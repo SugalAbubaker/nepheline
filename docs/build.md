@@ -87,6 +87,7 @@ target links.
 | `NPH_ASAN` | `ON` (`OFF` for clang-cl) | AddressSanitizer in Debug |
 | `NPH_UBSAN` | `ON` | UndefinedBehaviorSanitizer in Debug (GCC/Clang) |
 | `NPH_TSAN` | `OFF` | ThreadSanitizer in Debug (GCC/Clang); excludes `NPH_ASAN` |
+| `NPH_COVERAGE` | `OFF` | Instrument for llvm-cov source-based coverage (Clang only; combine with `-DNPH_ASAN=OFF -DNPH_UBSAN=OFF`) |
 
 Pass them at configure time: `cmake --preset linux-clang -DNPH_ASAN=OFF -DNPH_TSAN=ON`.
 
@@ -127,12 +128,42 @@ Benchmarks (`benchmarks/`, [docs/benchmarks.md](benchmarks.md)) build as
 `build/<preset>/bin/Profile/core_alloc_bench --json=out.json`; CTest only
 runs them for a few milliseconds each to make sure they still work.
 
+### Coverage
+
+Line coverage is measured with Clang's source-based instrumentation and
+llvm-cov (`cmake/NphCoverage.cmake`). The targets from CLAUDE.md §9 (90 %
+for core, math, and jobs; 80 % elsewhere) are enforced per module by
+`scripts/coverage_check.py`, which reads the text of `llvm-cov report`.
+Files under `tests/`, `tools/`, `benchmarks/`, and `samples/` are excluded.
+
+```sh
+cmake --preset linux-clang-tidy -DCMAKE_BUILD_TYPE=Debug -DNPH_COVERAGE=ON       -DNPH_ASAN=OFF -DNPH_UBSAN=OFF -DNPH_BUILD_BENCHMARKS=OFF
+cmake --build build/linux-clang-tidy
+LLVM_PROFILE_FILE=build/linux-clang-tidy/profiles/%p-%m.profraw       ctest --test-dir build/linux-clang-tidy -L unit
+llvm-profdata merge -sparse build/linux-clang-tidy/profiles/*.profraw       -o build/linux-clang-tidy/coverage.profdata
+llvm-cov report build/linux-clang-tidy/bin/core_tests       -instr-profile=build/linux-clang-tidy/coverage.profdata       -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/'       engine/core/ | tee core.txt
+python scripts/coverage_check.py --module core core.txt
+```
+
+`llvm-cov show` on the same inputs prints annotated source for the lines
+that were missed. The sanitizers are turned off because their runtime
+distorts the counters and ASan does not combine with profiling on every
+LLVM release.
+
 ## Formatting and static analysis
 
 ```sh
 python scripts/format.py --check     # what CI runs (clang-format 19.1.x, .clang-format)
 python scripts/format.py --fix       # or: cmake --build --preset <p> --target nph-format
 cmake --preset linux-clang-tidy && python scripts/tidy.py --build-dir build/linux-clang-tidy
+```
+
+`scripts/format.py` looks for clang-format in `$CLANG_FORMAT`, then the
+PyPI package, then `PATH`. Install the pinned package so local results
+match CI exactly (other 19.x builds group `#include` blocks differently):
+
+```sh
+pip install clang-format==19.1.5
 ```
 
 `.clang-tidy` lists every disabled check with its reason. clang-tidy runs on
@@ -166,6 +197,10 @@ nph_add_test(<module>
   linux-clang × Debug, Development; Shipping on windows-msvc and linux-gcc so
   LTO is exercised. JUnit results are uploaded as artifacts.
 - **clang-tidy** on the `linux-clang-tidy` preset with LLVM 19.
+- **coverage (llvm-cov)**: an instrumented Debug build with the sanitizers
+  off runs the unit tests and checks every engine module against its
+  coverage target (see [Coverage](#coverage)). The per-module reports are
+  uploaded as the `coverage-reports` artifact.
 - **CI** aggregates the above; it is the single required status check on `main`.
 
 `.github/workflows/benchmarks.yml` runs every benchmark nightly in the
@@ -184,5 +219,5 @@ and is manual-only until Phase 5 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)
 - **clang-cl + ASan** is unverified and off by default (ADR-0003 §4).
 - **Local Linux builds** are not possible on the primary development machine
   (no WSL); Linux is covered by CI only.
-- **lavapipe GPU tests, MSVC `/analyze`, cppcheck, coverage (llvm-cov)**
-  are wired up in the phases that introduce the code they check (CLAUDE.md §9).
+- **lavapipe GPU tests, MSVC `/analyze`, cppcheck** are wired up in the
+  phases that introduce the code they check (CLAUDE.md §9).
