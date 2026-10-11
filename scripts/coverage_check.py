@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check an llvm-cov report against per-module line-coverage targets.
 
-    python scripts/coverage_check.py report.txt
+    python scripts/coverage_check.py [--module NAME] report.txt
 
 Reads the text of `llvm-cov report` (one row per source file plus TOTAL),
 groups rows by engine module (engine/<module>/...), and fails if any
 module's line coverage is below its target (CLAUDE.md §9: 90 % for core,
 math, and jobs; 80 % for every other module). Files under tests/, tools/,
 benchmarks/, samples/, and third_party/ are ignored.
+
+llvm-cov strips the common directory prefix from the paths it prints, so a
+report restricted to one module shows `src/x.c` rather than
+`engine/core/src/x.c`; pass --module to attribute such rows to that module.
 """
 
+import argparse
 import re
 import sys
 
@@ -35,10 +40,13 @@ def parse_rows(text):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(__doc__, file=sys.stderr)
-        return 2
-    with open(sys.argv[1], encoding="utf-8") as f:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("report", help="text output of `llvm-cov report`")
+    parser.add_argument("--module", default=None,
+                        help="module to attribute rows without an engine/<module>/ prefix to")
+    args = parser.parse_args()
+    with open(args.report, encoding="utf-8") as f:
         text = f.read()
 
     per_module = {}
@@ -46,9 +54,12 @@ def main():
         if any(part in path for part in IGNORED):
             continue
         match = re.search(r"engine/([^/]+)/", path)
-        if not match:
+        if match:
+            module = match.group(1)
+        elif args.module:
+            module = args.module
+        else:
             continue
-        module = match.group(1)
         t, m = per_module.get(module, (0, 0))
         per_module[module] = (t + total, m + missed)
 
