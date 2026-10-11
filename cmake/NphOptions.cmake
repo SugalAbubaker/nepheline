@@ -2,6 +2,7 @@
 # Cache options that control what gets built and how it is instrumented.
 
 option(NPH_BUILD_TESTS "Build the unit tests and the ntest framework" ON)
+option(NPH_BUILD_BENCHMARKS "Build the benchmarks and the nbench harness" ON)
 option(NPH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (CLAUDE.md §1.3)" ON)
 
 # Sanitizers apply to the Debug configuration only (CLAUDE.md §6).
