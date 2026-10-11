@@ -539,7 +539,7 @@ const NphJsonValue *nph_json_array_at(const NphJsonValue *array, u32 index)
         return NULL;
     }
     const NphJsonValue *child = array->first_child;
-    for (u32 i = 0; i < index; ++i) {
+    for (u32 i = 0; i < index && child != NULL; ++i) {
         child = child->next;
     }
     return child;

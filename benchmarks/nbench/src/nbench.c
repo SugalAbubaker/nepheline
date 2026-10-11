@@ -424,12 +424,18 @@ static int load_budgets(const char *path, NbenchBudget **out)
             *hash = '\0';
         }
         NbenchBudget b;
-        double max_ns = 0.0;
-        const int fields = sscanf(line, "%127s %lf", b.name, &max_ns);
+        const int fields = sscanf(line, "%127s", b.name);
         if (fields <= 0) {
             continue; // blank or comment-only line
         }
-        if (fields != 2 || !(max_ns > 0.0)) {
+        // The number follows the name; strtod reports where it stopped.
+        const char *rest = strstr(line, b.name) + strlen(b.name);
+        char *end = NULL;
+        const double max_ns = strtod(rest, &end);
+        while (end != NULL && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+            ++end;
+        }
+        if (end == rest || end == NULL || *end != '\0' || !(max_ns > 0.0)) {
             fprintf(stderr, "nbench: %s:%d: expected `name max_ns`\n", path, line_number);
             free(budgets);
             fclose(f);

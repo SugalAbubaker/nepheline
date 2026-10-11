@@ -150,7 +150,10 @@ typedef struct NphArrayRef {
 // for (T *it = first; it != end; ++it). Do not grow the array inside.
 // (T is a type and `it` a declarator: neither can be parenthesised.)
 // NOLINTBEGIN(bugprone-macro-parentheses)
-#define NPH_ARRAY_FOREACH(T, it, a) for (T *it = (a)->data; it != (a)->data + (a)->len; ++it)
+// The NULL test keeps an empty array (data == NULL) from forming NULL + 0,
+// which is undefined pointer arithmetic.
+#define NPH_ARRAY_FOREACH(T, it, a)                                                                \
+    for (T *it = (a)->data; it != NULL && it != (a)->data + (a)->len; ++it)
 // NOLINTEND(bugprone-macro-parentheses)
 
 // Increments *len and returns the previous value: the index of a slot the

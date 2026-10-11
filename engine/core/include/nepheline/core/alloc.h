@@ -96,9 +96,12 @@ void nph_free_at(NphAllocator *a, void *ptr, u64 size, u32 align, NphCallsite si
 #define NPH_ALLOC(a, size, align) nph_alloc_at((a), (size), (align), NPH_CALLSITE_HERE())
 #define NPH_ALLOC_ZEROED(a, size, align)                                                           \
     nph_alloc_zeroed_at((a), (size), (align), NPH_CALLSITE_HERE())
+// Pointer arguments are cast to void * so pointer-to-pointer values (an
+// array of pointers) convert in one explicit step.
 #define NPH_REALLOC(a, ptr, old_size, new_size, align)                                             \
-    nph_realloc_at((a), (ptr), (old_size), (new_size), (align), NPH_CALLSITE_HERE())
-#define NPH_FREE(a, ptr, size, align) nph_free_at((a), (ptr), (size), (align), NPH_CALLSITE_HERE())
+    nph_realloc_at((a), (void *)(ptr), (old_size), (new_size), (align), NPH_CALLSITE_HERE())
+#define NPH_FREE(a, ptr, size, align)                                                              \
+    nph_free_at((a), (void *)(ptr), (size), (align), NPH_CALLSITE_HERE())
 
 // Typed helpers. NPH_ALLOC_TYPE returns zeroed memory: a struct that starts
 // with every field zero is the engine's default "empty" state.
@@ -111,9 +114,9 @@ void nph_free_at(NphAllocator *a, void *ptr, u64 size, u32 align, NphCallsite si
 #define NPH_ALLOC_ARRAY_ZEROED(a, T, count)                                                        \
     ((T *)nph_alloc_array_at((a), sizeof(T), NPH_ALIGNOF(T), (count), true, NPH_CALLSITE_HERE()))
 #define NPH_FREE_TYPE(a, T, ptr)                                                                   \
-    nph_free_at((a), (ptr), sizeof(T), NPH_ALIGNOF(T), NPH_CALLSITE_HERE())
+    nph_free_at((a), (void *)(ptr), sizeof(T), NPH_ALIGNOF(T), NPH_CALLSITE_HERE())
 #define NPH_FREE_ARRAY(a, T, ptr, count)                                                           \
-    nph_free_at((a), (ptr), sizeof(T) * (u64)(count), NPH_ALIGNOF(T), NPH_CALLSITE_HERE())
+    nph_free_at((a), (void *)(ptr), sizeof(T) * (u64)(count), NPH_ALIGNOF(T), NPH_CALLSITE_HERE())
 
 // ---------------------------------------------------------------------------
 // Helpers for allocator implementations
