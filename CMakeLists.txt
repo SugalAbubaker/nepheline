@@ -49,6 +49,8 @@ include(NphModule)
 add_library(nph_options INTERFACE)
 add_library(nph::options ALIAS nph_options)
 target_compile_features(nph_options INTERFACE c_std_17)
+# libm is part of the C runtime everywhere except Windows, where the CRT has it.
+target_link_libraries(nph_options INTERFACE $<$<NOT:$<PLATFORM_ID:Windows>>:m>)
 nph_apply_warnings(nph_options)
 nph_apply_configuration_definitions(nph_options)
 nph_apply_sanitizers(nph_options)
