@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <nepheline/core/assert.h>
 #include <nepheline/core/cvar.h>
+#include <nepheline/core/log.h>
 #include <nepheline/core/string_id.h>
 
 #include <stdio.h>
@@ -126,7 +127,13 @@ NphResult nph_cvar_register(NphCvarRegistry *r, NphCvar *cvar)
     if (pending != NULL) {
         char *text = *pending;
         (void)nph_hashmap_remove_u64(&r->pending, key);
-        (void)nph_cvar_force_from_string(r, cvar, nph_str_from_cstr(text));
+        const NphResult applied = nph_cvar_force_from_string(r, cvar, nph_str_from_cstr(text));
+        if (applied != NPH_RESULT_OK) {
+            // A config value that does not fit the cvar is a content error,
+            // not a registration failure: report it and keep the default.
+            NPH_LOG_WARN(&NPH_LOG_CORE, "cvar %s: config value \"%s\" rejected (%s)", cvar->name,
+                         text, nph_result_string(applied));
+        }
         nph_str_free(r->alloc, text, (u64)strlen(text));
     }
     return NPH_RESULT_OK;
