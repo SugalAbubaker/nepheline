@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: Apache-2.0
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 19
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned to the exact version Visual Studio 2022 ships, so local and CI
+      # formatting can never disagree.
+      - name: Install clang-format ${{ env.CLANG_FORMAT_VERSION }}
+        run: python3 -m pip install --user clang-format==${{ env.CLANG_FORMAT_VERSION }}
+        env:
+          CLANG_FORMAT_VERSION: 19.1.5
+      - name: Check formatting
+        run: python3 scripts/format.py --check
+
+  build:
+    name: ${{ matrix.name }} ${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Debug,       cfg: debug }
+          - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Development, cfg: development }
+          - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Shipping,    cfg: shipping }
+          - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Debug,       cfg: debug }
+          - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Development, cfg: development }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Development, cfg: development }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Shipping,    cfg: shipping }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Development, cfg: development }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up the MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/dev_env.ps1 -GitHubEnv
+
+      - name: Install Ninja
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Tool versions
+        shell: bash
+        run: |
+          cmake --version | head -1
+          ninja --version
+          case "${{ matrix.preset }}" in
+            win-msvc)    cl 2>&1 | head -1 ;;
+            win-clang)   clang-cl --version | head -1 ;;
+            linux-gcc)   gcc --version | head -1 ;;
+            linux-clang) clang --version | head -1 ;;
+          esac
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}
+
+      - name: Test
+        run: >
+          ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
+          --output-junit "${{ github.workspace }}/build/${{ matrix.preset }}/test-results/ctest-${{ matrix.cfg }}.xml"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.name }}-${{ matrix.cfg }}
+          path: build/${{ matrix.preset }}/test-results/
+          if-no-files-found: warn
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.LLVM_VERSION }}
+          sudo apt-get install -y clang-tidy-${{ env.LLVM_VERSION }} ninja-build
+      - name: Configure (single-config, exports compile_commands.json)
+        run: cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
+      - name: Run clang-tidy
+        run: >
+          python3 scripts/tidy.py --build-dir build/linux-clang-tidy
+          --clang-tidy clang-tidy-${{ env.LLVM_VERSION }}
+
+  # Single required status check for branch protection; stays stable while the
+  # matrix above evolves.
+  ci:
+    name: CI
+    if: always()
+    needs: [format, build, tidy]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify every job succeeded
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ needs.format.result }}" = "success"
+          test "${{ needs.build.result }}" = "success"
+          test "${{ needs.tidy.result }}" = "success"

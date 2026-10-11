@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Reference-hardware performance run on the self-hosted RTX 3060 Ti runner
+# (docs/adr/0002-self-hosted-gpu-runner.md).
+#
+# Phase 0: manual trigger only; the runner is registered in Phase 5, when the
+# first GPU code and microbenchmarks exist. Phase 5 adds `push: [main]` and
+# `pull_request` triggers and the §10.4 budget enforcement.
+name: GPU performance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    name: RTX 3060 Ti reference scenes
+    # Fork pull requests must never execute on this machine (ADR-0002).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, windows, x64, gpu, rtx3060ti]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up the MSVC environment
+        shell: pwsh
+        run: ./scripts/dev_env.ps1 -GitHubEnv
+
+      - name: Configure
+        run: cmake --preset win-msvc
+
+      - name: Build (Profile)
+        run: cmake --build --preset win-msvc-profile
+
+      - name: GPU benchmarks
+        # Replaced in Phase 5 by benchmarks/gpu with the CLAUDE.md §10.4 budgets.
+        run: echo "No GPU benchmarks exist before Phase 5."
