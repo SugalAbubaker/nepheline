@@ -18,7 +18,7 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Foundation: repo, CMake skeleton, presets, warnings, sanitizers, ntest, CI, ADRs | **done** |
-| 1 | Core: types, asserts, logging, allocators, containers, strings, hashing, handles, cvars, serialization | **in progress** — everything but cvars and serialization done |
+| 1 | Core: types, asserts, logging, allocators, containers, strings, hashing, handles, cvars, serialization | **done** |
 | 2–15 | Math → Platform → Jobs → GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
@@ -51,7 +51,9 @@ Configurations: **Debug** (asserts, validation, ASan/UBSan), **Development**
 cmake/          build helpers: configurations, warnings, sanitizers, module/test functions
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
-benchmarks/     nbench harness, benchmarks per module, recorded results
+benchmarks/     nbench harness, benchmarks per module, recorded results, budgets
+samples/        one small executable per feature (core_hello)
+tests/fuzz/     libFuzzer targets and seed corpora for every parser
 scripts/        dev_env.ps1, format.py, tidy.py
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
@@ -64,7 +66,7 @@ Modules depend strictly left-to-right:
 ## Documentation
 
 - [`docs/build.md`](docs/build.md) — build system, presets, options, CI
-- [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, hashing, containers, strings, logging
+- [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, hashing, containers, strings, logging, cvars, serialization
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness and methodology
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records

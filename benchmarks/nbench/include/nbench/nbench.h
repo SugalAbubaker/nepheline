@@ -92,8 +92,9 @@ void nbench_clobber_memory(void);
 uint64_t nbench_now_ns(void);
 
 // Parses the command line (see --help), runs the selected benchmarks, prints
-// a table, optionally writes JSON. Exit codes: 0 ok, 2 usage error, 3 no
-// benchmark matched.
+// a table, optionally writes JSON and checks budgets. Exit codes: 0 ok,
+// 2 usage error or unwritable report, 3 no benchmark matched, 4 a budget
+// was exceeded.
 int nbench_main(int argc, char **argv);
 
 #ifdef __cplusplus

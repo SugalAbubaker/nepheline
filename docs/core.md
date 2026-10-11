@@ -5,9 +5,8 @@ only on the C standard library and compiler intrinsics; it includes no OS
 header. This document grows with the module; each section names the headers
 it covers.
 
-Status: **base, errors, assertions, atomics, allocators, hashing,
-containers, strings, and logging are done**; cvars and serialization follow
-in the last Phase 1 pull request.
+Status: **complete for Phase 1** (base, errors, assertions, atomics,
+allocators, hashing, containers, strings, logging, cvars, serialization).
 
 ## Base (`types.h`, `base.h`, `version.h`)
 
@@ -418,6 +417,82 @@ few dozen records per frame cost nothing measurable. Formatting at the
 call site (rather than deferring to the flusher) is deliberate: the record
 is self-contained, arguments do not need to outlive the call, and the
 flusher never touches caller memory.
+
+## CVars (`cvar.h`)
+
+A cvar is a static object defined next to the code that reads it
+(`NPH_CVAR_BOOL/INT/FLOAT/STRING(ident, "name", default, [min, max],
+description, flags)`) and registered explicitly with an `NphCvarRegistry`
+owned by the engine context, so there is no global list (§2). Reads are
+plain loads (`nph_cvar_get_int(&cv)`); writes go through the registry,
+which type-checks, clamps numbers to their range, copies strings into
+registry-owned storage, honours `READ_ONLY` and `CHEAT` (gated by the
+registry's cheat switch), bumps a version counter the editor can poll, and
+calls the cvar's change callback when the value actually changed. Names
+are `[a-z0-9._]+` (asserted). Config text (`name = value`, `#` comments,
+optional quotes) and command-line assignments apply through the registry;
+values for names registered later are held pending and applied on
+registration, and `nph_cvar_write_config` emits the `SAVED` set sorted by
+name. Decisions: [ADR-0007](adr/0007-serialization-formats.md).
+
+## Serialization (`serialize.h`, `json.h`)
+
+**Binary.** `NphBinWriter` appends little-endian scalars, blobs, and
+length-prefixed strings to a growable buffer and can back-patch; it writes
+documents as `{magic, version}` + `{tag, size, payload}` sections + a
+CRC-32C trailer. `NphBinReader` is a bounds-checked cursor over immutable
+bytes: every read returns `NPH_RESULT_END_OF_STREAM` rather than reading
+past the end, strings come back as views, headers are magic- and
+range-checked, sections report `NPH_RESULT_CORRUPT` when their size
+exceeds the data, and unknown sections are skipped by size. That is what
+"versioning" means here: old readers survive new writers.
+
+**JSON.** Strict RFC 8259 (escapes with surrogate pairs, no comments or
+trailing commas) parsed by recursive descent into a tree whose nodes and
+unescaped strings live in 16 KiB chunks owned by the `NphJsonDoc`; depth
+is capped at 128 and numbers at 64 characters so hostile input cannot
+exhaust the stack. Errors carry line, column, and a static message.
+Numbers keep both the `f64` and, when lexically integral and in range, the
+`i64`. Member access by key, element access by index, lenient getters with
+fallbacks, strict `as_*` conversions, a builder API, a tree writer (compact
+or two-space pretty, non-finite numbers as `null`), and a streaming writer
+that validates nesting. The design choices are in
+[ADR-0007](adr/0007-serialization-formats.md).
+
+**Fuzzing.** `tests/fuzz/` holds libFuzzer targets for the JSON parser
+(with a write-then-parse fixed-point check), the binary reader, UTF-8
+decoding, and cvar config; they build with `-DNPH_BUILD_FUZZERS=ON` under
+Clang and run nightly (`.github/workflows/fuzz.yml`) from seed corpora in
+`tests/fuzz/corpus/`.
+
+**Sample.** `samples/core_hello` ties the module together: console
+logging, a debug-wrapped TLSF heap, cvars from the command line, a scene
+written as pretty JSON and as a checksummed binary document and read back
+from both, handles and interned names, and a leak check as the exit code.
+CTest runs it as `sample.core_hello`.
+
+### Serialization benchmarks
+
+`benchmarks/core/bench_json.c`, Profile, Ryzen 7 5800X, MSVC 14.44,
+2026-10-11, median of 5
+(`benchmarks/results/core_json-2026-10-11-win-msvc-profile-ryzen7-5800x.json`).
+
+| Benchmark | per op | Throughput | Note |
+|---|---|---|---|
+| JSON parse, 20 000 entities, 1.73 MB | 11.0 ms | 158 MB/s | 220 k nodes; `strtod` for 60 k floats is the largest single cost |
+| JSON write, tree, compact | 13.2 ms | 131 MB/s | `%.17g` for 60 k floats dominates |
+| JSON write, streaming | 18.1 ms | 96 MB/s | per-item nesting checks plus the same float formatting |
+| binary write, 20 000 entities + CRC, 820 KB | 0.89 ms | 0.92 GB/s | |
+| binary read + CRC verify | 0.27 ms | 3.0 GB/s | bounds-checked cursor; strings are views |
+| cvar config apply, per `name = value` line | 121 ns | | trim, split, parse, set |
+
+Reading: text is 12–40× more expensive than binary for the same data, which
+is why scenes are cooked. Float formatting and parsing through the C
+library are the JSON hot spots; a Ryu/Eisel-Lemire pair would roughly halve
+both and is worth doing when editor save/load times show up in profiles.
+The streaming writer's extra cost over the tree writer is the per-call
+nesting validation and separator logic; it exists to avoid building a tree,
+not to be faster.
 
 ## Testing
 

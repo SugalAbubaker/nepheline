@@ -68,6 +68,14 @@ are only useful relative to each other.
 
 ## Budgets
 
-Per-benchmark budgets (`budgets.json`, checked by `--budgets=FILE`) are
-added once the core JSON reader exists later in Phase 1; from then on a
-benchmark that exceeds its budget fails the nightly run, as §9 requires.
+`benchmarks/budgets.txt` lists a maximum median ns/op per benchmark, one
+`name max_ns` pair per line (`#` comments). `--budgets=FILE` compares every
+benchmark that ran against it after the run and exits with status 4 when
+any exceeds its budget, which fails the nightly workflow (§9). The file is
+plain text rather than JSON so that nbench stays free of engine
+dependencies, like ntest.
+
+Budgets are set at roughly three times the recorded reference-machine
+number: hosted runners are slower and noisier, and the budget exists to
+catch regressions of integer factors, not percentage drift. The
+self-hosted machine (Phase 5) enforces the tight numbers.
