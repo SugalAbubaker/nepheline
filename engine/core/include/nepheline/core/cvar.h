@@ -63,7 +63,8 @@ struct NphCvar {
     b32 value_bool;
     i64 value_int;
     f64 value_float;
-    const char *value_string; // registry-owned copy, or the static default
+    const char *value_string; // the owned copy below, or the static default
+    char *owned_string;       // registry-owned copy when a string was set, else NULL
     // Defaults and ranges.
     b32 default_bool;
     i64 default_int;
@@ -81,94 +82,44 @@ struct NphCvar {
     u32 change_count;
 };
 
-// Static definitions.
-#define NPH_CVAR_BOOL(ident, name, default_value, description, flags)                              \
-    NphCvar ident = {(name),                                                                       \
-                     (description),                                                                \
-                     NPH_CVAR_TYPE_BOOL,                                                           \
-                     (flags),                                                                      \
-                     (default_value),                                                              \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     (default_value),                                                              \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     0,                                                                            \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     NULL,                                                                         \
-                     0U,                                                                           \
-                     0U}
+// Static definitions (designated initialisers: unnamed fields stay zero).
+// Macro parameters carry a trailing underscore so they do not collide with
+// the designators.
+#define NPH_CVAR_BOOL(ident, name_, default_, description_, flags_)                                \
+    NphCvar ident = {.name = (name_),                                                              \
+                     .description = (description_),                                                \
+                     .type = NPH_CVAR_TYPE_BOOL,                                                   \
+                     .flags = (flags_),                                                            \
+                     .value_bool = (default_),                                                     \
+                     .default_bool = (default_)}
 
-#define NPH_CVAR_INT(ident, name, default_value, min, max, description, flags)                     \
-    NphCvar ident = {(name),                                                                       \
-                     (description),                                                                \
-                     NPH_CVAR_TYPE_INT,                                                            \
-                     (flags),                                                                      \
-                     0,                                                                            \
-                     (default_value),                                                              \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     0,                                                                            \
-                     (default_value),                                                              \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     (min),                                                                        \
-                     (max),                                                                        \
-                     0.0,                                                                          \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     NULL,                                                                         \
-                     0U,                                                                           \
-                     0U}
+#define NPH_CVAR_INT(ident, name_, default_, min_, max_, description_, flags_)                     \
+    NphCvar ident = {.name = (name_),                                                              \
+                     .description = (description_),                                                \
+                     .type = NPH_CVAR_TYPE_INT,                                                    \
+                     .flags = (flags_),                                                            \
+                     .value_int = (default_),                                                      \
+                     .default_int = (default_),                                                    \
+                     .min_int = (min_),                                                            \
+                     .max_int = (max_)}
 
-#define NPH_CVAR_FLOAT(ident, name, default_value, min, max, description, flags)                   \
-    NphCvar ident = {(name),                                                                       \
-                     (description),                                                                \
-                     NPH_CVAR_TYPE_FLOAT,                                                          \
-                     (flags),                                                                      \
-                     0,                                                                            \
-                     0,                                                                            \
-                     (default_value),                                                              \
-                     NULL,                                                                         \
-                     0,                                                                            \
-                     0,                                                                            \
-                     (default_value),                                                              \
-                     NULL,                                                                         \
-                     0,                                                                            \
-                     0,                                                                            \
-                     (min),                                                                        \
-                     (max),                                                                        \
-                     NULL,                                                                         \
-                     NULL,                                                                         \
-                     0U,                                                                           \
-                     0U}
+#define NPH_CVAR_FLOAT(ident, name_, default_, min_, max_, description_, flags_)                   \
+    NphCvar ident = {.name = (name_),                                                              \
+                     .description = (description_),                                                \
+                     .type = NPH_CVAR_TYPE_FLOAT,                                                  \
+                     .flags = (flags_),                                                            \
+                     .value_float = (default_),                                                    \
+                     .default_float = (default_),                                                  \
+                     .min_float = (min_),                                                          \
+                     .max_float = (max_)}
 
-#define NPH_CVAR_STRING(ident, name, default_value, description, flags)                            \
-    NphCvar ident = {(name),                                                                       \
-                     (description),                                                                \
-                     NPH_CVAR_TYPE_STRING,                                                         \
-                     (flags),                                                                      \
-                     0,                                                                            \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     (default_value),                                                              \
-                     0,                                                                            \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     (default_value),                                                              \
-                     0,                                                                            \
-                     0,                                                                            \
-                     0.0,                                                                          \
-                     0.0,                                                                          \
-                     NULL,                                                                         \
-                     NULL,                                                                         \
-                     0U,                                                                           \
-                     0U}
+#define NPH_CVAR_STRING(ident, name_, default_, description_, flags_)                              \
+    NphCvar ident = {.name = (name_),                                                              \
+                     .description = (description_),                                                \
+                     .type = NPH_CVAR_TYPE_STRING,                                                 \
+                     .flags = (flags_),                                                            \
+                     .value_string = (default_),                                                   \
+                     .default_string = (default_)}
 
 // ---------------------------------------------------------------------------
 // Getters: plain loads.

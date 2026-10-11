@@ -195,14 +195,14 @@ NTEST_F(JsonFixture, nesting_and_number_limits)
         deep[i] = '[';
         deep[NPH_JSON_MAX_DEPTH + i] = ']';
     }
-    deep[NPH_JSON_MAX_DEPTH * 2U] = '\0';
+    deep[(u64)NPH_JSON_MAX_DEPTH * 2U] = '\0';
     NTEST_ASSERT_EQ_INT(parse(f, deep), NPH_RESULT_OK);
     char deeper[NPH_JSON_MAX_DEPTH * 2U + 4U];
     for (u32 i = 0; i < NPH_JSON_MAX_DEPTH + 1U; ++i) {
         deeper[i] = '[';
         deeper[NPH_JSON_MAX_DEPTH + 1U + i] = ']';
     }
-    deeper[NPH_JSON_MAX_DEPTH * 2U + 2U] = '\0';
+    deeper[(u64)NPH_JSON_MAX_DEPTH * 2U + 2U] = '\0';
     NTEST_ASSERT_EQ_INT(parse(f, deeper), NPH_RESULT_PARSE_ERROR);
     NTEST_ASSERT_EQ_STR(f->doc.error_message, "nesting too deep");
 

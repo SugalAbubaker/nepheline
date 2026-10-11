@@ -103,8 +103,11 @@ NPH_MUST_USE NphResult nph_json_as_i64(const NphJsonValue *v, i64 *out);
 NPH_MUST_USE NphResult nph_json_as_f64(const NphJsonValue *v, f64 *out);
 NPH_MUST_USE NphResult nph_json_as_str(const NphJsonValue *v, NphStr *out);
 
+// (`child` is a declarator and cannot be parenthesised.)
+// NOLINTBEGIN(bugprone-macro-parentheses)
 #define NPH_JSON_FOREACH(child, parent)                                                            \
     for (const NphJsonValue *child = (parent)->first_child; child != NULL; child = child->next)
+// NOLINTEND(bugprone-macro-parentheses)
 
 // ---------------------------------------------------------------------------
 // Building

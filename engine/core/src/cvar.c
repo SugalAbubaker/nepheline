@@ -30,8 +30,9 @@ static u64 name_key(NphStr name)
 // Owned string helpers: the registry copies every string value it stores.
 static void release_string(NphCvarRegistry *r, NphCvar *cvar)
 {
-    if (cvar->value_string != NULL && cvar->value_string != cvar->default_string) {
-        nph_str_free(r->alloc, (char *)(uptr)cvar->value_string, (u64)strlen(cvar->value_string));
+    if (cvar->owned_string != NULL) {
+        nph_str_free(r->alloc, cvar->owned_string, (u64)strlen(cvar->owned_string));
+        cvar->owned_string = NULL;
     }
     cvar->value_string = cvar->default_string;
 }
@@ -112,7 +113,7 @@ NphResult nph_cvar_register(NphCvarRegistry *r, NphCvar *cvar)
         return NPH_RESULT_ALREADY_EXISTS;
     }
     NPH_TRY(NPH_ARRAY_PUSH(&r->cvars, (void *)cvar));
-    const NphResult inserted = nph_hashmap_insert_u64(&r->by_name, key, &cvar);
+    const NphResult inserted = nph_hashmap_insert_u64(&r->by_name, key, (const void *)&cvar);
     if (inserted != NPH_RESULT_OK) {
         r->cvars.len -= 1U;
         return inserted;
@@ -220,6 +221,7 @@ static NphResult set_string(NphCvarRegistry *r, NphCvar *cvar, NphStr value, boo
     char *copy;
     NPH_TRY(nph_str_dup(r->alloc, value, &copy));
     release_string(r, cvar);
+    cvar->owned_string = copy;
     cvar->value_string = copy;
     notify(r, cvar);
     return NPH_RESULT_OK;
@@ -341,7 +343,7 @@ static NphResult store_pending(NphCvarRegistry *r, NphStr name, NphStr value)
         *slot = copy;
         return NPH_RESULT_OK;
     }
-    const NphResult inserted = nph_hashmap_insert_u64(&r->pending, key, &copy);
+    const NphResult inserted = nph_hashmap_insert_u64(&r->pending, key, (const void *)&copy);
     if (inserted != NPH_RESULT_OK) {
         nph_str_free(r->alloc, copy, value.len);
     }
