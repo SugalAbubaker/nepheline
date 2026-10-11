@@ -1,11 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 nph_add_module(core
     SOURCES
+        src/alloc.c
+        src/alloc_debug.c
+        src/arena.c
+        src/assert.c
+        src/pool.c
+        src/result.c
+        src/stack_alloc.c
+        src/tlsf.c
         src/version.c
 )
 
 nph_add_test(core
     SOURCES
+        tests/test_alloc.c
+        tests/test_alloc_debug.c
+        tests/test_arena.c
+        tests/test_assert.c
+        tests/test_atomic.c
+        tests/test_base.c
+        tests/test_pool.c
+        tests/test_stack_alloc.c
+        tests/test_support.h
+        tests/test_tlsf.c
         tests/test_version.c
     DEPS
         nph::core

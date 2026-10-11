@@ -41,6 +41,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 include(NphWarnings)
 include(NphSanitizers)
+include(NphArch)
 include(NphModule)
 
 # nph::options carries every compiler setting shared by all Nepheline code:
@@ -54,6 +55,7 @@ target_link_libraries(nph_options INTERFACE $<$<NOT:$<PLATFORM_ID:Windows>>:m>)
 nph_apply_warnings(nph_options)
 nph_apply_configuration_definitions(nph_options)
 nph_apply_sanitizers(nph_options)
+nph_apply_arch_flags(nph_options)
 
 if(NPH_BUILD_TESTS)
     enable_testing()
@@ -69,9 +71,14 @@ add_subdirectory(engine/core)
 add_library(nepheline INTERFACE)
 target_link_libraries(nepheline INTERFACE nph::core)
 
+if(NPH_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 include(NphFormat)
 nph_add_format_targets()
 
 message(STATUS "Nepheline ${PROJECT_VERSION}: compiler=${CMAKE_C_COMPILER_ID} "
                "frontend=${CMAKE_C_COMPILER_FRONTEND_VARIANT} generator=${CMAKE_GENERATOR} "
-               "asan=${NPH_ASAN} ubsan=${NPH_UBSAN} tsan=${NPH_TSAN} tests=${NPH_BUILD_TESTS}")
+               "asan=${NPH_ASAN} ubsan=${NPH_UBSAN} tsan=${NPH_TSAN} tests=${NPH_BUILD_TESTS} "
+               "benchmarks=${NPH_BUILD_BENCHMARKS}")
