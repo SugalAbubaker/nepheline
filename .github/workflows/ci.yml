@@ -143,7 +143,7 @@ jobs:
           llvm-profdata-${{ env.LLVM_VERSION }} merge -sparse "$build"/profiles/*.profraw \
             -o "$build/coverage.profdata"
           objects=""
-          for exe in "$build"/bin/*_tests; do objects="$objects -object $exe"; done
+          first=""; for exe in "$build"/bin/*_tests; do if [ -z "$first" ]; then first="$exe"; else objects="$objects -object $exe"; fi; done
           mkdir -p "$build/coverage"
           status=0
           # One report per engine module: llvm-cov prints paths relative to
@@ -152,7 +152,7 @@ jobs:
             module=$(basename "$dir")
             echo "== engine/$module"
             # shellcheck disable=SC2086
-            llvm-cov-${{ env.LLVM_VERSION }} report $objects -instr-profile="$build/coverage.profdata" \
+            llvm-cov-${{ env.LLVM_VERSION }} report "$first" $objects -instr-profile="$build/coverage.profdata" \
               -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/' \
               "$GITHUB_WORKSPACE/$dir" | tee "$build/coverage/$module.txt"
             python3 scripts/coverage_check.py --module "$module" "$build/coverage/$module.txt" || status=1
