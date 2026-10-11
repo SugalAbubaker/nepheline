@@ -17,6 +17,9 @@ function(nph_apply_warnings target)
             /external:env:INCLUDE /external:W0
             /w44062               # enum value not handled in switch without default
             /w44242 /w44254       # implicit narrowing conversions (close to -Wconversion)
+            # C4324 "structure was padded due to alignment specifier" fires for
+            # every cache-line-aligned field; that padding is the point.
+            /wd4324
             # C4702 "unreachable code" is raised during link-time code generation
             # after whole-program constant propagation (e.g. a `return` following a
             # conditional longjmp whose condition is constant at every call site).
