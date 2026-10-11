@@ -50,7 +50,7 @@ NTEST(alloc, zeroed_and_typed)
 
     Vec4 *u = NPH_ALLOC_TYPE_UNINIT(a, Vec4);
     NTEST_ASSERT_NOT_NULL(u);
-    u->x = 1.0f;
+    u->x = 1.0F;
     NPH_FREE_TYPE(a, Vec4, u);
 
     Vec4 *arr = NPH_ALLOC_ARRAY_ZEROED(a, Vec4, 10U);
