@@ -6,3 +6,7 @@ nph_add_benchmark(core_alloc
 nph_add_benchmark(core_hash
     SOURCES bench_hash.c
     DEPS nph::core)
+
+nph_add_benchmark(core_log
+    SOURCES bench_log.c
+    DEPS nph::core)
