@@ -1,0 +1,42 @@
+# Line endings: LF in the repository and on every checkout.
+* text=auto eol=lf
+
+# Windows batch files must stay CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Source and config files are always text.
+*.c        text
+*.h        text
+*.glsl     text
+*.comp     text
+*.vert     text
+*.frag     text
+*.cmake    text
+*.json     text
+*.md       text
+*.yml      text
+*.yaml     text
+*.py       text
+*.ps1      text
+*.sh       text
+CMakeLists.txt text
+
+# Binary assets are tracked with Git LFS (used from Phase 6 onwards).
+*.png  filter=lfs diff=lfs merge=lfs -text
+*.jpg  filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.tga  filter=lfs diff=lfs merge=lfs -text
+*.hdr  filter=lfs diff=lfs merge=lfs -text
+*.exr  filter=lfs diff=lfs merge=lfs -text
+*.ktx2 filter=lfs diff=lfs merge=lfs -text
+*.dds  filter=lfs diff=lfs merge=lfs -text
+*.glb  filter=lfs diff=lfs merge=lfs -text
+*.bin  filter=lfs diff=lfs merge=lfs -text
+*.wav  filter=lfs diff=lfs merge=lfs -text
+*.ogg  filter=lfs diff=lfs merge=lfs -text
+*.flac filter=lfs diff=lfs merge=lfs -text
+*.ttf  filter=lfs diff=lfs merge=lfs -text
+*.otf  filter=lfs diff=lfs merge=lfs -text
+*.nph  filter=lfs diff=lfs merge=lfs -text
+*.npk  filter=lfs diff=lfs merge=lfs -text

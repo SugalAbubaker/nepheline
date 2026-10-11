@@ -1,0 +1,32 @@
+# Build output
+/build/
+/out/
+/cmake-build-*/
+/test-results/
+
+# CMake
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# IDE / editor
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+.cache/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Python tooling
+__pycache__/
+*.pyc
+
+# Crash dumps and profiler captures
+*.dmp
+*.nvvp
+*.ncu-rep

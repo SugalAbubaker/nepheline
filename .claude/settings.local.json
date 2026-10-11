@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(gh auth *)",
+      "PowerShell(nvidia-smi *)"
+    ]
+  }
+}
