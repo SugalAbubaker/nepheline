@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# Nepheline C style (CLAUDE.md §5): 4-space indent, 100 columns, K&R braces
+# with function braces on their own line, pointer star bound to the name.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+ContinuationIndentWidth: 4
+
+BreakBeforeBraces: Linux
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+PointerAlignment: Right
+QualifierAlignment: Leave
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: true
+
+IndentCaseLabels: false
+IndentGotoLabels: false
+IndentPPDirectives: None
+InsertNewlineAtEOF: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+ReflowComments: true
+SeparateDefinitionBlocks: Leave
+
+# Own header first, then project headers, then system headers.
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
+IncludeCategories:
+  - Regex: '^<nepheline/'
+    Priority: 1
+  - Regex: '^<ntest/'
+    Priority: 2
+  - Regex: '^"'
+    Priority: 3
+  - Regex: '^<'
+    Priority: 4
+IncludeIsMainRegex: '$'
+
+# Test and attribute macros that should format like declarations.
+StatementAttributeLikeMacros: []
+AttributeMacros: [NPH_THREADSAFE, NPH_MAIN_THREAD_ONLY, NPH_RENDER_THREAD_ONLY, NTEST_PRINTF]
