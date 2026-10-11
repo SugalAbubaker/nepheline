@@ -5,9 +5,9 @@ only on the C standard library and compiler intrinsics; it includes no OS
 header. This document grows with the module; each section names the headers
 it covers.
 
-Status: **base, errors, assertions, atomics, allocators, hashing, and
-containers are done**; strings, logging, cvars, and serialization follow in
-the remaining Phase 1 pull requests.
+Status: **base, errors, assertions, atomics, allocators, hashing,
+containers, strings, and logging are done**; cvars and serialization follow
+in the last Phase 1 pull request.
 
 ## Base (`types.h`, `base.h`, `version.h`)
 
@@ -328,6 +328,96 @@ usually ends at the first group (an empty byte) without touching a slot; the
 is latency-bound on the single `crc32` dependency chain; a three-stream
 version with a combine step (Gopal et al., Intel 2011) would reach ~3× and
 is worth adding when file checksums show up in profiles.
+
+## Strings (`string.h`, `string_id.h`)
+
+**Views.** `NphStr {const char *data; u64 len}` is the string type of every
+engine API: non-owning, not necessarily NUL-terminated, UTF-8 bytes.
+`NPH_STR("literal")` makes one at compile time; `NPH_STR_FMT`/`NPH_STR_ARG`
+print one. Slicing, comparison (byte-wise, plus ASCII case-insensitive),
+search, trimming, `nph_str_split_first` for separator loops, and strict
+parsers for integers (overflow-checked), floats (whole-string `strtod`),
+and booleans. Ownership is explicit: `nph_str_dup` returns an owned
+NUL-terminated copy from an allocator.
+
+**UTF-8.** `nph_utf8_decode` walks code points, yielding U+FFFD and
+advancing one byte on an invalid sequence (overlong forms, surrogates,
+truncation, bytes above 0xF7); `nph_utf8_encode`, `nph_utf8_is_valid`,
+`nph_utf8_count`. No locale, no tables.
+
+**Builder.** `NphStrBuilder` grows with `NPH_REALLOC` (doubling from 32
+bytes) and always keeps a NUL after its contents, so `nph_sb_cstr` is free.
+Appends for views, C strings, characters, integers (no printf), `%.17g`
+floats, printf formats (two-pass `vsnprintf`), and code points.
+
+**String IDs.** An `NphStrId` is the `nph_hash64` of the text (hash 0 is
+remapped to 1 so zero means "none"). Equal strings give equal IDs with no
+table involved, so IDs are computed anywhere and compared as integers, and
+cooked assets store them. `NphStrTable` optionally interns text behind IDs
+for diagnostics and text serialisation: text is copied into 64 KiB chunks,
+the map is id → view, and interning the same text twice is a lookup. A
+collision between different texts is detected on intern and reported as
+`NPH_RESULT_CORRUPT` (asserted); at 2^-64 per pair it is a content bug to
+fix, not a case to handle.
+
+## Logging (`log.h`)
+
+The split with the platform layer is [ADR-0005](adr/0005-atomics-in-core.md):
+core owns rings, formatting, sinks, and `nph_log_flush`; the runtime's logger
+thread (Phase 3) calls flush periodically.
+
+- **Categories** are static objects (`NPH_LOG_CATEGORY_DEFINE(ident, "name",
+  default_level)`) with an atomic minimum level; a global minimum applies on
+  top. The `NPH_LOG_*` macros check both with relaxed loads before touching
+  arguments. `TRACE` and `DEBUG` compile out of Shipping.
+- **Records** are fixed 256-byte structs: UTC timestamp (C11
+  `timespec_get`), category and file pointers (static strings), line, level,
+  a 1-based log thread index, a per-thread sequence number, a count of
+  records dropped before this one, and a 216-byte NUL-terminated message
+  (longer messages end in `...`).
+- **Rings.** Each thread owns an `NphSpscRing` of records, allocated from the
+  logger's allocator on `nph_log_thread_attach` (or implicitly on the first
+  write) and registered in a fixed slot table by compare-exchange. A write
+  is a `vsnprintf` into a stack record and one ring push: no lock, no
+  allocation, no I/O. A full ring drops the record and increments the
+  thread's drop counter; the next record that fits carries the count, and
+  the formatter prints "[N earlier records dropped]".
+- **Flush** takes a single-flusher flag, then repeatedly picks the oldest
+  head record across all rings (k-way merge by timestamp) and delivers it
+  to every sink whose minimum level allows, bounded by `max_records`.
+  Detached threads' rings are freed once drained.
+- **Sinks** are `(fn, user, min_level)` triples (up to 8) behind a spin
+  lock that is held only to copy the table. Built-in: console (stdout
+  below WARN, stderr from WARN, optional ANSI colour, location always shown
+  from WARN) and file (append, flushed on ERROR). The editor sink is a
+  callback the editor registers.
+- **Before init**, or if a thread cannot attach, a record is formatted and
+  written to stderr synchronously, so early failures are never lost.
+
+### String and logging benchmarks
+
+`benchmarks/core/bench_log.c`, Profile, Ryzen 7 5800X, MSVC 14.44,
+2026-10-11, median of 5
+(`benchmarks/results/core_log-2026-10-11-win-msvc-profile-ryzen7-5800x.json`).
+
+| Benchmark | ns/op | Note |
+|---|---|---|
+| `NPH_LOG_INFO` with two integer arguments, stored | 146 | `vsnprintf` into the record is the cost; the ring push is a few ns |
+| `NPH_LOG_DEBUG` below the category level | 1.9 | two relaxed loads; arguments not evaluated |
+| flush, per record delivered to one sink | 12.6 | k-way merge over 8 thread slots plus the sink call |
+| builder append of a 6-byte view | 4.0 | |
+| builder `append_u64` | 11.5 | no printf |
+| builder `appendf("%u;")` | 77 | two-pass `vsnprintf` |
+| `nph_str_find`, 6-byte needle in 64 bytes | 29 | `memchr`-free scan; a two-way or SIMD search is a later option |
+| `nph_str_id` of 16 bytes | 5.3 | |
+
+The 146 ns per stored record means a thread can log ~7 000 records per
+millisecond; at 240 FPS the budget is one record per ~35 µs of frame time,
+so logging in hot loops is still wrong (and the rings would drop), but a
+few dozen records per frame cost nothing measurable. Formatting at the
+call site (rather than deferring to the flusher) is deliberate: the record
+is self-contained, arguments do not need to outlive the call, and the
+flusher never touches caller memory.
 
 ## Testing
 

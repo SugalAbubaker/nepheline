@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "executable": "core_log_bench.exe",
+  "timestamp": "2026-10-11T22:55:11Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.3,
+  "benchmarks": [
+    {"name": "log_write_enabled", "label": "", "iterations": 5060, "items_per_iteration": 512, "repeats": 5, "ns_per_op": 145.642, "min_ns_per_op": 144.803, "max_ns_per_op": 146.251},
+    {"name": "log_write_disabled", "label": "", "iterations": 193135699, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 1.868, "min_ns_per_op": 1.866, "max_ns_per_op": 1.878},
+    {"name": "log_flush_per_record", "label": "", "iterations": 57559, "items_per_iteration": 512, "repeats": 5, "ns_per_op": 12.583, "min_ns_per_op": 12.579, "max_ns_per_op": 12.690},
+    {"name": "sb_append_small", "label": "", "iterations": 92916, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 3.947, "min_ns_per_op": 3.939, "max_ns_per_op": 4.008},
+    {"name": "sb_appendf_int", "label": "", "iterations": 19027, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 77.132, "min_ns_per_op": 76.977, "max_ns_per_op": 77.718},
+    {"name": "sb_append_u64", "label": "", "iterations": 111660, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 11.543, "min_ns_per_op": 11.511, "max_ns_per_op": 11.618},
+    {"name": "str_find_64B", "label": "", "iterations": 13105839, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 28.641, "min_ns_per_op": 28.575, "max_ns_per_op": 29.167},
+    {"name": "str_id_16B", "label": "", "iterations": 70452965, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 5.327, "min_ns_per_op": 5.318, "max_ns_per_op": 5.374}
+  ]
+}
