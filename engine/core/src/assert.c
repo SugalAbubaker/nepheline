@@ -35,24 +35,10 @@ void nph_assert_set_handler(NphAssertHandler handler, void *user, NphAssertHandl
     g_handler_user = user;
 }
 
-void nph_assert_fail(const char *file, const char *function, u32 line, const char *condition,
-                     const char *fmt, ...)
+static void dispatch(const NphAssertInfo *info)
 {
-    char message[1024];
-    message[0] = '\0';
-    if (fmt != NULL && fmt[0] != '\0') {
-        va_list args;
-        va_start(args, fmt);
-        const int n = vsnprintf(message, sizeof message, fmt, args);
-        va_end(args);
-        if (n < 0) {
-            message[0] = '\0';
-        }
-    }
-
-    const NphAssertInfo info = {file, function, line, condition, message};
     const NphAssertHandler handler = g_handler != NULL ? g_handler : default_handler;
-    const NphAssertAction action = handler(&info, g_handler_user);
+    const NphAssertAction action = handler(info, g_handler_user);
 
     switch (action) {
     case NPH_ASSERT_ACTION_ABORT:
@@ -71,4 +57,28 @@ void nph_assert_fail(const char *file, const char *function, u32 line, const cha
     case NPH_ASSERT_ACTION_CONTINUE:
         break;
     }
+}
+
+void nph_assert_fail(const char *file, const char *function, u32 line, const char *condition,
+                     const char *fmt, ...)
+{
+    char message[1024];
+    message[0] = '\0';
+    if (fmt != NULL && fmt[0] != '\0') {
+        va_list args;
+        va_start(args, fmt);
+        const int n = vsnprintf(message, sizeof message, fmt, args);
+        va_end(args);
+        if (n < 0) {
+            message[0] = '\0';
+        }
+    }
+    const NphAssertInfo info = {file, function, line, condition, message};
+    dispatch(&info);
+}
+
+void nph_assert_fail_nomsg(const char *file, const char *function, u32 line, const char *condition)
+{
+    const NphAssertInfo info = {file, function, line, condition, ""};
+    dispatch(&info);
 }

@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Allocator entry points and the malloc-backed system allocator.
+
+// posix_memalign is POSIX.1-2001, not C17.
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/assert.h>
 

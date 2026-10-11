@@ -410,17 +410,20 @@ int nbench_main(int argc, char **argv)
         } else if (strncmp(a, "--json=", 7) == 0) {
             json_path = a + 7;
         } else if (strncmp(a, "--min-time=", 11) == 0) {
-            min_time_s = atof(a + 11);
-            if (!(min_time_s > 0.0)) {
+            char *end = NULL;
+            min_time_s = strtod(a + 11, &end);
+            if (end == NULL || *end != '\0' || !(min_time_s > 0.0)) {
                 fprintf(stderr, "nbench: --min-time needs a positive number\n");
                 return 2;
             }
         } else if (strncmp(a, "--repeats=", 10) == 0) {
-            repeats = atoi(a + 10);
-            if (repeats < 1 || repeats > 64) {
+            char *end = NULL;
+            const long value = strtol(a + 10, &end, 10);
+            if (end == NULL || *end != '\0' || value < 1 || value > 64) {
                 fprintf(stderr, "nbench: --repeats needs a count between 1 and 64\n");
                 return 2;
             }
+            repeats = (int)value;
         } else if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             print_usage(stdout, exe);
             return 0;

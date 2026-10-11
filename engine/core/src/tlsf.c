@@ -137,9 +137,19 @@ static void mapping_search(u64 size, u32 *fl, u32 *sl)
     mapping_insert(size, fl, sl);
 }
 
-static TlsfBlock *null_block(const NphTlsf *tlsf)
+static TlsfBlock *null_block(NphTlsf *tlsf)
 {
-    return (TlsfBlock *)(uptr)tlsf->null_block;
+    return (TlsfBlock *)tlsf->null_block;
+}
+
+static const TlsfBlock *null_block_const(const NphTlsf *tlsf)
+{
+    return (const TlsfBlock *)tlsf->null_block;
+}
+
+static const TlsfFreeLinks *block_links_const(const TlsfBlock *b)
+{
+    return (const TlsfFreeLinks *)((const u8 *)b + BLOCK_HEADER_SIZE);
 }
 
 static TlsfBlock *search_suitable_block(NphTlsf *tlsf, u32 *fl, u32 *sl)
@@ -250,12 +260,12 @@ static TlsfBlock *block_split(TlsfBlock *block, u64 size)
     return remaining;
 }
 
-// Absorbs the physically following free block into `prev`.
-static TlsfBlock *block_absorb(TlsfBlock *prev, TlsfBlock *block)
+// Merges `second`, the block physically following `first`, into `first`.
+static TlsfBlock *block_absorb(TlsfBlock *first, TlsfBlock *second)
 {
-    block_set_size(prev, block_size(prev) + BLOCK_HEADER_SIZE + block_size(block));
-    block_next(prev)->prev_phys = prev;
-    return prev;
+    block_set_size(first, block_size(first) + BLOCK_HEADER_SIZE + block_size(second));
+    block_next(first)->prev_phys = first;
+    return first;
 }
 
 static TlsfBlock *block_merge_prev(NphTlsf *tlsf, TlsfBlock *block)
@@ -429,8 +439,7 @@ static NphResult add_pool(NphTlsf *tlsf, void *memory, u64 size, NphAllocator *b
     }
     // Layout: [slack][first header][payload][sentinel header]. The region is
     // trimmed so the first block starts aligned.
-    const uptr start = nph_align_up_u64((uptr)memory, NPH_TLSF_ALIGN);
-    const u64 slack = start - (uptr)memory;
+    const u64 slack = nph_align_up_u64((uptr)memory, NPH_TLSF_ALIGN) - (uptr)memory;
     if (slack >= size) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -440,7 +449,7 @@ static NphResult add_pool(NphTlsf *tlsf, void *memory, u64 size, NphAllocator *b
     }
     const u64 payload = usable - BLOCK_HEADER_SIZE - BLOCK_HEADER_SIZE;
 
-    TlsfBlock *block = (TlsfBlock *)start;
+    TlsfBlock *block = (TlsfBlock *)((u8 *)memory + slack);
     block->prev_phys = NULL;
     block->size_flags = payload | BLOCK_FLAG_FREE;
 
@@ -460,7 +469,8 @@ static NphResult add_pool(NphTlsf *tlsf, void *memory, u64 size, NphAllocator *b
 
 static TlsfBlock *pool_first_block(const NphTlsfPool *pool)
 {
-    return (TlsfBlock *)nph_align_up_u64((uptr)pool->base, NPH_TLSF_ALIGN);
+    const u64 slack = nph_align_up_u64((uptr)pool->base, NPH_TLSF_ALIGN) - (uptr)pool->base;
+    return (TlsfBlock *)(pool->base + slack);
 }
 
 static NphResult release_pool(NphTlsf *tlsf, u32 index)
@@ -771,9 +781,9 @@ void nph_tlsf_walk(const NphTlsf *tlsf, NphTlsfWalkFn fn, void *user)
 // True if `block` is present in the free list for class (fl, sl).
 static bool free_list_contains(const NphTlsf *tlsf, const TlsfBlock *block, u32 fl, u32 sl)
 {
-    const TlsfBlock *nb = null_block(tlsf);
+    const TlsfBlock *nb = null_block_const(tlsf);
     for (const TlsfBlock *b = (const TlsfBlock *)tlsf->blocks[fl][sl]; b != nb;
-         b = block_links((TlsfBlock *)(uptr)b)->next_free) {
+         b = block_links_const(b)->next_free) {
         if (b == block) {
             return true;
         }
@@ -784,7 +794,7 @@ static bool free_list_contains(const NphTlsf *tlsf, const TlsfBlock *block, u32 
 NphResult nph_tlsf_validate(const NphTlsf *tlsf, const char **out_reason)
 {
     TLSF_CHECK(tlsf != NULL && tlsf->allocator.vtable == &g_tlsf_vtable, "not an initialised heap");
-    const TlsfBlock *nb = null_block(tlsf);
+    const TlsfBlock *nb = null_block_const(tlsf);
     TLSF_CHECK(tlsf->pool_count <= NPH_TLSF_MAX_POOLS, "pool_count out of range");
 
     // Physical walk of every pool.
@@ -850,10 +860,9 @@ NphResult nph_tlsf_validate(const NphTlsf *tlsf, const char **out_reason)
             const bool sl_set = (tlsf->sl_bitmap[f] & (1U << s)) != 0U;
             TLSF_CHECK(sl_set == (head != nb), "sl_bitmap disagrees with the list head");
             const TlsfBlock *prev_free = nb;
-            for (const TlsfBlock *b = head; b != nb;
-                 b = block_links((TlsfBlock *)(uptr)b)->next_free) {
+            for (const TlsfBlock *b = head; b != nb; b = block_links_const(b)->next_free) {
                 TLSF_CHECK(block_is_free(b), "used block in a free list");
-                TLSF_CHECK(block_links((TlsfBlock *)(uptr)b)->prev_free == prev_free,
+                TLSF_CHECK(block_links_const(b)->prev_free == prev_free,
                            "free list prev link is wrong");
                 u32 fl;
                 u32 sl;

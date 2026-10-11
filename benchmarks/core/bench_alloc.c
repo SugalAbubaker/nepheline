@@ -110,7 +110,7 @@ static void workload_batch(NbenchState *state, NphAllocator *a)
 {
     static void *ptrs[BATCH_COUNT];
     prepare_sequences();
-    nbench_set_items_per_iteration(state, BATCH_COUNT * 2U);
+    nbench_set_items_per_iteration(state, (u64)BATCH_COUNT * 2U);
     while (nbench_keep_running(state)) {
         for (u32 i = 0; i < BATCH_COUNT; ++i) {
             ptrs[i] = NPH_ALLOC(a, g_sizes[i], 16U);
@@ -127,7 +127,7 @@ static void workload_random_mixed(NbenchState *state, NphAllocator *a)
     static void *live[LIVE_SLOTS];
     static u64 live_size[LIVE_SLOTS];
     prepare_sequences();
-    memset(live, 0, sizeof live);
+    memset((void *)live, 0, sizeof live);
     nbench_set_items_per_iteration(state, MIXED_OPS);
     while (nbench_keep_running(state)) {
         for (u32 i = 0; i < MIXED_OPS; ++i) {

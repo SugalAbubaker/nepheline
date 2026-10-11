@@ -118,6 +118,7 @@ extern "C" {
 #define NPH_MUST_USE     _Check_return_
 #define NPH_THREAD_LOCAL __declspec(thread)
 #define NPH_PRINTF_LIKE(fmt_index, first_arg)
+#define NPH_ANALYZER_NORETURN
 #define NPH_LIKELY(x)     (x)
 #define NPH_UNLIKELY(x)   (x)
 #define NPH_DEBUG_BREAK() __debugbreak()
@@ -132,6 +133,13 @@ extern "C" {
 #define NPH_PRINTF_LIKE(fmt_index, first_arg) __attribute__((format(printf, fmt_index, first_arg)))
 #define NPH_LIKELY(x)                         __builtin_expect(!!(x), 1)
 #define NPH_UNLIKELY(x)                       __builtin_expect(!!(x), 0)
+// Tells the Clang static analyzer that a function does not return (an assert
+// handler that may continue in tests), so it stops following the failure path.
+#if NPH_COMPILER_CLANG
+#define NPH_ANALYZER_NORETURN __attribute__((analyzer_noreturn))
+#else
+#define NPH_ANALYZER_NORETURN
+#endif
 // A breakpoint the debugger can step past (unlike __builtin_trap, which is
 // fatal). Without a debugger attached the process receives SIGTRAP.
 #if NPH_COMPILER_CLANG
@@ -392,7 +400,9 @@ NPH_INLINE bool nph_is_aligned_u64(u64 v, u64 align)
 }
 NPH_INLINE void *nph_align_ptr_up(void *p, u64 align)
 {
-    return (void *)nph_align_up_u64((uptr)p, align);
+    // Pointer arithmetic rather than an integer-to-pointer cast keeps the
+    // result's provenance tied to `p`.
+    return (u8 *)p + (nph_align_up_u64((uptr)p, align) - (uptr)p);
 }
 NPH_INLINE bool nph_is_ptr_aligned(const void *p, u64 align)
 {
