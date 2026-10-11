@@ -28,8 +28,14 @@ function(nph_apply_warnings target)
             target_compile_options(${target} INTERFACE /WX)
         endif()
     elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+            # clang-cl maps -Wall to -Weverything; /W4 is its -Wall -Wextra.
+            target_compile_options(${target} INTERFACE /W4)
+        else()
+            target_compile_options(${target} INTERFACE -Wall -Wextra)
+        endif()
         target_compile_options(${target} INTERFACE
-            -Wall -Wextra -Wpedantic
+            -Wpedantic
             -Wconversion -Wshadow
             -Wdouble-promotion    # accidental float->double promotion is a perf bug
             -Wstrict-prototypes -Wmissing-prototypes

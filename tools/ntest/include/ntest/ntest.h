@@ -99,6 +99,10 @@ void *ntest_fixture(void);
     }                                                                                              \
     static void ntest_body_##suite##_##name(void)
 
+// The fixture type is a macro argument used in declarators (`Fixture *f`),
+// where parentheses are not possible; bugprone-macro-parentheses cannot
+// tell type arguments from expression arguments.
+// NOLINTBEGIN(bugprone-macro-parentheses)
 // NTEST_SETUP(Fixture) { body using Fixture *f }
 // Runs before each NTEST_F of that fixture. f is zero-initialised.
 #define NTEST_SETUP(Fixture)                                                                       \
@@ -142,6 +146,7 @@ void *ntest_fixture(void);
         ntest_register(&ntest_case_##Fixture##_##name);                                            \
     }                                                                                              \
     static void ntest_body_##Fixture##_##name(Fixture *f)
+// NOLINTEND(bugprone-macro-parentheses)
 
 // ---------------------------------------------------------------------------
 // Checks (called through the macros below). Each returns whether the check

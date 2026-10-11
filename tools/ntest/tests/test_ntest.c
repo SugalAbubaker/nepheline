@@ -201,8 +201,8 @@ NTEST(ulp, distance_f64)
     NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64(1.0, nextafter(1.0, 2.0)), 1U);
     NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64(0.0, -0.0), 0U);
     NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64(-1.0, 1.0), 2ULL * 0x3FF0000000000000ULL);
-    NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64(NAN, 1.0), UINT64_MAX);
-    NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64(INFINITY, DBL_MAX), 1U);
+    NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64((double)NAN, 1.0), UINT64_MAX);
+    NTEST_ASSERT_EQ_UINT(ntest_ulp_distance_f64((double)INFINITY, DBL_MAX), 1U);
 }
 
 NTEST(glob, matching)
@@ -271,7 +271,9 @@ NTEST(order, cases_sort_by_file_then_line)
     const NtestCase *pa = &a;
     const NtestCase *pb = &b;
     const NtestCase *pc = &c;
-    NTEST_ASSERT_GT_INT(ntest_compare_cases(&pa, &pb), 0); // "b.c" after "a.c"
-    NTEST_ASSERT_LT_INT(ntest_compare_cases(&pc, &pb), 0); // same file, line 5 before 99
-    NTEST_ASSERT_EQ_INT(ntest_compare_cases(&pa, &pa), 0);
+    NTEST_ASSERT_GT_INT(ntest_compare_cases((const void *)&pa, (const void *)&pb),
+                        0); // "b.c" after "a.c"
+    NTEST_ASSERT_LT_INT(ntest_compare_cases((const void *)&pc, (const void *)&pb),
+                        0); // same file, line 5 before 99
+    NTEST_ASSERT_EQ_INT(ntest_compare_cases((const void *)&pa, (const void *)&pa), 0);
 }
