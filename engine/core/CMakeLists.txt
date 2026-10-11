@@ -7,13 +7,16 @@ nph_add_module(core
         src/array.c
         src/assert.c
         src/bitset.c
+        src/cvar.c
         src/handle.c
         src/hash.c
         src/hashmap.c
+        src/json.c
         src/log.c
         src/pool.c
         src/result.c
         src/ring.c
+        src/serialize.c
         src/sparse_set.c
         src/stack_alloc.c
         src/string.c
@@ -37,12 +40,15 @@ nph_add_test(core
         tests/test_atomic.c
         tests/test_base.c
         tests/test_bitset.c
+        tests/test_cvar.c
         tests/test_handle.c
         tests/test_hash.c
         tests/test_hashmap.c
+        tests/test_json.c
         tests/test_log.c
         tests/test_pool.c
         tests/test_ring.c
+        tests/test_serialize.c
         tests/test_sparse_set.c
         tests/test_stack_alloc.c
         tests/test_string.c
