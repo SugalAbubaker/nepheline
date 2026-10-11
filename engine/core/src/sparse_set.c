@@ -112,7 +112,7 @@ void *nph_sparse_set_get(const NphSparseSet *s, u32 key)
     if (pos == NPH_U32_MAX) {
         return NULL;
     }
-    return s->elem_size > 0U ? (void *)nph_sparse_set_value_at(s, pos) : (void *)&s->dense[pos];
+    return s->elem_size > 0U ? nph_sparse_set_value_at(s, pos) : (void *)&s->dense[pos];
 }
 
 static NphResult append(NphSparseSet *s, u32 key, const void *value)

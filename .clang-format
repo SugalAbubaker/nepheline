@@ -64,3 +64,5 @@ IncludeIsMainRegex: '$'
 # Test and attribute macros that should format like declarations.
 StatementAttributeLikeMacros: []
 AttributeMacros: [NPH_THREADSAFE, NPH_MAIN_THREAD_ONLY, NPH_RENDER_THREAD_ONLY, NTEST_PRINTF]
+# Loop macros, so their bodies format like for-loops.
+ForEachMacros: [NPH_ARRAY_FOREACH, NPH_BITSET_FOREACH_SET]

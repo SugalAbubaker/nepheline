@@ -81,8 +81,7 @@ NTEST_F(ArrayFixture, push_slot_and_struct_elements)
     NTEST_ASSERT_EQ_INT(pts.data[0].y, 2);
     NTEST_ASSERT_EQ_INT(pts.data[1].x, 3);
     i32 sum = 0;
-    NPH_ARRAY_FOREACH(Point, it, &pts)
-    {
+    NPH_ARRAY_FOREACH (Point, it, &pts) {
         sum += it->x + it->y;
     }
     NTEST_ASSERT_EQ_INT(sum, 10);

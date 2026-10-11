@@ -17,6 +17,11 @@
 #   readability-else-after-return                 early-return style is not mandated
 #   readability-avoid-nested-conditional-operator a?b:c?d:e is accepted when formatted on separate lines
 #   readability-math-missing-parentheses          a*b + c is unambiguous to every C programmer
+#   bugprone-assignment-in-if-condition           the compilers' -Wparentheses already flags `if (a = b)`;
+#                                                 the check also fires on comma-expression macros
+#                                                 such as NPH_ARRAY_PUSH used in a condition
+#   clang-analyzer-optin.performance.Padding      cache-line-separated fields (rings, logger) are padded
+#                                                 on purpose; the suggested reorderings defeat that
 ---
 Checks: >
   -*,
@@ -40,7 +45,9 @@ Checks: >
   -readability-magic-numbers,
   -readability-else-after-return,
   -readability-avoid-nested-conditional-operator,
-  -readability-math-missing-parentheses
+  -readability-math-missing-parentheses,
+  -bugprone-assignment-in-if-condition,
+  -clang-analyzer-optin.performance.Padding
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '(engine|tools|editor|samples|tests|benchmarks)/.*\.h$'

@@ -9,13 +9,13 @@
 static u8 *load_data(const NphArrayRef *r)
 {
     void *p;
-    memcpy(&p, r->data_field, sizeof p);
+    memcpy((void *)&p, r->data_field, sizeof p);
     return (u8 *)p;
 }
 
 static void store_data(const NphArrayRef *r, void *p)
 {
-    memcpy(r->data_field, &p, sizeof p);
+    memcpy(r->data_field, (const void *)&p, sizeof p);
 }
 
 u32 nph_array_elem_align(u32 elem_size)

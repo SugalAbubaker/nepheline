@@ -109,8 +109,7 @@ NTEST_F(BitsetFixture, find_next_set_and_clear)
     }
     NTEST_ASSERT_EQ_UINT(found, NPH_ARRAY_COUNT(set_bits));
     found = 0U;
-    NPH_BITSET_FOREACH_SET(i, &b)
-    {
+    NPH_BITSET_FOREACH_SET (i, &b) {
         NTEST_ASSERT_EQ_UINT(i, set_bits[found++]);
     }
     NTEST_ASSERT_EQ_UINT(found, NPH_ARRAY_COUNT(set_bits));

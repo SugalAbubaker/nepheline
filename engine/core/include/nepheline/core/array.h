@@ -102,12 +102,16 @@ typedef struct NphArrayRef {
     ((a)->len < (a)->cap || nph_array_grow(NPH_ARRAY_REF_(a), 1U, NPH_CALLSITE_HERE()))
 
 // Appends `value`. NphResult (OUT_OF_MEMORY on failure; the array is unchanged).
+// `value` must not read the array's length (the slot index is claimed in
+// the same expression, in unspecified order).
 #define NPH_ARRAY_PUSH(a, value)                                                                   \
-    (NPH_ARRAY_HAS_ROOM_(a) ? ((a)->data[(a)->len++] = (value), NPH_RESULT_OK)                     \
-                            : NPH_RESULT_OUT_OF_MEMORY)
+    (NPH_ARRAY_HAS_ROOM_(a)                                                                        \
+         ? ((a)->data[nph_array_claim_slot(&(a)->len)] = (value), NPH_RESULT_OK)                   \
+         : NPH_RESULT_OUT_OF_MEMORY)
 
 // Appends an uninitialised element and returns its address, or NULL.
-#define NPH_ARRAY_PUSH_SLOT(a) (NPH_ARRAY_HAS_ROOM_(a) ? &(a)->data[(a)->len++] : NULL)
+#define NPH_ARRAY_PUSH_SLOT(a)                                                                     \
+    (NPH_ARRAY_HAS_ROOM_(a) ? &(a)->data[nph_array_claim_slot(&(a)->len)] : NULL)
 
 // Appends `n` elements copied from `src` (same element type). NphResult.
 #define NPH_ARRAY_PUSH_N(a, src, n)                                                                \
@@ -144,7 +148,19 @@ typedef struct NphArrayRef {
 #define NPH_ARRAY_BYTES(a)    ((u64)(a)->len * sizeof *(a)->data)
 
 // for (T *it = first; it != end; ++it). Do not grow the array inside.
-#define NPH_ARRAY_FOREACH(T, it, a) for (T * (it) = (a)->data; (it) != (a)->data + (a)->len; ++(it))
+// (T is a type and `it` a declarator: neither can be parenthesised.)
+// NOLINTBEGIN(bugprone-macro-parentheses)
+#define NPH_ARRAY_FOREACH(T, it, a) for (T *it = (a)->data; it != (a)->data + (a)->len; ++it)
+// NOLINTEND(bugprone-macro-parentheses)
+
+// Increments *len and returns the previous value: the index of a slot the
+// caller has made room for.
+NPH_INLINE u32 nph_array_claim_slot(u32 *len)
+{
+    const u32 index = *len;
+    *len = index + 1U;
+    return index;
+}
 
 // ---------------------------------------------------------------------------
 // Untyped implementation (called by the macros; usable directly by code
