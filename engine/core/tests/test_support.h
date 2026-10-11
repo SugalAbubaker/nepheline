@@ -20,7 +20,7 @@ typedef struct TestAssertRecorder {
     u32 last_line;
 } TestAssertRecorder;
 
-static NphAssertAction test_assert_record(const NphAssertInfo *info, void *user)
+static inline NphAssertAction test_assert_record(const NphAssertInfo *info, void *user)
 {
     TestAssertRecorder *rec = (TestAssertRecorder *)user;
     rec->count += 1U;
