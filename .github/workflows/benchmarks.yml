@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Nightly CPU benchmarks (CLAUDE.md §6, §9 "Performance regression").
+#
+# Runs every nbench executable in the Profile configuration and archives the
+# JSON results. GitHub-hosted runners are shared hardware, so these numbers
+# track trends and catch gross regressions; the authoritative measurements
+# come from the self-hosted reference machine (docs/adr/0002) from Phase 5.
+name: Benchmarks
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-msvc, os: windows-2022, preset: win-msvc,    cfg: profile }
+          - { name: linux-gcc,    os: ubuntu-24.04, preset: linux-gcc,   cfg: profile }
+          - { name: linux-clang,  os: ubuntu-24.04, preset: linux-clang, cfg: profile }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up the MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/dev_env.ps1 -GitHubEnv
+
+      - name: Install Ninja
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DNPH_BUILD_TESTS=OFF
+
+      - name: Build (Profile)
+        run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}
+
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          mkdir -p bench-results
+          for exe in build/${{ matrix.preset }}/bin/Profile/*_bench*; do
+            case "$exe" in *.pdb) continue ;; esac
+            name=$(basename "$exe" .exe)
+            echo "== $name"
+            "$exe" --min-time=0.5 --repeats=7 --json="bench-results/$name.json"
+          done
+
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-results-${{ matrix.name }}
+          path: bench-results/

@@ -54,3 +54,29 @@ function(nph_add_test name)
              COMMAND ${target} "--junit=${CMAKE_BINARY_DIR}/test-results/$<CONFIG>/${name}.xml")
     set_tests_properties(${name} PROPERTIES TIMEOUT 600 LABELS "unit")
 endfunction()
+
+# nph_add_benchmark(<name> SOURCES <src>... [DEPS <target>...])
+#
+# Builds the executable <name>_bench on the nbench harness and registers a
+# short smoke run with CTest as "bench.<name>" (label "benchmark") so a
+# benchmark that no longer builds or runs fails the normal test matrix. The
+# nightly workflow runs the executables at full length with --json.
+function(nph_add_benchmark name)
+    if(NOT NPH_BUILD_BENCHMARKS)
+        return()
+    endif()
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS")
+    if(ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "nph_add_benchmark(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
+    endif()
+
+    set(target ${name}_bench)
+    add_executable(${target} ${ARG_SOURCES})
+    target_link_libraries(${target} PRIVATE nph::options nbench::main ${ARG_DEPS})
+    set_target_properties(${target} PROPERTIES FOLDER "benchmarks")
+
+    if(NPH_BUILD_TESTS)
+        add_test(NAME bench.${name} COMMAND ${target} --min-time=0.005 --repeats=1)
+        set_tests_properties(bench.${name} PROPERTIES TIMEOUT 600 LABELS "benchmark")
+    endif()
+endfunction()
