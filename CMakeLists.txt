@@ -76,6 +76,12 @@ target_link_libraries(nepheline INTERFACE nph::core)
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
+if(NPH_BUILD_SAMPLES)
+    add_subdirectory(samples)
+endif()
+if(NPH_BUILD_FUZZERS)
+    add_subdirectory(tests/fuzz)
+endif()
 
 include(NphFormat)
 nph_add_format_targets()
@@ -83,4 +89,5 @@ nph_add_format_targets()
 message(STATUS "Nepheline ${PROJECT_VERSION}: compiler=${CMAKE_C_COMPILER_ID} "
                "frontend=${CMAKE_C_COMPILER_FRONTEND_VARIANT} generator=${CMAKE_GENERATOR} "
                "asan=${NPH_ASAN} ubsan=${NPH_UBSAN} tsan=${NPH_TSAN} tests=${NPH_BUILD_TESTS} "
-               "benchmarks=${NPH_BUILD_BENCHMARKS}")
+               "benchmarks=${NPH_BUILD_BENCHMARKS} samples=${NPH_BUILD_SAMPLES} "
+               "fuzzers=${NPH_BUILD_FUZZERS}")

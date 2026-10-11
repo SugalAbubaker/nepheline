@@ -54,7 +54,8 @@ jobs:
             case "$exe" in *.pdb) continue ;; esac
             name=$(basename "$exe" .exe)
             echo "== $name"
-            "$exe" --min-time=0.5 --repeats=7 --json="bench-results/$name.json"
+            "$exe" --min-time=0.5 --repeats=7 --json="bench-results/$name.json" \
+                   --budgets=benchmarks/budgets.txt
           done
 
       - name: Upload results

@@ -55,6 +55,58 @@ function(nph_add_test name)
     set_tests_properties(${name} PROPERTIES TIMEOUT 600 LABELS "unit")
 endfunction()
 
+# nph_add_sample(<name> SOURCES <src>... [DEPS <target>...] [ARGS <arg>...])
+#
+# Builds the executable <name> and registers "sample.<name>" with CTest
+# (label "sample") so every sample keeps running.
+function(nph_add_sample name)
+    if(NOT NPH_BUILD_SAMPLES)
+        return()
+    endif()
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS;ARGS")
+    if(ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "nph_add_sample(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
+    endif()
+
+    add_executable(${name} ${ARG_SOURCES})
+    target_link_libraries(${name} PRIVATE nph::options ${ARG_DEPS})
+    set_target_properties(${name} PROPERTIES FOLDER "samples")
+    if(MSVC)
+        target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+
+    if(NPH_BUILD_TESTS)
+        add_test(NAME sample.${name} COMMAND ${name} ${ARG_ARGS})
+        set_tests_properties(sample.${name} PROPERTIES TIMEOUT 120 LABELS "sample")
+    endif()
+endfunction()
+
+# nph_add_fuzzer(<name> SOURCES <src>... [DEPS <target>...])
+#
+# Builds a libFuzzer target (Clang only, NPH_BUILD_FUZZERS=ON) as
+# <name>_fuzz. The entry point is LLVMFuzzerTestOneInput. With any other
+# compiler the function does nothing.
+function(nph_add_fuzzer name)
+    if(NOT NPH_BUILD_FUZZERS)
+        return()
+    endif()
+    if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        message(STATUS "nph_add_fuzzer(${name}): libFuzzer needs Clang; skipping")
+        return()
+    endif()
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS")
+    if(ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "nph_add_fuzzer(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
+    endif()
+
+    set(target ${name}_fuzz)
+    add_executable(${target} ${ARG_SOURCES})
+    target_link_libraries(${target} PRIVATE nph::options ${ARG_DEPS})
+    target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+    set_target_properties(${target} PROPERTIES FOLDER "fuzz")
+endfunction()
+
 # nph_add_benchmark(<name> SOURCES <src>... [DEPS <target>...])
 #
 # Builds the executable <name>_bench on the nbench harness and registers a

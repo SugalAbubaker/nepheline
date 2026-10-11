@@ -1,0 +1,73 @@
+# Benchmark budgets: maximum median nanoseconds per operation (docs/benchmarks.md).
+# Roughly 3x the Profile numbers recorded on the reference machine
+# (benchmarks/results/), so hosted runners only fail on integer-factor
+# regressions. Benchmarks of the platform allocator get 5x.
+
+# core_alloc_bench
+alloc_free_64_system           180
+alloc_free_64_tlsf             100
+alloc_free_64_pool             45
+alloc_free_64_debug_tlsf       130
+batch_system                   170
+batch_tlsf                     50
+batch_debug_tlsf               90
+random_mixed_system            140
+random_mixed_tlsf              65
+random_mixed_debug_tlsf        115
+realloc_grow_system            35000
+realloc_grow_tlsf              65
+bump_64_arena                  8
+bump_64_stack                  10
+pool_direct_alloc_free_64      15
+tlsf_direct_alloc_free_64      90
+malloc_direct_alloc_free_64    150
+
+# core_hash_bench
+hash64_8B                      12
+hash64_16B                     12
+hash64_32B                     17
+hash64_64B                     20
+hash64_256B                    38
+hash64_4096B                   400
+hash64_65536B                  6300
+crc32c_8B                      9
+crc32c_16B                     10
+crc32c_32B                     11
+crc32c_64B                     17
+crc32c_256B                    61
+crc32c_4096B                   950
+crc32c_65536B                  15300
+mix_u64                        8
+hashmap_insert_1000            77
+hashmap_insert_100000          90
+hashmap_insert_1000000         170
+hashmap_find_hit_1000          24
+hashmap_find_hit_100000        37
+hashmap_find_hit_1000000       125
+hashmap_find_miss_1000         16
+hashmap_find_miss_100000       27
+hashmap_find_miss_1000000      27
+hashmap_remove_1000            24
+hashmap_remove_100000          37
+hashmap_remove_1000000         125
+array_push_u32                 3
+sparse_set_insert_get          12
+bitset_count_1M                9500
+
+# core_json_bench
+json_parse_scene               33000000
+json_write_scene               40000000
+json_write_streaming           54000000
+bin_write_scene                2700000
+bin_read_scene                 810000
+cvar_apply_config              370
+
+# core_log_bench
+log_write_enabled              440
+log_write_disabled             6
+log_flush_per_record           38
+sb_append_small                12
+sb_appendf_int                 230
+sb_append_u64                  35
+str_find_64B                   90
+str_id_16B                     16

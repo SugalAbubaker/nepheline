@@ -1,0 +1,9 @@
+{
+  "name": "scene é😀",
+  "version": 3,
+  "scale": -1.5e-3,
+  "visible": true,
+  "parent": null,
+  "tags": ["a", "b\n", []],
+  "transform": {"pos": [1, 2, 3], "empty": {}}
+}

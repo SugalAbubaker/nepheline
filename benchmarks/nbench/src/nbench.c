@@ -389,8 +389,98 @@ static void print_usage(FILE *out, const char *exe)
             "  --min-time=SEC     Minimum time per measured run (default 0.2)\n"
             "  --repeats=N        Measured runs per benchmark (default 5, max 64)\n"
             "  --json=FILE        Write results as JSON\n"
+            "  --budgets=FILE     Exit 4 if any median ns/op exceeds its budget\n"
+            "                     (lines of `name max_ns`; '#' starts a comment)\n"
             "  --help             Show this help\n",
             exe);
+}
+
+// ---------------------------------------------------------------------------
+// Budgets
+// ---------------------------------------------------------------------------
+
+typedef struct NbenchBudget {
+    char name[128];
+    double max_ns;
+} NbenchBudget;
+
+// Reads `name max_ns` lines. Returns the count, or -1 on a malformed file.
+static int load_budgets(const char *path, NbenchBudget **out)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        fprintf(stderr, "nbench: cannot open budgets file '%s'\n", path);
+        return -1;
+    }
+    NbenchBudget *budgets = NULL;
+    int count = 0;
+    int capacity = 0;
+    char line[512];
+    int line_number = 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        ++line_number;
+        char *hash = strchr(line, '#');
+        if (hash != NULL) {
+            *hash = '\0';
+        }
+        NbenchBudget b;
+        double max_ns = 0.0;
+        const int fields = sscanf(line, "%127s %lf", b.name, &max_ns);
+        if (fields <= 0) {
+            continue; // blank or comment-only line
+        }
+        if (fields != 2 || !(max_ns > 0.0)) {
+            fprintf(stderr, "nbench: %s:%d: expected `name max_ns`\n", path, line_number);
+            free(budgets);
+            fclose(f);
+            return -1;
+        }
+        b.max_ns = max_ns;
+        if (count == capacity) {
+            capacity = capacity == 0 ? 32 : capacity * 2;
+            NbenchBudget *grown =
+                (NbenchBudget *)realloc(budgets, (size_t)capacity * sizeof *grown);
+            if (grown == NULL) {
+                fputs("nbench: out of memory\n", stderr);
+                abort();
+            }
+            budgets = grown;
+        }
+        budgets[count++] = b;
+    }
+    fclose(f);
+    *out = budgets;
+    return count;
+}
+
+// Compares every result with its budget. Returns false if any exceeded.
+static bool check_budgets(const char *path, const NbenchResult *results, size_t n)
+{
+    NbenchBudget *budgets = NULL;
+    const int count = load_budgets(path, &budgets);
+    if (count < 0) {
+        return false;
+    }
+    bool ok = true;
+    for (size_t i = 0; i < n; ++i) {
+        const NbenchResult *r = &results[i];
+        for (int b = 0; b < count; ++b) {
+            if (strcmp(budgets[b].name, r->bc->name) != 0) {
+                continue;
+            }
+            if (r->ns_per_op_median > budgets[b].max_ns) {
+                printf("BUDGET EXCEEDED  %-40s %.2f ns/op > %.2f\n", r->bc->name,
+                       r->ns_per_op_median, budgets[b].max_ns);
+                ok = false;
+            }
+            break;
+        }
+    }
+    printf(ok ? "budgets: all %zu benchmarks within budget (%s)\n"
+              : "budgets: FAILED (%zu benchmarks checked against %s)\n",
+           n, path);
+    free(budgets);
+    return ok;
 }
 
 int nbench_main(int argc, char **argv)
@@ -398,6 +488,7 @@ int nbench_main(int argc, char **argv)
     bool list = false;
     const char *filter = NULL;
     const char *json_path = NULL;
+    const char *budgets_path = NULL;
     double min_time_s = 0.2;
     int repeats = 5;
     const char *exe = argc > 0 ? path_basename(argv[0]) : "nbench";
@@ -410,6 +501,8 @@ int nbench_main(int argc, char **argv)
             filter = a + 9;
         } else if (strncmp(a, "--json=", 7) == 0) {
             json_path = a + 7;
+        } else if (strncmp(a, "--budgets=", 10) == 0) {
+            budgets_path = a + 10;
         } else if (strncmp(a, "--min-time=", 11) == 0) {
             char *end = NULL;
             min_time_s = strtod(a + 11, &end);
@@ -478,11 +571,14 @@ int nbench_main(int argc, char **argv)
         fflush(stdout);
     }
 
-    bool ok = true;
-    if (json_path != NULL) {
-        ok = write_json(json_path, exe, results, n, min_time_s);
+    int status = 0;
+    if (json_path != NULL && !write_json(json_path, exe, results, n, min_time_s)) {
+        status = 2;
+    }
+    if (budgets_path != NULL && !check_budgets(budgets_path, results, n)) {
+        status = 4;
     }
     free((void *)cases);
     free(results);
-    return ok ? 0 : 2;
+    return status;
 }
