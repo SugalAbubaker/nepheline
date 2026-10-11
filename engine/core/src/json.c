@@ -423,8 +423,12 @@ static NphResult parse_container(Parser *p, NphJsonValue *container, bool is_obj
             ++p->pos;
             skip_whitespace(p);
         }
-        NphJsonValue *child;
+        // parse_value writes *out on every NPH_RESULT_OK path; the assert
+        // states that contract for the static analyzer, which cannot always
+        // see through the recursion.
+        NphJsonValue *child = NULL;
         NPH_TRY(parse_value(p, &child));
+        NPH_ASSERT(child != NULL);
         child->key = key;
         append_child(container, child);
         skip_whitespace(p);
