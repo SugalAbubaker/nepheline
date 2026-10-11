@@ -37,12 +37,12 @@ extern "C" {
 
 typedef enum NphLogLevel {
     NPH_LOG_LEVEL_TRACE = 0,
-    NPH_LOG_LEVEL_DEBUG,
-    NPH_LOG_LEVEL_INFO,
-    NPH_LOG_LEVEL_WARN,
-    NPH_LOG_LEVEL_ERROR,
-    NPH_LOG_LEVEL_FATAL,
-    NPH_LOG_LEVEL_COUNT,
+    NPH_LOG_LEVEL_DEBUG = 1,
+    NPH_LOG_LEVEL_INFO = 2,
+    NPH_LOG_LEVEL_WARN = 3,
+    NPH_LOG_LEVEL_ERROR = 4,
+    NPH_LOG_LEVEL_FATAL = 5,
+    NPH_LOG_LEVEL_COUNT = 6,
     NPH_LOG_LEVEL_OFF = NPH_LOG_LEVEL_COUNT, // disables a category or sink
 } NphLogLevel;
 
@@ -160,6 +160,7 @@ u32 nph_log_flush(u32 max_records);
 NPH_PRINTF_LIKE(5, 6)
 void nph_log_write(NphLogCategory *category, NphLogLevel level, const char *file, u32 line,
                    const char *fmt, ...);
+NPH_PRINTF_LIKE(5, 0)
 void nph_log_write_v(NphLogCategory *category, NphLogLevel level, const char *file, u32 line,
                      const char *fmt, va_list args);
 void nph_log_write_str(NphLogCategory *category, NphLogLevel level, const char *file, u32 line,

@@ -274,6 +274,9 @@ NTEST(log, file_sink_writes_lines)
     nph_log_file_sink_close(&sink);
     FILE *f = fopen(path, "rb");
     NTEST_ASSERT_NOT_NULL(f);
+    if (f == NULL) {
+        return; // the assertion above already failed the test
+    }
     char line[256];
     NTEST_ASSERT_NOT_NULL(fgets(line, sizeof line, f));
     fclose(f);

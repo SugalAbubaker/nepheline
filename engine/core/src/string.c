@@ -480,7 +480,14 @@ NphResult nph_sb_append_i64(NphStrBuilder *sb, i64 v)
 
 NphResult nph_sb_append_f64(NphStrBuilder *sb, f64 v)
 {
-    return nph_sb_appendf(sb, "%.17g", v);
+    // One snprintf into a local buffer rather than the two-pass appendf:
+    // %.17g never exceeds 24 characters.
+    char buffer[32];
+    const int n = snprintf(buffer, sizeof buffer, "%.17g", v);
+    if (n < 0 || (size_t)n >= sizeof buffer) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    return nph_sb_append(sb, nph_str(buffer, (u64)n));
 }
 
 NphResult nph_sb_appendf(NphStrBuilder *sb, const char *fmt, ...)
