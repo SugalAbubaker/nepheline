@@ -5,8 +5,8 @@ only on the C standard library and compiler intrinsics; it includes no OS
 header. This document grows with the module; each section names the headers
 it covers.
 
-Status: **base, errors, assertions, atomics, and allocators are done**;
-containers, strings, hashing, logging, cvars, and serialization follow in
+Status: **base, errors, assertions, atomics, allocators, hashing, and
+containers are done**; strings, logging, cvars, and serialization follow in
 the remaining Phase 1 pull requests.
 
 ## Base (`types.h`, `base.h`, `version.h`)
@@ -233,6 +233,102 @@ What the numbers say:
 - **The debug wrapper costs 10–15 ns per op** (two fills, guard checks, the
   spin lock), affordable in Debug and Development.
 
+## Hashing (`hash.h`)
+
+- **`nph_hash64`**: a 64-bit non-cryptographic hash following the wyhash
+  construction (Wang Yi): the mixing primitive is a 64×64→128 multiply
+  whose halves are folded; 48 bytes per step in three independent lanes;
+  inputs of 4–16 bytes are read with two overlapping loads from each end,
+  1–3 bytes with first/middle/last, so there is no byte loop. Constants are
+  our own (golden ratio, √2, √3, √5). Tests: pinned regression vectors,
+  avalanche (every output bit flips 42–58 % of the time for every input bit,
+  lengths 1–200), bucket distribution of sequential keys, alignment
+  independence.
+- **`nph_hash_mix_u64`**: the `moremur` finaliser (Evensen 2019), bijective,
+  for integer keys; `nph_hash_combine`, `nph_hash_fold_u32`.
+- **`nph_crc32c`**: Castagnoli CRC with the SSE4.2 instruction eight bytes
+  at a time (the x86-64 baseline guarantees it); `nph_crc32c_portable` is
+  the table-driven reference, cross-checked for every length 0–299 at every
+  alignment. Standard vectors (RFC 3720) pass.
+- **Stability**: both hashes are part of the asset format (cooked string
+  IDs and checksums). Changing either is a format version change.
+
+## Containers
+
+Decisions and alternatives: [ADR-0006](adr/0006-containers.md).
+
+| Container | Header | Shape | Complexity |
+|---|---|---|---|
+| dynamic array | `array.h` | `NPH_ARRAY(T)` struct + uppercase macros over an untyped `NphArrayRef` | push amortised O(1), doubling from 8 |
+| hash map | `hashmap.h` | Swiss table: control bytes + AoS slots, SSE2 group probe | O(1) expected; 7/8 load |
+| handle pool | `handle.h` | 32-bit index + generation, FIFO reuse | O(1) |
+| SPSC ring | `ring.h` | Lamport queue with cached positions | O(1), lock-free |
+| MPMC ring | `ring.h` | Vyukov bounded queue | O(1), lock-free |
+| bitset | `bitset.h` | u64 words, zero tail invariant | O(words) |
+| sparse set | `sparse_set.h` | sparse index + dense keys (+ values) | O(1) |
+
+**Dynamic array.** `typedef NPH_ARRAY(T) Name;` declares `{T *data; u32
+len, cap; NphAllocator *alloc;}`. Operations are macros (`NPH_ARRAY_PUSH`,
+`_PUSH_SLOT`, `_PUSH_N`, `_INSERT`, `_POP`, `_LAST`, `_REMOVE_AT`,
+`_REMOVE_SWAP`, `_RESERVE`, `_RESIZE`, `_SHRINK_TO_FIT`, `_FOREACH`) that
+assign through `data[i]` for type safety and forward memory work to
+functions on `NphArrayRef`. The `data` field is read and written through
+`memcpy` in those functions, so no pointer type is punned. Growth uses
+`NPH_REALLOC`, which TLSF grows in place when it can. Element alignment is
+16, or 32/64 for power-of-two element sizes of 32/64 (SIMD register types),
+since `_Alignof` cannot be applied to an expression in C17.
+
+**Hash map.** See ADR-0006 for the layout. `nph_hashmap_desc_u64` gives
+integer-keyed maps the mixer as hash; other keys use `nph_hash64` over the
+key bytes and `memcmp` unless the descriptor supplies functions. Value
+pointers are stable until the next mutating call. Iteration walks the
+control bytes.
+
+**Handle pool.** Issues `NphHandle {u32}` with a per-pool index width
+(1–28 bits). Generations start at 1 and wrap to 1, so zero is never valid;
+released indices queue in a FIFO and are reused only after
+`min_free_before_reuse` other releases. The pool stores no payload.
+
+**Rings.** Both copy fixed-size elements by value and never allocate after
+init. SPSC keeps the producer's and consumer's positions on separate cache
+lines and caches the remote position so a push or pop touches one shared
+line only when the ring looks full or empty. MPMC cells carry sequence
+numbers; positions are 32-bit and wrap safely (tested).
+
+**Bitset and sparse set.** The bitset keeps tail bits zero so `count`,
+`all`, and `equals` are whole-word operations; `find_next_set/clear` scan
+with `ctz`. The sparse set grows its sparse array to the largest key
+(rounded to a power of two) and keeps members packed in `dense` with an
+optional parallel value array, swapping the last member into a removed
+slot.
+
+### Hashing and container benchmarks
+
+`benchmarks/core/bench_hash.c`, Profile, Ryzen 7 5800X, MSVC 14.44,
+2026-10-11, median of 5. Full JSON:
+`benchmarks/results/core_hash-2026-10-11-win-msvc-profile-ryzen7-5800x.json`.
+
+| Benchmark | ns/op | Note |
+|---|---|---|
+| `nph_hash64`, 8 / 16 / 32 / 64 B | 3.9 / 3.9 / 5.4 / 6.4 | short-input path |
+| `nph_hash64`, 256 B / 4 KiB / 64 KiB | 12.4 / 133 / 2076 | 31.6 GB/s on long inputs |
+| `nph_crc32c`, 8 / 64 B / 4 KiB / 64 KiB | 2.9 / 5.4 / 318 / 5072 | 12.9 GB/s: one dependent `crc32` chain |
+| `nph_hash_mix_u64` | 2.5 | |
+| hash map insert, 1 k / 100 k / 1 M u64 keys | 25.5 / 30.0 / 55.4 | includes rehashes from empty |
+| hash map find hit, 1 k / 100 k / 1 M | 7.7 / 12.3 / 40.4 | L1 / L2 / DRAM resident |
+| hash map find miss, 1 k / 100 k / 1 M | 5.1 / 8.7 / 8.8 | one group load, no key compare |
+| hash map remove, 1 k / 100 k / 1 M | 8.0 / 12.3 / 40.7 | |
+| array push u32 (100 k pushes, with growth) | 0.81 | inline fast path; 16.5 before it, when every push called the grow function |
+| sparse set set + get, 4096 keys | 3.8 | per operation |
+| bitset count + find, 1 M bits | 3147 | per call pair; 15 625 words |
+
+Reading: the map's miss path is faster than its hit path because a miss
+usually ends at the first group (an empty byte) without touching a slot; the
+1 M-entry numbers are DRAM latency, as expected for a 16 MiB table. CRC32C
+is latency-bound on the single `crc32` dependency chain; a three-stream
+version with a combine step (Gopal et al., Intel 2011) would reach ~3× and
+is worth adding when file checksums show up in profiles.
+
 ## Testing
 
 `engine/core/tests/`: `test_base.c` (bit tricks, alignment, min/max,
@@ -244,5 +340,13 @@ realloc fallback via a failing allocator), `test_arena.c`, `test_pool.c`,
 direction, over-alignment, in-place realloc, pools, exhaustion, double free,
 three randomised model checks with full validation), `test_alloc_debug.c`
 (leaks with callsites, overrun/underrun, size/alignment mismatch, poison,
-double free). Multi-threaded tests of atomics and the debug wrapper's lock
-arrive with platform threads in Phase 3.
+double free), `test_hash.c` (regression vectors, avalanche, distribution,
+CRC vectors and hardware/portable agreement), `test_array.c`,
+`test_hashmap.c` (growth to 100 k, tombstone reclamation under churn,
+randomised model check, byte keys, sets, allocation failure),
+`test_handle.c` (staleness, reuse delay, generation wrap, randomised),
+`test_ring.c` (order, capacity, position wrap-around for both rings),
+`test_bitset.c`, `test_sparse_set.c` (randomised model check). Container
+tests run under the debug allocator so a leaked allocation fails the test.
+Multi-threaded tests of atomics, rings, and the debug wrapper's lock arrive
+with platform threads in Phase 3.
