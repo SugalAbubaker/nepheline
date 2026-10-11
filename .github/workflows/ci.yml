@@ -112,12 +112,56 @@ jobs:
           python3 scripts/tidy.py --build-dir build/linux-clang-tidy
           --clang-tidy clang-tidy-${{ env.LLVM_VERSION }}
 
+  # Line coverage per module against the CLAUDE.md §9 targets (90 % core,
+  # math, jobs; 80 % elsewhere), from a Debug build without sanitizers.
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.LLVM_VERSION }}
+          sudo apt-get install -y ninja-build
+      - name: Configure (Debug, instrumented, no sanitizers)
+        run: >
+          cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
+          -DCMAKE_BUILD_TYPE=Debug -DNPH_COVERAGE=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
+          -DNPH_BUILD_BENCHMARKS=OFF
+      - name: Build
+        run: cmake --build build/linux-clang-tidy
+      - name: Run unit tests with profiling
+        env:
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/build/linux-clang-tidy/profiles/%p-%m.profraw
+        run: ctest --test-dir build/linux-clang-tidy -L unit --output-on-failure
+      - name: Report
+        shell: bash
+        run: |
+          cd build/linux-clang-tidy
+          llvm-profdata-${{ env.LLVM_VERSION }} merge -sparse profiles/*.profraw -o coverage.profdata
+          objects=""
+          for exe in bin/*_tests; do objects="$objects -object $exe"; done
+          # shellcheck disable=SC2086
+          llvm-cov-${{ env.LLVM_VERSION }} report $objects -instr-profile=coverage.profdata \
+            -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/' \
+            | tee coverage-report.txt
+          python3 ../../scripts/coverage_check.py coverage-report.txt
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: build/linux-clang-tidy/coverage-report.txt
+          if-no-files-found: warn
+
   # Single required status check for branch protection; stays stable while the
   # matrix above evolves.
   ci:
     name: CI
     if: always()
-    needs: [format, build, tidy]
+    needs: [format, build, tidy, coverage]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify every job succeeded
@@ -126,3 +170,4 @@ jobs:
           test "${{ needs.format.result }}" = "success"
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.tidy.result }}" = "success"
+          test "${{ needs.coverage.result }}" = "success"
