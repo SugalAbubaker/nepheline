@@ -3,6 +3,8 @@
 
 option(NPH_BUILD_TESTS "Build the unit tests and the ntest framework" ON)
 option(NPH_BUILD_BENCHMARKS "Build the benchmarks and the nbench harness" ON)
+option(NPH_BUILD_SAMPLES "Build the sample applications" ON)
+option(NPH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only; links -fsanitize=fuzzer)" OFF)
 option(NPH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (CLAUDE.md §1.3)" ON)
 
 # Sanitizers apply to the Debug configuration only (CLAUDE.md §6).

@@ -10,3 +10,7 @@ nph_add_benchmark(core_hash
 nph_add_benchmark(core_log
     SOURCES bench_log.c
     DEPS nph::core)
+
+nph_add_benchmark(core_json
+    SOURCES bench_json.c
+    DEPS nph::core)

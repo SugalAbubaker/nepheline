@@ -81,6 +81,8 @@ target links.
 |---|---|---|
 | `NPH_BUILD_TESTS` | `ON` | Build ntest and the unit tests; register them with CTest |
 | `NPH_BUILD_BENCHMARKS` | `ON` | Build nbench and the benchmarks; register a smoke run of each with CTest (label `benchmark`) |
+| `NPH_BUILD_SAMPLES` | `ON` | Build `samples/`; register each as a CTest smoke run (label `sample`) |
+| `NPH_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets in `tests/fuzz/` (Clang only; `-fsanitize=fuzzer`) |
 | `NPH_WARNINGS_AS_ERRORS` | `ON` | `/WX` or `-Werror` |
 | `NPH_ASAN` | `ON` (`OFF` for clang-cl) | AddressSanitizer in Debug |
 | `NPH_UBSAN` | `ON` | UndefinedBehaviorSanitizer in Debug (GCC/Clang) |
@@ -167,8 +169,12 @@ nph_add_test(<module>
 - **CI** aggregates the above; it is the single required status check on `main`.
 
 `.github/workflows/benchmarks.yml` runs every benchmark nightly in the
-Profile configuration on hosted Windows and Linux runners and uploads the
-JSON results as artifacts.
+Profile configuration on hosted Windows and Linux runners, checks them
+against `benchmarks/budgets.txt`, and uploads the JSON results as artifacts.
+
+`.github/workflows/fuzz.yml` builds the libFuzzer targets nightly with
+Clang (Debug: ASan + UBSan) and runs each for two minutes from its seed
+corpus; crashing inputs are uploaded as artifacts.
 
 `.github/workflows/gpu-perf.yml` targets the self-hosted RTX 3060 Ti runner
 and is manual-only until Phase 5 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)).
@@ -178,5 +184,5 @@ and is manual-only until Phase 5 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)
 - **clang-cl + ASan** is unverified and off by default (ADR-0003 §4).
 - **Local Linux builds** are not possible on the primary development machine
   (no WSL); Linux is covered by CI only.
-- **lavapipe GPU tests, MSVC `/analyze`, cppcheck, coverage (llvm-cov), fuzzing**
+- **lavapipe GPU tests, MSVC `/analyze`, cppcheck, coverage (llvm-cov)**
   are wired up in the phases that introduce the code they check (CLAUDE.md §9).
