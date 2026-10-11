@@ -22,6 +22,18 @@ def find_clang_format():
     env = os.environ.get("CLANG_FORMAT")
     if env:
         return env
+    # The PyPI package pinned in CI (pip install clang-format==19.1.5) is the
+    # reference: the binary bundled with Visual Studio reports the same
+    # version but has been seen to regroup includes differently.
+    try:
+        import clang_format  # type: ignore
+
+        exe = os.path.join(os.path.dirname(clang_format.__file__), "data", "bin",
+                           "clang-format.exe" if os.name == "nt" else "clang-format")
+        if os.path.exists(exe):
+            return exe
+    except ImportError:
+        pass
     for name in ("clang-format", "clang-format-19"):
         found = shutil.which(name)
         if found:

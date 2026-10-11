@@ -5,8 +5,9 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include <inttypes.h>
 #include <nbench/nbench.h>
+
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
