@@ -933,43 +933,54 @@ static size_t count_distinct_suites(const NtestCase *const *cases, size_t n)
 // JUnit reporter
 // ---------------------------------------------------------------------------
 
+// Appends n bytes of s to out (bounded by cap, keeping room for the
+// terminator) and advances *len by n regardless, so a NULL out measures.
+static void xml_emit(char *out, size_t cap, size_t *len, const char *s, size_t n)
+{
+    if (out != NULL && cap > 0U) {
+        for (size_t k = 0; k < n; ++k) {
+            if (*len + k + 1U < cap) {
+                out[*len + k] = s[k];
+            }
+        }
+    }
+    *len += n;
+}
+
 size_t ntest_xml_escape(const char *in, char *out, size_t cap)
 {
     size_t len = 0;
     for (const char *p = in; *p != '\0'; ++p) {
         const unsigned char c = (unsigned char)*p;
-        char single[2] = {'\0', '\0'};
-        const char *rep;
+        const char *entity = NULL;
         switch (c) {
         case '&':
-            rep = "&amp;";
+            entity = "&amp;";
             break;
         case '<':
-            rep = "&lt;";
+            entity = "&lt;";
             break;
         case '>':
-            rep = "&gt;";
+            entity = "&gt;";
             break;
         case '"':
-            rep = "&quot;";
+            entity = "&quot;";
             break;
         case '\'':
-            rep = "&apos;";
+            entity = "&apos;";
             break;
         default:
-            single[0] = (c < 0x20U && c != '\t' && c != '\n' && c != '\r') ? '?' : (char)c;
-            rep = single;
             break;
         }
-        const size_t rep_len = strlen(rep);
-        if (out != NULL && cap > 0U) {
-            for (size_t k = 0; k < rep_len; ++k) {
-                if (len + k + 1U < cap) {
-                    out[len + k] = rep[k];
-                }
+        if (entity != NULL) {
+            xml_emit(out, cap, &len, entity, strlen(entity));
+        } else {
+            char ch = (char)c;
+            if (c < 0x20U && c != '\t' && c != '\n' && c != '\r') {
+                ch = '?';
             }
+            xml_emit(out, cap, &len, &ch, 1U);
         }
-        len += rep_len;
     }
     if (out != NULL && cap > 0U) {
         out[len < cap ? len : cap - 1U] = '\0';
