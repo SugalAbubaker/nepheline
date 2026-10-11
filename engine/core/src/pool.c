@@ -59,12 +59,12 @@ void nph_pool_init(NphPool *pool, void *memory, u64 size, u32 elem_size, u32 ele
     pool->slot_size = pool_slot_size(elem_size, pool->slot_align);
 
     // Align the first slot; the block itself may be unaligned.
-    const uptr start = nph_align_up_u64((uptr)memory, pool->slot_align);
-    const u64 skipped = memory != NULL ? start - (uptr)memory : 0U;
+    const u64 skipped =
+        memory != NULL ? nph_align_up_u64((uptr)memory, pool->slot_align) - (uptr)memory : 0U;
     if (memory == NULL || skipped >= size) {
         return;
     }
-    pool->base = (u8 *)start;
+    pool->base = (u8 *)memory + skipped;
     pool->capacity = size - skipped;
     const u64 count = pool->capacity / pool->slot_size;
     pool->slot_count = count > NPH_U32_MAX ? NPH_U32_MAX : (u32)count;
@@ -112,7 +112,7 @@ void *nph_pool_alloc(NphPool *pool)
     void *slot;
     if (pool->free_head != NULL) {
         slot = pool->free_head;
-        memcpy(&pool->free_head, slot, sizeof pool->free_head);
+        memcpy((void *)&pool->free_head, slot, sizeof pool->free_head);
     } else if (pool->bump < pool->slot_count) {
         slot = pool->base + (u64)pool->bump * pool->slot_size;
         pool->bump += 1U;
@@ -157,7 +157,7 @@ void nph_pool_free(NphPool *pool, void *ptr)
     }
     // Poison everything but the link word, which the free list keeps using.
     NPH_ASAN_UNPOISON(ptr, pool->slot_size);
-    memcpy(ptr, &pool->free_head, sizeof pool->free_head);
+    memcpy(ptr, (const void *)&pool->free_head, sizeof pool->free_head);
     pool->free_head = ptr;
     pool->live -= 1U;
     NPH_ASAN_POISON((u8 *)ptr + sizeof(void *), pool->slot_size - sizeof(void *));

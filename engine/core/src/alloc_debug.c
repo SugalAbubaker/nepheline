@@ -30,9 +30,14 @@ struct NphDebugAllocBlock {
 NPH_STATIC_ASSERT(sizeof(NphDebugAllocBlock) % NPH_ALLOC_DEFAULT_ALIGN == 0U,
                   "header must keep the payload at the default alignment");
 
-static NphDebugAllocBlock *header_of(const void *ptr)
+static NphDebugAllocBlock *header_of(void *ptr)
 {
-    return (NphDebugAllocBlock *)(uptr)((const u8 *)ptr - sizeof(NphDebugAllocBlock));
+    return (NphDebugAllocBlock *)((u8 *)ptr - sizeof(NphDebugAllocBlock));
+}
+
+static const NphDebugAllocBlock *header_of_const(const void *ptr)
+{
+    return (const NphDebugAllocBlock *)((const u8 *)ptr - sizeof(NphDebugAllocBlock));
 }
 
 static bool guard_intact(const u8 *guard)
@@ -59,7 +64,7 @@ static NphResult check_block(const NphDebugAllocBlock *h, const void *ptr)
     return NPH_RESULT_OK;
 }
 
-static void fill_info(const NphDebugAllocBlock *h, NphDebugAllocInfo *info)
+static void fill_info(NphDebugAllocBlock *h, NphDebugAllocInfo *info)
 {
     info->ptr = (u8 *)h + sizeof *h;
     info->size = h->size;
@@ -185,7 +190,7 @@ u32 nph_debug_allocator_report(NphDebugAllocator *da, NphDebugAllocReportFn fn, 
     NPH_ASSERT(da != NULL);
     u32 count = 0U;
     nph_spin_lock_acquire(&da->lock);
-    for (const NphDebugAllocBlock *h = da->live_head; h != NULL; h = h->next) {
+    for (NphDebugAllocBlock *h = da->live_head; h != NULL; h = h->next) {
         if (fn != NULL) {
             NphDebugAllocInfo info;
             fill_info(h, &info);
@@ -212,7 +217,7 @@ NphResult nph_debug_allocator_check_block(const void *ptr)
     if (ptr == NULL) {
         return NPH_RESULT_CORRUPT;
     }
-    return check_block(header_of(ptr), ptr);
+    return check_block(header_of_const(ptr), ptr);
 }
 
 NphResult nph_debug_allocator_check(NphDebugAllocator *da, NphDebugAllocInfo *out_info)
@@ -220,7 +225,7 @@ NphResult nph_debug_allocator_check(NphDebugAllocator *da, NphDebugAllocInfo *ou
     NPH_ASSERT(da != NULL);
     NphResult result = NPH_RESULT_OK;
     nph_spin_lock_acquire(&da->lock);
-    for (const NphDebugAllocBlock *h = da->live_head; h != NULL; h = h->next) {
+    for (NphDebugAllocBlock *h = da->live_head; h != NULL; h = h->next) {
         const void *ptr = (const u8 *)h + sizeof *h;
         if (check_block(h, ptr) != NPH_RESULT_OK) {
             if (out_info != NULL) {

@@ -165,7 +165,7 @@ NTEST(base, thread_local_storage_is_per_translation_unit_usable)
 
 NTEST(result, strings_cover_every_value)
 {
-    for (int i = 0; i < (int)NPH_RESULT_COUNT; ++i) {
+    for (int i = 0; i < NPH_RESULT_COUNT; ++i) {
         const char *s = nph_result_string((NphResult)i);
         NTEST_ASSERT_NOT_NULL(s);
         NTEST_ASSERT_NE_STR(s, "INVALID_RESULT");

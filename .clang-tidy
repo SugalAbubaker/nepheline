@@ -58,6 +58,8 @@ CheckOptions:
   readability-identifier-naming.MacroDefinitionIgnoredRegexp: '^_|_$'
   readability-identifier-naming.EnumConstantCase: UPPER_CASE
   readability-identifier-naming.TypedefCase: CamelCase
+  # The fixed-width scalar aliases mandated by CLAUDE.md §5 (core/types.h)
+  readability-identifier-naming.TypedefIgnoredRegexp: '^(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|b32|uptr|iptr)$'
   readability-identifier-naming.StructCase: CamelCase
   readability-identifier-naming.EnumCase: CamelCase
   readability-identifier-naming.UnionCase: CamelCase

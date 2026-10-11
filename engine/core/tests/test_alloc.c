@@ -44,7 +44,7 @@ NTEST(alloc, zeroed_and_typed)
 
     Vec4 *v = NPH_ALLOC_TYPE(a, Vec4);
     NTEST_ASSERT_NOT_NULL(v);
-    NTEST_ASSERT_TRUE(v->x == 0.0f && v->w == 0.0f);
+    NTEST_ASSERT_TRUE(v->x == 0.0F && v->w == 0.0F);
     NTEST_ASSERT_TRUE(nph_is_ptr_aligned(v, NPH_ALIGNOF(Vec4)));
     NPH_FREE_TYPE(a, Vec4, v);
 
@@ -55,7 +55,7 @@ NTEST(alloc, zeroed_and_typed)
 
     Vec4 *arr = NPH_ALLOC_ARRAY_ZEROED(a, Vec4, 10U);
     NTEST_ASSERT_NOT_NULL(arr);
-    NTEST_ASSERT_TRUE(arr[9].z == 0.0f);
+    NTEST_ASSERT_TRUE(arr[9].z == 0.0F);
     NPH_FREE_ARRAY(a, Vec4, arr, 10U);
 
     u32 *ints = NPH_ALLOC_ARRAY(a, u32, 3U);

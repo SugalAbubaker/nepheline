@@ -109,24 +109,25 @@ void *nph_stack_alloc_push(NphStackAlloc *stack, u64 size, u32 align)
     NPH_ASSERT(size > 0U);
     NPH_ASSERT(nph_is_pow2_u32(align));
     const u64 header_align = (u64)nph_max_u32(align, NPH_ALIGNOF(StackHeader));
-    const uptr cursor = (uptr)stack->base + stack->offset;
-    // Payload at an aligned address with room for the header before it.
-    const uptr payload = nph_align_up_u64(cursor + sizeof(StackHeader), header_align);
-    const u64 overhead = payload - cursor; // header plus alignment padding
+    u8 *const cursor = stack->base + stack->offset;
+    // Payload at an aligned address with room for the header before it;
+    // overhead is the header plus the alignment padding.
+    const u64 overhead =
+        nph_align_up_u64((uptr)cursor + sizeof(StackHeader), header_align) - (uptr)cursor;
     const u64 remaining = stack->capacity - stack->offset;
     // Two comparisons so that overhead + size cannot wrap around.
     if (overhead > remaining || size > remaining - overhead) {
         return NULL;
     }
-    const u64 needed = overhead + size;
-    NPH_ASAN_UNPOISON((void *)(payload - sizeof(StackHeader)), sizeof(StackHeader) + size);
-    StackHeader *h = header_of((void *)payload);
+    u8 *const payload = cursor + overhead;
+    NPH_ASAN_UNPOISON(payload - sizeof(StackHeader), sizeof(StackHeader) + size);
+    StackHeader *h = header_of(payload);
     h->prev_offset = stack->offset;
     h->size = size;
-    stack->offset += needed;
+    stack->offset += overhead + size;
     stack->peak = nph_max_u64(stack->peak, stack->offset);
     stack->live += 1U;
-    return (void *)payload;
+    return payload;
 }
 
 void nph_stack_alloc_pop(NphStackAlloc *stack, void *ptr)

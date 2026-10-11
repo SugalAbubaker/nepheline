@@ -108,18 +108,18 @@ void *nph_arena_alloc(NphArena *arena, u64 size, u32 align)
     NPH_ASSERT(arena != NULL);
     NPH_ASSERT(size > 0U);
     NPH_ASSERT(nph_is_pow2_u32(align));
-    const uptr cursor = (uptr)arena->base + arena->offset;
-    const uptr aligned = nph_align_up_u64(cursor, align);
-    const u64 padding = aligned - cursor;
+    u8 *const cursor = arena->base + arena->offset;
+    const u64 padding = nph_align_up_u64((uptr)cursor, align) - (uptr)cursor;
     // Overflow-safe exhaustion check: compare against remaining space.
     const u64 remaining = arena->capacity - arena->offset;
     if (padding > remaining || size > remaining - padding) {
         return NULL;
     }
+    u8 *const aligned = cursor + padding;
     arena->offset += padding + size;
     arena->peak = nph_max_u64(arena->peak, arena->offset);
-    NPH_ASAN_UNPOISON((void *)aligned, size);
-    return (void *)aligned;
+    NPH_ASAN_UNPOISON(aligned, size);
+    return aligned;
 }
 
 void *nph_arena_alloc_zeroed(NphArena *arena, u64 size, u32 align)

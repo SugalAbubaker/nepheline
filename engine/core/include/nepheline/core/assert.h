@@ -54,8 +54,13 @@ void nph_assert_set_handler(NphAssertHandler handler, void *user, NphAssertHandl
 // (and after a BREAK). Called by the macros below; not called directly.
 // Thread-safety: NPH_THREADSAFE.
 NPH_PRINTF_LIKE(5, 6)
+NPH_ANALYZER_NORETURN
 void nph_assert_fail(const char *file, const char *function, u32 line, const char *condition,
                      const char *fmt, ...);
+
+// As nph_assert_fail without a message.
+NPH_ANALYZER_NORETURN
+void nph_assert_fail_nomsg(const char *file, const char *function, u32 line, const char *condition);
 
 #if NPH_ASSERTS_ENABLED
 
@@ -74,7 +79,7 @@ void nph_assert_fail(const char *file, const char *function, u32 line, const cha
     do {                                                                                           \
         NPH_ASSERT_WARNING_PUSH_()                                                                 \
         if (NPH_UNLIKELY(!(cond))) {                                                               \
-            nph_assert_fail(__FILE__, __func__, (u32)__LINE__, #cond, "");                         \
+            nph_assert_fail_nomsg(__FILE__, __func__, (u32)__LINE__, #cond);                       \
         }                                                                                          \
         NPH_ASSERT_WARNING_POP_()                                                                  \
     } while (0)

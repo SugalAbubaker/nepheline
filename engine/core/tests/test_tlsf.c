@@ -329,7 +329,8 @@ NTEST_F(TlsfFixture, walk_visits_every_block)
     nph_tlsf_walk(&f->tlsf, record_walk, &w);
     NTEST_ASSERT_EQ_UINT(w.blocks, 4U); // a, free b, c, free tail
     NTEST_ASSERT_EQ_UINT(w.used, 2U);
-    NTEST_ASSERT_EQ_UINT(w.bytes, f->size - 32U - 3U * 16U); // minus 4 headers... one is the first
+    NTEST_ASSERT_EQ_UINT(w.bytes,
+                         f->size - 32U - (u64)3U * 16U); // minus 4 headers... one is the first
     nph_tlsf_free(&f->tlsf, a);
     nph_tlsf_free(&f->tlsf, c);
     VALIDATE(&f->tlsf);

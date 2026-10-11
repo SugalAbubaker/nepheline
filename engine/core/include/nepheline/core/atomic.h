@@ -299,7 +299,7 @@ NPH_INLINE bool nph_atomic_compare_exchange_ptr(NphAtomicPtr *a, void **expected
 // GCC / Clang: the __atomic builtins take the order directly.
 // ---------------------------------------------------------------------------
 
-NPH_INLINE int nph_atomic_order_(NphMemoryOrder order)
+NPH_INLINE int nph_atomic_builtin_order(NphMemoryOrder order)
 {
     switch (order) {
     case NPH_MEMORY_ORDER_RELAXED:
@@ -318,7 +318,7 @@ NPH_INLINE int nph_atomic_order_(NphMemoryOrder order)
 
 // A failure order may not be release or acq_rel, and may not be stronger
 // than the success order.
-NPH_INLINE int nph_atomic_failure_order_(NphMemoryOrder order)
+NPH_INLINE int nph_atomic_builtin_failure_order(NphMemoryOrder order)
 {
     switch (order) {
     case NPH_MEMORY_ORDER_RELAXED:
@@ -335,110 +335,114 @@ NPH_INLINE int nph_atomic_failure_order_(NphMemoryOrder order)
 
 NPH_INLINE void nph_atomic_thread_fence(NphMemoryOrder order)
 {
-    __atomic_thread_fence(nph_atomic_order_(order));
+    __atomic_thread_fence(nph_atomic_builtin_order(order));
 }
 
 NPH_INLINE void nph_atomic_signal_fence(NphMemoryOrder order)
 {
-    __atomic_signal_fence(nph_atomic_order_(order));
+    __atomic_signal_fence(nph_atomic_builtin_order(order));
 }
 
 // --- u32 ---
 
 NPH_INLINE u32 nph_atomic_load_u32(const NphAtomicU32 *a, NphMemoryOrder order)
 {
-    return __atomic_load_n(&a->value, nph_atomic_order_(order));
+    return __atomic_load_n(&a->value, nph_atomic_builtin_order(order));
 }
 NPH_INLINE void nph_atomic_store_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    __atomic_store_n(&a->value, v, nph_atomic_order_(order));
+    __atomic_store_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u32 nph_atomic_exchange_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    return __atomic_exchange_n(&a->value, v, nph_atomic_order_(order));
+    return __atomic_exchange_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u32 nph_atomic_fetch_add_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_add(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_add(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u32 nph_atomic_fetch_sub_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_sub(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_sub(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u32 nph_atomic_fetch_or_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_or(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_or(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u32 nph_atomic_fetch_and_u32(NphAtomicU32 *a, u32 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_and(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_and(&a->value, v, nph_atomic_builtin_order(order));
 }
+// The builtin writes the observed value through `expected`; clang-tidy
+// cannot see that and suggests const.
+// NOLINTNEXTLINE(readability-non-const-parameter)
 NPH_INLINE bool nph_atomic_compare_exchange_u32(NphAtomicU32 *a, u32 *expected, u32 desired,
                                                 NphMemoryOrder success, NphMemoryOrder failure)
 {
     return __atomic_compare_exchange_n(&a->value, expected, desired, false,
-                                       nph_atomic_order_(success),
-                                       nph_atomic_failure_order_(failure));
+                                       nph_atomic_builtin_order(success),
+                                       nph_atomic_builtin_failure_order(failure));
 }
 
 // --- u64 ---
 
 NPH_INLINE u64 nph_atomic_load_u64(const NphAtomicU64 *a, NphMemoryOrder order)
 {
-    return __atomic_load_n(&a->value, nph_atomic_order_(order));
+    return __atomic_load_n(&a->value, nph_atomic_builtin_order(order));
 }
 NPH_INLINE void nph_atomic_store_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    __atomic_store_n(&a->value, v, nph_atomic_order_(order));
+    __atomic_store_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u64 nph_atomic_exchange_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    return __atomic_exchange_n(&a->value, v, nph_atomic_order_(order));
+    return __atomic_exchange_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u64 nph_atomic_fetch_add_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_add(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_add(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u64 nph_atomic_fetch_sub_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_sub(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_sub(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u64 nph_atomic_fetch_or_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_or(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_or(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE u64 nph_atomic_fetch_and_u64(NphAtomicU64 *a, u64 v, NphMemoryOrder order)
 {
-    return __atomic_fetch_and(&a->value, v, nph_atomic_order_(order));
+    return __atomic_fetch_and(&a->value, v, nph_atomic_builtin_order(order));
 }
+// NOLINTNEXTLINE(readability-non-const-parameter)
 NPH_INLINE bool nph_atomic_compare_exchange_u64(NphAtomicU64 *a, u64 *expected, u64 desired,
                                                 NphMemoryOrder success, NphMemoryOrder failure)
 {
     return __atomic_compare_exchange_n(&a->value, expected, desired, false,
-                                       nph_atomic_order_(success),
-                                       nph_atomic_failure_order_(failure));
+                                       nph_atomic_builtin_order(success),
+                                       nph_atomic_builtin_failure_order(failure));
 }
 
 // --- pointers ---
 
 NPH_INLINE void *nph_atomic_load_ptr(const NphAtomicPtr *a, NphMemoryOrder order)
 {
-    return __atomic_load_n(&a->value, nph_atomic_order_(order));
+    return __atomic_load_n(&a->value, nph_atomic_builtin_order(order));
 }
 NPH_INLINE void nph_atomic_store_ptr(NphAtomicPtr *a, void *v, NphMemoryOrder order)
 {
-    __atomic_store_n(&a->value, v, nph_atomic_order_(order));
+    __atomic_store_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE void *nph_atomic_exchange_ptr(NphAtomicPtr *a, void *v, NphMemoryOrder order)
 {
-    return __atomic_exchange_n(&a->value, v, nph_atomic_order_(order));
+    return __atomic_exchange_n(&a->value, v, nph_atomic_builtin_order(order));
 }
 NPH_INLINE bool nph_atomic_compare_exchange_ptr(NphAtomicPtr *a, void **expected, void *desired,
                                                 NphMemoryOrder success, NphMemoryOrder failure)
 {
     return __atomic_compare_exchange_n(&a->value, expected, desired, false,
-                                       nph_atomic_order_(success),
-                                       nph_atomic_failure_order_(failure));
+                                       nph_atomic_builtin_order(success),
+                                       nph_atomic_builtin_failure_order(failure));
 }
 
 #endif
