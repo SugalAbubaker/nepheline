@@ -19,6 +19,7 @@
 #include <nepheline/core/sparse_set.h>
 
 #include <nbench/nbench.h>
+
 #include <stdlib.h>
 #include <string.h>
 

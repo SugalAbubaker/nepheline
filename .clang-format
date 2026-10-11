@@ -53,7 +53,7 @@ SortIncludes: CaseSensitive
 IncludeCategories:
   - Regex: '^<nepheline/'
     Priority: 1
-  - Regex: '^<ntest/'
+  - Regex: '^<(ntest|nbench)/'
     Priority: 2
   - Regex: '^"'
     Priority: 3

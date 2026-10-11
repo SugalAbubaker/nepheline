@@ -114,11 +114,17 @@ void nph_str_free(NphAllocator *alloc, char *copy, u64 len);
 
 NPH_INLINE char nph_ascii_to_lower(char c)
 {
-    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c + ('a' - 'A')); // NOLINT(bugprone-narrowing-conversions)
+    }
+    return c;
 }
 NPH_INLINE char nph_ascii_to_upper(char c)
 {
-    return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+    if (c >= 'a' && c <= 'z') {
+        return (char)(c - ('a' - 'A')); // NOLINT(bugprone-narrowing-conversions)
+    }
+    return c;
 }
 NPH_INLINE bool nph_ascii_is_space(char c)
 {
@@ -146,7 +152,7 @@ bool nph_utf8_decode(NphStr s, u64 *pos, u32 *out_codepoint);
 
 // Encodes `codepoint` into `out` (at least 4 bytes); returns the length
 // (1-4), or 0 for an invalid code point (surrogates, > 0x10FFFF).
-u32 nph_utf8_encode(u32 codepoint, char *out);
+u32 nph_utf8_encode(u32 cp, char *out);
 
 // True if every byte sequence is well-formed UTF-8.
 bool nph_utf8_is_valid(NphStr s);

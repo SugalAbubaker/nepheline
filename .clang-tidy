@@ -60,6 +60,9 @@ CheckOptions:
   readability-identifier-naming.MemberCase: lower_case
   readability-identifier-naming.GlobalVariablePrefix: g_
   readability-identifier-naming.GlobalVariableCase: lower_case
+  # Exempt from the g_ rule: log category objects and other constant-like
+  # globals (UPPER_CASE), thread-locals (t_), and cvar objects (cv_).
+  readability-identifier-naming.GlobalVariableIgnoredRegexp: '^([A-Z][A-Z0-9_]*|t_[a-z0-9_]+|cv_[a-z0-9_]+)$'
   readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
   # Feature-test macros (_POSIX_C_SOURCE) and implementation-detail macros (NAME_)
   readability-identifier-naming.MacroDefinitionIgnoredRegexp: '^_|_$'
