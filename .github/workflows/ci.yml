@@ -139,21 +139,31 @@ jobs:
       - name: Report
         shell: bash
         run: |
-          cd build/linux-clang-tidy
-          llvm-profdata-${{ env.LLVM_VERSION }} merge -sparse profiles/*.profraw -o coverage.profdata
+          build=build/linux-clang-tidy
+          llvm-profdata-${{ env.LLVM_VERSION }} merge -sparse "$build"/profiles/*.profraw \
+            -o "$build/coverage.profdata"
           objects=""
-          for exe in bin/*_tests; do objects="$objects -object $exe"; done
-          # shellcheck disable=SC2086
-          llvm-cov-${{ env.LLVM_VERSION }} report $objects -instr-profile=coverage.profdata \
-            -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/' \
-            | tee coverage-report.txt
-          python3 ../../scripts/coverage_check.py coverage-report.txt
-      - name: Upload report
+          for exe in "$build"/bin/*_tests; do objects="$objects -object $exe"; done
+          mkdir -p "$build/coverage"
+          status=0
+          # One report per engine module: llvm-cov prints paths relative to
+          # the sources it was restricted to, and the check needs the module.
+          for dir in engine/*/; do
+            module=$(basename "$dir")
+            echo "== engine/$module"
+            # shellcheck disable=SC2086
+            llvm-cov-${{ env.LLVM_VERSION }} report $objects -instr-profile="$build/coverage.profdata" \
+              -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/' \
+              "$GITHUB_WORKSPACE/$dir" | tee "$build/coverage/$module.txt"
+            python3 scripts/coverage_check.py --module "$module" "$build/coverage/$module.txt" || status=1
+          done
+          exit $status
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-report
-          path: build/linux-clang-tidy/coverage-report.txt
+          name: coverage-reports
+          path: build/linux-clang-tidy/coverage/
           if-no-files-found: warn
 
   # Single required status check for branch protection; stays stable while the
