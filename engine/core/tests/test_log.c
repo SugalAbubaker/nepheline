@@ -172,7 +172,7 @@ NTEST_F(LogFixture, full_ring_drops_and_reports_the_count)
 NTEST_F(LogFixture, flush_limit)
 {
     for (u32 i = 0; i < 5U; ++i) {
-        NPH_LOG_DEBUG(&LOG_TEST, "d%u", i);
+        NPH_LOG_INFO(&LOG_TEST, "d%u", i);
     }
     NTEST_ASSERT_EQ_UINT(nph_log_flush(2U), 2U);
     NTEST_ASSERT_EQ_UINT(f->capture.count, 2U);
