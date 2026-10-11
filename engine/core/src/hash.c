@@ -36,8 +36,8 @@ static void hash_mul128(u64 *a, u64 *b)
     *a = lo;
     *b = hi;
 #else
-    __extension__ typedef unsigned __int128 hash_u128;
-    const hash_u128 r = (hash_u128)*a * (hash_u128)*b;
+    __extension__ typedef unsigned __int128 HashU128;
+    const HashU128 r = (HashU128)*a * (HashU128)*b;
     *a = (u64)r;
     *b = (u64)(r >> 64U);
 #endif

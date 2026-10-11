@@ -88,7 +88,7 @@ static u64 key_of(u32 i)
 
 static void map_fill(NphHashMap *m, u32 n)
 {
-    for (u32 i = 0; i < n; ++i) {
+    for (u32 i = 0; i < (n); ++i) {
         const u32 v = i;
         if (nph_hashmap_insert_u64(m, key_of(i), &v) != NPH_RESULT_OK) {
             abort();
@@ -99,7 +99,7 @@ static void map_fill(NphHashMap *m, u32 n)
 #define DEFINE_MAP_BENCH(n)                                                                        \
     NBENCH(hashmap_insert_##n)                                                                     \
     {                                                                                              \
-        nbench_set_items_per_iteration(state, n);                                                  \
+        nbench_set_items_per_iteration(state, (n));                                                \
         while (nbench_keep_running(state)) {                                                       \
             nbench_pause_timing(state);                                                            \
             NphHashMap m;                                                                          \
@@ -108,7 +108,7 @@ static void map_fill(NphHashMap *m, u32 n)
                 abort();                                                                           \
             }                                                                                      \
             nbench_resume_timing(state);                                                           \
-            map_fill(&m, n);                                                                       \
+            map_fill(&m, (n));                                                                     \
             nbench_pause_timing(state);                                                            \
             nph_hashmap_free(&m);                                                                  \
             nbench_resume_timing(state);                                                           \
@@ -121,11 +121,11 @@ static void map_fill(NphHashMap *m, u32 n)
         if (nph_hashmap_init(&m, nph_allocator_system(), &desc) != NPH_RESULT_OK) {                \
             abort();                                                                               \
         }                                                                                          \
-        map_fill(&m, n);                                                                           \
-        nbench_set_items_per_iteration(state, n);                                                  \
+        map_fill(&m, (n));                                                                         \
+        nbench_set_items_per_iteration(state, (n));                                                \
         u64 acc = 0U;                                                                              \
         while (nbench_keep_running(state)) {                                                       \
-            for (u32 i = 0; i < n; ++i) {                                                          \
+            for (u32 i = 0; i < (n); ++i) {                                                        \
                 const u32 *v = (const u32 *)nph_hashmap_find_u64(&m, key_of(i));                   \
                 acc += v != NULL ? *v : 0U;                                                        \
             }                                                                                      \
@@ -140,11 +140,11 @@ static void map_fill(NphHashMap *m, u32 n)
         if (nph_hashmap_init(&m, nph_allocator_system(), &desc) != NPH_RESULT_OK) {                \
             abort();                                                                               \
         }                                                                                          \
-        map_fill(&m, n);                                                                           \
-        nbench_set_items_per_iteration(state, n);                                                  \
+        map_fill(&m, (n));                                                                         \
+        nbench_set_items_per_iteration(state, (n));                                                \
         u64 acc = 0U;                                                                              \
         while (nbench_keep_running(state)) {                                                       \
-            for (u32 i = 0; i < n; ++i) {                                                          \
+            for (u32 i = 0; i < (n); ++i) {                                                        \
                 acc += nph_hashmap_find_u64(&m, key_of(i) + 1U) != NULL ? 1U : 0U;                 \
             }                                                                                      \
         }                                                                                          \
@@ -153,7 +153,7 @@ static void map_fill(NphHashMap *m, u32 n)
     }                                                                                              \
     NBENCH(hashmap_remove_##n)                                                                     \
     {                                                                                              \
-        nbench_set_items_per_iteration(state, n);                                                  \
+        nbench_set_items_per_iteration(state, (n));                                                \
         NphHashMap m;                                                                              \
         const NphHashMapDesc desc = nph_hashmap_desc_u64(sizeof(u32));                             \
         if (nph_hashmap_init(&m, nph_allocator_system(), &desc) != NPH_RESULT_OK) {                \
@@ -162,9 +162,9 @@ static void map_fill(NphHashMap *m, u32 n)
         while (nbench_keep_running(state)) {                                                       \
             nbench_pause_timing(state);                                                            \
             nph_hashmap_clear(&m);                                                                 \
-            map_fill(&m, n);                                                                       \
+            map_fill(&m, (n));                                                                     \
             nbench_resume_timing(state);                                                           \
-            for (u32 i = 0; i < n; ++i) {                                                          \
+            for (u32 i = 0; i < (n); ++i) {                                                        \
                 nph_hashmap_remove_u64(&m, key_of(i));                                             \
             }                                                                                      \
         }                                                                                          \
@@ -197,7 +197,7 @@ NBENCH(array_push_u32)
 
 NBENCH(sparse_set_insert_get)
 {
-    nbench_set_items_per_iteration(state, 4096U * 2U);
+    nbench_set_items_per_iteration(state, (u64)4096U * 2U);
     NphSparseSet s;
     nph_sparse_set_init(&s, nph_allocator_system(), sizeof(u32));
     u64 acc = 0U;

@@ -94,10 +94,18 @@ bool nph_bitset_equals(const NphBitset *a, const NphBitset *b);
 void nph_bitset_copy(NphBitset *dst, const NphBitset *src);
 
 // Iterates set bits: for (u32 i = first_set; i != NPH_U32_MAX; i = next_set(i + 1)).
+// (`index` is a declarator and cannot be parenthesised.)
+// NOLINTBEGIN(bugprone-macro-parentheses)
 #define NPH_BITSET_FOREACH_SET(index, b)                                                           \
     for (u32 index = nph_bitset_find_first_set(b); index != NPH_U32_MAX;                           \
-         index = (index + 1U < (b)->bit_count) ? nph_bitset_find_next_set((b), index + 1U)         \
-                                               : NPH_U32_MAX)
+         index = nph_bitset_next_set_after((b), index))
+// NOLINTEND(bugprone-macro-parentheses)
+
+// The set bit after `index`, or NPH_U32_MAX; safe at the last bit.
+NPH_INLINE u32 nph_bitset_next_set_after(const NphBitset *b, u32 index)
+{
+    return index + 1U < b->bit_count ? nph_bitset_find_next_set(b, index + 1U) : NPH_U32_MAX;
+}
 
 #ifdef __cplusplus
 }
