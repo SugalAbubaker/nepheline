@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+# clang-tidy configuration for Nepheline (C17). Runs in CI on the
+# linux-clang-tidy preset (scripts/tidy.py); every warning is an error.
+#
+# Disabled checks, and why:
+#   bugprone-easily-swappable-parameters          C APIs pass many adjacent same-typed args by design
+#   cert-dcl37-c, cert-dcl51-cpp                  aliases of bugprone-reserved-identifier (configured below)
+#   cert-err33-c                                  ignoring printf/fflush return values is intentional
+#   clang-analyzer-security.insecureAPI.
+#     DeprecatedOrUnsafeBufferHandling            demands Annex K *_s functions, which glibc does not ship
+#   misc-include-cleaner                          platform headers are included transitively on purpose
+#   misc-no-recursion                             recursion is fine where bounded (trees, parsers)
+#   readability-function-cognitive-complexity     hot loops and parsers are long by nature; reviewed by humans
+#   readability-identifier-length                 i, n, x, y, z, a, b are idiomatic in math and tests
+#   readability-implicit-bool-conversion          in C, comparisons and && yield int; the check fights the language
+#   readability-magic-numbers                     bit layouts, test vectors, and tuning constants are literal by design
+#   readability-else-after-return                 early-return style is not mandated
+#   readability-avoid-nested-conditional-operator a?b:c?d:e is accepted when formatted on separate lines
+#   readability-math-missing-parentheses          a*b + c is unambiguous to every C programmer
+---
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-magic-numbers,
+  -readability-else-after-return,
+  -readability-avoid-nested-conditional-operator,
+  -readability-math-missing-parentheses
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(engine|tools|editor|samples|tests|benchmarks)/.*\.h$'
+FormatStyle: file
+
+CheckOptions:
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.GlobalVariablePrefix: g_
+  readability-identifier-naming.GlobalVariableCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  # Feature-test macros (_POSIX_C_SOURCE) and implementation-detail macros (NAME_)
+  readability-identifier-naming.MacroDefinitionIgnoredRegexp: '^_|_$'
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.UnionCase: CamelCase
+  readability-braces-around-statements.ShortStatementLines: 0
+  bugprone-reserved-identifier.AllowedIdentifiers: '_POSIX_C_SOURCE;_CRT_SECURE_NO_WARNINGS'

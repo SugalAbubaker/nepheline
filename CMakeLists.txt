@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+cmake_minimum_required(VERSION 3.25)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# The version number is owned by the C header so that code, CMake, and the
+# packaged artifacts can never disagree. CMake reads it rather than generating it.
+include(NphVersion)
+nph_read_version_header("${CMAKE_CURRENT_SOURCE_DIR}/engine/core/include/nepheline/core/version.h"
+                        NPH_VERSION)
+
+# Replace CMake's default configuration set with ours before any language is
+# enabled (see docs/build.md and docs/adr/0003-build-configurations.md).
+include(NphConfigurations)
+nph_declare_configurations()
+
+project(Nepheline
+    VERSION ${NPH_VERSION}
+    DESCRIPTION "A production-grade, GPU-driven 3D game engine in C17 and Vulkan 1.3"
+    HOMEPAGE_URL "https://github.com/SugalAbubaker/nepheline"
+    LANGUAGES C)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset <name>")
+endif()
+
+include(NphOptions)
+nph_apply_configuration_flags()
+
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+# Multi-config generators append /<Config> to these automatically.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+include(NphWarnings)
+include(NphSanitizers)
+include(NphModule)
+
+# nph::options carries every compiler setting shared by all Nepheline code:
+# the C standard, warnings-as-errors, per-configuration defines, sanitizers.
+# Every engine module, tool, test, and sample links it.
+add_library(nph_options INTERFACE)
+add_library(nph::options ALIAS nph_options)
+target_compile_features(nph_options INTERFACE c_std_17)
+nph_apply_warnings(nph_options)
+nph_apply_configuration_definitions(nph_options)
+nph_apply_sanitizers(nph_options)
+
+if(NPH_BUILD_TESTS)
+    enable_testing()
+    # JUnit reports from ntest (per configuration) and from `ctest --output-junit`.
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results")
+    add_subdirectory(tools/ntest)
+endif()
+
+# Engine modules, in dependency order (CLAUDE.md §4).
+add_subdirectory(engine/core)
+
+# The aggregate target a game or tool links to get the whole engine.
+add_library(nepheline INTERFACE)
+target_link_libraries(nepheline INTERFACE nph::core)
+
+include(NphFormat)
+nph_add_format_targets()
+
+message(STATUS "Nepheline ${PROJECT_VERSION}: compiler=${CMAKE_C_COMPILER_ID} "
+               "frontend=${CMAKE_C_COMPILER_FRONTEND_VARIANT} generator=${CMAKE_GENERATOR} "
+               "asan=${NPH_ASAN} ubsan=${NPH_UBSAN} tsan=${NPH_TSAN} tests=${NPH_BUILD_TESTS}")
