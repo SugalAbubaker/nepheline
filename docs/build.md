@@ -80,6 +80,7 @@ target links.
 | Option | Default | Effect |
 |---|---|---|
 | `NPH_BUILD_TESTS` | `ON` | Build ntest and the unit tests; register them with CTest |
+| `NPH_BUILD_BENCHMARKS` | `ON` | Build nbench and the benchmarks; register a smoke run of each with CTest (label `benchmark`) |
 | `NPH_WARNINGS_AS_ERRORS` | `ON` | `/WX` or `-Werror` |
 | `NPH_ASAN` | `ON` (`OFF` for clang-cl) | AddressSanitizer in Debug |
 | `NPH_UBSAN` | `ON` | UndefinedBehaviorSanitizer in Debug (GCC/Clang) |
@@ -114,9 +115,15 @@ run writes a JUnit report to `build/<preset>/test-results/<Config>/<name>.xml`.
 ```sh
 ctest --preset linux-gcc-debug                      # everything
 ctest --preset linux-gcc-debug -R core              # by CTest name
+ctest --preset linux-gcc-debug -L unit              # unit tests only (skip benchmark smoke runs)
 build/linux-gcc/bin/Debug/core_tests --filter=version.*   # by ntest filter
 build/linux-gcc/bin/Debug/core_tests --help         # runner options
 ```
+
+Benchmarks (`benchmarks/`, [docs/benchmarks.md](benchmarks.md)) build as
+`<name>_bench` executables and run for real with
+`build/<preset>/bin/Profile/core_alloc_bench --json=out.json`; CTest only
+runs them for a few milliseconds each to make sure they still work.
 
 ## Formatting and static analysis
 
@@ -158,6 +165,10 @@ nph_add_test(<module>
   LTO is exercised. JUnit results are uploaded as artifacts.
 - **clang-tidy** on the `linux-clang-tidy` preset with LLVM 19.
 - **CI** aggregates the above; it is the single required status check on `main`.
+
+`.github/workflows/benchmarks.yml` runs every benchmark nightly in the
+Profile configuration on hosted Windows and Linux runners and uploads the
+JSON results as artifacts.
 
 `.github/workflows/gpu-perf.yml` targets the self-hosted RTX 3060 Ti runner
 and is manual-only until Phase 5 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)).

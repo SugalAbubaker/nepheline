@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "executable": "core_alloc_bench.exe",
+  "timestamp": "2026-10-11T21:00:53Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.5,
+  "benchmarks": [
+    {"name": "alloc_free_64_system", "label": "system", "iterations": 17520990, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 35.456, "min_ns_per_op": 35.347, "max_ns_per_op": 35.748},
+    {"name": "alloc_free_64_tlsf", "label": "tlsf", "iterations": 19393014, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 32.810, "min_ns_per_op": 32.763, "max_ns_per_op": 32.929},
+    {"name": "alloc_free_64_pool", "label": "pool", "iterations": 42422062, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 14.472, "min_ns_per_op": 14.467, "max_ns_per_op": 14.494},
+    {"name": "alloc_free_64_debug_tlsf", "label": "debug_tlsf", "iterations": 14727297, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 42.268, "min_ns_per_op": 42.188, "max_ns_per_op": 42.432},
+    {"name": "batch_system", "label": "system", "iterations": 1747, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 33.631, "min_ns_per_op": 33.226, "max_ns_per_op": 35.812},
+    {"name": "batch_tlsf", "label": "tlsf", "iterations": 4683, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 15.906, "min_ns_per_op": 15.721, "max_ns_per_op": 16.868},
+    {"name": "batch_debug_tlsf", "label": "debug_tlsf", "iterations": 2534, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 30.252, "min_ns_per_op": 30.046, "max_ns_per_op": 30.509},
+    {"name": "random_mixed_system", "label": "system", "iterations": 2809, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 27.185, "min_ns_per_op": 27.114, "max_ns_per_op": 27.286},
+    {"name": "random_mixed_tlsf", "label": "tlsf", "iterations": 3673, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 20.739, "min_ns_per_op": 20.698, "max_ns_per_op": 20.969},
+    {"name": "random_mixed_debug_tlsf", "label": "debug_tlsf", "iterations": 2063, "items_per_iteration": 8192, "repeats": 7, "ns_per_op": 37.156, "min_ns_per_op": 36.872, "max_ns_per_op": 37.502},
+    {"name": "realloc_grow_system", "label": "system", "iterations": 4822, "items_per_iteration": 17, "repeats": 7, "ns_per_op": 6973.572, "min_ns_per_op": 6805.289, "max_ns_per_op": 7241.169},
+    {"name": "realloc_grow_tlsf", "label": "tlsf", "iterations": 2000000, "items_per_iteration": 17, "repeats": 7, "ns_per_op": 21.649, "min_ns_per_op": 21.529, "max_ns_per_op": 21.788},
+    {"name": "bump_64_arena", "label": "arena", "iterations": 245946, "items_per_iteration": 1024, "repeats": 7, "ns_per_op": 2.487, "min_ns_per_op": 2.483, "max_ns_per_op": 2.513},
+    {"name": "bump_64_stack", "label": "stack", "iterations": 200880, "items_per_iteration": 1024, "repeats": 7, "ns_per_op": 3.015, "min_ns_per_op": 3.001, "max_ns_per_op": 3.055},
+    {"name": "pool_direct_alloc_free_64", "label": "pool (direct API)", "iterations": 121030209, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 4.969, "min_ns_per_op": 4.958, "max_ns_per_op": 5.011},
+    {"name": "tlsf_direct_alloc_free_64", "label": "tlsf (direct API)", "iterations": 23180343, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 28.679, "min_ns_per_op": 28.282, "max_ns_per_op": 29.152},
+    {"name": "malloc_direct_alloc_free_64", "label": "malloc (direct API)", "iterations": 21229259, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 29.567, "min_ns_per_op": 29.511, "max_ns_per_op": 30.890}
+  ]
+}
