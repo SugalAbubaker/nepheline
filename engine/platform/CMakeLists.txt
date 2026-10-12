@@ -6,12 +6,14 @@ set(platform_sources
     src/async_io.c
     src/cpu.c
     src/file_common.c
+    src/input.c
     src/locked_alloc.c
     src/log_thread.c
     src/path.c
     src/platform_common.c
     src/thread_common.c
     src/time_common.c
+    src/window_glfw.c
 )
 if(WIN32)
     list(APPEND platform_sources
@@ -62,6 +64,8 @@ nph_add_module(platform
 if(TARGET nph_platform_fiber_asm)
     target_link_libraries(nph_platform PRIVATE nph_platform_fiber_asm)
 endif()
+# GLFW is private: only window_glfw.c includes its header (CLAUDE.md §1.8).
+target_link_libraries(nph_platform PRIVATE glfw)
 
 if(WIN32)
     # fopen and friends are portable C; the "secure" CRT variants are not.
@@ -85,6 +89,7 @@ nph_add_test(platform
         tests/test_dylib.c
         tests/test_fiber.c
         tests/test_file.c
+        tests/test_input.c
         tests/test_locked_alloc.c
         tests/test_log_thread.c
         tests/test_path.c
@@ -94,6 +99,7 @@ nph_add_test(platform
         tests/test_thread.c
         tests/test_time.c
         tests/test_vmem.c
+        tests/test_window.c
     DEPS
         nph::platform
 )

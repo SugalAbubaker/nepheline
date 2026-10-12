@@ -66,6 +66,9 @@ if(NPH_BUILD_TESTS)
     add_subdirectory(tools/ntest)
 endif()
 
+# Vendored libraries (pinned submodules), before the modules that wrap them.
+add_subdirectory(third_party)
+
 # Engine modules, in dependency order (CLAUDE.md §4).
 add_subdirectory(engine/core)
 add_subdirectory(engine/math)
