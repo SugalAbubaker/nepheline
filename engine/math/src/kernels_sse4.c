@@ -6,7 +6,7 @@
 #include "kernels_impl.h"
 #include "kernels_tables.h"
 
-const NphMathKernels nph_math_kernels_sse4 = {
+const NphMathKernels g_nph_math_kernels_sse4 = {
     NPH_SIMD_LEVEL_SSE4,
     "sse4",
     NPH_KERNEL(frustum_cull_aabbs),

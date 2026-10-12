@@ -26,7 +26,15 @@ static void cpuid(u32 leaf, u32 subleaf, u32 out[4])
     out[2] = (u32)regs[2];
     out[3] = (u32)regs[3];
 #else
-    __cpuid_count(leaf, subleaf, out[0], out[1], out[2], out[3]);
+    u32 a;
+    u32 b;
+    u32 c;
+    u32 d;
+    __cpuid_count(leaf, subleaf, a, b, c, d);
+    out[0] = a;
+    out[1] = b;
+    out[2] = c;
+    out[3] = d;
 #endif
 }
 
@@ -155,7 +163,7 @@ static void scalar_transform_vectors(const NphAffine *m, const NphVec3 *in, NphV
     }
 }
 
-const NphMathKernels nph_math_kernels_scalar = {
+const NphMathKernels g_nph_math_kernels_scalar = {
     NPH_SIMD_LEVEL_SCALAR,     "scalar",
     scalar_frustum_cull_aabbs, scalar_frustum_cull_spheres,
     scalar_transform_points,   scalar_transform_vectors,
@@ -166,12 +174,12 @@ const NphMathKernels *nph_math_kernels(NphSimdLevel level)
 {
     switch (level) {
     case NPH_SIMD_LEVEL_SSE4:
-        return &nph_math_kernels_sse4;
+        return &g_nph_math_kernels_sse4;
     case NPH_SIMD_LEVEL_AVX2:
-        return &nph_math_kernels_avx2;
+        return &g_nph_math_kernels_avx2;
     case NPH_SIMD_LEVEL_SCALAR:
     case NPH_SIMD_LEVEL_COUNT:
         break;
     }
-    return &nph_math_kernels_scalar;
+    return &g_nph_math_kernels_scalar;
 }

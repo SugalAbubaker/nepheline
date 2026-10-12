@@ -24,8 +24,8 @@ extern "C" {
 
 typedef enum NphSimdLevel {
     NPH_SIMD_LEVEL_SCALAR = 0, // reference implementation, no SIMD
-    NPH_SIMD_LEVEL_SSE4 = 1,   // the engine baseline (CLAUDE.md §3)
-    NPH_SIMD_LEVEL_AVX2 = 2,   // AVX2 + FMA + F16C, OS support verified
+    NPH_SIMD_LEVEL_SSE4,       // the engine baseline (CLAUDE.md §3)
+    NPH_SIMD_LEVEL_AVX2,       // AVX2 + FMA + F16C, OS support verified
     NPH_SIMD_LEVEL_COUNT
 } NphSimdLevel;
 
