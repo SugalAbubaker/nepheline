@@ -120,7 +120,11 @@ engine must not.
    limit added, deadlocked: every worker sat at the limit waiting on
    children that only a worker with stack room could run. A byte reserve
    remains as a backstop (a quarter of the stack, at least 12 KiB): a
-   wait that reaches it runs nothing and logs an error once. A wait with
+   wait that reaches it runs nothing, asserts in development builds, and
+   logs an error once in shipping (the Linux sanitizer builds reached it
+   with 64 KiB stacks at eight levels of nesting, where MSVC's did not:
+   the bound is in levels, and the bytes per level are the toolchain's).
+   A wait with
    nothing to run does not poll: it registers on its counter with its
    worker's own semaphore, like an external waiter, so the counter wakes
    it the moment it is met, and wakes by itself every 500 µs to withdraw

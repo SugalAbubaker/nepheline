@@ -270,13 +270,15 @@ NTEST(jobs, fork_join_tree_waits_on_fibers)
 
 // With far fewer fibers than parked waits, the waits that find no fiber
 // run their subtrees on their own stacks (nesting at most as deep as the
-// tree, so the default stack suffices) and the result is still right.
+// tree) and the result is still right. The nesting bound is in levels,
+// not bytes: the sanitizers' fat frames need the bigger stack here.
 NTEST(jobs, fork_join_tree_with_too_few_fibers_falls_back_inline)
 {
     NphJobSystemDesc desc;
     memset(&desc, 0, sizeof desc);
     desc.worker_count = test_jobs_worker_count(4U);
     desc.fiber_count = desc.worker_count + 2U;
+    desc.fiber_stack_size = NPH_KIB(256);
     NphJobSystem *js = test_jobs_create_desc(&desc);
     Tree t;
     TreeNode root;

@@ -210,8 +210,11 @@ buys two guarantees:
 - **Bounded stack.** Every nested wait is strictly deeper than the one
   below it, so a fiber holds at most one job per level of the spawn
   tree: the same stack a serial run of the same code would need. A byte
-  reserve (a quarter of the stack, at least 12 KiB) stays as a backstop
-  and logs an error once if ever reached.
+  reserve (a quarter of the stack, at least 12 KiB) stays as a backstop:
+  reaching it asserts in development builds and logs an error once in
+  shipping, where the wait sleeps instead of nesting further. Sanitizer
+  builds have much larger frames; tests that nest deeply under exhaustion
+  use 256 KiB fiber stacks.
 - **Liveness.** Take the deepest job in progress anywhere. If it has
   outstanding children they are deeper and queued, so it runs them; if
   not, it is computing, parked on something outside the system (an I/O

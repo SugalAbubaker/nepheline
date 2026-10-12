@@ -130,6 +130,7 @@ NTEST(jobs_stress, wide_fork_join_exceeds_the_fiber_pool)
     NphJobSystemDesc desc;
     memset(&desc, 0, sizeof desc);
     desc.worker_count = test_jobs_worker_count(16U);
+    desc.fiber_stack_size = NPH_KIB(256); // nested waits under the sanitizers' fat frames
     NphJobSystem *js = test_jobs_create_desc(&desc);
     Fan f;
     memset(&f, 0, sizeof f);
@@ -227,7 +228,11 @@ static void mix_job(void *user)
 
 NTEST(jobs_stress, random_spawn_wait_signal_mix)
 {
-    NphJobSystem *js = test_jobs_create(test_jobs_worker_count(16U));
+    NphJobSystemDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.worker_count = test_jobs_worker_count(16U);
+    desc.fiber_stack_size = NPH_KIB(256); // nested waits under the sanitizers' fat frames
+    NphJobSystem *js = test_jobs_create_desc(&desc);
     Mix m;
     memset(&m, 0, sizeof m);
     m.js = js;
