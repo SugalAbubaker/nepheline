@@ -12,7 +12,7 @@
 #include "kernels_impl.h"
 #include "kernels_tables.h"
 
-const NphMathKernels nph_math_kernels_avx2 = {
+const NphMathKernels g_nph_math_kernels_avx2 = {
     NPH_SIMD_LEVEL_AVX2,
     "avx2",
     NPH_KERNEL(frustum_cull_aabbs),

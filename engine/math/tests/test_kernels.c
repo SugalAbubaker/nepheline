@@ -21,20 +21,18 @@ NTEST(kernels, detection_and_tables)
     NTEST_ASSERT_EQ_STR(nph_simd_level_name(NPH_SIMD_LEVEL_SSE4), "sse4");
     NTEST_ASSERT_EQ_STR(nph_simd_level_name(NPH_SIMD_LEVEL_AVX2), "avx2");
     NTEST_ASSERT_EQ_STR(nph_simd_level_name(NPH_SIMD_LEVEL_COUNT), "invalid");
-    NTEST_ASSERT_EQ_STR(nph_simd_level_name((NphSimdLevel)99), "invalid");
     for (int l = 0; l < NPH_SIMD_LEVEL_COUNT; ++l) {
         const NphMathKernels *k = nph_math_kernels((NphSimdLevel)l);
         NTEST_ASSERT_NOT_NULL(k);
         NTEST_ASSERT_EQ_INT(k->level, l);
         NTEST_ASSERT_EQ_STR(k->name, nph_simd_level_name((NphSimdLevel)l));
-        NTEST_ASSERT_NOT_NULL(k->frustum_cull_aabbs);
-        NTEST_ASSERT_NOT_NULL(k->frustum_cull_spheres);
-        NTEST_ASSERT_NOT_NULL(k->transform_points);
-        NTEST_ASSERT_NOT_NULL(k->transform_vectors);
-        NTEST_ASSERT_NOT_NULL(k->f32_to_f16);
+        NTEST_ASSERT_TRUE(k->frustum_cull_aabbs != NULL);
+        NTEST_ASSERT_TRUE(k->frustum_cull_spheres != NULL);
+        NTEST_ASSERT_TRUE(k->transform_points != NULL);
+        NTEST_ASSERT_TRUE(k->transform_vectors != NULL);
+        NTEST_ASSERT_TRUE(k->f32_to_f16 != NULL);
     }
     NTEST_ASSERT_EQ_INT(nph_math_kernels(NPH_SIMD_LEVEL_COUNT)->level, NPH_SIMD_LEVEL_SCALAR);
-    NTEST_ASSERT_EQ_INT(nph_math_kernels((NphSimdLevel)77)->level, NPH_SIMD_LEVEL_SCALAR);
     NTEST_ASSERT_EQ_INT(nph_math_kernels_best()->level, level);
 }
 

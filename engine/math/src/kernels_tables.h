@@ -6,6 +6,6 @@
 
 #include <nepheline/math/kernels.h>
 
-extern const NphMathKernels nph_math_kernels_scalar;
-extern const NphMathKernels nph_math_kernels_sse4;
-extern const NphMathKernels nph_math_kernels_avx2;
+extern const NphMathKernels g_nph_math_kernels_scalar;
+extern const NphMathKernels g_nph_math_kernels_sse4;
+extern const NphMathKernels g_nph_math_kernels_avx2;
