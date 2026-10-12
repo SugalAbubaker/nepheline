@@ -19,7 +19,7 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 |---|---|---|
 | 0 | Foundation: repo, CMake skeleton, presets, warnings, sanitizers, ntest, CI, ADRs | **done** |
 | 1 | Core: types, asserts, logging, allocators, containers, strings, hashing, handles, cvars, serialization | **done** |
-| 2 | Math: scalar + SIMD types, geometry, random | **in progress** |
+| 2 | Math: scalar + SIMD types, wide SoA kernels, geometry, packing, random | **done** |
 | 3–15 | Platform → Jobs → GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
@@ -53,7 +53,7 @@ cmake/          build helpers: configurations, warnings, sanitizers, module/test
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
 benchmarks/     nbench harness, benchmarks per module, recorded results, budgets
-samples/        one small executable per feature (core_hello)
+samples/        one small executable per feature (core_hello, math_demo)
 tests/fuzz/     libFuzzer targets and seed corpora for every parser
 scripts/        dev_env.ps1, format.py, tidy.py
 docs/           design docs per subsystem; docs/adr/ holds decision records

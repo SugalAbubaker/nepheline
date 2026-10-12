@@ -8,3 +8,4 @@
 add_subdirectory(nbench)
 
 add_subdirectory(core)
+add_subdirectory(math)

@@ -71,3 +71,32 @@ sb_appendf_int                 230
 sb_append_u64                  35
 str_find_64B                   90
 str_id_16B                     16
+
+# math_bench (docs/math.md). The avx2 entries fall back to the sse4 kernels
+# on a runner without AVX2 and are budgeted for that fallback.
+mat4_mul_scalar                90
+mat4_mul_simd                  16
+mat4_inverse_scalar            80
+mat4_inverse_simd              56
+quat_mul_scalar                15
+quat_mul_simd                  16
+affine_point_scalar            15
+affine_point_simd              15
+transform_points_scalar        6.5
+transform_points_sse4          2.5
+transform_points_avx2          2.5
+cull_aabbs_scalar              35
+cull_aabbs_sse4                10
+cull_aabbs_avx2                10
+cull_spheres_scalar            25
+cull_spheres_sse4              4.5
+cull_spheres_avx2              4.5
+f32_to_f16_scalar              14
+f32_to_f16_sse4                14
+f32_to_f16_avx2                14
+pcg32_next_u32                 6
+pcg32_bounded                  11
+halton_2d                      72
+r2                             15
+oct_encode_snorm16             150
+blue_noise_32x32               4000000

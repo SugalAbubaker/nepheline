@@ -6,10 +6,10 @@ The decisions that shape every header are in
 [ADR-0008](adr/0008-math-conventions.md); this document describes what the
 module contains and how it is tested. It grows with the module.
 
-Status: **Phase 2 in progress.** Scalar layer (`scalar.h`, `vec.h`,
+Status: **complete for Phase 2.** Scalar layer (`scalar.h`, `vec.h`,
 `quat.h`, `mat.h`, `affine.h`), geometry (`geometry.h`), packing (`pack.h`),
-and random (`random.h`) complete. SIMD and wide types follow in the last
-pull request of the phase.
+random (`random.h`), the SIMD register layer (`simd.h`), wide SoA types
+(`wide.h`), and the ISA-dispatched batch kernels (`kernels.h`).
 
 ## Conventions in one paragraph
 
@@ -190,6 +190,116 @@ seed gives the same stream on every platform (§2 determinism).
   early ranks are spaced near the ideal `sqrt(N/k)` where white noise is
   not.
 
+## SIMD register layer (`simd.h`)
+
+`NphF32x4` is one SSE register. Following DirectXMath, the one register type
+serves vectors, points, quaternions, and planes; the operation name says
+which semantics apply (`nph_f32x4_dot3`, `nph_f32x4_quat_mul`,
+`nph_f32x4_plane_distance`). Values enter and leave through explicit
+`nph_f32x4_load_*` / `nph_f32x4_store_*` functions that take the storage
+types and use unaligned loads, so storage types keep natural alignment.
+
+- Lane construction and access, shuffles (`NPH_F32X4_SHUFFLE`), arithmetic,
+  min/max, sqrt, rounding (`floor`, `ceil`, `round_even`, `trunc`),
+  comparisons producing all-ones masks, `select`, `movemask`, integer
+  conversion.
+- Vector semantics: `dot3`/`dot4` (splatted and scalar), `cross3`,
+  lengths, `normalize3`/`normalize4`; quaternion product, conjugate, and
+  rotation; plane distance.
+- `NphSimdMat4` (four column registers): product, vector and point
+  transforms, transpose, and a general inverse by Zhang's 2×2 block method
+  ("Fast 4x4 Matrix Inverse with SSE SIMD, Explained", 2016), which runs on
+  our column-major matrices without a transpose because inverting the
+  transpose yields the columns of the inverse.
+- `NphSimdAffine`: the storage type keeps rows for the GPU, but in registers
+  the linear part is held as three columns (w = 0) plus the translation
+  column (w = 1). A point transform is then three multiply-adds with no
+  horizontal sums, and load/store transpose once.
+
+Every operation uses correctly rounded instructions and performs the same
+arithmetic in the same order as its scalar twin, so `test_simd.c` asserts
+**bit-identical** results for add, sub, mul, div, min, max, sqrt, rounding,
+dot, cross, normalize, quaternion product and rotation, matrix product and
+transforms, and affine product and transforms. The approximate `rsqrt`/`rcp`
+instructions are exposed only as `*_fast`, differ between CPU vendors, and
+are tested to a tolerance (ADR-0008 §6).
+
+## Wide SoA types (`wide.h`)
+
+`NphVec3x4` and `NphVec3x8` hold four or eight independent vectors with the
+x, y, and z components in separate registers. `NphF32x8` is one AVX
+register in translation units compiled with AVX (`NPH_WIDE_AVX`) and a
+32-byte-aligned pair of SSE registers elsewhere, so the same inline code
+compiles to either ISA. Operations: SoA load/store, AoS↔SoA transposes
+(five shuffles for four `NphVec3`), arithmetic, dot, cross, normalize,
+lerp, select, and affine point/vector transforms that match
+`nph_affine_transform_*` bit for bit. `nph_frustum_cull_aabb_x4/x8` and
+`nph_frustum_cull_sphere_x4/x8` classify four or eight volumes per call
+with the formula `n·c + |n|·e + d ≥ 0` per plane, in a fixed operation
+order, over all six plane slots (an infinite frustum carries an always-true
+sixth plane, so there is no branch on the count).
+
+## Batch kernels and ISA dispatch (`kernels.h`)
+
+`engine/math/src/kernels_impl.h` holds the kernel bodies once; they are
+compiled into `kernels_sse4.c` at the baseline and into `kernels_avx2.c`
+with `/arch:AVX2` or `-mavx2 -mfma -mf16c` (`nph_set_avx2_sources` in
+`cmake/NphArch.cmake`). `kernels.c` holds the scalar reference kernels and
+the dispatch. `nph_simd_detect_level` reads CPUID and XGETBV through
+compiler intrinsics (SSE4.2, AVX, AVX2, FMA, F16C, and the OS's AVX state
+support) and `nph_math_kernels(level)` returns an immutable table:
+
+| Kernel | Does |
+|---|---|
+| `frustum_cull_aabbs` / `frustum_cull_spheres` | one visibility bit per volume into `u64` words |
+| `transform_points` / `transform_vectors` | `NphAffine` applied to an array, in place allowed |
+| `f32_to_f16` | binary16 conversion; F16C on AVX2 |
+
+Kernels take and return plain memory, so no wide value crosses between
+units compiled at different ISA levels, and every level produces
+bit-identical outputs for the same inputs, which `test_kernels.c` checks
+for counts of 0, 1, 7, 8, 9, 63, 64, 65, 100, 1000, and 1031 (full and
+partial groups, padding bits cleared). Boxes are gathered with the AoS
+transposes plus one shuffle per component to separate min from max;
+spheres (16 bytes each) with a 4×4 register transpose. The engine picks the
+table once at start-up; dispatch never happens per element.
+
+## Benchmarks
+
+`benchmarks/math/bench_math.c`, Profile, Ryzen 7 5800X, MSVC 14.44,
+2026-10-12, median of 5
+(`benchmarks/results/math-2026-10-12-win-msvc-profile-ryzen7-5800x.json`).
+Batch entries are per element over 65 536 elements.
+
+| Benchmark | scalar | SSE4 register / kernel | AVX2 kernel |
+|---|---|---|---|
+| `mat4_mul` | 29.4 ns | 5.2 ns (5.6×) | |
+| `mat4_inverse` | 25.8 ns | 18.6 ns (1.4×) | |
+| `quat_mul`, dependent chain | 4.9 ns | 5.2 ns (parity) | |
+| `affine_point`, dependent chain | 4.8 ns | 5.0 ns (parity) | |
+| `transform_points` | 2.03 ns | 0.80 ns (2.5×) | 0.61 ns (3.3×) |
+| `cull_aabbs` | 11.5 ns | 3.3 ns (3.5×) | 2.2 ns (5.1×) |
+| `cull_spheres` | 8.3 ns | 1.37 ns (6.0×) | 1.14 ns (7.3×) |
+| `f32_to_f16` | 4.4 ns | 4.4 ns (scalar) | 0.06 ns (F16C, 76×) |
+| `pcg32_next_u32` | 1.9 ns | | |
+| `pcg32_bounded` | 3.5 ns | | |
+| `halton_2d` | 23 ns | | |
+| `r2` | 4.9 ns | | |
+| `oct_encode_snorm16` | 49 ns | | |
+| `blue_noise_32x32` | 1.34 ms | | |
+
+Reading: the SIMD paths beat scalar wherever there is parallel work (Phase 2
+exit criterion). A single quaternion product or point transform in a
+dependent chain is latency-bound and the scalar code already compiles to
+SSE, so the register form is at parity there; the gain for per-object work
+comes from batching into the SoA kernels. `cull_spheres` gains more than
+`cull_aabbs` because a sphere is exactly one register and transposes
+cheaply. The first benchmark run had the AVX2 cull no faster than SSE4 and
+the register affine slower than scalar; the shuffle gathers and the column
+register layout fixed both, and the bit-exactness tests were unchanged by
+either. `oct_encode_snorm16` is dominated by `roundf` and the normalise; the
+cooker will batch it.
+
 ## Testing
 
 `engine/math/tests/` uses `test_math_support.h`: a splitmix64 generator
@@ -197,7 +307,7 @@ seed gives the same stream on every platform (§2 determinism).
 uniform scalars, vectors, unit vectors (Marsaglia), unit quaternions
 (Shoemake), well-conditioned TRS and general matrices, plus assertion macros
 that print both operands. Every property test runs 1 000–2 000 random cases
-from a fixed seed. Tolerances are stated per property: exact (0 ULP) where
+from a fixed seed. 113 tests in all. Tolerances are stated per property: exact (0 ULP) where
 the arithmetic is identical, 1–2 ULP for normalisation, and absolute
 tolerances of 1e-4 to 1e-5 for products of several operations.
 
@@ -215,3 +325,14 @@ trips including reflections; the view matrix sends the eye to the origin
 and the target onto −Z; the projections put the near plane at depth 1, the
 far plane (or infinity) at 0, decrease monotonically, and flip Y; the affine
 type agrees with `NphMat4` on every operation.
+
+SIMD and kernels: `test_simd.c` compares every register operation with its
+scalar twin bit for bit (tolerances only for the fast approximations and
+the differently ordered inverse); `test_wide.c` does the same for the
+eight-lane fallback and both SoA types, including the AoS transposes and
+the wide frustum tests against the scalar kernel; `test_kernels.c` runs the
+SSE4 and (when the CPU has it) AVX2 tables against the scalar table on
+partial and full groups, checks padding bits and in-place transforms, and
+confirms the scalar kernel agrees with `geometry.h` away from plane
+boundaries. GitHub's hosted runners have AVX2, so the AVX2 unit is tested
+in CI.
