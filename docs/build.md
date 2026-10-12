@@ -13,6 +13,8 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | Ninja | bundled with VS | `ninja-build` |
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
 | Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
+| Window system | nothing extra | `libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev` to build GLFW; `xvfb` to run the window tests headless |
+| Submodules | `git submodule update --init --recursive` after cloning (GLFW lives in `third_party/`) | same |
 | Vulkan SDK | 1.3+ (from Phase 5) | 1.3+ (from Phase 5) |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
@@ -35,7 +37,7 @@ ctest --preset win-msvc-debug
 ```sh
 cmake --preset linux-gcc                   # or linux-clang
 cmake --build --preset linux-gcc-debug
-ctest --preset linux-gcc-debug
+ctest --preset linux-gcc-debug             # headless: xvfb-run -a ctest --preset linux-gcc-debug
 ```
 
 Build output lands in `build/<preset>/bin/<Config>/` and `build/<preset>/lib/<Config>/`.
@@ -198,8 +200,9 @@ nph_add_test(<module>
 - **Build + test matrix:** windows-msvc, windows-clang, linux-gcc,
   linux-clang × Debug, Development; Shipping on windows-msvc and linux-gcc so
   LTO is exercised; one windows-msvc Development build with
-  `-DNPH_FIBERS_WIN32=ON` so the fiber fallback keeps passing. JUnit results
-  are uploaded as artifacts.
+  `-DNPH_FIBERS_WIN32=ON` so the fiber fallback keeps passing. Linux tests
+  run under Xvfb so the window tests and the `platform_window` sample open
+  a real window. JUnit results are uploaded as artifacts.
 - **clang-tidy** on the `linux-clang-tidy` preset with LLVM 19.
 - **coverage (llvm-cov)**: an instrumented Debug build with the sanitizers
   off runs the unit tests and checks every engine module against its

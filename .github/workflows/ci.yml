@@ -53,17 +53,19 @@ jobs:
           - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Development, cfg: development }
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Set up the MSVC environment
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/dev_env.ps1 -GitHubEnv
 
-      - name: Install Ninja
+      - name: Install Ninja and the window system development packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
 
       - name: Tool versions
         shell: bash
@@ -83,7 +85,16 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}
 
-      - name: Test
+      # Linux tests run under a virtual X server so the window tests and the
+      # platform_window sample can open a window (CLAUDE.md §12 Phase 3).
+      - name: Test (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: >
+          xvfb-run -a ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
+          --output-junit "${{ github.workspace }}/build/${{ matrix.preset }}/test-results/ctest-${{ matrix.cfg }}.xml"
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
         run: >
           ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
           --output-junit "${{ github.workspace }}/build/${{ matrix.preset }}/test-results/ctest-${{ matrix.cfg }}.xml"
@@ -101,12 +112,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - name: Install LLVM ${{ env.LLVM_VERSION }}
         run: |
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-          sudo apt-get install -y clang-tidy-${{ env.LLVM_VERSION }} ninja-build
+          sudo apt-get install -y clang-tidy-${{ env.LLVM_VERSION }} ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
       - name: Configure (single-config, exports compile_commands.json)
         run: cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
       - name: Run clang-tidy
@@ -121,12 +134,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - name: Install LLVM ${{ env.LLVM_VERSION }}
         run: |
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
       - name: Configure (Debug, instrumented, no sanitizers)
         run: >
           cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
@@ -137,7 +152,7 @@ jobs:
       - name: Run unit tests with profiling
         env:
           LLVM_PROFILE_FILE: ${{ github.workspace }}/build/linux-clang-tidy/profiles/%p-%m.profraw
-        run: ctest --test-dir build/linux-clang-tidy -L unit --output-on-failure
+        run: xvfb-run -a ctest --test-dir build/linux-clang-tidy -L unit --output-on-failure
       - name: Report
         shell: bash
         run: |
