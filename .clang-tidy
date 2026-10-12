@@ -22,6 +22,8 @@
 #                                                 such as NPH_ARRAY_PUSH used in a condition
 #   clang-analyzer-optin.performance.Padding      cache-line-separated fields (rings, logger) are padded
 #                                                 on purpose; the suggested reorderings defeat that
+#   misc-confusable-identifiers                   key enumerators (NPH_KEY_I / NPH_KEY_1, O / 0) are
+#                                                 confusable by nature; they name keyboard keys
 ---
 Checks: >
   -*,
@@ -47,7 +49,8 @@ Checks: >
   -readability-avoid-nested-conditional-operator,
   -readability-math-missing-parentheses,
   -bugprone-assignment-in-if-condition,
-  -clang-analyzer-optin.performance.Padding
+  -clang-analyzer-optin.performance.Padding,
+  -misc-confusable-identifiers
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '(engine|tools|editor|samples|tests|benchmarks)/.*\.h$'

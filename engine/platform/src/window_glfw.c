@@ -20,9 +20,11 @@
 typedef struct NphVkInstanceT *NphVkInstanceHandle;
 typedef struct NphVkAllocationCallbacksT NphVkAllocationCallbacks;
 typedef void *NphVkSurfaceHandle;
+// NOLINTBEGIN(readability-identifier-naming): GLFW's names
 void glfwInitVulkanLoader(NphVulkanGetInstanceProcAddrFn loader);
 int glfwCreateWindowSurface(NphVkInstanceHandle instance, GLFWwindow *window,
                             const NphVkAllocationCallbacks *allocator, NphVkSurfaceHandle *surface);
+// NOLINTEND(readability-identifier-naming)
 
 #define EVENT_QUEUE_CAPACITY 1024U // power of two
 #define DEFAULT_WIDTH        1280U
@@ -265,7 +267,7 @@ static void on_char(GLFWwindow *h, unsigned int codepoint)
 
 static void on_mouse_button(GLFWwindow *h, int button, int action, int mods)
 {
-    if (button < 0 || button >= (int)NPH_MOUSE_BUTTON_COUNT) {
+    if (button < 0 || button >= NPH_MOUSE_BUTTON_COUNT) {
         return;
     }
     NphWindowEvent *e = push_event(window_of(h), NPH_WINDOW_EVENT_MOUSE_BUTTON);
