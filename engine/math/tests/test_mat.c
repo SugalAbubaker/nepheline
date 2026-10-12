@@ -412,11 +412,9 @@ NTEST(mat4, perspective_infinite_reverse_z)
     NTEST_ASSERT_NEAR_F32(w.x, 0.5F, 1e-6F);
     NTEST_ASSERT_NEAR_F32(w.y, -1.0F, 1e-6F);
     // Invalid parameters are asserted.
-    NphMat4 m = nph_mat4_identity();
-    TM_EXPECT_ASSERT(m = nph_mat4_perspective_infinite(NPH_HALF_PI, 1.0F, 0.0F));
-    TM_EXPECT_ASSERT(m = nph_mat4_perspective_infinite(NPH_HALF_PI, 0.0F, near));
-    TM_EXPECT_ASSERT(m = nph_mat4_perspective_infinite(0.0F, 1.0F, near));
-    NPH_UNUSED(m);
+    TM_EXPECT_ASSERT((void)nph_mat4_perspective_infinite(NPH_HALF_PI, 1.0F, 0.0F));
+    TM_EXPECT_ASSERT((void)nph_mat4_perspective_infinite(NPH_HALF_PI, 0.0F, near));
+    TM_EXPECT_ASSERT((void)nph_mat4_perspective_infinite(0.0F, 1.0F, near));
 }
 
 NTEST(mat4, perspective_finite_reverse_z)
@@ -439,9 +437,7 @@ NTEST(mat4, perspective_finite_reverse_z)
     const NphVec3 b = nph_mat4_transform_point_perspective(inf, nph_vec3(1.0F, -2.0F, -7.0F));
     NTEST_ASSERT_NEAR_F32(a.x, b.x, 1e-6F);
     NTEST_ASSERT_NEAR_F32(a.y, b.y, 1e-6F);
-    NphMat4 m = nph_mat4_identity();
-    TM_EXPECT_ASSERT(m = nph_mat4_perspective(1.2F, 1.6F, near, near));
-    NPH_UNUSED(m);
+    TM_EXPECT_ASSERT((void)nph_mat4_perspective(1.2F, 1.6F, near, near));
 }
 
 NTEST(mat4, orthographic_reverse_z)
@@ -455,7 +451,5 @@ NTEST(mat4, orthographic_reverse_z)
     TM_ASSERT_VEC3_NEAR(nph_mat4_transform_point(o, nph_vec3(2.0F, 1.0F, -5.5F)),
                         nph_vec3(0.0F, 0.0F, 0.5F), 1e-6F);
     NTEST_ASSERT_ULP_F32(nph_mat4_mul_vec4(o, nph_vec4(1.0F, 1.0F, 1.0F, 1.0F)).w, 1.0F, 0U);
-    NphMat4 m = nph_mat4_identity();
-    TM_EXPECT_ASSERT(m = nph_mat4_orthographic(1.0F, 1.0F, -1.0F, 3.0F, 0.5F, 10.5F));
-    NPH_UNUSED(m);
+    TM_EXPECT_ASSERT((void)nph_mat4_orthographic(1.0F, 1.0F, -1.0F, 3.0F, 0.5F, 10.5F));
 }
