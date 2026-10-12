@@ -35,3 +35,21 @@ function(nph_apply_arch_flags target)
         target_compile_options(${target} INTERFACE /fp:precise)
     endif()
 endfunction()
+
+# nph_set_avx2_sources(<src>...)
+#
+# Compiles the given sources of the current directory with AVX2, FMA, and
+# F16C enabled. Used for the second copy of the math batch kernels
+# (engine/math/src/kernels_avx2.c), which is selected at run time after
+# CPUID (docs/adr/0008-math-conventions.md 4, 9). Contraction stays off, so
+# the flags widen the registers without changing any rounding.
+function(nph_set_avx2_sources)
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")
+        return()
+    endif()
+    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set_source_files_properties(${ARGN} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(${ARGN} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
+    endif()
+endfunction()

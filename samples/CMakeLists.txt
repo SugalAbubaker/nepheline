@@ -6,3 +6,7 @@ nph_add_sample(core_hello
     SOURCES core_hello/main.c
     DEPS nph::core
     ARGS r.vsync=false sample.entities=3 game.player_name=Ada)
+
+nph_add_sample(math_demo
+    SOURCES math_demo/main.c
+    DEPS nph::math)

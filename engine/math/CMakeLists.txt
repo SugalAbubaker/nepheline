@@ -3,25 +3,33 @@ nph_add_module(math
     SOURCES
         src/affine.c
         src/geometry.c
+        src/kernels.c
+        src/kernels_avx2.c
+        src/kernels_sse4.c
         src/mat.c
         src/pack.c
         src/quat.c
         src/random.c
+        src/simd.c
     PUBLIC_DEPS
         nph::core
 )
+nph_set_avx2_sources(src/kernels_avx2.c)
 
 nph_add_test(math
     SOURCES
         tests/test_affine.c
         tests/test_geometry.c
+        tests/test_kernels.c
         tests/test_mat.c
         tests/test_math_support.h
         tests/test_pack.c
         tests/test_quat.c
         tests/test_random.c
         tests/test_scalar.c
+        tests/test_simd.c
         tests/test_vec.c
+        tests/test_wide.c
     DEPS
         nph::math
 )
