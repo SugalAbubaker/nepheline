@@ -19,6 +19,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#if NPH_COMPILER_MSVC
+#include <intrin.h> // _AddressOfReturnAddress
+#endif
+
 NPH_LOG_CATEGORY_DEFINE(NPH_LOG_JOBS, "jobs", NPH_LOG_LEVEL_INFO);
 
 // Defaults (jobs.h documents them).
@@ -826,10 +830,17 @@ static void execute_io_job(NphJobSystem *js, u32 elem)
 // ---------------------------------------------------------------------------
 
 // Bytes of the running pool fiber's stack below the current frame.
+// The probe is the frame address, never a local's address: with
+// AddressSanitizer's use-after-return detection a local may live in a
+// "fake stack" off the real one, and its address said nothing about the
+// fiber stack (the Linux Debug builds reached the reserve at once).
 static NPH_NO_INLINE u64 stack_remaining(const NphFiber *f)
 {
-    volatile u8 marker = 0U;
-    const uptr here = (uptr)&marker;
+#if NPH_COMPILER_MSVC
+    const uptr here = (uptr)_AddressOfReturnAddress();
+#else
+    const uptr here = (uptr)__builtin_frame_address(0);
+#endif
     const uptr lo = (uptr)f->stack_lo;
     return here > lo ? (u64)(here - lo) : 0U;
 }

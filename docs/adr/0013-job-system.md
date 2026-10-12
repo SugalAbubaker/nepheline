@@ -121,9 +121,10 @@ engine must not.
    children that only a worker with stack room could run. A byte reserve
    remains as a backstop (a quarter of the stack, at least 12 KiB): a
    wait that reaches it runs nothing, asserts in development builds, and
-   logs an error once in shipping (the Linux sanitizer builds reached it
-   with 64 KiB stacks at eight levels of nesting, where MSVC's did not:
-   the bound is in levels, and the bytes per level are the toolchain's).
+   logs an error once in shipping. The probe is the frame address, not a
+   local's address: under AddressSanitizer's use-after-return detection a
+   local may live in a fake stack off the fiber's, and the first probe
+   declared the reserve reached at once on the Linux Debug builds.
    A wait with
    nothing to run does not poll: it registers on its counter with its
    worker's own semaphore, like an external waiter, so the counter wakes

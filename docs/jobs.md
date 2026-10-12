@@ -212,9 +212,10 @@ buys two guarantees:
   tree: the same stack a serial run of the same code would need. A byte
   reserve (a quarter of the stack, at least 12 KiB) stays as a backstop:
   reaching it asserts in development builds and logs an error once in
-  shipping, where the wait sleeps instead of nesting further. Sanitizer
-  builds have much larger frames; tests that nest deeply under exhaustion
-  use 256 KiB fiber stacks.
+  shipping, where the wait sleeps instead of nesting further. The probe
+  reads the frame address rather than a local's address, which under
+  AddressSanitizer's use-after-return detection can point into a fake
+  stack rather than the fiber's.
 - **Liveness.** Take the deepest job in progress anywhere. If it has
   outstanding children they are deeper and queued, so it runs them; if
   not, it is computing, parked on something outside the system (an I/O
