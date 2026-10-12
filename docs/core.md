@@ -36,7 +36,7 @@ back through out-parameters (§5). Values are grouped by what the caller can
 do about them: `OUT_OF_MEMORY`, `INVALID_ARGUMENT`, `NOT_FOUND`,
 `ALREADY_EXISTS`, `FULL`, `EMPTY`, `OVERFLOW`, `UNSUPPORTED`, `CORRUPT`,
 `VERSION_MISMATCH`, `TYPE_MISMATCH`, `PARSE_ERROR`, `END_OF_STREAM`,
-`IO_ERROR`, `UNKNOWN`. `nph_result_string` names them for logs;
+`IO_ERROR`, `ACCESS_DENIED`, `BUSY`, `UNKNOWN`. `nph_result_string` names them for logs;
 `NPH_TRY(expr)` propagates failures. The one exception, raw allocation
 returning NULL, is [ADR-0004](adr/0004-allocator-interface.md).
 
@@ -384,7 +384,10 @@ thread (Phase 3) calls flush periodically.
 - **Flush** takes a single-flusher flag, then repeatedly picks the oldest
   head record across all rings (k-way merge by timestamp) and delivers it
   to every sink whose minimum level allows, bounded by `max_records`.
-  Detached threads' rings are freed once drained.
+  Detached threads' rings are freed once drained; if such a ring still
+  carries a drop count that no later record could report, the flusher
+  emits a synthetic `core` WARN record with the count before releasing it
+  (found by the Phase 3 concurrent tests, ADR-0009 §9).
 - **Sinks** are `(fn, user, min_level)` triples (up to 8) behind a spin
   lock that is held only to copy the table. Built-in: console (stdout
   below WARN, stderr from WARN, optional ANSI colour, location always shown

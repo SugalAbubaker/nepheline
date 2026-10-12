@@ -34,6 +34,10 @@ const char *nph_result_string(NphResult r)
         return "END_OF_STREAM";
     case NPH_RESULT_IO_ERROR:
         return "IO_ERROR";
+    case NPH_RESULT_ACCESS_DENIED:
+        return "ACCESS_DENIED";
+    case NPH_RESULT_BUSY:
+        return "BUSY";
     case NPH_RESULT_UNKNOWN:
         return "UNKNOWN";
     case NPH_RESULT_COUNT:

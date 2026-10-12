@@ -79,6 +79,19 @@ extern "C" {
 #define NPH_ASAN_ENABLED 0
 #endif
 
+// ThreadSanitizer presence, for the fiber-switch annotations (platform/fiber.h).
+#if defined(__SANITIZE_THREAD__)
+#define NPH_TSAN_ENABLED 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define NPH_TSAN_ENABLED 1
+#else
+#define NPH_TSAN_ENABLED 0
+#endif
+#else
+#define NPH_TSAN_ENABLED 0
+#endif
+
 // Build configuration flags are defined by CMake (cmake/NphConfigurations.cmake):
 // NPH_CONFIG_{DEBUG,DEVELOPMENT,PROFILE,SHIPPING}, NPH_ASSERTS_ENABLED,
 // NPH_GPU_VALIDATION_ENABLED, NPH_PROFILER_ENABLED. Normalise the ones code
@@ -153,6 +166,16 @@ extern "C" {
 
 // `static inline` for header-defined functions.
 #define NPH_INLINE static inline
+
+// Marks a function as exported from a shared library (game modules loaded
+// through platform/dylib.h). Nothing is exported by default on Windows, and
+// the engine's Linux builds use default visibility, so this is explicit only
+// where a symbol must cross a module boundary.
+#if NPH_PLATFORM_WINDOWS
+#define NPH_EXPORT __declspec(dllexport)
+#else
+#define NPH_EXPORT __attribute__((visibility("default")))
+#endif
 
 // Alignment of a type, as a u32.
 #define NPH_ALIGNOF(T) ((u32) _Alignof(T))
