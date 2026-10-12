@@ -183,12 +183,39 @@ jobs:
           path: build/linux-clang-tidy/coverage/
           if-no-files-found: warn
 
+  # ThreadSanitizer on the job system (CLAUDE.md §9 "TSan for jobs, audio,
+  # and streaming"; §12 Phase 4 exit "stress tests and TSan clean"): a Debug
+  # build with TSan in place of ASan and UBSan runs the jobs tests, stress
+  # suite included. The fibers carry the __tsan_*_fiber annotations
+  # (ADR-0010 §5), so parked and migrated jobs are tracked correctly.
+  tsan:
+    name: tsan (jobs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Ninja and the window system development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev
+      - name: Configure (Debug, ThreadSanitizer)
+        run: >
+          cmake --preset linux-clang -DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
+          -DNPH_BUILD_BENCHMARKS=OFF -DNPH_BUILD_SAMPLES=OFF
+      - name: Build the jobs tests
+        run: cmake --build --preset linux-clang-debug --target jobs_tests
+      - name: Run the jobs tests under ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --preset linux-clang-debug -R '^jobs$' --output-on-failure
+
   # Single required status check for branch protection; stays stable while the
   # matrix above evolves.
   ci:
     name: CI
     if: always()
-    needs: [format, build, tidy, coverage]
+    needs: [format, build, tidy, coverage, tsan]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify every job succeeded
@@ -198,3 +225,4 @@ jobs:
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.tidy.result }}" = "success"
           test "${{ needs.coverage.result }}" = "success"
+          test "${{ needs.tsan.result }}" = "success"

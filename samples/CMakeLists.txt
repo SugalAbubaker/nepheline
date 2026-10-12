@@ -17,3 +17,10 @@ nph_add_sample(platform_window
     SOURCES platform_window/main.c
     DEPS nph::platform
     ARGS --frames=30)
+
+# Fork-join, parallel-for, an I/O job, and the overlapped frame pipeline
+# on the job system (CLAUDE.md §8.4; docs/jobs.md).
+nph_add_sample(jobs_demo
+    SOURCES jobs_demo/main.c
+    DEPS nph::jobs
+    ARGS --frames=60)

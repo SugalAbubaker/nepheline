@@ -73,10 +73,11 @@ add_subdirectory(third_party)
 add_subdirectory(engine/core)
 add_subdirectory(engine/math)
 add_subdirectory(engine/platform)
+add_subdirectory(engine/jobs)
 
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
-target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform)
+target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs)
 
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "executable": "jobs_bench.exe",
+  "timestamp": "2026-10-12T22:48:10Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.3,
+  "benchmarks": [
+    {"name": "counter_signal", "label": "", "iterations": 95451421, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 3.937, "min_ns_per_op": 3.930, "max_ns_per_op": 4.040},
+    {"name": "run_wait_1_main", "label": "", "iterations": 653196, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 572.156, "min_ns_per_op": 504.741, "max_ns_per_op": 650.042},
+    {"name": "run_wait_1_worker", "label": "", "iterations": 732, "items_per_iteration": 1000, "repeats": 5, "ns_per_op": 417.320, "min_ns_per_op": 414.462, "max_ns_per_op": 420.414},
+    {"name": "run_wait_batch_256", "label": "", "iterations": 7093, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 207.644, "min_ns_per_op": 206.838, "max_ns_per_op": 208.473},
+    {"name": "fork_256_worker", "label": "", "iterations": 6957, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 192.033, "min_ns_per_op": 189.612, "max_ns_per_op": 211.184},
+    {"name": "fork_join_depth_8", "label": "", "iterations": 7201, "items_per_iteration": 511, "repeats": 5, "ns_per_op": 89.107, "min_ns_per_op": 85.343, "max_ns_per_op": 90.867},
+    {"name": "io_run_wait_1", "label": "", "iterations": 2000000, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 229.111, "min_ns_per_op": 226.469, "max_ns_per_op": 230.218},
+    {"name": "parallel_for_1M", "label": "", "iterations": 6453, "items_per_iteration": 1048576, "repeats": 5, "ns_per_op": 0.060, "min_ns_per_op": 0.060, "max_ns_per_op": 0.061},
+    {"name": "scaling_w1", "label": "\u0001", "iterations": 33, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 10596015.152, "min_ns_per_op": 10591690.909, "max_ns_per_op": 10620912.121},
+    {"name": "scaling_w2", "label": "\u0001", "iterations": 69, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 5306495.652, "min_ns_per_op": 5301157.971, "max_ns_per_op": 5311275.362},
+    {"name": "scaling_w4", "label": "\u0001", "iterations": 125, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2834003.200, "min_ns_per_op": 2831594.400, "max_ns_per_op": 2841440.800},
+    {"name": "scaling_w8", "label": "\u0001", "iterations": 234, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 1494490.598, "min_ns_per_op": 1492130.342, "max_ns_per_op": 1501903.846},
+    {"name": "scaling_w16", "label": "\u0001", "iterations": 403, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 822397.519, "min_ns_per_op": 820266.501, "max_ns_per_op": 830166.749}
+  ]
+}

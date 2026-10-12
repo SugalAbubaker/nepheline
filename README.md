@@ -21,7 +21,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 1 | Core: types, asserts, logging, allocators, containers, strings, hashing, handles, cvars, serialization | **done** |
 | 2 | Math: scalar + SIMD types, wide SoA kernels, geometry, packing, random | **done** |
 | 3 | Platform: threads, fibers, virtual memory, files + async I/O, CPU detection, window/input (GLFW) | **done** |
-| 4–15 | Jobs → GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
+| 4 | Jobs: fiber workers, work-stealing deques, counters, priorities, I/O threads, deterministic mode | **done** (`v0.1.0`) |
+| 5–15 | GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -54,7 +55,7 @@ cmake/          build helpers: configurations, warnings, sanitizers, module/test
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
 benchmarks/     nbench harness, benchmarks per module, recorded results, budgets
-samples/        one small executable per feature (core_hello, math_demo, platform_window)
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo)
 tests/fuzz/     libFuzzer targets and seed corpora for every parser
 scripts/        dev_env.ps1, format.py, tidy.py
 third_party/    pinned submodules (GLFW), each wrapped by exactly one engine module
@@ -72,6 +73,7 @@ Modules depend strictly left-to-right:
 - [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, hashing, containers, strings, logging, cvars, serialization
 - [`docs/math.md`](docs/math.md) — math module: conventions, scalar/vector/quaternion/matrix layer, SIMD, geometry, random
 - [`docs/platform.md`](docs/platform.md) — platform module: clocks, threads, fibers, virtual memory, files and async I/O, CPU, window and input
+- [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness and methodology
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records
