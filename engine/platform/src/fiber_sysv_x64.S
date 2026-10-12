@@ -64,7 +64,7 @@ nph_fiber_trampoline_asm:
     .cfi_startproc
     .cfi_undefined rip
     mov rdi, r12
-    call nph_fiber_entry_
+    call nph_fiber_entry
     ud2
     .cfi_endproc
     .size nph_fiber_trampoline_asm, .-nph_fiber_trampoline_asm

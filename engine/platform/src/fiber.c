@@ -36,7 +36,7 @@
 void nph_fiber_switch_asm(void **from_sp, void *to_sp);
 void nph_fiber_trampoline_asm(void);
 // Called by the trampoline on a fresh fiber's stack.
-void nph_fiber_entry_(NphFiber *fiber);
+void nph_fiber_entry(NphFiber *fiber);
 
 static NPH_THREAD_LOCAL NphFiber *t_current;
 static NPH_THREAD_LOCAL NphFiber *t_previous; // what the running fiber was switched from
@@ -81,19 +81,21 @@ static void *prepare_initial_frame(NphFiber *f)
     const u32 mxcsr = (u32)_mm_getcsr();
 #if NPH_PLATFORM_WINDOWS
     memcpy(base + 160U, &mxcsr, sizeof mxcsr);
-    void *stack_base_tib = top;
-    void *stack_limit_tib = f->stack_lo;
-    void *dealloc_tib = f->stack_base;
+    // Addresses are stored as integers: the frame is raw memory, not a
+    // struct, and pointer values are never read back through it.
+    const uptr stack_base_tib = (uptr)top;
+    const uptr stack_limit_tib = (uptr)f->stack_lo;
+    const uptr dealloc_tib = (uptr)f->stack_base;
     memcpy(base + 168U, &stack_base_tib, sizeof stack_base_tib);
     memcpy(base + 176U, &stack_limit_tib, sizeof stack_limit_tib);
     memcpy(base + 184U, &dealloc_tib, sizeof dealloc_tib);
-    NphFiber *r12 = f;
+    const uptr r12 = (uptr)f;
     memcpy(base + 224U, &r12, sizeof r12);
     const uptr entry = (uptr)nph_fiber_trampoline_asm;
     memcpy(base + 264U, &entry, sizeof entry);
 #else
     memcpy(base + 0U, &mxcsr, sizeof mxcsr);
-    NphFiber *r12 = f;
+    const uptr r12 = (uptr)f;
     memcpy(base + 32U, &r12, sizeof r12);
     const uptr entry = (uptr)nph_fiber_trampoline_asm;
     memcpy(base + 56U, &entry, sizeof entry);
@@ -205,7 +207,7 @@ NPH_NO_INLINE NphFiber *nph_fiber_current(void)
     return t_current;
 }
 
-void nph_fiber_entry_(NphFiber *fiber)
+void nph_fiber_entry(NphFiber *fiber)
 {
     finish_switch();
     fiber->fn(fiber->user);

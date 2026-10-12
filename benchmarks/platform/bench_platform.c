@@ -227,7 +227,7 @@ NBENCH(vmem_commit_decommit_64k)
 // ---------------------------------------------------------------------------
 
 #define BENCH_FILE_SIZE NPH_MIB(4)
-#define BENCH_BLOCK     4096U
+#define BENCH_BLOCK     ((u64)4096U)
 
 typedef struct BenchFile {
     char path[1024];
@@ -325,7 +325,7 @@ static void async_read_depth(NbenchState *state, NphAsyncIoBackend backend, u32 
     u64 offset = 0U;
     while (nbench_keep_running(state)) {
         for (u32 i = 0; i < depth; ++i) {
-            (void)nph_async_io_read(io, &bf.file, offset, g_blocks[i], BENCH_BLOCK, i);
+            (void)nph_async_io_read(io, &bf.file, offset, g_blocks[i], (u32)BENCH_BLOCK, i);
             offset = (offset + 64U * BENCH_BLOCK) % BENCH_FILE_SIZE;
         }
         u32 done = 0U;

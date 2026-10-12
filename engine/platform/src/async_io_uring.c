@@ -55,6 +55,7 @@ static u32 load_acquire(const u32 *p)
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 }
 
+// NOLINTNEXTLINE(readability-non-const-parameter): the builtin writes through p
 static void store_release(u32 *p, u32 v)
 {
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
