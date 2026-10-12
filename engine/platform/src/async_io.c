@@ -271,12 +271,16 @@ static void threads_worker(void *user)
     ThreadsState *st = (ThreadsState *)user;
     for (;;) {
         nph_semaphore_wait(&st->work);
+        // A permit means an element was (or is being) pushed. The MPMC ring
+        // reports "empty" while a producer that claimed an earlier cell is
+        // still writing it, so retry rather than drop the permit's element.
+        // The shutdown permits carry no element and end the loop.
         u32 index = 0U;
-        if (!nph_mpmc_ring_pop(&st->queue, &index)) {
+        while (!nph_mpmc_ring_pop(&st->queue, &index)) {
             if (nph_atomic_load_u32(&st->stop, NPH_MEMORY_ORDER_ACQUIRE) != 0U) {
                 return;
             }
-            continue;
+            nph_cpu_relax();
         }
         NphAsyncIoRequest *req = &st->io->requests[index];
         u64 done = 0U;
@@ -382,7 +386,11 @@ static u32 threads_poll(NphAsyncIo *io, NphAsyncIoCompletion *out, u32 max, u64 
     }
     for (;;) {
         ThreadsDone record;
-        NPH_VERIFY(nph_mpmc_ring_pop(&st->done, &record));
+        // As in the worker: the permit guarantees the element, the ring may
+        // need a moment to show it while another worker finishes its push.
+        while (!nph_mpmc_ring_pop(&st->done, &record)) {
+            nph_cpu_relax();
+        }
         nph_async_io_complete(io, &io->requests[record.index], record.result, record.bytes,
                               &out[count]);
         ++count;
