@@ -142,12 +142,13 @@ NTEST(condvar, wait_timeout_returns_false_when_nobody_signals)
     NphCondVar cv = NPH_CONDVAR_INIT;
     nph_mutex_lock(&m);
     const u64 t0 = nph_time_now_ns();
-    NTEST_ASSERT_FALSE(nph_condvar_wait_timeout(&cv, &m, 5U * NPH_TIME_NS_PER_MS));
+    NTEST_ASSERT_FALSE(nph_condvar_wait_timeout(&cv, &m, 30U * NPH_TIME_NS_PER_MS));
     const u64 elapsed = nph_time_now_ns() - t0;
     // The mutex is held again on return.
     NTEST_ASSERT_FALSE(nph_mutex_try_lock(&m));
     nph_mutex_unlock(&m);
-    NTEST_ASSERT_GE_UINT(elapsed, 4U * NPH_TIME_NS_PER_MS); // Windows rounds to ms
+    // Windows may return up to one scheduler tick (15.6 ms) early.
+    NTEST_ASSERT_GE_UINT(elapsed, 10U * NPH_TIME_NS_PER_MS);
     NTEST_ASSERT_LT_UINT(elapsed, NPH_TIME_NS_PER_S);
     nph_condvar_destroy(&cv);
     nph_mutex_destroy(&m);
@@ -290,9 +291,9 @@ NTEST(semaphore, wait_timeout_expires)
     NphSemaphore s;
     NTEST_ASSERT_EQ_INT(nph_semaphore_init(&s, 0U), NPH_RESULT_OK);
     const u64 t0 = nph_time_now_ns();
-    NTEST_ASSERT_FALSE(nph_semaphore_wait_timeout(&s, 5U * NPH_TIME_NS_PER_MS));
+    NTEST_ASSERT_FALSE(nph_semaphore_wait_timeout(&s, 30U * NPH_TIME_NS_PER_MS));
     const u64 elapsed = nph_time_now_ns() - t0;
-    NTEST_ASSERT_GE_UINT(elapsed, 4U * NPH_TIME_NS_PER_MS);
+    NTEST_ASSERT_GE_UINT(elapsed, 10U * NPH_TIME_NS_PER_MS); // one Windows tick early at most
     NTEST_ASSERT_LT_UINT(elapsed, NPH_TIME_NS_PER_S);
     // The timed-out waiter withdrew: a later post is not consumed twice.
     nph_semaphore_post(&s);

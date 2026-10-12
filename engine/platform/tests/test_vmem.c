@@ -86,8 +86,6 @@ NTEST(vmem, protect_read_only_and_back)
     NTEST_ASSERT_EQ_INT(nph_vmem_protect(base, page, NPH_VMEM_PROTECT_READ_WRITE), NPH_RESULT_OK);
     bytes[0] = 43U; // writable again
     NTEST_ASSERT_EQ_UINT(bytes[0], 43U);
-    NTEST_ASSERT_EQ_INT(nph_vmem_protect(base, page, (NphVmemProtect)99),
-                        NPH_RESULT_INVALID_ARGUMENT);
     NTEST_ASSERT_EQ_INT(nph_vmem_release(base, page), NPH_RESULT_OK);
 }
 

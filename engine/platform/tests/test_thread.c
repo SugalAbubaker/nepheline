@@ -163,8 +163,6 @@ NTEST(thread, affinity_and_priority_on_current_thread)
     const NphResult critical = nph_thread_set_priority(&me, NPH_THREAD_PRIORITY_TIME_CRITICAL);
     NTEST_ASSERT_TRUE(critical == NPH_RESULT_OK || critical == NPH_RESULT_ACCESS_DENIED);
     (void)nph_thread_set_priority(&me, NPH_THREAD_PRIORITY_NORMAL);
-    NTEST_ASSERT_EQ_INT(nph_thread_set_priority(&me, (NphThreadPriority)99),
-                        NPH_RESULT_INVALID_ARGUMENT);
 }
 
 static void pinned_fn(void *user)

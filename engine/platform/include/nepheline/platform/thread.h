@@ -12,6 +12,11 @@
 // mutex in a frame, so nothing here is tuned for contention beyond what the
 // OS provides.
 //
+// Timed waits are approximate on Windows, whose kernel waits are quantised
+// to the scheduler tick (15.6 ms by default): a short timeout may expire up
+// to one tick early or late. Linux honours them to the microsecond. Code
+// that needs a precise bound re-checks the clock.
+//
 // Each primitive is a fixed-size, in-place object: no allocation, and the
 // native object lives inside the struct (sized per platform below; the
 // implementation checks the sizes with static assertions). A zero-filled

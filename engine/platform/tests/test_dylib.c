@@ -24,10 +24,17 @@ NTEST(dylib, open_call_and_close)
 
     NphDylibFn fn = NULL;
     NTEST_ASSERT_EQ_INT(nph_dylib_function(&lib, "nph_test_dylib_add", &fn), NPH_RESULT_OK);
-    NTEST_ASSERT_TRUE(fn != NULL);
+    if (fn == NULL) {
+        NTEST_FAIL("nph_test_dylib_add resolved to NULL");
+        return;
+    }
     NTEST_ASSERT_EQ_INT(((AddFn)fn)(40, 2), 42);
 
     NTEST_ASSERT_EQ_INT(nph_dylib_function(&lib, "nph_test_dylib_name", &fn), NPH_RESULT_OK);
+    if (fn == NULL) {
+        NTEST_FAIL("nph_test_dylib_name resolved to NULL");
+        return;
+    }
     NTEST_ASSERT_EQ_STR(((NameFn)fn)(), "platform_test_dylib");
 
     void *data = NULL;
@@ -78,6 +85,10 @@ NTEST(dylib, open_twice_shares_the_module)
     // b still works after a's reference is dropped.
     NphDylibFn fn = NULL;
     NTEST_ASSERT_EQ_INT(nph_dylib_function(&b, "nph_test_dylib_add", &fn), NPH_RESULT_OK);
+    if (fn == NULL) {
+        NTEST_FAIL("nph_test_dylib_add resolved to NULL");
+        return;
+    }
     NTEST_ASSERT_EQ_INT(((AddFn)fn)(1, 2), 3);
     nph_dylib_close(&b);
 }
