@@ -172,6 +172,11 @@ static u32 uring_poll(NphAsyncIo *io, NphAsyncIoCompletion *out, u32 max, u64 ti
     u32 head = *st->cq_head;
     u32 tail = load_acquire(st->cq_tail);
     if (head == tail && timeout_ns > 0U) {
+        // Sleep in the kernel without the mutex: submitters must be able
+        // to queue work while a poller waits, or a poller that loops would
+        // starve them (seen in CI). GETEVENTS may be called from several
+        // threads at once; only the ring heads and tails need the lock.
+        nph_mutex_unlock(&st->mutex);
         struct __kernel_timespec ts;
         ts.tv_sec = (i64)(timeout_ns / NPH_TIME_NS_PER_S);
         ts.tv_nsec = (i64)(timeout_ns % NPH_TIME_NS_PER_S);
@@ -181,6 +186,8 @@ static u32 uring_poll(NphAsyncIo *io, NphAsyncIoCompletion *out, u32 max, u64 ti
         // ETIME on timeout, EINTR on a signal: both just mean "look again".
         (void)uring_enter(st->fd, 0U, 1U, IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG, &arg,
                           sizeof arg);
+        nph_mutex_lock(&st->mutex);
+        head = *st->cq_head;
         tail = load_acquire(st->cq_tail);
     }
     u32 count = 0U;

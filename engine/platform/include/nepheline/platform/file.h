@@ -103,6 +103,8 @@ NphResult nph_file_tell(NphFile *f, u64 *out_position);
 NphResult nph_file_size(NphFile *f, u64 *out_size);
 
 // Sets the file's length (extending with zeros or cutting). Needs WRITE.
+// The file position afterwards is unspecified; seek before the next
+// sequential read or write.
 NphResult nph_file_truncate(NphFile *f, u64 size);
 
 // Forces written data to the device (FlushFileBuffers / fsync).
