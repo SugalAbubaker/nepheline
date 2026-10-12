@@ -18,6 +18,7 @@ supersedes it and both link to each other.
 | [0010](0010-fibers.md) | Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback | Accepted |
 | [0011](0011-files-and-async-io.md) | Files, memory mapping, and asynchronous I/O backends | Accepted |
 | [0012](0012-window-and-input.md) | Window and input: GLFW behind `nph_window_*`, an event queue, and the action layer | Accepted |
+| [0013](0013-job-system.md) | Job system: fiber workers, Chase-Lev deques, futex-style counters, and depth-bounded inline waits | Accepted |
 
 ## Template
 
