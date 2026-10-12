@@ -478,7 +478,7 @@ bool nph_dir_next(NphDirIterator *it, NphDirEntry *out)
             return false;
         }
         const char *name = entry->d_name;
-        if (name[0] == '.' && (name[1] == ' ' || (name[1] == '.' && name[2] == ' '))) {
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
             continue;
         }
         u64 len = strlen(name);
@@ -486,7 +486,7 @@ bool nph_dir_next(NphDirIterator *it, NphDirEntry *out)
             len = sizeof out->name - 1U;
         }
         memcpy(out->name, name, len);
-        out->name[len] = ' ';
+        out->name[len] = '\0';
         if (entry->d_type == DT_DIR) {
             out->is_directory = 1;
         } else if (entry->d_type != DT_UNKNOWN && entry->d_type != DT_LNK) {
@@ -495,7 +495,9 @@ bool nph_dir_next(NphDirIterator *it, NphDirEntry *out)
             // File systems that do not report types, and symbolic links:
             // ask relative to the directory, following links.
             struct stat st;
-            out->is_directory = fstatat(dirfd(dir), name, &st, 0) == 0 && S_ISDIR(st.st_mode);
+            const int dir_fd = dirfd(dir);
+            out->is_directory =
+                dir_fd >= 0 && fstatat(dir_fd, name, &st, 0) == 0 && S_ISDIR(st.st_mode);
         }
         return true;
     }

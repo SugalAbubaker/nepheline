@@ -36,7 +36,7 @@ bookkeeping.
 2. **A fresh fiber's first switch "returns" into a trampoline.** fiber.c
    lays out on the new stack exactly the frame the switch restores, with
    r12 holding the `NphFiber *` and the return slot holding the
-   trampoline, which calls `nph_fiber_entry_(fiber)`. A zero word above
+   trampoline, which calls `nph_fiber_entry(fiber)`. A zero word above
    it terminates stack walks. A fiber function never returns; doing so is
    a fatal error (logged, then `abort`).
 3. **Stacks come from vmem.h with a guard page.** `nph_fiber_create`

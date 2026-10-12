@@ -25,7 +25,7 @@
 
 .code
 
-EXTERN nph_fiber_entry_:PROC
+EXTERN nph_fiber_entry:PROC
 
 ; void nph_fiber_switch_asm(void **from_sp /* rcx */, void *to_sp /* rdx */)
 PUBLIC nph_fiber_switch_asm
@@ -92,12 +92,12 @@ nph_fiber_switch_asm ENDP
 ; Entered through the `ret` of the first switch into a new fiber, with
 ; r12 = NphFiber * and rsp 16-byte aligned (one slot above the zero "return
 ; address" that ends stack walks). Allocates the 32-byte shadow space the
-; ABI requires and calls nph_fiber_entry_(fiber), which never returns.
+; ABI requires and calls nph_fiber_entry(fiber), which never returns.
 PUBLIC nph_fiber_trampoline_asm
 nph_fiber_trampoline_asm PROC
     sub rsp, 32
     mov rcx, r12
-    call nph_fiber_entry_
+    call nph_fiber_entry
     int 3
 nph_fiber_trampoline_asm ENDP
 
