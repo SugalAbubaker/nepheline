@@ -42,6 +42,8 @@ jobs:
           - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Debug,       cfg: debug }
           - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Development, cfg: development }
           - { name: windows-msvc,  os: windows-2022, preset: win-msvc,    config: Shipping,    cfg: shipping }
+          # The Win32 fiber fallback (ADR-0010 §6) must keep passing the same tests.
+          - { name: windows-msvc-win32-fibers, os: windows-2022, preset: win-msvc, config: Development, cfg: development, extra: -DNPH_FIBERS_WIN32=ON }
           - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Debug,       cfg: debug }
           - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Development, cfg: development }
           - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug }
@@ -76,7 +78,7 @@ jobs:
           esac
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.extra }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}

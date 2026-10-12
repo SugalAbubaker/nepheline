@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <nepheline/core/alloc.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/platform/vmem.h>
 
@@ -103,6 +104,10 @@ NphResult nph_vmem_decommit(void *ptr, u64 size)
 {
     NPH_ASSERT(ptr != NULL && size > 0U);
     const size_t len = (size_t)round_to_pages(size);
+    // Instrumented code that ran on this memory (a fiber stack) left its
+    // redzones in the sanitizer's shadow; clear them before the addresses
+    // can be handed to something else.
+    NPH_ASAN_UNPOISON(ptr, len);
     // MADV_DONTNEED drops the physical pages; the next access would fault
     // in fresh zero pages, which PROT_NONE turns into a visible fault.
     if (madvise(ptr, len, MADV_DONTNEED) != 0) {
@@ -117,6 +122,7 @@ NphResult nph_vmem_decommit(void *ptr, u64 size)
 NphResult nph_vmem_release(void *ptr, u64 size)
 {
     NPH_ASSERT(ptr != NULL && size > 0U);
+    NPH_ASAN_UNPOISON(ptr, round_to_pages(size)); // see nph_vmem_decommit
     if (munmap(ptr, (size_t)round_to_pages(size)) != 0) {
         return nph_posix_fail("munmap", errno);
     }

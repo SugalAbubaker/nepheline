@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "executable": "platform_bench.exe",
+  "timestamp": "2026-10-12T18:18:23Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.3,
+  "benchmarks": [
+    {"name": "fiber_switch", "label": "asm", "iterations": 16741669, "items_per_iteration": 2, "repeats": 5, "ns_per_op": 10.908, "min_ns_per_op": 10.864, "max_ns_per_op": 10.943},
+    {"name": "mutex_lock_unlock", "label": "", "iterations": 95619358, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 3.941, "min_ns_per_op": 3.924, "max_ns_per_op": 3.995},
+    {"name": "spin_lock_acquire_release", "label": "", "iterations": 180418571, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 1.864, "min_ns_per_op": 1.861, "max_ns_per_op": 1.878},
+    {"name": "semaphore_post_wait", "label": "", "iterations": 96874442, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 3.822, "min_ns_per_op": 3.805, "max_ns_per_op": 3.930},
+    {"name": "semaphore_round_trip", "label": "", "iterations": 4728376, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 79.641, "min_ns_per_op": 78.493, "max_ns_per_op": 79.757},
+    {"name": "thread_create_join", "label": "", "iterations": 7310, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 50122.285, "min_ns_per_op": 49802.695, "max_ns_per_op": 51348.399},
+    {"name": "time_now_ns", "label": "", "iterations": 15610885, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 23.685, "min_ns_per_op": 23.622, "max_ns_per_op": 23.723},
+    {"name": "time_cycles", "label": "", "iterations": 50482613, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 7.478, "min_ns_per_op": 7.440, "max_ns_per_op": 7.510},
+    {"name": "vmem_commit_decommit_64k", "label": "", "iterations": 154295, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2622.211, "min_ns_per_op": 2582.265, "max_ns_per_op": 2638.629},
+    {"name": "file_read_at_4k", "label": "", "iterations": 70892, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 5018.566, "min_ns_per_op": 4996.387, "max_ns_per_op": 5065.526},
+    {"name": "file_write_at_4k", "label": "", "iterations": 46684, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 7572.764, "min_ns_per_op": 7535.736, "max_ns_per_op": 7719.240},
+    {"name": "async_read_4k_depth_1", "label": "iocp", "iterations": 53731, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 6624.390, "min_ns_per_op": 6618.511, "max_ns_per_op": 6739.996},
+    {"name": "async_read_4k_depth_32", "label": "iocp", "iterations": 1970, "items_per_iteration": 32, "repeats": 5, "ns_per_op": 6353.084, "min_ns_per_op": 6294.305, "max_ns_per_op": 6455.619},
+    {"name": "async_read_4k_threads_32", "label": "threads", "iterations": 3858, "items_per_iteration": 32, "repeats": 5, "ns_per_op": 3037.608, "min_ns_per_op": 3022.835, "max_ns_per_op": 3054.675}
+  ]
+}

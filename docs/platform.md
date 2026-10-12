@@ -1,10 +1,12 @@
 # Platform module (`engine/platform`)
 
 The OS abstraction (CLAUDE.md §8.3): clocks, threads and blocking
-synchronisation, virtual memory, CPU detection, dynamic libraries, process
-helpers, and the logger thread. Decisions: [ADR-0009](adr/0009-platform-threads-and-memory.md).
-Fibers, files, asynchronous I/O, and the window/input layer are documented
-in the sections added with their code.
+synchronisation, fibers, virtual memory, files and asynchronous I/O, CPU
+detection, dynamic libraries, process helpers, and the logger thread.
+Decisions: [ADR-0009](adr/0009-platform-threads-and-memory.md) (threads,
+memory, the TLSF lock), [ADR-0010](adr/0010-fibers.md) (fibers),
+[ADR-0011](adr/0011-files-and-async-io.md) (files and async I/O). The
+window and input layer is documented in the section added with its code.
 
 Depends on `core` and `math` (for the SIMD level). Every public header is
 self-contained and includes no OS header; the sources are split per
@@ -17,7 +19,11 @@ added to core for it).
 |---|---|
 | `time.h` | monotonic clock, wall clock, cycle counter, stopwatch |
 | `thread.h` | threads, mutex, condition variable, read-write lock, semaphore, once |
+| `fiber.h` | fibers: guard-paged stacks, assembly context switch, Win32 fallback |
 | `vmem.h` | reserve/commit/decommit/release/protect, large pages |
+| `path.h` | pure path string helpers (basename, dirname, extension, join) |
+| `file.h` | synchronous files, memory mapping, the file system, directory listing |
+| `async_io.h` | asynchronous reads and writes: IOCP, io_uring, thread pool |
 | `cpu.h` | CPUID features, caches, core counts, TSC rate |
 | `dylib.h` | shared-library loading and symbol lookup |
 | `locked_alloc.h` | a mutex around any allocator |
@@ -63,6 +69,28 @@ common "how long did this take" pattern.
 - **Once.** `nph_once` runs an initialiser exactly once; racers spin until
   it is done. Used for the cached CPU info and the virtual-memory sizes.
 
+## Fibers (`fiber.h`)
+
+A fiber is a stack plus the saved registers of the code suspended on it.
+`nph_fiber_switch(from, to)` pushes the callee-saved registers and MXCSR
+on the current stack (on Windows also xmm6-xmm15 and the three TIB stack
+bounds), swaps the stack pointer, and pops the target's state; a fresh
+fiber's first switch "returns" into a trampoline that calls its function.
+The assembly is `src/fiber_win64.asm` (MASM) and `src/fiber_sysv_x64.S`
+(GNU assembler); `src/fiber.c` lays out the initial frame, owns the
+stacks (a `vmem.h` reservation with a no-access guard page below the
+usable range), and carries the ASan and TSan annotations so the sanitizers
+follow the stack switches. `-DNPH_FIBERS_WIN32=ON` substitutes the Win32
+fiber API behind the same header (`src/fiber_win32.c`); CI builds one
+configuration with it.
+
+Rules (the header spells them out): a thread calls `nph_fiber_init_thread`
+before any switch, a fiber function never returns, a fiber is destroyed
+only while suspended, and no thread-local address is cached across a
+switch because a fiber may resume on another thread. The x87 control word
+is not part of a fiber's state (ADR-0010 §8): `FLDCW` alone cost more than
+the whole rest of the switch.
+
 ## Virtual memory (`vmem.h`)
 
 Reserve address space (no access, no commit charge: `MEM_RESERVE` /
@@ -79,6 +107,48 @@ huge page hint (`MADV_HUGEPAGE`; a no-op on Windows).
 
 Fiber stacks (next section when they land), the job system's arenas, and
 streaming buffers are built on this: reserve generously, commit as used.
+
+## Paths, files, and the file system (`path.h`, `file.h`)
+
+`path.h` is pure string handling on UTF-8 paths with either separator:
+basename, dirname (keeping roots such as `/` and a drive root), extension
+and stem, absolute-path detection, join into a caller buffer, separator
+normalisation. Nothing allocates.
+
+`file.h` wraps the OS file API (ADR-0011): `NphFile` holds the handle in
+place; sequential and positional reads and writes loop until satisfied or
+the file ends (short reads only at the end; writes complete or fail);
+seek/tell/size/truncate/flush; `nph_file_read_all` (NUL-terminated for
+text) and `nph_file_write_all`; memory mapping of any byte range in read,
+shared read-write, or private copy-on-write mode over a page-aligned view;
+stat, exists, remove, rename (replacing), create/remove directories
+(single, recursive, whole tree), temp and current directory, and a
+directory iterator that skips `.` and `..`. Windows opens files with every
+share mode and converts paths to UTF-16 at the boundary;
+`NPH_FILE_ASYNC` opens an overlapped handle for the completion-port backend
+(its sequential calls then keep their own position). Expected outcomes
+such as a missing file come back as results and are logged at DEBUG;
+real failures are logged at ERROR with the OS message.
+
+## Asynchronous I/O (`async_io.h`)
+
+An `NphAsyncIo` context queues positional reads and writes and reports
+completions through `nph_async_io_poll`, each carrying the caller's
+64-bit `user` value, a result, and the byte count. Requests come from a
+fixed pool (an MPMC ring of free indices, so submission from several
+threads is lock-free); `FULL` tells a submitter to poll first. Three
+backends behind one vtable: **IOCP** (overlapped `ReadFile`/`WriteFile`
+on a completion port; files are bound on first use; a request that fails
+before being queued, including end-of-file, is posted to the port so every
+request yields exactly one completion), **io_uring** (the rings mapped and
+driven with raw `io_uring_setup`/`io_uring_enter`; one mutex on the
+engine's side of the rings; timeouts through `IORING_ENTER_EXT_ARG`;
+needs Linux 5.11+), and a **thread pool** (workers run the positional
+calls and hand completions back through an MPMC ring and a semaphore),
+which is the fallback when the native backend is unavailable and the
+reference the others are tested against. `DEFAULT` picks the native
+backend when it works. `nph_async_io_destroy` waits for in-flight requests
+and discards their completions; there is no cancellation.
 
 ## CPU detection (`cpu.h`)
 
@@ -133,7 +203,40 @@ layer reports.
 
 ## Benchmarks
 
-Recorded with the fibers and file I/O that complete the module.
+`benchmarks/platform/bench_platform.c`, Profile, Ryzen 7 5800X, Windows 10,
+MSVC 14.44, 2026-10-12, median of 5
+(`benchmarks/results/platform-2026-10-12-win-msvc-profile-ryzen7-5800x.json`).
+
+| Benchmark | ns/op | Note |
+|---|---|---|
+| `fiber_switch` (assembly) | 11 | one switch of a two-fiber ping-pong; 38 before the x87 control word was dropped (ADR-0010 §8) |
+| `fiber_switch` (Win32 fiber API, `NPH_FIBERS_WIN32`) | 24 | the OS routine does switch the x87 word |
+| `mutex_lock_unlock` | 3.9 | SRW lock, uncontended |
+| `spin_lock_acquire_release` | 1.9 | core's spin lock, for comparison |
+| `semaphore_post_wait` | 3.8 | the user-space fast path: no kernel transition |
+| `semaphore_round_trip` | 47 | hand-off to another thread and back, both sides spinning |
+| `thread_create_join` | 50 500 | Windows thread creation; never on a frame path |
+| `time_now_ns` | 24 | `QueryPerformanceCounter` plus the conversion |
+| `time_cycles` | 7.4 | `rdtsc` |
+| `vmem_commit_decommit_64k` | 2 670 | two system calls plus one page fault |
+| `file_read_at_4k` | 5 020 | synchronous positional read from the page cache |
+| `file_write_at_4k` | 7 590 | synchronous positional write, no flush |
+| `async_read_4k_depth_1` | 6 640 | IOCP, one request in flight |
+| `async_read_4k_depth_32` | 6 330 | IOCP, 32 in flight, per request |
+| `async_read_4k_threads_32` | 3 030 | thread pool (4 workers), 32 in flight, per request |
+
+Reading: the fiber switch is where the job system's budget goes, and 11 ns
+means a job can yield and resume a few hundred times per frame at 240 FPS
+without registering. The semaphore's fast path makes a post with nobody
+waiting as cheap as a mutex; the 47 ns round trip is the floor for waking a
+parked worker on another core. The file numbers are Windows page-cache
+numbers (an NTFS read through the filter stack costs about 5 us even when
+it copies from memory): a cached 4 KiB read through IOCP costs about the
+same as the synchronous call plus port overhead because the file system
+completes it inline on the submitting thread, while the thread pool
+parallelises cached reads across its workers. The native backend earns its
+place on real device reads, where requests overlap the device latency
+instead of the CPU; Phase 6 measures the streamer against both.
 
 ## Testing
 
@@ -161,6 +264,28 @@ Recorded with the fibers and file I/O that complete the module.
   producers, four consumers, every item exactly once and per-producer
   order preserved), the debug allocator from eight threads, and the logger
   with writers racing a flusher while threads attach and detach.
+- `test_fiber.c`: create/switch/resume/destroy, a 20 000-round ping-pong
+  with ordering checks, callee-saved registers and MXCSR surviving switches
+  past a fiber that churns both, deep recursion and a 20 KiB frame (the
+  stack probe) on a 256 KiB stack, 256 fibers round robin, a fiber
+  migrating across three threads, and independent fiber sets on eight
+  threads at once. The same file runs against the Win32 backend in CI.
+- `test_path.c`: the pure path helpers on both separators, roots, and
+  overflow.
+- `test_file.c`: a 1 MiB write/read round trip, open modes (missing,
+  exclusive, append, truncate, directory as file), positional I/O with
+  short reads at the end, seek/tell/truncate, the overlapped-handle
+  sequential path, memory mapping in all three modes including an
+  unaligned sub-range and write-through, nested directories, listing,
+  rename-over, busy and not-found results, tree removal, whole-file
+  helpers. Each test works in its own temp directory.
+- `test_async_io.c`: for every backend available (the thread pool
+  everywhere, IOCP on Windows, io_uring on Linux) a 4 MiB file is read with
+  65 chunks in flight through a 32-deep queue (so `FULL` is exercised),
+  end-of-file and short reads, timeouts, and an asynchronous copy of the
+  file; plus the unsupported-backend results, destroy with requests in
+  flight, the IOCP non-async-file rejection, and four threads submitting
+  concurrently while the main thread polls.
 - `test_vmem.c`, `test_cpu.c`, `test_dylib.c` (loads
   `platform_test_dylib`, a shared library built by the test CMake),
   `test_locked_alloc.c` (TLSF through the lock from eight threads, then

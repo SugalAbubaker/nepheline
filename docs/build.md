@@ -12,6 +12,7 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | CMake | ≥ 3.25 (VS bundles 3.31) | ≥ 3.25 |
 | Ninja | bundled with VS | `ninja-build` |
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
+| Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
 | Vulkan SDK | 1.3+ (from Phase 5) | 1.3+ (from Phase 5) |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
@@ -88,6 +89,7 @@ target links.
 | `NPH_UBSAN` | `ON` | UndefinedBehaviorSanitizer in Debug (GCC/Clang) |
 | `NPH_TSAN` | `OFF` | ThreadSanitizer in Debug (GCC/Clang); excludes `NPH_ASAN` |
 | `NPH_COVERAGE` | `OFF` | Instrument for llvm-cov source-based coverage (Clang only; combine with `-DNPH_ASAN=OFF -DNPH_UBSAN=OFF`) |
+| `NPH_FIBERS_WIN32` | `OFF` | Windows only: build the fiber layer on the Win32 fiber API instead of the assembly context switch ([ADR-0010](adr/0010-fibers.md)) |
 
 Pass them at configure time: `cmake --preset linux-clang -DNPH_ASAN=OFF -DNPH_TSAN=ON`.
 
@@ -195,7 +197,9 @@ nph_add_test(<module>
 - **clang-format** (pinned 19.1.5 from PyPI, matching VS 2022's copy).
 - **Build + test matrix:** windows-msvc, windows-clang, linux-gcc,
   linux-clang × Debug, Development; Shipping on windows-msvc and linux-gcc so
-  LTO is exercised. JUnit results are uploaded as artifacts.
+  LTO is exercised; one windows-msvc Development build with
+  `-DNPH_FIBERS_WIN32=ON` so the fiber fallback keeps passing. JUnit results
+  are uploaded as artifacts.
 - **clang-tidy** on the `linux-clang-tidy` preset with LLVM 19.
 - **coverage (llvm-cov)**: an instrumented Debug build with the sanitizers
   off runs the unit tests and checks every engine module against its
