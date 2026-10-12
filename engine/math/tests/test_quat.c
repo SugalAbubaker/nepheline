@@ -77,10 +77,8 @@ NTEST(quat, inverse_and_normalize)
     NTEST_ASSERT_TRUE(nph_quat_eq(nph_quat_normalize_or_identity(nph_quat(0.0F, 0.0F, 0.0F, 0.0F)),
                                   nph_quat_identity()));
     NTEST_ASSERT_FALSE(nph_quat_is_normalized(nph_quat(1.0F, 1.0F, 0.0F, 0.0F), 1e-6F));
-    NphQuat r = nph_quat_identity();
-    TM_EXPECT_ASSERT(r = nph_quat_normalize(nph_quat(0.0F, 0.0F, 0.0F, 0.0F)));
-    TM_EXPECT_ASSERT(r = nph_quat_inverse(nph_quat(0.0F, 0.0F, 0.0F, 0.0F)));
-    NPH_UNUSED(r);
+    TM_EXPECT_ASSERT((void)nph_quat_normalize(nph_quat(0.0F, 0.0F, 0.0F, 0.0F)));
+    TM_EXPECT_ASSERT((void)nph_quat_inverse(nph_quat(0.0F, 0.0F, 0.0F, 0.0F)));
 }
 
 NTEST(quat, axis_angle)

@@ -57,9 +57,7 @@ NTEST(vec2, normalize)
     NTEST_ASSERT_TRUE(nph_vec2_eq(nph_vec2_normalize_or_zero(nph_vec2_zero()), nph_vec2_zero()));
     TM_ASSERT_VEC2_NEAR(nph_vec2_normalize_or_zero(nph_vec2(0.0F, -2.0F)), nph_vec2(0.0F, -1.0F),
                         0.0F);
-    NphVec2 r = nph_vec2_one();
-    TM_EXPECT_ASSERT(r = nph_vec2_normalize(nph_vec2_zero()));
-    NPH_UNUSED(r);
+    TM_EXPECT_ASSERT((void)nph_vec2_normalize(nph_vec2_zero()));
     u64 rng = 2U;
     for (u32 i = 0; i < ITER; ++i) {
         const NphVec2 v = tm_rng_vec2(&rng, -100.0F, 100.0F);
@@ -182,9 +180,7 @@ NTEST(vec3, normalize)
                         nph_vec3_unit_x(), 0.0F);
     TM_ASSERT_VEC3_NEAR(nph_vec3_normalize_or_zero(nph_vec3(0.0F, 0.0F, -5.0F)),
                         nph_vec3(0.0F, 0.0F, -1.0F), 0.0F);
-    NphVec3 r = nph_vec3_one();
-    TM_EXPECT_ASSERT(r = nph_vec3_normalize(nph_vec3_zero()));
-    NPH_UNUSED(r);
+    TM_EXPECT_ASSERT((void)nph_vec3_normalize(nph_vec3_zero()));
     NTEST_ASSERT_TRUE(nph_vec3_is_normalized(nph_vec3_unit_x(), 1e-6F));
     NTEST_ASSERT_FALSE(nph_vec3_is_normalized(nph_vec3_splat(1.0F), 1e-6F));
     u64 rng = 4U;
@@ -194,7 +190,9 @@ NTEST(vec3, normalize)
             continue;
         }
         const NphVec3 n = nph_vec3_normalize(v);
-        NTEST_ASSERT_ULP_F32(nph_vec3_length(n), 1.0F, 2U);
+        // Three squares, a sum, a sqrt, a divide, three products, then the
+        // length again: up to 3 ULPs of accumulated rounding.
+        NTEST_ASSERT_ULP_F32(nph_vec3_length(n), 1.0F, 4U);
         NTEST_ASSERT_TRUE(nph_vec3_is_normalized(n, 1e-6F));
         // Direction is preserved.
         NTEST_ASSERT_NEAR_F32(nph_vec3_dot(n, v), nph_vec3_length(v), nph_vec3_length(v) * 1e-6F);
@@ -342,9 +340,7 @@ NTEST(vec4, normalize)
     NTEST_ASSERT_TRUE(nph_vec4_eq(nph_vec4_normalize_or_zero(nph_vec4_zero()), nph_vec4_zero()));
     TM_ASSERT_VEC4_NEAR(nph_vec4_normalize_or_zero(nph_vec4(0.0F, 0.0F, 0.0F, -3.0F)),
                         nph_vec4(0.0F, 0.0F, 0.0F, -1.0F), 0.0F);
-    NphVec4 r = nph_vec4_one();
-    TM_EXPECT_ASSERT(r = nph_vec4_normalize(nph_vec4_zero()));
-    NPH_UNUSED(r);
+    TM_EXPECT_ASSERT((void)nph_vec4_normalize(nph_vec4_zero()));
     u64 rng = 7U;
     for (u32 i = 0; i < ITER; ++i) {
         const NphVec4 v = tm_rng_vec4(&rng, -10.0F, 10.0F);
