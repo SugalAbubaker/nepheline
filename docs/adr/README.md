@@ -14,6 +14,7 @@ supersedes it and both link to each other.
 | [0006](0006-containers.md) | Core containers: representation and the hash map design | Accepted |
 | [0007](0007-serialization-formats.md) | Serialization formats: binary documents, JSON, and cvar config | Accepted |
 | [0008](0008-math-conventions.md) | Math module: conventions, storage layouts, and SIMD layering | Accepted |
+| [0009](0009-platform-threads-and-memory.md) | Platform layer: threads, synchronisation, virtual memory, and the TLSF locking decision | Accepted |
 
 ## Template
 

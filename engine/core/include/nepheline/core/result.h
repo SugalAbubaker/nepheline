@@ -28,6 +28,8 @@ typedef enum NphResult {
     NPH_RESULT_PARSE_ERROR,      // text or binary stream is malformed
     NPH_RESULT_END_OF_STREAM,    // a reader ran past the end of its data
     NPH_RESULT_IO_ERROR,         // the OS reported a file or device failure
+    NPH_RESULT_ACCESS_DENIED,    // the OS refused on permissions or privileges
+    NPH_RESULT_BUSY,             // the resource is in use (sharing violation, non-empty directory)
     NPH_RESULT_UNKNOWN,          // failure with no better classification
     NPH_RESULT_COUNT
 } NphResult;

@@ -169,6 +169,29 @@ NTEST_F(LogFixture, full_ring_drops_and_reports_the_count)
     NTEST_ASSERT_NOT_NULL(strstr(line, "[4 earlier records dropped]"));
 }
 
+NTEST_F(LogFixture, drops_pending_at_detach_are_reported_when_the_ring_is_retired)
+{
+    // Fill the ring (8) and drop 3 more, then detach without another
+    // record getting through: the flusher must report the 3 itself.
+    for (u32 i = 0; i < 11U; ++i) {
+        NPH_LOG_INFO(&LOG_TEST, "msg %u", i);
+    }
+    nph_log_thread_detach();
+    NTEST_ASSERT_EQ_UINT(nph_log_flush(0U), 9U); // 8 stored + 1 synthetic
+    NTEST_ASSERT_EQ_UINT(f->capture.count, 9U);
+    const NphLogRecord *r = &f->capture.records[8];
+    NTEST_ASSERT_EQ_STR(r->category, "core");
+    NTEST_ASSERT_EQ_UINT(r->level, NPH_LOG_LEVEL_WARN);
+    NTEST_ASSERT_EQ_UINT(r->thread_index, 1U);
+    NTEST_ASSERT_EQ_UINT(r->sequence, 11U);
+    NTEST_ASSERT_EQ_UINT(r->dropped_before, 3U);
+    NTEST_ASSERT_EQ_STR(r->message, "log thread detached with dropped records");
+    // The ring was released: only the allocator bookkeeping of nothing remains.
+    NphDebugAllocStats s;
+    nph_debug_allocator_get_stats(&f->da, &s);
+    NTEST_ASSERT_EQ_UINT(s.live_count, 0U);
+}
+
 NTEST_F(LogFixture, flush_limit)
 {
     for (u32 i = 0; i < 5U; ++i) {

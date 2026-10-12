@@ -404,6 +404,20 @@ u32 nph_log_flush(u32 max_records)
         if (thread != NULL &&
             nph_atomic_load_u32(&thread->retired, NPH_MEMORY_ORDER_ACQUIRE) != 0U &&
             nph_spsc_ring_peek(&thread->ring) == NULL) {
+            // Records dropped after the thread's last delivered one had no
+            // later record to carry their count, and the thread is gone.
+            // Report them in its name so the loss is never silent.
+            const u32 dropped = nph_atomic_load_u32(&thread->dropped, NPH_MEMORY_ORDER_RELAXED);
+            if (dropped != 0U) {
+                NphLogRecord rec;
+                fill_record(&rec, &NPH_LOG_CORE, NPH_LOG_LEVEL_WARN, __FILE__, (u32)__LINE__);
+                rec.thread_index = (u16)thread->index;
+                rec.sequence = thread->sequence;
+                rec.dropped_before = dropped;
+                set_message(&rec, "log thread detached with dropped records", 40U);
+                deliver(&rec);
+                ++delivered;
+            }
             nph_atomic_store_ptr(&g_log.threads[i], NULL, NPH_MEMORY_ORDER_RELEASE);
             free_thread(thread);
         }

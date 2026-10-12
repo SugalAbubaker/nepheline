@@ -69,10 +69,11 @@ endif()
 # Engine modules, in dependency order (CLAUDE.md §4).
 add_subdirectory(engine/core)
 add_subdirectory(engine/math)
+add_subdirectory(engine/platform)
 
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
-target_link_libraries(nepheline INTERFACE nph::core nph::math)
+target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform)
 
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
