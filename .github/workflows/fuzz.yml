@@ -37,7 +37,7 @@ jobs:
         run: >
           cmake --preset linux-clang -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
           -DNPH_BUILD_FUZZERS=ON -DNPH_BUILD_TESTS=OFF -DNPH_BUILD_BENCHMARKS=OFF -DNPH_BUILD_SAMPLES=OFF
-      - name: Build (Debug: ASan + UBSan)
+      - name: "Build (Debug: ASan + UBSan)"
         run: cmake --build --preset linux-clang-debug
       - name: Fuzz
         shell: bash

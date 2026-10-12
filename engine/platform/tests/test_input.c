@@ -22,12 +22,13 @@ NTEST_TEARDOWN(InputFixture)
     nph_input_destroy(NULL); // harmless
 }
 
-static NphWindowEvent key_event(NphKey key, NphKeyAction action, u32 mods)
+// `key` is a raw u32 so the tests can also send values outside NphKey.
+static NphWindowEvent key_event(u32 key, NphKeyAction action, u32 mods)
 {
     NphWindowEvent e;
     memset(&e, 0, sizeof e);
     e.type = NPH_WINDOW_EVENT_KEY;
-    e.u.key.key = (u32)key;
+    e.u.key.key = key;
     e.u.key.action = (u32)action;
     e.u.key.mods = mods;
     return e;
@@ -124,7 +125,7 @@ NTEST_F(InputFixture, key_edges_across_frames)
 
     // Out-of-range keys are ignored.
     NTEST_ASSERT_FALSE(nph_input_key_down(f->input, (NphKey)NPH_KEY_COUNT));
-    NphWindowEvent bogus = key_event((NphKey)9999, NPH_KEY_ACTION_PRESS, 0U);
+    NphWindowEvent bogus = key_event(9999U, NPH_KEY_ACTION_PRESS, 0U);
     frame(f->input, &bogus, 1U);
 }
 
