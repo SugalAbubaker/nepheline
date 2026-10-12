@@ -17,6 +17,7 @@ supersedes it and both link to each other.
 | [0009](0009-platform-threads-and-memory.md) | Platform layer: threads, synchronisation, virtual memory, and the TLSF locking decision | Accepted |
 | [0010](0010-fibers.md) | Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback | Accepted |
 | [0011](0011-files-and-async-io.md) | Files, memory mapping, and asynchronous I/O backends | Accepted |
+| [0012](0012-window-and-input.md) | Window and input: GLFW behind `nph_window_*`, an event queue, and the action layer | Accepted |
 
 ## Template
 

@@ -5,8 +5,8 @@ synchronisation, fibers, virtual memory, files and asynchronous I/O, CPU
 detection, dynamic libraries, process helpers, and the logger thread.
 Decisions: [ADR-0009](adr/0009-platform-threads-and-memory.md) (threads,
 memory, the TLSF lock), [ADR-0010](adr/0010-fibers.md) (fibers),
-[ADR-0011](adr/0011-files-and-async-io.md) (files and async I/O). The
-window and input layer is documented in the section added with its code.
+[ADR-0011](adr/0011-files-and-async-io.md) (files and async I/O),
+[ADR-0012](adr/0012-window-and-input.md) (window and input).
 
 Depends on `core` and `math` (for the SIMD level). Every public header is
 self-contained and includes no OS header; the sources are split per
@@ -24,6 +24,8 @@ added to core for it).
 | `path.h` | pure path string helpers (basename, dirname, extension, join) |
 | `file.h` | synchronous files, memory mapping, the file system, directory listing |
 | `async_io.h` | asynchronous reads and writes: IOCP, io_uring, thread pool |
+| `window.h` | the window system, monitors, raw events, gamepads, Vulkan surface hooks |
+| `input.h` | the action layer: per-frame state and named actions with bindings |
 | `cpu.h` | CPUID features, caches, core counts, TSC rate |
 | `dylib.h` | shared-library loading and symbol lookup |
 | `locked_alloc.h` | a mutex around any allocator |
@@ -149,6 +151,44 @@ which is the fallback when the native backend is unavailable and the
 reference the others are tested against. `DEFAULT` picks the native
 backend when it works. `nph_async_io_destroy` waits for in-flight requests
 and discards their completions; there is no cancellation.
+
+## Window and monitors (`window.h`)
+
+The GLFW wrapper (ADR-0012); `src/window_glfw.c` is the only file in the
+engine that includes a GLFW header, and GLFW itself is the pinned
+submodule `third_party/glfw` built as part of the tree. The window system
+is initialised once on the main thread (`NPH_RESULT_UNSUPPORTED` on a
+headless machine); `nph_window_poll_events` runs the OS loop and fills
+each window's 1024-event ring (32-byte events, oldest dropped and counted
+on overflow), drained with `nph_window_pop_event`. Keys are the engine's
+`NphKey` enum mapped from the OS codes; text arrives as code points.
+Windows expose size, framebuffer size and content scale (the swapchain
+uses the framebuffer), position, title, fullscreen on a monitor with the
+windowed placement restored on the way back, show/hide/focus/minimise/
+maximise, cursor modes (normal, hidden, disabled for mouse look) with raw
+motion, cursor position, and the clipboard. Monitors report name,
+position, mode, physical size, and scale. Gamepads are polled snapshots in
+the standard layout. Vulkan hooks hand Phase 5 the required instance
+extensions and a `VkSurfaceKHR` without any Vulkan header dependency.
+
+## Input actions (`input.h`)
+
+`NphInput` turns raw events and gamepad snapshots into per-frame state
+(held, pressed this frame, released this frame; cursor and scroll deltas;
+typed text) and into named actions. A binding is a key with modifiers
+(exact or `NPH_MOD_ANY`), a mouse button, a key pair as an axis, a mouse
+axis with a scale, a gamepad button, or a gamepad axis with a dead zone,
+on one pad or any; an action sums its bindings (digital ±1, analog
+values) clamped to [-1, 1], plus unclamped scaled mouse deltas. The frame
+cycle is `begin_frame`, events through `process_event`, gamepads through
+`poll_gamepads` (or `set_gamepad`), `end_frame`, then queries. Losing
+focus releases everything held. The layer is window-system independent
+and tested with synthetic events.
+
+`samples/platform_window` is the Phase 3 exit sample: it opens a window,
+binds quit/fullscreen/fire/jump/move/look to keyboard, mouse, and gamepad,
+and logs every event and action edge; `--frames=N` bounds it for CI,
+where Linux runs it under Xvfb.
 
 ## CPU detection (`cpu.h`)
 
@@ -286,6 +326,16 @@ instead of the CPU; Phase 6 measures the streamer against both.
   file; plus the unsupported-backend results, destroy with requests in
   flight, the IOCP non-async-file rejection, and four threads submitting
   concurrently while the main thread polls.
+- `test_input.c`: key edges across frames (press, repeat, release, tap
+  within a frame), mouse buttons, motion deltas, scroll, typed text and
+  its cap, focus loss releasing everything, action registration and
+  limits, key bindings with exact and any modifiers, axes combining and
+  clamping (key pairs, gamepad sticks with dead zones, mouse deltas),
+  gamepad buttons on specific and any pads, the name tables.
+- `test_window.c` (skipped without a display; CI provides one): init
+  idempotence, a hidden window's sizes and state, cursor modes, the event
+  queue after pumping and a programmatic resize, monitors, the clipboard
+  round trip, gamepad and Vulkan queries without hardware.
 - `test_vmem.c`, `test_cpu.c`, `test_dylib.c` (loads
   `platform_test_dylib`, a shared library built by the test CMake),
   `test_locked_alloc.c` (TLSF through the lock from eight threads, then
