@@ -54,7 +54,7 @@ static void hammer(u32 index, void *shared)
     u64 rng = 0x1234U + index;
     void *slots[32];
     u64 sizes[32];
-    memset(slots, 0, sizeof slots);
+    memset((void *)slots, 0, sizeof slots);
     memset(sizes, 0, sizeof sizes);
     for (u32 i = 0; i < s->iterations; ++i) {
         const u32 slot = (u32)(test_rng_next(&rng) % 32U);

@@ -100,8 +100,9 @@ NTEST(cpu, feature_names)
     NTEST_ASSERT_EQ_STR(nph_cpu_feature_name(NPH_CPU_FEATURE_SSE42), "sse4.2");
     NTEST_ASSERT_EQ_STR(nph_cpu_feature_name(NPH_CPU_FEATURE_AVX2), "avx2");
     NTEST_ASSERT_EQ_STR(nph_cpu_feature_name(NPH_CPU_FEATURE_INVARIANT_TSC), "invariant-tsc");
-    NTEST_ASSERT_EQ_STR(nph_cpu_feature_name((NphCpuFeature)(1U << 30U)), "?");
+    NTEST_ASSERT_EQ_STR(nph_cpu_feature_name(1U << 30U), "?");
+    NTEST_ASSERT_EQ_STR(nph_cpu_feature_name(0U), "?");
     for (u32 bit = 0; bit < 20U; ++bit) {
-        NTEST_ASSERT_NE_STR(nph_cpu_feature_name((NphCpuFeature)(1U << bit)), "?");
+        NTEST_ASSERT_NE_STR(nph_cpu_feature_name(1U << bit), "?");
     }
 }

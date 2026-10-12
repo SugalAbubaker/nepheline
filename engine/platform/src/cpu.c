@@ -269,7 +269,7 @@ void nph_cpu_detect(NphCpuInfo *out)
         char brand[49];
         for (u32 i = 0; i < 3U; ++i) {
             cpuid(0x80000002U + i, 0U, r);
-            copy_regs(brand + i * 16U, r);
+            copy_regs(brand + (u64)i * 16U, r);
         }
         brand[48] = '\0';
         // Vendors pad the brand string with leading spaces.
@@ -368,9 +368,9 @@ u64 nph_cpu_measure_tsc_hz(u64 sample_ns)
     return (u64)((f64)(c1 - c0) * 1e9 / (f64)elapsed_ns);
 }
 
-const char *nph_cpu_feature_name(NphCpuFeature feature)
+const char *nph_cpu_feature_name(u32 feature)
 {
-    switch (feature) {
+    switch ((NphCpuFeature)feature) {
     case NPH_CPU_FEATURE_SSE3:
         return "sse3";
     case NPH_CPU_FEATURE_SSSE3:

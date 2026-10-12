@@ -87,8 +87,9 @@ u32 nph_cpu_logical_count(void);
 // sample duration.
 u64 nph_cpu_measure_tsc_hz(u64 sample_ns);
 
-// A static name for a single feature bit ("avx2"); "?" for unknown bits.
-const char *nph_cpu_feature_name(NphCpuFeature feature);
+// A static name for a single NphCpuFeature bit ("avx2"); "?" for any
+// other value.
+const char *nph_cpu_feature_name(u32 feature);
 
 #ifdef __cplusplus
 }

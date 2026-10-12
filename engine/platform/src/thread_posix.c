@@ -250,7 +250,7 @@ void nph_thread_yield(void)
 
 static pthread_mutex_t *mutex_native(NphMutex *m)
 {
-    return (pthread_mutex_t *)(void *)m->storage;
+    return (pthread_mutex_t *)m->storage;
 }
 
 void nph_mutex_init(NphMutex *m)
@@ -287,7 +287,7 @@ void nph_mutex_unlock(NphMutex *m)
 
 static pthread_cond_t *condvar_native(NphCondVar *cv)
 {
-    return (pthread_cond_t *)(void *)cv->storage;
+    return (pthread_cond_t *)cv->storage;
 }
 
 void nph_condvar_init(NphCondVar *cv)
@@ -332,7 +332,7 @@ void nph_condvar_broadcast(NphCondVar *cv)
 
 static pthread_rwlock_t *rwlock_native(NphRwLock *rw)
 {
-    return (pthread_rwlock_t *)(void *)rw->storage;
+    return (pthread_rwlock_t *)rw->storage;
 }
 
 void nph_rwlock_init(NphRwLock *rw)
@@ -383,7 +383,7 @@ void nph_rwlock_unlock_exclusive(NphRwLock *rw)
 
 static sem_t *semaphore_native(NphSemaphore *s)
 {
-    return (sem_t *)(void *)s->native;
+    return (sem_t *)s->native;
 }
 
 NphResult nph_semaphore_os_init(NphSemaphore *s)

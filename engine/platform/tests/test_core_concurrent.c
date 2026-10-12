@@ -349,7 +349,7 @@ static void debug_alloc_worker(u32 index, void *shared)
     u64 rng = 0xABCDU + index;
     void *slots[16];
     u64 sizes[16];
-    memset(slots, 0, sizeof slots);
+    memset((void *)slots, 0, sizeof slots);
     memset(sizes, 0, sizeof sizes);
     for (u32 i = 0; i < s->iterations; ++i) {
         const u32 slot = (u32)(test_rng_next(&rng) % 16U);
