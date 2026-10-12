@@ -280,12 +280,14 @@ NBENCH(file_read_at_4k)
         return;
     }
     u64 offset = 0U;
+    u64 failures = 0U;
     while (nbench_keep_running(state)) {
         u64 got = 0U;
-        (void)nph_file_read_at(&bf.file, offset, g_block, BENCH_BLOCK, &got);
+        failures += nph_file_read_at(&bf.file, offset, g_block, BENCH_BLOCK, &got) != NPH_RESULT_OK;
         offset = (offset + 64U * BENCH_BLOCK) % BENCH_FILE_SIZE;
         nbench_do_not_optimize(g_block);
     }
+    nbench_do_not_optimize_u64(failures);
     bench_file_close(&bf);
 }
 
@@ -297,10 +299,13 @@ NBENCH(file_write_at_4k)
         return;
     }
     u64 offset = 0U;
+    u64 failures = 0U;
     while (nbench_keep_running(state)) {
-        (void)nph_file_write_at(&bf.file, offset, g_block, BENCH_BLOCK, NULL);
+        failures +=
+            nph_file_write_at(&bf.file, offset, g_block, BENCH_BLOCK, NULL) != NPH_RESULT_OK;
         offset = (offset + 64U * BENCH_BLOCK) % BENCH_FILE_SIZE;
     }
+    nbench_do_not_optimize_u64(failures);
     bench_file_close(&bf);
 }
 
@@ -323,9 +328,11 @@ static void async_read_depth(NbenchState *state, NphAsyncIoBackend backend, u32 
     nbench_set_label(state, nph_async_io_backend_name(nph_async_io_backend(io)));
     nbench_set_items_per_iteration(state, depth);
     u64 offset = 0U;
+    u64 failures = 0U;
     while (nbench_keep_running(state)) {
         for (u32 i = 0; i < depth; ++i) {
-            (void)nph_async_io_read(io, &bf.file, offset, g_blocks[i], (u32)BENCH_BLOCK, i);
+            failures += nph_async_io_read(io, &bf.file, offset, g_blocks[i], (u32)BENCH_BLOCK, i) !=
+                        NPH_RESULT_OK;
             offset = (offset + 64U * BENCH_BLOCK) % BENCH_FILE_SIZE;
         }
         u32 done = 0U;
@@ -334,6 +341,7 @@ static void async_read_depth(NbenchState *state, NphAsyncIoBackend backend, u32 
             done += nph_async_io_poll(io, out, depth - done, NPH_TIME_NS_PER_S);
         }
     }
+    nbench_do_not_optimize_u64(failures);
     nph_async_io_destroy(io);
     bench_file_close(&bf);
 }
