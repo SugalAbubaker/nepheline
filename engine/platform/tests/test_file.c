@@ -279,8 +279,10 @@ NTEST_F(TempDir, async_mode_files_support_sequential_io)
     NTEST_ASSERT_EQ_INT(nph_file_seek(&file, 0, NPH_FILE_SEEK_END, &pos), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_UINT(pos, 6U);
     NTEST_ASSERT_EQ_INT(nph_file_truncate(&file, 3U), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_file_tell(&file, &pos), NPH_RESULT_OK);
-    NTEST_ASSERT_LE_UINT(pos, 3U);
+    // The position after a truncate is unspecified (POSIX keeps it, the
+    // overlapped path clamps it); seeking defines it again.
+    NTEST_ASSERT_EQ_INT(nph_file_seek(&file, 0, NPH_FILE_SEEK_END, &pos), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(pos, 3U);
     nph_file_close(&file);
 }
 

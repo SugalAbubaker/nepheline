@@ -194,6 +194,7 @@ typedef struct FpState {
     NphFiber noisy;
     NphFiber worker;
     f64 sum;
+    f64 noise;         // what the noisy fiber computed, so its work is observable
     u32 rounding_seen; // what the worker observed after resuming
     u32 rounds;
 } FpState;
@@ -205,9 +206,12 @@ static void noisy_fn(void *user)
     FpState *s = (FpState *)user;
     volatile f64 junk[16];
     for (;;) {
+        f64 total = 0.0;
         for (u32 i = 0; i < 16U; ++i) {
             junk[i] = sqrt((f64)i * 7.0 + 1.0) * 1e9;
+            total += junk[i];
         }
+        s->noise = total;
         set_rounding(MXCSR_RC_DOWN);
         nph_fiber_switch(&s->noisy, &s->worker);
     }
