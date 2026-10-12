@@ -18,4 +18,20 @@ function(nph_apply_arch_flags target)
     # MSVC has no /arch level between SSE2 and AVX. The SSE4.2 and POPCNT
     # intrinsics are always available and emit the instructions directly, so
     # no flag is needed; auto-vectorisation simply stays at SSE2.
+
+    # Floating-point policy (docs/adr/0008-math-conventions.md §6): IEEE-754
+    # semantics, no fast-math, and no contraction of a*b+c into FMA. Results
+    # are then identical across translation units compiled at different ISA
+    # levels, which the SIMD kernels and the determinism tests rely on.
+    # GCC already defaults to -ffp-contract=off in ISO C mode; Clang does not.
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+            target_compile_options(${target} INTERFACE /clang:-ffp-contract=off)
+        else()
+            target_compile_options(${target} INTERFACE -ffp-contract=off)
+        endif()
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # The default, stated explicitly: /fp:precise does not contract.
+        target_compile_options(${target} INTERFACE /fp:precise)
+    endif()
 endfunction()

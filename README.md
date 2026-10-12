@@ -19,7 +19,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 |---|---|---|
 | 0 | Foundation: repo, CMake skeleton, presets, warnings, sanitizers, ntest, CI, ADRs | **done** |
 | 1 | Core: types, asserts, logging, allocators, containers, strings, hashing, handles, cvars, serialization | **done** |
-| 2–15 | Math → Platform → Jobs → GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
+| 2 | Math: scalar + SIMD types, geometry, random | **in progress** |
+| 3–15 | Platform → Jobs → GPU/RHI → Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -67,6 +68,7 @@ Modules depend strictly left-to-right:
 
 - [`docs/build.md`](docs/build.md) — build system, presets, options, CI
 - [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, hashing, containers, strings, logging, cvars, serialization
+- [`docs/math.md`](docs/math.md) — math module: conventions, scalar/vector/quaternion/matrix layer, SIMD, geometry, random
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness and methodology
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records
