@@ -453,32 +453,28 @@ static void ordered_job(void *user)
     }
 }
 
-typedef struct Gate {
-    NphJobSystem *js;
-    NphJobCounter *counter;
-} Gate;
-
+// Holds the worker thread itself (not a parked fiber: the worker would be
+// free to run whatever arrived) until the main thread has queued every
+// job of the test, so the only order the worker can choose is by priority.
 static void gate_job(void *user)
 {
-    Gate *g = (Gate *)user;
-    nph_job_wait(g->js, g->counter);
+    NphAtomicU32 *open = (NphAtomicU32 *)user;
+    while (nph_atomic_load_u32(open, NPH_MEMORY_ORDER_ACQUIRE) == 0U) {
+        nph_thread_yield();
+    }
 }
 
 // One worker, held by a gate job, receives low, normal, and high jobs; once
-// released it must run them high first, low last.
+// released it must run them high first, low last. The gate is queued first
+// and alone, so it is the job the worker starts with.
 NTEST(jobs, priorities_are_strict_on_one_worker)
 {
     NphJobSystem *js = test_jobs_create(1U);
-    NphJobCounter gate_counter = NPH_JOB_COUNTER_INIT;
-    nph_job_counter_add(&gate_counter, 1U);
-    Gate gate = {js, &gate_counter};
-    const NphJobDecl gate_decl = {gate_job, &gate, "gate"};
+    NphAtomicU32 open = NPH_ATOMIC_U32_INIT(0U);
+    const NphJobDecl gate_decl = {gate_job, &open, "gate"};
     NphJobCounter gate_done = NPH_JOB_COUNTER_INIT;
     NTEST_ASSERT_EQ_INT(nph_job_run(js, &gate_decl, 1U, NPH_JOB_PRIORITY_HIGH, &gate_done),
                         NPH_RESULT_OK);
-    // Wait until the gate job is parked: it is the only job, so once it has
-    // started the worker is either in it or parked on the fiber switch.
-    nph_thread_sleep_ns(20U * NPH_TIME_NS_PER_MS);
 
     Ordered o;
     memset(&o, 0, sizeof o);
@@ -489,7 +485,7 @@ NTEST(jobs, priorities_are_strict_on_one_worker)
         NTEST_ASSERT_EQ_INT(nph_job_run(js, &decl, 1U, (NphJobPriority)jobs[i].tag, &done),
                             NPH_RESULT_OK);
     }
-    nph_job_counter_signal(js, &gate_counter);
+    nph_atomic_store_u32(&open, 1U, NPH_MEMORY_ORDER_RELEASE);
     nph_job_wait(js, &gate_done);
     nph_job_wait(js, &done);
     NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&o.next, NPH_MEMORY_ORDER_RELAXED), 6U);
