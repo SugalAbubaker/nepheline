@@ -13,6 +13,7 @@ supersedes it and both link to each other.
 | [0005](0005-atomics-in-core.md) | Atomics live in core; the logger thread lives in platform | Accepted |
 | [0006](0006-containers.md) | Core containers: representation and the hash map design | Accepted |
 | [0007](0007-serialization-formats.md) | Serialization formats: binary documents, JSON, and cvar config | Accepted |
+| [0008](0008-math-conventions.md) | Math module: conventions, storage layouts, and SIMD layering | Accepted |
 
 ## Template
 
