@@ -6,9 +6,10 @@ The decisions that shape every header are in
 [ADR-0008](adr/0008-math-conventions.md); this document describes what the
 module contains and how it is tested. It grows with the module.
 
-Status: **Phase 2 in progress.** Scalar layer complete (`scalar.h`, `vec.h`,
-`quat.h`, `mat.h`, `affine.h`). Geometry, packing, random, SIMD, and wide
-types follow in the next pull requests.
+Status: **Phase 2 in progress.** Scalar layer (`scalar.h`, `vec.h`,
+`quat.h`, `mat.h`, `affine.h`), geometry (`geometry.h`), packing (`pack.h`),
+and random (`random.h`) complete. SIMD and wide types follow in the last
+pull request of the phase.
 
 ## Conventions in one paragraph
 
@@ -99,6 +100,95 @@ buffers without padding and transforms a point with three dot products.
 It offers the same constructors, products, transforms, inverse (general and
 `inverse_rigid`), and TRS decomposition as `NphMat4`, and converts to and
 from it losslessly.
+
+## Geometry (`geometry.h`)
+
+Scalar reference implementations of the bounding volumes and tests the
+culling and physics code is built on (Ericson, *Real-Time Collision
+Detection*). The wide SoA kernels implement the same frustum tests for four
+or eight volumes at a time and are checked against these.
+
+- **`NphAABB`** (`min`, `max`; 24 bytes). `nph_aabb_empty` is the inverted
+  box (+inf, −inf) so `union`/`expand` need no first-point special case;
+  `is_empty` detects it and the result of intersecting disjoint boxes.
+  Centre/extents/size/area/volume, the eight corners (bit *i* of the index
+  selects `max` on axis *i*), union, expand, grow, intersection, translate,
+  closed-interval containment and overlap, closest point and squared
+  distance, `from_points`, `bounding_sphere`, and `nph_aabb_transform`
+  (Arvo, Graphics Gems 1990: transformed centre plus `|L|·extents`).
+- **`NphSphere`** (16 bytes). Containment and overlap with points, spheres,
+  and boxes (closest-point test), the minimal enclosing sphere of two
+  spheres, Ritter's two-pass approximate bounding sphere of a point set
+  (Graphics Gems 1990), and transform by a rotation-and-scale affine.
+- **`NphPlane`** (`normal`, `d`; `n·p + d = 0`; 16 bytes, one SIMD register).
+  Construction from point-and-normal, three points (right-hand rule), or a
+  `vec4`; normalisation; signed distance; projection; side with epsilon;
+  flip; and transform by the inverse transpose of an affine's linear part.
+- **`NphRay`** (`origin + t·dir`, `t ≥ 0`). Slab test against boxes with an
+  explicit branch for axis-parallel directions (avoiding the `0·∞` NaN of
+  the pure form), nearest intersection with spheres (exit point from
+  inside), planes, and triangles (Möller–Trumbore 1997, optional back-face
+  culling, barycentrics out). Closest point on a segment and on a triangle
+  (Ericson §5.1.5, Voronoi regions).
+- **`NphFrustum`**: five or six inward-facing normalised planes extracted
+  from a clip matrix by combining its rows (Gribb & Hartmann 2001) for
+  Vulkan's `0 ≤ z ≤ w` and reversed depth; the far plane of an infinite
+  projection is degenerate and dropped, and unused slots hold a plane every
+  point satisfies so fixed-count loops work. Point containment, and
+  box/sphere classification into OUTSIDE / INTERSECTS / INSIDE with the
+  p-vertex/n-vertex test (Assarsson & Möller 2000). OUTSIDE and INSIDE are
+  exact; INTERSECTS may be reported for a box that is actually outside near
+  a frustum edge, which is the accepted trade-off for culling.
+
+## Packing (`pack.h`)
+
+Compact encodings that follow the Vulkan conversion rules, so what the CPU
+writes is what the GPU reads back.
+
+- **binary16**: `nph_f32_to_f16` rounds to nearest even with correct
+  subnormals, overflow to infinity, and quiet NaN; `nph_f16_to_f32` is
+  exact. Array and 2/4-wide packed forms. Tested exhaustively (every half
+  round-trips) and against an independent binary-search oracle over a
+  million random bit patterns.
+- **unorm/snorm 8/16**: Vulkan §3.9 rounding; both most-negative snorm
+  codes decode to −1. Packed RGBA8, snorm8×4, unorm16×2, snorm16×2 with
+  the first component in the low bits.
+- **Octahedral unit vectors** (Meyer et al. 2010; Cigolle et al., JCGT
+  2014): `nph_oct_encode/decode` to `[−1, 1]²`, plus snorm16×2 (32-bit,
+  < 0.006° error) and snorm8×2 (16-bit, < 0.7°) quantised forms. The axes
+  round-trip exactly.
+- **R11G11B10F** (`VK_FORMAT_B10G11R11_UFLOAT_PACK32`) via binary16 with a
+  second round-to-nearest-even to 6 or 5 mantissa bits; negatives clamp to
+  0, infinity and NaN survive, overflow saturates to infinity.
+- **RGB9E5** (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`): exactly the
+  `EXT_texture_shared_exponent` algorithm, including the mantissa-overflow
+  exponent bump and the 65408 clamp.
+
+## Random (`random.h`)
+
+Every generator is a pure function of explicit state or index: the same
+seed gives the same stream on every platform (§2 determinism).
+
+- **PCG32** (O'Neill 2014; XSH-RR on a 64-bit LCG): seeding identical to
+  `pcg32_srandom_r` (verified against the reference outputs for seed 42 /
+  stream 54), `u32`/`u64`, unbiased bounded integers (Lemire 2019, nearly
+  divisionless), `f32` in [0, 1) from 24 bits (exactly representable, never
+  1), `f64` from 53 bits, and O(log n) `advance` (Brown 1994) so jobs can
+  carve disjoint sub-streams from one seed.
+- **Low-discrepancy**: base-2 radical inverse by bit reversal, general-base
+  radical inverse (Halton), the (2, 3) Halton pair, and Roberts's R1/R2
+  additive recurrences (golden ratio, plastic constant) for per-pixel
+  jitter.
+- **Sample warps**: Shirley–Chiu concentric disk, uniform sphere and
+  hemisphere, cosine-weighted hemisphere (Malley), uniform triangle
+  barycentrics, with the matching pdfs.
+- **Blue noise**: `nph_blue_noise_generate` implements Ulichney's
+  void-and-cluster method (SPIE 1993) with a toroidal Gaussian, producing
+  a rank permutation for dither and sample textures. O(N²) time and 14
+  bytes of scratch per texel from the caller's allocator; a cooker-side
+  tool. Tests check the permutation, determinism per seed, and that the
+  early ranks are spaced near the ideal `sqrt(N/k)` where white noise is
+  not.
 
 ## Testing
 

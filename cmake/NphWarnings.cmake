@@ -24,8 +24,12 @@ function(nph_apply_warnings target)
             # after whole-program constant propagation (e.g. a `return` following a
             # conditional longjmp whose condition is constant at every call site).
             # It reports optimizer facts, not source bugs, so it is off only where
-            # LTO runs. The other configurations keep it.
+            # LTO runs. The other configurations keep it. C4723 "potential divide
+            # by 0" is the same phenomenon: a call site with a constant argument
+            # (a ray perpendicular to a plane) is inlined and the divisor becomes
+            # a known zero on a path the preceding guard already returns from.
             $<$<CONFIG:Shipping>:/wd4702>
+            $<$<CONFIG:Shipping>:/wd4723>
         )
         if(NPH_WARNINGS_AS_ERRORS)
             target_compile_options(${target} INTERFACE /WX)
