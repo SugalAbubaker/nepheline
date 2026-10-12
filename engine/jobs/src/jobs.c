@@ -901,9 +901,15 @@ static void wait_inline(NphJobSystem *js, NphJobCounter *c, u32 target, NphJobWa
             }
         } else if (nph_atomic_exchange_u32(&js->stack_limit_warned, 1U, NPH_MEMORY_ORDER_RELAXED) ==
                    0U) {
+            // A configuration error: the pool is too small for the workload
+            // and the stack too small for the nesting that follows. Loud in
+            // development; in shipping the wait sleeps and the counter is
+            // met if any worker with stack room runs the outstanding jobs.
             NPH_LOG_ERROR(&NPH_LOG_JOBS,
                           "nested inline waits reached the fiber stack reserve; the worker is "
                           "sleeping (raise fiber_count or fiber_stack_size)");
+            NPH_ASSERT_MSG(false, "fiber stack exhausted by nested waits: raise fiber_count or "
+                                  "fiber_stack_size (sanitizer builds need larger stacks)");
         }
         node->fiber = NULL;
         node->sem = &w->sem;

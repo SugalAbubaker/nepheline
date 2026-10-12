@@ -65,6 +65,16 @@ bool nph_semaphore_try_wait(NphSemaphore *s)
     return try_take(s);
 }
 
+// After a kernel wait handed over a permit. The kernel object orders the
+// post before the wake-up; this acquire load of the count, which the
+// poster's release increment wrote, states the same ordering in terms of
+// the atomics so that ThreadSanitizer, which does not intercept every
+// kernel wait (sem_clockwait), sees it too.
+static void acquire_after_kernel_wait(const NphSemaphore *s)
+{
+    (void)nph_atomic_load_u32(&s->count, NPH_MEMORY_ORDER_ACQUIRE);
+}
+
 void nph_semaphore_wait(NphSemaphore *s)
 {
     NPH_ASSERT(s != NULL);
@@ -78,6 +88,7 @@ void nph_semaphore_wait(NphSemaphore *s)
         return;
     }
     nph_semaphore_os_wait(s);
+    acquire_after_kernel_wait(s);
 }
 
 bool nph_semaphore_wait_timeout(NphSemaphore *s, u64 timeout_ns)
@@ -94,6 +105,7 @@ bool nph_semaphore_wait_timeout(NphSemaphore *s, u64 timeout_ns)
         return true;
     }
     if (nph_semaphore_os_wait_timeout(s, timeout_ns)) {
+        acquire_after_kernel_wait(s);
         return true;
     }
     // Timed out with this thread still counted as a waiter. Withdraw, unless
@@ -102,6 +114,7 @@ bool nph_semaphore_wait_timeout(NphSemaphore *s, u64 timeout_ns)
     for (;;) {
         u32 now = nph_atomic_load_u32(&s->count, NPH_MEMORY_ORDER_RELAXED);
         if (now >= NPH_SEMAPHORE_BIAS && nph_semaphore_os_try_wait(s)) {
+            acquire_after_kernel_wait(s);
             return true;
         }
         if (now < NPH_SEMAPHORE_BIAS &&

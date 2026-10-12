@@ -67,7 +67,11 @@ common "how long did this take" pattern.
   to sleep or be woken; a waiter spins 1024 iterations before sleeping.
   `nph_semaphore_wait_timeout` withdraws its registration on timeout
   unless a post has already paid for it, in which case it consumes the
-  kernel permit, so the count stays exact.
+  kernel permit, so the count stays exact. A wait that came back from
+  the kernel ends with an acquire load of the count: the kernel object
+  already orders the post before the wake-up, but ThreadSanitizer does
+  not intercept every kernel wait (`sem_clockwait`), and the load states
+  the ordering in terms it models.
 - **Once.** `nph_once` runs an initialiser exactly once; racers spin until
   it is done. Used for the cached CPU info and the virtual-memory sizes.
 
