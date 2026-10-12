@@ -100,3 +100,20 @@ halton_2d                      72
 r2                             15
 oct_encode_snorm16             150
 blue_noise_32x32               4000000
+
+# platform_bench (docs/platform.md). OS-bound entries (thread creation, file
+# and async I/O, virtual memory) get 5x: hosted runners vary the most there.
+fiber_switch                   40
+mutex_lock_unlock              15
+spin_lock_acquire_release      8
+semaphore_post_wait            15
+semaphore_round_trip           250
+thread_create_join             300000
+time_now_ns                    100
+time_cycles                    25
+vmem_commit_decommit_64k       15000
+file_read_at_4k                25000
+file_write_at_4k               40000
+async_read_4k_depth_1          40000
+async_read_4k_depth_32         40000
+async_read_4k_threads_32       20000

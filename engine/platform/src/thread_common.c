@@ -83,6 +83,9 @@ void nph_semaphore_wait(NphSemaphore *s)
 bool nph_semaphore_wait_timeout(NphSemaphore *s, u64 timeout_ns)
 {
     NPH_ASSERT(s != NULL);
+    if (timeout_ns == 0U) {
+        return try_take(s); // a poll: no spinning, no kernel
+    }
     if (wait_spinning(s)) {
         return true;
     }

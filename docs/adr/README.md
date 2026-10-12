@@ -15,6 +15,8 @@ supersedes it and both link to each other.
 | [0007](0007-serialization-formats.md) | Serialization formats: binary documents, JSON, and cvar config | Accepted |
 | [0008](0008-math-conventions.md) | Math module: conventions, storage layouts, and SIMD layering | Accepted |
 | [0009](0009-platform-threads-and-memory.md) | Platform layer: threads, synchronisation, virtual memory, and the TLSF locking decision | Accepted |
+| [0010](0010-fibers.md) | Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback | Accepted |
+| [0011](0011-files-and-async-io.md) | Files, memory mapping, and asynchronous I/O backends | Accepted |
 
 ## Template
 

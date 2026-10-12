@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <nepheline/core/alloc.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/platform/vmem.h>
 
@@ -94,6 +95,10 @@ NphResult nph_vmem_commit(void *ptr, u64 size)
 NphResult nph_vmem_decommit(void *ptr, u64 size)
 {
     NPH_ASSERT(ptr != NULL && size > 0U);
+    // Instrumented code that ran on this memory (a fiber stack) left its
+    // redzones in the sanitizer's shadow; clear them before the addresses
+    // can be handed to something else.
+    NPH_ASAN_UNPOISON(ptr, size);
     // MEM_DECOMMIT on a range that is already decommitted succeeds.
     if (!VirtualFree(ptr, (SIZE_T)size, MEM_DECOMMIT)) {
         return nph_win32_fail("VirtualFree(MEM_DECOMMIT)", GetLastError());
@@ -103,8 +108,9 @@ NphResult nph_vmem_decommit(void *ptr, u64 size)
 
 NphResult nph_vmem_release(void *ptr, u64 size)
 {
-    NPH_ASSERT(ptr != NULL);
-    NPH_UNUSED(size); // Windows releases the whole reservation by base address
+    NPH_ASSERT(ptr != NULL && size > 0U);
+    NPH_ASAN_UNPOISON(ptr, size); // see nph_vmem_decommit
+    // Windows releases the whole reservation by base address.
     if (!VirtualFree(ptr, 0U, MEM_RELEASE)) {
         return nph_win32_fail("VirtualFree(MEM_RELEASE)", GetLastError());
     }
