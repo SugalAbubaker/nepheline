@@ -684,20 +684,22 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     dev->props = c->props.properties;
     dev->mem_props = c->memory;
 
-    // Queue plan
+    // Queue plan. desc.single_queue routes everything to the graphics
+    // queue, as hardware with one family and one queue would.
+    const bool single = dev->desc.single_queue != 0;
     u32 graphics_queue_index = 0U;
-    u32 compute_family = c->compute_family;
+    u32 compute_family = single ? NPH_U32_MAX : c->compute_family;
     u32 compute_queue_index = 0U;
     bool compute_distinct = true;
     if (compute_family == NPH_U32_MAX) {
         compute_family = c->graphics_family;
-        if (c->graphics_queue_count >= 2U) {
+        if (!single && c->graphics_queue_count >= 2U) {
             compute_queue_index = 1U;
         } else {
             compute_distinct = false;
         }
     }
-    u32 transfer_family = c->transfer_family;
+    u32 transfer_family = single ? NPH_U32_MAX : c->transfer_family;
     const bool transfer_distinct = transfer_family != NPH_U32_MAX;
     if (!transfer_distinct) {
         transfer_family = c->graphics_family;

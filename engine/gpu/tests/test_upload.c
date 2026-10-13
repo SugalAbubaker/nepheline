@@ -216,28 +216,27 @@ NTEST_F(GpuFixture, image_uploads_land_in_shader_read_only)
     nph_gpu_image_destroy(f->dev, img);
 }
 
-NTEST_F(GpuFixture, uploads_inside_frames_feed_graphics_work)
+// Three frames, each uploading a buffer and then reading it back on the
+// graphics queue, and the graphics work that follows sees the upload
+// without any wait of its own.
+static void frame_uploads_feed_graphics_work(NphGpuDevice *dev)
 {
-    REQUIRE_DEVICE(f);
-    NphGpuBuffer buf = test_make_buffer(f->dev, 1024U,
-                                        (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
-                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
-                                        NPH_GPU_MEMORY_DEVICE, "frame upload");
-    NphGpuBuffer rb = test_make_buffer(f->dev, 1024U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+    NphGpuBuffer buf = test_make_buffer(
+        dev, 1024U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+        NPH_GPU_MEMORY_DEVICE, "frame upload");
+    NphGpuBuffer rb = test_make_buffer(dev, 1024U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                                        NPH_GPU_MEMORY_READBACK, "frame readback");
     u32 words[256];
     for (u32 frame = 0; frame < 3U; ++frame) {
-        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
         fill_pattern(words, 256U, frame + 100U);
-        NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, words, sizeof words),
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(dev, buf, 0U, words, sizeof words),
                             NPH_RESULT_OK);
         u64 upload_value = 0U;
-        NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, &upload_value), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(dev, &upload_value), NPH_RESULT_OK);
         NTEST_ASSERT_GT_UINT(upload_value, 0U);
-        // The graphics work that follows sees the upload without any wait
-        // of its own.
         NphGpuCmd *cmd = NULL;
-        NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_GRAPHICS, "consume", &cmd),
+        NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "consume", &cmd),
                             NPH_RESULT_OK);
         NphGpuBufferCopy region = {0U, 0U, sizeof words};
         nph_gpu_cmd_copy_buffer(cmd, buf, rb, &region, 1U);
@@ -246,11 +245,38 @@ NTEST_F(GpuFixture, uploads_inside_frames_feed_graphics_work)
         memset(&sd, 0, sizeof sd);
         sd.cmds = &cmd;
         sd.cmd_count = 1U;
-        NTEST_ASSERT_EQ_INT(nph_gpu_submit(f->dev, &sd, NULL), NPH_RESULT_OK);
-        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
-        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
-        NTEST_ASSERT_EQ_MEM(nph_gpu_buffer_map(f->dev, rb), words, sizeof words);
+        NTEST_ASSERT_EQ_INT(nph_gpu_submit(dev, &sd, NULL), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_MEM(nph_gpu_buffer_map(dev, rb), words, sizeof words);
     }
-    nph_gpu_buffer_destroy(f->dev, buf);
-    nph_gpu_buffer_destroy(f->dev, rb);
+    nph_gpu_buffer_destroy(dev, buf);
+    nph_gpu_buffer_destroy(dev, rb);
+}
+
+NTEST_F(GpuFixture, uploads_inside_frames_feed_graphics_work)
+{
+    REQUIRE_DEVICE(f);
+    frame_uploads_feed_graphics_work(f->dev);
+}
+
+// The same on one queue: no transfer timeline to wait on, so the upload
+// command buffer must carry the barriers itself. Synchronisation
+// validation on lavapipe found this missing (a read-after-write hazard on
+// the uploaded buffer); desc.single_queue reproduces that layout on any
+// device.
+NTEST(gpu_upload, uploads_feed_graphics_work_on_a_single_queue)
+{
+    NphGpuDeviceDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.headless = 1;
+    desc.single_queue = 1;
+    NphGpuDevice *dev = test_gpu_create(&desc);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NTEST_ASSERT_FALSE(nph_gpu_device_info(dev)->features.async_compute);
+    NTEST_ASSERT_FALSE(nph_gpu_device_info(dev)->features.dedicated_transfer);
+    frame_uploads_feed_graphics_work(dev);
+    test_gpu_destroy(dev);
 }

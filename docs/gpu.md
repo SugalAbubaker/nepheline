@@ -51,6 +51,9 @@ graphics family, otherwise the graphics queue itself) and TRANSFER (a
 transfer-only family when present, otherwise the graphics queue). The
 queue table may alias; `NphGpuFeatures.async_compute` and
 `dedicated_transfer` say whether the queues are distinct.
+`NphGpuDeviceDesc.single_queue` forces the aliased layout on any device,
+so the single-queue paths that lavapipe and most integrated GPUs take
+are tested on the development machine too.
 
 ## Validation gate
 
@@ -120,6 +123,12 @@ upload into a resource that frame read cannot race it, then submits a
 small graphics-queue command buffer that waits for the transfer and
 acquires any exclusive images; every later graphics submit is ordered
 after it (the semaphore wait's second scope includes later submissions).
+When the transfer queue is the graphics queue there is no semaphore to
+wait on, and the upload command buffer carries the barriers itself: a
+global memory barrier before the copies against everything the queue
+did earlier, and one after them for everything it does later (a
+pipeline barrier's scopes span submissions on the queue). Synchronisation
+validation on lavapipe found the second one missing.
 Uploaded mips end in SHADER_READ_ONLY (sampled images) or GENERAL. Ring
 space is released when the frame that allocated it completes; outside a
 frame a flush is synchronous.
