@@ -15,7 +15,7 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
 | Window system | nothing extra | `libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev` to build GLFW; `xvfb` to run the window tests headless |
 | Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, and VMA live in `third_party/`) | same |
-| Vulkan | the LunarG SDK (1.4.321 is the pinned reference; `scripts/install_vulkan_sdk.ps1 -Version 1.4.321.1` installs it unattended): `glslc` for the shader build, the validation layers for Debug and Development, and the loader | `glslc` and `libvulkan1`; `vulkan-validationlayers` for Debug and Development; `mesa-vulkan-drivers` for lavapipe, the software driver the GPU tests run on without a GPU |
+| Vulkan | the LunarG SDK (1.4.321 is the pinned reference; `scripts/install_vulkan_sdk.ps1 -Version 1.4.321.1` installs it unattended): `glslc` for the shader build, the validation layers for Debug and Development, and the loader | `glslc` and `libvulkan1`; the validation layer for Debug and Development, from the pinned SDK (`scripts/install_vulkan_layer.sh 1.4.321.1`, then `VK_LAYER_PATH=~/vulkan-sdk/share/vulkan/explicit_layer.d`; Ubuntu 24.04's `vulkan-validationlayers` is 1.3.275 and crashes on lavapipe); `mesa-vulkan-drivers` for lavapipe, the software driver the GPU tests run on without a GPU |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
 ## Quick start
@@ -92,6 +92,7 @@ target links.
 | `NPH_TSAN` | `OFF` | ThreadSanitizer in Debug (GCC/Clang); excludes `NPH_ASAN` |
 | `NPH_COVERAGE` | `OFF` | Instrument for llvm-cov source-based coverage (Clang only; combine with `-DNPH_ASAN=OFF -DNPH_UBSAN=OFF`) |
 | `NPH_FIBERS_WIN32` | `OFF` | Windows only: build the fiber layer on the Win32 fiber API instead of the assembly context switch ([ADR-0010](adr/0010-fibers.md)) |
+| `NPH_GPU_REQUIRE_VALIDATION` | `OFF` | The gpu tests fail when the Khronos validation layer is missing in Debug and Development, instead of running unvalidated (the device only warns). CI sets it on Linux |
 
 Pass them at configure time: `cmake --preset linux-clang -DNPH_ASAN=OFF -DNPH_TSAN=ON`.
 
@@ -244,10 +245,15 @@ install `mesa-vulkan-drivers` and point the loader at lavapipe only
 (`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, the manifest name
 Ubuntu's package uses; upstream Mesa installs `lvp_icd.x86_64.json`, and a
 listed file that does not exist is reported by the loader as an error that
-the validation gate counts), install
-`vulkan-validationlayers` so Debug and Development builds run with the
-validation gate, and run CTest under Xvfb so the swapchain tests can open
-a window. LeakSanitizer suppresses the loader's and lavapipe's
+the validation gate counts), install the Khronos validation layer from the
+pinned SDK release with `scripts/install_vulkan_layer.sh` (cached per
+version; `VK_LAYER_PATH` points the loader at it alone, because Ubuntu's
+`vulkan-validationlayers` 1.3.275 crashes inside itself on lavapipe and
+reports synchronisation hazards the pinned layer does not), configure with
+`-DNPH_GPU_REQUIRE_VALIDATION=ON` so a runner that lost the layer fails the
+gpu tests instead of running them unvalidated, and run CTest under Xvfb so
+the swapchain tests can open a window. LeakSanitizer suppresses the
+loader's and lavapipe's
 process-lifetime allocations (`tests/lsan.supp`). Windows runners have no
 driver: the GPU tests report "skipped" and the samples exit with 77, which
 CTest treats as skipped (`SKIP_RETURN_CODE`). Windows jobs install the

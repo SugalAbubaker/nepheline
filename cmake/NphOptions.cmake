@@ -8,6 +8,7 @@ option(NPH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only; links -fsanit
 option(NPH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (CLAUDE.md §1.3)" ON)
 option(NPH_COVERAGE "Instrument for llvm-cov source-based coverage (Clang only; CLAUDE.md §9)" OFF)
 option(NPH_FIBERS_WIN32 "Use the Win32 fiber API instead of the assembly context switch (Windows only; docs/adr/0010-fibers.md)" OFF)
+option(NPH_GPU_REQUIRE_VALIDATION "The gpu tests fail, instead of continuing without it, when the Khronos validation layer is missing in Debug and Development (for CI runners)" OFF)
 
 # Sanitizers apply to the Debug configuration only (CLAUDE.md §6).
 # clang-cl's AddressSanitizer runtime conflicts with the MSVC CRT's copy of the

@@ -23,6 +23,13 @@
 #error "NPH_SHADER_DIR must point at the compiled shaders (nph_target_use_shaders)"
 #endif
 
+// Set by CMake (NPH_GPU_REQUIRE_VALIDATION=ON) on CI runners: the layer
+// must be present, since a device that continues without it would pass the
+// validation gate without validating anything.
+#ifndef NPH_GPU_REQUIRE_VALIDATION
+#define NPH_GPU_REQUIRE_VALIDATION 0
+#endif
+
 // ---------------------------------------------------------------------------
 // Expected assertions (as in the core tests)
 // ---------------------------------------------------------------------------
@@ -83,6 +90,12 @@ static inline NphGpuDevice *test_gpu_create(const NphGpuDeviceDesc *override)
     }
     NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
     NTEST_ASSERT_NOT_NULL(dev);
+#if NPH_GPU_REQUIRE_VALIDATION && NPH_GPU_VALIDATION_ENABLED
+    if (override == NULL) {
+        NTEST_ASSERT_TRUE(nph_gpu_device_info(dev)->validation);
+        NTEST_ASSERT_TRUE(nph_gpu_device_info(dev)->sync_validation);
+    }
+#endif
     return dev;
 }
 
