@@ -77,4 +77,9 @@ if(NPH_BUILD_TESTS)
     if(MSVC)
         target_compile_definitions(gpu_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
+    # A CI runner without the layer must fail the gate, not skip validating
+    # (the device itself only warns and continues; see docs/build.md).
+    if(NPH_GPU_REQUIRE_VALIDATION)
+        target_compile_definitions(gpu_tests PRIVATE NPH_GPU_REQUIRE_VALIDATION=1)
+    endif()
 endif()

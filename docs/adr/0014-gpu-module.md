@@ -30,8 +30,11 @@ parallel, and how resources cross queue families.
    validation layers (Debug and Development), and the loader (run time,
    found by volk). The instance asks for API 1.3 and the device must offer
    1.3; 1.4 headers compile fine for that. CI installs the matching SDK on
-   Windows and `glslc` plus `mesa-vulkan-drivers` and
-   `vulkan-validationlayers` on Ubuntu 24.04.
+   Windows; on Ubuntu 24.04 it installs `glslc` plus `mesa-vulkan-drivers`
+   from apt and the validation layer from the same SDK release
+   (`scripts/install_vulkan_layer.sh`), because Ubuntu's
+   `vulkan-validationlayers` is 1.3.275, crashes inside itself on lavapipe,
+   and reports synchronisation hazards the pinned layer does not.
 
 2. **VMA is one C++ translation unit behind a C interface.**
    `engine/gpu/src/gpu_vma.cpp` includes `vk_mem_alloc.h`, defines
