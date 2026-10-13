@@ -21,15 +21,23 @@ static u64 dump_to_buffer(NphJobSystem *js, char *buf, u64 cap)
     }
     snprintf(path, sizeof path, "%s/nph_jobs_dump_%llu.txt", tmp,
              (unsigned long long)nph_platform_process_id());
-    FILE *f = fopen(path, "w+");
+    FILE *f = fopen(path, "wb"); // binary: no line-end translation on Windows
     if (f == NULL) {
         return 0U;
     }
     nph_job_system_dump(js, f);
-    rewind(f);
-    const u64 n = fread(buf, 1U, cap - 1U, f);
+    if (fclose(f) != 0) {
+        return 0U;
+    }
+    void *data = NULL;
+    u64 size = 0U;
+    u64 n = 0U;
+    if (nph_file_read_all(path, nph_allocator_system(), &data, &size) == NPH_RESULT_OK) {
+        n = size < cap - 1U ? size : cap - 1U;
+        memcpy(buf, data, n);
+        nph_file_free_all(nph_allocator_system(), data, size);
+    }
     buf[n] = '\0';
-    fclose(f);
     (void)nph_fs_remove_file(path);
     return n;
 }

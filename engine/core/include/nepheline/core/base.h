@@ -92,6 +92,19 @@ extern "C" {
 #define NPH_TSAN_ENABLED 0
 #endif
 
+// Marks a function whose reads are racy by design (a diagnostic that
+// reads other threads' live state, such as nph_job_system_dump) so that
+// ThreadSanitizer does not instrument it. Clang spells the attribute
+// no_sanitize("thread"), GCC no_sanitize_thread; MSVC has no
+// ThreadSanitizer.
+#if NPH_TSAN_ENABLED && defined(__clang__)
+#define NPH_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
+#elif NPH_TSAN_ENABLED
+#define NPH_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+#else
+#define NPH_NO_SANITIZE_THREAD
+#endif
+
 // Build configuration flags are defined by CMake (cmake/NphConfigurations.cmake):
 // NPH_CONFIG_{DEBUG,DEVELOPMENT,PROFILE,SHIPPING}, NPH_ASSERTS_ENABLED,
 // NPH_GPU_VALIDATION_ENABLED, NPH_PROFILER_ENABLED. Normalise the ones code

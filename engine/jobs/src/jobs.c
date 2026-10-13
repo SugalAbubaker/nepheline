@@ -1358,7 +1358,10 @@ static void dump_deque(const NphJobDeque *d, FILE *out)
     fputc('\n', out);
 }
 
-void nph_job_system_dump(const NphJobSystem *js, FILE *out)
+// Reads the workers' fibers, the fibers' depths, and the pending waits
+// without synchronisation: the dump describes a stuck system, and a live
+// one only approximately. ThreadSanitizer is told so.
+NPH_NO_SANITIZE_THREAD void nph_job_system_dump(const NphJobSystem *js, FILE *out)
 {
     NPH_ASSERT(js != NULL && out != NULL);
     fprintf(out,
