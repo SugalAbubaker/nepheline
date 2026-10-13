@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Writes a pattern into a bindless storage image: texel (x, y) gets
+// (x, y, value, 255) / 255 so tests can verify every texel.
+#version 460
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant, scalar) uniform Push { NphTestPush pc; };
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(nph_images_2d[nonuniformEXT(pc.image_index)]);
+    if (p.x >= size.x || p.y >= size.y) {
+        return;
+    }
+    const vec4 v = vec4(float(p.x & 255), float(p.y & 255), float(pc.value & 255u), 255.0) / 255.0;
+    imageStore(nph_images_2d[nonuniformEXT(pc.image_index)], p, v);
+}

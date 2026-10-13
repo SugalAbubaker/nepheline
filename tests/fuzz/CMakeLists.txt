@@ -7,3 +7,6 @@ nph_add_fuzzer(json SOURCES fuzz_json.c DEPS nph::core)
 nph_add_fuzzer(bin SOURCES fuzz_bin.c DEPS nph::core)
 nph_add_fuzzer(utf8 SOURCES fuzz_utf8.c DEPS nph::core)
 nph_add_fuzzer(cvar SOURCES fuzz_cvar.c DEPS nph::core)
+
+# The SPIR-V reflection parser (engine/gpu, CLAUDE.md §8.5).
+nph_add_fuzzer(spirv SOURCES fuzz_spirv.c DEPS nph::gpu)
