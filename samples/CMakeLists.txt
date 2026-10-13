@@ -24,3 +24,20 @@ nph_add_sample(jobs_demo
     SOURCES jobs_demo/main.c
     DEPS nph::jobs
     ARGS --frames=60)
+
+# The GPU samples exit with 77 on a machine without a window system or a
+# Vulkan device, which CTest reports as skipped (CLAUDE.md §12 Phase 5).
+nph_add_sample(gpu_triangle
+    SOURCES gpu_triangle/main.c
+    DEPS nph::gpu
+    ARGS --frames=60
+    SKIP_RETURN_CODE 77)
+nph_add_sample(gpu_mesh
+    SOURCES gpu_mesh/main.c
+    DEPS nph::gpu
+    ARGS --frames=120
+    SKIP_RETURN_CODE 77)
+if(TARGET gpu_triangle)
+    nph_target_use_shaders(gpu_triangle nph_shaders_samples)
+    nph_target_use_shaders(gpu_mesh nph_shaders_samples)
+endif()

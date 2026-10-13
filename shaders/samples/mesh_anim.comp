@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// gpu_mesh: computes one spinning model matrix per instance on the async
+// compute queue, written through a buffer address.
+#version 460
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x = 64) in;
+
+NPH_BUFFER_REF(Instances) { NphMat4 m[]; };
+
+layout(push_constant, scalar) uniform Push { NphMeshPush pc; };
+
+mat4 rotation_y(float a)
+{
+    const float c = cos(a);
+    const float s = sin(a);
+    return mat4(c, 0.0, -s, 0.0, 0.0, 1.0, 0.0, 0.0, s, 0.0, c, 0.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+mat4 rotation_x(float a)
+{
+    const float c = cos(a);
+    const float s = sin(a);
+    return mat4(1.0, 0.0, 0.0, 0.0, 0.0, c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.instance_count) {
+        return;
+    }
+    const float n = float(pc.instance_count);
+    const float ring = 6.2831853 * float(i) / n;
+    const float radius = n > 1.0 ? 2.5 : 0.0;
+    mat4 m = rotation_y(pc.time * 0.9 + ring) * rotation_x(pc.time * 0.6 + float(i));
+    m[3] = vec4(radius * cos(ring + pc.time * 0.2), 0.6 * sin(pc.time + float(i)),
+                radius * sin(ring + pc.time * 0.2), 1.0);
+    Instances inst = Instances(pc.instance_address);
+    inst.m[i] = m;
+}
