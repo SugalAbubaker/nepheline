@@ -45,10 +45,11 @@ jobs:
     # machine has no pwsh), run so that the step does not depend on the
     # machine's script execution policy, which refused the step's temporary
     # script under the runner's standard user. The trailer fails the step on
-    # a native command's exit code, as GitHub's own powershell shell does.
+    # a native command's exit code, as GitHub's own powershell shell does
+    # (the runner formats the template with .NET, so braces are doubled).
     defaults:
       run:
-        shell: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = 'Stop'; . '{0}'; if ((Test-Path -LiteralPath variable:LASTEXITCODE)) { exit $LASTEXITCODE }\""
+        shell: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = 'Stop'; . '{0}'; if ((Test-Path -LiteralPath variable:LASTEXITCODE)) {{ exit $LASTEXITCODE }}\""
     steps:
       - uses: actions/checkout@v7
         with:
