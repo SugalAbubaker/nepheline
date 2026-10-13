@@ -71,7 +71,7 @@ NphResult nph_gpu_shader_reload(NphGpuDevice *dev, NphGpuShader shader, const vo
     }
     VkShaderModule module = VK_NULL_HANDLE;
     NPH_TRY(create_module(dev, spirv, size, &module));
-    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SHADER_MODULE, (u64)(uptr)slot->vk);
+    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SHADER_MODULE, slot->vk);
     slot->vk = module;
     slot->info = info;
     ++slot->generation;
@@ -89,7 +89,7 @@ void nph_gpu_shader_destroy(NphGpuDevice *dev, NphGpuShader shader)
     if (slot == NULL) {
         return;
     }
-    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SHADER_MODULE, (u64)(uptr)slot->vk);
+    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SHADER_MODULE, slot->vk);
     slot->vk = VK_NULL_HANDLE;
     gpu_pool_release(&dev->shaders, shader.value);
 }

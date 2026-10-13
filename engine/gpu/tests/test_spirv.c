@@ -199,17 +199,21 @@ NTEST(gpu_spirv, rejects_layouts_outside_the_bindless_model)
     Asm a;
     NphGpuShaderInfo info;
     asm_vertex_with_input(&a);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_UNSUPPORTED);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_UNSUPPORTED);
     asm_fragment_combined_sampler(&a, 0U, 0U);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_UNSUPPORTED);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_UNSUPPORTED);
     asm_fragment_combined_sampler(&a, 1U, 0U);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_UNSUPPORTED);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_UNSUPPORTED);
     asm_fragment_storage_buffer(&a);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_UNSUPPORTED);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_UNSUPPORTED);
 }
 
 NTEST(gpu_spirv, computes_push_constant_block_sizes)
@@ -217,8 +221,9 @@ NTEST(gpu_spirv, computes_push_constant_block_sizes)
     Asm a;
     NphGpuShaderInfo info;
     asm_compute_push(&a);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(info.stage, NPH_GPU_SHADER_COMPUTE);
     NTEST_ASSERT_EQ_UINT(info.push_constant_bytes, 80U);
     NTEST_ASSERT_EQ_UINT(info.workgroup_size[0], 4U);
@@ -230,8 +235,9 @@ NTEST(gpu_spirv, computes_push_constant_block_sizes)
             a.words[i + 4U] = 120U;
         }
     }
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, nph_allocator_system(), &info),
-                        NPH_RESULT_UNSUPPORTED);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_UNSUPPORTED);
 }
 
 NTEST(gpu_spirv, rejects_malformed_modules)
@@ -245,50 +251,50 @@ NTEST(gpu_spirv, rejects_malformed_modules)
     Asm a;
     asm_compute_push(&a);
     a.words[0] = 0x12345678U; // bad magic
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     asm_compute_push(&a);
     a.words[3] = 0U; // bound 0
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     asm_compute_push(&a);
     a.words[3] = 1U << 30U; // absurd bound
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     asm_compute_push(&a);
     a.words[a.count - 1U] = (99U << 16U) | 56U; // last instruction claims 99 words
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     asm_compute_push(&a);
     a.words[5] = 17U; // word count 0
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     // Header only: no entry point.
     asm_begin(&a, 4U);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     // An entry point with an unterminated name.
     asm_begin(&a, 8U);
     OP(&a, 15, 5U, 4U, 0x6E69616DU);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     // An unknown execution model.
     asm_begin(&a, 8U);
     OP(&a, 15, 3U, 4U, MAIN_STR); // Geometry
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_UNSUPPORTED);
     // Ids out of bound.
     asm_begin(&a, 8U);
     OP(&a, 15, 5U, 4U, MAIN_STR);
     OP(&a, 19, 200U);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
     // Redefined id.
     asm_begin(&a, 8U);
     OP(&a, 15, 5U, 4U, MAIN_STR);
     OP(&a, 19, 2U);
     OP(&a, 19, 2U);
-    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, a.count * 4U, alloc, &info),
+    NTEST_ASSERT_EQ_INT(nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, alloc, &info),
                         NPH_RESULT_CORRUPT);
 }
 

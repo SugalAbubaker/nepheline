@@ -29,7 +29,7 @@ NTEST_F(GpuFixture, buffer_upload_round_trips)
     u32 *src = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
     u32 *out = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
     fill_pattern(src, WORDS, 7U);
-    NphGpuBuffer buf = test_make_buffer(f->dev, WORDS * 4U,
+    NphGpuBuffer buf = test_make_buffer(f->dev, (u64)WORDS * 4U,
                                         (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
                                             (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC |
                                             (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
@@ -38,20 +38,21 @@ NTEST_F(GpuFixture, buffer_upload_round_trips)
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, &value), NPH_RESULT_OK); // nothing pending
     NTEST_ASSERT_EQ_UINT(value, 0U);
     const u64 free_before = nph_gpu_upload_staging_free(f->dev);
-    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, src, WORDS * 4U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, src, (u64)WORDS * 4U),
+                        NPH_RESULT_OK);
     NTEST_ASSERT_LT_UINT(nph_gpu_upload_staging_free(f->dev), free_before);
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, &value), NPH_RESULT_OK);
     NTEST_ASSERT_GT_UINT(value, 0U);
     // Synchronous outside a frame: the ring is free again.
     NTEST_ASSERT_EQ_UINT(nph_gpu_upload_staging_free(f->dev), free_before);
-    test_read_buffer(f->dev, buf, 0U, WORDS * 4U, out);
-    NTEST_ASSERT_EQ_MEM(out, src, WORDS * 4U);
+    test_read_buffer(f->dev, buf, 0U, (u64)WORDS * 4U, out);
+    NTEST_ASSERT_EQ_MEM(out, src, (u64)WORDS * 4U);
     // Partial update at an offset.
     const u32 patch[4] = {1U, 2U, 3U, 4U};
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 64U, patch, sizeof patch),
                         NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
-    test_read_buffer(f->dev, buf, 0U, WORDS * 4U, out);
+    test_read_buffer(f->dev, buf, 0U, (u64)WORDS * 4U, out);
     NTEST_ASSERT_EQ_UINT(out[15], src[15]);
     NTEST_ASSERT_EQ_UINT(out[16], 1U);
     NTEST_ASSERT_EQ_UINT(out[19], 4U);
@@ -110,14 +111,14 @@ NTEST(gpu_upload, large_uploads_bypass_the_ring)
     u32 *src = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
     u32 *out = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
     fill_pattern(src, WORDS, 99U);
-    NphGpuBuffer buf = test_make_buffer(dev, WORDS * 4U,
+    NphGpuBuffer buf = test_make_buffer(dev, (u64)WORDS * 4U,
                                         (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
                                             (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
                                         NPH_GPU_MEMORY_DEVICE, "big");
-    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(dev, buf, 0U, src, WORDS * 4U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(dev, buf, 0U, src, (u64)WORDS * 4U), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(dev, NULL), NPH_RESULT_OK);
-    test_read_buffer(dev, buf, 0U, WORDS * 4U, out);
-    NTEST_ASSERT_EQ_MEM(out, src, WORDS * 4U);
+    test_read_buffer(dev, buf, 0U, (u64)WORDS * 4U, out);
+    NTEST_ASSERT_EQ_MEM(out, src, (u64)WORDS * 4U);
     nph_gpu_buffer_destroy(dev, buf);
     NPH_FREE_ARRAY(nph_allocator_system(), u32, src, WORDS);
     NPH_FREE_ARRAY(nph_allocator_system(), u32, out, WORDS);
@@ -137,7 +138,7 @@ NTEST(gpu_upload, ring_wraps_across_frames)
     enum {
         WORDS = 20U * 1024U
     }; // 80 KiB per frame: the ring wraps every ~3 frames
-    const u64 bytes = WORDS * 4U;
+    const u64 bytes = (u64)WORDS * 4U;
     const u64 quarter = bytes / 4U;
     u32 *src = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
     u32 *out = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
@@ -150,7 +151,7 @@ NTEST(gpu_upload, ring_wraps_across_frames)
         // Four uploads of a quarter each; the ring holds about three frames.
         for (u32 q = 0; q < 4U; ++q) {
             NTEST_ASSERT_EQ_INT(
-                nph_gpu_upload_buffer(dev, buf, q * quarter, src + q * (WORDS / 4U), quarter),
+                nph_gpu_upload_buffer(dev, buf, q * quarter, src + (u64)q * (WORDS / 4U), quarter),
                 NPH_RESULT_OK);
         }
         NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK); // flushes

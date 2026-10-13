@@ -343,7 +343,7 @@ NphResult nph_gpu_pipeline_reload(NphGpuDevice *dev, NphGpuPipeline pipeline)
     } else {
         NPH_TRY(build_graphics(dev, &slot->gdesc, slot->name, &vk, &push_bytes));
     }
-    gpu_defer_handle(dev, NPH_GPU_DEFERRED_PIPELINE, (u64)(uptr)slot->vk);
+    gpu_defer_handle(dev, NPH_GPU_DEFERRED_PIPELINE, slot->vk);
     slot->vk = vk;
     slot->push_bytes = push_bytes;
     ++slot->generation;
@@ -361,7 +361,7 @@ void nph_gpu_pipeline_destroy(NphGpuDevice *dev, NphGpuPipeline pipeline)
     if (slot == NULL) {
         return;
     }
-    gpu_defer_handle(dev, NPH_GPU_DEFERRED_PIPELINE, (u64)(uptr)slot->vk);
+    gpu_defer_handle(dev, NPH_GPU_DEFERRED_PIPELINE, slot->vk);
     slot->vk = VK_NULL_HANDLE;
     gpu_pool_release(&dev->pipelines, pipeline.value);
 }
@@ -455,7 +455,7 @@ static bool cache_blob_matches_device(const NphGpuDevice *dev, const void *data,
 
 NphResult gpu_pipeline_cache_init(NphGpuDevice *dev)
 {
-    void *initial = NULL;
+    const void *initial = NULL;
     u64 initial_size = 0U;
     void *file = NULL;
     u64 file_size = 0U;
@@ -477,7 +477,7 @@ NphResult gpu_pipeline_cache_init(NphGpuDevice *dev)
                     h.data_size == file_size - sizeof h &&
                     nph_crc32c(blob, h.data_size, 0U) == h.crc32c &&
                     cache_blob_matches_device(dev, blob, h.data_size)) {
-                    initial = (void *)blob; // NOLINT(clang-diagnostic-cast-qual)
+                    initial = blob;
                     initial_size = h.data_size;
                 } else {
                     GPU_LOG_WARN("pipeline cache '%s' is stale or corrupt; starting empty",
@@ -573,7 +573,8 @@ void gpu_pipeline_cache_shutdown(NphGpuDevice *dev)
 {
     if (dev->pipeline_cache != VK_NULL_HANDLE) {
         if (dev->pipeline_cache_path != NULL) {
-            (void)nph_gpu_pipeline_cache_save(dev);
+            const NphResult saved = nph_gpu_pipeline_cache_save(dev); // logged on failure
+            NPH_UNUSED(saved);
         }
         vkDestroyPipelineCache(dev->device, dev->pipeline_cache, NULL);
         dev->pipeline_cache = VK_NULL_HANDLE;

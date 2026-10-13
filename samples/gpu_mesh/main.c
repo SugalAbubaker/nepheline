@@ -58,14 +58,14 @@ static void make_cube(NphMeshVertex *v, u16 *indices)
             const f32 w = (corner >= 2U) ? 1.0F : 0.0F;
             const f32 su = u * 2.0F - 1.0F;
             const f32 sw = w * 2.0F - 1.0F;
-            NphMeshVertex *out = &v[face * 4U + corner];
+            NphMeshVertex *out = &v[(u64)face * 4U + corner];
             out->position = nph_vec4(n[0] + t[0] * su + b[0] * sw, n[1] + t[1] * su + b[1] * sw,
                                      n[2] + t[2] * su + b[2] * sw, 1.0F);
             out->normal_uv = nph_vec4(n[0], n[1], n[2], u);
             out->extra = nph_vec4(w, 0.0F, 0.0F, 0.0F);
         }
         const u16 base = (u16)(face * 4U);
-        u16 *i = &indices[face * 6U];
+        u16 *i = &indices[(u64)face * 6U];
         i[0] = base;
         i[1] = (u16)(base + 1U);
         i[2] = (u16)(base + 2U);
@@ -81,7 +81,7 @@ static void make_checkerboard(u8 *texels)
         for (u32 x = 0; x < TEXTURE_SIZE; ++x) {
             const u32 cell = ((x / 32U) + (y / 32U)) & 1U;
             const u32 fine = ((x / 4U) + (y / 4U)) & 1U;
-            u8 *p = &texels[(y * TEXTURE_SIZE + x) * 4U];
+            u8 *p = &texels[((u64)y * TEXTURE_SIZE + x) * 4U];
             p[0] = (u8)(cell ? 235U : 40U);
             p[1] = (u8)(cell ? 180U : 90U);
             p[2] = (u8)(cell ? 60U : 200U);
@@ -193,7 +193,7 @@ static NphResult setup_scene(Scene *s, u32 instance_count, NphGpuFormat color_fo
 
     NphMeshVertex *vertices = NPH_ALLOC_ARRAY(alloc, NphMeshVertex, 24U);
     u16 *indices = NPH_ALLOC_ARRAY(alloc, u16, 36U);
-    u8 *texels = NPH_ALLOC_ARRAY(alloc, u8, TEXTURE_SIZE * TEXTURE_SIZE * 4U);
+    u8 *texels = NPH_ALLOC_ARRAY(alloc, u8, (u64)TEXTURE_SIZE * TEXTURE_SIZE * 4U);
     if (vertices == NULL || indices == NULL || texels == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -227,11 +227,11 @@ static NphResult setup_scene(Scene *s, u32 instance_count, NphGpuFormat color_fo
     id.name = "checkerboard";
     NPH_TRY(nph_gpu_image_create(dev, &id, &s->texture));
     NPH_TRY(nph_gpu_upload_image(dev, s->texture, 0U, 0U, 1U, texels,
-                                 TEXTURE_SIZE * TEXTURE_SIZE * 4U));
+                                 (u64)TEXTURE_SIZE * TEXTURE_SIZE * 4U));
     NPH_TRY(nph_gpu_upload_flush(dev, NULL));
     NPH_FREE_ARRAY(alloc, NphMeshVertex, vertices, 24U);
     NPH_FREE_ARRAY(alloc, u16, indices, 36U);
-    NPH_FREE_ARRAY(alloc, u8, texels, TEXTURE_SIZE * TEXTURE_SIZE * 4U);
+    NPH_FREE_ARRAY(alloc, u8, texels, (u64)TEXTURE_SIZE * TEXTURE_SIZE * 4U);
 
     // Mip chain: mip 0 is in SHADER_READ_ONLY after the upload.
     NphGpuCmd *cmd = NULL;

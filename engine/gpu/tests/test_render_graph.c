@@ -218,7 +218,7 @@ NTEST_F(GpuFixture, graphics_pass_renders_into_a_transient_and_copies_out)
     NphGpuPipeline pipeline =
         test_make_graphics_pipeline(f->dev, vert, frag, NPH_GPU_FORMAT_R8G8B8A8_UNORM);
     NphGpuBuffer out =
-        test_make_buffer(f->dev, 32U * 32U * 4U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+        test_make_buffer(f->dev, (u64)32U * 32U * 4U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                          NPH_GPU_MEMORY_READBACK, "pixels");
     for (u32 frame = 0; frame < 3U; ++frame) {
         nph_gpu_rg_begin(g);
@@ -251,7 +251,8 @@ NTEST_F(GpuFixture, graphics_pass_renders_into_a_transient_and_copies_out)
         NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(g), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
         const u8 *px = (const u8 *)nph_gpu_buffer_map(f->dev, out);
-        NTEST_ASSERT_TRUE(test_pixel_near(&px[(16U * 32U + 16U) * 4U], 255U, 0U, 0U, 255U, 0U));
+        NTEST_ASSERT_TRUE(
+            test_pixel_near(&px[((u64)16U * 32U + 16U) * 4U], 255U, 0U, 0U, 255U, 0U));
         NTEST_ASSERT_TRUE(test_pixel_near(&px[0], 0U, 0U, 255U, 255U, 0U));
         // The transient image is cached across frames: no new images.
         NTEST_ASSERT_EQ_UINT(nph_gpu_device_live_counts(f->dev).images, 1U);
@@ -271,7 +272,7 @@ NTEST_F(GpuFixture, transients_with_disjoint_lifetimes_share_memory)
 {
     REQUIRE_DEVICE(f);
     NphGpuRenderGraph *g = make_graph(f->dev, NULL);
-    const u64 bytes = 256U * 256U * 4U;
+    const u64 bytes = (u64)256U * 256U * 4U;
     NphGpuBuffer out_a = test_make_buffer(f->dev, bytes, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                                           NPH_GPU_MEMORY_READBACK, "out a");
     NphGpuBuffer out_b = test_make_buffer(f->dev, bytes, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
@@ -394,14 +395,14 @@ NTEST_F(GpuFixture, passes_record_in_parallel_on_the_job_system)
         WORDS = 128U
     };
     NphGpuBuffer out =
-        test_make_buffer(f->dev, PASSES * WORDS * 4U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+        test_make_buffer(f->dev, (u64)PASSES * WORDS * 4U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                          NPH_GPU_MEMORY_READBACK, "parallel out");
     nph_gpu_rg_begin(g);
     NphGpuRgBuffer dst = nph_gpu_rg_import_buffer(g, out);
     FillPass fills[PASSES];
     CopyPass copies[PASSES];
     for (u32 i = 0; i < PASSES; ++i) {
-        const NphGpuBufferDesc bd = transient_buffer_desc(WORDS * 4U, "piece");
+        const NphGpuBufferDesc bd = transient_buffer_desc((u64)WORDS * 4U, "piece");
         NphGpuRgBuffer t = nph_gpu_rg_create_buffer(g, &bd);
         fills[i].pipeline = pipeline;
         fills[i].target = t;
@@ -413,7 +414,7 @@ NTEST_F(GpuFixture, passes_record_in_parallel_on_the_job_system)
         nph_gpu_rg_write_buffer(fp, t, NPH_GPU_RG_USE_STORAGE_WRITE);
         copies[i].src = t;
         copies[i].dst = dst;
-        copies[i].size = WORDS * 4U;
+        copies[i].size = (u64)WORDS * 4U;
         copies[i].dst_offset = (u64)i * WORDS * 4U;
         copies[i].ran = 0U;
         NphGpuRgPass *cp =
@@ -429,7 +430,7 @@ NTEST_F(GpuFixture, passes_record_in_parallel_on_the_job_system)
     for (u32 i = 0; i < PASSES; ++i) {
         NTEST_ASSERT_EQ_UINT(fills[i].ran, 1U);
         for (u32 w = 0; w < WORDS; ++w) {
-            NTEST_ASSERT_EQ_UINT(words[i * WORDS + w], (i + 1U) * w);
+            NTEST_ASSERT_EQ_UINT(words[(u64)i * WORDS + w], (i + 1U) * w);
         }
     }
     nph_gpu_render_graph_destroy(g);

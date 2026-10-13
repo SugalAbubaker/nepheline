@@ -53,7 +53,9 @@ jobs:
       - name: Point the build at the Vulkan SDK
         if: runner.os == 'Windows'
         shell: pwsh
-        run: echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}" >> $env:GITHUB_ENV
+        run: |
+          echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}" >> $env:GITHUB_ENV
+          echo "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}\Bin" >> $env:GITHUB_PATH
 
       - name: Install Ninja
         if: runner.os == 'Linux'

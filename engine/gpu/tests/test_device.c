@@ -45,7 +45,8 @@ NTEST_F(GpuFixture, reports_a_conforming_device)
     NTEST_ASSERT_GE_UINT(info->physical_device_count, 1U);
     NTEST_ASSERT_LT_UINT(info->physical_device_index, info->physical_device_count);
     NTEST_ASSERT_NE_STR(nph_gpu_device_type_name(info->type), "?");
-    NTEST_ASSERT_EQ_STR(nph_gpu_device_type_name((NphGpuDeviceType)99), "?");
+    volatile int bad_type = 99; // not a constant: the analyzer would reject the cast
+    NTEST_ASSERT_EQ_STR(nph_gpu_device_type_name((NphGpuDeviceType)bad_type), "?");
     NTEST_ASSERT_NOT_NULL(nph_gpu_device_allocator(f->dev));
     NTEST_LOG("features: async compute %d, dedicated transfer %d, mesh %d, ray query %d",
               info->features.async_compute, info->features.dedicated_transfer,

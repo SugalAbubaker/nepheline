@@ -26,7 +26,8 @@ NphResult gpu_upload_init(NphGpuDevice *dev)
     }
     up->acquire_cap = 256U;
     up->acquires = NPH_ALLOC_ARRAY(dev->alloc, NphGpuUploadAcquire, up->acquire_cap);
-    up->cmd_storage = NPH_ALLOC_ARRAY_ZEROED(dev->alloc, NphGpuCmd, 2U * NPH_GPU_FRAMES_IN_FLIGHT);
+    up->cmd_storage =
+        NPH_ALLOC_ARRAY_ZEROED(dev->alloc, NphGpuCmd, (u64)2U * NPH_GPU_FRAMES_IN_FLIGHT);
     if (up->acquires == NULL || up->cmd_storage == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -50,7 +51,7 @@ void gpu_upload_shutdown(NphGpuDevice *dev)
         up->acquires = NULL;
     }
     if (up->cmd_storage != NULL) {
-        NPH_FREE_ARRAY(dev->alloc, NphGpuCmd, up->cmd_storage, 2U * NPH_GPU_FRAMES_IN_FLIGHT);
+        NPH_FREE_ARRAY(dev->alloc, NphGpuCmd, up->cmd_storage, (u64)2U * NPH_GPU_FRAMES_IN_FLIGHT);
         up->cmd_storage = NULL;
     }
     nph_mutex_destroy(&up->lock);
@@ -114,7 +115,7 @@ static NphResult ensure_batch(NphGpuDevice *dev)
     if (pool->pool == VK_NULL_HANDLE) {
         NPH_TRY(gpu_cmd_pool_create(dev, pool, dev->queues[NPH_GPU_QUEUE_TRANSFER]->family));
     }
-    NphGpuCmd *cmd = &up->cmd_storage[dev->frame_slot * 2U];
+    NphGpuCmd *cmd = &up->cmd_storage[(u64)dev->frame_slot * 2U];
     NPH_TRY(gpu_cmd_begin_from_pool(dev, pool, cmd, NPH_GPU_QUEUE_TRANSFER, "uploads"));
     up->cmd = cmd;
     up->batch_bytes = 0U;
@@ -400,7 +401,7 @@ NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
         if (pool->pool == VK_NULL_HANDLE) {
             r = gpu_cmd_pool_create(dev, pool, dev->queues[NPH_GPU_QUEUE_GRAPHICS]->family);
         }
-        NphGpuCmd *acquire = &up->cmd_storage[dev->frame_slot * 2U + 1U];
+        NphGpuCmd *acquire = &up->cmd_storage[(u64)dev->frame_slot * 2U + 1U];
         if (r == NPH_RESULT_OK) {
             r = gpu_cmd_begin_from_pool(dev, pool, acquire, NPH_GPU_QUEUE_GRAPHICS,
                                         "upload acquire");

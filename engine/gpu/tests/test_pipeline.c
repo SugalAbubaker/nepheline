@@ -80,7 +80,7 @@ NTEST_F(GpuFixture, compute_pipeline_writes_through_a_buffer_address)
         COUNT = 1024U
     };
     NphGpuBuffer buf =
-        test_make_buffer(f->dev, COUNT * 4U,
+        test_make_buffer(f->dev, (u64)COUNT * 4U,
                          (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
                          NPH_GPU_MEMORY_DEVICE, "fill target");
     NphTestPush push;
@@ -121,9 +121,10 @@ NTEST_F(GpuFixture, graphics_pipeline_draws_a_triangle)
     push.color = nph_vec4(1.0F, 0.0F, 0.0F, 1.0F);
     u8 pixels[64U * 64U * 4U];
     render_to_pixels(f->dev, pipeline, &push, 64U, 3U, pixels);
-    NTEST_ASSERT_TRUE(test_pixel_near(&pixels[(32U * 64U + 32U) * 4U], 255U, 0U, 0U, 255U, 0U));
+    NTEST_ASSERT_TRUE(
+        test_pixel_near(&pixels[((u64)32U * 64U + 32U) * 4U], 255U, 0U, 0U, 255U, 0U));
     NTEST_ASSERT_TRUE(test_pixel_near(&pixels[0], 0U, 0U, 0U, 255U, 0U));
-    NTEST_ASSERT_TRUE(test_pixel_near(&pixels[(63U * 64U + 63U) * 4U], 0U, 0U, 0U, 255U, 0U));
+    NTEST_ASSERT_TRUE(test_pixel_near(&pixels[((u64)63U * 64U + 63U) * 4U], 0U, 0U, 0U, 255U, 0U));
     nph_gpu_pipeline_destroy(f->dev, pipeline);
     nph_gpu_shader_destroy(f->dev, vert);
     nph_gpu_shader_destroy(f->dev, frag);
@@ -137,10 +138,10 @@ NTEST_F(GpuFixture, fragment_shader_samples_a_bindless_texture)
         (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST, "texture");
     u8 texels[4U * 4U * 4U];
     for (u32 i = 0; i < 16U; ++i) {
-        texels[i * 4U] = 10U;
-        texels[i * 4U + 1U] = 200U;
-        texels[i * 4U + 2U] = 30U;
-        texels[i * 4U + 3U] = 255U;
+        texels[(u64)i * 4U] = 10U;
+        texels[(u64)i * 4U + 1U] = 200U;
+        texels[(u64)i * 4U + 2U] = 30U;
+        texels[(u64)i * 4U + 3U] = 255U;
     }
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_image(f->dev, tex, 0U, 0U, 1U, texels, sizeof texels),
                         NPH_RESULT_OK);
@@ -160,7 +161,7 @@ NTEST_F(GpuFixture, fragment_shader_samples_a_bindless_texture)
     u8 pixels[8U * 8U * 4U];
     render_to_pixels(f->dev, pipeline, &push, 8U, 3U, pixels);
     for (u32 i = 0; i < 64U; ++i) {
-        NTEST_ASSERT_TRUE(test_pixel_near(&pixels[i * 4U], 10U, 200U, 30U, 255U, 1U));
+        NTEST_ASSERT_TRUE(test_pixel_near(&pixels[(u64)i * 4U], 10U, 200U, 30U, 255U, 1U));
     }
     nph_gpu_pipeline_destroy(f->dev, pipeline);
     nph_gpu_shader_destroy(f->dev, vert);
@@ -199,7 +200,8 @@ NTEST_F(GpuFixture, compute_shader_writes_a_bindless_storage_image)
     test_read_image(f->dev, img, 0U, pixels, sizeof pixels);
     for (u32 y = 0; y < 16U; ++y) {
         for (u32 x = 0; x < 16U; ++x) {
-            NTEST_ASSERT_TRUE(test_pixel_near(&pixels[(y * 16U + x) * 4U], x, y, 77U, 255U, 0U));
+            NTEST_ASSERT_TRUE(
+                test_pixel_near(&pixels[((u64)y * 16U + x) * 4U], x, y, 77U, 255U, 0U));
         }
     }
     nph_gpu_pipeline_destroy(f->dev, pipeline);
