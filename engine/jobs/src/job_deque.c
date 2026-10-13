@@ -137,6 +137,23 @@ NphJobDequeSteal nph_job_deque_steal_if(NphJobDeque *d, NphJobDequePred pred, vo
     return NPH_JOB_DEQUE_STOLEN;
 }
 
+bool nph_job_deque_any_if(const NphJobDeque *d, NphJobDequePred pred, void *ctx)
+{
+    NPH_ASSERT(pred != NULL);
+    const u64 b = nph_atomic_load_u64(&d->bottom, NPH_MEMORY_ORDER_RELAXED);
+    const u64 t = nph_atomic_load_u64(&d->top, NPH_MEMORY_ORDER_ACQUIRE);
+    // Only the owner writes slots, so every slot in [t, b) holds an element
+    // that was in the deque at `t`; a thief may have taken the oldest since.
+    for (u64 i = b; (i64)i > (i64)t; --i) {
+        const u32 value =
+            nph_atomic_load_u32(&d->buffer[(i - 1U) & d->mask], NPH_MEMORY_ORDER_RELAXED);
+        if (pred(value, ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 u32 nph_job_deque_count(const NphJobDeque *d)
 {
     const u64 t = nph_atomic_load_u64(&d->top, NPH_MEMORY_ORDER_RELAXED);

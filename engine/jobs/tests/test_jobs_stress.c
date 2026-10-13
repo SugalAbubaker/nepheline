@@ -4,6 +4,14 @@
 // millions of jobs").
 #include "test_jobs_support.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
+// A round of the random mix that runs this long has hung (issue #18): the
+// scheduler state is dumped and the process aborted, since the workers
+// are stuck and destroying the system would hang too.
+#define MIX_ROUND_LIMIT_MS 60000.0
+
 typedef struct Tally {
     NphAtomicU64 runs;
     NphAtomicU64 sum;
@@ -226,13 +234,10 @@ static void mix_job(void *user)
     }
 }
 
-NTEST(jobs_stress, random_spawn_wait_signal_mix)
+// The random mix on a system described by `desc`.
+static void run_random_mix(const NphJobSystemDesc *desc)
 {
-    NphJobSystemDesc desc;
-    memset(&desc, 0, sizeof desc);
-    desc.worker_count = test_jobs_worker_count(16U);
-    desc.fiber_stack_size = NPH_KIB(256); // nested waits under the sanitizers' fat frames
-    NphJobSystem *js = test_jobs_create_desc(&desc);
+    NphJobSystem *js = test_jobs_create_desc(desc);
     Mix m;
     memset(&m, 0, sizeof m);
     m.js = js;
@@ -259,10 +264,20 @@ NTEST(jobs_stress, random_spawn_wait_signal_mix)
         nph_atomic_fetch_add_u64(&m.spawned, ROOTS, NPH_MEMORY_ORDER_RELAXED);
         // Pulse the event (the main thread is its only signaller) until the
         // round has finished, so everything parked on it gets released.
+        const NphStopwatch round_sw = nph_stopwatch_start();
         while (nph_job_counter_value(&done) != 0U) {
             nph_job_counter_signal(js, &m.event);
             nph_job_counter_add(&m.event, 1U); // re-arm for the next waiters
             nph_thread_sleep_ns(NPH_TIME_NS_PER_MS);
+            if (nph_stopwatch_elapsed_ms(&round_sw) > MIX_ROUND_LIMIT_MS) {
+                fprintf(stderr,
+                        "random_spawn_wait_signal_mix: round %u has not finished in %.0f s; "
+                        "%u roots outstanding\n",
+                        round, MIX_ROUND_LIMIT_MS / 1000.0, nph_job_counter_value(&done));
+                nph_job_system_dump(js, stderr);
+                fflush(stderr);
+                abort();
+            }
         }
         nph_job_wait(js, &done);
     }
@@ -275,6 +290,15 @@ NTEST(jobs_stress, random_spawn_wait_signal_mix)
     NTEST_ASSERT_EQ_UINT(nph_atomic_load_u64(&m.ran, NPH_MEMORY_ORDER_RELAXED),
                          nph_atomic_load_u64(&m.spawned, NPH_MEMORY_ORDER_RELAXED));
     nph_job_system_destroy(js);
+}
+
+NTEST(jobs_stress, random_spawn_wait_signal_mix)
+{
+    NphJobSystemDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.worker_count = test_jobs_worker_count(16U);
+    desc.fiber_stack_size = NPH_KIB(256); // nested waits under the sanitizers' fat frames
+    run_random_mix(&desc);
 }
 
 // Create, use, destroy, repeat: no leaked threads, fibers, or slots.

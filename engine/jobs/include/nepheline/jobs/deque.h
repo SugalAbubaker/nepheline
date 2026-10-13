@@ -88,6 +88,11 @@ bool nph_job_deque_take_if(NphJobDeque *d, NphJobDequePred pred, void *ctx, u32 
 // which is harmless: the caller moves on and looks again later).
 NphJobDequeSteal nph_job_deque_steal_if(NphJobDeque *d, NphJobDequePred pred, void *ctx, u32 *out);
 
+// Owner: whether any element, newest to oldest, satisfies `pred`. Thieves
+// may remove elements meanwhile, so true can be stale; false is exact for
+// everything the owner could still take.
+bool nph_job_deque_any_if(const NphJobDeque *d, NphJobDequePred pred, void *ctx);
+
 // Approximate element count (exact only for the owner with no thief
 // active). Never larger than the capacity.
 u32 nph_job_deque_count(const NphJobDeque *d);

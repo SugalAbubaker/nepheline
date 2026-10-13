@@ -105,7 +105,10 @@ engine must not.
    checking for a ready or free fiber, and meanwhile runs queued jobs
    whose depth is strictly greater than its own, peeking the deques
    through `take_if`/`steal_if` and rotating the spill queue once per
-   scan. This is the depth-restricted stealing of early Intel TBB, which
+   scan; when its own deque holds a deeper job under shallower ones it
+   moves the shallow newest ones to the spill queue until the deeper one
+   surfaces (added for issue #18, see below). This is the depth-restricted
+   stealing of early Intel TBB, which
    bounded stack use the same way: every nested wait is strictly deeper
    than the one under it, so a fiber's stack holds at most one job per
    level of the spawn tree, the same depth a serial run of the same code
@@ -138,6 +141,23 @@ engine must not.
    logged once at warning level and counted in the statistics; the fix
    is to raise `fiber_count`, and the point of the rule is that the
    engine degrades rather than crashes or hangs while it is wrong.
+
+   *Amended 2026-10-13 (issue #18).* The liveness argument above assumed
+   the deepest job's queued children are at an end of a deque. They need
+   not be: the worker loop takes NORMAL roots from the injection queue
+   before LOW jobs from its own deque, and resumed fibers spawn at any
+   depth, so a parked job's children get covered by shallower jobs. The
+   random-mix stress test then hung about once in fifty runs on four
+   workers, with every worker an inline waiter at depth 4 or 5 and the
+   jobs they needed sandwiched between depth-2 and depth-3 jobs, which
+   `take_if` at the newest end and `steal_if` at the oldest end both
+   refused. An inline wait now checks its whole deque (`any_if`) and,
+   when a deeper job is buried, moves the shallow newest elements to the
+   spill queue until it surfaces; the deepest job's children are then
+   always reachable, by the spill scan or by the deque's owner, which is
+   either in the worker loop or an inline waiter no deeper than that job.
+   `nph_job_system_dump` and the stress test's watchdog, which found
+   this, stay for the next one.
 
 6. **Priorities are strict and small.** Three levels, each with its own
    deque per worker and injection and spill queues. A worker looks at

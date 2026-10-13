@@ -143,10 +143,22 @@ static NPH_FORCE_INLINE u32 counter_waiters_of(u64 state)
     return (u32)(state >> 32U);
 }
 
+// What a worker thread is doing, for nph_job_system_dump. Written by the
+// thread itself with relaxed stores at the points where its state
+// changes; a dump reads it racily.
+enum {
+    WORKER_PHASE_SEARCHING = 0, // the worker loop, between jobs
+    WORKER_PHASE_RUNNING,       // executing a job
+    WORKER_PHASE_PARKED,        // asleep on the wake semaphore
+    WORKER_PHASE_INLINE_SEARCH, // a wait with no fiber, looking for a fiber or a deeper job
+    WORKER_PHASE_INLINE_SLEEP,  // the same, asleep on the worker's own semaphore
+};
+
 typedef struct NphJobWorker {
     NPH_ALIGNAS(NPH_CACHE_LINE_SIZE) NphJobSystem *js;
     u32 index;
-    u32 rng; // xorshift32 state for victim selection (Marsaglia, 2003)
+    NphAtomicU32 phase; // WORKER_PHASE_*
+    u32 rng;            // xorshift32 state for victim selection (Marsaglia, 2003)
     NphThread thread;
     NphSemaphore sem;             // a wait without a fiber sleeps here (wait_inline)
     NphFiber thread_fiber;        // the thread's own context: used at start and shutdown only
@@ -239,6 +251,15 @@ static NPH_NO_INLINE NphJobWorker *current_worker(void)
 static NPH_NO_INLINE void set_current_worker(NphJobWorker *w)
 {
     t_worker = w;
+}
+
+// The calling thread's worker records its phase (see WORKER_PHASE_*).
+static NPH_NO_INLINE void set_phase(u32 phase)
+{
+    NphJobWorker *w = t_worker;
+    if (w != NULL) {
+        nph_atomic_store_u32(&w->phase, phase, NPH_MEMORY_ORDER_RELAXED);
+    }
 }
 
 static NPH_NO_INLINE void set_io_thread(b32 value)
@@ -468,6 +489,55 @@ static bool find_job(NphJobSystem *js, NphJobWorker *w, u32 *out)
     return steal_job(js, w, NULL, NULL, out);
 }
 
+// The owner's side of find_deeper_job: the newest element of its deque
+// when that is deeper than `depth`. When it is not, but a deeper one lies
+// below it, the shallow newest elements are moved to the spill queue,
+// where every worker still finds them, until the deeper one surfaces.
+//
+// Without the eviction the depth rule has a hole (issue #18): a deeper
+// job ends up under shallower ones whenever a worker starts new shallow
+// work while a parked job's children sit in its deque (the worker loop
+// takes NORMAL roots from the injection queue before LOW jobs from its
+// deque, and resumed fibers spawn at any depth), and once every worker
+// is an inline waiter at a depth between the two ends of such a deque,
+// take_if (newest end) and steal_if (oldest end) both refuse, and
+// nothing runs. With it, the deepest job in progress always finds its
+// queued children: they are in the spill queue, which is scanned, or in
+// a deque whose owner is either running the worker loop or an inline
+// waiter no deeper than that job, and so may dig them out.
+static bool take_deeper_own(NphJobSystem *js, NphJobWorker *w, u32 priority, u32 depth, u32 *out)
+{
+    NphJobDeque *d = &w->deques[priority];
+    bool found = false;
+    u32 evicted = 0U;
+    for (;;) {
+        if (nph_job_deque_take_if(d, deeper_than, &depth, out)) {
+            found = true;
+            break;
+        }
+        if (!nph_job_deque_any_if(d, deeper_than, &depth)) {
+            break;
+        }
+        u32 shallow;
+        if (!nph_job_deque_take(d, &shallow)) {
+            break; // thieves emptied it meanwhile
+        }
+        if (job_depth_of(shallow) > depth) {
+            // Not expected (the newest element changes only through the
+            // owner), but a deeper job must never be spilled by mistake.
+            *out = shallow;
+            found = true;
+            break;
+        }
+        ring_push_spin(&js->spill[priority], shallow);
+        ++evicted;
+    }
+    if (evicted != 0U) {
+        wake_workers(js, evicted); // they were out of every queue for a moment
+    }
+    return found;
+}
+
 // As find_job, restricted to jobs deeper than `depth` in the spawn tree,
 // for a wait that must run them on its own stack. The deques are peeked;
 // the spill queue has no peek, so a job popped from it that is too
@@ -475,7 +545,7 @@ static bool find_job(NphJobSystem *js, NphJobWorker *w, u32 *out)
 static bool find_deeper_job(NphJobSystem *js, NphJobWorker *w, u32 depth, u32 *out)
 {
     for (u32 p = 0; p < NPH_JOB_PRIORITY_COUNT; ++p) {
-        if (nph_job_deque_take_if(&w->deques[p], deeper_than, &depth, out)) {
+        if (take_deeper_own(js, w, p, depth, out)) {
             return true;
         }
         u32 n = nph_mpmc_ring_count(&js->spill[p]);
@@ -891,6 +961,7 @@ static void wait_inline(NphJobSystem *js, NphJobCounter *c, u32 target, NphJobWa
                      js->fiber_count);
     }
     for (;;) {
+        set_phase(WORKER_PHASE_INLINE_SEARCH);
         if (nph_job_counter_value(c) <= target) {
             return;
         }
@@ -927,6 +998,7 @@ static void wait_inline(NphJobSystem *js, NphJobCounter *c, u32 target, NphJobWa
         if (!register_wait(js, node)) {
             return;
         }
+        set_phase(WORKER_PHASE_INLINE_SLEEP);
         if (nph_semaphore_wait_timeout(&w->sem, JOB_HOSTAGE_WAIT_NS)) {
             return; // posted exactly once, by whoever unlinked the node
         }
@@ -1011,7 +1083,9 @@ static void park_worker(NphJobSystem *js, NphJobWorker *w)
     nph_atomic_fetch_add_u32(&js->idle_workers, 1U, NPH_MEMORY_ORDER_SEQ_CST);
     if (nph_atomic_load_u32(&js->stop, NPH_MEMORY_ORDER_SEQ_CST) == 0U && !work_available(js, w)) {
         stat_inc(&w->parks);
+        set_phase(WORKER_PHASE_PARKED);
         nph_semaphore_wait(&js->wake);
+        set_phase(WORKER_PHASE_SEARCHING);
     }
     nph_atomic_fetch_sub_u32(&js->idle_workers, 1U, NPH_MEMORY_ORDER_SEQ_CST);
 }
@@ -1022,6 +1096,7 @@ static void worker_loop(NphJobSystem *js)
 {
     for (;;) {
         NphJobWorker *w = current_worker();
+        set_phase(WORKER_PHASE_SEARCHING);
         if (nph_atomic_load_u32(&js->stop, NPH_MEMORY_ORDER_ACQUIRE) != 0U) {
             switch_fiber(w, &w->thread_fiber, true);
             continue; // not reached: nothing switches to a pool fiber after stop
@@ -1032,6 +1107,7 @@ static void worker_loop(NphJobSystem *js)
             continue;
         }
         if (find_job(js, w, &elem)) {
+            set_phase(WORKER_PHASE_RUNNING);
             execute_job(js, elem, true);
             continue;
         }
@@ -1237,6 +1313,116 @@ NphResult nph_job_parallel_for(NphJobSystem *js, u32 count, u32 batch, NphJobRan
     push_job(js, w, job_pack(index, child_depth(current_depth(js))), (u32)priority);
     wake_workers(js, 1U);
     return NPH_RESULT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+static const char *phase_name(u32 phase)
+{
+    switch (phase) {
+    case WORKER_PHASE_SEARCHING:
+        return "searching";
+    case WORKER_PHASE_RUNNING:
+        return "running a job";
+    case WORKER_PHASE_PARKED:
+        return "parked";
+    case WORKER_PHASE_INLINE_SEARCH:
+        return "inline wait, searching";
+    case WORKER_PHASE_INLINE_SLEEP:
+        return "inline wait, sleeping";
+    default:
+        return "?";
+    }
+}
+
+// The deque's elements, oldest (the thieves' end) first.
+static void dump_deque(const NphJobDeque *d, FILE *out)
+{
+    const u64 t = nph_atomic_load_u64(&d->top, NPH_MEMORY_ORDER_RELAXED);
+    const u64 b = nph_atomic_load_u64(&d->bottom, NPH_MEMORY_ORDER_RELAXED);
+    if ((i64)b <= (i64)t) {
+        fputs(" empty\n", out);
+        return;
+    }
+    u64 n = b - t;
+    if (n > (u64)d->capacity) {
+        n = d->capacity;
+    }
+    fprintf(out, " %llu, oldest first (job:depth):", (unsigned long long)n);
+    for (u64 i = t; i < t + n; ++i) {
+        const u32 e = nph_atomic_load_u32(&d->buffer[i & d->mask], NPH_MEMORY_ORDER_RELAXED);
+        fprintf(out, " %u:%u", job_index_of(e), job_depth_of(e));
+    }
+    fputc('\n', out);
+}
+
+void nph_job_system_dump(const NphJobSystem *js, FILE *out)
+{
+    NPH_ASSERT(js != NULL && out != NULL);
+    fprintf(out,
+            "job system %p: %u workers, %u fibers, stop %u, idle workers %u; free jobs %u of %u, "
+            "free fibers %u, ready fibers %u, io queue %u\n",
+            (const void *)js, js->worker_count, js->fiber_count,
+            nph_atomic_load_u32(&js->stop, NPH_MEMORY_ORDER_RELAXED),
+            nph_atomic_load_u32(&js->idle_workers, NPH_MEMORY_ORDER_RELAXED),
+            nph_mpmc_ring_count(&js->free_jobs), js->job_capacity,
+            nph_mpmc_ring_count(&js->free_fibers), nph_mpmc_ring_count(&js->ready_fibers),
+            nph_mpmc_ring_count(&js->io_queue));
+    for (u32 p = 0; p < NPH_JOB_PRIORITY_COUNT; ++p) {
+        fprintf(out, "  priority %u: inject %u, spill %u\n", p, nph_mpmc_ring_count(&js->inject[p]),
+                nph_mpmc_ring_count(&js->spill[p]));
+    }
+    for (u32 i = 0; i < js->worker_count; ++i) {
+        const NphJobWorker *w = &js->workers[i];
+        const NphFiber *f = w->current_fiber;
+        if (f != NULL) {
+            const u32 fi = fiber_index(js, f);
+            fprintf(out, "  worker %u: %s, on fiber %u (depth %u)%s\n", i,
+                    phase_name(nph_atomic_load_u32(&w->phase, NPH_MEMORY_ORDER_RELAXED)), fi,
+                    js->fiber_depths[fi], w->pending_wait != NULL ? ", wait pending" : "");
+        } else {
+            fprintf(out, "  worker %u: not started\n", i);
+        }
+        for (u32 p = 0; p < NPH_JOB_PRIORITY_COUNT; ++p) {
+            fprintf(out, "    deque[%u]:", p);
+            dump_deque(&w->deques[p], out);
+        }
+    }
+    u32 waits = 0U;
+    for (u32 i = 0; i < JOB_WAIT_BUCKETS; ++i) {
+        NphJobWaitBucket *b = &js->wait_buckets[i];
+        nph_spin_lock_acquire(&b->lock);
+        for (const NphJobWaitNode *node = b->head; node != NULL; node = node->next) {
+            const u64 state = nph_atomic_load_u64(&node->counter->state, NPH_MEMORY_ORDER_RELAXED);
+            char who[64];
+            if (node->fiber != NULL) {
+                const u32 fi = fiber_index(js, node->fiber);
+                snprintf(who, sizeof who, "fiber %u (depth %u)", fi, js->fiber_depths[fi]);
+            } else {
+                snprintf(who, sizeof who, "an external thread");
+                for (u32 k = 0; k < js->worker_count; ++k) {
+                    if (node->sem == &js->workers[k].sem) {
+                        snprintf(who, sizeof who, "worker %u's inline wait", k);
+                    }
+                }
+            }
+            fprintf(out, "  wait: %s on counter %p (value %u, %u registered) until <= %u\n", who,
+                    (const void *)node->counter, counter_value_of(state), counter_waiters_of(state),
+                    node->target);
+            ++waits;
+        }
+        nph_spin_lock_release(&b->lock);
+    }
+    NphJobStats stats;
+    nph_job_system_get_stats(js, &stats);
+    fprintf(out,
+            "  %u waits registered; executed %llu (nested %llu, stolen %llu), waits switched "
+            "%llu, inline %llu, parks %llu\n",
+            waits, (unsigned long long)stats.jobs_executed, (unsigned long long)stats.jobs_nested,
+            (unsigned long long)stats.jobs_stolen, (unsigned long long)stats.waits_switched,
+            (unsigned long long)stats.waits_inline, (unsigned long long)stats.worker_parks);
 }
 
 // ---------------------------------------------------------------------------
