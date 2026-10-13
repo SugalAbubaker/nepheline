@@ -240,8 +240,9 @@ corpus; crashing inputs are uploaded as artifacts.
 ### GPU tests in CI
 
 The gpu module's tests and samples need a Vulkan device. Linux jobs
-install `mesa-vulkan-drivers` and point the loader at lavapipe
-(`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`), install
+install `mesa-vulkan-drivers` and point the loader at lavapipe only
+(`VK_DRIVER_FILES` listing both manifest names: Ubuntu's `lvp_icd.json` and
+upstream Mesa's `lvp_icd.x86_64.json`), install
 `vulkan-validationlayers` so Debug and Development builds run with the
 validation gate, and run CTest under Xvfb so the swapchain tests can open
 a window. LeakSanitizer suppresses the loader's and lavapipe's
