@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "executable": "gpu_bench",
+  "timestamp": "2026-10-13T18:38:18Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "gpu": "NVIDIA GeForce RTX 3060 Ti", "driver": "NVIDIA 610.74", "api": "1.4.341"},
+  "benchmarks": [
+    {"name": "timestamp_resolution", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 0.000, "min_ns_per_op": 0.000, "max_ns_per_op": 0.000, "metric": 0.000, "unit": "ns"},
+    {"name": "copy_256mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1335296.000, "min_ns_per_op": 1334272.000, "max_ns_per_op": 1397760.000, "metric": 402.061, "unit": "GB/s"},
+    {"name": "write_256mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 634784.000, "min_ns_per_op": 632832.000, "max_ns_per_op": 778240.000, "metric": 422.877, "unit": "GB/s"},
+    {"name": "read_256mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 620544.000, "min_ns_per_op": 619520.000, "max_ns_per_op": 638976.000, "metric": 432.581, "unit": "GB/s"},
+    {"name": "fma_fp32", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1297408.000, "min_ns_per_op": 1296384.000, "max_ns_per_op": 1299456.000, "metric": 13.242, "unit": "TFLOPS"},
+    {"name": "random_read_1mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1225728.000, "min_ns_per_op": 1223680.000, "max_ns_per_op": 1596416.000, "metric": 876.003, "unit": "GB/s"},
+    {"name": "random_read_2mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1491968.000, "min_ns_per_op": 1489920.000, "max_ns_per_op": 1496064.000, "metric": 719.682, "unit": "GB/s"},
+    {"name": "random_read_4mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1615872.000, "min_ns_per_op": 1614848.000, "max_ns_per_op": 1617920.000, "metric": 664.497, "unit": "GB/s"},
+    {"name": "random_read_8mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 1961984.000, "min_ns_per_op": 1954816.000, "max_ns_per_op": 2413568.000, "metric": 547.273, "unit": "GB/s"},
+    {"name": "random_read_16mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 4928512.000, "min_ns_per_op": 4896768.000, "max_ns_per_op": 5405696.000, "metric": 217.863, "unit": "GB/s"},
+    {"name": "random_read_64mib", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 8369152.000, "min_ns_per_op": 8354816.000, "max_ns_per_op": 8944640.000, "metric": 128.298, "unit": "GB/s"},
+    {"name": "clear_4k_rgba8", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 66560.000, "min_ns_per_op": 66560.000, "max_ns_per_op": 67584.000, "metric": 498.462, "unit": "GB/s"},
+    {"name": "raster_fill_4k_rgba8_x8", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 480256.000, "min_ns_per_op": 479232.000, "max_ns_per_op": 480256.000, "metric": 138.166, "unit": "Gpix/s"},
+    {"name": "raster_fill_4k_r11g11b10_x8", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 480256.000, "min_ns_per_op": 479232.000, "max_ns_per_op": 480256.000, "metric": 138.166, "unit": "Gpix/s"},
+    {"name": "raster_fill_4k_rgba16f_x8", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 925696.000, "min_ns_per_op": 925696.000, "max_ns_per_op": 926720.000, "metric": 71.681, "unit": "Gpix/s"},
+    {"name": "visbuffer_write_4k_8bpp", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 117760.000, "min_ns_per_op": 116736.000, "max_ns_per_op": 117760.000, "metric": 70.435, "unit": "Gpix/s"},
+    {"name": "texture_sample_4k_rgba8", "label": "", "iterations": 1, "items_per_iteration": 1, "repeats": 20, "ns_per_op": 279552.000, "min_ns_per_op": 277504.000, "max_ns_per_op": 598016.000, "metric": 29.670, "unit": "Gpix/s"}
+  ]
+}

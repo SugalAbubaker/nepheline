@@ -65,4 +65,18 @@ NPH_SHARED_STRUCT(NphMeshVertex)
     NphVec4 extra;     // v in x
 };
 
+// Push constants of the GPU benchmarks (benchmarks/gpu).
+NPH_SHARED_STRUCT(NphBenchPush)
+{
+    u64 address;       // source or destination buffer
+    u64 address2;      // second buffer (reductions)
+    u32 count;         // elements (uvec4) per dispatch
+    u32 iterations;    // inner loop count
+    u32 mask;          // working-set mask for random reads (power of two - 1)
+    u32 texture_index; // sampled texture (bindless)
+    u32 sampler_index;
+    u32 pad0;
+    NphVec4 color; // raster fill colour
+};
+
 #endif

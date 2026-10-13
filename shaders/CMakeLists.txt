@@ -23,3 +23,16 @@ nph_add_shaders(nph_shaders_samples
         samples/mesh.frag
         samples/mesh_anim.comp
 )
+
+# Shaders of the GPU benchmarks (benchmarks/gpu).
+nph_add_shaders(nph_shaders_bench
+    SOURCES
+        bench/bench_fill.comp
+        bench/bench_read.comp
+        bench/bench_fma.comp
+        bench/bench_random.comp
+        bench/bench_fullscreen.vert
+        bench/bench_color.frag
+        bench/bench_sample.frag
+        bench/bench_visbuffer.frag
+)

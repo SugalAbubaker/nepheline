@@ -235,8 +235,54 @@ against `benchmarks/budgets.txt`, and uploads the JSON results as artifacts.
 Clang (Debug: ASan + UBSan) and runs each for two minutes from its seed
 corpus; crashing inputs are uploaded as artifacts.
 
-`.github/workflows/gpu-perf.yml` targets the self-hosted RTX 3060 Ti runner
-([ADR-0002](adr/0002-self-hosted-gpu-runner.md)).
+`.github/workflows/gpu-perf.yml` runs on the self-hosted RTX 3060 Ti runner
+([ADR-0002](adr/0002-self-hosted-gpu-runner.md)): nightly, on pushes to
+`main`, and on pull requests from this repository that touch `engine/gpu`,
+`engine/render`, `shaders`, or `benchmarks/gpu`. It builds Development and
+Profile, runs the gpu tests and samples with validation on the real driver,
+runs `gpu_bench` against `benchmarks/gpu_budgets.txt` (a median more than
+5 % over the recorded reference fails the job, CLAUDE.md §10.7), and
+uploads the JSON results. The job queues until the machine is on.
+
+### Self-hosted GPU runner
+
+The reference machine registers as a repository-scoped runner with the
+labels `self-hosted, windows, x64, gpu, rtx3060ti`, hardened as ADR-0002
+§4 requires: a dedicated standard user, ephemeral registration (one job per
+registration, so nothing survives from one job to the next), and no
+credential reachable by the job. `scripts/runner/install.ps1` sets
+it all up:
+
+1. Install Visual Studio 2022 (MSVC, CMake, Ninja), the Vulkan SDK, Git
+   with git-lfs, and a current GPU driver on the machine.
+2. Create a fine-grained personal access token restricted to this
+   repository with the single permission *Administration: Read and write*
+   (it mints runner registration tokens and nothing else).
+3. In the repository settings keep *Actions → General → Require approval
+   for all outside collaborators* enabled; `gpu-perf.yml` additionally
+   refuses fork pull requests.
+4. From an elevated PowerShell run `.\scripts\runner\install.ps1`
+   and paste the token. The script creates the `nph-runner` user with a
+   random password (granted *Log on as a batch job*), downloads the latest
+   `actions/runner` into `C:\actions-runner` (the only folder the user can
+   write), stores the token DPAPI-protected under `C:\actions-runner\admin`
+   (SYSTEM and Administrators only), and registers two scheduled tasks:
+   *Nepheline runner (register)* runs as SYSTEM at startup and loops (mint
+   a registration token, `config.cmd --ephemeral`, start the run task,
+   wait), and *Nepheline runner (run)* runs `run.cmd` as `nph-runner` for
+   exactly one job.
+5. Confirm the runner under *Settings → Actions → Runners* and trigger the
+   *GPU performance* workflow once by hand (`workflow_dispatch`).
+   `C:\actions-runner\admin\loop.log` records every registration.
+
+The tasks run in session 0, without an interactive desktop. Compute and
+offscreen rendering do not care; if the swapchain tests report that the
+surface cannot be presented there, switch *Nepheline runner (run)* to
+*Run only when user is logged on* with an *At log on* trigger for
+`nph-runner` and configure auto-logon for that user with Sysinternals
+Autologon (which stores the password as an LSA secret). Re-running the
+script rotates the password and the token; `-Uninstall` removes the
+tasks, the folder, and the user.
 
 ### GPU tests in CI
 
@@ -269,3 +315,6 @@ Vulkan SDK with `scripts/install_vulkan_sdk.ps1` (cached per version) for
   the code they check (CLAUDE.md §9).
 - **Windows CI has no Vulkan driver**, so the GPU tests only run on Linux
   (lavapipe) and on the self-hosted RTX 3060 Ti runner.
+- **The self-hosted runner is registered by hand** (an administrator runs
+  `scripts/runner/install.ps1`); until then the GPU performance
+  workflow queues, and its session-0 presentation path is unverified.
