@@ -32,7 +32,7 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb glslc
       - name: Configure
         run: >
           cmake --preset linux-clang -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
