@@ -30,6 +30,7 @@ typedef enum NphResult {
     NPH_RESULT_IO_ERROR,         // the OS reported a file or device failure
     NPH_RESULT_ACCESS_DENIED,    // the OS refused on permissions or privileges
     NPH_RESULT_BUSY,             // the resource is in use (sharing violation, non-empty directory)
+    NPH_RESULT_DEVICE_LOST,      // the GPU (or another device) was lost or reset; recreate it
     NPH_RESULT_UNKNOWN,          // failure with no better classification
     NPH_RESULT_COUNT
 } NphResult;
