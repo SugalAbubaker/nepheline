@@ -1,0 +1,9 @@
+# LeakSanitizer suppressions for the Linux CI runs (CLAUDE.md §9).
+# The Vulkan loader and lavapipe (Mesa's LLVM-based software Vulkan driver)
+# keep process-lifetime state that LeakSanitizer reports at exit; none of it
+# is Nepheline's. The engine's own allocations are never suppressed.
+leak:libvulkan.so
+leak:libvulkan_lvp
+leak:libLLVM
+leak:libdrm
+leak:libgallium
