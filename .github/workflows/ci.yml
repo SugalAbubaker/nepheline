@@ -16,10 +16,20 @@ permissions:
 
 env:
   LLVM_VERSION: 19
+  # The Vulkan SDK release the vendored headers, volk, and the validation
+  # layer on the development machine are pinned to (docs/adr/0014).
+  VULKAN_SDK_VERSION: 1.4.321.1
+  # Linux GPU tests run on lavapipe, Mesa's software Vulkan driver
+  # (CLAUDE.md §6, §9); the loader is told to use only that ICD.
+  VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+  VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+  # The loader and lavapipe keep process-lifetime state that LeakSanitizer
+  # would otherwise report (tests/lsan.supp).
+  LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
 
 jobs:
   format:
-    name: clang-format
+    name: clang-format + layering
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -31,6 +41,10 @@ jobs:
           CLANG_FORMAT_VERSION: 19.1.5
       - name: Check formatting
         run: python3 scripts/format.py --check
+      # The module dependency rule and the third-party include policy
+      # (CLAUDE.md §1.8, §4).
+      - name: Check layering
+        run: python3 scripts/check_layering.py
 
   build:
     name: ${{ matrix.name }} ${{ matrix.config }}
@@ -61,17 +75,37 @@ jobs:
         shell: pwsh
         run: ./scripts/dev_env.ps1 -GitHubEnv
 
-      - name: Install Ninja and the window system development packages
+      # Windows runners have no GPU and no Vulkan driver, so the GPU tests
+      # and samples skip there; the SDK provides glslc for the shader build.
+      - name: Cache the Vulkan SDK
+        if: runner.os == 'Windows'
+        id: vulkan-sdk
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}-windows
+      - name: Install the Vulkan SDK
+        if: runner.os == 'Windows' && steps.vulkan-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/install_vulkan_sdk.ps1 -Version ${{ env.VULKAN_SDK_VERSION }}
+      - name: Point the build at the Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}" >> $env:GITHUB_ENV
+
+      - name: Install Ninja, the window system packages, glslc, and lavapipe
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb \
+            glslc libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
 
       - name: Tool versions
         shell: bash
         run: |
           cmake --version | head -1
           ninja --version
+          glslc --version | head -1
           case "${{ matrix.preset }}" in
             win-msvc)    cl 2>&1 | head -1 ;;
             win-clang)   clang-cl --version | head -1 ;;
@@ -85,9 +119,10 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}
 
-      # Linux tests run under a virtual X server so the window tests and the
-      # platform_window sample can open a window (CLAUDE.md §12 Phase 3).
-      - name: Test (Linux, under Xvfb)
+      # Linux tests run under a virtual X server so the window tests, the
+      # swapchain tests, and the GPU samples can open a window (CLAUDE.md
+      # §12 Phase 3, Phase 5).
+      - name: Test (Linux, under Xvfb, on lavapipe)
         if: runner.os == 'Linux'
         run: >
           xvfb-run -a ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
@@ -119,7 +154,7 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-          sudo apt-get install -y clang-tidy-${{ env.LLVM_VERSION }} ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
+          sudo apt-get install -y clang-tidy-${{ env.LLVM_VERSION }} ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb glslc
       - name: Configure (single-config, exports compile_commands.json)
         run: cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
       - name: Run clang-tidy
@@ -128,7 +163,8 @@ jobs:
           --clang-tidy clang-tidy-${{ env.LLVM_VERSION }}
 
   # Line coverage per module against the CLAUDE.md §9 targets (90 % core,
-  # math, jobs; 80 % elsewhere), from a Debug build without sanitizers.
+  # math, jobs; 80 % elsewhere), from a Debug build without sanitizers. The
+  # gpu tests run on lavapipe so the gpu module is measured too.
   coverage:
     name: coverage (llvm-cov)
     runs-on: ubuntu-24.04
@@ -141,7 +177,8 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev xvfb \
+            glslc libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
       - name: Configure (Debug, instrumented, no sanitizers)
         run: >
           cmake --preset linux-clang-tidy -DCMAKE_C_COMPILER=clang-${{ env.LLVM_VERSION }}
@@ -195,10 +232,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - name: Install Ninja and the window system development packages
+      - name: Install Ninja, the window system packages, and glslc
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev
+          sudo apt-get install -y ninja-build libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev glslc
       - name: Configure (Debug, ThreadSanitizer)
         run: >
           cmake --preset linux-clang -DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
