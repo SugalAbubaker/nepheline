@@ -36,7 +36,12 @@ endif()
 # every executable that links nph_gpu.
 add_library(nph_gpu_vma STATIC src/gpu_vma.cpp)
 target_compile_features(nph_gpu_vma PRIVATE cxx_std_17)
-target_link_libraries(nph_gpu_vma PRIVATE GPUOpen::VulkanMemoryAllocator Vulkan::Headers)
+# Link-only dependency on core (the assert handler), so the static archives
+# are ordered core-after-vma on single-pass linkers; LINK_ONLY keeps
+# nph::options' C-only warning flags away from this C++ translation unit.
+target_link_libraries(nph_gpu_vma PRIVATE GPUOpen::VulkanMemoryAllocator Vulkan::Headers
+                                          $<LINK_ONLY:nph::core>)
+nph_apply_configuration_definitions(nph_gpu_vma)
 target_include_directories(nph_gpu_vma PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_SOURCE_DIR}/engine/core/include")

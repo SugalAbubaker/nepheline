@@ -7,15 +7,20 @@
 
 #include <cstring>
 
-// VMA's assertions go through the engine's handler: the default one
-// writes to stderr and aborts without the CRT's modal dialog, and tests
-// can intercept it.
+// VMA's assertions follow the engine's configuration (ADR-0003): on in Debug
+// and Development, where they go through the engine's handler (the default
+// one writes to stderr and aborts without the CRT's modal dialog, and tests
+// can intercept it); compiled out in Profile and Shipping like NPH_ASSERT.
+#if NPH_ASSERTS_ENABLED
 #define VMA_ASSERT(expr)                                                                           \
     do {                                                                                           \
         if (!(expr)) {                                                                             \
             nph_assert_fail_nomsg(__FILE__, __func__, (u32)__LINE__, #expr);                       \
         }                                                                                          \
     } while (0)
+#else
+#define VMA_ASSERT(expr) ((void)0)
+#endif
 
 #define VK_NO_PROTOTYPES
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
