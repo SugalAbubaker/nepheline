@@ -241,8 +241,10 @@ corpus; crashing inputs are uploaded as artifacts.
 
 The gpu module's tests and samples need a Vulkan device. Linux jobs
 install `mesa-vulkan-drivers` and point the loader at lavapipe only
-(`VK_DRIVER_FILES` listing both manifest names: Ubuntu's `lvp_icd.json` and
-upstream Mesa's `lvp_icd.x86_64.json`), install
+(`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, the manifest name
+Ubuntu's package uses; upstream Mesa installs `lvp_icd.x86_64.json`, and a
+listed file that does not exist is reported by the loader as an error that
+the validation gate counts), install
 `vulkan-validationlayers` so Debug and Development builds run with the
 validation gate, and run CTest under Xvfb so the swapchain tests can open
 a window. LeakSanitizer suppresses the loader's and lavapipe's
