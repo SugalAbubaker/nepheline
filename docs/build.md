@@ -254,7 +254,13 @@ credential reachable by the job. `scripts/runner/install.ps1` sets
 it all up:
 
 1. Install Visual Studio 2022 (MSVC, CMake, Ninja), the Vulkan SDK, Git
-   with git-lfs, and a current GPU driver on the machine.
+   with git-lfs, and a current GPU driver on the machine. The SDK must be
+   readable by the runner's standard user: install it machine-wide
+   (`scripts\install_vulkan_sdk.ps1 -Version 1.4.321.1`, into
+   `C:\VulkanSDK`), or, for an SDK inside a user profile, grant that user
+   read access (`icacls <sdk> /grant "nph-runner:(OI)(CI)RX" /T`); the
+   installer warns when `VULKAN_SDK` points into a profile. The machine
+   needs only Windows PowerShell 5.1; the workflow runs its steps with it.
 2. Create a fine-grained personal access token restricted to this
    repository with the single permission *Administration: Read and write*
    (it mints runner registration tokens and nothing else).
