@@ -20,9 +20,12 @@ env:
   # layer on the development machine are pinned to (docs/adr/0014).
   VULKAN_SDK_VERSION: 1.4.321.1
   # Linux GPU tests run on lavapipe, Mesa's software Vulkan driver
-  # (CLAUDE.md §6, §9); the loader is told to use only that ICD.
-  VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-  VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+  # (CLAUDE.md §6, §9); the loader is told to use only that ICD. Ubuntu's
+  # mesa-vulkan-drivers names the manifest lvp_icd.json; upstream Mesa
+  # installs lvp_icd.x86_64.json. Both are listed; the loader skips the
+  # one that does not exist.
+  VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+  VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
   # The loader and lavapipe keep process-lifetime state that LeakSanitizer
   # would otherwise report (tests/lsan.supp).
   LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
