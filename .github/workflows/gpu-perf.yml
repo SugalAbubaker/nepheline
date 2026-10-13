@@ -48,7 +48,7 @@ jobs:
     # a native command's exit code, as GitHub's own powershell shell does.
     defaults:
       run:
-        shell: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = 'Stop'; . '{0}'; if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit $LASTEXITCODE }\""
+        shell: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = 'Stop'; . '{0}'; if ((Test-Path -LiteralPath variable:LASTEXITCODE)) { exit $LASTEXITCODE }\""
     steps:
       - uses: actions/checkout@v7
         with:
