@@ -129,7 +129,7 @@ if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
     Write-Host "Local user $User exists; password rotated."
 } else {
     New-LocalUser -Name $User -Password $securePassword -PasswordNeverExpires -UserMayNotChangePassword `
-        -Description 'Nepheline GitHub Actions runner (standard user, ADR-0002)' | Out-Null
+        -Description 'Nepheline GitHub Actions runner (ADR-0002)' | Out-Null
     Write-Host "Local user $User created."
 }
 $sid = (Get-LocalUser -Name $User).SID.Value
