@@ -41,13 +41,17 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, x64, gpu, rtx3060ti]
     timeout-minutes: 60
+    # Windows PowerShell 5.1 is on every Windows machine; PowerShell 7 (pwsh)
+    # is not on the reference machine, and the first run failed asking for it.
+    defaults:
+      run:
+        shell: powershell
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Set up the MSVC environment
-        shell: pwsh
         run: ./scripts/dev_env.ps1 -GitHubEnv
 
       # The reference machine has the SDK layer: the gpu tests fail, rather
@@ -65,7 +69,6 @@ jobs:
         run: ctest --preset win-msvc-development -R "^gpu$|^sample\.gpu_" --output-on-failure
 
       - name: GPU benchmarks (Profile)
-        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force bench-results | Out-Null
           .\build\win-msvc\bin\Profile\gpu_bench.exe --repeats=20 --json=bench-results\gpu_bench.json --budgets=benchmarks\gpu_budgets.txt
