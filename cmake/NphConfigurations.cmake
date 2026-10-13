@@ -100,7 +100,16 @@ endmacro()
 
 # Per-configuration preprocessor definitions seen by all Nepheline code.
 function(nph_apply_configuration_definitions target)
-    target_compile_definitions(${target} INTERFACE
+    # INTERFACE for nph::options (every Nepheline target inherits it); PRIVATE
+    # for the few targets that must not inherit nph::options' flags but still
+    # follow the configuration, such as the C++ VMA translation unit.
+    get_target_property(_nph_type ${target} TYPE)
+    if(_nph_type STREQUAL "INTERFACE_LIBRARY")
+        set(_nph_scope INTERFACE)
+    else()
+        set(_nph_scope PRIVATE)
+    endif()
+    target_compile_definitions(${target} ${_nph_scope}
         $<$<CONFIG:Debug>:NPH_CONFIG_DEBUG=1>
         $<$<CONFIG:Development>:NPH_CONFIG_DEVELOPMENT=1>
         $<$<CONFIG:Profile>:NPH_CONFIG_PROFILE=1>
