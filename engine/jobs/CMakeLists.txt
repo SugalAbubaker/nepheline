@@ -28,3 +28,6 @@ nph_add_test(jobs
     DEPS
         nph::jobs
 )
+if(NPH_BUILD_TESTS AND WIN32)
+    target_compile_definitions(jobs_tests PRIVATE _CRT_SECURE_NO_WARNINGS) # fopen in the dump tests
+endif()
