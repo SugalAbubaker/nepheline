@@ -31,8 +31,9 @@ if(MSVC)
 endif()
 
 # The Vulkan Memory Allocator implementation: one C++ translation unit with
-# the library's own warning policy, never the engine's (CLAUDE.md §3).
-enable_language(CXX)
+# the library's own warning policy, never the engine's (CLAUDE.md §3). CXX
+# is enabled by the top-level project() so its linker preference reaches
+# every executable that links nph_gpu.
 add_library(nph_gpu_vma STATIC src/gpu_vma.cpp)
 target_compile_features(nph_gpu_vma PRIVATE cxx_std_17)
 target_link_libraries(nph_gpu_vma PRIVATE GPUOpen::VulkanMemoryAllocator Vulkan::Headers)

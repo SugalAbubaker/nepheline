@@ -548,7 +548,8 @@ void gpu_copy_name(char *dst, const char *src, const char *fallback, u32 counter
         memcpy(dst, src, n);
         dst[n] = '\0';
     } else {
-        snprintf(dst, NPH_GPU_NAME_MAX, "%s#%u", fallback, counter);
+        snprintf(dst, NPH_GPU_NAME_MAX, "%.*s#%u", (int)(NPH_GPU_NAME_MAX - 12U), fallback,
+                 counter);
     }
 }
 

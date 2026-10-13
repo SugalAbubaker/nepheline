@@ -45,8 +45,9 @@ NTEST_F(GpuFixture, reports_a_conforming_device)
     NTEST_ASSERT_GE_UINT(info->physical_device_count, 1U);
     NTEST_ASSERT_LT_UINT(info->physical_device_index, info->physical_device_count);
     NTEST_ASSERT_NE_STR(nph_gpu_device_type_name(info->type), "?");
-    volatile int bad_type = 99; // not a constant: the analyzer would reject the cast
-    NTEST_ASSERT_EQ_STR(nph_gpu_device_type_name((NphGpuDeviceType)bad_type), "?");
+    // An out-of-range value exercises the "?" fallback on purpose.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_STR(nph_gpu_device_type_name((NphGpuDeviceType)99), "?");
     NTEST_ASSERT_NOT_NULL(nph_gpu_device_allocator(f->dev));
     NTEST_LOG("features: async compute %d, dedicated transfer %d, mesh %d, ray query %d",
               info->features.async_compute, info->features.dedicated_transfer,
@@ -303,9 +304,9 @@ NTEST_F(GpuFixture, frames_alternate_slots_and_recycle)
 NTEST_F(GpuFixture, frame_misuse_is_asserted)
 {
     REQUIRE_DEVICE(f);
-    NPH_TEST_EXPECT_ASSERT((void)nph_gpu_frame_end(f->dev));
+    NPH_TEST_EXPECT_ASSERT(NPH_IGNORE_RESULT(nph_gpu_frame_end(f->dev)));
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
-    NPH_TEST_EXPECT_ASSERT((void)nph_gpu_frame_begin(f->dev));
+    NPH_TEST_EXPECT_ASSERT(NPH_IGNORE_RESULT(nph_gpu_frame_begin(f->dev)));
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
 }

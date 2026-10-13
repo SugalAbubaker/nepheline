@@ -191,7 +191,7 @@ NTEST_F(GpuFixture, generate_mips_averages)
     u8 mip1[4U * 4U * 4U];
     test_read_image(f->dev, img, 1U, mip1, sizeof mip1); // 4x4: still white left, black right
     NTEST_ASSERT_TRUE(test_pixel_near(&mip1[0], 255U, 255U, 255U, 255U, 1U));
-    NTEST_ASSERT_TRUE(test_pixel_near(&mip1[3U * 4U], 0U, 0U, 0U, 255U, 1U));
+    NTEST_ASSERT_TRUE(test_pixel_near(&mip1[12U], 0U, 0U, 0U, 255U, 1U)); // pixel 3, row 0
     nph_gpu_image_destroy(f->dev, img);
 }
 

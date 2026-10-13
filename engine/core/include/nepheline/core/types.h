@@ -60,6 +60,10 @@ typedef intptr_t iptr;
 
 // Marks a parameter or variable as intentionally unused.
 #define NPH_UNUSED(x) ((void)(x))
+// Discards the result of an NPH_MUST_USE call on purpose (cleanup paths that
+// cannot act on a failure). A plain (void) cast does not silence GCC's
+// -Wunused-result (GCC bug 66425); consuming the value with `!` does.
+#define NPH_IGNORE_RESULT(expr) ((void)!(expr))
 
 // Compile-time size and alignment checks. The headers are included by the
 // one C++ translation unit in the runtime (the VMA implementation), where

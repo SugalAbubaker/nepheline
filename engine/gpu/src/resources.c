@@ -403,7 +403,7 @@ static NphResult create_view(NphGpuDevice *dev, NphGpuImageSlot *slot, VkImageVi
     VK_TRY(dev, vkCreateImageView(dev->device, &ci, NULL, out));
     if (dev->has_debug_utils) {
         char name[NPH_GPU_NAME_MAX + 32U];
-        snprintf(name, sizeof name, "%s %s", slot->name, suffix);
+        snprintf(name, sizeof name, "%.*s %.31s", (int)(NPH_GPU_NAME_MAX - 1U), slot->name, suffix);
         gpu_set_name(dev, VK_OBJECT_TYPE_IMAGE_VIEW, (u64)(uptr)*out, name);
     }
     return NPH_RESULT_OK;

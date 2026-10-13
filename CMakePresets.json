@@ -48,7 +48,8 @@
       "inherits": "windows-base",
       "displayName": "Windows / MSVC (cl)",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "cl"
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
       }
     },
     {
@@ -56,7 +57,8 @@
       "inherits": "windows-base",
       "displayName": "Windows / clang-cl",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang-cl"
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
       }
     },
     {
@@ -64,7 +66,8 @@
       "inherits": "linux-base",
       "displayName": "Linux / GCC",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "gcc"
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
       }
     },
     {
@@ -72,7 +75,8 @@
       "inherits": "linux-base",
       "displayName": "Linux / Clang",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang"
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
       }
     },
     {
@@ -82,6 +86,7 @@
       "displayName": "Linux / Clang, single-config Development (drives clang-tidy)",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "Development"
       }
     }

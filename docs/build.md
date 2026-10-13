@@ -8,7 +8,7 @@ in [ADR-0003](adr/0003-build-configurations.md).
 
 | | Windows | Linux |
 |---|---|---|
-| Compiler | Visual Studio 2022 17.14+ with the "Desktop development with C++" workload (MSVC 14.44). Optional: "C++ Clang tools for Windows" for the `win-clang` preset | GCC ≥ 12 or Clang ≥ 16 |
+| Compiler | Visual Studio 2022 17.14+ with the "Desktop development with C++" workload (MSVC 14.44). Optional: "C++ Clang tools for Windows" for the `win-clang` preset | GCC ≥ 12 or Clang ≥ 16, with the matching `g++`/`clang++` (the VMA implementation is one C++ translation unit; the presets set both compilers) |
 | CMake | ≥ 3.25 (VS bundles 3.31) | ≥ 3.25 |
 | Ninja | bundled with VS | `ninja-build` |
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
