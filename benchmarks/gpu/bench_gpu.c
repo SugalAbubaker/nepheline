@@ -567,15 +567,14 @@ static int write_json(const char *path, const Result *results, u32 count,
         fprintf(stderr, "gpu_bench: cannot write %s\n", path);
         return 2;
     }
-    char stamp[32];
+    // Portable C, as in nbench: the tool is single-threaded, so gmtime's
+    // static result is fine.
+    char stamp[32] = "unknown";
     const time_t now = (time_t)(nph_time_wall_ns() / NPH_TIME_NS_PER_S);
-    struct tm utc;
-#if NPH_PLATFORM_WINDOWS
-    gmtime_s(&utc, &now);
-#else
-    gmtime_r(&now, &utc);
-#endif
-    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", &utc);
+    const struct tm *utc = gmtime(&now);
+    if (utc != NULL) {
+        strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", utc);
+    }
     fprintf(f, "{\n  \"schema\": 1,\n  \"executable\": \"gpu_bench\",\n  \"timestamp\": \"%s\",\n",
             stamp);
 #if NPH_CONFIG_DEBUG
@@ -621,10 +620,23 @@ static int check_budgets(const char *path, const Result *results, u32 count)
     int status = 0;
     char line[256];
     while (fgets(line, sizeof line, f) != NULL) {
+        char *hash = strchr(line, '#');
+        if (hash != NULL) {
+            *hash = '\0';
+        }
         char name[128];
-        double max_ns = 0.0;
-        if (line[0] == '#' || sscanf(line, "%127s %lf", name, &max_ns) != 2) {
-            continue;
+        if (sscanf(line, "%127s", name) <= 0) {
+            continue; // blank or comment-only line
+        }
+        // The number follows the name; strtod reports where it stopped (as
+        // in nbench; sscanf cannot report a conversion failure).
+        const char *rest = strstr(line, name) + strlen(name);
+        char *end = NULL;
+        const double max_ns = strtod(rest, &end);
+        if (end == rest || !(max_ns > 0.0)) {
+            fprintf(stderr, "gpu_bench: %s: expected `name max_ns`, got: %s", path, line);
+            fclose(f);
+            return 2;
         }
         for (u32 i = 0; i < count; ++i) {
             if (strcmp(results[i].bench->name, name) == 0 && results[i].median_ns > max_ns) {
