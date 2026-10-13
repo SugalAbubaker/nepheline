@@ -22,9 +22,11 @@ NTEST(gpu_formats, every_format_is_described)
         }
     }
     NTEST_ASSERT_EQ_STR(nph_gpu_format_name(NPH_GPU_FORMAT_UNDEFINED), "UNDEFINED");
-    volatile int bad = 9999; // not a constant: the analyzer would reject the cast
-    NTEST_ASSERT_EQ_STR(nph_gpu_format_name((NphGpuFormat)bad), "UNDEFINED");
-    NTEST_ASSERT_EQ_INT(nph_gpu_vk_format((NphGpuFormat)bad), VK_FORMAT_UNDEFINED);
+    // Out-of-range values exercise the UNDEFINED fallback on purpose.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_STR(nph_gpu_format_name((NphGpuFormat)9999), "UNDEFINED");
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_INT(nph_gpu_vk_format((NphGpuFormat)9999), VK_FORMAT_UNDEFINED);
 }
 
 NTEST(gpu_formats, level_bytes_round_up_to_blocks)
@@ -68,12 +70,13 @@ NTEST(gpu_formats, layouts_stages_access_map_to_vulkan)
     for (u32 i = 0; i < (u32)NPH_GPU_LAYOUT_COUNT; ++i) {
         NTEST_ASSERT_NE_STR(nph_gpu_layout_name((NphGpuLayout)i), "?");
     }
-    volatile int bad_layout = 77;
-    NTEST_ASSERT_EQ_STR(nph_gpu_layout_name((NphGpuLayout)bad_layout), "?");
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_STR(nph_gpu_layout_name((NphGpuLayout)77), "?");
     NTEST_ASSERT_EQ_INT(nph_gpu_vk_layout(NPH_GPU_LAYOUT_PRESENT), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     NTEST_ASSERT_EQ_INT(nph_gpu_vk_layout(NPH_GPU_LAYOUT_COLOR_ATTACHMENT),
                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    NTEST_ASSERT_EQ_INT(nph_gpu_vk_layout((NphGpuLayout)bad_layout), VK_IMAGE_LAYOUT_UNDEFINED);
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_INT(nph_gpu_vk_layout((NphGpuLayout)77), VK_IMAGE_LAYOUT_UNDEFINED);
     NTEST_ASSERT_EQ_UINT((u64)nph_gpu_vk_stages((u32)NPH_GPU_STAGE_COMPUTE),
                          (u64)VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     NTEST_ASSERT_EQ_UINT((u64)nph_gpu_vk_stages((u32)NPH_GPU_STAGE_DEPTH_STENCIL),
@@ -99,8 +102,8 @@ NTEST(gpu_formats, results_map_and_name)
     NTEST_ASSERT_EQ_INT(nph_gpu_vk_result(VK_TIMEOUT, NULL), NPH_RESULT_BUSY);
     NTEST_ASSERT_EQ_INT(nph_gpu_vk_result(VK_ERROR_UNKNOWN, "logged"), NPH_RESULT_UNKNOWN);
     NTEST_ASSERT_EQ_STR(nph_gpu_vk_result_name(VK_ERROR_DEVICE_LOST), "VK_ERROR_DEVICE_LOST");
-    volatile int bad_result = -999999;
-    NTEST_ASSERT_EQ_STR(nph_gpu_vk_result_name((VkResult)bad_result), "VK_RESULT_?");
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_ASSERT_EQ_STR(nph_gpu_vk_result_name((VkResult)(-999999)), "VK_RESULT_?");
     NTEST_ASSERT_EQ_STR(nph_result_string(NPH_RESULT_DEVICE_LOST), "DEVICE_LOST");
 }
 

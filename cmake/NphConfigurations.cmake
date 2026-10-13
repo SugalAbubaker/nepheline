@@ -83,7 +83,7 @@ macro(nph_apply_configuration_flags)
 
     # Shipping uses link-time optimization (/GL+/LTCG on MSVC, -flto on GCC/Clang).
     include(CheckIPOSupported)
-    check_ipo_supported(RESULT _nph_ipo OUTPUT _nph_ipo_msg LANGUAGES C)
+    check_ipo_supported(RESULT _nph_ipo OUTPUT _nph_ipo_msg LANGUAGES C CXX)
     if(_nph_ipo)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_SHIPPING ON)
     else()

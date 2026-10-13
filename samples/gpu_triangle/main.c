@@ -164,13 +164,13 @@ int main(int argc, char **argv)
         NphGpuImage backbuffer = NPH_GPU_IMAGE_NULL;
         const NphResult ar = nph_gpu_swapchain_acquire(swapchain, &backbuffer);
         if (ar == NPH_RESULT_EMPTY) {
-            (void)nph_gpu_frame_end(dev);
+            NPH_IGNORE_RESULT(nph_gpu_frame_end(dev));
             nph_thread_sleep_ns(16U * NPH_TIME_NS_PER_MS);
             continue;
         }
         if (ar != NPH_RESULT_OK) {
             status = 1;
-            (void)nph_gpu_frame_end(dev);
+            NPH_IGNORE_RESULT(nph_gpu_frame_end(dev));
             break;
         }
         nph_gpu_rg_begin(graph);
@@ -213,7 +213,7 @@ int main(int argc, char **argv)
 
 done:
     if (dev != NULL) {
-        (void)nph_gpu_device_wait_idle(dev);
+        NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(dev));
         nph_gpu_render_graph_destroy(graph);
         nph_gpu_pipeline_destroy(dev, triangle.pipeline);
         nph_gpu_shader_destroy(dev, vert);

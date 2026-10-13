@@ -18,7 +18,13 @@ project(Nepheline
     VERSION ${NPH_VERSION}
     DESCRIPTION "A production-grade, GPU-driven 3D game engine in C17 and Vulkan 1.3"
     HOMEPAGE_URL "https://github.com/SugalAbubaker/nepheline"
-    LANGUAGES C)
+    LANGUAGES C CXX)
+# C++ exists for exactly one engine translation unit, the VMA implementation
+# in engine/gpu (CLAUDE.md §3), and for the editor's cimgui later. It is
+# enabled here rather than in engine/gpu because CMake propagates a
+# language's linker preference only within the directory scope that enabled
+# it: enabling it in engine/gpu left samples and benchmarks linking with the
+# C driver and without the C++ runtime on Linux.
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset <name>")

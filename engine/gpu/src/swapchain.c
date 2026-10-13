@@ -243,7 +243,9 @@ static NphResult create_objects(NphGpuSwapchain *swapchain)
         NphGpuImageDesc desc;
         memset(&desc, 0, sizeof desc);
         char name[NPH_GPU_NAME_MAX];
-        snprintf(name, sizeof name, "%s image %u", swapchain->name, i);
+        // Precision-bounded so the compiler can prove the name fits.
+        snprintf(name, sizeof name, "%.*s image %u", (int)(NPH_GPU_NAME_MAX - 20U), swapchain->name,
+                 i);
         desc.type = NPH_GPU_IMAGE_2D;
         desc.format = swapchain->format;
         desc.width = width;
@@ -296,7 +298,16 @@ NphResult nph_gpu_swapchain_create(NphGpuDevice *dev, const NphGpuSwapchainDesc 
         NPH_FREE_TYPE(dev->alloc, NphGpuSwapchain, swapchain);
         return NPH_RESULT_UNSUPPORTED;
     }
-    memcpy(&swapchain->surface, &surface, sizeof swapchain->surface); // a u64 from the window layer
+    // The window layer hands the handle over as a u64 (platform exposes no
+    // Vulkan types); VkSurfaceKHR is a pointer on 64-bit targets, so the
+    // conversion goes through a union rather than an integer-to-pointer cast.
+    NPH_STATIC_ASSERT(sizeof(VkSurfaceKHR) <= sizeof(u64), "surface handle fits a u64");
+    union {
+        u64 bits;
+        VkSurfaceKHR handle;
+    } conv;
+    conv.bits = surface;
+    swapchain->surface = conv.handle;
     VkBool32 supported = VK_FALSE;
     const VkResult sr = vkGetPhysicalDeviceSurfaceSupportKHR(
         dev->phys, dev->queues[NPH_GPU_QUEUE_GRAPHICS]->family, swapchain->surface, &supported);
