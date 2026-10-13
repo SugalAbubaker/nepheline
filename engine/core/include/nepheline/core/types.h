@@ -61,8 +61,14 @@ typedef intptr_t iptr;
 // Marks a parameter or variable as intentionally unused.
 #define NPH_UNUSED(x) ((void)(x))
 
-// Compile-time size and alignment checks.
+// Compile-time size and alignment checks. The headers are included by the
+// one C++ translation unit in the runtime (the VMA implementation), where
+// the keyword is static_assert.
+#ifdef __cplusplus
+#define NPH_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
 #define NPH_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
 
 NPH_STATIC_ASSERT(sizeof(u8) == 1, "u8 must be one byte");
 NPH_STATIC_ASSERT(sizeof(u16) == 2, "u16 must be two bytes");

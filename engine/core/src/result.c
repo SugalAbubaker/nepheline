@@ -38,6 +38,8 @@ const char *nph_result_string(NphResult r)
         return "ACCESS_DENIED";
     case NPH_RESULT_BUSY:
         return "BUSY";
+    case NPH_RESULT_DEVICE_LOST:
+        return "DEVICE_LOST";
     case NPH_RESULT_UNKNOWN:
         return "UNKNOWN";
     case NPH_RESULT_COUNT:

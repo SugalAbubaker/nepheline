@@ -44,6 +44,7 @@ include(NphSanitizers)
 include(NphArch)
 include(NphCoverage)
 include(NphModule)
+include(NphShaders)
 
 # nph::options carries every compiler setting shared by all Nepheline code:
 # the C standard, warnings-as-errors, per-configuration defines, sanitizers.
@@ -74,10 +75,14 @@ add_subdirectory(engine/core)
 add_subdirectory(engine/math)
 add_subdirectory(engine/platform)
 add_subdirectory(engine/jobs)
+add_subdirectory(engine/gpu)
+
+# Shader sources shared by the engine, its tests, and the samples.
+add_subdirectory(shaders)
 
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
-target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs)
+target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs nph::gpu)
 
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)

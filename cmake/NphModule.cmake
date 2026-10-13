@@ -55,15 +55,18 @@ function(nph_add_test name)
     set_tests_properties(${name} PROPERTIES TIMEOUT 600 LABELS "unit")
 endfunction()
 
-# nph_add_sample(<name> SOURCES <src>... [DEPS <target>...] [ARGS <arg>...])
+# nph_add_sample(<name> SOURCES <src>... [DEPS <target>...] [ARGS <arg>...]
+#                [SKIP_RETURN_CODE <n>])
 #
 # Builds the executable <name> and registers "sample.<name>" with CTest
-# (label "sample") so every sample keeps running.
+# (label "sample") so every sample keeps running. SKIP_RETURN_CODE marks an
+# exit status that CTest reports as "skipped" rather than failed: the GPU
+# samples use it on machines without a Vulkan driver.
 function(nph_add_sample name)
     if(NOT NPH_BUILD_SAMPLES)
         return()
     endif()
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS;ARGS")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "SKIP_RETURN_CODE" "SOURCES;DEPS;ARGS")
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "nph_add_sample(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
     endif()
@@ -78,6 +81,9 @@ function(nph_add_sample name)
     if(NPH_BUILD_TESTS)
         add_test(NAME sample.${name} COMMAND ${name} ${ARG_ARGS})
         set_tests_properties(sample.${name} PROPERTIES TIMEOUT 120 LABELS "sample")
+        if(DEFINED ARG_SKIP_RETURN_CODE)
+            set_tests_properties(sample.${name} PROPERTIES SKIP_RETURN_CODE ${ARG_SKIP_RETURN_CODE})
+        endif()
     endif()
 endfunction()
 
