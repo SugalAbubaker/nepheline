@@ -1,13 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
-# Reference-hardware performance run on the self-hosted RTX 3060 Ti runner
-# (docs/adr/0002-self-hosted-gpu-runner.md).
-#
-# Phase 0: manual trigger only; the runner is registered in Phase 5, when the
-# first GPU code and microbenchmarks exist. Phase 5 adds `push: [main]` and
-# `pull_request` triggers and the §10.4 budget enforcement.
+# Reference-hardware runs on the self-hosted RTX 3060 Ti runner
+# (docs/adr/0002-self-hosted-gpu-runner.md; CLAUDE.md §6, §10.7): the gpu
+# tests with validation on the real driver, and the GPU microbenchmarks
+# against benchmarks/gpu_budgets.txt (a regression of more than 5 % over
+# the recorded reference fails the job). Runs nightly, on pushes to main,
+# and on pull requests that touch the GPU or renderer code; the job is
+# skipped when the runner is offline only in the sense that it queues
+# until the machine is on.
 name: GPU performance
 
 on:
+  schedule:
+    - cron: "0 4 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "engine/gpu/**"
+      - "engine/render/**"
+      - "shaders/**"
+      - "benchmarks/gpu/**"
+      - "benchmarks/gpu_budgets.txt"
+      - ".github/workflows/gpu-perf.yml"
+  pull_request:
+    paths:
+      - "engine/gpu/**"
+      - "engine/render/**"
+      - "shaders/**"
+      - "benchmarks/gpu/**"
+      - "benchmarks/gpu_budgets.txt"
+      - ".github/workflows/gpu-perf.yml"
   workflow_dispatch:
 
 permissions:
@@ -15,7 +36,7 @@ permissions:
 
 jobs:
   perf:
-    name: RTX 3060 Ti reference scenes
+    name: RTX 3060 Ti reference runs
     # Fork pull requests must never execute on this machine (ADR-0002).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, x64, gpu, rtx3060ti]
@@ -29,12 +50,29 @@ jobs:
         shell: pwsh
         run: ./scripts/dev_env.ps1 -GitHubEnv
 
+      # The reference machine has the SDK layer: the gpu tests fail, rather
+      # than run unvalidated, if it ever goes missing.
       - name: Configure
-        run: cmake --preset win-msvc
+        run: cmake --preset win-msvc -DNPH_GPU_REQUIRE_VALIDATION=ON
 
-      - name: Build (Profile)
-        run: cmake --build --preset win-msvc-profile
+      - name: Build (Development, Profile)
+        run: |
+          cmake --build --preset win-msvc-development
+          cmake --build --preset win-msvc-profile
 
-      - name: GPU benchmarks
-        # Replaced in Phase 5 by benchmarks/gpu with the CLAUDE.md §10.4 budgets.
-        run: echo "No GPU benchmarks exist before Phase 5."
+      # Validation and synchronisation validation on the real driver.
+      - name: GPU tests (Development, validation on)
+        run: ctest --preset win-msvc-development -R "^gpu$|^sample\.gpu_" --output-on-failure
+
+      - name: GPU benchmarks (Profile)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bench-results | Out-Null
+          .\build\win-msvc\bin\Profile\gpu_bench.exe --repeats=20 --json=bench-results\gpu_bench.json --budgets=benchmarks\gpu_budgets.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpu-benchmark-results
+          path: bench-results/

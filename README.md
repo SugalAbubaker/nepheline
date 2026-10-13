@@ -22,7 +22,7 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 2 | Math: scalar + SIMD types, wide SoA kernels, geometry, packing, random | **done** |
 | 3 | Platform: threads, fibers, virtual memory, files + async I/O, CPU detection, window/input (GLFW) | **done** |
 | 4 | Jobs: fiber workers, work-stealing deques, counters, priorities, I/O threads, deterministic mode | **done** (`v0.1.0`) |
-| 5 | GPU/RHI: Vulkan 1.3 device, bindless resources, frames and timelines, uploads, swapchain, SPIR-V reflection, pipelines with a persisted cache and hot reload, render graph with aliasing and async compute | **in progress** |
+| 5 | GPU/RHI: Vulkan 1.3 device, bindless resources, frames and timelines, uploads, swapchain, SPIR-V reflection, pipelines with a persisted cache and hot reload, render graph with aliasing and async compute, GPU microbenchmarks and budgets on the reference RTX 3060 Ti | **done** |
 | 6–15 | Assets → Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
@@ -56,11 +56,11 @@ Configurations: **Debug** (asserts, validation, ASan/UBSan), **Development**
 cmake/          build helpers: configurations, warnings, sanitizers, module/test functions
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
-benchmarks/     nbench harness, benchmarks per module, recorded results, budgets
+benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
 samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh)
 tests/fuzz/     libFuzzer targets and seed corpora for every parser
-scripts/        dev_env.ps1, install_vulkan_sdk.ps1, format.py, tidy.py, check_layering.py
+scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, runner/install.ps1 + loop.ps1
 third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA), each wrapped by exactly one engine module
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
@@ -79,7 +79,7 @@ Modules depend strictly left-to-right:
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/gpu.md`](docs/gpu.md) — GPU module: device and validation gate, bindless resources, frames and submission, uploads, shaders and pipelines, the render graph, the swapchain
 - [`docs/ntest.md`](docs/ntest.md) — test framework
-- [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness and methodology
+- [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records
 
 ## Contributing

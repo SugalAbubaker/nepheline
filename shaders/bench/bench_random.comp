@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+// Random reads over a working set of (mask + 1) uvec4: a different
+// pseudo-random 16-byte load per step, dependent on the previous one so the
+// latency and the cache level the set fits in dominate.
+#version 460
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x = 256) in;
+
+NPH_BUFFER_REF(Words) { uvec4 v[]; };
+
+layout(push_constant, scalar) uniform Push { NphBenchPush pc; };
+
+void main()
+{
+    Words src = Words(pc.address);
+    Words dst = Words(pc.address2);
+    uint index = (gl_GlobalInvocationID.x * 2654435761u) & pc.mask;
+    uvec4 acc = uvec4(0u);
+    for (uint k = 0u; k < pc.iterations; ++k) {
+        const uvec4 w = src.v[index];
+        acc ^= w;
+        index = (index * 1664525u + 1013904223u + w.x) & pc.mask;
+    }
+    if (gl_LocalInvocationID.x == 0u) {
+        dst.v[gl_WorkGroupID.x] = acc;
+    }
+}
