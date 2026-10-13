@@ -1,14 +1,56 @@
 // SPDX-License-Identifier: Apache-2.0
 // The job system end to end: lifecycle, running and waiting, nesting,
 // priorities, parallel-for, I/O threads, migration, deterministic mode.
+#include <nepheline/platform/file.h>
+#include <nepheline/platform/platform.h>
+
 #include "test_jobs_support.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 
+// Writes nph_job_system_dump's output into `buf` through a temporary file
+// (there is no portable memory stream in C17). Returns the length, 0 on
+// any failure; no test assertions, so it may run inside a job.
+static u64 dump_to_buffer(NphJobSystem *js, char *buf, u64 cap)
+{
+    char tmp[800];
+    char path[1024];
+    if (nph_fs_temp_directory(tmp, sizeof tmp, NULL) != NPH_RESULT_OK) {
+        return 0U;
+    }
+    snprintf(path, sizeof path, "%s/nph_jobs_dump_%llu.txt", tmp,
+             (unsigned long long)nph_platform_process_id());
+    FILE *f = fopen(path, "w+");
+    if (f == NULL) {
+        return 0U;
+    }
+    nph_job_system_dump(js, f);
+    rewind(f);
+    const u64 n = fread(buf, 1U, cap - 1U, f);
+    buf[n] = '\0';
+    fclose(f);
+    (void)nph_fs_remove_file(path);
+    return n;
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
+
+NTEST(jobs, dump_describes_an_idle_system)
+{
+    NphJobSystem *js = test_jobs_create(2U);
+    static char dump[8192];
+    NTEST_ASSERT_GT_UINT(dump_to_buffer(js, dump, sizeof dump), 0U);
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "job system "));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "2 workers"));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "worker 0: "));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "worker 1: "));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "deque[0]: empty"));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "0 waits registered"));
+    nph_job_system_destroy(js);
+}
 
 NTEST(jobs, create_with_defaults_and_destroy)
 {
@@ -376,6 +418,12 @@ NTEST(jobs, fiber_exhaustion_by_event_waiters_stays_live)
     NTEST_ASSERT_GE_UINT(blocked, workers);
     NTEST_ASSERT_LE_UINT(blocked, fibers);
     NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&h.parents_done, NPH_MEMORY_ORDER_RELAXED), 0U);
+    // The dump shows the hostages and the parked fibers.
+    static char dump[16384];
+    NTEST_ASSERT_GT_UINT(dump_to_buffer(js, dump, sizeof dump), 0U);
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "inline wait"));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "wait: fiber "));
+    NTEST_ASSERT_NOT_NULL(strstr(dump, "free fibers 0"));
     const NphStopwatch sw = nph_stopwatch_start();
     nph_job_counter_signal(js, &h.event);
     nph_job_wait(js, &done);
@@ -408,6 +456,9 @@ typedef struct Buried {
     NphJobCounter q_signals; // held at 1 until Q signals it
     NphAtomicU32 order[8];   // the jobs in the order they started
     NphAtomicU32 count;
+    NphAtomicU32 failures; // spawns refused (asserting inside a job is not allowed)
+    char dump[8192];       // taken by B2 with Q buried under B1
+    u64 dump_len;
 } Buried;
 
 enum {
@@ -440,7 +491,10 @@ static void buried_a2(void *user)
     buried_note(b, BURIED_A2);
     const NphJobDecl q = {buried_q, b, "Q"};
     NphJobCounter done = NPH_JOB_COUNTER_INIT;
-    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, &q, 1U, NPH_JOB_PRIORITY_LOW, &done), NPH_RESULT_OK);
+    if (nph_job_run(b->js, &q, 1U, NPH_JOB_PRIORITY_LOW, &done) != NPH_RESULT_OK) {
+        nph_atomic_fetch_add_u32(&b->failures, 1U, NPH_MEMORY_ORDER_RELAXED);
+        return;
+    }
     nph_job_wait(b->js, &done);
 }
 
@@ -450,7 +504,10 @@ static void buried_a(void *user)
     buried_note(b, BURIED_A);
     const NphJobDecl a2 = {buried_a2, b, "A'"};
     NphJobCounter done = NPH_JOB_COUNTER_INIT;
-    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, &a2, 1U, NPH_JOB_PRIORITY_HIGH, &done), NPH_RESULT_OK);
+    if (nph_job_run(b->js, &a2, 1U, NPH_JOB_PRIORITY_HIGH, &done) != NPH_RESULT_OK) {
+        nph_atomic_fetch_add_u32(&b->failures, 1U, NPH_MEMORY_ORDER_RELAXED);
+        return;
+    }
     nph_job_wait(b->js, &done);
 }
 
@@ -463,6 +520,9 @@ static void buried_b2(void *user)
 {
     Buried *b = (Buried *)user;
     buried_note(b, BURIED_B2);
+    // Right now the LOW deque is [Q(3), B1(2)] and this job runs inline
+    // on B's wait: the state the dump exists to show.
+    b->dump_len = dump_to_buffer(b->js, b->dump, sizeof b->dump);
     nph_job_wait(b->js, &b->q_signals);
 }
 
@@ -472,7 +532,10 @@ static void buried_b(void *user)
     buried_note(b, BURIED_B);
     const NphJobDecl kids[2] = {{buried_b1, b, "B1"}, {buried_b2, b, "B2"}};
     NphJobCounter done = NPH_JOB_COUNTER_INIT;
-    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, kids, 2U, NPH_JOB_PRIORITY_LOW, &done), NPH_RESULT_OK);
+    if (nph_job_run(b->js, kids, 2U, NPH_JOB_PRIORITY_LOW, &done) != NPH_RESULT_OK) {
+        nph_atomic_fetch_add_u32(&b->failures, 1U, NPH_MEMORY_ORDER_RELAXED);
+        return;
+    }
     nph_job_wait(b->js, &done);
 }
 
@@ -516,6 +579,18 @@ NTEST(jobs, inline_wait_digs_out_a_buried_deeper_job)
     NTEST_ASSERT_EQ_UINT(stats.jobs_executed, 6U);
     NTEST_ASSERT_EQ_UINT(stats.waits_inline, 2U); // B's and B2's
     NTEST_ASSERT_EQ_UINT(stats.jobs_nested, 2U);  // B2 in B, Q in B2
+    NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&b.failures, NPH_MEMORY_ORDER_RELAXED), 0U);
+    // B2's dump: the worker running a job on its own fiber, the LOW deque
+    // with Q (depth 3) under B1 (depth 2), and the two parked fibers (A at
+    // depth 1, A' at depth 2) registered on their counters.
+    NTEST_ASSERT_GT_UINT(b.dump_len, 0U);
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, "worker 0: running a job"));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, "deque[2]: 2, oldest first (job:depth): "));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, ":3 "));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, ":2\n"));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, "(depth 1) on counter"));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, "(depth 2) on counter"));
+    NTEST_ASSERT_NOT_NULL(strstr(b.dump, "2 waits registered"));
     nph_job_system_destroy(js);
 }
 

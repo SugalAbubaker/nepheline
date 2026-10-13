@@ -851,6 +851,7 @@ static void run_range(NphJobSystem *js, NphJobWorker *w, const NphJobRecord *r, 
 static void execute_job(NphJobSystem *js, u32 elem, bool scheduler_context)
 {
     NphJobWorker *w = current_worker();
+    set_phase(WORKER_PHASE_RUNNING); // on either path; the enclosing loop resets it
     const u32 index = job_index_of(elem);
     const u32 depth = job_depth_of(elem);
     const NphJobRecord r = js->jobs[index];
@@ -1107,7 +1108,6 @@ static void worker_loop(NphJobSystem *js)
             continue;
         }
         if (find_job(js, w, &elem)) {
-            set_phase(WORKER_PHASE_RUNNING);
             execute_job(js, elem, true);
             continue;
         }
