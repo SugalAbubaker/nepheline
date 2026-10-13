@@ -164,7 +164,7 @@ void nph_gpu_buffer_destroy(NphGpuDevice *dev, NphGpuBuffer buffer)
     NphGpuDeferred e;
     e.type = NPH_GPU_DEFERRED_BUFFER;
     e.index = 0U;
-    e.handle = (u64)(uptr)slot->vk;
+    e.handle = slot->vk;
     e.alloc = slot->alloc;
     gpu_defer(dev, &e);
     slot->vk = VK_NULL_HANDLE;
@@ -459,8 +459,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
 {
     for (u32 i = 0; i < slot->attachment_view_count; ++i) {
         if (deferred) {
-            gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW,
-                             (u64)(uptr)slot->attachment_views[i].view);
+            gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW, slot->attachment_views[i].view);
         } else {
             vkDestroyImageView(dev->device, slot->attachment_views[i].view, NULL);
         }
@@ -475,8 +474,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
     for (u32 mip = 0; mip < NPH_GPU_MAX_MIPS; ++mip) {
         if (slot->storage_views[mip] != VK_NULL_HANDLE) {
             if (deferred) {
-                gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW,
-                                 (u64)(uptr)slot->storage_views[mip]);
+                gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW, slot->storage_views[mip]);
             } else {
                 vkDestroyImageView(dev->device, slot->storage_views[mip], NULL);
             }
@@ -487,7 +485,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
                 NphGpuDeferred e;
                 e.type = NPH_GPU_DEFERRED_BINDLESS_STORAGE;
                 e.index = slot->storage_index[mip];
-                e.handle = 0U;
+                e.handle = NULL;
                 e.alloc = NULL;
                 gpu_defer(dev, &e);
             } else {
@@ -498,7 +496,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
     }
     if (slot->view != VK_NULL_HANDLE) {
         if (deferred) {
-            gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW, (u64)(uptr)slot->view);
+            gpu_defer_handle(dev, NPH_GPU_DEFERRED_IMAGE_VIEW, slot->view);
         } else {
             vkDestroyImageView(dev->device, slot->view, NULL);
         }
@@ -509,7 +507,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
             NphGpuDeferred e;
             e.type = NPH_GPU_DEFERRED_BINDLESS_SAMPLED;
             e.index = slot->sampled_index;
-            e.handle = 0U;
+            e.handle = NULL;
             e.alloc = NULL;
             gpu_defer(dev, &e);
         } else {
@@ -522,7 +520,7 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
             NphGpuDeferred e;
             e.type = NPH_GPU_DEFERRED_IMAGE;
             e.index = 0U;
-            e.handle = (u64)(uptr)slot->vk;
+            e.handle = slot->vk;
             e.alloc = slot->alloc;
             gpu_defer(dev, &e);
         } else if (slot->alloc != NULL) {
@@ -736,7 +734,7 @@ VkImageView gpu_image_attachment_view(NphGpuDevice *dev, NphGpuImageSlot *slot, 
     for (u32 i = 0; i < slot->attachment_view_count; ++i) {
         const NphGpuViewKey *k = &slot->attachment_views[i];
         if (k->mip == mip && k->base_layer == base_layer && k->layer_count == layer_count) {
-            const VkImageView v = k->view;
+            VkImageView v = k->view;
             nph_spin_lock_release(&dev->images.lock);
             return v;
         }
@@ -884,11 +882,11 @@ void nph_gpu_sampler_destroy(NphGpuDevice *dev, NphGpuSampler sampler)
     if (slot == NULL) {
         return;
     }
-    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SAMPLER, (u64)(uptr)slot->vk);
+    gpu_defer_handle(dev, NPH_GPU_DEFERRED_SAMPLER, slot->vk);
     NphGpuDeferred e;
     e.type = NPH_GPU_DEFERRED_BINDLESS_SAMPLER;
     e.index = slot->index;
-    e.handle = 0U;
+    e.handle = NULL;
     e.alloc = NULL;
     gpu_defer(dev, &e);
     slot->vk = VK_NULL_HANDLE;

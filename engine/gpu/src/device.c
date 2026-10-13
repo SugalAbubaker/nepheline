@@ -222,8 +222,10 @@ static NphResult create_instance(NphGpuDevice *dev, bool want_validation, bool w
 
     NphResult result = NPH_RESULT_OK;
     if (!dev->desc.headless) {
+        // Function-pointer to function-pointer through the universal
+        // void (*)(void) type, as the window layer's own typedef is.
         nph_window_vulkan_set_loader(
-            (NphVulkanGetInstanceProcAddrFn)(void *)vkGetInstanceProcAddr); // NOLINT
+            (NphVulkanGetInstanceProcAddrFn)(NphVulkanProcFn)vkGetInstanceProcAddr);
         const char *const *names = NULL;
         u32 n = 0U;
         if (nph_window_vulkan_extensions(&names, &n) != NPH_RESULT_OK) {
@@ -524,6 +526,11 @@ static void check_baseline(Candidate *c, bool headless)
         c->reject = "no timestamps on the graphics queue";
         return;
     }
+}
+
+static b32 vk_bool(VkBool32 v)
+{
+    return v != VK_FALSE ? 1 : 0;
 }
 
 static NphGpuDeviceType device_type(VkPhysicalDeviceType t)
@@ -854,17 +861,17 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         feat->calibrated_timestamps = 1;
     }
     *next = NULL;
-    feat->sampler_filter_minmax = c->f12.samplerFilterMinmax;
-    feat->shader_float16 = c->f12.shaderFloat16;
-    feat->shader_int8 = c->f12.shaderInt8;
-    feat->shader_int64 = hf->shaderInt64;
-    feat->storage_8bit = c->f12.storageBuffer8BitAccess;
-    feat->storage_16bit = c->f11.storageBuffer16BitAccess;
-    feat->depth_clamp = hf->depthClamp;
-    feat->fill_mode_non_solid = hf->fillModeNonSolid;
-    feat->texture_compression_bc = hf->textureCompressionBC;
-    feat->sampler_anisotropy = hf->samplerAnisotropy;
-    feat->pipeline_statistics = hf->pipelineStatisticsQuery;
+    feat->sampler_filter_minmax = vk_bool(c->f12.samplerFilterMinmax);
+    feat->shader_float16 = vk_bool(c->f12.shaderFloat16);
+    feat->shader_int8 = vk_bool(c->f12.shaderInt8);
+    feat->shader_int64 = vk_bool(hf->shaderInt64);
+    feat->storage_8bit = vk_bool(c->f12.storageBuffer8BitAccess);
+    feat->storage_16bit = vk_bool(c->f11.storageBuffer16BitAccess);
+    feat->depth_clamp = vk_bool(hf->depthClamp);
+    feat->fill_mode_non_solid = vk_bool(hf->fillModeNonSolid);
+    feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);
+    feat->sampler_anisotropy = vk_bool(hf->samplerAnisotropy);
+    feat->pipeline_statistics = vk_bool(hf->pipelineStatisticsQuery);
     feat->async_compute = compute_distinct;
     feat->dedicated_transfer = transfer_distinct;
     feat->timestamps_on_compute = c->family_timestamp_bits[compute_family] != 0U;
@@ -1058,7 +1065,7 @@ void gpu_timeline_destroy_internal(NphGpuDevice *dev, NphGpuTimeline *tl, bool d
         return;
     }
     if (deferred) {
-        gpu_defer_handle(dev, NPH_GPU_DEFERRED_SEMAPHORE, (u64)(uptr)tl->vk);
+        gpu_defer_handle(dev, NPH_GPU_DEFERRED_SEMAPHORE, tl->vk);
     } else {
         vkDestroySemaphore(dev->device, tl->vk, NULL);
     }
@@ -1336,10 +1343,11 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
         destroy_partial(dev);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
-    static const char *const queue_names[3] = {"graphics timeline", "compute timeline",
-                                               "transfer timeline"};
     for (u32 i = 0; i < dev->queue_count; ++i) {
-        r = gpu_timeline_create_internal(dev, 0U, queue_names[i], &dev->queue_storage[i].timeline);
+        const char *name = i == 0U   ? "graphics timeline"
+                           : i == 1U ? "compute timeline"
+                                     : "transfer timeline";
+        r = gpu_timeline_create_internal(dev, 0U, name, &dev->queue_storage[i].timeline);
         if (r != NPH_RESULT_OK) {
             destroy_partial(dev);
             return r;

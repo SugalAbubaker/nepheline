@@ -67,7 +67,7 @@ NTEST_F(GpuFixture, clear_image_and_read_back)
     u8 pixels[16U * 8U * 4U];
     test_read_image(f->dev, img, 0U, pixels, sizeof pixels);
     for (u32 i = 0; i < 16U * 8U; ++i) {
-        NTEST_ASSERT_TRUE(test_pixel_near(&pixels[i * 4U], 255U, 0U, 0U, 255U, 0U));
+        NTEST_ASSERT_TRUE(test_pixel_near(&pixels[(u64)i * 4U], 255U, 0U, 0U, 255U, 0U));
     }
     nph_gpu_image_destroy(f->dev, img);
 }
@@ -124,7 +124,7 @@ NTEST_F(GpuFixture, depth_clear_copy_and_blit)
     NTEST_ASSERT_TRUE(test_pixel_near(&pb[0], 0U, 255U, 0U, 255U, 0U));
     u8 pc[4U * 4U * 4U];
     test_read_image(f->dev, c, 0U, pc, sizeof pc);
-    NTEST_ASSERT_TRUE(test_pixel_near(&pc[15U * 4U], 0U, 255U, 0U, 255U, 1U));
+    NTEST_ASSERT_TRUE(test_pixel_near(&pc[60U], 0U, 255U, 0U, 255U, 1U));
     f32 dvals[64];
     test_read_image(f->dev, depth, 0U, dvals, sizeof dvals);
     NTEST_ASSERT_NEAR_F32(dvals[0], 0.5F, 0.0F);
@@ -149,7 +149,7 @@ NTEST_F(GpuFixture, generate_mips_averages)
     for (u32 y = 0; y < 8U; ++y) {
         for (u32 x = 0; x < 8U; ++x) {
             const u8 v = x < 4U ? 255U : 0U;
-            u8 *p = &texels[(y * 8U + x) * 4U];
+            u8 *p = &texels[((u64)y * 8U + x) * 4U];
             p[0] = v;
             p[1] = v;
             p[2] = v;
@@ -223,7 +223,7 @@ static void record_thread_main(void *user)
 NTEST_F(GpuFixture, threads_record_into_their_own_pools)
 {
     REQUIRE_DEVICE(f);
-    NphGpuBuffer buf = test_make_buffer(f->dev, 8U * 256U,
+    NphGpuBuffer buf = test_make_buffer(f->dev, (u64)8U * 256U,
                                         (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
                                             (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
                                         NPH_GPU_MEMORY_DEVICE, "per-thread fills");
@@ -256,8 +256,8 @@ NTEST_F(GpuFixture, threads_record_into_their_own_pools)
     u32 out[8U * 64U];
     test_read_buffer(f->dev, buf, 0U, sizeof out, out);
     for (u32 i = 0; i < 8U; ++i) {
-        NTEST_ASSERT_EQ_UINT(out[i * 64U], 0x10000U * i + 1U);
-        NTEST_ASSERT_EQ_UINT(out[i * 64U + 63U], 0x10000U * i + 1U);
+        NTEST_ASSERT_EQ_UINT(out[(u64)i * 64U], 0x10000U * i + 1U);
+        NTEST_ASSERT_EQ_UINT(out[(u64)i * 64U + 63U], 0x10000U * i + 1U);
     }
     nph_gpu_buffer_destroy(f->dev, buf);
 }

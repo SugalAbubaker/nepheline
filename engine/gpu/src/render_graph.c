@@ -267,7 +267,8 @@ void nph_gpu_render_graph_destroy(NphGpuRenderGraph *g)
             gpu_defer(dev, &e);
         }
     }
-    (void)nph_gpu_device_wait_idle(dev);
+    const NphResult idle = nph_gpu_device_wait_idle(dev); // logged on failure
+    NPH_UNUSED(idle);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         if (g->timings[i] != NULL) {
             NPH_FREE_ARRAY(alloc, RgTiming, g->timings[i], g->desc.max_passes);

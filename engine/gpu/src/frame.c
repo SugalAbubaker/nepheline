@@ -249,9 +249,9 @@ void gpu_defer(NphGpuDevice *dev, const NphGpuDeferred *entry)
     nph_spin_lock_release(&fs->deferred_lock);
 }
 
-void gpu_defer_handle(NphGpuDevice *dev, NphGpuDeferredType type, u64 handle)
+void gpu_defer_handle(NphGpuDevice *dev, NphGpuDeferredType type, void *handle)
 {
-    if (handle == 0U) {
+    if (handle == NULL) {
         return;
     }
     NphGpuDeferred e;
@@ -286,7 +286,7 @@ void gpu_run_deferred(NphGpuDevice *dev, u32 slot)
         case NPH_GPU_DEFERRED_IMAGE:
             if (e->alloc != NULL) {
                 nph_gpu_alloc_destroy_image(dev->vma, (VkImage)e->handle, e->alloc);
-            } else if (e->handle != 0U) {
+            } else if (e->handle != NULL) {
                 vkDestroyImage(dev->device, (VkImage)e->handle, NULL);
             }
             break;
@@ -424,7 +424,7 @@ static void read_timestamps(NphGpuDevice *dev, NphGpuFrameSlot *fs)
         2U * sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
     if (r == VK_SUCCESS || r == VK_NOT_READY) {
         for (u32 i = 0; i < used; ++i) {
-            fs->query_results[i] = scratch[i * 2U + 1U] != 0U ? scratch[i * 2U] : 0U;
+            fs->query_results[i] = scratch[(u64)i * 2U + 1U] != 0U ? scratch[(u64)i * 2U] : 0U;
         }
         fs->query_result_count = used;
         fs->query_results_valid = 1;

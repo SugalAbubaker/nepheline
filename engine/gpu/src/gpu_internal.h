@@ -141,7 +141,7 @@ typedef enum NphGpuDeferredType {
 typedef struct NphGpuDeferred {
     u32 type;
     u32 index;
-    u64 handle;
+    void *handle; // the Vulkan handle (a pointer on 64-bit targets)
     NphGpuAllocation alloc;
 } NphGpuDeferred;
 
@@ -387,7 +387,7 @@ NPH_INLINE NphGpuPipelineSlot *gpu_pipeline(const NphGpuDevice *dev, NphGpuPipel
 
 // Deferred destruction: queues the entry on the current frame slot.
 void gpu_defer(NphGpuDevice *dev, const NphGpuDeferred *entry);
-void gpu_defer_handle(NphGpuDevice *dev, NphGpuDeferredType type, u64 handle);
+void gpu_defer_handle(NphGpuDevice *dev, NphGpuDeferredType type, void *handle);
 // Destroys every entry queued on `slot`.
 void gpu_run_deferred(NphGpuDevice *dev, u32 slot);
 
@@ -401,18 +401,18 @@ void gpu_bindless_free(NphGpuDevice *dev, NphGpuDeferredType type, u32 index);
 
 // Images
 // Registers a swapchain image as an external image handle.
-NphResult gpu_image_register_external(NphGpuDevice *dev, VkImage image, const NphGpuImageDesc *desc,
+NphResult gpu_image_register_external(NphGpuDevice *dev, VkImage image, const NphGpuImageDesc *in,
                                       NphGpuImage *out);
 // Memory requirements of a would-be image or buffer, without creating it
 // (Vulkan 1.3 vkGetDevice*MemoryRequirements), for the render graph's
 // transient packing.
-NphResult gpu_image_memory_requirements(NphGpuDevice *dev, const NphGpuImageDesc *desc,
+NphResult gpu_image_memory_requirements(NphGpuDevice *dev, const NphGpuImageDesc *in,
                                         bool concurrent, VkMemoryRequirements *out);
 NphResult gpu_buffer_memory_requirements(NphGpuDevice *dev, const NphGpuBufferDesc *desc,
                                          VkMemoryRequirements *out);
 // Creates a VkImage (no memory) for a transient render-graph image to be
 // bound into a block; `concurrent` shares it across queue families.
-NphResult gpu_image_create_unbound(NphGpuDevice *dev, const NphGpuImageDesc *desc, bool concurrent,
+NphResult gpu_image_create_unbound(NphGpuDevice *dev, const NphGpuImageDesc *in, bool concurrent,
                                    NphGpuImage *out);
 NphResult gpu_image_bind_and_finish(NphGpuDevice *dev, NphGpuImage image, NphGpuAllocation block,
                                     u64 offset);
