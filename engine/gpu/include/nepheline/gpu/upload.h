@@ -13,7 +13,11 @@
 // with a release/acquire pair (exclusive sharing keeps the hardware's
 // framebuffer compression, CLAUDE.md §10.3.5), so by the time the frame
 // renders every upload has landed. Buffers are shared across queue
-// families and need no ownership transfer.
+// families and need no ownership transfer. When the TRANSFER queue is
+// the graphics queue (no transfer family, or NphGpuDeviceDesc
+// .single_queue) the upload command buffer carries the barriers itself:
+// one before the copies against everything the queue did earlier, one
+// after them for everything it does later.
 //
 // After an image upload its mips are in SHADER_READ_ONLY when the image
 // has SAMPLED usage and GENERAL otherwise. Uploads larger than the free

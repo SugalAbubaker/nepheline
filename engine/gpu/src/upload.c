@@ -105,6 +105,33 @@ static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset)
     return true;
 }
 
+// Whether the TRANSFER queue is the graphics queue (no transfer family, or
+// desc.single_queue). Then the uploads are ordered against the
+// surrounding graphics work by barriers in the upload command buffer
+// itself: a pipeline barrier's scopes cover everything earlier and later
+// in submission order on the queue, across command buffers. With a
+// distinct transfer queue the timeline-semaphore waits in
+// nph_gpu_upload_flush do that instead.
+static bool shared_queue(const NphGpuDevice *dev)
+{
+    return dev->queues[NPH_GPU_QUEUE_TRANSFER] == dev->queues[NPH_GPU_QUEUE_GRAPHICS];
+}
+
+static void memory_barrier(NphGpuCmd *cmd, u32 src_stages, u32 src_access, u32 dst_stages,
+                           u32 dst_access)
+{
+    NphGpuMemoryBarrier m;
+    m.src_stages = src_stages;
+    m.src_access = src_access;
+    m.dst_stages = dst_stages;
+    m.dst_access = dst_access;
+    NphGpuBarrierDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.memory = &m;
+    desc.memory_count = 1U;
+    nph_gpu_cmd_barrier(cmd, &desc);
+}
+
 static NphResult ensure_batch(NphGpuDevice *dev)
 {
     NphGpuUploadState *up = &dev->upload;
@@ -117,6 +144,14 @@ static NphResult ensure_batch(NphGpuDevice *dev)
     }
     NphGpuCmd *cmd = &up->cmd_storage[(u64)dev->frame_slot * 2U];
     NPH_TRY(gpu_cmd_begin_from_pool(dev, pool, cmd, NPH_GPU_QUEUE_TRANSFER, "uploads"));
+    if (shared_queue(dev)) {
+        // Whatever the queue did before with the destinations (reads as
+        // well as writes) completes before the copies overwrite them.
+        memory_barrier(cmd, (u32)NPH_GPU_STAGE_ALL,
+                       (u32)NPH_GPU_ACCESS_MEMORY_READ | (u32)NPH_GPU_ACCESS_MEMORY_WRITE,
+                       (u32)NPH_GPU_STAGE_TRANSFER,
+                       (u32)NPH_GPU_ACCESS_TRANSFER_READ | (u32)NPH_GPU_ACCESS_TRANSFER_WRITE);
+    }
     up->cmd = cmd;
     up->batch_bytes = 0U;
     up->batch_copies = 0U;
@@ -372,9 +407,14 @@ NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
     }
     NphGpuCmd *cmd = up->cmd;
     up->cmd = NULL;
+    const bool distinct = !shared_queue(dev);
+    if (!distinct) {
+        // The copies are visible to everything the queue does next.
+        memory_barrier(cmd, (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_WRITE,
+                       (u32)NPH_GPU_STAGE_ALL,
+                       (u32)NPH_GPU_ACCESS_MEMORY_READ | (u32)NPH_GPU_ACCESS_MEMORY_WRITE);
+    }
     nph_gpu_cmd_end(cmd);
-    const bool distinct =
-        dev->queues[NPH_GPU_QUEUE_TRANSFER] != dev->queues[NPH_GPU_QUEUE_GRAPHICS];
     // The transfer runs after the previous frame's graphics work, so an
     // upload into a resource that frame read cannot race it (CLAUDE.md
     // §10.6: the CPU is at most one frame ahead, so this costs nothing).

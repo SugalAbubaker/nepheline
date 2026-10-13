@@ -73,6 +73,11 @@ typedef struct NphGpuDeviceDesc {
     // No surface support: tests, the cooker, benchmarks. Swapchains cannot
     // be created on a headless device.
     b32 headless;
+    // Route COMPUTE and TRANSFER work to the graphics queue even when the
+    // device offers distinct queues, as on lavapipe and most integrated
+    // GPUs; the single-queue paths become testable on any machine.
+    // NphGpuFeatures.async_compute and dedicated_transfer then report 0.
+    b32 single_queue;
     // The Khronos validation layer, and its synchronisation validation.
     // DEFAULT: on when NPH_GPU_VALIDATION_ENABLED (Debug, Development). A
     // request for ON on a machine without the layer is logged and ignored.
