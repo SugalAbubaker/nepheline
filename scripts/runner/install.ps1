@@ -204,7 +204,7 @@ $runAction = New-ScheduledTaskAction -Execute (Join-Path $Root 'run.cmd') -Worki
 $runSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit $noLimit -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $runTask -Action $runAction -Settings $runSettings `
-    -User ".\$User" -Password $password -RunLevel Limited -Force | Out-Null
+    -User "$env:COMPUTERNAME\$User" -Password $password -RunLevel Limited -Force | Out-Null
 $password = ''
 
 $registerAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
