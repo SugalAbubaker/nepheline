@@ -252,12 +252,14 @@ NphGpuMemoryStats nph_gpu_device_memory_stats(const NphGpuDevice *dev);
 
 // Begins frame N: waits for frame N - NPH_GPU_FRAMES_IN_FLIGHT to complete
 // on every queue, then recycles its slot. NPH_RESULT_DEVICE_LOST if the
-// wait reports a lost device. Asserts when a frame is already active.
+// wait reports a lost device. A frame already active is asserted in
+// development and refused with NPH_RESULT_INVALID_STATE everywhere.
 NPH_MUST_USE NphResult nph_gpu_frame_begin(NphGpuDevice *dev);
 
 // Ends the frame: flushes pending uploads and records, per queue, the
 // timeline value the frame's work reaches, which the matching
-// nph_gpu_frame_begin waits for. Asserts when no frame is active.
+// nph_gpu_frame_begin waits for. No active frame is asserted in development
+// and refused with NPH_RESULT_INVALID_STATE everywhere.
 NPH_MUST_USE NphResult nph_gpu_frame_end(NphGpuDevice *dev);
 
 // The index of the frame being recorded (counts from 0; valid between
@@ -282,6 +284,9 @@ bool nph_gpu_frame_timestamps(const NphGpuDevice *dev, u64 *out_frame_index, con
 // signals and the CPU or another queue waits on.
 NPH_MUST_USE NphResult nph_gpu_timeline_create(NphGpuDevice *dev, u64 initial_value,
                                                const char *name, NphGpuTimeline **out);
+// Destroys a timeline from nph_gpu_timeline_create. A queue's own timeline
+// (nph_gpu_queue_timeline) is the device's: destroying it is asserted in
+// development and ignored, with an error logged, everywhere.
 void nph_gpu_timeline_destroy(NphGpuDevice *dev, NphGpuTimeline *timeline);
 
 // The current counter value.
