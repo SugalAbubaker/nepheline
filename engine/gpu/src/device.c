@@ -1088,6 +1088,12 @@ void nph_gpu_timeline_destroy(NphGpuDevice *dev, NphGpuTimeline *timeline)
     for (u32 q = 0; q < dev->queue_count; ++q) {
         NPH_ASSERT_MSG(dev->queue_storage[q].timeline != timeline,
                        "queue timelines are owned by the device");
+        if (dev->queue_storage[q].timeline == timeline) {
+            GPU_LOG_ERROR("nph_gpu_timeline_destroy: queue %u's timeline is owned by the device; "
+                          "ignored",
+                          q);
+            return;
+        }
     }
     gpu_timeline_destroy_internal(dev, timeline, true);
 }

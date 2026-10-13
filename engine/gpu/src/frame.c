@@ -450,6 +450,10 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
 {
     NPH_ASSERT(dev != NULL);
     NPH_ASSERT_MSG(!dev->frame_active, "nph_gpu_frame_begin: a frame is already active");
+    if (dev->frame_active) {
+        GPU_LOG_ERROR("nph_gpu_frame_begin: a frame is already active");
+        return NPH_RESULT_INVALID_STATE;
+    }
     if (dev->lost) {
         return NPH_RESULT_DEVICE_LOST;
     }
@@ -506,6 +510,10 @@ NphResult nph_gpu_frame_end(NphGpuDevice *dev)
 {
     NPH_ASSERT(dev != NULL);
     NPH_ASSERT_MSG(dev->frame_active, "nph_gpu_frame_end without a frame");
+    if (!dev->frame_active) {
+        GPU_LOG_ERROR("nph_gpu_frame_end: no frame is active");
+        return NPH_RESULT_INVALID_STATE;
+    }
     NphResult r = nph_gpu_upload_flush(dev, NULL);
     NphGpuFrameSlot *fs = &dev->frames[dev->frame_slot];
     for (u32 q = 0; q < dev->queue_count; ++q) {

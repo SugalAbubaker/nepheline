@@ -213,8 +213,11 @@ NTEST_F(GpuFixture, queue_timelines_advance_per_submit)
     NTEST_ASSERT_EQ_UINT(nph_gpu_queue_submitted_value(f->dev, NPH_GPU_QUEUE_GRAPHICS), 1U);
     NphGpuTimeline *tl = nph_gpu_queue_timeline(f->dev, NPH_GPU_QUEUE_GRAPHICS);
     NTEST_ASSERT_EQ_INT(nph_gpu_timeline_wait(f->dev, tl, 1U, NPH_U64_MAX), NPH_RESULT_OK);
-    // The queue's timeline is not the caller's to destroy.
+    // The queue's timeline is not the caller's to destroy: asserted in
+    // development, refused in every configuration.
     NPH_TEST_EXPECT_ASSERT(nph_gpu_timeline_destroy(f->dev, tl));
+    NTEST_ASSERT_EQ_PTR(nph_gpu_queue_timeline(f->dev, NPH_GPU_QUEUE_GRAPHICS), tl);
+    NTEST_ASSERT_EQ_INT(nph_gpu_timeline_wait(f->dev, tl, 1U, NPH_U64_MAX), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     // Submitting a command buffer twice, or for the wrong queue, is refused.
     NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_COMPUTE, "compute", &cmd),
@@ -304,9 +307,13 @@ NTEST_F(GpuFixture, frames_alternate_slots_and_recycle)
 NTEST_F(GpuFixture, frame_misuse_is_asserted)
 {
     REQUIRE_DEVICE(f);
-    NPH_TEST_EXPECT_ASSERT(NPH_IGNORE_RESULT(nph_gpu_frame_end(f->dev)));
+    // Asserted in development; refused with INVALID_STATE in every configuration.
+    NphResult r = NPH_RESULT_OK;
+    NPH_TEST_EXPECT_ASSERT(r = nph_gpu_frame_end(f->dev));
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_INVALID_STATE);
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
-    NPH_TEST_EXPECT_ASSERT(NPH_IGNORE_RESULT(nph_gpu_frame_begin(f->dev)));
+    NPH_TEST_EXPECT_ASSERT(r = nph_gpu_frame_begin(f->dev));
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_INVALID_STATE);
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
 }
