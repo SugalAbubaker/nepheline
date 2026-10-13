@@ -14,8 +14,8 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
 | Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
 | Window system | nothing extra | `libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev` to build GLFW; `xvfb` to run the window tests headless |
-| Submodules | `git submodule update --init --recursive` after cloning (GLFW lives in `third_party/`) | same |
-| Vulkan SDK | 1.3+ (from Phase 5) | 1.3+ (from Phase 5) |
+| Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, and VMA live in `third_party/`) | same |
+| Vulkan | the LunarG SDK (1.4.321 is the pinned reference; `scripts/install_vulkan_sdk.ps1 -Version 1.4.321.1` installs it unattended): `glslc` for the shader build, the validation layers for Debug and Development, and the loader | `glslc` and `libvulkan1`; `vulkan-validationlayers` for Debug and Development; `mesa-vulkan-drivers` for lavapipe, the software driver the GPU tests run on without a GPU |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
 ## Quick start
@@ -94,6 +94,17 @@ target links.
 | `NPH_FIBERS_WIN32` | `OFF` | Windows only: build the fiber layer on the Win32 fiber API instead of the assembly context switch ([ADR-0010](adr/0010-fibers.md)) |
 
 Pass them at configure time: `cmake --preset linux-clang -DNPH_ASAN=OFF -DNPH_TSAN=ON`.
+
+### Shaders
+
+GLSL sources under `shaders/` compile to SPIR-V at build time with `glslc`
+(`cmake/NphShaders.cmake`): `nph_add_shaders(<target> SOURCES ...)` makes a
+target whose outputs land in `build/<preset>/shaders/<name>.spv`, with
+`#include` dependencies tracked through glslc's depfiles, and
+`nph_target_use_shaders(<exe> <shader_target>)` gives an executable the
+`NPH_SHADER_DIR` definition it loads them from plus the `shaders/shared/`
+include path for the C/GLSL shared headers. Flags: `--target-env=vulkan1.3
+-O -g -Werror`. If `glslc` is not on `PATH`, set `VULKAN_SDK`.
 
 ### Warnings
 
@@ -224,12 +235,28 @@ Clang (Debug: ASan + UBSan) and runs each for two minutes from its seed
 corpus; crashing inputs are uploaded as artifacts.
 
 `.github/workflows/gpu-perf.yml` targets the self-hosted RTX 3060 Ti runner
-and is manual-only until Phase 5 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)).
+([ADR-0002](adr/0002-self-hosted-gpu-runner.md)).
+
+### GPU tests in CI
+
+The gpu module's tests and samples need a Vulkan device. Linux jobs
+install `mesa-vulkan-drivers` and point the loader at lavapipe
+(`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`), install
+`vulkan-validationlayers` so Debug and Development builds run with the
+validation gate, and run CTest under Xvfb so the swapchain tests can open
+a window. LeakSanitizer suppresses the loader's and lavapipe's
+process-lifetime allocations (`tests/lsan.supp`). Windows runners have no
+driver: the GPU tests report "skipped" and the samples exit with 77, which
+CTest treats as skipped (`SKIP_RETURN_CODE`). Windows jobs install the
+Vulkan SDK with `scripts/install_vulkan_sdk.ps1` (cached per version) for
+`glslc`.
 
 ## Known gaps
 
 - **clang-cl + ASan** is unverified and off by default (ADR-0003 §4).
 - **Local Linux builds** are not possible on the primary development machine
   (no WSL); Linux is covered by CI only.
-- **lavapipe GPU tests, MSVC `/analyze`, cppcheck** are wired up in the
-  phases that introduce the code they check (CLAUDE.md §9).
+- **MSVC `/analyze`, cppcheck** are wired up in the phases that introduce
+  the code they check (CLAUDE.md §9).
+- **Windows CI has no Vulkan driver**, so the GPU tests only run on Linux
+  (lavapipe) and on the self-hosted RTX 3060 Ti runner.
