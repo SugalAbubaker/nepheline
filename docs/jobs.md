@@ -195,7 +195,17 @@ its own stack, but **only a job deeper in the spawn tree than itself**
 (the depth in the queue element, read through `nph_job_deque_take_if`
 and `nph_job_deque_steal_if`, which show the element to a predicate
 before removing it; the spill ring has no peek, so too-shallow elements
-popped from it go back to its tail, each examined once per scan).
+popped from it go back to its tail, each examined once per scan). A
+deeper job can lie *under* shallower ones in the worker's own deque,
+out of reach of both predicates: the worker loop starts NORMAL roots
+from the injection queue before LOW jobs from its deque, and resumed
+fibers spawn at any depth, so a parked job's children get covered. When
+`nph_job_deque_any_if` reports one below the newest element, the wait
+moves the shallow newest elements to the spill ring, where every worker
+still finds them, until the deeper one surfaces. Issue #18 was the hang
+without that: with four workers and 128 fibers, about one run in fifty
+ended with every worker an inline waiter at depth 4 or 5 and the jobs
+they needed sandwiched between depth-2 and depth-3 jobs in the deques.
 Finding nothing, it registers itself on its counter like an external
 waiter, with its worker's own semaphore, and sleeps there: the counter
 wakes it at once when met (a counter another thread pulses and re-arms
@@ -217,10 +227,13 @@ buys two guarantees:
   AddressSanitizer's use-after-return detection can point into a fake
   stack rather than the fiber's.
 - **Liveness.** Take the deepest job in progress anywhere. If it has
-  outstanding children they are deeper and queued, so it runs them; if
-  not, it is computing, parked on something outside the system (an I/O
-  completion, a signal from the main thread) that will arrive, or ready,
-  and ready fibers are what every waiting worker looks for first. Without
+  outstanding children they are deeper and queued: in the spill ring,
+  which every inline wait scans, or in a deque whose owner is either
+  running the worker loop or an inline waiter no deeper than that job,
+  and so digs them out. If it has none it is computing, parked on
+  something outside the system (an I/O completion, a signal from the
+  main thread) that will arrive, or ready, and ready fibers are what
+  every waiting worker looks for first. Without
   the restriction a wait could nest a job that waits on the very fiber
   under it; with every worker in that state nothing ran at all, which is
   how the first implementation hung.

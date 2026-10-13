@@ -160,6 +160,34 @@ typedef struct Contended {
     u8 *seen;                      // one byte per value
 } Contended;
 
+// any_if looks at every element, newest to oldest, not just the ends.
+NTEST(deque, any_if_sees_the_whole_deque)
+{
+    NphJobDeque d;
+    NTEST_ASSERT_EQ_INT(nph_job_deque_init(&d, nph_allocator_system(), 8U), NPH_RESULT_OK);
+    NTEST_ASSERT_FALSE(nph_job_deque_any_if(&d, is_even, NULL));
+    NTEST_ASSERT_TRUE(nph_job_deque_push(&d, 1U));
+    NTEST_ASSERT_TRUE(nph_job_deque_push(&d, 4U)); // buried between two odd ones
+    NTEST_ASSERT_TRUE(nph_job_deque_push(&d, 3U));
+    u32 v = 0U;
+    NTEST_ASSERT_FALSE(nph_job_deque_take_if(&d, is_even, NULL, &v));
+    NTEST_ASSERT_EQ_INT(nph_job_deque_steal_if(&d, is_even, NULL, &v), NPH_JOB_DEQUE_REFUSED);
+    NTEST_ASSERT_TRUE(nph_job_deque_any_if(&d, is_even, NULL));
+    u32 limit = 4U;
+    NTEST_ASSERT_FALSE(nph_job_deque_any_if(&d, above, &limit));
+    limit = 3U;
+    NTEST_ASSERT_TRUE(nph_job_deque_any_if(&d, above, &limit));
+    // Taking the newest exposes the buried element to take_if.
+    NTEST_ASSERT_TRUE(nph_job_deque_take(&d, &v));
+    NTEST_ASSERT_EQ_UINT(v, 3U);
+    NTEST_ASSERT_TRUE(nph_job_deque_take_if(&d, is_even, NULL, &v));
+    NTEST_ASSERT_EQ_UINT(v, 4U);
+    NTEST_ASSERT_FALSE(nph_job_deque_any_if(&d, is_even, NULL));
+    NTEST_ASSERT_TRUE(nph_job_deque_take(&d, &v));
+    NTEST_ASSERT_FALSE(nph_job_deque_any_if(&d, is_even, NULL)); // empty
+    nph_job_deque_free(&d);
+}
+
 static void deque_thief(u32 index, void *shared)
 {
     NPH_UNUSED(index);

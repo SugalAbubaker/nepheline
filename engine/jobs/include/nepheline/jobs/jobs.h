@@ -58,6 +58,8 @@
 #include <nepheline/core/log.h>
 #include <nepheline/core/result.h>
 
+#include <stdio.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -256,6 +258,14 @@ typedef struct NphJobStats {
 
 // Sums the per-thread counters. Approximate while the system is busy.
 void nph_job_system_get_stats(const NphJobSystem *js, NphJobStats *out);
+
+// Writes the scheduler's state to `out` for diagnosing a hang: what each
+// worker is doing and on which fiber, every deque's queued jobs with
+// their depths in the spawn tree, the shared queues' counts, and every
+// registered wait with its counter's value and target. The reads are
+// racy by design: call it when the system is stuck (the stress tests do,
+// from a watchdog), not as telemetry. Callable from any thread.
+void nph_job_system_dump(const NphJobSystem *js, FILE *out);
 
 #ifdef __cplusplus
 }

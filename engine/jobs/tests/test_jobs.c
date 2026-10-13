@@ -3,6 +3,9 @@
 // priorities, parallel-for, I/O threads, migration, deterministic mode.
 #include "test_jobs_support.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -384,6 +387,135 @@ NTEST(jobs, fiber_exhaustion_by_event_waiters_stays_live)
     nph_job_system_get_stats(js, &stats);
     NTEST_ASSERT_EQ_UINT(stats.jobs_executed, 3U * PARENTS);
     NTEST_ASSERT_GT_UINT(stats.waits_inline, 0U);
+    nph_job_system_destroy(js);
+}
+
+// Issue #18: a deeper job buried in a deque under shallower ones at both
+// ends, out of reach of take_if (newest end) and steal_if (oldest end).
+// One worker, two spare fibers, and strict priorities make the order
+// exact:
+//   A (root, NORMAL) spawns A' at HIGH and parks on the first spare fiber;
+//   A' (depth 2) spawns Q at LOW and parks on the second;
+//   B (root, NORMAL, injected with A, so taken before the LOW deque) spawns
+//     B1 and B2 at LOW on top of Q, which makes the LOW deque
+//     [Q(3), B1(2), B2(2)], and waits with no fiber left: an inline wait
+//     at depth 1 that takes B2;
+//   B2 (depth 2) waits on a counter only Q signals: an inline wait at
+//     depth 2 whose deque's newest element, B1, is not deeper. Q is, but
+//     lies under B1; before the eviction rule nothing ran, ever.
+typedef struct Buried {
+    NphJobSystem *js;
+    NphJobCounter q_signals; // held at 1 until Q signals it
+    NphAtomicU32 order[8];   // the jobs in the order they started
+    NphAtomicU32 count;
+} Buried;
+
+enum {
+    BURIED_A = 1,
+    BURIED_A2,
+    BURIED_Q,
+    BURIED_B,
+    BURIED_B1,
+    BURIED_B2
+};
+
+static void buried_note(Buried *b, u32 who)
+{
+    const u32 i = nph_atomic_fetch_add_u32(&b->count, 1U, NPH_MEMORY_ORDER_RELAXED);
+    if (i < NPH_ARRAY_COUNT(b->order)) {
+        nph_atomic_store_u32(&b->order[i], who, NPH_MEMORY_ORDER_RELAXED);
+    }
+}
+
+static void buried_q(void *user)
+{
+    Buried *b = (Buried *)user;
+    buried_note(b, BURIED_Q);
+    nph_job_counter_signal(b->js, &b->q_signals);
+}
+
+static void buried_a2(void *user)
+{
+    Buried *b = (Buried *)user;
+    buried_note(b, BURIED_A2);
+    const NphJobDecl q = {buried_q, b, "Q"};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, &q, 1U, NPH_JOB_PRIORITY_LOW, &done), NPH_RESULT_OK);
+    nph_job_wait(b->js, &done);
+}
+
+static void buried_a(void *user)
+{
+    Buried *b = (Buried *)user;
+    buried_note(b, BURIED_A);
+    const NphJobDecl a2 = {buried_a2, b, "A'"};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, &a2, 1U, NPH_JOB_PRIORITY_HIGH, &done), NPH_RESULT_OK);
+    nph_job_wait(b->js, &done);
+}
+
+static void buried_b1(void *user)
+{
+    buried_note((Buried *)user, BURIED_B1);
+}
+
+static void buried_b2(void *user)
+{
+    Buried *b = (Buried *)user;
+    buried_note(b, BURIED_B2);
+    nph_job_wait(b->js, &b->q_signals);
+}
+
+static void buried_b(void *user)
+{
+    Buried *b = (Buried *)user;
+    buried_note(b, BURIED_B);
+    const NphJobDecl kids[2] = {{buried_b1, b, "B1"}, {buried_b2, b, "B2"}};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(b->js, kids, 2U, NPH_JOB_PRIORITY_LOW, &done), NPH_RESULT_OK);
+    nph_job_wait(b->js, &done);
+}
+
+NTEST(jobs, inline_wait_digs_out_a_buried_deeper_job)
+{
+    NphJobSystemDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.worker_count = 1U;
+    desc.fiber_count = 3U; // the worker's own and two to park on
+    NphJobSystem *js = test_jobs_create_desc(&desc);
+    Buried b;
+    memset(&b, 0, sizeof b);
+    b.js = js;
+    nph_job_counter_add(&b.q_signals, 1U);
+    const NphJobDecl roots[2] = {{buried_a, &b, "A"}, {buried_b, &b, "B"}};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(js, roots, 2U, NPH_JOB_PRIORITY_NORMAL, &done), NPH_RESULT_OK);
+    // The bug is a hang here. The worker cannot be joined then, so the state
+    // is dumped and the process aborted rather than left to the CTest timeout.
+    const NphStopwatch sw = nph_stopwatch_start();
+    while (nph_job_counter_value(&done) != 0U) {
+        if (nph_stopwatch_elapsed_ms(&sw) > 30000.0) {
+            fprintf(stderr, "inline_wait_digs_out_a_buried_deeper_job: hung\n");
+            nph_job_system_dump(js, stderr);
+            fflush(stderr);
+            abort();
+        }
+        nph_thread_sleep_ns(NPH_TIME_NS_PER_MS);
+    }
+    nph_job_wait(js, &done);
+    // A, A', B, then B2 inline in B, Q inline in B2 (dug out from under B1),
+    // and B1 last, from the spill queue, in the worker loop.
+    static const u32 expected[6] = {BURIED_A, BURIED_A2, BURIED_B, BURIED_B2, BURIED_Q, BURIED_B1};
+    NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&b.count, NPH_MEMORY_ORDER_RELAXED), 6U);
+    for (u32 i = 0; i < 6U; ++i) {
+        NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&b.order[i], NPH_MEMORY_ORDER_RELAXED),
+                             expected[i]);
+    }
+    NphJobStats stats;
+    nph_job_system_get_stats(js, &stats);
+    NTEST_ASSERT_EQ_UINT(stats.jobs_executed, 6U);
+    NTEST_ASSERT_EQ_UINT(stats.waits_inline, 2U); // B's and B2's
+    NTEST_ASSERT_EQ_UINT(stats.jobs_nested, 2U);  // B2 in B, Q in B2
     nph_job_system_destroy(js);
 }
 
