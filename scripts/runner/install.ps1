@@ -37,8 +37,10 @@
     for all outside collaborators" enabled in the repository settings.
 
     Prerequisites on the machine: Visual Studio 2022 (MSVC, CMake, Ninja),
-    the Vulkan SDK (glslc, validation layers), Git with git-lfs, and a
-    current GPU driver. Builds land under -Root\_work.
+    the Vulkan SDK (glslc, validation layers) installed where the runner
+    user can read it (C:\VulkanSDK via scripts\install_vulkan_sdk.ps1; an
+    SDK inside a user profile is not, and the script warns), Git with
+    git-lfs, and a current GPU driver. Builds land under -Root\_work.
 
     The tasks run in session 0 (no interactive desktop). If the swapchain
     tests cannot present there, switch "Nepheline runner (run)" to an
@@ -152,6 +154,20 @@ if (-not ($current -and $current -like "*$sid*")) {
     Write-Host "Granted 'Log on as a batch job' to $User."
 }
 Remove-Item $inf, $sdb -Force -ErrorAction SilentlyContinue
+
+# The job needs the Vulkan SDK (glslc for the shader build, the validation
+# layer for the gpu tests) readable by the runner user. The SDK's location
+# comes from the machine-wide VULKAN_SDK; an SDK installed inside a user
+# profile is unreadable by every other account.
+$sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+if (-not $sdk) {
+    Write-Warning ("VULKAN_SDK is not set machine-wide, so the job will not find glslc. Install the SDK " +
+        "with scripts\install_vulkan_sdk.ps1 (into C:\VulkanSDK) or set VULKAN_SDK for the machine.")
+} elseif ($sdk -like (Join-Path $env:SystemDrive 'Users\*')) {
+    Write-Warning ("VULKAN_SDK ($sdk) is inside a user profile, which $User cannot read. Either grant " +
+        "read access: icacls `"$sdk`" /grant `"${User}:(OI)(CI)RX`" /T, or install the SDK " +
+        "machine-wide with scripts\install_vulkan_sdk.ps1.")
+}
 
 # ---------------------------------------------------------------------------
 # 2. The runner package and the folder layout
