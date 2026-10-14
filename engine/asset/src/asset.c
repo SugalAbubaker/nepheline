@@ -25,7 +25,7 @@ void nph_fourcc_to_string(u32 code, char out[5])
 {
     for (u32 i = 0; i < 4U; ++i) {
         const u8 c = (u8)(code >> (8U * i));
-        out[i] = (c >= 0x20U && c < 0x7FU) ? (char)c : '.';
+        out[i] = (char)((c >= 0x20U && c < 0x7FU) ? c : (u8)'.');
     }
     out[4] = '\0';
 }

@@ -138,8 +138,10 @@ NTEST_F(FormatFixture, writer_rejects_bad_blobs)
     NTEST_ASSERT_EQ_INT(
         nph_asset_writer_add_blob(&w, TAG_DATA, 1U, data, sizeof data, NPH_ASSET_CODEC_NONE, 8192U),
         NPH_RESULT_INVALID_ARGUMENT); // too large
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    const NphAssetCodec unknown_codec = (NphAssetCodec)7;
     NTEST_ASSERT_EQ_INT(
-        nph_asset_writer_add_blob(&w, TAG_DATA, 1U, data, sizeof data, (NphAssetCodec)7, 0U),
+        nph_asset_writer_add_blob(&w, TAG_DATA, 1U, data, sizeof data, unknown_codec, 0U),
         NPH_RESULT_INVALID_ARGUMENT);
     NTEST_ASSERT_EQ_UINT(w.blobs.len, 1U);
     nph_asset_writer_free(&w);
@@ -182,7 +184,7 @@ NTEST_F(FormatFixture, corruption_is_detected)
                         NPH_RESULT_INVALID_ARGUMENT);
 
     // A blob entry pointing past the end (patch the first entry's size).
-    NphAssetBlobEntry *table = (NphAssetBlobEntry *)(void *)(bytes + NPH_ASSET_HEADER_SIZE);
+    NphAssetBlobEntry *table = (NphAssetBlobEntry *)(bytes + NPH_ASSET_HEADER_SIZE);
     const u64 saved = table[0].stored_size;
     table[0].stored_size = f->size;
     NTEST_ASSERT_EQ_INT(nph_asset_file_validate(f->image, f->size, &info), NPH_RESULT_CORRUPT);

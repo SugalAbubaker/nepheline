@@ -57,7 +57,7 @@ NphResult nph_asset_file_validate(const void *data, u64 size, NphAssetFileInfo *
         return NPH_RESULT_CORRUPT;
     }
     const NphAssetBlobEntry *blobs =
-        (const NphAssetBlobEntry *)(const void *)((const u8 *)data + NPH_ASSET_HEADER_SIZE);
+        (const NphAssetBlobEntry *)((const u8 *)data + NPH_ASSET_HEADER_SIZE);
     for (u32 i = 0; i < h.blob_count; ++i) {
         const NphAssetBlobEntry *b = &blobs[i];
         if (b->tag == 0U || !codec_is_known(b->codec) || !alignment_is_valid(b->alignment) ||
@@ -279,7 +279,12 @@ static u64 writer_layout(NphAssetWriter *w)
 u64 nph_asset_writer_size(const NphAssetWriter *w)
 {
     NPH_ASSERT(w != NULL);
-    return writer_layout((NphAssetWriter *)w);
+    // The same walk as writer_layout, without recording the offsets.
+    u64 offset = NPH_ASSET_HEADER_SIZE + (u64)w->blobs.len * sizeof(NphAssetBlobEntry);
+    NPH_ARRAY_FOREACH (NphAssetWriterBlob, b, &w->blobs) {
+        offset = nph_align_up_u64(offset, b->entry.alignment) + b->entry.stored_size;
+    }
+    return nph_align_up_u64(offset, NPH_ASSET_BLOB_DEFAULT_ALIGN);
 }
 
 void nph_asset_writer_finish(NphAssetWriter *w, void *out)

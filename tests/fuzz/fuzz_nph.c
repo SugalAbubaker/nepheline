@@ -30,11 +30,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     NphAssetFileInfo info;
     if (nph_asset_file_validate(copy, size, &info) == NPH_RESULT_OK) {
         NphAssetBlob *blobs = NULL;
+        void **owned = NULL; // the unpacked buffers; NULL where a blob points into the image
         if (info.blob_count != 0U) {
             blobs = NPH_ALLOC_ARRAY_ZEROED(alloc, NphAssetBlob, info.blob_count);
+            owned = NPH_ALLOC_ARRAY_ZEROED(alloc, void *, info.blob_count);
+            if (blobs == NULL || owned == NULL) {
+                if (blobs != NULL) {
+                    NPH_FREE_ARRAY(alloc, NphAssetBlob, blobs, info.blob_count);
+                }
+                if (owned != NULL) {
+                    NPH_FREE_ARRAY(alloc, void *, owned, info.blob_count);
+                }
+                NPH_FREE(alloc, copy, size, NPH_ASSET_BLOB_MAX_ALIGN);
+                return 0;
+            }
         }
         u64 unpacked_bytes = 0U;
-        for (u32 i = 0; i < info.blob_count && (blobs != NULL || info.blob_count == 0U); ++i) {
+        for (u32 i = 0; i < info.blob_count; ++i) {
             const NphAssetBlobEntry *e = &info.blobs[i];
             (void)nph_asset_file_verify_blob(copy, e);
             blobs[i].tag = e->tag;
@@ -59,9 +71,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 continue;
             }
             blobs[i].data = raw != NULL ? raw : (const void *)copy;
+            owned[i] = raw;
             unpacked_bytes += e->raw_size;
         }
-        if (blobs != NULL || info.blob_count == 0U) {
+        {
             NphAsset asset;
             memset(&asset, 0, sizeof asset);
             asset.header = info.header;
@@ -81,13 +94,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 }
             }
             for (u32 i = 0; i < info.blob_count; ++i) {
-                if (blobs[i].data != copy && blobs[i].data != NULL) {
-                    NPH_FREE(alloc, (void *)(uptr)blobs[i].data, blobs[i].size, blobs[i].alignment);
+                if (owned[i] != NULL) {
+                    NPH_FREE(alloc, owned[i], blobs[i].size, blobs[i].alignment);
                 }
             }
         }
         if (blobs != NULL) {
             NPH_FREE_ARRAY(alloc, NphAssetBlob, blobs, info.blob_count);
+            NPH_FREE_ARRAY(alloc, void *, owned, info.blob_count);
         }
     }
     NPH_FREE(alloc, copy, size, NPH_ASSET_BLOB_MAX_ALIGN);

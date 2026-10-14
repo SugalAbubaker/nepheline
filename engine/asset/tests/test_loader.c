@@ -364,7 +364,7 @@ NTEST_F(LoaderFixture, many_concurrent_async_loads)
     for (u32 i = 0; i < 40U; ++i) {
         char name[32];
         snprintf(name, sizeof name, "many%u.nph", i);
-        write_asset(f, name, 2U + i % 3U, NPH_KIB(8) + i * 100U,
+        write_asset(f, name, 2U + i % 3U, NPH_KIB(8) + (u64)i * 100U,
                     i % 2U == 0U ? NPH_ASSET_CODEC_LZ : NPH_ASSET_CODEC_NONE);
     }
     NphJobCounter counter = NPH_JOB_COUNTER_INIT;
@@ -383,7 +383,8 @@ NTEST_F(LoaderFixture, many_concurrent_async_loads)
         NTEST_ASSERT_EQ_UINT(handles[i][1].value, handles[i][0].value);
         NTEST_ASSERT_EQ_UINT(handles[i][2].value, handles[i][0].value);
         NTEST_ASSERT_EQ_INT(nph_asset_wait(f->loader, handles[i][0]), NPH_RESULT_OK);
-        check_blobs(nph_asset_get(f->loader, handles[i][0]), 2U + i % 3U, NPH_KIB(8) + i * 100U,
+        check_blobs(nph_asset_get(f->loader, handles[i][0]), 2U + i % 3U,
+                    NPH_KIB(8) + (u64)i * 100U,
                     i % 2U == 0U ? NPH_ASSET_CODEC_LZ : NPH_ASSET_CODEC_NONE);
         for (u32 rep = 0; rep < 3U; ++rep) {
             nph_asset_release(f->loader, handles[i][rep]);

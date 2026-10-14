@@ -48,12 +48,13 @@ static void image_asset_free(ImageAsset *ia)
     }
 }
 
-// Patches a blob's bytes in place (the image is writable memory).
+// Patches a blob's bytes in place (the image is writable memory the
+// fixture owns; the blob's pointer is derived from it).
 static void *blob_bytes(ImageAsset *ia, u32 tag, u32 index)
 {
     const NphAssetBlob *b = nph_asset_blob(&ia->asset, tag, index);
     NTEST_ASSERT_NOT_NULL(b);
-    return (void *)(uptr)b->data;
+    return (u8 *)ia->image + nph_ptr_diff(ia->image, b->data);
 }
 
 static void add(NphAssetWriter *w, u32 tag, u32 index, const void *data, u64 size)
@@ -507,6 +508,7 @@ static void check_seed_asset(const char *name, u32 type)
     ImageAsset ia;
     memset(&ia, 0, sizeof ia);
     ia.alloc = alloc;
+    void *owned[NPH_ARRAY_COUNT(ia.blobs)];
     NTEST_ASSERT_LE_UINT(info.blob_count, NPH_ARRAY_COUNT(ia.blobs));
     for (u32 i = 0; i < info.blob_count; ++i) {
         const NphAssetBlobEntry *e = &info.blobs[i];
@@ -516,10 +518,11 @@ static void check_seed_asset(const char *name, u32 type)
         ia.blobs[i].codec = e->codec;
         ia.blobs[i].alignment = e->alignment;
         ia.blobs[i].size = e->raw_size;
-        void *data = NPH_ALLOC(alloc, nph_max_u64(e->raw_size, 1U), e->alignment);
-        NTEST_ASSERT_NOT_NULL(data);
-        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(raw, e, data), NPH_RESULT_OK);
-        ia.blobs[i].data = data;
+        void *unpacked = NPH_ALLOC(alloc, nph_max_u64(e->raw_size, 1U), e->alignment);
+        NTEST_ASSERT_NOT_NULL(unpacked);
+        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(raw, e, unpacked), NPH_RESULT_OK);
+        ia.blobs[i].data = unpacked;
+        owned[i] = unpacked;
     }
     ia.asset.header = info.header;
     ia.asset.blobs = ia.blobs;
@@ -542,8 +545,7 @@ static void check_seed_asset(const char *name, u32 type)
         NTEST_ASSERT_TRUE(nph_str_equals(nph_scene_node_name(&v, 1U), NPH_STR("child")));
     }
     for (u32 i = 0; i < info.blob_count; ++i) {
-        NPH_FREE(alloc, (void *)(uptr)ia.blobs[i].data, nph_max_u64(ia.blobs[i].size, 1U),
-                 ia.blobs[i].alignment);
+        NPH_FREE(alloc, owned[i], nph_max_u64(ia.blobs[i].size, 1U), ia.blobs[i].alignment);
     }
     nph_file_free_all(alloc, raw, size);
 }

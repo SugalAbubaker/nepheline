@@ -63,8 +63,8 @@ NphResult nph_pack_validate(const void *data, u64 size, NphPack *out)
         return NPH_RESULT_CORRUPT;
     }
     const u8 *base = (const u8 *)data;
-    const NphPackEntry *entries = (const NphPackEntry *)(const void *)(base + h.entry_table_offset);
-    const u32 *guid_index = (const u32 *)(const void *)(base + h.guid_index_offset);
+    const NphPackEntry *entries = (const NphPackEntry *)(base + h.entry_table_offset);
+    const u32 *guid_index = (const u32 *)(base + h.guid_index_offset);
     const char *strings = (const char *)(base + h.string_table_offset);
     if (n != 0U && (h.string_table_size == 0U || strings[h.string_table_size - 1U] != '\0')) {
         return NPH_RESULT_CORRUPT;
@@ -439,7 +439,7 @@ NphResult nph_pack_writer_finish(NphPackWriter *w)
     const u64 trailer_size = strings_offset + w->string_bytes - table_offset;
     const u64 file_size = nph_align_up_u64(strings_offset + w->string_bytes, 16U);
     u8 *trailer = (u8 *)NPH_ALLOC_ZEROED(w->alloc, nph_max_u64(trailer_size, 1U), 16U);
-    u32 *index = (u32 *)(void *)(trailer + (index_offset - table_offset));
+    u32 *index = (u32 *)(trailer + (index_offset - table_offset));
     if (trailer == NULL) {
         writer_release(w);
         return NPH_RESULT_OUT_OF_MEMORY;

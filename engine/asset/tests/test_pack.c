@@ -36,7 +36,7 @@ static void write_pack(PackFixture *f, u32 entry_align)
     for (u32 i = 0; i < ENTRY_COUNT; ++i) {
         char name[64];
         snprintf(name, sizeof name, "dir%u/file%u.nph", i % 4U, i);
-        const u64 size = (i * 977U) % NPH_KIB(64);
+        const u64 size = ((u64)i * 977U) % NPH_KIB(64);
         test_fill_pattern(buf, size, i);
         NTEST_ASSERT_EQ_INT(nph_pack_writer_add(&w, nph_str_from_cstr(name),
                                                 nph_guid_from_cstr(name), NPH_ASSET_TYPE_BLOB, buf,
@@ -93,7 +93,7 @@ static void check_pack(PackFixture *f, u32 entry_align)
         snprintf(name, sizeof name, "dir%u/file%u.nph", i % 4U, i);
         const NphPackEntry *e = nph_pack_find_path(&pack, nph_str_from_cstr(name));
         NTEST_ASSERT_NOT_NULL(e);
-        NTEST_ASSERT_EQ_UINT(e->size, (i * 977U) % NPH_KIB(64));
+        NTEST_ASSERT_EQ_UINT(e->size, ((u64)i * 977U) % NPH_KIB(64));
         NTEST_ASSERT_EQ_UINT(e->offset % entry_align, 0U);
         NTEST_ASSERT_EQ_UINT(e->type, NPH_ASSET_TYPE_BLOB);
         NTEST_ASSERT_TRUE(nph_str_equals(nph_pack_entry_path(&pack, e), nph_str_from_cstr(name)));
@@ -186,7 +186,7 @@ NTEST_F(PackFixture, missing_and_corrupt_packs_are_reported)
     NTEST_ASSERT_EQ_INT(nph_pack_validate(image, size, &mem), NPH_RESULT_OK);
 
     // Corrupt an entry: a wrong path hash, a bad offset, a swapped order.
-    NphPackEntry *entries = (NphPackEntry *)(void *)(bytes + h.entry_table_offset);
+    NphPackEntry *entries = (NphPackEntry *)(bytes + h.entry_table_offset);
     const u64 saved_hash = entries[3].path_hash;
     entries[3].path_hash ^= 1U;
     NTEST_ASSERT_EQ_INT(nph_pack_validate(image, size, &mem), NPH_RESULT_CORRUPT);
@@ -203,7 +203,7 @@ NTEST_F(PackFixture, missing_and_corrupt_packs_are_reported)
     entries[3] = tmp;
     NTEST_ASSERT_EQ_INT(nph_pack_validate(image, size, &mem), NPH_RESULT_OK);
     // A GUID index entry out of range.
-    u32 *index = (u32 *)(void *)(bytes + h.guid_index_offset);
+    u32 *index = (u32 *)(bytes + h.guid_index_offset);
     const u32 saved_index = index[0];
     index[0] = 0xFFFFFFFFU;
     NTEST_ASSERT_EQ_INT(nph_pack_validate(image, size, &mem), NPH_RESULT_CORRUPT);
