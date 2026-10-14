@@ -237,7 +237,9 @@ NPH_MUST_USE NphResult nph_job_parallel_for(NphJobSystem *js, u32 count, u32 bat
 void nph_job_wait(NphJobSystem *js, NphJobCounter *counter);
 
 // As nph_job_wait, returning once the value is at most `target`. For
-// bounding a pipeline: "at most one frame of rendering outstanding".
+// bounding a count: "at most one frame of rendering in flight". It does
+// not say which items finished (jobs complete in any order), so work that
+// reuses a particular frame's resources waits on that frame's counter.
 void nph_job_wait_value(NphJobSystem *js, NphJobCounter *counter, u32 target);
 
 // ---------------------------------------------------------------------------

@@ -224,6 +224,14 @@ NTEST_F(LzFixture, decoder_rejects_malformed_streams)
     char out[64];
     // Empty input.
     NTEST_ASSERT_EQ_INT(nph_lz_decompress(NULL, 0U, out, 0U), NPH_RESULT_CORRUPT);
+    NTEST_ASSERT_EQ_INT(nph_lz_decompress(NULL, 0U, NULL, 0U), NPH_RESULT_CORRUPT);
+    // The stream of an empty input decodes into no destination at all,
+    // and a literal it does not have room for is refused.
+    const u8 empty_stream[] = {0x00U};
+    NTEST_ASSERT_EQ_INT(nph_lz_decompress(empty_stream, 1U, NULL, 0U), NPH_RESULT_OK);
+    const u8 one_literal[] = {0x10U, 'a'};
+    NTEST_ASSERT_EQ_INT(nph_lz_decompress(one_literal, sizeof one_literal, NULL, 0U),
+                        NPH_RESULT_CORRUPT);
     // Literals past the end of the input.
     const u8 short_lits[] = {0x50U, 'a', 'b'};
     NTEST_ASSERT_EQ_INT(nph_lz_decompress(short_lits, sizeof short_lits, out, 5U),
