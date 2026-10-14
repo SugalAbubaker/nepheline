@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "executable": "asset_bench.exe",
+  "timestamp": "2026-10-14T18:36:33Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.5,
+  "benchmarks": [
+    {"name": "lz_compress_fast_text", "label": "40.9% of input", "iterations": 2250, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 1056.422, "min_ns_per_op": 1052.567, "max_ns_per_op": 1078.264},
+    {"name": "lz_compress_high_text", "label": "19.7% of input", "iterations": 124, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 18638.247, "min_ns_per_op": 18542.121, "max_ns_per_op": 18705.979},
+    {"name": "lz_decompress_text", "label": "", "iterations": 4438, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 543.955, "min_ns_per_op": 542.918, "max_ns_per_op": 546.399},
+    {"name": "lz_compress_fast_vertices", "label": "8.1% of input", "iterations": 10422, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 236.605, "min_ns_per_op": 234.299, "max_ns_per_op": 237.725},
+    {"name": "lz_compress_high_vertices", "label": "6.4% of input", "iterations": 732, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 3245.731, "min_ns_per_op": 3194.571, "max_ns_per_op": 3314.845},
+    {"name": "lz_decompress_vertices", "label": "", "iterations": 17790, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 183.762, "min_ns_per_op": 163.253, "max_ns_per_op": 208.198},
+    {"name": "lz_decompress_zeros", "label": "", "iterations": 70138, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 45.184, "min_ns_per_op": 44.933, "max_ns_per_op": 46.201},
+    {"name": "crc32c_blob_256k", "label": "", "iterations": 30804, "items_per_iteration": 256, "repeats": 7, "ns_per_op": 79.450, "min_ns_per_op": 79.343, "max_ns_per_op": 79.757},
+    {"name": "pack_find_path_4k", "label": "", "iterations": 5999209, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 102.057, "min_ns_per_op": 101.858, "max_ns_per_op": 102.327},
+    {"name": "pack_find_guid_4k", "label": "", "iterations": 13335467, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 47.047, "min_ns_per_op": 46.870, "max_ns_per_op": 47.644},
+    {"name": "vfs_stat_pack", "label": "", "iterations": 7681369, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 79.852, "min_ns_per_op": 79.717, "max_ns_per_op": 81.058},
+    {"name": "vfs_stat_shadowed_pack", "label": "", "iterations": 28143, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 21799.492, "min_ns_per_op": 21644.938, "max_ns_per_op": 21984.167},
+    {"name": "vfs_normalize_path", "label": "", "iterations": 13130059, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 48.078, "min_ns_per_op": 47.809, "max_ns_per_op": 49.156},
+    {"name": "asset_load_cached", "label": "", "iterations": 11329400, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 54.454, "min_ns_per_op": 53.991, "max_ns_per_op": 55.728},
+    {"name": "asset_load_small", "label": "", "iterations": 2000000, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 330.486, "min_ns_per_op": 329.853, "max_ns_per_op": 332.727}
+  ]
+}
