@@ -31,9 +31,9 @@
 // (NphAssetLoaderDesc.verify) at a cost of one CRC pass per blob.
 //
 // Thread-safety: NPH_THREADSAFE. One mutex guards the slot tables for the
-// duration of a lookup or a state change; the data of a READY asset is
-// immutable and read without locks. Create and destroy are
-// NPH_MAIN_THREAD_ONLY.
+// duration of a lookup or a state change (which is why even the queries
+// take a non-const loader); the data of a READY asset is immutable and
+// read without locks. Create and destroy are NPH_MAIN_THREAD_ONLY.
 
 #include <nepheline/asset/format.h>
 #include <nepheline/asset/vfs.h>
@@ -140,14 +140,14 @@ NPH_MUST_USE NphResult nph_asset_load_async(NphAssetLoader *loader, NphStr path,
 // LOADING. The result of the load: NPH_RESULT_OK when READY.
 NphResult nph_asset_wait(NphAssetLoader *loader, NphAssetHandle handle);
 
-NphAssetState nph_asset_state(const NphAssetLoader *loader, NphAssetHandle handle);
+NphAssetState nph_asset_state(NphAssetLoader *loader, NphAssetHandle handle);
 
 // Why a FAILED load failed (NPH_RESULT_OK for any other state).
-NphResult nph_asset_error(const NphAssetLoader *loader, NphAssetHandle handle);
+NphResult nph_asset_error(NphAssetLoader *loader, NphAssetHandle handle);
 
 // The asset behind a READY handle, or NULL. The pointer stays valid while
 // the caller holds a reference.
-const NphAsset *nph_asset_get(const NphAssetLoader *loader, NphAssetHandle handle);
+const NphAsset *nph_asset_get(NphAssetLoader *loader, NphAssetHandle handle);
 
 // Adds a reference. Asserts a live handle.
 void nph_asset_acquire(NphAssetLoader *loader, NphAssetHandle handle);
@@ -157,7 +157,7 @@ void nph_asset_acquire(NphAssetLoader *loader, NphAssetHandle handle);
 void nph_asset_release(NphAssetLoader *loader, NphAssetHandle handle);
 
 // The handle of the loaded asset with `guid` (no new reference), or null.
-NphAssetHandle nph_asset_find_guid(const NphAssetLoader *loader, NphGuid guid);
+NphAssetHandle nph_asset_find_guid(NphAssetLoader *loader, NphGuid guid);
 
 // The blob with `tag` and `index`, or NULL.
 const NphAssetBlob *nph_asset_blob(const NphAsset *asset, u32 tag, u32 index);

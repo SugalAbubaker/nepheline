@@ -312,8 +312,7 @@ static NphResult work_run(const Work *w)
     // The table was validated by load_prepare; re-deriving it is cheaper
     // than storing a pointer per blob and keeps the work item tiny.
     const NphAssetBlobEntry *entries =
-        (const NphAssetBlobEntry *)(const void *)((const u8 *)s->mapping.data +
-                                                  NPH_ASSET_HEADER_SIZE);
+        (const NphAssetBlobEntry *)((const u8 *)s->mapping.data + NPH_ASSET_HEADER_SIZE);
     const NphAssetBlobEntry *e = &entries[w->blob];
     if (w->loader->verify && !nph_asset_file_verify_blob(s->mapping.data, e)) {
         char tag[5];
@@ -325,8 +324,10 @@ static NphResult work_run(const Work *w)
     if (e->codec == NPH_ASSET_CODEC_NONE) {
         return NPH_RESULT_OK;
     }
-    const NphResult r =
-        nph_asset_file_unpack_blob(s->mapping.data, e, (void *)(uptr)s->blobs[w->blob].data);
+    // The blob's raw bytes live in the slot's heap (load_prepare placed
+    // them there); the public view holds a const pointer to the same place.
+    u8 *dst = s->heap + nph_ptr_diff(s->heap, s->blobs[w->blob].data);
+    const NphResult r = nph_asset_file_unpack_blob(s->mapping.data, e, dst);
     if (r != NPH_RESULT_OK) {
         char tag[5];
         nph_fourcc_to_string(e->tag, tag);
@@ -706,45 +707,42 @@ NphResult nph_asset_wait(NphAssetLoader *l, NphAssetHandle handle)
     return slot_result(s);
 }
 
-NphAssetState nph_asset_state(const NphAssetLoader *l, NphAssetHandle handle)
+NphAssetState nph_asset_state(NphAssetLoader *l, NphAssetHandle handle)
 {
     NPH_ASSERT(l != NULL);
-    NphAssetLoader *ml = (NphAssetLoader *)l;
-    nph_mutex_lock(&ml->lock);
+    nph_mutex_lock(&l->lock);
     const Slot *s = slot_of(l, handle);
     const u32 state = s != NULL ? nph_atomic_load_u32(&s->state, NPH_MEMORY_ORDER_ACQUIRE)
                                 : (u32)NPH_ASSET_STATE_NONE;
-    nph_mutex_unlock(&ml->lock);
+    nph_mutex_unlock(&l->lock);
     return (NphAssetState)state;
 }
 
-NphResult nph_asset_error(const NphAssetLoader *l, NphAssetHandle handle)
+NphResult nph_asset_error(NphAssetLoader *l, NphAssetHandle handle)
 {
     NPH_ASSERT(l != NULL);
-    NphAssetLoader *ml = (NphAssetLoader *)l;
-    nph_mutex_lock(&ml->lock);
+    nph_mutex_lock(&l->lock);
     const Slot *s = slot_of(l, handle);
     NphResult r = NPH_RESULT_OK;
     if (s != NULL &&
         nph_atomic_load_u32(&s->state, NPH_MEMORY_ORDER_ACQUIRE) == (u32)NPH_ASSET_STATE_FAILED) {
         r = slot_result(s);
     }
-    nph_mutex_unlock(&ml->lock);
+    nph_mutex_unlock(&l->lock);
     return r;
 }
 
-const NphAsset *nph_asset_get(const NphAssetLoader *l, NphAssetHandle handle)
+const NphAsset *nph_asset_get(NphAssetLoader *l, NphAssetHandle handle)
 {
     NPH_ASSERT(l != NULL);
-    NphAssetLoader *ml = (NphAssetLoader *)l;
-    nph_mutex_lock(&ml->lock);
+    nph_mutex_lock(&l->lock);
     const Slot *s = slot_of(l, handle);
     const NphAsset *asset = NULL;
     if (s != NULL &&
         nph_atomic_load_u32(&s->state, NPH_MEMORY_ORDER_ACQUIRE) == (u32)NPH_ASSET_STATE_READY) {
         asset = &s->asset;
     }
-    nph_mutex_unlock(&ml->lock);
+    nph_mutex_unlock(&l->lock);
     return asset;
 }
 
@@ -775,17 +773,16 @@ void nph_asset_release(NphAssetLoader *l, NphAssetHandle handle)
     nph_mutex_unlock(&l->lock);
 }
 
-NphAssetHandle nph_asset_find_guid(const NphAssetLoader *l, NphGuid guid)
+NphAssetHandle nph_asset_find_guid(NphAssetLoader *l, NphGuid guid)
 {
     NPH_ASSERT(l != NULL);
-    NphAssetLoader *ml = (NphAssetLoader *)l;
     NphAssetHandle h = NPH_ASSET_HANDLE_NULL;
-    nph_mutex_lock(&ml->lock);
+    nph_mutex_lock(&l->lock);
     const u32 *index = (const u32 *)nph_hashmap_find(&l->by_guid, &guid);
     if (index != NULL) {
         h = handle_of(&l->slots[*index]);
     }
-    nph_mutex_unlock(&ml->lock);
+    nph_mutex_unlock(&l->lock);
     return h;
 }
 

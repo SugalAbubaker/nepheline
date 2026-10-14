@@ -150,8 +150,7 @@ typedef struct NphVfsFile {
     NphFile owned; // loose files only
 } NphVfsFile;
 
-NPH_MUST_USE NphResult nph_vfs_open(const NphVfs *vfs, NphStr path, u32 extra_mode,
-                                    NphVfsFile *out);
+NPH_MUST_USE NphResult nph_vfs_open(NphVfs *vfs, NphStr path, u32 extra_mode, NphVfsFile *out);
 void nph_vfs_close(const NphVfs *vfs, NphVfsFile *f);
 
 // Reads [offset, offset + size) of the entry into `buf` (bounded to the

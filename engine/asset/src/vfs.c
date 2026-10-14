@@ -44,7 +44,7 @@ bool nph_vfs_path_is_normalized(NphStr path)
     }
     u64 start = 0U;
     for (u64 i = 0; i <= path.len; ++i) {
-        const char c = i < path.len ? path.data[i] : '/';
+        const char c = (char)(i < path.len ? path.data[i] : '/');
         if (c == '\\' || c == '\0') {
             return false;
         }
@@ -66,7 +66,7 @@ NphResult nph_vfs_normalize_path(NphStr path, char *buf, u64 cap, NphStr *out)
     u64 len = 0U;
     u64 start = 0U;
     for (u64 i = 0; i <= path.len; ++i) {
-        const char c = i < path.len ? path.data[i] : '/';
+        const char c = (char)(i < path.len ? path.data[i] : '/');
         if (c == '\0') {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
@@ -276,13 +276,15 @@ static NphResult mount_os_path(const Mount *m, NphStr rel, char *buf, u64 cap, u
     return nph_path_join(buf, cap, nph_str(m->backing, m->backing_len), rel, out_len);
 }
 
-// Finds the newest mount holding `path`. For directory mounts the file
-// system is consulted; *out_info is filled when not NULL.
-static const Mount *resolve(const NphVfs *vfs, NphStr path, NphVfsInfo *out_info,
-                            const NphPackEntry **out_entry, char *os_path, u64 os_cap)
+// Finds the newest mount holding `path` and returns its index, or
+// NPH_VFS_NO_MOUNT. For directory mounts the file system is consulted;
+// *out_info is filled when not NULL. (An index rather than a pointer so
+// that callers with a mutable VFS get a mutable mount.)
+static u32 resolve(const NphVfs *vfs, NphStr path, NphVfsInfo *out_info,
+                   const NphPackEntry **out_entry, char *os_path, u64 os_cap)
 {
     if (!nph_vfs_path_is_normalized(path)) {
-        return NULL;
+        return NPH_VFS_NO_MOUNT;
     }
     for (u32 i = vfs->mount_count; i-- > 0U;) {
         const Mount *m = &vfs->mounts[i];
@@ -304,7 +306,7 @@ static const Mount *resolve(const NphVfs *vfs, NphStr path, NphVfsInfo *out_info
             if (out_entry != NULL) {
                 *out_entry = e;
             }
-            return m;
+            return i;
         }
         if (mount_os_path(m, rel, os_path, os_cap, NULL) != NPH_RESULT_OK) {
             continue;
@@ -319,9 +321,9 @@ static const Mount *resolve(const NphVfs *vfs, NphStr path, NphVfsInfo *out_info
             out_info->source = NPH_VFS_MOUNT_DIRECTORY;
             out_info->is_directory = fi.is_directory;
         }
-        return m;
+        return i;
     }
-    return NULL;
+    return NPH_VFS_NO_MOUNT;
 }
 
 NphResult nph_vfs_stat(const NphVfs *vfs, NphStr path, NphVfsInfo *out)
@@ -329,14 +331,15 @@ NphResult nph_vfs_stat(const NphVfs *vfs, NphStr path, NphVfsInfo *out)
     NPH_ASSERT(vfs != NULL && out != NULL);
     char os_path[VFS_OS_PATH_MAX];
     memset(out, 0, sizeof *out);
-    return resolve(vfs, path, out, NULL, os_path, sizeof os_path) != NULL ? NPH_RESULT_OK
-                                                                          : NPH_RESULT_NOT_FOUND;
+    return resolve(vfs, path, out, NULL, os_path, sizeof os_path) != NPH_VFS_NO_MOUNT
+               ? NPH_RESULT_OK
+               : NPH_RESULT_NOT_FOUND;
 }
 
 bool nph_vfs_exists(const NphVfs *vfs, NphStr path)
 {
     char os_path[VFS_OS_PATH_MAX];
-    return resolve(vfs, path, NULL, NULL, os_path, sizeof os_path) != NULL;
+    return resolve(vfs, path, NULL, NULL, os_path, sizeof os_path) != NPH_VFS_NO_MOUNT;
 }
 
 NphResult nph_vfs_read_all(const NphVfs *vfs, NphStr path, NphAllocator *alloc, void **out_data,
@@ -346,10 +349,11 @@ NphResult nph_vfs_read_all(const NphVfs *vfs, NphStr path, NphAllocator *alloc, 
     char os_path[VFS_OS_PATH_MAX];
     NphVfsInfo info;
     const NphPackEntry *entry = NULL;
-    const Mount *m = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
-    if (m == NULL) {
+    const u32 index = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
+    if (index == NPH_VFS_NO_MOUNT) {
         return NPH_RESULT_NOT_FOUND;
     }
+    const Mount *m = &vfs->mounts[index];
     if (m->type == NPH_VFS_MOUNT_DIRECTORY) {
         if (info.is_directory) {
             return NPH_RESULT_INVALID_ARGUMENT;
@@ -381,10 +385,11 @@ NphResult nph_vfs_map(const NphVfs *vfs, NphStr path, NphVfsMapping *out)
     char os_path[VFS_OS_PATH_MAX];
     NphVfsInfo info;
     const NphPackEntry *entry = NULL;
-    const Mount *m = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
-    if (m == NULL) {
+    const u32 index = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
+    if (index == NPH_VFS_NO_MOUNT) {
         return NPH_RESULT_NOT_FOUND;
     }
+    const Mount *m = &vfs->mounts[index];
     out->mount_id = m->id;
     out->source = m->type;
     if (m->type == NPH_VFS_MOUNT_PACK) {
@@ -423,23 +428,24 @@ void nph_vfs_unmap(const NphVfs *vfs, NphVfsMapping *m)
     memset(m, 0, sizeof *m);
 }
 
-NphResult nph_vfs_open(const NphVfs *vfs, NphStr path, u32 extra_mode, NphVfsFile *out)
+NphResult nph_vfs_open(NphVfs *vfs, NphStr path, u32 extra_mode, NphVfsFile *out)
 {
     NPH_ASSERT(vfs != NULL && out != NULL);
     memset(out, 0, sizeof *out);
     char os_path[VFS_OS_PATH_MAX];
     NphVfsInfo info;
     const NphPackEntry *entry = NULL;
-    const Mount *m = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
-    if (m == NULL) {
+    const u32 index = resolve(vfs, path, &info, &entry, os_path, sizeof os_path);
+    if (index == NPH_VFS_NO_MOUNT) {
         return NPH_RESULT_NOT_FOUND;
     }
+    Mount *m = &vfs->mounts[index];
     out->mount_id = m->id;
     out->source = m->type;
     if (m->type == NPH_VFS_MOUNT_PACK) {
         // The pack's handle is shared: positional reads on it are safe
         // from any thread (platform/file.h).
-        out->file = (NphFile *)&m->pack.file;
+        out->file = &m->pack.file;
         out->base_offset = entry->offset;
         out->size = entry->size;
         return NPH_RESULT_OK;
