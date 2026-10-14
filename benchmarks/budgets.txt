@@ -131,3 +131,21 @@ fork_256_worker                600
 fork_join_depth_8              300
 io_run_wait_1                  1200
 parallel_for_1M                1
+
+# asset_bench (docs/asset.md). The codec rows are per KiB. The shadowed
+# VFS lookup is OS-bound (a failed stat) and gets 5x.
+lz_compress_fast_text          3200
+lz_compress_high_text          56000
+lz_decompress_text             1700
+lz_compress_fast_vertices      720
+lz_compress_high_vertices      10000
+lz_decompress_vertices         560
+lz_decompress_zeros            150
+crc32c_blob_256k               240
+pack_find_path_4k              320
+pack_find_guid_4k              150
+vfs_stat_pack                  250
+vfs_stat_shadowed_pack         110000
+vfs_normalize_path             150
+asset_load_cached              170
+asset_load_small               1000
