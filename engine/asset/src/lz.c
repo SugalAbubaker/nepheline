@@ -382,15 +382,25 @@ NphResult nph_lz_decompress(const void *src, u64 src_size, void *dst, u64 dst_si
 {
     NPH_ASSERT(src != NULL || src_size == 0U);
     NPH_ASSERT(dst != NULL || dst_size == 0U);
+    if (src_size == 0U) {
+        return NPH_RESULT_CORRUPT; // every block has at least one token
+    }
+    if (src == NULL || (dst == NULL && dst_size != 0U)) {
+        return NPH_RESULT_INVALID_ARGUMENT; // the contract above, when asserts are compiled out
+    }
+    // An empty destination may be NULL, and arithmetic on a null pointer
+    // is undefined even with a zero offset (C17 6.5.6): it gets a stand-in
+    // that the bounds checks below never let a write reach.
+    u8 no_output = 0U;
     const u8 *ip = (const u8 *)src;
     const u8 *const iend = ip + src_size;
-    u8 *op = (u8 *)dst;
+    u8 *op = dst != NULL ? (u8 *)dst : &no_output;
     u8 *const obase = op;
     u8 *const oend = op + dst_size;
 
     for (;;) {
         if (ip >= iend) {
-            return NPH_RESULT_CORRUPT; // every block has at least one token
+            return NPH_RESULT_CORRUPT; // a match must be followed by a token
         }
         const u32 token = *ip++;
         u64 lit = token >> 4U;

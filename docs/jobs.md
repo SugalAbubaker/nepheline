@@ -55,8 +55,12 @@ I/O thread, the main thread, or a thread the system has never heard of.
 
 Waits are on counters. `nph_job_run` adds the batch size to the counter
 and each job subtracts one when it returns; `nph_job_wait` returns at
-zero and `nph_job_wait_value(c, n)` at `n` or below, which is how a
-pipeline bounds itself ("at most one frame of rendering outstanding").
+zero and `nph_job_wait_value(c, n)` at `n` or below, which bounds how
+much work is outstanding ("at most one frame of rendering in flight").
+It says how many items remain, not which: jobs of consecutive frames can
+finish out of order, so a frame that reuses another frame's buffers
+waits on that frame's own counter (`samples/jobs_demo` keeps one per
+frame slot).
 `nph_job_counter_add` and `nph_job_counter_signal` make a counter stand
 for work that is not a job, such as an asynchronous read whose
 completion callback signals it from the I/O backend's thread.

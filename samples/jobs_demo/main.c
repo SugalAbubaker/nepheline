@@ -3,7 +3,7 @@
 // the feature"). A fork-join tree, a parallel-for over a particle field,
 // an I/O job feeding a simulation step, and the frame pipeline of §8.4:
 // the simulation of frame N+1 runs while frame N renders, with the
-// latency bounded to one frame by nph_job_wait_value. Prints the timings
+// latency bounded to one frame by a counter per frame slot. Prints the timings
 // and the job system's statistics; the exit code is non-zero if the
 // render checksums disagree with a serial reference.
 //
@@ -255,14 +255,20 @@ int main(int argc, char **argv)
                nph_stopwatch_elapsed_ms(&sw));
     }
 
-    // 3. The frame pipeline: simulate frame N+1 while frame N renders. The
-    //    render counter counts frames whose render job is still running;
-    //    waiting for it to be at most 1 lets exactly one frame overlap.
-    //    Every fourth frame also issues a streaming read on the I/O
-    //    threads; the simulation two frames later waits for it.
+    // 3. The frame pipeline: simulate frame N+1 while frame N renders.
+    //    Frame N renders buffer `next` and frame N+1 simulates into the
+    //    other one, so before frame N reuses buffer `next` (and the render
+    //    slot that goes with it), the render of frame N-2, which read that
+    //    buffer, must be complete. Each slot therefore has its own counter:
+    //    a single counter waited down to 1 would bound the number of
+    //    renders in flight but not say which one finished, and render jobs
+    //    of consecutive frames can complete out of order. Waiting on the
+    //    slot's counter lets exactly one frame overlap. Every fourth frame
+    //    also issues a streaming read on the I/O threads; the simulation
+    //    two frames later waits for it.
     RenderFrame render_frames[2];
     memset(render_frames, 0, sizeof render_frames);
-    NphJobCounter rendering = NPH_JOB_COUNTER_INIT;
+    NphJobCounter rendering[2] = {NPH_JOB_COUNTER_INIT, NPH_JOB_COUNTER_INIT};
     NphJobCounter streaming = NPH_JOB_COUNTER_INIT;
     u64 sim_ns_total = 0U;
     u64 render_ns_total = 0U;
@@ -272,8 +278,9 @@ int main(int argc, char **argv)
     for (u32 frame = 0; frame < frames; ++frame) {
         const u32 cur = frame & 1U;
         const u32 next = cur ^ 1U;
-        // Frame N-2 must have finished rendering before its buffers are reused.
-        nph_job_wait_value(js, &rendering, 1U);
+        // Frame N-2 rendered buffer `next` from slot `next`: it must have
+        // finished before the simulation below overwrites that buffer.
+        nph_job_wait(js, &rendering[next]);
         if (frame >= 2U && (frame - 2U) % 4U == 0U) {
             nph_job_wait(js, &streaming); // the read issued two frames ago
         }
@@ -297,7 +304,7 @@ int main(int argc, char **argv)
         // Render the buffer just written; the main thread does not wait.
         RenderFrame *rf = &render_frames[next];
         if (frame >= 2U) {
-            // This slot's previous frame has finished (rendering <= 1 above).
+            // This slot's previous frame has finished (its counter, above).
             render_ns_total += rf->elapsed_ns;
             if (rf->result != rf->expected) {
                 ++mismatches;
@@ -308,11 +315,12 @@ int main(int argc, char **argv)
         rf->render.buffer = next;
         rf->expected = hash_range(p.x[next], 0U, PARTICLES);
         const NphJobDecl decl = {render_frame_job, rf, "render"};
-        if (nph_job_run(js, &decl, 1U, NPH_JOB_PRIORITY_HIGH, &rendering) != NPH_RESULT_OK) {
+        if (nph_job_run(js, &decl, 1U, NPH_JOB_PRIORITY_HIGH, &rendering[next]) != NPH_RESULT_OK) {
             status = 1;
         }
     }
-    nph_job_wait(js, &rendering);
+    nph_job_wait(js, &rendering[0]);
+    nph_job_wait(js, &rendering[1]);
     nph_job_wait(js, &streaming);
     const f64 wall_ms = nph_stopwatch_elapsed_ms(&pipeline);
     for (u32 i = 0; i < 2U; ++i) {

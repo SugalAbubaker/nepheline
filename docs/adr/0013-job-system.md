@@ -270,5 +270,12 @@ engine must not.
 - TSan runs in CI on the jobs tests only (ADR-0003 policy: TSan excludes
   ASan). Audio and streaming join when they exist (CLAUDE.md §9).
 - The frame pipeline (simulate N+1 while rendering N) is expressed with
-  `nph_job_wait_value(counter, 1)` and shown in `samples/jobs_demo`; the
-  runtime module (Phase 9) will own the real one.
+  one counter per frame slot, waited on before the slot's buffers are
+  reused, and shown in `samples/jobs_demo`; the runtime module (Phase 9)
+  will own the real one. (Amended 2026-10-14: the sample first bounded
+  the pipeline with `nph_job_wait_value(counter, 1)` on one shared
+  counter. That bounds the number of renders in flight but not which
+  one finished; when frame N's render completed before frame N-1's, the
+  next simulation overwrote a buffer still being rendered, which the
+  sample's checksum caught on a CI runner. `nph_job_wait_value` remains
+  the tool for bounding a count, not for identifying completed work.)
