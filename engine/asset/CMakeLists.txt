@@ -10,6 +10,8 @@ nph_add_module(asset
         src/format.c
         src/guid.c
         src/lz.c
+        src/pack.c
+        src/vfs.c
     PUBLIC_DEPS nph::jobs
 )
 if(MSVC)
@@ -26,6 +28,8 @@ nph_add_test(asset
         tests/test_format.c
         tests/test_guid.c
         tests/test_lz.c
+        tests/test_pack.c
+        tests/test_vfs.c
     DEPS
         nph::asset
 )
