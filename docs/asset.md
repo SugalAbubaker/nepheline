@@ -1,0 +1,276 @@
+# Asset module (`engine/asset`)
+
+The cooked asset runtime (CLAUDE.md §8.8): the `.nph` container, pack
+archives (`.npk`), the virtual file system, the LZ codec, GUIDs, the
+loader, and the typed views of meshes, textures, materials, and scenes.
+Decisions: [ADR-0016](adr/0016-asset-format.md). The offline cooker that
+produces these files lives in `tools/cook` ([cook.md](cook.md),
+[ADR-0017](adr/0017-cooker.md)).
+
+Depends on `jobs` (asynchronous loads and parallel decompression) and
+through it on `platform` (files, memory mapping, the mutex of the loader),
+`math` (bounds in the typed headers), and `core`. It does not depend on
+`gpu`: texture formats and the like are pinned numbers that the renderer
+maps.
+
+| Header | Contents |
+|---|---|
+| `asset.h` | the log category, asset types, four-character codes |
+| `guid.h` | 128-bit identifiers: derived from text, random, text form |
+| `lz.h` | the LZ codec: two compression levels, one bounds-checked decoder |
+| `format.h` | the `.nph` container: validation, blob lookup, the writer |
+| `pack.h` | pack archives: reader (mapped, binary search) and streaming writer |
+| `vfs.h` | mounts, path normalisation, reads as copies, mappings, or handles |
+| `loader.h` | shared handles, synchronous and asynchronous loads, blob access |
+| `mesh.h`, `texture.h`, `material.h`, `scene.h` | the typed headers and the views that validate them |
+
+## The container (`format.h`)
+
+```
+NphAssetHeader        64 bytes: magic "NPHA", format version, type, type
+                      version, GUID, content hash, blob count, file size,
+                      CRC-32C of the first 60 bytes
+NphAssetBlobEntry[n]  48 bytes each: tag, index, codec, alignment, offset,
+                      stored size, raw size, CRC-32C of the stored bytes
+blob data             at each entry's offset, aligned as the entry says
+```
+
+A blob is a byte range named by a four-character tag and an index (a mip
+level, a stream number); it is stored as is or LZ-compressed. Alignment is
+16 bytes by default and up to a page, and holds both in the file and in
+memory: a stored blob mapped from a page-aligned file (or sitting at a
+4 KiB-aligned pack entry) is used in place, which is what "no parsing step"
+means in practice. The typed headers are stored blobs; bulk data (vertex
+streams, mips) is compressed.
+
+`nph_asset_file_validate` is the one function that reads an untrusted
+image. It checks the magic, header size, header checksum, format version,
+file size, the table bounds, and for every entry: a known codec, a valid
+alignment, an offset at that alignment inside the data area, a stored size
+within the file, a raw size under 4 GiB, raw equal to stored for stored
+blobs, stored within the LZ bound for compressed ones, and no duplicate
+tag/index pair. After it, everything is offset arithmetic;
+`nph_asset_file_verify_blob` checks a blob's CRC and
+`nph_asset_file_unpack_blob` decodes it.
+
+The writer (`NphAssetWriter`) collects blobs, compressing each as it is
+added (HIGH level by default; the cooker runs offline), lays them out at
+their alignments, and writes the image to memory or to a file.
+
+## The LZ codec (`lz.h`)
+
+The byte stream is the LZ4 block format (Collet, "LZ4 Block Format
+Description", 2011): a sequence of tokens, each a run of literals followed
+by a back-reference of at least four bytes at a 16-bit offset; lengths
+past 15 extend by bytes of 255; the final sequence carries only literals.
+The compressor and decoder are the engine's own. Why that format: a
+decoder is a copy loop with no entropy stage, which is what keeps
+decompression at memory speed on the loading path (§10.5), and the public
+layout can be checked against other implementations.
+
+- **FAST**: one hash-table candidate per position (16 K entries of 4-byte
+  hashes), greedy, extended backwards into the pending literals; the probe
+  step grows after 64 misses so incompressible input costs little. For
+  tools that run often.
+- **HIGH**: every position goes into hash chains covering the 64 KiB
+  window; up to 64 candidates are compared for the longest match, and a
+  match is deferred when the next position starts a longer one (lazy
+  matching). The cooker's default.
+- **The decoder** checks every read against the input and every write
+  against the output and handles overlapping matches (offsets below 8,
+  which repeat a short pattern) by copying one period at a time until
+  eight bytes of pattern exist, then eight bytes at a time. A stream that
+  is malformed, truncated, or decodes to a size other than the one asked
+  for yields `NPH_RESULT_CORRUPT`. It is fuzzed (`tests/fuzz/fuzz_lz.c`).
+
+The compressor takes its tables from the caller (`nph_lz_workspace_size`:
+64 KiB for FAST, 512 KiB for HIGH); nothing in the codec allocates.
+
+## GUIDs (`guid.h`)
+
+`NphGuid` is two 64-bit words. `nph_guid_from_str` hashes text with two
+fixed seeds, so the cooker derives an asset's identity from its source path
+(and sub-asset name) and cooks reproducibly; the seeds are part of the
+format and pinned by a test. `nph_guid_generate` draws random identifiers
+from a generator seeded by the wall clock, the cycle counter, the process
+id, and a serial, for assets the editor creates. The text form is 32 hex
+digits, high word first; parsing accepts hyphens and upper case.
+
+## Packs (`pack.h`)
+
+```
+NphPackHeader       64 bytes: magic "NPAK", version, entry count, entry
+                    alignment, table/index/string offsets, file size, CRC
+entry data          whole .nph files, each at an aligned offset (4 KiB by
+                    default, so an entry can be read or mapped on its own)
+NphPackEntry[n]     64 bytes each: GUID, path hash, offset, size, path
+                    offset and length, type; sorted by (hash, path bytes)
+u32[n]              entry indices sorted by GUID
+string table        the paths, NUL-terminated
+```
+
+The reader maps the whole file read-only (the OS pages it on demand),
+validates every table (ranges, alignment, terminated paths, the sort
+orders, no duplicates), and answers `nph_pack_find_path` and
+`nph_pack_find_guid` by binary search without allocating. The writer
+streams entries to the file as they are added (`nph_pack_writer_add_file`
+copies a file in 1 MiB chunks) and appends the tables at
+`nph_pack_writer_finish`, sorting with an in-place heapsort so a pack of
+any size needs memory only for its table. Duplicate paths and GUIDs, paths
+that are not canonical, and null GUIDs are refused at add time.
+
+## The VFS (`vfs.h`)
+
+A VFS is an ordered list of up to 64 mounts; each binds a prefix (`""` or
+`a/b/`) to a directory or a pack. Lookups walk the mounts newest first, so
+a directory mounted after a pack overrides files in it (editor edits and
+patches shadow shipped content). Paths are canonical, produced by
+`nph_vfs_normalize_path` (separators to `/`, repeated and leading
+separators collapsed, `.` dropped, `..` resolved and refused above the
+root), and matched as exact bytes on every platform.
+
+Three ways to read: `nph_vfs_read_all` copies; `nph_vfs_map` gives a
+`NphVfsMapping` used in place (a memory-mapped loose file whose handle and
+view live in the structure, or a pointer into the pack's mapping with
+nothing opened); `nph_vfs_open` gives a file handle and the entry's offset
+for positional and asynchronous reads (the pack's shared handle, opened
+with `NPH_FILE_ASYNC`, or a loose file the VFS opens). `nph_vfs_iterate`
+visits every file under a prefix across mounts, each path once, with the
+info of the mount that would serve it; `nph_vfs_resolve_directory` gives
+tools the OS path a loose file would be written to.
+
+Cost to know about: when a directory mount shadows a pack, a lookup that
+ends in the pack first pays a failed `stat` on the directory (about 30 µs
+on Windows). Shipping builds mount packs only; the editor's loads are
+deduplicated by the loader, so the cost is paid once per asset.
+
+## The loader (`loader.h`)
+
+`nph_asset_load(loader, path, &handle)` maps the file through the VFS,
+validates it, points stored blobs into the mapping, decompresses the rest
+into one allocation (aligned as the largest blob asks), and returns a
+handle holding one reference. A path already loaded returns the same
+handle with one more reference; one still loading is waited for. Handles
+are generational (core/handle.h); `nph_asset_get` returns the `NphAsset`
+(header, blobs with raw pointers and sizes, path) for a READY handle and
+NULL for anything else. `nph_asset_release` drops a reference; the last
+one unloads. `nph_asset_find_guid` finds a loaded asset by identity, which
+is how a scene's mesh and material references are resolved.
+
+With a job system, `nph_asset_load_async` returns a LOADING handle at
+once, runs the mapping and validation on an I/O thread, spawns one job per
+blob that needs work (a decompression, or a checksum pass over a stored
+blob) on the workers at LOW priority, and the last job to finish publishes
+READY or FAILED and signals the counter the caller passed. A synchronous
+load with a job system decompresses in parallel the same way when the
+work is at least `parallel_threshold` bytes (256 KiB by default), waiting
+on the calling thread. A second asynchronous request for an asset in
+flight shares the handle and gets its counter signalled by a job that
+waits on the first load.
+
+The pipeline holds its own reference while in flight: a release during a
+load unloads when the load completes, and `nph_asset_loader_destroy`
+waits for every pipeline before it reports the assets still live as leaks
+(with their paths) and frees them. Blob checksums are verified by default
+in Debug and Development (`NphAssetLoaderDesc.verify` makes the policy
+explicit); a stored blob that fails its CRC, or a compressed one that
+does not decode, fails the load with `NPH_RESULT_CORRUPT` and the slot is
+released (synchronous) or left FAILED with the error until released
+(asynchronous).
+
+Thread-safety: one mutex guards the slot tables for the duration of a
+lookup or a state change; the data of a READY asset is immutable and read
+without locks. Costs (§1.4): the slot tables at creation; per load the
+record, the path copy, the decompression block, and the mapping.
+
+## Typed views
+
+Each asset type defines blobs and a header (all little-endian plain data,
+sizes fixed by static assertions) and a view function that resolves them
+from a READY asset and checks every count against its blob and every
+index and range against the array it addresses, so a view that resolves
+can be handed to the renderer without further checks:
+
+- **Mesh** (`mesh.h`, type version 1): `HEAD` (counts, bounds, sphere,
+  position quantisation), `POSN` (16-bit unorm positions across the
+  bounds, 8 bytes each, separate from the other attributes so the
+  visibility-buffer pass of §8.6.4 reads positions only), `ATTR` (normal
+  as octahedral snorm16, tangent as snorm8 with the handedness in w, half
+  float UV, RGBA8 colour: 16 bytes), `INDX` (u32 triangle list), `SUBM`
+  (index and meshlet ranges per material slot, bounds), `MLET` (meshlets
+  of at most 64 vertices and 124 triangles), `MLBD` (sphere and normal
+  cone per meshlet, after Kapoulkine's meshoptimizer), `MLVX` (meshlet
+  vertex indices), `MLTR` (meshlet-local triangle corners, 3 bytes each).
+- **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
+  flags) and one `MIP ` blob per level holding every layer, exactly the
+  bytes the format and extent imply (whole 4x4 blocks for BC formats).
+  Formats: R8, RG8, RGBA8 (UNORM and sRGB), RGBA16F, BC4, BC5, BC6H, BC7
+  (UNORM and sRGB).
+- **Material** (`material.h`): one `HEAD` with glTF's metallic-roughness
+  parameters, alpha mode and cutoff, flags, and five texture references
+  (GUID, UV set, wrap modes, filter, scale).
+- **Scene** (`scene.h`): `HEAD`, `NODE` (parent-before-child hierarchy
+  with local TRS, child and sibling links, names), `INST` (a mesh GUID at
+  a node with a range of material GUIDs in `MTRL`), `CAMS`, `LGHT`, and
+  `STRS` (NUL-terminated names).
+
+## Testing
+
+`asset_tests` (48 cases): GUID derivation (pinned), text round trips and
+rejections, generator uniqueness; the codec on empty, tiny, zero,
+random, text, periodic (offsets 1–9), window-edge, and structured inputs
+at both levels, every size up to 300 bytes, hand-built streams from the
+format description, and a dozen malformed streams; the container's
+writer against the validator with every corruption the validator must
+catch; packs written and read back with both alignments, including
+duplicates refused, every corruption, and the empty pack; the VFS's path
+rules, mount precedence and unmounting, mappings and handles, iteration
+with shadowing; the loader synchronous and asynchronous, shared handles,
+release during a load, parallel decompression, checksum policies,
+failure paths, leak reporting; every typed view on valid and corrupted
+data. The fuzz seeds, written by `scripts/fuzz_seeds.py` from an
+independent Python description of the formats (with a port of
+`nph_hash64` in `scripts/nph_hash64.py`), must validate with the C
+readers, so a drift between the description and the code fails the unit
+tests.
+
+Fuzz targets (`tests/fuzz`): `lz` (decode arbitrary bytes into several
+output sizes, then compress-decompress the input at both levels and
+compare), `nph` (validate, checksum, unpack, and resolve every typed
+view), `pack` (validate, then look every entry up by path and GUID and
+touch its bytes).
+
+## Benchmarks
+
+`benchmarks/asset/bench_asset.c`, run with `--min-time=0.5 --repeats=7`
+in the Profile configuration on the development machine (Ryzen 7 5800X,
+Windows 10, MSVC 14.44, 2026-10-14). Full JSON:
+`benchmarks/results/asset-2026-10-14-win-msvc-profile-ryzen7-5800x.json`.
+The codec rows are nanoseconds per KiB (1000 ns/KiB is about 1 GB/s).
+
+| Benchmark | ns/op | Reading |
+|---|---|---|
+| lz_compress_fast_text (256 KiB) | 1056 | 1.0 GB/s, 40.9 % of input |
+| lz_compress_high_text | 18638 | 55 MB/s, 19.7 % of input |
+| lz_decompress_text | 544 | 1.9 GB/s of output |
+| lz_compress_fast_vertices | 237 | 4.3 GB/s, 8.1 % of input (HIGH: 6.4 % at 3246 ns/KiB) |
+| lz_decompress_vertices | 184 | 5.6 GB/s |
+| lz_decompress_zeros | 45 | 22.7 GB/s (one long match) |
+| crc32c_blob_256k | 79 | 12.9 GB/s |
+| pack_find_path_4k | 102 | hash + binary search over 4096 entries |
+| pack_find_guid_4k | 47 | binary search over the GUID index |
+| vfs_stat_pack | 80 | one pack mount |
+| vfs_stat_shadowed_pack | 21799 | a directory mount consulted first (a failed stat) |
+| vfs_normalize_path | 48 | 33 bytes with two separators to fix |
+| asset_load_cached | 54 | lookup, reference, release of a loaded asset |
+| asset_load_small | 330 | map, validate, release a 512-byte stored asset from a pack |
+
+What the numbers say: decompression runs at memory-copy speed, which is
+what lets streaming decompress on the job system without a budget line of
+its own; the HIGH level trades an 18x slower compressor for a stream half
+the size of FAST's on text, the right trade for an offline cooker whose
+blobs are compressed in parallel jobs; a pack lookup is a hundred
+nanoseconds and a cached load fifty, so resolving a scene's references
+costs nothing noticeable; and an uncached load of a pack entry is tens of
+microseconds, dominated by the loader's bookkeeping and the mapping
+arithmetic rather than I/O, because the pack is already mapped.
