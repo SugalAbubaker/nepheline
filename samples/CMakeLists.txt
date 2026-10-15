@@ -41,3 +41,33 @@ if(TARGET gpu_triangle)
     nph_target_use_shaders(gpu_triangle nph_shaders_samples)
     nph_target_use_shaders(gpu_mesh nph_shaders_samples)
 endif()
+
+# The Phase 6 sample (CLAUDE.md §12, "a glTF scene cooks and loads"): its
+# content is cooked when it is built, as a game's would be, with nph_cook
+# turning the glTF source into a pack; the program loads the pack through
+# the VFS and the asset loader and draws the cooked streams as they are.
+# It exits with 77 like the GPU samples without a window system or device.
+if(TARGET nph_cook)
+    set(asset_viewer_content "${CMAKE_CURRENT_SOURCE_DIR}/asset_viewer/content")
+    set(asset_viewer_out "${CMAKE_CURRENT_BINARY_DIR}/asset_viewer/$<CONFIG>")
+    add_custom_command(
+        OUTPUT "${asset_viewer_out}/showcase.npk"
+        COMMAND nph_cook "${asset_viewer_content}/showcase.gltf" --root "${asset_viewer_content}"
+                -o "${asset_viewer_out}/cooked" --pack "${asset_viewer_out}/showcase.npk" --quiet
+        DEPENDS nph_cook "${asset_viewer_content}/showcase.gltf"
+        COMMENT "Cooking the asset_viewer content"
+        VERBATIM)
+    add_custom_target(asset_viewer_content DEPENDS "${asset_viewer_out}/showcase.npk")
+    set_target_properties(asset_viewer_content PROPERTIES FOLDER "samples")
+    nph_add_sample(asset_viewer
+        SOURCES asset_viewer/main.c
+        DEPS nph::gpu nph::asset
+        ARGS --frames=120 "--capture=${asset_viewer_out}/capture.bmp"
+        SKIP_RETURN_CODE 77)
+    if(TARGET asset_viewer)
+        add_dependencies(asset_viewer asset_viewer_content)
+        target_compile_definitions(asset_viewer PRIVATE
+            "NPH_SAMPLE_PACK=\"${asset_viewer_out}/showcase.npk\"")
+        nph_target_use_shaders(asset_viewer nph_shaders_samples)
+    endif()
+endif()

@@ -65,6 +65,34 @@ NPH_SHARED_STRUCT(NphMeshVertex)
     NphVec4 extra;     // v in x
 };
 
+// One draw of the asset viewer sample (samples/asset_viewer): a submesh of
+// a cooked mesh at a node's world transform with its material. The
+// streams are the cooked ones (engine/asset mesh.h), read as they are.
+NPH_SHARED_STRUCT(NphCookedDraw)
+{
+    NphMat4 model;           // the node's world transform
+    NphVec4 base_color;      // the material's factor
+    NphVec4 position_offset; // xyz: dequantise as offset + unorm16 * scale
+    NphVec4 position_scale;  // xyz
+    u64 positions_address;   // NphMeshPosition[]: x | y << 16, z
+    u64 attribs_address;     // NphMeshAttrib[]: octahedral normal, tangent, half UV, colour
+    u32 texture_index;       // base colour (bindless): a white texel when untextured
+    u32 pad0;
+    u32 pad1;
+    u32 pad2;
+};
+
+// Push constants of the asset viewer: the frame's camera and light, and
+// which record of the draw buffer this draw is.
+NPH_SHARED_STRUCT(NphCookedPush)
+{
+    NphMat4 view_proj;
+    NphVec4 light_dir; // xyz: towards the light, normalised
+    u64 draws_address; // NphCookedDraw[]
+    u32 draw_index;
+    u32 sampler_index;
+};
+
 // Push constants of the GPU benchmarks (benchmarks/gpu).
 NPH_SHARED_STRUCT(NphBenchPush)
 {
