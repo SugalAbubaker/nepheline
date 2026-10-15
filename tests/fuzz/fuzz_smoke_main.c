@@ -11,7 +11,11 @@
 // The nightly workflow (.github/workflows/fuzz.yml) runs the real fuzzers,
 // which explore with coverage guidance, for minutes per target.
 //
-//     <name>_fuzz_smoke <corpus dir> [mutations per seed]
+//     <name>_fuzz_smoke <corpus dir> [mutations per seed] [--save-last=FILE]
+//
+// --save-last writes each input to FILE before running it, so the file a
+// crash leaves behind is the input that crashed (the runs are
+// deterministic, so a failure is reproduced by running again with it).
 #include <nepheline/platform/file.h>
 
 #include <stdint.h>
@@ -105,6 +109,17 @@ static u64 mutate(u64 *rng, const Seed *in, const Seed *other, u8 *out)
     return n;
 }
 
+static const char *g_save_last;
+
+static void run_one(const u8 *data, u64 size)
+{
+    if (g_save_last != NULL && nph_file_write_all(g_save_last, data, size) != NPH_RESULT_OK) {
+        fprintf(stderr, "%s: cannot write\n", g_save_last);
+        exit(1);
+    }
+    (void)LLVMFuzzerTestOneInput(data, (size_t)size);
+}
+
 static int compare_names(const void *a, const void *b)
 {
     return strcmp(((const NphDirEntry *)a)->name, ((const NphDirEntry *)b)->name);
@@ -112,11 +127,20 @@ static int compare_names(const void *a, const void *b)
 
 int main(int argc, char **argv)
 {
+#if defined(_MSC_VER)
+    // A harness that finds a bug aborts: MSVC's debug CRT would otherwise
+    // show a dialog and hang the test instead of failing it.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <corpus dir> [mutations per seed]\n", argv[0]);
+        fprintf(stderr, "usage: %s <corpus dir> [mutations per seed] [--save-last=FILE]\n",
+                argv[0]);
         return 2;
     }
     const u32 mutations = argc >= 3 ? (u32)strtoul(argv[2], NULL, 10) : 200U;
+    if (argc >= 4 && strncmp(argv[3], "--save-last=", 12U) == 0) {
+        g_save_last = argv[3] + 12;
+    }
     NphAllocator *alloc = nph_allocator_system();
     Seed *seeds = NPH_ALLOC_ARRAY_ZEROED(alloc, Seed, SMOKE_MAX_SEEDS);
     NphDirEntry *names = NPH_ALLOC_ARRAY_ZEROED(alloc, NphDirEntry, SMOKE_MAX_SEEDS);
@@ -160,17 +184,17 @@ int main(int argc, char **argv)
             for (u64 b = 0; b < n; ++b) {
                 buffer[b] = (u8)smoke_rng(&rng);
             }
-            LLVMFuzzerTestOneInput(buffer, (size_t)n);
+            run_one(buffer, n);
             ++runs;
         }
     }
     for (u32 i = 0; i < loaded; ++i) {
-        LLVMFuzzerTestOneInput(seeds[i].data, (size_t)seeds[i].size);
+        run_one(seeds[i].data, seeds[i].size);
         ++runs;
         for (u32 m = 0; m < mutations; ++m) {
             const Seed *other = &seeds[below(&rng, loaded)];
             const u64 n = mutate(&rng, &seeds[i], other, buffer);
-            LLVMFuzzerTestOneInput(buffer, (size_t)n);
+            run_one(buffer, n);
             ++runs;
         }
     }

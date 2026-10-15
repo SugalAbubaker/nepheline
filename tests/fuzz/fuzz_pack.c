@@ -18,7 +18,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     NphAllocator *alloc = nph_allocator_system();
-    u8 *copy = (u8 *)NPH_ALLOC(alloc, size, 4096U);
+    // Whole pages: ASan's quarantine counts the bytes asked for, and a
+    // page-aligned chunk for a few hundred bytes occupies two or three
+    // pages, so with small inputs the quarantine kept gigabytes alive and
+    // libFuzzer's RSS limit stopped the nightly run.
+    const u64 cap = (size + 4095U) & ~(u64)4095U;
+    u8 *copy = (u8 *)NPH_ALLOC(alloc, cap, 4096U);
     if (copy == NULL) {
         return 0;
     }
@@ -45,6 +50,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         (void)checksum;
     }
-    NPH_FREE(alloc, copy, size, 4096U);
+    NPH_FREE(alloc, copy, cap, 4096U);
     return 0;
 }
