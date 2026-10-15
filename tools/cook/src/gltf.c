@@ -981,6 +981,32 @@ static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgl
     return NPH_RESULT_OK;
 }
 
+// cgltf allocates a base64 buffer's declared byteLength before it decodes
+// a character, and saturates absurd lengths to ~2^63 while parsing, so a
+// hostile document could request any amount of memory. The payload bounds
+// what can honestly decode: 6 bits per character after the comma.
+static NphResult check_embedded_buffers(const cgltf_data *data, const char *path_for_uris)
+{
+    for (cgltf_size i = 0; i < data->buffers_count; ++i) {
+        const cgltf_buffer *b = &data->buffers[i];
+        if (b->uri == NULL || strncmp(b->uri, "data:", 5U) != 0) {
+            continue;
+        }
+        const char *comma = strchr(b->uri, ',');
+        const u64 chars = comma != NULL ? (u64)strlen(comma + 1) : 0U;
+        // `chars` is bounded by the document size, so this cannot wrap.
+        const u64 decodable = chars / 4U * 3U + (chars % 4U) * 6U / 8U;
+        if ((u64)b->size > decodable) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK,
+                          "%s: buffer %llu declares %llu bytes but its data URI holds at most %llu",
+                          path_for_uris, (unsigned long long)i, (unsigned long long)b->size,
+                          (unsigned long long)decodable);
+            return NPH_RESULT_PARSE_ERROR;
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
 // Parses the document in `bytes` (a cook block the scene adopts: a GLB's
 // binary chunk is used in place), loads its buffers, validates, converts.
 static NphResult load(NphAllocator *alloc, u8 *bytes, u64 size, const char *path_for_uris,
@@ -997,7 +1023,8 @@ static NphResult load(NphAllocator *alloc, u8 *bytes, u64 size, const char *path
     NphResult r = NPH_RESULT_OK;
     if (cr == cgltf_result_success) {
         out->cgltf = data;
-        if (base_dir == NULL) {
+        r = check_embedded_buffers(data, path_for_uris);
+        if (r == NPH_RESULT_OK && base_dir == NULL) {
             // Without a directory only embedded buffers can be loaded.
             for (cgltf_size i = 0; i < data->buffers_count; ++i) {
                 const char *uri = data->buffers[i].uri;

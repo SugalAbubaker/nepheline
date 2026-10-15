@@ -350,6 +350,13 @@ projects onto, and mesh validation refuses position coordinates beyond
 `COOK_MESH_MAX_COORDINATE` (1e9), below which every edge, cross product,
 and quantisation step stays finite.
 
+The 2026-10-15 nightly run found a glTF buffer with a `byteLength` of
+5.6e41 and a data URI: cgltf saturates the length to about 2^63 and
+allocates it before decoding a character, which ASan aborts on (and a
+smaller lie would have cost real memory). `gltf.c` now refuses any
+embedded buffer longer than its base64 payload can decode, six bits per
+character, before cgltf loads buffers (`regression_huge_buffer`).
+
 Two problems the fuzzing work turned up are handled in `image.c`:
 stb_image computes `NULL + 0` and calls `memcpy(NULL, p, 0)` on a PNG
 whose first IDAT chunk is empty (undefined behaviour that UBSan reports),

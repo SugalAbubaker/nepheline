@@ -232,6 +232,30 @@ NTEST(gltf, rejects_bad_input)
         NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
                             NPH_RESULT_PARSE_ERROR);
     }
+    // A buffer longer than its data URI can decode is refused before
+    // anything is allocated for it (the fuzzer's 5.6e41-byte buffer
+    // saturated to ~2^63 inside cgltf). "AAAA" decodes to exactly 3 bytes.
+    static const struct {
+        const char *length;
+        NphResult expected;
+    } lengths[] = {
+        {"3", NPH_RESULT_OK},
+        {"4", NPH_RESULT_PARSE_ERROR},
+        {"9223372036854775807", NPH_RESULT_PARSE_ERROR},
+        {"555555555555555555555555555555555555555544", NPH_RESULT_PARSE_ERROR},
+    };
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(lengths); ++i) {
+        char doc[256];
+        snprintf(doc, sizeof doc,
+                 "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":%s,"
+                 "\"uri\":\"data:application/octet-stream;base64,AAAA\"}]}",
+                 lengths[i].length);
+        NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
+                            lengths[i].expected);
+        if (lengths[i].expected == NPH_RESULT_OK) {
+            cook_gltf_free(&scene);
+        }
+    }
 }
 
 NTEST(gltf, triangulates_strips_and_fans)
