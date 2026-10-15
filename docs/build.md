@@ -14,7 +14,7 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
 | Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
 | Window system | nothing extra | `libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev` to build GLFW; `xvfb` to run the window tests headless |
-| Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, and VMA live in `third_party/`) | same |
+| Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, VMA, and the cooker's cgltf and stb live in `third_party/`) | same |
 | Vulkan | the LunarG SDK (1.4.321 is the pinned reference; `scripts/install_vulkan_sdk.ps1 -Version 1.4.321.1` installs it unattended): `glslc` for the shader build, the validation layers for Debug and Development, and the loader | `glslc` and `libvulkan1`; the validation layer for Debug and Development, from the pinned SDK (`scripts/install_vulkan_layer.sh 1.4.321.1`, then `VK_LAYER_PATH=~/vulkan-sdk/share/vulkan/explicit_layer.d`; Ubuntu 24.04's `vulkan-validationlayers` is 1.3.275 and crashes on lavapipe); `mesa-vulkan-drivers` for lavapipe, the software driver the GPU tests run on without a GPU |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
@@ -85,7 +85,7 @@ target links.
 | `NPH_BUILD_TESTS` | `ON` | Build ntest and the unit tests; register them with CTest |
 | `NPH_BUILD_BENCHMARKS` | `ON` | Build nbench and the benchmarks; register a smoke run of each with CTest (label `benchmark`) |
 | `NPH_BUILD_SAMPLES` | `ON` | Build `samples/`; register each as a CTest smoke run (label `sample`) |
-| `NPH_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets in `tests/fuzz/` (Clang only; `-fsanitize=fuzzer`) |
+| `NPH_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets in `tests/fuzz/` (Clang only; `-fsanitize=fuzzer`). Their corpus-replay smoke tests (label `fuzz`) are built with `NPH_BUILD_TESTS` either way |
 | `NPH_WARNINGS_AS_ERRORS` | `ON` | `/WX` or `-Werror` |
 | `NPH_ASAN` | `ON` (`OFF` for clang-cl) | AddressSanitizer in Debug |
 | `NPH_UBSAN` | `ON` | UndefinedBehaviorSanitizer in Debug (GCC/Clang) |
@@ -135,6 +135,8 @@ run writes a JUnit report to `build/<preset>/test-results/<Config>/<name>.xml`.
 ctest --preset linux-gcc-debug                      # everything
 ctest --preset linux-gcc-debug -R core              # by CTest name
 ctest --preset linux-gcc-debug -L unit              # unit tests only (skip benchmark smoke runs)
+ctest --preset linux-gcc-debug -L integration       # cross-module tests (cooker, runtime, GPU)
+ctest --preset linux-gcc-debug -L fuzz              # every fuzz target's corpus replay
 build/linux-gcc/bin/Debug/core_tests --filter=version.*   # by ntest filter
 build/linux-gcc/bin/Debug/core_tests --help         # runner options
 ```
@@ -233,7 +235,10 @@ against `benchmarks/budgets.txt`, and uploads the JSON results as artifacts.
 
 `.github/workflows/fuzz.yml` builds the libFuzzer targets nightly with
 Clang (Debug: ASan + UBSan) and runs each for two minutes from its seed
-corpus; crashing inputs are uploaded as artifacts.
+corpus; crashing inputs are uploaded as artifacts. Every test build also
+replays each target's corpus with a fixed set of mutations
+(`fuzz_smoke.<name>`, label `fuzz`), so the parsers meet the sanitizers of
+every toolchain on every push ([cook.md](cook.md), "Fuzzing").
 
 `.github/workflows/gpu-perf.yml` runs on the self-hosted RTX 3060 Ti runner
 ([ADR-0002](adr/0002-self-hosted-gpu-runner.md)): nightly, on pushes to

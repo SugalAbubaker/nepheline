@@ -22,6 +22,7 @@ supersedes it and both link to each other.
 | [0014](0014-gpu-module.md) | GPU module: vendored Vulkan headers, volk and VMA, one bindless layout, and a Vulkan-shaped RHI | Accepted |
 | [0015](0015-gpu-budget-measurements.md) | GPU budget measurements on the RTX 3060 Ti and the §10.4 table | Accepted |
 | [0016](0016-asset-format.md) | Asset runtime: the `.nph` container, pack archives, the VFS, the LZ codec, and the loader | Accepted |
+| [0017](0017-cooker.md) | The asset cooker: derived identities, a JSON database, our own mesh and texture pipelines | Accepted |
 
 ## Template
 
