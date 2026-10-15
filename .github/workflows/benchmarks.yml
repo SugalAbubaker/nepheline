@@ -69,6 +69,18 @@ jobs:
       - name: Build (Profile)
         run: cmake --build --preset ${{ matrix.preset }}-${{ matrix.cfg }}
 
+      - name: Record the runner's CPU
+        shell: bash
+        run: |
+          # Hosted runners mix CPU models, and a benchmark bound by a
+          # microarchitectural cost can swing by an integer factor between
+          # them (docs/benchmarks.md): name the CPU next to the numbers.
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"
+          else
+            grep -m1 'model name' /proc/cpuinfo
+          fi
+
       - name: Run benchmarks
         shell: bash
         run: |
