@@ -30,3 +30,6 @@ __pycache__/
 *.dmp
 *.nvvp
 *.ncu-rep
+
+# The CI list of Git LFS objects (.github/workflows/ci.yml cache key).
+.lfs-objects
