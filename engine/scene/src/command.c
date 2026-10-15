@@ -194,7 +194,7 @@ static NphResult record_value(NphCommandBuffer *cb, CmdType type, NphEntity e, N
     if (!valid_target(cb, e)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    const NphComponentInfo *info = nph_world_info_(cb->world, id);
+    const NphComponentInfo *info = nph_world_info(cb->world, id);
     if (info == NULL || (info->desc->flags & NPH_COMPONENT_FLAG_INTERNAL) != 0U) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -329,13 +329,13 @@ static NphResult apply_value(Applier *ap, const CmdHeader *h, const u8 *value, N
         st->skipped += 1U;
         return NPH_RESULT_OK;
     }
-    const NphComponentInfo *info = nph_world_info_(w, h->id);
+    const NphComponentInfo *info = nph_world_info(w, h->id);
     const void *data = NULL;
     ValueBuffer buffer;
     if (h->value_size > 0U) {
         if (info->entity_field_count > 0U) {
             memcpy(buffer.bytes, value, h->value_size);
-            nph_component_remap_entities_(info, buffer.bytes, resolve, ap);
+            nph_component_remap_entities(info, buffer.bytes, resolve, ap);
             data = buffer.bytes;
         } else {
             data = value;

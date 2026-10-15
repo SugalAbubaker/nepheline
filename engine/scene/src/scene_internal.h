@@ -236,62 +236,62 @@ struct NphQuery {
 // ---------------------------------------------------------------------------
 
 // The tick stamped by writes made outside a system run.
-NPH_INLINE u32 nph_world_change_tick_(const NphWorld *w)
+NPH_INLINE u32 nph_world_change_tick(const NphWorld *w)
 {
     return w->tick + 1U;
 }
 
 // Asserts that the world's structure may change now and records the change.
-void nph_world_structural_begin_(NphWorld *w);
+void nph_world_structural_begin(NphWorld *w);
 
-const NphComponentInfo *nph_world_info_(const NphWorld *w, NphComponentId id);
+const NphComponentInfo *nph_world_info(const NphWorld *w, NphComponentId id);
 
 // The record of a live entity, or NULL.
-NphEntityRecord *nph_world_record_(const NphWorld *w, NphEntity e);
+NphEntityRecord *nph_world_record(const NphWorld *w, NphEntity e);
 
 // Appends an event when the stream is on.
-void nph_world_event_(NphWorld *w, NphWorldEventType type, NphEntity e, NphComponentId id);
+void nph_world_event(NphWorld *w, NphWorldEventType type, NphEntity e, NphComponentId id);
 
 // The archetype for `mask`, created on first use.
-NPH_MUST_USE NphResult nph_world_archetype_(NphWorld *w, const NphComponentMask *mask,
-                                            NphArchetype **out);
+NPH_MUST_USE NphResult nph_world_archetype(NphWorld *w, const NphComponentMask *mask,
+                                           NphArchetype **out);
 
 // Moves a live entity to `dst` (which must differ from its archetype):
 // components present in both are copied, those only in `dst` get their
 // defaults. Nothing changes on failure.
-NPH_MUST_USE NphResult nph_world_move_(NphWorld *w, NphEntity e, NphArchetype *dst);
+NPH_MUST_USE NphResult nph_world_move(NphWorld *w, NphEntity e, NphArchetype *dst);
 
 // Allocates `count` entity handles without placing them in an archetype
 // (they are not alive until placed), so their slots follow the order of
 // `out`. NPH_RESULT_FULL at the capacity.
-NPH_MUST_USE NphResult nph_world_reserve_(NphWorld *w, u32 count, NphEntity *out);
+NPH_MUST_USE NphResult nph_world_reserve(NphWorld *w, u32 count, NphEntity *out);
 
 // Places reserved handles in the archetype of `ids`, rows in the order of
 // `handles`, with default values. All or nothing.
-NPH_MUST_USE NphResult nph_world_place_(NphWorld *w, const NphComponentId *ids, u32 id_count,
-                                        u32 count, const NphEntity *handles);
+NPH_MUST_USE NphResult nph_world_place(NphWorld *w, const NphComponentId *ids, u32 id_count,
+                                       u32 count, const NphEntity *handles);
 
 // Releases reserved handles that were never placed (placed ones are left
 // alone; despawn them).
-void nph_world_unreserve_(NphWorld *w, const NphEntity *handles, u32 count);
+void nph_world_unreserve(NphWorld *w, const NphEntity *handles, u32 count);
 
 // Writes a component cell, stamping the column with the change tick.
-void *nph_world_cell_mut_(NphWorld *w, NphEntityRecord *rec, NphComponentId id);
+void *nph_world_cell_mut(NphWorld *w, NphEntityRecord *rec, NphComponentId id);
 
 // Remaps every ENTITY field of a component value through `map`
 // (an entity -> entity function).
 typedef NphEntity (*NphEntityMapFn)(void *user, NphEntity e);
-void nph_component_remap_entities_(const NphComponentInfo *info, void *value, NphEntityMapFn fn,
-                                   void *user);
+void nph_component_remap_entities(const NphComponentInfo *info, void *value, NphEntityMapFn fn,
+                                  void *user);
 
 // Query bookkeeping called by the world when it creates an archetype:
 // first every query reserves room for one more (may fail), then each
 // records the archetype if it matches (cannot fail).
-NPH_MUST_USE NphResult nph_query_reserve_(NphQuery *q, u32 extra);
-void nph_query_on_archetype_(NphQuery *q, const NphArchetype *arch);
+NPH_MUST_USE NphResult nph_query_reserve(NphQuery *q, u32 extra);
+void nph_query_on_archetype(NphQuery *q, const NphArchetype *arch);
 
 // Hierarchy maintenance called by the world (transform.c).
-void nph_hierarchy_on_despawn_(NphWorld *w, NphEntity e);
+void nph_hierarchy_on_despawn(NphWorld *w, NphEntity e);
 
 // Built-in component descriptors (transform.c, prefab.c).
-const NphComponentDesc *nph_builtin_component_desc_(u32 index);
+const NphComponentDesc *nph_builtin_component_desc(u32 index);

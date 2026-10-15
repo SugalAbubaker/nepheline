@@ -210,20 +210,20 @@ NphResult nph_prefab_instantiate(const NphPrefab *p, NphWorld *w, NphEntity *out
     if (r == NPH_RESULT_OK) {
         Remap map = {pw, index_of_slot, created};
         for (u32 i = 0; i < n; ++i) {
-            const NphEntityRecord *src = nph_world_record_(pw, source[i]);
-            NphEntityRecord *dst = nph_world_record_(w, created[i]);
+            const NphEntityRecord *src = nph_world_record(pw, source[i]);
+            NphEntityRecord *dst = nph_world_record(w, created[i]);
             const NphArchetype *sa = src->chunk->archetype;
             for (u32 col = 0; col < sa->column_count; ++col) {
                 const NphComponentId id = sa->column_ids[col];
                 if (id == NPH_COMPONENT_ID_HIERARCHY || id == NPH_COMPONENT_ID_PREFAB_INSTANCE) {
                     continue; // links are rebuilt below; the instance record is set below
                 }
-                void *cell = nph_world_cell_mut_(w, dst, id);
+                void *cell = nph_world_cell_mut(w, dst, id);
                 memcpy(cell, nph_chunk_cell(src->chunk, col, src->row), sa->column_sizes[col]);
-                nph_component_remap_entities_(&w->components[id], cell, remap_entity, &map);
+                nph_component_remap_entities(&w->components[id], cell, remap_entity, &map);
             }
             NphPrefabInstance *inst =
-                (NphPrefabInstance *)nph_world_cell_mut_(w, dst, NPH_COMPONENT_ID_PREFAB_INSTANCE);
+                (NphPrefabInstance *)nph_world_cell_mut(w, dst, NPH_COMPONENT_ID_PREFAB_INSTANCE);
             inst->prefab = interned;
             inst->index = i;
             inst->root = created[0];

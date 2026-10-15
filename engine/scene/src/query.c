@@ -14,7 +14,7 @@ static bool archetype_matches(const NphQuery *q, const NphArchetype *a)
            !nph_mask_intersects(&a->mask, &q->excluded);
 }
 
-NphResult nph_query_reserve_(NphQuery *q, u32 extra)
+NphResult nph_query_reserve(NphQuery *q, u32 extra)
 {
     const u64 need = (u64)q->archetype_count + extra;
     if (need <= q->archetype_cap) {
@@ -38,7 +38,7 @@ NphResult nph_query_reserve_(NphQuery *q, u32 extra)
     return NPH_RESULT_OK;
 }
 
-void nph_query_on_archetype_(NphQuery *q, const NphArchetype *arch)
+void nph_query_on_archetype(NphQuery *q, const NphArchetype *arch)
 {
     if (!archetype_matches(q, arch)) {
         return;
@@ -112,7 +112,7 @@ NphResult nph_query_create(NphWorld *w, const NphQueryDesc *desc, NphQuery **out
         q->has_change_filter = q->has_change_filter || t->changed != 0U;
     }
 
-    if (nph_query_reserve_(q, w->archetype_count) != NPH_RESULT_OK) {
+    if (nph_query_reserve(q, w->archetype_count) != NPH_RESULT_OK) {
         query_free(q);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -129,7 +129,7 @@ NphResult nph_query_create(NphWorld *w, const NphQueryDesc *desc, NphQuery **out
         w->query_cap = cap;
     }
     for (u32 i = 0; i < w->archetype_count; ++i) {
-        nph_query_on_archetype_(q, w->archetypes[i]);
+        nph_query_on_archetype(q, w->archetypes[i]);
     }
     q->slot = w->query_count;
     w->queries[w->query_count++] = q;
@@ -241,7 +241,7 @@ void nph_query_iter(const NphQuery *q, NphQueryIter *it)
     NPH_ASSERT(q != NULL && it != NULL);
     memset(it, 0, sizeof *it);
     it->query = q;
-    it->write_tick = nph_world_change_tick_(q->world);
+    it->write_tick = nph_world_change_tick(q->world);
     it->epoch = q->world->epoch;
 }
 

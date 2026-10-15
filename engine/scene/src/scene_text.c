@@ -68,7 +68,7 @@ static u32 prefab_rank(const NphWorld *pw, NphEntity e)
 static bool listed_component(const NphWorld *w, NphComponentId id)
 {
     return id != NPH_COMPONENT_ID_PREFAB_INSTANCE &&
-           nph_scene_component_saved_(w->components[id].desc);
+           nph_scene_component_saved(w->components[id].desc);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ static NphResult write_value(Saver *s, const NphFieldDesc *f, const u8 *p)
     case NPH_FIELD_ENTITY: {
         NphEntity e;
         memcpy(&e, p, sizeof e);
-        const u32 id = nph_saveset_id_(&s->set, s->w, e);
+        const u32 id = nph_saveset_id(&s->set, s->w, e);
         return id != NPH_SAVE_NONE ? nph_json_writer_i64(jw, (i64)id) : nph_json_writer_null(jw);
     }
     case NPH_FIELD_STR_ID: {
@@ -408,14 +408,14 @@ static NphResult write_entity(Saver *s, u32 id)
     NPH_TRY(nph_json_writer_begin_object(jw));
     NPH_TRY(nph_json_writer_key(jw, NPH_STR("id")));
     NPH_TRY(nph_json_writer_i64(jw, (i64)id));
-    const u32 parent = nph_saveset_id_(&s->set, w, nph_world_parent(w, e));
+    const u32 parent = nph_saveset_id(&s->set, w, nph_world_parent(w, e));
     if (parent != NPH_SAVE_NONE) {
         NPH_TRY(nph_json_writer_key(jw, NPH_STR("parent")));
         NPH_TRY(nph_json_writer_i64(jw, (i64)parent));
     }
     const NphPrefabInstance *pi =
         NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_PREFAB_INSTANCE, NphPrefabInstance);
-    const u32 root = pi != NULL ? nph_saveset_id_(&s->set, w, pi->root) : NPH_SAVE_NONE;
+    const u32 root = pi != NULL ? nph_saveset_id(&s->set, w, pi->root) : NPH_SAVE_NONE;
     if (root == NPH_SAVE_NONE) {
         // Not an instance, or one whose root is not saved: in full.
         NPH_TRY(write_full(s, e));
@@ -476,8 +476,8 @@ NphResult nph_scene_save_text(const NphWorld *w, const NphSceneSaveDesc *desc, N
     s->w = w;
     s->resolve = d.resolve;
     s->resolve_user = d.resolve_user;
-    NphResult r = nph_saveset_build_(w, d.entities, d.entities != NULL ? d.entity_count : 0U,
-                                     scratch, &s->set);
+    NphResult r = nph_saveset_build(w, d.entities, d.entities != NULL ? d.entity_count : 0U,
+                                    scratch, &s->set);
     if (r == NPH_RESULT_OK) {
         s->sorted_count = sorted_components(w, s->sorted);
         nph_json_writer_init(&s->jw, out, d.compact == 0);
@@ -495,10 +495,10 @@ NphResult nph_scene_save_text(const NphWorld *w, const NphSceneSaveDesc *desc, N
         if (result != NULL) {
             result->entity_count = r == NPH_RESULT_OK ? s->set.count : 0U;
         }
-        nph_saveset_free_(&s->set);
+        nph_saveset_free(&s->set);
     }
     if (r != NPH_RESULT_OK) {
-        nph_scene_error_(result, "saving failed: %s", nph_result_string(r));
+        nph_scene_error(result, "saving failed: %s", nph_result_string(r));
     }
     NPH_FREE_TYPE(scratch, Saver, s);
     return r;
@@ -1088,10 +1088,10 @@ static NphResult fill_entity(Loader *l, u32 i)
 {
     EntityIn *in = &l->in[i];
     NphWorld *w = l->w;
-    NphEntityRecord *rec = nph_world_record_(w, l->created[i]);
+    NphEntityRecord *rec = nph_world_record(w, l->created[i]);
     if (in->prefab != NULL) {
         const NphWorld *pw = nph_prefab_world_const(in->prefab);
-        const NphEntityRecord *src = nph_world_record_(pw, in->pe);
+        const NphEntityRecord *src = nph_world_record(pw, in->pe);
         const NphArchetype *sa = src->chunk->archetype;
         InstanceRemap remap = {l, pw, in->root};
         for (u32 col = 0; col < sa->column_count; ++col) {
@@ -1100,14 +1100,14 @@ static NphResult fill_entity(Loader *l, u32 i)
                 !nph_world_has(w, l->created[i], id)) {
                 continue;
             }
-            void *cell = nph_world_cell_mut_(w, rec, id);
+            void *cell = nph_world_cell_mut(w, rec, id);
             memcpy(cell, nph_chunk_cell(src->chunk, col, src->row), sa->column_sizes[col]);
-            nph_component_remap_entities_(&w->components[id], cell, remap_instance, &remap);
+            nph_component_remap_entities(&w->components[id], cell, remap_instance, &remap);
         }
     }
     if (in->root != NPH_SAVE_NONE) {
         NphPrefabInstance *pi =
-            (NphPrefabInstance *)nph_world_cell_mut_(w, rec, NPH_COMPONENT_ID_PREFAB_INSTANCE);
+            (NphPrefabInstance *)nph_world_cell_mut(w, rec, NPH_COMPONENT_ID_PREFAB_INSTANCE);
         pi->prefab = in->prefab_id;
         if (in->prefab_name.len > 0U) {
             NPH_TRY(nph_str_table_intern(&w->strings, in->prefab_name, &pi->prefab));
@@ -1127,7 +1127,7 @@ static NphResult fill_entity(Loader *l, u32 i)
             ValueBuffer buffer;
             nph_component_init_default(d, buffer.bytes);
             NPH_TRY(read_fields(l, i, id, member, buffer.bytes));
-            memcpy(nph_world_cell_mut_(w, rec, id), buffer.bytes, d->size);
+            memcpy(nph_world_cell_mut(w, rec, id), buffer.bytes, d->size);
         }
     }
     const NphJsonValue *overrides = nph_json_object_get(in->obj, NPH_STR("overrides"));
@@ -1140,7 +1140,7 @@ static NphResult fill_entity(Loader *l, u32 i)
                 continue;
             }
             ValueBuffer buffer;
-            void *cell = nph_world_cell_mut_(w, rec, id);
+            void *cell = nph_world_cell_mut(w, rec, id);
             memcpy(buffer.bytes, cell, d->size);
             NPH_TRY(read_fields(l, i, id, member, buffer.bytes));
             memcpy(cell, buffer.bytes, d->size);
@@ -1248,7 +1248,7 @@ NphResult nph_scene_load_text(NphWorld *w, NphStr text, const NphSceneLoadDesc *
     }
     if (r != NPH_RESULT_OK) {
         if (result != NULL && result->error[0] == '\0') {
-            nph_scene_error_(result, "loading failed: %s", nph_result_string(r));
+            nph_scene_error(result, "loading failed: %s", nph_result_string(r));
         }
         // All or nothing.
         for (u32 i = l.n; i > 0U; --i) {

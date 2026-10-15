@@ -14,7 +14,7 @@
 // Marks a slot that is saved but has no id yet.
 #define MEMBER (NPH_SAVE_NONE - 1U)
 
-void nph_scene_error_(NphSceneResult *result, const char *fmt, ...)
+void nph_scene_error(NphSceneResult *result, const char *fmt, ...)
 {
     if (result == NULL) {
         return;
@@ -77,8 +77,8 @@ static void walk(NphSaveSet *s, const NphWorld *w, NphEntity root)
     }
 }
 
-NphResult nph_saveset_build_(const NphWorld *w, const NphEntity *entities, u32 count,
-                             NphAllocator *alloc, NphSaveSet *out)
+NphResult nph_saveset_build(const NphWorld *w, const NphEntity *entities, u32 count,
+                            NphAllocator *alloc, NphSaveSet *out)
 {
     memset(out, 0, sizeof *out);
     out->alloc = alloc;
@@ -87,7 +87,7 @@ NphResult nph_saveset_build_(const NphWorld *w, const NphEntity *entities, u32 c
     out->order = NPH_ALLOC_ARRAY(alloc, NphEntity, out->order_cap);
     out->id_of_slot = NPH_ALLOC_ARRAY(alloc, u32, nph_max_u32(out->slot_count, 1U));
     if (out->order == NULL || out->id_of_slot == NULL) {
-        nph_saveset_free_(out);
+        nph_saveset_free(out);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     for (u32 i = 0; i < out->slot_count; ++i) {
@@ -119,7 +119,7 @@ NphResult nph_saveset_build_(const NphWorld *w, const NphEntity *entities, u32 c
     return NPH_RESULT_OK;
 }
 
-void nph_saveset_free_(NphSaveSet *s)
+void nph_saveset_free(NphSaveSet *s)
 {
     if (s->order != NULL) {
         NPH_FREE_ARRAY(s->alloc, NphEntity, s->order, s->order_cap);

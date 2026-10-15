@@ -75,7 +75,7 @@ static void canonical(const BinSaver *s, NphComponentId id, const u8 *src, u8 *d
         if (f->kind == NPH_FIELD_ENTITY) {
             NphEntity e;
             memcpy(&e, src + f->offset, sizeof e);
-            const u32 fid = nph_saveset_id_(&s->set, s->w, e);
+            const u32 fid = nph_saveset_id(&s->set, s->w, e);
             const u32 v = fid != NPH_SAVE_NONE ? fid + 1U : 0U;
             memcpy(dst + f->offset, &v, sizeof v);
         } else if (f->kind == NPH_FIELD_TEXT) {
@@ -119,7 +119,7 @@ static int compare_u64(const void *a, const void *b)
 
 static bool saved_column(const NphWorld *w, NphComponentId id)
 {
-    return nph_scene_component_saved_(w->components[id].desc);
+    return nph_scene_component_saved(w->components[id].desc);
 }
 
 static NphResult write_archetype(BinSaver *s, const NphArchetype *a, const u32 *ids, u32 n)
@@ -276,7 +276,7 @@ static NphResult save_body(BinSaver *s)
     NPH_TRY(nph_bin_write_u32(o, 0U));
     u32 pairs = 0U;
     for (u32 i = 0; i < s->set.count; ++i) {
-        const u32 parent = nph_saveset_id_(&s->set, w, nph_world_parent(w, s->set.order[i]));
+        const u32 parent = nph_saveset_id(&s->set, w, nph_world_parent(w, s->set.order[i]));
         if (parent != NPH_SAVE_NONE) {
             NPH_TRY(nph_bin_write_u32(o, i));
             NPH_TRY(nph_bin_write_u32(o, parent));
@@ -311,8 +311,8 @@ NphResult nph_scene_save_binary(const NphWorld *w, const NphSceneSaveDesc *desc,
     const NphHashMapDesc md = nph_hashmap_desc_u64(0U);
     NphResult r = nph_hashmap_init(&s->strings, scratch, &md);
     if (r == NPH_RESULT_OK) {
-        r = nph_saveset_build_(w, d.entities, d.entities != NULL ? d.entity_count : 0U, scratch,
-                               &s->set);
+        r = nph_saveset_build(w, d.entities, d.entities != NULL ? d.entity_count : 0U, scratch,
+                              &s->set);
         if (r == NPH_RESULT_OK) {
             const u64 start = nph_bin_writer_len(out);
             r = save_body(s);
@@ -321,12 +321,12 @@ NphResult nph_scene_save_binary(const NphWorld *w, const NphSceneSaveDesc *desc,
             } else if (result != NULL) {
                 result->entity_count = s->set.count;
             }
-            nph_saveset_free_(&s->set);
+            nph_saveset_free(&s->set);
         }
         nph_hashmap_free(&s->strings);
     }
     if (r != NPH_RESULT_OK) {
-        nph_scene_error_(result, "saving failed: %s", nph_result_string(r));
+        nph_scene_error(result, "saving failed: %s", nph_result_string(r));
     }
     NPH_FREE_TYPE(scratch, BinSaver, s);
     return r;
@@ -404,7 +404,7 @@ static NphResult parse_comp(BinLoader *l, NphBinReader *r)
                          NPH_STR_ARG(nph_str_prefix(name, 64U)));
         }
         const NphComponentInfo *info = &l->w->components[id];
-        if (!nph_scene_component_saved_(info->desc)) {
+        if (!nph_scene_component_saved(info->desc)) {
             return bfail(l, NPH_RESULT_CORRUPT, "component '%s' cannot appear in a scene",
                          info->desc->name);
         }
@@ -606,7 +606,7 @@ static NphResult spawn_groups(BinLoader *l)
             }
         }
     }
-    NphResult res = nph_world_reserve_(w, l->n, l->created);
+    NphResult res = nph_world_reserve(w, l->n, l->created);
     if (res != NPH_RESULT_OK) {
         memset(l->created, 0, sizeof(NphEntity) * (u64)nph_max_u32(l->n, 1U));
         return bfail(l, res, "reserving %u entities: %s", l->n, nph_result_string(res));
@@ -636,7 +636,7 @@ static NphResult spawn_groups(BinLoader *l)
         for (u32 i = 0; i < g->entity_count; ++i) {
             batch[i] = l->created[read_u32_at(g->ids_data, i)];
         }
-        res = nph_world_place_(w, ids, count, g->entity_count, batch);
+        res = nph_world_place(w, ids, count, g->entity_count, batch);
         if (res != NPH_RESULT_OK) {
             res = bfail(l, res, "placing %u entities: %s", g->entity_count, nph_result_string(res));
             break;
@@ -654,17 +654,17 @@ static NphResult spawn_groups(BinLoader *l)
 static void fill_groups(BinLoader *l)
 {
     NphWorld *w = l->w;
-    const u32 tick = nph_world_change_tick_(w);
+    const u32 tick = nph_world_change_tick(w);
     for (u32 gi = 0; gi < l->group_count; ++gi) {
         const GroupIn *g = &l->groups[gi];
         u32 i = 0U;
         while (i < g->entity_count) {
             const NphEntityRecord *first =
-                nph_world_record_(w, l->created[read_u32_at(g->ids_data, i)]);
+                nph_world_record(w, l->created[read_u32_at(g->ids_data, i)]);
             u32 run = 1U;
             while (i + run < g->entity_count) {
                 const NphEntityRecord *next =
-                    nph_world_record_(w, l->created[read_u32_at(g->ids_data, i + run)]);
+                    nph_world_record(w, l->created[read_u32_at(g->ids_data, i + run)]);
                 if (next->chunk != first->chunk || next->row != first->row + run) {
                     break;
                 }
@@ -682,8 +682,7 @@ static void fill_groups(BinLoader *l)
                 memcpy(dst, g->columns[k] + (u64)i * size, (size_t)(size * run));
                 if (info->entity_field_count > 0U) {
                     for (u32 j = 0; j < run; ++j) {
-                        nph_component_remap_entities_(info, dst + (u64)j * size, map_file_entity,
-                                                      l);
+                        nph_component_remap_entities(info, dst + (u64)j * size, map_file_entity, l);
                     }
                 }
                 nph_chunk_stamp(c, col, tick);
@@ -800,7 +799,7 @@ NphResult nph_scene_load_binary(NphWorld *w, const void *data, u64 size,
     const NphResult r = load_body(l, data, size);
     if (r != NPH_RESULT_OK) {
         if (result != NULL && result->error[0] == '\0') {
-            nph_scene_error_(result, "loading failed: %s", nph_result_string(r));
+            nph_scene_error(result, "loading failed: %s", nph_result_string(r));
         }
         for (u32 i = l->n; l->reserved && i > 0U; --i) {
             if (nph_world_is_alive(w, l->created[i - 1U])) {
@@ -808,7 +807,7 @@ NphResult nph_scene_load_binary(NphWorld *w, const void *data, u64 size,
             }
         }
         if (l->reserved) {
-            nph_world_unreserve_(w, l->created, l->n);
+            nph_world_unreserve(w, l->created, l->n);
         }
     } else {
         if (d.out_entities != NULL && l->n > 0U) {
