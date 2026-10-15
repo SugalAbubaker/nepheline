@@ -93,7 +93,7 @@ static NphResult write_float(NphJsonWriter *jw, f64 v, bool single)
     if (isinf(v)) {
         return nph_json_writer_str(jw, v > 0.0 ? NPH_STR("inf") : NPH_STR("-inf"));
     }
-    return single ? nph_json_writer_f32(jw, (f32)v) : nph_json_writer_f64(jw, v);
+    return single ? nph_json_writer_f32_shortest(jw, (f32)v) : nph_json_writer_f64_shortest(jw, v);
 }
 
 static NphResult write_f32s(NphJsonWriter *jw, const u8 *p, u32 count)
@@ -101,7 +101,7 @@ static NphResult write_f32s(NphJsonWriter *jw, const u8 *p, u32 count)
     NPH_TRY(nph_json_writer_begin_array_inline(jw));
     for (u32 i = 0; i < count; ++i) {
         f32 v;
-        memcpy(&v, p + 4U * i, sizeof v);
+        memcpy(&v, p + (u64)4U * i, sizeof v);
         NPH_TRY(write_float(jw, (f64)v, true));
     }
     return nph_json_writer_end_array(jw);
@@ -198,7 +198,7 @@ static NphResult write_value(Saver *s, const NphFieldDesc *f, const u8 *p)
         NPH_TRY(nph_json_writer_begin_array_inline(jw));
         for (u32 i = 0; i < 3U; ++i) {
             f64 v;
-            memcpy(&v, p + 8U * i, sizeof v);
+            memcpy(&v, p + (u64)8U * i, sizeof v);
             NPH_TRY(write_float(jw, v, false));
         }
         return nph_json_writer_end_array(jw);
@@ -628,9 +628,9 @@ static NphResult read_floats(const NphJsonValue *v, u32 count, bool single, u8 *
             if (!to_f32(d, &f)) {
                 return NPH_RESULT_OVERFLOW;
             }
-            memcpy(dst + 4U * i, &f, sizeof f);
+            memcpy(dst + (u64)4U * i, &f, sizeof f);
         } else {
-            memcpy(dst + 8U * i, &d, sizeof d);
+            memcpy(dst + (u64)8U * i, &d, sizeof d);
         }
         i += 1U;
     }
