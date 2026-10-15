@@ -7,6 +7,9 @@
 //   bin_write_scene      write the entities as a binary document with checksum
 //   bin_read_scene       verify the checksum and read every entity back
 //   cvar_apply_config    apply a 4-line config to a registry
+//   f32_shortest         the shortest round-trip text of a float (scene files)
+//   f64_shortest         the same for a double
+//   f32_shortest_integer an integral float (the fast path)
 // Throughput in bytes per op is derivable from the document sizes logged
 // in the labels.
 
@@ -217,4 +220,56 @@ NBENCH(cvar_apply_config)
         }
     }
     nph_cvar_registry_free(&r);
+}
+
+// Typical scene values: fractions with a few significant digits.
+static const f32 g_f32_values[8] = {0.25F,   1.5F,        -3.75F,  0.1F,
+                                    1234.5F, 0.70710677F, 2.0e-3F, 98.6F};
+
+NBENCH(f32_shortest)
+{
+    NphStrBuilder sb;
+    nph_sb_init(&sb, nph_allocator_system());
+    nbench_set_items_per_iteration(state, 8U);
+    while (nbench_keep_running(state)) {
+        nph_sb_clear(&sb);
+        for (u32 i = 0; i < 8U; ++i) {
+            if (nph_sb_append_f32_shortest(&sb, g_f32_values[i]) != NPH_RESULT_OK) {
+                break;
+            }
+        }
+        nbench_do_not_optimize(sb.data);
+    }
+    nph_sb_free(&sb);
+}
+
+NBENCH(f64_shortest)
+{
+    NphStrBuilder sb;
+    nph_sb_init(&sb, nph_allocator_system());
+    nbench_set_items_per_iteration(state, 8U);
+    while (nbench_keep_running(state)) {
+        nph_sb_clear(&sb);
+        for (u32 i = 0; i < 8U; ++i) {
+            if (nph_sb_append_f64_shortest(&sb, (f64)g_f32_values[i] * 1.1) != NPH_RESULT_OK) {
+                break;
+            }
+        }
+        nbench_do_not_optimize(sb.data);
+    }
+    nph_sb_free(&sb);
+}
+
+NBENCH(f32_shortest_integer)
+{
+    NphStrBuilder sb;
+    nph_sb_init(&sb, nph_allocator_system());
+    while (nbench_keep_running(state)) {
+        nph_sb_clear(&sb);
+        if (nph_sb_append_f32_shortest(&sb, 42.0F) != NPH_RESULT_OK) {
+            break;
+        }
+        nbench_do_not_optimize(sb.data);
+    }
+    nph_sb_free(&sb);
 }

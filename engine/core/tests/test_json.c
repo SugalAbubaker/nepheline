@@ -295,6 +295,39 @@ NTEST_F(JsonFixture, build_write_and_reparse)
     NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[\n  null,\n  {}\n]");
 }
 
+NTEST_F(JsonFixture, inline_arrays_stay_on_one_line)
+{
+    NphJsonWriter w;
+    nph_json_writer_init(&w, &f->sb, true);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_object(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_key(&w, NPH_STR("v")), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array_inline(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, 1.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array(&w), NPH_RESULT_OK); // nested: inline too
+    NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 2), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 3), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_key(&w, NPH_STR("e")), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array_inline(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_key(&w, NPH_STR("n")), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array(&w), NPH_RESULT_OK); // not inline again
+    NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 4), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_object(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb),
+                        "{\n  \"v\": [1.5, [2, 3]],\n  \"e\": [],\n  \"n\": [\n    4\n  ]\n}");
+    // Compact output is unaffected.
+    nph_sb_clear(&f->sb);
+    nph_json_writer_init(&w, &f->sb, false);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array_inline(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 1), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 2), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[1,2]");
+}
+
 NTEST_F(JsonFixture, numbers_are_written_in_shortest_form)
 {
     NphJsonWriter w;

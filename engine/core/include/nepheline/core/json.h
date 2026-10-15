@@ -148,12 +148,17 @@ typedef struct NphJsonWriter {
     u8 is_object[NPH_JSON_MAX_DEPTH]; // container kind per level
     u8 has_items[NPH_JSON_MAX_DEPTH]; // whether a comma is needed
     bool expect_value;                // a key was written; a value must follow
+    u32 inline_depth; // pretty output: levels from this depth on stay on one line (0: none)
 } NphJsonWriter;
 
 void nph_json_writer_init(NphJsonWriter *w, NphStrBuilder *out, bool pretty);
 NPH_MUST_USE NphResult nph_json_writer_begin_object(NphJsonWriter *w);
 NPH_MUST_USE NphResult nph_json_writer_end_object(NphJsonWriter *w);
 NPH_MUST_USE NphResult nph_json_writer_begin_array(NphJsonWriter *w);
+// As begin_array, but in pretty output the array and everything in it stay
+// on one line, `[1, 2, 3]`: for short arrays of numbers (vectors) that read
+// better whole. Ended with nph_json_writer_end_array.
+NPH_MUST_USE NphResult nph_json_writer_begin_array_inline(NphJsonWriter *w);
 NPH_MUST_USE NphResult nph_json_writer_end_array(NphJsonWriter *w);
 NPH_MUST_USE NphResult nph_json_writer_key(NphJsonWriter *w, NphStr key);
 NPH_MUST_USE NphResult nph_json_writer_null(NphJsonWriter *w);

@@ -785,13 +785,16 @@ static NphResult write_number(NphStrBuilder *out, const NphJsonValue *v)
     return nph_sb_append_f64_shortest(out, v->number);
 }
 
+// A newline and two spaces per level, appended at once.
+#define JSON_SPACES_16 "                "
+#define JSON_SPACES_64 JSON_SPACES_16 JSON_SPACES_16 JSON_SPACES_16 JSON_SPACES_16
+static const char g_indent[] = "\n" JSON_SPACES_64 JSON_SPACES_64 JSON_SPACES_64 JSON_SPACES_64;
+NPH_STATIC_ASSERT(sizeof(g_indent) == 2U + 2U * NPH_JSON_MAX_DEPTH, "an indent per level");
+
 static NphResult write_indent(NphStrBuilder *out, u32 depth)
 {
-    NPH_TRY(nph_sb_append_char(out, '\n'));
-    for (u32 i = 0; i < depth; ++i) {
-        NPH_TRY(nph_sb_append_cstr(out, "  "));
-    }
-    return NPH_RESULT_OK;
+    NPH_ASSERT(depth <= NPH_JSON_MAX_DEPTH);
+    return nph_sb_append(out, nph_str(g_indent, 1U + 2U * (u64)depth));
 }
 
 static NphResult write_value(const NphJsonValue *v, NphStrBuilder *out, bool pretty, u32 depth)
@@ -878,11 +881,12 @@ static NphResult writer_before_item(NphJsonWriter *w, bool is_key)
     if (in_object != is_key) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    const bool on_one_line = w->inline_depth != 0U && w->depth >= w->inline_depth;
     if (w->has_items[level]) {
-        NPH_TRY(nph_sb_append_char(w->out, ','));
+        NPH_TRY(nph_sb_append_cstr(w->out, w->pretty && on_one_line ? ", " : ","));
     }
     w->has_items[level] = 1U;
-    if (w->pretty) {
+    if (w->pretty && !on_one_line) {
         NPH_TRY(write_indent(w->out, w->depth));
     }
     return NPH_RESULT_OK;
@@ -912,8 +916,12 @@ static NphResult writer_end(NphJsonWriter *w, bool is_object)
     if ((w->is_object[level] != 0U) != is_object) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    const bool on_one_line = w->inline_depth != 0U && w->depth >= w->inline_depth;
+    if (w->inline_depth == w->depth) {
+        w->inline_depth = 0U; // the inline array itself ends
+    }
     w->depth -= 1U;
-    if (w->pretty && w->has_items[level]) {
+    if (w->pretty && w->has_items[level] && !on_one_line) {
         NPH_TRY(write_indent(w->out, w->depth));
     }
     return nph_sb_append_char(w->out, is_object ? '}' : ']');
@@ -931,6 +939,15 @@ NphResult nph_json_writer_begin_array(NphJsonWriter *w)
 {
     return writer_begin(w, false);
 }
+NphResult nph_json_writer_begin_array_inline(NphJsonWriter *w)
+{
+    NPH_TRY(writer_begin(w, false));
+    if (w->inline_depth == 0U) {
+        w->inline_depth = w->depth;
+    }
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_json_writer_end_array(NphJsonWriter *w)
 {
     return writer_end(w, false);
