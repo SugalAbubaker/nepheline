@@ -104,3 +104,25 @@ if(TARGET nph_cook)
         nph_target_use_shaders(pbr_viewer nph_shaders_render)
     endif()
 endif()
+
+# The Phase 8 sample (CLAUDE.md §12, "Scene/ECS"): an orrery built as an ECS
+# world, moved by systems on the scheduler, drawn by the reference
+# renderer, and round-tripped through both scene formats before the first
+# frame. The headless run exercises the world, the schedule, and the scene
+# files on machines without a window system or a GPU.
+nph_add_sample(scene_demo
+    SOURCES scene_demo/main.c common/capture.c common/capture.h
+    DEPS nph::scene nph::render
+    ARGS --frames=120 "--capture=${CMAKE_CURRENT_BINARY_DIR}/scene_demo/capture.bmp"
+         "--save=${CMAKE_CURRENT_BINARY_DIR}/scene_demo/orrery.scene"
+    SKIP_RETURN_CODE 77)
+if(TARGET scene_demo)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/scene_demo")
+    target_include_directories(scene_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/common")
+    nph_target_use_shaders(scene_demo nph_shaders_render)
+    if(NPH_BUILD_TESTS)
+        add_test(NAME sample.scene_demo.headless
+                 COMMAND scene_demo --headless --frames=120 --asteroids=2000)
+        set_tests_properties(sample.scene_demo.headless PROPERTIES TIMEOUT 120 LABELS "sample")
+    endif()
+endif()
