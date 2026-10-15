@@ -348,7 +348,8 @@ NphResult cook_mesh_generate_tangents(CookMesh *mesh)
                     mesh->vertices.data[mesh->indices.data[t * 3U + (k + 2U) % 3U]].position;
                 const NphVec3 p2 =
                     mesh->vertices.data[mesh->indices.data[t * 3U + (k + 1U) % 3U]].position;
-                const NphVec3 n = v->normal;
+                // Unit length for the projections, whatever the source gave.
+                const NphVec3 n = nph_vec3_normalize_or(v->normal, nph_vec3_unit_z());
                 const NphVec3 v1 = project_unit(nph_vec3_sub(p0, v->position), n);
                 const NphVec3 v2 = project_unit(nph_vec3_sub(p2, v->position), n);
                 const f32 angle = nph_f32_acos(nph_f32_clamp(nph_vec3_dot(v1, v2), -1.0F, 1.0F));
@@ -360,7 +361,10 @@ NphResult cook_mesh_generate_tangents(CookMesh *mesh)
         for (u32 i = 0; i < corners; ++i) {
             const u32 t = i / 3U;
             const u32 k = i % 3U;
-            const NphVec3 n = mesh->vertices.data[mesh->indices.data[i]].normal;
+            // A source normal of zero (invalid glTF, but finite) is +Z, as
+            // the writer encodes it; perpendicular() needs a unit vector.
+            const NphVec3 n = nph_vec3_normalize_or(
+                mesh->vertices.data[mesh->indices.data[i]].normal, nph_vec3_unit_z());
             const NphVec3 fallback = nph_vec3_perpendicular(n);
             if (tris[t].group[k] == TANGENT_NONE) {
                 result[i] = nph_vec4_from_vec3(fallback, 1.0F);

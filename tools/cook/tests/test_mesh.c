@@ -626,6 +626,100 @@ NTEST(mesh, meshlets_gather_scattered_triangles_by_distance)
 // The whole pipeline
 // ---------------------------------------------------------------------------
 
+// A mesh left without triangles (a source whose every triangle is
+// degenerate, or an index accessor of count 0) cooks to a valid empty
+// asset. Under UBSan this also pins the absence of arithmetic on the null
+// index array the fuzzer found.
+NTEST(mesh, a_mesh_without_triangles_writes_an_empty_asset)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    CookVertex v[3];
+    memset(v, 0, sizeof v);
+    v[1].position = nph_vec3(1.0F, 0.0F, 0.0F);
+    v[2].position = nph_vec3(0.0F, 1.0F, 0.0F);
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, NULL, 0U, 0U), NPH_RESULT_OK);
+    CookMeshSettings s;
+    cook_mesh_settings_default(&s);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                          nph_guid_from_cstr("empty"), 1U);
+    CookMeshStats st;
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, &st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(st.triangles, 0U);
+    NTEST_ASSERT_EQ_UINT(st.meshlets, 0U);
+    TestAsset ta;
+    test_asset_from_writer(alloc, &w, &ta);
+    nph_asset_writer_free(&w);
+    NphMeshView view;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ta.asset, &view), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(view.header->index_count, 0U);
+    NTEST_ASSERT_EQ_UINT(view.header->submesh_count, 1U);
+    test_asset_free(&ta);
+    cook_mesh_free(&m);
+}
+
+// A source normal of zero is invalid glTF but finite, so it reaches the
+// pipeline; tangent generation treats it as +Z instead of asserting (a
+// mutation of the fuzz corpus found the assertion).
+NTEST(mesh, tangents_survive_a_zero_normal)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    CookVertex v[3];
+    memset(v, 0, sizeof v);
+    v[1].position = nph_vec3(1.0F, 0.0F, 0.0F);
+    v[2].position = nph_vec3(0.0F, 1.0F, 0.0F);
+    v[1].uv0 = nph_vec2(1.0F, 0.0F);
+    v[2].uv0 = nph_vec2(0.0F, 1.0F);
+    const u32 tri[3] = {0U, 1U, 2U};
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, tri, 3U, 0U), NPH_RESULT_OK);
+    m.flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_UV0; // all three normals are zero
+    NTEST_ASSERT_EQ_INT(cook_mesh_generate_tangents(&m), NPH_RESULT_OK);
+    for (u32 i = 0; i < m.vertices.len; ++i) {
+        const NphVec4 t = m.vertices.data[i].tangent;
+        NTEST_ASSERT_TRUE(nph_f32_is_finite(t.x) && nph_f32_is_finite(t.y) &&
+                          nph_f32_is_finite(t.z));
+        NTEST_ASSERT_NEAR_F32(nph_vec3_length(nph_vec3(t.x, t.y, t.z)), 1.0F, 1e-5F);
+    }
+    cook_mesh_free(&m);
+}
+
+// Normals and positions at the edge of the float range: a normal whose
+// squared length overflows keeps its direction (the fuzzer's (0, 1.8e19, 0)
+// once came out as the zero vector), and positions beyond
+// COOK_MESH_MAX_COORDINATE are refused rather than overflowing later.
+NTEST(mesh, extreme_values_are_normalised_or_refused)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    CookVertex v[3];
+    memset(v, 0, sizeof v);
+    v[1].position = nph_vec3(1.0F, 0.0F, 0.0F);
+    v[2].position = nph_vec3(0.0F, 1.0F, 0.0F);
+    v[1].uv0 = nph_vec2(1.0F, 0.0F);
+    v[2].uv0 = nph_vec2(0.0F, 1.0F);
+    for (u32 i = 0; i < 3U; ++i) {
+        v[i].normal = nph_vec3(0.0F, 0.0F, i == 0U ? 1.8446744e19F : 1.0F);
+    }
+    const u32 tri[3] = {0U, 1U, 2U};
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, tri, 3U, 0U), NPH_RESULT_OK);
+    m.flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_UV0;
+    NTEST_ASSERT_EQ_INT(cook_mesh_validate(&m), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_generate_tangents(&m), NPH_RESULT_OK);
+    NTEST_ASSERT_NEAR_F32(m.vertices.data[0].tangent.x, 1.0F, 1e-5F);
+    cook_mesh_free(&m);
+
+    cook_mesh_init(&m, alloc);
+    v[2].position = nph_vec3(0.0F, 2e9F, 0.0F);
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, tri, 3U, 0U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_validate(&m), NPH_RESULT_CORRUPT);
+    cook_mesh_free(&m);
+}
+
 NTEST(mesh, the_pipeline_writes_a_valid_asset)
 {
     NphAllocator *alloc = nph_allocator_system();

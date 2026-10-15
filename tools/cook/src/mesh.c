@@ -73,7 +73,7 @@ NphResult cook_mesh_add_submesh(CookMesh *mesh, const CookVertex *vertices, u32 
     return NPH_RESULT_OK;
 }
 
-static bool vertex_is_finite(const CookVertex *v)
+static bool vertex_is_usable(const CookVertex *v)
 {
     const f32 *f = (const f32 *)v;
     for (u32 i = 0; i < sizeof *v / sizeof(f32); ++i) {
@@ -81,7 +81,9 @@ static bool vertex_is_finite(const CookVertex *v)
             return false;
         }
     }
-    return true;
+    return nph_f32_abs(v->position.x) <= COOK_MESH_MAX_COORDINATE &&
+           nph_f32_abs(v->position.y) <= COOK_MESH_MAX_COORDINATE &&
+           nph_f32_abs(v->position.z) <= COOK_MESH_MAX_COORDINATE;
 }
 
 NphResult cook_mesh_validate(const CookMesh *mesh)
@@ -95,10 +97,11 @@ NphResult cook_mesh_validate(const CookMesh *mesh)
             return NPH_RESULT_CORRUPT;
         }
     }
-    // Non-finite values would poison the bounds and turn into undefined
+    // Non-finite values, and positions so large that their differences
+    // overflow, would poison the bounds and turn into undefined
     // float-to-integer conversions when quantised.
     NPH_ARRAY_FOREACH (CookVertex, v, &mesh->vertices) {
-        if (!vertex_is_finite(v)) {
+        if (!vertex_is_usable(v)) {
             return NPH_RESULT_CORRUPT;
         }
     }
@@ -430,8 +433,9 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets, Np
             subs[s].index_offset = cs->index_offset;
             subs[s].index_count = cs->index_count;
             subs[s].material_slot = cs->material_slot;
-            subs[s].bounds =
-                bounds_of(positions, mesh->indices.data + cs->index_offset, cs->index_count, true);
+            // An empty mesh has no index array at all: no offset into it.
+            const u32 *first = cs->index_count != 0U ? mesh->indices.data + cs->index_offset : NULL;
+            subs[s].bounds = bounds_of(positions, first, cs->index_count, true);
             subs[s].meshlet_offset = m;
             while (m < mn && meshlets->meshlets.data[m].submesh == s) {
                 ++m;
