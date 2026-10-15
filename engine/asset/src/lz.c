@@ -25,6 +25,7 @@
 #define LZ_MF_LIMIT      12U // no match starts within this many bytes of the end
 #define LZ_ML_MASK       15U
 #define LZ_RUN_MASK      15U
+#define LZ_COPY_DISTANCE 64U // short-offset matches copy from at least this far back
 
 #define LZ_FAST_HASH_BITS 14U
 #define LZ_FAST_TABLE     (1U << LZ_FAST_HASH_BITS)
@@ -448,22 +449,48 @@ NphResult nph_lz_decompress(const void *src, u64 src_size, void *dst, u64 dst_si
             return NPH_RESULT_CORRUPT;
         }
         const u8 *match = op - offset;
-        if (offset < 8U) {
+        if (offset < LZ_COPY_DISTANCE) {
             // A short offset repeats a pattern of period `offset`. The
             // first bytes are copied one at a time (each may read a byte
-            // the copy just wrote); once a whole number of periods of at
-            // least eight bytes exists, the source can point that far back
-            // and the copy proceeds eight bytes at a time like any other.
-            const u64 period8 = (u64)offset * ((8U + offset - 1U) / offset);
-            u64 head = ml < period8 ? ml : period8;
-            ml -= head;
-            while (head != 0U) {
-                *op++ = *match++;
-                --head;
+            // the copy just wrote) until a whole number of periods of at
+            // least eight bytes exists.
+            u64 dist = offset;
+            if (offset < 8U) {
+                dist = (u64)offset * ((8U + offset - 1U) / offset);
+                u64 head = ml < dist ? ml : dist;
+                ml -= head;
+                while (head != 0U) {
+                    *op++ = *match++;
+                    --head;
+                }
             }
-            match = op - period8;
+            // A step that reads what one of the last few steps wrote waits
+            // on store-to-load forwarding, a dependency chain that ran a
+            // run of zeros 4.5x slower on hosted CI runners (nightly
+            // benchmarks, 2026-10-15). Doubling the copied span first (it
+            // stays a whole number of periods) puts the source
+            // LZ_COPY_DISTANCE bytes back: four 16-byte stores behind.
+            // On a Ryzen 7 5800X, 32 bytes back made zeros slower than the
+            // plain 8-byte copy; 128 made short matches pay for the extra
+            // doubling (docs/asset.md).
+            while (dist < LZ_COPY_DISTANCE && ml >= dist) {
+                memcpy(op, op - dist, (size_t)dist);
+                op += dist;
+                ml -= dist;
+                dist *= 2U;
+            }
+            match = op - dist;
         }
-        // Source and destination never overlap within one 8-byte step.
+        // Source and destination never overlap within one step: 16 bytes
+        // once they are that far apart, 8 otherwise.
+        if (op - match >= 16) {
+            while (ml >= 16U) {
+                memcpy(op, match, 16U);
+                op += 16;
+                match += 16;
+                ml -= 16U;
+            }
+        }
         while (ml >= 8U) {
             memcpy(op, match, 8U);
             op += 8;

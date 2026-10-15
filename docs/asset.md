@@ -256,26 +256,46 @@ replays the corpus and a fixed set of mutations under the sanitizers
 
 `benchmarks/asset/bench_asset.c`, run with `--min-time=0.5 --repeats=7`
 in the Profile configuration on the development machine (Ryzen 7 5800X,
-Windows 10, MSVC 14.44, 2026-10-14). Full JSON:
-`benchmarks/results/asset-2026-10-14-win-msvc-profile-ryzen7-5800x.json`.
+Windows 10, MSVC 14.44, 2026-10-15). Full JSON:
+`benchmarks/results/asset-2026-10-15-win-msvc-profile-ryzen7-5800x.json`.
 The codec rows are nanoseconds per KiB (1000 ns/KiB is about 1 GB/s).
 
 | Benchmark | ns/op | Reading |
 |---|---|---|
-| lz_compress_fast_text (256 KiB) | 1056 | 1.0 GB/s, 40.9 % of input |
-| lz_compress_high_text | 18638 | 55 MB/s, 19.7 % of input |
-| lz_decompress_text | 544 | 1.9 GB/s of output |
-| lz_compress_fast_vertices | 237 | 4.3 GB/s, 8.1 % of input (HIGH: 6.4 % at 3246 ns/KiB) |
-| lz_decompress_vertices | 184 | 5.6 GB/s |
-| lz_decompress_zeros | 45 | 22.7 GB/s (one long match) |
+| lz_compress_fast_text (256 KiB) | 1038 | 1.0 GB/s, 40.9 % of input |
+| lz_compress_high_text | 18577 | 55 MB/s, 19.7 % of input |
+| lz_decompress_text | 551 | 1.9 GB/s of output |
+| lz_compress_fast_vertices | 234 | 4.4 GB/s, 8.1 % of input (HIGH: 6.4 % at 3242 ns/KiB) |
+| lz_decompress_vertices | 105 | 9.8 GB/s |
+| lz_decompress_zeros | 37 | 27.6 GB/s (one long match) |
 | crc32c_blob_256k | 79 | 12.9 GB/s |
 | pack_find_path_4k | 102 | hash + binary search over 4096 entries |
-| pack_find_guid_4k | 47 | binary search over the GUID index |
+| pack_find_guid_4k | 46 | binary search over the GUID index |
 | vfs_stat_pack | 80 | one pack mount |
-| vfs_stat_shadowed_pack | 21799 | a directory mount consulted first (a failed stat) |
-| vfs_normalize_path | 48 | 33 bytes with two separators to fix |
+| vfs_stat_shadowed_pack | 21488 | a directory mount consulted first (a failed stat) |
+| vfs_normalize_path | 54 | 33 bytes with two separators to fix |
 | asset_load_cached | 54 | lookup, reference, release of a loaded asset |
 | asset_load_small | 330 | map, validate, release a 512-byte stored asset from a pack |
+
+**Short-offset match copies.** A match whose offset is below 64 bytes is
+first grown by doubling copies (each a whole number of the pattern's
+periods) until the source lies 64 bytes back; the rest copies 16 bytes a
+step. Copying straight from `offset` back made every step load what one of
+the last steps stored, a store-to-load forwarding chain: on some hosted CI
+CPUs `lz_decompress_zeros` ran at 210–226 ns/KiB against 47–67 on others
+(2026-10-15 nightly). Measured here, same session, before → after:
+
+| Variant | text | vertices | zeros |
+|---|---|---|---|
+| 8-byte steps from `offset` back (before) | 539 | 153 | 46 |
+| 8-byte steps, 32/64/128 bytes back | 542–551 | 107–139 | 55 |
+| 16-byte steps, 32 bytes back | 548 | 129 | 66 |
+| **16-byte steps, 64 bytes back (chosen)** | 551 | 105 | 37 |
+| 16-byte steps, 128 bytes back | 616 | 141 | 23 |
+
+The 5800X forwards the 8-byte chain cheaply, so the old copy was already
+fast here; a source two 16-byte stores back is slower than that; four is
+enough; 128 bytes back doubles more often than short matches repay.
 
 What the numbers say: decompression runs at memory-copy speed, which is
 what lets streaming decompress on the job system without a budget line of

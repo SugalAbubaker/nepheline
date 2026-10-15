@@ -138,6 +138,50 @@ NTEST_F(LzFixture, short_offsets_and_overlapping_matches)
     }
 }
 
+NTEST_F(LzFixture, every_short_offset_and_match_length_decodes)
+{
+    NTEST_UNUSED(f);
+    // One sequence of `offset` distinct literals and a match at that
+    // offset, then an empty final token, for every offset around the
+    // decoder's short-offset paths and every length across its span
+    // doubling; the expected output is the byte-at-a-time LZ77 copy.
+    u8 stream[128];
+    u8 out[400];
+    u8 expected[400];
+    for (u32 offset = 1U; offset <= 80U; ++offset) {
+        for (u32 ml = 4U; ml <= 300U; ++ml) {
+            u32 n = 0U;
+            const u32 ml_code = ml - 4U;
+            stream[n++] =
+                (u8)((offset < 15U ? offset : 15U) << 4U | (ml_code < 15U ? ml_code : 15U));
+            if (offset >= 15U) {
+                stream[n++] = (u8)(offset - 15U);
+            }
+            for (u32 i = 0; i < offset; ++i) {
+                stream[n++] = (u8)('A' + i);
+                expected[i] = (u8)('A' + i);
+            }
+            stream[n++] = (u8)offset;
+            stream[n++] = 0U;
+            if (ml_code >= 15U) {
+                u32 rest = ml_code - 15U;
+                while (rest >= 255U) {
+                    stream[n++] = 255U;
+                    rest -= 255U;
+                }
+                stream[n++] = (u8)rest;
+            }
+            stream[n++] = 0x00U; // the final, empty literal-only sequence
+            for (u32 i = offset; i < offset + ml; ++i) {
+                expected[i] = expected[i - offset];
+            }
+            memset(out, 0, sizeof out);
+            NTEST_ASSERT_EQ_INT(nph_lz_decompress(stream, n, out, offset + ml), NPH_RESULT_OK);
+            NTEST_ASSERT_EQ_MEM(out, expected, offset + ml);
+        }
+    }
+}
+
 NTEST_F(LzFixture, matches_across_the_whole_window)
 {
     // A random block repeated after exactly 65535 bytes is matchable;
