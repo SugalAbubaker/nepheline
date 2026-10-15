@@ -3,6 +3,7 @@
 #include <nepheline/core/hash.h>
 #include <nepheline/core/string.h>
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -485,6 +486,102 @@ NphResult nph_sb_append_f64(NphStrBuilder *sb, f64 v)
     char buffer[32];
     const int n = snprintf(buffer, sizeof buffer, "%.17g", v);
     if (n < 0 || (size_t)n >= sizeof buffer) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    return nph_sb_append(sb, nph_str(buffer, (u64)n));
+}
+
+// %g switches to exponent notation as soon as the exponent reaches the
+// precision, so the shortest precision for 10 prints "1e+01". When the
+// exponent is small, print the same value positionally with as many
+// digits as the integer part needs: more digits are closer to the value,
+// so the text still reads back exactly (the decimals that read back as a
+// given float form an interval around it).
+static int positional(char *buffer, size_t size, int n, f64 v)
+{
+    const char *e = memchr(buffer, 'e', (size_t)n);
+    if (e == NULL) {
+        return n;
+    }
+    const long exponent = strtol(e + 1, NULL, 10);
+    if (exponent < 0 || exponent > 16) {
+        return n;
+    }
+    return snprintf(buffer, size, "%.*g", (int)exponent + 1, v);
+}
+
+// Non-finite values in the C library's spelling; false for finite ones.
+static bool append_non_finite(NphStrBuilder *sb, f64 v, NphResult *out)
+{
+    if (isnan(v)) {
+        *out = nph_sb_append_cstr(sb, "nan");
+        return true;
+    }
+    if (isinf(v)) {
+        *out = nph_sb_append_cstr(sb, v > 0.0 ? "inf" : "-inf");
+        return true;
+    }
+    return false;
+}
+
+NphResult nph_sb_append_f64_shortest(NphStrBuilder *sb, f64 v)
+{
+    NphResult r = NPH_RESULT_OK;
+    if (append_non_finite(sb, v, &r)) {
+        return r;
+    }
+    // %.17g always round-trips a binary64; the shortest precision that
+    // does is usually much smaller (Steele & White, "How to Print
+    // Floating-Point Numbers Accurately", PLDI 1990, for the bound).
+    char buffer[40];
+    int n = 0;
+    for (int precision = 1; precision <= 17; ++precision) {
+        n = snprintf(buffer, sizeof buffer, "%.*g", precision, v);
+        if (n <= 0 || (size_t)n >= sizeof buffer) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        const f64 back = strtod(buffer, NULL);
+        if (memcmp(&back, &v, sizeof v) == 0) {
+            break;
+        }
+    }
+    n = positional(buffer, sizeof buffer, n, v);
+    if (n <= 0 || (size_t)n >= sizeof buffer) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    return nph_sb_append(sb, nph_str(buffer, (u64)n));
+}
+
+NphResult nph_sb_append_f32_shortest(NphStrBuilder *sb, f32 v)
+{
+    NphResult r = NPH_RESULT_OK;
+    if (append_non_finite(sb, (f64)v, &r)) {
+        return r;
+    }
+    // The text must read back as `v` both through strtof and through
+    // strtod followed by a conversion to float, the path of a JSON reader
+    // that parses every number as a double: a short decimal can round
+    // differently the two ways when it sits near a midpoint between two
+    // floats (double rounding). %.17g of the exact double value of `v`
+    // satisfies both, so it ends the search.
+    char buffer[40];
+    for (int precision = 1; precision <= 9; ++precision) {
+        const int n = snprintf(buffer, sizeof buffer, "%.*g", precision, (f64)v);
+        if (n <= 0 || (size_t)n >= sizeof buffer) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        const f32 direct = strtof(buffer, NULL);
+        const f32 through_double = (f32)strtod(buffer, NULL);
+        if (memcmp(&direct, &v, sizeof v) == 0 && memcmp(&through_double, &v, sizeof v) == 0) {
+            const int m = positional(buffer, sizeof buffer, n, (f64)v);
+            if (m <= 0 || (size_t)m >= sizeof buffer) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+            return nph_sb_append(sb, nph_str(buffer, (u64)m));
+        }
+    }
+    const int n = snprintf(buffer, sizeof buffer, "%.17g", (f64)v);
+    if (n <= 0 || (size_t)n >= sizeof buffer) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     return nph_sb_append(sb, nph_str(buffer, (u64)n));

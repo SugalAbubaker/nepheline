@@ -184,6 +184,13 @@ NPH_MUST_USE NphResult nph_sb_append_u64(NphStrBuilder *sb, u64 v);
 NPH_MUST_USE NphResult nph_sb_append_i64(NphStrBuilder *sb, i64 v);
 // %.17g, round-trippable.
 NPH_MUST_USE NphResult nph_sb_append_f64(NphStrBuilder *sb, f64 v);
+// The shortest decimal text that reads back (strtod, strtof) as exactly
+// `v`: "0.1" rather than "0.10000000000000001", and -0 stays "-0". For text
+// that people read and diff (scene files, JSON). Non-finite values are
+// written as nan, inf, and -inf. The f32 text also reads back exactly
+// through strtod and a conversion to float (how a JSON reader sees it).
+NPH_MUST_USE NphResult nph_sb_append_f64_shortest(NphStrBuilder *sb, f64 v);
+NPH_MUST_USE NphResult nph_sb_append_f32_shortest(NphStrBuilder *sb, f32 v);
 NPH_PRINTF_LIKE(2, 3)
 NPH_MUST_USE NphResult nph_sb_appendf(NphStrBuilder *sb, const char *fmt, ...);
 NPH_MUST_USE NphResult nph_sb_append_utf8(NphStrBuilder *sb, u32 codepoint);
