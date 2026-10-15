@@ -23,6 +23,7 @@ supersedes it and both link to each other.
 | [0015](0015-gpu-budget-measurements.md) | GPU budget measurements on the RTX 3060 Ti and the §10.4 table | Accepted |
 | [0016](0016-asset-format.md) | Asset runtime: the `.nph` container, pack archives, the VFS, the LZ codec, and the loader | Accepted |
 | [0017](0017-cooker.md) | The asset cooker: derived identities, a JSON database, our own mesh and texture pipelines | Accepted |
+| [0018](0018-reference-renderer.md) | The reference renderer: forward PBR in physical units, GPU-computed IBL, pre-exposed HDR | Accepted |
 
 ## Template
 
