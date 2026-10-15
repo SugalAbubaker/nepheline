@@ -828,21 +828,13 @@ static void fill_defaults(const NphWorld *w, NphChunk *c, u32 row, u32 count)
     }
 }
 
-NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_count,
-                                u32 entity_count, NphEntity *out)
+// The body of a batch spawn: rows for `entity_count` entities, handles
+// allocated now (`handles` NULL) or reserved before. All or nothing.
+static NphResult batch_fill(NphWorld *w, const NphComponentMask *mask, u32 entity_count,
+                            const NphEntity *handles, NphEntity *out)
 {
-    NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
-    NphComponentMask mask;
-    NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
-    if (entity_count == 0U) {
-        return NPH_RESULT_OK;
-    }
-    if ((u64)nph_handle_pool_live(&w->handles) + entity_count > w->capacity) {
-        return NPH_RESULT_FULL;
-    }
     NphArchetype *a;
-    NPH_TRY(nph_world_archetype_(w, &mask, &a));
+    NPH_TRY(nph_world_archetype_(w, mask, &a));
 
     // Reserve every chunk the batch needs before touching anything.
     NphChunk *last = a->chunk_count > 0U ? a->chunks[a->chunk_count - 1U] : NULL;
@@ -876,7 +868,11 @@ NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_c
         NphEntity *ents = nph_chunk_entities(c);
         for (u32 i = 0; i < n; ++i) {
             NphHandle h;
-            NPH_VERIFY(nph_handle_pool_alloc(&w->handles, &h) == NPH_RESULT_OK);
+            if (handles != NULL) {
+                h.value = handles[done + i].value;
+            } else {
+                NPH_VERIFY(nph_handle_pool_alloc(&w->handles, &h) == NPH_RESULT_OK);
+            }
             const NphEntity e = {h.value};
             ents[first + i] = e;
             NphEntityRecord *rec = &w->records[nph_handle_pool_index(&w->handles, h)];
@@ -892,6 +888,65 @@ NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_c
         done += n;
     }
     return NPH_RESULT_OK;
+}
+
+NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_count,
+                                u32 entity_count, NphEntity *out)
+{
+    NPH_ASSERT(w != NULL);
+    nph_world_structural_begin_(w);
+    NphComponentMask mask;
+    NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
+    if (entity_count == 0U) {
+        return NPH_RESULT_OK;
+    }
+    if ((u64)nph_handle_pool_live(&w->handles) + entity_count > w->capacity) {
+        return NPH_RESULT_FULL;
+    }
+    return batch_fill(w, &mask, entity_count, NULL, out);
+}
+
+NphResult nph_world_reserve_(NphWorld *w, u32 count, NphEntity *out)
+{
+    nph_world_structural_begin_(w);
+    if ((u64)nph_handle_pool_live(&w->handles) + count > w->capacity) {
+        return NPH_RESULT_FULL;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        NphHandle h;
+        NPH_VERIFY(nph_handle_pool_alloc(&w->handles, &h) == NPH_RESULT_OK);
+        out[i].value = h.value;
+    }
+    return NPH_RESULT_OK;
+}
+
+NphResult nph_world_place_(NphWorld *w, const NphComponentId *ids, u32 id_count, u32 count,
+                           const NphEntity *handles)
+{
+    nph_world_structural_begin_(w);
+    NphComponentMask mask;
+    NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
+    if (count == 0U) {
+        return NPH_RESULT_OK;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        const NphHandle h = {handles[i].value};
+        NPH_ASSERT(nph_handle_pool_is_valid(&w->handles, h) &&
+                   w->records[nph_handle_pool_index(&w->handles, h)].chunk == NULL);
+        NPH_UNUSED(h);
+    }
+    return batch_fill(w, &mask, count, handles, NULL);
+}
+
+void nph_world_unreserve_(NphWorld *w, const NphEntity *handles, u32 count)
+{
+    for (u32 i = 0; i < count; ++i) {
+        const NphHandle h = {handles[i].value};
+        if (nph_handle_pool_is_valid(&w->handles, h) &&
+            w->records[nph_handle_pool_index(&w->handles, h)].chunk == NULL) {
+            NPH_VERIFY(nph_handle_pool_release(&w->handles, h));
+        }
+    }
 }
 
 NphResult nph_world_despawn(NphWorld *w, NphEntity e)

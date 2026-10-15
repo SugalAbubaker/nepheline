@@ -11,7 +11,11 @@ nph_add_module(scene
         src/prefab.c
         src/query.c
         src/schedule.c
+        src/scene_binary.c
         src/scene_internal.h
+        src/scene_io.c
+        src/scene_io_internal.h
+        src/scene_text.c
         src/transform.c
         src/world.c
     PUBLIC_DEPS nph::jobs
@@ -29,7 +33,9 @@ nph_add_test(scene
         tests/test_command.c
         tests/test_component.c
         tests/test_components.c
+        tests/test_prefab.c
         tests/test_query.c
+        tests/test_scene_io.c
         tests/test_scene_support.h
         tests/test_schedule.c
         tests/test_transform.c
