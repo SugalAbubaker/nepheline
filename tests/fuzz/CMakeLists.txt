@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# libFuzzer targets for every parser in core (CLAUDE.md §8.8 "every parser
-# is fuzzed", §9). Built only with -DNPH_BUILD_FUZZERS=ON under Clang; the
-# nightly fuzz workflow runs each with its seed corpus (tests/fuzz/corpus).
+# Fuzz targets for every parser (CLAUDE.md §8.8 "every parser is fuzzed",
+# §9). Each is a libFuzzer target with -DNPH_BUILD_FUZZERS=ON under Clang,
+# which the nightly fuzz workflow runs with its seed corpus
+# (tests/fuzz/corpus), and a corpus-replay smoke test in every test build
+# (nph_add_fuzzer, cmake/NphModule.cmake).
 
 nph_add_fuzzer(json SOURCES fuzz_json.c DEPS nph::core)
 nph_add_fuzzer(bin SOURCES fuzz_bin.c DEPS nph::core)
@@ -17,3 +19,11 @@ nph_add_fuzzer(spirv SOURCES fuzz_spirv.c DEPS nph::gpu)
 nph_add_fuzzer(lz SOURCES fuzz_lz.c DEPS nph::asset)
 nph_add_fuzzer(nph SOURCES fuzz_nph.c DEPS nph::asset)
 nph_add_fuzzer(pack SOURCES fuzz_pack.c DEPS nph::asset)
+
+# The cooker's inputs (tools/cook, CLAUDE.md §8.8 "every parser is fuzzed",
+# §9 "all file parsers and the cooker inputs"): glTF documents through the
+# importer and the mesh pipeline, images through stb_image and the texture
+# pipeline (fewer smoke mutations: the BC7 encoder dominates each run).
+# Seeds come from scripts/fuzz_seeds.py too.
+nph_add_fuzzer(gltf SOURCES fuzz_gltf.c DEPS nph::cook)
+nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)

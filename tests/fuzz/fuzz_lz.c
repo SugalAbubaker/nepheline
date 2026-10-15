@@ -5,9 +5,11 @@
 // of the input selects the output size so the corpus explores the
 // "exactly right", "too small", and "too large" cases.
 #include <nepheline/asset/lz.h>
+#include <nepheline/core/alloc.h>
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -36,11 +38,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             u64 packed_size = 0U;
             if (nph_lz_compress(data, size, packed, bound, (NphLzLevel)level, ws, &packed_size) !=
                 NPH_RESULT_OK) {
-                __builtin_trap();
+                abort();
             }
             if (nph_lz_decompress(packed, packed_size, back, size) != NPH_RESULT_OK ||
                 memcmp(back, data, size) != 0) {
-                __builtin_trap();
+                abort();
             }
         }
     }

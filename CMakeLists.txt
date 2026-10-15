@@ -108,7 +108,9 @@ endif()
 if(NPH_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
-if(NPH_BUILD_FUZZERS)
+# The fuzz targets: libFuzzer executables with NPH_BUILD_FUZZERS (Clang),
+# and their corpus-replay smoke tests with NPH_BUILD_TESTS.
+if(NPH_BUILD_FUZZERS OR NPH_BUILD_TESTS)
     add_subdirectory(tests/fuzz)
 endif()
 

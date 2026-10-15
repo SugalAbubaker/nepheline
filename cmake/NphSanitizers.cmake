@@ -66,5 +66,16 @@ function(nph_apply_sanitizers target)
                 "$<${dbg}:-fno-omit-frame-pointer>")
             target_link_options(${target} INTERFACE "$<${dbg}:-fsanitize=${san}>")
         endif()
+        # libFuzzer steers by the coverage of the code under test, so with
+        # the fuzzers on every first-party object is instrumented (the
+        # harness alone would leave the parsers in the static libraries
+        # blind to it). Every executable links the runtime without its
+        # main, which defines the coverage hooks; the fuzz executables'
+        # -fsanitize=fuzzer (nph_add_fuzzer) takes precedence and links the
+        # one with libFuzzer's main.
+        if(NPH_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+            target_compile_options(${target} INTERFACE -fsanitize=fuzzer-no-link)
+            target_link_options(${target} INTERFACE -fsanitize=fuzzer-no-link)
+        endif()
     endif()
 endfunction()

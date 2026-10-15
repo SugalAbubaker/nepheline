@@ -87,12 +87,39 @@ function(nph_add_sample name)
     endif()
 endfunction()
 
-# nph_add_fuzzer(<name> SOURCES <src>... [DEPS <target>...])
+# nph_add_fuzzer(<name> SOURCES <src>... [DEPS <target>...] [MUTATIONS <n>])
 #
-# Builds a libFuzzer target (Clang only, NPH_BUILD_FUZZERS=ON) as
-# <name>_fuzz. The entry point is LLVMFuzzerTestOneInput. With any other
-# compiler the function does nothing.
+# The entry point is LLVMFuzzerTestOneInput, built two ways:
+# - with NPH_BUILD_TESTS, as <name>_fuzz_smoke, linked with a driver
+#   (tests/fuzz/fuzz_smoke_main.c) that replays the seed corpus
+#   tests/fuzz/corpus/<name> and MUTATIONS deterministic mutations of each
+#   seed (200 by default), registered with CTest as "fuzz_smoke.<name>"
+#   (label "fuzz"): every toolchain and configuration runs it under its
+#   sanitizers on every push;
+# - with NPH_BUILD_FUZZERS under Clang, as the libFuzzer target <name>_fuzz,
+#   which the nightly workflow runs with coverage guidance.
 function(nph_add_fuzzer name)
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "MUTATIONS" "SOURCES;DEPS")
+    if(ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "nph_add_fuzzer(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
+    endif()
+    if(NOT ARG_MUTATIONS)
+        set(ARG_MUTATIONS 200)
+    endif()
+
+    if(NPH_BUILD_TESTS)
+        set(smoke ${name}_fuzz_smoke)
+        add_executable(${smoke} ${ARG_SOURCES} "${CMAKE_SOURCE_DIR}/tests/fuzz/fuzz_smoke_main.c")
+        target_link_libraries(${smoke} PRIVATE nph::options nph::platform ${ARG_DEPS})
+        if(MSVC)
+            target_compile_definitions(${smoke} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endif()
+        set_target_properties(${smoke} PROPERTIES FOLDER "fuzz")
+        add_test(NAME fuzz_smoke.${name}
+                 COMMAND ${smoke} "${CMAKE_SOURCE_DIR}/tests/fuzz/corpus/${name}" ${ARG_MUTATIONS})
+        set_tests_properties(fuzz_smoke.${name} PROPERTIES TIMEOUT 900 LABELS "fuzz")
+    endif()
+
     if(NOT NPH_BUILD_FUZZERS)
         return()
     endif()
@@ -100,11 +127,6 @@ function(nph_add_fuzzer name)
         message(STATUS "nph_add_fuzzer(${name}): libFuzzer needs Clang; skipping")
         return()
     endif()
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS")
-    if(ARG_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "nph_add_fuzzer(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
-    endif()
-
     set(target ${name}_fuzz)
     add_executable(${target} ${ARG_SOURCES})
     target_link_libraries(${target} PRIVATE nph::options ${ARG_DEPS})
