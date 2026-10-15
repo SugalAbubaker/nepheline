@@ -128,8 +128,14 @@ fiber or the semaphore a blocked thread sleeps on.
 cores minus one, at most 64), at high priority, pinned one per core from
 core 1 up when `worker_count + 1 <= logical cores` so that core 0 stays
 with the main thread (`NPH_JOB_PIN_AUTO`). A worker converts its thread
-to a fiber, takes a pool fiber, and from then on runs the loop on pool
-fibers:
+to a fiber, switches to the pool fiber set aside for it at creation
+(fiber `i` for worker `i`; the pool's free list starts with only the
+rest), and from then on runs the loop on pool fibers. Taking the first
+fiber from the free list instead raced with the jobs: on an
+oversubscribed machine a thread scheduled late found every fiber held by
+the other workers and their parked waits and spun forever (found under
+load by the fiber-exhaustion test; `a_worker_starting_late_finds_its_fiber`
+reproduces it with `debug_last_worker_start_delay_ms`). The loop:
 
 1. stop requested: switch back to the thread fiber and exit;
 2. a ready fiber: switch to it, returning this loop fiber to the pool
@@ -303,6 +309,7 @@ system is busy; exact after a wait that drained it.
 | `external_waiter_slots` | 16 | threads outside the system waiting at once |
 | `pinning` | `NPH_JOB_PIN_AUTO` | pin when `worker_count + 1 <= logical cores` |
 | `deterministic` | false | forces one worker |
+| `debug_last_worker_start_delay_ms` | 0 | the last worker starts this late (≤ 10 s); for tests |
 
 ## Memory orders
 

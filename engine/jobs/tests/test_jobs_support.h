@@ -13,6 +13,8 @@
 
 #include <ntest/ntest.h>
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Work counts scale down where the sanitizers make everything slower.
@@ -48,6 +50,23 @@ static inline NphJobSystem *test_jobs_create_desc(const NphJobSystemDesc *in)
     NTEST_ASSERT_EQ_INT(nph_job_system_create(&desc, &js), NPH_RESULT_OK);
     NTEST_ASSERT_NOT_NULL(js);
     return js;
+}
+
+// Ends the process after a failure that leaves jobs running which
+// reference the test's stack (or a worker that never sees the stop flag):
+// a failed assertion would unwind under them, and destroying the system
+// would hang. The message and the job system's state go to stderr first.
+// Without the debugger, abort() must not raise the debug CRT's modal box,
+// which hangs an unattended run (as core/assert.c does).
+static inline void test_jobs_fatal(NphJobSystem *js, const char *why)
+{
+    fprintf(stderr, "fatal: %s\n", why);
+    nph_job_system_dump(js, stderr);
+    fflush(stderr);
+#if NPH_MSVC_ABI
+    _set_abort_behavior(0U, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+    abort();
 }
 
 // A worker count that exercises real parallelism without oversubscribing

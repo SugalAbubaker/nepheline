@@ -425,10 +425,14 @@ NTEST(jobs, fiber_exhaustion_by_event_waiters_stays_live)
     NphStopwatch quiet = nph_stopwatch_start();
     u32 last = NPH_U32_MAX;
     for (;;) {
-        NTEST_ASSERT_LT_UINT(nph_stopwatch_elapsed_ns(&settle), 20U * NPH_TIME_NS_PER_S);
         const u32 now = nph_atomic_load_u32(&h.blocked, NPH_MEMORY_ORDER_ACQUIRE);
         NphJobStats st;
         nph_job_system_get_stats(js, &st);
+        if (nph_stopwatch_elapsed_ns(&settle) > 20U * NPH_TIME_NS_PER_S) {
+            fprintf(stderr, "%u blocked, %llu inline waits, %u workers\n", now,
+                    (unsigned long long)st.waits_inline, workers);
+            test_jobs_fatal(js, "the hostages did not settle within 20 s");
+        }
         if (now != last) {
             last = now;
             quiet = nph_stopwatch_start();
@@ -460,6 +464,64 @@ NTEST(jobs, fiber_exhaustion_by_event_waiters_stays_live)
     nph_job_system_get_stats(js, &stats);
     NTEST_ASSERT_EQ_UINT(stats.jobs_executed, 3U * PARENTS);
     NTEST_ASSERT_GT_UINT(stats.waits_inline, 0U);
+    nph_job_system_destroy(js);
+}
+
+// Each worker's first fiber is set aside at creation, not taken from the
+// pool when its thread gets around to starting. Taking it late lost a
+// race on an oversubscribed machine: the other workers and their parked
+// waits had already claimed every fiber, and the late worker spun
+// forever (found by fiber_exhaustion_by_event_waiters_stays_live under
+// load). Here the last of three workers starts late on purpose, after
+// two jobs on the other two have parked on an event: their fibers and the
+// two they parked onto are all four fibers but the late worker's.
+typedef struct LateStart {
+    NphJobSystem *js;
+    NphJobCounter event;
+    NphAtomicU32 parked;
+} LateStart;
+
+static void late_start_waiter(void *user)
+{
+    LateStart *s = (LateStart *)user;
+    nph_atomic_fetch_add_u32(&s->parked, 1U, NPH_MEMORY_ORDER_RELEASE);
+    nph_job_wait(s->js, &s->event);
+}
+
+NTEST(jobs, a_worker_starting_late_finds_its_fiber)
+{
+    NphJobSystemDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.worker_count = 3U;
+    desc.fiber_count = desc.worker_count + 1U;
+    desc.debug_last_worker_start_delay_ms = 200U;
+    NphJobSystem *js = test_jobs_create_desc(&desc);
+    const NphStopwatch sw = nph_stopwatch_start();
+    LateStart s;
+    memset(&s, 0, sizeof s);
+    s.js = js;
+    nph_job_counter_add(&s.event, 1U);
+    const NphJobDecl decls[2] = {{late_start_waiter, &s, "waiter"},
+                                 {late_start_waiter, &s, "waiter"}};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(js, decls, 2U, NPH_JOB_PRIORITY_NORMAL, &done), NPH_RESULT_OK);
+    static char dump[16384];
+    bool all_started = false;
+    while (!all_started && nph_stopwatch_elapsed_ns(&sw) < 10U * NPH_TIME_NS_PER_S) {
+        nph_thread_sleep_ns(NPH_TIME_NS_PER_MS);
+        if (nph_atomic_load_u32(&s.parked, NPH_MEMORY_ORDER_ACQUIRE) == 2U &&
+            dump_to_buffer(js, dump, sizeof dump) > 0U) {
+            all_started = strstr(dump, "not started") == NULL;
+        }
+    }
+    if (!all_started) {
+        test_jobs_fatal(js, "a worker never started");
+    }
+    // The waiters parked before the late worker started: they held the
+    // spares.
+    NTEST_ASSERT_GE_UINT(nph_stopwatch_elapsed_ns(&sw), 200U * NPH_TIME_NS_PER_MS);
+    nph_job_counter_signal(js, &s.event);
+    nph_job_wait(js, &done);
     nph_job_system_destroy(js);
 }
 
