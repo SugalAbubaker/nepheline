@@ -22,7 +22,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     NphAllocator *alloc = nph_allocator_system();
-    u8 *copy = (u8 *)NPH_ALLOC(alloc, size, NPH_ASSET_BLOB_MAX_ALIGN);
+    // Whole pages: ASan's quarantine counts the bytes asked for, and a
+    // page-aligned chunk for a few hundred bytes occupies two or three
+    // pages, so with small inputs the quarantine kept gigabytes alive and
+    // libFuzzer's RSS limit stopped the nightly run.
+    const u64 cap =
+        (size + (NPH_ASSET_BLOB_MAX_ALIGN - 1U)) & ~(u64)(NPH_ASSET_BLOB_MAX_ALIGN - 1U);
+    u8 *copy = (u8 *)NPH_ALLOC(alloc, cap, NPH_ASSET_BLOB_MAX_ALIGN);
     if (copy == NULL) {
         return 0;
     }
@@ -41,7 +47,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 if (owned != NULL) {
                     NPH_FREE_ARRAY(alloc, void *, owned, info.blob_count);
                 }
-                NPH_FREE(alloc, copy, size, NPH_ASSET_BLOB_MAX_ALIGN);
+                NPH_FREE(alloc, copy, cap, NPH_ASSET_BLOB_MAX_ALIGN);
                 return 0;
             }
         }
@@ -104,6 +110,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             NPH_FREE_ARRAY(alloc, void *, owned, info.blob_count);
         }
     }
-    NPH_FREE(alloc, copy, size, NPH_ASSET_BLOB_MAX_ALIGN);
+    NPH_FREE(alloc, copy, cap, NPH_ASSET_BLOB_MAX_ALIGN);
     return 0;
 }

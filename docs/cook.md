@@ -114,7 +114,7 @@ directory.
 | Imported | Notes |
 |---|---|
 | triangle primitives | lists, strips, and fans (triangulated); one submesh per primitive |
-| POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0 | any allowed component type; non-finite values are refused |
+| POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0 | any allowed component type; non-finite values and positions beyond ±1e9 are refused |
 | missing normals | flat normals, as glTF 2.0 §3.7.2.1 requires; the source tangents are then ignored |
 | missing tangents | MikkTSpace tangents when the primitive has UVs (per mesh, or per primitive in a mesh where only some have them) |
 | metallic-roughness materials | five textures with their samplers, alpha mode and cutoff, double-sidedness |
@@ -318,6 +318,37 @@ with coverage guidance, and a smoke test in every test build,
 fixed set of mutations of each seed (bit flips, boundary values,
 truncations, removed and duplicated ranges, splices) under each
 toolchain's sanitizers on every push (`tests/fuzz/fuzz_smoke_main.c`).
+
+With `NPH_BUILD_FUZZERS`, all first-party code and the cgltf/stb unit
+are compiled with `-fsanitize=fuzzer-no-link`, so libFuzzer is guided by
+the coverage of the parsers themselves; before Phase 6 only the harnesses
+were instrumented, which left the nightly runs close to blind. The first
+instrumented runs (two minutes per target) found four problems the blind
+ones never had, each now fixed with a test and its input kept in the
+corpus as `regression_*`:
+
+- JSON: `-1.5e-3333...` underflows to -0.0, which was written as `-0`
+  and re-parsed as the integer 0, so writing was not a fixed point (core).
+- SPIR-V: a struct naming itself among its members made the
+  depth-limited type sizing exponential (seven members, depth 32); sizes
+  are now memoised and such a struct is rejected (gpu).
+- glTF: an index accessor whose `count` key was garbled became an empty
+  index list, and the mesh writer offset into the null array (cook).
+- Packs and `.nph` files: the harnesses' page-aligned copies of
+  few-hundred-byte inputs let ASan's quarantine, which counts the bytes
+  asked for, hold gigabytes until libFuzzer's RSS limit stopped the run;
+  the copies are now whole pages (harness only).
+
+Replaying the new regression seeds with longer local mutation runs
+(`<name>_fuzz_smoke <corpus> 200000 --save-last=FILE`, which keeps the
+input that crashed) found two more in the cooker, both a Debug assertion
+on a zero vector: a source normal of (0, 0, 0), and one of (0, 1.8e19, 0)
+whose squared length overflows, so normalising it gave zero. The math
+module's `normalize_or` functions now rescale such vectors and return the
+fallback for non-finite ones, the tangent code normalises every normal it
+projects onto, and mesh validation refuses position coordinates beyond
+`COOK_MESH_MAX_COORDINATE` (1e9), below which every edge, cross product,
+and quantisation step stays finite.
 
 Two problems the fuzzing work turned up are handled in `image.c`:
 stb_image computes `NULL + 0` and calls `memcpy(NULL, p, 0)` on a PNG
