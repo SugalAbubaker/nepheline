@@ -313,8 +313,8 @@ ThreadSanitizer must follow (ADR-0013 §4 lists each one). The deque's
 where Lê et al. use a fence; same `xchg` on x86-64. Elements are stored
 and loaded with relaxed atomics so a thief's read of a slot the owner is
 overwriting is defined and rejected by the subsequent compare-exchange.
-TSan runs the whole test suite in CI (`tsan (jobs)`,
-[build.md](build.md)).
+TSan runs the whole test suite in CI (`tsan (jobs, scene)`,
+[build.md](build.md)), together with the scene module's scheduler tests.
 
 ## Benchmarks
 

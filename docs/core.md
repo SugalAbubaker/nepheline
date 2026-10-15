@@ -463,6 +463,19 @@ or two-space pretty, non-finite numbers as `null`), and a streaming writer
 that validates nesting. The design choices are in
 [ADR-0007](adr/0007-serialization-formats.md).
 
+**Shortest floats, inline arrays.** `nph_sb_append_f64_shortest` and
+`_f32_shortest` (and the streaming writer's `nph_json_writer_f64_shortest`
+and `_f32_shortest`) write the shortest text that reads back as exactly the
+same value: "0.1" rather than "0.10000000000000001", positional for
+exponents 0 to 16, "-0" kept. A precision that round-trips stays valid for
+every larger one, so the search is a binary search. Integers below 10^15
+skip it and go through the engine's own integer printer. The f32 form also
+reads back exactly through a reader that parses numbers as doubles (it
+guards against double rounding). This is for text people read and diff
+(scene files, docs/scene.md); it costs a few times `%.17g`, so the default
+writers keep `%.17g`. `nph_json_writer_begin_array_inline` keeps a short
+array on one line in pretty output, `[1, 2, 3]`.
+
 **Fuzzing.** `tests/fuzz/` holds libFuzzer targets for the JSON parser
 (with a write-then-parse fixed-point check), the binary reader, UTF-8
 decoding, and cvar config; they build with `-DNPH_BUILD_FUZZERS=ON` under
@@ -490,6 +503,9 @@ CTest runs it as `sample.core_hello`.
 | binary write, 20 000 entities + CRC, 820 KB | 0.89 ms | 0.92 GB/s | |
 | binary read + CRC verify | 0.27 ms | 3.0 GB/s | bounds-checked cursor; strings are views |
 | cvar config apply, per `name = value` line | 121 ns | | trim, split, parse, set |
+| shortest f32 text, typical fractions (2026-10-15) | 1.0 µs | | binary search over `snprintf`/`strtof`/`strtod` |
+| shortest f64 text, typical fractions | 1.3 µs | | |
+| shortest text of an integral float | 16 ns | | the engine's integer printer, no C library |
 
 Reading: text is 12–40× more expensive than binary for the same data, which
 is why scenes are cooked. Float formatting and parsing through the C

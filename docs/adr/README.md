@@ -25,6 +25,8 @@ supersedes it and both link to each other.
 | [0017](0017-cooker.md) | The asset cooker: derived identities, a JSON database, our own mesh and texture pipelines | Accepted |
 | [0018](0018-reference-renderer.md) | The reference renderer: forward PBR in physical units, GPU-computed IBL, pre-exposed HDR | Accepted |
 | [0019](0019-golden-image-tests.md) | Golden-image tests: our own LDR-FLIP and PNG codec, lavapipe baselines, calibrated thresholds | Accepted |
+| [0020](0020-ecs.md) | The ECS: archetype chunks, access-derived scheduling, 64-bit transforms | Accepted |
+| [0021](0021-scene-serialization.md) | Scene files: canonical JSON for the editor, archetype snapshots for the runtime, prefab overrides | Accepted |
 
 ## Template
 
