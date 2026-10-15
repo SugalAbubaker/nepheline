@@ -183,19 +183,25 @@ NTEST(vec3, normalize)
     TM_EXPECT_ASSERT((void)nph_vec3_normalize(nph_vec3_zero()));
     // A squared length past the float range (fuzzed input: a glTF normal
     // of (0, 1.8e19, 0)) keeps the direction; non-finite input falls back.
-    TM_ASSERT_VEC3_NEAR(
-        nph_vec3_normalize_or(nph_vec3(0.0F, 1.8446744e19F, 0.0F), nph_vec3_unit_x()),
-        nph_vec3_unit_y(), 0.0F);
-    TM_ASSERT_VEC3_NEAR(nph_vec3_normalize_or_zero(nph_vec3(3e38F, -3e38F, 0.0F)),
+    // The values pass through volatiles: constant-folded, the overflow the
+    // functions handle is itself a compile-time warning on MSVC (C4756).
+    volatile f32 huge = 1.8446744e19F;
+    volatile f32 vast = 3e38F;
+    volatile f32 big = 2e30F;
+    volatile f32 infinity = NPH_F32_INFINITY;
+    volatile f32 not_a_number = nanf("");
+    TM_ASSERT_VEC3_NEAR(nph_vec3_normalize_or(nph_vec3(0.0F, huge, 0.0F), nph_vec3_unit_x()),
+                        nph_vec3_unit_y(), 0.0F);
+    TM_ASSERT_VEC3_NEAR(nph_vec3_normalize_or_zero(nph_vec3(vast, -vast, 0.0F)),
                         nph_vec3(0.70710678F, -0.70710678F, 0.0F), 1e-7F);
-    NTEST_ASSERT_TRUE(nph_vec3_eq(
-        nph_vec3_normalize_or(nph_vec3(NPH_F32_INFINITY, 0.0F, 0.0F), nph_vec3_unit_y()),
-        nph_vec3_unit_y()));
     NTEST_ASSERT_TRUE(
-        nph_vec3_eq(nph_vec3_normalize_or_zero(nph_vec3(nanf(""), 1.0F, 0.0F)), nph_vec3_zero()));
-    TM_ASSERT_VEC2_NEAR(nph_vec2_normalize_or_zero(nph_vec2(-3e38F, 0.0F)), nph_vec2(-1.0F, 0.0F),
+        nph_vec3_eq(nph_vec3_normalize_or(nph_vec3(infinity, 0.0F, 0.0F), nph_vec3_unit_y()),
+                    nph_vec3_unit_y()));
+    NTEST_ASSERT_TRUE(nph_vec3_eq(nph_vec3_normalize_or_zero(nph_vec3(not_a_number, 1.0F, 0.0F)),
+                                  nph_vec3_zero()));
+    TM_ASSERT_VEC2_NEAR(nph_vec2_normalize_or_zero(nph_vec2(-vast, 0.0F)), nph_vec2(-1.0F, 0.0F),
                         0.0F);
-    TM_ASSERT_VEC4_NEAR(nph_vec4_normalize_or_zero(nph_vec4(0.0F, 0.0F, 0.0F, 2e30F)),
+    TM_ASSERT_VEC4_NEAR(nph_vec4_normalize_or_zero(nph_vec4(0.0F, 0.0F, 0.0F, big)),
                         nph_vec4(0.0F, 0.0F, 0.0F, 1.0F), 0.0F);
     NTEST_ASSERT_TRUE(nph_vec3_is_normalized(nph_vec3_unit_x(), 1e-6F));
     NTEST_ASSERT_FALSE(nph_vec3_is_normalized(nph_vec3_splat(1.0F), 1e-6F));
