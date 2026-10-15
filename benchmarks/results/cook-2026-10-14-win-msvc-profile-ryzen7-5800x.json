@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "executable": "cook_bench.exe",
+  "timestamp": "2026-10-14T23:52:39Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "bc7_encode_opaque", "label": "41.19 dB RGB, blocks c5cccdc67c55b934", "iterations": 2, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 108016.797, "min_ns_per_op": 107901.758, "max_ns_per_op": 108433.008},
+    {"name": "bc7_encode_alpha", "label": "40.30 dB RGBA, blocks 9550d5401a9971e1", "iterations": 2, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 113169.824, "min_ns_per_op": 112685.938, "max_ns_per_op": 113539.160},
+    {"name": "bc7_encode_opaque_p2_r1", "label": "41.14 dB RGB, blocks 4f9f44e545275d5f", "iterations": 6, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 38348.633, "min_ns_per_op": 38334.587, "max_ns_per_op": 38555.094},
+    {"name": "bc7_encode_opaque_p1", "label": "41.10 dB RGB, blocks cd0299cf56711ec2", "iterations": 6, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 37697.754, "min_ns_per_op": 37577.051, "max_ns_per_op": 37821.387},
+    {"name": "bc7_encode_opaque_mode6", "label": "38.73 dB RGB, blocks 0412f03374eef1e9", "iterations": 22, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 10654.665, "min_ns_per_op": 10635.059, "max_ns_per_op": 10847.581},
+    {"name": "bc7_encode_opaque_mode1", "label": "41.13 dB RGB, blocks baf8ba3ab11e8495", "iterations": 4, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 51063.770, "min_ns_per_op": 51002.417, "max_ns_per_op": 51115.259},
+    {"name": "bc7_decode", "label": "", "iterations": 2000, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 163.053, "min_ns_per_op": 162.477, "max_ns_per_op": 163.685},
+    {"name": "bc5_encode_normals", "label": "42.06 dB XY", "iterations": 154, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 1549.178, "min_ns_per_op": 1546.628, "max_ns_per_op": 1551.088},
+    {"name": "bc4_encode_mask", "label": "48.73 dB", "iterations": 399, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 588.415, "min_ns_per_op": 587.612, "max_ns_per_op": 601.290},
+    {"name": "bc6h_encode_hdr", "label": "2.69% mean relative error", "iterations": 45, "items_per_iteration": 1024, "repeats": 5, "ns_per_op": 5403.218, "min_ns_per_op": 5397.606, "max_ns_per_op": 5437.795},
+    {"name": "texture_cook_256", "label": "", "iterations": 1, "items_per_iteration": 65536, "repeats": 5, "ns_per_op": 9035.313, "min_ns_per_op": 9023.619, "max_ns_per_op": 9072.768},
+    {"name": "texture_cook_256_jobs", "label": "15 workers", "iterations": 4, "items_per_iteration": 65536, "repeats": 5, "ns_per_op": 1263.063, "min_ns_per_op": 1258.869, "max_ns_per_op": 1277.069},
+    {"name": "mesh_weld", "label": "393216 -> 66049 vertices", "iterations": 5, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 327.317, "min_ns_per_op": 321.520, "max_ns_per_op": 330.553},
+    {"name": "mesh_normals_smooth", "label": "", "iterations": 63, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 27.816, "min_ns_per_op": 27.787, "max_ns_per_op": 27.920},
+    {"name": "mesh_tangents", "label": "66049 -> 66049 vertices", "iterations": 4, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 421.498, "min_ns_per_op": 419.665, "max_ns_per_op": 472.442},
+    {"name": "mesh_optimize", "label": "ACMR 3.00 -> 0.76", "iterations": 7, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 254.362, "min_ns_per_op": 253.644, "max_ns_per_op": 257.440},
+    {"name": "mesh_meshlets", "label": "1368 meshlets, 95.8 triangles each", "iterations": 3, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 551.671, "min_ns_per_op": 549.754, "max_ns_per_op": 554.244},
+    {"name": "mesh_process", "label": "1368 meshlets, ACMR 3.00 -> 0.76", "iterations": 1, "items_per_iteration": 131072, "repeats": 5, "ns_per_op": 2103.984, "min_ns_per_op": 2093.905, "max_ns_per_op": 2109.483},
+    {"name": "gltf_import_glb", "label": "7.1 MiB, 8 meshes", "iterations": 13, "items_per_iteration": 7237, "repeats": 5, "ns_per_op": 2534.140, "min_ns_per_op": 2426.676, "max_ns_per_op": 2635.791}
+  ]
+}
