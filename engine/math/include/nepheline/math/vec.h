@@ -158,11 +158,19 @@ NPH_INLINE NphVec2 nph_vec2_normalize(NphVec2 v)
     NPH_ASSERT_MSG(len_sq > 0.0F, "nph_vec2_normalize of a zero vector");
     return nph_vec2_scale(v, nph_f32_rsqrt(len_sq));
 }
-// As nph_vec2_normalize, but returns zero for a zero vector.
+// As nph_vec2_normalize, but returns zero for a zero or non-finite vector
+// (see nph_vec3_normalize_or for vectors whose squared length overflows).
 NPH_INLINE NphVec2 nph_vec2_normalize_or_zero(NphVec2 v)
 {
     const f32 len_sq = nph_vec2_length_sq(v);
-    return len_sq > 0.0F ? nph_vec2_scale(v, nph_f32_rsqrt(len_sq)) : nph_vec2_zero();
+    if (len_sq > 0.0F && len_sq <= NPH_F32_MAX) {
+        return nph_vec2_scale(v, nph_f32_rsqrt(len_sq));
+    }
+    if (!(len_sq > NPH_F32_MAX) || !nph_f32_is_finite(v.x) || !nph_f32_is_finite(v.y)) {
+        return nph_vec2_zero();
+    }
+    const NphVec2 u = nph_vec2_scale(v, 1.0F / nph_f32_max(nph_f32_abs(v.x), nph_f32_abs(v.y)));
+    return nph_vec2_scale(u, nph_f32_rsqrt(nph_vec2_length_sq(u)));
 }
 NPH_INLINE NphVec2 nph_vec2_lerp(NphVec2 a, NphVec2 b, f32 t)
 {
@@ -321,17 +329,29 @@ NPH_INLINE NphVec3 nph_vec3_normalize(NphVec3 v)
     NPH_ASSERT_MSG(len_sq > 0.0F, "nph_vec3_normalize of a zero vector");
     return nph_vec3_scale(v, nph_f32_rsqrt(len_sq));
 }
-// As nph_vec3_normalize, but returns zero for a zero vector.
-NPH_INLINE NphVec3 nph_vec3_normalize_or_zero(NphVec3 v)
-{
-    const f32 len_sq = nph_vec3_length_sq(v);
-    return len_sq > 0.0F ? nph_vec3_scale(v, nph_f32_rsqrt(len_sq)) : nph_vec3_zero();
-}
-// As nph_vec3_normalize, but returns `fallback` for a zero vector.
+// As nph_vec3_normalize, but returns `fallback` for a vector of zero length
+// (or so short that its squared length underflows) and for a non-finite
+// one. A finite vector whose squared length overflows (a component beyond
+// about 1.8e19) is rescaled by its largest component first, so it keeps its
+// direction instead of collapsing to zero; the common case is unchanged.
 NPH_INLINE NphVec3 nph_vec3_normalize_or(NphVec3 v, NphVec3 fallback)
 {
     const f32 len_sq = nph_vec3_length_sq(v);
-    return len_sq > 0.0F ? nph_vec3_scale(v, nph_f32_rsqrt(len_sq)) : fallback;
+    if (len_sq > 0.0F && len_sq <= NPH_F32_MAX) {
+        return nph_vec3_scale(v, nph_f32_rsqrt(len_sq));
+    }
+    if (!(len_sq > NPH_F32_MAX) || !nph_f32_is_finite(v.x) || !nph_f32_is_finite(v.y) ||
+        !nph_f32_is_finite(v.z)) {
+        return fallback;
+    }
+    const f32 m = nph_f32_max(nph_f32_abs(v.x), nph_f32_max(nph_f32_abs(v.y), nph_f32_abs(v.z)));
+    const NphVec3 u = nph_vec3_scale(v, 1.0F / m);
+    return nph_vec3_scale(u, nph_f32_rsqrt(nph_vec3_length_sq(u)));
+}
+// As nph_vec3_normalize_or with a zero fallback.
+NPH_INLINE NphVec3 nph_vec3_normalize_or_zero(NphVec3 v)
+{
+    return nph_vec3_normalize_or(v, nph_vec3_zero());
 }
 NPH_INLINE NphVec3 nph_vec3_lerp(NphVec3 a, NphVec3 b, f32 t)
 {
@@ -582,10 +602,22 @@ NPH_INLINE NphVec4 nph_vec4_normalize(NphVec4 v)
     NPH_ASSERT_MSG(len_sq > 0.0F, "nph_vec4_normalize of a zero vector");
     return nph_vec4_scale(v, nph_f32_rsqrt(len_sq));
 }
+// As nph_vec4_normalize, but returns zero for a zero or non-finite vector
+// (see nph_vec3_normalize_or for vectors whose squared length overflows).
 NPH_INLINE NphVec4 nph_vec4_normalize_or_zero(NphVec4 v)
 {
     const f32 len_sq = nph_vec4_length_sq(v);
-    return len_sq > 0.0F ? nph_vec4_scale(v, nph_f32_rsqrt(len_sq)) : nph_vec4_zero();
+    if (len_sq > 0.0F && len_sq <= NPH_F32_MAX) {
+        return nph_vec4_scale(v, nph_f32_rsqrt(len_sq));
+    }
+    if (!(len_sq > NPH_F32_MAX) || !nph_f32_is_finite(v.x) || !nph_f32_is_finite(v.y) ||
+        !nph_f32_is_finite(v.z) || !nph_f32_is_finite(v.w)) {
+        return nph_vec4_zero();
+    }
+    const f32 m = nph_f32_max(nph_f32_max(nph_f32_abs(v.x), nph_f32_abs(v.y)),
+                              nph_f32_max(nph_f32_abs(v.z), nph_f32_abs(v.w)));
+    const NphVec4 u = nph_vec4_scale(v, 1.0F / m);
+    return nph_vec4_scale(u, nph_f32_rsqrt(nph_vec4_length_sq(u)));
 }
 NPH_INLINE NphVec4 nph_vec4_lerp(NphVec4 a, NphVec4 b, f32 t)
 {
@@ -914,10 +946,21 @@ NPH_INLINE f64 nph_dvec3_distance(NphDVec3 a, NphDVec3 b)
 {
     return nph_dvec3_length(nph_dvec3_sub(a, b));
 }
+// Zero for a zero or non-finite vector; a finite one whose squared length
+// overflows (beyond about 1.3e154) is rescaled first (nph_vec3_normalize_or).
 NPH_INLINE NphDVec3 nph_dvec3_normalize_or_zero(NphDVec3 v)
 {
     const f64 len_sq = nph_dvec3_length_sq(v);
-    return len_sq > 0.0 ? nph_dvec3_scale(v, 1.0 / nph_f64_sqrt(len_sq)) : nph_dvec3_zero();
+    if (len_sq > 0.0 && len_sq <= NPH_F64_MAX) {
+        return nph_dvec3_scale(v, 1.0 / nph_f64_sqrt(len_sq));
+    }
+    if (!(len_sq > NPH_F64_MAX) || !nph_f64_is_finite(v.x) || !nph_f64_is_finite(v.y) ||
+        !nph_f64_is_finite(v.z)) {
+        return nph_dvec3_zero();
+    }
+    const f64 m = nph_f64_max(nph_f64_abs(v.x), nph_f64_max(nph_f64_abs(v.y), nph_f64_abs(v.z)));
+    const NphDVec3 u = nph_dvec3_scale(v, 1.0 / m);
+    return nph_dvec3_scale(u, 1.0 / nph_f64_sqrt(nph_dvec3_length_sq(u)));
 }
 NPH_INLINE NphDVec3 nph_dvec3_lerp(NphDVec3 a, NphDVec3 b, f64 t)
 {
