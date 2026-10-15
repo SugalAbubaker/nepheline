@@ -23,7 +23,7 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 3 | Platform: threads, fibers, virtual memory, files + async I/O, CPU detection, window/input (GLFW) | **done** |
 | 4 | Jobs: fiber workers, work-stealing deques, counters, priorities, I/O threads, deterministic mode | **done** (`v0.1.0`) |
 | 5 | GPU/RHI: Vulkan 1.3 device, bindless resources, frames and timelines, uploads, swapchain, SPIR-V reflection, pipelines with a persisted cache and hot reload, render graph with aliasing and async compute, GPU microbenchmarks and budgets on the reference RTX 3060 Ti | **done** |
-| 6 | Assets v1: the `.nph` container, LZ codec, pack archives, VFS, loader and typed views; the cooker (meshes, textures, materials, scenes) | **in progress** |
+| 6 | Assets v1: the `.nph` container, LZ codec, pack archives, VFS, loader and typed views; the cooker (glTF import, mesh pipeline with MikkTSpace tangents and meshlets, our BC4/BC5/BC6H/BC7 encoders, incremental database, packs); fuzzing of every parser in every build | **done** |
 | 7–15 | Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
@@ -51,18 +51,30 @@ Configurations: **Debug** (asserts, validation, ASan/UBSan), **Development**
 (optimised, asserts, validation, profiler), **Profile** (optimised, profiler),
 **Shipping** (LTO, everything compiled out).
 
+Content is cooked offline into packs the runtime maps without parsing
+([`docs/cook.md`](docs/cook.md)):
+
+```sh
+nph_cook content/ --root content -o build/cooked --pack build/game.npk
+```
+
+`samples/asset_viewer` does exactly that at build time and renders the
+result.
+
 ## Repository layout
 
 ```
 cmake/          build helpers: configurations, warnings, sanitizers, module/test functions
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
+tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh)
-tests/fuzz/     libFuzzer targets and seed corpora for every parser (scripts/fuzz_seeds.py writes the asset ones)
-scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, nph_hash64.py, runner/install.ps1 + loop.ps1
-third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA), each wrapped by exactly one engine module
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer)
+tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
+tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
+scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, nph_hash64.py, runner/install.ps1 + loop.ps1
+third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb), each wrapped by exactly one module or tool
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
 ```
@@ -80,6 +92,7 @@ Modules depend strictly left-to-right:
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/gpu.md`](docs/gpu.md) — GPU module: device and validation gate, bindless resources, frames and submission, uploads, shaders and pipelines, the render graph, the swapchain
 - [`docs/asset.md`](docs/asset.md) — asset module: the `.nph` container, the LZ codec, GUIDs, pack archives, the VFS, the loader, the typed views
+- [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records

@@ -138,6 +138,10 @@ with `NPH_FILE_ASYNC`, or a loose file the VFS opens). `nph_vfs_iterate`
 visits every file under a prefix across mounts, each path once, with the
 info of the mount that would serve it; `nph_vfs_resolve_directory` gives
 tools the OS path a loose file would be written to.
+`nph_vfs_find_guid` resolves an identity to a path: it asks the pack
+mounts, newest first, each a binary search of its GUID index, and
+returns the entry's path under the mount's prefix (directory mounts have
+no identity index; a loose file is found by path).
 
 Cost to know about: when a directory mount shadows a pack, a lookup that
 ends in the pack first pays a failed `stat` on the directory (about 30 µs
@@ -154,8 +158,12 @@ handle with one more reference; one still loading is waited for. Handles
 are generational (core/handle.h); `nph_asset_get` returns the `NphAsset`
 (header, blobs with raw pointers and sizes, path) for a READY handle and
 NULL for anything else. `nph_asset_release` drops a reference; the last
-one unloads. `nph_asset_find_guid` finds a loaded asset by identity, which
-is how a scene's mesh and material references are resolved.
+one unloads. `nph_asset_load_guid` and `nph_asset_load_guid_async` load
+by identity, resolving the GUID to a path through `nph_vfs_find_guid`:
+that is how a scene's references to meshes and materials, and a
+material's to textures, are followed (the cooker derives every GUID from
+the source path and sub-asset, [cook.md](cook.md)). `nph_asset_find_guid`
+finds an asset already loaded by identity, without a new reference.
 
 With a job system, `nph_asset_load_async` returns a LOADING handle at
 once, runs the mapping and validation on an I/O thread, spawns one job per
@@ -216,7 +224,7 @@ can be handed to the renderer without further checks:
 
 ## Testing
 
-`asset_tests` (48 cases): GUID derivation (pinned), text round trips and
+`asset_tests` (50 cases): GUID derivation (pinned), text round trips and
 rejections, generator uniqueness; the codec on empty, tiny, zero,
 random, text, periodic (offsets 1–9), window-edge, and structured inputs
 at both levels, every size up to 300 bytes, hand-built streams from the
@@ -225,7 +233,8 @@ writer against the validator with every corruption the validator must
 catch; packs written and read back with both alignments, including
 duplicates refused, every corruption, and the empty pack; the VFS's path
 rules, mount precedence and unmounting, mappings and handles, iteration
-with shadowing; the loader synchronous and asynchronous, shared handles,
+with shadowing, identities resolved through pack indexes; the loader
+synchronous and asynchronous, loads by GUID through a pack, shared handles,
 release during a load, parallel decompression, checksum policies,
 failure paths, leak reporting; every typed view on valid and corrupted
 data. The fuzz seeds, written by `scripts/fuzz_seeds.py` from an
@@ -238,7 +247,10 @@ Fuzz targets (`tests/fuzz`): `lz` (decode arbitrary bytes into several
 output sizes, then compress-decompress the input at both levels and
 compare), `nph` (validate, checksum, unpack, and resolve every typed
 view), `pack` (validate, then look every entry up by path and GUID and
-touch its bytes).
+touch its bytes). Besides the nightly libFuzzer runs, each builds as a
+CTest smoke test in every configuration (`fuzz_smoke.lz` and so on) that
+replays the corpus and a fixed set of mutations under the sanitizers
+([cook.md](cook.md), "Fuzzing").
 
 ## Benchmarks
 
