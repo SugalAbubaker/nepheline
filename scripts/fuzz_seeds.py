@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate the seed corpora of the asset module's fuzz targets.
 
-    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,image,gltf}/
+    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,png,image,gltf}/
 
 The files are built here, in Python, from the format descriptions in
 engine/asset/include/nepheline/asset/{lz,format,pack}.h rather than by the
@@ -19,6 +19,7 @@ Seed files carry no extension: `.nph` and `.npk` are Git LFS patterns
 import os
 import struct
 import sys
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(ROOT, "tests", "fuzz", "corpus")
@@ -247,6 +248,25 @@ def nph_hash64(data, seed=0x4E65706865):
     raise SystemExit("scripts/nph_hash64.py is missing")
 
 
+def png_chunk(kind, body):
+    c = kind + body
+    return struct.pack(">I", len(body)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+
+
+def png_file(width, height, color, channels, filters, level):
+    """An 8-bit PNG whose rows use the given filter types (the raw bytes
+    after each filter byte are a pattern; the fuzzer only needs valid
+    structure to mutate)."""
+    raw = bytearray()
+    for y in range(height):
+        raw.append(filters[y % len(filters)])
+        raw.extend(((x * 37 + y * 11) & 0xFF) for x in range(width * channels))
+    header = struct.pack(">IIBBBBB", width, height, 8, color, 0, 0, 0)
+    stream = zlib.compress(bytes(raw), level)
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", stream) +
+            png_chunk(b"IEND", b""))
+
+
 def write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
@@ -269,6 +289,16 @@ def main():
     write(os.path.join(CORPUS, "pack", "one_entry"),
           pack_file([("assets/one.nph", guid_from_str("one"), fourcc("BLOB"), blob)]))
     write(os.path.join(CORPUS, "pack", "empty"), pack_file([]))
+    # The golden toolkit's PNG reader and inflate (tools/golden; fuzz_png.c):
+    # an even first byte selects a PNG, an odd one a zlib stream with the
+    # second byte sizing the output.
+    write(os.path.join(CORPUS, "png", "rgba_filters"),
+          b"\x00" + png_file(6, 5, 6, 4, [0, 1, 2, 3, 4], 9))
+    write(os.path.join(CORPUS, "png", "rgb_stored"), b"\x00" + png_file(4, 4, 2, 3, [0], 0))
+    write(os.path.join(CORPUS, "png", "grey_alpha"), b"\x02" + png_file(3, 7, 4, 2, [4, 1], 6))
+    write(os.path.join(CORPUS, "png", "zlib_dynamic"),
+          b"\x01\x04" + zlib.compress(text * 2, 9))
+    write(os.path.join(CORPUS, "png", "zlib_stored"), b"\x01\x01" + zlib.compress(text[:120], 0))
     # The cooker's inputs: images and glTF documents (scripts/fuzz_seeds_cook.py).
     sys.path.insert(0, os.path.join(ROOT, "scripts"))
     import fuzz_seeds_cook

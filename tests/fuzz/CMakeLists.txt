@@ -27,3 +27,7 @@ nph_add_fuzzer(pack SOURCES fuzz_pack.c DEPS nph::asset)
 # Seeds come from scripts/fuzz_seeds.py too.
 nph_add_fuzzer(gltf SOURCES fuzz_gltf.c DEPS nph::cook)
 nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)
+
+# The golden toolkit's PNG reader and inflate (tools/golden), which read
+# baselines from the repository (CLAUDE.md §9 golden-image tests).
+nph_add_fuzzer(png SOURCES fuzz_png.c DEPS nph::golden)

@@ -92,6 +92,10 @@ add_subdirectory(shaders)
 # samples use, and the nph_cook executable.
 add_subdirectory(tools/cook)
 
+# The golden-image toolkit (CLAUDE.md §9): our PNG codec and LDR-FLIP, and
+# the nph_flip comparison tool.
+add_subdirectory(tools/golden)
+
 # Tests that span modules and tools (the cooker against the runtime and
 # the GPU).
 if(NPH_BUILD_TESTS)
