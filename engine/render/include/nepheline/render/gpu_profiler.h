@@ -60,8 +60,8 @@ typedef struct NphRenderPassStats {
 } NphRenderPassStats;
 
 // Statistics per pass, in the order the passes were first seen, then the
-// frame total (the sum of every pass per frame). Returns the number
-// written (at most `cap`).
+// frame total (the sum of every pass per frame, times and declared bytes).
+// Returns the number written (at most `cap`).
 u32 nph_render_gpu_profiler_stats(NphRenderGpuProfiler *p, NphRenderPassStats *out, u32 cap);
 
 // Frames recorded since creation or the last reset.

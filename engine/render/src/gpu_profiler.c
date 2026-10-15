@@ -96,6 +96,8 @@ void nph_render_gpu_profiler_reset(NphRenderGpuProfiler *p)
         p->passes[i].head = 0U;
         p->passes[i].count = 0U;
         p->passes[i].last_ms = 0.0F;
+        p->passes[i].read_bytes = 0U;
+        p->passes[i].write_bytes = 0U;
     }
     p->frames = 0U;
 }
@@ -140,6 +142,8 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
     // Passes that run several times a frame under one name (the IBL
     // levels) are summed into one sample.
     f32 total = 0.0F;
+    u64 total_read = 0U;
+    u64 total_write = 0U;
     u32 recorded = 0U;
     f32 frame_ms[128];
     ProfPass *seen[128];
@@ -147,6 +151,8 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
     for (u32 i = 0; i < n; ++i) {
         const f32 ms = (f32)((f64)timings[i].gpu_ns / 1.0e6);
         total += ms;
+        total_read += timings[i].read_bytes;
+        total_write += timings[i].write_bytes;
         ProfPass *pass = find_pass(p, timings[i].name);
         if (pass == NULL) {
             continue;
@@ -171,7 +177,10 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
         push_sample(seen[k], p->history, frame_ms[k]);
         ++recorded;
     }
-    push_sample(&p->passes[p->max_passes], p->history, total);
+    ProfPass *sum = &p->passes[p->max_passes];
+    push_sample(sum, p->history, total);
+    sum->read_bytes = total_read;
+    sum->write_bytes = total_write;
     p->frames += 1U;
     return recorded;
 }
