@@ -71,3 +71,36 @@ if(TARGET nph_cook)
         nph_target_use_shaders(asset_viewer nph_shaders_samples)
     endif()
 endif()
+
+# The Phase 7 sample (CLAUDE.md §12, "Renderer v1"): the forward PBR
+# reference renderer drawing cooked content. pbr_scene.gltf exercises every
+# material feature the renderer implements; it is cooked at build time like
+# the asset_viewer's content, and loaded through samples/common/
+# cooked_scene.c, the asset-to-renderer bridge the golden tests share.
+if(TARGET nph_cook)
+    set(pbr_viewer_content "${CMAKE_CURRENT_SOURCE_DIR}/pbr_viewer/content")
+    set(pbr_viewer_out "${CMAKE_CURRENT_BINARY_DIR}/pbr_viewer/$<CONFIG>")
+    add_custom_command(
+        OUTPUT "${pbr_viewer_out}/pbr_scene.npk"
+        COMMAND nph_cook "${pbr_viewer_content}/pbr_scene.gltf" --root "${pbr_viewer_content}"
+                -o "${pbr_viewer_out}/cooked" --pack "${pbr_viewer_out}/pbr_scene.npk" --quiet
+        DEPENDS nph_cook "${pbr_viewer_content}/pbr_scene.gltf"
+        COMMENT "Cooking the pbr_viewer content"
+        VERBATIM)
+    add_custom_target(pbr_viewer_content DEPENDS "${pbr_viewer_out}/pbr_scene.npk")
+    set_target_properties(pbr_viewer_content PROPERTIES FOLDER "samples")
+    nph_add_sample(pbr_viewer
+        SOURCES pbr_viewer/main.c common/cooked_scene.c common/cooked_scene.h common/capture.c
+                common/capture.h
+        DEPS nph::render nph::asset
+        ARGS --frames=120 "--capture=${pbr_viewer_out}/capture.bmp"
+             "--profile=${pbr_viewer_out}/gpu_profile.json"
+        SKIP_RETURN_CODE 77)
+    if(TARGET pbr_viewer)
+        add_dependencies(pbr_viewer pbr_viewer_content)
+        target_include_directories(pbr_viewer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/common")
+        target_compile_definitions(pbr_viewer PRIVATE
+            "NPH_SAMPLE_PACK=\"${pbr_viewer_out}/pbr_scene.npk\"")
+        nph_target_use_shaders(pbr_viewer nph_shaders_render)
+    endif()
+endif()
