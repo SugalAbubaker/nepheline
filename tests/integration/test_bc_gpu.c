@@ -171,7 +171,7 @@ NTEST_F(BcGpuFixture, bc7_random_blocks_decode_as_the_gpu_decodes_them)
         for (u32 b = 0; b < BC_BLOCKS; ++b) {
             const u32 mode = b % 9U;
             u8 *first = &blocks[(u64)b * 16U];
-            *first = mode == 8U ? 0U : (u8)((*first & (u8) ~((2U << mode) - 1U)) | (1U << mode));
+            *first = (u8)(mode == 8U ? 0U : ((*first & ~((2U << mode) - 1U)) | (1U << mode)));
         }
         check_bc7(f, blocks, "random");
     }
