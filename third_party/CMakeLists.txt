@@ -15,6 +15,8 @@ _nph_require_submodule(glfw CMakeLists.txt)
 _nph_require_submodule(vulkan_headers CMakeLists.txt)
 _nph_require_submodule(volk CMakeLists.txt)
 _nph_require_submodule(vma CMakeLists.txt)
+_nph_require_submodule(cgltf cgltf.h)
+_nph_require_submodule(stb stb_image.h)
 
 # GLFW 3.4: window, input, monitors (wrapped by engine/platform, window.h).
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -53,3 +55,16 @@ set_target_properties(volk PROPERTIES FOLDER "third_party")
 # (src/gpu_vma.cpp), the only C++ in the runtime.
 set(VMA_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(vma SYSTEM)
+
+# cgltf 1.15: glTF 2.0 parsing, offline only (wrapped by tools/cook,
+# src/gltf.c; docs/adr/0017-cooker.md). Header-only: the implementation is
+# compiled in tools/cook/src/cgltf_impl.c with the library's own warning
+# policy. Never linked into the runtime.
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/cgltf")
+
+# stb_image 2.30 (stb at 2c980bb5): PNG, JPEG, TGA, BMP, and Radiance HDR
+# decoding, offline only (wrapped by tools/cook, src/image.c). Header-only;
+# the implementation is tools/cook/src/stb_impl.c.
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/stb")
