@@ -24,7 +24,7 @@ NPH_LOG_CATEGORY_DEFINE(NPH_LOG_SCENE, "scene", NPH_LOG_LEVEL_INFO);
 // Small helpers
 // ---------------------------------------------------------------------------
 
-void nph_world_structural_begin_(NphWorld *w)
+void nph_world_structural_begin(NphWorld *w)
 {
     NPH_ASSERT_MSG(w->frozen == 0U,
                    "structural change to a world while a schedule stage runs on it; "
@@ -32,12 +32,12 @@ void nph_world_structural_begin_(NphWorld *w)
     w->epoch += 1U;
 }
 
-const NphComponentInfo *nph_world_info_(const NphWorld *w, NphComponentId id)
+const NphComponentInfo *nph_world_info(const NphWorld *w, NphComponentId id)
 {
     return id < w->component_count ? &w->components[id] : NULL;
 }
 
-NphEntityRecord *nph_world_record_(const NphWorld *w, NphEntity e)
+NphEntityRecord *nph_world_record(const NphWorld *w, NphEntity e)
 {
     const NphHandle h = {e.value};
     if (!nph_handle_pool_is_valid(&w->handles, h)) {
@@ -47,7 +47,7 @@ NphEntityRecord *nph_world_record_(const NphWorld *w, NphEntity e)
     return rec->chunk != NULL ? rec : NULL;
 }
 
-void nph_world_event_(NphWorld *w, NphWorldEventType type, NphEntity e, NphComponentId id)
+void nph_world_event(NphWorld *w, NphWorldEventType type, NphEntity e, NphComponentId id)
 {
     if (w->event_capacity == 0U) {
         return;
@@ -60,7 +60,7 @@ void nph_world_event_(NphWorld *w, NphWorldEventType type, NphEntity e, NphCompo
     ev->type = (u32)type;
     ev->entity = e;
     ev->component = id;
-    ev->tick = nph_world_change_tick_(w);
+    ev->tick = nph_world_change_tick(w);
 }
 
 static void stamp_all(NphChunk *c, u32 tick)
@@ -341,14 +341,14 @@ static NphResult archetype_create(NphWorld *w, const NphComponentMask *mask, Nph
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     for (u32 i = 0; i < w->query_count; ++i) {
-        if (nph_query_reserve_(w->queries[i], 1U) != NPH_RESULT_OK) {
+        if (nph_query_reserve(w->queries[i], 1U) != NPH_RESULT_OK) {
             archetype_free(w, a);
             return NPH_RESULT_OUT_OF_MEMORY;
         }
     }
     a->index = w->archetype_count;
     for (u32 i = 0; i < w->query_count; ++i) {
-        nph_query_on_archetype_(w->queries[i], a);
+        nph_query_on_archetype(w->queries[i], a);
     }
     w->archetypes[w->archetype_count++] = a;
     const u32 index = a->index;
@@ -357,7 +357,7 @@ static NphResult archetype_create(NphWorld *w, const NphComponentMask *mask, Nph
     return NPH_RESULT_OK;
 }
 
-NphResult nph_world_archetype_(NphWorld *w, const NphComponentMask *mask, NphArchetype **out)
+NphResult nph_world_archetype(NphWorld *w, const NphComponentMask *mask, NphArchetype **out)
 {
     const u32 *found = (const u32 *)nph_hashmap_find(&w->archetype_map, mask);
     if (found != NULL) {
@@ -383,7 +383,7 @@ static NphResult archetype_step(NphWorld *w, NphArchetype *src, NphComponentId i
     } else {
         nph_mask_clear(&mask, id);
     }
-    NPH_TRY(nph_world_archetype_(w, &mask, out));
+    NPH_TRY(nph_world_archetype(w, &mask, out));
     // A failure to cache the edge only costs a lookup next time.
     const u32 index = (*out)->index;
     NPH_IGNORE_RESULT(nph_hashmap_set_u64(&w->edges, key, &index));
@@ -483,15 +483,15 @@ static void init_defaults(const NphWorld *w, NphChunk *c, u32 row)
     }
 }
 
-NphResult nph_world_move_(NphWorld *w, NphEntity e, NphArchetype *dst)
+NphResult nph_world_move(NphWorld *w, NphEntity e, NphArchetype *dst)
 {
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    NphEntityRecord *rec = nph_world_record(w, e);
     NPH_ASSERT(rec != NULL);
     NphChunk *sc = rec->chunk;
     const u32 srow = rec->row;
     const NphArchetype *src = sc->archetype;
     NPH_ASSERT(src != dst);
-    const u32 tick = nph_world_change_tick_(w);
+    const u32 tick = nph_world_change_tick(w);
     NphChunk *dc;
     u32 drow;
     NPH_TRY(row_alloc(w, dst, tick, &dc, &drow));
@@ -512,13 +512,13 @@ NphResult nph_world_move_(NphWorld *w, NphEntity e, NphArchetype *dst)
     return NPH_RESULT_OK;
 }
 
-void *nph_world_cell_mut_(NphWorld *w, NphEntityRecord *rec, NphComponentId id)
+void *nph_world_cell_mut(NphWorld *w, NphEntityRecord *rec, NphComponentId id)
 {
     const u8 col = rec->chunk->archetype->column_of[id];
     if (col == NPH_NO_COLUMN) {
         return NULL;
     }
-    nph_chunk_stamp(rec->chunk, col, nph_world_change_tick_(w));
+    nph_chunk_stamp(rec->chunk, col, nph_world_change_tick(w));
     return nph_chunk_cell(rec->chunk, col, rec->row);
 }
 
@@ -694,7 +694,7 @@ NphResult nph_world_create(const NphWorldDesc *desc, NphWorld **out)
     }
     for (u32 i = 0; r == NPH_RESULT_OK && i < NPH_COMPONENT_BUILTIN_COUNT; ++i) {
         NphComponentId id;
-        r = register_component(w, nph_builtin_component_desc_(i), &id);
+        r = register_component(w, nph_builtin_component_desc(i), &id);
         NPH_ASSERT(r != NPH_RESULT_OK || id == i);
     }
     if (r == NPH_RESULT_OK && desc->registry_from != NULL) {
@@ -727,7 +727,7 @@ void nph_world_destroy(NphWorld *w)
 void nph_world_clear(NphWorld *w)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     const u32 slots = w->handles.bump;
     for (u32 i = 0; i < slots; ++i) {
         NphEntityRecord *rec = &w->records[i];
@@ -735,7 +735,7 @@ void nph_world_clear(NphWorld *w)
             continue;
         }
         const NphEntity e = nph_world_entity_at(w, i);
-        nph_world_event_(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
+        nph_world_event(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
         NPH_VERIFY(nph_handle_pool_release(&w->handles, (NphHandle){e.value}));
         rec->chunk = NULL;
         rec->row = 0U;
@@ -780,17 +780,17 @@ NphResult nph_world_spawn(NphWorld *w, const NphComponentId *ids, u32 id_count, 
 {
     NPH_ASSERT(w != NULL && out != NULL);
     *out = NPH_ENTITY_NULL;
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     NphComponentMask mask;
     NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
     if (nph_handle_pool_live(&w->handles) >= w->capacity) {
         return NPH_RESULT_FULL;
     }
     NphArchetype *a;
-    NPH_TRY(nph_world_archetype_(w, &mask, &a));
+    NPH_TRY(nph_world_archetype(w, &mask, &a));
     NphChunk *c;
     u32 row;
-    NPH_TRY(row_alloc(w, a, nph_world_change_tick_(w), &c, &row));
+    NPH_TRY(row_alloc(w, a, nph_world_change_tick(w), &c, &row));
     NphHandle h;
     NPH_VERIFY(nph_handle_pool_alloc(&w->handles, &h) == NPH_RESULT_OK);
     const NphEntity e = {h.value};
@@ -799,7 +799,7 @@ NphResult nph_world_spawn(NphWorld *w, const NphComponentId *ids, u32 id_count, 
     NphEntityRecord *rec = &w->records[nph_handle_pool_index(&w->handles, h)];
     rec->chunk = c;
     rec->row = row;
-    nph_world_event_(w, NPH_WORLD_EVENT_SPAWNED, e, NPH_COMPONENT_NONE);
+    nph_world_event(w, NPH_WORLD_EVENT_SPAWNED, e, NPH_COMPONENT_NONE);
     *out = e;
     return NPH_RESULT_OK;
 }
@@ -833,7 +833,7 @@ static NphResult batch_fill(NphWorld *w, const NphComponentMask *mask, u32 entit
                             const NphEntity *handles, NphEntity *out)
 {
     NphArchetype *a;
-    NPH_TRY(nph_world_archetype_(w, mask, &a));
+    NPH_TRY(nph_world_archetype(w, mask, &a));
 
     // Reserve every chunk the batch needs before touching anything.
     NphChunk *last = a->chunk_count > 0U ? a->chunks[a->chunk_count - 1U] : NULL;
@@ -850,7 +850,7 @@ static NphResult batch_fill(NphWorld *w, const NphComponentMask *mask, u32 entit
         }
     }
 
-    const u32 tick = nph_world_change_tick_(w);
+    const u32 tick = nph_world_change_tick(w);
     u32 done = 0U;
     NphChunk *c = room > 0U ? last : NULL;
     while (done < entity_count) {
@@ -880,7 +880,7 @@ static NphResult batch_fill(NphWorld *w, const NphComponentMask *mask, u32 entit
             if (out != NULL) {
                 out[done + i] = e;
             }
-            nph_world_event_(w, NPH_WORLD_EVENT_SPAWNED, e, NPH_COMPONENT_NONE);
+            nph_world_event(w, NPH_WORLD_EVENT_SPAWNED, e, NPH_COMPONENT_NONE);
         }
         c->count += n;
         a->entity_count += n;
@@ -893,7 +893,7 @@ NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_c
                                 u32 entity_count, NphEntity *out)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     NphComponentMask mask;
     NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
     if (entity_count == 0U) {
@@ -905,9 +905,9 @@ NphResult nph_world_spawn_batch(NphWorld *w, const NphComponentId *ids, u32 id_c
     return batch_fill(w, &mask, entity_count, NULL, out);
 }
 
-NphResult nph_world_reserve_(NphWorld *w, u32 count, NphEntity *out)
+NphResult nph_world_reserve(NphWorld *w, u32 count, NphEntity *out)
 {
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     if ((u64)nph_handle_pool_live(&w->handles) + count > w->capacity) {
         return NPH_RESULT_FULL;
     }
@@ -919,10 +919,10 @@ NphResult nph_world_reserve_(NphWorld *w, u32 count, NphEntity *out)
     return NPH_RESULT_OK;
 }
 
-NphResult nph_world_place_(NphWorld *w, const NphComponentId *ids, u32 id_count, u32 count,
-                           const NphEntity *handles)
+NphResult nph_world_place(NphWorld *w, const NphComponentId *ids, u32 id_count, u32 count,
+                          const NphEntity *handles)
 {
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     NphComponentMask mask;
     NPH_TRY(mask_from_ids(w, ids, id_count, &mask));
     if (count == 0U) {
@@ -937,7 +937,7 @@ NphResult nph_world_place_(NphWorld *w, const NphComponentId *ids, u32 id_count,
     return batch_fill(w, &mask, count, handles, NULL);
 }
 
-void nph_world_unreserve_(NphWorld *w, const NphEntity *handles, u32 count)
+void nph_world_unreserve(NphWorld *w, const NphEntity *handles, u32 count)
 {
     for (u32 i = 0; i < count; ++i) {
         const NphHandle h = {handles[i].value};
@@ -951,26 +951,26 @@ void nph_world_unreserve_(NphWorld *w, const NphEntity *handles, u32 count)
 NphResult nph_world_despawn(NphWorld *w, NphEntity e)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    nph_world_structural_begin(w);
+    NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL) {
         return NPH_RESULT_NOT_FOUND;
     }
     if (rec->chunk->archetype->column_of[NPH_COMPONENT_ID_HIERARCHY] != NPH_NO_COLUMN) {
-        nph_hierarchy_on_despawn_(w, e);
+        nph_hierarchy_on_despawn(w, e);
     }
-    row_remove(w, rec->chunk, rec->row, nph_world_change_tick_(w));
+    row_remove(w, rec->chunk, rec->row, nph_world_change_tick(w));
     rec->chunk = NULL;
     rec->row = 0U;
     NPH_VERIFY(nph_handle_pool_release(&w->handles, (NphHandle){e.value}));
-    nph_world_event_(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
+    nph_world_event(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
     return NPH_RESULT_OK;
 }
 
 bool nph_world_is_alive(const NphWorld *w, NphEntity e)
 {
     NPH_ASSERT(w != NULL);
-    return nph_world_record_(w, e) != NULL;
+    return nph_world_record(w, e) != NULL;
 }
 
 u32 nph_world_entity_count(const NphWorld *w)
@@ -1014,13 +1014,13 @@ u32 nph_world_entity_slot_count(const NphWorld *w)
 NphResult nph_world_add(NphWorld *w, NphEntity e, NphComponentId id, const void *value)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
-    const NphComponentInfo *info = nph_world_info_(w, id);
+    nph_world_structural_begin(w);
+    const NphComponentInfo *info = nph_world_info(w, id);
     if (info == NULL ||
         ((info->desc->flags & NPH_COMPONENT_FLAG_INTERNAL) != 0U && value != NULL)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL) {
         return NPH_RESULT_NOT_FOUND;
     }
@@ -1030,19 +1030,19 @@ NphResult nph_world_add(NphWorld *w, NphEntity e, NphComponentId id, const void 
     }
     NphArchetype *dst;
     NPH_TRY(archetype_step(w, src, id, true, &dst));
-    NPH_TRY(nph_world_move_(w, e, dst));
+    NPH_TRY(nph_world_move(w, e, dst));
     if (value != NULL && info->desc->size > 0U) {
         memcpy(nph_chunk_cell(rec->chunk, dst->column_of[id], rec->row), value, info->desc->size);
     }
-    nph_world_event_(w, NPH_WORLD_EVENT_ADDED, e, id);
+    nph_world_event(w, NPH_WORLD_EVENT_ADDED, e, id);
     return NPH_RESULT_OK;
 }
 
 NphResult nph_world_remove(NphWorld *w, NphEntity e, NphComponentId id)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    nph_world_structural_begin(w);
+    NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL || id >= w->component_count ||
         !nph_mask_test(&rec->chunk->archetype->mask, id)) {
         return NPH_RESULT_NOT_FOUND;
@@ -1050,42 +1050,42 @@ NphResult nph_world_remove(NphWorld *w, NphEntity e, NphComponentId id)
     if (id == NPH_COMPONENT_ID_HIERARCHY) {
         // Without its links the entity leaves the tree: detach it from
         // its parent and its children from it.
-        nph_hierarchy_on_despawn_(w, e);
+        nph_hierarchy_on_despawn(w, e);
     }
     NphArchetype *dst;
     NPH_TRY(archetype_step(w, rec->chunk->archetype, id, false, &dst));
-    NPH_TRY(nph_world_move_(w, e, dst));
-    nph_world_event_(w, NPH_WORLD_EVENT_REMOVED, e, id);
+    NPH_TRY(nph_world_move(w, e, dst));
+    nph_world_event(w, NPH_WORLD_EVENT_REMOVED, e, id);
     return NPH_RESULT_OK;
 }
 
 NphResult nph_world_set(NphWorld *w, NphEntity e, NphComponentId id, const void *value)
 {
     NPH_ASSERT(w != NULL);
-    const NphComponentInfo *info = nph_world_info_(w, id);
+    const NphComponentInfo *info = nph_world_info(w, id);
     if (info == NULL || (info->desc->flags & NPH_COMPONENT_FLAG_INTERNAL) != 0U ||
         (value == NULL && info->desc->size > 0U)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL) {
         return NPH_RESULT_NOT_FOUND;
     }
     if (!nph_mask_test(&rec->chunk->archetype->mask, id)) {
         return nph_world_add(w, e, id, value);
     }
-    void *cell = nph_world_cell_mut_(w, rec, id);
-    if (cell != NULL) {
+    void *cell = nph_world_cell_mut(w, rec, id);
+    if (cell != NULL && value != NULL) {
         memcpy(cell, value, info->desc->size);
     }
-    nph_world_event_(w, NPH_WORLD_EVENT_SET, e, id);
+    nph_world_event(w, NPH_WORLD_EVENT_SET, e, id);
     return NPH_RESULT_OK;
 }
 
 bool nph_world_has(const NphWorld *w, NphEntity e, NphComponentId id)
 {
     NPH_ASSERT(w != NULL);
-    const NphEntityRecord *rec = nph_world_record_(w, e);
+    const NphEntityRecord *rec = nph_world_record(w, e);
     return rec != NULL && id < w->component_count &&
            nph_mask_test(&rec->chunk->archetype->mask, id);
 }
@@ -1093,7 +1093,7 @@ bool nph_world_has(const NphWorld *w, NphEntity e, NphComponentId id)
 const void *nph_world_get(const NphWorld *w, NphEntity e, NphComponentId id)
 {
     NPH_ASSERT(w != NULL);
-    const NphEntityRecord *rec = nph_world_record_(w, e);
+    const NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL || id >= NPH_ECS_MAX_COMPONENTS) {
         return NULL;
     }
@@ -1104,7 +1104,7 @@ const void *nph_world_get(const NphWorld *w, NphEntity e, NphComponentId id)
 void *nph_world_get_mut(NphWorld *w, NphEntity e, NphComponentId id)
 {
     NPH_ASSERT(w != NULL);
-    const NphComponentInfo *info = nph_world_info_(w, id);
+    const NphComponentInfo *info = nph_world_info(w, id);
     if (info == NULL) {
         return NULL;
     }
@@ -1113,13 +1113,13 @@ void *nph_world_get_mut(NphWorld *w, NphEntity e, NphComponentId id)
     if ((info->desc->flags & NPH_COMPONENT_FLAG_INTERNAL) != 0U) {
         return NULL;
     }
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL) {
         return NULL;
     }
-    void *cell = nph_world_cell_mut_(w, rec, id);
+    void *cell = nph_world_cell_mut(w, rec, id);
     if (cell != NULL) {
-        nph_world_event_(w, NPH_WORLD_EVENT_SET, e, id);
+        nph_world_event(w, NPH_WORLD_EVENT_SET, e, id);
     }
     return cell;
 }
@@ -1127,7 +1127,7 @@ void *nph_world_get_mut(NphWorld *w, NphEntity e, NphComponentId id)
 u32 nph_world_entity_components(const NphWorld *w, NphEntity e, NphComponentId *out, u32 capacity)
 {
     NPH_ASSERT(w != NULL);
-    const NphEntityRecord *rec = nph_world_record_(w, e);
+    const NphEntityRecord *rec = nph_world_record(w, e);
     if (rec == NULL) {
         return 0U;
     }

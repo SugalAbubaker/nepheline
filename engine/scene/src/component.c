@@ -235,8 +235,8 @@ u64 nph_component_layout_hash(const NphComponentDesc *desc)
     return h;
 }
 
-void nph_component_remap_entities_(const NphComponentInfo *info, void *value, NphEntityMapFn fn,
-                                   void *user)
+void nph_component_remap_entities(const NphComponentInfo *info, void *value, NphEntityMapFn fn,
+                                  void *user)
 {
     u8 *p = (u8 *)value;
     for (u32 i = 0; i < info->entity_field_count; ++i) {

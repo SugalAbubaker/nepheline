@@ -29,7 +29,7 @@ NPH_COMPONENT_DEFINE(NphWorldTransform, NPH_WORLD_TRANSFORM_FIELDS, "WorldTransf
 NPH_COMPONENT_DEFINE(NphHierarchy, NPH_HIERARCHY_FIELDS, "Hierarchy",
                      NPH_COMPONENT_FLAG_INTERNAL | NPH_COMPONENT_FLAG_TRANSIENT, NULL)
 
-const NphComponentDesc *nph_builtin_component_desc_(u32 index)
+const NphComponentDesc *nph_builtin_component_desc(u32 index)
 {
     // In the order of the NPH_COMPONENT_ID_* constants (world.h).
     typedef const NphComponentDesc *(*DescFn)(void);
@@ -119,9 +119,9 @@ static const NphHierarchy *hier(const NphWorld *w, NphEntity e)
 // A writable Hierarchy cell (the column is stamped as changed).
 static NphHierarchy *hier_mut(NphWorld *w, NphEntity e)
 {
-    NphEntityRecord *rec = nph_world_record_(w, e);
+    NphEntityRecord *rec = nph_world_record(w, e);
     NPH_ASSERT(rec != NULL);
-    NphHierarchy *h = (NphHierarchy *)nph_world_cell_mut_(w, rec, NPH_COMPONENT_ID_HIERARCHY);
+    NphHierarchy *h = (NphHierarchy *)nph_world_cell_mut(w, rec, NPH_COMPONENT_ID_HIERARCHY);
     NPH_ASSERT(h != NULL);
     return h;
 }
@@ -237,7 +237,7 @@ static void set_depths(NphWorld *w, NphEntity root, u32 depth)
     }
 }
 
-void nph_hierarchy_on_despawn_(NphWorld *w, NphEntity e)
+void nph_hierarchy_on_despawn(NphWorld *w, NphEntity e)
 {
     NphHierarchy *h = hier_mut(w, e);
     if (!nph_entity_is_null(h->parent)) {
@@ -251,7 +251,7 @@ void nph_hierarchy_on_despawn_(NphWorld *w, NphEntity e)
         ch->next_sibling = NPH_ENTITY_NULL;
         ch->prev_sibling = NPH_ENTITY_NULL;
         set_depths(w, c, 0U);
-        nph_world_event_(w, NPH_WORLD_EVENT_PARENT_CHANGED, c, NPH_COMPONENT_NONE);
+        nph_world_event(w, NPH_WORLD_EVENT_PARENT_CHANGED, c, NPH_COMPONENT_NONE);
         c = next;
     }
     h->first_child = NPH_ENTITY_NULL;
@@ -262,7 +262,7 @@ void nph_hierarchy_on_despawn_(NphWorld *w, NphEntity e)
 NphResult nph_world_set_parent(NphWorld *w, NphEntity child, NphEntity parent)
 {
     NPH_ASSERT(w != NULL);
-    nph_world_structural_begin_(w);
+    nph_world_structural_begin(w);
     if (!nph_world_is_alive(w, child) ||
         (!nph_entity_is_null(parent) && !nph_world_is_alive(w, parent))) {
         return NPH_RESULT_NOT_FOUND;
@@ -309,7 +309,7 @@ NphResult nph_world_set_parent(NphWorld *w, NphEntity child, NphEntity parent)
         hier_link_last(w, child, hier_mut(w, child), parent);
     }
     set_depths(w, child, new_depth);
-    nph_world_event_(w, NPH_WORLD_EVENT_PARENT_CHANGED, child, NPH_COMPONENT_NONE);
+    nph_world_event(w, NPH_WORLD_EVENT_PARENT_CHANGED, child, NPH_COMPONENT_NONE);
     return NPH_RESULT_OK;
 }
 

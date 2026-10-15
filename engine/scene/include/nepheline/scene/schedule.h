@@ -114,10 +114,10 @@ struct NphSystemContext {
     u32 last_tick;      // the previous run's tick (0 before the first run)
 
     // Private.
-    NphSchedule *schedule_;
-    u32 system_;
-    u32 piece_;
-    NphCommandBuffer *commands_;
+    NphSchedule *internal_schedule;
+    u32 internal_system;
+    u32 internal_piece;
+    NphCommandBuffer *internal_commands;
 };
 
 typedef struct NphScheduleDesc {

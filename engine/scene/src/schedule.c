@@ -270,7 +270,7 @@ static NphResult validate_access(const NphWorld *w, const NphComponentId *ids, u
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < count; ++i) {
-        const NphComponentInfo *info = nph_world_info_(w, ids[i]);
+        const NphComponentInfo *info = nph_world_info(w, ids[i]);
         if (info == NULL || (write && (info->desc->flags & NPH_COMPONENT_FLAG_INTERNAL) != 0U)) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
@@ -629,8 +629,8 @@ static NphSystemContext make_context(NphSchedule *s, const System *sys)
     ctx.dt = s->dt;
     ctx.tick = sys->tick;
     ctx.last_tick = sys->last_tick;
-    ctx.schedule_ = s;
-    ctx.system_ = sys->index;
+    ctx.internal_schedule = s;
+    ctx.internal_system = sys->index;
     return ctx;
 }
 
@@ -638,13 +638,13 @@ static void chunk_piece(void *user, u32 begin, u32 end)
 {
     const ChunkRun *cr = (const ChunkRun *)user;
     NphSystemContext ctx = make_context(cr->s, cr->sys);
-    ctx.piece_ = begin;
+    ctx.internal_piece = begin;
     for (u32 i = begin; i < end; ++i) {
         NphChunkView view;
         nph_query_chunk_view(cr->sys->query, cr->chunks[i], ctx.tick, &view);
         cr->sys->run_chunk(&ctx, &view);
     }
-    register_commands(cr->s, cr->sys, begin, ctx.commands_);
+    register_commands(cr->s, cr->sys, begin, ctx.internal_commands);
 }
 
 static void execute(NphSchedule *s, System *sys)
@@ -657,7 +657,7 @@ static void execute(NphSchedule *s, System *sys)
     if (sys->run != NULL) {
         NphSystemContext ctx = make_context(s, sys);
         sys->run(&ctx);
-        register_commands(s, sys, 0U, ctx.commands_);
+        register_commands(s, sys, 0U, ctx.internal_commands);
     } else {
         const u32 n = nph_query_collect_chunks(sys->query, sys->last_tick, NULL, 0U);
         void **chunks = NULL;
@@ -947,18 +947,18 @@ void nph_schedule_system_stats(const NphSchedule *s, u32 system, NphSystemStats 
 
 NphCommandBuffer *nph_system_commands(NphSystemContext *ctx)
 {
-    NPH_ASSERT(ctx != NULL && ctx->schedule_ != NULL);
-    if (ctx->commands_ != NULL) {
-        return ctx->commands_;
+    NPH_ASSERT(ctx != NULL && ctx->internal_schedule != NULL);
+    if (ctx->internal_commands != NULL) {
+        return ctx->internal_commands;
     }
-    NphSchedule *s = ctx->schedule_;
+    NphSchedule *s = ctx->internal_schedule;
     NphCommandBuffer *cb = NPH_ARENA_ALLOC_TYPE(&current_scratch(s)->arena, NphCommandBuffer);
     if (cb == NULL) {
         report(s, NPH_RESULT_OUT_OF_MEMORY);
         return NULL;
     }
     nph_commands_init(cb, ctx->world, &s->scratch_alloc.base, SCHEDULE_CMD_BLOCK);
-    ctx->commands_ = cb;
+    ctx->internal_commands = cb;
     return cb;
 }
 
@@ -970,6 +970,6 @@ void nph_system_query_iter(const NphSystemContext *ctx, NphQueryIter *it)
 
 void nph_system_report(NphSystemContext *ctx, NphResult result)
 {
-    NPH_ASSERT(ctx != NULL && ctx->schedule_ != NULL);
-    report(ctx->schedule_, result);
+    NPH_ASSERT(ctx != NULL && ctx->internal_schedule != NULL);
+    report(ctx->internal_schedule, result);
 }
