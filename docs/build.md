@@ -131,6 +131,12 @@ Tests are built on [ntest](ntest.md) and registered with CTest, one CTest
 entry per test executable (`nph_add_test` in `cmake/NphModule.cmake`). Each
 run writes a JUnit report to `build/<preset>/test-results/<Config>/<name>.xml`.
 
+With tests on, `nph_add_module` also generates one translation unit per
+public header of the module, which includes the header twice and nothing
+else (`nph_<module>_header_check`, an object library in the default
+build). A header that depends on its includer's includes, or lacks
+`#pragma once`, breaks the build (CLAUDE.md §5).
+
 ```sh
 ctest --preset linux-gcc-debug                      # everything
 ctest --preset linux-gcc-debug -R core              # by CTest name
