@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Frames in flight, per-thread command pools, deferred destruction, and
 // the timestamp query pools (docs/gpu.md "Frames").
+#include <nepheline/gpu/upload.h>
 #include <nepheline/platform/thread.h>
 
 #include "gpu_internal.h"
@@ -457,6 +458,11 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
     if (dev->lost) {
         return NPH_RESULT_DEVICE_LOST;
     }
+    // Uploads queued between frames were recorded into a slot's command
+    // pool that this or the next frame_begin recycles: submit them first
+    // (synchronously, as any flush outside a frame is), so the recycling
+    // cannot reset their command buffer or release their staging memory.
+    NPH_TRY(nph_gpu_upload_flush(dev, NULL));
     const u64 next = dev->any_frame_begun ? dev->frame_index + 1U : 0U;
     const u32 slot = (u32)(next % NPH_GPU_FRAMES_IN_FLIGHT);
     NphGpuFrameSlot *fs = &dev->frames[slot];
