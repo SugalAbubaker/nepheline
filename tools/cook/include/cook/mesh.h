@@ -119,9 +119,15 @@ NPH_MUST_USE NphResult cook_mesh_add_submesh(CookMesh *mesh, const CookVertex *v
                                              u32 vertex_count, const u32 *indices, u32 index_count,
                                              u32 material_slot);
 
+// Positions beyond this magnitude (a million kilometres) are refused:
+// below it every edge, cross product, and quantisation step the pipeline
+// computes stays a finite float (16 * (1e9)^4 < FLT_MAX).
+#define COOK_MESH_MAX_COORDINATE 1e9F
+
 // Checks every index and submesh range. NPH_RESULT_CORRUPT when an index
-// is out of range, a count is not a multiple of three, or the submeshes do
-// not tile the index list in order.
+// is out of range, a count is not a multiple of three, the submeshes do
+// not tile the index list in order, or a vertex has a non-finite value or
+// a position coordinate beyond COOK_MESH_MAX_COORDINATE.
 NPH_MUST_USE NphResult cook_mesh_validate(const CookMesh *mesh);
 
 // ---------------------------------------------------------------------------

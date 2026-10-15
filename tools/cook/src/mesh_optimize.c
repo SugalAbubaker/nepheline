@@ -397,6 +397,9 @@ NphResult cook_mesh_optimize(CookMesh *mesh)
     NphResult r = NPH_RESULT_OK;
     for (u32 i = 0; i < mesh->submeshes.len && r == NPH_RESULT_OK; ++i) {
         const CookSubmesh *s = &mesh->submeshes.data[i];
+        if (s->index_count == 0U) {
+            continue; // nothing to order (and no index array to offset into)
+        }
         u32 *indices = mesh->indices.data + s->index_offset;
         r = forsyth_optimize(mesh->alloc, &tables, verts, indices, s->index_count);
         if (r == NPH_RESULT_OK) {
