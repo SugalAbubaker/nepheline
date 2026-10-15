@@ -57,6 +57,7 @@ void nph_prefab_destroy(NphPrefab *prefab);
 // the world's slot order, so index 0 is the first entity created, which by
 // convention is the root of the prefab's hierarchy.
 NphWorld *nph_prefab_world(NphPrefab *prefab);
+const NphWorld *nph_prefab_world_const(const NphPrefab *prefab);
 
 NphStr nph_prefab_name(const NphPrefab *prefab);
 NphStrId nph_prefab_id(const NphPrefab *prefab);

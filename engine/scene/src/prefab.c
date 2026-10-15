@@ -73,6 +73,12 @@ NphWorld *nph_prefab_world(NphPrefab *p)
     return p->world;
 }
 
+const NphWorld *nph_prefab_world_const(const NphPrefab *p)
+{
+    NPH_ASSERT(p != NULL);
+    return p->world;
+}
+
 NphStr nph_prefab_name(const NphPrefab *p)
 {
     NPH_ASSERT(p != NULL);

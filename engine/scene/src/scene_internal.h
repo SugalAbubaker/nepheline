@@ -259,6 +259,20 @@ NPH_MUST_USE NphResult nph_world_archetype_(NphWorld *w, const NphComponentMask 
 // defaults. Nothing changes on failure.
 NPH_MUST_USE NphResult nph_world_move_(NphWorld *w, NphEntity e, NphArchetype *dst);
 
+// Allocates `count` entity handles without placing them in an archetype
+// (they are not alive until placed), so their slots follow the order of
+// `out`. NPH_RESULT_FULL at the capacity.
+NPH_MUST_USE NphResult nph_world_reserve_(NphWorld *w, u32 count, NphEntity *out);
+
+// Places reserved handles in the archetype of `ids`, rows in the order of
+// `handles`, with default values. All or nothing.
+NPH_MUST_USE NphResult nph_world_place_(NphWorld *w, const NphComponentId *ids, u32 id_count,
+                                        u32 count, const NphEntity *handles);
+
+// Releases reserved handles that were never placed (placed ones are left
+// alone; despawn them).
+void nph_world_unreserve_(NphWorld *w, const NphEntity *handles, u32 count);
+
 // Writes a component cell, stamping the column with the change tick.
 void *nph_world_cell_mut_(NphWorld *w, NphEntityRecord *rec, NphComponentId id);
 
