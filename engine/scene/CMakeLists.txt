@@ -46,6 +46,10 @@ nph_add_test(scene
 if(NPH_BUILD_TESTS)
     # White-box tests read the module's internal structures.
     target_include_directories(scene_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    # The fuzz seed corpora (scripts/fuzz_seeds_scene.py) are an independent
+    # description of the scene formats; the tests load them.
+    target_compile_definitions(scene_tests PRIVATE
+        "NPH_FUZZ_CORPUS_DIR=\"${CMAKE_SOURCE_DIR}/tests/fuzz/corpus\"")
     if(MSVC)
         target_compile_definitions(scene_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()

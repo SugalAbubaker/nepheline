@@ -222,7 +222,8 @@ NTEST(prefab, instances_save_as_differences_and_follow_the_prefab)
                                     "\"root\":0}}]}"),
                             &ld, &res),
         NPH_RESULT_NOT_FOUND);
-    // Two entities claiming the same place in one instance.
+    // Two entities claiming the same place in one instance: both load
+    // (references inside the instance resolve to the first).
     NTEST_EXPECT_EQ_INT(
         nph_scene_load_text(w4,
                             NPH_STR("{\"nepheline_scene\":1,\"entities\":[{\"id\":0,"
@@ -230,7 +231,7 @@ NTEST(prefab, instances_save_as_differences_and_follow_the_prefab)
                                     "\"root\":0}},{\"id\":1,\"prefab\":{\"name\":"
                                     "\"crate\",\"index\":0,\"root\":0}}]}"),
                             &ld, &res),
-        NPH_RESULT_PARSE_ERROR);
+        NPH_RESULT_OK);
     // An override of a component the instance does not have.
     NTEST_EXPECT_EQ_INT(
         nph_scene_load_text(w4,

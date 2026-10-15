@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate the seed corpora of the asset module's fuzz targets.
 
-    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,png,image,gltf}/
+    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,png,image,gltf,scene_*}/
 
 The files are built here, in Python, from the format descriptions in
 engine/asset/include/nepheline/asset/{lz,format,pack}.h rather than by the
@@ -303,6 +303,9 @@ def main():
     sys.path.insert(0, os.path.join(ROOT, "scripts"))
     import fuzz_seeds_cook
     fuzz_seeds_cook.write_cook_seeds(write, CORPUS)
+    # The scene files (engine/scene; scripts/fuzz_seeds_scene.py).
+    import fuzz_seeds_scene
+    fuzz_seeds_scene.write_scene_seeds(write, CORPUS)
     return 0
 
 

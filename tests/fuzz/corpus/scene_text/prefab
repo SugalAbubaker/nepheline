@@ -1,0 +1,78 @@
+{
+  "nepheline_scene": 1,
+  "entities": [
+    {
+      "id": 0,
+      "prefab": {
+        "name": "crate",
+        "index": 0,
+        "root": 0
+      }
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "prefab": {
+        "name": "crate",
+        "index": 1,
+        "root": 0
+      }
+    },
+    {
+      "id": 2,
+      "prefab": {
+        "name": "crate",
+        "index": 0,
+        "root": 2
+      },
+      "overrides": {
+        "test.Position": {
+          "value": [
+            9,
+            2,
+            3
+          ]
+        }
+      },
+      "components": {
+        "test.Velocity": {
+          "value": [
+            0,
+            1,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "parent": 2,
+      "prefab": {
+        "name": "crate",
+        "index": 1,
+        "root": 2
+      },
+      "removed": [
+        "test.TagA"
+      ]
+    },
+    {
+      "id": 4,
+      "prefab": {
+        "name": "crate",
+        "index": 0,
+        "root": 4,
+        "full": true
+      },
+      "components": {
+        "test.Position": {
+          "value": [
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  ]
+}

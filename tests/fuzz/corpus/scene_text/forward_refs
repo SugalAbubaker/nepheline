@@ -1,0 +1,32 @@
+{
+  "nepheline_scene": 1,
+  "entities": [
+    {
+      "id": 10,
+      "components": {
+        "test.Health": {
+          "current": 1,
+          "maximum": 2,
+          "attacker": 30
+        }
+      }
+    },
+    {
+      "id": 30,
+      "parent": 20,
+      "components": {
+        "test.Health": {
+          "attacker": 10
+        }
+      }
+    },
+    {
+      "id": 20,
+      "components": {
+        "Name": {
+          "text": "middle"
+        }
+      }
+    }
+  ]
+}
