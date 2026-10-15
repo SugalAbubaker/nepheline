@@ -12,6 +12,7 @@ add_subdirectory(math)
 add_subdirectory(platform)
 add_subdirectory(jobs)
 add_subdirectory(asset)
+add_subdirectory(scene)
 # The offline cooker (tools/cook), a tool rather than an engine module.
 add_subdirectory(cook)
 
