@@ -23,6 +23,8 @@ nph_add_shaders(nph_shaders_samples
         samples/mesh.vert
         samples/mesh.frag
         samples/mesh_anim.comp
+        samples/cooked_mesh.vert
+        samples/cooked_mesh.frag
 )
 
 # Shaders of the GPU benchmarks (benchmarks/gpu).
