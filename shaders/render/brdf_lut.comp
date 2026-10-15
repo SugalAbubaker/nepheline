@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+// The split-sum DFG table (Karis, "Real Shading in Unreal Engine 4",
+// SIGGRAPH 2013): for NoV along x and perceptual roughness along y (texel
+// centres), the GGX lobe's directional albedo split into the scale (x)
+// and bias (y) of F0, integrated with importance-sampled half vectors and
+// the height-correlated Smith visibility of the forward pass. The same
+// integral runs on the CPU in nph_render_ref_dfg, which the render tests
+// compare against this table.
+//
+// dst_index: the table's storage slot; size: its extent; sample_count:
+// samples per texel.
+#version 460
+#include "render_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant, scalar) uniform Push { NphRenderIblPush pc; };
+
+void main()
+{
+    const uvec2 id = gl_GlobalInvocationID.xy;
+    if (id.x >= pc.size || id.y >= pc.size) {
+        return;
+    }
+    const float nov = (float(id.x) + 0.5) / float(pc.size);
+    const float roughness = (float(id.y) + 0.5) / float(pc.size);
+    const float a = roughness * roughness;
+    const vec3 v = vec3(sqrt(1.0 - nov * nov), 0.0, nov);
+    float scale = 0.0;
+    float bias = 0.0;
+    for (uint i = 0u; i < pc.sample_count; ++i) {
+        const vec3 h = nph_importance_sample_ggx(nph_hammersley(i, pc.sample_count), a);
+        const float voh = dot(v, h);
+        const vec3 l = 2.0 * voh * h - v;
+        const float nol = l.z;
+        const float noh = h.z;
+        if (nol > 0.0 && voh > 0.0) {
+            // f * NoL / pdf with pdf = D NoH / (4 VoH): D cancels.
+            const float g = nph_v_smith_ggx_correlated(nov, nol, a) * 4.0 * nol * voh / noh;
+            const float fc = pow(1.0 - voh, 5.0);
+            scale += (1.0 - fc) * g;
+            bias += fc * g;
+        }
+    }
+    const float inv = 1.0 / float(pc.sample_count);
+    imageStore(nph_images_2d[nonuniformEXT(pc.dst_index)], ivec2(id),
+               vec4(scale * inv, bias * inv, 0.0, 1.0));
+}

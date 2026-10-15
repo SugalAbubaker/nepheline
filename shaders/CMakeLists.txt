@@ -27,6 +27,28 @@ nph_add_shaders(nph_shaders_samples
         samples/cooked_mesh.frag
 )
 
+# The renderer (engine/render; docs/render.md): the forward PBR reference
+# renderer, image-based lighting, tonemapping, and debug lines.
+nph_add_shaders(nph_shaders_render
+    SOURCES
+        render/forward.vert
+        render/forward_opaque.frag
+        render/forward_mask.frag
+        render/forward_blend.frag
+        render/fullscreen.vert
+        render/sky.frag
+        render/tonemap.frag
+        render/debug_line.vert
+        render/debug_line.frag
+        render/ibl_sky.comp
+        render/ibl_equirect.comp
+        render/ibl_cube.comp
+        render/ibl_downsample.comp
+        render/ibl_prefilter.comp
+        render/ibl_sh.comp
+        render/brdf_lut.comp
+)
+
 # Shaders of the GPU benchmarks (benchmarks/gpu).
 nph_add_shaders(nph_shaders_bench
     SOURCES

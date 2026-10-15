@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: Apache-2.0
+// Projects one level of the environment cube onto the real spherical
+// harmonics to band 2 and convolves them with the clamped cosine lobe, so
+// the forward pass evaluates irradiance with nine coefficients
+// (Ramamoorthi & Hanrahan, "An Efficient Representation for Irradiance
+// Environment Maps", SIGGRAPH 2001: Â0 = π, Â1 = 2π/3, Â2 = π/4).
+//
+// One workgroup: each of the 64 invocations walks a strided share of the
+// texels in a fixed order and the partial sums are reduced through shared
+// memory in a fixed tree, so the result is identical on every run. Each
+// texel is weighted by its exact solid angle and the total is normalised
+// to 4π, which removes the small error of the texel quadrature.
+//
+// src_index: the level's storage slot; size: its extent; address: the
+// output (vec4[9], rgb used).
+#version 460
+#include "render_common.glsl"
+
+#define THREADS 64u
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, scalar) uniform Push { NphRenderIblPush pc; };
+
+shared vec3 s_sum[THREADS][9];
+shared float s_weight[THREADS];
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+    vec3 sum[9];
+    for (int k = 0; k < 9; ++k) {
+        sum[k] = vec3(0.0);
+    }
+    float weight = 0.0;
+    const uint size = pc.size;
+    const uint texels = 6u * size * size;
+    const float h = 1.0 / float(size); // half a texel in [-1, 1] face coordinates
+    for (uint i = tid; i < texels; i += THREADS) {
+        const uint face = i / (size * size);
+        const uint r = i - face * size * size;
+        const uint y = r / size;
+        const uint x = r - y * size;
+        const vec2 st = (vec2(x, y) + 0.5) / float(size);
+        const vec3 dir = nph_cube_direction(face, st);
+        const float sa = nph_cube_texel_solid_angle(st * 2.0 - 1.0, h);
+        const vec3 radiance = imageLoad(nph_images_2d_array[nonuniformEXT(pc.src_index)],
+                                        ivec3(x, y, face)).rgb;
+        float basis[9];
+        nph_sh9_basis(dir, basis);
+        for (int k = 0; k < 9; ++k) {
+            sum[k] += radiance * (basis[k] * sa);
+        }
+        weight += sa;
+    }
+    for (int k = 0; k < 9; ++k) {
+        s_sum[tid][k] = sum[k];
+    }
+    s_weight[tid] = weight;
+    barrier();
+    for (uint stride = THREADS / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            for (int k = 0; k < 9; ++k) {
+                s_sum[tid][k] += s_sum[tid + stride][k];
+            }
+            s_weight[tid] += s_weight[tid + stride];
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        const float norm = 4.0 * NPH_PI / s_weight[0];
+        const float band[3] = float[3](NPH_PI, 2.0 * NPH_PI / 3.0, 0.25 * NPH_PI);
+        ShRef out_sh = ShRef(pc.address);
+        for (int k = 0; k < 9; ++k) {
+            const int l = k == 0 ? 0 : (k < 4 ? 1 : 2);
+            out_sh.c[k] = vec4(s_sum[0][k] * (norm * band[l]), 0.0);
+        }
+    }
+}

@@ -1,0 +1,273 @@
+// SPDX-License-Identifier: Apache-2.0
+// CPU twins of the renderer's shader math (render/reference.h). Each
+// function mirrors a GLSL function in shaders/render/ line for line, in
+// double precision where the shader's single precision is not the point.
+#include <nepheline/math/scalar.h>
+#include <nepheline/render/reference.h>
+
+#include <math.h>
+
+#define REF_PI 3.14159265358979323846
+
+f32 nph_render_ref_d_ggx(f32 noh, f32 a)
+{
+    const f64 a2 = (f64)a * (f64)a;
+    const f64 d = ((f64)noh * a2 - (f64)noh) * (f64)noh + 1.0;
+    return (f32)(a2 / (REF_PI * d * d));
+}
+
+f32 nph_render_ref_v_smith(f32 nov, f32 nol, f32 a)
+{
+    const f64 a2 = (f64)a * (f64)a;
+    const f64 v = (f64)nov;
+    const f64 l = (f64)nol;
+    const f64 gv = l * sqrt(v * v * (1.0 - a2) + a2);
+    const f64 gl = v * sqrt(l * l * (1.0 - a2) + a2);
+    const f64 s = gv + gl;
+    return (f32)(0.5 / (s > 1e-8 ? s : 1e-8));
+}
+
+f32 nph_render_ref_f_schlick(f32 voh, f32 f0)
+{
+    const f64 f = pow(1.0 - (f64)voh, 5.0);
+    return (f32)((f64)f0 + (1.0 - (f64)f0) * f);
+}
+
+static u32 reverse_bits(u32 v)
+{
+    v = ((v >> 1U) & 0x55555555U) | ((v & 0x55555555U) << 1U);
+    v = ((v >> 2U) & 0x33333333U) | ((v & 0x33333333U) << 2U);
+    v = ((v >> 4U) & 0x0F0F0F0FU) | ((v & 0x0F0F0F0FU) << 4U);
+    v = ((v >> 8U) & 0x00FF00FFU) | ((v & 0x00FF00FFU) << 8U);
+    return (v >> 16U) | (v << 16U);
+}
+
+NphVec2 nph_render_ref_hammersley(u32 i, u32 n)
+{
+    return nph_vec2((f32)i / (f32)n, (f32)((f64)reverse_bits(i) * 2.3283064365386963e-10));
+}
+
+NphVec3 nph_render_ref_importance_sample_ggx(NphVec2 xi, f32 a)
+{
+    const f64 phi = 2.0 * REF_PI * (f64)xi.x;
+    const f64 a2 = (f64)a * (f64)a;
+    const f64 c = sqrt((1.0 - (f64)xi.y) / (1.0 + (a2 - 1.0) * (f64)xi.y));
+    const f64 cos_theta = c < 1.0 ? c : 1.0;
+    const f64 s2 = 1.0 - cos_theta * cos_theta;
+    const f64 sin_theta = sqrt(s2 > 0.0 ? s2 : 0.0);
+    return nph_vec3((f32)(sin_theta * cos(phi)), (f32)(sin_theta * sin(phi)), (f32)cos_theta);
+}
+
+NphVec2 nph_render_ref_dfg(f32 nov, f32 roughness, u32 samples)
+{
+    const f64 a = (f64)roughness * (f64)roughness;
+    const f64 vx = sqrt(1.0 - (f64)nov * (f64)nov);
+    const f64 vz = (f64)nov;
+    f64 scale = 0.0;
+    f64 bias = 0.0;
+    for (u32 i = 0; i < samples; ++i) {
+        const NphVec3 h =
+            nph_render_ref_importance_sample_ggx(nph_render_ref_hammersley(i, samples), (f32)a);
+        const f64 voh = vx * (f64)h.x + vz * (f64)h.z;
+        const f64 lz = 2.0 * voh * (f64)h.z - vz;
+        if (lz > 0.0 && voh > 0.0) {
+            const f64 g =
+                (f64)nph_render_ref_v_smith(nov, (f32)lz, (f32)a) * 4.0 * lz * voh / (f64)h.z;
+            const f64 fc = pow(1.0 - voh, 5.0);
+            scale += (1.0 - fc) * g;
+            bias += fc * g;
+        }
+    }
+    return nph_vec2((f32)(scale / samples), (f32)(bias / samples));
+}
+
+static f64 clamp01(f64 v)
+{
+    return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+}
+
+static void mul_rows(const f64 m[3][3], const f64 in[3], f64 out[3])
+{
+    for (u32 r = 0; r < 3U; ++r) {
+        out[r] = m[r][0] * in[0] + m[r][1] * in[1] + m[r][2] * in[2];
+    }
+}
+
+NphVec3 nph_render_ref_tonemap(NphVec3 color, NphRenderTonemapper tonemapper)
+{
+    const f64 c[3] = {(f64)color.x, (f64)color.y, (f64)color.z};
+    f64 out[3];
+    if (tonemapper == NPH_RENDER_TONEMAPPER_ACES) {
+        static const f64 in_m[3][3] = {
+            {0.59719, 0.35458, 0.04823}, {0.07600, 0.90834, 0.01566}, {0.02840, 0.13383, 0.83777}};
+        static const f64 out_m[3][3] = {{1.60475, -0.53108, -0.07367},
+                                        {-0.10208, 1.10813, -0.00605},
+                                        {-0.00327, -0.07276, 1.07602}};
+        f64 v[3];
+        mul_rows(in_m, c, v);
+        f64 f[3];
+        for (u32 i = 0; i < 3U; ++i) {
+            const f64 a = v[i] * (v[i] + 0.0245786) - 0.000090537;
+            const f64 b = v[i] * (0.983729 * v[i] + 0.4329510) + 0.238081;
+            f[i] = a / b;
+        }
+        mul_rows(out_m, f, out);
+        for (u32 i = 0; i < 3U; ++i) {
+            out[i] = clamp01(out[i]);
+        }
+    } else if (tonemapper == NPH_RENDER_TONEMAPPER_AGX) {
+        static const f64 in_m[3][3] = {{0.842479062253094, 0.0784335999999992, 0.0792237451477643},
+                                       {0.0423282422610123, 0.878468636469772, 0.0791661274605434},
+                                       {0.0423756549057051, 0.0784336, 0.879142973793104}};
+        static const f64 out_m[3][3] = {
+            {1.19687900512017, -0.0980208811401368, -0.0990297440797205},
+            {-0.0528968517574562, 1.15190312990417, -0.0989611768448433},
+            {-0.0529716355144438, -0.0980434501171241, 1.15107367264116}};
+        const f64 min_ev = -12.47393;
+        const f64 max_ev = 4.026069;
+        f64 v[3];
+        mul_rows(in_m, c, v);
+        for (u32 i = 0; i < 3U; ++i) {
+            f64 x = log2(v[i] > 1e-10 ? v[i] : 1e-10);
+            x = x < min_ev ? min_ev : (x > max_ev ? max_ev : x);
+            x = (x - min_ev) / (max_ev - min_ev);
+            const f64 x2 = x * x;
+            const f64 x4 = x2 * x2;
+            v[i] = 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 +
+                   0.1191 * x - 0.00232;
+        }
+        mul_rows(out_m, v, out);
+        for (u32 i = 0; i < 3U; ++i) {
+            out[i] = pow(clamp01(out[i]), 2.2);
+        }
+    } else {
+        for (u32 i = 0; i < 3U; ++i) {
+            out[i] = clamp01(c[i]);
+        }
+    }
+    return nph_vec3((f32)out[0], (f32)out[1], (f32)out[2]);
+}
+
+f32 nph_render_ref_linear_to_srgb(f32 c)
+{
+    const f64 v = (f64)c;
+    return (f32)(v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055);
+}
+
+f32 nph_render_ref_srgb_to_linear(f32 c)
+{
+    const f64 v = (f64)c;
+    return (f32)(v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
+}
+
+NphVec3 nph_render_ref_cube_direction(u32 face, f32 s, f32 t)
+{
+    const f32 u = 2.0F * s - 1.0F;
+    const f32 v = 2.0F * t - 1.0F;
+    NphVec3 d;
+    switch (face) {
+    case 0U:
+        d = nph_vec3(1.0F, -v, -u);
+        break;
+    case 1U:
+        d = nph_vec3(-1.0F, -v, u);
+        break;
+    case 2U:
+        d = nph_vec3(u, 1.0F, v);
+        break;
+    case 3U:
+        d = nph_vec3(u, -1.0F, -v);
+        break;
+    case 4U:
+        d = nph_vec3(u, -v, 1.0F);
+        break;
+    default:
+        d = nph_vec3(-u, -v, -1.0F);
+        break;
+    }
+    return nph_vec3_normalize(d);
+}
+
+static f64 area_element(f64 x, f64 y)
+{
+    return atan2(x * y, sqrt(x * x + y * y + 1.0));
+}
+
+f32 nph_render_ref_cube_texel_solid_angle(f32 u, f32 v, f32 h)
+{
+    const f64 x0 = (f64)u - (f64)h;
+    const f64 y0 = (f64)v - (f64)h;
+    const f64 x1 = (f64)u + (f64)h;
+    const f64 y1 = (f64)v + (f64)h;
+    return (f32)(area_element(x0, y0) - area_element(x0, y1) - area_element(x1, y0) +
+                 area_element(x1, y1));
+}
+
+NphVec3 nph_render_ref_sky(const NphRenderSkyDesc *sky, NphVec3 d)
+{
+    const f32 h = d.y;
+    if (h >= 0.0F) {
+        const f32 t = nph_f32_pow(h, sky->zenith_exponent);
+        return nph_vec3_lerp(sky->horizon, sky->zenith, t);
+    }
+    const f32 t = nph_f32_saturate(-h * sky->ground_sharpness);
+    return nph_vec3_lerp(sky->horizon, sky->ground, t);
+}
+
+void nph_render_ref_sh9_basis(NphVec3 d, f32 out[9])
+{
+    out[0] = 0.282095F;
+    out[1] = 0.488603F * d.y;
+    out[2] = 0.488603F * d.z;
+    out[3] = 0.488603F * d.x;
+    out[4] = 1.092548F * d.x * d.y;
+    out[5] = 1.092548F * d.y * d.z;
+    out[6] = 0.315392F * (3.0F * d.z * d.z - 1.0F);
+    out[7] = 1.092548F * d.x * d.z;
+    out[8] = 0.546274F * (d.x * d.x - d.y * d.y);
+}
+
+void nph_render_ref_sh9_sky(const NphRenderSkyDesc *sky, u32 size, NphVec3 out[9])
+{
+    f64 sum[9][3] = {{0.0}};
+    f64 weight = 0.0;
+    const f32 h = 1.0F / (f32)size;
+    for (u32 face = 0; face < 6U; ++face) {
+        for (u32 y = 0; y < size; ++y) {
+            for (u32 x = 0; x < size; ++x) {
+                const f32 s = ((f32)x + 0.5F) / (f32)size;
+                const f32 t = ((f32)y + 0.5F) / (f32)size;
+                const NphVec3 dir = nph_render_ref_cube_direction(face, s, t);
+                const f64 sa =
+                    (f64)nph_render_ref_cube_texel_solid_angle(2.0F * s - 1.0F, 2.0F * t - 1.0F, h);
+                const NphVec3 l = nph_render_ref_sky(sky, dir);
+                f32 basis[9];
+                nph_render_ref_sh9_basis(dir, basis);
+                for (u32 k = 0; k < 9U; ++k) {
+                    sum[k][0] += (f64)l.x * (f64)basis[k] * sa;
+                    sum[k][1] += (f64)l.y * (f64)basis[k] * sa;
+                    sum[k][2] += (f64)l.z * (f64)basis[k] * sa;
+                }
+                weight += sa;
+            }
+        }
+    }
+    const f64 norm = 4.0 * REF_PI / weight;
+    const f64 band[3] = {REF_PI, 2.0 * REF_PI / 3.0, 0.25 * REF_PI};
+    for (u32 k = 0; k < 9U; ++k) {
+        const u32 l = k == 0U ? 0U : (k < 4U ? 1U : 2U);
+        const f64 f = norm * band[l];
+        out[k] = nph_vec3((f32)(sum[k][0] * f), (f32)(sum[k][1] * f), (f32)(sum[k][2] * f));
+    }
+}
+
+NphVec3 nph_render_ref_sh9_irradiance(const NphVec3 sh[9], NphVec3 n)
+{
+    f32 basis[9];
+    nph_render_ref_sh9_basis(n, basis);
+    NphVec3 e = nph_vec3_zero();
+    for (u32 k = 0; k < 9U; ++k) {
+        e = nph_vec3_add(e, nph_vec3_scale(sh[k], basis[k]));
+    }
+    return nph_vec3_max(e, nph_vec3_zero());
+}
