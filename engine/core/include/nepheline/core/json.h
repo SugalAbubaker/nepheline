@@ -134,7 +134,9 @@ NPH_MUST_USE NphResult nph_json_object_set(NphJsonDoc *doc, NphJsonValue *object
 // ---------------------------------------------------------------------------
 
 // Appends `value` as JSON text. Pretty output uses two-space indents and
-// one member or element per line. Non-finite numbers are written as null.
+// one member or element per line. Numbers are written in the shortest form
+// that reads back as the same double; non-finite numbers are written as
+// null.
 NPH_MUST_USE NphResult nph_json_write(const NphJsonValue *value, NphStrBuilder *out, bool pretty);
 
 // Streaming writer: emits well-formed JSON without building a tree. Misuse
@@ -157,7 +159,11 @@ NPH_MUST_USE NphResult nph_json_writer_key(NphJsonWriter *w, NphStr key);
 NPH_MUST_USE NphResult nph_json_writer_null(NphJsonWriter *w);
 NPH_MUST_USE NphResult nph_json_writer_bool(NphJsonWriter *w, bool value);
 NPH_MUST_USE NphResult nph_json_writer_i64(NphJsonWriter *w, i64 value);
+// Numbers in the shortest form that reads back as the same value (an f32
+// written with nph_json_writer_f32 needs fewer digits than as a double).
+// Non-finite values are written as null.
 NPH_MUST_USE NphResult nph_json_writer_f64(NphJsonWriter *w, f64 value);
+NPH_MUST_USE NphResult nph_json_writer_f32(NphJsonWriter *w, f32 value);
 NPH_MUST_USE NphResult nph_json_writer_str(NphJsonWriter *w, NphStr value);
 
 // Appends `s` as a quoted, escaped JSON string.

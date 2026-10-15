@@ -782,7 +782,7 @@ static NphResult write_number(NphStrBuilder *out, const NphJsonValue *v)
     if (isnan(v->number) || isinf(v->number)) {
         return nph_sb_append_cstr(out, "null");
     }
-    return nph_sb_append_f64(out, v->number);
+    return nph_sb_append_f64_shortest(out, v->number);
 }
 
 static NphResult write_indent(NphStrBuilder *out, u32 depth)
@@ -969,7 +969,16 @@ NphResult nph_json_writer_f64(NphJsonWriter *w, f64 value)
     if (isnan(value) || isinf(value)) {
         return nph_sb_append_cstr(w->out, "null");
     }
-    return nph_sb_append_f64(w->out, value);
+    return nph_sb_append_f64_shortest(w->out, value);
+}
+
+NphResult nph_json_writer_f32(NphJsonWriter *w, f32 value)
+{
+    NPH_TRY(writer_before_item(w, false));
+    if (isnan(value) || isinf(value)) {
+        return nph_sb_append_cstr(w->out, "null");
+    }
+    return nph_sb_append_f32_shortest(w->out, value);
 }
 
 NphResult nph_json_writer_str(NphJsonWriter *w, NphStr value)

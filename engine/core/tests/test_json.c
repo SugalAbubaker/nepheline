@@ -295,6 +295,27 @@ NTEST_F(JsonFixture, build_write_and_reparse)
     NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[\n  null,\n  {}\n]");
 }
 
+NTEST_F(JsonFixture, numbers_are_written_in_shortest_form)
+{
+    NphJsonWriter w;
+    nph_json_writer_init(&w, &f->sb, false);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f64(&w, 0.1), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, 0.1F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, (f32)NAN), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, -2.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[0.1,0.1,null,-2.5]");
+    // The tree writer uses the same form.
+    NphJsonDoc doc;
+    NTEST_ASSERT_EQ_INT(nph_json_parse(nph_sb_str(&f->sb), nph_allocator_system(), &doc),
+                        NPH_RESULT_OK);
+    nph_sb_clear(&f->sb);
+    NTEST_ASSERT_EQ_INT(nph_json_write(doc.root, &f->sb, false), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[0.1,0.1,null,-2.5]");
+    nph_json_doc_free(&doc);
+}
+
 NTEST_F(JsonFixture, streaming_writer)
 {
     NphJsonWriter w;

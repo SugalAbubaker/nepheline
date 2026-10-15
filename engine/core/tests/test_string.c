@@ -7,7 +7,9 @@
 
 #include "test_support.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 NTEST(str, views_and_slices)
@@ -230,6 +232,69 @@ NTEST_F(SbFixture, append_and_terminate)
     NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "7-x");
     nph_sb_truncate(&f->sb, 100U);
     NTEST_ASSERT_EQ_UINT(f->sb.len, 3U);
+}
+
+// The shortest text that reads back exactly, for f64 and f32.
+static void expect_shortest_f64(NphStrBuilder *sb, f64 v, const char *expect)
+{
+    nph_sb_clear(sb);
+    NTEST_ASSERT_EQ_INT(nph_sb_append_f64_shortest(sb, v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(nph_sb_cstr(sb), expect);
+}
+
+static void expect_shortest_f32(NphStrBuilder *sb, f32 v, const char *expect)
+{
+    nph_sb_clear(sb);
+    NTEST_ASSERT_EQ_INT(nph_sb_append_f32_shortest(sb, v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(nph_sb_cstr(sb), expect);
+}
+
+NTEST_F(SbFixture, shortest_float_text_round_trips)
+{
+    expect_shortest_f64(&f->sb, 0.1, "0.1");
+    expect_shortest_f64(&f->sb, 1.0, "1");
+    expect_shortest_f64(&f->sb, -0.0, "-0");
+    expect_shortest_f64(&f->sb, 1.0 / 3.0, "0.3333333333333333");
+    expect_shortest_f64(&f->sb, 1e300, "1e+300");
+    expect_shortest_f64(&f->sb, 10.0, "10");
+    expect_shortest_f64(&f->sb, 1200.0, "1200");
+    expect_shortest_f64(&f->sb, 1e16, "10000000000000000");
+    expect_shortest_f64(&f->sb, 1e17, "1e+17");
+    expect_shortest_f64(&f->sb, 1.5e-5, "1.5e-05");
+    expect_shortest_f64(&f->sb, 0.001, "0.001");
+    expect_shortest_f64(&f->sb, 5e-324, "5e-324");
+    expect_shortest_f64(&f->sb, (f64)INFINITY, "inf");
+    expect_shortest_f64(&f->sb, -(f64)INFINITY, "-inf");
+    expect_shortest_f64(&f->sb, (f64)NAN, "nan");
+    expect_shortest_f32(&f->sb, 0.1F, "0.1");
+    expect_shortest_f32(&f->sb, 1.0F / 3.0F, "0.33333334");
+    expect_shortest_f32(&f->sb, -0.0F, "-0");
+    expect_shortest_f32(&f->sb, 16777216.0F, "16777216");
+    expect_shortest_f32(&f->sb, 20.0F, "20");
+    expect_shortest_f32(&f->sb, 1.0e10F, "10000000000");
+    expect_shortest_f32(&f->sb, 3.4028235e38F, "3.4028235e+38");
+    expect_shortest_f32(&f->sb, (f32)INFINITY, "inf");
+    // Every value of a sweep reads back bit for bit.
+    u32 bits = 0x00000001U;
+    for (u32 i = 0; i < 200000U; ++i) {
+        f32 v;
+        memcpy(&v, &bits, sizeof v);
+        bits = bits * 2654435761U + 12345U;
+        if (isnan(v) || isinf(v)) {
+            continue;
+        }
+        nph_sb_clear(&f->sb);
+        NTEST_ASSERT_EQ_INT(nph_sb_append_f32_shortest(&f->sb, v), NPH_RESULT_OK);
+        const f32 back = strtof(nph_sb_cstr(&f->sb), NULL);
+        NTEST_ASSERT_EQ_MEM(&back, &v, sizeof v);
+        const f32 via_double = (f32)strtod(nph_sb_cstr(&f->sb), NULL);
+        NTEST_ASSERT_EQ_MEM(&via_double, &v, sizeof v);
+        const f64 d = (f64)v * 1.0000001;
+        nph_sb_clear(&f->sb);
+        NTEST_ASSERT_EQ_INT(nph_sb_append_f64_shortest(&f->sb, d), NPH_RESULT_OK);
+        const f64 dback = strtod(nph_sb_cstr(&f->sb), NULL);
+        NTEST_ASSERT_EQ_MEM(&dback, &d, sizeof d);
+    }
 }
 
 NTEST_F(SbFixture, grows_across_many_appends)
