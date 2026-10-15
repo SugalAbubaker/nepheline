@@ -16,3 +16,5 @@ add_subdirectory(asset)
 add_subdirectory(cook)
 
 add_subdirectory(gpu)
+# The render module's CPU work and the golden-image toolkit (tools/golden).
+add_subdirectory(render)

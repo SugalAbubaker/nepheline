@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "executable": "render_bench.exe",
+  "timestamp": "2026-10-15T19:27:29Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "primitive_sphere_64x32", "label": "", "iterations": 612, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 289687.908, "min_ns_per_op": 284340.686, "max_ns_per_op": 329764.869},
+    {"name": "primitive_cube", "label": "", "iterations": 90464, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2427.121, "min_ns_per_op": 2426.076, "max_ns_per_op": 2469.889},
+    {"name": "flip_256", "label": "", "iterations": 5, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 48569080.000, "min_ns_per_op": 47925700.000, "max_ns_per_op": 48881640.000},
+    {"name": "png_encode_256", "label": "", "iterations": 120, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 1920960.833, "min_ns_per_op": 1916642.500, "max_ns_per_op": 1926451.667},
+    {"name": "png_decode_256", "label": "", "iterations": 115, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2090874.783, "min_ns_per_op": 2085776.522, "max_ns_per_op": 2092706.087},
+    {"name": "ref_dfg_256_samples", "label": "", "iterations": 28276, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 8867.379, "min_ns_per_op": 8842.347, "max_ns_per_op": 8874.282}
+  ]
+}
