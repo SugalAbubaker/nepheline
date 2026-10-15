@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// Fills level 0 of the environment cube with the procedural sky
+// (NphRenderSkyData at pc.address). One invocation per texel; z is the
+// face. dst_index is the level's storage slot (a 2D array of six faces).
+#version 460
+#include "render_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant, scalar) uniform Push { NphRenderIblPush pc; };
+
+void main()
+{
+    const uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= pc.size || id.y >= pc.size) {
+        return;
+    }
+    const vec2 st = (vec2(id.xy) + 0.5) / float(pc.size);
+    const vec3 dir = nph_cube_direction(id.z, st);
+    const vec3 radiance = nph_sky_radiance(SkyRef(pc.address).s, dir);
+    imageStore(nph_images_2d_array[nonuniformEXT(pc.dst_index)], ivec3(id),
+               vec4(min(radiance, vec3(NPH_RENDER_HALF_MAX)), 1.0));
+}

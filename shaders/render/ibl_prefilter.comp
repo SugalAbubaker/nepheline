@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: Apache-2.0
+// One level of the prefiltered specular cube (the first sum of the
+// split-sum approximation, Karis 2013): the environment convolved with
+// the GGX lobe of roughness params.x under the assumption N = V = R.
+//
+// Each sample reads the environment at a level chosen from the sample's
+// probability (Křivánek & Colbert, "Real-time Shading with Filtered
+// Importance Sampling", EGSR 2008; GPU Gems 3 ch. 20): a sample standing
+// for a solid angle wider than a texel reads a level where one texel spans
+// it, so a modest sample count converges without fireflies.
+//
+// src_index/sampler_index: the environment cube (sampled, full mip chain);
+// src_size: its level-0 extent; params.y: its highest level; dst_index:
+// the destination level's storage slot; size: its extent; sample_count:
+// GGX samples per texel (roughness 0 takes one, the mirror direction).
+#version 460
+#include "render_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant, scalar) uniform Push { NphRenderIblPush pc; };
+
+vec3 env_lod(vec3 dir, float lod)
+{
+    return textureLod(samplerCube(nph_textures_cube[nonuniformEXT(pc.src_index)],
+                                  nph_samplers[nonuniformEXT(pc.sampler_index)]),
+                      dir, lod).rgb;
+}
+
+void main()
+{
+    const uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= pc.size || id.y >= pc.size) {
+        return;
+    }
+    const vec2 st = (vec2(id.xy) + 0.5) / float(pc.size);
+    const vec3 n = nph_cube_direction(id.z, st);
+    const float roughness = pc.params.x;
+    const float max_lod = pc.params.y;
+    vec3 color;
+    if (roughness <= 0.0 || pc.sample_count <= 1u) {
+        // The mirror: the environment at this level's resolution.
+        color = env_lod(n, clamp(log2(float(pc.src_size) / float(pc.size)), 0.0, max_lod));
+    } else {
+        const float a = roughness * roughness;
+        vec3 t;
+        vec3 b;
+        nph_basis(n, t, b);
+        // The solid angle of one level-0 texel, on average.
+        const float texel_sa = 4.0 * NPH_PI / (6.0 * float(pc.src_size) * float(pc.src_size));
+        color = vec3(0.0);
+        float weight = 0.0;
+        for (uint i = 0u; i < pc.sample_count; ++i) {
+            const vec3 h_t = nph_importance_sample_ggx(nph_hammersley(i, pc.sample_count), a);
+            const vec3 h = t * h_t.x + b * h_t.y + n * h_t.z;
+            const float noh = h_t.z;
+            const vec3 l = 2.0 * noh * h - n; // reflect V = N about H
+            const float nol = dot(n, l);
+            if (nol <= 0.0) {
+                continue;
+            }
+            // pdf(l) = D(h) NoH / (4 VoH), and VoH = NoH when V = N.
+            const float pdf = nph_d_ggx(noh, a) * 0.25;
+            const float sample_sa = 1.0 / (float(pc.sample_count) * pdf + 1e-6);
+            const float lod = clamp(0.5 * log2(sample_sa / texel_sa) + 1.0, 0.0, max_lod);
+            color += env_lod(l, lod) * nol;
+            weight += nol;
+        }
+        color /= max(weight, 1e-6);
+    }
+    imageStore(nph_images_2d_array[nonuniformEXT(pc.dst_index)], ivec3(id),
+               vec4(min(color, vec3(NPH_RENDER_HALF_MAX)), 1.0));
+}
