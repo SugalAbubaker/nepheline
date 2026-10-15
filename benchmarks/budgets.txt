@@ -174,3 +174,12 @@ mesh_optimize                  770
 mesh_meshlets                  1700
 mesh_process                   6300
 gltf_import_glb                12700
+
+# render_bench (docs/render.md, docs/golden.md). flip_256 is one golden-image
+# comparison; the PNG rows are a 256 x 256 RGB golden image.
+primitive_sphere_64x32         870000
+primitive_cube                 7500
+flip_256                       150000000
+png_encode_256                 6000000
+png_decode_256                 6500000
+ref_dfg_256_samples            27000
