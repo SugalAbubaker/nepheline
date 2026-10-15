@@ -2,6 +2,7 @@
 // Instance, physical device selection, logical device, queues, timelines,
 // submission, and device lifetime (docs/gpu.md, docs/adr/0014-gpu-module.md).
 #include <nepheline/core/version.h>
+#include <nepheline/gpu/upload.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/window.h>
 
@@ -1542,6 +1543,10 @@ NphResult nph_gpu_device_wait_idle(NphGpuDevice *dev)
     if (dev->lost) {
         return NPH_RESULT_DEVICE_LOST;
     }
+    // Pending uploads are work too: submit them so the wait covers them.
+    // Recycling the slots below would otherwise reset their command buffer
+    // and release their staging memory under them, losing the copies.
+    NPH_TRY(nph_gpu_upload_flush(dev, NULL));
     VK_TRY(dev, vkDeviceWaitIdle(dev->device));
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         gpu_run_deferred(dev, i);

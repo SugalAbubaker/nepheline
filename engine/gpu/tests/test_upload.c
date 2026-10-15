@@ -62,6 +62,62 @@ NTEST_F(GpuFixture, buffer_upload_round_trips)
     NPH_FREE_ARRAY(nph_allocator_system(), u32, out, WORDS);
 }
 
+// Waiting for the device covers uploads that were queued but never
+// flushed: they are submitted, not dropped with the recycled pools.
+NTEST_F(GpuFixture, wait_idle_submits_pending_uploads)
+{
+    REQUIRE_DEVICE(f);
+    u32 src[256];
+    u32 out[256];
+    fill_pattern(src, 256U, 11U);
+    NphGpuBuffer buf = test_make_buffer(f->dev, sizeof src,
+                                        (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                                        NPH_GPU_MEMORY_DEVICE, "pending");
+    const u64 free_before = nph_gpu_upload_staging_free(f->dev);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, src, sizeof src), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_gpu_upload_staging_free(f->dev), free_before);
+    u64 value = 1U;
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, &value), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(value, 0U); // nothing was left pending
+    test_read_buffer(f->dev, buf, 0U, sizeof src, out);
+    NTEST_EXPECT_EQ_MEM(out, src, sizeof src);
+    // The same inside a frame.
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+    fill_pattern(src, 256U, 12U);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, src, sizeof src), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, buf, 0U, sizeof src, out);
+    NTEST_EXPECT_EQ_MEM(out, src, sizeof src);
+    nph_gpu_buffer_destroy(f->dev, buf);
+}
+
+// Uploads queued between frames survive the next frame_begin, which
+// recycles the command pool they were recorded into.
+NTEST_F(GpuFixture, uploads_between_frames_survive_frame_begin)
+{
+    REQUIRE_DEVICE(f);
+    u32 src[256];
+    u32 out[256];
+    NphGpuBuffer buf = test_make_buffer(f->dev, sizeof src,
+                                        (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                                        NPH_GPU_MEMORY_DEVICE, "between frames");
+    for (u32 round = 0; round < 3U; ++round) {
+        fill_pattern(src, 256U, 100U + round);
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(f->dev, buf, 0U, src, sizeof src), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+        test_read_buffer(f->dev, buf, 0U, sizeof src, out);
+        NTEST_EXPECT_EQ_MEM(out, src, sizeof src);
+    }
+    nph_gpu_buffer_destroy(f->dev, buf);
+}
+
 NTEST_F(GpuFixture, upload_arguments_are_validated)
 {
     REQUIRE_DEVICE(f);
