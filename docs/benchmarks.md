@@ -78,7 +78,12 @@ dependencies, like ntest.
 
 Budgets are set at roughly three times the recorded reference-machine
 number: hosted runners are slower and noisier, and the budget exists to
-catch regressions of integer factors, not percentage drift. The GPU
+catch regressions of integer factors, not percentage drift. A benchmark
+that blows through its budget on one hosted CPU model only usually has a
+microarchitectural cause worth fixing rather than a budget to raise:
+`lz_decompress_zeros` ran 4.5x slower on some runners because each copy
+step waited on store-to-load forwarding (docs/asset.md). The workflow
+prints each runner's CPU model before the run for this reason. The GPU
 budgets are the tight kind: measured on the reference machine and enforced
 there, within 5 % (below).
 
