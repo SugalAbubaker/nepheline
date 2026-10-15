@@ -665,6 +665,96 @@ NTEST_F(Frame, mirrored_instances_keep_their_front_faces)
     nph_render_mesh_destroy(f->renderer, mesh);
 }
 
+// The radiance of a rough white surface with normal `n`, seen along +Z
+// (V = +Z) and lit by illuminance `e` from direction `l`, pre-exposed at
+// EV100 0: the forward shader's BRDF, evaluated with the reference math.
+static f32 lit_radiance(NphVec3 n, NphVec3 l, f32 e)
+{
+    const NphVec3 v = nph_vec3_unit_z();
+    const NphVec3 h = nph_vec3_normalize(nph_vec3_add(v, l));
+    const f32 nol = nph_vec3_dot(n, l);
+    const f32 nov = nph_vec3_dot(n, v);
+    const NphVec2 dfg = nph_render_ref_dfg(nov, 1.0F, 1024U);
+    const f32 energy = 1.0F + 0.04F * (1.0F / (dfg.x + dfg.y) - 1.0F);
+    const f32 spec = nph_render_ref_d_ggx(nph_vec3_dot(n, h), 1.0F) *
+                     nph_render_ref_v_smith(nov, nol, 1.0F) *
+                     nph_render_ref_f_schlick(nph_vec3_dot(v, h), 0.04F) * energy;
+    return (1.0F / NPH_PI + spec) * e * nol / 1.2F;
+}
+
+NTEST_F(Frame, normal_maps_follow_the_tangent_frame)
+{
+    REQUIRE_RENDERER(f);
+    // A constant tangent-space normal tilted 30 degrees towards +u
+    // ((sin 30, 0, cos 30)), as three-channel RGBA8 and as two-channel RG8
+    // (z rebuilt in the shader).
+    const u8 rgba[4] = {191U, 128U, 238U, 255U};
+    const u8 rg[2] = {191U, 128U};
+    const void *mips_rgba[1] = {rgba};
+    const void *mips_rg[1] = {rg};
+    const u64 size_rgba[1] = {sizeof rgba};
+    const u64 size_rg[1] = {sizeof rg};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    td.width = 1U;
+    td.height = 1U;
+    td.mip_count = 1U;
+    td.mips = mips_rgba;
+    td.mip_sizes = size_rgba;
+    NphRenderTexture three = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &three), NPH_RESULT_OK);
+    td.format = NPH_GPU_FORMAT_R8G8_UNORM;
+    td.mips = mips_rg;
+    td.mip_sizes = size_rg;
+    td.flags = (u32)NPH_RENDER_TEXTURE_FLAG_NORMAL_TWO_CHANNEL;
+    NphRenderTexture two = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &two), NPH_RESULT_OK);
+
+    // Lit from +X and the camera's side: the tilt towards +u (+X on the
+    // plane) faces the light; on a mirrored copy +u runs along -X, and the
+    // same texel tilts away from it.
+    const NphVec3 l = nph_vec3_normalize(nph_vec3(1.0F, 0.0F, 1.0F));
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 1.5F;
+    ld.direction = nph_vec3_neg(l);
+    NphRenderLight light = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    const NphRenderMesh mesh = facing_plane(f);
+    const f32 s30 = 0.5F;
+    const f32 c30 = 0.8660254F;
+    const f32 toward = lit_radiance(nph_vec3(s30, 0.0F, c30), l, 1.5F);
+    const f32 away = lit_radiance(nph_vec3(-s30, 0.0F, c30), l, 1.5F);
+    const NphRenderTexture maps[2] = {three, two};
+    for (u32 k = 0; k < 2U; ++k) {
+        NphRenderMaterialDesc md;
+        nph_render_material_desc_default(&md);
+        md.textures[NPH_RENDER_SLOT_NORMAL].texture = maps[k];
+        NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+        for (u32 mirror = 0; mirror < 2U; ++mirror) {
+            const NphRenderTransform t = nph_render_transform_from_trs(
+                nph_dvec3_zero(), nph_quat_from_rotation_x(0.5F * NPH_PI),
+                nph_vec3(mirror != 0U ? -1.0F : 1.0F, 1.0F, 1.0F));
+            const NphRenderInstance inst = add_instance(f, mesh, mat, t);
+            NphRenderView v;
+            plain_view(&v);
+            test_render_read(f, &v);
+            const u8 *p = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U);
+            NTEST_EXPECT_TRUE(byte_near(p[0], expected_byte(mirror != 0U ? away : toward), 3U));
+            nph_render_instance_destroy(f->renderer, inst);
+        }
+        nph_render_material_destroy(f->renderer, mat);
+    }
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    nph_render_texture_destroy(f->renderer, three);
+    nph_render_texture_destroy(f->renderer, two);
+}
+
 NTEST_F(Frame, alpha_modes)
 {
     REQUIRE_RENDERER(f);
