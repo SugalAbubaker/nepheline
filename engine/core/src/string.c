@@ -491,12 +491,48 @@ NphResult nph_sb_append_f64(NphStrBuilder *sb, f64 v)
     return nph_sb_append(sb, nph_str(buffer, (u64)n));
 }
 
+// Shortest round-trip text (nph_sb_append_f64_shortest and _f32_shortest).
+//
+// The decimal printed at precision p + 1 is the nearest (p + 1)-digit
+// decimal to the value, and the p-digit one is among those candidates, so
+// it is at least as close: once a precision reads back exactly, every
+// larger one does too (the decimals that read back as a given float form
+// an interval around it). That makes the shortest precision a binary
+// search over [1, max], a handful of snprintf/strtod pairs instead of up to
+// `max` of them. Integers below 10^15 skip the search: their shortest form
+// is the integer itself.
+typedef bool (*RoundTripFn)(const char *text, const void *value);
+
+static bool f64_round_trips(const char *text, const void *value)
+{
+    const f64 back = strtod(text, NULL);
+    return memcmp(&back, value, sizeof back) == 0;
+}
+
+// The f32 text must read back as the value both through strtof and through
+// strtod followed by a conversion to float, the path of a JSON reader that
+// parses every number as a double: a short decimal can round differently
+// the two ways when it sits near a midpoint between two floats (double
+// rounding). Each condition holds from some precision on, so the search
+// uses the cheaper one and the other is checked at the end (9 digits
+// always satisfy strtof, %.17g of the exact double value both).
+static bool f32_round_trips(const char *text, const void *value)
+{
+    const f32 back = strtof(text, NULL);
+    return memcmp(&back, value, sizeof back) == 0;
+}
+
+static bool f32_round_trips_through_double(const char *text, const void *value)
+{
+    const f32 back = (f32)strtod(text, NULL);
+    return memcmp(&back, value, sizeof back) == 0;
+}
+
 // %g switches to exponent notation as soon as the exponent reaches the
 // precision, so the shortest precision for 10 prints "1e+01". When the
-// exponent is small, print the same value positionally with as many
-// digits as the integer part needs: more digits are closer to the value,
-// so the text still reads back exactly (the decimals that read back as a
-// given float form an interval around it).
+// exponent is small, print the same value positionally with as many digits
+// as the integer part needs: more digits are closer, so it still reads
+// back exactly.
 static int positional(char *buffer, size_t size, int n, f64 v)
 {
     const char *e = memchr(buffer, 'e', (size_t)n);
@@ -510,81 +546,67 @@ static int positional(char *buffer, size_t size, int n, f64 v)
     return snprintf(buffer, size, "%.*g", (int)exponent + 1, v);
 }
 
-// Non-finite values in the C library's spelling; false for finite ones.
-static bool append_non_finite(NphStrBuilder *sb, f64 v, NphResult *out)
+// The shortest precision in [1, search_max] satisfying `ok`, then raised
+// until `also` holds too (NULL: nothing more); 17 always satisfies both.
+static NphResult append_shortest(NphStrBuilder *sb, f64 v, int search_max, RoundTripFn ok,
+                                 RoundTripFn also, const void *value)
 {
     if (isnan(v)) {
-        *out = nph_sb_append_cstr(sb, "nan");
-        return true;
+        return nph_sb_append_cstr(sb, "nan");
     }
     if (isinf(v)) {
-        *out = nph_sb_append_cstr(sb, v > 0.0 ? "inf" : "-inf");
-        return true;
+        return nph_sb_append_cstr(sb, v > 0.0 ? "inf" : "-inf");
     }
-    return false;
+    char buffer[40];
+    int n = 0;
+    if (v == floor(v) && fabs(v) < 1e15) {
+        // Exact as an i64, and printed without the C library, which costs
+        // about as much per call as the whole integer path should.
+        if (v == 0.0 && signbit(v)) {
+            return nph_sb_append_cstr(sb, "-0");
+        }
+        return nph_sb_append_i64(sb, (i64)v);
+    } else {
+        int lo = 1;
+        int hi = search_max;
+        while (lo < hi) {
+            const int mid = lo + (hi - lo) / 2;
+            n = snprintf(buffer, sizeof buffer, "%.*g", mid, v);
+            if (n <= 0 || (size_t)n >= sizeof buffer) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+            if (ok(buffer, value)) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        n = snprintf(buffer, sizeof buffer, "%.*g", lo, v);
+        while (also != NULL && lo < 17 && n > 0 && (size_t)n < sizeof buffer &&
+               !also(buffer, value)) {
+            lo += 1;
+            n = snprintf(buffer, sizeof buffer, "%.*g", lo, v);
+        }
+        if (n > 0 && (size_t)n < sizeof buffer) {
+            n = positional(buffer, sizeof buffer, n, v);
+        }
+    }
+    if (n <= 0 || (size_t)n >= sizeof buffer) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    return nph_sb_append(sb, nph_str(buffer, (u64)n));
 }
 
 NphResult nph_sb_append_f64_shortest(NphStrBuilder *sb, f64 v)
 {
-    NphResult r = NPH_RESULT_OK;
-    if (append_non_finite(sb, v, &r)) {
-        return r;
-    }
-    // %.17g always round-trips a binary64; the shortest precision that
-    // does is usually much smaller (Steele & White, "How to Print
+    // %.17g always round-trips a binary64 (Steele & White, "How to Print
     // Floating-Point Numbers Accurately", PLDI 1990, for the bound).
-    char buffer[40];
-    int n = 0;
-    for (int precision = 1; precision <= 17; ++precision) {
-        n = snprintf(buffer, sizeof buffer, "%.*g", precision, v);
-        if (n <= 0 || (size_t)n >= sizeof buffer) {
-            return NPH_RESULT_INVALID_ARGUMENT;
-        }
-        const f64 back = strtod(buffer, NULL);
-        if (memcmp(&back, &v, sizeof v) == 0) {
-            break;
-        }
-    }
-    n = positional(buffer, sizeof buffer, n, v);
-    if (n <= 0 || (size_t)n >= sizeof buffer) {
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
-    return nph_sb_append(sb, nph_str(buffer, (u64)n));
+    return append_shortest(sb, v, 17, f64_round_trips, NULL, &v);
 }
 
 NphResult nph_sb_append_f32_shortest(NphStrBuilder *sb, f32 v)
 {
-    NphResult r = NPH_RESULT_OK;
-    if (append_non_finite(sb, (f64)v, &r)) {
-        return r;
-    }
-    // The text must read back as `v` both through strtof and through
-    // strtod followed by a conversion to float, the path of a JSON reader
-    // that parses every number as a double: a short decimal can round
-    // differently the two ways when it sits near a midpoint between two
-    // floats (double rounding). %.17g of the exact double value of `v`
-    // satisfies both, so it ends the search.
-    char buffer[40];
-    for (int precision = 1; precision <= 9; ++precision) {
-        const int n = snprintf(buffer, sizeof buffer, "%.*g", precision, (f64)v);
-        if (n <= 0 || (size_t)n >= sizeof buffer) {
-            return NPH_RESULT_INVALID_ARGUMENT;
-        }
-        const f32 direct = strtof(buffer, NULL);
-        const f32 through_double = (f32)strtod(buffer, NULL);
-        if (memcmp(&direct, &v, sizeof v) == 0 && memcmp(&through_double, &v, sizeof v) == 0) {
-            const int m = positional(buffer, sizeof buffer, n, (f64)v);
-            if (m <= 0 || (size_t)m >= sizeof buffer) {
-                return NPH_RESULT_INVALID_ARGUMENT;
-            }
-            return nph_sb_append(sb, nph_str(buffer, (u64)m));
-        }
-    }
-    const int n = snprintf(buffer, sizeof buffer, "%.17g", (f64)v);
-    if (n <= 0 || (size_t)n >= sizeof buffer) {
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
-    return nph_sb_append(sb, nph_str(buffer, (u64)n));
+    return append_shortest(sb, (f64)v, 9, f32_round_trips, f32_round_trips_through_double, &v);
 }
 
 NphResult nph_sb_appendf(NphStrBuilder *sb, const char *fmt, ...)
