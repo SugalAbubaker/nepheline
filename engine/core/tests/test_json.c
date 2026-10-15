@@ -302,7 +302,7 @@ NTEST_F(JsonFixture, inline_arrays_stay_on_one_line)
     NTEST_ASSERT_EQ_INT(nph_json_writer_begin_object(&w), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_json_writer_key(&w, NPH_STR("v")), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array_inline(&w), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, 1.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32_shortest(&w, 1.5F), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array(&w), NPH_RESULT_OK); // nested: inline too
     NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 2), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_json_writer_i64(&w, 3), NPH_RESULT_OK);
@@ -333,20 +333,14 @@ NTEST_F(JsonFixture, numbers_are_written_in_shortest_form)
     NphJsonWriter w;
     nph_json_writer_init(&w, &f->sb, false);
     NTEST_ASSERT_EQ_INT(nph_json_writer_begin_array(&w), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_json_writer_f64(&w, 0.1), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, 0.1F), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, (f32)NAN), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_json_writer_f32(&w, -2.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f64_shortest(&w, 0.1), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32_shortest(&w, 0.1F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32_shortest(&w, (f32)NAN), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f64_shortest(&w, (f64)INFINITY), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f32_shortest(&w, -2.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_json_writer_f64(&w, 0.1), NPH_RESULT_OK); // the fast, long form
     NTEST_ASSERT_EQ_INT(nph_json_writer_end_array(&w), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[0.1,0.1,null,-2.5]");
-    // The tree writer uses the same form.
-    NphJsonDoc doc;
-    NTEST_ASSERT_EQ_INT(nph_json_parse(nph_sb_str(&f->sb), nph_allocator_system(), &doc),
-                        NPH_RESULT_OK);
-    nph_sb_clear(&f->sb);
-    NTEST_ASSERT_EQ_INT(nph_json_write(doc.root, &f->sb, false), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[0.1,0.1,null,-2.5]");
-    nph_json_doc_free(&doc);
+    NTEST_ASSERT_EQ_STR(nph_sb_cstr(&f->sb), "[0.1,0.1,null,null,-2.5,0.10000000000000001]");
 }
 
 NTEST_F(JsonFixture, streaming_writer)

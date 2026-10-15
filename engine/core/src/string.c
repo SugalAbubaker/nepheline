@@ -503,10 +503,28 @@ NphResult nph_sb_append_f64(NphStrBuilder *sb, f64 v)
 // is the integer itself.
 typedef bool (*RoundTripFn)(const char *text, const void *value);
 
+// Bit-for-bit equality (so -0 and 0 differ), through the integer patterns.
+static bool same_f64(f64 a, const void *b)
+{
+    u64 x;
+    u64 y;
+    memcpy(&x, &a, sizeof x);
+    memcpy(&y, b, sizeof y);
+    return x == y;
+}
+
+static bool same_f32(f32 a, const void *b)
+{
+    u32 x;
+    u32 y;
+    memcpy(&x, &a, sizeof x);
+    memcpy(&y, b, sizeof y);
+    return x == y;
+}
+
 static bool f64_round_trips(const char *text, const void *value)
 {
-    const f64 back = strtod(text, NULL);
-    return memcmp(&back, value, sizeof back) == 0;
+    return same_f64(strtod(text, NULL), value);
 }
 
 // The f32 text must read back as the value both through strtof and through
@@ -518,14 +536,12 @@ static bool f64_round_trips(const char *text, const void *value)
 // always satisfy strtof, %.17g of the exact double value both).
 static bool f32_round_trips(const char *text, const void *value)
 {
-    const f32 back = strtof(text, NULL);
-    return memcmp(&back, value, sizeof back) == 0;
+    return same_f32(strtof(text, NULL), value);
 }
 
 static bool f32_round_trips_through_double(const char *text, const void *value)
 {
-    const f32 back = (f32)strtod(text, NULL);
-    return memcmp(&back, value, sizeof back) == 0;
+    return same_f32((f32)strtod(text, NULL), value);
 }
 
 // %g switches to exponent notation as soon as the exponent reaches the
