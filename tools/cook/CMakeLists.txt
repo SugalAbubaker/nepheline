@@ -19,6 +19,13 @@ else()
     target_compile_options(nph_cook_thirdparty PRIVATE -w)
 endif()
 nph_apply_configuration_definitions(nph_cook_thirdparty)
+# cgltf and stb_image are the parsers the cooker's fuzzers exercise most:
+# instrument them for libFuzzer's coverage like first-party code
+# (cmake/NphSanitizers.cmake).
+if(NPH_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang"
+   AND NOT CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_options(nph_cook_thirdparty PRIVATE -fsanitize=fuzzer-no-link)
+endif()
 set_target_properties(nph_cook_thirdparty PROPERTIES FOLDER "tools")
 
 add_library(nph_cooklib STATIC

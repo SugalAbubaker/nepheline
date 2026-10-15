@@ -58,6 +58,8 @@ FormatStyle: file
 
 CheckOptions:
   readability-identifier-naming.FunctionCase: lower_case
+  # libFuzzer's entry point, whose name the fuzz harnesses must define
+  readability-identifier-naming.FunctionIgnoredRegexp: '^LLVMFuzzerTestOneInput$'
   readability-identifier-naming.VariableCase: lower_case
   readability-identifier-naming.ParameterCase: lower_case
   readability-identifier-naming.MemberCase: lower_case

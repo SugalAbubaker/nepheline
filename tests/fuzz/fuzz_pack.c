@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -32,7 +33,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             const NphPackEntry *e = nph_pack_entry_at(&pack, i);
             if (nph_pack_find_path(&pack, nph_pack_entry_path(&pack, e)) != e ||
                 nph_pack_find_guid(&pack, e->guid) != e) {
-                __builtin_trap();
+                abort();
             }
             const u8 *bytes = (const u8 *)nph_pack_entry_data(&pack, e);
             for (u64 b = 0; b < e->size; b += 4096U) {
