@@ -31,3 +31,18 @@ nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)
 # The golden toolkit's PNG reader and inflate (tools/golden), which read
 # baselines from the repository (CLAUDE.md §9 golden-image tests).
 nph_add_fuzzer(png SOURCES fuzz_png.c DEPS nph::golden)
+
+# The scene module's readers (engine/scene, CLAUDE.md §8.7, §8.8 "every
+# parser is fuzzed"): text and binary scene files. The targets register the
+# scene tests' components, which the seeds (scripts/fuzz_seeds_scene.py)
+# use.
+set(scene_test_components "${CMAKE_SOURCE_DIR}/engine/scene/tests/test_components.c")
+nph_add_fuzzer(scene_text SOURCES fuzz_scene_text.c fuzz_scene_common.h ${scene_test_components}
+               DEPS nph::scene)
+nph_add_fuzzer(scene_bin SOURCES fuzz_scene_bin.c fuzz_scene_common.h ${scene_test_components}
+               DEPS nph::scene)
+foreach(target scene_text_fuzz_smoke scene_text_fuzz scene_bin_fuzz_smoke scene_bin_fuzz)
+    if(TARGET ${target})
+        target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/engine/scene/tests")
+    endif()
+endforeach()

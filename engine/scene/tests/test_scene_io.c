@@ -287,6 +287,9 @@ NTEST(scene_io, text_errors_roll_back)
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"components\": {\"test.AllKinds\": "
          "{\"sid\": {\"hash\": \"xyz\"}}}}]}",
          NPH_RESULT_TYPE_MISMATCH, "sid"},
+        {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"components\": {\"test.AllKinds\": "
+         "{\"sid\": \"\xFF\"}}}]}", // a byte that is not UTF-8
+         NPH_RESULT_TYPE_MISMATCH, "sid"},
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"removed\": []}]}",
          NPH_RESULT_PARSE_ERROR, "without"},
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"prefab\": {\"name\": \"p\", "
@@ -513,3 +516,109 @@ NTEST(scene_io, binary_loads_a_large_world_by_columns)
     nph_world_destroy(a);
     nph_world_destroy(b);
 }
+
+// ---------------------------------------------------------------------------
+// The fuzz seed corpora (scripts/fuzz_seeds_scene.py) are an independent
+// description of both formats: every seed must load.
+// ---------------------------------------------------------------------------
+
+#ifdef NPH_FUZZ_CORPUS_DIR
+
+static u8 *read_seed(const char *dir, const char *name, u64 *out_size)
+{
+    char path[512];
+    (void)snprintf(path, sizeof path, "%s/%s/%s", NPH_FUZZ_CORPUS_DIR, dir, name);
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        NTEST_FAIL("cannot open %s", path);
+        return NULL;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    const long size = ftell(f);
+    (void)fseek(f, 0, SEEK_SET);
+    u8 *data = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, (u64)size + 1U);
+    NTEST_ASSERT_NOT_NULL(data);
+    NTEST_ASSERT_EQ_UINT(fread(data, 1U, (size_t)size, f), (u64)size);
+    (void)fclose(f);
+    *out_size = (u64)size;
+    return data;
+}
+
+static const NphPrefab *resolve_one(void *user, NphStrId id)
+{
+    const NphPrefab *p = (const NphPrefab *)user;
+    return nph_str_id_equals(nph_prefab_id(p), id) ? p : NULL;
+}
+
+NTEST(scene_io, fuzz_seeds_load)
+{
+    TestIds ids;
+    NphWorld *registry = test_world_create(0U, &ids);
+    // The fuzz targets' "crate" (tests/fuzz/fuzz_scene_common.h).
+    NphPrefab *crate = NULL;
+    NTEST_ASSERT_EQ_INT(
+        nph_prefab_create(NPH_STR("crate"), registry, nph_allocator_system(), 16U, &crate),
+        NPH_RESULT_OK);
+    NphWorld *pw = nph_prefab_world(crate);
+    const NphComponentId rc[3] = {ids.position, ids.health, NPH_COMPONENT_ID_LOCAL_TRANSFORM};
+    const NphComponentId lc[2] = {ids.tag_a, NPH_COMPONENT_ID_LOCAL_TRANSFORM};
+    NphEntity root;
+    NphEntity lid;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(pw, rc, 3U, &root), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(pw, lc, 2U, &lid), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(pw, lid, root), NPH_RESULT_OK);
+
+    static const char *const text_seeds[] = {"basic", "all_kinds", "prefab", "forward_refs",
+                                             "empty"};
+    static const u32 text_counts[] = {3U, 2U, 5U, 3U, 0U};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(text_seeds); ++i) {
+        u64 size = 0U;
+        u8 *data = read_seed("scene_text", text_seeds[i], &size);
+        NphWorld *w = test_world_create(0U, &ids);
+        NphSceneLoadDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.resolve = resolve_one;
+        ld.resolve_user = crate;
+        NphSceneResult res;
+        const NphResult r = nph_scene_load_text(w, nph_str((const char *)data, size), &ld, &res);
+        if (r != NPH_RESULT_OK) {
+            NTEST_ADD_FAILURE("scene_text/%s: %s", text_seeds[i], res.error);
+        }
+        NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), text_counts[i]);
+        nph_world_destroy(w);
+        NPH_FREE_ARRAY(nph_allocator_system(), u8, data, size + 1U);
+    }
+    static const char *const bin_seeds[] = {"basic", "instance", "empty"};
+    static const u32 bin_counts[] = {4U, 2U, 0U};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(bin_seeds); ++i) {
+        u64 size = 0U;
+        u8 *data = read_seed("scene_bin", bin_seeds[i], &size);
+        NphWorld *w = test_world_create(0U, &ids);
+        NphSceneResult res;
+        const NphResult r = nph_scene_load_binary(w, data, size, NULL, &res);
+        if (r != NPH_RESULT_OK) {
+            NTEST_ADD_FAILURE("scene_bin/%s: %s", bin_seeds[i], res.error);
+        }
+        NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), bin_counts[i]);
+        if (i == 0U && r == NPH_RESULT_OK) {
+            // The child's name has a multi-byte character; the health refers
+            // to the root, which is the entity of file id 0.
+            const NphEntity e0 = nph_world_entity_at(w, 0U);
+            NTEST_EXPECT_TRUE(nph_str_equals(
+                nph_text_str(&NPH_WORLD_GET(w, e0, NPH_COMPONENT_ID_NAME, NphName)->text),
+                NPH_STR("root")));
+            const TestHealth *h =
+                NPH_WORLD_GET(w, nph_world_entity_at(w, 2U), ids.health, TestHealth);
+            NTEST_ASSERT_NOT_NULL(h);
+            NTEST_EXPECT_TRUE(nph_entity_equals(h->attacker, e0));
+            NTEST_EXPECT_TRUE(
+                nph_entity_equals(nph_world_parent(w, nph_world_entity_at(w, 1U)), e0));
+        }
+        nph_world_destroy(w);
+        NPH_FREE_ARRAY(nph_allocator_system(), u8, data, size + 1U);
+    }
+    nph_prefab_destroy(crate);
+    nph_world_destroy(registry);
+}
+
+#endif

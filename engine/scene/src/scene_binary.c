@@ -496,6 +496,9 @@ static NphResult parse_strs(BinLoader *l, NphBinReader *r)
         if (nph_bin_read_str(r, &s) != NPH_RESULT_OK) {
             return bfail(l, NPH_RESULT_CORRUPT, "truncated string table");
         }
+        if (!nph_utf8_is_valid(s)) {
+            return bfail(l, NPH_RESULT_CORRUPT, "a string is not UTF-8");
+        }
         NphStrId id;
         const NphResult res = nph_str_table_intern(&l->w->strings, s, &id);
         if (res != NPH_RESULT_OK) {
@@ -531,6 +534,40 @@ static NphEntity map_file_entity(void *user, NphEntity e)
     return e.value == 0U ? NPH_ENTITY_NULL : l->created[e.value - 1U];
 }
 
+// A TEXT field as the text loader accepts it: terminated within the
+// capacity, zero after the terminator, valid UTF-8.
+static bool text_valid(const u8 *p)
+{
+    u32 len = 0U;
+    while (len < NPH_TEXT_CAPACITY && p[len] != 0U) {
+        ++len;
+    }
+    if (len == NPH_TEXT_CAPACITY) {
+        return false;
+    }
+    for (u32 i = len; i < NPH_TEXT_CAPACITY; ++i) {
+        if (p[i] != 0U) {
+            return false;
+        }
+    }
+    return nph_utf8_is_valid(nph_str((const char *)p, len));
+}
+
+static bool text_fields_valid(const NphComponentDesc *d, const u8 *column, u32 count)
+{
+    for (u32 k = 0; k < d->field_count; ++k) {
+        if (d->fields[k].kind != NPH_FIELD_TEXT) {
+            continue;
+        }
+        for (u32 i = 0; i < count; ++i) {
+            if (!text_valid(column + (u64)i * d->size + d->fields[k].offset)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Checks every ENTITY field of a column before anything is copied.
 static bool entity_fields_valid(const BinLoader *l, const NphComponentInfo *info, const u8 *column,
                                 u32 count)
@@ -562,6 +599,10 @@ static NphResult spawn_groups(BinLoader *l)
             if (g->columns[k] != NULL && info->entity_field_count > 0U &&
                 !entity_fields_valid(l, info, g->columns[k], g->entity_count)) {
                 return bfail(l, NPH_RESULT_CORRUPT, "an entity reference is out of range");
+            }
+            if (g->columns[k] != NULL &&
+                !text_fields_valid(info->desc, g->columns[k], g->entity_count)) {
+                return bfail(l, NPH_RESULT_CORRUPT, "a text field is not canonical UTF-8");
             }
         }
     }

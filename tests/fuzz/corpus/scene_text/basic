@@ -1,0 +1,74 @@
+{
+  "nepheline_scene": 1,
+  "entities": [
+    {
+      "id": 0,
+      "components": {
+        "Name": {
+          "text": "root"
+        },
+        "LocalTransform": {
+          "translation": [
+            0,
+            0,
+            10000000
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "components": {
+        "LocalTransform": {
+          "translation": [
+            1,
+            2,
+            3
+          ],
+          "rotation": [
+            0,
+            0.70710677,
+            0,
+            0.70710677
+          ],
+          "scale": [
+            2,
+            2,
+            2
+          ]
+        },
+        "test.Health": {
+          "current": 5,
+          "maximum": 10,
+          "attacker": 0
+        }
+      }
+    },
+    {
+      "id": 2,
+      "parent": 1,
+      "components": {
+        "test.TagA": {},
+        "test.Position": {
+          "value": [
+            1,
+            2,
+            3
+          ]
+        }
+      }
+    }
+  ]
+}

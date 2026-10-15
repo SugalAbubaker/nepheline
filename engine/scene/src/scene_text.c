@@ -98,7 +98,7 @@ static NphResult write_float(NphJsonWriter *jw, f64 v, bool single)
 
 static NphResult write_f32s(NphJsonWriter *jw, const u8 *p, u32 count)
 {
-    NPH_TRY(nph_json_writer_begin_array(jw));
+    NPH_TRY(nph_json_writer_begin_array_inline(jw));
     for (u32 i = 0; i < count; ++i) {
         f32 v;
         memcpy(&v, p + 4U * i, sizeof v);
@@ -195,7 +195,7 @@ static NphResult write_value(Saver *s, const NphFieldDesc *f, const u8 *p)
     case NPH_FIELD_QUAT:
         return write_f32s(jw, p, 4U);
     case NPH_FIELD_DVEC3: {
-        NPH_TRY(nph_json_writer_begin_array(jw));
+        NPH_TRY(nph_json_writer_begin_array_inline(jw));
         for (u32 i = 0; i < 3U; ++i) {
             f64 v;
             memcpy(&v, p + 8U * i, sizeof v);
@@ -222,7 +222,7 @@ static NphResult write_value(Saver *s, const NphFieldDesc *f, const u8 *p)
     case NPH_FIELD_KIND_COUNT:
         break;
     }
-    NPH_UNREACHABLE();
+    // Registered descriptors are validated: no other kind reaches here.
     return NPH_RESULT_CORRUPT;
 }
 
@@ -372,7 +372,7 @@ static NphResult write_instance_sections(Saver *s, const InstanceCtx *ic, NphEnt
         }
         NPH_TRY(nph_json_writer_key(&s->jw, nph_str_from_cstr(keys[sec])));
         if (section == SECTION_REMOVED) {
-            NPH_TRY(nph_json_writer_begin_array(&s->jw));
+            NPH_TRY(nph_json_writer_begin_array_inline(&s->jw));
         } else {
             NPH_TRY(nph_json_writer_begin_object(&s->jw));
         }
@@ -779,6 +779,10 @@ static NphResult read_value(Loader *l, const NphFieldDesc *f, const NphJsonValue
     case NPH_FIELD_STR_ID: {
         NphStrId id = NPH_STR_ID_NULL;
         if (v->type == NPH_JSON_STRING) {
+            // The same rule as the binary format's string table.
+            if (!nph_utf8_is_valid(v->string)) {
+                return NPH_RESULT_TYPE_MISMATCH;
+            }
             NPH_TRY(nph_str_table_intern(&l->w->strings, v->string, &id));
         } else if (v->type == NPH_JSON_OBJECT) {
             const NphJsonValue *hash = nph_json_object_get(v, NPH_STR("hash"));
@@ -811,7 +815,7 @@ static NphResult read_value(Loader *l, const NphFieldDesc *f, const NphJsonValue
     case NPH_FIELD_KIND_COUNT:
         break;
     }
-    NPH_UNREACHABLE();
+    // Registered descriptors are validated: no other kind reaches here.
     return NPH_RESULT_CORRUPT;
 }
 
@@ -901,7 +905,7 @@ static NphResult parse_entities(Loader *l, const NphJsonValue *list)
         i64 root = 0;
         if (prefab->type != NPH_JSON_OBJECT || name == NULL ||
             !json_integer(nph_json_object_get(prefab, NPH_STR("index")), &index) || index < 0 ||
-            index > (i64)NPH_I32_MAX ||
+            index > (i64)NPH_U32_MAX ||
             !json_integer(nph_json_object_get(prefab, NPH_STR("root")), &root)) {
             return fail(l, NPH_RESULT_PARSE_ERROR,
                         "entity %u: \"prefab\" needs a name, an index, and a root", in->id);
@@ -913,6 +917,10 @@ static NphResult parse_entities(Loader *l, const NphJsonValue *list)
         }
         NphStrId pid = NPH_STR_ID_NULL;
         if (name->type == NPH_JSON_STRING) {
+            if (!nph_utf8_is_valid(name->string)) {
+                return fail(l, NPH_RESULT_PARSE_ERROR, "entity %u: the prefab name is not UTF-8",
+                            in->id);
+            }
             pid = nph_str_id(name->string);
             in->prefab_name = name->string;
         } else {
@@ -1171,15 +1179,20 @@ static NphResult load(Loader *l, NphStr text)
     for (u32 i = 0; i < l->n; ++i) {
         NPH_TRY(spawn_entity(l, i));
     }
+    // Each instance's entities by prefab index, for the references inside
+    // the instance. PrefabInstance is ordinary data, so two entities may
+    // claim the same place; the first in the file is the one references
+    // resolve to.
     for (u32 i = 0; i < l->n; ++i) {
         if (l->in[i].root == NPH_SAVE_NONE) {
             continue;
         }
         const u64 key = ((u64)l->in[i].root << 32U) | l->in[i].prefab_index;
-        if (nph_hashmap_insert_u64(&l->inst, key, &i) != NPH_RESULT_OK) {
-            return fail(l, NPH_RESULT_PARSE_ERROR,
-                        "entity %u: another entity of the same instance has index %u", l->in[i].id,
-                        l->in[i].prefab_index);
+        if (!nph_hashmap_contains_u64(&l->inst, key)) {
+            const NphResult r = nph_hashmap_insert_u64(&l->inst, key, &i);
+            if (r != NPH_RESULT_OK) {
+                return fail(l, r, "%s", nph_result_string(r));
+            }
         }
     }
     for (u32 i = 0; i < l->n; ++i) {

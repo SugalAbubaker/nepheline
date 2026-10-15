@@ -418,7 +418,7 @@ static NphResult apply_one(Applier *ap, const CmdHeader *h, const u8 *value, Nph
         return r;
     }
     }
-    NPH_UNREACHABLE();
+    // The recording functions write no other type.
     return NPH_RESULT_CORRUPT;
 }
 

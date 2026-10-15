@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Definitions of the test components declared in test_scene_support.h.
+// Definitions of the test components declared in test_scene_components.h.
 
-#include "test_scene_support.h"
+#include "test_scene_components.h"
 
 NPH_COMPONENT_DEFINE(TestPosition, TEST_POSITION_FIELDS, "test.Position", 0U, NULL)
 

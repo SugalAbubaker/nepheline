@@ -31,21 +31,13 @@ NPH_COMPONENT_DEFINE(NphHierarchy, NPH_HIERARCHY_FIELDS, "Hierarchy",
 
 const NphComponentDesc *nph_builtin_component_desc_(u32 index)
 {
-    switch (index) {
-    case NPH_COMPONENT_ID_NAME:
-        return NphName_component();
-    case NPH_COMPONENT_ID_LOCAL_TRANSFORM:
-        return NphLocalTransform_component();
-    case NPH_COMPONENT_ID_WORLD_TRANSFORM:
-        return NphWorldTransform_component();
-    case NPH_COMPONENT_ID_HIERARCHY:
-        return NphHierarchy_component();
-    case NPH_COMPONENT_ID_PREFAB_INSTANCE:
-        return NphPrefabInstance_component();
-    default:
-        NPH_UNREACHABLE();
-        return NULL;
-    }
+    // In the order of the NPH_COMPONENT_ID_* constants (world.h).
+    typedef const NphComponentDesc *(*DescFn)(void);
+    static const DescFn descs[NPH_COMPONENT_BUILTIN_COUNT] = {
+        NphName_component, NphLocalTransform_component, NphWorldTransform_component,
+        NphHierarchy_component, NphPrefabInstance_component};
+    NPH_ASSERT(index < NPH_COMPONENT_BUILTIN_COUNT);
+    return descs[index]();
 }
 
 // ---------------------------------------------------------------------------
