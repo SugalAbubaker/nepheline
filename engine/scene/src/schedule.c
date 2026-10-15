@@ -761,7 +761,7 @@ static void apply_commands(NphSchedule *s)
         s->scratch[i].cmds = NULL;
         s->scratch[i].cmd_count = 0U;
     }
-    qsort(list, total, sizeof(CmdEntry *), compare_entries);
+    qsort((void *)list, total, sizeof(CmdEntry *), compare_entries);
     for (u32 i = 0; i < total; ++i) {
         report(s, nph_commands_apply(list[i]->cb, NULL));
     }
@@ -843,13 +843,13 @@ NphResult nph_schedule_run(NphSchedule *s, f64 dt)
                                             sizeof(u32) * 2U * s->count, NPH_ALIGNOF(u32));
         if (ticks != NULL) {
             for (u32 i = 0; i < s->count; ++i) {
-                ticks[2U * i] = s->systems[i]->tick;
-                ticks[2U * i + 1U] = s->systems[i]->last_tick;
+                ticks[(u64)2U * i] = s->systems[i]->tick;
+                ticks[(u64)2U * i + 1U] = s->systems[i]->last_tick;
             }
             nph_world_clamp_ticks(w, ticks, 2U * s->count);
             for (u32 i = 0; i < s->count; ++i) {
-                s->systems[i]->tick = ticks[2U * i];
-                s->systems[i]->last_tick = ticks[2U * i + 1U];
+                s->systems[i]->tick = ticks[(u64)2U * i];
+                s->systems[i]->last_tick = ticks[(u64)2U * i + 1U];
             }
             s->last_clamp = w->tick;
         }

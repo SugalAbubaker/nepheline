@@ -494,7 +494,7 @@ NTEST(world, out_of_memory_paths_leave_the_world_intact)
 {
     // A small arena runs out at every step of world growth in turn; every
     // failure must leave the world consistent.
-    for (u64 size = 64U * 1024U; size < 4U * 1024U * 1024U; size += 61U * 1024U) {
+    for (u64 size = NPH_KIB(64); size < NPH_MIB(4); size += NPH_KIB(61)) {
         NphArena arena;
         NTEST_ASSERT_EQ_INT(nph_arena_init_from(&arena, nph_allocator_system(), size),
                             NPH_RESULT_OK);

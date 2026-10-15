@@ -238,8 +238,10 @@ NTEST(component, text_truncates_on_a_character_boundary)
     // 62 ASCII bytes and a 3-byte euro sign: 65 bytes do not fit 63, and
     // the cut must not split the euro sign.
     char buf[80];
-    memset(buf, 'a', 62);
-    memcpy(buf + 62, "\xE2\x82\xAC", 3);
+    memset(buf, 'a', sizeof buf);
+    buf[62] = '\xE2';
+    buf[63] = '\x82';
+    buf[64] = '\xAC';
     NTEST_EXPECT_FALSE(nph_text_set(&t, nph_str(buf, 65U)));
     NTEST_EXPECT_EQ_UINT(nph_text_str(&t).len, 62U);
     NTEST_EXPECT_TRUE(nph_utf8_is_valid(nph_text_str(&t)));
