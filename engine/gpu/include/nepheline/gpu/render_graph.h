@@ -233,12 +233,24 @@ typedef struct NphGpuRgPassTiming {
     const char *name;
     u64 gpu_ns;
     NphGpuQueueType queue;
+    // The pass's declared footprint (CLAUDE.md §10.7 "every renderer PR
+    // must state its cost in both milliseconds and DRAM bytes"): the bytes
+    // of every resource range it declared, counted once as read and/or
+    // once as written. Reads are sampled, storage, index, indirect, and
+    // copy-source ranges plus attachments loaded with LOAD; writes are
+    // storage, copy-destination, and attachment ranges stored with STORE.
+    // It is what the pass asks for, not measured DRAM traffic: caches,
+    // framebuffer compression, and partial sampling make the real figure
+    // smaller, and nothing counts repeated reads of the same bytes.
+    u64 read_bytes;
+    u64 write_bytes;
 } NphGpuRgPassTiming;
 
 // Per-pass GPU times of the most recent frame whose timestamps are
-// available (NPH_GPU_FRAMES_IN_FLIGHT frames ago). Returns the number
-// written (at most `cap`); `out_frame_index` (may be NULL) receives which
-// frame. 0 when none has completed yet.
+// available (NPH_GPU_FRAMES_IN_FLIGHT frames ago), with each pass's
+// declared footprint in that frame. Returns the number written (at most
+// `cap`); `out_frame_index` (may be NULL) receives which frame. 0 when
+// none has completed yet.
 u32 nph_gpu_rg_timings(const NphGpuRenderGraph *graph, NphGpuRgPassTiming *out, u32 cap,
                        u64 *out_frame_index);
 
