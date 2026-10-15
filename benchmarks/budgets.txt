@@ -149,3 +149,28 @@ vfs_stat_shadowed_pack         110000
 vfs_normalize_path             150
 asset_load_cached              170
 asset_load_small               1000
+
+# cook_bench (docs/cook.md). Encoder rows are per 4x4 block, the texture
+# cooks per base texel, the mesh rows per triangle, the import per KiB.
+# The job-system texture cook is budgeted like the single-thread one
+# (hosted runners have four vCPUs, the reference machine sixteen); the
+# glTF import allocates through the platform allocator and gets 5x.
+bc7_encode_opaque              330000
+bc7_encode_alpha               340000
+bc7_encode_opaque_p2_r1        115000
+bc7_encode_opaque_p1           115000
+bc7_encode_opaque_mode6        32000
+bc7_encode_opaque_mode1        155000
+bc7_decode                     490
+bc5_encode_normals             4700
+bc4_encode_mask                1800
+bc6h_encode_hdr                16000
+texture_cook_256               27000
+texture_cook_256_jobs          27000
+mesh_weld                      1000
+mesh_normals_smooth            85
+mesh_tangents                  1300
+mesh_optimize                  770
+mesh_meshlets                  1700
+mesh_process                   6300
+gltf_import_glb                12700
