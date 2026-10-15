@@ -229,9 +229,10 @@ nph_add_test(<module>
   `ctest --preset linux-clang-debug -R '^jobs$'`.
 - **CI** aggregates the above; it is the single required status check on `main`.
 
-`.github/workflows/benchmarks.yml` runs every benchmark nightly in the
+`.github/workflows/benchmarks.yml` runs every CPU benchmark nightly in the
 Profile configuration on hosted Windows and Linux runners, checks them
 against `benchmarks/budgets.txt`, and uploads the JSON results as artifacts.
+`gpu_bench` needs the reference GPU and runs in `gpu-perf.yml` (below).
 
 `.github/workflows/fuzz.yml` builds the libFuzzer targets nightly with
 Clang (Debug: ASan + UBSan) and runs each for two minutes from its seed

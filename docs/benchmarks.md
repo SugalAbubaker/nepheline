@@ -62,9 +62,10 @@ are only useful relative to each other.
   module's design doc quotes the numbers that justify its decisions
   (`docs/core.md` for the allocators).
 - The nightly **Benchmarks** workflow (`.github/workflows/benchmarks.yml`)
-  runs every benchmark on the hosted Windows and Linux runners and uploads
-  the JSON as artifacts. Hosted runners are shared hardware; those numbers
-  show trends, not absolutes.
+  runs every nbench executable on the hosted Windows and Linux runners and
+  uploads the JSON as artifacts; `gpu_bench` is left to the self-hosted
+  runner (below). Hosted runners are shared hardware; those numbers show
+  trends, not absolutes.
 
 ## Budgets
 
