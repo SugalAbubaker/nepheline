@@ -37,9 +37,12 @@
 
 #define GOLDEN_SIZE 256U
 
-// The thresholds of ADR-0019 (measured: see docs/golden.md "Calibration").
-#define GOLDEN_MEAN_MAX 0.02
-#define GOLDEN_P99_MAX  0.30F
+// The thresholds of ADR-0019, from docs/golden.md "Calibration": a real
+// GPU's rounding against the lavapipe baselines stays under a mean of 0.021
+// and a p99 of 0.052, while a 3.5 % change of brightness scores a mean of
+// 0.036 to 0.062 in every lit scene and a local break a p99 near 0.2.
+#define GOLDEN_MEAN_MAX 0.03
+#define GOLDEN_P99_MAX  0.15F
 
 typedef struct Golden {
     NphGpuDevice *dev;
