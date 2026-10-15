@@ -456,7 +456,8 @@ unescaped strings live in 16 KiB chunks owned by the `NphJsonDoc`; depth
 is capped at 128 and numbers at 64 characters so hostile input cannot
 exhaust the stack. Errors carry line, column, and a static message.
 Numbers keep both the `f64` and, when lexically integral and in range, the
-`i64`. Member access by key, element access by index, lenient getters with
+`i64`; `-0` (and anything negative that underflows to -0.0) stays a
+double, so it writes back with its sign. Member access by key, element access by index, lenient getters with
 fallbacks, strict `as_*` conversions, a builder API, a tree writer (compact
 or two-space pretty, non-finite numbers as `null`), and a streaming writer
 that validates nesting. The design choices are in
@@ -466,7 +467,8 @@ that validates nesting. The design choices are in
 (with a write-then-parse fixed-point check), the binary reader, UTF-8
 decoding, and cvar config; they build with `-DNPH_BUILD_FUZZERS=ON` under
 Clang and run nightly (`.github/workflows/fuzz.yml`) from seed corpora in
-`tests/fuzz/corpus/`.
+`tests/fuzz/corpus/`, and every test build replays the corpora with
+mutations (`fuzz_smoke.<name>`, [cook.md](cook.md), "Fuzzing").
 
 **Sample.** `samples/core_hello` ties the module together: console
 logging, a debug-wrapped TLSF heap, cvars from the command line, a scene
