@@ -144,7 +144,10 @@ bindings used, and the fragment outputs, and rejects anything outside the
 layout: descriptors beyond set 0 bindings 0 to 2, combined samplers,
 uniform or storage buffer descriptors (buffers are reached through
 addresses), vertex input attributes (vertex data is pulled), and push
-constant blocks over 128 bytes.
+constant blocks over 128 bytes. Struct sizes are computed once per struct,
+so the work is linear in the module however often a struct is named, and
+a struct that contains itself (SPIR-V recurses through pointers only) is
+rejected as corrupt.
 
 Every pipeline uses the one global layout, so a graphics description is
 the stages, the fixed-function state the engine uses, and the attachment

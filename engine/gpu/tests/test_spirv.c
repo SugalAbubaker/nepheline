@@ -147,6 +147,29 @@ static void asm_compute_push(Asm *a)
     OP0(a, 56);
 }
 
+// A push constant block whose struct contains itself six times: invalid
+// (SPIR-V recurses only through pointers). The fuzzer's module of this
+// shape took exponential time before struct sizes were memoised.
+static void asm_compute_self_struct(Asm *a)
+{
+    asm_begin(a, 20U);
+    OP(a, 17, 1U);
+    OP(a, 14, 0U, 1U);
+    OP(a, 15, 5U, 4U, MAIN_STR);
+    OP(a, 16, 4U, 17U, 1U, 1U, 1U);
+    OP(a, 19, 2U);
+    OP(a, 33, 3U, 2U);
+    OP(a, 22, 6U, 32U);                               // float
+    OP(a, 23, 7U, 6U, 4U);                            // vec4
+    OP(a, 30, 10U, 7U, 10U, 10U, 10U, 10U, 10U, 10U); // struct {vec4, itself x6}
+    OP(a, 32, 11U, 9U, 10U);                          // ptr PushConstant
+    OP(a, 59, 11U, 12U, 9U);                          // variable PushConstant
+    OP(a, 54, 2U, 4U, 0U, 3U);
+    OP(a, 248, 5U);
+    OP0(a, 253);
+    OP0(a, 56);
+}
+
 // A fragment shader with a combined sampler at set 0 binding 0: rejected.
 static void asm_fragment_combined_sampler(Asm *a, u32 set, u32 binding)
 {
@@ -238,6 +261,16 @@ NTEST(gpu_spirv, computes_push_constant_block_sizes)
     NTEST_ASSERT_EQ_INT(
         nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
         NPH_RESULT_UNSUPPORTED);
+}
+
+NTEST(gpu_spirv, rejects_a_struct_that_contains_itself)
+{
+    Asm a;
+    NphGpuShaderInfo info;
+    asm_compute_self_struct(&a);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_spirv_reflect(a.words, (u64)a.count * 4U, nph_allocator_system(), &info),
+        NPH_RESULT_CORRUPT);
 }
 
 NTEST(gpu_spirv, rejects_malformed_modules)
