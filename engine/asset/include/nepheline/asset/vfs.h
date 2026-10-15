@@ -158,6 +158,19 @@ void nph_vfs_close(const NphVfs *vfs, NphVfsFile *f);
 NPH_MUST_USE NphResult nph_vfs_read_at(NphVfsFile *f, u64 offset, void *buf, u64 size,
                                        u64 *out_read);
 
+// Writes the virtual path of the asset with identity `guid` into `buf`
+// (NUL terminated; *out_len, may be NULL, gets its length): the entry in
+// the newest pack mount whose GUID index has it, behind that mount's
+// prefix. This is how cooked references (a scene's meshes, a material's
+// textures) become loadable paths; loading the path then goes through the
+// usual mount order, so a loose file that shadows the entry is what loads.
+// Directory mounts do not index identities (the editor resolves them
+// through the cooker's database). NPH_RESULT_NOT_FOUND when no pack has
+// the GUID, NPH_RESULT_OVERFLOW when the path does not fit.
+// Thread-safety: NPH_THREADSAFE against other readers, as nph_vfs_stat.
+NPH_MUST_USE NphResult nph_vfs_find_guid(const NphVfs *vfs, NphGuid guid, char *buf, u64 cap,
+                                         u64 *out_len);
+
 // Writes the OS path of `path` in the directory mount that would serve it
 // (the newest directory mount whose prefix matches, whether or not the
 // file exists yet), for tools that write loose files. NPH_RESULT_NOT_FOUND

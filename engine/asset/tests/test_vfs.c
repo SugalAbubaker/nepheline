@@ -319,3 +319,38 @@ NTEST_F(VfsFixture, mount_errors)
     NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(f->vfs, NPH_STR("m"), f->loose, NULL),
                         NPH_RESULT_FULL);
 }
+
+NTEST_F(VfsFixture, identities_resolve_through_packs)
+{
+    char path[64];
+    u64 len = 0U;
+    const NphGuid pq = nph_guid_from_cstr("pq");
+    // Nothing mounted, then only a directory: directories index no GUIDs.
+    NTEST_ASSERT_EQ_INT(nph_vfs_find_guid(f->vfs, pq, path, sizeof path, &len),
+                        NPH_RESULT_NOT_FOUND);
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(f->vfs, nph_str_empty(), f->loose, NULL),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_find_guid(f->vfs, pq, path, sizeof path, &len),
+                        NPH_RESULT_NOT_FOUND);
+    // A pack behind a prefix: the entry's path comes back with the prefix.
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_pack(f->vfs, NPH_STR("game"), f->pack_path, NULL),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_find_guid(f->vfs, pq, path, sizeof path, &len), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(path, "game/p/q.txt");
+    NTEST_ASSERT_EQ_UINT(len, 12U);
+    NTEST_ASSERT_EQ_INT(
+        nph_vfs_find_guid(f->vfs, nph_guid_from_cstr("pa"), path, sizeof path, NULL),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(path, "game/a.txt");
+    expect_text(f, path, "pack a");
+    // Too small a buffer, and an identity no pack has.
+    NTEST_ASSERT_EQ_INT(nph_vfs_find_guid(f->vfs, pq, path, 12U, NULL), NPH_RESULT_OVERFLOW);
+    NTEST_ASSERT_EQ_INT(
+        nph_vfs_find_guid(f->vfs, nph_guid_from_cstr("nope"), path, sizeof path, NULL),
+        NPH_RESULT_NOT_FOUND);
+    // The newest pack mount answers first.
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_pack(f->vfs, nph_str_empty(), f->pack_path, NULL),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_find_guid(f->vfs, pq, path, sizeof path, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_STR(path, "p/q.txt");
+}
