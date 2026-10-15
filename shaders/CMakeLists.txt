@@ -12,6 +12,7 @@ nph_add_shaders(nph_shaders_test
         test/test_color.frag
         test/test_sample.frag
         test/test_fullscreen.vert
+        test/test_texel_fetch.comp
 )
 
 # Shaders of the Phase 5 samples.

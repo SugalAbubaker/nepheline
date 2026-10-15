@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// Reads every texel of mip 0 of a bindless texture with texelFetch and
+// writes it to a buffer, row after row: out[y * width + x]. The
+// integration tests decode block-compressed textures on the GPU with it
+// and compare the result with the cooker's CPU decoders.
+#version 460
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+NPH_BUFFER_REF(TexelBuffer) { vec4 texels[]; };
+
+layout(push_constant, scalar) uniform Push { NphTestPush pc; };
+
+void main()
+{
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    const uint width = pc.count;
+    const uint height = pc.value;
+    if (p.x >= width || p.y >= height) {
+        return;
+    }
+    TexelBuffer dst = TexelBuffer(pc.buffer_address);
+    dst.texels[p.y * width + p.x] = nph_fetch_2d(pc.texture_index, ivec2(p), 0);
+}

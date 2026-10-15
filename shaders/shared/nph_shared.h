@@ -36,10 +36,10 @@
 // Push constants of the gpu test shaders (fits NPH_GPU_PUSH_CONSTANT_BYTES).
 NPH_SHARED_STRUCT(NphTestPush)
 {
-    u64 buffer_address; // test_fill: destination; test_sample: unused
-    u32 count;          // elements to write
-    u32 value;          // test_fill: multiplier; test_image: pattern seed
-    u32 texture_index;  // test_sample
+    u64 buffer_address; // test_fill, test_texel_fetch: destination; test_sample: unused
+    u32 count;          // elements to write; test_texel_fetch: width
+    u32 value;          // test_fill: multiplier; test_image: pattern seed; test_texel_fetch: height
+    u32 texture_index;  // test_sample, test_texel_fetch
     u32 sampler_index;  // test_sample
     u32 image_index;    // test_image: storage image slot
     u32 pad0;

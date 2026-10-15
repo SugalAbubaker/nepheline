@@ -91,6 +91,12 @@ add_subdirectory(shaders)
 # samples use, and the nph_cook executable.
 add_subdirectory(tools/cook)
 
+# Tests that span modules and tools (the cooker against the runtime and
+# the GPU).
+if(NPH_BUILD_TESTS)
+    add_subdirectory(tests/integration)
+endif()
+
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
 target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs nph::gpu
