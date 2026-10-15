@@ -247,8 +247,8 @@ static void run_integration(NphJobSystem *js, u64 *out_hash)
 {
     static Exec ex;
     memset(&ex, 0, sizeof ex);
-    NphWorld *w = test_world_create(1U << 17U, &ex.ids);
     const u32 n = 20000U * TEST_SCALE;
+    NphWorld *w = test_world_create(n + 1024U, &ex.ids);
     const NphComponentId comps[2] = {ex.ids.position, ex.ids.velocity};
     NTEST_ASSERT_EQ_INT(nph_world_spawn_batch(w, comps, 2U, n, NULL), NPH_RESULT_OK);
     NphSchedule *s = make_schedule(w, js, 0U);
@@ -343,8 +343,8 @@ static void spawn_chunk(NphSystemContext *ctx, const NphChunkView *v)
 static u64 run_spawner(NphJobSystem *js)
 {
     static Spawner sp;
-    NphWorld *w = test_world_create(1U << 16U, &sp.ids);
     const u32 n = 5000U * TEST_SCALE;
+    NphWorld *w = test_world_create(2U * n + 1024U, &sp.ids); // two runs spawn n more
     NphEntity *e = NPH_ALLOC_ARRAY(nph_allocator_system(), NphEntity, n);
     NTEST_ASSERT_NOT_NULL(e);
     NTEST_ASSERT_EQ_INT(nph_world_spawn_batch(w, &sp.ids.position, 1U, n, e), NPH_RESULT_OK);
@@ -588,7 +588,7 @@ NTEST(schedule, scratch_exhaustion_fails_the_run)
 {
     TestIds ids;
     NphWorld *w = test_world_create(0U, &ids);
-    NphSchedule *s = make_schedule(w, NULL, 64U * 1024U);
+    NphSchedule *s = make_schedule(w, NULL, NPH_KIB(64));
     NphSystemDesc a = sys_desc("flood", NULL, 0U, NULL, 0U);
     a.run = flood_commands;
     NTEST_ASSERT_EQ_INT(nph_schedule_add_system(s, &a, NULL), NPH_RESULT_OK);

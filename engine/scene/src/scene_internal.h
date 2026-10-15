@@ -88,11 +88,13 @@ typedef struct NphArchetype NphArchetype;
 // The header at the start of every 16 KiB chunk. It is followed, at the
 // archetype's offsets, by one change version per column, the entity
 // handles, and the columns.
-typedef struct NphChunk {
-    NphArchetype *archetype;
-    u32 count; // rows in use
-    u32 index; // position in archetype->chunks
-} NphChunk;
+typedef struct NphChunk NphChunk;
+struct NphChunk {
+    NphArchetype *archetype; // NULL while the chunk is free
+    NphChunk *next_free;     // the free list's link while the chunk is free
+    u32 count;               // rows in use
+    u32 index;               // position in archetype->chunks
+};
 
 // Column index meaning "no column" (absent, or a tag).
 #define NPH_NO_COLUMN 0xFFU

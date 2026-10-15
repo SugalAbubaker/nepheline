@@ -13,10 +13,11 @@
 // work from that descriptor, so adding a field is a one-line change that
 // every consumer picks up.
 //
-//     // health.h
-//     #define GAME_HEALTH_FIELDS(F)                                       \
-//         F(F32, current, NPH_FIELD_NO_HINTS)                             \
-//         F(F32, maximum, NPH_FIELD_RANGE(1.0F, 1000.0F))                 \
+//     // health.h (the field list continues over lines with backslashes,
+//     // which a // comment cannot show)
+//     #define GAME_HEALTH_FIELDS(F)
+//         F(F32, current, NPH_FIELD_NO_HINTS)
+//         F(F32, maximum, NPH_FIELD_RANGE(1.0F, 1000.0F))
 //         F(ENTITY, last_attacker, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY))
 //     NPH_COMPONENT_STRUCT(GameHealth, GAME_HEALTH_FIELDS);
 //     NPH_COMPONENT_DECLARE(GameHealth);

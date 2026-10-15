@@ -97,12 +97,15 @@ static u32 slab_find(const NphWorld *w, const void *chunk)
 
 static void free_list_push(NphWorld *w, NphChunk *c)
 {
-    // The link lives in the chunk's first word; the rest is poisoned so a
-    // stale chunk pointer is reported by ASan.
-    memcpy(c, &w->free_chunks, sizeof(NphChunk *));
+    // The header holds the link; the rest is poisoned so that a stale chunk
+    // pointer is reported by ASan.
+    c->archetype = NULL;
+    c->next_free = w->free_chunks;
+    c->count = 0U;
+    c->index = 0U;
     w->free_chunks = c;
     w->free_chunk_count += 1U;
-    NPH_ASAN_POISON((u8 *)c + sizeof(NphChunk *), NPH_ECS_CHUNK_SIZE - sizeof(NphChunk *));
+    NPH_ASAN_POISON((u8 *)c + sizeof(NphChunk), NPH_ECS_CHUNK_SIZE - sizeof(NphChunk));
 }
 
 static bool slab_grow(NphWorld *w)
@@ -148,10 +151,12 @@ static NphChunk *chunk_acquire(NphWorld *w)
         return NULL;
     }
     NphChunk *c = w->free_chunks;
+    if (c == NULL) {
+        return NULL; // unreachable: a slab holds at least one chunk
+    }
     NPH_ASAN_UNPOISON(c, NPH_ECS_CHUNK_SIZE);
-    NphChunk *next;
-    memcpy(&next, c, sizeof next);
-    w->free_chunks = next;
+    w->free_chunks = c->next_free;
+    c->next_free = NULL;
     w->free_chunk_count -= 1U;
     w->chunks_in_use += 1U;
     w->slabs[slab_find(w, c)].live += 1U;
@@ -172,26 +177,20 @@ void nph_world_trim(NphWorld *w)
     // those slabs.
     NphChunk *keep = NULL;
     u32 keep_count = 0U;
-    NphChunk *c = w->free_chunks;
-    while (c != NULL) {
-        NPH_ASAN_UNPOISON(c, sizeof(NphChunk *));
-        NphChunk *next;
-        memcpy(&next, c, sizeof next);
+    for (NphChunk *c = w->free_chunks; c != NULL;) {
+        NphChunk *next = c->next_free;
         if (w->slabs[slab_find(w, c)].live != 0U) {
-            memcpy(c, &keep, sizeof keep);
+            c->next_free = keep;
             keep = c;
             keep_count += 1U;
         }
-        NPH_ASAN_POISON(c, sizeof(NphChunk *));
         c = next;
     }
-    // Re-link in address order (the list is rebuilt reversed above).
+    // Re-link in the original order (the list is rebuilt reversed above).
     w->free_chunks = NULL;
     w->free_chunk_count = 0U;
     while (keep != NULL) {
-        NPH_ASAN_UNPOISON(keep, sizeof(NphChunk *));
-        NphChunk *next;
-        memcpy(&next, keep, sizeof next);
+        NphChunk *next = keep->next_free;
         free_list_push(w, keep);
         keep = next;
     }
