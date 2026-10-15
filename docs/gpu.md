@@ -131,7 +131,10 @@ pipeline barrier's scopes span submissions on the queue). Synchronisation
 validation on lavapipe found the second one missing.
 Uploaded mips end in SHADER_READ_ONLY (sampled images) or GENERAL. Ring
 space is released when the frame that allocated it completes; outside a
-frame a flush is synchronous.
+frame a flush is synchronous. Uploads queued between frames are recorded
+into a frame slot's command pool, so `nph_gpu_frame_begin` and
+`nph_gpu_device_wait_idle`, which recycle those pools, flush them first
+(the renderer's tests found the copies being dropped; ADR-0018).
 
 ## Shaders and pipelines
 
@@ -201,7 +204,11 @@ and executes:
    with its barriers in front, so with a job system the passes record in
    parallel, one job per pass, and are submitted in order. Timestamps
    bracket every pass; `nph_gpu_rg_timings` reports the frame that
-   completed two frames ago.
+   completed two frames ago, with each pass's declared footprint: the
+   bytes of every range it declared, counted once as read and/or written
+   (loaded and stored attachments included). That is what a pass asks
+   for, not measured DRAM traffic; the renderer's GPU profiler reports it
+   as the §10.7 byte figure (docs/render.md).
 
 Imported resources get their final state written back at the end of
 execute, so the next frame, or explicit commands, continue from the truth.

@@ -24,7 +24,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 4 | Jobs: fiber workers, work-stealing deques, counters, priorities, I/O threads, deterministic mode | **done** (`v0.1.0`) |
 | 5 | GPU/RHI: Vulkan 1.3 device, bindless resources, frames and timelines, uploads, swapchain, SPIR-V reflection, pipelines with a persisted cache and hot reload, render graph with aliasing and async compute, GPU microbenchmarks and budgets on the reference RTX 3060 Ti | **done** |
 | 6 | Assets v1: the `.nph` container, LZ codec, pack archives, VFS, loader and typed views; the cooker (glTF import, mesh pipeline with MikkTSpace tangents and meshlets, our BC4/BC5/BC6H/BC7 encoders, incremental database, packs); fuzzing of every parser in every build | **done** |
-| 7–15 | Renderer → ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
+| 7 | Renderer v1: forward PBR reference renderer (GGX, energy compensation, punctual lights in physical units), GPU-computed image-based lighting, pre-exposed HDR with ACES and AgX, debug draw, GPU profiler, primitives; golden-image tests | in progress |
+| 8–15 | ECS → Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -59,7 +60,8 @@ nph_cook content/ --root content -o build/cooked --pack build/game.npk
 ```
 
 `samples/asset_viewer` does exactly that at build time and renders the
-result.
+result; `samples/pbr_viewer` cooks a scene that exercises every material
+feature and renders it with the PBR reference renderer.
 
 ## Repository layout
 
@@ -70,7 +72,7 @@ tools/ntest/    the Nepheline test framework
 tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer)
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer); samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, nph_hash64.py, runner/install.ps1 + loop.ps1
@@ -91,6 +93,7 @@ Modules depend strictly left-to-right:
 - [`docs/platform.md`](docs/platform.md) — platform module: clocks, threads, fibers, virtual memory, files and async I/O, CPU, window and input
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/gpu.md`](docs/gpu.md) — GPU module: device and validation gate, bindless resources, frames and submission, uploads, shaders and pipelines, the render graph, the swapchain
+- [`docs/render.md`](docs/render.md) — render module: the forward PBR reference renderer, units and conventions, image-based lighting, tonemapping, debug draw, the GPU profiler
 - [`docs/asset.md`](docs/asset.md) — asset module: the `.nph` container, the LZ codec, GUIDs, pack archives, the VFS, the loader, the typed views
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/ntest.md`](docs/ntest.md) — test framework
