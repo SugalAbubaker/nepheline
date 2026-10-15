@@ -410,21 +410,38 @@ NTEST(jobs, fiber_exhaustion_by_event_waiters_stays_live)
     NphJobCounter done = NPH_JOB_COUNTER_INIT;
     NTEST_ASSERT_EQ_INT(nph_job_run(js, decls, PARENTS, NPH_JOB_PRIORITY_NORMAL, &done),
                         NPH_RESULT_OK);
-    // Every worker ends up holding one child polling on the event, and
-    // the spare fibers hold a few more, parked; nothing else can make
-    // progress until it fires.
+    // Every worker ends up in a wait and every fiber is held; nothing can
+    // make progress until the event fires. A worker usually holds a child
+    // blocked on the event, but it may hold a parent instead: a parent's
+    // inline wait runs only deeper jobs, and the remaining children can
+    // sit behind a shallower job at the stealable end of a deque whose
+    // owner is itself a waiting child. That is allowed (the system is live:
+    // everything finishes once the event fires), so the test waits for the
+    // system to stop changing rather than for one hostage per worker
+    // (which failed 2 runs in 224 under load).
     const u32 workers = nph_job_system_worker_count(js);
     const u32 fibers = nph_job_system_fiber_count(js);
     const NphStopwatch settle = nph_stopwatch_start();
-    while (nph_atomic_load_u32(&h.blocked, NPH_MEMORY_ORDER_ACQUIRE) < workers) {
-        NTEST_ASSERT_LT_UINT(nph_stopwatch_elapsed_ns(&settle), 10U * NPH_TIME_NS_PER_S);
-        nph_thread_yield();
+    NphStopwatch quiet = nph_stopwatch_start();
+    u32 last = NPH_U32_MAX;
+    for (;;) {
+        NTEST_ASSERT_LT_UINT(nph_stopwatch_elapsed_ns(&settle), 20U * NPH_TIME_NS_PER_S);
+        const u32 now = nph_atomic_load_u32(&h.blocked, NPH_MEMORY_ORDER_ACQUIRE);
+        NphJobStats st;
+        nph_job_system_get_stats(js, &st);
+        if (now != last) {
+            last = now;
+            quiet = nph_stopwatch_start();
+        } else if (now > 0U && st.waits_inline >= workers &&
+                   nph_stopwatch_elapsed_ns(&quiet) > 300U * NPH_TIME_NS_PER_MS) {
+            break;
+        }
+        nph_thread_sleep_ns(NPH_TIME_NS_PER_MS);
     }
-    nph_thread_sleep_ns(20U * NPH_TIME_NS_PER_MS);
     const u32 blocked = nph_atomic_load_u32(&h.blocked, NPH_MEMORY_ORDER_RELAXED);
     NTEST_LOG("%u children blocked on %u workers with %u fibers", blocked, workers, fibers);
-    NTEST_ASSERT_GE_UINT(blocked, workers);
-    NTEST_ASSERT_LE_UINT(blocked, fibers);
+    NTEST_ASSERT_GE_UINT(blocked, 1U);
+    NTEST_ASSERT_LE_UINT(blocked, fibers + workers);
     NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&h.parents_done, NPH_MEMORY_ORDER_RELAXED), 0U);
     // The dump shows the hostages and the parked fibers.
     static char dump[16384];
