@@ -87,6 +87,10 @@ add_subdirectory(engine/asset)
 # Shader sources shared by the engine, its tests, and the samples.
 add_subdirectory(shaders)
 
+# The offline asset cooker (CLAUDE.md §8.8): a library the tests and the
+# samples use, and the nph_cook executable.
+add_subdirectory(tools/cook)
+
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
 target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs nph::gpu
