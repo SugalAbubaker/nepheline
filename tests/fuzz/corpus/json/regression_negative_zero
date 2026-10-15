@@ -1,0 +1,14 @@
+{
+  "name": "scene é😀",
+  "version": 2,
+  "scale": -1.5e-3333333333333333333333,
+  "visible": true,
+  "parmesible": true,
+  "parme": "scene é😀",
+  "version": 2,
+  "scal": 2,
+  "scale": -1.5e-3,
+  "visible": true,
+  "parent": null,
+  "tags": {"pos": [1, 2, 3], "empty": {}}
+}

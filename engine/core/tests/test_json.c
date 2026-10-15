@@ -188,6 +188,30 @@ NTEST_F(JsonFixture, rejects_malformed_input_with_positions)
     }
 }
 
+// Negative zero keeps its sign through a write and a re-parse: "-0" is a
+// double, not the integer 0, and so is a negative number that underflows
+// (the input the JSON fuzzer reduced its failure to).
+NTEST_F(JsonFixture, negative_zero_round_trips_as_a_double)
+{
+    static const char *const inputs[] = {"-0", "-1.5e-3333333333333333333333", "-0.0"};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(inputs); ++i) {
+        NTEST_ASSERT_EQ_INT(parse(f, inputs[i]), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(f->doc.root->is_integer, 0U);
+        NTEST_ASSERT_TRUE(f->doc.root->number == 0.0 && signbit(f->doc.root->number));
+        nph_sb_clear(&f->sb);
+        NTEST_ASSERT_EQ_INT(nph_json_write(f->doc.root, &f->sb, false), NPH_RESULT_OK);
+        NTEST_ASSERT_TRUE(nph_str_equals(nph_sb_str(&f->sb), NPH_STR("-0")));
+        NphJsonDoc again;
+        NTEST_ASSERT_EQ_INT(nph_json_parse(nph_sb_str(&f->sb), f->a, &again), NPH_RESULT_OK);
+        const bool still_double = again.root->is_integer == 0U && signbit(again.root->number);
+        nph_json_doc_free(&again);
+        NTEST_ASSERT_TRUE(still_double);
+    }
+    // Zero without a sign stays the integer 0.
+    NTEST_ASSERT_EQ_INT(parse(f, "0"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(f->doc.root->is_integer, 1U);
+}
+
 NTEST_F(JsonFixture, nesting_and_number_limits)
 {
     char deep[NPH_JSON_MAX_DEPTH * 2U + 2U];

@@ -368,7 +368,11 @@ static NphResult parse_number(Parser *p, NphJsonValue *v)
     if (end != buffer + len) {
         return fail(p, "bad number");
     }
-    if (is_integer && nph_str_parse_i64(nph_str(buffer, len), &v->integer)) {
+    // "-0" is the integer 0 but the double -0.0, so it stays a double and
+    // writes back as "-0" rather than "0" (as does any negative number that
+    // underflows to -0.0): writing then re-parsing is a fixed point.
+    if (is_integer && nph_str_parse_i64(nph_str(buffer, len), &v->integer) &&
+        !(v->integer == 0 && buffer[0] == '-')) {
         v->is_integer = 1U;
     }
     return NPH_RESULT_OK;
