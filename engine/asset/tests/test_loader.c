@@ -421,3 +421,60 @@ NTEST_F(LoaderFixture, async_needs_a_job_system)
                         NPH_RESULT_UNSUPPORTED);
     NTEST_ASSERT_TRUE(nph_asset_handle_is_null(h));
 }
+
+NTEST_F(LoaderFixture, loads_by_guid_through_the_pack_index)
+{
+    make_loader(f, true, NPH_ASSET_VERIFY_ALWAYS, 0U);
+    NphPackWriter w;
+    NTEST_ASSERT_EQ_INT(nph_pack_writer_begin(&w, f->alloc, f->pack_path, 0U), NPH_RESULT_OK);
+    const char *names[] = {"stored.nph", "packed.nph"};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(names); ++i) {
+        char path[1400];
+        NTEST_ASSERT_EQ_INT(nph_path_join(path, sizeof path, nph_str_from_cstr(f->loose),
+                                          nph_str_from_cstr(names[i]), NULL),
+                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_pack_writer_add_file(&w, nph_str_from_cstr(names[i]),
+                                                     nph_guid_from_cstr(names[i]),
+                                                     NPH_ASSET_TYPE_BLOB, path),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(nph_pack_writer_finish(&w), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_pack(f->vfs, NPH_STR("pak"), f->pack_path, NULL),
+                        NPH_RESULT_OK);
+    // Synchronous: the GUID names the path, and a later load by path
+    // shares the same record.
+    NphAssetHandle by_guid;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(f->loader, nph_guid_from_cstr("stored.nph"), &by_guid),
+                        NPH_RESULT_OK);
+    const NphAsset *a = nph_asset_get(f->loader, by_guid);
+    NTEST_ASSERT_NOT_NULL(a);
+    NTEST_ASSERT_TRUE(nph_str_equals(a->path, NPH_STR("pak/stored.nph")));
+    check_blobs(a, 3U, 1000U, NPH_ASSET_CODEC_NONE);
+    NphAssetHandle by_path;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("pak/stored.nph"), &by_path),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(by_path.value, by_guid.value);
+    NTEST_ASSERT_EQ_UINT(nph_asset_find_guid(f->loader, nph_guid_from_cstr("stored.nph")).value,
+                         by_guid.value);
+    // Asynchronous.
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NphAssetHandle async;
+    NTEST_ASSERT_EQ_INT(
+        nph_asset_load_guid_async(f->loader, nph_guid_from_cstr("packed.nph"), &done, &async),
+        NPH_RESULT_OK);
+    nph_job_wait(f->jobs, &done);
+    NTEST_ASSERT_EQ_INT(nph_asset_wait(f->loader, async), NPH_RESULT_OK);
+    check_blobs(nph_asset_get(f->loader, async), 3U, NPH_KIB(40), NPH_ASSET_CODEC_LZ);
+    // An identity no mounted pack knows.
+    NphAssetHandle none;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(f->loader, nph_guid_from_cstr("missing"), &none),
+                        NPH_RESULT_NOT_FOUND);
+    NTEST_ASSERT_TRUE(nph_asset_handle_is_null(none));
+    NTEST_ASSERT_EQ_INT(
+        nph_asset_load_guid_async(f->loader, nph_guid_from_cstr("missing"), &done, &none),
+        NPH_RESULT_NOT_FOUND);
+    nph_asset_release(f->loader, by_guid);
+    nph_asset_release(f->loader, by_path);
+    nph_asset_release(f->loader, async);
+    NTEST_ASSERT_EQ_UINT(nph_asset_loader_live(f->loader), 0U);
+}

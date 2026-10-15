@@ -326,6 +326,34 @@ static u32 resolve(const NphVfs *vfs, NphStr path, NphVfsInfo *out_info,
     return NPH_VFS_NO_MOUNT;
 }
 
+NphResult nph_vfs_find_guid(const NphVfs *vfs, NphGuid guid, char *buf, u64 cap, u64 *out_len)
+{
+    NPH_ASSERT(vfs != NULL && buf != NULL && cap != 0U);
+    for (u32 i = vfs->mount_count; i-- > 0U;) {
+        const Mount *m = &vfs->mounts[i];
+        if (m->type != NPH_VFS_MOUNT_PACK) {
+            continue;
+        }
+        const NphPackEntry *e = nph_pack_find_guid(&m->pack, guid);
+        if (e == NULL) {
+            continue;
+        }
+        const NphStr rel = nph_pack_entry_path(&m->pack, e);
+        const u64 n = m->prefix_len + rel.len;
+        if (n + 1U > cap) {
+            return NPH_RESULT_OVERFLOW;
+        }
+        memcpy(buf, m->prefix, (size_t)m->prefix_len);
+        memcpy(buf + m->prefix_len, rel.data, (size_t)rel.len);
+        buf[n] = '\0';
+        if (out_len != NULL) {
+            *out_len = n;
+        }
+        return NPH_RESULT_OK;
+    }
+    return NPH_RESULT_NOT_FOUND;
+}
+
 NphResult nph_vfs_stat(const NphVfs *vfs, NphStr path, NphVfsInfo *out)
 {
     NPH_ASSERT(vfs != NULL && out != NULL);

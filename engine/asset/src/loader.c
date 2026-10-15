@@ -618,6 +618,31 @@ static void wait_stage_job(void *user)
     NPH_FREE_TYPE(stage->loader->alloc, IoStage, stage);
 }
 
+// A GUID load is a path load once the VFS has named the path: the slot
+// tables deduplicate by path, so an asset already loaded (or loading) by
+// either route is shared, and there is no separate GUID-keyed state to
+// keep consistent.
+NphResult nph_asset_load_guid(NphAssetLoader *l, NphGuid guid, NphAssetHandle *out)
+{
+    NPH_ASSERT(l != NULL && out != NULL);
+    *out = NPH_ASSET_HANDLE_NULL;
+    char path[NPH_VFS_MAX_PATH + 1U];
+    u64 len = 0U;
+    NPH_TRY(nph_vfs_find_guid(l->vfs, guid, path, sizeof path, &len));
+    return nph_asset_load(l, nph_str(path, len), out);
+}
+
+NphResult nph_asset_load_guid_async(NphAssetLoader *l, NphGuid guid, NphJobCounter *counter,
+                                    NphAssetHandle *out)
+{
+    NPH_ASSERT(l != NULL && out != NULL);
+    *out = NPH_ASSET_HANDLE_NULL;
+    char path[NPH_VFS_MAX_PATH + 1U];
+    u64 len = 0U;
+    NPH_TRY(nph_vfs_find_guid(l->vfs, guid, path, sizeof path, &len));
+    return nph_asset_load_async(l, nph_str(path, len), counter, out);
+}
+
 NphResult nph_asset_load_async(NphAssetLoader *l, NphStr path, NphJobCounter *counter,
                                NphAssetHandle *out)
 {

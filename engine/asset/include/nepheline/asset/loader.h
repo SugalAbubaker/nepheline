@@ -136,6 +136,15 @@ NPH_MUST_USE NphResult nph_asset_load(NphAssetLoader *loader, NphStr path, NphAs
 NPH_MUST_USE NphResult nph_asset_load_async(NphAssetLoader *loader, NphStr path,
                                             NphJobCounter *counter, NphAssetHandle *out);
 
+// As nph_asset_load and nph_asset_load_async for the asset with identity
+// `guid`, located through nph_vfs_find_guid: how a scene's references to
+// meshes, materials, and textures are loaded. NPH_RESULT_NOT_FOUND when no
+// mounted pack knows the GUID; otherwise the errors of the path load.
+NPH_MUST_USE NphResult nph_asset_load_guid(NphAssetLoader *loader, NphGuid guid,
+                                           NphAssetHandle *out);
+NPH_MUST_USE NphResult nph_asset_load_guid_async(NphAssetLoader *loader, NphGuid guid,
+                                                 NphJobCounter *counter, NphAssetHandle *out);
+
 // Blocks (on a worker: parks the fiber) until the handle is no longer
 // LOADING. The result of the load: NPH_RESULT_OK when READY.
 NphResult nph_asset_wait(NphAssetLoader *loader, NphAssetHandle handle);
