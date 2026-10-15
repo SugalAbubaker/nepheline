@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "executable": "scene_bench.exe",
+  "timestamp": "2026-10-15T22:09:08Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.5,
+  "benchmarks": [
+    {"name": "spawn_batch_1M", "label": "", "iterations": 30, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 18.241, "min_ns_per_op": 18.007, "max_ns_per_op": 18.603},
+    {"name": "spawn_single_1M", "label": "", "iterations": 14, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 43.459, "min_ns_per_op": 43.226, "max_ns_per_op": 44.239},
+    {"name": "despawn_1M", "label": "", "iterations": 23, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 25.954, "min_ns_per_op": 25.555, "max_ns_per_op": 26.062},
+    {"name": "add_remove_tag_1M", "label": "", "iterations": 4, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 125.940, "min_ns_per_op": 124.877, "max_ns_per_op": 128.384},
+    {"name": "get_random_1M", "label": "", "iterations": 3069, "items_per_iteration": 4096, "repeats": 7, "ns_per_op": 49.005, "min_ns_per_op": 47.944, "max_ns_per_op": 50.661},
+    {"name": "query_read_1M", "label": "", "iterations": 418, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 1.730, "min_ns_per_op": 1.676, "max_ns_per_op": 1.748},
+    {"name": "query_write_1M", "label": "", "iterations": 266, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 3.462, "min_ns_per_op": 3.411, "max_ns_per_op": 3.602},
+    {"name": "schedule_write_1M", "label": "", "iterations": 1397, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 0.431, "min_ns_per_op": 0.427, "max_ns_per_op": 0.448},
+    {"name": "schedule_64_systems", "label": "", "iterations": 66368, "items_per_iteration": 64, "repeats": 7, "ns_per_op": 159.782, "min_ns_per_op": 144.836, "max_ns_per_op": 249.424},
+    {"name": "commands_spawn_1M", "label": "", "iterations": 4, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 130.665, "min_ns_per_op": 129.568, "max_ns_per_op": 131.198},
+    {"name": "transform_roots_1M", "label": "", "iterations": 64, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 8.502, "min_ns_per_op": 8.484, "max_ns_per_op": 8.726},
+    {"name": "transform_static_1M", "label": "", "iterations": 8039, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 0.073, "min_ns_per_op": 0.072, "max_ns_per_op": 0.074},
+    {"name": "transform_tree_1M", "label": "", "iterations": 44, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 13.307, "min_ns_per_op": 13.208, "max_ns_per_op": 13.680},
+    {"name": "save_binary_1M", "label": "", "iterations": 8, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 100.869, "min_ns_per_op": 99.686, "max_ns_per_op": 101.948},
+    {"name": "load_binary_1M", "label": "", "iterations": 22, "items_per_iteration": 1048576, "repeats": 7, "ns_per_op": 36.334, "min_ns_per_op": 36.282, "max_ns_per_op": 36.503},
+    {"name": "save_text_64K", "label": "", "iterations": 3, "items_per_iteration": 65536, "repeats": 7, "ns_per_op": 2941.278, "min_ns_per_op": 2917.167, "max_ns_per_op": 2968.944},
+    {"name": "load_text_64K", "label": "", "iterations": 3, "items_per_iteration": 65536, "repeats": 7, "ns_per_op": 2658.555, "min_ns_per_op": 2645.955, "max_ns_per_op": 2686.602}
+  ]
+}

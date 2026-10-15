@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "executable": "core_json_bench.exe",
+  "timestamp": "2026-10-15T22:06:35Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.5,
+  "benchmarks": [
+    {"name": "json_parse_scene", "label": "1734451 bytes", "iterations": 45, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 11499835.556, "min_ns_per_op": 11360337.778, "max_ns_per_op": 11680133.333},
+    {"name": "json_write_scene", "label": "", "iterations": 44, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 13084529.545, "min_ns_per_op": 13029879.545, "max_ns_per_op": 13260209.091},
+    {"name": "json_write_streaming", "label": "", "iterations": 32, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 18443671.875, "min_ns_per_op": 18340818.750, "max_ns_per_op": 18729750.000},
+    {"name": "bin_write_scene", "label": "820020 bytes", "iterations": 627, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 839565.072, "min_ns_per_op": 821591.707, "max_ns_per_op": 841132.217},
+    {"name": "bin_read_scene", "label": "", "iterations": 2378, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 262724.601, "min_ns_per_op": 262292.094, "max_ns_per_op": 263312.574},
+    {"name": "cvar_apply_config", "label": "", "iterations": 2000000, "items_per_iteration": 4, "repeats": 7, "ns_per_op": 121.940, "min_ns_per_op": 121.767, "max_ns_per_op": 122.867},
+    {"name": "f32_shortest", "label": "", "iterations": 76853, "items_per_iteration": 8, "repeats": 7, "ns_per_op": 1025.023, "min_ns_per_op": 1020.781, "max_ns_per_op": 1031.758},
+    {"name": "f64_shortest", "label": "", "iterations": 58357, "items_per_iteration": 8, "repeats": 7, "ns_per_op": 1329.132, "min_ns_per_op": 1326.767, "max_ns_per_op": 1340.908},
+    {"name": "f32_shortest_integer", "label": "", "iterations": 36687877, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 16.171, "min_ns_per_op": 16.145, "max_ns_per_op": 16.901}
+  ]
+}

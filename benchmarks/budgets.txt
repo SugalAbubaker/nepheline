@@ -61,6 +61,9 @@ json_write_streaming           54000000
 bin_write_scene                2700000
 bin_read_scene                 810000
 cvar_apply_config              370
+f32_shortest                   3100
+f64_shortest                   4000
+f32_shortest_integer           50
 
 # core_log_bench
 log_write_enabled              440
@@ -149,6 +152,29 @@ vfs_stat_shadowed_pack         110000
 vfs_normalize_path             150
 asset_load_cached              170
 asset_load_small               1000
+
+# scene_bench (docs/scene.md "Performance"). Rows are per entity (per
+# system, per command). The parallel rows (schedule_write_1M, the
+# transform system) assume a two-core runner like parallel_for_1M; the
+# transform rows and random access are bound by memory bandwidth and
+# latency, and schedule_64_systems wakes workers: those get 5x.
+spawn_batch_1M                 56
+spawn_single_1M                130
+despawn_1M                     78
+add_remove_tag_1M              385
+get_random_1M                  250
+query_read_1M                  5.1
+query_write_1M                 10.4
+schedule_write_1M              5.5
+schedule_64_systems            800
+commands_spawn_1M              395
+transform_roots_1M             45
+transform_static_1M            0.35
+transform_tree_1M              70
+save_binary_1M                 305
+load_binary_1M                 110
+save_text_64K                  8800
+load_text_64K                  8000
 
 # cook_bench (docs/cook.md). Encoder rows are per 4x4 block, the texture
 # cooks per base texel, the mesh rows per triangle, the import per KiB.
