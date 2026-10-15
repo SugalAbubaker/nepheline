@@ -228,8 +228,11 @@ The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
 were silently dropped.
 
-The pixel-level image tests (FLIP against approved baselines) are in
-`tests/golden` (Phase 7's exit criterion).
+The whole-image tests are in `tests/golden` ([docs/golden.md](golden.md),
+Phase 7's exit criterion). Eight scenes are compared with lavapipe
+baselines by our own LDR-FLIP, with thresholds calibrated against the
+RTX 3060 Ti. `render_bench` times the primitives and the golden
+comparisons.
 
 ## Samples
 

@@ -24,6 +24,7 @@ supersedes it and both link to each other.
 | [0016](0016-asset-format.md) | Asset runtime: the `.nph` container, pack archives, the VFS, the LZ codec, and the loader | Accepted |
 | [0017](0017-cooker.md) | The asset cooker: derived identities, a JSON database, our own mesh and texture pipelines | Accepted |
 | [0018](0018-reference-renderer.md) | The reference renderer: forward PBR in physical units, GPU-computed IBL, pre-exposed HDR | Accepted |
+| [0019](0019-golden-image-tests.md) | Golden-image tests: our own LDR-FLIP and PNG codec, lavapipe baselines, calibrated thresholds | Accepted |
 
 ## Template
 
