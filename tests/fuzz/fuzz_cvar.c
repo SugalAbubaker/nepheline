@@ -29,7 +29,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
     const NphStr text = nph_str((const char *)data, size);
     u32 line;
-    (void)nph_cvar_apply_config(&r, text, &line);
+    NPH_IGNORE_RESULT(nph_cvar_apply_config(&r, text, &line));
     NphStrBuilder out;
     nph_sb_init(&out, a);
     if (nph_cvar_write_config(&r, &out) == NPH_RESULT_OK) {

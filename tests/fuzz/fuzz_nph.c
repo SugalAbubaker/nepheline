@@ -82,11 +82,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             asset.blob_count = info.blob_count;
             asset.path = NPH_STR("fuzz");
             NphMeshView mesh;
-            (void)nph_mesh_view(&asset, &mesh);
+            NPH_IGNORE_RESULT(nph_mesh_view(&asset, &mesh));
             NphTextureView texture;
-            (void)nph_texture_view(&asset, &texture);
+            NPH_IGNORE_RESULT(nph_texture_view(&asset, &texture));
             NphMaterialView material;
-            (void)nph_material_view(&asset, &material);
+            NPH_IGNORE_RESULT(nph_material_view(&asset, &material));
             NphSceneView scene;
             if (nph_scene_view(&asset, &scene) == NPH_RESULT_OK) {
                 for (u32 i = 0; i < scene.header->node_count; ++i) {

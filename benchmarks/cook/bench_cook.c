@@ -826,16 +826,19 @@ static void prepare_glb(void)
     check(nph_sb_append_cstr(&sb, "],\"bufferViews\":["));
     for (u32 m = 0; m < GLB_MESHES; ++m) {
         const u64 o = per_mesh * m;
-        check(nph_sb_appendf(
-            &sb,
-            "%s{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
-            "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
-            "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
-            "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu}",
-            m == 0U ? "" : ",", (unsigned long long)o, (unsigned long long)positions,
-            (unsigned long long)(o + positions), (unsigned long long)normals,
-            (unsigned long long)(o + positions + normals), (unsigned long long)uvs,
-            (unsigned long long)(o + positions + normals + uvs), (unsigned long long)index_bytes));
+        const u64 at_normals = o + positions;
+        const u64 at_uvs = at_normals + normals;
+        const u64 at_indices = at_uvs + uvs;
+        check(nph_sb_appendf(&sb,
+                             "%s{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
+                             "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
+                             "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},"
+                             "{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu}",
+                             m == 0U ? "" : ",", (unsigned long long)o,
+                             (unsigned long long)positions, (unsigned long long)at_normals,
+                             (unsigned long long)normals, (unsigned long long)at_uvs,
+                             (unsigned long long)uvs, (unsigned long long)at_indices,
+                             (unsigned long long)index_bytes));
     }
     check(nph_sb_appendf(&sb, "],\"buffers\":[{\"byteLength\":%llu}]}",
                          (unsigned long long)bin_size));
