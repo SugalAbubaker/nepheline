@@ -702,8 +702,11 @@ NTEST(mesh, extreme_values_are_normalised_or_refused)
     v[2].position = nph_vec3(0.0F, 1.0F, 0.0F);
     v[1].uv0 = nph_vec2(1.0F, 0.0F);
     v[2].uv0 = nph_vec2(0.0F, 1.0F);
+    // Through a volatile, so LTCG cannot fold the overflow into a
+    // compile-time warning (C4756).
+    volatile f32 huge = 1.8446744e19F;
     for (u32 i = 0; i < 3U; ++i) {
-        v[i].normal = nph_vec3(0.0F, 0.0F, i == 0U ? 1.8446744e19F : 1.0F);
+        v[i].normal = nph_vec3(0.0F, 0.0F, i == 0U ? huge : 1.0F);
     }
     const u32 tri[3] = {0U, 1U, 2U};
     NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, tri, 3U, 0U), NPH_RESULT_OK);
