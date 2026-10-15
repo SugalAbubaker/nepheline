@@ -104,16 +104,24 @@ typedef struct Id {
     u8 has_binding;
     u8 has_location;
     u8 builtin;
-    u8 sampled; // images: 1 sampled, 2 storage
-    u32 a;      // width / component or element type / pointee / variable type / constant value
-    u32 b;      // count / length constant id / storage class
+    u8 sampled;    // images: 1 sampled, 2 storage
+    u8 size_state; // structs: SIZE_UNKNOWN, SIZE_COMPUTING, or SIZE_KNOWN (type_size)
+    u32 a;         // width / component or element type / pointee / variable type / constant value
+    u32 b;         // count / length constant id / storage class
     u32 first_member;
     u32 member_count;
     u32 set;
     u32 binding;
     u32 location;
     u32 array_stride;
+    u32 size; // structs: the size once size_state is SIZE_KNOWN
 } Id;
+
+enum {
+    SIZE_UNKNOWN = 0,
+    SIZE_COMPUTING = 1,
+    SIZE_KNOWN = 2
+};
 
 typedef struct Member {
     u32 type;
@@ -486,7 +494,7 @@ static NphResult pass_decorations(Parser *p)
     return NPH_RESULT_OK;
 }
 
-static u64 type_size(const Parser *p, u32 type, u32 matrix_stride, u32 depth);
+static u64 type_size(Parser *p, u32 type, u32 matrix_stride, u32 depth);
 
 static u64 constant_value(const Parser *p, u32 id)
 {
@@ -496,7 +504,7 @@ static u64 constant_value(const Parser *p, u32 id)
     return p->ids[id].a;
 }
 
-static u64 type_size(const Parser *p, u32 type, u32 matrix_stride, u32 depth)
+static u64 type_size(Parser *p, u32 type, u32 matrix_stride, u32 depth)
 {
     if (!id_ok(p, type) || depth > MAX_DEPTH) {
         return 0U;
@@ -522,15 +530,32 @@ static u64 type_size(const Parser *p, u32 type, u32 matrix_stride, u32 depth)
         return length * stride;
     }
     case ID_TYPE_STRUCT: {
+        // Each struct is sized once: members may name the same struct any
+        // number of times, and the depth limit alone leaves the recursion
+        // exponential in it (a fuzzed module whose struct named itself
+        // among seven members took 7^MAX_DEPTH steps). A struct that
+        // contains itself is invalid SPIR-V (recursion goes through
+        // pointers only) and fails the module.
+        Id *s = &p->ids[type];
+        if (s->size_state == SIZE_KNOWN) {
+            return s->size;
+        }
+        if (s->size_state == SIZE_COMPUTING) {
+            p->reject = "a struct contains itself";
+            return 0U;
+        }
+        s->size_state = SIZE_COMPUTING;
         u64 size = 0U;
-        for (u32 i = 0; i < t->member_count; ++i) {
-            const Member *m = &p->members[t->first_member + i];
+        for (u32 i = 0; i < s->member_count; ++i) {
+            const Member *m = &p->members[s->first_member + i];
             const u64 end = (u64)m->offset + type_size(p, m->type, m->matrix_stride, depth + 1U);
             if (end > size) {
                 size = end;
             }
         }
-        return size;
+        s->size = size > NPH_U32_MAX ? NPH_U32_MAX : (u32)size;
+        s->size_state = SIZE_KNOWN;
+        return s->size;
     }
     case ID_TYPE_POINTER:
     case ID_TYPE_FORWARD_POINTER:
@@ -595,6 +620,9 @@ static NphResult analyse(Parser *p)
         switch (v->b) {
         case STORAGE_PUSH_CONSTANT: {
             const u64 size = type_size(p, pointee, 0U, 0U);
+            if (p->reject != NULL) {
+                return NPH_RESULT_CORRUPT;
+            }
             if (size > NPH_GPU_PUSH_CONSTANT_BYTES) {
                 p->reject = "push constant block larger than NPH_GPU_PUSH_CONSTANT_BYTES";
                 return NPH_RESULT_UNSUPPORTED;
