@@ -24,7 +24,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
     memcpy(copy, data, words * 4U);
     NphGpuShaderInfo info;
-    (void)nph_gpu_spirv_reflect(copy, words * 4U, alloc, &info);
+    NPH_IGNORE_RESULT(nph_gpu_spirv_reflect(copy, words * 4U, alloc, &info));
     NPH_FREE_ARRAY(alloc, u32, copy, words);
     return 0;
 }

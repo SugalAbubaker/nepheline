@@ -14,6 +14,9 @@
 
 #include <cook/cooker.h>
 #include <stdlib.h>
+#if !NPH_PLATFORM_WINDOWS
+#include <sys/wait.h>
+#endif
 
 typedef struct CookFixture {
     NphAllocator *alloc;
@@ -503,7 +506,7 @@ static int run_command(const char *command)
 #if NPH_PLATFORM_WINDOWS
     // cmd.exe strips the outer quotes of a command line that begins with
     // one; wrapping the whole thing in another pair keeps every path intact.
-    char wrapped[4200];
+    char wrapped[8200];
     snprintf(wrapped, sizeof wrapped, "\"%s\"", command);
     // The tool runs from a shell as a user runs it; the command is built
     // from the test's own paths.
@@ -518,7 +521,7 @@ NTEST_F(CookFixture, the_command_line_tool_cooks_and_packs)
 {
     char pack_path[1200];
     test_path_in(&f->dir, "cli.npk", pack_path, sizeof pack_path);
-    char command[4096];
+    char command[8192];
     snprintf(command, sizeof command,
              "\"%s\" \"%s\" -o \"%s\" --root \"%s\" --pack \"%s\" --lz fast --threads 2 --quiet",
              NPH_COOK_EXE, f->gltf, f->out_dir, f->dir.dir, pack_path);

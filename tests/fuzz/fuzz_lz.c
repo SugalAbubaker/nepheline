@@ -25,8 +25,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (dst == NULL) {
         return 0;
     }
-    (void)nph_lz_decompress(data + 1, size - 1U, dst, dst_size);
-    (void)nph_lz_decompress(data + 1, size - 1U, dst, size - 1U);
+    NPH_IGNORE_RESULT(nph_lz_decompress(data + 1, size - 1U, dst, dst_size));
+    NPH_IGNORE_RESULT(nph_lz_decompress(data + 1, size - 1U, dst, size - 1U));
     // Whatever the input, compressing it and decompressing the result must
     // reproduce it at both levels.
     const u64 bound = nph_lz_compress_bound(size);

@@ -10,10 +10,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     u64 payload = size;
-    (void)nph_bin_verify_checksum(data, size, &payload);
+    NPH_IGNORE_RESULT(nph_bin_verify_checksum(data, size, &payload));
     NphBinReader r = nph_bin_reader(data, size);
     u32 version;
-    (void)nph_bin_read_header(&r, 0x4E504853U, 0U, 10U, &version);
+    NPH_IGNORE_RESULT(nph_bin_read_header(&r, 0x4E504853U, 0U, 10U, &version));
     for (u32 guard = 0; guard < 100000U && !nph_bin_reader_at_end(&r); ++guard) {
         u32 tag;
         u32 section_size;
@@ -33,7 +33,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                     break;
                 }
             }
-            (void)nph_bin_read_skip(&r, section_size);
+            NPH_IGNORE_RESULT(nph_bin_read_skip(&r, section_size));
         } else {
             u8 byte;
             if (nph_bin_read_u8(&r, &byte) != NPH_RESULT_OK) {
@@ -41,6 +41,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             }
         }
     }
-    (void)nph_bin_read_align(&r, 16U);
+    NPH_IGNORE_RESULT(nph_bin_read_align(&r, 16U));
     return 0;
 }

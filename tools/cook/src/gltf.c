@@ -551,12 +551,12 @@ static NphResult convert_mesh(CookGltfScene *scene, const cgltf_data *data, cons
 // Materials
 // ---------------------------------------------------------------------------
 
-static u8 wrap_mode(cgltf_int gl)
+static u8 wrap_mode(cgltf_wrap_mode mode)
 {
-    switch (gl) {
-    case 33071: // GL_CLAMP_TO_EDGE
+    switch (mode) {
+    case cgltf_wrap_mode_clamp_to_edge: // GL_CLAMP_TO_EDGE
         return (u8)NPH_MATERIAL_WRAP_CLAMP;
-    case 33648: // GL_MIRRORED_REPEAT
+    case cgltf_wrap_mode_mirrored_repeat: // GL_MIRRORED_REPEAT
         return (u8)NPH_MATERIAL_WRAP_MIRROR;
     default:
         return (u8)NPH_MATERIAL_WRAP_REPEAT;

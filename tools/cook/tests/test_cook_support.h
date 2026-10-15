@@ -164,8 +164,8 @@ static inline void test_base64(const u8 *in, u64 n, char *out)
         const u32 v = (b0 << 16U) | (b1 << 8U) | b2;
         out[o++] = table[(v >> 18U) & 63U];
         out[o++] = table[(v >> 12U) & 63U];
-        out[o++] = i + 1U < n ? table[(v >> 6U) & 63U] : '=';
-        out[o++] = i + 2U < n ? table[v & 63U] : '=';
+        out[o++] = (char)(i + 1U < n ? table[(v >> 6U) & 63U] : '=');
+        out[o++] = (char)(i + 2U < n ? table[v & 63U] : '=');
     }
     out[o] = '\0';
 }
@@ -258,14 +258,14 @@ static inline void test_write_gltf(const TempDir *dir, const char *name, bool ex
             const f32 sv = v * 2.0F - 1.0F;
             const u32 i = face * 4U + corner;
             for (u32 c = 0; c < 3U; ++c) {
-                cube_pos[i * 3U + c] = n[c] + t[c] * su + b[c] * sv;
-                cube_nrm[i * 3U + c] = n[c];
+                cube_pos[(u64)i * 3U + c] = n[c] + t[c] * su + b[c] * sv;
+                cube_nrm[(u64)i * 3U + c] = n[c];
             }
-            cube_uv[i * 2U] = u;
-            cube_uv[i * 2U + 1U] = v;
+            cube_uv[(u64)i * 2U] = u;
+            cube_uv[(u64)i * 2U + 1U] = v;
         }
         const u16 base = (u16)(face * 4U);
-        u16 *idx = &cube_idx[face * 6U];
+        u16 *idx = &cube_idx[(u64)face * 6U];
         idx[0] = base;
         idx[1] = (u16)(base + 1U);
         idx[2] = (u16)(base + 2U);
@@ -308,7 +308,7 @@ static inline void test_write_gltf(const TempDir *dir, const char *name, bool ex
     for (u32 y = 0; y < 8U; ++y) {
         for (u32 x = 0; x < 8U; ++x) {
             const bool on = ((x / 2U) + (y / 2U)) % 2U == 0U;
-            u8 *p = &base_rgba[(y * 8U + x) * 4U];
+            u8 *p = &base_rgba[((u64)y * 8U + x) * 4U];
             p[0] = on ? 220U : 30U;
             p[1] = on ? 160U : 60U;
             p[2] = on ? 40U : 200U;
@@ -316,9 +316,9 @@ static inline void test_write_gltf(const TempDir *dir, const char *name, bool ex
         }
     }
     for (u32 i = 0; i < 16U; ++i) {
-        normal_rgba[i * 4U] = 128U;
-        normal_rgba[i * 4U + 1U] = 128U;
-        normal_rgba[i * 4U + 2U] = 255U;
+        normal_rgba[(u64)i * 4U] = 128U;
+        normal_rgba[(u64)i * 4U + 1U] = 128U;
+        normal_rgba[(u64)i * 4U + 2U] = 255U;
         normal_rgba[i * 4U + 3U] = 255U;
     }
     u8 base_tga[18 + 8 * 8 * 4];

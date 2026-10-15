@@ -88,7 +88,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         u32 w;
         u32 h;
         u32 c;
-        (void)cook_image_info(scene.images[i].data, scene.images[i].size, &w, &h, &c);
+        NPH_IGNORE_RESULT(cook_image_info(scene.images[i].data, scene.images[i].size, &w, &h, &c));
     }
     CookMeshSettings settings;
     cook_mesh_settings_default(&settings);

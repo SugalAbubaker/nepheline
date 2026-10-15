@@ -9,7 +9,7 @@
 // Bit writing for hand-built blocks (LSB first, as the formats are stored)
 // ---------------------------------------------------------------------------
 
-static void put_bits(u8 block[16], u32 *pos, u32 value, u32 count)
+static void put_bits(u8 *block, u32 *pos, u32 value, u32 count)
 {
     for (u32 b = 0; b < count; ++b) {
         if (((value >> b) & 1U) != 0U) {
