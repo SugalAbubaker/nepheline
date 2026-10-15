@@ -154,6 +154,10 @@ typedef struct NphJobSystemDesc {
     // "Deterministic mode"). For reproducing scheduling-dependent bugs;
     // I/O threads still run concurrently.
     b32 deterministic;
+    // The last worker's thread sleeps this long (at most 10 s) before it
+    // starts, while the others already run jobs: reproduces a thread that
+    // an oversubscribed machine schedules late. For tests; 0 in real use.
+    u32 debug_last_worker_start_delay_ms;
 } NphJobSystemDesc;
 
 // Creates the system, its worker and I/O threads, fibers, and queues.

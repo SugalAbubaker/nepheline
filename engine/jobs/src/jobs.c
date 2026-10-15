@@ -197,6 +197,7 @@ struct NphJobSystem {
     u64 inline_stack_reserve;
     b32 deterministic;
     b32 pinned;
+    u32 last_worker_start_delay_ms; // NphJobSystemDesc::debug_last_worker_start_delay_ms
 
     NphJobWorker *workers;
     NphJobIoThread *io_threads;
@@ -1125,13 +1126,16 @@ static void worker_thread_main(void *user)
 {
     NphJobWorker *w = (NphJobWorker *)user;
     NphJobSystem *js = w->js;
+    if (js->last_worker_start_delay_ms != 0U && w->index + 1U == js->worker_count) {
+        nph_thread_sleep_ns((u64)js->last_worker_start_delay_ms * NPH_TIME_NS_PER_MS);
+    }
     set_current_worker(w);
     nph_fiber_init_thread(&w->thread_fiber);
-    u32 index;
-    while (!nph_mpmc_ring_pop(&js->free_fibers, &index)) {
-        nph_cpu_relax(); // fiber_count > worker_count, so one is always there
-    }
-    w->current_fiber = &js->fibers[index];
+    // The first fiber was set aside for this worker at creation. Taking one
+    // from the pool here instead lost a race: a thread that starts late
+    // (an oversubscribed machine) found every fiber already held by the
+    // other workers and their parked waits, and spun forever.
+    w->current_fiber = &js->fibers[w->index];
     nph_fiber_switch(&w->thread_fiber, w->current_fiber);
     // Back on the thread's own stack: the system is stopping. The thread
     // fiber is never migrated, so `w` is still this thread's worker.
@@ -1641,7 +1645,7 @@ NphResult nph_job_system_create(const NphJobSystemDesc *desc, NphJobSystem **out
         job_capacity < JOB_MIN_CAPACITY || job_capacity > JOB_MAX_CAPACITY ||
         !nph_is_pow2_u32(job_capacity) || deque_capacity < JOB_MIN_DEQUE ||
         !nph_is_pow2_u32(deque_capacity) || io_thread_count > NPH_JOB_MAX_WORKERS ||
-        ext_slots > 4096U) {
+        ext_slots > 4096U || desc->debug_last_worker_start_delay_ms > 10000U) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
 
@@ -1661,6 +1665,7 @@ NphResult nph_job_system_create(const NphJobSystemDesc *desc, NphJobSystem **out
         desc->fiber_stack_size != 0U ? desc->fiber_stack_size : JOB_DEFAULT_STACK_SIZE;
     js->inline_stack_reserve = nph_max_u64(JOB_INLINE_STACK_RESERVE_MIN, js->fiber_stack_size / 4U);
     js->deterministic = desc->deterministic;
+    js->last_worker_start_delay_ms = desc->debug_last_worker_start_delay_ms;
 
     NphResult r = NPH_RESULT_OUT_OF_MEMORY;
     js->workers = (NphJobWorker *)NPH_ALLOC_ZEROED(alloc, sizeof(NphJobWorker) * (u64)worker_count,
@@ -1729,7 +1734,9 @@ NphResult nph_job_system_create(const NphJobSystemDesc *desc, NphJobSystem **out
             goto fail;
         }
         js->fibers_created = i + 1U;
-        ring_push_spin(&js->free_fibers, i);
+        if (i >= worker_count) {
+            ring_push_spin(&js->free_fibers, i); // fibers below worker_count start the workers
+        }
     }
 
     r = nph_semaphore_init(&js->wake, 0U);
