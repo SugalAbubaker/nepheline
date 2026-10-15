@@ -457,6 +457,12 @@ NTEST_F(GpuFixture, reports_pass_timings_two_frames_later)
             NTEST_ASSERT_EQ_STR(timings[0].name, "clear");
             NTEST_ASSERT_EQ_STR(timings[1].name, "copy");
             NTEST_ASSERT_EQ_INT(timings[0].queue, NPH_GPU_QUEUE_GRAPHICS);
+            // The declared footprint: the clear writes the 32 x 32 RGBA8
+            // image; the copy reads it and writes the whole 4 KiB buffer.
+            NTEST_EXPECT_EQ_UINT(timings[0].read_bytes, 0U);
+            NTEST_EXPECT_EQ_UINT(timings[0].write_bytes, 32U * 32U * 4U);
+            NTEST_EXPECT_EQ_UINT(timings[1].read_bytes, 32U * 32U * 4U);
+            NTEST_EXPECT_EQ_UINT(timings[1].write_bytes, 4096U);
         } else {
             NTEST_ASSERT_EQ_UINT(n, 0U);
         }

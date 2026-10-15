@@ -133,6 +133,8 @@ typedef struct RgTiming {
     u32 ts_begin;
     u32 ts_end;
     NphGpuQueueType queue;
+    u64 read_bytes;
+    u64 write_bytes;
 } RgTiming;
 
 struct NphGpuRenderGraph {
@@ -1407,6 +1409,81 @@ static void record_barrier_list(NphGpuRenderGraph *g, NphGpuCmd *cmd, u32 head)
     }
 }
 
+// Bytes of mips [base_mip, base_mip + mip_count) of a resource (all
+// layers), or the whole size of a buffer.
+static u64 use_range_bytes(const RgResource *r, u32 base_mip, u32 mip_count)
+{
+    if (!r->is_image) {
+        return r->buffer_desc.size;
+    }
+    const NphGpuImageDesc *d = &r->image_desc;
+    const u32 mips = d->mip_count != 0U ? d->mip_count : 1U;
+    const u32 end =
+        mip_count == NPH_GPU_ALL_MIPS || base_mip + mip_count > mips ? mips : base_mip + mip_count;
+    const u32 layers = d->layer_count != 0U ? d->layer_count : 1U;
+    const u32 samples = d->samples != 0U ? d->samples : 1U;
+    u64 bytes = 0U;
+    for (u32 m = base_mip; m < end; ++m) {
+        bytes += nph_gpu_format_level_bytes(d->format, nph_gpu_mip_extent(d->width, m),
+                                            nph_gpu_mip_extent(d->height, m),
+                                            nph_gpu_mip_extent(d->depth, m)) *
+                 layers * samples;
+    }
+    return bytes;
+}
+
+static const RgAttachment *pass_attachment(const NphGpuRgPass *pass, const RgUse *use)
+{
+    if (use->use == NPH_GPU_RG_USE_DEPTH_ATTACHMENT || use->use == NPH_GPU_RG_USE_DEPTH_READ_ONLY) {
+        return pass->has_depth && pass->depth.resource == use->resource ? &pass->depth : NULL;
+    }
+    for (u32 i = 0; i < pass->color_count; ++i) {
+        if (pass->colors[i].resource == use->resource) {
+            return &pass->colors[i];
+        }
+    }
+    return NULL;
+}
+
+// The declared footprint of a pass (NphGpuRgPassTiming.read_bytes and
+// write_bytes): every use's range counted once as read and/or written.
+static void pass_declared_bytes(const NphGpuRenderGraph *g, const NphGpuRgPass *pass, u64 *out_read,
+                                u64 *out_write)
+{
+    u64 read = 0U;
+    u64 write = 0U;
+    for (u32 u = pass->use_head; u != RG_INVALID; u = g->uses[u].next) {
+        const RgUse *use = &g->uses[u];
+        const RgResource *r = &g->resources[use->resource];
+        const u64 bytes = use_range_bytes(r, use->base_mip, use->mip_count);
+        switch (use->use) {
+        case NPH_GPU_RG_USE_COLOR_ATTACHMENT:
+        case NPH_GPU_RG_USE_DEPTH_ATTACHMENT:
+        case NPH_GPU_RG_USE_DEPTH_READ_ONLY: {
+            const RgAttachment *a = pass_attachment(pass, use);
+            const bool load = a == NULL || a->desc.load == NPH_GPU_LOAD_OP_LOAD;
+            const bool store = use->use != NPH_GPU_RG_USE_DEPTH_READ_ONLY &&
+                               (a == NULL || a->desc.store == NPH_GPU_STORE_OP_STORE);
+            read += load ? bytes : 0U;
+            write += store ? bytes : 0U;
+            break;
+        }
+        case NPH_GPU_RG_USE_PRESENT:
+            break;
+        case NPH_GPU_RG_USE_STORAGE_WRITE:
+        case NPH_GPU_RG_USE_SHADER_WRITE:
+        case NPH_GPU_RG_USE_TRANSFER_DST:
+            write += bytes;
+            break;
+        default:
+            read += bytes;
+            break;
+        }
+    }
+    *out_read = read;
+    *out_write = write;
+}
+
 static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass)
 {
     NphGpuDevice *dev = g->dev;
@@ -1536,6 +1613,7 @@ NphResult nph_gpu_rg_execute(NphGpuRenderGraph *g)
             t->ts_begin = pass->ts_begin;
             t->ts_end = pass->ts_end;
             t->queue = pass->queue;
+            pass_declared_bytes(g, pass, &t->read_bytes, &t->write_bytes);
         }
         NphGpuTimelineOp waits[2U * NPH_GPU_QUEUE_COUNT + 1U];
         u32 wait_count = 0U;
@@ -1665,6 +1743,8 @@ u32 nph_gpu_rg_timings(const NphGpuRenderGraph *g, NphGpuRgPassTiming *out, u32 
         const RgTiming *t = &g->timings[slot][i];
         out[n].name = t->name;
         out[n].queue = t->queue;
+        out[n].read_bytes = t->read_bytes;
+        out[n].write_bytes = t->write_bytes;
         out[n].gpu_ns = 0U;
         if (t->ts_begin < tick_count && t->ts_end < tick_count &&
             ticks[t->ts_end] >= ticks[t->ts_begin]) {
