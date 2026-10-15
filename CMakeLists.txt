@@ -100,6 +100,8 @@ add_subdirectory(tools/golden)
 # the GPU).
 if(NPH_BUILD_TESTS)
     add_subdirectory(tests/integration)
+    # Golden-image tests of the renderer against approved baselines.
+    add_subdirectory(tests/golden)
 endif()
 
 # The aggregate target a game or tool links to get the whole engine.

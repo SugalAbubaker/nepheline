@@ -74,6 +74,23 @@ jobs:
         with:
           submodules: recursive
 
+      # The golden-image baselines are Git LFS objects (tests/golden/baselines,
+      # docs/golden.md), and only the Linux jobs render them (lavapipe). The
+      # LFS store is cached under the list of objects, so a run downloads
+      # only baselines it has not seen.
+      - name: List the LFS objects
+        if: runner.os == 'Linux'
+        run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-objects
+      - name: Cache the LFS objects
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-objects') }}
+      - name: Fetch the LFS objects
+        if: runner.os == 'Linux'
+        run: git lfs pull
+
       - name: Set up the MSVC environment
         if: runner.os == 'Windows'
         shell: pwsh
@@ -169,6 +186,16 @@ jobs:
           name: test-results-${{ matrix.name }}-${{ matrix.cfg }}
           path: build/${{ matrix.preset }}/test-results/
           if-no-files-found: warn
+
+      # The rendered golden images and their FLIP maps: what a reviewer
+      # looks at, and what scripts/golden_approve.py approves from.
+      - name: Upload the golden images
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-${{ matrix.name }}-${{ matrix.cfg }}
+          path: build/${{ matrix.preset }}/golden/
+          if-no-files-found: ignore
 
   tidy:
     name: clang-tidy
