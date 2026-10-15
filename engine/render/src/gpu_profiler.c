@@ -204,7 +204,7 @@ static void pass_stats(NphRenderGpuProfiler *p, const ProfPass *pass, NphRenderP
     out->name = pass->name;
     out->queue = pass->queue;
     out->samples = pass->count;
-    out->last_ms = pass->last_ms;
+    out->last_ms = (f64)pass->last_ms;
     out->read_bytes = pass->read_bytes;
     out->write_bytes = pass->write_bytes;
     if (pass->count == 0U) {
