@@ -58,6 +58,6 @@ nph_add_test(core
     DEPS
         nph::core
 )
-if(MSVC)
+if(NPH_BUILD_TESTS AND MSVC)
     target_compile_definitions(core_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
