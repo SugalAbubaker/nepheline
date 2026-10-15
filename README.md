@@ -70,11 +70,13 @@ cmake/          build helpers: configurations, warnings, sanitizers, module/test
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
 tools/ntest/    the Nepheline test framework
 tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
+tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_flip tool
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
 samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer); samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
+tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
 scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, nph_hash64.py, runner/install.ps1 + loop.ps1
 third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb), each wrapped by exactly one module or tool
 docs/           design docs per subsystem; docs/adr/ holds decision records
@@ -94,6 +96,7 @@ Modules depend strictly left-to-right:
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/gpu.md`](docs/gpu.md) — GPU module: device and validation gate, bindless resources, frames and submission, uploads, shaders and pipelines, the render graph, the swapchain
 - [`docs/render.md`](docs/render.md) — render module: the forward PBR reference renderer, units and conventions, image-based lighting, tonemapping, debug draw, the GPU profiler
+- [`docs/golden.md`](docs/golden.md) — golden-image tests: the scenes, our LDR-FLIP and PNG codec, baselines and approval, calibration
 - [`docs/asset.md`](docs/asset.md) — asset module: the `.nph` container, the LZ codec, GUIDs, pack archives, the VFS, the loader, the typed views
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/ntest.md`](docs/ntest.md) — test framework
