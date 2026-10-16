@@ -176,6 +176,9 @@ struct NphWorld {
     NphHandlePool handles;
     NphEntityRecord *records; // per slot
     u32 capacity;
+    // Handles allocated but not placed: reserved by a load, or suspended.
+    // nph_world_entity_count is the pool's live count minus these.
+    u32 reserved;
 
     // Archetypes.
     NphArchetype **archetypes;

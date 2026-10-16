@@ -442,6 +442,33 @@ full when the save has no resolver, so a copy does not depend on the
 prefab library. On a failed load in this mode the world has released the
 handles it placed, so it is discarded, as copies always are on failure.
 
+### Suspended entities
+
+An editor's undo has to bring a deleted entity back as itself, because
+other components, the selection, and the undo history refer to it by
+handle. `nph_world_suspend` takes an entity out of the world but keeps
+its handle.
+- It is no longer alive: queries, iteration, `nph_world_entity_count`,
+  and saves skip it, and its components are gone.
+- Its children become roots and it leaves its parent, as with a despawn,
+  and the event stream records DESPAWNED.
+- Its slot stays allocated, so no new entity gets its handle, and
+  references keep meaning it.
+
+`nph_world_resume` places it again at the same handle, with the given
+components at their defaults, and records SPAWNED.
+`nph_world_release` frees the slot for good, which makes the handle
+stale.
+
+A suspended handle is a reserved one, the state a load gives handles
+before placing them. Suspension only adds a public way in and out of that
+state. The world counts reserved handles, so `nph_world_entity_count`
+excludes them while the capacity still includes them.
+`nph_world_clear` leaves them reserved (their owner decides), and
+`nph_world_adopt_handles` copies them as reserved. So a play-in-editor
+copy, or a hot reload that migrates the world, keeps a suspended entity
+restorable.
+
 ## Profiling
 
 A schedule run is the profiler zone `scene.schedule`; each system run on
@@ -516,7 +543,7 @@ scenes outgrow it.
 
 ## Testing
 
-`engine/scene/tests/` (74 tests):
+`engine/scene/tests/` (79 tests):
 
 - Component generators, descriptor validation, field comparison and
   hashing, layout hashes, and text truncation at UTF-8 boundaries.
@@ -554,6 +581,12 @@ scenes outgrow it.
   an instance when asked, and fail the load otherwise.
 - Prefabs: instantiation, internal references, instance differences,
   prefab changes reaching instances, full instances, and errors.
+- Suspension (`test_suspend.c`): a suspended entity is gone from every
+  view (alive, counts, iteration, queries, stats, events) but its slot is
+  never handed out. It comes back at the same handle with default
+  components, and its hierarchy can be restored. Release frees the slot
+  for a new handle. Mistakes are refused, and capacity counts suspended
+  handles. Saves skip suspended entities; copies and clears keep them.
 
 **Fuzzing.** The targets are `tests/fuzz/fuzz_scene_text.c` and
 `fuzz_scene_bin.c` (the binary target repairs the CRC so mutations reach

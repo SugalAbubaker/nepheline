@@ -158,7 +158,49 @@ NPH_MUST_USE NphResult nph_world_despawn(NphWorld *world, NphEntity e);
 
 bool nph_world_is_alive(const NphWorld *world, NphEntity e);
 
+// Live entities (suspended ones not counted).
 u32 nph_world_entity_count(const NphWorld *world);
+
+// ---------------------------------------------------------------------------
+// Suspension: an entity taken out of the world, its handle kept
+// ---------------------------------------------------------------------------
+//
+// An editor's undo needs to bring a deleted entity back as itself: other
+// components and the undo history refer to it by handle. A suspended
+// entity is gone in every way but its slot:
+//   - it is not alive: queries, iteration, nph_world_entity_count, and
+//     saves skip it, and its components are gone;
+//   - its children become roots and it leaves its parent, as with
+//     nph_world_despawn, and the event stream records DESPAWNED;
+//   - its slot stays taken, so no new entity gets its handle, and
+//     references to it keep meaning it.
+// nph_world_resume brings it back with the same handle; nph_world_release
+// lets the slot go for good. It still counts against the capacity.
+// nph_world_clear leaves suspended handles suspended, and
+// nph_world_adopt_handles copies them as suspended.
+
+// Suspends a live entity. NPH_RESULT_NOT_FOUND for a stale, null, or
+// already suspended handle.
+NPH_MUST_USE NphResult nph_world_suspend(NphWorld *world, NphEntity e);
+
+// Brings a suspended entity back with the components `ids` (their default
+// values; a SPAWNED event, as nph_world_spawn records). NPH_RESULT_NOT_FOUND
+// when `e` is not suspended; NPH_RESULT_INVALID_ARGUMENT for an unknown
+// component id. Nothing changes on failure.
+NPH_MUST_USE NphResult nph_world_resume(NphWorld *world, NphEntity e, const NphComponentId *ids,
+                                        u32 id_count);
+
+// Releases a suspended entity's slot: its handle is stale from now on, and
+// a later spawn may reuse the slot (with a new generation). Nothing when
+// `e` is not suspended.
+void nph_world_release(NphWorld *world, NphEntity e);
+
+// True while `e` is suspended. (A handle a scene load reserved and has not
+// placed yet reads as suspended too: the state is the same.)
+bool nph_world_is_suspended(const NphWorld *world, NphEntity e);
+
+// Suspended handles in the world.
+u32 nph_world_suspended_count(const NphWorld *world);
 
 // The largest entity count this world can hold.
 u32 nph_world_entity_capacity(const NphWorld *world);
@@ -273,7 +315,8 @@ void nph_world_clear_events(NphWorld *world);
 // ---------------------------------------------------------------------------
 
 typedef struct NphWorldStats {
-    u32 entities;
+    u32 entities;  // live
+    u32 suspended; // handles kept for suspended entities (nph_world_suspend)
     u32 archetypes;
     u32 chunks;      // in use
     u32 free_chunks; // carved, unused

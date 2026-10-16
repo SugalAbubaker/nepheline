@@ -758,8 +758,12 @@ NphResult nph_world_adopt_handles(NphWorld *dst, const NphWorld *src)
     }
     nph_world_structural_begin(dst);
     // An empty world has no placed record (every live handle is placed or
-    // reserved, and there are none), so only the pool changes.
-    return nph_handle_pool_copy(&dst->handles, &src->handles);
+    // reserved, and there are none), so only the pool changes. Every handle
+    // it now holds is reserved: src's live entities, until a load places
+    // them, and src's suspended ones.
+    NPH_TRY(nph_handle_pool_copy(&dst->handles, &src->handles));
+    dst->reserved = nph_handle_pool_live(&dst->handles);
+    return NPH_RESULT_OK;
 }
 
 bool nph_world_handle_reserved(const NphWorld *w, NphEntity e)
@@ -935,6 +939,7 @@ NphResult nph_world_reserve(NphWorld *w, u32 count, NphEntity *out)
         NPH_VERIFY(nph_handle_pool_alloc(&w->handles, &h) == NPH_RESULT_OK);
         out[i].value = h.value;
     }
+    w->reserved += count;
     return NPH_RESULT_OK;
 }
 
@@ -953,7 +958,10 @@ NphResult nph_world_place(NphWorld *w, const NphComponentId *ids, u32 id_count, 
                    w->records[nph_handle_pool_index(&w->handles, h)].chunk == NULL);
         NPH_UNUSED(h);
     }
-    return batch_fill(w, &mask, count, handles, NULL);
+    NPH_TRY(batch_fill(w, &mask, count, handles, NULL));
+    NPH_ASSERT(w->reserved >= count);
+    w->reserved -= count;
+    return NPH_RESULT_OK;
 }
 
 void nph_world_unreserve(NphWorld *w, const NphEntity *handles, u32 count)
@@ -963,8 +971,22 @@ void nph_world_unreserve(NphWorld *w, const NphEntity *handles, u32 count)
         if (nph_handle_pool_is_valid(&w->handles, h) &&
             w->records[nph_handle_pool_index(&w->handles, h)].chunk == NULL) {
             NPH_VERIFY(nph_handle_pool_release(&w->handles, h));
+            NPH_ASSERT(w->reserved > 0U);
+            --w->reserved;
         }
     }
+}
+
+// Takes a live entity out of its archetype and its hierarchy, leaving its
+// handle allocated (and its record unplaced).
+static void take_out(NphWorld *w, NphEntity e, NphEntityRecord *rec)
+{
+    if (rec->chunk->archetype->column_of[NPH_COMPONENT_ID_HIERARCHY] != NPH_NO_COLUMN) {
+        nph_hierarchy_on_despawn(w, e);
+    }
+    row_remove(w, rec->chunk, rec->row, nph_world_change_tick(w));
+    rec->chunk = NULL;
+    rec->row = 0U;
 }
 
 NphResult nph_world_despawn(NphWorld *w, NphEntity e)
@@ -975,12 +997,7 @@ NphResult nph_world_despawn(NphWorld *w, NphEntity e)
     if (rec == NULL) {
         return NPH_RESULT_NOT_FOUND;
     }
-    if (rec->chunk->archetype->column_of[NPH_COMPONENT_ID_HIERARCHY] != NPH_NO_COLUMN) {
-        nph_hierarchy_on_despawn(w, e);
-    }
-    row_remove(w, rec->chunk, rec->row, nph_world_change_tick(w));
-    rec->chunk = NULL;
-    rec->row = 0U;
+    take_out(w, e, rec);
     NPH_VERIFY(nph_handle_pool_release(&w->handles, (NphHandle){e.value}));
     nph_world_event(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
     return NPH_RESULT_OK;
@@ -995,7 +1012,48 @@ bool nph_world_is_alive(const NphWorld *w, NphEntity e)
 u32 nph_world_entity_count(const NphWorld *w)
 {
     NPH_ASSERT(w != NULL);
-    return nph_handle_pool_live(&w->handles);
+    return nph_handle_pool_live(&w->handles) - w->reserved;
+}
+
+NphResult nph_world_suspend(NphWorld *w, NphEntity e)
+{
+    NPH_ASSERT(w != NULL);
+    nph_world_structural_begin(w);
+    NphEntityRecord *rec = nph_world_record(w, e);
+    if (rec == NULL) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    take_out(w, e, rec);
+    ++w->reserved;
+    nph_world_event(w, NPH_WORLD_EVENT_DESPAWNED, e, NPH_COMPONENT_NONE);
+    return NPH_RESULT_OK;
+}
+
+NphResult nph_world_resume(NphWorld *w, NphEntity e, const NphComponentId *ids, u32 id_count)
+{
+    NPH_ASSERT(w != NULL && (ids != NULL || id_count == 0U));
+    if (!nph_world_handle_reserved(w, e)) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    return nph_world_place(w, ids, id_count, 1U, &e);
+}
+
+void nph_world_release(NphWorld *w, NphEntity e)
+{
+    NPH_ASSERT(w != NULL);
+    nph_world_unreserve(w, &e, 1U);
+}
+
+bool nph_world_is_suspended(const NphWorld *w, NphEntity e)
+{
+    NPH_ASSERT(w != NULL);
+    return nph_world_handle_reserved(w, e);
+}
+
+u32 nph_world_suspended_count(const NphWorld *w)
+{
+    NPH_ASSERT(w != NULL);
+    return w->reserved;
 }
 
 u32 nph_world_entity_capacity(const NphWorld *w)
@@ -1222,7 +1280,8 @@ void nph_world_clear_events(NphWorld *w)
 void nph_world_get_stats(const NphWorld *w, NphWorldStats *out)
 {
     NPH_ASSERT(w != NULL && out != NULL);
-    out->entities = nph_handle_pool_live(&w->handles);
+    out->entities = nph_world_entity_count(w);
+    out->suspended = w->reserved;
     out->archetypes = w->archetype_count;
     out->chunks = w->chunks_in_use;
     out->free_chunks = w->free_chunk_count;
@@ -1235,7 +1294,7 @@ void nph_world_get_stats(const NphWorld *w, NphWorldStats *out)
 u64 nph_world_hash(const NphWorld *w)
 {
     NPH_ASSERT(w != NULL);
-    u64 h = nph_hash_mix_u64(nph_handle_pool_live(&w->handles));
+    u64 h = nph_hash_mix_u64(nph_world_entity_count(w));
     for (u32 i = 0; i < w->handles.bump; ++i) {
         const NphEntityRecord *rec = &w->records[i];
         if (rec->chunk == NULL) {
