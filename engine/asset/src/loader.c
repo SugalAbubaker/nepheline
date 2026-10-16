@@ -58,6 +58,8 @@ struct NphAssetLoader {
     NphHashMap by_guid; // NphGuid -> u32 slot index
     bool verify;
     u64 parallel_threshold;
+    NphAssetResolveFn resolve;
+    void *resolve_user;
     u32 in_flight; // loads whose pipeline may still touch the loader (under lock)
 };
 
@@ -82,6 +84,8 @@ NphResult nph_asset_loader_create(const NphAssetLoaderDesc *desc, NphAssetLoader
     l->max_assets = desc->max_assets != 0U ? desc->max_assets : LOADER_DEFAULT_MAX_ASSETS;
     l->parallel_threshold =
         desc->parallel_threshold != 0U ? desc->parallel_threshold : LOADER_DEFAULT_PARALLEL;
+    l->resolve = desc->resolve;
+    l->resolve_user = desc->resolve_user;
 #if NPH_CONFIG_DEBUG || NPH_CONFIG_DEVELOPMENT
     const bool verify_default = true;
 #else
@@ -622,13 +626,23 @@ static void wait_stage_job(void *user)
 // tables deduplicate by path, so an asset already loaded (or loading) by
 // either route is shared, and there is no separate GUID-keyed state to
 // keep consistent.
+// The virtual path of `guid`: from a pack's index, else from the resolver.
+static NphResult guid_path(NphAssetLoader *l, NphGuid guid, char *path, u64 cap, u64 *len)
+{
+    const NphResult r = nph_vfs_find_guid(l->vfs, guid, path, cap, len);
+    if (r == NPH_RESULT_NOT_FOUND && l->resolve != NULL) {
+        return l->resolve(l->resolve_user, guid, path, cap, len);
+    }
+    return r;
+}
+
 NphResult nph_asset_load_guid(NphAssetLoader *l, NphGuid guid, NphAssetHandle *out)
 {
     NPH_ASSERT(l != NULL && out != NULL);
     *out = NPH_ASSET_HANDLE_NULL;
     char path[NPH_VFS_MAX_PATH + 1U];
     u64 len = 0U;
-    NPH_TRY(nph_vfs_find_guid(l->vfs, guid, path, sizeof path, &len));
+    NPH_TRY(guid_path(l, guid, path, sizeof path, &len));
     return nph_asset_load(l, nph_str(path, len), out);
 }
 
@@ -639,7 +653,7 @@ NphResult nph_asset_load_guid_async(NphAssetLoader *l, NphGuid guid, NphJobCount
     *out = NPH_ASSET_HANDLE_NULL;
     char path[NPH_VFS_MAX_PATH + 1U];
     u64 len = 0U;
-    NPH_TRY(nph_vfs_find_guid(l->vfs, guid, path, sizeof path, &len));
+    NPH_TRY(guid_path(l, guid, path, sizeof path, &len));
     return nph_asset_load_async(l, nph_str(path, len), counter, out);
 }
 

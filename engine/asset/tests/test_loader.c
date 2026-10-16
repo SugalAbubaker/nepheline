@@ -56,6 +56,34 @@ NTEST_TEARDOWN(LoaderFixture)
     test_temp_dir_remove(&f->dir);
 }
 
+// A resolver over a fixed table of (name, path) identities.
+typedef struct TestResolver {
+    const char *const *names;
+    const char *const *paths;
+    u32 count;
+    u32 calls;
+} TestResolver;
+
+static NphResult test_resolve(void *user, NphGuid guid, char *buf, u64 cap, u64 *out_len)
+{
+    TestResolver *r = (TestResolver *)user;
+    r->calls += 1U;
+    for (u32 i = 0; i < r->count; ++i) {
+        if (nph_guid_equals(guid, nph_guid_from_cstr(r->names[i]))) {
+            const u64 len = strlen(r->paths[i]);
+            if (len + 1U > cap) {
+                return NPH_RESULT_OVERFLOW;
+            }
+            memcpy(buf, r->paths[i], len + 1U);
+            *out_len = len;
+            return NPH_RESULT_OK;
+        }
+    }
+    return NPH_RESULT_NOT_FOUND;
+}
+
+static TestResolver *g_resolver; // set by tests that want one, read by make_loader
+
 static void make_loader(LoaderFixture *f, bool with_jobs, NphAssetVerify verify, u32 max_assets)
 {
     if (with_jobs) {
@@ -73,6 +101,10 @@ static void make_loader(LoaderFixture *f, bool with_jobs, NphAssetVerify verify,
     desc.verify = verify;
     desc.max_assets = max_assets;
     desc.parallel_threshold = 1U; // every multi-blob sync load uses jobs when they exist
+    if (g_resolver != NULL) {
+        desc.resolve = test_resolve;
+        desc.resolve_user = g_resolver;
+    }
     NTEST_ASSERT_EQ_INT(nph_asset_loader_create(&desc, &f->loader), NPH_RESULT_OK);
 }
 
@@ -476,5 +508,39 @@ NTEST_F(LoaderFixture, loads_by_guid_through_the_pack_index)
     nph_asset_release(f->loader, by_guid);
     nph_asset_release(f->loader, by_path);
     nph_asset_release(f->loader, async);
+    NTEST_ASSERT_EQ_UINT(nph_asset_loader_live(f->loader), 0U);
+}
+
+NTEST_F(LoaderFixture, loads_by_guid_through_the_resolver)
+{
+    // Loose files have no identity index: the resolver names them.
+    static const char *const names[] = {"textures/stored", "textures/packed"};
+    static const char *const paths[] = {"game/stored.nph", "game/packed.nph"};
+    TestResolver resolver = {names, paths, 2U, 0U};
+    g_resolver = &resolver;
+    make_loader(f, true, NPH_ASSET_VERIFY_ALWAYS, 0U);
+    g_resolver = NULL;
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(f->vfs, NPH_STR("game"), f->loose, NULL),
+                        NPH_RESULT_OK);
+    NphAssetHandle a;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(f->loader, nph_guid_from_cstr("textures/stored"), &a),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(
+        nph_str_equals(nph_asset_get(f->loader, a)->path, NPH_STR("game/stored.nph")));
+    check_blobs(nph_asset_get(f->loader, a), 3U, 1000U, NPH_ASSET_CODEC_NONE);
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NphAssetHandle b;
+    NTEST_ASSERT_EQ_INT(
+        nph_asset_load_guid_async(f->loader, nph_guid_from_cstr("textures/packed"), &done, &b),
+        NPH_RESULT_OK);
+    nph_job_wait(f->jobs, &done);
+    NTEST_ASSERT_EQ_INT(nph_asset_wait(f->loader, b), NPH_RESULT_OK);
+    // Unknown to both the packs and the resolver.
+    NphAssetHandle none;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(f->loader, nph_guid_from_cstr("nowhere"), &none),
+                        NPH_RESULT_NOT_FOUND);
+    NTEST_ASSERT_EQ_UINT(resolver.calls, 3U);
+    nph_asset_release(f->loader, a);
+    nph_asset_release(f->loader, b);
     NTEST_ASSERT_EQ_UINT(nph_asset_loader_live(f->loader), 0U);
 }
