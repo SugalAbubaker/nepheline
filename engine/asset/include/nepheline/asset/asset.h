@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_ASSET);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_ASSET);
 
 // A four-character code packed little-endian, so the bytes read in order
 // in a hex dump of the file ("MESH" appears as M E S H).

@@ -34,7 +34,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_CONSOLE);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_CONSOLE);
 
 typedef struct NphConsole NphConsole;
 

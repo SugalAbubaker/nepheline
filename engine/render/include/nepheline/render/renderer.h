@@ -56,7 +56,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_RENDER);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_RENDER);
 
 typedef struct NphRenderer NphRenderer;
 

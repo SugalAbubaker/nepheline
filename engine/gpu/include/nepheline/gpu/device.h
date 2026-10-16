@@ -48,7 +48,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_GPU);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_GPU);
 
 typedef struct NphGpuDevice NphGpuDevice;
 typedef struct NphGpuCmd NphGpuCmd;

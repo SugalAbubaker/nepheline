@@ -392,6 +392,16 @@ thread (Phase 3) calls flush periodically.
   carries a drop count that no later record could report, the flusher
   emits a synthetic `core` WARN record with the count before releasing it
   (found by the Phase 3 concurrent tests, ADR-0009 §9).
+- **Drain.** `nph_log_drain` waits (spinning) for a flush in progress on
+  another thread, then delivers everything queued. A record keeps its
+  category's name and its call site's file as pointers, so code about to
+  free memory those point into calls it first: the runtime does before
+  unloading a game module (docs/runtime.md).
+- **Engine categories** are declared with `NPH_LOG_ENGINE_CATEGORY_DECLARE`,
+  which marks them `NPH_ENGINE_DATA` (base.h): imported from the engine's
+  shared library by game modules and the hosts that load them
+  ([ADR-0024](adr/0024-game-modules.md)). Other code declares its own
+  categories with `NPH_LOG_CATEGORY_DECLARE`.
 - **Sinks** are `(fn, user, min_level)` triples (up to 8) behind a spin
   lock that is held only to copy the table. Built-in: console (stdout
   below WARN, stderr from WARN, optional ANSI colour, location always shown
@@ -452,7 +462,10 @@ are `[a-z0-9._]+` (asserted). Config text (`name = value`, `#` comments,
 optional quotes) and command-line assignments apply through the registry;
 values for names registered later are held pending and applied on
 registration, and `nph_cvar_write_config` emits the `SAVED` set sorted by
-name. Decisions: [ADR-0007](adr/0007-serialization-formats.md).
+name. `nph_cvar_unregister` removes a cvar before the memory it lives in
+goes (a hot-reloaded game module's); a value changed from the default is
+kept pending, so the next build's cvar of the same name starts from it.
+Decisions: [ADR-0007](adr/0007-serialization-formats.md).
 
 ## Serialization (`serialize.h`, `json.h`)
 

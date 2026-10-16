@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_SCENE);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_SCENE);
 
 typedef struct NphWorld NphWorld;
 

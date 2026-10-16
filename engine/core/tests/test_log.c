@@ -317,3 +317,14 @@ NTEST(log, file_sink_writes_lines)
                         NPH_RESULT_IO_ERROR);
     nph_log_file_sink(&rec, &missing); // ignored
 }
+
+NTEST_F(LogFixture, drain_delivers_everything_queued)
+{
+    NTEST_ASSERT_EQ_UINT(nph_log_drain(), 0U);
+    for (u32 i = 0; i < 5U; ++i) {
+        NPH_LOG_INFO(&LOG_TEST, "record %u", i);
+    }
+    NTEST_ASSERT_EQ_UINT(nph_log_drain(), 5U);
+    NTEST_ASSERT_EQ_UINT(f->capture.count, 5U);
+    NTEST_ASSERT_EQ_UINT(nph_log_drain(), 0U);
+}

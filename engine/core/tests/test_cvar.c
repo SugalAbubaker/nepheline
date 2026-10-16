@@ -248,3 +248,54 @@ NTEST_F(CvarFixture, registry_free_restores_defaults)
     NTEST_ASSERT_EQ_INT(nph_cvar_registry_init(&f->registry, nph_debug_allocator_allocator(&f->da)),
                         NPH_RESULT_OK);
 }
+
+// A game module's cvars, as the build before and after a hot reload define
+// them: the reloaded build changed one default.
+static NPH_CVAR_FLOAT(cv_speed_v1, "game.speed", 4.0, 0.0, 100.0, "Speed", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_FLOAT(cv_speed_v2, "game.speed", 4.0, 0.0, 100.0, "Speed", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_INT(cv_lives_v1, "game.lives", 3, 0, 9, "Lives", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_INT(cv_lives_v2, "game.lives", 5, 0, 9, "Lives", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_STRING(cv_title_v1, "game.title", "one", "Title", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_STRING(cv_title_v2, "game.title", "one", "Title", NPH_CVAR_FLAG_NONE);
+
+NTEST_F(CvarFixture, unregistered_values_carry_over_to_the_next_registration)
+{
+    NphCvar *v1[3] = {&cv_speed_v1, &cv_lives_v1, &cv_title_v1};
+    NphCvar *v2[3] = {&cv_speed_v2, &cv_lives_v2, &cv_title_v2};
+    for (u32 i = 0; i < 3U; ++i) {
+        v1[i]->registered = 0U;
+        v2[i]->registered = 0U;
+        NTEST_ASSERT_EQ_INT(nph_cvar_register(&f->registry, v1[i]), NPH_RESULT_OK);
+    }
+    // Speed and title are tuned; lives is left at its default.
+    NTEST_ASSERT_EQ_INT(nph_cvar_set_float(&f->registry, &cv_speed_v1, 6.25), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_cvar_set_string(&f->registry, &cv_title_v1, NPH_STR("two words")),
+                        NPH_RESULT_OK);
+    const u64 version = f->registry.version;
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_ASSERT_TRUE(nph_cvar_unregister(&f->registry, v1[i]));
+        NTEST_ASSERT_FALSE(nph_cvar_unregister(&f->registry, v1[i])); // not registered now
+        NTEST_ASSERT_EQ_UINT(v1[i]->registered, 0U);
+    }
+    NTEST_ASSERT_GT_UINT(f->registry.version, version);
+    NTEST_ASSERT_NULL(nph_cvar_find(&f->registry, NPH_STR("game.speed")));
+    NTEST_ASSERT_EQ_UINT(nph_cvar_registry_count(&f->registry), 0U);
+    // Unregistering released the string; the static object is back at its default.
+    NTEST_ASSERT_EQ_PTR(cv_title_v1.value_string, cv_title_v1.default_string);
+    // The next build's cvars: tuned values carry over, the untouched one
+    // takes the new default.
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_cvar_register(&f->registry, v2[i]), NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_NEAR_F64(nph_cvar_get_float(&cv_speed_v2), 6.25, 0.0);
+    NTEST_ASSERT_EQ_INT(nph_cvar_get_int(&cv_lives_v2), 5);
+    NTEST_ASSERT_TRUE(nph_str_equals(nph_cvar_get_string(&cv_title_v2), NPH_STR("two words")));
+    // Another object of a registered name is not unregistered by mistake.
+    cv_speed_v1.registered = 1U;
+    NTEST_ASSERT_FALSE(nph_cvar_unregister(&f->registry, &cv_speed_v1));
+    cv_speed_v1.registered = 0U;
+    NTEST_ASSERT_EQ_PTR(nph_cvar_find(&f->registry, NPH_STR("game.speed")), &cv_speed_v2);
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_ASSERT_TRUE(nph_cvar_unregister(&f->registry, v2[i]));
+    }
+}
