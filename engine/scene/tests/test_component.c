@@ -18,6 +18,9 @@ NTEST(component, field_kinds_have_their_c_sizes)
     NTEST_EXPECT_EQ_UINT(nph_field_kind_size(NPH_FIELD_ENTITY), 4U);
     NTEST_EXPECT_EQ_UINT(nph_field_kind_size(NPH_FIELD_STR_ID), 8U);
     NTEST_EXPECT_EQ_UINT(nph_field_kind_size(NPH_FIELD_TEXT), NPH_TEXT_CAPACITY);
+    NTEST_EXPECT_EQ_UINT(nph_field_kind_size(NPH_FIELD_GUID), 16U);
+    NTEST_EXPECT_EQ_UINT(nph_field_kind_align(NPH_FIELD_GUID), 8U);
+    NTEST_EXPECT_EQ_STR(nph_field_kind_name(NPH_FIELD_GUID), "GUID");
     NTEST_EXPECT_EQ_UINT(nph_field_kind_align(NPH_FIELD_DVEC3), 8U);
     NTEST_EXPECT_EQ_UINT(nph_field_kind_size(NPH_FIELD_KIND_COUNT), 0U);
     NTEST_EXPECT_EQ_STR(nph_field_kind_name(NPH_FIELD_VEC4), "VEC4");
@@ -55,12 +58,16 @@ NTEST(component, generator_matches_the_struct)
 NTEST(component, every_kind_validates)
 {
     const NphComponentDesc *d = TestAllKinds_component();
-    NTEST_ASSERT_EQ_UINT(d->field_count, 20U);
+    // One field of every kind, plus a transient float.
+    NTEST_ASSERT_EQ_UINT(d->field_count, (u32)NPH_FIELD_KIND_COUNT + 1U);
+    u32 seen = 0U;
     for (u32 i = 0; i < d->field_count; ++i) {
         NTEST_EXPECT_EQ_UINT(d->fields[i].size,
                              nph_field_kind_size((NphFieldKind)d->fields[i].kind));
+        seen |= 1U << d->fields[i].kind;
     }
-    NTEST_EXPECT_EQ_UINT(d->fields[19].flags, NPH_FIELD_FLAG_TRANSIENT);
+    NTEST_EXPECT_EQ_UINT(seen, (1U << (u32)NPH_FIELD_KIND_COUNT) - 1U);
+    NTEST_EXPECT_EQ_UINT(d->fields[d->field_count - 1U].flags, NPH_FIELD_FLAG_TRANSIENT);
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(d, NULL), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(TestTagA_component(), NULL), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(TestTagA_component()->size, 0U);

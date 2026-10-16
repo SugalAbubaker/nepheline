@@ -44,6 +44,7 @@ NPH_COMPONENT_DECLARE(TestHealth);
     F(ENTITY, target, NPH_FIELD_NO_HINTS)                                                          \
     F(STR_ID, sid, NPH_FIELD_NO_HINTS)                                                             \
     F(TEXT, label, NPH_FIELD_NO_HINTS)                                                             \
+    F(GUID, asset, NPH_FIELD_NO_HINTS)                                                             \
     F(F32, scratch, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_TRANSIENT))
 NPH_COMPONENT_STRUCT(TestAllKinds, TEST_ALL_KINDS_FIELDS);
 NPH_COMPONENT_DECLARE(TestAllKinds);

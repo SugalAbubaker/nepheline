@@ -219,6 +219,16 @@ static NphResult write_value(Saver *s, const NphFieldDesc *f, const u8 *p)
         memcpy(&t, p, sizeof t);
         return nph_json_writer_str(jw, nph_text_str(&t));
     }
+    case NPH_FIELD_GUID: {
+        NphGuid g;
+        memcpy(&g, p, sizeof g);
+        if (nph_guid_is_null(g)) {
+            return nph_json_writer_null(jw);
+        }
+        char text[NPH_GUID_STRING_LEN + 1U];
+        nph_guid_to_string(g, text);
+        return nph_json_writer_str(jw, nph_str(text, NPH_GUID_STRING_LEN));
+    }
     case NPH_FIELD_KIND_COUNT:
         break;
     }
@@ -810,6 +820,19 @@ static NphResult read_value(Loader *l, const NphFieldDesc *f, const NphJsonValue
         NphText t;
         NPH_VERIFY(nph_text_set(&t, v->string));
         memcpy(dst, &t, sizeof t);
+        return NPH_RESULT_OK;
+    }
+    case NPH_FIELD_GUID: {
+        // null, or the 32-digit text (hyphens and upper case accepted).
+        NphGuid g = NPH_GUID_NULL;
+        if (v->type == NPH_JSON_STRING) {
+            if (!nph_guid_parse(v->string, &g)) {
+                return NPH_RESULT_TYPE_MISMATCH;
+            }
+        } else if (v->type != NPH_JSON_NULL) {
+            return NPH_RESULT_TYPE_MISMATCH;
+        }
+        memcpy(dst, &g, sizeof g);
         return NPH_RESULT_OK;
     }
     case NPH_FIELD_KIND_COUNT:

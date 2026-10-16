@@ -81,12 +81,15 @@ static void build_rich(NphWorld *w, const TestIds *ids)
         nph_str_table_intern(nph_world_strings(w), NPH_STR("assets/crate.mesh"), &a.sid),
         NPH_RESULT_OK);
     nph_text_set(&a.label, NPH_STR("caf\xC3\xA9 \"quoted\" \\ \n"));
+    a.asset.hi = 0xFEDCBA9876543210ULL;
+    a.asset.lo = 0x0123456789ABCDEFULL;
     a.scratch = 42.0F; // transient: not saved
     NTEST_ASSERT_EQ_INT(nph_world_add(w, e[4], ids->all, &a), NPH_RESULT_OK);
     // A string ID the world cannot name, a tag, and a health with a ref.
     TestAllKinds b = a;
     b.sid.value = 0x0123456789ABCDEFULL;
     b.target = NPH_ENTITY_NULL;
+    b.asset = NPH_GUID_NULL; // written as null
     NTEST_ASSERT_EQ_INT(nph_world_add(w, e[5], ids->all, &b), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_world_add(w, e[5], ids->tag_a, NULL), NPH_RESULT_OK);
     const TestHealth h = {50.0F, 75.0F, e[0]};
@@ -137,6 +140,9 @@ NTEST(scene_io, text_round_trip_is_byte_identical)
     NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(all->f32v), nph_f32_to_bits(0.1F));
     NTEST_EXPECT_EQ_UINT(nph_f64_to_bits(all->d3.z), nph_f64_to_bits(-5e-324));
     NTEST_EXPECT_NEAR_F32(all->scratch, 0.0F, 0.0F); // transient: the default
+    NTEST_EXPECT_EQ_UINT(all->asset.hi, 0xFEDCBA9876543210ULL);
+    NTEST_EXPECT_EQ_UINT(all->asset.lo, 0x0123456789ABCDEFULL);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(all_unnamed->asset));
     NTEST_EXPECT_TRUE(
         nph_str_equals(nph_text_str(&all->label), NPH_STR("caf\xC3\xA9 \"quoted\" \\ \n")));
     NTEST_EXPECT_TRUE(nph_str_equals(nph_str_table_lookup(nph_world_strings(b), all->sid),
@@ -290,6 +296,12 @@ NTEST(scene_io, text_errors_roll_back)
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"components\": {\"test.AllKinds\": "
          "{\"sid\": \"\xFF\"}}}]}", // a byte that is not UTF-8
          NPH_RESULT_TYPE_MISMATCH, "sid"},
+        {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"components\": {\"test.AllKinds\": "
+         "{\"asset\": \"0123\"}}}]}",
+         NPH_RESULT_TYPE_MISMATCH, "asset"},
+        {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"components\": {\"test.AllKinds\": "
+         "{\"asset\": 5}}}]}",
+         NPH_RESULT_TYPE_MISMATCH, "asset"},
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"removed\": []}]}",
          NPH_RESULT_PARSE_ERROR, "without"},
         {"{\"nepheline_scene\": 1, \"entities\": [{\"id\": 0, \"prefab\": {\"name\": \"p\", "
@@ -347,9 +359,10 @@ NTEST(scene_io, field_kinds_accept_their_forms)
     const char *text = "{\"nepheline_scene\": 1, \"entities\": [{\"id\": 7, \"components\": "
                        "{\"test.AllKinds\": {\"flag\": true, \"u64v\": \"18446744073709551615\", "
                        "\"i8v\": -5, \"f64v\": \"-inf\", \"v2\": [\"nan\", 1], \"target\": 9, "
-                       "\"sid\": {\"hash\": \"00000000000000ff\"}, \"scratch\": 5}}}, "
+                       "\"sid\": {\"hash\": \"00000000000000ff\"}, \"scratch\": 5, "
+                       "\"asset\": \"FEDCBA98-76543210-01234567-89ABCDEF\"}}}, "
                        "{\"id\": 9, \"components\": {\"test.AllKinds\": {\"sid\": null, "
-                       "\"target\": null, \"u64v\": 12}}}]}";
+                       "\"target\": null, \"u64v\": 12, \"asset\": null}}}]}";
     NTEST_ASSERT_EQ_INT(nph_scene_load_text(w, nph_str_from_cstr(text), &ld, &res), NPH_RESULT_OK);
     const TestAllKinds *a = NPH_WORLD_GET(w, out[0], ids.all, TestAllKinds);
     NTEST_ASSERT_NOT_NULL(a);
@@ -361,8 +374,11 @@ NTEST(scene_io, field_kinds_accept_their_forms)
     NTEST_EXPECT_TRUE(nph_entity_equals(a->target, out[1]));
     NTEST_EXPECT_EQ_UINT(a->sid.value, 0xFFU);
     NTEST_EXPECT_NEAR_F32(a->scratch, 0.0F, 0.0F); // transient fields are not read
+    NTEST_EXPECT_EQ_UINT(a->asset.hi, 0xFEDCBA9876543210ULL);
+    NTEST_EXPECT_EQ_UINT(a->asset.lo, 0x0123456789ABCDEFULL);
     const TestAllKinds *b = NPH_WORLD_GET(w, out[1], ids.all, TestAllKinds);
     NTEST_EXPECT_EQ_UINT(b->u64v, 12U);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(b->asset));
     NTEST_EXPECT_TRUE(nph_entity_is_null(b->target));
     nph_world_destroy(w);
 }
