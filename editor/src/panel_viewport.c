@@ -14,6 +14,7 @@
 #include <nepheline/core/assert.h>
 #include <nepheline/gpu/resources.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/render/debug_draw.h>
 
 #include "editor_internal.h"
 
@@ -90,15 +91,126 @@ static void toolbar(Editor *ed)
     }
     igEndDisabled();
     igEndDisabled();
-    igSameLine(0.0F, -1.0F);
     if (!playing) {
-        igTextDisabled("right drag: look, WASD: move   Alt drag: orbit   middle drag: pan");
+        static const char *const modes[3] = {"Move", "Rotate", "Scale"};
+        igSameLine(0.0F, 16.0F);
+        for (u32 i = 0; i < 3U; ++i) {
+            const bool on = (u32)ed->gizmo_mode == i;
+            if (on) {
+                igPushStyleColor_U32(ImGuiCol_Button,
+                                     igGetColorU32_Col(ImGuiCol_ButtonActive, 1.0F));
+            }
+            if (igButton(modes[i], ui_vec2(0.0F, 0.0F))) {
+                ed->gizmo_mode = (EditorGizmoMode)i;
+            }
+            if (on) {
+                igPopStyleColor(1);
+            }
+            igSameLine(0.0F, -1.0F);
+        }
+        if (igButton(ed->gizmo_local ? "Local" : "World", ui_vec2(0.0F, 0.0F))) {
+            ed->gizmo_local = !ed->gizmo_local;
+        }
+        igSameLine(0.0F, 16.0F);
+        igTextDisabled("click: select  W E R: gizmo  X: axes  F: frame  right drag: look");
     } else if (ed->viewport.game_input) {
         igTextDisabled("the game has the input: Escape to take it back");
     } else {
         igTextDisabled("click the scene to give the game the input");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Picking and overlays
+// ---------------------------------------------------------------------------
+
+static bool lookup_mesh(void *user, NphEntity e, NphMeshView *out)
+{
+    const NphAsset *mesh = nph_scene_renderer_mesh_asset((const NphSceneRenderer *)user, e);
+    return mesh != NULL && nph_mesh_view(mesh, out) == NPH_RESULT_OK;
+}
+
+// Selects what is under the mouse (Ctrl adds or removes); nothing clears.
+static void pick(Editor *ed, const EditorView *v, f32 mx, f32 my)
+{
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    EditorPick hit;
+    const bool any =
+        editor_pick(nph_engine_edit_world(ed->engine), nph_engine_components(ed->engine),
+                    sr != NULL ? lookup_mesh : NULL, sr, v->eye, editor_view_ray(v, mx, my), &hit);
+    if (igGetIO_Nil()->KeyCtrl) {
+        if (any) {
+            editor_selection_toggle(&ed->selection, hit.entity);
+        }
+    } else {
+        editor_selection_set(&ed->selection, any ? hit.entity : NPH_ENTITY_NULL);
+    }
+}
+
+#define COLOR_SELECTED NPH_RENDER_RGBA(255, 160, 40, 255)
+#define COLOR_MARKER   NPH_RENDER_RGBA(230, 220, 120, 255)
+#define COLOR_GRID     NPH_RENDER_RGBA(90, 90, 96, 255)
+
+// The ground grid, markers for lights and cameras (which have no mesh to
+// see), and boxes around the selection, as the renderer's debug lines.
+static void overlays(Editor *ed)
+{
+    NphEngine *engine = ed->engine;
+    NphRenderer *r = nph_engine_renderer(engine);
+    if (r == NULL) {
+        return;
+    }
+    const bool playing = nph_engine_is_playing(engine);
+    const NphWorld *w = nph_engine_world(engine);
+    // The frame's lines share one origin, which the editor does not own:
+    // positions are relative to it as it is.
+    const NphDVec3 eye = nph_render_debug_origin(r);
+    if (ed->show_grid && !playing) {
+        // A metre a cell, on the ground under the pivot.
+        const NphDVec3 pivot = ed->camera.pivot;
+        const NphDVec3 center =
+            nph_dvec3(nph_f64_floor(pivot.x + 0.5), 0.0, nph_f64_floor(pivot.z + 0.5));
+        nph_render_debug_grid(r, nph_dvec3_relative(center, eye), 1.0F, 40U, COLOR_GRID,
+                              NPH_RENDER_DEBUG_DEPTH_TESTED);
+    }
+    const NphRuntimeComponents *rc = nph_engine_components(engine);
+    const NphSceneRenderer *sr = nph_engine_scene_renderer(engine);
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        const NphWorldTransform *t =
+            NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+        if (t == NULL) {
+            continue;
+        }
+        const bool selected = editor_selection_contains(&ed->selection, e);
+        const bool marker = nph_world_has(w, e, rc->light) || nph_world_has(w, e, rc->camera);
+        if (!selected && !marker) {
+            continue;
+        }
+        const NphVec3 at = nph_dvec3_relative(t->translation, eye);
+        const NphAsset *mesh = sr != NULL ? nph_scene_renderer_mesh_asset(sr, e) : NULL;
+        NphMeshView view;
+        if (selected && mesh != NULL && nph_mesh_view(mesh, &view) == NPH_RESULT_OK) {
+            const NphAffine a = nph_world_transform_relative(t, eye);
+            nph_render_debug_box(r, &a, view.header->bounds, COLOR_SELECTED,
+                                 NPH_RENDER_DEBUG_OVERLAY);
+        } else if (marker) {
+            const u32 c = selected ? COLOR_SELECTED : COLOR_MARKER;
+            nph_render_debug_sphere(r, at, EDITOR_PICK_MARKER_RADIUS, c, NPH_RENDER_DEBUG_OVERLAY,
+                                    16U);
+            // Lights and cameras face their -Z.
+            const NphVec3 forward = nph_vec3_normalize_or(nph_vec3_neg(t->z_axis), nph_vec3_zero());
+            nph_render_debug_arrow(r, at, nph_vec3_mul_add(at, forward, 1.0F), c,
+                                   NPH_RENDER_DEBUG_OVERLAY);
+        } else {
+            nph_render_debug_cross(r, at, 0.3F, COLOR_SELECTED, NPH_RENDER_DEBUG_OVERLAY);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The camera
+// ---------------------------------------------------------------------------
 
 static void camera_input(Editor *ed, bool hovered)
 {
@@ -198,7 +310,20 @@ void editor_panel_viewport(Editor *ed)
         ed->viewport.rect[3] = avail.y;
         ed->viewport.shown = true;
     }
-    camera_input(ed, hovered);
+    // The gizmo first: a click on a handle drags it rather than picking.
+    if (ed->viewport.shown && !nph_engine_is_playing(ed->engine) && !ed->viewport.fly) {
+        EditorView view;
+        const NphRenderCamera cam = editor_camera_render(&ed->camera);
+        editor_view_init(&view, &cam, ed->viewport.rect[0], ed->viewport.rect[1],
+                         ed->viewport.rect[2], ed->viewport.rect[3]);
+        const bool gizmo = editor_gizmo_update(ed, &view, hovered, igGetWindowDrawList());
+        if (hovered && !gizmo && !io->KeyAlt &&
+            igIsMouseClicked_Bool(ImGuiMouseButton_Left, false)) {
+            pick(ed, &view, io->MousePos.x, io->MousePos.y);
+        }
+    }
+    camera_input(ed, hovered && !ed->gizmo_dragging);
+    overlays(ed);
     igEnd();
 }
 

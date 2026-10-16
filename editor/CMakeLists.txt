@@ -15,6 +15,9 @@ add_library(nph_editor_core STATIC
     src/editor_internal.h
     src/editor_log.c
     src/editor_log.h
+    src/gizmo.c
+    src/gizmo.h
+    src/gizmo_ui.c
     src/history.c
     src/history.h
     src/imgui_c.h
@@ -24,12 +27,16 @@ add_library(nph_editor_core STATIC
     src/panel_profiler.c
     src/panel_stats.c
     src/panel_viewport.c
+    src/picking.c
+    src/picking.h
     src/selection.c
     src/selection.h
     src/ui_platform.c
     src/ui_platform.h
     src/ui_renderer.c
-    src/ui_renderer.h)
+    src/ui_renderer.h
+    src/view.c
+    src/view.h)
 target_include_directories(nph_editor_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(nph_editor_core PUBLIC nph::options nph::shared nph_cimgui)
 nph_target_use_shaders(nph_editor_core nph_shaders_editor)
@@ -55,6 +62,7 @@ nph_add_test(editor
         tests/test_camera.c
         tests/test_editor.c
         tests/test_editor_log.c
+        tests/test_gizmo.c
         tests/test_history.c
         tests/test_selection.c
         tests/test_ui_platform.c

@@ -10,11 +10,14 @@
 #include "edit.h"
 #include "editor.h"
 #include "editor_log.h"
+#include "gizmo.h"
 #include "history.h"
 #include "imgui_c.h"
+#include "picking.h"
 #include "selection.h"
 #include "ui_platform.h"
 #include "ui_renderer.h"
+#include "view.h"
 
 #define EDITOR_PATH_MAX            512U
 #define EDITOR_CONSOLE_INPUT_MAX   512U
@@ -157,6 +160,17 @@ struct Editor {
     NphEntity renaming;         // renamed in place in the outliner
     char rename_buf[NPH_TEXT_CAPACITY];
     bool rename_focus;
+
+    // The viewport's gizmo and overlays.
+    EditorGizmoMode gizmo_mode;
+    bool gizmo_local;
+    EditorGizmoHandle gizmo_hover;
+    bool gizmo_dragging;
+    EditorGizmoDrag gizmo_drag;
+    NphEntity gizmo_entity;
+    NphLocalTransform gizmo_start_local;
+    u64 gizmo_drag_id; // a merge key per drag
+    bool show_grid;
 };
 
 // editor.c
@@ -179,6 +193,11 @@ void editor_begin_rename(Editor *ed, NphEntity e);
 
 // panel_inspector.c
 void editor_panel_inspector(Editor *ed);
+
+// gizmo_ui.c
+// Shows the gizmo on the primary selection and drags it. True when it has
+// the mouse (a handle under it, or a drag): the viewport then does not pick.
+bool editor_gizmo_update(Editor *ed, const EditorView *v, bool image_hovered, ImDrawList *dl);
 
 // panel_viewport.c
 // Points the editor camera at the selection.

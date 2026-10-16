@@ -258,6 +258,20 @@ static void shortcuts(Editor *ed)
     if (!ed->viewport.fly && igIsKeyPressed_Bool(ImGuiKey_F, false)) {
         editor_viewport_frame_selection(ed);
     }
+    if (editing && !ed->viewport.fly) {
+        if (igIsKeyPressed_Bool(ImGuiKey_W, false)) {
+            ed->gizmo_mode = EDITOR_GIZMO_TRANSLATE;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_E, false)) {
+            ed->gizmo_mode = EDITOR_GIZMO_ROTATE;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_R, false)) {
+            ed->gizmo_mode = EDITOR_GIZMO_SCALE;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_X, false)) {
+            ed->gizmo_local = !ed->gizmo_local;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +375,8 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
+        igSeparator();
+        (void)igMenuItem_BoolPtr("Grid", NULL, &ed->show_grid, true);
         igSeparator();
         if (igMenuItem_Bool("Reset Layout", NULL, false, true)) {
             ed->build_layout = true;
@@ -679,6 +695,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     ed->show.console = true;
     ed->show.profiler = true;
     ed->show.stats = true;
+    ed->show_grid = true;
     (void)snprintf(ed->scene_path, sizeof ed->scene_path, "scene.nscene");
     *out = ed;
     return NPH_RESULT_OK;
