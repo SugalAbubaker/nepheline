@@ -349,13 +349,6 @@ static void main_menu(Editor *ed)
         }
         igSeparator();
         const bool selected = ed->selection.count > 0U;
-        if (igMenuItem_Bool("Create Entity", NULL, false, !playing)) {
-            NphEntity created = NPH_ENTITY_NULL;
-            if (editor_edit_create(ed->history, "Entity", NPH_ENTITY_NULL, NULL, &created) ==
-                NPH_RESULT_OK) {
-                editor_selection_set(&ed->selection, created);
-            }
-        }
         if (igMenuItem_Bool("Duplicate", "Ctrl+D", false, !playing && selected)) {
             editor_duplicate_selection(ed);
         }
@@ -368,6 +361,24 @@ static void main_menu(Editor *ed)
         igSeparator();
         if (igMenuItem_Bool("Frame Selection", "F", false, selected)) {
             editor_viewport_frame_selection(ed);
+        }
+        igEndMenu();
+    }
+    if (igBeginMenu("Create", true)) {
+        if (igMenuItem_Bool("Entity", NULL, false, !playing)) {
+            NphEntity created = NPH_ENTITY_NULL;
+            if (editor_edit_create(ed->history, "Entity", NPH_ENTITY_NULL, NULL, &created) ==
+                NPH_RESULT_OK) {
+                editor_selection_set(&ed->selection, created);
+            }
+        }
+        igSeparator();
+        static const char *const primitives[EDITOR_PRIMITIVE_COUNT] = {"Cube", "Sphere", "Plane",
+                                                                       "Cylinder"};
+        for (u32 i = 0; i < (u32)EDITOR_PRIMITIVE_COUNT; ++i) {
+            if (igMenuItem_Bool(primitives[i], NULL, false, !playing && ed->project != NULL)) {
+                NPH_IGNORE_RESULT(editor_create_primitive(ed, (EditorPrimitive)i)); // logged
+            }
         }
         igEndMenu();
     }

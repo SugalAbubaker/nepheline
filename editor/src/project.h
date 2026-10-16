@@ -61,6 +61,15 @@ typedef struct EditorImportResult {
     NphGuid scenes[EDITOR_IMPORT_SCENES_MAX];
     char scene_names[EDITOR_IMPORT_SCENES_MAX][EDITOR_IMPORT_NAME_MAX];
     u32 scene_count;
+    // The editable meshes (.nmesh) the request named, likewise: their mesh
+    // assets.
+    NphGuid meshes[EDITOR_IMPORT_SCENES_MAX];
+    char mesh_names[EDITOR_IMPORT_SCENES_MAX][EDITOR_IMPORT_NAME_MAX];
+    u32 mesh_count;
+    // Every asset the request wrote (not those found current): what the
+    // editor reloads. Owned by the result: editor_project_result_free.
+    NphGuid *written;
+    u32 written_count;
 } EditorImportResult;
 
 // Starts the import thread (at low priority) and loads the snapshot from
@@ -80,8 +89,8 @@ void editor_project_destroy(EditorProject *p);
 //     re-import). A .gltf or .glb brings the files it names along (cook/gltf.h
 //     cook_gltf_files), and a directory everything under it;
 //   - one inside the sources is used where it is.
-// Then each scene and image is cooked, and the scenes under each
-// directory. An image comes along without being cooked when the request
+// Then each scene, editable mesh, and image is cooked, and the scenes and
+// editable meshes under each directory. An image comes along without being cooked when the request
 // holds a scene, which cooks the images it uses itself.
 // NPH_RESULT_INVALID_ARGUMENT for no paths, more than
 // EDITOR_IMPORT_PATHS_MAX, or a folder that is absolute or climbs out of
@@ -98,7 +107,11 @@ NPH_MUST_USE NphResult editor_project_cook(EditorProject *p, const char *key, bo
                                            u32 *out_id);
 
 // Takes the oldest finished request's result; false when none is waiting.
+// The caller releases it (editor_project_result_free).
 bool editor_project_poll(EditorProject *p, EditorImportResult *out);
+
+// Releases what a result owns. Safe on a zero-filled result and twice.
+void editor_project_result_free(EditorProject *p, EditorImportResult *res);
 
 // Requests queued or running.
 u32 editor_project_pending(EditorProject *p);
@@ -111,6 +124,9 @@ void editor_project_status(EditorProject *p, char *out, u64 cap);
 
 // The scene asset cooked from the source `key`; false when it has none.
 bool editor_project_scene_of(EditorProject *p, const char *key, NphGuid *out);
+
+// The mesh asset cooked from the editable mesh `key`; false when it has none.
+bool editor_project_mesh_of(EditorProject *p, const char *key, NphGuid *out);
 
 // Whether the source `key` has cooked assets.
 bool editor_project_is_cooked(EditorProject *p, const char *key);

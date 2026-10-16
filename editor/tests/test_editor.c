@@ -18,6 +18,7 @@
 #include <ntest/ntest.h>
 
 #include "editor_internal.h"
+#include "test_cook_support.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1111,4 +1112,130 @@ NTEST(Editor, a_scene_is_built_saved_reloaded_and_played)
     NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_edit_world(again.engine)), entities);
     NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
     finish(&again);
+}
+
+// ---------------------------------------------------------------------------
+// Model creation and reloads
+// ---------------------------------------------------------------------------
+
+// Runs frames until the project's requests are done and what they placed
+// is drawn.
+static void settle(EditorFixture *f)
+{
+    frames(f, 1U);
+    editor_project_wait(editor_project(f->editor));
+    frames(f, 1U);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(f->engine));
+    frames(f, 2U);
+}
+
+static NphGuid mesh_of(EditorFixture *f, NphEntity e)
+{
+    const NphMeshRenderer *m = (const NphMeshRenderer *)nph_world_get(
+        nph_engine_edit_world(f->engine), e, nph_engine_components(f->engine)->mesh_renderer);
+    NTEST_ASSERT_NOT_NULL(m);
+    return m->mesh;
+}
+
+static u32 drawn_vertices(EditorFixture *f, NphEntity e)
+{
+    const NphAsset *mesh = nph_scene_renderer_mesh_asset(nph_engine_scene_renderer(f->engine), e);
+    NTEST_ASSERT_NOT_NULL(mesh);
+    NphMeshView view;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(mesh, &view), NPH_RESULT_OK);
+    return view.header->vertex_count;
+}
+
+NTEST(Editor, a_primitive_is_created_drawn_and_undone)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    const NphWorld *w = nph_engine_edit_world(fx.engine);
+    const u32 steps = editor_history_undo_count(ed->history);
+    NTEST_ASSERT_EQ_INT(editor_create_primitive(ed, EDITOR_PRIMITIVE_CUBE), NPH_RESULT_OK);
+    settle(&fx);
+    // One step: an entity named after it, drawing the mesh cooked from a
+    // source of its own, resting on the ground in front of the camera.
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), steps + 1U);
+    NTEST_EXPECT_EQ_STR(editor_history_undo_label(ed->history), "Create Cube");
+    const NphEntity cube = ed->selection.primary;
+    NTEST_ASSERT_TRUE(nph_world_is_alive(w, cube));
+    NTEST_EXPECT_EQ_STR(NPH_WORLD_GET(w, cube, NPH_COMPONENT_ID_NAME, NphName)->text.text, "Cube");
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(mesh_of(&fx, cube), nph_guid_from_cstr("meshes/cube.nmesh#mesh")));
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, cube, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.y,
+        0.5, 1e-3);
+    char source[1200];
+    (void)snprintf(source, sizeof source, "%s/meshes/cube.nmesh",
+                   editor_project_assets_dir(editor_project(ed)));
+    NTEST_EXPECT_TRUE(nph_fs_exists(source));
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(drawn_vertices(&fx, cube), 24U);
+    // Another is a source of its own.
+    NTEST_ASSERT_EQ_INT(editor_create_primitive(ed, EDITOR_PRIMITIVE_CUBE), NPH_RESULT_OK);
+    settle(&fx);
+    NTEST_EXPECT_TRUE(nph_guid_equals(mesh_of(&fx, ed->selection.primary),
+                                      nph_guid_from_cstr("meshes/cube_2.nmesh#mesh")));
+    // Every kind is drawn.
+    for (u32 k = 1; k < (u32)EDITOR_PRIMITIVE_COUNT; ++k) {
+        NTEST_ASSERT_EQ_INT(editor_create_primitive(ed, (EditorPrimitive)k), NPH_RESULT_OK);
+    }
+    settle(&fx);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.instances, 5U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.failed, 0U);
+    // Undo and redo, as any entity.
+    const u32 entities = nph_world_entity_count(w);
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), entities - 1U);
+    NTEST_ASSERT_EQ_INT(editor_history_redo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), entities);
+    // Not while playing.
+    NphCvarRegistry *cvars = nph_engine_cvars(fx.engine);
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_bool(cvars, nph_cvar_find(cvars, NPH_STR("rt.lockstep")), true),
+        NPH_RESULT_OK);
+    editor_play_toggle(ed);
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_INT(editor_create_primitive(ed, EDITOR_PRIMITIVE_CUBE),
+                        NPH_RESULT_INVALID_STATE);
+    editor_play_toggle(ed);
+    frames(&fx, 2U);
+    finish(&fx);
+}
+
+NTEST(Editor, a_source_imported_again_is_drawn_anew_where_it_is_used)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    const EditorView v = editor_view(&fx);
+    drop_showcase(&fx, "again", v.x + v.w * 0.5F, v.y + v.h * 0.5F);
+    const NphEntity torus = named(&fx, "torus");
+    NTEST_ASSERT_FALSE(nph_entity_is_null(torus));
+    const u32 before = drawn_vertices(&fx, torus);
+    // A different document under the same name: its first mesh is a cube,
+    // and that is what the torus's entity, which names the first mesh,
+    // draws once the new one is cooked, while its file was mapped.
+    TempDir dir;
+    test_temp_dir_make(&dir, "editor_reimport");
+    test_write_gltf(&dir, "showcase", false);
+    char path[1200];
+    test_path_in(&dir, "showcase.gltf", path, sizeof path);
+    const char *paths[1] = {path};
+    (void)snprintf(ed->assets.folder, sizeof ed->assets.folder, "again");
+    NTEST_ASSERT_EQ_INT(editor_import(ed, paths, 1U, false, 0.0F, 0.0F), NPH_RESULT_OK);
+    settle(&fx);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    frames(&fx, 2U);
+    NTEST_EXPECT_TRUE(nph_world_is_alive(nph_engine_edit_world(fx.engine), torus));
+    const u32 after = drawn_vertices(&fx, torus);
+    NTEST_EXPECT_NE_UINT(after, before);
+    NTEST_EXPECT_EQ_UINT(after, 24U); // the generated cube
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.failed, 0U);
+    test_temp_dir_remove(&dir);
+    finish(&fx);
 }

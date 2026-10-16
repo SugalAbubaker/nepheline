@@ -42,7 +42,7 @@
 
 // Dear ImGui drag-and-drop payload types.
 #define EDITOR_DRAG_ENTITY "nph.entity" // an NphEntity
-#define EDITOR_DRAG_ASSET  "nph.asset"  // a scene's source key, NUL-terminated
+#define EDITOR_DRAG_ASSET  "nph.asset"  // a scene's or a mesh's source key, NUL-terminated
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
@@ -90,15 +90,23 @@ typedef struct EditorProfilerPanel {
     char trace_path[EDITOR_PATH_MAX];
 } EditorProfilerPanel;
 
-// Where the scenes of an import go once it is done: the point under the
-// mouse where files were dropped, worked out at the next sync point while
-// the camera is as it was.
+typedef enum EditorPlaceKind {
+    EDITOR_PLACE_SCENES = 0, // the scenes the request cooked
+    EDITOR_PLACE_MESH,       // an entity drawing `mesh` (a new primitive)
+} EditorPlaceKind;
+
+// What goes into the edited world once a request is done, and where: for an
+// import, the point under the mouse where files were dropped, worked out at
+// the next sync point while the camera is as it was.
 typedef struct EditorPlacement {
     u32 id;        // the project's request; 0: a free slot
     bool place;    // false: dropped outside the viewport, nothing is placed
     bool resolved; // `at` holds the point
     f32 mouse[2];  // display units, until resolved
     NphDVec3 at;
+    u32 kind;     // EditorPlaceKind
+    NphGuid mesh; // EDITOR_PLACE_MESH: the mesh asset
+    char name[EDITOR_IMPORT_NAME_MAX];
 } EditorPlacement;
 
 typedef struct EditorAssetEntry {
