@@ -492,6 +492,53 @@ NTEST_F(TempDir, copy_file)
     NTEST_EXPECT_FALSE(nph_fs_exists(part));
 }
 
+// A file renamed or copied over another that is open and mapped replaces
+// it for whoever opens it next, while the mapping keeps the old bytes:
+// POSIX rename semantics, which a writer that replaces files a loader has
+// mapped relies on.
+NTEST_F(TempDir, a_mapped_file_can_be_replaced_and_its_readers_keep_it)
+{
+    char a[1024];
+    char b[1024];
+    path_in(f, "a.bin", a, sizeof a);
+    path_in(f, "b.bin", b, sizeof b);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(a, "old-old-old", 11U), NPH_RESULT_OK);
+    NphFile fa;
+    NTEST_ASSERT_EQ_INT(nph_file_open(a, NPH_FILE_READ, &fa), NPH_RESULT_OK);
+    NphFileMapping m;
+    NTEST_ASSERT_EQ_INT(nph_file_map(&fa, 0U, 0U, NPH_FILE_MAP_READ, &m), NPH_RESULT_OK);
+    NphAllocator *alloc = nph_allocator_system();
+    void *data = NULL;
+    u64 size = 0U;
+
+    // A rename over it.
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(b, "new", 3U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_rename(b, a), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(memcmp(m.data, "old-old-old", 11U), 0);
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(a, alloc, &data, &size), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(size, 3U);
+    NTEST_EXPECT_EQ_INT(memcmp(data, "new", 3U), 0);
+    nph_file_free_all(alloc, data, size);
+
+    // A copy over the new one, also open and mapped.
+    NphFile fn;
+    NTEST_ASSERT_EQ_INT(nph_file_open(a, NPH_FILE_READ, &fn), NPH_RESULT_OK);
+    NphFileMapping mn;
+    NTEST_ASSERT_EQ_INT(nph_file_map(&fn, 0U, 0U, NPH_FILE_MAP_READ, &mn), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(b, "newest", 6U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_copy_file(b, a), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(memcmp(mn.data, "new", 3U), 0);
+    NTEST_EXPECT_EQ_INT(memcmp(m.data, "old-old-old", 11U), 0);
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(a, alloc, &data, &size), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(size, 6U);
+    NTEST_EXPECT_EQ_INT(memcmp(data, "newest", 6U), 0);
+    nph_file_free_all(alloc, data, size);
+    nph_file_unmap(&mn);
+    nph_file_close(&fn);
+    nph_file_unmap(&m);
+    nph_file_close(&fa);
+}
+
 NTEST(fs, current_and_temp_directories_exist)
 {
     char buf[1024];

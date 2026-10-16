@@ -166,13 +166,19 @@ bool nph_fs_exists(const char *path);
 NphResult nph_fs_remove_file(const char *path);
 
 // Moves `from` to `to`, replacing an existing file atomically where the
-// OS allows (same volume).
+// OS allows (same volume). A destination open or mapped elsewhere is
+// replaced too, as POSIX renames do: those handles and views keep the old
+// file, and opens by the name find the new one. On Windows this takes
+// POSIX semantics (Windows 10 1809 and later, NTFS); elsewhere on Windows
+// a destination that is mapped, or open without delete sharing, is
+// refused (NPH_RESULT_ACCESS_DENIED).
 NphResult nph_fs_rename(const char *from, const char *to);
 
 // Copies the regular file `from` to `to`, replacing `to` when it exists.
 // The bytes go to a temporary file beside `to` (`to` + ".part"), which is
-// then renamed over it, so `to` is never seen half written; the copy is
-// writable whatever the source's attributes. The OS copies the bytes
+// then renamed over it (nph_fs_rename: a reader of the old `to` keeps it),
+// so `to` is never seen half written; the copy is writable whatever the
+// source's attributes. The OS copies the bytes
 // (CopyFileExW; copy_file_range on Linux, which may share extents on
 // file systems that can). NPH_RESULT_NOT_FOUND for a missing source or
 // destination directory, NPH_RESULT_INVALID_ARGUMENT when `from` is a

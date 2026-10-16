@@ -509,6 +509,58 @@ NphResult nph_fs_remove_file(const char *path)
     return NPH_RESULT_OK;
 }
 
+// A rename with POSIX semantics (Windows 10 1809 and later, on NTFS): the
+// destination is replaced even while it is open or mapped elsewhere, as on
+// Linux. Those handles and views keep the old file until they close, and
+// opens by the name find the new one. Returns the error, 0 on success.
+static DWORD rename_posix(const wchar_t *from, const wchar_t *to)
+{
+    // The information carries the destination's full path in place.
+    union {
+        FILE_RENAME_INFO info;
+        u8 bytes[sizeof(FILE_RENAME_INFO) + NPH_WIN32_PATH_MAX * sizeof(wchar_t)];
+    } rename;
+    memset(&rename.info, 0, sizeof rename.info);
+    const DWORD n = GetFullPathNameW(to, NPH_WIN32_PATH_MAX, rename.info.FileName, NULL);
+    if (n == 0U || n >= NPH_WIN32_PATH_MAX) {
+        return n == 0U ? GetLastError() : (DWORD)ERROR_FILENAME_EXCED_RANGE;
+    }
+    rename.info.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+    rename.info.FileNameLength = n * (DWORD)sizeof(wchar_t);
+    HANDLE h = CreateFileW(from, DELETE | SYNCHRONIZE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return GetLastError();
+    }
+    const BOOL ok = SetFileInformationByHandle(
+        h, FileRenameInfoEx, &rename.info, (DWORD)sizeof rename.info + rename.info.FileNameLength);
+    const DWORD error = ok ? 0U : GetLastError();
+    CloseHandle(h);
+    return error;
+}
+
+// Moves `from` over `to` (both wide), with POSIX semantics where the
+// system has them. `path` names `from` in messages.
+static NphResult replace(const wchar_t *from, const wchar_t *to, const char *path)
+{
+    const DWORD error = rename_posix(from, to);
+    if (error == 0U) {
+        return NPH_RESULT_OK;
+    }
+    // Older systems, other file systems, and other volumes: the classic
+    // move, which cannot replace a destination that is mapped, or open
+    // without delete sharing.
+    if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED &&
+        error != ERROR_INVALID_FUNCTION && error != ERROR_NOT_SAME_DEVICE) {
+        return file_fail("SetFileInformationByHandle", path, error);
+    }
+    if (!MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+        return file_fail("MoveFileExW", path, GetLastError());
+    }
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_fs_rename(const char *from, const char *to)
 {
     NPH_ASSERT(from != NULL && to != NULL);
@@ -516,10 +568,7 @@ NphResult nph_fs_rename(const char *from, const char *to)
     wchar_t wto[NPH_WIN32_PATH_MAX];
     NPH_TRY(to_wide(from, wfrom));
     NPH_TRY(to_wide(to, wto));
-    if (!MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-        return file_fail("MoveFileExW", from, GetLastError());
-    }
-    return NPH_RESULT_OK;
+    return replace(wfrom, wto, from);
 }
 
 NphResult nph_fs_copy_file(const char *from, const char *to)
@@ -551,8 +600,8 @@ NphResult nph_fs_copy_file(const char *from, const char *to)
         (void)SetFileAttributesW(wtemp, attributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
     }
     NphResult r = to_wide(to, wpath);
-    if (r == NPH_RESULT_OK && !MoveFileExW(wtemp, wpath, MOVEFILE_REPLACE_EXISTING)) {
-        r = file_fail("MoveFileExW", to, GetLastError());
+    if (r == NPH_RESULT_OK) {
+        r = replace(wtemp, wpath, temp);
     }
     if (r != NPH_RESULT_OK) {
         (void)DeleteFileW(wtemp);
