@@ -127,9 +127,10 @@ the file ends (short reads only at the end; writes complete or fail);
 seek/tell/size/truncate/flush; `nph_file_read_all` (NUL-terminated for
 text) and `nph_file_write_all`; memory mapping of any byte range in read,
 shared read-write, or private copy-on-write mode over a page-aligned view;
-stat, exists, remove, rename (replacing), create/remove directories
-(single, recursive, whole tree), temp and current directory, and a
-directory iterator that skips `.` and `..`. Windows opens files with every
+stat, exists, remove, rename (replacing), copy (by the OS, into a
+`.part` file renamed over the destination, so a reader never sees half a
+copy), create/remove directories (single, recursive, whole tree), temp
+and current directory, and a directory iterator that skips `.` and `..`. Windows opens files with every
 share mode and converts paths to UTF-16 at the boundary;
 `NPH_FILE_ASYNC` opens an overlapped handle for the completion-port backend
 (its sequential calls then keep their own position). Expected outcomes
@@ -334,7 +335,8 @@ instead of the CPU; Phase 6 measures the streamer against both.
   sequential path, memory mapping in all three modes including an
   unaligned sub-range and write-through, nested directories, listing,
   rename-over, busy and not-found results, tree removal, whole-file
-  helpers. Each test works in its own temp directory.
+  helpers, and copies (large, replacing, empty, and failing without a
+  trace). Each test works in its own temp directory.
 - `test_async_io.c`: for every backend available (the thread pool
   everywhere, IOCP on Windows, io_uring on Linux) a 4 MiB file is read with
   65 chunks in flight through a 32-deep queue (so `FULL` is exercised),

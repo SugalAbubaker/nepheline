@@ -6,6 +6,7 @@
 
 #include "platform_internal.h"
 
+#include <stdio.h>
 #include <string.h>
 
 // Largest single ReadFile/WriteFile: a DWORD, kept to 1 GiB chunks.
@@ -519,6 +520,44 @@ NphResult nph_fs_rename(const char *from, const char *to)
         return file_fail("MoveFileExW", from, GetLastError());
     }
     return NPH_RESULT_OK;
+}
+
+NphResult nph_fs_copy_file(const char *from, const char *to)
+{
+    NPH_ASSERT(from != NULL && to != NULL);
+    NphFileInfo info;
+    NPH_TRY(nph_fs_stat(from, &info));
+    if (info.is_directory) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    char temp[NPH_WIN32_PATH_MAX];
+    const int n = snprintf(temp, sizeof temp, "%s.part", to);
+    if (n < 0 || (u64)n >= sizeof temp) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    // Two wide buffers: the source's is reused for the destination once the
+    // bytes are copied.
+    wchar_t wpath[NPH_WIN32_PATH_MAX];
+    wchar_t wtemp[NPH_WIN32_PATH_MAX];
+    NPH_TRY(to_wide(from, wpath));
+    NPH_TRY(to_wide(temp, wtemp));
+    if (!CopyFileExW(wpath, wtemp, NULL, NULL, NULL, 0U)) {
+        return file_fail("CopyFileExW", from, GetLastError());
+    }
+    // CopyFileExW copies the attributes: a read-only source (a version
+    // control checkout) would make a copy that the next copy cannot replace.
+    const DWORD attributes = GetFileAttributesW(wtemp);
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0U) {
+        (void)SetFileAttributesW(wtemp, attributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+    }
+    NphResult r = to_wide(to, wpath);
+    if (r == NPH_RESULT_OK && !MoveFileExW(wtemp, wpath, MOVEFILE_REPLACE_EXISTING)) {
+        r = file_fail("MoveFileExW", to, GetLastError());
+    }
+    if (r != NPH_RESULT_OK) {
+        (void)DeleteFileW(wtemp);
+    }
+    return r;
 }
 
 NphResult nph_fs_create_directory(const char *path)

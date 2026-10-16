@@ -8,7 +8,10 @@
 #include "platform_internal.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -369,6 +372,99 @@ NphResult nph_fs_rename(const char *from, const char *to)
         return file_fail("rename", from, errno);
     }
     return NPH_RESULT_OK;
+}
+
+// Copies the rest of `in` to `out` from their current offsets.
+static NphResult copy_bytes(int in, int out, const char *path)
+{
+#if defined(__linux__)
+    // In the kernel, without a trip through user space; a file system that
+    // cannot (before Linux 5.3, across file systems) falls back to reads
+    // and writes, which continue from where it stopped.
+    for (;;) {
+        const ssize_t n = copy_file_range(in, NULL, out, NULL, (size_t)IO_CHUNK_MAX, 0U);
+        if (n > 0) {
+            continue;
+        }
+        if (n == 0) {
+            return NPH_RESULT_OK;
+        }
+        const int error = errno;
+        if (error == EINTR) {
+            continue;
+        }
+        if (error == ENOSYS || error == EXDEV || error == EINVAL || error == EOPNOTSUPP) {
+            break;
+        }
+        return file_fail("copy_file_range", path, error);
+    }
+#endif
+    u8 buf[16384];
+    for (;;) {
+        const ssize_t n = read(in, buf, sizeof buf);
+        if (n == 0) {
+            return NPH_RESULT_OK;
+        }
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return file_fail("read", path, errno);
+        }
+        for (ssize_t done = 0; done < n;) {
+            const ssize_t w = write(out, buf + done, (size_t)(n - done));
+            if (w < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return file_fail("write", path, errno);
+            }
+            done += w;
+        }
+    }
+}
+
+NphResult nph_fs_copy_file(const char *from, const char *to)
+{
+    NPH_ASSERT(from != NULL && to != NULL);
+    char temp[PATH_MAX];
+    const int len = snprintf(temp, sizeof temp, "%s.part", to);
+    if (len < 0 || (u64)len >= sizeof temp) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    const int in = open(from, O_RDONLY | O_CLOEXEC);
+    if (in < 0) {
+        return file_fail("open", from, errno);
+    }
+    struct stat st;
+    if (fstat(in, &st) != 0) {
+        const int error = errno;
+        (void)close(in);
+        return file_fail("fstat", from, error);
+    }
+    if (S_ISDIR(st.st_mode)) {
+        (void)close(in);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const int out =
+        open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, (st.st_mode & 0777U) | S_IWUSR);
+    if (out < 0) {
+        const int error = errno;
+        (void)close(in);
+        return file_fail("open", temp, error);
+    }
+    NphResult r = copy_bytes(in, out, from);
+    (void)close(in);
+    if (close(out) != 0 && r == NPH_RESULT_OK) {
+        r = file_fail("close", temp, errno);
+    }
+    if (r == NPH_RESULT_OK && rename(temp, to) != 0) {
+        r = file_fail("rename", to, errno);
+    }
+    if (r != NPH_RESULT_OK) {
+        (void)unlink(temp);
+    }
+    return r;
 }
 
 NphResult nph_fs_create_directory(const char *path)

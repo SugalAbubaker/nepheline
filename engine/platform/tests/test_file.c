@@ -442,6 +442,56 @@ NTEST_F(TempDir, read_all_and_write_all)
     nph_file_free_all(a, NULL, 0U); // harmless
 }
 
+NTEST_F(TempDir, copy_file)
+{
+    char a[1024];
+    char b[1024];
+    char part[1100];
+    path_in(f, "a.bin", a, sizeof a);
+    path_in(f, "b.bin", b, sizeof b);
+    snprintf(part, sizeof part, "%s.part", b);
+    NphAllocator *alloc = nph_allocator_system();
+
+    // Larger than any one buffer of the fallback path, with an odd tail.
+    fill(g_write_buf, BIG, 5U);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(a, g_write_buf, BIG), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_copy_file(a, b), NPH_RESULT_OK);
+    void *data = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(b, alloc, &data, &size), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(size, BIG);
+    NTEST_EXPECT_TRUE(check((const u8 *)data, BIG, 5U));
+    nph_file_free_all(alloc, data, size);
+    NTEST_EXPECT_FALSE(nph_fs_exists(part));
+
+    // A copy replaces the destination, shorter files included.
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(a, "xyz", 3U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_copy_file(a, b), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(b, alloc, &data, &size), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(size, 3U);
+    NTEST_EXPECT_EQ_INT(memcmp(data, "xyz", 3U), 0);
+    nph_file_free_all(alloc, data, size);
+
+    // An empty file copies as one.
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(a, NULL, 0U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_copy_file(a, b), NPH_RESULT_OK);
+    NphFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_fs_stat(b, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.size, 0U);
+
+    // Failures leave the destination alone and no temporary file behind.
+    char missing[1024];
+    char nowhere[1024];
+    path_in(f, "missing.bin", missing, sizeof missing);
+    path_in(f, "no/such/dir/c.bin", nowhere, sizeof nowhere);
+    NTEST_EXPECT_EQ_INT(nph_fs_copy_file(missing, b), NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_INT(nph_fs_copy_file(f->dir, b), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_fs_copy_file(a, nowhere), NPH_RESULT_NOT_FOUND);
+    NTEST_ASSERT_EQ_INT(nph_fs_stat(b, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.size, 0U);
+    NTEST_EXPECT_FALSE(nph_fs_exists(part));
+}
+
 NTEST(fs, current_and_temp_directories_exist)
 {
     char buf[1024];
