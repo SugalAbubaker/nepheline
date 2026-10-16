@@ -19,6 +19,26 @@
 // Context
 // ---------------------------------------------------------------------------
 
+// Pushes into a ring that cannot stay full: each value it can hold exists
+// once (the request pool's free slots, the thread pool's queue and its
+// completions). It can look full for a moment, though: the push may land
+// on the cell of a pop one lap behind that has claimed the cell but not
+// finished with it (core/ring.h), as when two threads take slots at once
+// and the later one's request completes first. Spin through that, and
+// yield when the pop's thread was preempted midway. jobs.c's free lists do
+// the same.
+static void ring_push_spin(NphMpmcRing *ring, const void *value)
+{
+    u32 spins = 0U;
+    while (!nph_mpmc_ring_push(ring, value)) {
+        if (++spins < 64U) {
+            nph_cpu_relax();
+        } else {
+            nph_thread_yield();
+        }
+    }
+}
+
 void nph_async_io_complete(NphAsyncIo *io, NphAsyncIoRequest *req, NphResult result, u32 bytes,
                            NphAsyncIoCompletion *out)
 {
@@ -26,7 +46,7 @@ void nph_async_io_complete(NphAsyncIo *io, NphAsyncIoRequest *req, NphResult res
     out->result = result;
     out->bytes = bytes;
     const u32 index = req->index;
-    NPH_VERIFY(nph_mpmc_ring_push(&io->free_slots, &index));
+    ring_push_spin(&io->free_slots, &index);
     nph_atomic_fetch_sub_u32(&io->pending, 1U, NPH_MEMORY_ORDER_ACQ_REL);
 }
 
@@ -45,7 +65,7 @@ static NphAsyncIoRequest *acquire_request(NphAsyncIo *io)
 static void release_request(NphAsyncIo *io, NphAsyncIoRequest *req)
 {
     const u32 index = req->index;
-    NPH_VERIFY(nph_mpmc_ring_push(&io->free_slots, &index));
+    ring_push_spin(&io->free_slots, &index);
 }
 
 static const NphAsyncIoBackendOps *native_ops(void)
@@ -292,8 +312,8 @@ static void threads_worker(void *user)
         record.bytes = (u32)done;
         record.result = r;
         // The ring holds queue_depth entries and at most that many requests
-        // exist, so this never fails.
-        NPH_VERIFY(nph_mpmc_ring_push(&st->done, &record));
+        // exist, so it is full only while a pop is in progress.
+        ring_push_spin(&st->done, &record);
         nph_semaphore_post(&st->done_sem);
     }
 }
@@ -368,9 +388,10 @@ static NphResult threads_submit(NphAsyncIo *io, NphAsyncIoRequest *req)
 {
     ThreadsState *st = (ThreadsState *)io->backend_state;
     const u32 index = req->index;
-    if (!nph_mpmc_ring_push(&st->queue, &index)) {
-        return NPH_RESULT_FULL;
-    }
+    // The queue holds queue_depth entries and this request's slot is not
+    // among them, so it is full only while a worker's pop is in progress;
+    // FULL would refuse a request the pool had room for.
+    ring_push_spin(&st->queue, &index);
     nph_semaphore_post(&st->work);
     return NPH_RESULT_OK;
 }

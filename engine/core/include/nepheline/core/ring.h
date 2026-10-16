@@ -22,6 +22,15 @@
 // Both rings are bounded and never allocate after init: push returns false
 // when full, pop returns false when empty. Capacity is a power of two.
 //
+// An MPMC push can also return false while the ring holds fewer than
+// `capacity` elements: the cell it lands on may still belong to a pop one
+// lap behind that has claimed the cell but not finished copying out of it
+// (a pop preempted midway while later pops finish and their values come
+// back). Likewise a pop can return false while an earlier push is still
+// writing its cell. Code that knows a free cell or an element must exist
+// (a free list holding each of its values once; a pop after a semaphore
+// permit) retries rather than treating false as final.
+//
 // Thread-safety: as described per ring; init and free are single-threaded.
 
 #include <nepheline/core/alloc.h>

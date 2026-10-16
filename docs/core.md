@@ -296,7 +296,12 @@ handles (hot reload, play-in-editor; [scene.md](scene.md)).
 init. SPSC keeps the producer's and consumer's positions on separate cache
 lines and caches the remote position so a push or pop touches one shared
 line only when the ring looks full or empty. MPMC cells carry sequence
-numbers; positions are 32-bit and wrap safely (tested).
+numbers; positions are 32-bit and wrap safely (tested). An MPMC operation
+that has claimed its cell but not finished holds it: a push can find the
+ring full while it holds fewer than its capacity (a pop one lap behind is
+still copying out), and a pop can find it empty while later pushes have
+finished. Callers that know a free cell or an element exists retry: the
+job system's rings and the async I/O request pool ([platform.md](platform.md)).
 
 **Bitset and sparse set.** The bitset keeps tail bits zero so `count`,
 `all`, and `equals` are whole-word operations; `find_next_set/clear` scan

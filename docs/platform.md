@@ -142,7 +142,10 @@ An `NphAsyncIo` context queues positional reads and writes and reports
 completions through `nph_async_io_poll`, each carrying the caller's
 64-bit `user` value, a result, and the byte count. Requests come from a
 fixed pool (an MPMC ring of free indices, so submission from several
-threads is lock-free); `FULL` tells a submitter to poll first. Three
+threads is lock-free); `FULL` tells a submitter to poll first. Returning
+an index retries while the ring looks full, as it does for a moment when
+a pop one lap behind is still copying out ([core.md](core.md) "Rings");
+the thread pool's queue and completion rings do the same. Three
 backends behind one vtable: **IOCP** (overlapped `ReadFile`/`WriteFile`
 on a completion port; files are bound on first use; a request that fails
 before being queued, including end-of-file, is posted to the port so every

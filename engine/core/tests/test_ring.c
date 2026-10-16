@@ -196,3 +196,49 @@ NTEST_F(RingFixture, mpmc_small_elements_and_sequence_wrap)
     NTEST_ASSERT_EQ_INT(nph_mpmc_ring_init(&ring, f->a, 0U, 2U), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_ASSERT_EQ_INT(nph_mpmc_ring_init(&ring, f->a, 1U, 3U), NPH_RESULT_INVALID_ARGUMENT);
 }
+
+// The states ring.h describes, made by hand: an operation that has claimed
+// its cell but not finished holds that cell, so a push one lap later sees
+// the ring full although it holds less than its capacity, and a pop sees it
+// empty although later pushes have finished.
+NTEST_F(RingFixture, mpmc_an_unfinished_operation_holds_its_cell)
+{
+    NphMpmcRing ring;
+    NTEST_ASSERT_EQ_INT(nph_mpmc_ring_init(&ring, f->a, sizeof(u32), 2U), NPH_RESULT_OK);
+    NphAtomicU32 *seq0 = (NphAtomicU32 *)ring.cells;
+    NphAtomicU32 *seq1 = (NphAtomicU32 *)(ring.cells + ring.stride);
+    for (u32 i = 0; i < 2U; ++i) {
+        NTEST_ASSERT_TRUE(nph_mpmc_ring_push(&ring, &i));
+    }
+
+    // A pop claims position 0 (value 0) and stalls; value 1 is popped after
+    // it and comes back to position 2, the stalled pop's cell.
+    nph_atomic_store_u32(&ring.dequeue_pos, 1U, NPH_MEMORY_ORDER_RELAXED);
+    u32 v = 99U;
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_pop(&ring, &v));
+    NTEST_ASSERT_EQ_UINT(v, 1U);
+    NTEST_ASSERT_FALSE(nph_mpmc_ring_push(&ring, &v));
+    // The pop finishes: the cell passes to the next lap.
+    nph_atomic_store_u32(seq0, 0U + ring.mask + 1U, NPH_MEMORY_ORDER_RELEASE);
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_push(&ring, &v));
+
+    // A push claims position 3 and stalls before writing; position 4 is
+    // pushed after it. A pop gets position 2, then finds position 3
+    // unwritten and reports empty with value 7 in the ring.
+    nph_atomic_store_u32(&ring.enqueue_pos, 4U, NPH_MEMORY_ORDER_RELAXED);
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_pop(&ring, &v));
+    NTEST_ASSERT_EQ_UINT(v, 1U);
+    const u32 seven = 7U;
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_push(&ring, &seven));
+    NTEST_ASSERT_FALSE(nph_mpmc_ring_pop(&ring, &v));
+    // The push finishes: its element, then the cell handed to consumers.
+    const u32 five = 5U;
+    memcpy(ring.cells + ring.stride + ring.elem_offset, &five, sizeof five);
+    nph_atomic_store_u32(seq1, 3U + 1U, NPH_MEMORY_ORDER_RELEASE);
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_pop(&ring, &v));
+    NTEST_ASSERT_EQ_UINT(v, 5U);
+    NTEST_ASSERT_TRUE(nph_mpmc_ring_pop(&ring, &v));
+    NTEST_ASSERT_EQ_UINT(v, 7U);
+    NTEST_ASSERT_FALSE(nph_mpmc_ring_pop(&ring, &v));
+    nph_mpmc_ring_free(&ring);
+}
