@@ -655,3 +655,174 @@ NTEST(Editor, unsaved_changes_are_asked_about_before_they_go)
     NPH_IGNORE_RESULT(nph_fs_remove_file(path));
     finish(&fx);
 }
+
+// ---------------------------------------------------------------------------
+// Picking and the gizmo, driven by the mouse
+// ---------------------------------------------------------------------------
+
+// The editor's view of the viewport as the last frame laid it out.
+static EditorView editor_view(EditorFixture *f)
+{
+    f32 rx = 0.0F;
+    f32 ry = 0.0F;
+    f32 rw = 0.0F;
+    f32 rh = 0.0F;
+    NTEST_ASSERT_TRUE(editor_viewport_rect(f->editor, &rx, &ry, &rw, &rh));
+    const NphRenderCamera cam = editor_camera_render(editor_camera(f->editor));
+    EditorView v;
+    editor_view_init(&v, &cam, rx, ry, rw, rh);
+    return v;
+}
+
+static void screen_of(const EditorView *v, NphDVec3 p, f32 *x, f32 *y)
+{
+    NTEST_ASSERT_TRUE(editor_view_project(v, p, x, y));
+}
+
+// A lamp at the origin, the camera 8 m in front of it, level.
+static NphEntity lamp_in_view(EditorFixture *f)
+{
+    Editor *ed = f->editor;
+    NphEntity lamp = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "lamp", NPH_ENTITY_NULL, NULL, &lamp),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(
+        editor_edit_add_component(ed->history, lamp, nph_engine_components(f->engine)->light),
+        NPH_RESULT_OK);
+    EditorCamera *cam = editor_camera(ed);
+    editor_camera_default(cam);
+    cam->pitch = 0.0F;
+    frames(f, 3U); // the transform system gives it its WorldTransform
+    return lamp;
+}
+
+NTEST(Editor, a_click_in_the_viewport_selects_what_is_under_it)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    const NphEntity lamp = lamp_in_view(&fx);
+    // Off the middle of the view, the camera looking down at it: a marker
+    // drawn relative to the wrong origin would land elsewhere on screen.
+    const NphDVec3 at = nph_dvec3(1.5, 0.5, 0.0);
+    NphLocalTransform t = nph_local_transform_identity();
+    t.translation = at;
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "place"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_history_set(ed->history, lamp, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &t),
+                        NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    editor_camera(ed)->pitch = -0.35F;
+    frames(&fx, 3U);
+    const EditorView v = editor_view(&fx);
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    screen_of(&v, at, &x, &y);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_TRUE(nph_entity_equals(ed->selection.primary, lamp));
+    // Its marker turns the selection's orange, around it on screen: the
+    // overlays draw where the entity is (they once drew relative to an
+    // origin the frame did not use, and landed metres away).
+    u64 size = 0U;
+    u8 *px = pixels_of(&fx, editor_viewport_image(ed), &size);
+    const NphGpuImageDesc *vd =
+        nph_gpu_image_desc(nph_engine_device(fx.engine), editor_viewport_image(ed));
+    const i32 cx = (i32)(x - v.x);
+    const i32 cy = (i32)(y - v.y);
+    u32 orange = 0U;
+    for (i32 dy = -24; dy <= 24; ++dy) {
+        for (i32 dx = -24; dx <= 24; ++dx) {
+            const i32 sx = cx + dx;
+            const i32 sy = cy + dy;
+            if (sx < 0 || sy < 0 || sx >= (i32)vd->width || sy >= (i32)vd->height) {
+                continue;
+            }
+            const u8 *p = px + ((u64)sy * vd->width + (u64)sx) * 4U;
+            orange += p[0] > 200U && p[1] > 110U && p[1] < 210U && p[2] < 110U ? 1U : 0U;
+        }
+    }
+    free_pixels(px, size);
+    NTEST_EXPECT_GT_UINT(orange, 20U);
+    // A click on empty space clears the selection.
+    (void)feed(&fx, move_to(v.x + 5.0F, v.y + 5.0F));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(ed->selection.count, 0U);
+    finish(&fx);
+}
+
+NTEST(Editor, dragging_the_gizmo_moves_the_selection_in_one_step)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    const NphEntity lamp = lamp_in_view(&fx);
+    editor_selection_set(&ed->selection, lamp);
+    frames(&fx, 2U);
+    const u32 steps = editor_history_undo_count(ed->history);
+    // The middle of the X arrow, as the gizmo sizes it on screen.
+    const EditorView v = editor_view(&fx);
+    const f32 size = EDITOR_GIZMO_PIXELS *
+                     editor_view_world_per_unit(&v, editor_view_depth(&v, nph_dvec3_zero()));
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    screen_of(&v, nph_dvec3((f64)size * 0.6, 0.0, 0.0), &x, &y);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_INT(ed->gizmo_hover, EDITOR_GIZMO_X);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    NTEST_ASSERT_TRUE(ed->gizmo_dragging);
+    // Two metres to the right, in screen units.
+    f32 x2 = 0.0F;
+    f32 y2 = 0.0F;
+    screen_of(&v, nph_dvec3((f64)size * 0.6 + 2.0, 0.0, 0.0), &x2, &y2);
+    for (u32 i = 1; i <= 4U; ++i) {
+        (void)feed(&fx, move_to(x + (x2 - x) * (f32)i / 4.0F, y));
+        frames(&fx, 1U);
+    }
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(ed->gizmo_dragging);
+    const NphWorld *w = nph_engine_edit_world(fx.engine);
+    const NphLocalTransform *t =
+        NPH_WORLD_GET(w, lamp, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    NTEST_EXPECT_NEAR_F64(t->translation.x, 2.0, 0.05);
+    NTEST_EXPECT_NEAR_F64(t->translation.y, 0.0, 1e-6);
+    NTEST_EXPECT_NEAR_F64(t->translation.z, 0.0, 1e-6);
+    // The whole drag is one step.
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), steps + 1U);
+    NTEST_EXPECT_EQ_STR(editor_history_undo_label(ed->history), "Move");
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, lamp, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.x,
+        0.0, 0.0);
+    // With Ctrl, the move snaps to half metres: about 1.3 m becomes 1.5.
+    frames(&fx, 2U);
+    screen_of(&v, nph_dvec3((f64)size * 0.6 + 1.3, 0.0, 0.0), &x2, &y2);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, key(NPH_KEY_LEFT_CONTROL, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, move_to(x2, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    (void)feed(&fx, key(NPH_KEY_LEFT_CONTROL, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, lamp, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.x,
+        1.5, 1e-4);
+    finish(&fx);
+}
