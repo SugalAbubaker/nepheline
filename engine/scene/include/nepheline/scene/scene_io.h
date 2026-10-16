@@ -84,6 +84,11 @@ typedef struct NphSceneSaveDesc {
     b32 compact;
     // Scratch memory for tables (NULL: the system allocator).
     NphAllocator *scratch;
+    // Receives the saved entities in file order (up to out_capacity): the
+    // entity written with file id i is out_entities[i]. Given to a load as
+    // its `handles`, they make the loaded entities keep these handles.
+    NphEntity *out_entities;
+    u32 out_capacity;
 } NphSceneSaveDesc;
 
 typedef struct NphSceneLoadDesc {
@@ -97,6 +102,20 @@ typedef struct NphSceneLoadDesc {
     // Receives the created entities in file order (up to out_capacity).
     NphEntity *out_entities;
     u32 out_capacity;
+    // The handle of each entity, in file order (handle_count must equal
+    // the file's entity count): handles the world holds reserved and has
+    // not placed (nph_world_adopt_handles), typically the save's
+    // out_entities. NULL: new handles. NPH_RESULT_INVALID_ARGUMENT when a
+    // handle is not reserved or appears twice. On failure in this mode the
+    // handles of the entities placed so far are released: discard the
+    // world, as copies made this way are.
+    const NphEntity *handles;
+    u32 handle_count;
+    // Text: a component the world does not register is skipped, with a
+    // logged warning, instead of failing the load (NPH_RESULT_NOT_FOUND).
+    // Hot reload sets it: a game that no longer defines a component drops
+    // it from the entities that had it.
+    b32 skip_unknown_components;
 } NphSceneLoadDesc;
 
 typedef struct NphSceneResult {

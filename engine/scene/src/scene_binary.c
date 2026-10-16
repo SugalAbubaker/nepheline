@@ -318,8 +318,14 @@ NphResult nph_scene_save_binary(const NphWorld *w, const NphSceneSaveDesc *desc,
             r = save_body(s);
             if (r != NPH_RESULT_OK) {
                 out->len = start;
-            } else if (result != NULL) {
-                result->entity_count = s->set.count;
+            } else {
+                if (result != NULL) {
+                    result->entity_count = s->set.count;
+                }
+                if (d.out_entities != NULL && s->set.count > 0U) {
+                    memcpy(d.out_entities, s->set.order,
+                           sizeof(NphEntity) * nph_min_u32(s->set.count, d.out_capacity));
+                }
             }
             nph_saveset_free(&s->set);
         }
@@ -360,7 +366,10 @@ typedef struct BinLoader {
     u32 group_cap;
     const u8 *hier;
     u32 hier_count;
-    bool reserved; // `created` holds reserved handles
+    const NphEntity *handles; // the caller's handles (NphSceneLoadDesc.handles), or NULL
+    u32 handle_count;
+    bool reserved;    // `created` holds handles, reserved or placed
+    bool own_handles; // ... that this load reserved (released on failure)
 } BinLoader;
 
 NPH_PRINTF_LIKE(3, 4)
@@ -585,6 +594,51 @@ static bool entity_fields_valid(const BinLoader *l, const NphComponentInfo *info
     return true;
 }
 
+static int compare_u32(const void *a, const void *b)
+{
+    u32 x;
+    u32 y;
+    memcpy(&x, a, sizeof x);
+    memcpy(&y, b, sizeof y);
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+// The caller's handles (NphSceneLoadDesc.handles): one per entity, each
+// reserved in the world and not placed, none twice (groups are placed in
+// batches, so a duplicate must be caught before any is).
+static NphResult check_handles(BinLoader *l)
+{
+    if (l->handle_count != l->n) {
+        return bfail(l, NPH_RESULT_INVALID_ARGUMENT, "%u handles for %u entities", l->handle_count,
+                     l->n);
+    }
+    if (l->n == 0U) {
+        return NPH_RESULT_OK;
+    }
+    u32 *values = NPH_ALLOC_ARRAY(l->scratch, u32, l->n);
+    if (values == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    NphResult r = NPH_RESULT_OK;
+    for (u32 i = 0; i < l->n && r == NPH_RESULT_OK; ++i) {
+        if (!nph_world_handle_reserved(l->w, l->handles[i])) {
+            r = bfail(l, NPH_RESULT_INVALID_ARGUMENT,
+                      "handle %u (0x%08x) is not reserved in the world", i, l->handles[i].value);
+        }
+        values[i] = l->handles[i].value;
+    }
+    if (r == NPH_RESULT_OK) {
+        qsort(values, l->n, sizeof(u32), compare_u32);
+        for (u32 i = 1; i < l->n && r == NPH_RESULT_OK; ++i) {
+            if (values[i] == values[i - 1U]) {
+                r = bfail(l, NPH_RESULT_INVALID_ARGUMENT, "handle 0x%08x appears twice", values[i]);
+            }
+        }
+    }
+    NPH_FREE_ARRAY(l->scratch, u32, values, l->n);
+    return r;
+}
+
 // Creates every entity: handles are reserved in file order first, so the
 // loaded world's slots follow the file (and a text save of it matches one
 // of the world that was saved), then each group is placed in its
@@ -606,10 +660,19 @@ static NphResult spawn_groups(BinLoader *l)
             }
         }
     }
-    NphResult res = nph_world_reserve(w, l->n, l->created);
-    if (res != NPH_RESULT_OK) {
-        memset(l->created, 0, sizeof(NphEntity) * (u64)nph_max_u32(l->n, 1U));
-        return bfail(l, res, "reserving %u entities: %s", l->n, nph_result_string(res));
+    NphResult res = NPH_RESULT_OK;
+    if (l->handles != NULL) {
+        NPH_TRY(check_handles(l));
+        if (l->n > 0U) {
+            memcpy(l->created, l->handles, sizeof(NphEntity) * l->n);
+        }
+    } else {
+        res = nph_world_reserve(w, l->n, l->created);
+        if (res != NPH_RESULT_OK) {
+            memset(l->created, 0, sizeof(NphEntity) * (u64)nph_max_u32(l->n, 1U));
+            return bfail(l, res, "reserving %u entities: %s", l->n, nph_result_string(res));
+        }
+        l->own_handles = true;
     }
     l->reserved = true;
     NphEntity *batch = NULL;
@@ -735,7 +798,9 @@ static NphResult load_body(BinLoader *l, const void *data, u64 size)
                 nph_bin_read_u32(&sr, &flags) != NPH_RESULT_OK || flags != 0U) {
                 return bfail(l, NPH_RESULT_CORRUPT, "malformed header section");
             }
-            if ((u64)nph_world_entity_count(l->w) + l->n > nph_world_entity_capacity(l->w)) {
+            // The caller's handles are reserved already.
+            if (l->handles == NULL &&
+                (u64)nph_world_entity_count(l->w) + l->n > nph_world_entity_capacity(l->w)) {
                 return bfail(l, NPH_RESULT_FULL, "%u entities do not fit the world", l->n);
             }
             l->created = NPH_ALLOC_ARRAY_ZEROED(l->scratch, NphEntity, nph_max_u32(l->n, 1U));
@@ -806,6 +871,8 @@ NphResult nph_scene_load_binary(NphWorld *w, const void *data, u64 size,
     l->w = w;
     l->scratch = d.scratch != NULL ? d.scratch : nph_allocator_system();
     l->result = result;
+    l->handles = d.handles;
+    l->handle_count = d.handle_count;
     const NphResult r = load_body(l, data, size);
     if (r != NPH_RESULT_OK) {
         if (result != NULL && result->error[0] == '\0') {
@@ -816,7 +883,7 @@ NphResult nph_scene_load_binary(NphWorld *w, const void *data, u64 size,
                 NPH_IGNORE_RESULT(nph_world_despawn(w, l->created[i - 1U]));
             }
         }
-        if (l->reserved) {
+        if (l->own_handles) {
             nph_world_unreserve(w, l->created, l->n);
         }
     } else {

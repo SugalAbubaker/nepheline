@@ -95,6 +95,18 @@ void nph_world_destroy(NphWorld *world);
 // memory for reuse. Entity handles from before are stale afterwards.
 void nph_world_clear(NphWorld *world);
 
+// Makes the empty world `dst` issue `src`'s entity handles: every handle
+// alive in `src` is reserved in `dst` (not alive until a scene load places
+// it, scene_io.h NphSceneLoadDesc.handles), and every other slot keeps its
+// generation, so a handle stale in `src` is stale in `dst` too. With a
+// scene saved from `src` and loaded into `dst` this way, `dst` is a copy
+// whose entities have the original handles: hot reload migrates a world
+// to new component layouts like this, and play-in-editor copies the
+// edited world, so references held outside the world (a selection, the
+// undo history, game state) stay valid. NPH_RESULT_INVALID_ARGUMENT when
+// `dst` holds or has reserved entities or the capacities differ.
+NPH_MUST_USE NphResult nph_world_adopt_handles(NphWorld *dst, const NphWorld *src);
+
 // Returns the chunk slabs that hold no live chunk to the allocator.
 void nph_world_trim(NphWorld *world);
 

@@ -275,6 +275,10 @@ NPH_MUST_USE NphResult nph_world_place(NphWorld *w, const NphComponentId *ids, u
 // alone; despawn them).
 void nph_world_unreserve(NphWorld *w, const NphEntity *handles, u32 count);
 
+// True when `e` is reserved in `w` and not placed yet (nph_world_reserve,
+// nph_world_adopt_handles).
+bool nph_world_handle_reserved(const NphWorld *w, NphEntity e);
+
 // Writes a component cell, stamping the column with the change tick.
 void *nph_world_cell_mut(NphWorld *w, NphEntityRecord *rec, NphComponentId id);
 

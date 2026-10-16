@@ -82,6 +82,14 @@ bool nph_handle_pool_release(NphHandlePool *pool, NphHandle h);
 // True if `h` was issued by this pool and has not been released since.
 bool nph_handle_pool_is_valid(const NphHandlePool *pool, NphHandle h);
 
+// Makes `dst` a copy of `src`: the same live, released, and never-used
+// slots with the same generations and the same reuse order, so a handle
+// valid (or stale) in `src` is valid (or stale) in `dst`, and both issue
+// the same handles from here on. A world copied for hot reload or
+// play-in-editor keeps the original's entity handles this way.
+// NPH_RESULT_INVALID_ARGUMENT when the capacities or index widths differ.
+NPH_MUST_USE NphResult nph_handle_pool_copy(NphHandlePool *dst, const NphHandlePool *src);
+
 // The slot index packed in `h`. Does not check validity.
 NPH_INLINE u32 nph_handle_pool_index(const NphHandlePool *pool, NphHandle h)
 {
