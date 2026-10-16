@@ -55,7 +55,11 @@ tag/index pair. After it, everything is offset arithmetic;
 
 The writer (`NphAssetWriter`) collects blobs, compressing each as it is
 added (HIGH level by default; the cooker runs offline), lays them out at
-their alignments, and writes the image to memory or to a file.
+their alignments, and writes the image to memory or to a file. A file is
+replaced whole: the image goes to `<path>.part`, which is renamed over the
+file. A reader never sees half an asset, and a loader that mapped the old
+file keeps its bytes. Rewriting it in place would change the bytes under
+the loader, and on Windows it fails while the file is mapped.
 
 ## The LZ codec (`lz.h`)
 
@@ -182,6 +186,14 @@ on the calling thread. A second asynchronous request for an asset in
 flight shares the handle and gets its counter signalled by a job that
 waits on the first load.
 
+**Replaced files.** A path already loaded returns the asset already
+there, even after its file was replaced. `nph_asset_forget` takes an
+asset out of the path and GUID indices, so the next load of either reads
+the new file into a new asset. Holders of the old one keep it, valid,
+until they release it, and a load of it still in flight lands without
+taking the GUID back. This is how the editor reloads what it re-cooks
+([editor.md](editor.md)).
+
 The pipeline holds its own reference while in flight: a release during a
 load unloads when the load completes, and `nph_asset_loader_destroy`
 waits for every pipeline before it reports the assets still live as leaks
@@ -230,19 +242,21 @@ can be handed to the renderer without further checks:
 
 ## Testing
 
-`asset_tests` (50 cases): GUID derivation (pinned), text round trips and
+`asset_tests` (52 cases): GUID derivation (pinned), text round trips and
 rejections, generator uniqueness; the codec on empty, tiny, zero,
 random, text, periodic (offsets 1–9), window-edge, and structured inputs
 at both levels, every size up to 300 bytes, hand-built streams from the
 format description, and a dozen malformed streams; the container's
 writer against the validator with every corruption the validator must
-catch; packs written and read back with both alignments, including
+catch, and a file it replaces while a mapping keeps the old one; packs
+written and read back with both alignments, including
 duplicates refused, every corruption, and the empty pack; the VFS's path
 rules, mount precedence and unmounting, mappings and handles, iteration
 with shadowing, identities resolved through pack indexes; the loader
 synchronous and asynchronous, loads by GUID through a pack, shared handles,
 release during a load, parallel decompression, checksum policies,
-failure paths, leak reporting; every typed view on valid and corrupted
+failure paths, leak reporting, and forgotten assets (read again while
+their holders keep them, also during a load); every typed view on valid and corrupted
 data. The fuzz seeds, written by `scripts/fuzz_seeds.py` from an
 independent Python description of the formats (with a port of
 `nph_hash64` in `scripts/nph_hash64.py`), must validate with the C

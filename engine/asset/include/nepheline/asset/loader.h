@@ -182,6 +182,14 @@ void nph_asset_release(NphAssetLoader *loader, NphAssetHandle handle);
 // The handle of the loaded asset with `guid` (no new reference), or null.
 NphAssetHandle nph_asset_find_guid(NphAssetLoader *loader, NphGuid guid);
 
+// Forgets the asset behind `handle` as the one at its path and with its
+// GUID, because its file was replaced (a cooker wrote it again,
+// format.h nph_asset_writer_write_file). From now on a load of the path or
+// the GUID reads the file again into a new asset, while holders of this
+// one keep it, valid, until they release it; a load in flight finishes as
+// usual. A null or stale handle is ignored. NPH_THREADSAFE.
+void nph_asset_forget(NphAssetLoader *loader, NphAssetHandle handle);
+
 // The blob with `tag` and `index`, or NULL.
 const NphAssetBlob *nph_asset_blob(const NphAsset *asset, u32 tag, u32 index);
 

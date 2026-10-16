@@ -252,6 +252,54 @@ NTEST_F(FormatFixture, file_round_trip_through_the_file_system)
     test_temp_dir_remove(&dir);
 }
 
+// Writing a file replaces it whole: a reader that mapped the old one keeps
+// its bytes, and the next read sees the new file.
+NTEST_F(FormatFixture, writing_a_file_replaces_it_and_its_readers_keep_the_old)
+{
+    TempDir dir;
+    test_temp_dir_make(&dir, "format_replace");
+    char path[1200];
+    test_path_in(&dir, "thing.nph", path, sizeof path);
+    NphAssetWriter w;
+    u8 data[300];
+    for (u32 version = 0; version < 2U; ++version) {
+        nph_asset_writer_init(&w, f->alloc, NPH_ASSET_TYPE_BLOB, 1U, nph_guid_from_cstr("thing"),
+                              version);
+        test_fill_pattern(data, sizeof data, version);
+        NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, TAG_DATA, 0U, data, sizeof data,
+                                                      NPH_ASSET_CODEC_NONE, 0U),
+                            NPH_RESULT_OK);
+        if (version == 1U) {
+            break; // written below, over the mapped first version
+        }
+        NTEST_ASSERT_EQ_INT(nph_asset_writer_write_file(&w, path), NPH_RESULT_OK);
+        nph_asset_writer_free(&w);
+    }
+    NphFile file;
+    NTEST_ASSERT_EQ_INT(nph_file_open(path, NPH_FILE_READ, &file), NPH_RESULT_OK);
+    NphFileMapping m;
+    NTEST_ASSERT_EQ_INT(nph_file_map(&file, 0U, 0U, NPH_FILE_MAP_READ, &m), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_write_file(&w, path), NPH_RESULT_OK);
+    nph_asset_writer_free(&w);
+    char part[1300];
+    (void)snprintf(part, sizeof part, "%s.part", path);
+    NTEST_EXPECT_FALSE(nph_fs_exists(part));
+    // The mapping: the first version, intact.
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(m.data, m.size, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.header.content_hash, 0U);
+    // The file: the second.
+    void *image = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, f->alloc, &image, &size), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(image, size, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.header.content_hash, 1U);
+    nph_file_free_all(f->alloc, image, size);
+    nph_file_unmap(&m);
+    nph_file_close(&file);
+    test_temp_dir_remove(&dir);
+}
+
 NTEST(format, fourcc_and_type_names)
 {
     NTEST_ASSERT_EQ_UINT(NPH_FOURCC('N', 'P', 'H', 'A'), 0x4148504EU);

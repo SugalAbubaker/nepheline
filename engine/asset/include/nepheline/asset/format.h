@@ -179,7 +179,12 @@ void nph_asset_writer_finish(NphAssetWriter *w, void *out);
 NPH_MUST_USE NphResult nph_asset_writer_finish_alloc(NphAssetWriter *w, NphAllocator *alloc,
                                                      void **out_data, u64 *out_size);
 
-// Finishes into a file at `path` (created or truncated).
+// Finishes into a file at `path`, replacing it whole: the bytes go to
+// `path` + ".part", which is renamed over it (platform/file.h
+// nph_fs_rename). A reader never sees half a file, and a loader that mapped
+// the old one keeps it (loader.h nph_asset_forget reads the new one). On
+// failure `path` is as it was. NPH_RESULT_OVERFLOW for a path too long; the
+// file system's errors.
 NPH_MUST_USE NphResult nph_asset_writer_write_file(NphAssetWriter *w, const char *path);
 
 #ifdef __cplusplus

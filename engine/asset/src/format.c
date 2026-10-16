@@ -4,7 +4,11 @@
 #include <nepheline/core/hash.h>
 #include <nepheline/platform/file.h>
 
+#include <stdio.h>
 #include <string.h>
+
+// The longest path nph_asset_writer_write_file takes (its ".part" included).
+#define WRITE_PATH_MAX 4096U
 
 // ---------------------------------------------------------------------------
 // Reading
@@ -325,10 +329,24 @@ NphResult nph_asset_writer_finish_alloc(NphAssetWriter *w, NphAllocator *alloc, 
 NphResult nph_asset_writer_write_file(NphAssetWriter *w, const char *path)
 {
     NPH_ASSERT(w != NULL && path != NULL);
+    // Written beside the file and renamed over it: rewriting it in place
+    // would change the bytes under a loader that has it mapped (or, on
+    // Windows, fail while it does).
+    char temp[WRITE_PATH_MAX];
+    const int n = snprintf(temp, sizeof temp, "%s.part", path);
+    if (n < 0 || (u64)n >= sizeof temp) {
+        return NPH_RESULT_OVERFLOW;
+    }
     void *data = NULL;
     u64 size = 0U;
     NPH_TRY(nph_asset_writer_finish_alloc(w, w->alloc, &data, &size));
-    const NphResult r = nph_file_write_all(path, data, size);
+    NphResult r = nph_file_write_all(temp, data, size);
     NPH_FREE(w->alloc, data, size, NPH_ASSET_BLOB_MAX_ALIGN);
+    if (r == NPH_RESULT_OK) {
+        r = nph_fs_rename(temp, path);
+    }
+    if (r != NPH_RESULT_OK) {
+        (void)nph_fs_remove_file(temp);
+    }
     return r;
 }

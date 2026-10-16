@@ -27,7 +27,8 @@ typedef struct Slot {
     char *path;
     u64 path_len;
     u64 path_hash;
-    NphGuid guid; // in by_guid once READY
+    NphGuid guid;  // in by_guid once READY
+    b32 forgotten; // out of by_path and by_guid for good (nph_asset_forget)
     NphAsset asset;
     NphAssetBlob *blobs;
     u32 blob_count;
@@ -143,15 +144,26 @@ static NphAssetHandle handle_of(const Slot *s)
 }
 
 // Releases everything a slot owns and returns it to the pool. Under lock.
-static void slot_free(NphAssetLoader *l, Slot *s)
+// Takes the slot out of the indices, leaving entries that are another's
+// (a slot that was forgotten has been replaced in them).
+static void slot_unlink(NphAssetLoader *l, Slot *s)
 {
-    nph_hashmap_remove_u64(&l->by_path, s->path_hash);
+    const u32 self = (u32)(s - l->slots);
+    const u32 *at_path = (const u32 *)nph_hashmap_find_u64(&l->by_path, s->path_hash);
+    if (at_path != NULL && *at_path == self) {
+        nph_hashmap_remove_u64(&l->by_path, s->path_hash);
+    }
     if (!nph_guid_is_null(s->guid)) {
-        u32 *index = (u32 *)nph_hashmap_find(&l->by_guid, &s->guid);
-        if (index != NULL && *index == (u32)(s - l->slots)) {
+        const u32 *at_guid = (const u32 *)nph_hashmap_find(&l->by_guid, &s->guid);
+        if (at_guid != NULL && *at_guid == self) {
             nph_hashmap_remove(&l->by_guid, &s->guid);
         }
     }
+}
+
+static void slot_free(NphAssetLoader *l, Slot *s)
+{
+    slot_unlink(l, s);
     nph_vfs_unmap(l->vfs, &s->mapping);
     if (s->heap != NULL) {
         NPH_FREE(l->alloc, s->heap, s->heap_size, s->heap_align);
@@ -350,7 +362,8 @@ static void load_finish(NphAssetLoader *l, Slot *s)
     if (r == NPH_RESULT_OK) {
         s->guid = s->asset.header.guid;
         const u32 index = (u32)(s - l->slots);
-        if (!nph_guid_is_null(s->guid) && !nph_hashmap_contains(&l->by_guid, &s->guid)) {
+        if (!s->forgotten && !nph_guid_is_null(s->guid) &&
+            !nph_hashmap_contains(&l->by_guid, &s->guid)) {
             NPH_IGNORE_RESULT(nph_hashmap_insert(&l->by_guid, &s->guid, &index));
         }
         nph_atomic_store_u32(&s->state, (u32)NPH_ASSET_STATE_READY, NPH_MEMORY_ORDER_RELEASE);
@@ -808,6 +821,18 @@ void nph_asset_release(NphAssetLoader *l, NphAssetHandle handle)
                        (u32)NPH_ASSET_STATE_LOADING);
             slot_free(l, s);
         }
+    }
+    nph_mutex_unlock(&l->lock);
+}
+
+void nph_asset_forget(NphAssetLoader *l, NphAssetHandle handle)
+{
+    NPH_ASSERT(l != NULL);
+    nph_mutex_lock(&l->lock);
+    Slot *s = slot_of(l, handle);
+    if (s != NULL && !s->forgotten) {
+        slot_unlink(l, s);
+        s->forgotten = 1;
     }
     nph_mutex_unlock(&l->lock);
 }
