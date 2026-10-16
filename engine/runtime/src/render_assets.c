@@ -178,10 +178,33 @@ void render_assets_release(RenderAssetCache *c, u32 index)
         render_assets_release(c, a->textures[t]);
     }
     nph_asset_release(c->loader, a->handle); // during a load: unloads when it lands
-    NPH_VERIFY(nph_hashmap_remove(&c->by_guid, &a->guid));
+    if (!a->forgotten) {
+        NPH_VERIFY(nph_hashmap_remove(&c->by_guid, &a->guid));
+    }
+    a->forgotten = 0;
     a->state = RENDER_ASSET_FREE;
     a->next_free = c->free_head;
     c->free_head = index;
+}
+
+u32 render_assets_find(const RenderAssetCache *c, NphGuid guid)
+{
+    const u32 *found = NPH_HASHMAP_FIND(&c->by_guid, u32, &guid);
+    return found != NULL ? *found : RENDER_ASSET_NONE;
+}
+
+void render_assets_forget(RenderAssetCache *c, u32 index)
+{
+    if (index == RENDER_ASSET_NONE || index >= c->high) {
+        return;
+    }
+    RenderAsset *a = &c->items[index];
+    if (a->state == RENDER_ASSET_FREE || a->forgotten) {
+        return;
+    }
+    NPH_VERIFY(nph_hashmap_remove(&c->by_guid, &a->guid));
+    a->forgotten = 1;
+    nph_asset_forget(c->loader, a->handle);
 }
 
 // ---------------------------------------------------------------------------
