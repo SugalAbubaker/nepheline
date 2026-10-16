@@ -217,6 +217,12 @@ void nph_gpu_cmd_begin_rendering(NphGpuCmd *cmd, const NphGpuRenderingDesc *desc
                         desc->depth_read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
                                               : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                         &depth, VK_IMAGE_ASPECT_DEPTH_BIT);
+        if (desc->depth_read_only) {
+            // Never written, so never stored: STORE and DONT_CARE would be a
+            // write the graph's barriers (which see a read) do not cover,
+            // a write-after-write hazard with the next frame's clear.
+            depth.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+        }
         info.pDepthAttachment = &depth;
         if ((slot->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0U) {
             // Depth-stencil formats: the stencil aspect follows the depth

@@ -350,8 +350,15 @@ VkAttachmentLoadOp gpu_vk_load_op(NphGpuLoadOp op)
 
 VkAttachmentStoreOp gpu_vk_store_op(NphGpuStoreOp op)
 {
-    return op == NPH_GPU_STORE_OP_DONT_CARE ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                                            : VK_ATTACHMENT_STORE_OP_STORE;
+    switch (op) {
+    case NPH_GPU_STORE_OP_DONT_CARE:
+        return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    case NPH_GPU_STORE_OP_NONE:
+        return VK_ATTACHMENT_STORE_OP_NONE;
+    case NPH_GPU_STORE_OP_STORE:
+        break;
+    }
+    return VK_ATTACHMENT_STORE_OP_STORE;
 }
 
 VkShaderStageFlagBits gpu_vk_shader_stage(NphGpuShaderStage stage)
