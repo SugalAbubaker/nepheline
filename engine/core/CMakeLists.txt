@@ -8,6 +8,7 @@ nph_add_module(core
         src/assert.c
         src/bitset.c
         src/cvar.c
+        src/guid.c
         src/handle.c
         src/hash.c
         src/hashmap.c
@@ -42,6 +43,7 @@ nph_add_test(core
         tests/test_base.c
         tests/test_bitset.c
         tests/test_cvar.c
+        tests/test_guid.c
         tests/test_handle.c
         tests/test_hash.c
         tests/test_hashmap.c
