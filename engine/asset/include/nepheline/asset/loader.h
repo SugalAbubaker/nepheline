@@ -63,6 +63,12 @@ typedef enum NphAssetState {
     NPH_ASSET_STATE_FAILED,
 } NphAssetState;
 
+// Resolves an identity to a virtual path when no mounted pack indexes it:
+// writes the path into `buf` (NUL terminated, at most `cap` bytes) and its
+// length into *out_len. NPH_RESULT_NOT_FOUND when it does not know the
+// GUID; NPH_RESULT_OVERFLOW when the path does not fit.
+typedef NphResult (*NphAssetResolveFn)(void *user, NphGuid guid, char *buf, u64 cap, u64 *out_len);
+
 typedef enum NphAssetVerify {
     NPH_ASSET_VERIFY_DEFAULT = 0, // checksums in Debug and Development builds
     NPH_ASSET_VERIFY_ALWAYS,
@@ -77,6 +83,13 @@ typedef struct NphAssetLoaderDesc {
     NphAssetVerify verify;
     u64 parallel_threshold; // bytes of compressed output from which a sync load uses jobs (0: 256
                             // KiB)
+    // Optional: identities that no mounted pack indexes, such as the loose
+    // cooked files of a project in development (the editor answers from the
+    // cooker's database). Consulted when nph_vfs_find_guid reports
+    // NOT_FOUND, on the thread that loads by GUID: it must be thread-safe
+    // when loads by GUID are made from several threads.
+    NphAssetResolveFn resolve;
+    void *resolve_user;
 } NphAssetLoaderDesc;
 
 // A blob of a loaded asset: `data` is the raw bytes (in the mapping for
@@ -137,9 +150,10 @@ NPH_MUST_USE NphResult nph_asset_load_async(NphAssetLoader *loader, NphStr path,
                                             NphJobCounter *counter, NphAssetHandle *out);
 
 // As nph_asset_load and nph_asset_load_async for the asset with identity
-// `guid`, located through nph_vfs_find_guid: how a scene's references to
-// meshes, materials, and textures are loaded. NPH_RESULT_NOT_FOUND when no
-// mounted pack knows the GUID; otherwise the errors of the path load.
+// `guid`, located through nph_vfs_find_guid and then the loader's resolver
+// (NphAssetLoaderDesc.resolve): how a scene's references to meshes,
+// materials, and textures are loaded. NPH_RESULT_NOT_FOUND when neither
+// knows the GUID; otherwise the errors of the path load.
 NPH_MUST_USE NphResult nph_asset_load_guid(NphAssetLoader *loader, NphGuid guid,
                                            NphAssetHandle *out);
 NPH_MUST_USE NphResult nph_asset_load_guid_async(NphAssetLoader *loader, NphGuid guid,

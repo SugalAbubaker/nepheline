@@ -162,8 +162,14 @@ one unloads. `nph_asset_load_guid` and `nph_asset_load_guid_async` load
 by identity, resolving the GUID to a path through `nph_vfs_find_guid`:
 that is how a scene's references to meshes and materials, and a
 material's to textures, are followed (the cooker derives every GUID from
-the source path and sub-asset, [cook.md](cook.md)). `nph_asset_find_guid`
-finds an asset already loaded by identity, without a new reference.
+the source path and sub-asset, [cook.md](cook.md)). Identities that no
+mounted pack indexes, such as the loose cooked files of a project in
+development, go to the loader's optional resolver
+(`NphAssetLoaderDesc.resolve`; the editor answers from the cooker's
+database). `nph_asset_find_guid` finds an asset already loaded by
+identity, without a new reference. The `NphGuid` type itself lives in
+core (`core/guid.h`), so that scene files can hold asset references;
+`asset/guid.h` adds the generator seeded from the clocks.
 
 With a job system, `nph_asset_load_async` returns a LOADING handle at
 once, runs the mapping and validation on an I/O thread, spawns one job per
