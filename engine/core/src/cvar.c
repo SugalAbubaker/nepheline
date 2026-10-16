@@ -140,6 +140,68 @@ NphResult nph_cvar_register(NphCvarRegistry *r, NphCvar *cvar)
     return NPH_RESULT_OK;
 }
 
+static bool at_default(const NphCvar *cvar)
+{
+    switch (cvar->type) {
+    case NPH_CVAR_TYPE_BOOL:
+        return (cvar->value_bool != 0) == (cvar->default_bool != 0);
+    case NPH_CVAR_TYPE_INT:
+        return cvar->value_int == cvar->default_int;
+    case NPH_CVAR_TYPE_FLOAT: {
+        // By bits: -0.0 and NaNs are values a user may have set.
+        u64 value = 0U;
+        u64 fallback = 0U;
+        memcpy(&value, &cvar->value_float, sizeof value);
+        memcpy(&fallback, &cvar->default_float, sizeof fallback);
+        return value == fallback;
+    }
+    case NPH_CVAR_TYPE_STRING:
+        return strcmp(cvar->value_string != NULL ? cvar->value_string : "",
+                      cvar->default_string != NULL ? cvar->default_string : "") == 0;
+    }
+    return true;
+}
+
+static NphResult store_pending(NphCvarRegistry *r, NphStr name, NphStr value);
+
+bool nph_cvar_unregister(NphCvarRegistry *r, NphCvar *cvar)
+{
+    NPH_ASSERT(r != NULL && cvar != NULL);
+    if (cvar->registered == 0U || cvar->name == NULL) {
+        return false;
+    }
+    const NphStr name = nph_str_from_cstr(cvar->name);
+    const u64 key = name_key(name);
+    NphCvar **found = (NphCvar **)nph_hashmap_find_u64(&r->by_name, key);
+    if (found == NULL || *found != cvar) {
+        return false;
+    }
+    if (!at_default(cvar)) {
+        // %.17g floats and the other forms read back exactly.
+        char text[512];
+        const u64 len = nph_cvar_format(cvar, text, sizeof text);
+        const NphResult kept =
+            len < sizeof text ? store_pending(r, name, nph_str(text, len)) : NPH_RESULT_OVERFLOW;
+        if (kept != NPH_RESULT_OK) {
+            NPH_LOG_WARN(&NPH_LOG_CORE, "cvar %s: its value is not kept for re-registration (%s)",
+                         cvar->name, nph_result_string(kept));
+        }
+    }
+    NPH_VERIFY(nph_hashmap_remove_u64(&r->by_name, key));
+    for (u32 i = 0; i < r->cvars.len; ++i) {
+        if (r->cvars.data[i] == (void *)cvar) {
+            NPH_ARRAY_REMOVE_AT(&r->cvars, i);
+            break;
+        }
+    }
+    if (cvar->type == NPH_CVAR_TYPE_STRING) {
+        release_string(r, cvar);
+    }
+    cvar->registered = 0U;
+    r->version += 1U;
+    return true;
+}
+
 NphCvar *nph_cvar_find(const NphCvarRegistry *r, NphStr name)
 {
     NPH_ASSERT(r != NULL);

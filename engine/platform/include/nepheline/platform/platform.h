@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 // The platform layer's log category, for the OS messages it reports.
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_PLATFORM);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_PLATFORM);
 
 // Writes the absolute path of the running executable into `buf` (NUL
 // terminated, at most `cap` bytes). *out_len receives the length without

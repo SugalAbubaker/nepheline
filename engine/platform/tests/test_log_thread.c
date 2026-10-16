@@ -146,3 +146,29 @@ NTEST_F(LogFixture, many_threads_log_concurrently_with_the_flusher)
     NTEST_ASSERT_EQ_UINT(delivered + dropped, 8U * l.records_each);
     NTEST_ASSERT_GT_UINT(delivered, 0U);
 }
+
+// nph_log_drain racing the logger thread's flushes: every
+// record pushed before each drain has been delivered when it returns
+// (what unloading a game module, whose names the records point into,
+// relies on).
+NTEST_F(LogFixture, drain_delivers_everything_pushed_before_it)
+{
+    NphLogThread lt;
+    memset(&lt, 0, sizeof lt);
+    NTEST_ASSERT_EQ_INT(nph_log_thread_start(&lt, 1U), NPH_RESULT_OK);
+    u32 pushed = 0U;
+    for (u32 round = 0; round < 200U; ++round) {
+        const u32 burst = 1U + (round % 7U);
+        for (u32 i = 0; i < burst; ++i) {
+            NPH_LOG_INFO(&LOG_TEST, "round %u record %u", round, i);
+        }
+        pushed += burst;
+        nph_log_thread_kick(&lt); // often mid-flush when the drain starts
+        (void)nph_log_drain();
+        NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&f->sink.records, NPH_MEMORY_ORDER_RELAXED),
+                             pushed);
+    }
+    NTEST_ASSERT_EQ_UINT(nph_atomic_load_u32(&f->sink.dropped, NPH_MEMORY_ORDER_RELAXED), 0U);
+    nph_log_thread_stop(&lt);
+    NTEST_ASSERT_EQ_UINT(nph_log_drain(), 0U); // nothing left
+}

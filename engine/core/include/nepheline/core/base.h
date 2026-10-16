@@ -190,6 +190,18 @@ extern "C" {
 #define NPH_EXPORT __attribute__((visibility("default")))
 #endif
 
+// Marks engine data (not functions) declared in public headers: the engine's
+// log categories. Code linking the engine's shared library (nepheline_shared:
+// game modules, the hosts that load them) is compiled with
+// NPH_ENGINE_SHARED_IMPORT, and on Windows data must be imported explicitly,
+// where functions get import thunks (docs/adr/0024-game-modules.md). The
+// engine's own code never defines it.
+#if NPH_PLATFORM_WINDOWS && defined(NPH_ENGINE_SHARED_IMPORT)
+#define NPH_ENGINE_DATA __declspec(dllimport)
+#else
+#define NPH_ENGINE_DATA
+#endif
+
 // Alignment of a type, as a u32.
 #define NPH_ALIGNOF(T) ((u32) _Alignof(T))
 

@@ -361,16 +361,39 @@ static void deliver(const NphLogRecord *rec)
     }
 }
 
+static bool try_begin_flush(void)
+{
+    u32 expected = 0U;
+    return nph_atomic_compare_exchange_u32(&g_log.flushing, &expected, 1U, NPH_MEMORY_ORDER_ACQUIRE,
+                                           NPH_MEMORY_ORDER_RELAXED);
+}
+
+// The body of a flush, with g_log.flushing held; releases it.
+static u32 flush_held(u32 max_records);
+
 u32 nph_log_flush(u32 max_records)
+{
+    if (!g_log.initialized || !try_begin_flush()) {
+        return 0U;
+    }
+    return flush_held(max_records);
+}
+
+u32 nph_log_drain(void)
 {
     if (!g_log.initialized) {
         return 0U;
     }
-    u32 expected = 0U;
-    if (!nph_atomic_compare_exchange_u32(&g_log.flushing, &expected, 1U, NPH_MEMORY_ORDER_ACQUIRE,
-                                         NPH_MEMORY_ORDER_RELAXED)) {
-        return 0U;
+    // Another flush (the logger thread's) is short: it delivers what is
+    // queued and returns. Wait for it, then deliver whatever it left.
+    while (!try_begin_flush()) {
+        nph_cpu_relax();
     }
+    return flush_held(0U);
+}
+
+static u32 flush_held(u32 max_records)
+{
     u32 delivered = 0U;
     const u32 limit = max_records != 0U ? max_records : NPH_U32_MAX;
     while (delivered < limit) {

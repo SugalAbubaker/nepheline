@@ -64,7 +64,7 @@
 extern "C" {
 #endif
 
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_JOBS);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_JOBS);
 
 typedef struct NphJobSystem NphJobSystem;
 

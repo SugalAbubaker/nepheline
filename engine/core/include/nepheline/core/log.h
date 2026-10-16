@@ -55,9 +55,12 @@ typedef struct NphLogCategory {
 #define NPH_LOG_CATEGORY_DEFINE(ident, name, default_level)                                        \
     NphLogCategory ident = {(name), NPH_ATOMIC_U32_INIT((u32)(default_level))}
 #define NPH_LOG_CATEGORY_DECLARE(ident) extern NphLogCategory ident
+// For the engine's own categories in its public headers: importable from
+// the engine's shared library (base.h NPH_ENGINE_DATA).
+#define NPH_LOG_ENGINE_CATEGORY_DECLARE(ident) extern NPH_ENGINE_DATA NphLogCategory ident
 
 // Core's own category.
-NPH_LOG_CATEGORY_DECLARE(NPH_LOG_CORE);
+NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_CORE);
 
 #define NPH_LOG_MESSAGE_MAX 216U
 
@@ -122,6 +125,13 @@ void nph_log_thread_detach(void);
 // `max_records` bounds one call (0: everything pending). Returns the
 // number delivered; 0 also when another flush is in progress.
 u32 nph_log_flush(u32 max_records);
+
+// Delivers every record pushed before the call, first waiting (spinning)
+// for a flush in progress on another thread to finish. For code about to
+// free memory that queued records point into: a record keeps its
+// category's name and its call site's file as pointers, which a game
+// module being unloaded owns. Returns the number this call delivered.
+u32 nph_log_drain(void);
 
 // ---------------------------------------------------------------------------
 // Writing

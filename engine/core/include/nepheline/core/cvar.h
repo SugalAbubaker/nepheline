@@ -168,6 +168,16 @@ void nph_cvar_registry_free(NphCvarRegistry *r);
 // registration still succeeds).
 NPH_MUST_USE NphResult nph_cvar_register(NphCvarRegistry *r, NphCvar *cvar);
 
+// Removes `cvar`: code about to unload the memory it lives in (a game
+// module being hot-reloaded) calls this first. A value changed from the
+// default is kept pending, so the cvar of the same name that the module's
+// next build registers starts from it: tunables survive reloads, while an
+// untouched cvar takes the new build's default. False (and nothing
+// changes) when `cvar` is not registered with `r`; NPH_RESULT_OUT_OF_MEMORY
+// cannot happen here, but a value that cannot be kept is dropped and
+// logged.
+bool nph_cvar_unregister(NphCvarRegistry *r, NphCvar *cvar);
+
 NphCvar *nph_cvar_find(const NphCvarRegistry *r, NphStr name);
 
 NPH_INLINE u32 nph_cvar_registry_count(const NphCvarRegistry *r)
