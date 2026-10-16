@@ -112,6 +112,8 @@ if(NPH_BUILD_TESTS)
     target_link_libraries(platform_test_dylib PRIVATE nph::options nph::core)
     set_target_properties(platform_test_dylib PROPERTIES FOLDER "tests")
     add_dependencies(platform_tests platform_test_dylib)
+    # White-box tests read the module's internal structures.
+    target_include_directories(platform_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(platform_tests PRIVATE
         "NPH_TEST_DYLIB_PATH=\"$<TARGET_FILE:platform_test_dylib>\"")
     if(MSVC)
