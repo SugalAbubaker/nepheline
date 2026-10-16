@@ -17,6 +17,9 @@ _nph_require_submodule(volk CMakeLists.txt)
 _nph_require_submodule(vma CMakeLists.txt)
 _nph_require_submodule(cgltf cgltf.h)
 _nph_require_submodule(stb stb_image.h)
+if(NPH_BUILD_EDITOR)
+    _nph_require_submodule(cimgui imgui/imgui.h) # cimgui's own submodule, Dear ImGui
+endif()
 
 # GLFW 3.4: window, input, monitors (wrapped by engine/platform, window.h).
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -68,3 +71,34 @@ target_include_directories(cgltf SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/c
 # the implementation is tools/cook/src/stb_impl.c.
 add_library(stb INTERFACE)
 target_include_directories(stb SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/stb")
+
+# cimgui at its docking_inter branch (125f397e0982), over Dear ImGui
+# 1.92.9b's docking branch (b48d1afb): the editor's UI, and only the
+# editor's (CLAUDE.md §3: "C++ compiled only for the editor target. Never
+# in the runtime"; docs/adr/0025-editor-ui.md). Built with ImGui's own
+# configuration (cimconfig.h keeps its asserts) and without its Win32 and
+# shell helpers: the editor's platform backend provides the clipboard.
+# C callers see the C declarations of cimgui.h (CIMGUI_DEFINE_ENUMS_AND_STRUCTS).
+if(NPH_BUILD_EDITOR)
+    add_library(nph_cimgui STATIC
+        cimgui/cimgui.cpp
+        cimgui/imgui/imgui.cpp
+        cimgui/imgui/imgui_draw.cpp
+        cimgui/imgui/imgui_tables.cpp
+        cimgui/imgui/imgui_widgets.cpp
+        cimgui/imgui/imgui_demo.cpp)
+    target_compile_features(nph_cimgui PRIVATE cxx_std_17)
+    target_include_directories(nph_cimgui SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/cimgui")
+    target_include_directories(nph_cimgui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cimgui/imgui")
+    target_compile_definitions(nph_cimgui
+        PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS=1 IMGUI_DISABLE_WIN32_FUNCTIONS
+               IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+        PRIVATE "IMGUI_USER_CONFIG=\"../cimconfig.h\""
+        INTERFACE CIMGUI_DEFINE_ENUMS_AND_STRUCTS)
+    if(MSVC)
+        target_compile_options(nph_cimgui PRIVATE /W0)
+    else()
+        target_compile_options(nph_cimgui PRIVATE -w)
+    endif()
+    set_target_properties(nph_cimgui PROPERTIES FOLDER "third_party")
+endif()
