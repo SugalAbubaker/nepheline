@@ -387,6 +387,92 @@ NTEST_F(LoaderFixture, releasing_during_a_load_unloads_when_it_finishes)
     NTEST_ASSERT_EQ_UINT(nph_asset_loader_live(f->loader), 0U);
 }
 
+// Replaces "<loose>/<name>" whole, as a cooker does: written beside it and
+// renamed over it, so a loader that mapped it keeps the old file.
+static void replace_asset(LoaderFixture *f, const char *name, u32 blob_count, u64 blob_size)
+{
+    void *image = NULL;
+    u64 size = 0U;
+    test_make_blob_asset(f->alloc, nph_guid_from_cstr(name), blob_count, blob_size,
+                         NPH_ASSET_CODEC_NONE, &image, &size);
+    char path[1400];
+    char part[1500];
+    NTEST_ASSERT_EQ_INT(nph_path_join(path, sizeof path, nph_str_from_cstr(f->loose),
+                                      nph_str_from_cstr(name), NULL),
+                        NPH_RESULT_OK);
+    (void)snprintf(part, sizeof part, "%s.part", path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(part, image, size), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_rename(part, path), NPH_RESULT_OK);
+    test_free_asset_image(f->alloc, image, size);
+}
+
+NTEST_F(LoaderFixture, a_forgotten_asset_is_read_again_and_its_holders_keep_it)
+{
+    make_loader(f, true, NPH_ASSET_VERIFY_ALWAYS, 0U);
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(f->vfs, nph_str_empty(), f->loose, NULL),
+                        NPH_RESULT_OK);
+    const NphGuid guid = nph_guid_from_cstr("replaced.nph");
+    replace_asset(f, "replaced.nph", 2U, 500U);
+    NphAssetHandle old_h;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("replaced.nph"), &old_h), NPH_RESULT_OK);
+    const NphAsset *old_asset = nph_asset_get(f->loader, old_h);
+    NTEST_ASSERT_NOT_NULL(old_asset);
+    check_blobs(old_asset, 2U, 500U, NPH_ASSET_CODEC_NONE);
+
+    // The file is replaced; until forgotten, a load is the asset already there.
+    replace_asset(f, "replaced.nph", 3U, 700U);
+    NphAssetHandle again;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("replaced.nph"), &again), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(again.value, old_h.value);
+    nph_asset_release(f->loader, again);
+
+    // Forgotten: the path loads the new file into a new asset, which takes
+    // the GUID, and the old one stays whole for its holder.
+    nph_asset_forget(f->loader, old_h);
+    nph_asset_forget(f->loader, old_h); // twice is once
+    NTEST_EXPECT_EQ_UINT(nph_asset_find_guid(f->loader, guid).value, 0U);
+    NphAssetHandle new_h;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("replaced.nph"), &new_h), NPH_RESULT_OK);
+    NTEST_EXPECT_NE_UINT(new_h.value, old_h.value);
+    check_blobs(nph_asset_get(f->loader, new_h), 3U, 700U, NPH_ASSET_CODEC_NONE);
+    check_blobs(old_asset, 2U, 500U, NPH_ASSET_CODEC_NONE);
+    NTEST_EXPECT_EQ_UINT(nph_asset_find_guid(f->loader, guid).value, new_h.value);
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(f->loader), 2U);
+    // Releasing the old one leaves the new one where it is.
+    nph_asset_release(f->loader, old_h);
+    NTEST_EXPECT_EQ_UINT(nph_asset_find_guid(f->loader, guid).value, new_h.value);
+    NphAssetHandle same;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("replaced.nph"), &same), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(same.value, new_h.value);
+    nph_asset_release(f->loader, same);
+    nph_asset_release(f->loader, new_h);
+
+    // Forgotten while its load is in flight: the load lands without taking
+    // the GUID back from the asset loaded after it.
+    for (u32 round = 0; round < 8U; ++round) {
+        NphJobCounter first = NPH_JOB_COUNTER_INIT;
+        NphJobCounter second = NPH_JOB_COUNTER_INIT;
+        NphAssetHandle a;
+        NphAssetHandle b;
+        NTEST_ASSERT_EQ_INT(nph_asset_load_async(f->loader, NPH_STR("big.nph"), &first, &a),
+                            NPH_RESULT_OK);
+        nph_asset_forget(f->loader, a);
+        NTEST_ASSERT_EQ_INT(nph_asset_load_async(f->loader, NPH_STR("big.nph"), &second, &b),
+                            NPH_RESULT_OK);
+        NTEST_EXPECT_NE_UINT(a.value, b.value);
+        nph_job_wait(f->jobs, &first);
+        nph_job_wait(f->jobs, &second);
+        NTEST_ASSERT_EQ_INT(nph_asset_wait(f->loader, a), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_asset_wait(f->loader, b), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(nph_asset_find_guid(f->loader, nph_guid_from_cstr("big.nph")).value,
+                             b.value);
+        nph_asset_release(f->loader, a);
+        nph_asset_release(f->loader, b);
+    }
+    nph_asset_forget(f->loader, NPH_ASSET_HANDLE_NULL); // ignored
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(f->loader), 0U);
+}
+
 NTEST_F(LoaderFixture, many_concurrent_async_loads)
 {
     make_loader(f, true, NPH_ASSET_VERIFY_ALWAYS, 0U);
