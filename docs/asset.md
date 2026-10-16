@@ -242,7 +242,7 @@ can be handed to the renderer without further checks:
 
 ## Testing
 
-`asset_tests` (52 cases): GUID derivation (pinned), text round trips and
+`asset_tests` (50 cases): GUID derivation (pinned), text round trips and
 rejections, generator uniqueness; the codec on empty, tiny, zero,
 random, text, periodic (offsets 1–9), window-edge, and structured inputs
 at both levels, every size up to 300 bytes, hand-built streams from the
