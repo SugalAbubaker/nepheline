@@ -265,6 +265,15 @@ typedef struct UploadRect {
 static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
                               u32 layer_count, const UploadRect *rect, const void *data, u64 size);
 
+// The transfer queue shares the graphics queue's family: no image changes
+// owner between them (a device with one family makes every image
+// exclusive).
+static bool one_queue_family(const NphGpuDevice *dev)
+{
+    return dev->queues[NPH_GPU_QUEUE_TRANSFER]->family ==
+           dev->queues[NPH_GPU_QUEUE_GRAPHICS]->family;
+}
+
 NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
                                u32 layer_count, const void *data, u64 size)
 {
@@ -317,9 +326,9 @@ NphResult nph_gpu_upload_image_region(NphGpuDevice *dev, NphGpuImage dst, u32 mi
                       mip_h, (unsigned long long)bytes);
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    if (slot->exclusive != 0) {
-        GPU_LOG_ERROR("image '%s' is exclusive (an attachment): a region upload cannot keep the "
-                      "texels around it",
+    if (slot->exclusive != 0 && !one_queue_family(dev)) {
+        GPU_LOG_ERROR("image '%s' is exclusive (an attachment) and the transfer queue has a family "
+                      "of its own: a region upload cannot keep the texels around it",
                       slot->name);
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -351,19 +360,22 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
         // Layouts are tracked per mip, so every layer of the mip makes the
         // round trip even when the copy touches a few. Shared images keep
         // the layers the upload does not touch: the transition starts from
-        // the tracked layout. Exclusive images (attachments) cannot be
-        // acquired here without a release on the owning queue, so their
-        // old contents are discarded: an upload into an attachment
-        // replaces the whole mip.
+        // the tracked layout. Exclusive images (attachments) owned by
+        // another family cannot be acquired here without a release on the
+        // owning queue, so their old contents are discarded: an upload into
+        // an attachment replaces the whole mip. On one family nothing
+        // changes owner, and a region upload keeps the rest of the mip as
+        // for shared images (a whole upload still discards).
         const bool exclusive = slot->exclusive != 0;
+        const bool foreign = exclusive && !one_queue_family(dev);
+        const bool discard = foreign || (exclusive && rect->whole);
         NphGpuImageBarrier b;
         memset(&b, 0, sizeof b);
         b.image = dst;
         b.src_stages = (u32)NPH_GPU_STAGE_ALL;
-        b.src_access = exclusive
-                           ? (u32)NPH_GPU_ACCESS_NONE
-                           : (u32)NPH_GPU_ACCESS_MEMORY_READ | (u32)NPH_GPU_ACCESS_MEMORY_WRITE;
-        b.old_layout = exclusive ? NPH_GPU_LAYOUT_UNDEFINED : slot->state[mip].layout;
+        b.src_access = discard ? (u32)NPH_GPU_ACCESS_NONE
+                               : (u32)NPH_GPU_ACCESS_MEMORY_READ | (u32)NPH_GPU_ACCESS_MEMORY_WRITE;
+        b.old_layout = discard ? NPH_GPU_LAYOUT_UNDEFINED : slot->state[mip].layout;
         b.dst_stages = (u32)NPH_GPU_STAGE_TRANSFER;
         b.dst_access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
         b.new_layout = NPH_GPU_LAYOUT_TRANSFER_DST;
@@ -406,8 +418,7 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
         b.new_layout = final_layout;
         b.dst_queue = NPH_GPU_QUEUE_GRAPHICS;
         nph_gpu_cmd_barrier(cmd, &desc);
-        if (exclusive && dev->queues[NPH_GPU_QUEUE_TRANSFER]->family !=
-                             dev->queues[NPH_GPU_QUEUE_GRAPHICS]->family) {
+        if (foreign) {
             NphGpuUploadAcquire a;
             a.image = dst;
             a.mip = mip;

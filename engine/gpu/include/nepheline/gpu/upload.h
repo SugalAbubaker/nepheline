@@ -59,8 +59,11 @@ NPH_MUST_USE NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, 
 // glyph). Compressed formats need block-aligned rectangles; `size` must be
 // the rectangle's bytes. NPH_RESULT_INVALID_ARGUMENT for a rectangle
 // outside the mip, a misaligned one, a wrong size, an image without
-// TRANSFER_DST usage, or an exclusive image (an attachment), whose upload
-// cannot keep the texels it does not cover.
+// TRANSFER_DST usage, or an exclusive image (an attachment) on a device
+// whose transfer queue has a family of its own: that upload cannot take
+// the image from its owner, so it cannot keep the texels it does not
+// cover. (On a device with one queue family every image is exclusive,
+// and nothing changes owner.)
 NPH_MUST_USE NphResult nph_gpu_upload_image_region(NphGpuDevice *dev, NphGpuImage dst, u32 mip,
                                                    u32 layer, u32 x, u32 y, u32 width, u32 height,
                                                    const void *data, u64 size);
