@@ -48,6 +48,12 @@ NPH_MUST_USE NphResult nph_dylib_function(const NphDylib *lib, const char *name,
 // Looks up an exported data object. NPH_RESULT_NOT_FOUND when absent.
 NPH_MUST_USE NphResult nph_dylib_data(const NphDylib *lib, const char *name, void **out);
 
+// True when `address` lies in the image of the open library `lib`: its
+// code or its static data. The runtime asks before unloading a game
+// module whether anything the engine keeps (a component descriptor, a
+// system function) still points into it.
+bool nph_dylib_contains(const NphDylib *lib, const void *address);
+
 // The platform's shared-library file extension including the dot: ".dll"
 // or ".so".
 const char *nph_dylib_extension(void);

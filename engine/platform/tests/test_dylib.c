@@ -41,8 +41,16 @@ NTEST(dylib, open_call_and_close)
     NTEST_ASSERT_EQ_INT(nph_dylib_data(&lib, "nph_test_dylib_value", &data), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_UINT(*(const u32 *)data, 0xC0FFEEU);
 
+    // Addresses inside the library's image, and outside it.
+    NTEST_ASSERT_TRUE(nph_dylib_contains(&lib, data));
+    NTEST_ASSERT_TRUE(nph_dylib_contains(&lib, ((NameFn)fn)())); // a string literal of the library
+    static const u32 local = 1U;
+    NTEST_ASSERT_FALSE(nph_dylib_contains(&lib, &local));
+    NTEST_ASSERT_FALSE(nph_dylib_contains(&lib, NULL));
+
     nph_dylib_close(&lib);
     NTEST_ASSERT_FALSE(nph_dylib_is_open(&lib));
+    NTEST_ASSERT_FALSE(nph_dylib_contains(&lib, &local));
     nph_dylib_close(&lib); // idempotent
 }
 

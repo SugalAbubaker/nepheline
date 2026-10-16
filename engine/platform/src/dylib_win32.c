@@ -72,6 +72,22 @@ NphResult nph_dylib_data(const NphDylib *lib, const char *name, void **out)
     return NPH_RESULT_OK;
 }
 
+bool nph_dylib_contains(const NphDylib *lib, const void *address)
+{
+    NPH_ASSERT(lib != NULL);
+    if (lib->handle == NULL || address == NULL) {
+        return false;
+    }
+    // The module whose image holds the address, without a reference.
+    HMODULE module = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)address, &module)) {
+        return false;
+    }
+    return module == (HMODULE)lib->handle;
+}
+
 const char *nph_dylib_extension(void)
 {
     return ".dll";
