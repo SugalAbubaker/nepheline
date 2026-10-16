@@ -53,6 +53,18 @@ NPH_MUST_USE NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, 
                                             u32 base_layer, u32 layer_count, const void *data,
                                             u64 size);
 
+// Copies tightly packed texels into the rectangle (x, y, width, height) of
+// mip `mip`, layer `layer`, keeping the rest of the mip: a texture that
+// changes in parts (the editor UI's font atlas, which grows glyph by
+// glyph). Compressed formats need block-aligned rectangles; `size` must be
+// the rectangle's bytes. NPH_RESULT_INVALID_ARGUMENT for a rectangle
+// outside the mip, a misaligned one, a wrong size, an image without
+// TRANSFER_DST usage, or an exclusive image (an attachment), whose upload
+// cannot keep the texels it does not cover.
+NPH_MUST_USE NphResult nph_gpu_upload_image_region(NphGpuDevice *dev, NphGpuImage dst, u32 mip,
+                                                   u32 layer, u32 x, u32 y, u32 width, u32 height,
+                                                   const void *data, u64 size);
+
 // Submits the pending uploads. `out_value` (may be NULL) receives the
 // transfer-queue timeline value that completes them; 0 when nothing was
 // pending. Outside a frame the call also waits for completion.
