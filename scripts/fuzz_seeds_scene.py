@@ -22,7 +22,7 @@ MASK64 = (1 << 64) - 1
 # NphFieldKind (engine/scene/include/nepheline/scene/component.h).
 KIND = {"BOOL": 0, "U8": 1, "U16": 2, "U32": 3, "U64": 4, "I8": 5, "I16": 6, "I32": 7,
         "I64": 8, "F32": 9, "F64": 10, "VEC2": 11, "VEC3": 12, "VEC4": 13, "QUAT": 14,
-        "DVEC3": 15, "ENTITY": 16, "STR_ID": 17, "TEXT": 18}
+        "DVEC3": 15, "ENTITY": 16, "STR_ID": 17, "TEXT": 18, "GUID": 19}
 
 
 def mix_u64(x):
@@ -195,6 +195,7 @@ def text_seeds():
         "v3": ["-inf", 1e-30, 3.4028235e38], "v4": [1, 2, 3, 4], "q": [0, 0, 0, 1],
         "d3": [0.3333333333333333, 1e300, -5e-324], "target": 1,
         "sid": "assets/crate.mesh", "label": "café \"quoted\"",
+        "asset": "fedcba98765432100123456789abcdef",
     }
     scenes = {
         "basic": {"nepheline_scene": 1, "entities": [
@@ -211,7 +212,8 @@ def text_seeds():
         "all_kinds": {"nepheline_scene": 1, "entities": [
             {"id": 0, "components": {"test.AllKinds": all_kinds}},
             {"id": 1, "components": {"test.AllKinds": dict(all_kinds, target=None,
-                                                           sid={"hash": "0123456789abcdef"})}},
+                                                           sid={"hash": "0123456789abcdef"},
+                                                           asset=None)}},
         ]},
         "prefab": {"nepheline_scene": 1, "entities": [
             {"id": 0, "prefab": {"name": "crate", "index": 0, "root": 0}},

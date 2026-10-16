@@ -44,7 +44,8 @@
           ],
           "target": 1,
           "sid": "assets/crate.mesh",
-          "label": "caf\u00e9 \"quoted\""
+          "label": "caf\u00e9 \"quoted\"",
+          "asset": "fedcba98765432100123456789abcdef"
         }
       }
     },
@@ -93,7 +94,8 @@
           "sid": {
             "hash": "0123456789abcdef"
           },
-          "label": "caf\u00e9 \"quoted\""
+          "label": "caf\u00e9 \"quoted\"",
+          "asset": null
         }
       }
     }

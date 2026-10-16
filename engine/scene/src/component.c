@@ -35,6 +35,7 @@ static const KindInfo g_kinds[NPH_FIELD_KIND_COUNT] = {
     {"ENTITY", sizeof(NphEntity), NPH_ALIGNOF(NphEntity)},
     {"STR_ID", sizeof(NphStrId), NPH_ALIGNOF(NphStrId)},
     {"TEXT", sizeof(NphText), NPH_ALIGNOF(NphText)},
+    {"GUID", sizeof(NphGuid), NPH_ALIGNOF(NphGuid)},
 };
 
 u32 nph_field_kind_size(NphFieldKind kind)

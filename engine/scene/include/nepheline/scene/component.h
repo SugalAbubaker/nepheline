@@ -41,10 +41,11 @@
 // Components are plain data: they are copied with memcpy, moved between
 // chunks, and compared field by field. Pointers are not a field kind on
 // purpose; reference other entities with ENTITY fields (remapped on load
-// and on instantiation) and assets by ID.
+// and on instantiation) and assets with GUID fields.
 //
 // Thread-safety: descriptors are immutable static data; NPH_THREADSAFE.
 
+#include <nepheline/core/guid.h>
 #include <nepheline/core/string.h>
 #include <nepheline/core/string_id.h>
 #include <nepheline/math/quat.h>
@@ -89,6 +90,7 @@ typedef enum NphFieldKind {
     NPH_FIELD_ENTITY, // remapped when entities are saved, loaded, or instantiated
     NPH_FIELD_STR_ID, // a 64-bit string ID, written as its text when the world knows it
     NPH_FIELD_TEXT,   // NphText
+    NPH_FIELD_GUID,   // NphGuid (core/guid.h): an asset reference, written as its text
     NPH_FIELD_KIND_COUNT
 } NphFieldKind;
 
@@ -112,6 +114,7 @@ typedef enum NphFieldKind {
 #define NPH_FIELD_CTYPE_ENTITY NphEntity
 #define NPH_FIELD_CTYPE_STR_ID NphStrId
 #define NPH_FIELD_CTYPE_TEXT   NphText
+#define NPH_FIELD_CTYPE_GUID   NphGuid
 
 // Size and alignment of a kind's C type; 0 for an out-of-range kind.
 u32 nph_field_kind_size(NphFieldKind kind);

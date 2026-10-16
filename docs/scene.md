@@ -96,7 +96,10 @@ Field kinds are a closed set chosen for serialization: BOOL (b32), the
 integer types, F32, F64, VEC2–VEC4, QUAT, DVEC3 (64-bit positions),
 ENTITY (remapped when saved, loaded, or instantiated), STR_ID (a 64-bit
 string ID, written as its text when the world's string table knows it),
-and TEXT (64 bytes of inline UTF-8). There are no pointers: components are
+TEXT (64 bytes of inline UTF-8), and GUID (a 128-bit asset reference,
+`core/guid.h`, written as its 32-digit text or `null`; added in Phase 9 for
+the runtime's mesh, material, and scene references; the kinds before it
+kept their numbers, so no layout hash changed). There are no pointers: components are
 copied with `memcpy`, moved between chunks, compared field by field
 (`nph_component_fields_equal`), and hashed field by field
 (`nph_component_hash_fields`; padding never matters).
