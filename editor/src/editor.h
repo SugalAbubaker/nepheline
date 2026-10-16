@@ -86,3 +86,30 @@ bool editor_viewport_rect(const Editor *ed, f32 *out_x, f32 *out_y, f32 *out_w, 
 
 // The editor's camera, which frames render from while not playing.
 EditorCamera *editor_camera(Editor *ed);
+
+// ---------------------------------------------------------------------------
+// The scene being edited (docs/editor.md "Scenes")
+// ---------------------------------------------------------------------------
+
+// Clears the edited world and the history: an untitled scene.
+// NPH_RESULT_INVALID_STATE while playing. The UI asks before discarding
+// unsaved changes; these do not.
+NPH_MUST_USE NphResult editor_new_scene(Editor *ed);
+
+// Replaces the edited world with a scene file (text or binary). The file is
+// loaded into a scratch world first: one that does not load leaves the
+// scene as it was. NPH_RESULT_INVALID_STATE while playing; the file's and
+// the loader's errors (logged).
+NPH_MUST_USE NphResult editor_open_scene(Editor *ed, const char *path);
+
+// Saves the edited world as a text scene to `path` (NULL: the scene's
+// file), which becomes the scene's file. NPH_RESULT_INVALID_ARGUMENT for
+// NULL while untitled; the saver's errors.
+NPH_MUST_USE NphResult editor_save_scene(Editor *ed, const char *path);
+
+// Unsaved changes: the history's state differs from the one saved or opened
+// (undoing back to it reads as clean).
+bool editor_scene_dirty(const Editor *ed);
+
+// The scene's file, or "" while untitled.
+const char *editor_scene_path(const Editor *ed);

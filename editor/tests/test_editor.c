@@ -10,6 +10,8 @@
 #include <nepheline/gpu/device.h>
 #include <nepheline/gpu/resources.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/platform/file.h>
+#include <nepheline/platform/platform.h>
 #include <nepheline/runtime/engine.h>
 #include <nepheline/scene/transform.h>
 
@@ -460,4 +462,196 @@ NTEST(Editor, attaching_refuses_a_headless_engine)
     NTEST_EXPECT_NOT_NULL(fx.engine);
     NTEST_EXPECT_EQ_UINT(editor_viewport_image(fx.editor).value, 0U);
     finish(&fx); // detaching an editor that never attached is harmless
+}
+
+// ---------------------------------------------------------------------------
+// Scenes and edits
+// ---------------------------------------------------------------------------
+
+static void temp_path(const char *name, char *out, u64 cap)
+{
+    char dir[400];
+    u64 len = 0U;
+    NTEST_ASSERT_EQ_INT(nph_fs_temp_directory(dir, sizeof dir, &len), NPH_RESULT_OK);
+    (void)snprintf(out, (size_t)cap, "%s/nph-editor-tests-%llu-%s", dir,
+                   (unsigned long long)nph_platform_process_id(), name);
+}
+
+// The live entity named `name` in the edited world, or null.
+static NphEntity find_named(EditorFixture *f, const char *name)
+{
+    const NphWorld *w = nph_engine_edit_world(f->engine);
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        const NphName *n = NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_NAME, NphName);
+        if (n != NULL && strcmp(n->text.text, name) == 0) {
+            return e;
+        }
+    }
+    return NPH_ENTITY_NULL;
+}
+
+static void press(EditorFixture *f, NphKey k)
+{
+    (void)feed(f, key(k, NPH_KEY_ACTION_PRESS));
+    frames(f, 2U);
+    (void)feed(f, key(k, NPH_KEY_ACTION_RELEASE));
+    frames(f, 2U);
+}
+
+static void chord(EditorFixture *f, NphKey modifier, NphKey k)
+{
+    (void)feed(f, key(modifier, NPH_KEY_ACTION_PRESS));
+    frames(f, 2U);
+    press(f, k);
+    (void)feed(f, key(modifier, NPH_KEY_ACTION_RELEASE));
+    frames(f, 2U);
+}
+
+NTEST(Editor, scenes_save_and_open_and_unsaved_changes_are_tracked)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    NphEngine *e = fx.engine;
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    NTEST_EXPECT_EQ_STR(editor_scene_path(ed), "");
+
+    // Build: a parent, a child with a light.
+    EditorHistory *h = ed->history;
+    NphLocalTransform t = nph_local_transform_identity();
+    t.translation.x = 2.0;
+    NphEntity post = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(h, "lamp post", NPH_ENTITY_NULL, &t, &post),
+                        NPH_RESULT_OK);
+    t.translation = nph_dvec3(0.0, 3.0, 0.0);
+    NphEntity bulb = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(h, "bulb", post, &t, &bulb), NPH_RESULT_OK);
+    const NphComponentId light = nph_engine_components(e)->light;
+    NTEST_ASSERT_EQ_INT(editor_edit_add_component(h, bulb, light), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_TRUE(editor_scene_dirty(ed));
+
+    // Save: clean, with a file.
+    char path[600];
+    temp_path("scene.nscene", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(editor_save_scene(ed, path), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    NTEST_EXPECT_EQ_STR(editor_scene_path(ed), path);
+    // An edit and its undo come back to the saved state.
+    NTEST_ASSERT_EQ_INT(editor_edit_rename(h, post, "renamed"), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(editor_scene_dirty(ed));
+    NTEST_ASSERT_EQ_INT(editor_history_undo(h), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    NTEST_ASSERT_EQ_INT(editor_history_redo(h), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(editor_scene_dirty(ed));
+    NTEST_ASSERT_EQ_INT(editor_history_undo(h), NPH_RESULT_OK);
+
+    // A file that does not load leaves the scene and its history alone.
+    char bad[600];
+    temp_path("bad.nscene", bad, sizeof bad);
+    const char garbage[] = "{ this is not a scene";
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(bad, garbage, sizeof garbage - 1U), NPH_RESULT_OK);
+    NTEST_EXPECT_NE_INT(editor_open_scene(ed, bad), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_edit_world(e)), 2U);
+    NTEST_EXPECT_TRUE(editor_history_can_undo(h));
+    NTEST_EXPECT_EQ_STR(editor_scene_path(ed), path);
+
+    // New: empty and untitled.
+    NTEST_ASSERT_EQ_INT(editor_new_scene(ed), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_edit_world(e)), 0U);
+    NTEST_EXPECT_EQ_STR(editor_scene_path(ed), "");
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    NTEST_EXPECT_FALSE(editor_history_can_undo(h));
+    NTEST_EXPECT_EQ_UINT(nph_world_suspended_count(nph_engine_edit_world(e)), 0U);
+
+    // Open: the scene as it was saved.
+    NTEST_ASSERT_EQ_INT(editor_open_scene(ed, path), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    NTEST_EXPECT_EQ_STR(editor_scene_path(ed), path);
+    const NphEntity post2 = find_named(&fx, "lamp post");
+    const NphEntity bulb2 = find_named(&fx, "bulb");
+    NTEST_ASSERT_FALSE(nph_entity_is_null(post2));
+    NTEST_ASSERT_FALSE(nph_entity_is_null(bulb2));
+    NphWorld *w = nph_engine_edit_world(e);
+    NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_parent(w, bulb2), post2));
+    NTEST_EXPECT_TRUE(nph_world_has(w, bulb2, light));
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, post2, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.x,
+        2.0, 0.0);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->scene.lights, 1U);
+
+    // Not while playing.
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, true), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(editor_open_scene(ed, path), NPH_RESULT_INVALID_STATE);
+    NTEST_EXPECT_EQ_INT(editor_new_scene(ed), NPH_RESULT_INVALID_STATE);
+    nph_engine_play_end(e);
+    NPH_IGNORE_RESULT(nph_fs_remove_file(path));
+    NPH_IGNORE_RESULT(nph_fs_remove_file(bad));
+    finish(&fx);
+}
+
+NTEST(Editor, shortcuts_duplicate_delete_undo_and_redo)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    const NphWorld *w = nph_engine_edit_world(fx.engine);
+    frames(&fx, 2U);
+    NphEntity a = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "a", NPH_ENTITY_NULL, NULL, &a),
+                        NPH_RESULT_OK);
+    editor_selection_set(&ed->selection, a);
+    const u32 count = nph_world_entity_count(w);
+
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_D);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), count + 1U);
+    NTEST_ASSERT_EQ_UINT(ed->selection.count, 1U);
+    NTEST_EXPECT_FALSE(nph_entity_equals(ed->selection.primary, a)); // the copy
+    const NphEntity copy = ed->selection.primary;
+
+    press(&fx, NPH_KEY_DELETE);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), count);
+    NTEST_EXPECT_FALSE(nph_world_is_alive(w, copy));
+    NTEST_EXPECT_EQ_UINT(ed->selection.count, 0U);
+
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_Z); // the delete
+    NTEST_EXPECT_TRUE(nph_world_is_alive(w, copy));
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_Z); // the duplicate
+    NTEST_EXPECT_FALSE(nph_world_is_alive(w, copy));
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_Y);
+    NTEST_EXPECT_TRUE(nph_world_is_alive(w, copy)); // the same handle again
+    NTEST_EXPECT_EQ_STR(editor_history_redo_label(ed->history), "Delete a");
+    finish(&fx);
+}
+
+NTEST(Editor, unsaved_changes_are_asked_about_before_they_go)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    const NphWorld *w = nph_engine_edit_world(fx.engine);
+    frames(&fx, 2U);
+    NphEntity a = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "precious", NPH_ENTITY_NULL, NULL, &a),
+                        NPH_RESULT_OK);
+    // New with unsaved changes: the question comes first, and the scene stays.
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_N);
+    NTEST_EXPECT_EQ_INT(ed->pending, EDITOR_PENDING_NEW);
+    NTEST_EXPECT_TRUE(nph_world_is_alive(w, a));
+    press(&fx, NPH_KEY_ESCAPE); // cancel
+    NTEST_EXPECT_EQ_INT(ed->pending, EDITOR_PENDING_NONE);
+    NTEST_EXPECT_TRUE(nph_world_is_alive(w, a));
+    // Saved, there is nothing to ask.
+    char path[600];
+    temp_path("asked.nscene", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(editor_save_scene(ed, path), NPH_RESULT_OK);
+    chord(&fx, NPH_KEY_LEFT_CONTROL, NPH_KEY_N);
+    NTEST_EXPECT_EQ_INT(ed->pending, EDITOR_PENDING_NONE);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), 0U);
+    NPH_IGNORE_RESULT(nph_fs_remove_file(path));
+    finish(&fx);
 }

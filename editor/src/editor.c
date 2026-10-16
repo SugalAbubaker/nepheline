@@ -109,6 +109,100 @@ static void play_menu_items(Editor *ed)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Edits and the scene's file
+// ---------------------------------------------------------------------------
+
+static void undo(Editor *ed)
+{
+    const NphResult r = editor_history_undo(ed->history);
+    if (r != NPH_RESULT_OK && r != NPH_RESULT_EMPTY) {
+        NPH_LOG_ERROR(&LOG_EDITOR, "undo: %s", nph_result_string(r));
+    }
+}
+
+static void redo(Editor *ed)
+{
+    const NphResult r = editor_history_redo(ed->history);
+    if (r != NPH_RESULT_OK && r != NPH_RESULT_EMPTY) {
+        NPH_LOG_ERROR(&LOG_EDITOR, "redo: %s", nph_result_string(r));
+    }
+}
+
+void editor_delete_selection(Editor *ed)
+{
+    if (nph_engine_is_playing(ed->engine) || ed->selection.count == 0U) {
+        return;
+    }
+    const NphResult r = editor_edit_delete(ed->history, ed->selection.items, ed->selection.count);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&LOG_EDITOR, "delete: %s", nph_result_string(r));
+    }
+    editor_selection_clear(&ed->selection);
+}
+
+void editor_duplicate_selection(Editor *ed)
+{
+    if (nph_engine_is_playing(ed->engine) || ed->selection.count == 0U) {
+        return;
+    }
+    NphEntity copies[EDITOR_SELECTION_MAX];
+    const u32 n = ed->selection.count;
+    const NphResult r = editor_edit_duplicate(ed->history, ed->selection.items, n, copies);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&LOG_EDITOR, "duplicate: %s", nph_result_string(r));
+        return;
+    }
+    editor_selection_clear(&ed->selection);
+    for (u32 i = 0; i < n; ++i) {
+        editor_selection_add(&ed->selection, copies[i]);
+    }
+}
+
+static void run_pending(Editor *ed, EditorPending pending)
+{
+    switch (pending) {
+    case EDITOR_PENDING_NEW: {
+        const NphResult r = editor_new_scene(ed);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&LOG_EDITOR, "new scene: %s", nph_result_string(r));
+        }
+        break;
+    }
+    case EDITOR_PENDING_OPEN:
+        ed->popup_request = EDITOR_POPUP_OPEN_SCENE;
+        break;
+    case EDITOR_PENDING_QUIT:
+        ed->quit_confirmed = true;
+        nph_engine_quit(ed->engine);
+        break;
+    case EDITOR_PENDING_NONE:
+    default:
+        break;
+    }
+}
+
+// Runs `pending` now, or after asking about the unsaved changes.
+static void ask_then(Editor *ed, EditorPending pending)
+{
+    if (editor_scene_dirty(ed)) {
+        ed->pending = pending;
+        ed->popup_request = EDITOR_POPUP_UNSAVED;
+    } else {
+        run_pending(ed, pending);
+    }
+}
+
+// Saves to the scene's file, or asks for one while untitled.
+static void save(Editor *ed)
+{
+    if (ed->doc_path[0] == '\0') {
+        ed->popup_request = EDITOR_POPUP_SAVE_SCENE;
+        return;
+    }
+    NPH_IGNORE_RESULT(editor_save_scene(ed, NULL)); // logged
+}
+
 static void shortcuts(Editor *ed)
 {
     const ImGuiIO *io = igGetIO_Nil();
@@ -116,17 +210,53 @@ static void shortcuts(Editor *ed)
         return;
     }
     NphEngine *e = ed->engine;
+    const bool editing = !nph_engine_is_playing(e);
     if (igIsKeyPressed_Bool(ImGuiKey_F5, false)) {
         editor_play_toggle(ed);
     }
-    if (igIsKeyPressed_Bool(ImGuiKey_F6, false) && nph_engine_is_playing(e)) {
+    if (igIsKeyPressed_Bool(ImGuiKey_F6, false) && !editing) {
         nph_engine_set_paused(e, !nph_engine_is_paused(e));
     }
     if (igIsKeyPressed_Bool(ImGuiKey_F7, false) && nph_engine_is_paused(e)) {
         nph_engine_step_once(e);
     }
-    if (io->KeyCtrl && igIsKeyPressed_Bool(ImGuiKey_S, false)) {
-        ed->popup_request = EDITOR_POPUP_SAVE_SCENE;
+    if (io->KeyCtrl) {
+        if (igIsKeyPressed_Bool(ImGuiKey_S, false)) {
+            if (io->KeyShift) {
+                ed->popup_request = EDITOR_POPUP_SAVE_SCENE;
+            } else {
+                save(ed);
+            }
+        }
+        if (editing && igIsKeyPressed_Bool(ImGuiKey_N, false)) {
+            ask_then(ed, EDITOR_PENDING_NEW);
+        }
+        if (editing && igIsKeyPressed_Bool(ImGuiKey_O, false)) {
+            ask_then(ed, EDITOR_PENDING_OPEN);
+        }
+        if (editing && igIsKeyPressed_Bool(ImGuiKey_Z, true)) {
+            if (io->KeyShift) {
+                redo(ed);
+            } else {
+                undo(ed);
+            }
+        }
+        if (editing && igIsKeyPressed_Bool(ImGuiKey_Y, true)) {
+            redo(ed);
+        }
+        if (editing && igIsKeyPressed_Bool(ImGuiKey_D, false)) {
+            editor_duplicate_selection(ed);
+        }
+        return;
+    }
+    if (editing && igIsKeyPressed_Bool(ImGuiKey_Delete, false)) {
+        editor_delete_selection(ed);
+    }
+    if (editing && igIsKeyPressed_Bool(ImGuiKey_F2, false)) {
+        editor_begin_rename(ed, ed->selection.primary);
+    }
+    if (!ed->viewport.fly && igIsKeyPressed_Bool(ImGuiKey_F, false)) {
+        editor_viewport_frame_selection(ed);
     }
 }
 
@@ -139,16 +269,21 @@ static void dockspace(Editor *ed)
     const ImGuiID id = igGetID_Str("nph.editor.dockspace");
     const ImGuiViewport *vp = igGetMainViewport();
     if (ed->build_layout || igDockBuilderGetNode(id) == NULL) {
-        // The viewport in the middle, the statistics on the right, the
-        // console and the profiler under them.
+        // The outliner on the left, the inspector and the statistics on the
+        // right, the console and the profiler below, the viewport in the
+        // middle.
         ed->build_layout = false;
+        ed->focus_defaults = 4U; // the windows exist from the next frame
         igDockBuilderRemoveNode(id);
         (void)igDockBuilderAddNode(id, (ImGuiDockNodeFlags)ImGuiDockNodeFlags_DockSpace);
         igDockBuilderSetNodeSize(id, vp->WorkSize);
         ImGuiID center = id;
-        const ImGuiID right = igDockBuilderSplitNode(center, ImGuiDir_Right, 0.24F, NULL, &center);
-        const ImGuiID bottom = igDockBuilderSplitNode(center, ImGuiDir_Down, 0.30F, NULL, &center);
+        const ImGuiID left = igDockBuilderSplitNode(center, ImGuiDir_Left, 0.18F, NULL, &center);
+        const ImGuiID right = igDockBuilderSplitNode(center, ImGuiDir_Right, 0.28F, NULL, &center);
+        const ImGuiID bottom = igDockBuilderSplitNode(center, ImGuiDir_Down, 0.28F, NULL, &center);
         igDockBuilderDockWindow(EDITOR_WINDOW_VIEWPORT, center);
+        igDockBuilderDockWindow(EDITOR_WINDOW_OUTLINER, left);
+        igDockBuilderDockWindow(EDITOR_WINDOW_INSPECTOR, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_STATS, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_CONSOLE, bottom);
         igDockBuilderDockWindow(EDITOR_WINDOW_PROFILER, bottom);
@@ -165,26 +300,64 @@ static void main_menu(Editor *ed)
     NphEngine *e = ed->engine;
     const bool playing = nph_engine_is_playing(e);
     if (igBeginMenu("File", true)) {
-        if (igMenuItem_Bool("New Scene", NULL, false, !playing)) {
-            const NphResult r = nph_engine_clear_scene(e);
-            if (r != NPH_RESULT_OK) {
-                NPH_LOG_ERROR(&LOG_EDITOR, "new scene: %s", nph_result_string(r));
-            }
+        if (igMenuItem_Bool("New Scene", "Ctrl+N", false, !playing)) {
+            ask_then(ed, EDITOR_PENDING_NEW);
         }
-        if (igMenuItem_Bool("Open Scene...", NULL, false, !playing)) {
-            ed->popup_request = EDITOR_POPUP_OPEN_SCENE;
+        if (igMenuItem_Bool("Open Scene...", "Ctrl+O", false, !playing)) {
+            ask_then(ed, EDITOR_PENDING_OPEN);
         }
-        if (igMenuItem_Bool("Save Scene...", "Ctrl+S", false, true)) {
+        if (igMenuItem_Bool("Save Scene", "Ctrl+S", false, true)) {
+            save(ed);
+        }
+        if (igMenuItem_Bool("Save Scene As...", "Ctrl+Shift+S", false, true)) {
             ed->popup_request = EDITOR_POPUP_SAVE_SCENE;
         }
         igSeparator();
         if (igMenuItem_Bool("Quit", NULL, false, true)) {
-            nph_engine_quit(e);
+            ask_then(ed, EDITOR_PENDING_QUIT);
+        }
+        igEndMenu();
+    }
+    if (igBeginMenu("Edit", true)) {
+        const char *u = editor_history_undo_label(ed->history);
+        const char *r = editor_history_redo_label(ed->history);
+        char label[EDITOR_HISTORY_LABEL_MAX + 8U];
+        (void)snprintf(label, sizeof label, "Undo %s", u != NULL ? u : "");
+        if (igMenuItem_Bool(label, "Ctrl+Z", false, !playing && u != NULL)) {
+            undo(ed);
+        }
+        (void)snprintf(label, sizeof label, "Redo %s", r != NULL ? r : "");
+        if (igMenuItem_Bool(label, "Ctrl+Y", false, !playing && r != NULL)) {
+            redo(ed);
+        }
+        igSeparator();
+        const bool selected = ed->selection.count > 0U;
+        if (igMenuItem_Bool("Create Entity", NULL, false, !playing)) {
+            NphEntity created = NPH_ENTITY_NULL;
+            if (editor_edit_create(ed->history, "Entity", NPH_ENTITY_NULL, NULL, &created) ==
+                NPH_RESULT_OK) {
+                editor_selection_set(&ed->selection, created);
+            }
+        }
+        if (igMenuItem_Bool("Duplicate", "Ctrl+D", false, !playing && selected)) {
+            editor_duplicate_selection(ed);
+        }
+        if (igMenuItem_Bool("Delete", "Del", false, !playing && selected)) {
+            editor_delete_selection(ed);
+        }
+        if (igMenuItem_Bool("Rename", "F2", false, !playing && selected)) {
+            editor_begin_rename(ed, ed->selection.primary);
+        }
+        igSeparator();
+        if (igMenuItem_Bool("Frame Selection", "F", false, selected)) {
+            editor_viewport_frame_selection(ed);
         }
         igEndMenu();
     }
     if (igBeginMenu("View", true)) {
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_VIEWPORT, NULL, &ed->show.viewport, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_OUTLINER, NULL, &ed->show.outliner, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_INSPECTOR, NULL, &ed->show.inspector, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
@@ -192,6 +365,8 @@ static void main_menu(Editor *ed)
         if (igMenuItem_Bool("Reset Layout", NULL, false, true)) {
             ed->build_layout = true;
             ed->show.viewport = true;
+            ed->show.outliner = true;
+            ed->show.inspector = true;
             ed->show.console = true;
             ed->show.profiler = true;
             ed->show.stats = true;
@@ -219,15 +394,6 @@ static void main_menu(Editor *ed)
     igEndMainMenuBar();
 }
 
-static NphResult open_scene(Editor *ed)
-{
-    if (!nph_fs_exists(ed->scene_path)) {
-        return NPH_RESULT_NOT_FOUND;
-    }
-    NPH_TRY(nph_engine_clear_scene(ed->engine));
-    return nph_engine_load_scene(ed->engine, ed->scene_path);
-}
-
 static void scene_popup(Editor *ed, const char *title, bool open)
 {
     if (!igBeginPopupModal(title, NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -248,9 +414,8 @@ static void scene_popup(Editor *ed, const char *title, bool open)
     const ImVec2_c button = ui_vec2(igGetFontSize() * 6.0F, 0.0F);
     if (igButton(open ? "Open" : "Save", button) || enter) {
         const NphResult r =
-            open ? open_scene(ed) : nph_engine_save_scene(ed->engine, ed->scene_path);
+            open ? editor_open_scene(ed, ed->scene_path) : editor_save_scene(ed, ed->scene_path);
         if (r == NPH_RESULT_OK) {
-            NPH_LOG_INFO(&LOG_EDITOR, "%s %s", open ? "opened" : "saved", ed->scene_path);
             igCloseCurrentPopup();
         } else {
             (void)snprintf(ed->popup_error, sizeof ed->popup_error, "%s", nph_result_string(r));
@@ -263,16 +428,56 @@ static void scene_popup(Editor *ed, const char *title, bool open)
     igEndPopup();
 }
 
+static void unsaved_popup(Editor *ed)
+{
+    if (!igBeginPopupModal("Unsaved Changes", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    igTextUnformatted("The scene has unsaved changes.", NULL);
+    const ImVec2_c button = ui_vec2(igGetFontSize() * 6.0F, 0.0F);
+    const EditorPending pending = ed->pending;
+    if (igButton("Save", button)) {
+        ed->pending = EDITOR_PENDING_NONE;
+        igCloseCurrentPopup();
+        if (ed->doc_path[0] == '\0') {
+            ed->popup_request = EDITOR_POPUP_SAVE_SCENE; // untitled: save first, then go on
+        } else if (editor_save_scene(ed, NULL) == NPH_RESULT_OK) {
+            run_pending(ed, pending);
+        }
+    }
+    igSameLine(0.0F, -1.0F);
+    if (igButton("Discard", button)) {
+        ed->pending = EDITOR_PENDING_NONE;
+        igCloseCurrentPopup();
+        run_pending(ed, pending);
+    }
+    igSameLine(0.0F, -1.0F);
+    if (igButton("Cancel", button) || igIsKeyPressed_Bool(ImGuiKey_Escape, false)) {
+        ed->pending = EDITOR_PENDING_NONE;
+        igCloseCurrentPopup();
+    }
+    igEndPopup();
+}
+
 static void scene_popups(Editor *ed)
 {
     if (ed->popup_request != EDITOR_POPUP_NONE) {
-        (void)igOpenPopup_Str(
-            ed->popup_request == EDITOR_POPUP_OPEN_SCENE ? "Open Scene" : "Save Scene", 0);
+        const char *name = "Unsaved Changes";
+        if (ed->popup_request == EDITOR_POPUP_OPEN_SCENE) {
+            name = "Open Scene";
+        } else if (ed->popup_request == EDITOR_POPUP_SAVE_SCENE) {
+            name = "Save Scene";
+            if (ed->doc_path[0] != '\0') {
+                (void)snprintf(ed->scene_path, sizeof ed->scene_path, "%s", ed->doc_path);
+            }
+        }
+        (void)igOpenPopup_Str(name, 0);
         ed->popup_error[0] = '\0';
         ed->popup_request = EDITOR_POPUP_NONE;
     }
     scene_popup(ed, "Open Scene", true);
     scene_popup(ed, "Save Scene", false);
+    unsaved_popup(ed);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,8 +486,33 @@ static void scene_popups(Editor *ed)
 
 static bool hook_event(NphEngine *e, const NphWindowEvent *ev, void *user)
 {
-    NPH_UNUSED(e);
-    return editor_feed_event((Editor *)user, ev);
+    Editor *ed = (Editor *)user;
+    // Closing the window with unsaved changes asks first.
+    if (ev->type == (u32)NPH_WINDOW_EVENT_CLOSE && ed->imgui != NULL && !ed->quit_confirmed &&
+        editor_scene_dirty(ed)) {
+        NphWindow *w = nph_engine_window(e);
+        if (w != NULL) {
+            nph_window_set_should_close(w, false);
+        }
+        ask_then(ed, EDITOR_PENDING_QUIT);
+        return true;
+    }
+    return editor_feed_event(ed, ev);
+}
+
+static void hook_world_replaced(NphEngine *e, NphWorld *old_world, NphWorld *new_world, void *user)
+{
+    NPH_UNUSED(old_world);
+    NPH_UNUSED(new_world);
+    Editor *ed = (Editor *)user;
+    // Play starting or ending swaps the world shown, not the edited one. A
+    // game reload that changed component layouts rebuilds the edited world:
+    // the history's component ids and values may no longer fit it.
+    if (ed->history != NULL && editor_history_world(ed->history) != nph_engine_edit_world(e)) {
+        NPH_LOG_INFO(&LOG_EDITOR, "the edited world was rebuilt by a game reload: the undo "
+                                  "history starts over");
+        editor_history_rebind(ed->history, nph_engine_edit_world(e));
+    }
 }
 
 static void hook_sync(NphEngine *e, void *user)
@@ -299,15 +529,34 @@ static void hook_sync(NphEngine *e, void *user)
     if (!nph_engine_is_playing(ed->engine)) {
         editor_release_game_input(ed);
     }
+    editor_selection_prune(&ed->selection, nph_engine_world(ed->engine));
     const u64 now = nph_time_now_ns();
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
     ed->last_frame_ns = now;
     igNewFrame();
     dockspace(ed);
+    if (ed->focus_defaults > 0U) {
+        // A dock node shows the tab of the window with the keyboard focus,
+        // and one window has it per frame: the inspector, then the console,
+        // then the viewport (which keeps it), a frame each, before the
+        // panels draw their tabs.
+        static const char *const order[3] = {EDITOR_WINDOW_VIEWPORT, EDITOR_WINDOW_CONSOLE,
+                                             EDITOR_WINDOW_INSPECTOR};
+        --ed->focus_defaults;
+        if (ed->focus_defaults < 3U) {
+            igSetWindowFocus_Str(order[ed->focus_defaults]);
+        }
+    }
     main_menu(ed);
     shortcuts(ed);
     if (ed->show.viewport) {
         editor_panel_viewport(ed);
+    }
+    if (ed->show.outliner) {
+        editor_panel_outliner(ed);
+    }
+    if (ed->show.inspector) {
+        editor_panel_inspector(ed);
     }
     if (ed->show.console) {
         editor_panel_console(ed);
@@ -328,6 +577,7 @@ static void hook_sync(NphEngine *e, void *user)
 #endif
     scene_popups(ed);
     editor_viewport_apply_view(ed);
+    editor_update_title(ed);
     igRender();
     NPH_PROFILE_END();
 }
@@ -377,6 +627,7 @@ void editor_engine_hooks(Editor *ed, NphEngineHooks *out)
     out->sync = hook_sync;
     out->scene_target = hook_scene_target;
     out->render = hook_render;
+    out->world_replaced = hook_world_replaced;
 }
 
 bool editor_feed_event(Editor *ed, const NphWindowEvent *ev)
@@ -423,6 +674,8 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
     ed->show.viewport = true;
+    ed->show.outliner = true;
+    ed->show.inspector = true;
     ed->show.console = true;
     ed->show.profiler = true;
     ed->show.stats = true;
@@ -505,6 +758,12 @@ static NphResult attach(Editor *ed, NphEngine *e)
     NPH_TRY(ui_renderer_create(ed->dev, ed->alloc, ed->shader_dir, format, &ed->renderer));
     NPH_TRY(editor_console_init(ed));
     NPH_TRY(editor_profiler_panel_init(ed));
+    EditorHistoryDesc hd;
+    memset(&hd, 0, sizeof hd);
+    hd.alloc = ed->alloc;
+    hd.world = nph_engine_edit_world(e);
+    NPH_TRY(editor_history_create(&hd, &ed->history));
+    ed->doc_saved_state = editor_history_state(ed->history);
     NphProfiler *prof = nph_engine_profiler(e);
     if (prof != NULL && nph_profiler_track_memory(prof, &ed->imgui_memory) == NPH_RESULT_OK) {
         ed->imgui_memory_tracked = true;
@@ -564,6 +823,10 @@ void editor_detach(Editor *ed)
     editor_viewport_free(ed);
     editor_console_free(ed);
     editor_profiler_panel_free(ed);
+    // Before the edited world goes: the history releases what it kept.
+    editor_history_destroy(ed->history);
+    ed->history = NULL;
+    editor_selection_clear(&ed->selection);
     if (ed->cvars_registered) {
         (void)nph_cvar_unregister(nph_engine_cvars(e), &ed->cv_layout);
         ed->cvars_registered = false;
