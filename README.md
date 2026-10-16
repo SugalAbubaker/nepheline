@@ -75,6 +75,15 @@ nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
            --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
 ```
 
+The editor ([`docs/editor.md`](docs/editor.md)) opens the same content in a
+docked Dear ImGui interface: a viewport with an orbit and fly camera, Play
+(F5) on a copy of the scene, the console, the profiler's timeline, and the
+statistics with every cvar:
+
+```sh
+nph_editor --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
+```
+
 ## Repository layout
 
 ```
@@ -85,6 +94,7 @@ engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, t
 tools/ntest/    the Nepheline test framework
 tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
 tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_flip tool
+editor/         nph_editor: the editor's shell, Dear ImGui backends on the window and the RHI, panels, tests
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
 samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and game_sandbox, a game module; samples/common/ holds the cooked-scene bridge and BMP capture they share
@@ -92,7 +102,7 @@ tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed co
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
 scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, fuzz_seeds_scene.py, nph_hash64.py, runner/install.ps1 + loop.ps1
-third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb), each wrapped by exactly one module or tool
+third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb, cimgui with Dear ImGui), each wrapped by exactly one module or tool
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
 ```
@@ -116,6 +126,7 @@ Modules depend strictly left-to-right:
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
 - [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
+- [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records

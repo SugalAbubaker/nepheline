@@ -104,6 +104,12 @@ add_subdirectory(tools/cook)
 # the nph_flip comparison tool.
 add_subdirectory(tools/golden)
 
+# The editor (CLAUDE.md §8.13): an executable over the engine's shared
+# library.
+if(NPH_BUILD_EDITOR)
+    add_subdirectory(editor)
+endif()
+
 # Tests that span modules and tools (the cooker against the runtime and
 # the GPU).
 if(NPH_BUILD_TESTS)

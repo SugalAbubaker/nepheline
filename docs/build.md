@@ -14,7 +14,7 @@ in [ADR-0003](adr/0003-build-configurations.md).
 | Python | 3.9+ (format/tidy scripts only) | 3.9+ |
 | Assembler | MASM (`ml64`, part of the MSVC toolset) for the fiber context switch | the GNU assembler via the C compiler driver |
 | Window system | nothing extra | `libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev` to build GLFW; `xvfb` to run the window tests headless |
-| Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, VMA, and the cooker's cgltf and stb live in `third_party/`) | same |
+| Submodules | `git submodule update --init --recursive` after cloning (GLFW, Vulkan-Headers, volk, VMA, the cooker's cgltf and stb, and the editor's cimgui with its own Dear ImGui submodule live in `third_party/`) | same |
 | Vulkan | the LunarG SDK (1.4.321 is the pinned reference; `scripts/install_vulkan_sdk.ps1 -Version 1.4.321.1` installs it unattended): `glslc` for the shader build, the validation layers for Debug and Development, and the loader | `glslc` and `libvulkan1`; the validation layer for Debug and Development, from the pinned SDK (`scripts/install_vulkan_layer.sh 1.4.321.1`, then `VK_LAYER_PATH=~/vulkan-sdk/share/vulkan/explicit_layer.d`; Ubuntu 24.04's `vulkan-validationlayers` is 1.3.275 and crashes on lavapipe); `mesa-vulkan-drivers` for lavapipe, the software driver the GPU tests run on without a GPU |
 | git-lfs | required from Phase 6 (binary assets) | same |
 
@@ -85,6 +85,7 @@ target links.
 | `NPH_BUILD_TESTS` | `ON` | Build ntest and the unit tests; register them with CTest |
 | `NPH_BUILD_BENCHMARKS` | `ON` | Build nbench and the benchmarks; register a smoke run of each with CTest (label `benchmark`) |
 | `NPH_BUILD_SAMPLES` | `ON` | Build `samples/`; register each as a CTest smoke run (label `sample`) |
+| `NPH_BUILD_EDITOR` | `ON` | Build `nph_editor`, its tests, and Dear ImGui (`nph_cimgui`, C++ for the editor only); register a windowed smoke run (`editor.smoke`, label `sample`) |
 | `NPH_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets in `tests/fuzz/` (Clang only; `-fsanitize=fuzzer`). Their corpus-replay smoke tests (label `fuzz`) are built with `NPH_BUILD_TESTS` either way |
 | `NPH_WARNINGS_AS_ERRORS` | `ON` | `/WX` or `-Werror` |
 | `NPH_ASAN` | `ON` (`OFF` for clang-cl) | AddressSanitizer in Debug |
