@@ -421,7 +421,7 @@ static void list_folder(Editor *ed)
         }
     }
     nph_dir_close(&it);
-    if (a->entry_count > 1U) { // `entries` is NULL until the first
+    if (a->entries != NULL && a->entry_count > 1U) { // NULL until the first entry
         qsort(a->entries, (size_t)a->entry_count, sizeof *a->entries, compare_entries);
     }
 }
