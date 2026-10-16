@@ -12,6 +12,7 @@
 //      needed (ibl.c), the forward pass into a pre-exposed HDR target, and
 //      the tonemap pass into the caller's target with the debug lines.
 #include <nepheline/core/log.h>
+#include <nepheline/core/profile.h>
 #include <nepheline/gpu/upload.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
@@ -465,9 +466,9 @@ static bool format_is_srgb(NphGpuFormat f)
     return nph_gpu_format_info(f)->srgb != 0;
 }
 
-NphResult nph_render_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
-                           NphGpuImage target, NphGpuRgImage *out_target,
-                           NphRenderFrameStats *out_stats)
+static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
+                              NphGpuImage target, NphGpuRgImage *out_target,
+                              NphRenderFrameStats *out_stats)
 {
     NPH_ASSERT(r != NULL && view != NULL && graph != NULL);
     NphRenderFrameStats stats;
@@ -646,4 +647,14 @@ NphResult nph_render_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         *out_stats = stats;
     }
     return NPH_RESULT_OK;
+}
+
+NphResult nph_render_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
+                           NphGpuImage target, NphGpuRgImage *out_target,
+                           NphRenderFrameStats *out_stats)
+{
+    NPH_PROFILE_BEGIN("render.frame");
+    const NphResult result = render_frame(r, view, graph, target, out_target, out_stats);
+    NPH_PROFILE_END();
+    return result;
 }

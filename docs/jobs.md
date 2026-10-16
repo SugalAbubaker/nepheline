@@ -287,6 +287,16 @@ priority), so a scheduling-dependent bug can be replayed. I/O threads
 still run concurrently. The tests check that two runs of a
 spawn-and-wait tree produce the same trace.
 
+## Profiling
+
+Every job is a profiler zone named by its declaration (`NphJobDecl.name`;
+`parallel_for` pieces are named `parallel_for`), workers and I/O threads
+are timeline lanes (`job-worker-N`, `job-io-N`), and every fiber switch is
+reported, so the collector follows a job that parks on one worker and
+resumes on another ([profile.md](profile.md), ADR-0022). Without an
+initialised profiler each of these costs a function call and one relaxed
+load.
+
 ## Statistics
 
 `nph_job_system_get_stats` sums per-thread counters that each thread

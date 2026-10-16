@@ -399,6 +399,16 @@ despawns what was created, and `NphSceneResult::error` says what was
 wrong and where. Both accept exactly the same states; the fuzz targets
 require an accepted file to reach a fixed point through both formats.
 
+## Profiling
+
+A schedule run is the profiler zone `scene.schedule`; each system run on
+the calling thread (main-thread and exclusive systems, or a schedule
+without a job system) is a zone of its own name, systems launched as jobs
+are named by their job, and each chunk piece of a `run_chunk` system is a
+zone of its system's name ([profile.md](profile.md)). System names belong
+to the schedule: code that destroys a schedule while the profiler runs
+calls `nph_profiler_forget_names` first.
+
 ## Threading model
 
 | What | Rule |
