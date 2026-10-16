@@ -33,6 +33,18 @@ NPH_MUST_USE NphResult editor_edit_delete(EditorHistory *h, const NphEntity *ent
 NPH_MUST_USE NphResult editor_edit_duplicate(EditorHistory *h, const NphEntity *entities, u32 count,
                                              NphEntity *out);
 
+// Copies `root` of another world and everything under it into the
+// history's world, as one step labelled `label`, under `parent` (null: a
+// root); how an imported scene arrives (docs/editor.md "Assets"). `src`
+// must have the history world's components (a world made with
+// NphWorldDesc.registry_from). References (ENTITY fields) to entities of
+// the copied subtree point at their copies, and references to anything
+// else become null: `src`'s handles mean nothing in the history's world.
+// `out` receives the copy of `root`. NPH_RESULT_NOT_FOUND when `root` is
+// not alive in `src`, or `parent` in the history's world.
+NPH_MUST_USE NphResult editor_edit_paste(EditorHistory *h, const NphWorld *src, NphEntity root,
+                                         NphEntity parent, const char *label, NphEntity *out);
+
 // Renames (adding a Name when missing).
 NPH_MUST_USE NphResult editor_edit_rename(EditorHistory *h, NphEntity e, const char *name);
 
