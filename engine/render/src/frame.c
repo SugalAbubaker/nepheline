@@ -526,7 +526,11 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u visible draws past max_draws (%u) were dropped",
                      r->name, stats.dropped, r->desc.max_draws);
     }
-    render_debug_begin_frame(r);
+    // Lines closed by this frame's nph_render_debug_flip, or everything
+    // added so far.
+    if (r->debug_flip_frame != nph_gpu_frame_index(r->dev) + 1U) {
+        render_debug_begin_frame(r);
+    }
     stats.lights = light_count;
     stats.debug_lines = r->debug_draw_counts[0] + r->debug_draw_counts[1];
 

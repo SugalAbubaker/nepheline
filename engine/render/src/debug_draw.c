@@ -3,8 +3,9 @@
 // upload buffers holds two lists of `debug_lines` lines: the depth-tested
 // list from vertex 0, the overlay list from vertex 2 * debug_lines. Adding
 // a line reserves its slot with one atomic add on the list's counter and
-// writes straight into the mapped buffer; nph_render_frame freezes the
-// counts and moves the writers to the next buffer.
+// writes straight into the mapped buffer; nph_render_frame (or, in a
+// pipelined frame loop, nph_render_debug_flip) freezes the counts and
+// moves the writers to the next buffer.
 #include <nepheline/core/log.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
@@ -52,6 +53,24 @@ void render_debug_begin_frame(NphRenderer *r)
     // The next buffer was last read by the frame RENDER_DEBUG_BUFFERS - 1
     // ago, which has completed: frame_begin waited for it.
     r->debug_write = (r->debug_write + 1U) % RENDER_DEBUG_BUFFERS;
+}
+
+void nph_render_debug_flip(NphRenderer *r)
+{
+    NPH_ASSERT(r != NULL);
+    if (!nph_gpu_frame_is_active(r->dev)) {
+        NPH_ASSERT_MSG(false, "nph_render_debug_flip belongs inside a frame");
+        return;
+    }
+    const u64 frame = nph_gpu_frame_index(r->dev) + 1U;
+    if (r->debug_flip_frame == frame) {
+        // A second rotation would hand the writers the buffer the previous
+        // frame may still be drawing from.
+        NPH_ASSERT_MSG(false, "nph_render_debug_flip called twice in one frame");
+        return;
+    }
+    render_debug_begin_frame(r);
+    r->debug_flip_frame = frame;
 }
 
 void nph_render_debug_set_origin(NphRenderer *r, NphDVec3 origin)

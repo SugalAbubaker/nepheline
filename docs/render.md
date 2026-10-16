@@ -195,6 +195,13 @@ so the buffer being written is never one the GPU is reading. Coordinates
 are relative to a 64-bit debug origin. Each of the two lists (depth-tested,
 overlay) holds `debug_lines` lines; extra lines are dropped and counted.
 
+A frame loop that lets jobs draw lines while it renders (the runtime's
+pipelined loop runs the simulation of frame N + 1 during frame N's
+submission) closes the list with `nph_render_debug_flip` at its sync
+point, after `nph_gpu_frame_begin`: lines added after the flip go to the
+next frame, and the writers move to the buffer of frame N − 2, which
+`nph_gpu_frame_begin` has already waited for.
+
 ## GPU profiler
 
 `NphRenderGpuProfiler` reads `nph_gpu_rg_timings` every frame and keeps a

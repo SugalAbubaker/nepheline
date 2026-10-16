@@ -16,14 +16,22 @@
 // full precision (CLAUDE.md §8.2).
 //
 // Storage: three buffers of NphRendererDesc.debug_lines lines per list,
-// persistently mapped, rotated by nph_render_frame so the one being
-// written is never read by a frame in flight. A line past the capacity is
-// dropped (counted in NphRenderFrameStats.debug_lines as the capacity).
+// persistently mapped, rotated once per frame so the one being written is
+// never read by a frame in flight. A line past the capacity is dropped
+// (counted in NphRenderFrameStats.debug_lines as the capacity).
+//
+// Rotation: by default nph_render_frame closes the lines added so far and
+// draws them. A frame loop that lets jobs keep drawing while a frame is
+// being rendered (the runtime's pipelined loop: the simulation of frame
+// N + 1 runs while frame N is submitted) closes the list itself with
+// nph_render_debug_flip at its sync point; lines added after the flip are
+// drawn by the next frame.
 //
 // Thread-safety: the line functions are NPH_THREADSAFE (a slot is
-// reserved with one atomic add) and may be called from job workers, but
-// not while nph_render_frame runs. nph_render_debug_set_origin is
-// NPH_MAIN_THREAD_ONLY and applies to the lines added after it.
+// reserved with one atomic add) and may be called from job workers at any
+// time except during the rotation: nph_render_frame without a flip, or
+// nph_render_debug_flip. nph_render_debug_set_origin and the flip are
+// NPH_MAIN_THREAD_ONLY; the origin applies to the lines added after it.
 
 #include <nepheline/math/affine.h>
 #include <nepheline/render/renderer.h>
@@ -82,6 +90,14 @@ void nph_render_debug_frustum(NphRenderer *r, const NphRenderCamera *camera, f32
 
 // Lines added so far for the next frame, in both lists.
 u32 nph_render_debug_line_count(const NphRenderer *r);
+
+// Closes the lines added so far (and the current origin) for this frame's
+// nph_render_frame, and starts an empty list for the next frame. Once per
+// frame, after nph_gpu_frame_begin (which guarantees that the buffer the
+// writers move to is no longer read by the GPU) and before
+// nph_render_frame, while no job draws. A second call in one frame is
+// asserted in development and ignored.
+void nph_render_debug_flip(NphRenderer *r);
 
 #ifdef __cplusplus
 }

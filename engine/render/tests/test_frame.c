@@ -927,6 +927,50 @@ NTEST_F(Frame, debug_lines_draw_over_the_image)
     NTEST_EXPECT_EQ_UINT(test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U)[1], 0U);
 }
 
+// The pipelined loop's protocol: lines added after the flip belong to the
+// next frame, even though they are added before this frame renders.
+NTEST_F(Frame, a_flip_closes_the_lines_for_this_frame)
+{
+    REQUIRE_RENDERER(f);
+    NphRenderView v;
+    plain_view(&v);
+    const NphVec3 a = nph_vec3(-5.0F, 0.0F, 0.0F);
+    const NphVec3 b = nph_vec3(5.0F, 0.0F, 0.0F);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+    nph_render_debug_line(f->renderer, a, b, NPH_RENDER_RGBA(0, 255, 0, 255),
+                          NPH_RENDER_DEBUG_OVERLAY);
+    nph_render_debug_flip(f->renderer);
+    NPH_TEST_EXPECT_ASSERT(nph_render_debug_flip(f->renderer)); // once per frame
+    // After the flip: drawn by the next frame, in red.
+    nph_render_debug_line(f->renderer, a, b, NPH_RENDER_RGBA(255, 0, 0, 255),
+                          NPH_RENDER_DEBUG_OVERLAY);
+    NTEST_EXPECT_EQ_UINT(nph_render_debug_line_count(f->renderer), 1U);
+    nph_gpu_rg_begin(f->graph);
+    NphRenderFrameStats stats;
+    NTEST_ASSERT_EQ_INT(nph_render_frame(f->renderer, &v, f->graph, f->target, NULL, &stats),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(stats.debug_lines, 1U);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(f->graph), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(f->graph), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, f->target, 0U, f->pixels,
+                    (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE * 4U);
+    const u8 *mid = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U - 1U);
+    const u8 *mid2 = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U);
+    NTEST_EXPECT_TRUE((mid[1] == 255U && mid[0] == 0U) || (mid2[1] == 255U && mid2[0] == 0U));
+    // The red line is still pending and the next frame (without a flip)
+    // draws it.
+    NTEST_EXPECT_EQ_UINT(nph_render_debug_line_count(f->renderer), 1U);
+    const NphRenderFrameStats next = test_render_read(f, &v);
+    NTEST_EXPECT_EQ_UINT(next.debug_lines, 1U);
+    mid = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U - 1U);
+    mid2 = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U);
+    NTEST_EXPECT_TRUE((mid[0] == 255U && mid[1] == 0U) || (mid2[0] == 255U && mid2[1] == 0U));
+    // Outside a frame the flip is refused.
+    NPH_TEST_EXPECT_ASSERT(nph_render_debug_flip(f->renderer));
+}
+
 NTEST_F(Frame, depth_tested_lines_hide_behind_geometry)
 {
     REQUIRE_RENDERER(f);
