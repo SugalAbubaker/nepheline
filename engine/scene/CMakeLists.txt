@@ -35,6 +35,7 @@ nph_add_test(scene
         tests/test_components.c
         tests/test_prefab.c
         tests/test_query.c
+        tests/test_scene_copy.c
         tests/test_scene_io.c
         tests/test_scene_support.h
         tests/test_schedule.c

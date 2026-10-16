@@ -750,6 +750,25 @@ void nph_world_clear(NphWorld *w)
     }
 }
 
+NphResult nph_world_adopt_handles(NphWorld *dst, const NphWorld *src)
+{
+    NPH_ASSERT(dst != NULL && src != NULL && dst != src);
+    if (nph_handle_pool_live(&dst->handles) != 0U || dst->capacity != src->capacity) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    nph_world_structural_begin(dst);
+    // An empty world has no placed record (every live handle is placed or
+    // reserved, and there are none), so only the pool changes.
+    return nph_handle_pool_copy(&dst->handles, &src->handles);
+}
+
+bool nph_world_handle_reserved(const NphWorld *w, NphEntity e)
+{
+    const NphHandle h = {e.value};
+    return nph_handle_pool_is_valid(&w->handles, h) &&
+           w->records[nph_handle_pool_index(&w->handles, h)].chunk == NULL;
+}
+
 // ---------------------------------------------------------------------------
 // Entities
 // ---------------------------------------------------------------------------

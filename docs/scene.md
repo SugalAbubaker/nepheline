@@ -410,6 +410,38 @@ editor's save, reload, and play cycle depends on it.) It starts at its
 default and the transform system computes it on its next run, since the
 loaded LocalTransform columns are stamped as changed.
 
+### Copies that keep their handles
+
+Hot reload and play-in-editor (Phase 9, [runtime.md](runtime.md)) need a
+second world holding the same entities under the same handles, so that
+references held outside the world stay valid: the editor's selection and
+undo history, and game state that stores entity handles. Hot reload also
+needs it when a game's component layouts change: the new world is
+registered with the new layouts and filled from a text save of the old
+one, so fields are matched by name. The pieces:
+
+1. `nph_world_adopt_handles(dst, src)` copies the handle pool into an
+   empty world of the same capacity (`nph_handle_pool_copy`). Every live
+   handle of `src` becomes reserved in `dst`, every free slot keeps its
+   generation, and both worlds issue the same handles afterwards. A handle
+   that is stale in `src` therefore stays stale in `dst`.
+2. A save reports its file order (`NphSceneSaveDesc.out_entities`).
+3. A load given that order as `handles` places each entity at its handle
+   instead of reserving new ones. It refuses (INVALID_ARGUMENT) a count
+   that differs from the file's, a handle that is not reserved, or a
+   duplicate. The binary loader checks every handle before placing any,
+   since it places whole groups at once.
+4. `skip_unknown_components` (text) skips, with a warning, components the
+   world does not register, in "components", "overrides", and "removed"
+   alike. A game that stopped defining a component loses it rather than
+   failing the reload.
+
+A copy is only as faithful as the formats: TRANSIENT data loads at its
+defaults (WorldTransform is recomputed). Prefab instances are written in
+full when the save has no resolver, so a copy does not depend on the
+prefab library. On a failed load in this mode the world has released the
+handles it placed, so it is discarded, as copies always are on failure.
+
 ## Profiling
 
 A schedule run is the profiler zone `scene.schedule`; each system run on
@@ -484,7 +516,7 @@ scenes outgrow it.
 
 ## Testing
 
-`engine/scene/tests/` (70 tests):
+`engine/scene/tests/` (74 tests):
 
 - Component generators, descriptor validation, field comparison and
   hashing, layout hashes, and text truncation at UTF-8 boundaries.
@@ -512,7 +544,14 @@ scenes outgrow it.
 - Scene files: byte-identical round trips, the exact text form, subsets,
   every field kind and its accepted spellings, 25 malformed files with
   their errors and rollback, binary round trips, every single-byte
-  corruption, version and layout mismatches, and capacity.
+  corruption, version and layout mismatches, and capacity. Loaded
+  entities get their WorldTransform back in both formats.
+- Copies (`test_scene_copy.c`): both formats keep live handles,
+  references, the hierarchy, and stale handles, and then issue the same
+  handles as the original. Adoption refuses a non-empty world or another
+  capacity, and loads refuse a short handle list, an unreserved, null, or
+  duplicate handle. Unknown components are skipped in every section of
+  an instance when asked, and fail the load otherwise.
 - Prefabs: instantiation, internal references, instance differences,
   prefab changes reaching instances, full instances, and errors.
 

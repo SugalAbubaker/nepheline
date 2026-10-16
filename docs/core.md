@@ -287,6 +287,10 @@ control bytes.
 (1–28 bits). Generations start at 1 and wrap to 1, so zero is never valid;
 released indices queue in a FIFO and are reused only after
 `min_free_before_reuse` other releases. The pool stores no payload.
+`nph_handle_pool_copy` copies one pool's state into another of the same
+shape: the same live and stale handles, and the same handles issued
+afterwards. Scene worlds use it for copies that keep their entity
+handles (hot reload, play-in-editor; [scene.md](scene.md)).
 
 **Rings.** Both copy fixed-size elements by value and never allocate after
 init. SPSC keeps the producer's and consumer's positions on separate cache

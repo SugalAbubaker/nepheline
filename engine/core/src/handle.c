@@ -84,6 +84,26 @@ bool nph_handle_pool_is_valid(const NphHandlePool *pool, NphHandle h)
     return index < pool->bump && pool->generations[index] == generation;
 }
 
+NphResult nph_handle_pool_copy(NphHandlePool *dst, const NphHandlePool *src)
+{
+    NPH_ASSERT(dst != NULL && src != NULL);
+    if (dst->capacity != src->capacity || dst->index_bits != src->index_bits) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    memcpy(dst->generations, src->generations, sizeof(u32) * src->capacity);
+    // Only the queued part of the ring holds slot indices; it is unrolled
+    // to the start of dst's ring.
+    for (u32 i = 0; i < src->free_count; ++i) {
+        dst->free_queue[i] = src->free_queue[(src->free_head + i) % src->capacity];
+    }
+    dst->free_head = 0U;
+    dst->free_count = src->free_count;
+    dst->bump = src->bump;
+    dst->live = src->live;
+    dst->min_free_before_reuse = src->min_free_before_reuse;
+    return NPH_RESULT_OK;
+}
+
 bool nph_handle_pool_release(NphHandlePool *pool, NphHandle h)
 {
     NPH_ASSERT(pool != NULL);

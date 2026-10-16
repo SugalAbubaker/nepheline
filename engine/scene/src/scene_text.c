@@ -505,6 +505,10 @@ NphResult nph_scene_save_text(const NphWorld *w, const NphSceneSaveDesc *desc, N
         if (result != NULL) {
             result->entity_count = r == NPH_RESULT_OK ? s->set.count : 0U;
         }
+        if (r == NPH_RESULT_OK && d.out_entities != NULL && s->set.count > 0U) {
+            memcpy(d.out_entities, s->set.order,
+                   sizeof(NphEntity) * nph_min_u32(s->set.count, d.out_capacity));
+        }
         nph_saveset_free(&s->set);
     }
     if (r != NPH_RESULT_OK) {
@@ -542,8 +546,11 @@ typedef struct Loader {
     EntityIn *in;
     NphEntity *created;
     u32 n;
-    NphHashMap ids;  // file id -> index
-    NphHashMap inst; // (root index << 32 | prefab index) -> index
+    NphHashMap ids;           // file id -> index
+    NphHashMap inst;          // (root index << 32 | prefab index) -> index
+    const NphEntity *handles; // the caller's handles (NphSceneLoadDesc.handles), or NULL
+    u32 handle_count;
+    bool skip_unknown; // NphSceneLoadDesc.skip_unknown_components
 } Loader;
 
 NPH_PRINTF_LIKE(3, 4)
@@ -982,6 +989,12 @@ static NphResult parse_entities(Loader *l, const NphJsonValue *list)
     return NPH_RESULT_OK;
 }
 
+static void skipped_component(const EntityIn *in, NphStr name)
+{
+    NPH_LOG_WARN(&NPH_LOG_SCENE, "entity %u: unknown component '%.*s'; skipped", in->id,
+                 NPH_STR_ARG(nph_str_prefix(name, 64U)));
+}
+
 // The component set of entity `i`, and spawning it.
 static NphResult spawn_entity(Loader *l, u32 i)
 {
@@ -1012,6 +1025,10 @@ static NphResult spawn_entity(Loader *l, u32 i)
                 const NphComponentId id = item->type == NPH_JSON_STRING
                                               ? nph_world_find_component(w, item->string)
                                               : NPH_COMPONENT_NONE;
+                if (id == NPH_COMPONENT_NONE && item->type == NPH_JSON_STRING && l->skip_unknown) {
+                    skipped_component(in, item->string);
+                    continue;
+                }
                 if (id == NPH_COMPONENT_NONE || !listed_component(w, id)) {
                     return fail(l, NPH_RESULT_NOT_FOUND,
                                 "entity %u: \"removed\" names an unknown component", in->id);
@@ -1038,6 +1055,10 @@ static NphResult spawn_entity(Loader *l, u32 i)
         NPH_JSON_FOREACH(member, comps)
         {
             const NphComponentId id = nph_world_find_component(w, member->key);
+            if (id == NPH_COMPONENT_NONE && l->skip_unknown) {
+                skipped_component(in, member->key);
+                continue;
+            }
             if (id == NPH_COMPONENT_NONE) {
                 return fail(l, NPH_RESULT_NOT_FOUND, "entity %u: unknown component '%.*s'", in->id,
                             NPH_STR_ARG(member->key));
@@ -1063,6 +1084,10 @@ static NphResult spawn_entity(Loader *l, u32 i)
         NPH_JSON_FOREACH(member, overrides)
         {
             const NphComponentId id = nph_world_find_component(w, member->key);
+            if (id == NPH_COMPONENT_NONE && l->skip_unknown) {
+                skipped_component(in, member->key);
+                continue;
+            }
             if (id == NPH_COMPONENT_NONE || !listed_component(w, id) || !nph_mask_test(&mask, id)) {
                 return fail(l, NPH_RESULT_PARSE_ERROR,
                             "entity %u: override of '%.*s', which the instance does not have",
@@ -1084,6 +1109,20 @@ static NphResult spawn_entity(Loader *l, u32 i)
         if (nph_mask_test(&mask, id)) {
             ids[count++] = id;
         }
+    }
+    if (l->handles != NULL) {
+        // A duplicate is caught here too: its first use placed it.
+        const NphEntity h = l->handles[i];
+        if (!nph_world_handle_reserved(w, h)) {
+            return fail(l, NPH_RESULT_INVALID_ARGUMENT,
+                        "entity %u: handle 0x%08x is not reserved in the world", in->id, h.value);
+        }
+        const NphResult r = nph_world_place(w, ids, count, 1U, &h);
+        if (r != NPH_RESULT_OK) {
+            return fail(l, r, "entity %u: %s", in->id, nph_result_string(r));
+        }
+        l->created[i] = h;
+        return NPH_RESULT_OK;
     }
     const NphResult r = nph_world_spawn(w, ids, count, &l->created[i]);
     if (r != NPH_RESULT_OK) {
@@ -1148,6 +1187,9 @@ static NphResult fill_entity(Loader *l, u32 i)
         NPH_JSON_FOREACH(member, comps)
         {
             const NphComponentId id = nph_world_find_component(w, member->key);
+            if (id == NPH_COMPONENT_NONE) {
+                continue; // skipped (skip_unknown_components)
+            }
             const NphComponentDesc *d = w->components[id].desc;
             if (d->size == 0U) {
                 continue;
@@ -1163,6 +1205,9 @@ static NphResult fill_entity(Loader *l, u32 i)
         NPH_JSON_FOREACH(member, overrides)
         {
             const NphComponentId id = nph_world_find_component(w, member->key);
+            if (id == NPH_COMPONENT_NONE) {
+                continue; // skipped (skip_unknown_components)
+            }
             const NphComponentDesc *d = w->components[id].desc;
             if (d->size == 0U) {
                 continue;
@@ -1201,7 +1246,13 @@ static NphResult load(Loader *l, NphStr text)
         return fail(l, NPH_RESULT_PARSE_ERROR, "\"entities\" is missing or not an array");
     }
     NPH_TRY(parse_entities(l, list));
-    if ((u64)nph_world_entity_count(w) + l->n > nph_world_entity_capacity(w)) {
+    if (l->handles != NULL && l->handle_count != l->n) {
+        return fail(l, NPH_RESULT_INVALID_ARGUMENT, "%u handles for %u entities", l->handle_count,
+                    l->n);
+    }
+    // The caller's handles are reserved already.
+    if (l->handles == NULL &&
+        (u64)nph_world_entity_count(w) + l->n > nph_world_entity_capacity(w)) {
         return fail(l, NPH_RESULT_FULL, "%u entities do not fit the world", l->n);
     }
     for (u32 i = 0; i < l->n; ++i) {
@@ -1266,6 +1317,9 @@ NphResult nph_scene_load_text(NphWorld *w, NphStr text, const NphSceneLoadDesc *
     l.result = result;
     l.resolve = d.resolve;
     l.resolve_user = d.resolve_user;
+    l.handles = d.handles;
+    l.handle_count = d.handle_count;
+    l.skip_unknown = d.skip_unknown_components != 0;
     const NphHashMapDesc map = nph_hashmap_desc_u64(sizeof(u32));
     NphResult r = nph_hashmap_init(&l.ids, l.scratch, &map);
     if (r == NPH_RESULT_OK) {

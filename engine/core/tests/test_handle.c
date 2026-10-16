@@ -125,6 +125,52 @@ NTEST(handle, init_rejects_bad_parameters)
     nph_handle_pool_free(&pool);
 }
 
+NTEST_F(HandleFixture, a_copy_keeps_live_stale_and_future_handles)
+{
+    NphHandle h[12];
+    for (u32 i = 0; i < 12U; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_handle_pool_alloc(&f->pool, &h[i]), NPH_RESULT_OK);
+    }
+    // Released slots queue for reuse and the oldest comes back, so the
+    // source's free ring no longer starts at its first entry.
+    for (u32 i = 0; i < 6U; ++i) {
+        NTEST_ASSERT_TRUE(nph_handle_pool_release(&f->pool, h[i]));
+    }
+    NphHandle again;
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_alloc(&f->pool, &again), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(nph_handle_pool_index(&f->pool, again), 0U);
+    NphHandlePool copy;
+    NTEST_ASSERT_EQ_INT(
+        nph_handle_pool_init(&copy, nph_debug_allocator_allocator(&f->da), 100U, 8U, 4U),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_copy(&copy, &f->pool), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(nph_handle_pool_live(&copy), nph_handle_pool_live(&f->pool));
+    for (u32 i = 0; i < 12U; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_handle_pool_is_valid(&copy, h[i]),
+                            nph_handle_pool_is_valid(&f->pool, h[i]));
+    }
+    NTEST_ASSERT_TRUE(nph_handle_pool_is_valid(&copy, again));
+    // Both issue the same handles from here on.
+    for (u32 i = 0; i < 20U; ++i) {
+        NphHandle a;
+        NphHandle b;
+        NTEST_ASSERT_EQ_INT(nph_handle_pool_alloc(&f->pool, &a), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_handle_pool_alloc(&copy, &b), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(a.value, b.value);
+    }
+    nph_handle_pool_free(&copy);
+    // Pools of another shape are refused.
+    NphHandlePool other;
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_init(&other, nph_allocator_system(), 100U, 9U, 4U),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_copy(&other, &f->pool), NPH_RESULT_INVALID_ARGUMENT);
+    nph_handle_pool_free(&other);
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_init(&other, nph_allocator_system(), 99U, 8U, 4U),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_handle_pool_copy(&other, &f->pool), NPH_RESULT_INVALID_ARGUMENT);
+    nph_handle_pool_free(&other);
+}
+
 NTEST(handle, randomized_use_matches_a_reference)
 {
     NphHandlePool pool;
