@@ -152,9 +152,12 @@ the editor's Dear ImGui font atlas, which grows glyph by glyph
 (ADR-0025).
 - Compressed formats need block-aligned rectangles. A rectangle may end
   at the mip's edge with a partial block.
-- The image must not be exclusive (an attachment): its acquiring
-  transition discards the contents a partial upload has to keep, so
-  such images are refused.
+- An exclusive image (an attachment) is refused when the transfer queue
+  has a family of its own. Taking the image from its owner would
+  discard the contents a partial upload has to keep. On a device with one
+  queue family (lavapipe) every image is exclusive, nothing changes
+  owner, and region uploads keep the rest of the mip there too. The
+  Linux CI found the font atlas refused.
 
 ## Shaders and pipelines
 
