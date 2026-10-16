@@ -334,6 +334,68 @@ NTEST_F(CookFixture, source_keys_are_relative_to_the_root)
     cooker_destroy(c);
 }
 
+NTEST(cooker, canonical_and_relative_paths)
+{
+    char cwd[1024];
+    NTEST_ASSERT_EQ_INT(nph_fs_current_directory(cwd, sizeof cwd, NULL), NPH_RESULT_OK);
+    char cwd_canonical[1024];
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path(cwd, cwd_canonical, sizeof cwd_canonical),
+                        NPH_RESULT_OK);
+    char out[1200];
+    char expected[1200];
+    // Relative paths start at the working directory; "." and ".." go.
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path("a/./b/../c/", out, sizeof out), NPH_RESULT_OK);
+    snprintf(expected, sizeof expected, "%s/a/c", cwd_canonical);
+    NTEST_EXPECT_EQ_STR(out, expected);
+#if NPH_PLATFORM_WINDOWS
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path("C:\\x\\..\\..\\y\\", out, sizeof out),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "C:/y"); // ".." stops at the drive
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path("C:\\", out, sizeof out), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "C:/");
+#else
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path("/x/../../y/", out, sizeof out), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "/y");
+    NTEST_ASSERT_EQ_INT(cooker_canonical_path("/", out, sizeof out), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "/");
+#endif
+    char tiny[4];
+    NTEST_EXPECT_EQ_INT(cooker_canonical_path("abcdef", tiny, sizeof tiny), NPH_RESULT_OVERFLOW);
+
+    // What each kind of file is, by its extension in any case.
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("a/b.gltf"), COOKER_SOURCE_SCENE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("B.GLB"), COOKER_SOURCE_SCENE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("c.Png"), COOKER_SOURCE_IMAGE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("sky.hdr"), COOKER_SOURCE_IMAGE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("d.jpeg"), COOKER_SOURCE_IMAGE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("buffer.bin"), COOKER_SOURCE_NONE);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("gltf"), COOKER_SOURCE_NONE);
+
+    // Below a root, the root itself, and the paths that are not below it.
+    NTEST_ASSERT_EQ_INT(cooker_relative_path("/p/assets", "/p/assets/m/a.gltf", out, sizeof out),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "m/a.gltf");
+    NTEST_ASSERT_EQ_INT(cooker_relative_path("/p/assets", "/p/assets", out, sizeof out),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "");
+    NTEST_ASSERT_EQ_INT(cooker_relative_path("/", "/p/a.gltf", out, sizeof out), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "p/a.gltf");
+    NTEST_EXPECT_EQ_INT(cooker_relative_path("/p/assets", "/p/assets2/a.gltf", out, sizeof out),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(cooker_relative_path("/p/assets", "/p", out, sizeof out),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(cooker_relative_path("/p/assets", "/p/assets/abcd", tiny, sizeof tiny),
+                        NPH_RESULT_OVERFLOW);
+#if NPH_PLATFORM_WINDOWS
+    NTEST_ASSERT_EQ_INT(cooker_relative_path("C:/P/Assets", "c:/p/assets/A.gltf", out, sizeof out),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(out, "A.gltf"); // the spelling given
+#else
+    NTEST_EXPECT_EQ_INT(cooker_relative_path("/P/Assets", "/p/assets/a.gltf", out, sizeof out),
+                        NPH_RESULT_INVALID_ARGUMENT);
+#endif
+}
+
 NTEST_F(CookFixture, a_packed_occlusion_map_shares_the_metallic_roughness_texture)
 {
     // glTF's "ORM" packing: one image for occlusion (R), roughness (G),

@@ -198,6 +198,115 @@ NTEST(gltf, loads_external_buffers_and_images)
     test_temp_dir_remove(&dir);
 }
 
+// ---------------------------------------------------------------------------
+// The files a document names
+// ---------------------------------------------------------------------------
+
+typedef struct FileNames {
+    char names[8][256];
+    u32 count;
+} FileNames;
+
+static void collect_file(void *user, const char *relative_path)
+{
+    FileNames *f = (FileNames *)user;
+    NTEST_ASSERT_LT_UINT(f->count, 8U);
+    snprintf(f->names[f->count++], sizeof f->names[0], "%s", relative_path);
+}
+
+static NphResult files_of_text(const TempDir *dir, const char *name, const char *json,
+                               FileNames *out)
+{
+    char path[1200];
+    test_path_in(dir, name, path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, json, strlen(json)), NPH_RESULT_OK);
+    memset(out, 0, sizeof *out);
+    return cook_gltf_files(nph_allocator_system(), path, collect_file, out);
+}
+
+NTEST(gltf, lists_the_files_a_document_names)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    TempDir dir;
+    test_temp_dir_make(&dir, "gltf_files");
+    char path[1200];
+    FileNames f;
+    // The generated scenes: external buffer and base colour, the normal map
+    // a data URI; then everything embedded.
+    test_write_gltf(&dir, "ext", true);
+    memset(&f, 0, sizeof f);
+    NTEST_ASSERT_EQ_INT(
+        cook_gltf_files(alloc, test_path_in(&dir, "ext.gltf", path, sizeof path), collect_file, &f),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(f.count, 2U);
+    NTEST_EXPECT_EQ_STR(f.names[0], "ext.bin");
+    NTEST_EXPECT_EQ_STR(f.names[1], "ext_base.tga");
+    test_write_gltf(&dir, "emb", false);
+    memset(&f, 0, sizeof f);
+    NTEST_ASSERT_EQ_INT(
+        cook_gltf_files(alloc, test_path_in(&dir, "emb.gltf", path, sizeof path), collect_file, &f),
+        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f.count, 0U);
+
+    // Decoded, normalised, and each once; the files need not exist.
+    NTEST_ASSERT_EQ_INT(
+        files_of_text(&dir, "uris.gltf",
+                      "{\"asset\":{\"version\":\"2.0\"},"
+                      "\"buffers\":[{\"byteLength\":4,\"uri\":\"a%20b.bin\"}],"
+                      "\"images\":[{\"uri\":\"./tex/../tex/c.png\"},{\"uri\":\"tex//c.png\"},"
+                      "{\"uri\":\"tex/d%C3%A9.png\"}]}",
+                      &f),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(f.count, 3U);
+    NTEST_EXPECT_EQ_STR(f.names[0], "a b.bin");
+    NTEST_EXPECT_EQ_STR(f.names[1], "tex/c.png");
+    NTEST_EXPECT_EQ_STR(f.names[2], "tex/d\xC3\xA9.png");
+
+    // What a copy beside the document could not keep.
+    static const char *const refused[] = {"../up.png", "a/../../up.png", "/abs.png", "C:/abs.png",
+                                          "https://example.com/x.png"};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(refused); ++i) {
+        char json[512];
+        snprintf(json, sizeof json,
+                 "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"ok.png\"},"
+                 "{\"uri\":\"%s\"}]}",
+                 refused[i]);
+        NTEST_EXPECT_EQ_INT(files_of_text(&dir, "refused.gltf", json, &f), NPH_RESULT_UNSUPPORTED);
+    }
+
+    // A GLB: its binary chunk is no file, its external image is.
+    static const char glb_json[] = "{\"asset\":{\"version\":\"2.0\"},"
+                                   "\"buffers\":[{\"byteLength\":4}],"
+                                   "\"images\":[{\"uri\":\"skin.png\"}]}";
+    // The chunk is padded with spaces to a multiple of 4 bytes.
+    const u32 json_len = ((u32)(sizeof glb_json - 1U) + 3U) & ~3U;
+    u8 glb[512];
+    const u32 total = 12U + 8U + json_len + 8U + 4U;
+    const u32 header[3] = {0x46546C67U, 2U, total};    // "glTF", version, length
+    const u32 json_chunk[2] = {json_len, 0x4E4F534AU}; // "JSON"
+    const u32 bin_chunk[2] = {4U, 0x004E4942U};        // "BIN\0"
+    memcpy(glb, header, sizeof header);
+    memcpy(glb + 12, json_chunk, sizeof json_chunk);
+    memset(glb + 20, ' ', json_len);
+    memcpy(glb + 20, glb_json, sizeof glb_json - 1U);
+    memcpy(glb + 20U + json_len, bin_chunk, sizeof bin_chunk);
+    memset(glb + 28U + json_len, 0, 4U);
+    test_path_in(&dir, "skin.glb", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, glb, total), NPH_RESULT_OK);
+    memset(&f, 0, sizeof f);
+    NTEST_ASSERT_EQ_INT(cook_gltf_files(alloc, path, collect_file, &f), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(f.count, 1U);
+    NTEST_EXPECT_EQ_STR(f.names[0], "skin.png");
+
+    // A missing or unreadable document.
+    NTEST_EXPECT_EQ_INT(cook_gltf_files(alloc, test_path_in(&dir, "none.gltf", path, sizeof path),
+                                        collect_file, &f),
+                        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_INT(files_of_text(&dir, "bad.gltf", "{ not json", &f), NPH_RESULT_PARSE_ERROR);
+    NTEST_EXPECT_EQ_INT(files_of_text(&dir, "empty.gltf", "", &f), NPH_RESULT_PARSE_ERROR);
+    test_temp_dir_remove(&dir);
+}
+
 NTEST(gltf, rejects_bad_input)
 {
     NphAllocator *alloc = nph_allocator_system();

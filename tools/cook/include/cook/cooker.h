@@ -70,10 +70,18 @@ NPH_MUST_USE NphResult cooker_create(const CookerDesc *desc, Cooker **out);
 // Saves the database and releases the cooker. Safe on NULL.
 void cooker_destroy(Cooker *cooker);
 
-// Cooks one source by extension: .gltf and .glb as scenes, .png, .jpg,
-// .jpeg, .tga, .bmp, and .hdr as textures with the default usage (HDR for
-// .hdr). A directory is walked (cooker_cook_directory).
-// NPH_RESULT_UNSUPPORTED for another extension.
+// What the cooker makes of a source, by its extension in any case.
+typedef enum CookerSourceKind {
+    COOKER_SOURCE_NONE = 0, // not a source the cooker reads
+    COOKER_SOURCE_SCENE,    // .gltf and .glb
+    COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, and .hdr
+} CookerSourceKind;
+
+CookerSourceKind cooker_source_kind(const char *path);
+
+// Cooks one source by its kind: a scene, or an image as a texture with the
+// default usage (HDR for .hdr). A directory is walked
+// (cooker_cook_directory). NPH_RESULT_UNSUPPORTED for another extension.
 NPH_MUST_USE NphResult cooker_cook_file(Cooker *cooker, const char *source_path);
 
 // Cooks every .gltf and .glb file under `dir`, recursively, in name order
@@ -103,6 +111,19 @@ const CookDb *cooker_db(const Cooker *cooker);
 // does not fit.
 NPH_MUST_USE NphResult cooker_source_key(const Cooker *cooker, const char *path, char *out,
                                          u64 cap);
+
+// The canonical form the cooker compares paths in: absolute (a relative
+// path is taken from the working directory), '/' separators, no empty,
+// "." or ".." components, and no trailing separator. A Windows drive
+// ("C:") or UNC prefix ("//server/share") is kept as the root, which ".."
+// never climbs above. NPH_RESULT_OVERFLOW when it does not fit.
+NPH_MUST_USE NphResult cooker_canonical_path(const char *path, char *out, u64 cap);
+
+// The part of `path` below `root`, both canonical, in `out`: "" when they
+// are the same directory, NPH_RESULT_INVALID_ARGUMENT when `path` is not
+// under `root` (a sibling sharing a prefix included). Names compare
+// without case on Windows. NPH_RESULT_OVERFLOW when it does not fit.
+NPH_MUST_USE NphResult cooker_relative_path(const char *root, const char *path, char *out, u64 cap);
 
 #ifdef __cplusplus
 }

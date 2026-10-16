@@ -33,12 +33,9 @@ struct Cooker {
 // Paths
 // ---------------------------------------------------------------------------
 
-// The absolute form of `in` with '/' separators, no empty, "." or ".."
-// components, and no trailing separator. Windows drive letters ("C:") and
-// UNC prefixes ("//server/share") are kept as the root; ".." never climbs
-// above it.
-static NphResult canonical_path(const char *in, char *out, u64 cap)
+NphResult cooker_canonical_path(const char *in, char *out, u64 cap)
 {
+    NPH_ASSERT(in != NULL && out != NULL);
     char joined[COOKER_PATH_MAX * 2U];
     if (nph_path_is_absolute(nph_str_from_cstr(in))) {
         const u64 n = strlen(in);
@@ -127,33 +124,41 @@ static bool chars_equal(char a, char b)
 #endif
 }
 
-NphResult cooker_source_key(const Cooker *c, const char *path, char *out, u64 cap)
+NphResult cooker_relative_path(const char *root, const char *path, char *out, u64 cap)
 {
-    NPH_ASSERT(c != NULL && path != NULL && out != NULL && cap != 0U);
-    char abs[COOKER_PATH_MAX];
-    NPH_TRY(canonical_path(path, abs, sizeof abs));
-    const u64 rn = strlen(c->root);
-    // The root "X:/" or "/" ends in a separator; any other root does not.
-    const bool root_has_slash = rn != 0U && c->root[rn - 1U] == '/';
+    NPH_ASSERT(root != NULL && path != NULL && out != NULL && cap != 0U);
+    const u64 rn = strlen(root);
     for (u64 i = 0; i < rn; ++i) {
         // A path shorter than the root ends inside this loop.
-        if (abs[i] == '\0' || !chars_equal(abs[i], c->root[i])) {
+        if (path[i] == '\0' || !chars_equal(path[i], root[i])) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
     }
     u64 start = rn;
-    if (!root_has_slash) {
-        if (abs[rn] != '/') {
+    // The root "X:/" or "/" ends in a separator; any other root does not,
+    // and the path continues with one or ends.
+    if (path[rn] != '\0' && (rn == 0U || root[rn - 1U] != '/')) {
+        if (path[rn] != '/') {
             return NPH_RESULT_INVALID_ARGUMENT; // "/a/bc" is not under "/a/b"
         }
         start = rn + 1U;
     }
-    const u64 n = strlen(abs + start);
-    if (n == 0U || n + 1U > cap) {
-        return n == 0U ? NPH_RESULT_INVALID_ARGUMENT : NPH_RESULT_OVERFLOW;
+    const u64 n = strlen(path + start);
+    if (n + 1U > cap) {
+        return NPH_RESULT_OVERFLOW;
     }
-    memcpy(out, abs + start, (size_t)n + 1U);
+    memcpy(out, path + start, (size_t)n + 1U);
     return NPH_RESULT_OK;
+}
+
+NphResult cooker_source_key(const Cooker *c, const char *path, char *out, u64 cap)
+{
+    NPH_ASSERT(c != NULL && path != NULL && out != NULL && cap != 0U);
+    char abs[COOKER_PATH_MAX];
+    NPH_TRY(cooker_canonical_path(path, abs, sizeof abs));
+    NPH_TRY(cooker_relative_path(c->root, abs, out, cap));
+    // The root itself is no source.
+    return out[0] != '\0' ? NPH_RESULT_OK : NPH_RESULT_INVALID_ARGUMENT;
 }
 
 // Keeps letters, digits, '-', '_' and '.'; everything else becomes '_'.
@@ -251,10 +256,10 @@ NphResult cooker_create(const CookerDesc *desc, Cooker **out)
     c->force = desc->force;
     c->texture = desc->texture;
     c->mesh = desc->mesh;
-    NphResult r = canonical_path(desc->out_dir, c->out_dir, sizeof c->out_dir);
+    NphResult r = cooker_canonical_path(desc->out_dir, c->out_dir, sizeof c->out_dir);
     if (r == NPH_RESULT_OK) {
-        r = canonical_path(desc->source_root != NULL ? desc->source_root : ".", c->root,
-                           sizeof c->root);
+        r = cooker_canonical_path(desc->source_root != NULL ? desc->source_root : ".", c->root,
+                                  sizeof c->root);
     }
     if (r == NPH_RESULT_OK && (u64)snprintf(c->db_path, sizeof c->db_path, "%s/%s", c->out_dir,
                                             COOK_DB_FILE_NAME) >= sizeof c->db_path) {
@@ -927,6 +932,22 @@ static bool is_scene_file(NphStr ext)
            nph_str_equals_ignore_case(ext, NPH_STR(".glb"));
 }
 
+CookerSourceKind cooker_source_kind(const char *path)
+{
+    NPH_ASSERT(path != NULL);
+    static const char *const images[] = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".hdr"};
+    const NphStr ext = nph_path_extension(nph_str_from_cstr(path));
+    if (is_scene_file(ext)) {
+        return COOKER_SOURCE_SCENE;
+    }
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(images); ++i) {
+        if (nph_str_equals_ignore_case(ext, nph_str_from_cstr(images[i]))) {
+            return COOKER_SOURCE_IMAGE;
+        }
+    }
+    return COOKER_SOURCE_NONE;
+}
+
 NphResult cooker_cook_file(Cooker *c, const char *source_path)
 {
     NPH_ASSERT(c != NULL && source_path != NULL);
@@ -934,19 +955,17 @@ NphResult cooker_cook_file(Cooker *c, const char *source_path)
     if (nph_fs_stat(source_path, &info) == NPH_RESULT_OK && info.is_directory) {
         return cooker_cook_directory(c, source_path);
     }
-    const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
-    if (is_scene_file(ext)) {
+    switch (cooker_source_kind(source_path)) {
+    case COOKER_SOURCE_SCENE:
         return cooker_cook_gltf(c, source_path);
+    case COOKER_SOURCE_IMAGE: {
+        const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
+        return cooker_cook_image(
+            c, source_path,
+            nph_str_equals_ignore_case(ext, NPH_STR(".hdr")) ? COOK_TEXTURE_HDR : c->texture.usage);
     }
-    if (nph_str_equals_ignore_case(ext, NPH_STR(".png")) ||
-        nph_str_equals_ignore_case(ext, NPH_STR(".jpg")) ||
-        nph_str_equals_ignore_case(ext, NPH_STR(".jpeg")) ||
-        nph_str_equals_ignore_case(ext, NPH_STR(".tga")) ||
-        nph_str_equals_ignore_case(ext, NPH_STR(".bmp"))) {
-        return cooker_cook_image(c, source_path, c->texture.usage);
-    }
-    if (nph_str_equals_ignore_case(ext, NPH_STR(".hdr"))) {
-        return cooker_cook_image(c, source_path, COOK_TEXTURE_HDR);
+    case COOKER_SOURCE_NONE:
+        break;
     }
     NPH_LOG_WARN(&NPH_LOG_COOK, "%s: no cooker for this file type", source_path);
     return NPH_RESULT_UNSUPPORTED;
