@@ -253,6 +253,18 @@ static NphResult push_acquire(NphGpuDevice *dev, const NphGpuUploadAcquire *a)
     return NPH_RESULT_OK;
 }
 
+// The part of a mip an upload writes: everything (`whole`), or a rectangle.
+typedef struct UploadRect {
+    bool whole;
+    u32 x;
+    u32 y;
+    u32 width;
+    u32 height;
+} UploadRect;
+
+static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
+                              u32 layer_count, const UploadRect *rect, const void *data, u64 size);
+
 NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
                                u32 layer_count, const void *data, u64 size)
 {
@@ -274,6 +286,51 @@ NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 
                       (unsigned long long)(level_bytes * layer_count));
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    const UploadRect whole = {true, 0U, 0U, 0U, 0U};
+    return upload_image(dev, dst, mip, base_layer, layer_count, &whole, data, size);
+}
+
+NphResult nph_gpu_upload_image_region(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 layer, u32 x,
+                                      u32 y, u32 width, u32 height, const void *data, u64 size)
+{
+    NPH_ASSERT(dev != NULL && data != NULL);
+    NphGpuImageSlot *slot = gpu_image(dev, dst);
+    if (slot == NULL || mip >= slot->desc.mip_count || layer >= slot->desc.layer_count) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const NphGpuFormatInfo *info = nph_gpu_format_info(slot->desc.format);
+    const u32 mip_w = nph_gpu_mip_extent(slot->desc.width, mip);
+    const u32 mip_h = nph_gpu_mip_extent(slot->desc.height, mip);
+    const u32 block = info->block_width;
+    // A rectangle may end at the mip's edge with a partial block.
+    const bool aligned = x % block == 0U && y % block == 0U &&
+                         (width % block == 0U || x + width == mip_w) &&
+                         (height % block == 0U || y + height == mip_h);
+    const bool inside = width > 0U && height > 0U && x <= mip_w && y <= mip_h &&
+                        width <= mip_w - x && height <= mip_h - y &&
+                        nph_gpu_mip_extent(slot->desc.depth, mip) == 1U;
+    const u64 bytes = nph_gpu_format_level_bytes(slot->desc.format, width, height, 1U);
+    if (!aligned || !inside || size != bytes) {
+        GPU_LOG_ERROR("upload to image '%s' mip %u layer %u: rectangle %u,%u %ux%u with %llu "
+                      "bytes (the mip is %ux%u, the rectangle needs %llu)",
+                      slot->name, mip, layer, x, y, width, height, (unsigned long long)size, mip_w,
+                      mip_h, (unsigned long long)bytes);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (slot->exclusive != 0) {
+        GPU_LOG_ERROR("image '%s' is exclusive (an attachment): a region upload cannot keep the "
+                      "texels around it",
+                      slot->name);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const UploadRect rect = {false, x, y, width, height};
+    return upload_image(dev, dst, mip, layer, 1U, &rect, data, size);
+}
+
+static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
+                              u32 layer_count, const UploadRect *rect, const void *data, u64 size)
+{
+    NphGpuImageSlot *slot = gpu_image(dev, dst);
     if ((slot->desc.usage & (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST) == 0U) {
         GPU_LOG_ERROR("image '%s' lacks TRANSFER_DST usage", slot->name);
         return NPH_RESULT_INVALID_ARGUMENT;
@@ -328,6 +385,13 @@ NphResult nph_gpu_upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 
         region.mip = mip;
         region.base_layer = base_layer;
         region.layer_count = layer_count;
+        if (!rect->whole) {
+            region.x = (i32)rect->x;
+            region.y = (i32)rect->y;
+            region.width = rect->width;
+            region.height = rect->height;
+            region.depth = 1U;
+        }
         nph_gpu_cmd_copy_buffer_to_image(cmd, src, dst, NPH_GPU_LAYOUT_TRANSFER_DST, &region, 1U);
         ++up->batch_copies;
 

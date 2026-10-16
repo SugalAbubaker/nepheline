@@ -146,6 +146,16 @@ into a frame slot's command pool, so `nph_gpu_frame_begin` and
 `nph_gpu_device_wait_idle`, which recycle those pools, flush them first
 (the renderer's tests found the copies being dropped; ADR-0018).
 
+`nph_gpu_upload_image_region` writes one rectangle of one mip and layer
+and keeps the rest of the mip. That is a texture that changes in parts:
+the editor's Dear ImGui font atlas, which grows glyph by glyph
+(ADR-0025).
+- Compressed formats need block-aligned rectangles. A rectangle may end
+  at the mip's edge with a partial block.
+- The image must not be exclusive (an attachment): its acquiring
+  transition discards the contents a partial upload has to keep, so
+  such images are refused.
+
 ## Shaders and pipelines
 
 `nph_gpu_spirv_reflect` is the engine's own SPIR-V parser: two passes over

@@ -272,6 +272,92 @@ NTEST_F(GpuFixture, image_uploads_land_in_shader_read_only)
     nph_gpu_image_destroy(f->dev, img);
 }
 
+NTEST_F(GpuFixture, region_uploads_keep_the_rest_of_the_mip)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuImageDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.width = 16U;
+    desc.height = 8U;
+    desc.mip_count = 1U;
+    desc.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST |
+                 (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC;
+    desc.name = "atlas";
+    NphGpuImage img = NPH_GPU_IMAGE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &desc, &img), NPH_RESULT_OK);
+    u32 whole[16U * 8U];
+    fill_pattern(whole, 16U * 8U, 0xA5A5A5A5U);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_image(f->dev, img, 0U, 0U, 1U, whole, sizeof whole),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
+    // A 5 x 3 rectangle at (9, 4), then one at the corner.
+    u32 patch[5U * 3U];
+    fill_pattern(patch, 5U * 3U, 0x12345678U);
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 9U, 4U, 5U, 3U, patch, sizeof patch),
+        NPH_RESULT_OK);
+    const u32 corner = 0xDEADBEEFU;
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 15U, 7U, 1U, 1U, &corner, sizeof corner),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_layout(f->dev, img, 0U), NPH_GPU_LAYOUT_SHADER_READ_ONLY);
+    u32 out[16U * 8U];
+    test_read_image(f->dev, img, 0U, out, sizeof out);
+    for (u32 y = 0; y < 8U; ++y) {
+        for (u32 x = 0; x < 16U; ++x) {
+            u32 want = whole[y * 16U + x];
+            if (x >= 9U && x < 14U && y >= 4U && y < 7U) {
+                want = patch[(y - 4U) * 5U + (x - 9U)];
+            } else if (x == 15U && y == 7U) {
+                want = corner;
+            }
+            NTEST_ASSERT_EQ_UINT(out[y * 16U + x], want);
+        }
+    }
+    // Outside the mip, empty, or the wrong size: refused, nothing queued.
+    NTEST_EXPECT_EQ_INT(
+        nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 12U, 0U, 5U, 1U, patch, (u64)5U * 4U),
+        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 0U, 0U, 0U, 1U, patch, 0U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(
+        nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 0U, 0U, 2U, 2U, patch, 12U),
+        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_gpu_upload_image_region(f->dev, img, 1U, 0U, 0U, 0U, 1U, 1U, patch, 4U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    nph_gpu_image_destroy(f->dev, img);
+
+    // Block-compressed: rectangles on block boundaries only.
+    desc.format = NPH_GPU_FORMAT_BC4_UNORM;
+    desc.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    desc.name = "bc4";
+    if (nph_gpu_device_info(f->dev)->features.texture_compression_bc &&
+        nph_gpu_image_create(f->dev, &desc, &img) == NPH_RESULT_OK) {
+        u8 blocks[2U * 8U];
+        memset(blocks, 0x3C, sizeof blocks);
+        NTEST_EXPECT_EQ_INT(
+            nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 4U, 4U, 8U, 4U, blocks, sizeof blocks),
+            NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_INT(
+            nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 2U, 4U, 8U, 4U, blocks, sizeof blocks),
+            NPH_RESULT_INVALID_ARGUMENT);
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
+        nph_gpu_image_destroy(f->dev, img);
+    }
+
+    // An attachment is exclusive: a region upload would lose the rest.
+    desc.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    desc.name = "attachment";
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &desc, &img), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(
+        nph_gpu_upload_image_region(f->dev, img, 0U, 0U, 0U, 0U, 1U, 1U, &corner, sizeof corner),
+        NPH_RESULT_INVALID_ARGUMENT);
+    nph_gpu_image_destroy(f->dev, img);
+}
+
 // Three frames, each uploading a buffer and then reading it back on the
 // graphics queue, and the graphics work that follows sees the upload
 // without any wait of its own.
