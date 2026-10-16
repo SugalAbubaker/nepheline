@@ -14,10 +14,9 @@
 #include <nepheline/platform/time.h>
 #include <nepheline/runtime/scene_render.h>
 
-#include <cook/cooker.h>
-
 #include "editor_internal.h"
 
+#include <cook/cooker.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,8 +290,8 @@ static void finished(Editor *ed, const EditorImportResult *res)
         NPH_LOG_ERROR(&LOG_EDITOR, "import failed: %s (%u assets cooked, %u sources failed)",
                       nph_result_string(res->result), res->cooked, res->failed);
     } else {
-        NPH_LOG_INFO(&LOG_EDITOR, "import done: %u assets cooked, %u already current",
-                     res->cooked, res->skipped);
+        NPH_LOG_INFO(&LOG_EDITOR, "import done: %u assets cooked, %u already current", res->cooked,
+                     res->skipped);
     }
     EditorPlacement *slot = placement_of(ed, res->id);
     if (slot == NULL) {
@@ -338,7 +337,7 @@ void editor_assets_update(Editor *ed)
 static bool key_of(const EditorAssets *a, const char *name, char *out, u64 cap)
 {
     const int n = a->folder[0] == '\0' ? snprintf(out, (size_t)cap, "%s", name)
-                                        : snprintf(out, (size_t)cap, "%s/%s", a->folder, name);
+                                       : snprintf(out, (size_t)cap, "%s/%s", a->folder, name);
     return n >= 0 && (u64)n < cap;
 }
 

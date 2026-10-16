@@ -17,8 +17,8 @@
 
 typedef struct ProjectFixture {
     NphDebugAllocator da;
-    TempDir dir;       // the test's: src/ outside the project, and project/
-    TempDir src;       // where files come from
+    TempDir dir; // the test's: src/ outside the project, and project/
+    TempDir src; // where files come from
     char project[1200];
     char assets[1200];
     char cooked[1200];
@@ -63,8 +63,7 @@ static EditorImportResult import_now(ProjectFixture *f, const char *const *paths
                                      const char *folder)
 {
     u32 id = 0U;
-    NTEST_ASSERT_EQ_INT(editor_project_import(f->p, paths, count, folder, 42U, &id),
-                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_project_import(f->p, paths, count, folder, 42U, &id), NPH_RESULT_OK);
     editor_project_wait(f->p);
     NTEST_EXPECT_EQ_UINT(editor_project_pending(f->p), 0U);
     EditorImportResult res;

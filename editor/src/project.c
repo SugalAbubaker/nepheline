@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The project: the import thread, its requests, and the snapshot of the
 // cooker's database that the resolver reads (project.h).
+#include "project.h"
+
 #include <nepheline/asset/vfs.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hashmap.h>
@@ -9,13 +11,11 @@
 #include <nepheline/platform/path.h>
 #include <nepheline/platform/thread.h>
 
+#include "editor_log.h"
+
 #include <cook/cooker.h>
 #include <cook/database.h>
 #include <cook/gltf.h>
-
-#include "editor_log.h"
-#include "project.h"
-
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,7 +53,7 @@ struct EditorProject {
     char db_path[EDITOR_PROJECT_PATH_MAX + 32U];
     NphThread thread;
 
-    NphMutex lock; // everything below
+    NphMutex lock;      // everything below
     NphCondVar changed; // a request queued or finished, or quit
     b32 quit;
     Request queue[EDITOR_PROJECT_REQUESTS];
@@ -483,9 +483,8 @@ NphResult editor_project_create(const EditorProjectDesc *desc, EditorProject **o
     if (r == NPH_RESULT_OK) {
         r = cooker_canonical_path(desc->cooked_dir, p->cooked, sizeof p->cooked);
     }
-    if (r == NPH_RESULT_OK &&
-        (u64)snprintf(p->db_path, sizeof p->db_path, "%s/%s", p->cooked, COOK_DB_FILE_NAME) >=
-            sizeof p->db_path) {
+    if (r == NPH_RESULT_OK && (u64)snprintf(p->db_path, sizeof p->db_path, "%s/%s", p->cooked,
+                                            COOK_DB_FILE_NAME) >= sizeof p->db_path) {
         r = NPH_RESULT_OVERFLOW;
     }
     if (r != NPH_RESULT_OK) {
@@ -570,8 +569,7 @@ static NphResult enqueue(EditorProject *p, u32 kind, const char *const *paths, u
         return NPH_RESULT_FULL;
     }
     req.id = ++p->next_id;
-    memcpy(&p->queue[(p->queue_head + p->queue_count) % EDITOR_PROJECT_REQUESTS], &req,
-           sizeof req);
+    memcpy(&p->queue[(p->queue_head + p->queue_count) % EDITOR_PROJECT_REQUESTS], &req, sizeof req);
     ++p->queue_count;
     nph_condvar_broadcast(&p->changed);
     nph_mutex_unlock(&p->lock);
@@ -646,10 +644,10 @@ bool editor_project_scene_of(EditorProject *p, const char *key, NphGuid *out)
 {
     NPH_ASSERT(p != NULL && key != NULL && out != NULL);
     nph_mutex_lock(&p->lock);
-    const CookDbEntry *e = p->snapshot != NULL
-                               ? cook_db_find(&p->snapshot->db, nph_str_from_cstr(key),
-                                              NPH_STR("scene"))
-                               : NULL;
+    const CookDbEntry *e =
+        p->snapshot != NULL
+            ? cook_db_find(&p->snapshot->db, nph_str_from_cstr(key), NPH_STR("scene"))
+            : NULL;
     if (e != NULL) {
         *out = e->guid;
     }
@@ -680,8 +678,7 @@ NphResult editor_project_resolve(void *user, NphGuid guid, char *buf, u64 cap, u
     EditorProject *p = (EditorProject *)user;
     NPH_ASSERT(p != NULL && buf != NULL && out_len != NULL);
     nph_mutex_lock(&p->lock);
-    const CookDbEntry *e =
-        p->snapshot != NULL ? cook_db_find_guid(&p->snapshot->db, guid) : NULL;
+    const CookDbEntry *e = p->snapshot != NULL ? cook_db_find_guid(&p->snapshot->db, guid) : NULL;
     NphResult r = NPH_RESULT_NOT_FOUND;
     if (e != NULL) {
         const u64 n = strlen(e->output);
