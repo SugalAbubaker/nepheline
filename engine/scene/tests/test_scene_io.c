@@ -431,6 +431,85 @@ NTEST(scene_io, binary_round_trip_matches_the_text)
     nph_world_destroy(b);
 }
 
+// WorldTransform is never saved; both loaders give it back to every entity
+// with a LocalTransform, and the transform system then places them as in
+// the world that was saved.
+NTEST(scene_io, loaded_entities_get_their_world_transforms_back)
+{
+    TestIds ids;
+    NphWorld *a = test_world_create(0U, &ids);
+    const NphComponentId placed[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                      NPH_COMPONENT_ID_WORLD_TRANSFORM, ids.position};
+    NphEntity root;
+    NphEntity child;
+    NphEntity loose; // a position without a transform
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(a, placed, 3U, &root), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(a, placed, 2U, &child), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(a, &ids.position, 1U, &loose), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(a, child, root), NPH_RESULT_OK);
+    NphLocalTransform l = nph_local_transform_identity();
+    l.translation = nph_dvec3(1.0e7, 2.0, -3.0);
+    NTEST_ASSERT_EQ_INT(nph_world_set(a, root, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &l),
+                        NPH_RESULT_OK);
+    l.translation = nph_dvec3(0.5, 0.0, 0.0);
+    NTEST_ASSERT_EQ_INT(nph_world_set(a, child, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &l),
+                        NPH_RESULT_OK);
+    NphStrBuilder text = sb_new();
+    save_text(a, &text);
+    NphBinWriter bw;
+    nph_bin_writer_init(&bw, nph_allocator_system());
+    save_binary(a, &bw);
+
+    for (u32 format = 0; format < 2U; ++format) {
+        TestIds ids_b;
+        NphWorld *b = test_world_create(0U, &ids_b);
+        NphEntity created[3];
+        NphSceneLoadDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.out_entities = created;
+        ld.out_capacity = 3U;
+        NphSceneResult res;
+        const NphResult r = format == 0U
+                                ? nph_scene_load_text(b, nph_sb_str(&text), &ld, &res)
+                                : nph_scene_load_binary(b, nph_bin_writer_data(&bw),
+                                                        nph_bin_writer_len(&bw), &ld, &res);
+        NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+        // File order: the root, its child, then the loose entity.
+        NTEST_EXPECT_TRUE(nph_world_has(b, created[0], NPH_COMPONENT_ID_WORLD_TRANSFORM));
+        NTEST_EXPECT_TRUE(nph_world_has(b, created[1], NPH_COMPONENT_ID_WORLD_TRANSFORM));
+        NTEST_EXPECT_FALSE(nph_world_has(b, created[2], NPH_COMPONENT_ID_WORLD_TRANSFORM));
+        NphTransformSystem *ts = NULL;
+        NTEST_ASSERT_EQ_INT(nph_transform_system_create(b, nph_allocator_system(), &ts),
+                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_transform_system_update(ts, NULL), NPH_RESULT_OK);
+        const NphWorldTransform *wt =
+            NPH_WORLD_GET(b, created[1], NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+        NTEST_ASSERT_NOT_NULL(wt);
+        NTEST_EXPECT_NEAR_F64(wt->translation.x, 1.0e7 + 0.5, 0.0);
+        NTEST_EXPECT_NEAR_F64(wt->translation.y, 2.0, 0.0);
+        // Saving the loaded world writes the same file.
+        if (format == 0U) {
+            NphStrBuilder again = sb_new();
+            save_text(b, &again);
+            NTEST_EXPECT_EQ_STR(nph_sb_cstr(&again), nph_sb_cstr(&text));
+            nph_sb_free(&again);
+        } else {
+            NphBinWriter again;
+            nph_bin_writer_init(&again, nph_allocator_system());
+            save_binary(b, &again);
+            NTEST_ASSERT_EQ_UINT(nph_bin_writer_len(&again), nph_bin_writer_len(&bw));
+            NTEST_EXPECT_EQ_MEM(nph_bin_writer_data(&again), nph_bin_writer_data(&bw),
+                                nph_bin_writer_len(&bw));
+            nph_bin_writer_free(&again);
+        }
+        nph_transform_system_destroy(ts);
+        nph_world_destroy(b);
+    }
+    nph_bin_writer_free(&bw);
+    nph_sb_free(&text);
+    nph_world_destroy(a);
+}
+
 NTEST(scene_io, binary_rejects_damage_and_mismatches)
 {
     TestIds ids;

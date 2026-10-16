@@ -616,11 +616,21 @@ static NphResult spawn_groups(BinLoader *l)
     u32 batch_cap = 0U;
     for (u32 gi = 0; res == NPH_RESULT_OK && gi < l->group_count; ++gi) {
         const GroupIn *g = &l->groups[gi];
-        NphComponentId ids[NPH_ECS_MAX_COMPONENTS + 1U];
+        NphComponentId ids[NPH_ECS_MAX_COMPONENTS + 2U];
         memcpy(ids, g->ids, sizeof(NphComponentId) * g->component_count);
         u32 count = g->component_count;
+        bool placed = false;
+        for (u32 k = 0; k < count; ++k) {
+            placed = placed || ids[k] == NPH_COMPONENT_ID_LOCAL_TRANSFORM;
+        }
         if ((g->flags & ARCH_FLAG_HIERARCHY) != 0U) {
             ids[count++] = NPH_COMPONENT_ID_HIERARCHY;
+        }
+        // WorldTransform is derived and never saved (the table refuses it):
+        // an entity with a LocalTransform gets it back, for the transform
+        // system to compute.
+        if (placed) {
+            ids[count++] = NPH_COMPONENT_ID_WORLD_TRANSFORM;
         }
         if (g->entity_count > batch_cap) {
             if (batch != NULL) {

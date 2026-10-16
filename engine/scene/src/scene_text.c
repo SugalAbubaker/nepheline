@@ -1073,6 +1073,11 @@ static NphResult spawn_entity(Loader *l, u32 i)
     if (in->parent != NPH_SAVE_NONE || in->has_children) {
         nph_mask_set(&mask, NPH_COMPONENT_ID_HIERARCHY);
     }
+    // WorldTransform is derived and never saved: an entity with a
+    // LocalTransform gets it back, for the transform system to compute.
+    if (nph_mask_test(&mask, NPH_COMPONENT_ID_LOCAL_TRANSFORM)) {
+        nph_mask_set(&mask, NPH_COMPONENT_ID_WORLD_TRANSFORM);
+    }
     NphComponentId ids[NPH_ECS_MAX_COMPONENTS];
     u32 count = 0U;
     for (u32 id = 0; id < w->component_count; ++id) {

@@ -29,8 +29,10 @@
 // line. Saving a loaded file writes the same bytes. ENTITY fields hold
 // ids; references to entities outside the saved set are written as null.
 // TRANSIENT components and fields are not written (they load as their
-// defaults; WorldTransform is recomputed by the transform system), and the
-// hierarchy is written as each entity's "parent".
+// defaults), and the hierarchy is written as each entity's "parent".
+// Both loaders give every entity with a LocalTransform its WorldTransform
+// back, at its default until the transform system computes it, so a loaded
+// scene is placed and drawn like the one that was saved.
 //
 // Prefab instances (prefab.h) are written as the prefab entity they came
 // from plus their differences: changed fields under "overrides",
