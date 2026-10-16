@@ -169,6 +169,17 @@ NphResult nph_fs_remove_file(const char *path);
 // OS allows (same volume).
 NphResult nph_fs_rename(const char *from, const char *to);
 
+// Copies the regular file `from` to `to`, replacing `to` when it exists.
+// The bytes go to a temporary file beside `to` (`to` + ".part"), which is
+// then renamed over it, so `to` is never seen half written; the copy is
+// writable whatever the source's attributes. The OS copies the bytes
+// (CopyFileExW; copy_file_range on Linux, which may share extents on
+// file systems that can). NPH_RESULT_NOT_FOUND for a missing source or
+// destination directory, NPH_RESULT_INVALID_ARGUMENT when `from` is a
+// directory, NPH_RESULT_OVERFLOW for a path too long, and the OS's errors;
+// on failure `to` is as it was and no temporary file is left.
+NphResult nph_fs_copy_file(const char *from, const char *to);
+
 // Creates one directory; OK when it already exists as a directory,
 // NOT_FOUND when the parent does not exist.
 NphResult nph_fs_create_directory(const char *path);
