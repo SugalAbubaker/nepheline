@@ -254,28 +254,31 @@ static NphResult copy_source(EditorProject *p, const char *from, const char *to)
     return r != NPH_RESULT_OK ? r : d.result;
 }
 
-// Records the scene cooked from `source` in the result.
-static void note_scene(Cooker *c, const char *source, EditorImportResult *res)
+// Records the asset `sub` cooked from `source` in a result's list.
+static void note(Cooker *c, const char *source, const char *sub, NphGuid *guids,
+                 char (*names)[EDITOR_IMPORT_NAME_MAX], u32 *count)
 {
     char key[EDITOR_PROJECT_PATH_MAX];
-    if (res->scene_count == EDITOR_IMPORT_SCENES_MAX ||
+    if (*count == EDITOR_IMPORT_SCENES_MAX ||
         cooker_source_key(c, source, key, sizeof key) != NPH_RESULT_OK) {
         return;
     }
-    const CookDbEntry *e = cook_db_find(cooker_db(c), nph_str_from_cstr(key), NPH_STR("scene"));
+    const CookDbEntry *e =
+        cook_db_find(cooker_db(c), nph_str_from_cstr(key), nph_str_from_cstr(sub));
     if (e == NULL) {
         return;
     }
     const NphStr stem = nph_path_stem(nph_str_from_cstr(source));
     const u64 n = stem.len < EDITOR_IMPORT_NAME_MAX ? stem.len : EDITOR_IMPORT_NAME_MAX - 1U;
-    res->scenes[res->scene_count] = e->guid;
-    memcpy(res->scene_names[res->scene_count], stem.data, (size_t)n);
-    res->scene_names[res->scene_count][n] = '\0';
-    ++res->scene_count;
+    guids[*count] = e->guid;
+    memcpy(names[*count], stem.data, (size_t)n);
+    names[*count][n] = '\0';
+    ++*count;
 }
 
-// Cooks a source of the project: a directory's scenes, a scene, or an image
-// (unless images are only along for a scene). Anything else was only copied.
+// Cooks a source of the project: a directory's scenes and editable meshes,
+// a scene, an editable mesh, or an image (unless images are only along for a
+// scene). Anything else was only copied.
 static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bool is_directory,
                              bool images_alone, EditorImportResult *res)
 {
@@ -288,7 +291,14 @@ static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bo
     case COOKER_SOURCE_SCENE: {
         const NphResult r = cooker_cook_gltf(c, source);
         if (r == NPH_RESULT_OK) {
-            note_scene(c, source, res);
+            note(c, source, "scene", res->scenes, res->scene_names, &res->scene_count);
+        }
+        return r;
+    }
+    case COOKER_SOURCE_MESH: {
+        const NphResult r = cooker_cook_mesh(c, source);
+        if (r == NPH_RESULT_OK) {
+            note(c, source, "mesh", res->meshes, res->mesh_names, &res->mesh_count);
         }
         return r;
     }
@@ -366,11 +376,52 @@ static NphResult cook_key(EditorProject *p, Cooker *c, const char *key, EditorIm
     return cook_source(p, c, source, info.is_directory, true, res);
 }
 
+typedef NPH_ARRAY(NphGuid) GuidArray;
+
+typedef struct Written {
+    GuidArray guids;
+    NphResult result; // the first failure to note one
+} Written;
+
+static void note_written(void *user, NphGuid guid, u32 type)
+{
+    NPH_UNUSED(type);
+    Written *w = (Written *)user;
+    const NphResult r = NPH_ARRAY_PUSH(&w->guids, guid);
+    if (r != NPH_RESULT_OK && w->result == NPH_RESULT_OK) {
+        w->result = r;
+    }
+}
+
+// The written GUIDs, moved into the result in a block of their own.
+static NphResult hand_over(EditorProject *p, Written *w, EditorImportResult *res)
+{
+    NphResult r = w->result;
+    if (r == NPH_RESULT_OK && w->guids.len != 0U) {
+        res->written = NPH_ALLOC_ARRAY(p->alloc, NphGuid, w->guids.len);
+        if (res->written == NULL) {
+            r = NPH_RESULT_OUT_OF_MEMORY;
+        } else {
+            memcpy(res->written, w->guids.data, sizeof(NphGuid) * (u64)w->guids.len);
+            res->written_count = w->guids.len;
+        }
+    }
+    NPH_ARRAY_FREE(&w->guids);
+    if (r != NPH_RESULT_OK) {
+        // The cook happened; only the viewport will not know to reload.
+        NPH_LOG_ERROR(&LOG_EDITOR, "assets: keeping what to reload: %s", nph_result_string(r));
+    }
+    return r;
+}
+
 static void run_request(EditorProject *p, const Request *req, EditorImportResult *res)
 {
     memset(res, 0, sizeof *res);
     res->id = req->id;
     res->tag = req->tag;
+    Written written;
+    memset(&written, 0, sizeof written);
+    NPH_ARRAY_INIT(&written.guids, p->alloc);
     CookerDesc d;
     memset(&d, 0, sizeof d);
     d.alloc = p->alloc;
@@ -378,6 +429,8 @@ static void run_request(EditorProject *p, const Request *req, EditorImportResult
     d.source_root = p->assets;
     d.jobs = p->jobs;
     d.force = req->force;
+    d.on_cooked = note_written;
+    d.on_cooked_user = &written;
     cook_texture_settings_default(&d.texture);
     cook_mesh_settings_default(&d.mesh);
     Cooker *c = NULL;
@@ -385,6 +438,7 @@ static void run_request(EditorProject *p, const Request *req, EditorImportResult
     if (res->result != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_EDITOR, "assets: the cooker for %s: %s", p->cooked,
                       nph_result_string(res->result));
+        NPH_ARRAY_FREE(&written.guids);
         return;
     }
     // A request holding a scene brings images along for it: the scene cooks
@@ -407,7 +461,8 @@ static void run_request(EditorProject *p, const Request *req, EditorImportResult
     res->cooked = stats.cooked;
     res->skipped = stats.skipped;
     res->failed = stats.failed;
-    cooker_destroy(c); // saves the database
+    cooker_destroy(c);                              // saves the database
+    NPH_IGNORE_RESULT(hand_over(p, &written, res)); // logged
 }
 
 static void free_request(NphAllocator *alloc, Request *req)
@@ -526,6 +581,9 @@ void editor_project_destroy(EditorProject *p)
     for (u32 i = 0; i < p->queue_count; ++i) {
         free_request(p->alloc, &p->queue[(p->queue_head + i) % EDITOR_PROJECT_REQUESTS]);
     }
+    for (u32 i = 0; i < p->done_count; ++i) {
+        editor_project_result_free(p, &p->done[(p->done_head + i) % EDITOR_PROJECT_REQUESTS]);
+    }
     nph_condvar_destroy(&p->changed);
     nph_mutex_destroy(&p->lock);
     snapshot_free(p->alloc, p->snapshot);
@@ -613,6 +671,16 @@ bool editor_project_poll(EditorProject *p, EditorImportResult *out)
     return any;
 }
 
+void editor_project_result_free(EditorProject *p, EditorImportResult *res)
+{
+    NPH_ASSERT(p != NULL && res != NULL);
+    if (res->written != NULL) {
+        NPH_FREE_ARRAY(p->alloc, NphGuid, res->written, res->written_count);
+    }
+    res->written = NULL;
+    res->written_count = 0U;
+}
+
 u32 editor_project_pending(EditorProject *p)
 {
     NPH_ASSERT(p != NULL);
@@ -640,19 +708,29 @@ void editor_project_status(EditorProject *p, char *out, u64 cap)
     nph_mutex_unlock(&p->lock);
 }
 
-bool editor_project_scene_of(EditorProject *p, const char *key, NphGuid *out)
+// The asset `sub` of source `key` in the snapshot.
+static bool find_asset(EditorProject *p, const char *key, NphStr sub, NphGuid *out)
 {
-    NPH_ASSERT(p != NULL && key != NULL && out != NULL);
     nph_mutex_lock(&p->lock);
     const CookDbEntry *e =
-        p->snapshot != NULL
-            ? cook_db_find(&p->snapshot->db, nph_str_from_cstr(key), NPH_STR("scene"))
-            : NULL;
+        p->snapshot != NULL ? cook_db_find(&p->snapshot->db, nph_str_from_cstr(key), sub) : NULL;
     if (e != NULL) {
         *out = e->guid;
     }
     nph_mutex_unlock(&p->lock);
     return e != NULL;
+}
+
+bool editor_project_scene_of(EditorProject *p, const char *key, NphGuid *out)
+{
+    NPH_ASSERT(p != NULL && key != NULL && out != NULL);
+    return find_asset(p, key, NPH_STR("scene"), out);
+}
+
+bool editor_project_mesh_of(EditorProject *p, const char *key, NphGuid *out)
+{
+    NPH_ASSERT(p != NULL && key != NULL && out != NULL);
+    return find_asset(p, key, NPH_STR("mesh"), out);
 }
 
 bool editor_project_is_cooked(EditorProject *p, const char *key)

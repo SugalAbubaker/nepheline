@@ -140,3 +140,24 @@ NPH_MUST_USE NphResult editor_import(Editor *ed, const char *const *paths, u32 c
 
 // The project, NULL when not attached (tests wait for its imports).
 EditorProject *editor_project(Editor *ed);
+
+// ---------------------------------------------------------------------------
+// Model creation (docs/editor.md "Model creation")
+// ---------------------------------------------------------------------------
+
+typedef enum EditorPrimitive {
+    EDITOR_PRIMITIVE_CUBE = 0, // 1 m
+    EDITOR_PRIMITIVE_SPHERE,   // 1 m across, 32 segments by 16 rings
+    EDITOR_PRIMITIVE_PLANE,    // 2 m square
+    EDITOR_PRIMITIVE_CYLINDER, // 1 m across and tall, 32 segments
+    EDITOR_PRIMITIVE_COUNT
+} EditorPrimitive;
+
+// Creates a primitive: an editable mesh source of its own in the project
+// (<sources>/meshes/<cube|sphere|plane|cylinder>[_N].nmesh, the first free
+// name), cooked on the import thread, then an entity drawing it, resting on
+// the point in front of the camera. The entity is one undoable step, is
+// selected, and appears once the cook is done (a frame or two).
+// NPH_RESULT_INVALID_STATE when not attached or while playing; FULL with too
+// many requests outstanding; the file system's and the project's errors.
+NPH_MUST_USE NphResult editor_create_primitive(Editor *ed, EditorPrimitive kind);

@@ -17,6 +17,7 @@
 #include "editor_internal.h"
 
 #include <cook/cooker.h>
+#include <cook/polymesh.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,7 +213,14 @@ static NphDVec3 point_ahead(Editor *ed)
     return at;
 }
 
-// Cooks a source; a placement waits for it at `at` when `place`.
+static void stem_of(const char *key, char *out, u64 cap)
+{
+    const NphStr stem = nph_path_stem(nph_str_from_cstr(key));
+    (void)snprintf(out, (size_t)cap, "%.*s", (int)stem.len, stem.data);
+}
+
+// Cooks a source; a placement of what it cooks into waits for it at `at`
+// when `place`.
 static NphResult cook(Editor *ed, const char *key, bool force, bool place, NphDVec3 at)
 {
     EditorPlacement *slot = place ? placement_of(ed, 0U) : NULL;
@@ -232,21 +240,35 @@ static NphResult cook(Editor *ed, const char *key, bool force, bool place, NphDV
         slot->place = true;
         slot->resolved = true;
         slot->at = at;
+        if (cooker_source_kind(key) == COOKER_SOURCE_MESH) {
+            char guid_text[EDITOR_PROJECT_PATH_MAX + 8U];
+            (void)snprintf(guid_text, sizeof guid_text, "%s#mesh", key); // the cooker's identity
+            slot->kind = (u32)EDITOR_PLACE_MESH;
+            slot->mesh = nph_guid_from_cstr(guid_text);
+            stem_of(key, slot->name, sizeof slot->name);
+        }
     }
     return NPH_RESULT_OK;
 }
+
+// An entity drawing `mesh` at `at`, as one undoable step (below).
+static NphResult place_mesh(Editor *ed, NphGuid mesh, const char *name, NphDVec3 at);
 
 void editor_assets_place(Editor *ed, const char *key, NphDVec3 at)
 {
     if (ed->project == NULL || nph_engine_is_playing(ed->engine)) {
         return;
     }
-    NphGuid scene;
-    if (editor_project_scene_of(ed->project, key, &scene)) {
-        const NphStr stem = nph_path_stem(nph_str_from_cstr(key));
-        char name[EDITOR_IMPORT_NAME_MAX];
-        (void)snprintf(name, sizeof name, "%.*s", (int)stem.len, stem.data);
-        (void)place_scene(ed, scene, name, at);
+    char name[EDITOR_IMPORT_NAME_MAX];
+    stem_of(key, name, sizeof name);
+    NphGuid asset;
+    if (cooker_source_kind(key) == COOKER_SOURCE_MESH) {
+        if (editor_project_mesh_of(ed->project, key, &asset)) {
+            (void)place_mesh(ed, asset, name, at);
+            return;
+        }
+    } else if (editor_project_scene_of(ed->project, key, &asset)) {
+        (void)place_scene(ed, asset, name, at);
         return;
     }
     (void)cook(ed, key, false, true, at); // placed once cooked
@@ -283,6 +305,47 @@ NphResult editor_import(Editor *ed, const char *const *paths, u32 count, bool pl
     return NPH_RESULT_OK;
 }
 
+// An entity drawing `mesh` at `at`, as one undoable step, selected.
+static NphResult place_mesh(Editor *ed, NphGuid mesh, const char *name, NphDVec3 at)
+{
+    NPH_ASSERT(ed->history != NULL);
+    EditorHistory *h = ed->history;
+    const NphComponentId mesh_renderer = nph_engine_components(ed->engine)->mesh_renderer;
+    char label[EDITOR_HISTORY_LABEL_MAX];
+    (void)snprintf(label, sizeof label, "Create %s", name);
+    NPH_TRY(editor_history_begin(h, label));
+    const NphComponentId ids[4] = {NPH_COMPONENT_ID_NAME, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                   NPH_COMPONENT_ID_WORLD_TRANSFORM, mesh_renderer};
+    NphEntity e = NPH_ENTITY_NULL;
+    NphResult r = editor_history_spawn(h, ids, 4U, &e);
+    if (r == NPH_RESULT_OK) {
+        NphName n;
+        memset(&n, 0, sizeof n);
+        (void)nph_text_set(&n.text, nph_str_from_cstr(name));
+        r = editor_history_set(h, e, NPH_COMPONENT_ID_NAME, &n);
+    }
+    if (r == NPH_RESULT_OK) {
+        NphLocalTransform t = nph_local_transform_identity();
+        t.translation = at;
+        r = editor_history_set(h, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &t);
+    }
+    if (r == NPH_RESULT_OK) {
+        NphMeshRenderer m;
+        memset(&m, 0, sizeof m);
+        m.mesh = mesh;
+        r = editor_history_set(h, e, mesh_renderer, &m);
+    }
+    if (r != NPH_RESULT_OK) {
+        editor_history_abort(h);
+        NPH_LOG_ERROR(&LOG_EDITOR, "creating %s: %s", name, nph_result_string(r));
+        return r;
+    }
+    editor_history_end(h);
+    editor_selection_set(&ed->selection, e);
+    NPH_LOG_INFO(&LOG_EDITOR, "created %s", name);
+    return NPH_RESULT_OK;
+}
+
 static void finished(Editor *ed, const EditorImportResult *res)
 {
     ed->assets.stale = true;
@@ -293,13 +356,28 @@ static void finished(Editor *ed, const EditorImportResult *res)
         NPH_LOG_INFO(&LOG_EDITOR, "import done: %u assets cooked, %u already current", res->cooked,
                      res->skipped);
     }
+    // What the cook replaced is read again wherever it is drawn, before
+    // anything new takes it.
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    for (u32 i = 0; sr != NULL && i < res->written_count; ++i) {
+        (void)nph_scene_renderer_reload(sr, res->written[i]);
+    }
     EditorPlacement *slot = placement_of(ed, res->id);
     if (slot == NULL) {
         return;
     }
     if (slot->place && slot->resolved) {
-        for (u32 i = 0; i < res->scene_count; ++i) {
-            (void)place_scene(ed, res->scenes[i], res->scene_names[i], slot->at);
+        if (slot->kind == (u32)EDITOR_PLACE_MESH) {
+            if (res->result == NPH_RESULT_OK) {
+                (void)place_mesh(ed, slot->mesh, slot->name, slot->at);
+            }
+        } else {
+            for (u32 i = 0; i < res->scene_count; ++i) {
+                (void)place_scene(ed, res->scenes[i], res->scene_names[i], slot->at);
+            }
+            for (u32 i = 0; i < res->mesh_count; ++i) {
+                (void)place_mesh(ed, res->meshes[i], res->mesh_names[i], slot->at);
+            }
         }
     }
     memset(slot, 0, sizeof *slot);
@@ -326,7 +404,105 @@ void editor_assets_update(Editor *ed)
     EditorImportResult res;
     while (editor_project_poll(ed->project, &res)) {
         finished(ed, &res);
+        editor_project_result_free(ed->project, &res);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Primitives
+// ---------------------------------------------------------------------------
+
+static const char *const primitive_names[EDITOR_PRIMITIVE_COUNT] = {"Cube", "Sphere", "Plane",
+                                                                    "Cylinder"};
+static const char *const primitive_files[EDITOR_PRIMITIVE_COUNT] = {"cube", "sphere", "plane",
+                                                                    "cylinder"};
+
+// The primitive, and how far above its centre its bottom lies.
+static NphResult primitive_mesh(CookPolyMesh *m, EditorPrimitive kind, f32 *out_rest)
+{
+    *out_rest = 0.5F;
+    switch (kind) {
+    case EDITOR_PRIMITIVE_CUBE:
+        return cook_polymesh_cube(m, 1.0F);
+    case EDITOR_PRIMITIVE_SPHERE:
+        return cook_polymesh_sphere(m, 0.5F, 32U, 16U);
+    case EDITOR_PRIMITIVE_PLANE:
+        *out_rest = 0.0F;
+        return cook_polymesh_plane(m, 2.0F, 1U);
+    case EDITOR_PRIMITIVE_CYLINDER:
+        return cook_polymesh_cylinder(m, 0.5F, 1.0F, 32U);
+    case EDITOR_PRIMITIVE_COUNT:
+        break;
+    }
+    return NPH_RESULT_INVALID_ARGUMENT;
+}
+
+NphResult editor_create_primitive(Editor *ed, EditorPrimitive kind)
+{
+    NPH_ASSERT(ed != NULL);
+    if (ed->project == NULL || nph_engine_is_playing(ed->engine)) {
+        return NPH_RESULT_INVALID_STATE;
+    }
+    if ((u32)kind >= (u32)EDITOR_PRIMITIVE_COUNT) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    EditorPlacement *slot = placement_of(ed, 0U);
+    if (slot == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    // A source of its own: the first free name.
+    const char *assets = editor_project_assets_dir(ed->project);
+    char key[EDITOR_PROJECT_PATH_MAX];
+    char path[EDITOR_PROJECT_PATH_MAX * 2U];
+    for (u32 n = 1;; ++n) {
+        if (n > 9999U) {
+            return NPH_RESULT_FULL;
+        }
+        if (n == 1U) {
+            (void)snprintf(key, sizeof key, "meshes/%s.nmesh", primitive_files[kind]);
+        } else {
+            (void)snprintf(key, sizeof key, "meshes/%s_%u.nmesh", primitive_files[kind], n);
+        }
+        (void)snprintf(path, sizeof path, "%s/%s", assets, key);
+        if (!nph_fs_exists(path)) {
+            break;
+        }
+    }
+    char dir[EDITOR_PROJECT_PATH_MAX * 2U];
+    (void)snprintf(dir, sizeof dir, "%s/meshes", assets);
+    CookPolyMesh m;
+    cook_polymesh_init(&m, ed->alloc);
+    f32 rest = 0.0F;
+    NphResult r = nph_fs_create_directories(dir);
+    if (r == NPH_RESULT_OK) {
+        r = primitive_mesh(&m, kind, &rest);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = cook_polymesh_save(&m, path);
+    }
+    cook_polymesh_free(&m);
+    u32 id = 0U;
+    if (r == NPH_RESULT_OK) {
+        r = editor_project_cook(ed->project, key, false, 0U, &id);
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&LOG_EDITOR, "creating a %s: %s", primitive_files[kind],
+                      nph_result_string(r));
+        return r;
+    }
+    char guid_text[EDITOR_PROJECT_PATH_MAX + 8U];
+    (void)snprintf(guid_text, sizeof guid_text, "%s#mesh", key); // the cooker's identity
+    memset(slot, 0, sizeof *slot);
+    slot->id = id;
+    slot->place = true;
+    slot->resolved = true;
+    slot->at = point_ahead(ed);
+    slot->at.y += (f64)rest;
+    slot->kind = (u32)EDITOR_PLACE_MESH;
+    slot->mesh = nph_guid_from_cstr(guid_text);
+    (void)snprintf(slot->name, sizeof slot->name, "%s", primitive_names[kind]);
+    ed->assets.stale = true;
+    return NPH_RESULT_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +651,8 @@ static const char *kind_name(const EditorAssetEntry *e)
     switch ((CookerSourceKind)e->kind) {
     case COOKER_SOURCE_SCENE:
         return "scene";
+    case COOKER_SOURCE_MESH:
+        return "mesh";
     case COOKER_SOURCE_IMAGE:
         return "image";
     case COOKER_SOURCE_NONE:
@@ -500,7 +678,7 @@ static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
     if (e->is_directory && igMenuItem_Bool("Open", NULL, false, true)) {
         action = ACTION_OPEN;
     }
-    if (e->kind == (u32)COOKER_SOURCE_SCENE &&
+    if ((e->kind == (u32)COOKER_SOURCE_SCENE || e->kind == (u32)COOKER_SOURCE_MESH) &&
         igMenuItem_Bool("Place in Scene", "double-click", false, !playing)) {
         action = ACTION_PLACE;
     }
@@ -524,6 +702,7 @@ static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing
     }
     switch ((CookerSourceKind)e->kind) {
     case COOKER_SOURCE_SCENE:
+    case COOKER_SOURCE_MESH:
         return playing ? ACTION_NONE : ACTION_PLACE;
     case COOKER_SOURCE_IMAGE:
         return ACTION_COOK;
@@ -619,8 +798,9 @@ void editor_panel_assets(Editor *ed)
                     target = i;
                 }
             }
-            // A scene drags into the viewport, which places it under the mouse.
-            if (e->kind == (u32)COOKER_SOURCE_SCENE &&
+            // A scene or a mesh drags into the viewport, which places it under
+            // the mouse.
+            if ((e->kind == (u32)COOKER_SOURCE_SCENE || e->kind == (u32)COOKER_SOURCE_MESH) &&
                 igBeginDragDropSource(ImGuiDragDropFlags_None)) {
                 char key[EDITOR_PROJECT_PATH_MAX];
                 if (key_of(a, e->name, key, sizeof key)) {

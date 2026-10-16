@@ -70,8 +70,10 @@ static EditorImportResult import_now(ProjectFixture *f, const char *const *paths
     NTEST_ASSERT_TRUE(editor_project_poll(f->p, &res));
     NTEST_EXPECT_EQ_UINT(res.id, id);
     NTEST_EXPECT_EQ_UINT(res.tag, 42U);
+    NTEST_EXPECT_EQ_UINT(res.written_count, res.cooked); // one per asset written
     EditorImportResult none;
     NTEST_EXPECT_FALSE(editor_project_poll(f->p, &none));
+    editor_project_result_free(f->p, &res); // the counts stay; the list goes
     return res;
 }
 
@@ -81,6 +83,8 @@ static EditorImportResult cook_now(ProjectFixture *f, const char *key, bool forc
     editor_project_wait(f->p);
     EditorImportResult res;
     NTEST_ASSERT_TRUE(editor_project_poll(f->p, &res));
+    NTEST_EXPECT_EQ_UINT(res.written_count, res.cooked);
+    editor_project_result_free(f->p, &res);
     return res;
 }
 
@@ -131,6 +135,7 @@ NTEST_F(ProjectFixture, an_import_copies_cooks_and_resolves)
     NphGuid scene;
     NTEST_ASSERT_TRUE(editor_project_scene_of(f->p, "models/crate.gltf", &scene));
     NTEST_EXPECT_TRUE(nph_guid_equals(scene, res.scenes[0]));
+    NTEST_EXPECT_NULL(res.written); // released by import_now
     // The GUID follows the key, wherever the project is.
     NTEST_EXPECT_TRUE(nph_guid_equals(scene, nph_guid_from_cstr("models/crate.gltf#scene")));
     // The resolver names its file in the cooked directory.
@@ -287,12 +292,15 @@ NTEST_F(ProjectFixture, requests_in_flight_are_bounded)
         NTEST_ASSERT_TRUE(editor_project_poll(f->p, &res));
         NTEST_EXPECT_EQ_UINT(res.tag, i);
         NTEST_EXPECT_EQ_INT(res.result, NPH_RESULT_NOT_FOUND);
+        editor_project_result_free(f->p, &res);
     }
     NTEST_EXPECT_FALSE(editor_project_poll(f->p, &res));
     NTEST_EXPECT_EQ_INT(editor_project_import(f->p, paths, 1U, "", 99U, NULL), NPH_RESULT_OK);
     editor_project_wait(f->p);
     NTEST_EXPECT_TRUE(editor_project_poll(f->p, &res));
-    // A request still queued when the project goes is dropped with it.
+    editor_project_result_free(f->p, &res);
+    // A request still queued when the project goes is dropped with it, and
+    // one finished and not taken is released with it.
     for (u32 i = 0; i < 4U; ++i) {
         NTEST_ASSERT_EQ_INT(editor_project_import(f->p, paths, 1U, "", i, NULL), NPH_RESULT_OK);
     }
