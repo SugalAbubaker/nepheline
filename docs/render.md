@@ -192,8 +192,11 @@ axes, arrows, crosses, grids, and camera frusta. Appending reserves a slot
 with one atomic add, so job workers may draw, but not while
 `nph_render_frame` runs. Three upload buffers rotate (frames in flight + 1),
 so the buffer being written is never one the GPU is reading. Coordinates
-are relative to a 64-bit debug origin. Each of the two lists (depth-tested,
-overlay) holds `debug_lines` lines; extra lines are dropped and counted.
+are relative to a 64-bit debug origin, one per frame: the rotation takes
+the origin current at that moment for every line of the frame, so the
+owner of the frame sets it once and code that only draws reads it with
+`nph_render_debug_origin`. Each of the two lists (depth-tested, overlay)
+holds `debug_lines` lines; extra lines are dropped and counted.
 
 A frame loop that lets jobs draw lines while it renders (the runtime's
 pipelined loop runs the simulation of frame N + 1 during frame N's

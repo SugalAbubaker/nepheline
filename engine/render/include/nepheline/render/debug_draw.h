@@ -11,9 +11,13 @@
 // (NPH_RENDER_DEBUG_OVERLAY).
 //
 // Positions are 32-bit, relative to the debug origin (a 64-bit world
-// position, the world origin by default): a system that draws far from
-// the world origin sets the origin near what it draws, so its lines keep
-// full precision (CLAUDE.md §8.2).
+// position, the world origin by default), so lines keep full precision
+// far from the world origin when the origin is near them (CLAUDE.md §8.2).
+// There is one origin per frame: the rotation takes the origin current at
+// that moment for every line of the frame. Whoever owns the frame sets it
+// once, before any line is drawn. Code that only draws reads it
+// (nph_render_debug_origin) and gives positions relative to it; changing
+// it moves every line of the frame, those already drawn included.
 //
 // Storage: three buffers of NphRendererDesc.debug_lines lines per list,
 // persistently mapped, rotated once per frame so the one being written is
@@ -31,7 +35,7 @@
 // reserved with one atomic add) and may be called from job workers at any
 // time except during the rotation: nph_render_frame without a flip, or
 // nph_render_debug_flip. nph_render_debug_set_origin and the flip are
-// NPH_MAIN_THREAD_ONLY; the origin applies to the lines added after it.
+// NPH_MAIN_THREAD_ONLY.
 
 #include <nepheline/math/affine.h>
 #include <nepheline/render/renderer.h>
@@ -58,7 +62,8 @@ typedef enum NphRenderDebugFlags {
     NPH_RENDER_DEBUG_OVERLAY = 1U << 0U, // drawn on top of everything
 } NphRenderDebugFlags;
 
-// Sets the 64-bit world position that line coordinates are relative to.
+// Sets the 64-bit world position that line coordinates are relative to,
+// for the whole of the frame the next rotation closes (see above).
 void nph_render_debug_set_origin(NphRenderer *r, NphDVec3 origin);
 NphDVec3 nph_render_debug_origin(const NphRenderer *r);
 
