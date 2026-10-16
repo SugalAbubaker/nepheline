@@ -193,9 +193,13 @@ NPH_MUST_USE NphResult nph_transform_system_create(NphWorld *world, NphAllocator
 // Destroys the state. Safe on NULL.
 void nph_transform_system_destroy(NphTransformSystem *ts);
 
-// The system's descriptor for nph_schedule_add_system: it reads
-// LocalTransform and Hierarchy and writes WorldTransform. `ts` must
-// outlive the schedule.
+// The transform system's name in a schedule: systems that need this
+// step's world transforms run after it.
+#define NPH_TRANSFORM_SYSTEM_NAME "nph.transform"
+
+// The system's descriptor for nph_schedule_add_system, named
+// NPH_TRANSFORM_SYSTEM_NAME: it reads LocalTransform and Hierarchy and
+// writes WorldTransform. `ts` must outlive the schedule.
 NphSystemDesc nph_transform_system_desc(NphTransformSystem *ts);
 
 // Runs one update outside a schedule: advances the world tick and updates

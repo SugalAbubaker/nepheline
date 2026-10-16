@@ -14,8 +14,7 @@ static void build(NphWorld *w, const TestIds *ids, NphEntity *out_live, u32 *out
                   NphEntity *out_stale, u32 *out_stale_count)
 {
     NphEntity e[8];
-    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM, ids->position,
-                                     ids->health};
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM, ids->position, ids->health};
     for (u32 i = 0; i < 8U; ++i) {
         NTEST_ASSERT_EQ_INT(nph_world_spawn(w, comps, i % 2U == 0U ? 3U : 2U, &e[i]),
                             NPH_RESULT_OK);
@@ -192,11 +191,10 @@ NTEST(scene_copy, a_copy_needs_an_empty_world_and_reserved_handles)
             } else {
                 handles[0].value = 0U; // null
             }
-            const NphResult r =
-                format == 0U
-                    ? nph_scene_load_text(b, nph_sb_str(&sb), &ld, &res)
-                    : nph_scene_load_binary(b, nph_bin_writer_data(&bw), nph_bin_writer_len(&bw),
-                                            &ld, &res);
+            const NphResult r = format == 0U
+                                    ? nph_scene_load_text(b, nph_sb_str(&sb), &ld, &res)
+                                    : nph_scene_load_binary(b, nph_bin_writer_data(&bw),
+                                                            nph_bin_writer_len(&bw), &ld, &res);
             NTEST_EXPECT_EQ_INT(r, NPH_RESULT_INVALID_ARGUMENT);
             NTEST_EXPECT_TRUE(res.error[0] != '\0');
             nph_world_destroy(b);
@@ -255,8 +253,7 @@ NTEST(scene_copy, unknown_components_can_be_skipped)
     NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), 0U);
     // Skipped, the rest loads.
     ld.skip_unknown_components = 1;
-    NTEST_ASSERT_EQ_INT(nph_scene_load_text(w, nph_str_from_cstr(text), &ld, &res),
-                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_scene_load_text(w, nph_str_from_cstr(text), &ld, &res), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_STR(res.error, "");
     NTEST_ASSERT_EQ_UINT(nph_world_entity_count(w), 2U);
     NphComponentId comps[8];
