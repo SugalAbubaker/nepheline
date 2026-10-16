@@ -39,6 +39,7 @@ typedef struct RenderAsset {
     u32 state; // RenderAssetState
     u32 refs;
     u32 next_free;
+    b32 forgotten; // out of by_guid: its users acquire the GUID anew (render_assets_forget)
     NphAssetHandle handle;
     NphRenderMesh mesh;
     NphRenderMaterial material;
@@ -70,6 +71,14 @@ void render_assets_free(RenderAssetCache *c);
 // cache returns NONE and logs).
 u32 render_assets_acquire(RenderAssetCache *c, NphGuid guid, RenderAssetKind kind);
 void render_assets_release(RenderAssetCache *c, u32 index);
+
+// The entry of `guid`, or RENDER_ASSET_NONE.
+u32 render_assets_find(const RenderAssetCache *c, NphGuid guid);
+
+// Forgets the entry as the one of its GUID, and its asset as the one at its
+// path (asset/loader.h nph_asset_forget): the next acquire of the GUID
+// loads it again into a new entry, while this one stays for its holders.
+void render_assets_forget(RenderAssetCache *c, u32 index);
 
 // Advances loads: LOADING to READY or FAILED, materials WAITING for their
 // textures to READY. Returns the first resource-creation failure that is

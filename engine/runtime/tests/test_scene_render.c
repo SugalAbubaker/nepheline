@@ -596,6 +596,120 @@ NTEST(SceneRender, a_world_switch_keeps_the_shared_assets)
     scene_teardown(&fx);
 }
 
+NTEST(SceneRender, the_host_hides_an_instance_whatever_its_component_says)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx);
+    const NphEntity torus = named(&fx, "torus");
+    const NphEntity ground = named(&fx, "ground");
+    const NphRenderView view = test_view();
+    NTEST_EXPECT_FALSE(nph_scene_renderer_set_hidden(fx.sr, named(&fx, "sun"), true)); // a light
+    NTEST_ASSERT_TRUE(nph_scene_renderer_set_hidden(fx.sr, torus, true));
+    NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 1U);
+    // Moved while hidden, it stays hidden, and shows where it is now.
+    local(&fx, named(&fx, "stage"))->translation.x += 100.0; // out of the view
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 2U); // the torus hidden, the ground out of view
+    NTEST_ASSERT_TRUE(nph_scene_renderer_set_hidden(fx.sr, torus, false));
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 2U); // both out of view: the torus moved with the stage
+    local(&fx, named(&fx, "stage"))->translation.x -= 100.0;
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 0U);
+    // The component and the host both hide: either is enough.
+    NTEST_ASSERT_TRUE(nph_scene_renderer_set_hidden(fx.sr, torus, true));
+    mesh_renderer(&fx, torus)->hidden = 1;
+    (void)sync(&fx);
+    mesh_renderer(&fx, torus)->hidden = 0;
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 1U);
+    // It holds across a new mesh, whose instance starts hidden.
+    mesh_renderer(&fx, torus)->mesh = mesh_renderer(&fx, ground)->mesh;
+    (void)sync(&fx);
+    nph_scene_renderer_wait(fx.sr);
+    const NphSceneRenderStats st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 1U);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_set_hidden(fx.sr, torus, false));
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 0U);
+    scene_teardown(&fx);
+}
+
+NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx);
+    const u32 live = nph_asset_loader_live(fx.loader);
+    const NphEntity torus = named(&fx, "torus");
+    const NphRenderInstance before = nph_scene_renderer_instance(fx.sr, torus);
+    const NphAsset *old_mesh = nph_scene_renderer_mesh_asset(fx.sr, torus);
+    NTEST_ASSERT_NOT_NULL(old_mesh);
+
+    // The torus's mesh: the torus alone loses its instance until it is back.
+    NTEST_EXPECT_EQ_UINT(
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#mesh/0")), 1U);
+    NphSceneRenderStats st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(st.pending, 1U);
+    NTEST_EXPECT_FALSE(
+        nph_render_instance_is_valid(fx.rf.renderer, nph_scene_renderer_instance(fx.sr, torus)));
+    nph_scene_renderer_wait(fx.sr);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st.created, 1U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, SCENE_ASSETS);
+    NTEST_EXPECT_NE_UINT(nph_scene_renderer_instance(fx.sr, torus).value, before.value);
+    NTEST_ASSERT_NOT_NULL(nph_scene_renderer_mesh_asset(fx.sr, torus));
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live); // the old one went
+
+    // The checker texture: its material is made again, so the torus, which
+    // uses it, is drawn again; the ground is untouched.
+    NTEST_EXPECT_EQ_UINT(
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#image/0/color")), 1U);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    nph_scene_renderer_wait(fx.sr);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, SCENE_ASSETS);
+    NTEST_EXPECT_EQ_UINT(st.failed, 0U);
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live);
+
+    // Twice before a sync is once; an asset nothing holds reloads nothing.
+    NTEST_EXPECT_EQ_UINT(
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#material/1")), 1U);
+    NTEST_EXPECT_EQ_UINT(
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#material/1")), 0U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("nothing")), 0U);
+    (void)sync(&fx);
+    nph_scene_renderer_wait(fx.sr);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, SCENE_ASSETS);
+    const NphRenderView view = test_view();
+    const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.draws, 2U);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, create_refuses_an_unprepared_world)
 {
     static SceneFixture fx;

@@ -125,6 +125,22 @@ const NphAsset *nph_scene_renderer_mesh_asset(const NphSceneRenderer *sr, NphEnt
 // The render instance of an entity, or a null handle while it has none.
 NphRenderInstance nph_scene_renderer_instance(const NphSceneRenderer *sr, NphEntity entity);
 
+// Hides the instance of `entity` whatever its MeshRenderer says, or lets the
+// component decide again: the host draws the entity its own way meanwhile
+// (the editor's mesh editing). It holds across changes of the entity's mesh
+// and transform, and ends when the entity stops being mirrored. False when
+// the entity has no mirrored MeshRenderer (nothing is changed).
+bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden);
+
+// Loads the asset with `guid` again, because its file was replaced (a
+// re-import, an edited mesh). The cached version is forgotten (also by the
+// loader, asset/loader.h nph_asset_forget), and so is every material that
+// uses it as a texture. Every entity drawing either, as its mesh or a
+// material, acquires them again at the next sync: it loses its instance
+// until the new versions are ready, as an entity whose MeshRenderer changed
+// does. Returns how many entities that is; 0 when nothing holds the asset.
+u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid);
+
 // ---------------------------------------------------------------------------
 // Importing cooked scenes
 // ---------------------------------------------------------------------------

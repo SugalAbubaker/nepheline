@@ -21,7 +21,9 @@ typedef enum RecordFlags {
     REC_LIGHT = 1U << 1U,   // mirrors a Light
     REC_PENDING = 1U << 2U, // in the pending list, waiting for assets
     REC_FAILED = 1U << 3U,  // its mesh failed: no instance until it changes
-    REC_HIDDEN = 1U << 4U,  // the instance is hidden (by the component or a bad transform)
+    REC_HIDDEN = 1U << 4U,  // the instance is hidden (by the component, a bad transform, the host)
+    REC_HOST_HIDDEN = 1U << 5U, // the host hides it (nph_scene_renderer_set_hidden)
+    REC_RELOAD = 1U << 6U,      // acquire the assets again (nph_scene_renderer_reload)
 } RecordFlags;
 
 typedef struct EntityRecord {
@@ -150,7 +152,7 @@ static void release_mesh(NphSceneRenderer *sr, EntityRecord *r)
     if ((r->flags & (u32)REC_FAILED) != 0U) {
         sr->failed -= 1U;
     }
-    r->flags &= ~(u32)(REC_MESH | REC_FAILED | REC_HIDDEN | REC_PENDING);
+    r->flags &= ~(u32)(REC_MESH | REC_FAILED | REC_HIDDEN | REC_PENDING | REC_RELOAD);
 }
 
 static void release_light(NphSceneRenderer *sr, EntityRecord *r)
@@ -424,13 +426,36 @@ static u64 mesh_source(const NphMeshRenderer *m)
     return h;
 }
 
+static bool hidden_now(const EntityRecord *r, const NphMeshRenderer *m, const NphWorldTransform *wt)
+{
+    return m->hidden != 0 || !drawable(wt) || (r->flags & (u32)REC_HOST_HIDDEN) != 0U;
+}
+
+// The instance's transform (unless hidden) and visibility as of now.
+static NphResult apply_visibility(NphSceneRenderer *sr, EntityRecord *r, const NphMeshRenderer *m,
+                                  const NphWorldTransform *wt)
+{
+    const bool hide = hidden_now(r, m, wt);
+    if (!hide) {
+        const NphRenderTransform t = render_transform(wt);
+        NPH_TRY(nph_render_instance_set_transform(sr->renderer, r->instance, &t));
+        sr->stats.moved += 1U;
+    }
+    if (hide != ((r->flags & (u32)REC_HIDDEN) != 0U)) {
+        nph_render_instance_set_hidden(sr->renderer, r->instance, hide);
+        r->flags ^= (u32)REC_HIDDEN;
+    }
+    return NPH_RESULT_OK;
+}
+
 // The entity's MeshRenderer as of now: new references when the GUIDs
-// changed, the transform and visibility of its instance otherwise.
+// changed (or a reload asks), the transform and visibility of its instance
+// otherwise.
 static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMeshRenderer *m,
                              const NphWorldTransform *wt)
 {
     const u64 source = mesh_source(m);
-    if ((r->flags & (u32)REC_MESH) == 0U || source != r->source) {
+    if ((r->flags & (u32)(REC_MESH | REC_RELOAD)) != (u32)REC_MESH || source != r->source) {
         // The new references first, then the old ones go: an asset named
         // before and after is neither unloaded nor reloaded.
         const u32 mesh = render_assets_acquire(&sr->assets, m->mesh, RENDER_ASSET_MESH);
@@ -449,17 +474,7 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
     if (!nph_render_instance_is_valid(sr->renderer, r->instance)) {
         return NPH_RESULT_OK; // pending or failed: placed when created
     }
-    const bool hide = m->hidden != 0 || !drawable(wt);
-    if (!hide) {
-        const NphRenderTransform t = render_transform(wt);
-        NPH_TRY(nph_render_instance_set_transform(sr->renderer, r->instance, &t));
-        sr->stats.moved += 1U;
-    }
-    if (hide != ((r->flags & (u32)REC_HIDDEN) != 0U)) {
-        nph_render_instance_set_hidden(sr->renderer, r->instance, hide);
-        r->flags ^= (u32)REC_HIDDEN;
-    }
-    return NPH_RESULT_OK;
+    return apply_visibility(sr, r, m, wt);
 }
 
 // Creates the instances whose assets have settled.
@@ -512,7 +527,7 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
         d.materials = table;
         d.material_count = NPH_MESH_RENDERER_MATERIALS;
         d.transform = render_transform(wt);
-        d.hidden = m->hidden;
+        d.hidden = hidden_now(r, m, wt) ? 1 : 0;
         const NphResult cr = nph_render_instance_create(sr->renderer, &d, &r->instance);
         if (cr != NPH_RESULT_OK) {
             first = cr;
@@ -520,7 +535,7 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
             continue;
         }
         r->flags &= ~(u32)(REC_PENDING | REC_HIDDEN);
-        r->flags |= m->hidden != 0 ? (u32)REC_HIDDEN : 0U;
+        r->flags |= d.hidden != 0 ? (u32)REC_HIDDEN : 0U;
         sr->instances += 1U;
         sr->stats.created += 1U;
     }
@@ -832,4 +847,85 @@ NphRenderInstance nph_scene_renderer_instance(const NphSceneRenderer *sr, NphEnt
     NPH_ASSERT(sr != NULL);
     const EntityRecord *r = find_record_const(sr, entity);
     return r != NULL ? r->instance : NPH_RENDER_INSTANCE_NULL;
+}
+
+bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden)
+{
+    NPH_ASSERT(sr != NULL);
+    EntityRecord *r = find_record(sr, entity, NULL);
+    if (r == NULL || (r->flags & (u32)REC_MESH) == 0U) {
+        return false;
+    }
+    if (hidden) {
+        r->flags |= (u32)REC_HOST_HIDDEN;
+    } else {
+        r->flags &= ~(u32)REC_HOST_HIDDEN;
+    }
+    // At once for an instance that exists, with the transform it missed
+    // while hidden; one created later starts this way.
+    const NphMeshRenderer *m =
+        (const NphMeshRenderer *)nph_world_get(sr->world, entity, sr->ids.mesh_renderer);
+    const NphWorldTransform *wt =
+        NPH_WORLD_GET(sr->world, entity, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+    if (m != NULL && wt != NULL && nph_render_instance_is_valid(sr->renderer, r->instance)) {
+        const NphResult res = apply_visibility(sr, r, m, wt);
+        if (res != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "showing an instance again: %s",
+                          nph_result_string(res));
+        }
+    }
+    return true;
+}
+
+static bool forgotten(const RenderAssetCache *c, u32 index)
+{
+    const RenderAsset *a = render_asset(c, index);
+    return a != NULL && a->state != RENDER_ASSET_FREE && a->forgotten != 0;
+}
+
+u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid)
+{
+    NPH_ASSERT(sr != NULL);
+    RenderAssetCache *c = &sr->assets;
+    const u32 index = render_assets_find(c, guid);
+    if (index == RENDER_ASSET_NONE) {
+        return 0U;
+    }
+    render_assets_forget(c, index);
+    // A texture: the materials sampling it are made again with the new one.
+    if (c->items[index].kind == (u32)RENDER_ASSET_TEXTURE) {
+        for (u32 i = 0; i < c->high; ++i) {
+            const RenderAsset *a = &c->items[i];
+            if (a->state == RENDER_ASSET_FREE || a->kind != (u32)RENDER_ASSET_MATERIAL) {
+                continue;
+            }
+            for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+                if (a->textures[t] == index) {
+                    render_assets_forget(c, i);
+                    break;
+                }
+            }
+        }
+    }
+    // Every entity drawing a forgotten entry acquires its assets again at
+    // the next sync, which looks at every chunk.
+    u32 count = 0U;
+    for (u32 i = 0; i < sr->record_high; ++i) {
+        EntityRecord *r = &sr->records[i];
+        if (nph_entity_is_null(r->entity) || (r->flags & (u32)REC_MESH) == 0U) {
+            continue;
+        }
+        bool uses = forgotten(c, r->mesh);
+        for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS && !uses; ++s) {
+            uses = forgotten(c, r->materials[s]);
+        }
+        if (uses) {
+            r->flags |= (u32)REC_RELOAD;
+            ++count;
+        }
+    }
+    if (count != 0U) {
+        sr->full_pass = 1;
+    }
+    return count;
 }

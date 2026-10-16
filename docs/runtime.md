@@ -235,6 +235,18 @@ undrawn (counted, logged once), a material that fails draws with the
 default material, and a MeshRenderer that names no mesh draws nothing and
 is no failure. A frame never waits for a load (§10.5).
 
+Two calls are for a host, such as the editor:
+- `nph_scene_renderer_reload` loads an asset again after its cooked file
+  was replaced (a re-import, an edited mesh). The cached version is
+  forgotten by the cache and the loader (`nph_asset_forget`), along with
+  the materials that use it as a texture. Every entity drawing them
+  acquires them again at the next sync, which visits every chunk, and is
+  without an instance until the new versions are ready.
+- `nph_scene_renderer_set_hidden` hides an entity's instance whatever its
+  MeshRenderer says, while the host draws it its own way (the editor's
+  mesh editing). It holds across mesh and transform changes. Showing the
+  instance again applies the transform it missed.
+
 `nph_scene_import_cooked` spawns a cooked scene asset (asset/scene.h)
 under a named root: one entity per node with its transform and hierarchy,
 a MeshRenderer per mesh instance, a Light per light, and an inactive
@@ -302,7 +314,9 @@ for an editor-sized world.
   time: instances and lights appear when the assets load, follow
   transforms, hide, go with despawns and removals, fail and default
   safely, keep shared assets across world switches, and recover from an
-  overflowed event stream; the camera and the sky;
+  overflowed event stream; a host hides an instance (across moves and a
+  new mesh) and reloads a mesh, a texture through its material, and a
+  material, with nothing left behind; the camera and the sky;
 - the engine: a headless engine leaks nothing (a debug allocator under
   it), configuration precedence and the user config, scenes in both
   formats, console commands, play, pause and steps, the view override, an
