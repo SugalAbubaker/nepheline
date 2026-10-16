@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // The window system against a real display: a hidden window on Windows
 // and under Xvfb in CI. Skipped cleanly on a headless machine.
+#include <nepheline/core/alloc_debug.h>
 #include <nepheline/platform/time.h>
 #include <nepheline/platform/window.h>
 
 #include "test_platform_support.h"
+#include "window_internal.h"
 
 #include <string.h>
 
@@ -223,4 +225,63 @@ NTEST_F(WindowFixture, gamepads_and_vulkan_queries_do_not_fail_without_hardware)
         NTEST_ASSERT_EQ_INT(r, NPH_RESULT_UNSUPPORTED); // no Vulkan loader on this machine
         NTEST_ASSERT_NULL(names);
     }
+}
+
+// Files dropped on a window: one event per drop, the paths by number, the
+// oldest forgotten once NPH_WINDOW_DROP_PATHS newer ones arrived, and
+// nothing left behind when the window goes. No OS lets a program drop
+// files on its own window, so the drops come through the entry point the
+// window system's drop callback uses.
+NTEST(window_system, dropped_files_arrive_with_their_paths)
+{
+    if (!window_system_available()) {
+        NTEST_SKIP("no display available");
+    }
+    static NphDebugAllocator da;
+    nph_debug_allocator_init(&da, nph_allocator_system());
+    NphWindowDesc desc;
+    nph_window_desc_default(&desc);
+    desc.title = "nepheline drop test";
+    desc.visible = 0;
+    NphWindow *w = NULL;
+    NTEST_ASSERT_EQ_INT(nph_window_create(nph_debug_allocator_allocator(&da), &desc, &w),
+                        NPH_RESULT_OK);
+    nph_window_poll_events();
+    NphWindowEvent e;
+    while (nph_window_pop_event(w, &e)) {
+        // whatever creation queued
+    }
+    NTEST_ASSERT_NULL(nph_window_dropped_path(w, 0U)); // nothing dropped yet
+
+    const char *const paths[2] = {"C:/content/scene.gltf", "textures/\xC3\xA9t\xC3\xA9.png"};
+    nph_window_push_drop(w, 2U, paths);
+    const char *const one = "one.png";
+    nph_window_push_drop(w, 1U, &one);
+    nph_window_push_drop(w, 0U, NULL); // an empty drop is no event
+    NTEST_ASSERT_TRUE(nph_window_pop_event(w, &e));
+    NTEST_ASSERT_EQ_UINT(e.type, (u32)NPH_WINDOW_EVENT_DROP);
+    NTEST_ASSERT_EQ_STR(nph_window_event_name((NphWindowEventType)e.type), "drop");
+    NTEST_ASSERT_EQ_UINT(e.u.drop.count, 2U);
+    const u32 first = e.u.drop.first;
+    NTEST_ASSERT_EQ_STR(nph_window_dropped_path(w, first), paths[0]);
+    NTEST_ASSERT_EQ_STR(nph_window_dropped_path(w, first + 1U), paths[1]);
+    NTEST_ASSERT_TRUE(nph_window_pop_event(w, &e));
+    NTEST_ASSERT_EQ_UINT(e.type, (u32)NPH_WINDOW_EVENT_DROP);
+    NTEST_ASSERT_EQ_UINT(e.u.drop.first, first + 2U);
+    NTEST_ASSERT_EQ_UINT(e.u.drop.count, 1U);
+    NTEST_ASSERT_EQ_STR(nph_window_dropped_path(w, first + 2U), "one.png");
+    NTEST_ASSERT_FALSE(nph_window_pop_event(w, &e));
+    NTEST_ASSERT_NULL(nph_window_dropped_path(w, first + 3U)); // not given out
+
+    // The window keeps the newest NPH_WINDOW_DROP_PATHS paths.
+    for (u32 i = 0; i < NPH_WINDOW_DROP_PATHS - 3U; ++i) {
+        nph_window_push_drop(w, 1U, &one);
+    }
+    NTEST_ASSERT_EQ_STR(nph_window_dropped_path(w, first), paths[0]);
+    nph_window_push_drop(w, 1U, &one);
+    NTEST_ASSERT_NULL(nph_window_dropped_path(w, first));
+    NTEST_ASSERT_EQ_STR(nph_window_dropped_path(w, first + 1U), paths[1]);
+    nph_window_destroy(w);
+    NTEST_ASSERT_EQ_UINT(nph_debug_allocator_destroy(&da, NULL, NULL), 0U);
+    nph_window_system_shutdown();
 }

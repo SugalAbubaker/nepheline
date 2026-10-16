@@ -19,6 +19,11 @@
 // returns a snapshot in the standard layout (Xbox-style names), which
 // input.h samples once per frame.
 //
+// Files dropped on a window arrive as one NPH_WINDOW_EVENT_DROP per drop.
+// The event carries numbers, not text (events hold no pointers): the
+// window keeps the latest NPH_WINDOW_DROP_PATHS paths, and
+// nph_window_dropped_path returns each by its number.
+//
 // Vulkan: the window reports the instance extensions it needs and creates
 // a VkSurfaceKHR for an instance; Phase 5 gives it the loader's
 // vkGetInstanceProcAddr first. Nothing here depends on Vulkan headers.
@@ -262,6 +267,7 @@ typedef enum NphWindowEventType {
     NPH_WINDOW_EVENT_ICONIFY,            // iconify: minimised (1) or restored (0)
     NPH_WINDOW_EVENT_MAXIMIZE,           // maximize: maximised (1) or restored (0)
     NPH_WINDOW_EVENT_CLOSE,              // the user asked to close the window
+    NPH_WINDOW_EVENT_DROP,               // drop: files dropped on the window
     NPH_WINDOW_EVENT_COUNT
 } NphWindowEventType;
 
@@ -316,6 +322,10 @@ typedef struct NphWindowEvent {
         struct {
             b32 maximized;
         } maximize;
+        struct {
+            u32 first; // the number of the first path (nph_window_dropped_path)
+            u32 count; // paths first .. first + count - 1, in the order dropped
+        } drop;
     } u;
 } NphWindowEvent;
 
@@ -460,6 +470,17 @@ void nph_window_set_raw_mouse_motion(NphWindow *w, bool enabled);
 
 void nph_window_get_cursor_position(const NphWindow *w, f64 *out_x, f64 *out_y);
 void nph_window_set_cursor_position(NphWindow *w, f64 x, f64 y);
+
+// Paths of files dropped on a window that the window keeps; a power of two.
+#define NPH_WINDOW_DROP_PATHS 256U
+
+// The UTF-8 path of dropped file `number` (an NPH_WINDOW_EVENT_DROP's
+// first .. first + count - 1), or NULL for a number the window no longer
+// keeps (NPH_WINDOW_DROP_PATHS later paths replaced it) or never gave out.
+// The text stays valid until then, or until the window is destroyed.
+// Costs: a drop copies its paths (from the window's allocator) and frees
+// the ones they replace.
+const char *nph_window_dropped_path(const NphWindow *w, u32 number);
 
 // The system clipboard as UTF-8. NPH_RESULT_NOT_FOUND when it holds no
 // text (or the OS refuses), NPH_RESULT_OVERFLOW when `cap` is too small.

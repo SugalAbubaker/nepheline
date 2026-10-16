@@ -793,6 +793,7 @@ static const char *const g_event_names[NPH_WINDOW_EVENT_COUNT] = {
     "none",         "key",         "char",    "mouse button",       "mouse move",
     "mouse scroll", "mouse enter", "resize",  "framebuffer resize", "content scale",
     "move",         "focus",       "iconify", "maximize",           "close",
+    "drop",
 };
 
 const char *nph_window_event_name(NphWindowEventType type)

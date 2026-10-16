@@ -7,6 +7,7 @@
 #include <nepheline/platform/window.h>
 
 #include "platform_internal.h"
+#include "window_internal.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -43,7 +44,15 @@ struct NphWindow {
     u32 windowed_height;
     NphCursorMode cursor_mode;
     NphWindowEvent events[EVENT_QUEUE_CAPACITY];
+    // Dropped paths: number n lives in drop_paths[n & (NPH_WINDOW_DROP_PATHS - 1)]
+    // while drop_next - n <= NPH_WINDOW_DROP_PATHS.
+    char *drop_paths[NPH_WINDOW_DROP_PATHS];
+    u64 drop_sizes[NPH_WINDOW_DROP_PATHS];
+    u32 drop_next; // the number the next dropped path gets
 };
+
+NPH_STATIC_ASSERT((NPH_WINDOW_DROP_PATHS & (NPH_WINDOW_DROP_PATHS - 1U)) == 0U,
+                  "the dropped paths are masked");
 
 NPH_STATIC_ASSERT((EVENT_QUEUE_CAPACITY & (EVENT_QUEUE_CAPACITY - 1U)) == 0U,
                   "the event queue is masked");
@@ -342,6 +351,40 @@ static void on_maximize(GLFWwindow *h, int maximized)
     e->u.maximize.maximized = maximized != 0;
 }
 
+void nph_window_push_drop(NphWindow *w, u32 count, const char *const *paths)
+{
+    NPH_ASSERT(w != NULL && (paths != NULL || count == 0U));
+    if (count == 0U) {
+        return;
+    }
+    const u32 first = w->drop_next;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 slot = w->drop_next & (NPH_WINDOW_DROP_PATHS - 1U);
+        if (w->drop_paths[slot] != NULL) {
+            NPH_FREE(w->alloc, w->drop_paths[slot], w->drop_sizes[slot], 1U);
+            w->drop_paths[slot] = NULL;
+        }
+        const u64 size = (u64)strlen(paths[i]) + 1U;
+        char *copy = (char *)NPH_ALLOC(w->alloc, size, 1U);
+        if (copy != NULL) {
+            memcpy(copy, paths[i], (size_t)size);
+            w->drop_paths[slot] = copy;
+            w->drop_sizes[slot] = size;
+        } else {
+            NPH_LOG_ERROR(&NPH_LOG_PLATFORM, "out of memory for a dropped file's path");
+        }
+        ++w->drop_next;
+    }
+    NphWindowEvent *e = push_event(w, NPH_WINDOW_EVENT_DROP);
+    e->u.drop.first = first;
+    e->u.drop.count = count;
+}
+
+static void on_drop(GLFWwindow *h, int count, const char **paths)
+{
+    nph_window_push_drop(window_of(h), count > 0 ? (u32)count : 0U, paths);
+}
+
 static void on_close(GLFWwindow *h)
 {
     (void)push_event(window_of(h), NPH_WINDOW_EVENT_CLOSE);
@@ -595,6 +638,7 @@ NphResult nph_window_create(NphAllocator *alloc, const NphWindowDesc *desc, NphW
     glfwSetWindowIconifyCallback(handle, on_iconify);
     glfwSetWindowMaximizeCallback(handle, on_maximize);
     glfwSetWindowCloseCallback(handle, on_close);
+    glfwSetDropCallback(handle, on_drop);
     *out = w;
     return NPH_RESULT_OK;
 }
@@ -608,7 +652,23 @@ void nph_window_destroy(NphWindow *w)
         glfwDestroyWindow(w->handle);
     }
     NphAllocator *alloc = w->alloc;
+    for (u32 i = 0; i < NPH_WINDOW_DROP_PATHS; ++i) {
+        if (w->drop_paths[i] != NULL) {
+            NPH_FREE(alloc, w->drop_paths[i], w->drop_sizes[i], 1U);
+        }
+    }
     NPH_FREE_TYPE(alloc, NphWindow, w);
+}
+
+const char *nph_window_dropped_path(const NphWindow *w, u32 number)
+{
+    NPH_ASSERT(w != NULL);
+    // Unsigned distance back from the next number: 1 for the newest path.
+    const u32 age = w->drop_next - number;
+    if (age == 0U || age > NPH_WINDOW_DROP_PATHS) {
+        return NULL;
+    }
+    return w->drop_paths[number & (NPH_WINDOW_DROP_PATHS - 1U)];
 }
 
 bool nph_window_pop_event(NphWindow *w, NphWindowEvent *out)

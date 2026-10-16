@@ -32,7 +32,7 @@ typedef struct Actions {
     NphActionId look_y;
 } Actions;
 
-static void log_event(const NphWindowEvent *e)
+static void log_event(const NphWindow *w, const NphWindowEvent *e)
 {
     switch ((NphWindowEventType)e->type) {
     case NPH_WINDOW_EVENT_KEY:
@@ -84,6 +84,12 @@ static void log_event(const NphWindowEvent *e)
         break;
     case NPH_WINDOW_EVENT_CLOSE:
         NPH_LOG_INFO(&LOG_SAMPLE, "close requested");
+        break;
+    case NPH_WINDOW_EVENT_DROP:
+        for (u32 i = 0; i < e->u.drop.count; ++i) {
+            const char *path = nph_window_dropped_path(w, e->u.drop.first + i);
+            NPH_LOG_INFO(&LOG_SAMPLE, "dropped %s", path != NULL ? path : "(forgotten)");
+        }
         break;
     default:
         NPH_LOG_INFO(&LOG_SAMPLE, "event %s", nph_window_event_name((NphWindowEventType)e->type));
@@ -231,7 +237,7 @@ int main(int argc, char **argv)
         nph_input_begin_frame(input);
         NphWindowEvent e;
         while (nph_window_pop_event(window, &e)) {
-            log_event(&e);
+            log_event(window, &e);
             nph_input_process_event(input, &e);
         }
         const u32 dropped = nph_window_dropped_events(window);
