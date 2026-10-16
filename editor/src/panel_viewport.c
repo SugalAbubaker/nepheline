@@ -10,6 +10,7 @@
 //
 // While playing, a click on the image gives the game the input, and
 // Escape takes it back.
+#include <nepheline/asset/mesh.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/gpu/resources.h>
 #include <nepheline/math/scalar.h>
@@ -199,6 +200,56 @@ void editor_panel_viewport(Editor *ed)
     }
     camera_input(ed, hovered);
     igEnd();
+}
+
+// A sphere around entity `e` in the world: its mesh's bounding sphere when
+// the scene renderer has its mesh loaded, else a small one at its origin.
+static void bounding_sphere(Editor *ed, const NphWorld *w, NphEntity e, NphDVec3 *out_center,
+                            f64 *out_radius)
+{
+    const NphWorldTransform t = editor_world_transform_of(w, e);
+    NphVec3 center = nph_vec3_zero();
+    f32 radius = 0.5F;
+    const NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    const NphAsset *mesh = sr != NULL ? nph_scene_renderer_mesh_asset(sr, e) : NULL;
+    NphMeshView view;
+    if (mesh != NULL && nph_mesh_view(mesh, &view) == NPH_RESULT_OK) {
+        center = view.header->sphere.center;
+        radius = view.header->sphere.radius;
+    }
+    const f32 scale = nph_f32_max3(nph_vec3_length(t.x_axis), nph_vec3_length(t.y_axis),
+                                   nph_vec3_length(t.z_axis));
+    *out_center = nph_world_transform_point(&t, center);
+    *out_radius = (f64)(radius * scale);
+}
+
+void editor_viewport_frame_selection(Editor *ed)
+{
+    const NphWorld *w = nph_engine_world(ed->engine);
+    bool any = false;
+    NphDVec3 lo = nph_dvec3_zero();
+    NphDVec3 hi = nph_dvec3_zero();
+    for (u32 i = 0; i < ed->selection.count; ++i) {
+        const NphEntity e = ed->selection.items[i];
+        if (!nph_world_is_alive(w, e)) {
+            continue;
+        }
+        NphDVec3 c;
+        f64 r = 0.0;
+        bounding_sphere(ed, w, e, &c, &r);
+        const NphDVec3 a = nph_dvec3(c.x - r, c.y - r, c.z - r);
+        const NphDVec3 b = nph_dvec3(c.x + r, c.y + r, c.z + r);
+        lo = any ? nph_dvec3_min(lo, a) : a;
+        hi = any ? nph_dvec3_max(hi, b) : b;
+        any = true;
+    }
+    if (!any) {
+        return;
+    }
+    const NphDVec3 center = nph_dvec3_scale(nph_dvec3_add(lo, hi), 0.5);
+    const NphDVec3 half = nph_dvec3_scale(nph_dvec3_sub(hi, lo), 0.5);
+    const f64 radius = nph_f64_sqrt(half.x * half.x + half.y * half.y + half.z * half.z);
+    editor_camera_focus(&ed->camera, center, radius > 0.25 ? (f32)radius : 0.25F);
 }
 
 void editor_viewport_apply_view(Editor *ed)

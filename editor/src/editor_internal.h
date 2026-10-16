@@ -7,9 +7,12 @@
 #include <nepheline/profile/profiler.h>
 
 #include "camera.h"
+#include "edit.h"
 #include "editor.h"
 #include "editor_log.h"
+#include "history.h"
 #include "imgui_c.h"
+#include "selection.h"
 #include "ui_platform.h"
 #include "ui_renderer.h"
 
@@ -24,10 +27,15 @@
 #define EDITOR_PROFILER_MEMORY     32U
 
 // ImGui knows windows by their names (docking, the layout file).
-#define EDITOR_WINDOW_VIEWPORT "Viewport"
-#define EDITOR_WINDOW_CONSOLE  "Console"
-#define EDITOR_WINDOW_PROFILER "Profiler"
-#define EDITOR_WINDOW_STATS    "Stats"
+#define EDITOR_WINDOW_VIEWPORT  "Viewport"
+#define EDITOR_WINDOW_CONSOLE   "Console"
+#define EDITOR_WINDOW_PROFILER  "Profiler"
+#define EDITOR_WINDOW_STATS     "Stats"
+#define EDITOR_WINDOW_OUTLINER  "Outliner"
+#define EDITOR_WINDOW_INSPECTOR "Inspector"
+
+// Dear ImGui drag-and-drop payload types.
+#define EDITOR_DRAG_ENTITY "nph.entity" // an NphEntity
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
@@ -80,6 +88,8 @@ typedef struct EditorPanels {
     bool console;
     bool profiler;
     bool stats;
+    bool outliner;
+    bool inspector;
     bool demo;    // Dear ImGui's demo window (development builds)
     bool metrics; // Dear ImGui's metrics window
 } EditorPanels;
@@ -88,7 +98,16 @@ typedef enum EditorPopup {
     EDITOR_POPUP_NONE = 0,
     EDITOR_POPUP_OPEN_SCENE,
     EDITOR_POPUP_SAVE_SCENE,
+    EDITOR_POPUP_UNSAVED, // "discard the unsaved changes?" before `pending`
 } EditorPopup;
+
+// What waits for the answer about unsaved changes.
+typedef enum EditorPending {
+    EDITOR_PENDING_NONE = 0,
+    EDITOR_PENDING_NEW,
+    EDITOR_PENDING_OPEN,
+    EDITOR_PENDING_QUIT,
+} EditorPending;
 
 struct Editor {
     NphAllocator *alloc;
@@ -107,7 +126,8 @@ struct Editor {
     UiPlatform platform;
     UiRenderer *renderer;
     u64 last_frame_ns;
-    bool build_layout; // no saved layout: build the default one
+    bool build_layout;  // no saved layout: build the default one
+    u32 focus_defaults; // frames left to bring the default tabs forward after a build
     char layout_path[EDITOR_PATH_MAX];
     NphCvar cv_layout;
     bool cvars_registered;
@@ -122,6 +142,21 @@ struct Editor {
     char scene_path[EDITOR_PATH_MAX];
     char popup_error[160];
     char cvar_filter[64];
+
+    // Editing.
+    EditorHistory *history; // over the edited world
+    EditorSelection selection;
+    char doc_path[EDITOR_PATH_MAX]; // the scene's file; "" while untitled
+    u64 doc_saved_state;            // the history's state when last saved or opened
+    char title[EDITOR_PATH_MAX + 64U];
+    EditorPending pending;
+    bool quit_confirmed; // the window may close with unsaved changes
+    char outliner_filter[64];
+    NphEntity outliner_primary; // the primary selection the outliner last showed
+    bool outliner_reveal;       // open the tree down to a newly selected entity
+    NphEntity renaming;         // renamed in place in the outliner
+    char rename_buf[NPH_TEXT_CAPACITY];
+    bool rename_focus;
 };
 
 // editor.c
@@ -130,7 +165,24 @@ void editor_play_toggle(Editor *ed);
 // Takes the input back from the game (Escape, or play ending).
 void editor_release_game_input(Editor *ed);
 
+// Selection actions (editor.c): each is one undoable step.
+void editor_delete_selection(Editor *ed);
+void editor_duplicate_selection(Editor *ed);
+
+// document.c
+void editor_update_title(Editor *ed);
+
+// panel_outliner.c
+void editor_panel_outliner(Editor *ed);
+// Renames `e` in place in the outliner.
+void editor_begin_rename(Editor *ed, NphEntity e);
+
+// panel_inspector.c
+void editor_panel_inspector(Editor *ed);
+
 // panel_viewport.c
+// Points the editor camera at the selection.
+void editor_viewport_frame_selection(Editor *ed);
 void editor_viewport_free(Editor *ed);
 void editor_panel_viewport(Editor *ed);
 // Sets the engine's view for the frame: the editor's camera while editing.
