@@ -16,11 +16,11 @@
 //     the viewport panel;
 //   - render: the UI pass draws into the backbuffer, sampling that image.
 //
-// An editor is made in steps, because the engine needs the hooks before
-// the editor can use the engine:
+// An editor is made in steps, because the engine needs the hooks and the
+// asset resolver before the editor can use the engine:
 //
 //     editor_create(&desc, &ed);
-//     editor_engine_hooks(ed, &engine_desc.hooks);
+//     editor_engine_desc(ed, &engine_desc);
 //     nph_engine_create(&engine_desc, &engine);
 //     editor_attach(ed, engine);
 //     ... nph_engine_run(engine) ...
@@ -41,6 +41,7 @@
 
 #include "camera.h"
 #include "editor_log.h"
+#include "project.h"
 
 typedef struct Editor Editor;
 
@@ -53,8 +54,15 @@ typedef struct EditorDesc {
 // NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult editor_create(const EditorDesc *desc, Editor **out);
 
-// The hooks to create the engine with (user is the editor).
-void editor_engine_hooks(Editor *ed, NphEngineHooks *out);
+// What the engine is created with: the hooks (`user` the editor), and the
+// asset resolver that names the files of the project's cooked assets by
+// GUID (editor_resolve). The other fields are left as they are.
+void editor_engine_desc(Editor *ed, NphEngineDesc *desc);
+
+// The engine's asset resolver (asset/loader.h NphAssetResolveFn, `user` the
+// editor): the project's (project.h editor_project_resolve) while attached,
+// NPH_RESULT_NOT_FOUND otherwise. NPH_THREADSAFE.
+NphResult editor_resolve(void *user, NphGuid guid, char *buf, u64 cap, u64 *out_len);
 
 // Brings the editor up on `engine` (WINDOWED or OFFSCREEN): its cvars,
 // Dear ImGui and its backends, and the viewport. NPH_RESULT_UNSUPPORTED for
@@ -113,3 +121,22 @@ bool editor_scene_dirty(const Editor *ed);
 
 // The scene's file, or "" while untitled.
 const char *editor_scene_path(const Editor *ed);
+
+// ---------------------------------------------------------------------------
+// Assets (docs/editor.md "Assets")
+// ---------------------------------------------------------------------------
+
+// Imports files as dropping them on the window does: they are copied into
+// the asset browser's folder and cooked on the project's import thread
+// (project.h editor_project_import). With `place`, the scenes among them
+// then join the edited world at the point under (x, y), display units,
+// when that is over the viewport's image, each as one undoable step and
+// selected: the point is worked out at the next frame, and the scenes
+// placed at the first frame outside play after the import is done.
+// NPH_RESULT_INVALID_STATE when not attached; NPH_RESULT_FULL with too
+// many imports outstanding; the errors of editor_project_import.
+NPH_MUST_USE NphResult editor_import(Editor *ed, const char *const *paths, u32 count, bool place,
+                                     f32 x, f32 y);
+
+// The project, NULL when not attached (tests wait for its imports).
+EditorProject *editor_project(Editor *ed);

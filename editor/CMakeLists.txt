@@ -21,6 +21,7 @@ add_library(nph_editor_core STATIC
     src/history.c
     src/history.h
     src/imgui_c.h
+    src/panel_assets.c
     src/panel_console.c
     src/panel_inspector.c
     src/panel_outliner.c
@@ -29,6 +30,8 @@ add_library(nph_editor_core STATIC
     src/panel_viewport.c
     src/picking.c
     src/picking.h
+    src/project.c
+    src/project.h
     src/selection.c
     src/selection.h
     src/ui_platform.c
@@ -38,7 +41,7 @@ add_library(nph_editor_core STATIC
     src/view.c
     src/view.h)
 target_include_directories(nph_editor_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(nph_editor_core PUBLIC nph::options nph::shared nph_cimgui)
+target_link_libraries(nph_editor_core PUBLIC nph::options nph::shared nph::cook_shared nph_cimgui)
 nph_target_use_shaders(nph_editor_core nph_shaders_editor)
 if(MSVC)
     target_compile_definitions(nph_editor_core PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -64,6 +67,7 @@ nph_add_test(editor
         tests/test_editor_log.c
         tests/test_gizmo.c
         tests/test_history.c
+        tests/test_project.c
         tests/test_selection.c
         tests/test_ui_platform.c
     DEPS
@@ -76,8 +80,11 @@ if(NPH_BUILD_TESTS)
     if(NPH_GPU_REQUIRE_VALIDATION)
         target_compile_definitions(editor_tests PRIVATE NPH_GPU_REQUIRE_VALIDATION=1)
     endif()
+    # The cooker tests' helpers: temporary directories and generated scenes.
+    target_include_directories(editor_tests PRIVATE "${CMAKE_SOURCE_DIR}/tools/cook/tests")
     # The runtime tests' cooked showcase (engine/runtime/CMakeLists.txt).
     add_dependencies(editor_tests runtime_test_content)
     target_compile_definitions(editor_tests PRIVATE
-        "NPH_TEST_PACK=\"${CMAKE_BINARY_DIR}/engine/runtime/test_content/$<CONFIG>/showcase.npk\"")
+        "NPH_TEST_PACK=\"${CMAKE_BINARY_DIR}/engine/runtime/test_content/$<CONFIG>/showcase.npk\""
+        "NPH_TEST_SHOWCASE_GLTF=\"${CMAKE_SOURCE_DIR}/samples/asset_viewer/content/showcase.gltf\"")
 endif()

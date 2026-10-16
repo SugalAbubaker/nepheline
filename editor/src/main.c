@@ -3,6 +3,7 @@
 //
 //     nph_editor --pack=showcase.npk --scene=level.nscene
 //     nph_editor --game=game_sandbox.dll editor.layout=my_layout.ini
+//     nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
 //
 // The engine's options and cvars apply (--help, and `cvars` in the
 // console); the editor adds editor.*. The edited world does not simulate:
@@ -42,7 +43,7 @@ static int run(const NphEngineConfig *config, EditorLogSink *log)
     d.config = config;
     d.mode = NPH_ENGINE_MODE_WINDOWED;
     d.app_name = "Nepheline Editor";
-    editor_engine_hooks(ed, &d.hooks);
+    editor_engine_desc(ed, &d);
     NphEngine *engine = NULL;
     NphResult r = nph_engine_create(&d, &engine);
     if (r != NPH_RESULT_OK) {
