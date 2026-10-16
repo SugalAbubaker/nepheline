@@ -28,6 +28,8 @@ supersedes it and both link to each other.
 | [0020](0020-ecs.md) | The ECS: archetype chunks, access-derived scheduling, 64-bit transforms | Accepted |
 | [0021](0021-scene-serialization.md) | Scene files: canonical JSON for the editor, archetype snapshots for the runtime, prefab overrides | Accepted |
 | [0022](0022-profiling.md) | Profiling: zones recorded in core, collected per fiber by the profile module | Accepted |
+| [0023](0023-runtime.md) | The runtime: one engine context and a pipelined fixed-step frame | Accepted |
+| [0024](0024-game-modules.md) | Game modules: C shared libraries against a shared engine, reloaded by migrating the world | Accepted |
 
 ## Template
 

@@ -26,7 +26,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 6 | Assets v1: the `.nph` container, LZ codec, pack archives, VFS, loader and typed views; the cooker (glTF import, mesh pipeline with MikkTSpace tangents and meshlets, our BC4/BC5/BC6H/BC7 encoders, incremental database, packs); fuzzing of every parser in every build | **done** |
 | 7 | Renderer v1: forward PBR reference renderer (GGX, energy compensation, punctual lights in physical units), GPU-computed image-based lighting, pre-exposed HDR with ACES and AgX, debug draw, GPU profiler, primitives; golden-image tests | **done** (`v0.2.0`) |
 | 8 | Scene/ECS: archetypes in 16 KiB SoA chunks, X-macro reflection, queries with change detection, command buffers, a scheduler that derives a dependency graph from declared access and runs systems on the job system, 64-bit transforms and the hierarchy, prefabs with overrides, text and binary scene files; million-entity benchmarks | **done** |
-| 9–15 | Runtime/Editor → Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
+| 9 | Runtime + Editor v1: profiling (zones, timeline, memory); the engine context and its pipelined fixed-step frame; the console, cvars, and the command line; the world-to-renderer bridge; C game modules with hot reload that migrates the world; the player; the editor | in progress |
+| 10–15 | Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -66,17 +67,27 @@ feature and renders it with the PBR reference renderer; `samples/scene_demo`
 builds an orrery as an ECS world, moves it with systems on the scheduler,
 round-trips it through both scene formats, and renders it.
 
+Games are C shared libraries that `nph_player` (and the editor) run, and
+swap in again when they are rebuilt ([`docs/runtime.md`](docs/runtime.md)):
+
+```sh
+nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
+           --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
+```
+
 ## Repository layout
 
 ```
 cmake/          build helpers: configurations, warnings, sanitizers, module/test functions
 engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, tests/
+                (also built together as nepheline_shared, for game modules and the hosts that load them;
+                engine/runtime/player/ is nph_player)
 tools/ntest/    the Nepheline test framework
 tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
 tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_flip tool
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo); samples/common/ holds the cooked-scene bridge and BMP capture they share
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and game_sandbox, a game module; samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
@@ -103,7 +114,8 @@ Modules depend strictly left-to-right:
 - [`docs/asset.md`](docs/asset.md) — asset module: the `.nph` container, the LZ codec, GUIDs, pack archives, the VFS, the loader, the typed views
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
-- [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, benchmarks
+- [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
+- [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records

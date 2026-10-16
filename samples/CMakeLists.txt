@@ -126,3 +126,24 @@ if(TARGET scene_demo)
         set_tests_properties(sample.scene_demo.headless PROPERTIES TIMEOUT 120 LABELS "sample")
     endif()
 endif()
+
+# The Phase 9 sample (CLAUDE.md §12, "Runtime + Editor v1"): a game module,
+# run by nph_player (and the editor) on the asset viewer's content. Its smoke
+# runs play 240 frames in a window (77 without one or without a device) and
+# headless, where the simulation runs without a GPU.
+if(TARGET asset_viewer_content AND NPH_BUILD_SAMPLES)
+    nph_add_game_module(game_sandbox SOURCES game_sandbox/game.c)
+    set_target_properties(game_sandbox PROPERTIES FOLDER "samples")
+    add_dependencies(game_sandbox asset_viewer_content nph_player)
+    if(NPH_BUILD_TESTS)
+        add_test(NAME sample.game_sandbox
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_sandbox>"
+                         "--pack=${asset_viewer_out}/showcase.npk" --frames=240)
+        add_test(NAME sample.game_sandbox_headless
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_sandbox>"
+                         "--pack=${asset_viewer_out}/showcase.npk" --frames=240 --headless
+                         rt.lockstep=true)
+        set_tests_properties(sample.game_sandbox sample.game_sandbox_headless PROPERTIES
+                             TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+    endif()
+endif()

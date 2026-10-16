@@ -269,6 +269,8 @@ jobs:
             -o "$build/coverage.profdata"
           objects=""
           first=""; for exe in "$build"/bin/*_tests; do if [ -z "$first" ]; then first="$exe"; else objects="$objects -object $exe"; fi; done
+          # The game module tests run the engine from its shared library.
+          for lib in "$build"/bin/libnepheline_shared.so; do if [ -f "$lib" ]; then objects="$objects -object $lib"; fi; done
           mkdir -p "$build/coverage"
           status=0
           # One report per engine module: llvm-cov prints paths relative to
@@ -291,16 +293,18 @@ jobs:
           path: build/linux-clang-tidy/coverage/
           if-no-files-found: warn
 
-  # ThreadSanitizer on the job system, the ECS scheduler, and the profiler
-  # (CLAUDE.md §9 "TSan for jobs, audio, and streaming"; §12 Phase 4 exit
-  # "stress tests and TSan clean"): a Debug build with TSan in place of ASan
-  # and UBSan runs the jobs tests, stress suite included, the scene tests,
-  # whose schedules and transform system run on the job system, and the
-  # profile tests, whose rings are written by many threads and drained by
-  # one. The fibers carry the __tsan_*_fiber annotations (ADR-0010 §5), so
-  # parked and migrated jobs are tracked correctly.
+  # ThreadSanitizer on the job system, the ECS scheduler, the profiler, and
+  # the engine's frame (CLAUDE.md §9 "TSan for jobs, audio, and streaming";
+  # §12 Phase 4 exit "stress tests and TSan clean"): a Debug build with TSan
+  # in place of ASan and UBSan runs the jobs tests, stress suite included,
+  # the scene tests, whose schedules and transform system run on the job
+  # system, the profile tests, whose rings are written by many threads and
+  # drained by one, and the game module tests, headless engines whose
+  # simulation job overlaps the main thread's frame (ADR-0023). The fibers
+  # carry the __tsan_*_fiber annotations (ADR-0010 §5), so parked and
+  # migrated jobs are tracked correctly.
   tsan:
-    name: tsan (jobs, scene, profile)
+    name: tsan (jobs, scene, profile, runtime)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -314,12 +318,14 @@ jobs:
         run: >
           cmake --preset linux-clang -DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
           -DNPH_BUILD_BENCHMARKS=OFF -DNPH_BUILD_SAMPLES=OFF
-      - name: Build the jobs, scene, and profile tests
-        run: cmake --build --preset linux-clang-debug --target jobs_tests scene_tests profile_tests
-      - name: Run the jobs, scene, and profile tests under ThreadSanitizer
+      - name: Build the jobs, scene, profile, and game module tests
+        run: >
+          cmake --build --preset linux-clang-debug
+          --target jobs_tests scene_tests profile_tests runtime_game_tests
+      - name: Run them under ThreadSanitizer
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile)$' --output-on-failure
+        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game)$' --output-on-failure
 
   # Single required status check for branch protection; stays stable while the
   # matrix above evolves.

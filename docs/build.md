@@ -228,12 +228,15 @@ nph_add_test(<module>
   off runs the unit tests and checks every engine module against its
   coverage target (see [Coverage](#coverage)). The per-module reports are
   uploaded as the `coverage-reports` artifact.
-- **tsan (jobs, scene)**: a linux-clang Debug build with ThreadSanitizer
-  in place of ASan and UBSan (`-DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF`)
-  runs the job system's tests, stress suite included, and the scene tests,
-  whose schedules and transform system run on the job system (CLAUDE.md §9
-  "TSan for jobs, audio, and streaming"). Locally: the same configure line,
-  then `ctest --preset linux-clang-debug -R '^(jobs|scene)$'`.
+- **tsan (jobs, scene, profile, runtime)**: a linux-clang Debug build with
+  ThreadSanitizer in place of ASan and UBSan (`-DNPH_TSAN=ON -DNPH_ASAN=OFF
+  -DNPH_UBSAN=OFF`) runs the job system's tests, stress suite included; the
+  scene tests, whose schedules and transform system run on the job system;
+  the profile tests, whose rings many threads write and one drains; and the
+  game module tests, headless engines whose simulation job overlaps the
+  main thread's frame (CLAUDE.md §9 "TSan for jobs, audio, and streaming").
+  Locally: the same configure line, then
+  `ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game)$'`.
 - **CI** aggregates the above; it is the single required status check on `main`.
 
 `.github/workflows/benchmarks.yml` runs every CPU benchmark nightly in the

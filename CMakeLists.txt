@@ -51,6 +51,7 @@ include(NphArch)
 include(NphCoverage)
 include(NphModule)
 include(NphShaders)
+include(NphGameModule)
 
 # nph::options carries every compiler setting shared by all Nepheline code:
 # the C standard, warnings-as-errors, per-configuration defines, sanitizers.
@@ -90,6 +91,10 @@ add_subdirectory(engine/runtime)
 
 # Shader sources shared by the engine, its tests, and the samples.
 add_subdirectory(shaders)
+
+# The engine as one shared library, for game modules and the hosts that
+# load them (cmake/NphGameModule.cmake).
+nph_add_engine_shared_library()
 
 # The offline asset cooker (CLAUDE.md §8.8): a library the tests and the
 # samples use, and the nph_cook executable.

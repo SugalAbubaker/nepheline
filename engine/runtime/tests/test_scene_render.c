@@ -464,22 +464,30 @@ NTEST(SceneRender, the_camera_and_the_environment)
     NTEST_ASSERT_FALSE(nph_scene_renderer_view(fx.sr, &view));
     view = test_view();
 
-    // An Environment sets the sky: the next frame recomputes the lighting,
-    // and later frames do not until it changes.
-    (void)test_render_frame(&fx.rf, &view, fx.rf.target);
+    // A world without an Environment has the default sky, set by the first
+    // sync: the first frame computes its lighting, the next ones do not.
     NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_ASSERT_TRUE(fs.environment_updated);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_ASSERT_FALSE(fs.environment_updated);
+    // An Environment with the default values changes nothing.
     const NphComponentId env_comps[1] = {fx.ids.environment};
     NphEntity env;
     NTEST_ASSERT_EQ_INT(nph_world_spawn(fx.world, env_comps, 1U, &env), NPH_RESULT_OK);
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_ASSERT_FALSE(fs.environment_updated);
+    // Edited, it does; unchanged, it does not.
+    NphEnvironment *e = (NphEnvironment *)nph_world_get_mut(fx.world, env, fx.ids.environment);
+    e->luminance = 2000.0F;
     (void)sync(&fx);
     fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_ASSERT_TRUE(fs.environment_updated);
     (void)sync(&fx);
     fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_ASSERT_FALSE(fs.environment_updated);
-    NphEnvironment *e = (NphEnvironment *)nph_world_get_mut(fx.world, env, fx.ids.environment);
-    e->luminance = 2000.0F;
+    // Removed, the default sky comes back.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, env), NPH_RESULT_OK);
     (void)sync(&fx);
     fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_ASSERT_TRUE(fs.environment_updated);

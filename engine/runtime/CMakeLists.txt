@@ -11,6 +11,9 @@ nph_add_module(runtime
         src/components.c
         src/config.c
         src/console.c
+        src/engine.c
+        src/engine_internal.h
+        src/game_host.c
         src/render_assets.c
         src/runtime_internal.h
         src/scene_import.c
@@ -21,6 +24,17 @@ nph_add_module(runtime
 if(MSVC)
     target_compile_definitions(nph_runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
+# The renderer's compiled shaders, where the engine finds them by default.
+nph_target_use_shaders(nph_runtime nph_shaders_render)
+
+# nph_player: runs a game module (player/main.c, docs/runtime.md "The
+# player"). It hosts game modules, so it runs the engine as a shared library.
+add_executable(nph_player player/main.c)
+target_link_libraries(nph_player PRIVATE nph::shared)
+set_target_properties(nph_player PROPERTIES FOLDER "tools")
+if(MSVC)
+    target_compile_definitions(nph_player PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -30,6 +44,7 @@ nph_add_test(runtime
     SOURCES
         tests/test_clock.c
         tests/test_console.c
+        tests/test_engine.c
         tests/test_scene_render.c
         tests/test_sim_input.c
     DEPS
@@ -67,4 +82,28 @@ if(NPH_BUILD_TESTS)
     add_dependencies(runtime_tests runtime_test_content)
     target_compile_definitions(runtime_tests PRIVATE
         "NPH_TEST_PACK=\"${runtime_out}/showcase.npk\"")
+endif()
+
+# The game module tests run against the engine as a shared library, as the
+# player and the editor do, loading three builds of one test game.
+if(NPH_BUILD_TESTS)
+    foreach(v 1 2 3)
+        nph_add_game_module(test_game_v${v} SOURCES tests/games/test_game.c)
+        target_compile_definitions(test_game_v${v} PRIVATE TEST_GAME_VERSION=${v})
+        set_target_properties(test_game_v${v} PROPERTIES FOLDER "tests")
+    endforeach()
+endif()
+nph_add_test(runtime_game
+    SOURCES
+        tests/test_game_modules.c
+        tests/games/test_game.h
+    DEPS
+        nph::shared
+)
+if(NPH_BUILD_TESTS)
+    add_dependencies(runtime_game_tests test_game_v1 test_game_v2 test_game_v3)
+    target_compile_definitions(runtime_game_tests PRIVATE
+        "TEST_GAME_V1=\"$<TARGET_FILE:test_game_v1>\""
+        "TEST_GAME_V2=\"$<TARGET_FILE:test_game_v2>\""
+        "TEST_GAME_V3=\"$<TARGET_FILE:test_game_v3>\"")
 endif()

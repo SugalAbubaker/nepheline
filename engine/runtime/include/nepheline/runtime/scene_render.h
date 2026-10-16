@@ -10,7 +10,8 @@
 //     instance of its mesh with its materials, once those have loaded;
 //   - every entity with a Light and a WorldTransform gets a render light at
 //     its position, pointing along its -Z axis;
-//   - the first Environment sets the sky, and the first active Camera is
+//   - the first Environment sets the sky (a world without one gets the
+//     component's defaults, a clear day), and the first active Camera is
 //     the view (nph_scene_renderer_view).
 // Only what changed is touched: entities in chunks whose MeshRenderer,
 // Light, or WorldTransform columns changed since the previous sync (the
