@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "executable": "runtime_bench.exe",
+  "timestamp": "2026-10-16T20:02:38Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "engine_frame_headless", "label": "", "iterations": 60939, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 3125.000, "min_ns_per_op": 2942.185, "max_ns_per_op": 3743.996},
+    {"name": "engine_frame_headless_10k", "label": "", "iterations": 46132, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 5547.681, "min_ns_per_op": 5354.116, "max_ns_per_op": 6460.819},
+    {"name": "engine_frame_headless_10k_moving", "label": "", "iterations": 4486, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 46755.350, "min_ns_per_op": 45884.886, "max_ns_per_op": 72592.086},
+    {"name": "engine_play_copy_10k", "label": "", "iterations": 166, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2208242.169, "min_ns_per_op": 2185818.072, "max_ns_per_op": 2279196.988},
+    {"name": "sim_input_frame", "label": "", "iterations": 865051, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 288.903, "min_ns_per_op": 288.512, "max_ns_per_op": 289.348},
+    {"name": "console_set_cvar", "label": "", "iterations": 1548466, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 248.807, "min_ns_per_op": 248.464, "max_ns_per_op": 253.519}
+  ]
+}
