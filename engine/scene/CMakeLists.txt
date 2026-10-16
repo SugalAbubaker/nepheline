@@ -39,6 +39,7 @@ nph_add_test(scene
         tests/test_scene_io.c
         tests/test_scene_support.h
         tests/test_schedule.c
+        tests/test_suspend.c
         tests/test_transform.c
         tests/test_world.c
     DEPS
