@@ -449,7 +449,7 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (79 cases): the block codecs against hand-built blocks
+- `cook_tests` (80 cases): the block codecs against hand-built blocks
   from the format descriptions and against the line-fit bound; image
   decoding of every seed, sRGB round trips, exact-area mips (including
   odd sizes), normal renormalisation, edge replication; the mesh pipeline

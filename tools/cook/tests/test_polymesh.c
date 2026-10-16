@@ -490,3 +490,33 @@ NTEST(polymesh, a_copy_is_its_own)
     cook_polymesh_free(&empty);
     cook_polymesh_free(&m);
 }
+
+#ifdef NPH_FUZZ_CORPUS_DIR
+// The fuzz target's seeds (scripts/fuzz_seeds_cook.py) read, so a seed that
+// stops reading fails here rather than quietly in the nightly runs.
+NTEST(polymesh, the_fuzz_corpus_reads)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    static const struct {
+        const char *name;
+        u32 positions;
+        u32 faces;
+    } seeds[] = {
+        {"triangle", 3U, 1U}, {"cube", 8U, 6U},    {"cube_materials_flat", 8U, 6U},
+        {"concave", 18U, 2U}, {"pyramid", 5U, 5U}, {"regression_degenerate", 5U, 3U},
+    };
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(seeds); ++i) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/nmesh/%s", NPH_FUZZ_CORPUS_DIR, seeds[i].name);
+        CookPolyMesh m;
+        NTEST_ASSERT_EQ_INT(cook_polymesh_load(alloc, path, &m), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(m.positions.len, seeds[i].positions);
+        NTEST_EXPECT_EQ_UINT(m.faces.len, seeds[i].faces);
+        if (strcmp(seeds[i].name, "cube") == 0) {
+            NTEST_EXPECT_TRUE(closed(&m));
+            NTEST_EXPECT_NEAR_F64(volume(&m), 1.0, 1e-5);
+        }
+        cook_polymesh_free(&m);
+    }
+}
+#endif
