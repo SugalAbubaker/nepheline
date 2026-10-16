@@ -178,6 +178,15 @@ position, mode, physical size, and scale. Gamepads are polled snapshots in
 the standard layout. Vulkan hooks hand Phase 5 the required instance
 extensions and a `VkSurfaceKHR` without any Vulkan header dependency.
 
+Files dropped on a window arrive as one `NPH_WINDOW_EVENT_DROP` per drop,
+which is how the editor imports content. Events carry no pointers, so a
+drop carries the number of its first path and a count. The window copies
+the paths and keeps the newest `NPH_WINDOW_DROP_PATHS` (256);
+`nph_window_dropped_path` returns one by number, or NULL once newer drops
+have replaced it. No OS lets a program drop files on its own window, so
+the test drives the internal entry point the GLFW callback uses
+(`src/window_internal.h`).
+
 ## Input actions (`input.h`)
 
 `NphInput` turns raw events and gamepad snapshots into per-frame state
