@@ -421,7 +421,9 @@ static void list_folder(Editor *ed)
         }
     }
     nph_dir_close(&it);
-    qsort(a->entries, (size_t)a->entry_count, sizeof *a->entries, compare_entries);
+    if (a->entry_count > 1U) { // `entries` is NULL until the first
+        qsort(a->entries, (size_t)a->entry_count, sizeof *a->entries, compare_entries);
+    }
 }
 
 static void set_folder(Editor *ed, const char *folder)
