@@ -7,11 +7,15 @@
 add_library(nph_editor_core STATIC
     src/camera.c
     src/camera.h
+    src/edit.c
+    src/edit.h
     src/editor.c
     src/editor.h
     src/editor_internal.h
     src/editor_log.c
     src/editor_log.h
+    src/history.c
+    src/history.h
     src/imgui_c.h
     src/panel_console.c
     src/panel_profiler.c
@@ -46,6 +50,7 @@ nph_add_test(editor
         tests/test_camera.c
         tests/test_editor.c
         tests/test_editor_log.c
+        tests/test_history.c
         tests/test_ui_platform.c
     DEPS
         nph_editor_core
