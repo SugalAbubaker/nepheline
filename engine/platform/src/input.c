@@ -247,6 +247,30 @@ static f32 apply_deadzone(f32 v, f32 deadzone)
     return v < 0.0F ? -scaled : scaled;
 }
 
+// A raw state that went down and came back up within the frame.
+static bool tapped(u8 state)
+{
+    return (state & (STATE_PRESSED | STATE_RELEASED | STATE_DOWN)) ==
+           (STATE_PRESSED | STATE_RELEASED);
+}
+
+// Whether a key or button of the binding was pressed and released within
+// the frame: a tap shorter than a frame, which the end-of-frame state
+// alone would never show.
+static bool binding_tapped(const NphInput *input, const Binding *b)
+{
+    switch ((BindingKind)b->kind) {
+    case BINDING_KEY:
+        return tapped(input->keys[b->a]) && mods_match(b->b, input->mods);
+    case BINDING_MOUSE_BUTTON:
+        return tapped(input->mouse[b->a]) && mods_match(b->b, input->mods);
+    case BINDING_KEY_AXIS:
+        return tapped(input->keys[b->a]) || tapped(input->keys[b->b]);
+    default:
+        return false; // axes and polled gamepads have no events within a frame
+    }
+}
+
 // Contribution of one binding: its digital state and its analog value
 // (digital bindings contribute ±1 to the clamped sum; mouse axes are
 // unclamped deltas).
@@ -335,17 +359,23 @@ void nph_input_end_frame(NphInput *input)
     NPH_ASSERT(input != NULL);
     for (u32 a = 0; a < input->action_count; ++a) {
         bool down = false;
+        bool tap = false;
         f32 clamped = 0.0F;
         f32 unclamped = 0.0F;
         for (u32 i = 0; i < input->binding_count; ++i) {
             if (input->bindings[i].action == a) {
                 evaluate_binding(input, &input->bindings[i], &down, &clamped, &unclamped);
+                tap = tap || binding_tapped(input, &input->bindings[i]);
             }
         }
         Action *action = &input->actions[a];
         const bool was_down = (action->state & STATE_DOWN) != 0U;
-        action->state = (u8)((down ? STATE_DOWN : 0U) | (down && !was_down ? STATE_PRESSED : 0U) |
-                             (!down && was_down ? STATE_RELEASED : 0U));
+        // An action idle at both ends of the frame that a binding tapped in
+        // between was pressed and released.
+        const bool tapped_through = tap && !down && !was_down;
+        action->state = (u8)((down ? STATE_DOWN : 0U) |
+                             ((down && !was_down) || tapped_through ? STATE_PRESSED : 0U) |
+                             ((!down && was_down) || tapped_through ? STATE_RELEASED : 0U));
         action->value = clamp_unit(clamped) + unclamped;
     }
 }
