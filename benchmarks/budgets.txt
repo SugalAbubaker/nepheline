@@ -209,3 +209,11 @@ flip_256                       150000000
 png_encode_256                 6000000
 png_decode_256                 6500000
 ref_dfg_256_samples            27000
+
+# profile_bench
+profile_zone_enabled           55
+profile_zone_paused            8
+profile_zone_uninitialised     8
+profile_collect_per_event      45
+tracked_alloc_free_64          250
+system_alloc_free_64           180

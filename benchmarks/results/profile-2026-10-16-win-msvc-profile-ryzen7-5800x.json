@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "executable": "profile_bench.exe",
+  "timestamp": "2026-10-16T17:45:11Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "profile_zone_enabled", "label": "", "iterations": 3546, "items_per_iteration": 4096, "repeats": 7, "ns_per_op": 17.020, "min_ns_per_op": 16.971, "max_ns_per_op": 17.169},
+    {"name": "profile_zone_paused", "label": "", "iterations": 26717, "items_per_iteration": 4096, "repeats": 7, "ns_per_op": 2.276, "min_ns_per_op": 2.272, "max_ns_per_op": 2.320},
+    {"name": "profile_zone_uninitialised", "label": "", "iterations": 26881, "items_per_iteration": 4096, "repeats": 7, "ns_per_op": 2.276, "min_ns_per_op": 2.272, "max_ns_per_op": 2.285},
+    {"name": "profile_collect_per_event", "label": "", "iterations": 1367, "items_per_iteration": 12290, "repeats": 7, "ns_per_op": 14.997, "min_ns_per_op": 14.934, "max_ns_per_op": 15.127},
+    {"name": "tracked_alloc_free_64", "label": "", "iterations": 5180209, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 48.812, "min_ns_per_op": 48.463, "max_ns_per_op": 48.928},
+    {"name": "system_alloc_free_64", "label": "", "iterations": 7027051, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 35.714, "min_ns_per_op": 35.658, "max_ns_per_op": 36.205}
+  ]
+}
