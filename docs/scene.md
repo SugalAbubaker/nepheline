@@ -402,6 +402,14 @@ despawns what was created, and `NphSceneResult::error` says what was
 wrong and where. Both accept exactly the same states; the fuzz targets
 require an accepted file to reach a fixed point through both formats.
 
+Both loaders also give every entity with a LocalTransform its
+WorldTransform back. WorldTransform is derived and never saved, and the
+transform system only updates entities that have it, so without this a
+loaded scene would never be placed or drawn. (Phase 9 found the gap: the
+editor's save, reload, and play cycle depends on it.) It starts at its
+default and the transform system computes it on its next run, since the
+loaded LocalTransform columns are stamped as changed.
+
 ## Profiling
 
 A schedule run is the profiler zone `scene.schedule`; each system run on
