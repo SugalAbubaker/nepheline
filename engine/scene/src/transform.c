@@ -731,7 +731,7 @@ NphSystemDesc nph_transform_system_desc(NphTransformSystem *ts)
     static const NphComponentId writes[1] = {NPH_COMPONENT_ID_WORLD_TRANSFORM};
     NphSystemDesc d;
     memset(&d, 0, sizeof d);
-    d.name = "nph.transform";
+    d.name = NPH_TRANSFORM_SYSTEM_NAME;
     d.run = transform_system_fn;
     d.user = ts;
     d.reads = reads;
