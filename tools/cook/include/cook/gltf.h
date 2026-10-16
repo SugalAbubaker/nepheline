@@ -131,6 +131,23 @@ NPH_MUST_USE NphResult cook_gltf_load_memory(NphAllocator *alloc, const void *da
 // Releases the scene. Safe on a zero-filled scene and twice.
 void cook_gltf_free(CookGltfScene *scene);
 
+// Receives one file a document names (cook_gltf_files).
+typedef void (*CookGltfFileFn)(void *user, const char *relative_path);
+
+// The files a document at `path` names besides itself, which a copy of the
+// document needs beside it: the URIs of its buffers and images that are
+// files (data: URIs and a GLB's binary chunk name none), percent-decoded
+// and normalised (asset/vfs.h nph_vfs_normalize_path), relative to the
+// document's directory with '/' separators. `fn` receives each once,
+// buffers first, in the document's order. Only the document is read; the
+// files it names need not exist. NPH_RESULT_UNSUPPORTED for a URI with a
+// scheme ("https://"), an absolute path, or one that climbs out of the
+// document's directory, which a copy could not keep beside it;
+// NPH_RESULT_NOT_FOUND for a missing document; NPH_RESULT_PARSE_ERROR for
+// one that does not parse.
+NPH_MUST_USE NphResult cook_gltf_files(NphAllocator *alloc, const char *path, CookGltfFileFn fn,
+                                       void *user);
+
 #ifdef __cplusplus
 }
 #endif

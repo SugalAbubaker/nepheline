@@ -2,6 +2,7 @@
 // glTF import (gltf.h): cgltf parses and validates; this file converts the
 // document into the cooker's intermediate form and checks every value it
 // takes from it.
+#include <nepheline/asset/vfs.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
 #include <nepheline/math/affine.h>
@@ -1075,6 +1076,99 @@ NphResult cook_gltf_load_memory(NphAllocator *alloc, const void *data_bytes, u64
     char pseudo[COOK_GLTF_URI_MAX + 16U];
     snprintf(pseudo, sizeof pseudo, "%s/scene.gltf", base_dir != NULL ? base_dir : ".");
     return load(alloc, copy, size, pseudo, base_dir, out);
+}
+
+// ---------------------------------------------------------------------------
+// The files a document names
+// ---------------------------------------------------------------------------
+
+// The file `uri` names, normalised into `out`; *out_named false for
+// embedded data.
+static NphResult uri_file(const char *uri, char *out, u64 cap, bool *out_named)
+{
+    *out_named = false;
+    if (uri == NULL || strncmp(uri, "data:", 5U) == 0) {
+        return NPH_RESULT_OK;
+    }
+    if (strstr(uri, "://") != NULL) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    char decoded[COOK_GLTF_URI_MAX];
+    const u64 n = strlen(uri);
+    if (n >= sizeof decoded) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    memcpy(decoded, uri, (size_t)n + 1U);
+    cgltf_decode_uri(decoded);
+    if (nph_path_is_absolute(nph_str_from_cstr(decoded))) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    // "..": above the document's directory, which a copy cannot keep.
+    const NphResult r = nph_vfs_normalize_path(nph_str_from_cstr(decoded), out, cap, NULL);
+    if (r != NPH_RESULT_OK) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    *out_named = true;
+    return NPH_RESULT_OK;
+}
+
+// The URI of the document's `index`-th file-bearing object: buffers, then
+// images.
+static const char *nth_uri(const cgltf_data *data, cgltf_size index)
+{
+    return index < data->buffers_count ? data->buffers[index].uri
+                                       : data->images[index - data->buffers_count].uri;
+}
+
+NphResult cook_gltf_files(NphAllocator *alloc, const char *path, CookGltfFileFn fn, void *user)
+{
+    NPH_ASSERT(alloc != NULL && path != NULL && fn != NULL);
+    cgltf_options options;
+    gltf_options(alloc, &options);
+    cgltf_size size = 0U;
+    void *bytes = NULL;
+    cgltf_result cr = gltf_file_read(&options.memory, &options.file, path, &size, &bytes);
+    if (cr != cgltf_result_success) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, gltf_result_name(cr));
+        return gltf_result_to_nph(cr);
+    }
+    cgltf_data *data = NULL;
+    cr = size != 0U ? cgltf_parse(&options, bytes, size, &data) : cgltf_result_data_too_short;
+    NphResult r = NPH_RESULT_OK;
+    if (cr != cgltf_result_success) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, gltf_result_name(cr));
+        r = gltf_result_to_nph(cr);
+    }
+    const cgltf_size count = data != NULL ? data->buffers_count + data->images_count : 0U;
+    for (cgltf_size i = 0; i < count && r == NPH_RESULT_OK; ++i) {
+        char file[COOK_GLTF_URI_MAX];
+        bool named = false;
+        r = uri_file(nth_uri(data, i), file, sizeof file, &named);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK,
+                          "%s: \"%s\" is not a file beside the document (a scheme, an absolute "
+                          "path, or above its directory)",
+                          path, nth_uri(data, i));
+            break;
+        }
+        // Each once: the documents are small enough that comparing with
+        // every earlier URI costs less than remembering them.
+        for (cgltf_size j = 0; j < i && named; ++j) {
+            char earlier[COOK_GLTF_URI_MAX];
+            bool earlier_named = false;
+            if (uri_file(nth_uri(data, j), earlier, sizeof earlier, &earlier_named) ==
+                    NPH_RESULT_OK &&
+                earlier_named && strcmp(earlier, file) == 0) {
+                named = false;
+            }
+        }
+        if (named) {
+            fn(user, file);
+        }
+    }
+    cgltf_free(data);
+    cook_block_free(alloc, bytes);
+    return r;
 }
 
 NphResult cook_gltf_load(NphAllocator *alloc, const char *path, CookGltfScene *out)

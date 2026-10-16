@@ -7,6 +7,12 @@ by the tests, the benchmarks, and the build of the samples, and a
 command-line tool, `nph_cook`. Decisions:
 [ADR-0017](adr/0017-cooker.md).
 
+The editor imports through the same sources built over the engine's shared
+library, `nph::cook_shared` (only with `NPH_BUILD_EDITOR`): the editor runs
+one engine, and linking the static modules the cooker uses beside the
+shared library would give it two logs and two job systems
+([ADR-0026](adr/0026-editor-import.md)).
+
 The cooker is the only code that includes the two decoding libraries
 CLAUDE.md §3 allows offline, cgltf and stb_image (`scripts/check_layering.py`
 enforces it), and it never ships: a game links the asset runtime, whose
@@ -74,6 +80,13 @@ the GUIDs stored in it (`nph_asset_load_guid`, [asset.md](asset.md)). One
 image used with two usages (a texture that is both a base colour and an
 emissive map, say) is encoded once per usage.
 
+Keys come from canonical paths: `cooker_canonical_path` makes a path
+absolute, with `/` separators and no `.` or `..` components, and
+`cooker_relative_path` takes the part below a root (names compare without
+case on Windows). `cooker_source_kind` says what the cooker makes of a
+file by its extension. The editor uses all three to decide what lies
+inside a project's sources and what to cook.
+
 **Outputs** mirror the source tree:
 `<key with its last '.' made '_'>/<kind>_<index>_<name>.nph`, for example
 `models/crate_gltf/mesh_0_Crate.nph`, sanitised to `[A-Za-z0-9._-]`. If
@@ -129,6 +142,13 @@ when the document merely uses them; a document that *requires* an
 extension the importer does not implement is refused with
 `NPH_RESULT_UNSUPPORTED`, because skipping it would change what the
 asset looks like.
+
+`cook_gltf_files` lists what a copy of a document needs beside it: the
+files its buffers and images name, percent-decoded and normalised,
+relative to its directory, each once. It reads only the document. A URI
+with a scheme, an absolute path, or one above the document's directory is
+refused, since a copy could not keep it beside the document. The editor's
+import copies a dropped `.gltf` with these files.
 
 ## The mesh pipeline (`mesh.h`)
 
@@ -366,7 +386,7 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (66 cases): the block codecs against hand-built blocks
+- `cook_tests` (71 cases): the block codecs against hand-built blocks
   from the format descriptions and against the line-fit bound; image
   decoding of every seed, sRGB round trips, exact-area mips (including
   odd sizes), normal renormalisation, edge replication; the mesh pipeline
@@ -378,10 +398,12 @@ are logged with everything outside printable ASCII replaced.
   strips and fans, per-primitive attributes, the tangent rules, sparse
   and quantised accessors, cameras and lights per node, deep hierarchies
   and repeated roots, required and used extensions, non-finite values,
-  and malformed documents; the database's round trips, atomic
-  saves, and refusals; the cooker's identities, outputs, collisions,
-  incremental decisions, stale-asset removal, directories, and packs;
-  the command-line tool end to end.
+  and malformed documents; the files a document names (decoded,
+  normalised, once each, a GLB's chunk excluded, and the URIs a copy could
+  not keep refused); the database's round trips, atomic saves, and
+  refusals; the cooker's canonical and relative paths, identities,
+  outputs, collisions, incremental decisions, stale-asset removal,
+  directories, and packs; the command-line tool end to end.
 - `integration_tests` (label `integration`): the GPU BC check above, and
   `test_cook_load.c`, the Phase 6 exit criterion end to end: a generated
   scene with external buffers and images, a data-URI normal map, a mesh

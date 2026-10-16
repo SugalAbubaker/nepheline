@@ -28,7 +28,7 @@ if(NPH_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang"
 endif()
 set_target_properties(nph_cook_thirdparty PROPERTIES FOLDER "tools")
 
-add_library(nph_cooklib STATIC
+set(cook_sources
     src/bc_decode.c
     src/bc_encode.c
     src/cook.c
@@ -42,19 +42,35 @@ add_library(nph_cooklib STATIC
     src/mesh_tangent.c
     src/texture.c
 )
-add_library(nph::cook ALIAS nph_cooklib)
-target_include_directories(nph_cooklib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(nph_cooklib
-    PUBLIC nph::options nph::asset
-    PRIVATE nph_cook_thirdparty cgltf stb)
-if(MSVC)
-    target_compile_definitions(nph_cooklib PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-set_target_properties(nph_cooklib PROPERTIES FOLDER "tools")
 file(GLOB_RECURSE cook_headers CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
-target_sources(nph_cooklib PRIVATE ${cook_headers})
+
+# nph_add_cooklib(<target> <engine>): the cooker library over <engine>,
+# the engine's static modules or its shared library.
+function(nph_add_cooklib target engine)
+    add_library(${target} STATIC ${cook_sources} ${cook_headers})
+    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(${target}
+        PUBLIC nph::options ${engine}
+        PRIVATE nph_cook_thirdparty cgltf stb)
+    if(MSVC)
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    set_target_properties(${target} PROPERTIES FOLDER "tools")
+endfunction()
+
+nph_add_cooklib(nph_cooklib nph::asset)
+add_library(nph::cook ALIAS nph_cooklib)
+
+# The editor's cooker (docs/adr/0026-editor-import.md): the same sources
+# over the engine's shared library, because the editor runs one engine (one
+# log, one job system), which a second, static copy of the modules the
+# cooker uses would split in two.
+if(NPH_BUILD_EDITOR)
+    nph_add_cooklib(nph_cooklib_shared nph::shared)
+    add_library(nph::cook_shared ALIAS nph_cooklib_shared)
+endif()
 
 add_executable(nph_cook src/main.c)
 target_link_libraries(nph_cook PRIVATE nph::options nph::cook)
