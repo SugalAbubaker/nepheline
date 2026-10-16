@@ -13,6 +13,7 @@
 #include "test_cook_support.h"
 
 #include <cook/cooker.h>
+#include <cook/polymesh.h>
 #include <stdlib.h>
 #if !NPH_PLATFORM_WINDOWS
 #include <sys/wait.h>
@@ -560,6 +561,100 @@ NTEST_F(CookFixture, cooks_standalone_images_and_rejects_unknown_files)
     NTEST_ASSERT_NOT_NULL(lin);
     NTEST_ASSERT_EQ_STR(lin->output, "Rough_Metal_tga/tex_linear.nph");
     cooker_destroy(c);
+}
+
+typedef struct CookedLog {
+    NphGuid guids[16];
+    u32 types[16];
+    u32 count;
+} CookedLog;
+
+static void note_cooked(void *user, NphGuid guid, u32 type)
+{
+    CookedLog *log = (CookedLog *)user;
+    NTEST_ASSERT_LT_UINT(log->count, 16U);
+    log->guids[log->count] = guid;
+    log->types[log->count] = type;
+    ++log->count;
+}
+
+NTEST_F(CookFixture, cooks_editable_meshes_and_tells_what_it_wrote)
+{
+    CookPolyMesh m;
+    cook_polymesh_init(&m, f->alloc);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_cylinder(&m, 0.5F, 1.0F, 12U), NPH_RESULT_OK);
+    char dir[1200];
+    char path[1300];
+    test_path_in(&f->dir, "meshes", dir, sizeof dir);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    (void)snprintf(path, sizeof path, "%s/drum.nmesh", dir);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind(path), COOKER_SOURCE_MESH);
+
+    CookedLog log;
+    memset(&log, 0, sizeof log);
+    CookerDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = f->alloc;
+    desc.out_dir = f->out_dir;
+    desc.source_root = f->dir.dir;
+    cook_texture_settings_default(&desc.texture);
+    cook_mesh_settings_default(&desc.mesh);
+    desc.mesh.lz = NPH_LZ_LEVEL_FAST;
+    desc.on_cooked = note_cooked;
+    desc.on_cooked_user = &log;
+    Cooker *c = NULL;
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    const NphGuid guid = nph_guid_from_cstr("meshes/drum.nmesh#mesh");
+    NTEST_ASSERT_EQ_UINT(log.count, 1U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(log.guids[0], guid));
+    NTEST_EXPECT_EQ_UINT(log.types[0], (u32)NPH_ASSET_TYPE_MESH);
+    const CookDbEntry *e =
+        cook_db_find(cooker_db(c), NPH_STR("meshes/drum.nmesh"), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_EXPECT_TRUE(nph_guid_equals(e->guid, guid));
+    NTEST_EXPECT_EQ_STR(e->output, "meshes/drum_nmesh/mesh.nph");
+    // The cooked file is a mesh the runtime can view: the cylinder's
+    // triangles, 12 per side band and 10 per cap.
+    char cooked[1400];
+    (void)snprintf(cooked, sizeof cooked, "%s/%s", f->out_dir, e->output);
+    void *image = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(cooked, f->alloc, &image, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(image, size, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.header.type, (u32)NPH_ASSET_TYPE_MESH);
+    nph_file_free_all(f->alloc, image, size);
+
+    // Current: skipped, and nothing told. Changed: cooked again.
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(log.count, 1U);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).skipped, 1U);
+    m.positions.data[0].y += 0.25F;
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(log.count, 2U);
+
+    // A directory's editable meshes cook with its scenes.
+    char second[1300];
+    (void)snprintf(second, sizeof second, "%s/box.nmesh", dir);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_cube(&m, 1.0F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, second), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_directory(c, dir), NPH_RESULT_OK);
+    NTEST_EXPECT_NOT_NULL(cook_db_find(cooker_db(c), NPH_STR("meshes/box.nmesh"), NPH_STR("mesh")));
+
+    // A mesh without faces, and a file that is not one, are refused.
+    char empty[1300];
+    (void)snprintf(empty, sizeof empty, "%s/empty.nmesh", dir);
+    cook_polymesh_clear(&m);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, empty), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_cook_mesh(c, empty), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(empty, "{ nope", 6U), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_cook_mesh(c, empty), NPH_RESULT_PARSE_ERROR);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).failed, 2U);
+    cooker_destroy(c);
+    cook_polymesh_free(&m);
 }
 
 #ifdef NPH_COOK_EXE

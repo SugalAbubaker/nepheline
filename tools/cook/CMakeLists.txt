@@ -40,6 +40,7 @@ set(cook_sources
     src/mesh_meshlet.c
     src/mesh_optimize.c
     src/mesh_tangent.c
+    src/polymesh.c
     src/texture.c
 )
 file(GLOB_RECURSE cook_headers CONFIGURE_DEPENDS
@@ -92,6 +93,7 @@ nph_add_test(cook
         tests/test_gltf.c
         tests/test_image.c
         tests/test_mesh.c
+        tests/test_polymesh.c
         tests/test_texture.c
     DEPS
         nph::cook

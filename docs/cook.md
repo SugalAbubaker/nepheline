@@ -42,8 +42,8 @@ nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
 A source is a `.gltf`, a `.glb`, an image (`.png`, `.jpg`, `.tga`, `.bmp`,
-`.hdr`), or a directory, whose `.gltf` and `.glb` files are cooked in
-sorted order. `--root` is the source root that identities are relative to
+`.hdr`), an editable mesh (`.nmesh`), or a directory, whose scenes and
+editable meshes are cooked in sorted order. `--root` is the source root that identities are relative to
 (default: the current directory); a source outside it is refused. The
 output directory receives the cooked files and the database; `--pack`
 then writes every asset the database knows into one archive. The exit
@@ -149,6 +149,63 @@ relative to its directory, each once. It reads only the document. A URI
 with a scheme, an absolute path, or one above the document's directory is
 refused, since a copy could not keep it beside the document. The editor's
 import copies a dropped `.gltf` with these files.
+
+## Editable meshes (`polymesh.h`)
+
+The editor's own meshes (CLAUDE.md §8.13 "primitives ... and basic mesh
+editing ..., saved as cooked meshes";
+[ADR-0027](adr/0027-editable-meshes.md)) are `.nmesh` sources: polygon
+meshes the cooker cooks like any other source, into one mesh asset with
+sub-asset `mesh`.
+
+A `CookPolyMesh` is positions and faces. A face is a loop of corners,
+counter-clockwise seen from its front. Each corner has a position and a
+UV of its own, so faces meet with seams where their UVs differ, and each
+face has a material slot.
+- **Triangulation.** Each face is cut in the plane facing its Newell
+  normal (Sutherland, Sproull & Schumacker 1974): a fan when the face is
+  convex, otherwise ear clipping (Eberly, "Triangulation by Ear
+  Clipping", 2002). A face that clipping cannot cut, because it is
+  degenerate or crosses itself, falls back to a fan.
+- **Normals.** They follow the mesh's smoothing angle. A corner averages
+  the normals of the faces around its position that lie within the angle
+  of its own face, weighted by their angles at that position. 0 gives
+  flat faces; the primitives use 60 degrees, so a cube is flat and a
+  sphere is smooth.
+- **The mesh pipeline.** The triangles go through it with their normals
+  and UVs (tangents by MikkTSpace), one submesh per material slot used.
+
+The file is JSON in one canonical form (numbers in their shortest exact
+text, -0 written as 0), so it diffs cleanly:
+
+```json
+{
+  "nmesh": 1,
+  "smoothing": 60,
+  "positions": [[x, y, z], ...],
+  "faces": [{"v": [0, 1, 2, 3], "uv": [[u, v], ...], "m": 0}, ...]
+}
+```
+
+"uv" and "m" are optional. The reader checks every value:
+- the version;
+- finite coordinates within the mesh pipeline's limit;
+- indices in range, and 3 to 256 corners a face;
+- material slots below 8 (a MeshRenderer's);
+- the totals.
+
+It is a fuzz target.
+
+The primitives (cube, plane, cylinder, sphere) are closed where they
+should be, face outwards, and map UVs in [0, 1]. `cook_polymesh_extrude`
+extrudes a set of faces as one region:
+- the region's positions are copied and moved along the mean normal of
+  the region's faces around each;
+- the faces move onto the copies;
+- a quad joins each boundary edge (one no other face of the region
+  shares) to its copy.
+
+A closed mesh stays closed.
 
 ## The mesh pipeline (`mesh.h`)
 
@@ -318,6 +375,11 @@ input must never crash"):
   vertices in all) through the whole pipeline; the written asset must
   pass the runtime's validation and `nph_mesh_view`, so whatever the
   cooker writes from hostile input is something the engine can load.
+- `tests/fuzz/fuzz_nmesh.c`: editable meshes. One that reads must
+  validate, write back to text that reads as the same mesh, stay valid
+  when its faces (up to 64) are extruded, and cook, before and after, into
+  a mesh the runtime can view (the check `fuzz_mesh_check.h` shares with
+  the glTF target).
 - `tests/fuzz/fuzz_image.c`: PNG, JPEG, TGA, BMP, and HDR through
   `cook_image_info` (header only; at most a million texels are decoded)
   and the decoder, then images up to 64 x 64 through the texture cook with
@@ -325,9 +387,10 @@ input must never crash"):
 - Seeds come from `scripts/fuzz_seeds_cook.py` (called by
   `scripts/fuzz_seeds.py`), written from the format descriptions rather
   than by the libraries under test: PNGs (RGBA, grey, palette, 16-bit),
-  TGA and RLE TGA, BMP, flat and RLE HDR, a minimal baseline JPEG, and
-  glTF documents (a triangle, a textured mesh, strips with a sparse
-  accessor, a GLB). Unit tests decode every seed, so a seed that stops
+  TGA and RLE TGA, BMP, flat and RLE HDR, a minimal baseline JPEG, glTF
+  documents (a triangle, a textured mesh, strips with a sparse accessor, a
+  GLB), and editable meshes (a triangle, cubes, concave faces, a pyramid,
+  degenerate faces). Unit tests decode every seed, so a seed that stops
   importing fails the normal build.
 
 Every fuzz target, the asset module's included, runs in two forms
@@ -386,7 +449,7 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (71 cases): the block codecs against hand-built blocks
+- `cook_tests` (79 cases): the block codecs against hand-built blocks
   from the format descriptions and against the line-fit bound; image
   decoding of every seed, sRGB round trips, exact-area mips (including
   odd sizes), normal renormalisation, edge replication; the mesh pipeline
@@ -401,9 +464,14 @@ are logged with everything outside printable ASCII replaced.
   and malformed documents; the files a document names (decoded,
   normalised, once each, a GLB's chunk excluded, and the URIs a copy could
   not keep refused); the database's round trips, atomic saves, and
-  refusals; the cooker's canonical and relative paths, identities,
-  outputs, collisions, incremental decisions, stale-asset removal,
-  directories, and packs; the command-line tool end to end.
+  refusals; editable meshes (closed primitives with their volumes,
+  triangulation of convex, concave, star-shaped, and degenerate faces
+  into their own area, normals by the smoothing angle, submeshes by
+  material, the file read back and refused where it must be, extrusion
+  that keeps a mesh closed, copies); the cooker's canonical and relative
+  paths, identities, outputs, collisions, incremental decisions,
+  stale-asset removal, directories, packs, and editable meshes cooked
+  with the assets written reported; the command-line tool end to end.
 - `integration_tests` (label `integration`): the GPU BC check above, and
   `test_cook_load.c`, the Phase 6 exit criterion end to end: a generated
   scene with external buffers and images, a data-URI normal map, a mesh

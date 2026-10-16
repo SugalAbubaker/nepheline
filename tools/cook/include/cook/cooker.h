@@ -14,7 +14,8 @@
 //
 // A glTF file becomes one asset per mesh, material, and texture (one per
 // image and usage) plus one scene asset; an image file becomes one
-// texture asset. Output paths mirror the source tree:
+// texture asset; an editable mesh (`.nmesh`, polymesh.h) becomes one mesh
+// asset. Output paths mirror the source tree:
 // `<key, its '.' made '_'>/<kind>_<index>_<name>.nph` (for example
 // `models/crate_gltf/mesh_0_Crate.nph`), sanitised to [A-Za-z0-9._-];
 // if sanitising ever makes two assets collide, the later one gets a
@@ -54,6 +55,11 @@ typedef struct CookerDesc {
     b32 force;                   // recook everything
     CookTextureSettings texture; // defaults for textures; the usage is set per material slot
     CookMeshSettings mesh;
+    // Optional: told of every asset written (not of those found current), on
+    // the cooker's thread, with its GUID and NphAssetType: how the editor
+    // knows what to reload.
+    void (*on_cooked)(void *user, NphGuid guid, u32 type);
+    void *on_cooked_user;
 } CookerDesc;
 
 typedef struct CookerStats {
@@ -75,6 +81,7 @@ typedef enum CookerSourceKind {
     COOKER_SOURCE_NONE = 0, // not a source the cooker reads
     COOKER_SOURCE_SCENE,    // .gltf and .glb
     COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, and .hdr
+    COOKER_SOURCE_MESH,     // .nmesh (polymesh.h)
 } CookerSourceKind;
 
 CookerSourceKind cooker_source_kind(const char *path);
@@ -84,10 +91,10 @@ CookerSourceKind cooker_source_kind(const char *path);
 // (cooker_cook_directory). NPH_RESULT_UNSUPPORTED for another extension.
 NPH_MUST_USE NphResult cooker_cook_file(Cooker *cooker, const char *source_path);
 
-// Cooks every .gltf and .glb file under `dir`, recursively, in name order
-// (images are cooked through the scenes that use them, or one by one with
-// cooker_cook_image). The first error is returned after every file was
-// tried.
+// Cooks every scene (.gltf, .glb) and editable mesh (.nmesh) under `dir`,
+// recursively, in name order (images are cooked through the scenes that
+// use them, or one by one with cooker_cook_image). The first error is
+// returned after every file was tried.
 NPH_MUST_USE NphResult cooker_cook_directory(Cooker *cooker, const char *dir);
 
 // Cooks a glTF scene with every asset it contains.
@@ -96,6 +103,12 @@ NPH_MUST_USE NphResult cooker_cook_gltf(Cooker *cooker, const char *source_path)
 // Cooks an image as a texture of the given usage.
 NPH_MUST_USE NphResult cooker_cook_image(Cooker *cooker, const char *source_path,
                                          CookTextureUsage usage);
+
+// Cooks an editable mesh (polymesh.h) as a mesh asset, sub-asset "mesh":
+// its faces triangulated, with normals by its smoothing angle, through the
+// mesh pipeline. NPH_RESULT_INVALID_ARGUMENT for a mesh without faces; the
+// reader's errors.
+NPH_MUST_USE NphResult cooker_cook_mesh(Cooker *cooker, const char *source_path);
 
 // Writes every asset the database knows into a pack at `pack_path`, with
 // the output paths as entry paths. NPH_RESULT_NOT_FOUND when an asset's
