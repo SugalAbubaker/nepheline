@@ -61,3 +61,10 @@ nph_add_shaders(nph_shaders_bench
         bench/bench_sample.frag
         bench/bench_visbuffer.frag
 )
+
+# The editor's UI (editor/src/ui_renderer.c): Dear ImGui's draw data.
+nph_add_shaders(nph_shaders_editor
+    SOURCES
+        editor/ui.vert
+        editor/ui.frag
+)
