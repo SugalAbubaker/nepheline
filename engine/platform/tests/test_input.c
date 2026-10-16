@@ -129,6 +129,59 @@ NTEST_F(InputFixture, key_edges_across_frames)
     frame(f->input, &bogus, 1U);
 }
 
+// A key tapped and released between two frames' ends still presses and
+// releases the action it is bound to (a tap shorter than a frame is common
+// at editor frame rates).
+NTEST_F(InputFixture, actions_see_taps_within_a_frame)
+{
+    NphActionId jump = NPH_ACTION_INVALID;
+    NphActionId fire = NPH_ACTION_INVALID;
+    NphActionId strafe = NPH_ACTION_INVALID;
+    NTEST_ASSERT_EQ_INT(nph_input_action_register(f->input, "jump", &jump), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_input_action_register(f->input, "fire", &fire), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_input_action_register(f->input, "strafe", &strafe), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_input_bind_key(f->input, jump, NPH_KEY_SPACE, NPH_MOD_ANY),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_input_bind_mouse_button(f->input, fire, NPH_MOUSE_BUTTON_LEFT, 0U),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_input_bind_key_axis(f->input, strafe, NPH_KEY_A, NPH_KEY_D),
+                        NPH_RESULT_OK);
+    const NphWindowEvent taps[6] = {
+        key_event(NPH_KEY_SPACE, NPH_KEY_ACTION_PRESS, 0U),
+        key_event(NPH_KEY_SPACE, NPH_KEY_ACTION_RELEASE, 0U),
+        mouse_button_event(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS, 0U),
+        mouse_button_event(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE, 0U),
+        key_event(NPH_KEY_D, NPH_KEY_ACTION_PRESS, 0U),
+        key_event(NPH_KEY_D, NPH_KEY_ACTION_RELEASE, 0U)};
+    frame(f->input, taps, 6U);
+    const NphActionId all[3] = {jump, fire, strafe};
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_ASSERT_TRUE(nph_input_action_pressed(f->input, all[i]));
+        NTEST_ASSERT_TRUE(nph_input_action_released(f->input, all[i]));
+        NTEST_ASSERT_FALSE(nph_input_action_down(f->input, all[i]));
+    }
+    NTEST_ASSERT_NEAR_F32(nph_input_action_value(f->input, strafe), 0.0F, 0.0F);
+    // The next frame shows nothing.
+    frame(f->input, NULL, 0U);
+    NTEST_ASSERT_FALSE(nph_input_action_pressed(f->input, jump));
+    NTEST_ASSERT_FALSE(nph_input_action_released(f->input, jump));
+    // A tap with the wrong modifiers does not press a modifier-exact binding.
+    const NphWindowEvent shift_click[2] = {
+        mouse_button_event(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS, NPH_MOD_SHIFT),
+        mouse_button_event(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE, NPH_MOD_SHIFT)};
+    frame(f->input, shift_click, 2U);
+    NTEST_ASSERT_FALSE(nph_input_action_pressed(f->input, fire));
+    // A held action does not get a second press from a tap of another
+    // binding.
+    const NphWindowEvent hold = key_event(NPH_KEY_A, NPH_KEY_ACTION_PRESS, 0U);
+    frame(f->input, &hold, 1U);
+    NTEST_ASSERT_TRUE(nph_input_action_pressed(f->input, strafe));
+    frame(f->input, &taps[4], 2U); // D tapped while A is held
+    NTEST_ASSERT_TRUE(nph_input_action_down(f->input, strafe));
+    NTEST_ASSERT_FALSE(nph_input_action_pressed(f->input, strafe));
+    NTEST_ASSERT_FALSE(nph_input_action_released(f->input, strafe));
+}
+
 NTEST_F(InputFixture, mouse_buttons_motion_scroll_and_text)
 {
     NphWindowEvent events[6] = {
