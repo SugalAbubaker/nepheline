@@ -86,6 +86,7 @@ add_subdirectory(engine/render)
 add_subdirectory(engine/asset)
 add_subdirectory(engine/scene)
 add_subdirectory(engine/profile)
+add_subdirectory(engine/runtime)
 
 # Shader sources shared by the engine, its tests, and the samples.
 add_subdirectory(shaders)
@@ -109,7 +110,8 @@ endif()
 # The aggregate target a game or tool links to get the whole engine.
 add_library(nepheline INTERFACE)
 target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs nph::gpu
-                                          nph::render nph::asset nph::scene nph::profile)
+                                          nph::render nph::asset nph::scene nph::profile
+                                          nph::runtime)
 
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
