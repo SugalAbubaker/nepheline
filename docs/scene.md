@@ -565,7 +565,7 @@ earlier, shallower runs had found three text/binary inconsistencies,
 which are fixed.
 
 **ThreadSanitizer.** CI runs the scene tests under TSan with the job
-system's (`tsan (jobs, scene)`).
+system's (`tsan (jobs, scene, profile, runtime)`).
 
 ## Limitations and future work
 

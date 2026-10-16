@@ -59,10 +59,12 @@ struct NphSceneRenderer {
     NphQuery *mesh_query;   // MeshRenderer, WorldTransform (both change-filtered)
     NphQuery *light_query;  // Light, WorldTransform (both change-filtered)
     NphQuery *camera_query; // Camera, WorldTransform
-    NphQuery *env_query;    // Environment (change-filtered)
+    NphQuery *env_query;    // Environment
     u32 last_tick;
     b32 full_pass; // the next sync looks at every chunk
     b32 has_view;
+    b32 has_env;        // `env` was applied to the renderer
+    NphEnvironment env; // the sky last applied
     NphRenderCamera camera;
     f32 ev100;
     u32 tonemapper;
@@ -284,7 +286,7 @@ static NphResult bind_world(NphSceneRenderer *sr, NphWorld *world)
         nph_term_changed(nph_term_read(NPH_COMPONENT_ID_WORLD_TRANSFORM))};
     const NphQueryTerm camera_terms[2] = {nph_term_read(ids.camera),
                                           nph_term_read(NPH_COMPONENT_ID_WORLD_TRANSFORM)};
-    const NphQueryTerm env_terms[1] = {nph_term_changed(nph_term_read(ids.environment))};
+    const NphQueryTerm env_terms[1] = {nph_term_read(ids.environment)};
     const NphQueryDesc mq = {mesh_terms, 2U};
     const NphQueryDesc lq = {light_terms, 2U};
     const NphQueryDesc cq = {camera_terms, 2U};
@@ -612,15 +614,40 @@ static NphResult sync_lights(NphSceneRenderer *sr, u32 now)
     return NPH_RESULT_OK;
 }
 
-static NphResult sync_environment(NphSceneRenderer *sr, u32 now)
+static bool vec3_bits_equal(NphVec3 a, NphVec3 b)
+{
+    return nph_f32_to_bits(a.x) == nph_f32_to_bits(b.x) &&
+           nph_f32_to_bits(a.y) == nph_f32_to_bits(b.y) &&
+           nph_f32_to_bits(a.z) == nph_f32_to_bits(b.z);
+}
+
+// By bits, so a NaN someone typed in does not make every frame differ.
+static bool env_equal(const NphEnvironment *a, const NphEnvironment *b)
+{
+    return vec3_bits_equal(a->zenith, b->zenith) && vec3_bits_equal(a->horizon, b->horizon) &&
+           vec3_bits_equal(a->ground, b->ground) &&
+           nph_f32_to_bits(a->luminance) == nph_f32_to_bits(b->luminance) &&
+           nph_f32_to_bits(a->intensity) == nph_f32_to_bits(b->intensity);
+}
+
+// The sky: the world's first Environment (by chunk order), or the
+// component's defaults when it has none, applied when it differs from the
+// sky last applied. Comparing values rather than watching for changes
+// handles the Environment being added, edited, or removed alike, and a
+// world switch to a world with the same sky (play-in-editor) recomputes
+// nothing.
+static NphResult sync_environment(NphSceneRenderer *sr)
 {
     NphQueryIter it;
-    start_iter(sr, sr->env_query, now, &it);
+    nph_query_iter(sr->env_query, &it);
     NphChunkView v;
-    if (!nph_query_next(&it, &v)) {
+    const NphEnvironment *e = (const NphEnvironment *)NphEnvironment_component()->defaults;
+    if (nph_query_next(&it, &v)) {
+        e = NPH_CHUNK_COLUMN(&v, 0, NphEnvironment);
+    }
+    if (sr->has_env && env_equal(&sr->env, e)) {
         return NPH_RESULT_OK;
     }
-    const NphEnvironment *e = NPH_CHUNK_COLUMN(&v, 0, NphEnvironment);
     NphRenderEnvironmentDesc d;
     memset(&d, 0, sizeof d);
     d.source = NPH_RENDER_ENV_SKY;
@@ -630,7 +657,10 @@ static NphResult sync_environment(NphSceneRenderer *sr, u32 now)
     d.sky.horizon = nph_vec3_scale(e->horizon, lum);
     d.sky.ground = nph_vec3_scale(e->ground, lum);
     d.intensity = e->intensity > 0.0F ? e->intensity : 1e-6F; // 0 would mean "the default 1"
-    return nph_render_set_environment(sr->renderer, &d);
+    NPH_TRY(nph_render_set_environment(sr->renderer, &d));
+    sr->env = *e;
+    sr->has_env = 1;
+    return NPH_RESULT_OK;
 }
 
 // The view: the active camera with the lowest entity slot.
@@ -744,7 +774,7 @@ NphResult nph_scene_renderer_sync(NphSceneRenderer *sr, NphSceneRenderStats *out
     release_retired(sr); // the new world holds what it shares with the old one
     step = sync_lights(sr, now);
     r = r != NPH_RESULT_OK ? r : step;
-    step = sync_environment(sr, now);
+    step = sync_environment(sr);
     r = r != NPH_RESULT_OK ? r : step;
     sync_camera(sr);
     sr->last_tick = now;
