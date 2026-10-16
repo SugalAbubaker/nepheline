@@ -8,6 +8,7 @@
 // across one. The functions that complete a switch (after_switch) are
 // non-inlined for the same reason.
 #include <nepheline/core/assert.h>
+#include <nepheline/core/profile.h>
 #include <nepheline/core/ring.h>
 #include <nepheline/jobs/deque.h>
 #include <nepheline/jobs/jobs.h>
@@ -600,6 +601,10 @@ static void publish_wait(NphJobSystem *js, NphJobWaitNode *node);
 static NPH_NO_INLINE void after_switch(void)
 {
     NphJobWorker *w = current_worker();
+    // The profiler follows a job that parks on one thread and resumes on
+    // another by the fiber each thread runs (core/profile.h).
+    NPH_PROFILE_FIBER(w->current_fiber == &w->thread_fiber ? NPH_PROFILE_NO_FIBER
+                                                           : fiber_index(w->js, w->current_fiber));
     NphFiber *f = w->fiber_to_free;
     if (f != NULL) {
         w->fiber_to_free = NULL;
@@ -864,11 +869,13 @@ static void execute_job(NphJobSystem *js, u32 elem, bool scheduler_context)
     u32 *depth_slot = &js->fiber_depths[fiber_index(js, w->current_fiber)];
     const u32 outer_depth = *depth_slot;
     *depth_slot = depth;
+    NPH_PROFILE_BEGIN(r.name);
     if (r.kind == JOB_KIND_RANGE) {
         run_range(js, w, &r, depth);
     } else {
         r.fn.single(r.user);
     }
+    NPH_PROFILE_END();
     *depth_slot = outer_depth;
     // The job may have waited and come back on another thread.
     w = current_worker();
@@ -886,11 +893,13 @@ static void execute_io_job(NphJobSystem *js, u32 elem)
     const u32 index = job_index_of(elem);
     const NphJobRecord r = js->jobs[index];
     free_job(js, NULL, index);
+    NPH_PROFILE_BEGIN(r.name);
     if (r.kind == JOB_KIND_RANGE) {
         r.fn.range(r.user, r.begin, r.end);
     } else {
         r.fn.single(r.user);
     }
+    NPH_PROFILE_END();
     nph_atomic_fetch_add_u64(&js->jobs_io_executed, 1U, NPH_MEMORY_ORDER_RELAXED);
     if (r.counter != NULL) {
         signal_counter(js, r.counter, false);
@@ -1130,6 +1139,10 @@ static void worker_thread_main(void *user)
         nph_thread_sleep_ns((u64)js->last_worker_start_delay_ms * NPH_TIME_NS_PER_MS);
     }
     set_current_worker(w);
+    // A lane of the profiler's timeline (a no-op when it is not running).
+    char name[NPH_PROFILE_THREAD_NAME_MAX];
+    (void)snprintf(name, sizeof name, "job-worker-%u", w->index);
+    NPH_IGNORE_RESULT(nph_profile_thread_attach(name));
     nph_fiber_init_thread(&w->thread_fiber);
     // The first fiber was set aside for this worker at creation. Taking one
     // from the pool here instead lost a race: a thread that starts late
@@ -1142,6 +1155,7 @@ static void worker_thread_main(void *user)
     after_switch();
     nph_fiber_release_thread(&w->thread_fiber);
     flush_job_cache(js, w);
+    nph_profile_thread_detach();
     set_current_worker(NULL);
 }
 
@@ -1150,11 +1164,15 @@ static void io_thread_main(void *user)
     NphJobIoThread *t = (NphJobIoThread *)user;
     NphJobSystem *js = t->js;
     set_io_thread(1);
+    char name[NPH_PROFILE_THREAD_NAME_MAX];
+    (void)snprintf(name, sizeof name, "job-io-%u", t->index);
+    NPH_IGNORE_RESULT(nph_profile_thread_attach(name));
     for (;;) {
         nph_semaphore_wait(&js->io_wake); // one permit per job, plus one per thread at stop
         u32 elem;
         while (!nph_mpmc_ring_pop(&js->io_queue, &elem)) {
             if (nph_atomic_load_u32(&js->stop, NPH_MEMORY_ORDER_ACQUIRE) != 0U) {
+                nph_profile_thread_detach();
                 set_io_thread(0);
                 return;
             }

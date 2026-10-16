@@ -5,6 +5,7 @@
 
 #include <nepheline/core/arena.h>
 #include <nepheline/core/assert.h>
+#include <nepheline/core/profile.h>
 #include <nepheline/platform/time.h>
 #include <nepheline/scene/schedule.h>
 
@@ -639,20 +640,27 @@ static void chunk_piece(void *user, u32 begin, u32 end)
     const ChunkRun *cr = (const ChunkRun *)user;
     NphSystemContext ctx = make_context(cr->s, cr->sys);
     ctx.internal_piece = begin;
+    NPH_PROFILE_BEGIN(cr->sys->name);
     for (u32 i = begin; i < end; ++i) {
         NphChunkView view;
         nph_query_chunk_view(cr->sys->query, cr->chunks[i], ctx.tick, &view);
         cr->sys->run_chunk(&ctx, &view);
     }
+    NPH_PROFILE_END();
     register_commands(cr->s, cr->sys, begin, ctx.internal_commands);
 }
 
-static void execute(NphSchedule *s, System *sys)
+// Runs one system. `zone` brackets it in a profiler zone of its own name;
+// a system that runs as a job already has one (the job's).
+static void execute(NphSchedule *s, System *sys, bool zone)
 {
     if (!sys->runs_this_time) {
         return;
     }
     const u64 t0 = nph_time_now_ns();
+    if (zone) {
+        NPH_PROFILE_BEGIN(sys->name);
+    }
     u32 chunk_count = 0U;
     if (sys->run != NULL) {
         NphSystemContext ctx = make_context(s, sys);
@@ -685,6 +693,9 @@ static void execute(NphSchedule *s, System *sys)
             chunk_count = n;
         }
     }
+    if (zone) {
+        NPH_PROFILE_END();
+    }
     sys->stats.runs += 1U;
     sys->stats.last_ns = nph_time_now_ns() - t0;
     sys->stats.last_chunks = chunk_count;
@@ -697,7 +708,7 @@ static void system_job(void *user)
 {
     System *sys = (System *)user;
     NphSchedule *s = sys->schedule;
-    execute(s, sys);
+    execute(s, sys, false);
     for (u32 i = 0; i < sys->succ_count; ++i) {
         System *next = s->systems[sys->succ[i]];
         if (nph_atomic_fetch_sub_u32(&next->remaining, 1U, NPH_MEMORY_ORDER_ACQ_REL) == 1U) {
@@ -788,14 +799,14 @@ static void run_stage(NphSchedule *s, u32 stage)
         if (!exclusive) {
             w->frozen += 1U;
         }
-        execute(s, head);
+        execute(s, head, true);
         if (!exclusive) {
             w->frozen -= 1U;
         }
     } else if (s->jobs == NULL) {
         w->frozen += 1U;
         for (u32 pos = first; pos < last; ++pos) {
-            execute(s, s->systems[s->order[pos]]);
+            execute(s, s->systems[s->order[pos]], true);
         }
         w->frozen -= 1U;
     } else {
@@ -855,9 +866,11 @@ NphResult nph_schedule_run(NphSchedule *s, f64 dt)
         }
     }
 
+    NPH_PROFILE_BEGIN("scene.schedule");
     for (u32 st = 0; st < s->stage_count; ++st) {
         run_stage(s, st);
     }
+    NPH_PROFILE_END();
     const NphResult r = (NphResult)nph_atomic_load_u32(&s->error, NPH_MEMORY_ORDER_ACQUIRE);
     if (r != NPH_RESULT_OK && s->error_text[0] == '\0') {
         (void)snprintf(s->error_text, sizeof s->error_text, "run failed: %s", nph_result_string(r));

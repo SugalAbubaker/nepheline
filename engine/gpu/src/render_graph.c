@@ -5,6 +5,7 @@
 // aliasing by lifetime, async compute batches joined with timeline
 // semaphores, and parallel recording with one command buffer per pass.
 #include <nepheline/core/hash.h>
+#include <nepheline/core/profile.h>
 
 #include "gpu_internal.h"
 
@@ -1340,7 +1341,7 @@ static NphResult compute_barriers(NphGpuRenderGraph *g)
     return NPH_RESULT_OK;
 }
 
-NphResult nph_gpu_rg_compile(NphGpuRenderGraph *g)
+static NphResult compile_graph(NphGpuRenderGraph *g)
 {
     NPH_ASSERT(g != NULL && !g->executing);
     g->compiled = 0;
@@ -1492,6 +1493,7 @@ static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass)
     if (pass->record_result != NPH_RESULT_OK) {
         return;
     }
+    NPH_PROFILE_BEGIN(pass->desc.name); // pass names are static strings
     NphGpuCmd *cmd = pass->cmd;
     pass->ts_begin = nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
     record_barrier_list(g, cmd, pass->pre_head);
@@ -1532,6 +1534,7 @@ static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass)
     record_barrier_list(g, cmd, pass->post_head);
     pass->ts_end = nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
     nph_gpu_cmd_end(cmd);
+    NPH_PROFILE_END();
 }
 
 typedef struct RecordJob {
@@ -1545,7 +1548,7 @@ static void record_job(void *user)
     record_pass(job->graph, job->pass);
 }
 
-NphResult nph_gpu_rg_execute(NphGpuRenderGraph *g)
+static NphResult execute_graph(NphGpuRenderGraph *g)
 {
     NPH_ASSERT(g != NULL);
     if (!g->compiled) {
@@ -1756,4 +1759,24 @@ u32 nph_gpu_rg_timings(const NphGpuRenderGraph *g, NphGpuRgPassTiming *out, u32 
         *out_frame_index = frame;
     }
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Profiled entry points
+// ---------------------------------------------------------------------------
+
+NphResult nph_gpu_rg_compile(NphGpuRenderGraph *g)
+{
+    NPH_PROFILE_BEGIN("gpu.rg.compile");
+    const NphResult r = compile_graph(g);
+    NPH_PROFILE_END();
+    return r;
+}
+
+NphResult nph_gpu_rg_execute(NphGpuRenderGraph *g)
+{
+    NPH_PROFILE_BEGIN("gpu.rg.execute");
+    const NphResult r = execute_graph(g);
+    NPH_PROFILE_END();
+    return r;
 }

@@ -213,6 +213,11 @@ and executes:
 Imported resources get their final state written back at the end of
 execute, so the next frame, or explicit commands, continue from the truth.
 
+Profiling: `nph_gpu_rg_compile` and `nph_gpu_rg_execute` are the CPU
+zones `gpu.rg.compile` and `gpu.rg.execute`, and each pass's command
+recording is a zone of the pass's name, on whichever worker recorded it
+([profile.md](profile.md)).
+
 ## Swapchain
 
 A swapchain is created for a window (the platform module makes the

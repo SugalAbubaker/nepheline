@@ -206,6 +206,10 @@ not measured traffic. Caches and framebuffer compression make real traffic
 smaller, and repeated reads are not counted. The profiler logs a table and
 writes JSON for the benchmarks.
 
+CPU time: `nph_render_frame` is the profiler zone `render.frame`
+([profile.md](profile.md)); the passes it declares are recorded under the
+render graph's zones.
+
 ## Testing
 
 `render_tests` (52 tests) run on the RTX 3060 Ti locally and on lavapipe
