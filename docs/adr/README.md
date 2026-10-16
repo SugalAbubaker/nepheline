@@ -27,6 +27,7 @@ supersedes it and both link to each other.
 | [0019](0019-golden-image-tests.md) | Golden-image tests: our own LDR-FLIP and PNG codec, lavapipe baselines, calibrated thresholds | Accepted |
 | [0020](0020-ecs.md) | The ECS: archetype chunks, access-derived scheduling, 64-bit transforms | Accepted |
 | [0021](0021-scene-serialization.md) | Scene files: canonical JSON for the editor, archetype snapshots for the runtime, prefab overrides | Accepted |
+| [0022](0022-profiling.md) | Profiling: zones recorded in core, collected per fiber by the profile module | Accepted |
 
 ## Template
 
