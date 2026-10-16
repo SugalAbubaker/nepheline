@@ -19,8 +19,8 @@
 //
 // Thread-safety: a database belongs to one thread.
 
-#include <nepheline/asset/guid.h>
 #include <nepheline/core/array.h>
+#include <nepheline/core/guid.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/core/string.h>
 

@@ -32,10 +32,10 @@
 // writer belongs to one thread.
 
 #include <nepheline/asset/asset.h>
-#include <nepheline/asset/guid.h>
 #include <nepheline/asset/lz.h>
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/array.h>
+#include <nepheline/core/guid.h>
 
 #ifdef __cplusplus
 extern "C" {

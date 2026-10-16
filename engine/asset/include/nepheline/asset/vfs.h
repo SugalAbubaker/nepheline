@@ -29,8 +29,8 @@
 // must not overlap any lookup; every lookup and read is NPH_THREADSAFE.
 
 #include <nepheline/asset/asset.h>
-#include <nepheline/asset/guid.h>
 #include <nepheline/core/alloc.h>
+#include <nepheline/core/guid.h>
 #include <nepheline/core/string.h>
 #include <nepheline/platform/file.h>
 

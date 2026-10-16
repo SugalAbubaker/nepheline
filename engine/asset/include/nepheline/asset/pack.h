@@ -27,9 +27,9 @@
 // immutable); open and close are single-threaded. A writer belongs to one
 // thread.
 
-#include <nepheline/asset/guid.h>
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/array.h>
+#include <nepheline/core/guid.h>
 #include <nepheline/core/string.h>
 #include <nepheline/platform/file.h>
 

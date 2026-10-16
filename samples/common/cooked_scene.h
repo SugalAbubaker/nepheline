@@ -24,8 +24,8 @@
 // Costs: allocates its handle tables from `alloc`; the loader and the
 // renderer allocate as their documentation says. NPH_MAIN_THREAD_ONLY.
 
-#include <nepheline/asset/guid.h>
 #include <nepheline/asset/loader.h>
+#include <nepheline/core/guid.h>
 #include <nepheline/render/renderer.h>
 
 typedef struct CookedSceneDesc {
