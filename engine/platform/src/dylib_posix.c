@@ -64,6 +64,27 @@ NphResult nph_dylib_data(const NphDylib *lib, const char *name, void **out)
     return *out != NULL ? NPH_RESULT_OK : NPH_RESULT_NOT_FOUND;
 }
 
+bool nph_dylib_contains(const NphDylib *lib, const void *address)
+{
+    NPH_ASSERT(lib != NULL);
+    if (lib->handle == NULL || address == NULL) {
+        return false;
+    }
+    // The shared object whose image holds the address, then its handle
+    // (RTLD_NOLOAD: only if already loaded; the extra reference is dropped).
+    Dl_info info;
+    if (dladdr(address, &info) == 0 || info.dli_fname == NULL) {
+        return false;
+    }
+    void *handle = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    if (handle == NULL) {
+        return false;
+    }
+    const bool same = handle == lib->handle;
+    NPH_VERIFY(dlclose(handle) == 0);
+    return same;
+}
+
 const char *nph_dylib_extension(void)
 {
     return ".so";
