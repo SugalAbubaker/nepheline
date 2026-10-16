@@ -217,3 +217,12 @@ profile_zone_uninitialised     8
 profile_collect_per_event      45
 tracked_alloc_free_64          250
 system_alloc_free_64           180
+
+# runtime_bench (docs/runtime.md). The engine frames wait for a job on
+# another thread and wake it: 5x, as the hosted runners have fewer cores.
+engine_frame_headless          16000
+engine_frame_headless_10k      28000
+engine_frame_headless_10k_moving 235000
+engine_play_copy_10k           9000000
+sim_input_frame                870
+console_set_cvar               750

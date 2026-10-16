@@ -14,6 +14,7 @@ add_subdirectory(jobs)
 add_subdirectory(asset)
 add_subdirectory(scene)
 add_subdirectory(profile)
+add_subdirectory(runtime)
 # The offline cooker (tools/cook), a tool rather than an engine module.
 add_subdirectory(cook)
 

@@ -274,6 +274,25 @@ the simulation, the transform update, and the scene renderer's sync (one
 version check per chunk of a static world); kicking the simulation is one
 job.
 
+## Performance
+
+`benchmarks/runtime` on the reference CPU (Ryzen 7 5800X, Profile build;
+`benchmarks/results/runtime-2026-10-16-win-msvc-profile-ryzen7-5800x.json`):
+
+| Benchmark | Median | |
+|---|---|---|
+| `engine_frame_headless` | 3.1 µs | a frame of an empty world playing in lockstep: the sync point, the simulation job started and waited for, the profiler's collection |
+| `engine_frame_headless_10k` | 5.5 µs | the same with 10,000 entities that do not move |
+| `engine_frame_headless_10k_moving` | 46.8 µs | the same with every LocalTransform written each frame |
+| `engine_play_copy_10k` | 2.2 ms | play-in-editor on 10,000 entities: the copy with handles kept, the world switch, stopping |
+| `sim_input_frame` | 0.29 µs | a frame of input into the accumulator and a step's snapshot (16 actions) |
+| `console_set_cvar` | 0.25 µs | a cvar set through the console |
+
+The engine's own frame overhead is a few microseconds, well inside the
+§10.5 main-thread budget of 1 ms. A static world adds about 0.24 ns per
+entity (one version check per chunk). Play-in-editor starts in about 2 ms
+for an editor-sized world.
+
 ## Testing
 
 `engine/runtime/tests` (`runtime_tests`, statically linked):
