@@ -223,6 +223,7 @@ struct NphRenderer {
     u32 debug_draw_buffer;       // and from which buffer
     NphDVec3 debug_origin;
     NphDVec3 debug_frame_origin; // the origin of the lines being drawn
+    u64 debug_flip_frame;        // nph_gpu_frame_index + 1 of the last flip; 0: none
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
