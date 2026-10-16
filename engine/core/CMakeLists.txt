@@ -14,6 +14,7 @@ nph_add_module(core
         src/json.c
         src/log.c
         src/pool.c
+        src/profile.c
         src/result.c
         src/ring.c
         src/serialize.c
@@ -47,6 +48,7 @@ nph_add_test(core
         tests/test_json.c
         tests/test_log.c
         tests/test_pool.c
+        tests/test_profile.c
         tests/test_ring.c
         tests/test_serialize.c
         tests/test_sparse_set.c

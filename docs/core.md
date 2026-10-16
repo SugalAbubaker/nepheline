@@ -421,6 +421,18 @@ call site (rather than deferring to the flusher) is deliberate: the record
 is self-contained, arguments do not need to outlive the call, and the
 flusher never touches caller memory.
 
+## Profiling (`profile.h`)
+
+The recording half of CPU profiling: `NPH_PROFILE_BEGIN(name)` /
+`NPH_PROFILE_END()`, `NPH_PROFILE_FRAME`, `NPH_PROFILE_COUNTER`, and the
+fiber reports of the job system, each one 32-byte event (a time-stamp
+counter reading, a static name, a value, a type) pushed on the calling
+thread's ring like a log record: no lock, no allocation, 17 ns per zone,
+2.3 ns when paused. It lives in core so that every module can be
+instrumented; the collector that turns events into zones, frames, and
+statistics is the profile module ([profile.md](profile.md),
+[ADR-0022](adr/0022-profiling.md)). Compiled out of Shipping.
+
 ## CVars (`cvar.h`)
 
 A cvar is a static object defined next to the code that reads it
@@ -532,7 +544,9 @@ CRC vectors and hardware/portable agreement), `test_array.c`,
 randomised model check, byte keys, sets, allocation failure),
 `test_handle.c` (staleness, reuse delay, generation wrap, randomised),
 `test_ring.c` (order, capacity, position wrap-around for both rings),
-`test_bitset.c`, `test_sparse_set.c` (randomised model check). Container
+`test_bitset.c`, `test_sparse_set.c` (randomised model check),
+`test_profile.c` (the recording half on one thread: event contents,
+drops, drains, naming, retirement, re-initialisation). Container
 tests run under the debug allocator so a leaked allocation fails the test.
 Multi-threaded tests of atomics, rings, and the debug wrapper's lock arrive
 with platform threads in Phase 3.
