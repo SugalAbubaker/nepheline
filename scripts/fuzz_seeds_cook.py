@@ -329,9 +329,49 @@ def gltf_seeds():
     }
 
 
+def nmesh_seeds():
+    """Editable meshes (tools/cook/polymesh.h): the shapes the editor makes,
+    faces the triangulation must handle, and degenerate cases."""
+    import json
+
+    def doc(positions, faces, smoothing=None):
+        d = {"nmesh": 1, "positions": positions, "faces": faces}
+        if smoothing is not None:
+            d["smoothing"] = smoothing
+        return json.dumps(d, separators=(",", ":")).encode("utf-8")
+
+    quad_uv = [[0, 1], [1, 1], [1, 0], [0, 0]]
+    cube_positions = [[(-0.5 if i & 1 == 0 else 0.5), (-0.5 if i & 2 == 0 else 0.5),
+                       (-0.5 if i & 4 == 0 else 0.5)] for i in range(8)]
+    cube_faces = [[4, 5, 7, 6], [1, 0, 2, 3], [5, 1, 3, 7], [0, 4, 6, 2], [6, 7, 3, 2],
+                  [0, 1, 5, 4]]
+    seeds = {}
+    seeds["triangle"] = doc([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [{"v": [0, 1, 2]}])
+    seeds["cube"] = doc(cube_positions, [{"v": f, "uv": quad_uv} for f in cube_faces], 60)
+    seeds["cube_materials_flat"] = doc(
+        cube_positions, [{"v": f, "uv": quad_uv, "m": i % 3} for i, f in enumerate(cube_faces)],
+        0)
+    # An L and a comb, in the XZ plane facing +Y: reflex corners.
+    ell = [[0, 0], [0, 2], [2, 2], [2, 1], [1, 1], [1, 0]]
+    comb = [[0, 0], [0, 3], [5, 3], [5, 0], [4, 0], [4, 2], [3, 2], [3, 0], [2, 0], [2, 2],
+            [1, 2], [1, 0]]
+    positions = [[x, 0, z] for x, z in ell] + [[x + 10, 0, z] for x, z in comb]
+    seeds["concave"] = doc(positions, [{"v": list(range(6))},
+                                       {"v": list(range(6, 18))}])
+    seeds["pyramid"] = doc([[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1], [0, 1.5, 0]],
+                           [{"v": [0, 1, 2, 3]}, {"v": [3, 2, 4]}, {"v": [2, 1, 4]},
+                            {"v": [1, 0, 4]}, {"v": [0, 3, 4]}], 30)
+    seeds["regression_degenerate"] = doc(
+        [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [0, 1, 0]],
+        [{"v": [0, 1, 2, 3]}, {"v": [0, 0, 4]}, {"v": [0, 1, 4, 1]}])
+    return seeds
+
+
 def write_cook_seeds(write, corpus):
     import os
     for name, data in image_seeds().items():
         write(os.path.join(corpus, "image", name), data)
     for name, data in gltf_seeds().items():
         write(os.path.join(corpus, "gltf", name), data)
+    for name, data in nmesh_seeds().items():
+        write(os.path.join(corpus, "nmesh", name), data)

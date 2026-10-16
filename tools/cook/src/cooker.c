@@ -11,6 +11,7 @@
 #include <cook/cooker.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
+#include <cook/polymesh.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,6 +28,8 @@ struct Cooker {
     CookMeshSettings mesh;
     b32 force;
     CookerStats stats;
+    void (*on_cooked)(void *user, NphGuid guid, u32 type);
+    void *on_cooked_user;
 };
 
 // ---------------------------------------------------------------------------
@@ -256,6 +259,8 @@ NphResult cooker_create(const CookerDesc *desc, Cooker **out)
     c->force = desc->force;
     c->texture = desc->texture;
     c->mesh = desc->mesh;
+    c->on_cooked = desc->on_cooked;
+    c->on_cooked_user = desc->on_cooked_user;
     NphResult r = cooker_canonical_path(desc->out_dir, c->out_dir, sizeof c->out_dir);
     if (r == NPH_RESULT_OK) {
         r = cooker_canonical_path(desc->source_root != NULL ? desc->source_root : ".", c->root,
@@ -405,6 +410,9 @@ static NphResult emit(Cooker *c, NphAssetWriter *w, const char *key, const char 
                         nph_str_from_cstr(relative), w->header.guid, type, content_hash, shash,
                         deps, dep_count));
     c->stats.cooked += 1U;
+    if (c->on_cooked != NULL) {
+        c->on_cooked(c->on_cooked_user, w->header.guid, type);
+    }
     NPH_LOG_INFO(&NPH_LOG_COOK, "cooked %s", relative);
     return NPH_RESULT_OK;
 }
@@ -530,6 +538,79 @@ NphResult cooker_cook_image(Cooker *c, const char *source_path, CookTextureUsage
     NphGuid guid;
     r = cook_texture_bytes(c, key, sub, file, bytes, size, usage, content_hash, &guid);
     nph_file_free_all(c->alloc, bytes, size);
+    if (r != NPH_RESULT_OK) {
+        c->stats.failed += 1U;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Editable meshes
+// ---------------------------------------------------------------------------
+
+NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
+{
+    NPH_ASSERT(c != NULL && source_path != NULL);
+    char key[COOKER_PATH_MAX];
+    NphResult r = cooker_source_key(c, source_path, key, sizeof key);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not under the source root %s", source_path, c->root);
+        c->stats.failed += 1U;
+        return r;
+    }
+    void *bytes = NULL;
+    u64 size = 0U;
+    r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
+        c->stats.failed += 1U;
+        return r;
+    }
+    const u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
+    const u64 shash = settings_hash(c, NPH_ASSET_TYPE_MESH);
+    const NphGuid guid = asset_guid(key, "mesh");
+    if (is_current(c, key, "mesh", content_hash, shash)) {
+        c->stats.skipped += 1U;
+        nph_file_free_all(c->alloc, bytes, size);
+        return NPH_RESULT_OK;
+    }
+    CookPolyMesh poly;
+    r = cook_polymesh_read(c->alloc, nph_str((const char *)bytes, size), &poly);
+    nph_file_free_all(c->alloc, bytes, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not an editable mesh: %s", key, nph_result_string(r));
+    }
+    const NphStr stem = nph_path_stem(nph_str_from_cstr(key));
+    char name[COOK_MESH_NAME_MAX];
+    snprintf(name, sizeof name, "%.*s", (int)stem.len, stem.data);
+    CookMesh mesh;
+    cook_mesh_init(&mesh, c->alloc);
+    if (r == NPH_RESULT_OK) {
+        cook_mesh_free(&mesh);
+        r = cook_polymesh_to_mesh(&poly, name, &mesh);
+    }
+    if (r == NPH_RESULT_OK && mesh.submeshes.len == 0U) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: has no faces", key);
+        r = NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (r == NPH_RESULT_OK) {
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
+                              content_hash);
+        CookMeshStats st;
+        r = cook_mesh_process(&mesh, &c->mesh, &w, &st);
+        if (r == NPH_RESULT_OK) {
+            char relative[COOKER_PATH_MAX];
+            output_path(c, key, "mesh", "mesh", guid, relative, sizeof relative);
+            r = emit(c, &w, key, "mesh", relative, NPH_ASSET_TYPE_MESH, content_hash, shash, NULL,
+                     0U);
+        } else {
+            NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", key, nph_result_string(r));
+        }
+        nph_asset_writer_free(&w);
+    }
+    cook_mesh_free(&mesh);
+    cook_polymesh_free(&poly);
     if (r != NPH_RESULT_OK) {
         c->stats.failed += 1U;
     }
@@ -940,6 +1021,9 @@ CookerSourceKind cooker_source_kind(const char *path)
     if (is_scene_file(ext)) {
         return COOKER_SOURCE_SCENE;
     }
+    if (nph_str_equals_ignore_case(ext, NPH_STR(".nmesh"))) {
+        return COOKER_SOURCE_MESH;
+    }
     for (u32 i = 0; i < NPH_ARRAY_COUNT(images); ++i) {
         if (nph_str_equals_ignore_case(ext, nph_str_from_cstr(images[i]))) {
             return COOKER_SOURCE_IMAGE;
@@ -958,6 +1042,8 @@ NphResult cooker_cook_file(Cooker *c, const char *source_path)
     switch (cooker_source_kind(source_path)) {
     case COOKER_SOURCE_SCENE:
         return cooker_cook_gltf(c, source_path);
+    case COOKER_SOURCE_MESH:
+        return cooker_cook_mesh(c, source_path);
     case COOKER_SOURCE_IMAGE: {
         const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
         return cooker_cook_image(
@@ -1024,10 +1110,12 @@ static NphResult cook_tree(Cooker *c, const char *dir, u32 depth, NphResult *fir
             r = cook_tree(c, path, depth + 1U, first_error);
             continue;
         }
-        if (!is_scene_file(nph_path_extension(nph_str_from_cstr(e->name)))) {
+        const CookerSourceKind kind = cooker_source_kind(e->name);
+        if (kind != COOKER_SOURCE_SCENE && kind != COOKER_SOURCE_MESH) {
             continue;
         }
-        const NphResult fr = cooker_cook_gltf(c, path);
+        const NphResult fr =
+            kind == COOKER_SOURCE_SCENE ? cooker_cook_gltf(c, path) : cooker_cook_mesh(c, path);
         if (fr != NPH_RESULT_OK && *first_error == NPH_RESULT_OK) {
             *first_error = fr; // keep going: one bad file does not stop the rest
         }

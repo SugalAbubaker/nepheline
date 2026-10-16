@@ -25,8 +25,11 @@ nph_add_fuzzer(pack SOURCES fuzz_pack.c DEPS nph::asset)
 # importer and the mesh pipeline, images through stb_image and the texture
 # pipeline (fewer smoke mutations: the BC7 encoder dominates each run).
 # Seeds come from scripts/fuzz_seeds.py too.
-nph_add_fuzzer(gltf SOURCES fuzz_gltf.c DEPS nph::cook)
+nph_add_fuzzer(gltf SOURCES fuzz_gltf.c fuzz_mesh_check.h DEPS nph::cook)
 nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)
+# Editable meshes (tools/cook/polymesh.h): read, written back, extruded,
+# and cooked.
+nph_add_fuzzer(nmesh SOURCES fuzz_nmesh.c fuzz_mesh_check.h DEPS nph::cook)
 
 # The golden toolkit's PNG reader and inflate (tools/golden), which read
 # baselines from the repository (CLAUDE.md §9 golden-image tests).
