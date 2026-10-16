@@ -247,18 +247,23 @@ NphResult editor_edit_delete(EditorHistory *h, const NphEntity *entities, u32 co
     return finish(h, r);
 }
 
-// Copies one component value of `src` onto `dst`, its ENTITY fields that
-// name an entity of the copied subtree pointing at that entity's copy.
-static NphResult copy_component(EditorHistory *h, const Subtree *t, const NphEntity *copies,
-                                NphEntity src, NphEntity dst, NphComponentId id)
+// Copies one component value of `src` (an entity of `src_world`) onto `dst`.
+// Its ENTITY fields that name an entity of the copied subtree point at that
+// entity's copy; the others keep their value within one world and become
+// null across worlds.
+static NphResult copy_component(EditorHistory *h, const NphWorld *src_world, const Subtree *t,
+                                const NphEntity *copies, NphEntity src, NphEntity dst,
+                                NphComponentId id)
 {
     const NphWorld *w = editor_history_world(h);
     const NphComponentDesc *d = nph_world_component_desc(w, id);
+    NPH_ASSERT(nph_world_component_desc(src_world, id) != NULL &&
+               nph_world_component_desc(src_world, id)->size == d->size);
     if (d->size == 0U) {
         return NPH_RESULT_OK; // a tag: the spawn added it
     }
     u8 value[NPH_ECS_MAX_COMPONENT_SIZE];
-    memcpy(value, nph_world_get(w, src, id), d->size);
+    memcpy(value, nph_world_get(src_world, src, id), d->size);
     for (u32 f = 0; f < d->field_count; ++f) {
         const NphFieldDesc *field = &d->fields[f];
         if (field->kind != (u32)NPH_FIELD_ENTITY) {
@@ -266,24 +271,31 @@ static NphResult copy_component(EditorHistory *h, const Subtree *t, const NphEnt
         }
         NphEntity ref;
         memcpy(&ref, value + field->offset, sizeof ref);
+        if (nph_entity_is_null(ref)) {
+            continue;
+        }
+        NphEntity mapped = src_world == w ? ref : NPH_ENTITY_NULL;
         for (u32 i = 0; i < t->count; ++i) {
-            if (!nph_entity_is_null(ref) && nph_entity_equals(t->entities[i], ref)) {
-                memcpy(value + field->offset, &copies[i], sizeof ref);
+            if (nph_entity_equals(t->entities[i], ref)) {
+                mapped = copies[i];
                 break;
             }
         }
+        memcpy(value + field->offset, &mapped, sizeof mapped);
     }
     return editor_history_set(h, dst, id, value);
 }
 
-static NphResult duplicate_root(EditorHistory *h, NphEntity root, NphEntity *out)
+// Copies `root` of `src` (the history's world or another with its
+// components) and its subtree into the history's world under `parent`.
+static NphResult copy_root(EditorHistory *h, const NphWorld *src, NphEntity root, NphEntity parent,
+                           NphEntity *out)
 {
-    const NphWorld *w = editor_history_world(h);
     NphAllocator *alloc = editor_history_allocator(h);
     Subtree t;
     memset(&t, 0, sizeof t);
     t.alloc = alloc;
-    NphResult r = subtree_gather(&t, w, root, NPH_U32_MAX);
+    NphResult r = subtree_gather(&t, src, root, NPH_U32_MAX);
     NphEntity *copies = NULL;
     if (r == NPH_RESULT_OK) {
         copies = NPH_ALLOC_ARRAY_ZEROED(alloc, NphEntity, t.count);
@@ -291,12 +303,14 @@ static NphResult duplicate_root(EditorHistory *h, NphEntity root, NphEntity *out
     }
     // The entities first (so references between them can be remapped),
     // with every component but the internal Hierarchy.
+    const NphWorld *w = editor_history_world(h);
     NphComponentId ids[NPH_ECS_MAX_COMPONENTS];
     for (u32 i = 0; i < t.count && r == NPH_RESULT_OK; ++i) {
-        const u32 all = nph_world_entity_components(w, t.entities[i], ids, NPH_ECS_MAX_COMPONENTS);
+        const u32 all =
+            nph_world_entity_components(src, t.entities[i], ids, NPH_ECS_MAX_COMPONENTS);
         u32 kept = 0U;
         for (u32 c = 0; c < all; ++c) {
-            if ((nph_world_component_desc(w, ids[c])->flags & (u32)NPH_COMPONENT_FLAG_INTERNAL) ==
+            if ((nph_world_component_desc(src, ids[c])->flags & (u32)NPH_COMPONENT_FLAG_INTERNAL) ==
                 0U) {
                 ids[kept++] = ids[c];
             }
@@ -308,14 +322,13 @@ static NphResult duplicate_root(EditorHistory *h, NphEntity root, NphEntity *out
     for (u32 i = 0; i < t.count && r == NPH_RESULT_OK; ++i) {
         const u32 n = nph_world_entity_components(w, copies[i], ids, NPH_ECS_MAX_COMPONENTS);
         for (u32 c = 0; c < n && r == NPH_RESULT_OK; ++c) {
-            r = copy_component(h, &t, copies, t.entities[i], copies[i], ids[c]);
+            r = copy_component(h, src, &t, copies, t.entities[i], copies[i], ids[c]);
         }
     }
     for (u32 i = 0; i < t.count && r == NPH_RESULT_OK; ++i) {
-        const NphEntity parent =
-            t.parents[i] == NPH_U32_MAX ? nph_world_parent(w, root) : copies[t.parents[i]];
-        if (!nph_entity_is_null(parent)) {
-            r = editor_history_set_parent(h, copies[i], parent);
+        const NphEntity to = t.parents[i] == NPH_U32_MAX ? parent : copies[t.parents[i]];
+        if (!nph_entity_is_null(to)) {
+            r = editor_history_set_parent(h, copies[i], to);
         }
     }
     if (r == NPH_RESULT_OK) {
@@ -338,7 +351,7 @@ NphResult editor_edit_duplicate(EditorHistory *h, const NphEntity *entities, u32
     for (u32 i = 0; i < count && r == NPH_RESULT_OK; ++i) {
         NphEntity copy = NPH_ENTITY_NULL;
         if (nph_world_is_alive(w, entities[i]) && !under_another(w, entities, count, i)) {
-            r = duplicate_root(h, entities[i], &copy);
+            r = copy_root(h, w, entities[i], nph_world_parent(w, entities[i]), &copy);
         }
         if (out != NULL) {
             out[i] = copy;
@@ -347,6 +360,24 @@ NphResult editor_edit_duplicate(EditorHistory *h, const NphEntity *entities, u32
     r = finish(h, r);
     if (r != NPH_RESULT_OK && out != NULL) {
         memset(out, 0, sizeof(NphEntity) * (u64)count);
+    }
+    return r;
+}
+
+NphResult editor_edit_paste(EditorHistory *h, const NphWorld *src, NphEntity root, NphEntity parent,
+                            const char *label, NphEntity *out)
+{
+    NPH_ASSERT(h != NULL && src != NULL && label != NULL && out != NULL);
+    *out = NPH_ENTITY_NULL;
+    if (!nph_world_is_alive(src, root) ||
+        (!nph_entity_is_null(parent) && !nph_world_is_alive(editor_history_world(h), parent))) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    NPH_TRY(editor_history_begin(h, label));
+    NphEntity copy = NPH_ENTITY_NULL;
+    const NphResult r = finish(h, copy_root(h, src, root, parent, &copy));
+    if (r == NPH_RESULT_OK) {
+        *out = copy;
     }
     return r;
 }

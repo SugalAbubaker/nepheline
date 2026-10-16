@@ -387,6 +387,81 @@ NTEST_F(HistoryFixture, duplicates_copy_subtrees_and_point_their_references_at_t
     NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_first_child(f->world, copies[0]), inner_copy));
 }
 
+NTEST_F(HistoryFixture, a_paste_from_another_world_arrives_whole_as_one_step)
+{
+    // A scratch world with the same components: root -> {left, right}, and
+    // a stray entity outside that subtree.
+    NphWorldDesc wd;
+    memset(&wd, 0, sizeof wd);
+    wd.alloc = nph_debug_allocator_allocator(&f->da);
+    wd.max_entities = 64U;
+    wd.registry_from = f->world;
+    NphWorld *src = NULL;
+    NTEST_ASSERT_EQ_INT(nph_world_create(&wd, &src), NPH_RESULT_OK);
+    const NphComponentId ids[2] = {NPH_COMPONENT_ID_NAME, NPH_COMPONENT_ID_LOCAL_TRANSFORM};
+    NphEntity e[4];
+    static const char *const names[4] = {"root", "left", "right", "stray"};
+    for (u32 i = 0; i < 4U; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_world_spawn(src, ids, 2U, &e[i]), NPH_RESULT_OK);
+        NphName n;
+        memset(&n, 0, sizeof n);
+        (void)nph_text_set(&n.text, nph_str_from_cstr(names[i]));
+        NTEST_ASSERT_EQ_INT(nph_world_set(src, e[i], NPH_COMPONENT_ID_NAME, &n), NPH_RESULT_OK);
+        NphLocalTransform t = nph_local_transform_identity();
+        t.translation.x = (f64)i;
+        NTEST_ASSERT_EQ_INT(nph_world_set(src, e[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, &t),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(src, e[1], e[0]), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(src, e[2], e[0]), NPH_RESULT_OK);
+    const TestLink to_right = {e[2], 1.0F};
+    const TestLink to_stray = {e[3], 2.0F};
+    NTEST_ASSERT_EQ_INT(nph_world_set(src, e[1], f->link, &to_right), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_set(src, e[2], f->link, &to_stray), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_add(src, e[2], f->mark, NULL), NPH_RESULT_OK);
+
+    const NphEntity parent = create(f, "parent", NPH_ENTITY_NULL, 10.0);
+    const u32 before = nph_world_entity_count(f->world);
+    const u32 steps = editor_history_undo_count(f->h);
+    NphEntity copy = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_paste(f->h, src, e[0], parent, "Import root", &copy),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(f->world), before + 3U);
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(f->h), steps + 1U);
+    NTEST_EXPECT_EQ_STR(editor_history_undo_label(f->h), "Import root");
+    NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_parent(f->world, copy), parent));
+    NTEST_EXPECT_EQ_STR(name_of(f, copy), "root");
+    // The children in their order, with their values.
+    const NphEntity left = nph_world_first_child(f->world, copy);
+    NTEST_ASSERT_FALSE(nph_entity_is_null(left));
+    const NphEntity right = nph_world_next_sibling(f->world, left);
+    NTEST_ASSERT_FALSE(nph_entity_is_null(right));
+    NTEST_EXPECT_EQ_STR(name_of(f, left), "left");
+    NTEST_EXPECT_EQ_STR(name_of(f, right), "right");
+    NTEST_EXPECT_NEAR_F64(x_of(f, right), 2.0, 0.0);
+    NTEST_EXPECT_TRUE(nph_world_has(f->world, right, f->mark));
+    // A reference inside the subtree follows the copy; one outside it means
+    // nothing here and becomes null.
+    NTEST_EXPECT_TRUE(
+        nph_entity_equals(NPH_WORLD_GET(f->world, left, f->link, TestLink)->target, right));
+    NTEST_EXPECT_TRUE(
+        nph_entity_is_null(NPH_WORLD_GET(f->world, right, f->link, TestLink)->target));
+    NTEST_EXPECT_NEAR_F64(NPH_WORLD_GET(f->world, right, f->link, TestLink)->weight, 2.0, 0.0);
+    // The source is untouched, and the step goes both ways.
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(src), 4U);
+    nph_world_destroy(src);
+    undo(f);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(f->world), before);
+    redo(f);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(f->world), before + 3U);
+    NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_first_child(f->world, copy), left));
+    // A dead root or parent is refused, and nothing is recorded.
+    NTEST_EXPECT_EQ_INT(
+        editor_edit_paste(f->h, f->world, NPH_ENTITY_NULL, NPH_ENTITY_NULL, "x", &copy),
+        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(f->h), steps + 1U);
+}
+
 NTEST_F(HistoryFixture, reparenting_keeps_the_entity_where_it_is_in_the_world)
 {
     NphLocalTransform pt = nph_local_transform_identity();
