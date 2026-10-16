@@ -3,6 +3,7 @@
 
 // The editor's state, shared by editor.c and the panels (panel_*.c).
 
+#include <nepheline/platform/file.h>
 #include <nepheline/profile/memory.h>
 #include <nepheline/profile/profiler.h>
 
@@ -14,6 +15,7 @@
 #include "history.h"
 #include "imgui_c.h"
 #include "picking.h"
+#include "project.h"
 #include "selection.h"
 #include "ui_platform.h"
 #include "ui_renderer.h"
@@ -36,9 +38,11 @@
 #define EDITOR_WINDOW_STATS     "Stats"
 #define EDITOR_WINDOW_OUTLINER  "Outliner"
 #define EDITOR_WINDOW_INSPECTOR "Inspector"
+#define EDITOR_WINDOW_ASSETS    "Assets"
 
 // Dear ImGui drag-and-drop payload types.
 #define EDITOR_DRAG_ENTITY "nph.entity" // an NphEntity
+#define EDITOR_DRAG_ASSET  "nph.asset"  // a scene's source key, NUL-terminated
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
@@ -86,6 +90,38 @@ typedef struct EditorProfilerPanel {
     char trace_path[EDITOR_PATH_MAX];
 } EditorProfilerPanel;
 
+// Where the scenes of an import go once it is done: the point under the
+// mouse where files were dropped, worked out at the next sync point while
+// the camera is as it was.
+typedef struct EditorPlacement {
+    u32 id;        // the project's request; 0: a free slot
+    bool place;    // false: dropped outside the viewport, nothing is placed
+    bool resolved; // `at` holds the point
+    f32 mouse[2];  // display units, until resolved
+    NphDVec3 at;
+} EditorPlacement;
+
+typedef struct EditorAssetEntry {
+    char name[NPH_DIR_ENTRY_NAME_MAX];
+    bool is_directory;
+    bool cooked; // the cooker's database has assets of it
+    u32 kind;    // CookerSourceKind
+} EditorAssetEntry;
+
+// The asset browser (panel_assets.c).
+typedef struct EditorAssets {
+    char folder[EDITOR_PROJECT_PATH_MAX]; // shown, relative to the sources ("": their top)
+    EditorAssetEntry *entries;            // the folder's, folders first
+    u32 entry_count;
+    u32 entry_cap;
+    u64 generation; // the project's when listed
+    u64 listed_ns;
+    bool stale;  // list again
+    bool reveal; // bring the panel forward: an import started
+    char selected[NPH_DIR_ENTRY_NAME_MAX];
+    EditorPlacement placements[EDITOR_PROJECT_REQUESTS];
+} EditorAssets;
+
 typedef struct EditorPanels {
     bool viewport;
     bool console;
@@ -93,6 +129,7 @@ typedef struct EditorPanels {
     bool stats;
     bool outliner;
     bool inspector;
+    bool assets;
     bool demo;    // Dear ImGui's demo window (development builds)
     bool metrics; // Dear ImGui's metrics window
 } EditorPanels;
@@ -133,7 +170,16 @@ struct Editor {
     u32 focus_defaults; // frames left to bring the default tabs forward after a build
     char layout_path[EDITOR_PATH_MAX];
     NphCvar cv_layout;
+    NphCvar cv_assets;
+    NphCvar cv_cooked;
     bool cvars_registered;
+    f32 mouse[2]; // the cursor, display units, from the window's events
+
+    // The project (panel_assets.c). The resolver reads `project` from any
+    // thread that loads by GUID, under `resolve_lock`.
+    EditorProject *project;
+    NphMutex resolve_lock;
+    EditorAssets assets;
 
     // The UI.
     EditorPanels show;
@@ -194,6 +240,20 @@ void editor_begin_rename(Editor *ed, NphEntity e);
 // panel_inspector.c
 void editor_panel_inspector(Editor *ed);
 
+// panel_assets.c
+// The project from editor.assets and editor.cooked, its cooked files
+// mounted at the root of the VFS (attach).
+NPH_MUST_USE NphResult editor_assets_open(Editor *ed);
+// Stops the imports and releases the project and the browser (detach).
+void editor_assets_close(Editor *ed);
+// At the sync point: works out where dropped files go, and places the
+// scenes of finished imports.
+void editor_assets_update(Editor *ed);
+// Places the scene cooked from the source `key` at `at`, cooking it first
+// when it has not been.
+void editor_assets_place(Editor *ed, const char *key, NphDVec3 at);
+void editor_panel_assets(Editor *ed);
+
 // gizmo_ui.c
 // Shows the gizmo on the primary selection and drags it. True when it has
 // the mouse (a handle under it, or a drag): the viewport then does not pick.
@@ -206,6 +266,10 @@ void editor_viewport_free(Editor *ed);
 void editor_panel_viewport(Editor *ed);
 // Sets the engine's view for the frame: the editor's camera while editing.
 void editor_viewport_apply_view(Editor *ed);
+// The world point under (x, y), display units, over the viewport's image as
+// last shown: the nearest surface there, else the ground plane, else a
+// point at the pivot's distance. False when (x, y) is not over the image.
+bool editor_viewport_point(Editor *ed, f32 x, f32 y, NphDVec3 *out);
 
 // panel_console.c
 NPH_MUST_USE NphResult editor_console_init(Editor *ed);

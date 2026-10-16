@@ -25,6 +25,8 @@
 #define FLY_BOOST              4.0F
 #define FLY_SPEED_MIN          0.1F
 #define FLY_SPEED_MAX          1000.0F
+// A ground point farther than this (a ray grazing the plane) is not taken.
+#define GROUND_FAR 1000.0
 
 static void capture_cursor(Editor *ed, bool capture)
 {
@@ -145,6 +147,33 @@ static void pick(Editor *ed, const EditorView *v, f32 mx, f32 my)
     } else {
         editor_selection_set(&ed->selection, any ? hit.entity : NPH_ENTITY_NULL);
     }
+}
+
+bool editor_viewport_point(Editor *ed, f32 x, f32 y, NphDVec3 *out)
+{
+    const f32 *r = ed->viewport.rect;
+    if (!ed->viewport.shown || x < r[0] || y < r[1] || x >= r[0] + r[2] || y >= r[1] + r[3]) {
+        return false;
+    }
+    EditorView view;
+    const NphRenderCamera cam = editor_camera_render(&ed->camera);
+    editor_view_init(&view, &cam, r[0], r[1], r[2], r[3]);
+    const NphVec3 dir = editor_view_ray(&view, x, y);
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    EditorPick hit;
+    f64 t = (f64)ed->camera.distance;
+    if (editor_pick(nph_engine_edit_world(ed->engine), nph_engine_components(ed->engine),
+                    sr != NULL ? lookup_mesh : NULL, sr, view.eye, dir, &hit)) {
+        t = hit.distance;
+    } else if (dir.y < 0.0F) {
+        const f64 ground = -view.eye.y / (f64)dir.y; // the plane y = 0
+        if (ground > 0.0 && ground < GROUND_FAR) {
+            t = ground;
+        }
+    }
+    *out = nph_dvec3(view.eye.x + (f64)dir.x * t, view.eye.y + (f64)dir.y * t,
+                     view.eye.z + (f64)dir.z * t);
+    return true;
 }
 
 #define COLOR_SELECTED NPH_RENDER_RGBA(255, 160, 40, 255)
@@ -309,6 +338,18 @@ void editor_panel_viewport(Editor *ed)
         ed->viewport.rect[2] = avail.x;
         ed->viewport.rect[3] = avail.y;
         ed->viewport.shown = true;
+        // A scene dragged from the asset browser lands under the mouse.
+        if (!nph_engine_is_playing(ed->engine) && igBeginDragDropTarget()) {
+            const ImGuiPayload *payload =
+                igAcceptDragDropPayload(EDITOR_DRAG_ASSET, ImGuiDragDropFlags_None);
+            NphDVec3 at;
+            if (payload != NULL && payload->DataSize > 0 &&
+                ((const char *)payload->Data)[payload->DataSize - 1] == '\0' &&
+                editor_viewport_point(ed, io->MousePos.x, io->MousePos.y, &at)) {
+                editor_assets_place(ed, (const char *)payload->Data, at);
+            }
+            igEndDragDropTarget();
+        }
     }
     // The gizmo first: a click on a handle drags it rather than picking.
     if (ed->viewport.shown && !nph_engine_is_playing(ed->engine) && !ed->viewport.fly) {

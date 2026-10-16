@@ -28,19 +28,42 @@
 typedef struct EditorFixture {
     NphDebugAllocator engine_memory;
     NphDebugAllocator editor_memory;
+    char project[900]; // a temporary directory for the project's sources and cooked files
+    bool keep_project; // finish() leaves it for another editor
+    char assets_assignment[1000];
+    char cooked_assignment[1000];
     NphEngineConfig config;
     NphEngine *engine;
     Editor *editor;
 } EditorFixture;
 
-static NphResult start(EditorFixture *f, NphEngineMode mode, EditorLogSink *log)
+// `project`: an existing project's directory (another editor's), NULL for a
+// new one.
+static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *log,
+                          const char *project)
 {
     memset(f, 0, sizeof *f);
     nph_debug_allocator_init(&f->engine_memory, nph_allocator_system());
     nph_debug_allocator_init(&f->editor_memory, nph_allocator_system());
     static const char *const assignments[1] = {"editor.layout="}; // no layout file
+    // The project in a directory of its own.
+    static u32 counter = 0U;
+    char tmp[800];
+    NTEST_ASSERT_EQ_INT(nph_fs_temp_directory(tmp, sizeof tmp, NULL), NPH_RESULT_OK);
+    if (project != NULL) {
+        (void)snprintf(f->project, sizeof f->project, "%s", project);
+    } else {
+        (void)snprintf(f->project, sizeof f->project, "%s/nph_editor_test_%llu_%u", tmp,
+                       (unsigned long long)nph_platform_process_id(), counter++);
+    }
+    (void)snprintf(f->assets_assignment, sizeof f->assets_assignment, "editor.assets=%s/assets",
+                   f->project);
+    (void)snprintf(f->cooked_assignment, sizeof f->cooked_assignment, "editor.cooked=%s/cooked",
+                   f->project);
     f->config.assignments[0] = assignments[0];
-    f->config.assignment_count = 1U;
+    f->config.assignments[1] = f->assets_assignment;
+    f->config.assignments[2] = f->cooked_assignment;
+    f->config.assignment_count = 3U;
     f->config.packs[0] = NPH_TEST_PACK;
     f->config.pack_count = 1U;
     f->config.headless = mode == NPH_ENGINE_MODE_HEADLESS ? 1 : 0;
@@ -57,9 +80,14 @@ static NphResult start(EditorFixture *f, NphEngineMode mode, EditorLogSink *log)
     d.app_name = "editor tests";
     d.offscreen_width = WIDTH;
     d.offscreen_height = HEIGHT;
-    editor_engine_hooks(f->editor, &d.hooks);
+    editor_engine_desc(f->editor, &d);
     NPH_TRY(nph_engine_create(&d, &f->engine));
     return editor_attach(f->editor, f->engine);
+}
+
+static NphResult start(EditorFixture *f, NphEngineMode mode, EditorLogSink *log)
+{
+    return start_in(f, mode, log, NULL);
 }
 
 static void finish(EditorFixture *f)
@@ -77,6 +105,9 @@ static void finish(EditorFixture *f)
     editor_destroy(f->editor);
     f->engine = NULL;
     f->editor = NULL;
+    if (!f->keep_project && f->project[0] != '\0' && nph_fs_exists(f->project)) {
+        NTEST_EXPECT_EQ_INT(nph_fs_remove_tree(f->project), NPH_RESULT_OK);
+    }
     NTEST_EXPECT_EQ_UINT(nph_debug_allocator_destroy(&f->editor_memory, NULL, NULL), 0U);
     NTEST_EXPECT_EQ_UINT(nph_debug_allocator_destroy(&f->engine_memory, NULL, NULL), 0U);
 }
@@ -825,4 +856,259 @@ NTEST(Editor, dragging_the_gizmo_moves_the_selection_in_one_step)
         NPH_WORLD_GET(w, lamp, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.x,
         1.5, 1e-4);
     finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// Imports, and a scene from start to play (CLAUDE.md §12, Phase 9)
+// ---------------------------------------------------------------------------
+
+// Pixels whose colour differs from `ref`'s at the same place by more than
+// `tolerance` in a channel.
+static u64 differing_by(const u8 *a, const u8 *ref, u64 size, u32 tolerance)
+{
+    u64 n = 0U;
+    for (u64 i = 0; i < size; i += 4U) {
+        for (u64 c = 0; c < 3U; ++c) {
+            const i32 d = (i32)a[i + c] - (i32)ref[i + c];
+            if ((u32)(d < 0 ? -d : d) > tolerance) {
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+// The entity of the edited world named `name`, or null.
+static NphEntity named(EditorFixture *f, const char *name)
+{
+    const NphWorld *w = nph_engine_edit_world(f->engine);
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        const NphName *n = NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_NAME, NphName);
+        if (n != NULL && strcmp(n->text.text, name) == 0) {
+            return e;
+        }
+    }
+    return NPH_ENTITY_NULL;
+}
+
+// Imports the showcase into `folder` of the sources, dropped at (x, y), and
+// runs frames until its scene is placed.
+static void drop_showcase(EditorFixture *f, const char *folder, f32 x, f32 y)
+{
+    Editor *ed = f->editor;
+    (void)snprintf(ed->assets.folder, sizeof ed->assets.folder, "%s", folder);
+    // The showcase's source, imported as a user's file would be.
+    const char *paths[1] = {NPH_TEST_SHOWCASE_GLTF};
+    NTEST_ASSERT_EQ_INT(editor_import(ed, paths, 1U, true, x, y), NPH_RESULT_OK);
+    frames(f, 1U); // where it fell is worked out
+    editor_project_wait(editor_project(ed));
+    frames(f, 1U); // the scene is placed
+    nph_scene_renderer_wait(nph_engine_scene_renderer(f->engine));
+    frames(f, 2U);
+}
+
+NTEST(Editor, a_dropped_scene_is_cooked_and_placed_where_it_fell)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    NphEngine *e = fx.engine;
+    frames(&fx, 3U);
+    const NphGpuImage viewport = editor_viewport_image(ed);
+    u64 size = 0U;
+    u8 *sky = pixels_of(&fx, viewport, &size);
+    // Off-centre, on the ground: where the ray through that point meets y = 0.
+    const EditorView v = editor_view(&fx);
+    const f32 x = v.x + v.w * 0.7F;
+    const f32 y = v.y + v.h * 0.65F;
+    const NphVec3 dir = editor_view_ray(&v, x, y);
+    NTEST_ASSERT_TRUE(dir.y < 0.0F);
+    const f64 t = -v.eye.y / (f64)dir.y;
+    const NphDVec3 ground = nph_dvec3(v.eye.x + (f64)dir.x * t, 0.0, v.eye.z + (f64)dir.z * t);
+    const NphWorld *w = nph_engine_edit_world(e);
+    const u32 entities = nph_world_entity_count(w);
+    const u32 steps = editor_history_undo_count(ed->history);
+    // Into a folder of its own: the tests' pack holds the same scene at the
+    // top of its sources, with the GUIDs that key gives. The browser shows
+    // the folder before the import makes it, and keeps it.
+    (void)snprintf(ed->assets.folder, sizeof ed->assets.folder, "imported");
+    ed->assets.stale = true;
+    ed->assets.reveal = true;
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_STR(ed->assets.folder, "imported");
+    NTEST_EXPECT_EQ_UINT(ed->assets.entry_count, 0U);
+    drop_showcase(&fx, "imported", x, y);
+
+    // One undoable step, selected, at the point it fell on.
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), steps + 1U);
+    NTEST_EXPECT_EQ_STR(editor_history_undo_label(ed->history), "Import showcase");
+    const NphEntity root = ed->selection.primary;
+    NTEST_ASSERT_TRUE(nph_world_is_alive(w, root));
+    NTEST_EXPECT_EQ_STR(NPH_WORLD_GET(w, root, NPH_COMPONENT_ID_NAME, NphName)->text.text,
+                        "showcase");
+    const NphLocalTransform *lt =
+        NPH_WORLD_GET(w, root, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    NTEST_EXPECT_NEAR_F64(lt->translation.x, ground.x, 1e-3);
+    NTEST_EXPECT_NEAR_F64(lt->translation.y, 0.0, 1e-3);
+    NTEST_EXPECT_NEAR_F64(lt->translation.z, ground.z, 1e-3);
+    NTEST_EXPECT_GT_UINT(nph_world_entity_count(w), entities + 2U);
+    // Its meshes come through the project's database, and are drawn.
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->scene.instances, 2U);
+    u64 size2 = 0U;
+    u8 *placed = pixels_of(&fx, viewport, &size2);
+    NTEST_EXPECT_GT_UINT(differing(placed, sky, size), size / 4U / 50U); // over 2%
+    free_pixels(placed, size2);
+    free_pixels(sky, size);
+    // The browser shows the source, cooked.
+    bool listed = false;
+    bool cooked = false;
+    for (u32 i = 0; i < ed->assets.entry_count; ++i) {
+        if (strcmp(ed->assets.entries[i].name, "showcase.gltf") == 0) {
+            listed = true;
+            cooked = ed->assets.entries[i].cooked;
+        }
+    }
+    NTEST_EXPECT_TRUE(listed);
+    NTEST_EXPECT_TRUE(cooked);
+
+    // Undo takes the whole scene away; redo brings it back.
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), entities);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->scene.instances, 0U);
+    NTEST_ASSERT_EQ_INT(editor_history_redo(ed->history), NPH_RESULT_OK);
+    // Undo let the meshes go: they load again, and a frame never waits.
+    frames(&fx, 1U);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(e));
+    frames(&fx, 2U);
+    NTEST_EXPECT_TRUE(nph_world_is_alive(w, root));
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->scene.instances, 2U);
+
+    // Dropped outside the viewport, a scene is imported but not placed.
+    const u32 after = nph_world_entity_count(w);
+    drop_showcase(&fx, "elsewhere", 1.0F, 1.0F);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), after);
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), "elsewhere/showcase.gltf"));
+    finish(&fx);
+}
+
+// CLAUDE.md §12, Phase 9's exit criterion: a scene is built, saved,
+// reloaded, and played in the editor. It is built from an imported scene,
+// a move, a light, and a camera; saved; opened by a second editor on the
+// same project, as after a restart, where it looks the same; and played
+// from that camera, with the edited scene back unchanged after Stop.
+NTEST(Editor, a_scene_is_built_saved_reloaded_and_played)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
+
+    // Build.
+    const EditorView v = editor_view(&fx);
+    drop_showcase(&fx, "level", v.x + v.w * 0.5F, v.y + v.h * 0.5F);
+    const NphEntity showcase = ed->selection.primary;
+    NphWorld *w = nph_engine_edit_world(fx.engine);
+    NTEST_ASSERT_TRUE(nph_world_is_alive(w, showcase));
+    NphLocalTransform moved =
+        *NPH_WORLD_GET(w, showcase, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    moved.translation.x = 1.5;
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "Move"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(
+        editor_history_set(ed->history, showcase, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &moved),
+        NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    NphEntity lamp = NPH_ENTITY_NULL;
+    NphLocalTransform lamp_at = nph_local_transform_identity();
+    lamp_at.translation = nph_dvec3(0.0, 3.0, 0.0);
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "lamp", showcase, &lamp_at, &lamp),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_edit_add_component(ed->history, lamp, rc->light), NPH_RESULT_OK);
+    NphEntity eye = NPH_ENTITY_NULL;
+    NphLocalTransform eye_at = nph_local_transform_identity();
+    eye_at.translation = nph_dvec3(0.0, 2.0, 9.0);
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "eye", NPH_ENTITY_NULL, &eye_at, &eye),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_edit_add_component(ed->history, eye, rc->camera), NPH_RESULT_OK);
+    NphCamera camera = *NPH_WORLD_GET(w, eye, rc->camera, NphCamera);
+    camera.active = true;
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "Activate"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_history_set(ed->history, eye, rc->camera, &camera), NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    frames(&fx, 2U);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    frames(&fx, 3U);
+    const u32 entities = nph_world_entity_count(w);
+    u64 size = 0U;
+    u8 *built = pixels_of(&fx, editor_viewport_image(ed), &size);
+    NTEST_EXPECT_TRUE(editor_scene_dirty(ed));
+
+    // Save.
+    char path[1100];
+    (void)snprintf(path, sizeof path, "%s/level.nscene", fx.project);
+    NTEST_ASSERT_EQ_INT(editor_save_scene(ed, path), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    char project[900];
+    (void)snprintf(project, sizeof project, "%s", fx.project);
+    fx.keep_project = true;
+    finish(&fx);
+
+    // Reload, in another editor on the same project: the entities come
+    // from the file and their meshes through the project's database.
+    static EditorFixture again;
+    const NphResult started = start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project);
+    NTEST_ASSERT_EQ_INT(started, NPH_RESULT_OK);
+    ed = again.editor;
+    frames(&again, 3U);
+    NTEST_ASSERT_EQ_INT(editor_open_scene(ed, path), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    w = nph_engine_edit_world(again.engine);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w), entities);
+    const NphEntity showcase2 = named(&again, "showcase");
+    NTEST_ASSERT_FALSE(nph_entity_is_null(showcase2));
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, showcase2, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation.x,
+        1.5, 0.0);
+    const NphEntity lamp2 = named(&again, "lamp");
+    NTEST_ASSERT_FALSE(nph_entity_is_null(lamp2));
+    NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_parent(w, lamp2), showcase2));
+    frames(&again, 2U);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(again.engine));
+    frames(&again, 3U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(again.engine)->scene.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(again.engine)->scene.failed, 0U);
+    u64 size2 = 0U;
+    u8 *reloaded = pixels_of(&again, editor_viewport_image(ed), &size2);
+    NTEST_ASSERT_EQ_UINT(size2, size);
+    // The same scene through the same camera (temporal filtering aside).
+    NTEST_EXPECT_LT_UINT(differing_by(reloaded, built, size, 24U), size / 4U / 100U);
+    free_pixels(reloaded, size2);
+    free_pixels(built, size);
+
+    // Play, from the scene's own camera, a step a frame whatever the time
+    // (a fast build renders 10 frames in less than one step of real time).
+    NphCvarRegistry *cvars = nph_engine_cvars(again.engine);
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_bool(cvars, nph_cvar_find(cvars, NPH_STR("rt.lockstep")), true),
+        NPH_RESULT_OK);
+    editor_play_toggle(ed);
+    frames(&again, 10U);
+    NTEST_ASSERT_TRUE(nph_engine_is_playing(again.engine));
+    NTEST_EXPECT_GT_UINT(nph_engine_frame_stats(again.engine)->total_steps, 0U);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_world(again.engine)), entities);
+    const NphDVec3 from = nph_engine_view(again.engine)->camera.position;
+    NTEST_EXPECT_NEAR_F64(from.x, 0.0, 1e-6);
+    NTEST_EXPECT_NEAR_F64(from.y, 2.0, 1e-6);
+    NTEST_EXPECT_NEAR_F64(from.z, 9.0, 1e-6);
+    // Stop: the edited scene, as it was.
+    editor_play_toggle(ed);
+    frames(&again, 2U);
+    NTEST_EXPECT_FALSE(nph_engine_is_playing(again.engine));
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_edit_world(again.engine)), entities);
+    NTEST_EXPECT_FALSE(editor_scene_dirty(ed));
+    finish(&again);
 }

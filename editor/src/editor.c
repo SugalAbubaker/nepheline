@@ -19,6 +19,8 @@
 #endif
 
 #define EDITOR_DEFAULT_LAYOUT "nph_editor_layout.ini"
+#define EDITOR_DEFAULT_ASSETS "assets"
+#define EDITOR_DEFAULT_COOKED "cooked"
 
 // ---------------------------------------------------------------------------
 // Dear ImGui's memory, through a tracked allocator (CLAUDE.md §1.4: all
@@ -284,8 +286,8 @@ static void dockspace(Editor *ed)
     const ImGuiViewport *vp = igGetMainViewport();
     if (ed->build_layout || igDockBuilderGetNode(id) == NULL) {
         // The outliner on the left, the inspector and the statistics on the
-        // right, the console and the profiler below, the viewport in the
-        // middle.
+        // right, the console, the assets, and the profiler below, the
+        // viewport in the middle.
         ed->build_layout = false;
         ed->focus_defaults = 4U; // the windows exist from the next frame
         igDockBuilderRemoveNode(id);
@@ -300,6 +302,7 @@ static void dockspace(Editor *ed)
         igDockBuilderDockWindow(EDITOR_WINDOW_INSPECTOR, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_STATS, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_CONSOLE, bottom);
+        igDockBuilderDockWindow(EDITOR_WINDOW_ASSETS, bottom);
         igDockBuilderDockWindow(EDITOR_WINDOW_PROFILER, bottom);
         igDockBuilderFinish(id);
     }
@@ -373,6 +376,7 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_OUTLINER, NULL, &ed->show.outliner, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_INSPECTOR, NULL, &ed->show.inspector, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_ASSETS, NULL, &ed->show.assets, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
         igSeparator();
@@ -384,6 +388,7 @@ static void main_menu(Editor *ed)
             ed->show.outliner = true;
             ed->show.inspector = true;
             ed->show.console = true;
+            ed->show.assets = true;
             ed->show.profiler = true;
             ed->show.stats = true;
         }
@@ -500,9 +505,38 @@ static void scene_popups(Editor *ed)
 // The engine's hooks
 // ---------------------------------------------------------------------------
 
+// Files dropped on the window: imported into the asset browser's folder,
+// and placed where they fell when that is the viewport.
+static void drop(Editor *ed, const NphWindow *w, const NphWindowEvent *ev)
+{
+    const char *paths[EDITOR_IMPORT_PATHS_MAX];
+    u32 n = 0U;
+    for (u32 i = 0; i < ev->u.drop.count && n < EDITOR_IMPORT_PATHS_MAX; ++i) {
+        const char *path = nph_window_dropped_path(w, ev->u.drop.first + i);
+        if (path != NULL) {
+            paths[n++] = path;
+        }
+    }
+    if (ev->u.drop.count > EDITOR_IMPORT_PATHS_MAX) {
+        NPH_LOG_WARN(&LOG_EDITOR, "only the first %u of the %u files dropped are imported",
+                     EDITOR_IMPORT_PATHS_MAX, ev->u.drop.count);
+    }
+    if (n != 0U) {
+        // The window moved the cursor to where they fell just before.
+        NPH_IGNORE_RESULT(editor_import(ed, paths, n, true, ed->mouse[0], ed->mouse[1]));
+    }
+}
+
 static bool hook_event(NphEngine *e, const NphWindowEvent *ev, void *user)
 {
     Editor *ed = (Editor *)user;
+    if (ev->type == (u32)NPH_WINDOW_EVENT_DROP && ed->imgui != NULL) {
+        const NphWindow *w = nph_engine_window(e);
+        if (w != NULL) {
+            drop(ed, w, ev);
+        }
+        return true;
+    }
     // Closing the window with unsaved changes asks first.
     if (ev->type == (u32)NPH_WINDOW_EVENT_CLOSE && ed->imgui != NULL && !ed->quit_confirmed &&
         editor_scene_dirty(ed)) {
@@ -546,6 +580,7 @@ static void hook_sync(NphEngine *e, void *user)
         editor_release_game_input(ed);
     }
     editor_selection_prune(&ed->selection, nph_engine_world(ed->engine));
+    editor_assets_update(ed);
     const u64 now = nph_time_now_ns();
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
     ed->last_frame_ns = now;
@@ -562,6 +597,9 @@ static void hook_sync(NphEngine *e, void *user)
         if (ed->focus_defaults < 3U) {
             igSetWindowFocus_Str(order[ed->focus_defaults]);
         }
+    } else if (ed->assets.reveal) {
+        ed->assets.reveal = false;
+        igSetWindowFocus_Str(EDITOR_WINDOW_ASSETS);
     }
     main_menu(ed);
     shortcuts(ed);
@@ -576,6 +614,9 @@ static void hook_sync(NphEngine *e, void *user)
     }
     if (ed->show.console) {
         editor_panel_console(ed);
+    }
+    if (ed->show.assets) {
+        editor_panel_assets(ed);
     }
     if (ed->show.profiler) {
         editor_panel_profiler(ed);
@@ -634,16 +675,19 @@ static void hook_render(NphEngine *e, NphGpuRenderGraph *graph, NphGpuRgImage ba
     }
 }
 
-void editor_engine_hooks(Editor *ed, NphEngineHooks *out)
+void editor_engine_desc(Editor *ed, NphEngineDesc *desc)
 {
-    NPH_ASSERT(ed != NULL && out != NULL);
-    memset(out, 0, sizeof *out);
-    out->user = ed;
-    out->event = hook_event;
-    out->sync = hook_sync;
-    out->scene_target = hook_scene_target;
-    out->render = hook_render;
-    out->world_replaced = hook_world_replaced;
+    NPH_ASSERT(ed != NULL && desc != NULL);
+    NphEngineHooks *h = &desc->hooks;
+    memset(h, 0, sizeof *h);
+    h->user = ed;
+    h->event = hook_event;
+    h->sync = hook_sync;
+    h->scene_target = hook_scene_target;
+    h->render = hook_render;
+    h->world_replaced = hook_world_replaced;
+    desc->resolve = editor_resolve;
+    desc->resolve_user = ed;
 }
 
 bool editor_feed_event(Editor *ed, const NphWindowEvent *ev)
@@ -651,6 +695,10 @@ bool editor_feed_event(Editor *ed, const NphWindowEvent *ev)
     NPH_ASSERT(ed != NULL && ev != NULL);
     if (ed->imgui == NULL) {
         return false;
+    }
+    if (ev->type == (u32)NPH_WINDOW_EVENT_MOUSE_MOVE) {
+        ed->mouse[0] = (f32)ev->u.mouse_move.x;
+        ed->mouse[1] = (f32)ev->u.mouse_move.y;
     }
     if (ed->viewport.game_input) {
         // The game has the input. Escape takes it back; focus and the
@@ -686,6 +734,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     }
     ed->alloc = desc->alloc;
     ed->log_sink = desc->log;
+    nph_mutex_init(&ed->resolve_lock);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
@@ -693,6 +742,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     ed->show.outliner = true;
     ed->show.inspector = true;
     ed->show.console = true;
+    ed->show.assets = true;
     ed->show.profiler = true;
     ed->show.stats = true;
     ed->show_grid = true;
@@ -711,9 +761,31 @@ static NphResult register_cvars(Editor *ed)
         .value_string = EDITOR_DEFAULT_LAYOUT,
         .default_string = EDITOR_DEFAULT_LAYOUT,
     };
+    // The project's directories, read when the editor attaches.
+    const NphCvar assets = {
+        .name = "editor.assets",
+        .description = "the project's sources: what the asset browser shows and imports copy into",
+        .type = NPH_CVAR_TYPE_STRING,
+        .flags = NPH_CVAR_FLAG_LATCHED,
+        .value_string = EDITOR_DEFAULT_ASSETS,
+        .default_string = EDITOR_DEFAULT_ASSETS,
+    };
+    const NphCvar cooked = {
+        .name = "editor.cooked",
+        .description = "the cooker's output and database, mounted at the root of the VFS",
+        .type = NPH_CVAR_TYPE_STRING,
+        .flags = NPH_CVAR_FLAG_LATCHED,
+        .value_string = EDITOR_DEFAULT_COOKED,
+        .default_string = EDITOR_DEFAULT_COOKED,
+    };
     ed->cv_layout = layout;
-    NPH_TRY(nph_cvar_register(nph_engine_cvars(ed->engine), &ed->cv_layout));
-    ed->cvars_registered = true;
+    ed->cv_assets = assets;
+    ed->cv_cooked = cooked;
+    NphCvarRegistry *cvars = nph_engine_cvars(ed->engine);
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_layout));
+    ed->cvars_registered = true; // detach unregisters what is there
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_assets));
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_cooked));
     return NPH_RESULT_OK;
 }
 
@@ -781,6 +853,7 @@ static NphResult attach(Editor *ed, NphEngine *e)
     hd.world = nph_engine_edit_world(e);
     NPH_TRY(editor_history_create(&hd, &ed->history));
     ed->doc_saved_state = editor_history_state(ed->history);
+    NPH_TRY(editor_assets_open(ed));
     NphProfiler *prof = nph_engine_profiler(e);
     if (prof != NULL && nph_profiler_track_memory(prof, &ed->imgui_memory) == NPH_RESULT_OK) {
         ed->imgui_memory_tracked = true;
@@ -837,6 +910,7 @@ void editor_detach(Editor *ed)
                          (unsigned long long)leaked);
         }
     }
+    editor_assets_close(ed); // after the import in progress, if any
     editor_viewport_free(ed);
     editor_console_free(ed);
     editor_profiler_panel_free(ed);
@@ -845,7 +919,10 @@ void editor_detach(Editor *ed)
     ed->history = NULL;
     editor_selection_clear(&ed->selection);
     if (ed->cvars_registered) {
-        (void)nph_cvar_unregister(nph_engine_cvars(e), &ed->cv_layout);
+        NphCvarRegistry *cvars = nph_engine_cvars(e);
+        (void)nph_cvar_unregister(cvars, &ed->cv_layout);
+        (void)nph_cvar_unregister(cvars, &ed->cv_assets);
+        (void)nph_cvar_unregister(cvars, &ed->cv_cooked);
         ed->cvars_registered = false;
     }
     ed->engine = NULL;
@@ -858,6 +935,7 @@ void editor_destroy(Editor *ed)
         return;
     }
     editor_detach(ed);
+    nph_mutex_destroy(&ed->resolve_lock);
     NPH_FREE_TYPE(ed->alloc, Editor, ed);
 }
 

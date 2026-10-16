@@ -31,6 +31,7 @@ supersedes it and both link to each other.
 | [0023](0023-runtime.md) | The runtime: one engine context and a pipelined fixed-step frame | Accepted |
 | [0024](0024-game-modules.md) | Game modules: C shared libraries against a shared engine, reloaded by migrating the world | Accepted |
 | [0025](0025-editor-ui.md) | The editor's interface: Dear ImGui through cimgui, on our own backends, as an engine host | Accepted |
+| [0026](0026-editor-import.md) | Editor projects and import: sources copied in, cooked on an import thread, placed through the history | Accepted |
 
 ## Template
 
