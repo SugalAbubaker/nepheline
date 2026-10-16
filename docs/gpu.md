@@ -107,6 +107,16 @@ swapchain binary semaphores are handled by naming the swapchain in the
 submit. Submissions outside frames (tests, tools) are followed by a
 timeline wait or `nph_gpu_device_wait_idle`, which also resets the pools.
 
+Dynamic rendering with a read-only depth attachment always stores it
+with `VK_ATTACHMENT_STORE_OP_NONE` (`NPH_GPU_STORE_OP_NONE`, core in
+Vulkan 1.3), whatever store op the caller asked for. STORE and DONT_CARE
+are writes as far as synchronization goes. The render graph sees a
+read-only use as a read, so its barriers would not order such a store
+before the next write. Phase 9 found this: the reference renderer's
+tonemap pass reads the scene depth to test debug lines, and in a windowed
+frame loop the next frame's depth clear raced the store
+(`SYNC-HAZARD-WRITE-AFTER-WRITE`; the runtime's windowed engine test).
+
 Timestamps: `nph_gpu_cmd_write_timestamp` writes into the frame slot's
 query pool; results are read when the slot is recycled two frames later
 (`nph_gpu_frame_timestamps`), which is how the render graph reports

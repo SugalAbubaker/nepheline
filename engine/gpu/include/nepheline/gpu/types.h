@@ -408,6 +408,11 @@ typedef enum NphGpuLoadOp {
 typedef enum NphGpuStoreOp {
     NPH_GPU_STORE_OP_STORE = 0,
     NPH_GPU_STORE_OP_DONT_CARE,
+    // The store does not access the attachment (Vulkan 1.3
+    // VK_ATTACHMENT_STORE_OP_NONE): for attachments a pass only reads. STORE
+    // and DONT_CARE are writes as far as synchronization goes; a read-only
+    // depth attachment always stores with NONE (nph_gpu_cmd_begin_rendering).
+    NPH_GPU_STORE_OP_NONE,
 } NphGpuStoreOp;
 
 typedef union NphGpuClearValue {
