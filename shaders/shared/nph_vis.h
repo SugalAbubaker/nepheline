@@ -51,6 +51,10 @@
 #define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
 #define NPH_VIS_RASTER_KINDS    3
 
+// The depth pyramid after phase 1 rebuilds only the tiles of this many
+// pixels square that phase 1 drew into (vis_hzb.comp mode 2).
+#define NPH_VIS_HZB_TILE 32
+
 // The widest cluster, in pixels, the software raster takes: it keeps every
 // triangle's box small enough for 32-bit edge functions (vis_sw_raster.comp).
 #define NPH_VIS_SW_MAX_PIXELS 64
@@ -160,6 +164,8 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 clusters;           // visible clusters, phase 0's first
     u32 raster_count[2][3]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
     u32 overflow;           // NPH_VIS_OVERFLOW_*
+    u32 hzb_full;           // nonzero: phase 1 drew something no tile list bounds, so the
+                            // pyramid after it rebuilds every tile
     // Statistics, read back two frames later.
     u32 instances_culled_frustum;
     u32 instances_culled_occlusion; // after phase 2
@@ -200,6 +206,7 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 clusters;           // NphVisCluster[]
     u64 raster_lists[2][3]; // u32[] of cluster indices: [phase][NPH_VIS_RASTER_*]
     u64 draws[2][2];        // NphVisDraw[]: the hardware kinds, for the indirect raster
+    u64 hzb_dirty;          // u32[]: a bit per NPH_VIS_HZB_TILE tile phase 1 drew into
     u32 instance_count;     // slots the instance cull walks
     u32 max_cull_meshlets;
     u32 max_deferred;
@@ -211,10 +218,8 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 max_mesh_groups_x;   // the device's mesh-task workgroup count limit in x
     f32 sw_raster_pixels;    // clusters whose triangles average at most this many pixels
                              // across rasterise in software (NPH_VIS_VIEW_SW_RASTER)
+    u32 hzb_tiles_x;         // tiles per row of hzb_dirty
     u32 pad0;
-    u32 pad1;
-    u32 pad2;
-    u32 pad3;
 };
 
 // Push constants of every production-path shader. The visibility buffer

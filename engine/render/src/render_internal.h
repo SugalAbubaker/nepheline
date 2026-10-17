@@ -251,6 +251,7 @@ typedef struct VisFrame {
     NphGpuRgImage hdr;
     NphGpuRgImage depth; // null without blended draws
     NphGpuRgImage hzb;
+    NphGpuRgBuffer hzb_dirty;
     NphGpuRgBuffer counters;
     NphGpuRgBuffer args;
     NphGpuRgBuffer draws;
@@ -309,6 +310,12 @@ typedef struct RenderVis {
     u32 target_width; // the target it was built for
     u32 target_height;
     b32 hzb_valid;
+    // The tiles phase 1 drew into, a bit each: the pyramid after phase 1
+    // rebuilds those alone (vis_hzb.comp mode 2).
+    NphGpuBuffer hzb_dirty;
+    u32 hzb_tiles_x;
+    u32 hzb_tiles_y;
+    b32 hzb_full_rebuild; // tests: rebuild the whole pyramid after phase 1 too
     // That frame's view, for phase 0's tests against its HZB.
     NphMat4 prev_view;
     NphMat4 prev_view_proj;

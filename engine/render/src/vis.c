@@ -184,6 +184,7 @@ void render_vis_destroy(NphRenderer *r)
     NphGpuDevice *dev = r->dev;
     render_vis_scene_destroy(r);
     nph_gpu_image_destroy(dev, v->hzb);
+    nph_gpu_buffer_destroy(dev, v->hzb_dirty);
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
     }
@@ -240,7 +241,9 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
         return NPH_RESULT_OK;
     }
     nph_gpu_image_destroy(r->dev, v->hzb); // deferred past the frames in flight
+    nph_gpu_buffer_destroy(r->dev, v->hzb_dirty);
     v->hzb = NPH_GPU_IMAGE_NULL;
+    v->hzb_dirty = NPH_GPU_BUFFER_NULL;
     v->hzb_valid = 0;
     NphGpuImageDesc d;
     memset(&d, 0, sizeof d);
@@ -259,7 +262,15 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     v->hzb_mips = d.mip_count;
     v->target_width = width;
     v->target_height = height;
-    return NPH_RESULT_OK;
+    v->hzb_tiles_x = (width + (u32)NPH_VIS_HZB_TILE - 1U) / (u32)NPH_VIS_HZB_TILE;
+    v->hzb_tiles_y = (height + (u32)NPH_VIS_HZB_TILE - 1U) / (u32)NPH_VIS_HZB_TILE;
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.size = ((u64)v->hzb_tiles_x * v->hzb_tiles_y + 31U) / 32U * sizeof(u32);
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    bd.memory = NPH_GPU_MEMORY_DEVICE;
+    bd.name = "vis hzb tiles";
+    return nph_gpu_buffer_create(r->dev, &bd, &v->hzb_dirty);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +389,8 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->max_mesh_groups_x =
         nph_max_u32(nph_min_u32(lim->max_mesh_workgroup_count[0], 1U << 22U), 1U);
     vd->sw_raster_pixels = d->sw_raster_pixels;
+    vd->hzb_dirty = nph_gpu_buffer_address(dev, v->hzb_dirty);
+    vd->hzb_tiles_x = v->hzb_tiles_x;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +420,8 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     NphRenderer *r = (NphRenderer *)user;
     const VisFrame *f = &r->vis.frame;
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->counters), 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->hzb_dirty), 0U, NPH_GPU_WHOLE_SIZE,
+                            r->vis.hzb_full_rebuild ? NPH_U32_MAX : 0U);
     const NphGpuClearValue zero = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 0.0F);
     nph_gpu_cmd_clear_color_image(cmd, nph_gpu_rg_image(graph, f->visbuffer),
                                   NPH_GPU_LAYOUT_TRANSFER_DST, &zero, 0U, 1U, 0U, 1U);
@@ -557,10 +572,11 @@ static void raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
 }
 
 // The pyramid, one dispatch per mip, each reading the one before (the
-// first, the visibility buffer's depth).
-static void hzb_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+// first, the visibility buffer's depth). After phase 1, mip 0 is rebuilt
+// only in the tiles phase 1 drew into (vis_hzb.comp mode 2): elsewhere the
+// pyramid after phase 0 already holds the frame's depth.
+static void hzb_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
 {
-    NphRenderer *r = (NphRenderer *)user;
     RenderVis *v = &r->vis;
     NphGpuDevice *dev = r->dev;
     const NphGpuImage hzb = nph_gpu_rg_image(graph, v->frame.hzb);
@@ -568,7 +584,8 @@ static void hzb_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     u32 src_w = v->frame.width;
     u32 src_h = v->frame.height;
     for (u32 mip = 0; mip < v->hzb_mips; ++mip) {
-        NphVisPush p = push_of(r, 0U, mip == 0U ? 0U : 1U);
+        const u32 mode = mip != 0U ? 1U : (phase == 0U ? 0U : 2U);
+        NphVisPush p = push_of(r, phase, mode);
         p.arg0 =
             mip == 0U
                 ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer), 0U)
@@ -581,7 +598,12 @@ static void hzb_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
         // rounded down, as Vulkan sizes them (vis_hzb.comp).
         const u32 w = mip == 0U ? (src_w + 1U) / 2U : nph_max_u32(src_w / 2U, 1U);
         const u32 h = mip == 0U ? (src_h + 1U) / 2U : nph_max_u32(src_h / 2U, 1U);
-        nph_gpu_cmd_dispatch(cmd, (w + 7U) / 8U, (h + 7U) / 8U, 1U);
+        if (mode == 2U) {
+            // A workgroup per tile: 16 x 16 mip-0 texels.
+            nph_gpu_cmd_dispatch(cmd, v->hzb_tiles_x, v->hzb_tiles_y, 1U);
+        } else {
+            nph_gpu_cmd_dispatch(cmd, (w + 15U) / 16U, (h + 15U) / 16U, 1U);
+        }
         if (mip + 1U < v->hzb_mips) {
             // The next mip reads this one (the image stays in GENERAL).
             const NphGpuMemoryBarrier m = {
@@ -596,6 +618,16 @@ static void hzb_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
         src_w = w;
         src_h = h;
     }
+}
+
+static void hzb0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    hzb_record((NphRenderer *)user, graph, cmd, 0U);
+}
+
+static void hzb1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    hzb_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
 static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -728,11 +760,15 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
 {
     const VisFrame *f = &r->vis.frame;
     NphGpuRgPass *p = add_pass(graph, r, phase == 0U ? "vis hzb 0" : "vis hzb 1",
-                               NPH_GPU_RG_PASS_COMPUTE, hzb_execute);
+                               NPH_GPU_RG_PASS_COMPUTE, phase == 0U ? hzb0_execute : hzb1_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
     nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    if (phase == 1U) {
+        nph_gpu_rg_read_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+    }
     nph_gpu_rg_write_image(p, f->hzb, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, NPH_GPU_ALL_MIPS);
     return NPH_RESULT_OK;
 }
@@ -747,6 +783,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
         return NPH_RESULT_FULL;
     }
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_DST);
+    nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
 
     if (f->update_count != 0U) {
@@ -813,6 +850,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
         return NPH_RESULT_FULL;
     }
     read_scene(p, g, f->hzb);
+    nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
     nph_gpu_rg_read_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
@@ -893,6 +931,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->visbuffer = nph_gpu_rg_create_image(graph, &vd);
     f->hdr = nph_gpu_rg_create_image(graph, &hd);
     f->hzb = nph_gpu_rg_import_image(graph, v->hzb);
+    f->hzb_dirty = nph_gpu_rg_import_buffer(graph, v->hzb_dirty);
     f->counters = nph_gpu_rg_import_buffer(graph, v->counters);
     f->args = nph_gpu_rg_import_buffer(graph, v->args);
     f->stats = nph_gpu_rg_import_buffer(graph, v->stats[r->frame_slot]);

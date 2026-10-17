@@ -556,6 +556,97 @@ NTEST_F(Vis, the_depth_pyramid_is_the_minimum_of_what_it_covers)
     nph_gpu_image_destroy(f->dev, target);
 }
 
+// A wall in front of spheres, then moved aside: phase 0 defers the spheres
+// (last frame's pyramid has them behind the wall) and phase 1 draws them.
+// Returns the pyramid that frame leaves, every mip back to back, and the
+// lit pixels of the image.
+typedef struct Pyramid {
+    f32 *texels;
+    u64 count;
+    u32 lit;
+} Pyramid;
+
+static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
+{
+    f->renderer->vis.hzb_full_rebuild = full_rebuild;
+    NphRenderEnvironmentDesc env;
+    memset(&env, 0, sizeof env);
+    env.source = NPH_RENDER_ENV_SKY;
+    nph_render_sky_desc_default(&env.sky);
+    NTEST_ASSERT_EQ_INT(nph_render_set_environment(f->renderer, &env), NPH_RESULT_OK);
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 img[PIXELS];
+    static u8 sky[PIXELS];
+    render_into(f, &v, 1U, sky);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    const NphRenderMaterial m = material(f, nph_vec4(0.7F, 0.7F, 0.7F, 1.0F), 0.0F, 0.6F);
+    NphRenderTransform wall = at(0.0, 0.0, 1.0, 1.0F);
+    wall.linear = nph_mat3_from_scale(nph_vec3(4.0F, 4.0F, 0.2F));
+    const NphRenderInstance w = instance(f, cube, m, wall);
+    for (u32 i = 0; i < 16U; ++i) {
+        (void)instance(f, sphere, m,
+                       at(-1.2 + 0.8 * (f64)(i % 4U), -1.2 + 0.8 * (f64)(i >> 2U), -1.0, 0.6F));
+    }
+    render_into(f, &v, 3U, img);
+    const NphRenderTransform aside = at(60.0, 0.0, 1.0, 1.0F);
+    NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(f->renderer, w, &aside), NPH_RESULT_OK);
+    render_into(f, &v, 1U, img);
+    Pyramid out;
+    memset(&out, 0, sizeof out);
+    out.lit = lit_pixels(img, sky);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    const RenderVis *vis = &f->renderer->vis;
+    for (u32 mip = 0; mip < vis->hzb_mips; ++mip) {
+        out.count +=
+            (u64)nph_max_u32(vis->hzb_width >> mip, 1U) * nph_max_u32(vis->hzb_height >> mip, 1U);
+    }
+    out.texels = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, out.count);
+    NTEST_ASSERT_NOT_NULL(out.texels);
+    u64 at_texel = 0U;
+    for (u32 mip = 0; mip < vis->hzb_mips; ++mip) {
+        const u64 n =
+            (u64)nph_max_u32(vis->hzb_width >> mip, 1U) * nph_max_u32(vis->hzb_height >> mip, 1U);
+        test_read_image(f->dev, vis->hzb, mip, out.texels + at_texel, n * sizeof(f32));
+        at_texel += n;
+    }
+    return out;
+}
+
+// The pyramid after phase 1 rebuilds only the tiles phase 1 drew into; it
+// must be the pyramid a full rebuild gives, texel for texel.
+NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
+{
+    RenderFixture tiled;
+    RenderFixture full;
+    test_render_setup(&tiled, NULL);
+    if (tiled.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(tiled.renderer)) {
+        test_render_teardown(&tiled);
+        NTEST_SKIP("no production path on this device");
+    }
+    const Pyramid a = pyramid_after_a_reveal(&tiled, false);
+    test_render_teardown(&tiled);
+    test_render_setup(&full, NULL);
+    const Pyramid b = pyramid_after_a_reveal(&full, true);
+    test_render_teardown(&full);
+    // Phase 1 drew the spheres: the image is not the bare sky.
+    NTEST_EXPECT_GT_UINT(a.lit, 100U);
+    NTEST_EXPECT_EQ_UINT(a.lit, b.lit);
+    NTEST_ASSERT_EQ_UINT(a.count, b.count);
+    u64 wrong = 0U;
+    for (u64 i = 0; i < a.count; ++i) {
+        wrong += a.texels[i] != b.texels[i] ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, a.texels, a.count);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, b.texels, b.count);
+}
+
 NTEST_F(Vis, production_matches_the_reference)
 {
     REQUIRE_PRODUCTION(f);
