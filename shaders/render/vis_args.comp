@@ -62,14 +62,6 @@ void main()
         args.a.cull_args[1] = uint[4](a.x, a.y, a.z, a.w);
         break;
     }
-    case NPH_VIS_ARGS_TILES: {
-        // The resolve of each bin: a workgroup per tile.
-        for (uint b = 0u; b < uint(NPH_VIS_BINS); ++b) {
-            const uvec4 a = groups(counters.c.tiles[b], VIS_MAX_GROUPS_X);
-            args.a.resolve_args[b] = uint[4](a.x, a.y, a.z, a.w);
-        }
-        break;
-    }
     default:
         break;
     }

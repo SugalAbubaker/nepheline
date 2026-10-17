@@ -59,24 +59,14 @@
 // triangle's box small enough for 32-bit edge functions (vis_sw_raster.comp).
 #define NPH_VIS_SW_MAX_PIXELS 64
 
-// Shading tiles: the resolve's workgroups, classified by what they hold
-// (vis_hzb.comp writes the class, vis_tile_bins.comp sorts the tiles into
-// bins, and the resolve runs once per bin, specialised for it).
-#define NPH_VIS_SHADE_TILE    8
-#define NPH_VIS_TILE_GEOMETRY 1 // class bit: a pixel of the tile holds a surface
-#define NPH_VIS_BIN_SKY       0 // tiles of background alone
-#define NPH_VIS_BIN_LIT       1 // tiles with surfaces (and maybe background)
-#define NPH_VIS_BINS          2
-
 // NphVisViewData.flags.
-#define NPH_VIS_VIEW_OCCLUSION    1   // test against the hierarchical depth
-#define NPH_VIS_VIEW_HZB_VALID    2   // the previous frame's HZB matches this view's target
-#define NPH_VIS_VIEW_MESH_SHADERS 4   // rasterise with mesh shaders (else indirect draws)
-#define NPH_VIS_VIEW_CONE_CULLING 8   // meshlet normal-cone backface culling
-#define NPH_VIS_VIEW_FREEZE       16  // keep last frame's culling camera (debugging)
-#define NPH_VIS_VIEW_SW_RASTER    32  // small clusters rasterise in software
-#define NPH_VIS_VIEW_TILE_BINS    64  // shading tiles of background alone take the sky bin
-#define NPH_VIS_VIEW_LIGHT_GRID   128 // local lights are binned (else every light is global)
+#define NPH_VIS_VIEW_OCCLUSION    1  // test against the hierarchical depth
+#define NPH_VIS_VIEW_HZB_VALID    2  // the previous frame's HZB matches this view's target
+#define NPH_VIS_VIEW_MESH_SHADERS 4  // rasterise with mesh shaders (else indirect draws)
+#define NPH_VIS_VIEW_CONE_CULLING 8  // meshlet normal-cone backface culling
+#define NPH_VIS_VIEW_FREEZE       16 // keep last frame's culling camera (debugging)
+#define NPH_VIS_VIEW_SW_RASTER    32 // small clusters rasterise in software
+#define NPH_VIS_VIEW_LIGHT_GRID   64 // local lights are binned (else every light is global)
 
 // vis_lights.comp modes (NphVisPush.mode).
 #define NPH_VIS_LIGHTS_UPDATE 0 // apply the frame's light updates
@@ -88,7 +78,6 @@
 #define NPH_VIS_ARGS_PHASE2      2 // before phase 1: instance cull of the deferred instances
 #define NPH_VIS_ARGS_PHASE2_MESH 3 // after phase 1's instance cull: its meshlet cull
 #define NPH_VIS_ARGS_RASTER2     4 // after phase 1's meshlet cull: its rasters
-#define NPH_VIS_ARGS_TILES       5 // after the tile bins: the resolve per bin
 
 // A transform: the linear part's rows in xyz, the translation's high
 // float in the rows' w, and its low float in `translation_low`.
@@ -192,7 +181,6 @@ NPH_SHARED_STRUCT(NphVisArgs)
     u32 instance2_args[4];    // phase 1's cull of the instances phase 0 deferred
     u32 raster_args[2][3][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
     u32 light_tile_args[4];   // the light masks: tile groups in x and y, light words in z
-    u32 resolve_args[2][4];   // [NPH_VIS_BIN_*]: a workgroup per tile, spread over x and y
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -209,7 +197,6 @@ NPH_SHARED_STRUCT(NphVisCounters)
                             // pyramid after it rebuilds every tile
     u32 lights_global;      // NphRenderLightGrid.counts: lights that reach every pixel
     u32 lights_local;       // and the others in view
-    u32 tiles[2];           // [NPH_VIS_BIN_*]: shading tiles in each bin
     // Statistics, read back two frames later.
     u32 instances_culled_frustum;
     u32 instances_culled_occlusion; // after phase 2
@@ -259,8 +246,6 @@ NPH_SHARED_STRUCT(NphVisViewData)
                             // 16), then its tiles (x0 | y0 << 16, x1 | y1 << 16)
     u64 light_staged;       // NphRenderLightData[]: those lights, camera relative, unsorted
     u64 light_rects;        // uvec2[]: their tiles, sorted like the grid's locals
-    u64 tile_class;         // u32[]: per shading tile, NPH_VIS_TILE_* bits
-    u64 tile_lists[2];      // u32[] per NPH_VIS_BIN_*: tiles as x | y << 16
     u32 instance_count;     // slots the instance cull walks
     u32 max_cull_meshlets;
     u32 max_deferred;
@@ -275,8 +260,7 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 hzb_tiles_x;         // tiles per row of hzb_dirty
     u32 light_slots;         // slots the light pass walks
     u32 light_tiles_y;       // rows of light tiles (the grid has the row length)
-    u32 shade_tiles_x;       // shading tiles per row
-    u32 shade_tiles_y;
+    u32 pad0;
 };
 
 // Push constants of every production-path shader. The visibility buffer

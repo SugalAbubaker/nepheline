@@ -47,10 +47,14 @@ float nph_gradient_noise(vec2 pixel)
 // Ti truncates), never applies. `u` is noise in [0, 1).
 vec3 nph_dither_b10g11r11(vec3 c, float u)
 {
-    const vec3 x = max(c, vec3(1e-20));
-    const vec3 e = vec3((floatBitsToUint(x) >> 23u) & 0xFFu) - 127.0;
-    const vec3 to_grid = exp2(vec3(6.0, 6.0, 5.0) - e);
-    return floor(c * to_grid + u) / to_grid;
+    // The grid's spacing, 2^(exponent - mantissa bits), and its reciprocal
+    // as exact powers of two built from the exponent's bits (a reciprocal
+    // power of two has the biased exponent 254 - e).
+    const uvec3 e = (floatBitsToUint(max(c, vec3(1e-20))) & 0x7F800000u) -
+                    (uvec3(6u, 6u, 5u) << 23u);
+    const vec3 spacing = uintBitsToFloat(e);
+    const vec3 inverse = uintBitsToFloat((254u << 23u) - e);
+    return floor(c * inverse + u) * spacing;
 }
 
 // The distance bin of view distance `z` in a light grid

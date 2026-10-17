@@ -17,12 +17,8 @@
 //   vis args, vis cull instances 1, vis args, vis cull meshlets 1 (the
 //                         meshlets phase 0 deferred, then those of instances
 //                         now visible), vis args, vis raster 1, vis sw raster 1
-//   vis hzb 1             the frame's depth: next frame's phase 0 tests it;
-//                         both pyramids classify the shading tiles
-//   vis tile bins, vis args tiles
-//                         the tiles sorted into bins: background, surfaces
-//   vis resolve sky, vis resolve
-//                         shading into the HDR image, a pipeline per bin
+//   vis hzb 1             the frame's depth: next frame's phase 0 tests it
+//   vis resolve           shading into the HDR image
 //   vis depth, transparent (only with blended surfaces)
 //   vis statistics        the counters, read back two frames later
 //
@@ -41,7 +37,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 800U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 768U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -58,7 +54,6 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_lights.comp",
     "vis_light_bins.comp",
     "vis_light_tiles.comp",
-    "vis_tile_bins.comp",
     "vis_raster_opaque.mesh",
     "vis_raster_masked.mesh",
     "vis_raster_mesh_opaque.frag",
@@ -74,13 +69,12 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_SCATTER,    VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
     VIS_SHADER_HZB,        VIS_SHADER_RESOLVE,        VIS_SHADER_SW_RASTER,     VIS_SHADER_LIGHTS,
-    VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,    VIS_SHADER_TILE_BINS,     VIS_SHADER_RESOLVE,
+    VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
-    "vis scatter",    "vis cull instances", "vis cull meshlets", "vis args",
-    "vis hzb",        "vis resolve",        "vis sw raster",     "vis lights",
-    "vis light bins", "vis light tiles",    "vis tile bins",     "vis resolve sky",
+    "vis scatter", "vis cull instances", "vis cull meshlets", "vis args",       "vis hzb",
+    "vis resolve", "vis sw raster",      "vis lights",        "vis light bins", "vis light tiles",
 };
 
 // ---------------------------------------------------------------------------
@@ -193,13 +187,11 @@ NphResult render_vis_create(NphRenderer *r)
         memset(&d, 0, sizeof d);
         d.shader = v->shaders[k_compute_shaders[i]];
         d.name = k_compute_names[i];
-        if (i == (u32)VIS_COMPUTE_RESOLVE || i == (u32)VIS_COMPUTE_RESOLVE_SKY) {
-            // The resolve's bins (vis_resolve.comp k_bin), and whether it
-            // dithers to the HDR target's precision (k_dither).
-            d.specialization[0] =
-                i == (u32)VIS_COMPUTE_RESOLVE ? (u32)NPH_VIS_BIN_LIT : (u32)NPH_VIS_BIN_SKY;
-            d.specialization[1] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
-            d.specialization_count = 2U;
+        if (i == (u32)VIS_COMPUTE_RESOLVE) {
+            // Whether the resolve dithers to the HDR target's precision
+            // (vis_resolve.comp k_dither).
+            d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
+            d.specialization_count = 1U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         log_statistics(r, v->compute[i], k_compute_names[i]);
@@ -251,8 +243,6 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_image_destroy(dev, v->hzb);
     nph_gpu_buffer_destroy(dev, v->hzb_dirty);
     nph_gpu_buffer_destroy(dev, v->light_tiles);
-    nph_gpu_buffer_destroy(dev, v->tile_class);
-    nph_gpu_buffer_destroy(dev, v->tile_lists);
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
     }
@@ -302,8 +292,7 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t, 
 // ---------------------------------------------------------------------------
 
 // Keeps what is sized by the target the size it needs: the light tiles'
-// masks, the shading tiles' classes and bins, and the HZB, whose mip 0 is
-// half the target, rounded up, with a
+// masks, and the HZB, whose mip 0 is half the target, rounded up, with a
 // full chain down to 1 x 1 (vis_hzb_occluded relies on the last mip
 // covering everything); Vulkan halves each later mip rounding down, which
 // vis_hzb.comp's footprints follow.
@@ -316,13 +305,9 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     nph_gpu_image_destroy(r->dev, v->hzb); // deferred past the frames in flight
     nph_gpu_buffer_destroy(r->dev, v->hzb_dirty);
     nph_gpu_buffer_destroy(r->dev, v->light_tiles);
-    nph_gpu_buffer_destroy(r->dev, v->tile_class);
-    nph_gpu_buffer_destroy(r->dev, v->tile_lists);
     v->hzb = NPH_GPU_IMAGE_NULL;
     v->hzb_dirty = NPH_GPU_BUFFER_NULL;
     v->light_tiles = NPH_GPU_BUFFER_NULL;
-    v->tile_class = NPH_GPU_BUFFER_NULL;
-    v->tile_lists = NPH_GPU_BUFFER_NULL;
     v->hzb_valid = 0;
     v->light_tiles_x = (width + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
     v->light_tiles_y = (height + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
@@ -334,15 +319,6 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     ld.memory = NPH_GPU_MEMORY_DEVICE;
     ld.name = "vis light tiles";
     NPH_TRY(nph_gpu_buffer_create(r->dev, &ld, &v->light_tiles));
-    v->shade_tiles_x = (width + (u32)NPH_VIS_SHADE_TILE - 1U) / (u32)NPH_VIS_SHADE_TILE;
-    v->shade_tiles_y = (height + (u32)NPH_VIS_SHADE_TILE - 1U) / (u32)NPH_VIS_SHADE_TILE;
-    const u64 shade_tiles = (u64)v->shade_tiles_x * v->shade_tiles_y;
-    ld.size = shade_tiles * sizeof(u32);
-    ld.name = "vis tile classes";
-    NPH_TRY(nph_gpu_buffer_create(r->dev, &ld, &v->tile_class));
-    ld.size = (u64)NPH_VIS_BINS * shade_tiles * sizeof(u32);
-    ld.name = "vis tile bins";
-    NPH_TRY(nph_gpu_buffer_create(r->dev, &ld, &v->tile_lists));
     NphGpuImageDesc d;
     memset(&d, 0, sizeof d);
     d.format = RENDER_HZB_FORMAT;
@@ -396,8 +372,6 @@ static void read_stats(NphRenderer *r)
     s->vis_meshlets_culled_cone = c->meshlets_culled_cone;
     s->vis_meshlets_culled_occlusion = c->meshlets_culled_occlusion;
     s->vis_lights = c->lights_global + c->lights_local;
-    s->vis_tiles_sky = c->tiles[NPH_VIS_BIN_SKY];
-    s->vis_tiles_lit = c->tiles[NPH_VIS_BIN_LIT];
     s->vis_overflow = c->overflow;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
@@ -506,13 +480,6 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->light_rects = work + ll->rects;
     vd->light_slots = r->light_pool.bump;
     vd->light_tiles_y = v->light_tiles_y;
-    const u64 tile_list = (u64)v->shade_tiles_x * v->shade_tiles_y * sizeof(u32);
-    vd->tile_class = nph_gpu_buffer_address(dev, v->tile_class);
-    for (u32 b = 0; b < (u32)NPH_VIS_BINS; ++b) {
-        vd->tile_lists[b] = nph_gpu_buffer_address(dev, v->tile_lists) + tile_list * b;
-    }
-    vd->shade_tiles_x = v->shade_tiles_x;
-    vd->shade_tiles_y = v->shade_tiles_y;
     NphRenderLightGrid *g = render_frame_at(r, r->layout.light_grid_offset);
     memset(g, 0, sizeof *g);
     g->globals = work + ll->globals;
@@ -646,7 +613,6 @@ ARGS_EXECUTE(args_raster1_execute, NPH_VIS_ARGS_RASTER1)
 ARGS_EXECUTE(args_phase2_execute, NPH_VIS_ARGS_PHASE2)
 ARGS_EXECUTE(args_phase2_mesh_execute, NPH_VIS_ARGS_PHASE2_MESH)
 ARGS_EXECUTE(args_raster2_execute, NPH_VIS_ARGS_RASTER2)
-ARGS_EXECUTE(args_tiles_execute, NPH_VIS_ARGS_TILES)
 
 #define ARGS_OFFSET(field) ((u64)offsetof(NphVisArgs, field))
 
@@ -809,41 +775,16 @@ static void hzb1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     hzb_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
-static void tile_bins_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    NPH_UNUSED(graph);
     NphRenderer *r = (NphRenderer *)user;
-    const NphVisPush p = push_of(r, 0U, 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_TILE_BINS]);
-    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    dispatch_items(cmd, r->vis.shade_tiles_x * r->vis.shade_tiles_y);
-}
-
-// A bin's resolve: a workgroup per tile of its list.
-static void resolve_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 bin)
-{
     const VisFrame *f = &r->vis.frame;
     NphVisPush p = push_of(r, 0U, 0U);
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
-    if (bin == (u32)NPH_VIS_BIN_LIT) {
-        p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
-    }
-    nph_gpu_cmd_bind_pipeline(
-        cmd, r->vis.compute[bin == (u32)NPH_VIS_BIN_LIT ? VIS_COMPUTE_RESOLVE
-                                                        : VIS_COMPUTE_RESOLVE_SKY]);
+    p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_RESOLVE]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
-                                  (u64)offsetof(NphVisArgs, resolve_args) + (u64)bin * 16U);
-}
-
-static void resolve_sky_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    resolve_record((NphRenderer *)user, graph, cmd, (u32)NPH_VIS_BIN_SKY);
-}
-
-static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    resolve_record((NphRenderer *)user, graph, cmd, (u32)NPH_VIS_BIN_LIT);
+    nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
 
 static void depth_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -974,7 +915,6 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
         nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     }
     nph_gpu_rg_write_image(p, f->hzb, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, NPH_GPU_ALL_MIPS);
-    nph_gpu_rg_write_buffer(p, f->tile_class, NPH_GPU_RG_USE_SHADER_WRITE);
     return NPH_RESULT_OK;
 }
 
@@ -1024,39 +964,18 @@ static void read_lights(NphGpuRgPass *p, const VisFrame *f)
     nph_gpu_rg_read_buffer(p, f->light_tiles, NPH_GPU_RG_USE_SHADER_READ);
 }
 
-// The shading: the tiles into bins, then a resolve per bin, the sky's
-// with the background alone.
+// The shading: every pixel in one pass (docs/adr/0031-light-grid.md:
+// binning the tiles of background alone into a pipeline of their own
+// measured slower).
 static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const VisGraph *g,
                                  NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
                                  NphGpuRgBuffer sh)
 {
     const VisFrame *f = &r->vis.frame;
-    NphGpuRgPass *p =
-        add_pass(graph, r, "vis tile bins", NPH_GPU_RG_PASS_COMPUTE, tile_bins_execute);
+    NphGpuRgPass *p = add_pass(graph, r, "vis resolve", NPH_GPU_RG_PASS_COMPUTE, resolve_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
-    nph_gpu_rg_read_buffer(p, f->tile_class, NPH_GPU_RG_USE_SHADER_READ);
-    nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
-    nph_gpu_rg_write_buffer(p, f->tile_lists, NPH_GPU_RG_USE_SHADER_WRITE);
-    if (args_pass(graph, r, "vis args tiles", args_tiles_execute) == NULL) {
-        return NPH_RESULT_FULL;
-    }
-    p = add_pass(graph, r, "vis resolve sky", NPH_GPU_RG_PASS_COMPUTE, resolve_sky_execute);
-    if (p == NULL) {
-        return NPH_RESULT_FULL;
-    }
-    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
-    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
-    nph_gpu_rg_read_buffer(p, f->tile_lists, NPH_GPU_RG_USE_SHADER_READ);
-    nph_gpu_rg_read_image(p, env, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
-    nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
-    p = add_pass(graph, r, "vis resolve", NPH_GPU_RG_PASS_COMPUTE, resolve_execute);
-    if (p == NULL) {
-        return NPH_RESULT_FULL;
-    }
-    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
-    nph_gpu_rg_read_buffer(p, f->tile_lists, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
     nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
@@ -1206,9 +1125,6 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_SW_RASTER) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_SW_RASTER;
     }
-    if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_TILE_BINS) == 0U) {
-        flags |= (u32)NPH_VIS_VIEW_TILE_BINS;
-    }
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_LIGHT_GRID) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_LIGHT_GRID;
     }
@@ -1244,8 +1160,6 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->lights = nph_gpu_rg_import_buffer(graph, v->lights);
     f->light_grid = nph_gpu_rg_import_buffer(graph, v->light_grid);
     f->light_tiles = nph_gpu_rg_import_buffer(graph, v->light_tiles);
-    f->tile_class = nph_gpu_rg_import_buffer(graph, v->tile_class);
-    f->tile_lists = nph_gpu_rg_import_buffer(graph, v->tile_lists);
     if (!v->mesh_shaders) {
         f->draws = nph_gpu_rg_import_buffer(graph, v->draws);
         f->index_pool = nph_gpu_rg_import_buffer(graph, v->index_pool);
@@ -1261,8 +1175,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.lists = nph_gpu_rg_import_buffer(graph, v->lists);
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
-        nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles) ||
-        nph_gpu_rg_buffer_is_null(f->tile_lists)) {
+        nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles)) {
         NPH_PROFILE_END();
         return NPH_RESULT_FULL;
     }
@@ -1301,8 +1214,6 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_meshlets_culled_cone = last->vis_meshlets_culled_cone;
         stats->vis_meshlets_culled_occlusion = last->vis_meshlets_culled_occlusion;
         stats->vis_lights = last->vis_lights;
-        stats->vis_tiles_sky = last->vis_tiles_sky;
-        stats->vis_tiles_lit = last->vis_tiles_lit;
         stats->vis_overflow = last->vis_overflow;
     }
     NPH_PROFILE_END();

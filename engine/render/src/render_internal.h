@@ -215,7 +215,6 @@ typedef enum VisShader {
     VIS_SHADER_LIGHTS,
     VIS_SHADER_LIGHT_BINS,
     VIS_SHADER_LIGHT_TILES,
-    VIS_SHADER_TILE_BINS,
     VIS_SHADER_MESH_OPAQUE,
     VIS_SHADER_MESH_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -240,8 +239,6 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHTS,
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
-    VIS_COMPUTE_TILE_BINS,
-    VIS_COMPUTE_RESOLVE_SKY, // vis_resolve.comp specialised for NPH_VIS_BIN_SKY
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -288,8 +285,6 @@ typedef struct VisFrame {
     NphGpuRgBuffer lights;
     NphGpuRgBuffer light_grid;
     NphGpuRgBuffer light_tiles;
-    NphGpuRgBuffer tile_class;
-    NphGpuRgBuffer tile_lists;
 } VisFrame;
 
 typedef struct RenderVis {
@@ -366,12 +361,6 @@ typedef struct RenderVis {
     NphGpuBuffer hzb_dirty;
     u32 hzb_tiles_x;
     u32 hzb_tiles_y;
-    // The shading tiles: each one's class (written with the pyramid), and
-    // the bins' lists of them.
-    NphGpuBuffer tile_class; // u32 per tile
-    NphGpuBuffer tile_lists; // u32[NPH_VIS_BINS][tiles]
-    u32 shade_tiles_x;
-    u32 shade_tiles_y;
     b32 hzb_full_rebuild; // tests: rebuild the whole pyramid after phase 1 too
     // That frame's view, for phase 0's tests against its HZB.
     NphMat4 prev_view;

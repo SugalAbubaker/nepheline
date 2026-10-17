@@ -13,10 +13,7 @@
 // background, as the reference's sky pass does.
 //
 // Writes pre-exposed radiance into the HDR image whose storage index is
-// arg0; arg1 is the visibility buffer's. A workgroup shades one shading
-// tile of its bin's list (vis_tile_bins.comp): the pipeline is specialised
-// by k_bin, and the sky bin's holds the background alone and never reads
-// the visibility buffer.
+// arg0; arg1 is the visibility buffer's.
 #version 460
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
@@ -27,22 +24,17 @@
 #define NPH_SURFACE_GRID_LIGHTS
 #include "surface.glsl"
 
-#if NPH_VIS_SHADE_TILE != 8
-#error "a workgroup is a shading tile"
-#endif
-
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
-// The bin this pipeline shades (NPH_VIS_BIN_*), and whether the HDR
-// target is B10G11R11, whose coarse steps are dithered.
-layout(constant_id = 0) const uint k_bin = NPH_VIS_BIN_LIT;
-layout(constant_id = 1) const bool k_dither = false;
+// Whether the HDR target is B10G11R11, whose coarse steps are dithered.
+layout(constant_id = 0) const bool k_dither = false;
 
-// The debug views are stored as they are, for reading.
-void store(ViewRef rview, ivec2 p, vec3 color)
+// With `dither` the colour is rounded to the HDR target's grid at random
+// (debug views are stored as they are, for reading).
+void store(ivec2 p, vec3 color, bool dither)
 {
-    if (k_dither && rview.v.debug_mode == NPH_RENDER_DEBUG_NONE) {
+    if (dither) {
         color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
     }
     imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
@@ -118,26 +110,18 @@ vec3 background(ViewRef rview, vec2 q)
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
-    const uint index = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    if (index >= VisCountersRef(view.v.counters).c.tiles[k_bin]) {
-        return; // the last row's tail
-    }
-    const uint tile = VisUintRef(view.v.tile_lists[k_bin]).v[index];
-    const ivec2 p = ivec2(uvec2(tile & 0xFFFFu, tile >> 16u) * uint(NPH_VIS_SHADE_TILE) +
-                          gl_LocalInvocationID.xy);
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     const vec2 size = view.v.viewport.xy;
     if (p.x >= int(size.x) || p.y >= int(size.y)) {
         return;
     }
     ViewRef rview = ViewRef(view.v.render_view);
+    const uint debug = rview.v.debug_mode;
+    // Decided here, so that nothing of the view stays live to the store.
+    const bool dither = k_dither && debug == NPH_RENDER_DEBUG_NONE;
     const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
-    if (k_bin == NPH_VIS_BIN_SKY) {
-        store(rview, p, background(rview, q));
-        return;
-    }
     const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg1)], p).x;
     vec3 color;
-    const uint debug = rview.v.debug_mode;
     if (v == 0ul) {
         color = background(rview, q);
     } else if (debug >= NPH_RENDER_DEBUG_CLUSTERS) {
@@ -206,5 +190,5 @@ void main()
         const NphRenderMaterialData material = MaterialsRef(view.v.materials).m[cluster.material];
         color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
     }
-    store(rview, p, color);
+    store(p, color, dither);
 }

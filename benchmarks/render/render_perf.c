@@ -34,8 +34,6 @@
 //                         pillars on a ground plane at 3840 x 2160, seen
 //                         from head height: the nearer rows hide most of
 //                         the field, so occlusion culling does the work.
-//   field_4k_no_tile_bins the production field with every shading tile
-//                         through the full resolve (NPH_RENDER_VIS_NO_TILE_BINS).
 //   lights_<n>_<pipeline> the field at night, lit by n point and spot
 //                         lights of 3 to 8 m range among the nearer rows
 //                         (and a dim moon): the light grid's cost against
@@ -102,8 +100,6 @@ static const SceneDef g_scenes[] = {
      0U},
     {"field_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U},
-    {"field_4k_no_tile_bins", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
-     (u32)NPH_RENDER_VIS_NO_TILE_BINS},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
      0U},
     {"lights_1k_production", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,

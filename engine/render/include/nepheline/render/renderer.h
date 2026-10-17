@@ -498,7 +498,6 @@ typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_NO_CONE = 1U << 1U,       // no meshlet normal-cone tests
     NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U,  // every cluster through the hardware raster
     NPH_RENDER_VIS_NO_LIGHT_GRID = 1U << 3U, // every light for every pixel, as the reference
-    NPH_RENDER_VIS_NO_TILE_BINS = 1U << 4U,  // every shading tile through the full resolve
 } NphRenderVisFlags;
 
 typedef struct NphRenderView {
@@ -550,11 +549,9 @@ typedef struct NphRenderFrameStats {
     u32 vis_meshlets_culled_frustum;
     u32 vis_meshlets_culled_cone;
     u32 vis_meshlets_culled_occlusion;
-    u32 vis_lights;    // lights in view: those that reach every pixel, and the others the
-                       // frustum keeps
-    u32 vis_tiles_sky; // shading tiles of background alone (8 x 8 pixels)
-    u32 vis_tiles_lit; // and the others
-    u32 vis_overflow;  // NphRenderVisOverflow bits: lists that dropped work
+    u32 vis_lights;   // lights in view: those that reach every pixel, and the others the
+                      // frustum keeps
+    u32 vis_overflow; // NphRenderVisOverflow bits: lists that dropped work
 } NphRenderFrameStats;
 
 // The production path's lists that can fill up (NphRenderFrameStats.
