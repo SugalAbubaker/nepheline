@@ -24,12 +24,24 @@
 // the visibility buffer (the cull pass marks the tiles; a cluster it cannot
 // bound marks them all). arg0 is the source's bindless storage index, arg1
 // the destination's, arg2 and arg3 the source extent.
+//
+// Modes 0 and 2 read every pixel of their tiles, so they also classify the
+// shading tiles (NPH_VIS_SHADE_TILE pixels square, 4 x 4 of them per
+// workgroup) for the resolve: whether any pixel holds a surface. A tile
+// phase 1 drew into is classified again by mode 2; the others keep mode
+// 0's class, phase 1 having left their pixels as they were.
 #version 460
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+#if NPH_VIS_HZB_TILE != 2 * 16 || NPH_VIS_SHADE_TILE * 4 != NPH_VIS_HZB_TILE
+#error "a workgroup is one HZB tile, 4 x 4 shading tiles"
+#endif
+
+shared uint s_class[16]; // the workgroup's shading tiles' classes
 
 float source_depth(ivec2 p)
 {
@@ -50,22 +62,45 @@ void main()
             return;
         }
     }
+    const bool classify = pc.mode != 1u;
+    const uint t = gl_LocalInvocationIndex;
+    if (classify) {
+        if (t < 16u) {
+            s_class[t] = 0u;
+        }
+        barrier();
+    }
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 src = ivec2(pc.arg2, pc.arg3);
     const ivec2 dst = pc.mode != 1u ? (src + 1) / 2 : max(src / 2, ivec2(1));
-    if (any(greaterThanEqual(p, dst))) {
-        return;
-    }
-    const ivec2 last = src - 1;
-    const ivec2 lo = min(p * 2, last);
-    // The last texel of a row or column reaches the source's edge.
-    const ivec2 hi = ivec2(p.x == dst.x - 1 ? last.x : p.x * 2 + 1,
-                           p.y == dst.y - 1 ? last.y : p.y * 2 + 1);
-    float d = source_depth(lo);
-    for (int y = lo.y; y <= hi.y; ++y) {
-        for (int x = lo.x; x <= hi.x; ++x) {
-            d = min(d, source_depth(ivec2(x, y)));
+    if (all(lessThan(p, dst))) {
+        const ivec2 last = src - 1;
+        const ivec2 lo = min(p * 2, last);
+        // The last texel of a row or column reaches the source's edge.
+        const ivec2 hi = ivec2(p.x == dst.x - 1 ? last.x : p.x * 2 + 1,
+                               p.y == dst.y - 1 ? last.y : p.y * 2 + 1);
+        float d = source_depth(lo);
+        float nearest = d;
+        for (int y = lo.y; y <= hi.y; ++y) {
+            for (int x = lo.x; x <= hi.x; ++x) {
+                const float s = source_depth(ivec2(x, y));
+                d = min(d, s);
+                nearest = max(nearest, s);
+            }
+        }
+        imageStore(nph_images_2d[nonuniformEXT(pc.arg1)], p, vec4(d, 0.0, 0.0, 0.0));
+        // Depth 0 is "nothing drawn" (vis_pack).
+        if (classify && nearest > 0.0) {
+            atomicOr(s_class[(gl_LocalInvocationID.y >> 2u) * 4u + (gl_LocalInvocationID.x >> 2u)],
+                     uint(NPH_VIS_TILE_GEOMETRY));
         }
     }
-    imageStore(nph_images_2d[nonuniformEXT(pc.arg1)], p, vec4(d, 0.0, 0.0, 0.0));
+    if (classify) {
+        barrier();
+        VisViewRef view = VisViewRef(pc.view);
+        const uvec2 tile = gl_WorkGroupID.xy * 4u + uvec2(t & 3u, t >> 2u);
+        if (t < 16u && tile.x < view.v.shade_tiles_x && tile.y < view.v.shade_tiles_y) {
+            VisUintRef(view.v.tile_class).v[tile.y * view.v.shade_tiles_x + tile.x] = s_class[t];
+        }
+    }
 }

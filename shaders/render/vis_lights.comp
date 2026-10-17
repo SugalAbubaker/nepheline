@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// The production path's lights (docs/render.md "Lights"), one invocation
+// per light slot, in two modes (NphVisPush.mode):
+//
+//   NPH_VIS_LIGHTS_UPDATE: the frame's light updates (arg0 of them) replace
+//     their slots' records in the persistent light table. The CPU sends at
+//     most one update per slot per frame.
+//   NPH_VIS_LIGHTS_CULL: each live light is made camera relative (its
+//     position's high and low floats minus the camera's, as instances are)
+//     and sorted out: directional lights and those of unlimited range reach
+//     every pixel and go to the grid's global list (every light does
+//     without NPH_VIS_VIEW_LIGHT_GRID, for comparisons); the others are kept
+//     when the sphere around what they reach (vis_light_sphere) meets the
+//     frustum, and listed with the distance bins of the sphere's nearest
+//     and farthest view distances and the light tiles its clipped screen
+//     rectangle covers (vis_project_sphere_clipped), counted per nearest
+//     bin for vis_light_bins.comp's sort.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+NPH_BUFFER_REF(VisLightsRef) { NphVisLight l[]; };
+NPH_BUFFER_REF(VisLightUpdatesRef) { NphVisLightUpdate u[]; };
+NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
+
+// The bounds are grown by this fraction so that a pixel inside a light's
+// reach is never binned or tiled outside it by rounding: the distances
+// and rectangles of the pixels and of the lights are computed differently.
+#define VIS_LIGHT_SLACK 1e-4
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    VisViewRef view = VisViewRef(pc.view);
+    if (pc.mode == NPH_VIS_LIGHTS_UPDATE) {
+        if (i < pc.arg0) {
+            const NphVisLightUpdate u = VisLightUpdatesRef(view.v.light_updates).u[i];
+            VisLightsRef(view.v.lights).l[u.slot] = u.light;
+        }
+        return;
+    }
+
+    // Every invocation reaches the list appends below (they use subgroup
+    // operations); those without a light append nothing.
+    bool global = false;
+    bool local = false;
+    NphRenderLightData d;
+    uvec4 entry = uvec4(0u);
+    if (i < view.v.light_slots) {
+        const NphVisLight l = VisLightsRef(view.v.lights).l[i];
+        d = l.data;
+        d.position.xyz = (l.data.position.xyz - view.v.camera_high.xyz) +
+                         (l.position_low.xyz - view.v.camera_low.xyz);
+        const float range = l.position_low.w;
+        const uint type = uint(d.direction.w);
+        if (l.live != 0u) {
+            global = type == NPH_RENDER_LIGHT_DIRECTIONAL || range <= 0.0 ||
+                     (view.v.flags & uint(NPH_VIS_VIEW_LIGHT_GRID)) == 0u;
+        }
+        if (l.live != 0u && !global) {
+            vec4 sphere = vis_light_sphere(d.position.xyz, d.direction.xyz, range, type, d.spot.z,
+                                           d.spot.w);
+            sphere.w *= 1.0 + VIS_LIGHT_SLACK;
+            if (vis_sphere_in_frustum(view.v, sphere.xyz, sphere.w)) {
+                local = true;
+                const vec3 c = mat3(view.v.view) * sphere.xyz;
+                const float znear = view.v.projection.z;
+                const float scale = float(NPH_RENDER_ZBINS) / float(NPH_RENDER_ZBIN_OCTAVES);
+                const float nearest = max((-c.z - sphere.w) * (1.0 - VIS_LIGHT_SLACK), znear);
+                const float farthest = (-c.z + sphere.w) * (1.0 + VIS_LIGHT_SLACK);
+                entry.x = nph_zbin(nearest, znear, scale) | (nph_zbin(farthest, znear, scale) << 16u);
+                const vec4 rect = vis_project_sphere_clipped(c, sphere.w, view.v.projection);
+                // Light tiles, clamped to the target (the rectangle may
+                // reach past it, or be huge for a light at the camera).
+                const vec2 tiles = view.v.viewport.xy / float(NPH_RENDER_LIGHT_TILE);
+                const vec2 last = vec2(ceil(tiles) - 1.0);
+                const vec2 lo = clamp(floor((rect.xy - VIS_LIGHT_SLACK) * tiles), vec2(0.0), last);
+                const vec2 hi = clamp(floor((rect.zw + VIS_LIGHT_SLACK) * tiles), vec2(0.0), last);
+                entry.z = uint(lo.x) | (uint(lo.y) << 16u);
+                entry.w = uint(hi.x) | (uint(hi.y) << 16u);
+            }
+        }
+    }
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    uint global_at;
+    uint local_at;
+    VIS_RESERVE(counters.c.lights_global, global ? 1u : 0u, global_at);
+    VIS_RESERVE(counters.c.lights_local, local ? 1u : 0u, local_at);
+    const NphRenderLightGrid grid = LightGridRef(view.v.light_grid).g;
+    if (global) {
+        LightsRef(grid.globals).l[global_at] = d;
+    }
+    if (local) {
+        LightsRef(view.v.light_staged).l[local_at] = d;
+        VisUvec4Ref(view.v.light_visible).v[local_at] = entry;
+        atomicAdd(VisUintRef(view.v.light_histogram).v[entry.x & 0xFFFFu], 1u);
+    }
+}

@@ -14,7 +14,10 @@
 //   - an instance's record goes up in the frame after it was created,
 //     moved, hidden, shown, or destroyed, as one entry of the frame's
 //     update list that vis_scatter.comp applies; the frame after that, a
-//     second entry brings its previous transform up to date.
+//     second entry brings its previous transform up to date;
+//   - a light's record goes up in the frame after it was created, changed,
+//     or destroyed, as an entry of the frame's light updates
+//     (vis_lights.comp).
 //
 // Translations are 64-bit on the CPU and split into a high and a low float
 // for the GPU, which subtracts the camera's split the same way
@@ -35,6 +38,8 @@ NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 112U, "NphVisMesh matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
+NPH_STATIC_ASSERT(sizeof(NphVisLight) == 96U, "NphVisLight matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisLightUpdate) == 112U, "NphVisLightUpdate matches its GLSL layout");
 
 // ---------------------------------------------------------------------------
 // Pending frees
@@ -100,6 +105,28 @@ static NphResult make_buffer(NphRenderer *r, u64 size, u32 usage, NphGpuMemory m
     return nph_gpu_buffer_create(r->dev, &d, out);
 }
 
+void render_vis_light_layout(u32 lights, VisLightLayout *out)
+{
+    // Every region holds 16-byte records or is a multiple of 16 bytes, so
+    // each starts 16-byte aligned for the shaders' buffer references.
+    u64 at = 0U;
+    out->histogram = at;
+    at += (u64)NPH_RENDER_ZBINS * sizeof(u32);
+    out->zbins = at;
+    at += (u64)NPH_RENDER_ZBINS * sizeof(u32);
+    out->visible = at;
+    at += (u64)lights * 4U * sizeof(u32);
+    out->staged = at;
+    at += (u64)lights * sizeof(NphRenderLightData);
+    out->locals = at;
+    at += (u64)lights * sizeof(NphRenderLightData);
+    out->globals = at;
+    at += (u64)lights * sizeof(NphRenderLightData);
+    out->rects = at;
+    at += (u64)lights * 2U * sizeof(u32);
+    out->size = at;
+}
+
 NphResult render_vis_scene_create(NphRenderer *r)
 {
     RenderVis *v = &r->vis;
@@ -148,6 +175,17 @@ NphResult render_vis_scene_create(NphRenderer *r)
         NPH_TRY(make_buffer(r, sizeof(NphVisCounters), (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                             NPH_GPU_MEMORY_READBACK, "vis statistics", &v->stats[i]));
     }
+    NPH_TRY(make_buffer(r, (u64)d->max_lights * sizeof(NphVisLight), storage, NPH_GPU_MEMORY_DEVICE,
+                        "vis lights", &v->lights));
+    render_vis_light_layout(d->max_lights, &v->light_layout);
+    NPH_TRY(make_buffer(r, v->light_layout.size, storage | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                        NPH_GPU_MEMORY_DEVICE, "vis light grid", &v->light_grid));
+    v->light_words = (d->max_lights + 31U) / 32U;
+    v->light_flags = NPH_ALLOC_ARRAY_ZEROED(a, u8, d->max_lights);
+    v->light_dirty = NPH_ALLOC_ARRAY(a, u32, d->max_lights);
+    if (v->light_flags == NULL || v->light_dirty == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
     v->slot_state = NPH_ALLOC_ARRAY_ZEROED(a, u8, d->max_instances);
     v->dirty = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->sent = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
@@ -181,6 +219,14 @@ void render_vis_scene_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->draws);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, v->stats[i]);
+    }
+    nph_gpu_buffer_destroy(dev, v->lights);
+    nph_gpu_buffer_destroy(dev, v->light_grid);
+    if (v->light_flags != NULL) {
+        NPH_FREE_ARRAY(a, u8, v->light_flags, d->max_lights);
+    }
+    if (v->light_dirty != NULL) {
+        NPH_FREE_ARRAY(a, u32, v->light_dirty, d->max_lights);
     }
     nph_range_alloc_destroy(&v->material_ranges);
     nph_range_alloc_destroy(&v->index_ranges);
@@ -551,6 +597,59 @@ static void instance_record(const NphRenderer *r, u32 slot, bool fresh, NphVisIn
                  (nph_mat3_determinant(l) < 0.0F ? (u32)NPH_VIS_INSTANCE_MIRRORED : 0U) |
                  (is_similarity(l) ? (u32)NPH_VIS_INSTANCE_SIMILAR : 0U) |
                  (fresh ? (u32)NPH_VIS_INSTANCE_FRESH : 0U);
+}
+
+// ---------------------------------------------------------------------------
+// Lights
+// ---------------------------------------------------------------------------
+
+void render_vis_light_changed(NphRenderer *r, u32 slot)
+{
+    RenderVis *v = &r->vis;
+    if (!v->supported || v->light_flags[slot] != 0U) {
+        return;
+    }
+    v->light_flags[slot] = 1U;
+    v->light_dirty[v->light_dirty_count++] = slot;
+}
+
+static void light_record(const NphRenderer *r, u32 slot, NphVisLight *out)
+{
+    memset(out, 0, sizeof *out);
+    const RenderLight *l = &r->lights[slot];
+    if (l->handle == 0U) {
+        return; // destroyed: a free slot
+    }
+    const NphDVec3 p = l->desc.position;
+    f32 hx = 0.0F;
+    f32 hy = 0.0F;
+    f32 hz = 0.0F;
+    f32 lx = 0.0F;
+    f32 ly = 0.0F;
+    f32 lz = 0.0F;
+    split(p.x, &hx, &lx);
+    split(p.y, &hy, &ly);
+    split(p.z, &hz, &lz);
+    render_light_data(&l->desc, nph_vec3(hx, hy, hz), &out->data);
+    out->position_low = nph_vec4(lx, ly, lz, l->desc.range);
+    out->live = 1U;
+}
+
+u32 render_vis_write_light_updates(NphRenderer *r)
+{
+    RenderVis *v = &r->vis;
+    NphVisLightUpdate *out = render_frame_at(r, r->layout.vis_light_updates_offset);
+    for (u32 i = 0; i < v->light_dirty_count; ++i) {
+        const u32 slot = v->light_dirty[i];
+        NphVisLightUpdate *u = &out[i];
+        memset(u, 0, sizeof *u);
+        u->slot = slot;
+        light_record(r, slot, &u->light);
+        v->light_flags[slot] = 0U;
+    }
+    const u32 n = v->light_dirty_count;
+    v->light_dirty_count = 0U;
+    return n;
 }
 
 u32 render_vis_write_updates(NphRenderer *r)

@@ -27,6 +27,16 @@ NPH_BUFFER_REF(PositionsRef) { uvec2 p[]; };
 NPH_BUFFER_REF(AttribsRef) { uvec4 a[]; };
 NPH_BUFFER_REF(DebugRef) { NphRenderDebugVertex v[]; };
 NPH_BUFFER_REF(SkyRef) { NphRenderSkyData s; };
+NPH_BUFFER_REF(LightGridRef) { NphRenderLightGrid g; };
+NPH_BUFFER_REF(WordsRef) { uint w[]; };
+
+// The distance bin of view distance `z` in a light grid
+// (NphRenderLightGrid): bins evenly spaced in log2 from the near plane,
+// the last one open-ended. C twin: nph_render_ref_zbin.
+uint nph_zbin(float z, float znear, float scale)
+{
+    return uint(clamp(log2(z / znear) * scale, 0.0, float(NPH_RENDER_ZBINS - 1)));
+}
 
 // ---------------------------------------------------------------------------
 // Vertex decoding (engine/render primitives.h; the cooker's mesh streams)

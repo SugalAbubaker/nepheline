@@ -83,6 +83,26 @@ f64 nph_render_ref_vis_cone_margin(NphVec3 apex, NphVec3 axis, f32 cutoff);
 bool nph_render_ref_vis_project_sphere(NphVec3 c, f32 r, f32 p00, f32 p11, f32 znear, NphVec4 *rect,
                                        f32 *depth);
 
+// vis_project_sphere_clipped (Mara & McGuire, JCGT 2013, with near-plane
+// clipping): the screen rectangle (UV, y down, not clamped) of the part of a
+// view-space sphere in front of the near plane, for a sphere that reaches in
+// front of it. Unlike nph_render_ref_vis_project_sphere it bounds spheres
+// that reach the near plane or hold the camera.
+NphVec4 nph_render_ref_vis_project_sphere_clipped(NphVec3 c, f32 r, f32 p00, f32 p11, f32 znear);
+
+// vis_light_sphere: the sphere (xyz centre, w radius) around everything a
+// light can reach: a point light's range, or for a spot light the smallest
+// sphere around its cone of the outer angle (cosine and sine given) capped at
+// the range. `type` is an NphRenderLightType.
+NphVec4 nph_render_ref_vis_light_sphere(NphVec3 position, NphVec3 direction, f32 range, u32 type,
+                                        f32 cos_outer, f32 sin_outer);
+
+// nph_zbin (render_common.glsl): the light grid's distance bin of view
+// distance `z`: floor(log2(z / znear) * scale) clamped to the bins.
+// `margin` receives the distance, in bins, of the unclamped value to the
+// nearest bin boundary (infinite when clamped far from one).
+u32 nph_render_ref_zbin(f32 z, f32 znear, f32 scale, f64 *margin);
+
 // vis_front_facing's determinant of the homogeneous (x, y, w) clip-space
 // vertices: the triangle is front facing when it is negative, unless the
 // transform mirrors.

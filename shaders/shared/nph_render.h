@@ -67,6 +67,12 @@
 // The largest finite half float: pre-exposed colour is clamped to it.
 #define NPH_RENDER_HALF_MAX 65504.0
 
+// The production path's clustered lights (NphRenderLightGrid).
+#define NPH_RENDER_LIGHT_TILE   16   // pixels: the screen tiles of the light masks
+#define NPH_RENDER_ZBINS        1024 // view-distance bins
+#define NPH_RENDER_ZBIN_OCTAVES 20   // the bins span znear to znear * 2^20, evenly in log2
+#define NPH_RENDER_MAX_LIGHTS   4096 // a view's lights (16-bit indices in the bins)
+
 // Per-frame constants, one record per frame in flight.
 NPH_SHARED_STRUCT(NphRenderViewData)
 {
@@ -92,8 +98,9 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     u32 clamp_sampler;    // trilinear, clamp to edge
     u32 debug_mode;       // NPH_RENDER_DEBUG_*
     u32 flags;            // NPH_RENDER_VIEW_*
-    u32 pad0;
-    u32 pad1;
+    // The production path's NphRenderLightGrid; 0: every light of
+    // lights_address is evaluated for every pixel (the reference).
+    u64 light_grid;
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -140,7 +147,33 @@ NPH_SHARED_STRUCT(NphRenderLightData)
     NphVec4 position;  // xyz: position; w: 1 / range^2 (0: unlimited range)
     NphVec4 direction; // xyz: the direction the light travels (unit); w: NPH_RENDER_LIGHT_*
     NphVec4 color;     // rgb: colour * intensity (lux or candela); w: unused
-    NphVec4 spot;      // x: angle scale, y: angle offset (spot lights); zw: unused
+    NphVec4 spot;      // spot lights: x, y the angle scale and offset; z, w the cosine and sine
+                       // of the outer cone angle (culling)
+};
+
+// The lights of a production frame, binned for shading (docs/render.md
+// "Lights"; Drobot, "Improved Culling for Tiled and Clustered Rendering",
+// SIGGRAPH 2017). Lights that reach every pixel (directional lights and
+// those of unlimited range) are listed apart; the others in view are
+// sorted by the bin of the nearest distance they reach. A pixel evaluates
+// the sorted lights its distance bin may meet that its screen tile's mask
+// also holds: the bins and the tiles each bound one dimension, so the
+// grid costs a word per bin and a bit per light and tile instead of a list
+// per 3D cell (Olsson et al., "Clustered Deferred and Forward Shading",
+// HPG 2012). Built on the GPU each frame (vis_lights.comp,
+// vis_light_bins.comp, vis_light_tiles.comp).
+NPH_SHARED_STRUCT(NphRenderLightGrid)
+{
+    u64 globals;    // NphRenderLightData[]: the lights that reach every pixel
+    u64 locals;     // NphRenderLightData[]: the others in view, by nearest distance's bin
+    u64 zbins;      // u32[NPH_RENDER_ZBINS]: first | last << 16, the range of locals that may
+                    // reach the bin (first > last: none)
+    u64 tiles;      // u32[word][tile]: bit b of word w set when local 32 w + b may reach the tile
+    u64 counts;     // u32[2]: the global and the local lights' counts (written on the GPU)
+    f32 znear;      // the projection's near plane
+    f32 zbin_scale; // bins per doubling of the view distance
+    u32 tiles_x;    // tiles per row (NPH_RENDER_LIGHT_TILE pixels square)
+    u32 tile_count; // tiles in all: the stride from one word of a tile to its next
 };
 
 // A debug line end point.

@@ -13,7 +13,10 @@
 // background, as the reference's sky pass does.
 //
 // Writes pre-exposed radiance into the HDR image whose storage index is
-// arg0; arg1 is the visibility buffer's.
+// arg0; arg1 is the visibility buffer's. A workgroup shades one shading
+// tile of its bin's list (vis_tile_bins.comp): the pipeline is specialised
+// by k_bin, and the sky bin's holds the background alone and never reads
+// the visibility buffer.
 #version 460
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
@@ -21,10 +24,18 @@
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
+#define NPH_SURFACE_GRID_LIGHTS
 #include "surface.glsl"
+
+#if NPH_VIS_SHADE_TILE != 8
+#error "a workgroup is a shading tile"
+#endif
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// The bin this pipeline shades (NPH_VIS_BIN_*).
+layout(constant_id = 0) const uint k_bin = NPH_VIS_BIN_LIT;
 
 // Perspective-correct barycentrics of a pixel at NDC `q` and their change
 // one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
@@ -96,13 +107,23 @@ vec3 background(ViewRef rview, vec2 q)
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const uint index = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (index >= VisCountersRef(view.v.counters).c.tiles[k_bin]) {
+        return; // the last row's tail
+    }
+    const uint tile = VisUintRef(view.v.tile_lists[k_bin]).v[index];
+    const ivec2 p = ivec2(uvec2(tile & 0xFFFFu, tile >> 16u) * uint(NPH_VIS_SHADE_TILE) +
+                          gl_LocalInvocationID.xy);
     const vec2 size = view.v.viewport.xy;
     if (p.x >= int(size.x) || p.y >= int(size.y)) {
         return;
     }
     ViewRef rview = ViewRef(view.v.render_view);
     const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    if (k_bin == NPH_VIS_BIN_SKY) {
+        imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(background(rview, q), 1.0));
+        return;
+    }
     const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg1)], p).x;
     vec3 color;
     const uint debug = rview.v.debug_mode;
@@ -168,6 +189,8 @@ void main()
         s.uv_dy = uvs * bary.ddy;
         s.color = mat3x4(unpackUnorm4x8(a0.w), unpackUnorm4x8(a1.w), unpackUnorm4x8(a2.w)) * bary.b;
         s.front_facing = vis_front_facing(c0, c1, c2, mirrored);
+        s.pixel = vec2(p) + 0.5;
+        s.depth = vis_depth(v);
 
         const NphRenderMaterialData material = MaterialsRef(view.v.materials).m[cluster.material];
         color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));

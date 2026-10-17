@@ -290,8 +290,12 @@ static NphResult apply_defaults(NphRendererDesc *d)
     // table holds one more entry than max_materials (the default).
     const u32 limit = 1U << 24U;
     if (d->max_textures > limit || d->max_meshes > limit || d->max_materials > limit ||
-        d->max_instances > limit || d->max_lights > limit || d->max_draws > limit ||
-        d->debug_lines > limit) {
+        d->max_instances > limit || d->max_draws > limit || d->debug_lines > limit) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // The production path's light grid indexes a view's lights in 16 bits
+    // and sorts them in one workgroup.
+    if (d->max_lights > (u32)NPH_RENDER_MAX_LIGHTS) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     return NPH_RESULT_OK;
@@ -1043,6 +1047,7 @@ NphResult nph_render_light_create(NphRenderer *r, const NphRenderLightDesc *desc
     NPH_TRY(alloc_slot(&r->light_pool, &value, &slot));
     r->lights[slot].handle = value;
     r->lights[slot].desc = *desc;
+    render_vis_light_changed(r, slot);
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1057,6 +1062,7 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
     }
     NPH_TRY(validate_light(desc));
     r->lights[slot].desc = *desc;
+    render_vis_light_changed(r, slot);
     return NPH_RESULT_OK;
 }
 
@@ -1072,6 +1078,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
         return;
     }
     memset(&r->lights[slot], 0, sizeof r->lights[slot]);
+    render_vis_light_changed(r, slot);
     release_slot(&r->light_pool, light.value);
 }
 
