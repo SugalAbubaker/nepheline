@@ -355,6 +355,7 @@ typedef struct Candidate {
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accel;
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables;
     VkPhysicalDeviceMeshShaderPropertiesEXT mesh_props;
     VkPhysicalDeviceMemoryProperties memory;
     b32 ext_swapchain;
@@ -365,6 +366,7 @@ typedef struct Candidate {
     b32 ext_atomic64;
     b32 ext_memory_budget;
     b32 ext_calibrated;
+    b32 ext_executables;
     u32 graphics_family;
     u32 graphics_queue_count;
     u32 compute_family; // NPH_U32_MAX: none dedicated
@@ -384,6 +386,8 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     c->ray_query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     c->accel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     c->atomic64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+    c->executables.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
     c->features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
     // Extensions first: feature structs of absent extensions must not be chained.
@@ -401,6 +405,8 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
         c->ext_atomic64 = has_extension(exts, n, VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME);
         c->ext_memory_budget = has_extension(exts, n, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         c->ext_calibrated = has_extension(exts, n, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        c->ext_executables =
+            has_extension(exts, n, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
         NPH_FREE_ARRAY(alloc, VkExtensionProperties, exts, n);
     }
 
@@ -424,6 +430,10 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     if (c->ext_atomic64) {
         *next = &c->atomic64;
         next = &c->atomic64.pNext;
+    }
+    if (c->ext_executables) {
+        *next = &c->executables;
+        next = &c->executables.pNext;
     }
     *next = NULL;
     vkGetPhysicalDeviceFeatures2(c->phys, &c->features);
@@ -746,6 +756,10 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accel;
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables;
+    memset(&executables, 0, sizeof executables);
+    executables.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
     memset(&f2, 0, sizeof f2);
     memset(&f11, 0, sizeof f11);
     memset(&f12, 0, sizeof f12);
@@ -879,6 +893,14 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     if (c->ext_calibrated) {
         exts[ext_count++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
         feat->calibrated_timestamps = 1;
+    }
+    if (dev->desc.shader_statistics && c->ext_executables &&
+        c->executables.pipelineExecutableInfo) {
+        executables.pipelineExecutableInfo = VK_TRUE;
+        exts[ext_count++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+        *next = &executables;
+        next = &executables.pNext;
+        feat->shader_statistics = 1;
     }
     *next = NULL;
     feat->sampler_filter_minmax = vk_bool(f12.samplerFilterMinmax);

@@ -110,6 +110,11 @@ typedef struct NphGpuDeviceDesc {
     // Pipeline cache file, loaded at create and written at destroy (and by
     // nph_gpu_pipeline_cache_save). NULL: no persistence.
     const char *pipeline_cache_path;
+    // Keep what the driver reports about each compiled pipeline (registers,
+    // instructions, spills) for nph_gpu_pipeline_statistics, where it offers
+    // them (VK_KHR_pipeline_executable_properties). For measuring shaders:
+    // off by default, as capturing may slow pipeline creation.
+    b32 shader_statistics;
     // Capacities. Zero picks the default in parentheses. These are hard
     // limits: creation past them returns NPH_RESULT_FULL.
     u32 max_buffers;                 // (65536)
@@ -168,6 +173,7 @@ typedef struct NphGpuFeatures {
     b32 timestamps_on_compute;        // the COMPUTE queue supports timestamps
     b32 timestamps_on_transfer;       // the TRANSFER queue supports timestamps
     b32 draw_indirect_first_instance; // indirect draws may start at a nonzero instance
+    b32 shader_statistics; // NphGpuDeviceDesc.shader_statistics asked and the driver has them
     // Subgroup operations available in compute shaders (Vulkan 1.1
     // guarantees only the basic ones): GL_KHR_shader_subgroup_vote,
     // _ballot, _arithmetic, _shuffle, and _quad.

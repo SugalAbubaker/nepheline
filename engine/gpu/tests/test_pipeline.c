@@ -112,6 +112,43 @@ NTEST_F(GpuFixture, specialization_constants_pick_the_variant)
     nph_gpu_shader_destroy(f->dev, shader);
 }
 
+// With shader statistics asked for, a compiled pipeline reports what the
+// driver knows of it (registers, instructions); without, nothing.
+NTEST(gpu_pipeline, statistics_describe_the_compiled_shader)
+{
+    NphGpuDeviceDesc dd;
+    memset(&dd, 0, sizeof dd);
+    dd.alloc = nph_allocator_system();
+    dd.headless = 1;
+    dd.shader_statistics = 1;
+    NphGpuDevice *dev = test_gpu_create(&dd);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NphGpuShader shader = test_load_shader(dev, "test_fill.comp");
+    NphGpuPipeline p = make_compute(dev, shader);
+    NphGpuShaderStatistic stats[32];
+    const u32 n = nph_gpu_pipeline_statistics(dev, p, stats, 32U);
+    if (!nph_gpu_device_info(dev)->features.shader_statistics) {
+        NTEST_EXPECT_EQ_UINT(n, 0U);
+    } else {
+        NTEST_EXPECT_GT_UINT(n, 0U);
+        for (u32 i = 0; i < n; ++i) {
+            NTEST_EXPECT_NE_UINT((u32)strlen(stats[i].name), 0U);
+            NTEST_LOG("%s: %s = %llu", stats[i].executable, stats[i].name,
+                      (unsigned long long)stats[i].value);
+        }
+        // A short buffer takes the first ones.
+        NphGpuShaderStatistic one;
+        NTEST_EXPECT_EQ_UINT(nph_gpu_pipeline_statistics(dev, p, &one, 1U), 1U);
+        NTEST_EXPECT_EQ_STR(one.name, stats[0].name);
+    }
+    NTEST_EXPECT_EQ_UINT(nph_gpu_pipeline_statistics(dev, NPH_GPU_PIPELINE_NULL, stats, 32U), 0U);
+    nph_gpu_pipeline_destroy(dev, p);
+    nph_gpu_shader_destroy(dev, shader);
+    test_gpu_destroy(dev);
+}
+
 // Renders `vertex_count` vertices with `pipeline` into a fresh RGBA8 image
 // of the given size, cleared to black, and reads the pixels back.
 static void render_to_pixels(NphGpuDevice *dev, NphGpuPipeline pipeline, const NphTestPush *push,

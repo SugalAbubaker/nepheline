@@ -168,6 +168,23 @@ void nph_gpu_pipeline_destroy(NphGpuDevice *dev, NphGpuPipeline pipeline);
 bool nph_gpu_pipeline_is_valid(const NphGpuDevice *dev, NphGpuPipeline pipeline);
 bool nph_gpu_pipeline_is_compute(const NphGpuDevice *dev, NphGpuPipeline pipeline);
 
+// A statistic the driver reports about a compiled pipeline
+// (VK_KHR_pipeline_executable_properties): the part of the pipeline it
+// describes (a stage, as the driver names it), its name (such as "Register
+// Count"), and its value (booleans as 0 or 1, floats rounded).
+typedef struct NphGpuShaderStatistic {
+    char executable[32];
+    char name[48];
+    u64 value;
+} NphGpuShaderStatistic;
+
+// Fills `out` with up to `max` of the pipeline's statistics, every part's
+// in the driver's order, and returns how many were written: zero without
+// NphGpuFeatures.shader_statistics or for an invalid pipeline. Statistics
+// past `max` are dropped. NPH_THREADSAFE.
+u32 nph_gpu_pipeline_statistics(NphGpuDevice *dev, NphGpuPipeline pipeline,
+                                NphGpuShaderStatistic *out, u32 max);
+
 // The largest push constant block among the pipeline's stages.
 u32 nph_gpu_pipeline_push_constant_bytes(const NphGpuDevice *dev, NphGpuPipeline pipeline);
 
