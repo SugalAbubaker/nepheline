@@ -65,7 +65,16 @@ typedef struct RgResource {
     u32 reads;  // live readers (culling)
     u32 writer; // last declared writer pass (RG_INVALID: none)
     b32 cross_queue;
-    NphGpuMipState state[NPH_GPU_MAX_MIPS]; // images per mip; buffers use [0]
+    // Images per mip; buffers use [0]. `state` holds the layout, the owning
+    // queue, and the stages and access of the last write (or of the pass a
+    // layout transition was ordered before): what a later use must wait
+    // for. read_stages / read_access are the reads already ordered after
+    // that write, so a read at a stage, or of a kind, not among them needs
+    // a barrier of its own (a write made visible to compute shaders is not
+    // visible to an indirect-argument or transfer read).
+    NphGpuMipState state[NPH_GPU_MAX_MIPS];
+    u32 read_stages[NPH_GPU_MAX_MIPS];
+    u32 read_access[NPH_GPU_MAX_MIPS];
     b32 first_use_done;
     NphGpuSwapchain *present;
     // transient placement
@@ -1071,35 +1080,39 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
     u32 m = base_mip;
     while (m < base_mip + mip_count) {
         // Run of mips in the same state.
-        NphGpuMipState cur = r->state[m];
+        const NphGpuMipState cur = r->state[m];
+        const u32 rs = r->read_stages[m];
+        const u32 ra = r->read_access[m];
         u32 run = 1U;
         while (m + run < base_mip + mip_count &&
-               memcmp(&r->state[m + run], &cur, sizeof cur) == 0) {
+               memcmp(&r->state[m + run], &cur, sizeof cur) == 0 && r->read_stages[m + run] == rs &&
+               r->read_access[m + run] == ra) {
             ++run;
         }
-        // Work on another queue is ordered by a semaphore, which makes its
-        // writes available, so the barrier here names no source stages (a
-        // stage of the other family would not even be valid on this
-        // queue). Ownership transfers only exist between distinct families.
+        // Work on another queue is ordered by a semaphore that waits at
+        // every stage, which also makes its writes available and visible,
+        // so the barrier here names no source stages (a stage of the other
+        // family would not even be valid on this queue). Ownership
+        // transfers only exist between distinct families.
         const bool cross_queue = g->dev->queues[cur.queue] != g->dev->queues[pass->queue];
         const bool same_family =
             g->dev->queues[cur.queue]->family == g->dev->queues[pass->queue]->family;
-        const u32 src_stages = cross_queue        ? (u32)NPH_GPU_STAGE_NONE
-                               : cur.stages == 0U ? (u32)NPH_GPU_STAGE_ALL
-                                                  : cur.stages;
-        const u32 src_access = cross_queue ? (u32)NPH_GPU_ACCESS_NONE : cur.access;
         const bool need_layout = cur.layout != need->layout;
-        const bool hazard = access_writes(cur.access) || access_writes(need->access);
+        const bool writes = access_writes(need->access);
+        // A read at a stage or of a kind the last write was not yet made
+        // visible to.
+        const bool uncovered =
+            cur.stages != 0U && ((need->stages & ~rs) != 0U || (need->access & ~ra) != 0U);
         const bool first_use = !r->imported && !r->first_use_done;
+        bool transition = false; // the barrier changes the layout or the owner
         if (first_use) {
             // Transient: contents undefined; order after whatever aliased it.
-            NphGpuImageBarrier *ib = NULL;
             RgBarrier *b = push_barrier(g, pass, false);
             if (b == NULL) {
                 return NPH_RESULT_FULL;
             }
             b->is_image = 1;
-            ib = &b->image;
+            NphGpuImageBarrier *ib = &b->image;
             ib->image = r->image;
             ib->src_stages =
                 r->alias_src_stages != 0U ? r->alias_src_stages : (u32)NPH_GPU_STAGE_ALL;
@@ -1113,6 +1126,7 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
             ib->layer_count = NPH_GPU_ALL_LAYERS;
             ib->src_queue = pass->queue;
             ib->dst_queue = pass->queue;
+            transition = true;
         } else if (!same_family && exclusive) {
             // Queue family ownership transfer: release on the owner's last
             // pass in this graph, acquire here.
@@ -1138,7 +1152,8 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
                 }
                 rel->is_image = 1;
                 rel->image.image = r->image;
-                rel->image.src_stages = cur.stages == 0U ? (u32)NPH_GPU_STAGE_ALL : cur.stages;
+                const u32 src = cur.stages | rs;
+                rel->image.src_stages = src == 0U ? (u32)NPH_GPU_STAGE_ALL : src;
                 rel->image.src_access = cur.access;
                 rel->image.old_layout = cur.layout;
                 rel->image.dst_stages = need->stages;
@@ -1151,13 +1166,14 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
                 rel->image.dst_queue = pass->queue;
                 acq->is_image = 1;
                 acq->image = rel->image;
+                transition = true;
             } else {
                 GPU_LOG_ERROR("render graph '%s': imported image '%s' is owned by another queue; "
                               "its first use in the graph must be on the owning queue",
                               g->name, r->image_desc.name != NULL ? r->image_desc.name : "");
                 return NPH_RESULT_INVALID_ARGUMENT;
             }
-        } else if (need_layout || hazard) {
+        } else if (cross_queue ? need_layout : (need_layout || writes || uncovered)) {
             RgBarrier *b = push_barrier(g, pass, false);
             if (b == NULL) {
                 return NPH_RESULT_FULL;
@@ -1165,8 +1181,19 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
             b->is_image = 1;
             NphGpuImageBarrier *ib = &b->image;
             ib->image = r->image;
-            ib->src_stages = src_stages;
-            ib->src_access = src_access;
+            if (cross_queue) {
+                ib->src_stages = (u32)NPH_GPU_STAGE_NONE;
+                ib->src_access = (u32)NPH_GPU_ACCESS_NONE;
+            } else if (need_layout || writes) {
+                // After the last write and every read since.
+                const u32 src = cur.stages | rs;
+                ib->src_stages = src == 0U ? (u32)NPH_GPU_STAGE_ALL : src;
+                ib->src_access = cur.access;
+            } else {
+                // A read after the last write: wait for that write only.
+                ib->src_stages = cur.stages;
+                ib->src_access = cur.access;
+            }
             ib->old_layout = cur.layout;
             ib->dst_stages = need->stages;
             ib->dst_access = need->access;
@@ -1176,19 +1203,33 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
             ib->layer_count = NPH_GPU_ALL_LAYERS;
             ib->src_queue = pass->queue;
             ib->dst_queue = pass->queue;
+            transition = need_layout;
         }
-        const bool barrier_emitted =
-            first_use || (!same_family && exclusive) || need_layout || hazard;
         for (u32 i = 0; i < run; ++i) {
-            NphGpuMipState *s = &r->state[m + i];
-            s->layout = need->layout;
-            s->queue = (u32)pass->queue;
-            if (barrier_emitted) {
-                s->stages = need->stages;
-                s->access = need->access;
+            NphGpuMipState *st = &r->state[m + i];
+            st->layout = need->layout;
+            st->queue = (u32)pass->queue;
+            if (writes) {
+                st->stages = need->stages;
+                st->access = need->access;
+                r->read_stages[m + i] = 0U;
+                r->read_access[m + i] = 0U;
+            } else if (transition) {
+                // A layout or owner change is a write ordered before this
+                // pass's stages; later uses at other stages chain on them.
+                st->stages = need->stages;
+                st->access = (u32)NPH_GPU_ACCESS_NONE;
+                r->read_stages[m + i] = need->stages;
+                r->read_access[m + i] = need->access;
+            } else if (cross_queue) {
+                // The semaphore completed and made visible everything before.
+                st->stages = (u32)NPH_GPU_STAGE_NONE;
+                st->access = (u32)NPH_GPU_ACCESS_NONE;
+                r->read_stages[m + i] = need->stages;
+                r->read_access[m + i] = need->access;
             } else {
-                s->stages |= need->stages;
-                s->access |= need->access;
+                r->read_stages[m + i] |= need->stages;
+                r->read_access[m + i] |= need->access;
             }
         }
         m += run;
@@ -1201,10 +1242,17 @@ static NphResult transition_buffer(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgR
                                    const RequiredState *need)
 {
     NphGpuMipState *cur = &r->state[0];
+    u32 *rs = &r->read_stages[0];
+    u32 *ra = &r->read_access[0];
     const bool first_use = !r->imported && !r->first_use_done;
     const bool cross_queue = g->dev->queues[cur->queue] != g->dev->queues[pass->queue];
-    const bool hazard = access_writes(cur->access) || access_writes(need->access);
-    if (first_use || hazard) {
+    const bool writes = access_writes(need->access);
+    // A read at a stage or of a kind the last write was not yet made
+    // visible to (the counters a compute pass wrote, read next as
+    // indirect arguments or by a copy).
+    const bool uncovered =
+        access_writes(cur->access) && ((need->stages & ~*rs) != 0U || (need->access & ~*ra) != 0U);
+    if (first_use || (!cross_queue && (writes || uncovered))) {
         RgBarrier *b = push_barrier(g, pass, false);
         if (b == NULL) {
             return NPH_RESULT_FULL;
@@ -1215,22 +1263,34 @@ static NphResult transition_buffer(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgR
             b->buffer.src_stages =
                 r->alias_src_stages != 0U ? r->alias_src_stages : (u32)NPH_GPU_STAGE_ALL;
             b->buffer.src_access = r->alias_src_access;
-        } else if (cross_queue) {
-            // Ordered by a semaphore (see transition_image).
-            b->buffer.src_stages = (u32)NPH_GPU_STAGE_NONE;
-            b->buffer.src_access = (u32)NPH_GPU_ACCESS_NONE;
+        } else if (writes) {
+            // After the last write and every read since.
+            const u32 src = cur->stages | *rs;
+            b->buffer.src_stages = src == 0U ? (u32)NPH_GPU_STAGE_ALL : src;
+            b->buffer.src_access = cur->access;
         } else {
-            b->buffer.src_stages = cur->stages == 0U ? (u32)NPH_GPU_STAGE_ALL : cur->stages;
+            b->buffer.src_stages = cur->stages;
             b->buffer.src_access = cur->access;
         }
         b->buffer.dst_stages = need->stages;
         b->buffer.dst_access = need->access;
         b->buffer.size = NPH_GPU_WHOLE_SIZE;
+    }
+    if (writes) {
         cur->stages = need->stages;
         cur->access = need->access;
+        *rs = 0U;
+        *ra = 0U;
+    } else if (cross_queue || first_use) {
+        // Ordered by a semaphore (see transition_image), or a transient's
+        // first use: nothing earlier is pending.
+        cur->stages = (u32)NPH_GPU_STAGE_NONE;
+        cur->access = (u32)NPH_GPU_ACCESS_NONE;
+        *rs = need->stages;
+        *ra = need->access;
     } else {
-        cur->stages |= need->stages;
-        cur->access |= need->access;
+        *rs |= need->stages;
+        *ra |= need->access;
     }
     cur->queue = (u32)pass->queue;
     r->first_use_done = 1;
@@ -1263,7 +1323,7 @@ static NphResult compute_barriers(NphGpuRenderGraph *g)
                         r->offset < mem->offset + mem->size) {
                         const u32 mips = other->is_image ? other->image_desc.mip_count : 1U;
                         for (u32 mp = 0; mp < mips; ++mp) {
-                            r->alias_src_stages |= other->state[mp].stages;
+                            r->alias_src_stages |= other->state[mp].stages | other->read_stages[mp];
                             r->alias_src_access |= other->state[mp].access;
                         }
                     }
@@ -1322,7 +1382,8 @@ static NphResult compute_barriers(NphGpuRenderGraph *g)
         }
         b->is_image = 1;
         b->image.image = r->image;
-        b->image.src_stages = r->state[0].stages;
+        const u32 src = r->state[0].stages | r->read_stages[0];
+        b->image.src_stages = src == 0U ? (u32)NPH_GPU_STAGE_ALL : src;
         b->image.src_access = r->state[0].access;
         b->image.old_layout = r->state[0].layout;
         b->image.dst_stages = need.stages;
@@ -1335,6 +1396,8 @@ static NphResult compute_barriers(NphGpuRenderGraph *g)
         r->state[0].layout = need.layout;
         r->state[0].stages = need.stages;
         r->state[0].access = need.access;
+        r->read_stages[0] = 0U;
+        r->read_access[0] = 0U;
         g->batches[first->batch].wait_acquire = 1;
         g->batches[last->batch].signal_present = 1;
     }
@@ -1671,15 +1734,23 @@ static NphResult execute_graph(NphGpuRenderGraph *g)
         if (!r->imported || r->first_pass == RG_INVALID) {
             continue;
         }
+        // The device keeps one (stages, access) per mip: everything a later
+        // barrier must wait for, the last write and the reads since.
+        NphGpuMipState final_state[NPH_GPU_MAX_MIPS];
+        memcpy(final_state, r->state, sizeof final_state);
+        for (u32 m = 0; m < NPH_GPU_MAX_MIPS; ++m) {
+            final_state[m].stages |= r->read_stages[m];
+            final_state[m].access |= r->read_access[m];
+        }
         if (r->is_image) {
             NphGpuImageSlot *islot = gpu_image(dev, r->image);
             if (islot != NULL) {
-                memcpy(islot->state, r->state, sizeof islot->state);
+                memcpy(islot->state, final_state, sizeof islot->state);
             }
         } else {
             NphGpuBufferSlot *bslot = gpu_buffer(dev, r->buffer);
             if (bslot != NULL) {
-                bslot->state = r->state[0];
+                bslot->state = final_state[0];
             }
         }
     }
