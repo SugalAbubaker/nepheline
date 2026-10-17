@@ -1,28 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
-// Instance culling (docs/render.md "Culling"), the first level of the
-// GPU-driven pipeline (Haar & Aaltonen, "GPU-Driven Rendering Pipelines",
-// SIGGRAPH 2015; Wihlidal, "Optimizing the Graphics Pipeline with
-// Compute", GDC 2016). Each invocation takes one instance and tests its
-// mesh's bounding sphere:
+// Instance culling (docs/render.md "The production path"), the first level
+// of the GPU-driven pipeline (Haar & Aaltonen, "GPU-Driven Rendering
+// Pipelines", SIGGRAPH 2015; Wihlidal, "Optimizing the Graphics Pipeline
+// with Compute", GDC 2016). Each invocation takes one instance and tests
+// its mesh's bounding sphere:
 //
 //   phase 0 (every instance slot): against the frustum, then against the
 //     previous frame's hierarchical depth, seen from the previous camera
 //     with the instance's previous transform (that is the view the HZB
-//     was built from). Instances that pass emit their meshlets in batches
-//     of NPH_VIS_BATCH_SIZE for phase 0's meshlet cull; occluded ones are
-//     deferred to phase 1.
+//     was built from). Instances that pass hand their meshlets to phase 0's
+//     meshlet cull; occluded ones are deferred to phase 1.
 //   phase 1 (the deferred instances): against the HZB built from what
 //     phase 0 drew, with the current camera and transform; instances now
-//     visible emit their batches for phase 1's meshlet cull.
+//     visible hand their meshlets to phase 1's meshlet cull, after the
+//     meshlets phase 0 deferred in the same list.
 //
 // This is the two-phase occlusion culling of Karis et al., "Nanite: A Deep
 // Dive" (SIGGRAPH 2021): phase 0's test against last frame's depth may be
 // wrong for this frame, but anything it misses is retested in phase 1
 // against depth this frame drew, which only holds surfaces really in front,
 // so nothing visible is lost.
+//
+// The meshlets go out as (instance, meshlet) work items, one per meshlet,
+// so the meshlet cull runs an invocation per meshlet with every lane busy,
+// whatever the meshes' sizes. The subgroup writes its instances' items
+// together: one atomic for the subgroup's total, then each invocation
+// writes an equal share, finding each item's instance by a binary search
+// over the subgroup's prefix sums, so a thousand-meshlet instance beside
+// one-meshlet ones costs every lane the same.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #include "vis_common.glsl"
 
 layout(local_size_x = 64) in;
@@ -45,16 +54,14 @@ void main()
         slot = VisUintRef(view.v.deferred_instances).v[id];
     }
 
-    uint batches = 0u;
     bool defer = false;
     bool culled_frustum = false;
     bool culled_occlusion = false;
-    uint meshlets = 0u;
+    uint meshlets = 0u; // handed to the meshlet cull
     if (slot != 0xFFFFFFFFu) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
             const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-            meshlets = mesh.meshlet_count;
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
             const vec3 c = vis_transform_vector(inst.transform, mesh.sphere.xyz) + t;
@@ -84,7 +91,7 @@ void main()
                                    vis_hzb_occluded(view.v, rect, depth);
             }
             if (!culled_frustum && !defer && !culled_occlusion) {
-                batches = (meshlets + uint(NPH_VIS_BATCH_SIZE) - 1u) / uint(NPH_VIS_BATCH_SIZE);
+                meshlets = mesh.meshlet_count;
             }
         }
     }
@@ -102,19 +109,45 @@ void main()
             }
         }
     }
-    uint first;
-    VIS_RESERVE(counters.c.batches[phase], batches, first);
-    VisBatchesRef list = VisBatchesRef(view.v.batches[phase]);
-    for (uint b = 0u; b < batches; ++b) {
-        if (first + b >= view.v.max_batches) {
-            atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_BATCHES));
-            break;
+
+    // The subgroup's meshlets as work items (see the file comment).
+    const uint inclusive = subgroupInclusiveAdd(meshlets);
+    const uint first = inclusive - meshlets;
+    const uint total = subgroupAdd(meshlets);
+    uint base = 0u;
+    if (total != 0u && subgroupElect()) {
+        if (phase == 0u) {
+            base = atomicAdd(counters.c.cull_meshlets, total);
+        } else {
+            base = atomicAdd(counters.c.deferred_meshlets, total);
         }
-        NphVisBatch batch;
-        batch.instance = slot;
-        batch.meshlet_offset = b * uint(NPH_VIS_BATCH_SIZE);
-        batch.meshlet_count = min(meshlets - batch.meshlet_offset, uint(NPH_VIS_BATCH_SIZE));
-        batch.pad0 = 0u;
-        list.b[first + b] = batch;
+    }
+    base = subgroupBroadcastFirst(base);
+    const uint capacity = phase == 0u ? view.v.max_cull_meshlets : view.v.max_deferred;
+    VisUvec2Ref list = VisUvec2Ref(phase == 0u ? view.v.cull_meshlets : view.v.deferred_meshlets);
+    const uint rounds = (total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+    for (uint round = 0u; round < rounds; ++round) {
+        const uint k = round * gl_SubgroupSize + gl_SubgroupInvocationID;
+        // The owner is the first invocation whose inclusive prefix passes k.
+        // Every invocation takes part in each shuffle (the loops' bounds
+        // are the subgroup's), as shuffles require.
+        uint owner = 0u;
+        for (uint step = gl_SubgroupSize >> 1u; step != 0u; step >>= 1u) {
+            const uint v = subgroupShuffle(inclusive, owner + step - 1u);
+            if (v <= k) {
+                owner += step;
+            }
+        }
+        const uint owner_slot = subgroupShuffle(slot, owner);
+        const uint owner_first = subgroupShuffle(first, owner);
+        if (k < total) {
+            const uint index = base + k;
+            if (index < capacity) {
+                list.v[index] = uvec2(owner_slot, k - owner_first);
+            } else {
+                atomicOr(counters.c.overflow, phase == 0u ? uint(NPH_VIS_OVERFLOW_MESHLETS)
+                                                          : uint(NPH_VIS_OVERFLOW_DEFERRED));
+            }
+        }
     }
 }

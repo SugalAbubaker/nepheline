@@ -8,11 +8,12 @@
 //   vis clear             counters to zero, the visibility buffer to "nothing"
 //   vis scatter           the frame's instance updates (vis_scene.c)
 //   vis cull instances 0  frustum, then last frame's HZB from last frame's view
-//   vis args, vis cull meshlets 0, vis args, vis raster 0
+//   vis args, vis cull meshlets 0, vis args, vis raster 0 (hardware), vis sw
+//                         raster 0 (small clusters, in compute)
 //   vis hzb 0             this frame's depth so far
 //   vis args, vis cull instances 1, vis args, vis cull meshlets 1 (the
-//                         batches of instances now visible, then the
-//                         meshlets phase 0 deferred), vis args, vis raster 1
+//                         meshlets phase 0 deferred, then those of instances
+//                         now visible), vis args, vis raster 1, vis sw raster 1
 //   vis hzb 1             the frame's depth: next frame's phase 0 tests it
 //   vis resolve           shading into the HDR image
 //   vis depth, transparent (only with blended surfaces)
@@ -32,7 +33,7 @@
 #include <stddef.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 688U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 704U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, render_view) % 8U == 0U, "addresses are aligned");
 
@@ -43,6 +44,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_args.comp",
     "vis_hzb.comp",
     "vis_resolve.comp",
+    "vis_sw_raster.comp",
     "vis_raster_opaque.mesh",
     "vis_raster_masked.mesh",
     "vis_raster_mesh_opaque.frag",
@@ -57,11 +59,12 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_SCATTER, VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
-    VIS_SHADER_HZB,     VIS_SHADER_RESOLVE,
+    VIS_SHADER_HZB,     VIS_SHADER_RESOLVE,        VIS_SHADER_SW_RASTER,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
-    "vis scatter", "vis cull instances", "vis cull meshlets", "vis args", "vis hzb", "vis resolve",
+    "vis scatter", "vis cull instances", "vis cull meshlets", "vis args",
+    "vis hzb",     "vis resolve",        "vis sw raster",
 };
 
 // ---------------------------------------------------------------------------
@@ -74,8 +77,8 @@ bool render_vis_device_supported(const NphRenderer *r)
     const NphGpuFeatures *f = &info->features;
     const char *missing = !f->image_atomic_int64 ? "64-bit image atomics"
                           : !f->shader_int64     ? "64-bit integers in shaders"
-                          : !(f->subgroup_ballot && f->subgroup_arithmetic)
-                              ? "subgroup ballot and arithmetic in compute shaders"
+                          : !(f->subgroup_ballot && f->subgroup_arithmetic && f->subgroup_shuffle)
+                              ? "subgroup ballot, arithmetic, and shuffle in compute shaders"
                           : !f->geometry_shader ? "gl_PrimitiveID in fragment shaders"
                                                 : NULL;
     if (missing != NULL) {
@@ -275,6 +278,8 @@ static void read_stats(NphRenderer *r)
     NphRenderFrameStats *s = &v->stats_last;
     s->vis_frame = v->stats_frame[slot] - 1U;
     s->vis_clusters = nph_min_u32(c->clusters, r->desc.max_visible_clusters);
+    s->vis_clusters_sw =
+        c->raster_count[0][NPH_VIS_RASTER_SOFTWARE] + c->raster_count[1][NPH_VIS_RASTER_SOFTWARE];
     s->vis_triangles = c->triangles;
     s->vis_instances_culled_frustum = c->instances_culled_frustum;
     s->vis_instances_culled_occlusion = c->instances_culled_occlusion;
@@ -288,7 +293,7 @@ static void read_stats(NphRenderer *r)
                      "%s: GPU culling dropped work (frame %llu):%s%s%s; raise the capacities in "
                      "NphRendererDesc (said once per list)",
                      r->name, (unsigned long long)s->vis_frame,
-                     (fresh & (u32)NPH_VIS_OVERFLOW_BATCHES) != 0U ? " max_cull_batches" : "",
+                     (fresh & (u32)NPH_VIS_OVERFLOW_MESHLETS) != 0U ? " max_cull_meshlets" : "",
                      (fresh & (u32)NPH_VIS_OVERFLOW_CLUSTERS) != 0U ? " max_visible_clusters" : "",
                      (fresh & (u32)NPH_VIS_OVERFLOW_DEFERRED) != 0U ? " max_deferred" : "");
         v->overflow_logged |= fresh;
@@ -345,9 +350,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->materials = frame + r->layout.materials_offset;
     vd->counters = nph_gpu_buffer_address(dev, v->counters);
     vd->args = nph_gpu_buffer_address(dev, v->args);
-    const u64 batches = (u64)d->max_cull_batches * sizeof(NphVisBatch);
-    vd->batches[0] = region(dev, v->batches, 0U);
-    vd->batches[1] = region(dev, v->batches, batches);
+    vd->cull_meshlets = nph_gpu_buffer_address(dev, v->cull_meshlets);
     // Deferred meshlets (uvec2) first, so both lists stay aligned.
     vd->deferred_meshlets = region(dev, v->deferred, 0U);
     vd->deferred_instances = region(dev, v->deferred, (u64)d->max_deferred * 8U);
@@ -355,13 +358,16 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     const u64 list = (u64)d->max_visible_clusters * sizeof(u32);
     const u64 draws = (u64)d->max_visible_clusters * sizeof(NphVisDraw);
     for (u32 p = 0; p < 2U; ++p) {
+        for (u32 k = 0; k < (u32)NPH_VIS_RASTER_KINDS; ++k) {
+            vd->raster_lists[p][k] =
+                region(dev, v->lists, list * (p * (u32)NPH_VIS_RASTER_KINDS + k));
+        }
         for (u32 k = 0; k < 2U; ++k) {
-            vd->raster_lists[p][k] = region(dev, v->lists, list * (p * 2U + k));
             vd->draws[p][k] = region(dev, v->draws, draws * (p * 2U + k));
         }
     }
     vd->instance_count = r->instance_pool.bump;
-    vd->max_batches = d->max_cull_batches;
+    vd->max_cull_meshlets = d->max_cull_meshlets;
     vd->max_deferred = d->max_deferred;
     vd->max_clusters = d->max_visible_clusters;
     vd->hzb_index = nph_gpu_image_sampled_index(dev, v->hzb);
@@ -371,6 +377,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     const NphGpuLimits *lim = &nph_gpu_device_info(dev)->limits;
     vd->max_mesh_groups_x =
         nph_max_u32(nph_min_u32(lim->max_mesh_workgroup_count[0], 1U << 22U), 1U);
+    vd->sw_raster_pixels = d->sw_raster_pixels;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,27 +479,11 @@ static void cull_instances1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, vo
 static void cull_meshlets1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
-    const NphGpuBuffer args = nph_gpu_rg_buffer(graph, r->vis.frame.args);
+    const NphVisPush p = push_of(r, 1U, 0U);
     nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_MESHLETS]);
-    // The batches of the instances phase 1 found visible...
-    NphVisPush p = push_of(r, 1U, 0U);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    nph_gpu_cmd_dispatch_indirect(cmd, args, ARGS_OFFSET(cull_args) + 16U);
-    // ...then the meshlets phase 0 deferred. Both append to the same lists
-    // through atomics, so they could overlap; the barrier only keeps
-    // synchronisation validation, which sees two writers of one buffer,
-    // from reporting a hazard.
-    const NphGpuMemoryBarrier m = {
-        (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_COMPUTE,
-        (u32)NPH_GPU_ACCESS_SHADER_READ | (u32)NPH_GPU_ACCESS_SHADER_WRITE};
-    NphGpuBarrierDesc bd;
-    memset(&bd, 0, sizeof bd);
-    bd.memory = &m;
-    bd.memory_count = 1U;
-    nph_gpu_cmd_barrier(cmd, &bd);
-    p.mode = 1U;
-    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    nph_gpu_cmd_dispatch_indirect(cmd, args, ARGS_OFFSET(deferred_args));
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
+                                  ARGS_OFFSET(cull_args) + 16U);
 }
 
 static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
@@ -510,24 +501,49 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
         nph_gpu_cmd_bind_index_buffer(cmd, nph_gpu_rg_buffer(graph, f->index_pool), 0U,
                                       NPH_GPU_INDEX_U16);
     }
+    // The hardware kinds: opaque, then masked.
     for (u32 k = 0; k < 2U; ++k) {
         nph_gpu_cmd_bind_pipeline(cmd, v->raster[k]);
         p.mode = k;
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+        const u64 kind = (u64)phase * (u64)NPH_VIS_RASTER_KINDS + k;
         if (v->mesh_shaders) {
-            nph_gpu_cmd_draw_mesh_tasks_indirect(
-                cmd, nph_gpu_rg_buffer(graph, f->args),
-                ARGS_OFFSET(raster_args) + ((u64)phase * 2U + k) * 16U, 1U, 16U);
+            nph_gpu_cmd_draw_mesh_tasks_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                                 ARGS_OFFSET(raster_args) + kind * 16U, 1U, 16U);
         } else {
             const u64 list = (u64)r->desc.max_visible_clusters * sizeof(NphVisDraw);
             nph_gpu_cmd_draw_indexed_indirect_count(
                 cmd, nph_gpu_rg_buffer(graph, f->draws), list * ((u64)phase * 2U + k),
                 nph_gpu_rg_buffer(graph, f->counters),
-                (u64)offsetof(NphVisCounters, raster_count) + ((u64)phase * 2U + k) * 4U,
+                (u64)offsetof(NphVisCounters, raster_count) + kind * 4U,
                 r->desc.max_visible_clusters, (u32)sizeof(NphVisDraw));
         }
     }
     nph_gpu_cmd_end_rendering(cmd);
+}
+
+// The software raster of a phase: a workgroup per small cluster.
+static void sw_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphVisPush p = push_of(r, phase, 0U);
+    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_SW_RASTER]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(
+        cmd, nph_gpu_rg_buffer(graph, f->args),
+        ARGS_OFFSET(raster_args) +
+            ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_SOFTWARE) * 16U);
+}
+
+static void sw_raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    sw_raster_record((NphRenderer *)user, graph, cmd, 0U);
+}
+
+static void sw_raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    sw_raster_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
 static void raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -629,7 +645,7 @@ typedef struct VisGraph {
     NphGpuRgBuffer prev_transforms;
     NphGpuRgBuffer meshes;
     NphGpuRgBuffer material_map;
-    NphGpuRgBuffer batches;
+    NphGpuRgBuffer cull_meshlets;
     NphGpuRgBuffer deferred;
     NphGpuRgBuffer clusters;
     NphGpuRgBuffer lists;
@@ -691,6 +707,20 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+
+    // The small clusters, in compute, into the same visibility buffer.
+    p = add_pass(graph, r, phase == 0U ? "vis sw raster 0" : "vis sw raster 1",
+                 NPH_GPU_RG_PASS_COMPUTE, phase == 0U ? sw_raster0_execute : sw_raster1_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->lists, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
 
@@ -736,7 +766,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     read_scene(p, g, f->hzb);
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
-    nph_gpu_rg_write_buffer(p, g->batches, NPH_GPU_RG_USE_SHADER_WRITE);
+    nph_gpu_rg_write_buffer(p, g->cull_meshlets, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_WRITE);
     if (args_pass(graph, r, "vis args 0", args_phase1_execute) == NULL) {
         return NPH_RESULT_FULL;
@@ -747,7 +777,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     read_scene(p, g, f->hzb);
     nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
-    nph_gpu_rg_read_buffer(p, g->batches, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->cull_meshlets, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_WRITE);
@@ -772,9 +802,9 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     read_scene(p, g, f->hzb);
     nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
-    nph_gpu_rg_read_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
-    nph_gpu_rg_write_buffer(p, g->batches, NPH_GPU_RG_USE_SHADER_WRITE);
+    // Reads the deferred instances, appends meshlets after the deferred ones.
+    nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_STORAGE_WRITE);
     if (args_pass(graph, r, "vis args 1 meshlets", args_phase2_mesh_execute) == NULL) {
         return NPH_RESULT_FULL;
     }
@@ -784,7 +814,6 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     read_scene(p, g, f->hzb);
     nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
-    nph_gpu_rg_read_buffer(p, g->batches, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_WRITE);
@@ -837,6 +866,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_CONE) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_CONE_CULLING;
     }
+    if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_SW_RASTER) == 0U) {
+        flags |= (u32)NPH_VIS_VIEW_SW_RASTER;
+    }
     write_view(r, view, width, height, view_m, proj, flags);
     memset(f, 0, sizeof *f);
     f->view_address = r->frame_addresses[r->frame_slot] + r->layout.vis_view_offset;
@@ -873,7 +905,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.prev_transforms = nph_gpu_rg_import_buffer(graph, v->prev_transforms);
     g.meshes = nph_gpu_rg_import_buffer(graph, v->meshes);
     g.material_map = nph_gpu_rg_import_buffer(graph, v->material_map);
-    g.batches = nph_gpu_rg_import_buffer(graph, v->batches);
+    g.cull_meshlets = nph_gpu_rg_import_buffer(graph, v->cull_meshlets);
     g.deferred = nph_gpu_rg_import_buffer(graph, v->deferred);
     g.clusters = nph_gpu_rg_import_buffer(graph, v->clusters);
     g.lists = nph_gpu_rg_import_buffer(graph, v->lists);
@@ -920,6 +952,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         const NphRenderFrameStats *last = &v->stats_last;
         stats->vis_frame = last->vis_frame;
         stats->vis_clusters = last->vis_clusters;
+        stats->vis_clusters_sw = last->vis_clusters_sw;
         stats->vis_triangles = last->vis_triangles;
         stats->vis_instances_culled_frustum = last->vis_instances_culled_frustum;
         stats->vis_instances_culled_occlusion = last->vis_instances_culled_occlusion;

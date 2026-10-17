@@ -206,6 +206,7 @@ typedef enum VisShader {
     VIS_SHADER_ARGS,
     VIS_SHADER_HZB,
     VIS_SHADER_RESOLVE,
+    VIS_SHADER_SW_RASTER,
     VIS_SHADER_MESH_OPAQUE,
     VIS_SHADER_MESH_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -226,6 +227,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_ARGS,
     VIS_COMPUTE_HZB,
     VIS_COMPUTE_RESOLVE,
+    VIS_COMPUTE_SW_RASTER,
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -276,13 +278,13 @@ typedef struct RenderVis {
 
     // The culling lists: persistent so that their addresses are known when
     // the view is written, imported into the graph every frame.
-    NphGpuBuffer counters; // NphVisCounters
-    NphGpuBuffer args;     // NphVisArgs
-    NphGpuBuffer batches;  // NphVisBatch[2][max_cull_batches]
-    NphGpuBuffer deferred; // u32[max_deferred] instances, then uvec2[max_deferred] meshlets
-    NphGpuBuffer clusters; // NphVisCluster[max_visible_clusters]
-    NphGpuBuffer lists;    // u32[2][2][max_visible_clusters]
-    NphGpuBuffer draws;    // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
+    NphGpuBuffer counters;      // NphVisCounters
+    NphGpuBuffer args;          // NphVisArgs
+    NphGpuBuffer cull_meshlets; // uvec2[max_cull_meshlets]: phase 0's meshlet candidates
+    NphGpuBuffer deferred;      // uvec2[max_deferred] meshlets, then u32[max_deferred] instances
+    NphGpuBuffer clusters;      // NphVisCluster[max_visible_clusters]
+    NphGpuBuffer lists;         // u32[2][NPH_VIS_RASTER_KINDS][max_visible_clusters]
+    NphGpuBuffer draws;         // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
 

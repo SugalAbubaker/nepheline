@@ -45,7 +45,7 @@ NPH_STATIC_ASSERT((u32)NPH_RENDER_VIEW_CLUSTERS == NPH_RENDER_DEBUG_CLUSTERS,
                   "the production debug views agree with the shader's");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_SLOT_COUNT == NPH_RENDER_TEX_COUNT,
                   "the texture slots agree with the shader's");
-NPH_STATIC_ASSERT((u32)NPH_RENDER_VIS_OVERFLOW_BATCHES == NPH_VIS_OVERFLOW_BATCHES &&
+NPH_STATIC_ASSERT((u32)NPH_RENDER_VIS_OVERFLOW_MESHLETS == NPH_VIS_OVERFLOW_MESHLETS &&
                       (u32)NPH_RENDER_VIS_OVERFLOW_CLUSTERS == NPH_VIS_OVERFLOW_CLUSTERS &&
                       (u32)NPH_RENDER_VIS_OVERFLOW_DEFERRED == NPH_VIS_OVERFLOW_DEFERRED,
                   "the overflow bits agree with the shaders'");

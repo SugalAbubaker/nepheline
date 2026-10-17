@@ -33,7 +33,6 @@ NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLS
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 112U, "NphVisMesh matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisBatch) == 16U, "NphVisBatch matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
 
@@ -133,14 +132,14 @@ NphResult render_vis_scene_create(NphRenderer *r)
                         "vis counters", &v->counters));
     NPH_TRY(make_buffer(r, sizeof(NphVisArgs), indirect, NPH_GPU_MEMORY_DEVICE, "vis arguments",
                         &v->args));
-    NPH_TRY(make_buffer(r, 2U * (u64)d->max_cull_batches * sizeof(NphVisBatch), storage,
-                        NPH_GPU_MEMORY_DEVICE, "vis batches", &v->batches));
+    NPH_TRY(make_buffer(r, (u64)d->max_cull_meshlets * 2U * sizeof(u32), storage,
+                        NPH_GPU_MEMORY_DEVICE, "vis meshlet candidates", &v->cull_meshlets));
     NPH_TRY(make_buffer(r, (u64)d->max_deferred * (sizeof(u32) + 2U * sizeof(u32)), storage,
                         NPH_GPU_MEMORY_DEVICE, "vis deferred", &v->deferred));
     NPH_TRY(make_buffer(r, (u64)d->max_visible_clusters * sizeof(NphVisCluster), storage,
                         NPH_GPU_MEMORY_DEVICE, "vis clusters", &v->clusters));
-    NPH_TRY(make_buffer(r, 4U * (u64)d->max_visible_clusters * sizeof(u32), storage,
-                        NPH_GPU_MEMORY_DEVICE, "vis raster lists", &v->lists));
+    NPH_TRY(make_buffer(r, 2U * (u64)NPH_VIS_RASTER_KINDS * d->max_visible_clusters * sizeof(u32),
+                        storage, NPH_GPU_MEMORY_DEVICE, "vis raster lists", &v->lists));
     if (!v->mesh_shaders) {
         NPH_TRY(make_buffer(r, 4U * (u64)d->max_visible_clusters * sizeof(NphVisDraw), indirect,
                             NPH_GPU_MEMORY_DEVICE, "vis draws", &v->draws));
@@ -175,7 +174,7 @@ void render_vis_scene_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->index_pool);
     nph_gpu_buffer_destroy(dev, v->counters);
     nph_gpu_buffer_destroy(dev, v->args);
-    nph_gpu_buffer_destroy(dev, v->batches);
+    nph_gpu_buffer_destroy(dev, v->cull_meshlets);
     nph_gpu_buffer_destroy(dev, v->deferred);
     nph_gpu_buffer_destroy(dev, v->clusters);
     nph_gpu_buffer_destroy(dev, v->lists);

@@ -1,24 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
-// Meshlet culling (docs/render.md "Culling"), the second level of the
-// GPU-driven pipeline: each invocation takes one meshlet of one instance
-// and tests its bounding sphere against the frustum, its normal cone
-// against the camera (all triangles facing away; Kapoulkine,
-// meshoptimizer, 2017; docs/cook.md "The meshlet normal cone"), and its
-// sphere against the hierarchical depth, in the two phases of
-// vis_cull_instances.comp:
+// Meshlet culling (docs/render.md "The production path"), the second level
+// of the GPU-driven pipeline: each invocation takes one (instance, meshlet)
+// work item and tests the meshlet's bounding sphere against the frustum,
+// its normal cone against the camera (all triangles facing away;
+// Kapoulkine, meshoptimizer, 2017; docs/cook.md "The meshlet normal
+// cone"), and its sphere against the hierarchical depth, in the two phases
+// of vis_cull_instances.comp:
 //
-//   mode 0, phase 0: a workgroup per batch of phase 0; occlusion against
+//   phase 0: the meshlets of the instances phase 0 kept; occlusion against
 //     the previous frame's HZB from the previous camera and transform,
 //     occluded meshlets deferred to phase 1;
-//   mode 0, phase 1: a workgroup per batch of the instances phase 1 found
-//     visible; occlusion against this frame's HZB;
-//   mode 1 (phase 1): an invocation per meshlet phase 0 deferred; the same.
+//   phase 1: the meshlets phase 0 deferred, then those of the instances
+//     phase 1 found visible; occlusion against this frame's HZB.
 //
 // A meshlet that survives becomes a visible cluster (instance, meshlet,
-// resolved material, flags) and joins its phase's raster list: masked
-// materials (alpha tested) apart from opaque ones, since only they sample
-// a texture while rasterising. Blended materials are not drawn into the
-// visibility buffer at all: the transparent pass draws them.
+// resolved material, flags) and joins one of its phase's raster lists:
+// masked materials (alpha tested) to the hardware raster, which samples
+// their texture; opaque clusters of small triangles to the software raster
+// (vis_sw_raster.comp): those whose bounding sphere projects into at most
+// NPH_VIS_SW_MAX_PIXELS across, with that box's area shared among the
+// triangles at most sw_raster_pixels across each; the rest to the hardware
+// raster. Blended materials are not drawn into the visibility
+// buffer at all: the transparent pass draws them.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -53,23 +56,15 @@ void main()
     uint slot = 0u;
     uint meshlet = 0u;
     bool valid = false;
-    if (pc.mode == 0u) {
-        if (group < min(counters.c.batches[phase], view.v.max_batches)) {
-            const NphVisBatch batch = VisBatchesRef(view.v.batches[phase]).b[group];
-            if (gl_LocalInvocationIndex < batch.meshlet_count) {
-                slot = batch.instance;
-                meshlet = batch.meshlet_offset + gl_LocalInvocationIndex;
-                valid = true;
-            }
-        }
-    } else {
-        const uint i = group * 64u + gl_LocalInvocationIndex;
-        if (i < min(counters.c.deferred_meshlets, view.v.max_deferred)) {
-            const uvec2 e = VisUvec2Ref(view.v.deferred_meshlets).v[i];
-            slot = e.x;
-            meshlet = e.y;
-            valid = true;
-        }
+    const uint i = group * 64u + gl_LocalInvocationIndex;
+    const uint count = phase == 0u ? min(counters.c.cull_meshlets, view.v.max_cull_meshlets)
+                                   : min(counters.c.deferred_meshlets, view.v.max_deferred);
+    if (i < count) {
+        const uvec2 e =
+            VisUvec2Ref(phase == 0u ? view.v.cull_meshlets : view.v.deferred_meshlets).v[i];
+        slot = e.x;
+        meshlet = e.y;
+        valid = true;
     }
 
     bool visible = false;
@@ -82,6 +77,8 @@ void main()
     uint triangles = 0u;
     uint first_index = 0u; // the indirect raster's draw: the meshlet's corners in the index pool
     uint vertex_offset = 0u;
+    vec3 c = vec3(0.0); // the meshlet's sphere, camera relative
+    float r = 0.0;
     if (valid) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
@@ -109,8 +106,8 @@ void main()
             const float scale = vis_max_scale(inst.transform);
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
-            const vec3 c = vis_transform_vector(inst.transform, center) + t;
-            const float r = radius * scale;
+            c = vis_transform_vector(inst.transform, center) + t;
+            r = radius * scale;
             const vec4 cone = unpackSnorm4x8(b1.x);
             if (!vis_sphere_in_frustum(view.v, c, r)) {
                 culled_frustum = true;
@@ -170,10 +167,31 @@ void main()
         visible = false;
     }
     const bool masked = (flags & NPH_VIS_CLUSTER_MASKED) != 0u;
+    // Opaque clusters of small triangles rasterise in software (see the
+    // file comment). The sphere projecting in front of the near plane also
+    // keeps every vertex in front of the camera, which the software raster
+    // relies on.
+    bool software = false;
+    if (visible && !masked && (view.v.flags & NPH_VIS_VIEW_SW_RASTER) != 0u) {
+        const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
+        vec4 rect;
+        float depth;
+        if (vis_project_sphere(cv, r, view.v.projection, rect, depth)) {
+            const vec2 extent = (rect.zw - rect.xy) * view.v.viewport.xy;
+            const float side = sqrt(extent.x * extent.y / float(max(triangles, 1u)));
+            software = max(extent.x, extent.y) <= float(NPH_VIS_SW_MAX_PIXELS) &&
+                       side <= view.v.sw_raster_pixels;
+        }
+    }
     uint j0;
     uint j1;
-    VIS_RESERVE(counters.c.raster_count[phase][0], visible && !masked ? 1u : 0u, j0);
-    VIS_RESERVE(counters.c.raster_count[phase][1], visible && masked ? 1u : 0u, j1);
+    uint j2;
+    VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_OPAQUE],
+                visible && !masked && !software ? 1u : 0u, j0);
+    VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_MASKED],
+                visible && masked ? 1u : 0u, j1);
+    VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SOFTWARE],
+                visible && software ? 1u : 0u, j2);
     VIS_ADD(counters.c.triangles, visible ? triangles : 0u);
     if (!visible) {
         return;
@@ -186,10 +204,12 @@ void main()
     VisClustersRef(view.v.clusters).c[g] = cluster;
     // Every raster list holds at most one entry per cluster, so an index
     // reserved here is below max_clusters.
-    const uint kind = masked ? 1u : 0u;
-    const uint j = masked ? j1 : j0;
+    const uint kind = masked     ? uint(NPH_VIS_RASTER_MASKED)
+                      : software ? uint(NPH_VIS_RASTER_SOFTWARE)
+                                 : uint(NPH_VIS_RASTER_OPAQUE);
+    const uint j = masked ? j1 : (software ? j2 : j0);
     VisUintRef(view.v.raster_lists[phase][kind]).v[j] = g;
-    if ((view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
+    if (!software && (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
         NphVisDraw draw;
         draw.index_count = triangles * 3u;
         draw.instance_count = 1u;

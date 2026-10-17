@@ -101,7 +101,7 @@ NTEST_SETUP(Golden)
     rd.max_anisotropy = 1.0F;
     // The production path's lists, sized for these scenes.
     rd.max_visible_clusters = 65536U;
-    rd.max_cull_batches = 16384U;
+    rd.max_cull_meshlets = 65536U;
     rd.max_deferred = 32768U;
     rd.max_instance_updates = 256U;
     rd.meshlet_index_pool = 1U << 22U;
