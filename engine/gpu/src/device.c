@@ -989,6 +989,36 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
                      "transfer queue");
     }
 
+    // What each format can do (optimal tiling).
+    for (u32 f = 1U; f < (u32)NPH_GPU_FORMAT_COUNT; ++f) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(dev->phys, gpu_vk_format((NphGpuFormat)f), &fp);
+        const VkFormatFeatureFlags o = fp.optimalTilingFeatures;
+        u32 bits = 0U;
+        bits |= (o & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED_LINEAR
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_STORAGE
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_STORAGE_ATOMIC
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_BLEND
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT
+                    : 0U;
+        dev->format_features[f] = bits;
+    }
+
     // Info
     NphGpuDeviceInfo *info = &dev->info;
     const VkPhysicalDeviceProperties *p = &c->props.properties;
@@ -1636,6 +1666,15 @@ const NphGpuDeviceInfo *nph_gpu_device_info(const NphGpuDevice *dev)
 NphAllocator *nph_gpu_device_allocator(NphGpuDevice *dev)
 {
     return dev->alloc;
+}
+
+bool nph_gpu_format_supports(const NphGpuDevice *dev, NphGpuFormat format, u32 features)
+{
+    NPH_ASSERT(dev != NULL);
+    if ((u32)format == 0U || (u32)format >= (u32)NPH_GPU_FORMAT_COUNT) {
+        return false;
+    }
+    return (dev->format_features[format] & features) == features;
 }
 
 NphGpuValidationStats nph_gpu_device_validation_stats(const NphGpuDevice *dev)

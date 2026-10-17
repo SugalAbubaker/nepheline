@@ -54,6 +54,35 @@ NTEST_F(GpuFixture, reports_a_conforming_device)
               info->features.mesh_shader, info->features.ray_query);
 }
 
+// The format query reports what the core of Vulkan promises for every
+// format (Vulkan's "Required Format Support"), and the formats the renderer
+// asks about on the reference GPU and lavapipe.
+NTEST_F(GpuFixture, formats_report_what_they_can_do)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuDevice *dev = f->dev;
+    const u32 rgba8 =
+        (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED | (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED_LINEAR |
+        (u32)NPH_GPU_FORMAT_FEATURE_STORAGE | (u32)NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT |
+        (u32)NPH_GPU_FORMAT_FEATURE_BLEND;
+    NTEST_EXPECT_TRUE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, rgba8));
+    NTEST_EXPECT_TRUE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_R16G16B16A16_SFLOAT, rgba8));
+    NTEST_EXPECT_TRUE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_D32_SFLOAT,
+                                              (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT));
+    NTEST_EXPECT_TRUE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_R32_UINT,
+                                              (u32)NPH_GPU_FORMAT_FEATURE_STORAGE_ATOMIC));
+    NTEST_EXPECT_FALSE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM,
+                                               (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT));
+    NTEST_EXPECT_FALSE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_UNDEFINED, 0U));
+    NTEST_EXPECT_FALSE(nph_gpu_format_supports(dev, NPH_GPU_FORMAT_COUNT, 0U));
+    // B10G11R11: what the production path's HDR target needs, by device.
+    NTEST_LOG("%s: B10G11R11 storage %d, blend %d", nph_gpu_device_info(dev)->name,
+              nph_gpu_format_supports(dev, NPH_GPU_FORMAT_B10G11R11_UFLOAT,
+                                      (u32)NPH_GPU_FORMAT_FEATURE_STORAGE),
+              nph_gpu_format_supports(dev, NPH_GPU_FORMAT_B10G11R11_UFLOAT,
+                                      (u32)NPH_GPU_FORMAT_FEATURE_BLEND));
+}
+
 // disable_features switches optional capabilities off on any device, so the
 // renderer's fallback paths run on hardware that has the fast ones.
 NTEST(gpu_device, optional_features_can_be_disabled)
