@@ -65,6 +65,9 @@ static const NPH_CVAR_BOOL(k_occlusion, "r.occlusion", 1,
 static const NPH_CVAR_BOOL(k_cone_culling, "r.cone_culling", 1,
                            "back-facing cluster culling by normal cone (production)",
                            NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_BOOL(k_sw_raster, "r.sw_raster", 1,
+                           "small triangles through the compute rasteriser (production)",
+                           NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -85,12 +88,14 @@ static NphResult register_cvars(NphEngine *e)
         &cv->sim_max_steps, &cv->sim_time_scale, &cv->vsync,          &cv->width,
         &cv->height,        &cv->hot_reload,     &cv->reload_poll_ms, &cv->prof_enabled,
         &cv->prof_history,  &cv->pipeline,       &cv->occlusion,      &cv->cone_culling,
+        &cv->sw_raster,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,   &k_pipelined,    &k_max_fps,  &k_lockstep,      &k_max_entities,
         &k_world_events, &k_workers,      &k_sim_rate, &k_sim_max_steps, &k_sim_time_scale,
         &k_vsync,        &k_width,        &k_height,   &k_hot_reload,    &k_reload_poll_ms,
         &k_prof_enabled, &k_prof_history, &k_pipeline, &k_occlusion,     &k_cone_culling,
+        &k_sw_raster,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -549,6 +554,9 @@ static void choose_view(NphEngine *e)
     }
     if (!nph_cvar_get_bool(&e->cv.cone_culling)) {
         e->view.vis_flags |= (u32)NPH_RENDER_VIS_NO_CONE;
+    }
+    if (!nph_cvar_get_bool(&e->cv.sw_raster)) {
+        e->view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
 }
 

@@ -122,6 +122,7 @@ typedef struct EngineCvars {
     NphCvar pipeline;       // r.pipeline: NphRenderPipeline
     NphCvar occlusion;      // r.occlusion
     NphCvar cone_culling;   // r.cone_culling
+    NphCvar sw_raster;      // r.sw_raster
 } EngineCvars;
 
 typedef enum EngineAllocTag {

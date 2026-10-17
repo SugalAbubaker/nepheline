@@ -522,10 +522,10 @@ static void log_systems(const App *app)
     if (rs->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         // The GPU's counters arrive a couple of frames late (vis_frame).
         NPH_LOG_INFO(&LOG_SAMPLE,
-                     "render (production): %u instances, %u clusters, %u triangles; culled: "
-                     "%u + %u instances (frustum + occlusion), %u + %u + %u clusters (frustum + "
-                     "cone + occlusion)",
-                     rs->instances, rs->vis_clusters, rs->vis_triangles,
+                     "render (production): %u instances, %u clusters (%u in software), %u "
+                     "triangles; culled: %u + %u instances (frustum + occlusion), %u + %u + %u "
+                     "clusters (frustum + cone + occlusion)",
+                     rs->instances, rs->vis_clusters, rs->vis_clusters_sw, rs->vis_triangles,
                      rs->vis_instances_culled_frustum, rs->vis_instances_culled_occlusion,
                      rs->vis_meshlets_culled_frustum, rs->vis_meshlets_culled_cone,
                      rs->vis_meshlets_culled_occlusion);
