@@ -10,11 +10,13 @@ and the meshlet builder.
   draws each visible submesh with its own draw call and evaluates every
   light at every pixel; its CPU cost grows with the object count and its
   GPU cost with lights × pixels. It favours exactness over speed.
-- The GPU-driven **production path** (stages 3–4,
-  [ADR-0029](adr/0029-gpu-driven-visibility-buffer.md); "The production
-  path" below) culls, rasterises into a visibility buffer, and shades on
-  the GPU. Its CPU cost does not depend on the object count. Its images
-  are tested against the reference's.
+- The GPU-driven **production path** (stages 3–5,
+  [ADR-0029](adr/0029-gpu-driven-visibility-buffer.md),
+  [ADR-0030](adr/0030-hybrid-raster-and-meshlet-work-lists.md),
+  [ADR-0031](adr/0031-light-grid-and-compact-hdr.md); "The production
+  path" below) culls, rasterises into a visibility buffer, bins its lights,
+  and shades on the GPU. Its CPU cost depends on neither the object count
+  nor the light count. Its images are tested against the reference's.
 
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
@@ -154,7 +156,11 @@ of glTF 2.0:
 `shaders/render/surface.glsl` holds this model; the forward pass and the
 production path's resolve both include it, so the two renderers cannot
 drift apart. The resolve has no rasteriser derivatives, so it supplies
-its own (see below).
+its own (see below). The environment and emission are evaluated before
+the punctual lights, so that only the point's description and one sum
+stay live across the light loop, where the resolve's registers peak. The
+reference lights every pixel with every light; the production path's
+view carries a light grid instead ("Lights" below).
 
 ## The production path
 
@@ -167,9 +173,9 @@ pass declarations, a few microseconds whatever the object count
 (`render_perf`, docs/benchmarks.md); the GPU culls, rasterises, and
 shades. Blended surfaces stay on the forward pass, drawn over the result.
 
-It needs 64-bit image atomics, 64-bit integers in shaders, subgroup ballot
-and arithmetic, and the geometry-shader feature (which lets a fragment
-shader read `gl_PrimitiveID`). `nph_renderer_production_supported` says
+It needs 64-bit image atomics, 64-bit integers in shaders, subgroup ballot,
+arithmetic, and shuffle, and the geometry-shader feature (which lets a
+fragment shader read `gl_PrimitiveID`). `nph_renderer_production_supported` says
 whether the renderer has it; a view asking for it on a device without it
 is drawn by the reference renderer, logged once. `disable_production` in
 the renderer's description skips it (no GPU memory, no pipelines).
@@ -185,6 +191,7 @@ re-sent per frame:
 | previous transforms | last frame's transform per slot, for phase 0's occlusion test |
 | meshes | `NphVisMesh`: dequantisation, bounding sphere, stream and meshlet addresses |
 | material map | per instance a range of material slots, from a TLSF range allocator over offsets (`core/range_alloc.h`) |
+| lights | `NphVisLight`: the shading record, its position split like a translation, its range, and whether the slot is live |
 
 Creating, moving, hiding, or destroying an instance marks its slot; each
 frame writes at most `max_instance_updates` update records into the
@@ -192,7 +199,9 @@ frame's upload buffer, and `vis scatter` copies them into the tables (the
 rest wait a frame, logged). A destroyed instance's material slots return
 `NPH_GPU_FRAMES_IN_FLIGHT` frames later, after the frames that may read
 them; the range allocator has room for a whole population being replaced
-between two frames.
+between two frames. A light created, changed, or destroyed goes up the
+same way in the next production frame; the update list holds every
+light, so none waits.
 
 Translations stay 64-bit on the CPU. The GPU gets each as a high and a
 low float and the camera likewise, and subtracts them part by part
@@ -210,6 +219,7 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 |---|---|
 | `vis clear` | clears the visibility buffer and the counters |
 | `vis scatter` | applies the frame's instance updates |
+| `vis light updates`, `vis lights`, `vis light bins`, `vis light tiles` | the light grid (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
 | `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
@@ -299,7 +309,46 @@ Attribute Interpolation for Memory-Efficient Deferred Shading", HPG
 clip-space vertices (Olano & Greer, "Triangle Scan Conversion using 2D
 Homogeneous Coordinates", 1997), right even with a vertex behind the
 camera. Shading is `surface.glsl`, as above; the images match the
-reference's (100 % of pixels within 3 levels in the tests).
+reference's (100 % of pixels within 3 levels in the tests). One pass
+covers every pixel: classifying the tiles of background alone into a
+pipeline of their own measured slower (ADR-0031).
+
+**The HDR target** is B10G11R11 where the device can store to it, sample
+it, and blend into it (RGBA16F otherwise; the reference keeps RGBA16F):
+half the bytes for every pass that reads it. Its mantissas are 6 bits (5
+for blue), so the resolve rounds each colour to the format's grid itself,
+up or down at random with the odds that keep its expected value
+(interleaved gradient noise; Gjøl & Svendsen 2016): the steps show as fine
+noise instead of bands, and the stored value is exact whatever rounding the
+device would apply (Vulkan leaves it open; the RTX 3060 Ti truncates).
+Debug views are stored without the dither.
+
+### Lights
+
+The production path lights from a grid built on the GPU every frame
+(`NphRenderLightGrid`; Drobot, "Improved Culling for Tiled and Clustered
+Rendering", SIGGRAPH 2017):
+
+| Pass | What it does |
+|---|---|
+| `vis light updates` | the frame's changed lights into the table |
+| `vis lights` | every light made camera relative; directional and unlimited lights to the global list; the others bounded by the sphere around what they reach (a spot light's cone sphere, Wronski 2017), kept when it meets the frustum, given the bins of their nearest and farthest distance and the tiles of their clipped screen rectangle (Mara & McGuire 2013) |
+| `vis light bins` | one workgroup: a counting sort of the kept lights by nearest bin into the grid's local list, and each bin's range of sorted lights that may reach it |
+| `vis light tiles` | a bit per light and 16-pixel tile, a word of 32 lights at a time, after a block test per 8 × 8 tiles |
+
+The 1,024 distance bins are spaced evenly in log2 distance over 20
+octaves from the near plane; a bin's range runs from the first sorted
+light whose running maximum of farthest bins reaches it to the last whose
+nearest bin is at most it. A pixel evaluates the global lights, then the
+sorted lights in its bin's range whose bit its tile's mask sets, each
+invocation on its own (walking the subgroup's lights together, as Drobot
+does, measured slower on the RTX 3060 Ti). Culling is exact: a light left
+out contributes zero at the pixel (its windowed falloff, or its cone), the
+bounds carrying a 10^-4 slack for rounding; 300 lights around and behind
+the camera give the image of lighting every pixel with every light, bit
+for bit. `NPH_RENDER_VIS_NO_LIGHT_GRID` makes every light global, for such
+comparisons. A view holds at most 4,096 lights (`max_lights`). Blended
+surfaces walk the same grid per fragment.
 
 ### Capacities and statistics
 
@@ -308,11 +357,11 @@ The production path's lists have fixed capacities in `NphRendererDesc`:
 meshlet work items), `max_deferred` (262,144: deferred instances, and
 phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
-(2^24, indirect path only). A list that fills drops work and sets a bit in
+(2^24, indirect path only); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
-software, instances and meshlets culled by each test), read back from the
-frame that completed
+software, instances and meshlets culled by each test, lights in view),
+read back from the frame that completed
 `NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
 `instances` is the live count and `culled` the hidden instances plus
 blended ones outside the frustum; `draws` and `triangles` count only the
@@ -325,21 +374,26 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.16 ms |
-| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.21 ms |
-| grid, 512 × 512 | 102,400 | 13.4 ms | 0.005 ms | 3.1 ms | 0.64 ms |
-| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.006 ms | 2.69 ms | 1.89 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.17 ms |
+| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.22 ms |
+| grid, 512 × 512 | 102,400 | 13.3 ms | 0.006 ms | 3.6 ms | 0.64 ms |
+| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.71 ms | 1.90 ms |
+| field at night, 1,024 lights | 16,385 | 3.63 ms | 0.007 ms | 54.0 ms | 2.23 ms |
+| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.99 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 53,257 clusters, and 55,701 of the 62,234 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
-passes 0.10 ms, raster 0.50 ms (0.22 in hardware, 0.28 in software), the
-two pyramids 0.21 ms, resolve 0.87 ms, tonemap 0.12 ms. Against CLAUDE.md
-§10.4, the raster (0.65 ms budgeted) and the shading fit; culling with
-the depth pyramid takes 0.31 ms against 0.25 ms, most of it the first
-pyramid's read of the visibility buffer. ADR-0029 and ADR-0030 record the
-numbers and what comes next.
+passes 0.10 ms, raster 0.49 ms (0.22 in hardware, 0.27 in software), the
+two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.88 ms, tonemap
+0.11 ms. Against CLAUDE.md §10.4, the raster (0.65 ms budgeted) and the
+shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
+against 0.25 ms, most of it the first pyramid's read of the visibility
+buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
+1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
+ADR-0029, ADR-0030, and ADR-0031 record the numbers and what comes
+next.
 
 ### Debug views
 
@@ -427,7 +481,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (68 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (72 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -450,8 +504,12 @@ synchronisation-validation gate:
   and so do the software and hardware rasters, with no cracks between
   their triangles; instances move, hide, and go, and a whole population is
   replaced between frames; the debug views; cooked and built meshlets draw
-  the same; the culling math against its C twins; the depth pyramid read
-  back, and the one after phase 1 against a full rebuild.
+  the same; the culling math, the light spheres, the clipped projections,
+  and the distance bins against their C twins; the depth pyramid read
+  back, and the one after phase 1 against a full rebuild; the light grid
+  read back (every light in every tile and bin its sphere reaches, none
+  more than a tile beyond); 300 lights giving the image of every light
+  everywhere, and lights moving, changing, and going between frames.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -479,10 +537,14 @@ path and logs what the GPU culled.
 ## Limitations (future work)
 
 - No shadows: virtual shadow maps are §8.6 stage 6 (Phase 10).
-- No MSAA or TAA: TAA is stage 8 (Phase 10).
-- Every light is evaluated for every pixel: clustering is stage 5.
-- The resolve is one shader for every material until stage 5 classifies
-  tiles.
+- No MSAA or TAA: TAA is stage 8 (Phase 10); until then the HDR target's
+  dither is the same every frame.
+- The reference renderer evaluates every light for every pixel (it is the
+  ground truth).
+- The resolve is one shader for every material: tile classification
+  returns with a second shading model (ADR-0031).
+- The light passes run on the graphics queue; they read nothing of the
+  frame's raster and could overlap it on the async compute queue.
 - The first depth pyramid reads the whole visibility buffer (0.145 ms at
   4K); the second rebuilds its coarser mips in full.
 - The software raster gives a cluster of a dozen triangles a whole
