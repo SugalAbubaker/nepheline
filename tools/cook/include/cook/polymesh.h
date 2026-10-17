@@ -119,6 +119,8 @@ NPH_MUST_USE NphResult cook_polymesh_save(const CookPolyMesh *m, const char *pat
 NphVec3 cook_polymesh_face_normal(const CookPolyMesh *m, u32 face);
 // The mean of its corners' positions.
 NphVec3 cook_polymesh_face_center(const CookPolyMesh *m, u32 face);
+// Its area: half the length of its Newell vector (exact for planar faces).
+f32 cook_polymesh_face_area(const CookPolyMesh *m, u32 face);
 
 // Triangulates face `face`: writes (count - 2) * 3 corner offsets within the
 // face (0 .. count - 1) to `out`, counter-clockwise as the face. Returns the

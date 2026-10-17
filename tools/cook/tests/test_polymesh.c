@@ -92,6 +92,7 @@ NTEST(polymesh, the_primitives_are_closed_and_face_out)
     cook_polymesh_init(&m, alloc);
 
     NTEST_ASSERT_EQ_INT(cook_polymesh_cube(&m, 2.0F), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(cook_polymesh_face_area(&m, 0U), 4.0F, 1e-5F);
     NTEST_EXPECT_EQ_UINT(m.positions.len, 8U);
     NTEST_EXPECT_EQ_UINT(m.faces.len, 6U);
     NTEST_EXPECT_EQ_UINT(m.corners.len, 24U);
@@ -191,12 +192,14 @@ NTEST(polymesh, faces_of_any_shape_triangulate_into_their_own_area)
     static const f32 ell[6][2] = {{0, 0}, {0, 2}, {2, 2}, {2, 1}, {1, 1}, {1, 0}};
     outline(&m, &ell[0][0], 6U);
     NTEST_EXPECT_NEAR_F64(triangulated_area(&m, &front), 3.0, 1e-6);
+    NTEST_EXPECT_NEAR_F32(cook_polymesh_face_area(&m, 0U), 3.0F, 1e-6F);
     NTEST_EXPECT_TRUE(front);
     // A comb: teeth of reflex corners.
     static const f32 comb[12][2] = {{0, 0}, {0, 3}, {5, 3}, {5, 0}, {4, 0}, {4, 2},
                                     {3, 2}, {3, 0}, {2, 0}, {2, 2}, {1, 2}, {1, 0}};
     outline(&m, &comb[0][0], 12U);
     NTEST_EXPECT_NEAR_F64(triangulated_area(&m, &front), 15.0 - 2.0 * 2.0, 1e-5); // two notches
+    NTEST_EXPECT_NEAR_F32(cook_polymesh_face_area(&m, 0U), 11.0F, 1e-5F);
     NTEST_EXPECT_TRUE(front);
     // A star with its points first in the list.
     f32 star[16][2];
@@ -214,12 +217,14 @@ NTEST(polymesh, faces_of_any_shape_triangulate_into_their_own_area)
         expected += 0.5 * ((f64)p[1] * (f64)q[0] - (f64)p[0] * (f64)q[1]);
     }
     NTEST_EXPECT_NEAR_F64(triangulated_area(&m, &front), expected, 1e-4);
+    NTEST_EXPECT_NEAR_F32(cook_polymesh_face_area(&m, 0U), (f32)expected, 1e-4F);
     NTEST_EXPECT_TRUE(front);
     // Degenerate: every corner on a line. It still gives count - 2
     // triangles (of no area), and nothing breaks.
     static const f32 line[5][2] = {{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}};
     outline(&m, &line[0][0], 5U);
     NTEST_EXPECT_TRUE(nph_vec3_eq(cook_polymesh_face_normal(&m, 0U), nph_vec3_zero()));
+    NTEST_EXPECT_NEAR_F32(cook_polymesh_face_area(&m, 0U), 0.0F, 0.0F);
     u32 tri[9];
     NTEST_EXPECT_EQ_UINT(cook_polymesh_triangulate_face(&m, 0U, tri), 3U);
     cook_polymesh_free(&m);
