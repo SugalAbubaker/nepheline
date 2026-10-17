@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// One ray per invocation against a top-level acceleration structure reached
+// by its device address (GpuFixture.ray_queries_hit_instanced_triangles):
+// what the ray hit first, as (distance, the instance's custom index, the
+// triangle, front facing), or a distance of -1.
+#version 460
+#extension GL_EXT_ray_query : require
+#include "nph_bindless.glsl"
+
+layout(local_size_x = 64) in;
+
+// Two vec4 per ray: origin and the farthest distance, then the direction.
+NPH_BUFFER_REF(RaysRef) { vec4 r[]; };
+NPH_BUFFER_REF(HitsRef) { vec4 h[]; };
+
+layout(push_constant, scalar) uniform Push
+{
+    uint64_t tlas;
+    uint64_t rays;
+    uint64_t hits;
+    uint count;
+    uint pad;
+}
+pc;
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    const vec4 o = RaysRef(pc.rays).r[i * 2u];
+    const vec4 d = RaysRef(pc.rays).r[i * 2u + 1u];
+    rayQueryEXT q;
+    rayQueryInitializeEXT(q, accelerationStructureEXT(pc.tlas), gl_RayFlagsOpaqueEXT, 0xFFu, o.xyz,
+                          0.0, d.xyz, o.w);
+    while (rayQueryProceedEXT(q)) {
+    }
+    vec4 hit = vec4(-1.0, 0.0, 0.0, 0.0);
+    if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        hit = vec4(rayQueryGetIntersectionTEXT(q, true),
+                   float(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true)),
+                   float(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)),
+                   rayQueryGetIntersectionFrontFaceEXT(q, true) ? 1.0 : 0.0);
+    }
+    HitsRef(pc.hits).h[i] = hit;
+}

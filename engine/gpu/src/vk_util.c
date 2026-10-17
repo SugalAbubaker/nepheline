@@ -63,6 +63,7 @@ static const FormatEntry g_formats[NPH_GPU_FORMAT_COUNT] = {
     F("BC6H_UFLOAT", 16U, 4U, 4U, NPH_GPU_ASPECT_COLOR, 0, 1, VK_FORMAT_BC6H_UFLOAT_BLOCK),
     F("BC7_UNORM", 16U, 4U, 4U, NPH_GPU_ASPECT_COLOR, 0, 1, VK_FORMAT_BC7_UNORM_BLOCK),
     F("BC7_SRGB", 16U, 4U, 4U, NPH_GPU_ASPECT_COLOR, 1, 1, VK_FORMAT_BC7_SRGB_BLOCK),
+    F("R32G32B32_SFLOAT", 12U, 1U, 1U, NPH_GPU_ASPECT_COLOR, 0, 0, VK_FORMAT_R32G32B32_SFLOAT),
 };
 #undef F
 
@@ -216,6 +217,9 @@ VkPipelineStageFlags2 gpu_vk_stages(u32 stages)
     if ((stages & (u32)NPH_GPU_STAGE_ALL) != 0U) {
         out |= VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     }
+    if ((stages & (u32)NPH_GPU_STAGE_ACCEL_BUILD) != 0U) {
+        out |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    }
     return out;
 }
 
@@ -268,6 +272,12 @@ VkAccessFlags2 gpu_vk_access(u32 access)
     }
     if ((access & (u32)NPH_GPU_ACCESS_MEMORY_WRITE) != 0U) {
         out |= VK_ACCESS_2_MEMORY_WRITE_BIT;
+    }
+    if ((access & (u32)NPH_GPU_ACCESS_ACCEL_READ) != 0U) {
+        out |= VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    }
+    if ((access & (u32)NPH_GPU_ACCESS_ACCEL_WRITE) != 0U) {
+        out |= VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     }
     return out;
 }

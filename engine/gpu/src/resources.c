@@ -37,6 +37,12 @@ static VkBufferUsageFlags buffer_usage(u32 usage)
     if ((usage & (u32)NPH_GPU_BUFFER_USAGE_UNIFORM) != 0U) {
         flags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     }
+    if ((usage & (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT) != 0U) {
+        flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
+    if ((usage & GPU_BUFFER_USAGE_ACCEL_STORAGE) != 0U) {
+        flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+    }
     return flags;
 }
 
@@ -78,6 +84,12 @@ NphResult nph_gpu_buffer_create(NphGpuDevice *dev, const NphGpuBufferDesc *desc,
     out->value = 0U;
     if (desc->size == 0U || desc->usage == 0U) {
         GPU_LOG_ERROR("buffer '%s': size and usage must be non-zero",
+                      desc->name != NULL ? desc->name : "");
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const u32 accel_usage = (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT | GPU_BUFFER_USAGE_ACCEL_STORAGE;
+    if ((desc->usage & accel_usage) != 0U && !dev->info.features.ray_query) {
+        GPU_LOG_ERROR("buffer '%s': acceleration-structure usage without ray queries",
                       desc->name != NULL ? desc->name : "");
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -920,6 +932,15 @@ void gpu_resources_shutdown(NphGpuDevice *dev)
 {
     u32 i = 0U;
     void *slot = NULL;
+    // Acceleration structures before the buffers they live in.
+    while (gpu_pool_next_live(&dev->accels, &i, &slot)) {
+        NphGpuAccelSlot *a = (NphGpuAccelSlot *)slot;
+        if (a->vk != VK_NULL_HANDLE) {
+            vkDestroyAccelerationStructureKHR(dev->device, a->vk, NULL);
+            a->vk = VK_NULL_HANDLE;
+        }
+    }
+    i = 0U;
     while (gpu_pool_next_live(&dev->samplers, &i, &slot)) {
         NphGpuSamplerSlot *s = (NphGpuSamplerSlot *)slot;
         if (s->vk != VK_NULL_HANDLE) {

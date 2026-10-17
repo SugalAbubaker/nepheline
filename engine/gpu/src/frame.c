@@ -303,6 +303,10 @@ void gpu_run_deferred(NphGpuDevice *dev, u32 slot)
         case NPH_GPU_DEFERRED_PIPELINE:
             vkDestroyPipeline(dev->device, (VkPipeline)e->handle, NULL);
             break;
+        case NPH_GPU_DEFERRED_ACCEL:
+            vkDestroyAccelerationStructureKHR(dev->device, (VkAccelerationStructureKHR)e->handle,
+                                              NULL);
+            break;
         case NPH_GPU_DEFERRED_SEMAPHORE:
             vkDestroySemaphore(dev->device, (VkSemaphore)e->handle, NULL);
             break;

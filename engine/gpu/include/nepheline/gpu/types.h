@@ -158,6 +158,9 @@ typedef enum NphGpuFormat {
     NPH_GPU_FORMAT_BC6H_UFLOAT,
     NPH_GPU_FORMAT_BC7_UNORM,
     NPH_GPU_FORMAT_BC7_SRGB,
+    // Vertices (acceleration-structure builds; appended, so earlier values
+    // keep their meaning)
+    NPH_GPU_FORMAT_R32G32B32_SFLOAT,
     NPH_GPU_FORMAT_COUNT
 } NphGpuFormat;
 
@@ -225,6 +228,9 @@ typedef enum NphGpuBufferUsage {
     NPH_GPU_BUFFER_USAGE_INDEX = 1U << 3U,
     NPH_GPU_BUFFER_USAGE_INDIRECT = 1U << 4U,
     NPH_GPU_BUFFER_USAGE_UNIFORM = 1U << 5U,
+    // Read by acceleration-structure builds: vertices, indices, instances
+    // (accel.h; NphGpuFeatures.ray_query).
+    NPH_GPU_BUFFER_USAGE_ACCEL_INPUT = 1U << 6U,
 } NphGpuBufferUsage;
 
 typedef struct NphGpuBufferDesc {
@@ -360,6 +366,7 @@ typedef enum NphGpuStage {
     NPH_GPU_STAGE_MESH_SHADER = 1U << 10U,
     NPH_GPU_STAGE_ALL_GRAPHICS = 1U << 11U,
     NPH_GPU_STAGE_ALL = 1U << 12U,
+    NPH_GPU_STAGE_ACCEL_BUILD = 1U << 13U, // acceleration-structure builds
 } NphGpuStage;
 
 typedef enum NphGpuAccess {
@@ -378,6 +385,8 @@ typedef enum NphGpuAccess {
     NPH_GPU_ACCESS_HOST_WRITE = 1U << 11U,
     NPH_GPU_ACCESS_MEMORY_READ = 1U << 12U,
     NPH_GPU_ACCESS_MEMORY_WRITE = 1U << 13U,
+    NPH_GPU_ACCESS_ACCEL_READ = 1U << 14U,  // ray queries, builds reading bottom levels or scratch
+    NPH_GPU_ACCESS_ACCEL_WRITE = 1U << 15U, // builds writing a structure or scratch
 } NphGpuAccess;
 
 typedef enum NphGpuLayout {

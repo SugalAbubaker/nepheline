@@ -38,6 +38,9 @@ static void fill_defaults(NphGpuDeviceDesc *d)
     if (d->max_pipelines == 0U) {
         d->max_pipelines = 4096U;
     }
+    if (d->max_accels == 0U) {
+        d->max_accels = 4096U;
+    }
     if (d->max_timelines == 0U) {
         d->max_timelines = 64U;
     }
@@ -357,6 +360,7 @@ typedef struct Candidate {
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables;
     VkPhysicalDeviceMeshShaderPropertiesEXT mesh_props;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR accel_props;
     VkPhysicalDeviceMemoryProperties memory;
     b32 ext_swapchain;
     b32 ext_mesh;
@@ -448,11 +452,19 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     c->p12.pNext = &c->p13;
     c->p13.pNext = &c->driver;
     c->driver.pNext = NULL;
+    void **prop_next = &c->driver.pNext;
     if (c->ext_mesh) {
         c->mesh_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
-        c->driver.pNext = &c->mesh_props;
-        c->mesh_props.pNext = NULL;
+        *prop_next = &c->mesh_props;
+        prop_next = &c->mesh_props.pNext;
     }
+    if (c->ext_accel) {
+        c->accel_props.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        *prop_next = &c->accel_props;
+        prop_next = &c->accel_props.pNext;
+    }
+    *prop_next = NULL;
     vkGetPhysicalDeviceProperties2(c->phys, &c->props);
     vkGetPhysicalDeviceMemoryProperties(c->phys, &c->memory);
 
@@ -1038,6 +1050,13 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         bits |= (o & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0U
                     ? (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT
                     : 0U;
+        // Vertex formats of acceleration-structure builds are buffer
+        // features, meaningful only with the extension enabled.
+        bits |= dev->info.features.ray_query &&
+                        (fp.bufferFeatures &
+                         VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_ACCEL_VERTEX
+                    : 0U;
         dev->format_features[f] = bits;
     }
 
@@ -1114,6 +1133,12 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         }
         lim->max_mesh_workgroup_total_count = m->maxMeshWorkGroupTotalCount;
         lim->max_preferred_mesh_workgroup_invocations = m->maxPreferredMeshWorkGroupInvocations;
+    }
+    if (info->features.ray_query) {
+        const VkPhysicalDeviceAccelerationStructurePropertiesKHR *a = &c->accel_props;
+        lim->accel_scratch_alignment = a->minAccelerationStructureScratchOffsetAlignment;
+        lim->accel_max_instances = a->maxInstanceCount;
+        lim->accel_max_triangles = a->maxPrimitiveCount;
     }
     return NPH_RESULT_OK;
 }
@@ -1494,6 +1519,9 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                           sizeof(NphGpuPipelineSlot));
     }
     if (r == NPH_RESULT_OK) {
+        r = gpu_pool_init(&dev->accels, dev->alloc, dev->desc.max_accels, sizeof(NphGpuAccelSlot));
+    }
+    if (r == NPH_RESULT_OK) {
         r = gpu_bindless_init(dev);
     }
     if (r == NPH_RESULT_OK) {
@@ -1559,12 +1587,14 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
 static void report_leaks(NphGpuDevice *dev)
 {
     const NphGpuLiveCounts live = nph_gpu_device_live_counts(dev);
-    if (live.buffers + live.images + live.samplers + live.shaders + live.pipelines == 0U) {
+    if (live.buffers + live.images + live.samplers + live.shaders + live.pipelines + live.accels ==
+        0U) {
         return;
     }
-    GPU_LOG_ERROR("resource leak: %u buffers, %u images, %u samplers, %u shaders, %u pipelines "
-                  "still alive at device destruction",
-                  live.buffers, live.images, live.samplers, live.shaders, live.pipelines);
+    GPU_LOG_ERROR("resource leak: %u buffers, %u images, %u samplers, %u shaders, %u pipelines, "
+                  "%u acceleration structures still alive at device destruction",
+                  live.buffers, live.images, live.samplers, live.shaders, live.pipelines,
+                  live.accels);
     u32 i = 0U;
     void *slot = NULL;
     u32 shown = 0U;
@@ -1589,6 +1619,10 @@ static void report_leaks(NphGpuDevice *dev)
     i = 0U;
     while (gpu_pool_next_live(&dev->pipelines, &i, &slot) && shown++ < 56U) {
         GPU_LOG_ERROR("  leaked pipeline '%s'", ((NphGpuPipelineSlot *)slot)->name);
+    }
+    i = 0U;
+    while (gpu_pool_next_live(&dev->accels, &i, &slot) && shown++ < 64U) {
+        GPU_LOG_ERROR("  leaked acceleration structure '%s'", ((NphGpuAccelSlot *)slot)->name);
     }
 }
 
@@ -1629,6 +1663,7 @@ static void destroy_partial(NphGpuDevice *dev)
     gpu_pool_free(&dev->samplers, alloc);
     gpu_pool_free(&dev->shaders, alloc);
     gpu_pool_free(&dev->pipelines, alloc);
+    gpu_pool_free(&dev->accels, alloc);
     if (dev->timelines != NULL) {
         NPH_FREE_ARRAY(alloc, NphGpuTimeline, dev->timelines, dev->timeline_cap);
         dev->timelines = NULL;
@@ -1721,6 +1756,7 @@ NphGpuLiveCounts nph_gpu_device_live_counts(const NphGpuDevice *dev)
     c.samplers = gpu_pool_live(&dev->samplers);
     c.shaders = gpu_pool_live(&dev->shaders);
     c.pipelines = gpu_pool_live(&dev->pipelines);
+    c.accels = gpu_pool_live(&dev->accels);
     c.timelines = 0U;
     for (u32 i = 0; i < dev->timeline_cap; ++i) {
         if (dev->timelines[i].in_use) {

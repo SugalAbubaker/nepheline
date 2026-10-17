@@ -561,7 +561,8 @@ void nph_gpu_rg_read_buffer(NphGpuRgPass *pass, NphGpuRgBuffer buffer, NphGpuRgU
     NPH_ASSERT(pass != NULL);
     NPH_ASSERT(use == NPH_GPU_RG_USE_SHADER_READ || use == NPH_GPU_RG_USE_STORAGE_READ ||
                use == NPH_GPU_RG_USE_INDEX || use == NPH_GPU_RG_USE_INDIRECT ||
-               use == NPH_GPU_RG_USE_TRANSFER_SRC);
+               use == NPH_GPU_RG_USE_TRANSFER_SRC || use == NPH_GPU_RG_USE_ACCEL_INPUT ||
+               use == NPH_GPU_RG_USE_ACCEL_READ);
     NphGpuRenderGraph *g = OWNER(pass);
     NPH_ASSERT(g != NULL);
     add_use(g, pass, buffer.value - 1U, use, 0U, 1U, false);
@@ -571,7 +572,8 @@ void nph_gpu_rg_write_buffer(NphGpuRgPass *pass, NphGpuRgBuffer buffer, NphGpuRg
 {
     NPH_ASSERT(pass != NULL);
     NPH_ASSERT(use == NPH_GPU_RG_USE_SHADER_WRITE || use == NPH_GPU_RG_USE_STORAGE_WRITE ||
-               use == NPH_GPU_RG_USE_TRANSFER_DST);
+               use == NPH_GPU_RG_USE_TRANSFER_DST || use == NPH_GPU_RG_USE_ACCEL_SCRATCH ||
+               use == NPH_GPU_RG_USE_ACCEL_BUILD);
     NphGpuRenderGraph *g = OWNER(pass);
     NPH_ASSERT(g != NULL);
     add_use(g, pass, buffer.value - 1U, use, 0U, 1U, true);
@@ -1047,6 +1049,20 @@ static RequiredState required_state(const NphGpuRenderGraph *g, const NphGpuRgPa
         s.stages = (u32)NPH_GPU_STAGE_ALL;
         s.access = (u32)NPH_GPU_ACCESS_NONE;
         break;
+    case NPH_GPU_RG_USE_ACCEL_INPUT:
+        s.stages = (u32)NPH_GPU_STAGE_ACCEL_BUILD;
+        s.access = (u32)NPH_GPU_ACCESS_SHADER_READ;
+        break;
+    case NPH_GPU_RG_USE_ACCEL_SCRATCH:
+    case NPH_GPU_RG_USE_ACCEL_BUILD:
+        s.stages = (u32)NPH_GPU_STAGE_ACCEL_BUILD;
+        s.access = (u32)NPH_GPU_ACCESS_ACCEL_READ | (u32)NPH_GPU_ACCESS_ACCEL_WRITE;
+        break;
+    case NPH_GPU_RG_USE_ACCEL_READ:
+        // Traced by the pass's shaders, or referenced by a top-level build.
+        s.stages = shader | (u32)NPH_GPU_STAGE_ACCEL_BUILD;
+        s.access = (u32)NPH_GPU_ACCESS_ACCEL_READ;
+        break;
     case NPH_GPU_RG_USE_COUNT:
         break;
     }
@@ -1057,7 +1073,8 @@ static bool access_writes(u32 access)
 {
     return (access & ((u32)NPH_GPU_ACCESS_SHADER_WRITE | (u32)NPH_GPU_ACCESS_COLOR_WRITE |
                       (u32)NPH_GPU_ACCESS_DEPTH_WRITE | (u32)NPH_GPU_ACCESS_TRANSFER_WRITE |
-                      (u32)NPH_GPU_ACCESS_HOST_WRITE | (u32)NPH_GPU_ACCESS_MEMORY_WRITE)) != 0U;
+                      (u32)NPH_GPU_ACCESS_HOST_WRITE | (u32)NPH_GPU_ACCESS_MEMORY_WRITE |
+                      (u32)NPH_GPU_ACCESS_ACCEL_WRITE)) != 0U;
 }
 
 static RgBarrier *push_barrier(NphGpuRenderGraph *g, NphGpuRgPass *pass, bool post)

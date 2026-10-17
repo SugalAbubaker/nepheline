@@ -105,6 +105,19 @@ typedef struct NphGpuShaderSlot {
     char name[NPH_GPU_NAME_MAX];
 } NphGpuShaderSlot;
 
+// An internal buffer usage: the storage an acceleration structure lives in
+// (accel.c creates such buffers; the public enum stops well short of it).
+#define GPU_BUFFER_USAGE_ACCEL_STORAGE (1U << 31U)
+
+typedef struct NphGpuAccelSlot {
+    VkAccelerationStructureKHR vk;
+    NphGpuBuffer buffer; // the storage it lives in
+    u64 address;
+    u64 size;
+    u32 type; // NphGpuAccelType
+    char name[NPH_GPU_NAME_MAX];
+} NphGpuAccelSlot;
+
 typedef struct NphGpuPipelineSlot {
     VkPipeline vk;
     b32 compute;
@@ -141,6 +154,7 @@ typedef enum NphGpuDeferredType {
     NPH_GPU_DEFERRED_BINDLESS_STORAGE, // index
     NPH_GPU_DEFERRED_BINDLESS_SAMPLER, // index
     NPH_GPU_DEFERRED_ALLOCATION,       // alloc only (render-graph block)
+    NPH_GPU_DEFERRED_ACCEL,            // handle = VkAccelerationStructureKHR
 } NphGpuDeferredType;
 
 typedef struct NphGpuDeferred {
@@ -298,6 +312,7 @@ struct NphGpuDevice {
     NphGpuPool samplers;
     NphGpuPool shaders;
     NphGpuPool pipelines;
+    NphGpuPool accels;
 
     NphGpuTimeline *timelines;
     u32 timeline_cap;

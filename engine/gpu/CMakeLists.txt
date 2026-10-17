@@ -5,6 +5,7 @@
 
 nph_add_module(gpu
     SOURCES
+        src/accel.c
         src/bindless.c
         src/commands.c
         src/device.c
@@ -59,6 +60,7 @@ target_link_libraries(nph_gpu PRIVATE nph_gpu_vma)
 
 nph_add_test(gpu
     SOURCES
+        tests/test_accel.c
         tests/test_commands.c
         tests/test_device.c
         tests/test_formats.c

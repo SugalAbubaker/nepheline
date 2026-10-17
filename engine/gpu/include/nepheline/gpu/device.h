@@ -122,6 +122,7 @@ typedef struct NphGpuDeviceDesc {
     u32 max_samplers;                // (1024)
     u32 max_shaders;                 // (4096)
     u32 max_pipelines;               // (4096)
+    u32 max_accels;                  // acceleration structures (4096)
     u32 max_timelines;               // (64)
     u32 max_command_threads;         // threads that may record commands (64)
     u32 max_commands_per_thread;     // command buffers per thread per frame per queue (32)
@@ -213,6 +214,10 @@ typedef struct NphGpuLimits {
     u32 max_mesh_workgroup_count[3];
     u32 max_mesh_workgroup_total_count;
     u32 max_preferred_mesh_workgroup_invocations;
+    // Acceleration structures (accel.h); all zero without ray queries.
+    u32 accel_scratch_alignment; // of a build's scratch offset
+    u64 accel_max_instances;     // in a top-level structure
+    u64 accel_max_triangles;     // in a bottom-level structure
 } NphGpuLimits;
 
 // Driver bugs the engine works around (NphGpuDeviceInfo.quirks). Each was
@@ -296,6 +301,7 @@ typedef struct NphGpuLiveCounts {
     u32 samplers;
     u32 shaders;
     u32 pipelines;
+    u32 accels;
     u32 timelines;
     u32 pending_destroys; // queued for a frame that has not completed
 } NphGpuLiveCounts;
@@ -316,6 +322,7 @@ typedef enum NphGpuFormatFeature {
     NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT = 1U << 4U,
     NPH_GPU_FORMAT_FEATURE_BLEND = 1U << 5U, // as a colour attachment
     NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT = 1U << 6U,
+    NPH_GPU_FORMAT_FEATURE_ACCEL_VERTEX = 1U << 7U, // as acceleration-structure vertices
 } NphGpuFormatFeature;
 
 // Whether `format` has every NphGpuFormatFeature in `features` (false for an

@@ -145,6 +145,12 @@ typedef enum NphGpuRgUse {
     NPH_GPU_RG_USE_DEPTH_ATTACHMENT,
     NPH_GPU_RG_USE_DEPTH_READ_ONLY, // depth test without write
     NPH_GPU_RG_USE_PRESENT,
+    // Acceleration structures (accel.h), declared through their buffers.
+    NPH_GPU_RG_USE_ACCEL_INPUT,   // buffer: vertices, indices, or instances a build reads
+    NPH_GPU_RG_USE_ACCEL_SCRATCH, // buffer: a build's scratch
+    NPH_GPU_RG_USE_ACCEL_BUILD,   // buffer: the structure a build writes
+    NPH_GPU_RG_USE_ACCEL_READ,    // buffer: a structure the pass's shaders trace against, or
+                                  // the bottom levels a top-level build references
     NPH_GPU_RG_USE_COUNT
 } NphGpuRgUse;
 

@@ -114,6 +114,7 @@ static inline void test_gpu_destroy(NphGpuDevice *dev)
     NTEST_EXPECT_EQ_UINT(live.samplers, 0U);
     NTEST_EXPECT_EQ_UINT(live.shaders, 0U);
     NTEST_EXPECT_EQ_UINT(live.pipelines, 0U);
+    NTEST_EXPECT_EQ_UINT(live.accels, 0U);
     NTEST_EXPECT_EQ_UINT(live.timelines, 0U);
     nph_gpu_device_destroy(dev);
 }
