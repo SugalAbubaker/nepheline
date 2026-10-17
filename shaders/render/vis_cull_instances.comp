@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: Apache-2.0
+// Instance culling (docs/render.md "Culling"), the first level of the
+// GPU-driven pipeline (Haar & Aaltonen, "GPU-Driven Rendering Pipelines",
+// SIGGRAPH 2015; Wihlidal, "Optimizing the Graphics Pipeline with
+// Compute", GDC 2016). Each invocation takes one instance and tests its
+// mesh's bounding sphere:
+//
+//   phase 0 (every instance slot): against the frustum, then against the
+//     previous frame's hierarchical depth, seen from the previous camera
+//     with the instance's previous transform (that is the view the HZB
+//     was built from). Instances that pass emit their meshlets in batches
+//     of NPH_VIS_BATCH_SIZE for phase 0's meshlet cull; occluded ones are
+//     deferred to phase 1.
+//   phase 1 (the deferred instances): against the HZB built from what
+//     phase 0 drew, with the current camera and transform; instances now
+//     visible emit their batches for phase 1's meshlet cull.
+//
+// This is the two-phase occlusion culling of Karis et al., "Nanite: A Deep
+// Dive" (SIGGRAPH 2021): phase 0's test against last frame's depth may be
+// wrong for this frame, but anything it misses is retested in phase 1
+// against depth this frame drew, which only holds surfaces really in front,
+// so nothing visible is lost.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    const uint phase = pc.phase;
+    const uint id = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                    gl_LocalInvocationIndex;
+
+    uint slot = 0xFFFFFFFFu;
+    if (phase == 0u) {
+        if (id < view.v.instance_count) {
+            slot = id;
+        }
+    } else if (id < min(counters.c.deferred_instances, view.v.max_deferred)) {
+        slot = VisUintRef(view.v.deferred_instances).v[id];
+    }
+
+    uint batches = 0u;
+    bool defer = false;
+    bool culled_frustum = false;
+    bool culled_occlusion = false;
+    uint meshlets = 0u;
+    if (slot != 0xFFFFFFFFu) {
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
+        if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
+            const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+            meshlets = mesh.meshlet_count;
+            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            const vec3 c = vis_transform_vector(inst.transform, mesh.sphere.xyz) + t;
+            const float r = mesh.sphere.w * vis_max_scale(inst.transform);
+            const bool occlusion = (view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u;
+            if (phase == 0u) {
+                if (!vis_sphere_in_frustum(view.v, c, r)) {
+                    culled_frustum = true;
+                } else if (occlusion && (view.v.flags & NPH_VIS_VIEW_HZB_VALID) != 0u) {
+                    // As the previous frame saw it.
+                    const NphVisTransform pt = VisTransformsRef(view.v.prev_transforms).t[slot];
+                    const vec3 ptr = vis_relative_translation(pt, view.v.prev_camera_high.xyz,
+                                                              view.v.prev_camera_low.xyz);
+                    const vec3 pc_world = vis_transform_vector(pt, mesh.sphere.xyz) + ptr;
+                    const vec3 pv = (view.v.prev_view * vec4(pc_world, 1.0)).xyz;
+                    const float pr = mesh.sphere.w * vis_max_scale(pt);
+                    vec4 rect;
+                    float depth;
+                    defer = vis_project_sphere(pv, pr, view.v.prev_projection, rect, depth) &&
+                            vis_hzb_occluded(view.v, rect, depth);
+                }
+            } else if (occlusion) {
+                const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
+                vec4 rect;
+                float depth;
+                culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
+                                   vis_hzb_occluded(view.v, rect, depth);
+            }
+            if (!culled_frustum && !defer && !culled_occlusion) {
+                batches = (meshlets + uint(NPH_VIS_BATCH_SIZE) - 1u) / uint(NPH_VIS_BATCH_SIZE);
+            }
+        }
+    }
+
+    VIS_COUNT(counters.c.instances_culled_frustum, culled_frustum);
+    VIS_COUNT(counters.c.instances_culled_occlusion, culled_occlusion);
+    if (phase == 0u) {
+        uint d;
+        VIS_RESERVE(counters.c.deferred_instances, defer ? 1u : 0u, d);
+        if (defer) {
+            if (d < view.v.max_deferred) {
+                VisUintRef(view.v.deferred_instances).v[d] = slot;
+            } else {
+                atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_DEFERRED));
+            }
+        }
+    }
+    uint first;
+    VIS_RESERVE(counters.c.batches[phase], batches, first);
+    VisBatchesRef list = VisBatchesRef(view.v.batches[phase]);
+    for (uint b = 0u; b < batches; ++b) {
+        if (first + b >= view.v.max_batches) {
+            atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_BATCHES));
+            break;
+        }
+        NphVisBatch batch;
+        batch.instance = slot;
+        batch.meshlet_offset = b * uint(NPH_VIS_BATCH_SIZE);
+        batch.meshlet_count = min(meshlets - batch.meshlet_offset, uint(NPH_VIS_BATCH_SIZE));
+        batch.pad0 = 0u;
+        list.b[first + b] = batch;
+    }
+}

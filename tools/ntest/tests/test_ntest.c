@@ -136,9 +136,15 @@ NTEST(assert_misc, add_failure_and_log_do_not_abort)
     NTEST_UNUSED(x);
 }
 
+// Read at run time, so the code after the skip is not provably unreachable
+// (ntest_skip is noreturn; compilers would warn about the fail call).
+static volatile int g_skip_now = 1;
+
 NTEST(skip, leaves_the_test_immediately)
 {
-    NTEST_SKIP("exercising NTEST_SKIP (%d)", 1);
+    if (g_skip_now != 0) {
+        NTEST_SKIP("exercising NTEST_SKIP (%d)", 1);
+    }
     NTEST_FAIL("code after NTEST_SKIP must not run");
 }
 

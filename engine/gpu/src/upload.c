@@ -155,6 +155,7 @@ static NphResult ensure_batch(NphGpuDevice *dev)
     up->cmd = cmd;
     up->batch_bytes = 0U;
     up->batch_copies = 0U;
+    up->batch_id += 1U;
     return NPH_RESULT_OK;
 }
 
@@ -217,13 +218,35 @@ NphResult nph_gpu_upload_buffer(NphGpuDevice *dev, NphGpuBuffer dst, u64 dst_off
         r = stage(dev, data, size, &src, &src_offset);
     }
     if (r == NPH_RESULT_OK) {
+        NphGpuBufferSlot *dst_slot = gpu_buffer(dev, dst);
+        // Copies in one command buffer may run in any order: a copy that
+        // overlaps what this batch already wrote to the buffer (a record
+        // rewritten, a range freed and given out again before the flush)
+        // waits for those copies, so the later upload wins. The envelope
+        // keeps this O(1); disjoint copies inside it pay a barrier they did
+        // not strictly need.
+        const u64 end = dst_offset + size;
+        if (dst_slot->upload_batch == up->batch_id && dst_offset < dst_slot->upload_hi &&
+            dst_slot->upload_lo < end) {
+            nph_gpu_cmd_buffer_barrier(
+                up->cmd, dst, (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_WRITE,
+                (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_WRITE);
+            dst_slot->upload_lo = dst_offset;
+            dst_slot->upload_hi = end;
+        } else if (dst_slot->upload_batch == up->batch_id) {
+            dst_slot->upload_lo = nph_min_u64(dst_slot->upload_lo, dst_offset);
+            dst_slot->upload_hi = nph_max_u64(dst_slot->upload_hi, end);
+        } else {
+            dst_slot->upload_batch = up->batch_id;
+            dst_slot->upload_lo = dst_offset;
+            dst_slot->upload_hi = end;
+        }
         NphGpuBufferCopy region;
         region.src_offset = src_offset;
         region.dst_offset = dst_offset;
         region.size = size;
         nph_gpu_cmd_copy_buffer(up->cmd, src, dst, &region, 1U);
         ++up->batch_copies;
-        NphGpuBufferSlot *dst_slot = gpu_buffer(dev, dst);
         dst_slot->state.stages = (u32)NPH_GPU_STAGE_TRANSFER;
         dst_slot->state.access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
         dst_slot->state.queue = (u32)NPH_GPU_QUEUE_TRANSFER;

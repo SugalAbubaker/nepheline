@@ -194,7 +194,9 @@ NTEST_F(GpuFixture, culls_passes_nobody_consumes)
     NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(g), NPH_RESULT_OK);
     stats = nph_gpu_rg_stats(g);
     NTEST_ASSERT_EQ_UINT(stats.submits, 1U);
-    NTEST_ASSERT_EQ_UINT(stats.command_buffers, 3U);
+    // Without a job system one thread records each batch into one command
+    // buffer.
+    NTEST_ASSERT_EQ_UINT(stats.command_buffers, 1U);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_UINT(dead.ran, 0U);
     NTEST_ASSERT_EQ_UINT(live.ran, 1U);
@@ -207,6 +209,124 @@ NTEST_F(GpuFixture, culls_passes_nobody_consumes)
     nph_gpu_pipeline_destroy(f->dev, pipeline);
     nph_gpu_shader_destroy(f->dev, shader);
     nph_gpu_buffer_destroy(f->dev, out);
+}
+
+typedef struct ArgsFillPass {
+    NphGpuRgBuffer args;
+    u32 value;
+    u32 ran;
+} ArgsFillPass;
+
+static void args_fill_execute(NphGpuRenderGraph *g, NphGpuCmd *cmd, void *user)
+{
+    ArgsFillPass *p = (ArgsFillPass *)user;
+    nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(g, p->args), 0U, 12U, p->value);
+    ++p->ran;
+}
+
+typedef struct IndirectFillPass {
+    NphGpuPipeline pipeline;
+    NphGpuRgBuffer args;
+    NphGpuRgBuffer target;
+    u32 ran;
+} IndirectFillPass;
+
+static void indirect_fill_execute(NphGpuRenderGraph *g, NphGpuCmd *cmd, void *user)
+{
+    IndirectFillPass *p = (IndirectFillPass *)user;
+    NphGpuDevice *dev = nph_gpu_rg_device(g);
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.buffer_address = nph_gpu_buffer_address(dev, nph_gpu_rg_buffer(g, p->target));
+    push.count = 64U;
+    push.value = 3U;
+    nph_gpu_cmd_bind_pipeline(cmd, p->pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(g, p->args), 0U);
+    ++p->ran;
+}
+
+// A buffer read in different stages: every reader waits for the write, not
+// only the first (an indirect read does not make the data visible to a
+// later copy), and the next write waits for every reader. Synchronisation
+// validation is the oracle (the teardown gate); the GPU-driven renderer's
+// counters and arguments, read by indirect commands, copies, and shaders,
+// found both hazards.
+NTEST_F(GpuFixture, every_reader_waits_for_the_write_and_the_next_write_for_every_reader)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuRenderGraph *g = make_graph(f->dev, NULL);
+    NphGpuBuffer first = test_make_buffer(f->dev, 12U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                                          NPH_GPU_MEMORY_READBACK, "first args");
+    NphGpuBuffer second = test_make_buffer(f->dev, 12U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                                           NPH_GPU_MEMORY_READBACK, "second args");
+    NphGpuBuffer out = test_make_buffer(f->dev, 256U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                                        NPH_GPU_MEMORY_READBACK, "out");
+    NphGpuShader shader = test_load_shader(f->dev, "test_fill.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &cd, &pipeline), NPH_RESULT_OK);
+
+    nph_gpu_rg_begin(g);
+    NphGpuBufferDesc ad;
+    memset(&ad, 0, sizeof ad);
+    ad.size = 12U;
+    ad.usage = (u32)NPH_GPU_BUFFER_USAGE_INDIRECT | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC |
+               (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    ad.name = "args";
+    NphGpuRgBuffer args = nph_gpu_rg_create_buffer(g, &ad);
+    const NphGpuBufferDesc td = transient_buffer_desc(256U, "filled");
+    NphGpuRgBuffer filled = nph_gpu_rg_create_buffer(g, &td);
+    NphGpuRgBuffer first_rb = nph_gpu_rg_import_buffer(g, first);
+    NphGpuRgBuffer second_rb = nph_gpu_rg_import_buffer(g, second);
+    NphGpuRgBuffer out_rb = nph_gpu_rg_import_buffer(g, out);
+    // write (transfer) -> read (indirect) -> read (transfer) -> write
+    // (transfer) -> read (transfer).
+    ArgsFillPass fill1 = {args, 1U, 0U};
+    IndirectFillPass dispatch = {pipeline, args, filled, 0U};
+    CopyPass copy1 = {args, first_rb, 12U, 0U, 0U};
+    ArgsFillPass fill2 = {args, 7U, 0U};
+    CopyPass copy2 = {args, second_rb, 12U, 0U, 0U};
+    CopyPass copy_out = {filled, out_rb, 256U, 0U, 0U};
+    NphGpuRgPass *p =
+        add_pass(g, "fill args", NPH_GPU_RG_PASS_TRANSFER, 0U, args_fill_execute, &fill1);
+    nph_gpu_rg_write_buffer(p, args, NPH_GPU_RG_USE_TRANSFER_DST);
+    p = add_pass(g, "dispatch", NPH_GPU_RG_PASS_COMPUTE, 0U, indirect_fill_execute, &dispatch);
+    nph_gpu_rg_read_buffer(p, args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_write_buffer(p, filled, NPH_GPU_RG_USE_SHADER_WRITE);
+    p = add_pass(g, "copy args", NPH_GPU_RG_PASS_TRANSFER, 0U, copy_execute, &copy1);
+    nph_gpu_rg_read_buffer(p, args, NPH_GPU_RG_USE_TRANSFER_SRC);
+    nph_gpu_rg_write_buffer(p, first_rb, NPH_GPU_RG_USE_TRANSFER_DST);
+    p = add_pass(g, "refill args", NPH_GPU_RG_PASS_TRANSFER, 0U, args_fill_execute, &fill2);
+    nph_gpu_rg_write_buffer(p, args, NPH_GPU_RG_USE_TRANSFER_DST);
+    p = add_pass(g, "copy args again", NPH_GPU_RG_PASS_TRANSFER, 0U, copy_execute, &copy2);
+    nph_gpu_rg_read_buffer(p, args, NPH_GPU_RG_USE_TRANSFER_SRC);
+    nph_gpu_rg_write_buffer(p, second_rb, NPH_GPU_RG_USE_TRANSFER_DST);
+    p = add_pass(g, "copy out", NPH_GPU_RG_PASS_TRANSFER, 0U, copy_execute, &copy_out);
+    nph_gpu_rg_read_buffer(p, filled, NPH_GPU_RG_USE_TRANSFER_SRC);
+    nph_gpu_rg_write_buffer(p, out_rb, NPH_GPU_RG_USE_TRANSFER_DST);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(g), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(g), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(fill1.ran + dispatch.ran + copy1.ran + fill2.ran + copy2.ran, 5U);
+    const u32 *a = (const u32 *)nph_gpu_buffer_map(f->dev, first);
+    const u32 *b = (const u32 *)nph_gpu_buffer_map(f->dev, second);
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_EXPECT_EQ_UINT(a[i], 1U);
+        NTEST_EXPECT_EQ_UINT(b[i], 7U);
+    }
+    const u32 *words = (const u32 *)nph_gpu_buffer_map(f->dev, out);
+    for (u32 i = 0; i < 64U; ++i) {
+        NTEST_ASSERT_EQ_UINT(words[i], 3U * i);
+    }
+    nph_gpu_render_graph_destroy(g);
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, shader);
+    nph_gpu_buffer_destroy(f->dev, out);
+    nph_gpu_buffer_destroy(f->dev, second);
+    nph_gpu_buffer_destroy(f->dev, first);
 }
 
 NTEST_F(GpuFixture, graphics_pass_renders_into_a_transient_and_copies_out)
@@ -424,7 +544,8 @@ NTEST_F(GpuFixture, passes_record_in_parallel_on_the_job_system)
     }
     NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(g), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(g), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_UINT(nph_gpu_rg_stats(g).command_buffers, 2U * PASSES);
+    // Consecutive passes share a command buffer, one per worker.
+    NTEST_ASSERT_EQ_UINT(nph_gpu_rg_stats(g).command_buffers, nph_job_system_worker_count(js));
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     const u32 *words = (const u32 *)nph_gpu_buffer_map(f->dev, out);
     for (u32 i = 0; i < PASSES; ++i) {
@@ -438,6 +559,74 @@ NTEST_F(GpuFixture, passes_record_in_parallel_on_the_job_system)
     nph_gpu_shader_destroy(f->dev, shader);
     nph_gpu_buffer_destroy(f->dev, out);
     nph_job_system_destroy(js);
+}
+
+// More passes than a thread may begin command buffers in a frame: they are
+// recorded into shared ones. A production frame that also computed the
+// environment (some forty passes) exhausted the 32 a thread had when every
+// pass took its own; here the device allows 4.
+NTEST(gpu_render_graph, more_passes_than_a_thread_has_command_buffers)
+{
+    NphGpuDeviceDesc dd;
+    memset(&dd, 0, sizeof dd);
+    dd.alloc = nph_allocator_system();
+    dd.headless = 1;
+    dd.max_commands_per_thread = 4U;
+    NphGpuDevice *dev = test_gpu_create(&dd);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NphGpuRenderGraph *g = make_graph(dev, NULL);
+    NphGpuShader shader = test_load_shader(dev, "test_fill.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(dev, &cd, &pipeline), NPH_RESULT_OK);
+    enum {
+        PASSES = 24U,
+        WORDS = 64U
+    };
+    NphGpuBuffer out =
+        test_make_buffer(dev, (u64)PASSES * WORDS * 4U, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                         NPH_GPU_MEMORY_READBACK, "many passes out");
+    for (u32 frame = 0; frame < 3U; ++frame) {
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+        nph_gpu_rg_begin(g);
+        NphGpuRgBuffer dst = nph_gpu_rg_import_buffer(g, out);
+        static FillPass fills[PASSES];
+        static CopyPass copies[PASSES];
+        for (u32 i = 0; i < PASSES / 2U; ++i) {
+            const NphGpuBufferDesc bd = transient_buffer_desc((u64)WORDS * 4U, "piece");
+            NphGpuRgBuffer t = nph_gpu_rg_create_buffer(g, &bd);
+            fills[i] = (FillPass){pipeline, t, WORDS, i + frame + 1U, 0U};
+            NphGpuRgPass *fp =
+                add_pass(g, "fill", NPH_GPU_RG_PASS_COMPUTE, 0U, fill_execute, &fills[i]);
+            nph_gpu_rg_write_buffer(fp, t, NPH_GPU_RG_USE_STORAGE_WRITE);
+            copies[i] = (CopyPass){t, dst, (u64)WORDS * 4U, (u64)i * WORDS * 4U, 0U};
+            NphGpuRgPass *cp =
+                add_pass(g, "copy", NPH_GPU_RG_PASS_TRANSFER, 0U, copy_execute, &copies[i]);
+            nph_gpu_rg_read_buffer(cp, t, NPH_GPU_RG_USE_TRANSFER_SRC);
+            nph_gpu_rg_write_buffer(cp, dst, NPH_GPU_RG_USE_TRANSFER_DST);
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(g), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(g), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(nph_gpu_rg_stats(g).command_buffers, 1U);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+        const u32 *words = (const u32 *)nph_gpu_buffer_map(dev, out);
+        for (u32 i = 0; i < PASSES / 2U; ++i) {
+            NTEST_ASSERT_EQ_UINT(fills[i].ran, 1U);
+            for (u32 w = 0; w < WORDS; ++w) {
+                NTEST_ASSERT_EQ_UINT(words[(u64)i * WORDS + w], (i + frame + 1U) * w);
+            }
+        }
+    }
+    nph_gpu_render_graph_destroy(g);
+    nph_gpu_pipeline_destroy(dev, pipeline);
+    nph_gpu_shader_destroy(dev, shader);
+    nph_gpu_buffer_destroy(dev, out);
+    test_gpu_destroy(dev);
 }
 
 NTEST_F(GpuFixture, reports_pass_timings_two_frames_later)

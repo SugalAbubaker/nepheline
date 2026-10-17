@@ -11,10 +11,13 @@ nph_add_module(render
         src/frame.c
         src/gpu_profiler.c
         src/ibl.c
+        src/meshlet.c
         src/primitives.c
         src/reference.c
         src/renderer.c
         src/render_internal.h
+        src/vis.c
+        src/vis_scene.c
     PUBLIC_DEPS nph::gpu
 )
 # The GPU records are declared once for C and GLSL (shaders/shared/
@@ -38,6 +41,7 @@ nph_add_test(render
         tests/test_reference.c
         tests/test_render_support.h
         tests/test_renderer.c
+        tests/test_vis.c
     DEPS
         nph::render
 )

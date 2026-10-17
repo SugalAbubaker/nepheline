@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+// The production path's culling math, case by case, for the render tests
+// (Vis.culling_math_matches_its_cpu_twins), which compare every result with
+// the C twins of render/reference.h. Not used by the renderer.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisMathPush pc; };
+
+NPH_BUFFER_REF(VisMathCasesRef) { NphVisMathCase c[]; };
+NPH_BUFFER_REF(VisMathResultsRef) { NphVisMathResult r[]; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    const NphVisViewData v = VisViewRef(pc.view).v;
+    const NphVisMathCase c = VisMathCasesRef(pc.cases).c[i];
+    NphVisMathResult r;
+    vec4 rect;
+    float depth;
+    r.projected = vis_project_sphere(c.sphere.xyz, c.sphere.w, v.projection, rect, depth) ? 1u : 0u;
+    r.rect = rect;
+    r.depth = depth;
+    r.in_frustum = vis_sphere_in_frustum(v, c.sphere.xyz, c.sphere.w) ? 1u : 0u;
+    r.cone_culled = vis_cone_culled(c.cone.xyz, c.axis.xyz, c.cone.w) ? 1u : 0u;
+    const bool mirrored = c.mirrored != 0u;
+    r.front_facing = vis_front_facing(c.c0, c.c1, c.c2, mirrored) ? 1u : 0u;
+    r.tri_culled = vis_cull_triangle(c.c0, c.c1, c.c2, true, mirrored, v.viewport) ? 1u : 0u;
+    r.hzb_occluded = vis_hzb_occluded(v, c.rect, c.depth) ? 1u : 0u;
+    r.pad0 = 0u;
+    VisMathResultsRef(pc.results).r[i] = r;
+}

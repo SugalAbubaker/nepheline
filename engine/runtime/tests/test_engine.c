@@ -324,20 +324,26 @@ static u8 *read_target(NphEngine *e, u64 bytes)
     return pixels;
 }
 
-// An offscreen engine draws the cooked showcase: imported into the world,
-// mirrored into the renderer once its assets are in, and rendered into the
-// engine's target under the validation gate.
-NTEST(Engine, an_offscreen_engine_draws_the_world)
+// An offscreen engine with r.pipeline=`pipeline` draws the cooked
+// showcase: imported into the world, mirrored into the renderer once its
+// assets are in, and rendered into the engine's target under the
+// validation gate. Returns the pixels (the caller frees them), or NULL
+// without a Vulkan device.
+static u8 *draw_showcase(u32 pipeline, u64 bytes)
 {
     static EngineFixture fx;
     prepare(&fx);
     fx.config.headless = 0;
     fx.config.packs[0] = NPH_TEST_PACK;
     fx.config.pack_count = 1U;
+    static char assignment[32];
+    (void)snprintf(assignment, sizeof assignment, "r.pipeline=%u", pipeline);
+    fx.config.assignments[0] = assignment;
+    fx.config.assignment_count = 1U;
     const NphResult started = start(&fx, NPH_ENGINE_MODE_OFFSCREEN);
     if (started == NPH_RESULT_UNSUPPORTED) {
         finish(&fx);
-        NTEST_SKIP("no Vulkan device available");
+        return NULL;
     }
     NTEST_ASSERT_EQ_INT(started, NPH_RESULT_OK);
     NphEngine *e = fx.engine;
@@ -347,7 +353,6 @@ NTEST(Engine, an_offscreen_engine_draws_the_world)
     // The sky alone first.
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
-    const u64 bytes = (u64)96U * 64U * 4U;
     u8 *sky = read_target(e, bytes);
     NphSceneImportDesc d;
     memset(&d, 0, sizeof d);
@@ -360,11 +365,6 @@ NTEST(Engine, an_offscreen_engine_draws_the_world)
     nph_scene_renderer_wait(nph_engine_scene_renderer(e));
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
-    const NphEngineFrameStats *st = nph_engine_frame_stats(e);
-    NTEST_EXPECT_EQ_UINT(st->scene.instances, 2U);
-    NTEST_EXPECT_EQ_UINT(st->scene.lights, 1U);
-    NTEST_EXPECT_EQ_UINT(st->render.instances, 2U);
-    NTEST_EXPECT_GE_UINT(st->render.draws, 1U);
     // The scene covers a good part of the view the sky filled.
     u8 *scene = read_target(e, bytes);
     u32 covered = 0U;
@@ -373,11 +373,57 @@ NTEST(Engine, an_offscreen_engine_draws_the_world)
     }
     NTEST_EXPECT_GT_UINT(covered, 96U * 64U / 10U);
     NPH_FREE_ARRAY(nph_allocator_system(), u8, sky, bytes);
-    NPH_FREE_ARRAY(nph_allocator_system(), u8, scene, bytes);
+    const bool production =
+        pipeline == 1U && nph_renderer_production_supported(nph_engine_renderer(e));
+    if (production) {
+        // The GPU's counters arrive NPH_GPU_FRAMES_IN_FLIGHT frames late.
+        for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+            NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+        }
+    }
+    const NphEngineFrameStats *st = nph_engine_frame_stats(e);
+    NTEST_EXPECT_EQ_UINT(st->scene.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st->scene.lights, 1U);
+    NTEST_EXPECT_EQ_UINT(st->render.instances, 2U);
+    NTEST_EXPECT_EQ_INT((int)st->render.pipeline, production ? (int)NPH_RENDER_PIPELINE_PRODUCTION
+                                                             : (int)NPH_RENDER_PIPELINE_REFERENCE);
+    if (production) {
+        NTEST_EXPECT_GE_UINT(st->render.vis_clusters, 2U);
+        NTEST_EXPECT_GT_UINT(st->render.vis_triangles, 0U);
+    } else {
+        NTEST_EXPECT_GE_UINT(st->render.draws, 1U);
+    }
     const NphGpuValidationStats vs = nph_gpu_device_validation_stats(nph_engine_device(e));
     NTEST_EXPECT_EQ_UINT(vs.errors, 0U);
     NTEST_EXPECT_EQ_UINT(vs.warnings, 0U);
     finish(&fx);
+    return scene;
+}
+
+// The showcase through both pipelines: each draws it, and the images agree
+// (the production path's own tests hold it to the reference much tighter).
+NTEST(Engine, an_offscreen_engine_draws_the_world)
+{
+    const u64 bytes = (u64)96U * 64U * 4U;
+    u8 *reference = draw_showcase(0U, bytes);
+    if (reference == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    u8 *production = draw_showcase(1U, bytes);
+    NTEST_ASSERT_NOT_NULL(production);
+    u64 within = 0U;
+    u32 max = 0U;
+    for (u64 i = 0; i < bytes; ++i) {
+        const u32 diff = (u32)(reference[i] > production[i] ? reference[i] - production[i]
+                                                            : production[i] - reference[i]);
+        max = diff > max ? diff : max;
+        within += diff <= 3U ? 1U : 0U;
+    }
+    NTEST_LOG("production vs reference: %.2f %% of channels within 3, max %u",
+              (f64)within * 100.0 / (f64)bytes, max);
+    NTEST_EXPECT_GE_UINT(within, bytes * 99U / 100U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, reference, bytes);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, production, bytes);
 }
 
 // A windowed engine, as the player runs it: frames into the swapchain with

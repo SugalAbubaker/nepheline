@@ -245,7 +245,10 @@ A closed mesh stays closed.
    triangle's normal leans from the meshlet's, `meshlet_cone_weight`,
    0.25 by default); when nothing touches the meshlet, the nearest unused
    triangle is found with a k-d tree over centroids that tracks how many
-   triangles each subtree still holds.
+   triangles each subtree still holds. The builder lives in the render
+   module (`render/meshlet.h`), which also meshletises meshes made at run
+   time; the cooker's `cook_mesh_build_meshlets` wraps it and gives the
+   same bytes as before the move.
 7. **Quantisation and writing**: 16-bit unorm positions over the mesh
    bounds, octahedral snorm16 normals, snorm8 tangents with the handedness
    in w, half-float UVs, RGBA8 colours ([asset.md](asset.md), "Typed

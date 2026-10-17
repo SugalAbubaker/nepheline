@@ -55,6 +55,11 @@ typedef struct NphGpuBufferSlot {
     NphGpuBufferDesc desc;
     NphGpuMipState state; // last recorded use (stages, access); layout unused
     b32 transient;
+    // What the current upload batch has written to the buffer, as one
+    // envelope [upload_lo, upload_hi) (upload.c orders overlapping copies).
+    u64 upload_batch; // the batch the envelope belongs to (0: none)
+    u64 upload_lo;
+    u64 upload_hi;
     char name[NPH_GPU_NAME_MAX];
 } NphGpuBufferSlot;
 
@@ -234,6 +239,7 @@ typedef struct NphGpuUploadState {
     u64 last_flush_value; // transfer timeline value of the last flush
     u64 batch_bytes;
     u32 batch_copies;
+    u64 batch_id; // counts batches from 1: tells envelopes of this batch from stale ones
 } NphGpuUploadState;
 
 // ---------------------------------------------------------------------------

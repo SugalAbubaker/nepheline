@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// The GPU scene's instance updates (docs/render.md "The GPU scene"), the
+// first pass of a frame: each NphVisInstanceUpdate replaces the record at
+// its slot and moves the old transform to the previous-transform table
+// (motion vectors and phase 1 of occlusion culling read last frame's
+// transforms), or, with copy_previous, brings the previous transform up to
+// the current one for an instance that moved last frame and not this one.
+// A fresh instance has no history: its previous transform is its first.
+// The CPU sends at most one update per slot per frame, so no two
+// invocations touch one slot.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; }; // arg0: update count
+
+NPH_BUFFER_REF(VisUpdatesRef) { NphVisInstanceUpdate u[]; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.arg0) {
+        return;
+    }
+    VisViewRef view = VisViewRef(pc.view);
+    const NphVisInstanceUpdate up = VisUpdatesRef(view.v.instance_updates).u[i];
+    VisInstancesRef instances = VisInstancesRef(view.v.instances);
+    VisTransformsRef prev = VisTransformsRef(view.v.prev_transforms);
+    if (up.copy_previous != 0u) {
+        prev.t[up.slot] = instances.i[up.slot].transform;
+        return;
+    }
+    NphVisInstance record = up.instance;
+    const bool fresh = (record.flags & NPH_VIS_INSTANCE_FRESH) != 0u;
+    prev.t[up.slot] = fresh ? record.transform : instances.i[up.slot].transform;
+    record.flags &= ~uint(NPH_VIS_INSTANCE_FRESH);
+    instances.i[up.slot] = record;
+}

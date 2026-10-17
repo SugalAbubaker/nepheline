@@ -171,8 +171,18 @@ void nph_gpu_cmd_draw_indexed_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 
 void nph_gpu_cmd_draw_indexed_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
                                              NphGpuBuffer count_buffer, u64 count_offset,
                                              u32 max_draw_count, u32 stride);
-// Requires NphGpuFeatures.mesh_shader (asserted).
+// Mesh-shader draws. All require NphGpuFeatures.mesh_shader: asserted, and
+// recorded as nothing where it is missing. The indirect forms read
+// `draw_count` records of three u32 workgroup counts (x, y, z) at `stride`
+// bytes apart; the count form takes the number of records from
+// `count_buffer`, capped at `max_draw_count` (the GPU-driven pipeline's
+// draw, §8.6.3).
 void nph_gpu_cmd_draw_mesh_tasks(NphGpuCmd *cmd, u32 x, u32 y, u32 z);
+void nph_gpu_cmd_draw_mesh_tasks_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                          u32 draw_count, u32 stride);
+void nph_gpu_cmd_draw_mesh_tasks_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                                NphGpuBuffer count_buffer, u64 count_offset,
+                                                u32 max_draw_count, u32 stride);
 
 void nph_gpu_cmd_dispatch(NphGpuCmd *cmd, u32 x, u32 y, u32 z);
 void nph_gpu_cmd_dispatch_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset);

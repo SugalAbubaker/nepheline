@@ -67,6 +67,20 @@ typedef enum NphGpuToggle {
 
 #define NPH_GPU_DEVICE_AUTO NPH_U32_MAX
 
+// Optional capabilities a device description can switch off even where the
+// hardware has them (NphGpuDeviceDesc.disable_features), so the fallback
+// paths that devices without them take (lavapipe, older GPUs) are tested on
+// every machine, as single_queue does for the queue layout. The matching
+// NphGpuFeatures flags then report 0 and the extensions are not enabled.
+typedef enum NphGpuOptionalFeature {
+    NPH_GPU_OPTIONAL_MESH_SHADER = 1U << 0U,
+    NPH_GPU_OPTIONAL_RAY_QUERY = 1U << 1U,
+    NPH_GPU_OPTIONAL_IMAGE_ATOMIC_INT64 = 1U << 2U,
+    NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64 = 1U << 3U,
+    NPH_GPU_OPTIONAL_SHADER_FLOAT16 = 1U << 4U,
+    NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX = 1U << 5U,
+} NphGpuOptionalFeature;
+
 typedef struct NphGpuDeviceDesc {
     NphAllocator *alloc;  // required
     const char *app_name; // NULL: "Nepheline"
@@ -78,6 +92,8 @@ typedef struct NphGpuDeviceDesc {
     // GPUs; the single-queue paths become testable on any machine.
     // NphGpuFeatures.async_compute and dedicated_transfer then report 0.
     b32 single_queue;
+    // NphGpuOptionalFeature bits to leave disabled whatever the device offers.
+    u32 disable_features;
     // The Khronos validation layer, and its synchronisation validation.
     // DEFAULT: on when NPH_GPU_VALIDATION_ENABLED (Debug, Development). A
     // request for ON on a machine without the layer is logged and ignored.
@@ -132,6 +148,7 @@ typedef struct NphGpuFeatures {
     b32 mesh_shader;           // VK_EXT_mesh_shader (task + mesh stages)
     b32 ray_query;             // VK_KHR_ray_query + acceleration structures
     b32 image_atomic_int64;    // VK_EXT_shader_image_atomic_int64 (the software rasteriser, §8.6.4)
+    b32 buffer_atomic_int64;   // 64-bit atomics on storage buffers (shaderBufferInt64Atomics)
     b32 sampler_filter_minmax; // MIN/MAX reduction samplers (Hi-Z)
     b32 shader_float16;        // 16-bit arithmetic in shaders (§10.3.5)
     b32 shader_int8;           // 8-bit integers in shaders
@@ -139,16 +156,26 @@ typedef struct NphGpuFeatures {
     b32 storage_8bit;          // 8-bit storage buffer access (quantised vertices)
     b32 storage_16bit;         // 16-bit storage buffer access
     b32 depth_clamp;           // shadow rendering
+    b32 geometry_shader;       // also what lets a fragment shader read gl_PrimitiveID
     b32 fill_mode_non_solid;   // wireframe debug draw
-    b32 texture_compression_bc; // BC1-7
-    b32 sampler_anisotropy;     //
-    b32 memory_budget;          // VK_EXT_memory_budget: live heap budgets in the stats
-    b32 calibrated_timestamps;  // VK_EXT_calibrated_timestamps (CPU/GPU timeline alignment)
-    b32 pipeline_statistics;    // pipeline statistics queries
-    b32 async_compute;          // the COMPUTE queue is distinct from GRAPHICS
-    b32 dedicated_transfer;     // the TRANSFER queue is a transfer-only family
-    b32 timestamps_on_compute;  // the COMPUTE queue supports timestamps
-    b32 timestamps_on_transfer; // the TRANSFER queue supports timestamps
+    b32 texture_compression_bc;       // BC1-7
+    b32 sampler_anisotropy;           //
+    b32 memory_budget;                // VK_EXT_memory_budget: live heap budgets in the stats
+    b32 calibrated_timestamps;        // VK_EXT_calibrated_timestamps (CPU/GPU timeline alignment)
+    b32 pipeline_statistics;          // pipeline statistics queries
+    b32 async_compute;                // the COMPUTE queue is distinct from GRAPHICS
+    b32 dedicated_transfer;           // the TRANSFER queue is a transfer-only family
+    b32 timestamps_on_compute;        // the COMPUTE queue supports timestamps
+    b32 timestamps_on_transfer;       // the TRANSFER queue supports timestamps
+    b32 draw_indirect_first_instance; // indirect draws may start at a nonzero instance
+    // Subgroup operations available in compute shaders (Vulkan 1.1
+    // guarantees only the basic ones): GL_KHR_shader_subgroup_vote,
+    // _ballot, _arithmetic, _shuffle, and _quad.
+    b32 subgroup_vote;
+    b32 subgroup_ballot;
+    b32 subgroup_arithmetic;
+    b32 subgroup_shuffle;
+    b32 subgroup_quad;
 } NphGpuFeatures;
 
 typedef struct NphGpuLimits {
@@ -173,7 +200,26 @@ typedef struct NphGpuLimits {
     u32 bindless_sampled_images; // the sizes actually used for the global set
     u32 bindless_storage_images;
     u32 bindless_samplers;
+    // Mesh shaders (VK_EXT_mesh_shader); all zero without the feature.
+    u32 max_mesh_output_vertices;
+    u32 max_mesh_output_primitives;
+    u32 max_mesh_workgroup_invocations;
+    u32 max_mesh_workgroup_count[3];
+    u32 max_mesh_workgroup_total_count;
+    u32 max_preferred_mesh_workgroup_invocations;
 } NphGpuLimits;
+
+// Driver bugs the engine works around (NphGpuDeviceInfo.quirks). Each was
+// found by a test, is matched by driver, and stays until no supported
+// driver has it.
+typedef enum NphGpuQuirk {
+    // Fragment shaders of mesh-shader pipelines read zeros from push
+    // constants; the mesh stage reads them, and vertex pipelines are fine.
+    // Lavapipe (Mesa's llvmpipe, seen on 25.2.8). Users of mesh shaders
+    // take another path or hand the fragment stage its data as
+    // per-primitive outputs.
+    NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS = 1U << 0U,
+} NphGpuQuirk;
 
 typedef struct NphGpuDeviceInfo {
     char name[256];
@@ -190,6 +236,7 @@ typedef struct NphGpuDeviceInfo {
     u64 host_visible_bytes;
     NphGpuFeatures features;
     NphGpuLimits limits;
+    u32 quirks;                // NphGpuQuirk bits
     b32 validation;            // the validation layer is active
     b32 sync_validation;       // and synchronisation validation is on
     b32 debug_utils;           // object names and labels are delivered to tools

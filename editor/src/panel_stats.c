@@ -31,10 +31,22 @@ static void frame_stats(Editor *ed)
     igText("entities %u", nph_world_entity_count(nph_engine_world(e)));
     if (igCollapsingHeader_TreeNodeFlags("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
         const NphRenderFrameStats *r = &s->render;
+        const bool production = r->pipeline == NPH_RENDER_PIPELINE_PRODUCTION;
+        igText("%s pipeline (r.pipeline)", production ? "production" : "reference");
         igText("instances %u (culled %u)   draws %u (blended %u, dropped %u)", r->instances,
                r->culled, r->draws, r->blended, r->dropped);
         igText("triangles %u   lights %u   debug lines %u", r->triangles, r->lights,
                r->debug_lines);
+        if (production) {
+            // The GPU's counters, from frame vis_frame (a couple behind).
+            igText("GPU: clusters %u   triangles %u%s", r->vis_clusters, r->vis_triangles,
+                   r->vis_overflow != 0U ? "   (lists overflowed)" : "");
+            igText("culled instances: frustum %u, occlusion %u", r->vis_instances_culled_frustum,
+                   r->vis_instances_culled_occlusion);
+            igText("culled clusters: frustum %u, cone %u, occlusion %u",
+                   r->vis_meshlets_culled_frustum, r->vis_meshlets_culled_cone,
+                   r->vis_meshlets_culled_occlusion);
+        }
         igText("viewport %ux%u", ed->viewport.width, ed->viewport.height);
     }
     if (igCollapsingHeader_TreeNodeFlags("Scene mirror", ImGuiTreeNodeFlags_None)) {

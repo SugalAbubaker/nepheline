@@ -118,6 +118,82 @@ NTEST_F(GpuFixture, uploads_between_frames_survive_frame_begin)
     nph_gpu_buffer_destroy(f->dev, buf);
 }
 
+// Uploads that overlap inside one batch land in the order they were made:
+// copies in one command buffer are unordered, so the upload path puts a
+// barrier between a copy and the earlier ones it overlaps (a record
+// rewritten, or a range freed and handed out again before the flush).
+// Synchronisation validation found the renderer's scene tables doing both.
+typedef struct UploadSpan {
+    u32 first;
+    u32 count;
+} UploadSpan;
+
+static void overlapping_uploads(NphGpuDevice *dev, bool in_frame)
+{
+    enum {
+        WORDS = 1024U
+    };
+    NphGpuBuffer buf = test_make_buffer(dev, (u64)WORDS * 4U,
+                                        (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                                        NPH_GPU_MEMORY_DEVICE, "overlapping uploads");
+    // Two batches. The first appends, overlaps both earlier spans, lands
+    // inside the envelope without touching the span before it, and
+    // overlaps again; the second rewrites everything and patches it.
+    static const UploadSpan batches[2][5] = {
+        {{0U, 256U}, {256U, 256U}, {128U, 256U}, {0U, 64U}, {32U, 128U}},
+        {{0U, WORDS}, {500U, 100U}, {520U, 10U}, {1000U, 24U}, {0U, 1U}},
+    };
+    u32 expect[WORDS];
+    u32 words[WORDS];
+    u32 out[WORDS];
+    memset(expect, 0, sizeof expect);
+    u32 seed = 1U;
+    for (u32 b = 0; b < 2U; ++b) {
+        if (in_frame) {
+            NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+        }
+        for (u32 u = 0; u < 5U; ++u) {
+            const UploadSpan span = batches[b][u];
+            fill_pattern(words, span.count, seed++);
+            NTEST_ASSERT_EQ_INT(
+                nph_gpu_upload_buffer(dev, buf, (u64)span.first * 4U, words, (u64)span.count * 4U),
+                NPH_RESULT_OK);
+            memcpy(&expect[span.first], words, (size_t)span.count * 4U);
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(dev, NULL), NPH_RESULT_OK);
+        if (in_frame) {
+            NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK);
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+        test_read_buffer(dev, buf, 0U, sizeof out, out);
+        NTEST_EXPECT_EQ_MEM(out, expect, sizeof expect);
+    }
+    nph_gpu_buffer_destroy(dev, buf);
+}
+
+NTEST_F(GpuFixture, overlapping_uploads_in_one_batch_land_in_order)
+{
+    REQUIRE_DEVICE(f);
+    overlapping_uploads(f->dev, false);
+    overlapping_uploads(f->dev, true);
+}
+
+NTEST(gpu_upload, overlapping_uploads_on_a_single_queue_land_in_order)
+{
+    NphGpuDeviceDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.headless = 1;
+    desc.single_queue = 1;
+    NphGpuDevice *dev = test_gpu_create(&desc);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    overlapping_uploads(dev, false);
+    overlapping_uploads(dev, true);
+    test_gpu_destroy(dev);
+}
+
 NTEST_F(GpuFixture, upload_arguments_are_validated)
 {
     REQUIRE_DEVICE(f);

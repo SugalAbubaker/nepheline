@@ -23,6 +23,11 @@ static bool is_power_of_two(u32 v)
     return v != 0U && (v & (v - 1U)) == 0U;
 }
 
+static u32 round_up_64(u32 v)
+{
+    return v > NPH_U32_MAX - 63U ? v : (v + 63U) & ~63U;
+}
+
 static u32 log2_floor(u32 v)
 {
     u32 n = 0U;
@@ -51,8 +56,7 @@ static NphResult pool_init(NphHandlePool *pool, NphAllocator *alloc, u32 capacit
     return nph_handle_pool_init(pool, alloc, capacity, index_bits_for(capacity), delay);
 }
 
-// The slot of a live handle, or NPH_U32_MAX for null and stale handles.
-static u32 slot_of(const NphHandlePool *pool, u32 value)
+u32 render_slot_of(const NphHandlePool *pool, u32 value)
 {
     const NphHandle h = {value};
     if (value == 0U || !nph_handle_pool_is_valid(pool, h)) {
@@ -78,16 +82,21 @@ static void release_slot(NphHandlePool *pool, u32 value)
     NPH_IGNORE_RESULT(nph_handle_pool_release(pool, h));
 }
 
-NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *file)
+NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out)
 {
     char path[640];
     snprintf(path, sizeof path, "%s/%s.spv", r->shader_dir, file);
-    const NphResult res = nph_gpu_shader_load(r->dev, path, file, &r->shaders[shader]);
+    const NphResult res = nph_gpu_shader_load(r->dev, path, file, out);
     if (res != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RENDER, "%s: cannot load shader %s: %s", r->name, path,
                       nph_result_string(res));
     }
     return res;
+}
+
+NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *file)
+{
+    return render_load_shader_file(r, file, &r->shaders[shader]);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +108,12 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     static const RenderShader frags[3] = {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK,
                                           RENDER_SHADER_FORWARD_BLEND};
     static const char *const names[3][RENDER_CULL_COUNT] = {
-        {"forward opaque", "forward opaque (mirrored)", "forward opaque (double-sided)"},
-        {"forward masked", "forward masked (mirrored)", "forward masked (double-sided)"},
-        {"forward blended", "forward blended (mirrored)", "forward blended (double-sided)"},
+        {"forward opaque", "forward opaque (mirrored)", "forward opaque (double-sided)",
+         "forward opaque (double-sided, mirrored)"},
+        {"forward masked", "forward masked (mirrored)", "forward masked (double-sided)",
+         "forward masked (double-sided, mirrored)"},
+        {"forward blended", "forward blended (mirrored)", "forward blended (double-sided)",
+         "forward blended (double-sided, mirrored)"},
     };
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
@@ -109,9 +121,10 @@ static NphResult create_forward_pipelines(NphRenderer *r)
             memset(&d, 0, sizeof d);
             d.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
             d.fragment = r->shaders[frags[alpha]];
-            d.cull_mode = cull == (u32)RENDER_CULL_NONE ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
-            d.front_face =
-                cull == (u32)RENDER_CULL_BACK_CW ? NPH_GPU_FRONT_FACE_CW : NPH_GPU_FRONT_FACE_CCW;
+            const bool none = cull == (u32)RENDER_CULL_NONE || cull == (u32)RENDER_CULL_NONE_CW;
+            const bool cw = cull == (u32)RENDER_CULL_BACK_CW || cull == (u32)RENDER_CULL_NONE_CW;
+            d.cull_mode = none ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
+            d.front_face = cw ? NPH_GPU_FRONT_FACE_CW : NPH_GPU_FRONT_FACE_CCW;
             d.color_formats[0] = RENDER_HDR_FORMAT;
             d.color_count = 1U;
             d.depth_format = RENDER_DEPTH_FORMAT;
@@ -252,6 +265,20 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->specular_samples = d->specular_samples != 0U ? d->specular_samples : 256U;
     d->brdf_lut_size = d->brdf_lut_size != 0U ? d->brdf_lut_size : 128U;
     d->max_anisotropy = d->max_anisotropy == 0.0F ? 8.0F : d->max_anisotropy;
+    // The production path's lists; their GPU regions sit back to back, so
+    // the capacities are rounded up to 64 entries to keep every region
+    // 16-byte aligned for the shaders' buffer references.
+    d->max_visible_clusters =
+        round_up_64(d->max_visible_clusters != 0U ? d->max_visible_clusters : 524288U);
+    d->max_cull_batches = round_up_64(d->max_cull_batches != 0U ? d->max_cull_batches : 131072U);
+    d->max_deferred = round_up_64(d->max_deferred != 0U ? d->max_deferred : 262144U);
+    d->max_instance_updates = d->max_instance_updates != 0U ? d->max_instance_updates : 16384U;
+    d->max_material_slots =
+        d->max_material_slots != 0U ? d->max_material_slots : 4U * d->max_instances;
+    d->meshlet_index_pool = d->meshlet_index_pool != 0U ? d->meshlet_index_pool : 1U << 24U;
+    if (d->max_visible_clusters > (u32)NPH_VIS_MAX_CLUSTERS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
     if (!is_power_of_two(d->environment_size) || !is_power_of_two(d->specular_size) ||
         d->specular_mips > log2_floor(d->specular_size) + 1U ||
         d->specular_size > d->environment_size || d->brdf_lut_size < 8U) {
@@ -304,7 +331,11 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(create_samplers(r));
     NPH_TRY(create_frame_buffers(r));
     NPH_TRY(render_ibl_create(r));
-    return render_debug_create(r);
+    NPH_TRY(render_debug_create(r));
+    if (!d->disable_production && render_vis_device_supported(r)) {
+        NPH_TRY(render_vis_create(r));
+    }
+    return NPH_RESULT_OK;
 }
 
 NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
@@ -344,10 +375,13 @@ NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
     }
     const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
     NPH_LOG_INFO(&NPH_LOG_RENDER,
-                 "%s: forward reference renderer on %s (environment %u, prefiltered %u x %u "
-                 "levels, %u lights, %u draws per frame)",
+                 "%s: on %s: reference renderer (environment %u, prefiltered %u x %u levels, "
+                 "%u lights, %u draws per frame); production path %s",
                  r->name, info->name, d.environment_size, d.specular_size, d.specular_mips,
-                 d.max_lights, d.max_draws);
+                 d.max_lights, d.max_draws,
+                 !r->vis.supported     ? "absent"
+                 : r->vis.mesh_shaders ? "with mesh shaders"
+                                       : "with indirect draws");
     *out = r;
     return NPH_RESULT_OK;
 }
@@ -384,6 +418,7 @@ void nph_renderer_destroy(NphRenderer *r)
             nph_gpu_buffer_destroy(dev, m->positions);
             nph_gpu_buffer_destroy(dev, m->attribs);
             nph_gpu_buffer_destroy(dev, m->indices);
+            render_vis_mesh_destroy(r, i);
             NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
         }
     }
@@ -405,13 +440,18 @@ void nph_renderer_destroy(NphRenderer *r)
     }
     render_debug_destroy(r);
     render_ibl_destroy(r);
+    render_vis_destroy(r);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, r->frame_buffers[i]);
     }
     for (u32 i = 0; i < RENDER_TARGET_FORMATS; ++i) {
-        nph_gpu_pipeline_destroy(dev, r->target_pipelines[i].tonemap);
-        nph_gpu_pipeline_destroy(dev, r->target_pipelines[i].debug_depth);
-        nph_gpu_pipeline_destroy(dev, r->target_pipelines[i].debug_overlay);
+        const RenderTargetPipelines *t = &r->target_pipelines[i];
+        nph_gpu_pipeline_destroy(dev, t->tonemap);
+        nph_gpu_pipeline_destroy(dev, t->debug_depth);
+        nph_gpu_pipeline_destroy(dev, t->debug_overlay);
+        nph_gpu_pipeline_destroy(dev, t->vis_tonemap);
+        nph_gpu_pipeline_destroy(dev, t->vis_debug_depth);
+        nph_gpu_pipeline_destroy(dev, t->vis_debug_overlay);
     }
     for (u32 a = 0; a < 3U; ++a) {
         for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
@@ -454,13 +494,19 @@ NphGpuDevice *nph_renderer_device(NphRenderer *r)
     return r->dev;
 }
 
+bool nph_renderer_production_supported(const NphRenderer *r)
+{
+    NPH_ASSERT(r != NULL);
+    return r->vis.supported != 0;
+}
+
 // ---------------------------------------------------------------------------
 // Textures
 // ---------------------------------------------------------------------------
 
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture)
 {
-    const u32 slot = slot_of(&r->texture_pool, texture.value);
+    const u32 slot = render_slot_of(&r->texture_pool, texture.value);
     return slot == NPH_U32_MAX ? NULL : &r->textures[slot];
 }
 
@@ -536,7 +582,7 @@ void nph_render_texture_destroy(NphRenderer *r, NphRenderTexture texture)
     if (texture.value == 0U) {
         return;
     }
-    const u32 slot = slot_of(&r->texture_pool, texture.value);
+    const u32 slot = render_slot_of(&r->texture_pool, texture.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale texture handle");
     if (slot == NPH_U32_MAX) {
         return;
@@ -550,7 +596,7 @@ void nph_render_texture_destroy(NphRenderer *r, NphRenderTexture texture)
 
 bool nph_render_texture_is_valid(const NphRenderer *r, NphRenderTexture texture)
 {
-    return slot_of(&r->texture_pool, texture.value) != NPH_U32_MAX;
+    return render_slot_of(&r->texture_pool, texture.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +613,46 @@ static NphResult make_buffer(NphRenderer *r, const void *data, u64 size, u32 usa
     d.name = name;
     NPH_TRY(nph_gpu_buffer_create(r->dev, &d, out));
     return nph_gpu_upload_buffer(r->dev, *out, 0U, data, size);
+}
+
+// Meshlets given with a mesh are checked so far as the GPU's reads stay
+// inside the streams: every range, local corner, and vertex index. That
+// they cover their submeshes' triangles exactly is the caller's contract.
+static NphResult validate_meshlets(const NphRenderMeshDesc *d)
+{
+    if (d->meshlets == NULL) {
+        return NPH_RESULT_OK;
+    }
+    if (d->meshlet_count == 0U || d->meshlet_bounds == NULL || d->meshlet_vertices == NULL ||
+        d->meshlet_triangles == NULL) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    for (u32 i = 0; i < d->meshlet_vertex_count; ++i) {
+        if (d->meshlet_vertices[i] >= d->vertex_count) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    for (u32 i = 0; i < d->meshlet_count; ++i) {
+        const NphRenderMeshlet *m = &d->meshlets[i];
+        const NphRenderMeshletBounds *b = &d->meshlet_bounds[i];
+        if (m->vertex_count == 0U || m->vertex_count > NPH_RENDER_MESHLET_MAX_VERTICES ||
+            m->triangle_count == 0U || m->triangle_count > NPH_RENDER_MESHLET_MAX_TRIANGLES ||
+            m->submesh >= d->submesh_count || m->vertex_offset > d->meshlet_vertex_count ||
+            m->vertex_count > d->meshlet_vertex_count - m->vertex_offset ||
+            m->triangle_offset > d->meshlet_triangle_count ||
+            m->triangle_count > d->meshlet_triangle_count - m->triangle_offset ||
+            !nph_vec3_is_finite(b->center) || !(b->radius >= 0.0F) ||
+            !nph_f32_is_finite(b->radius) || !nph_vec3_is_finite(b->cone_apex)) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        const u8 *corners = d->meshlet_triangles + (u64)m->triangle_offset * 3U;
+        for (u32 c = 0; c < (u32)m->triangle_count * 3U; ++c) {
+            if (corners[c] >= m->vertex_count) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+        }
+    }
+    return NPH_RESULT_OK;
 }
 
 static NphResult validate_mesh(const NphRenderMeshDesc *d)
@@ -590,7 +676,7 @@ static NphResult validate_mesh(const NphRenderMeshDesc *d)
             return NPH_RESULT_INVALID_ARGUMENT;
         }
     }
-    return NPH_RESULT_OK;
+    return validate_meshlets(d);
 }
 
 NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, NphRenderMesh *out)
@@ -603,6 +689,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     NPH_TRY(alloc_slot(&r->mesh_pool, &value, &slot));
     RenderMesh *m = &r->meshes[slot];
     memset(m, 0, sizeof *m);
+    m->index_range = NPH_RANGE_NULL; // a zero-filled range would name node 0
     m->submeshes = NPH_ALLOC_ARRAY(r->alloc, NphRenderSubmesh, desc->submesh_count);
     NphResult res = m->submeshes != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
     if (res == NPH_RESULT_OK) {
@@ -620,10 +707,16 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         res = make_buffer(r, desc->indices, (u64)desc->index_count * sizeof(u32),
                           (u32)NPH_GPU_BUFFER_USAGE_INDEX, "mesh indices", &m->indices);
     }
+    if (res == NPH_RESULT_OK) {
+        m->positions_address = nph_gpu_buffer_address(r->dev, m->positions);
+        m->attribs_address = nph_gpu_buffer_address(r->dev, m->attribs);
+        res = render_vis_mesh_create(r, slot, desc);
+    }
     if (res != NPH_RESULT_OK) {
         nph_gpu_buffer_destroy(r->dev, m->positions);
         nph_gpu_buffer_destroy(r->dev, m->attribs);
         nph_gpu_buffer_destroy(r->dev, m->indices);
+        render_vis_mesh_destroy(r, slot);
         if (m->submeshes != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
         }
@@ -632,8 +725,6 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         return res;
     }
     m->handle = value;
-    m->positions_address = nph_gpu_buffer_address(r->dev, m->positions);
-    m->attribs_address = nph_gpu_buffer_address(r->dev, m->attribs);
     m->index_count = desc->index_count;
     m->position_offset = desc->position_offset;
     m->position_scale = desc->position_scale;
@@ -649,7 +740,7 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     if (mesh.value == 0U) {
         return;
     }
-    const u32 slot = slot_of(&r->mesh_pool, mesh.value);
+    const u32 slot = render_slot_of(&r->mesh_pool, mesh.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale mesh handle");
     if (slot == NPH_U32_MAX) {
         return;
@@ -664,6 +755,7 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     nph_gpu_buffer_destroy(r->dev, m->positions);
     nph_gpu_buffer_destroy(r->dev, m->attribs);
     nph_gpu_buffer_destroy(r->dev, m->indices);
+    render_vis_mesh_destroy(r, slot);
     NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
     memset(m, 0, sizeof *m);
     release_slot(&r->mesh_pool, mesh.value);
@@ -671,7 +763,7 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
 
 bool nph_render_mesh_is_valid(const NphRenderer *r, NphRenderMesh mesh)
 {
-    return slot_of(&r->mesh_pool, mesh.value) != NPH_U32_MAX;
+    return render_slot_of(&r->mesh_pool, mesh.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +830,7 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
                                      const NphRenderMaterialDesc *desc)
 {
     NPH_ASSERT(r != NULL && desc != NULL);
-    const u32 slot = slot_of(&r->material_pool, material.value);
+    const u32 slot = render_slot_of(&r->material_pool, material.value);
     if (slot == NPH_U32_MAX) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -746,6 +838,7 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     r->material_version += 1U;
+    render_vis_materials_changed(r);
     return NPH_RESULT_OK;
 }
 
@@ -755,7 +848,7 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     if (material.value == 0U) {
         return;
     }
-    const u32 slot = slot_of(&r->material_pool, material.value);
+    const u32 slot = render_slot_of(&r->material_pool, material.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale material handle");
     if (slot == NPH_U32_MAX) {
         return;
@@ -763,11 +856,12 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     memset(&r->materials[slot], 0, sizeof r->materials[slot]);
     release_slot(&r->material_pool, material.value);
     r->material_version += 1U;
+    render_vis_materials_changed(r);
 }
 
 bool nph_render_material_is_valid(const NphRenderer *r, NphRenderMaterial material)
 {
-    return slot_of(&r->material_pool, material.value) != NPH_U32_MAX;
+    return render_slot_of(&r->material_pool, material.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------
@@ -813,14 +907,14 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
 {
     NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
     *out = NPH_RENDER_INSTANCE_NULL;
-    const u32 mesh_slot = slot_of(&r->mesh_pool, desc->mesh.value);
+    const u32 mesh_slot = render_slot_of(&r->mesh_pool, desc->mesh.value);
     if (mesh_slot == NPH_U32_MAX || !transform_ok(&desc->transform) ||
         (desc->material_count != 0U && desc->materials == NULL)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < desc->material_count; ++i) {
         if (desc->materials[i].value != 0U &&
-            slot_of(&r->material_pool, desc->materials[i].value) == NPH_U32_MAX) {
+            render_slot_of(&r->material_pool, desc->materials[i].value) == NPH_U32_MAX) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
     }
@@ -842,7 +936,17 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
     inst->material_count = desc->material_count;
     inst->transform = desc->transform;
     inst->hidden = desc->hidden;
+    const NphResult res = render_vis_instance_created(r, slot);
+    if (res != NPH_RESULT_OK) {
+        if (inst->materials != NULL) {
+            NPH_FREE_ARRAY(r->alloc, NphRenderMaterial, inst->materials, inst->material_count);
+        }
+        memset(inst, 0, sizeof *inst);
+        release_slot(&r->instance_pool, value);
+        return res;
+    }
     r->meshes[mesh_slot].instances += 1U;
+    r->hidden_count += inst->hidden ? 1U : 0U;
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -851,21 +955,24 @@ NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance in
                                             const NphRenderTransform *transform)
 {
     NPH_ASSERT(r != NULL && transform != NULL);
-    const u32 slot = slot_of(&r->instance_pool, instance.value);
+    const u32 slot = render_slot_of(&r->instance_pool, instance.value);
     if (slot == NPH_U32_MAX || !transform_ok(transform)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     r->instances[slot].transform = *transform;
+    render_vis_instance_changed(r, slot);
     return NPH_RESULT_OK;
 }
 
 void nph_render_instance_set_hidden(NphRenderer *r, NphRenderInstance instance, bool hidden)
 {
     NPH_ASSERT(r != NULL);
-    const u32 slot = slot_of(&r->instance_pool, instance.value);
+    const u32 slot = render_slot_of(&r->instance_pool, instance.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale instance handle");
-    if (slot != NPH_U32_MAX) {
+    if (slot != NPH_U32_MAX && r->instances[slot].hidden != (b32)hidden) {
         r->instances[slot].hidden = hidden;
+        r->hidden_count = hidden ? r->hidden_count + 1U : r->hidden_count - 1U;
+        render_vis_instance_changed(r, slot);
     }
 }
 
@@ -875,16 +982,18 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
     if (instance.value == 0U) {
         return;
     }
-    const u32 slot = slot_of(&r->instance_pool, instance.value);
+    const u32 slot = render_slot_of(&r->instance_pool, instance.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale instance handle");
     if (slot == NPH_U32_MAX) {
         return;
     }
     RenderInstance *inst = &r->instances[slot];
-    const u32 mesh_slot = slot_of(&r->mesh_pool, inst->mesh.value);
+    const u32 mesh_slot = render_slot_of(&r->mesh_pool, inst->mesh.value);
     if (mesh_slot != NPH_U32_MAX) {
         r->meshes[mesh_slot].instances -= 1U;
     }
+    r->hidden_count -= inst->hidden ? 1U : 0U;
+    render_vis_instance_destroyed(r, slot);
     if (inst->materials != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphRenderMaterial, inst->materials, inst->material_count);
     }
@@ -894,7 +1003,7 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
 
 bool nph_render_instance_is_valid(const NphRenderer *r, NphRenderInstance instance)
 {
-    return slot_of(&r->instance_pool, instance.value) != NPH_U32_MAX;
+    return render_slot_of(&r->instance_pool, instance.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------
@@ -940,7 +1049,7 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
                                   const NphRenderLightDesc *desc)
 {
     NPH_ASSERT(r != NULL && desc != NULL);
-    const u32 slot = slot_of(&r->light_pool, light.value);
+    const u32 slot = render_slot_of(&r->light_pool, light.value);
     if (slot == NPH_U32_MAX) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -955,7 +1064,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
     if (light.value == 0U) {
         return;
     }
-    const u32 slot = slot_of(&r->light_pool, light.value);
+    const u32 slot = render_slot_of(&r->light_pool, light.value);
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale light handle");
     if (slot == NPH_U32_MAX) {
         return;
@@ -966,7 +1075,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
 
 bool nph_render_light_is_valid(const NphRenderer *r, NphRenderLight light)
 {
-    return slot_of(&r->light_pool, light.value) != NPH_U32_MAX;
+    return render_slot_of(&r->light_pool, light.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,17 +6,18 @@
 // scheduler: orbits and spins write local transforms in parallel per
 // chunk, the transform system composes the hierarchy level by level, and a
 // main-thread system hands the world transforms of the chunks that changed
-// to the reference renderer. Before the first frame the scene is saved as
+// to the renderer (the GPU-driven production path unless --pipeline says
+// otherwise). Before the first frame the scene is saved as
 // text and as binary, loaded into fresh worlds, and saved again; both
 // round trips must reproduce the bytes.
 //
 //     scene_demo [--frames=N] [--capture=FILE.bmp] [--save=FILE.scene]
-//                [--asteroids=N] [--headless] [--vsync]
+//                [--asteroids=N] [--pipeline=production|reference] [--headless] [--vsync]
 //
 // --headless runs the simulation without a window (and exits 0); otherwise
 // exit status 77 means no window system or Vulkan device (CTest
-// "skipped"), 1 a failure. Keys: Space pauses, the mouse wheel zooms,
-// Escape quits.
+// "skipped"), 1 a failure. Keys: Space pauses, P switches the pipeline,
+// the mouse wheel zooms, Escape quits.
 
 #include <nepheline/core/json.h>
 #include <nepheline/jobs/jobs.h>
@@ -111,6 +112,7 @@ typedef struct Options {
     const char *capture;
     const char *save;
     u32 asteroids;
+    NphRenderPipeline pipeline;
     bool headless;
     bool vsync;
 } Options;
@@ -118,7 +120,8 @@ typedef struct Options {
 static int usage(void)
 {
     fprintf(stderr, "usage: scene_demo [--frames=N] [--capture=FILE.bmp] [--save=FILE.scene]\n"
-                    "                  [--asteroids=N] [--headless] [--vsync]\n");
+                    "                  [--asteroids=N] [--pipeline=production|reference] "
+                    "[--headless] [--vsync]\n");
     return 2;
 }
 
@@ -126,6 +129,7 @@ static bool parse(int argc, char **argv, Options *o)
 {
     memset(o, 0, sizeof *o);
     o->asteroids = 4000U;
+    o->pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
         if (strncmp(a, "--frames=", 9U) == 0) {
@@ -136,6 +140,10 @@ static bool parse(int argc, char **argv, Options *o)
             o->save = a + 7;
         } else if (strncmp(a, "--asteroids=", 12U) == 0) {
             o->asteroids = (u32)strtoul(a + 12, NULL, 10);
+        } else if (strcmp(a, "--pipeline=production") == 0) {
+            o->pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+        } else if (strcmp(a, "--pipeline=reference") == 0) {
+            o->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
         } else if (strcmp(a, "--headless") == 0) {
             o->headless = true;
         } else if (strcmp(a, "--vsync") == 0) {
@@ -423,6 +431,7 @@ typedef struct App {
     NphRenderMaterial materials[MATERIAL_COUNT];
     NphGpuBuffer capture;
     NphGpuImage capture_image;
+    NphRenderFrameStats render_stats; // the last frame's
 } App;
 
 static NphResult build_world(App *app)
@@ -506,6 +515,25 @@ static void log_systems(const App *app)
     nph_transform_system_stats(app->transforms, &ts);
     NPH_LOG_INFO(&LOG_SAMPLE, "systems: %s; transforms: %u roots, %u children, %u levels", line,
                  ts.roots_updated, ts.children_updated, ts.levels);
+    if (app->renderer == NULL) {
+        return;
+    }
+    const NphRenderFrameStats *rs = &app->render_stats;
+    if (rs->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
+        // The GPU's counters arrive a couple of frames late (vis_frame).
+        NPH_LOG_INFO(&LOG_SAMPLE,
+                     "render (production): %u instances, %u clusters, %u triangles; culled: "
+                     "%u + %u instances (frustum + occlusion), %u + %u + %u clusters (frustum + "
+                     "cone + occlusion)",
+                     rs->instances, rs->vis_clusters, rs->vis_triangles,
+                     rs->vis_instances_culled_frustum, rs->vis_instances_culled_occlusion,
+                     rs->vis_meshlets_culled_frustum, rs->vis_meshlets_culled_cone,
+                     rs->vis_meshlets_culled_occlusion);
+    } else {
+        NPH_LOG_INFO(&LOG_SAMPLE,
+                     "render (reference): %u instances, %u culled, %u draws, %u triangles",
+                     rs->instances, rs->culled, rs->draws, rs->triangles);
+    }
 }
 
 static NphResult open_device(App *app, int *status)
@@ -641,7 +669,7 @@ static NphResult create_renderer(App *app)
     return r;
 }
 
-static void handle_input(App *app, bool *paused, f32 *distance)
+static void handle_input(App *app, bool *paused, f32 *distance, NphRenderView *view)
 {
     nph_window_poll_events();
     NphWindowEvent e;
@@ -653,6 +681,11 @@ static void handle_input(App *app, bool *paused, f32 *distance)
                 nph_window_set_should_close(app->window, true);
             } else if (e.u.key.key == NPH_KEY_SPACE) {
                 *paused = !*paused;
+            } else if (e.u.key.key == NPH_KEY_P) {
+                const bool production = view->pipeline == NPH_RENDER_PIPELINE_PRODUCTION;
+                view->pipeline =
+                    production ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
+                NPH_LOG_INFO(&LOG_SAMPLE, "pipeline: %s", production ? "reference" : "production");
             }
         }
     }
@@ -712,7 +745,8 @@ static bool render_frame(App *app, const NphRenderView *view, bool capturing, in
     if (r == NPH_RESULT_OK) {
         nph_gpu_rg_begin(app->graph);
         NphGpuRgImage target = NPH_GPU_RG_IMAGE_NULL;
-        r = nph_render_frame(app->renderer, view, app->graph, backbuffer, &target, NULL);
+        r = nph_render_frame(app->renderer, view, app->graph, backbuffer, &target,
+                             &app->render_stats);
         if (r == NPH_RESULT_OK && capturing) {
             add_capture(app, backbuffer, target);
         }
@@ -776,6 +810,7 @@ static void run(App *app, int *status)
                             nph_render_camera_look_at(nph_dvec3(0.0, 20.0, 50.0), nph_dvec3_zero(),
                                                       nph_vec3_unit_y(), 0.9F, 0.1F));
     view.ev100 = 6.5F;
+    view.pipeline = app->opt.pipeline;
     bool paused = false;
     f32 distance = 52.0F;
     f32 angle = 0.6F;
@@ -785,7 +820,7 @@ static void run(App *app, int *status)
     u64 index = 0U;
     while ((max == 0U || index < max) && (!rendering || !nph_window_should_close(app->window))) {
         if (rendering) {
-            handle_input(app, &paused, &distance);
+            handle_input(app, &paused, &distance, &view);
         }
         if (!paused) {
             const NphResult r = nph_schedule_run(app->schedule, dt);
@@ -855,7 +890,7 @@ int main(int argc, char **argv)
         run(&app, &status);
     } else if (open_device(&app, &status) == NPH_RESULT_OK) {
         if (create_renderer(&app) == NPH_RESULT_OK) {
-            NPH_LOG_INFO(&LOG_SAMPLE, "%s; keys: Space pause, wheel zoom, Escape quit",
+            NPH_LOG_INFO(&LOG_SAMPLE, "%s; keys: Space pause, P pipeline, wheel zoom, Escape quit",
                          nph_gpu_device_info(app.dev)->name);
             run(&app, &status);
         } else {

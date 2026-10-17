@@ -21,6 +21,8 @@ bump_64_stack                  10
 pool_direct_alloc_free_64      15
 tlsf_direct_alloc_free_64      90
 malloc_direct_alloc_free_64    150
+range_alloc_free_64            60
+range_random_mixed             60
 
 # core_hash_bench
 hash64_8B                      12

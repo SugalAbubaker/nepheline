@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Reference-hardware runs on the self-hosted RTX 3060 Ti runner
-# (docs/adr/0002-self-hosted-gpu-runner.md; CLAUDE.md §6, §10.7): the gpu
-# tests with validation on the real driver, and the GPU microbenchmarks
-# against benchmarks/gpu_budgets.txt (a regression of more than 5 % over
-# the recorded reference fails the job). Runs nightly, on pushes to main,
-# and on pull requests that touch the GPU or renderer code; the job is
-# skipped when the runner is offline only in the sense that it queues
-# until the machine is on.
+# (docs/adr/0002-self-hosted-gpu-runner.md; CLAUDE.md §6, §10.7): the gpu and
+# render tests with validation on the real driver (the production renderer's
+# mesh-shader path runs only here: lavapipe takes the indirect one), the GPU
+# microbenchmarks against benchmarks/gpu_budgets.txt, and the renderer's
+# scenes against benchmarks/render_budgets.txt (a regression of more than
+# 5 % over the recorded reference fails the job). Runs nightly, on pushes
+# to main, and on pull requests that touch the GPU or renderer code; the
+# job is skipped when the runner is offline only in the sense that it
+# queues until the machine is on.
 name: GPU performance
 
 on:
@@ -20,6 +22,8 @@ on:
       - "shaders/**"
       - "benchmarks/gpu/**"
       - "benchmarks/gpu_budgets.txt"
+      - "benchmarks/render/**"
+      - "benchmarks/render_budgets.txt"
       - ".github/workflows/gpu-perf.yml"
   pull_request:
     paths:
@@ -28,6 +32,8 @@ on:
       - "shaders/**"
       - "benchmarks/gpu/**"
       - "benchmarks/gpu_budgets.txt"
+      - "benchmarks/render/**"
+      - "benchmarks/render_budgets.txt"
       - ".github/workflows/gpu-perf.yml"
   workflow_dispatch:
 
@@ -69,13 +75,17 @@ jobs:
           cmake --build --preset win-msvc-profile
 
       # Validation and synchronisation validation on the real driver.
-      - name: GPU tests (Development, validation on)
-        run: ctest --preset win-msvc-development -R "^gpu$|^sample\.gpu_" --output-on-failure
+      - name: GPU and render tests (Development, validation on)
+        run: ctest --preset win-msvc-development -R "^gpu$|^render$|^sample\.gpu_" --output-on-failure
 
       - name: GPU benchmarks (Profile)
         run: |
           New-Item -ItemType Directory -Force bench-results | Out-Null
           .\build\win-msvc\bin\Profile\gpu_bench.exe --repeats=20 --json=bench-results\gpu_bench.json --budgets=benchmarks\gpu_budgets.txt
+
+      # Every scene, CPU and GPU per pass with its declared bytes (§10.7).
+      - name: Renderer runs (Profile)
+        run: .\build\win-msvc\bin\Profile\render_perf.exe --frames=240 --json=bench-results\render_perf.json --budgets=benchmarks\render_budgets.txt
 
       - name: Upload results
         if: always()

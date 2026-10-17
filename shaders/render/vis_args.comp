@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: Apache-2.0
+// Indirect arguments between the GPU-driven passes (docs/render.md
+// "Culling"): one invocation turns the counts the last pass appended into
+// the workgroup counts of the next indirect dispatch or mesh-task draw.
+// Counts past a list's capacity were dropped (and flagged), so each count
+// is clamped first. A count past the per-dimension limit spills into y;
+// the consumers take their linear index as x + y * the x count and ignore
+// the tail of the last row.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 1) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; }; // mode: NPH_VIS_ARGS_*
+
+// The compute dispatch limit every device meets (maxComputeWorkGroupCount).
+#define VIS_MAX_GROUPS_X 65535u
+
+uvec4 groups(uint n, uint max_x)
+{
+    if (n == 0u) {
+        return uvec4(0u, 1u, 1u, 0u);
+    }
+    const uint x = min(n, max_x);
+    return uvec4(x, (n + x - 1u) / x, 1u, 0u);
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    VisArgsRef args = VisArgsRef(view.v.args);
+    const uint max_mesh_x = view.v.max_mesh_groups_x;
+    switch (pc.mode) {
+    case NPH_VIS_ARGS_PHASE1: {
+        const uvec4 a = groups(min(counters.c.batches[0], view.v.max_batches), VIS_MAX_GROUPS_X);
+        args.a.cull_args[0] = uint[4](a.x, a.y, a.z, a.w);
+        break;
+    }
+    case NPH_VIS_ARGS_RASTER1:
+    case NPH_VIS_ARGS_RASTER2: {
+        const uint p = pc.mode == NPH_VIS_ARGS_RASTER1 ? 0u : 1u;
+        for (uint k = 0u; k < 2u; ++k) {
+            const uvec4 a = groups(counters.c.raster_count[p][k], max_mesh_x);
+            args.a.raster_args[p][k] = uint[4](a.x, a.y, a.z, a.w);
+        }
+        break;
+    }
+    case NPH_VIS_ARGS_PHASE2: {
+        const uint instances = min(counters.c.deferred_instances, view.v.max_deferred);
+        const uvec4 a = groups((instances + 63u) / 64u, VIS_MAX_GROUPS_X);
+        args.a.instance2_args = uint[4](a.x, a.y, a.z, a.w);
+        const uint meshlets = min(counters.c.deferred_meshlets, view.v.max_deferred);
+        const uvec4 b = groups((meshlets + 63u) / 64u, VIS_MAX_GROUPS_X);
+        args.a.deferred_args = uint[4](b.x, b.y, b.z, b.w);
+        break;
+    }
+    case NPH_VIS_ARGS_PHASE2_MESH: {
+        const uvec4 a = groups(min(counters.c.batches[1], view.v.max_batches), VIS_MAX_GROUPS_X);
+        args.a.cull_args[1] = uint[4](a.x, a.y, a.z, a.w);
+        break;
+    }
+    default:
+        break;
+    }
+}

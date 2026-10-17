@@ -44,9 +44,12 @@
 #define NPH_RENDER_DEBUG_ROUGHNESS  3
 #define NPH_RENDER_DEBUG_METALLIC   4
 #define NPH_RENDER_DEBUG_OCCLUSION  5
-#define NPH_RENDER_DEBUG_DIRECT     6 // punctual lights only
-#define NPH_RENDER_DEBUG_INDIRECT   7 // image-based lighting only
-#define NPH_RENDER_DEBUG_COUNT      8
+#define NPH_RENDER_DEBUG_DIRECT     6  // punctual lights only
+#define NPH_RENDER_DEBUG_INDIRECT   7  // image-based lighting only
+#define NPH_RENDER_DEBUG_CLUSTERS   8  // the production path: a colour per visible cluster
+#define NPH_RENDER_DEBUG_TRIANGLES  9  // the production path: a colour per triangle
+#define NPH_RENDER_DEBUG_INSTANCES  10 // the production path: a colour per instance
+#define NPH_RENDER_DEBUG_COUNT      11
 
 // Tonemappers (NphRenderTonemapPush.tonemapper).
 #define NPH_RENDER_TONEMAP_NONE  0 // clamp to [0, 1]
@@ -122,9 +125,9 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     f32 alpha_cutoff;
     f32 normal_scale;
     f32 occlusion_strength;
-    u32 flags;      // NPH_RENDER_MATERIAL_*
-    u32 alpha_mode; // 0 opaque, 1 mask, 2 blend
-    u32 pad0;
+    u32 flags;       // NPH_RENDER_MATERIAL_*
+    u32 alpha_mode;  // 0 opaque, 1 mask, 2 blend
+    u32 handle;      // the material's handle value (0: the default material, or a free slot)
     u32 textures[5]; // bindless sampled-image indices (NPH_RENDER_NO_TEXTURE: none)
     u32 samplers[5]; // bindless sampler indices
     u32 pad1;
@@ -166,9 +169,11 @@ NPH_SHARED_STRUCT(NphRenderSkyData)
 // Push constants of the draw shaders (forward, sky, debug lines).
 NPH_SHARED_STRUCT(NphRenderPush)
 {
-    u64 view_address; // NphRenderViewData
-    u32 draw_index;   // forward: the record in draws
-    u32 flags;        // NPH_RENDER_PUSH_*
+    u64 view_address;    // NphRenderViewData
+    u32 draw_index;      // forward: the record in draws
+    u32 flags;           // NPH_RENDER_PUSH_*
+    u32 visbuffer_index; // the production path's debug lines: the visibility buffer
+    u32 pad0;
 };
 
 // Push constants of the tonemap pass.

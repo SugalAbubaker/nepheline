@@ -10,8 +10,10 @@ Baselines are the CI reference renders (lavapipe, ADR-0019), so approve
 from the Linux job's artifact, not from a local GPU, unless the change is
 being made for every device at once.
 
-Each NAME.png (FLIP maps, *.flip.png, are skipped) is checked to be the
-256 x 256 8-bit RGB PNG the tests write, then copied to
+Each NAME.png (FLIP maps, *.flip.png, are skipped, and so are the
+production path's renders, *.production.png, which are held to the
+reference's baseline rather than approved as their own) is checked to be
+the 256 x 256 8-bit RGB PNG the tests write, then copied to
 tests/golden/baselines/. The script prints which baselines are new,
 changed, or unchanged. Look at every new or changed image, and at its FLIP
 map against the old baseline, before committing: approving is a review,
@@ -51,9 +53,14 @@ def main():
         parser.error("name the images to approve, or pass --all")
     if args.all:
         names = sorted(n[:-4] for n in os.listdir(args.source)
-                       if n.endswith(".png") and not n.endswith(".flip.png"))
+                       if n.endswith(".png") and not n.endswith(".flip.png")
+                       and not n.endswith(".production.png"))
     else:
         names = args.names
+        for name in names:
+            if name.endswith(".production"):
+                parser.error(f"{name}: the production path is held to the reference's "
+                             "baseline; approve the reference image")
     if not names:
         print("golden_approve: no images found", file=sys.stderr)
         return 1

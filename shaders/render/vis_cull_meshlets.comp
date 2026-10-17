@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: Apache-2.0
+// Meshlet culling (docs/render.md "Culling"), the second level of the
+// GPU-driven pipeline: each invocation takes one meshlet of one instance
+// and tests its bounding sphere against the frustum, its normal cone
+// against the camera (all triangles facing away; Kapoulkine,
+// meshoptimizer, 2017; docs/cook.md "The meshlet normal cone"), and its
+// sphere against the hierarchical depth, in the two phases of
+// vis_cull_instances.comp:
+//
+//   mode 0, phase 0: a workgroup per batch of phase 0; occlusion against
+//     the previous frame's HZB from the previous camera and transform,
+//     occluded meshlets deferred to phase 1;
+//   mode 0, phase 1: a workgroup per batch of the instances phase 1 found
+//     visible; occlusion against this frame's HZB;
+//   mode 1 (phase 1): an invocation per meshlet phase 0 deferred; the same.
+//
+// A meshlet that survives becomes a visible cluster (instance, meshlet,
+// resolved material, flags) and joins its phase's raster list: masked
+// materials (alpha tested) apart from opaque ones, since only they sample
+// a texture while rasterising. Blended materials are not drawn into the
+// visibility buffer at all: the transparent pass draws them.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// The material table index of a material handle value from the material
+// map: its slot when the table's record there still carries that handle,
+// else the default material (a destroyed or unset material).
+uint resolve_material(VisViewRef view, uint handle)
+{
+    if (handle == 0u) {
+        return view.v.default_material;
+    }
+    const uint index = handle & view.v.material_index_mask;
+    if (index >= view.v.default_material ||
+        MaterialsRef(view.v.materials).m[index].handle != handle) {
+        return view.v.default_material;
+    }
+    return index;
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    const uint phase = pc.phase;
+    const uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+
+    uint slot = 0u;
+    uint meshlet = 0u;
+    bool valid = false;
+    if (pc.mode == 0u) {
+        if (group < min(counters.c.batches[phase], view.v.max_batches)) {
+            const NphVisBatch batch = VisBatchesRef(view.v.batches[phase]).b[group];
+            if (gl_LocalInvocationIndex < batch.meshlet_count) {
+                slot = batch.instance;
+                meshlet = batch.meshlet_offset + gl_LocalInvocationIndex;
+                valid = true;
+            }
+        }
+    } else {
+        const uint i = group * 64u + gl_LocalInvocationIndex;
+        if (i < min(counters.c.deferred_meshlets, view.v.max_deferred)) {
+            const uvec2 e = VisUvec2Ref(view.v.deferred_meshlets).v[i];
+            slot = e.x;
+            meshlet = e.y;
+            valid = true;
+        }
+    }
+
+    bool visible = false;
+    bool defer = false;
+    bool culled_frustum = false;
+    bool culled_cone = false;
+    bool culled_occlusion = false;
+    uint material = view.v.default_material;
+    uint flags = 0u;
+    uint triangles = 0u;
+    uint first_index = 0u; // the indirect raster's draw: the meshlet's corners in the index pool
+    uint vertex_offset = 0u;
+    if (valid) {
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
+        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        const uvec4 m = VisMeshletsRef(mesh.meshlets).m[meshlet];
+        triangles = m.z >> 16u;
+        first_index = mesh.index_base + m.y * 3u;
+        vertex_offset = m.x;
+        // The material of the meshlet's submesh, through the instance's map.
+        const uint mslot = VisUintRef(mesh.submesh_slots).v[m.w];
+        const uint handle =
+            mslot < inst.material_count ? VisUintRef(view.v.material_map).v[inst.material_base + mslot]
+                                        : 0u;
+        material = resolve_material(view, handle);
+        const NphRenderMaterialData md = MaterialsRef(view.v.materials).m[material];
+        const bool double_sided = (md.flags & NPH_RENDER_MATERIAL_DOUBLE_SIDED) != 0u;
+        flags = ((inst.flags & NPH_VIS_INSTANCE_MIRRORED) != 0u ? uint(NPH_VIS_CLUSTER_MIRRORED) : 0u) |
+                (double_sided ? uint(NPH_VIS_CLUSTER_DOUBLE_SIDED) : 0u) |
+                (md.alpha_mode == 1u ? uint(NPH_VIS_CLUSTER_MASKED) : 0u);
+        if (md.alpha_mode != 2u) {
+            VisMeshletBoundsRef bounds = VisMeshletBoundsRef(mesh.meshlet_bounds);
+            const uvec4 b0 = bounds.b[meshlet * 2u];
+            const uvec4 b1 = bounds.b[meshlet * 2u + 1u];
+            const vec3 center = uintBitsToFloat(b0.xyz);
+            const float radius = uintBitsToFloat(b0.w);
+            const float scale = vis_max_scale(inst.transform);
+            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            const vec3 c = vis_transform_vector(inst.transform, center) + t;
+            const float r = radius * scale;
+            const vec4 cone = unpackSnorm4x8(b1.x);
+            if (!vis_sphere_in_frustum(view.v, c, r)) {
+                culled_frustum = true;
+            } else if ((view.v.flags & NPH_VIS_VIEW_CONE_CULLING) != 0u && !double_sided &&
+                       (inst.flags & NPH_VIS_INSTANCE_SIMILAR) != 0u &&
+                       vis_cone_culled(vis_transform_vector(inst.transform, uintBitsToFloat(b1.yzw)) + t,
+                                       vis_transform_vector(inst.transform, cone.xyz) / scale,
+                                       cone.w)) {
+                culled_cone = true;
+            } else if ((view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u) {
+                vec4 rect;
+                float depth;
+                if (phase == 0u) {
+                    if ((view.v.flags & NPH_VIS_VIEW_HZB_VALID) != 0u) {
+                        const NphVisTransform pt =
+                            VisTransformsRef(view.v.prev_transforms).t[slot];
+                        const vec3 ptr = vis_relative_translation(
+                            pt, view.v.prev_camera_high.xyz, view.v.prev_camera_low.xyz);
+                        const vec3 pw = vis_transform_vector(pt, center) + ptr;
+                        const vec3 pv = (view.v.prev_view * vec4(pw, 1.0)).xyz;
+                        defer = vis_project_sphere(pv, radius * vis_max_scale(pt),
+                                                   view.v.prev_projection, rect, depth) &&
+                                vis_hzb_occluded(view.v, rect, depth);
+                    }
+                } else {
+                    const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
+                    culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
+                                       vis_hzb_occluded(view.v, rect, depth);
+                }
+            }
+            visible = !culled_frustum && !culled_cone && !defer && !culled_occlusion;
+        }
+    }
+
+    VIS_COUNT(counters.c.meshlets_culled_frustum, culled_frustum);
+    VIS_COUNT(counters.c.meshlets_culled_cone, culled_cone);
+    VIS_COUNT(counters.c.meshlets_culled_occlusion, culled_occlusion);
+
+    // Deferred to phase 1.
+    if (phase == 0u) {
+        uint d;
+        VIS_RESERVE(counters.c.deferred_meshlets, defer ? 1u : 0u, d);
+        if (defer) {
+            if (d < view.v.max_deferred) {
+                VisUvec2Ref(view.v.deferred_meshlets).v[d] = uvec2(slot, meshlet);
+            } else {
+                atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_DEFERRED));
+            }
+        }
+    }
+
+    // A visible cluster, then its place in a raster list.
+    uint g;
+    VIS_RESERVE(counters.c.clusters, visible ? 1u : 0u, g);
+    if (visible && g >= view.v.max_clusters) {
+        atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_CLUSTERS));
+        visible = false;
+    }
+    const bool masked = (flags & NPH_VIS_CLUSTER_MASKED) != 0u;
+    uint j0;
+    uint j1;
+    VIS_RESERVE(counters.c.raster_count[phase][0], visible && !masked ? 1u : 0u, j0);
+    VIS_RESERVE(counters.c.raster_count[phase][1], visible && masked ? 1u : 0u, j1);
+    VIS_ADD(counters.c.triangles, visible ? triangles : 0u);
+    if (!visible) {
+        return;
+    }
+    NphVisCluster cluster;
+    cluster.instance = slot;
+    cluster.meshlet = meshlet;
+    cluster.material = material;
+    cluster.flags = flags;
+    VisClustersRef(view.v.clusters).c[g] = cluster;
+    // Every raster list holds at most one entry per cluster, so an index
+    // reserved here is below max_clusters.
+    const uint kind = masked ? 1u : 0u;
+    const uint j = masked ? j1 : j0;
+    VisUintRef(view.v.raster_lists[phase][kind]).v[j] = g;
+    if ((view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
+        NphVisDraw draw;
+        draw.index_count = triangles * 3u;
+        draw.instance_count = 1u;
+        draw.first_index = first_index;
+        draw.vertex_offset = int(vertex_offset);
+        draw.first_instance = 0u;
+        VisDrawsRef(view.v.draws[phase][kind]).d[j] = draw;
+    }
+}

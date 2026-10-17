@@ -10,13 +10,15 @@
 //
 //     pbr_viewer [--frames=N] [--capture=FILE.bmp] [--profile=FILE.json]
 //                [--pack=FILE] [--tonemapper=aces|agx|none]
-//                [--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect]
-//                [--ev100=X] [--vsync] [--no-debug]
+//                [--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect|
+//                        clusters|triangles|instances]
+//                [--pipeline=production|reference] [--ev100=X] [--vsync] [--no-debug]
 //
-// Keys: 1/2/3 ACES/AgX/none, V cycles the debug views, I toggles image-based
-// lighting, D the debug lines, Space pauses the orbit, the mouse wheel
-// zooms, Escape quits. The orbit advances per frame, so a --frames run
-// renders the same images every time (--capture keeps the last).
+// Keys: 1/2/3 ACES/AgX/none, V cycles the debug views, P switches between
+// the production (GPU-driven visibility buffer) and reference (forward)
+// renderers, I toggles image-based lighting, D the debug lines, Space
+// pauses the orbit, the mouse wheel zooms, Escape quits. The orbit advances per frame, so a
+// --frames run renders the same images every time (--capture keeps the last).
 //
 // Exit status 77: no window system or Vulkan device (CTest "skipped");
 // 1: the content did not load or a validation error was reported.
@@ -56,22 +58,27 @@ typedef struct Options {
     const char *profile;
     NphRenderTonemapper tonemapper;
     NphRenderDebugView view;
+    NphRenderPipeline pipeline;
     f32 ev100;
     bool vsync;
     bool debug_lines;
 } Options;
 
 static const char *const g_view_names[NPH_RENDER_VIEW_COUNT] = {
-    "lit", "base", "normal", "roughness", "metallic", "occlusion", "direct", "indirect"};
+    "lit",    "base",     "normal",   "roughness", "metallic", "occlusion",
+    "direct", "indirect", "clusters", "triangles", "instances"};
 static const char *const g_tonemapper_names[3] = {"none", "aces", "agx"};
+static const char *const g_pipeline_names[2] = {"reference", "production"};
 
 static int usage(void)
 {
     fprintf(stderr, "usage: pbr_viewer [--frames=N] [--capture=FILE.bmp] [--profile=FILE.json] "
                     "[--pack=FILE]\n"
                     "                  [--tonemapper=aces|agx|none] "
-                    "[--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect]\n"
-                    "                  [--ev100=X] [--vsync] [--no-debug]\n");
+                    "[--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect|\n"
+                    "                          clusters|triangles|instances]\n"
+                    "                  [--pipeline=production|reference] [--ev100=X] [--vsync] "
+                    "[--no-debug]\n");
     return 2;
 }
 
@@ -81,6 +88,7 @@ static bool parse(int argc, char **argv, Options *o)
     o->pack = NPH_SAMPLE_PACK;
     o->tonemapper = NPH_RENDER_TONEMAPPER_ACES;
     o->view = NPH_RENDER_VIEW_LIT;
+    o->pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
     o->ev100 = 10.75F; // a low sun (about 9000 lux on the ground) under a dusk sky
     o->debug_lines = true;
     for (int i = 1; i < argc; ++i) {
@@ -111,6 +119,17 @@ static bool parse(int argc, char **argv, Options *o)
             for (u32 v = 0; v < (u32)NPH_RENDER_VIEW_COUNT; ++v) {
                 if (strcmp(a + 7, g_view_names[v]) == 0) {
                     o->view = (NphRenderDebugView)v;
+                    found = true;
+                }
+            }
+            if (!found) {
+                return false;
+            }
+        } else if (strncmp(a, "--pipeline=", 11U) == 0) {
+            bool found = false;
+            for (u32 p = 0; p < 2U; ++p) {
+                if (strcmp(a + 11, g_pipeline_names[p]) == 0) {
+                    o->pipeline = (NphRenderPipeline)p;
                     found = true;
                 }
             }
@@ -320,6 +339,12 @@ static void handle_input(App *app, NphRenderView *view, bool *paused, f32 *dista
         case NPH_KEY_I:
             view->disable_ibl = !view->disable_ibl;
             break;
+        case NPH_KEY_P:
+            view->pipeline = view->pipeline == NPH_RENDER_PIPELINE_PRODUCTION
+                                 ? NPH_RENDER_PIPELINE_REFERENCE
+                                 : NPH_RENDER_PIPELINE_PRODUCTION;
+            NPH_LOG_INFO(&LOG_SAMPLE, "pipeline: %s", g_pipeline_names[view->pipeline]);
+            break;
         case NPH_KEY_D:
             *lines = !*lines;
             break;
@@ -442,6 +467,7 @@ static void run(App *app, int *status)
     view.ev100 = app->opt.ev100;
     view.tonemapper = app->opt.tonemapper;
     view.debug_view = app->opt.view;
+    view.pipeline = app->opt.pipeline;
     const NphVec3 center = nph_aabb_center(app->scene.bounds);
     bool paused = false;
     bool lines = app->opt.debug_lines;
@@ -520,7 +546,7 @@ int main(int argc, char **argv)
         if (create_renderer(&app) == NPH_RESULT_OK) {
             NPH_LOG_INFO(&LOG_SAMPLE,
                          "%s: %u instances, %u lights; keys: 1/2/3 tonemapper, V view, "
-                         "I lighting, D lines, Space pause, Escape quit",
+                         "P pipeline, I lighting, D lines, Space pause, Escape quit",
                          nph_gpu_device_info(app.dev)->name, app.scene.instance_count,
                          app.scene.light_count);
             run(&app, &status);

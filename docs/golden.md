@@ -31,6 +31,14 @@ writes the FLIP error map (`<name>.flip.png`, magma colour map: black is
 identical, yellow is maximally different) and prints the statistics. With
 no baseline, the test fails and says how to approve one.
 
+Where the device has the production path (docs/render.md, "The production
+path"), every scene is rendered a second time through it, written as
+`<name>.production.png`, and compared with the **same** baseline under the
+same thresholds: the reference renderer's images are what the production
+path must reproduce, so it has no baselines of its own, and
+`scripts/golden_approve.py` never approves its renders. On lavapipe that
+is the indirect raster path; on the RTX 3060 Ti, mesh shaders.
+
 The fixture keeps the GPU tests' gate: zero validation and
 synchronisation-validation errors, and nothing leaked.
 

@@ -35,8 +35,10 @@ extern "C" {
 
 #if defined(__GNUC__) || defined(__clang__)
 #define NTEST_PRINTF(fmt_index, first_arg) __attribute__((format(printf, fmt_index, first_arg)))
+#define NTEST_NORETURN                     __attribute__((noreturn))
 #else
 #define NTEST_PRINTF(fmt_index, first_arg)
+#define NTEST_NORETURN __declspec(noreturn)
 #endif
 
 // Silences unused-parameter errors for a fixture (or any value) a test body
@@ -184,8 +186,10 @@ bool ntest_check_ulp_f64(bool fatal, const char *file, int line, const char *lhs
 // Records a failure with a printf-style message.
 NTEST_PRINTF(4, 5) void ntest_fail(bool fatal, const char *file, int line, const char *fmt, ...);
 
-// Marks the running test as skipped and leaves it immediately.
-NTEST_PRINTF(3, 4) void ntest_skip(const char *file, int line, const char *fmt, ...);
+// Marks the running test as skipped and leaves it immediately (declared so:
+// static analysis then knows a pointer checked before a skip is not NULL
+// after it).
+NTEST_NORETURN NTEST_PRINTF(3, 4) void ntest_skip(const char *file, int line, const char *fmt, ...);
 
 // Attaches a line to the running test's log. Shown for failing tests, and for
 // passing tests with --verbose. Included in the JUnit report.

@@ -355,6 +355,7 @@ typedef struct Candidate {
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accel;
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
+    VkPhysicalDeviceMeshShaderPropertiesEXT mesh_props;
     VkPhysicalDeviceMemoryProperties memory;
     b32 ext_swapchain;
     b32 ext_mesh;
@@ -437,6 +438,11 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     c->p12.pNext = &c->p13;
     c->p13.pNext = &c->driver;
     c->driver.pNext = NULL;
+    if (c->ext_mesh) {
+        c->mesh_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+        c->driver.pNext = &c->mesh_props;
+        c->mesh_props.pNext = NULL;
+    }
     vkGetPhysicalDeviceProperties2(c->phys, &c->props);
     vkGetPhysicalDeviceMemoryProperties(c->phys, &c->memory);
 
@@ -758,6 +764,13 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     atomic64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
 
     const VkPhysicalDeviceFeatures *hf = &c->features.features;
+    const u32 off = dev->desc.disable_features;
+    const bool want_mesh = (off & (u32)NPH_GPU_OPTIONAL_MESH_SHADER) == 0U;
+    const bool want_ray_query = (off & (u32)NPH_GPU_OPTIONAL_RAY_QUERY) == 0U;
+    const bool want_image_atomic64 = (off & (u32)NPH_GPU_OPTIONAL_IMAGE_ATOMIC_INT64) == 0U;
+    const bool want_buffer_atomic64 = (off & (u32)NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64) == 0U;
+    const bool want_float16 = (off & (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16) == 0U;
+    const bool want_minmax = (off & (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX) == 0U;
     f2.features.multiDrawIndirect = VK_TRUE;
     f2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     f2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
@@ -765,6 +778,9 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f2.features.independentBlend = VK_TRUE;
     f2.features.samplerAnisotropy = hf->samplerAnisotropy;
     f2.features.depthClamp = hf->depthClamp;
+    // Fragment shaders that read gl_PrimitiveID declare the Geometry
+    // capability (the visibility buffer's raster does).
+    f2.features.geometryShader = hf->geometryShader;
     f2.features.fillModeNonSolid = hf->fillModeNonSolid;
     f2.features.textureCompressionBC = hf->textureCompressionBC;
     f2.features.shaderInt64 = hf->shaderInt64;
@@ -792,11 +808,12 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingPartiallyBound = VK_TRUE;
     f12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
-    f12.shaderFloat16 = c->f12.shaderFloat16;
+    f12.shaderFloat16 = want_float16 ? c->f12.shaderFloat16 : VK_FALSE;
     f12.shaderInt8 = c->f12.shaderInt8;
     f12.storageBuffer8BitAccess = c->f12.storageBuffer8BitAccess;
-    f12.samplerFilterMinmax = c->f12.samplerFilterMinmax;
-    f12.shaderBufferInt64Atomics = c->f12.shaderBufferInt64Atomics;
+    f12.samplerFilterMinmax = want_minmax ? c->f12.samplerFilterMinmax : VK_FALSE;
+    f12.shaderBufferInt64Atomics =
+        want_buffer_atomic64 ? c->f12.shaderBufferInt64Atomics : VK_FALSE;
     f12.shaderSharedInt64Atomics = c->f12.shaderSharedInt64Atomics;
     f12.vulkanMemoryModel = c->f12.vulkanMemoryModel;
     f12.vulkanMemoryModelDeviceScope = c->f12.vulkanMemoryModelDeviceScope;
@@ -827,7 +844,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
 
     NphGpuFeatures *feat = &dev->info.features;
     memset(feat, 0, sizeof *feat);
-    if (c->ext_mesh && c->mesh.meshShader && c->mesh.taskShader) {
+    if (want_mesh && c->ext_mesh && c->mesh.meshShader && c->mesh.taskShader) {
         mesh.meshShader = VK_TRUE;
         mesh.taskShader = VK_TRUE;
         exts[ext_count++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
@@ -835,8 +852,8 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         next = &mesh.pNext;
         feat->mesh_shader = 1;
     }
-    if (c->ext_ray_query && c->ext_accel && c->ext_deferred_ops && c->ray_query.rayQuery &&
-        c->accel.accelerationStructure) {
+    if (want_ray_query && c->ext_ray_query && c->ext_accel && c->ext_deferred_ops &&
+        c->ray_query.rayQuery && c->accel.accelerationStructure) {
         ray_query.rayQuery = VK_TRUE;
         accel.accelerationStructure = VK_TRUE;
         exts[ext_count++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
@@ -848,7 +865,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         next = &accel.pNext;
         feat->ray_query = 1;
     }
-    if (c->ext_atomic64 && c->atomic64.shaderImageInt64Atomics) {
+    if (want_image_atomic64 && c->ext_atomic64 && c->atomic64.shaderImageInt64Atomics) {
         atomic64.shaderImageInt64Atomics = VK_TRUE;
         exts[ext_count++] = VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME;
         *next = &atomic64;
@@ -864,13 +881,25 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         feat->calibrated_timestamps = 1;
     }
     *next = NULL;
-    feat->sampler_filter_minmax = vk_bool(c->f12.samplerFilterMinmax);
-    feat->shader_float16 = vk_bool(c->f12.shaderFloat16);
+    feat->sampler_filter_minmax = vk_bool(f12.samplerFilterMinmax);
+    feat->shader_float16 = vk_bool(f12.shaderFloat16);
+    feat->buffer_atomic_int64 = vk_bool(f12.shaderBufferInt64Atomics);
+    feat->draw_indirect_first_instance = vk_bool(hf->drawIndirectFirstInstance);
+    // Subgroup operations in compute shaders.
+    if ((c->p11.subgroupSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0U) {
+        const VkSubgroupFeatureFlags ops = c->p11.subgroupSupportedOperations;
+        feat->subgroup_vote = (ops & VK_SUBGROUP_FEATURE_VOTE_BIT) != 0U;
+        feat->subgroup_ballot = (ops & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0U;
+        feat->subgroup_arithmetic = (ops & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0U;
+        feat->subgroup_shuffle = (ops & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0U;
+        feat->subgroup_quad = (ops & VK_SUBGROUP_FEATURE_QUAD_BIT) != 0U;
+    }
     feat->shader_int8 = vk_bool(c->f12.shaderInt8);
     feat->shader_int64 = vk_bool(hf->shaderInt64);
     feat->storage_8bit = vk_bool(c->f12.storageBuffer8BitAccess);
     feat->storage_16bit = vk_bool(c->f11.storageBuffer16BitAccess);
     feat->depth_clamp = vk_bool(hf->depthClamp);
+    feat->geometry_shader = vk_bool(hf->geometryShader);
     feat->fill_mode_non_solid = vk_bool(hf->fillModeNonSolid);
     feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);
     feat->sampler_anisotropy = vk_bool(hf->samplerAnisotropy);
@@ -973,6 +1002,12 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     info->api_version_minor = VK_API_VERSION_MINOR(p->apiVersion);
     info->api_version_patch = VK_API_VERSION_PATCH(p->apiVersion);
     info->driver_version = p->driverVersion;
+    if (c->driver.driverID == VK_DRIVER_ID_MESA_LLVMPIPE) {
+        // Found by gpu_tests' mesh_pipeline_fragment_shaders_read_push_constants
+        // on the CI's lavapipe (Mesa 25.2.8); no fixed release is known, so
+        // every version is assumed to have it.
+        info->quirks |= (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS;
+    }
     info->device_local_bytes = device_local_bytes(&c->memory);
     info->host_visible_bytes = host_visible_bytes(&c->memory);
     NphGpuLimits *lim = &info->limits;
@@ -1017,6 +1052,17 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         nph_min_u32(dev->desc.bindless_samplers,
                     nph_min_u32(c->p12.maxDescriptorSetUpdateAfterBindSamplers,
                                 c->p12.maxPerStageDescriptorUpdateAfterBindSamplers));
+    if (info->features.mesh_shader) {
+        const VkPhysicalDeviceMeshShaderPropertiesEXT *m = &c->mesh_props;
+        lim->max_mesh_output_vertices = m->maxMeshOutputVertices;
+        lim->max_mesh_output_primitives = m->maxMeshOutputPrimitives;
+        lim->max_mesh_workgroup_invocations = m->maxMeshWorkGroupInvocations;
+        for (u32 i = 0; i < 3U; ++i) {
+            lim->max_mesh_workgroup_count[i] = m->maxMeshWorkGroupCount[i];
+        }
+        lim->max_mesh_workgroup_total_count = m->maxMeshWorkGroupTotalCount;
+        lim->max_preferred_mesh_workgroup_invocations = m->maxPreferredMeshWorkGroupInvocations;
+    }
     return NPH_RESULT_OK;
 }
 
@@ -1421,15 +1467,39 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                  dev->queues[NPH_GPU_QUEUE_GRAPHICS]->family,
                  info->features.async_compute ? ", async compute" : "",
                  info->features.dedicated_transfer ? ", dedicated transfer" : "");
-    GPU_LOG_INFO("features: mesh shader %d, ray query %d, image atomic int64 %d, float16 %d, "
-                 "int64 %d, BC %d, filter minmax %d; bindless %u sampled / %u storage / %u "
-                 "samplers; push constants %u B; timestamp period %.3f ns",
+    // Two records: a log record keeps 216 bytes.
+    GPU_LOG_INFO("features: mesh shader %d, ray query %d, image atomic int64 %d, buffer atomic "
+                 "int64 %d, float16 %d, int64 %d, BC %d, filter minmax %d, first instance %d",
                  info->features.mesh_shader, info->features.ray_query,
-                 info->features.image_atomic_int64, info->features.shader_float16,
-                 info->features.shader_int64, info->features.texture_compression_bc,
-                 info->features.sampler_filter_minmax, info->limits.bindless_sampled_images,
-                 info->limits.bindless_storage_images, info->limits.bindless_samplers,
-                 info->limits.max_push_constant_bytes, (f64)info->limits.timestamp_period_ns);
+                 info->features.image_atomic_int64, info->features.buffer_atomic_int64,
+                 info->features.shader_float16, info->features.shader_int64,
+                 info->features.texture_compression_bc, info->features.sampler_filter_minmax,
+                 info->features.draw_indirect_first_instance);
+    GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d); "
+                 "bindless %u sampled / %u storage / %u samplers; push constants %u B; "
+                 "timestamps %.3f ns",
+                 info->limits.subgroup_size, info->features.subgroup_vote,
+                 info->features.subgroup_ballot, info->features.subgroup_arithmetic,
+                 info->features.subgroup_shuffle, info->features.subgroup_quad,
+                 info->limits.bindless_sampled_images, info->limits.bindless_storage_images,
+                 info->limits.bindless_samplers, info->limits.max_push_constant_bytes,
+                 (f64)info->limits.timestamp_period_ns);
+    if (info->features.mesh_shader) {
+        GPU_LOG_INFO(
+            "mesh shaders: %u vertices / %u primitives out, %u invocations (%u "
+            "preferred), %u x %u x %u groups (%u in total)",
+            info->limits.max_mesh_output_vertices, info->limits.max_mesh_output_primitives,
+            info->limits.max_mesh_workgroup_invocations,
+            info->limits.max_preferred_mesh_workgroup_invocations,
+            info->limits.max_mesh_workgroup_count[0], info->limits.max_mesh_workgroup_count[1],
+            info->limits.max_mesh_workgroup_count[2], info->limits.max_mesh_workgroup_total_count);
+    }
+    if (info->quirks != 0U) {
+        GPU_LOG_INFO("driver quirks worked around: 0x%x%s", info->quirks,
+                     (info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U
+                         ? " (mesh pipelines' fragment shaders read no push constants)"
+                         : "");
+    }
     *out = dev;
     return NPH_RESULT_OK;
 }

@@ -119,6 +119,9 @@ typedef struct EngineCvars {
     NphCvar reload_poll_ms; // game.reload_poll_ms
     NphCvar prof_enabled;   // prof.enabled
     NphCvar prof_history;   // prof.history
+    NphCvar pipeline;       // r.pipeline: NphRenderPipeline
+    NphCvar occlusion;      // r.occlusion
+    NphCvar cone_culling;   // r.cone_culling
 } EngineCvars;
 
 typedef enum EngineAllocTag {

@@ -139,3 +139,48 @@ new driver, a new reference run) is a run of `gpu_bench --repeats=20
 `.github/workflows/gpu-perf.yml` enforces the budgets on the self-hosted
 RTX 3060 Ti runner. The hosted runners never run `gpu_bench` for real:
 they have no GPU.
+
+## Renderer runs
+
+`benchmarks/render/render_perf.c` builds `render_perf`, which drives the
+renderer itself on a device, scene by scene, and reports what CLAUDE.md
+§10.7 asks every renderer PR to state:
+
+- `<scene>.cpu`: the median CPU time of `nph_render_frame` alone (the
+  records, the draw list, the pass declarations; not the render graph's
+  compile and submit). Phase 10's exit criterion holds it constant in the
+  object count on the production path.
+- `<scene>.gpu` and `<scene>.gpu.p99`: the frame's mean and 99th-percentile
+  GPU time (§10.1 measures the 1 % low).
+- `<scene>.gpu.<pass>`: each render-graph pass's mean GPU time, with its
+  declared footprint as the metric (`MB declared`: the bytes of the
+  resource ranges it reads and writes, render_graph.h). That is an upper
+  bound on DRAM traffic, not a measurement: whole buffers count even when a
+  GPU-driven pass touches a fraction of them (the production path's lists
+  are sized for its capacities), and caches absorb re-reads.
+
+Each scene renders warm-up frames (at least 24 and 500 ms: instance
+uploads, the environment's image-based-lighting passes, the GPU's clocks),
+then `--frames` measured ones (default 120), timed by the renderer's GPU
+profiler. The scenes are synthetic until Phase 10's reference scenes
+arrive:
+
+| Scene | What it is |
+|---|---|
+| `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
+| `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
+
+```
+render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation]
+```
+
+Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
+(`bench.render_perf`) renders the 1k grids for four frames and skips
+without a device. The reference results are
+`benchmarks/results/render_perf-2026-10-17-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/render_budgets.txt`, generated from them by
+`scripts/render_budgets.py`, budgets the production scenes only: GPU
+entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU
+entries at a flat 50 µs, which per-object work on the main thread would
+break. `.github/workflows/gpu-perf.yml` enforces them on the RTX 3060 Ti
+runner.

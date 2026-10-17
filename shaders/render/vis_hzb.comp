@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+// The hierarchical depth buffer (docs/render.md "The production path"; the
+// Hi-Z of Greene, Kass & Miller, "Hierarchical Z-Buffer Visibility",
+// SIGGRAPH 1993, as GPU-driven renderers use it for occlusion culling): each
+// texel holds the farthest depth of the texels below it, which under
+// reverse-Z is the smallest value.
+//
+// Mip 0 is half the screen rounded up: each texel takes a 2 x 2 block of
+// pixels, clamped at the last row and column. Every later mip is the one
+// above halved and rounded down, as Vulkan sizes mips, so where the source
+// has an odd number of texels its last one has no block of its own: the
+// destination's last texel takes it too (a 3-wide footprint). Every source
+// texel thus lies under exactly one destination texel, and mip-m texel t
+// covers mip-0 texels [t 2^m, (t + 1) 2^m), the last one reaching the edge,
+// which is the mapping vis_hzb_occluded relies on. Rounding up instead
+// would leave a mip larger than Vulkan made it and lose its last row and
+// column, and with them the farthest depth under them.
+//
+// Mode 0 reads the depth half of the visibility buffer, mode 1 the
+// previous mip. arg0 is the source's bindless storage index, arg1 the
+// destination's, arg2 and arg3 the source extent.
+#version 460
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+float source_depth(ivec2 p)
+{
+    if (pc.mode == 0u) {
+        return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
+    }
+    return imageLoad(nph_images_2d[nonuniformEXT(pc.arg0)], p).x;
+}
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 src = ivec2(pc.arg2, pc.arg3);
+    const ivec2 dst = pc.mode == 0u ? (src + 1) / 2 : max(src / 2, ivec2(1));
+    if (any(greaterThanEqual(p, dst))) {
+        return;
+    }
+    const ivec2 last = src - 1;
+    const ivec2 lo = min(p * 2, last);
+    // The last texel of a row or column reaches the source's edge.
+    const ivec2 hi = ivec2(p.x == dst.x - 1 ? last.x : p.x * 2 + 1,
+                           p.y == dst.y - 1 ? last.y : p.y * 2 + 1);
+    float d = source_depth(lo);
+    for (int y = lo.y; y <= hi.y; ++y) {
+        for (int x = lo.x; x <= hi.x; ++x) {
+            d = min(d, source_depth(ivec2(x, y)));
+        }
+    }
+    imageStore(nph_images_2d[nonuniformEXT(pc.arg1)], p, vec4(d, 0.0, 0.0, 0.0));
+}

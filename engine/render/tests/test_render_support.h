@@ -43,6 +43,12 @@ static inline void test_renderer_desc(NphRendererDesc *d, NphGpuDevice *dev)
     d->specular_samples = 64U;
     d->brdf_lut_size = 32U;
     d->max_anisotropy = 1.0F;
+    // The production path's lists, sized for test scenes.
+    d->max_visible_clusters = 4096U;
+    d->max_cull_batches = 1024U;
+    d->max_deferred = 4096U;
+    d->max_instance_updates = 256U;
+    d->meshlet_index_pool = 1U << 20U;
     d->name = "test renderer";
 }
 
