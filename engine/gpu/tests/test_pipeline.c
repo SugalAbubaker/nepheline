@@ -187,23 +187,29 @@ static u32 mesh_draw_columns(NphGpuDevice *dev, NphGpuPipeline pipeline, MeshDra
     test_read_image(dev, target, 0U, pixels, sizeof pixels);
     nph_gpu_image_destroy(dev, target);
     u32 columns = 0U;
+    u32 mismatches = 0U;
     for (u32 c = 0; c < 8U; ++c) {
         const bool lit = test_pixel_near(&pixels[((u64)32U * 64U + (u64)c * 8U + 4U) * 4U], 0U,
                                          255U, 0U, 255U, 0U);
         // Every pixel of a column agrees with its centre.
-        for (u32 y = 0; y < 64U; y += 7U) {
+        for (u32 y = 0; y < 64U; ++y) {
             for (u32 x = c * 8U; x < c * 8U + 8U; ++x) {
                 const u8 *p = &pixels[((u64)y * 64U + x) * 4U];
-                NTEST_ASSERT_TRUE(lit ? test_pixel_near(p, 0U, 255U, 0U, 255U, 0U)
-                                      : test_pixel_near(p, 0U, 0U, 0U, 255U, 0U));
+                const bool ok = lit ? test_pixel_near(p, 0U, 255U, 0U, 255U, 0U)
+                                    : test_pixel_near(p, 0U, 0U, 0U, 255U, 0U);
+                if (!ok && mismatches++ == 0U) {
+                    NTEST_LOG("mode %d: pixel (%u, %u) is (%u, %u, %u, %u) in a column that is %s",
+                              (int)mode, x, y, p[0], p[1], p[2], p[3], lit ? "lit" : "dark");
+                }
             }
         }
         // The draws fill columns from the left with no gaps.
         if (lit) {
-            NTEST_ASSERT_EQ_UINT(columns, c);
+            NTEST_EXPECT_EQ_UINT(columns, c);
             ++columns;
         }
     }
+    NTEST_EXPECT_EQ_UINT(mismatches, 0U);
     return columns;
 }
 
