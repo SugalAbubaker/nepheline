@@ -405,9 +405,9 @@ static NphVec3 corner_position(const CookPolyMesh *m, u32 corner)
     return m->positions.data[m->corners.data[corner]];
 }
 
-NphVec3 cook_polymesh_face_normal(const CookPolyMesh *m, u32 face)
+// The face's Newell vector: its normal times twice its area.
+static NphVec3 newell(const CookPolyMesh *m, u32 face)
 {
-    NPH_ASSERT(m != NULL && face < m->faces.len);
     const CookPolyFace *f = &m->faces.data[face];
     // Relative to the first corner, so faces far from the origin keep
     // their precision.
@@ -420,7 +420,19 @@ NphVec3 cook_polymesh_face_normal(const CookPolyMesh *m, u32 face)
         n.y += (a.z - b.z) * (a.x + b.x);
         n.z += (a.x - b.x) * (a.y + b.y);
     }
-    return nph_vec3_normalize_or(n, nph_vec3_zero());
+    return n;
+}
+
+NphVec3 cook_polymesh_face_normal(const CookPolyMesh *m, u32 face)
+{
+    NPH_ASSERT(m != NULL && face < m->faces.len);
+    return nph_vec3_normalize_or(newell(m, face), nph_vec3_zero());
+}
+
+f32 cook_polymesh_face_area(const CookPolyMesh *m, u32 face)
+{
+    NPH_ASSERT(m != NULL && face < m->faces.len);
+    return nph_vec3_length(newell(m, face)) * 0.5F;
 }
 
 NphVec3 cook_polymesh_face_center(const CookPolyMesh *m, u32 face)
