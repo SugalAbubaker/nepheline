@@ -80,6 +80,7 @@ void editor_release_game_input(Editor *ed)
 
 void editor_play_toggle(Editor *ed)
 {
+    editor_mesh_edit_end(ed); // play copies the world; the mesh edit is saved first
     NphEngine *e = ed->engine;
     if (nph_engine_is_playing(e)) {
         editor_release_game_input(ed);
@@ -216,6 +217,44 @@ static void shortcuts(Editor *ed)
     if (igIsKeyPressed_Bool(ImGuiKey_F5, false)) {
         editor_play_toggle(ed);
     }
+    if (editing && igIsKeyPressed_Bool(ImGuiKey_Tab, false) && !io->KeyCtrl) {
+        if (editor_mesh_editing(ed)) {
+            editor_mesh_edit_end(ed);
+        } else {
+            NPH_IGNORE_RESULT(editor_mesh_edit_begin(ed)); // logged
+        }
+    }
+    if (editor_mesh_editing(ed)) {
+        // The mesh's own keys, its own history.
+        if (io->KeyCtrl) {
+            if (igIsKeyPressed_Bool(ImGuiKey_Z, true)) {
+                (void)(io->KeyShift ? editor_mesh_edit_redo(ed) : editor_mesh_edit_undo(ed));
+            }
+            if (igIsKeyPressed_Bool(ImGuiKey_Y, true)) {
+                (void)editor_mesh_edit_redo(ed);
+            }
+            if (igIsKeyPressed_Bool(ImGuiKey_E, false)) {
+                editor_mesh_edit_extrude_selection(ed);
+            }
+            if (igIsKeyPressed_Bool(ImGuiKey_A, false)) {
+                editor_mesh_edit_select_all(ed);
+            }
+            if (igIsKeyPressed_Bool(ImGuiKey_S, false)) {
+                save(ed);
+            }
+            return;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_Escape, false)) {
+            editor_mesh_edit_end(ed);
+            return;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_1, false)) {
+            NPH_IGNORE_RESULT(editor_mesh_edit_select(ed, EDITOR_MESH_VERTICES, NULL, 0U, true));
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_2, false)) {
+            NPH_IGNORE_RESULT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, NULL, 0U, true));
+        }
+    }
     if (igIsKeyPressed_Bool(ImGuiKey_F6, false) && !editing) {
         nph_engine_set_paused(e, !nph_engine_is_paused(e));
     }
@@ -251,7 +290,7 @@ static void shortcuts(Editor *ed)
         }
         return;
     }
-    if (editing && igIsKeyPressed_Bool(ImGuiKey_Delete, false)) {
+    if (editing && !editor_mesh_editing(ed) && igIsKeyPressed_Bool(ImGuiKey_Delete, false)) {
         editor_delete_selection(ed);
     }
     if (editing && igIsKeyPressed_Bool(ImGuiKey_F2, false)) {
@@ -357,6 +396,14 @@ static void main_menu(Editor *ed)
         }
         if (igMenuItem_Bool("Rename", "F2", false, !playing && selected)) {
             editor_begin_rename(ed, ed->selection.primary);
+        }
+        if (igMenuItem_Bool(editor_mesh_editing(ed) ? "Done Editing Mesh" : "Edit Mesh", "Tab",
+                            false, !playing && selected)) {
+            if (editor_mesh_editing(ed)) {
+                editor_mesh_edit_end(ed);
+            } else {
+                NPH_IGNORE_RESULT(editor_mesh_edit_begin(ed)); // logged
+            }
         }
         igSeparator();
         if (igMenuItem_Bool("Frame Selection", "F", false, selected)) {
@@ -592,6 +639,7 @@ static void hook_sync(NphEngine *e, void *user)
     }
     editor_selection_prune(&ed->selection, nph_engine_world(ed->engine));
     editor_assets_update(ed);
+    editor_mesh_edit_update(ed);
     const u64 now = nph_time_now_ns();
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
     ed->last_frame_ns = now;
@@ -746,6 +794,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     ed->alloc = desc->alloc;
     ed->log_sink = desc->log;
     nph_mutex_init(&ed->resolve_lock);
+    editor_mesh_edit_init(ed);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
@@ -921,6 +970,8 @@ void editor_detach(Editor *ed)
                          (unsigned long long)leaked);
         }
     }
+    editor_mesh_edit_free(ed); // unsaved changes are dropped
+    editor_mesh_edit_init(ed);
     editor_assets_close(ed); // after the import in progress, if any
     editor_viewport_free(ed);
     editor_console_free(ed);

@@ -90,26 +90,26 @@ static NphResult selected_vertices(Editor *ed, NphArrayU32 *out)
         }
         return NPH_RESULT_OK;
     }
-    u8 *seen = NPH_ALLOC_ARRAY_ZEROED(ed->alloc, u8, (u64)me->mesh.positions.len + 1U);
-    if (seen == NULL) {
-        return NPH_RESULT_OUT_OF_MEMORY;
+    // The viewport asks every frame: the flags are kept, and grow only with
+    // the mesh.
+    NPH_TRY(NPH_ARRAY_RESIZE(&me->seen, me->mesh.positions.len));
+    if (me->seen.len != 0U) {
+        memset(me->seen.data, 0, (size_t)me->seen.len);
     }
-    NphResult r = NPH_RESULT_OK;
-    for (u32 f = 0; f < me->selected.len && r == NPH_RESULT_OK; ++f) {
+    for (u32 f = 0; f < me->selected.len; ++f) {
         if (me->selected.data[f] == 0U) {
             continue;
         }
         const CookPolyFace *face = &me->mesh.faces.data[f];
-        for (u32 i = 0; i < face->count && r == NPH_RESULT_OK; ++i) {
+        for (u32 i = 0; i < face->count; ++i) {
             const u32 v = me->mesh.corners.data[face->first + i];
-            if (seen[v] == 0U) {
-                seen[v] = 1U;
-                r = NPH_ARRAY_PUSH(out, v);
+            if (me->seen.data[v] == 0U) {
+                me->seen.data[v] = 1U;
+                NPH_TRY(NPH_ARRAY_PUSH(out, v));
             }
         }
     }
-    NPH_FREE_ARRAY(ed->alloc, u8, seen, (u64)me->mesh.positions.len + 1U);
-    return r;
+    return NPH_RESULT_OK;
 }
 
 // A copy of the mesh before a change, for undo; a new change drops redo.
@@ -151,8 +151,8 @@ static void drop_preview(Editor *ed)
         nph_render_instance_destroy(r, me->preview_instance);
     }
     if (nph_render_mesh_is_valid(r, me->preview)) {
-        nph_render_mesh_destroy(r,
-                                me->preview); // after the instance, and after the frames using it
+        // After its instance; the renderer defers it past the frames using it.
+        nph_render_mesh_destroy(r, me->preview);
     }
     me->preview_instance = NPH_RENDER_INSTANCE_NULL;
     me->preview = NPH_RENDER_MESH_NULL;
@@ -272,6 +272,10 @@ NphResult editor_mesh_edit_begin(Editor *ed)
     }
     const NphWorld *w = nph_engine_edit_world(ed->engine);
     const NphEntity e = ed->selection.primary;
+    if (!nph_world_is_alive(w, e)) {
+        NPH_LOG_WARN(&LOG_EDITOR, "select an entity to edit its mesh");
+        return NPH_RESULT_NOT_FOUND;
+    }
     const NphMeshRenderer *m = (const NphMeshRenderer *)nph_world_get(
         w, e, nph_engine_components(ed->engine)->mesh_renderer);
     char key[EDITOR_PROJECT_PATH_MAX];
@@ -393,8 +397,7 @@ void editor_mesh_edit_update(Editor *ed)
             snapshots_clear(&me->redo);
             cook_polymesh_free(&me->mesh);
         }
-        drop_preview(ed);
-        me->committing = false;
+        hand_back(ed);
         return;
     }
     if (me->active && (nph_engine_is_playing(ed->engine) ||
@@ -435,6 +438,7 @@ void editor_mesh_edit_free(Editor *ed)
     NPH_ARRAY_FREE(&me->selected);
     NPH_ARRAY_FREE(&me->drag_vertices);
     NPH_ARRAY_FREE(&me->drag_start);
+    NPH_ARRAY_FREE(&me->seen);
     memset(me, 0, sizeof *me);
 }
 
@@ -448,6 +452,7 @@ void editor_mesh_edit_init(Editor *ed)
     NPH_ARRAY_INIT(&me->selected, ed->alloc);
     NPH_ARRAY_INIT(&me->drag_vertices, ed->alloc);
     NPH_ARRAY_INIT(&me->drag_start, ed->alloc);
+    NPH_ARRAY_INIT(&me->seen, ed->alloc);
 }
 
 // ---------------------------------------------------------------------------

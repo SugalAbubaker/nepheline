@@ -362,6 +362,7 @@ static void finished(Editor *ed, const EditorImportResult *res)
     for (u32 i = 0; sr != NULL && i < res->written_count; ++i) {
         (void)nph_scene_renderer_reload(sr, res->written[i]);
     }
+    editor_mesh_edit_finished(ed, res);
     EditorPlacement *slot = placement_of(ed, res->id);
     if (slot == NULL) {
         return;

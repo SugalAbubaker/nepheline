@@ -1239,3 +1239,197 @@ NTEST(Editor, a_source_imported_again_is_drawn_anew_where_it_is_used)
     test_temp_dir_remove(&dir);
     finish(&fx);
 }
+
+// ---------------------------------------------------------------------------
+// Mesh editing
+// ---------------------------------------------------------------------------
+
+// A cube made in the editor, selected, its cook done and drawn.
+static NphEntity made_cube(EditorFixture *f)
+{
+    NTEST_ASSERT_EQ_INT(editor_create_primitive(f->editor, EDITOR_PRIMITIVE_CUBE), NPH_RESULT_OK);
+    settle(f);
+    const NphEntity cube = f->editor->selection.primary;
+    NTEST_ASSERT_TRUE(nph_world_is_alive(nph_engine_edit_world(f->engine), cube));
+    return cube;
+}
+
+static NphVec3 position(EditorFixture *f, u32 index)
+{
+    const CookPolyMesh *m = editor_mesh_edit_mesh(f->editor);
+    NTEST_ASSERT_NOT_NULL(m);
+    NTEST_ASSERT_LT_UINT(index, m->positions.len);
+    return m->positions.data[index];
+}
+
+NTEST(Editor, a_mesh_is_edited_in_place_saved_and_cooked_again)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    const NphEntity cube = made_cube(&fx);
+    const u32 scene_steps = editor_history_undo_count(ed->history);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(editor_mesh_editing(ed));
+    NTEST_EXPECT_EQ_UINT(editor_mesh_edit_mesh(ed)->faces.len, 6U);
+    frames(&fx, 2U);
+    // The edited version is drawn and the cooked one hidden.
+    NphRenderFrameStats rs = nph_engine_frame_stats(fx.engine)->render;
+    NTEST_EXPECT_EQ_UINT(rs.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(rs.culled, 1U);
+
+    // The top face (+Y), extruded half a metre and moved a quarter more.
+    const u32 top = 4U;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, &top, 1U, false),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_extrude(ed, 0.5F), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(editor_mesh_edit_mesh(ed)->faces.len, 10U);
+    NTEST_EXPECT_EQ_UINT(editor_mesh_edit_mesh(ed)->positions.len, 12U);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_move(ed, nph_vec3(0.0F, 0.25F, 0.0F)), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(position(&fx, 8U).y, 1.25F, 1e-6F);
+    // Its own history: undo and redo the move.
+    NTEST_ASSERT_TRUE(editor_mesh_edit_undo(ed));
+    NTEST_EXPECT_NEAR_F32(position(&fx, 8U).y, 1.0F, 1e-6F);
+    NTEST_ASSERT_TRUE(editor_mesh_edit_redo(ed));
+    NTEST_EXPECT_NEAR_F32(position(&fx, 8U).y, 1.25F, 1e-6F);
+    NTEST_EXPECT_FALSE(editor_mesh_edit_redo(ed));
+    // A vertex, nudged.
+    const u32 corner = 0U;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_VERTICES, &corner, 1U, false),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_move(ed, nph_vec3(-0.25F, 0.0F, 0.0F)), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(position(&fx, 0U).x, -0.75F, 1e-6F);
+    const u32 beyond = 99U;
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_VERTICES, &beyond, 1U, false),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_extrude(ed, 0.5F), NPH_RESULT_INVALID_STATE); // vertices
+    frames(&fx, 2U);
+
+    // Done: saved, cooked again, and drawn again from the cooked mesh, with
+    // no frame in between where the cube is missing.
+    editor_mesh_edit_end(ed);
+    NTEST_EXPECT_FALSE(editor_mesh_editing(ed));
+    char source[1200];
+    (void)snprintf(source, sizeof source, "%s/meshes/cube.nmesh",
+                   editor_project_assets_dir(editor_project(ed)));
+    CookPolyMesh saved;
+    NTEST_ASSERT_EQ_INT(cook_polymesh_load(nph_allocator_system(), source, &saved), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(saved.faces.len, 10U);
+    NTEST_EXPECT_NEAR_F32(saved.positions.data[0].x, -0.75F, 1e-6F);
+    cook_polymesh_free(&saved);
+    for (u32 i = 0; i < 40U; ++i) {
+        frames(&fx, 1U);
+        rs = nph_engine_frame_stats(fx.engine)->render;
+        NTEST_ASSERT_EQ_UINT(rs.draws, 1U); // the preview or the cooked mesh, never neither
+        if (!ed->mesh_edit.committing) {
+            break;
+        }
+        editor_project_wait(editor_project(ed));
+        nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    }
+    NTEST_EXPECT_FALSE(ed->mesh_edit.committing);
+    frames(&fx, 1U);
+    rs = nph_engine_frame_stats(fx.engine)->render;
+    NTEST_EXPECT_EQ_UINT(rs.instances, 1U); // the preview is gone
+    NTEST_EXPECT_EQ_UINT(rs.culled, 0U);
+    NTEST_EXPECT_GT_UINT(drawn_vertices(&fx, cube), 24U); // the extruded cube, cooked
+    // The scene's history did not see any of it.
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), scene_steps);
+
+    // An entity that draws no editable mesh cannot be edited.
+    NphEntity plain = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "plain", NPH_ENTITY_NULL, NULL, &plain),
+                        NPH_RESULT_OK);
+    editor_selection_set(&ed->selection, plain);
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_FALSE(editor_mesh_editing(ed));
+    // Nor can nothing.
+    editor_selection_clear(&ed->selection);
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_FALSE(editor_mesh_editing(ed));
+    finish(&fx);
+}
+
+NTEST(Editor, mesh_editing_picks_and_drags_with_the_mouse)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    const NphEntity cube = made_cube(&fx);
+    // The camera level with the cube, in front of it: +X to the right.
+    EditorCamera *cam = editor_camera(ed);
+    editor_camera_default(cam);
+    cam->pivot = editor_world_transform_of(nph_engine_edit_world(fx.engine), cube).translation;
+    cam->pitch = -0.3F;
+    cam->distance = 4.0F;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    const EditorView v = editor_view(&fx);
+    const NphWorldTransform wt = editor_world_transform_of(nph_engine_edit_world(fx.engine), cube);
+    // Vertex 7 is the (+, +, +) corner, the one nearest the camera.
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    screen_of(&v, nph_world_transform_point(&wt, position(&fx, 7U)), &x, &y);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_ASSERT_EQ_UINT(ed->mesh_edit.selected.len, 8U);
+    NTEST_EXPECT_EQ_UINT(ed->mesh_edit.selected.data[7], 1U);
+    u32 picked = 0U;
+    for (u32 i = 0; i < 8U; ++i) {
+        picked += ed->mesh_edit.selected.data[i];
+    }
+    NTEST_EXPECT_EQ_UINT(picked, 1U);
+    // The gizmo stands on it: its X arrow drags it one metre to the right.
+    const NphDVec3 at = nph_world_transform_point(&wt, position(&fx, 7U));
+    const f32 size =
+        EDITOR_GIZMO_PIXELS * editor_view_world_per_unit(&v, editor_view_depth(&v, at));
+    f32 ax = 0.0F;
+    f32 ay = 0.0F;
+    f32 bx = 0.0F;
+    f32 by = 0.0F;
+    screen_of(&v, nph_dvec3(at.x + (f64)size * 0.6, at.y, at.z), &ax, &ay);
+    screen_of(&v, nph_dvec3(at.x + (f64)size * 0.6 + 1.0, at.y, at.z), &bx, &by);
+    (void)feed(&fx, move_to(ax, ay));
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_INT(ed->gizmo_hover, EDITOR_GIZMO_X);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    NTEST_ASSERT_TRUE(ed->gizmo_dragging);
+    for (u32 i = 1; i <= 4U; ++i) {
+        (void)feed(&fx, move_to(ax + (bx - ax) * (f32)i / 4.0F, ay + (by - ay) * (f32)i / 4.0F));
+        frames(&fx, 1U);
+    }
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(ed->gizmo_dragging);
+    NTEST_EXPECT_NEAR_F32(position(&fx, 7U).x, 1.5F, 0.05F);
+    NTEST_EXPECT_NEAR_F32(position(&fx, 7U).y, 0.5F, 1e-4F);
+    NTEST_EXPECT_NEAR_F32(position(&fx, 6U).x, -0.5F, 0.0F); // the others stay
+    // One change: undone in one step.
+    NTEST_ASSERT_TRUE(editor_mesh_edit_undo(ed));
+    NTEST_EXPECT_NEAR_F32(position(&fx, 7U).x, 0.5F, 0.0F);
+    // Faces: a click on the top picks it.
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, NULL, 0U, false),
+                        NPH_RESULT_OK);
+    const NphVec3 top = nph_vec3(0.1F, 0.5F, 0.1F); // on the top face, nearer the camera's side
+    screen_of(&v, nph_world_transform_point(&wt, top), &x, &y);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_ASSERT_EQ_UINT(ed->mesh_edit.selected.len, 6U);
+    NTEST_EXPECT_EQ_UINT(ed->mesh_edit.selected.data[4], 1U);
+    // Selecting another entity ends editing.
+    editor_selection_set(&ed->selection, NPH_ENTITY_NULL);
+    frames(&fx, 1U);
+    NTEST_EXPECT_FALSE(editor_mesh_editing(ed));
+    finish(&fx);
+}

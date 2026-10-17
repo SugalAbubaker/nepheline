@@ -130,6 +130,55 @@ typedef struct EditorAssets {
     EditorPlacement placements[EDITOR_PROJECT_REQUESTS];
 } EditorAssets;
 
+// What the gizmo moves (gizmo_ui.c): the selected entity, or the vertices
+// of the mesh being edited (mesh_edit.c).
+typedef struct EditorGizmoTarget {
+    NphWorldTransform transform; // where it stands now: its pivot and axes
+    u64 id;                      // a drag ends when the target is another
+    // A drag: begin (false refuses it), apply for every move with the
+    // transform the gizmo made of the one it started from, end.
+    bool (*begin)(Editor *ed, void *user);
+    void (*apply)(Editor *ed, const NphWorldTransform *start, const NphWorldTransform *moved,
+                  void *user);
+    void (*end)(Editor *ed, void *user);
+    void *user;
+} EditorGizmoTarget;
+
+typedef NPH_ARRAY(CookPolyMesh) EditorMeshEditSnapshots;
+typedef NPH_ARRAY(u8) EditorFlagArray;
+
+// Mesh editing (mesh_edit.c).
+typedef struct EditorMeshEdit {
+    bool active;
+    NphEntity entity;
+    char key[EDITOR_PROJECT_PATH_MAX]; // the source
+    char name[EDITOR_IMPORT_NAME_MAX];
+    NphGuid asset; // the cooked mesh
+    CookPolyMesh mesh;
+    EditorMeshSelect mode;
+    EditorFlagArray selected;     // per vertex or face, by the mode
+    EditorMeshEditSnapshots undo; // the mesh before each change
+    EditorMeshEditSnapshots redo;
+    bool changed; // since editing began
+    // A gizmo drag: the vertices it moves, where they and their centre began.
+    NphArrayU32 drag_vertices;
+    CookVec3Array drag_start;
+    NphVec3 drag_center;
+    EditorFlagArray seen; // scratch: a flag per position, kept to spare an allocation a frame
+    // The mesh as edited, drawn in place of the cooked one.
+    NphRenderMesh preview;
+    NphRenderInstance preview_instance;
+    bool preview_stale;
+    // After editing: the cook that brings the cooked mesh up to date, and
+    // the reload that brings it back in view.
+    bool committing;
+    bool commit_done;
+    bool commit_ok;
+    bool reloading;
+    u32 commit;
+    NphRenderInstance stale_instance; // the entity's instance before the reload
+} EditorMeshEdit;
+
 typedef struct EditorPanels {
     bool viewport;
     bool console;
@@ -188,6 +237,7 @@ struct Editor {
     EditorProject *project;
     NphMutex resolve_lock;
     EditorAssets assets;
+    EditorMeshEdit mesh_edit;
 
     // The UI.
     EditorPanels show;
@@ -221,6 +271,7 @@ struct Editor {
     EditorGizmoHandle gizmo_hover;
     bool gizmo_dragging;
     EditorGizmoDrag gizmo_drag;
+    EditorGizmoTarget gizmo_target; // the drag's
     NphEntity gizmo_entity;
     NphLocalTransform gizmo_start_local;
     u64 gizmo_drag_id; // a merge key per drag
@@ -262,10 +313,34 @@ void editor_assets_update(Editor *ed);
 void editor_assets_place(Editor *ed, const char *key, NphDVec3 at);
 void editor_panel_assets(Editor *ed);
 
+// mesh_edit.c
+void editor_mesh_edit_init(Editor *ed);
+// Ends editing without saving and drops the preview (detach).
+void editor_mesh_edit_free(Editor *ed);
+// At the sync point: the preview follows the entity and is rebuilt when the
+// mesh changed; editing ends when another entity is selected or play
+// begins; a finished commit hands back to the cooked mesh.
+void editor_mesh_edit_update(Editor *ed);
+// A request of the project finished (after its assets were reloaded).
+void editor_mesh_edit_finished(Editor *ed, const EditorImportResult *res);
+// The viewport while editing: the gizmo on the selection and picking
+// elements. True when the gizmo has the mouse.
+bool editor_mesh_edit_viewport(Editor *ed, const EditorView *v, bool hovered, ImDrawList *dl);
+// The mesh's edges, vertices or face centres, and the selection, as debug
+// lines.
+void editor_mesh_edit_overlays(Editor *ed, const EditorView *v);
+void editor_mesh_edit_toolbar(Editor *ed);
+// Extrudes the selected faces by a quarter of their mean size.
+void editor_mesh_edit_extrude_selection(Editor *ed);
+void editor_mesh_edit_select_all(Editor *ed);
+
 // gizmo_ui.c
 // Shows the gizmo on the primary selection and drags it. True when it has
 // the mouse (a handle under it, or a drag): the viewport then does not pick.
 bool editor_gizmo_update(Editor *ed, const EditorView *v, bool image_hovered, ImDrawList *dl);
+// As editor_gizmo_update for any target; NULL: none (a drag ends).
+bool editor_gizmo_drive(Editor *ed, const EditorView *v, bool image_hovered, ImDrawList *dl,
+                        const EditorGizmoTarget *target);
 
 // panel_viewport.c
 // Points the editor camera at the selection.
