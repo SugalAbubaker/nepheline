@@ -3,7 +3,8 @@
 // Extensible Rendering Architecture in Frostbite", GDC 2017): pass culling
 // by reference counting, barrier derivation from declared uses, transient
 // aliasing by lifetime, async compute batches joined with timeline
-// semaphores, and parallel recording with one command buffer per pass.
+// semaphores, and parallel recording, consecutive passes sharing a command
+// buffer so their number does not grow with the passes.
 #include <nepheline/core/hash.h>
 #include <nepheline/core/profile.h>
 
@@ -47,8 +48,6 @@ struct NphGpuRgPass {
     u32 pre_count;
     u32 post_head;
     u32 post_count;
-    NphGpuCmd *cmd;
-    NphResult record_result;
     u32 ts_begin;
     u32 ts_end;
 };
@@ -131,12 +130,24 @@ typedef struct RgBatch {
     NphGpuQueueType queue;
     u32 first_pass; // index into the live pass order
     u32 pass_count;
+    u32 first_group; // its command buffers (RgGroup), in order
+    u32 group_count;
     u32 depends_on[NPH_GPU_QUEUE_COUNT];     // batch index per queue, RG_INVALID: none
     b32 wait_submitted[NPH_GPU_QUEUE_COUNT]; // wait for all earlier submits on that queue
     u64 value;                               // timeline value after submit
     b32 wait_acquire;
     b32 signal_present;
 } RgBatch;
+
+// Consecutive passes of a batch recorded into one command buffer by one
+// thread (plan_groups).
+typedef struct RgGroup {
+    NphGpuRenderGraph *graph;
+    u32 first; // index into the live pass order
+    u32 count;
+    NphGpuCmd *cmd;
+    NphResult result;
+} RgGroup;
 
 typedef struct RgTiming {
     const char *name;
@@ -166,6 +177,8 @@ struct NphGpuRenderGraph {
     u32 order_count;
     RgBatch *batches;
     u32 batch_count;
+    RgGroup *groups; // at most one per live pass
+    u32 group_count;
     RgBlock blocks[RG_MAX_BLOCKS];
     u32 block_count;
     RgCacheEntry *cache;
@@ -227,10 +240,11 @@ NphResult nph_gpu_render_graph_create(NphGpuDevice *dev, const NphGpuRenderGraph
     g->barriers = NPH_ALLOC_ARRAY_ZEROED(g->alloc, RgBarrier, g->desc.max_barriers);
     g->order = NPH_ALLOC_ARRAY_ZEROED(g->alloc, u32, g->desc.max_passes);
     g->batches = NPH_ALLOC_ARRAY_ZEROED(g->alloc, RgBatch, g->desc.max_passes);
+    g->groups = NPH_ALLOC_ARRAY_ZEROED(g->alloc, RgGroup, g->desc.max_passes);
     g->cache_cap = g->desc.transient_cache;
     g->cache = NPH_ALLOC_ARRAY_ZEROED(g->alloc, RgCacheEntry, g->cache_cap);
     bool ok = g->passes != NULL && g->resources != NULL && g->uses != NULL && g->barriers != NULL &&
-              g->order != NULL && g->batches != NULL && g->cache != NULL;
+              g->order != NULL && g->batches != NULL && g->groups != NULL && g->cache != NULL;
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         g->timings[i] = NPH_ALLOC_ARRAY_ZEROED(g->alloc, RgTiming, g->desc.max_passes);
         ok = ok && g->timings[i] != NULL;
@@ -303,6 +317,9 @@ void nph_gpu_render_graph_destroy(NphGpuRenderGraph *g)
     }
     if (g->batches != NULL) {
         NPH_FREE_ARRAY(alloc, RgBatch, g->batches, g->desc.max_passes);
+    }
+    if (g->groups != NULL) {
+        NPH_FREE_ARRAY(alloc, RgGroup, g->groups, g->desc.max_passes);
     }
     NPH_FREE_TYPE(alloc, NphGpuRenderGraph, g);
 }
@@ -1548,16 +1565,14 @@ static void pass_declared_bytes(const NphGpuRenderGraph *g, const NphGpuRgPass *
     *out_write = write;
 }
 
-static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass)
+// Records one pass into `cmd`, inside a debug label of its name when it
+// shares the command buffer (the command buffer carries the name otherwise).
+static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass, NphGpuCmd *cmd, bool label)
 {
-    NphGpuDevice *dev = g->dev;
-    pass->cmd = NULL;
-    pass->record_result = nph_gpu_cmd_begin(dev, pass->queue, pass->desc.name, &pass->cmd);
-    if (pass->record_result != NPH_RESULT_OK) {
-        return;
-    }
     NPH_PROFILE_BEGIN(pass->desc.name); // pass names are static strings
-    NphGpuCmd *cmd = pass->cmd;
+    if (label) {
+        nph_gpu_cmd_begin_label(cmd, pass->desc.name, 0.4F, 0.6F, 0.9F);
+    }
     pass->ts_begin = nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
     record_barrier_list(g, cmd, pass->pre_head);
     const bool rendering =
@@ -1596,19 +1611,63 @@ static void record_pass(NphGpuRenderGraph *g, NphGpuRgPass *pass)
     }
     record_barrier_list(g, cmd, pass->post_head);
     pass->ts_end = nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
-    nph_gpu_cmd_end(cmd);
+    if (label) {
+        nph_gpu_cmd_end_label(cmd);
+    }
     NPH_PROFILE_END();
 }
 
-typedef struct RecordJob {
-    NphGpuRenderGraph *graph;
-    NphGpuRgPass *pass;
-} RecordJob;
+static void record_group(RgGroup *group)
+{
+    NphGpuRenderGraph *g = group->graph;
+    const NphGpuRgPass *first = &g->passes[g->order[group->first]];
+    group->cmd = NULL;
+    group->result = nph_gpu_cmd_begin(g->dev, first->queue, first->desc.name, &group->cmd);
+    if (group->result != NPH_RESULT_OK) {
+        return;
+    }
+    for (u32 i = 0; i < group->count; ++i) {
+        record_pass(g, &g->passes[g->order[group->first + i]], group->cmd, group->count > 1U);
+    }
+    nph_gpu_cmd_end(group->cmd);
+}
 
 static void record_job(void *user)
 {
-    const RecordJob *job = (const RecordJob *)user;
-    record_pass(job->graph, job->pass);
+    record_group((RgGroup *)user);
+}
+
+// Splits each batch's passes into consecutive groups, one command buffer
+// each: as many as there are threads to record them (one without a job
+// system), so a frame's command buffers stay bounded by its batches and
+// threads however many passes it has (CLAUDE.md §10.5, "a constant number
+// of command buffers"), and no thread exhausts its per-frame pool.
+static void plan_groups(NphGpuRenderGraph *g)
+{
+    const u32 threads =
+        g->jobs != NULL ? nph_max_u32(nph_job_system_worker_count(g->jobs), 1U) : 1U;
+    g->group_count = 0U;
+    for (u32 b = 0; b < g->batch_count; ++b) {
+        RgBatch *batch = &g->batches[b];
+        const u32 n = nph_min_u32(batch->pass_count, threads);
+        batch->first_group = g->group_count;
+        batch->group_count = n;
+        if (n == 0U) {
+            continue; // a batch always holds a pass; this keeps the division safe
+        }
+        const u32 base = batch->pass_count / n;
+        const u32 extra = batch->pass_count % n;
+        u32 first = batch->first_pass;
+        for (u32 k = 0; k < n; ++k) {
+            RgGroup *group = &g->groups[g->group_count++];
+            group->graph = g;
+            group->first = first;
+            group->count = base + (k < extra ? 1U : 0U);
+            group->cmd = NULL;
+            group->result = NPH_RESULT_OK;
+            first += group->count;
+        }
+    }
 }
 
 static NphResult execute_graph(NphGpuRenderGraph *g)
@@ -1623,26 +1682,24 @@ static NphResult execute_graph(NphGpuRenderGraph *g)
     g->stats.submits = 0U;
     g->stats.command_buffers = 0U;
 
-    // Record every live pass, in parallel when a job system is available.
-    if (g->jobs != NULL && g->order_count > 1U) {
-        RecordJob jobs[128];
+    // Record every group, in parallel when a job system is available.
+    plan_groups(g);
+    if (g->jobs != NULL && g->group_count > 1U) {
         NphJobDecl decls[128];
-        u32 n = 0U;
         u32 done = 0U;
-        while (done < g->order_count) {
-            n = 0U;
-            while (done + n < g->order_count && n < 128U) {
-                jobs[n].graph = g;
-                jobs[n].pass = &g->passes[g->order[done + n]];
+        while (done < g->group_count) {
+            u32 n = 0U;
+            while (done + n < g->group_count && n < 128U) {
+                RgGroup *group = &g->groups[done + n];
                 decls[n].fn = record_job;
-                decls[n].user = &jobs[n];
-                decls[n].name = jobs[n].pass->desc.name;
+                decls[n].user = group;
+                decls[n].name = g->passes[g->order[group->first]].desc.name;
                 ++n;
             }
             NphJobCounter counter = NPH_JOB_COUNTER_INIT;
             if (nph_job_run(g->jobs, decls, n, NPH_JOB_PRIORITY_HIGH, &counter) != NPH_RESULT_OK) {
                 for (u32 i = 0; i < n; ++i) {
-                    record_pass(g, jobs[i].pass);
+                    record_group(&g->groups[done + i]);
                 }
             } else {
                 nph_job_wait(g->jobs, &counter);
@@ -1650,15 +1707,14 @@ static NphResult execute_graph(NphGpuRenderGraph *g)
             done += n;
         }
     } else {
-        for (u32 o = 0; o < g->order_count; ++o) {
-            record_pass(g, &g->passes[g->order[o]]);
+        for (u32 i = 0; i < g->group_count; ++i) {
+            record_group(&g->groups[i]);
         }
     }
-    for (u32 o = 0; o < g->order_count; ++o) {
-        const NphGpuRgPass *pass = &g->passes[g->order[o]];
-        if (pass->record_result != NPH_RESULT_OK) {
+    for (u32 i = 0; i < g->group_count; ++i) {
+        if (g->groups[i].result != NPH_RESULT_OK) {
             g->executing = 0;
-            return pass->record_result;
+            return g->groups[i].result;
         }
     }
 
@@ -1671,9 +1727,11 @@ static NphResult execute_graph(NphGpuRenderGraph *g)
         RgBatch *batch = &g->batches[b];
         NphGpuCmd *cmds[128];
         u32 n = 0U;
-        for (u32 i = 0; i < batch->pass_count && n < 128U; ++i) {
-            NphGpuRgPass *pass = &g->passes[g->order[batch->first_pass + i]];
-            cmds[n++] = pass->cmd;
+        for (u32 i = 0; i < batch->group_count && n < 128U; ++i) {
+            cmds[n++] = g->groups[batch->first_group + i].cmd;
+        }
+        for (u32 i = 0; i < batch->pass_count; ++i) {
+            const NphGpuRgPass *pass = &g->passes[g->order[batch->first_pass + i]];
             RgTiming *t = &g->timings[slot][g->timing_count[slot]++];
             t->name = pass->desc.name;
             t->ts_begin = pass->ts_begin;
