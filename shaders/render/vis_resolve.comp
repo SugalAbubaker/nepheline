@@ -21,10 +21,24 @@
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
+#define NPH_SURFACE_GRID_LIGHTS
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the HDR target is B10G11R11, whose coarse steps are dithered.
+layout(constant_id = 0) const bool k_dither = false;
+
+// With `dither` the colour is rounded to the HDR target's grid at random
+// (debug views are stored as they are, for reading).
+void store(ivec2 p, vec3 color, bool dither)
+{
+    if (dither) {
+        color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
+    }
+    imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
+}
 
 // Perspective-correct barycentrics of a pixel at NDC `q` and their change
 // one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
@@ -102,10 +116,12 @@ void main()
         return;
     }
     ViewRef rview = ViewRef(view.v.render_view);
+    const uint debug = rview.v.debug_mode;
+    // Decided here, so that nothing of the view stays live to the store.
+    const bool dither = k_dither && debug == NPH_RENDER_DEBUG_NONE;
     const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
     const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg1)], p).x;
     vec3 color;
-    const uint debug = rview.v.debug_mode;
     if (v == 0ul) {
         color = background(rview, q);
     } else if (debug >= NPH_RENDER_DEBUG_CLUSTERS) {
@@ -168,9 +184,11 @@ void main()
         s.uv_dy = uvs * bary.ddy;
         s.color = mat3x4(unpackUnorm4x8(a0.w), unpackUnorm4x8(a1.w), unpackUnorm4x8(a2.w)) * bary.b;
         s.front_facing = vis_front_facing(c0, c1, c2, mirrored);
+        s.pixel = vec2(p) + 0.5;
+        s.depth = vis_depth(v);
 
         const NphRenderMaterialData material = MaterialsRef(view.v.materials).m[cluster.material];
         color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
     }
-    imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
+    store(p, color, dither);
 }

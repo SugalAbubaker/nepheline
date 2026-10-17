@@ -264,7 +264,56 @@ static NphVisMathCase random_case(NphPcg32 *rng, f32 width, f32 height, u32 i)
     c.rect = nph_vec4(x0, y0, x0 + sx, y0 + sy);
     c.depth = nph_pcg32_next_f32(rng);
     c.mirrored = nph_pcg32_next_u32(rng) & 1U;
+    // A light of every type, cones narrow to flat, and a view distance
+    // from half the near plane to past the last bin.
+    c.light_position = nph_vec4(
+        nph_pcg32_next_range_f32(rng, -10.0F, 10.0F), nph_pcg32_next_range_f32(rng, -10.0F, 10.0F),
+        nph_pcg32_next_range_f32(rng, -10.0F, 10.0F), nph_pcg32_next_range_f32(rng, 0.1F, 20.0F));
+    c.light_direction = nph_vec4_from_vec3(random_unit(rng), (f32)(i % 3U));
+    const f32 outer = nph_pcg32_next_range_f32(rng, 0.01F, 0.5F * NPH_PI);
+    const f32 distance = 0.1F * nph_f32_pow(2.0F, nph_pcg32_next_range_f32(rng, -1.0F, 21.0F));
+    c.light_cone = nph_vec4(nph_f32_cos(outer), nph_f32_sin(outer), distance, 0.0F);
     return c;
+}
+
+// How near vis_project_sphere_clipped's decisions come to switching (a
+// bound from the tangent or from the near plane's circle, the camera
+// inside the sphere or not), and the circle's conditioning; relative.
+static f64 clip_margin(NphVec4 sphere, f32 znear)
+{
+    const f64 nz = -(f64)znear;
+    const f64 r = (f64)sphere.w;
+    const f64 z = (f64)sphere.z;
+    f64 m = nph_f64_abs(z + r - nz);
+    const f64 dz = nz - z;
+    m = nph_f64_min(m, nph_f64_abs(r * r - dz * dz) / (r * r));
+    for (u32 axis = 0; axis < 2U; ++axis) {
+        const f64 a = axis == 0U ? (f64)sphere.x : (f64)sphere.y;
+        const f64 t2 = a * a + z * z - r * r;
+        m = nph_f64_min(m, nph_f64_abs(t2) / (a * a + z * z + r * r));
+        if (t2 > 0.0) {
+            const f64 len = nph_f64_sqrt(a * a + z * z);
+            const f64 ct = nph_f64_sqrt(t2) / len;
+            const f64 st = r / len;
+            m = nph_f64_min(m, nph_f64_abs((st * a + ct * z) * ct - nz));
+            m = nph_f64_min(m, nph_f64_abs((-st * a + ct * z) * ct - nz));
+        }
+    }
+    return m;
+}
+
+// Whether two vectors agree to `tol` relative to the larger of 1 and each
+// wanted component's magnitude.
+static bool near_vec4(NphVec4 got, NphVec4 want, f32 tol)
+{
+    const f32 g[4] = {got.x, got.y, got.z, got.w};
+    const f32 w[4] = {want.x, want.y, want.z, want.w};
+    for (u32 k = 0; k < 4U; ++k) {
+        if (!(nph_f32_abs(g[k] - w[k]) <= tol * nph_f32_max(1.0F, nph_f32_abs(w[k])))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Per test: cases decided either way (so the random cases exercise both)
@@ -400,6 +449,11 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     TwinTally triangle = {0U, 0U, 0U, 0U};
     TwinTally occluded = {0U, 0U, 0U, 0U};
     u32 rect_wrong = 0U;
+    u32 clipped_compared = 0U;
+    u32 clipped_wrong = 0U;
+    u32 spheres_wrong = 0U;
+    u32 zbins_compared = 0U;
+    u32 zbins_wrong = 0U;
     for (u32 i = 0; i < CASES; ++i) {
         const NphVisMathCase *c = &cases[i];
         const NphVisMathResult *r = &results[i];
@@ -453,6 +507,45 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
         f64 hm = 0.0;
         const bool occ = nph_render_ref_vis_hzb_occluded(&ref_hzb, c->rect, c->depth, &hm);
         tally(&occluded, r->hzb_occluded != 0U, occ, hm, 1e-4);
+
+        // The light culling: the clipped rectangle of spheres reaching in
+        // front of the near plane, the sphere around a light, the bins.
+        if (-(f64)c->sphere.z + (f64)c->sphere.w > (f64)view.projection.z &&
+            clip_margin(c->sphere, view.projection.z) > 1e-3) {
+            const NphVec4 want = nph_render_ref_vis_project_sphere_clipped(
+                centre, c->sphere.w, view.projection.x, view.projection.y, view.projection.z);
+            clipped_compared += 1U;
+            if (!near_vec4(r->clipped_rect, want, 1e-3F) && clipped_wrong++ == 0U) {
+                NTEST_LOG("case %u: clipped rect (%g %g %g %g), want (%g %g %g %g)", i,
+                          (f64)r->clipped_rect.x, (f64)r->clipped_rect.y, (f64)r->clipped_rect.z,
+                          (f64)r->clipped_rect.w, (f64)want.x, (f64)want.y, (f64)want.z,
+                          (f64)want.w);
+            }
+        }
+        const u32 type = (u32)c->light_direction.w;
+        const NphVec4 sphere = nph_render_ref_vis_light_sphere(
+            nph_vec3(c->light_position.x, c->light_position.y, c->light_position.z),
+            nph_vec3(c->light_direction.x, c->light_direction.y, c->light_direction.z),
+            c->light_position.w, type, c->light_cone.x, c->light_cone.y);
+        const bool at_switch = type == (u32)NPH_RENDER_LIGHT_TYPE_SPOT &&
+                               nph_f32_abs(c->light_cone.x - 0.70710678F) < 1e-6F;
+        if (!at_switch && !near_vec4(r->light_sphere, sphere, 1e-5F) && spheres_wrong++ == 0U) {
+            NTEST_LOG("case %u: light sphere (%g %g %g %g), want (%g %g %g %g)", i,
+                      (f64)r->light_sphere.x, (f64)r->light_sphere.y, (f64)r->light_sphere.z,
+                      (f64)r->light_sphere.w, (f64)sphere.x, (f64)sphere.y, (f64)sphere.z,
+                      (f64)sphere.w);
+        }
+        f64 zm = 0.0;
+        const u32 zbin =
+            nph_render_ref_zbin(c->light_cone.z, view.projection.z,
+                                (f32)NPH_RENDER_ZBINS / (f32)NPH_RENDER_ZBIN_OCTAVES, &zm);
+        if (zm > 1e-3) {
+            zbins_compared += 1U;
+            if (r->zbin != zbin && zbins_wrong++ == 0U) {
+                NTEST_LOG("case %u: distance %g in bin %u, want %u", i, (f64)c->light_cone.z,
+                          r->zbin, zbin);
+            }
+        }
     }
     expect_tally("projected", &projected);
     expect_tally("in frustum", &frustum);
@@ -461,6 +554,13 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     expect_tally("triangle culled", &triangle);
     expect_tally("hzb occluded", &occluded);
     NTEST_EXPECT_EQ_UINT(rect_wrong, 0U);
+    NTEST_LOG("light culling: %u clipped rectangles, %u bins compared", clipped_compared,
+              zbins_compared);
+    NTEST_EXPECT_GT_UINT(clipped_compared, 1000U);
+    NTEST_EXPECT_EQ_UINT(clipped_wrong, 0U);
+    NTEST_EXPECT_EQ_UINT(spheres_wrong, 0U);
+    NTEST_EXPECT_GT_UINT(zbins_compared, 1000U);
+    NTEST_EXPECT_EQ_UINT(zbins_wrong, 0U);
     for (u32 m = 0; m < mips; ++m) {
         const u32 w = nph_max_u32(hzb_w >> m, 1U);
         const u32 h = nph_max_u32(hzb_h >> m, 1U);
@@ -1263,4 +1363,523 @@ NTEST_F(Vis, meshlets_given_or_built_draw_the_same)
     render_into(f, &v, 1U, b);
     nph_render_instance_destroy(f->renderer, i);
     NTEST_EXPECT_EQ_MEM(a, b, PIXELS);
+}
+
+// ---------------------------------------------------------------------------
+// The light grid
+// ---------------------------------------------------------------------------
+
+// The light tests render into a 250 x 150 target: 16 x 10 light tiles, the
+// last column and row partial.
+#define LIGHT_W      250U
+#define LIGHT_H      150U
+#define LIGHT_PIXELS ((u64)LIGHT_W * LIGHT_H * 4U)
+
+typedef struct LightFixture {
+    RenderFixture f;
+    NphGpuImage target;
+} LightFixture;
+
+static bool light_setup(LightFixture *lf, u32 max_lights)
+{
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.max_lights = max_lights;
+    test_render_setup(&lf->f, &d);
+    lf->target = NPH_GPU_IMAGE_NULL;
+    if (lf->f.dev == NULL || !nph_renderer_production_supported(lf->f.renderer)) {
+        return false;
+    }
+    lf->target = test_make_image_2d(lf->f.dev, LIGHT_W, LIGHT_H, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                                    (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
+                                        (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC,
+                                    "light test target");
+    return true;
+}
+
+static void light_teardown(LightFixture *lf)
+{
+    if (lf->f.dev != NULL) {
+        nph_gpu_image_destroy(lf->f.dev, lf->target);
+    }
+    test_render_teardown(&lf->f);
+}
+
+#define REQUIRE_LIGHTS(lf, max_lights)                                                             \
+    do {                                                                                           \
+        if (!light_setup((lf), (max_lights))) {                                                    \
+            const bool no_device = (lf)->f.dev == NULL;                                            \
+            light_teardown(lf);                                                                    \
+            NTEST_SKIP(no_device ? "no Vulkan device available"                                    \
+                                 : "no production path on this device");                           \
+        }                                                                                          \
+    } while (0)
+
+static NphRenderCamera light_camera(void)
+{
+    return nph_render_camera_look_at(nph_dvec3(0.0, 1.5, 5.0), nph_dvec3(0.0, 0.0, 0.0),
+                                     nph_vec3(0.0F, 1.0F, 0.0F), 0.9F, 0.05F);
+}
+
+static void light_view(NphRenderView *v, u32 vis_flags)
+{
+    nph_render_view_default(v, light_camera());
+    v->ev100 = 7.0F; // an interior
+    v->pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    v->disable_ibl = 1;
+    v->background = NPH_RENDER_BACKGROUND_SOLID;
+    v->background_color = nph_vec3(1.0F, 2.0F, 3.0F);
+    v->vis_flags = vis_flags;
+}
+
+// Renders `frames` frames into the light target and reads the last back.
+static NphRenderFrameStats light_render(LightFixture *lf, const NphRenderView *v, u32 frames,
+                                        u8 *out)
+{
+    NphRenderFrameStats stats;
+    memset(&stats, 0, sizeof stats);
+    for (u32 i = 0; i < frames; ++i) {
+        stats = test_render_frame(&lf->f, v, lf->target);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(lf->f.dev), NPH_RESULT_OK);
+    test_read_image(lf->f.dev, lf->target, 0U, out, LIGHT_PIXELS);
+    return stats;
+}
+
+static ImageDiff light_diff(const u8 *a, const u8 *b, u32 tol)
+{
+    ImageDiff d = {0.0F, 0.0F, 0U};
+    u64 sum = 0U;
+    u32 ok = 0U;
+    for (u32 i = 0; i < LIGHT_W * LIGHT_H; ++i) {
+        u32 worst = 0U;
+        for (u32 c = 0; c < 3U; ++c) {
+            const u32 x = a[i * 4U + c];
+            const u32 y = b[i * 4U + c];
+            const u32 e = x > y ? x - y : y - x;
+            worst = nph_max_u32(worst, e);
+            sum += e;
+        }
+        d.max = nph_max_u32(d.max, worst);
+        ok += worst <= tol ? 1U : 0U;
+    }
+    d.within = (f32)ok / (f32)(LIGHT_W * LIGHT_H);
+    d.mean = (f32)sum / (f32)(LIGHT_W * LIGHT_H * 3U);
+    return d;
+}
+
+static NphRenderLightDesc point_desc(NphDVec3 p, f32 range, f32 intensity, NphVec3 color)
+{
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    ld.position = p;
+    ld.range = range;
+    ld.intensity = intensity;
+    ld.color = color;
+    return ld;
+}
+
+static NphRenderLight make_light(RenderFixture *f, const NphRenderLightDesc *ld)
+{
+    NphRenderLight l = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, ld, &l), NPH_RESULT_OK);
+    return l;
+}
+
+static NphRenderLight make_point(RenderFixture *f, NphDVec3 p, f32 range, f32 intensity)
+{
+    const NphRenderLightDesc ld = point_desc(p, range, intensity, nph_vec3_one());
+    return make_light(f, &ld);
+}
+
+// A random light of finite range in the room: points and spots, around
+// and behind the camera.
+static NphRenderLightDesc random_light(NphPcg32 *rng)
+{
+    const NphDVec3 p = nph_dvec3((f64)nph_pcg32_next_range_f32(rng, -6.0F, 6.0F),
+                                 (f64)nph_pcg32_next_range_f32(rng, -0.95F, 2.5F),
+                                 (f64)nph_pcg32_next_range_f32(rng, -4.0F, 7.0F));
+    const NphVec3 color = nph_vec3(nph_pcg32_next_range_f32(rng, 0.2F, 1.0F),
+                                   nph_pcg32_next_range_f32(rng, 0.2F, 1.0F),
+                                   nph_pcg32_next_range_f32(rng, 0.2F, 1.0F));
+    NphRenderLightDesc ld = point_desc(p, nph_pcg32_next_range_f32(rng, 0.3F, 3.0F),
+                                       nph_pcg32_next_range_f32(rng, 20.0F, 400.0F), color);
+    if (nph_pcg32_next_u32(rng) % 3U == 0U) {
+        ld.type = NPH_RENDER_LIGHT_TYPE_SPOT;
+        ld.direction =
+            nph_vec3_normalize(nph_vec3_add(random_unit(rng), nph_vec3(0.0F, -1.5F, 0.0F)));
+        ld.outer_cone = nph_pcg32_next_range_f32(rng, 0.15F, 1.5F);
+        ld.inner_cone = ld.outer_cone * nph_pcg32_next_range_f32(rng, 0.0F, 0.9F);
+    }
+    return ld;
+}
+
+// A room: a floor, a back wall, and spheres and cubes between them.
+static void light_room(RenderFixture *f)
+{
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial white = material(f, nph_vec4(0.8F, 0.8F, 0.8F, 1.0F), 0.0F, 0.7F);
+    const NphRenderMaterial metal = material(f, nph_vec4(0.9F, 0.7F, 0.4F, 1.0F), 1.0F, 0.35F);
+    (void)instance(f, plane, white, at(0.0, -1.0, 0.0, 12.0F));
+    NphRenderTransform wall = at(0.0, 1.0, -4.0, 1.0F);
+    wall.linear = nph_mat3_from_scale(nph_vec3(12.0F, 6.0F, 0.2F));
+    (void)instance(f, cube, white, wall);
+    for (u32 i = 0; i < 12U; ++i) {
+        const u32 row = i / 4U;
+        const f64 x = -3.0 + 2.0 * (f64)(i % 4U);
+        const f64 z = -2.5 + 1.6 * (f64)row;
+        (void)instance(f, (i & 1U) != 0U ? sphere : cube, (i % 3U) == 0U ? metal : white,
+                       at(x, -0.5, z, 0.9F));
+    }
+}
+
+// The grid read back after a frame: the counts, the sorted lights, the
+// bins, and the tile masks.
+typedef struct GridReadback {
+    u32 globals;
+    u32 locals;
+    NphRenderLightData *lights; // the sorted locals
+    u32 *zbins;                 // NPH_RENDER_ZBINS
+    u32 *tiles;                 // tiles_x * tiles_y * words
+    u32 tiles_x;
+    u32 tiles_y;
+    u32 words;
+} GridReadback;
+
+static GridReadback grid_read(RenderFixture *f)
+{
+    NphAllocator *a = nph_allocator_system();
+    const RenderVis *v = &f->renderer->vis;
+    GridReadback g;
+    memset(&g, 0, sizeof g);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NphVisCounters c;
+    test_read_buffer(f->dev, v->counters, 0U, sizeof c, &c);
+    g.globals = c.lights_global;
+    g.locals = c.lights_local;
+    g.tiles_x = v->light_tiles_x;
+    g.tiles_y = v->light_tiles_y;
+    g.words = v->light_words;
+    g.lights = NPH_ALLOC_ARRAY(a, NphRenderLightData, nph_max_u32(g.locals, 1U));
+    g.zbins = NPH_ALLOC_ARRAY(a, u32, NPH_RENDER_ZBINS);
+    g.tiles = NPH_ALLOC_ARRAY(a, u32, (u64)g.tiles_x * g.tiles_y * g.words);
+    NTEST_ASSERT_TRUE(g.lights != NULL && g.zbins != NULL && g.tiles != NULL);
+    if (g.locals != 0U) {
+        test_read_buffer(f->dev, v->light_grid, v->light_layout.locals,
+                         (u64)g.locals * sizeof(NphRenderLightData), g.lights);
+    }
+    test_read_buffer(f->dev, v->light_grid, v->light_layout.zbins,
+                     (u64)NPH_RENDER_ZBINS * sizeof(u32), g.zbins);
+    test_read_buffer(f->dev, v->light_tiles, 0U, (u64)g.tiles_x * g.tiles_y * g.words * sizeof(u32),
+                     g.tiles);
+    return g;
+}
+
+static void grid_free(GridReadback *g)
+{
+    NphAllocator *a = nph_allocator_system();
+    NPH_FREE_ARRAY(a, NphRenderLightData, g->lights, nph_max_u32(g->locals, 1U));
+    NPH_FREE_ARRAY(a, u32, g->zbins, NPH_RENDER_ZBINS);
+    NPH_FREE_ARRAY(a, u32, g->tiles, (u64)g->tiles_x * g->tiles_y * g->words);
+}
+
+static bool grid_tile_has(const GridReadback *g, u32 tx, u32 ty, u32 light)
+{
+    const u32 word =
+        g->tiles[(u64)(light / 32U) * g->tiles_x * g->tiles_y + (u64)ty * g->tiles_x + tx];
+    return ((word >> (light % 32U)) & 1U) != 0U;
+}
+
+static bool grid_bin_has(const GridReadback *g, u32 bin, u32 light)
+{
+    const u32 first = g->zbins[bin] & 0xFFFFU;
+    const u32 last = g->zbins[bin] >> 16U;
+    return first <= light && light <= last;
+}
+
+// What the grid must hold for a light, from the C twins: its tiles and
+// its distance bins (without the shader's slack, so the GPU's must
+// contain these).
+typedef struct LightBounds {
+    u32 tile_lo[2];
+    u32 tile_hi[2];
+    u32 bin_lo;
+    u32 bin_hi;
+} LightBounds;
+
+static LightBounds light_bounds(const NphRenderLightDesc *ld, const NphRenderCamera *cam)
+{
+    const NphMat3 rot = nph_mat3_from_quat(nph_quat_normalize_or_identity(cam->orientation));
+    const NphMat3 view = nph_mat3_transpose(rot);
+    const NphMat4 proj =
+        nph_mat4_perspective_infinite(cam->yfov, (f32)LIGHT_W / (f32)LIGHT_H, cam->znear);
+    const NphVec3 rel = nph_dvec3_relative(ld->position, cam->position);
+    const NphVec3 dir = ld->type == NPH_RENDER_LIGHT_TYPE_POINT ? nph_vec3(0.0F, -1.0F, 0.0F)
+                                                                : nph_vec3_normalize(ld->direction);
+    const NphVec4 s =
+        nph_render_ref_vis_light_sphere(rel, dir, ld->range, (u32)ld->type,
+                                        nph_f32_cos(ld->outer_cone), nph_f32_sin(ld->outer_cone));
+    const NphVec3 c = nph_mat3_mul_vec3(view, nph_vec3(s.x, s.y, s.z));
+    const NphVec4 rect =
+        nph_render_ref_vis_project_sphere_clipped(c, s.w, proj.c[0].x, proj.c[1].y, cam->znear);
+    LightBounds b;
+    const f32 tiles[2] = {(f32)LIGHT_W / (f32)NPH_RENDER_LIGHT_TILE,
+                          (f32)LIGHT_H / (f32)NPH_RENDER_LIGHT_TILE};
+    const f32 lo[2] = {rect.x, rect.y};
+    const f32 hi[2] = {rect.z, rect.w};
+    for (u32 k = 0; k < 2U; ++k) {
+        const f32 last = nph_f32_ceil(tiles[k]) - 1.0F;
+        b.tile_lo[k] = (u32)nph_f32_clamp(nph_f32_floor(lo[k] * tiles[k]), 0.0F, last);
+        b.tile_hi[k] = (u32)nph_f32_clamp(nph_f32_floor(hi[k] * tiles[k]), 0.0F, last);
+    }
+    const f32 scale = (f32)NPH_RENDER_ZBINS / (f32)NPH_RENDER_ZBIN_OCTAVES;
+    f64 margin = 0.0;
+    b.bin_lo = nph_render_ref_zbin(nph_f32_max(-c.z - s.w, cam->znear), cam->znear, scale, &margin);
+    b.bin_hi = nph_render_ref_zbin(-c.z + s.w, cam->znear, scale, &margin);
+    return b;
+}
+
+// A few lights where the grid's bounds are known: each must be in every
+// tile and bin its sphere reaches, and in no tile more than one beyond;
+// the lights that reach every pixel and those out of view are told apart.
+NTEST(vis, the_light_grid_bounds_each_light)
+{
+    LightFixture lf;
+    REQUIRE_LIGHTS(&lf, 16U);
+    RenderFixture *f = &lf.f;
+    light_room(f);
+    const NphRenderCamera cam = light_camera();
+    NphRenderLightDesc locals[4];
+    locals[0] = point_desc(nph_dvec3(-2.0, 0.0, 0.0), 0.8F, 100.0F, nph_vec3_one());
+    locals[1] = point_desc(nph_dvec3(2.0, 0.5, -1.0), 1.2F, 100.0F, nph_vec3_one());
+    locals[2] = point_desc(nph_dvec3(0.0, 2.0, 1.0), 3.0F, 300.0F, nph_vec3_one());
+    locals[2].type = NPH_RENDER_LIGHT_TYPE_SPOT;
+    locals[2].direction = nph_vec3(0.0F, -1.0F, 0.0F);
+    locals[2].outer_cone = 0.4F;
+    locals[2].inner_cone = 0.2F;
+    // The camera inside its range.
+    locals[3] = point_desc(nph_dvec3(0.2, 1.4, 5.1), 1.0F, 20.0F, nph_vec3_one());
+    for (u32 i = 0; i < 4U; ++i) {
+        (void)make_light(f, &locals[i]);
+    }
+    NphRenderLightDesc sun;
+    memset(&sun, 0, sizeof sun);
+    sun.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    sun.direction = nph_vec3(0.3F, -1.0F, -0.2F);
+    sun.intensity = 50.0F;
+    sun.color = nph_vec3_one();
+    (void)make_light(f, &sun);
+    (void)make_point(f, nph_dvec3(0.0, 3.0, 0.0), 0.0F, 10.0F); // unlimited range
+    // Out of view: behind the camera, and far to the right.
+    (void)make_point(f, nph_dvec3(0.0, 1.5, 9.0), 1.0F, 10.0F);
+    (void)make_point(f, nph_dvec3(30.0, 0.0, 0.0), 1.0F, 10.0F);
+
+    NphRenderView v;
+    light_view(&v, 0U);
+    static u8 img[LIGHT_PIXELS];
+    const NphRenderFrameStats stats = light_render(&lf, &v, 3U, img);
+    NTEST_EXPECT_EQ_UINT(stats.lights, 8U);
+    NTEST_EXPECT_EQ_UINT(stats.vis_lights, 6U);
+    GridReadback g = grid_read(f);
+    NTEST_EXPECT_EQ_UINT(g.globals, 2U);
+    NTEST_ASSERT_EQ_UINT(g.locals, 4U);
+    NTEST_EXPECT_EQ_UINT(g.tiles_x, 16U);
+    NTEST_EXPECT_EQ_UINT(g.tiles_y, 10U);
+
+    u32 min_bin = NPH_U32_MAX;
+    u32 max_bin = 0U;
+    for (u32 i = 0; i < 4U; ++i) {
+        // Find the light among the sorted ones by its position.
+        const NphVec3 rel = nph_dvec3_relative(locals[i].position, cam.position);
+        u32 j = NPH_U32_MAX;
+        for (u32 k = 0; k < g.locals; ++k) {
+            const NphVec3 p =
+                nph_vec3(g.lights[k].position.x, g.lights[k].position.y, g.lights[k].position.z);
+            if (nph_vec3_length(nph_vec3_sub(p, rel)) < 1e-4F) {
+                j = k;
+            }
+        }
+        NTEST_ASSERT_NE_UINT(j, NPH_U32_MAX);
+        const LightBounds b = light_bounds(&locals[i], &cam);
+        min_bin = nph_min_u32(min_bin, b.bin_lo);
+        max_bin = nph_max_u32(max_bin, b.bin_hi);
+        u32 missing = 0U;
+        u32 stray = 0U;
+        for (u32 ty = 0; ty < g.tiles_y; ++ty) {
+            for (u32 tx = 0; tx < g.tiles_x; ++tx) {
+                const bool inside = tx >= b.tile_lo[0] && tx <= b.tile_hi[0] &&
+                                    ty >= b.tile_lo[1] && ty <= b.tile_hi[1];
+                const bool near = tx + 1U >= b.tile_lo[0] && tx <= b.tile_hi[0] + 1U &&
+                                  ty + 1U >= b.tile_lo[1] && ty <= b.tile_hi[1] + 1U;
+                const bool has = grid_tile_has(&g, tx, ty, j);
+                missing += inside && !has ? 1U : 0U;
+                stray += !near && has ? 1U : 0U;
+            }
+        }
+        u32 bins_missing = 0U;
+        for (u32 bin = b.bin_lo; bin <= b.bin_hi; ++bin) {
+            bins_missing += grid_bin_has(&g, bin, j) ? 0U : 1U;
+        }
+        NTEST_LOG("light %u (sorted %u): tiles [%u, %u] x [%u, %u], bins [%u, %u]: %u tiles "
+                  "missing, %u stray, %u bins missing",
+                  i, j, b.tile_lo[0], b.tile_hi[0], b.tile_lo[1], b.tile_hi[1], b.bin_lo, b.bin_hi,
+                  missing, stray, bins_missing);
+        NTEST_EXPECT_EQ_UINT(missing, 0U);
+        NTEST_EXPECT_EQ_UINT(stray, 0U);
+        NTEST_EXPECT_EQ_UINT(bins_missing, 0U);
+    }
+    // Bins nearer or farther than every light are empty.
+    u32 nonempty_outside = 0U;
+    for (u32 bin = 0; bin < NPH_RENDER_ZBINS; ++bin) {
+        const bool outside = bin + 2U < min_bin || bin > max_bin + 2U;
+        const u32 first = g.zbins[bin] & 0xFFFFU;
+        const u32 last = g.zbins[bin] >> 16U;
+        nonempty_outside += outside && first <= last ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(nonempty_outside, 0U);
+    grid_free(&g);
+    light_teardown(&lf);
+}
+
+// Hundreds of lights of finite range, around and behind the camera and one
+// holding it, with one of unlimited range and the sun: lighting each pixel
+// with the lights its bin and tile may meet must give the image of
+// lighting it with every light (the grid only skips lights that contribute
+// exactly nothing), up to the order of the sums.
+NTEST(vis, the_light_grid_never_changes_the_image)
+{
+    LightFixture lf;
+    REQUIRE_LIGHTS(&lf, 320U);
+    RenderFixture *f = &lf.f;
+    light_room(f);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0x11647ULL, 3U);
+    for (u32 i = 0; i < 300U; ++i) {
+        const NphRenderLightDesc ld = random_light(&rng);
+        (void)make_light(f, &ld);
+    }
+    (void)make_point(f, nph_dvec3(0.1, 1.4, 4.9), 1.5F, 30.0F); // holds the camera
+    (void)make_point(f, nph_dvec3(0.0, 3.0, 0.0), 0.0F, 15.0F); // unlimited range
+    NphRenderLightDesc sun;
+    memset(&sun, 0, sizeof sun);
+    sun.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    sun.direction = nph_vec3(0.3F, -1.0F, -0.2F);
+    sun.intensity = 100.0F;
+    sun.color = nph_vec3_one();
+    (void)make_light(f, &sun);
+
+    static u8 all[LIGHT_PIXELS];
+    static u8 grid[LIGHT_PIXELS];
+    static u8 ref[LIGHT_PIXELS];
+    NphRenderView v;
+    light_view(&v, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID);
+    (void)light_render(&lf, &v, 2U, all);
+    light_view(&v, 0U);
+    const NphRenderFrameStats stats = light_render(&lf, &v, 3U, grid);
+    v.pipeline = NPH_RENDER_PIPELINE_REFERENCE;
+    (void)light_render(&lf, &v, 1U, ref);
+    const ImageDiff d = light_diff(all, grid, 0U);
+    NTEST_LOG("every light vs the grid: %.2f %% identical, mean %.4f, max %u",
+              (f64)d.within * 100.0, (f64)d.mean, d.max);
+    NTEST_EXPECT_LE_UINT(d.max, 1U);
+    NTEST_EXPECT_TRUE(d.within >= 0.99F);
+    const ImageDiff dr = light_diff(ref, grid, 3U);
+    NTEST_LOG("reference vs the grid: %.2f %% within 3 levels, mean %.3f, max %u",
+              (f64)dr.within * 100.0, (f64)dr.mean, dr.max);
+    NTEST_EXPECT_TRUE(dr.within >= 0.97F);
+    NTEST_EXPECT_TRUE(dr.mean <= 1.0F);
+    // The scene is lit by the lights, not just the sun: a dark image would
+    // pass the comparisons above trivially.
+    u32 bright = 0U;
+    for (u32 i = 0; i < LIGHT_W * LIGHT_H; ++i) {
+        const u8 *px = &grid[(u64)i * 4U];
+        bright += (u32)px[0] + px[1] + px[2] > 240U ? 1U : 0U;
+    }
+    NTEST_LOG("%u of %u pixels bright; %u lights in view", bright, LIGHT_W * LIGHT_H,
+              stats.vis_lights);
+    NTEST_EXPECT_GT_UINT(bright, LIGHT_W * LIGHT_H / 20U);
+    NTEST_EXPECT_GT_UINT(stats.vis_lights, 50U);
+    NTEST_EXPECT_LT_UINT(stats.vis_lights, 303U);
+    light_teardown(&lf);
+}
+
+// Lights move, change, go, and come between frames: the GPU table follows,
+// and the grid's image stays that of every light.
+NTEST(vis, lights_move_change_and_go)
+{
+    LightFixture lf;
+    REQUIRE_LIGHTS(&lf, 64U);
+    RenderFixture *f = &lf.f;
+    light_room(f);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0xF00DULL, 5U);
+    NphRenderLight lights[48];
+    for (u32 i = 0; i < 48U; ++i) {
+        const NphRenderLightDesc ld = random_light(&rng);
+        lights[i] = make_light(f, &ld);
+    }
+    static u8 all[LIGHT_PIXELS];
+    static u8 grid[LIGHT_PIXELS];
+    static u8 first[LIGHT_PIXELS];
+    NphRenderView v;
+    for (u32 step = 0; step < 4U; ++step) {
+        if (step == 1U) {
+            // Move a third, recolour a third.
+            for (u32 i = 0; i < 32U; ++i) {
+                const NphRenderLightDesc ld = random_light(&rng);
+                NTEST_ASSERT_EQ_INT(nph_render_light_update(f->renderer, lights[i], &ld),
+                                    NPH_RESULT_OK);
+            }
+        } else if (step == 2U) {
+            // Destroy some and create others in their slots.
+            for (u32 i = 0; i < 16U; ++i) {
+                nph_render_light_destroy(f->renderer, lights[(u64)i * 3U]);
+            }
+            for (u32 i = 0; i < 16U; ++i) {
+                const NphRenderLightDesc ld = random_light(&rng);
+                lights[(u64)i * 3U] = make_light(f, &ld);
+            }
+        } else if (step == 3U) {
+            for (u32 i = 0; i < 48U; ++i) {
+                nph_render_light_destroy(f->renderer, lights[i]);
+            }
+        }
+        light_view(&v, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID);
+        (void)light_render(&lf, &v, 1U, all);
+        light_view(&v, 0U);
+        (void)light_render(&lf, &v, 1U, grid);
+        const ImageDiff d = light_diff(all, grid, 0U);
+        NTEST_LOG("step %u: every light vs the grid: %.2f %% identical, max %u", step,
+                  (f64)d.within * 100.0, d.max);
+        NTEST_EXPECT_LE_UINT(d.max, 1U);
+        if (step == 0U) {
+            memcpy(first, grid, LIGHT_PIXELS);
+        }
+    }
+    // With every light gone the room is dark (no environment), and it was
+    // not before.
+    u32 lit = 0U;
+    for (u32 i = 0; i < LIGHT_W * LIGHT_H; ++i) {
+        lit += memcmp(&first[(u64)i * 4U], &grid[(u64)i * 4U], 3U) != 0 ? 1U : 0U;
+    }
+    NTEST_EXPECT_GT_UINT(lit, LIGHT_W * LIGHT_H / 10U);
+    light_teardown(&lf);
+}
+
+NTEST(vis, more_lights_than_a_view_can_sort_are_refused)
+{
+    NphGpuDevice *dev = test_gpu_create(NULL);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NphRendererDesc d;
+    test_renderer_desc(&d, dev);
+    d.max_lights = (u32)NPH_RENDER_MAX_LIGHTS + 1U;
+    NphRenderer *r = NULL;
+    NTEST_EXPECT_EQ_INT(nph_renderer_create(&d, &r), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_NULL(r);
+    test_gpu_destroy(dev);
 }

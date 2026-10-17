@@ -29,6 +29,126 @@ static NphGpuPipeline make_compute(NphGpuDevice *dev, NphGpuShader shader)
     return p;
 }
 
+// Runs a fill-style compute pipeline over COUNT invocations and reads the
+// buffer back.
+#define SPEC_COUNT 256U
+
+static void run_fill(NphGpuDevice *dev, NphGpuPipeline pipeline, u32 value, u32 *out)
+{
+    NphGpuBuffer buf =
+        test_make_buffer(dev, (u64)SPEC_COUNT * 4U,
+                         (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                         NPH_GPU_MEMORY_DEVICE, "specialization target");
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.buffer_address = nph_gpu_buffer_address(dev, buf);
+    push.count = SPEC_COUNT;
+    push.value = value;
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_COMPUTE, "specialize", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, SPEC_COUNT / 64U, 1U, 1U);
+    nph_gpu_cmd_buffer_barrier(cmd, buf, (u32)NPH_GPU_STAGE_COMPUTE,
+                               (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_TRANSFER,
+                               (u32)NPH_GPU_ACCESS_TRANSFER_READ);
+    test_submit_wait(dev, cmd);
+    test_read_buffer(dev, buf, 0U, (u64)SPEC_COUNT * 4U, out);
+    nph_gpu_buffer_destroy(dev, buf);
+}
+
+// One module, three pipelines: the defaults, every constant set, and only
+// the first (the others keep their defaults); a reload keeps the values,
+// and more constants than the limit are refused.
+NTEST_F(GpuFixture, specialization_constants_pick_the_variant)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuShader shader = test_load_shader(f->dev, "test_specialize.comp");
+    NphGpuComputePipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.shader = shader;
+    desc.name = "specialized";
+    NphGpuPipeline defaults = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &defaults), NPH_RESULT_OK);
+    const f32 four = 4.0F;
+    desc.specialization[0] = 5U;
+    desc.specialization[1] = 1U;
+    memcpy(&desc.specialization[2], &four, sizeof four);
+    desc.specialization_count = 3U;
+    NphGpuPipeline all = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &all), NPH_RESULT_OK);
+    desc.specialization[0] = 0U;
+    desc.specialization_count = 1U;
+    NphGpuPipeline first = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &first), NPH_RESULT_OK);
+    desc.specialization_count = NPH_GPU_MAX_SPECIALIZATION + 1U;
+    NphGpuPipeline refused = NPH_GPU_PIPELINE_NULL;
+    NTEST_EXPECT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &refused),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_FALSE(nph_gpu_pipeline_is_valid(f->dev, refused));
+
+    static u32 out[SPEC_COUNT];
+    run_fill(f->dev, defaults, 3U, out);
+    for (u32 i = 0; i < SPEC_COUNT; ++i) {
+        NTEST_ASSERT_EQ_UINT(out[i], 3U * i + 7U + 1U);
+    }
+    run_fill(f->dev, all, 3U, out);
+    for (u32 i = 0; i < SPEC_COUNT; ++i) {
+        NTEST_ASSERT_EQ_UINT(out[i], 6U * i + 5U + 4U);
+    }
+    run_fill(f->dev, first, 3U, out);
+    for (u32 i = 0; i < SPEC_COUNT; ++i) {
+        NTEST_ASSERT_EQ_UINT(out[i], 3U * i + 0U + 1U);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_reload(f->dev, all), NPH_RESULT_OK);
+    run_fill(f->dev, all, 3U, out);
+    for (u32 i = 0; i < SPEC_COUNT; ++i) {
+        NTEST_ASSERT_EQ_UINT(out[i], 6U * i + 5U + 4U);
+    }
+    nph_gpu_pipeline_destroy(f->dev, first);
+    nph_gpu_pipeline_destroy(f->dev, all);
+    nph_gpu_pipeline_destroy(f->dev, defaults);
+    nph_gpu_shader_destroy(f->dev, shader);
+}
+
+// With shader statistics asked for, a compiled pipeline reports what the
+// driver knows of it (registers, instructions); without, nothing.
+NTEST(gpu_pipeline, statistics_describe_the_compiled_shader)
+{
+    NphGpuDeviceDesc dd;
+    memset(&dd, 0, sizeof dd);
+    dd.alloc = nph_allocator_system();
+    dd.headless = 1;
+    dd.shader_statistics = 1;
+    NphGpuDevice *dev = test_gpu_create(&dd);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NphGpuShader shader = test_load_shader(dev, "test_fill.comp");
+    NphGpuPipeline p = make_compute(dev, shader);
+    NphGpuShaderStatistic stats[32];
+    const u32 n = nph_gpu_pipeline_statistics(dev, p, stats, 32U);
+    if (!nph_gpu_device_info(dev)->features.shader_statistics) {
+        NTEST_EXPECT_EQ_UINT(n, 0U);
+    } else {
+        NTEST_EXPECT_GT_UINT(n, 0U);
+        for (u32 i = 0; i < n; ++i) {
+            NTEST_EXPECT_NE_UINT((u32)strlen(stats[i].name), 0U);
+            NTEST_LOG("%s: %s = %llu", stats[i].executable, stats[i].name,
+                      (unsigned long long)stats[i].value);
+        }
+        // A short buffer takes the first ones.
+        NphGpuShaderStatistic one;
+        NTEST_EXPECT_EQ_UINT(nph_gpu_pipeline_statistics(dev, p, &one, 1U), 1U);
+        NTEST_EXPECT_EQ_STR(one.name, stats[0].name);
+    }
+    NTEST_EXPECT_EQ_UINT(nph_gpu_pipeline_statistics(dev, NPH_GPU_PIPELINE_NULL, stats, 32U), 0U);
+    nph_gpu_pipeline_destroy(dev, p);
+    nph_gpu_shader_destroy(dev, shader);
+    test_gpu_destroy(dev);
+}
+
 // Renders `vertex_count` vertices with `pipeline` into a fresh RGBA8 image
 // of the given size, cleared to black, and reads the pixels back.
 static void render_to_pixels(NphGpuDevice *dev, NphGpuPipeline pipeline, const NphTestPush *push,

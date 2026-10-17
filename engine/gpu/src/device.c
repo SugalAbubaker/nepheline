@@ -355,6 +355,7 @@ typedef struct Candidate {
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accel;
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables;
     VkPhysicalDeviceMeshShaderPropertiesEXT mesh_props;
     VkPhysicalDeviceMemoryProperties memory;
     b32 ext_swapchain;
@@ -365,6 +366,7 @@ typedef struct Candidate {
     b32 ext_atomic64;
     b32 ext_memory_budget;
     b32 ext_calibrated;
+    b32 ext_executables;
     u32 graphics_family;
     u32 graphics_queue_count;
     u32 compute_family; // NPH_U32_MAX: none dedicated
@@ -384,6 +386,8 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     c->ray_query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     c->accel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     c->atomic64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+    c->executables.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
     c->features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
     // Extensions first: feature structs of absent extensions must not be chained.
@@ -401,6 +405,8 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
         c->ext_atomic64 = has_extension(exts, n, VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME);
         c->ext_memory_budget = has_extension(exts, n, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         c->ext_calibrated = has_extension(exts, n, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        c->ext_executables =
+            has_extension(exts, n, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
         NPH_FREE_ARRAY(alloc, VkExtensionProperties, exts, n);
     }
 
@@ -424,6 +430,10 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     if (c->ext_atomic64) {
         *next = &c->atomic64;
         next = &c->atomic64.pNext;
+    }
+    if (c->ext_executables) {
+        *next = &c->executables;
+        next = &c->executables.pNext;
     }
     *next = NULL;
     vkGetPhysicalDeviceFeatures2(c->phys, &c->features);
@@ -746,6 +756,10 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accel;
     VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables;
+    memset(&executables, 0, sizeof executables);
+    executables.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
     memset(&f2, 0, sizeof f2);
     memset(&f11, 0, sizeof f11);
     memset(&f12, 0, sizeof f12);
@@ -880,6 +894,14 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         exts[ext_count++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
         feat->calibrated_timestamps = 1;
     }
+    if (dev->desc.shader_statistics && c->ext_executables &&
+        c->executables.pipelineExecutableInfo) {
+        executables.pipelineExecutableInfo = VK_TRUE;
+        exts[ext_count++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+        *next = &executables;
+        next = &executables.pNext;
+        feat->shader_statistics = 1;
+    }
     *next = NULL;
     feat->sampler_filter_minmax = vk_bool(f12.samplerFilterMinmax);
     feat->shader_float16 = vk_bool(f12.shaderFloat16);
@@ -987,6 +1009,36 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     if (transfer_distinct) {
         gpu_set_name(dev, VK_OBJECT_TYPE_QUEUE, (u64)(uptr)dev->queues[NPH_GPU_QUEUE_TRANSFER]->vk,
                      "transfer queue");
+    }
+
+    // What each format can do (optimal tiling).
+    for (u32 f = 1U; f < (u32)NPH_GPU_FORMAT_COUNT; ++f) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(dev->phys, gpu_vk_format((NphGpuFormat)f), &fp);
+        const VkFormatFeatureFlags o = fp.optimalTilingFeatures;
+        u32 bits = 0U;
+        bits |= (o & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED_LINEAR
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_STORAGE
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_STORAGE_ATOMIC
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_BLEND
+                    : 0U;
+        bits |= (o & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0U
+                    ? (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT
+                    : 0U;
+        dev->format_features[f] = bits;
     }
 
     // Info
@@ -1636,6 +1688,15 @@ const NphGpuDeviceInfo *nph_gpu_device_info(const NphGpuDevice *dev)
 NphAllocator *nph_gpu_device_allocator(NphGpuDevice *dev)
 {
     return dev->alloc;
+}
+
+bool nph_gpu_format_supports(const NphGpuDevice *dev, NphGpuFormat format, u32 features)
+{
+    NPH_ASSERT(dev != NULL);
+    if ((u32)format == 0U || (u32)format >= (u32)NPH_GPU_FORMAT_COUNT) {
+        return false;
+    }
+    return (dev->format_features[format] & features) == features;
 }
 
 NphGpuValidationStats nph_gpu_device_validation_stats(const NphGpuDevice *dev)

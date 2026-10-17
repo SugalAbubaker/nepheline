@@ -278,6 +278,7 @@ struct NphGpuDevice {
     VkDebugUtilsMessengerEXT messenger;
     VkPhysicalDevice phys;
     VkDevice device;
+    u32 format_features[NPH_GPU_FORMAT_COUNT]; // NphGpuFormatFeature bits, optimal tiling
     VkPhysicalDeviceProperties props;
     VkPhysicalDeviceMemoryProperties mem_props;
     b32 has_debug_utils;

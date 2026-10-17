@@ -34,6 +34,12 @@
 //                         pillars on a ground plane at 3840 x 2160, seen
 //                         from head height: the nearer rows hide most of
 //                         the field, so occlusion culling does the work.
+//   lights_<n>_<pipeline> the field at night, lit by n point and spot
+//                         lights of 3 to 8 m range among the nearer rows
+//                         (and a dim moon): the light grid's cost against
+//                         the light count. `lights_1k_every_light` is the
+//                         production path lighting every pixel with every
+//                         light (NPH_RENDER_VIS_NO_LIGHT_GRID).
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -64,6 +70,7 @@
 #define WARMUP_FRAMES  24U
 #define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long, for the clocks
 #define MAX_INSTANCES  (102400U + 16384U + 256U + 1U)
+#define MAX_LIGHTS     4000U
 
 typedef enum SceneKind {
     SCENE_GRID = 0,
@@ -73,21 +80,34 @@ typedef enum SceneKind {
 typedef struct SceneDef {
     const char *name;
     SceneKind kind;
-    u32 count; // grid: cubes; field: spheres
+    u32 count;  // grid: cubes; field: spheres
+    u32 lights; // field: local lights at night (0: daylight)
     NphRenderPipeline pipeline;
     u32 width;
     u32 height;
+    u32 vis_flags; // NphRenderVisFlags
 } SceneDef;
 
 static const SceneDef g_scenes[] = {
-    {"grid_1k_reference", SCENE_GRID, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U},
-    {"grid_1k_production", SCENE_GRID, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U},
-    {"grid_10k_reference", SCENE_GRID, 10240U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U},
-    {"grid_10k_production", SCENE_GRID, 10240U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U},
-    {"grid_100k_reference", SCENE_GRID, 102400U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U},
-    {"grid_100k_production", SCENE_GRID, 102400U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U},
-    {"field_4k_reference", SCENE_FIELD, 16384U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U},
-    {"field_4k_production", SCENE_FIELD, 16384U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U},
+    {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
+    {"grid_1k_production", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U},
+    {"grid_10k_reference", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
+    {"grid_10k_production", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U},
+    {"grid_100k_reference", SCENE_GRID, 102400U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
+    {"grid_100k_production", SCENE_GRID, 102400U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U,
+     0U},
+    {"field_4k_reference", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
+     0U},
+    {"field_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
+     0U},
+    {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
+     0U},
+    {"lights_1k_production", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U},
+    {"lights_1k_every_light", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID},
+    {"lights_4k_production", SCENE_FIELD, 16384U, MAX_LIGHTS, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U},
 };
 
 typedef struct Result {
@@ -110,6 +130,9 @@ typedef struct Ctx {
     NphRenderMesh plane;
     NphRenderMaterial materials[4];
     NphRenderLight sun;
+    NphRenderLightDesc sun_desc;
+    NphRenderLight lights[MAX_LIGHTS];
+    u32 light_count;
     NphRenderInstance *instances;
     u32 instance_count;
     Result results[MAX_RESULTS];
@@ -202,6 +225,7 @@ static NphResult create_content(Ctx *ctx)
     ld.color = nph_vec3(1.0F, 0.95F, 0.9F);
     ld.intensity = 30000.0F;
     ld.direction = nph_vec3(-0.4F, -1.0F, -0.6F);
+    ctx->sun_desc = ld;
     NPH_TRY(nph_render_light_create(ctx->renderer, &ld, &ctx->sun));
     NphRenderEnvironmentDesc env;
     memset(&env, 0, sizeof env);
@@ -281,6 +305,37 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
     view->camera =
         nph_render_camera_look_at(nph_dvec3(-half - 4.0, 1.7, -half - 4.0),
                                   nph_dvec3(half, 0.5, half), nph_vec3_unit_y(), 0.9F, 0.1F);
+    if (s->lights == 0U) {
+        return NPH_RESULT_OK;
+    }
+    // Night: a dim moon, a dark sky, and lamps among the nearer rows (an
+    // 80 m square at the camera's corner), a quarter of them spots
+    // pointing down.
+    NphRenderLightDesc moon = ctx->sun_desc;
+    moon.intensity = 0.2F;
+    NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &moon));
+    view->ev100 = 5.0F;
+    view->disable_ibl = 1;
+    view->background = NPH_RENDER_BACKGROUND_SOLID;
+    view->background_color = nph_vec3(0.02F, 0.03F, 0.05F);
+    for (u32 i = 0; i < s->lights; ++i) {
+        const u32 h = hash_u32(i * 3U + 0x9E37U);
+        const u32 g = hash_u32(h);
+        NphRenderLightDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.type = (g & 3U) == 0U ? NPH_RENDER_LIGHT_TYPE_SPOT : NPH_RENDER_LIGHT_TYPE_POINT;
+        ld.position = nph_dvec3(-half + 80.0 * (f64)(h & 0xFFFFU) / 65535.0,
+                                0.5 + 2.5 * (f64)(g >> 24U) / 255.0,
+                                -half + 80.0 * (f64)(h >> 16U) / 65535.0);
+        ld.range = 3.0F + 5.0F * (f32)((g >> 8U) & 255U) / 255.0F;
+        ld.intensity = 300.0F + 2700.0F * (f32)((g >> 16U) & 255U) / 255.0F;
+        ld.color = nph_vec3(1.0F, 0.6F + 0.4F * (f32)(g & 255U) / 255.0F, 0.5F);
+        ld.direction = nph_vec3(0.0F, -1.0F, 0.0F);
+        ld.inner_cone = 0.3F;
+        ld.outer_cone = 0.7F;
+        NPH_TRY(nph_render_light_create(ctx->renderer, &ld, &ctx->lights[ctx->light_count]));
+        ++ctx->light_count;
+    }
     return NPH_RESULT_OK;
 }
 
@@ -290,6 +345,13 @@ static void destroy_scene(Ctx *ctx)
         nph_render_instance_destroy(ctx->renderer, ctx->instances[i]);
     }
     ctx->instance_count = 0U;
+    if (ctx->light_count != 0U) {
+        for (u32 i = 0; i < ctx->light_count; ++i) {
+            nph_render_light_destroy(ctx->renderer, ctx->lights[i]);
+        }
+        ctx->light_count = 0U;
+        NPH_IGNORE_RESULT(nph_render_light_update(ctx->renderer, ctx->sun, &ctx->sun_desc));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +430,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                                                       nph_vec3_unit_y(), 0.9F, 0.1F));
     view.pipeline = s->pipeline;
     view.ev100 = 13.0F;
+    view.vis_flags = s->vis_flags;
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
@@ -439,14 +502,16 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     const NphRenderFrameStats *st = &run.stats;
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
-               "%u occlusion, clusters %u frustum + %u cone + %u occlusion%s\n",
+               "%u occlusion, clusters %u frustum + %u cone + %u occlusion; lights %u, %u in "
+               "view%s\n",
                st->vis_clusters, st->vis_clusters_sw, st->vis_triangles,
                st->vis_instances_culled_frustum, st->vis_instances_culled_occlusion,
                st->vis_meshlets_culled_frustum, st->vis_meshlets_culled_cone,
-               st->vis_meshlets_culled_occlusion,
+               st->vis_meshlets_culled_occlusion, st->lights, st->vis_lights,
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
     } else {
-        printf("    draws %u, triangles %u, culled %u\n", st->draws, st->triangles, st->culled);
+        printf("    draws %u, triangles %u, culled %u, lights %u\n", st->draws, st->triangles,
+               st->culled, st->lights);
     }
     fflush(stdout); // whole lines between the log's (stderr) when both go to one file
     return NPH_RESULT_OK;
@@ -555,6 +620,8 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     dd.app_name = "render_perf";
     dd.headless = 1;
     dd.validation = validation ? NPH_GPU_TOGGLE_ON : NPH_GPU_TOGGLE_OFF;
+    // The renderer logs its pipelines' registers and spills (stderr).
+    dd.shader_statistics = 1;
     NPH_TRY(nph_gpu_device_create(&dd, &ctx->dev));
     NphGpuRenderGraphDesc gd;
     memset(&gd, 0, sizeof gd);
@@ -573,7 +640,8 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.dev = ctx->dev;
     rd.shader_dir = NPH_SHADER_DIR;
     rd.max_instances = MAX_INSTANCES;
-    rd.max_draws = MAX_INSTANCES; // the reference path draws every grid cube
+    rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
+    rd.max_lights = MAX_LIGHTS + 1U; // and the sun
     if (sw_pixels >= 0.0) {
         // Zero would pick the default: none goes through the view's flag.
         rd.sw_raster_pixels = (f32)sw_pixels;

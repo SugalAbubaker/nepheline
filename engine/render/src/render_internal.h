@@ -18,8 +18,11 @@
 
 #define RENDER_NAME_MAX 64U
 
-// The formats of the renderer's own images.
+// The formats of the renderer's own images. The production path's HDR
+// target is B10G11R11 where the device can store to it, sample it, and
+// blend into it (half the bytes), else this one (RenderVis.hdr_format).
 #define RENDER_HDR_FORMAT   NPH_GPU_FORMAT_R16G16B16A16_SFLOAT
+#define RENDER_HDR_COMPACT  NPH_GPU_FORMAT_B10G11R11_UFLOAT
 #define RENDER_DEPTH_FORMAT NPH_GPU_FORMAT_D32_SFLOAT
 #define RENDER_IBL_FORMAT   NPH_GPU_FORMAT_R16G16B16A16_SFLOAT
 // The production path's: the visibility buffer and the hierarchical depth.
@@ -190,8 +193,10 @@ typedef struct RenderFrameLayout {
     u64 lights_offset;
     u64 materials_offset;
     u64 draws_offset;
-    u64 vis_view_offset;    // NphVisViewData (production path)
-    u64 vis_updates_offset; // NphVisInstanceUpdate[max_instance_updates]
+    u64 vis_view_offset;          // NphVisViewData (production path)
+    u64 vis_updates_offset;       // NphVisInstanceUpdate[max_instance_updates]
+    u64 vis_light_updates_offset; // NphVisLightUpdate[max_lights]
+    u64 light_grid_offset;        // NphRenderLightGrid
     u64 size;
 } RenderFrameLayout;
 
@@ -207,6 +212,9 @@ typedef enum VisShader {
     VIS_SHADER_HZB,
     VIS_SHADER_RESOLVE,
     VIS_SHADER_SW_RASTER,
+    VIS_SHADER_LIGHTS,
+    VIS_SHADER_LIGHT_BINS,
+    VIS_SHADER_LIGHT_TILES,
     VIS_SHADER_MESH_OPAQUE,
     VIS_SHADER_MESH_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -228,8 +236,24 @@ typedef enum VisCompute {
     VIS_COMPUTE_HZB,
     VIS_COMPUTE_RESOLVE,
     VIS_COMPUTE_SW_RASTER,
+    VIS_COMPUTE_LIGHTS,
+    VIS_COMPUTE_LIGHT_BINS,
+    VIS_COMPUTE_LIGHT_TILES,
     VIS_COMPUTE_COUNT
 } VisCompute;
+
+// The light grid's work buffer (vis light grid): the regions' offsets for
+// a renderer of `lights` lights (render_vis_light_layout).
+typedef struct VisLightLayout {
+    u64 histogram; // u32[NPH_RENDER_ZBINS], cleared every frame
+    u64 zbins;     // u32[NPH_RENDER_ZBINS]
+    u64 visible;   // uvec4[lights]
+    u64 staged;    // NphRenderLightData[lights]
+    u64 locals;    // NphRenderLightData[lights]
+    u64 globals;   // NphRenderLightData[lights]
+    u64 rects;     // uvec2[lights]
+    u64 size;
+} VisLightLayout;
 
 // A range to free once the frames that may still read it have completed.
 typedef struct VisPendingFree {
@@ -245,6 +269,7 @@ typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
 typedef struct VisFrame {
     u64 view_address; // NphVisViewData
     u32 update_count;
+    u32 light_update_count;
     u32 width;
     u32 height;
     NphGpuRgImage visbuffer;
@@ -257,11 +282,18 @@ typedef struct VisFrame {
     NphGpuRgBuffer draws;
     NphGpuRgBuffer index_pool;
     NphGpuRgBuffer stats;
+    NphGpuRgBuffer lights;
+    NphGpuRgBuffer light_grid;
+    NphGpuRgBuffer light_tiles;
 } VisFrame;
 
 typedef struct RenderVis {
-    b32 supported;    // the device can run the production path and it was not disabled
-    b32 mesh_shaders; // rasterise with mesh shaders (else indirect draws)
+    b32 supported;           // the device can run the production path and it was not disabled
+    b32 mesh_shaders;        // rasterise with mesh shaders (else indirect draws)
+    NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
+    NphGpuPipeline blend_pipelines[RENDER_CULL_COUNT]; // blended forward pipelines into
+                                                       // hdr_format (null when it is
+                                                       // RENDER_HDR_FORMAT)
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2]; // [opaque, masked]: mesh or vertex pipelines
@@ -288,6 +320,20 @@ typedef struct RenderVis {
     NphGpuBuffer draws;         // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
+
+    // The lights: the persistent table, the grid's work buffer, and the
+    // tile masks (sized by the target, with the HZB).
+    NphGpuBuffer lights;     // NphVisLight[max_lights]
+    NphGpuBuffer light_grid; // VisLightLayout
+    NphGpuBuffer light_tiles;
+    VisLightLayout light_layout;
+    u32 light_tiles_x;
+    u32 light_tiles_y;
+    u32 light_words; // mask words: one per 32 lights, each over every tile
+    // Lights whose records must reach the GPU: a flag per slot and a list.
+    u8 *light_flags;
+    u32 *light_dirty;
+    u32 light_dirty_count;
 
     // Instances whose records must reach the GPU, and those sent last frame.
     u8 *slot_state; // RenderSlotState bits per instance slot
@@ -419,6 +465,10 @@ NPH_INLINE void *render_frame_at(const NphRenderer *r, u64 offset)
 
 // renderer.c
 NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *file);
+// The forward pipeline of an alpha mode and cull variant drawing into
+// `format` (the reference's HDR target, or the production path's).
+NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
+                                  NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);
@@ -427,6 +477,9 @@ u32 render_slot_of(const NphHandlePool *pool, u32 value);
 
 // frame.c
 void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out);
+// A light's shading record with its position given (camera relative for
+// the reference; the high floats of its split for the GPU table).
+void render_light_data(const NphRenderLightDesc *desc, NphVec3 position, NphRenderLightData *out);
 
 // ibl.c
 NphResult render_ibl_create(NphRenderer *r);
@@ -486,6 +539,14 @@ void render_vis_instance_changed(NphRenderer *r, u32 slot);
 void render_vis_instance_destroyed(NphRenderer *r, u32 slot);
 // A material's alpha mode may have changed: the blend list is rebuilt.
 void render_vis_materials_changed(NphRenderer *r);
+// A light was created, changed, or destroyed: its record is sent with the
+// next production frame.
+void render_vis_light_changed(NphRenderer *r, u32 slot);
+// Writes the changed lights' records into the frame's upload buffer (all
+// of them: the list holds max_lights) and returns how many.
+u32 render_vis_write_light_updates(NphRenderer *r);
+// The light grid work buffer's regions for `lights` lights.
+void render_vis_light_layout(u32 lights, VisLightLayout *out);
 // Writes this frame's instance updates into the frame's upload buffer
 // (at most max_instance_updates; the rest wait) and returns how many.
 u32 render_vis_write_updates(NphRenderer *r);

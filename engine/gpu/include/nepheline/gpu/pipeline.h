@@ -129,14 +129,27 @@ typedef struct NphGpuGraphicsPipelineDesc {
     const char *name;
 } NphGpuGraphicsPipelineDesc;
 
+// Specialization constants a compute pipeline can set: the values of the
+// shader's constants with constant_id 0 to count - 1.
+#define NPH_GPU_MAX_SPECIALIZATION 8U
+
 typedef struct NphGpuComputePipelineDesc {
     NphGpuShader shader;
+    // Values for the shader's specialization constants with constant_id 0
+    // to specialization_count - 1, 32 bits each (a uint, an int, a float's
+    // bits, or a bool as 0 or 1); constants past the count keep their
+    // defaults. One module thus gives pipelines compiled for different
+    // values, each with its dead branches removed and registers allocated
+    // for what remains.
+    u32 specialization[NPH_GPU_MAX_SPECIALIZATION];
+    u32 specialization_count;
     const char *name;
 } NphGpuComputePipelineDesc;
 
 // NPH_RESULT_INVALID_ARGUMENT for a stage mismatch (a non-vertex shader in
-// `vertex`, both vertex and mesh set, no stage at all) or an unsupported
-// state (line polygons without the feature); NPH_RESULT_FULL past
+// `vertex`, both vertex and mesh set, no stage at all), more than
+// NPH_GPU_MAX_SPECIALIZATION constants, or an unsupported state (line
+// polygons without the feature); NPH_RESULT_FULL past
 // max_pipelines; NPH_RESULT_UNKNOWN when the driver rejects the pipeline
 // (logged).
 NPH_MUST_USE NphResult nph_gpu_pipeline_create_graphics(NphGpuDevice *dev,
@@ -154,6 +167,23 @@ NPH_MUST_USE NphResult nph_gpu_pipeline_reload(NphGpuDevice *dev, NphGpuPipeline
 void nph_gpu_pipeline_destroy(NphGpuDevice *dev, NphGpuPipeline pipeline);
 bool nph_gpu_pipeline_is_valid(const NphGpuDevice *dev, NphGpuPipeline pipeline);
 bool nph_gpu_pipeline_is_compute(const NphGpuDevice *dev, NphGpuPipeline pipeline);
+
+// A statistic the driver reports about a compiled pipeline
+// (VK_KHR_pipeline_executable_properties): the part of the pipeline it
+// describes (a stage, as the driver names it), its name (such as "Register
+// Count"), and its value (booleans as 0 or 1, floats rounded).
+typedef struct NphGpuShaderStatistic {
+    char executable[32];
+    char name[48];
+    u64 value;
+} NphGpuShaderStatistic;
+
+// Fills `out` with up to `max` of the pipeline's statistics, every part's
+// in the driver's order, and returns how many were written: zero without
+// NphGpuFeatures.shader_statistics or for an invalid pipeline. Statistics
+// past `max` are dropped. NPH_THREADSAFE.
+u32 nph_gpu_pipeline_statistics(NphGpuDevice *dev, NphGpuPipeline pipeline,
+                                NphGpuShaderStatistic *out, u32 max);
 
 // The largest push constant block among the pipeline's stages.
 u32 nph_gpu_pipeline_push_constant_bytes(const NphGpuDevice *dev, NphGpuPipeline pipeline);

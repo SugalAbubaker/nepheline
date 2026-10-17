@@ -155,6 +155,84 @@ bool vis_project_sphere(vec3 c, float r, vec4 projection, out vec4 rect, out flo
     return true;
 }
 
+// One axis of vis_project_sphere_clipped: the lower and upper bounds, as
+// (axis coordinate, z) points in the plane of the axis and the view
+// direction, of a sphere whose centre in that plane is `c` (Mara &
+// McGuire 2013, listing 1). Each bound is where a ray from the camera
+// grazes the sphere, unless that point lies behind the near plane `near_z`
+// (negative) or the camera is inside the sphere: then the bound is where
+// the near plane cuts the sphere.
+void vis_sphere_axis_bounds(vec2 c, float r, float near_z, out vec2 lower, out vec2 upper)
+{
+    const float t2 = dot(c, c) - r * r;
+    const bool inside = t2 <= 0.0;
+    float cos_t = 0.0;
+    float sin_t = 0.0;
+    if (!inside) {
+        const float len = length(c);
+        cos_t = sqrt(t2) / len;
+        sin_t = r / len;
+    }
+    const bool clipped = c.y + r >= near_z;
+    float k = sqrt(max(r * r - (near_z - c.y) * (near_z - c.y), 0.0));
+    vec2 b[2];
+    for (int i = 0; i < 2; ++i) {
+        b[i] = vec2(0.0, near_z);
+        if (!inside) {
+            // c rotated by the tangent's angle, scaled to the tangent point.
+            b[i] = vec2(cos_t * c.x - sin_t * c.y, sin_t * c.x + cos_t * c.y) * cos_t;
+        }
+        if (clipped && (inside || b[i].y > near_z)) {
+            b[i] = vec2(c.x + k, near_z);
+        }
+        sin_t = -sin_t;
+        k = -k;
+    }
+    upper = b[0];
+    lower = b[1];
+}
+
+// The screen rectangle (UV, y down, not clamped) of the part of a
+// view-space sphere in front of the near plane, which the caller has
+// found to be in the frustum (Mara & McGuire, "2D Polyhedral Bounds of a
+// Clipped, Perspective-Projected 3D Sphere", JCGT 2013): unlike
+// vis_project_sphere it bounds spheres that reach the near plane or hold
+// the camera, as lights near the camera do.
+vec4 vis_project_sphere_clipped(vec3 c, float r, vec4 projection)
+{
+    const float near_z = -projection.z;
+    vec2 lx;
+    vec2 ux;
+    vec2 ly;
+    vec2 uy;
+    vis_sphere_axis_bounds(vec2(c.x, c.z), r, near_z, lx, ux);
+    vis_sphere_axis_bounds(vec2(c.y, c.z), r, near_z, ly, uy);
+    // The bounds' points lie in front of the near plane: w = -z > 0.
+    const vec2 x = vec2(lx.x / -lx.y, ux.x / -ux.y) * projection.x;
+    const vec2 y = vec2(ly.x / -ly.y, uy.x / -uy.y) * projection.y;
+    return vec4(min(x.x, x.y), min(y.x, y.y), max(x.x, x.y), max(y.x, y.y)) * 0.5 + 0.5;
+}
+
+// The sphere around everything a light can reach (camera relative; w the
+// radius): a point light's range, or for a spot light the smallest sphere
+// around its cone of the outer angle capped at the range. For half-angles
+// up to 45 degrees that sphere passes through the apex and the rim, its
+// centre on the axis range / (2 cos a) from the apex; for wider cones it
+// is the rim's own circle's sphere, centred range cos a along the axis
+// (Wronski, "Cull that Cone!", 2017). The cap's points lie inside both.
+vec4 vis_light_sphere(vec3 position, vec3 direction, float range, uint type, float cos_outer,
+                      float sin_outer)
+{
+    if (type == NPH_RENDER_LIGHT_SPOT) {
+        if (cos_outer >= 0.70710678) {
+            const float t = range / (2.0 * cos_outer);
+            return vec4(position + direction * t, t);
+        }
+        return vec4(position + direction * (range * cos_outer), range * sin_outer);
+    }
+    return vec4(position, range);
+}
+
 // Whether a rectangle (UV) at a nearest depth lies behind everything the
 // hierarchical depth records there. The HZB's mip 0 is half the screen,
 // each texel the farthest (smallest, reverse-Z) depth of its 2 x 2

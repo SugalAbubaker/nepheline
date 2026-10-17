@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+// The light grid's tile masks (docs/render.md "Lights"): a workgroup per
+// 8 x 8 light tiles and per word of 32 sorted local lights (workgroup z).
+// The word's lights whose rectangles miss the workgroup's block of tiles
+// are dropped together first; each invocation then tests its tile against
+// the rest and writes its word whole (no atomics on the masks). The masks
+// are stored a word at a time over every tile ([word][tile]), so a
+// subgroup's writes are contiguous. Words past the lights in view are left
+// as they were: no bin's range reaches them. Dispatched indirectly with the
+// arguments vis_light_bins.comp writes.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+shared uvec2 s_rects[32];
+shared uint s_block; // the word's lights whose rectangles meet the workgroup's block
+
+bool covers(uvec2 r, uvec2 lo_tile, uvec2 hi_tile)
+{
+    const uvec2 lo = uvec2(r.x & 0xFFFFu, r.x >> 16u);
+    const uvec2 hi = uvec2(r.y & 0xFFFFu, r.y >> 16u);
+    return all(lessThanEqual(lo, hi_tile)) && all(greaterThanEqual(hi, lo_tile));
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    const NphRenderLightGrid grid = LightGridRef(view.v.light_grid).g;
+    const uint n = VisCountersRef(view.v.counters).c.lights_local;
+    const uint w = gl_WorkGroupID.z;
+    const uint t = gl_LocalInvocationIndex;
+    if (t == 0u) {
+        s_block = 0u;
+    }
+    barrier();
+    if (t < 32u) {
+        const uint j = w * 32u + t;
+        // Past the last light: an empty rectangle (x0 > x1).
+        const uvec2 r = j < n ? VisUvec2Ref(view.v.light_rects).v[j] : uvec2(0xFFFFu, 0u);
+        s_rects[t] = r;
+        const uvec2 block = gl_WorkGroupID.xy * 8u;
+        if (covers(r, block, block + 7u)) {
+            atomicOr(s_block, 1u << t);
+        }
+    }
+    barrier();
+    const uvec2 tile = gl_GlobalInvocationID.xy;
+    if (tile.x >= grid.tiles_x || tile.y >= view.v.light_tiles_y) {
+        return;
+    }
+    uint left = s_block;
+    uint bits = 0u;
+    while (left != 0u) {
+        const uint b = findLSB(left);
+        left &= left - 1u;
+        if (covers(s_rects[b], tile, tile)) {
+            bits |= 1u << b;
+        }
+    }
+    VisUintRef(grid.tiles).v[w * grid.tile_count + tile.y * grid.tiles_x + tile.x] = bits;
+}

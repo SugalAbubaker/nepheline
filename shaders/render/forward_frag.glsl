@@ -44,6 +44,8 @@ void main()
     // Mirrored transforms are drawn with clockwise front faces, so the
     // rasteriser's facing already accounts for them.
     s.front_facing = gl_FrontFacing;
+    s.pixel = gl_FragCoord.xy;
+    s.depth = gl_FragCoord.z;
 
     const vec4 base = nph_surface_base_color(m, s);
 #if NPH_FORWARD_ALPHA_MODE == 1

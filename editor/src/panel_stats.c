@@ -39,8 +39,8 @@ static void frame_stats(Editor *ed)
                r->debug_lines);
         if (production) {
             // The GPU's counters, from frame vis_frame (a couple behind).
-            igText("GPU: clusters %u (%u in software)   triangles %u%s", r->vis_clusters,
-                   r->vis_clusters_sw, r->vis_triangles,
+            igText("GPU: clusters %u (%u in software)   triangles %u   lights in view %u%s",
+                   r->vis_clusters, r->vis_clusters_sw, r->vis_triangles, r->vis_lights,
                    r->vis_overflow != 0U ? "   (lists overflowed)" : "");
             igText("culled instances: frustum %u, occlusion %u", r->vis_instances_culled_frustum,
                    r->vis_instances_culled_occlusion);

@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: Apache-2.0
+// The light grid's distance bins (docs/render.md "Lights"; Drobot,
+// "Improved Culling for Tiled and Clustered Rendering", SIGGRAPH 2017),
+// one workgroup for the whole view:
+//
+//   1. the local lights vis_lights.comp kept are sorted by the bin of their
+//      nearest distance, a counting sort over its histogram (an exclusive
+//      prefix sum gives each bin's first slot, an atomic per light its
+//      place), into the grid's `locals` with their tile rectangles;
+//   2. the running maximum of the sorted lights' farthest bins is taken;
+//   3. bin b's range runs from the first sorted light whose running
+//      maximum reaches b (no light before it reaches that far) to the last
+//      light whose nearest bin is at most b (none after it starts that
+//      near): every light that may reach the bin lies inside, and the
+//      tiles and the lights' own falloff reject the rest;
+//   4. the arguments of the tile pass, a z layer per 32 lights.
+//
+// At most NPH_RENDER_MAX_LIGHTS lights, so indices fit 16 bits; the shared
+// memory is 13 KB, under the 16 KB every Vulkan device offers.
+#version 460
+#include "vis_common.glsl"
+
+#define THREADS 256u
+#define BINS_PER_THREAD (uint(NPH_RENDER_ZBINS) / THREADS)
+
+layout(local_size_x = 256) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
+
+shared uint s_end[NPH_RENDER_ZBINS];         // each bin's first slot, then one past its last
+shared uint s_far[NPH_RENDER_MAX_LIGHTS / 2]; // farthest bins by sorted index, 16 bits each
+shared uint s_scan[THREADS];
+
+uint far_bin(uint j)
+{
+    return (s_far[j >> 1u] >> ((j & 1u) * 16u)) & 0xFFFFu;
+}
+
+void main()
+{
+    const uint t = gl_LocalInvocationID.x;
+    VisViewRef view = VisViewRef(pc.view);
+    const NphRenderLightGrid grid = LightGridRef(view.v.light_grid).g;
+    const uint n = min(VisCountersRef(view.v.counters).c.lights_local, uint(NPH_RENDER_MAX_LIGHTS));
+    VisUintRef histogram = VisUintRef(view.v.light_histogram);
+
+    for (uint k = t; k < uint(NPH_RENDER_MAX_LIGHTS) / 2u; k += THREADS) {
+        s_far[k] = 0u;
+    }
+    // 1. Each thread's bins and their total, then an inclusive scan of the
+    // totals (Hillis & Steele) for each thread's first slot.
+    uint counts[BINS_PER_THREAD];
+    uint total = 0u;
+    for (uint k = 0u; k < BINS_PER_THREAD; ++k) {
+        counts[k] = histogram.v[t * BINS_PER_THREAD + k];
+        total += counts[k];
+    }
+    s_scan[t] = total;
+    barrier();
+    for (uint o = 1u; o < THREADS; o <<= 1u) {
+        const uint x = t >= o ? s_scan[t - o] : 0u;
+        barrier();
+        s_scan[t] += x;
+        barrier();
+    }
+    uint start = s_scan[t] - total;
+    for (uint k = 0u; k < BINS_PER_THREAD; ++k) {
+        s_end[t * BINS_PER_THREAD + k] = start;
+        start += counts[k];
+    }
+    barrier();
+
+    // The sort: each light takes the next slot of its nearest bin, which
+    // leaves s_end[b] one past bin b's last light.
+    VisUvec4Ref visible = VisUvec4Ref(view.v.light_visible);
+    LightsRef staged = LightsRef(view.v.light_staged);
+    LightsRef locals = LightsRef(grid.locals);
+    VisUvec2Ref rects = VisUvec2Ref(view.v.light_rects);
+    for (uint i = t; i < n; i += THREADS) {
+        const uvec4 e = visible.v[i];
+        const uint at = atomicAdd(s_end[e.x & 0xFFFFu], 1u);
+        locals.l[at] = staged.l[i];
+        rects.v[at] = e.zw;
+        atomicOr(s_far[at >> 1u], (e.x >> 16u) << ((at & 1u) * 16u));
+    }
+    barrier();
+
+    // 2. The running maximum of the farthest bins, in place: each thread an
+    // even-sized run of the sorted lights (a word is never shared).
+    const uint run = ((n + THREADS - 1u) / THREADS + 1u) & ~1u;
+    const uint first = min(t * run, n);
+    const uint end = min(first + run, n);
+    uint m = 0u;
+    for (uint j = first; j < end; ++j) {
+        m = max(m, far_bin(j));
+    }
+    s_scan[t] = m;
+    barrier();
+    for (uint o = 1u; o < THREADS; o <<= 1u) {
+        const uint x = t >= o ? s_scan[t - o] : 0u;
+        barrier();
+        s_scan[t] = max(s_scan[t], x);
+        barrier();
+    }
+    m = t > 0u ? s_scan[t - 1u] : 0u;
+    for (uint j = first; j < end; j += 2u) {
+        const uint a = max(m, far_bin(j));
+        m = a;
+        uint word = a;
+        if (j + 1u < end) {
+            m = max(m, far_bin(j + 1u));
+            word |= m << 16u;
+        }
+        s_far[j >> 1u] = word;
+    }
+    barrier();
+
+    // 3. The bins' ranges.
+    VisUintRef zbins = VisUintRef(grid.zbins);
+    for (uint k = 0u; k < BINS_PER_THREAD; ++k) {
+        const uint b = t * BINS_PER_THREAD + k;
+        const uint stop = s_end[b];
+        // The first sorted light whose running maximum reaches b.
+        uint lo = 0u;
+        uint hi = stop;
+        while (lo < hi) {
+            const uint mid = (lo + hi) >> 1u;
+            if (far_bin(mid) >= b) {
+                hi = mid;
+            } else {
+                lo = mid + 1u;
+            }
+        }
+        zbins.v[b] = lo < stop ? lo | ((stop - 1u) << 16u) : 0xFFFFu;
+    }
+
+    // 4. The tile pass: 8 x 8 tiles per workgroup, a layer per 32 lights.
+    if (t == 0u) {
+        VisArgsRef(view.v.args).a.light_tile_args =
+            uint[4]((grid.tiles_x + 7u) / 8u, (view.v.light_tiles_y + 7u) / 8u, (n + 31u) / 32u, 0u);
+    }
+}

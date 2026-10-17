@@ -99,6 +99,11 @@ at `nph_gpu_device_wait_idle`), so a slot never changes under a shader in
 flight. At device destruction every live handle is reported as a leak with
 its name and then released.
 
+`nph_gpu_format_supports(dev, format, features)` says what a format can do
+on the device in optimal tiling (sampled and linearly filtered, storage
+and storage atomics, colour attachment and blend, depth attachment), read
+once at creation. The renderer chooses its HDR target's format by it.
+
 Sharing: textures (transfer destinations that are never attachments) are
 shared across queue families so uploads need no ownership transfer and may
 touch a subset of layers; attachments are exclusive, which keeps the
@@ -204,6 +209,23 @@ header (magic, version, size, CRC32C) around the driver's blob whose
 `VkPipelineCacheHeaderVersionOne` is checked against the device before the
 driver sees it; writes go through a temporary file and a rename.
 
+A compute pipeline can set up to eight specialization constants
+(`NphGpuComputePipelineDesc.specialization`: the values of constant_id 0
+to n − 1, 32 bits each), so one module gives several pipelines, each
+compiled with its dead branches removed and its registers allocated for
+what remains; the renderer's resolve is specialised for its HDR target's
+format this way.
+
+With `NphGpuDeviceDesc.shader_statistics` set, pipelines are created with
+`VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR` where the driver has
+`VK_KHR_pipeline_executable_properties`, and
+`nph_gpu_pipeline_statistics` returns what the driver reports per stage:
+on the RTX 3060 Ti the register count, binary size, stack, local memory
+(spills), and shared memory. It is off by default (capturing may slow
+pipeline creation); `render_perf` turns it on and the renderer logs every
+compute pass's figures, which is how the resolve's register pressure was
+found and fixed (ADR-0031).
+
 Hot reload: `nph_gpu_shader_reload` swaps the module behind a handle,
 `nph_gpu_pipeline_reload` rebuilds a pipeline from its stored description;
 the old objects retire with the frame and the handles never change.
@@ -295,7 +317,7 @@ or a Vulkan device.
 
 ## Testing
 
-`engine/gpu/tests` (68 tests) run on any conforming device and skip
+`engine/gpu/tests` (84 tests) run on any conforming device and skip
 without one: device selection and information, the validation and leak
 gates, timelines and submission, frames and timestamps, deferred
 destruction, buffers, images of every kind, samplers, bindless slot
@@ -303,7 +325,9 @@ bounds, fills, clears, copies, blits, mip generation, per-thread command
 pools from eight threads, uploads through the ring and past it, image
 uploads across queues with layer subsets, SPIR-V reflection on the
 compiled shaders and on hand-assembled modules (including malformed
-ones), compute through buffer addresses, offscreen triangle rendering
+ones), compute through buffer addresses, specialization constants, the
+driver's pipeline statistics, format capabilities, offscreen triangle
+rendering
 with pixel checks, bindless sampling and storage images, pipeline
 validation, hot reload, the pipeline cache file (including a corrupt
 one), render-graph culling, attachments, aliasing, async compute,

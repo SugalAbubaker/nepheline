@@ -169,10 +169,15 @@ arrive:
 |---|---|
 | `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
+| `lights_1k_{reference,production}`, `lights_1k_every_light`, `lights_4k_production` | the field at night, lit by 1,024 (or 4,000) point and spot lamps of 3 to 8 m range among the nearer rows and a dim moon: the light grid against the light count; `every_light` is the production path lighting every pixel with every light |
 
 ```
-render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation]
+render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
 ```
+
+The device keeps its shader statistics, so the log (stderr) has each
+production compute pass's registers and spills, as the driver reports
+them.
 
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips

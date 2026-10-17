@@ -3,10 +3,11 @@
 // docs/render.md "A frame"):
 //
 //   1. the frame's records go into its slot of the per-frame upload
-//      buffer: the view, the lights and the materials (when they changed
-//      since that slot was last filled), and the draw records the CPU
-//      draws itself, every position made camera relative in double
-//      precision;
+//      buffer: the view, the materials (when they changed since that slot
+//      was last filled), the reference's lights, and the draw records the
+//      CPU draws itself, every position made camera relative in double
+//      precision (the production path keeps its lights in a GPU table and
+//      sends only the changed ones, vis_scene.c);
 //   2. the draw calls are sorted: opaque and masked ones by pipeline and
 //      mesh, blended ones back to front;
 //   3. the passes are declared: the image-based-lighting passes when
@@ -27,6 +28,7 @@
 
 #include "render_internal.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +37,8 @@ NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches 
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightData) == 64U, "NphRenderLightData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderLightGrid) == 56U, "NphRenderLightGrid matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphRenderViewData, light_grid) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(sizeof(NphRenderIblPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_TONEMAPPER_AGX == NPH_RENDER_TONEMAP_AGX,
@@ -75,6 +79,10 @@ void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out)
     at = align_up(at + sizeof(NphVisViewData), FRAME_ALIGN);
     out->vis_updates_offset = at;
     at = align_up(at + (u64)desc->max_instance_updates * sizeof(NphVisInstanceUpdate), FRAME_ALIGN);
+    out->vis_light_updates_offset = at;
+    at = align_up(at + (u64)desc->max_lights * sizeof(NphVisLightUpdate), FRAME_ALIGN);
+    out->light_grid_offset = at;
+    at = align_up(at + sizeof(NphRenderLightGrid), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -261,34 +269,36 @@ static void write_materials(NphRenderer *r)
     r->material_uploaded[r->frame_slot] = r->material_version;
 }
 
+void render_light_data(const NphRenderLightDesc *d, NphVec3 position, NphRenderLightData *out)
+{
+    memset(out, 0, sizeof *out);
+    const f32 inv_range_sq = d->range > 0.0F ? 1.0F / (d->range * d->range) : 0.0F;
+    out->position = nph_vec4_from_vec3(position, inv_range_sq);
+    const NphVec3 dir = d->type == NPH_RENDER_LIGHT_TYPE_POINT ? nph_vec3(0.0F, -1.0F, 0.0F)
+                                                               : nph_vec3_normalize(d->direction);
+    out->direction = nph_vec4_from_vec3(dir, (f32)d->type);
+    out->color = nph_vec4_from_vec3(nph_vec3_scale(d->color, d->intensity), 0.0F);
+    if (d->type == NPH_RENDER_LIGHT_TYPE_SPOT) {
+        // KHR_lights_punctual's angular attenuation as a scale and an
+        // offset on cos(angle); the outer angle's cosine and sine bound the
+        // cone for the production path's culling (vis_light_sphere).
+        const f32 cos_outer = nph_f32_cos(d->outer_cone);
+        const f32 cos_inner = nph_f32_cos(d->inner_cone);
+        const f32 scale = 1.0F / nph_f32_max(cos_inner - cos_outer, 1e-4F);
+        out->spot = nph_vec4(scale, -cos_outer * scale, cos_outer, nph_f32_sin(d->outer_cone));
+    }
+}
+
 static u32 write_lights(NphRenderer *r, NphDVec3 camera)
 {
     NphRenderLightData *out = render_frame_at(r, r->layout.lights_offset);
     u32 n = 0U;
-    for (u32 i = 0; i < r->desc.max_lights; ++i) {
+    for (u32 i = 0; i < r->light_pool.bump; ++i) {
         const RenderLight *l = &r->lights[i];
         if (l->handle == 0U) {
             continue;
         }
-        const NphRenderLightDesc *d = &l->desc;
-        NphRenderLightData *o = &out[n++];
-        memset(o, 0, sizeof *o);
-        const NphVec3 p = nph_dvec3_relative(d->position, camera);
-        const f32 inv_range_sq = d->range > 0.0F ? 1.0F / (d->range * d->range) : 0.0F;
-        o->position = nph_vec4_from_vec3(p, inv_range_sq);
-        const NphVec3 dir = d->type == NPH_RENDER_LIGHT_TYPE_POINT
-                                ? nph_vec3(0.0F, -1.0F, 0.0F)
-                                : nph_vec3_normalize(d->direction);
-        o->direction = nph_vec4_from_vec3(dir, (f32)d->type);
-        o->color = nph_vec4_from_vec3(nph_vec3_scale(d->color, d->intensity), 0.0F);
-        if (d->type == NPH_RENDER_LIGHT_TYPE_SPOT) {
-            // KHR_lights_punctual's angular attenuation as a scale and an
-            // offset on cos(angle).
-            const f32 cos_outer = nph_f32_cos(d->outer_cone);
-            const f32 cos_inner = nph_f32_cos(d->inner_cone);
-            const f32 scale = 1.0F / nph_f32_max(cos_inner - cos_outer, 1e-4F);
-            o->spot = nph_vec4(scale, -cos_outer * scale, 0.0F, 0.0F);
-        }
+        render_light_data(&l->desc, nph_dvec3_relative(l->desc.position, camera), &out[n++]);
     }
     return n;
 }
@@ -469,9 +479,13 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
                          NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
+    // The production path's blended surfaces draw into its own HDR format.
+    const bool compact = r->frame_production && r->vis.hdr_format != RENDER_HDR_FORMAT;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p = r->forward[c->alpha_mode][c->cull];
+        const NphGpuPipeline p = compact && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
+                                     ? r->vis.blend_pipelines[c->cull]
+                                     : r->forward[c->alpha_mode][c->cull];
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -663,7 +677,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     NPH_IGNORE_RESULT(nph_mat4_inverse(view_proj, &inv_view_proj));
 
     write_materials(r);
-    const u32 light_count = write_lights(r, view->camera.position);
+    // The production path lights from its GPU table (render_vis_frame).
+    const u32 light_count = production ? 0U : write_lights(r, view->camera.position);
     build_draws(r, &fc, production, &stats);
     if (stats.dropped != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u visible draws past max_draws (%u) were dropped",
@@ -674,7 +689,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (r->debug_flip_frame != nph_gpu_frame_index(r->dev) + 1U) {
         render_debug_begin_frame(r);
     }
-    stats.lights = light_count;
+    stats.lights = nph_handle_pool_live(&r->light_pool);
     stats.debug_lines = r->debug_draw_counts[0] + r->debug_draw_counts[1];
 
     NphRenderViewData *vd = render_frame_at(r, r->layout.view_offset);

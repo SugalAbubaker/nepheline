@@ -6,6 +6,7 @@
 #include <nepheline/render/reference.h>
 
 #include <math.h>
+#include <nph_render.h>
 
 #define REF_PI 3.14159265358979323846
 
@@ -346,6 +347,92 @@ bool nph_render_ref_vis_project_sphere(NphVec3 c, f32 r, f32 p00, f32 p11, f32 z
     rect->w = (f32)((y0 < y1 ? y1 : y0) * 0.5 + 0.5);
     *depth = (f32)(n / (cz - rr));
     return true;
+}
+
+// One axis of the clipped bounds, in the plane of the axis and the view
+// direction: `c` is the centre there (axis coordinate, z), `near_z` the near
+// plane's z (negative).
+static void sphere_axis_bounds(f64 cx, f64 cz, f64 r, f64 near_z, f64 lower[2], f64 upper[2])
+{
+    const f64 t2 = cx * cx + cz * cz - r * r;
+    const bool inside = t2 <= 0.0;
+    f64 cos_t = 0.0;
+    f64 sin_t = 0.0;
+    if (!inside) {
+        const f64 len = sqrt(cx * cx + cz * cz);
+        cos_t = sqrt(t2) / len;
+        sin_t = r / len;
+    }
+    const bool clipped = cz + r >= near_z;
+    const f64 dz = near_z - cz;
+    f64 k = sqrt(r * r - dz * dz > 0.0 ? r * r - dz * dz : 0.0);
+    f64 b[2][2];
+    for (u32 i = 0; i < 2U; ++i) {
+        b[i][0] = 0.0;
+        b[i][1] = near_z;
+        if (!inside) {
+            b[i][0] = (cos_t * cx - sin_t * cz) * cos_t;
+            b[i][1] = (sin_t * cx + cos_t * cz) * cos_t;
+        }
+        if (clipped && (inside || b[i][1] > near_z)) {
+            b[i][0] = cx + k;
+            b[i][1] = near_z;
+        }
+        sin_t = -sin_t;
+        k = -k;
+    }
+    upper[0] = b[0][0];
+    upper[1] = b[0][1];
+    lower[0] = b[1][0];
+    lower[1] = b[1][1];
+}
+
+NphVec4 nph_render_ref_vis_project_sphere_clipped(NphVec3 c, f32 r, f32 p00, f32 p11, f32 znear)
+{
+    const f64 near_z = -(f64)znear;
+    f64 lx[2];
+    f64 ux[2];
+    f64 ly[2];
+    f64 uy[2];
+    sphere_axis_bounds((f64)c.x, (f64)c.z, (f64)r, near_z, lx, ux);
+    sphere_axis_bounds((f64)c.y, (f64)c.z, (f64)r, near_z, ly, uy);
+    const f64 x0 = lx[0] / -lx[1] * (f64)p00;
+    const f64 x1 = ux[0] / -ux[1] * (f64)p00;
+    const f64 y0 = ly[0] / -ly[1] * (f64)p11;
+    const f64 y1 = uy[0] / -uy[1] * (f64)p11;
+    return nph_vec4((f32)((x0 < x1 ? x0 : x1) * 0.5 + 0.5), (f32)((y0 < y1 ? y0 : y1) * 0.5 + 0.5),
+                    (f32)((x0 < x1 ? x1 : x0) * 0.5 + 0.5), (f32)((y0 < y1 ? y1 : y0) * 0.5 + 0.5));
+}
+
+NphVec4 nph_render_ref_vis_light_sphere(NphVec3 position, NphVec3 direction, f32 range, u32 type,
+                                        f32 cos_outer, f32 sin_outer)
+{
+    f64 t = 0.0;
+    f64 radius = (f64)range;
+    if (type == (u32)NPH_RENDER_LIGHT_TYPE_SPOT) {
+        if ((f64)cos_outer >= 0.70710678) {
+            t = (f64)range / (2.0 * (f64)cos_outer);
+            radius = t;
+        } else {
+            t = (f64)range * (f64)cos_outer;
+            radius = (f64)range * (f64)sin_outer;
+        }
+    }
+    return nph_vec4((f32)((f64)position.x + (f64)direction.x * t),
+                    (f32)((f64)position.y + (f64)direction.y * t),
+                    (f32)((f64)position.z + (f64)direction.z * t), (f32)radius);
+}
+
+u32 nph_render_ref_zbin(f32 z, f32 znear, f32 scale, f64 *margin)
+{
+    const f64 x = log2((f64)z / (f64)znear) * (f64)scale;
+    const f64 last = (f64)(NPH_RENDER_ZBINS - 1);
+    const f64 clamped = x < 0.0 ? 0.0 : (x > last ? last : x);
+    // A clamped value is decided by the clamp, unless it is near the bound.
+    const f64 to_bound = x < 0.0 ? -x : (x > last ? x - last : (f64)INFINITY);
+    const f64 to_edge = fabs(x - floor(x + 0.5));
+    *margin = x < 0.0 || x > last ? to_bound : to_edge;
+    return (u32)clamped;
 }
 
 f64 nph_render_ref_vis_facing_det(NphVec4 c0, NphVec4 c1, NphVec4 c2)

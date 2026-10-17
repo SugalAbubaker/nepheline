@@ -16,10 +16,13 @@
 //     occlusion against a hierarchical depth buffer); visible meshlets are
 //     rasterised into a 64-bit visibility buffer by mesh shaders, or by
 //     indirect draws on devices without them; one compute pass shades
-//     every pixel with the reference's own shading. Its CPU cost per frame
-//     does not grow with the number of objects. It needs 64-bit image
-//     atomics, subgroup ballot and arithmetic, and gl_PrimitiveID in
-//     fragment shaders (nph_renderer_production_supported).
+//     every pixel with the reference's own shading, each pixel lighting
+//     with the lights its distance bin and screen tile may meet (a light
+//     grid built on the GPU each frame from a persistent light table). Its
+//     CPU cost per frame grows with neither the number of objects nor of
+//     lights. It needs 64-bit image atomics, subgroup ballot, arithmetic,
+//     and shuffle, and gl_PrimitiveID in fragment shaders
+//     (nph_renderer_production_supported).
 //
 // What it renders:
 //   - glTF 2.0 metallic-roughness materials: base colour, metallic,
@@ -111,7 +114,7 @@ typedef struct NphRendererDesc {
     u32 max_meshes;    // (1024)
     u32 max_materials; // (1024)
     u32 max_instances; // (16384)
-    u32 max_lights;    // (256): all evaluated for every pixel
+    u32 max_lights;    // (256), at most NPH_RENDER_MAX_LIGHTS (4096)
     u32 max_draws;     // visible submeshes per frame (16384); the rest are dropped and logged
     u32 debug_lines;   // per frame, depth-tested and overlay each (32768)
     // Image-based lighting resolution; zero picks the default.
@@ -491,9 +494,10 @@ typedef enum NphRenderPipeline {
 // Switches of the production path's culling, for tests and debugging; the
 // image does not change, only the work.
 typedef enum NphRenderVisFlags {
-    NPH_RENDER_VIS_NO_OCCLUSION = 1U << 0U, // no hierarchical-depth tests
-    NPH_RENDER_VIS_NO_CONE = 1U << 1U,      // no meshlet normal-cone tests
-    NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U, // every cluster through the hardware raster
+    NPH_RENDER_VIS_NO_OCCLUSION = 1U << 0U,  // no hierarchical-depth tests
+    NPH_RENDER_VIS_NO_CONE = 1U << 1U,       // no meshlet normal-cone tests
+    NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U,  // every cluster through the hardware raster
+    NPH_RENDER_VIS_NO_LIGHT_GRID = 1U << 3U, // every light for every pixel, as the reference
 } NphRenderVisFlags;
 
 typedef struct NphRenderView {
@@ -526,7 +530,7 @@ typedef struct NphRenderFrameStats {
     u32 blended;   // of those, blended
     u32 dropped;   // visible draws past max_draws
     u32 triangles; // drawn
-    u32 lights;    // evaluated per pixel
+    u32 lights;    // live lights (the reference evaluates each for every pixel)
     u32 debug_lines;
     b32 environment_updated;    // this frame declared the IBL passes
     NphRenderPipeline pipeline; // the pipeline that drew the frame
@@ -545,6 +549,8 @@ typedef struct NphRenderFrameStats {
     u32 vis_meshlets_culled_frustum;
     u32 vis_meshlets_culled_cone;
     u32 vis_meshlets_culled_occlusion;
+    u32 vis_lights;   // lights in view: those that reach every pixel, and the others the
+                      // frustum keeps
     u32 vis_overflow; // NphRenderVisOverflow bits: lists that dropped work
 } NphRenderFrameStats;
 

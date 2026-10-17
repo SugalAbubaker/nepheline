@@ -239,6 +239,9 @@ static NphResult build_graphics(NphGpuDevice *dev, const NphGpuGraphicsPipelineD
     ci.pColorBlendState = &blend;
     ci.pDynamicState = &dynamic;
     ci.layout = dev->bindless.pipeline_layout;
+    if (dev->info.features.shader_statistics) {
+        ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    }
     const VkResult r =
         vkCreateGraphicsPipelines(dev->device, dev->pipeline_cache, 1U, &ci, NULL, out);
     if (r != VK_SUCCESS) {
@@ -259,7 +262,30 @@ static NphResult build_compute(NphGpuDevice *dev, const NphGpuComputePipelineDes
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     NPH_TRY(stage_info(dev, d->shader, NPH_GPU_SHADER_COMPUTE, &ci.stage, &push_bytes));
+    if (d->specialization_count > NPH_GPU_MAX_SPECIALIZATION) {
+        GPU_LOG_ERROR("pipeline '%s': %u specialization constants, at most %u", name,
+                      d->specialization_count, NPH_GPU_MAX_SPECIALIZATION);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    VkSpecializationMapEntry entries[NPH_GPU_MAX_SPECIALIZATION];
+    VkSpecializationInfo spec;
+    if (d->specialization_count != 0U) {
+        for (u32 i = 0; i < d->specialization_count; ++i) {
+            entries[i].constantID = i;
+            entries[i].offset = i * (u32)sizeof(u32);
+            entries[i].size = sizeof(u32);
+        }
+        memset(&spec, 0, sizeof spec);
+        spec.mapEntryCount = d->specialization_count;
+        spec.pMapEntries = entries;
+        spec.dataSize = (size_t)d->specialization_count * sizeof(u32);
+        spec.pData = d->specialization;
+        ci.stage.pSpecializationInfo = &spec;
+    }
     ci.layout = dev->bindless.pipeline_layout;
+    if (dev->info.features.shader_statistics) {
+        ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    }
     const VkResult r =
         vkCreateComputePipelines(dev->device, dev->pipeline_cache, 1U, &ci, NULL, out);
     if (r != VK_SUCCESS) {
@@ -327,6 +353,76 @@ NphResult nph_gpu_pipeline_create_compute(NphGpuDevice *dev, const NphGpuCompute
     gpu_set_name(dev, VK_OBJECT_TYPE_PIPELINE, (u64)(uptr)vk, slot->name);
     out->value = handle;
     return NPH_RESULT_OK;
+}
+
+// The driver's strings, cut to fit.
+static void copy_cut(char *dst, u32 cap, const char *src)
+{
+    u32 i = 0U;
+    for (; i + 1U < cap && src[i] != '\0'; ++i) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
+u32 nph_gpu_pipeline_statistics(NphGpuDevice *dev, NphGpuPipeline pipeline,
+                                NphGpuShaderStatistic *out, u32 max)
+{
+    NPH_ASSERT(dev != NULL && (out != NULL || max == 0U));
+    const NphGpuPipelineSlot *slot = gpu_pipeline(dev, pipeline);
+    if (slot == NULL || !dev->info.features.shader_statistics) {
+        return 0U;
+    }
+    VkPipelineInfoKHR pi;
+    memset(&pi, 0, sizeof pi);
+    pi.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR;
+    pi.pipeline = slot->vk;
+    VkPipelineExecutablePropertiesKHR parts[8];
+    u32 part_count = 8U;
+    for (u32 i = 0; i < part_count; ++i) {
+        memset(&parts[i], 0, sizeof parts[i]);
+        parts[i].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR;
+    }
+    // VK_INCOMPLETE leaves the first eight, which is every stage there is.
+    (void)vkGetPipelineExecutablePropertiesKHR(dev->device, &pi, &part_count, parts);
+    u32 n = 0U;
+    for (u32 e = 0; e < part_count && n < max; ++e) {
+        VkPipelineExecutableInfoKHR ei;
+        memset(&ei, 0, sizeof ei);
+        ei.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
+        ei.pipeline = slot->vk;
+        ei.executableIndex = e;
+        VkPipelineExecutableStatisticKHR stats[24];
+        u32 stat_count = 24U;
+        for (u32 i = 0; i < stat_count; ++i) {
+            memset(&stats[i], 0, sizeof stats[i]);
+            stats[i].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
+        }
+        (void)vkGetPipelineExecutableStatisticsKHR(dev->device, &ei, &stat_count, stats);
+        for (u32 i = 0; i < stat_count && n < max; ++i) {
+            NphGpuShaderStatistic *o = &out[n++];
+            copy_cut(o->executable, (u32)sizeof o->executable, parts[e].name);
+            copy_cut(o->name, (u32)sizeof o->name, stats[i].name);
+            switch (stats[i].format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                o->value = stats[i].value.b32 != VK_FALSE ? 1U : 0U;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                o->value = stats[i].value.i64 < 0 ? 0U : (u64)stats[i].value.i64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                o->value = stats[i].value.u64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                o->value = stats[i].value.f64 < 0.0 ? 0U : (u64)(stats[i].value.f64 + 0.5);
+                break;
+            default:
+                o->value = 0U;
+                break;
+            }
+        }
+    }
+    return n;
 }
 
 NphResult nph_gpu_pipeline_reload(NphGpuDevice *dev, NphGpuPipeline pipeline)

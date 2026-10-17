@@ -21,6 +21,21 @@
 // forward pass with the rasteriser's implicit derivatives, the resolve
 // with the analytic ones it computes (textureGrad). The surface carries
 // its screen-space derivatives for the same reason.
+//
+// The reference evaluates every light for every pixel. The production
+// path's view carries a light grid (NphRenderLightGrid) instead, and a
+// pixel evaluates only the lights its distance bin and screen tile may
+// meet. A light skipped there contributes exactly nothing: its windowed
+// falloff or its cone is zero at the pixel. A shader that always has the
+// grid defines NPH_SURFACE_GRID_LIGHTS and leaves the reference's loop out.
+// Each invocation walks its own lights: on the reference GPU, invocations
+// of a subgroup that load the same light share the load anyway, and
+// walking the subgroup's lights together (Drobot 2017) measured slower
+// for the registers it holds (docs/adr/0031).
+//
+// The environment and the emission are evaluated before the punctual
+// lights, so that across the light loop, where a shader's registers peak,
+// only the point's description and one sum stay live.
 #ifndef NPH_SURFACE_GLSL
 #define NPH_SURFACE_GLSL
 
@@ -42,6 +57,8 @@ struct NphSurface {
     vec2 uv_dx;
     vec2 uv_dy;
     bool front_facing;
+    vec2 pixel;  // the pixel's position in the target (a light tile is found from it)
+    float depth; // its reverse-Z depth (znear over the view distance)
 };
 
 vec4 nph_surface_sample(NphRenderMaterialData m, int slot, NphSurface s)
@@ -113,6 +130,82 @@ vec3 nph_light_illuminance(NphRenderLightData light, vec3 p, out vec3 l)
     return light.color.rgb * attenuation;
 }
 
+// What the lights need to know about a shaded point.
+struct NphLitPoint {
+    vec3 position;
+    vec3 n;
+    vec3 v;
+    float nov;
+    float a; // GGX alpha
+    vec3 base;
+    float metallic;
+    float energy; // 1 / Ess - 1: the specular lobe's multiple-scattering compensation is
+                  // 1 + F0 * energy
+};
+
+// The radiance one punctual light reflects from the point, before exposure.
+vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
+{
+    vec3 l;
+    const vec3 e = nph_light_illuminance(light, p.position, l);
+    const float nol = dot(p.n, l);
+    if (nol <= 0.0 || (e.r == 0.0 && e.g == 0.0 && e.b == 0.0)) {
+        return vec3(0.0);
+    }
+    const vec3 h = normalize(p.v + l);
+    const float noh = clamp(dot(p.n, h), 0.0, 1.0);
+    const float voh = clamp(dot(p.v, h), 0.0, 1.0);
+    // F0 and the diffuse colour again from the base colour: fewer values
+    // live across the loop for a few multiplies per light.
+    const vec3 f0 = mix(vec3(0.04), p.base, p.metallic);
+    const vec3 spec = nph_d_ggx(noh, p.a) * nph_v_smith_ggx_correlated(p.nov, nol, p.a) *
+                      nph_f_schlick(voh, f0) * (vec3(1.0) + f0 * p.energy);
+    return (p.base * (1.0 - p.metallic) * NPH_INV_PI + spec) * e * nol;
+}
+
+// The bits of light word `w` whose indices lie in [first, last]; the word
+// must overlap that range.
+uint nph_light_bits(uint w, uint first, uint last)
+{
+    const uint lo = w * 32u;
+    const uint a = first > lo ? first - lo : 0u;
+    const uint b = min(last - lo, 31u);
+    return (0xFFFFFFFFu >> (31u - b)) & (0xFFFFFFFFu << a);
+}
+
+// The direct light the production path's grid holds for the point: the
+// lights that reach every pixel, then the sorted local lights in the range
+// of the point's distance bin whose bit its tile's mask sets, in index
+// order.
+vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
+{
+    vec3 direct = vec3(0.0);
+    WordsRef counts = WordsRef(g.counts);
+    LightsRef globals = LightsRef(g.globals);
+    const uint global_count = counts.w[0];
+    for (uint i = 0u; i < global_count; ++i) {
+        direct += nph_lit_light(p, globals.l[i]);
+    }
+    const uint range = WordsRef(g.zbins).w[nph_zbin(g.znear / depth, g.znear, g.zbin_scale)];
+    const uint first = range & 0xFFFFu;
+    const uint last = range >> 16u;
+    const uvec2 tile = uvec2(pixel) / uint(NPH_RENDER_LIGHT_TILE);
+    const uint at = tile.y * g.tiles_x + tile.x;
+    WordsRef tiles = WordsRef(g.tiles);
+    LightsRef locals = LightsRef(g.locals);
+    if (first <= last) {
+        for (uint w = first >> 5u; w <= (last >> 5u); ++w) {
+            uint bits = tiles.w[w * g.tile_count + at] & nph_light_bits(w, first, last);
+            while (bits != 0u) {
+                const uint b = findLSB(bits);
+                bits &= bits - 1u;
+                direct += nph_lit_light(p, locals.l[w * 32u + b]);
+            }
+        }
+    }
+    return direct;
+}
+
 // The pre-exposed radiance leaving the surface towards the camera (at the
 // origin), or for an unlit material its colour as authored. `base` is
 // nph_surface_base_color's result.
@@ -177,24 +270,6 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     const float ess = max(dfg.x + dfg.y, 1e-4);
     const vec3 energy = vec3(1.0) + f0 * (1.0 / ess - 1.0);
 
-    // Punctual lights.
-    vec3 direct = vec3(0.0);
-    LightsRef lights = LightsRef(view.v.lights_address);
-    for (uint i = 0u; i < view.v.light_count; ++i) {
-        vec3 l;
-        const vec3 e = nph_light_illuminance(lights.l[i], s.position, l);
-        const float nol = dot(n, l);
-        if (nol <= 0.0) {
-            continue;
-        }
-        const vec3 h = normalize(v + l);
-        const float noh = clamp(dot(n, h), 0.0, 1.0);
-        const float voh = clamp(dot(v, h), 0.0, 1.0);
-        const vec3 spec = nph_d_ggx(noh, a) * nph_v_smith_ggx_correlated(nov, nol, a) *
-                          nph_f_schlick(voh, f0) * energy;
-        direct += (diffuse_color * NPH_INV_PI + spec) * e * nol;
-    }
-
     // Image-based lighting.
     vec3 indirect = vec3(0.0);
     if ((view.v.flags & NPH_RENDER_VIEW_IBL) != 0u) {
@@ -226,33 +301,52 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         emissive *= nph_surface_sample(m, NPH_RENDER_TEX_EMISSIVE, s).rgb;
     }
 
-    vec3 color = (direct + indirect + emissive) * view.v.exposure;
+    // The debug views that need no punctual light.
     switch (view.v.debug_mode) {
     case NPH_RENDER_DEBUG_BASE_COLOR:
-        color = base.rgb;
-        break;
+        return min(base.rgb, vec3(NPH_RENDER_HALF_MAX));
     case NPH_RENDER_DEBUG_NORMAL:
-        color = n * 0.5 + 0.5;
-        break;
+        return n * 0.5 + 0.5;
     case NPH_RENDER_DEBUG_ROUGHNESS:
-        color = vec3(roughness);
-        break;
+        return vec3(roughness);
     case NPH_RENDER_DEBUG_METALLIC:
-        color = vec3(metallic);
-        break;
+        return vec3(metallic);
     case NPH_RENDER_DEBUG_OCCLUSION:
-        color = vec3(occlusion);
-        break;
-    case NPH_RENDER_DEBUG_DIRECT:
-        color = direct * view.v.exposure;
-        break;
+        return vec3(occlusion);
     case NPH_RENDER_DEBUG_INDIRECT:
-        color = indirect * view.v.exposure;
-        break;
+        return min(indirect * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
     default:
         break;
     }
-    return min(color, vec3(NPH_RENDER_HALF_MAX));
+    const vec3 rest = indirect + emissive;
+
+    // Punctual lights.
+    NphLitPoint lp;
+    lp.position = s.position;
+    lp.n = n;
+    lp.v = v;
+    lp.nov = nov;
+    lp.a = a;
+    lp.base = base.rgb;
+    lp.metallic = metallic;
+    lp.energy = 1.0 / ess - 1.0;
+#ifdef NPH_SURFACE_GRID_LIGHTS
+    const vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+#else
+    vec3 direct = vec3(0.0);
+    if (view.v.light_grid != 0ul) {
+        direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+    } else {
+        LightsRef lights = LightsRef(view.v.lights_address);
+        for (uint i = 0u; i < view.v.light_count; ++i) {
+            direct += nph_lit_light(lp, lights.l[i]);
+        }
+    }
+#endif
+    if (view.v.debug_mode == NPH_RENDER_DEBUG_DIRECT) {
+        return min(direct * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
+    }
+    return min((direct + rest) * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
 }
 
 #endif
