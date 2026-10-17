@@ -1885,8 +1885,9 @@ NTEST(vis, more_lights_than_a_view_can_sort_are_refused)
 }
 
 // The shading tiles: every 8 x 8 tile lands in exactly one bin; the sky
-// bin's tiles show the background alone and the others a surface
-// somewhere. The target's last column and row of tiles are partial.
+// bin's tiles show the background alone (within its dither) and the
+// others a surface somewhere. The target's last column and row of tiles
+// are partial.
 NTEST(vis, shading_tiles_are_binned_by_what_they_hold)
 {
     LightFixture lf;
@@ -1945,8 +1946,10 @@ NTEST(vis, shading_tiles_are_binned_by_what_they_hold)
             u32 surface = 0U;
             for (u32 y = ty * 8U; y < nph_min_u32(ty * 8U + 8U, LIGHT_H); ++y) {
                 for (u32 x = tx * 8U; x < nph_min_u32(tx * 8U + 8U, LIGHT_W); ++x) {
-                    surface +=
-                        memcmp(&img[((u64)y * LIGHT_W + x) * 4U], background, 3U) != 0 ? 1U : 0U;
+                    surface += test_pixel_near(&img[((u64)y * LIGHT_W + x) * 4U], background[0],
+                                               background[1], background[2], 255U, 8U)
+                                   ? 0U
+                                   : 1U;
                 }
             }
             sky_with_surface += b == (u32)NPH_VIS_BIN_SKY && surface != 0U ? 1U : 0U;

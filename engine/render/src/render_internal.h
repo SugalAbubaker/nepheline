@@ -18,8 +18,11 @@
 
 #define RENDER_NAME_MAX 64U
 
-// The formats of the renderer's own images.
+// The formats of the renderer's own images. The production path's HDR
+// target is B10G11R11 where the device can store to it, sample it, and
+// blend into it (half the bytes), else this one (RenderVis.hdr_format).
 #define RENDER_HDR_FORMAT   NPH_GPU_FORMAT_R16G16B16A16_SFLOAT
+#define RENDER_HDR_COMPACT  NPH_GPU_FORMAT_B10G11R11_UFLOAT
 #define RENDER_DEPTH_FORMAT NPH_GPU_FORMAT_D32_SFLOAT
 #define RENDER_IBL_FORMAT   NPH_GPU_FORMAT_R16G16B16A16_SFLOAT
 // The production path's: the visibility buffer and the hierarchical depth.
@@ -290,8 +293,12 @@ typedef struct VisFrame {
 } VisFrame;
 
 typedef struct RenderVis {
-    b32 supported;    // the device can run the production path and it was not disabled
-    b32 mesh_shaders; // rasterise with mesh shaders (else indirect draws)
+    b32 supported;           // the device can run the production path and it was not disabled
+    b32 mesh_shaders;        // rasterise with mesh shaders (else indirect draws)
+    NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
+    NphGpuPipeline blend_pipelines[RENDER_CULL_COUNT]; // blended forward pipelines into
+                                                       // hdr_format (null when it is
+                                                       // RENDER_HDR_FORMAT)
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2]; // [opaque, masked]: mesh or vertex pipelines
@@ -469,6 +476,10 @@ NPH_INLINE void *render_frame_at(const NphRenderer *r, u64 offset)
 
 // renderer.c
 NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *file);
+// The forward pipeline of an alpha mode and cull variant drawing into
+// `format` (the reference's HDR target, or the production path's).
+NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
+                                  NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);

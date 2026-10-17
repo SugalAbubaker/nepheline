@@ -34,8 +34,19 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
-// The bin this pipeline shades (NPH_VIS_BIN_*).
+// The bin this pipeline shades (NPH_VIS_BIN_*), and whether the HDR
+// target is B10G11R11, whose coarse steps are dithered.
 layout(constant_id = 0) const uint k_bin = NPH_VIS_BIN_LIT;
+layout(constant_id = 1) const bool k_dither = false;
+
+// The debug views are stored as they are, for reading.
+void store(ViewRef rview, ivec2 p, vec3 color)
+{
+    if (k_dither && rview.v.debug_mode == NPH_RENDER_DEBUG_NONE) {
+        color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
+    }
+    imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
+}
 
 // Perspective-correct barycentrics of a pixel at NDC `q` and their change
 // one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
@@ -121,7 +132,7 @@ void main()
     ViewRef rview = ViewRef(view.v.render_view);
     const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
     if (k_bin == NPH_VIS_BIN_SKY) {
-        imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(background(rview, q), 1.0));
+        store(rview, p, background(rview, q));
         return;
     }
     const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg1)], p).x;
@@ -195,5 +206,5 @@ void main()
         const NphRenderMaterialData material = MaterialsRef(view.v.materials).m[cluster.material];
         color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
     }
-    imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
+    store(rview, p, color);
 }

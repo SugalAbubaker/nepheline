@@ -30,6 +30,29 @@ NPH_BUFFER_REF(SkyRef) { NphRenderSkyData s; };
 NPH_BUFFER_REF(LightGridRef) { NphRenderLightGrid g; };
 NPH_BUFFER_REF(WordsRef) { uint w[]; };
 
+// Interleaved gradient noise in [0, 1) at a pixel (Jimenez, "Next
+// Generation Post Processing in Call of Duty: Advanced Warfare", SIGGRAPH
+// 2014): cheap, and without the low frequencies that read as blotches.
+float nph_gradient_noise(vec2 pixel)
+{
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+}
+
+// The colour rounded to B10G11R11's grid (mantissas of 6 bits for red and
+// green, 5 for blue) up or down at random, with the odds that keep its
+// expected value: the format's coarse steps then show as fine noise
+// rather than bands (Gjøl & Svendsen, "The Rendering of INSIDE", GDC 2016).
+// The result is exactly representable, so the device's own conversion,
+// which Vulkan lets round either to nearest or toward zero (the RTX 3060
+// Ti truncates), never applies. `u` is noise in [0, 1).
+vec3 nph_dither_b10g11r11(vec3 c, float u)
+{
+    const vec3 x = max(c, vec3(1e-20));
+    const vec3 e = vec3((floatBitsToUint(x) >> 23u) & 0xFFu) - 127.0;
+    const vec3 to_grid = exp2(vec3(6.0, 6.0, 5.0) - e);
+    return floor(c * to_grid + u) / to_grid;
+}
+
 // The distance bin of view distance `z` in a light grid
 // (NphRenderLightGrid): bins evenly spaced in log2 from the near plane,
 // the last one open-ended. C twin: nph_render_ref_zbin.

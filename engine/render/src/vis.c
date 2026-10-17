@@ -167,6 +167,15 @@ NphResult render_vis_create(NphRenderer *r)
 {
     RenderVis *v = &r->vis;
     v->mesh_shaders = mesh_path_supported(r);
+    // The HDR target in B10G11R11 where the resolve can store to it, the
+    // tonemap sample it, and blended surfaces blend into it (the resolve's
+    // pipelines are specialised for it).
+    const u32 hdr_use = (u32)NPH_GPU_FORMAT_FEATURE_STORAGE | (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED |
+                        (u32)NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT |
+                        (u32)NPH_GPU_FORMAT_FEATURE_BLEND;
+    v->hdr_format = nph_gpu_format_supports(r->dev, RENDER_HDR_COMPACT, hdr_use)
+                        ? RENDER_HDR_COMPACT
+                        : RENDER_HDR_FORMAT;
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         const bool mesh_stage =
             i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_MASKED;
@@ -185,10 +194,12 @@ NphResult render_vis_create(NphRenderer *r)
         d.shader = v->shaders[k_compute_shaders[i]];
         d.name = k_compute_names[i];
         if (i == (u32)VIS_COMPUTE_RESOLVE || i == (u32)VIS_COMPUTE_RESOLVE_SKY) {
-            // The resolve's bins (vis_resolve.comp k_bin).
+            // The resolve's bins (vis_resolve.comp k_bin), and whether it
+            // dithers to the HDR target's precision (k_dither).
             d.specialization[0] =
                 i == (u32)VIS_COMPUTE_RESOLVE ? (u32)NPH_VIS_BIN_LIT : (u32)NPH_VIS_BIN_SKY;
-            d.specialization_count = 1U;
+            d.specialization[1] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
+            d.specialization_count = 2U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         log_statistics(r, v->compute[i], k_compute_names[i]);
@@ -214,14 +225,21 @@ NphResult render_vis_create(NphRenderer *r)
     d.depth.compare = NPH_GPU_COMPARE_ALWAYS;
     d.name = "vis depth";
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &v->depth));
+    if (v->hdr_format != RENDER_HDR_FORMAT) {
+        for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
+            NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format,
+                                            &v->blend_pipelines[c]));
+        }
+    }
     NPH_TRY(render_vis_scene_create(r));
     v->supported = 1;
     const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
-    NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: production path rasterises with %s", r->name,
+    NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: production path rasterises with %s; HDR in %s", r->name,
                  v->mesh_shaders               ? "mesh shaders"
                  : !info->features.mesh_shader ? "indirect draws (no mesh shaders)"
                                                : "indirect draws (the driver's mesh shaders are "
-                                                 "unusable here)");
+                                                 "unusable here)",
+                 nph_gpu_format_info(v->hdr_format)->name);
     return NPH_RESULT_OK;
 }
 
@@ -241,6 +259,9 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
     nph_gpu_pipeline_destroy(dev, v->depth);
+    for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
+        nph_gpu_pipeline_destroy(dev, v->blend_pipelines[c]);
+    }
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         nph_gpu_shader_destroy(dev, v->shaders[i]);
     }
@@ -1209,7 +1230,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     vd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
     vd.name = "vis visibility buffer";
     NphGpuImageDesc hd = vd;
-    hd.format = RENDER_HDR_FORMAT;
+    hd.format = v->hdr_format;
     hd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED |
                (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT;
     hd.name = "hdr colour";

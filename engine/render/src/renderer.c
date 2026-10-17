@@ -103,7 +103,8 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // Pipelines and samplers
 // ---------------------------------------------------------------------------
 
-static NphResult create_forward_pipelines(NphRenderer *r)
+NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
+                                  NphGpuPipeline *out)
 {
     static const RenderShader frags[3] = {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK,
                                           RENDER_SHADER_FORWARD_BLEND};
@@ -115,35 +116,41 @@ static NphResult create_forward_pipelines(NphRenderer *r)
         {"forward blended", "forward blended (mirrored)", "forward blended (double-sided)",
          "forward blended (double-sided, mirrored)"},
     };
+    NphGpuGraphicsPipelineDesc d;
+    memset(&d, 0, sizeof d);
+    d.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
+    d.fragment = r->shaders[frags[alpha]];
+    const bool none = cull == (u32)RENDER_CULL_NONE || cull == (u32)RENDER_CULL_NONE_CW;
+    const bool cw = cull == (u32)RENDER_CULL_BACK_CW || cull == (u32)RENDER_CULL_NONE_CW;
+    d.cull_mode = none ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
+    d.front_face = cw ? NPH_GPU_FRONT_FACE_CW : NPH_GPU_FRONT_FACE_CCW;
+    d.color_formats[0] = format;
+    d.color_count = 1U;
+    d.depth_format = RENDER_DEPTH_FORMAT;
+    d.depth.test = 1;
+    d.depth.compare = NPH_GPU_COMPARE_GREATER; // reverse-Z
+    if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
+        // "Over" compositing; blended surfaces do not occlude.
+        d.blend[0].enable = 1;
+        d.blend[0].src_color = NPH_GPU_BLEND_SRC_ALPHA;
+        d.blend[0].dst_color = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
+        d.blend[0].color_op = NPH_GPU_BLEND_OP_ADD;
+        d.blend[0].src_alpha = NPH_GPU_BLEND_ONE;
+        d.blend[0].dst_alpha = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
+        d.blend[0].alpha_op = NPH_GPU_BLEND_OP_ADD;
+    } else {
+        d.depth.write = 1;
+    }
+    d.name = names[alpha][cull];
+    return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
+}
+
+static NphResult create_forward_pipelines(NphRenderer *r)
+{
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
-            NphGpuGraphicsPipelineDesc d;
-            memset(&d, 0, sizeof d);
-            d.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
-            d.fragment = r->shaders[frags[alpha]];
-            const bool none = cull == (u32)RENDER_CULL_NONE || cull == (u32)RENDER_CULL_NONE_CW;
-            const bool cw = cull == (u32)RENDER_CULL_BACK_CW || cull == (u32)RENDER_CULL_NONE_CW;
-            d.cull_mode = none ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
-            d.front_face = cw ? NPH_GPU_FRONT_FACE_CW : NPH_GPU_FRONT_FACE_CCW;
-            d.color_formats[0] = RENDER_HDR_FORMAT;
-            d.color_count = 1U;
-            d.depth_format = RENDER_DEPTH_FORMAT;
-            d.depth.test = 1;
-            d.depth.compare = NPH_GPU_COMPARE_GREATER; // reverse-Z
-            if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
-                // "Over" compositing; blended surfaces do not occlude.
-                d.blend[0].enable = 1;
-                d.blend[0].src_color = NPH_GPU_BLEND_SRC_ALPHA;
-                d.blend[0].dst_color = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
-                d.blend[0].color_op = NPH_GPU_BLEND_OP_ADD;
-                d.blend[0].src_alpha = NPH_GPU_BLEND_ONE;
-                d.blend[0].dst_alpha = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
-                d.blend[0].alpha_op = NPH_GPU_BLEND_OP_ADD;
-            } else {
-                d.depth.write = 1;
-            }
-            d.name = names[alpha][cull];
-            NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &r->forward[alpha][cull]));
+            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT,
+                                            &r->forward[alpha][cull]));
         }
     }
     NphGpuGraphicsPipelineDesc s;

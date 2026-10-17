@@ -479,9 +479,13 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
                          NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
+    // The production path's blended surfaces draw into its own HDR format.
+    const bool compact = r->frame_production && r->vis.hdr_format != RENDER_HDR_FORMAT;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p = r->forward[c->alpha_mode][c->cull];
+        const NphGpuPipeline p = compact && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
+                                     ? r->vis.blend_pipelines[c->cull]
+                                     : r->forward[c->alpha_mode][c->cull];
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
