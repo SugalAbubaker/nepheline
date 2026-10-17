@@ -106,10 +106,10 @@ imported content gets into a scene and back out of a file:
   a restart, through the database. To play outside the editor, the cooked
   directory is packed (`nph_cook --pack-only`), and the player mounts the
   pack. Phase 9's exit-criterion test covers the editor half.
-- Re-importing a changed source whose assets are loaded fails on Windows
-  while their files are mapped, and the import reports it. An unchanged
-  source is skipped by the incremental cook and never hits this. Asset
-  hot reload (§8.8) is the fix, and is future work.
+- Re-importing a changed source whose assets are loaded failed on Windows
+  while their files were mapped. Update: ADR-0027 removed this. Files are
+  replaced as POSIX renames replace them, and the editor reloads what it
+  re-cooks.
 - Imports cannot be cancelled. Closing the editor waits for the one in
   progress.
 - The editor's allocator must be thread-safe, because the import thread
