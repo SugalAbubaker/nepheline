@@ -32,10 +32,23 @@ timeline semaphores, buffer device address, descriptor indexing with
 update-after-bind and partially bound descriptors, draw indirect count,
 host query reset, scalar block layout, format-less storage images, and 128
 bytes of push constants. Optional capabilities are detected and enabled
-when present and reported in `NphGpuFeatures`: mesh shaders, ray queries,
-64-bit image atomics (the software rasteriser of §8.6.4), min/max
-reduction samplers (Hi-Z), 16-bit floats and 8-bit integers, depth clamp,
+when present and reported in `NphGpuFeatures`: mesh shaders (with their
+limits in `NphGpuLimits`), ray queries, 64-bit image and buffer atomics
+(the visibility buffer and the software rasteriser of §8.6.4), min/max
+reduction samplers (Hi-Z), 16-bit floats and 8-bit integers, subgroup
+operations, first-instance indirect draws, the geometry-shader feature
+(which a fragment shader reading `gl_PrimitiveID` declares), depth clamp,
 wireframe, BC compression, memory budgets, calibrated timestamps.
+`NphGpuDeviceDesc.disable_features` switches the optional ones off on any
+device, so the fallbacks run on hardware that has the fast paths.
+
+**Driver quirks.** `NphGpuDeviceInfo.quirks` flags driver bugs the engine
+works around, each found by a test and matched by driver:
+`NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS` marks lavapipe (Mesa
+25.2.8 on the CI runners; no fixed release is known), whose mesh-shader
+pipelines hand the fragment stage zeros for push constants. Its
+`mesh_pipeline_fragment_shaders_read_push_constants` test skips there,
+naming the quirk, and the renderer takes its indirect raster path.
 
 Physical devices are scored (discrete > integrated > virtual > CPU, then
 device-local memory, then optional features) and every candidate is logged
@@ -146,6 +159,14 @@ into a frame slot's command pool, so `nph_gpu_frame_begin` and
 `nph_gpu_device_wait_idle`, which recycle those pools, flush them first
 (the renderer's tests found the copies being dropped; ADR-0018).
 
+Copies in one command buffer may run in any order, so two uploads into
+overlapping bytes of one buffer in the same batch (a record rewritten, a
+range freed and handed out again before the flush) would race. Each
+buffer keeps the envelope of what the current batch wrote to it; a copy
+overlapping it gets a transfer-to-transfer barrier first, and the
+envelope restarts. That costs O(1) per upload, and appends never pay it.
+Synchronisation validation found the renderer's scene tables doing both.
+
 `nph_gpu_upload_image_region` writes one rectangle of one mip and layer
 and keeps the rest of the mip. That is a texture that changes in parts:
 the editor's Dear ImGui font atlas, which grows glyph by glyph
@@ -216,22 +237,32 @@ and executes:
    creates nothing.
 4. **Barriers** are derived from the declared uses with synchronization2
    stage and access masks that cover only what the pass does, per mip for
-   images: layout changes and write hazards get a barrier, read-after-read
-   accumulates stages, the first use of a transient starts from UNDEFINED
+   images. Each resource (per mip) remembers its last write, or layout
+   transition, and the read stages already ordered after it. A read those
+   do not cover gets a barrier from the write, so a copy after an
+   indirect read of the same buffer still waits for the writer; a write,
+   or a transition, waits for the last write and every read since. The
+   GPU-driven renderer's counters, read by shaders, indirect commands, and
+   copies in turn, found the earlier model (one stage set per resource)
+   missing both. The first use of a transient starts from UNDEFINED
    and orders after whatever it aliases, cross-queue sources name no
    stages (the semaphore orders them), and exclusive images crossing
    families get a release on the owner's last pass and an acquire on the
    consumer. The final transition to PRESENT and the swapchain semaphores
    attach to the batches that first and last touch the presented image.
-5. **Recording**: each pass records into its own primary command buffer
-   with its barriers in front, so with a job system the passes record in
-   parallel, one job per pass, and are submitted in order. Timestamps
-   bracket every pass; `nph_gpu_rg_timings` reports the frame that
-   completed two frames ago, with each pass's declared footprint: the
-   bytes of every range it declared, counted once as read and/or written
-   (loaded and stored attachments included). That is what a pass asks
-   for, not measured DRAM traffic; the renderer's GPU profiler reports it
-   as the §10.7 byte figure (docs/render.md).
+5. **Recording**: consecutive passes of a batch share a primary command
+   buffer, each with its barriers in front and a debug label of its name:
+   one command buffer per batch without a job system, one per worker with
+   one, each group recorded by one job, submitted in order. A frame's
+   command buffers thus stay bounded by its batches and threads however
+   many passes it declares (CLAUDE.md §10.5); with one per pass, a
+   production frame that also computed the environment exhausted a
+   thread's 32. Timestamps bracket every pass; `nph_gpu_rg_timings`
+   reports the frame that completed two frames ago, with each pass's
+   declared footprint: the bytes of every range it declared, counted once
+   as read and/or written (loaded and stored attachments included). That
+   is what a pass asks for, not measured DRAM traffic; the renderer's GPU
+   profiler reports it as the §10.7 byte figure (docs/render.md).
 
 Imported resources get their final state written back at the end of
 execute, so the next frame, or explicit commands, continue from the truth.

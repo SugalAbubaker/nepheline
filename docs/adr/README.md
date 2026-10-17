@@ -34,6 +34,7 @@ supersedes it and both link to each other.
 | [0026](0026-editor-import.md) | Editor projects and import: sources copied in, cooked on an import thread, placed through the history | Accepted |
 | [0027](0027-editable-meshes.md) | Editable meshes: a polygon source the cooker cooks, edited in place, reloaded where it is drawn | Accepted |
 | [0028](0028-gpu-runner-service.md) | The GPU runner as a standard runner service: no stored token, no elevated loop | Accepted |
+| [0029](0029-gpu-driven-visibility-buffer.md) | The production renderer: GPU-driven two-phase culling into a 64-bit visibility buffer | Accepted |
 
 ## Template
 

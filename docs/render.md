@@ -1,17 +1,23 @@
 # Render module (`engine/render`)
 
-The forward PBR **reference renderer** (CLAUDE.md §8.6 stages 1–2), plus the
-pieces every later renderer reuses: image-based lighting, tonemapping, the
-debug-draw API, the GPU profiler, and procedural primitives. Decisions are
-recorded in [ADR-0018](adr/0018-reference-renderer.md).
+Two renderers behind one API (CLAUDE.md §8.6), chosen per view by
+`NphRenderView.pipeline`, plus the pieces both use: image-based lighting,
+tonemapping, the debug-draw API, the GPU profiler, procedural primitives,
+and the meshlet builder.
 
-The reference renderer is the **ground truth**, not the production path.
-It draws each visible submesh with its own draw call and evaluates every
-light at every pixel. Its CPU cost grows with the object count and its GPU
-cost with lights × pixels. The GPU-driven visibility-buffer renderer of
-§8.6 stages 3–8 (Phase 10) will be compared against its images, so it
-favours exactness over speed. Every formula is cited in the shader that
-implements it, and has a CPU twin that the tests check it against.
+- The forward PBR **reference renderer** (stages 1–2,
+  [ADR-0018](adr/0018-reference-renderer.md)) is the **ground truth**. It
+  draws each visible submesh with its own draw call and evaluates every
+  light at every pixel; its CPU cost grows with the object count and its
+  GPU cost with lights × pixels. It favours exactness over speed.
+- The GPU-driven **production path** (stages 3–4,
+  [ADR-0029](adr/0029-gpu-driven-visibility-buffer.md); "The production
+  path" below) culls, rasterises into a visibility buffer, and shades on
+  the GPU. Its CPU cost does not depend on the object count. Its images
+  are tested against the reference's.
+
+Every formula is cited in the shader that implements it, and has a CPU
+twin that the tests check it against.
 
 | Header | What it holds |
 |---|---|
@@ -19,10 +25,12 @@ implements it, and has a CPU twin that the tests check it against.
 | `debug_draw.h` | immediate-mode debug lines (depth-tested and overlay) |
 | `gpu_profiler.h` | per-pass GPU times and declared bytes over a rolling window |
 | `primitives.h` | cube, sphere, plane, cylinder in the cooked vertex streams |
-| `reference.h` | CPU reference implementations of the shader math |
+| `meshlet.h` | the meshlet builder (moved from the cooker, which wraps it) and meshlet bounds |
+| `reference.h` | CPU reference implementations of the shader math, the culling tests included |
 
 Shaders live in `shaders/render/`. The records they share with C are in
-`shaders/shared/nph_render.h`.
+`shaders/shared/nph_render.h` and, for the production path,
+`shaders/shared/nph_vis.h`.
 
 ## Units and conventions
 
@@ -139,7 +147,173 @@ of glTF 2.0:
 - **Unlit** materials (`KHR_materials_unlit`) write their colour as
   authored, outside exposure.
 - **Debug views:** base colour, shading normal, roughness, metallic,
-  occlusion, direct light only, and indirect light only.
+  occlusion, direct light only, and indirect light only; on the
+  production path also clusters, triangles, and instances (a hashed
+  colour each).
+
+`shaders/render/surface.glsl` holds this model; the forward pass and the
+production path's resolve both include it, so the two renderers cannot
+drift apart. The resolve has no rasteriser derivatives, so it supplies
+its own (see below).
+
+## The production path
+
+`view.pipeline = NPH_RENDER_PIPELINE_PRODUCTION` draws the frame with the
+GPU-driven visibility-buffer renderer (Haar & Aaltonen, "GPU-Driven
+Rendering Pipelines", SIGGRAPH 2015; Burns & Hunt, "The Visibility
+Buffer", JCGT 2013; Karis et al., "Nanite: A Deep Dive", SIGGRAPH 2021).
+The CPU writes the view, the records of instances that changed, and the
+pass declarations, a few microseconds whatever the object count
+(`render_perf`, docs/benchmarks.md); the GPU culls, rasterises, and
+shades. Blended surfaces stay on the forward pass, drawn over the result.
+
+It needs 64-bit image atomics, 64-bit integers in shaders, subgroup ballot
+and arithmetic, and the geometry-shader feature (which lets a fragment
+shader read `gl_PrimitiveID`). `nph_renderer_production_supported` says
+whether the renderer has it; a view asking for it on a device without it
+is drawn by the reference renderer, logged once. `disable_production` in
+the renderer's description skips it (no GPU memory, no pipelines).
+
+### The GPU scene
+
+The renderer keeps GPU tables indexed by pool slot, so nothing is
+re-sent per frame:
+
+| Table | Holds |
+|---|---|
+| instances | `NphVisInstance`: the transform (camera-relative, below), mesh slot, material range, flags (visible, mirrored, similarity) |
+| previous transforms | last frame's transform per slot, for phase 0's occlusion test |
+| meshes | `NphVisMesh`: dequantisation, bounding sphere, stream and meshlet addresses |
+| material map | per instance a range of material slots, from a TLSF range allocator over offsets (`core/range_alloc.h`) |
+
+Creating, moving, hiding, or destroying an instance marks its slot; each
+frame writes at most `max_instance_updates` update records into the
+frame's upload buffer, and `vis scatter` copies them into the tables (the
+rest wait a frame, logged). A destroyed instance's material slots return
+`NPH_GPU_FRAMES_IN_FLIGHT` frames later, after the frames that may read
+them; the range allocator has room for a whole population being replaced
+between two frames.
+
+Translations stay 64-bit on the CPU. The GPU gets each as a high and a
+low float and the camera likewise, and subtracts them part by part
+(Cozzi & Ring, "GPU RTE", 2011), so positions 10,000 km from the origin
+render as they do at it (a test).
+
+Meshes are split into meshlets of at most 64 vertices and 124 triangles
+when created (or take the cooked ones), each with a bounding sphere and a
+normal cone. Without mesh shaders the renderer also widens each mesh's
+meshlet triangles into a shared pool of 16-bit indices for indirect draws.
+
+### A frame
+
+| Pass | What it does |
+|---|---|
+| `vis clear` | clears the visibility buffer and the counters |
+| `vis scatter` | applies the frame's instance updates |
+| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out in batches of 64, the occluded wait for phase 1 |
+| `vis cull meshlets 0` | per meshlet: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list (opaque or masked) |
+| `vis raster 0` | the clusters into the visibility buffer |
+| `vis hzb 0` | the depth pyramid of what phase 0 drew |
+| `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances and meshlets against the new pyramid |
+| `vis raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against |
+| `vis resolve` | shades every pixel from its cluster and triangle |
+| `vis statistics` | copies the counters for the frame's statistics |
+| `vis depth`, `transparent` | the depth the visibility buffer holds, then the blended surfaces, forward |
+| `tonemap` | as the reference's |
+
+`vis args …` passes between them turn counts into indirect arguments,
+and appends to the GPU lists are aggregated per subgroup (one atomic per
+subgroup). This is **two-phase occlusion culling** (Haar & Aaltonen
+2015; Karis et al. 2021): phase 0 draws what was visible last frame,
+which is nearly everything visible now, and phase 1 catches what
+disocclusion revealed, so no object is lost to a stale pyramid. Culling
+never changes the image: a test renders the same scene with occlusion and
+cone culling on and off and compares.
+
+**The visibility buffer** is 64 bits per pixel (R64_UINT): the depth's
+bits high, then the cluster index (25 bits) and the triangle (7 bits). The
+raster writes it with `imageAtomicMax`, which keeps the nearest surface
+under reverse-Z with no depth attachment, the same path the software
+rasteriser of stage 4 will use.
+
+**Raster.** With mesh shaders each workgroup of 32 threads emits one
+cluster, culling back faces and triangles that cover no pixel centre
+(Wihlidal, "Optimizing the Graphics Pipeline with Compute", GDC 2016)
+before output; `gl_PrimitiveID` carries the cluster and triangle. Without
+them, `vkCmdDrawIndexedIndirectCount` draws each cluster's slice of the
+index pool, and the instance index finds the cluster. Lavapipe has mesh
+shaders but loses push constants in their fragment stage
+(`NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS`, docs/gpu.md), so it takes
+the indirect path; the RTX runner covers the mesh-shader path. Masked
+materials have their own pipeline, which samples the alpha.
+
+**The depth pyramid** holds the farthest depth (the smallest, reverse-Z)
+under each texel. Mip 0 is half the target rounded up, each later mip
+halved and rounded down as Vulkan sizes mips; where a source has an odd
+number of texels, the destination's last texel takes the extra one, so
+mip-m texel t covers mip-0 texels [t·2^m, (t + 1)·2^m) and the last one
+reaches the edge. An occlusion test projects the bounding sphere to a
+screen rectangle and nearest depth (Mara & McGuire, "2D Polyhedral Bounds
+of a Clipped, Perspective-Projected 3D Sphere", JCGT 2013), picks the mip
+at which the rectangle spans one texel, and reads a 2 × 2 footprint. The
+frustum, cone, projection, facing, small-triangle, and pyramid tests have
+C twins in `reference.h`; a test runs the shaders on thousands of random
+cases and compares, and another reads the built pyramid back and checks
+every texel is the minimum of what it covers.
+
+**The resolve** decodes each pixel's cluster and triangle, fetches the
+three vertices, and rebuilds the attributes from perspective-correct
+barycentrics. Texture filtering needs derivatives a compute shader does
+not have, so it also computes the barycentrics one pixel right and one
+down, as the rasteriser's quad would (Schied & Dachsbacher, "Deferred
+Attribute Interpolation for Memory-Efficient Deferred Shading", HPG
+2015). Facing comes from the sign of the homogeneous determinant of the
+clip-space vertices (Olano & Greer, "Triangle Scan Conversion using 2D
+Homogeneous Coordinates", 1997), right even with a vertex behind the
+camera. Shading is `surface.glsl`, as above; the images match the
+reference's (100 % of pixels within 3 levels in the tests).
+
+### Capacities and statistics
+
+The production path's lists have fixed capacities in `NphRendererDesc`:
+`max_visible_clusters` (524,288), `max_cull_batches` (131,072),
+`max_deferred` (262,144), `max_instance_updates` (16,384),
+`max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
+(2^24, indirect path only). A list that fills drops work and sets a bit in
+`NphRenderFrameStats.vis_overflow`, logged once. The frame statistics
+carry the GPU's counters (clusters and triangles drawn, instances and
+meshlets culled by each test), read back from the frame that completed
+`NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
+`instances` is the live count and `culled` the hidden instances plus
+blended ones outside the frustum; `draws` and `triangles` count only the
+blended surfaces the CPU draws.
+
+### Cost
+
+`render_perf` on the RTX 3060 Ti (Profile; docs/benchmarks.md), the CPU
+time of `nph_render_frame` and the GPU frame:
+
+| Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
+|---|---|---|---|---|---|
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.15 ms |
+| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.27 ms |
+| grid, 512 × 512 | 102,400 | 13.4 ms | 0.006 ms | 3.0 ms | 1.51 ms |
+| field, 3840 × 2160 | 16,385 | 2.87 ms | 0.006 ms | 2.69 ms | 2.06 ms |
+
+In the 4K field the surviving clusters hold 5.3 million triangles (the
+reference draws 14.6 million after its frustum test; occlusion removed
+53,257 clusters), and the passes take: clear 0.08 ms, culling with its
+argument passes 0.16 ms, raster 0.56 ms, the two pyramids 0.26 ms,
+resolve 0.88 ms, tonemap 0.12 ms. Against CLAUDE.md §10.4, the raster
+(0.65 ms budgeted) and the shading fit, but culling with the depth
+pyramid takes 0.42 ms against 0.25 ms: each pyramid reads the whole
+8-byte visibility buffer. ADR-0029 records the numbers and what comes
+next.
+
+### Debug views
+
+`NPH_RENDER_VIEW_CLUSTERS`, `_TRIANGLES`, and `_INSTANCES` colour each
+pixel by a hash of what drew it.
 
 ## Image-based lighting
 
@@ -222,8 +396,9 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (52 tests) run on the RTX 3060 Ti locally and on lavapipe
-in CI, under the validation and synchronisation-validation gate:
+`render_tests` (65 tests) run on the RTX 3060 Ti locally and on the
+self-hosted runner, and on lavapipe in CI, under the validation and
+synchronisation-validation gate:
 
 - **CPU:** GGX normalisation, Smith symmetry and bounds, DFG energy and
   limits, tonemap ranges and the ACES value at middle grey (worked by
@@ -237,6 +412,13 @@ in CI, under the validation and synchronisation-validation gate:
   debug views; normal maps on mirrored instances, three- and two-channel;
   sidedness, alpha modes, blend order, culling; camera-relative rendering;
   debug lines; and the profiler's windows and declared bytes.
+- **The production path** (`test_vis.c`): its images against the
+  reference's (plain, with every alpha mode and side, and 10,000 km from
+  the origin); culling switched off changes nothing; the frustum culls
+  what is off screen; mesh shaders and indirect draws give the same image;
+  instances move, hide, and go, and a whole population is replaced between
+  frames; the debug views; cooked and built meshlets draw the same; the
+  culling math against its C twins; and the depth pyramid read back.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -256,15 +438,23 @@ occlusion-roughness-metallic, and colour maps (plus a mirrored copy), an
 emissive panel, a masked double-sided grate, a glass pane, an unlit marker,
 a gold roughness ramp, and a sun, a lamp, and a spotlight. It lights them
 with a procedural dusk sky, orbits the camera, draws light gizmos, and logs
-the profiler. `--capture`, `--profile`, `--tonemapper`, `--view`, and
-`--ev100` serve CI and debugging.
+the profiler. `--capture`, `--profile`, `--tonemapper`, `--view`,
+`--pipeline`, and `--ev100` serve CI and debugging; P switches between the
+pipelines. `scene_demo` draws its thousands of asteroids on the production
+path and logs what the GPU culled.
 
 ## Limitations (future work)
 
 - No shadows: virtual shadow maps are §8.6 stage 6 (Phase 10).
 - No MSAA or TAA: TAA is stage 8 (Phase 10).
 - Every light is evaluated for every pixel: clustering is stage 5.
-- One draw call per submesh, CPU culling: the GPU-driven path is stage 3.
+- The production path rasterises everything in hardware: the software
+  rasteriser for micro-triangles is the rest of stage 4, and the resolve
+  is one shader for every material until stage 5 classifies tiles.
+- Meshlet culling gives each instance its own batches, so instances of
+  one or two meshlets leave most of a workgroup idle (0.9 ms for 102,400
+  one-meshlet cubes).
+- Each depth pyramid reads the whole visibility buffer (0.13 ms at 4K).
 - `KHR_texture_transform`, `TEXCOORD_1`, skinning, morph targets, and
   the PBR extension materials (clearcoat, transmission, ...) are not
   rendered (the cooker skips them, docs/cook.md).
