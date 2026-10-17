@@ -11,11 +11,14 @@
 //   bump_64B            arena / stack: 1024 allocations then a reset
 // Each is run against the system allocator (malloc), TLSF, and where the
 // workload fits, the pool, arena, stack, and the debug wrapper over TLSF.
+// The range allocator, which hands out offsets rather than memory, runs
+// alloc_free_64 and random_mixed through its own API.
 
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/core/arena.h>
 #include <nepheline/core/pool.h>
+#include <nepheline/core/range_alloc.h>
 #include <nepheline/core/stack_alloc.h>
 #include <nepheline/core/tlsf.h>
 
@@ -259,4 +262,52 @@ NBENCH(malloc_direct_alloc_free_64)
         nbench_do_not_optimize(p);
         free(p);
     }
+}
+
+// The range allocator (core/range_alloc.h) on the same two shapes: one
+// range taken and returned, and the steady random mix of 1024 live ranges
+// of 16..1024 units. It manages offsets, not memory, so nothing is touched.
+NBENCH(range_alloc_free_64)
+{
+    NphRangeAllocator ra;
+    if (nph_range_alloc_init(&ra, nph_allocator_system(), (u32)HEAP_SIZE, LIVE_SLOTS) !=
+        NPH_RESULT_OK) {
+        abort();
+    }
+    nbench_set_label(state, "range allocator");
+    while (nbench_keep_running(state)) {
+        NphRange r;
+        NPH_IGNORE_RESULT(nph_range_alloc(&ra, 64U, &r));
+        nbench_do_not_optimize_u64(r.offset);
+        nph_range_free(&ra, r);
+    }
+    nph_range_alloc_destroy(&ra);
+}
+
+NBENCH(range_random_mixed)
+{
+    static NphRange live[LIVE_SLOTS];
+    NphRangeAllocator ra;
+    if (nph_range_alloc_init(&ra, nph_allocator_system(), (u32)HEAP_SIZE, LIVE_SLOTS) !=
+        NPH_RESULT_OK) {
+        abort();
+    }
+    prepare_sequences();
+    for (u32 i = 0; i < LIVE_SLOTS; ++i) {
+        live[i] = NPH_RANGE_NULL;
+    }
+    nbench_set_label(state, "range allocator");
+    nbench_set_items_per_iteration(state, MIXED_OPS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0; i < MIXED_OPS; ++i) {
+            const u32 slot = g_slots[i];
+            if (!nph_range_is_null(live[slot])) {
+                nph_range_free(&ra, live[slot]);
+                live[slot] = NPH_RANGE_NULL;
+            } else {
+                NPH_IGNORE_RESULT(nph_range_alloc(&ra, (u32)g_sizes[i], &live[slot]));
+            }
+        }
+    }
+    nph_range_alloc_destroy(&ra);
 }
