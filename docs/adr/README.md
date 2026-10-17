@@ -7,7 +7,7 @@ supersedes it and both link to each other.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-license.md) | Apache License 2.0 | Accepted |
-| [0002](0002-self-hosted-gpu-runner.md) | Self-hosted RTX 3060 Ti performance runner | Accepted |
+| [0002](0002-self-hosted-gpu-runner.md) | Self-hosted RTX 3060 Ti performance runner | Accepted; §4 amended by [0028](0028-gpu-runner-service.md) |
 | [0003](0003-build-configurations.md) | Build configurations, presets, and sanitizer policy | Accepted |
 | [0004](0004-allocator-interface.md) | Allocator interface | Accepted |
 | [0005](0005-atomics-in-core.md) | Atomics live in core; the logger thread lives in platform | Accepted |
@@ -33,6 +33,7 @@ supersedes it and both link to each other.
 | [0025](0025-editor-ui.md) | The editor's interface: Dear ImGui through cimgui, on our own backends, as an engine host | Accepted |
 | [0026](0026-editor-import.md) | Editor projects and import: sources copied in, cooked on an import thread, placed through the history | Accepted |
 | [0027](0027-editable-meshes.md) | Editable meshes: a polygon source the cooker cooks, edited in place, reloaded where it is drawn | Accepted |
+| [0028](0028-gpu-runner-service.md) | The GPU runner as a standard runner service: no stored token, no elevated loop | Accepted |
 
 ## Template
 

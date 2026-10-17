@@ -264,11 +264,12 @@ uploads the JSON results. The job queues until the machine is on.
 ### Self-hosted GPU runner
 
 The reference machine registers as a repository-scoped runner with the
-labels `self-hosted, windows, x64, gpu, rtx3060ti`, hardened as ADR-0002
-§4 requires: a dedicated standard user, ephemeral registration (one job per
-registration, so nothing survives from one job to the next), and no
-credential reachable by the job. `scripts/runner/install.ps1` sets
-it all up:
+labels `self-hosted, windows, x64, gpu, rtx3060ti`. It is a standard
+runner service under a dedicated standard user. No credential is stored on
+the machine, and nothing elevated ever runs a file the job could have
+written (ADR-0002 §4 as amended by
+[ADR-0028](adr/0028-gpu-runner-service.md)). `scripts/runner/install.ps1`
+sets it all up:
 
 1. Install Visual Studio 2022 (MSVC, CMake, Ninja), the Vulkan SDK, Git
    with git-lfs, and a current GPU driver on the machine. The SDK must be
@@ -278,34 +279,41 @@ it all up:
    read access (`icacls <sdk> /grant "nph-runner:(OI)(CI)RX" /T`); the
    installer warns when `VULKAN_SDK` points into a profile. The machine
    needs only Windows PowerShell 5.1; the workflow runs its steps with it.
-2. Create a fine-grained personal access token restricted to this
-   repository with the single permission *Administration: Read and write*
-   (it mints runner registration tokens and nothing else).
-3. In the repository settings keep *Actions → General → Require approval
+2. In the repository settings keep *Actions → General → Require approval
    for all outside collaborators* enabled; `gpu-perf.yml` additionally
    refuses fork pull requests.
-4. From an elevated PowerShell run `.\scripts\runner\install.ps1`
-   and paste the token. The script creates the `nph-runner` user with a
-   random password (granted *Log on as a batch job*), downloads the latest
-   `actions/runner` into `C:\actions-runner` (the only folder the user can
-   write), stores the token DPAPI-protected under `C:\actions-runner\admin`
-   (SYSTEM and Administrators only), and registers two scheduled tasks:
-   *Nepheline runner (register)* runs as SYSTEM at startup and loops (mint
-   a registration token, `config.cmd --ephemeral`, start the run task,
-   wait), and *Nepheline runner (run)* runs `run.cmd` as `nph-runner` for
-   exactly one job.
-5. Confirm the runner under *Settings → Actions → Runners* and trigger the
-   *GPU performance* workflow once by hand (`workflow_dispatch`).
-   `C:\actions-runner\admin\loop.log` records every registration.
+3. From an elevated PowerShell run `.\scripts\runner\install.ps1`. It
+   needs one registration token, used once and never stored. It asks `gh`
+   for the token when the GitHub CLI is logged in as a repository
+   administrator. Otherwise it prompts for the token shown under
+   *Settings → Actions → Runners → New self-hosted runner*, or takes it as
+   `-Token`.
 
-The tasks run in session 0, without an interactive desktop. Compute and
-offscreen rendering do not care; if the swapchain tests report that the
-surface cannot be presented there, switch *Nepheline runner (run)* to
-*Run only when user is logged on* with an *At log on* trigger for
-`nph-runner` and configure auto-logon for that user with Sysinternals
-Autologon (which stores the password as an LSA secret). Re-running the
-script rotates the password and the token; `-Uninstall` removes the
-tasks, the folder, and the user.
+   The script then does four things:
+   - It removes any earlier installation, including the scheduled tasks of
+     the old registration loop, without running anything from the old
+     folder.
+   - It creates the `nph-runner` user with a random password.
+   - It downloads the latest `actions/runner`, checks the release's SHA-256,
+     and unpacks it into `C:\actions-runner`. That folder inherits nothing
+     from `C:\`, and only Administrators, SYSTEM, and `nph-runner` can
+     write it.
+   - It registers the runner once, as the automatic Windows service
+     `actions.runner.<owner>-<repo>.rtx3060ti` running as `nph-runner`.
+4. Confirm the runner shows as *Idle* under *Settings → Actions → Runners*,
+   then trigger the *GPU performance* workflow once by hand
+   (`workflow_dispatch`). The runner's own logs are in
+   `C:\actions-runner\_diag`.
+
+The service survives restarts with its registration intact. It runs in
+session 0, without an interactive desktop. That suits compute, offscreen
+rendering, and the swapchain tests and samples: they passed there under
+the earlier scheduled-task design, which also ran in session 0.
+
+Re-running the script reinstalls from scratch with a new password and a
+new registration. `-Uninstall` removes the service, the folder, and the
+user. If `gh` is available, it also removes the runner's registration on
+GitHub.
 
 ### GPU tests in CI
 
@@ -338,6 +346,7 @@ Vulkan SDK with `scripts/install_vulkan_sdk.ps1` (cached per version) for
   the code they check (CLAUDE.md §9).
 - **Windows CI has no Vulkan driver**, so the GPU tests only run on Linux
   (lavapipe) and on the self-hosted RTX 3060 Ti runner.
-- **The self-hosted runner is registered by hand** (an administrator runs
-  `scripts/runner/install.ps1`); until then the GPU performance
-  workflow queues, and its session-0 presentation path is unverified.
+- **The self-hosted runner is registered by hand**: an administrator runs
+  `scripts/runner/install.ps1`. While the runner is offline, *GPU
+  performance* runs queue and expire after 24 hours. The check is not
+  required, so nothing else flags the outage.
