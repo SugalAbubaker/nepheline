@@ -47,13 +47,13 @@ file(GLOB_RECURSE cook_headers CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
 
-# nph_add_cooklib(<target> <engine>): the cooker library over <engine>,
+# nph_add_cooklib(<target> <engine>...): the cooker library over <engine>,
 # the engine's static modules or its shared library.
-function(nph_add_cooklib target engine)
+function(nph_add_cooklib target)
     add_library(${target} STATIC ${cook_sources} ${cook_headers})
     target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(${target}
-        PUBLIC nph::options ${engine}
+        PUBLIC nph::options ${ARGN}
         PRIVATE nph_cook_thirdparty cgltf stb)
     if(MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -61,7 +61,9 @@ function(nph_add_cooklib target engine)
     set_target_properties(${target} PROPERTIES FOLDER "tools")
 endfunction()
 
-nph_add_cooklib(nph_cooklib nph::asset)
+# The asset runtime for the formats, and the renderer for its meshlet
+# builder (render/meshlet.h), which cooked and run-time meshes share.
+nph_add_cooklib(nph_cooklib nph::asset nph::render)
 add_library(nph::cook ALIAS nph_cooklib)
 
 # The editor's cooker (docs/adr/0026-editor-import.md): the same sources

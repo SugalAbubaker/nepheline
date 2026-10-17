@@ -11,6 +11,7 @@ nph_add_module(render
         src/frame.c
         src/gpu_profiler.c
         src/ibl.c
+        src/meshlet.c
         src/primitives.c
         src/reference.c
         src/renderer.c
