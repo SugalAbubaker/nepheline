@@ -271,3 +271,167 @@ NphVec3 nph_render_ref_sh9_irradiance(const NphVec3 sh[9], NphVec3 n)
     }
     return nph_vec3_max(e, nph_vec3_zero());
 }
+
+// ---------------------------------------------------------------------------
+// The production path's culling
+// ---------------------------------------------------------------------------
+
+// The distance from x to the nearest integer.
+static f64 to_integer(f64 x)
+{
+    return fabs(x - floor(x + 0.5));
+}
+
+typedef struct D3 {
+    f64 x;
+    f64 y;
+    f64 z;
+} D3;
+
+static D3 d3(NphVec3 v)
+{
+    return (D3){(f64)v.x, (f64)v.y, (f64)v.z};
+}
+
+static f64 d3_dot(D3 a, D3 b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+f64 nph_render_ref_vis_frustum_margin(const NphVec4 planes[5], NphVec3 c, f32 r)
+{
+    const D3 cd = d3(c);
+    f64 margin = HUGE_VAL;
+    for (u32 i = 0; i < 5U; ++i) {
+        const D3 n = {(f64)planes[i].x, (f64)planes[i].y, (f64)planes[i].z};
+        const f64 d = d3_dot(n, cd) + (f64)planes[i].w + (f64)r;
+        margin = d < margin ? d : margin;
+    }
+    return margin;
+}
+
+f64 nph_render_ref_vis_cone_margin(NphVec3 apex, NphVec3 axis, f32 cutoff)
+{
+    const D3 a = d3(apex);
+    return d3_dot(a, d3(axis)) - (f64)cutoff * sqrt(d3_dot(a, a));
+}
+
+bool nph_render_ref_vis_project_sphere(NphVec3 c, f32 r, f32 p00, f32 p11, f32 znear, NphVec4 *rect,
+                                       f32 *depth)
+{
+    *rect = nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);
+    *depth = 0.0F;
+    const f64 cx = (f64)c.x;
+    const f64 cy = (f64)c.y;
+    const f64 cz = -(f64)c.z;
+    const f64 rr = (f64)r;
+    const f64 n = (f64)znear;
+    if (cz - rr < n) {
+        return false;
+    }
+    const f64 czr2 = cz * cz - rr * rr;
+    const f64 vx = sqrt(cx * cx + czr2);
+    const f64 minx = (vx * cx - rr * cz) / (vx * cz + rr * cx);
+    const f64 maxx = (vx * cx + rr * cz) / (vx * cz - rr * cx);
+    const f64 vy = sqrt(cy * cy + czr2);
+    const f64 miny = (vy * cy - rr * cz) / (vy * cz + rr * cy);
+    const f64 maxy = (vy * cy + rr * cz) / (vy * cz - rr * cy);
+    const f64 x0 = minx * (f64)p00;
+    const f64 x1 = maxx * (f64)p00;
+    const f64 y0 = miny * (f64)p11;
+    const f64 y1 = maxy * (f64)p11;
+    rect->x = (f32)(x0 * 0.5 + 0.5);
+    rect->y = (f32)((y0 < y1 ? y0 : y1) * 0.5 + 0.5);
+    rect->z = (f32)(x1 * 0.5 + 0.5);
+    rect->w = (f32)((y0 < y1 ? y1 : y0) * 0.5 + 0.5);
+    *depth = (f32)(n / (cz - rr));
+    return true;
+}
+
+f64 nph_render_ref_vis_facing_det(NphVec4 c0, NphVec4 c1, NphVec4 c2)
+{
+    // The determinant of the matrix whose columns are (x, y, w) of each
+    // vertex.
+    const D3 a = {(f64)c0.x, (f64)c0.y, (f64)c0.w};
+    const D3 b = {(f64)c1.x, (f64)c1.y, (f64)c1.w};
+    const D3 c = {(f64)c2.x, (f64)c2.y, (f64)c2.w};
+    return a.x * (b.y * c.z - b.z * c.y) - b.x * (a.y * c.z - a.z * c.y) +
+           c.x * (a.y * b.z - a.z * b.y);
+}
+
+bool nph_render_ref_vis_cull_triangle(NphVec4 c0, NphVec4 c1, NphVec4 c2, bool mirrored,
+                                      NphVec2 viewport, f64 *facing_margin, f64 *box_margin)
+{
+    const NphVec4 c[3] = {c0, c1, c2};
+    *facing_margin = HUGE_VAL;
+    *box_margin = HUGE_VAL;
+    if (c0.w <= 0.0F || c1.w <= 0.0F || c2.w <= 0.0F) {
+        return false;
+    }
+    // The determinant against the size of its terms.
+    const f64 det = nph_render_ref_vis_facing_det(c0, c1, c2);
+    f64 scale = 1.0;
+    for (u32 i = 0; i < 3U; ++i) {
+        scale *= fabs((f64)c[i].x) + fabs((f64)c[i].y) + fabs((f64)c[i].w);
+    }
+    *facing_margin = fabs(det) / scale;
+    if ((det < 0.0) == mirrored) {
+        return true; // a back face
+    }
+    const f64 size[2] = {(f64)viewport.x, (f64)viewport.y};
+    f64 lo[2] = {HUGE_VAL, HUGE_VAL};
+    f64 hi[2] = {-HUGE_VAL, -HUGE_VAL};
+    for (u32 i = 0; i < 3U; ++i) {
+        const f64 w = (f64)c[i].w;
+        const f64 s[2] = {((f64)c[i].x / w * 0.5 + 0.5) * size[0],
+                          ((f64)c[i].y / w * 0.5 + 0.5) * size[1]};
+        for (u32 a = 0; a < 2U; ++a) {
+            lo[a] = s[a] < lo[a] ? s[a] : lo[a];
+            hi[a] = s[a] > hi[a] ? s[a] : hi[a];
+        }
+    }
+    bool culled = false;
+    for (u32 a = 0; a < 2U; ++a) {
+        const f64 l = lo[a] - 1.0 / 256.0 - 0.5;
+        const f64 h = hi[a] + 1.0 / 256.0 - 0.5;
+        culled = culled || floor(h) < ceil(l);
+        *box_margin = nph_f64_min(*box_margin, nph_f64_min(to_integer(l), to_integer(h)));
+    }
+    return culled;
+}
+
+bool nph_render_ref_vis_hzb_occluded(const NphRenderRefHzb *hzb, NphVec4 rect, f32 depth,
+                                     f64 *margin)
+{
+    const f64 r[4] = {nph_f64_clamp((f64)rect.x, 0.0, 1.0), nph_f64_clamp((f64)rect.y, 0.0, 1.0),
+                      nph_f64_clamp((f64)rect.z, 0.0, 1.0), nph_f64_clamp((f64)rect.w, 0.0, 1.0)};
+    const f64 vw = (f64)hzb->viewport.x;
+    const f64 vh = (f64)hzb->viewport.y;
+    const f64 sx = (r[2] - r[0]) * vw * 0.5;
+    const f64 sy = (r[3] - r[1]) * vh * 0.5;
+    const f64 extent = nph_f64_max(nph_f64_max(sx, sy), 1.0);
+    const f64 level = log2(extent);
+    // The mip only matters while the chain has one to choose.
+    f64 m = extent > 1.0 ? to_integer(level) : HUGE_VAL;
+    const u32 wanted = (u32)ceil(level);
+    const u32 mip = wanted < hzb->mip_count - 1U ? wanted : hzb->mip_count - 1U;
+    const f64 scale_x = vw * 0.5 / (f64)(1U << mip);
+    const f64 scale_y = vh * 0.5 / (f64)(1U << mip);
+    const f64 fx = r[0] * scale_x;
+    const f64 fy = r[1] * scale_y;
+    // A rectangle clamped to the edge sits on texel 0 exactly, in either
+    // precision.
+    m = nph_f64_min(m, r[0] > 0.0 ? to_integer(fx) : HUGE_VAL);
+    m = nph_f64_min(m, r[1] > 0.0 ? to_integer(fy) : HUGE_VAL);
+    const u32 w = nph_max_u32(hzb->width >> mip, 1U);
+    const u32 h = nph_max_u32(hzb->height >> mip, 1U);
+    const u32 x0 = nph_min_u32((u32)floor(fx), w - 1U);
+    const u32 y0 = nph_min_u32((u32)floor(fy), h - 1U);
+    const u32 x1 = nph_min_u32(x0 + 1U, w - 1U);
+    const u32 y1 = nph_min_u32(y0 + 1U, h - 1U);
+    const f32 *texels = hzb->mips[mip];
+    const f32 d = nph_f32_min(nph_f32_min(texels[(u64)y0 * w + x0], texels[(u64)y0 * w + x1]),
+                              nph_f32_min(texels[(u64)y1 * w + x0], texels[(u64)y1 * w + x1]));
+    *margin = nph_f64_min(m, fabs((f64)depth - (f64)d));
+    return depth < d;
+}

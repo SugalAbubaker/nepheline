@@ -31,7 +31,8 @@ nph_add_shaders(nph_shaders_samples
 )
 
 # The renderer (engine/render; docs/render.md): the forward PBR reference
-# renderer, image-based lighting, tonemapping, and debug lines.
+# renderer, image-based lighting, tonemapping, debug lines, and the
+# GPU-driven visibility-buffer renderer (vis_*).
 nph_add_shaders(nph_shaders_render
     SOURCES
         render/forward.vert
@@ -50,6 +51,24 @@ nph_add_shaders(nph_shaders_render
         render/ibl_prefilter.comp
         render/ibl_sh.comp
         render/brdf_lut.comp
+        render/vis_scatter.comp
+        render/vis_cull_instances.comp
+        render/vis_cull_meshlets.comp
+        render/vis_args.comp
+        render/vis_raster_opaque.mesh
+        render/vis_raster_masked.mesh
+        render/vis_raster_opaque.vert
+        render/vis_raster_masked.vert
+        render/vis_raster_mesh_opaque.frag
+        render/vis_raster_mesh_masked.frag
+        render/vis_raster_vert_opaque.frag
+        render/vis_raster_vert_masked.frag
+        render/vis_hzb.comp
+        render/vis_resolve.comp
+        render/vis_depth.frag
+        render/vis_debug_line.frag
+        # The culling math for the render tests (render/reference.h twins).
+        render/vis_math_test.comp
 )
 
 # Shaders of the GPU benchmarks (benchmarks/gpu).

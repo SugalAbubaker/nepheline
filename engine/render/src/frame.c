@@ -1,16 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
-// One frame of the reference renderer (render/renderer.h nph_render_frame;
+// One frame of the renderer (render/renderer.h nph_render_frame;
 // docs/render.md "A frame"):
 //
 //   1. the frame's records go into its slot of the per-frame upload
 //      buffer: the view, the lights and the materials (when they changed
-//      since that slot was last filled), and one draw record per visible
-//      submesh, every position made camera relative in double precision;
+//      since that slot was last filled), and the draw records the CPU
+//      draws itself, every position made camera relative in double
+//      precision;
 //   2. the draw calls are sorted: opaque and masked ones by pipeline and
 //      mesh, blended ones back to front;
 //   3. the passes are declared: the image-based-lighting passes when
-//      needed (ibl.c), the forward pass into a pre-exposed HDR target, and
-//      the tonemap pass into the caller's target with the debug lines.
+//      needed (ibl.c), then either the reference renderer's forward pass
+//      into a pre-exposed HDR target or the production path's culling,
+//      raster, resolve, and transparent passes (vis.c), and the tonemap
+//      pass into the caller's target with the debug lines.
+//
+// The reference draws every visible submesh itself; the production path
+// leaves opaque and masked surfaces to the GPU and draws only the blended
+// ones, which it finds through the blend list (vis_scene.c), so its CPU
+// cost does not grow with the number of objects.
 #include <nepheline/core/log.h>
 #include <nepheline/core/profile.h>
 #include <nepheline/gpu/upload.h>
@@ -33,8 +41,14 @@ NPH_STATIC_ASSERT((u32)NPH_RENDER_TONEMAPPER_AGX == NPH_RENDER_TONEMAP_AGX,
                   "the tonemapper enums agree with the shader's");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_VIEW_COUNT == NPH_RENDER_DEBUG_COUNT,
                   "the debug views agree with the shader's");
+NPH_STATIC_ASSERT((u32)NPH_RENDER_VIEW_CLUSTERS == NPH_RENDER_DEBUG_CLUSTERS,
+                  "the production debug views agree with the shader's");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_SLOT_COUNT == NPH_RENDER_TEX_COUNT,
                   "the texture slots agree with the shader's");
+NPH_STATIC_ASSERT((u32)NPH_RENDER_VIS_OVERFLOW_BATCHES == NPH_VIS_OVERFLOW_BATCHES &&
+                      (u32)NPH_RENDER_VIS_OVERFLOW_CLUSTERS == NPH_VIS_OVERFLOW_CLUSTERS &&
+                      (u32)NPH_RENDER_VIS_OVERFLOW_DEFERRED == NPH_VIS_OVERFLOW_DEFERRED,
+                  "the overflow bits agree with the shaders'");
 
 #define FRAME_ALIGN 256U
 
@@ -57,6 +71,10 @@ void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out)
         align_up(at + ((u64)desc->max_materials + 1U) * sizeof(NphRenderMaterialData), FRAME_ALIGN);
     out->draws_offset = at;
     at = align_up(at + (u64)desc->max_draws * sizeof(NphRenderDrawData), FRAME_ALIGN);
+    out->vis_view_offset = at;
+    at = align_up(at + sizeof(NphVisViewData), FRAME_ALIGN);
+    out->vis_updates_offset = at;
+    at = align_up(at + (u64)desc->max_instance_updates * sizeof(NphVisInstanceUpdate), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -100,6 +118,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->ev100 = 15.0F;
     view->tonemapper = NPH_RENDER_TONEMAPPER_ACES;
     view->background = NPH_RENDER_BACKGROUND_ENV;
+    view->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +164,9 @@ static NphResult create_target_pipelines(NphRenderer *r, RenderTargetPipelines *
     d.depth.test = 0;
     d.name = "debug lines (overlay)";
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->debug_overlay));
+    if (r->vis.supported) {
+        NPH_TRY(render_vis_target_pipelines(r, t, format));
+    }
     t->format = format;
     return NPH_RESULT_OK;
 }
@@ -168,6 +190,9 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
                 nph_gpu_pipeline_destroy(r->dev, t->tonemap);
                 nph_gpu_pipeline_destroy(r->dev, t->debug_depth);
                 nph_gpu_pipeline_destroy(r->dev, t->debug_overlay);
+                nph_gpu_pipeline_destroy(r->dev, t->vis_tonemap);
+                nph_gpu_pipeline_destroy(r->dev, t->vis_debug_depth);
+                nph_gpu_pipeline_destroy(r->dev, t->vis_debug_overlay);
                 memset(t, 0, sizeof *t);
                 return res;
             }
@@ -182,7 +207,7 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
 // Records
 // ---------------------------------------------------------------------------
 
-static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d,
+static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, u32 handle,
                           NphRenderMaterialData *out)
 {
     memset(out, 0, sizeof *out);
@@ -194,6 +219,7 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d,
     out->normal_scale = d->normal_scale;
     out->occlusion_strength = d->occlusion_strength;
     out->alpha_mode = (u32)d->alpha_mode;
+    out->handle = handle;
     out->flags = (d->double_sided ? (u32)NPH_RENDER_MATERIAL_DOUBLE_SIDED : 0U) |
                  (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U);
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
@@ -213,7 +239,9 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d,
 }
 
 // The material table: one record per pool slot, then the default
-// material at index max_materials.
+// material at index max_materials. Free slots are written as zero: the
+// production path checks a record's handle against the material map's,
+// so a destroyed material's record must stop matching.
 static void write_materials(NphRenderer *r)
 {
     if (r->material_uploaded[r->frame_slot] == r->material_version) {
@@ -222,12 +250,14 @@ static void write_materials(NphRenderer *r)
     NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
     for (u32 i = 0; i < r->desc.max_materials; ++i) {
         if (r->materials[i].handle != 0U) {
-            fill_material(r, &r->materials[i].desc, &table[i]);
+            fill_material(r, &r->materials[i].desc, r->materials[i].handle, &table[i]);
+        } else {
+            memset(&table[i], 0, sizeof table[i]);
         }
     }
     NphRenderMaterialDesc def;
     nph_render_material_desc_default(&def);
-    fill_material(r, &def, &table[r->desc.max_materials]);
+    fill_material(r, &def, 0U, &table[r->desc.max_materials]);
     r->material_uploaded[r->frame_slot] = r->material_version;
 }
 
@@ -266,7 +296,9 @@ static u32 write_lights(NphRenderer *r, NphDVec3 camera)
 static u32 cull_of(bool double_sided, bool mirrored)
 {
     if (double_sided) {
-        return (u32)RENDER_CULL_NONE;
+        // Nothing is culled, but the front face still decides which side
+        // the shading normal takes.
+        return mirrored ? (u32)RENDER_CULL_NONE_CW : (u32)RENDER_CULL_NONE;
     }
     return mirrored ? (u32)RENDER_CULL_BACK_CW : (u32)RENDER_CULL_BACK_CCW;
 }
@@ -302,160 +334,206 @@ typedef struct FrameCull {
     NphDVec3 camera;
 } FrameCull;
 
-static void build_draws(NphRenderer *r, const FrameCull *fc, NphRenderFrameStats *stats)
+// What one frame's draw list holds so far.
+typedef struct DrawList {
+    u32 count;
+    u32 blend_count;
+} DrawList;
+
+// The draw records and commands of instance `i`'s submeshes: every one for
+// the reference, the blended ones only for the production path.
+static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool blend_only,
+                               DrawList *list, NphRenderFrameStats *stats)
 {
     NphRenderDrawData *records = render_frame_at(r, r->layout.draws_offset);
-    RenderDrawCmd *opaque = r->draw_cmds;
-    u32 count = 0U;
-    u32 blend_count = 0U;
     const u32 cap = r->desc.max_draws;
     const u32 default_material = r->desc.max_materials;
-    for (u32 i = 0; i < r->desc.max_instances; ++i) {
-        const RenderInstance *inst = &r->instances[i];
-        if (inst->handle == 0U) {
+    const RenderInstance *inst = &r->instances[i];
+    const NphHandle mh = {inst->mesh.value};
+    const RenderMesh *mesh = &r->meshes[nph_handle_pool_index(&r->mesh_pool, mh)];
+    // Camera-relative transform: the 64-bit translation minus the camera,
+    // rounded to 32 bits only after the subtraction.
+    const NphVec3 t = nph_dvec3_relative(inst->transform.translation, fc->camera);
+    const NphMat3 lin = inst->transform.linear;
+    const NphAffine model = nph_affine_from_mat3_translation(lin, t);
+    if (inst->hidden) {
+        // The production path counts hidden instances without visiting them.
+        stats->culled += blend_only ? 0U : 1U;
+        return;
+    }
+    if (!nph_frustum_intersects_aabb(&fc->frustum, nph_aabb_transform(mesh->bounds, model))) {
+        stats->culled += 1U;
+        return;
+    }
+    NphMat3 inv = nph_mat3_identity();
+    NPH_IGNORE_RESULT(nph_mat3_inverse(lin, &inv)); // invertible: checked at creation
+    const NphMat3 normal = nph_mat3_transpose(inv);
+    const bool mirrored = nph_mat3_determinant(lin) < 0.0F;
+    const NphVec3 center = nph_aabb_center(nph_aabb_transform(mesh->bounds, model));
+    const f32 view_depth = nph_mat4_transform_point(fc->view, center).z;
+    for (u32 s = 0; s < mesh->submesh_count; ++s) {
+        const NphRenderSubmesh *sm = &mesh->submeshes[s];
+        u32 material_index = default_material;
+        const NphRenderMaterialDesc *md = NULL;
+        if (sm->material_slot < inst->material_count) {
+            const NphRenderMaterial mat = inst->materials[sm->material_slot];
+            const NphHandle h = {mat.value};
+            if (mat.value != 0U && nph_handle_pool_is_valid(&r->material_pool, h)) {
+                material_index = nph_handle_pool_index(&r->material_pool, h);
+                md = &r->materials[material_index].desc;
+            }
+        }
+        const u32 alpha = md != NULL ? (u32)md->alpha_mode : (u32)NPH_RENDER_ALPHA_OPAQUE;
+        if (blend_only && alpha != (u32)NPH_RENDER_ALPHA_BLEND) {
             continue;
         }
-        stats->instances += 1U;
-        const NphHandle mh = {inst->mesh.value};
-        const RenderMesh *mesh = &r->meshes[nph_handle_pool_index(&r->mesh_pool, mh)];
-        // Camera-relative transform: the 64-bit translation minus the
-        // camera, rounded to 32 bits only after the subtraction.
-        const NphVec3 t = nph_dvec3_relative(inst->transform.translation, fc->camera);
-        const NphMat3 lin = inst->transform.linear;
-        const NphAffine model = nph_affine_from_mat3_translation(lin, t);
-        if (inst->hidden ||
-            !nph_frustum_intersects_aabb(&fc->frustum, nph_aabb_transform(mesh->bounds, model))) {
-            stats->culled += 1U;
+        const bool double_sided = md != NULL && md->double_sided;
+        if (list->count == cap) {
+            stats->dropped += 1U;
             continue;
         }
-        NphMat3 inv = nph_mat3_identity();
-        NPH_IGNORE_RESULT(nph_mat3_inverse(lin, &inv)); // invertible: checked at creation
-        const NphMat3 normal = nph_mat3_transpose(inv);
-        const bool mirrored = nph_mat3_determinant(lin) < 0.0F;
-        const NphVec3 center = nph_aabb_center(nph_aabb_transform(mesh->bounds, model));
-        const f32 view_depth = nph_mat4_transform_point(fc->view, center).z;
-        for (u32 s = 0; s < mesh->submesh_count; ++s) {
-            const NphRenderSubmesh *sm = &mesh->submeshes[s];
-            u32 material_index = default_material;
-            const NphRenderMaterialDesc *md = NULL;
-            if (sm->material_slot < inst->material_count) {
-                const NphRenderMaterial mat = inst->materials[sm->material_slot];
-                const NphHandle h = {mat.value};
-                if (mat.value != 0U && nph_handle_pool_is_valid(&r->material_pool, h)) {
-                    material_index = nph_handle_pool_index(&r->material_pool, h);
-                    md = &r->materials[material_index].desc;
-                }
+        const u32 rec = list->count;
+        NphRenderDrawData *d = &records[rec];
+        d->model0 = model.r[0];
+        d->model1 = model.r[1];
+        d->model2 = model.r[2];
+        d->normal0 = nph_vec4_from_vec3(nph_mat3_row(normal, 0U), 0.0F);
+        d->normal1 = nph_vec4_from_vec3(nph_mat3_row(normal, 1U), 0.0F);
+        d->normal2 = nph_vec4_from_vec3(nph_mat3_row(normal, 2U), 0.0F);
+        d->position_offset = nph_vec4_from_vec3(mesh->position_offset, 0.0F);
+        d->position_scale = nph_vec4_from_vec3(mesh->position_scale, mirrored ? -1.0F : 1.0F);
+        d->positions_address = mesh->positions_address;
+        d->attribs_address = mesh->attribs_address;
+        d->material_index = material_index;
+        d->instance_index = i;
+        d->pad0 = 0U;
+        d->pad1 = 0U;
+        RenderDrawCmd *c = &r->draw_cmds[rec];
+        memset(c, 0, sizeof *c);
+        c->record = rec;
+        c->mesh = nph_handle_pool_index(&r->mesh_pool, mh);
+        c->first_index = sm->index_offset;
+        c->index_count = sm->index_count;
+        c->alpha_mode = (u8)alpha;
+        c->cull = (u8)cull_of(double_sided, mirrored);
+        if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
+            c->key = depth_key(view_depth, rec);
+            list->blend_count += 1U;
+        } else {
+            // Pipeline (alpha mode, culling), then mesh, then record.
+            c->key = ((u64)alpha << 61U) | ((u64)c->cull << 59U) | ((u64)c->mesh << 32U) | rec;
+        }
+        stats->triangles += sm->index_count / 3U;
+        list->count += 1U;
+    }
+}
+
+// The draw list: every instance's submeshes (the reference), or only the
+// blended submeshes of the instances on the blend list (the production
+// path, which leaves the rest to the GPU).
+static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
+                        NphRenderFrameStats *stats)
+{
+    DrawList list = {0U, 0U};
+    if (production) {
+        stats->instances = nph_handle_pool_live(&r->instance_pool);
+        stats->culled = r->hidden_count;
+        u32 blended = 0U;
+        const u32 *blend = render_vis_blend_list(r, &blended);
+        for (u32 i = 0; i < blended; ++i) {
+            add_instance_draws(r, fc, blend[i], true, &list, stats);
+        }
+    } else {
+        for (u32 i = 0; i < r->desc.max_instances; ++i) {
+            if (r->instances[i].handle != 0U) {
+                stats->instances += 1U;
+                add_instance_draws(r, fc, i, false, &list, stats);
             }
-            const u32 alpha = md != NULL ? (u32)md->alpha_mode : (u32)NPH_RENDER_ALPHA_OPAQUE;
-            const bool double_sided = md != NULL && md->double_sided;
-            if (count == cap) {
-                stats->dropped += 1U;
-                continue;
-            }
-            const u32 rec = count;
-            NphRenderDrawData *d = &records[rec];
-            d->model0 = model.r[0];
-            d->model1 = model.r[1];
-            d->model2 = model.r[2];
-            d->normal0 = nph_vec4_from_vec3(nph_mat3_row(normal, 0U), 0.0F);
-            d->normal1 = nph_vec4_from_vec3(nph_mat3_row(normal, 1U), 0.0F);
-            d->normal2 = nph_vec4_from_vec3(nph_mat3_row(normal, 2U), 0.0F);
-            d->position_offset = nph_vec4_from_vec3(mesh->position_offset, 0.0F);
-            d->position_scale = nph_vec4_from_vec3(mesh->position_scale, mirrored ? -1.0F : 1.0F);
-            d->positions_address = mesh->positions_address;
-            d->attribs_address = mesh->attribs_address;
-            d->material_index = material_index;
-            d->instance_index = i;
-            d->pad0 = 0U;
-            d->pad1 = 0U;
-            RenderDrawCmd *c = &opaque[rec];
-            memset(c, 0, sizeof *c);
-            c->record = rec;
-            c->mesh = nph_handle_pool_index(&r->mesh_pool, mh);
-            c->first_index = sm->index_offset;
-            c->index_count = sm->index_count;
-            c->alpha_mode = (u8)alpha;
-            c->cull = (u8)cull_of(double_sided, mirrored);
-            if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
-                c->key = depth_key(view_depth, rec);
-                ++blend_count;
-            } else {
-                // Pipeline (alpha mode, culling), then mesh, then record.
-                c->key = ((u64)alpha << 61U) | ((u64)c->cull << 59U) | ((u64)c->mesh << 32U) | rec;
-            }
-            stats->triangles += sm->index_count / 3U;
-            ++count;
         }
     }
     // Blended keys have the top bit set, so one sort puts them last and
     // farthest first.
-    qsort(r->draw_cmds, count, sizeof(RenderDrawCmd), compare_draws);
-    r->opaque_count = count - blend_count;
-    r->blend_count = blend_count;
-    stats->draws = count;
-    stats->blended = blend_count;
+    qsort(r->draw_cmds, list.count, sizeof(RenderDrawCmd), compare_draws);
+    r->opaque_count = list.count - list.blend_count;
+    r->blend_count = list.blend_count;
+    stats->draws = list.count;
+    stats->blended = list.blend_count;
 }
 
 // ---------------------------------------------------------------------------
 // Passes
 // ---------------------------------------------------------------------------
 
-static void forward_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+// Records draw_cmds[first, first + count) with the forward pipelines.
+static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
+                         NphGpuPipeline *bound, u32 *bound_mesh)
 {
-    NPH_UNUSED(graph);
-    NphRenderer *r = (NphRenderer *)user;
     NphRenderPush push = r->push;
-    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
-    u32 bound_mesh = NPH_U32_MAX;
-    const u32 total = r->opaque_count + r->blend_count;
-    for (u32 i = 0; i < total; ++i) {
-        if (i == r->opaque_count) {
-            // The sky fills what the opaque geometry left uncovered, before
-            // the blended surfaces composite over both.
-            nph_gpu_cmd_bind_pipeline(cmd, r->sky);
-            nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
-            nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
-            bound = r->sky;
-        }
+    for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
         const NphGpuPipeline p = r->forward[c->alpha_mode][c->cull];
-        if (p.value != bound.value) {
+        if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
-            bound = p;
+            *bound = p;
         }
-        if (c->mesh != bound_mesh) {
+        if (c->mesh != *bound_mesh) {
             nph_gpu_cmd_bind_index_buffer(cmd, r->meshes[c->mesh].indices, 0U, NPH_GPU_INDEX_U32);
-            bound_mesh = c->mesh;
+            *bound_mesh = c->mesh;
         }
         push.draw_index = c->record;
         nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
         nph_gpu_cmd_draw_indexed(cmd, c->index_count, 1U, c->first_index, 0, 0U);
     }
-    if (r->blend_count == 0U) {
-        nph_gpu_cmd_bind_pipeline(cmd, r->sky);
-        nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
-        nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
-    }
+}
+
+static void forward_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
+    u32 bound_mesh = NPH_U32_MAX;
+    record_draws(r, cmd, 0U, r->opaque_count, &bound, &bound_mesh);
+    // The sky fills what the opaque geometry left uncovered, before the
+    // blended surfaces composite over both.
+    nph_gpu_cmd_bind_pipeline(cmd, r->sky);
+    nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
+    nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
+    bound = r->sky;
+    record_draws(r, cmd, r->opaque_count, r->blend_count, &bound, &bound_mesh);
+}
+
+// The production path's blended surfaces, over the resolved image.
+static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
+    u32 bound_mesh = NPH_U32_MAX;
+    record_draws(r, cmd, r->opaque_count, r->blend_count, &bound, &bound_mesh);
 }
 
 static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
     const RenderTargetPipelines *t = r->frame_target;
+    const bool production = r->frame_production != 0;
     NphRenderTonemapPush tp = r->tonemap_push;
     tp.hdr_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->hdr_rg));
-    nph_gpu_cmd_bind_pipeline(cmd, t->tonemap);
+    nph_gpu_cmd_bind_pipeline(cmd, production ? t->vis_tonemap : t->tonemap);
     nph_gpu_cmd_push_constants(cmd, &tp, (u32)sizeof tp);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
     NphRenderPush push = r->push;
     push.flags = tp.encode_srgb != 0U ? 0U : (u32)NPH_RENDER_PUSH_LINEAR_OUTPUT;
+    if (production && r->debug_draw_counts[0] != 0U) {
+        push.visbuffer_index = render_vis_visbuffer_index(r, graph);
+    }
     if (r->debug_draw_counts[0] != 0U) {
-        nph_gpu_cmd_bind_pipeline(cmd, t->debug_depth);
+        nph_gpu_cmd_bind_pipeline(cmd, production ? t->vis_debug_depth : t->debug_depth);
         nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
         nph_gpu_cmd_draw(cmd, r->debug_draw_counts[0] * 2U, 1U, 0U, 0U);
     }
     if (r->debug_draw_counts[1] != 0U) {
-        nph_gpu_cmd_bind_pipeline(cmd, t->debug_overlay);
+        nph_gpu_cmd_bind_pipeline(cmd, production ? t->vis_debug_overlay : t->debug_overlay);
         nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
         nph_gpu_cmd_draw(cmd, r->debug_draw_counts[1] * 2U, 1U, r->desc.debug_lines * 2U, 0U);
     }
@@ -464,6 +542,57 @@ static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
 static bool format_is_srgb(NphGpuFormat f)
 {
     return nph_gpu_format_info(f)->srgb != 0;
+}
+
+// The reference renderer's passes: the forward pass into the HDR target
+// and its depth, which the tonemap pass's debug lines test against.
+static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32 width, u32 height,
+                                   NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
+                                   NphGpuRgBuffer sh, NphGpuRgImage *out_depth)
+{
+    NphGpuImageDesc hdr_desc;
+    memset(&hdr_desc, 0, sizeof hdr_desc);
+    hdr_desc.format = RENDER_HDR_FORMAT;
+    hdr_desc.width = width;
+    hdr_desc.height = height;
+    hdr_desc.mip_count = 1U;
+    hdr_desc.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    hdr_desc.name = "hdr colour";
+    NphGpuImageDesc depth_desc = hdr_desc;
+    depth_desc.format = RENDER_DEPTH_FORMAT;
+    depth_desc.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
+    depth_desc.name = "depth";
+    const NphGpuRgImage hdr = nph_gpu_rg_create_image(graph, &hdr_desc);
+    const NphGpuRgImage depth = nph_gpu_rg_create_image(graph, &depth_desc);
+    if (nph_gpu_rg_image_is_null(hdr) || nph_gpu_rg_image_is_null(depth)) {
+        return NPH_RESULT_FULL;
+    }
+    r->hdr_rg = hdr;
+    *out_depth = depth;
+
+    NphGpuRgPassDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.name = "forward";
+    pd.type = NPH_GPU_RG_PASS_GRAPHICS;
+    pd.execute = forward_execute;
+    pd.user = r;
+    NphGpuRgPass *fwd = nph_gpu_rg_add_pass(graph, &pd);
+    if (fwd == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    NphGpuRgAttachment a;
+    memset(&a, 0, sizeof a);
+    a.load = NPH_GPU_LOAD_OP_CLEAR;
+    a.store = NPH_GPU_STORE_OP_STORE;
+    a.clear = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 1.0F);
+    nph_gpu_rg_color_attachment(fwd, hdr, &a);
+    a.clear = nph_gpu_clear_depth(0.0F, 0U); // reverse-Z: the far plane is 0
+    nph_gpu_rg_depth_attachment(fwd, depth, &a, 0);
+    nph_gpu_rg_read_image(fwd, env, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
+    nph_gpu_rg_read_image(fwd, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
+    nph_gpu_rg_read_image(fwd, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    nph_gpu_rg_read_buffer(fwd, sh, NPH_GPU_RG_USE_SHADER_READ);
+    return NPH_RESULT_OK;
 }
 
 static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
@@ -487,7 +616,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (!nph_gpu_image_is_valid(dev, target) || !(view->camera.yfov > 0.0F) ||
         !(view->camera.yfov < NPH_PI) || !(view->camera.znear > 0.0F) ||
         (u32)view->tonemapper > (u32)NPH_RENDER_TONEMAPPER_AGX ||
-        (u32)view->debug_view >= (u32)NPH_RENDER_VIEW_COUNT) {
+        (u32)view->debug_view >= (u32)NPH_RENDER_VIEW_COUNT ||
+        (u32)view->pipeline > (u32)NPH_RENDER_PIPELINE_PRODUCTION) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const NphGpuImageDesc *td = nph_gpu_image_desc(dev, target);
@@ -498,12 +628,25 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (!target_format_supported(td->format)) {
         return NPH_RESULT_UNSUPPORTED;
     }
+    bool production = view->pipeline == NPH_RENDER_PIPELINE_PRODUCTION;
+    if (production && !r->vis.supported) {
+        if (!r->vis.fallback_logged) {
+            NPH_LOG_WARN(&NPH_LOG_RENDER,
+                         "%s: no production path here; drawing with the reference renderer "
+                         "(said once)",
+                         r->name);
+            r->vis.fallback_logged = 1;
+        }
+        production = false;
+    }
     NPH_TRY(target_pipelines(r, td->format, &r->frame_target));
     r->last_frame_index = nph_gpu_frame_index(dev);
     r->frame_slot = nph_gpu_frame_slot(dev);
+    r->frame_production = production ? 1 : 0;
     const u64 address = r->frame_addresses[r->frame_slot];
     const u32 width = td->width;
     const u32 height = td->height;
+    stats.pipeline = production ? NPH_RENDER_PIPELINE_PRODUCTION : NPH_RENDER_PIPELINE_REFERENCE;
 
     // The view: rotation only, the camera at the origin.
     const NphMat3 rot =
@@ -521,7 +664,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
 
     write_materials(r);
     const u32 light_count = write_lights(r, view->camera.position);
-    build_draws(r, &fc, &stats);
+    build_draws(r, &fc, production, &stats);
     if (stats.dropped != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u visible draws past max_draws (%u) were dropped",
                      r->name, stats.dropped, r->desc.max_draws);
@@ -582,50 +725,27 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     NphGpuRgBuffer sh;
     NPH_TRY(render_ibl_declare(r, graph, &env, &specular, &lut, &sh, &stats.environment_updated));
 
-    NphGpuImageDesc hdr_desc;
-    memset(&hdr_desc, 0, sizeof hdr_desc);
-    hdr_desc.format = RENDER_HDR_FORMAT;
-    hdr_desc.width = width;
-    hdr_desc.height = height;
-    hdr_desc.mip_count = 1U;
-    hdr_desc.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
-    hdr_desc.name = "hdr colour";
-    NphGpuImageDesc depth_desc = hdr_desc;
-    depth_desc.format = RENDER_DEPTH_FORMAT;
-    depth_desc.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
-    depth_desc.name = "depth";
-    const NphGpuRgImage hdr = nph_gpu_rg_create_image(graph, &hdr_desc);
-    const NphGpuRgImage depth = nph_gpu_rg_create_image(graph, &depth_desc);
+    NphGpuRgImage depth = NPH_GPU_RG_IMAGE_NULL;
+    NphGpuRgImage visbuffer = NPH_GPU_RG_IMAGE_NULL;
+    if (production) {
+        NphGpuRgImage hdr = NPH_GPU_RG_IMAGE_NULL;
+        NPH_TRY(render_vis_frame(r, view, graph, width, height, &view_m, &proj, env, specular, lut,
+                                 sh, &hdr, &stats));
+        if (r->blend_count != 0U) {
+            NPH_TRY(render_vis_declare_transparent(r, graph, transparent_execute, env, specular,
+                                                   lut, sh));
+        }
+        r->hdr_rg = hdr;
+        visbuffer = r->vis.frame.visbuffer;
+    } else {
+        NPH_TRY(declare_reference(r, graph, width, height, env, specular, lut, sh, &depth));
+    }
+
     const NphGpuRgImage out = nph_gpu_rg_import_image(graph, target);
-    if (nph_gpu_rg_image_is_null(hdr) || nph_gpu_rg_image_is_null(depth) ||
-        nph_gpu_rg_image_is_null(out)) {
+    if (nph_gpu_rg_image_is_null(out)) {
         return NPH_RESULT_FULL;
     }
-    r->hdr_rg = hdr;
-
     NphGpuRgPassDesc pd;
-    memset(&pd, 0, sizeof pd);
-    pd.name = "forward";
-    pd.type = NPH_GPU_RG_PASS_GRAPHICS;
-    pd.execute = forward_execute;
-    pd.user = r;
-    NphGpuRgPass *fwd = nph_gpu_rg_add_pass(graph, &pd);
-    if (fwd == NULL) {
-        return NPH_RESULT_FULL;
-    }
-    NphGpuRgAttachment a;
-    memset(&a, 0, sizeof a);
-    a.load = NPH_GPU_LOAD_OP_CLEAR;
-    a.store = NPH_GPU_STORE_OP_STORE;
-    a.clear = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 1.0F);
-    nph_gpu_rg_color_attachment(fwd, hdr, &a);
-    a.clear = nph_gpu_clear_depth(0.0F, 0U); // reverse-Z: the far plane is 0
-    nph_gpu_rg_depth_attachment(fwd, depth, &a, 0);
-    nph_gpu_rg_read_image(fwd, env, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
-    nph_gpu_rg_read_image(fwd, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
-    nph_gpu_rg_read_image(fwd, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
-    nph_gpu_rg_read_buffer(fwd, sh, NPH_GPU_RG_USE_SHADER_READ);
-
     memset(&pd, 0, sizeof pd);
     pd.name = "tonemap";
     pd.type = NPH_GPU_RG_PASS_GRAPHICS;
@@ -635,14 +755,22 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (tm == NULL) {
         return NPH_RESULT_FULL;
     }
+    NphGpuRgAttachment a;
     memset(&a, 0, sizeof a);
     a.load = NPH_GPU_LOAD_OP_DONT_CARE; // every pixel is written
     a.store = NPH_GPU_STORE_OP_STORE;
     nph_gpu_rg_color_attachment(tm, out, &a);
-    a.load = NPH_GPU_LOAD_OP_LOAD;
-    a.store = NPH_GPU_STORE_OP_DONT_CARE;
-    nph_gpu_rg_depth_attachment(tm, depth, &a, 1);
-    nph_gpu_rg_read_image(tm, hdr, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    if (production) {
+        // The depth-tested lines read the visibility buffer's depth.
+        if (r->debug_draw_counts[0] != 0U) {
+            nph_gpu_rg_read_image(tm, visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        }
+    } else {
+        a.load = NPH_GPU_LOAD_OP_LOAD;
+        a.store = NPH_GPU_STORE_OP_DONT_CARE;
+        nph_gpu_rg_depth_attachment(tm, depth, &a, 1);
+    }
+    nph_gpu_rg_read_image(tm, r->hdr_rg, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
 
     if (out_target != NULL) {
         *out_target = out;

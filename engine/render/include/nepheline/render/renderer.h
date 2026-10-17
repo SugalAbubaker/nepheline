@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// The forward PBR reference renderer (CLAUDE.md §8.6 stages 1-2;
-// docs/render.md; docs/adr/0018-reference-renderer.md).
+// The renderer (CLAUDE.md §8.6; docs/render.md): one set of resources
+// drawn by either of two pipelines, chosen per view (NphRenderPipeline):
 //
-// This renderer is the ground truth that golden images are compared
-// against, not the production path: it draws every visible submesh with
-// its own draw call and evaluates every light per pixel, so its CPU cost
-// grows with the object count and its GPU cost with lights times pixels.
-// The GPU-driven visibility-buffer renderer of §8.6 stages 3-8 (Phase 10)
-// is checked against it.
+//   - REFERENCE, the forward PBR reference renderer (§8.6 stages 1-2;
+//     docs/adr/0018-reference-renderer.md): the ground truth golden images
+//     are compared against. It draws every visible submesh with its own
+//     draw call and evaluates every light per pixel, so its CPU cost grows
+//     with the object count and its GPU cost with lights times pixels.
+//   - PRODUCTION, the GPU-driven visibility-buffer renderer (§8.6 stages
+//     3 and on; docs/adr/0029-gpu-driven-renderer.md): the scene lives in
+//     GPU tables updated only where something changed; instances and
+//     meshlets are culled on the GPU (frustum, normal cone, two-phase
+//     occlusion against a hierarchical depth buffer); visible meshlets are
+//     rasterised into a 64-bit visibility buffer by mesh shaders, or by
+//     indirect draws on devices without them; one compute pass shades
+//     every pixel with the reference's own shading. Its CPU cost per frame
+//     does not grow with the number of objects. It needs 64-bit image
+//     atomics, subgroup ballot and arithmetic, and gl_PrimitiveID in
+//     fragment shaders (nph_renderer_production_supported).
 //
 // What it renders:
 //   - glTF 2.0 metallic-roughness materials: base colour, metallic,
@@ -51,6 +61,7 @@
 #include <nepheline/gpu/render_graph.h>
 #include <nepheline/math/geometry.h>
 #include <nepheline/math/quat.h>
+#include <nepheline/render/meshlet.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -113,7 +124,19 @@ typedef struct NphRendererDesc {
     // off (golden-image tests do, since anisotropic filtering is
     // implementation-defined).
     f32 max_anisotropy;
-    const char *name; // for logs and GPU object names
+    // The production path (zero picks the default in parentheses).
+    b32 disable_production;   // never create it: no GPU memory or pipelines for it
+    u32 max_visible_clusters; // meshlets that survive culling per frame (524288)
+    u32 max_cull_batches;     // batches of 64 meshlets per culling phase (131072)
+    u32 max_deferred;         // instances or meshlets deferred to the second phase (262144)
+    u32 max_instance_updates; // instance records sent to the GPU per frame (16384); the
+                              // rest wait for the next frame
+    u32 max_material_slots;   // material slots across all instances (4 * max_instances);
+                              // a destroyed instance's slots return two frames later
+    u32 meshlet_index_pool;   // meshlet corners of all meshes for the indirect raster, on
+                              // devices without mesh shaders (2^24); a destroyed mesh's
+                              // return two frames later
+    const char *name;         // for logs and GPU object names
 } NphRendererDesc;
 
 // Creates the renderer: pools, samplers, the per-frame buffers, the
@@ -214,6 +237,18 @@ typedef struct NphRenderMeshDesc {
     NphVec3 position_offset;
     NphVec3 position_scale;
     NphAABB bounds; // of the dequantised positions (culling)
+    // Meshlets (render/meshlet.h), as a cooked mesh carries them; with
+    // `meshlets` NULL the renderer builds them (a CPU cost at creation:
+    // about half a microsecond per triangle). Each meshlet's submesh
+    // indexes `submeshes`, and the meshlets of a submesh cover exactly its
+    // triangles.
+    const NphRenderMeshlet *meshlets;
+    const NphRenderMeshletBounds *meshlet_bounds;
+    u32 meshlet_count;
+    const u32 *meshlet_vertices; // indices into the vertices
+    u32 meshlet_vertex_count;
+    const u8 *meshlet_triangles; // meshlet-local corners, three per triangle
+    u32 meshlet_triangle_count;
     const char *name;
 } NphRenderMeshDesc;
 
@@ -436,8 +471,25 @@ typedef enum NphRenderDebugView {
     NPH_RENDER_VIEW_OCCLUSION,
     NPH_RENDER_VIEW_DIRECT,   // punctual lights only
     NPH_RENDER_VIEW_INDIRECT, // image-based lighting only
+    // The production path's culling and raster, as a colour per visible
+    // cluster, triangle, or instance (the reference path shades as LIT).
+    NPH_RENDER_VIEW_CLUSTERS,
+    NPH_RENDER_VIEW_TRIANGLES,
+    NPH_RENDER_VIEW_INSTANCES,
     NPH_RENDER_VIEW_COUNT
 } NphRenderDebugView;
+
+typedef enum NphRenderPipeline {
+    NPH_RENDER_PIPELINE_REFERENCE = 0,  // the forward reference renderer
+    NPH_RENDER_PIPELINE_PRODUCTION = 1, // the GPU-driven visibility-buffer renderer
+} NphRenderPipeline;
+
+// Switches of the production path's culling, for tests and debugging; the
+// image does not change, only the work.
+typedef enum NphRenderVisFlags {
+    NPH_RENDER_VIS_NO_OCCLUSION = 1U << 0U, // no hierarchical-depth tests
+    NPH_RENDER_VIS_NO_CONE = 1U << 1U,      // no meshlet normal-cone tests
+} NphRenderVisFlags;
 
 typedef struct NphRenderView {
     NphRenderCamera camera;
@@ -450,6 +502,10 @@ typedef struct NphRenderView {
     NphVec3 background_color; // radiance, cd/m^2
     NphRenderDebugView debug_view;
     b32 disable_ibl;
+    // The pipeline that draws the view. PRODUCTION falls back to REFERENCE
+    // (logged once) on a renderer without the production path.
+    NphRenderPipeline pipeline;
+    u32 vis_flags; // NphRenderVisFlags
 } NphRenderView;
 
 // A view of `camera`: EV100 15, ACES, the environment as background.
@@ -467,8 +523,36 @@ typedef struct NphRenderFrameStats {
     u32 triangles; // drawn
     u32 lights;    // evaluated per pixel
     u32 debug_lines;
-    b32 environment_updated; // this frame declared the IBL passes
+    b32 environment_updated;    // this frame declared the IBL passes
+    NphRenderPipeline pipeline; // the pipeline that drew the frame
+    // The production path's GPU counters, read back from the frame that
+    // completed NPH_GPU_FRAMES_IN_FLIGHT frames ago (vis_frame); zero
+    // until one has. On that path `instances` above is the live count,
+    // `culled` the hidden instances plus blended ones outside the frustum,
+    // and `draws`, `blended`, and `triangles` count only the blended
+    // surfaces the CPU draws itself; the GPU draws the rest.
+    u64 vis_frame;
+    u32 vis_clusters;  // meshlets that survived culling
+    u32 vis_triangles; // in them
+    u32 vis_instances_culled_frustum;
+    u32 vis_instances_culled_occlusion;
+    u32 vis_meshlets_culled_frustum;
+    u32 vis_meshlets_culled_cone;
+    u32 vis_meshlets_culled_occlusion;
+    u32 vis_overflow; // NphRenderVisOverflow bits: lists that dropped work
 } NphRenderFrameStats;
+
+// The production path's lists that can fill up (NphRenderFrameStats.
+// vis_overflow); each is a capacity in NphRendererDesc.
+typedef enum NphRenderVisOverflow {
+    NPH_RENDER_VIS_OVERFLOW_BATCHES = 1U << 0U,  // max_cull_batches
+    NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U, // max_visible_clusters
+    NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U, // max_deferred
+} NphRenderVisOverflow;
+
+// Whether the renderer has the production path: the device has what it
+// needs and the description did not disable it.
+bool nph_renderer_production_supported(const NphRenderer *r);
 
 // Declares this frame's passes into `graph` (between nph_gpu_rg_begin and
 // nph_gpu_rg_compile) and fills the frame's GPU records. `target` is the

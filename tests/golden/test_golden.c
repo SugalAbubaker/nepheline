@@ -12,6 +12,10 @@
 // image is approved with scripts/golden_approve.py, after a person has
 // looked at it and at its FLIP map (<name>.flip.png beside it).
 //
+// Where the device has it, the production path renders every scene too
+// (<name>.production.png) and is held to the same baseline and thresholds:
+// the reference renderer's images are what it must reproduce (ADR-0029).
+//
 // The fixture's teardown keeps the gpu tests' gate: zero validation and
 // synchronisation-validation errors, nothing leaked.
 #include <nepheline/asset/vfs.h>
@@ -66,6 +70,9 @@ typedef struct Golden {
     u32 light_count;
     NphRenderTexture textures[4];
     u32 texture_count;
+    // Draws what lasts one frame (debug lines) before each render, so both
+    // pipelines' frames get it.
+    void (*before_frame)(struct Golden *f);
 } Golden;
 
 NTEST_SETUP(Golden)
@@ -92,6 +99,12 @@ NTEST_SETUP(Golden)
     rd.specular_samples = 128U;
     rd.brdf_lut_size = 64U;
     rd.max_anisotropy = 1.0F;
+    // The production path's lists, sized for these scenes.
+    rd.max_visible_clusters = 65536U;
+    rd.max_cull_batches = 16384U;
+    rd.max_deferred = 32768U;
+    rd.max_instance_updates = 256U;
+    rd.meshlet_index_pool = 1U << 22U;
     rd.name = "golden";
     NTEST_ASSERT_EQ_INT(nph_renderer_create(&rd, &f->renderer), NPH_RESULT_OK);
     NphGpuRenderGraphDesc gd;
@@ -151,12 +164,15 @@ NTEST_TEARDOWN(Golden)
 // The comparison
 // ---------------------------------------------------------------------------
 
-// Renders `view`, writes <output>/<name>.png, and compares it with the
-// approved baseline.
-static void golden_check(Golden *f, const char *name, const NphRenderView *view)
+// Renders `view`, writes <output>/<file>.png, and compares it with the
+// approved baseline <name>.png.
+static void golden_compare(Golden *f, const char *name, const char *file, const NphRenderView *view)
 {
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
     nph_gpu_rg_begin(f->graph);
+    if (f->before_frame != NULL) {
+        f->before_frame(f);
+    }
     NTEST_ASSERT_EQ_INT(nph_render_frame(f->renderer, view, f->graph, f->target, NULL, NULL),
                         NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(f->graph), NPH_RESULT_OK);
@@ -168,7 +184,7 @@ static void golden_check(Golden *f, const char *name, const NphRenderView *view)
 
     NPH_IGNORE_RESULT(nph_fs_create_directories(NPH_GOLDEN_OUTPUT_DIR));
     char out_path[512];
-    snprintf(out_path, sizeof out_path, "%s/%s.png", NPH_GOLDEN_OUTPUT_DIR, name);
+    snprintf(out_path, sizeof out_path, "%s/%s.png", NPH_GOLDEN_OUTPUT_DIR, file);
     NTEST_ASSERT_EQ_INT(golden_png_write(out_path, f->pixels, GOLDEN_SIZE, GOLDEN_SIZE, 3U),
                         NPH_RESULT_OK);
 
@@ -193,14 +209,29 @@ static void golden_check(Golden *f, const char *name, const NphRenderView *view)
                         NPH_RESULT_OK);
     golden_flip_magma(map, GOLDEN_SIZE, GOLDEN_SIZE, f->pixels);
     char map_path[512];
-    snprintf(map_path, sizeof map_path, "%s/%s.flip.png", NPH_GOLDEN_OUTPUT_DIR, name);
+    snprintf(map_path, sizeof map_path, "%s/%s.flip.png", NPH_GOLDEN_OUTPUT_DIR, file);
     NPH_IGNORE_RESULT(golden_png_write(map_path, f->pixels, GOLDEN_SIZE, GOLDEN_SIZE, 3U));
-    printf("golden %s: FLIP mean %.5f p95 %.4f p99 %.4f max %.4f (%s)\n", name, s.mean, (f64)s.p95,
+    printf("golden %s: FLIP mean %.5f p95 %.4f p99 %.4f max %.4f (%s)\n", file, s.mean, (f64)s.p95,
            (f64)s.p99, (f64)s.max, nph_gpu_device_info(f->dev)->name);
     NPH_FREE_ARRAY(nph_allocator_system(), f32, map, (u64)GOLDEN_SIZE * GOLDEN_SIZE);
     golden_image_free(&base);
     NTEST_EXPECT_TRUE(s.mean <= GOLDEN_MEAN_MAX);
     NTEST_EXPECT_TRUE(s.p99 <= GOLDEN_P99_MAX);
+}
+
+// The scene through the reference renderer, then through the production
+// path where the device has it, both against the one baseline.
+static void golden_check(Golden *f, const char *name, const NphRenderView *view)
+{
+    NphRenderView v = *view;
+    v.pipeline = NPH_RENDER_PIPELINE_REFERENCE;
+    golden_compare(f, name, name, &v);
+    if (nph_renderer_production_supported(f->renderer)) {
+        char file[128];
+        snprintf(file, sizeof file, "%s.production", name);
+        v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+        golden_compare(f, name, file, &v);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -517,16 +548,9 @@ NTEST_F(Golden, equirect_environment)
 
 // The debug-draw API over a dim scene: depth-tested shapes partly behind a
 // cube, overlay shapes on top.
-NTEST_F(Golden, debug_draw)
+// The debug lines last one frame: the fixture draws them before each.
+static void debug_lines(Golden *f)
 {
-    REQUIRE_GOLDEN(f);
-    const NphRenderMesh floor = plane_mesh(f, 8.0F);
-    const NphRenderMesh cube = cube_mesh(f, 1.0F);
-    add_instance(f, floor, simple_material(f, nph_vec3(0.3F, 0.3F, 0.32F), 0.0F, 0.9F),
-                 at(0, 0, 0));
-    add_instance(f, cube, simple_material(f, nph_vec3(0.5F, 0.45F, 0.4F), 0.0F, 0.6F),
-                 at(0.0, 0.5, 0.0));
-    relative_sky(f);
     NphRenderer *r = f->renderer;
     nph_render_debug_grid(r, nph_vec3(0.0F, 0.001F, 0.0F), 0.5F, 12U, NPH_RENDER_COLOR_GRAY,
                           NPH_RENDER_DEBUG_DEPTH_TESTED);
@@ -544,6 +568,19 @@ NTEST_F(Golden, debug_draw)
         nph_dvec3(-2.0, 1.2, -1.0), nph_dvec3(0.0, 0.5, 0.0), nph_vec3_unit_y(), 0.6F, 0.3F);
     nph_render_debug_frustum(r, &probe, 1.5F, 1.6F, NPH_RENDER_COLOR_GREEN,
                              NPH_RENDER_DEBUG_DEPTH_TESTED);
+}
+
+NTEST_F(Golden, debug_draw)
+{
+    REQUIRE_GOLDEN(f);
+    const NphRenderMesh floor = plane_mesh(f, 8.0F);
+    const NphRenderMesh cube = cube_mesh(f, 1.0F);
+    add_instance(f, floor, simple_material(f, nph_vec3(0.3F, 0.3F, 0.32F), 0.0F, 0.9F),
+                 at(0, 0, 0));
+    add_instance(f, cube, simple_material(f, nph_vec3(0.5F, 0.45F, 0.4F), 0.0F, 0.6F),
+                 at(0.0, 0.5, 0.0));
+    relative_sky(f);
+    f->before_frame = debug_lines;
     NphRenderView v;
     base_view(&v, nph_dvec3(2.6, 2.4, 3.8), nph_dvec3(0.0, 0.4, 0.0), 0.8F);
     golden_check(f, "debug_draw", &v);
