@@ -1,0 +1,121 @@
+# 0030. The hybrid raster: a compute rasteriser for small triangles, meshlet work lists, and a partial second pyramid
+
+- **Date:** 2026-10-17
+- **Status:** Accepted
+
+## Context
+
+CLAUDE.md §8.6 stage 4 asks for hybrid rasterisation: "large triangles use
+the hardware rasterizer; micro-triangles use a compute software rasterizer
+with 64-bit image atomics". [ADR-0029](0029-gpu-driven-visibility-buffer.md)
+built the visibility buffer so that both rasters can write it the same
+way, and left two measured problems against the §10.4 budgets:
+
+- Meshlet culling took a 64-lane workgroup per batch of an instance's
+  meshlets, so instances of one or two meshlets left most lanes idle:
+  102,400 one-meshlet cubes took 0.90 ms to cull.
+- Culling with the depth pyramids took 0.42 ms at 4K against 0.25 ms,
+  each pyramid reading the whole 66 MB visibility buffer.
+
+Measurements are `render_perf` on the RTX 3060 Ti, Profile build (the
+4K field: 16,385 instances, 5.3 million triangles in the visible clusters).
+
+## Decision
+
+1. **Meshlet work lists.** The instance cull writes one (instance,
+   meshlet) item per meshlet of every instance it keeps. A subgroup's
+   instances write together: one atomic for the subgroup's total, then
+   each invocation writes an equal share of the items, finding each item's
+   instance by a binary search over the subgroup's inclusive prefix sums
+   (subgroup shuffles, now a requirement of the production path). The
+   meshlet cull runs an invocation per item. Phase 1's candidates, the
+   meshlets phase 0 deferred and those of deferred instances found
+   visible, share one list. `max_cull_batches` becomes
+   `max_cull_meshlets` (2^20).
+2. **The software raster** (`vis_sw_raster.comp`) takes an opaque
+   cluster when its bounding sphere projects in front of the near plane
+   into at most 64 pixels across and its triangles average at most
+   `sw_raster_pixels` (default 3) pixels across (the square root of the
+   projected box's area over the triangle count). A 32-thread workgroup
+   per cluster snaps the vertices to 1/256 pixel, culls back faces, and
+   walks each triangle's pixel centres with 32-bit integer edge functions
+   relative to the triangle's box under the top-left rule (Pineda 1988;
+   Direct3D's tie-breaking), writing the atomic max the hardware path's
+   fragment shader writes. Masked materials stay in hardware.
+3. **The pyramid after phase 1 rebuilds only where phase 1 drew.** Phase
+   1's meshlet cull marks the 32-pixel tiles each kept cluster's sphere
+   projects onto, or asks for a full rebuild when the sphere reaches the
+   near plane or covers more than 64 tiles; the pyramid after phase 1
+   rebuilds mip 0 in the marked tiles alone, then every coarser mip.
+
+## Measurements
+
+| | Before | After |
+|---|---|---|
+| meshlet cull, 102,400 one-meshlet cubes | 0.898 ms | 0.059 ms |
+| meshlet cull, 4K field (phase 0) | 0.098 ms | 0.038 ms |
+| raster, 4K field | 0.555 ms (hardware) | 0.504 ms (0.226 hardware + 0.278 software) |
+| raster, 102,400 cubes 1.6 px across | 0.436 ms (hardware) | 0.392 ms (software) |
+| pyramid after phase 1, 4K field | 0.147 ms | 0.066 ms |
+| GPU frame, 4K field | 2.056 ms | 1.885 ms |
+| GPU frame, 102,400 cubes | 1.512 ms | 0.638 ms |
+
+How the software raster's parameters were chosen, on the 4K field's
+raster (hardware only: 0.545 ms):
+
+| Variant | Raster |
+|---|---|
+| clusters up to 16 / 32 / 64 px, 64-bit edge functions, 64 threads | 0.531 / 0.547 / 0.615 ms |
+| average triangle up to 2 / 3 / 5 px, 32-bit, 64 threads | 0.515 / 0.508 / 0.498 ms |
+| average triangle up to 1 / 2 / 3 px, 32-bit, 32 threads | 0.539 / 0.511 / 0.494 ms |
+
+32 threads at 3 pixels is the choice. Larger thresholds gain little on
+the field (0.498 ms at 5 pixels with 64 threads) and already at 3 a grid
+of 10,240 cubes of 12 triangles 5 pixels across, which the hardware
+rasterises in 0.045 ms, goes to the software raster at 0.049 ms (0.081 ms
+with 64 threads and 64-bit arithmetic).
+
+Correctness: a scene whose 273 clusters all went to the software raster
+gives the hardware raster's image to the bit on the RTX 3060 Ti, so the
+snapping, the top-left rule, and the depth interpolation match NVIDIA's; a
+finely divided plane drawn by both shows no background through it; the
+golden scenes score the same through the production path as before.
+
+Culling with the pyramids is now 0.31 ms at 4K against the §10.4 budget
+of 0.25 ms. The first pyramid's 0.145 ms is the visibility buffer's 66 MB
+at the bus's bandwidth; what remains to cut is the second pyramid's
+coarser mips (rebuilt in full) and the six argument passes (0.015 ms).
+The §10.4 table's 30 MB for this line cannot hold with an 8-byte
+visibility buffer read once per pyramid at 4K: the record that lands the
+reference scenes revisits the table with measurements, as ADR-0015
+anticipated.
+
+## Alternatives considered
+
+- **Clusters by size alone** (Nanite's criterion, where the LOD system
+  keeps triangles near a pixel): without LOD (Phase 13), a small cluster
+  can hold a few large triangles that one thread walks for hundreds of
+  pixels; measured slower above.
+- **64-bit edge functions**: exact for any box, but integer 64-bit
+  arithmetic is emulated on the reference GPU; the 64-pixel bound makes 32
+  bits exact.
+- **A prefix-sum pass over per-instance meshlet counts** instead of the
+  subgroup expansion: one more pass and barrier; the subgroup version
+  balances within a subgroup, which is where the imbalance hurt.
+- **Rebuilding the coarser mips per tile too**: exact only away from the
+  image's right and bottom edges, where Vulkan's rounded-down mips give the
+  last texel an extra row or column; left for when the remaining 0.06 ms
+  matters more than the complexity.
+- **A 32-bit depth copy written by the raster**, halving the pyramid's
+  reads: it doubles the raster's writes and both rasters' atomics; not
+  pursued while the pyramid after phase 1 can be skipped instead.
+
+## Consequences
+
+- The production path now requires subgroup shuffles (the RTX 3060 Ti and
+  lavapipe have them).
+- `NPH_RENDER_VIS_NO_SW_RASTER` and the `r.sw_raster` cvar switch the
+  software raster off; the frame statistics count its clusters.
+- With the DAG LOD of Phase 13, clusters will carry about a triangle per
+  two to four pixels, which is where the software raster wins; its
+  threshold is revisited then.
