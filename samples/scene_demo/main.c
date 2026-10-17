@@ -523,12 +523,12 @@ static void log_systems(const App *app)
         // The GPU's counters arrive a couple of frames late (vis_frame).
         NPH_LOG_INFO(&LOG_SAMPLE,
                      "render (production): %u instances, %u clusters (%u in software), %u "
-                     "triangles; culled: %u + %u instances (frustum + occlusion), %u + %u + %u "
-                     "clusters (frustum + cone + occlusion)",
+                     "triangles, %u lights in view; culled: %u + %u instances (frustum + "
+                     "occlusion), %u + %u + %u clusters (frustum + cone + occlusion)",
                      rs->instances, rs->vis_clusters, rs->vis_clusters_sw, rs->vis_triangles,
-                     rs->vis_instances_culled_frustum, rs->vis_instances_culled_occlusion,
-                     rs->vis_meshlets_culled_frustum, rs->vis_meshlets_culled_cone,
-                     rs->vis_meshlets_culled_occlusion);
+                     rs->vis_lights, rs->vis_instances_culled_frustum,
+                     rs->vis_instances_culled_occlusion, rs->vis_meshlets_culled_frustum,
+                     rs->vis_meshlets_culled_cone, rs->vis_meshlets_culled_occlusion);
     } else {
         NPH_LOG_INFO(&LOG_SAMPLE,
                      "render (reference): %u instances, %u culled, %u draws, %u triangles",
