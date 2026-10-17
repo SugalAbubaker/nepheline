@@ -186,12 +186,22 @@ if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
 # The job needs the Vulkan SDK (glslc for the shader build, the validation
 # layer for the gpu tests) readable by the runner user. The SDK's location
 # comes from the machine-wide VULKAN_SDK; an SDK installed inside a user
-# profile is unreadable by every other account.
+# profile is unreadable by every other account unless the runner user was
+# granted read access to it (an explicit allow rule naming that user).
 $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+$sdkReadable = $false
+if ($sdk -and (Test-Path $sdk)) {
+    $readExecute = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $sdkReadable = [bool]((Get-Acl $sdk).Access | Where-Object {
+            $_.AccessControlType -eq 'Allow' -and
+            $_.IdentityReference.Value -like "*\$User" -and
+            ($_.FileSystemRights -band $readExecute) -eq $readExecute
+        })
+}
 if (-not $sdk) {
     Write-Warning ("VULKAN_SDK is not set machine-wide, so the job will not find glslc. Install the SDK " +
         "with scripts\install_vulkan_sdk.ps1 (into C:\VulkanSDK) or set VULKAN_SDK for the machine.")
-} elseif ($sdk -like (Join-Path $env:SystemDrive 'Users\*')) {
+} elseif ($sdk -like (Join-Path $env:SystemDrive 'Users\*') -and -not $sdkReadable) {
     Write-Warning ("VULKAN_SDK ($sdk) is inside a user profile, which $User cannot read. Either grant " +
         "read access: icacls `"$sdk`" /grant `"${User}:(OI)(CI)RX`" /T, or install the SDK " +
         "machine-wide with scripts\install_vulkan_sdk.ps1.")
