@@ -129,14 +129,27 @@ typedef struct NphGpuGraphicsPipelineDesc {
     const char *name;
 } NphGpuGraphicsPipelineDesc;
 
+// Specialization constants a compute pipeline can set: the values of the
+// shader's constants with constant_id 0 to count - 1.
+#define NPH_GPU_MAX_SPECIALIZATION 8U
+
 typedef struct NphGpuComputePipelineDesc {
     NphGpuShader shader;
+    // Values for the shader's specialization constants with constant_id 0
+    // to specialization_count - 1, 32 bits each (a uint, an int, a float's
+    // bits, or a bool as 0 or 1); constants past the count keep their
+    // defaults. One module thus gives pipelines compiled for different
+    // values, each with its dead branches removed and registers allocated
+    // for what remains.
+    u32 specialization[NPH_GPU_MAX_SPECIALIZATION];
+    u32 specialization_count;
     const char *name;
 } NphGpuComputePipelineDesc;
 
 // NPH_RESULT_INVALID_ARGUMENT for a stage mismatch (a non-vertex shader in
-// `vertex`, both vertex and mesh set, no stage at all) or an unsupported
-// state (line polygons without the feature); NPH_RESULT_FULL past
+// `vertex`, both vertex and mesh set, no stage at all), more than
+// NPH_GPU_MAX_SPECIALIZATION constants, or an unsupported state (line
+// polygons without the feature); NPH_RESULT_FULL past
 // max_pipelines; NPH_RESULT_UNKNOWN when the driver rejects the pipeline
 // (logged).
 NPH_MUST_USE NphResult nph_gpu_pipeline_create_graphics(NphGpuDevice *dev,

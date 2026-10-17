@@ -259,6 +259,26 @@ static NphResult build_compute(NphGpuDevice *dev, const NphGpuComputePipelineDes
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     NPH_TRY(stage_info(dev, d->shader, NPH_GPU_SHADER_COMPUTE, &ci.stage, &push_bytes));
+    if (d->specialization_count > NPH_GPU_MAX_SPECIALIZATION) {
+        GPU_LOG_ERROR("pipeline '%s': %u specialization constants, at most %u", name,
+                      d->specialization_count, NPH_GPU_MAX_SPECIALIZATION);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    VkSpecializationMapEntry entries[NPH_GPU_MAX_SPECIALIZATION];
+    VkSpecializationInfo spec;
+    if (d->specialization_count != 0U) {
+        for (u32 i = 0; i < d->specialization_count; ++i) {
+            entries[i].constantID = i;
+            entries[i].offset = i * (u32)sizeof(u32);
+            entries[i].size = sizeof(u32);
+        }
+        memset(&spec, 0, sizeof spec);
+        spec.mapEntryCount = d->specialization_count;
+        spec.pMapEntries = entries;
+        spec.dataSize = (size_t)d->specialization_count * sizeof(u32);
+        spec.pData = d->specialization;
+        ci.stage.pSpecializationInfo = &spec;
+    }
     ci.layout = dev->bindless.pipeline_layout;
     const VkResult r =
         vkCreateComputePipelines(dev->device, dev->pipeline_cache, 1U, &ci, NULL, out);
