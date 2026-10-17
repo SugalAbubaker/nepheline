@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+// The test quad of test_mesh.mesh (one per draw, in column gl_DrawID of an
+// 8-column split), coloured per primitive with the push-constant colour:
+// the mesh stage's push constants and per-primitive outputs, without the
+// fragment stage reading push constants (NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_
+// CONSTANTS).
+#version 460
+#extension GL_EXT_mesh_shader : require
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x = 1) in;
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+
+layout(location = 0) perprimitiveEXT flat out vec4 out_color[];
+
+layout(push_constant, scalar) uniform Push { NphTestPush pc; };
+
+void main()
+{
+    SetMeshOutputsEXT(4u, 2u);
+    const float x0 = -1.0 + 2.0 * float(gl_DrawID) / 8.0;
+    const float x1 = x0 + 2.0 / 8.0;
+    const vec2 corners[4] = vec2[4](vec2(x0, -1.0), vec2(x1, -1.0), vec2(x1, 1.0), vec2(x0, 1.0));
+    for (uint i = 0u; i < 4u; ++i) {
+        gl_MeshVerticesEXT[i].gl_Position = vec4(corners[i], 0.5, 1.0);
+    }
+    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0u, 1u, 2u);
+    gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0u, 2u, 3u);
+    out_color[0] = pc.color;
+    out_color[1] = pc.color;
+}

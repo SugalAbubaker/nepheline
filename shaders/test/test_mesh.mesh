@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // A mesh shader for the gpu tests: each draw (gl_DrawID) emits one quad
 // covering column gl_DrawID of an 8-column split of the viewport, full
-// height. Indirect draws and their counts are checked by which columns get
-// coloured.
+// height, with a per-vertex uv for test_color.frag, whose push-constant
+// colour checks the fragment stage of mesh pipelines reads push constants.
+// test_mesh_color.mesh is the same quad coloured per primitive.
 #version 460
 #extension GL_EXT_mesh_shader : require
 #include "nph_bindless.glsl"

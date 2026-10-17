@@ -778,6 +778,9 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f2.features.independentBlend = VK_TRUE;
     f2.features.samplerAnisotropy = hf->samplerAnisotropy;
     f2.features.depthClamp = hf->depthClamp;
+    // Fragment shaders that read gl_PrimitiveID declare the Geometry
+    // capability (the visibility buffer's raster does).
+    f2.features.geometryShader = hf->geometryShader;
     f2.features.fillModeNonSolid = hf->fillModeNonSolid;
     f2.features.textureCompressionBC = hf->textureCompressionBC;
     f2.features.shaderInt64 = hf->shaderInt64;
@@ -896,6 +899,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     feat->storage_8bit = vk_bool(c->f12.storageBuffer8BitAccess);
     feat->storage_16bit = vk_bool(c->f11.storageBuffer16BitAccess);
     feat->depth_clamp = vk_bool(hf->depthClamp);
+    feat->geometry_shader = vk_bool(hf->geometryShader);
     feat->fill_mode_non_solid = vk_bool(hf->fillModeNonSolid);
     feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);
     feat->sampler_anisotropy = vk_bool(hf->samplerAnisotropy);
@@ -998,6 +1002,12 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     info->api_version_minor = VK_API_VERSION_MINOR(p->apiVersion);
     info->api_version_patch = VK_API_VERSION_PATCH(p->apiVersion);
     info->driver_version = p->driverVersion;
+    if (c->driver.driverID == VK_DRIVER_ID_MESA_LLVMPIPE) {
+        // Found by gpu_tests' mesh_pipeline_fragment_shaders_read_push_constants
+        // on the CI's lavapipe (Mesa 25.2.8); no fixed release is known, so
+        // every version is assumed to have it.
+        info->quirks |= (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS;
+    }
     info->device_local_bytes = device_local_bytes(&c->memory);
     info->host_visible_bytes = host_visible_bytes(&c->memory);
     NphGpuLimits *lim = &info->limits;
@@ -1483,6 +1493,12 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
             info->limits.max_preferred_mesh_workgroup_invocations,
             info->limits.max_mesh_workgroup_count[0], info->limits.max_mesh_workgroup_count[1],
             info->limits.max_mesh_workgroup_count[2], info->limits.max_mesh_workgroup_total_count);
+    }
+    if (info->quirks != 0U) {
+        GPU_LOG_INFO("driver quirks worked around: 0x%x%s", info->quirks,
+                     (info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U
+                         ? " (mesh pipelines' fragment shaders read no push constants)"
+                         : "");
     }
     *out = dev;
     return NPH_RESULT_OK;

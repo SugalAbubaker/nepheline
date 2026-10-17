@@ -156,6 +156,7 @@ typedef struct NphGpuFeatures {
     b32 storage_8bit;          // 8-bit storage buffer access (quantised vertices)
     b32 storage_16bit;         // 16-bit storage buffer access
     b32 depth_clamp;           // shadow rendering
+    b32 geometry_shader;       // also what lets a fragment shader read gl_PrimitiveID
     b32 fill_mode_non_solid;   // wireframe debug draw
     b32 texture_compression_bc;       // BC1-7
     b32 sampler_anisotropy;           //
@@ -208,6 +209,18 @@ typedef struct NphGpuLimits {
     u32 max_preferred_mesh_workgroup_invocations;
 } NphGpuLimits;
 
+// Driver bugs the engine works around (NphGpuDeviceInfo.quirks). Each was
+// found by a test, is matched by driver, and stays until no supported
+// driver has it.
+typedef enum NphGpuQuirk {
+    // Fragment shaders of mesh-shader pipelines read zeros from push
+    // constants; the mesh stage reads them, and vertex pipelines are fine.
+    // Lavapipe (Mesa's llvmpipe, seen on 25.2.8). Users of mesh shaders
+    // take another path or hand the fragment stage its data as
+    // per-primitive outputs.
+    NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS = 1U << 0U,
+} NphGpuQuirk;
+
 typedef struct NphGpuDeviceInfo {
     char name[256];
     char driver_name[256];
@@ -223,6 +236,7 @@ typedef struct NphGpuDeviceInfo {
     u64 host_visible_bytes;
     NphGpuFeatures features;
     NphGpuLimits limits;
+    u32 quirks;                // NphGpuQuirk bits
     b32 validation;            // the validation layer is active
     b32 sync_validation;       // and synchronisation validation is on
     b32 debug_utils;           // object names and labels are delivered to tools

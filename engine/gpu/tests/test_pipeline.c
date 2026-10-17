@@ -136,10 +136,10 @@ typedef enum MeshDraw {
     MESH_DRAW_INDIRECT_COUNT,
 } MeshDraw;
 
-// Draws with the test mesh shader (one quad per draw record, in column
-// gl_DrawID of an 8-column split) into a 64 x 64 RGBA8 image and returns
-// how many columns were coloured, checking each column is either fully
-// coloured or untouched.
+// Draws with a test mesh shader (one quad per draw record, in column
+// gl_DrawID of an 8-column split) into a 64 x 64 RGBA8 image, with green as
+// the push-constant colour, and returns how many columns were coloured,
+// checking each column is either fully coloured or untouched.
 static u32 mesh_draw_columns(NphGpuDevice *dev, NphGpuPipeline pipeline, MeshDraw mode,
                              NphGpuBuffer args, NphGpuBuffer count)
 {
@@ -223,8 +223,11 @@ NTEST_F(GpuFixture, mesh_shaders_draw_directly_indirectly_and_with_a_count)
     NTEST_ASSERT_GE_UINT(info->limits.max_mesh_output_vertices, 256U); // the API's minimum
     NTEST_ASSERT_GE_UINT(info->limits.max_mesh_output_primitives, 256U);
     NTEST_ASSERT_GE_UINT(info->limits.max_mesh_workgroup_count[0], 65535U);
-    NphGpuShader mesh = test_load_shader(f->dev, "test_mesh.mesh");
-    NphGpuShader frag = test_load_shader(f->dev, "test_color.frag");
+    // The colour comes per primitive from the mesh stage, so the draws are
+    // checked on drivers with NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS
+    // too (the next test covers the fragment stage's push constants).
+    NphGpuShader mesh = test_load_shader(f->dev, "test_mesh_color.mesh");
+    NphGpuShader frag = test_load_shader(f->dev, "test_prim_color.frag");
     NphGpuGraphicsPipelineDesc desc;
     memset(&desc, 0, sizeof desc);
     desc.mesh = mesh;
@@ -260,6 +263,39 @@ NTEST_F(GpuFixture, mesh_shaders_draw_directly_indirectly_and_with_a_count)
 
     nph_gpu_buffer_destroy(f->dev, count);
     nph_gpu_buffer_destroy(f->dev, args);
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, mesh);
+    nph_gpu_shader_destroy(f->dev, frag);
+}
+
+// The fragment shader of a mesh pipeline reads the push constants the
+// command buffer pushed. Lavapipe's read zeros (the drawn quad came out
+// (0, 0, 0, 0) on CI); that driver carries the quirk and skips.
+NTEST_F(GpuFixture, mesh_pipeline_fragment_shaders_read_push_constants)
+{
+    REQUIRE_DEVICE(f);
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(f->dev);
+    if (!info->features.mesh_shader) {
+        NTEST_SKIP("no mesh shaders on %s", info->name);
+    }
+    if ((info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U) {
+        NTEST_SKIP("%s (%s) has NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS", info->name,
+                   info->driver_info);
+    }
+    NphGpuShader mesh = test_load_shader(f->dev, "test_mesh.mesh");
+    NphGpuShader frag = test_load_shader(f->dev, "test_color.frag");
+    NphGpuGraphicsPipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.mesh = mesh;
+    desc.fragment = frag;
+    desc.color_formats[0] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.color_count = 1U;
+    desc.name = "test mesh, fragment push constants";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &pipeline), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(mesh_draw_columns(f->dev, pipeline, MESH_DRAW_DIRECT, NPH_GPU_BUFFER_NULL,
+                                           NPH_GPU_BUFFER_NULL),
+                         1U);
     nph_gpu_pipeline_destroy(f->dev, pipeline);
     nph_gpu_shader_destroy(f->dev, mesh);
     nph_gpu_shader_destroy(f->dev, frag);

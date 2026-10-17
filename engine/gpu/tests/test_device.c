@@ -69,10 +69,12 @@ NTEST(gpu_device, optional_features_can_be_disabled)
     const NphGpuFeatures have = nph_gpu_device_info(full)->features;
     const NphGpuLimits have_limits = nph_gpu_device_info(full)->limits;
     NTEST_LOG("mesh %d, ray query %d, image atomic64 %d, buffer atomic64 %d, float16 %d, "
-              "minmax %d, first instance %d, subgroup vote %d ballot %d arithmetic %d",
+              "minmax %d, first instance %d, subgroup vote %d ballot %d arithmetic %d, "
+              "geometry shader %d",
               have.mesh_shader, have.ray_query, have.image_atomic_int64, have.buffer_atomic_int64,
               have.shader_float16, have.sampler_filter_minmax, have.draw_indirect_first_instance,
-              have.subgroup_vote, have.subgroup_ballot, have.subgroup_arithmetic);
+              have.subgroup_vote, have.subgroup_ballot, have.subgroup_arithmetic,
+              have.geometry_shader);
     if (have.mesh_shader) {
         NTEST_EXPECT_GE_UINT(have_limits.max_mesh_output_vertices, 256U);
         NTEST_EXPECT_GE_UINT(have_limits.max_mesh_workgroup_invocations, 128U);
@@ -99,6 +101,7 @@ NTEST(gpu_device, optional_features_can_be_disabled)
     // What is not optional stays as it was.
     NTEST_EXPECT_EQ_INT(info->features.subgroup_ballot, have.subgroup_ballot);
     NTEST_EXPECT_EQ_INT(info->features.texture_compression_bc, have.texture_compression_bc);
+    NTEST_EXPECT_EQ_INT(info->features.geometry_shader, have.geometry_shader);
     // A mesh-shader draw is refused (asserted in development builds), not
     // called through a missing entry point.
     NphGpuCmd *cmd = NULL;
