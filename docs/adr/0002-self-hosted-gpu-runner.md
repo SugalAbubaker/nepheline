@@ -1,7 +1,8 @@
 # 0002. Self-hosted RTX 3060 Ti performance runner
 
 - **Date:** 2026-10-11
-- **Status:** Accepted
+- **Status:** Accepted. §4's ephemeral registration loop is replaced by
+  [ADR-0028](0028-gpu-runner-service.md) (2026-10-17).
 
 ## Context
 
@@ -38,6 +39,9 @@ forks could execute arbitrary code on that machine.
    work folder only; no secrets are configured for it; it is started in
    ephemeral mode (`--ephemeral`, one job per registration, re-registered by a
    scheduled task) so a job cannot leave state for the next one.
+   *Amended by ADR-0028:* the ephemeral loop went stale after a restart and
+   let job code reach SYSTEM. The runner is now a standard service under
+   the same user, registered once, with no stored credential.
 5. **What it measures.** The Profile configuration of the reference scenes at
    native 3840×2160: GPU timestamps per render-graph pass and total frame
    time, compared with the §10.4 table (updated by ADR after Phase 5

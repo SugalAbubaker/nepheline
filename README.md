@@ -109,7 +109,7 @@ samples/        one small executable per feature (core_hello, math_demo, platfor
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
-scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, fuzz_seeds_scene.py, nph_hash64.py, runner/install.ps1 + loop.ps1
+scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, fuzz_seeds_scene.py, nph_hash64.py, runner/install.ps1
 third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb, cimgui with Dear ImGui), each wrapped by exactly one module or tool
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
