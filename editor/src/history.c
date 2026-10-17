@@ -197,7 +197,7 @@ static NphResult op_undo(EditorHistory *h, const Op *op)
     case OP_PARENT:
         return nph_world_set_parent(w, op->entity, op->parent_before);
     default:
-        NPH_UNREACHABLE();
+        NPH_ASSERT_MSG(false, "unknown history op kind");
     }
     return NPH_RESULT_UNKNOWN;
 }
@@ -220,7 +220,7 @@ static NphResult op_redo(EditorHistory *h, const Op *op)
     case OP_PARENT:
         return nph_world_set_parent(w, op->entity, op->parent_after);
     default:
-        NPH_UNREACHABLE();
+        NPH_ASSERT_MSG(false, "unknown history op kind");
     }
     return NPH_RESULT_UNKNOWN;
 }
