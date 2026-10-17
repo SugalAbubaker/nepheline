@@ -17,18 +17,23 @@
 // column, and with them the farthest depth under them.
 //
 // Mode 0 reads the depth half of the visibility buffer, mode 1 the
-// previous mip. arg0 is the source's bindless storage index, arg1 the
-// destination's, arg2 and arg3 the source extent.
+// previous mip. Mode 2 is mode 0 for the tiles phase 1 drew into alone,
+// a workgroup per NPH_VIS_HZB_TILE-pixel tile (16 x 16 mip-0 texels): the
+// pyramid after phase 1 differs from the one after phase 0 only there,
+// and phase 1 usually draws little, so this skips most of a full read of
+// the visibility buffer (the cull pass marks the tiles; a cluster it cannot
+// bound marks them all). arg0 is the source's bindless storage index, arg1
+// the destination's, arg2 and arg3 the source extent.
 #version 460
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 
-layout(local_size_x = 8, local_size_y = 8) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 float source_depth(ivec2 p)
 {
-    if (pc.mode == 0u) {
+    if (pc.mode != 1u) {
         return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
     }
     return imageLoad(nph_images_2d[nonuniformEXT(pc.arg0)], p).x;
@@ -36,9 +41,18 @@ float source_depth(ivec2 p)
 
 void main()
 {
+    if (pc.mode == 2u) {
+        VisViewRef view = VisViewRef(pc.view);
+        const uint tile = gl_WorkGroupID.y * view.v.hzb_tiles_x + gl_WorkGroupID.x;
+        const bool dirty =
+            (VisUintRef(view.v.hzb_dirty).v[tile >> 5u] & (1u << (tile & 31u))) != 0u;
+        if (!dirty && VisCountersRef(view.v.counters).c.hzb_full == 0u) {
+            return;
+        }
+    }
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 src = ivec2(pc.arg2, pc.arg3);
-    const ivec2 dst = pc.mode == 0u ? (src + 1) / 2 : max(src / 2, ivec2(1));
+    const ivec2 dst = pc.mode != 1u ? (src + 1) / 2 : max(src / 2, ivec2(1));
     if (any(greaterThanEqual(p, dst))) {
         return;
     }

@@ -206,6 +206,7 @@ typedef enum VisShader {
     VIS_SHADER_ARGS,
     VIS_SHADER_HZB,
     VIS_SHADER_RESOLVE,
+    VIS_SHADER_SW_RASTER,
     VIS_SHADER_MESH_OPAQUE,
     VIS_SHADER_MESH_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -226,6 +227,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_ARGS,
     VIS_COMPUTE_HZB,
     VIS_COMPUTE_RESOLVE,
+    VIS_COMPUTE_SW_RASTER,
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -249,6 +251,7 @@ typedef struct VisFrame {
     NphGpuRgImage hdr;
     NphGpuRgImage depth; // null without blended draws
     NphGpuRgImage hzb;
+    NphGpuRgBuffer hzb_dirty;
     NphGpuRgBuffer counters;
     NphGpuRgBuffer args;
     NphGpuRgBuffer draws;
@@ -276,13 +279,13 @@ typedef struct RenderVis {
 
     // The culling lists: persistent so that their addresses are known when
     // the view is written, imported into the graph every frame.
-    NphGpuBuffer counters; // NphVisCounters
-    NphGpuBuffer args;     // NphVisArgs
-    NphGpuBuffer batches;  // NphVisBatch[2][max_cull_batches]
-    NphGpuBuffer deferred; // u32[max_deferred] instances, then uvec2[max_deferred] meshlets
-    NphGpuBuffer clusters; // NphVisCluster[max_visible_clusters]
-    NphGpuBuffer lists;    // u32[2][2][max_visible_clusters]
-    NphGpuBuffer draws;    // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
+    NphGpuBuffer counters;      // NphVisCounters
+    NphGpuBuffer args;          // NphVisArgs
+    NphGpuBuffer cull_meshlets; // uvec2[max_cull_meshlets]: phase 0's meshlet candidates
+    NphGpuBuffer deferred;      // uvec2[max_deferred] meshlets, then u32[max_deferred] instances
+    NphGpuBuffer clusters;      // NphVisCluster[max_visible_clusters]
+    NphGpuBuffer lists;         // u32[2][NPH_VIS_RASTER_KINDS][max_visible_clusters]
+    NphGpuBuffer draws;         // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
 
@@ -307,6 +310,12 @@ typedef struct RenderVis {
     u32 target_width; // the target it was built for
     u32 target_height;
     b32 hzb_valid;
+    // The tiles phase 1 drew into, a bit each: the pyramid after phase 1
+    // rebuilds those alone (vis_hzb.comp mode 2).
+    NphGpuBuffer hzb_dirty;
+    u32 hzb_tiles_x;
+    u32 hzb_tiles_y;
+    b32 hzb_full_rebuild; // tests: rebuild the whole pyramid after phase 1 too
     // That frame's view, for phase 0's tests against its HZB.
     NphMat4 prev_view;
     NphMat4 prev_view_proj;

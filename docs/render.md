@@ -210,12 +210,12 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 |---|---|
 | `vis clear` | clears the visibility buffer and the counters |
 | `vis scatter` | applies the frame's instance updates |
-| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out in batches of 64, the occluded wait for phase 1 |
-| `vis cull meshlets 0` | per meshlet: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list (opaque or masked) |
-| `vis raster 0` | the clusters into the visibility buffer |
+| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
+| `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
+| `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew |
-| `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances and meshlets against the new pyramid |
-| `vis raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against |
+| `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
+| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew |
 | `vis resolve` | shades every pixel from its cluster and triangle |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds, then the blended surfaces, forward |
@@ -223,7 +223,11 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 
 `vis args …` passes between them turn counts into indirect arguments,
 and appends to the GPU lists are aggregated per subgroup (one atomic per
-subgroup). This is **two-phase occlusion culling** (Haar & Aaltonen
+subgroup). The instance cull writes its meshlets as one work item each,
+the subgroup's instances together: one atomic for the subgroup's total,
+then every invocation writes an equal share, finding each item's instance
+by a binary search over the subgroup's prefix sums, so the meshlet cull
+keeps every lane busy whatever the meshes' sizes. This is **two-phase occlusion culling** (Haar & Aaltonen
 2015; Karis et al. 2021): phase 0 draws what was visible last frame,
 which is nearly everything visible now, and phase 1 catches what
 disocclusion revealed, so no object is lost to a stale pyramid. Culling
@@ -233,8 +237,8 @@ cone culling on and off and compares.
 **The visibility buffer** is 64 bits per pixel (R64_UINT): the depth's
 bits high, then the cluster index (25 bits) and the triangle (7 bits). The
 raster writes it with `imageAtomicMax`, which keeps the nearest surface
-under reverse-Z with no depth attachment, the same path the software
-rasteriser of stage 4 will use.
+under reverse-Z with no depth attachment, so the hardware and software
+rasters write the same buffer the same way.
 
 **Raster.** With mesh shaders each workgroup of 32 threads emits one
 cluster, culling back faces and triangles that cover no pixel centre
@@ -246,6 +250,20 @@ shaders but loses push constants in their fragment stage
 (`NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS`, docs/gpu.md), so it takes
 the indirect path; the RTX runner covers the mesh-shader path. Masked
 materials have their own pipeline, which samples the alpha.
+
+**The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
+the opaque clusters whose bounding sphere projects in front of the near
+plane into at most 64 pixels across and whose triangles average at most
+`sw_raster_pixels` (3) across. A 32-thread workgroup per cluster snaps
+the vertices to 1/256 pixel, as the hardware does, culls back faces, and
+walks each triangle's pixel centres with exact 32-bit edge functions
+relative to the triangle's box (the 64-pixel bound keeps them within 30
+bits) under the top-left rule, writing the same atomic max as the
+hardware path's fragment shader. On the RTX 3060 Ti it gives the hardware
+raster's image to the bit. It is faster on micro-triangles (102,400
+cubes 1.6 pixels across: 0.38 ms against 0.43) and slower on clusters of a
+few larger triangles, which the triangle-size test keeps in hardware.
+`NPH_RENDER_VIS_NO_SW_RASTER` (the `r.sw_raster` cvar) turns it off ([ADR-0030](adr/0030-hybrid-raster-and-meshlet-work-lists.md)).
 
 **The depth pyramid** holds the farthest depth (the smallest, reverse-Z)
 under each texel. Mip 0 is half the target rounded up, each later mip
@@ -260,6 +278,16 @@ frustum, cone, projection, facing, small-triangle, and pyramid tests have
 C twins in `reference.h`; a test runs the shaders on thousands of random
 cases and compares, and another reads the built pyramid back and checks
 every texel is the minimum of what it covers.
+
+Each full build reads the whole visibility buffer (66 MB at 4K, 0.145 ms:
+the bus's bandwidth). The pyramid after phase 1 differs from the one
+after phase 0 only where phase 1 drew, so phase 1's meshlet cull marks
+the 32-pixel tiles each of its clusters' spheres projects onto, and that
+pyramid rebuilds mip 0 in the marked tiles alone before the coarser mips
+(0.066 ms in the 4K field). A cluster it cannot bound, or one covering
+more than 64 tiles, asks for a full rebuild. A test compares the result
+with a full rebuild's, texel for texel, after a wall moves off what it
+hid.
 
 **The resolve** decodes each pixel's cluster and triangle, fetches the
 three vertices, and rebuilds the attributes from perspective-correct
@@ -276,13 +304,15 @@ reference's (100 % of pixels within 3 levels in the tests).
 ### Capacities and statistics
 
 The production path's lists have fixed capacities in `NphRendererDesc`:
-`max_visible_clusters` (524,288), `max_cull_batches` (131,072),
-`max_deferred` (262,144), `max_instance_updates` (16,384),
+`max_visible_clusters` (524,288), `max_cull_meshlets` (2^20, phase 0's
+meshlet work items), `max_deferred` (262,144: deferred instances, and
+phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
 (2^24, indirect path only). A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The frame statistics
-carry the GPU's counters (clusters and triangles drawn, instances and
-meshlets culled by each test), read back from the frame that completed
+carry the GPU's counters (clusters and triangles drawn, clusters drawn in
+software, instances and meshlets culled by each test), read back from the
+frame that completed
 `NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
 `instances` is the live count and `culled` the hidden instances plus
 blended ones outside the frustum; `draws` and `triangles` count only the
@@ -295,20 +325,21 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.15 ms |
-| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.27 ms |
-| grid, 512 × 512 | 102,400 | 13.4 ms | 0.006 ms | 3.0 ms | 1.51 ms |
-| field, 3840 × 2160 | 16,385 | 2.87 ms | 0.006 ms | 2.69 ms | 2.06 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.16 ms |
+| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.21 ms |
+| grid, 512 × 512 | 102,400 | 13.4 ms | 0.005 ms | 3.1 ms | 0.64 ms |
+| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.006 ms | 2.69 ms | 1.89 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
-53,257 clusters), and the passes take: clear 0.08 ms, culling with its
-argument passes 0.16 ms, raster 0.56 ms, the two pyramids 0.26 ms,
-resolve 0.88 ms, tonemap 0.12 ms. Against CLAUDE.md §10.4, the raster
-(0.65 ms budgeted) and the shading fit, but culling with the depth
-pyramid takes 0.42 ms against 0.25 ms: each pyramid reads the whole
-8-byte visibility buffer. ADR-0029 records the numbers and what comes
-next.
+53,257 clusters, and 55,701 of the 62,234 drawn went to the software
+raster), and the passes take: clear 0.08 ms, culling with its argument
+passes 0.10 ms, raster 0.50 ms (0.22 in hardware, 0.28 in software), the
+two pyramids 0.21 ms, resolve 0.87 ms, tonemap 0.12 ms. Against CLAUDE.md
+§10.4, the raster (0.65 ms budgeted) and the shading fit; culling with
+the depth pyramid takes 0.31 ms against 0.25 ms, most of it the first
+pyramid's read of the visibility buffer. ADR-0029 and ADR-0030 record the
+numbers and what comes next.
 
 ### Debug views
 
@@ -396,7 +427,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (65 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (68 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -415,10 +446,12 @@ synchronisation-validation gate:
 - **The production path** (`test_vis.c`): its images against the
   reference's (plain, with every alpha mode and side, and 10,000 km from
   the origin); culling switched off changes nothing; the frustum culls
-  what is off screen; mesh shaders and indirect draws give the same image;
-  instances move, hide, and go, and a whole population is replaced between
-  frames; the debug views; cooked and built meshlets draw the same; the
-  culling math against its C twins; and the depth pyramid read back.
+  what is off screen; mesh shaders and indirect draws give the same image,
+  and so do the software and hardware rasters, with no cracks between
+  their triangles; instances move, hide, and go, and a whole population is
+  replaced between frames; the debug views; cooked and built meshlets draw
+  the same; the culling math against its C twins; the depth pyramid read
+  back, and the one after phase 1 against a full rebuild.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -448,13 +481,12 @@ path and logs what the GPU culled.
 - No shadows: virtual shadow maps are §8.6 stage 6 (Phase 10).
 - No MSAA or TAA: TAA is stage 8 (Phase 10).
 - Every light is evaluated for every pixel: clustering is stage 5.
-- The production path rasterises everything in hardware: the software
-  rasteriser for micro-triangles is the rest of stage 4, and the resolve
-  is one shader for every material until stage 5 classifies tiles.
-- Meshlet culling gives each instance its own batches, so instances of
-  one or two meshlets leave most of a workgroup idle (0.9 ms for 102,400
-  one-meshlet cubes).
-- Each depth pyramid reads the whole visibility buffer (0.13 ms at 4K).
+- The resolve is one shader for every material until stage 5 classifies
+  tiles.
+- The first depth pyramid reads the whole visibility buffer (0.145 ms at
+  4K); the second rebuilds its coarser mips in full.
+- The software raster gives a cluster of a dozen triangles a whole
+  32-thread workgroup.
 - `KHR_texture_transform`, `TEXCOORD_1`, skinning, morph targets, and
   the PBR extension materials (clearcoat, transmission, ...) are not
   rendered (the cooker skips them, docs/cook.md).

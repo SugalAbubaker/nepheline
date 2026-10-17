@@ -247,8 +247,8 @@ u32 nph_engine_game_reloads(const NphEngine *engine);
 
 // Overrides the view (the editor's camera): from now on frames render
 // `view` instead of the world's active Camera. NULL returns to the world's.
-// The r.pipeline, r.occlusion, and r.cone_culling cvars replace the view's
-// `pipeline` and `vis_flags` either way.
+// The r.pipeline, r.occlusion, r.cone_culling, and r.sw_raster cvars
+// replace the view's `pipeline` and `vis_flags` either way.
 void nph_engine_set_view(NphEngine *engine, const NphRenderView *view);
 
 // The view the last frame rendered.

@@ -35,6 +35,7 @@ supersedes it and both link to each other.
 | [0027](0027-editable-meshes.md) | Editable meshes: a polygon source the cooker cooks, edited in place, reloaded where it is drawn | Accepted |
 | [0028](0028-gpu-runner-service.md) | The GPU runner as a standard runner service: no stored token, no elevated loop | Accepted |
 | [0029](0029-gpu-driven-visibility-buffer.md) | The production renderer: GPU-driven two-phase culling into a 64-bit visibility buffer | Accepted |
+| [0030](0030-hybrid-raster-and-meshlet-work-lists.md) | The hybrid raster: a compute rasteriser for small triangles, meshlet work lists, and a partial second pyramid | Accepted |
 
 ## Template
 

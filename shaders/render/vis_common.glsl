@@ -17,7 +17,6 @@ NPH_BUFFER_REF(VisTransformsRef) { NphVisTransform t[]; };
 NPH_BUFFER_REF(VisMeshesRef) { NphVisMesh m[]; };
 NPH_BUFFER_REF(VisCountersRef) { NphVisCounters c; };
 NPH_BUFFER_REF(VisArgsRef) { NphVisArgs a; };
-NPH_BUFFER_REF(VisBatchesRef) { NphVisBatch b[]; };
 NPH_BUFFER_REF(VisClustersRef) { NphVisCluster c[]; };
 NPH_BUFFER_REF(VisDrawsRef) { NphVisDraw d[]; };
 NPH_BUFFER_REF(VisUintRef) { uint v[]; };

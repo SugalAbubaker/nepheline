@@ -127,8 +127,12 @@ typedef struct NphRendererDesc {
     // The production path (zero picks the default in parentheses).
     b32 disable_production;   // never create it: no GPU memory or pipelines for it
     u32 max_visible_clusters; // meshlets that survive culling per frame (524288)
-    u32 max_cull_batches;     // batches of 64 meshlets per culling phase (131072)
-    u32 max_deferred;         // instances or meshlets deferred to the second phase (262144)
+    u32 max_cull_meshlets;    // meshlets of the instances phase 0 keeps, per frame (2^20)
+    u32 max_deferred;         // instances phase 0 defers, and phase 1's meshlets: those
+                              // phase 0 deferred plus those of deferred instances now
+                              // visible (262144)
+    f32 sw_raster_pixels;     // clusters whose triangles average at most this many pixels
+                              // across (and that fit in 64) rasterise in software (3)
     u32 max_instance_updates; // instance records sent to the GPU per frame (16384); the
                               // rest wait for the next frame
     u32 max_material_slots;   // material slots across all instances (4 * max_instances);
@@ -489,6 +493,7 @@ typedef enum NphRenderPipeline {
 typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_NO_OCCLUSION = 1U << 0U, // no hierarchical-depth tests
     NPH_RENDER_VIS_NO_CONE = 1U << 1U,      // no meshlet normal-cone tests
+    NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U, // every cluster through the hardware raster
 } NphRenderVisFlags;
 
 typedef struct NphRenderView {
@@ -532,8 +537,9 @@ typedef struct NphRenderFrameStats {
     // and `draws`, `blended`, and `triangles` count only the blended
     // surfaces the CPU draws itself; the GPU draws the rest.
     u64 vis_frame;
-    u32 vis_clusters;  // meshlets that survived culling
-    u32 vis_triangles; // in them
+    u32 vis_clusters;    // meshlets that survived culling
+    u32 vis_clusters_sw; // of those, rasterised in software
+    u32 vis_triangles;   // in them all
     u32 vis_instances_culled_frustum;
     u32 vis_instances_culled_occlusion;
     u32 vis_meshlets_culled_frustum;
@@ -545,7 +551,7 @@ typedef struct NphRenderFrameStats {
 // The production path's lists that can fill up (NphRenderFrameStats.
 // vis_overflow); each is a capacity in NphRendererDesc.
 typedef enum NphRenderVisOverflow {
-    NPH_RENDER_VIS_OVERFLOW_BATCHES = 1U << 0U,  // max_cull_batches
+    NPH_RENDER_VIS_OVERFLOW_MESHLETS = 1U << 0U, // max_cull_meshlets
     NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U, // max_visible_clusters
     NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U, // max_deferred
 } NphRenderVisOverflow;

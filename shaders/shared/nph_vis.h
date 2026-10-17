@@ -40,13 +40,24 @@
 #define NPH_VIS_TRIANGLE_MASK 127
 #define NPH_VIS_MAX_CLUSTERS  33554432 // 2^25
 
-// Meshlets per batch: the culling workgroup takes one batch.
-#define NPH_VIS_BATCH_SIZE 64
-
 // NphVisCounters.overflow bits: a list was full and items were dropped.
-#define NPH_VIS_OVERFLOW_BATCHES  1
+#define NPH_VIS_OVERFLOW_MESHLETS 1 // phase 0's meshlet candidates (max_cull_meshlets)
 #define NPH_VIS_OVERFLOW_CLUSTERS 2
 #define NPH_VIS_OVERFLOW_DEFERRED 4
+
+// Raster lists, per phase: how each visible cluster is rasterised.
+#define NPH_VIS_RASTER_OPAQUE   0 // hardware
+#define NPH_VIS_RASTER_MASKED   1 // hardware, alpha tested
+#define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
+#define NPH_VIS_RASTER_KINDS    3
+
+// The depth pyramid after phase 1 rebuilds only the tiles of this many
+// pixels square that phase 1 drew into (vis_hzb.comp mode 2).
+#define NPH_VIS_HZB_TILE 32
+
+// The widest cluster, in pixels, the software raster takes: it keeps every
+// triangle's box small enough for 32-bit edge functions (vis_sw_raster.comp).
+#define NPH_VIS_SW_MAX_PIXELS 64
 
 // NphVisViewData.flags.
 #define NPH_VIS_VIEW_OCCLUSION    1  // test against the hierarchical depth
@@ -54,13 +65,14 @@
 #define NPH_VIS_VIEW_MESH_SHADERS 4  // rasterise with mesh shaders (else indirect draws)
 #define NPH_VIS_VIEW_CONE_CULLING 8  // meshlet normal-cone backface culling
 #define NPH_VIS_VIEW_FREEZE       16 // keep last frame's culling camera (debugging)
+#define NPH_VIS_VIEW_SW_RASTER    32 // small clusters rasterise in software
 
 // vis_args.comp modes (NphVisPush.mode).
-#define NPH_VIS_ARGS_PHASE1      0 // after phase 1's instance cull: its meshlet cull
-#define NPH_VIS_ARGS_RASTER1     1 // after phase 1's meshlet cull: its raster
-#define NPH_VIS_ARGS_PHASE2      2 // before phase 2: instance cull of the deferred instances
-#define NPH_VIS_ARGS_PHASE2_MESH 3 // after phase 2's instance cull: its meshlet culls
-#define NPH_VIS_ARGS_RASTER2     4 // after phase 2's meshlet cull: its raster
+#define NPH_VIS_ARGS_PHASE1      0 // after phase 0's instance cull: its meshlet cull
+#define NPH_VIS_ARGS_RASTER1     1 // after phase 0's meshlet cull: its rasters
+#define NPH_VIS_ARGS_PHASE2      2 // before phase 1: instance cull of the deferred instances
+#define NPH_VIS_ARGS_PHASE2_MESH 3 // after phase 1's instance cull: its meshlet cull
+#define NPH_VIS_ARGS_RASTER2     4 // after phase 1's meshlet cull: its rasters
 
 // A transform: the linear part's rows in xyz, the translation's high
 // float in the rows' w, and its low float in `translation_low`.
@@ -113,15 +125,6 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u32 index_base; // the mesh's first corner in the meshlet index pool (indirect raster)
 };
 
-// A batch of up to NPH_VIS_BATCH_SIZE meshlets of one instance.
-NPH_SHARED_STRUCT(NphVisBatch)
-{
-    u32 instance;
-    u32 meshlet_offset;
-    u32 meshlet_count;
-    u32 pad0;
-};
-
 // A visible cluster: one meshlet of one instance that survived culling.
 NPH_SHARED_STRUCT(NphVisCluster)
 {
@@ -146,21 +149,23 @@ NPH_SHARED_STRUCT(NphVisDraw)
 // written).
 NPH_SHARED_STRUCT(NphVisArgs)
 {
-    u32 cull_args[2][4];      // meshlet-batch cull per phase: x, y, z, unused
-    u32 deferred_args[4];     // phase 1's cull of the meshlets phase 0 deferred
+    u32 cull_args[2][4];      // meshlet cull per phase: x, y, z, unused
     u32 instance2_args[4];    // phase 1's cull of the instances phase 0 deferred
-    u32 raster_args[2][2][4]; // [phase][opaque, masked]: mesh-task groups x, y, z, unused
+    u32 raster_args[2][3][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
 };
 
 // The frame's counters (cleared at the start of every frame).
 NPH_SHARED_STRUCT(NphVisCounters)
 {
-    u32 batches[2];         // meshlet batches per phase
-    u32 deferred_instances; // instances phase 1 found occluded
-    u32 deferred_meshlets;  // meshlets phase 1 found occluded
-    u32 clusters;           // visible clusters, phase 1's first
-    u32 raster_count[2][2]; // [phase][opaque, masked]: clusters to rasterise
+    u32 cull_meshlets;      // phase 0's meshlet candidates
+    u32 deferred_instances; // instances phase 0 found occluded
+    u32 deferred_meshlets;  // phase 1's meshlet candidates: those phase 0 deferred, then the
+                            // meshlets of deferred instances phase 1 found visible
+    u32 clusters;           // visible clusters, phase 0's first
+    u32 raster_count[2][3]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
     u32 overflow;           // NPH_VIS_OVERFLOW_*
+    u32 hzb_full;           // nonzero: phase 1 drew something no tile list bounds, so the
+                            // pyramid after it rebuilds every tile
     // Statistics, read back two frames later.
     u32 instances_culled_frustum;
     u32 instances_culled_occlusion; // after phase 2
@@ -168,7 +173,6 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 meshlets_culled_cone;
     u32 meshlets_culled_occlusion; // after phase 2
     u32 triangles;                 // in the visible clusters
-    u32 pad0;
 };
 
 // The production path's view of a frame.
@@ -196,14 +200,15 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 materials;          // NphRenderMaterialData[]
     u64 counters;           // NphVisCounters
     u64 args;               // NphVisArgs
-    u64 batches[2];         // NphVisBatch[] per phase
+    u64 cull_meshlets;      // uvec2[] (instance, meshlet): phase 0's meshlet candidates
     u64 deferred_instances; // u32[]
-    u64 deferred_meshlets;  // uvec2[] (instance, meshlet)
+    u64 deferred_meshlets;  // uvec2[] (instance, meshlet): phase 1's meshlet candidates
     u64 clusters;           // NphVisCluster[]
-    u64 raster_lists[2][2]; // u32[] of cluster indices: [phase][opaque, masked]
-    u64 draws[2][2];        // NphVisDraw[]: the same, for the indirect raster
+    u64 raster_lists[2][3]; // u32[] of cluster indices: [phase][NPH_VIS_RASTER_*]
+    u64 draws[2][2];        // NphVisDraw[]: the hardware kinds, for the indirect raster
+    u64 hzb_dirty;          // u32[]: a bit per NPH_VIS_HZB_TILE tile phase 1 drew into
     u32 instance_count;     // slots the instance cull walks
-    u32 max_batches;
+    u32 max_cull_meshlets;
     u32 max_deferred;
     u32 max_clusters;
     u32 hzb_index;           // bindless sampled image: the HZB
@@ -211,9 +216,10 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 default_material;    // the table index of the default material
     u32 flags;               // NPH_VIS_VIEW_*
     u32 max_mesh_groups_x;   // the device's mesh-task workgroup count limit in x
+    f32 sw_raster_pixels;    // clusters whose triangles average at most this many pixels
+                             // across rasterise in software (NPH_VIS_VIEW_SW_RASTER)
+    u32 hzb_tiles_x;         // tiles per row of hzb_dirty
     u32 pad0;
-    u32 pad1;
-    u32 pad2;
 };
 
 // Push constants of every production-path shader. The visibility buffer

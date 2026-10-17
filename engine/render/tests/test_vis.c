@@ -556,6 +556,97 @@ NTEST_F(Vis, the_depth_pyramid_is_the_minimum_of_what_it_covers)
     nph_gpu_image_destroy(f->dev, target);
 }
 
+// A wall in front of spheres, then moved aside: phase 0 defers the spheres
+// (last frame's pyramid has them behind the wall) and phase 1 draws them.
+// Returns the pyramid that frame leaves, every mip back to back, and the
+// lit pixels of the image.
+typedef struct Pyramid {
+    f32 *texels;
+    u64 count;
+    u32 lit;
+} Pyramid;
+
+static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
+{
+    f->renderer->vis.hzb_full_rebuild = full_rebuild;
+    NphRenderEnvironmentDesc env;
+    memset(&env, 0, sizeof env);
+    env.source = NPH_RENDER_ENV_SKY;
+    nph_render_sky_desc_default(&env.sky);
+    NTEST_ASSERT_EQ_INT(nph_render_set_environment(f->renderer, &env), NPH_RESULT_OK);
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 img[PIXELS];
+    static u8 sky[PIXELS];
+    render_into(f, &v, 1U, sky);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    const NphRenderMaterial m = material(f, nph_vec4(0.7F, 0.7F, 0.7F, 1.0F), 0.0F, 0.6F);
+    NphRenderTransform wall = at(0.0, 0.0, 1.0, 1.0F);
+    wall.linear = nph_mat3_from_scale(nph_vec3(4.0F, 4.0F, 0.2F));
+    const NphRenderInstance w = instance(f, cube, m, wall);
+    for (u32 i = 0; i < 16U; ++i) {
+        (void)instance(f, sphere, m,
+                       at(-1.2 + 0.8 * (f64)(i % 4U), -1.2 + 0.8 * (f64)(i >> 2U), -1.0, 0.6F));
+    }
+    render_into(f, &v, 3U, img);
+    const NphRenderTransform aside = at(60.0, 0.0, 1.0, 1.0F);
+    NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(f->renderer, w, &aside), NPH_RESULT_OK);
+    render_into(f, &v, 1U, img);
+    Pyramid out;
+    memset(&out, 0, sizeof out);
+    out.lit = lit_pixels(img, sky);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    const RenderVis *vis = &f->renderer->vis;
+    for (u32 mip = 0; mip < vis->hzb_mips; ++mip) {
+        out.count +=
+            (u64)nph_max_u32(vis->hzb_width >> mip, 1U) * nph_max_u32(vis->hzb_height >> mip, 1U);
+    }
+    out.texels = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, out.count);
+    NTEST_ASSERT_NOT_NULL(out.texels);
+    u64 at_texel = 0U;
+    for (u32 mip = 0; mip < vis->hzb_mips; ++mip) {
+        const u64 n =
+            (u64)nph_max_u32(vis->hzb_width >> mip, 1U) * nph_max_u32(vis->hzb_height >> mip, 1U);
+        test_read_image(f->dev, vis->hzb, mip, out.texels + at_texel, n * sizeof(f32));
+        at_texel += n;
+    }
+    return out;
+}
+
+// The pyramid after phase 1 rebuilds only the tiles phase 1 drew into; it
+// must be the pyramid a full rebuild gives, texel for texel.
+NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
+{
+    RenderFixture tiled;
+    RenderFixture full;
+    test_render_setup(&tiled, NULL);
+    if (tiled.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(tiled.renderer)) {
+        test_render_teardown(&tiled);
+        NTEST_SKIP("no production path on this device");
+    }
+    const Pyramid a = pyramid_after_a_reveal(&tiled, false);
+    test_render_teardown(&tiled);
+    test_render_setup(&full, NULL);
+    const Pyramid b = pyramid_after_a_reveal(&full, true);
+    test_render_teardown(&full);
+    // Phase 1 drew the spheres: the image is not the bare sky.
+    NTEST_EXPECT_GT_UINT(a.lit, 100U);
+    NTEST_EXPECT_EQ_UINT(a.lit, b.lit);
+    NTEST_ASSERT_EQ_UINT(a.count, b.count);
+    u64 wrong = 0U;
+    for (u64 i = 0; i < a.count; ++i) {
+        wrong += a.texels[i] != b.texels[i] ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, a.texels, a.count);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, b.texels, b.count);
+}
+
 NTEST_F(Vis, production_matches_the_reference)
 {
     REQUIRE_PRODUCTION(f);
@@ -853,6 +944,120 @@ NTEST_F(Vis, a_whole_population_is_replaced_between_frames)
             nph_render_instance_destroy(f->renderer, insts[i]);
         }
     }
+}
+
+// A field of small spheres and pillars far enough away that most clusters'
+// triangles are a pixel or two across: the software raster draws those and
+// the hardware raster the rest, and the image is the one the hardware
+// raster alone draws.
+NTEST_F(Vis, the_software_raster_draws_what_the_hardware_raster_draws)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMaterial gold = material(f, nph_vec4(1.0F, 0.78F, 0.34F, 1.0F), 1.0F, 0.3F);
+    const NphRenderMaterial red = material(f, nph_vec4(0.8F, 0.1F, 0.1F, 1.0F), 0.0F, 0.6F);
+    NphRenderEnvironmentDesc env;
+    memset(&env, 0, sizeof env);
+    env.source = NPH_RENDER_ENV_SKY;
+    nph_render_sky_desc_default(&env.sky);
+    NTEST_ASSERT_EQ_INT(nph_render_set_environment(f->renderer, &env), NPH_RESULT_OK);
+    for (u32 i = 0; i < 48U; ++i) {
+        const f64 x = -3.5 + (f64)(i % 8U);
+        const f64 z = -6.0 - 1.5 * (f64)(i >> 3U);
+        if (i % 5U == 0U) {
+            NphRenderTransform t = at(x, 0.0, z, 0.5F);
+            t.linear = nph_mat3_mul(
+                nph_mat3_from_quat(nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.3F * (f32)i)),
+                t.linear);
+            (void)instance(f, cube, red, t);
+        } else {
+            (void)instance(f, sphere, gold, at(x, 0.0, z, 0.7F));
+        }
+    }
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 1.5, 2.0),
+                                                          nph_dvec3(0.0, 0.0, -8.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.05F));
+    v.ev100 = 13.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 hardware[PIXELS];
+    static u8 hybrid[PIXELS];
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    const NphRenderFrameStats hw = render_into(f, &v, 4U, hardware);
+    v.vis_flags = 0U;
+    const NphRenderFrameStats sw = render_into(f, &v, 4U, hybrid);
+    NTEST_EXPECT_EQ_UINT(hw.vis_clusters_sw, 0U);
+    NTEST_EXPECT_GT_UINT(sw.vis_clusters_sw, sw.vis_clusters / 2U);
+    NTEST_EXPECT_EQ_UINT(sw.vis_clusters, hw.vis_clusters);
+    const ImageDiff d = image_diff(hardware, hybrid, 2U);
+    NTEST_LOG("%u of %u clusters in software; hardware vs hybrid: %.2f %% within 2 levels, "
+              "mean %.3f, max %u",
+              sw.vis_clusters_sw, sw.vis_clusters, (f64)d.within * 100.0, (f64)d.mean, d.max);
+    NTEST_EXPECT_TRUE(d.within >= 0.995F);
+}
+
+// A finely divided plane filling the view, seen from above at a slant, its
+// clusters small enough that nearly all go to the software raster (the
+// renderer here takes any cluster that fits in 64 pixels; a few reach past
+// the screen's edge and stay in hardware): no pixel shows the background
+// through it, between software triangles or where software meets hardware,
+// and the image is the hardware raster's. Neighbouring triangles share edges, and
+// the top-left rule must give each pixel centre to one of them; a raster
+// that gave an edge's centres to neither would leave a crack.
+NTEST(vis, the_software_raster_leaves_no_cracks)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.sw_raster_pixels = 64.0F;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 128U, 1.0F, &data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh plane = test_upload_mesh(fx.renderer, &data);
+    nph_render_mesh_data_free(&data);
+    const NphRenderMaterial grey = material(&fx, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F), 0.0F, 0.8F);
+    NphRenderTransform t = at(0.0, 0.0, 0.0, 40.0F);
+    t.linear = nph_mat3_mul(nph_mat3_from_quat(nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.37F)),
+                            t.linear);
+    (void)instance(&fx, plane, grey, t);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.3, 12.0, 6.0),
+                                                          nph_dvec3(-0.4, 0.0, -2.0),
+                                                          nph_vec3_unit_y(), 0.5F, 0.05F));
+    v.ev100 = 13.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    // Magenta bright enough to survive the exposure: what a crack shows.
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3(20000.0F, 0.0F, 20000.0F);
+    static u8 hybrid[PIXELS];
+    static u8 hardware[PIXELS];
+    // Four frames: the GPU's counters arrive two frames late.
+    const NphRenderFrameStats sw = render_into(&fx, &v, 4U, hybrid);
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    (void)render_into(&fx, &v, 4U, hardware);
+    NTEST_EXPECT_GE_UINT(sw.vis_clusters_sw * 10U, sw.vis_clusters * 9U);
+    NTEST_EXPECT_GT_UINT(sw.vis_clusters, 8U);
+    u32 holes = 0U;
+    for (u32 i = 0; i < TEST_TARGET_SIZE * TEST_TARGET_SIZE; ++i) {
+        const u8 *px = &hybrid[(u64)i * 4U];
+        holes += px[0] > 150U && px[1] < 40U && px[2] > 150U ? 1U : 0U;
+    }
+    const ImageDiff d = image_diff(hardware, hybrid, 2U);
+    NTEST_LOG("%u of %u clusters in software: %u background pixels; hardware vs software: "
+              "%.2f %% within 2 levels, max %u",
+              sw.vis_clusters_sw, sw.vis_clusters, holes, (f64)d.within * 100.0, d.max);
+    NTEST_EXPECT_EQ_UINT(holes, 0U);
+    NTEST_EXPECT_TRUE(d.within >= 0.995F);
+    test_render_teardown(&fx);
 }
 
 NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)

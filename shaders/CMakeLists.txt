@@ -65,6 +65,7 @@ nph_add_shaders(nph_shaders_render
         render/vis_raster_vert_masked.frag
         render/vis_hzb.comp
         render/vis_resolve.comp
+        render/vis_sw_raster.comp
         render/vis_depth.frag
         render/vis_debug_line.frag
         # The culling math for the render tests (render/reference.h twins).

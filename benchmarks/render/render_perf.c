@@ -19,7 +19,11 @@
 //                       DRAM traffic (render_graph.h NphGpuRgPassTiming).
 //
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
-//                 [--list] [--validation]
+//                 [--list] [--validation] [--sw-pixels=N]
+//
+// --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
+// size the software raster takes (0: every cluster in hardware), for tuning
+// the hybrid raster's split.
 //
 // The scenes are synthetic until Phase 10's reference scenes arrive:
 //
@@ -110,6 +114,7 @@ typedef struct Ctx {
     u32 instance_count;
     Result results[MAX_RESULTS];
     u32 result_count;
+    bool no_sw_raster; // --sw-pixels=0
 } Ctx;
 
 static int compare_f64(const void *a, const void *b)
@@ -363,6 +368,9 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                                                       nph_vec3_unit_y(), 0.9F, 0.1F));
     view.pipeline = s->pipeline;
     view.ev100 = 13.0F;
+    if (ctx->no_sw_raster) {
+        view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    }
     NphResult r = build_scene(ctx, s, &view);
     static FrameRun run;
     if (r == NPH_RESULT_OK) {
@@ -430,11 +438,12 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     }
     const NphRenderFrameStats *st = &run.stats;
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
-        printf("    clusters %u, triangles %u; culled instances %u frustum + %u occlusion, "
-               "clusters %u frustum + %u cone + %u occlusion%s\n",
-               st->vis_clusters, st->vis_triangles, st->vis_instances_culled_frustum,
-               st->vis_instances_culled_occlusion, st->vis_meshlets_culled_frustum,
-               st->vis_meshlets_culled_cone, st->vis_meshlets_culled_occlusion,
+        printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
+               "%u occlusion, clusters %u frustum + %u cone + %u occlusion%s\n",
+               st->vis_clusters, st->vis_clusters_sw, st->vis_triangles,
+               st->vis_instances_culled_frustum, st->vis_instances_culled_occlusion,
+               st->vis_meshlets_culled_frustum, st->vis_meshlets_culled_cone,
+               st->vis_meshlets_culled_occlusion,
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
     } else {
         printf("    draws %u, triangles %u, culled %u\n", st->draws, st->triangles, st->culled);
@@ -538,7 +547,7 @@ static int check_budgets(const char *path, const Ctx *ctx)
 // Setup
 // ---------------------------------------------------------------------------
 
-static NphResult setup(Ctx *ctx, bool validation)
+static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
 {
     NphGpuDeviceDesc dd;
     memset(&dd, 0, sizeof dd);
@@ -565,6 +574,11 @@ static NphResult setup(Ctx *ctx, bool validation)
     rd.shader_dir = NPH_SHADER_DIR;
     rd.max_instances = MAX_INSTANCES;
     rd.max_draws = MAX_INSTANCES; // the reference path draws every grid cube
+    if (sw_pixels >= 0.0) {
+        // Zero would pick the default: none goes through the view's flag.
+        rd.sw_raster_pixels = (f32)sw_pixels;
+        ctx->no_sw_raster = sw_pixels == 0.0;
+    }
     rd.name = "render_perf";
     NPH_TRY(nph_renderer_create(&rd, &ctx->renderer));
     ctx->instances = NPH_ALLOC_ARRAY(nph_allocator_system(), NphRenderInstance, MAX_INSTANCES);
@@ -598,7 +612,7 @@ static void teardown(Ctx *ctx)
 static int usage(void)
 {
     fprintf(stderr, "usage: render_perf [--filter=GLOB] [--frames=N] [--json=FILE] "
-                    "[--budgets=FILE] [--list] [--validation]\n");
+                    "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n");
     return 2;
 }
 
@@ -610,6 +624,7 @@ int main(int argc, char **argv)
     u32 frames = 120U;
     bool list = false;
     bool validation = false;
+    f64 sw_pixels = -1.0;
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--filter=", 9U) == 0) {
             filter = argv[i] + 9;
@@ -621,6 +636,8 @@ int main(int argc, char **argv)
             budgets = argv[i] + 10;
         } else if (strcmp(argv[i], "--list") == 0) {
             list = true;
+        } else if (strncmp(argv[i], "--sw-pixels=", 12U) == 0) {
+            sw_pixels = strtod(argv[i] + 12, NULL);
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else {
@@ -646,7 +663,7 @@ int main(int argc, char **argv)
     }
 
     static Ctx ctx;
-    const NphResult sr = setup(&ctx, validation);
+    const NphResult sr = setup(&ctx, validation, sw_pixels);
     if (sr == NPH_RESULT_UNSUPPORTED && ctx.dev == NULL) {
         fprintf(stderr, "render_perf: no Vulkan device; skipping\n");
         return EXIT_SKIPPED;

@@ -270,8 +270,10 @@ static NphResult apply_defaults(NphRendererDesc *d)
     // 16-byte aligned for the shaders' buffer references.
     d->max_visible_clusters =
         round_up_64(d->max_visible_clusters != 0U ? d->max_visible_clusters : 524288U);
-    d->max_cull_batches = round_up_64(d->max_cull_batches != 0U ? d->max_cull_batches : 131072U);
+    d->max_cull_meshlets =
+        round_up_64(d->max_cull_meshlets != 0U ? d->max_cull_meshlets : 1U << 20U);
     d->max_deferred = round_up_64(d->max_deferred != 0U ? d->max_deferred : 262144U);
+    d->sw_raster_pixels = d->sw_raster_pixels > 0.0F ? d->sw_raster_pixels : 3.0F;
     d->max_instance_updates = d->max_instance_updates != 0U ? d->max_instance_updates : 16384U;
     d->max_material_slots =
         d->max_material_slots != 0U ? d->max_material_slots : 4U * d->max_instances;
