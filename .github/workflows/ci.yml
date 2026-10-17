@@ -167,6 +167,13 @@ jobs:
       # Linux tests run under a virtual X server so the window tests, the
       # swapchain tests, and the GPU samples can open a window (CLAUDE.md
       # §12 Phase 3, Phase 5).
+      # Which optional features lavapipe offers decides which renderer
+      # paths CI exercises (docs/render.md); ctest hides a passing test's
+      # log, so print the device's here.
+      - name: GPU features (lavapipe)
+        if: runner.os == 'Linux'
+        run: ./build/${{ matrix.preset }}/bin/${{ matrix.config }}/gpu_tests --filter=gpu_device.optional_features_can_be_disabled
+
       - name: Test (Linux, under Xvfb, on lavapipe)
         if: runner.os == 'Linux'
         run: >
