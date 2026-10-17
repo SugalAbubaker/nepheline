@@ -21,6 +21,7 @@ add_library(nph_editor_core STATIC
     src/history.c
     src/history.h
     src/imgui_c.h
+    src/mesh_edit.c
     src/panel_assets.c
     src/panel_console.c
     src/panel_inspector.c

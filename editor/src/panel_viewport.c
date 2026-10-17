@@ -94,6 +94,10 @@ static void toolbar(Editor *ed)
     igEndDisabled();
     igEndDisabled();
     if (!playing) {
+        if (editor_mesh_editing(ed)) {
+            editor_mesh_edit_toolbar(ed);
+            igSameLine(0.0F, 16.0F);
+        }
         static const char *const modes[3] = {"Move", "Rotate", "Scale"};
         igSameLine(0.0F, 16.0F);
         for (u32 i = 0; i < 3U; ++i) {
@@ -113,8 +117,11 @@ static void toolbar(Editor *ed)
         if (igButton(ed->gizmo_local ? "Local" : "World", ui_vec2(0.0F, 0.0F))) {
             ed->gizmo_local = !ed->gizmo_local;
         }
-        igSameLine(0.0F, 16.0F);
-        igTextDisabled("click: select  W E R: gizmo  X: axes  F: frame  right drag: look");
+        if (!editor_mesh_editing(ed)) {
+            igSameLine(0.0F, 16.0F);
+            igTextDisabled(
+                "click: select  W E R: gizmo  X: axes  Tab: edit mesh  right drag: look");
+        }
     } else if (ed->viewport.game_input) {
         igTextDisabled("the game has the input: Escape to take it back");
     } else {
@@ -211,7 +218,10 @@ static void overlays(Editor *ed)
         if (t == NULL) {
             continue;
         }
-        const bool selected = editor_selection_contains(&ed->selection, e);
+        // The mesh being edited draws its own edges instead of a box.
+        const bool selected =
+            editor_selection_contains(&ed->selection, e) &&
+            !(editor_mesh_editing(ed) && nph_entity_equals(e, ed->mesh_edit.entity));
         const bool marker = nph_world_has(w, e, rc->light) || nph_world_has(w, e, rc->camera);
         if (!selected && !marker) {
             continue;
@@ -357,14 +367,25 @@ void editor_panel_viewport(Editor *ed)
         const NphRenderCamera cam = editor_camera_render(&ed->camera);
         editor_view_init(&view, &cam, ed->viewport.rect[0], ed->viewport.rect[1],
                          ed->viewport.rect[2], ed->viewport.rect[3]);
-        const bool gizmo = editor_gizmo_update(ed, &view, hovered, igGetWindowDrawList());
-        if (hovered && !gizmo && !io->KeyAlt &&
-            igIsMouseClicked_Bool(ImGuiMouseButton_Left, false)) {
-            pick(ed, &view, io->MousePos.x, io->MousePos.y);
+        if (editor_mesh_editing(ed)) {
+            (void)editor_mesh_edit_viewport(ed, &view, hovered, igGetWindowDrawList());
+        } else {
+            const bool gizmo = editor_gizmo_update(ed, &view, hovered, igGetWindowDrawList());
+            if (hovered && !gizmo && !io->KeyAlt &&
+                igIsMouseClicked_Bool(ImGuiMouseButton_Left, false)) {
+                pick(ed, &view, io->MousePos.x, io->MousePos.y);
+            }
         }
     }
     camera_input(ed, hovered && !ed->gizmo_dragging);
     overlays(ed);
+    if (editor_mesh_editing(ed) && ed->viewport.shown) {
+        EditorView view;
+        const NphRenderCamera cam = editor_camera_render(&ed->camera);
+        editor_view_init(&view, &cam, ed->viewport.rect[0], ed->viewport.rect[1],
+                         ed->viewport.rect[2], ed->viewport.rect[3]);
+        editor_mesh_edit_overlays(ed, &view);
+    }
     igEnd();
 }
 

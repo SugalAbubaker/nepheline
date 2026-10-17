@@ -229,16 +229,42 @@ static void end_drag(Editor *ed)
 {
     if (ed->gizmo_dragging) {
         ed->gizmo_dragging = false;
-        editor_history_end_merge(ed->history);
+        if (ed->gizmo_target.end != NULL) {
+            ed->gizmo_target.end(ed, ed->gizmo_target.user);
+        }
     }
 }
 
-static void apply_drag(Editor *ed, NphWorld *w, NphEntity e, const EditorView *v, f32 mx, f32 my)
+// ---------------------------------------------------------------------------
+// The selected entity as a target: a drag is one merged step of its
+// LocalTransform.
+// ---------------------------------------------------------------------------
+
+static bool entity_begin(Editor *ed, void *user)
 {
-    const ImGuiIO *io = igGetIO_Nil();
-    const NphVec3 dir = editor_view_ray(v, mx, my);
-    const NphVec3 o = nph_dvec3_relative(v->eye, ed->gizmo_drag.start.translation);
-    const NphWorldTransform moved = editor_gizmo_drag(&ed->gizmo_drag, o, dir, mx, io->KeyCtrl);
+    NPH_UNUSED(user);
+    const NphWorld *w = nph_engine_edit_world(ed->engine);
+    ed->gizmo_entity = ed->selection.primary;
+    ed->gizmo_start_local =
+        *NPH_WORLD_GET(w, ed->gizmo_entity, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    ++ed->gizmo_drag_id;
+    return true;
+}
+
+static void entity_end(Editor *ed, void *user)
+{
+    NPH_UNUSED(user);
+    editor_history_end_merge(ed->history);
+}
+
+static void entity_apply(Editor *ed, const NphWorldTransform *start,
+                         const NphWorldTransform *moved_ptr, void *user)
+{
+    NPH_UNUSED(start);
+    NPH_UNUSED(user);
+    NphWorld *w = nph_engine_edit_world(ed->engine);
+    const NphEntity e = ed->gizmo_entity;
+    const NphWorldTransform moved = *moved_ptr;
     const NphEntity parent = nph_world_parent(w, e);
     NphWorldTransform parent_world = nph_world_transform_identity();
     if (!nph_entity_is_null(parent)) {
@@ -270,11 +296,27 @@ bool editor_gizmo_update(Editor *ed, const EditorView *v, bool image_hovered, Im
     const NphEntity e = ed->selection.primary;
     if (nph_engine_is_playing(engine) || !nph_world_is_alive(w, e) ||
         !nph_world_has(w, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM)) {
+        return editor_gizmo_drive(ed, v, image_hovered, dl, NULL);
+    }
+    EditorGizmoTarget target;
+    memset(&target, 0, sizeof target);
+    target.transform = editor_world_transform_of(w, e);
+    target.id = e.value;
+    target.begin = entity_begin;
+    target.apply = entity_apply;
+    target.end = entity_end;
+    return editor_gizmo_drive(ed, v, image_hovered, dl, &target);
+}
+
+bool editor_gizmo_drive(Editor *ed, const EditorView *v, bool image_hovered, ImDrawList *dl,
+                        const EditorGizmoTarget *target)
+{
+    if (target == NULL) {
         end_drag(ed);
         ed->gizmo_hover = EDITOR_GIZMO_NONE;
         return false;
     }
-    const NphWorldTransform t = editor_world_transform_of(w, e);
+    const NphWorldTransform t = target->transform;
     const f32 depth = editor_view_depth(v, t.translation);
     if (depth <= ed->camera.znear) {
         end_drag(ed);
@@ -303,20 +345,22 @@ bool editor_gizmo_update(Editor *ed, const EditorView *v, bool image_hovered, Im
             const NphVec3 dir = editor_view_ray(v, mx, my);
             const NphVec3 o = nph_dvec3_relative(v->eye, t.translation);
             if (editor_gizmo_begin(&ed->gizmo_drag, ed->gizmo_mode, ed->gizmo_hover, &t,
-                                   ed->gizmo_local, o, dir, mx)) {
+                                   ed->gizmo_local, o, dir, mx) &&
+                (target->begin == NULL || target->begin(ed, target->user))) {
                 ed->gizmo_dragging = true;
-                ed->gizmo_entity = e;
-                ed->gizmo_start_local =
-                    *NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
-                ++ed->gizmo_drag_id;
+                ed->gizmo_target = *target;
             }
         }
     }
     if (ed->gizmo_dragging) {
-        if (!igIsMouseDown_Nil(ImGuiMouseButton_Left) || !nph_entity_equals(e, ed->gizmo_entity)) {
+        if (!igIsMouseDown_Nil(ImGuiMouseButton_Left) || target->id != ed->gizmo_target.id) {
             end_drag(ed);
         } else {
-            apply_drag(ed, w, e, v, mx, my);
+            const NphVec3 dir = editor_view_ray(v, mx, my);
+            const NphVec3 o = nph_dvec3_relative(v->eye, ed->gizmo_drag.start.translation);
+            const NphWorldTransform moved =
+                editor_gizmo_drag(&ed->gizmo_drag, o, dir, mx, io->KeyCtrl);
+            ed->gizmo_target.apply(ed, &ed->gizmo_drag.start, &moved, ed->gizmo_target.user);
         }
     }
     ImDrawList_PushClipRect(dl, ui_vec2(v->x, v->y), ui_vec2(v->x + v->w, v->y + v->h), true);

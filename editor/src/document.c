@@ -37,6 +37,7 @@ NphResult editor_new_scene(Editor *ed)
     if (nph_engine_is_playing(ed->engine)) {
         return NPH_RESULT_INVALID_STATE;
     }
+    editor_mesh_edit_end(ed); // saved before the world is replaced
     forget_document(ed);
     NPH_TRY(nph_engine_clear_scene(ed->engine));
     ed->doc_path[0] = '\0';
@@ -90,6 +91,7 @@ NphResult editor_open_scene(Editor *ed, const char *path)
                       error[0] != '\0' ? ": " : "", error);
         return r;
     }
+    editor_mesh_edit_end(ed); // saved before the world is replaced
     forget_document(ed);
     NPH_TRY(nph_engine_clear_scene(ed->engine));
     NPH_TRY(nph_engine_load_scene(ed->engine, path));

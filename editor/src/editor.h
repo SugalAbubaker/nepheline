@@ -43,6 +43,8 @@
 #include "editor_log.h"
 #include "project.h"
 
+#include <cook/polymesh.h>
+
 typedef struct Editor Editor;
 
 typedef struct EditorDesc {
@@ -161,3 +163,49 @@ typedef enum EditorPrimitive {
 // NPH_RESULT_INVALID_STATE when not attached or while playing; FULL with too
 // many requests outstanding; the file system's and the project's errors.
 NPH_MUST_USE NphResult editor_create_primitive(Editor *ed, EditorPrimitive kind);
+
+// ---------------------------------------------------------------------------
+// Mesh editing (docs/editor.md "Mesh editing")
+// ---------------------------------------------------------------------------
+
+typedef enum EditorMeshSelect {
+    EDITOR_MESH_VERTICES = 0,
+    EDITOR_MESH_FACES,
+} EditorMeshSelect;
+
+// Edits the mesh the primary selection draws, when it is cooked from an
+// editable mesh (.nmesh) of the project: the source is read and drawn, as
+// it changes, in place of the cooked mesh. NPH_RESULT_INVALID_STATE while
+// playing or when not attached; NPH_RESULT_NOT_FOUND when nothing is
+// selected or the entity draws no such mesh; the reader's errors.
+NPH_MUST_USE NphResult editor_mesh_edit_begin(Editor *ed);
+
+// Ends editing. A changed mesh is saved to its source and cooked again,
+// and the edited version stays drawn until the scene renderer draws the
+// cooked one again. Safe when not editing.
+void editor_mesh_edit_end(Editor *ed);
+
+bool editor_mesh_editing(const Editor *ed);
+
+// The mesh being edited, or NULL.
+const CookPolyMesh *editor_mesh_edit_mesh(const Editor *ed);
+
+// Selects vertices or faces, switching to that kind of element (which
+// clears the selection), adding to it with `add`.
+// NPH_RESULT_INVALID_STATE when not editing; NPH_RESULT_INVALID_ARGUMENT
+// for an index out of range (nothing changes).
+NPH_MUST_USE NphResult editor_mesh_edit_select(Editor *ed, EditorMeshSelect mode, const u32 *items,
+                                               u32 count, bool add);
+
+// Moves the selected vertices (a selected face moves its corners) by
+// `offset`, in the entity's space: one change.
+NPH_MUST_USE NphResult editor_mesh_edit_move(Editor *ed, NphVec3 offset);
+
+// Extrudes the selected faces as one region, `distance` along their
+// normals (cook/polymesh.h): one change. The extruded faces stay selected.
+// NPH_RESULT_INVALID_STATE without faces selected.
+NPH_MUST_USE NphResult editor_mesh_edit_extrude(Editor *ed, f32 distance);
+
+// Undoes or redoes the last change while editing; false when there is none.
+bool editor_mesh_edit_undo(Editor *ed);
+bool editor_mesh_edit_redo(Editor *ed);

@@ -128,6 +128,12 @@ bool editor_project_scene_of(EditorProject *p, const char *key, NphGuid *out);
 // The mesh asset cooked from the editable mesh `key`; false when it has none.
 bool editor_project_mesh_of(EditorProject *p, const char *key, NphGuid *out);
 
+// The source key (into `out`, `cap` bytes) and sub-asset name of the asset
+// with `guid`; false when the database does not know it, or the key does
+// not fit.
+bool editor_project_source_of(EditorProject *p, NphGuid guid, char *out, u64 cap, char *out_sub,
+                              u64 sub_cap);
+
 // Whether the source `key` has cooked assets.
 bool editor_project_is_cooked(EditorProject *p, const char *key);
 

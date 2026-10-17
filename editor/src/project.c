@@ -733,6 +733,22 @@ bool editor_project_mesh_of(EditorProject *p, const char *key, NphGuid *out)
     return find_asset(p, key, NPH_STR("mesh"), out);
 }
 
+bool editor_project_source_of(EditorProject *p, NphGuid guid, char *out, u64 cap, char *out_sub,
+                              u64 sub_cap)
+{
+    NPH_ASSERT(p != NULL && out != NULL && cap != 0U && out_sub != NULL && sub_cap != 0U);
+    nph_mutex_lock(&p->lock);
+    const CookDbEntry *e = p->snapshot != NULL ? cook_db_find_guid(&p->snapshot->db, guid) : NULL;
+    bool found = false;
+    if (e != NULL) {
+        const int n = snprintf(out, (size_t)cap, "%s", e->source);
+        const int m = snprintf(out_sub, (size_t)sub_cap, "%s", e->sub);
+        found = n >= 0 && (u64)n < cap && m >= 0 && (u64)m < sub_cap;
+    }
+    nph_mutex_unlock(&p->lock);
+    return found;
+}
+
 bool editor_project_is_cooked(EditorProject *p, const char *key)
 {
     NPH_ASSERT(p != NULL && key != NULL);
