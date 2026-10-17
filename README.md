@@ -25,8 +25,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 5 | GPU/RHI: Vulkan 1.3 device, bindless resources, frames and timelines, uploads, swapchain, SPIR-V reflection, pipelines with a persisted cache and hot reload, render graph with aliasing and async compute, GPU microbenchmarks and budgets on the reference RTX 3060 Ti | **done** |
 | 6 | Assets v1: the `.nph` container, LZ codec, pack archives, VFS, loader and typed views; the cooker (glTF import, mesh pipeline with MikkTSpace tangents and meshlets, our BC4/BC5/BC6H/BC7 encoders, incremental database, packs); fuzzing of every parser in every build | **done** |
 | 7 | Renderer v1: forward PBR reference renderer (GGX, energy compensation, punctual lights in physical units), GPU-computed image-based lighting, pre-exposed HDR with ACES and AgX, debug draw, GPU profiler, primitives; golden-image tests | **done** (`v0.2.0`) |
-| 8 | Scene/ECS: archetypes in 16 KiB SoA chunks, X-macro reflection, queries with change detection, command buffers, a scheduler that derives a dependency graph from declared access and runs systems on the job system, 64-bit transforms and the hierarchy, prefabs with overrides, text and binary scene files; million-entity benchmarks | **done** |
-| 9 | Runtime + Editor v1: profiling (zones, timeline, memory); the engine context and its pipelined fixed-step frame; the console, cvars, and the command line; the world-to-renderer bridge; C game modules with hot reload that migrates the world; the player; the editor | in progress |
+| 8 | Scene/ECS: archetypes in 16 KiB SoA chunks, X-macro reflection, queries with change detection, command buffers, a scheduler that derives a dependency graph from declared access and runs systems on the job system, 64-bit transforms and the hierarchy, prefabs with overrides, text and binary scene files; million-entity benchmarks | **done** (`v0.3.0`) |
+| 9 | Runtime + Editor v1: profiling (zones, timeline, memory); the engine context and its pipelined fixed-step frame; the console, cvars, and the command line; the world-to-renderer bridge; C game modules with hot reload that migrates the world; the player; the editor: scene editing with gizmos and undo/redo, drag-and-drop import through the cooker, primitives and mesh editing | **done** (`v0.4.0`) |
 | 10–15 | Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
@@ -75,12 +75,20 @@ nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
            --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
 ```
 
-The editor ([`docs/editor.md`](docs/editor.md)) opens the same content in a
-docked Dear ImGui interface: a viewport with an orbit and fly camera, Play
-(F5) on a copy of the scene, the console, the profiler's timeline, and the
-statistics with every cvar:
+The editor ([`docs/editor.md`](docs/editor.md)) builds scenes in a docked
+Dear ImGui interface. It has:
+- a viewport with an orbit and fly camera, gizmos, the outliner, and the
+  inspector;
+- undo and redo for every edit;
+- Play (F5) on a copy of the scene;
+- drag-and-drop import: dropped files are copied into the project and
+  cooked;
+- model creation: Create makes primitives, and Tab edits a mesh's vertices
+  and faces;
+- the console, the profiler's timeline, and the statistics with every cvar.
 
 ```sh
+nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
 nph_editor --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
 ```
 
@@ -92,9 +100,9 @@ engine/<mod>/   one static library per module: include/nepheline/<mod>/, src/, t
                 (also built together as nepheline_shared, for game modules and the hosts that load them;
                 engine/runtime/player/ is nph_player)
 tools/ntest/    the Nepheline test framework
-tools/cook/     the offline asset cooker: nph::cook and the nph_cook tool (the only user of cgltf and stb_image)
+tools/cook/     the asset cooker: nph::cook, the nph_cook tool, and nph::cook_shared for the editor (the only user of cgltf and stb_image)
 tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_flip tool
-editor/         nph_editor: the editor's shell, Dear ImGui backends on the window and the RHI, panels, tests
+editor/         nph_editor: the shell, Dear ImGui backends on the window and the RHI, panels, scene editing, import, mesh editing, tests
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
 samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and game_sandbox, a game module; samples/common/ holds the cooked-scene bridge and BMP capture they share
@@ -126,7 +134,7 @@ Modules depend strictly left-to-right:
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
 - [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
-- [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, the engine hooks it is built on, the Dear ImGui backends, testing
+- [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records
