@@ -953,7 +953,10 @@ static NphResult parse_entities(Loader *l, const NphJsonValue *list)
             }
             pid = nph_str_id(name->string);
             in->prefab_name = name->string;
-        } else {
+        } else if (name->type != NPH_JSON_NULL) {
+            // null is the null ID, which write_str_id writes for an instance
+            // whose PrefabInstance names no prefab (a binary file may hold
+            // one); it loads in full and resolves to no prefab otherwise.
             const NphJsonValue *hash = nph_json_object_get(name, NPH_STR("hash"));
             if (hash == NULL || hash->type != NPH_JSON_STRING ||
                 !parse_hex_u64(hash->string, &pid.value)) {
@@ -973,10 +976,13 @@ static NphResult parse_entities(Loader *l, const NphJsonValue *list)
         if (in->full) {
             continue; // loads as written; the prefab is not needed
         }
-        in->prefab = l->resolve != NULL ? l->resolve(l->resolve_user, pid) : NULL;
+        in->prefab = l->resolve != NULL && !nph_str_id_is_null(pid)
+                         ? l->resolve(l->resolve_user, pid)
+                         : NULL;
         if (in->prefab == NULL) {
-            const NphStr shown =
-                name->type == NPH_JSON_STRING ? name->string : NPH_STR("(by hash)");
+            const NphStr shown = name->type == NPH_JSON_STRING ? name->string
+                                 : name->type == NPH_JSON_NULL ? NPH_STR("(null)")
+                                                               : NPH_STR("(by hash)");
             return fail(l, NPH_RESULT_NOT_FOUND, "entity %u: prefab '%.*s' not found", in->id,
                         NPH_STR_ARG(shown));
         }

@@ -251,3 +251,75 @@ NTEST(prefab, instances_save_as_differences_and_follow_the_prefab)
     nph_prefab_destroy(p);
     nph_world_destroy(w);
 }
+
+// A PrefabInstance that names no prefab (the null ID) cannot come from
+// nph_prefab_instantiate, but a binary scene file may hold one. Its text
+// form, "name": null, must load (the nightly fuzzer found the text loader
+// refusing what the text saver wrote for it,
+// tests/fuzz/corpus/scene_bin/regression_null_prefab_name).
+NTEST(prefab, an_instance_of_no_prefab_round_trips_through_text)
+{
+    TestIds ids;
+    NphWorld *w = test_world_create(0U, &ids);
+    const NphComponentId comps[2] = {NPH_COMPONENT_ID_PREFAB_INSTANCE,
+                                     NPH_COMPONENT_ID_LOCAL_TRANSFORM};
+    NphEntity e;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(w, comps, 2U, &e), NPH_RESULT_OK);
+    NphPrefabInstance pi;
+    memset(&pi, 0, sizeof pi);
+    pi.prefab = NPH_STR_ID_NULL;
+    pi.root = e;
+    NTEST_ASSERT_EQ_INT(nph_world_set(w, e, NPH_COMPONENT_ID_PREFAB_INSTANCE, &pi), NPH_RESULT_OK);
+
+    NphSceneSaveDesc sd;
+    memset(&sd, 0, sizeof sd);
+    sd.compact = 1;
+    NphStrBuilder text;
+    nph_sb_init(&text, nph_allocator_system());
+    NTEST_ASSERT_EQ_INT(nph_scene_save_text(w, &sd, &text, NULL), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_str_contains(
+        nph_sb_str(&text),
+        NPH_STR("\"prefab\":{\"name\":null,\"index\":0,\"root\":0,\"full\":true}")));
+
+    NphWorld *w2 = test_world_create(0U, &ids);
+    NphSceneResult res;
+    NTEST_ASSERT_EQ_INT(nph_scene_load_text(w2, nph_sb_str(&text), NULL, &res), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(res.error, "");
+    NTEST_ASSERT_EQ_UINT(res.entity_count, 1U);
+    NphStrBuilder again;
+    nph_sb_init(&again, nph_allocator_system());
+    NTEST_ASSERT_EQ_INT(nph_scene_save_text(w2, &sd, &again, NULL), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(nph_sb_cstr(&again), nph_sb_cstr(&text));
+
+    // Without "full" the instance needs its prefab, and the null ID names
+    // none: not found, whatever the resolver holds, and not a parse error.
+    NphPrefab *p = make_crate(w, &ids, 100.0F);
+    Library lib = {{p}, 1U};
+    NphSceneLoadDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.resolve = library_resolve;
+    ld.resolve_user = &lib;
+    NphWorld *w3 = test_world_create(0U, &ids);
+    NTEST_EXPECT_EQ_INT(
+        nph_scene_load_text(w3,
+                            NPH_STR("{\"nepheline_scene\":1,\"entities\":[{\"id\":0,"
+                                    "\"prefab\":{\"name\":null,\"index\":0,\"root\":0}}]}"),
+                            &ld, &res),
+        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_TRUE(nph_str_contains(nph_str_from_cstr(res.error), NPH_STR("(null)")));
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(w3), 0U);
+    // A name that is neither text, a hash, nor null is still malformed.
+    NTEST_EXPECT_EQ_INT(
+        nph_scene_load_text(w3,
+                            NPH_STR("{\"nepheline_scene\":1,\"entities\":[{\"id\":0,"
+                                    "\"prefab\":{\"name\":7,\"index\":0,\"root\":0}}]}"),
+                            &ld, &res),
+        NPH_RESULT_PARSE_ERROR);
+
+    nph_sb_free(&text);
+    nph_sb_free(&again);
+    nph_world_destroy(w3);
+    nph_world_destroy(w2);
+    nph_prefab_destroy(p);
+    nph_world_destroy(w);
+}
