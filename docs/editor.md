@@ -4,8 +4,10 @@ The editor is the engine's last host (CLAUDE.md §8.13). It is a separate
 executable, `nph_editor`, linked against the engine's shared library like
 the player and the game modules. It draws a docked Dear ImGui interface
 over the engine's frame. Decisions: [ADR-0025](adr/0025-editor-ui.md)
-covers the library pin, the backends, the host model, and input, and
-[ADR-0026](adr/0026-editor-import.md) covers projects and import.
+covers the library pin, the backends, the host model, and input,
+[ADR-0026](adr/0026-editor-import.md) projects and import, and
+[ADR-0027](adr/0027-editable-meshes.md) editable meshes and reloading
+cooked assets.
 
 Editor v1 has:
 - the shell: the viewport and its camera, play-in-editor, the console, the
@@ -15,9 +17,11 @@ Editor v1 has:
 - scenes: new, open, and save, with a prompt before unsaved changes are
   lost;
 - assets: a project of sources and cooked files, drag-and-drop import
-  through the cooker, and the asset browser.
-
-Model creation (primitives and basic mesh editing) comes next.
+  through the cooker, the asset browser, and what an import cooks again
+  reloaded where it is drawn;
+- model creation (§8.13, "Phase 1"): primitives (cube, sphere, plane,
+  cylinder) and basic mesh editing (vertex and face transforms, extrude),
+  saved as editable mesh sources and cooked meshes.
 
 | File | What |
 |---|---|
@@ -28,6 +32,7 @@ Model creation (primitives and basic mesh editing) comes next.
 | `src/view.h`, `src/picking.h` | the viewport's projection, and the entity under the mouse |
 | `src/gizmo.h` | the transform gizmo's geometry (`gizmo_ui.c` draws and drags it) |
 | `src/project.h` | the project: sources, cooked files, the import thread, the resolver |
+| `src/mesh_edit.c` | mesh editing: the preview, element picking, the gizmo on vertices, extrude, its own history |
 | `src/camera.h` | the editor camera: orbit, look, pan, dolly, fly, focus |
 | `src/editor_log.h` | the editor's log category, the console panel's lines, and the log sink |
 | `src/ui_platform.h` | Dear ImGui's platform backend on `platform/window.h` |
@@ -68,7 +73,12 @@ exist: the first import makes them.
 | Ctrl+D, Del, F2 | duplicate, delete, rename the selection |
 | F | frame the selection in the viewport |
 | W, E, R; X | the gizmo moves, rotates, scales; world or local axes |
+| Tab | edit the selected entity's mesh, or stop editing it |
 | F5, F6, F7 | play or stop, pause, step |
+
+While a mesh is edited: 1 and 2 select vertices or faces, Ctrl+A selects
+all, Ctrl+E extrudes the selected faces, Ctrl+Z and Ctrl+Y undo and redo
+the mesh's changes, and Escape (or Tab) ends editing.
 
 Exit status: 0; 1 on a failure (validation errors included); 2 for a bad
 command line; 77 without a window system or a Vulkan device.
@@ -303,14 +313,18 @@ into the folder the asset browser shows:
    brings the files it names with it (`cook_gltf_files`), and a folder
    everything under it. A file already inside the sources is used where
    it is.
-2. Each scene and image is **cooked**, and the scenes under each folder.
-   Images dropped together with a scene come along without being cooked
-   alone: the scene cooks the ones it uses, with the usage each material
-   slot needs.
-3. Scenes dropped on the viewport are **placed** where they fell: on the
-   surface under the mouse, else on the ground plane, else in front of the
-   camera. Each becomes one undoable step and is selected. Files dropped
-   elsewhere are only imported.
+2. Each scene, editable mesh (`.nmesh`), and image is **cooked**, and the
+   scenes and editable meshes under each folder. Images dropped together
+   with a scene come along without being cooked alone: the scene cooks the
+   ones it uses, with the usage each material slot needs.
+3. Scenes and editable meshes dropped on the viewport are **placed** where
+   they fell: on the surface under the mouse, else on the ground plane,
+   else in front of the camera. Each becomes one undoable step and is
+   selected. Files dropped elsewhere are only imported.
+4. Whatever the cook wrote is **reloaded** where it is drawn
+   (`nph_scene_renderer_reload`), before anything new is placed. A source
+   imported again after it changed is drawn anew wherever it is used,
+   while the old files were mapped (ADR-0027).
 
 The copy and the cook run on the project's **import thread**, one request
 at a time, so the editor keeps drawing while textures encode. The thread
@@ -332,6 +346,57 @@ runs:
   above its folder cannot be copied with it (drop the folder holding both
   instead);
 - a missing file, or a document that does not cook, fails its source.
+
+## Model creation
+
+### Primitives
+
+Create > Cube, Sphere, Plane, or Cylinder (`editor_create_primitive`)
+makes a primitive in three steps:
+1. It writes an editable mesh source of its own,
+   `<sources>/meshes/<cube|sphere|plane|cylinder>[_N].nmesh`, under the
+   first free name.
+2. It cooks it on the import thread.
+3. When the cook is done, moments later, it creates an entity drawing it,
+   resting on the surface under the middle of the viewport (else at the
+   camera's pivot): one undoable step, "Create Cube", selected.
+
+The primitives are a 1 m cube, a sphere 1 m across (32 segments by 16
+rings), a 2 m plane, and a cylinder 1 m across and tall (32 segments). See
+[cook.md](cook.md) "Editable meshes" for the format.
+
+### Mesh editing
+
+Tab, or Edit > Edit Mesh, edits the mesh the selected entity draws, when it
+is cooked from an editable mesh of the project (the database names its
+source). Editing works on the source:
+- **The preview.** The mesh is triangulated as the cooker will and drawn
+  as it changes, with the default material, by a render mesh and instance
+  of the editor's own. The scene renderer hides the entity's instance
+  meanwhile (`nph_scene_renderer_set_hidden`).
+- **Selection.** Vertices (1) or faces (2) are selected by clicking, with
+  Ctrl adding or removing one; Ctrl+A selects all. A vertex is picked by
+  its position on screen, within 12 pixels. A face is picked by the ray,
+  against its triangles in the entity's space.
+- **The gizmo.** It stands on the centre `c` of the selected vertices (a
+  face brings its corners), with world or local axes as for an entity (X).
+  A drag moves, rotates, or scales them about that centre. The gizmo
+  starts with the entity's transform, so a vertex at `l` in the entity's
+  space goes to `c + E⁻¹·Δt + E⁻¹·L·(l − c)`. Here E is the entity's
+  linear part, L the gizmo's, and Δt how far its pivot moved. The gizmo's
+  code is shared with entities: it moves an `EditorGizmoTarget`.
+- **Extrude.** Ctrl+E extrudes the selected faces as one region, by a
+  quarter of their mean size (`cook_polymesh_extrude`). The moved faces
+  stay selected, for the gizmo.
+- **History.** Every change (a drag, a move, an extrusion) is a step of the
+  editing's own history: a copy of the mesh before it, at most 64.
+  Ctrl+Z and Ctrl+Y undo and redo them while editing. The scene's history
+  does not see mesh changes.
+- **Ending.** Editing ends with Tab, Escape, Done, selecting another
+  entity, Play, or a new scene. A changed mesh is saved to its source and
+  cooked again. The preview stays until the scene renderer has replaced
+  the entity's instance with one of the reloaded cooked mesh, so the
+  entity is never missing from the view.
 
 ## How it works
 
@@ -356,7 +421,8 @@ Each frame, the engine calls the editor's hooks
    the game has the input. A drop of files starts an import.
 2. **sync**, at the sync point, where the world is quiescent:
    1. the log lines are drained;
-   2. finished imports are taken, and their scenes placed;
+   2. finished imports are taken: what they wrote is reloaded and their
+      scenes placed; the mesh being edited updates its preview;
    3. a Dear ImGui frame is built: the dock space, the menus, and the
       panels;
    4. the view is set (the editor's camera while editing, the world's
@@ -434,13 +500,18 @@ step runs on the job system. It reads nothing the simulation writes.
   allocates as the cooker does, and the snapshot is rebuilt from the
   database file. Placing a scene creates and destroys a scratch world
   sized to the scene.
+- **Mesh editing** keeps the mesh and up to 64 copies of it for undo.
+  Every change triangulates it again and makes a new render mesh for the
+  preview (the old one is destroyed once the frames using it are done).
+  That is fine for the meshes the editor makes; a mesh of millions of
+  faces would want an incremental preview.
 - **The UI renderer** grows its buffers by doubling, and allocates a
   staging copy for each texture upload.
 - **Reading the clipboard** grows a buffer to the text's size.
 
 ## Testing
 
-`editor_tests` (62 tests):
+`editor_tests` (66 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -473,6 +544,18 @@ step runs on the job system. It reads nothing the simulation writes.
     a gizmo drag moves the selection in one step, and Ctrl snaps it.
   - A dropped scene is cooked and placed where it fell, drawn, undone,
     and redone; the browser keeps a folder the import is about to make.
+  - A source imported again after it changed is drawn anew where it is
+    used (the test fails without the reload).
+  - Primitives of every kind are created, drawn, undone, and redone; each
+    has a source of its own; none is created while playing.
+  - A mesh is edited in place: the preview replaces the cooked mesh, faces
+    extrude, vertices move, the edit's history undoes and redoes, and
+    ending saves and cooks it. No frame is without the entity (the test
+    fails if the preview goes before the cooked mesh is back), and the
+    scene's history does not see it.
+  - Mesh editing with the mouse: a click picks a vertex and a face, the
+    gizmo drags a vertex in one change, and selecting another entity ends
+    editing.
   - **Phase 9's exit criterion** (CLAUDE.md §12): a scene is built from
     an imported scene, a move, a light, and a camera; saved; opened by a
     second editor on the same project (as after a restart), where its
@@ -487,12 +570,13 @@ device.
 
 ## Limitations and future work
 
-- Model creation comes next: primitives and basic mesh editing, saved as
-  cooked meshes.
-- Re-importing a changed source whose assets are loaded fails on Windows
-  while the loader has their files mapped (the cooker cannot replace a
-  mapped file); unchanged sources are skipped and do not hit this. Asset
-  hot reload (§8.8) would release and reload them.
+- Mesh editing has vertices and faces, not edges, and moves, rotates,
+  scales, and extrudes; deleting, merging, splitting, and the other
+  modeling tools are §8.13's "Phase 2". The preview draws with the default
+  material, whatever the entity's.
+- A reload drops the instances drawing the asset until the new version is
+  ready (a frame or two). Mesh editing covers its own entity with the
+  preview; other entities sharing the mesh blink.
 - Imports cannot be cancelled, and closing the editor waits for the one in
   progress.
 - Scene paths are typed. There is no native file dialog: the window
