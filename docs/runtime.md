@@ -100,7 +100,9 @@ simulation in flight, after which the world is the caller's until the next
 frame; the engine's own world-changing functions wait by themselves.
 
 **The view** is the world's first active Camera (by entity slot), or the
-host's (`nph_engine_set_view`, the editor's camera).
+host's (`nph_engine_set_view`, the editor's camera). Either way the
+`r.pipeline`, `r.occlusion`, and `r.cone_culling` cvars choose the renderer
+and its culling (docs/render.md, "The production path").
 
 ## Configuration
 
@@ -115,6 +117,8 @@ Settings are cvars. The engine's:
 | `rt.max_entities`, `rt.world_events`, `rt.workers` | 65536, 16384, 0 | latched |
 | `sim.rate`, `sim.max_steps`, `sim.time_scale` | 240, 8, 1 | the clock |
 | `r.vsync`, `r.width`, `r.height` | true, 1280, 720 | saved, latched |
+| `r.pipeline` | 1 | 0: the forward reference renderer, 1: the GPU-driven production one (saved) |
+| `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 

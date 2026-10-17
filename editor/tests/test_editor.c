@@ -1321,7 +1321,9 @@ NTEST(Editor, a_mesh_is_edited_in_place_saved_and_cooked_again)
     for (u32 i = 0; i < 40U; ++i) {
         frames(&fx, 1U);
         rs = nph_engine_frame_stats(fx.engine)->render;
-        NTEST_ASSERT_EQ_UINT(rs.draws, 1U); // the preview or the cooked mesh, never neither
+        // The preview or the cooked mesh, never neither: one instance shown
+        // (on either pipeline; the production one's draws are the GPU's).
+        NTEST_ASSERT_EQ_UINT(rs.instances - rs.culled, 1U);
         if (!ed->mesh_edit.committing) {
             break;
         }
