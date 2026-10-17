@@ -54,6 +54,61 @@ NTEST_F(GpuFixture, reports_a_conforming_device)
               info->features.mesh_shader, info->features.ray_query);
 }
 
+// disable_features switches optional capabilities off on any device, so the
+// renderer's fallback paths run on hardware that has the fast ones.
+NTEST(gpu_device, optional_features_can_be_disabled)
+{
+    NphGpuDeviceDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = nph_allocator_system();
+    desc.headless = 1;
+    NphGpuDevice *full = test_gpu_create(&desc);
+    if (full == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    const NphGpuFeatures have = nph_gpu_device_info(full)->features;
+    const NphGpuLimits have_limits = nph_gpu_device_info(full)->limits;
+    NTEST_LOG("mesh %d, ray query %d, image atomic64 %d, buffer atomic64 %d, float16 %d, "
+              "minmax %d, first instance %d, subgroup vote %d ballot %d arithmetic %d",
+              have.mesh_shader, have.ray_query, have.image_atomic_int64, have.buffer_atomic_int64,
+              have.shader_float16, have.sampler_filter_minmax, have.draw_indirect_first_instance,
+              have.subgroup_vote, have.subgroup_ballot, have.subgroup_arithmetic);
+    if (have.mesh_shader) {
+        NTEST_EXPECT_GE_UINT(have_limits.max_mesh_output_vertices, 256U);
+        NTEST_EXPECT_GE_UINT(have_limits.max_mesh_workgroup_invocations, 128U);
+        NTEST_EXPECT_GE_UINT(have_limits.max_mesh_workgroup_total_count, 1U << 22U);
+    } else {
+        NTEST_EXPECT_EQ_UINT(have_limits.max_mesh_output_vertices, 0U);
+    }
+    test_gpu_destroy(full);
+
+    desc.disable_features =
+        (u32)NPH_GPU_OPTIONAL_MESH_SHADER | (u32)NPH_GPU_OPTIONAL_RAY_QUERY |
+        (u32)NPH_GPU_OPTIONAL_IMAGE_ATOMIC_INT64 | (u32)NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64 |
+        (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16 | (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX;
+    NphGpuDevice *bare = test_gpu_create(&desc);
+    NTEST_ASSERT_NOT_NULL(bare);
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(bare);
+    NTEST_EXPECT_FALSE(info->features.mesh_shader);
+    NTEST_EXPECT_FALSE(info->features.ray_query);
+    NTEST_EXPECT_FALSE(info->features.image_atomic_int64);
+    NTEST_EXPECT_FALSE(info->features.buffer_atomic_int64);
+    NTEST_EXPECT_FALSE(info->features.shader_float16);
+    NTEST_EXPECT_FALSE(info->features.sampler_filter_minmax);
+    NTEST_EXPECT_EQ_UINT(info->limits.max_mesh_output_vertices, 0U);
+    // What is not optional stays as it was.
+    NTEST_EXPECT_EQ_INT(info->features.subgroup_ballot, have.subgroup_ballot);
+    NTEST_EXPECT_EQ_INT(info->features.texture_compression_bc, have.texture_compression_bc);
+    // A mesh-shader draw is refused (asserted in development builds), not
+    // called through a missing entry point.
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(bare, NPH_GPU_QUEUE_GRAPHICS, "no mesh", &cmd),
+                        NPH_RESULT_OK);
+    NPH_TEST_EXPECT_ASSERT(nph_gpu_cmd_draw_mesh_tasks(cmd, 1U, 1U, 1U));
+    test_submit_wait(bare, cmd);
+    test_gpu_destroy(bare);
+}
+
 NTEST_F(GpuFixture, statistics_start_at_zero)
 {
     REQUIRE_DEVICE(f);

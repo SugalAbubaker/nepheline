@@ -357,11 +357,43 @@ void nph_gpu_cmd_draw_indexed_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer
                                   max_draw_count, stride);
 }
 
+// The mesh-shader entry points are not loaded on a device without the
+// extension: refuse rather than call through a null pointer.
+static bool mesh_tasks_supported(const NphGpuCmd *cmd)
+{
+    NPH_ASSERT_MSG(cmd->dev->info.features.mesh_shader, "mesh shaders are not supported");
+    return cmd->dev->info.features.mesh_shader != 0;
+}
+
 void nph_gpu_cmd_draw_mesh_tasks(NphGpuCmd *cmd, u32 x, u32 y, u32 z)
 {
     CHECK_RECORDING(cmd);
-    NPH_ASSERT_MSG(cmd->dev->info.features.mesh_shader, "mesh shaders are not supported");
-    vkCmdDrawMeshTasksEXT(cmd->vk, x, y, z);
+    if (mesh_tasks_supported(cmd)) {
+        vkCmdDrawMeshTasksEXT(cmd->vk, x, y, z);
+    }
+}
+
+void nph_gpu_cmd_draw_mesh_tasks_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                          u32 draw_count, u32 stride)
+{
+    CHECK_RECORDING(cmd);
+    if (mesh_tasks_supported(cmd)) {
+        const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
+        vkCmdDrawMeshTasksIndirectEXT(cmd->vk, slot->vk, offset, draw_count, stride);
+    }
+}
+
+void nph_gpu_cmd_draw_mesh_tasks_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                                NphGpuBuffer count_buffer, u64 count_offset,
+                                                u32 max_draw_count, u32 stride)
+{
+    CHECK_RECORDING(cmd);
+    if (mesh_tasks_supported(cmd)) {
+        const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
+        const NphGpuBufferSlot *count = gpu_buffer(cmd->dev, count_buffer);
+        vkCmdDrawMeshTasksIndirectCountEXT(cmd->vk, slot->vk, offset, count->vk, count_offset,
+                                           max_draw_count, stride);
+    }
 }
 
 void nph_gpu_cmd_dispatch(NphGpuCmd *cmd, u32 x, u32 y, u32 z)

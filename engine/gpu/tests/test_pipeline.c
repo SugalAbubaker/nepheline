@@ -130,6 +130,135 @@ NTEST_F(GpuFixture, graphics_pipeline_draws_a_triangle)
     nph_gpu_shader_destroy(f->dev, frag);
 }
 
+typedef enum MeshDraw {
+    MESH_DRAW_DIRECT = 0,
+    MESH_DRAW_INDIRECT,
+    MESH_DRAW_INDIRECT_COUNT,
+} MeshDraw;
+
+// Draws with the test mesh shader (one quad per draw record, in column
+// gl_DrawID of an 8-column split) into a 64 x 64 RGBA8 image and returns
+// how many columns were coloured, checking each column is either fully
+// coloured or untouched.
+static u32 mesh_draw_columns(NphGpuDevice *dev, NphGpuPipeline pipeline, MeshDraw mode,
+                             NphGpuBuffer args, NphGpuBuffer count)
+{
+    NphGpuImage target = test_make_image_2d(dev, 64U, 64U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                                            (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
+                                                (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC,
+                                            "mesh target");
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "mesh draw", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_image_barrier(cmd, target, (u32)NPH_GPU_STAGE_NONE, (u32)NPH_GPU_ACCESS_NONE,
+                              NPH_GPU_LAYOUT_UNDEFINED, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT);
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.colors[0].image = target;
+    rd.colors[0].load = NPH_GPU_LOAD_OP_CLEAR;
+    rd.colors[0].store = NPH_GPU_STORE_OP_STORE;
+    rd.colors[0].clear = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 1.0F);
+    rd.color_count = 1U;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.color = nph_vec4(0.0F, 1.0F, 0.0F, 1.0F);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    switch (mode) {
+    case MESH_DRAW_DIRECT:
+        nph_gpu_cmd_draw_mesh_tasks(cmd, 1U, 1U, 1U);
+        break;
+    case MESH_DRAW_INDIRECT:
+        nph_gpu_cmd_draw_mesh_tasks_indirect(cmd, args, 0U, 3U, 16U);
+        break;
+    case MESH_DRAW_INDIRECT_COUNT:
+        nph_gpu_cmd_draw_mesh_tasks_indirect_count(cmd, args, 0U, count, 0U, 4U, 16U);
+        break;
+    }
+    nph_gpu_cmd_end_rendering(cmd);
+    nph_gpu_cmd_image_barrier(cmd, target, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT,
+                              (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_READ,
+                              NPH_GPU_LAYOUT_TRANSFER_SRC);
+    test_submit_wait(dev, cmd);
+    static u8 pixels[64U * 64U * 4U];
+    test_read_image(dev, target, 0U, pixels, sizeof pixels);
+    nph_gpu_image_destroy(dev, target);
+    u32 columns = 0U;
+    for (u32 c = 0; c < 8U; ++c) {
+        const bool lit = test_pixel_near(&pixels[((u64)32U * 64U + (u64)c * 8U + 4U) * 4U], 0U,
+                                         255U, 0U, 255U, 0U);
+        // Every pixel of a column agrees with its centre.
+        for (u32 y = 0; y < 64U; y += 7U) {
+            for (u32 x = c * 8U; x < c * 8U + 8U; ++x) {
+                const u8 *p = &pixels[((u64)y * 64U + x) * 4U];
+                NTEST_ASSERT_TRUE(lit ? test_pixel_near(p, 0U, 255U, 0U, 255U, 0U)
+                                      : test_pixel_near(p, 0U, 0U, 0U, 255U, 0U));
+            }
+        }
+        // The draws fill columns from the left with no gaps.
+        if (lit) {
+            NTEST_ASSERT_EQ_UINT(columns, c);
+            ++columns;
+        }
+    }
+    return columns;
+}
+
+NTEST_F(GpuFixture, mesh_shaders_draw_directly_indirectly_and_with_a_count)
+{
+    REQUIRE_DEVICE(f);
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(f->dev);
+    if (!info->features.mesh_shader) {
+        NTEST_SKIP("no mesh shaders on %s", info->name);
+    }
+    NTEST_ASSERT_GE_UINT(info->limits.max_mesh_output_vertices, 256U); // the API's minimum
+    NTEST_ASSERT_GE_UINT(info->limits.max_mesh_output_primitives, 256U);
+    NTEST_ASSERT_GE_UINT(info->limits.max_mesh_workgroup_count[0], 65535U);
+    NphGpuShader mesh = test_load_shader(f->dev, "test_mesh.mesh");
+    NphGpuShader frag = test_load_shader(f->dev, "test_color.frag");
+    NphGpuGraphicsPipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.mesh = mesh;
+    desc.fragment = frag;
+    desc.color_formats[0] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.color_count = 1U;
+    desc.name = "test mesh";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &pipeline), NPH_RESULT_OK);
+
+    // Four records of one workgroup each, 16 bytes apart; the count buffer
+    // says two.
+    NphGpuBuffer args = test_make_buffer(f->dev, 64U, (u32)NPH_GPU_BUFFER_USAGE_INDIRECT,
+                                         NPH_GPU_MEMORY_UPLOAD, "mesh args");
+    NphGpuBuffer count = test_make_buffer(f->dev, 4U, (u32)NPH_GPU_BUFFER_USAGE_INDIRECT,
+                                          NPH_GPU_MEMORY_UPLOAD, "mesh count");
+    u32 *a = (u32 *)nph_gpu_buffer_map(f->dev, args);
+    for (u32 i = 0; i < 4U; ++i) {
+        a[i * 4U + 0U] = 1U;
+        a[i * 4U + 1U] = 1U;
+        a[i * 4U + 2U] = 1U;
+        a[i * 4U + 3U] = 0xDEADBEEFU; // padding the stride skips
+    }
+    *(u32 *)nph_gpu_buffer_map(f->dev, count) = 2U;
+
+    NTEST_EXPECT_EQ_UINT(mesh_draw_columns(f->dev, pipeline, MESH_DRAW_DIRECT, NPH_GPU_BUFFER_NULL,
+                                           NPH_GPU_BUFFER_NULL),
+                         1U);
+    NTEST_EXPECT_EQ_UINT(
+        mesh_draw_columns(f->dev, pipeline, MESH_DRAW_INDIRECT, args, NPH_GPU_BUFFER_NULL), 3U);
+    NTEST_EXPECT_EQ_UINT(mesh_draw_columns(f->dev, pipeline, MESH_DRAW_INDIRECT_COUNT, args, count),
+                         2U);
+
+    nph_gpu_buffer_destroy(f->dev, count);
+    nph_gpu_buffer_destroy(f->dev, args);
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, mesh);
+    nph_gpu_shader_destroy(f->dev, frag);
+}
+
 NTEST_F(GpuFixture, fragment_shader_samples_a_bindless_texture)
 {
     REQUIRE_DEVICE(f);
