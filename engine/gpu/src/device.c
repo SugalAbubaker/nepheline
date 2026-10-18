@@ -804,6 +804,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f2.features.independentBlend = VK_TRUE;
     f2.features.samplerAnisotropy = hf->samplerAnisotropy;
     f2.features.depthClamp = hf->depthClamp;
+    f2.features.shaderClipDistance = hf->shaderClipDistance;
     // Fragment shaders that read gl_PrimitiveID declare the Geometry
     // capability (the visibility buffer's raster does).
     f2.features.geometryShader = hf->geometryShader;
@@ -933,6 +934,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     feat->storage_8bit = vk_bool(c->f12.storageBuffer8BitAccess);
     feat->storage_16bit = vk_bool(c->f11.storageBuffer16BitAccess);
     feat->depth_clamp = vk_bool(hf->depthClamp);
+    feat->clip_distance = vk_bool(hf->shaderClipDistance);
     feat->geometry_shader = vk_bool(hf->geometryShader);
     feat->fill_mode_non_solid = vk_bool(hf->fillModeNonSolid);
     feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);

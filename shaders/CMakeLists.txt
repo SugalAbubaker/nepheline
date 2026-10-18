@@ -11,6 +11,7 @@ nph_add_shaders(nph_shaders_test
         test/test_ray_query.comp
         test/test_image.comp
         test/test_triangle.vert
+        test/test_clip.vert
         test/test_color.frag
         test/test_sample.frag
         test/test_fullscreen.vert

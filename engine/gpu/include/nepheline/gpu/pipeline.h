@@ -109,6 +109,10 @@ typedef struct NphGpuDepthState {
     b32 clamp; // depth clamp (requires NphGpuFeatures.depth_clamp)
 } NphGpuDepthState;
 
+// Specialization constants a pipeline can set: the values of the
+// shader's constants with constant_id 0 to count - 1.
+#define NPH_GPU_MAX_SPECIALIZATION 8U
+
 typedef struct NphGpuGraphicsPipelineDesc {
     // Either vertex (+ optional fragment), or mesh (+ optional task and
     // fragment). A missing fragment shader makes a depth-only pipeline.
@@ -126,12 +130,14 @@ typedef struct NphGpuGraphicsPipelineDesc {
     NphGpuBlendState blend[NPH_GPU_MAX_COLOR_ATTACHMENTS];
     NphGpuFormat depth_format; // UNDEFINED: no depth attachment
     NphGpuDepthState depth;
+    // Values for the specialization constants with constant_id 0 to
+    // specialization_count - 1, as for compute pipelines below; every stage
+    // gets the same values, and a stage that declares no such constant
+    // ignores them.
+    u32 specialization[NPH_GPU_MAX_SPECIALIZATION];
+    u32 specialization_count;
     const char *name;
 } NphGpuGraphicsPipelineDesc;
-
-// Specialization constants a compute pipeline can set: the values of the
-// shader's constants with constant_id 0 to count - 1.
-#define NPH_GPU_MAX_SPECIALIZATION 8U
 
 typedef struct NphGpuComputePipelineDesc {
     NphGpuShader shader;

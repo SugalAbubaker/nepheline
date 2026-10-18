@@ -162,6 +162,7 @@ typedef struct NphGpuFeatures {
     b32 storage_8bit;          // 8-bit storage buffer access (quantised vertices)
     b32 storage_16bit;         // 16-bit storage buffer access
     b32 depth_clamp;           // shadow rendering
+    b32 clip_distance;         // gl_ClipDistance (the shadow-page raster confines triangles)
     b32 geometry_shader;       // also what lets a fragment shader read gl_PrimitiveID
     b32 fill_mode_non_solid;   // wireframe debug draw
     b32 texture_compression_bc;       // BC1-7

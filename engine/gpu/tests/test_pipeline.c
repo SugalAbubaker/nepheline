@@ -250,6 +250,52 @@ NTEST_F(GpuFixture, graphics_pipeline_draws_a_triangle)
     nph_gpu_shader_destroy(f->dev, frag);
 }
 
+// One vertex module, two pipelines: the specialization constant turns on a
+// clip distance that cuts away the right half of a viewport-covering
+// triangle, so the constant reaches the vertex stage and the device clips.
+NTEST_F(GpuFixture, graphics_specialization_and_clip_distances)
+{
+    REQUIRE_DEVICE(f);
+    if (!nph_gpu_device_info(f->dev)->features.clip_distance) {
+        NTEST_SKIP("no clip distances on this device");
+    }
+    NphGpuShader vert = test_load_shader(f->dev, "test_clip.vert");
+    NphGpuShader frag = test_load_shader(f->dev, "test_color.frag");
+    NphGpuGraphicsPipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.vertex = vert;
+    desc.fragment = frag;
+    desc.color_formats[0] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.color_count = 1U;
+    desc.name = "test clip off";
+    NphGpuPipeline whole = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &whole), NPH_RESULT_OK);
+    desc.specialization[0] = 1U;
+    desc.specialization_count = 1U;
+    desc.name = "test clip on";
+    NphGpuPipeline half = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &half), NPH_RESULT_OK);
+    desc.specialization_count = NPH_GPU_MAX_SPECIALIZATION + 1U;
+    NphGpuPipeline refused = NPH_GPU_PIPELINE_NULL;
+    NTEST_EXPECT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &refused),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.color = nph_vec4(0.0F, 0.0F, 1.0F, 1.0F);
+    u8 pixels[64U * 64U * 4U];
+    render_to_pixels(f->dev, whole, &push, 64U, 3U, pixels);
+    NTEST_EXPECT_TRUE(test_pixel_near(&pixels[((u64)32U * 64U + 8U) * 4U], 0U, 0U, 255U, 255U, 0U));
+    NTEST_EXPECT_TRUE(
+        test_pixel_near(&pixels[((u64)32U * 64U + 56U) * 4U], 0U, 0U, 255U, 255U, 0U));
+    render_to_pixels(f->dev, half, &push, 64U, 3U, pixels);
+    NTEST_EXPECT_TRUE(test_pixel_near(&pixels[((u64)32U * 64U + 8U) * 4U], 0U, 0U, 255U, 255U, 0U));
+    NTEST_EXPECT_TRUE(test_pixel_near(&pixels[((u64)32U * 64U + 56U) * 4U], 0U, 0U, 0U, 255U, 0U));
+    nph_gpu_pipeline_destroy(f->dev, whole);
+    nph_gpu_pipeline_destroy(f->dev, half);
+    nph_gpu_shader_destroy(f->dev, vert);
+    nph_gpu_shader_destroy(f->dev, frag);
+}
+
 typedef enum MeshDraw {
     MESH_DRAW_DIRECT = 0,
     MESH_DRAW_INDIRECT,

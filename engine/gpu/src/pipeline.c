@@ -101,6 +101,22 @@ static NphResult stage_info(NphGpuDevice *dev, NphGpuShader shader, NphGpuShader
     return NPH_RESULT_OK;
 }
 
+// The specialization info of `count` 32-bit values, constant_id 0 on.
+static void specialization_info(const u32 *values, u32 count, VkSpecializationMapEntry *entries,
+                                VkSpecializationInfo *out)
+{
+    for (u32 i = 0; i < count; ++i) {
+        entries[i].constantID = i;
+        entries[i].offset = i * (u32)sizeof(u32);
+        entries[i].size = sizeof(u32);
+    }
+    memset(out, 0, sizeof *out);
+    out->mapEntryCount = count;
+    out->pMapEntries = entries;
+    out->dataSize = (size_t)count * sizeof(u32);
+    out->pData = values;
+}
+
 static NphResult build_graphics(NphGpuDevice *dev, const NphGpuGraphicsPipelineDesc *d,
                                 const char *name, VkPipeline *out, u32 *out_push_bytes)
 {
@@ -137,6 +153,19 @@ static NphResult build_graphics(NphGpuDevice *dev, const NphGpuGraphicsPipelineD
     if (!nph_gpu_shader_is_null(d->fragment)) {
         NPH_TRY(stage_info(dev, d->fragment, NPH_GPU_SHADER_FRAGMENT, &stages[stage_count++],
                            &push_bytes));
+    }
+    if (d->specialization_count > NPH_GPU_MAX_SPECIALIZATION) {
+        GPU_LOG_ERROR("pipeline '%s': %u specialization constants, at most %u", name,
+                      d->specialization_count, NPH_GPU_MAX_SPECIALIZATION);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    VkSpecializationMapEntry spec_entries[NPH_GPU_MAX_SPECIALIZATION];
+    VkSpecializationInfo spec;
+    if (d->specialization_count != 0U) {
+        specialization_info(d->specialization, d->specialization_count, spec_entries, &spec);
+        for (u32 i = 0; i < stage_count; ++i) {
+            stages[i].pSpecializationInfo = &spec;
+        }
     }
 
     VkFormat color_formats[NPH_GPU_MAX_COLOR_ATTACHMENTS];
@@ -270,16 +299,7 @@ static NphResult build_compute(NphGpuDevice *dev, const NphGpuComputePipelineDes
     VkSpecializationMapEntry entries[NPH_GPU_MAX_SPECIALIZATION];
     VkSpecializationInfo spec;
     if (d->specialization_count != 0U) {
-        for (u32 i = 0; i < d->specialization_count; ++i) {
-            entries[i].constantID = i;
-            entries[i].offset = i * (u32)sizeof(u32);
-            entries[i].size = sizeof(u32);
-        }
-        memset(&spec, 0, sizeof spec);
-        spec.mapEntryCount = d->specialization_count;
-        spec.pMapEntries = entries;
-        spec.dataSize = (size_t)d->specialization_count * sizeof(u32);
-        spec.pData = d->specialization;
+        specialization_info(d->specialization, d->specialization_count, entries, &spec);
         ci.stage.pSpecializationInfo = &spec;
     }
     ci.layout = dev->bindless.pipeline_layout;
