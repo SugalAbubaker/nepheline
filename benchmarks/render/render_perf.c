@@ -25,7 +25,9 @@
 // size the software raster takes (0: every cluster in hardware), for tuning
 // the hybrid raster's split.
 //
-// The scenes are synthetic until Phase 10's reference scenes arrive:
+// The scenes are synthetic until Phase 10's reference scenes arrive. The
+// production path's resolve temporally (NPH_RENDER_AA_TEMPORAL, the
+// runtime's default), the reference's do not:
 //
 //   grid_<n>_<pipeline>   n cubes on a flat grid under a top-down camera,
 //                         every one on screen, at 512 x 512: the CPU cost
@@ -34,6 +36,9 @@
 //                         pillars on a ground plane at 3840 x 2160, seen
 //                         from head height: the nearer rows hide most of
 //                         the field, so occlusion culling does the work.
+//   field_4k_no_taa       field_4k_production without temporal
+//                         anti-aliasing: the tonemap pass where the other
+//                         has the temporal resolve.
 //   lights_<n>_<pipeline> the field at night, lit by n point and spot
 //                         lights of 3 to 8 m range among the nearer rows
 //                         (and a dim moon): the light grid's cost against
@@ -108,6 +113,7 @@ typedef struct SceneDef {
     u32 height;
     u32 vis_flags; // NphRenderVisFlags
     u32 shadows;   // SceneShadows
+    b32 aliased;   // the production path without temporal anti-aliasing
 } SceneDef;
 
 typedef enum SceneShadows {
@@ -135,6 +141,8 @@ static const SceneDef g_scenes[] = {
      SHADOWS_NONE},
     {"field_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_NONE},
+    {"field_4k_no_taa", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, 1},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
      0U, SHADOWS_NONE},
     {"lights_1k_production", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
@@ -521,6 +529,9 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.pipeline = s->pipeline;
     view.ev100 = 13.0F;
     view.vis_flags = s->vis_flags;
+    view.anti_aliasing = s->pipeline == NPH_RENDER_PIPELINE_PRODUCTION && !s->aliased
+                             ? NPH_RENDER_AA_TEMPORAL
+                             : NPH_RENDER_AA_NONE;
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }

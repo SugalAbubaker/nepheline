@@ -130,9 +130,11 @@ reports as skipped. The JSON is the nbench schema with `metric` and `unit`
 per entry and the GPU, driver, and API version under `host`.
 
 The reference results are
-`benchmarks/results/gpu-2026-10-13-win-msvc-profile-rtx3060ti.json`; what
-they say about the CLAUDE.md §10 budgets is recorded in
-[ADR-0015](adr/0015-gpu-budget-measurements.md). `benchmarks/gpu_budgets.txt`
+`benchmarks/results/gpu-2026-10-18-win-msvc-profile-rtx3060ti.json` (the
+temporal benchmarks added, the rest within 1 % of the first reference run,
+`gpu-2026-10-13`); what they say about the CLAUDE.md §10 budgets is
+recorded in [ADR-0015](adr/0015-gpu-budget-measurements.md) and, for the
+temporal resolve, [ADR-0034](adr/0034-temporal-anti-aliasing.md). `benchmarks/gpu_budgets.txt`
 holds each benchmark's reference median plus the 5 % regression allowance
 of §10.7 (with a 50 µs floor on the sub-0.2 ms entries); it is generated
 from the reference JSON by `scripts/gpu_budgets.py`, so a re-baseline (a
@@ -165,13 +167,15 @@ renderer itself on a device, scene by scene, and reports what CLAUDE.md
 Each scene renders warm-up frames (at least 24 and 500 ms: instance
 uploads, the environment's image-based-lighting passes, the GPU's clocks),
 then `--frames` measured ones (default 120), timed by the renderer's GPU
-profiler. The scenes are synthetic until Phase 10's reference scenes
-arrive:
+profiler. The production path's scenes resolve temporally (the runtime's
+default, docs/render.md "Temporal anti-aliasing"). The scenes are synthetic
+until Phase 10's reference scenes arrive:
 
 | Scene | What it is |
 |---|---|
 | `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
+| `field_4k_no_taa` | `field_4k_production` without temporal anti-aliasing: the tonemap pass where the other has the temporal resolve |
 | `lights_1k_{reference,production}`, `lights_1k_every_light`, `lights_4k_production` | the field at night, lit by 1,024 (or 4,000) point and spot lamps of 3 to 8 m range among the nearer rows and a dim moon: the light grid against the light count; `every_light` is the production path lighting every pixel with every light |
 | `shadows_4k_{reference,production}` | the field with the sun casting shadows (docs/render.md "Shadows"): the reference traces rays, the production path draws the sun's virtual shadow map |
 | `shadows_rt_4k_production` | the production path with the sun's shadows ray traced instead (`NPH_RENDER_VIS_RT_SHADOWS`) |
@@ -186,8 +190,8 @@ render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list]
 ```
 
 The device keeps its shader statistics, so the log (stderr) has each
-production compute pass's registers and spills, as the driver reports
-them.
+production compute pass's registers and spills, and the temporal
+resolve's, as the driver reports them.
 
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
