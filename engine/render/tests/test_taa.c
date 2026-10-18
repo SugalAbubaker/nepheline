@@ -186,7 +186,7 @@ static void supersampled(RenderFixture *f, const NphRenderView *view, u8 *out)
     v.anti_aliasing = NPH_RENDER_AA_NONE;
     (void)test_render_frame(f, &v, big);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
-    const u64 bytes = (u64)SS_SIZE * SS_SIZE * 4U;
+    const u64 bytes = (u64)SS_SIZE * (u64)SS_SIZE * 4U;
     u8 *texels = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, bytes);
     NTEST_ASSERT_NOT_NULL(texels);
     test_read_image(f->dev, big, 0U, texels, bytes);
@@ -196,7 +196,8 @@ static void supersampled(RenderFixture *f, const NphRenderView *view, u8 *out)
                 f32 sum = 0.0F;
                 for (u32 sy = 0; sy < SS; ++sy) {
                     for (u32 sx = 0; sx < SS; ++sx) {
-                        const u64 at = (((u64)y * SS + sy) * SS_SIZE + (u64)x * SS + sx) * 4U + c;
+                        const u64 at =
+                            (((u64)y * SS + sy) * (u64)SS_SIZE + (u64)x * SS + sx) * 4U + c;
                         sum += nph_render_ref_srgb_to_linear((f32)texels[at] / 255.0F);
                     }
                 }

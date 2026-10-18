@@ -714,7 +714,7 @@ NTEST_F(GpuFixture, an_image_is_sampled_in_another_format)
     NphGpuShader fetch = test_load_shader(f->dev, "test_texel_fetch.comp");
     NphGpuPipeline write_pipeline = make_compute(f->dev, write);
     NphGpuPipeline fetch_pipeline = make_compute(f->dev, fetch);
-    const u64 bytes = 16U * 16U * sizeof(NphVec4);
+    const u64 bytes = (u64)16U * 16U * sizeof(NphVec4);
     NphGpuBuffer out = test_make_buffer(
         f->dev, bytes, (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
         NPH_GPU_MEMORY_DEVICE, "texels");
