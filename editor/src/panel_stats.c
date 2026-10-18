@@ -61,6 +61,14 @@ static void frame_stats(Editor *ed)
             // The temporal resolve (r.taa): a history restarts after a cut.
             igText("temporal anti-aliasing%s", r->taa_history ? "" : "   (history restarted)");
         }
+        // The exposure (r.auto_exposure adapts it toward the metering) and
+        // the bloom (r.bloom).
+        if (r->metered_ev100 != 0.0F) {
+            igText("exposure EV100 %.2f (metered %.2f)%s", (f64)r->ev100, (f64)r->metered_ev100,
+                   r->bloom ? "   bloom" : "");
+        } else {
+            igText("exposure EV100 %.2f%s", (f64)r->ev100, r->bloom ? "   bloom" : "");
+        }
         igText("viewport %ux%u", ed->viewport.width, ed->viewport.height);
     }
     if (igCollapsingHeader_TreeNodeFlags("Scene mirror", ImGuiTreeNodeFlags_None)) {

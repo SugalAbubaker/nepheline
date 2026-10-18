@@ -248,11 +248,15 @@ u32 nph_engine_game_reloads(const NphEngine *engine);
 // Overrides the view (the editor's camera): from now on frames render
 // `view` instead of the world's active Camera. NULL returns to the world's.
 // The r.pipeline, r.occlusion, r.cone_culling, r.sw_raster,
-// r.virtual_shadows, and r.taa cvars replace the view's `pipeline`,
-// `vis_flags`, and `anti_aliasing` either way. The first frame after a
-// switch between the override and the world's camera is a camera cut; a
-// caller that moves its own camera discontinuously sets `camera_cut` in
-// the view it passes for that frame.
+// r.virtual_shadows, r.taa, r.bloom, r.auto_exposure,
+// r.exposure_compensation, and r.exposure_speed cvars replace the view's
+// `pipeline`, `vis_flags`, `anti_aliasing`, `bloom`, `exposure`,
+// `exposure_compensation`, and `exposure_speed` either way, and the
+// engine sets `frame_seconds` (one simulation step per frame under
+// rt.lockstep); an automatic exposure starts from the view's `ev100`. The
+// first frame after a switch between the override and the world's camera
+// is a camera cut; a caller that moves its own camera discontinuously sets
+// `camera_cut` in the view it passes for that frame.
 void nph_engine_set_view(NphEngine *engine, const NphRenderView *view);
 
 // The view the last frame rendered.

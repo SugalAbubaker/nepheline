@@ -75,6 +75,18 @@ static const NPH_CVAR_BOOL(k_virtual_shadows, "r.virtual_shadows", 1,
 static const NPH_CVAR_BOOL(k_taa, "r.taa", 1,
                            "temporal anti-aliasing at native resolution (production)",
                            NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_FLOAT(k_bloom, "r.bloom", 0.04, 0.0, 1.0,
+                            "the bloom's weight in the image (0: none)", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_BOOL(k_auto_exposure, "r.auto_exposure", 0,
+                           "meter each frame and adapt the exposure to it, starting from the "
+                           "camera's EV100",
+                           NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_exposure_compensation, "r.exposure_compensation", 0.0, -16.0, 16.0,
+                            "automatic exposure: stops brighter than the metering",
+                            NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_exposure_speed, "r.exposure_speed", 1.5, 0.01, 100.0,
+                            "automatic exposure: e-foldings per second toward the metering",
+                            NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -90,21 +102,62 @@ static NphResult register_cvars(NphEngine *e)
 {
     EngineCvars *cv = &e->cv;
     NphCvar *const slots[] = {
-        &cv->max_frames,      &cv->pipelined,    &cv->max_fps,
-        &cv->lockstep,        &cv->max_entities, &cv->world_events,
-        &cv->workers,         &cv->sim_rate,     &cv->sim_max_steps,
-        &cv->sim_time_scale,  &cv->vsync,        &cv->width,
-        &cv->height,          &cv->hot_reload,   &cv->reload_poll_ms,
-        &cv->prof_enabled,    &cv->prof_history, &cv->pipeline,
-        &cv->occlusion,       &cv->cone_culling, &cv->sw_raster,
-        &cv->virtual_shadows, &cv->taa,
+        &cv->max_frames,
+        &cv->pipelined,
+        &cv->max_fps,
+        &cv->lockstep,
+        &cv->max_entities,
+        &cv->world_events,
+        &cv->workers,
+        &cv->sim_rate,
+        &cv->sim_max_steps,
+        &cv->sim_time_scale,
+        &cv->vsync,
+        &cv->width,
+        &cv->height,
+        &cv->hot_reload,
+        &cv->reload_poll_ms,
+        &cv->prof_enabled,
+        &cv->prof_history,
+        &cv->pipeline,
+        &cv->occlusion,
+        &cv->cone_culling,
+        &cv->sw_raster,
+        &cv->virtual_shadows,
+        &cv->taa,
+        &cv->bloom,
+        &cv->auto_exposure,
+        &cv->exposure_compensation,
+        &cv->exposure_speed,
     };
     const NphCvar *const templates[] = {
-        &k_max_frames,   &k_pipelined,       &k_max_fps,  &k_lockstep,      &k_max_entities,
-        &k_world_events, &k_workers,         &k_sim_rate, &k_sim_max_steps, &k_sim_time_scale,
-        &k_vsync,        &k_width,           &k_height,   &k_hot_reload,    &k_reload_poll_ms,
-        &k_prof_enabled, &k_prof_history,    &k_pipeline, &k_occlusion,     &k_cone_culling,
-        &k_sw_raster,    &k_virtual_shadows, &k_taa,
+        &k_max_frames,
+        &k_pipelined,
+        &k_max_fps,
+        &k_lockstep,
+        &k_max_entities,
+        &k_world_events,
+        &k_workers,
+        &k_sim_rate,
+        &k_sim_max_steps,
+        &k_sim_time_scale,
+        &k_vsync,
+        &k_width,
+        &k_height,
+        &k_hot_reload,
+        &k_reload_poll_ms,
+        &k_prof_enabled,
+        &k_prof_history,
+        &k_pipeline,
+        &k_occlusion,
+        &k_cone_culling,
+        &k_sw_raster,
+        &k_virtual_shadows,
+        &k_taa,
+        &k_bloom,
+        &k_auto_exposure,
+        &k_exposure_compensation,
+        &k_exposure_speed,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -548,10 +601,11 @@ static void poll_events(NphEngine *e)
 }
 
 // The view to render: the override, or the world's camera. The r.*
-// cvars choose the pipeline, its culling, and its anti-aliasing for either;
-// a switch between the two is a camera cut (the temporal history of the
-// other camera does not carry over).
-static void choose_view(NphEngine *e)
+// cvars choose the pipeline, its culling, its anti-aliasing, its bloom, and
+// how it is exposed for either; a switch between the two is a camera cut
+// (the temporal history of the other camera does not carry over). `dt` is
+// the time since the previous frame, which paces the automatic exposure.
+static void choose_view(NphEngine *e, f64 dt)
 {
     // A cut the host asked for in its view applies to one frame.
     bool cut = false;
@@ -583,6 +637,16 @@ static void choose_view(NphEngine *e)
     if (!nph_cvar_get_bool(&e->cv.virtual_shadows)) {
         e->view.vis_flags |= (u32)NPH_RENDER_VIS_RT_SHADOWS;
     }
+    e->view.bloom = (f32)nph_cvar_get_float(&e->cv.bloom);
+    e->view.exposure = nph_cvar_get_bool(&e->cv.auto_exposure) ? NPH_RENDER_EXPOSURE_AUTO
+                                                               : NPH_RENDER_EXPOSURE_MANUAL;
+    e->view.exposure_compensation = (f32)nph_cvar_get_float(&e->cv.exposure_compensation);
+    e->view.exposure_speed = (f32)nph_cvar_get_float(&e->cv.exposure_speed);
+    // In lockstep a frame lasts one step whatever the clock says, so a
+    // run's exposure is the same every time.
+    const f64 seconds =
+        nph_cvar_get_bool(&e->cv.lockstep) ? nph_fixed_clock_step_seconds(&e->clock) : dt;
+    e->view.frame_seconds = (f32)seconds;
 }
 
 // The sync point: the world is quiescent from here to the simulation's
@@ -619,7 +683,7 @@ static NphResult sync_point(NphEngine *e, f64 dt)
     if (r == NPH_RESULT_OK && e->renderer != NULL) {
         nph_render_debug_flip(e->renderer);
     }
-    choose_view(e);
+    choose_view(e, dt);
     e->stats.sync_ms = nph_time_ns_to_ms(nph_time_now_ns() - t0);
     NPH_PROFILE_END();
     return r;

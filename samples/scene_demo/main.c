@@ -17,8 +17,9 @@
 // --headless runs the simulation without a window (and exits 0); otherwise
 // exit status 77 means no window system or Vulkan device (CTest
 // "skipped"), 1 a failure. Keys: Space pauses, P switches the pipeline,
-// T switches temporal anti-aliasing (on, as the runtime's r.taa), the mouse
-// wheel zooms, Escape quits.
+// T switches temporal anti-aliasing (on, as the runtime's r.taa), B the
+// bloom (on, as r.bloom), E the automatic exposure (off, as
+// r.auto_exposure), the mouse wheel zooms, Escape quits.
 
 #include <nepheline/core/json.h>
 #include <nepheline/jobs/jobs.h>
@@ -45,6 +46,7 @@
 NPH_LOG_CATEGORY_DEFINE(LOG_SAMPLE, "scene_demo", NPH_LOG_LEVEL_INFO);
 
 #define EXIT_SKIPPED 77
+#define DEMO_BLOOM   0.04F // the runtime's r.bloom default
 
 // ---------------------------------------------------------------------------
 // Components
@@ -545,6 +547,15 @@ static void log_systems(const App *app)
                      "render (reference): %u instances, %u culled, %u draws, %u triangles",
                      rs->instances, rs->culled, rs->draws, rs->triangles);
     }
+    // The metering arrives a couple of frames late, and only with the
+    // automatic exposure.
+    if (rs->metered_ev100 != 0.0F) {
+        NPH_LOG_INFO(&LOG_SAMPLE, "exposure: EV100 %.2f, metered %.2f%s", (f64)rs->ev100,
+                     (f64)rs->metered_ev100, rs->bloom ? "; bloom" : "");
+    } else {
+        NPH_LOG_INFO(&LOG_SAMPLE, "exposure: EV100 %.2f%s", (f64)rs->ev100,
+                     rs->bloom ? "; bloom" : "");
+    }
 }
 
 static NphResult open_device(App *app, int *status)
@@ -701,6 +712,13 @@ static void handle_input(App *app, bool *paused, f32 *distance, NphRenderView *v
                 const bool temporal = view->anti_aliasing == NPH_RENDER_AA_TEMPORAL;
                 view->anti_aliasing = temporal ? NPH_RENDER_AA_NONE : NPH_RENDER_AA_TEMPORAL;
                 NPH_LOG_INFO(&LOG_SAMPLE, "temporal anti-aliasing: %s", temporal ? "off" : "on");
+            } else if (e.u.key.key == NPH_KEY_B) {
+                view->bloom = view->bloom > 0.0F ? 0.0F : DEMO_BLOOM;
+                NPH_LOG_INFO(&LOG_SAMPLE, "bloom: %s", view->bloom > 0.0F ? "on" : "off");
+            } else if (e.u.key.key == NPH_KEY_E) {
+                const bool automatic = view->exposure == NPH_RENDER_EXPOSURE_AUTO;
+                view->exposure = automatic ? NPH_RENDER_EXPOSURE_MANUAL : NPH_RENDER_EXPOSURE_AUTO;
+                NPH_LOG_INFO(&LOG_SAMPLE, "exposure: %s", automatic ? "manual" : "automatic");
             }
         }
     }
@@ -827,6 +845,10 @@ static void run(App *app, int *status)
     view.ev100 = 6.5F;
     view.pipeline = app->opt.pipeline;
     view.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
+    view.bloom = DEMO_BLOOM;
+    // The automatic exposure (E) adapts one step's time per frame, so
+    // --frames runs stay reproducible.
+    view.frame_seconds = (f32)dt;
     bool paused = false;
     f32 distance = 52.0F;
     f32 angle = 0.6F;
@@ -906,7 +928,9 @@ int main(int argc, char **argv)
         run(&app, &status);
     } else if (open_device(&app, &status) == NPH_RESULT_OK) {
         if (create_renderer(&app) == NPH_RESULT_OK) {
-            NPH_LOG_INFO(&LOG_SAMPLE, "%s; keys: Space pause, P pipeline, wheel zoom, Escape quit",
+            NPH_LOG_INFO(&LOG_SAMPLE,
+                         "%s; keys: Space pause, P pipeline, T anti-aliasing, B bloom, E "
+                         "exposure, wheel zoom, Escape quit",
                          nph_gpu_device_info(app.dev)->name);
             run(&app, &status);
         } else {
