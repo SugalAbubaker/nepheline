@@ -264,10 +264,10 @@ vec3 vsm_clip_to_light(VsmViewRef r, vec2 ndc, float depth)
 // `distance` from the camera, on a surface whose geometric normal in light
 // space is `nl` (unit, toward the light: nl.z <= 0): the depth test against
 // the resolution-matched level holding the point's page, with 2 x 2
-// percentage-closer filtering in the sampler (Reeves, Salesin & Cook,
-// SIGGRAPH 1987), the receiver moved off its surface along the normal by a
-// share of the level's texel (normal-offset shadows; Holbert, "Saying
-// Goodbye to Shadow Acne", GDC 2011). The filter stays inside the page. A
+// percentage-closer filtering (Reeves, Salesin & Cook, SIGGRAPH 1987), the
+// receiver moved off its surface along the normal by a share of the
+// level's texel (normal-offset shadows; Holbert, "Saying Goodbye to Shadow
+// Acne", GDC 2011). The filter stays inside the page. A
 // level without the page (the request took the next coarser one:
 // VSM_LEVEL_SLACK, the margin at a window's edge) passes to the next;
 // after three levels whose windows hold the point, or past the last, the
@@ -299,10 +299,20 @@ float vsm_shadow_light_space(VsmViewRef r, vec3 ls, float distance, vec3 nl)
         const vec2 at = vec2(vsm_pool_base(state & NPH_VSM_ENTRY_PAGE)) +
                         clamp((c.xy - vec2(rel)) * float(NPH_VSM_PAGE), vec2(0.5),
                               vec2(float(NPH_VSM_PAGE) - 0.5));
-        // The pool and its sampler are the same for every invocation.
-        return textureLod(sampler2DShadow(nph_textures_2d[r.v.pool_index],
-                                          nph_samplers[r.v.compare_sampler]),
-                          vec3(at * r.v.pool_scale.xy, c.z), 0.0);
+        // The four depths around it in one gather, each compared and
+        // weighted as bilinear filtering would: the comparison done here
+        // rather than by a depth-comparison sampler, which needs a depth
+        // image type the bindless array does not declare (SPIR-V's
+        // OpSampledImage over a Depth 0 image; lavapipe compares nothing).
+        // Gather order: (0, 1), (1, 1), (1, 0), (0, 0). The pool and its
+        // sampler are the same for every invocation.
+        const vec4 stored = textureGather(sampler2D(nph_textures_2d[r.v.pool_index],
+                                                    nph_samplers[r.v.pool_sampler]),
+                                          at * r.v.pool_scale.xy, 0);
+        const vec2 f = fract(at - 0.5);
+        const vec4 lit = vec4(lessThanEqual(vec4(c.z), stored));
+        return dot(lit, vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y),
+                             (1.0 - f.x) * (1.0 - f.y)));
     }
     return 1.0;
 }

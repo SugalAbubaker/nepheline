@@ -41,12 +41,11 @@ drawn), unless stated otherwise.
 1. **Scope.** The production path's sun, the live directional light that
    casts shadows in the lowest light slot, gets the map; every other
    shadow-casting light keeps its rays, and the reference renderer stays
-   the ray-traced ground truth. A device without depth clamping, clip
-   distances, or bilinear depth comparison on D32 has no map
-   (`nph_renderer_virtual_shadows_supported`), nor does a renderer created
-   with `disable_virtual_shadows`; its sun is then ray traced, as is the
-   sun of a view with `NPH_RENDER_VIS_RT_SHADOWS` (the `r.virtual_shadows`
-   cvar).
+   the ray-traced ground truth. A device without depth clamping or clip
+   distances has no map (`nph_renderer_virtual_shadows_supported`), nor
+   does a renderer created with `disable_virtual_shadows`; its sun is then
+   ray traced, as is the sun of a view with `NPH_RENDER_VIS_RT_SHADOWS`
+   (the `r.virtual_shadows` cvar).
 2. **Light space and the clipmap.** Light space has axes u and v across
    the light and d along it, its origin at an anchor within 2 km of the
    camera, which moves to the camera (dropping every page) when the camera
@@ -106,11 +105,17 @@ drawn), unless stated otherwise.
    three levels whose windows hold the point until one holds its page
    (lit past those). The point moves off its surface along its geometric
    normal (turned to the light) by 1.5 of the level's texels (normal-offset
-   shadows; Holbert, "Saying Goodbye to Shadow Acne", GDC 2011), and one
-   comparison sample with bilinear filtering gives 2 × 2 percentage-closer
+   shadows; Holbert, "Saying Goodbye to Shadow Acne", GDC 2011). One
+   gather fetches the four depths around it, each compared in the shader
+   and weighted as bilinear filtering would: 2 × 2 percentage-closer
    filtering (Reeves, Salesin & Cook, SIGGRAPH 1987), its footprint kept
-   inside the page. The page table is read for the entry's state alone:
-   `vsm update` has dropped every entry whose page the window left.
+   inside the page. A depth-comparison sampler would do the comparison in
+   the texture unit, but GLSL reaches it only by constructing a shadow
+   sampler over an image of the bindless array, which SPIR-V types as a
+   non-depth image; NVIDIA accepts that, and the gather is the portable
+   form at the same cost (1.165 against 1.162 ms of resolve). The page
+   table is read for the entry's state alone: `vsm update` has dropped
+   every entry whose page the window left.
 8. **Overflow.** The pool, the meshlet items (`max_vsm_meshlets`, 2^20),
    and the draws (`max_vsm_draws`, 2^20) are fixed. What does not fit is
    dropped, flagged in `NphRenderFrameStats.vsm_overflow`, and logged once;
@@ -147,9 +152,9 @@ drawn), unless stated otherwise.
   pyramid's first pass, which reads the whole visibility buffer anyway
   (half of it the rounds of subgroup minimums at page and level edges, a
   quarter of the subgroups). The map's own passes take 0.048 ms in a
-  still frame. The rest is the resolve's lookup: 0.27 ms. About
-  0.1 ms of that is the lookup's own work (a page-table read, a filtered
-  comparison, the level search); the rest is registers: the resolve
+  still frame. The rest is the resolve's lookup: 0.27 ms. About 0.1 ms of
+  that is the lookup's own work (a page-table read, a gather and four
+  comparisons, the level search); the rest is registers: the resolve
   compiles to 64 registers and 6.4 KB of shared memory per workgroup with
   the lookup, against 64 and 0.8 KB without, and a variant that has the
   lookup but never runs it already costs 0.16 ms.
@@ -195,8 +200,10 @@ drawn), unless stated otherwise.
   shading could fall back across a level boundary: twice the pages. The
   margin around the page and the shading's bias toward the finer level
   make the fallback unnecessary.
-- **Four texel fetches and the weights in the shader:** one comparison
-  sample does the same.
+- **Four texel fetches and the weights in the shader:** one gather does
+  the same in one instruction.
+- **A depth-comparison sampler** (above): no faster here, and not portable
+  over the bindless array's image type.
 - **The other places for the lookup** (above).
 - **Marking a whole level dirty for a large caster,** and scanning every
   row of a level for its pages to draw: a single moving sphere cost
@@ -226,6 +233,15 @@ drawn), unless stated otherwise.
   the pixels (62 MB held, sampled where needed, mostly from the caches).
   The declared footprints render_perf prints are upper bounds over whole
   buffers.
+- CI's lavapipe (Mesa 25.2.8) drew none of the map's pages at first, and
+  every pixel read as shadowed: a plain indirect draw (the pages' clears)
+  read its count from the count buffer of an earlier indirect-count draw
+  in the command buffer (the visibility buffer's raster), drew nothing,
+  and the casters then failed their depth test against the uncleared
+  pool. The RHI works around it for every caller
+  (`NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT`, docs/gpu.md), and a test
+  draws the map through the indexed indirect path that lavapipe takes on
+  every device.
 - New: `NphRendererDesc.disable_virtual_shadows`, `vsm_pages`,
   `max_vsm_meshlets`, `max_vsm_draws`; `NPH_RENDER_VIS_RT_SHADOWS`;
   `nph_renderer_virtual_shadows_supported`; statistics `vsm`,

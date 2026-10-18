@@ -125,14 +125,13 @@ static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out
 
 // The production path decides it as it is created (render_vis_create), so
 // its resolve and blended pipelines have the variants that read the map.
-// The shading filters the pool's depth comparisons bilinearly.
+// The shading gathers the pool's depths.
 bool render_vsm_device_supported(const NphRenderer *r)
 {
     const NphGpuFeatures *f = &nph_gpu_device_info(r->dev)->features;
     return !r->desc.disable_virtual_shadows && f->depth_clamp && f->clip_distance &&
            nph_gpu_format_supports(r->dev, RENDER_DEPTH_FORMAT,
                                    (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED |
-                                       (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED_LINEAR |
                                        (u32)NPH_GPU_FORMAT_FEATURE_DEPTH_ATTACHMENT);
 }
 
@@ -222,20 +221,6 @@ NphResult render_vsm_create(NphRenderer *r)
     id.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
     id.name = "vsm pool";
     NPH_TRY(nph_gpu_image_create(dev, &id, &v->pool));
-    // Bilinear percentage-closer filtering: the stored depth against the
-    // receiver's, lit where the receiver is no farther from the light.
-    NphGpuSamplerDesc sd;
-    nph_gpu_sampler_desc_default(&sd);
-    sd.min_filter = NPH_GPU_FILTER_LINEAR;
-    sd.mag_filter = NPH_GPU_FILTER_LINEAR;
-    sd.mip_filter = NPH_GPU_FILTER_NEAREST;
-    sd.address_u = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
-    sd.address_v = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
-    sd.address_w = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
-    sd.compare_enable = 1;
-    sd.compare_op = NPH_GPU_COMPARE_LESS_OR_EQUAL;
-    sd.name = "vsm compare";
-    NPH_TRY(nph_gpu_sampler_create(dev, &sd, &v->compare_sampler));
     NphGpuBufferDesc bd;
     memset(&bd, 0, sizeof bd);
     bd.memory = NPH_GPU_MEMORY_DEVICE;
@@ -282,7 +267,6 @@ void render_vsm_destroy(NphRenderer *r)
         nph_gpu_shader_destroy(dev, v->shaders[i]);
     }
     nph_gpu_image_destroy(dev, v->pool);
-    nph_gpu_sampler_destroy(dev, v->compare_sampler);
     nph_gpu_buffer_destroy(dev, v->entries);
     nph_gpu_buffer_destroy(dev, v->phys);
     nph_gpu_buffer_destroy(dev, v->work);
@@ -447,7 +431,8 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->args = work + lo->args;
     vv->pool_pages = v->pool_pages;
     vv->pool_index = nph_gpu_image_sampled_index(r->dev, v->pool);
-    vv->compare_sampler = nph_gpu_sampler_index(r->dev, v->compare_sampler);
+    // Clamped to the edge (the samples stay inside their pages anyway).
+    vv->pool_sampler = nph_gpu_sampler_index(r->dev, r->clamp_sampler);
     vv->frame = ++v->frames;
     vv->max_meshlets = r->desc.max_vsm_meshlets;
     vv->max_draws = r->desc.max_vsm_draws;

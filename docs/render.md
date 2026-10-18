@@ -177,9 +177,9 @@ A light casts shadows when its description says so
 - **The production path's sun**, the live directional light that casts
   shadows in the lowest light slot, is shadowed by its **virtual shadow
   map** (below; [ADR-0033](adr/0033-virtual-shadow-maps.md)) wherever the
-  renderer has one: the device has depth clamping, clip distances, and
-  bilinear depth comparison on D32, and `NphRendererDesc.
-  disable_virtual_shadows` is clear (`nph_renderer_virtual_shadows_supported`).
+  renderer has one: the device has depth clamping and clip distances, and
+  `NphRendererDesc.disable_virtual_shadows` is clear
+  (`nph_renderer_virtual_shadows_supported`).
   A view with `NPH_RENDER_VIS_RT_SHADOWS` (the runtime's
   `r.virtual_shadows` cvar off) traces the sun's rays instead.
 - **Every other shadow-casting light**, and every light of the reference
@@ -324,8 +324,10 @@ request took or the one finer and passes to the next; up to three levels
 whose windows hold the point, until one holds its page (lit past those).
 The point moves off its surface along its geometric normal, turned to the
 light, by 1.5 of the level's texels (normal-offset shadows; Holbert, GDC
-2011), and one comparison sample with bilinear filtering gives 2 × 2
-percentage-closer filtering, kept half a texel inside the page. Only an
+2011), and one gather of the four depths around it, each compared and
+weighted as bilinear filtering would, gives 2 × 2 percentage-closer
+filtering, kept half a texel inside the page (a depth-comparison sampler
+would need a depth image type the bindless array does not declare). Only an
 entry's state word is read: `vsm update` has dropped every entry whose
 page the window left. `surface.glsl` holds the call (`NPH_SURFACE_VSM`);
 the resolve and the blended surfaces have pipeline variants specialised
@@ -683,7 +685,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (91 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (92 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -725,7 +727,8 @@ synchronisation-validation gate:
   shadows; and a renderer without ray tracing drawing such lights
   unshadowed.
 - **The sun's virtual shadow map** (`test_vsm.c`), held to the same
-  classification with a margin of its texels: the sun behind a cube; a
+  classification with a margin of its texels: the sun behind a cube, with
+  mesh shaders and through the indexed indirect raster lavapipe takes; a
   blended floor with nothing opaque under it, shadowed by a cube out of
   view (its pages come from the blended surfaces' own requests); a narrow
   view from 20 km, beyond the window of the level matching its pixels;

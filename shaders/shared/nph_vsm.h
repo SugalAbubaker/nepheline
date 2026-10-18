@@ -158,9 +158,9 @@ NPH_SHARED_STRUCT(NphVsmView)
     f32 texel_bias;  // the receiver's offset along its normal, in texels of its level
     f32 margin;      // pages: a request also takes the pages this near (the offset, and slack)
     u32 pool_pages;
-    u32 pool_index;      // bindless sampled index of the pool (D32_SFLOAT)
-    u32 compare_sampler; // bindless index of the pool's sampler: bilinear depth comparison
-    u32 frame;           // counts frames that have the virtual shadow map (pages' ages)
+    u32 pool_index;   // bindless sampled index of the pool (D32_SFLOAT)
+    u32 pool_sampler; // bindless index of the sampler the pool is gathered with
+    u32 frame;        // counts frames that have the virtual shadow map (pages' ages)
     u32 max_meshlets;
     u32 max_draws;
     u32 reset; // nonzero: every page is dropped this frame

@@ -92,6 +92,58 @@ NTEST_F(Vsm, the_sun_shadows_what_the_geometry_says)
     NTEST_EXPECT_GT_UINT(c.lit, 2000U);
 }
 
+// The same on a device whose mesh shaders are switched off: the pages are
+// drawn with indexed indirect draws, as on lavapipe-class devices.
+NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
+{
+    static RenderFixture fx;
+    RenderFixture *f = &fx;
+    memset(f, 0, sizeof *f);
+    NphGpuDeviceDesc dd;
+    memset(&dd, 0, sizeof dd);
+    dd.alloc = nph_allocator_system();
+    dd.headless = 1;
+    dd.disable_features = (u32)NPH_GPU_OPTIONAL_MESH_SHADER;
+    f->dev = test_gpu_create(&dd);
+    if (f->dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, f->dev);
+    NTEST_ASSERT_EQ_INT(nph_renderer_create(&rd, &f->renderer), NPH_RESULT_OK);
+    NphGpuRenderGraphDesc gd;
+    memset(&gd, 0, sizeof gd);
+    gd.alloc = nph_allocator_system();
+    NTEST_ASSERT_EQ_INT(nph_gpu_render_graph_create(f->dev, &gd, &f->graph), NPH_RESULT_OK);
+    f->target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, TEST_TARGET_SIZE);
+    f->pixels = NPH_ALLOC_ARRAY_ZEROED(nph_allocator_system(), u8, PIXELS);
+    if (!nph_renderer_virtual_shadows_supported(f->renderer)) {
+        test_render_teardown(f);
+        NTEST_SKIP("no virtual shadow map on this device");
+    }
+    Scene s;
+    scene_build(f, &s, at(0.0, 1.0, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(false);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphRenderCamera cam = top_camera();
+    NphRenderView v;
+    vsm_view(&v, cam);
+    static u8 off[PIXELS];
+    static u8 on[PIXELS];
+    render_into(f, &v, off);
+    set_shadows(f, sun, &ld, true);
+    const NphRenderFrameStats st = render_into(f, &v, on);
+    NTEST_EXPECT_TRUE(st.vsm);
+    const Light l = {true, ld.direction, nph_vec3_zero()};
+    const Box occluder = box_at(nph_vec3(0.0F, 1.0F, 0.0F), 1.0F);
+    const ShadowCheck c = check_shadow(on, off, &cam, &l, &occluder, VSM_GROW);
+    log_check("sun behind a cube", "virtual shadow map, indirect raster", &c);
+    NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
+    NTEST_EXPECT_GT_UINT(c.shadow, 8U);
+    NTEST_EXPECT_GT_UINT(c.lit, 2000U);
+    test_render_teardown(f);
+}
+
 // A blended floor, with nothing opaque under it, shadowed by a cube out of
 // the camera's view: the visibility buffer holds nothing at all, so the
 // floor's pages come from the blended surfaces' own requests, and the

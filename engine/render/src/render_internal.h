@@ -198,11 +198,10 @@ typedef struct VsmLayout {
 typedef struct RenderVsm {
     b32 supported;
     u32 pool_pages;
-    NphGpuImage pool;              // D32_SFLOAT, NPH_VSM_POOL_ROW pages per row
-    NphGpuSampler compare_sampler; // the pool's: bilinear depth comparison
-    NphGpuBuffer entries;          // NphVsmEntry[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
-    NphGpuBuffer phys;             // NphVsmPhys[pool_pages]
-    NphGpuBuffer work;             // VsmLayout
+    NphGpuImage pool;     // D32_SFLOAT, NPH_VSM_POOL_ROW pages per row
+    NphGpuBuffer entries; // NphVsmEntry[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
+    NphGpuBuffer phys;    // NphVsmPhys[pool_pages]
+    NphGpuBuffer work;    // VsmLayout
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVsmCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // 1 + the frame copied into stats[i], 0: none
     u32 stats_bias[NPH_GPU_FRAMES_IN_FLIGHT];     // the resolution bias that frame drew with
