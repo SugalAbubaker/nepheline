@@ -28,7 +28,9 @@
 //   - glTF 2.0 metallic-roughness materials: base colour, metallic,
 //     roughness, normal, occlusion, and emissive textures; opaque, masked,
 //     and blended alpha; double-sided and unlit materials;
-//   - punctual lights in KHR_lights_punctual units (lux, candela);
+//   - punctual lights in KHR_lights_punctual units (lux, candela), with
+//     ray-traced hard shadows for those that cast them where the device
+//     has ray queries (nph_renderer_ray_tracing_supported);
 //   - image-based lighting from a procedural sky, an equirectangular
 //     texture, or a cube texture, through the split-sum approximation;
 //   - a pre-exposed HDR target (physical exposure from EV100), tonemapped
@@ -143,7 +145,12 @@ typedef struct NphRendererDesc {
     u32 meshlet_index_pool;   // meshlet corners of all meshes for the indirect raster, on
                               // devices without mesh shaders (2^24); a destroyed mesh's
                               // return two frames later
-    const char *name;         // for logs and GPU object names
+    // Ray-traced shadows, where the device has ray queries (docs/render.md
+    // "Shadows"): set to never create them (no acceleration structures,
+    // GPU memory, or pipelines for them); lights that cast shadows then draw
+    // unshadowed (logged once).
+    b32 disable_ray_tracing;
+    const char *name; // for logs and GPU object names
 } NphRendererDesc;
 
 // Creates the renderer: pools, samplers, the per-frame buffers, the
@@ -389,6 +396,9 @@ typedef struct NphRenderLightDesc {
     f32 range;         // point and spot: 0 is unlimited
     f32 inner_cone;    // spot: radians, [0, outer)
     f32 outer_cone;    // spot: radians, (inner, pi / 2]
+    // Casts shadows: shadow rays where the device has ray queries (both
+    // pipelines; docs/render.md "Shadows"), none elsewhere (logged once).
+    b32 shadows;
 } NphRenderLightDesc;
 
 // NPH_RESULT_INVALID_ARGUMENT for a negative intensity or range, a zero
@@ -534,6 +544,16 @@ typedef struct NphRenderFrameStats {
     u32 debug_lines;
     b32 environment_updated;    // this frame declared the IBL passes
     NphRenderPipeline pipeline; // the pipeline that drew the frame
+    // Ray-traced shadows: whether the frame traced shadow rays (some light
+    // casts shadows and the renderer has ray tracing); the meshes'
+    // bottom-level structures it built (each once, in the first frame that
+    // traces after the mesh's creation); and whether it rebuilt the top
+    // level over the instances (the reference every frame; the production
+    // path when instances changed, after a frame that traced nothing, or
+    // when the camera moved more than 16 m from where it last built it).
+    b32 shadow_rays;
+    u32 shadow_builds;
+    b32 shadow_rebuild;
     // The production path's GPU counters, read back from the frame that
     // completed NPH_GPU_FRAMES_IN_FLIGHT frames ago (vis_frame); zero
     // until one has. On that path `instances` above is the live count,
@@ -566,6 +586,10 @@ typedef enum NphRenderVisOverflow {
 // needs and the description did not disable it.
 bool nph_renderer_production_supported(const NphRenderer *r);
 
+// Whether the renderer traces shadow rays for lights that cast shadows:
+// the device has ray queries and the description did not disable them.
+bool nph_renderer_ray_tracing_supported(const NphRenderer *r);
+
 // Declares this frame's passes into `graph` (between nph_gpu_rg_begin and
 // nph_gpu_rg_compile) and fills the frame's GPU records. `target` is the
 // image the tonemapped result is written to, typically the acquired
@@ -575,7 +599,8 @@ bool nph_renderer_production_supported(const NphRenderer *r);
 // in `out_target` (may be NULL) for the caller's own passes and the
 // present. Uploads queued since the last frame are flushed so the passes
 // see them. Once per frame, inside a frame (nph_gpu_frame_begin), from the
-// main thread.
+// main thread; the passes record from the renderer's resources when the
+// graph executes, so none may be created or destroyed in between.
 // NPH_RESULT_INVALID_STATE outside a frame or for a second call in one
 // frame; NPH_RESULT_INVALID_ARGUMENT for an invalid target or a camera
 // without a positive field of view and near distance;

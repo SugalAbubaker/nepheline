@@ -35,7 +35,8 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 112U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 128U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
 NPH_STATIC_ASSERT(sizeof(NphVisLight) == 96U, "NphVisLight matches its GLSL layout");
@@ -377,6 +378,8 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     rec.submesh_slots = nph_gpu_buffer_address(r->dev, m->submesh_slots);
     rec.meshlet_count = meshlet_count;
     rec.index_base = index_base;
+    rec.blas =
+        nph_gpu_accel_is_valid(r->dev, m->blas) ? nph_gpu_accel_address(r->dev, m->blas) : 0U;
     return nph_gpu_upload_buffer(r->dev, v->meshes, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
@@ -673,6 +676,7 @@ u32 render_vis_write_updates(NphRenderer *r)
         u->copy_previous = 1U;
     }
     // Then the changed instances, as many as fit; the rest wait a frame.
+    const u32 catch_ups = n;
     v->sent_next_count = 0U;
     u32 kept = 0U;
     for (u32 i = 0; i < v->dirty_count; ++i) {
@@ -699,6 +703,7 @@ u32 render_vis_write_updates(NphRenderer *r)
         v->updates_logged = 1;
     }
     v->dirty_count = kept;
+    v->frame_changed = n - catch_ups;
     u32 *swap = v->sent;
     v->sent = v->sent_next;
     v->sent_next = swap;

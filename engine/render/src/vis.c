@@ -54,6 +54,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_lights.comp",
     "vis_light_bins.comp",
     "vis_light_tiles.comp",
+    "vis_resolve_rt.comp",
     "vis_raster_opaque.mesh",
     "vis_raster_masked.mesh",
     "vis_raster_mesh_opaque.frag",
@@ -69,12 +70,21 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_SCATTER,    VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
     VIS_SHADER_HZB,        VIS_SHADER_RESOLVE,        VIS_SHADER_SW_RASTER,     VIS_SHADER_LIGHTS,
-    VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,
+    VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,    VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
-    "vis scatter", "vis cull instances", "vis cull meshlets", "vis args",       "vis hzb",
-    "vis resolve", "vis sw raster",      "vis lights",        "vis light bins", "vis light tiles",
+    "vis scatter",
+    "vis cull instances",
+    "vis cull meshlets",
+    "vis args",
+    "vis hzb",
+    "vis resolve",
+    "vis sw raster",
+    "vis lights",
+    "vis light bins",
+    "vis light tiles",
+    "vis resolve (ray traced)",
 };
 
 // ---------------------------------------------------------------------------
@@ -176,18 +186,23 @@ NphResult render_vis_create(NphRenderer *r)
         const bool vertex_stage =
             i >= (u32)VIS_SHADER_VERT_OPAQUE && i <= (u32)VIS_SHADER_VERT_FRAG_MASKED;
         // Only the raster path in use: a mesh shader cannot even be loaded
-        // on a device without the extension.
-        if ((mesh_stage && !v->mesh_shaders) || (vertex_stage && v->mesh_shaders)) {
+        // on a device without the extension, nor the ray-traced resolve on
+        // one without ray queries.
+        if ((mesh_stage && !v->mesh_shaders) || (vertex_stage && v->mesh_shaders) ||
+            (i == (u32)VIS_SHADER_RESOLVE_RT && !r->rt.supported)) {
             continue;
         }
         NPH_TRY(render_load_shader_file(r, k_shader_files[i], &v->shaders[i]));
     }
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
+        if (i == (u32)VIS_COMPUTE_RESOLVE_RT && !r->rt.supported) {
+            continue;
+        }
         NphGpuComputePipelineDesc d;
         memset(&d, 0, sizeof d);
         d.shader = v->shaders[k_compute_shaders[i]];
         d.name = k_compute_names[i];
-        if (i == (u32)VIS_COMPUTE_RESOLVE) {
+        if (i == (u32)VIS_COMPUTE_RESOLVE || i == (u32)VIS_COMPUTE_RESOLVE_RT) {
             // Whether the resolve dithers to the HDR target's precision
             // (vis_resolve.comp k_dither).
             d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
@@ -219,8 +234,12 @@ NphResult render_vis_create(NphRenderer *r)
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &v->depth));
     if (v->hdr_format != RENDER_HDR_FORMAT) {
         for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
-            NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format,
+            NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format, false,
                                             &v->blend_pipelines[c]));
+            if (r->rt.supported) {
+                NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format,
+                                                true, &v->blend_pipelines_rt[c]));
+            }
         }
     }
     NPH_TRY(render_vis_scene_create(r));
@@ -251,6 +270,7 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, v->depth);
     for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
         nph_gpu_pipeline_destroy(dev, v->blend_pipelines[c]);
+        nph_gpu_pipeline_destroy(dev, v->blend_pipelines_rt[c]);
     }
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         nph_gpu_shader_destroy(dev, v->shaders[i]);
@@ -782,7 +802,8 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphVisPush p = push_of(r, 0U, 0U);
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
     p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_RESOLVE]);
+    nph_gpu_cmd_bind_pipeline(
+        cmd, r->vis.compute[r->rt.frame_active ? VIS_COMPUTE_RESOLVE_RT : VIS_COMPUTE_RESOLVE]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
@@ -985,6 +1006,9 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_read_image(p, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(p, sh, NPH_GPU_RG_USE_SHADER_READ);
     read_lights(p, f);
+    if (r->rt.frame_active) {
+        nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    }
     nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
@@ -1181,6 +1205,11 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     }
 
     res = declare_culling(graph, r, &g);
+    if (res == NPH_RESULT_OK && r->rt.frame_active) {
+        // Shadow rays: the instance records from the GPU scene, then the
+        // builds, before the resolve traces.
+        res = render_rt_declare(r, graph, g.instances, g.meshes, &f->tlas);
+    }
     if (res == NPH_RESULT_OK) {
         res = declare_resolve(graph, r, &g, env, specular, lut, sh);
     }
@@ -1266,5 +1295,8 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
     nph_gpu_rg_read_image(p, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(p, sh, NPH_GPU_RG_USE_SHADER_READ);
     read_lights(p, f);
+    if (r->rt.frame_active) {
+        nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    }
     return NPH_RESULT_OK;
 }

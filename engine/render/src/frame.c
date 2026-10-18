@@ -32,13 +32,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 392U, "NphRenderViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 416U, "NphRenderViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightData) == 64U, "NphRenderLightData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightGrid) == 56U, "NphRenderLightGrid matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphRenderViewData, light_grid) % 8U == 0U, "addresses are aligned");
+NPH_STATIC_ASSERT(offsetof(NphRenderViewData, tlas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(sizeof(NphRenderIblPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_TONEMAPPER_AGX == NPH_RENDER_TONEMAP_AGX,
@@ -61,7 +62,7 @@ static u64 align_up(u64 v, u64 a)
     return (v + a - 1U) & ~(a - 1U);
 }
 
-void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out)
+void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFrameLayout *out)
 {
     u64 at = 0U;
     out->view_offset = at;
@@ -83,6 +84,10 @@ void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out)
     at = align_up(at + (u64)desc->max_lights * sizeof(NphVisLightUpdate), FRAME_ALIGN);
     out->light_grid_offset = at;
     at = align_up(at + sizeof(NphRenderLightGrid), FRAME_ALIGN);
+    out->rt_instances_offset = at;
+    if (ray_tracing) {
+        at = align_up(at + (u64)desc->max_instances * sizeof(NphGpuAccelInstance), FRAME_ALIGN);
+    }
     out->size = at;
 }
 
@@ -277,7 +282,8 @@ void render_light_data(const NphRenderLightDesc *d, NphVec3 position, NphRenderL
     const NphVec3 dir = d->type == NPH_RENDER_LIGHT_TYPE_POINT ? nph_vec3(0.0F, -1.0F, 0.0F)
                                                                : nph_vec3_normalize(d->direction);
     out->direction = nph_vec4_from_vec3(dir, (f32)d->type);
-    out->color = nph_vec4_from_vec3(nph_vec3_scale(d->color, d->intensity), 0.0F);
+    out->color =
+        nph_vec4_from_vec3(nph_vec3_scale(d->color, d->intensity), d->shadows ? 1.0F : 0.0F);
     if (d->type == NPH_RENDER_LIGHT_TYPE_SPOT) {
         // KHR_lights_punctual's angular attenuation as a scale and an
         // offset on cos(angle); the outer angle's cosine and sine bound the
@@ -479,13 +485,16 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
                          NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
-    // The production path's blended surfaces draw into its own HDR format.
+    // The production path's blended surfaces draw into its own HDR format;
+    // a frame that traces shadow rays uses the pipelines that do.
     const bool compact = r->frame_production && r->vis.hdr_format != RENDER_HDR_FORMAT;
+    const bool rt = r->rt.frame_active != 0;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p = compact && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
-                                     ? r->vis.blend_pipelines[c->cull]
-                                     : r->forward[c->alpha_mode][c->cull];
+        const NphGpuPipeline p =
+            compact && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
+                ? (rt ? r->vis.blend_pipelines_rt[c->cull] : r->vis.blend_pipelines[c->cull])
+                : (rt ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull]);
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -584,6 +593,13 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     r->hdr_rg = hdr;
     *out_depth = depth;
 
+    // Shadow rays: this frame's builds, from the records
+    // render_rt_write_instances wrote, before the pass that traces.
+    NphGpuRgBuffer tlas = NPH_GPU_RG_BUFFER_NULL;
+    if (r->rt.frame_active) {
+        NPH_TRY(render_rt_declare(r, graph, NPH_GPU_RG_BUFFER_NULL, NPH_GPU_RG_BUFFER_NULL, &tlas));
+    }
+
     NphGpuRgPassDesc pd;
     memset(&pd, 0, sizeof pd);
     pd.name = "forward";
@@ -606,6 +622,9 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     nph_gpu_rg_read_image(fwd, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_read_image(fwd, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(fwd, sh, NPH_GPU_RG_USE_SHADER_READ);
+    if (r->rt.frame_active) {
+        nph_gpu_rg_read_buffer(fwd, tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    }
     return NPH_RESULT_OK;
 }
 
@@ -657,6 +676,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     r->last_frame_index = nph_gpu_frame_index(dev);
     r->frame_slot = nph_gpu_frame_slot(dev);
     r->frame_production = production ? 1 : 0;
+    // Shadow rays this frame: some light casts shadows and the device can.
+    const bool rt = render_rt_frame_begin(r, production, view->camera.position);
+    stats.shadow_rays = rt ? 1 : 0;
     const u64 address = r->frame_addresses[r->frame_slot];
     const u32 width = td->width;
     const u32 height = td->height;
@@ -680,6 +702,10 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // The production path lights from its GPU table (render_vis_frame).
     const u32 light_count = production ? 0U : write_lights(r, view->camera.position);
     build_draws(r, &fc, production, &stats);
+    // The production path writes its instance records on the GPU (vis.c).
+    if (rt && !production) {
+        render_rt_write_instances(r);
+    }
     if (stats.dropped != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u visible draws past max_draws (%u) were dropped",
                      r->name, stats.dropped, r->desc.max_draws);
@@ -719,6 +745,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->env_index = nph_gpu_image_sampled_index(dev, r->env_cube);
     vd->clamp_sampler = nph_gpu_sampler_index(dev, r->clamp_sampler);
     vd->debug_mode = (u32)view->debug_view;
+    vd->tlas = rt ? nph_gpu_accel_address(dev, r->rt.tlas) : 0U;
+    vd->tlas_offset = nph_vec4_from_vec3(r->rt.tlas_offset, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
 
@@ -755,6 +783,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     } else {
         NPH_TRY(declare_reference(r, graph, width, height, env, specular, lut, sh, &depth));
     }
+    stats.shadow_builds = r->rt.frame_builds;
+    stats.shadow_rebuild = rt && r->rt.frame_rebuild ? 1 : 0;
 
     const NphGpuRgImage out = nph_gpu_rg_import_image(graph, target);
     if (nph_gpu_rg_image_is_null(out)) {

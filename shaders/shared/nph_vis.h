@@ -151,6 +151,10 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 submesh_slots;       // u32[submesh]: each submesh's material slot
     u32 meshlet_count;
     u32 index_base; // the mesh's first corner in the meshlet index pool (indirect raster)
+    u64 blas;       // its bottom-level acceleration structure, over the quantised positions
+                    // (0: none)
+    u32 pad0;
+    u32 pad1;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.

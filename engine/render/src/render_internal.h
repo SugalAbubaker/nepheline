@@ -9,6 +9,7 @@
 #include <nepheline/core/atomic.h>
 #include <nepheline/core/handle.h>
 #include <nepheline/core/range_alloc.h>
+#include <nepheline/gpu/accel.h>
 #include <nepheline/render/debug_draw.h>
 #include <nepheline/render/meshlet.h>
 #include <nepheline/render/renderer.h>
@@ -59,6 +60,12 @@ typedef enum RenderShader {
     RENDER_SHADER_IBL_PREFILTER,
     RENDER_SHADER_IBL_SH,
     RENDER_SHADER_BRDF_LUT,
+    // With ray-traced shadows (rt.c), loaded where the device has ray
+    // queries.
+    RENDER_SHADER_FORWARD_OPAQUE_RT,
+    RENDER_SHADER_FORWARD_MASK_RT,
+    RENDER_SHADER_FORWARD_BLEND_RT,
+    RENDER_SHADER_RT_INSTANCES,
     RENDER_SHADER_COUNT
 } RenderShader;
 
@@ -120,6 +127,14 @@ typedef struct RenderMesh {
     NphVec3 position_scale;
     NphAABB bounds;
     u32 instances; // live instances referencing the mesh
+    u32 vertex_count;
+    // Ray-traced shadows (rt.c): the bottom-level structure over the
+    // quantised positions, the float copy of them it is built from where the
+    // device cannot build from 16-bit unorm, and the scratch its build needs.
+    NphGpuAccel blas;
+    NphGpuBuffer blas_vertices;
+    u64 blas_scratch;
+    b32 blas_pending; // listed in RenderRt.pending
     // The production path (vis_scene.c): the meshlet streams and the
     // mesh's corners in the index pool (indirect raster only).
     NphGpuBuffer meshlets;
@@ -157,6 +172,31 @@ typedef struct RenderInstance {
     NphRange material_range; // its entries in the material map
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
 } RenderInstance;
+
+// Ray-traced shadows (rt.c; docs/render.md "Shadows").
+typedef struct RenderRt {
+    b32 supported;      // the device has ray queries and the description allowed them
+    b32 unorm_vertices; // builds read the quantised positions as they are
+    NphGpuAccel tlas;
+    NphGpuBuffer instances; // NphGpuAccelInstance[max_instances]: the production path's
+    NphGpuBuffer scratch;   // the builds' scratch: room for the largest one
+    u64 scratch_size;
+    u32 *pending; // mesh slots whose bottom level waits for its build
+    u32 pending_count;
+    u32 shadow_lights; // live lights that cast shadows
+    // The top level's space: the camera's shifted by tlas_offset (rt.c).
+    NphDVec3 anchor;      // where its origin is in the world
+    NphVec3 tlas_offset;  // the camera in it, this frame
+    b32 tlas_valid;       // it holds the instances as they are (as of this frame's records)
+    b32 tlas_production;  // the production path built it
+    b32 frame_active;     // this frame traces shadow rays
+    b32 frame_production; // its instances come from the GPU scene
+    b32 frame_rebuild;    // it rebuilds the top level
+    u32 frame_instances;  // instance records of this frame's top level
+    u32 frame_builds;     // the first pending bottom levels, built this frame
+    b32 unsupported_logged;
+    NphGpuPipeline instance_writer; // rt_instances.comp
+} RenderRt;
 
 typedef struct RenderLight {
     u32 handle;
@@ -197,6 +237,7 @@ typedef struct RenderFrameLayout {
     u64 vis_updates_offset;       // NphVisInstanceUpdate[max_instance_updates]
     u64 vis_light_updates_offset; // NphVisLightUpdate[max_lights]
     u64 light_grid_offset;        // NphRenderLightGrid
+    u64 rt_instances_offset;      // NphGpuAccelInstance[max_instances]: the reference's
     u64 size;
 } RenderFrameLayout;
 
@@ -215,6 +256,7 @@ typedef enum VisShader {
     VIS_SHADER_LIGHTS,
     VIS_SHADER_LIGHT_BINS,
     VIS_SHADER_LIGHT_TILES,
+    VIS_SHADER_RESOLVE_RT, // with ray-traced shadows (rt.c), where the device has ray queries
     VIS_SHADER_MESH_OPAQUE,
     VIS_SHADER_MESH_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -239,6 +281,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHTS,
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
+    VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -285,15 +328,17 @@ typedef struct VisFrame {
     NphGpuRgBuffer lights;
     NphGpuRgBuffer light_grid;
     NphGpuRgBuffer light_tiles;
+    NphGpuRgBuffer tlas; // the frame's top level, when it traces shadow rays
 } VisFrame;
 
 typedef struct RenderVis {
     b32 supported;           // the device can run the production path and it was not disabled
     b32 mesh_shaders;        // rasterise with mesh shaders (else indirect draws)
     NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
-    NphGpuPipeline blend_pipelines[RENDER_CULL_COUNT]; // blended forward pipelines into
-                                                       // hdr_format (null when it is
-                                                       // RENDER_HDR_FORMAT)
+    NphGpuPipeline blend_pipelines[RENDER_CULL_COUNT];    // blended forward pipelines into
+                                                          // hdr_format (null when it is
+                                                          // RENDER_HDR_FORMAT)
+    NphGpuPipeline blend_pipelines_rt[RENDER_CULL_COUNT]; // and with ray-traced shadows
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2]; // [opaque, masked]: mesh or vertex pipelines
@@ -343,6 +388,7 @@ typedef struct RenderVis {
     u32 sent_count;
     u32 *sent_next;
     u32 sent_next_count;
+    u32 frame_changed; // instances whose records this frame sends (not catch-ups)
     // Instances with a blended material: the CPU draws those itself.
     u32 *blend;
     u32 blend_count;
@@ -400,7 +446,8 @@ struct NphRenderer {
     NphGpuSampler clamp_sampler;
 
     NphGpuShader shaders[RENDER_SHADER_COUNT];
-    NphGpuPipeline forward[3][RENDER_CULL_COUNT]; // [alpha mode][cull]
+    NphGpuPipeline forward[3][RENDER_CULL_COUNT];    // [alpha mode][cull]
+    NphGpuPipeline forward_rt[3][RENDER_CULL_COUNT]; // with ray-traced shadows (rt.c)
     NphGpuPipeline sky;
     NphGpuPipeline compute[RENDER_COMPUTE_COUNT];
     RenderTargetPipelines target_pipelines[RENDER_TARGET_FORMATS];
@@ -447,6 +494,9 @@ struct NphRenderer {
     // The production path.
     RenderVis vis;
 
+    // Ray-traced shadows.
+    RenderRt rt;
+
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
     NphRenderTonemapPush tonemap_push;
@@ -468,7 +518,7 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // The forward pipeline of an alpha mode and cull variant drawing into
 // `format` (the reference's HDR target, or the production path's).
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  NphGpuPipeline *out);
+                                  bool ray_query, NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);
@@ -476,7 +526,8 @@ u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding 
 u32 render_slot_of(const NphHandlePool *pool, u32 value);
 
 // frame.c
-void render_frame_layout(const NphRendererDesc *desc, RenderFrameLayout *out);
+// `ray_tracing`: room for the reference's top-level instance records.
+void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFrameLayout *out);
 // A light's shading record with its position given (camera relative for
 // the reference; the high floats of its split for the GPU table).
 void render_light_data(const NphRenderLightDesc *desc, NphVec3 position, NphRenderLightData *out);
@@ -496,6 +547,31 @@ void render_debug_destroy(NphRenderer *r);
 // Freezes the lines added so far for this frame and switches writers to
 // the next buffer.
 void render_debug_begin_frame(NphRenderer *r);
+
+// rt.c: ray-traced shadows' acceleration structures.
+NphResult render_rt_create(NphRenderer *r);
+void render_rt_destroy(NphRenderer *r);
+// A mesh's bottom level: created with the mesh, built in the next frame
+// that traces.
+NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *desc);
+void render_rt_mesh_destroy(NphRenderer *r, u32 slot);
+// A light's shadows were turned on (+1) or off (-1).
+void render_rt_shadow_lights(NphRenderer *r, i32 change);
+// Whether this frame traces shadow rays: some light casts shadows and the
+// renderer can (logged once when it cannot). Sets RenderRt.frame_* and the
+// top level's space for this frame's camera.
+bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera);
+// The reference's instance records, written by the CPU into the frame's
+// upload buffer, in the top level's space.
+void render_rt_write_instances(NphRenderer *r);
+// Declares this frame's passes: on the production path the instance
+// records' writer, which reads the GPU scene's instance and mesh tables
+// (`instance_table`, `mesh_table`; null handles on the reference, whose
+// records render_rt_write_instances wrote), then the builds (the bottom
+// levels pending now, then the top level). Returns the top level's buffer
+// in the graph for the passes that trace (NPH_GPU_RG_USE_ACCEL_READ).
+NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBuffer instance_table,
+                            NphGpuRgBuffer mesh_table, NphGpuRgBuffer *out_tlas);
 
 // vis.c: the production path's pipelines and frames.
 // Whether the device can run the production path (logged reasons).

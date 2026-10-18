@@ -14,6 +14,16 @@
 #endif
 
 #define NPH_SURFACE_SAMPLE(tex, smp, s) nph_sample_2d((tex), (smp), (s).uv)
+
+// The *_rt variants trace shadow rays (rt_common.glsl).
+#ifdef NPH_RAY_QUERY
+#include "rt_common.glsl"
+uint64_t g_tlas;     // the view's top-level structure, set first thing in main(),
+vec3 g_tlas_offset; // and the camera's place in it
+#define NPH_SURFACE_SHADOW(p, l, distance)                                                         \
+    nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
+#endif
+
 #include "surface.glsl"
 
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
@@ -28,6 +38,10 @@ layout(location = 0) out vec4 out_color;
 void main()
 {
     ViewRef view = ViewRef(pc.view_address);
+#ifdef NPH_RAY_QUERY
+    g_tlas = view.v.tlas;
+    g_tlas_offset = view.v.tlas_offset.xyz;
+#endif
     const NphRenderDrawData draw = DrawsRef(view.v.draws_address).d[pc.draw_index];
     const NphRenderMaterialData m = MaterialsRef(view.v.materials_address).m[draw.material_index];
 
@@ -44,6 +58,10 @@ void main()
     // Mirrored transforms are drawn with clockwise front faces, so the
     // rasteriser's facing already accounts for them.
     s.front_facing = gl_FrontFacing;
+    // The triangle's plane, from the position's screen derivatives (only
+    // its line matters; a degenerate one falls back on the vertex normal).
+    const vec3 face = cross(dFdx(in_position), dFdy(in_position));
+    s.face_normal = dot(face, face) > 1e-30 ? normalize(face) : normalize(in_normal);
     s.pixel = gl_FragCoord.xy;
     s.depth = gl_FragCoord.z;
 

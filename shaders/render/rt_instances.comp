@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: Apache-2.0
+// The top-level acceleration structure's instance records of a production
+// frame (docs/render.md "Shadows"; engine/render/src/rt.c): one invocation
+// per instance slot writes the VkAccelerationStructureInstanceKHR record
+// (gpu/accel.h NphGpuAccelInstance) from the GPU scene, in the top level's
+// space: camera relative, then shifted by the view's tlas_offset. The
+// mesh's bottom level holds its quantised positions, so the dequantisation
+// is folded into the transform: L (offset + scale q) + t = (L diag(scale)) q
+// + (L offset + t). Hidden and free slots get no structure and a zero mask,
+// which no ray matches.
+//
+// arg0 is the slot count; arg2 and arg3 the records' address, low and high.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+struct AccelInstance {
+    vec4 row0; // the object-to-world rows
+    vec4 row1;
+    vec4 row2;
+    uint index_and_mask;
+    uint offset_and_flags;
+    uint64_t blas;
+};
+
+NPH_BUFFER_REF(AccelInstancesRef) { AccelInstance a[]; };
+
+// VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR, in the flags'
+// byte: shadows come from both sides.
+#define RT_INSTANCE_NO_FACE_CULL (1u << 24u)
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.arg0) {
+        return;
+    }
+    VisViewRef view = VisViewRef(pc.view);
+    AccelInstancesRef out_ref = AccelInstancesRef(uint64_t(pc.arg2) | (uint64_t(pc.arg3) << 32ul));
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[i];
+    AccelInstance o;
+    o.row0 = vec4(1.0, 0.0, 0.0, 0.0);
+    o.row1 = vec4(0.0, 1.0, 0.0, 0.0);
+    o.row2 = vec4(0.0, 0.0, 1.0, 0.0);
+    o.index_and_mask = i;
+    o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL;
+    o.blas = 0ul;
+    if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
+        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                view.v.camera_low.xyz) +
+                       ViewRef(view.v.render_view).v.tlas_offset.xyz;
+        const vec3 s = mesh.position_scale.xyz;
+        const vec3 off = mesh.position_offset.xyz;
+        o.row0 = vec4(inst.transform.row0.xyz * s, dot(inst.transform.row0.xyz, off) + t.x);
+        o.row1 = vec4(inst.transform.row1.xyz * s, dot(inst.transform.row1.xyz, off) + t.y);
+        o.row2 = vec4(inst.transform.row2.xyz * s, dot(inst.transform.row2.xyz, off) + t.z);
+        o.index_and_mask = i | (0xFFu << 24u);
+        o.blas = mesh.blas;
+    }
+    out_ref.a[i] = o;
+}

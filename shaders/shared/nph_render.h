@@ -101,6 +101,11 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     // The production path's NphRenderLightGrid; 0: every light of
     // lights_address is evaluated for every pixel (the reference).
     u64 light_grid;
+    // The top-level acceleration structure of the instances, for the shaders
+    // with ray queries (0: none this frame). Its space is the camera's
+    // shifted by tlas_offset: a point p of the view is p + tlas_offset there.
+    u64 tlas;
+    NphVec4 tlas_offset; // xyz: the camera's position in the top level's space; w: unused
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -146,7 +151,7 @@ NPH_SHARED_STRUCT(NphRenderLightData)
 {
     NphVec4 position;  // xyz: position; w: 1 / range^2 (0: unlimited range)
     NphVec4 direction; // xyz: the direction the light travels (unit); w: NPH_RENDER_LIGHT_*
-    NphVec4 color;     // rgb: colour * intensity (lux or candela); w: unused
+    NphVec4 color;     // rgb: colour * intensity (lux or candela); w: 1 when it casts shadows
     NphVec4 spot;      // spot lights: x, y the angle scale and offset; z, w the cosine and sine
                        // of the outer cone angle (culling)
 };

@@ -104,10 +104,12 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // ---------------------------------------------------------------------------
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  NphGpuPipeline *out)
+                                  bool ray_query, NphGpuPipeline *out)
 {
-    static const RenderShader frags[3] = {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK,
-                                          RENDER_SHADER_FORWARD_BLEND};
+    static const RenderShader frags[2][3] = {
+        {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK, RENDER_SHADER_FORWARD_BLEND},
+        {RENDER_SHADER_FORWARD_OPAQUE_RT, RENDER_SHADER_FORWARD_MASK_RT,
+         RENDER_SHADER_FORWARD_BLEND_RT}};
     static const char *const names[3][RENDER_CULL_COUNT] = {
         {"forward opaque", "forward opaque (mirrored)", "forward opaque (double-sided)",
          "forward opaque (double-sided, mirrored)"},
@@ -119,7 +121,7 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     NphGpuGraphicsPipelineDesc d;
     memset(&d, 0, sizeof d);
     d.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
-    d.fragment = r->shaders[frags[alpha]];
+    d.fragment = r->shaders[frags[ray_query ? 1 : 0][alpha]];
     const bool none = cull == (u32)RENDER_CULL_NONE || cull == (u32)RENDER_CULL_NONE_CW;
     const bool cw = cull == (u32)RENDER_CULL_BACK_CW || cull == (u32)RENDER_CULL_NONE_CW;
     d.cull_mode = none ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
@@ -147,10 +149,15 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
 
 static NphResult create_forward_pipelines(NphRenderer *r)
 {
+    const bool rt = r->rt.supported != 0;
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
-            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT,
+            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false,
                                             &r->forward[alpha][cull]));
+            if (rt) {
+                NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true,
+                                                &r->forward_rt[alpha][cull]));
+            }
         }
     }
     NphGpuGraphicsPipelineDesc s;
@@ -238,12 +245,14 @@ u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding 
 
 static NphResult create_frame_buffers(NphRenderer *r)
 {
-    render_frame_layout(&r->desc, &r->layout);
+    render_frame_layout(&r->desc, r->rt.supported != 0, &r->layout);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         NphGpuBufferDesc d;
         memset(&d, 0, sizeof d);
         d.size = r->layout.size;
-        d.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+        // The reference's top-level instance records live here too (rt.c).
+        d.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE |
+                  (r->rt.supported ? (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT : 0U);
         d.memory = NPH_GPU_MEMORY_UPLOAD;
         d.name = "render frame records";
         NPH_TRY(nph_gpu_buffer_create(r->dev, &d, &r->frame_buffers[i]));
@@ -329,14 +338,23 @@ static NphResult create_contents(NphRenderer *r)
     }
 
     static const char *const files[RENDER_SHADER_COUNT] = {
-        "forward.vert",        "forward_opaque.frag", "forward_mask.frag",
-        "forward_blend.frag",  "fullscreen.vert",     "sky.frag",
-        "tonemap.frag",        "debug_line.vert",     "debug_line.frag",
-        "ibl_sky.comp",        "ibl_equirect.comp",   "ibl_cube.comp",
-        "ibl_downsample.comp", "ibl_prefilter.comp",  "ibl_sh.comp",
-        "brdf_lut.comp",
+        "forward.vert",          "forward_opaque.frag",    "forward_mask.frag",
+        "forward_blend.frag",    "fullscreen.vert",        "sky.frag",
+        "tonemap.frag",          "debug_line.vert",        "debug_line.frag",
+        "ibl_sky.comp",          "ibl_equirect.comp",      "ibl_cube.comp",
+        "ibl_downsample.comp",   "ibl_prefilter.comp",     "ibl_sh.comp",
+        "brdf_lut.comp",         "forward_opaque_rt.frag", "forward_mask_rt.frag",
+        "forward_blend_rt.frag", "rt_instances.comp",
     };
+    // Ray-traced shadows where the device has ray queries, unless the
+    // description turned them off: the ray-query shaders cannot even be
+    // loaded on a device without them.
+    r->rt.supported = nph_gpu_device_info(r->dev)->features.ray_query && !d->disable_ray_tracing;
+    const bool rt = r->rt.supported != 0;
     for (u32 i = 0; i < (u32)RENDER_SHADER_COUNT; ++i) {
+        if (!rt && i >= (u32)RENDER_SHADER_FORWARD_OPAQUE_RT) {
+            continue;
+        }
         NPH_TRY(render_load_shader(r, (RenderShader)i, files[i]));
     }
     NPH_TRY(create_forward_pipelines(r));
@@ -345,6 +363,7 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(create_frame_buffers(r));
     NPH_TRY(render_ibl_create(r));
     NPH_TRY(render_debug_create(r));
+    NPH_TRY(render_rt_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
         NPH_TRY(render_vis_create(r));
     }
@@ -389,12 +408,13 @@ NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
     const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
     NPH_LOG_INFO(&NPH_LOG_RENDER,
                  "%s: on %s: reference renderer (environment %u, prefiltered %u x %u levels, "
-                 "%u lights, %u draws per frame); production path %s",
+                 "%u lights, %u draws per frame); production path %s; ray-traced shadows %s",
                  r->name, info->name, d.environment_size, d.specular_size, d.specular_mips,
                  d.max_lights, d.max_draws,
                  !r->vis.supported     ? "absent"
                  : r->vis.mesh_shaders ? "with mesh shaders"
-                                       : "with indirect draws");
+                                       : "with indirect draws",
+                 r->rt.supported ? "on" : "absent");
     *out = r;
     return NPH_RESULT_OK;
 }
@@ -432,6 +452,7 @@ void nph_renderer_destroy(NphRenderer *r)
             nph_gpu_buffer_destroy(dev, m->attribs);
             nph_gpu_buffer_destroy(dev, m->indices);
             render_vis_mesh_destroy(r, i);
+            render_rt_mesh_destroy(r, i);
             NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
         }
     }
@@ -454,6 +475,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_debug_destroy(r);
     render_ibl_destroy(r);
     render_vis_destroy(r);
+    render_rt_destroy(r);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, r->frame_buffers[i]);
     }
@@ -469,6 +491,7 @@ void nph_renderer_destroy(NphRenderer *r)
     for (u32 a = 0; a < 3U; ++a) {
         for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
             nph_gpu_pipeline_destroy(dev, r->forward[a][c]);
+            nph_gpu_pipeline_destroy(dev, r->forward_rt[a][c]);
         }
     }
     nph_gpu_pipeline_destroy(dev, r->sky);
@@ -511,6 +534,12 @@ bool nph_renderer_production_supported(const NphRenderer *r)
 {
     NPH_ASSERT(r != NULL);
     return r->vis.supported != 0;
+}
+
+bool nph_renderer_ray_tracing_supported(const NphRenderer *r)
+{
+    NPH_ASSERT(r != NULL);
+    return r->rt.supported != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -705,24 +734,33 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     m->index_range = NPH_RANGE_NULL; // a zero-filled range would name node 0
     m->submeshes = NPH_ALLOC_ARRAY(r->alloc, NphRenderSubmesh, desc->submesh_count);
     NphResult res = m->submeshes != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    // Bottom-level builds read the positions and indices (rt.c).
+    const u32 accel_input = r->rt.supported ? (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT : 0U;
     if (res == NPH_RESULT_OK) {
         m->submesh_count = desc->submesh_count;
         memcpy(m->submeshes, desc->submeshes, sizeof(NphRenderSubmesh) * desc->submesh_count);
-        res = make_buffer(r, desc->positions,
-                          (u64)desc->vertex_count * sizeof(NphRenderVertexPosition),
-                          (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "mesh positions", &m->positions);
+        res = make_buffer(
+            r, desc->positions, (u64)desc->vertex_count * sizeof(NphRenderVertexPosition),
+            (u32)NPH_GPU_BUFFER_USAGE_STORAGE | accel_input, "mesh positions", &m->positions);
     }
     if (res == NPH_RESULT_OK) {
         res = make_buffer(r, desc->attribs, (u64)desc->vertex_count * sizeof(NphRenderVertexAttrib),
                           (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "mesh attributes", &m->attribs);
     }
     if (res == NPH_RESULT_OK) {
-        res = make_buffer(r, desc->indices, (u64)desc->index_count * sizeof(u32),
-                          (u32)NPH_GPU_BUFFER_USAGE_INDEX, "mesh indices", &m->indices);
+        res =
+            make_buffer(r, desc->indices, (u64)desc->index_count * sizeof(u32),
+                        (u32)NPH_GPU_BUFFER_USAGE_INDEX | accel_input, "mesh indices", &m->indices);
     }
     if (res == NPH_RESULT_OK) {
         m->positions_address = nph_gpu_buffer_address(r->dev, m->positions);
         m->attribs_address = nph_gpu_buffer_address(r->dev, m->attribs);
+        m->vertex_count = desc->vertex_count;
+        m->index_count = desc->index_count;
+        // The bottom level first: the GPU scene's mesh record names it.
+        res = render_rt_mesh_create(r, slot, desc);
+    }
+    if (res == NPH_RESULT_OK) {
         res = render_vis_mesh_create(r, slot, desc);
     }
     if (res != NPH_RESULT_OK) {
@@ -730,6 +768,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         nph_gpu_buffer_destroy(r->dev, m->attribs);
         nph_gpu_buffer_destroy(r->dev, m->indices);
         render_vis_mesh_destroy(r, slot);
+        render_rt_mesh_destroy(r, slot);
         if (m->submeshes != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
         }
@@ -769,6 +808,7 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     nph_gpu_buffer_destroy(r->dev, m->attribs);
     nph_gpu_buffer_destroy(r->dev, m->indices);
     render_vis_mesh_destroy(r, slot);
+    render_rt_mesh_destroy(r, slot);
     NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
     memset(m, 0, sizeof *m);
     release_slot(&r->mesh_pool, mesh.value);
@@ -1054,6 +1094,7 @@ NphResult nph_render_light_create(NphRenderer *r, const NphRenderLightDesc *desc
     NPH_TRY(alloc_slot(&r->light_pool, &value, &slot));
     r->lights[slot].handle = value;
     r->lights[slot].desc = *desc;
+    render_rt_shadow_lights(r, desc->shadows ? 1 : 0);
     render_vis_light_changed(r, slot);
     out->value = value;
     return NPH_RESULT_OK;
@@ -1068,6 +1109,7 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NPH_TRY(validate_light(desc));
+    render_rt_shadow_lights(r, (desc->shadows ? 1 : 0) - (r->lights[slot].desc.shadows ? 1 : 0));
     r->lights[slot].desc = *desc;
     render_vis_light_changed(r, slot);
     return NPH_RESULT_OK;
@@ -1084,6 +1126,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
     if (slot == NPH_U32_MAX) {
         return;
     }
+    render_rt_shadow_lights(r, r->lights[slot].desc.shadows ? -1 : 0);
     memset(&r->lights[slot], 0, sizeof r->lights[slot]);
     render_vis_light_changed(r, slot);
     release_slot(&r->light_pool, light.value);

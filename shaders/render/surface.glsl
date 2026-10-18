@@ -36,6 +36,13 @@
 // The environment and the emission are evaluated before the punctual
 // lights, so that across the light loop, where a shader's registers peak,
 // only the point's description and one sum stay live.
+//
+// Shadows: a light whose record says it casts them
+// (NphRenderLightData.color.w) is weighed by NPH_SURFACE_SHADOW(p, l,
+// distance) when the includer defines it: the visibility in [0, 1] of the
+// light in direction `l`, `distance` away, from the lit point `p` (an
+// NphLitPoint, whose geometric normal offsets the query off its surface).
+// Shaders with ray queries trace a shadow ray (rt_common.glsl).
 #ifndef NPH_SURFACE_GLSL
 #define NPH_SURFACE_GLSL
 
@@ -57,7 +64,8 @@ struct NphSurface {
     vec2 uv_dx;
     vec2 uv_dy;
     bool front_facing;
-    vec2 pixel;  // the pixel's position in the target (a light tile is found from it)
+    vec3 face_normal; // the triangle's geometric normal, either way round
+    vec2 pixel;       // the pixel's position in the target (a light tile is found from it)
     float depth; // its reverse-Z depth (znear over the view distance)
 };
 
@@ -141,17 +149,30 @@ struct NphLitPoint {
     float metallic;
     float energy; // 1 / Ess - 1: the specular lobe's multiple-scattering compensation is
                   // 1 + F0 * energy
+    vec3 face_normal; // the surface's geometric normal, either way round
 };
 
 // The radiance one punctual light reflects from the point, before exposure.
 vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
 {
     vec3 l;
-    const vec3 e = nph_light_illuminance(light, p.position, l);
+    vec3 e = nph_light_illuminance(light, p.position, l);
     const float nol = dot(p.n, l);
     if (nol <= 0.0 || (e.r == 0.0 && e.g == 0.0 && e.b == 0.0)) {
         return vec3(0.0);
     }
+#ifdef NPH_SURFACE_SHADOW
+    if (light.color.w > 0.0) {
+        // Directional lights are unlimited; the others end at the light.
+        const float distance = uint(light.direction.w) == NPH_RENDER_LIGHT_DIRECTIONAL
+                                   ? 1.0e6
+                                   : length(light.position.xyz - p.position);
+        e *= NPH_SURFACE_SHADOW(p, l, distance);
+        if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
+            return vec3(0.0);
+        }
+    }
+#endif
     const vec3 h = normalize(p.v + l);
     const float noh = clamp(dot(p.n, h), 0.0, 1.0);
     const float voh = clamp(dot(p.v, h), 0.0, 1.0);
@@ -330,6 +351,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.base = base.rgb;
     lp.metallic = metallic;
     lp.energy = 1.0 / ess - 1.0;
+    lp.face_normal = s.face_normal;
 #ifdef NPH_SURFACE_GRID_LIGHTS
     const vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
 #else

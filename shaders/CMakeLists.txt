@@ -41,6 +41,9 @@ nph_add_shaders(nph_shaders_render
         render/forward_opaque.frag
         render/forward_mask.frag
         render/forward_blend.frag
+        render/forward_opaque_rt.frag
+        render/forward_mask_rt.frag
+        render/forward_blend_rt.frag
         render/fullscreen.vert
         render/sky.frag
         render/tonemap.frag
@@ -67,6 +70,8 @@ nph_add_shaders(nph_shaders_render
         render/vis_raster_vert_masked.frag
         render/vis_hzb.comp
         render/vis_resolve.comp
+        render/vis_resolve_rt.comp
+        render/rt_instances.comp
         render/vis_sw_raster.comp
         render/vis_lights.comp
         render/vis_light_bins.comp

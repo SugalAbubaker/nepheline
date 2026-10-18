@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// The visibility-buffer resolve with ray-traced shadows (vis_resolve.glsl,
+// rt_common.glsl).
+#version 460
+#extension GL_EXT_ray_query : require
+#define NPH_RAY_QUERY
+#include "vis_resolve.glsl"
