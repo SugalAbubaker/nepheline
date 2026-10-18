@@ -16,6 +16,7 @@
 
 #include <nph_render.h>
 #include <nph_vis.h>
+#include <nph_vsm.h>
 
 #define RENDER_NAME_MAX 64U
 
@@ -173,6 +174,73 @@ typedef struct RenderInstance {
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
 } RenderInstance;
 
+// The virtual shadow map's work buffer (vsm.c).
+typedef struct VsmLayout {
+    u64 counters;    // NphVsmCounters, then the three bitmasks: cleared each frame
+    u64 requests;    // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_WORDS]
+    u64 dirty;       // u32[...]
+    u64 render;      // u32[...]
+    u64 render_rows; // u32[NPH_VSM_LEVELS * NPH_VSM_ROW_WORDS]
+    u64 clear_size;  // bytes cleared at the start of a frame
+    u64 args;        // NphVsmArgs
+    u64 alloc;       // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
+    u64 free;        // u32[vsm_pages]
+    u64 candidate;   // u32[vsm_pages]
+    u64 rendered;    // u32[vsm_pages]
+    u64 meshlets;    // uvec2[max_vsm_meshlets]
+    u64 draws;       // uvec4[max_vsm_draws]
+    u64 vis_draws;   // NphVisDraw[max_vsm_draws] (indirect raster only)
+    u64 size;
+} VsmLayout;
+
+// The production path's virtual shadow map (vsm.c; docs/render.md
+// "Shadows").
+typedef struct RenderVsm {
+    b32 supported;
+    u32 pool_pages;
+    NphGpuImage pool;              // D32_SFLOAT, NPH_VSM_POOL_ROW pages per row
+    NphGpuSampler compare_sampler; // the pool's: bilinear depth comparison
+    NphGpuBuffer entries;          // NphVsmEntry[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
+    NphGpuBuffer phys;             // NphVsmPhys[pool_pages]
+    NphGpuBuffer work;             // VsmLayout
+    NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVsmCounters read back
+    u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // 1 + the frame copied into stats[i], 0: none
+    u32 stats_bias[NPH_GPU_FRAMES_IN_FLIGHT];     // the resolution bias that frame drew with
+    u32 overflow_logged;                          // NphRenderVsmOverflow bits said once
+    // The resolution bias (levels coarser than resolution-matched): raised
+    // by each overflow at the current bias, lowered after `roomy` frames
+    // in a row that would have fitted a step finer.
+    u32 lod_bias;
+    u32 roomy;
+    u32 frame_bias; // the bias this frame draws with (lod_bias as it began)
+    VsmLayout layout;
+    NphGpuShader shaders[5]; // pages, cull, raster (mesh or vertex), clear, request
+    NphGpuPipeline pages;
+    NphGpuPipeline cull;
+    NphGpuPipeline raster;
+    NphGpuPipeline clear;
+    NphGpuPipeline request; // the blended draws' page requests (vsm_request.frag)
+    u32 sun_slot;           // the light it shadows, NPH_U32_MAX: none
+    b32 initialize;         // the page table and the pages' records still need clearing
+    // The clipmap as the pages hold it.
+    b32 continuous; // the previous production frame had the map (else everything is dropped)
+    NphVec3 direction;
+    NphDVec3 anchor;
+    f64 depth_reference[NPH_VSM_LEVELS];
+    u32 frames; // frames that had the map: the pages' ages
+    // This frame.
+    b32 frame_active;
+    b32 frame_initialize;
+    u64 view_address; // its NphVsmView
+    struct {
+        NphGpuRgBuffer work;
+        NphGpuRgBuffer entries;
+        NphGpuRgBuffer phys;
+        NphGpuRgImage pool;
+        NphGpuRgBuffer stats;
+    } frame;
+} RenderVsm;
+
 // Ray-traced shadows (rt.c; docs/render.md "Shadows").
 typedef struct RenderRt {
     b32 supported;      // the device has ray queries and the description allowed them
@@ -238,6 +306,7 @@ typedef struct RenderFrameLayout {
     u64 vis_light_updates_offset; // NphVisLightUpdate[max_lights]
     u64 light_grid_offset;        // NphRenderLightGrid
     u64 rt_instances_offset;      // NphGpuAccelInstance[max_instances]: the reference's
+    u64 vsm_view_offset;          // NphVsmView (production path)
     u64 size;
 } RenderFrameLayout;
 
@@ -282,6 +351,8 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
     VIS_COMPUTE_RESOLVE_RT,
+    VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
+    VIS_COMPUTE_RESOLVE_RT_VSM, // with both
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -335,10 +406,9 @@ typedef struct RenderVis {
     b32 supported;           // the device can run the production path and it was not disabled
     b32 mesh_shaders;        // rasterise with mesh shaders (else indirect draws)
     NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
-    NphGpuPipeline blend_pipelines[RENDER_CULL_COUNT];    // blended forward pipelines into
-                                                          // hdr_format (null when it is
-                                                          // RENDER_HDR_FORMAT)
-    NphGpuPipeline blend_pipelines_rt[RENDER_CULL_COUNT]; // and with ray-traced shadows
+    // Blended forward pipelines into hdr_format (null when it is
+    // RENDER_HDR_FORMAT): [ray-traced shadows][the virtual shadow map][cull].
+    NphGpuPipeline blend_pipelines[2][2][RENDER_CULL_COUNT];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2]; // [opaque, masked]: mesh or vertex pipelines
@@ -497,6 +567,9 @@ struct NphRenderer {
     // Ray-traced shadows.
     RenderRt rt;
 
+    // The production path's virtual shadow map.
+    RenderVsm vsm;
+
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
     NphRenderTonemapPush tonemap_push;
@@ -517,8 +590,10 @@ NPH_INLINE void *render_frame_at(const NphRenderer *r, u64 offset)
 NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *file);
 // The forward pipeline of an alpha mode and cull variant drawing into
 // `format` (the reference's HDR target, or the production path's).
+// With `ray_query`, the variant that traces shadow rays (rt.c); with
+// `vsm`, the one that reads the sun's virtual shadow map (vsm.c).
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, NphGpuPipeline *out);
+                                  bool ray_query, bool vsm, NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);
@@ -557,10 +632,11 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
 void render_rt_mesh_destroy(NphRenderer *r, u32 slot);
 // A light's shadows were turned on (+1) or off (-1).
 void render_rt_shadow_lights(NphRenderer *r, i32 change);
-// Whether this frame traces shadow rays: some light casts shadows and the
-// renderer can (logged once when it cannot). Sets RenderRt.frame_* and the
-// top level's space for this frame's camera.
-bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera);
+// Whether this frame traces shadow rays: some light casts shadows that the
+// virtual shadow map does not take (`handled` of them), and the renderer
+// can (logged once when it cannot). Sets RenderRt.frame_* and the top
+// level's space for this frame's camera.
+bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled);
 // The reference's instance records, written by the CPU into the frame's
 // upload buffer, in the top level's space.
 void render_rt_write_instances(NphRenderer *r);
@@ -575,6 +651,41 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
                             NphGpuRgBuffer mesh_table, NphGpuRgBuffer counters,
                             NphGpuRgBuffer *out_tlas);
 
+// vsm.c: the production path's virtual shadow map.
+// Whether the renderer can have it (logged reasons are vis.c's).
+bool render_vsm_device_supported(const NphRenderer *r);
+NphResult render_vsm_create(NphRenderer *r);
+void render_vsm_destroy(NphRenderer *r);
+// Light `slot` was created, changed, or destroyed (its record as it now
+// is): the sun is the live directional light that casts shadows in the
+// lowest slot; when it changes, the records of the old and the new sun are
+// sent again. Constant time but where the sun itself stops being one.
+void render_vsm_light_changed(NphRenderer *r, u32 slot);
+// Whether this production frame has the map, and if so its NphVsmView,
+// written into the frame's records (RenderVsm.view_address).
+bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *proj,
+                            const NphMat4 *inv_view_proj, u32 height, bool production);
+// The statistics of the frame that last completed in this slot, into
+// RenderVis.stats_last.
+void render_vsm_read_stats(NphRenderer *r);
+// `vsm clear`, then `vsm invalidate` (before the scatter, which replaces the
+// instance records it reads).
+NphResult render_vsm_declare_begin(NphRenderer *r, NphGpuRenderGraph *graph,
+                                   NphGpuRgBuffer instances, NphGpuRgBuffer meshes);
+// A pass that requests pages (the depth pyramid's mip 0) writes the work.
+void render_vsm_request_pages(const NphRenderer *r, NphGpuRgPass *pass);
+// The page requests of the blended surfaces: `draw` records the blended
+// draws with the pipeline it is given, against `depth` (the opaque
+// surfaces'), before render_vsm_declare_pages.
+NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *graph,
+                                            NphGpuRgImage depth, NphGpuRgExecuteFn draw);
+// The page tables, the allocation, the casters' culling, the page raster,
+// and the statistics, after the requests.
+NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
+                                   NphGpuRgBuffer instances, NphGpuRgBuffer meshes);
+// What a pass that samples the map reads.
+void render_vsm_read(const NphRenderer *r, NphGpuRgPass *pass);
+
 // vis.c: the production path's pipelines and frames.
 // Whether the device can run the production path (logged reasons).
 bool render_vis_device_supported(const NphRenderer *r);
@@ -588,16 +699,21 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t,
 // surfaces, ending in the HDR image `*out_hdr` that the tonemap reads.
 // `view_proj`, `view_m`, and `proj` are the frame's camera-relative
 // matrices.
+// `blend_requests`, where the frame has blended draws, records them with
+// the pipeline RenderVsm.request (the sun's virtual shadow map asks for
+// their pages with it; it is not called without the map).
 NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
                            u32 width, u32 height, const NphMat4 *view_m, const NphMat4 *proj,
                            NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
-                           NphGpuRgBuffer sh, NphGpuRgImage *out_hdr, NphRenderFrameStats *stats);
+                           NphGpuRgBuffer sh, NphGpuRgExecuteFn blend_requests,
+                           NphGpuRgImage *out_hdr, NphRenderFrameStats *stats);
 // The bindless storage index of the frame's visibility buffer, for the
 // tonemap pass's depth-tested debug lines (valid inside callbacks).
 u32 render_vis_visbuffer_index(const NphRenderer *r, NphGpuRenderGraph *graph);
 // The transparent surfaces of a production frame, after render_vis_frame:
-// the visibility buffer's depth into a depth attachment, then `draw` (the
-// forward pipelines' blended draws) over the HDR image.
+// the visibility buffer's depth into a depth attachment (unless the frame
+// already has it), then `draw` (the forward pipelines' blended draws) over
+// the HDR image.
 NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *graph,
                                          NphGpuRgExecuteFn draw, NphGpuRgImage env,
                                          NphGpuRgImage specular, NphGpuRgImage lut,

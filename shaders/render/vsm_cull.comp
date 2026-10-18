@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: Apache-2.0
+// The virtual shadow map's casters (docs/render.md "Shadows";
+// shaders/shared/nph_vsm.h): what the pages drawn this frame need drawn
+// into them, in two modes.
+//
+//   INSTANCES: an invocation per instance slot and level with pages to
+//     draw (the dispatch's z indexes those levels, NphVsmArgs.levels). A visible
+//     instance whose bounding sphere spans a page to draw of the level, and
+//     does not lie wholly beyond the level's far plane, hands its meshlets
+//     on as (instance, meshlet, level) items, a subgroup's together as in
+//     vis_cull_instances.comp.
+//   MESHLETS: an invocation per item: the meshlet's bounding sphere against
+//     the level's pages to draw, one draw (instance, meshlet, entry) per
+//     page it spans. Devices without mesh shaders also get the draw as an
+//     indexed indirect command (NphVisDraw) over the index pool, as the
+//     visibility buffer's indirect raster does.
+//
+// Casters are drawn from both sides and from every direction: no normal
+// cone culling, since a meshlet facing away from the light shadows all the
+// same.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "vis_common.glsl"
+#include "vsm_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// A sphere spanning more pages than this is taken as touching a page to
+// draw without scanning the bitmask for one (its meshlets are tested).
+#define VSM_SCAN_PAGES 256
+
+void cull_instances(VisViewRef view, VsmViewRef r)
+{
+    const int level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    const uint slot = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                      gl_LocalInvocationIndex;
+    uint meshlets = 0u;
+    if (slot < view.v.instance_count) {
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
+        if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
+            const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            const vec3 c =
+                vsm_light_space(r, vis_transform_vector(inst.transform, mesh.sphere.xyz) + t);
+            const float radius = mesh.sphere.w * vis_max_scale(inst.transform);
+            if (!vsm_beyond(r, level, c, radius)) {
+                const ivec4 rect = vsm_sphere_rect(r, level, c, radius);
+                const int area = (rect.y - rect.x + 1) * (rect.w - rect.z + 1);
+                if (rect.x <= rect.y &&
+                    (area > VSM_SCAN_PAGES || vsm_render_any(r, level, rect))) {
+                    meshlets = mesh.meshlet_count;
+                }
+            }
+        }
+    }
+
+    // The subgroup's meshlets as items: one atomic for the total, then an
+    // equal share each, the owner found by a binary search over the
+    // prefix sums (vis_cull_instances.comp).
+    const uint inclusive = subgroupInclusiveAdd(meshlets);
+    const uint first = inclusive - meshlets;
+    const uint total = subgroupAdd(meshlets);
+    uint base = 0u;
+    if (total != 0u && subgroupElect()) {
+        base = atomicAdd(counters.c.meshlet_count, total);
+    }
+    base = subgroupBroadcastFirst(base);
+    const uint rounds = (total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+    for (uint round = 0u; round < rounds; ++round) {
+        const uint k = round * gl_SubgroupSize + gl_SubgroupInvocationID;
+        uint owner = 0u;
+        for (uint step = gl_SubgroupSize >> 1u; step != 0u; step >>= 1u) {
+            const uint v = subgroupShuffle(inclusive, owner + step - 1u);
+            if (v <= k) {
+                owner += step;
+            }
+        }
+        const uint owner_slot = subgroupShuffle(slot, owner);
+        const uint owner_first = subgroupShuffle(first, owner);
+        if (k < total) {
+            const uint index = base + k;
+            if (index < r.v.max_meshlets) {
+                VsmUvec2Ref(r.v.meshlets).v[index] =
+                    uvec2(owner_slot, (k - owner_first) | (uint(level) << 24u));
+            } else {
+                atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
+            }
+        }
+    }
+}
+
+void cull_meshlets(VisViewRef view, VsmViewRef r)
+{
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    const uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                   gl_LocalInvocationIndex;
+    uint draws = 0u;
+    int level = 0;
+    uint slot = 0u;
+    uint meshlet = 0u;
+    ivec4 rect = ivec4(1, 0, 0, 0);
+    NphVisMesh mesh;
+    uvec4 m = uvec4(0u);
+    if (i < min(counters.c.meshlet_count, r.v.max_meshlets)) {
+        const uvec2 item = VsmUvec2Ref(r.v.meshlets).v[i];
+        slot = item.x;
+        meshlet = item.y & 0xFFFFFFu;
+        level = int(item.y >> 24u);
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
+        mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        m = VisMeshletsRef(mesh.meshlets).m[meshlet];
+        const uvec4 b0 = VisMeshletBoundsRef(mesh.meshlet_bounds).b[meshlet * 2u];
+        const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                view.v.camera_low.xyz);
+        const vec3 c =
+            vsm_light_space(r, vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t);
+        const float radius = uintBitsToFloat(b0.w) * vis_max_scale(inst.transform);
+        if (!vsm_beyond(r, level, c, radius)) {
+            rect = vsm_sphere_rect(r, level, c, radius);
+            if (rect.x <= rect.y) {
+                // Only the rows with a page to draw.
+                for (uint k = uint(rect.z) >> 5u; k <= uint(rect.w) >> 5u; ++k) {
+                    uint rows = vsm_render_rows(r, level, k, rect.z, rect.w);
+                    while (rows != 0u) {
+                        const int y = int(k * 32u + uint(findLSB(rows)));
+                        rows &= rows - 1u;
+                        for (uint w = uint(rect.x) >> 5u; w <= uint(rect.y) >> 5u; ++w) {
+                            draws += bitCount(vsm_row_word(r.v.render, level, y, w) &
+                                              vsm_word_mask(w, rect.x, rect.y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    uint at;
+    VIS_RESERVE(counters.c.draw_count, draws, at);
+    if (draws == 0u) {
+        return;
+    }
+    const ivec2 window = vsm_window(r, level);
+    const bool indirect = (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u;
+    for (uint k = uint(rect.z) >> 5u; k <= uint(rect.w) >> 5u; ++k) {
+        uint rows = vsm_render_rows(r, level, k, rect.z, rect.w);
+        while (rows != 0u) {
+            const int y = int(k * 32u + uint(findLSB(rows)));
+            rows &= rows - 1u;
+            for (uint w = uint(rect.x) >> 5u; w <= uint(rect.y) >> 5u; ++w) {
+                uint bits =
+                    vsm_row_word(r.v.render, level, y, w) & vsm_word_mask(w, rect.x, rect.y);
+                while (bits != 0u) {
+                    const int x = int(w * 32u + uint(findLSB(bits)));
+                    bits &= bits - 1u;
+                    if (at >= r.v.max_draws) {
+                        atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_DRAWS));
+                        return;
+                    }
+                    const uint entry = vsm_entry(level, ivec2(x, y) + window);
+                    VsmUvec4Ref(r.v.draws).v[at] = uvec4(slot, meshlet, entry, 0u);
+                    if (indirect) {
+                        NphVisDraw draw;
+                        draw.index_count = (m.z >> 16u) * 3u;
+                        draw.instance_count = 1u;
+                        draw.first_index = mesh.index_base + m.y * 3u;
+                        draw.vertex_offset = int(m.x);
+                        draw.first_instance = 0u;
+                        VisDrawsRef(r.v.vis_draws).d[at] = draw;
+                    }
+                    ++at;
+                }
+            }
+        }
+    }
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
+    if (pc.mode == NPH_VSM_CULL_INSTANCES) {
+        cull_instances(view, r);
+    } else {
+        cull_meshlets(view, r);
+    }
+}

@@ -106,6 +106,10 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     // shifted by tlas_offset: a point p of the view is p + tlas_offset there.
     u64 tlas;
     NphVec4 tlas_offset; // xyz: the camera's position in the top level's space; w: unused
+    // The production path's virtual shadow map this frame (NphVsmView, nph_vsm.h;
+    // 0: none), which the sun's light record (color.w 2) is shadowed by.
+    u64 vsm;
+    u64 pad_vsm;
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -152,6 +156,8 @@ NPH_SHARED_STRUCT(NphRenderLightData)
     NphVec4 position;  // xyz: position; w: 1 / range^2 (0: unlimited range)
     NphVec4 direction; // xyz: the direction the light travels (unit); w: NPH_RENDER_LIGHT_*
     NphVec4 color;     // rgb: colour * intensity (lux or candela); w: 1 when it casts shadows
+                       // (shadow rays), 2 for the production path's sun (its virtual shadow
+                       // map where the view has one, else shadow rays)
     NphVec4 spot;      // spot lights: x, y the angle scale and offset; z, w the cosine and sine
                        // of the outer cone angle (culling)
 };

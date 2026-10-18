@@ -32,7 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 416U, "NphRenderViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 432U, "NphRenderViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
@@ -88,6 +88,8 @@ void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFr
     if (ray_tracing) {
         at = align_up(at + (u64)desc->max_instances * sizeof(NphGpuAccelInstance), FRAME_ALIGN);
     }
+    out->vsm_view_offset = at;
+    at = align_up(at + sizeof(NphVsmView), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -480,21 +482,25 @@ static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
 // Passes
 // ---------------------------------------------------------------------------
 
-// Records draw_cmds[first, first + count) with the forward pipelines.
-static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
+// Records draw_cmds[first, first + count) with the forward pipelines, or
+// with `only` where it is not null.
+static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count, NphGpuPipeline only,
                          NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
     // The production path's blended surfaces draw into its own HDR format;
-    // a frame that traces shadow rays uses the pipelines that do.
-    const bool compact = r->frame_production && r->vis.hdr_format != RENDER_HDR_FORMAT;
-    const bool rt = r->rt.frame_active != 0;
+    // a frame that traces shadow rays, or has the sun's virtual shadow map,
+    // uses the pipelines that do.
+    const bool production = r->frame_production != 0;
+    const u32 rt = r->rt.frame_active != 0 ? 1U : 0U;
+    const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p =
-            compact && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
-                ? (rt ? r->vis.blend_pipelines_rt[c->cull] : r->vis.blend_pipelines[c->cull])
-                : (rt ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull]);
+        const NphGpuPipeline p = only.value != 0U ? only
+                                 : production && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
+                                     ? r->vis.blend_pipelines[rt][vsm][c->cull]
+                                     : (rt != 0U ? r->forward_rt[c->alpha_mode][c->cull]
+                                                 : r->forward[c->alpha_mode][c->cull]);
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -515,14 +521,15 @@ static void forward_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphRenderer *r = (NphRenderer *)user;
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, 0U, r->opaque_count, &bound, &bound_mesh);
+    record_draws(r, cmd, 0U, r->opaque_count, NPH_GPU_PIPELINE_NULL, &bound, &bound_mesh);
     // The sky fills what the opaque geometry left uncovered, before the
     // blended surfaces composite over both.
     nph_gpu_cmd_bind_pipeline(cmd, r->sky);
     nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
     bound = r->sky;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, &bound, &bound_mesh);
+    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, &bound,
+                 &bound_mesh);
 }
 
 // The production path's blended surfaces, over the resolved image.
@@ -532,7 +539,19 @@ static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *
     NphRenderer *r = (NphRenderer *)user;
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, &bound, &bound_mesh);
+    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, &bound,
+                 &bound_mesh);
+}
+
+// The production path's blended surfaces again, asking for the pages of
+// the sun's virtual shadow map their shading will read (vsm.c).
+static void blend_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
+    u32 bound_mesh = NPH_U32_MAX;
+    record_draws(r, cmd, r->opaque_count, r->blend_count, r->vsm.request, &bound, &bound_mesh);
 }
 
 static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -677,9 +696,6 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     r->last_frame_index = nph_gpu_frame_index(dev);
     r->frame_slot = nph_gpu_frame_slot(dev);
     r->frame_production = production ? 1 : 0;
-    // Shadow rays this frame: some light casts shadows and the device can.
-    const bool rt = render_rt_frame_begin(r, production, view->camera.position);
-    stats.shadow_rays = rt ? 1 : 0;
     const u64 address = r->frame_addresses[r->frame_slot];
     const u32 width = td->width;
     const u32 height = td->height;
@@ -698,6 +714,14 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     fc.frustum = nph_frustum_from_matrix(&view_proj);
     NphMat4 inv_view_proj = nph_mat4_identity();
     NPH_IGNORE_RESULT(nph_mat4_inverse(view_proj, &inv_view_proj));
+
+    // The sun's virtual shadow map (the production path), then shadow rays
+    // for the lights that cast shadows it does not take.
+    const bool vsm = render_vsm_frame_begin(r, view, &proj, &inv_view_proj, height, production);
+    const bool rt = render_rt_frame_begin(r, production, view->camera.position, vsm ? 1U : 0U);
+    stats.shadow_rays = rt ? 1 : 0;
+    stats.vsm = vsm ? 1 : 0;
+    stats.vsm_lod_bias = vsm ? r->vsm.frame_bias : 0U;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -748,6 +772,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->debug_mode = (u32)view->debug_view;
     vd->tlas = rt ? nph_gpu_accel_address(dev, r->rt.tlas) : 0U;
     vd->tlas_offset = nph_vec4_from_vec3(r->rt.tlas_offset, 0.0F);
+    vd->vsm = vsm ? r->vsm.view_address : 0U;
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
 
@@ -774,7 +799,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (production) {
         NphGpuRgImage hdr = NPH_GPU_RG_IMAGE_NULL;
         NPH_TRY(render_vis_frame(r, view, graph, width, height, &view_m, &proj, env, specular, lut,
-                                 sh, &hdr, &stats));
+                                 sh, r->blend_count != 0U ? blend_requests_execute : NULL, &hdr,
+                                 &stats));
         if (r->blend_count != 0U) {
             NPH_TRY(render_vis_declare_transparent(r, graph, transparent_execute, env, specular,
                                                    lut, sh));

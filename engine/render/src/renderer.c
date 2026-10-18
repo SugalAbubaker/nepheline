@@ -104,7 +104,7 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // ---------------------------------------------------------------------------
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, NphGpuPipeline *out)
+                                  bool ray_query, bool vsm, NphGpuPipeline *out)
 {
     static const RenderShader frags[2][3] = {
         {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK, RENDER_SHADER_FORWARD_BLEND},
@@ -144,6 +144,9 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
         d.depth.write = 1;
     }
     d.name = names[alpha][cull];
+    // forward_frag.glsl's k_vsm.
+    d.specialization[0] = vsm ? 1U : 0U;
+    d.specialization_count = vsm ? 1U : 0U;
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -152,10 +155,10 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     const bool rt = r->rt.supported != 0;
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
-            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false,
+            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
                                             &r->forward[alpha][cull]));
             if (rt) {
-                NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true,
+                NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
                                                 &r->forward_rt[alpha][cull]));
             }
         }
@@ -294,7 +297,16 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_material_slots =
         d->max_material_slots != 0U ? d->max_material_slots : 4U * d->max_instances;
     d->meshlet_index_pool = d->meshlet_index_pool != 0U ? d->meshlet_index_pool : 1U << 24U;
+    d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
+    d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
+    d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
     if (d->max_visible_clusters > (u32)NPH_VIS_MAX_CLUSTERS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // A page table entry names its physical page in 16 bits, and the pool
+    // is at most 16384 texels tall (128 rows of NPH_VSM_POOL_ROW pages),
+    // the extent every device takes.
+    if (d->vsm_pages > 128U * (u32)NPH_VSM_POOL_ROW) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     if (!is_power_of_two(d->environment_size) || !is_power_of_two(d->specular_size) ||
@@ -366,6 +378,9 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(render_rt_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
         NPH_TRY(render_vis_create(r));
+        NPH_TRY(render_vsm_create(r));
+    } else {
+        r->vsm.sun_slot = NPH_U32_MAX;
     }
     return NPH_RESULT_OK;
 }
@@ -408,13 +423,14 @@ NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
     const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
     NPH_LOG_INFO(&NPH_LOG_RENDER,
                  "%s: on %s: reference renderer (environment %u, prefiltered %u x %u levels, "
-                 "%u lights, %u draws per frame); production path %s; ray-traced shadows %s",
+                 "%u lights, %u draws per frame); production path %s; ray-traced shadows %s; "
+                 "virtual shadow map %s",
                  r->name, info->name, d.environment_size, d.specular_size, d.specular_mips,
                  d.max_lights, d.max_draws,
                  !r->vis.supported     ? "absent"
                  : r->vis.mesh_shaders ? "with mesh shaders"
                                        : "with indirect draws",
-                 r->rt.supported ? "on" : "absent");
+                 r->rt.supported ? "on" : "absent", r->vsm.supported ? "on" : "absent");
     *out = r;
     return NPH_RESULT_OK;
 }
@@ -474,6 +490,7 @@ void nph_renderer_destroy(NphRenderer *r)
     }
     render_debug_destroy(r);
     render_ibl_destroy(r);
+    render_vsm_destroy(r);
     render_vis_destroy(r);
     render_rt_destroy(r);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
@@ -540,6 +557,12 @@ bool nph_renderer_ray_tracing_supported(const NphRenderer *r)
 {
     NPH_ASSERT(r != NULL);
     return r->rt.supported != 0;
+}
+
+bool nph_renderer_virtual_shadows_supported(const NphRenderer *r)
+{
+    NPH_ASSERT(r != NULL);
+    return r->vsm.supported != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,6 +1119,7 @@ NphResult nph_render_light_create(NphRenderer *r, const NphRenderLightDesc *desc
     r->lights[slot].desc = *desc;
     render_rt_shadow_lights(r, desc->shadows ? 1 : 0);
     render_vis_light_changed(r, slot);
+    render_vsm_light_changed(r, slot);
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1112,6 +1136,7 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
     render_rt_shadow_lights(r, (desc->shadows ? 1 : 0) - (r->lights[slot].desc.shadows ? 1 : 0));
     r->lights[slot].desc = *desc;
     render_vis_light_changed(r, slot);
+    render_vsm_light_changed(r, slot);
     return NPH_RESULT_OK;
 }
 
@@ -1129,6 +1154,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
     render_rt_shadow_lights(r, r->lights[slot].desc.shadows ? -1 : 0);
     memset(&r->lights[slot], 0, sizeof r->lights[slot]);
     render_vis_light_changed(r, slot);
+    render_vsm_light_changed(r, slot);
     release_slot(&r->light_pool, light.value);
 }
 

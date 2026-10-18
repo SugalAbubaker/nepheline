@@ -150,7 +150,15 @@ typedef struct NphRendererDesc {
     // GPU memory, or pipelines for them); lights that cast shadows then draw
     // unshadowed (logged once).
     b32 disable_ray_tracing;
-    const char *name; // for logs and GPU object names
+    // The production path's virtual shadow map for its sun, the first live
+    // directional light that casts shadows (docs/render.md "Shadows"),
+    // where the device has depth clamping and clip distances. Zero picks
+    // the default in parentheses.
+    b32 disable_virtual_shadows; // never create it: the sun's shadows are then ray traced
+    u32 vsm_pages;               // physical pages of 128 x 128 depth texels, 64 KB each (2048)
+    u32 max_vsm_meshlets;        // caster meshlets tested against the pages drawn in a frame (2^20)
+    u32 max_vsm_draws;           // (meshlet, page) draws in a frame (2^20)
+    const char *name;            // for logs and GPU object names
 } NphRendererDesc;
 
 // Creates the renderer: pools, samplers, the per-frame buffers, the
@@ -501,13 +509,16 @@ typedef enum NphRenderPipeline {
     NPH_RENDER_PIPELINE_PRODUCTION = 1, // the GPU-driven visibility-buffer renderer
 } NphRenderPipeline;
 
-// Switches of the production path's culling, for tests and debugging; the
-// image does not change, only the work.
+// Switches of the production path, for tests and debugging. The culling's
+// leave the image as it is and change only the work; RT_SHADOWS shadows
+// the sun with rays (as the reference does) instead of its virtual shadow
+// map.
 typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_NO_OCCLUSION = 1U << 0U,  // no hierarchical-depth tests
     NPH_RENDER_VIS_NO_CONE = 1U << 1U,       // no meshlet normal-cone tests
     NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U,  // every cluster through the hardware raster
     NPH_RENDER_VIS_NO_LIGHT_GRID = 1U << 3U, // every light for every pixel, as the reference
+    NPH_RENDER_VIS_RT_SHADOWS = 1U << 4U,    // no virtual shadow map: the sun's shadows ray traced
 } NphRenderVisFlags;
 
 typedef struct NphRenderView {
@@ -572,7 +583,33 @@ typedef struct NphRenderFrameStats {
     u32 vis_lights;   // lights in view: those that reach every pixel, and the others the
                       // frustum keeps
     u32 vis_overflow; // NphRenderVisOverflow bits: lists that dropped work
+    // The virtual shadow map: whether this frame has it, and the levels'
+    // resolution bias it draws with (each step halves the resolution: the
+    // renderer raises it while the map overflows its capacities and lowers
+    // it again once there is room); then, read back with the counters above
+    // (zero when that frame had none), the pages its pixels needed, the
+    // pages drawn (new, or changed since), the pages the pool holds, those
+    // taken from others, the caster draws, and NphRenderVsmOverflow bits.
+    b32 vsm;
+    u32 vsm_lod_bias;
+    u32 vsm_requested;
+    u32 vsm_drawn;
+    u32 vsm_resident;
+    u32 vsm_evicted;
+    u32 vsm_draws;
+    u32 vsm_overflow;
 } NphRenderFrameStats;
+
+// The virtual shadow map's capacities that can fill up
+// (NphRenderFrameStats.vsm_overflow); each is in NphRendererDesc. Pixels
+// whose pages did not fit in the pool are lit; a page whose draws did not
+// all fit is drawn again the next frame. Either way the renderer raises the
+// resolution bias until the map fits (NphRenderFrameStats.vsm_lod_bias).
+typedef enum NphRenderVsmOverflow {
+    NPH_RENDER_VSM_OVERFLOW_POOL = 1U << 0U,     // vsm_pages
+    NPH_RENDER_VSM_OVERFLOW_MESHLETS = 1U << 1U, // max_vsm_meshlets
+    NPH_RENDER_VSM_OVERFLOW_DRAWS = 1U << 2U,    // max_vsm_draws
+} NphRenderVsmOverflow;
 
 // The production path's lists that can fill up (NphRenderFrameStats.
 // vis_overflow); each is a capacity in NphRendererDesc.
@@ -589,6 +626,11 @@ bool nph_renderer_production_supported(const NphRenderer *r);
 // Whether the renderer traces shadow rays for lights that cast shadows:
 // the device has ray queries and the description did not disable them.
 bool nph_renderer_ray_tracing_supported(const NphRenderer *r);
+
+// Whether the production path shadows its sun with a virtual shadow map:
+// it has the production path, the device has depth clamping and clip
+// distances, and the description did not disable it.
+bool nph_renderer_virtual_shadows_supported(const NphRenderer *r);
 
 // Declares this frame's passes into `graph` (between nph_gpu_rg_begin and
 // nph_gpu_rg_compile) and fills the frame's GPU records. `target` is the

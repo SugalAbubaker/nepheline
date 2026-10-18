@@ -634,6 +634,9 @@ static void light_record(const NphRenderer *r, u32 slot, NphVisLight *out)
     split(p.y, &hy, &ly);
     split(p.z, &hz, &lz);
     render_light_data(&l->desc, nph_vec3(hx, hy, hz), &out->data);
+    if (slot == r->vsm.sun_slot) {
+        out->data.color.w = 2.0F; // the sun: its virtual shadow map where the view has one
+    }
     out->position_low = nph_vec4(lx, ly, lz, l->desc.range);
     out->live = 1U;
 }

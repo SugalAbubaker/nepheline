@@ -243,7 +243,7 @@ void render_rt_shadow_lights(NphRenderer *r, i32 change)
     rt->shadow_lights = (u32)((i32)rt->shadow_lights + change);
 }
 
-bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera)
+bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled)
 {
     RenderRt *rt = &r->rt;
     rt->frame_active = 0;
@@ -252,11 +252,13 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera)
     rt->frame_instances = r->instance_pool.bump;
     rt->frame_builds = 0U;
     rt->tlas_offset = nph_vec3_zero();
-    if (rt->shadow_lights == 0U || !rt->supported) {
+    // The lights whose shadows are this frame's to trace.
+    const bool traced = rt->shadow_lights > handled;
+    if (!traced || !rt->supported) {
         // Instances may change unseen: the next frame that traces rebuilds.
         rt->tlas_valid = 0;
     }
-    if (rt->shadow_lights == 0U) {
+    if (!traced) {
         return false;
     }
     if (!rt->supported) {

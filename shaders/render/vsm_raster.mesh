@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// The virtual shadow map's page raster, mesh-shader path (vsm_raster.glsl):
+// a workgroup per draw (instance, meshlet, page), outputting the meshlet's
+// vertices in the page and every triangle (both sides cast).
+#version 460
+#extension GL_EXT_mesh_shader : require
+#include "vsm_raster.glsl"
+
+layout(local_size_x = 32) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+out gl_MeshPerVertexEXT
+{
+    vec4 gl_Position;
+    float gl_ClipDistance[4];
+}
+gl_MeshVerticesEXT[];
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
+    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (wg >= min(VsmCountersRef(r.v.counters).c.draw_count, r.v.max_draws)) {
+        SetMeshOutputsEXT(0u, 0u);
+        return;
+    }
+    const uvec4 item = VsmUvec4Ref(r.v.draws).v[wg];
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[item.x];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[item.y];
+    const uint vertex_count = m.z & 0xFFFFu;
+    const uint triangle_count = m.z >> 16u;
+    SetMeshOutputsEXT(vertex_count, triangle_count);
+
+    const VsmTarget target = vsm_target(r, item.z);
+    const vec2 extent = vsm_pool_extent(r);
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    for (uint i = gl_LocalInvocationIndex; i < vertex_count; i += 32u) {
+        const uint vertex = VisUintRef(mesh.meshlet_vertices).v[m.x + i];
+        const vec3 p = vis_transform_vector(inst.transform, vis_position(mesh, vertex)) + t;
+        vec4 clip;
+        gl_MeshVerticesEXT[i].gl_Position = vsm_raster_position(r, target, extent, p, clip);
+        gl_MeshVerticesEXT[i].gl_ClipDistance[0] = clip.x;
+        gl_MeshVerticesEXT[i].gl_ClipDistance[1] = clip.y;
+        gl_MeshVerticesEXT[i].gl_ClipDistance[2] = clip.z;
+        gl_MeshVerticesEXT[i].gl_ClipDistance[3] = clip.w;
+    }
+    for (uint i = gl_LocalInvocationIndex; i < triangle_count; i += 32u) {
+        gl_PrimitiveTriangleIndicesEXT[i] = vis_triangle_corners(mesh, m.y, i);
+    }
+}

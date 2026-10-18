@@ -38,11 +38,16 @@
 // only the point's description and one sum stay live.
 //
 // Shadows: a light whose record says it casts them
-// (NphRenderLightData.color.w) is weighed by NPH_SURFACE_SHADOW(p, l,
-// distance) when the includer defines it: the visibility in [0, 1] of the
-// light in direction `l`, `distance` away, from the lit point `p` (an
-// NphLitPoint, whose geometric normal offsets the query off its surface).
-// Shaders with ray queries trace a shadow ray (rt_common.glsl).
+// (NphRenderLightData.color.w) is weighed by its visibility in [0, 1] from
+// the lit point `p` (an NphLitPoint, whose geometric normal offsets the
+// query off its surface), when the includer defines how:
+//   - NPH_SURFACE_VSM(p), for the production path's sun (color.w 2) while
+//     NPH_SURFACE_VSM_ACTIVE: its virtual shadow map (vsm_common.glsl),
+//     looked up once per point before the light loop, whose registers the
+//     lookup would otherwise add to;
+//   - NPH_SURFACE_SHADOW(p, l, distance), for the others (and the sun
+//     otherwise): a shadow ray toward the light in direction `l`,
+//     `distance` away (rt_common.glsl).
 #ifndef NPH_SURFACE_GLSL
 #define NPH_SURFACE_GLSL
 
@@ -150,6 +155,9 @@ struct NphLitPoint {
     float energy; // 1 / Ess - 1: the specular lobe's multiple-scattering compensation is
                   // 1 + F0 * energy
     vec3 face_normal; // the surface's geometric normal, either way round
+#ifdef NPH_SURFACE_VSM
+    float sun_visibility; // NPH_SURFACE_VSM's, or 1 when it is not active
+#endif
 };
 
 // The radiance one punctual light reflects from the point, before exposure.
@@ -161,13 +169,24 @@ vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
     if (nol <= 0.0 || (e.r == 0.0 && e.g == 0.0 && e.b == 0.0)) {
         return vec3(0.0);
     }
-#ifdef NPH_SURFACE_SHADOW
+#if defined(NPH_SURFACE_VSM) || defined(NPH_SURFACE_SHADOW)
     if (light.color.w > 0.0) {
-        // Directional lights are unlimited; the others end at the light.
-        const float distance = uint(light.direction.w) == NPH_RENDER_LIGHT_DIRECTIONAL
-                                   ? 1.0e6
-                                   : length(light.position.xyz - p.position);
-        e *= NPH_SURFACE_SHADOW(p, l, distance);
+        float visibility = 1.0;
+#ifdef NPH_SURFACE_VSM
+        if (light.color.w > 1.5 && NPH_SURFACE_VSM_ACTIVE) {
+            visibility = p.sun_visibility;
+        } else
+#endif
+        {
+#ifdef NPH_SURFACE_SHADOW
+            // Directional lights are unlimited; the others end at the light.
+            const float distance = uint(light.direction.w) == NPH_RENDER_LIGHT_DIRECTIONAL
+                                       ? 1.0e6
+                                       : length(light.position.xyz - p.position);
+            visibility = NPH_SURFACE_SHADOW(p, l, distance);
+#endif
+        }
+        e *= visibility;
         if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
             return vec3(0.0);
         }
@@ -352,6 +371,9 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.metallic = metallic;
     lp.energy = 1.0 / ess - 1.0;
     lp.face_normal = s.face_normal;
+#ifdef NPH_SURFACE_VSM
+    lp.sun_visibility = NPH_SURFACE_VSM_ACTIVE ? NPH_SURFACE_VSM(lp) : 1.0;
+#endif
 #ifdef NPH_SURFACE_GRID_LIGHTS
     const vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
 #else

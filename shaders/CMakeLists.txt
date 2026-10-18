@@ -73,6 +73,12 @@ nph_add_shaders(nph_shaders_render
         render/vis_resolve.comp
         render/vis_resolve_rt.comp
         render/rt_instances.comp
+        render/vsm_pages.comp
+        render/vsm_cull.comp
+        render/vsm_raster.mesh
+        render/vsm_raster.vert
+        render/vsm_clear.vert
+        render/vsm_request.frag
         render/vis_sw_raster.comp
         render/vis_lights.comp
         render/vis_light_bins.comp

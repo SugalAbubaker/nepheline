@@ -1,0 +1,317 @@
+// SPDX-License-Identifier: Apache-2.0
+// The virtual shadow map's page management (docs/render.md "Shadows";
+// shaders/shared/nph_vsm.h), one mode per dispatch:
+//
+//   INVALIDATE (before the scatter): each of this frame's instance updates
+//     marks dirty the pages its old and its new bounding sphere span (a
+//     shadow map's texel holds the nearest caster along the light, so a
+//     caster changes exactly the texels under it), an invocation per update
+//     and level (the dispatch's y), a row of the rectangle at a time.
+//   UPDATE (after the pages are requested): each entry of every level
+//     against this frame's window and requests. An entry whose page the
+//     window scrolled past, or of a level reset, gives its physical page
+//     up; a requested entry with a page is kept (and drawn again if
+//     dirty), and one without asks for a page.
+//   COLLECT: the physical pages without an owner (free), then those no
+//     pixel needed this frame (evictable): the ones no pixel needed for
+//     NPH_VSM_RECENT frames first, the recently needed after them, a
+//     two-bucket approximation of least recently used.
+//   ALLOC: each request takes a free page, else an evictable one (whose
+//     entry loses it), else none (the pool is full: its pixels are lit,
+//     and the renderer makes the levels coarser until the pages fit).
+//   FIXUP (after the culling): when draws did not all fit, every page drawn
+//     this frame stays dirty, so the next frame draws it again.
+//   ARGS: the indirect arguments of the dispatches and draws that follow.
+//
+// The pages drawn this frame are listed (`rendered`) and set in the
+// render bitmask and its rows, which the culling tests casters against.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+#include "vsm_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; }; // arg0: INVALIDATE's update count
+
+NPH_BUFFER_REF(VisUpdatesRef) { NphVisInstanceUpdate u[]; };
+
+// The compute dispatch limit every device meets (maxComputeWorkGroupCount).
+#define VSM_MAX_GROUPS_X 65535u
+
+uvec4 groups(uint n, uint max_x)
+{
+    if (n == 0u) {
+        return uvec4(0u, 1u, 1u, 0u);
+    }
+    const uint x = min(n, max_x);
+    return uvec4(x, (n + x - 1u) / x, 1u, 0u);
+}
+
+uint linear_id()
+{
+    return (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+           gl_LocalInvocationIndex;
+}
+
+// Marks the pages of a level a caster's bounding sphere (light space)
+// spans.
+void invalidate_sphere(VsmViewRef r, int level, vec3 centre, float radius)
+{
+    if (vsm_beyond(r, level, centre, radius)) {
+        return;
+    }
+    const ivec4 rect = vsm_sphere_rect(r, level, centre, radius);
+    if (rect.x > rect.y) {
+        return;
+    }
+    VsmBitsRef dirty = VsmBitsRef(r.v.dirty);
+    for (int y = rect.z; y <= rect.w; ++y) {
+        const uint row =
+            uint(level) * uint(NPH_VSM_LEVEL_WORDS) + uint(y) * uint(NPH_VSM_ROW_WORDS);
+        for (uint w = uint(rect.x) >> 5u; w <= uint(rect.y) >> 5u; ++w) {
+            atomicOr(dirty.w[row + w], vsm_word_mask(w, rect.x, rect.y));
+        }
+    }
+}
+
+void invalidate_instance(VsmViewRef r, VisViewRef view, int level, NphVisInstance inst)
+{
+    if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) == 0u) {
+        return;
+    }
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    const vec3 c = vis_transform_vector(inst.transform, mesh.sphere.xyz) + t;
+    invalidate_sphere(r, level, vsm_light_space(r, c),
+                      mesh.sphere.w * vis_max_scale(inst.transform));
+}
+
+void invalidate(VisViewRef view, VsmViewRef r)
+{
+    const uint i = gl_GlobalInvocationID.x;
+    const int level = int(gl_WorkGroupID.y);
+    if (i >= pc.arg0) {
+        return;
+    }
+    const NphVisInstanceUpdate up = VisUpdatesRef(view.v.instance_updates).u[i];
+    if (up.copy_previous != 0u) {
+        return;
+    }
+    // The record it replaces (the scatter has not run yet), then its own.
+    invalidate_instance(r, view, level, VisInstancesRef(view.v.instances).i[up.slot]);
+    invalidate_instance(r, view, level, up.instance);
+}
+
+// Lists an entry drawn this frame, and marks its page and its row.
+void add_render(VsmViewRef r, uint at, uint index, int level, uint bit)
+{
+    VisUintRef(r.v.rendered).v[at] = index;
+    atomicOr(VsmBitsRef(r.v.render).w[bit >> 5u], 1u << (bit & 31u));
+    const uint y = (bit % uint(NPH_VSM_LEVEL_ENTRIES)) / uint(NPH_VSM_WINDOW);
+    atomicOr(VsmBitsRef(r.v.render_rows).w[uint(level) * uint(NPH_VSM_ROW_WORDS) + (y >> 5u)],
+             1u << (y & 31u));
+    atomicAdd(VsmCountersRef(r.v.counters).c.level_render[level], 1u);
+}
+
+void update(VsmViewRef r)
+{
+    const uint index = linear_id(); // the dispatch covers every entry exactly
+    const int level = int(index / uint(NPH_VSM_LEVEL_ENTRIES));
+    const ivec2 window = vsm_window(r, level);
+    const ivec2 page = vsm_slot_page(window, index % uint(NPH_VSM_LEVEL_ENTRIES));
+    const uint bit = vsm_bit_of(level, page - window);
+    VsmEntriesRef entries = VsmEntriesRef(r.v.entries);
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    NphVsmEntry e = entries.e[index];
+    const uint before = e.state;
+    bool valid = (e.state & NPH_VSM_ENTRY_VALID) != 0u;
+    if (valid && (r.v.reset != 0u || r.v.levels[level].reset != 0u || e.page_x != page.x ||
+                  e.page_y != page.y)) {
+        // The window scrolled past its page, or the level was reset.
+        VsmPhysRef(r.v.phys).p[e.state & NPH_VSM_ENTRY_PAGE].owner = NPH_VSM_NO_OWNER;
+        e.state = 0u;
+        valid = false;
+    }
+    if (valid && vsm_bit(r.v.dirty, bit)) {
+        e.state |= NPH_VSM_ENTRY_DIRTY;
+    }
+    const bool requested = vsm_bit(r.v.requests, bit);
+    bool render = false;
+    bool alloc = false;
+    if (requested) {
+        if (valid) {
+            VsmPhysRef(r.v.phys).p[e.state & NPH_VSM_ENTRY_PAGE].last_used = r.v.frame;
+            render = (e.state & NPH_VSM_ENTRY_DIRTY) != 0u;
+            e.state &= ~NPH_VSM_ENTRY_DIRTY;
+        } else {
+            alloc = true;
+        }
+    }
+    if (e.state != before) {
+        entries.e[index].state = e.state;
+    }
+    uint at;
+    VIS_RESERVE(counters.c.render_count, render ? 1u : 0u, at);
+    if (render) {
+        add_render(r, at, index, level, bit);
+    }
+    VIS_RESERVE(counters.c.alloc_count, alloc ? 1u : 0u, at);
+    if (alloc) {
+        VisUintRef(r.v.alloc).v[at] = index;
+    }
+    VIS_ADD(counters.c.requested, requested ? 1u : 0u);
+}
+
+void collect(VsmViewRef r)
+{
+    const uint p = linear_id();
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    bool free_page = false;
+    bool old = false;
+    bool recent = false;
+    if (p < r.v.pool_pages) {
+        const NphVsmPhys ph = VsmPhysRef(r.v.phys).p[p];
+        free_page = ph.owner == NPH_VSM_NO_OWNER;
+        // Ages wrap with the frame count; the difference does not care.
+        const uint age = r.v.frame - ph.last_used;
+        old = !free_page && age > uint(NPH_VSM_RECENT);
+        recent = !free_page && age != 0u && !old;
+    }
+    uint at;
+    VIS_RESERVE(counters.c.free_count, free_page ? 1u : 0u, at);
+    if (free_page) {
+        VisUintRef(r.v.free).v[at] = p;
+    }
+    VIS_RESERVE(counters.c.candidate_count, old ? 1u : 0u, at);
+    if (old) {
+        VisUintRef(r.v.candidate).v[at] = p;
+    }
+    VIS_RESERVE(counters.c.recent_count, recent ? 1u : 0u, at);
+    if (recent) {
+        VisUintRef(r.v.candidate).v[r.v.pool_pages - 1u - at] = p;
+    }
+}
+
+void alloc(VsmViewRef r)
+{
+    const uint k = linear_id();
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    if (k >= counters.c.alloc_count) {
+        return;
+    }
+    VsmEntriesRef entries = VsmEntriesRef(r.v.entries);
+    VsmPhysRef phys = VsmPhysRef(r.v.phys);
+    const uint free_count = counters.c.free_count;
+    const uint old_count = counters.c.candidate_count;
+    uint page;
+    if (k < free_count) {
+        page = VisUintRef(r.v.free).v[k];
+    } else if (k - free_count < old_count + counters.c.recent_count) {
+        // The long unused first, then the recent ones from the list's end.
+        // The owner was not requested this frame: no other invocation
+        // touches its entry.
+        const uint j = k - free_count;
+        const uint at = j < old_count ? j : r.v.pool_pages - 1u - (j - old_count);
+        page = VisUintRef(r.v.candidate).v[at];
+        entries.e[phys.p[page].owner].state = 0u;
+        atomicAdd(counters.c.evicted, 1u);
+    } else {
+        atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_POOL));
+        return;
+    }
+    const uint index = VisUintRef(r.v.alloc).v[k];
+    const int level = int(index / uint(NPH_VSM_LEVEL_ENTRIES));
+    const ivec2 window = vsm_window(r, level);
+    const ivec2 abs_page = vsm_slot_page(window, index % uint(NPH_VSM_LEVEL_ENTRIES));
+    NphVsmEntry e;
+    e.state = page | NPH_VSM_ENTRY_VALID;
+    e.page_x = abs_page.x;
+    e.page_y = abs_page.y;
+    e.pad0 = 0u;
+    entries.e[index] = e;
+    NphVsmPhys ph;
+    ph.owner = index;
+    ph.last_used = r.v.frame;
+    phys.p[page] = ph;
+    add_render(r, atomicAdd(counters.c.render_count, 1u), index, level,
+               vsm_bit_of(level, abs_page - window));
+}
+
+void fixup(VsmViewRef r)
+{
+    const uint i = linear_id();
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    if ((counters.c.overflow & uint(NPH_VSM_OVERFLOW_MESHLETS | NPH_VSM_OVERFLOW_DRAWS)) == 0u ||
+        i >= min(counters.c.render_count, r.v.pool_pages)) {
+        return;
+    }
+    atomicOr(VsmEntriesRef(r.v.entries).e[VisUintRef(r.v.rendered).v[i]].state,
+             NPH_VSM_ENTRY_DIRTY);
+}
+
+void args(VisViewRef view, VsmViewRef r)
+{
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    VsmArgsRef a = VsmArgsRef(r.v.args);
+    switch (pc.phase) {
+    case NPH_VSM_ARGS_INSTANCE: {
+        // A workgroup per 64 instance slots and level with pages to draw.
+        if (gl_LocalInvocationIndex == 0u) {
+            uint n = 0u;
+            for (uint level = 0u; level < uint(NPH_VSM_LEVELS); ++level) {
+                if (counters.c.level_render[level] != 0u) {
+                    a.a.levels[n++] = level;
+                }
+            }
+            const uvec4 g = groups((view.v.instance_count + 63u) / 64u, VSM_MAX_GROUPS_X);
+            a.a.instance_args = uint[4](n != 0u ? g.x : 0u, g.y, n, 0u);
+        }
+        break;
+    }
+    case NPH_VSM_ARGS_ALLOC: {
+        const uvec4 g = groups((counters.c.alloc_count + 63u) / 64u, VSM_MAX_GROUPS_X);
+        a.a.alloc_args = uint[4](g.x, g.y, g.z, g.w);
+        break;
+    }
+    case NPH_VSM_ARGS_MESHLET: {
+        const uint n = min(counters.c.meshlet_count, r.v.max_meshlets);
+        const uvec4 g = groups((n + 63u) / 64u, VSM_MAX_GROUPS_X);
+        a.a.meshlet_args = uint[4](g.x, g.y, g.z, g.w);
+        break;
+    }
+    default: {
+        const uvec4 g = groups(min(counters.c.draw_count, r.v.max_draws), view.v.max_mesh_groups_x);
+        a.a.draw_args = uint[4](g.x, g.y, g.z, g.w);
+        a.a.clear_args = uint[4](6u, min(counters.c.render_count, r.v.pool_pages), 0u, 0u);
+        break;
+    }
+    }
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
+    switch (pc.mode) {
+    case NPH_VSM_PAGES_INVALIDATE:
+        invalidate(view, r);
+        break;
+    case NPH_VSM_PAGES_UPDATE:
+        update(r);
+        break;
+    case NPH_VSM_PAGES_COLLECT:
+        collect(r);
+        break;
+    case NPH_VSM_PAGES_ALLOC:
+        alloc(r);
+        break;
+    case NPH_VSM_PAGES_FIXUP:
+        fixup(r);
+        break;
+    default:
+        args(view, r);
+        break;
+    }
+}

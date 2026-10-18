@@ -35,6 +35,16 @@ vec3 g_tlas_offset;
     nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
 #endif
 
+// The sun's virtual shadow map where the view has one (vsm_common.glsl):
+// the pipelines are specialised on it, so frames without one keep the
+// registers its test would hold.
+#define NPH_VSM_SAMPLING
+#include "vsm_common.glsl"
+layout(constant_id = 1) const bool k_vsm = false;
+VsmViewRef g_vsm; // set first thing in main()
+#define NPH_SURFACE_VSM_ACTIVE k_vsm
+#define NPH_SURFACE_VSM(p)     vsm_shadow(g_vsm, (p).position, (p).face_normal, (p).n)
+
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
@@ -137,6 +147,7 @@ void main()
     g_tlas = rview.v.tlas;
     g_tlas_offset = rview.v.tlas_offset.xyz;
 #endif
+    g_vsm = VsmViewRef(rview.v.vsm);
     const uint debug = rview.v.debug_mode;
     // Decided here, so that nothing of the view stays live to the store.
     const bool dither = k_dither && debug == NPH_RENDER_DEBUG_NONE;

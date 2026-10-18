@@ -49,6 +49,10 @@ static inline void test_renderer_desc(NphRendererDesc *d, NphGpuDevice *dev)
     d->max_deferred = 4096U;
     d->max_instance_updates = 256U;
     d->meshlet_index_pool = 1U << 20U;
+    // The virtual shadow map's pool: 4 MB, enough for test scenes.
+    d->vsm_pages = 64U;
+    d->max_vsm_meshlets = 65536U;
+    d->max_vsm_draws = 65536U;
     d->name = "test renderer";
 }
 

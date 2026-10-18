@@ -15,6 +15,16 @@
 
 #define NPH_SURFACE_SAMPLE(tex, smp, s) nph_sample_2d((tex), (smp), (s).uv)
 
+// The production path's blended surfaces read the sun's virtual shadow map
+// where the view has one (vsm_common.glsl); their pipelines are
+// specialised on it (the reference's never are).
+#define NPH_VSM_SAMPLING
+#include "vsm_common.glsl"
+layout(constant_id = 0) const bool k_vsm = false;
+VsmViewRef g_vsm; // set first thing in main()
+#define NPH_SURFACE_VSM_ACTIVE k_vsm
+#define NPH_SURFACE_VSM(p)     vsm_shadow(g_vsm, (p).position, (p).face_normal, (p).n)
+
 // The *_rt variants trace shadow rays (rt_common.glsl).
 #ifdef NPH_RAY_QUERY
 #include "rt_common.glsl"
@@ -42,6 +52,7 @@ void main()
     g_tlas = view.v.tlas;
     g_tlas_offset = view.v.tlas_offset.xyz;
 #endif
+    g_vsm = VsmViewRef(view.v.vsm);
     const NphRenderDrawData draw = DrawsRef(view.v.draws_address).d[pc.draw_index];
     const NphRenderMaterialData m = MaterialsRef(view.v.materials_address).m[draw.material_index];
 

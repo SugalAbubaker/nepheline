@@ -19,6 +19,7 @@ nph_add_module(render
         src/rt.c
         src/vis.c
         src/vis_scene.c
+        src/vsm.c
     PUBLIC_DEPS nph::gpu
 )
 # The GPU records are declared once for C and GLSL (shaders/shared/
@@ -44,6 +45,7 @@ nph_add_test(render
         tests/test_renderer.c
         tests/test_shadows.c
         tests/test_vis.c
+        tests/test_vsm.c
     DEPS
         nph::render
 )
