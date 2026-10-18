@@ -169,6 +169,12 @@ static void taa_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     p.hdr_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->hdr_rg));
     p.visbuffer_index =
         nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->vis.frame.visbuffer));
+    // The bloom's sampler is the history's (bilinear, clamped).
+    const RenderPostComposite bloom = render_post_composite(r, graph);
+    p.bloom_index = bloom.bloom_index;
+    p.bloom = bloom.bloom;
+    p.bloom_scale = bloom.bloom_scale;
+    p.bloom_uv = bloom.bloom_uv;
     nph_gpu_cmd_bind_pipeline(cmd, r->frame_target->taa);
     nph_gpu_cmd_push_constants(cmd, &p, (u32)sizeof p);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
@@ -236,6 +242,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     if (t->frame_history) {
         nph_gpu_rg_read_image(p, prev, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
+    render_post_read(r, p);
 
     NphRenderTaaPush *push = &t->push;
     memset(push, 0, sizeof *push);

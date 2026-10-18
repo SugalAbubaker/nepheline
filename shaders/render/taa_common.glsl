@@ -111,6 +111,21 @@ void taa_neighbourhood_add(inout TaaNeighbourhood n, vec3 rgb, float w)
     n.count += 1.0;
 }
 
+// The neighbourhood with `g` (YCoCg) mixed into every sample by `b`, as
+// if each had been c' = (1 - b) c + b g: the same g for all, so the
+// moments, the extremes (1 - b >= 0 keeps their order), and the filtered
+// colour (the weights sum to 1) follow from the plain samples' without
+// touching them one by one (the bloom, bloom.comp).
+void taa_neighbourhood_mix(inout TaaNeighbourhood n, vec3 g, float b)
+{
+    const float a = 1.0 - b;
+    n.m2 = a * a * n.m2 + (2.0 * a * b) * g * n.m1 + (n.count * b * b) * g * g;
+    n.m1 = a * n.m1 + (n.count * b) * g;
+    n.lo = a * n.lo + b * g;
+    n.hi = a * n.hi + b * g;
+    n.filtered = a * n.filtered + (b * n.weight) * g;
+}
+
 // One bilinear tap of the history (its indices are the same for every
 // invocation: push constants).
 vec3 taa_tap(uint texture_index, uint sampler_index, vec2 uv)

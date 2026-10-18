@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+// The exposure's metering, after bloom.comp's histogram (docs/render.md
+// "Bloom and exposure"; ADR-0035): one workgroup, an invocation per bin,
+// takes the mean log2 pre-exposed luminance of the pixels between the
+// histogram's NPH_RENDER_EXPOSURE_LOW and _HIGH fractions, so neither the
+// darkest half of the frame nor its brightest highlights steer it. The CPU
+// reads it back and adapts the exposure (post.c). C twin:
+// render_exposure_average.
+#version 460
+#include "render_common.glsl"
+
+layout(local_size_x = NPH_RENDER_EXPOSURE_BINS) in;
+layout(push_constant, scalar) uniform Push { NphRenderPostPush pc; };
+
+NPH_BUFFER_REF(ExposureRef) { NphRenderExposureData d; };
+
+shared uint s_counts[NPH_RENDER_EXPOSURE_BINS];
+
+void main()
+{
+    ExposureRef ex = ExposureRef(pc.exposure);
+    const uint i = gl_LocalInvocationIndex;
+    s_counts[i] = ex.d.histogram[i];
+    barrier();
+    if (i != 0u) {
+        return;
+    }
+    uint total = 0u;
+    for (uint b = 0u; b < uint(NPH_RENDER_EXPOSURE_BINS); ++b) {
+        total += s_counts[b];
+    }
+    const float lo = float(total) * NPH_RENDER_EXPOSURE_LOW;
+    const float hi = float(total) * NPH_RENDER_EXPOSURE_HIGH;
+    const float bin_log2 = NPH_RENDER_EXPOSURE_RANGE_LOG2 / float(NPH_RENDER_EXPOSURE_BINS);
+    float below = 0.0;
+    float sum = 0.0;
+    float weight = 0.0;
+    for (uint b = 0u; b < uint(NPH_RENDER_EXPOSURE_BINS); ++b) {
+        const float n = float(s_counts[b]);
+        // The part of this bin's pixels that falls between the fractions.
+        const float take = max(min(below + n, hi) - max(below, lo), 0.0);
+        sum += take * (NPH_RENDER_EXPOSURE_MIN_LOG2 + (float(b) + 0.5) * bin_log2);
+        weight += take;
+        below += n;
+    }
+    ex.d.average_log2 = weight > 0.0 ? sum / weight : NPH_RENDER_EXPOSURE_MIN_LOG2;
+    ex.d.count = total;
+}

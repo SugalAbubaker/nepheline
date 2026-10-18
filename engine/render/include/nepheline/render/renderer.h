@@ -523,6 +523,16 @@ typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_RT_SHADOWS = 1U << 4U,    // no virtual shadow map: the sun's shadows ray traced
 } NphRenderVisFlags;
 
+// How a view's exposure is set.
+typedef enum NphRenderExposureMode {
+    NPH_RENDER_EXPOSURE_MANUAL = 0, // `ev100`
+    // Metered from the frame's luminance and adapted toward it over time,
+    // starting from `ev100` (docs/render.md "Bloom and exposure"). The
+    // metering reaches the exposure NPH_GPU_FRAMES_IN_FLIGHT frames late;
+    // debug views are not metered (the exposure holds its course).
+    NPH_RENDER_EXPOSURE_AUTO = 1,
+} NphRenderExposureMode;
+
 // How a view is anti-aliased.
 typedef enum NphRenderAntiAliasing {
     // One sample per pixel, at its centre: every frame stands alone.
@@ -554,10 +564,16 @@ typedef struct NphRenderView {
     // The view does not continue the previous frame's (a cut, a teleport,
     // another camera): temporal history is dropped, not reprojected.
     b32 camera_cut;
+    NphRenderExposureMode exposure;
+    f32 exposure_compensation; // AUTO: stops brighter than the metered exposure
+    f32 exposure_speed;        // AUTO: e-foldings per second toward the metering (0: 1.5)
+    f32 frame_seconds;         // the time since the previous frame, AUTO's pace (0: 1/240)
+    f32 bloom; // the bloom's weight in the image, 0 to 1 (0: none; debug views have none)
 } NphRenderView;
 
-// A view of `camera`: EV100 15, ACES, the environment as background, no
-// anti-aliasing (the runtime turns temporal anti-aliasing on: r.taa).
+// A view of `camera`: EV100 15 (manual), ACES, the environment as
+// background, no anti-aliasing, no bloom (the runtime turns temporal
+// anti-aliasing and bloom on: r.taa, r.bloom).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
 
 // The linear exposure for an EV100 value.
@@ -622,6 +638,12 @@ typedef struct NphRenderFrameStats {
     // after a cut, a resize, or a frame resolved otherwise).
     b32 taa;
     b32 taa_history;
+    // The exposure the frame was drawn with (for NPH_RENDER_EXPOSURE_AUTO the
+    // adapted one) and the latest metering's target (0 until one is read
+    // back), as EV100; whether the frame drew bloom.
+    f32 ev100;
+    f32 metered_ev100;
+    b32 bloom;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

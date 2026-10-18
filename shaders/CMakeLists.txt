@@ -51,6 +51,8 @@ nph_add_shaders(nph_shaders_render
         render/sky.frag
         render/tonemap.frag
         render/taa.frag
+        render/bloom.comp
+        render/exposure.comp
         render/debug_line.vert
         render/debug_line.frag
         render/ibl_sky.comp

@@ -44,6 +44,8 @@ NPH_STATIC_ASSERT(offsetof(NphRenderViewData, light_grid) % 8U == 0U, "addresses
 NPH_STATIC_ASSERT(offsetof(NphRenderViewData, tlas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(sizeof(NphRenderIblPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
+NPH_STATIC_ASSERT(sizeof(NphRenderTonemapPush) <= NPH_GPU_PUSH_CONSTANT_BYTES,
+                  "push constants fit");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_TONEMAPPER_AGX == NPH_RENDER_TONEMAP_AGX,
                   "the tonemapper enums agree with the shader's");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_VIEW_COUNT == NPH_RENDER_DEBUG_COUNT,
@@ -564,6 +566,12 @@ static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     const bool production = r->frame_production != 0;
     NphRenderTonemapPush tp = r->tonemap_push;
     tp.hdr_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->hdr_rg));
+    const RenderPostComposite bloom = render_post_composite(r, graph);
+    tp.bloom_index = bloom.bloom_index;
+    tp.bloom = bloom.bloom;
+    tp.bloom_scale = bloom.bloom_scale;
+    tp.sampler_index = bloom.sampler_index;
+    tp.bloom_uv = bloom.bloom_uv;
     nph_gpu_cmd_bind_pipeline(cmd, production ? t->vis_tonemap : t->tonemap);
     nph_gpu_cmd_push_constants(cmd, &tp, (u32)sizeof tp);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
@@ -674,7 +682,10 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         (u32)view->tonemapper > (u32)NPH_RENDER_TONEMAPPER_AGX ||
         (u32)view->debug_view >= (u32)NPH_RENDER_VIEW_COUNT ||
         (u32)view->pipeline > (u32)NPH_RENDER_PIPELINE_PRODUCTION ||
-        (u32)view->anti_aliasing > (u32)NPH_RENDER_AA_TEMPORAL) {
+        (u32)view->anti_aliasing > (u32)NPH_RENDER_AA_TEMPORAL ||
+        (u32)view->exposure > (u32)NPH_RENDER_EXPOSURE_AUTO ||
+        !(view->bloom >= 0.0F && view->bloom <= 1.0F) || !(view->exposure_speed >= 0.0F) ||
+        !(view->frame_seconds >= 0.0F)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const NphGpuImageDesc *td = nph_gpu_image_desc(dev, target);
@@ -737,6 +748,11 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.vsm_lod_bias = vsm ? r->vsm.frame_bias : 0U;
     stats.taa = r->taa.frame_active;
     stats.taa_history = r->taa.frame_history;
+    // The exposure: the view's, or the automatic one's (post.c).
+    const f32 ev100 = render_post_frame_begin(r, view);
+    stats.ev100 = ev100;
+    stats.metered_ev100 = r->post.metered ? r->post.metered_ev100 : 0.0F;
+    stats.bloom = r->post.frame_bloom;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -777,7 +793,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->sh_address = nph_gpu_buffer_address(dev, r->sh_buffer);
     vd->debug_address = r->debug_addresses[r->debug_draw_buffer];
     vd->light_count = light_count;
-    vd->exposure = nph_render_exposure_from_ev100(view->ev100);
+    vd->exposure = nph_render_exposure_from_ev100(ev100);
     vd->ibl_intensity = r->env.intensity;
     vd->specular_index = nph_gpu_image_sampled_index(dev, r->specular_cube);
     vd->specular_max_lod = (f32)(r->desc.specular_mips - 1U);
@@ -828,6 +844,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     }
     stats.shadow_builds = r->rt.frame_builds;
     stats.shadow_rebuild = rt && r->rt.frame_rebuild ? 1 : 0;
+    // Bloom and the metering, over the complete HDR image.
+    NPH_TRY(render_post_declare(r, graph, width, height));
 
     const NphGpuRgImage out = nph_gpu_rg_import_image(graph, target);
     if (nph_gpu_rg_image_is_null(out)) {
@@ -869,6 +887,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         nph_gpu_rg_depth_attachment(tm, depth, &a, 1);
     }
     nph_gpu_rg_read_image(tm, r->hdr_rg, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    render_post_read(r, tm);
 
     if (out_target != NULL) {
         *out_target = out;

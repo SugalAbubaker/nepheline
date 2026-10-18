@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: Apache-2.0
+// Bloom, and the exposure's metering (docs/render.md "Bloom and exposure";
+// ADR-0035): the glare of the HDR image as a sum of blurs of growing
+// radius over a chain of mips, the first half the frame's size (Jimenez,
+// "Next Generation Post Processing in Call of Duty: Advanced Warfare",
+// SIGGRAPH 2014):
+//   - DOWN_FIRST: the HDR image to the chain's mip 0 through the 13-tap
+//     filter (five overlapping 2 x 2 boxes of bilinear taps), each box
+//     weighted by 1 / (1 + luma), the partial Karis average, so that a
+//     sub-pixel highlight the jitter finds and loses does not pulse; and,
+//     when the exposure is metered, the frame's luminance histogram, from
+//     the plain box under each texel;
+//   - DOWN: mip k - 1 to mip k through the same filter, unweighted;
+//   - UP: mip k += a 3 x 3 tent of mip k + 1, coarsest first, so that mip
+//     0 ends as the sum of every level's blur (each invocation reads and
+//     writes its own texel).
+// Each level halves the one before exactly: a texel covers the 2 x 2
+// texels under it (an odd source's last row or column lies only in the
+// filters' footprints), and the frame's pixel p lies at (p + 0.5) / 2 in
+// mip 0's texels (post.c render_post_composite).
+// The chain is rounded at random to its format's grid when it is
+// B10G11R11 (render_common.glsl nph_dither_b10g11r11), so its energy does
+// not drift with the truncating store the RTX 3060 Ti performs.
+#version 460
+#include "render_common.glsl"
+
+// DOWN modes: each invocation writes the 2 x 2 destination texels at twice
+// its ID; UP: one texel.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphRenderPostPush pc; };
+
+// Whether the chain is B10G11R11.
+layout(constant_id = 0) const bool k_dither = false;
+// The kernel, NPH_RENDER_POST_DOWN_FIRST, _DOWN, or _UP: a pipeline each,
+// so that each has the registers its own path needs (the upsample far
+// fewer than the downsample).
+layout(constant_id = 1) const uint k_mode = NPH_RENDER_POST_DOWN_FIRST;
+
+NPH_BUFFER_REF(ExposureRef) { NphRenderExposureData d; };
+
+shared uint s_histogram[NPH_RENDER_EXPOSURE_BINS];
+
+float luma(vec3 c)
+{
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 tap(vec2 uv)
+{
+    return textureLod(sampler2D(nph_textures_2d[pc.src_index], nph_samplers[pc.sampler_index]), uv,
+                      pc.src_lod)
+        .rgb;
+}
+
+void store(ivec2 p, vec3 c)
+{
+    if (k_dither) {
+        c = nph_dither_b10g11r11(c, nph_gradient_noise(vec2(p) + 5.588238 * float(pc.noise)));
+    }
+    imageStore(nph_images_2d[pc.dst_index], p, vec4(c, 1.0));
+}
+
+// The four destination texels 2 * `id` + (i, j), texel t = 2j + i, through
+// the 13-tap filter. A destination texel's centre is the source corner
+// 2x + 1, where the bilinear tap is the plain 2 x 2 box: its 13 taps lie at
+// the corners two apart around it (the even ones, offsets -2, 0, 2) and
+// between those (the odd ones, -1 and 1), the outer boxes being the 2 x 2
+// blocks of even taps (1/8 each) and the inner box the odd taps (1/2). The
+// four texels' even taps make one 4 x 4 grid of corners 4 * id - 1 + 2k and
+// their odd taps one 3 x 3 grid 4 * id + 2k, so 25 taps serve the four,
+// which apart would take 52: texel (i, j) has the outer boxes at grid
+// (i, j) to (i + 1, j + 1) and the inner box at (i, j). `karis` weights each
+// box by 1 / (1 + luma), and the texels sharing an outer box share its
+// weight. `centres` receives each texel's plain box, even tap (i + 1, j + 1).
+void downsample(ivec2 id, bool karis, out vec3 result[4], out vec3 centres[4])
+{
+    const vec2 o = vec2(4 * id);
+    vec3 sum[4] = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    float weight[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    // The even taps row by row: a row's horizontal pair sums with the row
+    // above's make that row pair's three outer boxes.
+    vec3 above[3];
+    for (int r = 0; r < 4; ++r) {
+        vec3 e[4];
+        for (int c = 0; c < 4; ++c) {
+            e[c] = tap((o + vec2(float(2 * c - 1), float(2 * r - 1))) * pc.src_texel);
+        }
+        if (r == 1 || r == 2) {
+            centres[(r - 1) * 2] = e[1];
+            centres[(r - 1) * 2 + 1] = e[2];
+        }
+        const vec3 pairs[3] = vec3[3](e[0] + e[1], e[1] + e[2], e[2] + e[3]);
+        if (r > 0) {
+            for (int c = 0; c < 3; ++c) {
+                const vec3 box = (above[c] + pairs[c]) * 0.25;
+                const float w = karis ? 0.125 / (1.0 + luma(box)) : 0.125;
+                // Outer box (c, r - 1) is texel (i, j)'s for i in {c - 1, c}
+                // and j in {r - 2, r - 1}.
+                for (int j = 0; j < 2; ++j) {
+                    for (int i = 0; i < 2; ++i) {
+                        if ((c == i || c == i + 1) && (r - 1 == j || r - 1 == j + 1)) {
+                            sum[j * 2 + i] += box * w;
+                            weight[j * 2 + i] += w;
+                        }
+                    }
+                }
+            }
+        }
+        above = pairs;
+    }
+    // The odd taps likewise: inner box (c, r - 1) is texel (c, r - 1)'s.
+    vec3 above_odd[2];
+    for (int r = 0; r < 3; ++r) {
+        vec3 d[3];
+        for (int c = 0; c < 3; ++c) {
+            d[c] = tap((o + vec2(float(2 * c), float(2 * r))) * pc.src_texel);
+        }
+        const vec3 pairs[2] = vec3[2](d[0] + d[1], d[1] + d[2]);
+        if (r > 0) {
+            for (int c = 0; c < 2; ++c) {
+                const vec3 box = (above_odd[c] + pairs[c]) * 0.25;
+                const float w = karis ? 0.5 / (1.0 + luma(box)) : 0.5;
+                sum[(r - 1) * 2 + c] += box * w;
+                weight[(r - 1) * 2 + c] += w;
+            }
+        }
+        above_odd = pairs;
+    }
+    for (int t = 0; t < 4; ++t) {
+        // Unweighted, the weights sum to 1 already.
+        result[t] = karis ? sum[t] / weight[t] : sum[t];
+    }
+}
+
+// The 3 x 3 tent of the coarser mip around texel `p` of the finer one,
+// whose centre lies at (p + 0.5) / 2 in the coarser mip's texels: nine
+// bilinear taps a texel apart, weighted 1-2-1 per axis. Per axis that puts
+// the weights (1 - f, 2 - f, 1 + f, f) / 4 on the four texels from k - 1,
+// where k + f is the centre's place among the texel centres; all are
+// positive, so each pair folds into one bilinear tap between its texels,
+// and four taps give the nine's sum exactly.
+vec3 upsample(ivec2 p)
+{
+    const vec2 x = (vec2(p) + 0.5) * 0.5 - 0.5;
+    const vec2 k = floor(x);
+    const vec2 f = x - k;
+    const vec2 w0 = (3.0 - 2.0 * f) * 0.25; // texels k - 1 and k
+    const vec2 w1 = (1.0 + 2.0 * f) * 0.25; // texels k + 1 and k + 2
+    const vec2 t0 = (k - 0.5 + (2.0 - f) / (3.0 - 2.0 * f)) * pc.src_texel;
+    const vec2 t1 = (k + 1.5 + f / (1.0 + 2.0 * f)) * pc.src_texel;
+    return tap(t0) * (w0.x * w0.y) + tap(vec2(t1.x, t0.y)) * (w1.x * w0.y) +
+           tap(vec2(t0.x, t1.y)) * (w0.x * w1.y) + tap(t1) * (w1.x * w1.y);
+}
+
+void main()
+{
+    if (k_mode == NPH_RENDER_POST_UP) {
+        const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+        if (p.x < int(pc.dst_width) && p.y < int(pc.dst_height)) {
+            store(p, imageLoad(nph_images_2d[pc.dst_index], p).rgb + upsample(p));
+        }
+        return;
+    }
+    const bool first = k_mode == NPH_RENDER_POST_DOWN_FIRST;
+    const ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    vec3 result[4];
+    vec3 centres[4];
+    downsample(id, first, result, centres);
+    bool inside[4];
+    for (int t = 0; t < 4; ++t) {
+        const ivec2 p = 2 * id + ivec2(t & 1, t >> 1);
+        inside[t] = p.x < int(pc.dst_width) && p.y < int(pc.dst_height);
+        if (inside[t]) {
+            store(p, result[t]);
+        }
+    }
+    if (!first || pc.exposure == 0ul) {
+        return;
+    }
+    // The histogram: shared counts, then one add per nonzero bin.
+    for (uint b = gl_LocalInvocationIndex; b < uint(NPH_RENDER_EXPOSURE_BINS); b += 64u) {
+        s_histogram[b] = 0u;
+    }
+    barrier();
+    for (int t = 0; t < 4; ++t) {
+        if (inside[t]) {
+            const float l = log2(max(luma(centres[t]), 1e-20));
+            const float x = (l - NPH_RENDER_EXPOSURE_MIN_LOG2) *
+                            (float(NPH_RENDER_EXPOSURE_BINS) / NPH_RENDER_EXPOSURE_RANGE_LOG2);
+            const uint bin = uint(clamp(x, 0.0, float(NPH_RENDER_EXPOSURE_BINS - 1)));
+            atomicAdd(s_histogram[bin], 1u);
+        }
+    }
+    barrier();
+    ExposureRef ex = ExposureRef(pc.exposure);
+    for (uint b = gl_LocalInvocationIndex; b < uint(NPH_RENDER_EXPOSURE_BINS); b += 64u) {
+        if (s_histogram[b] != 0u) {
+            atomicAdd(ex.d.histogram[b], s_histogram[b]);
+        }
+    }
+}

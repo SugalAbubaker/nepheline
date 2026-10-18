@@ -12,6 +12,7 @@ nph_add_module(render
         src/gpu_profiler.c
         src/ibl.c
         src/meshlet.c
+        src/post.c
         src/primitives.c
         src/reference.c
         src/renderer.c
@@ -40,6 +41,7 @@ nph_add_test(render
     SOURCES
         tests/test_frame.c
         tests/test_gpu_profiler.c
+        tests/test_post.c
         tests/test_primitives.c
         tests/test_reference.c
         tests/test_render_support.h

@@ -376,6 +376,7 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(render_ibl_create(r));
     NPH_TRY(render_debug_create(r));
     NPH_TRY(render_rt_create(r));
+    NPH_TRY(render_post_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
         NPH_TRY(render_taa_create(r));
         NPH_TRY(render_vis_create(r));
@@ -494,6 +495,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_vsm_destroy(r);
     render_vis_destroy(r);
     render_taa_destroy(r);
+    render_post_destroy(r);
     render_rt_destroy(r);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, r->frame_buffers[i]);

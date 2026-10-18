@@ -96,6 +96,17 @@ void main()
             taa_neighbourhood_add(n, c, filter_weight((y + 1) * 3 + x + 1));
         }
     }
+    // The bloom (bloom.comp), mixed into the current frame before the
+    // history meets it, so the history carries it and steadies it too; it
+    // varies slowly, so the pixel's own serves its neighbours.
+    if (pc.bloom > 0.0) {
+        const vec3 glare =
+            textureLod(sampler2D(nph_textures_2d[pc.bloom_index], nph_samplers[pc.sampler_index]),
+                       (vec2(pixel) + 0.5) * pc.bloom_uv, 0.0)
+                .rgb *
+            pc.bloom_scale;
+        taa_neighbourhood_mix(n, taa_rgb_to_ycocg(glare), pc.bloom);
+    }
     // Its nearest surface: the visibility buffer's depths (its high words,
     // reverse-Z, so the largest is the nearest and the sky's 0 the
     // farthest; the bits of non-negative floats order as the floats do) by

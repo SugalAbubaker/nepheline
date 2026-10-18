@@ -227,9 +227,57 @@ NPH_SHARED_STRUCT(NphRenderPush)
 // Push constants of the tonemap pass.
 NPH_SHARED_STRUCT(NphRenderTonemapPush)
 {
-    u32 hdr_index;   // bindless: the pre-exposed HDR colour
-    u32 tonemapper;  // NPH_RENDER_TONEMAP_*
-    u32 encode_srgb; // 1: the target is UNORM, so the shader applies the sRGB curve
+    u32 hdr_index;     // bindless: the pre-exposed HDR colour
+    u32 tonemapper;    // NPH_RENDER_TONEMAP_*
+    u32 encode_srgb;   // 1: the target is UNORM, so the shader applies the sRGB curve
+    u32 bloom_index;   // bindless sampled: the bloom chain, whose mip 0 sums its levels
+    f32 bloom;         // the bloom's weight in the image (0: none)
+    f32 bloom_scale;   // 1 / the chain's levels: mip 0 back to one blur's energy
+    u32 sampler_index; // bilinear, clamped to the edge
+    u32 pad0;
+    NphVec2 bloom_uv; // a pixel's step in mip 0's UV: 0.5 / its size (it halves the frame)
+};
+
+// Bloom and exposure (post.c; bloom.comp, exposure.comp).
+#define NPH_RENDER_BLOOM_LEVELS 6 // the chain's mips at most, the first half the frame's size
+// The bloom and metering kernels (bloom.comp's specialisation, or
+// exposure.comp).
+#define NPH_RENDER_POST_DOWN_FIRST 0 // the HDR image to the chain's mip 0 (Karis average)
+#define NPH_RENDER_POST_DOWN       1 // mip k - 1 to mip k
+#define NPH_RENDER_POST_UP         2 // mip k += the tent of mip k + 1
+#define NPH_RENDER_POST_AVERAGE    3 // the histogram's mean between its percentiles
+// The exposure histogram: log2 of pre-exposed luminance over
+// [MIN_LOG2, MIN_LOG2 + RANGE_LOG2) in BINS bins (an eighth of a stop
+// each); the metered mean takes the pixels between the LOW and HIGH
+// fractions of the sorted luminances.
+#define NPH_RENDER_EXPOSURE_BINS       128
+#define NPH_RENDER_EXPOSURE_MIN_LOG2   (-12.0)
+#define NPH_RENDER_EXPOSURE_RANGE_LOG2 16.0
+#define NPH_RENDER_EXPOSURE_LOW        0.5
+#define NPH_RENDER_EXPOSURE_HIGH       0.95
+
+// The frame's metering, on the GPU (cleared each frame; read back).
+NPH_SHARED_STRUCT(NphRenderExposureData)
+{
+    u32 histogram[NPH_RENDER_EXPOSURE_BINS];
+    f32 average_log2; // mean log2 pre-exposed luminance between the percentiles
+    u32 count;        // the pixels counted
+    u32 pad0;
+    u32 pad1;
+};
+
+// Push constants of the bloom and exposure kernels.
+NPH_SHARED_STRUCT(NphRenderPostPush)
+{
+    u64 exposure;      // NphRenderExposureData; 0: no metering
+    NphVec2 src_texel; // the source mip's texel, in UV
+    u32 src_index;     // bindless sampled: the HDR image, or the chain
+    f32 src_lod;       // the source's mip
+    u32 dst_index;     // bindless storage: the destination mip
+    u32 sampler_index; // bilinear, clamped to the edge
+    u32 dst_width;
+    u32 dst_height;
+    u32 noise; // the rounding noise's offset this frame
     u32 pad0;
 };
 
@@ -252,6 +300,11 @@ NPH_SHARED_STRUCT(NphRenderTaaPush)
     u32 tonemapper;      // NPH_RENDER_TONEMAP_*
     u32 encode_srgb;     // 1: the target is UNORM, so the shader applies the sRGB curve
     u32 noise;           // the history's rounding noise's offset this frame
+    u32 bloom_index;     // as NphRenderTonemapPush's
+    f32 bloom;
+    f32 bloom_scale;
+    u32 pad0;
+    NphVec2 bloom_uv;
 };
 
 // Push constants of the image-based lighting kernels.

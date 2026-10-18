@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// Internal state of the renderer (renderer.c, frame.c, ibl.c,
+// Internal state of the renderer (renderer.c, frame.c, ibl.c, post.c,
 // debug_draw.c, and the production path in vis.c, vis_scene.c, vsm.c, and
 // taa.c). See
 // render/renderer.h for the contract and docs/render.md for the design.
@@ -524,6 +524,40 @@ typedef struct RenderTaa {
     NphRenderTaaPush push; // this frame's, without the transient images' indices
 } RenderTaa;
 
+// One pass of the bloom chain or the metering (post.c): its callback's data.
+typedef struct RenderPostPass {
+    NphRenderer *renderer;
+    u32 mode; // NPH_RENDER_POST_*
+    u32 mip;  // the chain's mip it writes
+} RenderPostPass;
+
+// Bloom and the exposure (post.c).
+typedef struct RenderPost {
+    NphGpuShader bloom_shader;
+    NphGpuShader exposure_shader;
+    // bloom.comp by kernel (NPH_RENDER_POST_DOWN_FIRST to _UP), specialised
+    // for the chain's format.
+    NphGpuPipeline bloom[NPH_RENDER_POST_UP + 1];
+    NphGpuPipeline exposure; // exposure.comp
+    NphGpuFormat format;     // the chain's: B10G11R11 where it can be stored and filtered
+    NphGpuBuffer metering;   // NphRenderExposureData
+    NphGpuBuffer readback[NPH_GPU_FRAMES_IN_FLIGHT];
+    u64 readback_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // 1 + the frame readback[i] meters; 0: none
+    f32 readback_exposure[NPH_GPU_FRAMES_IN_FLIGHT]; // the exposure that frame was drawn with
+    f32 ev100;                                       // NPH_RENDER_EXPOSURE_AUTO: the adapted EV100
+    b32 adapted;       // ev100 holds a value (else the view's starts it)
+    f32 metered_ev100; // the latest metering's target
+    b32 metered;       // metered_ev100 holds one
+    // This frame's.
+    b32 frame_bloom;
+    b32 frame_meter;
+    f32 frame_weight; // the bloom's weight in the image
+    f32 frame_ev100;
+    u32 frame_levels; // the chain's mips (0: no chain)
+    NphGpuRgImage frame_chain;
+    RenderPostPass passes[2U * NPH_RENDER_BLOOM_LEVELS + 1U];
+} RenderPost;
+
 struct NphRenderer {
     NphAllocator *alloc;
     NphGpuDevice *dev;
@@ -605,6 +639,9 @@ struct NphRenderer {
 
     // The production path's temporal anti-aliasing.
     RenderTaa taa;
+
+    // Bloom and the exposure.
+    RenderPost post;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -721,6 +758,35 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
                                    NphGpuRgBuffer instances, NphGpuRgBuffer meshes);
 // What a pass that samples the map reads.
 void render_vsm_read(const NphRenderer *r, NphGpuRgPass *pass);
+
+// post.c: bloom and the exposure.
+NphResult render_post_create(NphRenderer *r);
+void render_post_destroy(NphRenderer *r);
+// The frame's EV100: the view's, or for NPH_RENDER_EXPOSURE_AUTO the
+// adapted one, moved toward the latest metering read back. Sets
+// RenderPost.frame_*.
+f32 render_post_frame_begin(NphRenderer *r, const NphRenderView *view);
+// The bloom chain and the metering over the frame's HDR image (r->hdr_rg),
+// once it is complete, before the final pass.
+NphResult render_post_declare(NphRenderer *r, NphGpuRenderGraph *graph, u32 width, u32 height);
+// What the final pass (the tonemap, or the temporal resolve) reads of it.
+void render_post_read(const NphRenderer *r, NphGpuRgPass *pass);
+// What the final pass reads of the bloom (NphRenderTonemapPush's fields).
+typedef struct RenderPostComposite {
+    u32 bloom_index;   // bindless sampled: the chain
+    f32 bloom;         // the bloom's weight in the image (0: none)
+    f32 bloom_scale;   // 1 / the chain's levels
+    u32 sampler_index; // bilinear, clamped to the edge
+    NphVec2 bloom_uv;  // a pixel's step in mip 0's UV
+} RenderPostComposite;
+// The final pass's bloom, inside its callback.
+RenderPostComposite render_post_composite(const NphRenderer *r, NphGpuRenderGraph *graph);
+// The histogram's mean log2 between its percentiles, as exposure.comp
+// computes it, and its pixel count.
+void render_exposure_average(const u32 *histogram, f32 *out_log2, u32 *out_count);
+// The EV100 an averaging meter gives a mean log2 pre-exposed luminance
+// measured at `exposure`, with a compensation in stops (positive: brighter).
+f32 render_exposure_target_ev100(f32 average_log2, f32 exposure, f32 compensation);
 
 // taa.c: the production path's temporal anti-aliasing.
 NphResult render_taa_create(NphRenderer *r);
