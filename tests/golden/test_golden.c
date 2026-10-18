@@ -425,6 +425,69 @@ NTEST_F(Golden, punctual_lights)
     golden_check(f, "punctual_lights", &v);
 }
 
+// Ray-traced shadows (docs/render.md "Shadows"): a sun, a point, and a spot
+// light, each casting shadows, over a pillar, a turned cube, and spheres
+// (one floating) on a floor under the sky: the shadows' shapes where they
+// overlap and the sky's light left in them. Skipped without ray queries.
+NTEST_F(Golden, shadows)
+{
+    REQUIRE_GOLDEN(f);
+    if (!nph_renderer_ray_tracing_supported(f->renderer)) {
+        NTEST_SKIP("no ray queries on this device");
+    }
+    const NphRenderMesh floor = plane_mesh(f, 10.0F);
+    const NphRenderMesh cube = cube_mesh(f, 1.0F);
+    const NphRenderMesh sphere = sphere_mesh(f, 0.45F);
+    add_instance(f, floor, simple_material(f, nph_vec3(0.6F, 0.6F, 0.6F), 0.0F, 0.7F), at(0, 0, 0));
+    add_instance(f, cube, simple_material(f, nph_vec3(0.8F, 0.8F, 0.8F), 0.0F, 0.5F),
+                 nph_render_transform_from_trs(nph_dvec3(-1.3, 1.2, -0.9), nph_quat_identity(),
+                                               nph_vec3(0.5F, 2.4F, 0.5F)));
+    add_instance(f, cube, simple_material(f, nph_vec3(0.75F, 0.25F, 0.2F), 0.0F, 0.45F),
+                 nph_render_transform_from_trs(nph_dvec3(1.4, 0.4, 0.1),
+                                               nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.6F),
+                                               nph_vec3(0.8F, 0.8F, 0.8F)));
+    add_instance(f, sphere, simple_material(f, nph_vec3(0.7F, 0.7F, 0.75F), 0.0F, 0.2F),
+                 at(-0.1, 0.45, 1.1));
+    add_instance(f, sphere, simple_material(f, nph_vec3(0.95F, 0.85F, 0.6F), 1.0F, 0.35F),
+                 at(0.3, 1.5, -0.4));
+    // The sky dimmed, so what the lights do not reach stays dark.
+    NphRenderEnvironmentDesc ed;
+    memset(&ed, 0, sizeof ed);
+    ed.source = NPH_RENDER_ENV_SKY;
+    ed.sky.zenith = nph_vec3(0.35F, 0.55F, 1.0F);
+    ed.sky.horizon = nph_vec3(1.0F, 0.95F, 0.88F);
+    ed.sky.ground = nph_vec3(0.30F, 0.26F, 0.22F);
+    ed.intensity = 0.3F;
+    NTEST_ASSERT_EQ_INT(nph_render_set_environment(f->renderer, &ed), NPH_RESULT_OK);
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.shadows = 1;
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3(1.0F, 0.96F, 0.9F);
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.55F, -1.0F, -0.35F));
+    add_light(f, &ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    ld.color = nph_vec3(1.0F, 0.6F, 0.3F);
+    ld.intensity = 6.0F;
+    ld.position = nph_dvec3(-0.4, 1.4, 2.0);
+    ld.range = 6.0F;
+    add_light(f, &ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_SPOT;
+    ld.color = nph_vec3(0.4F, 0.6F, 1.0F);
+    ld.intensity = 50.0F;
+    ld.position = nph_dvec3(2.2, 3.6, 1.6);
+    ld.direction = nph_vec3_normalize(nph_vec3(-0.55F, -1.0F, -0.45F));
+    ld.range = 0.0F;
+    ld.inner_cone = 0.3F;
+    ld.outer_cone = 0.55F;
+    add_light(f, &ld);
+    NphRenderView v;
+    base_view(&v, nph_dvec3(0.0, 3.4, 6.5), nph_dvec3(0.0, 0.4, 0.0), 0.8F);
+    v.ev100 = 1.0F;
+    golden_check(f, "shadows", &v);
+}
+
 // Emissive swatches doubling in radiance from 2^-8 to 2^7, in white and
 // three saturated colours: the curve and the hue behaviour of a tonemapper.
 static void tonemap_ramp(Golden *f, NphRenderTonemapper op, const char *name)
