@@ -104,7 +104,14 @@ NPH_SHARED_STRUCT(NphBenchPush)
     u32 texture_index; // sampled texture (bindless)
     u32 sampler_index;
     u32 pad0;
-    NphVec4 color; // raster fill colour
+    NphVec4 color; // raster fill colour; the temporal benchmarks: xy the motion in pixels
+    // The temporal benchmarks (bench_taa.*): the visibility buffer and the
+    // history as sampled textures, and the history written by the compute
+    // form as a storage image.
+    u32 texture2_index;
+    u32 texture3_index;
+    u32 image_index;
+    u32 pad1;
 };
 
 #endif

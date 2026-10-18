@@ -25,6 +25,7 @@
 #include <nepheline/gpu/commands.h>
 #include <nepheline/gpu/upload.h>
 #include <nepheline/gpu/vk.h>
+#include <nepheline/math/pack.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
 
@@ -42,6 +43,17 @@
 #define WARMUP_NS    (150ULL * 1000000ULL)  // per benchmark, before the measured frames
 #define PREWARM_NS   (1000ULL * 1000000ULL) // once, before the suite
 
+// The temporal resolve's forms (bench_taa.frag k_mode: nine fetches, the
+// quad's shared block, the cross) and history formats (B10G11R11, RGBA16F).
+#define TAA_MODES        3U
+#define TAA_MODE_QUAD    1U
+#define TAA_FORMATS      2U
+#define TAA_COMPUTE      TAA_MODES // the row of taa_supported for the compute form
+#define TAA_TILE         16U       // bench_taa.comp's workgroup
+#define TAA_PARAM(m, f)  ((m) | ((f) << 4U))
+#define TAA_MODE_OF(p)   ((p) & 0xFU)
+#define TAA_FORMAT_OF(p) ((p) >> 4U)
+
 typedef struct Ctx {
     NphGpuDevice *dev;
     NphGpuShader fill_cs;
@@ -52,6 +64,9 @@ typedef struct Ctx {
     NphGpuShader color_fs;
     NphGpuShader sample_fs;
     NphGpuShader visbuffer_fs;
+    NphGpuShader taa_fs;
+    NphGpuShader taa_cs;
+    NphGpuShader tonemap_fs;
     NphGpuPipeline fill;
     NphGpuPipeline read;
     NphGpuPipeline fma;
@@ -61,6 +76,12 @@ typedef struct Ctx {
     NphGpuPipeline raster_rgba16f;
     NphGpuPipeline sample_rgba8;
     NphGpuPipeline visbuffer;
+    // The temporal resolve (bench_taa.*): [neighbourhood mode][history
+    // format], the compute form per history format, and the tonemap.
+    NphGpuPipeline taa_fragment[TAA_MODES][TAA_FORMATS];
+    NphGpuPipeline taa_compute[TAA_FORMATS];
+    NphGpuPipeline tonemap;
+    b32 taa_supported[TAA_MODES + 1U][TAA_FORMATS]; // the last row: the compute form
     NphGpuBuffer big_a;
     NphGpuBuffer big_b;
     NphGpuBuffer small;
@@ -71,6 +92,13 @@ typedef struct Ctx {
     NphGpuImage clear_target;
     NphGpuImage texture;
     NphGpuSampler sampler;
+    // The temporal resolve's inputs, filled with noise (the worst case for
+    // the hardware's colour compression), and its new history.
+    NphGpuImage hdr;                     // B10G11R11, the current frame
+    NphGpuImage vis;                     // R32G32_UINT, the visibility buffer
+    NphGpuImage history_in[TAA_FORMATS]; // the previous frame's history
+    NphGpuImage history_out[TAA_FORMATS];
+    NphGpuSampler linear_clamp;
 } Ctx;
 
 typedef struct Bench Bench;
@@ -211,6 +239,79 @@ static void record_visbuffer(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 {
     record_raster(ctx, cmd, ctx->target_r32g32, ctx->visbuffer, b->param);
 }
+// A full-screen triangle into `count` colour targets, their contents
+// discarded first.
+static void record_fullscreen(NphGpuCmd *cmd, const NphGpuImage *targets, u32 count,
+                              NphGpuPipeline pipeline, const NphBenchPush *p)
+{
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    for (u32 i = 0; i < count; ++i) {
+        nph_gpu_cmd_image_barrier(cmd, targets[i], (u32)NPH_GPU_STAGE_ALL,
+                                  (u32)NPH_GPU_ACCESS_MEMORY_WRITE, NPH_GPU_LAYOUT_UNDEFINED,
+                                  (u32)NPH_GPU_STAGE_COLOR_OUTPUT, (u32)NPH_GPU_ACCESS_COLOR_WRITE,
+                                  NPH_GPU_LAYOUT_COLOR_ATTACHMENT);
+        rd.colors[i].image = targets[i];
+        rd.colors[i].load = NPH_GPU_LOAD_OP_DONT_CARE;
+        rd.colors[i].store = NPH_GPU_STORE_OP_STORE;
+    }
+    rd.color_count = count;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, p, sizeof *p);
+    nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
+    nph_gpu_cmd_end_rendering(cmd);
+}
+
+static NphBenchPush taa_push(const Ctx *ctx, u32 format)
+{
+    NphBenchPush p = base_push(ctx);
+    p.texture_index = nph_gpu_image_sampled_index(ctx->dev, ctx->hdr);
+    p.texture2_index = nph_gpu_image_sampled_index(ctx->dev, ctx->vis);
+    p.texture3_index = nph_gpu_image_sampled_index(ctx->dev, ctx->history_in[format]);
+    p.sampler_index = nph_gpu_sampler_index(ctx->dev, ctx->linear_clamp);
+    p.image_index = nph_gpu_image_storage_index(ctx->dev, ctx->history_out[format], 0U);
+    p.color = nph_vec4(0.37F, -0.21F, 0.0F, 0.0F); // the motion, in pixels
+    return p;
+}
+
+static void record_tonemap(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
+{
+    NPH_UNUSED(b);
+    const NphBenchPush p = taa_push(ctx, 0U);
+    record_fullscreen(cmd, &ctx->target_rgba8, 1U, ctx->tonemap, &p);
+}
+
+// The fused form: the display colour and the new history in one pass.
+static void record_taa_fragment(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
+{
+    const u32 format = TAA_FORMAT_OF(b->param);
+    const NphBenchPush p = taa_push(ctx, format);
+    const NphGpuImage targets[2] = {ctx->target_rgba8, ctx->history_out[format]};
+    record_fullscreen(cmd, targets, 2U, ctx->taa_fragment[TAA_MODE_OF(b->param)][format], &p);
+}
+
+// The compute form: the history from a compute pass, then the tonemap.
+static void record_taa_compute(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
+{
+    const u32 format = TAA_FORMAT_OF(b->param);
+    const NphGpuImage history = ctx->history_out[format];
+    nph_gpu_cmd_image_barrier(cmd, history, (u32)NPH_GPU_STAGE_ALL,
+                              (u32)NPH_GPU_ACCESS_MEMORY_WRITE, NPH_GPU_LAYOUT_UNDEFINED,
+                              (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
+                              NPH_GPU_LAYOUT_GENERAL);
+    NphBenchPush p = taa_push(ctx, format);
+    nph_gpu_cmd_bind_pipeline(cmd, ctx->taa_compute[format]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch(cmd, WIDTH_4K / TAA_TILE, HEIGHT_4K / TAA_TILE, 1U);
+    nph_gpu_cmd_image_barrier(cmd, history, (u32)NPH_GPU_STAGE_COMPUTE,
+                              (u32)NPH_GPU_ACCESS_SHADER_WRITE, NPH_GPU_LAYOUT_GENERAL,
+                              (u32)NPH_GPU_STAGE_FRAGMENT_SHADER, (u32)NPH_GPU_ACCESS_SHADER_READ,
+                              NPH_GPU_LAYOUT_SHADER_READ_ONLY);
+    p.texture_index = nph_gpu_image_sampled_index(ctx->dev, history);
+    record_fullscreen(cmd, &ctx->target_rgba8, 1U, ctx->tonemap, &p);
+}
+
 static void record_nothing(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 {
     NPH_UNUSED(ctx);
@@ -244,7 +345,28 @@ static const Bench g_benches[] = {
     {"raster_fill_4k_rgba16f_x8", record_raster_rgba16f, PIXELS_4K * 8.0, "Gpix/s", 8U},
     {"visbuffer_write_4k_8bpp", record_visbuffer, PIXELS_4K, "Gpix/s", 1U},
     {"texture_sample_4k_rgba8", record_sample, PIXELS_4K, "Gpix/s", 1U},
+    // The temporal resolve and the tonemap (docs/adr/0034-temporal-anti-aliasing.md).
+    {"tonemap_4k", record_tonemap, PIXELS_4K, "Gpix/s", 0U},
+    {"taa_fragment_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 0U)},
+    {"taa_fragment_quad_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 0U)},
+    {"taa_fragment_cross_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 0U)},
+    {"taa_compute_4k", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 0U)},
+    {"taa_fragment_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 1U)},
+    {"taa_fragment_quad_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 1U)},
+    {"taa_fragment_cross_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 1U)},
+    {"taa_compute_4k_rgba16f", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 1U)},
 };
+
+// Whether the device can run `b`: the temporal forms need their history
+// format's uses, and the quad form subgroup quad operations in fragment
+// shaders.
+static bool bench_supported(const Ctx *ctx, const Bench *b)
+{
+    if (b->record == record_taa_fragment || b->record == record_taa_compute) {
+        return ctx->taa_supported[TAA_MODE_OF(b->param)][TAA_FORMAT_OF(b->param)] != 0;
+    }
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -293,6 +415,134 @@ static NphResult make_target(Ctx *ctx, NphGpuFormat format, u32 usage, const cha
     return nph_gpu_image_create(ctx->dev, &d, out);
 }
 
+// A small xorshift generator: the noise needs no quality, only to defeat
+// the hardware's colour compression.
+static u32 noise_next(u32 *state)
+{
+    u32 x = *state;
+    x ^= x << 13U;
+    x ^= x >> 17U;
+    x ^= x << 5U;
+    *state = x;
+    return x;
+}
+
+// A B10G11R11 texel of noise: each channel's exponent between 2^-6 and
+// 2^4, so every value is finite and in the range shading produces.
+static u32 noise_b10g11r11(u32 *state)
+{
+    const u32 n = noise_next(state);
+    const u32 r = ((8U + (n & 7U) + ((n >> 3U) & 3U)) << 6U) | ((n >> 5U) & 0x3FU);
+    const u32 g = ((8U + ((n >> 11U) & 7U) + ((n >> 14U) & 3U)) << 6U) | ((n >> 16U) & 0x3FU);
+    const u32 b = ((8U + ((n >> 22U) & 7U) + ((n >> 25U) & 3U)) << 5U) | ((n >> 27U) & 0x1FU);
+    return r | (g << 11U) | (b << 22U);
+}
+
+// Creates a 4K image of `format` and, when `noise` is set, fills it with
+// noise through the upload ring (4 bytes per texel, or 8: RGBA16F and the
+// visibility buffer's R32G32_UINT).
+static NphResult make_noise_image(Ctx *ctx, NphGpuFormat format, u32 usage, const char *name,
+                                  u32 seed, NphGpuImage *out)
+{
+    NPH_TRY(make_target(ctx, format, usage, name, out));
+    const u64 texels = (u64)WIDTH_4K * HEIGHT_4K;
+    const bool wide = format != NPH_GPU_FORMAT_B10G11R11_UFLOAT;
+    const u64 bytes = texels * (wide ? 8U : 4U);
+    u32 *words = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, bytes / 4U);
+    if (words == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    u32 state = seed;
+    for (u64 i = 0; i < texels; ++i) {
+        if (format == NPH_GPU_FORMAT_B10G11R11_UFLOAT) {
+            words[i] = noise_b10g11r11(&state);
+        } else if (format == NPH_GPU_FORMAT_R32G32_UINT) {
+            // A cluster and triangle, then a reverse-Z depth in (0, 1].
+            words[2U * i] = noise_next(&state);
+            const f32 depth = (f32)((noise_next(&state) >> 8U) + 1U) / 16777216.0F;
+            memcpy(&words[2U * i + 1U], &depth, sizeof depth);
+        } else {
+            const u32 n = noise_next(&state);
+            const NphVec4 c = nph_vec4((f32)(n & 0xFFU) / 64.0F, (f32)((n >> 8U) & 0xFFU) / 64.0F,
+                                       (f32)((n >> 16U) & 0xFFU) / 64.0F, 1.0F);
+            const u64 packed = nph_pack_f16x4(c);
+            memcpy(&words[2U * i], &packed, sizeof packed);
+        }
+    }
+    const NphResult r = nph_gpu_upload_image(ctx->dev, *out, 0U, 0U, 1U, words, bytes);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, words, bytes / 4U);
+    NPH_TRY(r);
+    return nph_gpu_upload_flush(ctx->dev, NULL);
+}
+
+// The temporal resolve's images and pipelines, for the history formats the
+// device can sample, render to, and store to.
+static NphResult setup_taa(Ctx *ctx)
+{
+    NphGpuDevice *dev = ctx->dev;
+    const u32 input = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    NPH_TRY(make_noise_image(ctx, NPH_GPU_FORMAT_B10G11R11_UFLOAT, input, "taa hdr", 0x9E3779B9U,
+                             &ctx->hdr));
+    NPH_TRY(make_noise_image(ctx, NPH_GPU_FORMAT_R32G32_UINT, input, "taa visibility", 0x85EBCA6BU,
+                             &ctx->vis));
+    const NphGpuFormat formats[TAA_FORMATS] = {NPH_GPU_FORMAT_B10G11R11_UFLOAT,
+                                               NPH_GPU_FORMAT_R16G16B16A16_SFLOAT};
+    const NphGpuFeatures *feat = &nph_gpu_device_info(dev)->features;
+    for (u32 f = 0; f < TAA_FORMATS; ++f) {
+        const u32 render = (u32)NPH_GPU_FORMAT_FEATURE_SAMPLED_LINEAR |
+                           (u32)NPH_GPU_FORMAT_FEATURE_COLOR_ATTACHMENT;
+        const bool can_render = nph_gpu_format_supports(dev, formats[f], render);
+        const bool can_store =
+            can_render && nph_gpu_format_supports(dev, formats[f], NPH_GPU_FORMAT_FEATURE_STORAGE);
+        if (!can_render) {
+            continue;
+        }
+        NPH_TRY(make_noise_image(ctx, formats[f], input, "taa history in", 0xC2B2AE35U + f,
+                                 &ctx->history_in[f]));
+        u32 usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT;
+        if (can_store) {
+            usage |= (u32)NPH_GPU_IMAGE_USAGE_STORAGE;
+        }
+        NPH_TRY(make_target(ctx, formats[f], usage, "taa history out", &ctx->history_out[f]));
+        for (u32 m = 0; m < TAA_MODES; ++m) {
+            if (m == TAA_MODE_QUAD && !(feat->subgroup_quad && feat->subgroup_fragment)) {
+                continue;
+            }
+            NphGpuGraphicsPipelineDesc d;
+            memset(&d, 0, sizeof d);
+            d.vertex = ctx->fullscreen_vs;
+            d.fragment = ctx->taa_fs;
+            d.color_formats[0] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+            d.color_formats[1] = formats[f];
+            d.color_count = 2U;
+            d.specialization[0] = m;
+            d.specialization[1] = formats[f] == NPH_GPU_FORMAT_B10G11R11_UFLOAT ? 1U : 0U;
+            d.specialization_count = 2U;
+            d.name = "taa (fragment)";
+            NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &d, &ctx->taa_fragment[m][f]));
+            ctx->taa_supported[m][f] = 1;
+        }
+        if (can_store) {
+            NphGpuComputePipelineDesc d;
+            memset(&d, 0, sizeof d);
+            d.shader = ctx->taa_cs;
+            d.specialization[1] = formats[f] == NPH_GPU_FORMAT_B10G11R11_UFLOAT ? 1U : 0U;
+            d.specialization_count = 2U;
+            d.name = "taa (compute)";
+            NPH_TRY(nph_gpu_pipeline_create_compute(dev, &d, &ctx->taa_compute[f]));
+            ctx->taa_supported[TAA_COMPUTE][f] = 1;
+        }
+    }
+    NphGpuSamplerDesc smp;
+    nph_gpu_sampler_desc_default(&smp);
+    smp.mip_filter = NPH_GPU_FILTER_NEAREST;
+    smp.address_u = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
+    smp.address_v = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
+    smp.address_w = NPH_GPU_ADDRESS_CLAMP_TO_EDGE;
+    smp.name = "taa history";
+    return nph_gpu_sampler_create(dev, &smp, &ctx->linear_clamp);
+}
+
 static NphResult setup(Ctx *ctx)
 {
     NphGpuDevice *dev = ctx->dev;
@@ -304,6 +554,9 @@ static NphResult setup(Ctx *ctx)
     NPH_TRY(load_shader(ctx, "bench_color.frag", &ctx->color_fs));
     NPH_TRY(load_shader(ctx, "bench_sample.frag", &ctx->sample_fs));
     NPH_TRY(load_shader(ctx, "bench_visbuffer.frag", &ctx->visbuffer_fs));
+    NPH_TRY(load_shader(ctx, "bench_taa.frag", &ctx->taa_fs));
+    NPH_TRY(load_shader(ctx, "bench_taa.comp", &ctx->taa_cs));
+    NPH_TRY(load_shader(ctx, "bench_tonemap.frag", &ctx->tonemap_fs));
     NPH_TRY(make_compute(ctx, ctx->fill_cs, "fill", &ctx->fill));
     NPH_TRY(make_compute(ctx, ctx->read_cs, "read", &ctx->read));
     NPH_TRY(make_compute(ctx, ctx->fma_cs, "fma", &ctx->fma));
@@ -318,6 +571,9 @@ static NphResult setup(Ctx *ctx)
                           &ctx->sample_rgba8));
     NPH_TRY(make_graphics(ctx, ctx->visbuffer_fs, NPH_GPU_FORMAT_R32G32_UINT, "visbuffer",
                           &ctx->visbuffer));
+    NPH_TRY(make_graphics(ctx, ctx->tonemap_fs, NPH_GPU_FORMAT_R8G8B8A8_UNORM, "tonemap",
+                          &ctx->tonemap));
+    NPH_TRY(setup_taa(ctx));
 
     NphGpuBufferDesc bd;
     memset(&bd, 0, sizeof bd);
@@ -407,16 +663,29 @@ static void teardown(Ctx *ctx)
     const NphGpuPipeline pipelines[] = {
         ctx->fill,           ctx->read,         ctx->fma,
         ctx->random,         ctx->raster_rgba8, ctx->raster_r11g11b10,
-        ctx->raster_rgba16f, ctx->sample_rgba8, ctx->visbuffer};
+        ctx->raster_rgba16f, ctx->sample_rgba8, ctx->visbuffer,
+        ctx->tonemap};
     for (u32 i = 0; i < NPH_ARRAY_COUNT(pipelines); ++i) {
         nph_gpu_pipeline_destroy(dev, pipelines[i]);
     }
+    for (u32 f = 0; f < TAA_FORMATS; ++f) {
+        for (u32 m = 0; m < TAA_MODES; ++m) {
+            nph_gpu_pipeline_destroy(dev, ctx->taa_fragment[m][f]);
+        }
+        nph_gpu_pipeline_destroy(dev, ctx->taa_compute[f]);
+        nph_gpu_image_destroy(dev, ctx->history_in[f]);
+        nph_gpu_image_destroy(dev, ctx->history_out[f]);
+    }
     const NphGpuShader shaders[] = {ctx->fill_cs,   ctx->read_cs,       ctx->fma_cs,
                                     ctx->random_cs, ctx->fullscreen_vs, ctx->color_fs,
-                                    ctx->sample_fs, ctx->visbuffer_fs};
+                                    ctx->sample_fs, ctx->visbuffer_fs,  ctx->taa_fs,
+                                    ctx->taa_cs,    ctx->tonemap_fs};
     for (u32 i = 0; i < NPH_ARRAY_COUNT(shaders); ++i) {
         nph_gpu_shader_destroy(dev, shaders[i]);
     }
+    nph_gpu_image_destroy(dev, ctx->vis);
+    nph_gpu_image_destroy(dev, ctx->hdr);
+    nph_gpu_sampler_destroy(dev, ctx->linear_clamp);
     nph_gpu_sampler_destroy(dev, ctx->sampler);
     nph_gpu_image_destroy(dev, ctx->texture);
     nph_gpu_image_destroy(dev, ctx->clear_target);
@@ -731,6 +1000,10 @@ int main(int argc, char **argv)
         for (u32 i = 0; i < NPH_ARRAY_COUNT(g_benches); ++i) {
             const Bench *b = &g_benches[i];
             if (!glob_match(filter, b->name)) {
+                continue;
+            }
+            if (!bench_supported(&ctx, b)) {
+                printf("%-32s skipped: the device lacks what it needs\n", b->name);
                 continue;
             }
             Result r;

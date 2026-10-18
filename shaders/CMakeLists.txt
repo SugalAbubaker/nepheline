@@ -102,6 +102,9 @@ nph_add_shaders(nph_shaders_bench
         bench/bench_color.frag
         bench/bench_sample.frag
         bench/bench_visbuffer.frag
+        bench/bench_taa.frag
+        bench/bench_taa.comp
+        bench/bench_tonemap.frag
 )
 
 # The editor's UI (editor/src/ui_renderer.c): Dear ImGui's draw data.
