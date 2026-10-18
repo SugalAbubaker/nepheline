@@ -40,16 +40,24 @@
 //                         the light count. `lights_1k_every_light` is the
 //                         production path lighting every pixel with every
 //                         light (NPH_RENDER_VIS_NO_LIGHT_GRID).
-//   shadows_4k_<pipeline> the field in daylight, the sun casting ray-traced
-//                         shadows (docs/render.md "Shadows"): a shadow ray
-//                         per lit pixel. The reference rebuilds the top
+//   shadows_4k_<pipeline> the field in daylight, the sun casting shadows
+//                         (docs/render.md "Shadows"): the reference traces
+//                         a shadow ray per lit pixel, rebuilding the top
 //                         level over every instance each frame; the
-//                         production path keeps it while nothing moves.
+//                         production path draws the sun's virtual shadow
+//                         map, whose pages stay drawn while nothing moves.
+//   shadows_rt_4k_production
+//                         the production path with the sun's shadows ray
+//                         traced instead (NPH_RENDER_VIS_RT_SHADOWS): its
+//                         top level kept while nothing moves.
 //   shadows_moving_4k_production
 //                         shadows_4k_production with one sphere moving
-//                         every frame: the production path rebuilds the
-//                         top level each frame, as in a scene with any
-//                         motion.
+//                         every frame: the pages it touches are drawn
+//                         again each frame.
+//   shadows_walk_4k_production
+//                         shadows_4k_production with the camera walking
+//                         (1.4 m/s at 240 frames a second): the pages it
+//                         comes to need are drawn as it moves.
 //   lights_1k_shadows     lights_1k_production with every lamp (and the
 //                         moon) casting shadows: a ray per pixel per light
 //                         that reaches it.
@@ -106,6 +114,7 @@ typedef enum SceneShadows {
     SHADOWS_NONE = 0,
     SHADOWS_SUN,        // the sun (or the moon) casts shadows
     SHADOWS_SUN_MOVING, // and an instance moves every frame
+    SHADOWS_SUN_WALK,   // and the camera walks
     SHADOWS_ALL,        // the moon and every lamp cast shadows
 } SceneShadows;
 
@@ -138,8 +147,12 @@ static const SceneDef g_scenes[] = {
      0U, SHADOWS_SUN},
     {"shadows_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_SUN},
+    {"shadows_rt_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, (u32)NPH_RENDER_VIS_RT_SHADOWS, SHADOWS_SUN},
     {"shadows_moving_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_SUN_MOVING},
+    {"shadows_walk_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_SUN_WALK},
     {"lights_1k_shadows", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_ALL},
 };
@@ -178,6 +191,9 @@ typedef struct Ctx {
     NphRenderInstance mover;
     NphRenderTransform mover_rest;
     u32 move_frame;
+    // The camera walking (SHADOWS_SUN_WALK): its step per frame.
+    bool walking;
+    NphDVec3 walk_step;
 } Ctx;
 
 static int compare_f64(const void *a, const void *b)
@@ -351,6 +367,14 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
             sun.shadows = 1;
             NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &sun));
         }
+        if (s->shadows == (u32)SHADOWS_SUN_WALK) {
+            // Along the view, level, at 1.4 m/s and 240 frames a second.
+            const NphVec3 f =
+                nph_quat_rotate(view->camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
+            const f64 step = 1.4 / 240.0 / nph_f64_sqrt((f64)f.x * (f64)f.x + (f64)f.z * (f64)f.z);
+            ctx->walk_step = nph_dvec3((f64)f.x * step, 0.0, (f64)f.z * step);
+            ctx->walking = true;
+        }
         if (s->shadows == (u32)SHADOWS_SUN_MOVING) {
             // One more sphere, in front of the camera.
             ctx->mover_rest = trs(-half + 2.0, 0.5, -half + 2.0, nph_vec3_splat(1.0F), 0.0F);
@@ -405,6 +429,7 @@ static void destroy_scene(Ctx *ctx)
     }
     ctx->light_count = 0U;
     ctx->moving = false;
+    ctx->walking = false;
     // The sun as setup made it (a scene may have dimmed it or given it
     // shadows).
     NPH_IGNORE_RESULT(nph_render_light_update(ctx->renderer, ctx->sun, &ctx->sun_desc));
@@ -420,9 +445,12 @@ typedef struct FrameRun {
     NphRenderFrameStats stats; // the last frame's
 } FrameRun;
 
-static NphResult render_one(Ctx *ctx, const NphRenderView *view, NphGpuImage target, f64 *cpu_ns,
+static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f64 *cpu_ns,
                             NphRenderFrameStats *stats)
 {
+    if (ctx->walking) {
+        view->camera.position = nph_dvec3_add(view->camera.position, ctx->walk_step);
+    }
     if (ctx->moving) {
         // The sphere bobs a centimetre up and down.
         NphRenderTransform t = ctx->mover_rest;
@@ -448,7 +476,7 @@ static NphResult render_one(Ctx *ctx, const NphRenderView *view, NphGpuImage tar
 // Warm-up, then `frames` measured frames. The profiler records a frame
 // NPH_GPU_FRAMES_IN_FLIGHT frames after it was submitted, so it is reset
 // that many frames into the measurement and fed that many frames past it.
-static NphResult run_frames(Ctx *ctx, const NphRenderView *view, NphGpuImage target, u32 frames,
+static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u32 frames,
                             FrameRun *run)
 {
     const u64 start = nph_time_now_ns();
@@ -572,14 +600,18 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                st->vis_meshlets_culled_occlusion, st->lights, st->vis_lights,
                st->shadow_rays ? "; shadow rays" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
+        if (st->vsm) {
+            printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
+                   "caster draws %u%s\n",
+                   st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
+                   st->vsm_draws, st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
+        }
     } else {
         printf("    draws %u, triangles %u, culled %u, lights %u%s\n", st->draws, st->triangles,
                st->culled, st->lights, st->shadow_rays ? "; shadow rays" : "");
     }
-    if (s->shadows != (u32)SHADOWS_NONE && !st->shadow_rays) {
-        fprintf(stderr,
-                "render_perf: %s: the renderer has no ray tracing; shadows were not "
-                "traced\n",
+    if (s->shadows != (u32)SHADOWS_NONE && !st->shadow_rays && !st->vsm) {
+        fprintf(stderr, "render_perf: %s: the renderer cannot shadow; shadows were not drawn\n",
                 s->name);
     }
     fflush(stdout); // whole lines between the log's (stderr) when both go to one file

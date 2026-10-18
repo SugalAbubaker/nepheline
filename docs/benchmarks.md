@@ -170,7 +170,9 @@ arrive:
 | `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
 | `lights_1k_{reference,production}`, `lights_1k_every_light`, `lights_4k_production` | the field at night, lit by 1,024 (or 4,000) point and spot lamps of 3 to 8 m range among the nearer rows and a dim moon: the light grid against the light count; `every_light` is the production path lighting every pixel with every light |
-| `shadows_4k_{reference,production}`, `shadows_moving_4k_production` | the field with the sun casting ray-traced shadows (docs/render.md "Shadows"); `moving` moves one sphere every frame, so the production path rebuilds its top level each frame |
+| `shadows_4k_{reference,production}` | the field with the sun casting shadows (docs/render.md "Shadows"): the reference traces rays, the production path draws the sun's virtual shadow map |
+| `shadows_rt_4k_production` | the production path with the sun's shadows ray traced instead (`NPH_RENDER_VIS_RT_SHADOWS`) |
+| `shadows_moving_4k_production`, `shadows_walk_4k_production` | `shadows_4k_production` with one sphere moving every frame (the pages it touches are drawn again), or with the camera walking at 1.4 m/s at 240 frames a second (the pages it comes to need are drawn) |
 | `lights_1k_shadows` | `lights_1k_production` with the moon and every lamp casting shadows |
 
 `lights_1k_every_light` and `lights_1k_shadows` are comparisons, not
@@ -187,7 +189,7 @@ them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-17-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-18-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU
