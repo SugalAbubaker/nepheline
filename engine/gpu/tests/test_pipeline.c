@@ -686,6 +686,97 @@ NTEST_F(GpuFixture, compute_shader_writes_a_bindless_storage_image)
     nph_gpu_image_destroy(f->dev, img);
 }
 
+static f32 srgb_to_linear(f32 c)
+{
+    return c <= 0.04045F ? c / 12.92F : nph_f32_pow((c + 0.055F) / 1.055F, 2.4F);
+}
+
+// An image sampled through a view of another format (sampled_format):
+// test_image.comp stores (x, y, 77, 255) / 255 through the RGBA8 UNORM
+// storage view, and texelFetch through the sRGB sampled view returns those
+// bytes decoded; descriptions whose formats cannot share an image are
+// refused.
+NTEST_F(GpuFixture, an_image_is_sampled_in_another_format)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuImageDesc d;
+    memset(&d, 0, sizeof d);
+    d.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    d.sampled_format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    d.width = 16U;
+    d.height = 16U;
+    d.mip_count = 1U;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    d.name = "mutable";
+    NphGpuImage img = NPH_GPU_IMAGE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &d, &img), NPH_RESULT_OK);
+    NphGpuShader write = test_load_shader(f->dev, "test_image.comp");
+    NphGpuShader fetch = test_load_shader(f->dev, "test_texel_fetch.comp");
+    NphGpuPipeline write_pipeline = make_compute(f->dev, write);
+    NphGpuPipeline fetch_pipeline = make_compute(f->dev, fetch);
+    const u64 bytes = 16U * 16U * sizeof(NphVec4);
+    NphGpuBuffer out = test_make_buffer(
+        f->dev, bytes, (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+        NPH_GPU_MEMORY_DEVICE, "texels");
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.image_index = nph_gpu_image_storage_index(f->dev, img, 0U);
+    push.value = 77U;
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_GRAPHICS, "mutable", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_image_barrier(cmd, img, (u32)NPH_GPU_STAGE_NONE, (u32)NPH_GPU_ACCESS_NONE,
+                              NPH_GPU_LAYOUT_UNDEFINED, (u32)NPH_GPU_STAGE_COMPUTE,
+                              (u32)NPH_GPU_ACCESS_SHADER_WRITE, NPH_GPU_LAYOUT_GENERAL);
+    nph_gpu_cmd_bind_pipeline(cmd, write_pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, 2U, 2U, 1U);
+    nph_gpu_cmd_image_barrier(cmd, img, (u32)NPH_GPU_STAGE_COMPUTE,
+                              (u32)NPH_GPU_ACCESS_SHADER_WRITE, NPH_GPU_LAYOUT_GENERAL,
+                              (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_READ,
+                              NPH_GPU_LAYOUT_SHADER_READ_ONLY);
+    memset(&push, 0, sizeof push);
+    push.buffer_address = nph_gpu_buffer_address(f->dev, out);
+    push.texture_index = nph_gpu_image_sampled_index(f->dev, img);
+    push.count = 16U;
+    push.value = 16U;
+    nph_gpu_cmd_bind_pipeline(cmd, fetch_pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, 2U, 2U, 1U);
+    nph_gpu_cmd_buffer_barrier(cmd, out, (u32)NPH_GPU_STAGE_COMPUTE,
+                               (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_TRANSFER,
+                               (u32)NPH_GPU_ACCESS_TRANSFER_READ);
+    test_submit_wait(f->dev, cmd);
+    NphVec4 texels[16U * 16U];
+    test_read_buffer(f->dev, out, 0U, bytes, texels);
+    for (u32 y = 0; y < 16U; ++y) {
+        for (u32 x = 0; x < 16U; ++x) {
+            const NphVec4 t = texels[y * 16U + x];
+            NTEST_ASSERT_NEAR_F32(t.x, srgb_to_linear((f32)x / 255.0F), 2e-3F);
+            NTEST_ASSERT_NEAR_F32(t.y, srgb_to_linear((f32)y / 255.0F), 2e-3F);
+            NTEST_ASSERT_NEAR_F32(t.z, srgb_to_linear(77.0F / 255.0F), 2e-3F);
+            NTEST_ASSERT_NEAR_F32(t.w, 1.0F, 1e-6F);
+        }
+    }
+    // Texels of another size, a sampled format without sampling, depth.
+    NphGpuImage bad = NPH_GPU_IMAGE_NULL;
+    d.sampled_format = NPH_GPU_FORMAT_R32G32_UINT;
+    NTEST_EXPECT_EQ_INT(nph_gpu_image_create(f->dev, &d, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    d.sampled_format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE;
+    NTEST_EXPECT_EQ_INT(nph_gpu_image_create(f->dev, &d, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    d.format = NPH_GPU_FORMAT_D32_SFLOAT;
+    d.sampled_format = NPH_GPU_FORMAT_R32_SFLOAT;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
+    NTEST_EXPECT_EQ_INT(nph_gpu_image_create(f->dev, &d, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    nph_gpu_buffer_destroy(f->dev, out);
+    nph_gpu_pipeline_destroy(f->dev, fetch_pipeline);
+    nph_gpu_pipeline_destroy(f->dev, write_pipeline);
+    nph_gpu_shader_destroy(f->dev, fetch);
+    nph_gpu_shader_destroy(f->dev, write);
+    nph_gpu_image_destroy(f->dev, img);
+}
+
 NTEST_F(GpuFixture, pipeline_descriptions_are_validated)
 {
     REQUIRE_DEVICE(f);

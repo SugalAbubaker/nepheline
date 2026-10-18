@@ -114,6 +114,15 @@ on the device in optimal tiling (sampled and linearly filtered, storage
 and storage atomics, colour attachment and blend, depth attachment), read
 once at creation. The renderer chooses its HDR target's format by it.
 
+`NphGpuImageDesc.sampled_format` gives a colour image's sampled view a
+format of its own, of the same texel size: the image is created mutable
+(`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, with the two formats listed) and
+with extended usage, so sampling need only be supported by the view's
+format and the other uses by the image's; each view then names the one
+use it serves. The production path's visibility buffer, R64_UINT for its
+64-bit atomics, is sampled as R32G32_UINT, which texture gathers read four
+depths at a time.
+
 Sharing: textures (transfer destinations that are never attachments) are
 shared across queue families so uploads need no ownership transfer and may
 touch a subset of layers; attachments are exclusive, which keeps the
@@ -327,7 +336,7 @@ or a Vulkan device.
 
 ## Testing
 
-`engine/gpu/tests` (89 tests) run on any conforming device and skip
+`engine/gpu/tests` (90 tests) run on any conforming device and skip
 without one: device selection and information, the validation and leak
 gates, timelines and submission, frames and timestamps, deferred
 destruction, buffers, images of every kind, samplers, bindless slot
@@ -335,7 +344,8 @@ bounds, fills, clears, copies, blits, mip generation, per-thread command
 pools from eight threads, uploads through the ring and past it, image
 uploads across queues with layer subsets, SPIR-V reflection on the
 compiled shaders and on hand-assembled modules (including malformed
-ones), compute through buffer addresses, specialization constants, the
+ones), images sampled in another format, compute through buffer
+addresses, specialization constants, the
 driver's pipeline statistics, format capabilities, offscreen triangle
 rendering
 with pixel checks, bindless sampling and storage images, pipeline

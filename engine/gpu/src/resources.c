@@ -335,9 +335,35 @@ static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d
         GPU_LOG_ERROR("image '%s': a colour format cannot be a depth attachment", name);
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // A sampled view in another format: SAMPLED is that format's to
+    // support, the other uses the image's own.
+    const bool mutable_view =
+        d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format;
+    u32 own_usage = d->usage;
+    if (mutable_view) {
+        const NphGpuFormatInfo *view = nph_gpu_format_info(d->sampled_format);
+        if ((d->usage & (u32)NPH_GPU_IMAGE_USAGE_SAMPLED) == 0U ||
+            view->bytes_per_block != info->bytes_per_block || view->compressed ||
+            info->compressed || view->aspects != (u32)NPH_GPU_ASPECT_COLOR ||
+            info->aspects != (u32)NPH_GPU_ASPECT_COLOR) {
+            GPU_LOG_ERROR("image '%s': %s cannot be sampled as %s (a sampled colour image whose "
+                          "texels are the same size)",
+                          name, nph_gpu_format_name(d->format),
+                          nph_gpu_format_name(d->sampled_format));
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        VkFormatProperties vp;
+        vkGetPhysicalDeviceFormatProperties(dev->phys, gpu_vk_format(d->sampled_format), &vp);
+        if ((vp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0U) {
+            GPU_LOG_ERROR("image '%s': format %s cannot be sampled on this device", name,
+                          nph_gpu_format_name(d->sampled_format));
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        own_usage &= ~(u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    }
     VkFormatProperties props;
     vkGetPhysicalDeviceFormatProperties(dev->phys, gpu_vk_format(d->format), &props);
-    const VkFormatFeatureFlags need = required_format_features(d->usage);
+    const VkFormatFeatureFlags need = required_format_features(own_usage);
     if ((props.optimalTilingFeatures & need) != need) {
         GPU_LOG_ERROR("image '%s': format %s does not support usage 0x%x on this device", name,
                       nph_gpu_format_name(d->format), d->usage);
@@ -346,10 +372,18 @@ static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d
     return NPH_RESULT_OK;
 }
 
+// The view formats of an image whose sampled view reads it in another
+// format (VkImageCreateInfo's pNext while it is used).
+typedef struct GpuFormatList {
+    VkImageFormatListCreateInfo info;
+    VkFormat formats[2];
+} GpuFormatList;
+
 static void fill_image_info(const NphGpuDevice *dev, const NphGpuImageDesc *d, bool concurrent,
-                            VkImageCreateInfo *ci)
+                            VkImageCreateInfo *ci, GpuFormatList *list)
 {
     memset(ci, 0, sizeof *ci);
+    memset(list, 0, sizeof *list);
     if (concurrent && dev->family_count > 1U) {
         ci->sharingMode = VK_SHARING_MODE_CONCURRENT;
         ci->queueFamilyIndexCount = dev->family_count;
@@ -374,6 +408,18 @@ static void fill_image_info(const NphGpuDevice *dev, const NphGpuImageDesc *d, b
         (d->usage & (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT) != 0U) {
         ci->flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     }
+    if (d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format) {
+        // Mutable for the sampled view's format alone, listed so drivers
+        // keep what optimisations the pair allows; each usage need only be
+        // supported by one of the two formats.
+        ci->flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+        list->formats[0] = gpu_vk_format(d->format);
+        list->formats[1] = gpu_vk_format(d->sampled_format);
+        list->info.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+        list->info.viewFormatCount = 2U;
+        list->info.pViewFormats = list->formats;
+        ci->pNext = &list->info;
+    }
 }
 
 static VkImageViewType sampled_view_type(const NphGpuImageDesc *d)
@@ -397,16 +443,25 @@ static VkImageViewType layered_view_type(const NphGpuImageDesc *d, u32 layer_cou
     return layer_count > 1U ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 }
 
+// A view of `format`. `usage`, when nonzero, narrows what the view is used
+// for: a view of a mutable image may serve only what its format supports
+// (VK_IMAGE_CREATE_EXTENDED_USAGE_BIT).
 static NphResult create_view(NphGpuDevice *dev, NphGpuImageSlot *slot, VkImageViewType type,
-                             VkImageAspectFlags aspect, u32 base_mip, u32 mip_count, u32 base_layer,
-                             u32 layer_count, const char *suffix, VkImageView *out)
+                             VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                             u32 base_mip, u32 mip_count, u32 base_layer, u32 layer_count,
+                             const char *suffix, VkImageView *out)
 {
+    VkImageViewUsageCreateInfo uc;
+    memset(&uc, 0, sizeof uc);
+    uc.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+    uc.usage = usage;
     VkImageViewCreateInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ci.pNext = usage != 0U ? &uc : NULL;
     ci.image = slot->vk;
     ci.viewType = type;
-    ci.format = slot->vk_format;
+    ci.format = format;
     ci.subresourceRange.aspectMask = aspect;
     ci.subresourceRange.baseMipLevel = base_mip;
     ci.subresourceRange.levelCount = mip_count;
@@ -433,9 +488,14 @@ static NphResult finish_image(NphGpuDevice *dev, NphGpuImageSlot *slot)
     const bool depth = (slot->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0U;
     // Sampled views of depth-stencil images expose the depth aspect only.
     const VkImageAspectFlags view_aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : slot->aspect;
+    // A mutable image's views each say what they serve.
+    const bool mutable_view =
+        d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format;
     if ((d->usage & (u32)NPH_GPU_IMAGE_USAGE_SAMPLED) != 0U) {
-        NPH_TRY(create_view(dev, slot, sampled_view_type(d), view_aspect, 0U, d->mip_count, 0U,
-                            d->layer_count, "sampled view", &slot->view));
+        const VkFormat format = mutable_view ? gpu_vk_format(d->sampled_format) : slot->vk_format;
+        NPH_TRY(create_view(dev, slot, sampled_view_type(d), format,
+                            mutable_view ? VK_IMAGE_USAGE_SAMPLED_BIT : 0U, view_aspect, 0U,
+                            d->mip_count, 0U, d->layer_count, "sampled view", &slot->view));
         slot->sampled_index =
             gpu_bindless_alloc_sampled(dev, slot->view,
                                        depth ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
@@ -449,7 +509,8 @@ static NphResult finish_image(NphGpuDevice *dev, NphGpuImageSlot *slot)
         for (u32 mip = 0; mip < d->mip_count; ++mip) {
             char suffix[32];
             snprintf(suffix, sizeof suffix, "storage view mip %u", mip);
-            NPH_TRY(create_view(dev, slot, layered_view_type(d, d->layer_count), view_aspect, mip,
+            NPH_TRY(create_view(dev, slot, layered_view_type(d, d->layer_count), slot->vk_format,
+                                mutable_view ? VK_IMAGE_USAGE_STORAGE_BIT : 0U, view_aspect, mip,
                                 1U, 0U, d->layer_count, suffix, &slot->storage_views[mip]));
             slot->storage_index[mip] = gpu_bindless_alloc_storage(dev, slot->storage_views[mip]);
             if (slot->storage_index[mip] == NPH_GPU_INVALID_INDEX) {
@@ -569,7 +630,8 @@ NphResult nph_gpu_image_create(NphGpuDevice *dev, const NphGpuImageDesc *in, Nph
                                        (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT)) == 0U;
     slot->exclusive = (shared && dev->family_count > 1U) ? 0 : 1;
     VkImageCreateInfo ci;
-    fill_image_info(dev, &desc, shared, &ci);
+    GpuFormatList list;
+    fill_image_info(dev, &desc, shared, &ci, &list);
     const VkResult r = nph_gpu_alloc_create_image(dev->vma, &ci, &slot->vk, &slot->alloc);
     if (r != VK_SUCCESS) {
         gpu_pool_release(&dev->images, handle);
@@ -595,7 +657,8 @@ NphResult gpu_image_memory_requirements(NphGpuDevice *dev, const NphGpuImageDesc
     gpu_image_normalize_desc(&desc);
     NPH_TRY(validate_image_desc(dev, &desc));
     VkImageCreateInfo ci;
-    fill_image_info(dev, &desc, concurrent, &ci);
+    GpuFormatList list;
+    fill_image_info(dev, &desc, concurrent, &ci, &list);
     VkDeviceImageMemoryRequirements info;
     memset(&info, 0, sizeof info);
     info.sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS;
@@ -627,7 +690,8 @@ NphResult gpu_image_create_unbound(NphGpuDevice *dev, const NphGpuImageDesc *in,
     slot->exclusive = (concurrent && dev->family_count > 1U) ? 0 : 1;
     slot->transient = 1;
     VkImageCreateInfo ci;
-    fill_image_info(dev, &desc, concurrent, &ci);
+    GpuFormatList list;
+    fill_image_info(dev, &desc, concurrent, &ci, &list);
     const VkResult r = vkCreateImage(dev->device, &ci, NULL, &slot->vk);
     if (r != VK_SUCCESS) {
         gpu_pool_release(&dev->images, handle);
@@ -768,8 +832,15 @@ VkImageView gpu_image_attachment_view(NphGpuDevice *dev, NphGpuImageSlot *slot, 
     char suffix[48];
     snprintf(suffix, sizeof suffix, "attachment mip %u layers %u+%u", mip, base_layer, layer_count);
     // Attachment views carry every aspect of the format (depth and stencil).
-    const NphResult r = create_view(dev, slot, layered_view_type(&slot->desc, layer_count),
-                                    slot->aspect, mip, 1U, base_layer, layer_count, suffix, &view);
+    const NphGpuImageDesc *d = &slot->desc;
+    const bool mutable_view =
+        d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format;
+    const VkImageUsageFlags usage = (d->usage & (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT) != 0U
+                                        ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    const NphResult r = create_view(dev, slot, layered_view_type(d, layer_count), slot->vk_format,
+                                    mutable_view ? usage : 0U, slot->aspect, mip, 1U, base_layer,
+                                    layer_count, suffix, &view);
     if (r == NPH_RESULT_OK) {
         NphGpuViewKey *k = &slot->attachment_views[slot->attachment_view_count++];
         k->mip = mip;
