@@ -172,7 +172,7 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
     };
     NphGpuBuffer rb =
         upload_buffer(dev, rays, sizeof rays, (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "test rays");
-    NphGpuBuffer hb = test_make_buffer(dev, RAYS * 16U, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+    NphGpuBuffer hb = test_make_buffer(dev, (u64)RAYS * 16U, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
                                        NPH_GPU_MEMORY_READBACK, "test hits");
     NphGpuShader shader = test_load_shader(dev, "test_ray_query.comp");
     NphGpuComputePipelineDesc cd;
@@ -197,8 +197,9 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
 
     const f32 *hits = (const f32 *)nph_gpu_buffer_map(dev, hb);
     for (u32 i = 0; i < RAYS; ++i) {
-        NTEST_LOG("ray %u: t %g, index %g, triangle %g, front %g", i, (f64)hits[i * 4U],
-                  (f64)hits[i * 4U + 1U], (f64)hits[i * 4U + 2U], (f64)hits[i * 4U + 3U]);
+        const f32 *h = hits + (u64)i * 4U;
+        NTEST_LOG("ray %u: t %g, index %g, triangle %g, front %g", i, (f64)h[0], (f64)h[1],
+                  (f64)h[2], (f64)h[3]);
     }
     NTEST_EXPECT_NEAR_F32(hits[0], 1.0F, 1e-5F);
     NTEST_EXPECT_NEAR_F32(hits[1], 7.0F, 0.0F);
