@@ -192,7 +192,7 @@ typedef struct RenderRt {
     b32 frame_active;     // this frame traces shadow rays
     b32 frame_production; // its instances come from the GPU scene
     b32 frame_rebuild;    // it rebuilds the top level
-    u32 frame_instances;  // instance records of this frame's top level
+    u32 frame_instances;  // instance records of this frame's top level (active ones first)
     u32 frame_builds;     // the first pending bottom levels, built this frame
     b32 unsupported_logged;
     NphGpuPipeline instance_writer; // rt_instances.comp
@@ -566,12 +566,14 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera);
 void render_rt_write_instances(NphRenderer *r);
 // Declares this frame's passes: on the production path the instance
 // records' writer, which reads the GPU scene's instance and mesh tables
-// (`instance_table`, `mesh_table`; null handles on the reference, whose
-// records render_rt_write_instances wrote), then the builds (the bottom
-// levels pending now, then the top level). Returns the top level's buffer
-// in the graph for the passes that trace (NPH_GPU_RG_USE_ACCEL_READ).
+// (`instance_table`, `mesh_table`, and the vis `counters`, whose
+// rt_instances it appends to; null handles on the reference, whose records
+// render_rt_write_instances wrote), then the builds (the bottom levels
+// pending now, then the top level). Returns the top level's buffer in the
+// graph for the passes that trace (NPH_GPU_RG_USE_ACCEL_READ).
 NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBuffer instance_table,
-                            NphGpuRgBuffer mesh_table, NphGpuRgBuffer *out_tlas);
+                            NphGpuRgBuffer mesh_table, NphGpuRgBuffer counters,
+                            NphGpuRgBuffer *out_tlas);
 
 // vis.c: the production path's pipelines and frames.
 // Whether the device can run the production path (logged reasons).

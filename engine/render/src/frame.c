@@ -597,7 +597,8 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     // render_rt_write_instances wrote, before the pass that traces.
     NphGpuRgBuffer tlas = NPH_GPU_RG_BUFFER_NULL;
     if (r->rt.frame_active) {
-        NPH_TRY(render_rt_declare(r, graph, NPH_GPU_RG_BUFFER_NULL, NPH_GPU_RG_BUFFER_NULL, &tlas));
+        NPH_TRY(render_rt_declare(r, graph, NPH_GPU_RG_BUFFER_NULL, NPH_GPU_RG_BUFFER_NULL,
+                                  NPH_GPU_RG_BUFFER_NULL, &tlas));
     }
 
     NphGpuRgPassDesc pd;

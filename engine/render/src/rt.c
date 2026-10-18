@@ -6,9 +6,13 @@
 //     read as they are where the device builds from them, else a float copy
 //     of the same values), created with the mesh and built in the next frame
 //     that traces, before that frame's top level;
-//   - a top level of every instance slot: the instances' records fold each
-//     mesh's dequantisation into their transform, and hidden or free slots
-//     get a mask that no ray matches. Its space is the world's, less an
+//   - a top level over the instances: their records fold each mesh's
+//     dequantisation into their transform, and come first in the record
+//     array, hidden and free slots after them as inactive records (a null
+//     structure and a zero mask). Vulkan allows inactive records anywhere,
+//     but lavapipe (Mesa 25.2) encodes only as many leaves as are active,
+//     from the start of the array, so an active record behind an inactive
+//     one would vanish from the structure. Its space is the world's, less an
 //     anchor near the camera, so 32-bit coordinates hold anywhere; a shader
 //     moves a view (camera-relative) point into it by adding tlas_offset,
 //     the camera's position less the anchor. The reference writes the
@@ -280,15 +284,19 @@ void render_rt_write_instances(NphRenderer *r)
 {
     const NphDVec3 anchor = r->rt.anchor;
     NphGpuAccelInstance *out = render_frame_at(r, r->layout.rt_instances_offset);
-    for (u32 i = 0; i < r->rt.frame_instances; ++i) {
-        NphGpuAccelInstance *o = &out[i];
-        memset(o, 0, sizeof *o);
+    // The live, shown instances only, one after another: the top level is
+    // built over as many as there are (see the file comment).
+    const u32 slots = r->instance_pool.bump;
+    u32 n = 0U;
+    for (u32 i = 0; i < slots; ++i) {
         const RenderInstance *inst = &r->instances[i];
         const u32 ms =
             inst->handle != 0U ? render_slot_of(&r->mesh_pool, inst->mesh.value) : NPH_U32_MAX;
         if (ms == NPH_U32_MAX || inst->hidden) {
-            continue; // no structure, no mask: never hit
+            continue;
         }
+        NphGpuAccelInstance *o = &out[n++];
+        memset(o, 0, sizeof *o);
         const RenderMesh *m = &r->meshes[ms];
         // world = L (offset + scale q) + t = (L diag(scale)) q + (L offset + t)
         const NphMat3 l = inst->transform.linear;
@@ -308,6 +316,7 @@ void render_rt_write_instances(NphRenderer *r)
         o->offset_and_flags = NPH_GPU_ACCEL_INSTANCE_NO_FACE_CULL << 24U;
         o->blas = nph_gpu_accel_address(r->dev, m->blas);
     }
+    r->rt.frame_instances = n;
 }
 
 static void accel_barrier(NphGpuCmd *cmd)
@@ -327,6 +336,9 @@ static void accel_barrier(NphGpuCmd *cmd)
     nph_gpu_cmd_barrier(cmd, &bd);
 }
 
+// The production path's records: every slot's record inactive first, then
+// the active instances appended from the start (rt_instances.comp), so the
+// inactive ones that remain are all at the end (see the file comment).
 static void instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NPH_UNUSED(graph);
@@ -340,8 +352,22 @@ static void instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *us
     p.arg2 = (u32)(dst & 0xFFFFFFFFU);
     p.arg3 = (u32)(dst >> 32U);
     nph_gpu_cmd_bind_pipeline(cmd, rt->instance_writer);
-    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    nph_gpu_cmd_dispatch(cmd, (rt->frame_instances + 63U) / 64U, 1U, 1U);
+    const u32 groups = (rt->frame_instances + 63U) / 64U;
+    for (u32 mode = 0; mode < 2U; ++mode) {
+        p.mode = mode;
+        nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+        nph_gpu_cmd_dispatch(cmd, groups, 1U, 1U);
+        if (mode == 0U) {
+            const NphGpuMemoryBarrier m = {
+                (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
+                (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE};
+            NphGpuBarrierDesc bd;
+            memset(&bd, 0, sizeof bd);
+            bd.memory = &m;
+            bd.memory_count = 1U;
+            nph_gpu_cmd_barrier(cmd, &bd);
+        }
+    }
 }
 
 static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -389,7 +415,8 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 }
 
 NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBuffer instance_table,
-                            NphGpuRgBuffer mesh_table, NphGpuRgBuffer *out_tlas)
+                            NphGpuRgBuffer mesh_table, NphGpuRgBuffer counters,
+                            NphGpuRgBuffer *out_tlas)
 {
     RenderRt *rt = &r->rt;
     NPH_ASSERT(rt->frame_active);
@@ -427,9 +454,11 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
             return NPH_RESULT_FULL;
         }
         nph_gpu_rg_write_buffer(p, instances, NPH_GPU_RG_USE_SHADER_WRITE);
-        // The instance and mesh tables, after the frame's scatter.
+        // The instance and mesh tables, after the frame's scatter; the
+        // append counter, cleared with the frame's others.
         nph_gpu_rg_read_buffer(p, instance_table, NPH_GPU_RG_USE_SHADER_READ);
         nph_gpu_rg_read_buffer(p, mesh_table, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_buffer(p, counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     }
     pd.name = "rt accel";
     pd.execute = accel_execute;

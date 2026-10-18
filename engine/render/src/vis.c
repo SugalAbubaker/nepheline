@@ -1208,7 +1208,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if (res == NPH_RESULT_OK && r->rt.frame_active) {
         // Shadow rays: the instance records from the GPU scene, then the
         // builds, before the resolve traces.
-        res = render_rt_declare(r, graph, g.instances, g.meshes, &f->tlas);
+        res = render_rt_declare(r, graph, g.instances, g.meshes, f->counters, &f->tlas);
     }
     if (res == NPH_RESULT_OK) {
         res = declare_resolve(graph, r, &g, env, specular, lut, sh);

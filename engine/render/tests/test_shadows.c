@@ -425,6 +425,44 @@ NTEST_F(Shadows, an_occluder_darkens_exactly_what_it_hides)
     }
 }
 
+// A caster whose record follows a hidden instance's and a destroyed one's
+// still casts, on both pipelines. Vulkan allows inactive instance records
+// anywhere, but lavapipe drops an active one that follows them, so the
+// renderer keeps the active records first (rt.c); released slots wait 16
+// allocations before reuse, so the four instances take slots 0 to 3.
+NTEST_F(Shadows, a_caster_after_hidden_and_freed_slots_still_casts)
+{
+    REQUIRE_RAY_TRACING(f);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 6.0F));
+    const NphRenderInstance hidden = instance(f, cube, grey, at(-2.0, 1.0, -2.0, 0.5F));
+    nph_render_instance_set_hidden(f->renderer, hidden, true);
+    const NphRenderInstance gone = instance(f, cube, grey, at(2.0, 1.0, 2.0, 0.5F));
+    nph_render_instance_destroy(f->renderer, gone);
+    (void)instance(f, cube, grey, at(0.0, 1.0, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(false);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphRenderCamera cam = top_camera();
+    const Light l = {true, ld.direction, nph_vec3_zero()};
+    const Box occluder = box_at(nph_vec3(0.0F, 1.0F, 0.0F), 1.0F);
+    static u8 off[PIXELS];
+    static u8 on[PIXELS];
+    for (u32 k = 0; k < pipeline_count(f); ++k) {
+        NphRenderView v;
+        shadow_view(&v, cam, 13.0F, k_pipelines[k]);
+        set_shadows(f, sun, &ld, false);
+        render_into(f, &v, off);
+        set_shadows(f, sun, &ld, true);
+        render_into(f, &v, on);
+        const ShadowCheck c = check_shadow(on, off, &cam, &l, &occluder);
+        log_check("after inactive records", k_pipeline_names[k], &c);
+        NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
+        NTEST_EXPECT_GT_UINT(c.shadow, 100U);
+    }
+}
+
 // A point light under a cube: the cube shadows the floor below it, but not
 // once it is above the light, where an unbounded ray would still meet it.
 NTEST_F(Shadows, a_shadow_ray_stops_at_its_light)

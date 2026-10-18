@@ -208,6 +208,7 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 meshlets_culled_cone;
     u32 meshlets_culled_occlusion; // after phase 2
     u32 triangles;                 // in the visible clusters
+    u32 rt_instances;              // the top level's active instance records (rt_instances.comp)
 };
 
 // The production path's view of a frame.
