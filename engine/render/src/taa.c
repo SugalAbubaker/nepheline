@@ -105,7 +105,9 @@ NphResult render_taa_target_pipeline(NphRenderer *r, RenderTargetPipelines *t, N
     d.specialization[0] = r->vis.hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
     d.specialization_count = 1U;
     d.name = "taa";
-    return nph_gpu_pipeline_create_graphics(r->dev, &d, &t->taa);
+    NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->taa));
+    render_log_statistics(r, t->taa, "taa");
+    return NPH_RESULT_OK;
 }
 
 // The history images for a target of `width` x `height`.
@@ -165,7 +167,8 @@ static void taa_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     NphRenderer *r = (NphRenderer *)user;
     NphRenderTaaPush p = r->taa.push;
     p.hdr_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->hdr_rg));
-    p.visbuffer_index = render_vis_visbuffer_index(r, graph);
+    p.visbuffer_index =
+        nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->vis.frame.visbuffer));
     nph_gpu_cmd_bind_pipeline(cmd, r->frame_target->taa);
     nph_gpu_cmd_push_constants(cmd, &p, (u32)sizeof p);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
@@ -226,7 +229,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     nph_gpu_rg_color_attachment(p, out, &a);
     nph_gpu_rg_color_attachment(p, next, &a);
     nph_gpu_rg_read_image(p, r->hdr_rg, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
-    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(p, f->clusters, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, f->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, f->prev_transforms, NPH_GPU_RG_USE_SHADER_READ);
@@ -247,6 +250,8 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     push->jitter = nph_vec2(t->frame_jitter.x / (f32)t->width, t->frame_jitter.y / (f32)t->height);
     push->history_index = nph_gpu_image_sampled_index(dev, last);
     push->sampler_index = nph_gpu_sampler_index(dev, t->sampler);
+    push->point_sampler = nph_gpu_sampler_index(
+        dev, r->material_samplers[NPH_RENDER_WRAP_CLAMP][NPH_RENDER_WRAP_CLAMP][1]);
     push->tonemapper = r->tonemap_push.tonemapper;
     push->encode_srgb = r->tonemap_push.encode_srgb;
     push->noise = (u32)(t->sequence % 64U);

@@ -32,6 +32,7 @@
 #define NPH_VIS_CLUSTER_MIRRORED     1
 #define NPH_VIS_CLUSTER_DOUBLE_SIDED 2
 #define NPH_VIS_CLUSTER_MASKED       4
+#define NPH_VIS_CLUSTER_MOVED        8 // its instance's NPH_VIS_INSTANCE_MOVED
 
 // The visibility buffer: 64 bits per pixel, the depth's IEEE bits high
 // (reverse-Z, so the largest value is the nearest and atomicMax is the

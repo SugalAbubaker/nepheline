@@ -21,7 +21,6 @@
 #include "taa_common.glsl"
 #include "tonemap.glsl"
 #include "vis_common.glsl"
-#include "nph_bindless_int64.glsl"
 
 layout(push_constant, scalar) uniform Push { NphRenderTaaPush pc; };
 
@@ -51,16 +50,19 @@ bool previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
     vec4 clip;
     bool moved = false;
     if (v != 0ul) {
-        const uint slot = VisClustersRef(view.v.clusters).c[vis_cluster(v)].instance;
-        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
-        if ((inst.flags & NPH_VIS_INSTANCE_MOVED) != 0u) {
+        // The cluster says whether its instance moved, so a still one's
+        // record is not read.
+        const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[vis_cluster(v)];
+        if ((cluster.flags & NPH_VIS_CLUSTER_MOVED) != 0u) {
             moved = true;
-            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+            const uint slot = cluster.instance;
+            const NphVisTransform transform = VisInstancesRef(view.v.instances).i[slot].transform;
+            const vec3 t = vis_relative_translation(transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
             // The point in the instance's own space (the inverse of the
             // linear part is the normal matrix transposed), out again
             // through the previous transform, relative to the previous camera.
-            const vec3 local = transpose(vis_normal_matrix(inst.transform)) * (x.xyz / x.w - t);
+            const vec3 local = transpose(vis_normal_matrix(transform)) * (x.xyz / x.w - t);
             const NphVisTransform pt = VisTransformsRef(view.v.prev_transforms).t[slot];
             const vec3 then = vis_transform_vector(pt, local) +
                               vis_relative_translation(pt, view.v.prev_camera_high.xyz,
@@ -85,24 +87,43 @@ void main()
     VisViewRef view = VisViewRef(pc.view);
     const ivec2 pixel = ivec2(gl_FragCoord.xy);
     const ivec2 last = ivec2(view.v.viewport.xy) - 1;
-    // The neighbourhood's colour, and its nearest surface: the visibility
-    // buffer's packing orders by depth first, and the largest is the
-    // nearest (reverse-Z), the sky's 0 the farthest.
+    // The neighbourhood's colour.
     TaaNeighbourhood n = taa_neighbourhood_begin();
-    uint64_t nearest = 0ul;
-    ivec2 nearest_at = pixel;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), last);
             const vec3 c = texelFetch(nph_textures_2d[pc.hdr_index], q, 0).rgb;
             taa_neighbourhood_add(n, c, filter_weight((y + 1) * 3 + x + 1));
-            const uint64_t v = imageLoad(nph_u64images_2d[pc.visbuffer_index], q).x;
-            if (v > nearest) {
-                nearest = v;
-                nearest_at = q;
+        }
+    }
+    // Its nearest surface: the visibility buffer's depths (its high words,
+    // reverse-Z, so the largest is the nearest and the sky's 0 the
+    // farthest; the bits of non-negative floats order as the floats do) by
+    // four gathers of 2 x 2 texels, each at the corner its block shares,
+    // then the nearest texel's whole record.
+    uint nearest_depth = 0u;
+    ivec2 nearest_at = pixel;
+    for (int by = 0; by < 2; ++by) {
+        for (int bx = 0; bx < 2; ++bx) {
+            const ivec2 corner = pixel + ivec2(2 * bx, 2 * by);
+            const uvec4 d =
+                textureGather(usampler2D(nph_utextures_2d[pc.visbuffer_index],
+                                         nph_samplers[pc.point_sampler]),
+                              vec2(corner) * view.v.viewport.zw, 1);
+            // A gather's order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
+            const ivec2 at[4] = ivec2[4](corner + ivec2(-1, 0), corner, corner + ivec2(0, -1),
+                                         corner - 1);
+            for (int i = 0; i < 4; ++i) {
+                if (all(lessThanEqual(abs(at[i] - pixel), ivec2(1))) && d[i] > nearest_depth) {
+                    nearest_depth = d[i];
+                    nearest_at = at[i];
+                }
             }
         }
     }
+    nearest_at = clamp(nearest_at, ivec2(0), last);
+    const uint64_t nearest =
+        packUint2x32(texelFetch(nph_utextures_2d[pc.visbuffer_index], nearest_at, 0).xy);
     // The weights sum to 1.
     vec3 resolved = n.filtered;
     vec2 then;
@@ -118,13 +139,18 @@ void main()
                 taa_rgb_to_ycocg(taa_history_catmull_rom(pc.history_index, pc.sampler_index, uv,
                                                          view.v.viewport.xy, inv_size) *
                                  pc.history_scale);
+            const vec2 pixels = abs(motion * view.v.viewport.xy);
             resolved = taa_blend(n.filtered, taa_clip(n, history),
-                                 taa_current_weight(length(motion * view.v.viewport.xy)));
+                                 taa_current_weight(max(pixels.x, pixels.y)));
         }
     }
     vec3 rgb = max(taa_ycocg_to_rgb(resolved), vec3(0.0));
-    // A non-finite colour would stay in the history for good.
-    rgb = mix(rgb, vec3(0.0), bvec3(any(isnan(rgb)) || any(isinf(rgb))));
+    // A non-finite colour would stay in the history for good (any channel's
+    // makes the sum non-finite).
+    const float sum = rgb.r + rgb.g + rgb.b;
+    if (isnan(sum) || isinf(sum)) {
+        rgb = vec3(0.0);
+    }
     out_color = vec4(nph_tonemap(rgb, pc.tonemapper, pc.encode_srgb != 0u), 1.0);
     // Interleaved gradient noise (Jimenez 2014) moved by 5.588238 pixels a
     // frame, so the rounding differs from frame to frame (Wolfe,

@@ -749,6 +749,9 @@ NphVec2 render_taa_jitter(u64 sequence);
 void render_taa_weights(NphVec2 jitter, f32 out[9]);
 
 // vis.c: the production path's pipelines and frames.
+// Logs a pipeline's compiled statistics (registers, spills; render_perf
+// reads them), where the device reports them.
+void render_log_statistics(NphRenderer *r, NphGpuPipeline pipeline, const char *name);
 // Whether the device can run the production path (logged reasons).
 bool render_vis_device_supported(const NphRenderer *r);
 NphResult render_vis_create(NphRenderer *r);

@@ -96,7 +96,8 @@ void main()
         const bool double_sided = (md.flags & NPH_RENDER_MATERIAL_DOUBLE_SIDED) != 0u;
         flags = ((inst.flags & NPH_VIS_INSTANCE_MIRRORED) != 0u ? uint(NPH_VIS_CLUSTER_MIRRORED) : 0u) |
                 (double_sided ? uint(NPH_VIS_CLUSTER_DOUBLE_SIDED) : 0u) |
-                (md.alpha_mode == 1u ? uint(NPH_VIS_CLUSTER_MASKED) : 0u);
+                (md.alpha_mode == 1u ? uint(NPH_VIS_CLUSTER_MASKED) : 0u) |
+                ((inst.flags & NPH_VIS_INSTANCE_MOVED) != 0u ? uint(NPH_VIS_CLUSTER_MOVED) : 0u);
         if (md.alpha_mode != 2u) {
             VisMeshletBoundsRef bounds = VisMeshletBoundsRef(mesh.meshlet_bounds);
             const uvec4 b0 = bounds.b[meshlet * 2u];

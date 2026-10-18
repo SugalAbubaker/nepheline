@@ -135,7 +135,7 @@ static bool mesh_path_supported(const NphRenderer *r)
 // What the driver reports of a compiled pipeline (registers, spills), when
 // the device keeps it (NphGpuDeviceDesc.shader_statistics): one line each,
 // for tuning the shaders' occupancy.
-static void log_statistics(NphRenderer *r, NphGpuPipeline pipeline, const char *name)
+void render_log_statistics(NphRenderer *r, NphGpuPipeline pipeline, const char *name)
 {
     NphGpuShaderStatistic stats[24];
     const u32 n = nph_gpu_pipeline_statistics(r->dev, pipeline, stats, 24U);
@@ -227,7 +227,7 @@ NphResult render_vis_create(NphRenderer *r)
             d.specialization_count = 2U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
-        log_statistics(r, v->compute[i], k_compute_names[i]);
+        render_log_statistics(r, v->compute[i], k_compute_names[i]);
     }
     if (v->mesh_shaders) {
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_OPAQUE, VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -1253,10 +1253,14 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     vd.width = width;
     vd.height = height;
     vd.mip_count = 1U;
-    vd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    vd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST |
+               (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    // Sampled as two 32-bit words (the temporal resolve gathers the depths).
+    vd.sampled_format = NPH_GPU_FORMAT_R32G32_UINT;
     vd.name = "vis visibility buffer";
     NphGpuImageDesc hd = vd;
     hd.format = v->hdr_format;
+    hd.sampled_format = NPH_GPU_FORMAT_UNDEFINED;
     hd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED |
                (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT;
     hd.name = "hdr colour";

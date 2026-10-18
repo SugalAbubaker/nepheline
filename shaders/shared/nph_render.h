@@ -245,13 +245,13 @@ NPH_SHARED_STRUCT(NphRenderTaaPush)
     f32 history_scale;   // this frame's exposure over the history's; 0: no history
     NphVec2 jitter;      // this frame's sub-pixel offset of the projection, in UV
     u32 hdr_index;       // bindless sampled: the pre-exposed HDR colour
-    u32 visbuffer_index; // bindless storage: the visibility buffer
+    u32 visbuffer_index; // bindless sampled: the visibility buffer as R32G32_UINT (depth in y)
     u32 history_index;   // bindless sampled: the previous frame's history
-    u32 sampler_index;   // bilinear, clamped to the edge
+    u32 sampler_index;   // bilinear, clamped to the edge: the history's taps
+    u32 point_sampler;   // nearest, clamped to the edge: the visibility buffer's gathers
     u32 tonemapper;      // NPH_RENDER_TONEMAP_*
     u32 encode_srgb;     // 1: the target is UNORM, so the shader applies the sRGB curve
     u32 noise;           // the history's rounding noise's offset this frame
-    u32 pad0;
 };
 
 // Push constants of the image-based lighting kernels.
