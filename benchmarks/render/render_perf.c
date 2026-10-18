@@ -40,6 +40,18 @@
 //                         the light count. `lights_1k_every_light` is the
 //                         production path lighting every pixel with every
 //                         light (NPH_RENDER_VIS_NO_LIGHT_GRID).
+//   shadows_4k_<pipeline> the field in daylight, the sun casting ray-traced
+//                         shadows (docs/render.md "Shadows"): a shadow ray
+//                         per lit pixel. The reference rebuilds the top
+//                         level over every instance each frame; the
+//                         production path keeps it while nothing moves.
+//   shadows_4k_moving     shadows_4k_production with one sphere moving
+//                         every frame: the production path rebuilds the
+//                         top level each frame, as in a scene with any
+//                         motion.
+//   lights_1k_shadows     lights_1k_production with every lamp (and the
+//                         moon) casting shadows: a ray per pixel per light
+//                         that reaches it.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -86,28 +98,49 @@ typedef struct SceneDef {
     u32 width;
     u32 height;
     u32 vis_flags; // NphRenderVisFlags
+    u32 shadows;   // SceneShadows
 } SceneDef;
 
+typedef enum SceneShadows {
+    SHADOWS_NONE = 0,
+    SHADOWS_SUN,        // the sun (or the moon) casts shadows
+    SHADOWS_SUN_MOVING, // and an instance moves every frame
+    SHADOWS_ALL,        // the moon and every lamp cast shadows
+} SceneShadows;
+
 static const SceneDef g_scenes[] = {
-    {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
-    {"grid_1k_production", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U},
-    {"grid_10k_reference", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
-    {"grid_10k_production", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U},
-    {"grid_100k_reference", SCENE_GRID, 102400U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U},
+    {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
+     SHADOWS_NONE},
+    {"grid_1k_production", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_NONE},
+    {"grid_10k_reference", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
+     SHADOWS_NONE},
+    {"grid_10k_production", SCENE_GRID, 10240U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_NONE},
+    {"grid_100k_reference", SCENE_GRID, 102400U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
+     SHADOWS_NONE},
     {"grid_100k_production", SCENE_GRID, 102400U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U,
-     0U},
-    {"field_4k_reference", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
-     0U},
+     0U, SHADOWS_NONE},
+    {"field_4k_reference", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U, 0U,
+     SHADOWS_NONE},
     {"field_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
-     0U},
+     0U, SHADOWS_NONE},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
-     0U},
+     0U, SHADOWS_NONE},
     {"lights_1k_production", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
-     2160U, 0U},
+     2160U, 0U, SHADOWS_NONE},
     {"lights_1k_every_light", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
-     2160U, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID},
+     2160U, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID, SHADOWS_NONE},
     {"lights_4k_production", SCENE_FIELD, 16384U, MAX_LIGHTS, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
-     2160U, 0U},
+     2160U, 0U, SHADOWS_NONE},
+    {"shadows_4k_reference", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
+     0U, SHADOWS_SUN},
+    {"shadows_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
+     0U, SHADOWS_SUN},
+    {"shadows_4k_moving", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_SUN_MOVING},
+    {"lights_1k_shadows", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
+     0U, SHADOWS_ALL},
 };
 
 typedef struct Result {
@@ -138,6 +171,12 @@ typedef struct Ctx {
     Result results[MAX_RESULTS];
     u32 result_count;
     bool no_sw_raster; // --sw-pixels=0
+    // A sphere moved every frame (SHADOWS_SUN_MOVING), where it rests, and
+    // the frame count.
+    bool moving;
+    NphRenderInstance mover;
+    NphRenderTransform mover_rest;
+    u32 move_frame;
 } Ctx;
 
 static int compare_f64(const void *a, const void *b)
@@ -306,6 +345,19 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         nph_render_camera_look_at(nph_dvec3(-half - 4.0, 1.7, -half - 4.0),
                                   nph_dvec3(half, 0.5, half), nph_vec3_unit_y(), 0.9F, 0.1F);
     if (s->lights == 0U) {
+        if (s->shadows != (u32)SHADOWS_NONE) {
+            NphRenderLightDesc sun = ctx->sun_desc;
+            sun.shadows = 1;
+            NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &sun));
+        }
+        if (s->shadows == (u32)SHADOWS_SUN_MOVING) {
+            // One more sphere, in front of the camera.
+            ctx->mover_rest = trs(-half + 2.0, 0.5, -half + 2.0, nph_vec3_splat(1.0F), 0.0F);
+            NPH_TRY(add_instance(ctx, ctx->sphere, 0U, ctx->mover_rest));
+            ctx->mover = ctx->instances[ctx->instance_count - 1U];
+            ctx->moving = true;
+            ctx->move_frame = 0U;
+        }
         return NPH_RESULT_OK;
     }
     // Night: a dim moon, a dark sky, and lamps among the nearer rows (an
@@ -313,6 +365,7 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
     // pointing down.
     NphRenderLightDesc moon = ctx->sun_desc;
     moon.intensity = 0.2F;
+    moon.shadows = s->shadows != (u32)SHADOWS_NONE ? 1 : 0;
     NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &moon));
     view->ev100 = 5.0F;
     view->disable_ibl = 1;
@@ -333,6 +386,7 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         ld.direction = nph_vec3(0.0F, -1.0F, 0.0F);
         ld.inner_cone = 0.3F;
         ld.outer_cone = 0.7F;
+        ld.shadows = s->shadows == (u32)SHADOWS_ALL ? 1 : 0;
         NPH_TRY(nph_render_light_create(ctx->renderer, &ld, &ctx->lights[ctx->light_count]));
         ++ctx->light_count;
     }
@@ -345,13 +399,14 @@ static void destroy_scene(Ctx *ctx)
         nph_render_instance_destroy(ctx->renderer, ctx->instances[i]);
     }
     ctx->instance_count = 0U;
-    if (ctx->light_count != 0U) {
-        for (u32 i = 0; i < ctx->light_count; ++i) {
-            nph_render_light_destroy(ctx->renderer, ctx->lights[i]);
-        }
-        ctx->light_count = 0U;
-        NPH_IGNORE_RESULT(nph_render_light_update(ctx->renderer, ctx->sun, &ctx->sun_desc));
+    for (u32 i = 0; i < ctx->light_count; ++i) {
+        nph_render_light_destroy(ctx->renderer, ctx->lights[i]);
     }
+    ctx->light_count = 0U;
+    ctx->moving = false;
+    // The sun as setup made it (a scene may have dimmed it or given it
+    // shadows).
+    NPH_IGNORE_RESULT(nph_render_light_update(ctx->renderer, ctx->sun, &ctx->sun_desc));
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +422,12 @@ typedef struct FrameRun {
 static NphResult render_one(Ctx *ctx, const NphRenderView *view, NphGpuImage target, f64 *cpu_ns,
                             NphRenderFrameStats *stats)
 {
+    if (ctx->moving) {
+        // The sphere bobs a centimetre up and down.
+        NphRenderTransform t = ctx->mover_rest;
+        t.translation.y += (ctx->move_frame++ & 1U) != 0U ? 0.01 : 0.0;
+        NPH_TRY(nph_render_instance_set_transform(ctx->renderer, ctx->mover, &t));
+    }
     NPH_TRY(nph_gpu_frame_begin(ctx->dev));
     NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(ctx->profiler, ctx->graph));
     nph_gpu_rg_begin(ctx->graph);
@@ -503,15 +564,22 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
                "%u occlusion, clusters %u frustum + %u cone + %u occlusion; lights %u, %u in "
-               "view%s\n",
+               "view%s%s\n",
                st->vis_clusters, st->vis_clusters_sw, st->vis_triangles,
                st->vis_instances_culled_frustum, st->vis_instances_culled_occlusion,
                st->vis_meshlets_culled_frustum, st->vis_meshlets_culled_cone,
                st->vis_meshlets_culled_occlusion, st->lights, st->vis_lights,
+               st->shadow_rays ? "; shadow rays" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
     } else {
-        printf("    draws %u, triangles %u, culled %u, lights %u\n", st->draws, st->triangles,
-               st->culled, st->lights);
+        printf("    draws %u, triangles %u, culled %u, lights %u%s\n", st->draws, st->triangles,
+               st->culled, st->lights, st->shadow_rays ? "; shadow rays" : "");
+    }
+    if (s->shadows != (u32)SHADOWS_NONE && !st->shadow_rays) {
+        fprintf(stderr,
+                "render_perf: %s: the renderer has no ray tracing; shadows were not "
+                "traced\n",
+                s->name);
     }
     fflush(stdout); // whole lines between the log's (stderr) when both go to one file
     return NPH_RESULT_OK;
