@@ -22,7 +22,9 @@ Both draw shadows for the lights that cast them ("Shadows" below): the
 production path's sun from its virtual shadow map
 ([ADR-0033](adr/0033-virtual-shadow-maps.md)), every other light with
 shadow rays where the device has ray queries
-([ADR-0032](adr/0032-ray-traced-shadows.md)).
+([ADR-0032](adr/0032-ray-traced-shadows.md)). The production path
+anti-aliases temporally at native resolution where the view asks
+("Temporal anti-aliasing" below; [ADR-0034](adr/0034-temporal-anti-aliasing.md)).
 
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
@@ -419,7 +421,8 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
-| `tonemap` | as the reference's |
+| `taa`, `debug lines` | on a view with temporal anti-aliasing: the temporal resolve, which tonemaps too (below), then the debug lines |
+| `tonemap` | otherwise, as the reference's |
 
 `vis args …` passes between them turn counts into indirect arguments,
 and appends to the GPU lists are aggregated per subgroup (one atomic per
@@ -540,6 +543,56 @@ for bit. `NPH_RENDER_VIS_NO_LIGHT_GRID` makes every light global, for such
 comparisons. A view holds at most 4,096 lights (`max_lights`). Blended
 surfaces walk the same grid per fragment.
 
+### Temporal anti-aliasing
+
+A production view with `NphRenderView.anti_aliasing` set to
+`NPH_RENDER_AA_TEMPORAL` (the runtime's default, `r.taa`) is anti-aliased
+temporally at native resolution, for anti-aliasing only (CLAUDE.md
+§8.6.8; Karis, "High Quality Temporal Supersampling", SIGGRAPH 2014;
+[ADR-0034](adr/0034-temporal-anti-aliasing.md)):
+
+- **Jitter.** Every pass renders with the projection moved by the next of
+  eight Halton (2, 3) points, two to each quarter of the pixel. The
+  culling's occlusion tests, the pyramid's dirty tiles, and the light grid
+  move their projected rectangles by the jitter of the frame they test
+  against (`NphVisViewData.jitter`). Debug views and the reference
+  renderer are never jittered, and debug lines are drawn after the resolve
+  without it.
+- **One pass** (`taa.frag`, the arithmetic in `taa_common.glsl`) replaces
+  the tonemap: a full-screen fragment pass writing the display colour and
+  the next history as two colour attachments. The history is two images
+  of the HDR format taken in turn, stochastically rounded with noise that
+  moves every frame.
+- **Motion.** The nearest surface in the 3 × 3 neighbourhood: four gathers
+  of the visibility buffer's depths through its R32G32_UINT sampled view
+  (`NphGpuImageDesc.sampled_format`), then one fetch of its record. Its
+  point is rebuilt camera relative and taken through the previous frame's
+  projection without its jitter: with the camera alone for a still
+  surface, through the previous transform for an instance that moved
+  (`NPH_VIS_INSTANCE_MOVED`, which the scatter pass keeps and the meshlet
+  cull copies to the cluster), with the rotation alone for the sky.
+- **The blend.** The 3 × 3 neighbourhood filtered with a Gaussian of a box
+  filter's spread under the jitter; the history read by five Catmull-Rom
+  taps (Jimenez 2016), rescaled by the exposure's change, and clipped in
+  YCoCg toward the centre of the neighbourhood's variance box within its
+  extremes (Salvi 2016; Pedersen 2016), the box at least 1/32 of its luma
+  wide (the history's own rounding); weights divided by 1 + luma (Karis
+  2014), the current frame's 1/16 still and up to 1/4 at a pixel a frame of
+  motion.
+- **The history's life.** It continues only from the frame just before,
+  resolved temporally into the same extent, without
+  `NphRenderView.camera_cut` (which the runtime sets when it switches
+  between the world's camera and the host's); otherwise the frame stands
+  alone. The statistics say whether the frame resolved temporally (`taa`)
+  and blended with history (`taa_history`).
+
+Against the reference renderer at 4 × 4 the resolution, a still view
+converges to 0.39 levels of mean error (one sample per pixel: 1.22), a
+panning camera holds 0.65 (1.24), and a moving cube 0.33 (0.62), with no
+trail beyond an edge's own pixel. The pass costs 0.79 ms in the 4K field
+against the tonemap's 0.11 ms, over the §10.4 line for TAA, post, and the
+tonemap together; ADR-0034 records why, and what can bring it down.
+
 ### Capacities and statistics
 
 The production path's lists have fixed capacities in `NphRendererDesc`:
@@ -569,28 +622,34 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.17 ms |
-| grid, 512 × 512 | 10,240 | 1.26 ms | 0.006 ms | 0.17 ms | 0.22 ms |
-| grid, 512 × 512 | 102,400 | 13.1 ms | 0.006 ms | 3.6 ms | 0.58 ms |
-| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.68 ms | 1.91 ms |
-| field at night, 1,024 lights | 16,385 | 3.62 ms | 0.007 ms | 54.2 ms | 2.18 ms |
-| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.86 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.15 ms | 0.008 ms | 3.34 ms | 2.31 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.007 ms | | 2.32 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 2.34 ms |
-| the map, the camera walking | 16,385 | | 0.009 ms | | 2.34 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 3.59 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.19 ms |
+| grid, 512 × 512 | 10,240 | 1.25 ms | 0.006 ms | 0.17 ms | 0.24 ms |
+| grid, 512 × 512 | 102,400 | 13.3 ms | 0.006 ms | 3.6 ms | 0.61 ms |
+| field, 3840 × 2160 | 16,385 | 2.89 ms | 0.008 ms | 2.68 ms | 2.66 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.007 ms | | 1.91 ms |
+| field at night, 1,024 lights | 16,385 | 3.61 ms | 0.008 ms | 54.7 ms | 2.95 ms |
+| field at night, 4,000 lights | 16,385 | | 0.008 ms | | 4.62 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.20 ms | 0.009 ms | 3.31 ms | 3.07 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.008 ms | | 3.07 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 3.11 ms |
+| the map, the camera walking | 16,385 | | 0.009 ms | | 3.10 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 4.37 ms |
+
+The production path's frames resolve temporally (the runtime's default),
+the reference's do not.
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 53,257 clusters, and 55,701 of the 62,234 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
 passes 0.10 ms, raster 0.49 ms (0.22 in hardware, 0.27 in software), the
-two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.88 ms, tonemap
-0.11 ms. Against CLAUDE.md §10.4, the raster (0.65 ms budgeted) and the
-shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
-against 0.25 ms, most of it the first pyramid's read of the visibility
-buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
+two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.93 ms (0.90
+without the jitter), the temporal resolve with the tonemap 0.79 ms (the
+tonemap alone: 0.11 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
+budgeted) and the shading (1.20 ms) fit; culling with the depth pyramid
+takes 0.31 ms against 0.25 ms, most of it the first pyramid's read of the
+visibility buffer; the temporal resolve is past the 0.40 ms of TAA, post,
+and the tonemap together (ADR-0034). With 1,024 lamps the grid's passes take 0.047 ms and the resolve
 1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
 The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
 when a sphere moves, at the shadow line (0.40 ms); its rays add
@@ -635,7 +694,8 @@ directional light anyway.
 
 ## Tonemapping
 
-`tonemap.frag` maps pre-exposed colour to the display:
+`tonemap.glsl` maps pre-exposed colour to the display, in the tonemap pass
+(`tonemap.frag`) and in the production path's temporal resolve:
 
 - **ACES:** Stephen Hill's fit of the ACES 1.0 RRT and sRGB ODT
   (BakingLab, 2016), with the input and output matrices.
@@ -685,7 +745,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (92 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (101 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -739,6 +799,15 @@ synchronisation-validation gate:
   until they fit, and the bias falling once there is room; agreement with
   the rays it replaces (98 % of pixels within two levels); and the scene
   10,000 km from the origin.
+- **Temporal anti-aliasing** (`test_taa.c`): the jitter (eight points, two
+  to each quarter of the pixel, repeating) and the filter's weights
+  against it; a still view, a camera panning across cubes at two depths,
+  and a moving cube against the reference renderer at 4 × 4 the
+  resolution (the error at most half or six tenths of one sample per
+  pixel's, nothing two pixels beyond an edge); a cut giving, bit for bit,
+  the frame without history in the same jitter phase; the history's
+  continuity across modes and extents; debug views and the reference never
+  jittered; an exposure change rescaling the history.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -782,8 +851,11 @@ path and logs what the GPU culled.
 - The production path's top level spans every instance slot up to the
   pool's high-water mark, live or not (the inactive ones last), and its
   rebuild costs accordingly.
-- No MSAA or TAA: TAA is stage 8 (Phase 10); until then the HDR target's
-  dither is the same every frame.
+- Temporal anti-aliasing costs 0.79 ms at 4K, past its §10.4 line
+  (ADR-0034); blended surfaces are resolved with the motion of the opaque
+  surface behind them, there is no sharpening, and bloom and
+  auto-exposure (stage 8's next part) are not yet there. No MSAA. The HDR
+  target's dither is the same every frame.
 - The reference renderer evaluates every light for every pixel (it is the
   ground truth).
 - The resolve is one shader for every material: tile classification
