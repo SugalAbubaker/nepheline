@@ -2,7 +2,8 @@
 #pragma once
 
 // Internal state of the renderer (renderer.c, frame.c, ibl.c,
-// debug_draw.c, and the production path in vis.c and vis_scene.c). See
+// debug_draw.c, and the production path in vis.c, vis_scene.c, vsm.c, and
+// taa.c). See
 // render/renderer.h for the contract and docs/render.md for the design.
 
 #include <nepheline/core/array.h>
@@ -103,6 +104,9 @@ typedef struct RenderTargetPipelines {
     NphGpuPipeline vis_tonemap;
     NphGpuPipeline vis_debug_depth;
     NphGpuPipeline vis_debug_overlay;
+    // The production path's temporal resolve (taa.c): into the target and
+    // the next history (RenderVis.hdr_format).
+    NphGpuPipeline taa;
 } RenderTargetPipelines;
 
 typedef struct RenderTexture {
@@ -399,6 +403,10 @@ typedef struct VisFrame {
     NphGpuRgBuffer light_grid;
     NphGpuRgBuffer light_tiles;
     NphGpuRgBuffer tlas; // the frame's top level, when it traces shadow rays
+    // The GPU scene's tables in the graph, for the temporal resolve's motion.
+    NphGpuRgBuffer instances;
+    NphGpuRgBuffer prev_transforms;
+    NphGpuRgBuffer clusters;
 } VisFrame;
 
 typedef struct RenderVis {
@@ -477,11 +485,13 @@ typedef struct RenderVis {
     u32 hzb_tiles_x;
     u32 hzb_tiles_y;
     b32 hzb_full_rebuild; // tests: rebuild the whole pyramid after phase 1 too
-    // That frame's view, for phase 0's tests against its HZB.
+    // That frame's view, for phase 0's tests against its HZB (and its
+    // projection without the jitter, for the temporal resolve's motion).
     NphMat4 prev_view;
     NphMat4 prev_view_proj;
     NphVec4 prev_projection;
     NphDVec3 prev_camera;
+    NphVec2 prev_jitter; // UV
 
     NphRenderFrameStats stats_last; // the vis_* fields of the last read-back
     b32 fallback_logged;            // PRODUCTION requested without the path: said once
@@ -489,6 +499,30 @@ typedef struct RenderVis {
     b32 updates_logged;             // instance updates waited for a frame: said once
     VisFrame frame;
 } RenderVis;
+
+// The jitter sequence's length: eight Halton (2, 3) points, which the
+// history's 16-frame memory covers twice (Karis 2014 uses eight).
+#define RENDER_TAA_PHASES 8U
+
+// The production path's temporal anti-aliasing (taa.c): the history of
+// resolved frames, two images written in turn.
+typedef struct RenderTaa {
+    NphGpuShader shader;   // taa.frag
+    NphGpuSampler sampler; // bilinear, clamped to the edge: the history's taps
+    NphGpuImage history[2];
+    NphGpuFormat format; // the history's: RenderVis.hdr_format
+    u32 width;
+    u32 height;
+    u32 write;             // the history this frame writes; the other holds the last one
+    b32 valid;             // history[write ^ 1] holds the last frame resolved temporally
+    u64 sequence;          // frames resolved temporally so far: the jitter's phase
+    u64 last_frame;        // 1 + the device frame index of the last frame resolved temporally
+    f32 exposure;          // the exposure the history was resolved with
+    b32 frame_active;      // this frame resolves temporally
+    b32 frame_history;     // and blends with the history
+    NphVec2 frame_jitter;  // this frame's jitter, pixels
+    NphRenderTaaPush push; // this frame's, without the transient images' indices
+} RenderTaa;
 
 struct NphRenderer {
     NphAllocator *alloc;
@@ -568,6 +602,9 @@ struct NphRenderer {
 
     // The production path's virtual shadow map.
     RenderVsm vsm;
+
+    // The production path's temporal anti-aliasing.
+    RenderTaa taa;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -684,6 +721,32 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
                                    NphGpuRgBuffer instances, NphGpuRgBuffer meshes);
 // What a pass that samples the map reads.
 void render_vsm_read(const NphRenderer *r, NphGpuRgPass *pass);
+
+// taa.c: the production path's temporal anti-aliasing.
+NphResult render_taa_create(NphRenderer *r);
+void render_taa_destroy(NphRenderer *r);
+// The temporal resolve's pipeline into a target of `format`.
+NphResult render_taa_target_pipeline(NphRenderer *r, RenderTargetPipelines *t, NphGpuFormat format);
+// Whether this frame resolves temporally: a lit production view with
+// NPH_RENDER_AA_TEMPORAL. If so, keeps the history images the size of the
+// target, decides whether the history continues (RenderTaa.frame_history),
+// and returns the frame's jitter in pixels in `out_jitter` (zero otherwise).
+NphResult render_taa_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
+                                 bool production, NphVec2 *out_jitter);
+// The temporal resolve into `out` (the caller's target) and the next
+// history, from the frame's HDR image and visibility buffer, then the
+// debug lines over `out`; after render_vis_frame and the transparent pass.
+// `exposure` is the frame's, which the HDR image is pre-exposed with.
+NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage out,
+                             f32 exposure);
+// The jitter of the `sequence`th frame resolved temporally, in pixels: a
+// Halton (2, 3) sequence of RENDER_TAA_PHASES points in [-0.5, 0.5).
+NphVec2 render_taa_jitter(u64 sequence);
+// The reconstruction filter's weights of the 3 x 3 samples around a pixel,
+// row by row from the top left, for the frame's jitter (pixels): the
+// sample at offset o lies at o - jitter from the pixel's centre. They sum
+// to 1 (taa_common.glsl taa_filter_weight is the shader's twin).
+void render_taa_weights(NphVec2 jitter, f32 out[9]);
 
 // vis.c: the production path's pipelines and frames.
 // Whether the device can run the production path (logged reasons).

@@ -35,6 +35,8 @@
 //     texture, or a cube texture, through the split-sum approximation;
 //   - a pre-exposed HDR target (physical exposure from EV100), tonemapped
 //     with ACES (Hill's fit) or AgX into the caller's target image;
+//   - on the production path, temporal anti-aliasing at native resolution
+//     (NphRenderAntiAliasing), fused with the tonemap;
 //   - debug lines (debug_draw.h) over the tonemapped image.
 //
 // Large worlds (CLAUDE.md §8.2): instance, light, and camera positions are
@@ -521,6 +523,18 @@ typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_RT_SHADOWS = 1U << 4U,    // no virtual shadow map: the sun's shadows ray traced
 } NphRenderVisFlags;
 
+// How a view is anti-aliased.
+typedef enum NphRenderAntiAliasing {
+    // One sample per pixel, at its centre: every frame stands alone.
+    NPH_RENDER_AA_NONE = 0,
+    // The production path's temporal anti-aliasing at native resolution
+    // (docs/render.md "Temporal anti-aliasing"): each frame's projection
+    // moves by a sub-pixel offset, and the frame is blended into the history
+    // of the earlier ones, read where what each pixel sees was a frame ago.
+    // The reference renderer ignores it, and so do debug views.
+    NPH_RENDER_AA_TEMPORAL = 1,
+} NphRenderAntiAliasing;
+
 typedef struct NphRenderView {
     NphRenderCamera camera;
     // Exposure as EV100 (Lagarde & de Rousiers, "Moving Frostbite to PBR",
@@ -536,9 +550,14 @@ typedef struct NphRenderView {
     // (logged once) on a renderer without the production path.
     NphRenderPipeline pipeline;
     u32 vis_flags; // NphRenderVisFlags
+    NphRenderAntiAliasing anti_aliasing;
+    // The view does not continue the previous frame's (a cut, a teleport,
+    // another camera): temporal history is dropped, not reprojected.
+    b32 camera_cut;
 } NphRenderView;
 
-// A view of `camera`: EV100 15, ACES, the environment as background.
+// A view of `camera`: EV100 15, ACES, the environment as background, no
+// anti-aliasing (the runtime turns temporal anti-aliasing on: r.taa).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
 
 // The linear exposure for an EV100 value.
@@ -598,6 +617,11 @@ typedef struct NphRenderFrameStats {
     u32 vsm_evicted;
     u32 vsm_draws;
     u32 vsm_overflow;
+    // Temporal anti-aliasing: whether the frame was resolved temporally,
+    // and whether it blended with history (not on the first such frame, nor
+    // after a cut, a resize, or a frame resolved otherwise).
+    b32 taa;
+    b32 taa_history;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

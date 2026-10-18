@@ -6,6 +6,8 @@
 // transforms), or, with copy_previous, brings the previous transform up to
 // the current one for an instance that moved last frame and not this one.
 // A fresh instance has no history: its previous transform is its first.
+// NPH_VIS_INSTANCE_MOVED marks the records whose two transforms differ, so
+// that the temporal resolve reads both only for those.
 // The CPU sends at most one update per slot per frame, so no two
 // invocations touch one slot.
 #version 460
@@ -28,11 +30,17 @@ void main()
     VisTransformsRef prev = VisTransformsRef(view.v.prev_transforms);
     if (up.copy_previous != 0u) {
         prev.t[up.slot] = instances.i[up.slot].transform;
+        instances.i[up.slot].flags &= ~uint(NPH_VIS_INSTANCE_MOVED);
         return;
     }
     NphVisInstance record = up.instance;
     const bool fresh = (record.flags & NPH_VIS_INSTANCE_FRESH) != 0u;
-    prev.t[up.slot] = fresh ? record.transform : instances.i[up.slot].transform;
-    record.flags &= ~uint(NPH_VIS_INSTANCE_FRESH);
+    const NphVisTransform before = fresh ? record.transform : instances.i[up.slot].transform;
+    prev.t[up.slot] = before;
+    const NphVisTransform now = record.transform;
+    const bool moved = before.row0 != now.row0 || before.row1 != now.row1 ||
+                       before.row2 != now.row2 || before.translation_low != now.translation_low;
+    record.flags &= ~uint(NPH_VIS_INSTANCE_FRESH | NPH_VIS_INSTANCE_MOVED);
+    record.flags |= moved ? uint(NPH_VIS_INSTANCE_MOVED) : 0u;
     instances.i[up.slot] = record;
 }

@@ -110,6 +110,10 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     // 0: none), which the sun's light record (color.w 2) is shadowed by.
     u64 vsm;
     u64 pad_vsm;
+    // xy: the sub-pixel offset of this frame's projection, in NDC (zero
+    // without temporal anti-aliasing), which what is drawn over the temporal
+    // resolve's output takes off again; zw: unused.
+    NphVec4 jitter;
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -226,6 +230,27 @@ NPH_SHARED_STRUCT(NphRenderTonemapPush)
     u32 hdr_index;   // bindless: the pre-exposed HDR colour
     u32 tonemapper;  // NPH_RENDER_TONEMAP_*
     u32 encode_srgb; // 1: the target is UNORM, so the shader applies the sRGB curve
+    u32 pad0;
+};
+
+// Push constants of the production path's temporal resolve (taa.frag).
+NPH_SHARED_STRUCT(NphRenderTaaPush)
+{
+    u64 view; // NphVisViewData
+    // The reconstruction filter's weights of the 3 x 3 samples, row by row
+    // from the top left (they sum to 1), for this frame's jitter.
+    NphVec4 weights0;
+    NphVec4 weights1;
+    f32 weight8;
+    f32 history_scale;   // this frame's exposure over the history's; 0: no history
+    NphVec2 jitter;      // this frame's sub-pixel offset of the projection, in UV
+    u32 hdr_index;       // bindless sampled: the pre-exposed HDR colour
+    u32 visbuffer_index; // bindless storage: the visibility buffer
+    u32 history_index;   // bindless sampled: the previous frame's history
+    u32 sampler_index;   // bilinear, clamped to the edge
+    u32 tonemapper;      // NPH_RENDER_TONEMAP_*
+    u32 encode_srgb;     // 1: the target is UNORM, so the shader applies the sRGB curve
+    u32 noise;           // the history's rounding noise's offset this frame
     u32 pad0;
 };
 

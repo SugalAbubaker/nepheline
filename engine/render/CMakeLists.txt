@@ -17,6 +17,7 @@ nph_add_module(render
         src/renderer.c
         src/render_internal.h
         src/rt.c
+        src/taa.c
         src/vis.c
         src/vis_scene.c
         src/vsm.c
@@ -44,6 +45,7 @@ nph_add_test(render
         tests/test_render_support.h
         tests/test_renderer.c
         tests/test_shadows.c
+        tests/test_taa.c
         tests/test_vis.c
         tests/test_vsm.c
     DEPS

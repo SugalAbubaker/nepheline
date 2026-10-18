@@ -73,7 +73,8 @@ void main()
                 const float nearest = max((-c.z - sphere.w) * (1.0 - VIS_LIGHT_SLACK), znear);
                 const float farthest = (-c.z + sphere.w) * (1.0 + VIS_LIGHT_SLACK);
                 entry.x = nph_zbin(nearest, znear, scale) | (nph_zbin(farthest, znear, scale) << 16u);
-                const vec4 rect = vis_project_sphere_clipped(c, sphere.w, view.v.projection);
+                const vec4 rect =
+                    vis_project_sphere_clipped(c, sphere.w, view.v.projection) + view.v.jitter.xyxy;
                 // Light tiles, clamped to the target (the rectangle may
                 // reach past it, or be huge for a light at the camera).
                 const vec2 tiles = view.v.viewport.xy / float(NPH_RENDER_LIGHT_TILE);

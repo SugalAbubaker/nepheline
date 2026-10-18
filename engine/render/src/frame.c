@@ -14,7 +14,9 @@
 //      needed (ibl.c), then either the reference renderer's forward pass
 //      into a pre-exposed HDR target or the production path's culling,
 //      raster, resolve, and transparent passes (vis.c), and the tonemap
-//      pass into the caller's target with the debug lines.
+//      pass into the caller's target with the debug lines, or on a
+//      production view with temporal anti-aliasing the temporal resolve
+//      (taa.c), which tonemaps too.
 //
 // The reference draws every visible submesh itself; the production path
 // leaves opaque and masked surfaces to the GPU and draws only the blended
@@ -32,7 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 432U, "NphRenderViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 448U, "NphRenderViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
@@ -208,6 +210,7 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
                 nph_gpu_pipeline_destroy(r->dev, t->vis_tonemap);
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_depth);
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_overlay);
+                nph_gpu_pipeline_destroy(r->dev, t->taa);
                 memset(t, 0, sizeof *t);
                 return res;
             }
@@ -670,7 +673,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         !(view->camera.yfov < NPH_PI) || !(view->camera.znear > 0.0F) ||
         (u32)view->tonemapper > (u32)NPH_RENDER_TONEMAPPER_AGX ||
         (u32)view->debug_view >= (u32)NPH_RENDER_VIEW_COUNT ||
-        (u32)view->pipeline > (u32)NPH_RENDER_PIPELINE_PRODUCTION) {
+        (u32)view->pipeline > (u32)NPH_RENDER_PIPELINE_PRODUCTION ||
+        (u32)view->anti_aliasing > (u32)NPH_RENDER_AA_TEMPORAL) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const NphGpuImageDesc *td = nph_gpu_image_desc(dev, target);
@@ -705,8 +709,17 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     const NphMat3 rot =
         nph_mat3_from_quat(nph_quat_normalize_or_identity(view->camera.orientation));
     const NphMat4 view_m = nph_mat4_from_mat3(nph_mat3_transpose(rot));
-    const NphMat4 proj = nph_mat4_perspective_infinite(view->camera.yfov, (f32)width / (f32)height,
-                                                       view->camera.znear);
+    NphMat4 proj = nph_mat4_perspective_infinite(view->camera.yfov, (f32)width / (f32)height,
+                                                 view->camera.znear);
+    // Temporal anti-aliasing moves the projection by the frame's sub-pixel
+    // jitter: x_ndc += j_ndc w, through the column that multiplies view z
+    // (w = -z). Every pass that draws or rebuilds positions uses it.
+    NphVec2 jitter = nph_vec2(0.0F, 0.0F);
+    NPH_TRY(render_taa_frame_begin(r, view, width, height, production, &jitter));
+    const NphVec2 jitter_ndc =
+        nph_vec2(2.0F * jitter.x / (f32)width, 2.0F * jitter.y / (f32)height);
+    proj.c[2].x -= jitter_ndc.x;
+    proj.c[2].y -= jitter_ndc.y;
     FrameCull fc;
     fc.view = view_m;
     fc.camera = view->camera.position;
@@ -722,6 +735,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.shadow_rays = rt ? 1 : 0;
     stats.vsm = vsm ? 1 : 0;
     stats.vsm_lod_bias = vsm ? r->vsm.frame_bias : 0U;
+    stats.taa = r->taa.frame_active;
+    stats.taa_history = r->taa.frame_history;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -773,6 +788,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->tlas = rt ? nph_gpu_accel_address(dev, r->rt.tlas) : 0U;
     vd->tlas_offset = nph_vec4_from_vec3(r->rt.tlas_offset, 0.0F);
     vd->vsm = vsm ? r->vsm.view_address : 0U;
+    vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
 
@@ -816,6 +832,16 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     const NphGpuRgImage out = nph_gpu_rg_import_image(graph, target);
     if (nph_gpu_rg_image_is_null(out)) {
         return NPH_RESULT_FULL;
+    }
+    if (r->taa.frame_active) {
+        NPH_TRY(render_taa_declare(r, graph, out, vd->exposure));
+        if (out_target != NULL) {
+            *out_target = out;
+        }
+        if (out_stats != NULL) {
+            *out_stats = stats;
+        }
+        return NPH_RESULT_OK;
     }
     NphGpuRgPassDesc pd;
     memset(&pd, 0, sizeof pd);

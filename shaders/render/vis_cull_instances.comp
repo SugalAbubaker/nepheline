@@ -81,14 +81,14 @@ void main()
                     vec4 rect;
                     float depth;
                     defer = vis_project_sphere(pv, pr, view.v.prev_projection, rect, depth) &&
-                            vis_hzb_occluded(view.v, rect, depth);
+                            vis_hzb_occluded(view.v, rect + view.v.jitter.zwzw, depth);
                 }
             } else if (occlusion) {
                 const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
                 vec4 rect;
                 float depth;
                 culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
-                                   vis_hzb_occluded(view.v, rect, depth);
+                                   vis_hzb_occluded(view.v, rect + view.v.jitter.xyxy, depth);
             }
             if (!culled_frustum && !defer && !culled_occlusion) {
                 meshlets = mesh.meshlet_count;

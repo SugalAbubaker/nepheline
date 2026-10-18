@@ -130,12 +130,12 @@ void main()
                         const vec3 pv = (view.v.prev_view * vec4(pw, 1.0)).xyz;
                         defer = vis_project_sphere(pv, radius * vis_max_scale(pt),
                                                    view.v.prev_projection, rect, depth) &&
-                                vis_hzb_occluded(view.v, rect, depth);
+                                vis_hzb_occluded(view.v, rect + view.v.jitter.zwzw, depth);
                     }
                 } else {
                     const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
                     culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
-                                       vis_hzb_occluded(view.v, rect, depth);
+                                       vis_hzb_occluded(view.v, rect + view.v.jitter.xyxy, depth);
                 }
             }
             visible = !culled_frustum && !culled_cone && !defer && !culled_occlusion;
@@ -205,7 +205,7 @@ void main()
         float depth;
         bool full = true;
         if (vis_project_sphere(cv, r, view.v.projection, rect, depth)) {
-            const vec4 px = clamp(rect, 0.0, 1.0) * view.v.viewport.xyxy;
+            const vec4 px = clamp(rect + view.v.jitter.xyxy, 0.0, 1.0) * view.v.viewport.xyxy;
             const ivec2 t0 = ivec2(px.xy) / NPH_VIS_HZB_TILE;
             const ivec2 t1 = ivec2(min(px.zw, view.v.viewport.xy - 1.0)) / NPH_VIS_HZB_TILE;
             const ivec2 n = t1 - t0 + 1;

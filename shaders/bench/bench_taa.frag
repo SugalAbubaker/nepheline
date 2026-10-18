@@ -47,7 +47,7 @@ const vec2 k_jitter = vec2(0.25, -0.125);
 void add(inout TaaNeighbourhood n, inout float nearest, inout ivec2 nearest_offset, vec3 color,
          float depth, ivec2 offset)
 {
-    taa_neighbourhood_add(n, color, vec2(offset) - k_jitter);
+    taa_neighbourhood_add(n, color, taa_filter_weight(vec2(offset) - k_jitter));
     if (depth > nearest) {
         nearest = depth;
         nearest_offset = offset;
@@ -109,8 +109,8 @@ void main()
     const vec3 history = taa_rgb_to_ycocg(
         taa_history_catmull_rom(pc.texture3_index, pc.sampler_index, uv, size, inv_size));
     const vec3 current = n.filtered / n.weight;
-    const vec3 resolved =
-        taa_ycocg_to_rgb(taa_blend(current, taa_clip(n, history), TAA_CURRENT_WEIGHT));
+    const vec3 resolved = taa_ycocg_to_rgb(
+        taa_blend(current, taa_clip(n, history), taa_current_weight(length(motion))));
     out_color = vec4(nph_tonemap(resolved, NPH_RENDER_TONEMAP_ACES, true), 1.0);
     out_history = vec4(
         k_dither ? nph_dither_b10g11r11(resolved, nph_gradient_noise(gl_FragCoord.xy)) : resolved,

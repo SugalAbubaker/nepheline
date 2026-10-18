@@ -24,6 +24,9 @@
 #define NPH_VIS_INSTANCE_FRESH    4 // created this frame: the previous transform is the current one
 #define NPH_VIS_INSTANCE_SIMILAR                                                                   \
     8 // rotation, uniform scale, mirroring only: angles kept (cone culling)
+// Its transform is not the previous frame's (the scatter pass keeps it):
+// motion vectors read both.
+#define NPH_VIS_INSTANCE_MOVED 16
 
 // Cluster flags (NphVisCluster.flags), from the instance and the material.
 #define NPH_VIS_CLUSTER_MIRRORED     1
@@ -214,10 +217,11 @@ NPH_SHARED_STRUCT(NphVisCounters)
 // The production path's view of a frame.
 NPH_SHARED_STRUCT(NphVisViewData)
 {
-    NphMat4 view;      // camera-relative world -> view (the camera's rotation)
-    NphMat4 view_proj; // camera-relative world -> clip
-    NphMat4 prev_view; // the previous frame's, relative to its own camera
-    NphMat4 prev_view_proj;
+    NphMat4 view;           // camera-relative world -> view (the camera's rotation)
+    NphMat4 view_proj;      // camera-relative world -> clip
+    NphMat4 prev_view;      // the previous frame's, relative to its own camera
+    NphMat4 prev_view_proj; // the previous frame's, relative to its camera, without its jitter
+                            // (motion vectors)
     NphVec4 frustum[5];  // camera-relative inward planes (xyz normal, w distance): l, r, b, t, near
     NphVec4 camera_high; // xyz: the camera position's high floats
     NphVec4 camera_low;  // xyz: and its low floats
@@ -226,7 +230,11 @@ NPH_SHARED_STRUCT(NphVisViewData)
     NphVec4 viewport;   // width, height, 1 / width, 1 / height
     NphVec4 projection; // x: P00, y: P11, z: near plane distance, w: unused
     NphVec4 prev_projection;
-    NphVec4 hzb;            // x, y: the HZB's mip-0 extent, z: its mip count, w: unused
+    NphVec4 hzb; // x, y: the HZB's mip-0 extent, z: its mip count, w: unused
+    // xy: this frame's sub-pixel offset of the projection (temporal
+    // anti-aliasing) in UV, zw: the previous frame's: rectangles projected
+    // with `projection` or `prev_projection` move by it.
+    NphVec4 jitter;
     u64 render_view;        // NphRenderViewData: lights, materials, environment
     u64 instance_updates;   // NphVisInstanceUpdate[] of this frame (the scatter pass)
     u64 instances;          // NphVisInstance[]

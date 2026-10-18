@@ -10,8 +10,8 @@
 // Supersampling", SIGGRAPH 2014):
 //   - the current frame is filtered over the pixel's 3 x 3 neighbourhood,
 //     each sample weighted by its distance from the pixel's centre (the
-//     samples lie at the jittered positions), with a Gaussian fit of the
-//     Blackman-Harris window (Karis 2014);
+//     samples lie at the jittered positions; Karis 2014), with a Gaussian
+//     of a box filter's spread (taa_filter_weight);
 //   - the history is read with a Catmull-Rom filter in five bilinear taps,
 //     its four corner taps dropped (Jimenez, "Filmic SMAA: Sharp Morphological
 //     and Temporal Antialiasing", SIGGRAPH 2016), which keeps it sharp
@@ -23,7 +23,8 @@
 //     Pedersen, "Temporal Reprojection Anti-Aliasing in INSIDE", GDC 2016);
 //   - the current sample and the history blend with weights divided by
 //     1 + luma, so that a bright sub-pixel highlight does not flicker as
-//     the jitter finds and loses it (Karis 2014).
+//     the jitter finds and loses it (Karis 2014), the current frame's
+//     weight growing with the motion (taa_current_weight).
 #ifndef NPH_TAA_COMMON_GLSL
 #define NPH_TAA_COMMON_GLSL
 
@@ -35,6 +36,13 @@
 // The clipping box's half-extent in the neighbourhood's standard
 // deviations (Salvi 2016).
 #define TAA_VARIANCE_GAMMA 1.0
+// The box's smallest half-extent, as a fraction of its centre's luma: the
+// history's quantisation (taa_clip).
+#define TAA_BOX_FLOOR (1.0 / 32.0)
+// The current frame's weight where the history moved TAA_MOVING_SPEED
+// pixels or more (taa_current_weight): a history of about 4 frames.
+#define TAA_MOVING_WEIGHT 0.25
+#define TAA_MOVING_SPEED  1.0
 
 // YCoCg (Malvar & Sullivan, "YCoCg-R: A Color Space with RGB Reversibility
 // and Low Dynamic Range", 2003): luma and two chroma axes, in which the
@@ -76,17 +84,28 @@ TaaNeighbourhood taa_neighbourhood_begin()
     return n;
 }
 
-// Adds the sample `rgb` lying `offset` pixels from the pixel's centre.
-void taa_neighbourhood_add(inout TaaNeighbourhood n, vec3 rgb, vec2 offset)
+// The reconstruction filter's weight of a sample lying `offset` pixels
+// from the pixel's centre: a Gaussian with a box filter's spread (sigma
+// 1 / sqrt(12) pixels), so the samples a pixel gathers over the jitter
+// sequence average to its area. Karis 2014's wider fit of the
+// Blackman-Harris window (sigma 0.47) steadies a frame's own sample but
+// softens edges: against a 4 x 4 supersampled image a still view converged
+// to 0.76 levels of error with it and 0.39 with this one (test_taa.c; ADR-0034).
+// C twin: render_taa_weights, which the pass's push constants carry,
+// normalised, for the frame's jitter.
+float taa_filter_weight(vec2 offset)
+{
+    return exp(-6.0 * dot(offset, offset));
+}
+
+// Adds the sample `rgb` with the reconstruction filter's weight `w`.
+void taa_neighbourhood_add(inout TaaNeighbourhood n, vec3 rgb, float w)
 {
     const vec3 c = taa_rgb_to_ycocg(rgb);
     n.m1 += c;
     n.m2 += c * c;
     n.lo = min(n.lo, c);
     n.hi = max(n.hi, c);
-    // A Gaussian of sigma 0.47 pixels fitted to the Blackman-Harris window
-    // (Karis 2014).
-    const float w = exp(-2.29 * dot(offset, offset));
     n.filtered += c * w;
     n.weight += w;
     n.count += 1.0;
@@ -144,11 +163,26 @@ vec3 taa_clip(TaaNeighbourhood n, vec3 history)
     const vec3 lo = max(n.lo, mean - TAA_VARIANCE_GAMMA * sigma);
     const vec3 hi = min(n.hi, mean + TAA_VARIANCE_GAMMA * sigma);
     const vec3 centre = 0.5 * (lo + hi);
-    const vec3 extent = max(0.5 * (hi - lo), vec3(1e-7));
+    // At least the history's own rounding: B10G11R11 keeps 5 bits of blue
+    // mantissa, so a grey history carries chroma up to 1/32 of its luma,
+    // which a flat neighbourhood's degenerate box would otherwise read as
+    // far outside and clip the whole history, luma and all, to the centre.
+    const vec3 extent = max(0.5 * (hi - lo), vec3(max(centre.x, 0.0) * TAA_BOX_FLOOR + 1e-6));
     const vec3 v = history - centre;
     const vec3 a = abs(v) / extent;
     const float m = max(max(a.x, a.y), a.z);
     return m > 1.0 ? centre + v / m : history;
+}
+
+// The current frame's weight for a pixel whose history moved `speed`
+// pixels: every frame that reads the history at a fractional offset
+// softens its edges a little (the Catmull-Rom filter interpolates exactly
+// only at texel centres), so a moving pixel keeps a shorter history (Yang,
+// Liu & Salvi, "A Survey of Temporal Antialiasing Techniques", Computer
+// Graphics Forum 2020).
+float taa_current_weight(float speed)
+{
+    return mix(TAA_CURRENT_WEIGHT, TAA_MOVING_WEIGHT, clamp(speed / TAA_MOVING_SPEED, 0.0, 1.0));
 }
 
 // The new history (YCoCg): the filtered current sample and the clipped

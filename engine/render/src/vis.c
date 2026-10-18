@@ -42,7 +42,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 768U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 784U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -329,7 +329,8 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t, 
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->vis_debug_depth));
     d.fragment = r->shaders[RENDER_SHADER_DEBUG_FRAG];
     d.name = "debug lines (production, overlay)";
-    return nph_gpu_pipeline_create_graphics(r->dev, &d, &t->vis_debug_overlay);
+    NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->vis_debug_overlay));
+    return render_taa_target_pipeline(r, t, format);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +450,16 @@ static u64 region(NphGpuDevice *dev, NphGpuBuffer b, u64 offset)
     return nph_gpu_buffer_is_null(b) ? 0U : nph_gpu_buffer_address(dev, b) + offset;
 }
 
+// The frame's projection without its jitter (render_taa_frame_begin): the
+// motion vectors' frame of reference.
+static NphMat4 unjittered(const NphRenderer *r, const NphMat4 *proj, u32 width, u32 height)
+{
+    NphMat4 p = *proj;
+    p.c[2].x += 2.0F * r->taa.frame_jitter.x / (f32)width;
+    p.c[2].y += 2.0F * r->taa.frame_jitter.y / (f32)height;
+    return p;
+}
+
 static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
                        const NphMat4 *view_m, const NphMat4 *proj, u32 flags)
 {
@@ -472,6 +483,8 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->projection = nph_vec4(proj->c[0].x, proj->c[1].y, view->camera.znear, 0.0F);
     vd->prev_projection = v->prev_projection;
     vd->hzb = nph_vec4((f32)v->hzb_width, (f32)v->hzb_height, (f32)v->hzb_mips, 0.0F);
+    vd->jitter = nph_vec4(r->taa.frame_jitter.x / (f32)width, r->taa.frame_jitter.y / (f32)height,
+                          v->prev_jitter.x, v->prev_jitter.y);
     vd->render_view = frame + r->layout.view_offset;
     vd->instance_updates = frame + r->layout.vis_updates_offset;
     vd->instances = nph_gpu_buffer_address(dev, v->instances);
@@ -1193,13 +1206,18 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         return res;
     }
     const bool hzb_valid = v->hzb_valid != 0;
+    // This frame's jitter in UV, and its projection without it.
+    const NphVec2 jitter =
+        nph_vec2(r->taa.frame_jitter.x / (f32)width, r->taa.frame_jitter.y / (f32)height);
+    const NphMat4 plain = unjittered(r, proj, width, height);
     if (!hzb_valid) {
         // No previous frame: phase 0's view is this one (its HZB tests are
         // off anyway).
         v->prev_view = *view_m;
-        v->prev_view_proj = nph_mat4_mul(*proj, *view_m);
+        v->prev_view_proj = nph_mat4_mul(plain, *view_m);
         v->prev_projection = nph_vec4(proj->c[0].x, proj->c[1].y, view->camera.znear, 0.0F);
         v->prev_camera = view->camera.position;
+        v->prev_jitter = jitter;
     }
     u32 flags = 0U;
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_OCCLUSION) == 0U) {
@@ -1265,6 +1283,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.deferred = nph_gpu_rg_import_buffer(graph, v->deferred);
     g.clusters = nph_gpu_rg_import_buffer(graph, v->clusters);
     g.lists = nph_gpu_rg_import_buffer(graph, v->lists);
+    f->instances = g.instances;
+    f->prev_transforms = g.prev_transforms;
+    f->clusters = g.clusters;
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
         nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles)) {
@@ -1306,9 +1327,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         // Next frame's phase 0 tests against this frame's HZB, from this
         // frame's view.
         v->prev_view = *view_m;
-        v->prev_view_proj = nph_mat4_mul(*proj, *view_m);
+        v->prev_view_proj = nph_mat4_mul(plain, *view_m);
         v->prev_projection = nph_vec4(proj->c[0].x, proj->c[1].y, view->camera.znear, 0.0F);
         v->prev_camera = view->camera.position;
+        v->prev_jitter = jitter;
         v->hzb_valid = 1;
         *out_hdr = f->hdr;
     }

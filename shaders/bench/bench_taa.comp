@@ -42,7 +42,7 @@ void main()
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const int at = (local.y + 1 + y) * APRON + local.x + 1 + x;
-            taa_neighbourhood_add(n, s_color[at], vec2(x, y) - k_jitter);
+            taa_neighbourhood_add(n, s_color[at], taa_filter_weight(vec2(x, y) - k_jitter));
             if (s_depth[at] > nearest) {
                 nearest = s_depth[at];
                 nearest_offset = ivec2(x, y);
@@ -56,8 +56,8 @@ void main()
     const vec3 history = taa_rgb_to_ycocg(
         taa_history_catmull_rom(pc.texture3_index, pc.sampler_index, uv, fsize, inv_size));
     const vec3 current = n.filtered / n.weight;
-    const vec3 resolved =
-        taa_ycocg_to_rgb(taa_blend(current, taa_clip(n, history), TAA_CURRENT_WEIGHT));
+    const vec3 resolved = taa_ycocg_to_rgb(
+        taa_blend(current, taa_clip(n, history), taa_current_weight(length(motion))));
     if (pixel.x < size.x && pixel.y < size.y) {
         const vec3 stored =
             k_dither ? nph_dither_b10g11r11(resolved, nph_gradient_noise(vec2(pixel))) : resolved;
