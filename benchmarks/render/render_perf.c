@@ -25,9 +25,10 @@
 // size the software raster takes (0: every cluster in hardware), for tuning
 // the hybrid raster's split.
 //
-// The scenes are synthetic until Phase 10's reference scenes arrive. The
-// production path's resolve temporally (NPH_RENDER_AA_TEMPORAL, the
-// runtime's default), the reference's do not:
+// The scenes are synthetic until Phase 10's reference scenes arrive. Each
+// draws the runtime's defaults: bloom (r.bloom's weight, 0.04) on both
+// pipelines, a temporal resolve (NPH_RENDER_AA_TEMPORAL, r.taa) on the
+// production path, and the scene's own exposure:
 //
 //   grid_<n>_<pipeline>   n cubes on a flat grid under a top-down camera,
 //                         every one on screen, at 512 x 512: the CPU cost
@@ -39,6 +40,12 @@
 //   field_4k_no_taa       field_4k_production without temporal
 //                         anti-aliasing: the tonemap pass where the other
 //                         has the temporal resolve.
+//   field_4k_no_bloom     field_4k_production without bloom: what the
+//                         bloom chain costs.
+//   field_4k_auto_exposure
+//                         field_4k_production exposed automatically
+//                         (NPH_RENDER_EXPOSURE_AUTO): the histogram and the
+//                         metering on top of the bloom chain.
 //   lights_<n>_<pipeline> the field at night, lit by n point and spot
 //                         lights of 3 to 8 m range among the nearer rows
 //                         (and a dim moon): the light grid's cost against
@@ -91,7 +98,7 @@
 
 #define EXIT_SKIPPED   77
 #define MAX_FRAMES     512U
-#define MAX_RESULTS    512U
+#define MAX_RESULTS    2048U
 #define MAX_PASS_STATS 96U
 #define WARMUP_FRAMES  24U
 #define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long, for the clocks
@@ -113,7 +120,7 @@ typedef struct SceneDef {
     u32 height;
     u32 vis_flags; // NphRenderVisFlags
     u32 shadows;   // SceneShadows
-    b32 aliased;   // the production path without temporal anti-aliasing
+    u32 post;      // ScenePost
 } SceneDef;
 
 typedef enum SceneShadows {
@@ -123,6 +130,16 @@ typedef enum SceneShadows {
     SHADOWS_SUN_WALK,   // and the camera walks
     SHADOWS_ALL,        // the moon and every lamp cast shadows
 } SceneShadows;
+
+// How a scene's post-processing departs from the runtime's defaults.
+typedef enum ScenePost {
+    POST_DEFAULT = 0,
+    POST_NO_TAA = 1U << 0U,        // the production path without temporal anti-aliasing
+    POST_NO_BLOOM = 1U << 1U,      // no bloom
+    POST_AUTO_EXPOSURE = 1U << 2U, // the exposure metered and adapted
+} ScenePost;
+
+#define RUNTIME_BLOOM 0.04F // r.bloom's default
 
 static const SceneDef g_scenes[] = {
     {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
@@ -142,7 +159,11 @@ static const SceneDef g_scenes[] = {
     {"field_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_NONE, 0},
     {"field_4k_no_taa", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
-     SHADOWS_NONE, 1},
+     SHADOWS_NONE, POST_NO_TAA},
+    {"field_4k_no_bloom", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_NO_BLOOM},
+    {"field_4k_auto_exposure", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_AUTO_EXPOSURE},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
      0U, SHADOWS_NONE, 0},
     {"lights_1k_production", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
@@ -529,9 +550,13 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.pipeline = s->pipeline;
     view.ev100 = 13.0F;
     view.vis_flags = s->vis_flags;
-    view.anti_aliasing = s->pipeline == NPH_RENDER_PIPELINE_PRODUCTION && !s->aliased
-                             ? NPH_RENDER_AA_TEMPORAL
-                             : NPH_RENDER_AA_NONE;
+    view.anti_aliasing =
+        s->pipeline == NPH_RENDER_PIPELINE_PRODUCTION && (s->post & (u32)POST_NO_TAA) == 0U
+            ? NPH_RENDER_AA_TEMPORAL
+            : NPH_RENDER_AA_NONE;
+    view.bloom = (s->post & (u32)POST_NO_BLOOM) != 0U ? 0.0F : RUNTIME_BLOOM;
+    view.exposure = (s->post & (u32)POST_AUTO_EXPOSURE) != 0U ? NPH_RENDER_EXPOSURE_AUTO
+                                                              : NPH_RENDER_EXPOSURE_MANUAL;
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
