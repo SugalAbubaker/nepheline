@@ -37,8 +37,8 @@ static u64 address_at(const NphGpuDevice *dev, NphGpuBuffer buffer, u64 offset)
 
 // The Vulkan description of triangle geometries; false for one the device
 // cannot build.
-static bool triangle_geometries(const NphGpuDevice *dev, const NphGpuAccelTriangles *in,
-                                u32 count, VkAccelerationStructureGeometryKHR *out,
+static bool triangle_geometries(const NphGpuDevice *dev, const NphGpuAccelTriangles *in, u32 count,
+                                VkAccelerationStructureGeometryKHR *out,
                                 VkAccelerationStructureBuildRangeInfoKHR *ranges,
                                 u32 *primitive_counts)
 {
@@ -105,9 +105,9 @@ static void sizes_of(NphGpuDevice *dev, const VkAccelerationStructureBuildGeomet
     VkAccelerationStructureBuildSizesInfoKHR sizes;
     memset(&sizes, 0, sizeof sizes);
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    vkGetAccelerationStructureBuildSizesKHR(
-        dev->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, info, primitive_counts,
-        &sizes);
+    vkGetAccelerationStructureBuildSizesKHR(dev->device,
+                                            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, info,
+                                            primitive_counts, &sizes);
     out->accel = sizes.accelerationStructureSize;
     out->scratch = sizes.buildScratchSize;
 }

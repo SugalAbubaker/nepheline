@@ -58,7 +58,7 @@ typedef enum NphGpuAccelBuildFlags {
 
 // One geometry of a bottom-level structure: an indexed triangle list.
 typedef struct NphGpuAccelTriangles {
-    NphGpuBuffer vertices;      // positions from vertex_offset, vertex_stride bytes apart
+    NphGpuBuffer vertices; // positions from vertex_offset, vertex_stride bytes apart
     u64 vertex_offset;
     u32 vertex_stride;
     u32 vertex_count;           // one more than the largest index
@@ -73,11 +73,11 @@ typedef struct NphGpuAccelTriangles {
 // A top-level structure's instance, laid out as VkAccelerationStructureInstanceKHR
 // (64 bytes), so shaders and the CPU may write them alike.
 typedef struct NphGpuAccelInstance {
-    f32 transform[3][4];   // rows of the object-to-world affine transform
-    u32 index_and_mask;    // bits 0-23: the custom index a hit reports; bits 24-31: the ray mask
-    u32 offset_and_flags;  // bits 0-23: shader binding table offset (0); bits 24-31:
-                           // NPH_GPU_ACCEL_INSTANCE_* flags
-    u64 blas;              // nph_gpu_accel_address of a bottom-level structure (0: none)
+    f32 transform[3][4];  // rows of the object-to-world affine transform
+    u32 index_and_mask;   // bits 0-23: the custom index a hit reports; bits 24-31: the ray mask
+    u32 offset_and_flags; // bits 0-23: shader binding table offset (0); bits 24-31:
+                          // NPH_GPU_ACCEL_INSTANCE_* flags
+    u64 blas;             // nph_gpu_accel_address of a bottom-level structure (0: none)
 } NphGpuAccelInstance;
 
 NPH_STATIC_ASSERT(sizeof(NphGpuAccelInstance) == 64U, "an instance is 64 bytes");
@@ -125,9 +125,8 @@ NphGpuBuffer nph_gpu_accel_buffer(const NphGpuDevice *dev, NphGpuAccel accel);
 
 // Records a full build of a bottom-level structure from `count` geometries
 // (the same ones its sizes were queried with, or no larger).
-void nph_gpu_cmd_build_blas(NphGpuCmd *cmd, NphGpuAccel dst,
-                            const NphGpuAccelTriangles *geometries, u32 count, u32 flags,
-                            NphGpuBuffer scratch, u64 scratch_offset);
+void nph_gpu_cmd_build_blas(NphGpuCmd *cmd, NphGpuAccel dst, const NphGpuAccelTriangles *geometries,
+                            u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset);
 
 // Records a full build of a top-level structure from `count` instances (at
 // most its max_instances) read at `offset` of `instances` (16-byte aligned).

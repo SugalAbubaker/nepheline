@@ -48,9 +48,8 @@ static u64 align_up(u64 v, u64 a)
 
 static void accel_barrier(NphGpuCmd *cmd, u32 dst_stages)
 {
-    const NphGpuMemoryBarrier m = {(u32)NPH_GPU_STAGE_ACCEL_BUILD,
-                                   (u32)NPH_GPU_ACCESS_ACCEL_WRITE, dst_stages,
-                                   (u32)NPH_GPU_ACCESS_ACCEL_READ};
+    const NphGpuMemoryBarrier m = {(u32)NPH_GPU_STAGE_ACCEL_BUILD, (u32)NPH_GPU_ACCESS_ACCEL_WRITE,
+                                   dst_stages, (u32)NPH_GPU_ACCESS_ACCEL_READ};
     NphGpuBarrierDesc bd;
     memset(&bd, 0, sizeof bd);
     bd.memory = &m;
@@ -111,9 +110,9 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
     u64 scratch_size = 0U;
     const u64 align = nph_max_u32(nph_gpu_device_info(dev)->limits.accel_scratch_alignment, 1U);
     for (u32 i = 0; i < blas_count; ++i) {
-        NTEST_ASSERT_EQ_INT(nph_gpu_accel_blas_sizes(dev, &tri[i], 1U,
-                                                     (u32)NPH_GPU_ACCEL_PREFER_TRACE, &sizes[i]),
-                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(
+            nph_gpu_accel_blas_sizes(dev, &tri[i], 1U, (u32)NPH_GPU_ACCEL_PREFER_TRACE, &sizes[i]),
+            NPH_RESULT_OK);
         NTEST_EXPECT_GT_UINT((u32)sizes[i].accel, 0U);
         NphGpuAccelDesc ad = {NPH_GPU_ACCEL_BOTTOM, sizes[i].accel, "test blas"};
         NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &ad, &blas[i]), NPH_RESULT_OK);
@@ -128,9 +127,9 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
     NphGpuAccelDesc td = {NPH_GPU_ACCEL_TOP, tsizes.accel, "test tlas"};
     NphGpuAccel tlas = NPH_GPU_ACCEL_NULL;
     NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &td, &tlas), NPH_RESULT_OK);
-    NphGpuBuffer scratch = test_make_buffer(dev, scratch_size + align,
-                                            (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
-                                            NPH_GPU_MEMORY_DEVICE, "test scratch");
+    NphGpuBuffer scratch =
+        test_make_buffer(dev, scratch_size + align, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                         NPH_GPU_MEMORY_DEVICE, "test scratch");
 
     // Instances: the float triangle at x = 0 (index 7) and x = 5 (index 9);
     // the unorm one at x = 10 (index 11), where the device has it.
@@ -171,8 +170,8 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
         {0.25F, 0.25F, 1.0F, 0.5F, 0.0F, 0.0F, -1.0F, 0.0F},   // too short: nothing
         {0.9F, 0.9F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F},    // outside the hypotenuse
     };
-    NphGpuBuffer rb = upload_buffer(dev, rays, sizeof rays, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
-                                    "test rays");
+    NphGpuBuffer rb =
+        upload_buffer(dev, rays, sizeof rays, (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "test rays");
     NphGpuBuffer hb = test_make_buffer(dev, RAYS * 16U, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
                                        NPH_GPU_MEMORY_READBACK, "test hits");
     NphGpuShader shader = test_load_shader(dev, "test_ray_query.comp");
@@ -258,8 +257,7 @@ NTEST_F(GpuFixture, acceleration_structures_refuse_bad_descriptions)
     NphGpuAccel a = NPH_GPU_ACCEL_NULL;
     NTEST_EXPECT_EQ_INT(nph_gpu_accel_create(dev, &ad, &a), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_FALSE(nph_gpu_accel_is_valid(dev, a));
-    NTEST_EXPECT_EQ_INT(nph_gpu_accel_tlas_sizes(dev, 0U, 0U, &sizes),
-                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_gpu_accel_tlas_sizes(dev, 0U, 0U, &sizes), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_EQ_INT(nph_gpu_accel_tlas_sizes(dev, NPH_U32_MAX, 0U, &sizes),
                         nph_gpu_device_info(dev)->limits.accel_max_instances < NPH_U32_MAX
                             ? NPH_RESULT_INVALID_ARGUMENT
