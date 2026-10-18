@@ -61,23 +61,32 @@ by the production path), unless stated otherwise.
    from; a float copy of the same values elsewhere). Each is built once,
    in the first frame that traces after the mesh is created, preferring
    trace speed.
-4. **One top level over every instance slot.** Each instance record folds
-   the mesh's dequantisation into its transform. Hidden and free slots get
-   a zero mask and no structure, so no ray meets them. The top level has a
-   space of its own: the world less an anchor near the camera, so 32-bit
-   coordinates hold anywhere in a 64-bit world (§8.2). Shaders move a view
-   point into it by adding `NphRenderViewData.tlas_offset`, the camera's
-   position less the anchor.
+4. **One top level over the instances.** Each instance record folds the
+   mesh's dequantisation into its transform and names its slot (the
+   custom index). The live, shown instances' records come first in the
+   array; hidden and free slots follow as inactive records (no structure,
+   a zero mask), or are left out. Vulkan allows inactive records anywhere,
+   but lavapipe (Mesa 25.2) encodes only as many leaves as are active,
+   counted from the start of the array (`lvp_encode_as`), so an active
+   record behind an inactive one vanished from its structure; CI caught it
+   on every Linux job. The top level has a space of its own: the world
+   less an anchor near the camera, so 32-bit coordinates hold anywhere in a
+   64-bit world (§8.2). Shaders move a view point into it by adding
+   `NphRenderViewData.tlas_offset`, the camera's position less the
+   anchor.
    - **The production path** writes the records on the GPU from its GPU
-     scene (`rt instances`), so its CPU cost does not depend on the
-     instance count. It rebuilds the top level only when its instances
+     scene (`rt instances`: every slot's record inactive, then the active
+     ones appended from the start), so its CPU cost does not depend on the
+     instance count; it builds over every slot, the inactive ones last. It
+     rebuilds the top level only when its instances
      changed this frame, after a frame that traced nothing, or when the
      camera has moved more than 16 m from the anchor (which then moves to
      the camera). A camera moving through a still scene costs no build.
      The 16 m bound keeps the ray offset near the camera at 256 ulp(16 m),
      half a millimetre.
-   - **The reference** writes the records on the CPU, as it does its
-     draws, and rebuilds every frame with the anchor at the camera.
+   - **The reference** writes the active records on the CPU, as it does
+     its draws, builds over those alone, and rebuilds every frame with the
+     anchor at the camera.
 5. **No frame allocates.** One scratch buffer serves every build. It is
    sized at creation for the top level of `max_instances` and grown at
    mesh creation when a bottom level needs more. A frame's bottom-level
@@ -92,30 +101,32 @@ by the production path), unless stated otherwise.
 
 | Scene (16,385 instances) | GPU frame | Resolve | Top-level build | CPU |
 |---|---|---|---|---|
-| day field, no shadows | 1.941 ms | 0.901 ms | | 0.007 ms |
-| day field, the sun's shadows, nothing moving | 2.352 ms | 1.317 ms | none (kept) | 0.007 ms |
-| the same, one sphere moving every frame | 2.685 ms | 1.303 ms | 0.319 ms + records 0.033 ms | 0.007 ms |
-| night field, 1,024 lamps | 2.241 ms | 1.179 ms | | 0.007 ms |
-| night field, 1,024 lamps and the moon casting shadows | 3.602 ms | 2.545 ms | none (kept) | 0.007 ms |
-| reference renderer, day field, no shadows | 2.682 ms | (forward 2.576 ms) | | 2.91 ms |
-| reference renderer, the sun's shadows | 3.893 ms | (forward 2.914 ms) | 0.872 ms (from host memory) | 3.38 ms |
+| day field, no shadows | 1.924 ms | 0.887 ms | | 0.007 ms |
+| day field, the sun's shadows, nothing moving | 2.360 ms | 1.319 ms | none (kept) | 0.007 ms |
+| the same, one sphere moving every frame | 2.714 ms | 1.309 ms | 0.317 ms + records 0.052 ms | 0.007 ms |
+| night field, 1,024 lamps | 2.248 ms | 1.184 ms | | 0.007 ms |
+| night field, 1,024 lamps and the moon casting shadows | 3.595 ms | 2.536 ms | none (kept) | 0.007 ms |
+| reference renderer, day field, no shadows | 2.703 ms | (forward 2.597 ms) | | 2.88 ms |
+| reference renderer, the sun's shadows | 3.355 ms | (forward 2.937 ms) | 0.311 ms | 3.15 ms |
 
-- **The sun's shadows** add 0.41 ms to a still scene, all of it in the
-  resolve's rays. That is just inside §10.4's shadow line (0.40 ms). A
-  scene with motion adds the rebuild on top: 0.62 ms in all, over the line
-  by 0.22 ms.
-- **The rebuild walks every slot up to the instance pool's high-water
-  mark.** `render_perf` ran its 102,400-instance grid before the field, so
-  the field's top level spans 102,401 slots: 0.319 ms. Run alone, the same
-  scene rebuilds 16,386 slots in 0.222 ms, and its records take 0.010 ms.
+- **The sun's shadows** add 0.41 to 0.44 ms to a still scene across runs,
+  all of it in the resolve's rays: §10.4's shadow line (0.40 ms), up to
+  10 % over. A scene with motion adds the rebuild on top: 0.79 ms in all,
+  about twice the line.
+- **The production rebuild walks every slot up to the instance pool's
+  high-water mark.** `render_perf` ran its 102,400-instance grid before the
+  field, so the field's top level spans 102,401 slots: 0.317 ms, and
+  0.052 ms for the records. Run alone, the same scene rebuilds its 16,386
+  slots in 0.222 ms. The reference builds over its live instances alone:
+  0.311 ms for 16,385, from records in host memory.
 - **Before the anchor**, the top level was camera relative and rebuilt
   every frame. The still day field took 2.839 ms then (rebuild 0.319 ms),
-  against 2.352 ms now.
+  against 2.36 ms now.
 - **The resolve with ray queries** compiles to 72 registers and 6.9 KB of
   shared memory per workgroup (the driver's traversal stack), against 64
   registers and 0.8 KB without. That is the reason for the variant.
 - **The 1,024 lamps' shadows** (every lit point tracing a ray to each of
-  the roughly fifteen lamps that reach it) add 1.37 ms. Ray-traced shadows
+  the roughly fifteen lamps that reach it) add 1.35 ms. Ray-traced shadows
   for many local lights do not fit the budget as they are.
 - **Memory** for `render_perf`'s 119,041 instance slots: a 20.7 MB top
   level, 7.6 MB of records (and, for the reference, 7.6 MB more in each
@@ -166,6 +177,7 @@ by the production path), unless stated otherwise.
 - Open: the shadow terminator on coarse meshes, where the interpolated
   normal faces a light that the triangle's plane does not (Hanika,
   "Hacking the Shadow Terminator", *Ray Tracing Gems II*, 2021);
-  compaction of the bottom levels; a top level over live slots only;
+  compaction of the bottom levels; the production path's top level over
+  live slots only (it builds the inactive tail as well);
   local lights' shadows within budget (cached, or a few lights at a time),
   which is stage 6's next part.

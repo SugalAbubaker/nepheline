@@ -207,22 +207,27 @@ ground truth that stage 6's virtual shadow maps will be tested against.
   format; a float copy of the same values elsewhere). It is built once, in
   the first frame that traces after the mesh's creation
   (`NphRenderFrameStats.shadow_builds`), preferring trace speed.
-- **A top level over every instance slot.** Each record's transform folds
-  in its mesh's dequantisation (`L·diag(scale)`, `L·offset + t`). Hidden
-  and free slots have no structure and a zero mask.
+- **A top level over the instances.** Each record's transform folds in its
+  mesh's dequantisation (`L·diag(scale)`, `L·offset + t`), and its custom
+  index names its slot. The live, shown instances' records come first;
+  hidden and free slots follow as inactive records (no structure, a zero
+  mask) or are left out. Vulkan allows inactive records anywhere, but
+  lavapipe (Mesa 25.2) encodes only as many leaves as are active, counted
+  from the start, and would lose an active record behind an inactive one.
   - **Its space** is the world less an anchor near the camera, so 32-bit
     coordinates hold anywhere. A shader moves a view (camera-relative)
     point into it by adding `NphRenderViewData.tlas_offset`, the camera's
     position less the anchor.
   - **The production path** writes the records on the GPU from its GPU
-    scene (`rt instances`), so its CPU cost does not depend on the
+    scene (`rt instances`: every slot's record inactive, then the active
+    ones appended from the start), so its CPU cost does not depend on the
     instance count. It rebuilds the top level only when its instances
     changed, after a frame that traced nothing, or when the camera has
     moved more than 16 m from the anchor, which then moves to the camera.
     A camera moving through a still scene costs no build.
-  - **The reference** writes the records on the CPU into its frame
-    records, as it does its draws, and rebuilds every frame with the
-    anchor at the camera. `shadow_rebuild` in the frame statistics says
+  - **The reference** writes the active records on the CPU into its frame
+    records, as it does its draws, and rebuilds every frame over them, with
+    the anchor at the camera. `shadow_rebuild` in the frame statistics says
     when either path rebuilt.
 - **One scratch buffer** serves every build. It is sized at creation for
   the top level of `max_instances` and grown at mesh creation when a
@@ -454,8 +459,8 @@ time of `nph_render_frame` and the GPU frame:
 | field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.71 ms | 1.90 ms |
 | field at night, 1,024 lights | 16,385 | 3.63 ms | 0.007 ms | 54.0 ms | 2.23 ms |
 | field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.99 ms |
-| field, the sun casting shadows | 16,385 | 3.38 ms | 0.007 ms | 3.89 ms | 2.35 ms |
-| the same, a sphere moving every frame | 16,386 | | 0.007 ms | | 2.69 ms |
+| field, the sun casting shadows | 16,385 | 3.15 ms | 0.007 ms | 3.36 ms | 2.36 ms |
+| the same, a sphere moving every frame | 16,386 | | 0.007 ms | | 2.71 ms |
 | field at night, 1,024 lights casting shadows | 16,385 | | 0.007 ms | | 3.60 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
@@ -469,11 +474,11 @@ shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
 against 0.25 ms, most of it the first pyramid's read of the visibility
 buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
 1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
-The sun's ray-traced shadows add 0.41 ms to the resolve, just inside the
+The sun's ray-traced shadows add 0.41 to 0.44 ms to the resolve, at the
 shadow line (0.40 ms), and a frame in which an instance moved also
-rebuilds the top level (0.32 ms over 102,401 slots); the lamps' shadows
-add 1.37 ms. ADR-0029 to ADR-0032 record the numbers and what comes
-next.
+rebuilds the top level (0.32 ms over 102,401 slots, 0.22 ms over the
+scene's own 16,386); the lamps' shadows add 1.35 ms. ADR-0029 to ADR-0032
+record the numbers and what comes next.
 
 ### Debug views
 
@@ -631,13 +636,14 @@ path and logs what the GPU culled.
 - Shadows are ray traced, and only where the device has ray queries:
   stage 6's virtual shadow maps (with page caching) and contact shadows
   come next, tested against these. Many shadow-casting local lights do
-  not fit the budget as ray-traced shadows (1.37 ms for 1,024 lamps).
+  not fit the budget as ray-traced shadows (1.35 ms for 1,024 lamps).
 - Shadow rays do not handle the shadow terminator: on a coarse mesh, an
   interpolated normal can face a light that the triangle's plane does not,
   and the triangle's neighbours then shadow it (Hanika, "Hacking the
   Shadow Terminator", *Ray Tracing Gems II*, 2021).
-- The top level spans every instance slot up to the pool's high-water
-  mark, live or not, and its rebuild costs accordingly.
+- The production path's top level spans every instance slot up to the
+  pool's high-water mark, live or not (the inactive ones last), and its
+  rebuild costs accordingly.
 - No MSAA or TAA: TAA is stage 8 (Phase 10); until then the HDR target's
   dither is the same every frame.
 - The reference renderer evaluates every light for every pixel (it is the
