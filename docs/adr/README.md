@@ -38,6 +38,7 @@ supersedes it and both link to each other.
 | [0030](0030-hybrid-raster-and-meshlet-work-lists.md) | The hybrid raster: a compute rasteriser for small triangles, meshlet work lists, and a partial second pyramid | Accepted |
 | [0031](0031-light-grid-and-compact-hdr.md) | Fused tile shading: the light grid, the HDR target in B10G11R11, and one resolve pass | Accepted |
 | [0032](0032-ray-traced-shadows.md) | Ray-traced shadows: the ground truth for every shadow technique, and the production path's first | Accepted |
+| [0033](0033-virtual-shadow-maps.md) | The sun's virtual shadow map: a resolution-matched clipmap of cached pages | Accepted |
 
 ## Template
 

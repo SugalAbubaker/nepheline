@@ -18,9 +18,11 @@ and the meshlet builder.
   and shades on the GPU. Its CPU cost depends on neither the object count
   nor the light count. Its images are tested against the reference's.
 
-Both draw ray-traced shadows for the lights that cast them, where the
-device has ray queries (stage 6's first part, "Shadows" below;
-[ADR-0032](adr/0032-ray-traced-shadows.md)).
+Both draw shadows for the lights that cast them ("Shadows" below): the
+production path's sun from its virtual shadow map
+([ADR-0033](adr/0033-virtual-shadow-maps.md)), every other light with
+shadow rays where the device has ray queries
+([ADR-0032](adr/0032-ray-traced-shadows.md)).
 
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
@@ -170,14 +172,28 @@ view carries a light grid instead ("Lights" below).
 ## Shadows
 
 A light casts shadows when its description says so
-(`NphRenderLightDesc.shadows`), on both pipelines, wherever the renderer
-has ray tracing: the device has `VK_KHR_ray_query` (the RTX 3060 Ti, and
-lavapipe in CI) and `NphRendererDesc.disable_ray_tracing` is clear
-(`nph_renderer_ray_tracing_supported`). Elsewhere such lights draw
-unshadowed, logged once. [ADR-0032](adr/0032-ray-traced-shadows.md)
-records the decision and the measurements.
+(`NphRenderLightDesc.shadows`). Two techniques draw them:
 
-**Shadow rays.** Where a shadow-casting light reaches a shaded point
+- **The production path's sun**, the live directional light that casts
+  shadows in the lowest light slot, is shadowed by its **virtual shadow
+  map** (below; [ADR-0033](adr/0033-virtual-shadow-maps.md)) wherever the
+  renderer has one: the device has depth clamping, clip distances, and
+  bilinear depth comparison on D32, and `NphRendererDesc.
+  disable_virtual_shadows` is clear (`nph_renderer_virtual_shadows_supported`).
+  A view with `NPH_RENDER_VIS_RT_SHADOWS` (the runtime's
+  `r.virtual_shadows` cvar off) traces the sun's rays instead.
+- **Every other shadow-casting light**, and every light of the reference
+  renderer (the ground truth), traces **shadow rays**, wherever the
+  renderer has ray tracing: the device has `VK_KHR_ray_query` (the RTX
+  3060 Ti, and lavapipe in CI) and `NphRendererDesc.disable_ray_tracing`
+  is clear (`nph_renderer_ray_tracing_supported`). Elsewhere such lights
+  draw unshadowed, logged once.
+  [ADR-0032](adr/0032-ray-traced-shadows.md) records the decision and the
+  measurements.
+
+### Shadow rays
+
+Where a shadow-casting light reaches a shaded point
 (inside its range and cone, and facing it), the point traces one ray
 toward it:
 
@@ -195,9 +211,10 @@ toward it:
 so the reference's forward pass and the production path's resolve and
 blended surfaces trace the very same rays. Each has a variant compiled
 with ray queries (`forward_*_rt.frag`, `vis_resolve_rt.comp`). A frame
-takes those variants only while a light casts shadows; the resolve's
-compiles to 72 registers against 64. The reference's shadows are the
-ground truth that stage 6's virtual shadow maps will be tested against.
+takes those variants only while a light casts shadows that the sun's map
+does not take; the resolve's compiles to 72 registers against 64. The
+reference's shadows are the ground truth the virtual shadow map is tested
+against.
 
 **Acceleration structures** (`engine/render/src/rt.c`, over
 `gpu/accel.h`):
@@ -239,6 +256,95 @@ ground truth that stage 6's virtual shadow maps will be tested against.
 The top level for 119,041 slots (`render_perf`) takes 20.7 MB, its records
 7.6 MB (and, for the reference, 7.6 MB more in each frame's upload
 buffer), and the scratch 9.8 MB. The bottom levels are not compacted.
+
+### The sun's virtual shadow map
+
+(`engine/render/src/vsm.c`, `shaders/render/vsm_*`, the records in
+`shaders/shared/nph_vsm.h`; Fernando et al., "Adaptive Shadow Maps",
+SIGGRAPH 2001; Lefohn, Sengupta & Owens, "Resolution-Matched Shadow Maps",
+ACM TOG 2007; Epic Games, "Virtual Shadow Maps", 2022.) A shadow map of
+the sun whose resolution matches the pixels that read it, held only in
+the pages some pixel needs, and kept drawn from frame to frame until
+something it shows changes.
+
+**Layout.**
+
+- **Light space**: axes u and v across the light, d along it, with its
+  origin at an anchor within 2 km of the camera (which moves to the camera,
+  dropping every page, when the camera leaves that radius), so 32-bit
+  coordinates hold anywhere.
+- **A clipmap of 16 levels** around the camera. Level 0's window is 4 m
+  across and each level's twice the one before (131 km for the sixteenth);
+  a window is 128 × 128 **pages** of 128 × 128 depth texels, so a level-0
+  texel is 0.24 mm. A level's frame is fixed to its own page grid and
+  depth reference (placed in double precision on the CPU), so a page's
+  contents stay valid while the camera moves; a level whose depth
+  reference moves (a quarter of its range) is dropped.
+- **Page tables**, one per level, toroidal: entry (x mod 128, y mod 128)
+  holds absolute page (x, y), so a page keeps its entry while the window
+  scrolls over it.
+- **The pool**: the pages that hold depth, in one D32 image of 64 pages a
+  row (`vsm_pages`, 2,048 by default: 134 MB).
+
+**A frame** (the production path, while it has a sun):
+
+| Pass | What it does |
+|---|---|
+| `vsm clear` | the frame's counters and page bitmasks to zero |
+| `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in every level (an invocation per update and level), a row of words at a time |
+| `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (`light_from_clip`), and the pages its shading may read set in the requests bitmask |
+| `vis depth`, `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the opaque depth, then the blended draws against it, each fragment in front setting its pages (`vsm_request.frag`) |
+| `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
+| `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
+| `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
+| `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
+| `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
+| `vsm statistics` | the counters, read back two frames later |
+
+**Requests.** A pixel asks for the level whose texels match its footprint
+(the texel at most twice the footprint) or, where that level's window
+does not hold its point with a margin, the next that does (a narrow view
+from afar), and there the page that holds the point and any other within
+2 texels of it (the shading's offset along the normal, and slack): at
+most 2 × 2 pages. Mostly every pixel of a subgroup needs the same page,
+which one invocation sets; otherwise, round after round, the lowest page
+any invocation still needs is set by one of those that need it.
+
+**Caching.** A drawn page stays drawn. A caster's change dirties exactly
+the pages under its bounding sphere, old and new, since a shadow map's
+texel holds the nearest caster along the light; a dirty page is drawn
+again (with every caster in it) when next requested. The sun turning, the
+anchor moving, or a production frame without the map drops every page.
+
+**Shading.** The resolve and the blended surfaces look the sun's
+visibility up once per point, before the light loop (inside it, the
+lookup's registers would add to the loop's): the resolution-matched level,
+biased by 0.001 octaves to the finer side, so that it reads the level the
+request took or the one finer and passes to the next; up to three levels
+whose windows hold the point, until one holds its page (lit past those).
+The point moves off its surface along its geometric normal, turned to the
+light, by 1.5 of the level's texels (normal-offset shadows; Holbert, GDC
+2011), and one comparison sample with bilinear filtering gives 2 × 2
+percentage-closer filtering, kept half a texel inside the page. Only an
+entry's state word is read: `vsm update` has dropped every entry whose
+page the window left. `surface.glsl` holds the call (`NPH_SURFACE_VSM`);
+the resolve and the blended surfaces have pipeline variants specialised
+on whether the frame has the map, so frames without it keep the registers.
+
+**Overflow.** What does not fit the pool, `max_vsm_meshlets`, or
+`max_vsm_draws` is dropped, flagged in `NphRenderFrameStats.vsm_overflow`,
+and logged once: pixels whose pages did not fit are lit, a page whose
+draws did not all fit is drawn again the next frame. Each overflow at the
+current **resolution bias** raises it (each step halves every level's
+resolution, up to 3), so the pages fit within a few frames; 120 frames in
+a row whose pages would fit a step finer within three quarters of the
+pool lower it again (`vsm_lod_bias`).
+
+In the 4K field the map holds 946 pages (62 MB) and adds 0.38 ms to a
+still frame: the requests 0.076 ms of the first pyramid's pass, the
+lookup 0.27 ms of the resolve, its own passes 0.05 ms. A sphere moving
+every frame redraws 20 pages and adds 0.43 ms; the sun's rays add
+0.42 ms still and 0.79 ms with motion (ADR-0033).
 
 ## The production path
 
@@ -301,13 +407,16 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
 | `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
-| `vis hzb 0` | the depth pyramid of what phase 0 drew |
+| `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
+| `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
-| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew |
-| `rt instances`, `rt accel` | while a light casts shadows: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
-| `vis resolve` | shades every pixel from its cluster and triangle (with shadow rays while a light casts shadows) |
+| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests there) |
+| `vis depth`, `vsm requests (blended)` | with the map and blended surfaces: the opaque depth, then the blended surfaces' page requests |
+| `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
+| `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
+| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows) |
 | `vis statistics` | copies the counters for the frame's statistics |
-| `vis depth`, `transparent` | the depth the visibility buffer holds, then the blended surfaces, forward |
+| `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
 | `tonemap` | as the reference's |
 
 `vis args …` passes between them turn counts into indirect arguments,
@@ -437,7 +546,12 @@ meshlet work items), `max_deferred` (262,144: deferred instances, and
 phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
 (2^24, indirect path only); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
-`NphRenderFrameStats.vis_overflow`, logged once. The frame statistics
+`NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
+`vsm_pages` (2,048), `max_vsm_meshlets` (2^20), and `max_vsm_draws`
+(2^20), whose overflow (`vsm_overflow`) raises its resolution bias
+("Shadows"); its statistics are `vsm` and `vsm_lod_bias` (this frame) and
+the pages requested, drawn, held, and evicted, and the caster draws, read
+back as the others. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
 software, instances and meshlets culled by each test, lights in view),
 read back from the frame that completed
@@ -453,15 +567,17 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.005 ms | 0.05 ms | 0.17 ms |
-| grid, 512 × 512 | 10,240 | 1.26 ms | 0.005 ms | 0.17 ms | 0.22 ms |
-| grid, 512 × 512 | 102,400 | 13.3 ms | 0.006 ms | 3.6 ms | 0.64 ms |
-| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.71 ms | 1.90 ms |
-| field at night, 1,024 lights | 16,385 | 3.63 ms | 0.007 ms | 54.0 ms | 2.23 ms |
-| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.99 ms |
-| field, the sun casting shadows | 16,385 | 3.15 ms | 0.007 ms | 3.36 ms | 2.36 ms |
-| the same, a sphere moving every frame | 16,386 | | 0.007 ms | | 2.71 ms |
-| field at night, 1,024 lights casting shadows | 16,385 | | 0.007 ms | | 3.60 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.17 ms |
+| grid, 512 × 512 | 10,240 | 1.26 ms | 0.006 ms | 0.17 ms | 0.22 ms |
+| grid, 512 × 512 | 102,400 | 13.1 ms | 0.006 ms | 3.7 ms | 0.59 ms |
+| field, 3840 × 2160 | 16,385 | 2.94 ms | 0.007 ms | 2.69 ms | 1.90 ms |
+| field at night, 1,024 lights | 16,385 | 3.62 ms | 0.007 ms | 54.1 ms | 2.17 ms |
+| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.84 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.14 ms | 0.008 ms | 3.32 ms | 2.28 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.007 ms | | 2.32 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 2.33 ms |
+| the map, the camera walking | 16,385 | | 0.009 ms | | 2.32 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 3.56 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
@@ -474,11 +590,12 @@ shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
 against 0.25 ms, most of it the first pyramid's read of the visibility
 buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
 1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
-The sun's ray-traced shadows add 0.41 to 0.44 ms to the resolve, at the
-shadow line (0.40 ms), and a frame in which an instance moved also
-rebuilds the top level (0.32 ms over 102,401 slots, 0.22 ms over the
-scene's own 16,386); the lamps' shadows add 1.35 ms. ADR-0029 to ADR-0032
-record the numbers and what comes next.
+The sun's virtual shadow map adds 0.38 ms to a still frame and 0.43 ms
+when a sphere moves, around the shadow line (0.40 ms); its rays add
+0.42 ms still, and a frame in which an instance moved also rebuilds the
+top level (0.32 ms over 102,401 slots, 0.22 ms over the scene's own
+16,386: 0.79 ms in all). The lamps' shadows (rays) add 1.35 ms. ADR-0029
+to ADR-0033 record the numbers and what comes next.
 
 ### Debug views
 
@@ -566,7 +683,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (78 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (91 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -607,6 +724,18 @@ synchronisation-validation gate:
   there) and rebuilt when it must be; rays traced only while a light casts
   shadows; and a renderer without ray tracing drawing such lights
   unshadowed.
+- **The sun's virtual shadow map** (`test_vsm.c`), held to the same
+  classification with a margin of its texels: the sun behind a cube; a
+  blended floor with nothing opaque under it, shadowed by a cube out of
+  view (its pages come from the blended surfaces' own requests); a narrow
+  view from 20 km, beyond the window of the level matching its pixels;
+  the sun passing between directional lights as they come, change, and
+  go; pages drawn once and then kept; a moving caster redrawing its own
+  pages, and a far one none; a camera move reusing the pages it had; the
+  sun turning redrawing everything; a full pool coarsening the levels
+  until they fit, and the bias falling once there is room; agreement with
+  the rays it replaces (98 % of pixels within two levels); and the scene
+  10,000 km from the origin.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -633,10 +762,16 @@ path and logs what the GPU culled.
 
 ## Limitations (future work)
 
-- Shadows are ray traced, and only where the device has ray queries:
-  stage 6's virtual shadow maps (with page caching) and contact shadows
-  come next, tested against these. Many shadow-casting local lights do
-  not fit the budget as ray-traced shadows (1.35 ms for 1,024 lamps).
+- Only the production path's sun has a virtual shadow map; other lights'
+  shadows are ray traced, and only where the device has ray queries. Many
+  shadow-casting local lights do not fit the budget as rays (1.35 ms for
+  1,024 lamps): their shadows are stage 6's next part. Screen-space
+  contact shadows are deferred (ADR-0033).
+- The sun's map: a moving caster redraws its pages with every caster in
+  them (static and dynamic pages are not kept apart); filtering is clamped
+  half a texel inside a page at its edges; a level's texels double at its
+  distance boundary, with no blend between levels; and its lookup costs
+  the resolve 0.27 ms, most of it registers.
 - Shadow rays do not handle the shadow terminator: on a coarse mesh, an
   interpolated normal can face a light that the triangle's plane does not,
   and the triangle's neighbours then shadow it (Hanika, "Hacking the
