@@ -18,6 +18,10 @@ and the meshlet builder.
   and shades on the GPU. Its CPU cost depends on neither the object count
   nor the light count. Its images are tested against the reference's.
 
+Both draw ray-traced shadows for the lights that cast them, where the
+device has ray queries (stage 6's first part, "Shadows" below;
+[ADR-0032](adr/0032-ray-traced-shadows.md)).
+
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
 
@@ -63,10 +67,10 @@ detected and refused rather than dereferenced.
 | Resource | Lives | Notes |
 |---|---|---|
 | texture | GPU, immutable | levels uploaded at creation through the staging ring; any sampled format, BC included; 2D or cube |
-| mesh | GPU, immutable | the cooked streams as they are: unorm16 positions in the bounds, octahedral normals, snorm8 tangents, half UVs, RGBA8 colours; up to 256 submeshes |
+| mesh | GPU, immutable | the cooked streams as they are: unorm16 positions in the bounds, octahedral normals, snorm8 tangents, half UVs, RGBA8 colours; up to 256 submeshes; with ray tracing, a bottom-level acceleration structure over the positions |
 | material | CPU record | metallic-roughness glTF material with five texture bindings, each with its own wrap and filter |
 | instance | CPU record | a mesh, a material per material slot, a 64-bit transform, hidden flag |
-| light | CPU record | directional, point, or spot |
+| light | CPU record | directional, point, or spot; casts shadows or not |
 
 Materials, instances, and lights are copied into per-frame upload buffers
 (one per frame in flight) when a frame is declared. Editing them therefore
@@ -103,7 +107,8 @@ then add its own passes (a UI, a capture, the present), compile, and execute.
 |---|---|---|---|
 | `brdf lut` | compute, first frame only | | DFG table |
 | `ibl source`, `ibl downsample` ×n, `ibl sh`, `ibl prefilter` ×m | compute, when the environment changed | environment levels | environment chain, SH, prefiltered levels |
-| `forward` | graphics | lighting tables, SH | pre-exposed RGBA16F colour, D32 depth |
+| `rt accel` | compute, when a light casts shadows | the instance records | new meshes' bottom levels, the top level ("Shadows") |
+| `forward` | graphics | lighting tables, SH, the top level when it traces | pre-exposed RGBA16F colour, D32 depth |
 | `tonemap` | graphics | HDR colour (sampled), depth (read-only attachment) | the caller's target |
 
 The forward pass draws, in order: the opaque and masked draws, the sky
@@ -161,6 +166,74 @@ the punctual lights, so that only the point's description and one sum
 stay live across the light loop, where the resolve's registers peak. The
 reference lights every pixel with every light; the production path's
 view carries a light grid instead ("Lights" below).
+
+## Shadows
+
+A light casts shadows when its description says so
+(`NphRenderLightDesc.shadows`), on both pipelines, wherever the renderer
+has ray tracing: the device has `VK_KHR_ray_query` (the RTX 3060 Ti, and
+lavapipe in CI) and `NphRendererDesc.disable_ray_tracing` is clear
+(`nph_renderer_ray_tracing_supported`). Elsewhere such lights draw
+unshadowed, logged once. [ADR-0032](adr/0032-ray-traced-shadows.md)
+records the decision and the measurements.
+
+**Shadow rays.** Where a shadow-casting light reaches a shaded point
+(inside its range and cone, and facing it), the point traces one ray
+toward it:
+
+- A directional light's ray is unbounded; a point or spot light's ends at
+  the light, so what lies beyond the light casts nothing.
+- The first hit ends the query, and every triangle is opaque. A point is
+  either lit or not, so the shadows are hard: punctual lights have no area.
+- The ray leaves from the side of the triangle's geometric normal that
+  faces the light. Its origin is pushed off the surface by 256 units in the
+  last place of each coordinate (Wächter & Binder, *Ray Tracing Gems*,
+  2019, chapter 6), so it never meets the triangle it starts on at any
+  distance.
+
+`surface.glsl` calls the test (`NPH_SURFACE_SHADOW`) from its light loop,
+so the reference's forward pass and the production path's resolve and
+blended surfaces trace the very same rays. Each has a variant compiled
+with ray queries (`forward_*_rt.frag`, `vis_resolve_rt.comp`). A frame
+takes those variants only while a light casts shadows; the resolve's
+compiles to 72 registers against 64. The reference's shadows are the
+ground truth that stage 6's virtual shadow maps will be tested against.
+
+**Acceleration structures** (`engine/render/src/rt.c`, over
+`gpu/accel.h`):
+
+- **A bottom level per mesh**, over its quantised positions as the cooked
+  stream stores them (R16G16B16A16_UNORM, where the device builds from that
+  format; a float copy of the same values elsewhere). It is built once, in
+  the first frame that traces after the mesh's creation
+  (`NphRenderFrameStats.shadow_builds`), preferring trace speed.
+- **A top level over every instance slot.** Each record's transform folds
+  in its mesh's dequantisation (`L·diag(scale)`, `L·offset + t`). Hidden
+  and free slots have no structure and a zero mask.
+  - **Its space** is the world less an anchor near the camera, so 32-bit
+    coordinates hold anywhere. A shader moves a view (camera-relative)
+    point into it by adding `NphRenderViewData.tlas_offset`, the camera's
+    position less the anchor.
+  - **The production path** writes the records on the GPU from its GPU
+    scene (`rt instances`), so its CPU cost does not depend on the
+    instance count. It rebuilds the top level only when its instances
+    changed, after a frame that traced nothing, or when the camera has
+    moved more than 16 m from the anchor, which then moves to the camera.
+    A camera moving through a still scene costs no build.
+  - **The reference** writes the records on the CPU into its frame
+    records, as it does its draws, and rebuilds every frame with the
+    anchor at the camera. `shadow_rebuild` in the frame statistics says
+    when either path rebuilt.
+- **One scratch buffer** serves every build. It is sized at creation for
+  the top level of `max_instances` and grown at mesh creation when a
+  bottom level needs more, so a frame never allocates. A frame's
+  bottom-level builds fill it in batches with a barrier between them; the
+  top level's build follows in the same pass (`rt accel`), after a barrier
+  that also makes the bottom levels visible to the shaders that trace.
+
+The top level for 119,041 slots (`render_perf`) takes 20.7 MB, its records
+7.6 MB (and, for the reference, 7.6 MB more in each frame's upload
+buffer), and the scratch 9.8 MB. The bottom levels are not compacted.
 
 ## The production path
 
@@ -226,7 +299,8 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis hzb 0` | the depth pyramid of what phase 0 drew |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
 | `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew |
-| `vis resolve` | shades every pixel from its cluster and triangle |
+| `rt instances`, `rt accel` | while a light casts shadows: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
+| `vis resolve` | shades every pixel from its cluster and triangle (with shadow rays while a light casts shadows) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds, then the blended surfaces, forward |
 | `tonemap` | as the reference's |
@@ -380,6 +454,9 @@ time of `nph_render_frame` and the GPU frame:
 | field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.71 ms | 1.90 ms |
 | field at night, 1,024 lights | 16,385 | 3.63 ms | 0.007 ms | 54.0 ms | 2.23 ms |
 | field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.99 ms |
+| field, the sun casting shadows | 16,385 | 3.38 ms | 0.007 ms | 3.89 ms | 2.35 ms |
+| the same, a sphere moving every frame | 16,386 | | 0.007 ms | | 2.69 ms |
+| field at night, 1,024 lights casting shadows | 16,385 | | 0.007 ms | | 3.60 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
@@ -392,7 +469,10 @@ shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
 against 0.25 ms, most of it the first pyramid's read of the visibility
 buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
 1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
-ADR-0029, ADR-0030, and ADR-0031 record the numbers and what comes
+The sun's ray-traced shadows add 0.41 ms to the resolve, just inside the
+shadow line (0.40 ms), and a frame in which an instance moved also
+rebuilds the top level (0.32 ms over 102,401 slots); the lamps' shadows
+add 1.37 ms. ADR-0029 to ADR-0032 record the numbers and what comes
 next.
 
 ### Debug views
@@ -481,7 +561,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (72 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (78 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -510,13 +590,25 @@ synchronisation-validation gate:
   read back (every light in every tile and bin its sphere reaches, none
   more than a tile beyond); 300 lights giving the image of every light
   everywhere, and lights moving, changing, and going between frames.
+- **Shadows** (`test_shadows.c`), on both pipelines: every pixel is
+  classified from the scene's geometry (rays through the corners of its
+  footprint, grown by half a pixel, against the floor, the occluder's box,
+  and the light), and away from the shadow's edges the shadowed floor is
+  black and everything else is as it was without shadows. A cube under the
+  sun; a point light's ray that stops at the light (an occluder above the
+  light casts nothing); the structures following instances that move,
+  hide, and go, and meshes created later; the production path's top level
+  kept while the camera moves within 16 m (and the shadows right from
+  there) and rebuilt when it must be; rays traced only while a light casts
+  shadows; and a renderer without ray tracing drawing such lights
+  unshadowed.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
 were silently dropped.
 
 The whole-image tests are in `tests/golden` ([docs/golden.md](golden.md),
-Phase 7's exit criterion). Eight scenes are compared with lavapipe
+Phase 7's exit criterion). Nine scenes are compared with lavapipe
 baselines by our own LDR-FLIP, with thresholds calibrated against the
 RTX 3060 Ti. `render_bench` times the primitives and the golden
 comparisons.
@@ -536,7 +628,16 @@ path and logs what the GPU culled.
 
 ## Limitations (future work)
 
-- No shadows: virtual shadow maps are §8.6 stage 6 (Phase 10).
+- Shadows are ray traced, and only where the device has ray queries:
+  stage 6's virtual shadow maps (with page caching) and contact shadows
+  come next, tested against these. Many shadow-casting local lights do
+  not fit the budget as ray-traced shadows (1.37 ms for 1,024 lamps).
+- Shadow rays do not handle the shadow terminator: on a coarse mesh, an
+  interpolated normal can face a light that the triangle's plane does not,
+  and the triangle's neighbours then shadow it (Hanika, "Hacking the
+  Shadow Terminator", *Ray Tracing Gems II*, 2021).
+- The top level spans every instance slot up to the pool's high-water
+  mark, live or not, and its rebuild costs accordingly.
 - No MSAA or TAA: TAA is stage 8 (Phase 10); until then the HDR target's
   dither is the same every frame.
 - The reference renderer evaluates every light for every pixel (it is the

@@ -8,7 +8,7 @@ tests pass for the PBR test scenes"). Decisions are recorded in
 
 ## What runs
 
-`golden_tests` (CTest label `golden`) renders eight scenes with the
+`golden_tests` (CTest label `golden`) renders nine scenes with the
 reference renderer (docs/render.md). Each is 256 × 256, on a headless
 device, into an `R8G8B8A8_SRGB` target. It reads each image back, writes
 it to `build/<preset>/golden/<Config>/<name>.png`, and compares it with
@@ -24,6 +24,7 @@ it to `build/<preset>/golden/<Config>/<name>.png`, and compares it with
 | `debug_draw` | every debug-draw shape, depth-tested and overlay |
 | `cooked_scene` | `pbr_viewer`'s scene through the cooker, loader, and bridge: every material feature, AgX |
 | `cooked_scene_normals` | the same scene's shading normals: normal maps, mirroring, two-channel maps |
+| `shadows` | ray-traced shadows of a sun, a point, and a spot light (docs/render.md "Shadows"): their shapes and overlaps, a floating occluder, the dimmed sky's light left in them; skipped without ray queries |
 
 A test passes when **mean FLIP ≤ 0.03** and **99th-percentile FLIP ≤
 0.15** (see "Calibration"). The test always writes the render. When a baseline exists, it also
