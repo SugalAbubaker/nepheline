@@ -45,7 +45,8 @@
 //                         per lit pixel. The reference rebuilds the top
 //                         level over every instance each frame; the
 //                         production path keeps it while nothing moves.
-//   shadows_4k_moving     shadows_4k_production with one sphere moving
+//   shadows_moving_4k_production
+//                         shadows_4k_production with one sphere moving
 //                         every frame: the production path rebuilds the
 //                         top level each frame, as in a scene with any
 //                         motion.
@@ -137,8 +138,8 @@ static const SceneDef g_scenes[] = {
      0U, SHADOWS_SUN},
     {"shadows_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_SUN},
-    {"shadows_4k_moving", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
-     SHADOWS_SUN_MOVING},
+    {"shadows_moving_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_SUN_MOVING},
     {"lights_1k_shadows", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_ALL},
 };
