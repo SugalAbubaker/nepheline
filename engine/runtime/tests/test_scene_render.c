@@ -325,8 +325,24 @@ NTEST(SceneRender, entities_become_instances_and_lights)
     fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_ASSERT_EQ_UINT(fs.culled, 0U);
 
-    // Removing the Light removes the render light.
+    // A Light that casts shadows: the frame traces shadow rays where the
+    // renderer can.
     const NphEntity sun = named(&fx, "sun");
+    NphLight *sun_light = (NphLight *)nph_world_get_mut(fx.world, sun, fx.ids.light);
+    NTEST_ASSERT_NOT_NULL(sun_light);
+    NTEST_ASSERT_FALSE(sun_light->shadows);
+    sun_light->shadows = 1;
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_ASSERT_EQ_INT(fs.shadow_rays ? 1 : 0,
+                        nph_renderer_ray_tracing_supported(fx.rf.renderer) ? 1 : 0);
+    sun_light = (NphLight *)nph_world_get_mut(fx.world, sun, fx.ids.light);
+    sun_light->shadows = 0;
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_ASSERT_FALSE(fs.shadow_rays);
+
+    // Removing the Light removes the render light.
     NTEST_ASSERT_EQ_INT(nph_world_remove(fx.world, sun, fx.ids.light), NPH_RESULT_OK);
     st = sync(&fx);
     NTEST_ASSERT_EQ_UINT(st.lights, 0U);

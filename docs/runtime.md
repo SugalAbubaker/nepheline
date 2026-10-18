@@ -218,7 +218,9 @@ Once per frame at the sync point it mirrors:
 - entities with a MeshRenderer and a WorldTransform as render instances,
   once their mesh and materials have loaded;
 - entities with a Light and a WorldTransform as render lights, pointing
-  down their -Z axis;
+  down their -Z axis, casting ray-traced shadows when the Light's
+  `shadows` is set (docs/render.md "Shadows"; off by default, also in
+  text scenes that predate the field);
 - the first Environment as the sky, or the component's defaults (a clear
   day) when the world has none, applied only when the result differs from
   the sky applied last;

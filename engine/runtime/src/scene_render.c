@@ -570,6 +570,7 @@ static void light_desc(const NphLight *l, const NphWorldTransform *wt, NphRender
     const f32 outer = nph_f32_clamp(l->outer_cone, 1e-3F, half_pi);
     d->outer_cone = outer;
     d->inner_cone = nph_f32_clamp(l->inner_cone, 0.0F, outer * 0.999F);
+    d->shadows = l->shadows != 0 ? 1 : 0;
 }
 
 static NphResult mirror_light(NphSceneRenderer *sr, EntityRecord *r, const NphLight *l,
