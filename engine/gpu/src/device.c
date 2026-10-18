@@ -1080,6 +1080,10 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         // on the CI's lavapipe (Mesa 25.2.8); no fixed release is known, so
         // every version is assumed to have it.
         info->quirks |= (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS;
+        // Found by the renderer's virtual-shadow-map tests and pinned by
+        // gpu_tests' an_indirect_draw_after_a_count_draw_draws (Mesa 25.2.8:
+        // lvp_execute.c's handle_draw_indirect keeps indirect_draw_count).
+        info->quirks |= (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT;
     }
     info->device_local_bytes = device_local_bytes(&c->memory);
     info->host_visible_bytes = host_visible_bytes(&c->memory);
@@ -1533,6 +1537,9 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
         r = gpu_upload_init(dev);
     }
     if (r == NPH_RESULT_OK) {
+        r = gpu_indirect_counts_init(dev);
+    }
+    if (r == NPH_RESULT_OK) {
         r = gpu_pipeline_cache_init(dev);
     }
     if (r != NPH_RESULT_OK) {
@@ -1577,9 +1584,12 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
             info->limits.max_mesh_workgroup_count[2], info->limits.max_mesh_workgroup_total_count);
     }
     if (info->quirks != 0U) {
-        GPU_LOG_INFO("driver quirks worked around: 0x%x%s", info->quirks,
+        GPU_LOG_INFO("driver quirks worked around: 0x%x%s%s", info->quirks,
                      (info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U
                          ? " (mesh pipelines' fragment shaders read no push constants)"
+                         : "",
+                     (info->quirks & (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT) != 0U
+                         ? " (indirect draws read a stale count: drawn with counts)"
                          : "");
     }
     *out = dev;
@@ -1635,6 +1645,10 @@ static void destroy_partial(NphGpuDevice *dev)
         (void)vkDeviceWaitIdle(dev->device);
         gpu_pipeline_cache_shutdown(dev);
         gpu_upload_shutdown(dev);
+        if (!nph_gpu_buffer_is_null(dev->indirect_counts)) {
+            nph_gpu_buffer_destroy(dev, dev->indirect_counts);
+            dev->indirect_counts = NPH_GPU_BUFFER_NULL;
+        }
         for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
             gpu_run_deferred(dev, i);
         }
@@ -1752,6 +1766,9 @@ NphGpuLiveCounts nph_gpu_device_live_counts(const NphGpuDevice *dev)
     c.buffers = gpu_pool_live(&dev->buffers);
     // The staging ring is the device's own buffer.
     if (c.buffers != 0U && !nph_gpu_buffer_is_null(dev->upload.staging)) {
+        c.buffers -= 1U;
+    }
+    if (c.buffers != 0U && !nph_gpu_buffer_is_null(dev->indirect_counts)) {
         c.buffers -= 1U;
     }
     c.images = gpu_pool_live(&dev->images);

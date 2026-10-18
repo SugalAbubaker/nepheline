@@ -343,6 +343,10 @@ struct NphGpuDevice {
     NphGpuCmd *cmds;
 
     NphGpuUploadState upload;
+    // NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT: u32[GPU_INDIRECT_COUNTS],
+    // entry i holding i, from which the plain indirect draws read their
+    // counts (commands.c). Null on other drivers.
+    NphGpuBuffer indirect_counts;
 
     NphAtomicU64 val_errors;
     NphAtomicU64 val_warnings;
@@ -476,6 +480,9 @@ bool gpu_swapchain_submit_semaphores(NphGpuSwapchain *swapchain, u32 ops, VkSema
 
 // Uploads
 NphResult gpu_upload_init(NphGpuDevice *dev);
+// commands.c: the count table of NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT,
+// created where the device has the quirk (NphGpuDevice.indirect_counts).
+NphResult gpu_indirect_counts_init(NphGpuDevice *dev);
 void gpu_upload_shutdown(NphGpuDevice *dev);
 // Called by frame_begin when `slot` has completed: releases its staging.
 void gpu_upload_release_slot(NphGpuDevice *dev, u32 slot);

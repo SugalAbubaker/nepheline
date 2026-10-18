@@ -434,6 +434,146 @@ NTEST_F(GpuFixture, mesh_shaders_draw_directly_indirectly_and_with_a_count)
     nph_gpu_shader_destroy(f->dev, frag);
 }
 
+// The columns (bit c of eight) lit in a 64 x 64 target after one command
+// buffer of draws with test_column.vert and test_green.frag, which `record`
+// records between the start and the end of rendering.
+typedef void (*ColumnDraws)(NphGpuCmd *cmd, const void *user);
+
+static u32 draw_columns(NphGpuDevice *dev, NphGpuPipeline pipeline, ColumnDraws record,
+                        const void *user)
+{
+    NphGpuImage target = test_make_image_2d(dev, 64U, 64U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                                            (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
+                                                (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC,
+                                            "column target");
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "column draws", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_image_barrier(cmd, target, (u32)NPH_GPU_STAGE_NONE, (u32)NPH_GPU_ACCESS_NONE,
+                              NPH_GPU_LAYOUT_UNDEFINED, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT);
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.colors[0].image = target;
+    rd.colors[0].load = NPH_GPU_LOAD_OP_CLEAR;
+    rd.colors[0].store = NPH_GPU_STORE_OP_STORE;
+    rd.colors[0].clear = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 1.0F);
+    rd.color_count = 1U;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    record(cmd, user);
+    nph_gpu_cmd_end_rendering(cmd);
+    nph_gpu_cmd_image_barrier(cmd, target, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT,
+                              (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_READ,
+                              NPH_GPU_LAYOUT_TRANSFER_SRC);
+    test_submit_wait(dev, cmd);
+    static u8 pixels[64U * 64U * 4U];
+    test_read_image(dev, target, 0U, pixels, sizeof pixels);
+    nph_gpu_image_destroy(dev, target);
+    u32 lit = 0U;
+    for (u32 c = 0; c < 8U; ++c) {
+        if (test_pixel_near(&pixels[((u64)32U * 64U + (u64)c * 8U + 4U) * 4U], 0U, 255U, 0U, 255U,
+                            0U)) {
+            lit |= 1U << c;
+        }
+    }
+    return lit;
+}
+
+typedef struct ColumnBuffers {
+    NphGpuBuffer records; // VkDrawIndirectCommand per column, 16 bytes apart
+    NphGpuBuffer indexed; // VkDrawIndexedIndirectCommand per column, 20 bytes apart
+    NphGpuBuffer indices; // u16 0 to 5
+    NphGpuBuffer counts;  // u32: 0, 2
+} ColumnBuffers;
+
+// An indirect-count draw that draws nothing (its count is 0), then plain
+// indirect draws of columns 1 and 2; the same with indices, then column 5.
+static void stale_count_draws(NphGpuCmd *cmd, const void *user)
+{
+    const ColumnBuffers *b = (const ColumnBuffers *)user;
+    nph_gpu_cmd_draw_indirect_count(cmd, b->records, 0U, b->counts, 0U, 8U, 16U);
+    nph_gpu_cmd_draw_indirect(cmd, b->records, 16U, 2U, 16U);
+    nph_gpu_cmd_bind_index_buffer(cmd, b->indices, 0U, NPH_GPU_INDEX_U16);
+    nph_gpu_cmd_draw_indexed_indirect_count(cmd, b->indexed, 0U, b->counts, 0U, 8U, 20U);
+    nph_gpu_cmd_draw_indexed_indirect(cmd, b->indexed, (u64)5U * 20U, 1U, 20U);
+}
+
+// Indirect-count draws whose counts are 2: columns 0 and 1, then 4 and 5.
+static void count_draws(NphGpuCmd *cmd, const void *user)
+{
+    const ColumnBuffers *b = (const ColumnBuffers *)user;
+    nph_gpu_cmd_draw_indirect_count(cmd, b->records, 0U, b->counts, 4U, 8U, 16U);
+    nph_gpu_cmd_bind_index_buffer(cmd, b->indices, 0U, NPH_GPU_INDEX_U16);
+    nph_gpu_cmd_draw_indexed_indirect_count(cmd, b->indexed, (u64)4U * 20U, b->counts, 4U, 4U, 20U);
+}
+
+// Indirect draws with and without a count buffer, in one command buffer:
+// each draws exactly its own records, wherever it comes. A plain indirect
+// draw after a count draw is the case NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT
+// gets wrong on lavapipe without the RHI's count table (it drew nothing).
+NTEST_F(GpuFixture, an_indirect_draw_after_a_count_draw_draws)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuShader vert = test_load_shader(f->dev, "test_column.vert");
+    NphGpuShader frag = test_load_shader(f->dev, "test_green.frag");
+    NphGpuGraphicsPipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.vertex = vert;
+    desc.fragment = frag;
+    desc.color_formats[0] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    desc.color_count = 1U;
+    desc.name = "test columns";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &desc, &pipeline), NPH_RESULT_OK);
+    ColumnBuffers b;
+    b.records = test_make_buffer(f->dev, (u64)8U * 16U, (u32)NPH_GPU_BUFFER_USAGE_INDIRECT,
+                                 NPH_GPU_MEMORY_UPLOAD, "column records");
+    b.indexed = test_make_buffer(f->dev, (u64)8U * 20U, (u32)NPH_GPU_BUFFER_USAGE_INDIRECT,
+                                 NPH_GPU_MEMORY_UPLOAD, "column indexed records");
+    b.indices = test_make_buffer(f->dev, (u64)6U * 2U, (u32)NPH_GPU_BUFFER_USAGE_INDEX,
+                                 NPH_GPU_MEMORY_UPLOAD, "column indices");
+    b.counts = test_make_buffer(f->dev, 8U, (u32)NPH_GPU_BUFFER_USAGE_INDIRECT,
+                                NPH_GPU_MEMORY_UPLOAD, "column counts");
+    u32 *rec = (u32 *)nph_gpu_buffer_map(f->dev, b.records);
+    u32 *ind = (u32 *)nph_gpu_buffer_map(f->dev, b.indexed);
+    for (u32 c = 0; c < 8U; ++c) {
+        // vertexCount, instanceCount, firstVertex, firstInstance (the column).
+        rec[c * 4U + 0U] = 6U;
+        rec[c * 4U + 1U] = 1U;
+        rec[c * 4U + 2U] = 0U;
+        rec[c * 4U + 3U] = c;
+        // indexCount, instanceCount, firstIndex, vertexOffset, firstInstance.
+        ind[c * 5U + 0U] = 6U;
+        ind[c * 5U + 1U] = 1U;
+        ind[c * 5U + 2U] = 0U;
+        ind[c * 5U + 3U] = 0U;
+        ind[c * 5U + 4U] = c;
+    }
+    u16 *idx = (u16 *)nph_gpu_buffer_map(f->dev, b.indices);
+    for (u16 i = 0; i < 6U; ++i) {
+        idx[i] = i;
+    }
+    u32 *counts = (u32 *)nph_gpu_buffer_map(f->dev, b.counts);
+    counts[0] = 0U;
+    counts[1] = 2U;
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(f->dev);
+    NTEST_LOG("%s: quirks 0x%x", info->name, info->quirks);
+    const u32 after_count = draw_columns(f->dev, pipeline, stale_count_draws, &b);
+    const u32 counted = draw_columns(f->dev, pipeline, count_draws, &b);
+    NTEST_LOG("columns: 0x%02x after a count draw, 0x%02x counted", after_count, counted);
+    NTEST_EXPECT_EQ_UINT(after_count, (1U << 1U) | (1U << 2U) | (1U << 5U));
+    NTEST_EXPECT_EQ_UINT(counted, (1U << 0U) | (1U << 1U) | (1U << 4U) | (1U << 5U));
+    nph_gpu_buffer_destroy(f->dev, b.counts);
+    nph_gpu_buffer_destroy(f->dev, b.indices);
+    nph_gpu_buffer_destroy(f->dev, b.indexed);
+    nph_gpu_buffer_destroy(f->dev, b.records);
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, vert);
+    nph_gpu_shader_destroy(f->dev, frag);
+}
+
 // The fragment shader of a mesh pipeline reads the push constants the
 // command buffer pushed. Lavapipe's read zeros (the drawn quad came out
 // (0, 0, 0, 0) on CI); that driver carries the quirk and skips.

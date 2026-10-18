@@ -49,6 +49,16 @@ works around, each found by a test and matched by driver:
 pipelines hand the fragment stage zeros for push constants. Its
 `mesh_pipeline_fragment_shaders_read_push_constants` test skips there,
 naming the quirk, and the renderer takes its indirect raster path.
+`NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT` marks the same driver, whose plain
+indirect draws (`vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`,
+`vkCmdDrawMeshTasksIndirectEXT`) read their draw count from the count
+buffer of the last indirect-count draw of their kind earlier in the
+command buffer (Mesa 25.2.8's `lvp_execute.c` never clears it): the
+virtual shadow map's page clears drew nothing after the visibility
+buffer's raster. There the RHI records them as indirect-count draws whose
+count it reads from a table of its own (`u32[256]`, entry n holding n),
+so callers need do nothing; `an_indirect_draw_after_a_count_draw_draws`
+pins it on every device.
 
 Physical devices are scored (discrete > integrated > virtual > CPU, then
 device-local memory, then optional features) and every candidate is logged
@@ -317,7 +327,7 @@ or a Vulkan device.
 
 ## Testing
 
-`engine/gpu/tests` (84 tests) run on any conforming device and skip
+`engine/gpu/tests` (89 tests) run on any conforming device and skip
 without one: device selection and information, the validation and leak
 gates, timelines and submission, frames and timestamps, deferred
 destruction, buffers, images of every kind, samplers, bindless slot

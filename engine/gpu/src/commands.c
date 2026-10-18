@@ -5,6 +5,43 @@
 
 #define CHECK_RECORDING(cmd) NPH_ASSERT((cmd) != NULL && (cmd)->recording)
 
+// NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT: the plain indirect draws are
+// drawn as indirect-count draws of at most GPU_INDIRECT_COUNTS - 1 records
+// each, the count read from entry n of this table, which holds n.
+#define GPU_INDIRECT_COUNTS 256U
+
+NphResult gpu_indirect_counts_init(NphGpuDevice *dev)
+{
+    dev->indirect_counts = NPH_GPU_BUFFER_NULL;
+    if ((dev->info.quirks & (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT) == 0U) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuBufferDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.size = (u64)GPU_INDIRECT_COUNTS * sizeof(u32);
+    desc.usage = (u32)NPH_GPU_BUFFER_USAGE_INDIRECT;
+    desc.memory = NPH_GPU_MEMORY_UPLOAD;
+    desc.name = "indirect counts";
+    NPH_TRY(nph_gpu_buffer_create(dev, &desc, &dev->indirect_counts));
+    u32 *counts = (u32 *)nph_gpu_buffer_map(dev, dev->indirect_counts);
+    if (counts == NULL) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    for (u32 i = 0; i < GPU_INDIRECT_COUNTS; ++i) {
+        counts[i] = i;
+    }
+    return NPH_RESULT_OK;
+}
+
+// The table, where the device has the quirk; VK_NULL_HANDLE elsewhere.
+static VkBuffer stale_count_table(const NphGpuCmd *cmd)
+{
+    if (nph_gpu_buffer_is_null(cmd->dev->indirect_counts)) {
+        return VK_NULL_HANDLE;
+    }
+    return gpu_buffer(cmd->dev, cmd->dev->indirect_counts)->vk;
+}
+
 // ---------------------------------------------------------------------------
 // Barriers
 // ---------------------------------------------------------------------------
@@ -335,7 +372,19 @@ void nph_gpu_cmd_draw_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset, 
 {
     CHECK_RECORDING(cmd);
     const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
-    vkCmdDrawIndirect(cmd->vk, slot->vk, offset, draw_count, stride);
+    VkBuffer counts = stale_count_table(cmd);
+    if (counts == VK_NULL_HANDLE) {
+        vkCmdDrawIndirect(cmd->vk, slot->vk, offset, draw_count, stride);
+        return;
+    }
+    // A count draw's stride must cover a record even for one draw.
+    stride = nph_max_u32(stride, (u32)sizeof(VkDrawIndirectCommand));
+    while (draw_count != 0U) {
+        const u32 n = nph_min_u32(draw_count, GPU_INDIRECT_COUNTS - 1U);
+        vkCmdDrawIndirectCount(cmd->vk, slot->vk, offset, counts, (u64)n * sizeof(u32), n, stride);
+        offset += (u64)n * stride;
+        draw_count -= n;
+    }
 }
 
 void nph_gpu_cmd_draw_indexed_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
@@ -343,7 +392,30 @@ void nph_gpu_cmd_draw_indexed_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 
 {
     CHECK_RECORDING(cmd);
     const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
-    vkCmdDrawIndexedIndirect(cmd->vk, slot->vk, offset, draw_count, stride);
+    VkBuffer counts = stale_count_table(cmd);
+    if (counts == VK_NULL_HANDLE) {
+        vkCmdDrawIndexedIndirect(cmd->vk, slot->vk, offset, draw_count, stride);
+        return;
+    }
+    stride = nph_max_u32(stride, (u32)sizeof(VkDrawIndexedIndirectCommand));
+    while (draw_count != 0U) {
+        const u32 n = nph_min_u32(draw_count, GPU_INDIRECT_COUNTS - 1U);
+        vkCmdDrawIndexedIndirectCount(cmd->vk, slot->vk, offset, counts, (u64)n * sizeof(u32), n,
+                                      stride);
+        offset += (u64)n * stride;
+        draw_count -= n;
+    }
+}
+
+void nph_gpu_cmd_draw_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                     NphGpuBuffer count_buffer, u64 count_offset,
+                                     u32 max_draw_count, u32 stride)
+{
+    CHECK_RECORDING(cmd);
+    const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
+    const NphGpuBufferSlot *count = gpu_buffer(cmd->dev, count_buffer);
+    vkCmdDrawIndirectCount(cmd->vk, slot->vk, offset, count->vk, count_offset, max_draw_count,
+                           stride);
 }
 
 void nph_gpu_cmd_draw_indexed_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
@@ -377,9 +449,22 @@ void nph_gpu_cmd_draw_mesh_tasks_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u
                                           u32 draw_count, u32 stride)
 {
     CHECK_RECORDING(cmd);
-    if (mesh_tasks_supported(cmd)) {
-        const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
+    if (!mesh_tasks_supported(cmd)) {
+        return;
+    }
+    const NphGpuBufferSlot *slot = gpu_buffer(cmd->dev, buffer);
+    VkBuffer counts = stale_count_table(cmd);
+    if (counts == VK_NULL_HANDLE) {
         vkCmdDrawMeshTasksIndirectEXT(cmd->vk, slot->vk, offset, draw_count, stride);
+        return;
+    }
+    stride = nph_max_u32(stride, (u32)sizeof(VkDrawMeshTasksIndirectCommandEXT));
+    while (draw_count != 0U) {
+        const u32 n = nph_min_u32(draw_count, GPU_INDIRECT_COUNTS - 1U);
+        vkCmdDrawMeshTasksIndirectCountEXT(cmd->vk, slot->vk, offset, counts, (u64)n * sizeof(u32),
+                                           n, stride);
+        offset += (u64)n * stride;
+        draw_count -= n;
     }
 }
 

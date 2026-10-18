@@ -231,6 +231,14 @@ typedef enum NphGpuQuirk {
     // take another path or hand the fragment stage its data as
     // per-primitive outputs.
     NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS = 1U << 0U,
+    // An indirect draw without a count buffer (vkCmdDrawIndirect,
+    // vkCmdDrawIndexedIndirect, vkCmdDrawMeshTasksIndirectEXT) reads its
+    // draw count from the count buffer of the last indirect-count draw of
+    // its kind earlier in the command buffer, if any: lavapipe (Mesa 25.2.8)
+    // never clears that state. The RHI draws them as indirect-count draws
+    // whose count it reads from a table of its own (commands.h), so callers
+    // need do nothing.
+    NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT = 1U << 1U,
 } NphGpuQuirk;
 
 typedef struct NphGpuDeviceInfo {

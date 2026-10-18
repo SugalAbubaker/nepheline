@@ -84,11 +84,17 @@ NTEST(gpu_resources, buffer_pool_is_bounded)
     NphGpuDeviceDesc desc;
     memset(&desc, 0, sizeof desc);
     desc.headless = 1;
-    desc.max_buffers = 4U; // the staging ring takes one
+    desc.max_buffers = 4U;
     NphGpuDevice *dev = test_gpu_create(&desc);
     if (dev == NULL) {
         NTEST_SKIP("no Vulkan device available");
     }
+    // The staging ring takes one, and on a driver with
+    // NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT the count table another.
+    const u32 own =
+        (nph_gpu_device_info(dev)->quirks & (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT) != 0U
+            ? 2U
+            : 1U;
     NphGpuBuffer bufs[4];
     u32 made = 0U;
     for (u32 i = 0; i < 4U; ++i) {
@@ -103,7 +109,7 @@ NTEST(gpu_resources, buffer_pool_is_bounded)
         }
         ++made;
     }
-    NTEST_ASSERT_EQ_UINT(made, 3U);
+    NTEST_ASSERT_EQ_UINT(made, 4U - own);
     for (u32 i = 0; i < made; ++i) {
         nph_gpu_buffer_destroy(dev, bufs[i]);
     }

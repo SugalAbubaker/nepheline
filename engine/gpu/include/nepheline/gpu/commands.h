@@ -163,11 +163,20 @@ void nph_gpu_cmd_draw(NphGpuCmd *cmd, u32 vertex_count, u32 instance_count, u32 
                       u32 first_instance);
 void nph_gpu_cmd_draw_indexed(NphGpuCmd *cmd, u32 index_count, u32 instance_count, u32 first_index,
                               i32 vertex_offset, u32 first_instance);
+// Indirect draws: `draw_count` records, `stride` bytes apart, from
+// `buffer` at `offset`. Where the device has
+// NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT they are recorded as
+// indirect-count draws whose count the RHI reads from a table of its own
+// (the stride is then at least a record's size).
 void nph_gpu_cmd_draw_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset, u32 draw_count,
                                u32 stride);
 void nph_gpu_cmd_draw_indexed_indirect(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
                                        u32 draw_count, u32 stride);
-// The GPU-driven draw of CLAUDE.md §8.6.3: the count comes from a buffer.
+// The GPU-driven draws of CLAUDE.md §8.6.3: the count comes from a buffer
+// (at most `max_draw_count`).
+void nph_gpu_cmd_draw_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
+                                     NphGpuBuffer count_buffer, u64 count_offset,
+                                     u32 max_draw_count, u32 stride);
 void nph_gpu_cmd_draw_indexed_indirect_count(NphGpuCmd *cmd, NphGpuBuffer buffer, u64 offset,
                                              NphGpuBuffer count_buffer, u64 count_offset,
                                              u32 max_draw_count, u32 stride);
