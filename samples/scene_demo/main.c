@@ -17,7 +17,8 @@
 // --headless runs the simulation without a window (and exits 0); otherwise
 // exit status 77 means no window system or Vulkan device (CTest
 // "skipped"), 1 a failure. Keys: Space pauses, P switches the pipeline,
-// the mouse wheel zooms, Escape quits.
+// T switches temporal anti-aliasing (on, as the runtime's r.taa), the mouse
+// wheel zooms, Escape quits.
 
 #include <nepheline/core/json.h>
 #include <nepheline/jobs/jobs.h>
@@ -535,6 +536,10 @@ static void log_systems(const App *app)
                          "resolution bias %u",
                          rs->vsm_requested, rs->vsm_drawn, rs->vsm_resident, rs->vsm_lod_bias);
         }
+        if (rs->taa) {
+            NPH_LOG_INFO(&LOG_SAMPLE, "temporal anti-aliasing%s",
+                         rs->taa_history ? "" : " (history restarted)");
+        }
     } else {
         NPH_LOG_INFO(&LOG_SAMPLE,
                      "render (reference): %u instances, %u culled, %u draws, %u triangles",
@@ -692,6 +697,10 @@ static void handle_input(App *app, bool *paused, f32 *distance, NphRenderView *v
                 view->pipeline =
                     production ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
                 NPH_LOG_INFO(&LOG_SAMPLE, "pipeline: %s", production ? "reference" : "production");
+            } else if (e.u.key.key == NPH_KEY_T) {
+                const bool temporal = view->anti_aliasing == NPH_RENDER_AA_TEMPORAL;
+                view->anti_aliasing = temporal ? NPH_RENDER_AA_NONE : NPH_RENDER_AA_TEMPORAL;
+                NPH_LOG_INFO(&LOG_SAMPLE, "temporal anti-aliasing: %s", temporal ? "off" : "on");
             }
         }
     }
@@ -817,6 +826,7 @@ static void run(App *app, int *status)
                                                       nph_vec3_unit_y(), 0.9F, 0.1F));
     view.ev100 = 6.5F;
     view.pipeline = app->opt.pipeline;
+    view.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
     bool paused = false;
     f32 distance = 52.0F;
     f32 angle = 0.6F;

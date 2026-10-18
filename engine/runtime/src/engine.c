@@ -72,6 +72,9 @@ static const NPH_CVAR_BOOL(k_virtual_shadows, "r.virtual_shadows", 1,
                            "the sun's shadows from its virtual shadow map, else ray traced "
                            "(production)",
                            NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_BOOL(k_taa, "r.taa", 1,
+                           "temporal anti-aliasing at native resolution (production)",
+                           NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -87,19 +90,21 @@ static NphResult register_cvars(NphEngine *e)
 {
     EngineCvars *cv = &e->cv;
     NphCvar *const slots[] = {
-        &cv->max_frames,    &cv->pipelined,       &cv->max_fps,        &cv->lockstep,
-        &cv->max_entities,  &cv->world_events,    &cv->workers,        &cv->sim_rate,
-        &cv->sim_max_steps, &cv->sim_time_scale,  &cv->vsync,          &cv->width,
-        &cv->height,        &cv->hot_reload,      &cv->reload_poll_ms, &cv->prof_enabled,
-        &cv->prof_history,  &cv->pipeline,        &cv->occlusion,      &cv->cone_culling,
-        &cv->sw_raster,     &cv->virtual_shadows,
+        &cv->max_frames,      &cv->pipelined,    &cv->max_fps,
+        &cv->lockstep,        &cv->max_entities, &cv->world_events,
+        &cv->workers,         &cv->sim_rate,     &cv->sim_max_steps,
+        &cv->sim_time_scale,  &cv->vsync,        &cv->width,
+        &cv->height,          &cv->hot_reload,   &cv->reload_poll_ms,
+        &cv->prof_enabled,    &cv->prof_history, &cv->pipeline,
+        &cv->occlusion,       &cv->cone_culling, &cv->sw_raster,
+        &cv->virtual_shadows, &cv->taa,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,   &k_pipelined,       &k_max_fps,  &k_lockstep,      &k_max_entities,
         &k_world_events, &k_workers,         &k_sim_rate, &k_sim_max_steps, &k_sim_time_scale,
         &k_vsync,        &k_width,           &k_height,   &k_hot_reload,    &k_reload_poll_ms,
         &k_prof_enabled, &k_prof_history,    &k_pipeline, &k_occlusion,     &k_cone_culling,
-        &k_sw_raster,    &k_virtual_shadows,
+        &k_sw_raster,    &k_virtual_shadows, &k_taa,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -543,14 +548,27 @@ static void poll_events(NphEngine *e)
 }
 
 // The view to render: the override, or the world's camera. The r.*
-// cvars choose the pipeline and its culling for either.
+// cvars choose the pipeline, its culling, and its anti-aliasing for either;
+// a switch between the two is a camera cut (the temporal history of the
+// other camera does not carry over).
 static void choose_view(NphEngine *e)
 {
+    // A cut the host asked for in its view applies to one frame.
+    bool cut = false;
     if (e->has_view_override) {
         e->view = e->view_override;
+        cut = e->view_override.camera_cut != 0;
+        e->view_override.camera_cut = 0;
     } else if (e->scene_renderer != NULL) {
         (void)nph_scene_renderer_view(e->scene_renderer, &e->view);
     }
+    if (e->has_view_override != e->view_was_override) {
+        cut = true;
+        e->view_was_override = e->has_view_override;
+    }
+    e->view.camera_cut = cut ? 1 : 0;
+    e->view.anti_aliasing =
+        nph_cvar_get_bool(&e->cv.taa) ? NPH_RENDER_AA_TEMPORAL : NPH_RENDER_AA_NONE;
     e->view.pipeline = (NphRenderPipeline)nph_cvar_get_int(&e->cv.pipeline);
     e->view.vis_flags = 0U;
     if (!nph_cvar_get_bool(&e->cv.occlusion)) {

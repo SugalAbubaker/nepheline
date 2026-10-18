@@ -320,18 +320,55 @@ NTEST(Engine, the_render_cvars_set_the_views_switches)
 {
     static EngineFixture fx;
     prepare(&fx);
-    static const char *const assignments[3] = {"r.occlusion=false", "r.sw_raster=false",
-                                               "r.virtual_shadows=false"};
-    for (u32 i = 0; i < 3U; ++i) {
+    static const char *const assignments[4] = {"r.occlusion=false", "r.sw_raster=false",
+                                               "r.virtual_shadows=false", "r.taa=false"};
+    for (u32 i = 0; i < 4U; ++i) {
         fx.config.assignments[i] = assignments[i];
     }
-    fx.config.assignment_count = 3U;
+    fx.config.assignment_count = 4U;
     NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
     NphEngine *e = fx.engine;
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(nph_engine_view(e)->vis_flags, (u32)NPH_RENDER_VIS_NO_OCCLUSION |
                                                             (u32)NPH_RENDER_VIS_NO_SW_RASTER |
                                                             (u32)NPH_RENDER_VIS_RT_SHADOWS);
+    NTEST_EXPECT_EQ_INT((int)nph_engine_view(e)->anti_aliasing, (int)NPH_RENDER_AA_NONE);
+    finish(&fx);
+}
+
+// Temporal anti-aliasing is on by default (r.taa), and a switch between the
+// world's camera and an override is a camera cut, once.
+NTEST(Engine, views_are_anti_aliased_and_a_camera_switch_cuts)
+{
+    static EngineFixture fx;
+    prepare(&fx);
+    NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
+    NphEngine *e = fx.engine;
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT((int)nph_engine_view(e)->anti_aliasing, (int)NPH_RENDER_AA_TEMPORAL);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_engine_view(e)->camera_cut);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 1.0, 5.0),
+                                                          nph_dvec3(0.0, 0.0, 0.0),
+                                                          nph_vec3(0.0F, 1.0F, 0.0F), 0.8F, 0.1F));
+    nph_engine_set_view(e, &v);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_engine_view(e)->camera_cut);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_engine_view(e)->camera_cut);
+    // A cut the host asks for applies once, though its view stays.
+    v.camera_cut = 1;
+    nph_engine_set_view(e, &v);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_engine_view(e)->camera_cut);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_engine_view(e)->camera_cut);
+    nph_engine_set_view(e, NULL);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_engine_view(e)->camera_cut);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_engine_view(e)->camera_cut);
     finish(&fx);
 }
 
@@ -360,7 +397,10 @@ static u8 *draw_showcase(u32 pipeline, u64 bytes)
     static char assignment[32];
     (void)snprintf(assignment, sizeof assignment, "r.pipeline=%u", pipeline);
     fx.config.assignments[0] = assignment;
-    fx.config.assignment_count = 1U;
+    // The pipelines are compared pixel for pixel: one sample per pixel
+    // (render_tests hold the temporal resolve to its own reference).
+    fx.config.assignments[1] = "r.taa=false";
+    fx.config.assignment_count = 2U;
     const NphResult started = start(&fx, NPH_ENGINE_MODE_OFFSCREEN);
     if (started == NPH_RESULT_UNSUPPORTED) {
         finish(&fx);

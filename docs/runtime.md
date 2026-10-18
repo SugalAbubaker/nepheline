@@ -101,10 +101,13 @@ frame; the engine's own world-changing functions wait by themselves.
 
 **The view** is the world's first active Camera (by entity slot), or the
 host's (`nph_engine_set_view`, the editor's camera). Either way the
-`r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`, and
-`r.virtual_shadows` cvars choose the renderer, its culling, its rasterisers,
-and how it shadows the sun (docs/render.md, "The production path" and
-"Shadows").
+`r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`,
+`r.virtual_shadows`, and `r.taa` cvars choose the renderer, its culling, its
+rasterisers, how it shadows the sun, and whether it resolves temporally
+(docs/render.md, "The production path", "Shadows", and "Temporal
+anti-aliasing"). A switch between the world's camera and the host's is a
+camera cut: the frame after it starts a new temporal history; a host that
+moves its camera discontinuously sets `camera_cut` in that frame's view.
 
 ## Configuration
 
@@ -123,6 +126,7 @@ Settings are cvars. The engine's:
 | `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
 | `r.sw_raster` | true | the production path's compute rasteriser for small triangles |
 | `r.virtual_shadows` | true | the production path shadows the sun with its virtual shadow map (false: with rays) |
+| `r.taa` | true | the production path's temporal anti-aliasing at native resolution |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 

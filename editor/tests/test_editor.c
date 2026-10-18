@@ -865,6 +865,14 @@ NTEST(Editor, dragging_the_gizmo_moves_the_selection_in_one_step)
 
 // Pixels whose colour differs from `ref`'s at the same place by more than
 // `tolerance` in a channel.
+// Turns the editor's temporal anti-aliasing off (r.taa).
+static void one_sample_per_pixel(EditorFixture *f)
+{
+    NphCvarRegistry *cvars = nph_engine_cvars(f->engine);
+    NTEST_ASSERT_EQ_INT(nph_cvar_set_bool(cvars, nph_cvar_find(cvars, NPH_STR("r.taa")), false),
+                        NPH_RESULT_OK);
+}
+
 static u64 differing_by(const u8 *a, const u8 *ref, u64 size, u32 tolerance)
 {
     u64 n = 0U;
@@ -1005,6 +1013,10 @@ NTEST(Editor, a_scene_is_built_saved_reloaded_and_played)
     static EditorFixture fx;
     START_OR_SKIP(&fx, NULL);
     Editor *ed = fx.editor;
+    // One sample per pixel (r.taa off) in both editors: the two images are
+    // compared pixel for pixel, and a temporal history's edges depend on
+    // the jitter phase each run happens to stop at.
+    one_sample_per_pixel(&fx);
     frames(&fx, 3U);
     const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
 
@@ -1062,6 +1074,7 @@ NTEST(Editor, a_scene_is_built_saved_reloaded_and_played)
     static EditorFixture again;
     const NphResult started = start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project);
     NTEST_ASSERT_EQ_INT(started, NPH_RESULT_OK);
+    one_sample_per_pixel(&again);
     ed = again.editor;
     frames(&again, 3U);
     NTEST_ASSERT_EQ_INT(editor_open_scene(ed, path), NPH_RESULT_OK);

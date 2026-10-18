@@ -124,6 +124,7 @@ typedef struct EngineCvars {
     NphCvar cone_culling;    // r.cone_culling
     NphCvar sw_raster;       // r.sw_raster
     NphCvar virtual_shadows; // r.virtual_shadows
+    NphCvar taa;             // r.taa
 } EngineCvars;
 
 typedef enum EngineAllocTag {
@@ -201,6 +202,7 @@ struct NphEngine {
     NphRenderView view;
     NphRenderView view_override;
     bool has_view_override;
+    bool view_was_override; // the last frame's view was the override (a switch is a cut)
     bool quit;
     u64 last_frame_ns;
     NphEngineFrameStats stats;

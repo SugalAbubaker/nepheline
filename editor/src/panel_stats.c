@@ -57,6 +57,10 @@ static void frame_stats(Editor *ed)
         if (r->shadow_rays) {
             igText("shadow rays%s", r->shadow_rebuild ? "   (top level rebuilt)" : "");
         }
+        if (r->taa) {
+            // The temporal resolve (r.taa): a history restarts after a cut.
+            igText("temporal anti-aliasing%s", r->taa_history ? "" : "   (history restarted)");
+        }
         igText("viewport %ux%u", ed->viewport.width, ed->viewport.height);
     }
     if (igCollapsingHeader_TreeNodeFlags("Scene mirror", ImGuiTreeNodeFlags_None)) {
