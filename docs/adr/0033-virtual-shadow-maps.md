@@ -137,18 +137,22 @@ drawn), unless stated otherwise.
 
 | Scene (4K field) | GPU frame | Shadows' share | Resolve | `vis hzb 0` | `vsm` passes |
 |---|---|---|---|---|---|
-| no shadows | 1.898 ms | | 0.896 ms | 0.142 ms | |
-| the sun's map, nothing moving | 2.281 ms | 0.38 ms | 1.162 ms | 0.218 ms | 0.048 ms |
-| the sun's map, a sphere moving every frame | 2.330 ms | 0.43 ms | 1.156 ms | 0.220 ms | 0.100 ms |
-| the sun's map, the camera walking (1.4 m/s at 240 Hz) | 2.317 ms | 0.42 ms | 1.167 ms | 0.223 ms | 0.062 ms |
-| the sun's rays, nothing moving | 2.315 ms | 0.42 ms | 1.320 ms | 0.140 ms | |
+| no shadows | 1.905 ms | | 0.901 ms | 0.143 ms | |
+| the sun's map, nothing moving | 2.307 ms | 0.40 ms | 1.172 ms | 0.217 ms | 0.048 ms |
+| the sun's map, a sphere moving every frame | 2.342 ms | 0.44 ms | 1.169 ms | 0.216 ms | 0.094 ms |
+| the sun's map, the camera walking (1.4 m/s at 240 Hz) | 2.336 ms | 0.43 ms | 1.174 ms | 0.221 ms | 0.060 ms |
+| the sun's rays, nothing moving | 2.323 ms | 0.42 ms | 1.324 ms | 0.141 ms | |
 | the sun's rays, a sphere moving (ADR-0032) | 2.714 ms | 0.79 ms | 1.309 ms | | |
+
+Across runs the frame times move by about 0.02 ms (the still map measured
+0.38 to 0.40 ms over no shadows); the table is the run the budgets come
+from (`render_perf-2026-10-18`).
 
 - **Pages.** The field needs 946 pages (62 MB of the pool) from its 8.3
   million pixels. The still scene draws none after its first frame; the
   moving sphere redraws 20 pages a frame with 191 caster draws; the walking
   camera draws a page every few frames.
-- **Where the time goes.** The requests add 0.076 ms to the depth
+- **Where the time goes.** The requests add 0.074 ms to the depth
   pyramid's first pass, which reads the whole visibility buffer anyway
   (half of it the rounds of subgroup minimums at page and level edges, a
   quarter of the subgroups). The map's own passes take 0.048 ms in a
@@ -221,13 +225,13 @@ drawn), unless stated otherwise.
 
 - The production path's sun is shadowed on every device that has the
   production path, and its shadows cost the same whether things move or
-  not: 0.38 ms in a still scene, 0.43 ms with motion, against the
-  rays' 0.42 and 0.79 ms.
-- The still scene's shadows sit just under the §10.4 line (0.38 of
-  0.40 ms) and a scene with motion just over it (0.43 ms). The resolve's
-  registers are the lever, for the map and for every later addition to
-  the resolve (indirect light, stage 7): the next work on it is the
-  resolve's register pressure as a whole.
+  not: 0.38 to 0.40 ms in a still scene, 0.44 ms with motion, against
+  the rays' 0.42 and 0.79 ms.
+- The still scene's shadows sit at the §10.4 line (0.40 ms) and a scene
+  with motion just over it (0.44 ms). The resolve's registers are the
+  lever, for the map and for every later addition to the resolve
+  (indirect light, stage 7): the next work on it is the resolve's
+  register pressure as a whole.
 - The map's DRAM traffic is small in a still frame: the requests' writes
   go to a 32 KB bitmask per level, the lookups read the pool pages under
   the pixels (62 MB held, sampled where needed, mostly from the caches).

@@ -342,10 +342,10 @@ resolution, up to 3), so the pages fit within a few frames; 120 frames in
 a row whose pages would fit a step finer within three quarters of the
 pool lower it again (`vsm_lod_bias`).
 
-In the 4K field the map holds 946 pages (62 MB) and adds 0.38 ms to a
-still frame: the requests 0.076 ms of the first pyramid's pass, the
+In the 4K field the map holds 946 pages (62 MB) and adds 0.40 ms to a
+still frame: the requests 0.074 ms of the first pyramid's pass, the
 lookup 0.27 ms of the resolve, its own passes 0.05 ms. A sphere moving
-every frame redraws 20 pages and adds 0.43 ms; the sun's rays add
+every frame redraws 20 pages and adds 0.44 ms; the sun's rays add
 0.42 ms still and 0.79 ms with motion (ADR-0033).
 
 ## The production path
@@ -571,15 +571,15 @@ time of `nph_render_frame` and the GPU frame:
 |---|---|---|---|---|---|
 | grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.17 ms |
 | grid, 512 × 512 | 10,240 | 1.26 ms | 0.006 ms | 0.17 ms | 0.22 ms |
-| grid, 512 × 512 | 102,400 | 13.1 ms | 0.006 ms | 3.7 ms | 0.59 ms |
-| field, 3840 × 2160 | 16,385 | 2.94 ms | 0.007 ms | 2.69 ms | 1.90 ms |
-| field at night, 1,024 lights | 16,385 | 3.62 ms | 0.007 ms | 54.1 ms | 2.17 ms |
-| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.84 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.14 ms | 0.008 ms | 3.32 ms | 2.28 ms |
+| grid, 512 × 512 | 102,400 | 13.1 ms | 0.006 ms | 3.6 ms | 0.58 ms |
+| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.007 ms | 2.68 ms | 1.91 ms |
+| field at night, 1,024 lights | 16,385 | 3.62 ms | 0.007 ms | 54.2 ms | 2.18 ms |
+| field at night, 4,000 lights | 16,385 | | 0.007 ms | | 3.86 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.15 ms | 0.008 ms | 3.34 ms | 2.31 ms |
 | the same, the sun's shadows ray traced | 16,385 | | 0.007 ms | | 2.32 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 2.33 ms |
-| the map, the camera walking | 16,385 | | 0.009 ms | | 2.32 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 3.56 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 2.34 ms |
+| the map, the camera walking | 16,385 | | 0.009 ms | | 2.34 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 3.59 ms |
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
@@ -592,8 +592,8 @@ shading (1.20 ms) fit; culling with the depth pyramid takes 0.31 ms
 against 0.25 ms, most of it the first pyramid's read of the visibility
 buffer. With 1,024 lamps the grid's passes take 0.047 ms and the resolve
 1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
-The sun's virtual shadow map adds 0.38 ms to a still frame and 0.43 ms
-when a sphere moves, around the shadow line (0.40 ms); its rays add
+The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
+when a sphere moves, at the shadow line (0.40 ms); its rays add
 0.42 ms still, and a frame in which an instance moved also rebuilds the
 top level (0.32 ms over 102,401 slots, 0.22 ms over the scene's own
 16,386: 0.79 ms in all). The lamps' shadows (rays) add 1.35 ms. ADR-0029
