@@ -167,15 +167,19 @@ renderer itself on a device, scene by scene, and reports what CLAUDE.md
 Each scene renders warm-up frames (at least 24 and 500 ms: instance
 uploads, the environment's image-based-lighting passes, the GPU's clocks),
 then `--frames` measured ones (default 120), timed by the renderer's GPU
-profiler. The production path's scenes resolve temporally (the runtime's
-default, docs/render.md "Temporal anti-aliasing"). The scenes are synthetic
-until Phase 10's reference scenes arrive:
+profiler. Every scene draws the runtime's bloom (0.04, docs/render.md
+"Bloom and exposure") with the scene's own exposure, and the production
+path's scenes resolve temporally (the runtime's default, "Temporal
+anti-aliasing"). The scenes are synthetic until Phase 10's reference
+scenes arrive:
 
 | Scene | What it is |
 |---|---|
 | `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
 | `field_4k_no_taa` | `field_4k_production` without temporal anti-aliasing: the tonemap pass where the other has the temporal resolve |
+| `field_4k_no_bloom` | `field_4k_production` without bloom: what the chain and its composite cost |
+| `field_4k_auto_exposure` | `field_4k_production` exposed automatically: the histogram and the metering on top |
 | `lights_1k_{reference,production}`, `lights_1k_every_light`, `lights_4k_production` | the field at night, lit by 1,024 (or 4,000) point and spot lamps of 3 to 8 m range among the nearer rows and a dim moon: the light grid against the light count; `every_light` is the production path lighting every pixel with every light |
 | `shadows_4k_{reference,production}` | the field with the sun casting shadows (docs/render.md "Shadows"): the reference traces rays, the production path draws the sun's virtual shadow map |
 | `shadows_rt_4k_production` | the production path with the sun's shadows ray traced instead (`NPH_RENDER_VIS_RT_SHADOWS`) |

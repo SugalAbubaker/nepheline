@@ -40,6 +40,7 @@ supersedes it and both link to each other.
 | [0032](0032-ray-traced-shadows.md) | Ray-traced shadows: the ground truth for every shadow technique, and the production path's first | Accepted |
 | [0033](0033-virtual-shadow-maps.md) | The sun's virtual shadow map: a resolution-matched clipmap of cached pages | Accepted |
 | [0034](0034-temporal-anti-aliasing.md) | Temporal anti-aliasing at native resolution, fused with the tonemap | Accepted (its §10.4 line open) |
+| [0035](0035-bloom-and-exposure.md) | Bloom and automatic exposure | Accepted (adds to ADR-0034's open §10.4 line) |
 
 ## Template
 

@@ -25,6 +25,8 @@ shadow rays where the device has ray queries
 ([ADR-0032](adr/0032-ray-traced-shadows.md)). The production path
 anti-aliases temporally at native resolution where the view asks
 ("Temporal anti-aliasing" below; [ADR-0034](adr/0034-temporal-anti-aliasing.md)).
+Both add bloom and expose automatically where the view asks ("Bloom and
+exposure" below; [ADR-0035](adr/0035-bloom-and-exposure.md)).
 
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
@@ -113,7 +115,8 @@ then add its own passes (a UI, a capture, the present), compile, and execute.
 | `ibl source`, `ibl downsample` ×n, `ibl sh`, `ibl prefilter` ×m | compute, when the environment changed | environment levels | environment chain, SH, prefiltered levels |
 | `rt accel` | compute, when a light casts shadows | the instance records | new meshes' bottom levels, the top level ("Shadows") |
 | `forward` | graphics | lighting tables, SH, the top level when it traces | pre-exposed RGBA16F colour, D32 depth |
-| `tonemap` | graphics | HDR colour (sampled), depth (read-only attachment) | the caller's target |
+| `exposure clear`, `bloom down 0` to `bloom down N`, `bloom up N - 1` to `bloom up 0`, `exposure average`, `exposure readback` | compute, transfer; with bloom or an automatic exposure | HDR colour (sampled) | the bloom chain, the metering ("Bloom and exposure") |
+| `tonemap` | graphics | HDR colour (sampled), depth (read-only attachment), the bloom chain's mip 0 | the caller's target |
 
 The forward pass draws, in order: the opaque and masked draws, the sky
 (a fullscreen triangle at depth 0, so GREATER_OR_EQUAL passes only where
@@ -421,7 +424,8 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
-| `taa`, `debug lines` | on a view with temporal anti-aliasing: the temporal resolve, which tonemaps too (below), then the debug lines |
+| `bloom …`, `exposure …` | with bloom or an automatic exposure: the chain and the metering over the HDR image, as the reference's ("Bloom and exposure") |
+| `taa`, `debug lines` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), then the debug lines |
 | `tonemap` | otherwise, as the reference's |
 
 `vis args …` passes between them turn counts into indirect arguments,
@@ -625,18 +629,20 @@ time of `nph_render_frame` and the GPU frame:
 | grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.19 ms |
 | grid, 512 × 512 | 10,240 | 1.25 ms | 0.006 ms | 0.17 ms | 0.24 ms |
 | grid, 512 × 512 | 102,400 | 13.3 ms | 0.006 ms | 3.6 ms | 0.61 ms |
-| field, 3840 × 2160 | 16,385 | 2.89 ms | 0.008 ms | 2.68 ms | 2.66 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.007 ms | | 1.91 ms |
-| field at night, 1,024 lights | 16,385 | 3.61 ms | 0.008 ms | 54.7 ms | 2.95 ms |
-| field at night, 4,000 lights | 16,385 | | 0.008 ms | | 4.62 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.20 ms | 0.009 ms | 3.31 ms | 3.07 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.008 ms | | 3.07 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.009 ms | | 3.11 ms |
-| the map, the camera walking | 16,385 | | 0.009 ms | | 3.10 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.009 ms | | 4.37 ms |
+| field, 3840 × 2160 | 16,385 | 2.92 ms | 0.008 ms | 3.02 ms | 3.02 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.008 ms | | 2.19 ms |
+| the same without bloom | 16,385 | | 0.008 ms | | 2.67 ms |
+| the same exposed automatically | 16,385 | | 0.009 ms | | 3.04 ms |
+| field at night, 1,024 lights | 16,385 | 3.69 ms | 0.008 ms | 55.0 ms | 3.34 ms |
+| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 5.02 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.21 ms | 0.009 ms | 3.67 ms | 3.45 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.008 ms | | 3.46 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.010 ms | | 3.49 ms |
+| the map, the camera walking | 16,385 | | 0.010 ms | | 3.47 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.010 ms | | 4.77 ms |
 
-The production path's frames resolve temporally (the runtime's default),
-the reference's do not.
+Every frame draws the runtime's bloom (0.04); the production path's
+frames resolve temporally (the runtime's default), the reference's do not.
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
@@ -644,13 +650,16 @@ reference draws 14.6 million after its frustum test; occlusion removed
 raster), and the passes take: clear 0.08 ms, culling with its argument
 passes 0.10 ms, raster 0.49 ms (0.22 in hardware, 0.27 in software), the
 two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.93 ms (0.90
-without the jitter), the temporal resolve with the tonemap 0.79 ms (the
-tonemap alone: 0.11 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
+without the jitter), the bloom chain 0.28 ms, the temporal resolve with
+the glare and the tonemap 0.87 ms (0.80 without bloom; the tonemap with
+the glare: 0.13 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
 budgeted) and the shading (1.20 ms) fit; culling with the depth pyramid
 takes 0.31 ms against 0.25 ms, most of it the first pyramid's read of the
-visibility buffer; the temporal resolve is past the 0.40 ms of TAA, post,
-and the tonemap together (ADR-0034). With 1,024 lamps the grid's passes take 0.047 ms and the resolve
-1.18 ms (every light for every pixel: 46.6 ms), 2 % over the shading line.
+visibility buffer; the temporal resolve and the bloom chain (1.15 ms) are
+past the 0.40 ms of TAA, post, and the tonemap together (ADR-0034,
+ADR-0035). With 1,024 lamps the grid's passes take 0.049 ms and the
+resolve 1.21 ms (every light for every pixel: 44.6 ms), 5 % over the
+shading line.
 The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
 when a sphere moves, at the shadow line (0.40 ms); its rays add
 0.42 ms still, and a frame in which an instance moved also rebuilds the
@@ -708,6 +717,53 @@ On UNORM targets the shader applies the exact sRGB curve; sRGB targets are
 encoded by the hardware. Tests compare both against the C reference, texel
 by texel, within one 8-bit step.
 
+## Bloom and exposure
+
+On both pipelines, after the HDR image is complete and before the final
+pass ([ADR-0035](adr/0035-bloom-and-exposure.md)):
+
+- **Bloom** (`NphRenderView.bloom`, the image's share of glare, 0 to 1;
+  the runtime's `r.bloom` is 0.04) is a chain of up to six mips, the
+  first half the frame's size, each halving the one before exactly
+  (`bloom.comp`; Jimenez, "Next Generation Post Processing in Call of
+  Duty: Advanced Warfare", SIGGRAPH 2014). Down the chain, each mip is the
+  13-tap filter of the one before, five overlapping 2 × 2 boxes of
+  bilinear taps; the first weights each box by 1 / (1 + luma) (the partial
+  Karis average) so a sub-pixel highlight does not pulse as the jitter
+  finds and loses it. Back up, coarsest first, each mip adds a 3 × 3 tent
+  of the next, so mip 0 ends as the sum of the levels' blurs. A downsample
+  invocation writes 2 × 2 texels from the 25 taps they share, and the
+  tent's nine taps fold into four with the same sum. The chain is
+  B10G11R11 where the device can store to and filter it, stochastically
+  rounded as the HDR image is.
+- **The composite** is `mix(colour, mip0 / levels, bloom)`, a lerp that
+  keeps the image's energy: in the tonemap pass, and in the temporal
+  resolve before the history meets the frame, so the history carries the
+  glare and steadies it (applied to the neighbourhood's statistics, the
+  glare being the same across it).
+- **The automatic exposure** (`NphRenderView.exposure =
+  NPH_RENDER_EXPOSURE_AUTO`; `r.auto_exposure`): the first downsample
+  counts each half-resolution texel's luminance into a 128-bin histogram
+  of log2 pre-exposed luminance over 16 stops (`exposure.comp` then takes
+  the mean between the 50th and 95th percentiles, so neither the dark half
+  of the frame nor its highlights steer it). The CPU reads it back
+  `NPH_GPU_FRAMES_IN_FLIGHT` frames later, undoes the exposure it was
+  metered at, and takes the EV100 an averaging meter gives it, log2(L ·
+  100 / 12.5) (Lagarde & de Rousiers 2014), less
+  `exposure_compensation` stops, within [−6, 20]. The exposure moves
+  toward it by `1 − exp(−frame_seconds · exposure_speed)` of the gap a
+  frame (defaults 1/240 s and 1.5 a second), starting from the view's
+  `ev100`. A metering beyond the histogram's range clamps there, so a
+  larger jump takes a few meterings.
+- **Scope.** Debug views are neither bloomed nor metered; their frames
+  keep the exposure moving toward the last metering. A manual view resets
+  the adaptation. The statistics carry the frame's `ev100`, the latest
+  `metered_ev100` (0 before one), and `bloom`.
+
+At 4K the chain costs 0.28 ms, mostly its first downsample (0.13 ms,
+bound by its 41.5 MB of traffic), and the glare's tap 0.07 to 0.09 ms in
+the temporal resolve; the metering adds under 0.01 ms.
+
 ## Debug draw
 
 Immediate-mode lines, valid for one frame: AABBs, oriented boxes, spheres,
@@ -745,7 +801,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (101 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (107 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -799,6 +855,14 @@ synchronisation-validation gate:
   until they fit, and the bias falling once there is room; agreement with
   the rays it replaces (98 % of pixels within two levels); and the scene
   10,000 km from the origin.
+- **Bloom and exposure** (`test_post.c`): the metering's mean between its
+  percentiles and the EV100 it gives, against the shaders' arithmetic; a
+  uniform image kept by bloom on both pipelines and under temporal
+  anti-aliasing; a highlight's glow alike in every direction, falling with
+  distance, the image's energy kept; the automatic exposure settling on an
+  averaging meter's EV100 on both pipelines, with its compensation, and a
+  manual view taking its own again; debug views neither bloomed nor
+  metered.
 - **Temporal anti-aliasing** (`test_taa.c`): the jitter (eight points, two
   to each quarter of the pixel, repeating) and the filter's weights
   against it; a still view, a camera panning across cubes at two depths,
@@ -852,10 +916,13 @@ path and logs what the GPU culled.
   pool's high-water mark, live or not (the inactive ones last), and its
   rebuild costs accordingly.
 - Temporal anti-aliasing costs 0.79 ms at 4K, past its §10.4 line
-  (ADR-0034); blended surfaces are resolved with the motion of the opaque
-  surface behind them, there is no sharpening, and bloom and
-  auto-exposure (stage 8's next part) are not yet there. No MSAA. The HDR
-  target's dither is the same every frame.
+  (ADR-0034), and bloom adds 0.34 ms (ADR-0035); blended surfaces are
+  resolved with the motion of the opaque surface behind them, and there is
+  no sharpening. No MSAA. The HDR target's dither is the same every frame.
+- Bloom has no lens effects (dirt, flares, streaks), and the exposure is
+  global: no local exposure, no centre-weighted metering. With bloom off,
+  an automatic exposure still runs the chain's first downsample for its
+  histogram.
 - The reference renderer evaluates every light for every pixel (it is the
   ground truth).
 - The resolve is one shader for every material: tile classification

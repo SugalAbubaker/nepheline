@@ -102,12 +102,17 @@ frame; the engine's own world-changing functions wait by themselves.
 **The view** is the world's first active Camera (by entity slot), or the
 host's (`nph_engine_set_view`, the editor's camera). Either way the
 `r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`,
-`r.virtual_shadows`, and `r.taa` cvars choose the renderer, its culling, its
-rasterisers, how it shadows the sun, and whether it resolves temporally
-(docs/render.md, "The production path", "Shadows", and "Temporal
-anti-aliasing"). A switch between the world's camera and the host's is a
-camera cut: the frame after it starts a new temporal history; a host that
-moves its camera discontinuously sets `camera_cut` in that frame's view.
+`r.virtual_shadows`, `r.taa`, `r.bloom`, `r.auto_exposure`,
+`r.exposure_compensation`, and `r.exposure_speed` cvars choose the
+renderer, its culling, its rasterisers, how it shadows the sun, whether it
+resolves temporally, its bloom, and how it exposes (docs/render.md, "The
+production path", "Shadows", "Temporal anti-aliasing", and "Bloom and
+exposure"); an automatic exposure starts from the camera's EV100 and
+adapts at the pace of the frames' real time (one simulation step a frame
+under `rt.lockstep`, so runs repeat). A switch between the world's camera
+and the host's is a camera cut: the frame after it starts a new temporal
+history; a host that moves its camera discontinuously sets `camera_cut`
+in that frame's view.
 
 ## Configuration
 
@@ -127,6 +132,9 @@ Settings are cvars. The engine's:
 | `r.sw_raster` | true | the production path's compute rasteriser for small triangles |
 | `r.virtual_shadows` | true | the production path shadows the sun with its virtual shadow map (false: with rays) |
 | `r.taa` | true | the production path's temporal anti-aliasing at native resolution |
+| `r.bloom` | 0.04 | the bloom's weight in the image, 0 to 1 (saved) |
+| `r.auto_exposure` | false | meter each frame and adapt the exposure, from the camera's EV100 (saved) |
+| `r.exposure_compensation`, `r.exposure_speed` | 0, 1.5 | the automatic exposure's offset in stops (positive: brighter) and e-foldings per second (saved) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 
