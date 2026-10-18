@@ -314,6 +314,27 @@ NTEST(Engine, the_world_steps_and_the_view_follows_the_override)
     finish(&fx);
 }
 
+// The r.* cvars set the production path's switches on whichever view a
+// frame renders.
+NTEST(Engine, the_render_cvars_set_the_views_switches)
+{
+    static EngineFixture fx;
+    prepare(&fx);
+    static const char *const assignments[3] = {"r.occlusion=false", "r.sw_raster=false",
+                                               "r.virtual_shadows=false"};
+    for (u32 i = 0; i < 3U; ++i) {
+        fx.config.assignments[i] = assignments[i];
+    }
+    fx.config.assignment_count = 3U;
+    NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
+    NphEngine *e = fx.engine;
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_engine_view(e)->vis_flags, (u32)NPH_RENDER_VIS_NO_OCCLUSION |
+                                                            (u32)NPH_RENDER_VIS_NO_SW_RASTER |
+                                                            (u32)NPH_RENDER_VIS_RT_SHADOWS);
+    finish(&fx);
+}
+
 static u8 *read_target(NphEngine *e, u64 bytes)
 {
     NphGpuDevice *dev = nph_engine_device(e);

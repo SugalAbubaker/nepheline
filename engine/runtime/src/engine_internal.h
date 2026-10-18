@@ -102,27 +102,28 @@ void game_free(NphEngine *e);
 // ---------------------------------------------------------------------------
 
 typedef struct EngineCvars {
-    NphCvar max_frames;     // rt.max_frames
-    NphCvar pipelined;      // rt.pipelined
-    NphCvar max_fps;        // rt.max_fps
-    NphCvar lockstep;       // rt.lockstep: one step per frame, whatever the time
-    NphCvar max_entities;   // rt.max_entities
-    NphCvar world_events;   // rt.world_events
-    NphCvar workers;        // rt.workers
-    NphCvar sim_rate;       // sim.rate
-    NphCvar sim_max_steps;  // sim.max_steps
-    NphCvar sim_time_scale; // sim.time_scale
-    NphCvar vsync;          // r.vsync
-    NphCvar width;          // r.width
-    NphCvar height;         // r.height
-    NphCvar hot_reload;     // game.hot_reload
-    NphCvar reload_poll_ms; // game.reload_poll_ms
-    NphCvar prof_enabled;   // prof.enabled
-    NphCvar prof_history;   // prof.history
-    NphCvar pipeline;       // r.pipeline: NphRenderPipeline
-    NphCvar occlusion;      // r.occlusion
-    NphCvar cone_culling;   // r.cone_culling
-    NphCvar sw_raster;      // r.sw_raster
+    NphCvar max_frames;      // rt.max_frames
+    NphCvar pipelined;       // rt.pipelined
+    NphCvar max_fps;         // rt.max_fps
+    NphCvar lockstep;        // rt.lockstep: one step per frame, whatever the time
+    NphCvar max_entities;    // rt.max_entities
+    NphCvar world_events;    // rt.world_events
+    NphCvar workers;         // rt.workers
+    NphCvar sim_rate;        // sim.rate
+    NphCvar sim_max_steps;   // sim.max_steps
+    NphCvar sim_time_scale;  // sim.time_scale
+    NphCvar vsync;           // r.vsync
+    NphCvar width;           // r.width
+    NphCvar height;          // r.height
+    NphCvar hot_reload;      // game.hot_reload
+    NphCvar reload_poll_ms;  // game.reload_poll_ms
+    NphCvar prof_enabled;    // prof.enabled
+    NphCvar prof_history;    // prof.history
+    NphCvar pipeline;        // r.pipeline: NphRenderPipeline
+    NphCvar occlusion;       // r.occlusion
+    NphCvar cone_culling;    // r.cone_culling
+    NphCvar sw_raster;       // r.sw_raster
+    NphCvar virtual_shadows; // r.virtual_shadows
 } EngineCvars;
 
 typedef enum EngineAllocTag {

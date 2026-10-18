@@ -529,6 +529,12 @@ static void log_systems(const App *app)
                      rs->vis_lights, rs->vis_instances_culled_frustum,
                      rs->vis_instances_culled_occlusion, rs->vis_meshlets_culled_frustum,
                      rs->vis_meshlets_culled_cone, rs->vis_meshlets_culled_occlusion);
+        if (rs->vsm) {
+            NPH_LOG_INFO(&LOG_SAMPLE,
+                         "sun's virtual shadow map: %u pages needed, %u drawn, %u held, "
+                         "resolution bias %u",
+                         rs->vsm_requested, rs->vsm_drawn, rs->vsm_resident, rs->vsm_lod_bias);
+        }
     } else {
         NPH_LOG_INFO(&LOG_SAMPLE,
                      "render (reference): %u instances, %u culled, %u draws, %u triangles",

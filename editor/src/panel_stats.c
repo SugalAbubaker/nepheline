@@ -48,6 +48,15 @@ static void frame_stats(Editor *ed)
                    r->vis_meshlets_culled_frustum, r->vis_meshlets_culled_cone,
                    r->vis_meshlets_culled_occlusion);
         }
+        if (r->vsm) {
+            // The sun's virtual shadow map (r.virtual_shadows).
+            igText("sun: virtual shadow map, pages needed %u, drawn %u, held %u   bias %u%s",
+                   r->vsm_requested, r->vsm_drawn, r->vsm_resident, r->vsm_lod_bias,
+                   r->vsm_overflow != 0U ? "   (overflowed)" : "");
+        }
+        if (r->shadow_rays) {
+            igText("shadow rays%s", r->shadow_rebuild ? "   (top level rebuilt)" : "");
+        }
         igText("viewport %ux%u", ed->viewport.width, ed->viewport.height);
     }
     if (igCollapsingHeader_TreeNodeFlags("Scene mirror", ImGuiTreeNodeFlags_None)) {

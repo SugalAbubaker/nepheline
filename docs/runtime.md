@@ -101,9 +101,10 @@ frame; the engine's own world-changing functions wait by themselves.
 
 **The view** is the world's first active Camera (by entity slot), or the
 host's (`nph_engine_set_view`, the editor's camera). Either way the
-`r.pipeline`, `r.occlusion`, `r.cone_culling`, and `r.sw_raster` cvars
-choose the renderer, its culling, and its rasterisers (docs/render.md, "The
-production path").
+`r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`, and
+`r.virtual_shadows` cvars choose the renderer, its culling, its rasterisers,
+and how it shadows the sun (docs/render.md, "The production path" and
+"Shadows").
 
 ## Configuration
 
@@ -121,6 +122,7 @@ Settings are cvars. The engine's:
 | `r.pipeline` | 1 | 0: the forward reference renderer, 1: the GPU-driven production one (saved) |
 | `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
 | `r.sw_raster` | true | the production path's compute rasteriser for small triangles |
+| `r.virtual_shadows` | true | the production path shadows the sun with its virtual shadow map (false: with rays) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 
