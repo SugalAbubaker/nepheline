@@ -928,6 +928,8 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         feat->subgroup_arithmetic = (ops & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0U;
         feat->subgroup_shuffle = (ops & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0U;
         feat->subgroup_quad = (ops & VK_SUBGROUP_FEATURE_QUAD_BIT) != 0U;
+        feat->subgroup_fragment =
+            (c->p11.subgroupSupportedStages & VK_SHADER_STAGE_FRAGMENT_BIT) != 0U;
     }
     feat->shader_int8 = vk_bool(c->f12.shaderInt8);
     feat->shader_int64 = vk_bool(hf->shaderInt64);
@@ -1564,15 +1566,15 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                  info->features.shader_float16, info->features.shader_int64,
                  info->features.texture_compression_bc, info->features.sampler_filter_minmax,
                  info->features.draw_indirect_first_instance);
-    GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d); "
-                 "bindless %u sampled / %u storage / %u samplers; push constants %u B; "
-                 "timestamps %.3f ns",
+    GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d; "
+                 "fragment %d); bindless %u sampled / %u storage / %u samplers; push constants "
+                 "%u B; timestamps %.3f ns",
                  info->limits.subgroup_size, info->features.subgroup_vote,
                  info->features.subgroup_ballot, info->features.subgroup_arithmetic,
                  info->features.subgroup_shuffle, info->features.subgroup_quad,
-                 info->limits.bindless_sampled_images, info->limits.bindless_storage_images,
-                 info->limits.bindless_samplers, info->limits.max_push_constant_bytes,
-                 (f64)info->limits.timestamp_period_ns);
+                 info->features.subgroup_fragment, info->limits.bindless_sampled_images,
+                 info->limits.bindless_storage_images, info->limits.bindless_samplers,
+                 info->limits.max_push_constant_bytes, (f64)info->limits.timestamp_period_ns);
     if (info->features.mesh_shader) {
         GPU_LOG_INFO(
             "mesh shaders: %u vertices / %u primitives out, %u invocations (%u "

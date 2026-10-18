@@ -184,6 +184,8 @@ typedef struct NphGpuFeatures {
     b32 subgroup_arithmetic;
     b32 subgroup_shuffle;
     b32 subgroup_quad;
+    // The operations above are available in fragment shaders too.
+    b32 subgroup_fragment;
 } NphGpuFeatures;
 
 typedef struct NphGpuLimits {

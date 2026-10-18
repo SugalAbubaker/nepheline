@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+// The production path's temporal resolve as a compute pass (bench_taa.frag
+// has the fused fragment form and the details): each 16 x 16 group loads
+// its tile of the current colour and the visibility buffer's depth with a
+// one-pixel apron into shared memory once, reads every pixel's 3 x 3
+// neighbourhood from there, and stores the new history; the display colour
+// then takes a tonemap pass of its own (bench_tonemap.frag), since a
+// swapchain image is written as a colour attachment.
+#version 460
+#include "../render/taa_common.glsl"
+#include "nph_shared.h"
+
+#define TILE  16
+#define APRON 18
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(constant_id = 1) const bool k_dither = true; // the history is B10G11R11
+
+layout(push_constant, scalar) uniform Push { NphBenchPush pc; };
+
+shared vec3 s_color[APRON * APRON];
+shared float s_depth[APRON * APRON];
+
+// The bench's jitter, in pixels.
+const vec2 k_jitter = vec2(0.25, -0.125);
+
+void main()
+{
+    const ivec2 size = textureSize(nph_textures_2d[pc.texture_index], 0);
+    const ivec2 origin = ivec2(gl_WorkGroupID.xy) * TILE - 1;
+    for (uint i = gl_LocalInvocationIndex; i < uint(APRON * APRON); i += uint(TILE * TILE)) {
+        const ivec2 q = clamp(origin + ivec2(i % uint(APRON), i / uint(APRON)), ivec2(0), size - 1);
+        s_color[i] = texelFetch(nph_textures_2d[pc.texture_index], q, 0).rgb;
+        s_depth[i] = uintBitsToFloat(texelFetch(nph_utextures_2d[pc.texture2_index], q, 0).y);
+    }
+    barrier();
+    const ivec2 local = ivec2(gl_LocalInvocationID.xy);
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    TaaNeighbourhood n = taa_neighbourhood_begin();
+    float nearest = 0.0;
+    ivec2 nearest_offset = ivec2(0);
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const int at = (local.y + 1 + y) * APRON + local.x + 1 + x;
+            taa_neighbourhood_add(n, s_color[at], vec2(x, y) - k_jitter);
+            if (s_depth[at] > nearest) {
+                nearest = s_depth[at];
+                nearest_offset = ivec2(x, y);
+            }
+        }
+    }
+    const vec2 motion = pc.color.xy + vec2(nearest_offset) * (nearest * 1e-3);
+    const vec2 fsize = vec2(size);
+    const vec2 inv_size = 1.0 / fsize;
+    const vec2 uv = (vec2(pixel) + 0.5 - motion) * inv_size;
+    const vec3 history = taa_rgb_to_ycocg(
+        taa_history_catmull_rom(pc.texture3_index, pc.sampler_index, uv, fsize, inv_size));
+    const vec3 current = n.filtered / n.weight;
+    const vec3 resolved =
+        taa_ycocg_to_rgb(taa_blend(current, taa_clip(n, history), TAA_CURRENT_WEIGHT));
+    if (pixel.x < size.x && pixel.y < size.y) {
+        const vec3 stored =
+            k_dither ? nph_dither_b10g11r11(resolved, nph_gradient_noise(vec2(pixel))) : resolved;
+        imageStore(nph_images_2d[pc.image_index], pixel, vec4(stored, 1.0));
+    }
+}

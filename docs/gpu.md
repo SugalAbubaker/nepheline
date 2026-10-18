@@ -36,7 +36,7 @@ when present and reported in `NphGpuFeatures`: mesh shaders (with their
 limits in `NphGpuLimits`), ray queries, 64-bit image and buffer atomics
 (the visibility buffer and the software rasteriser of §8.6.4), min/max
 reduction samplers (Hi-Z), 16-bit floats and 8-bit integers, subgroup
-operations, first-instance indirect draws, the geometry-shader feature
+operations (and whether fragment shaders have them), first-instance indirect draws, the geometry-shader feature
 (which a fragment shader reading `gl_PrimitiveID` declares), depth clamp,
 wireframe, BC compression, memory budgets, calibrated timestamps.
 `NphGpuDeviceDesc.disable_features` switches the optional ones off on any
