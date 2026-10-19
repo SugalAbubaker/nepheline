@@ -170,8 +170,9 @@ then `--frames` measured ones (default 120), timed by the renderer's GPU
 profiler. Every scene draws the runtime's bloom (0.04, docs/render.md
 "Bloom and exposure") with the scene's own exposure, and the production
 path's scenes resolve temporally (the runtime's default, "Temporal
-anti-aliasing"). The scenes are synthetic until Phase 10's reference
-scenes arrive:
+anti-aliasing") and, where the sky lights them, take the runtime's ambient
+occlusion (0.5 m, "Ambient occlusion"). The scenes are synthetic until
+Phase 10's reference scenes arrive:
 
 | Scene | What it is |
 |---|---|
@@ -179,6 +180,7 @@ scenes arrive:
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
 | `field_4k_no_taa` | `field_4k_production` without temporal anti-aliasing: the tonemap pass where the other has the temporal resolve |
 | `field_4k_no_bloom` | `field_4k_production` without bloom: what the chain and its composite cost |
+| `field_4k_no_ao` | `field_4k_production` without ambient occlusion: what the occlusion costs |
 | `field_4k_auto_exposure` | `field_4k_production` exposed automatically: the histogram and the metering on top |
 | `lights_1k_{reference,production}`, `lights_1k_every_light`, `lights_4k_production` | the field at night, lit by 1,024 (or 4,000) point and spot lamps of 3 to 8 m range among the nearer rows and a dim moon: the light grid against the light count; `every_light` is the production path lighting every pixel with every light |
 | `shadows_4k_{reference,production}` | the field with the sun casting shadows (docs/render.md "Shadows"): the reference traces rays, the production path draws the sun's virtual shadow map |
@@ -202,7 +204,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-19b-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-19c-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU

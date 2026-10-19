@@ -27,7 +27,8 @@
 //
 // The scenes are synthetic until Phase 10's reference scenes arrive. Each
 // draws the runtime's defaults: bloom (r.bloom's weight, 0.04) on both
-// pipelines, a temporal resolve (NPH_RENDER_AA_TEMPORAL, r.taa) on the
+// pipelines, a temporal resolve (NPH_RENDER_AA_TEMPORAL, r.taa) and ambient
+// occlusion within 0.5 m (r.ao; where the sky lights the scene) on the
 // production path, and the scene's own exposure:
 //
 //   grid_<n>_<pipeline>   n cubes on a flat grid under a top-down camera,
@@ -42,6 +43,8 @@
 //                         has the temporal resolve.
 //   field_4k_no_bloom     field_4k_production without bloom: what the
 //                         bloom chain costs.
+//   field_4k_no_ao        field_4k_production without ambient occlusion:
+//                         what the occlusion costs.
 //   field_4k_auto_exposure
 //                         field_4k_production exposed automatically
 //                         (NPH_RENDER_EXPOSURE_AUTO): the histogram and the
@@ -165,9 +168,11 @@ typedef enum ScenePost {
     POST_DOF = 1U << 6U,        // 5 m away
     POST_DOF_SLIGHT = 1U << 7U, // 2.6 m
     POST_DOF_LARGE = 1U << 8U,  // 0.6 m
+    POST_NO_AO = 1U << 9U,      // no ambient occlusion
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
+#define RUNTIME_AO    0.5F  // r.ao's default
 // Motion blur: a 180-degree shutter at the §10.1 rate, and the camera's
 // motions reversing every quarter second.
 #define MOTION_FRAME   (1.0F / 240.0F)
@@ -197,6 +202,8 @@ static const SceneDef g_scenes[] = {
      SHADOWS_NONE, POST_NO_TAA},
     {"field_4k_no_bloom", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
      SHADOWS_NONE, POST_NO_BLOOM},
+    {"field_4k_no_ao", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_NO_AO},
     {"field_4k_auto_exposure", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_NONE, POST_AUTO_EXPOSURE},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
@@ -621,6 +628,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
             ? NPH_RENDER_AA_TEMPORAL
             : NPH_RENDER_AA_NONE;
     view.bloom = (s->post & (u32)POST_NO_BLOOM) != 0U ? 0.0F : RUNTIME_BLOOM;
+    view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
     view.exposure = (s->post & (u32)POST_AUTO_EXPOSURE) != 0U ? NPH_RENDER_EXPOSURE_AUTO
                                                               : NPH_RENDER_EXPOSURE_MANUAL;
     if (ctx->no_sw_raster) {
