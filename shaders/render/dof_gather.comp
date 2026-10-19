@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth of field's gather at half resolution (docs/render.md "Depth of
+// field"; ADR-0037; dof_gather.glsl), for the tiles whose circles are too
+// large to gather at full resolution (dof_common.glsl dof_tile_class), and
+// the tiles beside them, whose texels their resolves read too. A
+// workgroup is a tile. The far layer keeps the texel's depth, which the
+// resolve matches against each pixel's.
+#version 460
+#define DOF_FULL   false
+#define DOF_GROUP  (NPH_RENDER_DOF_TILE / 2)
+#define DOF_APRON  (int(NPH_RENDER_DOF_MAX_RADIUS) / 2)
+#define DOF_SHARED 0 // its apron would not fit 16 KiB
+#include "dof_gather.glsl"
+
+// A sample per this many square half-resolution pixels of the disc, within
+// these bounds (and the centre).
+#define DOF_SAMPLE_AREA 2.0
+#define DOF_MIN_SAMPLES 8
+#define DOF_MAX_SAMPLES 48
+
+void main()
+{
+    const vec4 nb = texelFetch(nph_textures_2d[pc.neighbours_index], ivec2(gl_WorkGroupID.xy), 0);
+    if (nb.z <= 0.5 * NPH_RENDER_DOF_SLIGHT) {
+        // No tile within one is gathered at half resolution: no resolve
+        // reads this tile's texels.
+        return;
+    }
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, dof_extent()))) {
+        return;
+    }
+    const DofLayers l = dof_gather(p, ivec2(0), -min(nb.x, 0.0), DOF_SAMPLE_AREA,
+                                   DOF_MIN_SAMPLES, DOF_MAX_SAMPLES);
+    imageStore(nph_images_2d[pc.far_index], p, vec4(l.far, l.depth));
+    imageStore(nph_images_2d[pc.near_index], p, l.near);
+}

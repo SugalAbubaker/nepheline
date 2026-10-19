@@ -356,6 +356,49 @@ NPH_SHARED_STRUCT(NphRenderMotionBlurPush)
     NphVec2 inv_size; // 1 / the extent
 };
 
+// Depth of field (dof.c; dof_setup.comp, dof_tiles.comp, dof_gather.comp,
+// dof_resolve.comp; docs/render.md "Depth of field").
+#define NPH_RENDER_DOF_TILE 32 // full-resolution pixels: the circles' tiles
+// The largest circle of confusion's radius, in full-resolution pixels: a
+// tile, so that no circle reaches past the tiles around its own.
+#define NPH_RENDER_DOF_MAX_RADIUS 32.0
+// Circles of a radius under this many full-resolution pixels are sharp.
+#define NPH_RENDER_DOF_SHARP 0.5
+// Tiles no circle of a radius over this many full-resolution pixels can
+// reach are gathered at full resolution (dof_resolve.comp), the rest at
+// half (dof_gather.comp).
+#define NPH_RENDER_DOF_SLIGHT 8.0
+
+// Push constants of the depth of field's kernels.
+NPH_SHARED_STRUCT(NphRenderDofPush)
+{
+    // A pixel's circle of confusion's radius in full-resolution pixels at
+    // reverse-Z depth d: bias + scale * d (a thin lens; negative in front of
+    // the focus), within NPH_RENDER_DOF_MAX_RADIUS.
+    f32 coc_bias;
+    f32 coc_scale;
+    u32 depth_index;      // bindless sampled: the visibility buffer as R32G32_UINT (depth in
+                          // y; the production path), or the depth image (the reference)
+    u32 color_index;      // bindless sampled: the HDR image as drawn (setup, resolve)
+    u32 half_index;       // the half-resolution colour and its block's nearest depth: storage
+                          // (setup), sampled
+    u32 full_depth_index; // the full-resolution depths: storage (setup), sampled
+    u32 tiles_index;      // bindless storage: each tile's nearest and farthest circles
+    u32 neighbours_index; // their 3 x 3 neighbourhoods', and the largest circle within two
+                          // tiles: storage (tiles), sampled
+    u32 far_index;        // the far layer: storage (gather), sampled (resolve)
+    u32 near_index;       // the near layer: storage (gather), sampled (resolve)
+    u32 out_index;        // bindless storage: the HDR image with depth of field (resolve)
+    u32 point_sampler;    // nearest, clamped to the edge
+    u32 linear_sampler;   // bilinear, clamped to the edge
+    u32 width;            // the full-resolution extent
+    u32 height;
+    u32 tiles_x;      // tiles per row
+    u32 tiles_y;      // and rows
+    u32 noise;        // the samples' rotation's offset this frame
+    NphVec2 inv_size; // 1 / the full-resolution extent
+};
+
 // Push constants of the image-based lighting kernels.
 NPH_SHARED_STRUCT(NphRenderIblPush)
 {

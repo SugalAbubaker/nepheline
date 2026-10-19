@@ -649,10 +649,11 @@ static bool format_is_srgb(NphGpuFormat f)
 }
 
 // The reference renderer's passes: the forward pass into the HDR target
-// and its depth, which the tonemap pass's debug lines test against.
+// and its depth, which the tonemap pass's debug lines test against. With
+// depth of field the depth is also sampled (dof.c).
 static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32 width, u32 height,
-                                   NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
-                                   NphGpuRgBuffer sh, NphGpuRgImage *out_depth)
+                                   bool dof, NphGpuRgImage env, NphGpuRgImage specular,
+                                   NphGpuRgImage lut, NphGpuRgBuffer sh, NphGpuRgImage *out_depth)
 {
     NphGpuImageDesc hdr_desc;
     memset(&hdr_desc, 0, sizeof hdr_desc);
@@ -666,6 +667,9 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     depth_desc.format = RENDER_DEPTH_FORMAT;
     depth_desc.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
     depth_desc.name = "depth";
+    if (dof) {
+        depth_desc.usage |= (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    }
     const NphGpuRgImage hdr = nph_gpu_rg_create_image(graph, &hdr_desc);
     const NphGpuRgImage depth = nph_gpu_rg_create_image(graph, &depth_desc);
     if (nph_gpu_rg_image_is_null(hdr) || nph_gpu_rg_image_is_null(depth)) {
@@ -737,7 +741,18 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         (u32)view->exposure > (u32)NPH_RENDER_EXPOSURE_AUTO ||
         !(view->bloom >= 0.0F && view->bloom <= 1.0F) || !(view->exposure_speed >= 0.0F) ||
         !(view->frame_seconds >= 0.0F) || !(view->shutter >= 0.0F) ||
-        !nph_f32_is_finite(view->shutter)) {
+        !nph_f32_is_finite(view->shutter) || !(view->aperture >= 0.0F) ||
+        !nph_f32_is_finite(view->aperture) || !(view->sensor_height >= 0.0F) ||
+        !nph_f32_is_finite(view->sensor_height) || !nph_f32_is_finite(view->lens_offset.x) ||
+        !nph_f32_is_finite(view->lens_offset.y)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // A lens (an aperture, or a point off its centre) focuses beyond its
+    // focal length.
+    const bool lens_shift = view->lens_offset.x != 0.0F || view->lens_offset.y != 0.0F;
+    if ((view->aperture > 0.0F || lens_shift) &&
+        !(nph_f32_is_finite(view->focus_distance) &&
+          view->focus_distance > nph_render_view_focal_length(view))) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const NphGpuImageDesc *td = nph_gpu_image_desc(dev, target);
@@ -747,6 +762,17 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     }
     if (!target_format_supported(td->format)) {
         return NPH_RESULT_UNSUPPORTED;
+    }
+    // Seen through a point off the lens's centre (NphRenderView.lens_offset):
+    // the camera moves there, and the projection shears below so the focus
+    // plane stays put. Everything after takes the moved camera.
+    NphRenderView lensed;
+    if (lens_shift) {
+        lensed = *view;
+        const NphVec3 o = nph_quat_rotate(nph_quat_normalize_or_identity(view->camera.orientation),
+                                          nph_vec3(view->lens_offset.x, view->lens_offset.y, 0.0F));
+        lensed.camera.position = nph_dvec3_add(view->camera.position, nph_dvec3_from_vec3(o));
+        view = &lensed;
     }
     bool production = view->pipeline == NPH_RENDER_PIPELINE_PRODUCTION;
     if (production && !r->vis.supported) {
@@ -783,6 +809,13 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         nph_vec2(2.0F * jitter.x / (f32)width, 2.0F * jitter.y / (f32)height);
     proj.c[2].x -= jitter_ndc.x;
     proj.c[2].y -= jitter_ndc.y;
+    if (lens_shift) {
+        // The moved camera sees a point of the focus plane (view z = -focus)
+        // the offset aside: its NDC regains P00 x / focus (and P11 y), by
+        // the same column as the jitter.
+        proj.c[2].x -= proj.c[0].x * view->lens_offset.x / view->focus_distance;
+        proj.c[2].y -= proj.c[1].y * view->lens_offset.y / view->focus_distance;
+    }
     FrameCull fc;
     fc.view = view_m;
     fc.camera = view->camera.position;
@@ -805,9 +838,12 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.ev100 = ev100;
     stats.metered_ev100 = r->post.metered ? r->post.metered_ev100 : 0.0F;
     stats.bloom = r->post.frame_bloom;
-    // Motion blur, measured against the previous frame (motion_blur.c).
+    // Motion blur, measured against the previous frame (motion_blur.c), and
+    // depth of field (dof.c).
     const bool motion_blur = render_motion_frame_begin(r, view, width, height, production);
     stats.motion_blur = motion_blur ? 1 : 0;
+    const bool dof = render_dof_frame_begin(r, view, height);
+    stats.dof = dof ? 1 : 0;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -895,11 +931,18 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         r->hdr_rg = hdr;
         visbuffer = r->vis.frame.visbuffer;
     } else {
-        NPH_TRY(declare_reference(r, graph, width, height, env, specular, lut, sh, &depth));
+        NPH_TRY(declare_reference(r, graph, width, height, dof, env, specular, lut, sh, &depth));
     }
     stats.shadow_builds = r->rt.frame_builds;
     stats.shadow_rebuild = rt && r->rt.frame_rebuild ? 1 : 0;
-    // Bloom and the metering, over the complete HDR image.
+    // Depth of field over the complete HDR image, whose image with it the
+    // rest of the frame reads; then bloom (glowing from the blurred image)
+    // and the metering.
+    if (dof) {
+        NPH_TRY(render_dof_declare(
+            r, graph, r->hdr_rg, production ? r->vis.hdr_format : RENDER_HDR_FORMAT,
+            production ? visbuffer : depth, production, width, height, &r->hdr_rg));
+    }
     NPH_TRY(render_post_declare(r, graph, width, height));
 
     const NphGpuRgImage out = nph_gpu_rg_import_image(graph, target);

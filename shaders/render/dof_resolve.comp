@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth of field's resolve (docs/render.md "Depth of field"; ADR-0037),
+// at full resolution, into an image of its own (the HDR image it reads is
+// left as drawn: its gathers read neighbours), by the tile's class
+// (dof_common.glsl dof_tile_class); a workgroup is a quarter of a tile.
+//
+//   - A tile in focus as far as any circle reaches is copied as drawn.
+//   - One slightly out of focus is gathered at full resolution
+//     (dof_gather.glsl), where the half resolution's texels (each a 2 x 2
+//     block's average colour under its nearest depth) would carry an edge's
+//     light a pixel or two past where the lens does; as the "slight out of
+//     focus" gather of Abadie, "A Life of a Bokeh", SIGGRAPH 2018. The
+//     workgroup reads its pixels and the circles' reach around them into
+//     shared memory first.
+//   - In one further out of focus, gathered at half resolution
+//     (dof_gather.comp), a pixel in focus keeps its sharp colour and one
+//     out of focus takes the far layer, blending from one to the other as
+//     its circle grows from NPH_RENDER_DOF_SHARP to a pixel more, with the
+//     near layer over either. Both layers are read from the four
+//     half-resolution texels around the pixel, those of another surface (by
+//     depth, dof_apart) all but left out: one object's colour does not
+//     spread into the blur of another beside or behind it, nor a blurred
+//     near object's own texels (which see nothing in front of them) thin
+//     the near layer over the sharp pixels at its edge. Where the four are
+//     all of the pixel's surface, as most are, the layers are read
+//     bilinearly.
+#version 460
+#define DOF_FULL   true
+#define DOF_GROUP  (NPH_RENDER_DOF_TILE / 2)
+#define DOF_APRON  int(NPH_RENDER_DOF_SLIGHT)
+#define DOF_SHARED 1 // (16 + 2 * 8)^2 texels of 12 bytes: 12 KiB
+#include "dof_gather.glsl"
+
+// Whether the HDR images are B10G11R11, whose coarse steps are rounded at
+// random (render_common.glsl nph_dither_b10g11r11).
+layout(constant_id = 0) const bool k_dither = false;
+
+// The slight blur's samples: one per this many square pixels of the disc,
+// within these bounds (and the centre): as dense as the half-resolution
+// gather's (dof_gather.comp).
+#define DOF_SAMPLE_AREA 8.0
+#define DOF_MIN_SAMPLES 8
+#define DOF_MAX_SAMPLES 48
+
+// How far apart the surfaces at reverse-Z depths `a` and `b` lie: 0 within
+// a fifth of DOF_DEPTH_SOFTNESS of the nearer one's distance (one surface,
+// or a slope across a texel), 1 beyond all of it.
+float dof_apart(float a, float b)
+{
+    const float relative = abs(a - b) / (DOF_DEPTH_SOFTNESS * max(max(a, b), 1e-30));
+    return clamp(1.25 * relative - 0.25, 0.0, 1.0);
+}
+
+// A pixel of a tile gathered at half resolution: its sharp colour, its
+// depth, under the layers of the texels around it.
+vec3 dof_composite(ivec2 p, vec3 sharp, float depth)
+{
+    const float blur =
+        smoothstep(NPH_RENDER_DOF_SHARP, NPH_RENDER_DOF_SHARP + 1.0, abs(dof_circle(depth)));
+    // The texels' depths (the far layer's alpha) by one gather, in its
+    // order (x0, y1), (x1, y1), (x1, y0), (x0, y0).
+    const ivec2 half_size = (ivec2(pc.width, pc.height) + 1) / 2;
+    const vec2 uv = (vec2(p) + 0.5) * 0.5 / vec2(half_size);
+    const vec4 depths = textureGather(
+        sampler2D(nph_textures_2d[pc.far_index], nph_samplers[pc.point_sampler]), uv, 3);
+    if (max(max(dof_apart(depths.x, depth), dof_apart(depths.y, depth)),
+            max(dof_apart(depths.z, depth), dof_apart(depths.w, depth))) == 0.0) {
+        const vec3 far = textureLod(sampler2D(nph_textures_2d[pc.far_index],
+                                              nph_samplers[pc.linear_sampler]),
+                                    uv, 0.0)
+                             .rgb;
+        const vec4 near = textureLod(sampler2D(nph_textures_2d[pc.near_index],
+                                               nph_samplers[pc.linear_sampler]),
+                                     uv, 0.0);
+        return mix(sharp, far, blur) * (1.0 - near.a) + near.rgb;
+    }
+    // Each texel of another surface weighted down a hundredfold.
+    const vec2 at = (vec2(p) + 0.5) * 0.5 - 0.5;
+    const ivec2 h0 = ivec2(floor(at));
+    const vec2 f = at - vec2(h0);
+    const ivec2 last = half_size - 1;
+    vec3 far = vec3(0.0);
+    vec4 near = vec4(0.0);
+    float weight = 0.0;
+    // Beside a blurred surface in front, the pixel's own surface's texels
+    // lie a texel and more further off, its near layer there thinner than at
+    // the pixel; but that surface's own texels hold the colour at their place
+    // (their far layer under their near), and the pixel takes theirs by its
+    // bilinear weights and their blur: the blur's edge then runs on across
+    // the sharp edge under it, and a sharp surface in front leaves the pixel
+    // as it is.
+    vec3 front = vec3(0.0);
+    float front_weight = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const ivec2 q = clamp(h0 + o, ivec2(0), last);
+        const vec4 t = texelFetch(nph_textures_2d[pc.far_index], q, 0);
+        const vec4 n = texelFetch(nph_textures_2d[pc.near_index], q, 0);
+        const vec2 b = mix(1.0 - f, f, vec2(o));
+        const float apart = dof_apart(t.a, depth);
+        const float w = b.x * b.y * (1.0 - 0.99 * apart);
+        far += t.rgb * w;
+        near += n * w;
+        weight += w;
+        const float spread = smoothstep(NPH_RENDER_DOF_SHARP, NPH_RENDER_DOF_SHARP + 1.0,
+                                        abs(dof_circle(t.a)));
+        const float wf = t.a > depth ? b.x * b.y * apart * spread : 0.0;
+        front += (t.rgb * (1.0 - n.a) + n.rgb) * wf;
+        front_weight += wf;
+    }
+    far /= weight;
+    near /= weight;
+    const vec3 c = mix(sharp, far, blur) * (1.0 - near.a) + near.rgb;
+    return front_weight > 0.0 ? (c * weight + front) / (weight + front_weight) : c;
+}
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    // One tile's: the workgroup's class is its tile's, and the whole
+    // workgroup takes one branch (the slight blur's has a barrier).
+    const vec4 nb =
+        texelFetch(nph_textures_2d[pc.neighbours_index], ivec2(gl_WorkGroupID.xy) / 2, 0);
+    const int tile_class = dof_tile_class(nb);
+    const bool inside = all(lessThan(p, ivec2(pc.width, pc.height)));
+    vec3 c;
+    if (tile_class == DOF_TILE_SLIGHT) {
+        const ivec2 origin = ivec2(gl_WorkGroupID.xy) * DOF_GROUP - DOF_APRON;
+        dof_load(origin);
+        barrier();
+        if (!inside) {
+            return;
+        }
+        const DofLayers l = dof_gather(p, origin, -2.0 * min(nb.x, 0.0), DOF_SAMPLE_AREA,
+                                       DOF_MIN_SAMPLES, DOF_MAX_SAMPLES);
+        c = l.far * (1.0 - l.near.a) + l.near.rgb;
+    } else {
+        if (!inside) {
+            return;
+        }
+        const vec3 sharp = texelFetch(nph_textures_2d[pc.color_index], p, 0).rgb;
+        if (tile_class == DOF_TILE_SHARP) {
+            // On the format's grid already: copied exactly.
+            imageStore(nph_images_2d[pc.out_index], p, vec4(sharp, 1.0));
+            return;
+        }
+        c = dof_composite(p, sharp, texelFetch(nph_textures_2d[pc.full_depth_index], p, 0).r);
+    }
+    if (k_dither) {
+        // Noise of its own, apart from the spiral's turn.
+        c = nph_dither_b10g11r11(c,
+                                 nph_gradient_noise(vec2(p).yx + 3.141592 * float(pc.noise)));
+    }
+    imageStore(nph_images_2d[pc.out_index], p, vec4(c, 1.0));
+}

@@ -8,6 +8,7 @@
 nph_add_module(render
     SOURCES
         src/debug_draw.c
+        src/dof.c
         src/frame.c
         src/gpu_profiler.c
         src/ibl.c
@@ -40,6 +41,7 @@ endif()
 
 nph_add_test(render
     SOURCES
+        tests/test_dof.c
         tests/test_frame.c
         tests/test_gpu_profiler.c
         tests/test_motion_blur.c

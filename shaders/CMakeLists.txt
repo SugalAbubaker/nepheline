@@ -57,6 +57,10 @@ nph_add_shaders(nph_shaders_render
         render/motion.comp
         render/motion_tiles.comp
         render/motion_blur.frag
+        render/dof_setup.comp
+        render/dof_tiles.comp
+        render/dof_gather.comp
+        render/dof_resolve.comp
         render/debug_line.vert
         render/debug_line.frag
         render/ibl_sky.comp

@@ -6,6 +6,7 @@
 // renderer and a render graph on it, and helpers that render one frame
 // into an offscreen target and read it back.
 
+#include <nepheline/math/scalar.h>
 #include <nepheline/render/debug_draw.h>
 #include <nepheline/render/primitives.h>
 #include <nepheline/render/reference.h>
@@ -152,6 +153,69 @@ static inline NphRenderMesh test_upload_mesh(NphRenderer *r, const NphRenderMesh
     NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(r, &md, &mesh), NPH_RESULT_OK);
     return mesh;
+}
+
+// Averages of images in linear light, for ground truths made of many
+// frames (motion blur's instants, depth of field's lens points): sRGB
+// values, as an R8G8B8A8_UNORM target holds them.
+typedef struct TestAccumulator {
+    f32 *sum;
+    u64 count; // values (pixels * 4)
+    u32 images;
+} TestAccumulator;
+
+static inline void test_accumulator_begin(TestAccumulator *a, u64 values)
+{
+    a->sum = NPH_ALLOC_ARRAY_ZEROED(nph_allocator_system(), f32, values);
+    NTEST_ASSERT_NOT_NULL(a->sum);
+    a->count = values;
+    a->images = 0U;
+}
+
+static inline void test_accumulator_add(TestAccumulator *a, const u8 *image)
+{
+    for (u64 i = 0; i < a->count; ++i) {
+        a->sum[i] += nph_render_ref_srgb_to_linear((f32)image[i] / 255.0F);
+    }
+    a->images += 1U;
+}
+
+// The average, encoded back as the target holds it, into `out`; frees the
+// sums.
+static inline void test_accumulator_end(TestAccumulator *a, u8 *out)
+{
+    for (u64 i = 0; i < a->count; ++i) {
+        const f32 mean = nph_render_ref_linear_to_srgb(a->sum[i] / (f32)a->images);
+        out[i] = (u8)nph_f32_round(nph_f32_clamp(mean, 0.0F, 1.0F) * 255.0F);
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, a->sum, a->count);
+    a->sum = NULL;
+}
+
+typedef struct TestImageDiff {
+    f64 mean; // mean absolute difference over every pixel's RGB, in 8-bit levels
+    u32 max;  // the largest
+} TestImageDiff;
+
+static inline TestImageDiff test_image_diff(const u8 *a, const u8 *b, u64 pixels)
+{
+    TestImageDiff d = {0.0, 0U};
+    u64 sum = 0U;
+    for (u64 p = 0; p < pixels; ++p) {
+        for (u32 c = 0; c < 3U; ++c) {
+            const i32 e = (i32)a[p * 4U + c] - (i32)b[p * 4U + c];
+            const u32 m = (u32)(e < 0 ? -e : e);
+            sum += m;
+            d.max = nph_max_u32(d.max, m);
+        }
+    }
+    d.mean = (f64)sum / (f64)(pixels * 3U);
+    return d;
+}
+
+static inline void test_log_diff(const char *what, TestImageDiff d)
+{
+    NTEST_LOG("%s: mean %.3f levels, max %u", what, d.mean, d.max);
 }
 
 #define REQUIRE_RENDERER(f)                                                                        \

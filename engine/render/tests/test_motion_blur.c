@@ -140,35 +140,12 @@ static NphRenderFrameStats render_into(RenderFixture *f, const NphRenderView *vi
     return s;
 }
 
-// Linear-light sums of images, for the ground truth's average.
-typedef struct Accumulator {
-    f32 *sum;
-    u64 count; // values (pixels * 4)
-    u32 images;
-} Accumulator;
-
-static void accumulator_begin(Accumulator *a, u64 values)
-{
-    a->sum = NPH_ALLOC_ARRAY_ZEROED(nph_allocator_system(), f32, values);
-    NTEST_ASSERT_NOT_NULL(a->sum);
-    a->count = values;
-    a->images = 0U;
-}
-
-static void accumulator_add(Accumulator *a, const u8 *image)
-{
-    for (u64 i = 0; i < a->count; ++i) {
-        a->sum[i] += nph_render_ref_srgb_to_linear((f32)image[i] / 255.0F);
-    }
-    a->images += 1U;
-}
-
 // Adds an image of SS x SS the test target's size, each of its pixels' SS^2
 // samples averaged: an instant's area-sampled image, which a temporally
 // anti-aliased view converges toward.
 #define SS      4U
 #define SS_SIZE (TEST_TARGET_SIZE * SS)
-static void accumulator_add_supersampled(Accumulator *a, const u8 *big)
+static void accumulator_add_supersampled(TestAccumulator *a, const u8 *big)
 {
     for (u32 y = 0; y < TEST_TARGET_SIZE; ++y) {
         for (u32 x = 0; x < TEST_TARGET_SIZE; ++x) {
@@ -188,43 +165,6 @@ static void accumulator_add_supersampled(Accumulator *a, const u8 *big)
     a->images += 1U;
 }
 
-// The average, encoded back as the target is, into `out`; frees the sums.
-static void accumulator_end(Accumulator *a, u8 *out)
-{
-    for (u64 i = 0; i < a->count; ++i) {
-        const f32 mean = nph_render_ref_linear_to_srgb(a->sum[i] / (f32)a->images);
-        out[i] = (u8)nph_f32_round(nph_f32_clamp(mean, 0.0F, 1.0F) * 255.0F);
-    }
-    NPH_FREE_ARRAY(nph_allocator_system(), f32, a->sum, a->count);
-    a->sum = NULL;
-}
-
-typedef struct Diff {
-    f64 mean; // mean absolute difference over every pixel's RGB, in 8-bit levels
-    u32 max;  // the largest
-} Diff;
-
-static Diff diff(const u8 *a, const u8 *b, u64 pixels)
-{
-    Diff d = {0.0, 0U};
-    u64 sum = 0U;
-    for (u64 p = 0; p < pixels; ++p) {
-        for (u32 c = 0; c < 3U; ++c) {
-            const i32 e = (i32)a[p * 4U + c] - (i32)b[p * 4U + c];
-            const u32 m = (u32)(e < 0 ? -e : e);
-            sum += m;
-            d.max = nph_max_u32(d.max, m);
-        }
-    }
-    d.mean = (f64)sum / (f64)(pixels * 3U);
-    return d;
-}
-
-static void log_diff(const char *what, Diff d)
-{
-    NTEST_LOG("%s: mean %.3f levels, max %u", what, d.mean, d.max);
-}
-
 // ---------------------------------------------------------------------------
 // Against the shutter's average
 // ---------------------------------------------------------------------------
@@ -240,8 +180,8 @@ static void moving_box_truth(RenderFixture *f, NphRenderInstance box, f64 x, f64
     static u8 big[(u64)SS_SIZE * (u64)SS_SIZE * 4U];
     const NphGpuImage target =
         supersample ? test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SS_SIZE) : f->target;
-    Accumulator acc;
-    accumulator_begin(&acc, PIXELS);
+    TestAccumulator acc;
+    test_accumulator_begin(&acc, PIXELS);
     NphRenderView v;
     mb_view(&v, test_camera(), 0.0F);
     const f64 open = (f64)(shutter / FRAME);
@@ -253,10 +193,10 @@ static void moving_box_truth(RenderFixture *f, NphRenderInstance box, f64 x, f64
             accumulator_add_supersampled(&acc, big);
         } else {
             (void)render_into(f, &v, target, TEST_TARGET_SIZE, instant);
-            accumulator_add(&acc, instant);
+            test_accumulator_add(&acc, instant);
         }
     }
-    accumulator_end(&acc, out);
+    test_accumulator_end(&acc, out);
     if (supersample) {
         NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
         nph_gpu_image_destroy(f->dev, target);
@@ -296,10 +236,12 @@ NTEST_F(MotionBlur, a_moving_box_blurs_as_the_shutter_averages)
     mb_view(&v, test_camera(), FRAME);
     const NphRenderFrameStats s = moving_box_frames(f, box, 0.0, step, &v, blurred);
     NTEST_EXPECT_TRUE(s.motion_blur);
-    const Diff ds = diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    const Diff db = diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    log_diff("moving box, sharp", ds);
-    log_diff("moving box, blurred", db);
+    const TestImageDiff ds =
+        test_image_diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    const TestImageDiff db =
+        test_image_diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    test_log_diff("moving box, sharp", ds);
+    test_log_diff("moving box, blurred", db);
     NTEST_EXPECT_TRUE((f32)ds.mean > 1.0F); // the motion does show
     NTEST_EXPECT_TRUE((f32)db.mean < (f32)ds.mean * 0.3F);
 }
@@ -320,10 +262,12 @@ NTEST_F(MotionBlur, a_half_open_shutter_blurs_half_as_far)
     NphRenderView v;
     mb_view(&v, test_camera(), 0.5F * FRAME);
     NTEST_EXPECT_TRUE(moving_box_frames(f, box, 0.0, step, &v, blurred).motion_blur);
-    const Diff dh = diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    const Diff df = diff(blurred, truth_full, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    log_diff("half open, against its own average", dh);
-    log_diff("half open, against the whole frame's", df);
+    const TestImageDiff dh =
+        test_image_diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    const TestImageDiff df =
+        test_image_diff(blurred, truth_full, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    test_log_diff("half open, against its own average", dh);
+    test_log_diff("half open, against the whole frame's", df);
     NTEST_EXPECT_TRUE((f32)dh.mean < (f32)df.mean * 0.5F);
 }
 
@@ -343,26 +287,28 @@ NTEST_F(MotionBlur, a_turning_camera_blurs_as_the_shutter_averages)
     static u8 sharp[PIXELS];
     static u8 instant[PIXELS];
     static u8 blurred[PIXELS];
-    Accumulator acc;
-    accumulator_begin(&acc, PIXELS);
+    TestAccumulator acc;
+    test_accumulator_begin(&acc, PIXELS);
     NphRenderView v;
     for (u32 k = 0; k < INSTANTS; ++k) {
         const f32 t = ((f32)k + 0.5F) / (f32)INSTANTS - 0.5F;
         mb_view(&v, camera_turned(turn * t), 0.0F);
         (void)render_into(f, &v, f->target, TEST_TARGET_SIZE, instant);
-        accumulator_add(&acc, instant);
+        test_accumulator_add(&acc, instant);
     }
-    accumulator_end(&acc, truth);
+    test_accumulator_end(&acc, truth);
     mb_view(&v, camera_turned(0.0F), 0.0F);
     (void)render_into(f, &v, f->target, TEST_TARGET_SIZE, sharp);
     mb_view(&v, camera_turned(-turn), FRAME);
     (void)test_render_frame(f, &v, f->target);
     mb_view(&v, camera_turned(0.0F), FRAME);
     NTEST_EXPECT_TRUE(render_into(f, &v, f->target, TEST_TARGET_SIZE, blurred).motion_blur);
-    const Diff ds = diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    const Diff db = diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    log_diff("turning camera, sharp", ds);
-    log_diff("turning camera, blurred", db);
+    const TestImageDiff ds =
+        test_image_diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    const TestImageDiff db =
+        test_image_diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    test_log_diff("turning camera, sharp", ds);
+    test_log_diff("turning camera, blurred", db);
     NTEST_EXPECT_TRUE((f32)ds.mean > 1.0F);
     NTEST_EXPECT_TRUE((f32)db.mean < (f32)ds.mean * 0.3F);
 }
@@ -389,10 +335,12 @@ NTEST_F(MotionBlur, a_still_box_in_front_stays_sharp)
     (void)render_into(f, &v, f->target, TEST_TARGET_SIZE, sharp);
     mb_view(&v, test_camera(), FRAME);
     NTEST_EXPECT_TRUE(moving_box_frames(f, box, 0.0, step, &v, blurred).motion_blur);
-    const Diff ds = diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    const Diff db = diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    log_diff("behind a still box, sharp", ds);
-    log_diff("behind a still box, blurred", db);
+    const TestImageDiff ds =
+        test_image_diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    const TestImageDiff db =
+        test_image_diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    test_log_diff("behind a still box, sharp", ds);
+    test_log_diff("behind a still box, blurred", db);
     NTEST_EXPECT_TRUE((f32)db.mean < (f32)ds.mean * 0.4F);
     // The still box's own pixels, those whose truth is its colour, keep it.
     const u8 front = (u8)nph_f32_round(nph_render_ref_linear_to_srgb(0.25F) * 255.0F);
@@ -444,10 +392,12 @@ NTEST_F(MotionBlur, it_blurs_the_temporal_resolve)
         NTEST_EXPECT_TRUE(s.taa_history);
         NTEST_EXPECT_EQ_INT(s.motion_blur, pass == 0U ? 0 : 1);
     }
-    const Diff ds = diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    const Diff db = diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
-    log_diff("temporal, sharp", ds);
-    log_diff("temporal, blurred", db);
+    const TestImageDiff ds =
+        test_image_diff(sharp, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    const TestImageDiff db =
+        test_image_diff(blurred, truth, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    test_log_diff("temporal, sharp", ds);
+    test_log_diff("temporal, blurred", db);
     // The resolve's anti-aliased edges against the jittered visibility
     // buffer's classification leave about as much error as one sample per
     // pixel does in the tests above.

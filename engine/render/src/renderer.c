@@ -377,6 +377,7 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(render_debug_create(r));
     NPH_TRY(render_rt_create(r));
     NPH_TRY(render_post_create(r));
+    NPH_TRY(render_dof_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
         // The path's HDR format first: the temporal resolve's history is in it.
         NPH_TRY(render_vis_create(r));
@@ -498,6 +499,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_vis_destroy(r);
     render_motion_destroy(r);
     render_taa_destroy(r);
+    render_dof_destroy(r);
     render_post_destroy(r);
     render_rt_destroy(r);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {

@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth of field's setup (docs/render.md "Depth of field"; ADR-0037).
+// A thin lens blurs a point z metres away into a circle of confusion whose
+// radius, signed negative in front of the focus, is linear in reverse-Z
+// depth (dof.c, dof_common.glsl). A workgroup takes one tile of
+// NPH_RENDER_DOF_TILE full-resolution pixels square, an invocation each
+// half-resolution pixel (2 x 2 full-resolution ones): it keeps their depths
+// at full resolution for the resolve, and the half-resolution colour
+// (their average, one bilinear tap) with the nearest of their depths for the
+// gather; the tile keeps its nearest and farthest circles (half-resolution
+// pixels).
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "dof_common.glsl"
+
+layout(local_size_x = NPH_RENDER_DOF_TILE / 2, local_size_y = NPH_RENDER_DOF_TILE / 2) in;
+
+// The depth: the visibility buffer's high words (the production path), or
+// a depth image (the reference's).
+layout(constant_id = 0) const bool k_visbuffer = true;
+
+// What each subgroup found (an array of a struct of its own: docs/build.md
+// "Shaders").
+struct Part {
+    float nearest;
+    float farthest;
+};
+shared Part s_parts[256];
+
+void main()
+{
+    const ivec2 h = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 full = ivec2(pc.width, pc.height);
+    const ivec2 base = 2 * h;
+    float nearest = 1e30;
+    float farthest = -1e30;
+    float block_depth = 0.0; // the nearest of the block: the largest reverse-Z depth
+    if (all(lessThan(base, full))) {
+        // The 2 x 2 depths by one gather at their shared corner, in a
+        // gather's order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
+        const vec2 corner = vec2(base + 1) * pc.inv_size;
+        vec4 depths;
+        if (k_visbuffer) {
+            depths = uintBitsToFloat(textureGather(
+                usampler2D(nph_utextures_2d[pc.depth_index], nph_samplers[pc.point_sampler]),
+                corner, 1));
+        } else {
+            depths = textureGather(
+                sampler2D(nph_textures_2d[pc.depth_index], nph_samplers[pc.point_sampler]), corner,
+                0);
+        }
+        const ivec2 at[4] =
+            ivec2[4](base + ivec2(0, 1), base + ivec2(1, 1), base + ivec2(1, 0), base);
+        for (int i = 0; i < 4; ++i) {
+            if (all(lessThan(at[i], full))) {
+                imageStore(nph_images_2d[pc.full_depth_index], at[i], vec4(depths[i]));
+                const float c = dof_circle(depths[i]);
+                nearest = min(nearest, c);
+                farthest = max(farthest, c);
+                block_depth = max(block_depth, depths[i]);
+            }
+        }
+        // Their average, which the bilinear tap at the corner is exactly
+        // (clamped at the image's last row and column).
+        const vec3 colour = textureLod(sampler2D(nph_textures_2d[pc.color_index],
+                                                 nph_samplers[pc.linear_sampler]),
+                                       corner, 0.0)
+                                .rgb;
+        imageStore(nph_images_2d[pc.half_index], h, vec4(colour, block_depth));
+    }
+    // The tile's nearest and farthest circles: each subgroup's, then the
+    // workgroup's.
+    const float sub_nearest = subgroupMin(nearest);
+    const float sub_farthest = subgroupMax(farthest);
+    if (subgroupElect()) {
+        s_parts[gl_SubgroupID].nearest = sub_nearest;
+        s_parts[gl_SubgroupID].farthest = sub_farthest;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        float tile_nearest = s_parts[0].nearest;
+        float tile_farthest = s_parts[0].farthest;
+        for (uint s = 1u; s < gl_NumSubgroups; ++s) {
+            tile_nearest = min(tile_nearest, s_parts[s].nearest);
+            tile_farthest = max(tile_farthest, s_parts[s].farthest);
+        }
+        imageStore(nph_images_2d[pc.tiles_index], ivec2(gl_WorkGroupID.xy),
+                   vec4(0.5 * tile_nearest, 0.5 * tile_farthest, 0.0, 0.0));
+    }
+}

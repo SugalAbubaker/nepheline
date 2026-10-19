@@ -38,7 +38,8 @@
 //   - on the production path, temporal anti-aliasing at native resolution
 //     (NphRenderAntiAliasing), fused with the tonemap, and motion blur
 //     (NphRenderView.shutter);
-//   - bloom and an automatically metered exposure, on both pipelines;
+//   - depth of field through a thin lens, bloom, and an automatically
+//     metered exposure, on both pipelines;
 //   - debug lines (debug_draw.h) over the tonemapped image.
 //
 // Large worlds (CLAUDE.md §8.2): instance, light, and camera positions are
@@ -580,13 +581,37 @@ typedef struct NphRenderView {
     // without a cut blurs; debug views and the reference renderer never do.
     // A 180-degree shutter at 240 frames a second is 1/480 s.
     f32 shutter;
+    // Depth of field (both pipelines; docs/render.md "Depth of field"): a
+    // thin lens of f-number `aperture` (0: a pinhole, everything sharp)
+    // focused `focus_distance` metres away, which must be more than its
+    // focal length, in front of a sensor `sensor_height` metres tall (0:
+    // 0.024, full frame); the focal length follows from the camera's yfov.
+    // A point z metres away blurs into a circle of confusion of radius
+    // f^2 |z - focus| / (2 N z (focus - f)) on the sensor, at most
+    // NPH_RENDER_DOF_MAX_RADIUS (32) pixels. Debug views have none.
+    f32 aperture;
+    f32 focus_distance;
+    f32 sensor_height;
+    // A point on the lens, metres along the camera's x and y, that the frame
+    // is seen through instead of its centre: the camera moves there and the
+    // projection shears so the plane `focus_distance` away stays put.
+    // Averaging frames over the aperture's disc renders depth of field as a
+    // real lens does (an accumulation buffer; Haeberli & Akeley, "The
+    // Accumulation Buffer", SIGGRAPH 1990): for captures, and the tests'
+    // ground truth. Zero: the lens's centre.
+    NphVec2 lens_offset;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), ACES, the environment as
-// background, no anti-aliasing, no bloom, no motion blur (the runtime turns
-// temporal anti-aliasing and bloom on, r.taa and r.bloom, and gives the
-// camera's shutter, r.motion_blur).
+// background, no anti-aliasing, no bloom, no motion blur, a pinhole (the
+// runtime turns temporal anti-aliasing and bloom on, r.taa and r.bloom, and
+// gives the camera's shutter and lens, r.motion_blur and r.dof).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
+
+// The focal length in metres of the view's lens: its sensor's height (0:
+// 0.024) over 2 tan(yfov / 2). A view with an aperture or a lens offset must
+// focus beyond it. NPH_THREADSAFE.
+f32 nph_render_view_focal_length(const NphRenderView *view);
 
 // The linear exposure for an EV100 value.
 f32 nph_render_exposure_from_ev100(f32 ev100);
@@ -656,8 +681,9 @@ typedef struct NphRenderFrameStats {
     f32 ev100;
     f32 metered_ev100;
     b32 bloom;
-    // Whether the frame was motion blurred.
+    // Whether the frame was motion blurred, and whether it had depth of field.
     b32 motion_blur;
+    b32 dof;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

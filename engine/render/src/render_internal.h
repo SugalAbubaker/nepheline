@@ -2,8 +2,8 @@
 #pragma once
 
 // Internal state of the renderer (renderer.c, frame.c, ibl.c, post.c,
-// debug_draw.c, and the production path in vis.c, vis_scene.c, vsm.c,
-// taa.c, and motion_blur.c). See
+// dof.c, debug_draw.c, and the production path in vis.c, vis_scene.c,
+// vsm.c, taa.c, and motion_blur.c). See
 // render/renderer.h for the contract and docs/render.md for the design.
 
 #include <nepheline/core/array.h>
@@ -569,6 +569,36 @@ typedef struct RenderPost {
     RenderPostPass passes[2U * NPH_RENDER_BLOOM_LEVELS + 1U];
 } RenderPost;
 
+// Depth of field on both pipelines (dof.c): every image is transient, made
+// each frame that has it.
+typedef struct RenderDof {
+    NphGpuShader shaders[4]; // dof_setup, dof_tiles, dof_gather, dof_resolve
+    NphGpuPipeline setup[2]; // [the reference's depth image, the visibility buffer]
+    NphGpuPipeline tiles;
+    NphGpuPipeline gather;
+    NphGpuPipeline resolve[2];      // [plain, B10G11R11 dithered]
+    NphGpuFormat full_depth_format; // the full-resolution depths: R16F where storable, else R32F
+    // This frame.
+    b32 frame_active;
+    f32 frame_bias; // the circle's radius in pixels at reverse-Z depth d: bias + scale * d
+    f32 frame_scale;
+    u32 frame_width;
+    u32 frame_height;
+    u32 frame_tiles_x;
+    u32 frame_tiles_y;
+    b32 frame_visbuffer;           // the depth is the visibility buffer's (the production path)
+    NphGpuFormat frame_hdr_format; // the output's too
+    NphGpuRgImage frame_hdr;       // as drawn
+    NphGpuRgImage frame_depth;
+    NphGpuRgImage frame_half;
+    NphGpuRgImage frame_full_depth;
+    NphGpuRgImage frame_tiles;
+    NphGpuRgImage frame_neighbours;
+    NphGpuRgImage frame_far;
+    NphGpuRgImage frame_near;
+    NphGpuRgImage frame_out; // the HDR image with depth of field
+} RenderDof;
+
 // The production path's motion blur (motion_blur.c): the motion image and
 // the tiles are transient, made each frame that blurs.
 typedef struct RenderMotion {
@@ -676,6 +706,9 @@ struct NphRenderer {
 
     // The production path's motion blur.
     RenderMotion motion;
+
+    // Depth of field.
+    RenderDof dof;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -850,6 +883,21 @@ NphVec2 render_taa_jitter(u64 sequence);
 // sample at offset o lies at o - jitter from the pixel's centre. They sum
 // to 1 (taa_common.glsl taa_filter_weight is the shader's twin).
 void render_taa_weights(NphVec2 jitter, f32 out[9]);
+
+// dof.c: depth of field.
+NphResult render_dof_create(NphRenderer *r);
+void render_dof_destroy(NphRenderer *r);
+// Whether this frame has depth of field: a lit view with an aperture. If so
+// sets RenderDof.frame_* for a target `height` pixels tall.
+bool render_dof_frame_begin(NphRenderer *r, const NphRenderView *view, u32 height);
+// The setup, the neighbourhoods, the gather, and the resolve, which make
+// `out`, the HDR image with depth of field (of `hdr_format`, sampled), from
+// `hdr` (sampled) and `depth` (the visibility buffer when `visbuffer`, else
+// a sampled depth image); after the scene, before render_post_declare,
+// whose passes and the frame's later ones then read `out` as the HDR image.
+NphResult render_dof_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage hdr,
+                             NphGpuFormat hdr_format, NphGpuRgImage depth, bool visbuffer,
+                             u32 width, u32 height, NphGpuRgImage *out);
 
 // motion_blur.c: the production path's motion blur.
 NphResult render_motion_create(NphRenderer *r);

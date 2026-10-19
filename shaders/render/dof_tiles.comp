@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth of field's neighbourhoods (docs/render.md "Depth of field";
+// ADR-0037): for each tile, the nearest and farthest circles of confusion of
+// the 3 x 3 tiles around it (half-resolution pixels), which bound every
+// circle that can reach its pixels (a circle is at most a tile across in
+// radius), and so give its class (dof_common.glsl dof_tile_class); and the
+// largest circle within two tiles, over the slight blur's exactly when a
+// tile within one is gathered at half resolution: its resolve reads the
+// texels a pixel into the tiles beside it, which the gather then writes.
+#version 460
+#include "dof_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main()
+{
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 tiles = ivec2(pc.tiles_x, pc.tiles_y);
+    if (any(greaterThanEqual(t, tiles))) {
+        return;
+    }
+    vec2 range = vec2(1e30, -1e30);
+    float largest = 0.0;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            const ivec2 n = t + ivec2(dx, dy);
+            if (any(lessThan(n, ivec2(0))) || any(greaterThanEqual(n, tiles))) {
+                continue;
+            }
+            const vec2 r = imageLoad(nph_images_2d[pc.tiles_index], n).xy;
+            largest = max(largest, max(-r.x, r.y));
+            if (abs(dx) <= 1 && abs(dy) <= 1) {
+                range = vec2(min(range.x, r.x), max(range.y, r.y));
+            }
+        }
+    }
+    imageStore(nph_images_2d[pc.neighbours_index], t, vec4(range, largest, 0.0));
+}
