@@ -19,9 +19,10 @@ static const NphLight g_light_defaults = {
 NPH_COMPONENT_DEFINE(NphLight, NPH_LIGHT_FIELDS, "Light", 0U, &g_light_defaults)
 
 // About 52 degrees of vertical field, a 10 cm near plane, sunny-day
-// exposure, ACES, and no motion blur (render/renderer.h
+// exposure, ACES, no motion blur, and a pinhole, which an aperture turns
+// into a full-frame lens focused 10 m away (render/renderer.h
 // nph_render_view_default).
-static const NphCamera g_camera_defaults = {0.9F, 0.1F, 15.0F, 1U, 1, 0.0F};
+static const NphCamera g_camera_defaults = {0.9F, 0.1F, 15.0F, 1U, 1, 0.0F, 0.0F, 10.0F, 0.0F};
 NPH_COMPONENT_DEFINE(NphCamera, NPH_CAMERA_FIELDS, "Camera", 0U, &g_camera_defaults)
 
 // The renderer's default clear sky (nph_render_sky_desc_default): colours

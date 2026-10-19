@@ -454,6 +454,9 @@ NTEST(SceneRender, the_camera_and_the_environment)
     c->yfov = 1.2F;
     c->znear = 0.25F;
     c->shutter = 1.0F / 480.0F;
+    c->aperture = 2.8F;
+    c->focus_distance = 4.0F;
+    c->sensor_height = 0.036F;
     NphLocalTransform *lt = local(&fx, cam);
     lt->translation = nph_dvec3(1.0, 2.0, 3.0);
     lt->rotation = nph_quat_from_rotation_y(0.5F);
@@ -468,6 +471,21 @@ NTEST(SceneRender, the_camera_and_the_environment)
     NTEST_ASSERT_NEAR_F32(view.ev100, 9.0F, 0.0F);
     NTEST_ASSERT_EQ_UINT((u32)view.tonemapper, (u32)NPH_RENDER_TONEMAPPER_AGX);
     NTEST_ASSERT_NEAR_F32(view.shutter, 1.0F / 480.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.aperture, 2.8F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.focus_distance, 4.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.sensor_height, 0.036F, 0.0F);
+    // A focus no further than the focal length (36 mm over 2 tan(0.6): 26
+    // mm) makes the lens a pinhole, as does one that is not finite.
+    c = (NphCamera *)nph_world_get_mut(fx.world, cam, fx.ids.camera);
+    c->focus_distance = 0.02F;
+    (void)sync(&fx);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(fx.sr, &view));
+    NTEST_ASSERT_NEAR_F32(view.aperture, 0.0F, 0.0F);
+    c = (NphCamera *)nph_world_get_mut(fx.world, cam, fx.ids.camera);
+    c->focus_distance = NPH_F32_INFINITY;
+    (void)sync(&fx);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(fx.sr, &view));
+    NTEST_ASSERT_NEAR_F32(view.aperture, 0.0F, 0.0F);
     const NphQuat want = nph_quat_from_rotation_y(0.5F);
     NTEST_ASSERT_NEAR_F32(nph_f32_abs(nph_quat_dot(view.camera.orientation, want)), 1.0F, 1e-5F);
     // Deactivating it hands the view to the next one.
@@ -478,6 +496,9 @@ NTEST(SceneRender, the_camera_and_the_environment)
     NTEST_ASSERT_NEAR_F64(view.camera.position.x, 0.0, 0.0);
     NTEST_ASSERT_NEAR_F32(view.ev100, 15.0F, 0.0F);
     NTEST_ASSERT_NEAR_F32(view.shutter, 0.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.aperture, 0.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.focus_distance, 10.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.sensor_height, 0.0F, 0.0F);
     NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, other), NPH_RESULT_OK);
     (void)sync(&fx);
     NTEST_ASSERT_FALSE(nph_scene_renderer_view(fx.sr, &view));

@@ -99,17 +99,25 @@ NPH_COMPONENT_STRUCT(NphLight, NPH_LIGHT_FIELDS);
 NPH_COMPONENT_DECLARE(NphLight);
 
 // A perspective camera along the entity's -Z with +Y up (ADR-0008), with
-// its exposure (EV100), tonemapper, and shutter (render/renderer.h
+// its exposure (EV100), tonemapper, shutter, and lens (render/renderer.h
 // NphRenderView): how long the shutter is open in seconds, which the motion
 // blur spans (0: none; 1/480 is a 180-degree shutter at 240 frames a
-// second; the r.motion_blur cvar turns it off).
+// second; the r.motion_blur cvar turns it off); and the lens's f-number
+// (`aperture`, 0: a pinhole, everything sharp), the distance in metres it
+// focuses at, and its sensor's height in metres (0: full frame, 0.024),
+// which with yfov give its focal length. The depth of field they make
+// (r.dof turns it off) needs the focus beyond the focal length: short of it
+// the lens is a pinhole.
 #define NPH_CAMERA_FIELDS(F)                                                                       \
     F(F32, yfov, NPH_FIELD_HINTS(NPH_FIELD_FLAG_ANGLE | NPH_FIELD_FLAG_RANGE, 0.1F, 2.8F))         \
     F(F32, znear, NPH_FIELD_RANGE(0.001F, 10.0F))                                                  \
     F(F32, ev100, NPH_FIELD_RANGE(-6.0F, 20.0F))                                                   \
     F(U32, tonemapper, NPH_FIELD_RANGE(0.0F, 2.0F))                                                \
     F(BOOL, active, NPH_FIELD_NO_HINTS)                                                            \
-    F(F32, shutter, NPH_FIELD_RANGE(0.0F, 0.1F))
+    F(F32, shutter, NPH_FIELD_RANGE(0.0F, 0.1F))                                                   \
+    F(F32, aperture, NPH_FIELD_RANGE(0.0F, 32.0F))                                                 \
+    F(F32, focus_distance, NPH_FIELD_RANGE(0.05F, 1000.0F))                                        \
+    F(F32, sensor_height, NPH_FIELD_RANGE(0.0F, 0.1F))
 NPH_COMPONENT_STRUCT(NphCamera, NPH_CAMERA_FIELDS);
 NPH_COMPONENT_DECLARE(NphCamera);
 

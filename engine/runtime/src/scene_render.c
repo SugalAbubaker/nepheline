@@ -71,6 +71,9 @@ struct NphSceneRenderer {
     f32 ev100;
     u32 tonemapper;
     f32 shutter;
+    f32 aperture;
+    f32 focus_distance;
+    f32 sensor_height;
     u32 instances;
     u32 lights;
     u32 failed;
@@ -714,6 +717,14 @@ static void sync_camera(NphSceneRenderer *sr)
             sr->ev100 = c[i].ev100;
             // A second at most: the renderer refuses what is not finite.
             sr->shutter = c[i].shutter > 0.0F ? nph_f32_min(c[i].shutter, 1.0F) : 0.0F;
+            // A lens's f-number and sensor finite and positive, else a
+            // pinhole and full frame (its focus is checked with the view).
+            sr->aperture =
+                c[i].aperture > 0.0F && nph_f32_is_finite(c[i].aperture) ? c[i].aperture : 0.0F;
+            sr->focus_distance = c[i].focus_distance;
+            sr->sensor_height = c[i].sensor_height > 0.0F && nph_f32_is_finite(c[i].sensor_height)
+                                    ? c[i].sensor_height
+                                    : 0.0F;
             sr->tonemapper = c[i].tonemapper <= (u32)NPH_RENDER_TONEMAPPER_AGX
                                  ? c[i].tonemapper
                                  : (u32)NPH_RENDER_TONEMAPPER_ACES;
@@ -830,6 +841,15 @@ bool nph_scene_renderer_view(const NphSceneRenderer *sr, NphRenderView *view)
     view->ev100 = sr->ev100;
     view->tonemapper = (NphRenderTonemapper)sr->tonemapper;
     view->shutter = sr->shutter;
+    view->aperture = sr->aperture;
+    view->focus_distance = sr->focus_distance;
+    view->sensor_height = sr->sensor_height;
+    // A lens that cannot focus there, not beyond its focal length or not
+    // finite, is a pinhole (the renderer refuses the lens).
+    if (!(nph_f32_is_finite(view->focus_distance) &&
+          view->focus_distance > nph_render_view_focal_length(view))) {
+        view->aperture = 0.0F;
+    }
     return true;
 }
 
