@@ -46,6 +46,7 @@
 //                         field_4k_production exposed automatically
 //                         (NPH_RENDER_EXPOSURE_AUTO): the histogram and the
 //                         metering on top of the bloom chain.
+
 //   lights_<n>_<pipeline> the field at night, lit by n point and spot
 //                         lights of 3 to 8 m range among the nearer rows
 //                         (and a dim moon): the light grid's cost against
@@ -73,6 +74,13 @@
 //   lights_1k_shadows     lights_1k_production with every lamp (and the
 //                         moon) casting shadows: a ray per pixel per light
 //                         that reaches it.
+//   motion_{turn,strafe,flick}_4k_production
+//                         field_4k_production with motion blur (a
+//                         180-degree shutter at 240 frames a second, 1/480 s)
+//                         while the camera turns 60 degrees a second, strafes
+//                         at 5 m/s (parallax: the layered gather), or turns
+//                         360 degrees a second, each reversing every quarter
+//                         second so the view stays over the field.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -137,9 +145,18 @@ typedef enum ScenePost {
     POST_NO_TAA = 1U << 0U,        // the production path without temporal anti-aliasing
     POST_NO_BLOOM = 1U << 1U,      // no bloom
     POST_AUTO_EXPOSURE = 1U << 2U, // the exposure metered and adapted
+    // Motion blur with the camera moving (SCENE_MOTION_*).
+    POST_MOTION_TURN = 1U << 3U,   // turning 60 degrees a second
+    POST_MOTION_STRAFE = 1U << 4U, // strafing at 5 m/s
+    POST_MOTION_FLICK = 1U << 5U,  // turning 360 degrees a second
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
+// Motion blur: a 180-degree shutter at the §10.1 rate, and the camera's
+// motions reversing every quarter second.
+#define MOTION_FRAME   (1.0F / 240.0F)
+#define MOTION_SHUTTER (1.0F / 480.0F)
+#define MOTION_REVERSE 60U
 
 static const SceneDef g_scenes[] = {
     {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
@@ -184,6 +201,12 @@ static const SceneDef g_scenes[] = {
      2160U, 0U, SHADOWS_SUN_WALK, 0},
     {"lights_1k_shadows", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_ALL, 0},
+    {"motion_turn_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_MOTION_TURN},
+    {"motion_strafe_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_MOTION_STRAFE},
+    {"motion_flick_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_MOTION_FLICK},
 };
 
 typedef struct Result {
@@ -223,6 +246,11 @@ typedef struct Ctx {
     // The camera walking (SHADOWS_SUN_WALK): its step per frame.
     bool walking;
     NphDVec3 walk_step;
+    // The camera turning or strafing for motion blur (POST_MOTION_*): radians
+    // and metres per frame, and the frame count (the motions reverse).
+    f32 turn;
+    f64 strafe;
+    u32 motion_frame;
 } Ctx;
 
 static int compare_f64(const void *a, const void *b)
@@ -459,6 +487,8 @@ static void destroy_scene(Ctx *ctx)
     ctx->light_count = 0U;
     ctx->moving = false;
     ctx->walking = false;
+    ctx->turn = 0.0F;
+    ctx->strafe = 0.0;
     // The sun as setup made it (a scene may have dimmed it or given it
     // shadows).
     NPH_IGNORE_RESULT(nph_render_light_update(ctx->renderer, ctx->sun, &ctx->sun_desc));
@@ -479,6 +509,18 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f
 {
     if (ctx->walking) {
         view->camera.position = nph_dvec3_add(view->camera.position, ctx->walk_step);
+    }
+    if (ctx->turn != 0.0F || ctx->strafe != 0.0) {
+        const f32 sign = ((ctx->motion_frame++ / MOTION_REVERSE) & 1U) != 0U ? -1.0F : 1.0F;
+        // About the world's up axis, and along the camera's right.
+        view->camera.orientation = nph_quat_normalize(
+            nph_quat_mul(nph_quat_from_axis_angle(nph_vec3_unit_y(), sign * ctx->turn),
+                         view->camera.orientation));
+        const NphVec3 right = nph_quat_rotate(view->camera.orientation, nph_vec3_unit_x());
+        const f64 along = (f64)sign * ctx->strafe;
+        view->camera.position = nph_dvec3_add(
+            view->camera.position,
+            nph_dvec3((f64)right.x * along, (f64)right.y * along, (f64)right.z * along));
     }
     if (ctx->moving) {
         // The sphere bobs a centimetre up and down.
@@ -561,6 +603,18 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
     NphResult r = build_scene(ctx, s, &view);
+    const u32 motion =
+        s->post & ((u32)POST_MOTION_TURN | (u32)POST_MOTION_STRAFE | (u32)POST_MOTION_FLICK);
+    if (motion != 0U) {
+        view.shutter = MOTION_SHUTTER;
+        view.frame_seconds = MOTION_FRAME;
+        const f32 degrees = NPH_PI / 180.0F * MOTION_FRAME; // a degree a second, per frame
+        ctx->turn = motion == (u32)POST_MOTION_TURN    ? 60.0F * degrees
+                    : motion == (u32)POST_MOTION_FLICK ? 360.0F * degrees
+                                                       : 0.0F;
+        ctx->strafe = motion == (u32)POST_MOTION_STRAFE ? 5.0 * (f64)MOTION_FRAME : 0.0;
+        ctx->motion_frame = 0U;
+    }
     static FrameRun run;
     if (r == NPH_RESULT_OK) {
         r = run_frames(ctx, &view, target, frames, &run);
@@ -629,12 +683,12 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
                "%u occlusion, clusters %u frustum + %u cone + %u occlusion; lights %u, %u in "
-               "view%s%s\n",
+               "view%s%s%s\n",
                st->vis_clusters, st->vis_clusters_sw, st->vis_triangles,
                st->vis_instances_culled_frustum, st->vis_instances_culled_occlusion,
                st->vis_meshlets_culled_frustum, st->vis_meshlets_culled_cone,
                st->vis_meshlets_culled_occlusion, st->lights, st->vis_lights,
-               st->shadow_rays ? "; shadow rays" : "",
+               st->shadow_rays ? "; shadow rays" : "", st->motion_blur ? "; motion blur" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
