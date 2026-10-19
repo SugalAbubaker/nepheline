@@ -41,6 +41,8 @@ supersedes it and both link to each other.
 | [0033](0033-virtual-shadow-maps.md) | The sun's virtual shadow map: a resolution-matched clipmap of cached pages | Accepted |
 | [0034](0034-temporal-anti-aliasing.md) | Temporal anti-aliasing at native resolution, fused with the tonemap | Accepted (its §10.4 line open) |
 | [0035](0035-bloom-and-exposure.md) | Bloom and automatic exposure | Accepted (adds to ADR-0034's open §10.4 line) |
+| [0036](0036-motion-blur.md) | Motion blur after the temporal resolve, weighted by the shutter | Accepted (adds to ADR-0034's open §10.4 line) |
+| [0037](0037-depth-of-field.md) | Depth of field through a thin lens: slight blur gathered at full resolution, large at half | Accepted (adds to ADR-0034's open §10.4 line) |
 
 ## Template
 

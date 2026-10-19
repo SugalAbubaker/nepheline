@@ -26,8 +26,10 @@ shadow rays where the device has ray queries
 anti-aliases temporally at native resolution where the view asks
 ("Temporal anti-aliasing" below; [ADR-0034](adr/0034-temporal-anti-aliasing.md))
 and blurs motion over the view's shutter time ("Motion blur" below;
-[ADR-0036](adr/0036-motion-blur.md)). Both add bloom and expose
-automatically where the view asks ("Bloom and exposure" below;
+[ADR-0036](adr/0036-motion-blur.md)). Both see through a thin lens where
+the view has an aperture ("Depth of field" below;
+[ADR-0037](adr/0037-depth-of-field.md)), and add bloom and expose
+automatically where it asks ("Bloom and exposure" below;
 [ADR-0035](adr/0035-bloom-and-exposure.md)).
 
 Every formula is cited in the shader that implements it, and has a CPU
@@ -117,6 +119,7 @@ then add its own passes (a UI, a capture, the present), compile, and execute.
 | `ibl source`, `ibl downsample` ×n, `ibl sh`, `ibl prefilter` ×m | compute, when the environment changed | environment levels | environment chain, SH, prefiltered levels |
 | `rt accel` | compute, when a light casts shadows | the instance records | new meshes' bottom levels, the top level ("Shadows") |
 | `forward` | graphics | lighting tables, SH, the top level when it traces | pre-exposed RGBA16F colour, D32 depth |
+| `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | compute; with an aperture | HDR colour and depth (sampled) | an HDR image with depth of field, which the passes after read ("Depth of field") |
 | `exposure clear`, `bloom down 0` to `bloom down N`, `bloom up N - 1` to `bloom up 0`, `exposure average`, `exposure readback` | compute, transfer; with bloom or an automatic exposure | HDR colour (sampled) | the bloom chain, the metering ("Bloom and exposure") |
 | `tonemap` | graphics | HDR colour (sampled), depth (read-only attachment), the bloom chain's mip 0 | the caller's target |
 
@@ -426,6 +429,7 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
+| `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
 | `bloom …`, `exposure …` | with bloom or an automatic exposure: the chain and the metering over the HDR image, as the reference's ("Bloom and exposure") |
 | `taa` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), or on a frame with motion blur writes only its history |
 | `motion`, `motion tiles`, `motion blur` | on a frame with motion blur: every pixel's motion, the tiles' dominant blurs, and the blur fused with the tonemap (below) |
@@ -684,28 +688,33 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.21 ms | 0.007 ms | 0.10 ms | 0.24 ms |
-| grid, 512 × 512 | 10,240 | 1.20 ms | 0.007 ms | 0.21 ms | 0.28 ms |
-| grid, 512 × 512 | 102,400 | 13.3 ms | 0.007 ms | 3.41 ms | 0.65 ms |
-| field, 3840 × 2160 | 16,385 | 3.02 ms | 0.009 ms | 3.05 ms | 2.95 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.008 ms | | 2.17 ms |
-| the same without bloom | 16,385 | | 0.009 ms | | 2.60 ms |
-| the same exposed automatically | 16,385 | | 0.009 ms | | 2.96 ms |
-| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.009 ms | | 3.55 ms |
-| the same, strafing at 5 m/s | 16,385 | | 0.009 ms | | 3.53 ms |
-| the same, turning 360°/s | 16,385 | | 0.009 ms | | 3.46 ms |
-| field at night, 1,024 lights | 16,385 | 3.59 ms | 0.009 ms | 54.8 ms | 3.27 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.007 ms | 0.10 ms | 0.23 ms |
+| grid, 512 × 512 | 10,240 | 1.24 ms | 0.007 ms | 0.21 ms | 0.28 ms |
+| grid, 512 × 512 | 102,400 | 13.2 ms | 0.007 ms | 3.57 ms | 0.66 ms |
+| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.009 ms | 3.03 ms | 2.97 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.009 ms | | 2.19 ms |
+| the same without bloom | 16,385 | | 0.009 ms | | 2.62 ms |
+| the same exposed automatically | 16,385 | | 0.009 ms | | 2.99 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.009 ms | | 3.53 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.009 ms | | 3.52 ms |
+| the same, turning 360°/s | 16,385 | | 0.009 ms | | 3.44 ms |
+| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.010 ms | | 3.94 ms |
+| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.010 ms | | 4.51 ms |
+| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.010 ms | | 4.29 ms |
+| field at night, 1,024 lights | 16,385 | 3.56 ms | 0.009 ms | 54.7 ms | 3.26 ms |
 | field at night, 4,000 lights | 16,385 | | 0.009 ms | | 4.96 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.06 ms | 0.010 ms | 3.66 ms | 3.39 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.40 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.010 ms | | 3.44 ms |
-| the map, the camera walking | 16,385 | | 0.010 ms | | 3.40 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.16 ms | 0.010 ms | 3.65 ms | 3.37 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.39 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.011 ms | | 3.43 ms |
+| the map, the camera walking | 16,385 | | 0.011 ms | | 3.40 ms |
 | field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.011 ms | | 4.69 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
 frames resolve temporally (the runtime's default), the reference's do not;
-the motion-blurred frames have a 180-degree shutter at 240 frames a second
-(`render_perf-2026-10-19`).
+the motion-blurred frames have a 180-degree shutter at 240 frames a
+second, and the others with depth of field a full-frame lens at f/1.4
+(`render_perf-2026-10-19b`; a frame varies by a few hundredths of a
+millisecond from run to run).
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
@@ -720,7 +729,8 @@ budgeted) and the shading (1.20 ms) fit; culling with the depth pyramid
 takes 0.31 ms against 0.25 ms, most of it the first pyramid's read of the
 visibility buffer; the temporal resolve and the bloom chain (1.10 ms) are
 past the 0.40 ms of TAA, post, and the tonemap together (ADR-0034,
-ADR-0035), and motion blur adds 0.51 to 0.60 ms when on (ADR-0036). With
+ADR-0035); motion blur adds about half a millisecond when on (ADR-0036),
+and depth of field 0.97 to 1.54 ms (ADR-0037). With
 1,024 lamps the grid's passes take 0.049 ms and the resolve 1.20 ms (every
 light for every pixel: 44.4 ms), at the shading line.
 The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
@@ -779,6 +789,75 @@ directional light anyway.
 On UNORM targets the shader applies the exact sRGB curve; sRGB targets are
 encoded by the hardware. Tests compare both against the C reference, texel
 by texel, within one 8-bit step.
+
+## Depth of field
+
+A view whose `NphRenderView.aperture` is above zero sees through a thin
+lens of that f-number, focused `focus_distance` metres away, in front of a
+sensor `sensor_height` metres tall (0: full frame, 0.024 m), whose focal
+length follows from the camera's field of view
+(`nph_render_view_focal_length`; [ADR-0037](adr/0037-depth-of-field.md)).
+Both pipelines blur lit views (the statistic `dof`); the runtime gives the
+world camera's lens and makes it a pinhole with `r.dof`.
+
+- **The circle of confusion.** A point z metres away blurs into a disc of
+  radius K (1 − z_f / z) pixels, negative in front of the focus, with
+  K = f² H / (2 N (z_f − f) h) for an image H pixels tall (Potmesil &
+  Chakravarty, "A Lens and Aperture Camera Model for Synthetic Image
+  Generation", SIGGRAPH 1981): one multiply-add from the reverse-Z depth.
+  Circles are cut at 32 pixels, a tile.
+- **Where.** After the scene, before bloom (which glows from the blurred
+  image) and the final pass, whose temporal resolve averages the gathers'
+  samples as they turn from frame to frame.
+- **Setup** (`dof_setup.comp`): every pixel's depth in half floats; the
+  half-resolution image, each texel its 2 × 2 pixels' average colour and
+  the nearest of their depths; each 32-pixel tile's nearest and farthest
+  circle.
+- **Tiles** (`dof_tiles.comp`): a tile's 3 × 3 neighbourhood bounds every
+  circle that can reach its pixels, which classes it as in focus (all
+  under half a pixel), slightly out of focus (none over
+  `NPH_RENDER_DOF_SLIGHT`, 8 pixels), or further.
+- **The gather** (`dof_gather.glsl`): scattering as a gather (Jimenez,
+  "Next Generation Post Processing in Call of Duty: Advanced Warfare",
+  SIGGRAPH 2014) with the lens's own weights. The samples lie on a spiral
+  turned by the golden angle at equal-area radii, each standing for an
+  equal share of the disc, turned per pixel by interleaved gradient noise
+  that moves every frame. Against the pixel's own depth (5 % apart is
+  wholly in front), samples in front reach the pixel where their circles
+  cover it, 1 / (π c²) of their light per unit area: the near layer, its
+  coverage in alpha. The others, within the pixel's own circle, average
+  into the far layer: its surface and what the circle reveals behind it.
+- **Further out of focus** (`dof_gather.comp`): those tiles, and the tiles
+  beside them, at half resolution, a sample per 2 square texels of the
+  disc, 8 to 48.
+- **The resolve** (`dof_resolve.comp`), at full resolution into a new HDR
+  image that the rest of the frame reads: tiles in focus are copied as
+  drawn; tiles slightly out of focus are gathered at full resolution from
+  their pixels and 8 more around them in shared memory, a sample per 8
+  square pixels, 8 to 48, where half resolution would carry an edge's
+  light a pixel or two past the lens's (as the "slight out of focus"
+  gather of Abadie, "A Life of a Bokeh", SIGGRAPH 2018); the rest are
+  composited. There a pixel in focus keeps its colour and one out of focus
+  takes the far layer, with the near layer over either, from the four
+  half-resolution texels around it, those of another surface (1 to 5 %
+  apart in depth) all but left out, and by two bilinear fetches where all
+  four are of its surface. Beside a blurred surface in front, that
+  surface's texels' own colour carries its blur's edge on across the sharp
+  edge under it; a sharp surface in front leaves the pixel as drawn.
+
+`NphRenderView.lens_offset` sees a frame through a point on the lens
+instead of its centre (the camera moves there and the projection shears,
+so the focus plane stays put): averaged over the aperture's disc, such
+frames are a thin lens's exact image (Haeberli & Akeley, "The Accumulation
+Buffer", SIGGRAPH 1990), for captures and the tests' ground truth. Against
+64 of them, a box 10 m away behind one in focus at 3.7 m (circles of 3.8
+pixels, the sky's 6.1) holds 2.05 levels of mean error (the pinhole frame:
+7.12), the reference renderer 1.98 (7.10), the same temporally resolved
+1.18 (6.13), and a box 1.35 m away blurred over a wall in focus (circles of
+12 pixels) 1.14 (9.35). At 4K a full-frame lens wide open (f/1.4) adds
+0.97 ms with circles up to 4 pixels, 1.54 ms up to 7.7 (the most the
+full-resolution gather takes), and 1.32 ms at the 32-pixel limit, past the
+§10.4 post line (ADR-0037).
 
 ## Bloom and exposure
 
@@ -864,7 +943,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (116 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (125 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -935,6 +1014,15 @@ synchronisation-validation gate:
   the frame without history in the same jitter phase; the history's
   continuity across modes and extents; debug views and the reference never
   jittered; an exposure change rescaling the history.
+- **Depth of field** (`test_dof.c`), against the average of 64 frames
+  through points spread over the lens: a box behind the focus, a near box
+  over it, the same on the reference renderer, and a temporally resolved
+  view, each well under the pinhole frame's error; tiles in focus as far
+  as any circle reaches left as drawn, bit for bit, and a sharp card's
+  edges kept bit for bit in tiles further out of focus; the lens offset
+  moving a card on the focus plane by nothing and one beyond it by its
+  parallax; a pinhole frame the plain one; debug views sharp; lenses that
+  cannot focus, or are not finite, refused.
 - **Motion blur** (`test_motion_blur.c`), against the shutter's average of
   32 sharp frames at instants across it (supersampled under temporal
   anti-aliasing): a moving box, a half-open shutter (against its own
@@ -993,6 +1081,11 @@ path and logs what the GPU culled.
   (ADR-0034), and bloom adds 0.36 ms (ADR-0035); blended surfaces are
   resolved with the motion of the opaque surface behind them, and there is
   no sharpening. No MSAA. The HDR target's dither is the same every frame.
+- Depth of field adds 0.97 to 1.54 ms at 4K with a lens wide open; its
+  circles are cut at 32 pixels; what a
+  sharp surface in front hides cannot show through its blur; bokeh is a
+  uniform disc; blended surfaces take the depth of the opaque surface
+  behind them (ADR-0037).
 - Motion blur adds 0.51 to 0.60 ms at 4K with typical motions (ADR-0036).
   Blended surfaces blur with the motion of the opaque surface behind them;
   motion is linear across the shutter; a blur reaches at most 32 pixels
