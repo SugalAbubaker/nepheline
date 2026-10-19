@@ -24,9 +24,11 @@ production path's sun from its virtual shadow map
 shadow rays where the device has ray queries
 ([ADR-0032](adr/0032-ray-traced-shadows.md)). The production path
 anti-aliases temporally at native resolution where the view asks
-("Temporal anti-aliasing" below; [ADR-0034](adr/0034-temporal-anti-aliasing.md)).
-Both add bloom and expose automatically where the view asks ("Bloom and
-exposure" below; [ADR-0035](adr/0035-bloom-and-exposure.md)).
+("Temporal anti-aliasing" below; [ADR-0034](adr/0034-temporal-anti-aliasing.md))
+and blurs motion over the view's shutter time ("Motion blur" below;
+[ADR-0036](adr/0036-motion-blur.md)). Both add bloom and expose
+automatically where the view asks ("Bloom and exposure" below;
+[ADR-0035](adr/0035-bloom-and-exposure.md)).
 
 Every formula is cited in the shader that implements it, and has a CPU
 twin that the tests check it against.
@@ -425,7 +427,9 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
 | `bloom …`, `exposure …` | with bloom or an automatic exposure: the chain and the metering over the HDR image, as the reference's ("Bloom and exposure") |
-| `taa`, `debug lines` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), then the debug lines |
+| `taa` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), or on a frame with motion blur writes only its history |
+| `motion`, `motion tiles`, `motion blur` | on a frame with motion blur: every pixel's motion, the tiles' dominant blurs, and the blur fused with the tonemap (below) |
+| `debug lines` | after either, the debug lines |
 | `tonemap` | otherwise, as the reference's |
 
 `vis args …` passes between them turn counts into indirect arguments,
@@ -570,11 +574,13 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
 - **Motion.** The nearest surface in the 3 × 3 neighbourhood: four gathers
   of the visibility buffer's depths through its R32G32_UINT sampled view
   (`NphGpuImageDesc.sampled_format`), then one fetch of its record. Its
-  point is rebuilt camera relative and taken through the previous frame's
-  projection without its jitter: with the camera alone for a still
-  surface, through the previous transform for an instance that moved
-  (`NPH_VIS_INSTANCE_MOVED`, which the scatter pass keeps and the meshlet
-  cull copies to the cluster), with the rotation alone for the sky.
+  point goes from this frame's clip space to the previous frame's without
+  its jitter (`vis_previous_uv`, which the motion blur shares): through
+  one matrix for a still surface (`NphVisViewData.reproject`: the previous
+  view-projection, the camera's move, this frame's inverse), which leaves
+  the sky to the camera's rotation, and through the previous transform for
+  an instance that moved (`NPH_VIS_INSTANCE_MOVED`, which the scatter pass
+  keeps and the meshlet cull copies to the cluster).
 - **The blend.** The 3 × 3 neighbourhood filtered with a Gaussian of a box
   filter's spread under the jitter; the history read by five Catmull-Rom
   taps (Jimenez 2016), rescaled by the exposure's change, and clipped in
@@ -593,9 +599,61 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
 Against the reference renderer at 4 × 4 the resolution, a still view
 converges to 0.39 levels of mean error (one sample per pixel: 1.22), a
 panning camera holds 0.65 (1.24), and a moving cube 0.33 (0.62), with no
-trail beyond an edge's own pixel. The pass costs 0.79 ms in the 4K field
+trail beyond an edge's own pixel. The pass costs 0.75 ms in the 4K field
 against the tonemap's 0.11 ms, over the §10.4 line for TAA, post, and the
 tonemap together; ADR-0034 records why, and what can bring it down.
+
+### Motion blur
+
+A production view with `NphRenderView.shutter` above zero blurs each pixel
+over what crosses it while the shutter is open, centred on the frame's
+instant: its surface's motion since the previous frame times `shutter /
+frame_seconds` ([ADR-0036](adr/0036-motion-blur.md)). A 180-degree shutter
+at 240 frames a second is 1/480 s. Only lit frames that follow a
+production frame of the same extent without a cut blur (the statistic
+`motion_blur`); the runtime gives the world camera's `shutter` and closes
+it with `r.motion_blur`.
+
+- **After the temporal resolve.** On such a frame the temporal resolve
+  writes only its history (`taa_history.frag`), and the blur reads it and
+  writes the target with the tonemap (`motion_blur.frag`): the resolve sees
+  sharp surfaces, and no blur reaches the next frame's history. Without
+  temporal anti-aliasing the blur reads the HDR image and mixes the bloom
+  in itself. The debug lines are drawn after it.
+- **Motion** (`motion.comp`): each pixel's, as the temporal resolve takes
+  it ("Motion" above), its blur cut to a tile, 32 pixels (31.94 as packed),
+  so no blur reaches past the tiles around its own; packed with the view
+  distance into a word (`motion_common.glsl`: sixteenths of a pixel, and
+  log2 of the distance in 1.1 % steps). Each 32-pixel tile keeps its
+  longest blur and the spread of its pixels' around it (McGuire et al.,
+  "A Reconstruction Filter for Plausible Motion Blur", I3D 2012).
+- **Neighbourhoods** (`motion_tiles.comp`): each tile's dominant blur is the
+  longest of its 3 × 3 tiles that can reach it, a diagonal one only if its
+  blur runs along that diagonal (Guertin, McGuire & Nowrouzezahrai, "A Fast
+  and Stable Feature-Aware Motion Blur Filter", HPG 2014).
+- **The gather.** Where every blur in the neighbourhood lies within half a
+  pixel, or a tenth of its length, of the dominant one (a turning camera),
+  the pixel is the average of the colour along it, by bilinear taps a pixel
+  apart (4 to 16). Elsewhere it samples along the dominant blur and, every
+  other sample, its own (or the dominant one's perpendicular where it
+  barely moves), classifies each sample against itself by a relative depth
+  test, and weights them by the shutter: a surface point sweeps its blur's
+  segment and covers a pixel on it for 1 / (2 reach) of the time per pixel,
+  so samples in front cover the pixel for as long as their sweeps cross it,
+  samples behind show through for as long as the pixel's own surface has
+  swept away, and samples of its own surface give the colours that pass
+  over it; the front layer goes over the pixel's surface over the revealed
+  background (4 to 32 samples). Near a tile's edge a pixel takes the tile
+  across it at random, so neighbouring tiles' blurs meet as noise, not a
+  seam.
+
+Against the shutter's own average (32 sharp frames at instants across it),
+a box moving 8 pixels a frame holds 0.73 levels of mean error (the sharp
+frame: 4.26), a turning camera 0.59 (4.34), a box moving behind a still one
+0.84 (4.53) with the still one untouched, and under temporal anti-aliasing
+0.78 (1.67); Guertin et al.'s weights gave 1.83, 0.76, 1.96, and 1.23. At
+4K with typical motions it adds 0.51 to 0.60 ms to the frame (the motion
+0.23 ms, the blur 0.39 to 0.58 ms), beyond the §10.4 post line (ADR-0036).
 
 ### Capacities and statistics
 
@@ -626,40 +684,45 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.006 ms | 0.05 ms | 0.19 ms |
-| grid, 512 × 512 | 10,240 | 1.25 ms | 0.006 ms | 0.17 ms | 0.24 ms |
-| grid, 512 × 512 | 102,400 | 13.3 ms | 0.006 ms | 3.6 ms | 0.61 ms |
-| field, 3840 × 2160 | 16,385 | 2.92 ms | 0.008 ms | 3.02 ms | 3.02 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.008 ms | | 2.19 ms |
-| the same without bloom | 16,385 | | 0.008 ms | | 2.67 ms |
-| the same exposed automatically | 16,385 | | 0.009 ms | | 3.04 ms |
-| field at night, 1,024 lights | 16,385 | 3.69 ms | 0.008 ms | 55.0 ms | 3.34 ms |
-| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 5.02 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.21 ms | 0.009 ms | 3.67 ms | 3.45 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.008 ms | | 3.46 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.010 ms | | 3.49 ms |
-| the map, the camera walking | 16,385 | | 0.010 ms | | 3.47 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.010 ms | | 4.77 ms |
+| grid, 512 × 512 | 1,024 | 0.21 ms | 0.007 ms | 0.10 ms | 0.24 ms |
+| grid, 512 × 512 | 10,240 | 1.20 ms | 0.007 ms | 0.21 ms | 0.28 ms |
+| grid, 512 × 512 | 102,400 | 13.3 ms | 0.007 ms | 3.41 ms | 0.65 ms |
+| field, 3840 × 2160 | 16,385 | 3.02 ms | 0.009 ms | 3.05 ms | 2.95 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.008 ms | | 2.17 ms |
+| the same without bloom | 16,385 | | 0.009 ms | | 2.60 ms |
+| the same exposed automatically | 16,385 | | 0.009 ms | | 2.96 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.009 ms | | 3.55 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.009 ms | | 3.53 ms |
+| the same, turning 360°/s | 16,385 | | 0.009 ms | | 3.46 ms |
+| field at night, 1,024 lights | 16,385 | 3.59 ms | 0.009 ms | 54.8 ms | 3.27 ms |
+| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 4.96 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.06 ms | 0.010 ms | 3.66 ms | 3.39 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.40 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.010 ms | | 3.44 ms |
+| the map, the camera walking | 16,385 | | 0.010 ms | | 3.40 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.011 ms | | 4.69 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
-frames resolve temporally (the runtime's default), the reference's do not.
+frames resolve temporally (the runtime's default), the reference's do not;
+the motion-blurred frames have a 180-degree shutter at 240 frames a second
+(`render_perf-2026-10-19`).
 
 In the 4K field the surviving clusters hold 5.3 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 53,257 clusters, and 55,701 of the 62,234 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
 passes 0.10 ms, raster 0.49 ms (0.22 in hardware, 0.27 in software), the
-two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.93 ms (0.90
+two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.92 ms (0.89
 without the jitter), the bloom chain 0.28 ms, the temporal resolve with
-the glare and the tonemap 0.87 ms (0.80 without bloom; the tonemap with
-the glare: 0.13 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
+the glare and the tonemap 0.83 ms (0.75 without bloom; the tonemap with
+the glare: 0.12 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
 budgeted) and the shading (1.20 ms) fit; culling with the depth pyramid
 takes 0.31 ms against 0.25 ms, most of it the first pyramid's read of the
-visibility buffer; the temporal resolve and the bloom chain (1.15 ms) are
+visibility buffer; the temporal resolve and the bloom chain (1.10 ms) are
 past the 0.40 ms of TAA, post, and the tonemap together (ADR-0034,
-ADR-0035). With 1,024 lamps the grid's passes take 0.049 ms and the
-resolve 1.21 ms (every light for every pixel: 44.6 ms), 5 % over the
-shading line.
+ADR-0035), and motion blur adds 0.51 to 0.60 ms when on (ADR-0036). With
+1,024 lamps the grid's passes take 0.049 ms and the resolve 1.20 ms (every
+light for every pixel: 44.4 ms), at the shading line.
 The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
 when a sphere moves, at the shadow line (0.40 ms); its rays add
 0.42 ms still, and a frame in which an instance moved also rebuilds the
@@ -801,7 +864,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (107 tests) run on the RTX 3060 Ti locally and on the
+`render_tests` (116 tests) run on the RTX 3060 Ti locally and on the
 self-hosted runner, and on lavapipe in CI, under the validation and
 synchronisation-validation gate:
 
@@ -872,6 +935,17 @@ synchronisation-validation gate:
   the frame without history in the same jitter phase; the history's
   continuity across modes and extents; debug views and the reference never
   jittered; an exposure change rescaling the history.
+- **Motion blur** (`test_motion_blur.c`), against the shutter's average of
+  32 sharp frames at instants across it (supersampled under temporal
+  anti-aliasing): a moving box, a half-open shutter (against its own
+  average and not the whole frame's), a turning camera, a box moving
+  behind a still one (every pixel of the still one kept), and the blur of a
+  temporally resolved frame, each well under the sharp frame's error; a
+  blur cut at a tile, with a still box beyond it untouched bit for bit; no
+  blur on a first frame, a cut, a debug view, the reference renderer, or
+  after another pipeline's frame or another extent, and a closed shutter's
+  frame the plain one; shutters that are negative or not finite refused;
+  debug lines over a blurred frame.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -915,10 +989,15 @@ path and logs what the GPU culled.
 - The production path's top level spans every instance slot up to the
   pool's high-water mark, live or not (the inactive ones last), and its
   rebuild costs accordingly.
-- Temporal anti-aliasing costs 0.79 ms at 4K, past its §10.4 line
-  (ADR-0034), and bloom adds 0.34 ms (ADR-0035); blended surfaces are
+- Temporal anti-aliasing costs 0.75 ms at 4K, past its §10.4 line
+  (ADR-0034), and bloom adds 0.36 ms (ADR-0035); blended surfaces are
   resolved with the motion of the opaque surface behind them, and there is
   no sharpening. No MSAA. The HDR target's dither is the same every frame.
+- Motion blur adds 0.51 to 0.60 ms at 4K with typical motions (ADR-0036).
+  Blended surfaces blur with the motion of the opaque surface behind them;
+  motion is linear across the shutter; a blur reaches at most 32 pixels
+  either way; its sampling noise is left to change every frame; the first
+  frame after a cut does not blur; the reference renderer has none.
 - Bloom has no lens effects (dirt, flares, streaks), and the exposure is
   global: no local exposure, no centre-weighted metering. With bloom off,
   an automatic exposure still runs the chain's first downsample for its

@@ -185,6 +185,7 @@ scenes arrive:
 | `shadows_rt_4k_production` | the production path with the sun's shadows ray traced instead (`NPH_RENDER_VIS_RT_SHADOWS`) |
 | `shadows_moving_4k_production`, `shadows_walk_4k_production` | `shadows_4k_production` with one sphere moving every frame (the pages it touches are drawn again), or with the camera walking at 1.4 m/s at 240 frames a second (the pages it comes to need are drawn) |
 | `lights_1k_shadows` | `lights_1k_production` with the moon and every lamp casting shadows |
+| `motion_{turn,strafe,flick}_4k_production` | `field_4k_production` with motion blur (a 180-degree shutter at 240 frames a second) while the camera turns 60 degrees a second, strafes at 5 m/s (parallax), or turns 360 degrees a second, each reversing every quarter second (docs/render.md "Motion blur") |
 
 `lights_1k_every_light` and `lights_1k_shadows` are comparisons, not
 targets: like the reference renderer's scenes, they carry no budget.
@@ -200,7 +201,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-18-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-19-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU
