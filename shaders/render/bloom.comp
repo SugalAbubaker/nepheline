@@ -38,7 +38,14 @@ layout(constant_id = 1) const uint k_mode = NPH_RENDER_POST_DOWN_FIRST;
 
 NPH_BUFFER_REF(ExposureRef) { NphRenderExposureData d; };
 
-shared uint s_histogram[NPH_RENDER_EXPOSURE_BINS];
+// The counts as an array of a struct of their own, never of uint: Ubuntu
+// 24.04's glslang (14.0) can give a shared uint[NPH_RENDER_EXPOSURE_BINS] the
+// histogram's array type, ArrayStride included, which spirv-val rejects for
+// workgroup memory (VUID-StandaloneSpirv-None-10684; docs/build.md "Shaders").
+struct Bin {
+    uint count;
+};
+shared Bin s_histogram[NPH_RENDER_EXPOSURE_BINS];
 
 float luma(vec3 c)
 {
@@ -179,7 +186,7 @@ void main()
     }
     // The histogram: shared counts, then one add per nonzero bin.
     for (uint b = gl_LocalInvocationIndex; b < uint(NPH_RENDER_EXPOSURE_BINS); b += 64u) {
-        s_histogram[b] = 0u;
+        s_histogram[b].count = 0u;
     }
     barrier();
     for (int t = 0; t < 4; ++t) {
@@ -188,14 +195,14 @@ void main()
             const float x = (l - NPH_RENDER_EXPOSURE_MIN_LOG2) *
                             (float(NPH_RENDER_EXPOSURE_BINS) / NPH_RENDER_EXPOSURE_RANGE_LOG2);
             const uint bin = uint(clamp(x, 0.0, float(NPH_RENDER_EXPOSURE_BINS - 1)));
-            atomicAdd(s_histogram[bin], 1u);
+            atomicAdd(s_histogram[bin].count, 1u);
         }
     }
     barrier();
     ExposureRef ex = ExposureRef(pc.exposure);
     for (uint b = gl_LocalInvocationIndex; b < uint(NPH_RENDER_EXPOSURE_BINS); b += 64u) {
-        if (s_histogram[b] != 0u) {
-            atomicAdd(ex.d.histogram[b], s_histogram[b]);
+        if (s_histogram[b].count != 0u) {
+            atomicAdd(ex.d.histogram[b], s_histogram[b].count);
         }
     }
 }

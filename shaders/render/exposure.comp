@@ -14,20 +14,27 @@ layout(push_constant, scalar) uniform Push { NphRenderPostPush pc; };
 
 NPH_BUFFER_REF(ExposureRef) { NphRenderExposureData d; };
 
-shared uint s_counts[NPH_RENDER_EXPOSURE_BINS];
+// The counts as an array of a struct of their own, never of uint: Ubuntu
+// 24.04's glslang (14.0) gives a shared uint[NPH_RENDER_EXPOSURE_BINS] the
+// histogram's array type, ArrayStride included, which spirv-val rejects for
+// workgroup memory (VUID-StandaloneSpirv-None-10684; docs/build.md "Shaders").
+struct Bin {
+    uint count;
+};
+shared Bin s_bins[NPH_RENDER_EXPOSURE_BINS];
 
 void main()
 {
     ExposureRef ex = ExposureRef(pc.exposure);
     const uint i = gl_LocalInvocationIndex;
-    s_counts[i] = ex.d.histogram[i];
+    s_bins[i].count = ex.d.histogram[i];
     barrier();
     if (i != 0u) {
         return;
     }
     uint total = 0u;
     for (uint b = 0u; b < uint(NPH_RENDER_EXPOSURE_BINS); ++b) {
-        total += s_counts[b];
+        total += s_bins[b].count;
     }
     const float lo = float(total) * NPH_RENDER_EXPOSURE_LOW;
     const float hi = float(total) * NPH_RENDER_EXPOSURE_HIGH;
@@ -36,7 +43,7 @@ void main()
     float sum = 0.0;
     float weight = 0.0;
     for (uint b = 0u; b < uint(NPH_RENDER_EXPOSURE_BINS); ++b) {
-        const float n = float(s_counts[b]);
+        const float n = float(s_bins[b].count);
         // The part of this bin's pixels that falls between the fractions.
         const float take = max(min(below + n, hi) - max(below, lo), 0.0);
         sum += take * (NPH_RENDER_EXPOSURE_MIN_LOG2 + (float(b) + 0.5) * bin_log2);

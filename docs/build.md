@@ -108,6 +108,27 @@ target whose outputs land in `build/<preset>/shaders/<name>.spv`, with
 include path for the C/GLSL shared headers. Flags: `--target-env=vulkan1.3
 -O -g -Werror`. If `glslc` is not on `PATH`, set `VULKAN_SDK`.
 
+The shaders must compile to valid SPIR-V with two glslc builds: the pinned
+SDK's, and Ubuntu 24.04's `glslc` package (shaderc 2023.8 over glslang 14.0),
+which Linux CI uses. The validation layer is the pinned SDK's on both.
+glslang 14.0 gives a variable outside a buffer an array type of the same
+shape as one inside a buffer, `ArrayStride` decoration included. The SPIR-V
+validator rejects that for workgroup and function memory
+(VUID-StandaloneSpirv-None-10684). So:
+
+- A `shared` array of a type that also appears in a buffer is declared as an
+  array of a struct of its own, e.g. `struct Bin { uint count; }; shared Bin
+  s_bins[N];` (`exposure.comp`, `bloom.comp`).
+- A shader reads the fields it needs from a buffer struct that holds an
+  array rather than copying the whole struct into a local (`vis_cull_meshlets.comp`).
+  The optimiser usually removes such a copy, but validity must not depend on it.
+
+Newer glslang (the SDK's) gives such variables types of their own, so a
+mistake shows up only on Linux CI, or when shaders are built with glslang 14.0's
+`glslangValidator -V --target-env vulkan1.3 -P"#extension
+GL_GOOGLE_include_directive : require"` and checked with the SDK's `spirv-val
+--target-env vulkan1.3 --scalar-block-layout`.
+
 ### Warnings
 
 `cmake/NphWarnings.cmake`: MSVC `/W4 /WX /permissive- /Zc:preprocessor
