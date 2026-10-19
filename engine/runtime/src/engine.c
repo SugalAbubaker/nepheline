@@ -92,6 +92,9 @@ static const NPH_CVAR_BOOL(k_motion_blur, "r.motion_blur", 1,
                            NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_dof, "r.dof", 1, "depth of field through the camera's lens",
                            NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_ao, "r.ao", 0.5, 0.0, 8.0,
+                            "the ambient occlusion's radius in metres (0: none; production)",
+                            NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -136,6 +139,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->exposure_speed,
         &cv->motion_blur,
         &cv->dof,
+        &cv->ao,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,
@@ -167,6 +171,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_exposure_speed,
         &k_motion_blur,
         &k_dof,
+        &k_ao,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -658,6 +663,7 @@ static void choose_view(NphEngine *e, f64 dt)
     if (!nph_cvar_get_bool(&e->cv.dof)) {
         e->view.aperture = 0.0F;
     }
+    e->view.ao_radius = (f32)nph_cvar_get_float(&e->cv.ao);
     // In lockstep a frame lasts one step whatever the clock says, so a
     // run's exposure is the same every time.
     const f64 seconds =

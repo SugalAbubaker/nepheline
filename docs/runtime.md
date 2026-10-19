@@ -103,13 +103,14 @@ frame; the engine's own world-changing functions wait by themselves.
 host's (`nph_engine_set_view`, the editor's camera). Either way the
 `r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`,
 `r.virtual_shadows`, `r.taa`, `r.bloom`, `r.auto_exposure`,
-`r.exposure_compensation`, `r.exposure_speed`, `r.motion_blur`, and
-`r.dof` cvars choose the renderer, its culling, its rasterisers, how it
+`r.exposure_compensation`, `r.exposure_speed`, `r.motion_blur`, `r.dof`,
+and `r.ao` cvars choose the renderer, its culling, its rasterisers, how it
 shadows the sun, whether it resolves temporally, its bloom, how it
-exposes, whether the camera's shutter blurs motion, and whether its lens
-blurs what is out of focus (docs/render.md, "The production path",
-"Shadows", "Temporal anti-aliasing", "Motion blur", "Depth of field", and
-"Bloom and exposure"); an automatic exposure starts from the camera's EV100 and
+exposes, whether the camera's shutter blurs motion, whether its lens
+blurs what is out of focus, and how far surfaces occlude the
+environment's light (docs/render.md, "The production path", "Shadows",
+"Temporal anti-aliasing", "Motion blur", "Depth of field", "Ambient
+occlusion", and "Bloom and exposure"); an automatic exposure starts from the camera's EV100 and
 adapts at the pace of the frames' real time (one simulation step a frame
 under `rt.lockstep`, so runs repeat), and the motion blur spans the
 camera's shutter time over that frame time. A switch between the world's camera
@@ -140,6 +141,7 @@ Settings are cvars. The engine's:
 | `r.exposure_compensation`, `r.exposure_speed` | 0, 1.5 | the automatic exposure's offset in stops (positive: brighter) and e-foldings per second (saved) |
 | `r.motion_blur` | true | motion blur over the camera's shutter time (its `shutter`, 0 by default; saved) |
 | `r.dof` | true | depth of field through the camera's lens (its `aperture`, 0 by default: a pinhole; saved) |
+| `r.ao` | 0.5 | the production path's ambient occlusion: the radius in metres within which surfaces occlude the environment's light, 0 to 8 (0: none; saved) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 

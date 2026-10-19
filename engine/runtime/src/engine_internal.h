@@ -131,6 +131,7 @@ typedef struct EngineCvars {
     NphCvar exposure_speed;        // r.exposure_speed
     NphCvar motion_blur;           // r.motion_blur
     NphCvar dof;                   // r.dof
+    NphCvar ao;                    // r.ao
 } EngineCvars;
 
 typedef enum EngineAllocTag {

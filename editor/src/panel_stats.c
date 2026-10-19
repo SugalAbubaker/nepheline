@@ -61,6 +61,10 @@ static void frame_stats(Editor *ed)
             // The temporal resolve (r.taa): a history restarts after a cut.
             igText("temporal anti-aliasing%s", r->taa_history ? "" : "   (history restarted)");
         }
+        if (r->ao) {
+            // The ambient occlusion (r.ao).
+            igText("ambient occlusion");
+        }
         // The exposure (r.auto_exposure adapts it toward the metering) and
         // the bloom (r.bloom).
         if (r->metered_ev100 != 0.0F) {

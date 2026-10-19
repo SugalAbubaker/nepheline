@@ -18,8 +18,9 @@
 // exit status 77 means no window system or Vulkan device (CTest
 // "skipped"), 1 a failure. Keys: Space pauses, P switches the pipeline,
 // T switches temporal anti-aliasing (on, as the runtime's r.taa), B the
-// bloom (on, as r.bloom), E the automatic exposure (off, as
-// r.auto_exposure), the mouse wheel zooms, Escape quits.
+// bloom (on, as r.bloom), O the ambient occlusion (on, as r.ao), E the
+// automatic exposure (off, as r.auto_exposure), the mouse wheel zooms,
+// Escape quits.
 
 #include <nepheline/core/json.h>
 #include <nepheline/jobs/jobs.h>
@@ -47,6 +48,7 @@ NPH_LOG_CATEGORY_DEFINE(LOG_SAMPLE, "scene_demo", NPH_LOG_LEVEL_INFO);
 
 #define EXIT_SKIPPED 77
 #define DEMO_BLOOM   0.04F // the runtime's r.bloom default
+#define DEMO_AO      0.5F  // the runtime's r.ao default
 
 // ---------------------------------------------------------------------------
 // Components
@@ -715,6 +717,10 @@ static void handle_input(App *app, bool *paused, f32 *distance, NphRenderView *v
             } else if (e.u.key.key == NPH_KEY_B) {
                 view->bloom = view->bloom > 0.0F ? 0.0F : DEMO_BLOOM;
                 NPH_LOG_INFO(&LOG_SAMPLE, "bloom: %s", view->bloom > 0.0F ? "on" : "off");
+            } else if (e.u.key.key == NPH_KEY_O) {
+                view->ao_radius = view->ao_radius > 0.0F ? 0.0F : DEMO_AO;
+                NPH_LOG_INFO(&LOG_SAMPLE, "ambient occlusion: %s",
+                             view->ao_radius > 0.0F ? "on" : "off");
             } else if (e.u.key.key == NPH_KEY_E) {
                 const bool automatic = view->exposure == NPH_RENDER_EXPOSURE_AUTO;
                 view->exposure = automatic ? NPH_RENDER_EXPOSURE_MANUAL : NPH_RENDER_EXPOSURE_AUTO;
@@ -846,6 +852,7 @@ static void run(App *app, int *status)
     view.pipeline = app->opt.pipeline;
     view.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
     view.bloom = DEMO_BLOOM;
+    view.ao_radius = DEMO_AO;
     // The automatic exposure (E) adapts one step's time per frame, so
     // --frames runs stay reproducible.
     view.frame_seconds = (f32)dt;
