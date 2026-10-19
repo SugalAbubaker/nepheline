@@ -61,6 +61,9 @@ nph_add_shaders(nph_shaders_render
         render/dof_tiles.comp
         render/dof_gather.comp
         render/dof_resolve.comp
+        render/ao_depth.comp
+        render/ao.comp
+        render/ao_denoise.comp
         render/debug_line.vert
         render/debug_line.frag
         render/ibl_sky.comp

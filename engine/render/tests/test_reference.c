@@ -158,6 +158,34 @@ NTEST(reference, srgb_transfer_round_trips)
     }
 }
 
+// Eq. 10 of Jimenez et al. 2016: none occluded leaves all the light; the
+// occluders give back more the brighter they are, never less than the
+// occlusion leaves (the fit dips below it for dark albedos), and the
+// paper's coefficients give a white surface half occluded 0.898.
+NTEST(reference, ao_bounces_give_back_light_with_the_albedo)
+{
+    for (u32 i = 0; i <= 10U; ++i) {
+        const f32 r = (f32)i / 10.0F;
+        const NphVec3 open = nph_render_ref_ao_bounce(1.0F, nph_vec3(r, r, r));
+        NTEST_EXPECT_ULP_F32(open.x, 1.0F, 0U);
+        NTEST_EXPECT_ULP_F32(nph_render_ref_ao_bounce(0.0F, nph_vec3(r, r, r)).x, 0.0F, 0U);
+        for (u32 j = 1U; j < 10U; ++j) {
+            const f32 ao = (f32)j / 10.0F;
+            const f32 b = nph_render_ref_ao_bounce(ao, nph_vec3(r, r, r)).x;
+            NTEST_EXPECT_TRUE(b >= ao && b <= 1.0F);
+            if (i > 0U) {
+                const f32 darker = (f32)(i - 1U) / 10.0F;
+                NTEST_EXPECT_TRUE(b >= nph_render_ref_ao_bounce(ao, nph_vec3(darker, 0, 0)).x);
+            }
+        }
+    }
+    // ((a A + b) A + c) A at A = 0.5 with a = 1.708, b = -4.1534, c = 3.4455.
+    const NphVec3 white = nph_render_ref_ao_bounce(0.5F, nph_vec3(1.0F, 0.0F, 0.6F));
+    NTEST_EXPECT_NEAR_F32(white.x, 0.8979F, 1e-6F);
+    NTEST_EXPECT_ULP_F32(white.y, 0.5F, 0U); // the fit's 0.464 is held at the occlusion
+    NTEST_EXPECT_TRUE(white.z > 0.5F && white.z < white.x);
+}
+
 NTEST(reference, cube_faces_follow_the_vulkan_layout)
 {
     static const f32 axes[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},

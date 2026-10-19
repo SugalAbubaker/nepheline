@@ -22,6 +22,9 @@
 //                         requests made by the vis hzb passes (and, with
 //                         blended surfaces, by `vis depth` and `vsm requests
 //                         (blended)` first)
+//   ao depth, ao, ao denoise
+//                         the ambient occlusion (ao.c), from the depths the
+//                         vis hzb passes took for it
 //   rt ...                shadow rays' top level (rt.c)
 //   vis resolve           shading into the HDR image
 //   vis depth, transparent (only with blended surfaces)
@@ -806,6 +809,10 @@ static void hzb_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd,
         p.arg1 = nph_gpu_image_storage_index(dev, hzb, mip);
         p.arg2 = src_w;
         p.arg3 = src_h;
+        p.arg4 =
+            mip == 0U && r->ao.frame_active
+                ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, r->ao.frame_depths), 0U)
+                : NPH_VIS_NO_AO;
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
         // Mip 0 is half the target rounded up; later mips are halved and
         // rounded down, as Vulkan sizes them (vis_hzb.comp).
@@ -850,6 +857,8 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphVisPush p = push_of(r, 0U, 0U);
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
     p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    p.arg2 = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
+    p.arg3 = r->ao.frame_push.point_sampler;
     static const VisCompute k_resolve[2][2] = {
         {VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_VSM},
         {VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_VSM}};
@@ -986,8 +995,12 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
         nph_gpu_rg_read_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_SHADER_READ);
         nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     }
-    // Mip 0 requests the virtual shadow map's pages (vis_hzb.comp).
+    // Mip 0 requests the virtual shadow map's pages, and writes the ambient
+    // occlusion's depths (vis_hzb.comp).
     render_vsm_request_pages(r, p);
+    if (r->ao.frame_active) {
+        nph_gpu_rg_write_image(p, r->ao.frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    }
     nph_gpu_rg_write_image(p, f->hzb, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, NPH_GPU_ALL_MIPS);
     return NPH_RESULT_OK;
 }
@@ -1063,6 +1076,9 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
         nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
     }
     render_vsm_read(r, p);
+    if (r->ao.frame_active) {
+        nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    }
     nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
@@ -1307,7 +1323,13 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         return NPH_RESULT_FULL;
     }
 
-    res = declare_culling(graph, r, &g);
+    if (r->ao.frame_active) {
+        // The ambient occlusion's depths, which the pyramid's passes start.
+        res = render_ao_declare_depths(r, graph);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = declare_culling(graph, r, &g);
+    }
     if (res == NPH_RESULT_OK && r->vsm.frame_active && blend_requests != NULL) {
         // The blended surfaces' pages, against the opaque depth (which the
         // transparent pass then tests against too).
@@ -1320,6 +1342,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         // The sun's virtual shadow map: its pages drawn where the depth
         // pyramid's passes asked for them.
         res = render_vsm_declare_pages(r, graph, g.instances, g.meshes);
+    }
+    if (res == NPH_RESULT_OK && r->ao.frame_active) {
+        // The ambient occlusion, which the resolve reads.
+        res = render_ao_declare(r, graph);
     }
     if (res == NPH_RESULT_OK && r->rt.frame_active) {
         // Shadow rays: the instance records from the GPU scene, then the

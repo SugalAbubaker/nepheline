@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: Apache-2.0
+// The ambient occlusion's depths' mips (docs/render.md "Ambient occlusion";
+// ADR-0038). Mip 0 holds the half-resolution reverse-Z depths, each texel
+// its 2 x 2 pixels' top-left one (an exact sample, which ao.comp rebuilds
+// the point of), which the depth pyramid's passes write as they read the
+// frame's depths (vis_hzb.comp). This pass adds NPH_RENDER_AO_MIPS - 1 mips,
+// each texel the average of the four below it, for the far steps of a
+// search (as XeGTAO's depth mips, Intel 2021): averaging reverse-Z depth,
+// which is affine across a plane, keeps every mip's samples on the planes
+// they come from. Each invocation averages a 2 x 2 block of mip 0 into a
+// texel of mip 1, and a workgroup reduces its 16 x 16 texels of mip 1
+// through the rest in shared memory.
+//
+// The extent is the half-resolution one rounded up to a multiple of the
+// group, so that every mip halves it exactly and one uv addresses a point in
+// all of them (ao_depth_at); the texels past the image repeat its last row
+// and column.
+#version 460
+#include "ao_common.glsl"
+
+#define AO_GROUP 16
+#if (1 << (NPH_RENDER_AO_MIPS - 2)) > AO_GROUP
+#error "a group's texels of mip 1 cover whole texels of the last mip"
+#endif
+
+layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
+
+// The depths of the mip being built (an array of a struct of its own:
+// docs/build.md "Shaders").
+struct AoDepth {
+    float d;
+};
+shared AoDepth s_depths[AO_GROUP * AO_GROUP];
+
+float mip0(ivec2 t)
+{
+    return imageLoad(nph_images_2d[pc.depth_mips[0]], t).r;
+}
+
+void main()
+{
+    // A group at the far edges reaches past the mips: its invocations there
+    // read texels within mip 0 and write nothing.
+    const ivec2 extent = imageSize(nph_images_2d[pc.depth_mips[0]]);
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 block = min(2 * t, extent - 2);
+    const float d = 0.25 * (mip0(block) + mip0(block + ivec2(1, 0)) + mip0(block + ivec2(0, 1)) +
+                            mip0(block + ivec2(1, 1)));
+    if (all(lessThan(t, extent >> 1))) {
+        imageStore(nph_images_2d[pc.depth_mips[1]], t, vec4(d));
+    }
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    const int at = l.y * AO_GROUP + l.x;
+    s_depths[at].d = d;
+    barrier();
+    for (int m = 2; m < NPH_RENDER_AO_MIPS; ++m) {
+        // The invocations at multiples of 2^(m-1) average the 2 x 2 texels
+        // of the mip below, 2^(m-2) apart in the group.
+        const int step = 1 << (m - 2);
+        const bool writer = ((l.x | l.y) & ((1 << (m - 1)) - 1)) == 0;
+        float average = 0.0;
+        if (writer) {
+            average = 0.25 * (s_depths[at].d + s_depths[at + step].d +
+                              s_depths[at + AO_GROUP * step].d +
+                              s_depths[at + AO_GROUP * step + step].d);
+        }
+        barrier();
+        if (writer) {
+            s_depths[at].d = average;
+            const ivec2 mt = (ivec2(gl_WorkGroupID.xy) * AO_GROUP + l) >> (m - 1);
+            if (all(lessThan(mt, extent >> m))) {
+                imageStore(nph_images_2d[pc.depth_mips[m]], mt, vec4(average));
+            }
+        }
+        barrier();
+    }
+}

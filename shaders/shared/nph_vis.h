@@ -285,6 +285,10 @@ NPH_SHARED_STRUCT(NphVisViewData)
 // and the HDR target are render-graph transients, so their bindless
 // indices are only known while a pass records: they travel here, not in
 // the view.
+// The ambient occlusion's index on a frame without it: the resolve's
+// (NphVisPush.arg2) and the depth pyramid's (arg4).
+#define NPH_VIS_NO_AO 0xFFFFFFFFU
+
 NPH_SHARED_STRUCT(NphVisPush)
 {
     u64 view;  // NphVisViewData
@@ -294,6 +298,7 @@ NPH_SHARED_STRUCT(NphVisPush)
     u32 arg1;
     u32 arg2;
     u32 arg3;
+    u32 arg4;
 };
 
 // The culling math against its C twins (render_tests, vis_math_test.comp,

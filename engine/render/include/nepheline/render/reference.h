@@ -39,6 +39,15 @@ NphVec3 nph_render_ref_tonemap(NphVec3 color, NphRenderTonemapper tonemapper);
 f32 nph_render_ref_linear_to_srgb(f32 c);
 f32 nph_render_ref_srgb_to_linear(f32 c);
 
+// The share of the environment's diffuse light left under the ambient
+// occlusion `ao` (render/renderer.h NphRenderView.ao_radius) for a surface
+// of diffuse albedo `albedo`, with what occluders of that albedo reflect
+// back (surface.glsl): Jimenez, Wu, Pesce & Jarabo's cubic fit to the
+// multiple bounces ("Practical Realtime Strategies for Accurate Indirect
+// Occlusion", ATVI-TR-16-01, 2016, Eq. 10), per channel, held within
+// [ao, 1].
+NphVec3 nph_render_ref_ao_bounce(f32 ao, NphVec3 albedo);
+
 // The direction through point (s, t) in [0, 1]^2 of cube face `face`
 // (+X -X +Y -Y +Z -Z), normalised.
 NphVec3 nph_render_ref_cube_direction(u32 face, f32 s, f32 t);

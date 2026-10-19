@@ -383,6 +383,7 @@ static NphResult create_contents(NphRenderer *r)
         NPH_TRY(render_vis_create(r));
         NPH_TRY(render_taa_create(r));
         NPH_TRY(render_motion_create(r));
+        NPH_TRY(render_ao_create(r));
         NPH_TRY(render_vsm_create(r));
     } else {
         r->vsm.sun_slot = NPH_U32_MAX;
@@ -498,6 +499,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_vsm_destroy(r);
     render_vis_destroy(r);
     render_motion_destroy(r);
+    render_ao_destroy(r);
     render_taa_destroy(r);
     render_dof_destroy(r);
     render_post_destroy(r);

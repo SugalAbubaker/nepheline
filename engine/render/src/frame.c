@@ -744,7 +744,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         !nph_f32_is_finite(view->shutter) || !(view->aperture >= 0.0F) ||
         !nph_f32_is_finite(view->aperture) || !(view->sensor_height >= 0.0F) ||
         !nph_f32_is_finite(view->sensor_height) || !nph_f32_is_finite(view->lens_offset.x) ||
-        !nph_f32_is_finite(view->lens_offset.y)) {
+        !nph_f32_is_finite(view->lens_offset.y) || !(view->ao_radius >= 0.0F) ||
+        !nph_f32_is_finite(view->ao_radius)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // A lens (an aperture, or a point off its centre) focuses beyond its
@@ -844,6 +845,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.motion_blur = motion_blur ? 1 : 0;
     const bool dof = render_dof_frame_begin(r, view, height);
     stats.dof = dof ? 1 : 0;
+    // Ambient occlusion on the production path (ao.c), through this
+    // frame's projection.
+    stats.ao = render_ao_frame_begin(r, view, &proj, width, height, production) ? 1 : 0;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).

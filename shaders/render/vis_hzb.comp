@@ -31,6 +31,13 @@
 // pixel's final surface (phase 1 changed only the tiles mode 2 reads
 // again); a surface phase 1 then hid may have asked for pages no pixel
 // shows, which costs only their drawing.
+//
+// Where the frame has ambient occlusion, modes 0 and 2 write its depths'
+// mip 0 too (arg4, its bindless storage index; NPH_VIS_NO_AO for none): each
+// texel its block's top-left pixel's depth, and past mip 0's extent, which
+// the occlusion's depths round up to a multiple of the group
+// (ao_depth.comp), the last row's and column's. The depths are read here
+// anyway, and the same two passes cover the frame's final depth.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -147,6 +154,10 @@ void main()
         if (vsm != 0ul) {
             request_pages(view, VsmViewRef(vsm), lo, last, block);
         }
+    }
+    if (pc.mode != 1u && pc.arg4 != NPH_VIS_NO_AO) {
+        const float top_left = inside ? block.x : source_depth(2 * min(p, dst - 1));
+        imageStore(nph_images_2d[nonuniformEXT(pc.arg4)], p, vec4(top_left, 0.0, 0.0, 0.0));
     }
     if (!inside) {
         return;

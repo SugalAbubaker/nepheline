@@ -1,0 +1,214 @@
+// SPDX-License-Identifier: Apache-2.0
+// Ground-truth ambient occlusion (docs/render.md "Ambient occlusion";
+// ADR-0038): Jimenez, Wu, Pesce & Jarabo, "Practical Realtime Strategies
+// for Accurate Indirect Occlusion", ATVI-TR-16-01, 2016, at half resolution
+// as there (§4.1).
+//
+// A pixel's ambient occlusion is the cosine-weighted visibility of its
+// hemisphere: A = (1/pi) * integral of V(w) <n, w>+ dw, over occluders
+// within `radius` metres (Eq. 2). In a slice of the hemisphere through the
+// view vector at screen angle phi, the visible arc lies between the two
+// horizons th1 and th2 that the depth shows, measured from the view vector;
+// its cosine-weighted measure has a closed form (Eq. 7):
+//   a = 1/4 (-cos(2 th1 - g) + cos g + 2 th1 sin g)
+//     + 1/4 (-cos(2 th2 - g) + cos g + 2 th2 sin g),
+// with g the angle from the view vector of the normal projected into the
+// slice, whose length scales the slice's share (Eq. 8). The horizons are
+// the highest of the samples along the slice's screen direction on either
+// side (Eq. 6), within the normal's hemisphere, an occluder fading out over
+// the last tenth of the radius (§4.1). The samples step evenly out to the
+// radius, the far ones from the depths' coarser mips (ao_depth.comp).
+//
+// Each texel takes one slice, its direction one of 16 spread over the 4 x 4
+// texels around it and turned through 6 rotations from frame to frame
+// (§4.1): the denoise (ao_denoise.comp) averages a window that holds every
+// direction, and the temporal resolve the rotations, 96 directions in all.
+// A slice's share of an open hemisphere, |np| (cos g + g sin g) (Eq. 7 with
+// the horizons at the hemisphere's edges), is 1 only on average over the
+// directions; each texel gives it with the share it found, and the denoise
+// divides the one's sum by the other's, so that an open surface comes out
+// open even where a window lacks some directions (an edge).
+#version 460
+#include "ao_common.glsl"
+
+#define AO_GROUP 16
+layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
+
+// Samples on either side of a slice.
+#define AO_STEPS 4
+// An occluder's weight falls from 1 to 0 over this last part of the radius.
+#define AO_FALLOFF 0.1
+// Steps 2^AO_MIP_SHIFT full-resolution pixels (16 half-resolution texels)
+// out and further take mip 1 of the depths, twice as far mip 2, and so on.
+#define AO_MIP_SHIFT 5
+
+// The 4 x 4 ordered dither (Bayer) at (x, y) mod 4, so that neighbours
+// take far-apart directions:
+//    0  8  2 10
+//   12  4 14  6
+//    3 11  1  9
+//   15  7 13  5
+// the bits of x ^ y and y interleaved, lowest first (from the matrix's
+// recursive definition, Bayer, "An optimum method for two-level rendition
+// of continuous-tone pictures", 1973).
+uint bayer(ivec2 p)
+{
+    const uint x = uint(p.x ^ p.y);
+    const uint y = uint(p.y);
+    return ((x & 1u) << 3u) | ((y & 1u) << 2u) | (x & 2u) | ((y >> 1u) & 1u);
+}
+
+// The group's depths and a texel's border around them, for the normals
+// (an array of a struct of its own: docs/build.md "Shaders").
+#define AO_SPAN (AO_GROUP + 2)
+struct AoDepth {
+    float d;
+};
+shared AoDepth s_depths[AO_SPAN * AO_SPAN];
+
+float depth_at(ivec2 l)
+{
+    return s_depths[(l.y + 1) * AO_SPAN + l.x + 1].d;
+}
+
+// acos to within 6.8e-5: a cubic in |x| times sqrt(1 - |x|), reflected for
+// negative x (Abramowitz & Stegun, Handbook of Mathematical Functions,
+// 4.4.45).
+float fast_acos(float x)
+{
+    const float a = abs(x);
+    const float r =
+        sqrt(1.0 - a) * (1.5707288 + a * (-0.2121144 + a * (0.0742610 - 0.0187293 * a)));
+    return x >= 0.0 ? r : NPH_PI - r;
+}
+
+// For the denoise (ao_denoise.comp): the slice's share of the hemisphere
+// left visible and its share when open, each in [0, 2) as 8 bits, and the
+// distance as a half float.
+void store(ivec2 t, float visible, float open, float dist)
+{
+    const uint shares = packUnorm4x8(vec4(0.5 * visible, 0.5 * open, 0.0, 0.0)) & 0xFFFFu;
+    const uint distance = packHalf2x16(vec2(0.0, min(dist, NPH_AO_HALF_MAX))) & 0xFFFF0000u;
+    imageStore(nph_uimages_2d[pc.raw_index], t, uvec4(shares | distance, 0u, 0u, 0u));
+}
+
+void main()
+{
+    const ivec2 origin = ivec2(gl_WorkGroupID.xy) * AO_GROUP - 1;
+    for (uint i = gl_LocalInvocationIndex; i < uint(AO_SPAN * AO_SPAN);
+         i += uint(AO_GROUP * AO_GROUP)) {
+        s_depths[i].d = ao_depth(origin + ivec2(int(i) % AO_SPAN, int(i) / AO_SPAN));
+    }
+    barrier();
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(t, ivec2(pc.half_width, pc.half_height)))) {
+        return;
+    }
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    const float depth = depth_at(l);
+    const float dist = ao_distance(depth);
+    // A point whose radius covers under a texel sees nothing occlude it.
+    const float radius_px = min(pc.radius_pixels / dist, pc.max_radius);
+    if (dist >= NPH_RENDER_AO_SKY || radius_px < 2.0) {
+        store(t, 1.0, 1.0, dist);
+        return;
+    }
+    // The point is dist times its ray rc (ao_position); v, the view vector.
+    const vec2 c = ao_centre(t);
+    const vec3 rc = vec3(pc.unproject.xy * c + pc.unproject.zw, -1.0);
+    const float inv_rc_length = inversesqrt(dot(rc, rc));
+    const vec3 v = -rc * inv_rc_length;
+    const vec3 n = -normalize(ao_plane(
+        t, depth,
+        ao_gradient(t, depth, depth_at(l - ivec2(1, 0)), depth_at(l + ivec2(1, 0)),
+                    depth_at(l - ivec2(0, 1)), depth_at(l + ivec2(0, 1)))));
+
+    // The slice: a direction at angle phi around the view vector, the angles
+    // spread evenly as Eq. 8 integrates over them (even screen angles would
+    // crowd the slices of a point off the view's axis), and the screen
+    // direction a step along it takes from the point (the derivative of
+    // ao_position's inverse): the camera's rays through that screen line
+    // span the slice's plane, so the samples along it lie in the slice.
+    const float phi = (float(bayer(t)) + float(pc.noise) / 6.0) * (NPH_PI / 16.0);
+    const vec3 b1 = normalize(cross(vec3(0.0, 1.0, 0.0), v));
+    const vec3 b2 = cross(v, b1);
+    const vec3 ortho = cos(phi) * b1 + sin(phi) * b2;
+    const vec2 omega = normalize((ortho.xy + rc.xy * ortho.z) * pc.project);
+    const vec3 axis = cross(ortho, v);
+    const vec3 np = n - axis * dot(n, axis);
+    const float np_length2 = dot(np, np);
+    const float inv_np_length = inversesqrt(max(np_length2, 1e-12));
+    const float np_length = np_length2 * inv_np_length;
+    const float cos_g = clamp(dot(np, v) * inv_np_length, -1.0, 1.0);
+    const float g = (dot(np, ortho) < 0.0 ? -1.0 : 1.0) * fast_acos(cos_g);
+
+    // The horizons' cosines from the view vector, starting at the
+    // hemisphere's edges (g -+ pi/2, cosines sin g and -sin g): side 0
+    // against the screen direction, side 1 along it.
+    const float sin_g = sin(g);
+    const float low0 = sin_g;
+    const float low1 = -sin_g;
+    float h0 = low0;
+    float h1 = low1;
+    // The steps' offsets, jittered as the directions are (the transposed
+    // dither), at least a texel out.
+    const float jitter =
+        fract((float(bayer(t.yx)) + 0.5) / 16.0 +
+              float(pc.noise) * 0.618034);
+    const float inv_radius = 1.0 / pc.radius;
+    // How far each side's samples reach: between the outermost texels'
+    // samples, where the depths interpolate (off the image nothing is
+    // known), a thousandth of a pixel's slack keeping an axis the slice
+    // runs along from cutting it off.
+    const vec2 lo = vec2(0.5);
+    const vec2 hi = 2.0 * vec2(ivec2(pc.half_width, pc.half_height) - 1) + 0.5;
+    const bvec2 rising = greaterThanEqual(omega, vec2(0.0));
+    const vec2 per_pixel = 1.0 / max(abs(omega), vec2(1e-7));
+    const vec2 room0 = (mix(hi - c, c - lo, rising) + 1e-3) * per_pixel;
+    const vec2 room1 = (mix(c - lo, hi - c, rising) + 1e-3) * per_pixel;
+    const float reach0 = min(room0.x, room0.y);
+    const float reach1 = min(room1.x, room1.y);
+    // A step of a pixel along omega turns the ray by w, within the slice's
+    // plane: a sample s pixels along it at distance x lies at x (rc + s w),
+    // (x - dist) rc + x s w from the point, of which (rc being -|rc| v)
+    // -(x - dist) |rc| + x s (w . v) along v and x s (w . ortho) along
+    // ortho, the slice's other axis.
+    const vec2 w = pc.unproject.xy * omega;
+    const float w_along = dot(w, v.xy);
+    const float w_across = dot(w, ortho.xy);
+    const float rc_length = 1.0 / inv_rc_length;
+    for (int i = 0; i < AO_STEPS; ++i) {
+        const float length_px = max((float(i) + jitter) / float(AO_STEPS) * radius_px, 2.0);
+        // Mip floor(log2(length_px)) - AO_MIP_SHIFT + 1: the logarithm is the
+        // float's exponent (length_px is at least 2).
+        const int mip = clamp((floatBitsToInt(length_px) >> 23) - 127 - AO_MIP_SHIFT + 1, 0,
+                              NPH_RENDER_AO_MIPS - 1);
+        for (int side = 0; side < 2; ++side) {
+            if (length_px > (side == 0 ? reach0 : reach1)) {
+                continue;
+            }
+            const float s = side == 0 ? -length_px : length_px;
+            const float x = ao_distance(ao_depth_at(c + s * omega, mip));
+            const float along = x * s * w_along - (x - dist) * rc_length;
+            const float across = x * s * w_across;
+            const float len2 = along * along + across * across;
+            const float inv_len = inversesqrt(max(len2, 1e-12));
+            const float weight =
+                clamp((1.0 - len2 * inv_len * inv_radius) / AO_FALLOFF, 0.0, 1.0);
+            const float h = along * inv_len;
+            if (side == 0) {
+                h0 = max(h0, mix(low0, h, weight));
+            } else {
+                h1 = max(h1, mix(low1, h, weight));
+            }
+        }
+    }
+
+    // The horizon angles (side 0 negative), within the hemisphere around
+    // the projected normal, and the slice's visible arc (Eq. 7).
+    const float th0 = g + max(-fast_acos(clamp(h0, -1.0, 1.0)) - g, -0.5 * NPH_PI);
+    const float th1 = g + min(fast_acos(clamp(h1, -1.0, 1.0)) - g, 0.5 * NPH_PI);
+    const float arc = 0.25 * (-cos(2.0 * th0 - g) + cos_g + 2.0 * th0 * sin_g) +
+                      0.25 * (-cos(2.0 * th1 - g) + cos_g + 2.0 * th1 * sin_g);
+    store(t, max(np_length * arc, 0.0), np_length * (cos_g + g * sin_g), dist);
+}

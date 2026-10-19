@@ -161,6 +161,22 @@ f32 nph_render_ref_srgb_to_linear(f32 c)
     return (f32)(v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
 }
 
+static f32 ao_bounce(f32 ao, f32 albedo)
+{
+    const f64 x = (f64)ao;
+    const f64 r = (f64)albedo;
+    const f64 a = 2.0404 * r - 0.3324;
+    const f64 b = -4.7951 * r + 0.6417;
+    const f64 c = 2.7552 * r + 0.6903;
+    const f64 fit = ((a * x + b) * x + c) * x;
+    return (f32)(fit < x ? x : (fit > 1.0 ? 1.0 : fit));
+}
+
+NphVec3 nph_render_ref_ao_bounce(f32 ao, NphVec3 albedo)
+{
+    return nph_vec3(ao_bounce(ao, albedo.x), ao_bounce(ao, albedo.y), ao_bounce(ao, albedo.z));
+}
+
 NphVec3 nph_render_ref_cube_direction(u32 face, f32 s, f32 t)
 {
     const f32 u = 2.0F * s - 1.0F;

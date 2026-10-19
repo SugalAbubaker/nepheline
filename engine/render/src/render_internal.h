@@ -599,6 +599,23 @@ typedef struct RenderDof {
     NphGpuRgImage frame_out; // the HDR image with depth of field
 } RenderDof;
 
+// The production path's ambient occlusion (ao.c): its images are transient,
+// made each frame that has it.
+typedef struct RenderAo {
+    NphGpuShader depth_shader;   // ao_depth.comp
+    NphGpuShader ao_shader;      // ao.comp
+    NphGpuShader denoise_shader; // ao_denoise.comp
+    NphGpuPipeline depth;
+    NphGpuPipeline ao;
+    NphGpuPipeline denoise;
+    // This frame, at half resolution.
+    b32 frame_active;
+    NphRenderAoPush frame_push; // all but the images' indices
+    NphGpuRgImage frame_depths; // reverse-Z depths, NPH_RENDER_AO_MIPS mips
+    NphGpuRgImage frame_raw;    // each texel's slice's occlusion and the distance
+    NphGpuRgImage frame_out;    // the denoised occlusion and the depth
+} RenderAo;
+
 // The production path's motion blur (motion_blur.c): the motion image and
 // the tiles are transient, made each frame that blurs.
 typedef struct RenderMotion {
@@ -709,6 +726,9 @@ struct NphRenderer {
 
     // Depth of field.
     RenderDof dof;
+
+    // The production path's ambient occlusion.
+    RenderAo ao;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -898,6 +918,25 @@ bool render_dof_frame_begin(NphRenderer *r, const NphRenderView *view, u32 heigh
 NphResult render_dof_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage hdr,
                              NphGpuFormat hdr_format, NphGpuRgImage depth, bool visbuffer,
                              u32 width, u32 height, NphGpuRgImage *out);
+
+// ao.c: the production path's ambient occlusion.
+NphResult render_ao_create(NphRenderer *r);
+void render_ao_destroy(NphRenderer *r);
+// Whether this frame has ambient occlusion: a production view with a radius
+// whose image shows the environment's light where there is any (lit, or the
+// indirect debug view) or shows the occlusion (its debug view). If so sets
+// RenderAo.frame_* from `proj`, the frame's projection (jitter included),
+// for a `width` x `height` target.
+bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *proj,
+                           u32 width, u32 height, bool production);
+// The depths (RenderAo.frame_depths), before the depth pyramid's passes,
+// which write their mip 0 (vis_hzb.comp).
+NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph);
+// Once the pyramid's passes have: the depths' mips, the occlusion, and its
+// denoise into RenderAo.frame_out, which the resolve upsamples.
+NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph);
+// RenderAo.frame_out's sampled bindless index (a pass's callback).
+u32 render_ao_index(const NphRenderer *r, NphGpuRenderGraph *graph);
 
 // motion_blur.c: the production path's motion blur.
 NphResult render_motion_create(NphRenderer *r);

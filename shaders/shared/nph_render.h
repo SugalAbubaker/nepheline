@@ -399,6 +399,46 @@ NPH_SHARED_STRUCT(NphRenderDofPush)
     NphVec2 inv_size; // 1 / the full-resolution extent
 };
 
+// Ambient occlusion (ao.c; ao_depth.comp, ao.comp, ao_denoise.comp, and the
+// resolve's upsample; docs/render.md "Ambient occlusion"), at half
+// resolution: each half-resolution texel stands for its 2 x 2 pixels'
+// top-left one.
+// The most pixels a search for horizons reaches, as a fraction of the
+// image's height: nearer surfaces search a radius the view shrinks.
+#define NPH_RENDER_AO_MAX_RADIUS 0.25
+// Distances at or beyond this many metres are the sky's.
+#define NPH_RENDER_AO_SKY 1.0e8
+// The half-resolution depths' mips (ao_depth.comp), each the average of the
+// reverse-Z depths below it: exact where they lie on a plane.
+#define NPH_RENDER_AO_MIPS 5
+
+// Push constants of the ambient occlusion's kernels.
+NPH_SHARED_STRUCT(NphRenderAoPush)
+{
+    // A point's view-space position at view distance d under the pixel
+    // position c (full-resolution pixels): d * (unproject.xy * c +
+    // unproject.zw, -1), through this frame's projection, jitter included.
+    NphVec4 unproject;
+    NphVec2 project;     // 1 / unproject.xy
+    NphVec2 depth_texel; // a texel of the depths' mip 0 in uv: 1 / their extent
+    f32 znear;           // the near plane (reverse-Z depth d is znear / distance)
+    f32 radius;          // the search's radius in metres
+    f32 radius_pixels;   // the radius in full-resolution pixels at a distance of one metre
+    f32 max_radius;      // the most full-resolution pixels a search reaches
+    u32 depths_index;    // bindless sampled: the half-resolution reverse-Z depths, every mip
+                         // (the extent rounded up to a multiple of 2^(NPH_RENDER_AO_MIPS - 1))
+    u32 depth_mips[NPH_RENDER_AO_MIPS]; // bindless storage: each of their mips (depth)
+    u32 raw_index; // bindless: each texel's occlusion, storage (ao), sampled (denoise)
+    u32 out_index; // bindless storage: the denoised occlusion and depth (denoise)
+    u32 width;     // the full-resolution extent
+    u32 height;
+    u32 half_width; // the half-resolution one
+    u32 half_height;
+    u32 noise;          // the slices' rotation this frame (0 to 5)
+    u32 point_sampler;  // nearest, clamped to the edge
+    u32 linear_sampler; // bilinear, clamped to the edge
+};
+
 // Push constants of the image-based lighting kernels.
 NPH_SHARED_STRUCT(NphRenderIblPush)
 {

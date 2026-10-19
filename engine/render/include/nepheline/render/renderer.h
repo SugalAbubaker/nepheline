@@ -600,6 +600,14 @@ typedef struct NphRenderView {
     // Accumulation Buffer", SIGGRAPH 1990): for captures, and the tests'
     // ground truth. Zero: the lens's centre.
     NphVec2 lens_offset;
+    // Ambient occlusion (the production path; docs/render.md "Ambient
+    // occlusion"): the radius in metres within which surfaces occlude the
+    // environment's light (0: none). Ground-truth ambient occlusion from the
+    // depth the view sees, which darkens the environment's light, the diffuse
+    // part with what the occluders reflect back: made for lit views and the
+    // indirect debug view when the environment lights the view, and for the
+    // occlusion debug view. The reference renderer has none.
+    f32 ao_radius;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), ACES, the environment as
@@ -681,9 +689,11 @@ typedef struct NphRenderFrameStats {
     f32 ev100;
     f32 metered_ev100;
     b32 bloom;
-    // Whether the frame was motion blurred, and whether it had depth of field.
+    // Whether the frame was motion blurred, whether it had depth of field, and
+    // whether ambient occlusion.
     b32 motion_blur;
     b32 dof;
+    b32 ao;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

@@ -13,8 +13,12 @@
 // Multiple-Scattering Microfacet Model for Real-Time Image-based
 // Lighting", JCGT 2019; Kulla & Conty, "Revisiting Physically Based
 // Shading at Imageworks", SIGGRAPH 2017) and specular occlusion from the
-// material's ambient occlusion (Lagarde & de Rousiers, "Moving Frostbite
-// to PBR", SIGGRAPH 2014).
+// ambient occlusion (Lagarde & de Rousiers, "Moving Frostbite to PBR",
+// SIGGRAPH 2014): the material's, times the production path's screen-space
+// occlusion where the includer defines NPH_SURFACE_AO (vis_resolve.glsl,
+// from ao.comp), which the diffuse light takes with the light its occluders
+// reflect back (Jimenez, Wu, Pesce & Jarabo, "Practical Realtime Strategies
+// for Accurate Indirect Occlusion", 2016, Eq. 10).
 //
 // The includer says how a material texture is sampled at the surface by
 // defining NPH_SURFACE_SAMPLE(tex, smp, s) before including this file: the
@@ -270,6 +274,11 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         occlusion =
             1.0 + m.occlusion_strength * (nph_surface_sample(m, NPH_RENDER_TEX_OCCLUSION, s).r - 1.0);
     }
+#ifdef NPH_SURFACE_AO
+    const float screen_occlusion = NPH_SURFACE_AO;
+#else
+    const float screen_occlusion = 1.0;
+#endif
 
     // The shading normal: back faces of double-sided materials face the
     // viewer (glTF 2.0 §3.9.2); the whole tangent frame flips with them.
@@ -330,10 +339,23 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         const vec3 f_avg = f0 + (vec3(1.0) - f0) / 21.0;
         const vec3 fms_ems = fss_ess * f_avg / (vec3(1.0) - ems * f_avg) * ems;
         const vec3 k_d = diffuse_color * (vec3(1.0) - fss_ess - fms_ems);
-        const float spec_occlusion =
-            clamp(pow(nov + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion, 0.0, 1.0);
+        const float ao = occlusion * screen_occlusion;
+        const float spec_occlusion = clamp(pow(nov + ao, exp2(-16.0 * a - 1.0)) - 1.0 + ao, 0.0, 1.0);
+        // The diffuse light under the screen-space occlusion A, with what its
+        // occluders of the surface's albedo reflect back: Jimenez et al.'s
+        // cubic fit (Eq. 10), at least A (the fit falls below it for dark
+        // albedos) and at most 1, where A = 1 leaves the light as it was.
+#ifdef NPH_SURFACE_AO
+        const vec3 fit_a = 2.0404 * diffuse_color - 0.3324;
+        const vec3 fit_b = -4.7951 * diffuse_color + 0.6417;
+        const vec3 fit_c = 2.7552 * diffuse_color + 0.6903;
+        const float sa = screen_occlusion;
+        const vec3 bounce = clamp(((fit_a * sa + fit_b) * sa + fit_c) * sa, vec3(sa), vec3(1.0));
+#else
+        const vec3 bounce = vec3(1.0);
+#endif
         indirect = fss_ess * radiance * spec_occlusion +
-                   (fms_ems + k_d) * irradiance * NPH_INV_PI * occlusion;
+                   (fms_ems + k_d) * irradiance * NPH_INV_PI * (occlusion * bounce);
     }
 
     vec3 emissive = m.emissive.rgb;
@@ -352,7 +374,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     case NPH_RENDER_DEBUG_METALLIC:
         return vec3(metallic);
     case NPH_RENDER_DEBUG_OCCLUSION:
-        return vec3(occlusion);
+        return vec3(occlusion * screen_occlusion);
     case NPH_RENDER_DEBUG_INDIRECT:
         return min(indirect * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
     default:
