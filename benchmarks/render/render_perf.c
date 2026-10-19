@@ -81,6 +81,18 @@
 //                         at 5 m/s (parallax: the layered gather), or turns
 //                         360 degrees a second, each reversing every quarter
 //                         second so the view stays over the field.
+//   dof_4k_production     field_4k_production through a full-frame lens
+//                         (24.8 mm at the camera's field of view) at f/1.4
+//                         focused 5 m away: circles of confusion up to 4
+//                         pixels in radius, all gathered at full resolution.
+//   dof_slight_4k_production
+//                         the same lens focused 2.6 m away: circles up to
+//                         7.7 pixels, the most the full-resolution gather
+//                         takes (NPH_RENDER_DOF_SLIGHT).
+//   dof_large_4k_production
+//                         the same lens focused 0.6 m away: circles at the
+//                         32-pixel limit beyond 8 m, gathered at half
+//                         resolution.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -149,6 +161,10 @@ typedef enum ScenePost {
     POST_MOTION_TURN = 1U << 3U,   // turning 60 degrees a second
     POST_MOTION_STRAFE = 1U << 4U, // strafing at 5 m/s
     POST_MOTION_FLICK = 1U << 5U,  // turning 360 degrees a second
+    // Depth of field through DOF_APERTURE, focused at DOF_FOCUS[...].
+    POST_DOF = 1U << 6U,        // 5 m away
+    POST_DOF_SLIGHT = 1U << 7U, // 2.6 m
+    POST_DOF_LARGE = 1U << 8U,  // 0.6 m
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
@@ -157,6 +173,8 @@ typedef enum ScenePost {
 #define MOTION_FRAME   (1.0F / 240.0F)
 #define MOTION_SHUTTER (1.0F / 480.0F)
 #define MOTION_REVERSE 60U
+// Depth of field: a full-frame lens (the view's default sensor) wide open.
+#define DOF_APERTURE 1.4F
 
 static const SceneDef g_scenes[] = {
     {"grid_1k_reference", SCENE_GRID, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
@@ -207,6 +225,12 @@ static const SceneDef g_scenes[] = {
      2160U, 0U, SHADOWS_NONE, POST_MOTION_STRAFE},
     {"motion_flick_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_NONE, POST_MOTION_FLICK},
+    {"dof_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_DOF},
+    {"dof_slight_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_DOF_SLIGHT},
+    {"dof_large_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_DOF_LARGE},
 };
 
 typedef struct Result {
@@ -615,6 +639,13 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
         ctx->strafe = motion == (u32)POST_MOTION_STRAFE ? 5.0 * (f64)MOTION_FRAME : 0.0;
         ctx->motion_frame = 0U;
     }
+    const u32 dof = s->post & ((u32)POST_DOF | (u32)POST_DOF_SLIGHT | (u32)POST_DOF_LARGE);
+    if (dof != 0U) {
+        view.aperture = DOF_APERTURE;
+        view.focus_distance = dof == (u32)POST_DOF          ? 5.0F
+                              : dof == (u32)POST_DOF_SLIGHT ? 2.6F
+                                                            : 0.6F;
+    }
     static FrameRun run;
     if (r == NPH_RESULT_OK) {
         r = run_frames(ctx, &view, target, frames, &run);
@@ -683,12 +714,13 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
                "%u occlusion, clusters %u frustum + %u cone + %u occlusion; lights %u, %u in "
-               "view%s%s%s\n",
+               "view%s%s%s%s\n",
                st->vis_clusters, st->vis_clusters_sw, st->vis_triangles,
                st->vis_instances_culled_frustum, st->vis_instances_culled_occlusion,
                st->vis_meshlets_culled_frustum, st->vis_meshlets_culled_cone,
                st->vis_meshlets_culled_occlusion, st->lights, st->vis_lights,
                st->shadow_rays ? "; shadow rays" : "", st->motion_blur ? "; motion blur" : "",
+               st->dof ? "; depth of field" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
