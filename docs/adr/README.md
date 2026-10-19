@@ -43,6 +43,7 @@ supersedes it and both link to each other.
 | [0035](0035-bloom-and-exposure.md) | Bloom and automatic exposure | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0036](0036-motion-blur.md) | Motion blur after the temporal resolve, weighted by the shutter | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0037](0037-depth-of-field.md) | Depth of field through a thin lens: slight blur gathered at full resolution, large at half | Accepted (adds to ADR-0034's open §10.4 line) |
+| [0038](0038-ambient-occlusion.md) | Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads | Accepted (0.38 ms of §10.4's indirect-light line) |
 
 ## Template
 

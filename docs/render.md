@@ -158,7 +158,9 @@ of glTF 2.0:
   (BC5, RG8) rebuild z. Meshes without tangents get a frame from
   screen-space derivatives (Schüler 2006).
 - **Occlusion** applies to indirect light only (glTF), and also drives
-  specular occlusion (Lagarde & de Rousiers 2014).
+  specular occlusion (Lagarde & de Rousiers 2014). On the production path
+  the screen's ambient occlusion multiplies it, the diffuse light's with
+  what the occluders reflect back ("Ambient occlusion").
 - **Alpha:** MASK discards below the cutoff in its own shader variant (so
   the opaque variant keeps early depth testing). BLEND composites "over"
   without writing depth. Double-sided materials flip the whole tangent
@@ -420,13 +422,14 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
 | `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
-| `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests) |
+| `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, and the ambient occlusion's depths) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
-| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests there) |
+| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests and the occlusion's depths there) |
 | `vis depth`, `vsm requests (blended)` | with the map and blended surfaces: the opaque depth, then the blended surfaces' page requests |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
+| `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' mips, each texel's slice, and the denoise, at half resolution (below) |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
-| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows) |
+| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the ambient occlusion upsampled) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
@@ -659,6 +662,58 @@ frame: 4.26), a turning camera 0.59 (4.34), a box moving behind a still one
 4K with typical motions it adds 0.51 to 0.60 ms to the frame (the motion
 0.23 ms, the blur 0.39 to 0.58 ms), beyond the §10.4 post line (ADR-0036).
 
+### Ambient occlusion
+
+A production view with `NphRenderView.ao_radius` above zero darkens the
+environment's light by ground-truth ambient occlusion: the cosine-weighted
+share of each pixel's hemisphere that no surface within the radius covers
+(Jimenez, Wu, Pesce & Jarabo, "Practical Realtime Strategies for Accurate
+Indirect Occlusion", ATVI-TR-16-01, 2016;
+[ADR-0038](adr/0038-ambient-occlusion.md)). The occlusion is made for lit
+views and the indirect debug view while the environment lights the view
+(not with `disable_ibl` or no environment), and for the occlusion debug
+view (the statistic `ao`); the reference renderer has none. The runtime
+sets the radius from `r.ao` (0.5 m).
+
+- **Half resolution** (the paper's §4.1): texel (i, j) stands for pixel
+  (2i, 2j). The depth pyramid's passes write each 2 × 2 block's top-left
+  depth as they read the frame's depths, and `ao depth` averages four more
+  mips of reverse-Z depth, which is affine across a plane, so every mip's
+  points stay on the planes they come from (XeGTAO's depth mips, Intel
+  2021). The extent rounds up to 16 texels so that every mip halves it
+  exactly and one uv addresses a point in all of them.
+- **A slice a texel** (`ao.comp`): its angle around the view vector one
+  of 16 over 4 × 4 texels (a Bayer matrix), turned by a sixth of a step
+  each frame under temporal anti-aliasing, which averages the rotations:
+  96 directions a pixel. Along the slice's screen direction (the
+  projection's derivative, so the samples lie in the slice), 4 steps a
+  side out to the radius (at most a quarter of the image's height): the
+  near ones interpolate mip 0 exactly where its texels lie on one plane,
+  which a sample beside the slice would rise above at a grazing angle; the
+  far ones read coarser mips. Occluders fade over the last tenth of the
+  radius. The horizons give the slice's visible arc in closed form (Eq. 7),
+  scaled by the normal projected into the slice (Eq. 8; the normal from
+  the depth's gradient).
+- **The denoise** (`ao_denoise.comp`): a 5 × 5 tent of texels, which holds
+  each of the 16 directions equally, counting the neighbours on the
+  texel's tangent plane (5 % of the distance off it counts nothing); the
+  occlusion is the window's visible shares over the open shares its slices
+  would have, so an open surface stays open where an edge cuts directions
+  out.
+- **Shading.** The resolve takes the four texels around each pixel by
+  their bilinear weights and their depth's likeness to the pixel's. The
+  environment's specular light takes specular occlusion from the
+  material's occlusion times the screen's, and its diffuse light the
+  screen's through Eq. 10 of the paper, which adds back what occluders of
+  the surface's albedo reflect (`nph_render_ref_ao_bounce`); direct light
+  is untouched.
+
+Against a ground truth cast by rays, a box on the ground is occluded
+within a fifth of how much the truth is, the ground nothing occludes stays
+within 0.003 of open, and the ground alone within 0.009 out to its
+horizon (`test_ao.c`). At 4K with the runtime's radius it adds 0.38 ms to
+a frame the sky lights (ADR-0038).
+
 ### Capacities and statistics
 
 The production path's lists have fixed capacities in `NphRendererDesc`:
@@ -691,46 +746,51 @@ time of `nph_render_frame` and the GPU frame:
 | grid, 512 × 512 | 1,024 | 0.20 ms | 0.007 ms | 0.10 ms | 0.23 ms |
 | grid, 512 × 512 | 10,240 | 1.24 ms | 0.007 ms | 0.21 ms | 0.28 ms |
 | grid, 512 × 512 | 102,400 | 13.2 ms | 0.007 ms | 3.57 ms | 0.66 ms |
-| field, 3840 × 2160 | 16,385 | 2.86 ms | 0.009 ms | 3.03 ms | 2.97 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.009 ms | | 2.19 ms |
-| the same without bloom | 16,385 | | 0.009 ms | | 2.62 ms |
-| the same exposed automatically | 16,385 | | 0.009 ms | | 2.99 ms |
-| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.009 ms | | 3.53 ms |
-| the same, strafing at 5 m/s | 16,385 | | 0.009 ms | | 3.52 ms |
-| the same, turning 360°/s | 16,385 | | 0.009 ms | | 3.44 ms |
-| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.010 ms | | 3.94 ms |
-| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.010 ms | | 4.51 ms |
-| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.010 ms | | 4.29 ms |
-| field at night, 1,024 lights | 16,385 | 3.56 ms | 0.009 ms | 54.7 ms | 3.26 ms |
-| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 4.96 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.16 ms | 0.010 ms | 3.65 ms | 3.37 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.39 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.011 ms | | 3.43 ms |
-| the map, the camera walking | 16,385 | | 0.011 ms | | 3.40 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.011 ms | | 4.69 ms |
+| field, 3840 × 2160 | 16,385 | 2.90 ms | 0.009 ms | 3.02 ms | 3.36 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.009 ms | | 2.59 ms |
+| the same without bloom | 16,385 | | 0.009 ms | | 3.01 ms |
+| the same without ambient occlusion | 16,385 | | 0.009 ms | | 2.98 ms |
+| the same exposed automatically | 16,385 | | 0.010 ms | | 3.37 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.010 ms | | 3.92 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.010 ms | | 3.90 ms |
+| the same, turning 360°/s | 16,385 | | 0.010 ms | | 3.80 ms |
+| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.010 ms | | 4.33 ms |
+| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.010 ms | | 4.90 ms |
+| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.010 ms | | 4.68 ms |
+| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.009 ms | 58.3 ms | 3.25 ms |
+| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 4.92 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.22 ms | 0.011 ms | 3.63 ms | 3.66 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.84 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.011 ms | | 3.71 ms |
+| the map, the camera walking | 16,385 | | 0.011 ms | | 3.69 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.011 ms | | 4.72 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
-frames resolve temporally (the runtime's default), the reference's do not;
-the motion-blurred frames have a 180-degree shutter at 240 frames a
-second, and the others with depth of field a full-frame lens at f/1.4
-(`render_perf-2026-10-19b`; a frame varies by a few hundredths of a
-millisecond from run to run).
+frames resolve temporally (the runtime's default) and, where the sky
+lights them, take ambient occlusion within 0.5 m (`r.ao`), the
+reference's do neither; the motion-blurred frames have a 180-degree
+shutter at 240 frames a second, and the others with depth of field a
+full-frame lens at f/1.4 (`render_perf-2026-10-19c`; a frame varies by a
+few hundredths of a millisecond from run to run).
 
-In the 4K field the surviving clusters hold 5.3 million triangles (the
+In the 4K field the surviving clusters hold 5.4 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
-53,257 clusters, and 55,701 of the 62,234 drawn went to the software
+52,249 clusters, and 57,587 of the 64,128 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
-passes 0.10 ms, raster 0.49 ms (0.22 in hardware, 0.27 in software), the
-two pyramids 0.21 ms, the light grid 0.013 ms, resolve 0.92 ms (0.89
-without the jitter), the bloom chain 0.28 ms, the temporal resolve with
-the glare and the tonemap 0.83 ms (0.75 without bloom; the tonemap with
-the glare: 0.12 ms). Against CLAUDE.md §10.4, the raster (0.65 ms
-budgeted) and the shading (1.20 ms) fit; culling with the depth pyramid
-takes 0.31 ms against 0.25 ms, most of it the first pyramid's read of the
-visibility buffer; the temporal resolve and the bloom chain (1.10 ms) are
-past the 0.40 ms of TAA, post, and the tonemap together (ADR-0034,
-ADR-0035); motion blur adds about half a millisecond when on (ADR-0036),
-and depth of field 0.97 to 1.54 ms (ADR-0037). With
+passes 0.09 ms, raster 0.53 ms (0.24 in hardware, 0.30 in software), the
+two pyramids 0.23 ms (0.21 without the ambient occlusion's depths), the
+light grid 0.014 ms, the ambient occlusion 0.30 ms, resolve 1.00 ms (0.94
+without the ambient occlusion), the bloom chain 0.27 ms, the temporal
+resolve with the glare and the tonemap 0.83 ms (0.75 without bloom; the
+tonemap with the glare: 0.13 ms). Against CLAUDE.md §10.4, the raster
+(0.65 ms budgeted) and the shading (1.20 ms) fit; culling with the depth
+pyramid takes 0.30 ms against 0.25 ms, most of it the first pyramid's
+read of the visibility buffer; the ambient occlusion takes 0.38 ms (its
+share of the pyramids and the resolve included) of the indirect light's
+0.60 ms (ADR-0038); the temporal resolve and the bloom
+chain (1.10 ms) are past the 0.40 ms of TAA, post, and the tonemap
+together (ADR-0034, ADR-0035); motion blur adds about half a millisecond
+when on (ADR-0036), and depth of field 0.97 to 1.54 ms (ADR-0037). With
 1,024 lamps the grid's passes take 0.049 ms and the resolve 1.20 ms (every
 light for every pixel: 44.4 ms), at the shading line.
 The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
@@ -1034,6 +1094,16 @@ synchronisation-validation gate:
   after another pipeline's frame or another extent, and a closed shutter's
   frame the plain one; shutters that are negative or not finite refused;
   debug lines over a blurred frame.
+- **Ambient occlusion** (`test_ao.c`), against a ground truth cast by 576
+  stratified rays a pixel: a box on the ground occluded within a quarter of
+  how much the truth is, with no more than a hundredth of light on average
+  where the truth is open; the ground alone open out to its horizon and at
+  the image's edges; the diffuse light's bounce, measured from two albedos
+  with and without the occlusion, against `nph_render_ref_ao_bounce`; a sun
+  alone lighting the frame as without it, bit for bit, and the
+  environment's light nowhere brightened; the views that make it (lit and
+  indirect with an environment, the occlusion debug view) and those that
+  do not; radii that are negative or not finite refused.
 
 The DFG comparison found a real bug: in single precision, near-mirror GGX
 samples produced `cos θ > 1`, so `sin θ` was NaN and 29 % of the samples
@@ -1086,6 +1156,14 @@ path and logs what the GPU culled.
   sharp surface in front hides cannot show through its blur; bokeh is a
   uniform disc; blended surfaces take the depth of the opaque surface
   behind them (ADR-0037).
+- Ambient occlusion adds 0.38 ms at 4K (ADR-0038), most of the indirect
+  light's §10.4 line. Screen space cannot see how thick an occluder is
+  (behind a silhouette it occludes as if it went on; the paper's thickness
+  heuristic is not used); the environment's specular light is occluded by
+  the occlusion's amount, not by a cone around the bent normal; the
+  occlusion is not accumulated on its own (the temporal resolve averages
+  its rotations in the image); blended surfaces and the reference
+  renderer have none.
 - Motion blur adds 0.51 to 0.60 ms at 4K with typical motions (ADR-0036).
   Blended surfaces blur with the motion of the opaque surface behind them;
   motion is linear across the shutter; a blur reaches at most 32 pixels
