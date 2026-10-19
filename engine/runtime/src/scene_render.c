@@ -70,6 +70,7 @@ struct NphSceneRenderer {
     NphRenderCamera camera;
     f32 ev100;
     u32 tonemapper;
+    f32 shutter;
     u32 instances;
     u32 lights;
     u32 failed;
@@ -711,6 +712,8 @@ static void sync_camera(NphSceneRenderer *sr)
             sr->camera.yfov = nph_f32_clamp(c[i].yfov, 0.01F, 3.0F);
             sr->camera.znear = c[i].znear > 1e-5F ? c[i].znear : 1e-5F;
             sr->ev100 = c[i].ev100;
+            // A second at most: the renderer refuses what is not finite.
+            sr->shutter = c[i].shutter > 0.0F ? nph_f32_min(c[i].shutter, 1.0F) : 0.0F;
             sr->tonemapper = c[i].tonemapper <= (u32)NPH_RENDER_TONEMAPPER_AGX
                                  ? c[i].tonemapper
                                  : (u32)NPH_RENDER_TONEMAPPER_ACES;
@@ -826,6 +829,7 @@ bool nph_scene_renderer_view(const NphSceneRenderer *sr, NphRenderView *view)
     view->camera = sr->camera;
     view->ev100 = sr->ev100;
     view->tonemapper = (NphRenderTonemapper)sr->tonemapper;
+    view->shutter = sr->shutter;
     return true;
 }
 

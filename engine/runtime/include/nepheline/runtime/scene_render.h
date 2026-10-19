@@ -114,7 +114,7 @@ void nph_scene_renderer_wait(NphSceneRenderer *sr);
 
 // Fills `view` from the world's first active Camera (by entity slot) as of
 // the last sync: its position, orientation, field of view, near plane,
-// exposure, and tonemapper; other fields keep their values. False (and
+// exposure, tonemapper, and shutter; other fields keep their values. False (and
 // `view` untouched) when the world has no active camera.
 bool nph_scene_renderer_view(const NphSceneRenderer *sr, NphRenderView *view);
 

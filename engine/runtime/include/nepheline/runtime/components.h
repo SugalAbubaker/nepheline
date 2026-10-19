@@ -99,13 +99,17 @@ NPH_COMPONENT_STRUCT(NphLight, NPH_LIGHT_FIELDS);
 NPH_COMPONENT_DECLARE(NphLight);
 
 // A perspective camera along the entity's -Z with +Y up (ADR-0008), with
-// its exposure (EV100) and tonemapper (render/renderer.h).
+// its exposure (EV100), tonemapper, and shutter (render/renderer.h
+// NphRenderView): how long the shutter is open in seconds, which the motion
+// blur spans (0: none; 1/480 is a 180-degree shutter at 240 frames a
+// second; the r.motion_blur cvar turns it off).
 #define NPH_CAMERA_FIELDS(F)                                                                       \
     F(F32, yfov, NPH_FIELD_HINTS(NPH_FIELD_FLAG_ANGLE | NPH_FIELD_FLAG_RANGE, 0.1F, 2.8F))         \
     F(F32, znear, NPH_FIELD_RANGE(0.001F, 10.0F))                                                  \
     F(F32, ev100, NPH_FIELD_RANGE(-6.0F, 20.0F))                                                   \
     F(U32, tonemapper, NPH_FIELD_RANGE(0.0F, 2.0F))                                                \
-    F(BOOL, active, NPH_FIELD_NO_HINTS)
+    F(BOOL, active, NPH_FIELD_NO_HINTS)                                                            \
+    F(F32, shutter, NPH_FIELD_RANGE(0.0F, 0.1F))
 NPH_COMPONENT_STRUCT(NphCamera, NPH_CAMERA_FIELDS);
 NPH_COMPONENT_DECLARE(NphCamera);
 

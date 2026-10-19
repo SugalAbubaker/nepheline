@@ -372,6 +372,34 @@ NTEST(Engine, views_have_bloom_and_a_manual_exposure_by_default)
     finish(&fx);
 }
 
+// A view's shutter reaches the renderer, and r.motion_blur (on by default)
+// closes it while off.
+NTEST(Engine, r_motion_blur_closes_the_shutter_while_off)
+{
+    static EngineFixture fx;
+    prepare(&fx);
+    NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
+    NphEngine *e = fx.engine;
+    NphRenderView v;
+    nph_render_view_default(&v,
+                            nph_render_camera_look_at(nph_dvec3(5.0, 5.0, 5.0), nph_dvec3_zero(),
+                                                      nph_vec3_unit_y(), 1.0F, 0.2F));
+    v.shutter = 1.0F / 480.0F;
+    nph_engine_set_view(e, &v);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(nph_engine_view(e)->shutter, 1.0F / 480.0F, 0.0F);
+    NphCvar *mb = nph_cvar_find(nph_engine_cvars(e), NPH_STR("r.motion_blur"));
+    NTEST_ASSERT_NOT_NULL(mb);
+    NTEST_ASSERT_EQ_INT(nph_cvar_set_bool(nph_engine_cvars(e), mb, 0), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(nph_engine_view(e)->shutter, 0.0F, 0.0F);
+    NTEST_ASSERT_EQ_INT(nph_cvar_set_bool(nph_engine_cvars(e), mb, 1), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(nph_engine_view(e)->shutter, 1.0F / 480.0F, 0.0F);
+    nph_engine_set_view(e, NULL);
+    finish(&fx);
+}
+
 // Temporal anti-aliasing is on by default (r.taa), and a switch between the
 // world's camera and an override is a camera cut, once.
 NTEST(Engine, views_are_anti_aliased_and_a_camera_switch_cuts)

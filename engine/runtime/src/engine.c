@@ -87,6 +87,9 @@ static const NPH_CVAR_FLOAT(k_exposure_compensation, "r.exposure_compensation", 
 static const NPH_CVAR_FLOAT(k_exposure_speed, "r.exposure_speed", 1.5, 0.01, 100.0,
                             "automatic exposure: e-foldings per second toward the metering",
                             NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_BOOL(k_motion_blur, "r.motion_blur", 1,
+                           "motion blur over the camera's shutter time (production)",
+                           NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -129,6 +132,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->auto_exposure,
         &cv->exposure_compensation,
         &cv->exposure_speed,
+        &cv->motion_blur,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,
@@ -158,6 +162,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_auto_exposure,
         &k_exposure_compensation,
         &k_exposure_speed,
+        &k_motion_blur,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -601,10 +606,11 @@ static void poll_events(NphEngine *e)
 }
 
 // The view to render: the override, or the world's camera. The r.*
-// cvars choose the pipeline, its culling, its anti-aliasing, its bloom, and
-// how it is exposed for either; a switch between the two is a camera cut
-// (the temporal history of the other camera does not carry over). `dt` is
-// the time since the previous frame, which paces the automatic exposure.
+// cvars choose the pipeline, its culling, its anti-aliasing, its bloom, how
+// it is exposed, and whether its shutter blurs, for either; a switch between
+// the two is a camera cut (the temporal history of the other camera does not
+// carry over). `dt` is the time since the previous frame, which paces the
+// automatic exposure and scales the motion blur.
 static void choose_view(NphEngine *e, f64 dt)
 {
     // A cut the host asked for in its view applies to one frame.
@@ -642,6 +648,9 @@ static void choose_view(NphEngine *e, f64 dt)
                                                                : NPH_RENDER_EXPOSURE_MANUAL;
     e->view.exposure_compensation = (f32)nph_cvar_get_float(&e->cv.exposure_compensation);
     e->view.exposure_speed = (f32)nph_cvar_get_float(&e->cv.exposure_speed);
+    if (!nph_cvar_get_bool(&e->cv.motion_blur)) {
+        e->view.shutter = 0.0F;
+    }
     // In lockstep a frame lasts one step whatever the clock says, so a
     // run's exposure is the same every time.
     const f64 seconds =

@@ -453,6 +453,7 @@ NTEST(SceneRender, the_camera_and_the_environment)
     c->tonemapper = (u32)NPH_RENDER_TONEMAPPER_AGX;
     c->yfov = 1.2F;
     c->znear = 0.25F;
+    c->shutter = 1.0F / 480.0F;
     NphLocalTransform *lt = local(&fx, cam);
     lt->translation = nph_dvec3(1.0, 2.0, 3.0);
     lt->rotation = nph_quat_from_rotation_y(0.5F);
@@ -466,6 +467,7 @@ NTEST(SceneRender, the_camera_and_the_environment)
     NTEST_ASSERT_NEAR_F32(view.camera.znear, 0.25F, 0.0F);
     NTEST_ASSERT_NEAR_F32(view.ev100, 9.0F, 0.0F);
     NTEST_ASSERT_EQ_UINT((u32)view.tonemapper, (u32)NPH_RENDER_TONEMAPPER_AGX);
+    NTEST_ASSERT_NEAR_F32(view.shutter, 1.0F / 480.0F, 0.0F);
     const NphQuat want = nph_quat_from_rotation_y(0.5F);
     NTEST_ASSERT_NEAR_F32(nph_f32_abs(nph_quat_dot(view.camera.orientation, want)), 1.0F, 1e-5F);
     // Deactivating it hands the view to the next one.
@@ -475,6 +477,7 @@ NTEST(SceneRender, the_camera_and_the_environment)
     NTEST_ASSERT_TRUE(nph_scene_renderer_view(fx.sr, &view));
     NTEST_ASSERT_NEAR_F64(view.camera.position.x, 0.0, 0.0);
     NTEST_ASSERT_NEAR_F32(view.ev100, 15.0F, 0.0F);
+    NTEST_ASSERT_NEAR_F32(view.shutter, 0.0F, 0.0F);
     NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, other), NPH_RESULT_OK);
     (void)sync(&fx);
     NTEST_ASSERT_FALSE(nph_scene_renderer_view(fx.sr, &view));

@@ -129,6 +129,7 @@ typedef struct EngineCvars {
     NphCvar auto_exposure;         // r.auto_exposure
     NphCvar exposure_compensation; // r.exposure_compensation
     NphCvar exposure_speed;        // r.exposure_speed
+    NphCvar motion_blur;           // r.motion_blur
 } EngineCvars;
 
 typedef enum EngineAllocTag {
