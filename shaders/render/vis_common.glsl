@@ -368,4 +368,55 @@ uint vis_triangle(uint64_t v)
     return uint(v) & NPH_VIS_TRIANGLE_MASK;
 }
 
+// ---------------------------------------------------------------------------
+// Motion
+// ---------------------------------------------------------------------------
+
+// Where the surface seen at pixel `q` (visibility-buffer texel `v`, 0 for
+// the sky) lay in the previous frame, in UV without jitter; false when it
+// lay behind the previous camera. The point, in this frame's clip space as
+// the sample at q was drawn (with the jitter), goes to the previous frame's
+// without its jitter: through the previous transform for an instance that
+// moved (NPH_VIS_INSTANCE_MOVED, which its clusters carry), and otherwise
+// with the camera's move alone (NphVisViewData.reproject), which leaves the
+// sky's points at infinity to the camera's rotation. The temporal resolve
+// (taa.frag) and the motion blur's motion (motion.comp) share it.
+bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
+{
+    const vec2 ndc = (vec2(q) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    const vec4 point = vec4(ndc, v == 0ul ? 0.0 : vis_depth(v), 1.0);
+    vec4 clip;
+    bool moved = false;
+    if (v != 0ul) {
+        // The cluster's flags say whether its instance moved, so a still
+        // one's record is not read.
+        VisClustersRef clusters = VisClustersRef(view.v.clusters);
+        const uint c = vis_cluster(v);
+        if ((clusters.c[c].flags & NPH_VIS_CLUSTER_MOVED) != 0u) {
+            moved = true;
+            // Homogeneous and camera relative.
+            ViewRef rview = ViewRef(view.v.render_view);
+            const vec4 x = rview.v.inv_view_proj * point;
+            const uint slot = clusters.c[c].instance;
+            const NphVisTransform transform = VisInstancesRef(view.v.instances).i[slot].transform;
+            const vec3 t = vis_relative_translation(transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            // The point in the instance's own space (the inverse of the
+            // linear part is the normal matrix transposed), out again
+            // through the previous transform, relative to the previous camera.
+            const vec3 local = transpose(vis_normal_matrix(transform)) * (x.xyz / x.w - t);
+            const NphVisTransform pt = VisTransformsRef(view.v.prev_transforms).t[slot];
+            const vec3 then = vis_transform_vector(pt, local) +
+                              vis_relative_translation(pt, view.v.prev_camera_high.xyz,
+                                                       view.v.prev_camera_low.xyz);
+            clip = view.v.prev_view_proj * vec4(then, 1.0);
+        }
+    }
+    if (!moved) {
+        clip = view.v.reproject * point;
+    }
+    uv = clip.xy / clip.w * 0.5 + 0.5;
+    return clip.w > 0.0;
+}
+
 #endif

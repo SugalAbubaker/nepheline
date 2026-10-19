@@ -378,8 +378,10 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(render_rt_create(r));
     NPH_TRY(render_post_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
-        NPH_TRY(render_taa_create(r));
+        // The path's HDR format first: the temporal resolve's history is in it.
         NPH_TRY(render_vis_create(r));
+        NPH_TRY(render_taa_create(r));
+        NPH_TRY(render_motion_create(r));
         NPH_TRY(render_vsm_create(r));
     } else {
         r->vsm.sun_slot = NPH_U32_MAX;
@@ -494,6 +496,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_ibl_destroy(r);
     render_vsm_destroy(r);
     render_vis_destroy(r);
+    render_motion_destroy(r);
     render_taa_destroy(r);
     render_post_destroy(r);
     render_rt_destroy(r);
@@ -509,6 +512,7 @@ void nph_renderer_destroy(NphRenderer *r)
         nph_gpu_pipeline_destroy(dev, t->vis_debug_depth);
         nph_gpu_pipeline_destroy(dev, t->vis_debug_overlay);
         nph_gpu_pipeline_destroy(dev, t->taa);
+        nph_gpu_pipeline_destroy(dev, t->motion_blur);
     }
     for (u32 a = 0; a < 3U; ++a) {
         for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {

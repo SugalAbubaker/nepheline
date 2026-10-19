@@ -13,10 +13,12 @@
 //   3. the passes are declared: the image-based-lighting passes when
 //      needed (ibl.c), then either the reference renderer's forward pass
 //      into a pre-exposed HDR target or the production path's culling,
-//      raster, resolve, and transparent passes (vis.c), and the tonemap
-//      pass into the caller's target with the debug lines, or on a
-//      production view with temporal anti-aliasing the temporal resolve
-//      (taa.c), which tonemaps too.
+//      raster, resolve, and transparent passes (vis.c), bloom and the
+//      metering (post.c), and the tonemap pass into the caller's target
+//      with the debug lines; or on a production view with temporal
+//      anti-aliasing the temporal resolve (taa.c), which tonemaps too, and
+//      with motion blur the blur (motion_blur.c), which then tonemaps
+//      instead.
 //
 // The reference draws every visible submesh itself; the production path
 // leaves opaque and masked surfaces to the GPU and draws only the blended
@@ -213,6 +215,7 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_depth);
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_overlay);
                 nph_gpu_pipeline_destroy(r->dev, t->taa);
+                nph_gpu_pipeline_destroy(r->dev, t->motion_blur);
                 memset(t, 0, sizeof *t);
                 return res;
             }
@@ -592,6 +595,54 @@ static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     }
 }
 
+// The production path's debug lines over its final image, when another pass
+// than the tonemap's wrote it (render/debug_draw.h): the depth-tested ones
+// against the visibility buffer, then the overlay.
+static void lines_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const RenderTargetPipelines *t = r->frame_target;
+    NphRenderPush push = r->push;
+    push.flags = r->tonemap_push.encode_srgb != 0U ? 0U : (u32)NPH_RENDER_PUSH_LINEAR_OUTPUT;
+    if (r->debug_draw_counts[0] != 0U) {
+        push.visbuffer_index = render_vis_visbuffer_index(r, graph);
+        nph_gpu_cmd_bind_pipeline(cmd, t->vis_debug_depth);
+        nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
+        nph_gpu_cmd_draw(cmd, r->debug_draw_counts[0] * 2U, 1U, 0U, 0U);
+    }
+    if (r->debug_draw_counts[1] != 0U) {
+        nph_gpu_cmd_bind_pipeline(cmd, t->vis_debug_overlay);
+        nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
+        nph_gpu_cmd_draw(cmd, r->debug_draw_counts[1] * 2U, 1U, r->desc.debug_lines * 2U, 0U);
+    }
+}
+
+static NphResult declare_lines(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage out)
+{
+    if (r->debug_draw_counts[0] == 0U && r->debug_draw_counts[1] == 0U) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuRgPassDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.name = "debug lines";
+    pd.type = NPH_GPU_RG_PASS_GRAPHICS;
+    pd.execute = lines_execute;
+    pd.user = r;
+    NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    NphGpuRgAttachment a;
+    memset(&a, 0, sizeof a);
+    a.load = NPH_GPU_LOAD_OP_LOAD;
+    a.store = NPH_GPU_STORE_OP_STORE;
+    nph_gpu_rg_color_attachment(p, out, &a);
+    if (r->debug_draw_counts[0] != 0U) {
+        nph_gpu_rg_read_image(p, r->vis.frame.visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    }
+    return NPH_RESULT_OK;
+}
+
 static bool format_is_srgb(NphGpuFormat f)
 {
     return nph_gpu_format_info(f)->srgb != 0;
@@ -685,7 +736,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         (u32)view->anti_aliasing > (u32)NPH_RENDER_AA_TEMPORAL ||
         (u32)view->exposure > (u32)NPH_RENDER_EXPOSURE_AUTO ||
         !(view->bloom >= 0.0F && view->bloom <= 1.0F) || !(view->exposure_speed >= 0.0F) ||
-        !(view->frame_seconds >= 0.0F)) {
+        !(view->frame_seconds >= 0.0F) || !(view->shutter >= 0.0F) ||
+        !nph_f32_is_finite(view->shutter)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const NphGpuImageDesc *td = nph_gpu_image_desc(dev, target);
@@ -753,6 +805,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.ev100 = ev100;
     stats.metered_ev100 = r->post.metered ? r->post.metered_ev100 : 0.0F;
     stats.bloom = r->post.frame_bloom;
+    // Motion blur, measured against the previous frame (motion_blur.c).
+    const bool motion_blur = render_motion_frame_begin(r, view, width, height, production);
+    stats.motion_blur = motion_blur ? 1 : 0;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -851,8 +906,19 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (nph_gpu_rg_image_is_null(out)) {
         return NPH_RESULT_FULL;
     }
-    if (r->taa.frame_active) {
-        NPH_TRY(render_taa_declare(r, graph, out, vd->exposure));
+    if (r->taa.frame_active || motion_blur) {
+        // The production path's own final passes: the temporal resolve into
+        // the target, or into its history alone for the motion blur to read;
+        // the motion blur fused with the tonemap; then the debug lines.
+        NphGpuRgImage color = r->hdr_rg;
+        if (r->taa.frame_active) {
+            NPH_TRY(render_taa_declare(r, graph, motion_blur ? NPH_GPU_RG_IMAGE_NULL : out,
+                                       vd->exposure, &color));
+        }
+        if (motion_blur) {
+            NPH_TRY(render_motion_declare(r, graph, out, color, !r->taa.frame_active));
+        }
+        NPH_TRY(declare_lines(r, graph, out));
         if (out_target != NULL) {
             *out_target = out;
         }

@@ -9,10 +9,12 @@
 // sequence (Karis, "High Quality Temporal Supersampling", SIGGRAPH 2014),
 // every pass alike: culling and the light grid move their rectangles by
 // it, so nothing is culled or binned against a position the raster does
-// not draw at. The resolve writes the display colour and the next history;
-// the two history images take turns. The history continues only from the
-// frame just before, resolved temporally into the same extent, without a
-// camera cut; otherwise the frame stands alone (its filtered samples).
+// not draw at. The resolve writes the display colour and the next history,
+// or on a frame with motion blur the history alone, which the blur reads
+// (motion_blur.c); the two history images take turns. The history
+// continues only from the frame just before, resolved temporally into the
+// same extent, without a camera cut; otherwise the frame stands alone (its
+// filtered samples).
 #include <nepheline/core/log.h>
 #include <nepheline/math/scalar.h>
 
@@ -61,6 +63,19 @@ NphResult render_taa_create(NphRenderer *r)
 {
     RenderTaa *t = &r->taa;
     NPH_TRY(render_load_shader_file(r, "taa.frag", &t->shader));
+    NPH_TRY(render_load_shader_file(r, "taa_history.frag", &t->history_shader));
+    // The resolve into the history alone, whatever the target's format.
+    NphGpuGraphicsPipelineDesc d;
+    memset(&d, 0, sizeof d);
+    d.vertex = r->shaders[RENDER_SHADER_FULLSCREEN_VERT];
+    d.fragment = t->history_shader;
+    d.color_formats[0] = r->vis.hdr_format;
+    d.color_count = 1U;
+    d.specialization[0] = r->vis.hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
+    d.specialization_count = 1U;
+    d.name = "taa (history only)";
+    NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->history_only));
+    render_log_statistics(r, t->history_only, "taa (history only)");
     NphGpuSamplerDesc s;
     nph_gpu_sampler_desc_default(&s);
     s.mip_filter = NPH_GPU_FILTER_NEAREST;
@@ -88,6 +103,8 @@ void render_taa_destroy(NphRenderer *r)
     RenderTaa *t = &r->taa;
     destroy_history(r);
     nph_gpu_sampler_destroy(r->dev, t->sampler);
+    nph_gpu_pipeline_destroy(r->dev, t->history_only);
+    nph_gpu_shader_destroy(r->dev, t->history_shader);
     nph_gpu_shader_destroy(r->dev, t->shader);
     memset(t, 0, sizeof *t);
 }
@@ -145,6 +162,7 @@ NphResult render_taa_frame_begin(NphRenderer *r, const NphRenderView *view, u32 
     RenderTaa *t = &r->taa;
     t->frame_active = 0;
     t->frame_history = 0;
+    t->frame_history_only = 0;
     t->frame_jitter = nph_vec2(0.0F, 0.0F);
     *out_jitter = t->frame_jitter;
     if (!production || view->anti_aliasing != NPH_RENDER_AA_TEMPORAL ||
@@ -175,46 +193,14 @@ static void taa_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     p.bloom = bloom.bloom;
     p.bloom_scale = bloom.bloom_scale;
     p.bloom_uv = bloom.bloom_uv;
-    nph_gpu_cmd_bind_pipeline(cmd, r->frame_target->taa);
+    nph_gpu_cmd_bind_pipeline(cmd, r->taa.frame_history_only ? r->taa.history_only
+                                                             : r->frame_target->taa);
     nph_gpu_cmd_push_constants(cmd, &p, (u32)sizeof p);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
 }
 
-// The debug lines over the resolved image (render/debug_draw.h): the
-// depth-tested ones against the visibility buffer, then the overlay.
-static void lines_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    NphRenderer *r = (NphRenderer *)user;
-    const RenderTargetPipelines *t = r->frame_target;
-    NphRenderPush push = r->push;
-    push.flags = r->tonemap_push.encode_srgb != 0U ? 0U : (u32)NPH_RENDER_PUSH_LINEAR_OUTPUT;
-    if (r->debug_draw_counts[0] != 0U) {
-        push.visbuffer_index = render_vis_visbuffer_index(r, graph);
-        nph_gpu_cmd_bind_pipeline(cmd, t->vis_debug_depth);
-        nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
-        nph_gpu_cmd_draw(cmd, r->debug_draw_counts[0] * 2U, 1U, 0U, 0U);
-    }
-    if (r->debug_draw_counts[1] != 0U) {
-        nph_gpu_cmd_bind_pipeline(cmd, t->vis_debug_overlay);
-        nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
-        nph_gpu_cmd_draw(cmd, r->debug_draw_counts[1] * 2U, 1U, r->desc.debug_lines * 2U, 0U);
-    }
-}
-
-static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
-                              NphGpuRgExecuteFn execute)
-{
-    NphGpuRgPassDesc d;
-    memset(&d, 0, sizeof d);
-    d.name = name;
-    d.type = NPH_GPU_RG_PASS_GRAPHICS;
-    d.execute = execute;
-    d.user = r;
-    return nph_gpu_rg_add_pass(graph, &d);
-}
-
 NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage out,
-                             f32 exposure)
+                             f32 exposure, NphGpuRgImage *out_history)
 {
     RenderTaa *t = &r->taa;
     const VisFrame *f = &r->vis.frame;
@@ -223,16 +209,26 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     const NphGpuRgImage next = nph_gpu_rg_import_image(graph, t->history[t->write]);
     const NphGpuRgImage prev =
         t->frame_history ? nph_gpu_rg_import_image(graph, last) : NPH_GPU_RG_IMAGE_NULL;
-    NphGpuRgPass *p = add_pass(graph, r, "taa", taa_execute);
+    NphGpuRgPassDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.name = "taa";
+    pd.type = NPH_GPU_RG_PASS_GRAPHICS;
+    pd.execute = taa_execute;
+    pd.user = r;
+    NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
     if (p == NULL || nph_gpu_rg_image_is_null(next) ||
         (t->frame_history && nph_gpu_rg_image_is_null(prev))) {
         return NPH_RESULT_FULL;
     }
+    *out_history = next;
+    t->frame_history_only = nph_gpu_rg_image_is_null(out) ? 1 : 0;
     NphGpuRgAttachment a;
     memset(&a, 0, sizeof a);
     a.load = NPH_GPU_LOAD_OP_DONT_CARE; // every pixel is written
     a.store = NPH_GPU_STORE_OP_STORE;
-    nph_gpu_rg_color_attachment(p, out, &a);
+    if (!t->frame_history_only) {
+        nph_gpu_rg_color_attachment(p, out, &a);
+    }
     nph_gpu_rg_color_attachment(p, next, &a);
     nph_gpu_rg_read_image(p, r->hdr_rg, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
@@ -262,18 +258,6 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     push->tonemapper = r->tonemap_push.tonemapper;
     push->encode_srgb = r->tonemap_push.encode_srgb;
     push->noise = (u32)(t->sequence % 64U);
-
-    if (r->debug_draw_counts[0] != 0U || r->debug_draw_counts[1] != 0U) {
-        NphGpuRgPass *lines = add_pass(graph, r, "debug lines", lines_execute);
-        if (lines == NULL) {
-            return NPH_RESULT_FULL;
-        }
-        a.load = NPH_GPU_LOAD_OP_LOAD;
-        nph_gpu_rg_color_attachment(lines, out, &a);
-        if (r->debug_draw_counts[0] != 0U) {
-            nph_gpu_rg_read_image(lines, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
-        }
-    }
 
     // The next frame continues from this one.
     t->exposure = exposure;

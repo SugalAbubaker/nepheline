@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: Apache-2.0
+// The motion blur's motion (docs/render.md "Motion blur"; ADR-0036): every
+// pixel's blur, and every tile's dominant one (McGuire, Hennessy, Bukowski
+// & Osman, "A Reconstruction Filter for Plausible Motion Blur", I3D 2012,
+// "TileMax"; Guertin, McGuire & Nowrouzezahrai, "A Fast and Stable
+// Feature-Aware Motion Blur Filter", HPG 2014).
+//
+// A workgroup takes one tile of NPH_RENDER_MB_TILE pixels square, each
+// invocation 2 x 2 pixels. A pixel's motion since the previous frame is its
+// surface's (vis_previous_uv); its blur reaches pc.scale of that either way
+// (half the shutter's time over the frame's), at most a tile, so that no
+// blur reaches past the tiles around its own. The motion image keeps the
+// blur's half-extent and the surface's view distance, packed in a word
+// (motion_common.glsl), which the gather weighs its samples by. The tile
+// keeps its longest blur and how far from that blur any of its pixels' lies
+// (0 when the tile moves as one).
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "motion_common.glsl"
+#include "vis_common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant, scalar) uniform Push { NphRenderMotionPush pc; };
+
+// What each subgroup found: its longest blur and that blur's squared length,
+// then how far its pixels' blurs lie from the tile's longest. An array of a
+// struct of its own (docs/build.md "Shaders").
+struct Part {
+    vec2 longest;
+    float length2;
+    float spread;
+};
+shared Part s_parts[256]; // a subgroup holds at least one invocation
+shared vec2 s_longest;
+
+// The longest of the subgroup's `b` (length squared `l2`), from the lowest
+// invocation that holds it.
+vec2 subgroup_longest(vec2 b, float l2, out float out_l2)
+{
+    out_l2 = subgroupMax(l2);
+    const uint holder = subgroupBallotFindLSB(subgroupBallot(l2 == out_l2));
+    return subgroupShuffle(b, holder);
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    const ivec2 size = ivec2(view.v.viewport.xy);
+    const ivec2 base =
+        ivec2(gl_WorkGroupID.xy) * NPH_RENDER_MB_TILE + 2 * ivec2(gl_LocalInvocationID.xy);
+    // The 2 x 2 pixels' records by two gathers at their shared corner: the
+    // low words (cluster and triangle), then the high ones (depth). A
+    // gather's order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
+    const vec2 corner = vec2(base + 1) * view.v.viewport.zw;
+    const uvec4 lows = textureGather(
+        usampler2D(nph_utextures_2d[pc.visbuffer_index], nph_samplers[pc.point_sampler]), corner, 0);
+    const uvec4 highs = textureGather(
+        usampler2D(nph_utextures_2d[pc.visbuffer_index], nph_samplers[pc.point_sampler]), corner, 1);
+    const ivec4 order = ivec4(3, 2, 0, 1); // pixel i = (i & 1, i >> 1)'s place in a gather
+    vec2 blur[4];
+    vec2 longest = vec2(0.0);
+    float longest2 = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 p = base + ivec2(i & 1, i >> 1);
+        blur[i] = vec2(0.0);
+        if (any(greaterThanEqual(p, size))) {
+            continue;
+        }
+        const uint64_t v = packUint2x32(uvec2(lows[order[i]], highs[order[i]]));
+        vec2 then;
+        if (vis_previous_uv(view, p, v, then)) {
+            // This frame's sample lies the jitter away from its pixel's
+            // centre; the motion is in pixels.
+            const vec2 motion =
+                ((vec2(p) + 0.5) * view.v.viewport.zw - view.v.jitter.xy - then) *
+                view.v.viewport.xy;
+            blur[i] = motion * pc.scale;
+            // At most a tile, as far as the packing keeps (31.94 pixels).
+            const float reach = min(float(NPH_RENDER_MB_TILE), NPH_MOTION_MAX);
+            const float l = length(blur[i]);
+            if (l > reach) {
+                blur[i] *= reach / l;
+            }
+        }
+        // The view distance: reverse-Z with an infinite far plane stores
+        // znear / distance, and the sky (0) lies beyond every surface.
+        const float depth = v == 0ul ? 0.0 : vis_depth(v);
+        const float away = depth > 0.0 ? min(view.v.projection.z / depth, 65504.0) : 65504.0;
+        imageStore(nph_uimages_2d[pc.motion_index], p, uvec4(nph_motion_pack(blur[i], away)));
+        const float l2 = dot(blur[i], blur[i]);
+        if (l2 > longest2) {
+            longest2 = l2;
+            longest = blur[i];
+        }
+    }
+    // The tile's longest blur: each subgroup's, then the longest of those.
+    float part2;
+    const vec2 part = subgroup_longest(longest, longest2, part2);
+    if (subgroupElect()) {
+        s_parts[gl_SubgroupID].longest = part;
+        s_parts[gl_SubgroupID].length2 = part2;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        vec2 tile = s_parts[0].longest;
+        float tile2 = s_parts[0].length2;
+        for (uint s = 1u; s < gl_NumSubgroups; ++s) {
+            if (s_parts[s].length2 > tile2) {
+                tile2 = s_parts[s].length2;
+                tile = s_parts[s].longest;
+            }
+        }
+        s_longest = tile;
+    }
+    barrier();
+    // How far the tile's pixels' blurs lie from it (outside pixels hold 0,
+    // which a tile at the image's edge must then not count).
+    const vec2 tile = s_longest;
+    float spread = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 p = base + ivec2(i & 1, i >> 1);
+        if (all(lessThan(p, size))) {
+            spread = max(spread, distance(blur[i], tile));
+        }
+    }
+    spread = subgroupMax(spread);
+    if (subgroupElect()) {
+        s_parts[gl_SubgroupID].spread = spread;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        float tile_spread = s_parts[0].spread;
+        for (uint s = 1u; s < gl_NumSubgroups; ++s) {
+            tile_spread = max(tile_spread, s_parts[s].spread);
+        }
+        imageStore(nph_images_2d[pc.tiles_index], ivec2(gl_WorkGroupID.xy),
+                   vec4(tile, tile_spread, 0.0));
+    }
+}

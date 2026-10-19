@@ -223,6 +223,10 @@ NPH_SHARED_STRUCT(NphVisViewData)
     NphMat4 prev_view;      // the previous frame's, relative to its own camera
     NphMat4 prev_view_proj; // the previous frame's, relative to its camera, without its jitter
                             // (motion vectors)
+    // A still point's motion: this frame's clip space (with its jitter, as
+    // drawn) to the previous frame's, through the camera's move since:
+    // prev_view_proj * translate(camera - prev_camera) * inverse(view_proj).
+    NphMat4 reproject;
     NphVec4 frustum[5];  // camera-relative inward planes (xyz normal, w distance): l, r, b, t, near
     NphVec4 camera_high; // xyz: the camera position's high floats
     NphVec4 camera_low;  // xyz: and its low floats

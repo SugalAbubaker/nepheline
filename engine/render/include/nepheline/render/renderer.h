@@ -36,7 +36,9 @@
 //   - a pre-exposed HDR target (physical exposure from EV100), tonemapped
 //     with ACES (Hill's fit) or AgX into the caller's target image;
 //   - on the production path, temporal anti-aliasing at native resolution
-//     (NphRenderAntiAliasing), fused with the tonemap;
+//     (NphRenderAntiAliasing), fused with the tonemap, and motion blur
+//     (NphRenderView.shutter);
+//   - bloom and an automatically metered exposure, on both pipelines;
 //   - debug lines (debug_draw.h) over the tonemapped image.
 //
 // Large worlds (CLAUDE.md §8.2): instance, light, and camera positions are
@@ -569,11 +571,21 @@ typedef struct NphRenderView {
     f32 exposure_speed;        // AUTO: e-foldings per second toward the metering (0: 1.5)
     f32 frame_seconds;         // the time since the previous frame, AUTO's pace (0: 1/240)
     f32 bloom; // the bloom's weight in the image, 0 to 1 (0: none; debug views have none)
+    // Motion blur (the production path; docs/render.md "Motion blur"): how
+    // long the shutter is open, in seconds (0: no blur). Each pixel blurs
+    // over what moves across it while the shutter is open, centred on the
+    // frame: its motion since the previous frame times shutter /
+    // frame_seconds, reaching at most NPH_RENDER_MB_TILE (32) pixels either
+    // way. Only a frame that follows a production frame of the same extent
+    // without a cut blurs; debug views and the reference renderer never do.
+    // A 180-degree shutter at 240 frames a second is 1/480 s.
+    f32 shutter;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), ACES, the environment as
-// background, no anti-aliasing, no bloom (the runtime turns temporal
-// anti-aliasing and bloom on: r.taa, r.bloom).
+// background, no anti-aliasing, no bloom, no motion blur (the runtime turns
+// temporal anti-aliasing and bloom on, r.taa and r.bloom, and gives the
+// camera's shutter, r.motion_blur).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
 
 // The linear exposure for an EV100 value.
@@ -644,6 +656,8 @@ typedef struct NphRenderFrameStats {
     f32 ev100;
     f32 metered_ev100;
     b32 bloom;
+    // Whether the frame was motion blurred.
+    b32 motion_blur;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

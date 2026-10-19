@@ -42,7 +42,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 784U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 848U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -330,7 +330,8 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t, 
     d.fragment = r->shaders[RENDER_SHADER_DEBUG_FRAG];
     d.name = "debug lines (production, overlay)";
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->vis_debug_overlay));
-    return render_taa_target_pipeline(r, t, format);
+    NPH_TRY(render_taa_target_pipeline(r, t, format));
+    return render_motion_target_pipeline(r, t, format);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +356,7 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     v->hzb_dirty = NPH_GPU_BUFFER_NULL;
     v->light_tiles = NPH_GPU_BUFFER_NULL;
     v->hzb_valid = 0;
+    v->prev_frame = 0U;
     v->light_tiles_x = (width + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
     v->light_tiles_y = (height + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
     NphGpuBufferDesc ld;
@@ -473,6 +475,14 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->view_proj = nph_mat4_mul(*proj, *view_m);
     vd->prev_view = v->prev_view;
     vd->prev_view_proj = v->prev_view_proj;
+    // The camera's move since the previous frame, taken in doubles (the
+    // GPU's high and low floats give the same), and the clip spaces joined
+    // across it for still points (vis_previous_uv).
+    NphMat4 inv = nph_mat4_identity();
+    NPH_IGNORE_RESULT(nph_mat4_inverse(vd->view_proj, &inv));
+    const NphVec3 moved = nph_dvec3_relative(view->camera.position, v->prev_camera);
+    vd->reproject =
+        nph_mat4_mul(v->prev_view_proj, nph_mat4_mul(nph_mat4_from_translation(moved), inv));
     const NphFrustum f = nph_frustum_from_matrix(&vd->view_proj);
     for (u32 i = 0; i < 5U; ++i) {
         vd->frustum[i] = nph_vec4_from_vec3(f.planes[i].normal, f.planes[i].d);
@@ -1335,6 +1345,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         v->prev_projection = nph_vec4(proj->c[0].x, proj->c[1].y, view->camera.znear, 0.0F);
         v->prev_camera = view->camera.position;
         v->prev_jitter = jitter;
+        v->prev_frame = nph_gpu_frame_index(dev) + 1U;
         v->hzb_valid = 1;
         *out_hdr = f->hdr;
     }

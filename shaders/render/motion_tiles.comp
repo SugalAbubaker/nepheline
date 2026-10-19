@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+// The motion blur's neighbourhoods (docs/render.md "Motion blur"; ADR-0036):
+// for each tile, the dominant blur of the 3 x 3 tiles around it, the longest
+// that can reach it ("NeighborMax", McGuire, Hennessy, Bukowski & Osman,
+// I3D 2012). A blur is at most a tile long, so only these tiles' pixels can
+// blur over this one's. A diagonal neighbour counts only if its blur runs
+// along a diagonal of the same sense, the only way it reaches past the
+// shared corner (Guertin, McGuire & Nowrouzezahrai, HPG 2014 §4.4).
+//
+// The neighbourhood's spread bounds how far any of its pixels' blurs lies
+// from the dominant one (each tile's own spread plus its longest blur's
+// distance from the dominant): under half a pixel, the whole neighbourhood
+// moves as one and the gather takes the plain average along the blur.
+#version 460
+#include "render_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphRenderMotionPush pc; };
+
+void main()
+{
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 tiles = ivec2(pc.tiles_x, pc.tiles_y);
+    if (any(greaterThanEqual(t, tiles))) {
+        return;
+    }
+    vec2 dominant = vec2(0.0);
+    float dominant2 = -1.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ivec2 n = t + ivec2(dx, dy);
+            if (any(lessThan(n, ivec2(0))) || any(greaterThanEqual(n, tiles))) {
+                continue;
+            }
+            const vec2 b = imageLoad(nph_images_2d[pc.tiles_index], n).xy;
+            if (dx != 0 && dy != 0 && b.x * b.y * float(dx * dy) <= 0.0) {
+                continue;
+            }
+            const float l2 = dot(b, b);
+            if (l2 > dominant2) {
+                dominant2 = l2;
+                dominant = b;
+            }
+        }
+    }
+    float spread = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ivec2 n = t + ivec2(dx, dy);
+            if (any(lessThan(n, ivec2(0))) || any(greaterThanEqual(n, tiles))) {
+                continue;
+            }
+            // Every neighbour, diagonal or not: the gather's samples land
+            // anywhere in the neighbourhood.
+            const vec4 o = imageLoad(nph_images_2d[pc.tiles_index], n);
+            spread = max(spread, o.z + distance(o.xy, dominant));
+        }
+    }
+    imageStore(nph_images_2d[pc.neighbours_index], t, vec4(dominant, spread, 0.0));
+}

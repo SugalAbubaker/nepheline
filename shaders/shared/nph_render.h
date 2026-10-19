@@ -307,6 +307,55 @@ NPH_SHARED_STRUCT(NphRenderTaaPush)
     NphVec2 bloom_uv;
 };
 
+// Motion blur (motion_blur.c; motion.comp, motion_tiles.comp, motion_blur.frag;
+// docs/render.md "Motion blur"; Guertin, McGuire & Nowrouzezahrai, "A Fast and
+// Stable Feature-Aware Motion Blur Filter", HPG 2014).
+#define NPH_RENDER_MB_TILE 32 // pixels: the dominant motion's tiles; no blur reaches farther
+// The gather's samples, a pixel apart along the dominant blur (two per
+// pixel of its half-extent, or four where they alternate between two
+// directions), within these bounds: where the neighbourhood moves as one,
+// the colour's bilinear taps alone, at most UNIFORM_SAMPLES; elsewhere a
+// colour and a motion each, at most MAX_SAMPLES.
+#define NPH_RENDER_MB_MIN_SAMPLES     4
+#define NPH_RENDER_MB_UNIFORM_SAMPLES 16
+#define NPH_RENDER_MB_MAX_SAMPLES     32
+
+// Push constants of the motion and tile kernels (motion.comp, motion_tiles.comp).
+NPH_SHARED_STRUCT(NphRenderMotionPush)
+{
+    u64 view;             // NphVisViewData
+    f32 scale;            // a pixel of motion's blur half-extent: 0.5 * shutter / frame_seconds
+    u32 visbuffer_index;  // bindless sampled: the visibility buffer as R32G32_UINT (depth in y)
+    u32 motion_index;     // bindless storage: the motion image (blur half-extent xy, distance z)
+    u32 tiles_index;      // bindless storage: each tile's dominant blur
+    u32 neighbours_index; // bindless storage: each tile's 3 x 3 neighbourhood's
+    u32 tiles_x;          // tiles per row
+    u32 tiles_y;          // and rows
+    u32 point_sampler;    // nearest, clamped to the edge: the visibility buffer's gathers
+};
+
+// Push constants of the motion blur's gather, fused with the tonemap
+// (motion_blur.frag).
+NPH_SHARED_STRUCT(NphRenderMotionBlurPush)
+{
+    u32 color_index;      // bindless sampled: the pre-exposed colour (the temporal history, or
+                          // the HDR image)
+    u32 motion_index;     // bindless sampled: the motion image
+    u32 neighbours_index; // bindless sampled: the neighbourhoods' dominant blur
+    u32 tonemapper;       // NPH_RENDER_TONEMAP_*
+    u32 encode_srgb;      // 1: the target is UNORM, so the shader applies the sRGB curve
+    u32 noise;            // the samples' jitter's offset this frame
+    u32 bloom_index;      // as NphRenderTonemapPush's (bloom 0 when the history carries it)
+    f32 bloom;
+    f32 bloom_scale;
+    u32 sampler_index; // bilinear, clamped to the edge: the glare, and the colour's taps where
+                       // the blur is uniform
+    u32 width;         // the target's extent
+    u32 height;
+    NphVec2 bloom_uv;
+    NphVec2 inv_size; // 1 / the extent
+};
+
 // Push constants of the image-based lighting kernels.
 NPH_SHARED_STRUCT(NphRenderIblPush)
 {

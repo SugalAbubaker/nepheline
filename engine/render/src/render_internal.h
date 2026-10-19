@@ -2,8 +2,8 @@
 #pragma once
 
 // Internal state of the renderer (renderer.c, frame.c, ibl.c, post.c,
-// debug_draw.c, and the production path in vis.c, vis_scene.c, vsm.c, and
-// taa.c). See
+// debug_draw.c, and the production path in vis.c, vis_scene.c, vsm.c,
+// taa.c, and motion_blur.c). See
 // render/renderer.h for the contract and docs/render.md for the design.
 
 #include <nepheline/core/array.h>
@@ -107,6 +107,9 @@ typedef struct RenderTargetPipelines {
     // The production path's temporal resolve (taa.c): into the target and
     // the next history (RenderVis.hdr_format).
     NphGpuPipeline taa;
+    // The production path's motion blur fused with the tonemap
+    // (motion_blur.c).
+    NphGpuPipeline motion_blur;
 } RenderTargetPipelines;
 
 typedef struct RenderTexture {
@@ -492,6 +495,9 @@ typedef struct RenderVis {
     NphVec4 prev_projection;
     NphDVec3 prev_camera;
     NphVec2 prev_jitter; // UV
+    // 1 + the device frame index of that frame (0: none, or another extent
+    // since): the motion blur measures motion only from the frame just before.
+    u64 prev_frame;
 
     NphRenderFrameStats stats_last; // the vis_* fields of the last read-back
     b32 fallback_logged;            // PRODUCTION requested without the path: said once
@@ -507,21 +513,26 @@ typedef struct RenderVis {
 // The production path's temporal anti-aliasing (taa.c): the history of
 // resolved frames, two images written in turn.
 typedef struct RenderTaa {
-    NphGpuShader shader;   // taa.frag
+    NphGpuShader shader;         // taa.frag
+    NphGpuShader history_shader; // taa_history.frag
+    // taa_history.frag into the history alone (RenderVis.hdr_format): the
+    // motion blur reads it and writes the target (motion_blur.c).
+    NphGpuPipeline history_only;
     NphGpuSampler sampler; // bilinear, clamped to the edge: the history's taps
     NphGpuImage history[2];
     NphGpuFormat format; // the history's: RenderVis.hdr_format
     u32 width;
     u32 height;
-    u32 write;             // the history this frame writes; the other holds the last one
-    b32 valid;             // history[write ^ 1] holds the last frame resolved temporally
-    u64 sequence;          // frames resolved temporally so far: the jitter's phase
-    u64 last_frame;        // 1 + the device frame index of the last frame resolved temporally
-    f32 exposure;          // the exposure the history was resolved with
-    b32 frame_active;      // this frame resolves temporally
-    b32 frame_history;     // and blends with the history
-    NphVec2 frame_jitter;  // this frame's jitter, pixels
-    NphRenderTaaPush push; // this frame's, without the transient images' indices
+    u32 write;              // the history this frame writes; the other holds the last one
+    b32 valid;              // history[write ^ 1] holds the last frame resolved temporally
+    u64 sequence;           // frames resolved temporally so far: the jitter's phase
+    u64 last_frame;         // 1 + the device frame index of the last frame resolved temporally
+    f32 exposure;           // the exposure the history was resolved with
+    b32 frame_active;       // this frame resolves temporally
+    b32 frame_history;      // and blends with the history
+    b32 frame_history_only; // and writes only the history (the motion blur writes the target)
+    NphVec2 frame_jitter;   // this frame's jitter, pixels
+    NphRenderTaaPush push;  // this frame's, without the transient images' indices
 } RenderTaa;
 
 // One pass of the bloom chain or the metering (post.c): its callback's data.
@@ -557,6 +568,26 @@ typedef struct RenderPost {
     NphGpuRgImage frame_chain;
     RenderPostPass passes[2U * NPH_RENDER_BLOOM_LEVELS + 1U];
 } RenderPost;
+
+// The production path's motion blur (motion_blur.c): the motion image and
+// the tiles are transient, made each frame that blurs.
+typedef struct RenderMotion {
+    NphGpuShader motion_shader; // motion.comp
+    NphGpuShader tiles_shader;  // motion_tiles.comp
+    NphGpuShader blur_shader;   // motion_blur.frag
+    NphGpuPipeline motion;
+    NphGpuPipeline tiles;
+    // This frame.
+    b32 frame_active;
+    f32 frame_scale; // a pixel of motion's blur half-extent
+    u32 frame_tiles_x;
+    u32 frame_tiles_y;
+    b32 frame_glare;           // the gather mixes the bloom in (no temporal resolve did)
+    NphGpuRgImage frame_color; // what it blurs: the temporal history, or the HDR image
+    NphGpuRgImage frame_motion;
+    NphGpuRgImage frame_tiles;
+    NphGpuRgImage frame_neighbours;
+} RenderMotion;
 
 struct NphRenderer {
     NphAllocator *alloc;
@@ -642,6 +673,9 @@ struct NphRenderer {
 
     // Bloom and the exposure.
     RenderPost post;
+
+    // The production path's motion blur.
+    RenderMotion motion;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -789,6 +823,7 @@ void render_exposure_average(const u32 *histogram, f32 *out_log2, u32 *out_count
 f32 render_exposure_target_ev100(f32 average_log2, f32 exposure, f32 compensation);
 
 // taa.c: the production path's temporal anti-aliasing.
+// After render_vis_create: the history-only pipeline is made in its HDR format.
 NphResult render_taa_create(NphRenderer *r);
 void render_taa_destroy(NphRenderer *r);
 // The temporal resolve's pipeline into a target of `format`.
@@ -800,11 +835,13 @@ NphResult render_taa_target_pipeline(NphRenderer *r, RenderTargetPipelines *t, N
 NphResult render_taa_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
                                  bool production, NphVec2 *out_jitter);
 // The temporal resolve into `out` (the caller's target) and the next
-// history, from the frame's HDR image and visibility buffer, then the
-// debug lines over `out`; after render_vis_frame and the transparent pass.
-// `exposure` is the frame's, which the HDR image is pre-exposed with.
+// history, from the frame's HDR image and visibility buffer; after
+// render_vis_frame and the transparent pass. With `out` null it writes the
+// history alone, for the motion blur to read and tonemap. `exposure` is the
+// frame's, which the HDR image is pre-exposed with. `out_history` receives
+// the history it writes.
 NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage out,
-                             f32 exposure);
+                             f32 exposure, NphGpuRgImage *out_history);
 // The jitter of the `sequence`th frame resolved temporally, in pixels: a
 // Halton (2, 3) sequence of RENDER_TAA_PHASES points in [-0.5, 0.5).
 NphVec2 render_taa_jitter(u64 sequence);
@@ -813,6 +850,25 @@ NphVec2 render_taa_jitter(u64 sequence);
 // sample at offset o lies at o - jitter from the pixel's centre. They sum
 // to 1 (taa_common.glsl taa_filter_weight is the shader's twin).
 void render_taa_weights(NphVec2 jitter, f32 out[9]);
+
+// motion_blur.c: the production path's motion blur.
+NphResult render_motion_create(NphRenderer *r);
+void render_motion_destroy(NphRenderer *r);
+// The gather's pipeline into a target of `format`.
+NphResult render_motion_target_pipeline(NphRenderer *r, RenderTargetPipelines *t,
+                                        NphGpuFormat format);
+// Whether this frame blurs: a lit production view with a shutter that
+// continues the production frame just before it, in the same extent
+// (`width` x `height`), without a cut. Sets RenderMotion.frame_*; before
+// render_vis_frame.
+bool render_motion_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
+                               bool production);
+// The motion, the tiles, and the gather fused with the tonemap into `out`
+// (the caller's target), blurring `color`: the history the temporal resolve
+// wrote this frame, or the HDR image, whose bloom the gather then mixes in
+// (`glare`). After render_post_declare.
+NphResult render_motion_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage out,
+                                NphGpuRgImage color, bool glare);
 
 // vis.c: the production path's pipelines and frames.
 // Logs a pipeline's compiled statistics (registers, spills; render_perf
