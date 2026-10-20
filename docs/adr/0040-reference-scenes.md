@@ -1,7 +1,7 @@
 # 0040. Reference scenes: third-party content outside the repository, pinned by manifest
 
 - **Date:** 2026-10-20
-- **Status:** Accepted (Bistro measures 7.47 ms against the 4.17 ms frame:
+- **Status:** Accepted (Bistro measures 7.86 ms against the 4.17 ms frame:
   see Consequences)
 
 ## Context
@@ -41,6 +41,8 @@ The constraints:
    - its exposure (`ev100`);
    - its sky (`sky_intensity`, scaling the default daylight sky, which
      pairs with a 30,000 lux sun, to the scene's own sun);
+   - whether its sun casts shadows (`sun_shadows`): glTF has no such
+     flag, and a game's sun casts them (the sun's virtual shadow map);
    - its views, either the scene's camera or an eye and a target.
 
    `scripts/scenes.py fetch` checks out exactly the pinned commit (a
@@ -110,22 +112,31 @@ The constraints:
 - A scene is reproducible from its manifest, but the content's hosting is
   external. If a repository disappears, the pinned commit can be restored
   from a machine's own checkout, kept locally and never redistributed.
-- **Bistro does not meet the target.** On the RTX 3060 Ti (Profile, 240
-  frames) it takes 7.47 ms mean and 8.17 ms at the 99th percentile,
-  against 4.17 ms (docs/benchmarks.md):
+- **Bistro does not meet the target.** With its sun casting shadows, on
+  the RTX 3060 Ti (Profile, 240 frames), it takes 7.86 ms mean and 8.70 ms
+  at the 99th percentile, against 4.17 ms (docs/benchmarks.md):
 
   | Pass | Bistro | §10.4 line |
   |---|---|---|
-  | Resolve: every pixel's material with up to five textures, and 69 of the 97 lights in view | 3.69 ms | 1.20 ms |
-  | Raster, 1.41 M triangles in 22,585 clusters | 1.15 ms | 0.65 ms |
-  | Hi-Z, two phases | 0.30 ms | inside the 0.25 ms culling line |
-  | TAA | 0.86 ms | 0.40 ms, with post |
-  | Ambient occlusion | 0.45 ms | 0.60 ms indirect line, with GI |
+  | Resolve | 3.87 ms | 1.20 ms |
+  | Raster, 1.42 M triangles in 22,708 clusters | 1.14 ms | 0.65 ms |
+  | Hi-Z, two phases (the first also gathers the sun's page requests) | 0.45 ms | inside the 0.25 ms culling line |
+  | TAA | 0.85 ms | 0.40 ms, with post |
+  | Ambient occlusion | 0.44 ms | 0.60 ms indirect line, with GI |
+
+  The resolve, measured by taking one cost away at a time:
+
+  | Cost | Share |
+  |---|---|
+  | The street lamps. 69 of the 97 lights are in view, and the grid hands each pixel 11.8 of them on average, of which 5.0 reach it | 1.25 ms |
+  | Material textures (the normal map alone: 0.43 ms) | 0.84 ms |
+  | Rebuilding the surface from the visibility buffer: records, vertices, barycentrics, attributes, the radiance-cache lookup | 0.97 ms |
+  | The sun's virtual shadow map | 0.34 ms |
 
   These go to the phase review with the earlier overruns (ADR-0034 to
-  ADR-0039). The resolve is the largest gap, and §8.6.5's per-material
-  tile classification is the planned lever. Per CLAUDE.md §10.4 nothing
-  is lowered to close the gap.
+  ADR-0039). The lamps are the largest lever: 57% of the lights the loop
+  evaluates are out of range. Per CLAUDE.md §10.4 nothing is lowered to
+  close the gap.
 - The GPU runner does not run the reference scenes yet. It would need the
   packs cooked by the cooker under test, a 23-minute cook of Bistro
   whenever the cooker's output changes. Decide how with the phase review.

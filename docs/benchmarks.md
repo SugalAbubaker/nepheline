@@ -207,8 +207,9 @@ are third-party content, kept outside the repository: a manifest in
 its document, its licence and attribution), names its cooked pack and
 scene, its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
-own sun), and its views (the scene's own camera, or an eye and a target
-with a field of view). `scripts/scenes.py fetch` checks the
+own sun), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
+and a game's would), and its views (the scene's own camera, or an eye and
+a target with a field of view). `scripts/scenes.py fetch` checks the
 source out at its commit under a directory of the machine's choosing and
 `scripts/scenes.py cook` cooks it there (`nph_cook`, incremental); with
 `--scenes=DIR` (or the `NPH_SCENES` environment variable) render_perf adds
@@ -234,12 +235,15 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.47 ms | 8.17 ms | resolve 3.69 ms (§10.4 line: 1.20 ms), raster 1.15 ms + Hi-Z 0.30 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+| `bistro_street_production` | 7.86 ms | 8.70 ms | resolve 3.87 ms (§10.4 line: 1.20 ms), raster 1.14 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.85 ms (with post, 0.40 ms), AO 0.44 ms |
 
-The visible geometry is 1.41 M triangles in 22,585 clusters (2,684 of
-them rasterised in software). 69 of the 97 lights are in view. The resolve
-shades every pixel with up to five textures and the clustered lights, so
-it carries most of the overrun (ADR-0040).
+The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
+them rasterised in software). 69 of the 97 lights are in view, and the
+light grid hands each pixel 11.8 of them on average, of which 5.0 reach
+it. The resolve carries most of the overrun. Taking one cost away at a
+time: the lamps 1.25 ms, material textures 0.84 ms, rebuilding the
+surface from the visibility buffer 0.97 ms, the sun's virtual shadow map
+0.34 ms (ADR-0040).
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal

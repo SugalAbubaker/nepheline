@@ -301,6 +301,7 @@ typedef struct RefManifest {
     char scene_key[256]; // its scene's identity (docs/cook.md "Identity")
     f32 ev100;
     f32 sky_intensity; // the default sky's (daylight next to a 30,000 lux sun) scale
+    bool sun_shadows;  // the scene's first directional light casts shadows
     RefView views[MAX_REF_VIEWS];
     u32 view_count;
 } RefManifest;
@@ -908,6 +909,7 @@ static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
         (void)snprintf(m->pack, sizeof m->pack, "%s/%s", scenes, pack);
         m->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
         m->sky_intensity = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
+        m->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
         const NphJsonValue *views = nph_json_object_get(root, NPH_STR("views"));
         for (u32 i = 0; i < MAX_REF_VIEWS; ++i) {
             const NphJsonValue *v = nph_json_array_at(views, i);
@@ -1045,6 +1047,18 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
         return r;
     }
     ctx->loaded_manifest = manifest;
+    if (m->sun_shadows) {
+        // glTF has no shadows to cast; the manifest says the sun casts them,
+        // as a game's would (the production path: its virtual shadow map).
+        for (u32 i = 0; i < ctx->cooked.light_count; ++i) {
+            NphRenderLightDesc d = ctx->cooked.light_descs[i];
+            if (d.type == NPH_RENDER_LIGHT_TYPE_DIRECTIONAL) {
+                d.shadows = 1;
+                NPH_TRY(nph_render_light_update(ctx->renderer, ctx->cooked.lights[i], &d));
+                break;
+            }
+        }
+    }
     printf("%s: loaded in %.1f s: %u instances, %u lights, %u materials\n", m->name,
            (f64)(nph_time_now_ns() - t0) / 1.0e9, ctx->cooked.instance_count,
            ctx->cooked.light_count, ctx->cooked.render_material_count);
