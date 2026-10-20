@@ -160,7 +160,9 @@ of glTF 2.0:
 - **Occlusion** applies to indirect light only (glTF), and also drives
   specular occlusion (Lagarde & de Rousiers 2014). On the production path
   the screen's ambient occlusion multiplies it, the diffuse light's with
-  what the occluders reflect back ("Ambient occlusion").
+  what the occluders reflect back ("Ambient occlusion"), and the diffuse
+  light can take the radiance cache's irradiance instead of the
+  environment's ("Global illumination").
 - **Alpha:** MASK discards below the cutoff in its own shader variant (so
   the opaque variant keeps early depth testing). BLEND composites "over"
   without writing depth. Double-sided materials flip the whole tangent
@@ -168,9 +170,10 @@ of glTF 2.0:
 - **Unlit** materials (`KHR_materials_unlit`) write their colour as
   authored, outside exposure.
 - **Debug views:** base colour, shading normal, roughness, metallic,
-  occlusion, direct light only, and indirect light only; on the
-  production path also clusters, triangles, and instances (a hashed
-  colour each).
+  occlusion, direct light only, indirect light only, and the diffuse
+  irradiance the indirect light takes (over π, at the interpolated
+  normal: the environment's, or the radiance cache's); on the production
+  path also clusters, triangles, and instances (a hashed colour each).
 
 `shaders/render/surface.glsl` holds this model; the forward pass and the
 production path's resolve both include it, so the two renderers cannot
@@ -428,8 +431,9 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis depth`, `vsm requests (blended)` | with the map and blended surfaces: the opaque depth, then the blended surfaces' page requests |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' mips, each texel's slice, and the denoise, at half resolution (below) |
-| `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
-| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the ambient occlusion upsampled) |
+| `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
+| `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
+| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the ambient occlusion upsampled; the radiance cache's cell looked up) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
@@ -714,6 +718,57 @@ within 0.003 of open, and the ground alone within 0.009 out to its
 horizon (`test_ao.c`). At 4K with the runtime's radius it adds 0.38 ms to
 a frame the sky lights (ADR-0038).
 
+### Global illumination
+
+A production view with `NphRenderView.gi`, on a device with ray queries,
+takes its diffuse indirect light from a radiance cache in the world
+instead of the environment's irradiance alone: the environment's light
+occluded by the scene, and the sun's, the environment's, and emissive
+surfaces' light the scene reflects, bounce after bounce (a hash grid after
+Binder, Fricke & Keller, "Fast Path Space Filtering by Jittered Spatial
+Hashing", SIGGRAPH 2018 talks, and "Massively Parallel Path Space
+Filtering", MCQMC 2020; Gautron, SIGGRAPH 2020 talks;
+[ADR-0039](adr/0039-radiance-cache.md)). The cache is made for lit views
+and the indirect and irradiance debug views (the statistic `gi`); the
+reference renderer has none. The runtime turns it on with `r.gi`.
+
+- **Cells** (`gi_common.glsl`): a cube of the world at a level the
+  point's distance from the camera chooses, 1/96 to 1/48 of that distance
+  across (23 to 47 pixels at 4K), for the surfaces in it whose geometric
+  normals face one octant, so the two sides of a wall are cells apart.
+  Each level's camera cell is worked out in double precision and the
+  shaders add the camera-relative point to it, so cells stay put in the
+  world at any distance from the origin.
+- **The table:** `gi_cells` slots (2^18: 9 MB) in buckets of 16; a cell's
+  key (its coordinates, level, and octant) hashes to a bucket and a 32-bit
+  fingerprint that the slot holds, claimed by compare-and-swap.
+- **`gi update`** (`gi_update.comp`): within `gi_rays` (65,536) a frame,
+  one ray from a random pixel of each block of the frame (12 × 12 pixels
+  at 4K): the surface point rebuilt as the resolve rebuilds it, its cell
+  claimed, one cosine-distributed ray traced. A miss adds the
+  environment's radiance; a hit its emission and its albedo times the
+  irradiance there, the sun's (shadowed by a second ray where it casts
+  shadows) and the cache's own (the environment's where it has none), so
+  each frame adds a bounce. Hits within 0.95 of the ambient occlusion's
+  radius count nothing: that range is the occlusion's.
+- **`gi resolve`** (`gi_resolve.comp`): every slot blends its frame's
+  samples into its irradiance over a history of at most 128 samples, or
+  ages, and is freed after 240 frames without any.
+- **The lookup:** the resolve, specialised on the cache, finds the
+  pixel's cell as soon as it has the pixel's point (under temporal
+  anti-aliasing at a random point of the cell in the surface's plane, so
+  that the cells' edges blend over frames) and the shading takes the
+  cell's irradiance, the environment's making up for what a cell does not
+  trust yet. Within the ambient occlusion's radius the occlusion darkens
+  it as it darkens the environment's.
+
+Against ground truths cast by rays, an open ground under a uniform sky
+gets the sky's irradiance exactly, a box on the ground occludes the sky
+within a tenth of how much the truth does, and a sunlit wall reflects
+light onto the ground within a seventh of the truth (`test_gi.c`). At 4K
+it adds 0.20 to 0.27 ms under the sky or the sun, and 0.36 to 0.41 ms at
+night among many lamps (ADR-0039).
+
 ### Capacities and statistics
 
 The production path's lists have fixed capacities in `NphRendererDesc`:
@@ -727,7 +782,9 @@ phase 1's meshlets), `max_instance_updates` (16,384),
 (2^20), whose overflow (`vsm_overflow`) raises its resolution bias
 ("Shadows"); its statistics are `vsm` and `vsm_lod_bias` (this frame) and
 the pages requested, drawn, held, and evicted, and the caster draws, read
-back as the others. The frame statistics
+back as the others. The radiance cache has `gi_cells` (2^18) slots, a
+bucket of which, when full, drops the samples of the cells it cannot
+take, and `gi_rays` (65,536) a frame. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
 software, instances and meshlets culled by each test, lights in view),
 read back from the frame that completed
@@ -743,62 +800,70 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.007 ms | 0.10 ms | 0.23 ms |
-| grid, 512 × 512 | 10,240 | 1.24 ms | 0.007 ms | 0.21 ms | 0.28 ms |
-| grid, 512 × 512 | 102,400 | 13.2 ms | 0.007 ms | 3.57 ms | 0.66 ms |
-| field, 3840 × 2160 | 16,385 | 2.90 ms | 0.009 ms | 3.02 ms | 3.36 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.009 ms | | 2.59 ms |
-| the same without bloom | 16,385 | | 0.009 ms | | 3.01 ms |
-| the same without ambient occlusion | 16,385 | | 0.009 ms | | 2.98 ms |
-| the same exposed automatically | 16,385 | | 0.010 ms | | 3.37 ms |
-| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.010 ms | | 3.92 ms |
-| the same, strafing at 5 m/s | 16,385 | | 0.010 ms | | 3.90 ms |
-| the same, turning 360°/s | 16,385 | | 0.010 ms | | 3.80 ms |
-| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.010 ms | | 4.33 ms |
-| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.010 ms | | 4.90 ms |
-| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.010 ms | | 4.68 ms |
-| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.009 ms | 58.3 ms | 3.25 ms |
-| field at night, 4,000 lights | 16,385 | | 0.009 ms | | 4.92 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.22 ms | 0.011 ms | 3.63 ms | 3.66 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.009 ms | | 3.84 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.011 ms | | 3.71 ms |
-| the map, the camera walking | 16,385 | | 0.011 ms | | 3.69 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.011 ms | | 4.72 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.010 ms | 0.10 ms | 0.31 ms |
+| grid, 512 × 512 | 10,240 | 1.24 ms | 0.010 ms | 0.22 ms | 0.38 ms |
+| grid, 512 × 512 | 102,400 | 13.5 ms | 0.010 ms | 3.36 ms | 0.74 ms |
+| field, 3840 × 2160 | 16,385 | 2.84 ms | 0.012 ms | 3.04 ms | 3.60 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.011 ms | | 2.78 ms |
+| the same without bloom | 16,385 | | 0.011 ms | | 3.26 ms |
+| the same without ambient occlusion | 16,385 | | 0.011 ms | | 3.22 ms |
+| the same without global illumination | 16,385 | | 0.009 ms | | 3.33 ms |
+| the same exposed automatically | 16,385 | | 0.012 ms | | 3.63 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.012 ms | | 4.20 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.012 ms | | 4.19 ms |
+| the same, turning 360°/s | 16,385 | | 0.012 ms | | 4.07 ms |
+| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.61 ms |
+| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.013 ms | | 5.18 ms |
+| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.98 ms |
+| field at night, 1,024 lights | 16,385 | 3.69 ms | 0.012 ms | 53.2 ms | 3.60 ms |
+| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.33 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.14 ms | 0.013 ms | 3.67 ms | 3.88 ms |
+| the same without global illumination | 16,385 | | 0.011 ms | | 3.68 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.012 ms | | 3.96 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.014 ms | | 4.24 ms |
+| the map, the camera walking | 16,385 | | 0.013 ms | | 3.90 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.013 ms | | 4.80 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
-frames resolve temporally (the runtime's default) and, where the sky
-lights them, take ambient occlusion within 0.5 m (`r.ao`), the
-reference's do neither; the motion-blurred frames have a 180-degree
-shutter at 240 frames a second, and the others with depth of field a
-full-frame lens at f/1.4 (`render_perf-2026-10-19c`; a frame varies by a
-few hundredths of a millisecond from run to run).
+frames resolve temporally (the runtime's default), take global
+illumination (`r.gi`), and, where the sky lights them, ambient occlusion
+within 0.5 m (`r.ao`), the reference's none of these; the motion-blurred
+frames have a 180-degree shutter at 240 frames a second, and the others
+with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-19d`;
+a frame varies by a few hundredths of a millisecond from run to run).
 
 In the 4K field the surviving clusters hold 5.4 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 52,249 clusters, and 57,587 of the 64,128 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
-passes 0.09 ms, raster 0.53 ms (0.24 in hardware, 0.30 in software), the
-two pyramids 0.23 ms (0.21 without the ambient occlusion's depths), the
-light grid 0.014 ms, the ambient occlusion 0.30 ms, resolve 1.00 ms (0.94
-without the ambient occlusion), the bloom chain 0.27 ms, the temporal
-resolve with the glare and the tonemap 0.83 ms (0.75 without bloom; the
-tonemap with the glare: 0.13 ms). Against CLAUDE.md §10.4, the raster
-(0.65 ms budgeted) and the shading (1.20 ms) fit; culling with the depth
-pyramid takes 0.30 ms against 0.25 ms, most of it the first pyramid's
-read of the visibility buffer; the ambient occlusion takes 0.38 ms (its
-share of the pyramids and the resolve included) of the indirect light's
-0.60 ms (ADR-0038); the temporal resolve and the bloom
-chain (1.10 ms) are past the 0.40 ms of TAA, post, and the tonemap
-together (ADR-0034, ADR-0035); motion blur adds about half a millisecond
-when on (ADR-0036), and depth of field 0.97 to 1.54 ms (ADR-0037). With
-1,024 lamps the grid's passes take 0.049 ms and the resolve 1.20 ms (every
-light for every pixel: 44.4 ms), at the shading line.
-The sun's virtual shadow map adds 0.40 ms to a still frame and 0.44 ms
-when a sphere moves, at the shadow line (0.40 ms); its rays add
-0.42 ms still, and a frame in which an instance moved also rebuilds the
-top level (0.32 ms over 102,401 slots, 0.22 ms over the scene's own
-16,386: 0.79 ms in all). The lamps' shadows (rays) add 1.35 ms. ADR-0029
-to ADR-0033 record the numbers and what comes next.
+passes 0.09 ms, raster 0.53 ms (0.23 in hardware, 0.29 in software), the
+two pyramids 0.22 ms (0.21 without the ambient occlusion's depths), the
+light grid 0.014 ms, the ambient occlusion 0.30 ms, the radiance cache's
+update and blend 0.043 ms, resolve 1.22 ms (0.99 without the radiance
+cache's lookup, and 0.06 less again without the ambient occlusion), the
+bloom chain 0.28 ms, the temporal resolve with the glare and the tonemap
+0.82 ms (0.75 without bloom; the tonemap with the glare: 0.13 ms).
+Against CLAUDE.md §10.4, the raster (0.65 ms budgeted) and the shading
+(1.20 ms; the resolve without the cache's lookup) fit; culling with the
+depth pyramid takes 0.30 ms against 0.25 ms, most of it the first
+pyramid's read of the visibility buffer; the ambient occlusion takes
+0.38 ms (its share of the pyramids and the resolve included) and the
+radiance cache 0.27 ms (its lookup included) of the indirect light's
+0.60 ms: 0.65 ms together (ADR-0038, ADR-0039); the temporal resolve and
+the bloom chain (1.10 ms) are past the 0.40 ms of TAA, post, and the
+tonemap together (ADR-0034, ADR-0035); motion blur adds about half a
+millisecond when on (ADR-0036), and depth of field 0.97 to 1.54 ms
+(ADR-0037). With 1,024 lamps the grid's passes take 0.050 ms and the resolve 1.50 ms, 1.20
+of it without the radiance cache's lookup (every light for every pixel:
+49.3 ms), at the shading line.
+The sun's virtual shadow map adds 0.35 ms to a still frame without global
+illumination (0.28 with it), at the shadow line (0.40 ms); its rays add
+0.36 ms still. A frame in which an instance moved rebuilds the top level
+wherever rays are traced, which global illumination's are on every
+frame: 0.36 ms with its records (over 102,401 slots; 0.22 ms over the
+scene's own 16,386), so a sphere moving every frame costs the map's frame
+0.64 ms. The lamps' shadows (rays) add 1.20 ms. ADR-0029 to ADR-0033 and
+ADR-0039 record the numbers and what comes next.
 
 ### Debug views
 
@@ -1003,7 +1068,7 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (132 tests, registered with CTest as the four shards
+`render_tests` (138 tests, registered with CTest as the four shards
 `render.0` to `render.3`, docs/ntest.md) run on the RTX 3060 Ti locally
 and on the self-hosted runner, and on lavapipe in CI, under the validation
 and synchronisation-validation gate:
@@ -1095,6 +1160,16 @@ and synchronisation-validation gate:
   after another pipeline's frame or another extent, and a closed shutter's
   frame the plain one; shutters that are negative or not finite refused;
   debug lines over a blurred frame.
+- **Global illumination** (`test_gi.c`), against ground truths cast by
+  576 stratified rays a pixel: an open ground under a uniform sky within
+  a level of the environment's irradiance; a black box's occlusion of the
+  sky within a quarter of how much the truth is, with no more than a
+  twentieth of bias; a sunlit white wall's light on a black ground within
+  a fifth of the truth; after one frame, every slot holding a cell of the
+  view's pixels as the CPU twins of the keys work them out, and nearly
+  every such cell a slot; the levels and the keys (a cell's neighbours and
+  the other octants apart; the hash's avalanche; the update's block within
+  the budget); the views that take it and those that do not.
 - **Ambient occlusion** (`test_ao.c`), against a ground truth cast by 576
   stratified rays a pixel: a box on the ground occluded within a quarter of
   how much the truth is, with no more than a hundredth of light on average
@@ -1157,6 +1232,16 @@ path and logs what the GPU culled.
   sharp surface in front hides cannot show through its blur; bokeh is a
   uniform disc; blended surfaces take the depth of the opaque surface
   behind them (ADR-0037).
+- Global illumination adds 0.20 to 0.41 ms at 4K, which with the ambient
+  occlusion's 0.38 ms puts the sky-lit field 0.05 ms past the indirect
+  light's §10.4 line, and its rays have a frame in which anything moves
+  rebuild the top level (0.36 ms; ADR-0039). Point and spot lights do not
+  bounce; devices without ray queries have no cache (no SDF or software
+  tracing); blended surfaces and the reference renderer take the
+  environment's irradiance; normal maps do not modulate the cache's
+  irradiance; a changed scene shows over about 128 samples a cell;
+  NVIDIA's patent on hashed path-space filtering is to be reviewed before
+  a release (ADR-0039).
 - Ambient occlusion adds 0.38 ms at 4K (ADR-0038), most of the indirect
   light's §10.4 line. Screen space cannot see how thick an occluder is
   (behind a silhouette it occludes as if it went on; the paper's thickness
