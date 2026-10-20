@@ -253,11 +253,11 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.03 ms | 7.95 ms | resolve 3.63 ms (§10.4 line: 1.20 ms), raster 0.82 ms + Hi-Z 0.43 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
-| `bistro_street_walk_production` | 7.03 ms | 7.99 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
-| `bistro_street_turn_production` | 7.74 ms | 8.93 ms | raster 1.61 ms: the turn sweeps over the foliage the next two views hold |
-| `bistro_terrace_production` | 8.14 ms | 9.25 ms | raster 1.75 ms: alpha-tested cypresses beside the café |
-| `bistro_hedge_production` | 7.72 ms | 8.53 ms | raster 2.15 ms: an alpha-tested hedge and cypresses across the view |
+| `bistro_street_production` | 6.97 ms | 7.97 ms | resolve 3.59 ms (§10.4 line: 1.20 ms), raster 0.82 ms + Hi-Z 0.42 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+| `bistro_street_walk_production` | 7.03 ms | 7.95 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
+| `bistro_street_turn_production` | 7.48 ms | 8.58 ms | raster 1.39 ms: the turn sweeps over the foliage the next two views hold |
+| `bistro_terrace_production` | 7.96 ms | 8.75 ms | raster 1.54 ms: alpha-tested cypresses beside the café |
+| `bistro_hedge_production` | 7.42 ms | 8.18 ms | raster 1.84 ms: an alpha-tested hedge and cypresses across the view |
 
 Bistro's manifest has five views: the scene's own camera still
 (`street`), walking along the street at 1.4 m/s (`street_walk`), turning
@@ -265,9 +265,10 @@ Bistro's manifest has five views: the scene's own camera still
 `hedge`), still. The motion itself costs little: walking added 0.05 ms,
 and stills along the turn's path cost what the turn does (their raster
 1.75, 1.66, 2.15 and 1.11 ms at 50°, 70°, 90° and 110°). What comes into
-view decides, and the two stills hold the foliage that costs most; the
-rows other than the street's were measured alone (2026-10-20, a run on
-its own).
+view decides, and the two stills hold the foliage that costs most: the
+masked fragments' alpha test, which the mesh stage now hands them
+(docs/render.md "Masked clusters"), took their frames from 8.14 and 7.72
+ms (p99 9.25 and 8.53) to the rows' 7.96 and 7.42.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -282,9 +283,9 @@ its pass from 1.13 to 0.74 ms. Testing the blended surfaces against the
 visibility buffer's depth in their shaders then dropped the 0.19 ms pass
 that copied it into a depth attachment for them, and building the depth
 pyramid's mips six a dispatch took 0.03 ms off the second pyramid. The
-frame varies by about 0.05 ms from run to run: the row is the nightly
-order's (`reference_scenes-2026-10-20d`, after the synthetic scenes, on a
-warm GPU), where a run alone measured 6.98 ms.
+frame varies by about 0.05 ms from run to run, and the nightly order,
+which runs these after the synthetic scenes on a warm GPU, measures about
+0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-20f`).
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal

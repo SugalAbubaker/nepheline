@@ -7,7 +7,11 @@
 // buffer. Back faces and triangles that cover no pixel centre are culled
 // here (vis_cull_triangle). Included by vis_raster_opaque.mesh and
 // vis_raster_masked.mesh with VIS_MASKED 0 or 1; the masked variant also
-// outputs what the alpha test needs.
+// outputs what the alpha test needs: the UV and vertex alpha, and the
+// material's texture, alpha factor and cutoff, read once a cluster here and
+// handed on flat, so that the fragments (foliage draws many layers of them)
+// read no record before their texture fetch: Bistro's hedge view rasterises
+// in 1.85 ms instead of 2.17.
 #extension GL_EXT_mesh_shader : require
 #include "vis_common.glsl"
 
@@ -23,6 +27,11 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 #if VIS_MASKED
 layout(location = 0) out vec3 out_uv_alpha[]; // UV, vertex-colour alpha
+// The material's alpha test, read here once a cluster so that no fragment
+// reads the records: the base colour texture and sampler
+// (NPH_RENDER_NO_TEXTURE: none), and its alpha factor and cutoff.
+layout(location = 1) flat out uvec2 out_alpha_texture[];
+layout(location = 2) flat out vec2 out_alpha_test[];
 #endif
 
 shared vec4 s_clip[64];
@@ -45,6 +54,14 @@ void main()
     const uint triangle_count = m.z >> 16u;
     SetMeshOutputsEXT(vertex_count, triangle_count);
 
+#if VIS_MASKED
+    // Field by field, not a copy of the record (docs/build.md "Shaders").
+    MaterialsRef materials = MaterialsRef(view.v.materials);
+    const uvec2 alpha_texture = uvec2(materials.m[cluster.material].textures[NPH_RENDER_TEX_BASE_COLOR],
+                                      materials.m[cluster.material].samplers[NPH_RENDER_TEX_BASE_COLOR]);
+    const vec2 alpha_test =
+        vec2(materials.m[cluster.material].base_color.a, materials.m[cluster.material].alpha_cutoff);
+#endif
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
     for (uint i = gl_LocalInvocationIndex; i < vertex_count; i += 32u) {
@@ -56,6 +73,8 @@ void main()
 #if VIS_MASKED
         const uvec4 a = AttribsRef(mesh.attribs).a[vertex];
         out_uv_alpha[i] = vec3(unpackHalf2x16(a.z), unpackUnorm4x8(a.w).a);
+        out_alpha_texture[i] = alpha_texture;
+        out_alpha_test[i] = alpha_test;
 #endif
     }
     barrier();

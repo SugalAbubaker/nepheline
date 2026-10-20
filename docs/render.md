@@ -508,6 +508,27 @@ Bistro's `vis raster 0` from 1.135 to 0.735 ms at 4K (0.798 with the
 opaque pipeline alone), and the synthetic scenes' by 14–18 %. The vertex
 path has no attachment, and discards back faces in its fragment stage.
 
+**Masked clusters** are where foliage costs: Bistro's views 50° and 90°
+from the scene camera (`terrace` and `hedge`, docs/benchmarks.md) look at
+alpha-tested cypresses and hedges, and their `vis raster 0` took 1.75 and
+2.17 ms against the street's 0.74. Measured on the hedge view, drawing the
+masked clusters as opaque (no alpha test, depth written early) would take
+1.01 ms and leaving them out 0.43, so most of the cost is fragments of
+layer after layer of leaves, each running the alpha test and its atomic.
+The mesh stage therefore reads the masked material's alpha test (its
+base-colour texture and sampler, alpha factor and cutoff) once a cluster
+and hands it to the fragments flat: a masked fragment's only read before
+its atomic is the texture, where it was the cluster's record, then the
+material's, then the texture. The hedge view rasterises in 1.85 ms and
+the terrace in 1.54 (the street unchanged), the same arithmetic in the
+same order. Measured and not kept: a masked fragment first reading the
+visibility buffer and discarding, before its texture, where a nearer
+masked surface was already drawn (the buffer only grows, so the test is
+exact): its read cost more than the layers it skipped (+0.03 to +0.06 ms);
+and masked depth writes with the test moved after the alpha test, so leaves
+would hide leaves: 2.60 ms, since the late test no longer rejects the
+fragments behind opaque surfaces before their shader.
+
 **The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
 the opaque clusters whose bounding sphere projects in front of the near
 plane into at most 64 pixels across and whose triangles average at most
