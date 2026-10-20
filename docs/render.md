@@ -599,6 +599,36 @@ by divisions, the 4K field's resolve took 1.29 ms against 1.21 and
 Bistro's 3.64 against 3.59; dispatched as (strip, rows, strips), 1.24 and
 3.60.
 
+Where Bistro's 3.6 ms goes, from builds with one part compiled out
+(2026-10-20): reading the visibility buffer and storing the colour 0.19
+ms; rebuilding the attributes (the cluster, instance, mesh and meshlet
+records, the triangle's corners and vertex indices, then the vertices:
+eight dependent loads) about 1.0 ms; the local lights 1.02; the material's
+textures 0.93; the sun's virtual shadow map 0.34; the radiance cache 0.21;
+the occlusion 0.15; the environment 0.08 (the parts overlap, so they sum
+to more). The pass is bound by the latency of those chains: with fewer
+warps resident it slows in proportion (28 warps an SM: 3.60 ms; about 20:
+4.72; about 12: 6.96). The variant with both the shadow map and the cache
+holds 72 registers and spills 2,304 bytes a workgroup to shared memory
+(the driver's "Shared Memory Size"), which comes out of the L1: a build
+that lands on 64 registers but spills 5,888 bytes runs no faster, its
+extra warps paying for a quarter of the L1, so a change to the resolve is
+judged by both numbers. Measured and not kept, in runs interleaved on the
+street, the hedge view and the 4K field:
+- the visible cluster carrying its meshlet's streams (48 bytes instead of
+  16), so that the instance, the mesh and the triangle load together and
+  the meshlet record is not read (eight dependent loads down to five): the
+  resolve 0.03 to 0.05 ms faster, the raster 0.04 slower, 17 MB more held.
+  Those records are shared by every lane of a warp and mostly hit the
+  caches already;
+- each invocation shading 4 or 16 pixels of a 16- or 32-pixel square in
+  turn, so that its later pixels find the records and texels in the L1:
+  0.35 to 0.47 ms slower;
+- the emissive texture sampled with the others before the environment, and
+  the radiance cache's lookup split so that its slot alone stays live
+  across the material: the compiler's allocation (72 registers, 2,304
+  bytes) did not change.
+
 **The HDR target** is B10G11R11 where the device can store to it, sample
 it, and blend into it (RGBA16F otherwise; the reference keeps RGBA16F):
 half the bytes for every pass that reads it. Its mantissas are 6 bits (5
@@ -641,6 +671,16 @@ the camera give the image of lighting every pixel with every light, bit
 for bit. `NPH_RENDER_VIS_NO_LIGHT_GRID` makes every light global, for such
 comparisons. A view holds at most 4,096 lights (`max_lights`). Blended
 surfaces walk the same grid per fragment.
+
+Measured and not kept: the light terms rearranged exactly (the range
+test's vector reused, one reciprocal square root for the direction and
+the falloff, N·H and V·H from |v + l|² = 2 + 2 v·l, the distribution and
+the visibility over one division, Schlick's power as multiplies: four
+transcendentals a light instead of nine), with N·L tested before the rest
+of the record loads, and with two candidates' positions loaded together.
+The 1,024 lamps' resolve took 1.37 ms against 1.42, but the compiler then
+allocated 64 registers and spilled 5,888 bytes a workgroup, and Bistro's
+hedge view took 3.18 ms against 3.08 (the street the same).
 
 ### Temporal anti-aliasing
 
@@ -693,6 +733,13 @@ panning camera holds 0.65 (1.24), and a moving cube 0.33 (0.62), with no
 trail beyond an edge's own pixel. The pass costs 0.75 ms in the 4K field
 against the tonemap's 0.11 ms, over the §10.4 line for TAA, post, and the
 tonemap together; ADR-0034 records why, and what can bring it down.
+Measured and not kept (2026-10-20, three rounds interleaved): the bloom's
+tap issued first, and on frames where no instance's record changed the
+nearest surface's motion taken from the gathered depth word alone, so that
+neither its whole record nor its cluster's flags were read before the
+history's taps (four dependent steps down to two, the image bit for bit
+the same): 0.859 ms against 0.853 in Bistro's street, 0.838 against 0.830
+in the 4K field. The pass is not waiting on that chain.
 
 ### Motion blur
 
