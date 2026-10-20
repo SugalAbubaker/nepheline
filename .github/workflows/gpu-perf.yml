@@ -97,13 +97,28 @@ jobs:
       # (the repository variable NPH_SCENES_DIR, else the runner's tool cache),
       # cooked there by this build's cooker (incrementally: Bistro's 23
       # minutes recur only when the cooker's output changes), then measured
-      # against benchmarks/reference_budgets.txt. The job's user has no Python
-      # of its own; setup-python keeps one in the tool cache.
+      # against benchmarks/reference_budgets.txt.
+      #
+      # The job's user (nph-runner, a standard user: ADR-0028) has no Python,
+      # and setup-python's installer needs administrator rights on Windows
+      # (it failed here). The embeddable distribution needs no installation:
+      # it is unpacked once into the tool cache after its SHA-256 matches, and
+      # its standard library is all scripts/scenes.py uses.
       - name: Python for the scene script
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        run: |
+          $version = '3.12.10'
+          $sha256 = '4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3'
+          $dir = Join-Path $env:RUNNER_TOOL_CACHE "python-embed-$version"
+          if (-not (Test-Path (Join-Path $dir 'python.exe'))) {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              $zip = Join-Path $env:RUNNER_TEMP "python-$version-embed-amd64.zip"
+              Invoke-WebRequest -UseBasicParsing -OutFile $zip -Uri "https://www.python.org/ftp/python/$version/python-$version-embed-amd64.zip"
+              $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+              if ($actual -ne $sha256) { throw "python-$version-embed-amd64.zip: SHA-256 $actual, expected $sha256" }
+              Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          }
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
 
       - name: Reference scenes, fetched and cooked
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
