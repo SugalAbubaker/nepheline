@@ -14,16 +14,17 @@
 // covers mip-0 texels [t 2^m, (t + 1) 2^m), the last one reaching the edge,
 // which is the mapping vis_hzb_occluded relies on. Rounding up instead
 // would leave a mip larger than Vulkan made it and lose its last row and
-// column, and with them the farthest depth under them.
+// column, and with them the farthest depth under them. This shader writes
+// mip 0; vis_hzb_mips.comp builds the others.
 //
-// Mode 0 reads the depth half of the visibility buffer, mode 1 the
-// previous mip. Mode 2 is mode 0 for the tiles phase 1 drew into alone,
+// Mode 0 reads the depth half of the visibility buffer for every texel.
+// Mode 2 is mode 0 for the tiles phase 1 drew into alone,
 // a workgroup per NPH_VIS_HZB_TILE-pixel tile (16 x 16 mip-0 texels): the
 // pyramid after phase 1 differs from the one after phase 0 only there,
 // and phase 1 usually draws little, so this skips most of a full read of
 // the visibility buffer (the cull pass marks the tiles; a cluster it cannot
-// bound marks them all). arg0 is the source's bindless storage index, arg1
-// the destination's, arg2 and arg3 the source extent.
+// bound marks them all). arg0 is the visibility buffer's bindless storage
+// index, arg1 mip 0's, arg2 and arg3 the visibility buffer's extent.
 //
 // Modes 0 and 2 also request the virtual shadow map's pages where the view
 // has one (vsm_common.glsl): each pixel the pages its shading will read,
@@ -52,10 +53,7 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 float source_depth(ivec2 p)
 {
-    if (pc.mode != 1u) {
-        return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
-    }
-    return imageLoad(nph_images_2d[nonuniformEXT(pc.arg0)], p).x;
+    return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
 }
 
 // The values of `v` at or above `floor`, VSM_NONE elsewhere.
@@ -136,7 +134,7 @@ void main()
     }
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 src = ivec2(pc.arg2, pc.arg3);
-    const ivec2 dst = pc.mode != 1u ? (src + 1) / 2 : max(src / 2, ivec2(1));
+    const ivec2 dst = (src + 1) / 2;
     const ivec2 last = src - 1;
     const ivec2 lo = min(p * 2, last);
     const bool inside = all(lessThan(p, dst));
@@ -147,7 +145,7 @@ void main()
             block[k] = source_depth(min(lo + ivec2(k & 1, k >> 1), last));
         }
     }
-    if (pc.mode != 1u) {
+    {
         // Every invocation of the subgroup takes part in the requests.
         VisViewRef view = VisViewRef(pc.view);
         const uint64_t vsm = ViewRef(view.v.render_view).v.vsm;
@@ -155,7 +153,7 @@ void main()
             request_pages(view, VsmViewRef(vsm), lo, last, block);
         }
     }
-    if (pc.mode != 1u && pc.arg4 != NPH_VIS_NO_AO) {
+    if (pc.arg4 != NPH_VIS_NO_AO) {
         const float top_left = inside ? block.x : source_depth(2 * min(p, dst - 1));
         imageStore(nph_images_2d[nonuniformEXT(pc.arg4)], p, vec4(top_left, 0.0, 0.0, 0.0));
     }

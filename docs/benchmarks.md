@@ -246,7 +246,7 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 6.98 ms | 7.85 ms | resolve 3.57 ms (§10.4 line: 1.20 ms), raster 0.80 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.44 ms |
+| `bistro_street_production` | 7.03 ms | 7.95 ms | resolve 3.63 ms (§10.4 line: 1.20 ms), raster 0.82 ms + Hi-Z 0.43 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -259,7 +259,11 @@ map 0.34 ms. Testing each light's range before reading the rest of it
 hardware raster's early depth test (docs/render.md "Early depth") took
 its pass from 1.13 to 0.74 ms. Testing the blended surfaces against the
 visibility buffer's depth in their shaders then dropped the 0.19 ms pass
-that copied it into a depth attachment for them.
+that copied it into a depth attachment for them, and building the depth
+pyramid's mips six a dispatch took 0.03 ms off the second pyramid. The
+frame varies by about 0.05 ms from run to run: the row is the nightly
+order's (`reference_scenes-2026-10-20d`, after the synthetic scenes, on a
+warm GPU), where a run alone measured 6.98 ms.
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
@@ -268,7 +272,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-20b-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-20d-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU

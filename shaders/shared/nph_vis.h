@@ -59,6 +59,13 @@
 // pixels square that phase 1 drew into (vis_hzb.comp mode 2).
 #define NPH_VIS_HZB_TILE 32
 
+// The depth pyramid's mips past the first (vis_hzb_mips.comp): a dispatch
+// builds NPH_VIS_HZB_MIPS_LEVELS mips from the one before them, a workgroup
+// per tile of NPH_VIS_HZB_MIPS_TILE texels square of that mip.
+#define NPH_VIS_HZB_MIPS_TILE   64
+#define NPH_VIS_HZB_MIPS_LEVELS 6  // mips a dispatch builds: log2 of the tile
+#define NPH_VIS_HZB_MAX_MIPS    16 // the pyramid's mips at most (mip 0 below 65,536 texels)
+
 // The widest cluster, in pixels, the software raster takes: it keeps every
 // triangle's box small enough for 32-bit edge functions (vis_sw_raster.comp).
 #define NPH_VIS_SW_MAX_PIXELS 64
@@ -301,6 +308,22 @@ NPH_SHARED_STRUCT(NphVisPush)
     u32 arg2;
     u32 arg3;
     u32 arg4;
+};
+
+// Push constants of the depth pyramid's mips past the first
+// (vis_hzb_mips.comp).
+NPH_SHARED_STRUCT(NphVisHzbMipsPush)
+{
+    u64 view;  // NphVisViewData: its counters and hzb_dirty (phase 1)
+    u32 base;  // the mip the dispatch reads; it builds the next NPH_VIS_HZB_MIPS_LEVELS
+    u32 phase; // 1 with base 0: only the tiles phase 1 drew into are rebuilt
+    u32 mips;  // the pyramid's mip count
+    u32 width; // mip 0's extent
+    u32 height;
+    u32 tiles_x; // tiles a row and a column: the base mip's extent over the tile, rounded
+    u32 tiles_y; // down, at least 1 (the last of each also takes the texels past it)
+    u32 pad0;
+    u32 storage[NPH_VIS_HZB_MAX_MIPS]; // the mips' bindless storage indices
 };
 
 // The culling math against its C twins (render_tests, vis_math_test.comp,

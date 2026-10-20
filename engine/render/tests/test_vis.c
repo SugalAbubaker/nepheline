@@ -574,12 +574,102 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     nph_gpu_image_destroy(dev, hzb_image);
 }
 
-// The depth pyramid the renderer builds, read back after a frame into an
-// awkward 100 x 60 target (mips 50 x 30, 25 x 15, 12 x 7, 6 x 3, 3 x 1,
-// 1 x 1: odd sources at three steps): every texel past mip 0 is exactly the
-// minimum of the texels it covers, and every texel of a mip lies under one
-// of the next. The twin test above found the pyramid built as if Vulkan
-// rounded mips up, which dropped the last row and column of odd mips.
+// The texels of a depth pyramid past mip 0 (every mip back to back in
+// `texels`, mip 0 `w` x `h`, `mips` mips) that are not exactly the minimum of
+// the texels they cover, the last texel of a row or column reaching the edge
+// of the mip before, plus the texels of a mip no texel of the next covers.
+static u32 pyramid_errors(const f32 *texels, u32 w, u32 h, u32 mips, const char *what)
+{
+    u8 *seen = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, (u64)w * h);
+    NTEST_ASSERT_NOT_NULL(seen);
+    u32 wrong = 0U;
+    const f32 *below = texels;
+    for (u32 m = 1; m < mips; ++m) {
+        const u32 sw = nph_max_u32(w >> (m - 1U), 1U);
+        const u32 sh = nph_max_u32(h >> (m - 1U), 1U);
+        const u32 dw = nph_max_u32(w >> m, 1U);
+        const u32 dh = nph_max_u32(h >> m, 1U);
+        const f32 *level = below + (u64)sw * sh;
+        memset(seen, 0, (u64)sw * sh);
+        for (u32 y = 0; y < dh; ++y) {
+            for (u32 x = 0; x < dw; ++x) {
+                const u32 x1 = x == dw - 1U ? sw - 1U : 2U * x + 1U;
+                const u32 y1 = y == dh - 1U ? sh - 1U : 2U * y + 1U;
+                f32 want =
+                    below[(u64)nph_min_u32(2U * y, sh - 1U) * sw + nph_min_u32(2U * x, sw - 1U)];
+                for (u32 sy = nph_min_u32(2U * y, sh - 1U); sy <= y1; ++sy) {
+                    for (u32 sx = nph_min_u32(2U * x, sw - 1U); sx <= x1; ++sx) {
+                        want = nph_f32_min(want, below[(u64)sy * sw + sx]);
+                        seen[(u64)sy * sw + sx] = 1U;
+                    }
+                }
+                const f32 got = level[(u64)y * dw + x];
+                if (got != want && wrong++ == 0U) {
+                    NTEST_LOG("%s: mip %u texel (%u, %u): %.7g, want %.7g", what, m, x, y, (f64)got,
+                              (f64)want);
+                }
+            }
+        }
+        for (u64 t = 0; t < (u64)sw * sh; ++t) {
+            wrong += seen[t] != 0U ? 0U : 1U;
+        }
+        below = level;
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, seen, (u64)w * h);
+    return wrong;
+}
+
+// The depth pyramid the renderer builds for a `width` x `height` target of
+// `mips` mips, read back after a frame of `v` (`what` names it in the log):
+// every texel past mip 0 is exactly the minimum of the texels it covers,
+// and every texel of a mip lies under one of the next.
+static void check_pyramid(RenderFixture *f, const NphRenderView *v, u32 width, u32 height, u32 mips,
+                          const char *what)
+{
+    NphGpuImage target =
+        test_make_image_2d(f->dev, width, height, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                           (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT, "pyramid target");
+    for (u32 i = 0; i < 2U; ++i) {
+        (void)test_render_frame(f, v, target);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    const RenderVis *vis = &f->renderer->vis;
+    NTEST_ASSERT_EQ_UINT(vis->hzb_width, (width + 1U) / 2U);
+    NTEST_ASSERT_EQ_UINT(vis->hzb_height, (height + 1U) / 2U);
+    NTEST_ASSERT_EQ_UINT(vis->hzb_mips, mips);
+    u64 count = 0U;
+    for (u32 m = 0; m < mips; ++m) {
+        count += (u64)nph_max_u32(vis->hzb_width >> m, 1U) * nph_max_u32(vis->hzb_height >> m, 1U);
+    }
+    f32 *texels = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, count);
+    NTEST_ASSERT_NOT_NULL(texels);
+    u64 at_texel = 0U;
+    for (u32 m = 0; m < mips; ++m) {
+        const u64 n =
+            (u64)nph_max_u32(vis->hzb_width >> m, 1U) * nph_max_u32(vis->hzb_height >> m, 1U);
+        test_read_image(f->dev, vis->hzb, m, texels + at_texel, n * sizeof(f32));
+        at_texel += n;
+    }
+    // Mip 0 holds the scene: depths in [0, 1], the far plane (0) where the
+    // sky shows, nearer where the floor and the objects are.
+    const u32 mip0 = vis->hzb_width * vis->hzb_height;
+    u32 covered = 0U;
+    for (u32 t = 0; t < mip0; ++t) {
+        NTEST_ASSERT_TRUE(texels[t] >= 0.0F && texels[t] <= 1.0F);
+        covered += texels[t] > 0.0F ? 1U : 0U;
+    }
+    NTEST_EXPECT_GT_UINT(covered, mip0 / 4U);
+    NTEST_EXPECT_EQ_UINT(pyramid_errors(texels, vis->hzb_width, vis->hzb_height, mips, what), 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, texels, count);
+    nph_gpu_image_destroy(f->dev, target);
+}
+
+// The pyramid for an awkward 100 x 60 target (mips 50 x 30, 25 x 15, 12 x 7,
+// 6 x 3, 3 x 1, 1 x 1: odd sources at three steps), and for 510 x 382 (mip 0
+// 255 x 191: vis_hzb_mips.comp's last tiles take 127 texels each way, odd
+// sources at every step, and a second dispatch builds mip 7). The twin test
+// above found the pyramid built as if Vulkan rounded mips up, which dropped
+// the last row and column of odd mips.
 NTEST_F(Vis, the_depth_pyramid_is_the_minimum_of_what_it_covers)
 {
     REQUIRE_PRODUCTION(f);
@@ -587,86 +677,41 @@ NTEST_F(Vis, the_depth_pyramid_is_the_minimum_of_what_it_covers)
     scene_build(f, &s, nph_dvec3_zero());
     NphRenderView v;
     scene_view(&v, nph_dvec3_zero(), NPH_RENDER_PIPELINE_PRODUCTION);
-    NphGpuImage target =
-        test_make_image_2d(f->dev, 100U, 60U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
-                           (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT, "pyramid target");
-    for (u32 i = 0; i < 2U; ++i) {
-        (void)test_render_frame(f, &v, target);
-    }
-    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
-    const RenderVis *vis = &f->renderer->vis;
-    NTEST_ASSERT_EQ_UINT(vis->hzb_width, 50U);
-    NTEST_ASSERT_EQ_UINT(vis->hzb_height, 30U);
-    NTEST_ASSERT_EQ_UINT(vis->hzb_mips, 6U);
-    enum {
-        MIPS = 6U
-    };
-    f32 *levels[MIPS];
-    u32 widths[MIPS];
-    u32 heights[MIPS];
-    for (u32 m = 0; m < MIPS; ++m) {
-        widths[m] = nph_max_u32(vis->hzb_width >> m, 1U);
-        heights[m] = nph_max_u32(vis->hzb_height >> m, 1U);
-        const u64 bytes = (u64)widths[m] * heights[m] * sizeof(f32);
-        levels[m] = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, (u64)widths[m] * heights[m]);
-        NTEST_ASSERT_NOT_NULL(levels[m]);
-        test_read_image(f->dev, vis->hzb, m, levels[m], bytes);
-    }
-    // Mip 0 holds the scene: depths in [0, 1], the far plane (0) where the
-    // sky shows, nearer where the floor and the objects are.
-    u32 covered = 0U;
-    for (u32 t = 0; t < widths[0] * heights[0]; ++t) {
-        NTEST_ASSERT_TRUE(levels[0][t] >= 0.0F && levels[0][t] <= 1.0F);
-        covered += levels[0][t] > 0.0F ? 1U : 0U;
-    }
-    NTEST_EXPECT_GT_UINT(covered, widths[0] * heights[0] / 4U);
-    u32 wrong = 0U;
-    for (u32 m = 1; m < MIPS; ++m) {
-        const u32 sw = widths[m - 1U];
-        const u32 sh = heights[m - 1U];
-        static u8 seen[50U * 30U];
-        memset(seen, 0, sizeof seen);
-        for (u32 y = 0; y < heights[m]; ++y) {
-            for (u32 x = 0; x < widths[m]; ++x) {
-                const u32 x1 = x == widths[m] - 1U ? sw - 1U : 2U * x + 1U;
-                const u32 y1 = y == heights[m] - 1U ? sh - 1U : 2U * y + 1U;
-                f32 want = levels[m - 1U][(u64)nph_min_u32(2U * y, sh - 1U) * sw +
-                                          nph_min_u32(2U * x, sw - 1U)];
-                for (u32 sy = nph_min_u32(2U * y, sh - 1U); sy <= y1; ++sy) {
-                    for (u32 sx = nph_min_u32(2U * x, sw - 1U); sx <= x1; ++sx) {
-                        want = nph_f32_min(want, levels[m - 1U][(u64)sy * sw + sx]);
-                        seen[sy * sw + sx] = 1U;
-                    }
-                }
-                const f32 got = levels[m][(u64)y * widths[m] + x];
-                if (got != want && wrong++ == 0U) {
-                    NTEST_LOG("mip %u texel (%u, %u): %.7g, want %.7g", m, x, y, (f64)got,
-                              (f64)want);
-                }
-            }
-        }
-        for (u32 t = 0; t < sw * sh; ++t) {
-            NTEST_EXPECT_EQ_UINT(seen[t], 1U);
-        }
-    }
-    NTEST_EXPECT_EQ_UINT(wrong, 0U);
-    for (u32 m = 0; m < MIPS; ++m) {
-        NPH_FREE_ARRAY(nph_allocator_system(), f32, levels[m], (u64)widths[m] * heights[m]);
-    }
-    nph_gpu_image_destroy(f->dev, target);
+    check_pyramid(f, &v, 100U, 60U, 6U, "100 x 60");
+    check_pyramid(f, &v, 510U, 382U, 8U, "510 x 382");
 }
 
 // A wall in front of spheres, then moved aside: phase 0 defers the spheres
 // (last frame's pyramid has them behind the wall) and phase 1 draws them.
 // Returns the pyramid that frame leaves, every mip back to back, and the
-// lit pixels of the image.
+// lit pixels of the image: rendered into the fixture's target, or into
+// `target` where it is not null (lit then 0).
 typedef struct Pyramid {
     f32 *texels;
     u64 count;
     u32 lit;
+    u32 width; // mip 0's extent
+    u32 height;
+    u32 mips;
+    u64 mip0;    // mip 0's texels (the first)
+    u64 covered; // those nearer than the far plane: where geometry is
 } Pyramid;
 
-static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
+// `frames` frames of `v` into `target`, or into the fixture's target (read
+// back into `out`) where it is null.
+static void reveal_frames(RenderFixture *f, const NphRenderView *v, u32 frames, NphGpuImage target,
+                          u8 *out)
+{
+    if (nph_gpu_image_is_null(target)) {
+        render_into(f, v, frames, out);
+        return;
+    }
+    for (u32 i = 0; i < frames; ++i) {
+        (void)test_render_frame(f, v, target);
+    }
+}
+
+static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild, NphGpuImage target)
 {
     f->renderer->vis.hzb_full_rebuild = full_rebuild;
     NphRenderEnvironmentDesc env;
@@ -679,7 +724,7 @@ static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
     v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
     static u8 img[PIXELS];
     static u8 sky[PIXELS];
-    render_into(f, &v, 1U, sky);
+    reveal_frames(f, &v, 1U, target, sky);
     const NphRenderMesh cube = mesh_of(f, make_cube);
     const NphRenderMesh sphere = mesh_of(f, make_sphere);
     const NphRenderMaterial m = material(f, nph_vec4(0.7F, 0.7F, 0.7F, 1.0F), 0.0F, 0.6F);
@@ -690,13 +735,13 @@ static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
         (void)instance(f, sphere, m,
                        at(-1.2 + 0.8 * (f64)(i % 4U), -1.2 + 0.8 * (f64)(i >> 2U), -1.0, 0.6F));
     }
-    render_into(f, &v, 3U, img);
+    reveal_frames(f, &v, 3U, target, img);
     const NphRenderTransform aside = at(60.0, 0.0, 1.0, 1.0F);
     NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(f->renderer, w, &aside), NPH_RESULT_OK);
-    render_into(f, &v, 1U, img);
+    reveal_frames(f, &v, 1U, target, img);
     Pyramid out;
     memset(&out, 0, sizeof out);
-    out.lit = lit_pixels(img, sky);
+    out.lit = nph_gpu_image_is_null(target) ? lit_pixels(img, sky) : 0U;
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     const RenderVis *vis = &f->renderer->vis;
     for (u32 mip = 0; mip < vis->hzb_mips; ++mip) {
@@ -712,12 +757,22 @@ static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild)
         test_read_image(f->dev, vis->hzb, mip, out.texels + at_texel, n * sizeof(f32));
         at_texel += n;
     }
+    out.width = vis->hzb_width;
+    out.height = vis->hzb_height;
+    out.mips = vis->hzb_mips;
+    out.mip0 = (u64)vis->hzb_width * vis->hzb_height;
+    for (u64 i = 0; i < out.mip0; ++i) {
+        out.covered += out.texels[i] > 0.0F ? 1U : 0U;
+    }
     return out;
 }
 
 // The pyramid after phase 1 rebuilds only the tiles phase 1 drew into; it
-// must be the pyramid a full rebuild gives, texel for texel.
-NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
+// must be the pyramid a full rebuild gives, texel for texel: in the
+// fixture's target, and in a wide 1040 x 262 one (mip 0 520 x 131), where
+// the spheres cover the middle of the view only, so that vis_hzb_mips.comp
+// keeps phase 0's mips for the tiles at the sides and rebuilds the others.
+static void compare_reveals(NphGpuImage (*make_target)(NphGpuDevice *), u32 min_lit)
 {
     RenderFixture tiled;
     RenderFixture full;
@@ -729,14 +784,27 @@ NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
         test_render_teardown(&tiled);
         NTEST_SKIP("no production path on this device");
     }
-    const Pyramid a = pyramid_after_a_reveal(&tiled, false);
+    NphGpuImage target = make_target != NULL ? make_target(tiled.dev) : NPH_GPU_IMAGE_NULL;
+    const Pyramid a = pyramid_after_a_reveal(&tiled, false, target);
+    nph_gpu_image_destroy(tiled.dev, target);
     test_render_teardown(&tiled);
     test_render_setup(&full, NULL);
-    const Pyramid b = pyramid_after_a_reveal(&full, true);
+    target = make_target != NULL ? make_target(full.dev) : NPH_GPU_IMAGE_NULL;
+    const Pyramid b = pyramid_after_a_reveal(&full, true, target);
+    nph_gpu_image_destroy(full.dev, target);
     test_render_teardown(&full);
-    // Phase 1 drew the spheres: the image is not the bare sky.
-    NTEST_EXPECT_GT_UINT(a.lit, 100U);
+    // Phase 1 drew the spheres: the image is not the bare sky, and in the
+    // wide target they cover part of it only.
+    NTEST_EXPECT_GE_UINT(a.lit, min_lit);
     NTEST_EXPECT_EQ_UINT(a.lit, b.lit);
+    NTEST_LOG("mip 0 covered: %llu of %llu texels", (unsigned long long)a.covered,
+              (unsigned long long)a.mip0);
+    NTEST_EXPECT_GT_UINT(a.covered, 0U);
+    NTEST_EXPECT_LT_UINT(a.covered, a.mip0 * 3U / 4U);
+    // Each is a pyramid of its own mip 0: phase 1's rebuild reached every
+    // mip above what it drew.
+    NTEST_EXPECT_EQ_UINT(pyramid_errors(a.texels, a.width, a.height, a.mips, "tiles"), 0U);
+    NTEST_EXPECT_EQ_UINT(pyramid_errors(b.texels, b.width, b.height, b.mips, "full"), 0U);
     NTEST_ASSERT_EQ_UINT(a.count, b.count);
     u64 wrong = 0U;
     for (u64 i = 0; i < a.count; ++i) {
@@ -745,6 +813,18 @@ NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
     NTEST_EXPECT_EQ_UINT(wrong, 0U);
     NPH_FREE_ARRAY(nph_allocator_system(), f32, a.texels, a.count);
     NPH_FREE_ARRAY(nph_allocator_system(), f32, b.texels, b.count);
+}
+
+static NphGpuImage wide_target(NphGpuDevice *dev)
+{
+    return test_make_image_2d(dev, 1040U, 262U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                              (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT, "wide target");
+}
+
+NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
+{
+    compare_reveals(NULL, 101U);
+    compare_reveals(wide_target, 0U);
 }
 
 NTEST_F(Vis, production_matches_the_reference)

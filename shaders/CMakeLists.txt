@@ -88,6 +88,7 @@ nph_add_shaders(nph_shaders_render
         render/vis_raster_vert_opaque.frag
         render/vis_raster_vert_masked.frag
         render/vis_hzb.comp
+        render/vis_hzb_mips.comp
         render/vis_resolve.comp
         render/vis_resolve_rt.comp
         render/rt_instances.comp

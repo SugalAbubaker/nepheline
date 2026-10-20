@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth pyramid's mips past the first (docs/render.md "The production
+// path"). vis_hzb.comp writes mip 0, and says how each mip halves the one
+// before: rounding down, the last texel of a row or column taking a third
+// texel where the mip before has an odd extent, so that every texel lies
+// under exactly one of the next mip.
+//
+// A dispatch and a barrier a mip waited on each other through the small
+// mips (eleven at 4K). Here a dispatch builds six mips from the one before
+// them, the base, after the single-pass downsampler of Kramer ("FidelityFX
+// Single Pass Downsampler", AMD GPUOpen, 2020): a workgroup per tile of
+// 64 x 64 base texels builds the tile's next mip from the image and the
+// five after it in shared memory, writing each to the image. The tiling
+// rounds down: the last tile of a row or column also takes the texels past
+// the last whole tile (127 at most), so that every texel's footprint, its
+// third texel included, lies in its tile, and a tile's sixth mip is exactly
+// one texel. A 4K frame's pyramid takes two dispatches (mips 1 to 6, then 7
+// to 10 from a single tile of mip 6) where Kramer's takes one at the price
+// of atomics and device-coherent memory between workgroups.
+//
+// In phase 1 (base 0) a tile phase 1 did not draw into keeps the mips phase 0
+// built for it: mip 0 changed only in the tiles vis_hzb.comp mode 2 rebuilt.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant, scalar) uniform Push { NphVisHzbMipsPush pc; };
+
+// A mip's texels in a tile, row by row from its top left: the first mip a
+// dispatch builds in s_a, the next in s_b, and so on alternately. (Arrays of
+// a struct of their own: docs/build.md "Shaders".)
+struct Texel {
+    float d;
+};
+shared Texel s_a[NPH_VIS_HZB_MIPS_TILE * NPH_VIS_HZB_MIPS_TILE];
+shared Texel s_b[(NPH_VIS_HZB_MIPS_TILE / 2) * (NPH_VIS_HZB_MIPS_TILE / 2)];
+
+// Mip m's extent: halved from mip 0, rounding down, never below 1.
+ivec2 extent(uint m)
+{
+    return max(ivec2(pc.width, pc.height) >> m, ivec2(1));
+}
+
+// Tile `t` of `n` along one axis at `levels` mips above the base (0: the base
+// itself), of extent `e` there: the texels [x, y).
+ivec2 tile_span(int t, int n, int e, uint levels)
+{
+    const int lo = t << (NPH_VIS_HZB_MIPS_LEVELS - int(levels));
+    return ivec2(lo, t == n - 1 ? e : lo + (1 << (NPH_VIS_HZB_MIPS_LEVELS - int(levels))));
+}
+
+float shared_texel(bool a, int i)
+{
+    return a ? s_a[i].d : s_b[i].d;
+}
+
+// Whether phase 1 drew into the base texels [lo, hi) (mip 0): the bits of
+// the NPH_VIS_HZB_TILE-pixel tiles under them (vis_hzb.comp mode 2).
+bool drawn(VisViewRef view, ivec2 lo, ivec2 hi)
+{
+    const int texels = NPH_VIS_HZB_TILE / 2; // a dirty tile's mip-0 texels
+    VisUintRef bits = VisUintRef(view.v.hzb_dirty);
+    for (int y = lo.y / texels; y <= (hi.y - 1) / texels; ++y) {
+        for (int x = lo.x / texels; x <= (hi.x - 1) / texels; ++x) {
+            const uint tile = uint(y) * view.v.hzb_tiles_x + uint(x);
+            if ((bits.v[tile >> 5u] & (1u << (tile & 31u))) != 0u) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void main()
+{
+    const ivec2 t = ivec2(gl_WorkGroupID.xy);
+    const ivec2 n = ivec2(pc.tiles_x, pc.tiles_y);
+    const ivec2 base = extent(pc.base);
+    if (pc.phase == 1u && pc.base == 0u) {
+        VisViewRef view = VisViewRef(pc.view);
+        if (VisCountersRef(view.v.counters).c.hzb_full == 0u &&
+            !drawn(view, ivec2(tile_span(t.x, n.x, base.x, 0u).x, tile_span(t.y, n.y, base.y, 0u).x),
+                   ivec2(tile_span(t.x, n.x, base.x, 0u).y, tile_span(t.y, n.y, base.y, 0u).y))) {
+            return; // the whole workgroup: uniform
+        }
+    }
+    const uint last = min(pc.mips - 1u, pc.base + uint(NPH_VIS_HZB_MIPS_LEVELS));
+    // The previous mip's region in the tile (its top left, and its width in
+    // shared memory).
+    ivec2 src_lo = ivec2(0);
+    int src_w = 0;
+    for (uint m = pc.base + 1u; m <= last; ++m) {
+        const uint levels = m - pc.base;
+        const ivec2 e = extent(m);
+        const ivec2 below = extent(m - 1u);
+        const ivec2 sx = tile_span(t.x, n.x, e.x, levels);
+        const ivec2 sy = tile_span(t.y, n.y, e.y, levels);
+        const ivec2 lo = ivec2(sx.x, sy.x);
+        const ivec2 size = ivec2(sx.y - sx.x, sy.y - sy.x);
+        // The first mip of the dispatch is read from the image, the others
+        // from the other shared array.
+        const bool from_image = levels == 1u;
+        const bool into_a = (levels & 1u) == 1u;
+        for (int i = int(gl_LocalInvocationIndex); i < size.x * size.y; i += 256) {
+            const ivec2 p = lo + ivec2(i % size.x, i / size.x);
+            // Its footprint: 2p to 2p + 1, the last texel reaching the edge.
+            const ivec2 f0 = 2 * p;
+            const ivec2 f1 = ivec2(p.x == e.x - 1 ? below.x - 1 : f0.x + 1,
+                                   p.y == e.y - 1 ? below.y - 1 : f0.y + 1);
+            float d = 3.402823466e38;
+            for (int y = f0.y; y <= f1.y; ++y) {
+                for (int x = f0.x; x <= f1.x; ++x) {
+                    d = min(d, from_image
+                                   ? imageLoad(nph_images_2d[nonuniformEXT(pc.storage[m - 1u])],
+                                               ivec2(x, y))
+                                         .x
+                                   : shared_texel(!into_a, (y - src_lo.y) * src_w + (x - src_lo.x)));
+                }
+            }
+            imageStore(nph_images_2d[nonuniformEXT(pc.storage[m])], p, vec4(d, 0.0, 0.0, 0.0));
+            if (into_a) {
+                s_a[i].d = d;
+            } else {
+                s_b[i].d = d;
+            }
+        }
+        barrier();
+        src_lo = lo;
+        src_w = size.x;
+    }
+}

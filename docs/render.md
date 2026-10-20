@@ -527,7 +527,19 @@ under each texel. Mip 0 is half the target rounded up, each later mip
 halved and rounded down as Vulkan sizes mips; where a source has an odd
 number of texels, the destination's last texel takes the extra one, so
 mip-m texel t covers mip-0 texels [t·2^m, (t + 1)·2^m) and the last one
-reaches the edge. An occlusion test projects the bounding sphere to a
+reaches the edge. `vis_hzb.comp` writes mip 0 from the visibility buffer
+(with the shadow map's page requests and the occlusion's depths, from the
+same reads); `vis_hzb_mips.comp` builds the rest six mips a dispatch, after
+the single-pass downsampler of Kramer ("FidelityFX Single Pass
+Downsampler", AMD GPUOpen, 2020): a workgroup per 64 × 64 tile of the mip
+before builds the tile's next six mips in shared memory, the tiling rounded
+down so that the last tile of a row or column takes the texels past it and
+every footprint lies in one tile. At 4K that is two dispatches where a
+dispatch and a barrier a mip took eleven; after phase 1, a tile phase 1 did
+not draw into keeps phase 0's mips. Bistro's second pyramid went from 0.134
+to 0.109 ms; the first, bound by its full read of the visibility buffer
+and its page requests (0.11 ms of its 0.31), stayed as it was. An
+occlusion test projects the bounding sphere to a
 screen rectangle and nearest depth (Mara & McGuire, "2D Polyhedral Bounds
 of a Clipped, Perspective-Projected 3D Sphere", JCGT 2013), picks the mip
 at which the rectangle spans one texel, and reads a 2 × 2 footprint. The
@@ -841,52 +853,52 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.21 ms | 0.010 ms | 0.10 ms | 0.31 ms |
-| grid, 512 × 512 | 10,240 | 1.27 ms | 0.010 ms | 0.21 ms | 0.38 ms |
-| grid, 512 × 512 | 102,400 | 13.5 ms | 0.010 ms | 3.36 ms | 0.74 ms |
-| field, 3840 × 2160 | 16,385 | 2.88 ms | 0.012 ms | 3.03 ms | 3.62 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.012 ms | | 2.77 ms |
-| the same without bloom | 16,385 | | 0.012 ms | | 3.25 ms |
-| the same without ambient occlusion | 16,385 | | 0.012 ms | | 3.22 ms |
-| the same without global illumination | 16,385 | | 0.010 ms | | 3.33 ms |
-| the same exposed automatically | 16,385 | | 0.013 ms | | 3.62 ms |
-| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.013 ms | | 4.20 ms |
-| the same, strafing at 5 m/s | 16,385 | | 0.013 ms | | 4.18 ms |
-| the same, turning 360°/s | 16,385 | | 0.013 ms | | 4.07 ms |
-| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.59 ms |
-| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.013 ms | | 5.18 ms |
-| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.95 ms |
-| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.012 ms | 53.5 ms | 3.55 ms |
-| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.03 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.16 ms | 0.013 ms | 3.70 ms | 3.88 ms |
-| the same without global illumination | 16,385 | | 0.011 ms | | 3.74 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.013 ms | | 3.98 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.014 ms | | 4.22 ms |
-| the map, the camera walking | 16,385 | | 0.014 ms | | 3.89 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.013 ms | | 4.81 ms |
+| grid, 512 × 512 | 1,024 | 0.20 ms | 0.010 ms | 0.10 ms | 0.30 ms |
+| grid, 512 × 512 | 10,240 | 1.26 ms | 0.010 ms | 0.22 ms | 0.36 ms |
+| grid, 512 × 512 | 102,400 | 13.2 ms | 0.010 ms | 3.13 ms | 0.72 ms |
+| field, 3840 × 2160 | 16,385 | 2.87 ms | 0.012 ms | 3.06 ms | 3.55 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.012 ms | | 2.72 ms |
+| the same without bloom | 16,385 | | 0.012 ms | | 3.19 ms |
+| the same without ambient occlusion | 16,385 | | 0.012 ms | | 3.16 ms |
+| the same without global illumination | 16,385 | | 0.010 ms | | 3.27 ms |
+| the same exposed automatically | 16,385 | | 0.013 ms | | 3.55 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.013 ms | | 4.15 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.013 ms | | 4.12 ms |
+| the same, turning 360°/s | 16,385 | | 0.013 ms | | 4.03 ms |
+| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.55 ms |
+| the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.013 ms | | 5.12 ms |
+| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.91 ms |
+| field at night, 1,024 lights | 16,385 | 3.61 ms | 0.012 ms | 53.0 ms | 3.48 ms |
+| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 4.99 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.20 ms | 0.014 ms | 3.69 ms | 3.82 ms |
+| the same without global illumination | 16,385 | | 0.011 ms | | 3.70 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.012 ms | | 3.91 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.014 ms | | 4.18 ms |
+| the map, the camera walking | 16,385 | | 0.014 ms | | 3.83 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.014 ms | | 4.77 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
 frames resolve temporally (the runtime's default), take global
 illumination (`r.gi`), and, where the sky lights them, ambient occlusion
 within 0.5 m (`r.ao`), the reference's none of these; the motion-blurred
 frames have a 180-degree shutter at 240 frames a second, and the others
-with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-20b`;
+with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-20d`;
 a frame varies by a few hundredths of a millisecond from run to run).
 
 In the 4K field the surviving clusters hold 5.4 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 52,249 clusters, and 57,587 of the 64,128 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
-passes 0.09 ms, raster 0.50 ms (0.20 in hardware, 0.30 in software), the
-two pyramids 0.22 ms (0.21 without the ambient occlusion's depths), the
+passes 0.09 ms, raster 0.49 ms (0.20 in hardware, 0.29 in software), the
+two pyramids 0.20 ms (0.18 without the ambient occlusion's depths), the
 light grid 0.014 ms, the ambient occlusion 0.30 ms, the radiance cache's
-update and blend 0.043 ms, resolve 1.24 ms (0.99 without the radiance
+update and blend 0.043 ms, resolve 1.22 ms (0.99 without the radiance
 cache's lookup, and 0.06 less again without the ambient occlusion), the
 bloom chain 0.28 ms, the temporal resolve with the glare and the tonemap
 0.82 ms (0.75 without bloom; the tonemap with the glare: 0.13 ms).
 Against CLAUDE.md §10.4, the raster (0.65 ms budgeted) and the shading
 (1.20 ms; the resolve without the cache's lookup) fit; culling with the
-depth pyramid takes 0.30 ms against 0.25 ms, most of it the first
+depth pyramid takes 0.29 ms against 0.25 ms, most of it the first
 pyramid's read of the visibility buffer; the ambient occlusion takes
 0.38 ms (its share of the pyramids and the resolve included) and the
 radiance cache 0.27 ms (its lookup included) of the indirect light's

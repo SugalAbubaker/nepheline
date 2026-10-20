@@ -51,6 +51,7 @@ NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 848U, "NphVisViewData matches its GL
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
+NPH_STATIC_ASSERT(sizeof(NphVisHzbMipsPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, render_view) % 8U == 0U, "addresses are aligned");
 
 static const char *const k_shader_files[VIS_SHADER_COUNT] = {
@@ -74,14 +75,15 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_raster_vert_opaque.frag",
     "vis_raster_vert_masked.frag",
     "vis_debug_line.frag",
+    "vis_hzb_mips.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
-    VIS_SHADER_SCATTER,    VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
-    VIS_SHADER_HZB,        VIS_SHADER_RESOLVE,        VIS_SHADER_SW_RASTER,     VIS_SHADER_LIGHTS,
-    VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT, VIS_SHADER_RESOLVE,        VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_SCATTER, VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
+    VIS_SHADER_HZB,     VIS_SHADER_HZB_MIPS,       VIS_SHADER_RESOLVE,       VIS_SHADER_SW_RASTER,
+    VIS_SHADER_LIGHTS,  VIS_SHADER_LIGHT_BINS,     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE, VIS_SHADER_RESOLVE_RT,     VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE, VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -90,6 +92,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis cull meshlets",
     "vis args",
     "vis hzb",
+    "vis hzb mips",
     "vis resolve",
     "vis sw raster",
     "vis lights",
@@ -398,6 +401,7 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     v->hzb_width = d.width;
     v->hzb_height = d.height;
     v->hzb_mips = d.mip_count;
+    NPH_ASSERT(v->hzb_mips <= (u32)NPH_VIS_HZB_MAX_MIPS); // vis_hzb_mips.comp's storage indices
     v->target_width = width;
     v->target_height = height;
     v->hzb_tiles_x = (width + (u32)NPH_VIS_HZB_TILE - 1U) / (u32)NPH_VIS_HZB_TILE;
@@ -806,56 +810,65 @@ static void raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     raster_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
-// The pyramid, one dispatch per mip, each reading the one before (the
-// first, the visibility buffer's depth). After phase 1, mip 0 is rebuilt
-// only in the tiles phase 1 drew into (vis_hzb.comp mode 2): elsewhere the
-// pyramid after phase 0 already holds the frame's depth.
+// The pyramid: mip 0 from the visibility buffer's depth (vis_hzb.comp),
+// then the mips past it six at a time, each dispatch from the mip before
+// them (vis_hzb_mips.comp). After phase 1, mip 0 is rebuilt only in the
+// tiles phase 1 drew into (vis_hzb.comp mode 2), and the first mips only in
+// the tiles above those: elsewhere the pyramid after phase 0 already holds
+// the frame's depth.
 static void hzb_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
 {
     RenderVis *v = &r->vis;
     NphGpuDevice *dev = r->dev;
     const NphGpuImage hzb = nph_gpu_rg_image(graph, v->frame.hzb);
+    // The next dispatch reads what this one wrote (the image stays in
+    // GENERAL).
+    const NphGpuMemoryBarrier m = {(u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
+                                   (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_READ};
+    NphGpuBarrierDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.memory = &m;
+    bd.memory_count = 1U;
+
     nph_gpu_cmd_bind_pipeline(cmd, v->compute[VIS_COMPUTE_HZB]);
-    u32 src_w = v->frame.width;
-    u32 src_h = v->frame.height;
-    for (u32 mip = 0; mip < v->hzb_mips; ++mip) {
-        const u32 mode = mip != 0U ? 1U : (phase == 0U ? 0U : 2U);
-        NphVisPush p = push_of(r, phase, mode);
-        p.arg0 =
-            mip == 0U
-                ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer), 0U)
-                : nph_gpu_image_storage_index(dev, hzb, mip - 1U);
-        p.arg1 = nph_gpu_image_storage_index(dev, hzb, mip);
-        p.arg2 = src_w;
-        p.arg3 = src_h;
-        p.arg4 =
-            mip == 0U && r->ao.frame_active
-                ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, r->ao.frame_depths), 0U)
-                : NPH_VIS_NO_AO;
-        nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-        // Mip 0 is half the target rounded up; later mips are halved and
-        // rounded down, as Vulkan sizes them (vis_hzb.comp).
-        const u32 w = mip == 0U ? (src_w + 1U) / 2U : nph_max_u32(src_w / 2U, 1U);
-        const u32 h = mip == 0U ? (src_h + 1U) / 2U : nph_max_u32(src_h / 2U, 1U);
-        if (mode == 2U) {
-            // A workgroup per tile: 16 x 16 mip-0 texels.
-            nph_gpu_cmd_dispatch(cmd, v->hzb_tiles_x, v->hzb_tiles_y, 1U);
-        } else {
-            nph_gpu_cmd_dispatch(cmd, (w + 15U) / 16U, (h + 15U) / 16U, 1U);
-        }
-        if (mip + 1U < v->hzb_mips) {
-            // The next mip reads this one (the image stays in GENERAL).
-            const NphGpuMemoryBarrier m = {
-                (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
-                (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_READ};
-            NphGpuBarrierDesc bd;
-            memset(&bd, 0, sizeof bd);
-            bd.memory = &m;
-            bd.memory_count = 1U;
-            nph_gpu_cmd_barrier(cmd, &bd);
-        }
-        src_w = w;
-        src_h = h;
+    NphVisPush p = push_of(r, phase, phase == 0U ? 0U : 2U);
+    p.arg0 = nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer), 0U);
+    p.arg1 = nph_gpu_image_storage_index(dev, hzb, 0U);
+    p.arg2 = v->frame.width;
+    p.arg3 = v->frame.height;
+    p.arg4 = r->ao.frame_active
+                 ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, r->ao.frame_depths), 0U)
+                 : NPH_VIS_NO_AO;
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    if (phase == 0U) {
+        // Mip 0 is half the target, rounded up.
+        nph_gpu_cmd_dispatch(cmd, (v->hzb_width + 15U) / 16U, (v->hzb_height + 15U) / 16U, 1U);
+    } else {
+        // A workgroup per tile: 16 x 16 mip-0 texels.
+        nph_gpu_cmd_dispatch(cmd, v->hzb_tiles_x, v->hzb_tiles_y, 1U);
+    }
+
+    NphVisHzbMipsPush mp;
+    memset(&mp, 0, sizeof mp);
+    mp.view = v->frame.view_address;
+    mp.phase = phase;
+    mp.mips = v->hzb_mips;
+    mp.width = v->hzb_width;
+    mp.height = v->hzb_height;
+    for (u32 i = 0; i < v->hzb_mips; ++i) {
+        mp.storage[i] = nph_gpu_image_storage_index(dev, hzb, i);
+    }
+    nph_gpu_cmd_bind_pipeline(cmd, v->compute[VIS_COMPUTE_HZB_MIPS]);
+    for (u32 base = 0; base + 1U < v->hzb_mips; base += (u32)NPH_VIS_HZB_MIPS_LEVELS) {
+        nph_gpu_cmd_barrier(cmd, &bd);
+        // Tiles of the base mip, rounded down (the last takes the rest).
+        mp.base = base;
+        mp.tiles_x =
+            nph_max_u32(nph_max_u32(v->hzb_width >> base, 1U) / (u32)NPH_VIS_HZB_MIPS_TILE, 1U);
+        mp.tiles_y =
+            nph_max_u32(nph_max_u32(v->hzb_height >> base, 1U) / (u32)NPH_VIS_HZB_MIPS_TILE, 1U);
+        nph_gpu_cmd_push_constants(cmd, &mp, sizeof mp);
+        nph_gpu_cmd_dispatch(cmd, mp.tiles_x, mp.tiles_y, 1U);
     }
 }
 

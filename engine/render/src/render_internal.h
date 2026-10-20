@@ -347,6 +347,7 @@ typedef enum VisShader {
     VIS_SHADER_VERT_FRAG_OPAQUE,
     VIS_SHADER_VERT_FRAG_MASKED,
     VIS_SHADER_DEBUG_LINE,
+    VIS_SHADER_HZB_MIPS,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -356,6 +357,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_CULL_MESHLETS,
     VIS_COMPUTE_ARGS,
     VIS_COMPUTE_HZB,
+    VIS_COMPUTE_HZB_MIPS, // the pyramid's mips past the first
     VIS_COMPUTE_RESOLVE,
     VIS_COMPUTE_SW_RASTER,
     VIS_COMPUTE_LIGHTS,
