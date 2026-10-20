@@ -144,3 +144,22 @@ The constraints:
   plants are alpha-tested, which §8.6's content budgets exclude
   ("modeled geometry instead"). That scene needs a decision: model the
   foliage, or scope an exception.
+- **The interior's candles cannot be lit faithfully by the grid.** Intel's
+  pack is one 1 cd point light with no range (unlimited, by glTF's rule),
+  placed by 10,000 nodes within 26 × 10 × 11 m, and one mesh of 19.5 M
+  triangles. Giving the candles a range trades light for work. Summing the
+  inverse-square light at points near the candles (no occlusion), the
+  share beyond a range r, and the candles within r of a point, are:
+
+  | r | Light beyond r (median) | Candles within r |
+  |---|---|---|
+  | 1 m | 79% | 33 |
+  | 2 m | 61% | 184 |
+  | 4 m | 37% | 929 |
+  | 8 m | 13% | 4,225 |
+
+  The far field is most of the light, and no range keeps it at a cost the
+  light loop can pay. Rendering this scene faithfully needs stochastic
+  many-light sampling (ReSTIR, §8.6 stage 10, which the roadmap puts in
+  Phase 14), or a different interior. The renderer also holds at most
+  4,096 lights. A decision for the phase review.
