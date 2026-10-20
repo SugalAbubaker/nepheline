@@ -34,6 +34,7 @@ set(cook_sources
     src/cook.c
     src/cooker.c
     src/database.c
+    src/dds.c
     src/gltf.c
     src/image.c
     src/mesh.c
@@ -41,6 +42,7 @@ set(cook_sources
     src/mesh_optimize.c
     src/mesh_tangent.c
     src/polymesh.c
+    src/specgloss.c
     src/texture.c
 )
 file(GLOB_RECURSE cook_headers CONFIGURE_DEPENDS
@@ -92,10 +94,12 @@ nph_add_test(cook
         tests/test_cook_support.h
         tests/test_cooker.c
         tests/test_database.c
+        tests/test_dds.c
         tests/test_gltf.c
         tests/test_image.c
         tests/test_mesh.c
         tests/test_polymesh.c
+        tests/test_specgloss.c
         tests/test_texture.c
     DEPS
         nph::cook

@@ -5,10 +5,12 @@
 // mip generation in linear space ... normal-map handling").
 //
 // A CookImage is a plain RGBA raster: 8-bit (as decoded from PNG, JPEG,
-// TGA, BMP) or 32-bit float (from Radiance HDR, and the working format for
-// every operation that filters). Decoding is the only thing stb_image
-// does; conversions, mip filtering, and normal-map handling are the
-// engine's own, so they are deterministic and documented:
+// TGA, BMP, and DDS) or 32-bit float (from Radiance HDR and BC6H DDS, and
+// the working format for every operation that filters). Decoding is the
+// only thing stb_image does, and DDS (the top level of a 2D texture: BC1
+// to BC7, 8-bit RGBA, BGRA, BGRX; docs/cook.md) the engine reads itself;
+// conversions, mip filtering, and normal-map handling are the engine's
+// own, so they are deterministic and documented:
 //
 // - sRGB decoding and encoding use the exact piecewise transfer function
 //   (IEC 61966-2-1); alpha is never transfer-coded.
@@ -65,23 +67,25 @@ NPH_MUST_USE NphResult cook_image_create(NphAllocator *alloc, u32 width, u32 hei
 void cook_image_free(CookImage *img);
 
 // Decodes an image file held in memory. 8-bit formats produce RGBA8 (gray
-// and gray+alpha are expanded), Radiance HDR produces RGBA32F.
+// and gray+alpha are expanded), Radiance HDR and BC6H DDS produce RGBA32F.
 // NPH_RESULT_PARSE_ERROR when the bytes are not a supported image,
-// NPH_RESULT_UNSUPPORTED past COOK_IMAGE_MAX_EXTENT.
+// NPH_RESULT_UNSUPPORTED past COOK_IMAGE_MAX_EXTENT or for a DDS file the
+// cooker does not read (a cube map, an array, another format).
 NPH_MUST_USE NphResult cook_image_decode(NphAllocator *alloc, const void *data, u64 size,
                                          CookImage *out);
 
 // The extent and channel count an image file declares, from its header
 // alone (nothing is decoded or allocated). NPH_RESULT_PARSE_ERROR when the
-// bytes are not a supported image. Lets a caller refuse an image before
-// paying for it (a fuzzer, or a cook with a memory budget).
+// bytes are not a supported image, NPH_RESULT_UNSUPPORTED for a DDS file
+// the cooker does not read. Lets a caller refuse an image before paying
+// for it (a fuzzer, or a cook with a memory budget).
 NPH_MUST_USE NphResult cook_image_info(const void *data, u64 size, u32 *out_width, u32 *out_height,
                                        u32 *out_channels);
 
 // Reads and decodes the file at `path`.
 NPH_MUST_USE NphResult cook_image_load(NphAllocator *alloc, const char *path, CookImage *out);
 
-// True when the bytes are a Radiance HDR file.
+// True when the bytes are a Radiance HDR file or a BC6H DDS file.
 bool cook_image_data_is_hdr(const void *data, u64 size);
 
 // The sRGB transfer function and its inverse, on [0, 1].

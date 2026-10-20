@@ -3,7 +3,8 @@
 tests/fuzz/fuzz_image.c), written by `python scripts/fuzz_seeds.py`.
 
 Every file is built here from the published format descriptions (the PNG,
-JPEG, TGA, BMP, and Radiance HDR layouts; glTF 2.0 and its binary container)
+JPEG, TGA, BMP, Radiance HDR, and DDS layouts; glTF 2.0 and its binary
+container)
 rather than by any library, so the seeds double as an independent check:
 `cook_tests --filter=*corpus*` decodes and imports each one with the
 cooker, and a seed it refuses fails the unit tests.
@@ -149,6 +150,65 @@ def jpeg_gray_flat(value):
     return b"\xff\xd8" + dqt + sof + dht_dc + dht_ac + sos + scan + b"\xff\xd9"
 
 
+def _dds(width, height, data, fourcc=b"", dxgi=None, pf_flags=0x4, bits=0, masks=(0, 0, 0, 0),
+         mips=1):
+    """A DDS file (Microsoft, "DDS", "DDS_HEADER", "DDS_PIXELFORMAT",
+    "DDS_HEADER_DXT10"): the magic, the 124-byte header (its pixel format
+    at offset 72 after eleven reserved words, the caps at 104), the DX10
+    header when `dxgi` is given, then `data`, the top level and any after."""
+    flags = 0x1007 | (0x20000 if mips > 1 else 0)  # caps, height, width, pixel format
+    if dxgi is not None:
+        fourcc = b"DX10"
+        pf_flags = 0x4
+    pixel_format = struct.pack("<II4sI4I", 32, pf_flags, fourcc.ljust(4, b"\x00"), bits, *masks)
+    header = struct.pack("<7I", 124, flags, height, width, 0, 0, mips) + bytes(44)
+    header += pixel_format + struct.pack("<5I", 0x1000, 0, 0, 0, 0)
+    assert len(header) == 124
+    out = b"DDS " + header
+    if dxgi is not None:
+        out += struct.pack("<5I", dxgi, 3, 0, 1, 0)  # TEXTURE2D, one element
+    return out + data
+
+
+def _bytes(count, seed):
+    """Deterministic filler (a linear congruential sequence)."""
+    out = bytearray()
+    x = seed
+    for _ in range(count):
+        x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+        out.append((x >> 16) & 0xFF)
+    return bytes(out)
+
+
+def _blocks(count, size, mode_byte=None, seed=1):
+    """`count` blocks of `size` bytes; with `mode_byte`, each block's first
+    byte names a BC7 or BC6H mode (the rest of any such block is valid)."""
+    out = bytearray()
+    for i in range(count):
+        b = bytearray(_bytes(size, seed + i))
+        if mode_byte is not None:
+            b[0] = mode_byte | (b[0] & 0x80 if mode_byte == 0x40 else 0)
+        out += b
+    return bytes(out)
+
+
+def dds_seeds():
+    """DDS sources (tools/cook/src/dds.c), small and in each family read:
+    BC7 by DX10 header with a second level after the top, legacy DXT1 with
+    partial blocks, DXT5, ATI2, BC6H mode 11, and 32-bit BGRA by masks."""
+    return {
+        # 8 x 4: two blocks, then the 4 x 2 level (one block).
+        "dds_bc7": _dds(8, 4, _blocks(3, 16, 0x40), dxgi=99, mips=2),
+        # 5 x 3: two blocks across, one down.
+        "dds_dxt1": _dds(5, 3, _blocks(2, 8), fourcc=b"DXT1"),
+        "dds_dxt5": _dds(4, 4, _blocks(1, 16, seed=7), fourcc=b"DXT5"),
+        "dds_ati2": _dds(4, 4, _blocks(1, 16, seed=9), fourcc=b"ATI2"),
+        "dds_bc6h": _dds(4, 4, _blocks(1, 16, 0x03, seed=11), dxgi=95),
+        "dds_bgra": _dds(3, 2, _bytes(3 * 2 * 4, 13), pf_flags=0x41, bits=32,
+                         masks=(0xFF0000, 0xFF00, 0xFF, 0xFF000000)),
+    }
+
+
 def image_seeds():
     rgba = gradient_rgba(4, 4)
     gray_rows = [bytes((x * 60 + y * 10) & 0xFF for x in range(5)) for y in range(3)]
@@ -168,6 +228,7 @@ def image_seeds():
         "hdr": hdr_flat(4, 2),
         "hdr_rle": hdr_rle(8, 2),
         "jpeg": jpeg_gray_flat(144),
+        **dds_seeds(),
     }
 
 
@@ -319,6 +380,42 @@ def glb(doc, binary):
     return struct.pack("<III", 0x46546C67, 2, total) + json_chunk + bin_chunk
 
 
+def gltf_specgloss_dds():
+    """A quad whose material is specular-glossiness
+    (KHR_materials_pbrSpecularGlossiness) and whose diffuse texture has a
+    DDS source (MSFT_texture_dds, a BC7 file embedded) beside a fallback
+    PNG that does not exist: the importer reads the DDS alone."""
+    pos = struct.pack("<12f", -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1)
+    uv = struct.pack("<8f", 0, 0, 1, 0, 1, 1, 0, 1)
+    idx = struct.pack("<6H", 0, 2, 1, 0, 3, 2)
+    buf = pos + uv + idx
+    dds = _dds(4, 4, _blocks(1, 16, 0x40, seed=17), dxgi=98)
+    return {
+        "asset": {"version": "2.0", "generator": "nepheline fuzz seeds"},
+        "extensionsUsed": ["KHR_materials_pbrSpecularGlossiness", "MSFT_texture_dds"],
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1},
+                                    "indices": 2, "material": 0}]}],
+        "materials": [{"extensions": {"KHR_materials_pbrSpecularGlossiness": {
+            "diffuseTexture": {"index": 0}, "specularFactor": [0.5, 0.4, 0.3],
+            "glossinessFactor": 0.6}}}],
+        "textures": [{"source": 0, "extensions": {"MSFT_texture_dds": {"source": 1}}}],
+        "images": [{"uri": "missing.png"}, {"uri": _data_uri(dds, "image/vnd-ms.dds")}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+             "min": [-1, 0, -1], "max": [1, 0, 1]},
+            {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"},
+            {"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
+        ],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 48},
+                        {"buffer": 0, "byteOffset": 48, "byteLength": 32},
+                        {"buffer": 0, "byteOffset": 80, "byteLength": 12}],
+        "buffers": [{"byteLength": len(buf), "uri": _data_uri(buf)}],
+    }
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -326,6 +423,7 @@ def gltf_seeds():
         "textured": _dump(gltf_textured()),
         "strips_sparse": _dump(gltf_strips_and_sparse()),
         "triangle_glb": glb(triangle, triangle_buf),
+        "specgloss_dds": _dump(gltf_specgloss_dds()),
     }
 
 

@@ -229,7 +229,7 @@ NTEST(image, blocks_replicate_edges)
 // The fuzz seeds are written from the format descriptions by
 // scripts/fuzz_seeds_cook.py, not by stb_image or this cooker: every one
 // must decode, with the size its header declares, and a few with known
-// content.
+// content (the DDS seeds also check dds.c's reading of the header layout).
 NTEST(image, the_fuzz_corpus_decodes)
 {
     NphAllocator *alloc = nph_allocator_system();
@@ -245,6 +245,9 @@ NTEST(image, the_fuzz_corpus_decodes)
         {"tga", 4U, 4U, 4U, COOK_IMAGE_RGBA8},         {"tga_rle", 6U, 3U, 3U, COOK_IMAGE_RGBA8},
         {"bmp", 5U, 3U, 3U, COOK_IMAGE_RGBA8},         {"hdr", 4U, 2U, 3U, COOK_IMAGE_RGBA32F},
         {"hdr_rle", 8U, 2U, 3U, COOK_IMAGE_RGBA32F},   {"jpeg", 8U, 8U, 1U, COOK_IMAGE_RGBA8},
+        {"dds_bc7", 8U, 4U, 4U, COOK_IMAGE_RGBA8},     {"dds_dxt1", 5U, 3U, 4U, COOK_IMAGE_RGBA8},
+        {"dds_dxt5", 4U, 4U, 4U, COOK_IMAGE_RGBA8},    {"dds_ati2", 4U, 4U, 2U, COOK_IMAGE_RGBA8},
+        {"dds_bc6h", 4U, 4U, 3U, COOK_IMAGE_RGBA32F},  {"dds_bgra", 3U, 2U, 4U, COOK_IMAGE_RGBA8},
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(seeds); ++i) {
         char path[1024];

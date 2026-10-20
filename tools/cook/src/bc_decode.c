@@ -234,6 +234,53 @@ void bc_write_bits(u8 *block, u32 *pos, u32 count, u32 value)
 }
 
 // ---------------------------------------------------------------------------
+// BC1
+// ---------------------------------------------------------------------------
+
+static void bc1_expand(u32 c, u32 out[4])
+{
+    const u32 r = (c >> 11U) & 31U;
+    const u32 g = (c >> 5U) & 63U;
+    const u32 b = c & 31U;
+    // Bit replication: equal to the exact r * 255 / 31 rounded, for every r.
+    out[0] = (r << 3U) | (r >> 2U);
+    out[1] = (g << 2U) | (g >> 4U);
+    out[2] = (b << 3U) | (b >> 2U);
+    out[3] = 255U;
+}
+
+void cook_bc1_decode(const u8 block[8], bool three_color, CookBlockRgba8 *out)
+{
+    const u32 c0 = (u32)block[0] | ((u32)block[1] << 8U);
+    const u32 c1 = (u32)block[2] | ((u32)block[3] << 8U);
+    u32 palette[4][4];
+    bc1_expand(c0, palette[0]);
+    bc1_expand(c1, palette[1]);
+    const bool four = !three_color || c0 > c1;
+    for (u32 ch = 0; ch < 3U; ++ch) {
+        const u32 a = palette[0][ch];
+        const u32 b = palette[1][ch];
+        if (four) {
+            palette[2][ch] = (2U * a + b + 1U) / 3U;
+            palette[3][ch] = (a + 2U * b + 1U) / 3U;
+        } else {
+            palette[2][ch] = (a + b + 1U) / 2U;
+            palette[3][ch] = 0U;
+        }
+    }
+    palette[2][3] = 255U;
+    palette[3][3] = four ? 255U : 0U;
+    const u32 indices =
+        (u32)block[4] | ((u32)block[5] << 8U) | ((u32)block[6] << 16U) | ((u32)block[7] << 24U);
+    for (u32 i = 0; i < 16U; ++i) {
+        const u32 k = (indices >> (2U * i)) & 3U;
+        for (u32 ch = 0; ch < 4U; ++ch) {
+            out->texels[i][ch] = (u8)palette[k][ch];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BC4 / BC5
 // ---------------------------------------------------------------------------
 

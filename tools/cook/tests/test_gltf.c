@@ -330,13 +330,17 @@ NTEST(gltf, rejects_bad_input)
     NTEST_ASSERT_EQ_UINT(scene.node_count, 0U);
     cook_gltf_free(&scene);
     // Malformed image data URIs: too short to decode, padding alone,
-    // characters outside the alphabet.
+    // characters outside the alphabet (in an image a material uses: only
+    // those are read).
     static const char *const bad_uris[] = {
         "data:image/png;base64,=",    "data:image/png;base64,==",   "data:image/png;base64,a",
         "data:image/png;base64,a===", "data:image/png;base64,!!!!", "data:image/png,AAAA"};
     for (u32 i = 0; i < NPH_ARRAY_COUNT(bad_uris); ++i) {
-        char doc[256];
-        snprintf(doc, sizeof doc, "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"%s\"}]}",
+        char doc[384];
+        snprintf(doc, sizeof doc,
+                 "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"%s\"}],"
+                 "\"textures\":[{\"source\":0}],"
+                 "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}}}]}",
                  bad_uris[i]);
         NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
                             NPH_RESULT_PARSE_ERROR);
@@ -618,6 +622,132 @@ NTEST(gltf, hierarchies_of_any_depth_and_repeated_roots)
     nph_sb_free(&sb);
 }
 
+// A 4 x 4 RGBA8 DDS file (the DX10 header, R8G8B8A8_UNORM), texel i
+// holding (i, 2 i, 3 i, 255).
+static u64 tiny_dds(u8 *out)
+{
+    memset(out, 0, 4U + 124U + 20U);
+    const u32 words[] = {0x20534444U, 124U, 0x1007U, 4U, 4U};
+    memcpy(out, words, sizeof words);
+    const u32 pf[] = {32U, 0x4U, 0x30315844U}; // size, FOURCC, "DX10"
+    memcpy(out + 4U + 72U, pf, sizeof pf);
+    const u32 dx10[] = {28U, 3U, 0U, 1U, 0U}; // R8G8B8A8_UNORM, TEXTURE2D, one element
+    memcpy(out + 4U + 124U, dx10, sizeof dx10);
+    u8 *texels = out + 4U + 124U + 20U;
+    for (u32 i = 0; i < 16U; ++i) {
+        texels[(u64)i * 4U] = (u8)i;
+        texels[i * 4U + 1U] = (u8)(2U * i);
+        texels[i * 4U + 2U] = (u8)(3U * i);
+        texels[i * 4U + 3U] = 255U;
+    }
+    return 4U + 124U + 20U + 64U;
+}
+
+// MSFT_texture_dds: a texture's DDS source replaces its own source, which
+// then serves clients that read no DDS and may be missing; a document that
+// names no image as the DDS source is refused.
+NTEST(gltf, dds_sources_replace_their_fallbacks)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    TempDir dir;
+    test_temp_dir_make(&dir, "gltf_dds");
+    u8 dds[4 + 124 + 20 + 64];
+    const u64 dds_size = tiny_dds(dds);
+    char path[1200];
+    test_path_in(&dir, "tex.dds", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, dds, dds_size), NPH_RESULT_OK);
+    static const char doc[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"MSFT_texture_dds\"],"
+        "\"images\":[{\"uri\":\"missing.png\"},{\"uri\":\"tex.dds\"}],"
+        "\"textures\":[{\"source\":0,\"extensions\":{\"MSFT_texture_dds\":{\"source\":1}}}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}}}]}";
+    test_path_in(&dir, "doc.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, doc, sizeof doc - 1U), NPH_RESULT_OK);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load(alloc, path, &scene), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 0U); // the extension is implemented
+    NTEST_ASSERT_EQ_UINT(scene.image_count, 2U);
+    NTEST_EXPECT_EQ_INT(scene.materials[0].image[NPH_MATERIAL_TEXTURE_BASE_COLOR], 1);
+    NTEST_EXPECT_TRUE(scene.images[0].data == NULL); // the fallback, never read
+    NTEST_ASSERT_EQ_UINT(scene.images[1].size, dds_size);
+    NTEST_EXPECT_EQ_MEM(scene.images[1].data, dds, dds_size);
+    cook_gltf_free(&scene);
+    // A copy needs the DDS file alone.
+    FileNames f;
+    memset(&f, 0, sizeof f);
+    NTEST_ASSERT_EQ_INT(cook_gltf_files(alloc, path, collect_file, &f), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(f.count, 1U);
+    NTEST_EXPECT_EQ_STR(f.names[0], "tex.dds");
+
+    // A source that is no image of the document.
+    static const char bad[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"missing.png\"}],"
+        "\"textures\":[{\"source\":0,\"extensions\":{\"MSFT_texture_dds\":{\"source\":3}}}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}}}]}";
+    NTEST_EXPECT_EQ_INT(cook_gltf_load_memory(alloc, bad, sizeof bad - 1U, dir.dir, &scene),
+                        NPH_RESULT_PARSE_ERROR);
+    NTEST_EXPECT_EQ_INT(files_of_text(&dir, "bad.gltf", bad, &f), NPH_RESULT_PARSE_ERROR);
+    test_temp_dir_remove(&dir);
+}
+
+// KHR_materials_pbrSpecularGlossiness on import: a material with a
+// texture keeps its images and factors for the cook (cooker.c makes the
+// textures), the slot without an image sampling as the other does; one
+// with factors alone is converted at once; the core model is ignored where
+// both are given.
+NTEST(gltf, specular_glossiness_materials)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    u8 rgba[4 * 4 * 4];
+    memset(rgba, 200, sizeof rgba);
+    u8 tga[18 + 64];
+    const u64 tga_size = test_write_tga(rgba, 4U, 4U, tga);
+    char b64[256];
+    test_base64(tga, tga_size, b64);
+    char doc[2048];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":["
+             "\"KHR_materials_pbrSpecularGlossiness\"],"
+             "\"samplers\":[{\"wrapS\":33071,\"wrapT\":33648}],"
+             "\"textures\":[{\"source\":0,\"sampler\":0}],"
+             "\"images\":[{\"uri\":\"data:image/tga;base64,%s\"}],"
+             "\"materials\":[{\"extensions\":{\"KHR_materials_pbrSpecularGlossiness\":{"
+             "\"specularGlossinessTexture\":{\"index\":0},\"diffuseFactor\":[0.5,0.5,0.5,0.75]}}},"
+             "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0,1,0,1],\"metallicFactor\":1},"
+             "\"extensions\":{\"KHR_materials_pbrSpecularGlossiness\":{"
+             "\"diffuseFactor\":[0.2,0.4,0.6,1],\"specularFactor\":[0.04,0.04,0.04],"
+             "\"glossinessFactor\":0.9}}}]}",
+             b64);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 0U);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 2U);
+    const CookGltfMaterial *t = &scene.materials[0];
+    NTEST_EXPECT_TRUE(t->specgloss);
+    NTEST_EXPECT_EQ_INT(t->specgloss_image[0], -1);
+    NTEST_EXPECT_EQ_INT(t->specgloss_image[1], 0);
+    NTEST_EXPECT_EQ_INT(t->image[NPH_MATERIAL_TEXTURE_BASE_COLOR], -1);
+    NTEST_EXPECT_EQ_INT(t->image[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS], -1);
+    NTEST_EXPECT_NEAR_F32(t->specgloss_factors.diffuse.w, 0.75F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(t->header.base_color_factor.x, 1.0F, 0.0F);
+    // Both slots sample as the specular-glossiness texture does (clamp,
+    // mirror), the base colour's missing image notwithstanding.
+    for (u32 slot = NPH_MATERIAL_TEXTURE_BASE_COLOR;
+         slot <= NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS; ++slot) {
+        NTEST_EXPECT_EQ_UINT(t->header.textures[slot].wrap_u, (u32)NPH_MATERIAL_WRAP_CLAMP);
+        NTEST_EXPECT_EQ_UINT(t->header.textures[slot].wrap_v, (u32)NPH_MATERIAL_WRAP_MIRROR);
+    }
+    NTEST_EXPECT_TRUE(scene.images[0].data != NULL); // used by the conversion
+    const CookGltfMaterial *f = &scene.materials[1];
+    NTEST_EXPECT_FALSE(f->specgloss);
+    NTEST_EXPECT_NEAR_F32(f->header.base_color_factor.x, 0.2F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(f->header.base_color_factor.y, 0.4F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(f->header.metallic_factor, 0.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(f->header.roughness_factor, 0.1F, 1e-6F);
+    cook_gltf_free(&scene);
+}
+
 NTEST(gltf, extensions_required_and_merely_used)
 {
     NphAllocator *alloc = nph_allocator_system();
@@ -675,10 +805,9 @@ NTEST(gltf, the_fuzz_corpus_imports)
         u32 images;
         u32 nodes;
     } seeds[] = {
-        {"triangle", 1U, 0U, 0U, 1U},
-        {"textured", 1U, 1U, 1U, 4U},
-        {"strips_sparse", 2U, 0U, 0U, 2U},
-        {"triangle_glb", 1U, 0U, 0U, 1U},
+        {"triangle", 1U, 0U, 0U, 1U},      {"textured", 1U, 1U, 1U, 4U},
+        {"strips_sparse", 2U, 0U, 0U, 2U}, {"triangle_glb", 1U, 0U, 0U, 1U},
+        {"specgloss_dds", 1U, 1U, 2U, 1U},
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(seeds); ++i) {
         char path[1024];
@@ -700,6 +829,13 @@ NTEST(gltf, the_fuzz_corpus_imports)
             NTEST_ASSERT_EQ_UINT(scene.camera_count, 1U);
             NTEST_ASSERT_EQ_UINT(scene.light_count, 1U);
             NTEST_ASSERT_NEAR_F32(scene.materials[0].header.emissive_strength, 2.0F, 0.0F);
+        }
+        if (strcmp(seeds[i].name, "specgloss_dds") == 0) {
+            // The DDS source read, its missing fallback not.
+            NTEST_ASSERT_TRUE(scene.materials[0].specgloss);
+            NTEST_ASSERT_EQ_INT(scene.materials[0].specgloss_image[0], 1);
+            NTEST_ASSERT_TRUE(scene.images[0].data == NULL);
+            NTEST_ASSERT_TRUE(scene.images[1].data != NULL);
         }
         cook_gltf_free(&scene);
         nph_file_free_all(alloc, bytes, size);

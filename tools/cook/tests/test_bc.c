@@ -225,6 +225,49 @@ NTEST(bc, bc4_decodes_hand_built_blocks_in_both_modes)
     NTEST_ASSERT_EQ_UINT(out[7], 255U);
 }
 
+// BC1: the four-colour and the three-colour palettes, from endpoints worked
+// out by hand (RGB565 bits replicated to 8: 31 -> 255, 16 -> 132, 63 ->
+// 255, 32 -> 130, 8 -> 66).
+NTEST(bc, bc1_decodes_both_palettes)
+{
+    // c0 = (31, 63, 0) = 0xFFE0, c1 = (16, 32, 8) = 0x8408: c0 > c1, four
+    // colours; indices 0, 1, 2, 3 repeated.
+    u8 block[8] = {0xE0U, 0xFFU, 0x08U, 0x84U, 0xE4U, 0xE4U, 0xE4U, 0xE4U};
+    CookBlockRgba8 out;
+    cook_bc1_decode(block, true, &out);
+    const u32 c0[3] = {255U, 255U, 0U};
+    const u32 c1[3] = {132U, 130U, 66U};
+    for (u32 ch = 0; ch < 3U; ++ch) {
+        NTEST_ASSERT_EQ_UINT(out.texels[0][ch], c0[ch]);
+        NTEST_ASSERT_EQ_UINT(out.texels[1][ch], c1[ch]);
+        NTEST_ASSERT_EQ_UINT(out.texels[2][ch], (2U * c0[ch] + c1[ch] + 1U) / 3U);
+        NTEST_ASSERT_EQ_UINT(out.texels[3][ch], (c0[ch] + 2U * c1[ch] + 1U) / 3U);
+    }
+    for (u32 i = 0; i < 16U; ++i) {
+        NTEST_ASSERT_EQ_UINT(out.texels[i][3], 255U);
+        NTEST_ASSERT_EQ_MEM(out.texels[i], out.texels[i % 4U], 4U);
+    }
+    // Swapped endpoints: c0 <= c1, three colours and transparent black...
+    const u8 swapped[8] = {0x08U, 0x84U, 0xE0U, 0xFFU, 0xE4U, 0xE4U, 0xE4U, 0xE4U};
+    cook_bc1_decode(swapped, true, &out);
+    for (u32 ch = 0; ch < 3U; ++ch) {
+        NTEST_ASSERT_EQ_UINT(out.texels[0][ch], c1[ch]);
+        NTEST_ASSERT_EQ_UINT(out.texels[1][ch], c0[ch]);
+        NTEST_ASSERT_EQ_UINT(out.texels[2][ch], (c0[ch] + c1[ch] + 1U) / 2U);
+        NTEST_ASSERT_EQ_UINT(out.texels[3][ch], 0U);
+    }
+    NTEST_ASSERT_EQ_UINT(out.texels[2][3], 255U);
+    NTEST_ASSERT_EQ_UINT(out.texels[3][3], 0U);
+    // ...unless the block is BC2's or BC3's colour block, which always has
+    // four.
+    cook_bc1_decode(swapped, false, &out);
+    for (u32 ch = 0; ch < 3U; ++ch) {
+        NTEST_ASSERT_EQ_UINT(out.texels[2][ch], (2U * c1[ch] + c0[ch] + 1U) / 3U);
+        NTEST_ASSERT_EQ_UINT(out.texels[3][ch], (c1[ch] + 2U * c0[ch] + 1U) / 3U);
+    }
+    NTEST_ASSERT_EQ_UINT(out.texels[3][3], 255U);
+}
+
 NTEST(bc, bc5_packs_two_channels)
 {
     u8 r[16];

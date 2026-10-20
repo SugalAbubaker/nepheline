@@ -25,7 +25,7 @@ static void usage(FILE *out)
     fputs("usage: nph_cook <source>... -o <out_dir> [options]\n"
           "       nph_cook --pack-only -o <out_dir> --pack <file.npk>\n"
           "\n"
-          "Cooks glTF scenes (.gltf, .glb) and images (.png, .jpg, .tga, .bmp, .hdr)\n"
+          "Cooks glTF scenes (.gltf, .glb) and images (.png, .jpg, .tga, .bmp, .hdr, .dds)\n"
           "into <out_dir>, keeping cook.db.json there for incremental runs. A\n"
           "directory source cooks every .gltf and .glb under it.\n"
           "\n"

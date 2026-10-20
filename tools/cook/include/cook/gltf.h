@@ -20,7 +20,11 @@
 //   others get theirs at import;
 // - the metallic-roughness material with its five textures and samplers,
 //   alpha mode and cutoff, double-sidedness, KHR_materials_unlit and
-//   KHR_materials_emissive_strength;
+//   KHR_materials_emissive_strength; KHR_materials_pbrSpecularGlossiness,
+//   converted to metallic-roughness (cook/specgloss.h); textures' DDS
+//   sources (MSFT_texture_dds), whose fallback images are then not read;
+// - of the images, those the materials use (an image no slot takes is not
+//   read: it may be missing);
 // - node TRS or matrices, cameras (a camera or light used by several nodes
 //   is instanced at each), and the default scene (or the first scene, or
 //   every root node when the document declares none).
@@ -42,6 +46,7 @@
 #include <nepheline/asset/scene.h>
 
 #include <cook/mesh.h>
+#include <cook/specgloss.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,6 +67,16 @@ typedef struct CookGltfMaterial {
     char name[COOK_GLTF_NAME_MAX];
     NphMaterialHeader header;              // texture GUIDs left null
     i32 image[NPH_MATERIAL_TEXTURE_COUNT]; // image index per slot, -1 when unused
+    // KHR_materials_pbrSpecularGlossiness with textures: the base colour and
+    // metallic-roughness textures are made, when the textures are cooked,
+    // from the diffuse and specular-glossiness images (`specgloss_image`,
+    // -1 for one the material lacks) and the factors (cook/specgloss.h),
+    // which the textures then carry (the header's factors are one); `image`
+    // leaves those two slots -1. A material with the factors alone is
+    // converted on import and has `specgloss` false.
+    b32 specgloss;
+    i32 specgloss_image[2]; // diffuse, specular-glossiness
+    CookSpecGloss specgloss_factors;
 } CookGltfMaterial;
 
 typedef struct CookGltfMesh {

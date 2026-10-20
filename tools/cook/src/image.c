@@ -4,6 +4,8 @@
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
 
+#include "dds.h"
+
 #include <cook/image.h>
 #include <stb_image.h>
 #include <string.h>
@@ -41,10 +43,19 @@ void cook_image_free(CookImage *img)
     memset(img, 0, sizeof *img);
 }
 
+// A DDS file (dds.c), which stb_image does not read.
+static bool is_dds(const void *data, u64 size)
+{
+    return size >= 4U && memcmp(data, "DDS ", 4U) == 0;
+}
+
 bool cook_image_data_is_hdr(const void *data, u64 size)
 {
     if (data == NULL || size == 0U || size > (u64)INT32_MAX) {
         return false;
+    }
+    if (is_dds(data, size)) {
+        return cook_dds_is_hdr(data, size);
     }
     return stbi_is_hdr_from_memory((const stbi_uc *)data, (int)size) != 0;
 }
@@ -103,6 +114,9 @@ NphResult cook_image_info(const void *data, u64 size, u32 *out_width, u32 *out_h
     if (data == NULL || size == 0U || size > (u64)INT32_MAX) {
         return NPH_RESULT_PARSE_ERROR;
     }
+    if (is_dds(data, size)) {
+        return cook_dds_info(data, size, out_width, out_height, out_channels);
+    }
     int w = 0;
     int h = 0;
     int channels = 0;
@@ -122,6 +136,9 @@ NphResult cook_image_decode(NphAllocator *alloc, const void *data, u64 size, Coo
     memset(out, 0, sizeof *out);
     if (data == NULL || size == 0U || size > (u64)INT32_MAX) {
         return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (is_dds(data, size)) {
+        return cook_dds_decode(alloc, data, size, out);
     }
     if (png_first_idat_is_empty((const u8 *)data, size)) {
         NPH_LOG_ERROR(&NPH_LOG_COOK, "image decode: PNG whose first IDAT chunk is empty");

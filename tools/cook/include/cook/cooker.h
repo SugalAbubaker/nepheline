@@ -80,7 +80,7 @@ void cooker_destroy(Cooker *cooker);
 typedef enum CookerSourceKind {
     COOKER_SOURCE_NONE = 0, // not a source the cooker reads
     COOKER_SOURCE_SCENE,    // .gltf and .glb
-    COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, and .hdr
+    COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, .hdr, and .dds
     COOKER_SOURCE_MESH,     // .nmesh (polymesh.h)
 } CookerSourceKind;
 

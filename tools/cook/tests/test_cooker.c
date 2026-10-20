@@ -14,6 +14,7 @@
 
 #include <cook/cooker.h>
 #include <cook/polymesh.h>
+#include <cook/specgloss.h>
 #include <stdlib.h>
 #if !NPH_PLATFORM_WINDOWS
 #include <sys/wait.h>
@@ -476,6 +477,173 @@ NTEST_F(CookFixture, a_packed_occlusion_map_shares_the_metallic_roughness_textur
                                       h.textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS].texture));
     NTEST_ASSERT_NEAR_F32(h.textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale, 0.8F, 1e-6F);
     nph_file_free_all(f->alloc, bytes, size);
+    cooker_destroy(c);
+}
+
+// A texture asset's top level, unpacked (`out` holds `cap` bytes).
+static void read_top_level(CookFixture *f, const Cooker *c, NphGuid guid, u8 *out, u64 cap)
+{
+    const CookDbEntry *e = cook_db_find_guid(cooker_db(c), guid);
+    NTEST_ASSERT_NOT_NULL(e);
+    char full[1500];
+    snprintf(full, sizeof full, "%s/%s", f->out_dir, e->output);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(full, f->alloc, &bytes, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(bytes, size, &info), NPH_RESULT_OK);
+    const NphAssetBlobEntry *mip = nph_asset_file_find(&info, NPH_TEXTURE_TAG_MIP, 0U);
+    NTEST_ASSERT_NOT_NULL(mip);
+    NTEST_ASSERT_EQ_UINT(mip->raw_size, cap);
+    NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(bytes, mip, out), NPH_RESULT_OK);
+    nph_file_free_all(f->alloc, bytes, size);
+}
+
+static NphMaterialHeader read_material(CookFixture *f, const Cooker *c, const char *source,
+                                       const char *sub)
+{
+    const CookDbEntry *mat =
+        cook_db_find(cooker_db(c), nph_str_from_cstr(source), nph_str_from_cstr(sub));
+    NTEST_ASSERT_NOT_NULL(mat);
+    char full[1500];
+    snprintf(full, sizeof full, "%s/%s", f->out_dir, mat->output);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(full, f->alloc, &bytes, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(bytes, size, &info), NPH_RESULT_OK);
+    const NphAssetBlobEntry *head = nph_asset_file_find(&info, NPH_MATERIAL_TAG_HEADER, 0U);
+    NTEST_ASSERT_NOT_NULL(head);
+    NphMaterialHeader h;
+    memcpy(&h, nph_asset_file_blob(bytes, head), sizeof h);
+    nph_file_free_all(f->alloc, bytes, size);
+    return h;
+}
+
+// KHR_materials_pbrSpecularGlossiness: a material with textures gets a
+// base colour and a metallic-roughness texture made from its two images
+// (once for the materials that share them), carrying the factors; one with
+// factors alone is converted to factors; a second cook finds all current.
+NTEST_F(CookFixture, specular_glossiness_materials_become_metallic_roughness)
+{
+    u8 diffuse[4 * 4 * 4];
+    u8 specgloss[4 * 4 * 4];
+    for (u32 i = 0; i < 16U; ++i) {
+        diffuse[(u64)i * 4U] = (u8)(40U + i * 10U);
+        diffuse[i * 4U + 1U] = 120U;
+        diffuse[i * 4U + 2U] = (u8)(200U - i * 5U);
+        diffuse[i * 4U + 3U] = 255U;
+        specgloss[(u64)i * 4U] = (u8)(i < 8U ? 59U : 240U); // a dielectric's 0.04, or metal
+        specgloss[i * 4U + 1U] = (u8)(i < 8U ? 59U : 200U);
+        specgloss[i * 4U + 2U] = (u8)(i < 8U ? 59U : 100U);
+        specgloss[i * 4U + 3U] = (u8)(i * 16U);
+    }
+    u8 diffuse_tga[18 + 64];
+    u8 specgloss_tga[18 + 64];
+    char diffuse_b64[256];
+    char specgloss_b64[256];
+    test_base64(diffuse_tga, test_write_tga(diffuse, 4U, 4U, diffuse_tga), diffuse_b64);
+    test_base64(specgloss_tga, test_write_tga(specgloss, 4U, 4U, specgloss_tga), specgloss_b64);
+    const f32 pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const f32 uv[6] = {0, 1, 1, 1, 0, 0};
+    u8 buffer[60];
+    memcpy(buffer, pos, sizeof pos);
+    memcpy(buffer + 36, uv, sizeof uv);
+    char buffer_b64[128];
+    test_base64(buffer, sizeof buffer, buffer_b64);
+    static const char sg_textures[] =
+        "{\"extensions\":{\"KHR_materials_pbrSpecularGlossiness\":{\"diffuseTexture\":{\"index\":"
+        "0},\"specularGlossinessTexture\":{\"index\":1},\"glossinessFactor\":0.5}}}";
+    char doc[4096];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":["
+             "\"KHR_materials_pbrSpecularGlossiness\"],\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+             "\"nodes\":[{\"mesh\":0}],"
+             "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1},"
+             "\"material\":0}]}],"
+             "\"materials\":[%s,%s,{\"extensions\":{\"KHR_materials_pbrSpecularGlossiness\":{"
+             "\"diffuseFactor\":[0.5,0.25,0.125,1],\"specularFactor\":[0.04,0.04,0.04],"
+             "\"glossinessFactor\":0.25}}}],"
+             "\"textures\":[{\"source\":0},{\"source\":1}],"
+             "\"images\":[{\"uri\":\"data:image/tga;base64,%s\"},{\"uri\":\"data:image/tga;base64,"
+             "%s\"}],"
+             "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":"
+             "\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]},{\"bufferView\":1,\"componentType\":5126,"
+             "\"count\":3,\"type\":\"VEC2\"}],"
+             "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,"
+             "\"byteLength\":24}],"
+             "\"buffers\":[{\"byteLength\":60,\"uri\":\"data:application/octet-stream;base64,%s\"}"
+             "]}",
+             sg_textures, sg_textures, diffuse_b64, specgloss_b64, buffer_b64);
+    char path[1200];
+    test_path_in(&f->dir, "sg.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, doc, strlen(doc)), NPH_RESULT_OK);
+    CookerDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = f->alloc;
+    desc.out_dir = f->out_dir;
+    desc.source_root = f->dir.dir;
+    cook_texture_settings_default(&desc.texture);
+    cook_mesh_settings_default(&desc.mesh);
+    desc.texture.lz = NPH_LZ_LEVEL_FAST;
+    desc.texture.uncompressed = 1; // RGBA8 levels the test can read
+    desc.texture.no_mips = 1;
+    desc.mesh.lz = NPH_LZ_LEVEL_FAST;
+    Cooker *c = NULL;
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    // One texture pair for the two materials that share their images, three
+    // materials, one mesh, one scene.
+    NTEST_ASSERT_EQ_UINT(cooker_stats(c).cooked, 7U);
+    const NphMaterialHeader m0 = read_material(f, c, "sg.gltf", "material/0");
+    const NphMaterialHeader m1 = read_material(f, c, "sg.gltf", "material/1");
+    const NphMaterialHeader m2 = read_material(f, c, "sg.gltf", "material/2");
+    const NphGuid base = m0.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture;
+    const NphGuid mr = m0.textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS].texture;
+    NTEST_ASSERT_FALSE(nph_guid_is_null(base));
+    NTEST_ASSERT_FALSE(nph_guid_is_null(mr));
+    NTEST_ASSERT_FALSE(nph_guid_equals(base, mr));
+    NTEST_ASSERT_TRUE(nph_guid_equals(m1.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture, base));
+    NTEST_ASSERT_TRUE(
+        nph_guid_equals(m1.textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS].texture, mr));
+    // The textures carry the factors.
+    NTEST_EXPECT_NEAR_F32(m0.base_color_factor.x, 1.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(m0.metallic_factor, 1.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(m0.roughness_factor, 1.0F, 0.0F);
+    // Each texel is the conversion of the texels under it.
+    u8 base_texels[4 * 4 * 4];
+    u8 mr_texels[4 * 4 * 4];
+    read_top_level(f, c, base, base_texels, sizeof base_texels);
+    read_top_level(f, c, mr, mr_texels, sizeof mr_texels);
+    for (u32 i = 0; i < 16U; ++i) {
+        CookSpecGloss sg;
+        const u8 *d = diffuse + (u64)i * 4U;
+        const u8 *s = specgloss + (u64)i * 4U;
+        sg.diffuse = nph_vec4(cook_srgb_to_linear((f32)d[0] / 255.0F),
+                              cook_srgb_to_linear((f32)d[1] / 255.0F),
+                              cook_srgb_to_linear((f32)d[2] / 255.0F), 1.0F);
+        sg.specular = nph_vec3(cook_srgb_to_linear((f32)s[0] / 255.0F),
+                               cook_srgb_to_linear((f32)s[1] / 255.0F),
+                               cook_srgb_to_linear((f32)s[2] / 255.0F));
+        sg.glossiness = (f32)s[3] / 255.0F * 0.5F;
+        const CookMetalRough m = cook_specgloss_to_metalrough(sg);
+        NTEST_EXPECT_NEAR_F32((f32)base_texels[(u64)i * 4U],
+                              cook_linear_to_srgb(m.base_color.x) * 255.0F, 0.51F);
+        NTEST_EXPECT_NEAR_F32((f32)mr_texels[i * 4U + 1U], m.roughness * 255.0F, 0.51F);
+        NTEST_EXPECT_NEAR_F32((f32)mr_texels[i * 4U + 2U], m.metallic * 255.0F, 0.51F);
+    }
+    // Factors alone: converted on import (a dielectric: the diffuse is the
+    // base colour), no textures.
+    NTEST_ASSERT_TRUE(nph_guid_is_null(m2.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture));
+    NTEST_EXPECT_NEAR_F32(m2.base_color_factor.x, 0.5F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(m2.base_color_factor.y, 0.25F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(m2.metallic_factor, 0.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(m2.roughness_factor, 0.75F, 1e-6F);
+    cooker_destroy(c);
+    // Nothing changed: everything is current.
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).cooked, 0U);
     cooker_destroy(c);
 }
 

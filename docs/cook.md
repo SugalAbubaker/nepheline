@@ -131,21 +131,43 @@ directory.
 | missing normals | flat normals, as glTF 2.0 §3.7.2.1 requires; the source tangents are then ignored |
 | missing tangents | MikkTSpace tangents when the primitive has UVs (per mesh, or per primitive in a mesh where only some have them) |
 | metallic-roughness materials | five textures with their samplers, alpha mode and cutoff, double-sidedness |
+| KHR_materials_pbrSpecularGlossiness | converted to metallic-roughness (below); takes precedence where a material has both |
 | KHR_materials_unlit, KHR_materials_emissive_strength | |
+| MSFT_texture_dds | a texture's DDS source replaces its `source`, which is then a fallback the importer does not read |
 | node TRS or matrices | parent-before-child order, iterative traversal; a node reached twice is warned about and kept once |
 | cameras, KHR_lights_punctual | instanced at every node that uses them |
 | the default scene | else the first scene, else every root node |
 
-Skins, morph targets, animations, points and lines, TEXCOORD_1 and above,
-KHR_texture_transform, and other extensions are skipped with a warning
-when the document merely uses them; a document that *requires* an
-extension the importer does not implement is refused with
+Of the images, only those the materials use are read: an image no slot
+takes (the fallback of a DDS source, or one nothing references) may be
+missing. Skins, morph targets, animations, points and lines, TEXCOORD_1
+and above, KHR_texture_transform, and other extensions are skipped with
+a warning when the document merely uses them; a document that *requires*
+an extension the importer does not implement is refused with
 `NPH_RESULT_UNSUPPORTED`, because skipping it would change what the
 asset looks like.
 
+**Specular-glossiness materials** (`specgloss.h`) become metallic-roughness
+by the conversion the extension's specification publishes (its
+"convert-between-workflows" example, after Babylon.js), in linear light:
+the metallic share solved from the perceived brightnesses of the diffuse
+and specular colours against a dielectric's 0.04, the base colour blended
+between the colour the diffuse implies and the one the specular implies by
+the metallic share squared, roughness one minus glossiness, and the
+diffuse alpha the opacity. It is exact for dielectrics and metals, and a
+grey material made by the inverse model comes back to within 2·10⁻⁴. A
+material with factors alone is converted on import; one with textures
+gets a base colour (BC7 sRGB) and a metallic-roughness (BC7 linear)
+texture made texel by texel from its diffuse and specular-glossiness
+images and its factors, which the textures then carry (the material's
+factors are one). The textures take the larger extent of the two images,
+the other sampled bilinearly; materials that share the images and the
+factors share the textures.
+
 `cook_gltf_files` lists what a copy of a document needs beside it: the
 files its buffers and images name, percent-decoded and normalised,
-relative to its directory, each once. It reads only the document. A URI
+relative to its directory, each once (an image that only serves as the
+fallback of DDS sources is left out). It reads only the document. A URI
 with a scheme, an absolute path, or one above the document's directory is
 refused, since a copy could not keep it beside the document. The editor's
 import copies a dropped `.gltf` with these files.
@@ -306,8 +328,18 @@ meshlet faces away from the camera.
 
 ## Textures (`image.h`, `texture.h`, `bc.h`)
 
-stb_image decodes; everything after decoding is the engine's own and
-deterministic. The usage decides the pipeline and the runtime format:
+stb_image decodes PNG, JPEG, TGA, BMP, and Radiance HDR; DDS the cooker
+reads itself (`dds.c`: the container as Direct3D documents it). Of a DDS
+file it reads the top level of a 2D texture in BC1 to BC5 or BC7 (UNORM
+or SRGB alike: the stored values are read as stored, and the material slot
+decides their meaning, as for a PNG), BC6H unsigned (mode 11), or 8-bit
+RGBA, BGRA, and BGRX, named by the DX10 header's DXGI format or by the
+legacy FourCC codes and RGB masks; cube maps, arrays, volumes, and other
+formats are refused as unsupported, and the levels after the first are
+not read (the cooker makes its own mips). The decoded texels go through
+the same pipeline as any image's. Everything after decoding is the
+engine's own and deterministic. The usage decides the pipeline and the
+runtime format:
 
 | Usage | Pipeline | Format |
 |---|---|---|
@@ -452,9 +484,11 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (80 cases): the block codecs against hand-built blocks
-  from the format descriptions and against the line-fit bound; image
-  decoding of every seed, sRGB round trips, exact-area mips (including
+- `cook_tests` (95 cases): the block codecs against hand-built blocks
+  from the format descriptions (BC1's palettes among them) and against
+  the line-fit bound; DDS files built byte by byte in every format read,
+  against the block decoders, and the malformed and unsupported refused;
+  image decoding of every seed, sRGB round trips, exact-area mips (including
   odd sizes), normal renormalisation, edge replication; the mesh pipeline
   step by step (flat normals, the weld's order and attribute rules,
   MikkTSpace handedness, mirrored seams, and angle weighting, the miss
@@ -464,7 +498,10 @@ are logged with everything outside printable ASCII replaced.
   strips and fans, per-primitive attributes, the tangent rules, sparse
   and quantised accessors, cameras and lights per node, deep hierarchies
   and repeated roots, required and used extensions, non-finite values,
-  and malformed documents; the files a document names (decoded,
+  and malformed documents; DDS sources replacing missing fallbacks; the
+  specular-glossiness conversion (dielectrics, metals, grey round trips,
+  textures texel by texel and of other extents) and its materials
+  imported and cooked; the files a document names (decoded,
   normalised, once each, a GLB's chunk excluded, and the URIs a copy could
   not keep refused); the database's round trips, atomic saves, and
   refusals; editable meshes (closed primitives with their volumes,
@@ -552,7 +589,12 @@ What the numbers say:
 - No KTX2, Basis, or WebP input; no texture arrays or cube maps from the
   cooker (the runtime format has layers).
 - glTF: no skins, morph targets, or animations (Phase 9+ needs them); no
-  TEXCOORD_1, KHR_texture_transform, or the PBR extension materials.
+  TEXCOORD_1, KHR_texture_transform, or the PBR extension materials but
+  specular-glossiness (KHR_materials_transmission and the others are
+  skipped with a warning).
+- DDS sources are decoded and encoded again even where their blocks
+  already are what the runtime would store (a BC7 colour texture), which
+  costs the BC7 encoder's time.
 - The cooker is single-threaded outside block encoding: sources and
   meshes cook one after another.
 - No LOD generation yet: the cluster DAG of §8.6.9 is Phase 13.

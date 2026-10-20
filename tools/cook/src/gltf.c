@@ -5,6 +5,7 @@
 #include <nepheline/asset/vfs.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
+#include <nepheline/core/json.h>
 #include <nepheline/math/affine.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
@@ -139,7 +140,9 @@ static bool extension_supported(const char *name)
         "KHR_lights_punctual",
         "KHR_materials_unlit",
         "KHR_materials_emissive_strength",
+        "KHR_materials_pbrSpecularGlossiness",
         "KHR_mesh_quantization",
+        "MSFT_texture_dds",
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(supported); ++i) {
         if (strcmp(name, supported[i]) == 0) {
@@ -564,15 +567,71 @@ static u8 wrap_mode(cgltf_wrap_mode mode)
     }
 }
 
-static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, const char *material,
-                                const cgltf_texture_view *view, NphMaterialTextureRef *ref,
-                                i32 *image)
+// ---------------------------------------------------------------------------
+// Textures' images
+// ---------------------------------------------------------------------------
+
+// Each texture's image, into `out` (data->textures_count entries; -1 for a
+// texture with none): its MSFT_texture_dds source where it has the
+// extension, whose `source` names a DDS image and leaves the texture's own
+// `source` a fallback for clients that read no DDS (the cooker reads DDS:
+// dds.c), else its own source. NPH_RESULT_PARSE_ERROR when an extension
+// names no image of the document.
+static NphResult texture_images(NphAllocator *alloc, const cgltf_data *data, i32 *out)
+{
+    for (cgltf_size i = 0; i < data->textures_count; ++i) {
+        const cgltf_texture *t = &data->textures[i];
+        i32 image = t->image != NULL ? (i32)cgltf_image_index(data, t->image) : -1;
+        for (cgltf_size e = 0; e < t->extensions_count; ++e) {
+            const cgltf_extension *x = &t->extensions[e];
+            if (x->name == NULL || strcmp(x->name, "MSFT_texture_dds") != 0) {
+                continue;
+            }
+            NphJsonDoc doc;
+            const NphResult r = nph_json_parse(
+                x->data != NULL ? nph_str_from_cstr(x->data) : NPH_STR(""), alloc, &doc);
+            const i64 source =
+                r == NPH_RESULT_OK ? nph_json_get_i64(doc.root, NPH_STR("source"), -1) : -1;
+            nph_json_doc_free(&doc);
+            if (r == NPH_RESULT_OUT_OF_MEMORY) {
+                return r;
+            }
+            if (source < 0 || (u64)source >= (u64)data->images_count) {
+                NPH_LOG_ERROR(&NPH_LOG_COOK, "texture %llu: MSFT_texture_dds names no image",
+                              (unsigned long long)i);
+                return NPH_RESULT_PARSE_ERROR;
+            }
+            image = (i32)source;
+        }
+        out[i] = image;
+    }
+    return NPH_RESULT_OK;
+}
+
+static i32 *alloc_texture_images(NphAllocator *alloc, const cgltf_data *data)
+{
+    return NPH_ALLOC_ARRAY(alloc, i32, nph_max_u32((u32)data->textures_count, 1U));
+}
+
+static void free_texture_images(NphAllocator *alloc, const cgltf_data *data, i32 *images)
+{
+    if (images != NULL) {
+        NPH_FREE_ARRAY(alloc, i32, images, nph_max_u32((u32)data->textures_count, 1U));
+    }
+}
+
+static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, const i32 *tex_images,
+                                const char *material, const cgltf_texture_view *view,
+                                NphMaterialTextureRef *ref, i32 *image)
 {
     *image = -1;
-    if (view->texture == NULL || view->texture->image == NULL) {
+    if (view->texture == NULL) {
         return;
     }
-    *image = (i32)cgltf_image_index(data, view->texture->image);
+    *image = tex_images[cgltf_texture_index(data, view->texture)];
+    if (*image < 0) {
+        return;
+    }
     ref->texcoord = 0U;
     ref->scale = view->scale;
     if (view->texcoord != 0) {
@@ -593,7 +652,7 @@ static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, co
     }
 }
 
-static void convert_material(CookGltfScene *scene, const cgltf_data *data,
+static void convert_material(CookGltfScene *scene, const cgltf_data *data, const i32 *tex_images,
                              const cgltf_material *src, CookGltfMaterial *out)
 {
     memset(out, 0, sizeof *out);
@@ -604,26 +663,62 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data,
     for (u32 i = 0; i < NPH_MATERIAL_TEXTURE_COUNT; ++i) {
         out->image[i] = -1;
     }
-    if (src->has_pbr_metallic_roughness) {
+    out->specgloss_image[0] = -1;
+    out->specgloss_image[1] = -1;
+    if (src->has_pbr_specular_glossiness) {
+        // The extension takes precedence over the core model where a
+        // document has both (it is the more specific description).
+        const cgltf_pbr_specular_glossiness *sg = &src->pbr_specular_glossiness;
+        CookSpecGloss *f = &out->specgloss_factors;
+        f->diffuse = nph_vec4(sg->diffuse_factor[0], sg->diffuse_factor[1], sg->diffuse_factor[2],
+                              sg->diffuse_factor[3]);
+        f->specular =
+            nph_vec3(sg->specular_factor[0], sg->specular_factor[1], sg->specular_factor[2]);
+        f->glossiness = sg->glossiness_factor;
+        NphMaterialTextureRef *base = &h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+        NphMaterialTextureRef *mr = &h->textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS];
+        convert_texture_ref(scene, data, tex_images, out->name, &sg->diffuse_texture, base,
+                            &out->specgloss_image[0]);
+        convert_texture_ref(scene, data, tex_images, out->name, &sg->specular_glossiness_texture,
+                            mr, &out->specgloss_image[1]);
+        if (out->specgloss_image[0] < 0 && out->specgloss_image[1] < 0) {
+            const CookMetalRough m = cook_specgloss_to_metalrough(*f);
+            h->base_color_factor = m.base_color;
+            h->metallic_factor = m.metallic;
+            h->roughness_factor = m.roughness;
+        } else {
+            // Both textures are made from both images: a slot whose image is
+            // missing samples as the other's does.
+            if (out->specgloss_image[0] < 0) {
+                *base = *mr;
+            } else if (out->specgloss_image[1] < 0) {
+                *mr = *base;
+            }
+            out->specgloss = 1;
+            h->base_color_factor = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+            h->metallic_factor = 1.0F;
+            h->roughness_factor = 1.0F;
+        }
+    } else if (src->has_pbr_metallic_roughness) {
         const cgltf_pbr_metallic_roughness *pbr = &src->pbr_metallic_roughness;
         h->base_color_factor = nph_vec4(pbr->base_color_factor[0], pbr->base_color_factor[1],
                                         pbr->base_color_factor[2], pbr->base_color_factor[3]);
         h->metallic_factor = pbr->metallic_factor;
         h->roughness_factor = pbr->roughness_factor;
-        convert_texture_ref(scene, data, out->name, &pbr->base_color_texture,
+        convert_texture_ref(scene, data, tex_images, out->name, &pbr->base_color_texture,
                             &h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR],
                             &out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR]);
-        convert_texture_ref(scene, data, out->name, &pbr->metallic_roughness_texture,
+        convert_texture_ref(scene, data, tex_images, out->name, &pbr->metallic_roughness_texture,
                             &h->textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS],
                             &out->image[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS]);
     }
-    convert_texture_ref(scene, data, out->name, &src->normal_texture,
+    convert_texture_ref(scene, data, tex_images, out->name, &src->normal_texture,
                         &h->textures[NPH_MATERIAL_TEXTURE_NORMAL],
                         &out->image[NPH_MATERIAL_TEXTURE_NORMAL]);
-    convert_texture_ref(scene, data, out->name, &src->occlusion_texture,
+    convert_texture_ref(scene, data, tex_images, out->name, &src->occlusion_texture,
                         &h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION],
                         &out->image[NPH_MATERIAL_TEXTURE_OCCLUSION]);
-    convert_texture_ref(scene, data, out->name, &src->emissive_texture,
+    convert_texture_ref(scene, data, tex_images, out->name, &src->emissive_texture,
                         &h->textures[NPH_MATERIAL_TEXTURE_EMISSIVE],
                         &out->image[NPH_MATERIAL_TEXTURE_EMISSIVE]);
     h->emissive_factor =
@@ -949,15 +1044,41 @@ static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgl
         scene->mesh_count += 1U; // counted first: a failed mesh is still released
         NPH_TRY(convert_mesh(scene, data, &data->meshes[i], &scene->meshes[i]));
     }
-    for (cgltf_size i = 0; i < data->materials_count; ++i) {
-        convert_material(scene, data, &data->materials[i], &scene->materials[i]);
-        scene->material_count += 1U;
+    i32 *tex_images = alloc_texture_images(alloc, data);
+    if (tex_images == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
     }
+    const NphResult tr = texture_images(alloc, data, tex_images);
+    if (tr == NPH_RESULT_OK) {
+        for (cgltf_size i = 0; i < data->materials_count; ++i) {
+            convert_material(scene, data, tex_images, &data->materials[i], &scene->materials[i]);
+            scene->material_count += 1U;
+        }
+    }
+    free_texture_images(alloc, data, tex_images);
+    NPH_TRY(tr);
+    // The images the materials take (only they are read: an image no slot
+    // uses, such as the fallback of a DDS source, need not exist). Every
+    // image keeps its glTF index; the others stay empty.
+    scene->image_count = (u32)data->images_count;
     for (cgltf_size i = 0; i < data->images_count; ++i) {
+        bool used = false;
+        for (u32 m = 0; m < scene->material_count && !used; ++m) {
+            const CookGltfMaterial *mat = &scene->materials[m];
+            for (u32 slot = 0; slot < NPH_MATERIAL_TEXTURE_COUNT && !used; ++slot) {
+                used = mat->image[slot] == (i32)i;
+            }
+            used = used || (mat->specgloss && (mat->specgloss_image[0] == (i32)i ||
+                                               mat->specgloss_image[1] == (i32)i));
+        }
+        if (!used) {
+            copy_name(scene->images[i].name, sizeof scene->images[i].name, data->images[i].name,
+                      "image", (u64)i);
+            continue;
+        }
         NPH_TRY(convert_image(scene, options, data, &data->images[i], base_dir, &scene->images[i]));
         scene->images[i].hash =
             nph_hash64(scene->images[i].data, scene->images[i].size, NPH_HASH_DEFAULT_SEED);
-        scene->image_count += 1U;
     }
     if (data->animations_count != 0U) {
         NPH_LOG_WARN(&NPH_LOG_COOK, "%llu animations are not supported; ignored",
@@ -966,7 +1087,7 @@ static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgl
     }
     NPH_TRY(convert_nodes(scene, data));
     // What the cooked assets depend on: the document, every buffer it
-    // loaded (external .bin files included), and every image.
+    // loaded (external .bin files included), and every image read.
     u64 h =
         nph_hash_combine(nph_hash64(document, document_size, NPH_HASH_DEFAULT_SEED), document_size);
     for (cgltf_size i = 0; i < data->buffers_count; ++i) {
@@ -1120,6 +1241,28 @@ static const char *nth_uri(const cgltf_data *data, cgltf_size index)
                                        : data->images[index - data->buffers_count].uri;
 }
 
+// Whether image `index` serves only as the fallback of textures that have
+// a DDS source (MSFT_texture_dds): it may then be missing, as a document
+// shipped with DDS textures alone has it.
+static bool image_is_dds_fallback(const cgltf_data *data, const i32 *tex_images, cgltf_size index)
+{
+    bool fallback = false;
+    for (cgltf_size t = 0; t < data->textures_count; ++t) {
+        const cgltf_texture *tex = &data->textures[t];
+        const bool own = tex->image != NULL && cgltf_image_index(data, tex->image) == index;
+        if (tex_images[t] == (i32)index && !own) {
+            return false; // a DDS source itself
+        }
+        if (own) {
+            if (tex_images[t] == (i32)index) {
+                return false; // the texture's only source
+            }
+            fallback = true;
+        }
+    }
+    return fallback;
+}
+
 NphResult cook_gltf_files(NphAllocator *alloc, const char *path, CookGltfFileFn fn, void *user)
 {
     NPH_ASSERT(alloc != NULL && path != NULL && fn != NULL);
@@ -1139,8 +1282,17 @@ NphResult cook_gltf_files(NphAllocator *alloc, const char *path, CookGltfFileFn 
         NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, gltf_result_name(cr));
         r = gltf_result_to_nph(cr);
     }
+    i32 *tex_images = NULL;
+    if (data != NULL) {
+        tex_images = alloc_texture_images(alloc, data);
+        r = tex_images != NULL ? texture_images(alloc, data, tex_images) : NPH_RESULT_OUT_OF_MEMORY;
+    }
     const cgltf_size count = data != NULL ? data->buffers_count + data->images_count : 0U;
     for (cgltf_size i = 0; i < count && r == NPH_RESULT_OK; ++i) {
+        if (i >= data->buffers_count &&
+            image_is_dds_fallback(data, tex_images, i - data->buffers_count)) {
+            continue; // optional beside a DDS source
+        }
         char file[COOK_GLTF_URI_MAX];
         bool named = false;
         r = uri_file(nth_uri(data, i), file, sizeof file, &named);
@@ -1165,6 +1317,9 @@ NphResult cook_gltf_files(NphAllocator *alloc, const char *path, CookGltfFileFn 
         if (named) {
             fn(user, file);
         }
+    }
+    if (data != NULL) {
+        free_texture_images(alloc, data, tex_images);
     }
     cgltf_free(data);
     cook_block_free(alloc, bytes);

@@ -3,9 +3,10 @@
 
 // Block-compressed texture encoders and decoders (CLAUDE.md §8.8 "our own
 // BC7/BC5/BC4/BC6H encoders"): the engine's implementation of the BC4,
-// BC5, BC6H, and BC7 formats (Khronos Data Format Specification 1.3,
-// chapter "S3TC/BPTC"; Microsoft, "Texture Block Compression in Direct3D
-// 11").
+// BC5, BC6H, and BC7 formats, and a decoder for BC1 (whose colour block
+// BC2 and BC3 share) to read DDS sources (Khronos Data Format
+// Specification 1.3, chapter "S3TC/BPTC"; Microsoft, "Texture Block
+// Compression in Direct3D 11").
 //
 // Blocks are 4x4 texels in row-major order (texel 0 is the top left).
 // Every encoder is deterministic: the same block gives the same bytes on
@@ -46,6 +47,20 @@ typedef struct CookBlockRgba8 {
 typedef struct CookBlockRgbHalf {
     u16 texels[16][3]; // half-float bits
 } CookBlockRgbHalf;
+
+// ---------------------------------------------------------------------------
+// BC1 (RGB and a 1-bit alpha, 8 bytes), decoded only
+// ---------------------------------------------------------------------------
+
+// Decodes a BC1 colour block: two RGB565 endpoints (bits replicated to 8)
+// and a 2-bit index a texel. When `three_color` is set (BC1 itself) a
+// block whose first endpoint is not above the second holds three colours
+// (the endpoints and their mean) and transparent black; otherwise (and
+// always for BC2 and BC3, which `three_color` false decodes) the palette is
+// the endpoints and the colours a third and two thirds between them. The
+// interpolants round to nearest; GPUs may differ from them by a level,
+// which the format allows.
+void cook_bc1_decode(const u8 block[8], bool three_color, CookBlockRgba8 *out);
 
 // ---------------------------------------------------------------------------
 // BC4 (one 8-bit channel, 8 bytes) and BC5 (two channels, 16 bytes)
