@@ -232,7 +232,9 @@ nph_add_test(<module>
 
 `nph_add_module` creates `nph_<module>` with alias `nph::<module>`, exposes
 `include/`, and links `nph::options`. `nph_add_test` creates
-`<module>_tests` on `ntest::main` and registers it as CTest test `<module>`.
+`<module>_tests` on `ntest::main` and registers it as CTest test `<module>`,
+or, with `SHARDS n`, as `<module>.0` to `<module>.<n-1>`, each running every
+n-th test (the renderer's suite is four: `ctest -R "^render\."`).
 
 ## Continuous integration
 

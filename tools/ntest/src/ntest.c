@@ -1137,6 +1137,8 @@ typedef struct NtestOptions {
     int color; // -1 auto, 0 off, 1 on
     uint64_t shuffle_seed;
     uint64_t repeat;
+    uint32_t shard_index;
+    uint32_t shard_count; // 0: no --shard
     const char *filter;
     const char *junit_path;
 } NtestOptions;
@@ -1149,6 +1151,8 @@ static void print_usage(FILE *out, const char *exe)
             "  --filter=PATTERNS   Comma-separated globs ('*', '?') matched against\n"
             "                      suite.name; a pattern without '.' also matches a suite;\n"
             "                      prefix with '-' to exclude.  e.g. --filter=math.*,-math.slow_*\n"
+            "  --shard=I/N         Run every N-th selected test from the I-th (0-based) in the\n"
+            "                      default order: shards 0 to N-1 run each test once\n"
             "  --junit=FILE        Write a JUnit XML report (parent directories are created)\n"
             "  --repeat=N          Run the selected tests N times\n"
             "  --shuffle[=SEED]    Run in random order; the seed is printed for reproduction\n"
@@ -1181,6 +1185,35 @@ static bool has_prefix(const char *s, const char *prefix)
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
+bool ntest_parse_shard(const char *s, uint32_t *index, uint32_t *count)
+{
+    const char *slash = strchr(s, '/');
+    if (slash == NULL) {
+        return false;
+    }
+    char head[24];
+    const size_t n = (size_t)(slash - s);
+    if (n == 0U || n >= sizeof head) {
+        return false;
+    }
+    memcpy(head, s, n);
+    head[n] = '\0';
+    uint64_t i = 0U;
+    uint64_t c = 0U;
+    if (!parse_u64_arg(head, &i) || !parse_u64_arg(slash + 1, &c) || c == 0U || c > 1000000U ||
+        i >= c) {
+        return false;
+    }
+    *index = (uint32_t)i;
+    *count = (uint32_t)c;
+    return true;
+}
+
+bool ntest_shard_accepts(size_t position, uint32_t index, uint32_t count)
+{
+    return position % count == index;
+}
+
 // Returns 0 on success, 2 on a usage error, -1 when --help was printed.
 static int parse_options(int argc, char **argv, NtestOptions *opt)
 {
@@ -1193,6 +1226,11 @@ static int parse_options(int argc, char **argv, NtestOptions *opt)
             opt->list = true;
         } else if (has_prefix(a, "--filter=")) {
             opt->filter = a + strlen("--filter=");
+        } else if (has_prefix(a, "--shard=")) {
+            if (!ntest_parse_shard(a + strlen("--shard="), &opt->shard_index, &opt->shard_count)) {
+                fprintf(stderr, "ntest: --shard needs I/N with 0 <= I < N <= 1000000\n");
+                return 2;
+            }
         } else if (has_prefix(a, "--junit=")) {
             opt->junit_path = a + strlen("--junit=");
         } else if (has_prefix(a, "--repeat=")) {
@@ -1286,6 +1324,18 @@ int ntest_main(int argc, char **argv)
         }
     }
     free((void *)all);
+    // A shard keeps its share of the filter's selection, in the default
+    // order, before any shuffle.
+    const size_t matched = selected_count;
+    if (opt.shard_count > 0U) {
+        size_t kept = 0;
+        for (size_t i = 0; i < matched; ++i) {
+            if (ntest_shard_accepts(i, opt.shard_index, opt.shard_count)) {
+                selected[kept++] = selected[i];
+            }
+        }
+        selected_count = kept;
+    }
 
     if (opt.list) {
         for (size_t i = 0; i < selected_count; ++i) {
@@ -1295,10 +1345,17 @@ int ntest_main(int argc, char **argv)
         return 0;
     }
 
-    if (selected_count == 0U) {
+    if (matched == 0U) {
         fprintf(stderr, "ntest: no tests match the filter '%s'\n", opt.filter ? opt.filter : "");
         free((void *)selected);
         return 3;
+    }
+    if (selected_count == 0U) {
+        // More shards than tests: the others run them all.
+        printf("ntest: shard %u/%u holds none of the %zu selected test%s\n",
+               (unsigned)opt.shard_index, (unsigned)opt.shard_count, matched, plural(matched));
+        free((void *)selected);
+        return 0;
     }
 
     if (opt.shuffle) {
@@ -1325,6 +1382,10 @@ int ntest_main(int argc, char **argv)
                plural(selected_count), suites, plural(suites));
         if (opt.repeat > 1U) {
             printf(", %" PRIu64 " times", opt.repeat);
+        }
+        if (opt.shard_count > 0U) {
+            printf(", shard %u/%u of %zu", (unsigned)opt.shard_index, (unsigned)opt.shard_count,
+                   matched);
         }
         printf(" (%s)\n", exe_name);
     }

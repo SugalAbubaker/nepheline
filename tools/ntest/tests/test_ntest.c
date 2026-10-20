@@ -232,6 +232,43 @@ NTEST(glob, matching)
     NTEST_ASSERT_TRUE(ntest_glob_match("*b*", "abc"));
 }
 
+// --shard=I/N: decimal, 0 <= I < N <= 1000000; the shards of a count run
+// every position exactly once between them.
+NTEST(shard, parsing)
+{
+    uint32_t index = 9U;
+    uint32_t count = 9U;
+    NTEST_ASSERT_TRUE(ntest_parse_shard("0/1", &index, &count));
+    NTEST_EXPECT_EQ_UINT(index, 0U);
+    NTEST_EXPECT_EQ_UINT(count, 1U);
+    NTEST_ASSERT_TRUE(ntest_parse_shard("3/4", &index, &count));
+    NTEST_EXPECT_EQ_UINT(index, 3U);
+    NTEST_EXPECT_EQ_UINT(count, 4U);
+    NTEST_ASSERT_TRUE(ntest_parse_shard("999999/1000000", &index, &count));
+    static const char *const bad[] = {"4/4",  "0/0",  "1",   "/2",        "1/", "-1/2",
+                                      "1/2x", "1/-2", "x/2", "0/1000001", "",   "1/2/3"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+        index = 7U;
+        count = 7U;
+        NTEST_EXPECT_FALSE(ntest_parse_shard(bad[i], &index, &count));
+        NTEST_EXPECT_EQ_UINT(index, 7U);
+        NTEST_EXPECT_EQ_UINT(count, 7U);
+    }
+}
+
+NTEST(shard, every_position_runs_once)
+{
+    for (uint32_t count = 1U; count <= 7U; ++count) {
+        for (size_t position = 0; position < 40U; ++position) {
+            uint32_t takers = 0U;
+            for (uint32_t index = 0U; index < count; ++index) {
+                takers += ntest_shard_accepts(position, index, count) ? 1U : 0U;
+            }
+            NTEST_EXPECT_EQ_UINT(takers, 1U);
+        }
+    }
+}
+
 NTEST(filter, semantics)
 {
     NTEST_ASSERT_TRUE(ntest_filter_accepts(NULL, "s", "n"));

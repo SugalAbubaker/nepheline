@@ -83,6 +83,8 @@ core_tests [options]
   --filter=PATTERNS   Comma-separated globs ('*', '?') on suite.name; a pattern
                       without '.' also matches a suite; prefix '-' excludes.
                       e.g. --filter=math.*,-math.slow_*
+  --shard=I/N         Every N-th selected test from the I-th (0-based), in the
+                      default order: shards 0 to N-1 run each test once
   --junit=FILE        Write a JUnit XML report (parent directories are created)
   --repeat=N          Run the selection N times
   --shuffle[=SEED]    Random order; the seed is printed so a run can be reproduced
@@ -93,13 +95,18 @@ core_tests [options]
 ```
 
 Exit codes: `0` all passed (skips allowed), `1` a test failed, `2` usage
-error or unwritable report, `3` nothing matched the filter.
+error or unwritable report, `3` nothing matched the filter. A shard that
+holds none of the selected tests (more shards than tests) exits `0`.
 
 Default order is deterministic — by source file, then line — regardless of
 link order. `--shuffle` exists to find hidden inter-test dependencies.
 
 CMake's `nph_add_test` registers each executable with CTest and passes
 `--junit=<build>/test-results/<Config>/<name>.xml`; CI uploads those files.
+With `SHARDS n` it registers `<name>.0` to `<name>.<n-1>` instead, each with
+`--shard=<i>/<n>` and its own report, so a suite too long for one CTest
+timeout (the renderer's, on lavapipe in Debug) is split without listing
+tests by hand: a new test always lands in exactly one shard.
 
 ## Design
 

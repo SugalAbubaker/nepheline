@@ -56,16 +56,19 @@ function(nph_add_module name)
     endif()
 endfunction()
 
-# nph_add_test(<name> SOURCES <src>... [DEPS <target>...])
+# nph_add_test(<name> SOURCES <src>... [DEPS <target>...] [SHARDS <n>])
 #
 # Builds the executable <name>_tests on the ntest framework and registers it
 # with CTest as test "<name>". Each run writes a JUnit report to
-# <build>/test-results/<Config>/<name>.xml for CI.
+# <build>/test-results/<Config>/<name>.xml for CI. With SHARDS n (n > 1) it
+# is registered as the n tests "<name>.0" to "<name>.<n-1>" instead, each
+# running every n-th test (ntest --shard) and writing <name>.<i>.xml: a suite
+# too long for one CTest timeout is split, and every test still runs once.
 function(nph_add_test name)
     if(NOT NPH_BUILD_TESTS)
         return()
     endif()
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "SHARDS" "SOURCES;DEPS")
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "nph_add_test(${name}): unexpected arguments: ${ARG_UNPARSED_ARGUMENTS}")
     endif()
@@ -75,9 +78,19 @@ function(nph_add_test name)
     target_link_libraries(${target} PRIVATE nph::options ntest::main ${ARG_DEPS})
     set_target_properties(${target} PROPERTIES FOLDER "tests")
 
-    add_test(NAME ${name}
-             COMMAND ${target} "--junit=${CMAKE_BINARY_DIR}/test-results/$<CONFIG>/${name}.xml")
-    set_tests_properties(${name} PROPERTIES TIMEOUT 600 LABELS "unit")
+    set(results "${CMAKE_BINARY_DIR}/test-results/$<CONFIG>")
+    if(DEFINED ARG_SHARDS AND ARG_SHARDS GREATER 1)
+        math(EXPR last "${ARG_SHARDS} - 1")
+        foreach(i RANGE 0 ${last})
+            add_test(NAME ${name}.${i}
+                     COMMAND ${target} "--shard=${i}/${ARG_SHARDS}"
+                             "--junit=${results}/${name}.${i}.xml")
+            set_tests_properties(${name}.${i} PROPERTIES TIMEOUT 600 LABELS "unit")
+        endforeach()
+    else()
+        add_test(NAME ${name} COMMAND ${target} "--junit=${results}/${name}.xml")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 600 LABELS "unit")
+    endif()
 endfunction()
 
 # nph_add_sample(<name> SOURCES <src>... [DEPS <target>...] [ARGS <arg>...]

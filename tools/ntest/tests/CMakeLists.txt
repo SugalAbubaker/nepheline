@@ -76,6 +76,29 @@ ntest_cli_test(list EXIT 0 ARGS --list
 
 ntest_cli_test(bad_option EXIT 2 ARGS --bogus)
 
+# Shards take every N-th test of the selection in the default order (by
+# file, then line: passes, eq_int, eq_str, eq_mem, ulp, near,
+# expect_continues, explicit, skipped, TeardownFixture's, teardown_observed).
+ntest_cli_test(shard_list EXIT 0 ARGS --shard=0/2 --list
+    EXPECT "fail.passes" "fail.eq_str" "fail.ulp" "fail.expect_continues" "fail.skipped"
+        "fail.teardown_observed"
+    EXPECT_NOT "fail.eq_int" "fail.eq_mem" "fail.near" "fail.explicit" "TeardownFixture")
+
+ntest_cli_test(shard_after_filter EXIT 0 ARGS --filter=fail.* --shard=1/3 --list
+    EXPECT "fail.eq_int" "fail.ulp" "fail.explicit"
+    EXPECT_NOT "fail.passes" "fail.eq_str" "fail.eq_mem" "fail.near" "fail.skipped"
+        "fail.teardown_observed" "TeardownFixture")
+
+ntest_cli_test(shard_run EXIT 0 ARGS --filter=fail.passes,fail.skipped --shard=1/2
+    EXPECT "shard 1/2 of 2" "[  SKIPPED ] 1 test"
+    EXPECT_NOT "[ RUN      ] fail.passes")
+
+ntest_cli_test(shard_empty EXIT 0 ARGS --filter=fail.passes --shard=1/2
+    EXPECT "shard 1/2 holds none of the 1 selected test"
+    EXPECT_NOT "[ RUN")
+
+ntest_cli_test(shard_bad EXIT 2 ARGS --shard=2/2)
+
 ntest_cli_test(shuffle EXIT 1 ARGS --shuffle=7
     EXPECT "shuffle seed: 7")
 
