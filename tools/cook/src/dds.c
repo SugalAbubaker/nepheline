@@ -278,7 +278,7 @@ static bool decode_block(DdsFormat f, const u8 *src, CookBlockRgba8 *out)
     case DDS_BC2: {
         cook_bc1_decode(src + 8, false, out);
         for (u32 i = 0; i < 16U; ++i) {
-            const u32 a = (src[i / 2U] >> (4U * (i & 1U))) & 15U;
+            const u32 a = ((u32)src[i / 2U] >> (4U * (i & 1U))) & 15U;
             out->texels[i][3] = (u8)(a * 17U);
         }
         return true;
