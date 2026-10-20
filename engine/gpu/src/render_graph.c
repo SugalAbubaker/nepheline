@@ -1097,6 +1097,26 @@ static RgBarrier *push_barrier(NphGpuRenderGraph *g, NphGpuRgPass *pass, bool po
     return b;
 }
 
+// The source scope of a transient's first barrier in the graph. After the
+// resources that shared its memory earlier in the graph, their final
+// stages and accesses: their own first barriers ordered them after
+// everything before. With none, every stage, and every write made
+// available: the graph caches its transients across frames, so the same
+// image or buffer (or memory a later transient aliased) was last written
+// by an earlier frame still in flight, maybe last of all (a depth
+// attachment stored DONT_CARE). A write-after-write needs that write
+// made available, not only finished.
+static void first_use_source(const RgResource *r, u32 *stages, u32 *access)
+{
+    if (r->alias_src_stages != 0U) {
+        *stages = r->alias_src_stages;
+        *access = r->alias_src_access;
+    } else {
+        *stages = (u32)NPH_GPU_STAGE_ALL;
+        *access = (u32)NPH_GPU_ACCESS_MEMORY_WRITE;
+    }
+}
+
 // Transitions one mip range of an image into the required state, emitting
 // barriers (and a release on the previous owner for exclusive images).
 static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgResource *r,
@@ -1140,7 +1160,9 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
         const bool first_use = !r->imported && !r->first_use_done;
         bool transition = false; // the barrier changes the layout or the owner
         if (first_use) {
-            // Transient: contents undefined; order after whatever aliased it.
+            // Transient: contents undefined; order after whatever aliased it
+            // earlier in this graph or, with nothing before it here, after
+            // everything submitted before (first_use_source).
             RgBarrier *b = push_barrier(g, pass, false);
             if (b == NULL) {
                 return NPH_RESULT_FULL;
@@ -1148,9 +1170,7 @@ static NphResult transition_image(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgRe
             b->is_image = 1;
             NphGpuImageBarrier *ib = &b->image;
             ib->image = r->image;
-            ib->src_stages =
-                r->alias_src_stages != 0U ? r->alias_src_stages : (u32)NPH_GPU_STAGE_ALL;
-            ib->src_access = r->alias_src_access;
+            first_use_source(r, &ib->src_stages, &ib->src_access);
             ib->old_layout = NPH_GPU_LAYOUT_UNDEFINED;
             ib->dst_stages = need->stages;
             ib->dst_access = need->access;
@@ -1294,9 +1314,7 @@ static NphResult transition_buffer(NphGpuRenderGraph *g, NphGpuRgPass *pass, RgR
         b->is_image = 0;
         b->buffer.buffer = r->buffer;
         if (first_use) {
-            b->buffer.src_stages =
-                r->alias_src_stages != 0U ? r->alias_src_stages : (u32)NPH_GPU_STAGE_ALL;
-            b->buffer.src_access = r->alias_src_access;
+            first_use_source(r, &b->buffer.src_stages, &b->buffer.src_access);
         } else if (writes) {
             // After the last write and every read since.
             const u32 src = cur->stages | *rs;

@@ -299,7 +299,14 @@ and executes:
    GPU-driven renderer's counters, read by shaders, indirect commands, and
    copies in turn, found the earlier model (one stage set per resource)
    missing both. The first use of a transient starts from UNDEFINED
-   and orders after whatever it aliases, cross-queue sources name no
+   and orders after whatever it aliases earlier in the graph; with
+   nothing there, after every stage, with every write made available,
+   because the cached image or buffer, or memory a later transient
+   aliased, was last written by an earlier frame. A write-after-write
+   needs that write made available, not only finished: a depth
+   attachment stored `DONT_CARE` (a write) as its frame's last use met
+   the next frame's layout transition unordered in the engine's runs
+   until it was. Cross-queue sources name no
    stages (the semaphore orders them), and exclusive images crossing
    families get a release on the owner's last pass and an acquire on the
    consumer. The final transition to PRESENT and the swapchain semaphores
