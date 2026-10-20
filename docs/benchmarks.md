@@ -235,15 +235,16 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.86 ms | 8.70 ms | resolve 3.87 ms (§10.4 line: 1.20 ms), raster 1.14 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.85 ms (with post, 0.40 ms), AO 0.44 ms |
+| `bistro_street_production` | 7.57 ms | 8.39 ms | resolve 3.58 ms (§10.4 line: 1.20 ms), raster 1.15 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.85 ms (with post, 0.40 ms), AO 0.44 ms |
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
 light grid hands each pixel 11.8 of them on average, of which 5.0 reach
 it. The resolve carries most of the overrun. Taking one cost away at a
-time: the lamps 1.25 ms, material textures 0.84 ms, rebuilding the
-surface from the visibility buffer 0.97 ms, the sun's virtual shadow map
-0.34 ms (ADR-0040).
+time (ADR-0040): the lamps 1.25 ms, material textures 0.84 ms, rebuilding
+the surface from the visibility buffer 0.97 ms, the sun's virtual shadow
+map 0.34 ms. Testing each light's range before reading the rest of it
+(docs/render.md "Lights") then took 0.29 ms off the lamps' share.
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
