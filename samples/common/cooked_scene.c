@@ -83,7 +83,9 @@ static NphResult alloc_tables(CookedScene *s, u32 cap)
     s->guids = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphGuid, cap);
     s->textures = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderTexture, cap);
     s->meshes = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderMesh, cap);
-    return s->assets != NULL && s->guids != NULL && s->textures != NULL && s->meshes != NULL
+    s->asset_materials = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderMaterial, cap);
+    return s->assets != NULL && s->guids != NULL && s->textures != NULL && s->meshes != NULL &&
+                   s->asset_materials != NULL
                ? NPH_RESULT_OK
                : NPH_RESULT_OUT_OF_MEMORY;
 }
@@ -361,10 +363,20 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     // the textures, then the instances and lights.
     for (u32 i = 0; i < s->asset_count; ++i) {
         const NphAsset *a = nph_asset_get(s->loader, s->assets[i]);
-        if (a->header.type == NPH_ASSET_TYPE_TEXTURE) {
-            NPH_TRY(create_texture(s, i));
-        } else if (a->header.type == NPH_ASSET_TYPE_MESH) {
-            NPH_TRY(create_mesh(s, i));
+        const bool texture = a->header.type == NPH_ASSET_TYPE_TEXTURE;
+        if (!texture && a->header.type != NPH_ASSET_TYPE_MESH) {
+            continue;
+        }
+        r = texture ? create_texture(s, i) : create_mesh(s, i);
+        if (r != NPH_RESULT_OK) {
+            // Which one, and how far the load got: a capacity runs out at a
+            // count, not at an asset.
+            char guid[NPH_GUID_STRING_LEN + 1U];
+            nph_guid_to_string(s->guids[i], guid);
+            NPH_LOG_ERROR(&LOG_COOKED_SCENE, "%s %s (asset %u of %u): %s",
+                          texture ? "texture" : "mesh", guid, i, s->asset_count,
+                          nph_result_string(r));
+            return r;
         }
     }
     const f32 emissive_scale = desc->emissive_scale > 0.0F ? desc->emissive_scale : 1.0F;
@@ -385,17 +397,40 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     }
     r = NPH_RESULT_OK;
     for (u32 i = 0; i < sh->material_count && r == NPH_RESULT_OK; ++i) {
-        r = create_material(s, asset_of(s, sv.materials[i]), emissive_scale, &s->materials[i]);
+        // The table names a material once per instance slot: one render
+        // material per asset, which every slot naming it shares.
+        const u32 a = find_asset(s, sv.materials[i]);
+        NPH_ASSERT(a != NPH_U32_MAX); // requested above
+        if (s->asset_materials[a].value == 0U) {
+            r = create_material(s, nph_asset_get(s->loader, s->assets[a]), emissive_scale,
+                                &s->asset_materials[a]);
+            if (r == NPH_RESULT_OK) {
+                ++s->render_material_count;
+            }
+        }
         if (r == NPH_RESULT_OK) {
+            s->materials[i] = s->asset_materials[a];
             ++s->material_count;
         }
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&LOG_COOKED_SCENE, "material %u of %u (%u created): %s", s->material_count,
+                      sh->material_count, s->render_material_count, nph_result_string(r));
     }
     if (r == NPH_RESULT_OK) {
         world_matrices(&sv, world);
         r = create_instances(s, desc, &sv, world);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&LOG_COOKED_SCENE, "instance %u of %u: %s", s->instance_count,
+                          sh->instance_count, nph_result_string(r));
+        }
     }
     if (r == NPH_RESULT_OK) {
         r = create_lights(s, desc, &sv, world);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&LOG_COOKED_SCENE, "light %u of %u: %s", s->light_count, sh->light_count,
+                          nph_result_string(r));
+        }
     }
     if (r == NPH_RESULT_OK) {
         first_camera(s, desc, &sv, world);
@@ -439,12 +474,10 @@ void cooked_scene_unload(CookedScene *s)
             nph_render_light_destroy(r, s->lights[i]);
         }
     }
-    if (s->materials != NULL) {
-        for (u32 i = 0; i < s->material_count; ++i) {
-            nph_render_material_destroy(r, s->materials[i]);
-        }
-    }
     for (u32 i = 0; i < s->asset_count; ++i) {
+        if (s->asset_materials != NULL) {
+            nph_render_material_destroy(r, s->asset_materials[i]);
+        }
         if (s->meshes != NULL) {
             nph_render_mesh_destroy(r, s->meshes[i]);
         }
@@ -465,6 +498,9 @@ void cooked_scene_unload(CookedScene *s)
     }
     if (s->meshes != NULL) {
         NPH_FREE_ARRAY(a, NphRenderMesh, s->meshes, s->asset_cap);
+    }
+    if (s->asset_materials != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderMaterial, s->asset_materials, s->asset_cap);
     }
     if (s->materials != NULL) {
         NPH_FREE_ARRAY(a, NphRenderMaterial, s->materials, s->material_cap);

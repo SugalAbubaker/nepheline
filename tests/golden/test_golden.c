@@ -680,6 +680,11 @@ static void load_cooked(Golden *f)
     cd.jobs = f->jobs;
     cd.scene = nph_guid_from_cstr("pbr_scene.gltf#scene");
     NTEST_ASSERT_EQ_INT(cooked_scene_load(&cd, &f->scene), NPH_RESULT_OK);
+    // Thirteen instance slots name eleven materials (three name the
+    // first): one render material per material, shared.
+    NTEST_EXPECT_EQ_UINT(f->scene.material_count, 13U);
+    NTEST_EXPECT_EQ_UINT(f->scene.render_material_count, 11U);
+    NTEST_EXPECT_EQ_UINT(f->scene.materials[1].value, f->scene.materials[2].value);
     // The pbr_viewer's dusk sky.
     NphRenderEnvironmentDesc ed;
     memset(&ed, 0, sizeof ed);

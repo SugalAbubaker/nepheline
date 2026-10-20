@@ -13,9 +13,11 @@
 //      each batch in flight together on the job system;
 //   2. creates a render texture per texture asset (block-compressed
 //      levels uploaded as they are), a render mesh per mesh asset (the
-//      cooked streams handed over unchanged), a render material per scene
-//      material, an instance per mesh instance at its node's world
-//      transform, and a light per KHR_lights_punctual light.
+//      cooked streams handed over unchanged), a render material per
+//      material asset (the scene's material table names one per instance
+//      slot, so instances share them: Bistro's 2,909 slots name 254), an
+//      instance per mesh instance at its node's world transform, and a
+//      light per KHR_lights_punctual light.
 //
 // Units: glTF lights are already lux and candela; emissive is
 // emissiveFactor x KHR_materials_emissive_strength x `emissive_scale`,
@@ -46,10 +48,12 @@ typedef struct CookedScene {
     NphGuid *guids;
     u32 asset_count;
     u32 asset_cap;
-    NphRenderTexture *textures;   // parallel to `assets` (null for non-textures)
-    NphRenderMesh *meshes;        // parallel to `assets`
-    NphRenderMaterial *materials; // per scene material
-    u32 material_count;
+    NphRenderTexture *textures;         // parallel to `assets` (null for non-textures)
+    NphRenderMesh *meshes;              // parallel to `assets`
+    NphRenderMaterial *asset_materials; // parallel to `assets`: the materials, owned
+    u32 render_material_count;          // how many of those were created
+    NphRenderMaterial *materials;       // per entry of the scene's material table
+    u32 material_count;                 // (instance slots), sharing asset_materials
     u32 material_cap;
     NphRenderInstance *instances;
     u32 instance_count;
