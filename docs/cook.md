@@ -127,7 +127,7 @@ directory.
 | Imported | Notes |
 |---|---|
 | triangle primitives | lists, strips, and fans (triangulated); one submesh per primitive |
-| POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0 | any allowed component type; non-finite values and positions beyond ±1e9 are refused |
+| POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0 | any allowed component type; non-finite values and positions beyond ±1e9 are refused, but for tangents: a primitive with a non-finite tangent (exporters write NaN where texture coordinates are degenerate) gets its tangents made, with a warning |
 | missing normals | flat normals, as glTF 2.0 §3.7.2.1 requires; the source tangents are then ignored |
 | missing tangents | MikkTSpace tangents when the primitive has UVs (per mesh, or per primitive in a mesh where only some have them) |
 | metallic-roughness materials | five textures with their samplers, alpha mode and cutoff, double-sidedness |
@@ -497,7 +497,8 @@ are logged with everything outside printable ASCII replaced.
   dequantised positions); glTF import of embedded and external data,
   strips and fans, per-primitive attributes, the tangent rules, sparse
   and quantised accessors, cameras and lights per node, deep hierarchies
-  and repeated roots, required and used extensions, non-finite values,
+  and repeated roots, required and used extensions, non-finite values
+  (tangents made again),
   and malformed documents; DDS sources replacing missing fallbacks; the
   specular-glossiness conversion (dielectrics, metals, grey round trips,
   textures texel by texel and of other extents) and its materials

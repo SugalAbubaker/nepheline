@@ -767,7 +767,7 @@ NTEST(gltf, extensions_required_and_merely_used)
     cook_gltf_free(&scene);
 }
 
-NTEST(gltf, non_finite_values_are_refused)
+NTEST(gltf, non_finite_values_are_refused_or_tangents_remade)
 {
     f32 pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
     const u32 nan_bits = 0x7FC00000U;
@@ -790,6 +790,43 @@ NTEST(gltf, non_finite_values_are_refused)
     NTEST_ASSERT_EQ_UINT(scene.node_count, 1U);
     NTEST_ASSERT_TRUE(nph_vec3_near(scene.nodes[0].translation, nph_vec3_zero(), 0.0F));
     NTEST_ASSERT_EQ_UINT(scene.warnings, 1U);
+    cook_gltf_free(&scene);
+    // A non-finite tangent (exporters write NaN where texture coordinates
+    // are degenerate) is derived data: the primitive's tangents are made
+    // again, with a warning.
+    f32 buffer[3 * 3 + 3 * 3 + 3 * 2 + 3 * 4] = {
+        0, 0, 0, 1, 0, 0, 0, 1, 0,          // positions
+        0, 0, 1, 0, 0, 1, 0, 0, 1,          // normals
+        0, 0, 1, 0, 0, 1,                   // texture coordinates
+        1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, // tangents
+    };
+    memcpy(&buffer[3 * 3 + 3 * 3 + 3 * 2 + 5], &nan_bits, sizeof nan_bits);
+    const char *tangents =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,"
+        "\"TEXCOORD_0\":2,\"TANGENT\":3}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+        "\"min\":[0,0,0],\"max\":[1,1,0]},"
+        "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"},"
+        "{\"bufferView\":3,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},"
+        "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36},"
+        "{\"buffer\":0,\"byteOffset\":72,\"byteLength\":24},"
+        "{\"buffer\":0,\"byteOffset\":96,\"byteLength\":48}],"
+        "\"buffers\":[{\"byteLength\":144,\"uri\":\"%s\"}]}";
+    NTEST_ASSERT_EQ_INT(load_doc(tangents, buffer, sizeof buffer, &scene), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.warnings, 1U);
+    NTEST_ASSERT_EQ_UINT(scene.mesh_count, 1U);
+    const CookMesh *mesh = &scene.meshes[0].mesh;
+    NTEST_ASSERT_TRUE((mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) != 0U);
+    NTEST_ASSERT_GT_UINT(mesh->vertices.len, 0U);
+    NPH_ARRAY_FOREACH (CookVertex, v, &mesh->vertices) {
+        NTEST_EXPECT_TRUE(nph_f32_is_finite(v->tangent.x) && nph_f32_is_finite(v->tangent.y) &&
+                          nph_f32_is_finite(v->tangent.z));
+        // Made from the texture coordinates: u runs along +x.
+        NTEST_EXPECT_NEAR_F32(v->tangent.x, 1.0F, 1e-5F);
+    }
     cook_gltf_free(&scene);
 }
 

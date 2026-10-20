@@ -353,12 +353,29 @@ static void primitive_attribs(const cgltf_primitive *prim, PrimitiveAttribs *out
     }
 }
 
+// Whether every one of `count` floats is finite.
+static bool all_finite(const f32 *v, u64 count)
+{
+    for (u64 i = 0; i < count; ++i) {
+        if (!nph_f32_is_finite(v[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // One primitive as a stand-alone CookMesh with every attribute it has;
 // normals made flat when absent, tangents made when `want_tangents` and
-// the primitive has texture coordinates but none of its own.
+// the primitive has texture coordinates but none of its own. Tangents with
+// a non-finite value (exporters write NaN where texture coordinates are
+// degenerate) are derived data the importer can make again: they are
+// dropped and made as for a primitive without them, and `*tangents_redone`
+// is set; any other non-finite attribute makes the document invalid.
 static NphResult convert_primitive(NphAllocator *alloc, const cgltf_primitive *prim,
-                                   const PrimitiveAttribs *at, bool want_tangents, CookMesh *out)
+                                   const PrimitiveAttribs *at, bool want_tangents, CookMesh *out,
+                                   bool *tangents_redone)
 {
+    *tangents_redone = false;
     const u32 count = (u32)at->pos->count;
     f32 *pos = unpack_floats(alloc, at->pos, 3U);
     f32 *nrm = at->nrm != NULL ? unpack_floats(alloc, at->nrm, 3U) : NULL;
@@ -377,6 +394,11 @@ static NphResult convert_primitive(NphAllocator *alloc, const cgltf_primitive *p
                 (at->col != NULL && col == NULL) ||
                 (at->col != NULL && at->col_components != 3U && at->col_components != 4U))) {
         r = NPH_RESULT_PARSE_ERROR; // an attribute of the wrong shape or unreadable
+    }
+    if (r == NPH_RESULT_OK && tan != NULL && !all_finite(tan, (u64)count * 4U)) {
+        free_floats(alloc, tan, at->tan, 4U);
+        tan = NULL;
+        *tangents_redone = true;
     }
     if (r == NPH_RESULT_OK) {
         for (u32 i = 0; i < count; ++i) {
@@ -522,7 +544,14 @@ static NphResult convert_mesh(CookGltfScene *scene, const cgltf_data *data, cons
         }
         CookMesh piece;
         cook_mesh_init(&piece, alloc);
-        NphResult r = convert_primitive(alloc, prim, &at, want_tangents, &piece);
+        bool tangents_redone = false;
+        NphResult r = convert_primitive(alloc, prim, &at, want_tangents, &piece, &tangents_redone);
+        if (tangents_redone) {
+            NPH_LOG_WARN(&NPH_LOG_COOK,
+                         "%s: primitive %llu: non-finite TANGENT values; tangents made instead",
+                         out->mesh.name, (unsigned long long)p);
+            scene->warnings += 1U;
+        }
         // The material slot: one per distinct material in this mesh.
         const i32 material =
             prim->material != NULL ? (i32)cgltf_material_index(data, prim->material) : -1;
