@@ -238,6 +238,12 @@ bool nph_gpu_rg_pass_is_culled(const NphGpuRenderGraph *graph, const NphGpuRgPas
 typedef struct NphGpuRgPassTiming {
     const char *name;
     u64 gpu_ns;
+    // When the pass began, after the earliest beginning of any pass of the
+    // frame, on whatever queue: the frame's span is the largest begin_ns +
+    // gpu_ns. Every queue's timestamps are read as one clock, the device's
+    // (VK_TIME_DOMAIN_DEVICE_KHR, which desktop drivers share across
+    // queues); passes on the async compute queue overlap the others there.
+    u64 begin_ns;
     NphGpuQueueType queue;
     // The pass's declared footprint (CLAUDE.md §10.7 "every renderer PR
     // must state its cost in both milliseconds and DRAM bytes"): the bytes

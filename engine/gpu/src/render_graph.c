@@ -1905,6 +1905,15 @@ u32 nph_gpu_rg_timings(const NphGpuRenderGraph *g, NphGpuRgPassTiming *out, u32 
         return 0U;
     }
     const f64 period = (f64)dev->info.limits.timestamp_period_ns;
+    // The earliest beginning of the frame's passes, which begin_ns counts
+    // from.
+    u64 first = NPH_U64_MAX;
+    for (u32 i = 0; i < g->timing_count[slot]; ++i) {
+        const RgTiming *t = &g->timings[slot][i];
+        if (t->ts_begin < tick_count && ticks[t->ts_begin] < first) {
+            first = ticks[t->ts_begin];
+        }
+    }
     u32 n = 0U;
     for (u32 i = 0; i < g->timing_count[slot] && n < cap; ++i) {
         const RgTiming *t = &g->timings[slot][i];
@@ -1913,9 +1922,11 @@ u32 nph_gpu_rg_timings(const NphGpuRenderGraph *g, NphGpuRgPassTiming *out, u32 
         out[n].read_bytes = t->read_bytes;
         out[n].write_bytes = t->write_bytes;
         out[n].gpu_ns = 0U;
+        out[n].begin_ns = 0U;
         if (t->ts_begin < tick_count && t->ts_end < tick_count &&
             ticks[t->ts_end] >= ticks[t->ts_begin]) {
             out[n].gpu_ns = (u64)((f64)(ticks[t->ts_end] - ticks[t->ts_begin]) * period);
+            out[n].begin_ns = (u64)((f64)(ticks[t->ts_begin] - first) * period);
         }
         ++n;
     }

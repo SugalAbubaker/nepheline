@@ -5,7 +5,8 @@
 // Each tracked pass has a ring of `history` samples; a frame that does not
 // run the pass leaves its ring untouched, so the statistics describe the
 // frames that ran it. The frame total is a ring of its own, filled with
-// the sum of every pass each frame.
+// the sum of every pass each frame, and so is the frame's span, from the
+// first pass's beginning to the last one's end.
 #include <nepheline/core/log.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/render/gpu_profiler.h>
@@ -14,6 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// The rings after the passes': the frame total, then the frame's span.
+#define TOTALS 2U
 
 typedef struct ProfPass {
     const char *name;
@@ -30,9 +34,9 @@ struct NphRenderGpuProfiler {
     NphAllocator *alloc;
     u32 history;
     u32 max_passes;
-    ProfPass *passes; // max_passes + 1: the last is the frame total
+    ProfPass *passes; // max_passes + TOTALS: then the frame total and the span
     u32 pass_count;
-    f32 *rings;   // (max_passes + 1) x history
+    f32 *rings;   // (max_passes + TOTALS) x history
     f32 *scratch; // history, for percentiles
     u64 frames;
     u64 last_frame;
@@ -55,7 +59,7 @@ NphResult nph_render_gpu_profiler_create(const NphRenderGpuProfilerDesc *desc,
     p->alloc = desc->alloc;
     p->history = desc->history != 0U ? desc->history : 240U;
     p->max_passes = desc->max_passes != 0U ? desc->max_passes : 64U;
-    const u64 slots = (u64)p->max_passes + 1U;
+    const u64 slots = (u64)p->max_passes + TOTALS;
     p->passes = NPH_ALLOC_ARRAY_ZEROED(p->alloc, ProfPass, slots);
     p->rings = NPH_ALLOC_ARRAY_ZEROED(p->alloc, f32, slots * p->history);
     p->scratch = NPH_ALLOC_ARRAY_ZEROED(p->alloc, f32, p->history);
@@ -67,6 +71,7 @@ NphResult nph_render_gpu_profiler_create(const NphRenderGpuProfilerDesc *desc,
         p->passes[i].ring = p->rings + i * p->history;
     }
     p->passes[p->max_passes].name = "frame";
+    p->passes[p->max_passes + 1U].name = "span";
     *out = p;
     return NPH_RESULT_OK;
 }
@@ -76,7 +81,7 @@ void nph_render_gpu_profiler_destroy(NphRenderGpuProfiler *p)
     if (p == NULL) {
         return;
     }
-    const u64 slots = (u64)p->max_passes + 1U;
+    const u64 slots = (u64)p->max_passes + TOTALS;
     if (p->passes != NULL) {
         NPH_FREE_ARRAY(p->alloc, ProfPass, p->passes, slots);
     }
@@ -92,7 +97,7 @@ void nph_render_gpu_profiler_destroy(NphRenderGpuProfiler *p)
 void nph_render_gpu_profiler_reset(NphRenderGpuProfiler *p)
 {
     NPH_ASSERT(p != NULL);
-    for (u32 i = 0; i <= p->max_passes; ++i) {
+    for (u32 i = 0; i < p->max_passes + TOTALS; ++i) {
         p->passes[i].head = 0U;
         p->passes[i].count = 0U;
         p->passes[i].last_ms = 0.0F;
@@ -144,6 +149,7 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
     f32 total = 0.0F;
     u64 total_read = 0U;
     u64 total_write = 0U;
+    u64 span_end = 0U;
     u32 recorded = 0U;
     f32 frame_ms[128];
     ProfPass *seen[128];
@@ -151,6 +157,10 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
     for (u32 i = 0; i < n; ++i) {
         const f32 ms = (f32)((f64)timings[i].gpu_ns / 1.0e6);
         total += ms;
+        // begin_ns counts from the earliest beginning, so the span is the
+        // latest end.
+        const u64 end = timings[i].begin_ns + timings[i].gpu_ns;
+        span_end = end > span_end ? end : span_end;
         total_read += timings[i].read_bytes;
         total_write += timings[i].write_bytes;
         ProfPass *pass = find_pass(p, timings[i].name);
@@ -181,6 +191,7 @@ u32 nph_render_gpu_profiler_update(NphRenderGpuProfiler *p, const NphGpuRenderGr
     push_sample(sum, p->history, total);
     sum->read_bytes = total_read;
     sum->write_bytes = total_write;
+    push_sample(&p->passes[p->max_passes + 1U], p->history, (f32)((f64)span_end / 1.0e6));
     p->frames += 1U;
     return recorded;
 }
@@ -236,8 +247,8 @@ u32 nph_render_gpu_profiler_stats(NphRenderGpuProfiler *p, NphRenderPassStats *o
     for (u32 i = 0; i < p->pass_count && n < cap; ++i) {
         pass_stats(p, &p->passes[i], &out[n++]);
     }
-    if (n < cap) {
-        pass_stats(p, &p->passes[p->max_passes], &out[n++]);
+    for (u32 i = 0; i < TOTALS && n < cap; ++i) {
+        pass_stats(p, &p->passes[p->max_passes + i], &out[n++]);
     }
     return n;
 }
@@ -245,8 +256,8 @@ u32 nph_render_gpu_profiler_stats(NphRenderGpuProfiler *p, NphRenderPassStats *o
 void nph_render_gpu_profiler_log(NphRenderGpuProfiler *p)
 {
     NPH_ASSERT(p != NULL);
-    NphRenderPassStats stats[65];
-    const u32 n = nph_render_gpu_profiler_stats(p, stats, 65U);
+    NphRenderPassStats stats[64U + TOTALS];
+    const u32 n = nph_render_gpu_profiler_stats(p, stats, 64U + TOTALS);
     for (u32 i = 0; i < n; ++i) {
         const NphRenderPassStats *s = &stats[i];
         NPH_LOG_INFO(&NPH_LOG_RENDER,
@@ -261,8 +272,8 @@ NphResult nph_render_gpu_profiler_write_json(NphRenderGpuProfiler *p, NphAllocat
                                              const char *path)
 {
     NPH_ASSERT(p != NULL && alloc != NULL && path != NULL);
-    NphRenderPassStats stats[65];
-    const u32 n = nph_render_gpu_profiler_stats(p, stats, 65U);
+    NphRenderPassStats stats[64U + TOTALS];
+    const u32 n = nph_render_gpu_profiler_stats(p, stats, 64U + TOTALS);
     const u64 cap = 256U + (u64)n * 384U;
     char *text = NPH_ALLOC_ARRAY(alloc, char, cap);
     if (text == NULL) {

@@ -13,7 +13,7 @@
 // image-based-lighting passes, for instance) is averaged over the frames
 // it ran in.
 //
-// Costs (§1.4): create allocates the windows (max_passes x history
+// Costs (§1.4): create allocates the windows ((max_passes + 2) x history
 // floats) and a sort scratch of `history` floats; update and the queries
 // allocate nothing; write_json allocates its text from the given
 // allocator.
@@ -60,7 +60,10 @@ typedef struct NphRenderPassStats {
 } NphRenderPassStats;
 
 // Statistics per pass, in the order the passes were first seen, then the
-// frame total (the sum of every pass per frame, times and declared bytes).
+// frame total ("frame": the sum of every pass per frame, times and declared
+// bytes), then the frame's span ("span": from the first pass's beginning to
+// the last one's end, on any queue; passes that overlap on the async compute
+// queue make it shorter than the total, idle gaps between passes longer).
 // Returns the number written (at most `cap`).
 u32 nph_render_gpu_profiler_stats(NphRenderGpuProfiler *p, NphRenderPassStats *out, u32 cap);
 

@@ -16,7 +16,11 @@
 //   <scene>.gpu.<pass>  each render-graph pass's mean GPU time, with its
 //                       declared footprint: the bytes of the resource
 //                       ranges it reads and writes, an upper bound on its
-//                       DRAM traffic (render_graph.h NphGpuRgPassTiming).
+//                       DRAM traffic (render_graph.h NphGpuRgPassTiming);
+//   <scene>.gpu.span    the frame's span, from its first pass's beginning to
+//                       its last one's end on any queue: the sum above
+//                       while one queue runs every pass, less where async
+//                       compute overlaps it.
 //
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]

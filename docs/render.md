@@ -1112,8 +1112,17 @@ nearest-rank p99, along with the pass's **declared footprint**: bytes read
 and written as declared to the render graph (§10.7 asks every renderer PR
 for milliseconds and DRAM bytes). The footprint is what a pass asks for,
 not measured traffic. Caches and framebuffer compression make real traffic
-smaller, and repeated reads are not counted. The profiler logs a table and
-writes JSON for the benchmarks.
+smaller, and repeated reads are not counted. After the passes come two
+totals: the frame (`frame`, the sum of the passes) and its span (`span`,
+from the first pass's beginning to the last one's end, on any queue, from
+the render graph's `begin_ns`). They agree while one queue runs every pass
+(Bistro: 7.00 against 6.99 ms); passes overlapping on the async compute
+queue would make the span the shorter, and it is the frame time §10.1
+counts. Moving the radiance cache's update and resolve there (every image
+made concurrent for the trial) lengthened Bistro's span to 7.15 ms and its
+resolve by 0.08 ms: the queues' semaphores left gaps, and nothing
+overlapped enough to pay for them. The profiler logs a table and writes
+JSON for the benchmarks.
 
 CPU time: `nph_render_frame` is the profiler zone `render.frame`
 ([profile.md](profile.md)); the passes it declares are recorded under the

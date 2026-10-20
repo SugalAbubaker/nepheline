@@ -319,7 +319,10 @@ and executes:
    many passes it declares (CLAUDE.md §10.5); with one per pass, a
    production frame that also computed the environment exhausted a
    thread's 32. Timestamps bracket every pass; `nph_gpu_rg_timings`
-   reports the frame that completed two frames ago, with each pass's
+   reports the frame that completed two frames ago: each pass's GPU time,
+   when it began after the frame's first pass (`begin_ns`, every queue's
+   timestamps read as the device's one clock, so a frame's span shows
+   overlap between queues), and its
    declared footprint: the bytes of every range it declared, counted once
    as read and/or written (loaded and stored attachments included). That
    is what a pass asks for, not measured DRAM traffic; the renderer's GPU

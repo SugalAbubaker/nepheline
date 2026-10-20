@@ -163,6 +163,10 @@ renderer itself on a device, scene by scene, and reports what CLAUDE.md
   bound on DRAM traffic, not a measurement: whole buffers count even when a
   GPU-driven pass touches a fraction of them (the production path's lists
   are sized for its capacities), and caches absorb re-reads.
+- `<scene>.gpu.span`: the frame's span, from its first pass's beginning to
+  its last one's end on any queue (the render graph's `begin_ns`): the sum
+  of the passes while one queue runs them all, shorter where passes overlap
+  on the async compute queue (docs/render.md "GPU profiler").
 
 Each scene renders warm-up frames (at least 24 and 500 ms: instance
 uploads, the environment's image-based-lighting passes, the GPU's clocks),

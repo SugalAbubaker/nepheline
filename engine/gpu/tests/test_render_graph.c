@@ -652,6 +652,10 @@ NTEST_F(GpuFixture, reports_pass_timings_two_frames_later)
             NTEST_EXPECT_EQ_UINT(timings[0].write_bytes, 32U * 32U * 4U);
             NTEST_EXPECT_EQ_UINT(timings[1].read_bytes, 32U * 32U * 4U);
             NTEST_EXPECT_EQ_UINT(timings[1].write_bytes, 4096U);
+            // The first pass begins the frame; the copy, on the same queue
+            // and ordered after the clear, begins when the clear has ended.
+            NTEST_EXPECT_EQ_UINT(timings[0].begin_ns, 0U);
+            NTEST_EXPECT_GE_UINT(timings[1].begin_ns, timings[0].gpu_ns);
         } else {
             NTEST_ASSERT_EQ_UINT(n, 0U);
         }

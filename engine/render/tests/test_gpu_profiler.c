@@ -28,11 +28,13 @@ NTEST(gpu_profiler, create_checks_its_description)
     d.alloc = nph_allocator_system();
     NTEST_ASSERT_EQ_INT(nph_render_gpu_profiler_create(&d, &p), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(nph_render_gpu_profiler_frames(p), 0U);
-    // Before any frame: only the (empty) frame total.
+    // Before any frame: only the (empty) frame total and span.
     NphRenderPassStats s[4];
-    NTEST_ASSERT_EQ_UINT(nph_render_gpu_profiler_stats(p, s, 4U), 1U);
+    NTEST_ASSERT_EQ_UINT(nph_render_gpu_profiler_stats(p, s, 4U), 2U);
     NTEST_EXPECT_EQ_STR(s[0].name, "frame");
     NTEST_EXPECT_EQ_UINT(s[0].samples, 0U);
+    NTEST_EXPECT_EQ_STR(s[1].name, "span");
+    NTEST_EXPECT_EQ_UINT(s[1].samples, 0U);
     nph_render_gpu_profiler_destroy(p);
     nph_render_gpu_profiler_destroy(NULL);
 }
@@ -88,7 +90,15 @@ NTEST_F(Profiler, collects_the_renderer_passes)
         }
     }
     NTEST_EXPECT_TRUE(forward && tonemap && lut);
-    NTEST_EXPECT_EQ_STR(s[n - 1U].name, "frame");
+    NTEST_ASSERT_TRUE(n >= 2U);
+    NTEST_EXPECT_EQ_STR(s[n - 2U].name, "frame");
+    NTEST_EXPECT_EQ_STR(s[n - 1U].name, "span");
+    // One queue runs the passes one after another: the span holds them all
+    // (and whatever separates them), so it is at least their sum, rounding
+    // aside, and not much more.
+    NTEST_EXPECT_EQ_UINT(s[n - 1U].samples, s[n - 2U].samples);
+    NTEST_EXPECT_TRUE(s[n - 1U].mean_ms >= s[n - 2U].mean_ms * 0.999 - 1e-6);
+    NTEST_EXPECT_TRUE(s[n - 1U].mean_ms <= s[n - 2U].mean_ms * 2.0 + 0.05);
 
     char path[512];
     snprintf(path, sizeof path, "%s/render_profiler_test.json", NPH_SHADER_DIR);
