@@ -20,7 +20,8 @@
 // Compiled twice: vis_resolve.comp, and vis_resolve_rt.comp with ray
 // queries (NPH_RAY_QUERY), which traces shadow rays for the lights that
 // cast them (rt_common.glsl); the renderer takes the second when a light
-// casts shadows.
+// casts shadows. Each is specialised on whether the frame has the sun's
+// virtual shadow map (k_vsm) and the radiance cache (k_gi).
 #ifndef NPH_VIS_RESOLVE_GLSL
 #define NPH_VIS_RESOLVE_GLSL
 
@@ -82,6 +83,35 @@ float vis_ambient_occlusion()
 }
 #define NPH_SURFACE_AO (g_ao != NPH_VIS_NO_AO ? vis_ambient_occlusion() : 1.0)
 
+// The radiance cache where the frame has it (gi.c): the pipelines are
+// specialised on it, so frames without it keep the registers its lookup
+// would hold. main() looks the pixel's cell up as soon as it has the
+// pixel's point, before the triangle's attributes, and the shading blends
+// the cell's irradiance in (surface.glsl): the resolve runs at its register
+// limit, and of the places measured (here, the shading's indirect light,
+// after the attributes) this one costs least (docs/adr/0039).
+#include "gi_common.glsl"
+layout(constant_id = 2) const bool k_gi = false;
+vec4 g_gi_cell; // set in main() where k_gi
+#define NPH_SURFACE_GI_ACTIVE k_gi
+#define NPH_SURFACE_GI        g_gi_cell
+
+// The cache's cell holding the surface point `p` (camera relative) of
+// geometric normal `face` (either way round: the cells are keyed by the
+// side the camera sees, as the update keys them), at a random point of the
+// cell under temporal anti-aliasing, which averages them (gi_jitter): its
+// irradiance and trust (gi_cell), zero where the cache has none.
+vec4 vis_gi_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
+{
+    const vec3 n = dot(face, p) > 0.0 ? -face : face;
+    vec3 at = p;
+    if (g.g.jitter != 0u) {
+        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
+    }
+    const uint slot = gi_find(g, gi_key(g, at, n));
+    return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
+}
+
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
@@ -102,43 +132,6 @@ void store(ivec2 p, vec3 color, bool dither)
         color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
     }
     imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
-}
-
-// Perspective-correct barycentrics of a pixel at NDC `q` and their change
-// one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
-// of a pixel in NDC (2 / width, 2 / height; Vulkan's NDC y grows down like
-// pixel rows). The screen-space barycentrics b_i are affine in q, so b_i /
-// w_i and their sum are too; their ratio is the perspective-correct
-// weight, exact for neighbours as well.
-struct VisBarycentrics {
-    vec3 b;
-    vec3 ddx;
-    vec3 ddy;
-};
-
-VisBarycentrics vis_barycentrics(vec4 c0, vec4 c1, vec4 c2, vec2 q, vec2 step)
-{
-    const vec3 inv_w = 1.0 / vec3(c0.w, c1.w, c2.w);
-    const vec2 n0 = c0.xy * inv_w.x;
-    const vec2 e1 = c1.xy * inv_w.y - n0;
-    const vec2 e2 = c2.xy * inv_w.z - n0;
-    const float inv_area = 1.0 / (e1.x * e2.y - e1.y * e2.x);
-    const vec2 d = q - n0;
-    const float b1 = (d.x * e2.y - d.y * e2.x) * inv_area;
-    const float b2 = (e1.x * d.y - e1.y * d.x) * inv_area;
-    // Gradients of b1 and b2 in NDC; b0's is minus their sum.
-    const vec2 g1 = vec2(e2.y, -e2.x) * inv_area;
-    const vec2 g2 = vec2(-e1.y, e1.x) * inv_area;
-    const vec2 g0 = -(g1 + g2);
-    const vec3 f = vec3(1.0 - b1 - b2, b1, b2) * inv_w;
-    const vec3 fx = vec3(g0.x, g1.x, g2.x) * inv_w * step.x;
-    const vec3 fy = vec3(g0.y, g1.y, g2.y) * inv_w * step.y;
-    const float s = f.x + f.y + f.z;
-    VisBarycentrics r;
-    r.b = f / s;
-    r.ddx = (f + fx) / (s + fx.x + fx.y + fx.z) - r.b;
-    r.ddy = (f + fy) / (s + fy.x + fy.y + fy.z) - r.b;
-    return r;
 }
 
 // A bright colour from a key (an integer hash: Wang, "Integer Hash
@@ -226,6 +219,12 @@ void main()
         const vec4 c2 = view.v.view_proj * vec4(w2, 1.0);
         const VisBarycentrics bary = vis_barycentrics(c0, c1, c2, q, 2.0 * view.v.viewport.zw);
         const mat3 world = mat3(w0, w1, w2);
+        if (k_gi) {
+            // The point and the triangle's normal as the cache's update
+            // keys them (gi_update.comp: the same arithmetic, as below).
+            g_gi_cell = vis_gi_cell(GiViewRef(rview.v.gi), p, world * bary.b,
+                                    normalize(cross(w1 - w0, w2 - w0)));
+        }
 
         AttribsRef attribs = AttribsRef(mesh.attribs);
         const uvec4 a0 = attribs.a[vtx.x];
@@ -262,8 +261,13 @@ void main()
         s.pixel = vec2(p) + 0.5;
         s.depth = vis_depth(v);
 
-        const NphRenderMaterialData material = MaterialsRef(view.v.materials).m[cluster.material];
-        color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
+        if (debug == NPH_RENDER_DEBUG_IRRADIANCE) {
+            color = nph_surface_irradiance_view(rview, s, k_gi ? g_gi_cell : vec4(0.0));
+        } else {
+            const NphRenderMaterialData material =
+                MaterialsRef(view.v.materials).m[cluster.material];
+            color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
+        }
     }
     store(p, color, dither);
 }

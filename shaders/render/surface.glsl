@@ -37,6 +37,13 @@
 // walking the subgroup's lights together (Drobot 2017) measured slower
 // for the registers it holds (docs/adr/0031).
 //
+// The diffuse indirect light takes the environment's irradiance, or, where
+// the includer defines NPH_SURFACE_GI while NPH_SURFACE_GI_ACTIVE, the
+// production path's radiance cache's: NPH_SURFACE_GI is the cache's cell
+// at the surface (gi_common.glsl gi_cell: its irradiance, and how far it is
+// trusted, 0 to 1), and the environment's irradiance makes up what it does
+// not trust yet.
+//
 // The environment and the emission are evaluated before the punctual
 // lights, so that across the light loop, where a shader's registers peak,
 // only the point's description and one sum stay live.
@@ -250,9 +257,28 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
     return direct;
 }
 
+// The irradiance debug view (NPH_RENDER_DEBUG_IRRADIANCE): the diffuse
+// irradiance at the surface's interpolated normal (facing the viewer, as
+// the shading's) over pi, pre-exposed, before any occlusion: the
+// environment's, or as far as `cell.w` trusts it the radiance cache's
+// (gi_common.glsl gi_cell; zero without one). Includers branch to it instead
+// of nph_surface_shade: as a case of that function's debug views it kept a
+// value live that cost every frame (0.05 ms in a 4K resolve).
+vec3 nph_surface_irradiance_view(ViewRef view, NphSurface s, vec4 cell)
+{
+    const vec3 n = normalize(s.normal * (s.front_facing ? 1.0 : -1.0));
+    vec3 e = vec3(0.0);
+    if ((view.v.flags & NPH_RENDER_VIEW_IBL) != 0u) {
+        e = nph_sh9_irradiance(ShRef(view.v.sh_address), n) * view.v.ibl_intensity;
+    }
+    e = mix(e, cell.rgb, cell.w);
+    return min(e * (NPH_INV_PI * view.v.exposure), vec3(NPH_RENDER_HALF_MAX));
+}
+
 // The pre-exposed radiance leaving the surface towards the camera (at the
 // origin), or for an unlit material its colour as authored. `base` is
-// nph_surface_base_color's result.
+// nph_surface_base_color's result. The irradiance debug view is
+// nph_surface_irradiance_view's.
 vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4 base)
 {
     if ((m.flags & NPH_RENDER_MATERIAL_UNLIT) != 0u) {
@@ -319,17 +345,38 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     const float ess = max(dfg.x + dfg.y, 1e-4);
     const vec3 energy = vec3(1.0) + f0 * (1.0 / ess - 1.0);
 
-    // Image-based lighting.
+    // Image-based lighting, and the production path's radiance cache where
+    // the includer defines NPH_SURFACE_GI (vis_resolve.glsl, from
+    // gi_update.comp), whose irradiance the diffuse light takes instead of
+    // the environment's: it holds the environment's light too, occluded by
+    // the scene, and the light the scene reflects (with no environment, the
+    // sun's alone).
+    const bool ibl = (view.v.flags & NPH_RENDER_VIEW_IBL) != 0u;
+#ifdef NPH_SURFACE_GI
+    const bool gi = NPH_SURFACE_GI_ACTIVE;
+#else
+    const bool gi = false;
+#endif
     vec3 indirect = vec3(0.0);
-    if ((view.v.flags & NPH_RENDER_VIEW_IBL) != 0u) {
-        const vec3 irradiance =
-            nph_sh9_irradiance(ShRef(view.v.sh_address), n) * view.v.ibl_intensity;
+    if (ibl || gi) {
+        vec3 irradiance = vec3(0.0);
+        if (ibl) {
+            irradiance = nph_sh9_irradiance(ShRef(view.v.sh_address), n) * view.v.ibl_intensity;
+        }
+#ifdef NPH_SURFACE_GI
+        if (gi) {
+            const vec4 cell = NPH_SURFACE_GI;
+            irradiance = mix(irradiance, cell.rgb, cell.w);
+        }
+#endif
         const vec3 r = reflect(-v, n);
         const vec3 radiance =
-            textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
-                                   nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
-                       r, roughness * view.v.specular_max_lod).rgb *
-            view.v.ibl_intensity;
+            ibl ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
+                                         nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
+                             r, roughness * view.v.specular_max_lod)
+                          .rgb *
+                      view.v.ibl_intensity
+                : vec3(0.0);
         // Fdez-Agüera 2019: single- and multiple-scattering specular, and
         // the diffuse energy that remains.
         const vec3 fr = max(vec3(1.0 - roughness), f0) - f0;

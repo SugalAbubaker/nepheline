@@ -79,6 +79,7 @@ static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_SCATTER,    VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
     VIS_SHADER_HZB,        VIS_SHADER_RESOLVE,        VIS_SHADER_SW_RASTER,     VIS_SHADER_LIGHTS,
     VIS_SHADER_LIGHT_BINS, VIS_SHADER_LIGHT_TILES,    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT, VIS_SHADER_RESOLVE,        VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
     VIS_SHADER_RESOLVE_RT,
 };
 
@@ -96,6 +97,10 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
+    "vis resolve (radiance cache)",
+    "vis resolve (ray traced, radiance cache)",
+    "vis resolve (virtual shadows, radiance cache)",
+    "vis resolve (ray traced, virtual shadows, radiance cache)",
 };
 
 // ---------------------------------------------------------------------------
@@ -195,6 +200,9 @@ NphResult render_vis_create(NphRenderer *r)
     // the blended surfaces get the pipelines that read it.
     r->vsm.supported = render_vsm_device_supported(r) ? 1 : 0;
     const bool vsm = r->vsm.supported != 0;
+    // And the radiance cache (gi.c), for the same reason.
+    r->gi.supported = render_gi_device_supported(r) ? 1 : 0;
+    const bool gi = r->gi.supported != 0;
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         const bool mesh_stage =
             i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_MASKED;
@@ -211,23 +219,27 @@ NphResult render_vis_create(NphRenderer *r)
     }
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         const bool resolve_rt =
-            i == (u32)VIS_COMPUTE_RESOLVE_RT || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM;
+            i == (u32)VIS_COMPUTE_RESOLVE_RT || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM ||
+            i == (u32)VIS_COMPUTE_RESOLVE_RT_GI || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM_GI;
         const bool resolve_vsm =
-            i == (u32)VIS_COMPUTE_RESOLVE_VSM || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM;
-        if ((resolve_rt && !r->rt.supported) || (resolve_vsm && !vsm)) {
+            i == (u32)VIS_COMPUTE_RESOLVE_VSM || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM ||
+            i == (u32)VIS_COMPUTE_RESOLVE_VSM_GI || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM_GI;
+        const bool resolve_gi = i >= (u32)VIS_COMPUTE_RESOLVE_GI;
+        if ((resolve_rt && !r->rt.supported) || (resolve_vsm && !vsm) || (resolve_gi && !gi)) {
             continue;
         }
         NphGpuComputePipelineDesc d;
         memset(&d, 0, sizeof d);
         d.shader = v->shaders[k_compute_shaders[i]];
         d.name = k_compute_names[i];
-        if (i == (u32)VIS_COMPUTE_RESOLVE || resolve_rt || resolve_vsm) {
-            // Whether the resolve dithers to the HDR target's precision, and
-            // whether it reads the sun's virtual shadow map
-            // (vis_resolve.glsl k_dither, k_vsm).
+        if (i == (u32)VIS_COMPUTE_RESOLVE || resolve_rt || resolve_vsm || resolve_gi) {
+            // Whether the resolve dithers to the HDR target's precision,
+            // whether it reads the sun's virtual shadow map, and whether
+            // the radiance cache (vis_resolve.glsl k_dither, k_vsm, k_gi).
             d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
             d.specialization[1] = resolve_vsm ? 1U : 0U;
-            d.specialization_count = 2U;
+            d.specialization[2] = resolve_gi ? 1U : 0U;
+            d.specialization_count = 3U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         render_log_statistics(r, v->compute[i], k_compute_names[i]);
@@ -859,11 +871,15 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
     p.arg2 = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
     p.arg3 = r->ao.frame_push.point_sampler;
-    static const VisCompute k_resolve[2][2] = {
-        {VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_VSM},
-        {VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_VSM}};
+    // By shadow rays, the virtual shadow map, and the radiance cache.
+    static const VisCompute k_resolve[2][2][2] = {
+        {{VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_GI},
+         {VIS_COMPUTE_RESOLVE_VSM, VIS_COMPUTE_RESOLVE_VSM_GI}},
+        {{VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_GI},
+         {VIS_COMPUTE_RESOLVE_RT_VSM, VIS_COMPUTE_RESOLVE_RT_VSM_GI}}};
     nph_gpu_cmd_bind_pipeline(
-        cmd, r->vis.compute[k_resolve[r->rt.frame_active ? 1 : 0][r->vsm.frame_active ? 1 : 0]]);
+        cmd, r->vis.compute[k_resolve[r->rt.frame_shadows ? 1 : 0][r->vsm.frame_active ? 1 : 0]
+                                     [r->gi.frame_active ? 1 : 0]]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
@@ -1076,6 +1092,7 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
         nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
     }
     render_vsm_read(r, p);
+    render_gi_read(r, p);
     if (r->ao.frame_active) {
         nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
@@ -1348,9 +1365,22 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         res = render_ao_declare(r, graph);
     }
     if (res == NPH_RESULT_OK && r->rt.frame_active) {
-        // Shadow rays: the instance records from the GPU scene, then the
-        // builds, before the resolve traces.
+        // Rays: the instance records from the GPU scene, then the builds,
+        // before the radiance cache and the resolve trace.
         res = render_rt_declare(r, graph, g.instances, g.meshes, f->counters, &f->tlas);
+    }
+    if (res == NPH_RESULT_OK && r->gi.frame_active) {
+        // The radiance cache, whose cells the resolve reads.
+        RenderGiInputs in;
+        in.visbuffer = f->visbuffer;
+        in.clusters = g.clusters;
+        in.instances = g.instances;
+        in.meshes = g.meshes;
+        in.material_map = g.material_map;
+        in.tlas = f->tlas;
+        in.env = env;
+        in.sh = sh;
+        res = render_gi_declare(r, graph, &in);
     }
     if (res == NPH_RESULT_OK) {
         res = declare_resolve(graph, r, &g, env, specular, lut, sh);

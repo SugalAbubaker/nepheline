@@ -82,6 +82,11 @@ void main()
         discard;
     }
 #endif
-    const vec3 color = nph_surface_shade(view, m, s, base);
+    vec3 color;
+    if (view.v.debug_mode == NPH_RENDER_DEBUG_IRRADIANCE) {
+        color = nph_surface_irradiance_view(view, s, vec4(0.0));
+    } else {
+        color = nph_surface_shade(view, m, s, base);
+    }
     out_color = vec4(color, NPH_FORWARD_ALPHA_MODE == 2 ? base.a : 1.0);
 }

@@ -54,6 +54,8 @@ static inline void test_renderer_desc(NphRendererDesc *d, NphGpuDevice *dev)
     d->vsm_pages = 64U;
     d->max_vsm_meshlets = 65536U;
     d->max_vsm_draws = 65536U;
+    // The radiance cache: test views are small.
+    d->gi_cells = 1U << 16U;
     d->name = "test renderer";
 }
 

@@ -81,6 +81,69 @@ vec3 vis_position(NphVisMesh mesh, uint vertex)
     return mesh.position_offset.xyz + unorm * mesh.position_scale.xyz;
 }
 
+// Perspective-correct barycentrics of a pixel at NDC `q` and their change
+// one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
+// of a pixel in NDC (2 / width, 2 / height; Vulkan's NDC y grows down like
+// pixel rows). The screen-space barycentrics b_i are affine in q, so b_i /
+// w_i and their sum are too; their ratio is the perspective-correct
+// weight, exact for neighbours as well.
+struct VisBarycentrics {
+    vec3 b;
+    vec3 ddx;
+    vec3 ddy;
+};
+
+VisBarycentrics vis_barycentrics(vec4 c0, vec4 c1, vec4 c2, vec2 q, vec2 step)
+{
+    const vec3 inv_w = 1.0 / vec3(c0.w, c1.w, c2.w);
+    const vec2 n0 = c0.xy * inv_w.x;
+    const vec2 e1 = c1.xy * inv_w.y - n0;
+    const vec2 e2 = c2.xy * inv_w.z - n0;
+    const float inv_area = 1.0 / (e1.x * e2.y - e1.y * e2.x);
+    const vec2 d = q - n0;
+    const float b1 = (d.x * e2.y - d.y * e2.x) * inv_area;
+    const float b2 = (e1.x * d.y - e1.y * d.x) * inv_area;
+    // Gradients of b1 and b2 in NDC; b0's is minus their sum.
+    const vec2 g1 = vec2(e2.y, -e2.x) * inv_area;
+    const vec2 g2 = vec2(-e1.y, e1.x) * inv_area;
+    const vec2 g0 = -(g1 + g2);
+    const vec3 f = vec3(1.0 - b1 - b2, b1, b2) * inv_w;
+    const vec3 fx = vec3(g0.x, g1.x, g2.x) * inv_w * step.x;
+    const vec3 fy = vec3(g0.y, g1.y, g2.y) * inv_w * step.y;
+    const float s = f.x + f.y + f.z;
+    VisBarycentrics r;
+    r.b = f / s;
+    r.ddx = (f + fx) / (s + fx.x + fx.y + fx.z) - r.b;
+    r.ddy = (f + fy) / (s + fy.x + fy.y + fy.z) - r.b;
+    return r;
+}
+
+// The material table index of a material handle value from the material
+// map: its slot when the table's record there still carries that handle,
+// else the default material (a destroyed or unset material).
+uint vis_resolve_material(VisViewRef view, uint handle)
+{
+    if (handle == 0u) {
+        return view.v.default_material;
+    }
+    const uint index = handle & view.v.material_index_mask;
+    if (index >= view.v.default_material ||
+        MaterialsRef(view.v.materials).m[index].handle != handle) {
+        return view.v.default_material;
+    }
+    return index;
+}
+
+// The material table index of submesh slot `slot` of an instance (its
+// material map's entry; the default material past its slots).
+uint vis_instance_material(VisViewRef view, NphVisInstance inst, uint slot)
+{
+    const uint handle = slot < inst.material_count
+                            ? VisUintRef(view.v.material_map).v[inst.material_base + slot]
+                            : 0u;
+    return vis_resolve_material(view, handle);
+}
+
 // One byte of the meshlet triangle array (MLTR, read as u32 words).
 uint vis_triangle_byte(NphVisMesh mesh, uint byte_index)
 {

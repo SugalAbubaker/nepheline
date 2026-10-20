@@ -11,7 +11,7 @@
 //     pbr_viewer [--frames=N] [--capture=FILE.bmp] [--profile=FILE.json]
 //                [--pack=FILE] [--tonemapper=aces|agx|none]
 //                [--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect|
-//                        clusters|triangles|instances]
+//                        irradiance|clusters|triangles|instances]
 //                [--pipeline=production|reference] [--ev100=X] [--vsync] [--no-debug]
 //
 // Keys: 1/2/3 ACES/AgX/none, V cycles the debug views, P switches between
@@ -65,8 +65,8 @@ typedef struct Options {
 } Options;
 
 static const char *const g_view_names[NPH_RENDER_VIEW_COUNT] = {
-    "lit",    "base",     "normal",   "roughness", "metallic", "occlusion",
-    "direct", "indirect", "clusters", "triangles", "instances"};
+    "lit",    "base",     "normal",     "roughness", "metallic",  "occlusion",
+    "direct", "indirect", "irradiance", "clusters",  "triangles", "instances"};
 static const char *const g_tonemapper_names[3] = {"none", "aces", "agx"};
 static const char *const g_pipeline_names[2] = {"reference", "production"};
 
@@ -76,7 +76,7 @@ static int usage(void)
                     "[--pack=FILE]\n"
                     "                  [--tonemapper=aces|agx|none] "
                     "[--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect|\n"
-                    "                          clusters|triangles|instances]\n"
+                    "                          irradiance|clusters|triangles|instances]\n"
                     "                  [--pipeline=production|reference] [--ev100=X] [--vsync] "
                     "[--no-debug]\n");
     return 2;

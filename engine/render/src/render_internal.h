@@ -149,7 +149,7 @@ typedef struct RenderMesh {
     NphGpuBuffer meshlet_bounds;
     NphGpuBuffer meshlet_vertices;
     NphGpuBuffer meshlet_triangles;
-    NphGpuBuffer submesh_slots;
+    NphGpuBuffer submesh_table; // NphVisMesh.submeshes
     NphRange index_range;
     u32 meshlet_count;
     u32 meshlet_triangle_count;
@@ -257,13 +257,18 @@ typedef struct RenderRt {
     u64 scratch_size;
     u32 *pending; // mesh slots whose bottom level waits for its build
     u32 pending_count;
-    u32 shadow_lights; // live lights that cast shadows
+    // One bottom level's geometries (a submesh each), as mesh_geometries
+    // fills them for a sizing (the main thread) or a build (the build pass,
+    // while the main thread waits on the graph): never both at once.
+    NphGpuAccelTriangles *geometries; // NPH_RENDER_MAX_SUBMESHES
+    u32 shadow_lights;                // live lights that cast shadows
     // The top level's space: the camera's shifted by tlas_offset (rt.c).
     NphDVec3 anchor;      // where its origin is in the world
     NphVec3 tlas_offset;  // the camera in it, this frame
     b32 tlas_valid;       // it holds the instances as they are (as of this frame's records)
     b32 tlas_production;  // the production path built it
-    b32 frame_active;     // this frame traces shadow rays
+    b32 frame_active;     // this frame's top level is built, for shadow rays or the radiance cache
+    b32 frame_shadows;    // this frame shades with shadow rays (the *_rt pipelines)
     b32 frame_production; // its instances come from the GPU scene
     b32 frame_rebuild;    // it rebuilds the top level
     u32 frame_instances;  // instance records of this frame's top level (active ones first)
@@ -313,6 +318,7 @@ typedef struct RenderFrameLayout {
     u64 light_grid_offset;        // NphRenderLightGrid
     u64 rt_instances_offset;      // NphGpuAccelInstance[max_instances]: the reference's
     u64 vsm_view_offset;          // NphVsmView (production path)
+    u64 gi_view_offset;           // NphRenderGiView (production path)
     u64 size;
 } RenderFrameLayout;
 
@@ -359,6 +365,11 @@ typedef enum VisCompute {
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both
+    // Each resolve with the radiance cache (gi.c).
+    VIS_COMPUTE_RESOLVE_GI,
+    VIS_COMPUTE_RESOLVE_RT_GI,
+    VIS_COMPUTE_RESOLVE_VSM_GI,
+    VIS_COMPUTE_RESOLVE_RT_VSM_GI,
     VIS_COMPUTE_COUNT
 } VisCompute;
 
@@ -616,6 +627,42 @@ typedef struct RenderAo {
     NphGpuRgImage frame_out;    // the denoised occlusion and the depth
 } RenderAo;
 
+// The production path's radiance cache (gi.c): its slots persist across
+// frames; the frame's fields are set by render_gi_frame_begin and
+// render_gi_declare.
+typedef struct RenderGi {
+    b32 supported;               // render_gi_device_supported, set with the production path
+    b32 cleared;                 // its slots have been zeroed (the first frame that has it)
+    u32 capacity;                // slots (NphRendererDesc.gi_cells)
+    u32 sun_slot;                // the light whose bounce the update traces (NPH_U32_MAX: none)
+    NphGpuBuffer keys;           // u32 fingerprints
+    NphGpuBuffer sums;           // uvec4: this frame's samples
+    NphGpuBuffer cells;          // uvec4: irradiance, count, age
+    NphGpuShader update_shader;  // gi_update.comp
+    NphGpuShader resolve_shader; // gi_resolve.comp
+    NphGpuPipeline update;
+    NphGpuPipeline resolve;
+    b32 frame_active;
+    u32 frame_rays_x; // the update's samples across and down the target
+    u32 frame_rays_y;
+    NphGpuRgImage frame_visbuffer;
+    NphGpuRgBuffer frame_keys;
+    NphGpuRgBuffer frame_sums;
+    NphGpuRgBuffer frame_cells;
+} RenderGi;
+
+// What the radiance cache's update reads of the frame (vis.c).
+typedef struct RenderGiInputs {
+    NphGpuRgImage visbuffer;
+    NphGpuRgBuffer clusters;
+    NphGpuRgBuffer instances;
+    NphGpuRgBuffer meshes;
+    NphGpuRgBuffer material_map;
+    NphGpuRgBuffer tlas;
+    NphGpuRgImage env;
+    NphGpuRgBuffer sh;
+} RenderGiInputs;
+
 // The production path's motion blur (motion_blur.c): the motion image and
 // the tiles are transient, made each frame that blurs.
 typedef struct RenderMotion {
@@ -730,6 +777,9 @@ struct NphRenderer {
     // The production path's ambient occlusion.
     RenderAo ao;
 
+    // The production path's radiance cache.
+    RenderGi gi;
+
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
     NphRenderTonemapPush tonemap_push;
@@ -792,11 +842,12 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
 void render_rt_mesh_destroy(NphRenderer *r, u32 slot);
 // A light's shadows were turned on (+1) or off (-1).
 void render_rt_shadow_lights(NphRenderer *r, i32 change);
-// Whether this frame traces shadow rays: some light casts shadows that the
-// virtual shadow map does not take (`handled` of them), and the renderer
-// can (logged once when it cannot). Sets RenderRt.frame_* and the top
-// level's space for this frame's camera.
-bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled);
+// Whether this frame builds the top level: to trace shadow rays (some
+// light casts shadows that the virtual shadow map does not take, `handled`
+// of them: RenderRt.frame_shadows), or for the radiance cache's rays (`gi`),
+// and the renderer can (logged once when shadows cannot). Sets
+// RenderRt.frame_* and the top level's space for this frame's camera.
+bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled, bool gi);
 // The reference's instance records, written by the CPU into the frame's
 // upload buffer, in the top level's space.
 void render_rt_write_instances(NphRenderer *r);
@@ -937,6 +988,45 @@ NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph);
 NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph);
 // RenderAo.frame_out's sampled bindless index (a pass's callback).
 u32 render_ao_index(const NphRenderer *r, NphGpuRenderGraph *graph);
+
+// gi.c: the production path's radiance cache.
+// Whether the renderer makes it: not disabled, and the device has ray
+// queries (decided when the production path is created, whose resolve
+// pipelines are specialised on it).
+bool render_gi_device_supported(const NphRenderer *r);
+NphResult render_gi_create(NphRenderer *r);
+void render_gi_destroy(NphRenderer *r);
+// Light `slot` was created, changed, or destroyed: the sun whose light the
+// cache's rays find reflected is the live directional light in the lowest
+// slot. Constant time but where the sun itself stops being one.
+void render_gi_light_changed(NphRenderer *r, u32 slot);
+// Whether a frame of `view` takes the cache: a production view asking for
+// it whose image shows the diffuse indirect light (lit, or the indirect and
+// irradiance debug views), on a renderer that has it. The top level must be
+// built for it (render_rt_frame_begin).
+bool render_gi_frame_wanted(const NphRenderer *r, const NphRenderView *view, bool production);
+// Whether this frame has it; if so writes its NphRenderGiView into the
+// frame's records (render_gi_view_address) for a `width` x `height` target,
+// after the ambient occlusion's and the temporal resolve's frame begins.
+bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
+                           bool production);
+u64 render_gi_view_address(const NphRenderer *r);
+// Declares the update and the resolve (and, the first time, the slots'
+// clear) once the frame's top level and visibility buffer are declared.
+NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const RenderGiInputs *in);
+// Declares `pass`'s reads of the cells (the resolve's shading), if the frame
+// has them.
+void render_gi_read(const NphRenderer *r, NphGpuRgPass *pass);
+// The keys on the CPU, gi_common.glsl's twins: a camera's level table for
+// cells 1 / (2 scale) to 1 / scale of their distance across, a point's
+// level and key, and the mix that makes a key's bucket and fingerprint.
+void render_gi_levels(NphDVec3 camera, f64 scale, NphRenderGiLevel *levels);
+i32 render_gi_level(f32 dist);
+u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n);
+u64 render_gi_mix(u64 k);
+// The update's block: the smallest square of pixels that keeps a
+// `width` x `height` frame's samples within `rays`.
+u32 render_gi_stride(u32 width, u32 height, u32 rays);
 
 // motion_blur.c: the production path's motion blur.
 NphResult render_motion_create(NphRenderer *r);

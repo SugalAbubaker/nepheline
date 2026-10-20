@@ -30,22 +30,6 @@
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
-// The material table index of a material handle value from the material
-// map: its slot when the table's record there still carries that handle,
-// else the default material (a destroyed or unset material).
-uint resolve_material(VisViewRef view, uint handle)
-{
-    if (handle == 0u) {
-        return view.v.default_material;
-    }
-    const uint index = handle & view.v.material_index_mask;
-    if (index >= view.v.default_material ||
-        MaterialsRef(view.v.materials).m[index].handle != handle) {
-        return view.v.default_material;
-    }
-    return index;
-}
-
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -87,11 +71,11 @@ void main()
         first_index = mesh.index_base + m.y * 3u;
         vertex_offset = m.x;
         // The material of the meshlet's submesh, through the instance's map.
-        const uint mslot = VisUintRef(mesh.submesh_slots).v[m.w];
+        const uint mslot = VisUvec2Ref(mesh.submeshes).v[m.w].x;
         const uint handle =
             mslot < inst.material_count ? VisUintRef(view.v.material_map).v[inst.material_base + mslot]
                                         : 0u;
-        material = resolve_material(view, handle);
+        material = vis_resolve_material(view, handle);
         // The two fields, not a copy of the material: Ubuntu 24.04's glslang
         // (14.0) gives a local copy the buffer's array types, ArrayStride
         // included, which spirv-val rejects unless the optimiser removes the

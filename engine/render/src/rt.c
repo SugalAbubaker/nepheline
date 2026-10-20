@@ -4,8 +4,11 @@
 //
 //   - a bottom level per mesh over its quantised positions (16-bit unorm,
 //     read as they are where the device builds from them, else a float copy
-//     of the same values), created with the mesh and built in the next frame
-//     that traces, before that frame's top level;
+//     of the same values), a geometry per submesh, so that a ray's hit names
+//     its submesh (the geometry index) and its triangle within it (the
+//     primitive index; NphVisMesh.submeshes has each one's first index),
+//     created with the mesh and built in the next frame that traces, before
+//     that frame's top level;
 //   - a top level over the instances: their records fold each mesh's
 //     dequantisation into their transform, and come first in the record
 //     array, hidden and free slots after them as inactive records (a null
@@ -57,24 +60,30 @@ static u64 scratch_alignment(const NphRenderer *r)
     return nph_max_u32(nph_gpu_device_info(r->dev)->limits.accel_scratch_alignment, 1U);
 }
 
-// The mesh's triangles as one geometry (every submesh shares the index
-// buffer; the shadows treat every triangle as opaque).
-static void mesh_geometry(const NphRenderer *r, const RenderMesh *m, NphGpuAccelTriangles *out)
+// The mesh's triangles as a geometry per submesh, into RenderRt.geometries
+// (every submesh shares the vertices and the index buffer; the rays treat
+// every triangle as opaque); returns how many.
+static u32 mesh_geometries(NphRenderer *r, const RenderMesh *m)
 {
-    memset(out, 0, sizeof *out);
-    if (r->rt.unorm_vertices) {
-        out->vertices = m->positions;
-        out->vertex_stride = sizeof(NphRenderVertexPosition);
-        out->vertex_format = NPH_GPU_FORMAT_R16G16B16A16_UNORM;
-    } else {
-        out->vertices = m->blas_vertices;
-        out->vertex_stride = 3U * sizeof(f32);
-        out->vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+    for (u32 s = 0; s < m->submesh_count; ++s) {
+        NphGpuAccelTriangles *g = &r->rt.geometries[s];
+        memset(g, 0, sizeof *g);
+        if (r->rt.unorm_vertices) {
+            g->vertices = m->positions;
+            g->vertex_stride = sizeof(NphRenderVertexPosition);
+            g->vertex_format = NPH_GPU_FORMAT_R16G16B16A16_UNORM;
+        } else {
+            g->vertices = m->blas_vertices;
+            g->vertex_stride = 3U * sizeof(f32);
+            g->vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+        }
+        g->vertex_count = m->vertex_count;
+        g->indices = m->indices;
+        g->index_offset = (u64)m->submeshes[s].index_offset * sizeof(u32);
+        g->triangle_count = m->submeshes[s].index_count / 3U;
+        g->opaque = 1;
     }
-    out->vertex_count = m->vertex_count;
-    out->indices = m->indices;
-    out->triangle_count = m->index_count / 3U;
-    out->opaque = 1;
+    return m->submesh_count;
 }
 
 // Room in the scratch for one build of `size` bytes at the device's
@@ -129,7 +138,8 @@ NphResult render_rt_create(NphRenderer *r)
     bd.name = "rt instance records";
     NPH_TRY(nph_gpu_buffer_create(dev, &bd, &rt->instances));
     rt->pending = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
-    if (rt->pending == NULL) {
+    rt->geometries = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccelTriangles, NPH_RENDER_MAX_SUBMESHES);
+    if (rt->pending == NULL || rt->geometries == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     NphGpuComputePipelineDesc cd;
@@ -158,6 +168,9 @@ void render_rt_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, rt->scratch);
     if (rt->pending != NULL) {
         NPH_FREE_ARRAY(r->alloc, u32, rt->pending, r->desc.max_meshes);
+    }
+    if (rt->geometries != NULL) {
+        NPH_FREE_ARRAY(r->alloc, NphGpuAccelTriangles, rt->geometries, NPH_RENDER_MAX_SUBMESHES);
     }
     memset(rt, 0, sizeof *rt);
 }
@@ -196,10 +209,10 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
         NPH_FREE_ARRAY(r->alloc, f32, v, count * 3U);
         NPH_TRY(res);
     }
-    NphGpuAccelTriangles g;
-    mesh_geometry(r, m, &g);
+    const u32 geometries = mesh_geometries(r, m);
     NphGpuAccelSizes sizes;
-    NPH_TRY(nph_gpu_accel_blas_sizes(dev, &g, 1U, (u32)NPH_GPU_ACCEL_PREFER_TRACE, &sizes));
+    NPH_TRY(nph_gpu_accel_blas_sizes(dev, rt->geometries, geometries,
+                                     (u32)NPH_GPU_ACCEL_PREFER_TRACE, &sizes));
     NPH_TRY(reserve_scratch(r, sizes.scratch));
     NphGpuAccelDesc ad;
     memset(&ad, 0, sizeof ad);
@@ -207,8 +220,9 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
     ad.size = sizes.accel;
     ad.name = desc->name != NULL ? desc->name : "rt mesh";
     NPH_TRY(nph_gpu_accel_create(dev, &ad, &m->blas));
-    NPH_LOG_DEBUG(&NPH_LOG_RENDER, "%s: %s: a bottom level of %u triangles, %.1f KB", r->name,
-                  ad.name, g.triangle_count, (f64)sizes.accel / 1.0e3);
+    NPH_LOG_DEBUG(&NPH_LOG_RENDER,
+                  "%s: %s: a bottom level of %u triangles in %u geometries, %.1f KB", r->name,
+                  ad.name, m->index_count / 3U, geometries, (f64)sizes.accel / 1.0e3);
     m->blas_scratch = sizes.scratch;
     m->blas_pending = 1;
     rt->pending[rt->pending_count++] = slot;
@@ -243,17 +257,20 @@ void render_rt_shadow_lights(NphRenderer *r, i32 change)
     rt->shadow_lights = (u32)((i32)rt->shadow_lights + change);
 }
 
-bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled)
+bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled, bool gi)
 {
     RenderRt *rt = &r->rt;
     rt->frame_active = 0;
+    rt->frame_shadows = 0;
     rt->frame_production = production ? 1 : 0;
     rt->frame_rebuild = 0;
     rt->frame_instances = r->instance_pool.bump;
     rt->frame_builds = 0U;
     rt->tlas_offset = nph_vec3_zero();
-    // The lights whose shadows are this frame's to trace.
-    const bool traced = rt->shadow_lights > handled;
+    // The lights whose shadows are this frame's to trace, and the radiance
+    // cache's rays (which only a renderer that has ray queries asks for).
+    const bool shadows = rt->shadow_lights > handled;
+    const bool traced = shadows || gi;
     if (!traced || !rt->supported) {
         // Instances may change unseen: the next frame that traces rebuilds.
         rt->tlas_valid = 0;
@@ -272,6 +289,7 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
         return false;
     }
     rt->frame_active = 1;
+    rt->frame_shadows = shadows ? 1 : 0;
     const NphVec3 moved = nph_dvec3_relative(camera, rt->anchor);
     if (!production || !rt->tlas_valid || !rt->tlas_production ||
         nph_vec3_length_sq(moved) > (f32)(RT_ANCHOR_RADIUS * RT_ANCHOR_RADIUS)) {
@@ -393,10 +411,8 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
             accel_barrier(cmd); // the batch is done with the scratch
             at = 0U;
         }
-        NphGpuAccelTriangles g;
-        mesh_geometry(r, m, &g);
-        nph_gpu_cmd_build_blas(cmd, m->blas, &g, 1U, (u32)NPH_GPU_ACCEL_PREFER_TRACE, rt->scratch,
-                               lead + at);
+        nph_gpu_cmd_build_blas(cmd, m->blas, rt->geometries, mesh_geometries(r, m),
+                               (u32)NPH_GPU_ACCEL_PREFER_TRACE, rt->scratch, lead + at);
         m->blas_pending = 0;
         at += s;
     }

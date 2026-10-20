@@ -300,7 +300,14 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
+    d->gi_cells = d->gi_cells != 0U ? d->gi_cells : 1U << 18U;
+    d->gi_rays = d->gi_rays != 0U ? d->gi_rays : 65536U;
     if (d->max_visible_clusters > (u32)NPH_VIS_MAX_CLUSTERS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // The cache's slots come in buckets, and a slot's index fits 32 bits.
+    if (!is_power_of_two(d->gi_cells) || d->gi_cells < (u32)NPH_RENDER_GI_BUCKET ||
+        d->gi_cells > 1U << 28U) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // A page table entry names its physical page in 16 bits, and the pool
@@ -385,8 +392,10 @@ static NphResult create_contents(NphRenderer *r)
         NPH_TRY(render_motion_create(r));
         NPH_TRY(render_ao_create(r));
         NPH_TRY(render_vsm_create(r));
+        NPH_TRY(render_gi_create(r));
     } else {
         r->vsm.sun_slot = NPH_U32_MAX;
+        r->gi.sun_slot = NPH_U32_MAX;
     }
     return NPH_RESULT_OK;
 }
@@ -430,13 +439,14 @@ NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
     NPH_LOG_INFO(&NPH_LOG_RENDER,
                  "%s: on %s: reference renderer (environment %u, prefiltered %u x %u levels, "
                  "%u lights, %u draws per frame); production path %s; ray-traced shadows %s; "
-                 "virtual shadow map %s",
+                 "virtual shadow map %s; radiance cache %s",
                  r->name, info->name, d.environment_size, d.specular_size, d.specular_mips,
                  d.max_lights, d.max_draws,
                  !r->vis.supported     ? "absent"
                  : r->vis.mesh_shaders ? "with mesh shaders"
                                        : "with indirect draws",
-                 r->rt.supported ? "on" : "absent", r->vsm.supported ? "on" : "absent");
+                 r->rt.supported ? "on" : "absent", r->vsm.supported ? "on" : "absent",
+                 r->gi.supported ? "on" : "absent");
     *out = r;
     return NPH_RESULT_OK;
 }
@@ -496,6 +506,7 @@ void nph_renderer_destroy(NphRenderer *r)
     }
     render_debug_destroy(r);
     render_ibl_destroy(r);
+    render_gi_destroy(r);
     render_vsm_destroy(r);
     render_vis_destroy(r);
     render_motion_destroy(r);
@@ -1133,6 +1144,7 @@ NphResult nph_render_light_create(NphRenderer *r, const NphRenderLightDesc *desc
     render_rt_shadow_lights(r, desc->shadows ? 1 : 0);
     render_vis_light_changed(r, slot);
     render_vsm_light_changed(r, slot);
+    render_gi_light_changed(r, slot);
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1150,6 +1162,7 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
     r->lights[slot].desc = *desc;
     render_vis_light_changed(r, slot);
     render_vsm_light_changed(r, slot);
+    render_gi_light_changed(r, slot);
     return NPH_RESULT_OK;
 }
 
@@ -1168,6 +1181,7 @@ void nph_render_light_destroy(NphRenderer *r, NphRenderLight light)
     memset(&r->lights[slot], 0, sizeof r->lights[slot]);
     render_vis_light_changed(r, slot);
     render_vsm_light_changed(r, slot);
+    render_gi_light_changed(r, slot);
     release_slot(&r->light_pool, light.value);
 }
 

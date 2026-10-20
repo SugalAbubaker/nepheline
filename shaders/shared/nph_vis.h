@@ -152,13 +152,15 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 meshlet_bounds;      // NphRenderMeshletBounds[] (32 bytes each)
     u64 meshlet_vertices;    // u32[]: mesh vertex indices
     u64 meshlet_triangles;   // u8[3 * triangles] read as u32 words
-    u64 submesh_slots;       // u32[submesh]: each submesh's material slot
+    // uvec2[submesh]: each submesh's material slot and its first index into
+    // `indices` (a bottom level's geometry is a submesh: a ray's hit names
+    // it, and its triangle within it)
+    u64 submeshes;
     u32 meshlet_count;
     u32 index_base; // the mesh's first corner in the meshlet index pool (indirect raster)
     u64 blas;       // its bottom-level acceleration structure, over the quantised positions
                     // (0: none)
-    u32 pad0;
-    u32 pad1;
+    u64 indices;    // u32[]: the triangles' corners, three a triangle, as the mesh has them
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.

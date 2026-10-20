@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+// The radiance cache's resolve (docs/render.md "Global illumination";
+// ADR-0039; gi_common.glsl): one invocation a slot. A cell that received
+// samples this frame blends their mean into its irradiance, weighted by
+// their count against its history's (at most NPH_RENDER_GI_HISTORY samples:
+// older light fades as new arrives, the window over which a cell follows a
+// change), and its sums are cleared for the next frame; a cell none reached
+// ages, and is freed after NPH_RENDER_GI_MAX_AGE frames, so cells out of
+// sight give their slots back. The sums are pre-exposed fixed point; the
+// irradiance is kept in lux, whatever the exposure does.
+//
+// arg0: the slot count.
+#version 460
+#include "vis_common.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.arg0) {
+        return;
+    }
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    GiViewRef g = GiViewRef(rview.v.gi);
+    GiKeysRef keys = GiKeysRef(g.g.keys);
+    if (keys.k[i] == 0u) {
+        return;
+    }
+    GiSumsRef sums = GiSumsRef(g.g.sums);
+    GiCellsRef cells = GiCellsRef(g.g.cells);
+    const uvec4 s = sums.s[i];
+    uvec4 c = cells.c[i];
+    uint count = c.w & 0xFFFFu;
+    uint age = c.w >> 16u;
+    if (s.w != 0u) {
+        const vec3 mean = vec3(s.xyz) / (g.g.sum_scale * float(s.w) * rview.v.exposure);
+        const float history = float(min(count, uint(NPH_RENDER_GI_HISTORY)));
+        const vec3 e = (uintBitsToFloat(c.xyz) * history + mean * float(s.w)) /
+                       (history + float(s.w));
+        c.xyz = floatBitsToUint(e);
+        count = min(count + s.w, uint(NPH_RENDER_GI_HISTORY));
+        age = 0u;
+        sums.s[i] = uvec4(0u);
+    } else if (age >= uint(NPH_RENDER_GI_MAX_AGE)) {
+        keys.k[i] = 0u;
+        cells.c[i] = uvec4(0u);
+        return;
+    } else {
+        ++age;
+    }
+    c.w = count | (age << 16u);
+    cells.c[i] = c;
+}

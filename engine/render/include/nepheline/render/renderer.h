@@ -163,7 +163,14 @@ typedef struct NphRendererDesc {
     u32 vsm_pages;               // physical pages of 128 x 128 depth texels, 64 KB each (2048)
     u32 max_vsm_meshlets;        // caster meshlets tested against the pages drawn in a frame (2^20)
     u32 max_vsm_draws;           // (meshlet, page) draws in a frame (2^20)
-    const char *name;            // for logs and GPU object names
+    // The production path's radiance cache (docs/render.md "Global
+    // illumination"), where the device has ray queries: its cells, a power of
+    // two of at least 16 (262144: 9 MB), and the rays its update traces a
+    // frame, a budget whatever the resolution (65536). Zero picks the default.
+    b32 disable_gi; // never create it
+    u32 gi_cells;
+    u32 gi_rays;
+    const char *name; // for logs and GPU object names
 } NphRendererDesc;
 
 // Creates the renderer: pools, samplers, the per-frame buffers, the
@@ -501,6 +508,10 @@ typedef enum NphRenderDebugView {
     NPH_RENDER_VIEW_OCCLUSION,
     NPH_RENDER_VIEW_DIRECT,   // punctual lights only
     NPH_RENDER_VIEW_INDIRECT, // image-based lighting only
+    // The diffuse irradiance the indirect light takes (the environment's, or
+    // the production path's radiance cache's), over pi: what a white surface
+    // would reflect of it, pre-exposed.
+    NPH_RENDER_VIEW_IRRADIANCE,
     // The production path's culling and raster, as a colour per visible
     // cluster, triangle, or instance (the reference path shades as LIT).
     NPH_RENDER_VIEW_CLUSTERS,
@@ -608,12 +619,24 @@ typedef struct NphRenderView {
     // indirect debug view when the environment lights the view, and for the
     // occlusion debug view. The reference renderer has none.
     f32 ao_radius;
+    // Global illumination (the production path where the device has ray
+    // queries; docs/render.md "Global illumination"): the diffuse light
+    // takes its irradiance from a radiance cache in the world, which a fixed
+    // budget of rays a frame keeps up to date: the environment's light
+    // occluded by the scene, and the sun's and the environment's light the
+    // scene reflects, bounce after bounce, instead of the environment's
+    // light alone. Within `ao_radius` the ambient occlusion darkens it
+    // instead. Made for lit views and the indirect and irradiance debug
+    // views; the reference renderer has none.
+    b32 gi;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), ACES, the environment as
-// background, no anti-aliasing, no bloom, no motion blur, a pinhole (the
-// runtime turns temporal anti-aliasing and bloom on, r.taa and r.bloom, and
-// gives the camera's shutter and lens, r.motion_blur and r.dof).
+// background, no anti-aliasing, no bloom, no motion blur, a pinhole, no
+// ambient occlusion, no global illumination (the runtime turns temporal
+// anti-aliasing, bloom, ambient occlusion, and global illumination on,
+// r.taa, r.bloom, r.ao, and r.gi, and gives the camera's shutter and lens,
+// r.motion_blur and r.dof).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
 
 // The focal length in metres of the view's lens: its sensor's height (0:
@@ -689,11 +712,12 @@ typedef struct NphRenderFrameStats {
     f32 ev100;
     f32 metered_ev100;
     b32 bloom;
-    // Whether the frame was motion blurred, whether it had depth of field, and
-    // whether ambient occlusion.
+    // Whether the frame was motion blurred, whether it had depth of field,
+    // whether ambient occlusion, and whether global illumination.
     b32 motion_blur;
     b32 dof;
     b32 ao;
+    b32 gi;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

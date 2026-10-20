@@ -334,12 +334,14 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
                           &m->meshlet_vertices));
     NPH_TRY(upload_stream(r, triangles, (u64)triangle_count * 3U, "mesh meshlet triangles",
                           &m->meshlet_triangles));
-    u32 slots[NPH_RENDER_MAX_SUBMESHES];
+    // Each submesh's material slot and first index (NphVisMesh.submeshes).
+    u32 table[NPH_RENDER_MAX_SUBMESHES][2];
     for (u32 s = 0; s < d->submesh_count; ++s) {
-        slots[s] = d->submeshes[s].material_slot;
+        table[s][0] = d->submeshes[s].material_slot;
+        table[s][1] = d->submeshes[s].index_offset;
     }
-    NPH_TRY(upload_stream(r, slots, (u64)d->submesh_count * sizeof(u32), "mesh submesh slots",
-                          &m->submesh_slots));
+    NPH_TRY(upload_stream(r, table, (u64)d->submesh_count * 2U * sizeof(u32), "mesh submeshes",
+                          &m->submesh_table));
     u32 index_base = 0U;
     if (!v->mesh_shaders && triangle_count != 0U) {
         // The indirect raster's indices: the meshlet-local corners widened
@@ -375,7 +377,8 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     rec.meshlet_bounds = nph_gpu_buffer_address(r->dev, m->meshlet_bounds);
     rec.meshlet_vertices = nph_gpu_buffer_address(r->dev, m->meshlet_vertices);
     rec.meshlet_triangles = nph_gpu_buffer_address(r->dev, m->meshlet_triangles);
-    rec.submesh_slots = nph_gpu_buffer_address(r->dev, m->submesh_slots);
+    rec.submeshes = nph_gpu_buffer_address(r->dev, m->submesh_table);
+    rec.indices = nph_gpu_buffer_address(r->dev, m->indices);
     rec.meshlet_count = meshlet_count;
     rec.index_base = index_base;
     rec.blas =
@@ -414,12 +417,12 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->meshlet_bounds);
     nph_gpu_buffer_destroy(r->dev, m->meshlet_vertices);
     nph_gpu_buffer_destroy(r->dev, m->meshlet_triangles);
-    nph_gpu_buffer_destroy(r->dev, m->submesh_slots);
+    nph_gpu_buffer_destroy(r->dev, m->submesh_table);
     m->meshlets = NPH_GPU_BUFFER_NULL;
     m->meshlet_bounds = NPH_GPU_BUFFER_NULL;
     m->meshlet_vertices = NPH_GPU_BUFFER_NULL;
     m->meshlet_triangles = NPH_GPU_BUFFER_NULL;
-    m->submesh_slots = NPH_GPU_BUFFER_NULL;
+    m->submesh_table = NPH_GPU_BUFFER_NULL;
     if (r->vis.supported) {
         free_later(r, 1U, m->index_range);
     }

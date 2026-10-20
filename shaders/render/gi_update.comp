@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: Apache-2.0
+// The radiance cache's update (docs/render.md "Global illumination";
+// ADR-0039; gi_common.glsl): within a fixed budget of rays a frame, one
+// invocation for each stride x stride block of the frame's pixels takes a
+// random pixel of it, the surface the visibility buffer has there, and the
+// cell of the cache holding it (claimed if new), traces one ray in a
+// cosine-distributed direction from it (Malley's method), and adds what
+// arrives along the ray, times pi, to the cell's sums: the irradiance's
+// estimate (the cosine over the direction's density is pi). The resolve
+// (gi_resolve.comp) blends the frame's sums into the cell.
+//
+// What arrives: on a miss, the environment's radiance (a blurred level of
+// its cube, which changes the irradiance's estimate little and its noise a
+// lot); on a hit, the surface's emission plus its diffuse reflection of the
+// sun (shadowed by a second ray where the sun casts shadows) and of the
+// cache's own irradiance at the hit, so each frame adds a bounce to what the
+// cells hold (the environment's irradiance where the hit's cell has none
+// yet). Point and spot lights do not bounce yet (ADR-0039). Texture detail
+// at a hit is read at the level the hit's cell resolves: a cell across over
+// the triangle's texel size (Akenine-Möller et al., "Texture Level of
+// Detail Strategies for Real-Time Ray Tracing", Ray Tracing Gems, 2019,
+// with the cell as the cone's footprint).
+//
+// A ray that hits within NphRenderGiView.near counts nothing: that range is
+// the ambient occlusion's (ao.c), which darkens the cache's irradiance for
+// what lies near; the cell's mean is then over the directions open that
+// far, so nothing is occluded twice and no ray reaches past a wall nearer
+// than that.
+//
+// arg0: the visibility buffer's bindless storage index.
+#version 460
+#extension GL_EXT_ray_query : require
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+#include "rt_common.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// The point of the visibility buffer's triangle `v` under the pixel at
+// NDC `q`, camera relative, as the resolve rebuilds it (the same arithmetic,
+// so the update keys the cell the shading looks up: a point rebuilt from
+// depth through the inverse projection strays by more than a cell's
+// rounding allows), and the triangle's normal facing the camera.
+vec3 surface_point(VisViewRef view, uint64_t v, vec2 q, out vec3 n)
+{
+    const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[vis_cluster(v)];
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
+    VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    const vec3 w0 =
+        vis_transform_vector(inst.transform, vis_position(mesh, mlvx.v[m.x + corners.x])) + t;
+    const vec3 w1 =
+        vis_transform_vector(inst.transform, vis_position(mesh, mlvx.v[m.x + corners.y])) + t;
+    const vec3 w2 =
+        vis_transform_vector(inst.transform, vis_position(mesh, mlvx.v[m.x + corners.z])) + t;
+    const VisBarycentrics bary =
+        vis_barycentrics(view.v.view_proj * vec4(w0, 1.0), view.v.view_proj * vec4(w1, 1.0),
+                         view.v.view_proj * vec4(w2, 1.0), q, 2.0 * view.v.viewport.zw);
+    const vec3 x = mat3(w0, w1, w2) * bary.b;
+    n = normalize(cross(w1 - w0, w2 - w0));
+    n = dot(n, x) > 0.0 ? -n : n;
+    return x;
+}
+
+// The environment's radiance in direction `w`: a level of its cube about 16
+// texels across a face.
+vec3 environment(ViewRef rview, vec3 w)
+{
+    if ((rview.v.flags & NPH_RENDER_VIEW_IBL) == 0u) {
+        return vec3(0.0);
+    }
+    const uint tex = rview.v.env_index;
+    const uint smp = rview.v.clamp_sampler;
+    const float lod = max(float(textureQueryLevels(samplerCube(
+                              nph_textures_cube[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]))) -
+                              5.0,
+                          0.0);
+    return textureLod(samplerCube(nph_textures_cube[nonuniformEXT(tex)],
+                                  nph_samplers[nonuniformEXT(smp)]),
+                      w, lod)
+               .rgb *
+           rview.v.ibl_intensity;
+}
+
+// A material texture at `uv` and level of detail `lod` (before the
+// texture's own size), or 1 without the texture.
+vec4 material_texel(uint tex, uint smp, vec2 uv, float lod)
+{
+    if (tex == NPH_RENDER_NO_TEXTURE) {
+        return vec4(1.0);
+    }
+    const vec2 dim = vec2(textureSize(nph_textures_2d[nonuniformEXT(tex)], 0));
+    return textureLod(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]),
+                      uv, lod + 0.5 * log2(dim.x * dim.y));
+}
+
+// The radiance leaving the ray query's committed hit back along `w`.
+vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, vec3 w)
+{
+    // The hit's triangle: the instance its record names (the custom index
+    // is the slot), the submesh its geometry is, the triangle in that.
+    const uint slot = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+    const uint geometry = rayQueryGetIntersectionGeometryIndexEXT(q, true);
+    const uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
+    const vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, true);
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const uvec2 sub = VisUvec2Ref(mesh.submeshes).v[geometry];
+    VisUintRef indices = VisUintRef(mesh.indices);
+    const uint first = sub.y + 3u * primitive;
+    const uvec3 vtx = uvec3(indices.v[first], indices.v[first + 1u], indices.v[first + 2u]);
+    const vec3 b = vec3(1.0 - bc.x - bc.y, bc.x, bc.y);
+
+    // Its point, camera relative as the cells are keyed, and its normals.
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    const vec3 w0 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.x)) + t;
+    const vec3 w1 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.y)) + t;
+    const vec3 w2 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.z)) + t;
+    const vec3 x = mat3(w0, w1, w2) * b;
+    const vec3 edge_normal = cross(w1 - w0, w2 - w0);
+    vec3 face = normalize(edge_normal);
+    face = dot(face, w) > 0.0 ? -face : face; // toward the ray's origin
+    AttribsRef attribs = AttribsRef(mesh.attribs);
+    const uvec4 a0 = attribs.a[vtx.x];
+    const uvec4 a1 = attribs.a[vtx.y];
+    const uvec4 a2 = attribs.a[vtx.z];
+    vec3 n = vis_normal_matrix(inst.transform) *
+             (mat3(nph_oct_decode(unpackSnorm2x16(a0.x)), nph_oct_decode(unpackSnorm2x16(a1.x)),
+                   nph_oct_decode(unpackSnorm2x16(a2.x))) *
+              b);
+    n = normalize(dot(n, face) < 0.0 ? -n : n);
+    const mat3x2 uvs = mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z));
+    const vec2 uv = uvs * b;
+    const vec3 color =
+        (mat3x4(unpackUnorm4x8(a0.w), unpackUnorm4x8(a1.w), unpackUnorm4x8(a2.w)) * b).rgb;
+
+    // Its material, field by field (it holds arrays: docs/build.md
+    // "Shaders"), textures at the level the hit's cell resolves.
+    const uint mi = vis_instance_material(view, inst, sub.x);
+    MaterialsRef materials = MaterialsRef(view.v.materials);
+    const float cell = gi_cell_size(g, gi_level(length(x)));
+    const vec2 duv1 = uvs[1] - uvs[0];
+    const vec2 duv2 = uvs[2] - uvs[0];
+    const float uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x);
+    const float lod =
+        log2(cell) + 0.5 * log2(max(uv_area, 1e-12) / max(length(edge_normal), 1e-12));
+    const vec3 albedo =
+        materials.m[mi].base_color.rgb * color *
+        material_texel(materials.m[mi].textures[NPH_RENDER_TEX_BASE_COLOR],
+                       materials.m[mi].samplers[NPH_RENDER_TEX_BASE_COLOR], uv, lod)
+            .rgb *
+        (1.0 - clamp(materials.m[mi].metallic, 0.0, 1.0));
+    const vec3 emissive = materials.m[mi].emissive.rgb *
+                          material_texel(materials.m[mi].textures[NPH_RENDER_TEX_EMISSIVE],
+                                         materials.m[mi].samplers[NPH_RENDER_TEX_EMISSIVE], uv, lod)
+                              .rgb;
+
+    // The irradiance it reflects: the sun's, and the cache's (the bounces
+    // before this frame), else the environment's.
+    vec3 irradiance = vec3(0.0);
+    const vec4 sun = g.g.sun_direction;
+    if (sun.w >= 0.0) {
+        const vec3 l = -sun.xyz;
+        const float nol = dot(n, l);
+        if (nol > 0.0 && dot(face, l) > 0.0) {
+            const float lit =
+                sun.w > 0.0 ? nph_shadow_ray(rview.v.tlas, x + rview.v.tlas_offset.xyz, face, l, 1e30)
+                            : 1.0;
+            irradiance += g.g.sun_color.rgb * (nol * lit);
+        }
+    }
+    const vec3 sky = (rview.v.flags & NPH_RENDER_VIEW_IBL) != 0u
+                         ? nph_sh9_irradiance(ShRef(rview.v.sh_address), n) * rview.v.ibl_intensity
+                         : vec3(0.0);
+    irradiance += gi_irradiance(g, x, face, sky);
+    return emissive + albedo * NPH_INV_PI * irradiance;
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    GiViewRef g = GiViewRef(rview.v.gi);
+    const uvec2 block = gl_GlobalInvocationID.xy;
+    const ivec2 size = ivec2(view.v.viewport.xy);
+    const uint stride = g.g.stride;
+    if (block.x >= g.g.rays_x || int(block.y * stride) >= size.y) {
+        return;
+    }
+    const vec3 u0 = gi_random(uvec3(block, g.g.frame));
+    const ivec2 p = min(ivec2(block * stride) + ivec2(u0.xy * float(stride)), size - 1);
+    const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x;
+    if (v == 0ul) {
+        return; // the background
+    }
+
+    // The pixel's point and its triangle's normal.
+    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    vec3 n;
+    const vec3 x = surface_point(view, v, q, n);
+    const uint slot = gi_claim(g, gi_key(g, x, n));
+    if (slot == GI_NONE) {
+        return; // its bucket is full: no sample
+    }
+
+    // A cosine-distributed direction about n: a uniform point of the unit
+    // disc lifted onto the hemisphere (Malley's method).
+    const vec3 u1 = gi_random(uvec3(block.yx, g.g.frame ^ 0x9E3779B9u));
+    const float r = sqrt(u1.x);
+    const float phi = 2.0 * NPH_PI * u1.y;
+    const float s = n.z >= 0.0 ? 1.0 : -1.0;
+    const float a = -1.0 / (s + n.z);
+    const float bb = n.x * n.y * a;
+    const vec3 tangent = vec3(1.0 + s * n.x * n.x * a, s * bb, -s * n.x);
+    const vec3 bitangent = vec3(bb, s + n.y * n.y * a, -n.y);
+    const vec3 w = normalize(r * cos(phi) * tangent + r * sin(phi) * bitangent +
+                             sqrt(max(1.0 - u1.x, 0.0)) * n);
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsOpaqueEXT, 0xFFu,
+                          nph_offset_ray(x + rview.v.tlas_offset.xyz, n), 0.0, w, 1e30);
+    while (rayQueryProceedEXT(rq)) {
+    }
+    vec3 radiance;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        radiance = environment(rview, w);
+    } else {
+        if (rayQueryGetIntersectionTEXT(rq, true) < g.g.near) {
+            return; // the ambient occlusion's range
+        }
+        radiance = hit_radiance(view, rview, g, rq, w);
+    }
+
+    // The estimate, pre-exposed, in fixed point.
+    const vec3 e = min(radiance * (NPH_PI * rview.v.exposure), vec3(NPH_RENDER_GI_SAMPLE_MAX));
+    const uvec3 fixed_e = uvec3(e * g.g.sum_scale + 0.5);
+    GiSumsRef sums = GiSumsRef(g.g.sums);
+    if (fixed_e.x != 0u) {
+        atomicAdd(sums.s[slot].x, fixed_e.x);
+    }
+    if (fixed_e.y != 0u) {
+        atomicAdd(sums.s[slot].y, fixed_e.y);
+    }
+    if (fixed_e.z != 0u) {
+        atomicAdd(sums.s[slot].z, fixed_e.z);
+    }
+    atomicAdd(sums.s[slot].w, 1u);
+}

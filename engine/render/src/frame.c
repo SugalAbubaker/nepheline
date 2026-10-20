@@ -96,6 +96,8 @@ void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFr
     }
     out->vsm_view_offset = at;
     at = align_up(at + sizeof(NphVsmView), FRAME_ALIGN);
+    out->gi_view_offset = at;
+    at = align_up(at + sizeof(NphRenderGiView), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -500,7 +502,7 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count, N
     // a frame that traces shadow rays, or has the sun's virtual shadow map,
     // uses the pipelines that do.
     const bool production = r->frame_production != 0;
-    const u32 rt = r->rt.frame_active != 0 ? 1U : 0U;
+    const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
@@ -828,8 +830,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // The sun's virtual shadow map (the production path), then shadow rays
     // for the lights that cast shadows it does not take.
     const bool vsm = render_vsm_frame_begin(r, view, &proj, &inv_view_proj, height, production);
-    const bool rt = render_rt_frame_begin(r, production, view->camera.position, vsm ? 1U : 0U);
-    stats.shadow_rays = rt ? 1 : 0;
+    const bool rt = render_rt_frame_begin(r, production, view->camera.position, vsm ? 1U : 0U,
+                                          render_gi_frame_wanted(r, view, production));
+    stats.shadow_rays = r->rt.frame_shadows;
     stats.vsm = vsm ? 1 : 0;
     stats.vsm_lod_bias = vsm ? r->vsm.frame_bias : 0U;
     stats.taa = r->taa.frame_active;
@@ -848,6 +851,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // Ambient occlusion on the production path (ao.c), through this
     // frame's projection.
     stats.ao = render_ao_frame_begin(r, view, &proj, width, height, production) ? 1 : 0;
+    // Global illumination on the production path (gi.c), whose rays leave
+    // the ambient occlusion's range to it.
+    stats.gi = render_gi_frame_begin(r, view, width, height, production) ? 1 : 0;
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -899,6 +905,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->tlas = rt ? nph_gpu_accel_address(dev, r->rt.tlas) : 0U;
     vd->tlas_offset = nph_vec4_from_vec3(r->rt.tlas_offset, 0.0F);
     vd->vsm = vsm ? r->vsm.view_address : 0U;
+    vd->gi = stats.gi ? render_gi_view_address(r) : 0U;
     vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;

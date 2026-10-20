@@ -46,10 +46,11 @@
 #define NPH_RENDER_DEBUG_OCCLUSION  5
 #define NPH_RENDER_DEBUG_DIRECT     6  // punctual lights only
 #define NPH_RENDER_DEBUG_INDIRECT   7  // image-based lighting only
-#define NPH_RENDER_DEBUG_CLUSTERS   8  // the production path: a colour per visible cluster
-#define NPH_RENDER_DEBUG_TRIANGLES  9  // the production path: a colour per triangle
-#define NPH_RENDER_DEBUG_INSTANCES  10 // the production path: a colour per instance
-#define NPH_RENDER_DEBUG_COUNT      11
+#define NPH_RENDER_DEBUG_IRRADIANCE 8  // the diffuse light's irradiance, over pi
+#define NPH_RENDER_DEBUG_CLUSTERS   9  // the production path: a colour per visible cluster
+#define NPH_RENDER_DEBUG_TRIANGLES  10 // the production path: a colour per triangle
+#define NPH_RENDER_DEBUG_INSTANCES  11 // the production path: a colour per instance
+#define NPH_RENDER_DEBUG_COUNT      12
 
 // Tonemappers (NphRenderTonemapPush.tonemapper).
 #define NPH_RENDER_TONEMAP_NONE  0 // clamp to [0, 1]
@@ -109,7 +110,9 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     // The production path's virtual shadow map this frame (NphVsmView, nph_vsm.h;
     // 0: none), which the sun's light record (color.w 2) is shadowed by.
     u64 vsm;
-    u64 pad_vsm;
+    // The production path's radiance cache this frame (NphRenderGiView; 0:
+    // none), whose irradiance the diffuse indirect light takes.
+    u64 gi;
     // xy: the sub-pixel offset of this frame's projection, in NDC (zero
     // without temporal anti-aliasing), which what is drawn over the temporal
     // resolve's output takes off again; zw: unused.
@@ -437,6 +440,61 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
     u32 noise;          // the slices' rotation this frame (0 to 5)
     u32 point_sampler;  // nearest, clamped to the edge
     u32 linear_sampler; // bilinear, clamped to the edge
+};
+
+// ---------------------------------------------------------------------------
+// The radiance cache (gi.c, gi_common.glsl; docs/render.md "Global
+// illumination")
+// ---------------------------------------------------------------------------
+
+// Its cells' levels: level l holds the points 2^(l - NPH_RENDER_GI_LEVEL_BIAS)
+// to twice that far from the camera, in cells 2^(l - NPH_RENDER_GI_LEVEL_BIAS)
+// / NphRenderGiView.scale metres across (level 8: 1 to 2 m away).
+#define NPH_RENDER_GI_LEVELS     32
+#define NPH_RENDER_GI_LEVEL_BIAS 8
+// The slots a key may take: the NPH_RENDER_GI_BUCKET of its bucket.
+#define NPH_RENDER_GI_BUCKET 16
+// A cell's history holds at most this many samples (its window).
+#define NPH_RENDER_GI_HISTORY 128
+// A cell no sample has reached for this many frames is freed.
+#define NPH_RENDER_GI_MAX_AGE 240
+// The most a sample may add, in pre-exposed irradiance: brighter ones are
+// clamped (fireflies; the sums are fixed point).
+#define NPH_RENDER_GI_SAMPLE_MAX 4096.0
+
+// Where the camera is at one level: the cell it is in, and where in it.
+NPH_SHARED_STRUCT(NphRenderGiLevel)
+{
+    NphVec4 origin; // xyz: the camera's offset from its cell's corner (m, [0, size)); w: size
+    // xyz: the camera's cell, its two's complement's low 32 bits (the keys
+    // keep 17); w: unused
+    u32 cell[4];
+};
+
+// A production frame's radiance cache (NphRenderViewData.gi): a hash grid of
+// cells, each the irradiance of the surfaces in it facing one octant.
+NPH_SHARED_STRUCT(NphRenderGiView)
+{
+    u64 keys;  // u32[capacity]: each slot's key fingerprint (0: free)
+    u64 sums;  // uvec4[capacity]: this frame's samples (rgb in 1 / sum_scale, and their count)
+    u64 cells; // uvec4[capacity]: irradiance (rgb, lux, as a float's bits); w: the sample
+               // count in bits 0-15 and the frames since one arrived in bits 16-31
+    u32 bucket_mask; // capacity / NPH_RENDER_GI_BUCKET - 1
+    f32 scale;       // a cell is 1 / (2 scale) to 1 / scale of its distance across
+    f32 sum_scale;   // fixed-point units of a pre-exposed sample
+    f32 near;        // update rays that hit nearer count nothing (the ambient occlusion's)
+    u32 frame;       // this frame's number, for the random numbers
+    u32 jitter;      // nonzero: a lookup takes a random point of its cell (temporal
+                     // anti-aliasing averages them)
+    u32 rays_x;      // the update's samples across the target
+    u32 stride;      // a sample a stride x stride block of pixels
+    u32 pad0;
+    u32 pad1;
+    // xyz: the direction the sun's light travels; w: 1 when it casts
+    // shadows, 0 when it does not, -1 when there is no sun
+    NphVec4 sun_direction;
+    NphVec4 sun_color; // rgb: its illuminance times its colour (lux)
+    NphRenderGiLevel levels[NPH_RENDER_GI_LEVELS];
 };
 
 // Push constants of the image-based lighting kernels.
