@@ -78,6 +78,17 @@ void gpu_upload_mark_frame_end(NphGpuDevice *dev, u32 slot)
     NPH_UNUSED(slot);
 }
 
+// Whether ring_alloc would find `size` bytes (without taking them).
+static bool ring_has_room(const NphGpuUploadState *up, u64 size)
+{
+    size = nph_align_up_u64(size, STAGING_ALIGN);
+    if (up->used + size > up->staging_size) {
+        return false;
+    }
+    return up->head + size <= up->staging_size ||
+           up->used + (up->staging_size - up->head) + size <= up->staging_size;
+}
+
 // Allocates `size` bytes of ring space; false when the ring is too full.
 static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset)
 {
@@ -159,6 +170,25 @@ static NphResult ensure_batch(NphGpuDevice *dev)
     return NPH_RESULT_OK;
 }
 
+static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value);
+
+// Between frames nothing waits on the uploads, so when the ring cannot
+// take `size` bytes that it would take empty, the pending uploads are
+// flushed first (synchronously, which releases their staging): a scene
+// loaded between frames then streams through the ring instead of taking a
+// dedicated buffer per upload, whose handles and deferred destructions
+// would run out (a 1.3 GB scene made thousands). Inside a frame the
+// uploads stay batched for the frame's submission.
+static NphResult make_room(NphGpuDevice *dev, u64 size)
+{
+    NphGpuUploadState *up = &dev->upload;
+    if (dev->frame_active || up->cmd == NULL || size > up->staging_size ||
+        ring_has_room(up, size)) {
+        return NPH_RESULT_OK;
+    }
+    return flush_locked(dev, NULL);
+}
+
 // Finds staging space for `size` bytes: in the ring, or in a dedicated
 // buffer that dies with the frame. Returns the buffer and offset to copy from.
 static NphResult stage(NphGpuDevice *dev, const void *data, u64 size, NphGpuBuffer *out_buffer,
@@ -211,7 +241,10 @@ NphResult nph_gpu_upload_buffer(NphGpuDevice *dev, NphGpuBuffer dst, u64 dst_off
     }
     NphGpuUploadState *up = &dev->upload;
     nph_mutex_lock(&up->lock);
-    NphResult r = ensure_batch(dev);
+    NphResult r = make_room(dev, size);
+    if (r == NPH_RESULT_OK) {
+        r = ensure_batch(dev);
+    }
     NphGpuBuffer src = NPH_GPU_BUFFER_NULL;
     u64 src_offset = 0U;
     if (r == NPH_RESULT_OK) {
@@ -372,7 +405,10 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
                                           : NPH_GPU_LAYOUT_GENERAL;
     NphGpuUploadState *up = &dev->upload;
     nph_mutex_lock(&up->lock);
-    NphResult r = ensure_batch(dev);
+    NphResult r = make_room(dev, size);
+    if (r == NPH_RESULT_OK) {
+        r = ensure_batch(dev);
+    }
     NphGpuBuffer src = NPH_GPU_BUFFER_NULL;
     u64 src_offset = 0U;
     if (r == NPH_RESULT_OK) {
@@ -499,8 +535,16 @@ NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
     }
     NphGpuUploadState *up = &dev->upload;
     nph_mutex_lock(&up->lock);
+    const NphResult r = flush_locked(dev, out_value);
+    nph_mutex_unlock(&up->lock);
+    return r;
+}
+
+// nph_gpu_upload_flush with the upload lock held.
+static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value)
+{
+    NphGpuUploadState *up = &dev->upload;
     if (up->cmd == NULL) {
-        nph_mutex_unlock(&up->lock);
         return NPH_RESULT_OK;
     }
     NphGpuCmd *cmd = up->cmd;
@@ -584,10 +628,23 @@ NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
             up->head = 0U;
             up->tail = 0U;
         }
+        if (r == NPH_RESULT_OK) {
+            // Every command buffer in the slot's upload pools has completed:
+            // this flush's were waited for, and a signal's scope covers
+            // everything submitted before it on its queue, which includes
+            // the earlier flushes' (an in-frame one may have been in flight
+            // until now). Recycling the pools lets a load between frames
+            // flush any number of times; they would otherwise hold
+            // max_commands_per_thread flushes until the slot's next frame.
+            gpu_cmd_pool_reset(dev, gpu_upload_pool(dev, dev->frame_slot, NPH_GPU_QUEUE_TRANSFER));
+            if (distinct) {
+                gpu_cmd_pool_reset(dev,
+                                   gpu_upload_pool(dev, dev->frame_slot, NPH_GPU_QUEUE_GRAPHICS));
+            }
+        }
     }
     up->batch_bytes = 0U;
     up->batch_copies = 0U;
-    nph_mutex_unlock(&up->lock);
     if (out_value != NULL) {
         *out_value = value;
     }

@@ -26,7 +26,12 @@
 //
 // Outside a frame (no nph_gpu_frame_begin active) a flush is synchronous:
 // it waits for the transfer to complete before returning, so tests and
-// tools can upload, flush, and read back without frame bookkeeping.
+// tools can upload, flush, and read back without frame bookkeeping. There
+// an upload that the ring cannot take now but would take empty flushes
+// the pending uploads first, so a load between frames of any size streams
+// through the ring; only an upload larger than the whole ring (or one
+// that meets the ring held by frames still in flight) takes a dedicated
+// buffer. Inside a frame the uploads stay batched for the frame.
 //
 // Thread-safety: NPH_THREADSAFE through one lock on the upload state
 // (the only lock on this path); intended for the main thread and loading

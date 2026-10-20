@@ -300,6 +300,100 @@ NTEST(gpu_upload, ring_wraps_across_frames)
     test_gpu_destroy(dev);
 }
 
+// The capacities of a device that loads through a 64 KiB ring: 16 buffer
+// handles, which a dedicated staging buffer per upload would exhaust, and
+// four command buffers per pool, fewer than the flushes one load makes.
+static NphGpuDeviceDesc small_ring_desc(b32 single_queue)
+{
+    NphGpuDeviceDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.headless = 1;
+    desc.single_queue = single_queue;
+    desc.staging_ring_bytes = NPH_KIB(64);
+    desc.max_buffers = 16U;
+    desc.max_commands_per_thread = 4U;
+    return desc;
+}
+
+// A load between frames streams through the ring: an upload the ring
+// cannot take flushes the pending ones first, rather than taking a
+// dedicated staging buffer each (whose handles and deferred destructions
+// ran out loading a 1.3 GB scene), and those synchronous flushes recycle
+// their command buffers. 1 MiB in 12 KiB pieces fills the ring every five
+// uploads; a texture mip the size of the whole ring follows. Once before
+// any frame, then right after three frames, whose own uploads may still be
+// in flight in the pools the flushes recycle.
+static void loads_stream_through_the_ring(NphGpuDevice *dev)
+{
+    enum {
+        WORDS = 256U * 1024U,
+        PIECE = 3U * 1024U,
+        SIDE = 128U, // 128 x 128 RGBA8: 64 KiB, the whole ring
+    };
+    const u64 bytes = (u64)WORDS * 4U;
+    u32 *src = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
+    u32 *out = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, WORDS);
+    NphGpuBuffer buf = test_make_buffer(
+        dev, bytes, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+        NPH_GPU_MEMORY_DEVICE, "streamed");
+    NphGpuImage img = test_make_image_2d(dev, SIDE, SIDE, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                                         (u32)NPH_GPU_IMAGE_USAGE_SAMPLED |
+                                             (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST |
+                                             (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC,
+                                         "streamed texture");
+    for (u32 round = 0; round < 2U; ++round) {
+        fill_pattern(src, WORDS, 40U + round);
+        for (u32 at = 0; at < WORDS; at += PIECE) {
+            const u32 n = nph_min_u32(PIECE, WORDS - at);
+            NTEST_ASSERT_EQ_INT(
+                nph_gpu_upload_buffer(dev, buf, (u64)at * 4U, src + at, (u64)n * 4U),
+                NPH_RESULT_OK);
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_image(dev, img, 0U, 0U, 1U, src, (u64)SIDE * SIDE * 4U),
+                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(dev, NULL), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(nph_gpu_upload_staging_free(dev), NPH_KIB(64));
+        test_read_buffer(dev, buf, 0U, bytes, out);
+        NTEST_ASSERT_EQ_MEM(out, src, bytes);
+        test_read_image(dev, img, 0U, out, (u64)SIDE * SIDE * 4U);
+        NTEST_ASSERT_EQ_MEM(out, src, (u64)SIDE * SIDE * 4U);
+        for (u32 frame = 0; frame < 3U; ++frame) {
+            NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+            NTEST_ASSERT_EQ_INT(nph_gpu_upload_buffer(dev, buf, 0U, src, (u64)PIECE * 4U),
+                                NPH_RESULT_OK);
+            NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK);
+        }
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+    nph_gpu_buffer_destroy(dev, buf);
+    nph_gpu_image_destroy(dev, img);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, src, WORDS);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, out, WORDS);
+}
+
+NTEST(gpu_upload, loads_between_frames_stream_through_the_ring)
+{
+    const NphGpuDeviceDesc desc = small_ring_desc(0);
+    NphGpuDevice *dev = test_gpu_create(&desc);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    loads_stream_through_the_ring(dev);
+    test_gpu_destroy(dev);
+}
+
+NTEST(gpu_upload, loads_between_frames_stream_through_the_ring_on_a_single_queue)
+{
+    const NphGpuDeviceDesc desc = small_ring_desc(1);
+    NphGpuDevice *dev = test_gpu_create(&desc);
+    if (dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    loads_stream_through_the_ring(dev);
+    test_gpu_destroy(dev);
+}
+
 NTEST_F(GpuFixture, image_uploads_land_in_shader_read_only)
 {
     REQUIRE_DEVICE(f);

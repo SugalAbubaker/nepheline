@@ -183,6 +183,19 @@ into a frame slot's command pool, so `nph_gpu_frame_begin` and
 `nph_gpu_device_wait_idle`, which recycle those pools, flush them first
 (the renderer's tests found the copies being dropped; ADR-0018).
 
+A load between frames streams through the ring. An upload that the ring
+cannot take now, but would take empty, flushes the pending uploads first:
+nothing waits on them between frames, and the synchronous flush releases
+their space. That flush also recycles the slot's upload pools, since every
+command buffer in them has completed: its own were waited for, and a
+signal's scope covers everything submitted before it on its queue. Only
+an upload larger than the whole ring, or one that meets the ring held by
+frames still in flight, takes a dedicated buffer. Before this, Bistro's
+1.3 GB load filled the ring once and then took 7,488 dedicated staging
+buffers, one per upload. Their host memory and deferred destructions
+(warnings at 8,192 entries) piled up until the next frame. Inside a frame
+the uploads stay batched for the frame's submission.
+
 Copies in one command buffer may run in any order, so two uploads into
 overlapping bytes of one buffer in the same batch (a record rewritten, a
 range freed and handed out again before the flush) would race. Each
