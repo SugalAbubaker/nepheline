@@ -27,9 +27,9 @@
 //
 // The scenes are synthetic until Phase 10's reference scenes arrive. Each
 // draws the runtime's defaults: bloom (r.bloom's weight, 0.04) on both
-// pipelines, a temporal resolve (NPH_RENDER_AA_TEMPORAL, r.taa) and ambient
-// occlusion within 0.5 m (r.ao; where the sky lights the scene) on the
-// production path, and the scene's own exposure:
+// pipelines, a temporal resolve (NPH_RENDER_AA_TEMPORAL, r.taa), ambient
+// occlusion within 0.5 m (r.ao; where the sky lights the scene), and global
+// illumination (r.gi) on the production path, and the scene's own exposure:
 //
 //   grid_<n>_<pipeline>   n cubes on a flat grid under a top-down camera,
 //                         every one on screen, at 512 x 512: the CPU cost
@@ -45,6 +45,8 @@
 //                         bloom chain costs.
 //   field_4k_no_ao        field_4k_production without ambient occlusion:
 //                         what the occlusion costs.
+//   field_4k_no_gi        field_4k_production without global illumination:
+//                         what the radiance cache costs under the sky.
 //   field_4k_auto_exposure
 //                         field_4k_production exposed automatically
 //                         (NPH_RENDER_EXPOSURE_AUTO): the histogram and the
@@ -62,6 +64,10 @@
 //                         level over every instance each frame; the
 //                         production path draws the sun's virtual shadow
 //                         map, whose pages stay drawn while nothing moves.
+//   shadows_4k_no_gi      shadows_4k_production without global
+//                         illumination: what the radiance cache costs with
+//                         the sun's light to bounce (a shadow ray more for
+//                         each of its rays that hits).
 //   shadows_rt_4k_production
 //                         the production path with the sun's shadows ray
 //                         traced instead (NPH_RENDER_VIS_RT_SHADOWS): its
@@ -169,6 +175,7 @@ typedef enum ScenePost {
     POST_DOF_SLIGHT = 1U << 7U, // 2.6 m
     POST_DOF_LARGE = 1U << 8U,  // 0.6 m
     POST_NO_AO = 1U << 9U,      // no ambient occlusion
+    POST_NO_GI = 1U << 10U,     // no global illumination
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
@@ -204,6 +211,8 @@ static const SceneDef g_scenes[] = {
      SHADOWS_NONE, POST_NO_BLOOM},
     {"field_4k_no_ao", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
      SHADOWS_NONE, POST_NO_AO},
+    {"field_4k_no_gi", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_NO_GI},
     {"field_4k_auto_exposure", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_NONE, POST_AUTO_EXPOSURE},
     {"lights_1k_reference", SCENE_FIELD, 16384U, 1024U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
@@ -218,6 +227,8 @@ static const SceneDef g_scenes[] = {
      0U, SHADOWS_SUN, 0},
     {"shadows_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_SUN, 0},
+    {"shadows_4k_no_gi", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_SUN, POST_NO_GI},
     {"shadows_rt_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, (u32)NPH_RENDER_VIS_RT_SHADOWS, SHADOWS_SUN, 0},
     {"shadows_moving_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
@@ -629,6 +640,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
             : NPH_RENDER_AA_NONE;
     view.bloom = (s->post & (u32)POST_NO_BLOOM) != 0U ? 0.0F : RUNTIME_BLOOM;
     view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
+    view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
     view.exposure = (s->post & (u32)POST_AUTO_EXPOSURE) != 0U ? NPH_RENDER_EXPOSURE_AUTO
                                                               : NPH_RENDER_EXPOSURE_MANUAL;
     if (ctx->no_sw_raster) {
