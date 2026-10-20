@@ -198,7 +198,48 @@ targets: like the reference renderer's scenes, they carry no budget.
 
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
+            [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME]
 ```
+
+**Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
+are third-party content, kept outside the repository: a manifest in
+`benchmarks/scenes/` pins each one's source (a git repository and commit,
+its document, its licence and attribution), names its cooked pack and
+scene, its exposure (`ev100`), its sky (`sky_intensity`, scaling the
+default daylight sky, which pairs with a 30,000 lux sun, to the scene's
+own sun), and its views (the scene's own camera, or an eye and a target
+with a field of view). `scripts/scenes.py fetch` checks the
+source out at its commit under a directory of the machine's choosing and
+`scripts/scenes.py cook` cooks it there (`nph_cook`, incremental); with
+`--scenes=DIR` (or the `NPH_SCENES` environment variable) render_perf adds
+a scene per view of every manifest whose pack DIR holds,
+`<scene>_<view>_production`, after the synthetic ones: 3840 × 2160 through
+the production path with the runtime's defaults, lit by the scene's own
+lights (the synthetic scenes' sun is removed). `--capture-dir` writes
+each one's last frame there as a BMP. `--debug-view` renders them as one
+of the renderer's debug views (base colour, normals, roughness, ...) to
+look at the content, under names no budget matches. Without the packs
+those scenes are skipped with a message, so the budgets of a machine
+without them are those of the synthetic scenes alone. The CTest smoke
+run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,
+reads its manifest from `benchmarks/render/test_scenes` (`--manifests`),
+and renders it at 320 × 180 (`--ref-size`) for four frames.
+
+| Scene | Source | What it is |
+|---|---|---|
+| `bistro` | Amazon Lumberyard Bistro, exterior (CC BY 4.0; NVIDIA's glTF conversion, MIT, as `zeux/niagara_bistro` edits it) | a street at dusk: 2,909 instances of 551 meshes, 254 materials (234 specular-glossiness) using 338 BC7 DDS textures, the sun at 6,830 lux and 96 street lamps |
+
+Measured on the RTX 3060 Ti (Profile, 240 frames, 2026-10-20), against
+the 4.17 ms frame of §10.1:
+
+| Scene | GPU mean | p99 | Largest passes |
+|---|---|---|---|
+| `bistro_street_production` | 7.47 ms | 8.17 ms | resolve 3.69 ms (§10.4 line: 1.20 ms), raster 1.15 ms + Hi-Z 0.30 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+
+The visible geometry is 1.41 M triangles in 22,585 clusters (2,684 of
+them rasterised in software). 69 of the 97 lights are in view. The resolve
+shades every pixel with up to five textures and the clustered lights, so
+it carries most of the overrun (ADR-0040).
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal

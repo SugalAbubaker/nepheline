@@ -1,0 +1,18 @@
+{
+  "name": "bistro",
+  "title": "Amazon Lumberyard Bistro, exterior",
+  "license": "CC BY 4.0: Amazon Lumberyard Bistro (Amazon; NVIDIA Open Research Content Archive); its glTF conversion and repository MIT (NVIDIA GameWorks rtxdi-assets, lightly edited by zeux/niagara_bistro)",
+  "attribution": "Amazon Lumberyard Bistro, Amazon (2017), https://developer.nvidia.com/orca/amazon-lumberyard-bistro, CC BY 4.0",
+  "source": {
+    "git": "https://github.com/zeux/niagara_bistro.git",
+    "commit": "2bdb6a410f8ebd475d3737e7c8e038ed2b00b02e",
+    "document": "bistro.gltf"
+  },
+  "pack": "bistro.npk",
+  "scene": "bistro.gltf#scene",
+  "ev100": 10.0,
+  "sky_intensity": 0.25,
+  "views": [
+    {"name": "street", "scene_camera": true}
+  ]
+}

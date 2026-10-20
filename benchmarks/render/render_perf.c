@@ -19,11 +19,30 @@
 //                       DRAM traffic (render_graph.h NphGpuRgPassTiming).
 //
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
-//                 [--list] [--validation] [--sw-pixels=N]
+//                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
+//                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
+//                 [--debug-view=NAME]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
 // the hybrid raster's split.
+//
+// Reference scenes (§10.7: the targets are measured on them): with
+// --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
+// benchmarks/scenes whose cooked pack DIR holds (scripts/scenes.py fetches
+// and cooks them) adds a scene per view, `<scene>_<view>_production`, run
+// after the synthetic scenes at 3840 x 2160 through the production path
+// with the runtime's defaults, lit by the scene's own lights (the
+// synthetic scenes' sun is removed first) and seen from its own camera or
+// the manifest's. --capture-dir writes each one's last frame there as a
+// BMP, to look at what was measured. --manifests reads the manifests from
+// another directory and --ref-size renders them at another size (the
+// CTest smoke run of a small cooked scene; budgets hold at 3840 x 2160).
+// --debug-view renders them as one of the renderer's debug views
+// (base_color, normal, roughness, metallic, occlusion, direct, indirect,
+// irradiance, clusters, triangles, instances) for looking at the content;
+// the results are then named `<scene>_<view>_production_<debug view>`, so
+// no budget applies to them.
 //
 // The scenes are synthetic until Phase 10's reference scenes arrive. Each
 // draws the runtime's defaults: bloom (r.bloom's weight, 0.04) on both
@@ -110,15 +129,24 @@
 // without a Vulkan device (CTest "skipped"). Validation is off unless
 // --validation: these are the hardware's numbers, not the layer's.
 
+#include <nepheline/asset/loader.h>
+#include <nepheline/asset/vfs.h>
 #include <nepheline/core/alloc.h>
+#include <nepheline/core/json.h>
+#include <nepheline/gpu/commands.h>
 #include <nepheline/gpu/device.h>
 #include <nepheline/gpu/render_graph.h>
+#include <nepheline/jobs/jobs.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
 #include <nepheline/render/gpu_profiler.h>
 #include <nepheline/render/primitives.h>
 #include <nepheline/render/renderer.h>
+
+#include "capture.h"
+#include "cooked_scene.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -251,6 +279,54 @@ static const SceneDef g_scenes[] = {
      2160U, 0U, SHADOWS_NONE, POST_DOF_LARGE},
 };
 
+// Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
+// views, and one measured scene per view.
+#define MAX_REF_MANIFESTS 8U
+#define MAX_REF_VIEWS     8U
+#define REF_WIDTH         3840U
+#define REF_HEIGHT        2160U
+
+typedef struct RefView {
+    char name[32];
+    bool scene_camera; // the scene's own (first) camera, else eye and target
+    NphDVec3 eye;
+    NphDVec3 target;
+    f32 yfov;
+    f32 znear;
+} RefView;
+
+typedef struct RefManifest {
+    char name[32];
+    char pack[1024];     // the cooked pack, under the scenes directory
+    char scene_key[256]; // its scene's identity (docs/cook.md "Identity")
+    f32 ev100;
+    f32 sky_intensity; // the default sky's (daylight next to a 30,000 lux sun) scale
+    RefView views[MAX_REF_VIEWS];
+    u32 view_count;
+} RefManifest;
+
+typedef struct RefScene {
+    char name[96];
+    u32 manifest;
+    u32 view;
+} RefScene;
+
+static RefManifest g_manifests[MAX_REF_MANIFESTS];
+static u32 g_manifest_count;
+static RefScene g_ref_scenes[MAX_REF_MANIFESTS * MAX_REF_VIEWS];
+static u32 g_ref_count;
+static u32 g_ref_width = REF_WIDTH;
+static u32 g_ref_height = REF_HEIGHT;
+
+// --debug-view's names, in NphRenderDebugView order from BASE_COLOR.
+static const char *const k_debug_views[] = {
+    "base_color", "normal",     "roughness", "metallic",  "occlusion", "direct",
+    "indirect",   "irradiance", "clusters",  "triangles", "instances",
+};
+NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT - 1U,
+                  "a name per debug view");
+static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
+
 typedef struct Result {
     char name[128];
     u32 samples;
@@ -293,6 +369,16 @@ typedef struct Ctx {
     f32 turn;
     f64 strafe;
     u32 motion_frame;
+    // Reference scenes: what loads them, made for the first; the manifest
+    // whose scene is loaded (NPH_U32_MAX: none), and whether the synthetic
+    // scenes' sun was removed for its lights.
+    NphJobSystem *jobs;
+    NphVfs *vfs;
+    NphAssetLoader *loader;
+    u32 mount;
+    CookedScene cooked;
+    u32 loaded_manifest;
+    bool sun_removed;
 } Ctx;
 
 static int compare_f64(const void *a, const void *b)
@@ -614,6 +700,9 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
     return nph_gpu_frame_end(ctx->dev);
 }
 
+static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
+                        NphRenderPipeline pipeline, bool shadows, FrameRun *run);
+
 static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
 {
     NphGpuImageDesc td;
@@ -673,26 +762,35 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     destroy_scene(ctx);
     nph_gpu_image_destroy(ctx->dev, target);
     NPH_TRY(r);
-    if (run.stats.pipeline != s->pipeline) {
-        fprintf(stderr, "render_perf: %s: the device has no production path; skipped\n", s->name);
+    return report(ctx, s->name, s->width, s->height, s->pipeline, s->shadows != (u32)SHADOWS_NONE,
+                  &run);
+}
+
+// Records and prints a measured run of scene `name`: the CPU median, the
+// GPU frame and each pass, and the frame's statistics.
+static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
+                        NphRenderPipeline pipeline, bool shadows, FrameRun *run)
+{
+    if (run->stats.pipeline != pipeline) {
+        fprintf(stderr, "render_perf: %s: the device has no production path; skipped\n", name);
         return NPH_RESULT_OK;
     }
 
-    qsort(run.cpu_ns, run.cpu_count, sizeof run.cpu_ns[0], compare_f64);
-    Result *cpu = add_result(ctx, s->name, ".cpu");
+    qsort(run->cpu_ns, run->cpu_count, sizeof run->cpu_ns[0], compare_f64);
+    Result *cpu = add_result(ctx, name, ".cpu");
     if (cpu == NULL) {
         return NPH_RESULT_FULL;
     }
-    cpu->samples = run.cpu_count;
-    cpu->ns = run.cpu_ns[run.cpu_count / 2U];
-    cpu->min_ns = run.cpu_ns[0];
-    cpu->max_ns = run.cpu_ns[run.cpu_count - 1U];
+    cpu->samples = run->cpu_count;
+    cpu->ns = run->cpu_ns[run->cpu_count / 2U];
+    cpu->min_ns = run->cpu_ns[0];
+    cpu->max_ns = run->cpu_ns[run->cpu_count - 1U];
     cpu->metric = cpu->ns;
 
     static NphRenderPassStats passes[MAX_PASS_STATS];
     const u32 n = nph_render_gpu_profiler_stats(ctx->profiler, passes, MAX_PASS_STATS);
-    printf("%s (%u x %u, %u instances): cpu %.3f ms median", s->name, s->width, s->height,
-           run.stats.instances, cpu->ns / 1.0e6);
+    printf("%s (%u x %u, %u instances): cpu %.3f ms median", name, width, height,
+           run->stats.instances, cpu->ns / 1.0e6);
     for (u32 i = 0; i < n; ++i) {
         const NphRenderPassStats *p = &passes[i];
         if (p->samples == 0U) {
@@ -701,7 +799,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
         const bool frame = strcmp(p->name, "frame") == 0;
         char suffix[96];
         (void)snprintf(suffix, sizeof suffix, frame ? ".gpu" : ".gpu.%s", p->name);
-        Result *g = add_result(ctx, s->name, suffix);
+        Result *g = add_result(ctx, name, suffix);
         if (g == NULL) {
             return NPH_RESULT_FULL;
         }
@@ -714,7 +812,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
         if (frame) {
             printf(", gpu %.3f ms mean, %.3f ms p99, %.1f MB declared\n", p->mean_ms, p->p99_ms,
                    g->metric);
-            Result *p99 = add_result(ctx, s->name, ".gpu.p99");
+            Result *p99 = add_result(ctx, name, ".gpu.p99");
             if (p99 == NULL) {
                 return NPH_RESULT_FULL;
             }
@@ -730,7 +828,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                    (f64)p->read_bytes / 1.0e6, (f64)p->write_bytes / 1.0e6);
         }
     }
-    const NphRenderFrameStats *st = &run.stats;
+    const NphRenderFrameStats *st = &run->stats;
     if (st->pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
         printf("    clusters %u (%u in software), triangles %u; culled instances %u frustum + "
                "%u occlusion, clusters %u frustum + %u cone + %u occlusion; lights %u, %u in "
@@ -752,12 +850,318 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
         printf("    draws %u, triangles %u, culled %u, lights %u%s\n", st->draws, st->triangles,
                st->culled, st->lights, st->shadow_rays ? "; shadow rays" : "");
     }
-    if (s->shadows != (u32)SHADOWS_NONE && !st->shadow_rays && !st->vsm) {
+    if (shadows && !st->shadow_rays && !st->vsm) {
         fprintf(stderr, "render_perf: %s: the renderer cannot shadow; shadows were not drawn\n",
-                s->name);
+                name);
     }
     fflush(stdout); // whole lines between the log's (stderr) when both go to one file
     return NPH_RESULT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Reference scenes
+// ---------------------------------------------------------------------------
+
+static bool json_vec3(const NphJsonValue *object, const char *key, NphDVec3 *out)
+{
+    const NphJsonValue *a = nph_json_object_get(object, nph_str_from_cstr(key));
+    f64 v[3];
+    for (u32 i = 0; i < 3U; ++i) {
+        if (nph_json_as_f64(nph_json_array_at(a, i), &v[i]) != NPH_RESULT_OK) {
+            return false;
+        }
+    }
+    *out = nph_dvec3(v[0], v[1], v[2]);
+    return true;
+}
+
+static void json_string(const NphJsonValue *object, const char *key, char *out, u64 cap)
+{
+    NphStr v = NPH_STR("");
+    NPH_IGNORE_RESULT(nph_json_as_str(nph_json_object_get(object, nph_str_from_cstr(key)), &v));
+    const u64 n = v.len < cap - 1U ? v.len : cap - 1U;
+    memcpy(out, v.data, (size_t)n);
+    out[n] = '\0';
+}
+
+// Reads manifest `path` into `m` (its pack under `scenes`); false, with a
+// message, when it does not describe a scene with views.
+static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
+{
+    NphAllocator *a = nph_allocator_system();
+    void *text = NULL;
+    u64 size = 0U;
+    if (nph_file_read_all(path, a, &text, &size) != NPH_RESULT_OK) {
+        fprintf(stderr, "render_perf: cannot read %s\n", path);
+        return false;
+    }
+    NphJsonDoc doc;
+    const NphResult r = nph_json_parse(nph_str((const char *)text, size), a, &doc);
+    bool ok = r == NPH_RESULT_OK;
+    memset(m, 0, sizeof *m);
+    if (ok) {
+        const NphJsonValue *root = doc.root;
+        char pack[512];
+        json_string(root, "name", m->name, sizeof m->name);
+        json_string(root, "pack", pack, sizeof pack);
+        json_string(root, "scene", m->scene_key, sizeof m->scene_key);
+        (void)snprintf(m->pack, sizeof m->pack, "%s/%s", scenes, pack);
+        m->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
+        m->sky_intensity = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
+        const NphJsonValue *views = nph_json_object_get(root, NPH_STR("views"));
+        for (u32 i = 0; i < MAX_REF_VIEWS; ++i) {
+            const NphJsonValue *v = nph_json_array_at(views, i);
+            if (v == NULL) {
+                break;
+            }
+            RefView *rv = &m->views[m->view_count];
+            json_string(v, "name", rv->name, sizeof rv->name);
+            rv->scene_camera = nph_json_get_bool(v, NPH_STR("scene_camera"), false);
+            rv->yfov = (f32)nph_json_get_f64(v, NPH_STR("yfov"), 0.9);
+            rv->znear = (f32)nph_json_get_f64(v, NPH_STR("near"), 0.1);
+            if (rv->name[0] == '\0' ||
+                (!rv->scene_camera &&
+                 (!json_vec3(v, "eye", &rv->eye) || !json_vec3(v, "target", &rv->target)))) {
+                fprintf(stderr,
+                        "render_perf: %s: view %u needs a name, and an eye and a target "
+                        "or scene_camera\n",
+                        path, i);
+                ok = false;
+                break;
+            }
+            m->view_count += 1U;
+        }
+        ok = ok && m->name[0] != '\0' && pack[0] != '\0' && m->scene_key[0] != '\0' &&
+             m->view_count != 0U && m->sky_intensity > 0.0F;
+    }
+    if (!ok) {
+        fprintf(stderr, "render_perf: %s: not a scene manifest (docs/benchmarks.md)\n", path);
+    }
+    nph_json_doc_free(&doc);
+    nph_file_free_all(a, text, size);
+    return ok;
+}
+
+// The manifests in `dir` whose packs `scenes` holds, and their scenes.
+static void load_manifests(const char *dir, const char *scenes)
+{
+    NphDirIterator it;
+    if (nph_dir_open(dir, &it) != NPH_RESULT_OK) {
+        fprintf(stderr, "render_perf: no scene manifests in %s\n", dir);
+        return;
+    }
+    NphDirEntry e;
+    while (nph_dir_next(&it, &e) && g_manifest_count < MAX_REF_MANIFESTS) {
+        const u64 n = strlen(e.name);
+        if (e.is_directory || n < 6U || strcmp(e.name + n - 5U, ".json") != 0) {
+            continue;
+        }
+        char path[1024];
+        (void)snprintf(path, sizeof path, "%s/%s", dir, e.name);
+        RefManifest *m = &g_manifests[g_manifest_count];
+        if (!parse_manifest(path, scenes, m)) {
+            continue;
+        }
+        NphFileInfo info;
+        if (nph_fs_stat(m->pack, &info) != NPH_RESULT_OK) {
+            fprintf(stderr,
+                    "render_perf: %s: %s is not there; its scenes are skipped "
+                    "(scripts/scenes.py fetch and cook it)\n",
+                    m->name, m->pack);
+            continue;
+        }
+        for (u32 v = 0; v < m->view_count; ++v) {
+            RefScene *rs = &g_ref_scenes[g_ref_count++];
+            const bool debug = g_debug_view != NPH_RENDER_VIEW_LIT;
+            (void)snprintf(rs->name, sizeof rs->name, "%s_%s_production%s%s", m->name,
+                           m->views[v].name, debug ? "_" : "",
+                           debug ? k_debug_views[(u32)g_debug_view - 1U] : "");
+            rs->manifest = g_manifest_count;
+            rs->view = v;
+        }
+        g_manifest_count += 1U;
+    }
+    nph_dir_close(&it);
+}
+
+static void unload_reference(Ctx *ctx)
+{
+    if (ctx->loaded_manifest == NPH_U32_MAX) {
+        return;
+    }
+    cooked_scene_unload(&ctx->cooked);
+    NPH_IGNORE_RESULT(nph_vfs_unmount(ctx->vfs, ctx->mount));
+    ctx->loaded_manifest = NPH_U32_MAX;
+}
+
+static NphResult load_reference(Ctx *ctx, u32 manifest)
+{
+    if (ctx->loaded_manifest == manifest) {
+        return NPH_RESULT_OK;
+    }
+    unload_reference(ctx);
+    NphAllocator *a = nph_allocator_system();
+    if (ctx->jobs == NULL) {
+        NphJobSystemDesc jd;
+        memset(&jd, 0, sizeof jd);
+        jd.alloc = a;
+        NPH_TRY(nph_job_system_create(&jd, &ctx->jobs));
+        NPH_TRY(nph_vfs_create(a, &ctx->vfs));
+        NphAssetLoaderDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.alloc = a;
+        ld.vfs = ctx->vfs;
+        ld.jobs = ctx->jobs;
+        NPH_TRY(nph_asset_loader_create(&ld, &ctx->loader));
+    }
+    if (!ctx->sun_removed) {
+        // The scene brings its own sun: the renderer takes the lowest-slot
+        // directional light as the sun, which the synthetic one would be.
+        nph_render_light_destroy(ctx->renderer, ctx->sun);
+        ctx->sun = NPH_RENDER_LIGHT_NULL;
+        ctx->sun_removed = true;
+    }
+    const RefManifest *m = &g_manifests[manifest];
+    // The sky in proportion to the scene's own sun (the default one pairs
+    // with the synthetic scenes' 30,000 lux).
+    NphRenderEnvironmentDesc env;
+    memset(&env, 0, sizeof env);
+    env.source = NPH_RENDER_ENV_SKY;
+    nph_render_sky_desc_default(&env.sky);
+    env.intensity = m->sky_intensity;
+    NPH_TRY(nph_render_set_environment(ctx->renderer, &env));
+    NPH_TRY(nph_vfs_mount_pack(ctx->vfs, NPH_STR("scene"), m->pack, &ctx->mount));
+    CookedSceneDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.alloc = a;
+    cd.renderer = ctx->renderer;
+    cd.loader = ctx->loader;
+    cd.jobs = ctx->jobs;
+    cd.scene = nph_guid_from_cstr(m->scene_key);
+    const u64 t0 = nph_time_now_ns();
+    const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
+    if (r != NPH_RESULT_OK) {
+        NPH_IGNORE_RESULT(nph_vfs_unmount(ctx->vfs, ctx->mount));
+        return r;
+    }
+    ctx->loaded_manifest = manifest;
+    printf("%s: loaded in %.1f s: %u instances, %u lights, %u materials\n", m->name,
+           (f64)(nph_time_now_ns() - t0) / 1.0e9, ctx->cooked.instance_count,
+           ctx->cooked.light_count, ctx->cooked.render_material_count);
+    return NPH_RESULT_OK;
+}
+
+// Writes `target` (RGBA8) to `path` as a BMP.
+static NphResult capture(Ctx *ctx, NphGpuImage target, u32 width, u32 height, const char *path)
+{
+    const u64 size = (u64)width * height * 4U;
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.size = size;
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    bd.memory = NPH_GPU_MEMORY_READBACK;
+    bd.name = "render_perf capture";
+    NphGpuBuffer rb = NPH_GPU_BUFFER_NULL;
+    NPH_TRY(nph_gpu_buffer_create(ctx->dev, &bd, &rb));
+    NphGpuCmd *cmd = NULL;
+    NphResult r = nph_gpu_cmd_begin(ctx->dev, NPH_GPU_QUEUE_GRAPHICS, "capture", &cmd);
+    if (r == NPH_RESULT_OK) {
+        NphGpuImageBarrier b;
+        memset(&b, 0, sizeof b);
+        b.image = target;
+        b.src_stages = (u32)NPH_GPU_STAGE_ALL;
+        b.src_access = (u32)NPH_GPU_ACCESS_MEMORY_WRITE;
+        b.old_layout = nph_gpu_image_layout(ctx->dev, target, 0U);
+        b.dst_stages = (u32)NPH_GPU_STAGE_TRANSFER;
+        b.dst_access = (u32)NPH_GPU_ACCESS_TRANSFER_READ;
+        b.new_layout = NPH_GPU_LAYOUT_TRANSFER_SRC;
+        b.mip_count = 1U;
+        b.layer_count = NPH_GPU_ALL_LAYERS;
+        NphGpuBarrierDesc desc;
+        memset(&desc, 0, sizeof desc);
+        desc.images = &b;
+        desc.image_count = 1U;
+        nph_gpu_cmd_barrier(cmd, &desc);
+        NphGpuBufferImageCopy region;
+        memset(&region, 0, sizeof region);
+        region.layer_count = 1U;
+        nph_gpu_cmd_copy_image_to_buffer(cmd, target, NPH_GPU_LAYOUT_TRANSFER_SRC, rb, &region, 1U);
+        nph_gpu_cmd_buffer_barrier(cmd, rb, (u32)NPH_GPU_STAGE_TRANSFER,
+                                   (u32)NPH_GPU_ACCESS_TRANSFER_WRITE, (u32)NPH_GPU_STAGE_HOST,
+                                   (u32)NPH_GPU_ACCESS_HOST_READ);
+        nph_gpu_cmd_end(cmd);
+        NphGpuSubmitDesc sd;
+        memset(&sd, 0, sizeof sd);
+        sd.queue = NPH_GPU_QUEUE_GRAPHICS;
+        sd.cmds = &cmd;
+        sd.cmd_count = 1U;
+        u64 value = 0U;
+        r = nph_gpu_submit(ctx->dev, &sd, &value);
+        if (r == NPH_RESULT_OK) {
+            r = nph_gpu_timeline_wait(ctx->dev, nph_gpu_queue_timeline(ctx->dev, sd.queue), value,
+                                      NPH_U64_MAX);
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = capture_write_bmp(path, (const u8 *)nph_gpu_buffer_map(ctx->dev, rb), width, height,
+                              false);
+    }
+    nph_gpu_buffer_destroy(ctx->dev, rb);
+    return r;
+}
+
+static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const char *capture_dir)
+{
+    NPH_TRY(load_reference(ctx, rs->manifest));
+    const RefManifest *m = &g_manifests[rs->manifest];
+    const RefView *rv = &m->views[rs->view];
+    NphRenderCamera camera;
+    if (rv->scene_camera && ctx->cooked.has_camera) {
+        camera = ctx->cooked.camera;
+    } else {
+        if (rv->scene_camera) {
+            fprintf(stderr, "render_perf: %s: the scene has no camera\n", rs->name);
+            return NPH_RESULT_NOT_FOUND;
+        }
+        camera =
+            nph_render_camera_look_at(rv->eye, rv->target, nph_vec3_unit_y(), rv->yfov, rv->znear);
+    }
+    NphGpuImageDesc td;
+    memset(&td, 0, sizeof td);
+    td.type = NPH_GPU_IMAGE_2D;
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    td.width = g_ref_width;
+    td.height = g_ref_height;
+    td.mip_count = 1U;
+    td.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC;
+    td.name = "render_perf target";
+    NphGpuImage target = NPH_GPU_IMAGE_NULL;
+    NPH_TRY(nph_gpu_image_create(ctx->dev, &td, &target));
+    // The runtime's defaults, as for the synthetic production scenes.
+    NphRenderView view;
+    nph_render_view_default(&view, camera);
+    view.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    view.ev100 = m->ev100;
+    view.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
+    view.bloom = RUNTIME_BLOOM;
+    view.ao_radius = RUNTIME_AO;
+    view.gi = 1;
+    view.debug_view = g_debug_view;
+    if (ctx->no_sw_raster) {
+        view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    }
+    static FrameRun run;
+    NphResult r = run_frames(ctx, &view, target, frames, &run);
+    if (r == NPH_RESULT_OK && capture_dir != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof path, "%s/%s.bmp", capture_dir, rs->name);
+        r = capture(ctx, target, g_ref_width, g_ref_height, path);
+    }
+    NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(ctx->dev));
+    nph_gpu_image_destroy(ctx->dev, target);
+    NPH_TRY(r);
+    return report(ctx, rs->name, g_ref_width, g_ref_height, NPH_RENDER_PIPELINE_PRODUCTION, false,
+                  &run);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +1269,9 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     dd.validation = validation ? NPH_GPU_TOGGLE_ON : NPH_GPU_TOGGLE_OFF;
     // The renderer logs its pipelines' registers and spills (stderr).
     dd.shader_statistics = 1;
+    // A reference scene unloads between frames in one go: Bistro destroys
+    // some 8,000 GPU objects.
+    dd.deferred_destroy_capacity = 16384U;
     NPH_TRY(nph_gpu_device_create(&dd, &ctx->dev));
     NphGpuRenderGraphDesc gd;
     memset(&gd, 0, sizeof gd);
@@ -901,12 +1308,21 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
 
 static void teardown(Ctx *ctx)
 {
+    if (ctx->renderer != NULL) {
+        NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(ctx->dev));
+        unload_reference(ctx);
+    }
+    nph_asset_loader_destroy(ctx->loader);
+    nph_vfs_destroy(ctx->vfs);
+    nph_job_system_destroy(ctx->jobs);
     if (ctx->instances != NULL) {
         destroy_scene(ctx);
         NPH_FREE_ARRAY(nph_allocator_system(), NphRenderInstance, ctx->instances, MAX_INSTANCES);
     }
     if (ctx->renderer != NULL) {
-        nph_render_light_destroy(ctx->renderer, ctx->sun);
+        if (!ctx->sun_removed) {
+            nph_render_light_destroy(ctx->renderer, ctx->sun);
+        }
         for (u32 i = 0; i < 4U; ++i) {
             nph_render_material_destroy(ctx->renderer, ctx->materials[i]);
         }
@@ -923,7 +1339,9 @@ static void teardown(Ctx *ctx)
 static int usage(void)
 {
     fprintf(stderr, "usage: render_perf [--filter=GLOB] [--frames=N] [--json=FILE] "
-                    "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n");
+                    "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
+                    "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
+                    "[--ref-size=WxH] [--debug-view=NAME]\n");
     return 2;
 }
 
@@ -936,6 +1354,9 @@ int main(int argc, char **argv)
     bool list = false;
     bool validation = false;
     f64 sw_pixels = -1.0;
+    const char *scenes = getenv("NPH_SCENES");
+    const char *capture_dir = NULL;
+    const char *manifest_dir = NPH_SCENE_MANIFEST_DIR;
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--filter=", 9U) == 0) {
             filter = argv[i] + 9;
@@ -951,9 +1372,37 @@ int main(int argc, char **argv)
             sw_pixels = strtod(argv[i] + 12, NULL);
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
+        } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {
+            scenes = argv[i] + 9;
+        } else if (strncmp(argv[i], "--capture-dir=", 14U) == 0) {
+            capture_dir = argv[i] + 14;
+        } else if (strncmp(argv[i], "--manifests=", 12U) == 0) {
+            manifest_dir = argv[i] + 12;
+        } else if (strncmp(argv[i], "--ref-size=", 11U) == 0) {
+            char *x = NULL;
+            const unsigned long w = strtoul(argv[i] + 11, &x, 10);
+            const unsigned long h = x != NULL && *x == 'x' ? strtoul(x + 1, NULL, 10) : 0UL;
+            if (w == 0UL || h == 0UL || w > 16384UL || h > 16384UL) {
+                return usage();
+            }
+            g_ref_width = (u32)w;
+            g_ref_height = (u32)h;
+        } else if (strncmp(argv[i], "--debug-view=", 13U) == 0) {
+            g_debug_view = NPH_RENDER_VIEW_COUNT;
+            for (u32 v = 0; v < NPH_ARRAY_COUNT(k_debug_views); ++v) {
+                if (strcmp(argv[i] + 13, k_debug_views[v]) == 0) {
+                    g_debug_view = (NphRenderDebugView)(v + 1U);
+                }
+            }
+            if (g_debug_view == NPH_RENDER_VIEW_COUNT) {
+                return usage();
+            }
         } else {
             return usage();
         }
+    }
+    if (scenes != NULL && scenes[0] != '\0') {
+        load_manifests(manifest_dir, scenes);
     }
     frames = nph_clamp_u32(frames, 1U, MAX_FRAMES - NPH_GPU_FRAMES_IN_FLIGHT);
     u32 matched = 0U;
@@ -962,6 +1411,14 @@ int main(int argc, char **argv)
             ++matched;
             if (list) {
                 printf("%s\n", g_scenes[i].name);
+            }
+        }
+    }
+    for (u32 i = 0; i < g_ref_count; ++i) {
+        if (glob_match(filter, g_ref_scenes[i].name)) {
+            ++matched;
+            if (list) {
+                printf("%s\n", g_ref_scenes[i].name);
             }
         }
     }
@@ -974,6 +1431,7 @@ int main(int argc, char **argv)
     }
 
     static Ctx ctx;
+    ctx.loaded_manifest = NPH_U32_MAX;
     const NphResult sr = setup(&ctx, validation, sw_pixels);
     if (sr == NPH_RESULT_UNSUPPORTED && ctx.dev == NULL) {
         fprintf(stderr, "render_perf: no Vulkan device; skipping\n");
@@ -991,6 +1449,17 @@ int main(int argc, char **argv)
         const NphResult r = run_scene(&ctx, &g_scenes[i], frames);
         if (r != NPH_RESULT_OK) {
             fprintf(stderr, "render_perf: %s failed: %s\n", g_scenes[i].name, nph_result_string(r));
+            status = 1;
+        }
+    }
+    for (u32 i = 0; i < g_ref_count && status == 0; ++i) {
+        if (!glob_match(filter, g_ref_scenes[i].name)) {
+            continue;
+        }
+        const NphResult r = run_reference(&ctx, &g_ref_scenes[i], frames, capture_dir);
+        if (r != NPH_RESULT_OK) {
+            fprintf(stderr, "render_perf: %s failed: %s\n", g_ref_scenes[i].name,
+                    nph_result_string(r));
             status = 1;
         }
     }
