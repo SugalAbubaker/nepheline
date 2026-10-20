@@ -45,6 +45,7 @@ supersedes it and both link to each other.
 | [0037](0037-depth-of-field.md) | Depth of field through a thin lens: slight blur gathered at full resolution, large at half | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0038](0038-ambient-occlusion.md) | Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads | Accepted (0.38 ms of §10.4's indirect-light line) |
 | [0039](0039-radiance-cache.md) | A hashed world-space radiance cache, kept by a fixed ray budget | Accepted (0.20 to 0.41 ms; with ADR-0038 past §10.4's indirect-light line in the sky-lit field; patent review before release) |
+| [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.47 ms against the 4.17 ms frame) |
 
 ## Template
 
