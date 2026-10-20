@@ -437,7 +437,7 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 ### 10.7 Enforcement
 - A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
 - GPU timestamps per pass are compared to the §10.4 table. A regression of more than 5% fails CI.
-- Reference scenes are defined in Phase 10: dense urban and open landscape with foliage. The interior with many lights (Intel's Sponza and its 10,000 candles) joins in Phase 14, whose many-light sampling it needs (ADR-0040).
+- Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) in Phase 14, whose many-light sampling it needs.
 - Every renderer PR must state its cost in both milliseconds and DRAM bytes.
 
 ## 11. Documentation
@@ -462,7 +462,7 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 | **10. Renderer v2** | GPU-driven culling, visibility buffer + hybrid raster, fused tile shading, virtual shadow maps, radiance cache GI, native TAA + fused post (§8.6 stages 3–8); define the reference scenes | Constant CPU cost vs object count. Reference scenes hold 1%-low ≤ 4.17 ms at native 4K on the RTX 3060 Ti, with every pass inside its §10.4 budget |
 | **11. Physics** | broadphase, narrowphase, solver, joints, CCD, queries, character controller | Stacking, ragdoll, and determinism tests pass. Benchmarks recorded |
 | **12. Audio** | device, mixer, voices, DSP, 3D, streaming | Offline mix tests pass. No audio-thread allocations (verified) |
-| **13. Streaming & scale** | virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9) | Open-world test scene streams without hitches, stays under 6.5 GB VRAM, and keeps the 240 FPS native-4K target |
+| **13. Streaming & scale** | virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9); the open-landscape reference scene (§10.7) | Open-world test scene streams without hitches, stays under 6.5 GB VRAM, and keeps the 240 FPS native-4K target, the landscape included |
 | **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the many-light interior reference scene (§10.7) | Golden tests pass. Reference hardware stays within the §10.4 budget, the interior included |
 | **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2 | Release candidate `v1.0.0` |
 

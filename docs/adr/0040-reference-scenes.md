@@ -170,11 +170,15 @@ The user decided the questions the consequences above left open:
 
 - **The interior moves to Phase 14.** Sponza and its candles become the
   reference scene of ReSTIR's many-light sampling, which it needs.
-  Phase 10's reference scenes are the street and the landscape (CLAUDE.md
-  §10.7 and §12 say so now).
-- **The landscape goes ahead with its alpha-tested plants.** §8.6's "no
-  alpha-tested foliage" governs our own content. Third-party reference
-  scenes are measured as their authors made them.
+- **§8.6's "no alpha-tested foliage" governs our own content.**
+  Third-party reference scenes are measured as their authors made them.
+- **The landscape moves to Phase 13.** Poly Haven's foliage is hero assets
+  without levels of detail: its pine tree is 17.4 M triangles (a 950 MB
+  glTF), its fir sapling 433 K, a grass clump 1.6 M. Any forest of them
+  puts hundreds of millions of triangles in view, which only virtualized
+  geometry's levels of detail (Phase 13) bound by pixels. Each reference
+  scene now joins with the feature it stresses, so Phase 10's is the
+  street (CLAUDE.md §10.7 and §12 say so now).
 - **The §10.4 table stands.** The work goes on against it: no line is
   raised to meet a measurement, and no quality is given up to meet a line.
 - **The GPU runner measures the reference scenes nightly**, cooking them
