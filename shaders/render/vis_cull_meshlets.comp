@@ -116,7 +116,7 @@ void main()
             c = vis_transform_vector(inst.transform, center) + t;
             r = radius * scale;
             const vec4 cone = unpackSnorm4x8(b1.x);
-            if (!vis_sphere_in_frustum(view.v, c, r)) {
+            if (!vis_sphere_in_frustum(view, c, r)) {
                 culled_frustum = true;
             } else if ((view.v.flags & NPH_VIS_VIEW_CONE_CULLING) != 0u && !double_sided &&
                        (inst.flags & NPH_VIS_INSTANCE_SIMILAR) != 0u &&
@@ -137,12 +137,12 @@ void main()
                         const vec3 pv = (view.v.prev_view * vec4(pw, 1.0)).xyz;
                         defer = vis_project_sphere(pv, radius * vis_max_scale(pt),
                                                    view.v.prev_projection, rect, depth) &&
-                                vis_hzb_occluded(view.v, rect + view.v.jitter.zwzw, depth);
+                                vis_hzb_occluded(view, rect + view.v.jitter.zwzw, depth);
                     }
                 } else {
                     const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
                     culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
-                                       vis_hzb_occluded(view.v, rect + view.v.jitter.xyxy, depth);
+                                       vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
                 }
             }
             visible = !culled_frustum && !culled_cone && !defer && !culled_occlusion;

@@ -120,8 +120,13 @@ validator rejects that for workgroup and function memory
   array of a struct of its own, e.g. `struct Bin { uint count; }; shared Bin
   s_bins[N];` (`exposure.comp`, `bloom.comp`).
 - A shader reads the fields it needs from a buffer struct that holds an
-  array rather than copying the whole struct into a local (`vis_cull_meshlets.comp`).
-  The optimiser usually removes such a copy, but validity must not depend on it.
+  array rather than copying the whole struct into a local
+  (`vis_cull_meshlets.comp`), and a function takes such a struct through its
+  buffer reference, not by value (`vis_common.glsl`'s culling functions take
+  `VisViewRef`): a by-value parameter is a copy too. The optimiser usually
+  removes such a copy, but validity must not depend on it; whether glslang
+  14.0 shares the decorated type depends on the order it meets the types
+  in, so a copy that validates today can fail after an unrelated change.
 
 Newer glslang (the SDK's) gives such variables types of their own, so a
 mistake shows up only on Linux CI, or when shaders are built with glslang 14.0's

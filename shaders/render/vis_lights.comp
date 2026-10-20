@@ -65,7 +65,7 @@ void main()
             vec4 sphere = vis_light_sphere(d.position.xyz, d.direction.xyz, range, type, d.spot.z,
                                            d.spot.w);
             sphere.w *= 1.0 + VIS_LIGHT_SLACK;
-            if (vis_sphere_in_frustum(view.v, sphere.xyz, sphere.w)) {
+            if (vis_sphere_in_frustum(view, sphere.xyz, sphere.w)) {
                 local = true;
                 const vec3 c = mat3(view.v.view) * sphere.xyz;
                 const float znear = view.v.projection.z;

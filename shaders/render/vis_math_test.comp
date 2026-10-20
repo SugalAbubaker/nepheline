@@ -17,25 +17,28 @@ void main()
     if (i >= pc.count) {
         return;
     }
-    const NphVisViewData v = VisViewRef(pc.view).v;
+    VisViewRef view = VisViewRef(pc.view);
+    // Fields, not a copy of the view (vis_sphere_in_frustum).
+    const vec4 projection = view.v.projection;
+    const vec4 viewport = view.v.viewport;
     const NphVisMathCase c = VisMathCasesRef(pc.cases).c[i];
     NphVisMathResult r;
     vec4 rect;
     float depth;
-    r.projected = vis_project_sphere(c.sphere.xyz, c.sphere.w, v.projection, rect, depth) ? 1u : 0u;
+    r.projected = vis_project_sphere(c.sphere.xyz, c.sphere.w, projection, rect, depth) ? 1u : 0u;
     r.rect = rect;
     r.depth = depth;
-    r.in_frustum = vis_sphere_in_frustum(v, c.sphere.xyz, c.sphere.w) ? 1u : 0u;
+    r.in_frustum = vis_sphere_in_frustum(view, c.sphere.xyz, c.sphere.w) ? 1u : 0u;
     r.cone_culled = vis_cone_culled(c.cone.xyz, c.axis.xyz, c.cone.w) ? 1u : 0u;
     const bool mirrored = c.mirrored != 0u;
     r.front_facing = vis_front_facing(c.c0, c.c1, c.c2, mirrored) ? 1u : 0u;
-    r.tri_culled = vis_cull_triangle(c.c0, c.c1, c.c2, true, mirrored, v.viewport) ? 1u : 0u;
-    r.hzb_occluded = vis_hzb_occluded(v, c.rect, c.depth) ? 1u : 0u;
-    r.clipped_rect = vis_project_sphere_clipped(c.sphere.xyz, c.sphere.w, v.projection);
+    r.tri_culled = vis_cull_triangle(c.c0, c.c1, c.c2, true, mirrored, viewport) ? 1u : 0u;
+    r.hzb_occluded = vis_hzb_occluded(view, c.rect, c.depth) ? 1u : 0u;
+    r.clipped_rect = vis_project_sphere_clipped(c.sphere.xyz, c.sphere.w, projection);
     r.light_sphere = vis_light_sphere(c.light_position.xyz, c.light_direction.xyz,
                                       c.light_position.w, uint(c.light_direction.w), c.light_cone.x,
                                       c.light_cone.y);
-    r.zbin = nph_zbin(c.light_cone.z, v.projection.z,
+    r.zbin = nph_zbin(c.light_cone.z, projection.z,
                       float(NPH_RENDER_ZBINS) / float(NPH_RENDER_ZBIN_OCTAVES));
     VisMathResultsRef(pc.results).r[i] = r;
 }

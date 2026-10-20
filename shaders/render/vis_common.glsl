@@ -102,11 +102,15 @@ uvec3 vis_triangle_corners(NphVisMesh mesh, uint triangle_offset, uint t)
 // ---------------------------------------------------------------------------
 
 // A sphere against the frustum's five inward planes (the far plane is at
-// infinity): false when it lies wholly outside one of them.
-bool vis_sphere_in_frustum(NphVisViewData v, vec3 c, float r)
+// infinity): false when it lies wholly outside one of them. The view is
+// read through its reference: a copy of the struct, which holds arrays, is
+// what Ubuntu 24.04's glslang (14.0) may give the buffer's ArrayStride
+// decorations, which spirv-val rejects (docs/build.md "Shaders").
+bool vis_sphere_in_frustum(VisViewRef view, vec3 c, float r)
 {
     for (int i = 0; i < 5; ++i) {
-        if (dot(v.frustum[i].xyz, c) + v.frustum[i].w < -r) {
+        const vec4 plane = view.v.frustum[i];
+        if (dot(plane.xyz, c) + plane.w < -r) {
             return false;
         }
     }
@@ -240,21 +244,23 @@ vec4 vis_light_sphere(vec3 position, vec3 direction, float range, uint type, flo
 // one reaching the edge (vis_hzb.comp), so clamping to the last texel stays
 // conservative. The mip is chosen so the rectangle spans at most one
 // texel, so a 2 x 2 footprint covers it.
-bool vis_hzb_occluded(NphVisViewData v, vec4 rect, float depth)
+bool vis_hzb_occluded(VisViewRef view, vec4 rect, float depth)
 {
+    const vec2 viewport = view.v.viewport.xy;
+    const vec4 hzb_size = view.v.hzb;
     const vec4 r = clamp(rect, 0.0, 1.0);
-    const vec2 size = vec2(r.z - r.x, r.w - r.y) * v.viewport.xy * 0.5; // in mip-0 texels
+    const vec2 size = vec2(r.z - r.x, r.w - r.y) * viewport * 0.5; // in mip-0 texels
     const float extent = max(max(size.x, size.y), 1.0);
-    const int mip_count = int(v.hzb.z);
+    const int mip_count = int(hzb_size.z);
     const int mip = min(int(ceil(log2(extent))), mip_count - 1);
-    const vec2 texel_scale = v.viewport.xy * 0.5 / float(1u << uint(mip));
+    const vec2 texel_scale = viewport * 0.5 / float(1u << uint(mip));
     const ivec2 lo = ivec2(floor(r.xy * texel_scale));
     // Vulkan's extents: each mip the one above halved, rounded down.
-    const ivec2 dims = max(ivec2(v.hzb.xy) >> mip, ivec2(1));
+    const ivec2 dims = max(ivec2(hzb_size.xy) >> mip, ivec2(1));
     const ivec2 last = dims - 1;
     const ivec2 p0 = min(lo, last);
     const ivec2 p1 = min(lo + 1, last);
-    const uint hzb = v.hzb_index;
+    const uint hzb = view.v.hzb_index;
     const float d = min(min(nph_fetch_2d(hzb, p0, mip).x, nph_fetch_2d(hzb, ivec2(p1.x, p0.y), mip).x),
                         min(nph_fetch_2d(hzb, ivec2(p0.x, p1.y), mip).x, nph_fetch_2d(hzb, p1, mip).x));
     return depth < d;
