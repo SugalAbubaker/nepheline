@@ -570,7 +570,13 @@ Homogeneous Coordinates", 1997), right even with a vertex behind the
 camera. Shading is `surface.glsl`, as above; the images match the
 reference's (100 % of pixels within 3 levels in the tests). One pass
 covers every pixel: classifying the tiles of background alone into a
-pipeline of their own measured slower (ADR-0031).
+pipeline of their own measured slower (ADR-0031). So did running its
+workgroups in vertical strips of 64 for the L2's sake (Bavoil, "Optimizing
+Compute Shaders for L2 Locality using Thread-Group ID Swizzling", NVIDIA
+DevBlog 2020), in runs interleaved with the dispatch's own rows: remapped
+by divisions, the 4K field's resolve took 1.29 ms against 1.21 and
+Bistro's 3.64 against 3.59; dispatched as (strip, rows, strips), 1.24 and
+3.60.
 
 **The HDR target** is B10G11R11 where the device can store to it, sample
 it, and blend into it (RGBA16F otherwise; the reference keeps RGBA16F):

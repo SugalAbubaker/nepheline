@@ -857,6 +857,63 @@ NTEST_F(Vis, production_matches_the_reference)
     NTEST_EXPECT_EQ_UINT(stats.vis_overflow, 0U);
 }
 
+// The scene again in a wide, awkward 1100 x 230 target, neither side a
+// multiple of the passes' tiles (the resolve's 138 x 29 workgroups, the last
+// row and column partly outside; the light tiles, the depth pyramid's
+// tiles): a tile skipped or written twice leaves pixels the reference
+// fills.
+NTEST_F(Vis, production_matches_the_reference_in_a_wide_target)
+{
+    REQUIRE_PRODUCTION(f);
+    Scene s;
+    scene_build(f, &s, nph_dvec3_zero());
+    enum {
+        W = 1100U,
+        H = 230U
+    };
+    const u64 bytes = (u64)W * H * 4U;
+    NphGpuImage target = test_make_image_2d(f->dev, W, H, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 1U,
+                                            (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
+                                                (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC,
+                                            "wide target");
+    u8 *ref = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, bytes);
+    u8 *vis = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, bytes);
+    NTEST_ASSERT_TRUE(ref != NULL && vis != NULL);
+    NphRenderView v;
+    scene_view(&v, nph_dvec3_zero(), NPH_RENDER_PIPELINE_REFERENCE);
+    (void)test_render_frame(f, &v, target);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, target, 0U, ref, bytes);
+    scene_view(&v, nph_dvec3_zero(), NPH_RENDER_PIPELINE_PRODUCTION);
+    for (u32 i = 0; i < 3U; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, target, 0U, vis, bytes);
+    u64 within = 0U;
+    u64 sum = 0U;
+    for (u64 i = 0; i < (u64)W * H; ++i) {
+        u32 worst = 0U;
+        for (u32 c = 0; c < 3U; ++c) {
+            const u32 x = ref[i * 4U + c];
+            const u32 y = vis[i * 4U + c];
+            const u32 e = x > y ? x - y : y - x;
+            worst = nph_max_u32(worst, e);
+            sum += e;
+        }
+        within += worst <= 3U ? 1U : 0U;
+    }
+    const f64 share = (f64)within / (f64)((u64)W * H);
+    const f64 mean = (f64)sum / (f64)((u64)W * H * 3U);
+    NTEST_LOG("wide target, reference vs production: %.2f %% within 3 levels, mean %.3f",
+              share * 100.0, mean);
+    NTEST_EXPECT_TRUE(share >= 0.97);
+    NTEST_EXPECT_TRUE(mean <= 1.0);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, ref, bytes);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, vis, bytes);
+    nph_gpu_image_destroy(f->dev, target);
+}
+
 NTEST_F(Vis, culling_never_changes_the_image)
 {
     REQUIRE_PRODUCTION(f);
