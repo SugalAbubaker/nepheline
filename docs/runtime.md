@@ -104,19 +104,20 @@ host's (`nph_engine_set_view`, the editor's camera). Either way the
 `r.pipeline`, `r.occlusion`, `r.cone_culling`, `r.sw_raster`,
 `r.virtual_shadows`, `r.taa`, `r.bloom`, `r.auto_exposure`,
 `r.exposure_compensation`, `r.exposure_speed`, `r.motion_blur`, `r.dof`,
-and `r.ao` cvars choose the renderer, its culling, its rasterisers, how it
-shadows the sun, whether it resolves temporally, its bloom, how it
-exposes, whether the camera's shutter blurs motion, whether its lens
-blurs what is out of focus, and how far surfaces occlude the
-environment's light (docs/render.md, "The production path", "Shadows",
-"Temporal anti-aliasing", "Motion blur", "Depth of field", "Ambient
-occlusion", and "Bloom and exposure"); an automatic exposure starts from the camera's EV100 and
-adapts at the pace of the frames' real time (one simulation step a frame
-under `rt.lockstep`, so runs repeat), and the motion blur spans the
-camera's shutter time over that frame time. A switch between the world's camera
-and the host's is a camera cut: the frame after it starts a new temporal
-history; a host that moves its camera discontinuously sets `camera_cut`
-in that frame's view.
+`r.ao`, and `r.gi` cvars choose the renderer, its culling, its
+rasterisers, how it shadows the sun, whether it resolves temporally, its
+bloom, how it exposes, whether the camera's shutter blurs motion, whether
+its lens blurs what is out of focus, how far surfaces occlude the
+environment's light, and whether the scene's light bounces
+(docs/render.md, "The production path", "Shadows", "Temporal
+anti-aliasing", "Motion blur", "Depth of field", "Ambient occlusion",
+"Global illumination", and "Bloom and exposure"); an automatic exposure
+starts from the camera's EV100 and adapts at the pace of the frames' real
+time (one simulation step a frame under `rt.lockstep`, so runs repeat),
+and the motion blur spans the camera's shutter time over that frame time.
+A switch between the world's camera and the host's is a camera cut: the
+frame after it starts a new temporal history; a host that moves its camera
+discontinuously sets `camera_cut` in that frame's view.
 
 ## Configuration
 
@@ -142,6 +143,7 @@ Settings are cvars. The engine's:
 | `r.motion_blur` | true | motion blur over the camera's shutter time (its `shutter`, 0 by default; saved) |
 | `r.dof` | true | depth of field through the camera's lens (its `aperture`, 0 by default: a pinhole; saved) |
 | `r.ao` | 0.5 | the production path's ambient occlusion: the radius in metres within which surfaces occlude the environment's light, 0 to 8 (0: none; saved) |
+| `r.gi` | true | the production path's global illumination: the diffuse light from the radiance cache, where the device has ray queries (saved) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 

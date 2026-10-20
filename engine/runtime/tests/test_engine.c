@@ -315,12 +315,13 @@ NTEST(Engine, the_world_steps_and_the_view_follows_the_override)
 }
 
 // The r.* cvars set the production path's switches, the bloom, the
-// exposure, and the ambient occlusion on whichever view a frame renders.
+// exposure, the ambient occlusion, and the global illumination on whichever
+// view a frame renders.
 NTEST(Engine, the_render_cvars_set_the_views_switches)
 {
     static EngineFixture fx;
     prepare(&fx);
-    static const char *const assignments[10] = {
+    static const char *const assignments[11] = {
         "r.occlusion=false",
         "r.sw_raster=false",
         "r.virtual_shadows=false",
@@ -330,12 +331,13 @@ NTEST(Engine, the_render_cvars_set_the_views_switches)
         "r.exposure_compensation=1.5",
         "r.exposure_speed=3.0",
         "r.ao=1.25",
+        "r.gi=false",
         "rt.lockstep=true",
     };
-    for (u32 i = 0; i < 10U; ++i) {
+    for (u32 i = 0; i < 11U; ++i) {
         fx.config.assignments[i] = assignments[i];
     }
-    fx.config.assignment_count = 10U;
+    fx.config.assignment_count = 11U;
     NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
     NphEngine *e = fx.engine;
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
@@ -349,14 +351,15 @@ NTEST(Engine, the_render_cvars_set_the_views_switches)
     NTEST_EXPECT_NEAR_F32(view->exposure_compensation, 1.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->exposure_speed, 3.0F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->ao_radius, 1.25F, 0.0F);
+    NTEST_EXPECT_FALSE(view->gi);
     // In lockstep a frame lasts one step (sim.rate 240), whatever the clock.
     NTEST_EXPECT_NEAR_F32(view->frame_seconds, 1.0F / 240.0F, 1e-9F);
     finish(&fx);
 }
 
 // By default a view has bloom (r.bloom 0.04), the camera's own exposure
-// (r.auto_exposure off), and ambient occlusion within half a metre (r.ao),
-// and its frame time is the clock's.
+// (r.auto_exposure off), ambient occlusion within half a metre (r.ao), and
+// global illumination (r.gi), and its frame time is the clock's.
 NTEST(Engine, views_have_bloom_and_a_manual_exposure_by_default)
 {
     static EngineFixture fx;
@@ -372,6 +375,7 @@ NTEST(Engine, views_have_bloom_and_a_manual_exposure_by_default)
     NTEST_EXPECT_NEAR_F32(view->exposure_compensation, 0.0F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->exposure_speed, 1.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->ao_radius, 0.5F, 0.0F);
+    NTEST_EXPECT_TRUE(view->gi);
     NTEST_EXPECT_TRUE(view->frame_seconds > 0.0F);
     finish(&fx);
 }

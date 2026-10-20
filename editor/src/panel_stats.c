@@ -65,6 +65,10 @@ static void frame_stats(Editor *ed)
             // The ambient occlusion (r.ao).
             igText("ambient occlusion");
         }
+        if (r->gi) {
+            // The radiance cache's global illumination (r.gi).
+            igText("global illumination");
+        }
         // The exposure (r.auto_exposure adapts it toward the metering) and
         // the bloom (r.bloom).
         if (r->metered_ev100 != 0.0F) {
