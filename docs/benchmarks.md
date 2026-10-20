@@ -252,7 +252,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-19d-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-20-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU

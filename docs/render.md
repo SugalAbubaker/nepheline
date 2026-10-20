@@ -559,7 +559,13 @@ light whose running maximum of farthest bins reaches it to the last whose
 nearest bin is at most it. A pixel evaluates the global lights, then the
 sorted lights in its bin's range whose bit its tile's mask sets, each
 invocation on its own (walking the subgroup's lights together, as Drobot
-does, measured slower on the RTX 3060 Ti). Culling is exact: a light left
+does, measured slower on the RTX 3060 Ti). The bins and tiles are
+conservative, so a light they hand a pixel is first tested against the
+pixel's distance from its position alone (one 16-byte read), and only a
+light within range is read whole and evaluated. In Bistro's street the
+grid hands each pixel 11.8 lights, of which 5.0 are within range; the
+test took its resolve from 3.87 to 3.58 ms, and the 4,000 lamps' from
+3.16 to 2.88 ms. Culling is exact: a light left
 out contributes zero at the pixel (its windowed falloff, or its cone), the
 bounds carrying a 10^-4 slack for rounding; 300 lights around and behind
 the camera give the image of lighting every pixel with every light, bit
@@ -820,8 +826,8 @@ time of `nph_render_frame` and the GPU frame:
 | the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.61 ms |
 | the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.013 ms | | 5.18 ms |
 | the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.98 ms |
-| field at night, 1,024 lights | 16,385 | 3.69 ms | 0.012 ms | 53.2 ms | 3.60 ms |
-| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.33 ms |
+| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.012 ms | 52.7 ms | 3.54 ms |
+| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.05 ms |
 | field, the sun casting shadows (production: its map) | 16,385 | 3.14 ms | 0.013 ms | 3.67 ms | 3.88 ms |
 | the same without global illumination | 16,385 | | 0.011 ms | | 3.68 ms |
 | the same, the sun's shadows ray traced | 16,385 | | 0.012 ms | | 3.96 ms |
@@ -834,8 +840,9 @@ frames resolve temporally (the runtime's default), take global
 illumination (`r.gi`), and, where the sky lights them, ambient occlusion
 within 0.5 m (`r.ao`), the reference's none of these; the motion-blurred
 frames have a 180-degree shutter at 240 frames a second, and the others
-with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-19d`;
-a frame varies by a few hundredths of a millisecond from run to run).
+with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-19d`,
+the lamps' rows `render_perf-2026-10-20`; a frame varies by a few
+hundredths of a millisecond from run to run).
 
 In the 4K field the surviving clusters hold 5.4 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
