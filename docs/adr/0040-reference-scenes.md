@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-20
 - **Status:** Accepted (Bistro measures 7.86 ms against the 4.17 ms frame:
-  see Consequences)
+  see Consequences; the review's decisions of 2026-10-20 at the end)
 
 ## Context
 
@@ -163,3 +163,20 @@ The constraints:
   many-light sampling (ReSTIR, §8.6 stage 10, which the roadmap puts in
   Phase 14), or a different interior. The renderer also holds at most
   4,096 lights. A decision for the phase review.
+
+## Decisions at the review (2026-10-20)
+
+The user decided the questions the consequences above left open:
+
+- **The interior moves to Phase 14.** Sponza and its candles become the
+  reference scene of ReSTIR's many-light sampling, which it needs.
+  Phase 10's reference scenes are the street and the landscape (CLAUDE.md
+  §10.7 and §12 say so now).
+- **The landscape goes ahead with its alpha-tested plants.** §8.6's "no
+  alpha-tested foliage" governs our own content. Third-party reference
+  scenes are measured as their authors made them.
+- **The §10.4 table stands.** The work goes on against it: no line is
+  raised to meet a measurement, and no quality is given up to meet a line.
+- **The GPU runner measures the reference scenes nightly**, cooking them
+  there (incrementally, so Bistro's 23 minutes recur only when the
+  cooker's output changes), not on every pull request.

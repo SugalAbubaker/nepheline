@@ -126,7 +126,7 @@ A module may only depend on modules to its left. `core` depends only on the C st
   - Matrix of Windows (MSVC, clang-cl) × Linux (GCC, Clang) × Debug/Development.
   - Steps: build, unit tests, sanitizer runs, clang-tidy, format check, and GPU tests on Linux using lavapipe (software Vulkan).
   - Benchmarks run nightly.
-  - **A self-hosted performance runner** with the RTX 3060 Ti runs the reference scenes nightly and on every renderer PR. They enforce the §10 budgets, since lavapipe cannot measure GPU performance.
+  - **A self-hosted performance runner** with the RTX 3060 Ti runs the synthetic performance scenes on every renderer PR, and the third-party reference scenes nightly, cooking them there (ADR-0040). They enforce the §10 budgets, since lavapipe cannot measure GPU performance.
 
 ## 7. Git & GitHub Workflow
 - Initialize the git repo in Phase 0 with `.gitignore` (build dirs, IDE files), `.gitattributes` (LF normalization; binary assets via Git LFS), and a README.
@@ -255,7 +255,7 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
     - Enabled on the reference hardware only within the §10 budget. Higher quality tiers are for high-end GPUs.
 - **Content budgets enforced by tools:**
   - Material instruction limits.
-  - No alpha-tested foliage (modeled geometry instead, so visibility-buffer efficiency holds).
+  - No alpha-tested foliage in our own content (modeled geometry instead, so visibility-buffer efficiency holds). Third-party reference scenes are measured as their authors made them.
   - A budgeted transparency pass.
   - Light-count limits per cluster.
 - Also includes: material system (shader permutations kept minimal through bindless and uber-material parameters), skinned meshes (compute skinning), a debug-draw API, and a GPU timestamp profiler per render-graph pass.
@@ -435,9 +435,9 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 - Vendor low-latency extensions are used where available (`VK_NV_low_latency2`, `VK_AMD_anti_lag`).
 
 ### 10.7 Enforcement
-- A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K, nightly and on every renderer PR (§6).
+- A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
 - GPU timestamps per pass are compared to the §10.4 table. A regression of more than 5% fails CI.
-- Reference scenes are defined in Phase 10: dense urban, open landscape with foliage, and an interior with many lights.
+- Reference scenes are defined in Phase 10: dense urban and open landscape with foliage. The interior with many lights (Intel's Sponza and its 10,000 candles) joins in Phase 14, whose many-light sampling it needs (ADR-0040).
 - Every renderer PR must state its cost in both milliseconds and DRAM bytes.
 
 ## 11. Documentation
@@ -463,7 +463,7 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 | **11. Physics** | broadphase, narrowphase, solver, joints, CCD, queries, character controller | Stacking, ragdoll, and determinism tests pass. Benchmarks recorded |
 | **12. Audio** | device, mixer, voices, DSP, 3D, streaming | Offline mix tests pass. No audio-thread allocations (verified) |
 | **13. Streaming & scale** | virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9) | Open-world test scene streams without hitches, stays under 6.5 GB VRAM, and keeps the 240 FPS native-4K target |
-| **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10) | Golden tests pass. Reference hardware stays within the §10.4 budget |
+| **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the many-light interior reference scene (§10.7) | Golden tests pass. Reference hardware stays within the §10.4 budget, the interior included |
 | **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2 | Release candidate `v1.0.0` |
 
 Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so they may run in parallel with phase 10 if more people join.
