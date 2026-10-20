@@ -162,7 +162,12 @@ same on lavapipe within 0.002 levels. What shaped it:
 
 - **The compute form, or neighbourhoods shared across quads** (above):
   slower here; the compute form also needs a second pass, as a swapchain
-  image is not a storage image.
+  image is not a storage image. Revisited in the pass itself (2026-10-20):
+  the quad form with gathers, each lane gathering its block of the
+  colour in three and of the depth in one, then 20 quad swaps (eleven
+  texture instructions a pixel where the pass has twenty), took Bistro's
+  `taa` from 0.85 to 0.96 ms at 4K. The pass is not bound by its texture
+  instructions.
 - **RGBA16F history:** finer steps, but 0.02 to 0.05 ms slower and 66 MB
   more a frame; with the stochastic rounding the B10G11R11 history is
   unbiased.

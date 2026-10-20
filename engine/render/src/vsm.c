@@ -20,8 +20,9 @@
 //      the windows and the requests, physical pages for the new ones, the
 //      list of pages to draw;
 //   3b. with blended surfaces, which the visibility buffer does not hold,
-//      `vsm requests (blended)` rasterises them against the opaque depth
-//      to request theirs (vsm_request.frag);
+//      `vsm requests (blended)` rasterises them, testing the opaque depth
+//      (the visibility buffer's) in the fragment stage, to request theirs
+//      (vsm_request.frag);
 //   5. `vsm cull instances`, `vsm cull meshlets`: the casters of those
 //      pages, a draw per (meshlet, page); `vsm fixup` keeps pages dirty
 //      whose draws did not all fit;
@@ -185,17 +186,15 @@ static NphResult create_pipelines(NphRenderer *r)
     gd.depth.compare = NPH_GPU_COMPARE_ALWAYS;
     gd.name = "vsm clear";
     NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->clear));
-    // The blended draws' requests: the forward vertex stage, both faces,
-    // in front of the opaque surfaces (reverse-Z), nothing written but the
-    // requests.
+    // The blended draws' requests: the forward vertex stage, both faces, no
+    // attachments; the fragment stage keeps what lies in front of the
+    // opaque surfaces (reverse-Z, the visibility buffer's depth), and writes
+    // nothing but the requests.
     memset(&gd, 0, sizeof gd);
     gd.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
     gd.fragment = v->shaders[4];
     gd.topology = NPH_GPU_TOPOLOGY_TRIANGLE_LIST;
     gd.cull_mode = NPH_GPU_CULL_NONE;
-    gd.depth_format = RENDER_DEPTH_FORMAT;
-    gd.depth.test = 1;
-    gd.depth.compare = NPH_GPU_COMPARE_GREATER;
     gd.name = "vsm request";
     return nph_gpu_pipeline_create_graphics(dev, &gd, &v->request);
 }
@@ -753,7 +752,7 @@ void render_vsm_request_pages(const NphRenderer *r, NphGpuRgPass *pass)
 }
 
 NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *graph,
-                                            NphGpuRgImage depth, NphGpuRgExecuteFn draw)
+                                            NphGpuRgImage visbuffer, NphGpuRgExecuteFn draw)
 {
     RenderVsm *v = &r->vsm;
     NPH_ASSERT(v->frame_active);
@@ -761,11 +760,8 @@ NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *g
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
-    NphGpuRgAttachment a;
-    memset(&a, 0, sizeof a);
-    a.load = NPH_GPU_LOAD_OP_LOAD;
-    a.store = NPH_GPU_STORE_OP_NONE; // read only
-    nph_gpu_rg_depth_attachment(p, depth, &a, 1);
+    // No attachments, so `draw` begins rendering itself.
+    nph_gpu_rg_read_image(p, visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_write_buffer(p, v->frame.work, NPH_GPU_RG_USE_STORAGE_WRITE);
     return NPH_RESULT_OK;
 }

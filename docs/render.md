@@ -313,7 +313,7 @@ something it shows changes.
 | `vsm clear` | the frame's counters and page bitmasks to zero |
 | `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in every level (an invocation per update and level), a row of words at a time |
 | `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (`light_from_clip`), and the pages its shading may read set in the requests bitmask |
-| `vis depth`, `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the opaque depth, then the blended draws against it, each fragment in front setting its pages (`vsm_request.frag`) |
+| `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
 | `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
 | `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
@@ -378,6 +378,14 @@ The CPU writes the view, the records of instances that changed, and the
 pass declarations, a few microseconds whatever the object count
 (`render_perf`, docs/benchmarks.md); the GPU culls, rasterises, and
 shades. Blended surfaces stay on the forward pass, drawn over the result.
+The frame has no depth buffer for them: their fragment stage reads the
+opaque depth from the visibility buffer (its sampled R32G32_UINT view,
+the depth's bits in y) and demotes a fragment that lies behind it, as the
+reference's `GREATER` test would reject it. Demoted fragments still serve
+their quad's derivatives. Their page requests (`vsm_request.frag`) and the
+depth-tested debug lines test the same way. A pass copying the depth into
+a D32 attachment for them (`vis depth`) cost Bistro 0.19 ms at 4K; testing
+in the shader costs its blended passes 0.015 ms.
 
 It needs 64-bit image atomics, 64-bit integers in shaders, subgroup ballot,
 arithmetic, and shuffle, and the geometry-shader feature (which lets a
@@ -433,14 +441,14 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, and the ambient occlusion's depths) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
 | `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests and the occlusion's depths there) |
-| `vis depth`, `vsm requests (blended)` | with the map and blended surfaces: the opaque depth, then the blended surfaces' page requests |
+| `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' mips, each texel's slice, and the denoise, at half resolution (below) |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the ambient occlusion upsampled; the radiance cache's cell looked up) |
 | `vis statistics` | copies the counters for the frame's statistics |
-| `vis depth`, `transparent` | the depth the visibility buffer holds (unless the map's requests already made it), then the blended surfaces, forward |
+| `transparent` | the blended surfaces, forward, with no depth attachment: each fragment tests the visibility buffer's depth itself and is demoted behind it (`forward_frag.glsl` `k_vis_depth`) |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
 | `bloom …`, `exposure …` | with bloom or an automatic exposure: the chain and the metering over the HDR image, as the reference's ("Bloom and exposure") |
 | `taa` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), or on a frame with motion blur writes only its history |

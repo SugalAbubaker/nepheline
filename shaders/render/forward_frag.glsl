@@ -25,6 +25,16 @@ VsmViewRef g_vsm; // set first thing in main()
 #define NPH_SURFACE_VSM_ACTIVE k_vsm
 #define NPH_SURFACE_VSM(p)     vsm_shadow(g_vsm, (p).position, (p).face_normal, (p).n)
 
+#if NPH_FORWARD_ALPHA_MODE == 2
+// The production path's blended surfaces have no depth attachment: the
+// opaque surfaces' depth is the visibility buffer's, which they test
+// themselves (pc.visbuffer_index, its sampled view: the depth's bits in y),
+// as the reference's GREATER test does in hardware. A fragment behind is
+// demoted, not discarded, so that it still serves its quad's derivatives;
+// it writes nothing. Their pipelines are specialised on it.
+layout(constant_id = 1) const bool k_vis_depth = false;
+#endif
+
 // The *_rt variants trace shadow rays (rt_common.glsl).
 #ifdef NPH_RAY_QUERY
 #include "rt_common.glsl"
@@ -47,6 +57,14 @@ layout(location = 0) out vec4 out_color;
 
 void main()
 {
+#if NPH_FORWARD_ALPHA_MODE == 2
+    if (k_vis_depth &&
+        gl_FragCoord.z <= uintBitsToFloat(texelFetch(nph_utextures_2d[pc.visbuffer_index],
+                                                     ivec2(gl_FragCoord.xy), 0)
+                                              .y)) {
+        demote;
+    }
+#endif
     ViewRef view = ViewRef(pc.view_address);
 #ifdef NPH_RAY_QUERY
     g_tlas = view.v.tlas;

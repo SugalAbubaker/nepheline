@@ -104,8 +104,9 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // ---------------------------------------------------------------------------
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, NphGpuPipeline *out)
+                                  bool ray_query, bool vsm, bool vis_depth, NphGpuPipeline *out)
 {
+    NPH_ASSERT(!vis_depth || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
     static const RenderShader frags[2][3] = {
         {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK, RENDER_SHADER_FORWARD_BLEND},
         {RENDER_SHADER_FORWARD_OPAQUE_RT, RENDER_SHADER_FORWARD_MASK_RT,
@@ -128,9 +129,11 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     d.front_face = cw ? NPH_GPU_FRONT_FACE_CW : NPH_GPU_FRONT_FACE_CCW;
     d.color_formats[0] = format;
     d.color_count = 1U;
-    d.depth_format = RENDER_DEPTH_FORMAT;
-    d.depth.test = 1;
-    d.depth.compare = NPH_GPU_COMPARE_GREATER; // reverse-Z
+    if (!vis_depth) {
+        d.depth_format = RENDER_DEPTH_FORMAT;
+        d.depth.test = 1;
+        d.depth.compare = NPH_GPU_COMPARE_GREATER; // reverse-Z
+    }
     if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
         // "Over" compositing; blended surfaces do not occlude.
         d.blend[0].enable = 1;
@@ -144,9 +147,10 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
         d.depth.write = 1;
     }
     d.name = names[alpha][cull];
-    // forward_frag.glsl's k_vsm.
+    // forward_frag.glsl's k_vsm and k_vis_depth.
     d.specialization[0] = vsm ? 1U : 0U;
-    d.specialization_count = vsm ? 1U : 0U;
+    d.specialization[1] = vis_depth ? 1U : 0U;
+    d.specialization_count = vis_depth ? 2U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -155,11 +159,11 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     const bool rt = r->rt.supported != 0;
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
-            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
+            NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false, false,
                                             &r->forward[alpha][cull]));
             if (rt) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                &r->forward_rt[alpha][cull]));
+                                                false, &r->forward_rt[alpha][cull]));
             }
         }
     }

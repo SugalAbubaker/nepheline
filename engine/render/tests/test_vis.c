@@ -1244,6 +1244,75 @@ NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
     NTEST_EXPECT_TRUE(d.mean <= 1.5F);
 }
 
+// Blended surfaces in front of opaque ones and behind them: the production
+// path has no depth attachment for them, and their fragment stage tests the
+// visibility buffer's depth itself, where the reference tests a depth
+// attachment. A wide blended plane turned about Y crosses an opaque wall,
+// its left part in front and its right part behind; a second one lies
+// wholly behind the wall, so nothing of it may show.
+NTEST_F(Vis, blended_surfaces_behind_opaque_ones_match_the_reference)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial wall = material(f, nph_vec4(0.8F, 0.8F, 0.8F, 1.0F), 0.0F, 0.6F);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.base_color = nph_vec4(0.1F, 0.4F, 1.0F, 0.5F);
+    NphRenderMaterial crossing;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &crossing), NPH_RESULT_OK);
+    md.base_color = nph_vec4(1.0F, 0.1F, 0.1F, 0.7F);
+    NphRenderMaterial hidden;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &hidden), NPH_RESULT_OK);
+
+    // Planes face +Y; a quarter turn about X faces the camera on +Z.
+    const NphQuat facing = nph_quat_from_rotation_x(0.5F * NPH_PI);
+    instance(f, plane, wall,
+             nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0), facing, nph_vec3_splat(1.2F)));
+    // Turned 25 degrees about Y: its left edge 0.42 m in front of the wall,
+    // its right edge as far behind.
+    instance(f, plane, crossing,
+             nph_render_transform_from_trs(
+                 nph_dvec3(0.0, 0.3, 0.0),
+                 nph_quat_mul(nph_quat_from_rotation_y(25.0F * NPH_PI / 180.0F), facing),
+                 nph_vec3(2.0F, 1.0F, 0.5F)));
+    instance(
+        f, plane, hidden,
+        nph_render_transform_from_trs(nph_dvec3(0.0, -0.3, -0.4), facing, nph_vec3_splat(0.5F)));
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    ld.color = nph_vec3_one();
+    ld.intensity = 50.0F;
+    ld.position = nph_dvec3(0.0, 0.5, 2.0);
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 4.0F;
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3(30.0F, 30.0F, 30.0F);
+    static u8 ref[PIXELS];
+    static u8 vis[PIXELS];
+    render_into(f, &v, 1U, ref);
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    const NphRenderFrameStats stats = render_into(f, &v, 1U, vis);
+    NTEST_EXPECT_EQ_UINT(stats.blended, 2U);
+    const ImageDiff d = image_diff(ref, vis, 3U);
+    NTEST_LOG("blended in front of and behind opaque: %.2f %% within 3 levels, mean %.3f, max %u",
+              (f64)d.within * 100.0, (f64)d.mean, d.max);
+    NTEST_EXPECT_TRUE(d.within >= 0.97F);
+    NTEST_EXPECT_TRUE(d.mean <= 1.5F);
+    // Where the hidden plane lies behind the wall, the wall shows, grey: no
+    // red blended over it (the image's lower middle).
+    const u8 *px =
+        &vis[((u64)(TEST_TARGET_SIZE * 5U / 8U) * TEST_TARGET_SIZE + (u64)(TEST_TARGET_SIZE / 2U)) *
+             4U];
+    NTEST_LOG("behind the wall: %u %u %u", px[0], px[1], px[2]);
+    NTEST_EXPECT_TRUE(px[0] <= (u32)px[1] + 8U);
+}
+
 // Triangles that reach behind the camera: floors and ceilings 24 m deep
 // around the camera's depth, so that the triangles of one row of each plane
 // run from 5 m in front of the camera to 1 m behind it. The mesh path culls

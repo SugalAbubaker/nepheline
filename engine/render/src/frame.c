@@ -493,11 +493,14 @@ static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
 // ---------------------------------------------------------------------------
 
 // Records draw_cmds[first, first + count) with the forward pipelines, or
-// with `only` where it is not null.
+// with `only` where it is not null. `visbuffer` is the visibility buffer's
+// sampled index, whose depth the production path's blended surfaces test
+// (render_vis_visbuffer_index; 0 on the reference path).
 static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count, NphGpuPipeline only,
-                         NphGpuPipeline *bound, u32 *bound_mesh)
+                         u32 visbuffer, NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
+    push.visbuffer_index = visbuffer;
     // The production path's blended surfaces draw into its own HDR format;
     // a frame that traces shadow rays, or has the sun's virtual shadow map,
     // uses the pipelines that do.
@@ -531,37 +534,43 @@ static void forward_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphRenderer *r = (NphRenderer *)user;
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, 0U, r->opaque_count, NPH_GPU_PIPELINE_NULL, &bound, &bound_mesh);
+    record_draws(r, cmd, 0U, r->opaque_count, NPH_GPU_PIPELINE_NULL, 0U, &bound, &bound_mesh);
     // The sky fills what the opaque geometry left uncovered, before the
     // blended surfaces composite over both.
     nph_gpu_cmd_bind_pipeline(cmd, r->sky);
     nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
     bound = r->sky;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, &bound,
+    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, 0U, &bound,
                  &bound_mesh);
 }
 
 // The production path's blended surfaces, over the resolved image.
 static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    NPH_UNUSED(graph);
     NphRenderer *r = (NphRenderer *)user;
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, &bound,
-                 &bound_mesh);
+    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL,
+                 render_vis_visbuffer_index(r, graph), &bound, &bound_mesh);
 }
 
 // The production path's blended surfaces again, asking for the pages of
-// the sun's virtual shadow map their shading will read (vsm.c).
+// the sun's virtual shadow map their shading will read (vsm.c): rendering
+// with no attachments, over the frame's extent.
 static void blend_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    NPH_UNUSED(graph);
     NphRenderer *r = (NphRenderer *)user;
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.width = r->vis.frame.width;
+    rd.height = r->vis.frame.height;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, r->vsm.request, &bound, &bound_mesh);
+    record_draws(r, cmd, r->opaque_count, r->blend_count, r->vsm.request,
+                 render_vis_visbuffer_index(r, graph), &bound, &bound_mesh);
+    nph_gpu_cmd_end_rendering(cmd);
 }
 
 static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -640,7 +649,7 @@ static NphResult declare_lines(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuR
     a.store = NPH_GPU_STORE_OP_STORE;
     nph_gpu_rg_color_attachment(p, out, &a);
     if (r->debug_draw_counts[0] != 0U) {
-        nph_gpu_rg_read_image(p, r->vis.frame.visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        nph_gpu_rg_read_image(p, r->vis.frame.visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
     return NPH_RESULT_OK;
 }
@@ -999,7 +1008,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (production) {
         // The depth-tested lines read the visibility buffer's depth.
         if (r->debug_draw_counts[0] != 0U) {
-            nph_gpu_rg_read_image(tm, visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+            nph_gpu_rg_read_image(tm, visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
         }
     } else {
         a.load = NPH_GPU_LOAD_OP_LOAD;

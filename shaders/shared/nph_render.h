@@ -220,10 +220,13 @@ NPH_SHARED_STRUCT(NphRenderSkyData)
 // Push constants of the draw shaders (forward, sky, debug lines).
 NPH_SHARED_STRUCT(NphRenderPush)
 {
-    u64 view_address;    // NphRenderViewData
-    u32 draw_index;      // forward: the record in draws
-    u32 flags;           // NPH_RENDER_PUSH_*
-    u32 visbuffer_index; // the production path's debug lines: the visibility buffer
+    u64 view_address; // NphRenderViewData
+    u32 draw_index;   // forward: the record in draws
+    u32 flags;        // NPH_RENDER_PUSH_*
+    // The production path's visibility buffer, bindless sampled (R32G32_UINT:
+    // the depth's bits in y), whose depth the blended surfaces, their page
+    // requests, and the depth-tested debug lines test themselves
+    u32 visbuffer_index;
     u32 pad0;
 };
 

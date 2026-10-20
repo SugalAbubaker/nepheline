@@ -20,14 +20,16 @@
 //   vis hzb 1             the frame's depth: next frame's phase 0 tests it
 //   vsm ...               the sun's virtual shadow map (vsm.c), its page
 //                         requests made by the vis hzb passes (and, with
-//                         blended surfaces, by `vis depth` and `vsm requests
-//                         (blended)` first)
+//                         blended surfaces, by `vsm requests (blended)`
+//                         first)
 //   ao depth, ao, ao denoise
 //                         the ambient occlusion (ao.c), from the depths the
 //                         vis hzb passes took for it
 //   rt ...                shadow rays' top level (rt.c)
 //   vis resolve           shading into the HDR image
-//   vis depth, transparent (only with blended surfaces)
+//   transparent           blended surfaces, forward, testing the visibility
+//                         buffer's depth themselves (only with blended
+//                         surfaces)
 //   vis statistics        the counters, read back two frames later
 //
 // Everything after `vis clear` is sized by counters the GPU itself wrote,
@@ -71,7 +73,6 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_raster_masked.vert",
     "vis_raster_vert_opaque.frag",
     "vis_raster_vert_masked.frag",
-    "vis_depth.frag",
     "vis_debug_line.frag",
 };
 
@@ -265,18 +266,9 @@ NphResult render_vis_create(NphRenderer *r)
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_VERT_MASKED, VIS_SHADER_VERT_FRAG_MASKED,
                                        "vis raster (indirect, masked)", &v->raster[1]));
     }
-    NphGpuGraphicsPipelineDesc d;
-    memset(&d, 0, sizeof d);
-    d.vertex = r->shaders[RENDER_SHADER_FULLSCREEN_VERT];
-    d.fragment = v->shaders[VIS_SHADER_DEPTH];
-    d.depth_format = RENDER_DEPTH_FORMAT;
-    d.depth.test = 1;
-    d.depth.write = 1;
-    d.depth.compare = NPH_GPU_COMPARE_ALWAYS;
-    d.name = "vis depth";
-    NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &v->depth));
-    // The blended surfaces, into the HDR format: with and without shadow
-    // rays, and with and without the virtual shadow map.
+    // The blended surfaces, into the HDR format, testing the visibility
+    // buffer's depth themselves: with and without shadow rays, and with and
+    // without the virtual shadow map.
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             if ((rt != 0U && !r->rt.supported) || (map != 0U && !vsm)) {
@@ -284,7 +276,7 @@ NphResult render_vis_create(NphRenderer *r)
             }
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
                 NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format,
-                                                rt != 0U, map != 0U,
+                                                rt != 0U, map != 0U, true,
                                                 &v->blend_pipelines[rt][map][c]));
             }
         }
@@ -314,7 +306,6 @@ void render_vis_destroy(NphRenderer *r)
     }
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
-    nph_gpu_pipeline_destroy(dev, v->depth);
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
@@ -900,17 +891,6 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
 
-static void depth_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    NphRenderer *r = (NphRenderer *)user;
-    NphVisPush p = push_of(r, 0U, 0U);
-    p.arg0 =
-        nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, r->vis.frame.visbuffer), 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.depth);
-    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
-}
-
 static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
@@ -921,7 +901,7 @@ static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 
 u32 render_vis_visbuffer_index(const NphRenderer *r, NphGpuRenderGraph *graph)
 {
-    return nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, r->vis.frame.visbuffer), 0U);
+    return nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, r->vis.frame.visbuffer));
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,36 +1207,6 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     return declare_hzb(graph, r, 1U);
 }
 
-// The visibility buffer's depth into a depth attachment, for the blended
-// surfaces' depth test.
-static NphResult declare_depth(NphGpuRenderGraph *graph, NphRenderer *r)
-{
-    VisFrame *f = &r->vis.frame;
-    NphGpuImageDesc dd;
-    memset(&dd, 0, sizeof dd);
-    dd.format = RENDER_DEPTH_FORMAT;
-    dd.width = f->width;
-    dd.height = f->height;
-    dd.mip_count = 1U;
-    dd.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
-    dd.name = "vis depth";
-    f->depth = nph_gpu_rg_create_image(graph, &dd);
-    if (nph_gpu_rg_image_is_null(f->depth)) {
-        return NPH_RESULT_FULL;
-    }
-    NphGpuRgPass *p = add_pass(graph, r, "vis depth", NPH_GPU_RG_PASS_GRAPHICS, depth_execute);
-    if (p == NULL) {
-        return NPH_RESULT_FULL;
-    }
-    NphGpuRgAttachment a;
-    memset(&a, 0, sizeof a);
-    a.load = NPH_GPU_LOAD_OP_DONT_CARE; // every pixel is written
-    a.store = NPH_GPU_STORE_OP_STORE;
-    nph_gpu_rg_depth_attachment(p, f->depth, &a, 0);
-    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
-    return NPH_RESULT_OK;
-}
-
 NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
                            u32 width, u32 height, const NphMat4 *view_m, const NphMat4 *proj,
                            NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
@@ -1384,12 +1334,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         res = declare_culling(graph, r, &g);
     }
     if (res == NPH_RESULT_OK && r->vsm.frame_active && blend_requests != NULL) {
-        // The blended surfaces' pages, against the opaque depth (which the
-        // transparent pass then tests against too).
-        res = declare_depth(graph, r);
-        if (res == NPH_RESULT_OK) {
-            res = render_vsm_declare_blend_requests(r, graph, f->depth, blend_requests);
-        }
+        // The blended surfaces' pages, against the opaque depth (the
+        // visibility buffer's, which the transparent pass tests too).
+        res = render_vsm_declare_blend_requests(r, graph, f->visbuffer, blend_requests);
     }
     if (res == NPH_RESULT_OK && r->vsm.frame_active) {
         // The sun's virtual shadow map: its pages drawn where the depth
@@ -1465,18 +1412,15 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     return res;
 }
 
-// The transparent surfaces of a production frame: the visibility buffer's
-// depth into a depth attachment, then the reference's forward pipelines
-// over the resolved HDR image. Only called when blended draws exist.
+// The transparent surfaces of a production frame: forward pipelines over
+// the resolved HDR image, testing the visibility buffer's depth themselves
+// (forward_frag.glsl k_vis_depth). Only called when blended draws exist.
 NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *graph,
                                          NphGpuRgExecuteFn draw, NphGpuRgImage env,
                                          NphGpuRgImage specular, NphGpuRgImage lut,
                                          NphGpuRgBuffer sh)
 {
     VisFrame *f = &r->vis.frame;
-    if (nph_gpu_rg_image_is_null(f->depth)) {
-        NPH_TRY(declare_depth(graph, r));
-    }
     NphGpuRgPass *p = add_pass(graph, r, "transparent", NPH_GPU_RG_PASS_GRAPHICS, draw);
     if (p == NULL) {
         return NPH_RESULT_FULL;
@@ -1486,8 +1430,7 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
     a.load = NPH_GPU_LOAD_OP_LOAD;
     a.store = NPH_GPU_STORE_OP_STORE;
     nph_gpu_rg_color_attachment(p, f->hdr, &a);
-    a.store = NPH_GPU_STORE_OP_NONE;
-    nph_gpu_rg_depth_attachment(p, f->depth, &a, 1);
+    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_image(p, env, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_read_image(p, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_read_image(p, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);

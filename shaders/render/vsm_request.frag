@@ -4,8 +4,10 @@
 // hold and the depth pyramid's requests therefore miss (vis_hzb.comp): the
 // blended draws with the forward vertex stage (forward.vert), against the
 // opaque surfaces' depth, each fragment in front of them setting the pages
-// its shading may read (vsm_request). No colour, no depth written; the
-// depth test comes first, so hidden fragments ask for nothing.
+// its shading may read (vsm_request). No attachments: the opaque depth is
+// the visibility buffer's (pc.visbuffer_index, its sampled view: the
+// depth's bits in y), tested first, as the transparent pass tests it
+// (forward_frag.glsl), so hidden fragments ask for nothing.
 #version 460
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_vote : require
@@ -13,7 +15,6 @@
 #define NPH_VSM_REQUESTS
 #include "vsm_common.glsl"
 
-layout(early_fragment_tests) in;
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
 
 layout(location = 0) in vec3 in_position; // camera-relative world space
@@ -21,7 +22,10 @@ layout(location = 0) in vec3 in_position; // camera-relative world space
 void main()
 {
     // Helper invocations' atomics do nothing: out of the subgroup's vote.
-    if (gl_HelperInvocation) {
+    if (gl_HelperInvocation ||
+        gl_FragCoord.z <= uintBitsToFloat(texelFetch(nph_utextures_2d[pc.visbuffer_index],
+                                                     ivec2(gl_FragCoord.xy), 0)
+                                              .y)) {
         return;
     }
     VsmViewRef r = VsmViewRef(ViewRef(pc.view_address).v.vsm);

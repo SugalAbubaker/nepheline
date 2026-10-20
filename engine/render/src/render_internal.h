@@ -346,7 +346,6 @@ typedef enum VisShader {
     VIS_SHADER_VERT_MASKED,
     VIS_SHADER_VERT_FRAG_OPAQUE,
     VIS_SHADER_VERT_FRAG_MASKED,
-    VIS_SHADER_DEPTH,
     VIS_SHADER_DEBUG_LINE,
     VIS_SHADER_COUNT
 } VisShader;
@@ -405,7 +404,6 @@ typedef struct VisFrame {
     u32 height;
     NphGpuRgImage visbuffer;
     NphGpuRgImage hdr;
-    NphGpuRgImage depth;        // null without blended draws
     NphGpuRgImage raster_depth; // the hardware raster's early depth test (mesh path; else null)
     NphGpuRgImage hzb;
     NphGpuRgBuffer hzb_dirty;
@@ -434,7 +432,6 @@ typedef struct RenderVis {
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2]; // [opaque, masked]: mesh or vertex pipelines
-    NphGpuPipeline depth;     // the visibility buffer's depth into a depth attachment
 
     // The GPU scene: persistent tables indexed by pool slot.
     NphGpuBuffer instances;       // NphVisInstance[max_instances]
@@ -802,9 +799,12 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // The forward pipeline of an alpha mode and cull variant drawing into
 // `format` (the reference's HDR target, or the production path's).
 // With `ray_query`, the variant that traces shadow rays (rt.c); with
-// `vsm`, the one that reads the sun's virtual shadow map (vsm.c).
+// `vsm`, the one that reads the sun's virtual shadow map (vsm.c). With
+// `vis_depth` (blended only), the production path's: no depth attachment,
+// the fragment stage testing the visibility buffer's depth itself
+// (forward_frag.glsl k_vis_depth).
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, NphGpuPipeline *out);
+                                  bool ray_query, bool vsm, bool vis_depth, NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);
@@ -887,10 +887,12 @@ NphResult render_vsm_declare_begin(NphRenderer *r, NphGpuRenderGraph *graph,
 // A pass that requests pages (the depth pyramid's mip 0) writes the work.
 void render_vsm_request_pages(const NphRenderer *r, NphGpuRgPass *pass);
 // The page requests of the blended surfaces: `draw` records the blended
-// draws with the pipeline it is given, against `depth` (the opaque
-// surfaces'), before render_vsm_declare_pages.
+// draws with the pipeline it is given, inside rendering over the frame's
+// extent with no attachments, each fragment testing the opaque surfaces'
+// depth in `visbuffer` itself (vsm_request.frag), before
+// render_vsm_declare_pages.
 NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *graph,
-                                            NphGpuRgImage depth, NphGpuRgExecuteFn draw);
+                                            NphGpuRgImage visbuffer, NphGpuRgExecuteFn draw);
 // The page tables, the allocation, the casters' culling, the page raster,
 // and the statistics, after the requests.
 NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
@@ -1072,8 +1074,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
                            NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
                            NphGpuRgBuffer sh, NphGpuRgExecuteFn blend_requests,
                            NphGpuRgImage *out_hdr, NphRenderFrameStats *stats);
-// The bindless storage index of the frame's visibility buffer, for the
-// tonemap pass's depth-tested debug lines (valid inside callbacks).
+// The bindless sampled index of the frame's visibility buffer (its
+// R32G32_UINT view: the depth's bits in y), for the passes that test its
+// depth themselves: the blended surfaces, their page requests, and the
+// depth-tested debug lines (valid inside callbacks).
 u32 render_vis_visbuffer_index(const NphRenderer *r, NphGpuRenderGraph *graph);
 // The transparent surfaces of a production frame, after render_vis_frame:
 // the visibility buffer's depth into a depth attachment (unless the frame

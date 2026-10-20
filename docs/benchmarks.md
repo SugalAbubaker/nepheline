@@ -246,7 +246,7 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.25 ms | 8.10 ms | resolve 3.63 ms (§10.4 line: 1.20 ms), raster 0.81 ms + Hi-Z 0.46 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+| `bistro_street_production` | 6.98 ms | 7.85 ms | resolve 3.57 ms (§10.4 line: 1.20 ms), raster 0.80 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.44 ms |
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -257,7 +257,9 @@ the surface from the visibility buffer 0.97 ms, the sun's virtual shadow
 map 0.34 ms. Testing each light's range before reading the rest of it
 (docs/render.md "Lights") then took 0.29 ms off the lamps' share, and the
 hardware raster's early depth test (docs/render.md "Early depth") took
-its pass from 1.13 to 0.74 ms.
+its pass from 1.13 to 0.74 ms. Testing the blended surfaces against the
+visibility buffer's depth in their shaders then dropped the 0.19 ms pass
+that copied it into a depth attachment for them.
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
