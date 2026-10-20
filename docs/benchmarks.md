@@ -213,7 +213,10 @@ scene, its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
 own sun), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
 and a game's would), and its views (the scene's own camera, or an eye and
-a target with a field of view). `scripts/scenes.py fetch` checks the
+a target with a field of view; still, or moving: `walk` metres a second
+along the view, level, and `turn` degrees a second about the world's up
+axis, one step a frame as at 240 frames a second, the warm-up included so
+the caches meet the motion in their steady state). `scripts/scenes.py fetch` checks the
 source out at its commit under a directory of the machine's choosing and
 `scripts/scenes.py cook` cooks it there (`nph_cook`, incremental); with
 `--scenes=DIR` (or the `NPH_SCENES` environment variable) render_perf adds
@@ -251,6 +254,20 @@ the 4.17 ms frame of §10.1:
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
 | `bistro_street_production` | 7.03 ms | 7.95 ms | resolve 3.63 ms (§10.4 line: 1.20 ms), raster 0.82 ms + Hi-Z 0.43 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+| `bistro_street_walk_production` | 7.03 ms | 7.99 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
+| `bistro_street_turn_production` | 7.74 ms | 8.93 ms | raster 1.61 ms: the turn sweeps over the foliage the next two views hold |
+| `bistro_terrace_production` | 8.14 ms | 9.25 ms | raster 1.75 ms: alpha-tested cypresses beside the café |
+| `bistro_hedge_production` | 7.72 ms | 8.53 ms | raster 2.15 ms: an alpha-tested hedge and cypresses across the view |
+
+Bistro's manifest has five views: the scene's own camera still
+(`street`), walking along the street at 1.4 m/s (`street_walk`), turning
+90° a second from it (`street_turn`), and turned 50° and 90° (`terrace`,
+`hedge`), still. The motion itself costs little: walking added 0.05 ms,
+and stills along the turn's path cost what the turn does (their raster
+1.75, 1.66, 2.15 and 1.11 ms at 50°, 70°, 90° and 110°). What comes into
+view decides, and the two stills hold the foliage that costs most; the
+rows other than the street's were measured alone (2026-10-20, a run on
+its own).
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the

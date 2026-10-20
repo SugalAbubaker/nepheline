@@ -38,7 +38,10 @@
 // after the synthetic scenes at 3840 x 2160 through the production path
 // with the runtime's defaults, lit by the scene's own lights (the
 // synthetic scenes' sun is removed first) and seen from its own camera or
-// the manifest's. --capture-dir writes each one's last frame there as a
+// the manifest's, still or moving as the view says (walking along it, level,
+// turning about the world's up axis, or both; one step a measured frame as
+// at 240 frames a second, warm-up included, so the caches meet the motion
+// in their steady state). --capture-dir writes each one's last frame there as a
 // BMP, to look at what was measured. --manifests reads the manifests from
 // another directory and --ref-size renders them at another size (the
 // CTest smoke run of a small cooked scene; budgets hold at 3840 x 2160).
@@ -299,6 +302,9 @@ typedef struct RefView {
     NphDVec3 target;
     f32 yfov;
     f32 znear;
+    f32 yaw;  // degrees the camera is turned about the world's up axis first
+    f32 walk; // metres a second along the view, level (0: still)
+    f32 turn; // degrees a second about the world's up axis, one way (0: none)
 } RefView;
 
 typedef struct RefManifest {
@@ -371,11 +377,14 @@ typedef struct Ctx {
     // The camera walking (SHADOWS_SUN_WALK): its step per frame.
     bool walking;
     NphDVec3 walk_step;
-    // The camera turning or strafing for motion blur (POST_MOTION_*): radians
-    // and metres per frame, and the frame count (the motions reverse).
+    // The camera turning or strafing for motion blur (POST_MOTION_*), or a
+    // reference view turning: radians and metres per frame, the frame count,
+    // and whether the motions reverse (the synthetic ones, to stay over the
+    // field).
     f32 turn;
     f64 strafe;
     u32 motion_frame;
+    bool motion_reverses;
     // Reference scenes: what loads them, made for the first; the manifest
     // whose scene is loaded (NPH_U32_MAX: none), and whether the synthetic
     // scenes' sun was removed for its lights.
@@ -646,7 +655,9 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f
         view->camera.position = nph_dvec3_add(view->camera.position, ctx->walk_step);
     }
     if (ctx->turn != 0.0F || ctx->strafe != 0.0) {
-        const f32 sign = ((ctx->motion_frame++ / MOTION_REVERSE) & 1U) != 0U ? -1.0F : 1.0F;
+        const u32 frame = ctx->motion_frame++;
+        const f32 sign =
+            ctx->motion_reverses && ((frame / MOTION_REVERSE) & 1U) != 0U ? -1.0F : 1.0F;
         // About the world's up axis, and along the camera's right.
         view->camera.orientation = nph_quat_normalize(
             nph_quat_mul(nph_quat_from_axis_angle(nph_vec3_unit_y(), sign * ctx->turn),
@@ -754,6 +765,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                                                        : 0.0F;
         ctx->strafe = motion == (u32)POST_MOTION_STRAFE ? 5.0 * (f64)MOTION_FRAME : 0.0;
         ctx->motion_frame = 0U;
+        ctx->motion_reverses = true;
     }
     const u32 dof = s->post & ((u32)POST_DOF | (u32)POST_DOF_SLIGHT | (u32)POST_DOF_LARGE);
     if (dof != 0U) {
@@ -927,6 +939,9 @@ static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
             rv->scene_camera = nph_json_get_bool(v, NPH_STR("scene_camera"), false);
             rv->yfov = (f32)nph_json_get_f64(v, NPH_STR("yfov"), 0.9);
             rv->znear = (f32)nph_json_get_f64(v, NPH_STR("near"), 0.1);
+            rv->yaw = (f32)nph_json_get_f64(v, NPH_STR("yaw"), 0.0);
+            rv->walk = (f32)nph_json_get_f64(v, NPH_STR("walk"), 0.0);
+            rv->turn = (f32)nph_json_get_f64(v, NPH_STR("turn"), 0.0);
             if (rv->name[0] == '\0' ||
                 (!rv->scene_camera &&
                  (!json_vec3(v, "eye", &rv->eye) || !json_vec3(v, "target", &rv->target)))) {
@@ -1146,6 +1161,11 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         camera =
             nph_render_camera_look_at(rv->eye, rv->target, nph_vec3_unit_y(), rv->yfov, rv->znear);
     }
+    if (rv->yaw != 0.0F) {
+        camera.orientation = nph_quat_normalize(
+            nph_quat_mul(nph_quat_from_axis_angle(nph_vec3_unit_y(), rv->yaw * (NPH_PI / 180.0F)),
+                         camera.orientation));
+    }
     NphGpuImageDesc td;
     memset(&td, 0, sizeof td);
     td.type = NPH_GPU_IMAGE_2D;
@@ -1170,8 +1190,24 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
+    if (rv->walk != 0.0F) {
+        // Along the view, level, as the synthetic walk.
+        const NphVec3 f = nph_quat_rotate(camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
+        const f64 step = (f64)rv->walk * (f64)MOTION_FRAME /
+                         nph_f64_sqrt((f64)f.x * (f64)f.x + (f64)f.z * (f64)f.z);
+        ctx->walk_step = nph_dvec3((f64)f.x * step, 0.0, (f64)f.z * step);
+        ctx->walking = true;
+    }
+    if (rv->turn != 0.0F) {
+        ctx->turn = rv->turn * (NPH_PI / 180.0F) * MOTION_FRAME;
+        ctx->strafe = 0.0;
+        ctx->motion_frame = 0U;
+        ctx->motion_reverses = false;
+    }
     static FrameRun run;
     NphResult r = run_frames(ctx, &view, target, frames, &run);
+    ctx->walking = false;
+    ctx->turn = 0.0F;
     if (r == NPH_RESULT_OK && capture_dir != NULL) {
         char path[1024];
         (void)snprintf(path, sizeof path, "%s/%s.bmp", capture_dir, rs->name);

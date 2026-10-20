@@ -14,6 +14,10 @@
   "sky_intensity": 0.25,
   "sun_shadows": true,
   "views": [
-    {"name": "street", "scene_camera": true}
+    {"name": "street", "scene_camera": true},
+    {"name": "street_walk", "scene_camera": true, "walk": 1.4},
+    {"name": "street_turn", "scene_camera": true, "turn": 90.0},
+    {"name": "terrace", "scene_camera": true, "yaw": 50.0},
+    {"name": "hedge", "scene_camera": true, "yaw": 90.0}
   ]
 }
