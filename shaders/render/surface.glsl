@@ -321,10 +321,16 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         tn.xy *= m.normal_scale;
         mat3 tbn;
         if (dot(s.tangent.xyz, s.tangent.xyz) > 1e-12) {
-            // MikkTSpace convention: the interpolated, unnormalised frame
-            // (glTF 2.0 §3.7.2.1).
-            const vec3 t = s.tangent.xyz * side;
-            tbn = mat3(t, cross(vn, t) * (s.tangent.w * side), vn);
+            // MikkTSpace's frame (glTF 2.0 §3.7.2.1) in its normalised
+            // variant: the interpolated normal and tangent at unit length,
+            // the bitangent their cross product with the stored sign. The
+            // unnormalised variant assumes both arrive as interpolated unit
+            // vectors, which a transform that scales breaks: it stretches
+            // the tangent by its scale and shrinks the normal by it (Bistro,
+            // scaled by 100, shaded in the surface's plane). The variants
+            // differ to second order in the frame's spread across a triangle.
+            const vec3 t = normalize(s.tangent.xyz) * side;
+            tbn = mat3(t, cross(n, t) * (s.tangent.w * side), n);
         } else {
             tbn = nph_derivative_frame(n, s);
         }

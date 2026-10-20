@@ -153,10 +153,15 @@ of glTF 2.0:
   radiance (a test checks it).
 - **Textures:** base colour and emissive in sRGB formats (the hardware
   decodes them), metallic in B and roughness in G, occlusion in R.
-  Normal maps follow the MikkTSpace convention of glTF (the interpolated,
-  unnormalised frame; bitangent `cross(n, t) · w`). Two-channel maps
-  (BC5, RG8) rebuild z. Meshes without tangents get a frame from
-  screen-space derivatives (Schüler 2006).
+  Normal maps follow glTF's MikkTSpace frame in its normalised variant:
+  the interpolated normal and tangent at unit length, and the bitangent
+  `cross(n, t) · w`. The unnormalised variant assumes both arrive as
+  interpolated unit vectors. A transform that scales breaks that: it
+  stretches the tangent by its scale and shrinks the normal by it, and
+  Bistro (scaled by 100) shaded in the surface's plane. The two variants
+  differ only to second order in the frame's spread across a triangle.
+  Two-channel maps (BC5, RG8) rebuild z. Meshes without tangents get a
+  frame from screen-space derivatives (Schüler 2006).
 - **Occlusion** applies to indirect light only (glTF), and also drives
   specular occlusion (Lagarde & de Rousiers 2014). On the production path
   the screen's ambient occlusion multiplies it, the diffuse light's with
@@ -1082,7 +1087,8 @@ and synchronisation-validation gate:
   DFG table; the SH projection; constant environments through every filter
   (sky, equirectangular, cube); BRDF radiance under directional, point, and
   spot lights; image-based lighting energy conservation; textures and
-  debug views; normal maps on mirrored instances, three- and two-channel;
+  debug views; normal maps on mirrored and scaled instances (uniformly by
+  100, and unevenly), three- and two-channel, through both pipelines;
   sidedness, alpha modes, blend order, culling; camera-relative rendering;
   debug lines; and the profiler's windows and declared bytes.
 - **The production path** (`test_vis.c`): its images against the

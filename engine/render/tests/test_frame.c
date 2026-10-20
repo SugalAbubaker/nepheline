@@ -682,6 +682,11 @@ static f32 lit_radiance(NphVec3 n, NphVec3 l, f32 e)
     return (1.0F / NPH_PI + spec) * e * nol / 1.2F;
 }
 
+// A transform that scales, uniformly or not, changes nothing: each
+// vertex's frame reaches the shading unit length. Left as transformed, a
+// scale of s stretched the tangent by s and shrank the normal by it, and
+// Bistro (its root scaled by 100) shaded in the surface's plane. Through
+// both pipelines.
 NTEST_F(Frame, normal_maps_follow_the_tangent_frame)
 {
     REQUIRE_RENDERER(f);
@@ -728,6 +733,15 @@ NTEST_F(Frame, normal_maps_follow_the_tangent_frame)
     const f32 c30 = 0.8660254F;
     const f32 toward = lit_radiance(nph_vec3(s30, 0.0F, c30), l, 1.5F);
     const f32 away = lit_radiance(nph_vec3(-s30, 0.0F, c30), l, 1.5F);
+    // The plane's local axes: +X is +u (world +X after the quarter turn),
+    // +Y the normal (world +Z), +Z the v direction (world -Y).
+    static const f32 scales[4][3] = {
+        {1.0F, 1.0F, 1.0F},  // as is
+        {-1.0F, 1.0F, 1.0F}, // mirrored
+        {100.0F, 100.0F, 100.0F},
+        {8.0F, 1.0F, 0.25F}, // stretched along u, squashed along v
+    };
+    const u32 pipelines = nph_renderer_production_supported(f->renderer) ? 2U : 1U;
     const NphRenderTexture maps[2] = {three, two};
     for (u32 k = 0; k < 2U; ++k) {
         NphRenderMaterialDesc md;
@@ -735,16 +749,23 @@ NTEST_F(Frame, normal_maps_follow_the_tangent_frame)
         md.textures[NPH_RENDER_SLOT_NORMAL].texture = maps[k];
         NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
         NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
-        for (u32 mirror = 0; mirror < 2U; ++mirror) {
+        for (u32 s = 0; s < 4U; ++s) {
             const NphRenderTransform t = nph_render_transform_from_trs(
                 nph_dvec3_zero(), nph_quat_from_rotation_x(0.5F * NPH_PI),
-                nph_vec3(mirror != 0U ? -1.0F : 1.0F, 1.0F, 1.0F));
+                nph_vec3(scales[s][0], scales[s][1], scales[s][2]));
             const NphRenderInstance inst = add_instance(f, mesh, mat, t);
-            NphRenderView v;
-            plain_view(&v);
-            test_render_read(f, &v);
-            const u8 *p = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U);
-            NTEST_EXPECT_TRUE(byte_near(p[0], expected_byte(mirror != 0U ? away : toward), 3U));
+            for (u32 pipeline = 0; pipeline < pipelines; ++pipeline) {
+                NphRenderView v;
+                plain_view(&v);
+                v.pipeline = (NphRenderPipeline)pipeline;
+                test_render_read(f, &v);
+                const u8 *p = test_pixel(f, TEST_TARGET_SIZE / 2U, TEST_TARGET_SIZE / 2U);
+                NTEST_EXPECT_TRUE(byte_near(p[0], expected_byte(s == 1U ? away : toward), 3U));
+                if (!byte_near(p[0], expected_byte(s == 1U ? away : toward), 3U)) {
+                    NTEST_LOG("map %u, scale %u, pipeline %u: %u, not %u", k, s, pipeline, p[0],
+                              expected_byte(s == 1U ? away : toward));
+                }
+            }
             nph_render_instance_destroy(f->renderer, inst);
         }
         nph_render_material_destroy(f->renderer, mat);
