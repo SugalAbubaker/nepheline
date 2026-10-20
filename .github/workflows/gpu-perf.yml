@@ -76,7 +76,7 @@ jobs:
 
       # Validation and synchronisation validation on the real driver.
       - name: GPU and render tests (Development, validation on)
-        run: ctest --preset win-msvc-development -R "^gpu$|^render$|^sample\.gpu_" --output-on-failure
+        run: ctest --preset win-msvc-development -R "^gpu$|^render\.[0-9]+$|^sample\.gpu_" --output-on-failure
 
       - name: GPU benchmarks (Profile)
         run: |

@@ -1003,9 +1003,10 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (125 tests) run on the RTX 3060 Ti locally and on the
-self-hosted runner, and on lavapipe in CI, under the validation and
-synchronisation-validation gate:
+`render_tests` (132 tests, registered with CTest as the four shards
+`render.0` to `render.3`, docs/ntest.md) run on the RTX 3060 Ti locally
+and on the self-hosted runner, and on lavapipe in CI, under the validation
+and synchronisation-validation gate:
 
 - **CPU:** GGX normalisation, Smith symmetry and bounds, DFG energy and
   limits, tonemap ranges and the ACES value at middle grey (worked by

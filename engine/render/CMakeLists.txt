@@ -58,6 +58,9 @@ nph_add_test(render
         tests/test_vsm.c
     DEPS
         nph::render
+    # On lavapipe in Debug with sanitizers every test pays seconds of device
+    # and renderer setup: four CTest entries keep the suite under the timeout.
+    SHARDS 4
 )
 if(NPH_BUILD_TESTS)
     # White-box tests read the renderer's internal images; the gpu tests'

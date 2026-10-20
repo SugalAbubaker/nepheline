@@ -161,22 +161,28 @@ static f32 truth_at(const AoScene *s, NphVec3 x, NphVec3 n)
     return open / (f32)(STRATA * STRATA);
 }
 
+// The direction of the camera's ray through the centre of pixel `i`.
+static NphVec3 pixel_ray(const AoScene *s, u32 i)
+{
+    const u32 column = i % SIZE;
+    const u32 row = i / SIZE;
+    const f32 sx = (2.0F * ((f32)column + 0.5F) / (f32)SIZE - 1.0F) * s->tan_half;
+    const f32 sy = (1.0F - 2.0F * ((f32)row + 0.5F) / (f32)SIZE) * s->tan_half;
+    return nph_vec3_normalize(nph_vec3_add(nph_vec3_add(s->forward, nph_vec3_scale(s->right, sx)),
+                                           nph_vec3_scale(s->up, sy)));
+}
+
 // The ground truth's occlusion of each pixel (-1 where its ray meets
 // nothing).
 static void truth_image(const AoScene *s, f32 *out)
 {
-    for (u32 y = 0; y < SIZE; ++y) {
-        for (u32 x = 0; x < SIZE; ++x) {
-            const f32 sx = (2.0F * ((f32)x + 0.5F) / (f32)SIZE - 1.0F) * s->tan_half;
-            const f32 sy = (1.0F - 2.0F * ((f32)y + 0.5F) / (f32)SIZE) * s->tan_half;
-            const NphVec3 d = nph_vec3_normalize(nph_vec3_add(
-                nph_vec3_add(s->forward, nph_vec3_scale(s->right, sx)), nph_vec3_scale(s->up, sy)));
-            f32 t = 0.0F;
-            NphVec3 n;
-            out[y * SIZE + x] = scene_hit(s, s->eye, d, 0.0F, &t, &n)
-                                    ? truth_at(s, nph_vec3_add(s->eye, nph_vec3_scale(d, t)), n)
-                                    : -1.0F;
-        }
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = pixel_ray(s, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        out[i] = scene_hit(s, s->eye, d, 0.0F, &t, &n)
+                     ? truth_at(s, nph_vec3_add(s->eye, nph_vec3_scale(d, t)), n)
+                     : -1.0F;
     }
 }
 
@@ -396,18 +402,19 @@ NTEST_F(Ao, flat_ground_stays_open)
     add_ground(f, &scene, cube_mesh(f), grey(f, 0.5F));
     const NphRenderCamera camera =
         scene_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, -2.0F), 0.8F);
-    static f32 truth[SIZE * SIZE];
-    truth_image(&scene, truth);
     const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
     static u8 image[PIXELS];
     NphRenderView v;
     ao_view(&v, camera, NPH_RENDER_VIEW_OCCLUSION, RADIUS);
     NTEST_EXPECT_TRUE(render_into(f, &v, target, image).ao);
+    // Every pixel whose ray meets the ground should be open: nothing else is
+    // there to occlude it.
     u32 ground = 0U;
     f32 worst = 0.0F;
     for (u32 i = 0; i < SIZE * SIZE; ++i) {
-        if (truth[i] >= 0.0F) {
-            NTEST_EXPECT_TRUE(truth[i] > 0.999F);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (scene_hit(&scene, scene.eye, pixel_ray(&scene, i), 0.0F, &t, &n)) {
             worst = nph_f32_max(worst, 1.0F - linear_at(image, i));
             ++ground;
         }
