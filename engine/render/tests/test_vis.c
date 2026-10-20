@@ -1244,6 +1244,68 @@ NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
     NTEST_EXPECT_TRUE(d.mean <= 1.5F);
 }
 
+// Triangles that reach behind the camera: floors and ceilings 24 m deep
+// around the camera's depth, so that the triangles of one row of each plane
+// run from 5 m in front of the camera to 1 m behind it. The mesh path culls
+// the back faces of such triangles itself (the homogeneous determinant
+// holds whatever the w's) and its opaque fragment stage no longer discards,
+// for its early depth test: a facing it got wrong would draw a ceiling's
+// back, or drop a floor. Plain and mirrored, against the reference, whose
+// rasteriser clips and culls them.
+NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial m = material(f, nph_vec4(0.8F, 0.6F, 0.4F, 1.0F), 0.0F, 0.6F);
+    // Planes face +Y: a floor below the camera shows it its front, a ceiling
+    // above it its back. Mirrored in X on the right, whose fronts wind the
+    // other way.
+    for (u32 side = 0; side < 2U; ++side) {
+        const f64 x = side == 0U ? -6.0 : 6.0;
+        const NphVec3 scale = nph_vec3(side == 0U ? 12.0F : -12.0F, 1.0F, 24.0F);
+        instance(
+            f, plane, m,
+            nph_render_transform_from_trs(nph_dvec3(x, -0.5, 5.0), nph_quat_identity(), scale));
+        instance(f, plane, m,
+                 nph_render_transform_from_trs(nph_dvec3(x, 0.5, 5.0), nph_quat_identity(), scale));
+    }
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 3.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.4F));
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 1.0F;
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE; // the colours as computed, for the checks below
+    v.disable_ibl = 1;                         // the sun alone lights the floors
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3(0.0F, 0.0F, 3.0F);
+    static u8 ref[PIXELS];
+    static u8 vis[PIXELS];
+    render_into(f, &v, 1U, ref);
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    render_into(f, &v, 1U, vis);
+    const ImageDiff d = image_diff(ref, vis, 3U);
+    NTEST_LOG("faces behind the camera: %.2f %% within 3 levels, mean %.3f, max %u",
+              (f64)d.within * 100.0, (f64)d.mean, d.max);
+    NTEST_EXPECT_TRUE(d.within >= 0.98F);
+    NTEST_EXPECT_TRUE(d.mean <= 1.0F);
+    // The ceilings' backs: the top rows show the background (blue only),
+    // and the floors' fronts fill the bottom rows.
+    for (u32 x = 0; x < TEST_TARGET_SIZE; x += 7U) {
+        const u8 *top = &vis[((u64)1U * TEST_TARGET_SIZE + x) * 4U];
+        const u8 *bottom = &vis[((u64)(TEST_TARGET_SIZE - 2U) * TEST_TARGET_SIZE + x) * 4U];
+        NTEST_EXPECT_TRUE(top[0] == 0U && top[1] == 0U && top[2] > 0U);
+        NTEST_EXPECT_TRUE(bottom[0] > 0U);
+    }
+    nph_render_light_destroy(f->renderer, light);
+}
+
 NTEST_F(Vis, debug_views_show_clusters_triangles_and_instances)
 {
     REQUIRE_PRODUCTION(f);

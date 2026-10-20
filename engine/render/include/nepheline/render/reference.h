@@ -117,13 +117,13 @@ u32 nph_render_ref_zbin(f32 z, f32 znear, f32 scale, f64 *margin);
 // transform mirrors.
 f64 nph_render_ref_vis_facing_det(NphVec4 c0, NphVec4 c1, NphVec4 c2);
 
-// vis_cull_triangle with back faces culled: true for a back face or a
-// triangle whose screen bounding box (grown by 1/256 pixel) holds no pixel
-// centre; false when a vertex is behind the camera. How near the decision
-// came to flipping: `facing_margin` receives the facing determinant
-// relative to its terms (infinite when a vertex is behind the camera, a
-// test single precision makes exactly), `box_margin` the distance in
-// pixels from a box edge to the pixel-centre boundary (infinite when the
+// vis_cull_triangle with back faces culled: true for a back face (whatever
+// the w's: the homogeneous determinant) or, when every vertex is in front
+// of the camera, a triangle whose screen bounding box (grown by 1/256
+// pixel) holds no pixel centre; false for a front face reaching behind the
+// camera. How near the decision came to flipping: `facing_margin` receives
+// the facing determinant relative to its terms, `box_margin` the distance
+// in pixels from a box edge to the pixel-centre boundary (infinite when the
 // box was not tested).
 bool nph_render_ref_vis_cull_triangle(NphVec4 c0, NphVec4 c1, NphVec4 c2, bool mirrored,
                                       NphVec2 viewport, f64 *facing_margin, f64 *box_margin);

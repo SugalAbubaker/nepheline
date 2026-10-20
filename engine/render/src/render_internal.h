@@ -405,7 +405,8 @@ typedef struct VisFrame {
     u32 height;
     NphGpuRgImage visbuffer;
     NphGpuRgImage hdr;
-    NphGpuRgImage depth; // null without blended draws
+    NphGpuRgImage depth;        // null without blended draws
+    NphGpuRgImage raster_depth; // the hardware raster's early depth test (mesh path; else null)
     NphGpuRgImage hzb;
     NphGpuRgBuffer hzb_dirty;
     NphGpuRgBuffer counters;

@@ -176,9 +176,19 @@ static NphResult create_raster_pipeline(NphRenderer *r, VisShader stage, VisShad
         d.vertex = v->shaders[stage];
     }
     d.fragment = v->shaders[fragment];
-    // No attachments: the fragment stage writes the visibility buffer
-    // through image atomics, and faces are culled per triangle.
+    // The fragment stage writes the visibility buffer through image atomics,
+    // and faces are culled per triangle. The mesh path adds a depth
+    // attachment that both fragment stages test early, so that fragments
+    // behind what the pass drew skip the shader (equal depths pass, and the
+    // atomic decides); the opaque one writes it, the masked one, which
+    // discards, does not.
     d.cull_mode = NPH_GPU_CULL_NONE;
+    if (v->mesh_shaders) {
+        d.depth_format = RENDER_DEPTH_FORMAT;
+        d.depth.test = 1;
+        d.depth.write = fragment == VIS_SHADER_MESH_FRAG_OPAQUE ? 1 : 0;
+        d.depth.compare = NPH_GPU_COMPARE_GREATER_OR_EQUAL;
+    }
     d.name = name;
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
@@ -733,11 +743,15 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
 {
     RenderVis *v = &r->vis;
     const VisFrame *f = &v->frame;
-    NphGpuRenderingDesc rd;
-    memset(&rd, 0, sizeof rd);
-    rd.width = f->width;
-    rd.height = f->height;
-    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    // The mesh path's pass has a depth attachment, and the graph begins
+    // rendering around it; the vertex path has none.
+    if (!v->mesh_shaders) {
+        NphGpuRenderingDesc rd;
+        memset(&rd, 0, sizeof rd);
+        rd.width = f->width;
+        rd.height = f->height;
+        nph_gpu_cmd_begin_rendering(cmd, &rd);
+    }
     NphVisPush p = push_of(r, phase, 0U);
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
     if (!v->mesh_shaders) {
@@ -762,7 +776,9 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
                 r->desc.max_visible_clusters, (u32)sizeof(NphVisDraw));
         }
     }
-    nph_gpu_cmd_end_rendering(cmd);
+    if (!v->mesh_shaders) {
+        nph_gpu_cmd_end_rendering(cmd);
+    }
 }
 
 // The software raster of a phase: a workgroup per small cluster.
@@ -981,6 +997,17 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    if (r->vis.mesh_shaders) {
+        // Cleared by phase 0 (reverse-Z: far is 0), kept for phase 1. The
+        // software raster's clusters never reach it: fragments behind them
+        // are not rejected, only lose their atomic, as before.
+        NphGpuRgAttachment a;
+        memset(&a, 0, sizeof a);
+        a.load = phase == 0U ? NPH_GPU_LOAD_OP_CLEAR : NPH_GPU_LOAD_OP_LOAD;
+        a.store = phase == 0U ? NPH_GPU_STORE_OP_STORE : NPH_GPU_STORE_OP_DONT_CARE;
+        a.clear.ds.depth = 0.0F;
+        nph_gpu_rg_depth_attachment(p, f->raster_depth, &a, 0);
+    }
 
     // The small clusters, in compute, into the same visibility buffer.
     p = add_pass(graph, r, phase == 0U ? "vis sw raster 0" : "vis sw raster 1",
@@ -1309,6 +1336,15 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     hd.name = "hdr colour";
     f->visbuffer = nph_gpu_rg_create_image(graph, &vd);
     f->hdr = nph_gpu_rg_create_image(graph, &hd);
+    f->raster_depth = NPH_GPU_RG_IMAGE_NULL;
+    if (v->mesh_shaders) {
+        NphGpuImageDesc dd = vd;
+        dd.format = RENDER_DEPTH_FORMAT;
+        dd.sampled_format = NPH_GPU_FORMAT_UNDEFINED;
+        dd.usage = (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT;
+        dd.name = "vis raster depth";
+        f->raster_depth = nph_gpu_rg_create_image(graph, &dd);
+    }
     f->hzb = nph_gpu_rg_import_image(graph, v->hzb);
     f->hzb_dirty = nph_gpu_rg_import_buffer(graph, v->hzb_dirty);
     f->counters = nph_gpu_rg_import_buffer(graph, v->counters);

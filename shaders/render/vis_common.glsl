@@ -348,15 +348,18 @@ bool vis_front_facing(vec4 c0, vec4 c1, vec4 c2, bool mirrored)
 // these clip-space vertices: a back face (when back faces are culled), or
 // a triangle whose screen bounding box holds no pixel centre (the
 // small-primitive test of Wihlidal, "Optimizing the Graphics Pipeline with
-// Compute", GDC 2016). Triangles reaching behind the camera are left to
-// the rasteriser's clipping.
+// Compute", GDC 2016). The facing holds whatever the w's (the homogeneous
+// determinant), so back faces go even when they reach behind the camera:
+// the opaque raster's fragment stage then never discards, which its early
+// depth test requires. The box test needs every vertex in front, and
+// leaves the rest to the rasteriser's clipping.
 bool vis_cull_triangle(vec4 c0, vec4 c1, vec4 c2, bool cull_back, bool mirrored, vec4 viewport)
 {
-    if (c0.w <= 0.0 || c1.w <= 0.0 || c2.w <= 0.0) {
-        return false;
-    }
     if (cull_back && !vis_front_facing(c0, c1, c2, mirrored)) {
         return true;
+    }
+    if (c0.w <= 0.0 || c1.w <= 0.0 || c2.w <= 0.0) {
+        return false;
     }
     const vec2 n0 = c0.xy / c0.w;
     const vec2 n1 = c1.xy / c1.w;

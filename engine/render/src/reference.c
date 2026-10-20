@@ -468,10 +468,8 @@ bool nph_render_ref_vis_cull_triangle(NphVec4 c0, NphVec4 c1, NphVec4 c2, bool m
     const NphVec4 c[3] = {c0, c1, c2};
     *facing_margin = HUGE_VAL;
     *box_margin = HUGE_VAL;
-    if (c0.w <= 0.0F || c1.w <= 0.0F || c2.w <= 0.0F) {
-        return false;
-    }
-    // The determinant against the size of its terms.
+    // The determinant against the size of its terms; its sign holds
+    // whatever the w's.
     const f64 det = nph_render_ref_vis_facing_det(c0, c1, c2);
     f64 scale = 1.0;
     for (u32 i = 0; i < 3U; ++i) {
@@ -480,6 +478,9 @@ bool nph_render_ref_vis_cull_triangle(NphVec4 c0, NphVec4 c1, NphVec4 c2, bool m
     *facing_margin = fabs(det) / scale;
     if ((det < 0.0) == mirrored) {
         return true; // a back face
+    }
+    if (c0.w <= 0.0F || c1.w <= 0.0F || c2.w <= 0.0F) {
+        return false; // the rasteriser clips it
     }
     const f64 size[2] = {(f64)viewport.x, (f64)viewport.y};
     f64 lo[2] = {HUGE_VAL, HUGE_VAL};

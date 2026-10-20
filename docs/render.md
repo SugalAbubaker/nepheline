@@ -464,8 +464,9 @@ cone culling on and off and compares.
 **The visibility buffer** is 64 bits per pixel (R64_UINT): the depth's
 bits high, then the cluster index (25 bits) and the triangle (7 bits). The
 raster writes it with `imageAtomicMax`, which keeps the nearest surface
-under reverse-Z with no depth attachment, so the hardware and software
-rasters write the same buffer the same way.
+under reverse-Z without any depth test, so the hardware and software
+rasters write the same buffer the same way (the mesh path's depth
+attachment, below, only spares fragments that would lose the atomic).
 
 **Raster.** With mesh shaders each workgroup of 32 threads emits one
 cluster, culling back faces and triangles that cover no pixel centre
@@ -477,6 +478,27 @@ shaders but loses push constants in their fragment stage
 (`NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS`, docs/gpu.md), so it takes
 the indirect path; the RTX runner covers the mesh-shader path. Masked
 materials have their own pipeline, which samples the alpha.
+
+**Early depth.** The mesh path also gives the hardware raster a D32 depth
+attachment (transient, cleared to 0 by phase 0 and kept for phase 1,
+`GREATER_OR_EQUAL`), tested before the fragment stage
+(`early_fragment_tests`), so that a fragment behind what the pass already
+drew skips its shader and its atomic. Equal depths pass and the atomic
+still decides, so the image is the one the atomic alone makes. An early
+test needs a fragment stage that never discards, which is why the mesh
+stage culls every back face of a single-sided material, including the
+triangles that reach behind the camera: their facing comes from the
+homogeneous determinant of the clip-space x, y and w, whose sign holds
+whatever the w's (Olano & Greer, "Triangle Scan Conversion using 2D
+Homogeneous Coordinates", HWWS 1997). Only the small-primitive box test
+needs every vertex in front of the camera. The opaque pipeline writes the
+depth. The masked one discards after its alpha test, so it tests early but
+writes nothing: an early write would let a discarded fragment occlude. The
+software raster's clusters never reach the attachment, so fragments behind
+them only lose their atomic, as before. On the RTX 3060 Ti this took
+Bistro's `vis raster 0` from 1.135 to 0.735 ms at 4K (0.798 with the
+opaque pipeline alone), and the synthetic scenes' by 14–18 %. The vertex
+path has no attachment, and discards back faces in its fragment stage.
 
 **The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
 the opaque clusters whose bounding sphere projects in front of the near
@@ -811,47 +833,46 @@ time of `nph_render_frame` and the GPU frame:
 
 | Scene | Instances | CPU, reference | CPU, production | GPU, reference | GPU, production |
 |---|---|---|---|---|---|
-| grid, 512 × 512 | 1,024 | 0.20 ms | 0.010 ms | 0.10 ms | 0.31 ms |
-| grid, 512 × 512 | 10,240 | 1.24 ms | 0.010 ms | 0.22 ms | 0.38 ms |
+| grid, 512 × 512 | 1,024 | 0.21 ms | 0.010 ms | 0.10 ms | 0.31 ms |
+| grid, 512 × 512 | 10,240 | 1.27 ms | 0.010 ms | 0.21 ms | 0.38 ms |
 | grid, 512 × 512 | 102,400 | 13.5 ms | 0.010 ms | 3.36 ms | 0.74 ms |
-| field, 3840 × 2160 | 16,385 | 2.84 ms | 0.012 ms | 3.04 ms | 3.60 ms |
-| the same without temporal anti-aliasing | 16,385 | | 0.011 ms | | 2.78 ms |
-| the same without bloom | 16,385 | | 0.011 ms | | 3.26 ms |
-| the same without ambient occlusion | 16,385 | | 0.011 ms | | 3.22 ms |
-| the same without global illumination | 16,385 | | 0.009 ms | | 3.33 ms |
-| the same exposed automatically | 16,385 | | 0.012 ms | | 3.63 ms |
-| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.012 ms | | 4.20 ms |
-| the same, strafing at 5 m/s | 16,385 | | 0.012 ms | | 4.19 ms |
-| the same, turning 360°/s | 16,385 | | 0.012 ms | | 4.07 ms |
-| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.61 ms |
+| field, 3840 × 2160 | 16,385 | 2.88 ms | 0.012 ms | 3.03 ms | 3.62 ms |
+| the same without temporal anti-aliasing | 16,385 | | 0.012 ms | | 2.77 ms |
+| the same without bloom | 16,385 | | 0.012 ms | | 3.25 ms |
+| the same without ambient occlusion | 16,385 | | 0.012 ms | | 3.22 ms |
+| the same without global illumination | 16,385 | | 0.010 ms | | 3.33 ms |
+| the same exposed automatically | 16,385 | | 0.013 ms | | 3.62 ms |
+| the same, motion blur with the camera turning 60°/s | 16,385 | | 0.013 ms | | 4.20 ms |
+| the same, strafing at 5 m/s | 16,385 | | 0.013 ms | | 4.18 ms |
+| the same, turning 360°/s | 16,385 | | 0.013 ms | | 4.07 ms |
+| the same, depth of field focused at 5 m (circles to 4 px) | 16,385 | | 0.013 ms | | 4.59 ms |
 | the same, focused at 2.6 m (circles to 7.7 px) | 16,385 | | 0.013 ms | | 5.18 ms |
-| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.98 ms |
-| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.012 ms | 52.7 ms | 3.54 ms |
-| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.05 ms |
-| field, the sun casting shadows (production: its map) | 16,385 | 3.14 ms | 0.013 ms | 3.67 ms | 3.88 ms |
-| the same without global illumination | 16,385 | | 0.011 ms | | 3.68 ms |
-| the same, the sun's shadows ray traced | 16,385 | | 0.012 ms | | 3.96 ms |
-| the map, a sphere moving every frame | 16,386 | | 0.014 ms | | 4.24 ms |
-| the map, the camera walking | 16,385 | | 0.013 ms | | 3.90 ms |
-| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.013 ms | | 4.80 ms |
+| the same, focused at 0.6 m (circles at the 32-px limit) | 16,385 | | 0.013 ms | | 4.95 ms |
+| field at night, 1,024 lights | 16,385 | 3.65 ms | 0.012 ms | 53.5 ms | 3.55 ms |
+| field at night, 4,000 lights | 16,385 | | 0.012 ms | | 5.03 ms |
+| field, the sun casting shadows (production: its map) | 16,385 | 3.16 ms | 0.013 ms | 3.70 ms | 3.88 ms |
+| the same without global illumination | 16,385 | | 0.011 ms | | 3.74 ms |
+| the same, the sun's shadows ray traced | 16,385 | | 0.013 ms | | 3.98 ms |
+| the map, a sphere moving every frame | 16,386 | | 0.014 ms | | 4.22 ms |
+| the map, the camera walking | 16,385 | | 0.014 ms | | 3.89 ms |
+| field at night, 1,024 lights and the moon casting shadows | 16,385 | | 0.013 ms | | 4.81 ms |
 
 Every frame draws the runtime's bloom (0.04); the production path's
 frames resolve temporally (the runtime's default), take global
 illumination (`r.gi`), and, where the sky lights them, ambient occlusion
 within 0.5 m (`r.ao`), the reference's none of these; the motion-blurred
 frames have a 180-degree shutter at 240 frames a second, and the others
-with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-19d`,
-the lamps' rows `render_perf-2026-10-20`; a frame varies by a few
-hundredths of a millisecond from run to run).
+with depth of field a full-frame lens at f/1.4 (`render_perf-2026-10-20b`;
+a frame varies by a few hundredths of a millisecond from run to run).
 
 In the 4K field the surviving clusters hold 5.4 million triangles (the
 reference draws 14.6 million after its frustum test; occlusion removed
 52,249 clusters, and 57,587 of the 64,128 drawn went to the software
 raster), and the passes take: clear 0.08 ms, culling with its argument
-passes 0.09 ms, raster 0.53 ms (0.23 in hardware, 0.29 in software), the
+passes 0.09 ms, raster 0.50 ms (0.20 in hardware, 0.30 in software), the
 two pyramids 0.22 ms (0.21 without the ambient occlusion's depths), the
 light grid 0.014 ms, the ambient occlusion 0.30 ms, the radiance cache's
-update and blend 0.043 ms, resolve 1.22 ms (0.99 without the radiance
+update and blend 0.043 ms, resolve 1.24 ms (0.99 without the radiance
 cache's lookup, and 0.06 less again without the ambient occlusion), the
 bloom chain 0.28 ms, the temporal resolve with the glare and the tonemap
 0.82 ms (0.75 without bloom; the tonemap with the glare: 0.13 ms).

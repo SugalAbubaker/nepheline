@@ -246,7 +246,7 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.57 ms | 8.39 ms | resolve 3.58 ms (§10.4 line: 1.20 ms), raster 1.15 ms + Hi-Z 0.45 ms (with culling, 0.90 ms), TAA 0.85 ms (with post, 0.40 ms), AO 0.44 ms |
+| `bistro_street_production` | 7.25 ms | 8.10 ms | resolve 3.63 ms (§10.4 line: 1.20 ms), raster 0.81 ms + Hi-Z 0.46 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -255,7 +255,9 @@ it. The resolve carries most of the overrun. Taking one cost away at a
 time (ADR-0040): the lamps 1.25 ms, material textures 0.84 ms, rebuilding
 the surface from the visibility buffer 0.97 ms, the sun's virtual shadow
 map 0.34 ms. Testing each light's range before reading the rest of it
-(docs/render.md "Lights") then took 0.29 ms off the lamps' share.
+(docs/render.md "Lights") then took 0.29 ms off the lamps' share, and the
+hardware raster's early depth test (docs/render.md "Early depth") took
+its pass from 1.13 to 0.74 ms.
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
@@ -264,7 +266,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-20-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-20b-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU
