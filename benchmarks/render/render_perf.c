@@ -21,7 +21,7 @@
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
-//                 [--debug-view=NAME]
+//                 [--debug-view=NAME] [--reference-only]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -42,7 +42,9 @@
 // (base_color, normal, roughness, metallic, occlusion, direct, indirect,
 // irradiance, clusters, triangles, instances) for looking at the content;
 // the results are then named `<scene>_<view>_production_<debug view>`, so
-// no budget applies to them.
+// no budget applies to them. --reference-only runs the reference scenes
+// alone (the GPU runner's nightly job, which runs the synthetic ones in a
+// step of their own).
 //
 // The scenes are synthetic until Phase 10's reference scenes arrive. Each
 // draws the runtime's defaults: bloom (r.bloom's weight, 0.04) on both
@@ -1355,7 +1357,7 @@ static int usage(void)
     fprintf(stderr, "usage: render_perf [--filter=GLOB] [--frames=N] [--json=FILE] "
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
-                    "[--ref-size=WxH] [--debug-view=NAME]\n");
+                    "[--ref-size=WxH] [--debug-view=NAME] [--reference-only]\n");
     return 2;
 }
 
@@ -1371,6 +1373,7 @@ int main(int argc, char **argv)
     const char *scenes = getenv("NPH_SCENES");
     const char *capture_dir = NULL;
     const char *manifest_dir = NPH_SCENE_MANIFEST_DIR;
+    bool reference_only = false;
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--filter=", 9U) == 0) {
             filter = argv[i] + 9;
@@ -1401,6 +1404,8 @@ int main(int argc, char **argv)
             }
             g_ref_width = (u32)w;
             g_ref_height = (u32)h;
+        } else if (strcmp(argv[i], "--reference-only") == 0) {
+            reference_only = true;
         } else if (strncmp(argv[i], "--debug-view=", 13U) == 0) {
             g_debug_view = NPH_RENDER_VIEW_COUNT;
             for (u32 v = 0; v < NPH_ARRAY_COUNT(k_debug_views); ++v) {
@@ -1420,7 +1425,7 @@ int main(int argc, char **argv)
     }
     frames = nph_clamp_u32(frames, 1U, MAX_FRAMES - NPH_GPU_FRAMES_IN_FLIGHT);
     u32 matched = 0U;
-    for (u32 i = 0; i < NPH_ARRAY_COUNT(g_scenes); ++i) {
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(g_scenes) && !reference_only; ++i) {
         if (glob_match(filter, g_scenes[i].name)) {
             ++matched;
             if (list) {
@@ -1456,7 +1461,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "render_perf: setup failed: %s\n", nph_result_string(sr));
         status = 1;
     }
-    for (u32 i = 0; i < NPH_ARRAY_COUNT(g_scenes) && status == 0; ++i) {
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(g_scenes) && status == 0 && !reference_only; ++i) {
         if (!glob_match(filter, g_scenes[i].name)) {
             continue;
         }

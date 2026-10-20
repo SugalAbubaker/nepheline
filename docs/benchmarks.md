@@ -198,7 +198,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
-            [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME]
+            [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -225,6 +225,17 @@ without them are those of the synthetic scenes alone. The CTest smoke
 run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,
 reads its manifest from `benchmarks/render/test_scenes` (`--manifests`),
 and renders it at 320 × 180 (`--ref-size`) for four frames.
+
+The RTX 3060 Ti runner measures them nightly, not on pull requests (the
+user's decision, ADR-0040). `.github/workflows/gpu-perf.yml`, when
+scheduled or dispatched, fetches and cooks every manifest's scene into a
+directory that persists between its jobs. That directory is the
+repository variable `NPH_SCENES_DIR`, or the runner's tool cache when the
+variable is unset. The cook is incremental, so Bistro's 23-minute cook
+recurs only when the cooker's output changes. The job then runs
+`render_perf --reference-only` against `benchmarks/reference_budgets.txt`,
+which `scripts/render_budgets.py --output` generates from the reference
+results like the synthetic budgets.
 
 | Scene | Source | What it is |
 |---|---|---|

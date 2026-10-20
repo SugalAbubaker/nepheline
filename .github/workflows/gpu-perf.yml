@@ -5,8 +5,10 @@
 # mesh-shader path runs only here: lavapipe takes the indirect one), the GPU
 # microbenchmarks against benchmarks/gpu_budgets.txt, and the renderer's
 # scenes against benchmarks/render_budgets.txt (a regression of more than
-# 5 % over the recorded reference fails the job). Runs nightly, on pushes
-# to main, and on pull requests that touch the GPU or renderer code; the
+# 5 % over the recorded reference fails the job), and nightly the
+# third-party reference scenes against benchmarks/reference_budgets.txt.
+# Runs nightly, on pushes to main, and on pull requests that touch the GPU
+# or renderer code; the
 # job is skipped when the runner is offline only in the sense that it
 # queues until the machine is on.
 name: GPU performance
@@ -46,7 +48,9 @@ jobs:
     # Fork pull requests must never execute on this machine (ADR-0002).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, x64, gpu, rtx3060ti]
-    timeout-minutes: 60
+    # A nightly run that cooks a reference scene afresh (a new cooker
+    # output) takes over an hour; a pull request's run, minutes.
+    timeout-minutes: 150
     # Windows PowerShell 5.1, which every Windows machine has (the reference
     # machine has no pwsh), run so that the step does not depend on the
     # machine's script execution policy, which refused the step's temporary
@@ -86,6 +90,35 @@ jobs:
       # Every scene, CPU and GPU per pass with its declared bytes (§10.7).
       - name: Renderer runs (Profile)
         run: .\build\win-msvc\bin\Profile\render_perf.exe --frames=240 --json=bench-results\render_perf.json --budgets=benchmarks\render_budgets.txt
+
+      # The third-party reference scenes (docs/adr/0040-reference-scenes.md),
+      # nightly and when dispatched, not on pull requests: fetched at their
+      # manifests' pinned commits into a directory that persists between jobs
+      # (the repository variable NPH_SCENES_DIR, else the runner's tool cache),
+      # cooked there by this build's cooker (incrementally: Bistro's 23
+      # minutes recur only when the cooker's output changes), then measured
+      # against benchmarks/reference_budgets.txt. The job's user has no Python
+      # of its own; setup-python keeps one in the tool cache.
+      - name: Python for the scene script
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reference scenes, fetched and cooked
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          SCENES_DIR: ${{ vars.NPH_SCENES_DIR }}
+        run: |
+          $scenes = $env:SCENES_DIR
+          if (-not $scenes) { $scenes = Join-Path $env:RUNNER_TOOL_CACHE 'nepheline-scenes' }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "NPH_SCENES=$scenes`n", (New-Object System.Text.UTF8Encoding $false))
+          python scripts/scenes.py fetch --dir $scenes
+          python scripts/scenes.py cook --dir $scenes --cook build\win-msvc\bin\Profile\nph_cook.exe
+
+      - name: Reference scenes (Profile)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: .\build\win-msvc\bin\Profile\render_perf.exe --scenes=$env:NPH_SCENES --reference-only --frames=240 --json=bench-results\reference_scenes.json --budgets=benchmarks\reference_budgets.txt
 
       - name: Upload results
         if: always()
