@@ -188,3 +188,58 @@ post), each at half the bytes.
 - The dither pattern is fixed until temporal antialiasing (stage 8)
   varies it per frame and averages it out.
 - The light passes are the async compute queue's first candidates.
+
+## Amendment (2026-10-20): the tile masks culled against the tiles' depths
+
+**Context.** In Bistro's street the grid handed each pixel 11.8 lights,
+of which 5.0 reached it: a light's rectangle and its distance bins bound
+the box around its sphere, and a pixel near the rim of its disc, at a
+distance within its bins, is outside the sphere. Each such light cost a
+load and a range test, and, where the lanes of a subgroup walk different
+lights, often a whole evaluation in which no lane takes part.
+
+**Decision.** The tile masks wait for the frame's depths. The depth
+pyramid's passes (`vis_hzb.comp` modes 0 and 2, which read every pixel's
+final depth anyway) keep each light tile's nearest and farthest surface
+depths and whether the background shows (`NphVisViewData.light_depths`),
+and `vis light tiles` runs after phase 1. A light stays in a tile's mask
+for opaque surfaces where its sphere meets the box around the tile's part
+of the view between those distances (Harada, McKee & Yang, "Forward+",
+Eurographics 2012, for the bounds; the box as Olsson & Assarsson, "Tiled
+Shading", JGT 2011, bound tiles); a tile without surfaces keeps none. A
+second mask (`NphRenderLightGrid.tiles_blended`) serves blended surfaces,
+which lie in front of the opaque ones: from the near plane to the
+farthest surface, or every light whose rectangle covers the tile where
+the background shows. The box carries the grid's 10^-4 slack, so the
+image is unchanged, bit for bit.
+
+**Measurements** (interleaved, three rounds): the lights a pixel tests
+fell from 11.8 to 5.7 in the street (5.0 in range), from 10.8 to 4.8 on
+the terrace and from 8.8 to 3.1 at the hedge. The resolve took 3.34 ms
+against 3.53, 3.25 against 3.45 and 2.84 against 3.02; `vis hzb 0` took
+0.024 ms more and `vis light tiles` 0.013 ms more; the frame 0.14 to
+0.16 ms less. The 1,024 lamps' resolve took 1.36 ms against 1.42, the
+frame the same (the masks' pass 0.025 ms more there); the 4,096 lamps'
+frame took 4.80 ms against 4.95 (the resolve 2.57 against 2.83, the masks'
+pass 0.18 against 0.09: a light's record is read only by the blocks of
+tiles its rectangle reaches). A frame without local lights in view skips
+the bounds, whose pass then costs what it did. The scenes that make no use
+of the grid moved by up to 0.06 ms (the 100,000-cube grid's culls and
+software raster, 8 %) with the allocation of the masks' buffers alone, as
+a dummy allocation of the same size showed: where later resources land in
+memory, not work.
+
+**Alternatives.**
+- Culling per subgroup in the resolve against the subgroup's own depth
+  range (8 × 4 pixels, tighter than a tile's): registers in the pass
+  that peaks, and the tiles leave 0.7 lights a pixel to win.
+- A depth mask per tile (Harada 2012's 2.5D culling) for tiles that span
+  an edge: the boxes leave little.
+- The tile's bounds reduced per subgroup, each tile's blocks in
+  subgroups of their own: 0.008 ms slower in the pyramid's pass than the
+  shared-memory atomics, for its memory order.
+
+**Consequences.** The masks need the visibility buffer's depth, so the
+grid can no longer be finished before the raster; its lights and bins
+still can. Blended and forward-drawn surfaces walk their own mask
+(`NPH_SURFACE_GRID_TILES`), twice the masks' memory.

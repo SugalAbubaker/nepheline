@@ -1819,13 +1819,14 @@ static void light_room(RenderFixture *f)
 }
 
 // The grid read back after a frame: the counts, the sorted lights, the
-// bins, and the tile masks.
+// bins, the tile masks, and the tiles' depths.
 typedef struct GridReadback {
     u32 globals;
     u32 locals;
     NphRenderLightData *lights; // the sorted locals
     u32 *zbins;                 // NPH_RENDER_ZBINS
-    u32 *tiles;                 // tiles_x * tiles_y * words
+    u32 *tiles;                 // [2][words][tiles_y][tiles_x]: the opaque, then the blended masks
+    u32 *depths;                // [tiles_y][tiles_x][2] (NphVisViewData.light_depths)
     u32 tiles_x;
     u32 tiles_y;
     u32 words;
@@ -1847,16 +1848,18 @@ static GridReadback grid_read(RenderFixture *f)
     g.words = v->light_words;
     g.lights = NPH_ALLOC_ARRAY(a, NphRenderLightData, nph_max_u32(g.locals, 1U));
     g.zbins = NPH_ALLOC_ARRAY(a, u32, NPH_RENDER_ZBINS);
-    g.tiles = NPH_ALLOC_ARRAY(a, u32, (u64)g.tiles_x * g.tiles_y * g.words);
-    NTEST_ASSERT_TRUE(g.lights != NULL && g.zbins != NULL && g.tiles != NULL);
+    const u64 tiles = (u64)g.tiles_x * g.tiles_y;
+    g.tiles = NPH_ALLOC_ARRAY(a, u32, 2U * tiles * g.words);
+    g.depths = NPH_ALLOC_ARRAY(a, u32, 2U * tiles);
+    NTEST_ASSERT_TRUE(g.lights != NULL && g.zbins != NULL && g.tiles != NULL && g.depths != NULL);
     if (g.locals != 0U) {
         test_read_buffer(f->dev, v->light_grid, v->light_layout.locals,
                          (u64)g.locals * sizeof(NphRenderLightData), g.lights);
     }
     test_read_buffer(f->dev, v->light_grid, v->light_layout.zbins,
                      (u64)NPH_RENDER_ZBINS * sizeof(u32), g.zbins);
-    test_read_buffer(f->dev, v->light_tiles, 0U, (u64)g.tiles_x * g.tiles_y * g.words * sizeof(u32),
-                     g.tiles);
+    test_read_buffer(f->dev, v->light_tiles, 0U, 2U * tiles * g.words * sizeof(u32), g.tiles);
+    test_read_buffer(f->dev, v->light_depths, 0U, 2U * tiles * sizeof(u32), g.depths);
     return g;
 }
 
@@ -1865,14 +1868,18 @@ static void grid_free(GridReadback *g)
     NphAllocator *a = nph_allocator_system();
     NPH_FREE_ARRAY(a, NphRenderLightData, g->lights, nph_max_u32(g->locals, 1U));
     NPH_FREE_ARRAY(a, u32, g->zbins, NPH_RENDER_ZBINS);
-    NPH_FREE_ARRAY(a, u32, g->tiles, (u64)g->tiles_x * g->tiles_y * g->words);
+    const u64 tiles = (u64)g->tiles_x * g->tiles_y;
+    NPH_FREE_ARRAY(a, u32, g->tiles, 2U * tiles * g->words);
+    NPH_FREE_ARRAY(a, u32, g->depths, 2U * tiles);
 }
 
-static bool grid_tile_has(const GridReadback *g, u32 tx, u32 ty, u32 light)
+// Whether the tile's mask for opaque (`blended` false) or blended surfaces
+// holds a light.
+static bool grid_tile_has(const GridReadback *g, bool blended, u32 tx, u32 ty, u32 light)
 {
-    const u32 word =
-        g->tiles[(u64)(light / 32U) * g->tiles_x * g->tiles_y + (u64)ty * g->tiles_x + tx];
-    return ((word >> (light % 32U)) & 1U) != 0U;
+    const u64 tiles = (u64)g->tiles_x * g->tiles_y;
+    const u64 word = ((blended ? (u64)g->words : 0U) + light / 32U) * tiles;
+    return ((g->tiles[word + (u64)ty * g->tiles_x + tx] >> (light % 32U)) & 1U) != 0U;
 }
 
 static bool grid_bin_has(const GridReadback *g, u32 bin, u32 light)
@@ -1884,12 +1891,14 @@ static bool grid_bin_has(const GridReadback *g, u32 bin, u32 light)
 
 // What the grid must hold for a light, from the C twins: its tiles and
 // its distance bins (without the shader's slack, so the GPU's must
-// contain these).
+// contain these), and the view-space sphere around its reach, which the
+// tiles' depths cull against.
 typedef struct LightBounds {
     u32 tile_lo[2];
     u32 tile_hi[2];
     u32 bin_lo;
     u32 bin_hi;
+    NphVec4 sphere;
 } LightBounds;
 
 static LightBounds light_bounds(const NphRenderLightDesc *ld, const NphRenderCamera *cam)
@@ -1921,12 +1930,58 @@ static LightBounds light_bounds(const NphRenderLightDesc *ld, const NphRenderCam
     f64 margin = 0.0;
     b.bin_lo = nph_render_ref_zbin(nph_f32_max(-c.z - s.w, cam->znear), cam->znear, scale, &margin);
     b.bin_hi = nph_render_ref_zbin(-c.z + s.w, cam->znear, scale, &margin);
+    b.sphere = nph_vec4(c.x, c.y, c.z, s.w);
     return b;
 }
 
+// A light tile's rays (x / -z in x and z, y / -z in y and w; lower, then
+// upper) under `proj`, as vis_light_tiles.comp takes them (this view has
+// no sub-pixel offset).
+static NphVec4 tile_slopes(const NphMat4 *proj, u32 tx, u32 ty)
+{
+    const f32 t = (f32)NPH_RENDER_LIGHT_TILE;
+    const f32 x0 = ((f32)tx * t / (f32)LIGHT_W * 2.0F - 1.0F) / proj->c[0].x;
+    const f32 x1 = ((f32)(tx + 1U) * t / (f32)LIGHT_W * 2.0F - 1.0F) / proj->c[0].x;
+    const f32 y0 = ((f32)ty * t / (f32)LIGHT_H * 2.0F - 1.0F) / proj->c[1].y;
+    const f32 y1 = ((f32)(ty + 1U) * t / (f32)LIGHT_H * 2.0F - 1.0F) / proj->c[1].y;
+    return nph_vec4(nph_f32_min(x0, x1), nph_f32_min(y0, y1), nph_f32_max(x0, x1),
+                    nph_f32_max(y0, y1));
+}
+
+// What a light tile's mask must hold for a light whose rectangle covers it,
+// given its depths: for opaque surfaces (`blended` false), exactly the
+// lights whose spheres meet the box around the tile between its surfaces'
+// distances; for blended ones, between the near plane and the farthest, or
+// every one where the background shows. Within the shader's slack either
+// way is right. 1: must hold it; -1: must not; 0: either.
+static i32 tile_expects(const u32 depths[2], NphVec4 slopes, NphVec4 sphere, f32 znear,
+                        bool blended)
+{
+    const bool surfaces = depths[0] != NPH_VIS_NO_SURFACE;
+    if (blended && (depths[1] >> 31U) != 0U) {
+        return 1;
+    }
+    if (!surfaces) {
+        return -1;
+    }
+    const f32 far_dist = znear / nph_f32_from_bits(depths[0]);
+    const f32 near_dist = blended ? znear : znear / nph_f32_from_bits(depths[1] & 0x7FFFFFFFU);
+    const f64 m = nph_render_ref_vis_tile_sphere_margin(slopes, near_dist, far_dist, sphere);
+    const f32 widest = nph_f32_max(nph_f32_max(nph_f32_abs(slopes.x), nph_f32_abs(slopes.y)),
+                                   nph_f32_max(nph_f32_abs(slopes.z), nph_f32_abs(slopes.w)));
+    // The shader grows the box by 1e-4 of its largest coordinate and the
+    // radius by 1e-4: twice that, and its rounding, is either way.
+    const f64 slack = 2e-4 * ((f64)far_dist * (1.0 + (f64)widest) + (f64)sphere.w);
+    return m >= 0.0 ? 1 : (m < -slack ? -1 : 0);
+}
+
 // A few lights where the grid's bounds are known: each must be in every
-// tile and bin its sphere reaches, and in no tile more than one beyond;
-// the lights that reach every pixel and those out of view are told apart.
+// bin its sphere reaches and in no tile more than one beyond its rectangle;
+// within it, in the masks of exactly the tiles whose surfaces' depths its
+// sphere meets (to the shader's slack), which the camera's own light, whose
+// reach holds no surface, meets for blended surfaces alone. The tiles'
+// depths are their pixels': against the depth pyramid's mip 0. The lights
+// that reach every pixel and those out of view are told apart.
 NTEST(vis, the_light_grid_bounds_each_light)
 {
     LightFixture lf;
@@ -1971,6 +2026,53 @@ NTEST(vis, the_light_grid_bounds_each_light)
     NTEST_EXPECT_EQ_UINT(g.tiles_x, 16U);
     NTEST_EXPECT_EQ_UINT(g.tiles_y, 10U);
 
+    // Each mip-0 texel of the pyramid is the farthest of its 2 x 2 pixels
+    // (0 where the background shows), and a tile's pixels are its 8 x 8
+    // texels' (the last row and column partial): the background shows in a
+    // tile exactly where a texel is 0, and elsewhere its farthest surface is
+    // their least. Its nearest lies between that and the near plane.
+    const RenderVis *vis = &f->renderer->vis;
+    const u64 hzb_texels = (u64)vis->hzb_width * vis->hzb_height;
+    f32 *hzb = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, hzb_texels);
+    NTEST_ASSERT_NOT_NULL(hzb);
+    test_read_image(f->dev, vis->hzb, 0U, hzb, hzb_texels * sizeof(f32));
+    u32 depth_errors = 0U;
+    u32 surface_tiles = 0U;
+    u32 background_tiles = 0U;
+    for (u32 ty = 0; ty < g.tiles_y; ++ty) {
+        for (u32 tx = 0; tx < g.tiles_x; ++tx) {
+            const u32 *d = &g.depths[((u64)ty * g.tiles_x + tx) * 2U];
+            f32 least = 2.0F;
+            for (u32 y = ty * 8U; y < nph_min_u32(ty * 8U + 8U, vis->hzb_height); ++y) {
+                for (u32 x = tx * 8U; x < nph_min_u32(tx * 8U + 8U, vis->hzb_width); ++x) {
+                    least = nph_f32_min(least, hzb[(u64)y * vis->hzb_width + x]);
+                }
+            }
+            const bool background = (d[1] >> 31U) != 0U;
+            const f32 nearest = nph_f32_from_bits(d[1] & 0x7FFFFFFFU);
+            depth_errors += background != (least == 0.0F) ? 1U : 0U;
+            if (least > 0.0F) {
+                depth_errors += d[0] != nph_f32_to_bits(least) ? 1U : 0U;
+            }
+            if (d[0] != NPH_VIS_NO_SURFACE) {
+                const f32 farthest = nph_f32_from_bits(d[0]);
+                depth_errors += farthest > 0.0F && farthest <= nearest && nearest <= 1.0F ? 0U : 1U;
+                surface_tiles += 1U;
+            } else {
+                depth_errors += d[1] == 0x80000000U ? 0U : 1U;
+            }
+            background_tiles += background ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("tile depths: %u of %u tiles with surfaces, %u showing the background, %u wrong",
+              surface_tiles, g.tiles_x * g.tiles_y, background_tiles, depth_errors);
+    NTEST_EXPECT_EQ_UINT(depth_errors, 0U);
+    NTEST_EXPECT_GT_UINT(surface_tiles, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), f32, hzb, hzb_texels);
+
+    const NphMat4 proj =
+        nph_mat4_perspective_infinite(cam.yfov, (f32)LIGHT_W / (f32)LIGHT_H, cam.znear);
+
     u32 min_bin = NPH_U32_MAX;
     u32 max_bin = 0U;
     for (u32 i = 0; i < 4U; ++i) {
@@ -1990,28 +2092,51 @@ NTEST(vis, the_light_grid_bounds_each_light)
         max_bin = nph_max_u32(max_bin, b.bin_hi);
         u32 missing = 0U;
         u32 stray = 0U;
+        u32 kept[2] = {0U, 0U};
         for (u32 ty = 0; ty < g.tiles_y; ++ty) {
             for (u32 tx = 0; tx < g.tiles_x; ++tx) {
                 const bool inside = tx >= b.tile_lo[0] && tx <= b.tile_hi[0] &&
                                     ty >= b.tile_lo[1] && ty <= b.tile_hi[1];
                 const bool near = tx + 1U >= b.tile_lo[0] && tx <= b.tile_hi[0] + 1U &&
                                   ty + 1U >= b.tile_lo[1] && ty <= b.tile_hi[1] + 1U;
-                const bool has = grid_tile_has(&g, tx, ty, j);
-                missing += inside && !has ? 1U : 0U;
-                stray += !near && has ? 1U : 0U;
+                const u32 *d = &g.depths[((u64)ty * g.tiles_x + tx) * 2U];
+                const NphVec4 slopes = tile_slopes(&proj, tx, ty);
+                for (u32 m = 0; m < 2U; ++m) {
+                    const bool has = grid_tile_has(&g, m == 1U, tx, ty, j);
+                    kept[m] += has ? 1U : 0U;
+                    if (!near) {
+                        stray += has ? 1U : 0U;
+                    } else if (inside) {
+                        const i32 want = tile_expects(d, slopes, b.sphere, cam.znear, m == 1U);
+                        missing += want > 0 && !has ? 1U : 0U;
+                        stray += want < 0 && has ? 1U : 0U;
+                    }
+                }
             }
         }
         u32 bins_missing = 0U;
         for (u32 bin = b.bin_lo; bin <= b.bin_hi; ++bin) {
             bins_missing += grid_bin_has(&g, bin, j) ? 0U : 1U;
         }
-        NTEST_LOG("light %u (sorted %u): tiles [%u, %u] x [%u, %u], bins [%u, %u]: %u tiles "
-                  "missing, %u stray, %u bins missing",
+        NTEST_LOG("light %u (sorted %u): tiles [%u, %u] x [%u, %u], bins [%u, %u]: in %u tiles "
+                  "for opaque surfaces, %u for blended; %u missing, %u stray, %u bins missing",
                   i, j, b.tile_lo[0], b.tile_hi[0], b.tile_lo[1], b.tile_hi[1], b.bin_lo, b.bin_hi,
-                  missing, stray, bins_missing);
+                  kept[0], kept[1], missing, stray, bins_missing);
         NTEST_EXPECT_EQ_UINT(missing, 0U);
         NTEST_EXPECT_EQ_UINT(stray, 0U);
         NTEST_EXPECT_EQ_UINT(bins_missing, 0U);
+        if (i == 3U) {
+            // The camera's light reaches no surface, and every blended one
+            // near the camera.
+            NTEST_EXPECT_EQ_UINT(kept[0], 0U);
+            NTEST_EXPECT_EQ_UINT(kept[1], g.tiles_x * g.tiles_y);
+        } else {
+            // The others light some of their tiles' surfaces, not all.
+            const u32 rect =
+                (b.tile_hi[0] - b.tile_lo[0] + 1U) * (b.tile_hi[1] - b.tile_lo[1] + 1U);
+            NTEST_EXPECT_GT_UINT(kept[0], 0U);
+            NTEST_EXPECT_LT_UINT(kept[0], rect);
+        }
     }
     // Bins nearer or farther than every light are empty.
     u32 nonempty_outside = 0U;

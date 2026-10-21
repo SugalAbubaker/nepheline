@@ -300,6 +300,43 @@ vec4 vis_light_sphere(vec3 position, vec3 direction, float range, uint type, flo
     return vec4(position, range);
 }
 
+// The light grid's bounds are grown by this fraction so that a pixel inside
+// a light's reach is never binned or tiled outside it by rounding: the
+// distances, rectangles and positions of the pixels and of the lights are
+// computed differently.
+#define VIS_LIGHT_SLACK 1e-4
+
+// The box around a light tile's part of the view between the view
+// distances dist.x and dist.y (0 < x <= y), view space (`lo`, `hi`).
+// `slopes` bound the tile's rays: x / -z in .x (lower) and .z (upper), y / -z
+// in .y and .w. The box is grown by VIS_LIGHT_SLACK of its largest
+// coordinate, so that a surface point at a distance the tile's depths bound
+// lies inside it however its position was rounded.
+void vis_tile_box(vec4 slopes, vec2 dist, out vec3 lo, out vec3 hi)
+{
+    const vec4 a = abs(slopes);
+    const float grow = VIS_LIGHT_SLACK * dist.y * (1.0 + max(max(a.x, a.y), max(a.z, a.w)));
+    lo = vec3(min(slopes.xy * dist.x, slopes.xy * dist.y), -dist.y) - grow;
+    hi = vec3(max(slopes.zw * dist.x, slopes.zw * dist.y), -dist.x) + grow;
+}
+
+// Whether a view-space sphere (w the radius) meets the box [lo, hi].
+bool vis_box_meets_sphere(vec3 lo, vec3 hi, vec4 sphere)
+{
+    const vec3 d = max(max(lo - sphere.xyz, sphere.xyz - hi), vec3(0.0));
+    return dot(d, d) <= sphere.w * sphere.w;
+}
+
+// Whether a view-space sphere meets the box around a light tile's part of
+// the view between the view distances dist.x and dist.y (vis_tile_box).
+bool vis_tile_meets_sphere(vec4 slopes, vec2 dist, vec4 sphere)
+{
+    vec3 lo;
+    vec3 hi;
+    vis_tile_box(slopes, dist, lo, hi);
+    return vis_box_meets_sphere(lo, hi, sphere);
+}
+
 // Whether a rectangle (UV) at a nearest depth lies behind everything the
 // hierarchical depth records there. The HZB's mip 0 is half the screen,
 // each texel the farthest (smallest, reverse-Z) depth of its 2 x 2

@@ -41,7 +41,7 @@ NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches 
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightData) == 64U, "NphRenderLightData matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphRenderLightGrid) == 56U, "NphRenderLightGrid matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderLightGrid) == 64U, "NphRenderLightGrid matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphRenderViewData, light_grid) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphRenderViewData, tlas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");

@@ -273,6 +273,10 @@ NPH_SHARED_STRUCT(NphVisViewData)
                             // 16), then its tiles (x0 | y0 << 16, x1 | y1 << 16)
     u64 light_staged;       // NphRenderLightData[]: those lights, camera relative, unsorted
     u64 light_rects;        // uvec2[]: their tiles, sorted like the grid's locals
+    u64 light_depths;       // uvec2[] per light tile, row by row (vis_hzb.comp): x the bits of
+                            // its surfaces' farthest (least) depth, NPH_VIS_NO_SURFACE for
+                            // none; y their nearest's, bit 31 set where the background shows
+                            // (reverse-Z depths are positive, below 2: bit 31 is free)
     u32 instance_count;     // slots the instance cull walks
     u32 max_cull_meshlets;
     u32 max_deferred;
@@ -297,6 +301,10 @@ NPH_SHARED_STRUCT(NphVisViewData)
 // The ambient occlusion's index on a frame without it: the resolve's
 // (NphVisPush.arg2) and the depth pyramid's (arg4).
 #define NPH_VIS_NO_AO 0xFFFFFFFFU
+
+// A light tile without surfaces: the farthest depth of none
+// (NphVisViewData.light_depths).
+#define NPH_VIS_NO_SURFACE 0xFFFFFFFFU
 
 NPH_SHARED_STRUCT(NphVisPush)
 {

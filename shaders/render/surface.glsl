@@ -32,6 +32,9 @@
 // meet. A light skipped there contributes exactly nothing: its windowed
 // falloff or its cone is zero at the pixel. A shader that always has the
 // grid defines NPH_SURFACE_GRID_LIGHTS and leaves the reference's loop out.
+// The tiles' masks are culled against the depths of the tile's opaque
+// surfaces (the visibility buffer's); a shader that draws others in front
+// of them defines NPH_SURFACE_GRID_TILES(g) as the grid's tiles_blended.
 // Each invocation walks its own lights: on the reference GPU, invocations
 // of a subgroup that load the same light share the load anyway, and
 // walking the subgroup's lights together (Drobot 2017) measured slower
@@ -66,6 +69,9 @@
 
 #ifndef NPH_SURFACE_SAMPLE
 #error "define NPH_SURFACE_SAMPLE(tex, smp, s) before including surface.glsl"
+#endif
+#ifndef NPH_SURFACE_GRID_TILES
+#define NPH_SURFACE_GRID_TILES(g) (g).tiles
 #endif
 
 // What shading needs to know about a point of a surface.
@@ -242,7 +248,7 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
     const uint last = range >> 16u;
     const uvec2 tile = uvec2(pixel) / uint(NPH_RENDER_LIGHT_TILE);
     const uint at = tile.y * g.tiles_x + tile.x;
-    WordsRef tiles = WordsRef(g.tiles);
+    WordsRef tiles = WordsRef(NPH_SURFACE_GRID_TILES(g));
     LightsRef locals = LightsRef(g.locals);
     if (first <= last) {
         for (uint w = first >> 5u; w <= (last >> 5u); ++w) {
@@ -250,9 +256,9 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
             while (bits != 0u) {
                 const uint b = findLSB(bits);
                 bits &= bits - 1u;
-                // Most of the lights a pixel's bin and tile hand it do not
-                // reach it (Bistro: 11.8 a pixel, 5.0 in range): the range
-                // test first, from the position alone (w: 1 / range^2).
+                // Some of the lights a pixel's bin and tile hand it do not
+                // reach it (Bistro's street: 5.7 a pixel, 5.0 in range): the
+                // range test first, from the position alone (w: 1 / range^2).
                 const vec4 at_light = locals.l[w * 32u + b].position;
                 const vec3 to_light = at_light.xyz - p.position;
                 if (dot(to_light, to_light) * at_light.w < 1.0) {

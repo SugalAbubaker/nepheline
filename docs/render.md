@@ -433,14 +433,15 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 |---|---|
 | `vis clear` | clears the visibility buffer and the counters |
 | `vis scatter` | applies the frame's instance updates |
-| `vis light updates`, `vis lights`, `vis light bins`, `vis light tiles` | the light grid (below), from the light table; nothing here reads the visibility buffer |
+| `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
 | `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
-| `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, and the ambient occlusion's depths) |
+| `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
-| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests and the occlusion's depths there) |
+| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
+| `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice, and the denoise (below) |
@@ -661,7 +662,7 @@ Rendering", SIGGRAPH 2017):
 | `vis light updates` | the frame's changed lights into the table |
 | `vis lights` | every light made camera relative; directional and unlimited lights to the global list; the others bounded by the sphere around what they reach (a spot light's cone sphere, Wronski 2017), kept when it meets the frustum, given the bins of their nearest and farthest distance and the tiles of their clipped screen rectangle (Mara & McGuire 2013) |
 | `vis light bins` | one workgroup: a counting sort of the kept lights by nearest bin into the grid's local list, and each bin's range of sorted lights that may reach it |
-| `vis light tiles` | a bit per light and 16-pixel tile, a word of 32 lights at a time, after a block test per 8 × 8 tiles |
+| `vis light tiles` | once the frame's depths are final: a bit per light and 16-pixel tile, a word of 32 lights at a time, after a block test per 8 × 8 tiles; a mask for the opaque surfaces, culled against the tile's depth bounds, and one for blended surfaces |
 
 The 1,024 distance bins are spaced evenly in log2 distance over 20
 octaves from the near plane; a bin's range runs from the first sorted
@@ -672,16 +673,47 @@ invocation on its own (walking the subgroup's lights together, as Drobot
 does, measured slower on the RTX 3060 Ti). The bins and tiles are
 conservative, so a light they hand a pixel is first tested against the
 pixel's distance from its position alone (one 16-byte read), and only a
-light within range is read whole and evaluated. In Bistro's street the
-grid hands each pixel 11.8 lights, of which 5.0 are within range; the
-test took its resolve from 3.87 to 3.58 ms, and the 4,000 lamps' from
-3.16 to 2.88 ms. Culling is exact: a light left
+light within range is read whole and evaluated. When the grid handed
+each pixel of Bistro's street 11.8 lights, 5.0 of them within range (before
+the tiles' depth bounds, below), the test took its resolve from 3.87 to
+3.58 ms, and the 4,000 lamps' from 3.16 to 2.88 ms. Culling is exact: a light left
 out contributes zero at the pixel (its windowed falloff, or its cone), the
 bounds carrying a 10^-4 slack for rounding; 300 lights around and behind
 the camera give the image of lighting every pixel with every light, bit
 for bit. `NPH_RENDER_VIS_NO_LIGHT_GRID` makes every light global, for such
 comparisons. A view holds at most 4,096 lights (`max_lights`). Blended
-surfaces walk the same grid per fragment.
+surfaces walk the same grid per fragment, with tile masks of their own.
+
+The tile masks are culled against what each tile shows (the tile depth
+bounds of Harada, McKee & Yang, "Forward+", Eurographics 2012). The depth
+pyramid's passes, which read every pixel's final depth anyway, keep each
+16-pixel tile's nearest and farthest surface depths and whether the
+background shows (shared-memory atomics per workgroup of 2 × 2 tiles; a
+subgroup reduction instead, with each tile's blocks in subgroups of their
+own, measured 0.008 ms slower in the pass for its memory order). Once both
+phases have drawn, `vis light tiles` keeps a light in a tile's mask for
+opaque surfaces only where the sphere around its reach meets the box
+around the tile's part of the view between those two distances (Olsson &
+Assarsson, "Tiled Shading", JGT 2011, bound tiles by such boxes); a tile
+without surfaces keeps none. A second mask serves blended surfaces, which
+lie anywhere in front of the opaque ones: the box runs from the near plane
+to the farthest surface, and where the background shows the tile keeps
+every light whose rectangle covers it. Forward-drawn surfaces walk that
+mask (`NPH_SURFACE_GRID_TILES`). The box carries the grid's 10^-4 slack,
+so a light left out reaches no surface of the tile and the image does not
+change, bit for bit (the image test above). The lights a pixel tests fell
+from 11.8 to 5.7 in Bistro's street (5.0 within range), from 10.8 to 4.8
+on the terrace (4.4) and from 8.8 to 3.1 at the hedge (2.8). The resolve
+took 3.34 ms against 3.53 in the street, 3.25 against 3.45 on the terrace
+and 2.84 against 3.02 at the hedge, for 0.03 ms more in `vis hzb 0` and
+0.01 ms more in `vis light tiles`: the frame 0.14 ms less. The 4,096
+lamps' frame took 4.80 ms against 4.95, its masks 0.18 ms against 0.09: a
+light's record is read only by the blocks of tiles its rectangle reaches.
+A frame without local lights in view skips the bounds (the pyramid's pass
+costs what it did). Scenes that make no use of the grid moved by up to
+0.06 ms with the masks' buffers' allocation alone, which a dummy
+allocation of the same size reproduced: where later resources land in
+memory, not work.
 
 Measured and not kept: the light terms rearranged exactly (the range
 test's vector reused, one reciprocal square root for the direction and

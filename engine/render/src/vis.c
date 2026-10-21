@@ -47,7 +47,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 848U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 856U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -304,6 +304,7 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_image_destroy(dev, v->hzb);
     nph_gpu_buffer_destroy(dev, v->hzb_dirty);
     nph_gpu_buffer_destroy(dev, v->light_tiles);
+    nph_gpu_buffer_destroy(dev, v->light_depths);
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
     }
@@ -358,7 +359,7 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t, 
 // ---------------------------------------------------------------------------
 
 // Keeps what is sized by the target the size it needs: the light tiles'
-// masks, and the HZB, whose mip 0 is half the target, rounded up, with a
+// masks and depths, and the HZB, whose mip 0 is half the target, rounded up, with a
 // full chain down to 1 x 1 (vis_hzb_occluded relies on the last mip
 // covering everything); Vulkan halves each later mip rounding down, which
 // vis_hzb.comp's footprints follow.
@@ -371,21 +372,28 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     nph_gpu_image_destroy(r->dev, v->hzb); // deferred past the frames in flight
     nph_gpu_buffer_destroy(r->dev, v->hzb_dirty);
     nph_gpu_buffer_destroy(r->dev, v->light_tiles);
+    nph_gpu_buffer_destroy(r->dev, v->light_depths);
     v->hzb = NPH_GPU_IMAGE_NULL;
     v->hzb_dirty = NPH_GPU_BUFFER_NULL;
     v->light_tiles = NPH_GPU_BUFFER_NULL;
+    v->light_depths = NPH_GPU_BUFFER_NULL;
     v->hzb_valid = 0;
     v->prev_frame = 0U;
     v->light_tiles_x = (width + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
     v->light_tiles_y = (height + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
     NphGpuBufferDesc ld;
     memset(&ld, 0, sizeof ld);
-    ld.size = (u64)v->light_tiles_x * v->light_tiles_y * v->light_words * sizeof(u32);
+    const u64 tiles = (u64)v->light_tiles_x * v->light_tiles_y;
+    // The masks for opaque surfaces, then for blended ones.
+    ld.size = 2U * tiles * v->light_words * sizeof(u32);
     // A transfer source too: the render tests read the grid back.
     ld.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
     ld.memory = NPH_GPU_MEMORY_DEVICE;
     ld.name = "vis light tiles";
     NPH_TRY(nph_gpu_buffer_create(r->dev, &ld, &v->light_tiles));
+    ld.size = tiles * 2U * sizeof(u32);
+    ld.name = "vis light depths";
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &ld, &v->light_depths));
     NphGpuImageDesc d;
     memset(&d, 0, sizeof d);
     d.format = RENDER_HZB_FORMAT;
@@ -566,6 +574,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->light_visible = work + ll->visible;
     vd->light_staged = work + ll->staged;
     vd->light_rects = work + ll->rects;
+    vd->light_depths = nph_gpu_buffer_address(dev, v->light_depths);
     vd->light_slots = r->light_pool.bump;
     vd->light_tiles_y = v->light_tiles_y;
     NphRenderLightGrid *g = render_frame_at(r, r->layout.light_grid_offset);
@@ -574,6 +583,8 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     g->locals = work + ll->locals;
     g->zbins = work + ll->zbins;
     g->tiles = nph_gpu_buffer_address(dev, v->light_tiles);
+    g->tiles_blended =
+        g->tiles + (u64)v->light_tiles_x * v->light_tiles_y * v->light_words * (u64)sizeof(u32);
     g->counts = vd->counters + offsetof(NphVisCounters, lights_global);
     g->znear = view->camera.znear;
     g->zbin_scale = (f32)NPH_RENDER_ZBINS / (f32)NPH_RENDER_ZBIN_OCTAVES;
@@ -1028,9 +1039,11 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
         return NPH_RESULT_FULL;
     }
     nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    // The counters: the local lights' count (the light tiles' depths), and
+    // in phase 1 the full rebuild's flag.
+    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     if (phase == 1U) {
         nph_gpu_rg_read_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_SHADER_READ);
-        nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     }
     // Mip 0 requests the virtual shadow map's pages, and writes the ambient
     // occlusion's depths (vis_hzb.comp).
@@ -1038,12 +1051,15 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
     if (r->ao.frame_active) {
         nph_gpu_rg_write_image(p, r->ao.frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 2U);
     }
+    // And bounds the light tiles' depths.
+    nph_gpu_rg_write_buffer(p, f->light_depths, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_image(p, f->hzb, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, NPH_GPU_ALL_MIPS);
     return NPH_RESULT_OK;
 }
 
-// The light grid: the frame's light updates, then the lights in view,
-// their bins, and their tiles. Nothing here reads the visibility buffer.
+// The light grid: the frame's light updates, then the lights in view and
+// their bins. Nothing here reads the visibility buffer; the tiles' masks
+// wait for the frame's depths (declare_light_tiles).
 static NphResult declare_lights(NphGpuRenderGraph *graph, NphRenderer *r)
 {
     const VisFrame *f = &r->vis.frame;
@@ -1069,13 +1085,23 @@ static NphResult declare_lights(NphGpuRenderGraph *graph, NphRenderer *r)
     nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->light_grid, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_SHADER_WRITE);
-    p = add_pass(graph, r, "vis light tiles", NPH_GPU_RG_PASS_COMPUTE, light_tiles_execute);
+    return NPH_RESULT_OK;
+}
+
+// The light tiles' masks, culled against the depths the depth pyramid's
+// passes bound (vis_light_tiles.comp): after both phases.
+static NphResult declare_light_tiles(NphGpuRenderGraph *graph, NphRenderer *r)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphGpuRgPass *p =
+        add_pass(graph, r, "vis light tiles", NPH_GPU_RG_PASS_COMPUTE, light_tiles_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
     nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
     nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, f->light_grid, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, f->light_depths, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, f->light_tiles, NPH_GPU_RG_USE_SHADER_WRITE);
     return NPH_RESULT_OK;
 }
@@ -1218,7 +1244,8 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
         return NPH_RESULT_FULL;
     }
     NPH_TRY(declare_raster(graph, r, g, 1U));
-    return declare_hzb(graph, r, 1U);
+    NPH_TRY(declare_hzb(graph, r, 1U));
+    return declare_light_tiles(graph, r);
 }
 
 NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
@@ -1317,6 +1344,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->lights = nph_gpu_rg_import_buffer(graph, v->lights);
     f->light_grid = nph_gpu_rg_import_buffer(graph, v->light_grid);
     f->light_tiles = nph_gpu_rg_import_buffer(graph, v->light_tiles);
+    f->light_depths = nph_gpu_rg_import_buffer(graph, v->light_depths);
     if (!v->mesh_shaders) {
         f->draws = nph_gpu_rg_import_buffer(graph, v->draws);
         f->index_pool = nph_gpu_rg_import_buffer(graph, v->index_pool);
@@ -1335,7 +1363,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->clusters = g.clusters;
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
-        nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles)) {
+        nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles) ||
+        nph_gpu_rg_buffer_is_null(f->light_depths)) {
         NPH_PROFILE_END();
         return NPH_RESULT_FULL;
     }

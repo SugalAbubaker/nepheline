@@ -106,6 +106,15 @@ NphVec4 nph_render_ref_vis_project_sphere_clipped(NphVec3 c, f32 r, f32 p00, f32
 NphVec4 nph_render_ref_vis_light_sphere(NphVec3 position, NphVec3 direction, f32 range, u32 type,
                                         f32 cos_outer, f32 sin_outer);
 
+// vis_tile_meets_sphere without its slack: the radius of a view-space sphere
+// (xyz centre, w radius) minus its distance to the box around a light
+// tile's part of the view between the view distances `near_dist` and
+// `far_dist` (0 < near <= far), whose rays' x / -z the tile bounds by
+// slopes.x and slopes.z, and y / -z by slopes.y and slopes.w. The sphere
+// meets the box when it is >= 0.
+f64 nph_render_ref_vis_tile_sphere_margin(NphVec4 slopes, f32 near_dist, f32 far_dist,
+                                          NphVec4 sphere);
+
 // nph_zbin (render_common.glsl): the light grid's distance bin of view
 // distance `z`: floor(log2(z / znear) * scale) clamped to the bins.
 // `margin` receives the distance, in bins, of the unclamped value to the

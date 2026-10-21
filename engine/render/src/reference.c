@@ -439,6 +439,27 @@ NphVec4 nph_render_ref_vis_light_sphere(NphVec3 position, NphVec3 direction, f32
                     (f32)((f64)position.z + (f64)direction.z * t), (f32)radius);
 }
 
+f64 nph_render_ref_vis_tile_sphere_margin(NphVec4 slopes, f32 near_dist, f32 far_dist,
+                                          NphVec4 sphere)
+{
+    const f64 d0 = (f64)near_dist;
+    const f64 d1 = (f64)far_dist;
+    // x = s d over the slopes and distances: the extremes at the corners.
+    const f64 lx = (f64)slopes.x * (slopes.x < 0.0F ? d1 : d0);
+    const f64 ly = (f64)slopes.y * (slopes.y < 0.0F ? d1 : d0);
+    const f64 hx = (f64)slopes.z * (slopes.z < 0.0F ? d0 : d1);
+    const f64 hy = (f64)slopes.w * (slopes.w < 0.0F ? d0 : d1);
+    const f64 lo[3] = {lx, ly, -d1};
+    const f64 hi[3] = {hx, hy, -d0};
+    const f64 c[3] = {(f64)sphere.x, (f64)sphere.y, (f64)sphere.z};
+    f64 d2 = 0.0;
+    for (u32 k = 0; k < 3U; ++k) {
+        const f64 e = c[k] < lo[k] ? lo[k] - c[k] : (c[k] > hi[k] ? c[k] - hi[k] : 0.0);
+        d2 += e * e;
+    }
+    return (f64)sphere.w - sqrt(d2);
+}
+
 u32 nph_render_ref_zbin(f32 z, f32 znear, f32 scale, f64 *margin)
 {
     const f64 x = log2((f64)z / (f64)znear) * (f64)scale;

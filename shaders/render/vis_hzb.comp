@@ -40,6 +40,13 @@
 // and column's; and each 2 x 2 block's average, as ao_depth.comp averages a
 // mip's blocks, which then builds the coarser mips from mip 1. The depths are
 // read here anyway, and the same two passes cover the frame's final depth.
+//
+// Modes 0 and 2 also bound the depths of each light tile (view.light_depths:
+// a workgroup covers 2 x 2 of them), which the light tiles' masks are culled
+// against (vis_light_tiles.comp): the farthest and nearest depths of the
+// tile's surfaces, and whether the background shows. Pixels past the target
+// are none of a tile's. A frame without local lights in view skips them: no
+// tile's mask holds a light, so nothing reads them.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -51,6 +58,16 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+#if NPH_RENDER_LIGHT_TILE != 16
+#error "a workgroup covers 2 x 2 light tiles"
+#endif
+
+// The workgroup's light tiles' depths, as uint bits (positive floats order
+// as their bits do), and a bit per tile where the background shows.
+shared uint s_far[4];
+shared uint s_near[4];
+shared uint s_background;
 
 float source_depth(ivec2 p)
 {
@@ -133,6 +150,16 @@ void main()
             return;
         }
     }
+    // The same for every invocation (the lights' pass counted them).
+    const bool light_depths =
+        VisCountersRef(VisViewRef(pc.view).v.counters).c.lights_local != 0u;
+    if (light_depths && gl_LocalInvocationIndex < 4u) {
+        s_far[gl_LocalInvocationIndex] = NPH_VIS_NO_SURFACE;
+        s_near[gl_LocalInvocationIndex] = 0u;
+    }
+    if (light_depths && gl_LocalInvocationIndex == 0u) {
+        s_background = 0u;
+    }
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 src = ivec2(VisViewRef(pc.view).v.viewport.xy);
     const ivec2 dst = (src + 1) / 2;
@@ -168,6 +195,43 @@ void main()
             }
             imageStore(nph_images_2d[nonuniformEXT(pc.arg2)], p,
                        vec4(0.25 * (d.x + d.y + d.z + d.w), 0.0, 0.0, 0.0));
+        }
+    }
+    // The light tiles' depths: the block lies in one tile (blocks start on
+    // even pixels), its clamped pixels in the same one.
+    if (light_depths) {
+        barrier();
+        if (inside) {
+            const uint tile = (gl_LocalInvocationID.y >> 3u) * 2u + (gl_LocalInvocationID.x >> 3u);
+            float far = 2.0;
+            float near = 0.0;
+            bool background = false;
+            for (int k = 0; k < 4; ++k) {
+                if (block[k] > 0.0) {
+                    far = min(far, block[k]);
+                    near = max(near, block[k]);
+                } else {
+                    background = true;
+                }
+            }
+            if (near > 0.0) {
+                atomicMin(s_far[tile], floatBitsToUint(far));
+                atomicMax(s_near[tile], floatBitsToUint(near));
+            }
+            if (background) {
+                atomicOr(s_background, 1u << tile);
+            }
+        }
+        barrier();
+        if (gl_LocalInvocationIndex < 4u) {
+            const uint k = gl_LocalInvocationIndex;
+            const uvec2 tile = gl_WorkGroupID.xy * 2u + uvec2(k & 1u, k >> 1u);
+            const uvec2 tiles = (uvec2(src) + uint(NPH_RENDER_LIGHT_TILE) - 1u) /
+                                uint(NPH_RENDER_LIGHT_TILE);
+            if (all(lessThan(tile, tiles))) {
+                VisUvec2Ref(VisViewRef(pc.view).v.light_depths).v[tile.y * tiles.x + tile.x] =
+                    uvec2(s_far[k], s_near[k] | (((s_background >> k) & 1u) << 31u));
+            }
         }
     }
     if (!inside) {

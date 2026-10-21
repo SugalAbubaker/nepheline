@@ -14,6 +14,10 @@
 #endif
 
 #define NPH_SURFACE_SAMPLE(tex, smp, s) nph_sample_2d((tex), (smp), (s).uv)
+// With the production path's light grid, the surfaces drawn here lie in
+// front of the visibility buffer's (or of the background): the grid's
+// masks for blended surfaces.
+#define NPH_SURFACE_GRID_TILES(g) (g).tiles_blended
 
 // The production path's blended surfaces read the sun's virtual shadow map
 // where the view has one (vsm_common.glsl); their pipelines are

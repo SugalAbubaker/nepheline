@@ -7,7 +7,20 @@
 // are stored a word at a time over every tile ([word][tile]), so a
 // subgroup's writes are contiguous. Words past the lights in view are left
 // as they were: no bin's range reaches them. Dispatched indirectly with the
-// arguments vis_light_bins.comp writes.
+// arguments vis_light_bins.comp writes, once the frame's depths are final.
+//
+// A light whose rectangle covers the tile is kept for the tile's opaque
+// surfaces only where the sphere around its reach (vis_light_sphere) meets
+// the box around the tile's part of the view between the nearest and the
+// farthest of their distances (the tile's depths, which the depth pyramid's
+// passes bound: vis_hzb.comp), and for blended surfaces, which lie in front
+// of them, between the near plane and the farthest, or anywhere where the
+// background shows (Harada, McKee & Yang, "Forward+: Bringing Deferred
+// Lighting to the Next Level", Eurographics 2012 short papers: the tile's
+// depth bounds; the box after Olsson & Assarsson, "Tiled Shading", JGT
+// 2011). A tile without surfaces keeps none for them. A light left out
+// reaches no point of the tile's surfaces, so it contributes exactly
+// nothing there, as the rectangles and bins already rely on.
 #version 460
 #include "vis_common.glsl"
 
@@ -15,7 +28,8 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 shared uvec2 s_rects[32];
-shared uint s_block; // the word's lights whose rectangles meet the workgroup's block
+shared vec4 s_spheres[32]; // view space, w the radius
+shared uint s_block;       // the word's lights whose rectangles meet the workgroup's block
 
 bool covers(uvec2 r, uvec2 lo_tile, uvec2 hi_tile)
 {
@@ -43,6 +57,15 @@ void main()
         const uvec2 block = gl_WorkGroupID.xy * 8u;
         if (covers(r, block, block + 7u)) {
             atomicOr(s_block, 1u << t);
+            // The sphere, for the lights that may reach the block alone, as
+            // vis_lights.comp bounds it (the range from the record's
+            // 1 / range^2), in view space.
+            const NphRenderLightData l = LightsRef(grid.locals).l[j];
+            const vec4 sphere =
+                vis_light_sphere(l.position.xyz, l.direction.xyz, inversesqrt(l.position.w),
+                                 uint(l.direction.w), l.spot.z, l.spot.w);
+            s_spheres[t] =
+                vec4(mat3(view.v.view) * sphere.xyz, sphere.w * (1.0 + VIS_LIGHT_SLACK));
         }
     }
     barrier();
@@ -50,14 +73,46 @@ void main()
     if (tile.x >= grid.tiles_x || tile.y >= view.v.light_tiles_y) {
         return;
     }
+    const uint at = tile.y * grid.tiles_x + tile.x;
+    const uvec2 depths = VisUvec2Ref(view.v.light_depths).v[at];
+    const bool surfaces = depths.x != NPH_VIS_NO_SURFACE;
+    const bool background = (depths.y >> 31u) != 0u;
+    // The tile's rays (x / -z, y / -z) at its edges, the projection's
+    // sub-pixel offset taken off as the pixels' positions have it.
+    const vec2 extent = vec2(float(NPH_RENDER_LIGHT_TILE)) * view.v.viewport.zw;
+    const vec2 uv0 = vec2(tile) * extent - view.v.jitter.xy;
+    const vec2 s0 = (uv0 * 2.0 - 1.0) / view.v.projection.xy;
+    const vec2 s1 = ((uv0 + extent) * 2.0 - 1.0) / view.v.projection.xy;
+    const vec4 slopes = vec4(min(s0, s1), max(s0, s1));
+    // The distances of the nearest and the farthest surface (znear / depth).
+    const float znear = view.v.projection.z;
+    const vec2 dist =
+        znear / vec2(uintBitsToFloat(depths.y & 0x7FFFFFFFu), uintBitsToFloat(depths.x));
+    // The two boxes once a tile: the opaque surfaces', and the blended ones'
+    // from the near plane (which holds it).
+    vec3 opaque_lo;
+    vec3 opaque_hi;
+    vec3 blended_lo;
+    vec3 blended_hi;
+    vis_tile_box(slopes, dist, opaque_lo, opaque_hi);
+    vis_tile_box(slopes, vec2(znear, dist.y), blended_lo, blended_hi);
     uint left = s_block;
-    uint bits = 0u;
+    uint opaque = 0u;
+    uint blended = 0u;
     while (left != 0u) {
         const uint b = findLSB(left);
         left &= left - 1u;
         if (covers(s_rects[b], tile, tile)) {
-            bits |= 1u << b;
+            const vec4 sphere = s_spheres[b];
+            if (surfaces && vis_box_meets_sphere(opaque_lo, opaque_hi, sphere)) {
+                opaque |= 1u << b;
+                blended |= 1u << b;
+            } else if (background ||
+                       (surfaces && vis_box_meets_sphere(blended_lo, blended_hi, sphere))) {
+                blended |= 1u << b;
+            }
         }
     }
-    VisUintRef(grid.tiles).v[w * grid.tile_count + tile.y * grid.tiles_x + tile.x] = bits;
+    VisUintRef(grid.tiles).v[w * grid.tile_count + at] = opaque;
+    VisUintRef(grid.tiles_blended).v[w * grid.tile_count + at] = blended;
 }

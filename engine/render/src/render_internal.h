@@ -417,6 +417,7 @@ typedef struct VisFrame {
     NphGpuRgBuffer lights;
     NphGpuRgBuffer light_grid;
     NphGpuRgBuffer light_tiles;
+    NphGpuRgBuffer light_depths;
     NphGpuRgBuffer tlas; // the frame's top level, when it traces shadow rays
     // The GPU scene's tables in the graph, for the temporal resolve's motion.
     NphGpuRgBuffer instances;
@@ -458,10 +459,11 @@ typedef struct RenderVis {
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
 
     // The lights: the persistent table, the grid's work buffer, and the
-    // tile masks (sized by the target, with the HZB).
-    NphGpuBuffer lights;     // NphVisLight[max_lights]
-    NphGpuBuffer light_grid; // VisLightLayout
-    NphGpuBuffer light_tiles;
+    // tile masks and depths (sized by the target, with the HZB).
+    NphGpuBuffer lights;       // NphVisLight[max_lights]
+    NphGpuBuffer light_grid;   // VisLightLayout
+    NphGpuBuffer light_tiles;  // u32[2][light_words][tiles]: the opaque, then the blended masks
+    NphGpuBuffer light_depths; // uvec2[tiles] (NphVisViewData.light_depths)
     VisLightLayout light_layout;
     u32 light_tiles_x;
     u32 light_tiles_y;

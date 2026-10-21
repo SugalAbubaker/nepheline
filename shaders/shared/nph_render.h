@@ -182,16 +182,19 @@ NPH_SHARED_STRUCT(NphRenderLightData)
 // vis_light_bins.comp, vis_light_tiles.comp).
 NPH_SHARED_STRUCT(NphRenderLightGrid)
 {
-    u64 globals;    // NphRenderLightData[]: the lights that reach every pixel
-    u64 locals;     // NphRenderLightData[]: the others in view, by nearest distance's bin
-    u64 zbins;      // u32[NPH_RENDER_ZBINS]: first | last << 16, the range of locals that may
-                    // reach the bin (first > last: none)
-    u64 tiles;      // u32[word][tile]: bit b of word w set when local 32 w + b may reach the tile
-    u64 counts;     // u32[2]: the global and the local lights' counts (written on the GPU)
-    f32 znear;      // the projection's near plane
-    f32 zbin_scale; // bins per doubling of the view distance
-    u32 tiles_x;    // tiles per row (NPH_RENDER_LIGHT_TILE pixels square)
-    u32 tile_count; // tiles in all: the stride from one word of a tile to its next
+    u64 globals;       // NphRenderLightData[]: the lights that reach every pixel
+    u64 locals;        // NphRenderLightData[]: the others in view, by nearest distance's bin
+    u64 zbins;         // u32[NPH_RENDER_ZBINS]: first | last << 16, the range of locals that may
+                       // reach the bin (first > last: none)
+    u64 tiles;         // u32[word][tile]: bit b of word w set when local 32 w + b may reach the
+                       // tile's opaque surfaces (the visibility buffer's)
+    u64 tiles_blended; // u32[word][tile]: the same for blended surfaces, which lie anywhere in
+                       // front of them (or of the background)
+    u64 counts;        // u32[2]: the global and the local lights' counts (written on the GPU)
+    f32 znear;         // the projection's near plane
+    f32 zbin_scale;    // bins per doubling of the view distance
+    u32 tiles_x;       // tiles per row (NPH_RENDER_LIGHT_TILE pixels square)
+    u32 tile_count;    // tiles in all: the stride from one word of a tile to its next
 };
 
 // A debug line end point.
