@@ -848,6 +848,24 @@ material's records the same way (`VisClusterRef`, `VisInstanceRef`,
 instructions a pixel against 2,180, the resolve 2.99 ms against 3.05 (two
 traces each).
 
+The surface is filled in the order that ends live ranges soonest: right
+after the barycentrics the facing test, the face normal and the
+position's interpolation (and the radiance cache's lookup, which keys on
+those two), so the clip and world positions end there, and each attribute
+interpolated as soon as it is unpacked; filled at the end, they had stayed
+live across the attributes' decode. The arithmetic is the same. The
+street's variant spills 2,304 bytes a workgroup instead of 3,840, the
+radiance cache's alone 1,792, and the shadow map's without the cache
+holds 64 registers instead of 72; in the street the resolve took 2.83 ms
+against 3.02 to 3.09, its warps 64.5% of the SM's 48 against 61.8% and
+its issue 74% against 71% (GPU traces, two each, interleaved), on the
+terrace 2.83 against 2.97 and at the hedge 2.49 against 2.74. The other
+way: the decode's arithmetic trimmed (the normal through the transform's
+cofactors turned by the mirrored flag, the tangent's and the colour's
+bytes interpolated before scaling) issued about as many instructions, but
+the street's variant spilled 5,888 bytes and the resolve took 3.19 to 3.30
+ms. A change here is judged by its spill as much as by its count.
+
 ### Temporal anti-aliasing
 
 A production view with `NphRenderView.anti_aliasing` set to

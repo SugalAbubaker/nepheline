@@ -206,46 +206,49 @@ void main()
         const vec4 c1 = view_proj * vec4(w1, 1.0);
         const vec4 c2 = view_proj * vec4(w2, 1.0);
         const VisBarycentrics bary = vis_barycentrics(c0, c1, c2, q, 2.0 * inv_size);
+        const bool mirrored = (cluster.flags & NPH_VIS_CLUSTER_MIRRORED) != 0u;
+        // What needs the clip and world positions first, so that they end
+        // here rather than stay live across the attributes' decode: this
+        // shader runs at its register limit, and what does not fit spills
+        // to shared memory (docs/render.md "Shading").
+        NphSurface s;
+        s.front_facing = vis_front_facing(c0, c1, c2, mirrored);
         const mat3 world = mat3(w0, w1, w2);
+        s.position = world * bary.b;
+        s.position_dx = world * bary.ddx;
+        s.position_dy = world * bary.ddy;
+        s.face_normal = normalize(cross(w1 - w0, w2 - w0));
         if (k_gi) {
             // The point and the triangle's normal as the cache's update
-            // keys them (gi_update.comp: the same arithmetic, as below).
-            g_gi_cell = vis_gi_cell(GiViewRef(rview.v.gi), p, world * bary.b,
-                                    normalize(cross(w1 - w0, w2 - w0)));
+            // keys them (gi_update.comp: the same arithmetic).
+            g_gi_cell = vis_gi_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
         }
 
+        // Each attribute interpolated as soon as it is unpacked.
         AttribsRef attribs = AttribsRef(mesh.attribs);
         const uvec4 a0 = attribs.a[vtx.x];
         const uvec4 a1 = attribs.a[vtx.y];
         const uvec4 a2 = attribs.a[vtx.z];
         const mat3x2 uvs =
             mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z));
+        s.uv = uvs * bary.b;
+        s.uv_dx = uvs * bary.ddx;
+        s.uv_dy = uvs * bary.ddy;
         const mat3 normals = mat3(nph_oct_decode(unpackSnorm2x16(a0.x)),
                                   nph_oct_decode(unpackSnorm2x16(a1.x)),
                                   nph_oct_decode(unpackSnorm2x16(a2.x)));
+        s.normal = vis_normal_matrix(inst.transform) * (normals * bary.b);
         const vec4 t0 = unpackSnorm4x8(a0.y);
         const vec4 t1 = unpackSnorm4x8(a1.y);
         const vec4 t2 = unpackSnorm4x8(a2.y);
-        const bool mirrored = (cluster.flags & NPH_VIS_CLUSTER_MIRRORED) != 0u;
         // Handedness as the reference's vertex stage sets it: the stored
         // sign, flipped by a mirroring transform.
         const float hand = mirrored ? -1.0 : 1.0;
         const vec3 handedness = vec3(t0.w < 0.0 ? -hand : hand, t1.w < 0.0 ? -hand : hand,
                                      t2.w < 0.0 ? -hand : hand);
-
-        NphSurface s;
-        s.position = world * bary.b;
-        s.position_dx = world * bary.ddx;
-        s.position_dy = world * bary.ddy;
-        s.normal = vis_normal_matrix(inst.transform) * (normals * bary.b);
         s.tangent = vec4(vis_transform_vector(inst.transform, mat3(t0.xyz, t1.xyz, t2.xyz) * bary.b),
                          dot(handedness, bary.b));
-        s.uv = uvs * bary.b;
-        s.uv_dx = uvs * bary.ddx;
-        s.uv_dy = uvs * bary.ddy;
         s.color = mat3x4(unpackUnorm4x8(a0.w), unpackUnorm4x8(a1.w), unpackUnorm4x8(a2.w)) * bary.b;
-        s.front_facing = vis_front_facing(c0, c1, c2, mirrored);
-        s.face_normal = normalize(cross(w1 - w0, w2 - w0));
         s.pixel = vec2(p) + 0.5;
         s.depth = vis_depth(v);
 
