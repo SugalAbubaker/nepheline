@@ -108,6 +108,8 @@ nph_add_shaders(nph_shaders_render
         render/vis_debug_line.frag
         # The culling math for the render tests (render/reference.h twins).
         render/vis_math_test.comp
+        # The depth pyramid's block requests against each pixel's (render tests).
+        render/vsm_request_test.comp
 )
 
 # Shaders of the GPU benchmarks (benchmarks/gpu).

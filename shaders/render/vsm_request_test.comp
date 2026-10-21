@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+// The depth pyramid's page requests for blocks of pixels (vsm_block.glsl)
+// against every pixel's own (vsm_request), for the render tests
+// (Vsm.block_requests_are_each_pixels): each invocation a 2 x 2 block of a
+// depth image, as vis_hzb.comp has them, the block's requests going in the
+// view's bitmask and its pixels' own in the reference. Not used by the
+// renderer.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
+#include "vis_common.glsl"
+#define NPH_VSM_REQUESTS
+#include "vsm_common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant, scalar) uniform Push { NphVsmTestPush pc; };
+
+#include "vsm_block.glsl"
+
+NPH_BUFFER_REF(VsmTestDepthsRef) { float d[]; };
+
+void main()
+{
+    const ivec2 size = ivec2(pc.width, pc.height);
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 last = size - 1;
+    const ivec2 lo = min(p * 2, last);
+    // Past the image: no pixels (but a part in the subgroup's requests).
+    vec4 depth = vec4(0.0);
+    if (all(lessThan(p, (size + 1) / 2))) {
+        for (int k = 0; k < 4; ++k) {
+            const ivec2 q = min(lo + ivec2(k & 1, k >> 1), last);
+            depth[k] = VsmTestDepthsRef(pc.depths).d[q.y * size.x + q.x];
+        }
+    }
+    const vec2 scale = 2.0 / vec2(size);
+    VsmViewRef r = VsmViewRef(pc.view);
+    vsm_request_block(r, lo, last, scale, depth);
+    for (int k = 0; k < 4; ++k) {
+        if (depth[k] > 0.0) {
+            const ivec2 q = min(lo + ivec2(k & 1, k >> 1), last);
+            const uint request = vsm_request(r, vsm_ray_point(r, vsm_ndc(q, scale), depth[k]));
+            if (request != VSM_NONE) {
+                vsm_set_request(pc.reference, request);
+            }
+        }
+    }
+}

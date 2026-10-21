@@ -312,7 +312,7 @@ something it shows changes.
 |---|---|
 | `vsm clear` | the frame's counters and page bitmasks to zero |
 | `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in every level (an invocation per update and level), a row of words at a time |
-| `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (`light_from_clip`), and the pages its shading may read set in the requests bitmask |
+| `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (the view's rays), and the pages its shading may read set in the requests bitmask, a 2 × 2 block's at once where it can (`vsm_block.glsl`) |
 | `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
 | `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
@@ -326,9 +326,36 @@ something it shows changes.
 does not hold its point with a margin, the next that does (a narrow view
 from afar), and there the page that holds the point and any other within
 2 texels of it (the shading's offset along the normal, and slack): at
-most 2 × 2 pages. Mostly every pixel of a subgroup needs the same page,
-which one invocation sets; otherwise, round after round, the lowest page
-any invocation still needs is set by one of those that need it.
+most 2 × 2 pages. The depth pyramid's invocations each read a 2 × 2 block
+of pixels, and where the four lie on one surface at one level the block
+asks at once: the rectangle around their points, widened by the margin,
+takes the same level, window test and pages as each point's own (all
+three only grow with a point's coordinates and distance), so where it
+spans one page or two it holds exactly the four's pages (the pixel
+nearest each end takes the page there). Near a page's corner (where the
+rectangle spans four, one of which no pixel may need), where the four's
+levels differ, where the background shows, and across an edge between
+surfaces, each pixel asks for its own: the subgroup gathers those pixels,
+four from each invocation that has them, into consecutive invocations
+with shuffles and computes them together, where one invocation going
+round its four would hold the subgroup up (shuffles, not shared memory: a
+barrier in control flow some subgroups skip broke on lavapipe). Each
+distinct request then goes to an invocation of its own, round after
+round the lowest any invocation still has, and every invocation sets the
+one it was given, their atomics together. A pixel's point comes from the
+view's rays: the infinite reverse-Z projection makes it (ray_x x + ray_y y
++ ray_o) / depth for NDC x and y, fewer operations than the homogeneous
+matrix the rays replace, and its level from the squared distance's
+exponent, without a root or a logarithm. Every quantity the block and its
+pixels compare goes through the same precise functions, so they agree to
+the bit, and a test holds the blocks' requests to every pixel's own over
+a depth image built to take every way through them (page edges and
+corners, level boundaries, the background, edges between surfaces,
+foliage-like noise, points beyond their level's window). In Bistro's
+street the first pyramid pass went from 0.382 to 0.307 ms (278 to 175
+instructions a pixel; it now runs at 73% of DRAM bandwidth), the second
+from 0.045 to 0.042 ms, with the pages requested the same within the
+frame's jitter.
 
 **Caching.** A drawn page stays drawn. A caster's change dirties exactly
 the pages under its bounding sphere, old and new, since a shadow map's
@@ -635,8 +662,9 @@ hid. Measured and not kept: reading each 2 × 2 block's depths with one
 gather of the visibility buffer's sampled R32G32 view instead of four
 64-bit storage loads (what took the temporal resolve's depth search from
 0.16 to 0.09 ms): Bistro's first pyramid 0.320 ms against 0.315, the 4K
-field's 0.154 against 0.159. Bistro's pass is the shadow map's page
-requests (about 0.14 ms) as much as the read.
+field's 0.154 against 0.159. Bistro's pass was then the shadow map's
+page requests (about 0.14 ms) as much as the read; the block requests
+(Shadows) have since cut them to about 0.03 ms.
 
 **The resolve** decodes each pixel's cluster and triangle, fetches the
 three vertices, and rebuilds the attributes from perspective-correct
@@ -1205,7 +1233,12 @@ hidden), the nearest depth 43, the history's dither 33. In the occlusion
 (672): its steps 377, 42 a sample, as the lanes of a subgroup sample
 different mips (the step's length scales with each pixel's radius), so
 the subgroup runs both `ao_depth_at` paths; the denoise's 25 taps 228,
-their plane test 118 of it.
+their plane test 118 of it. In the depth pyramid's first pass (288 in its
+trace): the shadow map's page requests 187 (removed, 0.108 ms less), the
+light tiles' depth bounds 29, the occlusion's depths 26; the pyramid
+alone, 57, takes 0.162 ms, its read of the visibility buffer bound by the
+bus. The requests now ask for a 2 × 2 block at once (Shadows): 74 a
+pixel.
 
 Measured and not kept:
 

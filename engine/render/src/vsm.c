@@ -44,7 +44,7 @@ NPH_STATIC_ASSERT(sizeof(NphVsmPhys) == 8U, "NphVsmPhys matches its GLSL layout"
 NPH_STATIC_ASSERT(sizeof(NphVsmLevel) == 48U, "NphVsmLevel matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 112U, "NphVsmCounters matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 144U, "NphVsmArgs matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1056U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1040U, "NphVsmView matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_ENTRIES == NPH_VSM_WINDOW * NPH_VSM_WINDOW, "a window's entries");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_WORDS * 32 == NPH_VSM_LEVEL_ENTRIES, "a level's bitmask");
 NPH_STATIC_ASSERT(NPH_VSM_ROW_WORDS * 32 == NPH_VSM_WINDOW, "a row of a level's bitmask");
@@ -371,9 +371,23 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->axis_u = nph_vec4_from_vec3(u, 0.0F);
     vv->axis_v = nph_vec4_from_vec3(w, 0.0F);
     vv->axis_d = nph_vec4_from_vec3(d, 0.0F);
-    // Light space turns camera-relative space: its rows are the axes.
-    vv->light_from_clip =
+    // Light space turns camera-relative space: its rows are the axes. With
+    // the view's infinite reverse-Z projection (ADR-0008 §2; jitter and lens
+    // shift move only its x and y), the homogeneous point from NDC (x, y,
+    // depth) has w = depth / near and x, y, z free of depth, so the point is
+    // (ray_x x + ray_y y + ray_o) / depth, which the requests rebuild with
+    // fewer operations than the matrix takes.
+    const NphMat4 lfc =
         nph_mat4_mul(nph_mat4_from_mat3(nph_mat3_from_rows(u, w, d)), *inv_view_proj);
+    NPH_ASSERT(nph_f32_abs(lfc.c[2].x) + nph_f32_abs(lfc.c[2].y) + nph_f32_abs(lfc.c[2].z) <=
+               1e-5F *
+                   (nph_f32_abs(lfc.c[3].x) + nph_f32_abs(lfc.c[3].y) + nph_f32_abs(lfc.c[3].z)));
+    NPH_ASSERT(nph_f32_abs(lfc.c[0].w) + nph_f32_abs(lfc.c[1].w) + nph_f32_abs(lfc.c[3].w) <=
+               1e-5F * nph_f32_abs(lfc.c[2].w));
+    const f32 near = 1.0F / lfc.c[2].w;
+    vv->ray_x = nph_vec4(lfc.c[0].x * near, lfc.c[0].y * near, lfc.c[0].z * near, 0.0F);
+    vv->ray_y = nph_vec4(lfc.c[1].x * near, lfc.c[1].y * near, lfc.c[1].z * near, 0.0F);
+    vv->ray_o = nph_vec4(lfc.c[3].x * near, lfc.c[3].y * near, lfc.c[3].z * near, 0.0F);
     const u32 rows = (v->pool_pages + (u32)NPH_VSM_POOL_ROW - 1U) / (u32)NPH_VSM_POOL_ROW;
     vv->pool_scale = nph_vec4(1.0F / (f32)(NPH_VSM_POOL_ROW * NPH_VSM_PAGE),
                               1.0F / (f32)(rows * (u32)NPH_VSM_PAGE), 0.0F, 0.0F);

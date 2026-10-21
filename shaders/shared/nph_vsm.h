@@ -133,9 +133,13 @@ NPH_SHARED_STRUCT(NphVsmView)
     NphVec4 axis_u; // xyz: light space's axes, in camera-relative world space
     NphVec4 axis_v;
     NphVec4 axis_d; // the light's direction of travel
-    // Light space (homogeneous) from a pixel's NDC x, y and depth: the page
-    // requests rebuild each pixel's point with it.
-    NphMat4 light_from_clip;
+    // A pixel's point in light space from its NDC x, y and depth, which the
+    // page requests rebuild each pixel's point with: (ray_x x + ray_y y +
+    // ray_o) / depth, exact for the view's infinite reverse-Z projection
+    // (vsm.c). xyz; w: unused.
+    NphVec4 ray_x;
+    NphVec4 ray_y;
+    NphVec4 ray_o;
     NphVec4 pool_scale; // xy: 1 / the pool's extent in texels; zw: unused
     NphVsmLevel levels[NPH_VSM_LEVELS];
     u64 entries;     // NphVsmEntry[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
@@ -164,6 +168,17 @@ NPH_SHARED_STRUCT(NphVsmView)
     u32 max_meshlets;
     u32 max_draws;
     u32 reset; // nonzero: every page is dropped this frame
+};
+
+// Push constants of vsm_request_test.comp (the render tests): the depth
+// pyramid's requests for blocks of a depth image against each pixel's own.
+NPH_SHARED_STRUCT(NphVsmTestPush)
+{
+    u64 view;      // NphVsmView: the blocks' requests go in its bitmask
+    u64 depths;    // f32[width * height], row by row (0: the background)
+    u64 reference; // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_WORDS]: each pixel's own
+    u32 width;
+    u32 height;
 };
 
 #endif

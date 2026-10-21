@@ -127,25 +127,83 @@ void vsm_set_bit(uint64_t bits, uint bit)
     }
 }
 
-// The pages the shading of a point may read, packed as level | x0 << 4 |
-// y0 << 11 | (x1 > x0) << 18 | (y1 > y0) << 19 (window-relative pages), or
-// VSM_NONE beyond every window: the finest level from the point's distance
-// whose window holds it with a margin, and there its page with any other
-// within the margin (r.v.margin pages: the shading's offset along the
-// normal, and slack), so at most 2 x 2. `ls` is the point in light space,
-// whose length is its distance from the camera (light space only turns the
-// camera-relative one).
+// The requests take every quantity they compare through the functions
+// below (precise, their fused operations explicit), so a pixel's point
+// and what follows from it come out the same to the bit wherever they are
+// computed: one pixel at a time (vsm_request) or a block of four at once
+// (vsm_block.glsl), which relies on it.
+
+// A pixel's NDC from its coordinates, `scale` 2 / the target's extent.
+vec2 vsm_ndc(ivec2 pixel, vec2 scale)
+{
+    precise vec2 ndc = fma(vec2(pixel) + 0.5, scale, vec2(-1.0));
+    return ndc;
+}
+
+// A pixel's point in light space from its NDC and depth (not 0), through
+// the view's rays (nph_vsm.h).
+vec3 vsm_ray_point(VsmViewRef r, vec2 ndc, float depth)
+{
+    precise vec3 l =
+        fma(r.v.ray_y.xyz, vec3(ndc.y), fma(r.v.ray_x.xyz, vec3(ndc.x), r.v.ray_o.xyz));
+    precise vec3 p = l * (1.0 / depth);
+    return p;
+}
+
+// A light-space point's squared distance from the camera times the square
+// of lod_scale (light space only turns camera-relative space), whose level
+// is vsm_level_of_q.
+float vsm_q(VsmViewRef r, vec3 ls)
+{
+    precise float q = dot(ls, ls) * (r.v.lod_scale * r.v.lod_scale);
+    return q;
+}
+
+// The level vsm_level_of picks without slack for a point whose vsm_q is
+// `q`: ceil(log2(sqrt(q))), clamped, from q's exponent e and whether its
+// mantissa is zero, without the root or the logarithm. With q = 2^e (1 +
+// f), log2(sqrt(q)) is (e + log2(1 + f)) / 2, whose ceiling is (e + 1) / 2
+// rounded down for f = 0 and (e + 2) / 2 rounded down otherwise. A level L
+// above 0 thus takes exactly the q above 4^(L - 1).
+int vsm_level_of_q(float q)
+{
+    const uint b = floatBitsToUint(max(q, 1.0));
+    const int e = int(b >> 23u) - 127;
+    return min((e + ((b & 0x7FFFFFu) != 0u ? 2 : 1)) >> 1, NPH_VSM_LEVELS - 1);
+}
+
+// A light-space point's x and y in a level's frame (vsm_level_coords).
+// Increasing in the point's, the scale being positive.
+vec2 vsm_level_xy(VsmViewRef r, int level, vec2 ls)
+{
+    precise vec2 c =
+        fma(ls, vec2(r.v.levels[level].inv_page_size), r.v.levels[level].origin.xy);
+    return c;
+}
+
+// A request for a level's window-relative pages lo to hi (at most one apart
+// each way), packed as level | lo.x << 4 | lo.y << 11 | (hi.x > lo.x) << 18
+// | (hi.y > lo.y) << 19.
+uint vsm_pack_request(int level, ivec2 lo, ivec2 hi)
+{
+    return uint(level) | (uint(lo.x) << 4u) | (uint(lo.y) << 11u) | (uint(hi.x - lo.x) << 18u) |
+           (uint(hi.y - lo.y) << 19u);
+}
+
+// The pages the shading of a point may read, as a packed request
+// (vsm_pack_request), or VSM_NONE beyond every window: the finest level from
+// the point's distance whose window holds it with a margin, and there its
+// page with any other within the margin (r.v.margin pages: the shading's
+// offset along the normal, and slack), so at most 2 x 2. `ls` is the point
+// in light space.
 uint vsm_request(VsmViewRef r, vec3 ls)
 {
     const float m = r.v.margin;
     const float last = float(NPH_VSM_WINDOW) - m;
-    for (int level = vsm_level_of(r, length(ls), 0.0); level < NPH_VSM_LEVELS; ++level) {
-        const vec2 c = vsm_level_coords(r, level, ls).xy;
+    for (int level = vsm_level_of_q(vsm_q(r, ls)); level < NPH_VSM_LEVELS; ++level) {
+        const vec2 c = vsm_level_xy(r, level, ls.xy);
         if (all(greaterThanEqual(c, vec2(m))) && all(lessThan(c, vec2(last)))) {
-            const ivec2 lo = ivec2(floor(c - m));
-            const ivec2 hi = ivec2(floor(c + m));
-            return uint(level) | (uint(lo.x) << 4u) | (uint(lo.y) << 11u) |
-                   (uint(hi.x - lo.x) << 18u) | (uint(hi.y - lo.y) << 19u);
+            return vsm_pack_request(level, ivec2(floor(c - m)), ivec2(floor(c + m)));
         }
     }
     return VSM_NONE;
@@ -162,6 +220,29 @@ uint vsm_request_bit(uint request, uint k)
     const ivec2 rel = ivec2((request >> 4u) & 0x7Fu, (request >> 11u) & 0x7Fu) +
                       ivec2(int(k & 1u), int(k >> 1u));
     return vsm_bit_of(int(request & 0xFu), rel);
+}
+
+// Sets a packed request's pages (not VSM_NONE) in a bitmask: a row of one
+// page or two (neighbouring bits, in one word or across two), and the same
+// in the row below where the rectangle has two rows.
+void vsm_set_request(uint64_t bits, uint request)
+{
+    const uint bit = vsm_request_bit(request, 0u);
+    const bool wide = (request & (1u << 18u)) != 0u;
+    const uint run = wide ? 3u : 1u;
+    const uint w = bit >> 5u;
+    const uint s = bit & 31u;
+    atomicOr(VsmBitsRef(bits).w[w], run << s);
+    if (wide && s == 31u) {
+        atomicOr(VsmBitsRef(bits).w[w + 1u], 1u);
+    }
+    if ((request & (1u << 19u)) != 0u) {
+        const uint below = w + uint(NPH_VSM_WINDOW / 32);
+        atomicOr(VsmBitsRef(bits).w[below], run << s);
+        if (wide && s == 31u) {
+            atomicOr(VsmBitsRef(bits).w[below + 1u], 1u);
+        }
+    }
 }
 #endif
 
@@ -253,13 +334,6 @@ ivec2 vsm_pool_base(uint page)
 }
 
 #ifdef NPH_VSM_SAMPLING
-// The point of a pixel at NDC `ndc` and depth `depth`, in light space.
-vec3 vsm_clip_to_light(VsmViewRef r, vec2 ndc, float depth)
-{
-    const vec4 h = r.v.light_from_clip * vec4(ndc, depth, 1.0);
-    return h.xyz / h.w;
-}
-
 // The fraction of the sun's light reaching light-space point `ls`,
 // `distance` from the camera, on a surface whose geometric normal in light
 // space is `nl` (unit, toward the light: nl.z <= 0): the depth test against

@@ -8,9 +8,14 @@
 // coarser until they fit (and finer again once there is room); blended
 // surfaces ask for their own pages, a narrow view from afar takes a level
 // that holds it; it agrees with the ray-traced shadow it replaces, and
-// holds far from the origin. The fixture's teardown asserts zero validation and
-// synchronisation-validation errors and nothing leaked.
+// holds far from the origin; the depth pyramid's requests for blocks of
+// pixels are every pixel's own. The fixture's teardown asserts zero
+// validation and synchronisation-validation errors and nothing leaked.
+#include <nepheline/math/random.h>
+
 #include "test_shadow_support.h"
+
+#include <nph_vsm.h>
 
 typedef RenderFixture Vsm;
 
@@ -587,4 +592,258 @@ NTEST_F(Vsm, far_from_the_origin_the_shadow_holds)
     const NphRenderFrameStats st = render_into(f, &v, far_img);
     NTEST_EXPECT_TRUE(st.vsm);
     NTEST_EXPECT_LE_UINT(image_max_diff(near_img, far_img), SAME_TOL);
+}
+
+// ---------------------------------------------------------------------------
+// The depth pyramid's requests for blocks of pixels
+// ---------------------------------------------------------------------------
+
+// A depth image (odd extents: the last row's and column's blocks are
+// clamped) of a view looking down -z (camera-relative space is view space),
+// its projection's x and y moved as the frame's jitter moves them.
+#define BLOCK_W       255U
+#define BLOCK_H       143U
+#define BLOCK_NEAR    0.1F
+#define BLOCK_TAN     0.55F // tan(yfov / 2)
+#define BLOCK_SHIFT_X (0.37F * 2.0F / (f32)BLOCK_W)
+#define BLOCK_SHIFT_Y (-0.21F * 2.0F / (f32)BLOCK_H)
+#define BLOCK_WORDS   ((u32)NPH_VSM_LEVELS * NPH_VSM_LEVEL_WORDS)
+
+typedef struct BlockBox {
+    NphVec3 lo;
+    NphVec3 hi;
+} BlockBox;
+
+// The view ray through NDC (x, y), z = -1: a point t along it is t metres
+// in front (depth near / t).
+static NphVec3 block_ray(f32 x, f32 y)
+{
+    const f32 p00 = (f32)BLOCK_H / ((f32)BLOCK_W * BLOCK_TAN);
+    const f32 p11 = -1.0F / BLOCK_TAN; // Vulkan's y down
+    return nph_vec3((x + BLOCK_SHIFT_X) / p00, (y + BLOCK_SHIFT_Y) / p11, -1.0F);
+}
+
+// The nearest t > 0 where the ray meets the box (slabs), else `best`.
+static f32 block_hit_box(NphVec3 dir, const BlockBox *b, f32 best)
+{
+    f32 t0 = 0.0F;
+    f32 t1 = best;
+    const f32 d[3] = {dir.x, dir.y, dir.z};
+    const f32 lo[3] = {b->lo.x, b->lo.y, b->lo.z};
+    const f32 hi[3] = {b->hi.x, b->hi.y, b->hi.z};
+    for (u32 k = 0; k < 3U; ++k) {
+        const f32 a = lo[k] / d[k];
+        const f32 c = hi[k] / d[k];
+        t0 = nph_f32_max(t0, nph_f32_min(a, c));
+        t1 = nph_f32_min(t1, nph_f32_max(a, c));
+    }
+    return t0 <= t1 && t0 > 0.0F ? t0 : best;
+}
+
+// Ground to the horizon (grazing far off), boxes near, mid-way and far, a
+// wall beyond 2 km, foliage-like noise (every pixel its own distance, or
+// the background), and the background.
+static void block_depths(f32 *depths)
+{
+    static const BlockBox boxes[] = {
+        {{-0.45F, -0.5F, -1.3F}, {-0.1F, 0.25F, -0.55F}},
+        {{0.5F, -1.6F, -9.0F}, {3.0F, 1.5F, -7.0F}},
+        {{-30.0F, -1.6F, -130.0F}, {-8.0F, 25.0F, -90.0F}},
+        {{-3000.0F, -1.6F, -2600.0F}, {-200.0F, 900.0F, -2500.0F}},
+    };
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0xB10C5EEDULL, 3U);
+    for (u32 y = 0; y < BLOCK_H; ++y) {
+        for (u32 x = 0; x < BLOCK_W; ++x) {
+            const NphVec3 dir = block_ray(((f32)x + 0.5F) * 2.0F / (f32)BLOCK_W - 1.0F,
+                                          ((f32)y + 0.5F) * 2.0F / (f32)BLOCK_H - 1.0F);
+            f32 t = 1.0e9F;
+            if (dir.y < 0.0F) {
+                t = -1.6F / dir.y;
+            }
+            for (u32 b = 0; b < sizeof boxes / sizeof boxes[0]; ++b) {
+                t = block_hit_box(dir, &boxes[b], t);
+            }
+            const u32 noise = nph_pcg32_next_u32(&rng);
+            if (x >= 150U && x < 220U && y >= 20U && y < 70U) {
+                t = (noise & 1U) != 0U ? 1.0e9F : 6.0F + (f32)(noise >> 8U) * (19.0F / 16777216.0F);
+            }
+            depths[y * BLOCK_W + x] = t < 1.0e8F ? BLOCK_NEAR / t : 0.0F;
+        }
+    }
+}
+
+// The virtual shadow map's view for the image: light space's axes from the
+// light's direction, the rays (nph_vsm.h) of the image's projection, and
+// levels around a camera off their pages' grid. `lod_scale` picks the
+// levels the pixels take.
+static void block_view(NphVsmView *vv, NphVec3 light, f32 lod_scale, u64 requests)
+{
+    memset(vv, 0, sizeof *vv);
+    const NphVec3 d = nph_vec3_normalize(light);
+    const NphVec3 u = nph_vec3_normalize(nph_vec3_cross(d, nph_vec3(0.0F, 1.0F, 0.0F)));
+    const NphVec3 w = nph_vec3_cross(u, d);
+    vv->axis_u = nph_vec4_from_vec3(u, 0.0F);
+    vv->axis_v = nph_vec4_from_vec3(w, 0.0F);
+    vv->axis_d = nph_vec4_from_vec3(d, 0.0F);
+    // A pixel's point is (near / depth) (x', y', -1), (x', y') its ray's
+    // (block_ray): in light space (ray_x x + ray_y y + ray_o) / depth.
+    const f32 p00 = (f32)BLOCK_H / ((f32)BLOCK_W * BLOCK_TAN);
+    const f32 p11 = -1.0F / BLOCK_TAN;
+    const NphVec3 cx = nph_vec3(u.x, w.x, d.x);
+    const NphVec3 cy = nph_vec3(u.y, w.y, d.y);
+    const NphVec3 cz = nph_vec3(u.z, w.z, d.z);
+    vv->ray_x = nph_vec4_from_vec3(nph_vec3_scale(cx, BLOCK_NEAR / p00), 0.0F);
+    vv->ray_y = nph_vec4_from_vec3(nph_vec3_scale(cy, BLOCK_NEAR / p11), 0.0F);
+    const NphVec3 o = nph_vec3_sub(nph_vec3_add(nph_vec3_scale(cx, BLOCK_SHIFT_X / p00),
+                                                nph_vec3_scale(cy, BLOCK_SHIFT_Y / p11)),
+                                   cz);
+    vv->ray_o = nph_vec4_from_vec3(nph_vec3_scale(o, BLOCK_NEAR), 0.0F);
+    // Level 0's window 8 m across, the camera at (0.37, -0.53) m in light
+    // space: off every level's page grid.
+    for (u32 i = 0; i < (u32)NPH_VSM_LEVELS; ++i) {
+        const f64 page = 8.0 * (f64)(1U << i) / (f64)NPH_VSM_WINDOW;
+        const f64 wx = nph_f64_floor(0.37 / page) - (f64)NPH_VSM_WINDOW * 0.5;
+        const f64 wy = nph_f64_floor(-0.53 / page) - (f64)NPH_VSM_WINDOW * 0.5;
+        NphVsmLevel *l = &vv->levels[i];
+        l->origin = nph_vec4((f32)(0.37 / page - wx), (f32)(-0.53 / page - wy), 0.5F, 0.0F);
+        l->window_x = (i32)wx;
+        l->window_y = (i32)wy;
+        l->inv_page_size = (f32)(1.0 / page);
+        l->depth_scale = (f32)(1.0 / (page * (f64)NPH_VSM_WINDOW));
+        l->page_size = (f32)page;
+    }
+    vv->lod_scale = lod_scale;
+    vv->margin = 2.0F / (f32)NPH_VSM_PAGE;
+    vv->requests = requests;
+}
+
+// The pages the image's blocks request (into `blocks`) and the pages its
+// pixels request one at a time (into `pixels`), under a view of the light.
+static void block_requests(RenderFixture *f, NphGpuPipeline pipeline, NphVec3 light, f32 lod_scale,
+                           u32 *blocks, u32 *pixels)
+{
+    NphGpuDevice *dev = f->dev;
+    const u32 storage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    const u32 bits_usage =
+        storage | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
+    const u64 bits_size = (u64)BLOCK_WORDS * sizeof(u32);
+    NphGpuBuffer view_buf =
+        test_make_buffer(dev, sizeof(NphVsmView), storage, NPH_GPU_MEMORY_UPLOAD, "block view");
+    NphGpuBuffer depth_buf = test_make_buffer(dev, (u64)BLOCK_W * BLOCK_H * sizeof(f32), storage,
+                                              NPH_GPU_MEMORY_UPLOAD, "block depths");
+    NphGpuBuffer block_bits =
+        test_make_buffer(dev, bits_size, bits_usage, NPH_GPU_MEMORY_DEVICE, "block requests");
+    NphGpuBuffer pixel_bits =
+        test_make_buffer(dev, bits_size, bits_usage, NPH_GPU_MEMORY_DEVICE, "pixel requests");
+    block_view((NphVsmView *)nph_gpu_buffer_map(dev, view_buf), light, lod_scale,
+               nph_gpu_buffer_address(dev, block_bits));
+    block_depths((f32 *)nph_gpu_buffer_map(dev, depth_buf));
+
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "block requests", &cmd),
+                        NPH_RESULT_OK);
+    const NphGpuBuffer bits[2] = {block_bits, pixel_bits};
+    for (u32 i = 0; i < 2U; ++i) {
+        nph_gpu_cmd_fill_buffer(cmd, bits[i], 0U, NPH_GPU_WHOLE_SIZE, 0U);
+        nph_gpu_cmd_buffer_barrier(cmd, bits[i], (u32)NPH_GPU_STAGE_TRANSFER,
+                                   (u32)NPH_GPU_ACCESS_TRANSFER_WRITE, (u32)NPH_GPU_STAGE_COMPUTE,
+                                   (u32)NPH_GPU_ACCESS_SHADER_READ |
+                                       (u32)NPH_GPU_ACCESS_SHADER_WRITE);
+    }
+    NphVsmTestPush push;
+    memset(&push, 0, sizeof push);
+    push.view = nph_gpu_buffer_address(dev, view_buf);
+    push.depths = nph_gpu_buffer_address(dev, depth_buf);
+    push.reference = nph_gpu_buffer_address(dev, pixel_bits);
+    push.width = BLOCK_W;
+    push.height = BLOCK_H;
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    // An invocation per block, 16 x 16 to a workgroup.
+    nph_gpu_cmd_dispatch(cmd, ((BLOCK_W + 1U) / 2U + 15U) / 16U, ((BLOCK_H + 1U) / 2U + 15U) / 16U,
+                         1U);
+    test_submit_wait(dev, cmd);
+    test_read_buffer(dev, block_bits, 0U, bits_size, blocks);
+    test_read_buffer(dev, pixel_bits, 0U, bits_size, pixels);
+    nph_gpu_buffer_destroy(dev, pixel_bits);
+    nph_gpu_buffer_destroy(dev, block_bits);
+    nph_gpu_buffer_destroy(dev, depth_buf);
+    nph_gpu_buffer_destroy(dev, view_buf);
+}
+
+static u32 popcount_u32(u32 v)
+{
+    u32 n = 0U;
+    for (; v != 0U; v &= v - 1U) {
+        ++n;
+    }
+    return n;
+}
+
+// The depth pyramid's requests for 2 x 2 blocks of pixels (vsm_block.glsl:
+// one request for a block on one surface, each pixel's own elsewhere,
+// gathered across the subgroup) against every pixel requesting its own
+// (vsm_request), over an image built to take every way through them:
+// surfaces across pages, their margins and corners and the levels'
+// boundaries, edges between near and far surfaces, the background, ground
+// grazing far off, noise as in foliage, and (with a level scale that makes
+// the pixels' levels fine) points beyond the window of their level, and of
+// every level. The two bitmasks are the same, bit for bit.
+NTEST_F(Vsm, block_requests_are_each_pixels)
+{
+    REQUIRE_VSM(f);
+    NphGpuShader shader = test_load_shader(f->dev, "vsm_request_test.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    cd.name = "vsm request test";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &cd, &pipeline), NPH_RESULT_OK);
+    // A pixel's footprint per metre over level 0's texel (vsm.c): the
+    // image's (a few pages at each level), 16 times finer (pages some 8
+    // pixels across: many blocks across their edges and corners), and 300
+    // times finer (most points beyond their level's window).
+    const f32 texel0 = 8.0F / (f32)(NPH_VSM_WINDOW * NPH_VSM_PAGE);
+    const f32 scale = 2.0F * BLOCK_TAN / (f32)BLOCK_H / texel0;
+    const struct {
+        NphVec3 light;
+        f32 lod_scale;
+        u32 pages; // at least
+        const char *what;
+    } cases[] = {
+        {{0.31F, -0.8F, -0.52F}, scale, 16U, "the image's levels"},
+        {{-0.62F, -0.35F, 0.7F}, scale, 16U, "a low sun"},
+        {{0.31F, -0.8F, -0.52F}, scale / 16.0F, 300U, "small pages"},
+        {{-0.62F, -0.35F, 0.7F}, scale / 16.0F, 300U, "small pages, a low sun"},
+        {{0.31F, -0.8F, -0.52F}, scale / 300.0F, 2000U, "levels too fine for their windows"},
+    };
+    static u32 blocks[BLOCK_WORDS];
+    static u32 pixels[BLOCK_WORDS];
+    for (u32 c = 0; c < sizeof cases / sizeof cases[0]; ++c) {
+        block_requests(f, pipeline, cases[c].light, cases[c].lod_scale, blocks, pixels);
+        u32 pages = 0U;
+        u32 levels = 0U;
+        u32 wrong = 0U;
+        for (u32 l = 0; l < (u32)NPH_VSM_LEVELS; ++l) {
+            u32 level_pages = 0U;
+            for (u32 i = 0; i < (u32)NPH_VSM_LEVEL_WORDS; ++i) {
+                const u32 k = l * (u32)NPH_VSM_LEVEL_WORDS + i;
+                level_pages += popcount_u32(pixels[k]);
+                if (blocks[k] != pixels[k] && wrong++ < 4U) {
+                    NTEST_LOG("%s: level %u, row %u, word %u: blocks 0x%08x, pixels 0x%08x",
+                              cases[c].what, l, i / (u32)NPH_VSM_ROW_WORDS,
+                              i % (u32)NPH_VSM_ROW_WORDS, blocks[k], pixels[k]);
+                }
+            }
+            pages += level_pages;
+            levels += level_pages != 0U ? 1U : 0U;
+        }
+        NTEST_LOG("%s: %u pages over %u levels", cases[c].what, pages, levels);
+        NTEST_EXPECT_EQ_UINT(wrong, 0U);
+        NTEST_EXPECT_GE_UINT(pages, cases[c].pages);
+        NTEST_EXPECT_GT_UINT(levels, 4U);
+    }
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, shader);
 }

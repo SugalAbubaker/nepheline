@@ -27,7 +27,7 @@
 // index, arg1 mip 0's.
 //
 // Modes 0 and 2 also request the virtual shadow map's pages where the view
-// has one (vsm_common.glsl): each pixel the pages its shading will read,
+// has one (vsm_block.glsl): each pixel the pages its shading will read,
 // from the depth they already read. Between them the two cover every
 // pixel's final surface (phase 1 changed only the tiles mode 2 reads
 // again); a surface phase 1 then hid may have asked for pages no pixel
@@ -50,6 +50,8 @@
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_vote : require
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
@@ -58,6 +60,8 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+#include "vsm_block.glsl"
 
 #if NPH_RENDER_LIGHT_TILE != 16
 #error "a workgroup covers 2 x 2 light tiles"
@@ -76,71 +80,6 @@ shared uint s_background;
 float source_depth(ivec2 p)
 {
     return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
-}
-
-// The values of `v` at or above `floor`, VSM_NONE elsewhere.
-uvec4 at_or_above(uvec4 v, uint floor)
-{
-    return mix(uvec4(VSM_NONE), v, greaterThanEqual(v, uvec4(floor)));
-}
-
-// A request's pages as bits (vsm_request_bit), VSM_NONE where it has fewer.
-uvec4 request_bits(uint request)
-{
-    return uvec4(vsm_request_bit(request, 0u), vsm_request_bit(request, 1u),
-                 vsm_request_bit(request, 2u), vsm_request_bit(request, 3u));
-}
-
-// Requests the virtual shadow map's pages for the 2 x 2 pixels at `lo`
-// (clamped to `last`; none outside the mip): the pages each pixel's
-// shading may read (vsm_request), from `depth`, the four pixels' depths
-// (row by row; 0 for none). Mostly every pixel of the subgroup needs the
-// same one page, which one invocation sets. Otherwise, round after round,
-// the lowest page any invocation still needs is set by one of those that
-// need it: as many rounds as the subgroup needs distinct pages.
-void request_pages(VisViewRef view, VsmViewRef r, ivec2 lo, ivec2 last, vec4 depth)
-{
-    uvec4 requests = uvec4(VSM_NONE);
-    for (int k = 0; k < 4; ++k) {
-        if (depth[k] > 0.0) { // else the background, or no pixel
-            const ivec2 q = min(lo + ivec2(k & 1, k >> 1), last);
-            const vec2 ndc = (vec2(q) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
-            const vec4 h = r.v.light_from_clip * vec4(ndc, depth[k], 1.0);
-            requests[k] = vsm_request(r, h.xyz / h.w);
-        }
-    }
-    // The usual case: one single-page request in every invocation that
-    // has one (VSM_NONE, the largest value, is no request).
-    const uint first = min(min(requests.x, requests.y), min(requests.z, requests.w));
-    const uvec4 other = uvec4(notEqual(requests, uvec4(first))) &
-                        uvec4(notEqual(requests, uvec4(VSM_NONE)));
-    const bool alone = (other.x | other.y | other.z | other.w) == 0u;
-    const uint lowest = subgroupMin(first);
-    if (subgroupAll(first == VSM_NONE || (alone && first == lowest && (first >> 18u) == 0u))) {
-        const uint bit = vsm_request_bit(lowest, 0u);
-        if (bit != VSM_NONE && subgroupElect()) {
-            atomicOr(VsmBitsRef(r.v.requests).w[bit >> 5u], 1u << (bit & 31u));
-        }
-        return;
-    }
-    const uvec4 a = request_bits(requests.x);
-    const uvec4 b = request_bits(requests.y);
-    const uvec4 c = request_bits(requests.z);
-    const uvec4 d = request_bits(requests.w);
-    uint floor = 0u;
-    for (;;) {
-        const uvec4 m = min(min(at_or_above(a, floor), at_or_above(b, floor)),
-                            min(at_or_above(c, floor), at_or_above(d, floor)));
-        const uint mine = min(min(m.x, m.y), min(m.z, m.w));
-        const uint bit = subgroupMin(mine);
-        if (bit == VSM_NONE) {
-            break;
-        }
-        if (mine == bit && subgroupElect()) {
-            atomicOr(VsmBitsRef(r.v.requests).w[bit >> 5u], 1u << (bit & 31u));
-        }
-        floor = bit + 1u;
-    }
 }
 
 void main()
@@ -182,7 +121,7 @@ void main()
         VisViewRef view = VisViewRef(pc.view);
         const uint64_t vsm = ViewRef(view.v.render_view).v.vsm;
         if (vsm != 0ul) {
-            request_pages(view, VsmViewRef(vsm), lo, last, block);
+            vsm_request_block(VsmViewRef(vsm), lo, last, view.v.viewport.zw * 2.0, block);
         }
     }
     if (pc.arg4 != NPH_VIS_NO_AO) {
