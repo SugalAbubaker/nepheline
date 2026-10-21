@@ -335,8 +335,8 @@ static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d
         GPU_LOG_ERROR("image '%s': a colour format cannot be a depth attachment", name);
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    // A sampled view in another format: SAMPLED is that format's to
-    // support, the other uses the image's own.
+    // A sampled view in another format: SAMPLED and COLOR_ATTACHMENT are
+    // that format's to support, the other uses the image's own.
     const bool mutable_view =
         d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format;
     u32 own_usage = d->usage;
@@ -359,7 +359,14 @@ static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d
                           nph_gpu_format_name(d->sampled_format));
             return NPH_RESULT_INVALID_ARGUMENT;
         }
-        own_usage &= ~(u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+        if ((d->usage & (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT) != 0U &&
+            (vp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0U) {
+            GPU_LOG_ERROR("image '%s': format %s cannot be a colour attachment on this device",
+                          name, nph_gpu_format_name(d->sampled_format));
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        own_usage &=
+            ~((u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT);
     }
     VkFormatProperties props;
     vkGetPhysicalDeviceFormatProperties(dev->phys, gpu_vk_format(d->format), &props);
@@ -838,9 +845,13 @@ VkImageView gpu_image_attachment_view(NphGpuDevice *dev, NphGpuImageSlot *slot, 
     const VkImageUsageFlags usage = (d->usage & (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT) != 0U
                                         ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
                                         : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    const NphResult r = create_view(dev, slot, layered_view_type(d, layer_count), slot->vk_format,
-                                    mutable_view ? usage : 0U, slot->aspect, mip, 1U, base_layer,
-                                    layer_count, suffix, &view);
+    // A colour attachment of a mutable image takes its sampled format.
+    const VkFormat format = mutable_view && usage == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                ? gpu_vk_format(d->sampled_format)
+                                : slot->vk_format;
+    const NphResult r =
+        create_view(dev, slot, layered_view_type(d, layer_count), format, mutable_view ? usage : 0U,
+                    slot->aspect, mip, 1U, base_layer, layer_count, suffix, &view);
     if (r == NPH_RESULT_OK) {
         NphGpuViewKey *k = &slot->attachment_views[slot->attachment_view_count++];
         k->mip = mip;

@@ -29,6 +29,16 @@
 #if !defined(VIS_MESH) || !defined(VIS_MASKED)
 #error "include through a vis_raster_*.frag wrapper"
 #endif
+// The ROP variant (phase 0's opaque clusters on the mesh path): the depth
+// and the cluster and triangle as the visibility buffer's two 32-bit words,
+// written through its colour-attachment view, where the early depth test
+// with writes leaves the nearest fragment's.
+#ifndef VIS_ROP
+#define VIS_ROP 0
+#endif
+#if VIS_ROP
+layout(location = 0) out uvec2 out_visibility;
+#endif
 
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
@@ -90,6 +100,10 @@ void main()
         discard;
     }
 #endif
+#if VIS_ROP
+    out_visibility = uvec2((g << NPH_VIS_TRIANGLE_BITS) | triangle, floatBitsToUint(gl_FragCoord.z));
+#else
     imageAtomicMax(nph_u64images_2d[nonuniformEXT(pc.arg0)], ivec2(gl_FragCoord.xy),
                    vis_pack(gl_FragCoord.z, g, triangle));
+#endif
 }

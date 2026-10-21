@@ -431,12 +431,12 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 
 | Pass | What it does |
 |---|---|
-| `vis clear` | clears the visibility buffer and the counters |
+| `vis clear` | clears the counters (and on the vertex path the visibility buffer, which the mesh path's raster clears as its attachment) |
 | `vis scatter` | applies the frame's instance updates |
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
-| `vis raster 0`, `vis sw raster 0` | the hardware raster of the opaque and masked clusters, then the compute raster of the small ones, into the visibility buffer |
+| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones, then the compute raster of the small ones, into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
@@ -476,6 +476,8 @@ raster writes it with `imageAtomicMax`, which keeps the nearest surface
 under reverse-Z without any depth test, so the hardware and software
 rasters write the same buffer the same way (the mesh path's depth
 attachment, below, only spares fragments that would lose the atomic).
+The one exception is phase 0's opaque clusters on the mesh path, written
+through the ROP (below).
 
 **Raster.** With mesh shaders each workgroup of 32 threads emits one
 cluster, culling back faces and triangles that cover no pixel centre
@@ -508,6 +510,28 @@ them only lose their atomic, as before. On the RTX 3060 Ti this took
 Bistro's `vis raster 0` from 1.135 to 0.735 ms at 4K (0.798 with the
 opaque pipeline alone), and the synthetic scenes' by 14–18 %. The vertex
 path has no attachment, and discards back faces in its fragment stage.
+
+**Through the ROP.** With that test writing depth, the last opaque fragment
+of a pixel to pass it is its nearest, so phase 0's opaque clusters need no
+atomic: on the mesh path they draw in a pass of their own whose colour
+attachment is the visibility buffer viewed as R32G32_UINT (the triangle and
+cluster in x, the depth's bits in y: the 64-bit word's halves), which the
+ROP writes in primitive order (`vis_raster_mesh_opaque_rop.frag`), and the
+pass clears it as it begins, so `vis clear` no longer does. The masked
+clusters follow in a pass of their own with their atomics, tested against
+the same depth attachment, then the software raster with its atomics, and
+the atomic max merges each with what the ROP wrote. Phase 1 keeps the
+atomics for every cluster: its depth attachment lacks the masked and
+software surfaces of phase 0, which a write there could cover. Only equal
+depths of two triangles part from the atomic's choice (the ROP keeps the
+last drawn, the atomic the larger index), both arbitrary, the clusters'
+indices coming from atomics in the cull: Bistro's street showed 37 pixels
+of instance that differed against 22 between two runs of either. The
+clear went (0.085 ms, 67 MB) and the opaque clusters drew faster: Bistro's
+street frame took 7.38 ms against 7.50, the terrace 8.19 against 8.30, the
+hedge 7.88 against 7.98, the 4K field 4.12 against 4.22 (interleaved,
+three rounds). Drawing them with no write at all would have taken 0.16
+to 0.24 ms off the pass, so most of the atomics' cost is gone.
 
 **Masked clusters** are where foliage costs: Bistro's views 50° and 90°
 from the scene camera (`terrace` and `hedge`, docs/benchmarks.md) look at

@@ -114,14 +114,15 @@ on the device in optimal tiling (sampled and linearly filtered, storage
 and storage atomics, colour attachment and blend, depth attachment), read
 once at creation. The renderer chooses its HDR target's format by it.
 
-`NphGpuImageDesc.sampled_format` gives a colour image's sampled view a
-format of its own, of the same texel size: the image is created mutable
-(`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, with the two formats listed) and
-with extended usage, so sampling need only be supported by the view's
-format and the other uses by the image's; each view then names the one
-use it serves. The production path's visibility buffer, R64_UINT for its
-64-bit atomics, is sampled as R32G32_UINT, which texture gathers read four
-depths at a time.
+`NphGpuImageDesc.sampled_format` gives a colour image's sampled view and
+its colour-attachment views a format of their own, of the same texel size:
+the image is created mutable (`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, with the
+two formats listed) and with extended usage, so sampling and rendering need
+only be supported by the views' format and the other uses by the image's;
+each view then names the one use it serves. The production path's
+visibility buffer, R64_UINT for its 64-bit atomics, is sampled as
+R32G32_UINT, which texture gathers read four depths at a time, and its
+opaque clusters are rendered into it as R32G32_UINT through the ROP.
 
 Sharing: textures (transfer destinations that are never attachments) are
 shared across queue families so uploads need no ownership transfer and may

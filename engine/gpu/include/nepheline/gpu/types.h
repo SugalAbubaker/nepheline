@@ -280,11 +280,12 @@ typedef struct NphGpuImageDesc {
     u32 layer_count; // 0: 1
     u32 samples;     // 0: 1 (MSAA counts are powers of two up to the device limit)
     u32 usage;       // NphGpuImageUsage bits
-    // UNDEFINED: `format`. Otherwise the format the sampled view reads the
-    // image as, of the same texel size (a 64-bit image sampled as two
-    // 32-bit channels, an RGBA8 one as sRGB): the image is created mutable,
-    // and SAMPLED need only be supported by this format, the other uses by
-    // `format`.
+    // UNDEFINED: `format`. Otherwise the format the sampled view and the
+    // colour-attachment views read the image as, of the same texel size (a
+    // 64-bit image sampled and rendered to as two 32-bit channels, an RGBA8
+    // one sampled as sRGB): the image is created mutable, and SAMPLED and
+    // COLOR_ATTACHMENT need only be supported by this format, the other
+    // uses by `format`.
     NphGpuFormat sampled_format;
     const char *name;
 } NphGpuImageDesc;

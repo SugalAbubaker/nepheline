@@ -15,6 +15,7 @@ nph_add_shaders(nph_shaders_test
         test/test_column.vert
         test/test_green.frag
         test/test_color.frag
+        test/test_uint2.frag
         test/test_sample.frag
         test/test_fullscreen.vert
         test/test_texel_fetch.comp
@@ -84,6 +85,7 @@ nph_add_shaders(nph_shaders_render
         render/vis_raster_opaque.vert
         render/vis_raster_masked.vert
         render/vis_raster_mesh_opaque.frag
+        render/vis_raster_mesh_opaque_rop.frag
         render/vis_raster_mesh_masked.frag
         render/vis_raster_vert_opaque.frag
         render/vis_raster_vert_masked.frag

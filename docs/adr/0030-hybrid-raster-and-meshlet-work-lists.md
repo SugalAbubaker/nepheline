@@ -119,3 +119,35 @@ anticipated.
 - With the DAG LOD of Phase 13, clusters will carry about a triangle per
   two to four pixels, which is where the software raster wins; its
   threshold is revisited then.
+
+## Amendment (2026-10-20): phase 0's opaque clusters through the ROP
+
+**Context.** Measured on Bistro, the opaque fragments' 64-bit atomics cost
+0.16 to 0.24 ms of `vis raster 0` (a build without them), and the transfer
+clear of the visibility buffer 0.085 ms (67 MB) before it.
+
+**Decision.** On the mesh path, whose early depth test writes the opaque
+clusters' depth, the last opaque fragment of a pixel to pass the test is
+its nearest, so phase 0's opaque clusters write the visibility buffer
+through the ROP: a pass of their own whose colour attachment is the buffer
+viewed as R32G32_UINT (`NphGpuImageDesc.sampled_format` now names the
+colour-attachment views' format too), cleared as the pass begins. The
+masked clusters (which discard, so cannot write depth early) follow in a
+pass of their own with their atomics, then the software raster; the atomic
+max merges them with what the ROP wrote. Phase 1 keeps the atomics: its
+depth attachment lacks phase 0's masked and software surfaces.
+
+**Measurements** (interleaved, three rounds): the clear went, the opaque
+pass drew faster, and the frame took 7.38 ms against 7.50 in the street,
+8.19 against 8.30 on the terrace, 7.88 against 7.98 at the hedge and 4.12
+against 4.22 in the 4K field.
+
+**Alternatives.** A 32-bit identifier target beside the depth attachment,
+merged into the 64-bit buffer afterwards: the merge reads 16 bytes a pixel
+and writes 8 (0.3 to 0.45 ms at 4K). The ROP for phase 1 too: it could
+cover the nearer masked and software surfaces of phase 0.
+
+**Consequences.** Equal depths of two opaque triangles keep the last drawn
+where the atomic kept the larger index, both arbitrary (the clusters'
+indices come from atomics in the cull). The vertex path, without a depth
+attachment, keeps the atomics and the transfer clear.

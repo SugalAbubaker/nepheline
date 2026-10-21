@@ -71,6 +71,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_raster_masked.mesh",
     "vis_raster_mesh_opaque.frag",
     "vis_raster_mesh_masked.frag",
+    "vis_raster_mesh_opaque_rop.frag",
     "vis_raster_opaque.vert",
     "vis_raster_masked.vert",
     "vis_raster_vert_opaque.frag",
@@ -191,8 +192,14 @@ static NphResult create_raster_pipeline(NphRenderer *r, VisShader stage, VisShad
     if (v->mesh_shaders) {
         d.depth_format = RENDER_DEPTH_FORMAT;
         d.depth.test = 1;
-        d.depth.write = fragment == VIS_SHADER_MESH_FRAG_OPAQUE ? 1 : 0;
+        d.depth.write = fragment != VIS_SHADER_MESH_FRAG_MASKED ? 1 : 0;
         d.depth.compare = NPH_GPU_COMPARE_GREATER_OR_EQUAL;
+    }
+    if (fragment == VIS_SHADER_MESH_FRAG_OPAQUE_ROP) {
+        // The visibility buffer's colour-attachment view (vis_raster_frag.glsl
+        // VIS_ROP): the last fragment the depth test passes, the nearest.
+        d.color_formats[0] = NPH_GPU_FORMAT_R32G32_UINT;
+        d.color_count = 1U;
     }
     d.name = name;
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
@@ -220,7 +227,7 @@ NphResult render_vis_create(NphRenderer *r)
     const bool gi = r->gi.supported != 0;
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         const bool mesh_stage =
-            i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_MASKED;
+            i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_OPAQUE_ROP;
         const bool vertex_stage =
             i >= (u32)VIS_SHADER_VERT_OPAQUE && i <= (u32)VIS_SHADER_VERT_FRAG_MASKED;
         // Only the raster path in use: a mesh shader cannot even be loaded
@@ -271,6 +278,8 @@ NphResult render_vis_create(NphRenderer *r)
                                        "vis raster (mesh, opaque)", &v->raster[0]));
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_MASKED, VIS_SHADER_MESH_FRAG_MASKED,
                                        "vis raster (mesh, masked)", &v->raster[1]));
+        NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_OPAQUE, VIS_SHADER_MESH_FRAG_OPAQUE_ROP,
+                                       "vis raster (mesh, opaque, ROP)", &v->raster_rop));
     } else {
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_VERT_OPAQUE, VIS_SHADER_VERT_FRAG_OPAQUE,
                                        "vis raster (indirect, opaque)", &v->raster[0]));
@@ -321,6 +330,7 @@ void render_vis_destroy(NphRenderer *r)
     }
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
+    nph_gpu_pipeline_destroy(dev, v->raster_rop);
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
@@ -650,9 +660,11 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
                             r->vis.light_layout.histogram, (u64)NPH_RENDER_ZBINS * sizeof(u32), 0U);
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->hzb_dirty), 0U, NPH_GPU_WHOLE_SIZE,
                             r->vis.hzb_full_rebuild ? NPH_U32_MAX : 0U);
-    const NphGpuClearValue zero = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 0.0F);
-    nph_gpu_cmd_clear_color_image(cmd, nph_gpu_rg_image(graph, f->visbuffer),
-                                  NPH_GPU_LAYOUT_TRANSFER_DST, &zero, 0U, 1U, 0U, 1U);
+    if (!r->vis.mesh_shaders) {
+        const NphGpuClearValue zero = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 0.0F);
+        nph_gpu_cmd_clear_color_image(cmd, nph_gpu_rg_image(graph, f->visbuffer),
+                                      NPH_GPU_LAYOUT_TRANSFER_DST, &zero, 0U, 1U, 0U, 1U);
+    }
 }
 
 static void scatter_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -770,7 +782,8 @@ static void cull_meshlets1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, voi
                                   ARGS_OFFSET(cull_args) + 16U);
 }
 
-static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
+static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase,
+                          u32 kinds, bool rop)
 {
     RenderVis *v = &r->vis;
     const VisFrame *f = &v->frame;
@@ -791,7 +804,10 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
     }
     // The hardware kinds: opaque, then masked.
     for (u32 k = 0; k < 2U; ++k) {
-        nph_gpu_cmd_bind_pipeline(cmd, v->raster[k]);
+        if ((kinds & (1U << k)) == 0U) {
+            continue;
+        }
+        nph_gpu_cmd_bind_pipeline(cmd, rop && k == 0U ? v->raster_rop : v->raster[k]);
         p.mode = k;
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
         const u64 kind = (u64)phase * (u64)NPH_VIS_RASTER_KINDS + k;
@@ -838,12 +854,20 @@ static void sw_raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *u
 
 static void raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    raster_record((NphRenderer *)user, graph, cmd, 0U);
+    // The mesh path draws phase 0's opaque clusters through the ROP here and
+    // its masked ones in a pass of their own.
+    NphRenderer *r = (NphRenderer *)user;
+    raster_record(r, graph, cmd, 0U, r->vis.mesh_shaders ? 1U : 3U, r->vis.mesh_shaders);
+}
+
+static void raster0_masked_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    raster_record((NphRenderer *)user, graph, cmd, 0U, 2U, false);
 }
 
 static void raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    raster_record((NphRenderer *)user, graph, cmd, 1U);
+    raster_record((NphRenderer *)user, graph, cmd, 1U, 3U, false);
 }
 
 // The pyramid: mip 0 from the visibility buffer's depth (vis_hzb.comp),
@@ -1028,7 +1052,18 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
     nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
-    nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    const bool rop = r->vis.mesh_shaders && phase == 0U;
+    if (rop) {
+        // Phase 0's opaque clusters through the ROP, into the visibility
+        // buffer, which the pass clears.
+        NphGpuRgAttachment c;
+        memset(&c, 0, sizeof c);
+        c.load = NPH_GPU_LOAD_OP_CLEAR;
+        c.store = NPH_GPU_STORE_OP_STORE;
+        nph_gpu_rg_color_attachment(p, f->visbuffer, &c);
+    } else {
+        nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    }
     if (r->vis.mesh_shaders) {
         // Cleared by phase 0 (reverse-Z: far is 0), kept for phase 1. The
         // software raster's clusters never reach it: fragments behind them
@@ -1038,6 +1073,26 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
         a.load = phase == 0U ? NPH_GPU_LOAD_OP_CLEAR : NPH_GPU_LOAD_OP_LOAD;
         a.store = phase == 0U ? NPH_GPU_STORE_OP_STORE : NPH_GPU_STORE_OP_DONT_CARE;
         a.clear.ds.depth = 0.0F;
+        nph_gpu_rg_depth_attachment(p, f->raster_depth, &a, 0);
+    }
+    if (rop) {
+        // The masked clusters, with atomics, against the opaque ones' depth.
+        p = add_pass(graph, r, "vis raster 0 masked", NPH_GPU_RG_PASS_GRAPHICS,
+                     raster0_masked_execute);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+        nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->lists, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+        NphGpuRgAttachment a;
+        memset(&a, 0, sizeof a);
+        a.load = NPH_GPU_LOAD_OP_LOAD;
+        a.store = NPH_GPU_STORE_OP_STORE;
         nph_gpu_rg_depth_attachment(p, f->raster_depth, &a, 0);
     }
 
@@ -1186,7 +1241,9 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->light_grid, NPH_GPU_RG_USE_TRANSFER_DST);
-    nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
+    if (!v->mesh_shaders) {
+        nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
+    }
 
     if (r->vsm.frame_active) {
         // The virtual shadow map's frame, and the pages this frame's instance
@@ -1344,6 +1401,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     vd.mip_count = 1U;
     vd.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST |
                (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
+    if (v->mesh_shaders) {
+        vd.usage |= (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT;
+    }
     // Sampled as two 32-bit words (the temporal resolve gathers the depths).
     vd.sampled_format = NPH_GPU_FORMAT_R32G32_UINT;
     vd.name = "vis visibility buffer";

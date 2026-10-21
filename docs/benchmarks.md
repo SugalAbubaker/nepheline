@@ -253,11 +253,11 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.70 ms | 8.53 ms | resolve 3.38 ms (§10.4 line: 1.20 ms), AO 1.32 ms at full resolution (with the radiance cache, 0.60 ms), raster 0.80 ms + Hi-Z 0.38 ms (with culling, 0.89 ms), TAA 0.87 ms (with post, 0.40 ms) |
-| `bistro_street_walk_production` | 7.77 ms | 8.81 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
-| `bistro_street_turn_production` | 8.14 ms | 9.43 ms | raster 1.46 ms: the turn sweeps over the foliage the next two views hold |
-| `bistro_terrace_production` | 8.56 ms | 9.52 ms | raster 1.62 ms: alpha-tested cypresses beside the café |
-| `bistro_hedge_production` | 8.17 ms | 9.17 ms | raster 1.91 ms: an alpha-tested hedge and cypresses across the view |
+| `bistro_street_production` | 7.43 ms | 8.25 ms | resolve 3.24 ms (§10.4 line: 1.20 ms), AO 1.33 ms at full resolution (with the radiance cache, 0.60 ms), raster 0.75 ms + Hi-Z 0.39 ms (with culling, 0.89 ms), TAA 0.87 ms (with post, 0.40 ms) |
+| `bistro_street_walk_production` | 7.48 ms | 8.37 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
+| `bistro_street_turn_production` | 7.87 ms | 8.84 ms | raster 1.42 ms: the turn sweeps over the foliage the next two views hold |
+| `bistro_terrace_production` | 8.28 ms | 9.10 ms | raster 1.56 ms: alpha-tested cypresses beside the café |
+| `bistro_hedge_production` | 7.96 ms | 8.76 ms | raster 1.89 ms: an alpha-tested hedge and cypresses across the view |
 
 Bistro's manifest has five views: the scene's own camera still
 (`street`), walking along the street at 1.4 m/s (`street_walk`), turning
@@ -295,10 +295,11 @@ that copied it into a depth attachment for them, and building the depth
 pyramid's mips six a dispatch took 0.03 ms off the second pyramid. The
 frame varies by about 0.05 ms from run to run, and the nightly order,
 which runs these after the synthetic scenes on a warm GPU, measures about
-0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-21`).
+0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-21b`).
 The ambient occlusion at full resolution added 0.88 ms to the street's
 frame against half resolution's (docs/render.md "Ambient occlusion"); the
-light tiles' depth bounds then took about 0.14 ms off each view.
+light tiles' depth bounds, the resolve's push constants and the opaque
+clusters' ROP raster then took 0.21 to 0.38 ms off each view.
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
@@ -307,7 +308,7 @@ resolve's, as the driver reports them.
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 (`bench.render_perf`) renders the 1k grids for four frames and skips
 without a device. The reference results are
-`benchmarks/results/render_perf-2026-10-21-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-21b-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU

@@ -777,6 +777,78 @@ NTEST_F(GpuFixture, an_image_is_sampled_in_another_format)
     nph_gpu_image_destroy(f->dev, img);
 }
 
+// An image rendered to through colour-attachment views of another format
+// (sampled_format): a 64-bit image as two 32-bit channels, as the visibility
+// buffer's raster writes it through the ROP (vis_raster_frag.glsl VIS_ROP).
+// test_uint2.frag writes (x, y + value) at every pixel, so each 64-bit texel
+// read back holds y + value in its high word and x in its low.
+NTEST_F(GpuFixture, an_image_is_rendered_to_in_another_format)
+{
+    REQUIRE_DEVICE(f);
+    NphGpuImageDesc d;
+    memset(&d, 0, sizeof d);
+    d.format = NPH_GPU_FORMAT_R64_UINT;
+    d.sampled_format = NPH_GPU_FORMAT_R32G32_UINT;
+    d.width = 16U;
+    d.height = 8U;
+    d.mip_count = 1U;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED |
+              (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC;
+    d.name = "mutable target";
+    NphGpuImage img = NPH_GPU_IMAGE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &d, &img), NPH_RESULT_OK);
+    NphGpuShader vert = test_load_shader(f->dev, "test_fullscreen.vert");
+    NphGpuShader frag = test_load_shader(f->dev, "test_uint2.frag");
+    NphGpuGraphicsPipelineDesc gd;
+    memset(&gd, 0, sizeof gd);
+    gd.vertex = vert;
+    gd.fragment = frag;
+    gd.color_formats[0] = NPH_GPU_FORMAT_R32G32_UINT;
+    gd.color_count = 1U;
+    gd.name = "two words";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &gd, &pipeline), NPH_RESULT_OK);
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.value = 1000U;
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_GRAPHICS, "two words", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_image_barrier(cmd, img, (u32)NPH_GPU_STAGE_NONE, (u32)NPH_GPU_ACCESS_NONE,
+                              NPH_GPU_LAYOUT_UNDEFINED, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT);
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.colors[0].image = img;
+    rd.colors[0].load = NPH_GPU_LOAD_OP_CLEAR;
+    rd.colors[0].store = NPH_GPU_STORE_OP_STORE;
+    rd.color_count = 1U;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
+    nph_gpu_cmd_end_rendering(cmd);
+    nph_gpu_cmd_image_barrier(cmd, img, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
+                              (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_COLOR_ATTACHMENT,
+                              (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_READ,
+                              NPH_GPU_LAYOUT_TRANSFER_SRC);
+    test_submit_wait(f->dev, cmd);
+    u64 texels[16U * 8U];
+    test_read_image(f->dev, img, 0U, texels, sizeof texels);
+    u32 wrong = 0U;
+    for (u32 y = 0; y < 8U; ++y) {
+        for (u32 x = 0; x < 16U; ++x) {
+            const u64 want = ((u64)(y + 1000U) << 32U) | (u64)x;
+            wrong += texels[y * 16U + x] == want ? 0U : 1U;
+        }
+    }
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    nph_gpu_pipeline_destroy(f->dev, pipeline);
+    nph_gpu_shader_destroy(f->dev, frag);
+    nph_gpu_shader_destroy(f->dev, vert);
+    nph_gpu_image_destroy(f->dev, img);
+}
+
 NTEST_F(GpuFixture, pipeline_descriptions_are_validated)
 {
     REQUIRE_DEVICE(f);
