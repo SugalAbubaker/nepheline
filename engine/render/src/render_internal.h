@@ -343,6 +343,7 @@ typedef enum VisShader {
     VIS_SHADER_MESH_FRAG_OPAQUE,
     VIS_SHADER_MESH_FRAG_MASKED,
     VIS_SHADER_MESH_FRAG_OPAQUE_ROP,
+    VIS_SHADER_MESH_FRAG_MASKED_SKIN,
     VIS_SHADER_VERT_OPAQUE,
     VIS_SHADER_VERT_MASKED,
     VIS_SHADER_VERT_FRAG_OPAQUE,
@@ -435,8 +436,9 @@ typedef struct RenderVis {
     NphGpuPipeline blend_pipelines[2][2][RENDER_CULL_COUNT];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
-    NphGpuPipeline raster[2];  // [opaque, masked]: mesh or vertex pipelines
-    NphGpuPipeline raster_rop; // the mesh path's opaque clusters of phase 0, through the ROP
+    NphGpuPipeline raster[2];   // [opaque, masked]: mesh or vertex pipelines
+    NphGpuPipeline raster_rop;  // the mesh path's opaque clusters of phase 0, through the ROP
+    NphGpuPipeline raster_skin; // the mesh path's masked skin: depth written after the alpha test
 
     // The GPU scene: persistent tables indexed by pool slot.
     NphGpuBuffer instances;       // NphVisInstance[max_instances]

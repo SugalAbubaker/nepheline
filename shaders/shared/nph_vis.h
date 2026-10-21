@@ -53,7 +53,8 @@
 #define NPH_VIS_RASTER_OPAQUE   0 // hardware
 #define NPH_VIS_RASTER_MASKED   1 // hardware, alpha tested
 #define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
-#define NPH_VIS_RASTER_KINDS    3
+#define NPH_VIS_RASTER_SKIN     3 // hardware, alpha tested, the front of its instance (mesh path)
+#define NPH_VIS_RASTER_KINDS    4
 
 // The depth pyramid after phase 1 rebuilds only the tiles of this many
 // pixels square that phase 1 drew into (vis_hzb.comp mode 2).
@@ -78,6 +79,9 @@
 #define NPH_VIS_VIEW_FREEZE       16 // keep last frame's culling camera (debugging)
 #define NPH_VIS_VIEW_SW_RASTER    32 // small clusters rasterise in software
 #define NPH_VIS_VIEW_LIGHT_GRID   64 // local lights are binned (else every light is global)
+#define NPH_VIS_VIEW_SKIN                                                                          \
+    128 // masked clusters at the front of their instance draw first,
+        // writing depth (mesh path; NphVisViewData.skin_fraction)
 
 // vis_lights.comp modes (NphVisPush.mode).
 #define NPH_VIS_LIGHTS_UPDATE 0 // apply the frame's light updates
@@ -196,7 +200,7 @@ NPH_SHARED_STRUCT(NphVisArgs)
 {
     u32 cull_args[2][4];      // meshlet cull per phase: x, y, z, unused
     u32 instance2_args[4];    // phase 1's cull of the instances phase 0 deferred
-    u32 raster_args[2][3][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
+    u32 raster_args[2][4][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
     u32 light_tile_args[4];   // the light masks: tile groups in x and y, light words in z
 };
 
@@ -208,7 +212,7 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 deferred_meshlets;  // phase 1's meshlet candidates: those phase 0 deferred, then the
                             // meshlets of deferred instances phase 1 found visible
     u32 clusters;           // visible clusters, phase 0's first
-    u32 raster_count[2][3]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
+    u32 raster_count[2][4]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
     u32 overflow;           // NPH_VIS_OVERFLOW_*
     u32 hzb_full;           // nonzero: phase 1 drew something no tile list bounds, so the
                             // pyramid after it rebuilds every tile
@@ -262,7 +266,7 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 deferred_instances; // u32[]
     u64 deferred_meshlets;  // uvec2[] (instance, meshlet): phase 1's meshlet candidates
     u64 clusters;           // NphVisCluster[]
-    u64 raster_lists[2][3]; // u32[] of cluster indices: [phase][NPH_VIS_RASTER_*]
+    u64 raster_lists[2][4]; // u32[] of cluster indices: [phase][NPH_VIS_RASTER_*]
     u64 draws[2][2];        // NphVisDraw[]: the hardware kinds, for the indirect raster
     u64 hzb_dirty;          // u32[]: a bit per NPH_VIS_HZB_TILE tile phase 1 drew into
     u64 lights;             // NphVisLight[]
@@ -291,7 +295,7 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 hzb_tiles_x;         // tiles per row of hzb_dirty
     u32 light_slots;         // slots the light pass walks
     u32 light_tiles_y;       // rows of light tiles (the grid has the row length)
-    u32 pad0;
+    f32 skin_fraction;       // NphRendererDesc.masked_skin (NPH_VIS_VIEW_SKIN)
 };
 
 // Push constants of every production-path shader. The visibility buffer

@@ -19,6 +19,12 @@
 // against the opaque surfaces drawn before it, and its texture is not
 // sampled behind them. The mesh stage hands it the material's alpha test
 // (vis_raster_mesh.glsl), so the texture fetch is its only read before the
+// atomic. The masked skin (VIS_LATE_Z: the masked clusters at the front of
+// their instance, vis_cull_meshlets.comp) runs the same alpha test without
+// the early test and writes its depth after it, before the other masked
+// clusters, so that their fragments behind a leaf the skin drew are
+// rejected before their shader; the depth it writes is that of a fragment
+// that passed its alpha test, which no farther fragment could beat in the
 // atomic. The vertex path has no depth attachment; it
 // discards back faces here, and runs the same alpha test in its masked
 // variant. Included with VIS_MESH (0: the vertex path) and VIS_MASKED set.
@@ -42,7 +48,12 @@ layout(location = 0) out uvec2 out_visibility;
 
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
-#if VIS_MESH
+// The masked skin (VIS_LATE_Z) writes its depth after the alpha test, so it
+// takes no early test.
+#ifndef VIS_LATE_Z
+#define VIS_LATE_Z 0
+#endif
+#if VIS_MESH && !VIS_LATE_Z
 layout(early_fragment_tests) in;
 #endif
 

@@ -39,7 +39,8 @@ shared vec4 s_clip[64];
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
-    const uint kind = uint(VIS_MASKED);
+    // The masked pipelines draw the skin's list too (NphVisPush.mode).
+    const uint kind = VIS_MASKED != 0 ? pc.mode : uint(NPH_VIS_RASTER_OPAQUE);
     const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (wg >= VisCountersRef(view.v.counters).c.raster_count[pc.phase][kind]) {
         SetMeshOutputsEXT(0u, 0u);

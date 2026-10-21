@@ -143,6 +143,10 @@ typedef struct NphRendererDesc {
                               // visible (262144)
     f32 sw_raster_pixels;     // clusters whose triangles average at most this many pixels
                               // across (and that fit in 64) rasterise in software (3)
+    f32 masked_skin;          // the masked clusters at the front of their instance, within
+                              // this share of the chord their view ray cuts through its box,
+                              // draw first writing their depth, so the leaves behind them are
+                              // rejected early (the mesh path; 0.35)
     u32 max_instance_updates; // instance records sent to the GPU per frame (16384); the
                               // rest wait for the next frame
     u32 max_material_slots;   // material slots across all instances (4 * max_instances);
@@ -535,6 +539,7 @@ typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_NO_SW_RASTER = 1U << 2U,  // every cluster through the hardware raster
     NPH_RENDER_VIS_NO_LIGHT_GRID = 1U << 3U, // every light for every pixel, as the reference
     NPH_RENDER_VIS_RT_SHADOWS = 1U << 4U,    // no virtual shadow map: the sun's shadows ray traced
+    NPH_RENDER_VIS_NO_SKIN = 1U << 5U,       // no masked cluster draws first writing depth
 } NphRenderVisFlags;
 
 // How a view's exposure is set.

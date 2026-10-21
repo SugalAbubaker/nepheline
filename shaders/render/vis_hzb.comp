@@ -64,9 +64,13 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 #endif
 
 // The workgroup's light tiles' depths, as uint bits (positive floats order
-// as their bits do), and a bit per tile where the background shows.
-shared uint s_far[4];
-shared uint s_near[4];
+// as their bits do), and a bit per tile where the background shows. A
+// struct of their own (docs/build.md "Shaders": the counters hold uint[4]).
+struct TileDepths {
+    uint far;
+    uint near;
+};
+shared TileDepths s_tiles[4];
 shared uint s_background;
 
 float source_depth(ivec2 p)
@@ -154,8 +158,8 @@ void main()
     const bool light_depths =
         VisCountersRef(VisViewRef(pc.view).v.counters).c.lights_local != 0u;
     if (light_depths && gl_LocalInvocationIndex < 4u) {
-        s_far[gl_LocalInvocationIndex] = NPH_VIS_NO_SURFACE;
-        s_near[gl_LocalInvocationIndex] = 0u;
+        s_tiles[gl_LocalInvocationIndex].far = NPH_VIS_NO_SURFACE;
+        s_tiles[gl_LocalInvocationIndex].near = 0u;
     }
     if (light_depths && gl_LocalInvocationIndex == 0u) {
         s_background = 0u;
@@ -215,8 +219,8 @@ void main()
                 }
             }
             if (near > 0.0) {
-                atomicMin(s_far[tile], floatBitsToUint(far));
-                atomicMax(s_near[tile], floatBitsToUint(near));
+                atomicMin(s_tiles[tile].far, floatBitsToUint(far));
+                atomicMax(s_tiles[tile].near, floatBitsToUint(near));
             }
             if (background) {
                 atomicOr(s_background, 1u << tile);
@@ -230,7 +234,7 @@ void main()
                                 uint(NPH_RENDER_LIGHT_TILE);
             if (all(lessThan(tile, tiles))) {
                 VisUvec2Ref(VisViewRef(pc.view).v.light_depths).v[tile.y * tiles.x + tile.x] =
-                    uvec2(s_far[k], s_near[k] | (((s_background >> k) & 1u) << 31u));
+                    uvec2(s_tiles[k].far, s_tiles[k].near | (((s_background >> k) & 1u) << 31u));
             }
         }
     }

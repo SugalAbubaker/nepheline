@@ -151,3 +151,39 @@ cover the nearer masked and software surfaces of phase 0.
 where the atomic kept the larger index, both arbitrary (the clusters'
 indices come from atomics in the cull). The vertex path, without a depth
 attachment, keeps the atomics and the transfer clear.
+
+## Amendment (2026-10-21): the masked skin
+
+**Context.** In Bistro's foliage views most of the raster is masked
+fragments: layer after layer of leaf cards, each running its alpha test
+(an anisotropic texture sample) and its atomic, since a masked fragment
+cannot write depth early (a discarded one would occlude). Writing it after
+the alpha test instead, for every masked cluster, measured slower (2.60 ms
+against 1.85 at the hedge): the late test lost the early rejection behind
+opaque surfaces.
+
+**Decision.** On the mesh path, the masked clusters at the front of their
+instance, the skin, draw first with the alpha test and a late depth write;
+the other masked clusters follow with the early test against it. A
+cluster is skin where its centre lies within the nearest share of the
+chord its view ray cuts through the instance's box
+(`NphRendererDesc.masked_skin`, 0.35, swept on Bistro). The skin's list is
+a fourth raster kind (`NPH_VIS_RASTER_SKIN`); the vertex path, without a
+depth attachment, has none.
+
+**Measurements** (interleaved, two rounds): the hedge's frame 7.85 →
+7.38 ms (masked pass 1.46 → 0.97), the terrace 8.20 → 7.84, the turn
+7.84 → 7.53, the street unchanged. The image is unchanged, pixel for
+pixel (the depth written is that of a fragment that passed its alpha
+test).
+
+**Alternatives.** Classifying alpha per region offline (certainly opaque
+or transparent texels per mip, as opacity micromaps do for rays), clipping
+cards to their opaque hull, and a software raster for small masked
+triangles: each more machinery for part of the same layers. A depth-only
+masked pre-pass: every layer's alpha test twice.
+
+**Consequences.** `NphRendererDesc.masked_skin`, `NPH_RENDER_VIS_NO_SKIN`,
+`NPH_VIS_VIEW_SKIN` and the pipeline `vis raster (mesh, masked skin)`. The
+share suits Bistro's hedges and cypresses; content of other depths may
+want another.

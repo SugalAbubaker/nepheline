@@ -86,6 +86,7 @@ nph_add_shaders(nph_shaders_render
         render/vis_raster_masked.vert
         render/vis_raster_mesh_opaque.frag
         render/vis_raster_mesh_opaque_rop.frag
+        render/vis_raster_mesh_masked_skin.frag
         render/vis_raster_mesh_masked.frag
         render/vis_raster_vert_opaque.frag
         render/vis_raster_vert_masked.frag

@@ -28,6 +28,12 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
 
+// A thread's bins' counts, as an array of a struct of its own (docs/build.md
+// "Shaders": the counters hold uint[4]).
+struct BinCount {
+    uint n;
+};
+
 shared uint s_end[NPH_RENDER_ZBINS];         // each bin's first slot, then one past its last
 shared uint s_far[NPH_RENDER_MAX_LIGHTS / 2]; // farthest bins by sorted index, 16 bits each
 shared uint s_scan[THREADS];
@@ -50,11 +56,11 @@ void main()
     }
     // 1. Each thread's bins and their total, then an inclusive scan of the
     // totals (Hillis & Steele) for each thread's first slot.
-    uint counts[BINS_PER_THREAD];
+    BinCount counts[BINS_PER_THREAD];
     uint total = 0u;
     for (uint k = 0u; k < BINS_PER_THREAD; ++k) {
-        counts[k] = histogram.v[t * BINS_PER_THREAD + k];
-        total += counts[k];
+        counts[k].n = histogram.v[t * BINS_PER_THREAD + k];
+        total += counts[k].n;
     }
     s_scan[t] = total;
     barrier();
@@ -67,7 +73,7 @@ void main()
     uint start = s_scan[t] - total;
     for (uint k = 0u; k < BINS_PER_THREAD; ++k) {
         s_end[t * BINS_PER_THREAD + k] = start;
-        start += counts[k];
+        start += counts[k].n;
     }
     barrier();
 

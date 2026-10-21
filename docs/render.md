@@ -436,7 +436,7 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
-| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones, then the compute raster of the small ones, into the visibility buffer |
+| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
 | `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
@@ -553,6 +553,29 @@ exact): its read cost more than the layers it skipped (+0.03 to +0.06 ms);
 and masked depth writes with the test moved after the alpha test, so leaves
 would hide leaves: 2.60 ms, since the late test no longer rejects the
 fragments behind opaque surfaces before their shader.
+
+**The skin.** Drawing a thin front layer of the foliage that way, before
+the rest, keeps both: on the mesh path the cull marks a masked cluster as
+its instance's skin where its centre lies within the nearest
+`NphRendererDesc.masked_skin` (0.35) of the chord the view ray through it
+cuts through the instance's box (the mesh's dequantisation box, in the
+instance's own space: a few dozen operations a masked cluster), and lists
+it apart (`NPH_VIS_RASTER_SKIN`). The masked pass draws the skin first with
+the alpha test and no early test, writing the depth of the fragments that
+pass it, then the other masked clusters as before: their fragments behind a
+leaf the skin drew are rejected before their shader. The skin's fragments
+behind opaque surfaces run their shader, which is the trade the share
+sets. The image does not change: the depth written is that of a fragment
+that passed its alpha test, which no farther fragment could beat in the
+atomic, and equal depths still pass and leave the atomic to decide (a
+test renders checkered spheres seen through their holes with and without
+it, pixel for pixel). Interleaved on Bistro (two rounds; ms, frame and
+masked pass): the hedge 7.85 and 1.46 without, 7.38 and 0.97 with 0.35;
+the terrace 8.20 and 1.01, 7.84 and 0.66; the turn 7.84 and 0.93, 7.53
+and 0.64; the street unchanged. Shares of 0.25 and 0.30 left more leaves
+behind (the hedge 7.56, 7.41 ms), 0.45 to 0.6 drew too many late (7.47 to
+7.84 ms). `NPH_RENDER_VIS_NO_SKIN` turns it off; the vertex path has no
+depth attachment and draws every masked cluster alike.
 
 **The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
 the opaque clusters whose bounding sphere projects in front of the near

@@ -1311,6 +1311,86 @@ NTEST(vis, the_software_raster_leaves_no_cracks)
     test_render_teardown(&fx);
 }
 
+// The masked clusters' skins (counted from the counters of the last frame).
+static u32 skin_clusters(RenderFixture *f)
+{
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NphVisCounters c;
+    test_read_buffer(f->dev, f->renderer->vis.counters, 0U, sizeof c, &c);
+    return c.raster_count[0][NPH_VIS_RASTER_SKIN] + c.raster_count[1][NPH_VIS_RASTER_SKIN];
+}
+
+// The masked clusters at the front of their instance (the skin) draw first
+// and write their depth after the alpha test, so that the masked fragments
+// behind a leaf they drew are rejected before their shader: the image is
+// the one without the skin, pixel for pixel. Double-sided spheres with
+// checkered holes, one behind another: the front halves' meshlets are skin,
+// the back halves', seen through the holes, are not.
+NTEST_F(Vis, the_masked_skin_changes_nothing)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->vis.mesh_shaders) {
+        NTEST_SKIP("the skin is the mesh path's");
+    }
+    u8 checker[8U * 8U * 4U];
+    for (u32 i = 0; i < 64U; ++i) {
+        const bool on = ((i % 8U) + (i / 8U)) % 2U == 0U;
+        checker[i * 4U + 0U] = on ? 255U : 64U;
+        checker[i * 4U + 1U] = 200U;
+        checker[i * 4U + 2U] = on ? 64U : 255U;
+        checker[i * 4U + 3U] = on ? 255U : 0U;
+    }
+    const void *mips[1] = {checker};
+    const u64 sizes[1] = {sizeof checker};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 8U;
+    td.height = 8U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    md.double_sided = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+    NphRenderMaterial leaves;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &leaves), NPH_RESULT_OK);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    (void)instance(f, sphere, leaves, at(-0.3, 0.1, 0.0, 1.4F));
+    (void)instance(f, sphere, leaves, at(0.4, -0.2, -1.5, 1.6F));
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 10000.0F;
+    ld.direction = nph_vec3(0.3F, -0.5F, -1.0F);
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    v.ev100 = 12.0F;
+    static u8 with_skin[PIXELS];
+    static u8 without[PIXELS];
+    (void)render_into(f, &v, 3U, with_skin);
+    const u32 skins = skin_clusters(f);
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SKIN;
+    const NphRenderFrameStats plain = render_into(f, &v, 3U, without);
+    const u32 none = skin_clusters(f);
+    const ImageDiff d = image_diff(with_skin, without, 0U);
+    NTEST_LOG("skin clusters %u of %u; with vs without: %.2f %% identical, max %u", skins,
+              plain.vis_clusters, (f64)d.within * 100.0, d.max);
+    NTEST_EXPECT_GT_UINT(skins, 0U);
+    NTEST_EXPECT_LT_UINT(skins, plain.vis_clusters);
+    NTEST_EXPECT_EQ_UINT(none, 0U);
+    NTEST_EXPECT_EQ_UINT(d.max, 0U);
+}
+
 NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
 {
     REQUIRE_PRODUCTION(f);

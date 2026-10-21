@@ -63,6 +63,7 @@ void main()
     uint vertex_offset = 0u;
     vec3 c = vec3(0.0); // the meshlet's sphere, camera relative
     float r = 0.0;
+    bool skin = false; // a masked cluster at the front of its instance (below)
     if (valid) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
@@ -131,6 +132,28 @@ void main()
             }
             visible = !culled_frustum && !culled_cone && !defer && !culled_occlusion;
         }
+        // The front of a masked instance on the mesh path (the skin): the
+        // cluster's centre within the nearest skin_fraction of the chord its
+        // view ray cuts through the instance's box (the mesh's dequantisation
+        // box), whose depth is written after its alpha test so that the leaves
+        // behind it are rejected before their fragment shader.
+        if (visible && alpha_mode == 1u && (view.v.flags & NPH_VIS_VIEW_SKIN) != 0u) {
+            const mat3 inv = transpose(vis_normal_matrix(inst.transform));
+            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            const float dist = length(c);
+            const vec3 o = inv * (-t);
+            const vec3 d = inv * (c / max(dist, 1e-6));
+            const vec3 lo = mesh.position_offset.xyz;
+            const vec3 hi = lo + mesh.position_scale.xyz;
+            const vec3 a = (lo - o) / d;
+            const vec3 b = (hi - o) / d;
+            const vec3 near3 = min(a, b);
+            const vec3 far3 = max(a, b);
+            const float enter = max(max(max(near3.x, near3.y), near3.z), 0.0);
+            const float exit = min(min(far3.x, far3.y), far3.z);
+            skin = dist - enter <= view.v.skin_fraction * max(exit - enter, 0.0);
+        }
     }
 
     VIS_COUNT(counters.c.meshlets_culled_frustum, culled_frustum);
@@ -174,13 +197,16 @@ void main()
                        side <= view.v.sw_raster_pixels;
         }
     }
+    skin = skin && visible;
     uint j0;
     uint j1;
     uint j2;
+    uint j3;
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_OPAQUE],
                 visible && !masked && !software ? 1u : 0u, j0);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_MASKED],
-                visible && masked ? 1u : 0u, j1);
+                visible && masked && !skin ? 1u : 0u, j1);
+    VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SKIN], skin ? 1u : 0u, j3);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SOFTWARE],
                 visible && software ? 1u : 0u, j2);
     VIS_ADD(counters.c.triangles, visible ? triangles : 0u);
@@ -224,10 +250,11 @@ void main()
     VisClustersRef(view.v.clusters).c[g] = cluster;
     // Every raster list holds at most one entry per cluster, so an index
     // reserved here is below max_clusters.
-    const uint kind = masked     ? uint(NPH_VIS_RASTER_MASKED)
+    const uint kind = skin       ? uint(NPH_VIS_RASTER_SKIN)
+                      : masked   ? uint(NPH_VIS_RASTER_MASKED)
                       : software ? uint(NPH_VIS_RASTER_SOFTWARE)
                                  : uint(NPH_VIS_RASTER_OPAQUE);
-    const uint j = masked ? j1 : (software ? j2 : j0);
+    const uint j = skin ? j3 : (masked ? j1 : (software ? j2 : j0));
     VisUintRef(view.v.raster_lists[phase][kind]).v[j] = g;
     if (!software && (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
         NphVisDraw draw;

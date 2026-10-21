@@ -47,7 +47,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 856U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 872U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -72,6 +72,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_raster_mesh_opaque.frag",
     "vis_raster_mesh_masked.frag",
     "vis_raster_mesh_opaque_rop.frag",
+    "vis_raster_mesh_masked_skin.frag",
     "vis_raster_opaque.vert",
     "vis_raster_masked.vert",
     "vis_raster_vert_opaque.frag",
@@ -227,7 +228,7 @@ NphResult render_vis_create(NphRenderer *r)
     const bool gi = r->gi.supported != 0;
     for (u32 i = 0; i < (u32)VIS_SHADER_COUNT; ++i) {
         const bool mesh_stage =
-            i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_OPAQUE_ROP;
+            i >= (u32)VIS_SHADER_MESH_OPAQUE && i <= (u32)VIS_SHADER_MESH_FRAG_MASKED_SKIN;
         const bool vertex_stage =
             i >= (u32)VIS_SHADER_VERT_OPAQUE && i <= (u32)VIS_SHADER_VERT_FRAG_MASKED;
         // Only the raster path in use: a mesh shader cannot even be loaded
@@ -280,6 +281,8 @@ NphResult render_vis_create(NphRenderer *r)
                                        "vis raster (mesh, masked)", &v->raster[1]));
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_OPAQUE, VIS_SHADER_MESH_FRAG_OPAQUE_ROP,
                                        "vis raster (mesh, opaque, ROP)", &v->raster_rop));
+        NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_MASKED, VIS_SHADER_MESH_FRAG_MASKED_SKIN,
+                                       "vis raster (mesh, masked skin)", &v->raster_skin));
     } else {
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_VERT_OPAQUE, VIS_SHADER_VERT_FRAG_OPAQUE,
                                        "vis raster (indirect, opaque)", &v->raster[0]));
@@ -331,6 +334,7 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
     nph_gpu_pipeline_destroy(dev, v->raster_rop);
+    nph_gpu_pipeline_destroy(dev, v->raster_skin);
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
@@ -582,6 +586,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->max_mesh_groups_x =
         nph_max_u32(nph_min_u32(lim->max_mesh_workgroup_count[0], 1U << 22U), 1U);
     vd->sw_raster_pixels = d->sw_raster_pixels;
+    vd->skin_fraction = d->masked_skin;
     vd->hzb_dirty = nph_gpu_buffer_address(dev, v->hzb_dirty);
     vd->hzb_tiles_x = v->hzb_tiles_x;
 
@@ -802,12 +807,18 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
         nph_gpu_cmd_bind_index_buffer(cmd, nph_gpu_rg_buffer(graph, f->index_pool), 0U,
                                       NPH_GPU_INDEX_U16);
     }
-    // The hardware kinds: opaque, then masked.
-    for (u32 k = 0; k < 2U; ++k) {
+    // The hardware kinds: opaque, then the masked skin (writing depth), then
+    // the other masked clusters.
+    static const u32 k_order[3] = {NPH_VIS_RASTER_OPAQUE, NPH_VIS_RASTER_SKIN,
+                                   NPH_VIS_RASTER_MASKED};
+    for (u32 o = 0; o < 3U; ++o) {
+        const u32 k = k_order[o];
         if ((kinds & (1U << k)) == 0U) {
             continue;
         }
-        nph_gpu_cmd_bind_pipeline(cmd, rop && k == 0U ? v->raster_rop : v->raster[k]);
+        nph_gpu_cmd_bind_pipeline(cmd, k == NPH_VIS_RASTER_SKIN ? v->raster_skin
+                                       : rop && k == 0U         ? v->raster_rop
+                                                                : v->raster[k]);
         p.mode = k;
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
         const u64 kind = (u64)phase * (u64)NPH_VIS_RASTER_KINDS + k;
@@ -862,12 +873,14 @@ static void raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
 
 static void raster0_masked_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    raster_record((NphRenderer *)user, graph, cmd, 0U, 2U, false);
+    raster_record((NphRenderer *)user, graph, cmd, 0U,
+                  (1U << NPH_VIS_RASTER_MASKED) | (1U << NPH_VIS_RASTER_SKIN), false);
 }
 
 static void raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
-    raster_record((NphRenderer *)user, graph, cmd, 1U, 3U, false);
+    NphRenderer *r = (NphRenderer *)user;
+    raster_record(r, graph, cmd, 1U, r->vis.mesh_shaders ? 11U : 3U, false);
 }
 
 // The pyramid: mip 0 from the visibility buffer's depth (vis_hzb.comp),
@@ -1379,6 +1392,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     }
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_SW_RASTER) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_SW_RASTER;
+    }
+    if (v->mesh_shaders && (view->vis_flags & (u32)NPH_RENDER_VIS_NO_SKIN) == 0U) {
+        flags |= (u32)NPH_VIS_VIEW_SKIN;
     }
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_LIGHT_GRID) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_LIGHT_GRID;
