@@ -189,29 +189,30 @@ void main()
     }
     // What phase 1 draws, the depth pyramid after it rebuilds: mark the
     // tiles the cluster's sphere projects onto (the triangles lie inside
-    // it), or the whole pyramid when that is no help.
+    // it), or the whole pyramid when the sphere does not project (it reaches
+    // the near plane). A row of tiles is a run of the mask's bits, set a word
+    // at a time, so a cluster of any size marks its rectangle in a few
+    // atomics: a large one no longer asks for the whole pyramid, whose
+    // rebuild cost Bistro's street 0.28 ms on every fourth frame.
     if (phase == 1u) {
         const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
         vec4 rect;
         float depth;
-        bool full = true;
         if (vis_project_sphere(cv, r, view.v.projection, rect, depth)) {
             const vec4 px = clamp(rect + view.v.jitter.xyxy, 0.0, 1.0) * view.v.viewport.xyxy;
             const ivec2 t0 = ivec2(px.xy) / NPH_VIS_HZB_TILE;
             const ivec2 t1 = ivec2(min(px.zw, view.v.viewport.xy - 1.0)) / NPH_VIS_HZB_TILE;
-            const ivec2 n = t1 - t0 + 1;
-            if (n.x * n.y <= 64) {
-                full = false;
-                VisUintRef dirty = VisUintRef(view.v.hzb_dirty);
-                for (int y = t0.y; y <= t1.y; ++y) {
-                    for (int x = t0.x; x <= t1.x; ++x) {
-                        const uint tile = uint(y) * view.v.hzb_tiles_x + uint(x);
-                        atomicOr(dirty.v[tile >> 5u], 1u << (tile & 31u));
-                    }
+            VisUintRef dirty = VisUintRef(view.v.hzb_dirty);
+            for (int y = t0.y; y <= t1.y; ++y) {
+                const uint first = uint(y) * view.v.hzb_tiles_x + uint(t0.x);
+                const uint last = uint(y) * view.v.hzb_tiles_x + uint(t1.x);
+                for (uint w = first >> 5u; w <= (last >> 5u); ++w) {
+                    const uint lo = max(first, w * 32u) - w * 32u;
+                    const uint hi = min(last, w * 32u + 31u) - w * 32u;
+                    atomicOr(dirty.v[w], (0xFFFFFFFFu >> (31u - hi)) & (0xFFFFFFFFu << lo));
                 }
             }
-        }
-        if (full) {
+        } else {
             atomicOr(counters.c.hzb_full, 1u);
         }
     }

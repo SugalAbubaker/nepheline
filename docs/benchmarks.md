@@ -253,11 +253,11 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 6.97 ms | 7.97 ms | resolve 3.59 ms (§10.4 line: 1.20 ms), raster 0.82 ms + Hi-Z 0.42 ms (with culling, 0.90 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
-| `bistro_street_walk_production` | 7.03 ms | 7.95 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
-| `bistro_street_turn_production` | 7.48 ms | 8.58 ms | raster 1.39 ms: the turn sweeps over the foliage the next two views hold |
-| `bistro_terrace_production` | 7.96 ms | 8.75 ms | raster 1.54 ms: alpha-tested cypresses beside the café |
-| `bistro_hedge_production` | 7.42 ms | 8.18 ms | raster 1.84 ms: an alpha-tested hedge and cypresses across the view |
+| `bistro_street_production` | 6.93 ms | 7.79 ms | resolve 3.61 ms (§10.4 line: 1.20 ms), raster 0.80 ms + Hi-Z 0.36 ms (with culling, 0.89 ms), TAA 0.86 ms (with post, 0.40 ms), AO 0.45 ms |
+| `bistro_street_walk_production` | 7.00 ms | 7.84 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
+| `bistro_street_turn_production` | 7.31 ms | 8.41 ms | raster 1.46 ms: the turn sweeps over the foliage the next two views hold |
+| `bistro_terrace_production` | 7.71 ms | 8.54 ms | raster 1.58 ms: alpha-tested cypresses beside the café |
+| `bistro_hedge_production` | 7.34 ms | 8.12 ms | raster 1.89 ms: an alpha-tested hedge and cypresses across the view |
 
 Bistro's manifest has five views: the scene's own camera still
 (`street`), walking along the street at 1.4 m/s (`street_walk`), turning
@@ -268,7 +268,17 @@ and stills along the turn's path cost what the turn does (their raster
 view decides, and the two stills hold the foliage that costs most: the
 masked fragments' alpha test, which the mesh stage now hands them
 (docs/render.md "Masked clusters"), took their frames from 8.14 and 7.72
-ms (p99 9.25 and 8.53) to the rows' 7.96 and 7.42.
+ms (p99 9.25 and 8.53) to 7.96 and 7.42. Then phase 1's large clusters
+stopped asking for a whole second pyramid (docs/render.md "The depth
+pyramid"), which the terrace had rebuilt on most frames and the street on
+every fourth.
+
+The p99 includes the machine as well as the renderer: in a frame-by-frame
+record of a still view, every large pass (the resolve, the raster, TAA,
+the occlusion, even the 0.05 ms software raster) now and then runs about
+0.5 ms longer than it otherwise does, and the largest frames come in
+bursts, which other clients of the GPU on the runner's desktop (launchers,
+overlays, editors) would explain.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -285,7 +295,7 @@ that copied it into a depth attachment for them, and building the depth
 pyramid's mips six a dispatch took 0.03 ms off the second pyramid. The
 frame varies by about 0.05 ms from run to run, and the nightly order,
 which runs these after the synthetic scenes on a warm GPU, measures about
-0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-20f`).
+0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-20g`).
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal

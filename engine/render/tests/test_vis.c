@@ -711,7 +711,11 @@ static void reveal_frames(RenderFixture *f, const NphRenderView *v, u32 frames, 
     }
 }
 
-static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild, NphGpuImage target)
+// With `big`, the wall hides one large cube instead of the spheres: its one
+// cluster's sphere projects onto more than 64 of a wide target's 32-pixel
+// tiles, rows of them running across the mask's words.
+static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild, NphGpuImage target,
+                                      bool big)
 {
     f->renderer->vis.hzb_full_rebuild = full_rebuild;
     NphRenderEnvironmentDesc env;
@@ -729,11 +733,19 @@ static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild, NphGp
     const NphRenderMesh sphere = mesh_of(f, make_sphere);
     const NphRenderMaterial m = material(f, nph_vec4(0.7F, 0.7F, 0.7F, 1.0F), 0.0F, 0.6F);
     NphRenderTransform wall = at(0.0, 0.0, 1.0, 1.0F);
-    wall.linear = nph_mat3_from_scale(nph_vec3(4.0F, 4.0F, 0.2F));
+    wall.linear = nph_mat3_from_scale(nph_vec3(big ? 8.0F : 4.0F, 4.0F, 0.2F));
     const NphRenderInstance w = instance(f, cube, m, wall);
-    for (u32 i = 0; i < 16U; ++i) {
-        (void)instance(f, sphere, m,
-                       at(-1.2 + 0.8 * (f64)(i % 4U), -1.2 + 0.8 * (f64)(i >> 2U), -1.0, 0.6F));
+    if (big) {
+        // Far enough behind the wall that its sphere (radius 1.73) is hidden
+        // whole, so that phase 0 defers it; right of centre, so that the cube
+        // itself covers columns 20 to 28, across the words' boundaries of
+        // rows 4 to 6 (a row is 33 tiles).
+        (void)instance(f, cube, m, at(3.3, 0.0, -1.5, 2.0F));
+    } else {
+        for (u32 i = 0; i < 16U; ++i) {
+            (void)instance(f, sphere, m,
+                           at(-1.2 + 0.8 * (f64)(i % 4U), -1.2 + 0.8 * (f64)(i >> 2U), -1.0, 0.6F));
+        }
     }
     reveal_frames(f, &v, 3U, target, img);
     const NphRenderTransform aside = at(60.0, 0.0, 1.0, 1.0F);
@@ -771,8 +783,9 @@ static Pyramid pyramid_after_a_reveal(RenderFixture *f, bool full_rebuild, NphGp
 // must be the pyramid a full rebuild gives, texel for texel: in the
 // fixture's target, and in a wide 1040 x 262 one (mip 0 520 x 131), where
 // the spheres cover the middle of the view only, so that vis_hzb_mips.comp
-// keeps phase 0's mips for the tiles at the sides and rebuilds the others.
-static void compare_reveals(NphGpuImage (*make_target)(NphGpuDevice *), u32 min_lit)
+// keeps phase 0's mips for the tiles at the sides and rebuilds the others;
+// there again with the large cube (`big`).
+static void compare_reveals(NphGpuImage (*make_target)(NphGpuDevice *), u32 min_lit, bool big)
 {
     RenderFixture tiled;
     RenderFixture full;
@@ -785,12 +798,12 @@ static void compare_reveals(NphGpuImage (*make_target)(NphGpuDevice *), u32 min_
         NTEST_SKIP("no production path on this device");
     }
     NphGpuImage target = make_target != NULL ? make_target(tiled.dev) : NPH_GPU_IMAGE_NULL;
-    const Pyramid a = pyramid_after_a_reveal(&tiled, false, target);
+    const Pyramid a = pyramid_after_a_reveal(&tiled, false, target, big);
     nph_gpu_image_destroy(tiled.dev, target);
     test_render_teardown(&tiled);
     test_render_setup(&full, NULL);
     target = make_target != NULL ? make_target(full.dev) : NPH_GPU_IMAGE_NULL;
-    const Pyramid b = pyramid_after_a_reveal(&full, true, target);
+    const Pyramid b = pyramid_after_a_reveal(&full, true, target, big);
     nph_gpu_image_destroy(full.dev, target);
     test_render_teardown(&full);
     // Phase 1 drew the spheres: the image is not the bare sky, and in the
@@ -823,8 +836,9 @@ static NphGpuImage wide_target(NphGpuDevice *dev)
 
 NTEST(vis, the_pyramid_after_phase_1_is_a_full_rebuild_where_it_matters)
 {
-    compare_reveals(NULL, 101U);
-    compare_reveals(wide_target, 0U);
+    compare_reveals(NULL, 101U, false);
+    compare_reveals(wide_target, 0U, false);
+    compare_reveals(wide_target, 0U, true);
 }
 
 NTEST_F(Vis, production_matches_the_reference)

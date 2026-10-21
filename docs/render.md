@@ -574,8 +574,14 @@ the bus's bandwidth). The pyramid after phase 1 differs from the one
 after phase 0 only where phase 1 drew, so phase 1's meshlet cull marks
 the 32-pixel tiles each of its clusters' spheres projects onto, and that
 pyramid rebuilds mip 0 in the marked tiles alone before the coarser mips
-(0.066 ms in the 4K field). A cluster it cannot bound, or one covering
-more than 64 tiles, asks for a full rebuild. A test compares the result
+(0.066 ms in the 4K field). A row of tiles is a run of the mask's bits,
+set a word at a time, so a cluster of any size marks its rectangle in a
+few atomics; only a sphere that does not project (it reaches the near
+plane) asks for a full rebuild. Clusters covering more than 64 tiles used
+to ask for one too: in Bistro's street a large cluster that phase 0 defers
+on every fourth frame (as the jitter moves the edge of what hides it) made
+that frame's second pyramid 0.32 ms instead of 0.04, the frame 0.28 ms
+longer, and the 1 % low 0.2 to 0.4 ms worse. A test compares the result
 with a full rebuild's, texel for texel, after a wall moves off what it
 hid.
 
