@@ -517,6 +517,13 @@ typedef struct RenderVis {
     u32 overflow_logged;            // overflow bits already reported
     b32 updates_logged;             // instance updates waited for a frame: said once
     VisFrame frame;
+    // The resolve's push constants, written with the view (the frame's
+    // record is reset after it); the passes' indices are added as it records.
+    NphVisResolvePush resolve_push;
+    // The resolve's variants for debug views (vis_resolve.glsl k_debug), as
+    // compute[]'s: [ray-traced shadows][virtual shadow map][radiance cache].
+    NphGpuPipeline resolve_debug[2][2][2];
+    b32 debug_view; // this frame's view draws a debug view
 } RenderVis;
 
 // The jitter sequence's length: eight Halton (2, 3) points, which the

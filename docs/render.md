@@ -621,11 +621,26 @@ the occlusion 0.15; the environment 0.08 (the parts overlap, so they sum
 to more). The pass is bound by the latency of those chains: with fewer
 warps resident it slows in proportion (28 warps an SM: 3.60 ms; about 20:
 4.72; about 12: 6.96). The variant with both the shadow map and the cache
-holds 72 registers and spills 2,304 bytes a workgroup to shared memory
+held 72 registers and spilled 2,304 bytes a workgroup to shared memory
 (the driver's "Shared Memory Size"), which comes out of the L1: a build
 that lands on 64 registers but spills 5,888 bytes runs no faster, its
 extra warps paying for a quarter of the L1, so a change to the resolve is
-judged by both numbers. Measured and not kept, in runs interleaved on the
+judged by both numbers. The view's values that every invocation reads
+come as the pass's push constants (`NphVisResolvePush`: the target's size,
+the cluster, instance and mesh tables' and the render view's addresses,
+and the transform), which the compiler uses as constant-bank operands
+where values loaded from the view record take registers; and the debug
+views have pipelines of their own (`k_debug`), so the others compile
+without their branches. The allocation sits on a cliff, each variant
+landing differently: the transform comes from the push constants in the
+radiance cache's variants and from the view record in the others, which
+each measured best. The street's variant holds 64 registers and 3,840
+bytes, and the pass took 3.21 ms against 3.36 in the street, 2.73
+against 2.85 at the hedge, 1.12 against 1.17 in the 4K field, 0.93
+against 0.97 in the field without the cache and 1.10 against 1.22 in the
+sunlit field without it (interleaved, three rounds; with every value
+from the push constants the cache-less field took 1.02, its variant
+spilling 4,352 bytes). Measured and not kept, in runs interleaved on the
 street, the hedge view and the 4K field:
 - the visible cluster carrying its meshlet's streams (48 bytes instead of
   16), so that the instance, the mesh and the triangle load together and
@@ -639,7 +654,9 @@ street, the hedge view and the 4K field:
 - the emissive texture sampled with the others before the environment, and
   the radiance cache's lookup split so that its slot alone stays live
   across the material: the compiler's allocation (72 registers, 2,304
-  bytes) did not change.
+  bytes) did not change;
+- the ambient occlusion fetched first thing, so that its latency hides
+  behind the triangle's: 0.03 to 0.05 ms slower.
 
 **The HDR target** is B10G11R11 where the device can store to it, sample
 it, and blend into it (RGBA16F otherwise; the reference keeps RGBA16F):

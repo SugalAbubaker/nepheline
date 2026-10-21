@@ -12,15 +12,20 @@
 // Deferred Shading", HPG 2015). Where nothing was drawn it writes the
 // background, as the reference's sky pass does.
 //
-// Writes pre-exposed radiance into the HDR image whose storage index is
-// arg0; arg1 is the visibility buffer's, arg2 the ambient occlusion's
-// sampled one (ao.c; NPH_VIS_NO_AO: none this frame).
+// Writes pre-exposed radiance into the HDR image. Its push constants
+// (NphVisResolvePush) carry the images' indices and the view's values every
+// invocation reads (the transform, the target's size, the tables'
+// addresses): the shader takes them as constant-bank operands, where values
+// loaded from the view record take registers, which the resolve runs short
+// of (docs/render.md "Shading").
 //
 // Compiled twice: vis_resolve.comp, and vis_resolve_rt.comp with ray
 // queries (NPH_RAY_QUERY), which traces shadow rays for the lights that
 // cast them (rt_common.glsl); the renderer takes the second when a light
 // casts shadows. Each is specialised on whether the frame has the sun's
-// virtual shadow map (k_vsm) and the radiance cache (k_gi).
+// virtual shadow map (k_vsm) and the radiance cache (k_gi), and on whether
+// it draws the debug views (k_debug): the others compile without their
+// branches.
 #ifndef NPH_VIS_RESOLVE_GLSL
 #define NPH_VIS_RESOLVE_GLSL
 
@@ -93,10 +98,12 @@ vec4 vis_gi_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
 #define NPH_SURFACE_GRID_LIGHTS
+layout(constant_id = 3) const bool k_debug = false;
+#define NPH_SURFACE_DEBUG_MODE(view) (k_debug ? (view).v.debug_mode : NPH_RENDER_DEBUG_NONE)
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+layout(push_constant, scalar) uniform Push { NphVisResolvePush pc; };
 
 // Whether the HDR target is B10G11R11, whose coarse steps are dithered.
 layout(constant_id = 0) const bool k_dither = false;
@@ -108,7 +115,7 @@ void store(ivec2 p, vec3 color, bool dither)
     if (dither) {
         color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
     }
-    imageStore(nph_images_2d[nonuniformEXT(pc.arg0)], p, vec4(color, 1.0));
+    imageStore(nph_images_2d[nonuniformEXT(pc.hdr_index)], p, vec4(color, 1.0));
 }
 
 // A bright colour from a key (an integer hash: Wang, "Integer Hash
@@ -145,23 +152,24 @@ void main()
 {
     VisViewRef view = VisViewRef(pc.view);
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    const vec2 size = view.v.viewport.xy;
+    const vec2 size = vec2(float(pc.size & 0xFFFFu), float(pc.size >> 16u));
     if (p.x >= int(size.x) || p.y >= int(size.y)) {
         return;
     }
-    ViewRef rview = ViewRef(view.v.render_view);
+    ViewRef rview = ViewRef(pc.render_view);
 #ifdef NPH_RAY_QUERY
     g_tlas = rview.v.tlas;
     g_tlas_offset = rview.v.tlas_offset.xyz;
 #endif
     g_vsm = VsmViewRef(rview.v.vsm);
     g_pixel = p;
-    g_ao = pc.arg2;
-    const uint debug = rview.v.debug_mode;
+    g_ao = pc.ao_index;
+    const uint debug = NPH_SURFACE_DEBUG_MODE(rview);
     // Decided here, so that nothing of the view stays live to the store.
     const bool dither = k_dither && debug == NPH_RENDER_DEBUG_NONE;
-    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
-    const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg1)], p).x;
+    const vec2 inv_size = vec2(pc.inv_width, pc.inv_height);
+    const vec2 q = (vec2(p) + 0.5) * inv_size * 2.0 - 1.0;
+    const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.vis_index)], p).x;
     g_depth = uintBitsToFloat(uint(v >> 32ul));
     vec3 color;
     if (v == 0ul) {
@@ -171,12 +179,12 @@ void main()
         const uint g = vis_cluster(v);
         const uint key = debug == NPH_RENDER_DEBUG_CLUSTERS    ? g
                          : debug == NPH_RENDER_DEBUG_TRIANGLES ? (g << 7u) ^ vis_triangle(v)
-                                                               : VisClustersRef(view.v.clusters).c[g].instance;
+                                                               : VisClustersRef(pc.clusters).c[g].instance;
         color = vis_debug_color(key);
     } else {
-        const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[vis_cluster(v)];
-        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        const NphVisCluster cluster = VisClustersRef(pc.clusters).c[vis_cluster(v)];
+        const NphVisInstance inst = VisInstancesRef(pc.instances).i[cluster.instance];
+        const NphVisMesh mesh = VisMeshesRef(pc.meshes).m[inst.mesh];
         const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
         const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
         VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
@@ -189,10 +197,15 @@ void main()
         const vec3 w0 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.x)) + t;
         const vec3 w1 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.y)) + t;
         const vec3 w2 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.z)) + t;
-        const vec4 c0 = view.v.view_proj * vec4(w0, 1.0);
-        const vec4 c1 = view.v.view_proj * vec4(w1, 1.0);
-        const vec4 c2 = view.v.view_proj * vec4(w2, 1.0);
-        const VisBarycentrics bary = vis_barycentrics(c0, c1, c2, q, 2.0 * view.v.viewport.zw);
+        // The transform from the push constants where the frame has the
+        // radiance cache, from the view's record otherwise: each variant
+        // compiles to fewer registers so on the RTX 3060 Ti (the same values;
+        // docs/render.md "Shading").
+        const mat4 view_proj = k_gi ? pc.view_proj : view.v.view_proj;
+        const vec4 c0 = view_proj * vec4(w0, 1.0);
+        const vec4 c1 = view_proj * vec4(w1, 1.0);
+        const vec4 c2 = view_proj * vec4(w2, 1.0);
+        const VisBarycentrics bary = vis_barycentrics(c0, c1, c2, q, 2.0 * inv_size);
         const mat3 world = mat3(w0, w1, w2);
         if (k_gi) {
             // The point and the triangle's normal as the cache's update

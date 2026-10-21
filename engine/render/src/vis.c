@@ -51,6 +51,7 @@ NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 856U, "NphVisViewData matches its GL
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
+NPH_STATIC_ASSERT(sizeof(NphVisResolvePush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(sizeof(NphVisHzbMipsPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, render_view) % 8U == 0U, "addresses are aligned");
 
@@ -253,10 +254,17 @@ NphResult render_vis_create(NphRenderer *r)
             d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
             d.specialization[1] = resolve_vsm ? 1U : 0U;
             d.specialization[2] = resolve_gi ? 1U : 0U;
-            d.specialization_count = 3U;
+            d.specialization_count = 4U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         render_log_statistics(r, v->compute[i], k_compute_names[i]);
+        if (i == (u32)VIS_COMPUTE_RESOLVE || resolve_rt || resolve_vsm || resolve_gi) {
+            // The same for the debug views (k_debug).
+            d.specialization[3] = 1U;
+            NPH_TRY(nph_gpu_pipeline_create_compute(
+                r->dev, &d,
+                &v->resolve_debug[resolve_rt ? 1 : 0][resolve_vsm ? 1 : 0][resolve_gi ? 1 : 0]));
+        }
     }
     if (v->mesh_shaders) {
         NPH_TRY(create_raster_pipeline(r, VIS_SHADER_MESH_OPAQUE, VIS_SHADER_MESH_FRAG_OPAQUE,
@@ -307,6 +315,9 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->light_depths);
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
+    }
+    for (u32 i = 0; i < 8U; ++i) {
+        nph_gpu_pipeline_destroy(dev, v->resolve_debug[i >> 2U][(i >> 1U) & 1U][i & 1U]);
     }
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
@@ -500,7 +511,8 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     NphVisViewData *vd = render_frame_at(r, r->layout.vis_view_offset);
     memset(vd, 0, sizeof *vd);
     vd->view = *view_m;
-    vd->view_proj = nph_mat4_mul(*proj, *view_m);
+    const NphMat4 view_proj = nph_mat4_mul(*proj, *view_m);
+    vd->view_proj = view_proj;
     vd->prev_view = v->prev_view;
     vd->prev_view_proj = v->prev_view_proj;
     // The camera's move since the previous frame, taken in doubles (the
@@ -592,6 +604,19 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     g->tile_count = v->light_tiles_x * v->light_tiles_y;
     NphRenderViewData *rv = render_frame_at(r, r->layout.view_offset);
     rv->light_grid = vd->light_grid;
+
+    // The resolve's push constants (NphVisResolvePush), from the same values.
+    NphVisResolvePush *rp = &v->resolve_push;
+    memset(rp, 0, sizeof *rp);
+    rp->view_proj = view_proj;
+    rp->view = frame + r->layout.vis_view_offset;
+    rp->render_view = frame + r->layout.view_offset;
+    rp->clusters = nph_gpu_buffer_address(dev, v->clusters);
+    rp->instances = nph_gpu_buffer_address(dev, v->instances);
+    rp->meshes = nph_gpu_buffer_address(dev, v->meshes);
+    rp->inv_width = 1.0F / (f32)width;
+    rp->inv_height = 1.0F / (f32)height;
+    rp->size = width | (height << 16U);
 }
 
 // ---------------------------------------------------------------------------
@@ -899,19 +924,21 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
 {
     NphRenderer *r = (NphRenderer *)user;
     const VisFrame *f = &r->vis.frame;
-    NphVisPush p = push_of(r, 0U, 0U);
-    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
-    p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
-    p.arg2 = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
+    NphVisResolvePush p = r->vis.resolve_push;
+    p.hdr_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
+    p.vis_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    p.ao_index = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
     // By shadow rays, the virtual shadow map, and the radiance cache.
     static const VisCompute k_resolve[2][2][2] = {
         {{VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_GI},
          {VIS_COMPUTE_RESOLVE_VSM, VIS_COMPUTE_RESOLVE_VSM_GI}},
         {{VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_GI},
          {VIS_COMPUTE_RESOLVE_RT_VSM, VIS_COMPUTE_RESOLVE_RT_VSM_GI}}};
-    nph_gpu_cmd_bind_pipeline(
-        cmd, r->vis.compute[k_resolve[r->rt.frame_shadows ? 1 : 0][r->vsm.frame_active ? 1 : 0]
-                                     [r->gi.frame_active ? 1 : 0]]);
+    const u32 rt = r->rt.frame_shadows ? 1U : 0U;
+    const u32 vsm = r->vsm.frame_active ? 1U : 0U;
+    const u32 gi = r->gi.frame_active ? 1U : 0U;
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.debug_view ? r->vis.resolve_debug[rt][vsm][gi]
+                                                     : r->vis.compute[k_resolve[rt][vsm][gi]]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
@@ -1300,6 +1327,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         flags |= (u32)NPH_VIS_VIEW_LIGHT_GRID;
     }
     write_view(r, view, width, height, view_m, proj, flags);
+    v->debug_view = view->debug_view != NPH_RENDER_VIEW_LIT ? 1 : 0;
     memset(f, 0, sizeof *f);
     f->view_address = r->frame_addresses[r->frame_slot] + r->layout.vis_view_offset;
     f->update_count = render_vis_write_updates(r);

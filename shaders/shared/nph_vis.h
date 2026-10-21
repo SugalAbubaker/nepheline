@@ -306,6 +306,26 @@ NPH_SHARED_STRUCT(NphVisViewData)
 // (NphVisViewData.light_depths).
 #define NPH_VIS_NO_SURFACE 0xFFFFFFFFU
 
+// Push constants of the resolve (vis_resolve.glsl): the view's values that
+// every invocation reads, which the shader then takes as constant-bank
+// operands where the view record's would be loaded into registers
+// (docs/render.md "Shading").
+NPH_SHARED_STRUCT(NphVisResolvePush)
+{
+    NphMat4 view_proj; // NphVisViewData.view_proj
+    u64 view;          // NphVisViewData
+    u64 render_view;   // NphRenderViewData
+    u64 clusters;      // NphVisViewData.clusters
+    u64 instances;     // NphVisViewData.instances
+    u64 meshes;        // NphVisViewData.meshes
+    f32 inv_width;     // 1 / the target's width
+    f32 inv_height;
+    u32 size;      // the target's width | height << 16
+    u32 hdr_index; // bindless storage: the HDR image
+    u32 vis_index; // bindless storage: the visibility buffer
+    u32 ao_index;  // bindless sampled: the ambient occlusion (NPH_VIS_NO_AO: none)
+};
+
 NPH_SHARED_STRUCT(NphVisPush)
 {
     u64 view;  // NphVisViewData

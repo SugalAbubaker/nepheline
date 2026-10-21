@@ -73,6 +73,12 @@
 #ifndef NPH_SURFACE_GRID_TILES
 #define NPH_SURFACE_GRID_TILES(g) (g).tiles
 #endif
+// The view's debug view (NPH_RENDER_DEBUG_*): a shader whose pipelines are
+// specialised on whether they draw the debug views defines it so that the
+// others compile without their branches.
+#ifndef NPH_SURFACE_DEBUG_MODE
+#define NPH_SURFACE_DEBUG_MODE(view) (view).v.debug_mode
+#endif
 
 // What shading needs to know about a point of a surface.
 struct NphSurface {
@@ -430,7 +436,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     }
 
     // The debug views that need no punctual light.
-    switch (view.v.debug_mode) {
+    switch (NPH_SURFACE_DEBUG_MODE(view)) {
     case NPH_RENDER_DEBUG_BASE_COLOR:
         return min(base.rgb, vec3(NPH_RENDER_HALF_MAX));
     case NPH_RENDER_DEBUG_NORMAL:
@@ -475,7 +481,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         }
     }
 #endif
-    if (view.v.debug_mode == NPH_RENDER_DEBUG_DIRECT) {
+    if (NPH_SURFACE_DEBUG_MODE(view) == NPH_RENDER_DEBUG_DIRECT) {
         return min(direct * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
     }
     return min((direct + rest) * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
