@@ -137,33 +137,42 @@ mat3 nph_derivative_frame(vec3 n, NphSurface s)
     return mat3(t * inv, b * inv, n);
 }
 
-// The illuminance a punctual light delivers at `p` on a surface facing it,
-// and the direction towards the light.
-vec3 nph_light_illuminance(NphRenderLightData light, vec3 p, out vec3 l)
+// The illuminance a positional light delivers on a surface facing it, from
+// its direction `l` (unit) and the squared distance `d2` (at least 1e-8) and
+// its reciprocal square root `inv_d` that gave it.
+vec3 nph_light_illuminance_from(NphRenderLightData light, vec3 l, float d2, float inv_d)
 {
-    const uint type = uint(light.direction.w);
-    if (type == NPH_RENDER_LIGHT_DIRECTIONAL) {
-        l = -light.direction.xyz;
-        return light.color.rgb;
-    }
-    const vec3 to_light = light.position.xyz - p;
-    const float d2 = max(dot(to_light, to_light), 1e-8);
-    l = to_light * inversesqrt(d2);
     // Inverse-square falloff, windowed to reach zero at the range (Karis
-    // 2013); a range of 0 is unlimited.
-    float attenuation = 1.0 / max(d2, 1e-4);
+    // 2013); a range of 0 is unlimited. 1 / max(d2, 1e-4), from the
+    // direction's reciprocal square root.
+    float attenuation = min(inv_d * inv_d, 1e4);
     if (light.position.w > 0.0) {
         const float x = d2 * light.position.w;
         const float window = clamp(1.0 - x * x, 0.0, 1.0);
         attenuation *= window * window;
     }
-    if (type == NPH_RENDER_LIGHT_SPOT) {
+    if (uint(light.direction.w) == NPH_RENDER_LIGHT_SPOT) {
         // KHR_lights_punctual: a smooth step between the cone angles.
         const float cd = dot(light.direction.xyz, -l);
         const float s = clamp(cd * light.spot.x + light.spot.y, 0.0, 1.0);
         attenuation *= s * s;
     }
     return light.color.rgb * attenuation;
+}
+
+// The illuminance a punctual light delivers at `p` on a surface facing it,
+// and the direction towards the light.
+vec3 nph_light_illuminance(NphRenderLightData light, vec3 p, out vec3 l)
+{
+    if (uint(light.direction.w) == NPH_RENDER_LIGHT_DIRECTIONAL) {
+        l = -light.direction.xyz;
+        return light.color.rgb;
+    }
+    const vec3 to_light = light.position.xyz - p;
+    const float d2 = max(dot(to_light, to_light), 1e-8);
+    const float inv_d = inversesqrt(d2);
+    l = to_light * inv_d;
+    return nph_light_illuminance_from(light, l, d2, inv_d);
 }
 
 // What the lights need to know about a shaded point.
@@ -182,6 +191,35 @@ struct NphLitPoint {
     float sun_visibility; // NPH_SURFACE_VSM's, or 1 when it is not active
 #endif
 };
+
+// The radiance the point reflects of light arriving from unit direction `l`
+// at N.L `nol` (above 0) with illuminance `e`, before exposure. The terms of
+// Karis 2013 rearranged: the GGX distribution and the Smith visibility share
+// one division, Schlick's fifth power is three multiplies, and the half
+// vector's length is |v + l| = sqrt(2 + 2 v.l) for unit v and l, so N.H and
+// V.H need no vector: one reciprocal square root, one square root and one
+// division a light where the textbook order takes six transcendentals. The
+// algebra is exact; the rounding moves results by a few ulps.
+vec3 nph_lit_reflect(NphLitPoint p, vec3 l, float nol, vec3 e)
+{
+    const float vol = dot(p.v, l);
+    const float inv_h = inversesqrt(max(2.0 + 2.0 * vol, 1e-12));
+    const float noh = clamp((dot(p.n, p.v) + nol) * inv_h, 0.0, 1.0);
+    const float voh = clamp((1.0 + vol) * inv_h, 0.0, 1.0);
+    const float a2 = p.a * p.a;
+    const float d = (noh * a2 - noh) * noh + 1.0;
+    const float gv = nol * sqrt(p.nov * p.nov * (1.0 - a2) + a2);
+    const float gl = p.nov * sqrt(nol * nol * (1.0 - a2) + a2);
+    const float dv = 0.5 * a2 / (NPH_PI * d * d * max(gv + gl, 1e-8));
+    // F0 and the diffuse colour again from the base colour: fewer values
+    // live across the loop for a few multiplies per light.
+    const vec3 f0 = mix(vec3(0.04), p.base, p.metallic);
+    const float x = 1.0 - voh;
+    const float x2 = x * x;
+    const vec3 f = f0 + (vec3(1.0) - f0) * (x2 * x2 * x);
+    const vec3 spec = dv * f * (vec3(1.0) + f0 * p.energy);
+    return (p.base * (1.0 - p.metallic) * NPH_INV_PI + spec) * e * nol;
+}
 
 // The radiance one punctual light reflects from the point, before exposure.
 vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
@@ -215,15 +253,35 @@ vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
         }
     }
 #endif
-    const vec3 h = normalize(p.v + l);
-    const float noh = clamp(dot(p.n, h), 0.0, 1.0);
-    const float voh = clamp(dot(p.v, h), 0.0, 1.0);
-    // F0 and the diffuse colour again from the base colour: fewer values
-    // live across the loop for a few multiplies per light.
-    const vec3 f0 = mix(vec3(0.04), p.base, p.metallic);
-    const vec3 spec = nph_d_ggx(noh, p.a) * nph_v_smith_ggx_correlated(p.nov, nol, p.a) *
-                      nph_f_schlick(voh, f0) * (vec3(1.0) + f0 * p.energy);
-    return (p.base * (1.0 - p.metallic) * NPH_INV_PI + spec) * e * nol;
+    return nph_lit_reflect(p, l, nol, e);
+}
+
+// nph_lit_light for a local light of `locals` whose vector from the point the
+// caller has (with its squared length): N.L is tested from the position
+// alone, before the rest of the record loads (the same early return).
+vec3 nph_lit_local(NphLitPoint p, LightsRef locals, uint index, vec3 to_light, float d2_raw)
+{
+    const float d2 = max(d2_raw, 1e-8);
+    const float inv_d = inversesqrt(d2);
+    const vec3 l = to_light * inv_d;
+    const float nol = dot(p.n, l);
+    if (nol <= 0.0) {
+        return vec3(0.0);
+    }
+    const NphRenderLightData light = locals.l[index];
+    vec3 e = nph_light_illuminance_from(light, l, d2, inv_d);
+    if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
+        return vec3(0.0);
+    }
+#ifdef NPH_SURFACE_SHADOW
+    if (light.color.w > 0.0) {
+        e *= NPH_SURFACE_SHADOW(p, l, length(light.position.xyz - p.position));
+        if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
+            return vec3(0.0);
+        }
+    }
+#endif
+    return nph_lit_reflect(p, l, nol, e);
 }
 
 // The bits of light word `w` whose indices lie in [first, last]; the word
@@ -267,8 +325,9 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
                 // range test first, from the position alone (w: 1 / range^2).
                 const vec4 at_light = locals.l[w * 32u + b].position;
                 const vec3 to_light = at_light.xyz - p.position;
-                if (dot(to_light, to_light) * at_light.w < 1.0) {
-                    direct += nph_lit_light(p, locals.l[w * 32u + b]);
+                const float d2 = dot(to_light, to_light);
+                if (d2 * at_light.w < 1.0) {
+                    direct += nph_lit_local(p, locals, w * 32u + b, to_light, d2);
                 }
             }
         }

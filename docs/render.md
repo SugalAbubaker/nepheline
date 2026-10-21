@@ -779,15 +779,22 @@ costs what it did). Scenes that make no use of the grid moved by up to
 allocation of the same size reproduced: where later resources land in
 memory, not work.
 
-Measured and not kept: the light terms rearranged exactly (the range
-test's vector reused, one reciprocal square root for the direction and
-the falloff, N·H and V·H from |v + l|² = 2 + 2 v·l, the distribution and
-the visibility over one division, Schlick's power as multiplies: four
-transcendentals a light instead of nine), with N·L tested before the rest
-of the record loads, and with two candidates' positions loaded together.
-The 1,024 lamps' resolve took 1.37 ms against 1.42, but the compiler then
-allocated 64 registers and spilled 5,888 bytes a workgroup, and Bistro's
-hedge view took 3.18 ms against 3.08 (the street the same).
+A local light's terms are rearranged exactly (`nph_lit_local`,
+`nph_lit_reflect` in surface.glsl): the range test's vector is reused,
+one reciprocal square root gives the direction and the falloff, N·H and
+V·H come from |v + l|² = 2 + 2 v·l, the distribution and the visibility
+share one division, and Schlick's power is three multiplies: four
+transcendentals a light instead of nine, the results a few ulps from the
+textbook order's (some 10⁻⁷ of a value the B10G11R11 target rounds to
+steps of 2⁻⁶ of it). N·L is tested from the position before the rest of
+the light's record loads. First measured on 2026-10-20, the compiler gave
+it 64 registers and 5,888 bytes of spill and Bistro's hedge took 0.10 ms
+more; after the light tiles' depth bounds and the resolve's push
+constants (2026-10-21) the resolve took 3.06 ms against 3.20 in the
+street, 2.99 against 3.10 on the terrace, 2.66 against 2.71 at the hedge
+and 2.32 against 2.52 under the 4,096 lamps (interleaved, two rounds; the
+field the same). Loading two candidates' positions together, measured
+with it the first time, is not kept.
 
 ### Temporal anti-aliasing
 
@@ -846,7 +853,11 @@ nearest surface's motion taken from the gathered depth word alone, so that
 neither its whole record nor its cluster's flags were read before the
 history's taps (four dependent steps down to two, the image bit for bit
 the same): 0.859 ms against 0.853 in Bistro's street, 0.838 against 0.830
-in the 4K field. The pass is not waiting on that chain.
+in the 4K field. The pass is not waiting on that chain. Nor kept
+(2026-10-21, two rounds): the neighbourhood fetched with immediate offsets
+where the whole subgroup lies a pixel inside the image, the nearest-depth
+search tracking one index, and the finite test as one compare: 0.890 ms
+against 0.864 in the street.
 
 ### Motion blur
 
@@ -969,7 +980,13 @@ Bistro's street (ADR-0038). Measured and not kept: the denoise unpacking its tex
 vectors in shared memory (0.76 ms against 0.59, the reads three times the
 bytes); unpacking the shares with float bit tricks instead of conversions
 (0.47 ms against 0.44); workgroups of 32 × 16 pixels whose subgroups each
-take one direction whole (0.87 ms against 0.84).
+take one direction whole (0.87 ms against 0.84); every loop of the denoise
+unrolled (`[[unroll]]`: 128 registers and 0.59 ms against the driver's own
+choice, 64 and 0.44), and the occlusion's steps (0.83 ms against 0.85, 40
+registers against 38: within two rounds' noise); the occlusion's mip 0
+read from the visibility buffer instead of the copy the depth pyramid's
+pass writes (2026-10-21: the pyramid 0.03 ms less, the occlusion 0.065 ms
+more, in Bistro's views).
 
 ### Global illumination
 

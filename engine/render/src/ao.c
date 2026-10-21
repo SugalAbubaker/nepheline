@@ -62,7 +62,9 @@ NphResult render_ao_create(NphRenderer *r)
     memset(&d, 0, sizeof d);
     d.shader = a->denoise_shader;
     d.name = "ao denoise";
-    return nph_gpu_pipeline_create_compute(r->dev, &d, &a->denoise);
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->denoise));
+    render_log_statistics(r, a->denoise, "ao denoise");
+    return NPH_RESULT_OK;
 }
 
 void render_ao_destroy(NphRenderer *r)
