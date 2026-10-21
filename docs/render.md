@@ -583,7 +583,12 @@ on every fourth frame (as the jitter moves the edge of what hides it) made
 that frame's second pyramid 0.32 ms instead of 0.04, the frame 0.28 ms
 longer, and the 1 % low 0.2 to 0.4 ms worse. A test compares the result
 with a full rebuild's, texel for texel, after a wall moves off what it
-hid.
+hid. Measured and not kept: reading each 2 × 2 block's depths with one
+gather of the visibility buffer's sampled R32G32 view instead of four
+64-bit storage loads (what took the temporal resolve's depth search from
+0.16 to 0.09 ms): Bistro's first pyramid 0.320 ms against 0.315, the 4K
+field's 0.154 against 0.159. Bistro's pass is the shadow map's page
+requests (about 0.14 ms) as much as the read.
 
 **The resolve** decodes each pixel's cluster and triangle, fetches the
 three vertices, and rebuilds the attributes from perspective-correct
