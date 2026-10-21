@@ -3,9 +3,11 @@
 // "every renderer PR must state its cost in both milliseconds and DRAM
 // bytes"; §12 Phase 10: "constant CPU cost vs object count").
 //
-// Each scene renders warm-up frames (instance uploads, the environment's
-// image-based-lighting passes, the GPU's clocks), then measured frames, and
-// reports:
+// Each scene renders frames of its view held still until the GPU's clock
+// has settled (its boost from the idle clock of the scene's load took up to
+// four seconds), warm-up frames (instance uploads, the environment's
+// image-based-lighting passes, the scene's motion), then measured frames,
+// and reports:
 //
 //   <scene>.cpu         the median CPU time of nph_render_frame itself: the
 //                       renderer's cost to the main thread (the records,
@@ -167,9 +169,21 @@
 #define MAX_RESULTS    2048U
 #define MAX_PASS_STATS 96U
 #define WARMUP_FRAMES  24U
-#define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long, for the clocks
-#define MAX_INSTANCES  (102400U + 16384U + 256U + 1U)
-#define MAX_LIGHTS     4000U
+#define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long
+// Before them, frames of the view held still until the GPU's clock has
+// settled: a GPU idle through a scene's load starts it at an idle clock,
+// and its boost back to full clock took from under half a second to four
+// seconds on the RTX 3060 Ti (driver 621.01, 2026-10-21), where frames
+// measured on the way read 40% slow. It has settled when the mean GPU frame
+// time of CLOCK_STEADY windows in a row has fallen by no more than
+// CLOCK_SETTLED of the window's before each (the boost pauses on the way,
+// for a window at a time), at most CLOCK_MAX_NS.
+#define CLOCK_WINDOW  64U
+#define CLOCK_STEADY  3U
+#define CLOCK_SETTLED 0.01
+#define CLOCK_MAX_NS  (10000ULL * 1000000ULL)
+#define MAX_INSTANCES (102400U + 16384U + 256U + 1U)
+#define MAX_LIGHTS    4000U
 
 typedef enum SceneKind {
     SCENE_GRID = 0,
@@ -648,8 +662,9 @@ typedef struct FrameRun {
     NphRenderFrameStats stats; // the last frame's
 } FrameRun;
 
-static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f64 *cpu_ns,
-                            NphRenderFrameStats *stats)
+// The scene's motion takes a frame's step: the camera walking or turning,
+// the sphere bobbing.
+static NphResult advance_motion(Ctx *ctx, NphRenderView *view)
 {
     if (ctx->walking) {
         view->camera.position = nph_dvec3_add(view->camera.position, ctx->walk_step);
@@ -674,6 +689,16 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f
         t.translation.y += (ctx->move_frame++ & 1U) != 0U ? 0.01 : 0.0;
         NPH_TRY(nph_render_instance_set_transform(ctx->renderer, ctx->mover, &t));
     }
+    return NPH_RESULT_OK;
+}
+
+// One frame, the scene's motion first taking its step where `advance` says.
+static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, bool advance,
+                            f64 *cpu_ns, NphRenderFrameStats *stats)
+{
+    if (advance) {
+        NPH_TRY(advance_motion(ctx, view));
+    }
     NPH_TRY(nph_gpu_frame_begin(ctx->dev));
     NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(ctx->profiler, ctx->graph));
     nph_gpu_rg_begin(ctx->graph);
@@ -690,23 +715,62 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, f
     return r != NPH_RESULT_OK ? r : er;
 }
 
-// Warm-up, then `frames` measured frames. The profiler records a frame
-// NPH_GPU_FRAMES_IN_FLIGHT frames after it was submitted, so it is reset
-// that many frames into the measurement and fed that many frames past it.
-static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u32 frames,
-                            FrameRun *run)
+// The mean GPU time of the frames the profiler holds (its "frame" total), 0
+// before it holds one.
+static f64 frame_mean_ms(Ctx *ctx)
+{
+    static NphRenderPassStats passes[MAX_PASS_STATS];
+    const u32 n = nph_render_gpu_profiler_stats(ctx->profiler, passes, MAX_PASS_STATS);
+    for (u32 i = 0; i < n; ++i) {
+        if (strcmp(passes[i].name, "frame") == 0) {
+            return passes[i].samples != 0U ? passes[i].mean_ms : 0.0;
+        }
+    }
+    return 0.0;
+}
+
+// Frames of the view as it stands (no motion, so a moving scene's measured
+// path does not depend on how long this takes) until the GPU's clock has
+// settled: windows of CLOCK_WINDOW frames, until CLOCK_STEADY in a row each
+// take at least (1 - CLOCK_SETTLED) of the one before (CLOCK_* above).
+static NphResult settle_clock(Ctx *ctx, NphRenderView *view, NphGpuImage target, FrameRun *run)
 {
     const u64 start = nph_time_now_ns();
     f64 cpu = 0.0;
+    f64 previous = 0.0;
+    u32 steady = 0U;
+    nph_render_gpu_profiler_reset(ctx->profiler);
+    while (steady < CLOCK_STEADY && nph_time_now_ns() - start < CLOCK_MAX_NS) {
+        for (u32 i = 0; i < CLOCK_WINDOW; ++i) {
+            NPH_TRY(render_one(ctx, view, target, false, &cpu, &run->stats));
+        }
+        const f64 mean = frame_mean_ms(ctx);
+        nph_render_gpu_profiler_reset(ctx->profiler);
+        steady = previous > 0.0 && mean >= previous * (1.0 - CLOCK_SETTLED) ? steady + 1U : 0U;
+        previous = mean;
+    }
+    return NPH_RESULT_OK;
+}
+
+// The clock settled, a warm-up with the scene's motion, then `frames`
+// measured frames. The profiler records a frame NPH_GPU_FRAMES_IN_FLIGHT
+// frames after it was submitted, so it is reset that many frames into the
+// measurement and fed that many frames past it.
+static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u32 frames,
+                            FrameRun *run)
+{
+    NPH_TRY(settle_clock(ctx, view, target, run));
+    const u64 start = nph_time_now_ns();
+    f64 cpu = 0.0;
     for (u32 i = 0; i < WARMUP_FRAMES || nph_time_now_ns() - start < WARMUP_NS; ++i) {
-        NPH_TRY(render_one(ctx, view, target, &cpu, &run->stats));
+        NPH_TRY(render_one(ctx, view, target, true, &cpu, &run->stats));
     }
     run->cpu_count = 0U;
     for (u32 i = 0; i < frames + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         if (i == NPH_GPU_FRAMES_IN_FLIGHT) {
             nph_render_gpu_profiler_reset(ctx->profiler);
         }
-        NPH_TRY(render_one(ctx, view, target, &cpu, &run->stats));
+        NPH_TRY(render_one(ctx, view, target, true, &cpu, &run->stats));
         if (i < frames) {
             run->cpu_ns[run->cpu_count++] = cpu;
         }

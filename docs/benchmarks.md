@@ -168,13 +168,21 @@ renderer itself on a device, scene by scene, and reports what CLAUDE.md
   of the passes while one queue runs them all, shorter where passes overlap
   on the async compute queue (docs/render.md "GPU profiler").
 
-Each scene renders warm-up frames (at least 24 and 500 ms: instance
-uploads, the environment's image-based-lighting passes, the GPU's clocks),
-then `--frames` measured ones (default 120), timed by the renderer's GPU
-profiler. Every scene draws the runtime's bloom (0.04, docs/render.md
-"Bloom and exposure") with the scene's own exposure, and the production
-path's scenes resolve temporally (the runtime's default, "Temporal
-anti-aliasing"), take the runtime's global illumination ("Global
+Each scene first renders its view held still until the GPU's clock has
+settled: in windows of 64 frames, until three windows in a row each take
+at least 99% of the one before (at most 10 s). A GPU idle through the
+scene's load starts at an idle clock, and its boost back took from under
+half a second to four seconds on the RTX 3060 Ti (driver 621.01,
+2026-10-21); the 500 ms warm-up that was all there was then measured
+Bistro's street on the way, 10.1 ms a frame against 7.1. The view is held
+still so that a moving scene's measured path does not depend on how long
+the clock took. Then come warm-up frames (at least 24 and 500 ms: instance
+uploads, the environment's image-based-lighting passes, the scene's
+motion) and `--frames` measured ones (default 120), timed by the
+renderer's GPU profiler. Every scene draws the runtime's bloom (0.04,
+docs/render.md "Bloom and exposure") with the scene's own exposure, and
+the production path's scenes resolve temporally (the runtime's default,
+"Temporal anti-aliasing"), take the runtime's global illumination ("Global
 illumination") and, where the sky lights them, its ambient occlusion
 (0.5 m, "Ambient occlusion"). The scenes are synthetic until Phase 10's
 reference scenes arrive:
