@@ -137,10 +137,11 @@ mat3 nph_derivative_frame(vec3 n, NphSurface s)
     return mat3(t * inv, b * inv, n);
 }
 
-// The illuminance a positional light delivers on a surface facing it, from
+// What of a positional light's intensity reaches a surface facing it, from
 // its direction `l` (unit) and the squared distance `d2` (at least 1e-8) and
-// its reciprocal square root `inv_d` that gave it.
-vec3 nph_light_illuminance_from(NphRenderLightData light, vec3 l, float d2, float inv_d)
+// its reciprocal square root `inv_d` that gave it: the illuminance over the
+// light's colour.
+float nph_light_attenuation(NphRenderLightData light, vec3 l, float d2, float inv_d)
 {
     // Inverse-square falloff, windowed to reach zero at the range (Karis
     // 2013); a range of 0 is unlimited. 1 / max(d2, 1e-4), from the
@@ -157,7 +158,7 @@ vec3 nph_light_illuminance_from(NphRenderLightData light, vec3 l, float d2, floa
         const float s = clamp(cd * light.spot.x + light.spot.y, 0.0, 1.0);
         attenuation *= s * s;
     }
-    return light.color.rgb * attenuation;
+    return attenuation;
 }
 
 // The illuminance a punctual light delivers at `p` on a surface facing it,
@@ -172,20 +173,23 @@ vec3 nph_light_illuminance(NphRenderLightData light, vec3 p, out vec3 l)
     const float d2 = max(dot(to_light, to_light), 1e-8);
     const float inv_d = inversesqrt(d2);
     l = to_light * inv_d;
-    return nph_light_illuminance_from(light, l, d2, inv_d);
+    return light.color.rgb * nph_light_attenuation(light, l, d2, inv_d);
 }
 
-// What the lights need to know about a shaded point.
+// What the lights need to know about a shaded point: besides the point, the
+// terms of its BRDF that no light changes, computed once here rather than
+// once per light in the loop (the same arithmetic either way).
 struct NphLitPoint {
     vec3 position;
     vec3 n;
     vec3 v;
-    float nov;
-    float a; // GGX alpha
-    vec3 base;
-    float metallic;
-    float energy; // 1 / Ess - 1: the specular lobe's multiple-scattering compensation is
-                  // 1 + F0 * energy
+    float nov;     // N.V, at least 1e-4
+    float nov_raw; // N.V as it is
+    float a2;      // GGX alpha squared
+    float smith_v; // the height-correlated Smith visibility's view half, sqrt(nov^2 (1 - a2) + a2)
+    vec3 f0;       // Fresnel at normal incidence
+    vec3 diffuse;  // the Lambertian lobe: the diffuse colour over pi
+    vec3 energy;   // 1 + F0 (1 / Ess - 1): the specular lobe's multiple-scattering compensation
     vec3 face_normal; // the surface's geometric normal, either way round
 #ifdef NPH_SURFACE_VSM
     float sun_visibility; // NPH_SURFACE_VSM's, or 1 when it is not active
@@ -204,21 +208,18 @@ vec3 nph_lit_reflect(NphLitPoint p, vec3 l, float nol, vec3 e)
 {
     const float vol = dot(p.v, l);
     const float inv_h = inversesqrt(max(2.0 + 2.0 * vol, 1e-12));
-    const float noh = clamp((dot(p.n, p.v) + nol) * inv_h, 0.0, 1.0);
+    const float noh = clamp((p.nov_raw + nol) * inv_h, 0.0, 1.0);
     const float voh = clamp((1.0 + vol) * inv_h, 0.0, 1.0);
-    const float a2 = p.a * p.a;
+    const float a2 = p.a2;
     const float d = (noh * a2 - noh) * noh + 1.0;
-    const float gv = nol * sqrt(p.nov * p.nov * (1.0 - a2) + a2);
+    const float gv = nol * p.smith_v;
     const float gl = p.nov * sqrt(nol * nol * (1.0 - a2) + a2);
     const float dv = 0.5 * a2 / (NPH_PI * d * d * max(gv + gl, 1e-8));
-    // F0 and the diffuse colour again from the base colour: fewer values
-    // live across the loop for a few multiplies per light.
-    const vec3 f0 = mix(vec3(0.04), p.base, p.metallic);
     const float x = 1.0 - voh;
     const float x2 = x * x;
-    const vec3 f = f0 + (vec3(1.0) - f0) * (x2 * x2 * x);
-    const vec3 spec = dv * f * (vec3(1.0) + f0 * p.energy);
-    return (p.base * (1.0 - p.metallic) * NPH_INV_PI + spec) * e * nol;
+    const vec3 f = p.f0 + (vec3(1.0) - p.f0) * (x2 * x2 * x);
+    const vec3 spec = dv * f * p.energy;
+    return (p.diffuse + spec) * e * nol;
 }
 
 // The radiance one punctual light reflects from the point, before exposure.
@@ -256,10 +257,15 @@ vec3 nph_lit_light(NphLitPoint p, NphRenderLightData light)
     return nph_lit_reflect(p, l, nol, e);
 }
 
-// nph_lit_light for a local light of `locals` whose vector from the point the
-// caller has (with its squared length): N.L is tested from the position
-// alone, before the rest of the record loads (the same early return).
-vec3 nph_lit_local(NphLitPoint p, LightsRef locals, uint index, vec3 to_light, float d2_raw)
+// nph_lit_light for the local light `light` (a reference to its record, so
+// its fields load at fixed offsets from one address) whose vector from the
+// point the caller has (with its squared length): N.L is tested from the
+// position alone, before the rest of the record loads, and a light its
+// window or cone leaves dark at the point returns before the BRDF (the same
+// early returns as nph_lit_light's, the second tested on the attenuation
+// instead of the illuminance's three channels: a light of colour zero,
+// which it lets through, reflects zero all the same).
+vec3 nph_lit_local(NphLitPoint p, LightRef light, vec3 to_light, float d2_raw)
 {
     const float d2 = max(d2_raw, 1e-8);
     const float inv_d = inversesqrt(d2);
@@ -268,14 +274,15 @@ vec3 nph_lit_local(NphLitPoint p, LightsRef locals, uint index, vec3 to_light, f
     if (nol <= 0.0) {
         return vec3(0.0);
     }
-    const NphRenderLightData light = locals.l[index];
-    vec3 e = nph_light_illuminance_from(light, l, d2, inv_d);
-    if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
+    const NphRenderLightData record = light.l;
+    const float attenuation = nph_light_attenuation(record, l, d2, inv_d);
+    if (attenuation == 0.0) {
         return vec3(0.0);
     }
+    vec3 e = record.color.rgb * attenuation;
 #ifdef NPH_SURFACE_SHADOW
-    if (light.color.w > 0.0) {
-        e *= NPH_SURFACE_SHADOW(p, l, length(light.position.xyz - p.position));
+    if (record.color.w > 0.0) {
+        e *= NPH_SURFACE_SHADOW(p, l, length(record.position.xyz - p.position));
         if (e.r == 0.0 && e.g == 0.0 && e.b == 0.0) {
             return vec3(0.0);
         }
@@ -313,7 +320,6 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
     const uvec2 tile = uvec2(pixel) / uint(NPH_RENDER_LIGHT_TILE);
     const uint at = tile.y * g.tiles_x + tile.x;
     WordsRef tiles = WordsRef(NPH_SURFACE_GRID_TILES(g));
-    LightsRef locals = LightsRef(g.locals);
     if (first <= last) {
         for (uint w = first >> 5u; w <= (last >> 5u); ++w) {
             uint bits = tiles.w[w * g.tile_count + at] & nph_light_bits(w, first, last);
@@ -323,11 +329,12 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
                 // Some of the lights a pixel's bin and tile hand it do not
                 // reach it (Bistro's street: 5.7 a pixel, 5.0 in range): the
                 // range test first, from the position alone (w: 1 / range^2).
-                const vec4 at_light = locals.l[w * 32u + b].position;
+                LightRef light = LightRef(g.locals)[w * 32u + b];
+                const vec4 at_light = light.l.position;
                 const vec3 to_light = at_light.xyz - p.position;
                 const float d2 = dot(to_light, to_light);
                 if (d2 * at_light.w < 1.0) {
-                    direct += nph_lit_local(p, locals, w * 32u + b, to_light, d2);
+                    direct += nph_lit_local(p, light, to_light, d2);
                 }
             }
         }
@@ -519,10 +526,12 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.n = n;
     lp.v = v;
     lp.nov = nov;
-    lp.a = a;
-    lp.base = base.rgb;
-    lp.metallic = metallic;
-    lp.energy = 1.0 / ess - 1.0;
+    lp.nov_raw = dot(n, v);
+    lp.a2 = a * a;
+    lp.smith_v = sqrt(nov * nov * (1.0 - lp.a2) + lp.a2);
+    lp.f0 = f0;
+    lp.diffuse = diffuse_color * NPH_INV_PI;
+    lp.energy = energy;
     lp.face_normal = s.face_normal;
 #ifdef NPH_SURFACE_VSM
     lp.sun_visibility = NPH_SURFACE_VSM_ACTIVE ? NPH_SURFACE_VSM(lp) : 1.0;

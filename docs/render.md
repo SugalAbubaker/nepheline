@@ -796,6 +796,25 @@ and 2.32 against 2.52 under the 4,096 lamps (interleaved, two rounds; the
 field the same). Loading two candidates' positions together, measured
 with it the first time, is not kept.
 
+The terms of the BRDF that no light changes are computed once per pixel,
+not once per light (`NphLitPoint`): F0, the diffuse colour over π, the
+multiple-scattering compensation 1 + F0 (1/E_ss − 1), α², the
+height-correlated Smith visibility's view half √(N·V² (1 − α²) + α²) and
+the raw N·V, each by the arithmetic the loop used, so the image does not
+change. A local light's record is read through a reference to that one
+record (`LightRef(locals)[i]`, GL_EXT_buffer_reference2), whose fields
+load at fixed offsets from one address: indexing the array instead
+recomputed the 64-bit address for each of the record's 16-byte words,
+three integer instructions a load. The test that skips a dark light (its
+window or cone zero at the point) reads the attenuation instead of the
+illuminance's three channels, the same lights skipped but those of colour
+zero, which reflect zero anyway. In GPU traces of Bistro's street (Nsight
+Graphics GPU Trace, instruction counts exact to the unit between traces
+of the same frame) the resolve issued 2,180 instructions a pixel against
+2,291, the reference alone 40 of the difference; with 64 registers and
+1 KB more spill, it took 3.07 ms against 3.13 (median of five traces each,
+interleaved).
+
 ### Temporal anti-aliasing
 
 A production view with `NphRenderView.anti_aliasing` set to
@@ -1134,6 +1153,64 @@ frame: 0.36 ms with its records (over 102,401 slots; 0.22 ms over the
 scene's own 16,386), so a sphere moving every frame costs the map's frame
 0.64 ms. The lamps' shadows (rays) add 1.20 ms. ADR-0029 to ADR-0033 and
 ADR-0039 record the numbers and what comes next.
+
+### Where the time goes
+
+GPU traces of Bistro's views (Nsight Graphics GPU Trace on the RTX 3060
+Ti, driver 621.01, 2026-10-21; steady frames of the street, terrace and
+hedge views) give each pass's unit throughputs, its warps' stall reasons
+and the instructions it issued. The frame is bound by instruction issue
+under the board's power limit, not by memory: through the frame the GPU
+draws 199.8 of its 200 W at 1.71 to 1.77 GHz (the clock follows the
+work's power; the throttle reason is the software power cap), and the
+expensive passes issue an instruction on 72 to 89% of their cycles while
+their DRAM traffic is 10 to 35% of its peak:
+
+| Pass (street) | Instructions a pixel | Issue | DRAM | First stall reasons |
+|---|---|---|---|---|
+| `vis resolve` | 2,291 | 74% | 16% | memory latency 34%, ready but not issued 20% |
+| `taa` | 782 | 89% | 35% | ready but not issued 40% |
+| `ao` | 672 | 78% | 18% | memory latency 37% |
+| `ao denoise` | 331 | 73% | 23% | ready but not issued 37% |
+| `vis hzb 0` | 278 | 72% | 57% | memory latency 20% |
+| `vis raster 0` | 38 | 8% | 71% | memory latency 66% |
+
+The frame issues 4,635 instructions a pixel; at 1.75 GHz the GPU issues at
+most 4,290 a pixel in 4.17 ms, so the frame's instructions bound it
+before its bytes do. Every instruction saved also lowers the power drawn,
+which raises the clock for the rest of the frame.
+
+Instruction counts in a trace are exact (the same to the unit between
+traces of the same frames), where times vary by about 2% from trace to
+trace and with the clock, so a pass's parts were costed by removing each
+in turn and comparing counts. In the street's resolve (2,291 a pixel):
+the local lights 697 (about 120 a light, 5.7 lights a pixel), the
+triangle's decoding and its attributes 615, the image-based and
+radiance-cache light 402, the material's textures 209, the radiance
+cache's lookup 193, the sun's shadow map 132, the visibility buffer's
+read and the store 49. Against the resolve's 1.34 µs for each instruction
+a pixel, removing the lights saved less a part (697 instructions, 0.60
+ms), the indirect light as much (402, 0.40 ms), and the textures and the
+shadow map more (209, 0.32 ms; 132, 0.19 ms): those wait on memory. The
+lookup's 193 cost nothing (removed, the resolve took 0.07 ms more): they
+run while the shader waits. In the temporal resolve (782): the history 485 (the
+clip and the neighbourhood's moments it needs 203, the Catmull-Rom filter
+85), the eight neighbours 228, the glare 83, the tonemap 67 (no time:
+hidden), the nearest depth 43, the history's dither 33. In the occlusion
+(672): its steps 377, 42 a sample, as the lanes of a subgroup sample
+different mips (the step's length scales with each pixel's radius), so
+the subgroup runs both `ao_depth_at` paths; the denoise's 25 taps 228,
+their plane test 118 of it.
+
+Measured and not kept:
+
+| Change | Instructions | Time |
+|---|---|---|
+| A workgroup's triangles set up once each into shared memory (Schied & Dachsbacher 2015's triangle cache, kept per 16 × 16 tile: a tile of Bistro holds 8 to 15 triangles, 17 to 33 pixels each), each pixel interpolating from there | 2,066 against 2,291 | resolve 5.39 ms against 3.16: 80 registers and 33 KB of shared memory leave 37% of the warps active, and the setup's chain of dependent loads (cluster, instance, mesh, meshlet, vertices) waits behind barriers in a few lanes where every pixel's own chain hid it; 8 × 8 tiles: 2,269, 4.64 ms |
+| The denoise in packed half precision (two pixels a lane) | 331 → 275 (unrolled; 532 rolled) | 0.44 → 0.46 to 0.48 ms: 80 registers |
+| Buffer references declared `readonly restrict` | −2 | no change |
+| The SH coefficients' block std430 (its loads aligned to 16) | 0 | no change |
+| The temporal resolve's divisions as reciprocals | +7, −1 | no change: the compiler already multiplies |
 
 ### Debug views
 

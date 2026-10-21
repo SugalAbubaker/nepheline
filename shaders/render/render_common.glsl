@@ -22,6 +22,10 @@ NPH_BUFFER_REF(ViewRef) { NphRenderViewData v; };
 NPH_BUFFER_REF(DrawsRef) { NphRenderDrawData d[]; };
 NPH_BUFFER_REF(MaterialsRef) { NphRenderMaterialData m[]; };
 NPH_BUFFER_REF(LightsRef) { NphRenderLightData l[]; };
+// One light's record: LightRef(lights)[i] is the reference to lights[i]
+// (GL_EXT_buffer_reference2), whose fields then load at fixed offsets from
+// one address, where indexing LightsRef recomputes the address for each.
+NPH_BUFFER_REF(LightRef) { NphRenderLightData l; };
 NPH_BUFFER_REF(ShRef) { vec4 c[9]; };
 NPH_BUFFER_REF(PositionsRef) { uvec2 p[]; };
 NPH_BUFFER_REF(AttribsRef) { uvec4 a[]; };
