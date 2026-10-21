@@ -182,9 +182,9 @@ void main()
                                                                : VisClustersRef(pc.clusters).c[g].instance;
         color = vis_debug_color(key);
     } else {
-        const NphVisCluster cluster = VisClustersRef(pc.clusters).c[vis_cluster(v)];
-        const NphVisInstance inst = VisInstancesRef(pc.instances).i[cluster.instance];
-        const NphVisMesh mesh = VisMeshesRef(pc.meshes).m[inst.mesh];
+        const NphVisCluster cluster = VisClusterRef(pc.clusters)[vis_cluster(v)].c;
+        const NphVisInstance inst = VisInstanceRef(pc.instances)[cluster.instance].i;
+        const NphVisMesh mesh = VisMeshRef(pc.meshes)[inst.mesh].m;
         const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
         const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
         VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
@@ -253,7 +253,7 @@ void main()
             color = nph_surface_irradiance_view(rview, s, k_gi ? g_gi_cell : vec4(0.0));
         } else {
             const NphRenderMaterialData material =
-                MaterialsRef(view.v.materials).m[cluster.material];
+                MaterialRef(view.v.materials)[cluster.material].m;
             color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
         }
     }

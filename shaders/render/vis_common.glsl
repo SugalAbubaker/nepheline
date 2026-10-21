@@ -18,6 +18,13 @@ NPH_BUFFER_REF(VisMeshesRef) { NphVisMesh m[]; };
 NPH_BUFFER_REF(VisCountersRef) { NphVisCounters c; };
 NPH_BUFFER_REF(VisArgsRef) { NphVisArgs a; };
 NPH_BUFFER_REF(VisClustersRef) { NphVisCluster c[]; };
+// One record each: VisClusterRef(clusters)[i] is the reference to clusters[i]
+// (GL_EXT_buffer_reference2), whose fields then load at fixed offsets from
+// one address, where indexing the arrays recomputes the address for each
+// (render_common.glsl LightRef).
+NPH_BUFFER_REF(VisClusterRef) { NphVisCluster c; };
+NPH_BUFFER_REF(VisInstanceRef) { NphVisInstance i; };
+NPH_BUFFER_REF(VisMeshRef) { NphVisMesh m; };
 NPH_BUFFER_REF(VisDrawsRef) { NphVisDraw d[]; };
 NPH_BUFFER_REF(VisUintRef) { uint v[]; };
 NPH_BUFFER_REF(VisUvec2Ref) { uvec2 v[]; };

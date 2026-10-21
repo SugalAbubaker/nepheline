@@ -813,7 +813,12 @@ Graphics GPU Trace, instruction counts exact to the unit between traces
 of the same frame) the resolve issued 2,180 instructions a pixel against
 2,291, the reference alone 40 of the difference; with 64 registers and
 1 KB more spill, it took 3.07 ms against 3.13 (median of five traces each,
-interleaved).
+interleaved). The resolve reads its cluster's, instance's, mesh's and
+material's records the same way (`VisClusterRef`, `VisInstanceRef`,
+`VisMeshRef`, `MaterialRef`; each record a multiple of the references'
+16-byte alignment, so indexing one strides by its size): 2,131 to 2,137
+instructions a pixel against 2,180, the resolve 2.99 ms against 3.05 (two
+traces each).
 
 ### Temporal anti-aliasing
 
