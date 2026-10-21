@@ -1,7 +1,7 @@
 # 0038. Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads
 
 - **Date:** 2026-10-19
-- **Status:** Accepted (the cost is reported against §10.4's indirect-light line: see Consequences)
+- **Status:** Accepted (the cost is reported against §10.4's indirect-light line: see Consequences); amended 2026-10-20: full resolution (decision 2 superseded, below)
 
 ## Context
 
@@ -191,3 +191,80 @@ side adds 0.022 ms.
   the occlusion is not accumulated on its own (the temporal resolve
   averages the rotations in the image); blended surfaces and the
   reference renderer get none.
+
+## Amendment (2026-10-20): full resolution
+
+**Context.** Half resolution let each 2 × 2 block share one slice and the
+resolve upsample it by depth-weighted bilinear taps, which loses occlusion
+at edges and on geometry thinner than two pixels. The user decided that
+the occlusion is made at full resolution: quality is not traded for time.
+
+**Decision** (decision 2 superseded; 3 to 7 hold, over pixels):
+- Every pixel takes its own slice from the frame's own depths. The depth
+  pyramid's passes write every pixel's depth (mip 0) and each 2 × 2
+  block's average (mip 1) as they read the visibility buffer, and
+  `ao depth` builds mips 2 to 5 from mip 1; the extent rounds up to 32
+  pixels so that every mip halves it exactly.
+- The steps start at least a pixel out; those 16 pixels out and further
+  read mip 1, twice as far mip 2, and so on (a texel at most an eighth of
+  the step's length, as at half resolution). A radius under a pixel
+  occludes nothing.
+- A workgroup takes its pixels sorted by slice direction, each half
+  subgroup one direction's pixels 4 apart, so that a step's samples fall
+  on one lattice (deinterleaved: Bavoil, NVIDIA 2014). Every sample is
+  fetched within the image, one beyond the reach counting nothing, so the
+  fetches never wait on a branch.
+- The denoise works a 2 × 2 block an invocation: the four windows lie in
+  one of 6 × 6 pixels, read and unpacked once and added to each window in
+  that window's own order (the sums are what they would be alone); a
+  block of the sky alone is written open at once. Its output is a half
+  float a pixel, which the resolve reads at the pixel (no upsample).
+
+**Measurements.** The images (`test_ao.c`, against the ray-cast truth; the
+RTX 3060 Ti, lavapipe the same within 0.003):
+
+| Case | Half resolution | Full resolution |
+|---|---|---|
+| the box: error as a share of the occlusion (bias) | 0.20 (+0.049) | 0.163 (+0.034) |
+| open ground: mean error, pixels off by over 0.03 | 0.0031, 0.5 % | 0.0033, 0.0 % |
+| the ground alone: the most occluded pixel | 0.009 | 0.009 |
+
+The cost at 4K with the runtime's 0.5 m, half against full resolution
+(`render_perf-2026-10-20d` and `-20e`, `reference_scenes-2026-10-20g` and
+`-20h`; ms):
+
+| Pass | 4K field | Bistro's street |
+|---|---|---|
+| `vis hzb 0` (the depths' mips 0 and 1) | 0.157 → 0.246 | 0.315 → 0.352 |
+| `ao depth` | 0.025 → 0.025 | 0.036 → 0.034 |
+| `ao` | 0.166 → 0.575 | 0.259 → 0.842 |
+| `ao denoise` | 0.113 → 0.337 | 0.154 → 0.436 |
+| `vis resolve` (the upsample gone) | 1.219 → 1.181 | 3.612 → 3.555 |
+| **the frame** | **3.548 → 4.262** (none: 3.197) | **6.930 → 7.810** |
+
+On the field the occlusion now costs 1.06 ms where it cost 0.35: four
+times the pixels, the far steps' mips a level finer for the same
+texel-to-step ratio, and the denoise over pixels, less the resolve's
+upsample. What shaped the passes, on the street (ms):
+
+| Step | `ao` | `ao denoise` | `ao depth` |
+|---|---|---|---|
+| half resolution's passes, pixel for texel | 0.987 | 0.587 | 0.105 |
+| each half subgroup one direction's pixels | 0.899 | | |
+| every sample fetched, none branched around | 0.843 | | |
+| the denoise's 2 × 2 blocks; the sky's blocks at once | | 0.434 | |
+| mip 1 written by the pyramid's passes (0.014 ms more there) | | | 0.034 |
+
+Measured and not kept: the denoise unpacking its texels into vectors in
+shared memory (three times the bytes read: 0.759 ms against 0.586), or
+unpacking the shares by float bit tricks rather than conversions (0.467
+against 0.437); 32 × 16 workgroups whose subgroups each take one direction
+whole (0.866 against 0.839).
+
+**Consequences.** The occlusion's cost moves from 63 % of §10.4's 0.60 ms
+indirect-light line to 177 % of it on the field, which the radiance cache
+shares: the line is past its budget, reported here rather than met by
+lowering the resolution. The resolve no longer upsamples (its
+four taps and depth weights go). Open: fusing the occlusion and its
+denoise into one pass, and fewer special-function instructions in the
+slices (the research behind this amendment estimates 0.1 to 0.2 ms).

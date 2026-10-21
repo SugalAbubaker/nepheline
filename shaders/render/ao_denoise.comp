@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // The ambient occlusion's denoise (docs/render.md "Ambient occlusion";
-// ADR-0038), at half resolution: each texel averages the occlusion of the
-// 5 x 5 texels around it, the outer rows and columns at half weight, so that
+// ADR-0038), at full resolution: each pixel averages the occlusion of the
+// 5 x 5 pixels around it, the outer rows and columns at half weight, so that
 // the window holds each of the 16 slice directions ao.comp spreads over 4 x 4
-// texels equally and is centred (Jimenez et al. 2016 §4.1 gather 4 x 4). A
-// neighbour counts as it lies on the texel's tangent plane: one off it by
-// AO_EDGE of the texel's distance or more counts nothing, so occlusion does
+// pixels equally and is centred (Jimenez et al. 2016 §4.1 gather 4 x 4). A
+// neighbour counts as it lies on the pixel's tangent plane: one off it by
+// AO_EDGE of the pixel's distance or more counts nothing, so occlusion does
 // not bleed across an edge, while a slope, however steep, stays one surface.
-// At the image's edges a tap outside it takes the texel 4 inside instead,
+// At the image's edges a tap outside it takes the pixel 4 inside instead,
 // whose slice runs the same way, so that every window still holds all 16.
 // The occlusion is the window's visible shares over their open shares
 // (ao.comp): an open surface stays open where an edge cuts directions out.
@@ -17,16 +17,21 @@
 // the inverse distance, the plane's m (ao_plane: q = m . r across it, m =
 // n / k for the plane n . p = k, so |k| = 1 / |m|) puts a tap at distance
 // d_s, under which the plane's inverse distance is q_p, at
-// n . p_s - k = k (q_p d_s - 1) off the plane: over AO_EDGE of the texel's
-// distance 1 / q, q |q_p d_s - 1| / (AO_EDGE |m|). Writes the occlusion with
-// the texel's reverse-Z depth, as half floats in a word, which the resolve
-// upsamples by (vis_resolve.glsl).
+// n . p_s - k = k (q_p d_s - 1) off the plane: over AO_EDGE of the pixel's
+// distance 1 / q, q |q_p d_s - 1| / (AO_EDGE |m|). Writes the occlusion, a
+// half float, which the resolve reads at its pixel (vis_resolve.glsl).
+//
+// Each invocation denoises a 2 x 2 block of pixels: their 5 x 5 windows lie
+// in one of 6 x 6, whose texels it reads and unpacks once (9 a pixel instead
+// of 25) and adds to each pixel whose window holds them, in the order of
+// that pixel's own window, so each pixel's sums are what they would be alone.
 #version 460
 #include "ao_common.glsl"
 
-#define AO_GROUP 16
-#define AO_APRON 3 // a tap 2 out, or one 4 back in from beyond the edge
-#define AO_SPAN  (AO_GROUP + 2 * AO_APRON)
+#define AO_GROUP 16 // invocations a side
+#define AO_TILE  32 // pixels a side: a 2 x 2 block an invocation
+#define AO_APRON 3  // a tap 2 out, or one 4 back in from beyond the edge
+#define AO_SPAN  (AO_TILE + 2 * AO_APRON)
 // A neighbour this far off the tangent plane, relative to the distance,
 // counts nothing.
 #define AO_EDGE 0.05
@@ -41,7 +46,7 @@ struct AoTexel {
 shared AoTexel s_texels[AO_SPAN * AO_SPAN];
 
 // The visible share and the open share (in units of 2 / 255: only their
-// ratio counts), and the distance of the texel at `local` in the group.
+// ratio counts), and the distance of the texel at `local` in the tile.
 vec3 texel_at(ivec2 local)
 {
     const uint w = s_texels[(local.y + AO_APRON) * AO_SPAN + local.x + AO_APRON].packed;
@@ -54,22 +59,11 @@ float tent(int x)
     return abs(x) == 2 ? 0.5 : 1.0;
 }
 
-// Adds the tap `o` texels from the one at `l` in the group, at window
-// weight `window`, as it lies on the plane (inverse distance q at the
-// centre, `step` more a texel along each axis) and so `edge` allows.
-void add_tap(ivec2 l, ivec2 o, float window, float q, vec2 step, float edge, inout float visible,
-             inout float open)
-{
-    const vec3 s = texel_at(l + o);
-    const float plane = clamp(1.0 - edge * abs((q + dot(vec2(o), step)) * s.z - 1.0), 0.0, 1.0);
-    visible += s.x * window * plane;
-    open += s.y * window * plane;
-}
-
 void main()
 {
-    const ivec2 size = ivec2(pc.half_width, pc.half_height);
-    const ivec2 origin = ivec2(gl_WorkGroupID.xy) * AO_GROUP - AO_APRON;
+    const ivec2 size = ivec2(pc.width, pc.height);
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy) * AO_TILE;
+    const ivec2 origin = tile - AO_APRON;
     for (uint i = gl_LocalInvocationIndex; i < uint(AO_SPAN * AO_SPAN);
          i += uint(AO_GROUP * AO_GROUP)) {
         const ivec2 q =
@@ -77,51 +71,92 @@ void main()
         s_texels[i].packed = texelFetch(nph_utextures_2d[pc.raw_index], q, 0).r;
     }
     barrier();
-    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
-    if (any(greaterThanEqual(t, size))) {
+
+    // The block's pixels (tile-local), their tangent planes as ao.comp takes
+    // them, from the inverse distances, and their sums.
+    const ivec2 block = 2 * ivec2(gl_LocalInvocationID.xy);
+    float q[4];
+    vec2 step[4];
+    float edge[4];
+    bool open_sky[4];
+    float visible[4];
+    float open[4];
+    for (int k = 0; k < 4; ++k) {
+        const ivec2 l = block + ivec2(k & 1, k >> 1);
+        const ivec2 t = tile + l;
+        const float dist = texel_at(l).z;
+        open_sky[k] = !(dist < NPH_AO_HALF_MAX);
+        q[k] = 1.0 / dist;
+        const vec2 gradient = ao_gradient(
+            t, q[k], 1.0 / texel_at(l - ivec2(1, 0)).z, 1.0 / texel_at(l + ivec2(1, 0)).z,
+            1.0 / texel_at(l - ivec2(0, 1)).z, 1.0 / texel_at(l + ivec2(0, 1)).z);
+        edge[k] = q[k] / (AO_EDGE * length(ao_plane(t, q[k], gradient)));
+        // The plane's inverse distance a pixel along each axis.
+        step[k] = gradient;
+        visible[k] = 0.0;
+        open[k] = 0.0;
+    }
+
+    // A block of the sky alone is open.
+    if (open_sky[0] && open_sky[1] && open_sky[2] && open_sky[3]) {
+        for (int k = 0; k < 4; ++k) {
+            const ivec2 t = tile + block + ivec2(k & 1, k >> 1);
+            if (all(lessThan(t, size))) {
+                imageStore(nph_images_2d[pc.out_index], t, vec4(1.0, 0.0, 0.0, 0.0));
+            }
+        }
         return;
     }
-    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
-    const float dist = texel_at(l).z;
-    float ao = 1.0;
-    float depth = 0.0; // the sky's
-    if (dist < NPH_AO_HALF_MAX) {
-        // The tangent plane as ao.comp takes it, from the inverse distances.
-        const float q = 1.0 / dist;
-        const vec2 gradient = ao_gradient(
-            t, q, 1.0 / texel_at(l - ivec2(1, 0)).z, 1.0 / texel_at(l + ivec2(1, 0)).z,
-            1.0 / texel_at(l - ivec2(0, 1)).z, 1.0 / texel_at(l + ivec2(0, 1)).z);
-        const float edge = q / (AO_EDGE * length(ao_plane(t, q, gradient)));
-        // The plane's inverse distance a texel along each axis.
-        const vec2 step = 2.0 * gradient;
-        float visible = 0.0;
-        float open = 0.0;
-        // A group whose windows all lie in the image (most) takes every tap
-        // where it is, at offsets the loops unroll to; one at an edge moves
-        // a tap beyond it 4 inside.
-        const ivec2 group = ivec2(gl_WorkGroupID.xy) * AO_GROUP;
-        if (all(greaterThanEqual(group, ivec2(2))) &&
-            all(lessThanEqual(group + AO_GROUP + 2, size))) {
-            for (int y = -2; y <= 2; ++y) {
-                for (int x = -2; x <= 2; ++x) {
-                    add_tap(l, ivec2(x, y), tent(x) * tent(y), q, step, edge, visible, open);
+
+    // A tile whose windows all lie in the image (most) reads each texel of a
+    // block's 6 x 6 window once; one at an edge takes each pixel's taps on
+    // their own, moving a tap beyond the edge 4 inside.
+    if (all(greaterThanEqual(tile, ivec2(2))) && all(lessThanEqual(tile + AO_TILE + 2, size))) {
+        for (int dy = -2; dy <= 3; ++dy) {
+            for (int dx = -2; dx <= 3; ++dx) {
+                const vec3 s = texel_at(block + ivec2(dx, dy));
+                for (int k = 0; k < 4; ++k) {
+                    const ivec2 o = ivec2(dx - (k & 1), dy - (k >> 1));
+                    if (abs(o.x) <= 2 && abs(o.y) <= 2) {
+                        const float window = tent(o.x) * tent(o.y);
+                        const float plane = clamp(
+                            1.0 - edge[k] * abs((q[k] + dot(vec2(o), step[k])) * s.z - 1.0), 0.0,
+                            1.0);
+                        visible[k] += s.x * window * plane;
+                        open[k] += s.y * window * plane;
+                    }
                 }
             }
-        } else {
+        }
+    } else {
+        for (int k = 0; k < 4; ++k) {
+            const ivec2 l = block + ivec2(k & 1, k >> 1);
+            const ivec2 t = tile + l;
             for (int y = -2; y <= 2; ++y) {
                 for (int x = -2; x <= 2; ++x) {
                     const ivec2 at = t + ivec2(x, y);
                     const ivec2 o = ivec2(x, y) + 4 * (ivec2(lessThan(at, ivec2(0))) -
                                                        ivec2(greaterThanEqual(at, size)));
-                    add_tap(l, o, tent(x) * tent(y), q, step, edge, visible, open);
+                    const vec3 s = texel_at(l + o);
+                    const float window = tent(x) * tent(y);
+                    const float plane = clamp(
+                        1.0 - edge[k] * abs((q[k] + dot(vec2(o), step[k])) * s.z - 1.0), 0.0, 1.0);
+                    visible[k] += s.x * window * plane;
+                    open[k] += s.y * window * plane;
                 }
             }
         }
+    }
+
+    for (int k = 0; k < 4; ++k) {
+        const ivec2 t = tile + block + ivec2(k & 1, k >> 1);
+        if (any(greaterThanEqual(t, size))) {
+            continue;
+        }
         // (The open shares are all 0 only if every slice in the window cuts
         // the surface along its normal.)
-        ao = open > 0.0 ? clamp(visible / open, 0.0, 1.0) : 1.0;
-        depth = pc.znear * q;
+        const float ao =
+            open_sky[k] ? 1.0 : (open[k] > 0.0 ? clamp(visible[k] / open[k], 0.0, 1.0) : 1.0);
+        imageStore(nph_images_2d[pc.out_index], t, vec4(ao, 0.0, 0.0, 0.0));
     }
-    imageStore(nph_uimages_2d[pc.out_index], t,
-               uvec4(packHalf2x16(vec2(ao, depth)), 0u, 0u, 0u));
 }

@@ -834,11 +834,13 @@ static void hzb_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd,
     NphVisPush p = push_of(r, phase, phase == 0U ? 0U : 2U);
     p.arg0 = nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer), 0U);
     p.arg1 = nph_gpu_image_storage_index(dev, hzb, 0U);
-    p.arg2 = v->frame.width;
-    p.arg3 = v->frame.height;
-    p.arg4 = r->ao.frame_active
-                 ? nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, r->ao.frame_depths), 0U)
-                 : NPH_VIS_NO_AO;
+    p.arg4 = NPH_VIS_NO_AO;
+    if (r->ao.frame_active) {
+        // The occlusion's depths' mips 0 and 1 (vis_hzb.comp).
+        const NphGpuImage depths = nph_gpu_rg_image(graph, r->ao.frame_depths);
+        p.arg4 = nph_gpu_image_storage_index(dev, depths, 0U);
+        p.arg2 = nph_gpu_image_storage_index(dev, depths, 1U);
+    }
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     if (phase == 0U) {
         // Mip 0 is half the target, rounded up.
@@ -890,7 +892,6 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
     p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
     p.arg2 = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
-    p.arg3 = r->ao.frame_push.point_sampler;
     // By shadow rays, the virtual shadow map, and the radiance cache.
     static const VisCompute k_resolve[2][2][2] = {
         {{VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_GI},
@@ -1035,7 +1036,7 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
     // occlusion's depths (vis_hzb.comp).
     render_vsm_request_pages(r, p);
     if (r->ao.frame_active) {
-        nph_gpu_rg_write_image(p, r->ao.frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+        nph_gpu_rg_write_image(p, r->ao.frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 2U);
     }
     nph_gpu_rg_write_image(p, f->hzb, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, NPH_GPU_ALL_MIPS);
     return NPH_RESULT_OK;

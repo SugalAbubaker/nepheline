@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Ground-truth ambient occlusion (docs/render.md "Ambient occlusion";
 // ADR-0038): Jimenez, Wu, Pesce & Jarabo, "Practical Realtime Strategies
-// for Accurate Indirect Occlusion", ATVI-TR-16-01, 2016, at half resolution
-// as there (§4.1).
+// for Accurate Indirect Occlusion", ATVI-TR-16-01, 2016, at full resolution:
+// one slice a pixel.
 //
 // A pixel's ambient occlusion is the cosine-weighted visibility of its
 // hemisphere: A = (1/pi) * integral of V(w) <n, w>+ dw, over occluders
@@ -19,13 +19,13 @@
 // the last tenth of the radius (§4.1). The samples step evenly out to the
 // radius, the far ones from the depths' coarser mips (ao_depth.comp).
 //
-// Each texel takes one slice, its direction one of 16 spread over the 4 x 4
-// texels around it and turned through 6 rotations from frame to frame
+// Each pixel takes one slice, its direction one of 16 spread over the 4 x 4
+// pixels around it and turned through 6 rotations from frame to frame
 // (§4.1): the denoise (ao_denoise.comp) averages a window that holds every
 // direction, and the temporal resolve the rotations, 96 directions in all.
 // A slice's share of an open hemisphere, |np| (cos g + g sin g) (Eq. 7 with
 // the horizons at the hemisphere's edges), is 1 only on average over the
-// directions; each texel gives it with the share it found, and the denoise
+// directions; each pixel gives it with the share it found, and the denoise
 // divides the one's sum by the other's, so that an open surface comes out
 // open even where a window lacks some directions (an edge).
 #version 460
@@ -38,9 +38,10 @@ layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
 #define AO_STEPS 4
 // An occluder's weight falls from 1 to 0 over this last part of the radius.
 #define AO_FALLOFF 0.1
-// Steps 2^AO_MIP_SHIFT full-resolution pixels (16 half-resolution texels)
-// out and further take mip 1 of the depths, twice as far mip 2, and so on.
-#define AO_MIP_SHIFT 5
+// Steps 2^AO_MIP_SHIFT pixels out and further take mip 1 of the depths,
+// twice as far mip 2, and so on: a far step's texel is an eighth of its
+// length, as at half resolution, and the nearer steps read the frame's own.
+#define AO_MIP_SHIFT 4
 
 // The 4 x 4 ordered dither (Bayer) at (x, y) mod 4, so that neighbours
 // take far-apart directions:
@@ -56,6 +57,27 @@ uint bayer(ivec2 p)
     const uint x = uint(p.x ^ p.y);
     const uint y = uint(p.y);
     return ((x & 1u) << 3u) | ((y & 1u) << 2u) | (x & 2u) | ((y >> 1u) & 1u);
+}
+
+// The pixel of a 4 x 4 block whose Bayer value is `k` (bayer's inverse).
+ivec2 bayer_inverse(uint k)
+{
+    const uint x = ((k >> 3u) & 1u) | (k & 2u);
+    const uint y = ((k >> 2u) & 1u) | ((k & 1u) << 1u);
+    return ivec2(int(x ^ y), int(y));
+}
+
+// The pixel of the group's AO_GROUP x AO_GROUP that invocation `index` takes:
+// the pixels sorted by slice direction, 16 of each, so that each half of a
+// subgroup takes one direction's pixels, 4 apart (deinterleaved, as Bavoil,
+// "Deinterleaved Texturing for Cache-Efficient Interleaved Sampling", NVIDIA
+// 2014, but over the frame's own depths). Their steps share the direction
+// and the jitter, so a step's samples lie on one lattice, a few cache lines,
+// where 16 directions in a subgroup would scatter them over the radius.
+ivec2 group_pixel(uint index)
+{
+    const uint m = index & 15u;
+    return 4 * ivec2(int(m & 3u), int(m >> 2u)) + bayer_inverse(index >> 4u);
 }
 
 // The group's depths and a texel's border around them, for the normals
@@ -100,16 +122,16 @@ void main()
         s_depths[i].d = ao_depth(origin + ivec2(int(i) % AO_SPAN, int(i) / AO_SPAN));
     }
     barrier();
-    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
-    if (any(greaterThanEqual(t, ivec2(pc.half_width, pc.half_height)))) {
+    const ivec2 l = group_pixel(gl_LocalInvocationIndex);
+    const ivec2 t = ivec2(gl_WorkGroupID.xy) * AO_GROUP + l;
+    if (any(greaterThanEqual(t, ivec2(pc.width, pc.height)))) {
         return;
     }
-    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
     const float depth = depth_at(l);
     const float dist = ao_distance(depth);
-    // A point whose radius covers under a texel sees nothing occlude it.
+    // A point whose radius covers under a pixel sees nothing occlude it.
     const float radius_px = min(pc.radius_pixels / dist, pc.max_radius);
-    if (dist >= NPH_RENDER_AO_SKY || radius_px < 2.0) {
+    if (dist >= NPH_RENDER_AO_SKY || radius_px < 1.0) {
         store(t, 1.0, 1.0, dist);
         return;
     }
@@ -151,7 +173,7 @@ void main()
     float h0 = low0;
     float h1 = low1;
     // The steps' offsets, jittered as the directions are (the transposed
-    // dither), at least a texel out.
+    // dither), at least a pixel out.
     const float jitter =
         fract((float(bayer(t.yx)) + 0.5) / 16.0 +
               float(pc.noise) * 0.618034);
@@ -161,7 +183,7 @@ void main()
     // known), a thousandth of a pixel's slack keeping an axis the slice
     // runs along from cutting it off.
     const vec2 lo = vec2(0.5);
-    const vec2 hi = 2.0 * vec2(ivec2(pc.half_width, pc.half_height) - 1) + 0.5;
+    const vec2 hi = vec2(ivec2(pc.width, pc.height) - 1) + 0.5;
     const bvec2 rising = greaterThanEqual(omega, vec2(0.0));
     const vec2 per_pixel = 1.0 / max(abs(omega), vec2(1e-7));
     const vec2 room0 = (mix(hi - c, c - lo, rising) + 1e-3) * per_pixel;
@@ -178,23 +200,26 @@ void main()
     const float w_across = dot(w, ortho.xy);
     const float rc_length = 1.0 / inv_rc_length;
     for (int i = 0; i < AO_STEPS; ++i) {
-        const float length_px = max((float(i) + jitter) / float(AO_STEPS) * radius_px, 2.0);
+        const float length_px = max((float(i) + jitter) / float(AO_STEPS) * radius_px, 1.0);
         // Mip floor(log2(length_px)) - AO_MIP_SHIFT + 1: the logarithm is the
-        // float's exponent (length_px is at least 2).
+        // float's exponent (length_px is at least 1).
         const int mip = clamp((floatBitsToInt(length_px) >> 23) - 127 - AO_MIP_SHIFT + 1, 0,
                               NPH_RENDER_AO_MIPS - 1);
         for (int side = 0; side < 2; ++side) {
-            if (length_px > (side == 0 ? reach0 : reach1)) {
-                continue;
-            }
-            const float s = side == 0 ? -length_px : length_px;
+            // Every sample is fetched, within the reach (so its texels lie in
+            // the image), and one beyond it counts nothing: the fetches do not
+            // wait on a branch, and the horizon is the same.
+            const float reach = side == 0 ? reach0 : reach1;
+            const float s = side == 0 ? -min(length_px, reach) : min(length_px, reach);
             const float x = ao_distance(ao_depth_at(c + s * omega, mip));
             const float along = x * s * w_along - (x - dist) * rc_length;
             const float across = x * s * w_across;
             const float len2 = along * along + across * across;
             const float inv_len = inversesqrt(max(len2, 1e-12));
             const float weight =
-                clamp((1.0 - len2 * inv_len * inv_radius) / AO_FALLOFF, 0.0, 1.0);
+                length_px > reach
+                    ? 0.0
+                    : clamp((1.0 - len2 * inv_len * inv_radius) / AO_FALLOFF, 0.0, 1.0);
             const float h = along * inv_len;
             if (side == 0) {
                 h0 = max(h0, mix(low0, h, weight));

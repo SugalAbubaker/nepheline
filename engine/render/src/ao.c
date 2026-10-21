@@ -5,16 +5,16 @@
 //
 // Ground-truth ambient occlusion (Jimenez, Wu, Pesce & Jarabo, "Practical
 // Realtime Strategies for Accurate Indirect Occlusion", ATVI-TR-16-01,
-// 2016) at half resolution, as there: the depth pyramid's passes take each
-// 2 x 2 pixels' top-left depth as they read them (vis_hzb.comp), and a pass
-// adds mips for the far samples (ao_depth.comp); each half-resolution
-// texel finds the horizons of one slice of its hemisphere and integrates
-// the visible arc in closed form (ao.comp); and a bilateral 5 x 5 average
-// gathers the 16 directions its neighbours took (ao_denoise.comp). The
-// resolve upsamples it and darkens the environment's light by it, the
-// diffuse part with the light the occluders reflect back. The slices turn
-// through 6 rotations from frame to frame under the temporal resolve,
-// which averages them.
+// 2016) at full resolution, one occlusion a pixel: the depth pyramid's
+// passes copy the frame's depths and average them into a mip as they read
+// them (vis_hzb.comp), and a pass adds the coarser mips for the far samples
+// (ao_depth.comp); each pixel finds the
+// horizons of one slice of its hemisphere and integrates the visible arc in
+// closed form (ao.comp); and a bilateral 5 x 5 average gathers the 16
+// directions its neighbours took (ao_denoise.comp). The resolve reads its
+// pixel's and darkens the environment's light by it, the diffuse part with
+// the light the occluders reflect back. The slices turn through 6 rotations
+// from frame to frame under the temporal resolve, which averages them.
 #include <nepheline/math/scalar.h>
 
 #include "render_internal.h"
@@ -23,23 +23,24 @@
 
 NPH_STATIC_ASSERT(sizeof(NphRenderAoPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
 
-// The half-resolution reverse-Z depths; each slice's occlusion with the
-// distance, and the denoised occlusion with the depth, as two half floats in
-// a word.
+// The reverse-Z depths; each slice's shares with the distance, packed in a
+// word; the denoised occlusion, a half float.
 #define AO_DEPTH_FORMAT  NPH_GPU_FORMAT_R32_SFLOAT
 #define AO_PACKED_FORMAT NPH_GPU_FORMAT_R32_UINT
+#define AO_OUT_FORMAT    NPH_GPU_FORMAT_R16_SFLOAT
 // The slices' rotations, which the temporal resolve averages.
 #define AO_ROTATIONS 6U
 // The passes' workgroups (ao_depth.comp, ao.comp, ao_denoise.comp).
 #define AO_GROUP 16U
-NPH_STATIC_ASSERT((1U << (NPH_RENDER_AO_MIPS - 1)) == AO_GROUP, "ao_depth.comp's reduction");
+NPH_STATIC_ASSERT((1U << (NPH_RENDER_AO_MIPS - 1)) == 2U * AO_GROUP, "the depths' alignment");
+#define AO_DEPTH_ALIGN (1U << (NPH_RENDER_AO_MIPS - 1))
 
-// The depths' extent: the half-resolution one rounded up to a multiple of
-// the depth pass's group, which every mip then halves exactly
+// The depths' extent: the frame's rounded up to a multiple of
+// 2^(NPH_RENDER_AO_MIPS - 1), which every mip then halves exactly
 // (ao_depth.comp).
-static u32 depth_extent(u32 half)
+static u32 depth_extent(u32 extent)
 {
-    return (half + AO_GROUP - 1U) / AO_GROUP * AO_GROUP;
+    return (extent + AO_DEPTH_ALIGN - 1U) / AO_DEPTH_ALIGN * AO_DEPTH_ALIGN;
 }
 
 NphResult render_ao_create(NphRenderer *r)
@@ -106,10 +107,7 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
     p->max_radius = (f32)NPH_RENDER_AO_MAX_RADIUS * (f32)height;
     p->width = width;
     p->height = height;
-    p->half_width = (width + 1U) / 2U;
-    p->half_height = (height + 1U) / 2U;
-    p->depth_texel =
-        nph_vec2(1.0F / (f32)depth_extent(p->half_width), 1.0F / (f32)depth_extent(p->half_height));
+    p->depth_texel = nph_vec2(1.0F / (f32)depth_extent(width), 1.0F / (f32)depth_extent(height));
     // The slices turn only where the temporal resolve averages them: a still
     // view without it keeps one set, which does not shimmer.
     p->noise = r->taa.frame_active ? (u32)(nph_gpu_frame_index(r->dev) % AO_ROTATIONS) : 0U;
@@ -129,8 +127,8 @@ static void dispatch(NphGpuCmd *cmd, NphGpuPipeline pipeline, const NphRenderAoP
 {
     nph_gpu_cmd_bind_pipeline(cmd, pipeline);
     nph_gpu_cmd_push_constants(cmd, p, (u32)sizeof *p);
-    nph_gpu_cmd_dispatch(cmd, (p->half_width + group - 1U) / group,
-                         (p->half_height + group - 1U) / group, 1U);
+    nph_gpu_cmd_dispatch(cmd, (p->width + group - 1U) / group, (p->height + group - 1U) / group,
+                         1U);
 }
 
 static void depth_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -142,11 +140,11 @@ static void depth_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     for (u32 m = 0; m < (u32)NPH_RENDER_AO_MIPS; ++m) {
         p.depth_mips[m] = nph_gpu_image_storage_index(r->dev, depths, m);
     }
-    // An invocation per texel of mip 1 (ao_depth.comp).
+    // An invocation per texel of mip 2 (ao_depth.comp).
     nph_gpu_cmd_bind_pipeline(cmd, a->depth);
     nph_gpu_cmd_push_constants(cmd, &p, (u32)sizeof p);
-    const u32 w = depth_extent(p.half_width) / 2U;
-    const u32 h = depth_extent(p.half_height) / 2U;
+    const u32 w = depth_extent(p.width) / 4U;
+    const u32 h = depth_extent(p.height) / 4U;
     nph_gpu_cmd_dispatch(cmd, (w + AO_GROUP - 1U) / AO_GROUP, (h + AO_GROUP - 1U) / AO_GROUP, 1U);
 }
 
@@ -167,7 +165,8 @@ static void denoise_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphRenderAoPush p = a->frame_push;
     p.raw_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, a->frame_raw));
     p.out_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, a->frame_out), 0U);
-    dispatch(cmd, a->denoise, &p, AO_GROUP);
+    // A 2 x 2 block an invocation (ao_denoise.comp).
+    dispatch(cmd, a->denoise, &p, 2U * AO_GROUP);
 }
 
 static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
@@ -188,8 +187,8 @@ NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph)
     NphGpuImageDesc id;
     memset(&id, 0, sizeof id);
     id.format = AO_DEPTH_FORMAT;
-    id.width = depth_extent(a->frame_push.half_width);
-    id.height = depth_extent(a->frame_push.half_height);
+    id.width = depth_extent(a->frame_push.width);
+    id.height = depth_extent(a->frame_push.height);
     id.mip_count = (u32)NPH_RENDER_AO_MIPS;
     id.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
     id.name = "ao depths";
@@ -203,12 +202,13 @@ NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph)
     NphGpuImageDesc id;
     memset(&id, 0, sizeof id);
     id.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
-    id.width = a->frame_push.half_width;
-    id.height = a->frame_push.half_height;
+    id.width = a->frame_push.width;
+    id.height = a->frame_push.height;
     id.mip_count = 1U;
     id.format = AO_PACKED_FORMAT;
     id.name = "ao raw";
     a->frame_raw = nph_gpu_rg_create_image(graph, &id);
+    id.format = AO_OUT_FORMAT;
     id.name = "ao";
     a->frame_out = nph_gpu_rg_create_image(graph, &id);
     if (nph_gpu_rg_image_is_null(a->frame_raw) || nph_gpu_rg_image_is_null(a->frame_out)) {
@@ -218,9 +218,9 @@ NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph)
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
-    nph_gpu_rg_read_image(p, a->frame_depths, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
-    nph_gpu_rg_write_image(p, a->frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 1U,
-                           (u32)NPH_RENDER_AO_MIPS - 1U);
+    nph_gpu_rg_read_image(p, a->frame_depths, NPH_GPU_RG_USE_STORAGE_READ, 1U, 1U);
+    nph_gpu_rg_write_image(p, a->frame_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 2U,
+                           (u32)NPH_RENDER_AO_MIPS - 2U);
     p = add_pass(graph, r, "ao", ao_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;

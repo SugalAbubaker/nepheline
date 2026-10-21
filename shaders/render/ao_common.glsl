@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // What the ambient occlusion's kernels share (docs/render.md "Ambient
 // occlusion"; ADR-0038): their push constants, view-space positions rebuilt
-// from depth, and lookups in the half-resolution depths.
+// from depth, and lookups in the depths.
 //
-// The occlusion runs at half resolution (Jimenez et al. 2016 §4.1): texel
-// (i, j) of every half-resolution image stands for full-resolution pixel
-// (2i, 2j), whose centre is at (2i + 0.5, 2j + 0.5) in full-resolution
-// pixels, the units all positions on screen are given in here.
+// The occlusion runs at full resolution, one value a pixel: texel (i, j) of
+// every image is pixel (i, j), whose centre is at (i + 0.5, j + 0.5), in
+// the pixels all positions on screen are given in here.
 #ifndef NPH_AO_COMMON_GLSL
 #define NPH_AO_COMMON_GLSL
 
@@ -32,22 +31,22 @@ vec3 ao_position(vec2 c, float dist)
     return dist * vec3(pc.unproject.xy * c + pc.unproject.zw, -1.0);
 }
 
-// The screen position of half-resolution texel `t`.
+// The screen position of pixel `t`.
 vec2 ao_centre(ivec2 t)
 {
-    return 2.0 * vec2(t) + 0.5;
+    return vec2(t) + 0.5;
 }
 
-// The reverse-Z depth of half-resolution texel `t`, clamped to the image.
+// The reverse-Z depth of pixel `t`, clamped to the image.
 float ao_depth(ivec2 t)
 {
     return texelFetch(nph_textures_2d[pc.depths_index],
-                      clamp(t, ivec2(0), ivec2(pc.half_width, pc.half_height) - 1), 0)
+                      clamp(t, ivec2(0), ivec2(pc.width, pc.height) - 1), 0)
         .r;
 }
 
-// The reverse-Z depth at screen position `at` (full-resolution pixels) from
-// the half-resolution depths' mip `mip`. Reverse-Z depth is affine in
+// The reverse-Z depth at screen position `at` (pixels) from the depths' mip
+// `mip`. Reverse-Z depth is affine in
 // screen position across a plane, and every mip averages the depths below
 // it, so where the texels around the point lie on a plane, their depths
 // interpolated bilinearly put it exactly on that plane: a sample along a
@@ -60,12 +59,12 @@ float ao_depth(ivec2 t)
 // interpolated as they are.
 float ao_depth_at(vec2 at, int mip)
 {
-    // Texel i's sample lies at 2 i + 0.5, l = (at - 0.5) / 2 texels along.
-    // The extent halves exactly down the mips (ao_depth.comp), so mip m's
-    // texel k, which stands for its texels' centroid k 2^m + (2^m - 1) / 2,
-    // lies at uv (k + 0.5) 2^m / extent: every mip has the point at uv
+    // Texel i's sample lies at i + 0.5, l = at - 0.5 texels along. The
+    // extent halves exactly down the mips (ao_depth.comp), so mip m's texel
+    // k, which stands for its texels' centroid k 2^m + (2^m - 1) / 2, lies at
+    // uv (k + 0.5) 2^m / extent: every mip has the point at uv
     // (l + 0.5) / extent.
-    const vec2 l = (at - 0.5) * 0.5;
+    const vec2 l = at - 0.5;
     if (mip > 0) {
         return textureLod(sampler2D(nph_textures_2d[pc.depths_index],
                                     nph_samplers[pc.linear_sampler]),
@@ -87,7 +86,7 @@ float ao_depth_at(vec2 at, int mip)
     return f.y < 0.5 ? (f.x < 0.5 ? d.w : d.z) : (f.x < 0.5 ? d.x : d.y);
 }
 
-// The surface's tangent plane at half-resolution texel `t`, from `q`, a
+// The surface's tangent plane at pixel `t`, from `q`, a
 // quantity proportional to the inverse of the view distance (reverse-Z
 // depth, or 1 / distance), at the texel and its neighbours (`left`,
 // `right`, `up`, `down`). Such a q is affine in screen position across a
@@ -103,11 +102,10 @@ float ao_depth_at(vec2 at, int mip)
 // so the normal facing it is -normalize(m).
 vec2 ao_gradient(ivec2 t, float q, float left, float right, float up, float down)
 {
-    const ivec2 last = ivec2(pc.half_width, pc.half_height) - 1;
+    const ivec2 last = ivec2(pc.width, pc.height) - 1;
     const bool use_right = t.x == 0 || (t.x < last.x && abs(right - q) < abs(left - q));
     const bool use_down = t.y == 0 || (t.y < last.y && abs(down - q) < abs(up - q));
-    // Per full-resolution pixel: the neighbours are 2 apart.
-    return 0.5 * vec2(use_right ? right - q : q - left, use_down ? down - q : q - up);
+    return vec2(use_right ? right - q : q - left, use_down ? down - q : q - up);
 }
 
 vec3 ao_plane(ivec2 t, float q, vec2 gradient)

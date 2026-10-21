@@ -443,10 +443,10 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests and the occlusion's depths there) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
-| `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' mips, each texel's slice, and the denoise, at half resolution (below) |
+| `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice, and the denoise (below) |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
-| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the ambient occlusion upsampled; the radiance cache's cell looked up) |
+| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `transparent` | the blended surfaces, forward, with no depth attachment: each fragment tests the visibility buffer's depth itself and is demoted behind it (`forward_frag.glsl` `k_vis_depth`) |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
@@ -817,33 +817,46 @@ views and the indirect debug view while the environment lights the view
 view (the statistic `ao`); the reference renderer has none. The runtime
 sets the radius from `r.ao` (0.5 m).
 
-- **Half resolution** (the paper's §4.1): texel (i, j) stands for pixel
-  (2i, 2j). The depth pyramid's passes write each 2 × 2 block's top-left
-  depth as they read the frame's depths, and `ao depth` averages four more
-  mips of reverse-Z depth, which is affine across a plane, so every mip's
-  points stay on the planes they come from (XeGTAO's depth mips, Intel
-  2021). The extent rounds up to 16 texels so that every mip halves it
-  exactly and one uv addresses a point in all of them.
-- **A slice a texel** (`ao.comp`): its angle around the view vector one
-  of 16 over 4 × 4 texels (a Bayer matrix), turned by a sixth of a step
+- **Full resolution** (the user's decision, 2026-10-20: the paper's
+  §4.1 half resolution traded detail at edges and on thin geometry for
+  time). The depth pyramid's passes write every pixel's depth (mip 0)
+  and each 2 × 2 block's average (mip 1) as they read the frame's depths,
+  and `ao depth` averages four more mips of reverse-Z depth, which is
+  affine across a plane, so every mip's points stay on the planes they
+  come from (XeGTAO's depth mips, Intel 2021). The extent rounds up to 32
+  pixels so that every mip halves it exactly and one uv addresses a point
+  in all of them.
+- **A slice a pixel** (`ao.comp`): its angle around the view vector one
+  of 16 over 4 × 4 pixels (a Bayer matrix), turned by a sixth of a step
   each frame under temporal anti-aliasing, which averages the rotations:
   96 directions a pixel. Along the slice's screen direction (the
   projection's derivative, so the samples lie in the slice), 4 steps a
-  side out to the radius (at most a quarter of the image's height): the
-  near ones interpolate mip 0 exactly where its texels lie on one plane,
-  which a sample beside the slice would rise above at a grazing angle; the
-  far ones read coarser mips. Occluders fade over the last tenth of the
-  radius. The horizons give the slice's visible arc in closed form (Eq. 7),
-  scaled by the normal projected into the slice (Eq. 8; the normal from
-  the depth's gradient).
-- **The denoise** (`ao_denoise.comp`): a 5 × 5 tent of texels, which holds
+  side out to the radius (at most a quarter of the image's height), at
+  least a pixel out: the near ones interpolate mip 0 exactly where its
+  texels lie on one plane, which a sample beside the slice would rise
+  above at a grazing angle; the steps 16 pixels out and further read
+  coarser mips, each texel an eighth of the step's length at most.
+  Occluders fade over the last tenth of the radius; a radius under a
+  pixel occludes nothing. The horizons give the slice's visible arc in
+  closed form (Eq. 7), scaled by the normal projected into the slice
+  (Eq. 8; the normal from the depth's gradient). A workgroup takes its
+  pixels sorted by direction, so that each half of a subgroup takes one
+  direction's pixels, 4 apart, whose samples fall on one lattice
+  (deinterleaved, as Bavoil, "Deinterleaved Texturing for Cache-Efficient
+  Interleaved Sampling", NVIDIA 2014, but over the frame's own depths);
+  and every sample is fetched within the image, one beyond the reach
+  counting nothing, so the fetches never wait on a branch.
+- **The denoise** (`ao_denoise.comp`): a 5 × 5 tent of pixels, which holds
   each of the 16 directions equally, counting the neighbours on the
-  texel's tangent plane (5 % of the distance off it counts nothing); the
+  pixel's tangent plane (5 % of the distance off it counts nothing); the
   occlusion is the window's visible shares over the open shares its slices
   would have, so an open surface stays open where an edge cuts directions
-  out.
-- **Shading.** The resolve takes the four texels around each pixel by
-  their bilinear weights and their depth's likeness to the pixel's. The
+  out. Each invocation denoises a 2 × 2 block, whose four windows lie in
+  one of 6 × 6 pixels that it reads and unpacks once, adding each texel to
+  each window in that window's own order, so every sum is what it would be
+  alone; a block of the sky alone is written open at once. The occlusion
+  goes out as a half float.
+- **Shading.** The resolve reads the occlusion at its pixel. The
   environment's specular light takes specular occlusion from the
   material's occlusion times the screen's, and its diffuse light the
   screen's through Eq. 10 of the paper, which adds back what occluders of
@@ -851,10 +864,16 @@ sets the radius from `r.ao` (0.5 m).
   is untouched.
 
 Against a ground truth cast by rays, a box on the ground is occluded
-within a fifth of how much the truth is, the ground nothing occludes stays
-within 0.003 of open, and the ground alone within 0.009 out to its
-horizon (`test_ao.c`). At 4K with the runtime's radius it adds 0.38 ms to
-a frame the sky lights (ADR-0038).
+within a sixth of how much the truth is (a fifth at half resolution), the
+ground nothing occludes stays within 0.003 of open with no pixel off by
+over 0.03 (0.5 % at half resolution), and the ground alone within 0.009
+out to its horizon (`test_ao.c`). At 4K with the runtime's radius it adds
+1.06 ms to a frame the sky lights, and its passes take 1.31 ms in
+Bistro's street (ADR-0038). Measured and not kept: the denoise unpacking its texels into
+vectors in shared memory (0.76 ms against 0.59, the reads three times the
+bytes); unpacking the shares with float bit tricks instead of conversions
+(0.47 ms against 0.44); workgroups of 32 × 16 pixels whose subgroups each
+take one direction whole (0.87 ms against 0.84).
 
 ### Global illumination
 

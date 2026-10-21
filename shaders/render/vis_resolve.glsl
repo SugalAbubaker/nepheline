@@ -14,8 +14,7 @@
 //
 // Writes pre-exposed radiance into the HDR image whose storage index is
 // arg0; arg1 is the visibility buffer's, arg2 the ambient occlusion's
-// sampled one (ao.c; NPH_VIS_NO_AO: none this frame) and arg3 the sampler
-// it is gathered with.
+// sampled one (ao.c; NPH_VIS_NO_AO: none this frame).
 //
 // Compiled twice: vis_resolve.comp, and vis_resolve_rt.comp with ray
 // queries (NPH_RAY_QUERY), which traces shadow rays for the lights that
@@ -52,34 +51,12 @@ VsmViewRef g_vsm; // set first thing in main()
 // invocation shades, of reverse-Z depth g_depth; set first thing in main().
 ivec2 g_pixel;
 float g_depth;
-uint g_ao;         // the half-resolution occlusion and depths; NPH_VIS_NO_AO: none
-uint g_ao_sampler; // nearest, clamped to the edge
-vec2 g_ao_size;    // its extent
+uint g_ao; // the occlusion, one a pixel (ao_denoise.comp); NPH_VIS_NO_AO: none
 
-// The occlusion upsampled from half resolution (ao_denoise.comp), whose
-// texel (i, j) stands for pixel (2i, 2j): the pixel lies between the
-// samples of texels floor(p / 2) and the next, weighted bilinearly, those
-// of another surface (5 % apart in depth) all but left out, so that no
-// occlusion crosses a silhouette.
+// The occlusion at the pixel.
 float vis_ambient_occlusion()
 {
-    const vec2 u = vec2(g_pixel) * 0.5;
-    const vec2 i0 = floor(u);
-    const vec2 f = u - i0;
-    // The four texels' occlusion and depth by one gather at the corner they
-    // share, in its order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
-    const uvec4 t =
-        textureGather(usampler2D(nph_utextures_2d[g_ao], nph_samplers[g_ao_sampler]),
-                      (i0 + 1.0) / g_ao_size, 0);
-    const vec2 t0 = unpackHalf2x16(t.x);
-    const vec2 t1 = unpackHalf2x16(t.y);
-    const vec2 t2 = unpackHalf2x16(t.z);
-    const vec2 t3 = unpackHalf2x16(t.w);
-    const vec4 depth = vec4(t0.y, t1.y, t2.y, t3.y);
-    const vec4 apart = abs(depth - g_depth) / (0.05 * max(depth, vec4(g_depth)) + 1e-30);
-    const vec4 w = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y)) *
-                   max(1.0 - apart, vec4(0.01));
-    return dot(vec4(t0.x, t1.x, t2.x, t3.x), w) / dot(w, vec4(1.0));
+    return texelFetch(nph_textures_2d[g_ao], g_pixel, 0).r;
 }
 #define NPH_SURFACE_AO (g_ao != NPH_VIS_NO_AO ? vis_ambient_occlusion() : 1.0)
 
@@ -180,8 +157,6 @@ void main()
     g_vsm = VsmViewRef(rview.v.vsm);
     g_pixel = p;
     g_ao = pc.arg2;
-    g_ao_sampler = pc.arg3;
-    g_ao_size = vec2((uvec2(size) + 1u) / 2u);
     const uint debug = rview.v.debug_mode;
     // Decided here, so that nothing of the view stays live to the store.
     const bool dither = k_dither && debug == NPH_RENDER_DEBUG_NONE;
