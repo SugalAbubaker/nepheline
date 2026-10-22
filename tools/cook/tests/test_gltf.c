@@ -557,6 +557,60 @@ NTEST(gltf, sparse_and_quantised_accessors)
     cook_gltf_free(&scene);
 }
 
+NTEST(gltf, ranges_outside_their_views_or_buffers_are_refused)
+{
+    // cgltf_validate read a sparse accessor's indices before it checked
+    // their view against its buffer, and its range sums can wrap (nightly
+    // fuzzing; the corpus seed regression_view_past_buffer). The sparse
+    // test's layout with one range made impossible at a time: each must be
+    // refused without a read outside the buffer.
+    struct {
+        i16 pos[3 * 4];
+        u8 sparse_index[4];
+        i16 sparse_value[4];
+    } buf;
+    memset(&buf, 0, sizeof buf);
+    static const struct {
+        const char *component; // the accessor's componentType
+        const char *type;
+        const char *count;
+        const char *sparse_count;
+        const char *index_component;
+        const char *index_offset; // the indices' view's byteOffset
+        NphResult expected;
+    } cases[] = {
+        // The layout itself, which loads.
+        {"5122", "VEC3", "3", "1", "5121", "24", NPH_RESULT_OK},
+        // The indices' view starts past the buffer's end (the crash).
+        {"5122", "VEC3", "3", "1", "5121", "9223372036854775807", NPH_RESULT_PARSE_ERROR},
+        // 2^62 four-byte indices and values: their byte counts wrap to 0.
+        {"5126", "SCALAR", "1", "4611686018427387904", "5125", "24", NPH_RESULT_PARSE_ERROR},
+        // 2^61 + 1 elements 8 bytes apart: the stride's span wraps to 0.
+        {"5122", "VEC3", "2305843009213693953", "1", "5121", "24", NPH_RESULT_PARSE_ERROR},
+    };
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(cases); ++i) {
+        char doc[1024];
+        snprintf(doc, sizeof doc,
+                 "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_mesh_quantization\"],"
+                 "\"extensionsRequired\":[\"KHR_mesh_quantization\"],"
+                 "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+                 "\"accessors\":[{\"bufferView\":0,\"componentType\":%s,\"type\":\"%s\","
+                 "\"count\":%s,\"sparse\":{\"count\":%s,\"indices\":{\"bufferView\":1,"
+                 "\"componentType\":%s},\"values\":{\"bufferView\":2}}}],"
+                 "\"bufferViews\":[{\"buffer\":0,\"byteLength\":24,\"byteStride\":8},"
+                 "{\"buffer\":0,\"byteOffset\":%s,\"byteLength\":1},"
+                 "{\"buffer\":0,\"byteOffset\":28,\"byteLength\":6}],"
+                 "\"buffers\":[{\"byteLength\":36,\"uri\":\"%%s\"}]}",
+                 cases[i].component, cases[i].type, cases[i].count, cases[i].sparse_count,
+                 cases[i].index_component, cases[i].index_offset);
+        CookGltfScene scene;
+        NTEST_ASSERT_EQ_INT(load_doc(doc, &buf, sizeof buf, &scene), cases[i].expected);
+        if (cases[i].expected == NPH_RESULT_OK) {
+            cook_gltf_free(&scene);
+        }
+    }
+}
+
 NTEST(gltf, cameras_and_lights_are_instanced_per_node)
 {
     // One light and one camera definition, each used by two nodes; a

@@ -1158,6 +1158,68 @@ static NphResult check_embedded_buffers(const cgltf_data *data, const char *path
     return NPH_RESULT_OK;
 }
 
+// Whether `size` bytes at `offset` lie within `limit` bytes.
+static bool range_fits(u64 offset, u64 size, u64 limit)
+{
+    return offset <= limit && size <= limit - offset;
+}
+
+// Whether `count` items of `item` bytes, from `offset`, lie within `limit`
+// bytes. Items of no size (an invalid type, which cgltf_validate refuses)
+// always fit.
+static bool items_fit(u64 offset, u64 item, u64 count, u64 limit)
+{
+    return offset <= limit && (item == 0U || count <= (limit - offset) / item);
+}
+
+// cgltf_validate compares ranges through sums that can wrap, and it reads a
+// sparse accessor's indices once they fit their buffer view but before it
+// checks the views against their buffers: a view placed past the end of
+// its buffer, or a count whose bytes wrap, made it read far outside the
+// buffer (nightly fuzzing from 2026-10-20). The same ranges, checked first
+// in arithmetic that cannot wrap.
+static NphResult check_ranges(const cgltf_data *data, const char *path_for_uris)
+{
+    for (cgltf_size i = 0; i < data->buffer_views_count; ++i) {
+        const cgltf_buffer_view *v = &data->buffer_views[i];
+        if (v->buffer != NULL && !range_fits((u64)v->offset, (u64)v->size, (u64)v->buffer->size)) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK,
+                          "%s: buffer view %llu (%llu bytes at %llu) lies outside its buffer of "
+                          "%llu bytes",
+                          path_for_uris, (unsigned long long)i, (unsigned long long)v->size,
+                          (unsigned long long)v->offset, (unsigned long long)v->buffer->size);
+            return NPH_RESULT_PARSE_ERROR;
+        }
+    }
+    for (cgltf_size i = 0; i < data->accessors_count; ++i) {
+        const cgltf_accessor *a = &data->accessors[i];
+        const u64 element = (u64)cgltf_calc_size(a->type, a->component_type);
+        bool fits = true;
+        if (a->buffer_view != NULL && a->count != 0U) {
+            // The last element ends at offset + stride (count - 1) + element.
+            const u64 view = (u64)a->buffer_view->size;
+            fits =
+                range_fits((u64)a->offset, element, view) &&
+                items_fit(0U, (u64)a->stride, (u64)a->count - 1U, view - (u64)a->offset - element);
+        }
+        if (fits && a->is_sparse) {
+            const cgltf_accessor_sparse *s = &a->sparse;
+            fits = s->indices_buffer_view != NULL && s->values_buffer_view != NULL &&
+                   items_fit((u64)s->indices_byte_offset,
+                             (u64)cgltf_component_size(s->indices_component_type), (u64)s->count,
+                             (u64)s->indices_buffer_view->size) &&
+                   items_fit((u64)s->values_byte_offset, element, (u64)s->count,
+                             (u64)s->values_buffer_view->size);
+        }
+        if (!fits) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: accessor %llu reaches past its buffer view",
+                          path_for_uris, (unsigned long long)i);
+            return NPH_RESULT_PARSE_ERROR;
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
 // Parses the document in `bytes` (a cook block the scene adopts: a GLB's
 // binary chunk is used in place), loads its buffers, validates, converts.
 static NphResult load(NphAllocator *alloc, u8 *bytes, u64 size, const char *path_for_uris,
@@ -1191,6 +1253,9 @@ static NphResult load(NphAllocator *alloc, u8 *bytes, u64 size, const char *path
         }
         if (r == NPH_RESULT_OK) {
             cr = cgltf_load_buffers(&options, data, path_for_uris);
+        }
+        if (r == NPH_RESULT_OK && cr == cgltf_result_success) {
+            r = check_ranges(data, path_for_uris);
         }
     }
     if (r == NPH_RESULT_OK && cr == cgltf_result_success) {
