@@ -29,7 +29,18 @@ if(MSVC)
 endif()
 
 if(NPH_BUILD_TESTS)
-    add_test(NAME bench.render_perf COMMAND render_perf --filter=grid_1k_* --frames=4)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        # With its JSON's shape checked: every GPU entry has its 99th
+        # percentile beside it (check_results.py).
+        add_test(NAME bench.render_perf
+            COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/check_results.py"
+                    "$<TARGET_FILE:render_perf>"
+                    "${CMAKE_CURRENT_BINARY_DIR}/render_perf_test_$<CONFIG>.json"
+                    --filter=grid_1k_* --frames=4)
+    else()
+        add_test(NAME bench.render_perf COMMAND render_perf --filter=grid_1k_* --frames=4)
+    endif()
     set_tests_properties(bench.render_perf PROPERTIES
         TIMEOUT 600 LABELS "benchmark" SKIP_RETURN_CODE 77)
     # The reference-scene path, on pbr_viewer's content cooked here (CI has

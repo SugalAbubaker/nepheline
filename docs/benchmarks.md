@@ -167,6 +167,9 @@ renderer itself on a device, scene by scene, and reports what CLAUDE.md
   its last one's end on any queue (the render graph's `begin_ns`): the sum
   of the passes while one queue runs them all, shorter where passes overlap
   on the async compute queue (docs/render.md "GPU profiler").
+- `<scene>.gpu.<pass>.p99` and `<scene>.gpu.span.p99`: their 99th
+  percentiles. The passes' percentiles do not add up to the frame's: a
+  pass's slowest frames are not every pass's.
 
 Each scene first renders its view held still until the GPU's clock has
 settled: in windows of 64 frames, until three windows in a row each take
@@ -317,8 +320,10 @@ production compute pass's registers and spills, and the temporal
 resolve's, as the driver reports them.
 
 Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
-(`bench.render_perf`) renders the 1k grids for four frames and skips
-without a device. The reference results are
+(`bench.render_perf`) renders the 1k grids for four frames, checks the
+JSON's shape (`benchmarks/render/check_results.py`: every GPU entry has
+its 99th percentile beside it) and skips without a device. The reference
+results are
 `benchmarks/results/render_perf-2026-10-21d-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU

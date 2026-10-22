@@ -22,7 +22,11 @@
 //   <scene>.gpu.span    the frame's span, from its first pass's beginning to
 //                       its last one's end on any queue: the sum above
 //                       while one queue runs every pass, less where async
-//                       compute overlaps it.
+//                       compute overlaps it;
+//   <scene>.gpu.<pass>.p99, <scene>.gpu.span.p99
+//                       their 99th percentiles. The passes' do not add up
+//                       to the frame's: a pass's slowest frames are not
+//                       every pass's.
 //
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
@@ -166,7 +170,7 @@
 
 #define EXIT_SKIPPED   77
 #define MAX_FRAMES     512U
-#define MAX_RESULTS    2048U
+#define MAX_RESULTS    4096U // the synthetic scenes write some 2,300
 #define MAX_PASS_STATS 96U
 #define WARMUP_FRAMES  24U
 #define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long
@@ -895,20 +899,22 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
         if (frame) {
             printf(", gpu %.3f ms mean, %.3f ms p99, %.1f MB declared\n", p->mean_ms, p->p99_ms,
                    g->metric);
-            Result *p99 = add_result(ctx, name, ".gpu.p99");
-            if (p99 == NULL) {
-                return NPH_RESULT_FULL;
-            }
-            p99->samples = p->samples;
-            p99->ns = p->p99_ms * 1.0e6;
-            p99->metric = p99->ns;
         }
+        char p99_suffix[100];
+        (void)snprintf(p99_suffix, sizeof p99_suffix, "%s.p99", suffix);
+        Result *p99 = add_result(ctx, name, p99_suffix);
+        if (p99 == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        p99->samples = p->samples;
+        p99->ns = p->p99_ms * 1.0e6;
+        p99->metric = p99->ns;
     }
     for (u32 i = 0; i < n; ++i) {
         const NphRenderPassStats *p = &passes[i];
         if (p->samples != 0U && strcmp(p->name, "frame") != 0) {
-            printf("    %-28s %8.3f ms  %9.1f MB read  %9.1f MB written\n", p->name, p->mean_ms,
-                   (f64)p->read_bytes / 1.0e6, (f64)p->write_bytes / 1.0e6);
+            printf("    %-28s %8.3f ms  %8.3f ms p99  %9.1f MB read  %9.1f MB written\n", p->name,
+                   p->mean_ms, p->p99_ms, (f64)p->read_bytes / 1.0e6, (f64)p->write_bytes / 1.0e6);
         }
     }
     const NphRenderFrameStats *st = &run->stats;
