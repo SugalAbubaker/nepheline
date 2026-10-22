@@ -69,6 +69,10 @@ jobs:
           - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Shipping,    cfg: shipping }
           - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug }
           - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Development, cfg: development }
+          # Clang without asserts: its -Wunused-but-set-variable counts `+=` as a
+          # write, which GCC and MSVC do not flag, so a value only an assert reads
+          # broke the nightly Benchmarks' Profile build unseen for a week.
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Shipping,    cfg: shipping }
     steps:
       - uses: actions/checkout@v7
         with:
