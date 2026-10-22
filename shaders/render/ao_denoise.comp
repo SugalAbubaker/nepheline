@@ -113,6 +113,12 @@ void main()
     // their own, moving a tap beyond the edge 4 inside.
     if (all(greaterThanEqual(tile, ivec2(2))) && all(lessThanEqual(tile + AO_TILE + 2, size))) {
         for (int dy = -2; dy <= 3; ++dy) {
+            // Each pixel's plane under this row: its inverse distance at the
+            // row's column 0, then a column's step at a time.
+            float row[4];
+            for (int k = 0; k < 4; ++k) {
+                row[k] = q[k] + float(dy - (k >> 1)) * step[k].y;
+            }
             for (int dx = -2; dx <= 3; ++dx) {
                 const vec3 s = texel_at(block + ivec2(dx, dy));
                 for (int k = 0; k < 4; ++k) {
@@ -120,8 +126,8 @@ void main()
                     if (abs(o.x) <= 2 && abs(o.y) <= 2) {
                         const float window = tent(o.x) * tent(o.y);
                         const float plane = clamp(
-                            1.0 - edge[k] * abs((q[k] + dot(vec2(o), step[k])) * s.z - 1.0), 0.0,
-                            1.0);
+                            1.0 - edge[k] * abs((row[k] + float(o.x) * step[k].x) * s.z - 1.0),
+                            0.0, 1.0);
                         visible[k] += s.x * window * plane;
                         open[k] += s.y * window * plane;
                     }

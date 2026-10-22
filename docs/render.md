@@ -1042,8 +1042,13 @@ sets the radius from `r.ao` (0.5 m).
   out. Each invocation denoises a 2 × 2 block, whose four windows lie in
   one of 6 × 6 pixels that it reads and unpacks once, adding each texel to
   each window in that window's own order, so every sum is what it would be
-  alone; a block of the sky alone is written open at once. The occlusion
-  goes out as a half float.
+  alone; a block of the sky alone is written open at once. A tap's plane
+  test takes the plane's inverse distance from a base per row and pixel
+  (q + o_y step_y, once a row) plus o_x step_x, one fused multiply-add a
+  tap where q + o · step took more: in Bistro's street 315 instructions a
+  pixel against 331 and 0.413 ms against 0.439 (GPU traces, two each,
+  interleaved), the weights differing only in rounding. The occlusion goes
+  out as a half float.
 - **Shading.** The resolve reads the occlusion at its pixel. The
   environment's specular light takes specular occlusion from the
   material's occlusion times the screen's, and its diffuse light the
