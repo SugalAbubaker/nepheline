@@ -1,7 +1,9 @@
 # 0034. Temporal anti-aliasing at native resolution, fused with the tonemap
 
 - **Date:** 2026-10-18
-- **Status:** Accepted (the §10.4 line it exceeds is open: see Consequences)
+- **Status:** Accepted (the §10.4 line it exceeds is open: see
+  Consequences; the review's options settled by
+  [ADR-0041](0041-frame-target-gates.md))
 
 ## Context
 

@@ -39,13 +39,14 @@ supersedes it and both link to each other.
 | [0031](0031-light-grid-and-compact-hdr.md) | Fused tile shading: the light grid, the HDR target in B10G11R11, and one resolve pass | Accepted |
 | [0032](0032-ray-traced-shadows.md) | Ray-traced shadows: the ground truth for every shadow technique, and the production path's first | Accepted |
 | [0033](0033-virtual-shadow-maps.md) | The sun's virtual shadow map: a resolution-matched clipmap of cached pages | Accepted |
-| [0034](0034-temporal-anti-aliasing.md) | Temporal anti-aliasing at native resolution, fused with the tonemap | Accepted (its §10.4 line open) |
+| [0034](0034-temporal-anti-aliasing.md) | Temporal anti-aliasing at native resolution, fused with the tonemap | Accepted (its §10.4 line open; the review's options settled by [0041](0041-frame-target-gates.md)) |
 | [0035](0035-bloom-and-exposure.md) | Bloom and automatic exposure | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0036](0036-motion-blur.md) | Motion blur after the temporal resolve, weighted by the shutter | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0037](0037-depth-of-field.md) | Depth of field through a thin lens: slight blur gathered at full resolution, large at half | Accepted (adds to ADR-0034's open §10.4 line) |
-| [0038](0038-ambient-occlusion.md) | Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads | Accepted (0.38 ms of §10.4's indirect-light line) |
+| [0038](0038-ambient-occlusion.md) | Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads | Accepted; amended 2026-10-20: full resolution (past §10.4's indirect-light line: [0041](0041-frame-target-gates.md)) |
 | [0039](0039-radiance-cache.md) | A hashed world-space radiance cache, kept by a fixed ray budget | Accepted (0.20 to 0.41 ms; with ADR-0038 past §10.4's indirect-light line in the sky-lit field; patent review before release) |
-| [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.86 ms against the 4.17 ms frame) |
+| [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.86 ms against the 4.17 ms frame; gated at Phase 14's exit by [0041](0041-frame-target-gates.md)) |
+| [0041](0041-frame-target-gates.md) | The frame target's gate: Phase 14's exit for the reference scenes, Phase 15 for the game | Accepted |
 
 ## Template
 

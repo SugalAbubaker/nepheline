@@ -378,7 +378,7 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
   - TAA at native resolution.
   - Caching of slowly changing lighting (GI radiance cache, cached shadow-map pages).
   - Reuse of the previous frame's depth for occlusion culling.
-- **Measured as 1%-low frame time ≤ 4.17 ms** in the reference scenes, not average FPS.
+- **Measured as 1%-low frame time ≤ 4.17 ms** in the reference scenes and the first game, not average FPS. §10.7 sets when each must hold it.
 
 ### 10.2 The physics of the problem
 | Resource | RTX 3060 Ti | Per 4.17 ms frame |
@@ -438,6 +438,8 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 - A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
 - GPU timestamps per pass are compared to the §10.4 table. A regression of more than 5% fails CI.
 - Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) in Phase 14, whose many-light sampling it needs.
+- The target gates at Phase 14's exit, the renderer's last phase, where every reference scene must hold it with every pass inside its §10.4 budget, and in Phase 15, where the first game must (ADR-0041). Until then the target and the table stand unchanged, and no phase from 11 to 14 may end with a reference scene slower than when it began, unless an ADR shows where the added cost will be won back.
+- Phase 13 opens with a structure checkpoint (ADR-0041): measured prototypes of TAA and post fused into the shading pass, and of full-resolution GTAO in a form that fits its share of the indirect-light line, so that Phases 13 and 14 build on a frame that can reach the target at full quality. The game's setting, camera, and world density are decided there, and the reference scenes are checked against them.
 - Every renderer PR must state its cost in both milliseconds and DRAM bytes.
 
 ## 11. Documentation
@@ -459,12 +461,12 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 | **7. Renderer v1** | forward PBR reference renderer, IBL, HDR/tonemap, debug draw, GPU profiler (§8.6 stages 1–2) | Golden-image tests pass for the PBR test scenes |
 | **8. Scene/ECS** | archetype ECS, parallel scheduler, reflection, transforms, scene serialization | 1M-entity benchmarks recorded. Scenes round-trip |
 | **9. Runtime + Editor v1** | engine loop, game hot reload, editor panels, gizmos, undo/redo, import, primitives | A scene can be built, saved, reloaded, and played in the editor |
-| **10. Renderer v2** | GPU-driven culling, visibility buffer + hybrid raster, fused tile shading, virtual shadow maps, radiance cache GI, native TAA + fused post (§8.6 stages 3–8); define the reference scenes | Constant CPU cost vs object count. Reference scenes hold 1%-low ≤ 4.17 ms at native 4K on the RTX 3060 Ti, with every pass inside its §10.4 budget |
+| **10. Renderer v2** | GPU-driven culling, visibility buffer + hybrid raster, fused tile shading, virtual shadow maps, radiance cache GI, native TAA + fused post (§8.6 stages 3–8); define the reference scenes | Constant CPU cost vs object count. Bistro measured at native 4K on the RTX 3060 Ti against every §10.4 line, each overrun's path recorded in an ADR (ADR-0041); the 4.17 ms gate is Phase 14's (§10.7) |
 | **11. Physics** | broadphase, narrowphase, solver, joints, CCD, queries, character controller | Stacking, ragdoll, and determinism tests pass. Benchmarks recorded |
 | **12. Audio** | device, mixer, voices, DSP, 3D, streaming | Offline mix tests pass. No audio-thread allocations (verified) |
-| **13. Streaming & scale** | virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9); the open-landscape reference scene (§10.7) | Open-world test scene streams without hitches, stays under 6.5 GB VRAM, and keeps the 240 FPS native-4K target, the landscape included |
-| **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the many-light interior reference scene (§10.7) | Golden tests pass. Reference hardware stays within the §10.4 budget, the interior included |
-| **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2 | Release candidate `v1.0.0` |
+| **13. Streaming & scale** | the structure checkpoint first (§10.7); virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9); the open-landscape reference scene (§10.7) | The checkpoint's prototypes measured and recorded in an ADR. Open-world test scene streams without hitches and stays under 6.5 GB VRAM. The landscape measured against every §10.4 line, and no reference scene slower than at the phase's start (§10.7) |
+| **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the many-light interior reference scene (§10.7); every reference scene brought inside the §10.4 budget | Golden tests pass. Every reference scene (Bistro, the landscape, the interior) holds 1%-low ≤ 4.17 ms at native 4K on the RTX 3060 Ti, with every pass inside its §10.4 budget |
+| **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2; the first game's performance pass (§10.7) | The first game holds 1%-low ≤ 4.17 ms at native 4K on the reference hardware, inside the §10.4 and §10.5 budgets. Release candidate `v1.0.0` |
 
 Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so they may run in parallel with phase 10 if more people join.
 
@@ -475,4 +477,4 @@ Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so the
 - Physics solver final choice: soft-step vs TGS/XPBD (Phase 11, based on benchmarks).
 - Dynamic GI technique for the radiance cache (Phase 10).
 - Gameplay scripting: C hot-reload only, or add a scripting language (Phase 9+).
-- First demo/game to showcase the engine (to be decided later).
+- First demo/game to showcase the engine (its setting, camera, and world density at the checkpoint that opens Phase 13, so the reference scenes resemble it; the game holds the target in Phase 15: §10.7).
