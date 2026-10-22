@@ -247,8 +247,11 @@ n-th test (the renderer's suite is four: `ctest -R "^render\."`).
 
 - **clang-format** (pinned 19.1.5 from PyPI, matching VS 2022's copy).
 - **Build + test matrix:** windows-msvc, windows-clang, linux-gcc,
-  linux-clang × Debug, Development; Shipping on windows-msvc and linux-gcc so
-  LTO is exercised; one windows-msvc Development build with
+  linux-clang × Debug, Development; Shipping on windows-msvc, linux-gcc, and
+  linux-clang so LTO is exercised and each compiler builds once without
+  asserts (clang's `-Wunused-but-set-variable` counts `+=` as a write, which
+  GCC and MSVC do not flag, and only the nightly Benchmarks' Profile build
+  saw it before); one windows-msvc Development build with
   `-DNPH_FIBERS_WIN32=ON` so the fiber fallback keeps passing. Linux tests
   run under Xvfb so the window tests and the `platform_window` sample open
   a real window. JUnit results are uploaded as artifacts.
