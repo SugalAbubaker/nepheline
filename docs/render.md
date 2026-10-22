@@ -602,7 +602,12 @@ the terrace 8.20 and 1.01, 7.84 and 0.66; the turn 7.84 and 0.93, 7.53
 and 0.64; the street unchanged. Shares of 0.25 and 0.30 left more leaves
 behind (the hedge 7.56, 7.41 ms), 0.45 to 0.6 drew too many late (7.47 to
 7.84 ms). `NPH_RENDER_VIS_NO_SKIN` turns it off; the vertex path has no
-depth attachment and draws every masked cluster alike.
+depth attachment and draws every masked cluster alike. Measured and not
+kept (2026-10-21): the masked clusters drawn through the raster
+operations as phase 0's opaque ones are, writing depth after the alpha
+test and no atomics: the hedge's masked pass took 1.12 ms against 0.96. A
+fragment stage that discards and writes depth loses the early test on
+this GPU, even with no other side effects.
 
 **The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
 the opaque clusters whose bounding sphere projects in front of the near
@@ -938,7 +943,12 @@ in the 4K field. The pass is not waiting on that chain. Nor kept
 (2026-10-21, two rounds): the neighbourhood fetched with immediate offsets
 where the whole subgroup lies a pixel inside the image, the nearest-depth
 search tracking one index, and the finite test as one compare: 0.890 ms
-against 0.864 in the street.
+against 0.864 in the street. Nor kept (2026-10-21): the tonemapper chosen
+by a specialisation constant instead of a push constant (0.004 ms less,
+not worth a pipeline per tonemapper). Writing the swapchain through an
+sRGB view instead of encoding in the shader would save the encode's
+0.03 ms (`VK_KHR_swapchain_mutable_format`), but the hardware's rounding
+may differ from the exact curve by one step in the last bit: parked.
 
 ### Motion blur
 
@@ -1072,7 +1082,9 @@ choice, 64 and 0.44), and the occlusion's steps (0.83 ms against 0.85, 40
 registers against 38: within two rounds' noise); the occlusion's mip 0
 read from the visibility buffer instead of the copy the depth pyramid's
 pass writes (2026-10-21: the pyramid 0.03 ms less, the occlusion 0.065 ms
-more, in Bistro's views).
+more, in Bistro's views); the denoise filtering 2 × 1 pixels an invocation
+(2026-10-21: 48 registers against 64, yet 0.49 ms against 0.44: its texel
+reads, not its occupancy, bound it).
 
 ### Global illumination
 
@@ -1490,8 +1502,13 @@ queue would make the span the shorter, and it is the frame time §10.1
 counts. Moving the radiance cache's update and resolve there (every image
 made concurrent for the trial) lengthened Bistro's span to 7.15 ms and its
 resolve by 0.08 ms: the queues' semaphores left gaps, and nothing
-overlapped enough to pay for them. The profiler logs a table and writes
-JSON for the benchmarks.
+overlapped enough to pay for them. Overlapping frames fared no better
+(a probe, 2026-10-21): on the async compute queue the resolve alone took
+3.67 ms against 3.19 in Bistro's street (the 4K field's was unchanged),
+and the next frame's phase-0 raster replayed beside it overlapped but
+slowed the resolve by about its own cost, hiding some 0.1 of its 0.49 ms
+(the render graph's cross-queue waits, docs/gpu.md, shaped the probe).
+The profiler logs a table and writes JSON for the benchmarks.
 
 CPU time: `nph_render_frame` is the profiler zone `render.frame`
 ([profile.md](profile.md)); the passes it declares are recorded under the

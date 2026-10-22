@@ -282,7 +282,11 @@ and executes:
    batch that last touched any of its resources on another queue, on
    everything an outside queue was given before the frame for imported
    resources entering from that queue, and, for compute batches, on the
-   frame's uploads.
+   frame's uploads. Touching includes reading, so two passes on
+   different queues that only read one buffer still order their batches,
+   and a batch's waits hold every pass in it: passes meant to overlap
+   across queues share no resource and sit in batches of their own (the
+   overlap probe in render.md's "GPU profiler").
 3. **Transient placement**: memory requirements come from
    `vkGetDeviceImageMemoryRequirements` without creating objects; images
    and buffers are packed, size-descending, into blocks by first-fit over
