@@ -187,9 +187,12 @@ struct NphLitPoint {
     float nov_raw; // N.V as it is
     float a2;      // GGX alpha squared
     float smith_v; // the height-correlated Smith visibility's view half, sqrt(nov^2 (1 - a2) + a2)
-    vec3 f0;       // Fresnel at normal incidence
     vec3 diffuse;  // the Lambertian lobe: the diffuse colour over pi
-    vec3 energy;   // 1 + F0 (1 / Ess - 1): the specular lobe's multiple-scattering compensation
+    // The specular lobe's Fresnel and multiple-scattering compensation
+    // together: energy (F0 + (1 - F0) x^5) = spec_base + spec_grazing x^5,
+    // energy 1 + F0 (1 / Ess - 1) (Schlick's two terms each scaled once).
+    vec3 spec_base;    // energy F0
+    vec3 spec_grazing; // energy (1 - F0)
     vec3 face_normal; // the surface's geometric normal, either way round
 #ifdef NPH_SURFACE_VSM
     float sun_visibility; // NPH_SURFACE_VSM's, or 1 when it is not active
@@ -217,8 +220,7 @@ vec3 nph_lit_reflect(NphLitPoint p, vec3 l, float nol, vec3 e)
     const float dv = 0.5 * a2 / (NPH_PI * d * d * max(gv + gl, 1e-8));
     const float x = 1.0 - voh;
     const float x2 = x * x;
-    const vec3 f = p.f0 + (vec3(1.0) - p.f0) * (x2 * x2 * x);
-    const vec3 spec = dv * f * p.energy;
+    const vec3 spec = dv * (p.spec_base + p.spec_grazing * (x2 * x2 * x));
     return (p.diffuse + spec) * e * nol;
 }
 
@@ -529,9 +531,9 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.nov_raw = dot(n, v);
     lp.a2 = a * a;
     lp.smith_v = sqrt(nov * nov * (1.0 - lp.a2) + lp.a2);
-    lp.f0 = f0;
     lp.diffuse = diffuse_color * NPH_INV_PI;
-    lp.energy = energy;
+    lp.spec_base = energy * f0;
+    lp.spec_grazing = energy - lp.spec_base;
     lp.face_normal = s.face_normal;
 #ifdef NPH_SURFACE_VSM
     lp.sun_visibility = NPH_SURFACE_VSM_ACTIVE ? NPH_SURFACE_VSM(lp) : 1.0;

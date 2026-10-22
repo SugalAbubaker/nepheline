@@ -866,6 +866,17 @@ bytes interpolated before scaling) issued about as many instructions, but
 the street's variant spilled 5,888 bytes and the resolve took 3.19 to 3.30
 ms. A change here is judged by its spill as much as by its count.
 
+The specular lobe's Fresnel term and its multiple-scattering compensation
+come to the loop folded into Schlick's two terms, energy·F0 and
+energy·(1 − F0), computed once per pixel, where the loop had multiplied
+F0 + (1 − F0) x⁵ by the energy for every light: the same algebra, a light
+then one fused multiply-add a channel for both. The instruction count
+barely moves (the compiler had already hoisted 1 − F0), but the street's
+variant spills 1,792 bytes instead of 2,304 and the radiance cache's alone
+none: in the street the resolve took 2.80 and 2.85 ms against 2.87 and
+2.90, on the terrace and at the hedge the same within the traces'
+spread.
+
 ### Temporal anti-aliasing
 
 A production view with `NphRenderView.anti_aliasing` set to
@@ -1267,6 +1278,7 @@ Measured and not kept:
 | Buffer references declared `readonly restrict` | −2 | no change |
 | The SH coefficients' block std430 (its loads aligned to 16) | 0 | no change |
 | The temporal resolve's divisions as reciprocals | +7, −1 | no change: the compiler already multiplies |
+| The light loop's sum started at the point's indirect and emitted light, so that sum does not stay live across the loop | −22 to −40 | the street's variant spilled 1,280 bytes against 1,792, yet the resolve took 2.82 to 2.91 ms against 2.80 to 2.82 in the street and 2.49 to 2.52 against 2.46 at the hedge (2.77 against 2.80 to 2.82 on the terrace) |
 
 ### Debug views
 
