@@ -1279,6 +1279,8 @@ Measured and not kept:
 | The SH coefficients' block std430 (its loads aligned to 16) | 0 | no change |
 | The temporal resolve's divisions as reciprocals | +7, −1 | no change: the compiler already multiplies |
 | The light loop's sum started at the point's indirect and emitted light, so that sum does not stay live across the loop | −22 to −40 | the street's variant spilled 1,280 bytes against 1,792, yet the resolve took 2.82 to 2.91 ms against 2.80 to 2.82 in the street and 2.49 to 2.52 against 2.46 at the hedge (2.77 against 2.80 to 2.82 on the terrace) |
+| The radiance cache's lookup after the attributes' decode instead of after the positions, where less is live | +61 to +74 | the variant held 72 registers and spilled 6,400 bytes against 64 and 1,792: the resolve took 3.61 to 3.71 ms against 2.82 to 2.85 in the street, 3.13 to 3.15 against 2.44 to 2.46 at the hedge |
+| The transform from the push constants in the variants without the radiance cache too (as in its own) | −2 to −8 | the shadow map's variant held 72 registers and 5,888 bytes against 64 and 6,400; the 4K fields without the cache the same within the traces' spread |
 
 ### Debug views
 
