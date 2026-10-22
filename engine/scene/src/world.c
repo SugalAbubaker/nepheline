@@ -194,6 +194,9 @@ void nph_world_trim(NphWorld *w)
         free_list_push(w, keep);
         keep = next;
     }
+    // Only the assert reads the count, and Profile and Shipping compile it
+    // out (clang then reports the variable as set but never used).
+    NPH_UNUSED(keep_count);
     NPH_ASSERT(w->free_chunk_count == keep_count);
     u32 out = 0U;
     const u64 bytes = (u64)w->chunks_per_slab * NPH_ECS_CHUNK_SIZE;
