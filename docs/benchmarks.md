@@ -279,11 +279,11 @@ the 4.17 ms frame of §10.1:
 
 | Scene | GPU mean | p99 | Largest passes |
 |---|---|---|---|
-| `bistro_street_production` | 7.28 ms | 8.18 ms | resolve 3.08 ms (§10.4 line: 1.20 ms), AO 1.33 ms at full resolution (with the radiance cache, 0.60 ms), raster 0.74 ms + Hi-Z 0.39 ms (with culling, 0.89 ms), TAA 0.88 ms (with post, 0.40 ms) |
-| `bistro_street_walk_production` | 7.35 ms | 8.19 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
-| `bistro_street_turn_production` | 7.50 ms | 8.44 ms | raster 1.13 ms: the turn sweeps over the foliage the next two views hold |
-| `bistro_terrace_production` | 7.81 ms | 8.63 ms | raster 1.21 ms: alpha-tested cypresses beside the café |
-| `bistro_hedge_production` | 7.40 ms | 8.26 ms | raster 1.40 ms: an alpha-tested hedge and cypresses across the view |
+| `bistro_street_production` | 7.11 ms | 7.21 ms | resolve 2.93 ms (§10.4 line: 1.20 ms), AO 1.33 ms at full resolution (with the radiance cache, 0.60 ms), raster 0.72 ms + Hi-Z 0.39 ms (with culling, 0.89 ms), TAA 0.88 ms (with post, 0.40 ms) |
+| `bistro_street_walk_production` | 7.18 ms | 7.41 ms | as the street: the shadow map's pages it comes to need cost 0.01 ms |
+| `bistro_street_turn_production` | 7.34 ms | 7.85 ms | raster 1.11 ms: the turn sweeps over the foliage the next two views hold |
+| `bistro_terrace_production` | 7.65 ms | 7.74 ms | raster 1.20 ms: alpha-tested cypresses beside the café |
+| `bistro_hedge_production` | 7.26 ms | 7.33 ms | raster 1.38 ms: an alpha-tested hedge and cypresses across the view |
 
 Bistro's manifest has five views: the scene's own camera still
 (`street`), walking along the street at 1.4 m/s (`street_walk`), turning
@@ -299,12 +299,13 @@ stopped asking for a whole second pyramid (docs/render.md "The depth
 pyramid"), which the terrace had rebuilt on most frames and the street on
 every fourth.
 
-The p99 includes the machine as well as the renderer: in a frame-by-frame
-record of a still view, every large pass (the resolve, the raster, TAA,
-the occlusion, even the 0.05 ms software raster) now and then runs about
-0.5 ms longer than it otherwise does, and the largest frames come in
-bursts, which other clients of the GPU on the runner's desktop (launchers,
-overlays, editors) would explain.
+The p99 includes the machine as well as the renderer. Before the light
+loop's terms were hoisted (docs/render.md "Lights"), every large pass of a
+still view (the resolve, the raster, TAA, the occlusion, even the 0.05 ms
+software raster) now and then ran about 0.5 ms longer than it otherwise
+did, in bursts, with the NVIDIA overlay on or off; since then a still
+view's p99 is within 0.1 to 0.2 ms of its mean. The turning view's wider
+spread is its own: what comes into view changes.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
@@ -321,7 +322,7 @@ that copied it into a depth attachment for them, and building the depth
 pyramid's mips six a dispatch took 0.03 ms off the second pyramid. The
 frame varies by about 0.05 ms from run to run, and the nightly order,
 which runs these after the synthetic scenes on a warm GPU, measures about
-0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-22`).
+0.05 ms more: the rows are a run alone (`reference_scenes-2026-10-22b`).
 The ambient occlusion at full resolution added 0.88 ms to the street's
 frame against half resolution's (docs/render.md "Ambient occlusion"); the
 light tiles' depth bounds, the resolve's push constants and the opaque
@@ -331,6 +332,10 @@ three foliage views, and the local lights' terms rearranged exactly
 (docs/render.md "Lights") 0.04 to 0.15 ms off each view.
 Settling the clock first and the reference machine's settings ("GPU
 benchmarks" above) moved no view's mean by more than 0.04 ms.
+Computing the light loop's light-independent terms once and reading the
+resolve's records through references (docs/render.md "Lights") took 0.10
+to 0.13 ms off each view, averaged over the runs of each, and the slow
+frames with it (above).
 
 The device keeps its shader statistics, so the log (stderr) has each
 production compute pass's registers and spills, and the temporal
@@ -341,7 +346,7 @@ Exit codes and the JSON follow `gpu_bench`. The CTest smoke run
 JSON's shape (`benchmarks/render/check_results.py`: every GPU entry has
 its 99th percentile beside it) and skips without a device. The reference
 results are
-`benchmarks/results/render_perf-2026-10-22-win-msvc-profile-rtx3060ti.json`;
+`benchmarks/results/render_perf-2026-10-22b-win-msvc-profile-rtx3060ti.json`;
 `benchmarks/render_budgets.txt`, generated from them by
 `scripts/render_budgets.py`, budgets the production scenes only: GPU
 entries at the reference mean plus 5 % (50 µs floor below 0.2 ms), CPU
