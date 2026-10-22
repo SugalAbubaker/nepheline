@@ -27,7 +27,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 7 | Renderer v1: forward PBR reference renderer (GGX, energy compensation, punctual lights in physical units), GPU-computed image-based lighting, pre-exposed HDR with ACES and AgX, debug draw, GPU profiler, primitives; golden-image tests | **done** (`v0.2.0`) |
 | 8 | Scene/ECS: archetypes in 16 KiB SoA chunks, X-macro reflection, queries with change detection, command buffers, a scheduler that derives a dependency graph from declared access and runs systems on the job system, 64-bit transforms and the hierarchy, prefabs with overrides, text and binary scene files; million-entity benchmarks | **done** (`v0.3.0`) |
 | 9 | Runtime + Editor v1: profiling (zones, timeline, memory); the engine context and its pipelined fixed-step frame; the console, cvars, and the command line; the world-to-renderer bridge; C game modules with hot reload that migrates the world; the player; the editor: scene editing with gizmos and undo/redo, drag-and-drop import through the cooker, primitives and mesh editing | **done** (`v0.4.0`) |
-| 10–15 | Renderer v2 → Physics → Audio → Streaming → Ray tracing → Hardening | planned |
+| 10 | Renderer v2: the GPU-driven production path (two-phase occlusion culling, a 64-bit visibility buffer, hybrid hardware and software raster); a light grid with exact culling; ray-traced shadows and the sun's virtual shadow map; temporal anti-aliasing at native resolution, bloom and exposure, motion blur, depth of field; full-resolution ground-truth ambient occlusion and a hashed radiance cache; Amazon Lumberyard Bistro as the reference scene, measured nightly at native 4K against every §10.4 line (the 4.17 ms frame gates at Phase 14's exit: ADR-0041) | **done** (`v0.5.0`) |
+| 11–15 | Physics → Audio → Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -65,7 +66,16 @@ nph_cook content/ --root content -o build/cooked --pack build/game.npk
 result; `samples/pbr_viewer` cooks a scene that exercises every material
 feature and renders it with the PBR reference renderer; `samples/scene_demo`
 builds an orrery as an ECS world, moves it with systems on the scheduler,
-round-trips it through both scene formats, and renders it.
+round-trips it through both scene formats, and renders it through the
+GPU-driven production path (P switches to the reference renderer; T, B, O,
+and G switch the temporal anti-aliasing, bloom, ambient occlusion, and
+global illumination).
+
+`render_perf` measures the renderer's synthetic scenes, most at native 4K,
+and with `--scenes=DIR` the third-party reference scenes that `scripts/scenes.py`
+fetches and cooks from their pinned manifests in `benchmarks/scenes/`
+([`docs/benchmarks.md`](docs/benchmarks.md)); the self-hosted RTX 3060 Ti
+runner enforces their budgets.
 
 Games are C shared libraries that `nph_player` (and the editor) run, and
 swap in again when they are rebuilt ([`docs/runtime.md`](docs/runtime.md)):
@@ -103,13 +113,13 @@ tools/ntest/    the Nepheline test framework
 tools/cook/     the asset cooker: nph::cook, the nph_cook tool, and nph::cook_shared for the editor (the only user of cgltf and stb_image)
 tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_flip tool
 editor/         nph_editor: the shell, Dear ImGui backends on the window and the RHI, panels, scene editing, import, mesh editing, tests
-benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, recorded results, budgets
+benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, render_perf, the reference scenes' manifests, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
 samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and game_sandbox, a game module; samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
-scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, fuzz_seeds.py, fuzz_seeds_cook.py, fuzz_seeds_scene.py, nph_hash64.py, runner/install.ps1
+scripts/        dev_env.ps1, install_vulkan_sdk.ps1, install_vulkan_layer.sh, format.py, tidy.py, check_layering.py, gpu_budgets.py, render_budgets.py, scenes.py, fuzz_seeds.py, fuzz_seeds_cook.py, fuzz_seeds_scene.py, nph_hash64.py, runner/install.ps1
 third_party/    pinned submodules (GLFW, Vulkan-Headers, volk, VMA, cgltf, stb, cimgui with Dear ImGui), each wrapped by exactly one module or tool
 docs/           design docs per subsystem; docs/adr/ holds decision records
 .github/        CI workflows, PR template
@@ -127,7 +137,7 @@ Modules depend strictly left-to-right:
 - [`docs/platform.md`](docs/platform.md) — platform module: clocks, threads, fibers, virtual memory, files and async I/O, CPU, window and input
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
 - [`docs/gpu.md`](docs/gpu.md) — GPU module: device and validation gate, bindless resources, frames and submission, uploads, shaders and pipelines, the render graph, the swapchain
-- [`docs/render.md`](docs/render.md) — render module: the forward PBR reference renderer, units and conventions, image-based lighting, tonemapping, debug draw, the GPU profiler
+- [`docs/render.md`](docs/render.md) — render module: the forward PBR reference renderer, units and conventions, the GPU-driven production path (culling, the visibility buffer and its raster, lights, shadows, temporal anti-aliasing, motion blur, ambient occlusion, global illumination), image-based lighting, tonemapping, depth of field, bloom and exposure, debug draw, the GPU profiler
 - [`docs/golden.md`](docs/golden.md) — golden-image tests: the scenes, our LDR-FLIP and PNG codec, baselines and approval, calibration
 - [`docs/asset.md`](docs/asset.md) — asset module: the `.nph` container, the LZ codec, GUIDs, pack archives, the VFS, the loader, the typed views
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
@@ -136,7 +146,7 @@ Modules depend strictly left-to-right:
 - [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
 - [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework
-- [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks and their budgets
+- [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks, render_perf and the reference scenes, and their budgets
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records
 
 ## Contributing
