@@ -1641,8 +1641,8 @@ path and logs what the GPU culled.
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many
   shadow-casting local lights do not fit the budget as rays (1.35 ms for
-  1,024 lamps): their shadows are stage 6's next part. Screen-space
-  contact shadows are deferred (ADR-0033).
+  1,024 lamps): their shadows, and screen-space contact shadows, come in
+  Phase 14 with many-light sampling (ADR-0033, ADR-0041).
 - The sun's map: a moving caster redraws its pages with every caster in
   them (static and dynamic pages are not kept apart); filtering is clamped
   half a texel inside a page at its edges; a level's texels double at its

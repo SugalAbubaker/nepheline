@@ -2,7 +2,8 @@
 
 - **Date:** 2026-10-22
 - **Status:** Accepted (the user's decision of 2026-10-22; CLAUDE.md
-  §10.1, §10.7, §12 and §13 amended)
+  §10.1, §10.7, §12 and §13 amended; contact shadows placed at Phase
+  10's review, at the end)
 
 ## Context
 
@@ -88,7 +89,7 @@ game open).
    | Culling + depth pyramid | 0.18–0.20 ms | tuning, chiefly the pyramid's first pass (0.30 ms), which also writes the occlusion's depths and the shadow map's page requests | Phase 14 |
    | Visibility buffer raster | 0.12–0.76 ms | virtualized geometry; the masked pass of Bistro's alpha-tested foliage, kept as authored (ADR-0040) | Phases 13 and 14 |
    | Shading | 1.30–1.76 ms | the light loop through many-light sampling; the resolve's structure, with the fusion below; its register pressure | the checkpoint, Phase 14 |
-   | Shadows | inside, 0.25–0.33 ms left | contact shadows and local lights' shadows would spend from it (ADR-0033) | |
+   | Shadows | inside, 0.25–0.33 ms left | contact shadows and local lights' shadows will spend from it (ADR-0033; placed at the end) | Phase 14 |
    | Indirect light | 0.90–0.94 ms | full-resolution occlusion in a structure that fits its share; ADR-0038's amendment leaves two levers open (the occlusion and its denoise in one pass; fewer special-function instructions in the slices) | the checkpoint |
    | TAA + post + tonemap | 0.77 ms | fused with the shading (§10.3, ADR-0034); the bloom chain on the async compute queue (ADR-0035) | the checkpoint |
 
@@ -172,5 +173,13 @@ game open).
   and the guard rails keep the gap from growing meanwhile.
 - The game becomes a decision with a date: its setting, camera, and
   density at the checkpoint (§13).
-- Open for the review: contact shadows (ADR-0033, decision 9), which
-  would spend from the shadows line's 0.25 to 0.33 ms.
+- Contact shadows, left open for the review, go to Phase 14 (below).
+
+## Decided at Phase 10's review (2026-10-22)
+
+- **Contact shadows go to Phase 14**, with the local lights' shadows
+  (ADR-0033: decision 9, and its open list). Phase 14's many-light
+  sampling traces a shadow ray toward each light it samples, and the
+  checkpoint may move the shading that screen-space contact shadows would
+  extend, so they are built once, after both, from the shadow line's 0.25
+  to 0.33 ms. CLAUDE.md §12's Phase 14 scope lists them.

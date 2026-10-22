@@ -1,7 +1,8 @@
 # 0033. The sun's virtual shadow map: a resolution-matched clipmap of cached pages
 
 - **Date:** 2026-10-18
-- **Status:** Accepted
+- **Status:** Accepted (contact shadows, decision 9, and the local lights'
+  shadows go to Phase 14: [ADR-0041](0041-frame-target-gates.md))
 
 ## Context
 
