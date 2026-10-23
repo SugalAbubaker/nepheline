@@ -196,12 +196,18 @@ static NphResult contact_sync(NphPhysicsWorld *w, u32 contact)
     return NPH_RESULT_OK;
 }
 
-NphResult phys_body_contacts_sync(NphPhysicsWorld *w, u32 body)
+NphResult phys_body_constraints_sync(NphPhysicsWorld *w, u32 body)
 {
     for (u32 key = w->bodies.data[body].contact_head; key != PHYS_NULL;) {
         const u32 c = key >> 1U;
         const u32 next = w->contacts.data[c].next[key & 1U];
         NPH_TRY(contact_sync(w, c));
+        key = next;
+    }
+    for (u32 key = w->bodies.data[body].joint_head; key != PHYS_NULL;) {
+        const u32 j = key >> 1U;
+        const u32 next = w->joints.data[j].next[key & 1U];
+        NPH_TRY(phys_joint_sync(w, j));
         key = next;
     }
     return NPH_RESULT_OK;
@@ -404,6 +410,10 @@ static bool pair_callback(u32 proxy, u64 user_data, void *context)
         return true;
     }
     if (!nph_physics_filter_should_collide(s->filter, o->filter)) {
+        return true;
+    }
+    if ((bs->joint_count != 0U && bo->joint_count != 0U) &&
+        !phys_joints_allow_contact(w, s->body, o->body)) {
         return true;
     }
     if (nph_hashmap_contains_u64(&w->pairs, pair_key(q->shape, other))) {

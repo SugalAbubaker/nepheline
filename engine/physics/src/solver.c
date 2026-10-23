@@ -4,9 +4,10 @@
 // (docs/physics.md "The solver"; ADR-0043).
 //
 // The stages are one list, unrolled for the step: prepare bodies, prepare
-// contacts, then per substep integrate velocities, warm start, solve,
-// integrate positions, relax (each contact stage once per colour, colours
-// in order), then restitution, store, finalize. Each participating thread
+// joints and contacts, then per substep integrate velocities, warm start,
+// solve, integrate positions, relax (each constraint stage once per colour,
+// colours in order, a colour's joints and contacts together), then
+// restitution, store, finalize. Each participating thread
 // starts at its own share of the current stage's blocks and claims blocks
 // one at a time, forward and then backward from there, so a thread keeps
 // working the same blocks, and their data stays in its cache, substep after
@@ -44,16 +45,7 @@ const PhysSolverKernels *phys_solver_kernels_best(void)
                                                           : &g_phys_solver_sse4;
 }
 
-// A soft constraint's coefficients for frequency `hertz`, damping ratio
-// `zeta`, and time step `h` (Catto, "Solver2D"; the implicit spring of
-// "Soft Constraints", GDC 2011).
-typedef struct PhysSoftness {
-    f32 bias_rate;
-    f32 mass_scale;
-    f32 impulse_scale;
-} PhysSoftness;
-
-static PhysSoftness make_soft(f32 hertz, f32 zeta, f32 h)
+PhysSoftness phys_make_soft(f32 hertz, f32 zeta, f32 h)
 {
     PhysSoftness s;
     if (hertz <= 0.0F) {
@@ -87,6 +79,7 @@ typedef struct StepContext {
     f32 restitution_threshold;
     PhysSoftness contact_soft;
     PhysSoftness static_soft;
+    PhysJointStep joint_step;
     u32 dummy; // the solver body of static and sleeping-kinematic lanes
 } StepContext;
 
@@ -430,8 +423,45 @@ static void store_group(const StepContext *ctx, u32 index)
 // Stages
 // ---------------------------------------------------------------------------
 
+static void run_joint_block(StepContext *ctx, const PhysStage *s, u32 block)
+{
+    NphPhysicsWorld *w = ctx->w;
+    const u32 first = s->joint_first + block * s->joint_block_size;
+    const u32 last = nph_min_u32(first + s->joint_block_size, s->joint_first + s->joint_count);
+    PhysSolverBody *bodies = w->solver_bodies.data;
+    for (u32 i = first; i < last; ++i) {
+        PhysJoint *j = &w->joints.data[w->step_joints.data[i]];
+        switch ((PhysStageType)s->type) {
+        case PHYS_STAGE_PREPARE_CONTACTS:
+            phys_joint_prepare(w, &ctx->joint_step, j);
+            break;
+        case PHYS_STAGE_WARM_START:
+            phys_joint_warm_start(bodies, j);
+            break;
+        case PHYS_STAGE_SOLVE:
+        case PHYS_STAGE_RELAX:
+            phys_joint_solve(bodies, &ctx->joint_step, j, s->type == PHYS_STAGE_SOLVE);
+            break;
+        case PHYS_STAGE_PREPARE_BODIES:
+        case PHYS_STAGE_INTEGRATE_VELOCITIES:
+        case PHYS_STAGE_INTEGRATE_POSITIONS:
+        case PHYS_STAGE_RESTITUTION:
+        case PHYS_STAGE_STORE:
+        case PHYS_STAGE_FINALIZE:
+        default:
+            NPH_ASSERT_MSG(false, "physics: stage %u has no joints", s->type);
+            break;
+        }
+    }
+}
+
 static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
 {
+    if (block < s->joint_blocks) {
+        run_joint_block(ctx, s, block);
+        return;
+    }
+    block -= s->joint_blocks;
     NphPhysicsWorld *w = ctx->w;
     const u32 first = s->first + block * s->block_size;
     const u32 last = nph_min_u32(first + s->block_size, s->first + s->count);
@@ -482,8 +512,8 @@ static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
 }
 
 // As many threads as the step's work pays for. Its cost on one thread is
-// about 600 ns per point row (eight lanes) and 290 ns per body over a step
-// of four substeps, and a thread pays for itself with about 450 ns of work
+// about 600 ns per point row (eight lanes), 290 ns per body, and 1200 ns per
+// joint over a step of four substeps, and a thread pays for itself with about 450 ns of work
 // in each stage it joins (measured on the bench scenes, docs/physics.md
 // "Threads"); the ratio holds across machines, which scale both alike.
 static u32 solver_participants(const NphPhysicsWorld *w, u32 available)
@@ -491,12 +521,13 @@ static u32 solver_participants(const NphPhysicsWorld *w, u32 available)
     if (w->forced_participants != 0U) {
         return nph_min_u32(w->forced_participants, available);
     }
-    u64 colors = 0U; // contact stages per pass
+    u64 colors = 0U; // constraint stages per pass
     for (u32 c = 0U; c <= PHYS_GRAPH_COLORS; ++c) {
-        colors += w->color_group_count[c] > 0U ? 1U : 0U;
+        colors += (w->color_group_count[c] > 0U || w->color_joint_count[c] > 0U) ? 1U : 0U;
     }
     const u64 stages = 4U + (u64)w->desc.substeps * (2U + 3U * colors) + colors;
-    const u64 work_ns = (u64)w->points.len * 600U + (u64)w->awake_bodies.len * 290U;
+    const u64 work_ns = (u64)w->points.len * 600U + (u64)w->awake_bodies.len * 290U +
+                        (u64)w->step_joints.len * 1200U;
     return (u32)nph_min_u64(1U + work_ns / (stages * 450U), available);
 }
 
@@ -582,10 +613,25 @@ static void helper_job(void *user)
 
 // Blocks hold at least `min_block` items, and a stage has at most four
 // blocks per participant: enough to even out, few enough to stay cheap.
-static NphResult push_stage(NphPhysicsWorld *w, u32 participants, PhysStageType type, u32 first,
-                            u32 count, u32 min_block)
+static void split_blocks(u32 participants, u32 count, u32 min_block, u32 *size, u32 *blocks)
 {
     if (count == 0U) {
+        *size = 1U;
+        *blocks = 0U;
+        return;
+    }
+    const u32 max_blocks = 4U * participants;
+    *size = nph_max_u32(nph_max_u32(min_block, 1U), (count + max_blocks - 1U) / max_blocks);
+    *blocks = (count + *size - 1U) / *size;
+}
+
+// A stage of `joint_count` step joints (from `joint_first`) and `count`
+// items (from `first`); none when both are empty.
+static NphResult push_mixed_stage(NphPhysicsWorld *w, u32 participants, PhysStageType type,
+                                  u32 joint_first, u32 joint_count, u32 joint_min_block, u32 first,
+                                  u32 count, u32 min_block)
+{
+    if (count == 0U && joint_count == 0U) {
         return NPH_RESULT_OK;
     }
     PhysStage *s = NPH_ARRAY_PUSH_SLOT(&w->stages);
@@ -593,26 +639,59 @@ static NphResult push_stage(NphPhysicsWorld *w, u32 participants, PhysStageType 
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     memset(s, 0, sizeof *s);
-    const u32 max_blocks = 4U * participants;
     s->type = (u32)type;
     s->first = first;
     s->count = count;
-    s->block_size = nph_max_u32(nph_max_u32(min_block, 1U), (count + max_blocks - 1U) / max_blocks);
-    s->block_count = (count + s->block_size - 1U) / s->block_size;
+    s->joint_first = joint_first;
+    s->joint_count = joint_count;
+    u32 blocks = 0U;
+    split_blocks(participants, joint_count, joint_min_block, &s->joint_block_size,
+                 &s->joint_blocks);
+    split_blocks(participants, count, min_block, &s->block_size, &blocks);
+    s->block_count = s->joint_blocks + blocks;
     s->claim_first = w->claims.len;
     return NPH_ARRAY_RESIZE(&w->claims, w->claims.len + s->block_count);
 }
 
-// One contact pass over the overflow (one block: its contacts share bodies)
-// and then every colour in order.
+static NphResult push_stage(NphPhysicsWorld *w, u32 participants, PhysStageType type, u32 first,
+                            u32 count, u32 min_block)
+{
+    return push_mixed_stage(w, participants, type, 0U, 0U, 1U, first, count, min_block);
+}
+
+// One constraint pass: the overflow's joints, then its contacts (one block
+// each: they share bodies), then every colour in order, its joints and
+// contacts together. Restitution has no joints.
 static NphResult push_contact_pass(NphPhysicsWorld *w, u32 participants, PhysStageType type)
 {
+    const bool joints = type != PHYS_STAGE_RESTITUTION;
+    const u32 overflow_joints = joints ? w->color_joint_count[PHYS_GRAPH_OVERFLOW] : 0U;
+    NPH_TRY(push_mixed_stage(w, 1U, type, w->color_joint_first[PHYS_GRAPH_OVERFLOW],
+                             overflow_joints, overflow_joints, 0U, 0U, 1U));
     NPH_TRY(push_stage(w, 1U, type, w->color_group_first[PHYS_GRAPH_OVERFLOW],
                        w->color_group_count[PHYS_GRAPH_OVERFLOW],
                        w->color_group_count[PHYS_GRAPH_OVERFLOW]));
     for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
-        NPH_TRY(push_stage(w, participants, type, w->color_group_first[c], w->color_group_count[c],
-                           4U));
+        NPH_TRY(push_mixed_stage(w, participants, type, w->color_joint_first[c],
+                                 joints ? w->color_joint_count[c] : 0U, 8U, w->color_group_first[c],
+                                 w->color_group_count[c], 4U));
+    }
+    return NPH_RESULT_OK;
+}
+
+// The graph's joints in one array for the stages: by colour, the overflow
+// last (as the groups).
+static NphResult build_step_joints(NphPhysicsWorld *w)
+{
+    NPH_ARRAY_CLEAR(&w->step_joints);
+    for (u32 c = 0U; c <= PHYS_GRAPH_COLORS; ++c) {
+        const NphArrayU32 *list =
+            c == PHYS_GRAPH_OVERFLOW ? &w->overflow_joints : &w->colors[c].joints;
+        w->color_joint_first[c] = w->step_joints.len;
+        w->color_joint_count[c] = list->len;
+        for (u32 i = 0U; i < list->len; ++i) {
+            NPH_TRY(NPH_ARRAY_PUSH(&w->step_joints, list->data[i]));
+        }
     }
     return NPH_RESULT_OK;
 }
@@ -658,6 +737,16 @@ static NphResult build_groups(NphPhysicsWorld *w)
 // events, kinematic bodies that push sleepers awake.
 static NphResult post_finalize(NphPhysicsWorld *w)
 {
+    // A motor driving towards a speed keeps its bodies awake: slow as they
+    // may still turn, they are being driven.
+    for (u32 i = 0U; i < w->step_joints.len; ++i) {
+        const PhysJoint *j = &w->joints.data[w->step_joints.data[i]];
+        if (j->type == NPH_PHYSICS_JOINT_HINGE && j->hinge.enable_motor != 0 &&
+            j->hinge.motor_speed != 0.0F && j->hinge.max_motor_torque > 0.0F) {
+            w->bodies.data[j->body_a].sleep_time = 0.0F;
+            w->bodies.data[j->body_b].sleep_time = 0.0F;
+        }
+    }
     NPH_TRY(NPH_ARRAY_RESERVE(&w->move_events, w->awake_bodies.len));
     for (u32 i = 0U; i < w->awake_bodies.len; ++i) {
         const u32 slot = w->awake_bodies.data[i];
@@ -697,6 +786,14 @@ static NphResult post_finalize(NphPhysicsWorld *w)
             key = c->next[key & 1U];
             if ((c->flags & PHYS_CONTACT_TOUCHING) != 0U &&
                 (w->bodies.data[other].flags & PHYS_BODY_AWAKE) == 0U) {
+                NPH_TRY(phys_wake_body(w, other));
+            }
+        }
+        for (u32 key = b->joint_head; key != PHYS_NULL;) {
+            const PhysJoint *j = &w->joints.data[key >> 1U];
+            const u32 other = (key & 1U) == 0U ? j->body_b : j->body_a;
+            key = j->next[key & 1U];
+            if ((w->bodies.data[other].flags & PHYS_BODY_AWAKE) == 0U) {
                 NPH_TRY(phys_wake_body(w, other));
             }
         }
@@ -753,6 +850,7 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     memset(dummy, 0, sizeof *dummy);
     dummy->dq = nph_quat_identity();
     NPH_TRY(build_groups(w));
+    NPH_TRY(build_step_joints(w));
 
     StepContext ctx;
     memset(&ctx, 0, sizeof ctx);
@@ -767,8 +865,14 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     // static and kinematic bodies twice as stiff (they take the whole
     // correction) (Catto, "Solver2D").
     const f32 hertz = nph_f32_min(w->desc.contact_hertz, 0.25F * ctx.inv_h);
-    ctx.contact_soft = make_soft(hertz, w->desc.contact_damping_ratio, ctx.h);
-    ctx.static_soft = make_soft(2.0F * hertz, w->desc.contact_damping_ratio, ctx.h);
+    ctx.contact_soft = phys_make_soft(hertz, w->desc.contact_damping_ratio, ctx.h);
+    ctx.static_soft = phys_make_soft(2.0F * hertz, w->desc.contact_damping_ratio, ctx.h);
+    ctx.joint_step.h = ctx.h;
+    ctx.joint_step.inv_h = ctx.inv_h;
+    ctx.joint_step.soft = phys_make_soft(nph_f32_min(w->desc.joint_hertz, 0.25F * ctx.inv_h),
+                                         w->desc.joint_damping_ratio, ctx.h);
+    ctx.joint_step.dummy = n;
+    w->last_substep = ctx.h;
 
     // Helpers when there is enough work to share, as many as it can use,
     // and never more threads than the machine runs at once: spinners
@@ -786,7 +890,8 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     NPH_ARRAY_CLEAR(&w->claims);
     const u32 p = participants;
     NPH_TRY(push_stage(w, p, PHYS_STAGE_PREPARE_BODIES, 0U, n, 32U));
-    NPH_TRY(push_stage(w, p, PHYS_STAGE_PREPARE_CONTACTS, 0U, w->groups.len, 4U));
+    NPH_TRY(push_mixed_stage(w, p, PHYS_STAGE_PREPARE_CONTACTS, 0U, w->step_joints.len, 8U, 0U,
+                             w->groups.len, 4U));
     for (u32 s = 0U; s < w->desc.substeps; ++s) {
         NPH_TRY(push_stage(w, p, PHYS_STAGE_INTEGRATE_VELOCITIES, 0U, n, 32U));
         NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_WARM_START));

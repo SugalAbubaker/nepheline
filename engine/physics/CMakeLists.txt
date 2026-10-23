@@ -16,6 +16,8 @@ nph_add_module(physics
         src/gjk.c
         src/hull.c
         src/island.c
+        src/joint.c
+        src/joint_solver.c
         src/physics_internal.h
         src/shape.c
         src/solver.c
@@ -39,8 +41,10 @@ nph_add_test(physics
         tests/test_geometry.c
         tests/test_gjk.c
         tests/test_hull.c
+        tests/test_joint.c
         tests/test_physics_support.h
         tests/test_world.c
+        tests/test_world_support.h
     DEPS
         nph::physics
 )

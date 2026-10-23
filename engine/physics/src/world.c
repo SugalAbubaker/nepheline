@@ -90,6 +90,8 @@ NphPhysicsWorldDesc nph_physics_world_desc_default(void)
     d.substeps = 4U;
     d.contact_hertz = 120.0F;
     d.contact_damping_ratio = 10.0F;
+    d.joint_hertz = 240.0F;
+    d.joint_damping_ratio = 2.0F;
     d.contact_push_max_velocity = 3.0F;
     d.restitution_threshold = 1.0F;
     d.max_linear_speed = 400.0F;
@@ -111,6 +113,7 @@ NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWo
     if (desc == NULL || out == NULL || desc->alloc == NULL || desc->substeps == 0U ||
         desc->substeps > 64U || !nph_vec3_is_finite(desc->gravity) ||
         !finite_nonneg(desc->contact_hertz) || !finite_nonneg(desc->contact_damping_ratio) ||
+        !finite_nonneg(desc->joint_hertz) || !finite_nonneg(desc->joint_damping_ratio) ||
         !finite_nonneg(desc->contact_push_max_velocity) ||
         !finite_nonneg(desc->restitution_threshold) || !(desc->max_linear_speed > 0.0F) ||
         !nph_f32_is_finite(desc->max_linear_speed) || !finite_nonneg(desc->time_to_sleep)) {
@@ -134,6 +137,11 @@ NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWo
     NPH_ARRAY_INIT(&w->shapes, alloc);
     NPH_ARRAY_INIT(&w->contacts, alloc);
     NPH_ARRAY_INIT(&w->free_contacts, alloc);
+    NPH_ARRAY_INIT(&w->joint_slots.generation, alloc);
+    NPH_ARRAY_INIT(&w->joint_slots.free, alloc);
+    NPH_ARRAY_INIT(&w->joints, alloc);
+    NPH_ARRAY_INIT(&w->overflow_joints, alloc);
+    NPH_ARRAY_INIT(&w->step_joints, alloc);
     NPH_ARRAY_INIT(&w->islands, alloc);
     NPH_ARRAY_INIT(&w->free_islands, alloc);
     NPH_ARRAY_INIT(&w->awake_bodies, alloc);
@@ -159,6 +167,7 @@ NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWo
     NPH_ARRAY_INIT(&w->move_events, alloc);
     for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
         NPH_ARRAY_INIT(&w->colors[c].contacts, alloc);
+        NPH_ARRAY_INIT(&w->colors[c].joints, alloc);
     }
     NphResult r = NPH_RESULT_OK;
     for (u32 t = 0U; t < PHYS_TREE_COUNT && r == NPH_RESULT_OK; ++t) {
@@ -209,6 +218,11 @@ void nph_physics_world_destroy(NphPhysicsWorld *world)
     NPH_ARRAY_FREE(&world->shapes);
     NPH_ARRAY_FREE(&world->contacts);
     NPH_ARRAY_FREE(&world->free_contacts);
+    NPH_ARRAY_FREE(&world->joint_slots.generation);
+    NPH_ARRAY_FREE(&world->joint_slots.free);
+    NPH_ARRAY_FREE(&world->joints);
+    NPH_ARRAY_FREE(&world->overflow_joints);
+    NPH_ARRAY_FREE(&world->step_joints);
     NPH_ARRAY_FREE(&world->islands);
     NPH_ARRAY_FREE(&world->free_islands);
     NPH_ARRAY_FREE(&world->awake_bodies);
@@ -235,6 +249,7 @@ void nph_physics_world_destroy(NphPhysicsWorld *world)
     for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
         nph_bitset_free(&world->colors[c].bodies);
         NPH_ARRAY_FREE(&world->colors[c].contacts);
+        NPH_ARRAY_FREE(&world->colors[c].joints);
     }
     for (u32 t = 0U; t < PHYS_TREE_COUNT; ++t) {
         nph_aabb_tree_free(&world->trees[t]);
@@ -344,6 +359,7 @@ NphPhysicsStats nph_physics_world_stats(const NphPhysicsWorld *world)
     s.awake_bodies = world->awake_bodies.len;
     s.shapes = world->shape_slots.generation.len - world->shape_slots.free.len;
     s.contacts = world->contacts.len - world->free_contacts.len;
+    s.joints = world->joint_slots.generation.len - world->joint_slots.free.len;
     s.islands = world->islands.len - world->free_islands.len;
     s.awake_islands = world->awake_islands.len;
     u32 touching = 0U;
@@ -440,6 +456,16 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
             key = c->next[side];
         }
         VALID(n == b->contact_count);
+        // Joint list.
+        u32 nj = 0U;
+        for (u32 key = b->joint_head; key != PHYS_NULL; ++nj) {
+            const PhysJoint *j = &world->joints.data[key >> 1U];
+            const u32 side = key & 1U;
+            VALID(j->handle != 0U && (side == 0U ? j->body_a : j->body_b) == i);
+            VALID(nj <= b->joint_count);
+            key = j->next[side];
+        }
+        VALID(nj == b->joint_count);
         // Shapes.
         u32 shapes = 0U;
         for (u32 s = b->shape_head; s != PHYS_NULL; s = world->shapes.data[s].next) {
@@ -483,6 +509,55 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         VALID(island == ((c->flags & PHYS_CONTACT_ISLAND) != 0U));
         VALID(island == (c->island != PHYS_NULL));
     }
+    // Joints: graph membership and islands, as contacts (always touching).
+    u32 live_joints = 0U;
+    for (u32 i = 0U; i < world->joints.len; ++i) {
+        const PhysJoint *j = &world->joints.data[i];
+        if (j->handle == 0U) {
+            continue;
+        }
+        live_joints += 1U;
+        const PhysBody *a = &world->bodies.data[j->body_a];
+        const PhysBody *b = &world->bodies.data[j->body_b];
+        VALID(a->handle != 0U && b->handle != 0U && j->body_a != j->body_b);
+        const bool ok_a = body_awake(a) || a->type != NPH_PHYSICS_BODY_DYNAMIC;
+        const bool ok_b = body_awake(b) || b->type != NPH_PHYSICS_BODY_DYNAMIC;
+        const bool in_graph = ok_a && ok_b && (body_awake(a) || body_awake(b));
+        VALID(in_graph == (j->color != PHYS_NULL));
+        if (j->color != PHYS_NULL) {
+            const NphArrayU32 *list = j->color == PHYS_GRAPH_OVERFLOW
+                                          ? &world->overflow_joints
+                                          : &world->colors[j->color].joints;
+            VALID(j->color_slot < list->len && list->data[j->color_slot] == i);
+            if (j->color != PHYS_GRAPH_OVERFLOW) {
+                const NphBitset *bits = &world->colors[j->color].bodies;
+                VALID(a->type != NPH_PHYSICS_BODY_DYNAMIC || nph_bitset_test(bits, j->body_a));
+                VALID(b->type != NPH_PHYSICS_BODY_DYNAMIC || nph_bitset_test(bits, j->body_b));
+            }
+        }
+        const bool island =
+            a->type == NPH_PHYSICS_BODY_DYNAMIC && b->type == NPH_PHYSICS_BODY_DYNAMIC;
+        VALID(island == ((j->flags & PHYS_JOINT_ISLAND) != 0U));
+        VALID(island == (j->island != PHYS_NULL));
+    }
+    VALID(live_joints == world->joint_slots.generation.len - world->joint_slots.free.len);
+    // A colour's constraints share no dynamic body: its bitset holds as many
+    // bodies as its constraints have dynamic ends.
+    for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
+        const PhysColor *color = &world->colors[c];
+        u32 ends = 0U;
+        for (u32 k = 0U; k < color->contacts.len; ++k) {
+            const PhysContact *contact = &world->contacts.data[color->contacts.data[k]];
+            ends += world->bodies.data[contact->body_a].type == NPH_PHYSICS_BODY_DYNAMIC ? 1U : 0U;
+            ends += world->bodies.data[contact->body_b].type == NPH_PHYSICS_BODY_DYNAMIC ? 1U : 0U;
+        }
+        for (u32 k = 0U; k < color->joints.len; ++k) {
+            const PhysJoint *j = &world->joints.data[color->joints.data[k]];
+            ends += world->bodies.data[j->body_a].type == NPH_PHYSICS_BODY_DYNAMIC ? 1U : 0U;
+            ends += world->bodies.data[j->body_b].type == NPH_PHYSICS_BODY_DYNAMIC ? 1U : 0U;
+        }
+        VALID(ends == nph_bitset_count(&color->bodies));
+    }
     // Islands: bodies agree, and connected pairs share an island root.
     for (u32 i = 0U; i < world->islands.len; ++i) {
         const PhysIsland *is = &world->islands.data[i];
@@ -502,6 +577,12 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
             m += 1U;
         }
         VALID(m == is->contact_count);
+        u32 nj = 0U;
+        for (u32 j = is->joint_head; j != PHYS_NULL; j = world->joints.data[j].island_next) {
+            VALID(world->joints.data[j].island == i);
+            nj += 1U;
+        }
+        VALID(nj == is->joint_count);
         VALID(is->parent == PHYS_NULL); // merges are applied by the end of a step
     }
     for (u32 t = 0U; t < PHYS_TREE_COUNT; ++t) {
@@ -651,6 +732,27 @@ void nph_physics_world_draw(const NphPhysicsWorld *world, const NphPhysicsDebugD
                       nph_dvec3_add(b->center, nph_dvec3(0.0, k, 0.0)), 0xFFFFFFFFU);
             draw_line(draw, nph_dvec3_add(b->center, nph_dvec3(0.0, 0.0, -k)),
                       nph_dvec3_add(b->center, nph_dvec3(0.0, 0.0, k)), 0xFFFFFFFFU);
+        }
+    }
+    if ((draw->flags & NPH_PHYSICS_DRAW_JOINTS) != 0U) {
+        for (u32 i = 0U; i < world->joints.len; ++i) {
+            const PhysJoint *j = &world->joints.data[i];
+            if (j->handle == 0U) {
+                continue;
+            }
+            const PhysBody *a = &world->bodies.data[j->body_a];
+            const PhysBody *b = &world->bodies.data[j->body_b];
+            const NphDVec3 pa =
+                world_point(a->origin, nph_quat_rotate(a->rotation, j->frame_a.position));
+            const NphDVec3 pb =
+                world_point(b->origin, nph_quat_rotate(b->rotation, j->frame_b.position));
+            draw_line(draw, a->center, pa, 0xFF00C0FFU);
+            draw_line(draw, b->center, pb, 0xFF00C0FFU);
+            draw_line(draw, pa, pb, 0xFF0000FFU); // the error, red
+            const NphVec3 xa = nph_quat_axis_x(nph_quat_mul(a->rotation, j->frame_a.rotation));
+            const NphVec3 xb = nph_quat_axis_x(nph_quat_mul(b->rotation, j->frame_b.rotation));
+            draw_line(draw, pa, world_point(pa, nph_vec3_scale(xa, 0.2F)), 0xFFFFFF00U);
+            draw_line(draw, pb, world_point(pb, nph_vec3_scale(xb, 0.15F)), 0xFFFF00FFU);
         }
     }
     if ((draw->flags & NPH_PHYSICS_DRAW_CONTACTS) != 0U) {

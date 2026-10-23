@@ -9,6 +9,7 @@
 #include <nepheline/core/bitset.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/physics/aabb_tree.h>
+#include <nepheline/physics/joint.h>
 #include <nepheline/physics/shape.h>
 
 #include "physics_internal.h"
@@ -89,6 +90,8 @@ typedef struct PhysBody {
     u32 shape_count;
     u32 contact_head; // a contact key (contact << 1 | side), or PHYS_NULL
     u32 contact_count;
+    u32 joint_head; // a joint key (joint << 1 | side), or PHYS_NULL
+    u32 joint_count;
     u32 island; // dynamic bodies only; PHYS_NULL otherwise
     u32 island_prev;
     u32 island_next;
@@ -171,6 +174,69 @@ typedef struct PhysContact {
     PhysContactPoint points[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
 } PhysContact;
 
+// A soft constraint's coefficients (Catto, "Solver2D"; the implicit spring
+// of "Soft Constraints", GDC 2011): impulse = -mass * mass_scale * (Cdot +
+// bias_rate * C) - impulse_scale * accumulated.
+typedef struct PhysSoftness {
+    f32 bias_rate;
+    f32 mass_scale;
+    f32 impulse_scale;
+} PhysSoftness;
+
+// For frequency `hertz` (0: rigid, no bias), damping ratio `zeta`, and
+// time step `h`.
+PhysSoftness phys_make_soft(f32 hertz, f32 zeta, f32 h);
+
+enum {
+    PHYS_JOINT_COLLIDE_CONNECTED = 1U << 0U,
+    PHYS_JOINT_ISLAND = 1U << 1U, // linked in an island (two dynamic bodies)
+};
+
+typedef struct PhysJoint {
+    u32 handle; // 0 for a free slot
+    u32 type;   // NphPhysicsJointType
+    u32 body_a; // slots
+    u32 body_b;
+    u32 flags; // PHYS_JOINT_*
+    // The bodies' joint lists: keys (joint << 1 | side).
+    u32 prev[2];
+    u32 next[2];
+    u32 color;      // constraint graph colour (PHYS_NULL: not in the graph)
+    u32 color_slot; // position in the colour's array
+    u32 island;
+    u32 island_prev;
+    u32 island_next;
+    NphPhysicsPose frame_a; // in body A's frame
+    NphPhysicsPose frame_b; // in body B's frame
+    union {
+        NphPhysicsBallJoint ball;
+        NphPhysicsHingeJoint hinge;
+    };
+    u64 user_data;
+    // Accumulated impulses, per substep, kept between steps (warm start).
+    NphVec3 linear_impulse;   // the anchors, world
+    NphVec3 angular_impulse;  // the aligned axes (hinge) or the whole rotation (fixed), world
+    NphVec3 friction_impulse; // a ball's friction, world
+    f32 lower_impulse;        // a hinge's limit or a ball's twist limits, about X
+    f32 upper_impulse;
+    f32 swing_impulse; // a ball's cone
+    f32 motor_impulse;
+    f32 spring_impulse;
+    // The step's data (phys_joint_prepare).
+    u32 solver_a; // solver body indices (the dummy for static ones)
+    u32 solver_b;
+    f32 inv_mass_a; // 0 unless dynamic
+    f32 inv_mass_b;
+    NphMat3 inv_inertia_a; // world, at the step's start
+    NphMat3 inv_inertia_b;
+    NphVec3 anchor_a;     // from A's centre of mass, world axes, at the step's start
+    NphVec3 anchor_b;     // from B's
+    NphVec3 delta_center; // B's centre of mass less A's, at the step's start
+    NphQuat frame_q_a;    // the frames' rotations in the world at the step's start
+    NphQuat frame_q_b;
+    PhysSoftness spring_soft;
+} PhysJoint;
+
 typedef struct PhysIsland {
     u32 live;
     u32 awake;
@@ -180,8 +246,12 @@ typedef struct PhysIsland {
     u32 contact_head;
     u32 contact_tail;
     u32 contact_count;
+    u32 joint_head;
+    u32 joint_tail;
+    u32 joint_count;
     u32 parent;                  // a pending merge into another island (union-find), or PHYS_NULL
-    u32 constraint_remove_count; // contacts removed since the last split: it may fall apart
+    u32 constraint_remove_count; // contacts and joints removed since the last split: it may fall
+                                 // apart
     u32 awake_slot;              // in world->awake_islands
     f32 sleep_time;              // the least of its bodies', at the last step
 } PhysIsland;
@@ -199,8 +269,9 @@ typedef struct PhysIsland {
 #define PHYS_GRAPH_OVERFLOW       PHYS_GRAPH_COLORS
 
 typedef struct PhysColor {
-    NphBitset bodies; // dynamic bodies with a contact in this colour (by slot)
+    NphBitset bodies; // dynamic bodies with a contact or joint in this colour (by slot)
     NphArrayU32 contacts;
+    NphArrayU32 joints;
 } PhysColor;
 
 // ---------------------------------------------------------------------------
@@ -305,7 +376,7 @@ typedef struct PhysPrepareLanes {
 // The solver's stages, unrolled for a step.
 typedef enum PhysStageType {
     PHYS_STAGE_PREPARE_BODIES = 0,
-    PHYS_STAGE_PREPARE_CONTACTS,
+    PHYS_STAGE_PREPARE_CONTACTS, // and the joints
     PHYS_STAGE_INTEGRATE_VELOCITIES,
     PHYS_STAGE_WARM_START,
     PHYS_STAGE_SOLVE,
@@ -319,13 +390,20 @@ typedef enum PhysStageType {
 // A stage's blocks are claimed one by one through its claim words (in the
 // world's `claims`), so each participant can start at its own share of the
 // blocks and keep its data in its own cache from substep to substep.
+//
+// A colour's stages hold its joints and its contacts: the joints' blocks
+// first (indices into the step's joint array), then the contact groups'.
 typedef struct PhysStage {
     NphAtomicU32 done; // blocks finished, added once per participant
     u32 type;          // PhysStageType
-    u32 first;         // the first item (group or body)
+    u32 first;         // the first item (contact group, body, or step joint)
     u32 count;         // items
     u32 block_size;
-    u32 block_count;
+    u32 block_count; // all blocks, the joints' included
+    u32 joint_first; // the first step joint
+    u32 joint_count;
+    u32 joint_block_size;
+    u32 joint_blocks;
     u32 claim_first; // the stage's first claim word
     u32 pad;
 } PhysStage;
@@ -349,6 +427,7 @@ extern const PhysSolverKernels g_phys_solver_avx2;
 typedef NPH_ARRAY(PhysBody) PhysBodyArray;
 typedef NPH_ARRAY(PhysShape) PhysShapeArray;
 typedef NPH_ARRAY(PhysContact) PhysContactArray;
+typedef NPH_ARRAY(PhysJoint) PhysJointArray;
 typedef NPH_ARRAY(PhysIsland) PhysIslandArray;
 typedef NPH_ARRAY(PhysSolverBody) PhysSolverBodyArray;
 typedef NPH_ARRAY(PhysSolverParams) PhysSolverParamsArray;
@@ -381,6 +460,8 @@ struct NphPhysicsWorld {
     PhysShapeArray shapes;
     PhysContactArray contacts;
     NphArrayU32 free_contacts;
+    PhysSlots joint_slots;
+    PhysJointArray joints;
     PhysIslandArray islands;
     NphArrayU32 free_islands;
 
@@ -398,7 +479,8 @@ struct NphPhysicsWorld {
 
     // The constraint graph.
     PhysColor colors[PHYS_GRAPH_COLORS];
-    NphArrayU32 overflow;
+    NphArrayU32 overflow; // contacts
+    NphArrayU32 overflow_joints;
 
     // Step data, kept between steps so steady state allocates nothing.
     PhysSolverBodyArray solver_bodies; // awake bodies, then the dummy
@@ -413,6 +495,9 @@ struct NphPhysicsWorld {
     NphArrayU32 candidates; // islands ready to sleep
     u32 color_group_first[PHYS_GRAPH_COLORS + 1U];
     u32 color_group_count[PHYS_GRAPH_COLORS + 1U];
+    NphArrayU32 step_joints; // the graph's joints: by colour, the overflow last
+    u32 color_joint_first[PHYS_GRAPH_COLORS + 1U];
+    u32 color_joint_count[PHYS_GRAPH_COLORS + 1U];
 
     // Events.
     PhysBeginEventArray begin_events;
@@ -423,6 +508,7 @@ struct NphPhysicsWorld {
     NphPhysicsStats stats;
     u32 split_candidate;
     u32 forced_participants; // white-box tests: nonzero fixes the solver's thread count
+    f32 last_substep;        // the last step's substep, seconds (joint reactions)
 };
 
 // ---------------------------------------------------------------------------
@@ -454,23 +540,55 @@ NphResult phys_move_buffer_push(NphPhysicsWorld *w, u32 shape_slot);
 NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b);
 void phys_contact_destroy(NphPhysicsWorld *w, u32 contact, bool events);
 void phys_contact_update(NphPhysicsWorld *w, u32 contact);
-// Every contact of a body: awake-list and graph membership after the body
-// woke or fell asleep.
-NphResult phys_body_contacts_sync(NphPhysicsWorld *w, u32 body);
+// Every contact and joint of a body: awake-list and graph membership after
+// the body woke or fell asleep.
+NphResult phys_body_constraints_sync(NphPhysicsWorld *w, u32 body);
 NphResult phys_update_pairs(NphPhysicsWorld *w, NphJobSystem *js);
 NphResult phys_collide(NphPhysicsWorld *w, NphJobSystem *js);
 // Every contact of a shape's body that involves the shape.
 void phys_shape_destroy_contacts(NphPhysicsWorld *w, u32 shape_slot);
 
-// The constraint graph.
+// Joints.
+PhysJoint *phys_joint(const NphPhysicsWorld *w, NphPhysicsJoint h);
+// Destroys a joint; `wake` wakes its bodies.
+void phys_joint_destroy(NphPhysicsWorld *w, u32 joint, bool wake);
+// Graph membership after a body woke or fell asleep.
+NphResult phys_joint_sync(NphPhysicsWorld *w, u32 joint);
+// False when a joint between the two bodies keeps their shapes apart.
+bool phys_joints_allow_contact(const NphPhysicsWorld *w, u32 body_a, u32 body_b);
+
+// The joints' arithmetic (joint_solver.c), per joint, scalar: the same on
+// every ISA.
+typedef struct PhysJointStep {
+    f32 h;
+    f32 inv_h;
+    PhysSoftness soft; // the world's joint stiffness
+    u32 dummy;         // the solver body of static and sleeping-kinematic ends
+} PhysJointStep;
+void phys_joint_prepare(NphPhysicsWorld *w, const PhysJointStep *step, PhysJoint *j);
+void phys_joint_warm_start(PhysSolverBody *bodies, PhysJoint *j);
+// The joint's accumulated angular impulse as a world vector, for frames
+// with world rotations `qa` and `qb`.
+NphVec3 phys_joint_angular_impulse(const PhysJoint *j, NphQuat qa, NphQuat qb);
+void phys_joint_solve(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j,
+                      bool use_bias);
+// The joint's current angle about X and the frames' world rotations, from
+// the bodies' poses (between steps).
+f32 phys_joint_angle(const NphPhysicsWorld *w, const PhysJoint *j);
+
+// The constraint graph: contacts and joints share the colours.
 NphResult phys_graph_add(NphPhysicsWorld *w, u32 contact);
 void phys_graph_remove(NphPhysicsWorld *w, u32 contact);
+NphResult phys_graph_add_joint(NphPhysicsWorld *w, u32 joint);
+void phys_graph_remove_joint(NphPhysicsWorld *w, u32 joint);
 
 // Islands.
 NphResult phys_island_add_body(NphPhysicsWorld *w, u32 body);
 void phys_island_remove_body(NphPhysicsWorld *w, u32 body);
 NphResult phys_island_link_contact(NphPhysicsWorld *w, u32 contact);
 void phys_island_unlink_contact(NphPhysicsWorld *w, u32 contact);
+void phys_island_link_joint(NphPhysicsWorld *w, u32 joint);
+void phys_island_unlink_joint(NphPhysicsWorld *w, u32 joint);
 NphResult phys_island_merge_pending(NphPhysicsWorld *w);
 NphResult phys_island_wake(NphPhysicsWorld *w, u32 island);
 NphResult phys_island_sleep_and_split(NphPhysicsWorld *w);
