@@ -510,6 +510,15 @@ NBENCH(tree_rebuild_10k)
 
 #define WORLD_DT (1.0F / 240.0F)
 
+// Debug builds run these as CTest's smoke test, under the address
+// sanitizer: the scenes shrink tenfold (their numbers are only recorded
+// from Profile builds).
+#if NPH_CONFIG_DEBUG
+#define WORLD_SCALE 10U
+#else
+#define WORLD_SCALE 1U
+#endif
+
 static NphJobSystem *bench_jobs(void)
 {
     static NphJobSystem *js = NULL;
@@ -610,7 +619,7 @@ NBENCH(world_pyramid_20_mt)
 
 NBENCH(world_pyramids_16_mt)
 {
-    bench_world_steps(state, pyramids(20U, 16U), bench_jobs());
+    bench_world_steps(state, pyramids(20U, 16U / (WORLD_SCALE > 1U ? 8U : 1U)), bench_jobs());
 }
 
 static void bench_pile(NbenchState *state, NphJobSystem *js)
@@ -629,7 +638,7 @@ static void bench_pile(NbenchState *state, NphJobSystem *js)
         bench_body(w, NPH_PHYSICS_BODY_STATIC, p, nph_quat_identity(), nph_physics_geometry_box(h));
     }
     NphPcg32 r = bench_rng(17U);
-    for (u32 i = 0U; i < 1000U; ++i) {
+    for (u32 i = 0U; i < 1000U / WORLD_SCALE; ++i) {
         const NphDVec3 p =
             nph_dvec3((f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F), 1.0 + 0.05 * (f64)i,
                       (f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F));
@@ -644,7 +653,7 @@ static void bench_pile(NbenchState *state, NphJobSystem *js)
         }
         bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, p, rand_rotation(&r), g);
     }
-    bench_steps(w, bench_jobs(), 960U); // fall and settle
+    bench_steps(w, bench_jobs(), 960U / WORLD_SCALE); // fall and settle
     while (nbench_keep_running(state)) {
         NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
     }
@@ -668,7 +677,7 @@ NBENCH(world_sleeping_10k)
         return;
     }
     bench_ground(w, 150.0F);
-    for (u32 i = 0U; i < 10000U; ++i) {
+    for (u32 i = 0U; i < 10000U / WORLD_SCALE; ++i) {
         const f64 x = (f64)(i % 100U) * 2.0 - 99.0;
         const f64 z = (f64)(u32)(i / 100U) * 2.0 - 99.0; // row index
         bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(x, 0.5, z), nph_quat_identity(),
