@@ -43,6 +43,7 @@ nph_add_test(physics
         tests/test_hull.c
         tests/test_joint.c
         tests/test_physics_support.h
+        tests/test_ragdoll.c
         tests/test_solvers.c
         tests/test_world.c
         tests/test_world_support.h
