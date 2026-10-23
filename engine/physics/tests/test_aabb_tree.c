@@ -102,10 +102,10 @@ NTEST(aabb_tree, random_edits_keep_queries_exact)
             m.boxes[i] = random_box(&rng, 50.0F, 2.0F);
             nph_aabb_tree_move_proxy(&tree, m.proxy[i], m.boxes[i]);
         } else if (op == 2U) {
-            // A small motion inside a grown box: enlarge in place.
+            // A small motion: the new box in place, no restructuring.
             const NphAABB moved = nph_aabb_translate(m.boxes[i], test_vec3(&rng, -0.3F, 0.3F));
             nph_aabb_tree_enlarge_proxy(&tree, m.proxy[i], moved);
-            m.boxes[i] = nph_aabb_union(m.boxes[i], moved);
+            m.boxes[i] = moved;
         } else {
             m.categories[i] = 1ULL << nph_pcg32_next_bounded(&rng, 4U);
             nph_aabb_tree_set_category_bits(&tree, m.proxy[i], m.categories[i]);

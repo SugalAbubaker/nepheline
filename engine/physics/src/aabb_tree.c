@@ -433,7 +433,7 @@ void nph_aabb_tree_enlarge_proxy(NphAabbTree *tree, u32 proxy, NphAABB aabb)
     NPH_ASSERT(tree != NULL && proxy < tree->node_capacity && is_leaf(&tree->nodes[proxy]));
     NPH_ASSERT(box_valid(aabb));
     NphAabbTreeNode *nodes = tree->nodes;
-    nodes[proxy].aabb = box_union(nodes[proxy].aabb, aabb);
+    nodes[proxy].aabb = aabb;
     nodes[proxy].flags = (u16)(nodes[proxy].flags | NODE_ENLARGED);
     u32 i = nodes[proxy].parent;
     while (i != NULL_NODE) {
