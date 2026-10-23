@@ -556,6 +556,75 @@ void nph_aabb_tree_raycast(const NphAabbTree *tree, const NphAabbTreeRay *ray, u
     }
 }
 
+// A node's box grown by the cast's extent: what the swept box's centre
+// must enter.
+static NphAABB grown(const NphAabbTree *tree, u32 node, NphVec3 extent)
+{
+    const NphAABB b = tree->nodes[node].aabb;
+    return (NphAABB){nph_vec3_sub(b.min, extent), nph_vec3_add(b.max, extent)};
+}
+
+// The raycast's walk with every box grown by the extent (its own loop, so
+// the plain raycast keeps its speed).
+void nph_aabb_tree_box_cast(const NphAabbTree *tree, const NphAabbTreeRay *ray, NphVec3 extent,
+                            u64 mask_bits, NphAabbTreeRayFn fn, void *context)
+{
+    NPH_ASSERT(tree != NULL && ray != NULL && fn != NULL);
+    NPH_ASSERT(extent.x >= 0.0F && extent.y >= 0.0F && extent.z >= 0.0F);
+    if (tree->root == NULL_NODE) {
+        return;
+    }
+    NphAabbTreeRay r = *ray;
+    const NphRay math_ray = nph_ray(r.origin, r.translation);
+    u32 stack[NPH_AABB_TREE_STACK_SIZE];
+    u32 top = 0U;
+    stack[top++] = tree->root;
+    while (top > 0U) {
+        const u32 i = stack[--top];
+        const NphAabbTreeNode *n = &tree->nodes[i];
+        if ((n->category_bits & mask_bits) == 0U ||
+            !nph_ray_intersects_aabb(math_ray, grown(tree, i, extent), r.max_fraction, NULL,
+                                     NULL)) {
+            continue;
+        }
+        if (is_leaf(n)) {
+            const f32 value = fn(&r, i, n->user_data, context);
+            if (value < 0.0F) {
+                return;
+            }
+            if (value < r.max_fraction) {
+                r.max_fraction = value;
+            }
+            continue;
+        }
+        // The nearer child is visited first, so a hit there clips the ray
+        // before the farther one is opened.
+        f32 t1 = FLT_MAX;
+        f32 t2 = FLT_MAX;
+        const bool h1 = nph_ray_intersects_aabb(math_ray, grown(tree, n->child1, extent),
+                                                r.max_fraction, &t1, NULL);
+        const bool h2 = nph_ray_intersects_aabb(math_ray, grown(tree, n->child2, extent),
+                                                r.max_fraction, &t2, NULL);
+        NPH_ASSERT_MSG(top + 2U <= NPH_AABB_TREE_STACK_SIZE, "aabb tree raycast: stack overflow");
+        if (top + 2U > NPH_AABB_TREE_STACK_SIZE) {
+            continue;
+        }
+        if (h1 && h2) {
+            if (t1 <= t2) {
+                stack[top++] = n->child2;
+                stack[top++] = n->child1;
+            } else {
+                stack[top++] = n->child1;
+                stack[top++] = n->child2;
+            }
+        } else if (h1) {
+            stack[top++] = n->child1;
+        } else if (h2) {
+            stack[top++] = n->child2;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rebuild: top-down binned SAH (Wald 2007)
 // ---------------------------------------------------------------------------

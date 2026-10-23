@@ -565,6 +565,9 @@ NphPhysicsShape phys_shape_handle(const NphPhysicsWorld *w, u32 slot);
 void phys_body_update_mass(NphPhysicsWorld *w, PhysBody *b);
 // The world pose of a shape's frame relative to `origin` (32-bit).
 NphPhysicsPose phys_shape_pose_relative(const PhysBody *b, const PhysShape *s, NphDVec3 origin);
+// Box `rel`, relative to `origin`, in the world's frame: rounded outward to
+// 32 bits, so it holds what `rel` holds however coarse 32 bits are there.
+NphAABB phys_world_box(NphDVec3 origin, NphAABB rel);
 // Tight world box of a shape, rounded outward to 32 bits.
 NphAABB phys_shape_world_aabb(const PhysBody *b, const PhysShape *s);
 // Creates the shape's proxy in its body type's tree and queues it.

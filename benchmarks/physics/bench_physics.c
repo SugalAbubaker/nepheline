@@ -42,6 +42,26 @@
 //   collide_heightfield_sphere   heightfield of 0.5 m cells
 //   collide_heightfield_capsule
 //   collide_heightfield_hull_32v
+//   raycast_sphere / _capsule /  a ray from 3 to 6 m out through a point
+//   _box / _hull_32v             within a metre of the shape (about half hit)
+//   shape_cast_sphere_box, ...   a shape from 3 to 6 m out, moved twice the
+//                                way to a point within a metre of the other
+//   shape_cast_capsule_mesh /    a standing capsule from a metre above the
+//   _box_mesh /                  rippled 0.5 m grid (64 x 64 cells), down 2 m
+//   _capsule_heightfield         and a metre sideways
+//
+// World queries (query.h), per query:
+//
+//   world_raycast_10k            a 50 m closest-hit ray among 10 000 static
+//                                shapes in a 200 m cube
+//   world_cast_sphere_10k        a ball (0.5 m) cast 10 m among them
+//   world_cast_capsule_10k       a capsule, the same
+//   world_overlap_sphere_10k     the shapes a 1 m ball touches
+//   world_overlap_aabb_10k       the shapes whose bounds a 4 m box overlaps
+//   world_terrain_collide_capsule  a character's capsule resting on a rippled
+//                                heightfield among rocks: its contacts
+//   world_terrain_cast_capsule   the same capsule cast a step along the
+//                                ground (5 cm, and 1 cm down)
 
 #include <nepheline/math/random.h>
 #include <nepheline/physics/aabb_tree.h>
@@ -539,6 +559,7 @@ NBENCH(tree_rebuild_10k)
 #include <nepheline/jobs/jobs.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/joint.h>
+#include <nepheline/physics/query.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/physics/world.h>
 
@@ -910,6 +931,196 @@ NBENCH(collide_mesh_hull_32v)
     const NphVec3 low = nph_physics_geometry_support(&g, nph_vec3(0.0F, -1.0F, 0.0F));
     bench_collide_mesh(state, &g, -low.y, nph_quat_identity());
     nph_physics_hull_free(h, nph_allocator_system());
+}
+
+// ---------------------------------------------------------------------------
+// Casts
+// ---------------------------------------------------------------------------
+
+// From 3 to 6 m out, twice the way to a point within a metre of `center`.
+static void make_motion(NphPcg32 *r, NphVec3 center, NphVec3 *from, NphVec3 *delta)
+{
+    *from = nph_vec3_mul_add(center, rand_unit(r), nph_pcg32_next_range_f32(r, 3.0F, 6.0F));
+    const NphVec3 aim = nph_vec3_add(center, rand_vec3(r, -1.0F, 1.0F));
+    *delta = nph_vec3_scale(nph_vec3_sub(aim, *from), 2.0F);
+}
+
+static void bench_raycast(NbenchState *state, const NphPhysicsGeometry *g)
+{
+    NphPcg32 r = bench_rng(41U);
+    NphPhysicsPose poses[PAIRS];
+    NphVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        poses[i] = nph_physics_pose(rand_vec3(&r, -1.0F, 1.0F), rand_rotation(&r));
+        make_motion(&r, poses[i].position, &origins[i], &deltas[i]);
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsCastHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_raycast(g, poses[i], origins[i], deltas[i], &hit) ? 1U : 0U);
+        }
+    }
+}
+
+NBENCH(raycast_sphere)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(0.5F);
+    bench_raycast(state, &g);
+}
+
+NBENCH(raycast_capsule)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.4F, 0.3F);
+    bench_raycast(state, &g);
+}
+
+NBENCH(raycast_box)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_box(nph_vec3(0.5F, 0.3F, 0.4F));
+    bench_raycast(state, &g);
+}
+
+NBENCH(raycast_hull_32v)
+{
+    NphPcg32 r = bench_rng(42U);
+    NphPhysicsHull *h = make_hull(&r, 200U, 32U);
+    if (h == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry g = nph_physics_geometry_hull(h);
+    bench_raycast(state, &g);
+    nph_physics_hull_free(h, nph_allocator_system());
+}
+
+static void bench_shape_cast(NbenchState *state, const NphPhysicsGeometry *a,
+                             const NphPhysicsGeometry *b)
+{
+    NphPcg32 r = bench_rng(43U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    NphVec3 deltas[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        pb[i] = nph_physics_pose(rand_vec3(&r, -1.0F, 1.0F), rand_rotation(&r));
+        NphVec3 from;
+        make_motion(&r, pb[i].position, &from, &deltas[i]);
+        pa[i] = nph_physics_pose(from, rand_rotation(&r));
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsCastHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_shape_cast(a, pa[i], deltas[i], b, pb[i], &hit) ? 1U : 0U);
+        }
+    }
+}
+
+NBENCH(shape_cast_sphere_box)
+{
+    const NphPhysicsGeometry a = nph_physics_geometry_sphere(0.3F);
+    const NphPhysicsGeometry b = nph_physics_geometry_box(nph_vec3(0.5F, 0.3F, 0.4F));
+    bench_shape_cast(state, &a, &b);
+}
+
+NBENCH(shape_cast_capsule_box)
+{
+    const NphPhysicsGeometry a = nph_physics_geometry_capsule(0.5F, 0.3F);
+    const NphPhysicsGeometry b = nph_physics_geometry_box(nph_vec3(0.5F, 0.3F, 0.4F));
+    bench_shape_cast(state, &a, &b);
+}
+
+NBENCH(shape_cast_capsule_capsule)
+{
+    const NphPhysicsGeometry a = nph_physics_geometry_capsule(0.5F, 0.3F);
+    const NphPhysicsGeometry b = nph_physics_geometry_capsule(0.4F, 0.2F);
+    bench_shape_cast(state, &a, &b);
+}
+
+NBENCH(shape_cast_box_box)
+{
+    const NphPhysicsGeometry a = nph_physics_geometry_box(nph_vec3(0.3F, 0.4F, 0.25F));
+    const NphPhysicsGeometry b = nph_physics_geometry_box(nph_vec3(0.5F, 0.3F, 0.4F));
+    bench_shape_cast(state, &a, &b);
+}
+
+NBENCH(shape_cast_hull_hull_32v)
+{
+    NphPcg32 r = bench_rng(44U);
+    NphPhysicsHull *ha = make_hull(&r, 200U, 32U);
+    NphPhysicsHull *hb = make_hull(&r, 200U, 32U);
+    if (ha != NULL && hb != NULL) {
+        const NphPhysicsGeometry a = nph_physics_geometry_hull(ha);
+        const NphPhysicsGeometry b = nph_physics_geometry_hull(hb);
+        bench_shape_cast(state, &a, &b);
+    }
+    nph_physics_hull_free(ha, nph_allocator_system());
+    nph_physics_hull_free(hb, nph_allocator_system());
+}
+
+// A shape from a metre above the rippled grid at `at`, down 2 m and a metre
+// sideways, anywhere on it.
+static void bench_cast_surface(NbenchState *state, const NphPhysicsGeometry *a,
+                               const NphPhysicsGeometry *surface, NphPhysicsPose at)
+{
+    NphPcg32 r = bench_rng(45U);
+    NphPhysicsPose pa[PAIRS];
+    NphVec3 deltas[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        pa[i] =
+            nph_physics_pose(nph_vec3(nph_pcg32_next_range_f32(&r, -14.0F, 14.0F), 1.5F,
+                                      nph_pcg32_next_range_f32(&r, -14.0F, 14.0F)),
+                             nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)));
+        const NphVec3 side = rand_unit(&r);
+        deltas[i] = nph_vec3(side.x, -2.0F, side.z);
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsCastHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_shape_cast(a, pa[i], deltas[i], surface, at, &hit) ? 1U : 0U);
+        }
+    }
+}
+
+NBENCH(shape_cast_capsule_mesh)
+{
+    NphPhysicsMesh *mesh = bench_grid(64U, 0.5F, 0.3F);
+    if (mesh == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry a = nph_physics_geometry_capsule(0.5F, 0.3F);
+    const NphPhysicsGeometry s = nph_physics_geometry_mesh(mesh);
+    bench_cast_surface(state, &a, &s, nph_physics_pose_identity());
+    nph_physics_mesh_free(mesh, nph_allocator_system());
+}
+
+NBENCH(shape_cast_box_mesh)
+{
+    NphPhysicsMesh *mesh = bench_grid(64U, 0.5F, 0.3F);
+    if (mesh == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry a = nph_physics_geometry_box(nph_vec3(0.4F, 0.25F, 0.3F));
+    const NphPhysicsGeometry s = nph_physics_geometry_mesh(mesh);
+    bench_cast_surface(state, &a, &s, nph_physics_pose_identity());
+    nph_physics_mesh_free(mesh, nph_allocator_system());
+}
+
+NBENCH(shape_cast_capsule_heightfield)
+{
+    NphPhysicsHeightfield *h = bench_field(64U, 0.5F, 0.3F);
+    if (h == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry a = nph_physics_geometry_capsule(0.5F, 0.3F);
+    const NphPhysicsGeometry s = nph_physics_geometry_heightfield(h);
+    bench_cast_surface(state, &a, &s,
+                       nph_physics_pose(nph_vec3(-16.0F, 0.0F, -16.0F), nph_quat_identity()));
+    nph_physics_heightfield_free(h, nph_allocator_system());
 }
 
 #define WORLD_DT (1.0F / 240.0F)
@@ -1440,4 +1651,247 @@ NBENCH(world_ragdolls_32_mt_soft8)
 NBENCH(world_ragdolls_32_mt_xpbd16)
 {
     bench_ragdolls(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U});
+}
+
+// ---------------------------------------------------------------------------
+// World queries
+// ---------------------------------------------------------------------------
+
+#define QUERY_SHAPES (10000U / WORLD_SCALE)
+
+// 10 000 static spheres, capsules, and boxes in a 200 m cube.
+static NphPhysicsWorld *query_world(void)
+{
+    NphPhysicsWorld *w = bench_world(true, k_soft);
+    if (w == NULL) {
+        return NULL;
+    }
+    NphPcg32 r = bench_rng(51U);
+    for (u32 i = 0U; i < QUERY_SHAPES; ++i) {
+        NphPhysicsGeometry g;
+        if (i % 3U == 0U) {
+            g = nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.3F, 1.5F));
+        } else if (i % 3U == 1U) {
+            g = nph_physics_geometry_capsule(nph_pcg32_next_range_f32(&r, 0.3F, 1.0F),
+                                             nph_pcg32_next_range_f32(&r, 0.2F, 0.6F));
+        } else {
+            g = nph_physics_geometry_box(rand_vec3(&r, 0.3F, 1.5F));
+        }
+        const NphVec3 p = rand_vec3(&r, -100.0F, 100.0F);
+        bench_body(w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_from_vec3(p), rand_rotation(&r), g);
+    }
+    return w;
+}
+
+static void query_motions(NphDVec3 origins[PAIRS], NphVec3 deltas[PAIRS], f32 length)
+{
+    NphPcg32 r = bench_rng(52U);
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        origins[i] = nph_dvec3_from_vec3(rand_vec3(&r, -100.0F, 100.0F));
+        deltas[i] = nph_vec3_scale(rand_unit(&r), length);
+    }
+}
+
+NBENCH(world_raycast_10k)
+{
+    NphPhysicsWorld *w = query_world();
+    if (w == NULL) {
+        return;
+    }
+    NphDVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    query_motions(origins, deltas, 50.0F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsQueryHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_world_raycast_closest(w, origins[i], deltas[i], NULL, &hit) ? 1U : 0U);
+        }
+    }
+    nph_physics_world_destroy(w);
+}
+
+static void bench_world_cast(NbenchState *state, const NphPhysicsGeometry *g)
+{
+    NphPhysicsWorld *w = query_world();
+    if (w == NULL) {
+        return;
+    }
+    NphDVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    query_motions(origins, deltas, 10.0F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsQueryHit hit;
+            nbench_do_not_optimize_u64(nph_physics_world_cast_shape_closest(w, g, origins[i],
+                                                                            nph_quat_identity(),
+                                                                            deltas[i], NULL, &hit)
+                                           ? 1U
+                                           : 0U);
+        }
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_cast_sphere_10k)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(0.5F);
+    bench_world_cast(state, &g);
+}
+
+NBENCH(world_cast_capsule_10k)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.5F, 0.3F);
+    bench_world_cast(state, &g);
+}
+
+static bool count_shape(void *user, NphPhysicsShape shape, NphPhysicsBody body)
+{
+    NPH_UNUSED(body);
+    *(u32 *)user += shape.value != 0U ? 1U : 0U;
+    return true;
+}
+
+NBENCH(world_overlap_sphere_10k)
+{
+    NphPhysicsWorld *w = query_world();
+    if (w == NULL) {
+        return;
+    }
+    NphDVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    query_motions(origins, deltas, 1.0F);
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(1.0F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            u32 n = 0U;
+            nph_physics_world_overlap_shape(w, &g, origins[i], nph_quat_identity(), NULL,
+                                            count_shape, &n);
+            nbench_do_not_optimize_u64(n);
+        }
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_overlap_aabb_10k)
+{
+    NphPhysicsWorld *w = query_world();
+    if (w == NULL) {
+        return;
+    }
+    NphDVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    query_motions(origins, deltas, 1.0F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            const NphVec3 c = nph_dvec3_to_vec3(origins[i]);
+            const NphAABB box = nph_aabb(nph_vec3_sub(c, nph_vec3_splat(2.0F)),
+                                         nph_vec3_add(c, nph_vec3_splat(2.0F)));
+            u32 n = 0U;
+            nph_physics_world_overlap_aabb(w, box, NULL, count_shape, &n);
+            nbench_do_not_optimize_u64(n);
+        }
+    }
+    nph_physics_world_destroy(w);
+}
+
+// A character's capsule (0.5 m core, 0.3 m radius) resting 2 mm into a
+// rippled 64 m heightfield of 0.5 m cells, among a thousand rocks (boxes):
+// 64 places on it.
+typedef struct Terrain {
+    NphPhysicsWorld *w;
+    NphPhysicsHeightfield *field;
+    NphDVec3 at[PAIRS];
+} Terrain;
+
+static bool terrain_begin(Terrain *t)
+{
+    t->field = bench_field(128U, 0.5F, 0.3F);
+    t->w = bench_world(true, k_soft);
+    if (t->field == NULL || t->w == NULL) {
+        return false;
+    }
+    bench_body(t->w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(-32.0, 0.0, -32.0), nph_quat_identity(),
+               nph_physics_geometry_heightfield(t->field));
+    NphPcg32 r = bench_rng(53U);
+    for (u32 i = 0U; i < 1000U / WORLD_SCALE; ++i) {
+        const NphVec3 p = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
+                                   nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        bench_body(t->w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_from_vec3(p), rand_rotation(&r),
+                   nph_physics_geometry_box(rand_vec3(&r, 0.2F, 0.6F)));
+    }
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const f32 x = nph_pcg32_next_range_f32(&r, -28.0F, 28.0F);
+        const f32 z = nph_pcg32_next_range_f32(&r, -28.0F, 28.0F);
+        f32 y = 0.0F;
+        if (!nph_physics_heightfield_height_at(t->field, x + 32.0F, z + 32.0F, &y, NULL)) {
+            return false;
+        }
+        t->at[i] = nph_dvec3((f64)x, (f64)y + 0.8 - 0.002, (f64)z);
+    }
+    return true;
+}
+
+static void terrain_end(Terrain *t)
+{
+    nph_physics_world_destroy(t->w);
+    nph_physics_heightfield_free(t->field, nph_allocator_system());
+}
+
+static bool count_contact(void *user, const NphPhysicsQueryContact *contact)
+{
+    *(u32 *)user += contact->manifold.point_count;
+    return true;
+}
+
+NBENCH(world_terrain_collide_capsule)
+{
+    Terrain t;
+    if (terrain_begin(&t)) {
+        const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.5F, 0.3F);
+        nbench_set_items_per_iteration(state, PAIRS);
+        while (nbench_keep_running(state)) {
+            for (u32 i = 0U; i < PAIRS; ++i) {
+                u32 n = 0U;
+                nph_physics_world_collide_shape(t.w, &g, t.at[i], nph_quat_identity(),
+                                                NPH_PHYSICS_SPECULATIVE_DISTANCE, NULL,
+                                                count_contact, &n);
+                nbench_do_not_optimize_u64(n);
+            }
+        }
+    }
+    terrain_end(&t);
+}
+
+NBENCH(world_terrain_cast_capsule)
+{
+    Terrain t;
+    if (terrain_begin(&t)) {
+        const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.5F, 0.3F);
+        NphPcg32 r = bench_rng(54U);
+        NphVec3 steps[PAIRS];
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            const NphVec3 u = rand_unit(&r);
+            steps[i] = nph_vec3_add(
+                nph_vec3_scale(nph_vec3_normalize_or(nph_vec3(u.x, 0.0F, u.z), nph_vec3_unit_x()),
+                               0.05F),
+                nph_vec3(0.0F, -0.01F, 0.0F));
+        }
+        nbench_set_items_per_iteration(state, PAIRS);
+        while (nbench_keep_running(state)) {
+            for (u32 i = 0U; i < PAIRS; ++i) {
+                NphPhysicsQueryHit hit;
+                nbench_do_not_optimize_u64(
+                    nph_physics_world_cast_shape_closest(t.w, &g, t.at[i], nph_quat_identity(),
+                                                         steps[i], NULL, &hit)
+                        ? 1U
+                        : 0U);
+            }
+        }
+    }
+    terrain_end(&t);
 }

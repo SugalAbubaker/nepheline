@@ -1049,22 +1049,34 @@ void nph_physics_mesh_overlap(const NphPhysicsMesh *m, NphAABB box, NphPhysicsMe
     }
 }
 
-// The entry fraction of the ray into each of the four boxes (FLT_MAX for
-// a miss), by the slab test with the reciprocal direction.
-static void slab4(const NphPhysicsMeshNode *n, NphVec3 o, NphVec3 inv, f32 limit, f32 out[4])
+// The entry fraction of the ray into each of the four boxes, grown by
+// `extent` (a swept box's half extents; zero for a ray), FLT_MAX for a
+// miss: the slab test with the reciprocal direction. A grown box's slab
+// starts `extent` before its own: the origin moved back instead.
+static void slab4(const NphPhysicsMeshNode *n, NphVec3 o, NphVec3 inv, NphVec3 extent, f32 limit,
+                  f32 out[4])
 {
     const NphF32x4 ox = nph_f32x4_splat(o.x);
     const NphF32x4 oy = nph_f32x4_splat(o.y);
     const NphF32x4 oz = nph_f32x4_splat(o.z);
+    const NphF32x4 ex = nph_f32x4_splat(extent.x);
+    const NphF32x4 ey = nph_f32x4_splat(extent.y);
+    const NphF32x4 ez = nph_f32x4_splat(extent.z);
     const NphF32x4 ix = nph_f32x4_splat(inv.x);
     const NphF32x4 iy = nph_f32x4_splat(inv.y);
     const NphF32x4 iz = nph_f32x4_splat(inv.z);
-    const NphF32x4 t1x = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->min_x), ox), ix);
-    const NphF32x4 t2x = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->max_x), ox), ix);
-    const NphF32x4 t1y = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->min_y), oy), iy);
-    const NphF32x4 t2y = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->max_y), oy), iy);
-    const NphF32x4 t1z = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->min_z), oz), iz);
-    const NphF32x4 t2z = nph_f32x4_mul(nph_f32x4_sub(nph_f32x4_load_aligned(n->max_z), oz), iz);
+    const NphF32x4 lo_x = nph_f32x4_sub(nph_f32x4_load_aligned(n->min_x), ex);
+    const NphF32x4 hi_x = nph_f32x4_add(nph_f32x4_load_aligned(n->max_x), ex);
+    const NphF32x4 lo_y = nph_f32x4_sub(nph_f32x4_load_aligned(n->min_y), ey);
+    const NphF32x4 hi_y = nph_f32x4_add(nph_f32x4_load_aligned(n->max_y), ey);
+    const NphF32x4 lo_z = nph_f32x4_sub(nph_f32x4_load_aligned(n->min_z), ez);
+    const NphF32x4 hi_z = nph_f32x4_add(nph_f32x4_load_aligned(n->max_z), ez);
+    const NphF32x4 t1x = nph_f32x4_mul(nph_f32x4_sub(lo_x, ox), ix);
+    const NphF32x4 t2x = nph_f32x4_mul(nph_f32x4_sub(hi_x, ox), ix);
+    const NphF32x4 t1y = nph_f32x4_mul(nph_f32x4_sub(lo_y, oy), iy);
+    const NphF32x4 t2y = nph_f32x4_mul(nph_f32x4_sub(hi_y, oy), iy);
+    const NphF32x4 t1z = nph_f32x4_mul(nph_f32x4_sub(lo_z, oz), iz);
+    const NphF32x4 t2z = nph_f32x4_mul(nph_f32x4_sub(hi_z, oz), iz);
     const NphF32x4 enter =
         nph_f32x4_max(nph_f32x4_max(nph_f32x4_min(t1x, t2x), nph_f32x4_min(t1y, t2y)),
                       nph_f32x4_max(nph_f32x4_min(t1z, t2z), nph_f32x4_zero()));
@@ -1135,7 +1147,7 @@ bool nph_physics_mesh_raycast(const NphPhysicsMesh *m, NphVec3 origin, NphVec3 d
         }
         const NphPhysicsMeshNode *n = &nodes[code];
         f32 enter[4];
-        slab4(n, origin, inv, nph_f32_min(best, 1.0F), enter);
+        slab4(n, origin, inv, nph_vec3_zero(), nph_f32_min(best, 1.0F), enter);
         // A slab test passes an inverted box: empty slots are skipped by
         // their code.
         for (u32 k = 0U; k < 4U; ++k) {
@@ -1175,4 +1187,88 @@ bool nph_physics_mesh_raycast(const NphPhysicsMesh *m, NphVec3 origin, NphVec3 d
     hit->original = nph_physics_mesh_originals(m)[best_triangle];
     hit->back = best_back ? 1 : 0;
     return true;
+}
+
+// The swept box's entry into a triangle's box (grown by `extent`): the
+// slab test of the box's centre. FLT_MAX for a miss.
+static f32 sweep_triangle_entry(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 center, NphVec3 extent,
+                                NphVec3 delta, f32 limit)
+{
+    const NphAABB box = {nph_vec3_sub(nph_vec3_min(nph_vec3_min(a, b), c), extent),
+                         nph_vec3_add(nph_vec3_max(nph_vec3_max(a, b), c), extent)};
+    f32 t = 0.0F;
+    return nph_ray_intersects_aabb(nph_ray(center, delta), box, limit, &t, NULL) ? t : FLT_MAX;
+}
+
+void nph_physics_mesh_visit_sweep(const NphPhysicsMesh *m, NphVec3 center, NphVec3 extent,
+                                  NphVec3 delta, NphDVec3 origin, NphPhysicsSweepVisit visit,
+                                  void *user)
+{
+    const NphPhysicsMeshNode *nodes = nph_physics_mesh_nodes(m);
+    const u32 *tri = nph_physics_mesh_triangles(m);
+    const u8 *edges = nph_physics_mesh_edges(m);
+    const NphVec3 *v = nph_physics_mesh_vertices(m);
+    const NphVec3 inv =
+        nph_vec3(safe_inverse(delta.x), safe_inverse(delta.y), safe_inverse(delta.z));
+    f32 best = 1.0F; // what the visits still want
+    u32 stack[STACK_DEPTH];
+    f32 stack_enter[STACK_DEPTH];
+    u32 top = 0U;
+    stack[top] = 0U;
+    stack_enter[top] = 0.0F;
+    top += 1U;
+    while (top > 0U) {
+        top -= 1U;
+        const u32 code = stack[top];
+        if (stack_enter[top] > best) {
+            continue;
+        }
+        if (nph_physics_mesh_child_is_leaf(code)) {
+            const u32 first = nph_physics_mesh_leaf_first(code);
+            const u32 last = first + nph_physics_mesh_leaf_count(code);
+            for (u32 t = first; t < last; ++t) {
+                const NphVec3 pa = v[tri[3ULL * t]];
+                const NphVec3 pb = v[tri[3ULL * t + 1U]];
+                const NphVec3 pc = v[tri[3ULL * t + 2U]];
+                if (sweep_triangle_entry(pa, pb, pc, center, extent, delta, best) > best) {
+                    continue;
+                }
+                const NphVec3 rel[3] = {nph_physics_relative_vertex(pa, origin),
+                                        nph_physics_relative_vertex(pb, origin),
+                                        nph_physics_relative_vertex(pc, origin)};
+                const f32 want = visit(user, t, rel, edges[t]);
+                if (want < 0.0F) {
+                    return;
+                }
+                best = nph_f32_min(best, want);
+            }
+            continue;
+        }
+        const NphPhysicsMeshNode *n = &nodes[code];
+        f32 enter[4];
+        slab4(n, center, inv, extent, best, enter);
+        for (u32 k = 0U; k < 4U; ++k) {
+            if (n->child[k] == NPH_PHYSICS_MESH_CHILD_EMPTY) {
+                enter[k] = FLT_MAX;
+            }
+        }
+        // The farthest first onto the stack, so the nearest comes off next.
+        u32 order[4] = {0U, 1U, 2U, 3U};
+        for (u32 i = 1U; i < 4U; ++i) {
+            for (u32 j = i; j > 0U && enter[order[j]] > enter[order[j - 1U]]; --j) {
+                const u32 s = order[j];
+                order[j] = order[j - 1U];
+                order[j - 1U] = s;
+            }
+        }
+        for (u32 i = 0U; i < 4U; ++i) {
+            const u32 k = order[i];
+            if (enter[k] < FLT_MAX && enter[k] <= best) {
+                NPH_ASSERT(top < STACK_DEPTH);
+                stack[top] = n->child[k];
+                stack_enter[top] = enter[k];
+                top += 1U;
+            }
+        }
+    }
 }

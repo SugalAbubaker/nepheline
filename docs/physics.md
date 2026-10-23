@@ -10,8 +10,8 @@ a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md) (the
 collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
 solver), [ADR-0044](adr/0044-physics-joints.md) (joints),
 [ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison),
-and [ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
-heightfields).
+[ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
+heightfields), and [ADR-0047](adr/0047-physics-queries.md) (queries).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -24,7 +24,8 @@ Phase 11 builds it in parts. This document describes what exists:
 | The ragdoll: the exit tests of §12 under every solver | done |
 | Triangle meshes: the block, its builder and queries, convex shapes against triangles, a pair's four manifolds | done |
 | Heightfields: the grid, its builder and queries, collision as a mesh's; compounds (bodies with several shapes) | done |
-| Queries, continuous collision, the character controller, the runtime bridge | to come |
+| Queries: rays, shape casts, overlaps, and contacts, against one geometry and a world | done |
+| Continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -33,8 +34,9 @@ Phase 11 builds it in parts. This document describes what exists:
 | `hull.h` | the convex hull block and the Quickhull builder |
 | `mesh.h` | the triangle mesh block, its builder (welding, active edges, the four-wide tree), box overlaps and raycasts |
 | `heightfield.h` | the heightfield block, its builder (active edges, block heights), box overlaps, raycasts, and heights |
-| `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction |
-| `aabb_tree.h` | the dynamic AABB tree |
+| `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction, ray and shape casts, overlaps |
+| `aabb_tree.h` | the dynamic AABB tree: box queries, raycasts, box casts |
+| `query.h` | world queries: raycasts, shape casts, overlaps, contacts, filters |
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
 | `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
@@ -446,10 +448,11 @@ Bounding Volume Hierarchies" (GDC 2019):
   SAH-based Bounding Volume Hierarchies", RT 2007): sixteen bins on the
   longest centroid axis, on an explicit task stack. A partial rebuild
   places only the marked region, keeping the untouched subtrees whole.
-- **Queries** walk a fixed 1024-entry stack: boxes, and rays that visit the
-  nearer child first and clip as hits come in. Each node carries the union
-  of its leaves' category bits, so a filtered query skips subtrees with
-  nothing it wants.
+- **Queries** walk a fixed 1024-entry stack: boxes, and rays (or boxes
+  swept along rays: the ray against each node grown by the box) that visit
+  the nearer child first and clip as hits come in. Each node carries the
+  union of its leaves' category bits, so a filtered query skips subtrees
+  with nothing it wants.
 
 The same edits build the same tree, bit for bit.
 
@@ -899,12 +902,96 @@ inactive ones dimmed), broadphase boxes, contact points and normals, and
 centres of mass through a line callback, in 32-bit coordinates relative to
 the renderer's debug origin.
 
+## Queries
+
+What a segment, a moving shape, a placed shape, or a box meets
+([ADR-0047](adr/0047-physics-queries.md)), against one geometry
+(`collide.h`) or a world (`query.h`).
+
+**Rays** (`nph_physics_raycast`) are exact: spheres and capsules by the
+line's closest approach to the centre or the axis and then Pythagoras along
+it (the quadratic formula cancels digits for a far origin; Ericson §5.3),
+boxes by the slab test keeping the face entered by, hulls by clipping the
+segment with their face planes (Haines, "Fast Ray-Convex Polyhedron
+Intersection", Graphics Gems II, 1991), meshes and heightfields by their
+watertight raycasts. A ray that starts inside a convex shape does not hit
+it (an overlap finds such shapes); one that starts on its surface and goes
+in hits at fraction 0.
+
+**Shape casts** (`nph_physics_shape_cast`) move a convex shape without
+turning against any geometry, by conservative advancement on GJK distances
+(Mirtich 1996, as Box2D v3.1's b2ShapeCast): each step moves the shape as
+far as the plane between the closest points allows, so it never passes the
+contact, until the two are within 0.1 mm, and a last step along the
+contact's normal closes what is left, exactly across a face. GJK runs in a
+frame at the moving shape's place: there its coordinates are the shapes'
+own size however long the cast (in the cast's start frame a 10 m cast left
+two hulls 0.1 mm apart where the axis test found them touching). The hit's
+point is on the target's surface and its normal the target's there:
+
+- for a round shape, GJK's (its core is apart from the other's at contact);
+- for two polytopes, whose cores touch at contact where GJK's normal is
+  noise, the exact normal of the closest features GJK's last simplex ended
+  on (a face against a point, or two edges: the axis Box2D's separation
+  functions take from the same simplex), or GJK's from a millimetre back,
+  whichever separates the two farther. The narrow phase's normal is not
+  used for this: its axis test leans to faces for steady contacts, which
+  tilts normals at edges by degrees, and for two 32-vertex hulls it cost
+  two thirds of the cast;
+- for a mesh's or heightfield's triangle, the contact rules' (ADR-0046 §5:
+  one side, the face's normal on an inactive edge, nothing beside it), so a
+  shape crossing a flat seam is not stopped by the next triangle's edge.
+  Each triangle under the swept box is cast in the start's frame (vertices
+  moved there in 64 bits); a triangle whose plane the shape does not reach
+  before the nearest hit so far is skipped, and the walk ends at a hit at
+  fraction 0.
+
+A shape already touching or overlapping another stops a cast at fraction 0
+only if the motion goes into the contact (by more than 1e-5 of its length:
+a motion projected onto a contact is off it by rounding), its normal then
+the narrow phase's (defined at any depth): a body resting on a floor casts
+along it freely, and stops at once when cast into it.
+
+**Overlaps** (`nph_physics_overlap`): GJK with radii between convex
+shapes; a mesh or a heightfield overlaps what touches one of its
+triangles, from either side.
+
+**In a world** (`query.h`), closest-hit and callback raycasts and shape
+casts, overlaps of a convex shape and of a box (shapes' bounds), and a
+convex shape's contact manifolds as the world's contacts make them (the
+controller's planes). A query walks the broadphase's trees, static,
+kinematic, then dynamic (`nph_aabb_tree_box_cast` sweeps a box along a ray:
+the ray against each node grown by the box), then tests each shape found in
+a frame centred on the query's 64-bit origin, a mesh or heightfield placed
+in 64 bits from the bodies' origins as its contacts are; the trees' 32-bit
+boxes are walked grown by the 32-bit stand-in's rounding. The same world
+answers the same 10 000 km out as at the origin (tested). The filter is
+Box2D's query filter (a shape is seen when its category meets the query's
+mask and its mask the query's category), plus the kinds of bodies wanted
+(which trees to walk) and a body to ignore. A hit is per shape and a
+shape's answer its own: each test sees the whole motion and the nearest
+hit so far as a limit, never a motion shortened to it, so the trees' order
+cannot change it. Callbacks return the fraction to clip the search to:
+the hit's for the closest, 1 for every hit, a negative value to end.
+Queries only read the world: any number of threads may query at once
+between steps.
+
+Costs (Profile, the reference machine): a ray against one shape takes
+27 ns (a box) to 107 ns (a 32-vertex hull), and the closest of 10 000
+static shapes along 50 m 1.6 µs; a cast 0.88 µs (a sphere against a box)
+to 5.3 µs (two 32-vertex hulls), about 5.8 µs down onto a rippled mesh or
+heightfield, and 1.05 µs among the 10 000 shapes. A character's capsule
+cast a step along a rocky heightfield costs 2.3 µs, and its contacts there
+1.7 µs. A cast's cost is GJK's: about 3.6 calls a cast, 205 ns each cold
+for a sphere and a box; a faster GJK is the next optimisation, for queries
+and contacts both.
+
 ## Performance
 
-Profile build, Ryzen 7 5800X, `benchmarks/physics` (each collision row
-cycles through 64 prepared configurations; world rows are per step at
-240 Hz, after the scene has settled, with sleep off except where it is the
-point):
+Profile build, Ryzen 7 5800X, `benchmarks/physics` (each collision and
+cast row cycles through 64 prepared configurations; world rows are per
+step at 240 Hz, after the scene has settled, with sleep off except where it
+is the point; world query rows are per query):
 
 | Benchmark | ns/op |
 |---|---|
@@ -933,6 +1020,10 @@ point):
 | `heightfield_raycast_256` / `_long` (down onto it / 100 m across it) | 121 / 409 |
 | `heightfield_overlap_256` (the triangles under a 1 m box) | 75 |
 | `collide_heightfield_box` / `_sphere` / `_capsule` / `_hull_32v` (flat, 0.5 m cells) | 7 880 / 667 / 1 810 / 23 400 |
+| `raycast_sphere` / `_capsule` / `_box` / `_hull_32v` (from 3 to 6 m out, about half hit) | 44 / 48 / 27 / 107 |
+| `shape_cast_sphere_box` / `_capsule_box` / `_capsule_capsule` | 881 / 1 130 / 845 |
+| `shape_cast_box_box` / `_hull_hull_32v` | 2 360 / 5 330 |
+| `shape_cast_capsule_mesh` / `_box_mesh` / `_capsule_heightfield` (down onto the rippled grid) | 5 820 / 11 700 / 5 950 |
 | `world_pyramid_20_st` (210 boxes, one thread) | 406 000 |
 | `world_pyramid_20_mt` (the job system) | 151 000 |
 | `world_pyramids_16_mt` (3360 boxes) | 951 000 |
@@ -946,6 +1037,10 @@ point):
 | `world_chains_mt` | 165 000 |
 | `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 340 000 |
 | `world_ragdolls_32_mt` | 353 000 |
+| `world_raycast_10k` (50 m, closest hit, 10 000 static shapes) | 1 610 |
+| `world_cast_sphere_10k` / `_capsule_10k` (10 m among them) | 1 040 / 1 050 |
+| `world_overlap_sphere_10k` / `world_overlap_aabb_10k` | 152 / 122 |
+| `world_terrain_collide_capsule` / `_cast_capsule` (a character on a rocky heightfield: its contacts, a step) | 1 720 / 2 350 |
 
 The resting pyramid costs 3 % more than without warm starting by place
 (407 µs against 394, the same build either way): with every warm start
@@ -971,7 +1066,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (174 tests):
+`physics_tests` (197 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1039,8 +1134,37 @@ reference CPU class.
   a box ground and on a heightfield, and a compound's own shapes never
   meeting.
 - The tree against brute force through random edits, moves, enlargements,
-  category changes, and rebuilds; raycasts (every hit and the closest);
-  partial rebuilds; determinism.
+  category changes, and rebuilds; raycasts (every hit and the closest) and
+  box casts (every box the swept box meets, a zero box as the ray); partial
+  rebuilds; determinism.
+- Casts (`test_cast.c`): rays against brute force (the first of 4096
+  samples inside, then bisection) on random shapes and poses, each hit's
+  point on the surface and its normal a supporting plane's; rays from
+  inside, from the surface, along axes, through edges at 45 degrees, and
+  from 5 km out keeping their digits; rays against meshes and heightfields
+  as their own raycasts placed; shape casts against bisection on GJK
+  distances (never past the contact, short of it by at most 1.5 µm, the
+  two at most 0.7 µm apart at the hit, the point on the target and the
+  normal its supporting plane's to 0.1 mm); flat contacts met exactly;
+  shapes resting 2 mm into a floor free along it and stopped at once into
+  it; boxes, balls, capsules, and hulls crossing a mesh's and a
+  heightfield's seams 2 mm in without a stop, landing on them at the floor
+  wherever they land, and meeting nothing from below a one-sided floor; a
+  valley's slopes and crease, and a two-sided floor from below; a
+  heightfield cast as its triangles built as a mesh; the sweep walks
+  against brute force (every triangle the swept box meets, once, holes
+  skipped); and overlaps against GJK distances and brute force over a
+  mesh's triangles.
+- World queries (`test_query.c`): closest raycasts and shape casts against
+  brute force over 182 shapes of every type and kind of body, meshes and
+  heightfields among them; callbacks that see each hit once, clip, and end;
+  the filter's categories both ways, kinds of bodies, and ignored body;
+  overlaps and box overlaps against brute force; contacts as the narrow
+  phase makes them; the same answers 10 000 km out; bodies seen asleep, at
+  once where they were moved, and not once destroyed; a body resting on its
+  floor casting along it freely; and 2048 rays on four workers at once
+  answering as on one thread, to the bit, leaving the world's hash
+  unchanged.
 - The world: creation and bad descriptions; free fall against the
   integrator's closed form; a dropped sphere settling and sleeping; a box
   resting without drift; a stack of ten and a pyramid of 20 rows standing

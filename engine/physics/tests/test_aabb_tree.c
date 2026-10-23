@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The dynamic AABB tree: structure through random edits, box and ray
-// queries against brute force, enlargement and rebuilds, category masks,
-// growth, and determinism.
+// queries and box casts against brute force, enlargement and rebuilds,
+// category masks, growth, and determinism.
 
 #include "test_physics_support.h"
 
@@ -226,6 +226,74 @@ NTEST(aabb_tree, raycasts_match_brute_force)
             NTEST_EXPECT_NEAR_F32(got.best_t, best_t, 1e-6F);
         } else {
             NTEST_EXPECT_EQ_UINT(got.best_id, NPH_U64_MAX);
+        }
+    }
+    nph_aabb_tree_free(&tree);
+    test_alloc_end(&ta);
+}
+
+// Every leaf reached, without clipping.
+static f32 cast_collect(const NphAabbTreeRay *ray, u32 proxy, u64 user_data, void *context)
+{
+    NPH_UNUSED(proxy);
+    Hits *h = (Hits *)context;
+    h->ids[h->count++] = user_data;
+    return ray->max_fraction;
+}
+
+NTEST(aabb_tree, box_casts_meet_every_box_the_swept_box_meets)
+{
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    static Model m;
+    memset(&m, 0, sizeof m);
+    NphAabbTree tree;
+    NTEST_ASSERT_EQ_INT(nph_aabb_tree_init(&tree, alloc, 0U), NPH_RESULT_OK);
+    NphPcg32 rng = test_rng(47U);
+    for (u32 i = 0U; i < 1000U; ++i) {
+        m.boxes[i] = random_box(&rng, 30.0F, 1.5F);
+        m.categories[i] = 1ULL << (i % 3U);
+        NTEST_ASSERT_EQ_INT(
+            nph_aabb_tree_create_proxy(&tree, m.boxes[i], m.categories[i], i, &m.proxy[i]),
+            NPH_RESULT_OK);
+    }
+    static Hits got;
+    static Hits want;
+    for (u32 k = 0U; k < 100U; ++k) {
+        NphAabbTreeRay ray;
+        ray.origin = test_vec3(&rng, -40.0F, 40.0F);
+        ray.translation = nph_vec3_scale(test_unit(&rng), test_range(&rng, 1.0F, 80.0F));
+        ray.max_fraction = test_range(&rng, 0.2F, 1.0F);
+        // A point, a thin box, and boxes up to 3 m across.
+        const NphVec3 extent = k % 5U == 0U ? nph_vec3_zero()
+                                            : nph_vec3_mul(test_vec3(&rng, 0.0F, 1.5F),
+                                                           k % 5U == 1U ? nph_vec3(1.0F, 0.0F, 1.0F)
+                                                                        : nph_vec3_splat(1.0F));
+        const u64 mask = k % 4U == 0U ? 2ULL : ~0ULL;
+        got.count = 0U;
+        nph_aabb_tree_box_cast(&tree, &ray, extent, mask, cast_collect, &got);
+        want.count = 0U;
+        for (u32 i = 0U; i < 1000U; ++i) {
+            const NphAABB grown = {nph_vec3_sub(m.boxes[i].min, extent),
+                                   nph_vec3_add(m.boxes[i].max, extent)};
+            if ((m.categories[i] & mask) != 0U &&
+                nph_ray_intersects_aabb(nph_ray(ray.origin, ray.translation), grown,
+                                        ray.max_fraction, NULL, NULL)) {
+                want.ids[want.count++] = i;
+            }
+        }
+        sort_hits(&got);
+        sort_hits(&want);
+        NTEST_ASSERT_EQ_UINT(got.count, want.count);
+        NTEST_EXPECT_EQ_MEM(got.ids, want.ids, (u64)got.count * sizeof(u64));
+        // A zero extent walks as the raycast does.
+        if (k % 5U == 0U) {
+            static Hits rays;
+            rays.count = 0U;
+            nph_aabb_tree_raycast(&tree, &ray, mask, cast_collect, &rays);
+            sort_hits(&rays);
+            NTEST_ASSERT_EQ_UINT(rays.count, got.count);
+            NTEST_EXPECT_EQ_MEM(rays.ids, got.ids, (u64)got.count * sizeof(u64));
         }
     }
     nph_aabb_tree_free(&tree);

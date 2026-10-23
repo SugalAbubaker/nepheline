@@ -836,24 +836,36 @@ static NphAABB surface_begin(SurfaceQuery *q, const NphPhysicsGeometry *a, NphQu
 }
 
 typedef struct MeshVisit {
-    SurfaceQuery *query;
+    NphDVec3 origin;
     const NphVec3 *vertices;
     const u32 *triangles;
     const u8 *edges;
+    NphPhysicsSurfaceVisit visit;
+    void *user;
 } MeshVisit;
 
 static bool mesh_triangle(void *user, u32 t)
 {
     const MeshVisit *mv = (const MeshVisit *)user;
     const u32 *tri = mv->triangles + 3ULL * t;
-    const NphDVec3 at = mv->query->position;
     NphVec3 v[3];
     for (u32 i = 0U; i < 3U; ++i) {
         // Moved next to the shape in 64 bits, then rounded: small and exact.
-        const NphVec3 w = mv->vertices[tri[i]];
-        v[i] = nph_vec3((f32)((f64)w.x - at.x), (f32)((f64)w.y - at.y), (f32)((f64)w.z - at.z));
+        v[i] = nph_physics_relative_vertex(mv->vertices[tri[i]], mv->origin);
     }
-    return surface_triangle(mv->query, t, v, mv->edges[t]);
+    return mv->visit(mv->user, t, v, mv->edges[t]);
+}
+
+void nph_physics_mesh_visit_box(const NphPhysicsMesh *mesh, NphAABB box, NphDVec3 origin,
+                                NphPhysicsSurfaceVisit visit, void *user)
+{
+    MeshVisit mv = {origin,
+                    nph_physics_mesh_vertices(mesh),
+                    nph_physics_mesh_triangles(mesh),
+                    nph_physics_mesh_edges(mesh),
+                    visit,
+                    user};
+    nph_physics_mesh_overlap(mesh, box, mesh_triangle, &mv);
 }
 
 // A capsule's merged manifold: its deepest point, then the extremes along
@@ -964,9 +976,7 @@ void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotatio
     SurfaceQuery q;
     const NphAABB box = surface_begin(&q, a, rotation, position, speculative,
                                       (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U);
-    MeshVisit mv = {&q, nph_physics_mesh_vertices(mesh), nph_physics_mesh_triangles(mesh),
-                    nph_physics_mesh_edges(mesh)};
-    nph_physics_mesh_overlap(mesh, box, mesh_triangle, &mv);
+    nph_physics_mesh_visit_box(mesh, box, position, surface_triangle, &q);
     surface_finish(&q, out);
 }
 
@@ -981,9 +991,8 @@ void nph_physics_collide_heightfield_local(const NphPhysicsGeometry *a, NphQuat 
     surface_finish(&q, out);
 }
 
-// The shape's rotation and position in the surface's frame, in 64 bits.
-static void surface_place(NphPhysicsPose pose_a, NphPhysicsPose pose_surface, NphQuat *rotation,
-                          NphDVec3 *position)
+void nph_physics_surface_place(NphPhysicsPose pose_a, NphPhysicsPose pose_surface,
+                               NphQuat *rotation, NphDVec3 *position)
 {
     *rotation = nph_quat_mul(nph_quat_conjugate(pose_surface.rotation), pose_a.rotation);
     const NphDVec3 d = nph_dvec3((f64)pose_a.position.x - (f64)pose_surface.position.x,
@@ -1013,7 +1022,7 @@ void nph_physics_collide_heightfield(const NphPhysicsGeometry *a, NphPhysicsPose
     NPH_ASSERT(a != NULL && h != NULL && out != NULL);
     NphQuat rotation;
     NphDVec3 position;
-    surface_place(pose_a, pose_h, &rotation, &position);
+    nph_physics_surface_place(pose_a, pose_h, &rotation, &position);
     nph_physics_collide_heightfield_local(a, rotation, position, h, speculative_distance, out);
     surface_unplace(pose_a, pose_h, out);
 }
@@ -1025,7 +1034,220 @@ void nph_physics_collide_mesh(const NphPhysicsGeometry *a, NphPhysicsPose pose_a
     NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
     NphQuat rotation;
     NphDVec3 position;
-    surface_place(pose_a, pose_mesh, &rotation, &position);
+    nph_physics_surface_place(pose_a, pose_mesh, &rotation, &position);
     nph_physics_collide_mesh_local(a, rotation, position, mesh, speculative_distance, out);
     surface_unplace(pose_a, pose_mesh, out);
+}
+
+// ---------------------------------------------------------------------------
+// Casts and overlaps against a surface's triangles (ADR-0047)
+// ---------------------------------------------------------------------------
+
+// A convex shape moved across a surface, in a frame with the surface's
+// axes and its origin at the shape's start.
+typedef struct SurfaceCast {
+    Probe probe; // the shape there, for the contact rules
+    NphPhysicsProxy proxy;
+    NphVec3 storage[NPH_PHYSICS_PROXY_STORAGE];
+    NphVec3 delta;
+    bool two_sided;
+    bool hit;
+    NphPhysicsCastHit best; // the closest hit; its fraction 1 until one
+} SurfaceCast;
+
+// The triangle's narrow phase with the shape at fraction t of its motion:
+// the contact rules (one side, active edges) on the contact probe_triangle
+// makes with the shape moved back to the origin; its normal (from the
+// triangle towards the shape) and its middle moved onto the triangle, in
+// the start's frame. Nothing there means the triangle is a neighbour's (an
+// inactive edge the shape passes beside it) or behind the shape, and is not
+// met.
+static bool triangle_contact(const SurfaceCast *q, const Tri *tri, f32 t, NphVec3 *normal,
+                             NphVec3 *point)
+{
+    const NphVec3 shift = nph_vec3_scale(q->delta, t);
+    Tri moved = *tri;
+    for (u32 i = 0U; i < 3U; ++i) {
+        moved.v[i] = nph_vec3_sub(tri->v[i], shift);
+    }
+    NphTriangleContact c;
+    probe_triangle(&q->probe, &moved, NPH_PHYSICS_CAST_REACH, &c);
+    if (c.point_count == 0U) {
+        return false;
+    }
+    u32 deepest = 0U;
+    for (u32 i = 1U; i < c.point_count; ++i) {
+        if (c.points[i].separation < c.points[deepest].separation) {
+            deepest = i;
+        }
+    }
+    const NphVec3 n = nph_vec3_neg(c.normal);
+    *normal = n;
+    *point = nph_vec3_add(
+        nph_vec3_mul_add(c.points[deepest].point, n, -0.5F * c.points[deepest].separation), shift);
+    return true;
+}
+
+// One triangle: the shape advanced to it, then the rules' normal where it
+// arrived (the narrow phase's, as the world's contacts have it).
+// The height of the shape's lowest point (along the triangle's normal)
+// above the triangle's plane, at the start.
+static f32 height_over_plane(const SurfaceCast *q, const Tri *tri)
+{
+    const NphQuat rotation = q->probe.pose.rotation;
+    const u32 i = nph_physics_proxy_support(
+        &q->proxy, nph_quat_rotate_inverse(rotation, nph_vec3_neg(tri->n)));
+    const NphVec3 low = nph_quat_rotate(rotation, q->proxy.points[i]);
+    return nph_vec3_dot(tri->n, nph_vec3_sub(low, tri->v[0])) - q->proxy.radius;
+}
+
+static f32 cast_triangle(void *user, u32 t, const NphVec3 v[3], u32 active_edges)
+{
+    SurfaceCast *q = (SurfaceCast *)user;
+    Tri tri;
+    if (!prepare(&tri, v, active_edges, q->two_sided, q->probe.center)) {
+        return q->best.fraction;
+    }
+    // The triangle lies in its plane: a shape above it that does not come
+    // down to it before the best hit so far cannot meet the triangle.
+    const f32 h = height_over_plane(q, &tri);
+    const f32 descent = -nph_vec3_dot(q->delta, tri.n);
+    if (h > NPH_PHYSICS_CAST_TOUCH && !(descent * q->best.fraction >= h)) {
+        return q->best.fraction;
+    }
+    const NphPhysicsProxy target = {tri.v, 3U, 0.0F};
+    NphPhysicsArrival arr;
+    NphVec3 normal;
+    NphVec3 point;
+    if (!nph_physics_cast_arrive(&q->proxy, q->probe.pose, q->delta, &target,
+                                 nph_physics_pose_identity(), q->best.fraction, &arr) ||
+        !triangle_contact(q, &tri, arr.fraction, &normal, &point)) {
+        return q->best.fraction;
+    }
+    const f32 f = nph_physics_cast_finish(&q->proxy, &target, &arr, q->delta, normal);
+    // Within the limit; of equal fractions the first found: deterministic.
+    if (f < 0.0F || (q->hit ? !(f < q->best.fraction) : f > q->best.fraction)) {
+        return q->best.fraction;
+    }
+    q->hit = true;
+    q->best.fraction = f;
+    q->best.normal = normal;
+    q->best.point = arr.have_point ? arr.point : point;
+    q->best.triangle = t;
+    // Nothing comes nearer than a hit at the start: the walk can end.
+    return f > 0.0F ? f : -1.0F;
+}
+
+// Starts a cast of `a` with `rotation` from `position` (the surface's
+// frame): the swept box's centre and half extents there, grown by the
+// narrow phase's reach and by the rounding of the position to 32 bits.
+static void cast_begin(SurfaceCast *q, const NphPhysicsGeometry *a, NphQuat rotation,
+                       NphDVec3 position, NphVec3 delta, bool two_sided, f32 limit, NphVec3 *center,
+                       NphVec3 *extent)
+{
+    NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
+    probe_init(&q->probe, a, rotation);
+    q->proxy = nph_physics_geometry_proxy(a, q->storage);
+    q->delta = delta;
+    q->two_sided = two_sided;
+    q->hit = false;
+    q->best.fraction = limit;
+    const NphVec3 at = nph_vec3((f32)position.x, (f32)position.y, (f32)position.z);
+    const f32 rounding = 2.4e-7F * nph_vec3_max_component(nph_vec3_abs(at));
+    const NphAABB box = nph_physics_geometry_aabb(a, nph_physics_pose(at, rotation));
+    *center = nph_vec3_scale(nph_vec3_add(box.min, box.max), 0.5F);
+    *extent = nph_vec3_add(nph_vec3_scale(nph_vec3_sub(box.max, box.min), 0.5F),
+                           nph_vec3_splat(NPH_PHYSICS_CAST_REACH + rounding));
+}
+
+bool nph_physics_cast_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation, NphDVec3 position,
+                                 NphVec3 delta, const NphPhysicsMesh *mesh, f32 limit,
+                                 NphPhysicsCastHit *out)
+{
+    NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
+    SurfaceCast q;
+    NphVec3 center;
+    NphVec3 extent;
+    cast_begin(&q, a, rotation, position, delta, (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U,
+               limit, &center, &extent);
+    nph_physics_mesh_visit_sweep(mesh, center, extent, delta, position, cast_triangle, &q);
+    if (!q.hit) {
+        return false;
+    }
+    *out = q.best;
+    out->triangle = nph_physics_mesh_originals(mesh)[q.best.triangle];
+    return true;
+}
+
+bool nph_physics_cast_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                        NphDVec3 position, NphVec3 delta,
+                                        const NphPhysicsHeightfield *h, f32 limit,
+                                        NphPhysicsCastHit *out)
+{
+    NPH_ASSERT(a != NULL && h != NULL && out != NULL);
+    SurfaceCast q;
+    NphVec3 center;
+    NphVec3 extent;
+    cast_begin(&q, a, rotation, position, delta, false, limit, &center, &extent);
+    nph_physics_heightfield_visit_sweep(h, center, extent, delta, position, cast_triangle, &q);
+    if (!q.hit) {
+        return false;
+    }
+    *out = q.best;
+    return true;
+}
+
+// A convex shape against a surface's triangles, each a three-point proxy
+// for GJK: from either side, with no rules (the triangle itself).
+typedef struct SurfaceOverlap {
+    NphPhysicsProxy proxy;
+    NphVec3 storage[NPH_PHYSICS_PROXY_STORAGE];
+    NphPhysicsPose pose;
+    bool hit;
+} SurfaceOverlap;
+
+static bool overlap_triangle(void *user, u32 t, const NphVec3 v[3], u32 active_edges)
+{
+    NPH_UNUSED(t);
+    NPH_UNUSED(active_edges);
+    SurfaceOverlap *q = (SurfaceOverlap *)user;
+    const NphPhysicsProxy target = {v, 3U, 0.0F};
+    NphPhysicsDistance d;
+    nph_physics_distance(&q->proxy, q->pose, &target, nph_physics_pose_identity(), true, NULL, &d);
+    q->hit = d.distance <= 0.0F;
+    return !q->hit;
+}
+
+// The shape's box at `position` (rounded to 32 bits, and grown by the
+// rounding), which the surface's triangles must meet.
+static NphAABB overlap_begin(SurfaceOverlap *q, const NphPhysicsGeometry *a, NphQuat rotation,
+                             NphDVec3 position)
+{
+    NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
+    q->proxy = nph_physics_geometry_proxy(a, q->storage);
+    q->pose = nph_physics_pose(nph_vec3_zero(), rotation);
+    q->hit = false;
+    const NphVec3 at = nph_vec3((f32)position.x, (f32)position.y, (f32)position.z);
+    const f32 rounding = 2.4e-7F * nph_vec3_max_component(nph_vec3_abs(at));
+    return nph_aabb_grow(nph_physics_geometry_aabb(a, nph_physics_pose(at, rotation)), rounding);
+}
+
+bool nph_physics_overlap_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                    NphDVec3 position, const NphPhysicsMesh *mesh)
+{
+    NPH_ASSERT(a != NULL && mesh != NULL);
+    SurfaceOverlap q;
+    const NphAABB box = overlap_begin(&q, a, rotation, position);
+    nph_physics_mesh_visit_box(mesh, box, position, overlap_triangle, &q);
+    return q.hit;
+}
+
+bool nph_physics_overlap_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                           NphDVec3 position, const NphPhysicsHeightfield *h)
+{
+    NPH_ASSERT(a != NULL && h != NULL);
+    SurfaceOverlap q;
+    const NphAABB box = overlap_begin(&q, a, rotation, position);
+    nph_physics_heightfield_visit_box(h, box, position, overlap_triangle, &q);
+    return q.hit;
 }

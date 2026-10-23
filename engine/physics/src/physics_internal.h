@@ -138,6 +138,134 @@ void nph_physics_collide_heightfield_local(const NphPhysicsGeometry *a, NphQuat 
 // The inverse rotation by unit `q` of a 64-bit vector, in 64 bits.
 NphDVec3 nph_physics_drotate_inverse(NphQuat q, NphDVec3 v);
 
+// Point `p` of a surface's frame less `origin`, in 64 bits, then rounded:
+// small and exact however far it is from the surface's origin.
+NPH_INLINE NphVec3 nph_physics_relative_vertex(NphVec3 p, NphDVec3 origin)
+{
+    return nph_vec3((f32)((f64)p.x - origin.x), (f32)((f64)p.y - origin.y),
+                    (f32)((f64)p.z - origin.z));
+}
+
+// The mesh's triangles whose boxes overlap `box` (in its frame), in
+// nph_physics_mesh_overlap's order, each with its vertices less `origin`
+// (collide_mesh.c).
+void nph_physics_mesh_visit_box(const NphPhysicsMesh *mesh, NphAABB box, NphDVec3 origin,
+                                NphPhysicsSurfaceVisit visit, void *user);
+
+// Shape `a` with pose `pose_a` placed in a surface's frame (`pose_surface`,
+// both in one frame): its rotation there, and its position in 64 bits, as
+// the *_local functions take them.
+void nph_physics_surface_place(NphPhysicsPose pose_a, NphPhysicsPose pose_surface,
+                               NphQuat *rotation, NphDVec3 *position);
+
+// ---------------------------------------------------------------------------
+// Casts (cast.c, collide_mesh.c; ADR-0047)
+// ---------------------------------------------------------------------------
+
+// Shapes this close (metres) touch: a shape cast has arrived. The last step
+// along the contact's normal (nph_physics_cast_finish) closes the rest
+// across a face.
+#define NPH_PHYSICS_CAST_TOUCH 1e-4F
+// A motion into a contact by at most this fraction of its length slides
+// along it: rounding leaves a motion projected onto a contact's plane this
+// far off it.
+#define NPH_PHYSICS_CAST_SLIDE 1e-5F
+// How far out a cast's narrow phase looks where the shapes touch, and the
+// margin its swept boxes are grown by.
+#define NPH_PHYSICS_CAST_REACH NPH_PHYSICS_LINEAR_SLOP
+
+// How far apart proxies `m` and `t` are along unit `n` (from t towards m):
+// m's least extent along it less t's greatest, radii included. A lower
+// bound on their distance (the gap of a separating slab), and the distance
+// itself across a face they touch by.
+f32 nph_physics_proxy_gap(const NphPhysicsProxy *m, NphPhysicsPose pose_m, const NphPhysicsProxy *t,
+                          NphPhysicsPose pose_t, NphVec3 n);
+
+// Where a shape cast arrived (cast.c).
+typedef struct NphPhysicsArrival {
+    f32 fraction;         // of the motion
+    f32 approach;         // the last step's speed of approach (0 at the start)
+    NphVec3 normal;       // GJK's: unit, from the target towards the mover
+    NphVec3 point;        // on the target, the cast's frame (when `have_point`)
+    NphPhysicsPose mover; // the two there, in a frame at the mover
+    NphPhysicsPose target;
+    NphVec3 base;                    // the target's place relative to the mover's start
+    NphPhysicsSimplexCache features; // GJK's last simplex that did not hold the origin
+    bool known;                      // `normal` well defined: the cores apart there
+    bool have_point;                 // `point` and `normal` found (GJK's cores apart at some step)
+} NphPhysicsArrival;
+
+// Conservative advancement of proxy `m` at `pose_m`, moved by `delta`,
+// towards proxy `t` at `pose_t`, on GJK distances (Mirtich 1996): each step
+// as far as the plane between the closest points allows, so never past the
+// contact, until the two touch (or GJK's 32 steps run out on a grazing
+// approach: where the last began). GJK runs in a frame at the mover's
+// place, where its digits are the shapes' own. False when the motion never
+// brings them together, or not before `limit`.
+bool nph_physics_cast_arrive(const NphPhysicsProxy *m, NphPhysicsPose pose_m, NphVec3 delta,
+                             const NphPhysicsProxy *t, NphPhysicsPose pose_t, f32 limit,
+                             NphPhysicsArrival *out);
+
+// GJK's normal a millimetre back along the motion from where the cast
+// arrived, for polytopes whose cores touch there. False where there is no
+// way back (they touched at the start) or it is not defined either.
+bool nph_physics_cast_normal_back(const NphPhysicsProxy *m, NphPhysicsPose pose_m, NphVec3 delta,
+                                  const NphPhysicsProxy *t, NphPhysicsPose pose_t,
+                                  const NphPhysicsArrival *a, NphVec3 *normal);
+
+// The hit's fraction from the arrival with the contact's `normal`: a pair
+// whose motion does not go into the contact (by more than
+// NPH_PHYSICS_CAST_SLIDE of its length) is not hit, so one touching at the
+// start and sliding along is not; otherwise the gap left along the normal
+// is crossed (exactly to a face, never past the contact). Negative for no
+// hit.
+f32 nph_physics_cast_finish(const NphPhysicsProxy *m, const NphPhysicsProxy *t,
+                            const NphPhysicsArrival *a, NphVec3 delta, NphVec3 normal);
+
+// nph_physics_shape_cast between convex geometries, for hits up to `limit`
+// (a world query's nearest so far).
+bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, NphVec3 delta,
+                             const NphPhysicsGeometry *b, NphPhysicsPose pose_b, f32 limit,
+                             NphPhysicsCastHit *out);
+
+// nph_physics_raycast in the geometry's own frame.
+bool nph_physics_raycast_local(const NphPhysicsGeometry *g, NphVec3 origin, NphVec3 delta,
+                               NphPhysicsCastHit *out);
+
+// A surface's triangle for a sweep, as NphPhysicsSurfaceVisit; returns the
+// fraction of the sweep still wanted (the closest hit so far: what lies
+// past it is skipped), or a negative value to end it.
+typedef f32 (*NphPhysicsSweepVisit)(void *user, u32 triangle, const NphVec3 v[3], u32 active_edges);
+
+// The triangles a box of half extents `extent` centred at `center` may
+// touch while moving by `delta` (the surface's frame): those whose boxes
+// the swept box meets, with their vertices less `origin` (64 bits). The
+// mesh's walk takes nearer nodes first (mesh.c); the heightfield's takes
+// its blocks and cells in the motion's direction (heightfield.c).
+void nph_physics_mesh_visit_sweep(const NphPhysicsMesh *m, NphVec3 center, NphVec3 extent,
+                                  NphVec3 delta, NphDVec3 origin, NphPhysicsSweepVisit visit,
+                                  void *user);
+void nph_physics_heightfield_visit_sweep(const NphPhysicsHeightfield *h, NphVec3 center,
+                                         NphVec3 extent, NphVec3 delta, NphDVec3 origin,
+                                         NphPhysicsSweepVisit visit, void *user);
+
+// Shape casts and overlaps against a surface (collide_mesh.c), with `a`
+// placed as for nph_physics_collide_mesh_local and `delta` in the
+// surface's axes; casts find hits up to `limit`. A hit comes out in a
+// frame with the surface's axes and its origin at a's start; its triangle
+// is the mesh's input index.
+bool nph_physics_cast_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation, NphDVec3 position,
+                                 NphVec3 delta, const NphPhysicsMesh *mesh, f32 limit,
+                                 NphPhysicsCastHit *out);
+bool nph_physics_cast_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                        NphDVec3 position, NphVec3 delta,
+                                        const NphPhysicsHeightfield *h, f32 limit,
+                                        NphPhysicsCastHit *out);
+bool nph_physics_overlap_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                    NphDVec3 position, const NphPhysicsMesh *mesh);
+bool nph_physics_overlap_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                           NphDVec3 position, const NphPhysicsHeightfield *h);
+
 // A manifold point this near the surface, or deeper, touches: it carries
 // load. Points farther out are speculative and matter only if the shape
 // turns onto them, so reductions keep touching points first.
