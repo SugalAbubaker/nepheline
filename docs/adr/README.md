@@ -50,7 +50,7 @@ supersedes it and both link to each other.
 | [0042](0042-physics-collision.md) | Physics: module boundaries, 64-bit bodies, and the collision layer | Accepted |
 | [0043](0043-physics-world.md) | Physics: the world, the soft-step solver, and its threads | Accepted (the solver provisional until the §13 comparison) |
 | [0044](0044-physics-joints.md) | Physics: joints in the soft step | Accepted |
-| [0045](0045-physics-solver-comparison.md) | Physics: the solver comparison (soft step, TGS, XPBD) | Proposed (the §13 choice is the user's) |
+| [0045](0045-physics-solver-comparison.md) | Physics: the solver comparison (soft step, TGS, XPBD) | Accepted (soft step by default; TGS and XPBD kept as options) |
 
 ## Template
 

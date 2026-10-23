@@ -518,18 +518,24 @@ force it is.
 25 links (400 joints) step in 0.57 ms on one thread and 0.16 ms on the job
 system.
 
-## The solver comparison
+## Choosing a solver
 
-CLAUDE.md §13 leaves the solver's final choice to measurements against TGS
-and XPBD. The world's `solver` setting selects one of the three on the same
-collision, graph, threads, and kernel layout:
-[ADR-0045](adr/0045-physics-solver-comparison.md) has the scenes, the
-measurements, and the reading. In short: the soft step is the only one
-that stacks, keeps energy, gets friction exactly, and settles ragdoll heaps,
-and its joints' give falls by four for each doubling of the substeps; TGS
-is 9 to 16 % cheaper but its joints fail under load; XPBD's joints are the
-stiffest but it cannot stack. The default stiffnesses are fractions of the
-substep rate, so the substep count is the quality setting.
+The world's `solver` setting selects one of three solvers, all on the same
+collision, graph, threads, and kernel layout (the comparison of CLAUDE.md
+§13: [ADR-0045](adr/0045-physics-solver-comparison.md) has the scenes and
+the measurements):
+
+| Solver | Per substep | Choose it for | Avoid it for |
+|---|---|---|---|
+| soft step (default) | soft solve, then a rigid relax | everything: stacks, piles, ragdolls, exact friction and energy | very heavy loads on joints at 4 substeps (raise the substeps) |
+| TGS (PhysX 4) | rigid rows with a Baumgarte bias on the step's error; one velocity pass after the substeps | stacks and piles where cost matters most (9 to 16 % cheaper) | heavy loads on joints: a 100:1 chain stretches 161 mm and can come apart |
+| XPBD (Müller et al. 2020) | predicted positions corrected by rigid constraints, velocities derived, then a velocity pass | stiff machinery and rigs (near rigid at 16 substeps) | stacks (a 20-row pyramid collapses), sliding friction (5 % weak), long oscillations (10 % of a pendulum's swing lost in 10 periods) |
+
+The soft step is the only one that stacks, keeps energy, gets friction
+exactly, and settles ragdoll heaps; its joints' give falls by four for each
+doubling of the substeps, since the default stiffnesses are fractions of
+the substep rate (contacts an eighth, joints a quarter): the substep count
+is the quality setting.
 
 ## Threads
 

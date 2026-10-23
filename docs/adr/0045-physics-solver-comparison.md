@@ -1,8 +1,8 @@
 # 0045. Physics: the solver comparison (soft step, TGS, XPBD)
 
 - **Date:** 2026-10-23
-- **Status:** Proposed: the choice is the user's (CLAUDE.md §13); the
-  recommendation below waits on it
+- **Status:** Accepted (2026-10-23, the user's choice under CLAUDE.md §13:
+  the soft step by default, TGS and XPBD kept as options)
 
 ## Context
 
@@ -91,29 +91,42 @@ since it converges with substeps.
   substeps, keeping its stacking, energy, and friction; what TGS does
   cheaper it pays for in joints.
 
-## Decision (proposed)
+## Decision
 
-Keep the soft step as the solver, at 4 substeps by default with its
-stiffnesses relative to the substep rate (the measurements above make the
-substep count the one quality setting). Remove TGS and XPBD from the
-engine after this decision: they stay in this ADR's measurements and in the
-history, and keeping three solvers would triple the solver's surface for
-tests and maintenance with no scene in which another wins outright.
+The soft step is the default solver, at 4 substeps, with its stiffnesses
+relative to the substep rate (the measurements make the substep count the
+one quality setting). **TGS and XPBD stay in the engine as supported
+options**, selected per world (`NphPhysicsWorldDesc::solver`):
+
+| Solver | Choose it for | Avoid it for |
+|---|---|---|
+| soft step (default) | everything: stacks, piles, ragdolls, vehicles, exact friction and energy | joints that must stay rigid under very heavy loads at 4 substeps (raise the substeps) |
+| TGS | worlds of stacked and piled bodies where the step's cost matters most (9 to 16 % cheaper) | heavy loads on joints (chains, cranes, ragdolls in piles) |
+| XPBD | stiff machinery and rigs (joints near rigid at 16 substeps) | stacks and piles, sliding friction, long-lived oscillations |
+
+The recommendation was the soft step alone (removing TGS and XPBD, since
+no scene showed another winning outright, at the cost of three solvers to
+maintain); the user chose to keep the options.
 
 ## Alternatives
 
-- **Keep all three behind the `solver` setting.** Lets a game choose (TGS
-  for cheap stacks without heavy joints, XPBD for stiff machinery without
-  stacks), at the cost of maintaining and testing three solvers.
+- **The soft step alone**, TGS and XPBD removed: one solver to maintain and
+  test, the recommendation.
 - **TGS as the default**: the cheapest, but joints under load are not
   robust.
 - **XPBD as the default**: the stiffest joints, but stacking fails.
 
 ## Consequences
 
-- If accepted, the next part (slider, distance, and 6-DOF joints, the
-  ragdoll exit test) builds on the soft step alone, and the TGS and XPBD
-  code, kernels, tests, and benchmark rows leave.
+- Every solver feature exists in all three: the next joints (slider,
+  distance, 6-DOF) and the ragdoll come with soft-step, TGS (the soft
+  step's rows, hard), and XPBD (position-level) forms.
+- All three are tested as the soft step is: the comparison scenes for
+  soundness, and the ISA kernels' agreement to the bit and the results'
+  independence of the worker count for each; their benchmark rows carry
+  budgets.
+- XPBD's stacking and TGS's loaded joints are known limits, documented
+  with the guidance above, not defects to work around in a scene.
 - The default stiffnesses are now fractions of the substep rate (contacts
   an eighth, joints a quarter); explicit values in hertz still override
   them.

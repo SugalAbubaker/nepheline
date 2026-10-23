@@ -71,21 +71,24 @@ NPH_INLINE bool nph_physics_shape_is_null(NphPhysicsShape s)
 // The most bodies or shapes a world holds (the slot bits of a handle).
 #define NPH_PHYSICS_MAX_OBJECTS (1U << 20U)
 
-// The constraint solver: the candidates of CLAUDE.md §13's comparison
-// (ADR-0045). Each substeps the step and solves contacts and joints in the
-// constraint graph's colours on the same threads, from the same collision.
+// The constraint solver (ADR-0045; docs/physics.md "Choosing a solver"):
+// the soft step by default, TGS and XPBD for their trade-offs. Each
+// substeps the step and solves contacts and joints in the constraint
+// graph's colours on the same threads, from the same collision.
 typedef enum NphPhysicsSolver {
     // Catto's soft step (Box2D v3): per substep, a soft solve towards the
     // contacts' and joints' springs, then a rigid relax.
     NPH_PHYSICS_SOLVER_SOFT_STEP = 0,
     // Temporal Gauss-Seidel (PhysX 4): per substep, a rigid solve with a
     // Baumgarte bias on the error since the step began; one velocity pass
-    // without bias after the substeps.
+    // without bias after the substeps. 9 to 16 % cheaper; joints under
+    // heavy loads do not converge.
     NPH_PHYSICS_SOLVER_TGS = 1,
     // Extended position-based dynamics (Mueller et al., SCA 2020): per
     // substep, positions corrected by rigid (or compliant) constraints,
     // velocities derived from them, then a velocity pass for friction,
-    // restitution, and motors.
+    // restitution, and motors. The stiffest joints (with 16 substeps); it
+    // cannot stack, and its friction and energy are approximate.
     NPH_PHYSICS_SOLVER_XPBD = 2,
     NPH_PHYSICS_SOLVER_COUNT = 3,
 } NphPhysicsSolver;

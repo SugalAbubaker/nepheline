@@ -5,12 +5,15 @@
 // nothing flung away); what each measures is logged for the ADR's table
 // (run with --verbose).
 
+#include <nepheline/math/kernels.h>
+
 #include "test_world_support.h"
 
-// The configurations compared: each solver at the default 4 substeps, the
-// soft step at 8 (its stiffnesses scale with the substep rate), and XPBD at
-// 16 (it converges with substeps). Quality thresholds hold the default (the
-// soft step at 4); every configuration must stay sound.
+// The configurations compared: each solver at the default 4 substeps, then
+// the soft step at 8 (its stiffnesses scale with the substep rate) and XPBD
+// at 16 (it converges with substeps), the last two where the build is fast
+// enough (not Debug or the sanitizers). Quality thresholds hold the default
+// (the soft step at 4); every configuration must stay sound.
 typedef struct SolverConfig {
     NphPhysicsSolver solver;
     u32 substeps;
@@ -18,12 +21,12 @@ typedef struct SolverConfig {
 } SolverConfig;
 
 static const SolverConfig k_configs[] = {
-    {NPH_PHYSICS_SOLVER_SOFT_STEP, 4U, "soft 4"}, {NPH_PHYSICS_SOLVER_SOFT_STEP, 8U, "soft 8"},
-    {NPH_PHYSICS_SOLVER_TGS, 4U, "TGS 4"},        {NPH_PHYSICS_SOLVER_XPBD, 4U, "XPBD 4"},
+    {NPH_PHYSICS_SOLVER_SOFT_STEP, 4U, "soft 4"}, {NPH_PHYSICS_SOLVER_TGS, 4U, "TGS 4"},
+    {NPH_PHYSICS_SOLVER_XPBD, 4U, "XPBD 4"},      {NPH_PHYSICS_SOLVER_SOFT_STEP, 8U, "soft 8"},
     {NPH_PHYSICS_SOLVER_XPBD, 16U, "XPBD 16"},
 };
 
-#define CONFIGS ((u32)NPH_ARRAY_COUNT(k_configs))
+#define CONFIGS (TEST_SCALE >= 8U ? (u32)NPH_ARRAY_COUNT(k_configs) : 3U)
 
 static void solver_scene(Scene *s, u32 config)
 {
@@ -480,5 +483,91 @@ NTEST(solvers, bounce_and_friction)
             NTEST_EXPECT_NEAR_F64(accel, 1.797, 0.02);
         }
         scene_end(&s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Every solver's arithmetic agrees across ISAs and worker counts
+// ---------------------------------------------------------------------------
+
+// A pile of mixed shapes on the ground, a chain swinging into it, and a
+// motorized door: contacts, joints, limits, and a motor.
+static void build_mix(NphPhysicsWorld *w)
+{
+    add_ground(w, 0.0);
+    NphPcg32 rng = test_rng(29U);
+    for (u32 i = 0U; i < 30U; ++i) {
+        const NphDVec3 p = nph_dvec3((f64)test_range(&rng, -2.0F, 2.0F), 0.5 + 0.6 * (f64)i,
+                                     (f64)test_range(&rng, -2.0F, 2.0F));
+        NphPhysicsGeometry g = nph_physics_geometry_box(test_vec3(&rng, 0.15F, 0.4F));
+        if (i % 3U == 1U) {
+            g = nph_physics_geometry_sphere(test_range(&rng, 0.15F, 0.35F));
+        } else if (i % 3U == 2U) {
+            g = nph_physics_geometry_capsule(test_range(&rng, 0.1F, 0.3F),
+                                             test_range(&rng, 0.1F, 0.2F));
+        }
+        add_body(w, NPH_PHYSICS_BODY_DYNAMIC, p, test_rotation(&rng), g, 0.6F, 0.1F);
+    }
+    NphPhysicsBody links[8];
+    NphPhysicsJoint joints[8];
+    const NphDVec3 top = nph_dvec3(-3.0, 5.0, 0.0);
+    build_chain(w, add_anchor(w, top), top, 8U, true, links, joints);
+    const NphPhysicsBody frame = add_anchor(w, nph_dvec3(3.0, 0.0, 3.0));
+    const NphPhysicsBody door = add_dynamic(w, nph_dvec3(3.5, 1.0, 3.0),
+                                            nph_physics_geometry_box(nph_vec3(0.5F, 1.0F, 0.04F)));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_HINGE, frame, door);
+    d.hinge.enable_limit = 1;
+    d.hinge.enable_motor = 1;
+    d.hinge.motor_speed = 3.0F;
+    d.hinge.max_motor_torque = 40.0F;
+    join(w, d, nph_dvec3(3.0, 1.0, 3.0), nph_vec3(0.0F, 1.0F, 0.0F));
+}
+
+NTEST(solvers, sse4_and_avx2_kernels_agree_to_the_bit)
+{
+    if (nph_simd_detect_level() < NPH_SIMD_LEVEL_AVX2) {
+        NTEST_SKIP("no AVX2 on this machine");
+    }
+    for (u32 solver = 0U; solver < (u32)NPH_PHYSICS_SOLVER_COUNT; ++solver) {
+        u64 hashes[2];
+        for (u32 k = 0U; k < 2U; ++k) {
+            Scene s;
+            NphPhysicsWorldDesc d = nph_physics_world_desc_default();
+            d.solver = (NphPhysicsSolver)solver;
+            scene_begin_with(&s, d);
+            s.w->kernels = k == 0U ? &g_phys_solver_sse4 : &g_phys_solver_avx2;
+            build_mix(s.w);
+            step(s.w, NULL, 300U);
+            hashes[k] = nph_physics_world_hash(s.w);
+            scene_end(&s);
+        }
+        NTEST_EXPECT_EQ_UINT(hashes[0], hashes[1]);
+    }
+}
+
+NTEST(solvers, results_do_not_depend_on_the_worker_count)
+{
+    const u32 workers[3] = {0U, 4U, 8U};
+    const u32 forced[3] = {0U, 5U, 9U};
+    for (u32 solver = 0U; solver < (u32)NPH_PHYSICS_SOLVER_COUNT; ++solver) {
+        u64 reference = 0U;
+        for (u32 run = 0U; run < 3U; ++run) {
+            NphJobSystem *js = workers[run] == 0U ? NULL : make_jobs(workers[run]);
+            Scene s;
+            NphPhysicsWorldDesc d = nph_physics_world_desc_default();
+            d.solver = (NphPhysicsSolver)solver;
+            scene_begin_with(&s, d);
+            s.w->forced_participants = forced[run];
+            build_mix(s.w);
+            step(s.w, js, 300U);
+            const u64 h = nph_physics_world_hash(s.w);
+            if (run == 0U) {
+                reference = h;
+            } else {
+                NTEST_EXPECT_EQ_UINT(h, reference);
+            }
+            scene_end(&s);
+            nph_job_system_destroy(js);
+        }
     }
 }
