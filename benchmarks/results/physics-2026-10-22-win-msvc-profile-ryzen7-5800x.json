@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "executable": "physics_bench.exe",
+  "timestamp": "2026-10-23T00:53:26Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "hull_build_1000_64v", "label": "", "iterations": 1328, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 313967.319, "min_ns_per_op": 302314.759, "max_ns_per_op": 334865.889},
+    {"name": "hull_build_box_8", "label": "", "iterations": 30674, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 7902.582, "min_ns_per_op": 7889.147, "max_ns_per_op": 7971.217},
+    {"name": "collide_spheres", "label": "", "iterations": 159907, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 24.393, "min_ns_per_op": 24.392, "max_ns_per_op": 24.516},
+    {"name": "collide_capsules", "label": "", "iterations": 78648, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 49.522, "min_ns_per_op": 49.492, "max_ns_per_op": 50.061},
+    {"name": "collide_box_sphere", "label": "", "iterations": 138381, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 28.241, "min_ns_per_op": 28.232, "max_ns_per_op": 28.253},
+    {"name": "collide_box_box_resting", "label": "", "iterations": 8647, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 450.624, "min_ns_per_op": 450.169, "max_ns_per_op": 451.456},
+    {"name": "collide_box_box_random", "label": "", "iterations": 13426, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 287.259, "min_ns_per_op": 287.153, "max_ns_per_op": 287.994},
+    {"name": "collide_box_box_cached_apart", "label": "", "iterations": 68919, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 56.641, "min_ns_per_op": 56.598, "max_ns_per_op": 56.715},
+    {"name": "collide_hull_hull_32v", "label": "", "iterations": 398, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 9089.977, "min_ns_per_op": 9068.471, "max_ns_per_op": 9221.125},
+    {"name": "collide_hull_capsule_32v", "label": "", "iterations": 5420, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 719.722, "min_ns_per_op": 717.550, "max_ns_per_op": 720.991},
+    {"name": "gjk_hull_hull_32v", "label": "", "iterations": 4596, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 846.037, "min_ns_per_op": 844.818, "max_ns_per_op": 857.407},
+    {"name": "gjk_hull_hull_32v_cached", "label": "", "iterations": 18965, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 204.909, "min_ns_per_op": 204.700, "max_ns_per_op": 206.150},
+    {"name": "epa_box_hull_32v", "label": "", "iterations": 928, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 3409.390, "min_ns_per_op": 3406.152, "max_ns_per_op": 3425.189},
+    {"name": "tree_insert_10k", "label": "", "iterations": 8480, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 452.989, "min_ns_per_op": 452.296, "max_ns_per_op": 456.321},
+    {"name": "tree_move_10k", "label": "", "iterations": 2486, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 1708.887, "min_ns_per_op": 1705.846, "max_ns_per_op": 1721.204},
+    {"name": "tree_query_10k", "label": "", "iterations": 54823, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 70.960, "min_ns_per_op": 70.909, "max_ns_per_op": 71.003},
+    {"name": "tree_raycast_10k", "label": "", "iterations": 4564, "items_per_iteration": 64, "repeats": 5, "ns_per_op": 861.120, "min_ns_per_op": 859.893, "max_ns_per_op": 861.324},
+    {"name": "tree_rebuild_10k", "label": "", "iterations": 103, "items_per_iteration": 10000, "repeats": 5, "ns_per_op": 211.068, "min_ns_per_op": 210.960, "max_ns_per_op": 213.917}
+  ]
+}
