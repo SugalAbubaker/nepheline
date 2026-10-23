@@ -79,9 +79,11 @@ static void awake_list_remove(NphPhysicsWorld *w, u32 contact)
     c->awake_slot = PHYS_NULL;
 }
 
-static bool is_mesh(const PhysShape *s)
+// A surface (a mesh or a heightfield): its pairs have up to four manifolds.
+static bool is_surface(const PhysShape *s)
 {
-    return s->geometry.type == NPH_PHYSICS_SHAPE_MESH;
+    return s->geometry.type == NPH_PHYSICS_SHAPE_MESH ||
+           s->geometry.type == NPH_PHYSICS_SHAPE_HEIGHTFIELD;
 }
 
 // A free contact record, uninitialised: from the free list, or a new one
@@ -130,7 +132,7 @@ NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b)
     const PhysShape *sb = &w->shapes.data[shape_b];
     // Every record first (a mesh pair's children with its own), so a
     // failure leaves nothing behind.
-    const u32 records = is_mesh(sa) || is_mesh(sb) ? NPH_PHYSICS_MESH_MAX_MANIFOLDS : 1U;
+    const u32 records = is_surface(sa) || is_surface(sb) ? NPH_PHYSICS_MESH_MAX_MANIFOLDS : 1U;
     u32 rec[NPH_PHYSICS_MESH_MAX_MANIFOLDS] = {PHYS_NULL, PHYS_NULL, PHYS_NULL, PHYS_NULL};
     NphResult r = NPH_RESULT_OK;
     u32 made = 0U;
@@ -371,16 +373,16 @@ static void warm_by_place(WarmStart *ws, PhysContactPoint *p, NphVec3 normal)
     }
 }
 
-// A pair with a mesh (ADR-0046 §8, §9): up to four manifolds, the deepest
-// into the pair's contact and the rest into its children. A manifold may
-// move from one record to another between steps, so impulses carry over
-// across the whole chain.
+// A pair with a mesh or a heightfield (ADR-0046 §8, §9): up to four
+// manifolds, the deepest into the pair's contact and the rest into its
+// children. A manifold may move from one record to another between steps,
+// so impulses carry over across the whole chain.
 static void mesh_update(NphPhysicsWorld *w, u32 contact)
 {
     PhysContact *c = &w->contacts.data[contact];
     const PhysShape *sa = &w->shapes.data[c->shape_a];
     const PhysShape *sb = &w->shapes.data[c->shape_b];
-    const bool mesh_a = is_mesh(sa);
+    const bool mesh_a = is_surface(sa);
     const PhysShape *sm = mesh_a ? sa : sb;
     const PhysShape *sx = mesh_a ? sb : sa;
     const PhysBody *bm = &w->bodies.data[sm->body];
@@ -394,10 +396,17 @@ static void mesh_update(NphPhysicsWorld *w, u32 contact)
         nph_dvec3_add_vec3(bm->origin, nph_quat_rotate(bm->rotation, sm->pose.position));
     const NphDVec3 px =
         nph_dvec3_add_vec3(bx->origin, nph_quat_rotate(bx->rotation, sx->pose.position));
+    const NphQuat rotation = nph_quat_mul(nph_quat_conjugate(qm), qx);
+    const NphDVec3 position = nph_physics_drotate_inverse(qm, nph_dvec3_sub(px, pm));
     NphPhysicsMeshManifolds mm;
-    nph_physics_collide_mesh_local(&sx->geometry, nph_quat_mul(nph_quat_conjugate(qm), qx),
-                                   nph_physics_drotate_inverse(qm, nph_dvec3_sub(px, pm)),
-                                   sm->geometry.mesh, NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+    if (sm->geometry.type == NPH_PHYSICS_SHAPE_MESH) {
+        nph_physics_collide_mesh_local(&sx->geometry, rotation, position, sm->geometry.mesh,
+                                       NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+    } else {
+        nph_physics_collide_heightfield_local(&sx->geometry, rotation, position,
+                                              sm->geometry.heightfield,
+                                              NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+    }
     // The points come out relative to the convex shape in the mesh's axes;
     // the anchors are from each body's centre of mass, in world axes.
     const NphVec3 shape_from_x = nph_dvec3_relative(px, bx->center);

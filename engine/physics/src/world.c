@@ -494,8 +494,8 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         const PhysBody *a = &world->bodies.data[c->body_a];
         const PhysBody *b = &world->bodies.data[c->body_b];
         const bool mesh_pair =
-            world->shapes.data[c->shape_a].geometry.type == NPH_PHYSICS_SHAPE_MESH ||
-            world->shapes.data[c->shape_b].geometry.type == NPH_PHYSICS_SHAPE_MESH;
+            !nph_physics_shape_type_is_convex(world->shapes.data[c->shape_a].geometry.type) ||
+            !nph_physics_shape_type_is_convex(world->shapes.data[c->shape_b].geometry.type);
         if (c->parent != PHYS_NULL) {
             // A mesh pair's child: its pair's shapes, found in its pair's
             // chain, outside the awake list, without events or islands.
@@ -733,6 +733,26 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
                 const NphVec3 p = nph_physics_pose_transform_point(pose, tv[k]);
                 const NphVec3 q = nph_physics_pose_transform_point(pose, tv[(k + 1U) % 3U]);
                 const u32 color = ((active[t] >> k) & 1U) != 0U ? rgba : (rgba & 0xFF7F7F7FU);
+                draw_line(d, world_point(b->origin, p), world_point(b->origin, q), color);
+            }
+        }
+        break;
+    }
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD: {
+        // As a mesh: every triangle's edges (holes have none), the active
+        // ones brighter.
+        const NphPhysicsHeightfield *h = s->geometry.heightfield;
+        const u32 triangles = nph_physics_heightfield_triangle_count(h);
+        for (u32 t = 0U; t < triangles; ++t) {
+            NphVec3 tv[3];
+            u32 active = 0U;
+            if (!nph_physics_heightfield_triangle(h, t, tv, &active)) {
+                continue;
+            }
+            for (u32 k = 0U; k < 3U; ++k) {
+                const NphVec3 p = nph_physics_pose_transform_point(pose, tv[k]);
+                const NphVec3 q = nph_physics_pose_transform_point(pose, tv[(k + 1U) % 3U]);
+                const u32 color = ((active >> k) & 1U) != 0U ? rgba : (rgba & 0xFF7F7F7FU);
                 draw_line(d, world_point(b->origin, p), world_point(b->origin, q), color);
             }
         }

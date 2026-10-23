@@ -434,7 +434,8 @@ static void collide_ordered(const NphPhysicsGeometry *a, NphPhysicsPose pa,
         }
         return;
     }
-    case NPH_PHYSICS_SHAPE_MESH: // nph_physics_collide_mesh
+    case NPH_PHYSICS_SHAPE_MESH:        // nph_physics_collide_mesh
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD: // nph_physics_collide_heightfield
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;

@@ -173,7 +173,7 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
     if (b == NULL) {
         return NPH_RESULT_NOT_FOUND;
     }
-    // A mesh bounds no volume, so it has no mass to move a body with
+    // A mesh or a heightfield bounds no volume, so it has no mass to move a body with
     // (ADR-0046 §1).
     if (!nph_physics_shape_type_is_convex(desc->geometry.type) &&
         b->type == NPH_PHYSICS_BODY_DYNAMIC) {

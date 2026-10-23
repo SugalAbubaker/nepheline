@@ -33,10 +33,20 @@
 //   collide_mesh_sphere          a ball, the same
 //   collide_mesh_capsule         a capsule lying on the grid, the same
 //   collide_mesh_hull_32v        a 32-vertex hull, the same
+//   heightfield_build_256        a 257 x 257 heightfield: active edges and
+//                                blocks (per cell)
+//   heightfield_raycast_256      a closest-hit ray down onto it
+//   heightfield_raycast_256_long a ray 100 m across it, low and falling
+//   heightfield_overlap_256      the triangles under a 1 m box on it
+//   collide_heightfield_box      the collide_mesh_ rows' scenes on a flat
+//   collide_heightfield_sphere   heightfield of 0.5 m cells
+//   collide_heightfield_capsule
+//   collide_heightfield_hull_32v
 
 #include <nepheline/math/random.h>
 #include <nepheline/physics/aabb_tree.h>
 #include <nepheline/physics/collide.h>
+#include <nepheline/physics/heightfield.h>
 #include <nepheline/physics/hull.h>
 #include <nepheline/physics/mesh.h>
 
@@ -514,6 +524,8 @@ NBENCH(tree_rebuild_10k)
 //   world_mesh_pile_1000_st  the pile on a mesh floor (0.5 m cells), one thread
 //   world_mesh_pile_1000_mt  the same on the job system
 //   world_terrain_pile_1000_mt  the pile on a rippled mesh, on the job system
+//   world_heightfield_pile_1000_mt  the same on the same surface as a
+//                            heightfield
 //   world_sleeping_10k       10k sleeping boxes and one awake ball
 //   world_chains_st          16 chains of 25 ball-jointed links swinging, one thread
 //   world_chains_mt          the same on the job system
@@ -694,6 +706,198 @@ NBENCH(collide_mesh_capsule)
     bench_collide_mesh(state, &g, 0.15F, nph_quat_from_axis_angle(nph_vec3_unit_z(), 1.5707963F));
 }
 
+// The grid of bench_grid as a heightfield: (n + 1)^2 samples from its first
+// at the origin (placed at -n cell / 2 to centre it), the cells' diagonals
+// alternating as the mesh's.
+static NphPhysicsHeightfield *bench_field(u32 n, f32 cell, f32 ripple)
+{
+    const u32 samples = (n + 1U) * (n + 1U);
+    f32 *heights = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, samples);
+    u8 *cells = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, (u64)n * n);
+    NphPhysicsHeightfield *h = NULL;
+    if (heights != NULL && cells != NULL) {
+        const f32 x0 = -0.5F * cell * (f32)n;
+        for (u32 j = 0U; j <= n; ++j) {
+            for (u32 i = 0U; i <= n; ++i) {
+                const f32 x = x0 + cell * (f32)i;
+                const f32 z = x0 + cell * (f32)j;
+                heights[j * (n + 1U) + i] =
+                    ripple * (nph_f32_sin(0.9F * x) * nph_f32_cos(0.7F * z) +
+                              0.25F * nph_f32_sin(3.1F * x + 1.3F * z));
+            }
+        }
+        for (u32 c = 0U; c < n * n; ++c) {
+            cells[c] = ((c / n + c % n) & 1U) != 0U ? NPH_PHYSICS_HEIGHTFIELD_FLIP : 0U;
+        }
+        NphPhysicsHeightfieldDesc d;
+        memset(&d, 0, sizeof d);
+        d.heights = heights;
+        d.columns = n + 1U;
+        d.rows = n + 1U;
+        d.spacing_x = cell;
+        d.spacing_z = cell;
+        d.cells = cells;
+        if (nph_physics_heightfield_build(&d, nph_allocator_system(), &h) != NPH_RESULT_OK) {
+            h = NULL;
+        }
+    }
+    if (heights != NULL) {
+        NPH_FREE_ARRAY(nph_allocator_system(), f32, heights, samples);
+    }
+    if (cells != NULL) {
+        NPH_FREE_ARRAY(nph_allocator_system(), u8, cells, (u64)n * n);
+    }
+    return h;
+}
+
+NBENCH(heightfield_build_256)
+{
+    while (nbench_keep_running(state)) {
+        NphPhysicsHeightfield *h = bench_field(256U, 0.5F, 0.3F);
+        nbench_do_not_optimize(h);
+        nph_physics_heightfield_free(h, nph_allocator_system());
+    }
+    nbench_set_items_per_iteration(state, 256ULL * 256U);
+}
+
+NBENCH(heightfield_raycast_256)
+{
+    NphPhysicsHeightfield *h = bench_field(256U, 0.5F, 0.3F);
+    if (h == NULL) {
+        return;
+    }
+    // As the mesh's: rays down onto the middle 60 m, in the field's frame.
+    NphPcg32 r = bench_rng(31U);
+    NphVec3 origins[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        origins[i] = nph_vec3(64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 5.0F,
+                              64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+    }
+    const NphVec3 delta = nph_vec3(0.3F, -10.0F, 0.2F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsMeshHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_heightfield_raycast(h, origins[i], delta, &hit) ? 1U : 0U);
+        }
+    }
+    nph_physics_heightfield_free(h, nph_allocator_system());
+}
+
+NBENCH(heightfield_raycast_256_long)
+{
+    NphPhysicsHeightfield *h = bench_field(256U, 0.5F, 0.3F);
+    if (h == NULL) {
+        return;
+    }
+    // Low and long: 100 m across the field, a metre above the swells,
+    // falling to meet them (the blocks pass over most of the way).
+    NphPcg32 r = bench_rng(35U);
+    NphVec3 origins[PAIRS];
+    NphVec3 deltas[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const f32 a = nph_pcg32_next_range_f32(&r, 0.0F, 6.2831853F);
+        origins[i] = nph_vec3(64.0F + 50.0F * nph_f32_cos(a), 1.0F, 64.0F + 50.0F * nph_f32_sin(a));
+        deltas[i] = nph_vec3(-100.0F * nph_f32_cos(a), -2.0F, -100.0F * nph_f32_sin(a));
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsMeshHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_heightfield_raycast(h, origins[i], deltas[i], &hit) ? 1U : 0U);
+        }
+    }
+    nph_physics_heightfield_free(h, nph_allocator_system());
+}
+
+NBENCH(heightfield_overlap_256)
+{
+    NphPhysicsHeightfield *h = bench_field(256U, 0.5F, 0.3F);
+    if (h == NULL) {
+        return;
+    }
+    NphPcg32 r = bench_rng(32U);
+    NphAABB boxes[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const NphVec3 c = nph_vec3(64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
+                                   64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        boxes[i] =
+            nph_aabb(nph_vec3_sub(c, nph_vec3_splat(0.5F)), nph_vec3_add(c, nph_vec3_splat(0.5F)));
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            u32 n = 0U;
+            nph_physics_heightfield_overlap(h, boxes[i], count_triangle, &n);
+            nbench_do_not_optimize_u64(n);
+        }
+    }
+    nph_physics_heightfield_free(h, nph_allocator_system());
+}
+
+// One shape resting on a flat heightfield of 0.5 m cells, 64 places and
+// headings: bench_collide_mesh's scene.
+static void bench_collide_field(NbenchState *state, const NphPhysicsGeometry *g, f32 rest,
+                                NphQuat lie)
+{
+    NphPhysicsHeightfield *h = bench_field(64U, 0.5F, 0.0F);
+    if (h == NULL) {
+        return;
+    }
+    NphPcg32 r = bench_rng(33U);
+    NphPhysicsPose poses[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        poses[i] = nph_physics_pose(
+            nph_vec3(nph_pcg32_next_range_f32(&r, -10.0F, 10.0F), rest - 0.001F,
+                     nph_pcg32_next_range_f32(&r, -10.0F, 10.0F)),
+            nph_quat_mul(nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)), lie));
+    }
+    const NphPhysicsPose at = nph_physics_pose(nph_vec3(-16.0F, 0.0F, -16.0F), nph_quat_identity());
+    NphPhysicsMeshManifolds mm;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_physics_collide_heightfield(g, poses[i], h, at, NPH_PHYSICS_SPECULATIVE_DISTANCE,
+                                            &mm);
+            nbench_do_not_optimize(&mm);
+        }
+    }
+    nph_physics_heightfield_free(h, nph_allocator_system());
+}
+
+NBENCH(collide_heightfield_box)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_box(nph_vec3(0.4F, 0.25F, 0.3F));
+    bench_collide_field(state, &g, 0.25F, nph_quat_identity());
+}
+
+NBENCH(collide_heightfield_sphere)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(0.3F);
+    bench_collide_field(state, &g, 0.3F, nph_quat_identity());
+}
+
+NBENCH(collide_heightfield_capsule)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.4F, 0.15F);
+    bench_collide_field(state, &g, 0.15F, nph_quat_from_axis_angle(nph_vec3_unit_z(), 1.5707963F));
+}
+
+NBENCH(collide_heightfield_hull_32v)
+{
+    NphPcg32 r = bench_rng(34U);
+    NphPhysicsHull *hull = make_hull(&r, 200U, 32U);
+    if (hull == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry g = nph_physics_geometry_hull(hull);
+    const NphVec3 low = nph_physics_geometry_support(&g, nph_vec3(0.0F, -1.0F, 0.0F));
+    bench_collide_field(state, &g, -low.y, nph_quat_identity());
+    nph_physics_hull_free(hull, nph_allocator_system());
+}
+
 NBENCH(collide_mesh_hull_32v)
 {
     NphPcg32 r = bench_rng(34U);
@@ -838,17 +1042,16 @@ NBENCH(world_pyramids_16_mt)
 }
 
 // The pile of a thousand shapes in a bin, on the box ground or on `floor`
-// (a mesh, which the bin's walls stand on).
+// placed at `at` (a mesh or a heightfield, which the bin's walls stand on).
 static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solver,
-                          const NphPhysicsMesh *floor)
+                          const NphPhysicsGeometry *floor, NphDVec3 at)
 {
     NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
         return;
     }
     if (floor != NULL) {
-        bench_body(w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_zero(), nph_quat_identity(),
-                   nph_physics_geometry_mesh(floor));
+        bench_body(w, NPH_PHYSICS_BODY_STATIC, at, nph_quat_identity(), *floor);
     } else {
         bench_ground(w, 30.0F);
     }
@@ -885,7 +1088,7 @@ static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solv
 
 static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
 {
-    bench_pile_on(state, js, solver, NULL);
+    bench_pile_on(state, js, solver, NULL, nph_dvec3_zero());
 }
 
 // The pile on a flat mesh of 0.5 m cells (12 m across, 1152 triangles), and
@@ -896,8 +1099,21 @@ static void bench_mesh_pile(NbenchState *state, NphJobSystem *js, f32 ripple)
     if (floor == NULL) {
         return;
     }
-    bench_pile_on(state, js, k_soft, floor);
+    const NphPhysicsGeometry g = nph_physics_geometry_mesh(floor);
+    bench_pile_on(state, js, k_soft, &g, nph_dvec3_zero());
     nph_physics_mesh_free(floor, nph_allocator_system());
+}
+
+// The rippled pile on the same surface as a heightfield (25 x 25 samples).
+NBENCH(world_heightfield_pile_1000_mt)
+{
+    NphPhysicsHeightfield *floor = bench_field(24U, 0.5F, 0.3F);
+    if (floor == NULL) {
+        return;
+    }
+    const NphPhysicsGeometry g = nph_physics_geometry_heightfield(floor);
+    bench_pile_on(state, bench_jobs(), k_soft, &g, nph_dvec3(-6.0, 0.0, -6.0));
+    nph_physics_heightfield_free(floor, nph_allocator_system());
 }
 
 NBENCH(world_mesh_pile_1000_st)

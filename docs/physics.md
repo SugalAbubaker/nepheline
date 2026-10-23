@@ -23,7 +23,8 @@ Phase 11 builds it in parts. This document describes what exists:
 | The solver comparison (§13): the soft step (the default), TGS, and XPBD | done |
 | The ragdoll: the exit tests of §12 under every solver | done |
 | Triangle meshes: the block, its builder and queries, convex shapes against triangles, a pair's four manifolds | done |
-| Heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
+| Heightfields: the grid, its builder and queries, collision as a mesh's; compounds (bodies with several shapes) | done |
+| Queries, continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -31,6 +32,7 @@ Phase 11 builds it in parts. This document describes what exists:
 | `geometry.h` | the shape types, bounds, mass, support points, GJK proxies |
 | `hull.h` | the convex hull block and the Quickhull builder |
 | `mesh.h` | the triangle mesh block, its builder (welding, active edges, the four-wide tree), box overlaps and raycasts |
+| `heightfield.h` | the heightfield block, its builder (active edges, block heights), box overlaps, raycasts, and heights |
 | `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction |
 | `aabb_tree.h` | the dynamic AABB tree |
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
@@ -77,6 +79,7 @@ Every geometry is canonical in its own frame and placed by a pose:
 | box | axis-aligned, centred, with half extents |
 | hull | a shared convex polyhedron (below) |
 | mesh | a shared triangle mesh (below); on static and kinematic bodies only |
+| heightfield | a shared grid of heights (below), its first sample at the origin; on static and kinematic bodies only |
 
 `nph_physics_geometry_aabb` gives the tight box of a placed geometry (for
 a box, |R| times the half extents: Arvo, Graphics Gems 1990),
@@ -85,9 +88,9 @@ for the primitives; the hull's are precomputed by its builder), and
 `nph_physics_geometry_support` the farthest point along a direction. A
 **proxy** (`NphPhysicsProxy`) describes a convex shape to GJK as the hull of
 a few points rounded by a radius: a sphere is one point, a capsule two, a
-box its corners, a hull its vertices. A mesh is a surface, not a convex
-solid: it has no mass and no proxy, and its pairs go through the mesh
-narrow phase.
+box its corners, a hull its vertices. A mesh or a heightfield is a
+surface, not a convex solid: it has no mass and no proxy, and its pairs go
+through the mesh narrow phase.
 
 ## Convex hulls
 
@@ -335,8 +338,12 @@ gathers up to 32 and is compacted to its deepest, the extremes of its
 touching points along eight directions, and those of its speculative
 points along four. Each cluster is then reduced to four points (touching
 points first, as every manifold is), a sphere keeping one point under its
-centre, and the four clusters with the deepest points are the pair's, the
-deepest first. Point ids mix the triangle's index with its features.
+centre and a capsule its deepest point and its ends along its axis (of its
+touching points, then of all: its contact is a segment, however many
+triangles cut it, and four points in a line came over a heightfield's
+uniform diagonals); the four clusters with the deepest points are the
+pair's, the deepest first. Point ids mix the triangle's index with its
+features.
 
 **In the world** a mesh goes on a static or a kinematic body (shape
 creation refuses a dynamic one: a surface has no mass); a kinematic mesh is
@@ -363,6 +370,62 @@ triangles prepared once per step as structure-of-arrays are the next
 optimisations. A thousand mixed shapes piled on a mesh floor step in
 0.77 ms on the job system (0.68 ms on a box floor), and on a rolling
 terrain in 0.85 ms.
+
+## Heightfields
+
+A heightfield (`NphPhysicsHeightfield`, `heightfield.h`; ADR-0046 §4) is
+terrain as a regular grid of heights: one block like a mesh's (an 80-byte
+header, the heights, a byte per cell, and two heights per block of 8 × 8
+cells), cookable and memory-mappable, shared by any number of shapes.
+Sample (i, j) stands at (i spacing_x, height, j spacing_z) in its frame;
+the cell between four samples is two triangles split along one diagonal,
+or along the other when the cell is flipped (the builder's input says
+which, so a terrain's diagonals can follow its ridges), or a hole, which
+has none. Triangle 2c and 2c + 1 are cell c's. Heightfields are one-sided,
+up.
+
+**The builder** marks each triangle's active edges by the mesh builder's
+rule (the grid's border, a hole's rim, and folds convex by more than
+5 degrees; flat and concave ones are not), which both builders agree on to
+the edge for the same triangles (tested), and keeps each block's lowest and
+highest height. `nph_physics_heightfield_validate` checks a block of a given
+size: the counts and spacings in range, the arrays inside the block, the
+bounds the grid's own, every height finite and inside them, and every
+block's range holding its cells' heights.
+
+**Queries** need no tree. The cells under a box are found by arithmetic,
+block by block (skipping blocks whose heights miss the box) and cell by
+cell in rows. A ray walks the blocks it passes over, then each block's
+cells (Amanatides and Woo, "A Fast Voxel Traversal Algorithm for Ray
+Tracing", 1987), skipping those its heights miss; the cells come in the
+ray's order, so the first hit is the closest. Each crossing of a grid line
+is computed from the cell's index, not accumulated, so a long ray does not
+drift; and where the ray leaves a cell through a corner, to rounding, both
+neighbours across the corner are tested too: the watertight test shears the
+ray where the walk steps it, and a ray through a corner on a block's side
+otherwise slipped through, the walk having stepped past the cell the test
+found the hit in. `nph_physics_heightfield_height_at` gives the surface's
+height and normal under a point.
+
+**Collision** is the mesh's narrow phase (`collide_mesh.c` works on any
+surface): the triangles under the shape come from the grid, with their
+vertices moved next to the shape in 64 bits, so a cell 10 km from the
+field's origin collides, to the bit, as one at it (tested). Over the same
+triangles a heightfield gives what a mesh gives: the same deepest point
+and the same surface directions (tested on random shapes over random
+terrain; which triangle comes first can split or join manifolds whose
+normals chain within 5 degrees, as the order of a mesh's tree does). In the
+world a heightfield is a mesh's equal: static and kinematic bodies only, a
+pair's four manifolds as a contact and its children.
+
+Costs (Profile, the reference machine): a 257 × 257 grid (65 536 cells)
+builds in 11 ms (168 ns a cell, against a mesh's 1.4 µs for a cell's two
+triangles); the triangles under a 1 m box are found in 75 ns (the mesh's
+tree takes 151), a ray's closest hit in 121 ns (136), and a ray 100 m long
+skimming the surface in 409 ns. Collision costs what a mesh's does (a box
+7.9 µs, a ball 0.67 µs, a capsule 1.8 µs, a 32-vertex hull 23 µs), and the
+thousand-shape pile on the rippled surface steps in 0.82 ms on the job
+system, as on the same mesh.
 
 ## Broadphase
 
@@ -465,10 +528,17 @@ friction coefficient, a restitution, a filter, and event switches. Two
 shapes meet when their filters allow: shapes of the same positive group
 always do, of the same negative group never do, and otherwise each's
 category must be in the other's mask (Box2D's rule). Shapes of one body
-never meet, and neither do two bodies that are not dynamic. A pair's friction is the geometric mean of the two
-coefficients and its restitution the larger, so a frictionless surface
-makes every contact on it frictionless and a bouncy ball bounces on any
-floor.
+never meet, and neither do two bodies that are not dynamic. A pair's
+friction is the geometric mean of the two coefficients and its restitution
+the larger, so a frictionless surface makes every contact on it
+frictionless and a bouncy ball bounces on any floor.
+
+**Compounds** are bodies with several shapes (ADR-0046 §11, as PhysX and
+Box2D do it): each shape is placed by its pose on the body, the body's
+mass properties are its shapes' moved into its frame and summed, and each
+shape has its own broadphase proxy and contacts. A table of five boxes
+stands on its four legs (four pairs, sixteen points) and sleeps, on a box
+ground or a heightfield; a compound's own shapes never meet.
 
 ## Contacts
 
@@ -859,6 +929,10 @@ point):
 | `mesh_overlap_grid_128` (the triangles under a 1 m box) | 152 |
 | `collide_mesh_box` (a box resting on 0.5 m cells, anywhere, turned any way) | 8 190 |
 | `collide_mesh_sphere` / `_capsule` / `_hull_32v` (the same) | 639 / 1 810 / 25 000 |
+| `heightfield_build_256` (257 × 257 samples, per cell) | 168 |
+| `heightfield_raycast_256` / `_long` (down onto it / 100 m across it) | 121 / 409 |
+| `heightfield_overlap_256` (the triangles under a 1 m box) | 75 |
+| `collide_heightfield_box` / `_sphere` / `_capsule` / `_hull_32v` (flat, 0.5 m cells) | 7 880 / 667 / 1 810 / 23 400 |
 | `world_pyramid_20_st` (210 boxes, one thread) | 406 000 |
 | `world_pyramid_20_mt` (the job system) | 151 000 |
 | `world_pyramids_16_mt` (3360 boxes) | 951 000 |
@@ -866,6 +940,7 @@ point):
 | `world_pile_1000_mt` | 682 000 |
 | `world_mesh_pile_1000_st` / `_mt` (the same pile on a mesh floor) | 4 580 000 / 766 000 |
 | `world_terrain_pile_1000_mt` (the pile dropped on a rolling terrain) | 855 000 |
+| `world_heightfield_pile_1000_mt` (the same surface as a heightfield) | 823 000 |
 | `world_sleeping_10k` (10k asleep, one ball awake) | 3 160 |
 | `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
 | `world_chains_mt` | 165 000 |
@@ -896,7 +971,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (151 tests):
+`physics_tests` (174 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -944,6 +1019,25 @@ reference CPU class.
   workers, and nothing under the surface; boxes coming to rest on a
   terrain; and the same motion with the mesh, or the world, far from its
   origin.
+- Heightfields (`test_heightfield.c`): the grid's layout and triangles,
+  refused descriptions, active edges at borders, holes' rims, and convex
+  folds (and none at concave or gentle ones), the same edges as the mesh
+  builder marks on the same triangles, blocks' height ranges, boxes and
+  rays against brute force, rays through every shared corner (on blocks'
+  sides among them) and edge that never slip, faces hit from above only,
+  heights against rays, validation of corrupted blocks and 2000 random
+  damages, determinism, collision as the same triangles built as a mesh,
+  and a cell 10 km from the origin colliding to the bit as one at it.
+  In the world (`test_world_mesh.c`, `world_heightfield`): static and
+  kinematic bodies only; shapes resting and sleeping; sliding and rolling
+  across cells as smoothly as across a mesh's seams; bodies falling
+  through a hole; a pile on a heightfield terrain keeping its course on 0
+  to 8 workers with nothing under the surface; and the same slide 10 000 km
+  out.
+- Compounds (`test_world.c`): a body's mass properties summed from posed
+  shapes, a table of five boxes standing on its four legs and sleeping on
+  a box ground and on a heightfield, and a compound's own shapes never
+  meeting.
 - The tree against brute force through random edits, moves, enlargements,
   category changes, and rebuilds; raycasts (every hit and the closest);
   partial rebuilds; determinism.
@@ -1006,9 +1100,9 @@ reference CPU class.
   pile replays bit for bit in a new world, on 4 and 8 workers, and on the
   AVX2 kernel, under every solver.
 
-**Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull` and
-`physics_mesh` read builder input from the fuzzer's bytes (a point cloud, a
-triangle soup), require the built block to validate and to survive every
+**Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull`,
+`physics_mesh`, and `physics_heightfield` read builder input from the
+fuzzer's bytes (a point cloud, a triangle soup, a grid), require the built block to validate and to survive every
 use (geometry queries, overlaps and raycasts, every convex shape's
 contacts, GJK and EPA, all with finite results), then damage a copy (a
 truncation and byte edits) that validation must refuse or the same uses
@@ -1018,4 +1112,5 @@ so a read past it is a sanitizer's error. Their seeds come from
 trusting the header's own size, a NaN vertex or tolerance passing every
 comparison, face counts beyond the collision code's arrays, the mesh's
 empty slots and stack depth above, and the Quickhull sliver; the smoke
-runs replay 40 000 mutations of each seed under ASan clean.
+runs replay 40 000 mutations of each seed under ASan clean, the
+heightfield's too.

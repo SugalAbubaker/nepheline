@@ -1,7 +1,7 @@
 # 0046. Physics: triangle meshes and heightfields
 
 - **Date:** 2026-10-23
-- **Status:** Accepted (2026-10-23); meshes built, heightfields to come
+- **Status:** Accepted (2026-10-23); meshes, heightfields, and compounds built
 
 ## Context
 
@@ -181,6 +181,27 @@ world's queries (§10's last sentence) follow. Building it refined the plan:
   this). At 240 Hz it is harmless (balls and capsules roll across seams
   within 1 mm of height); re-anchoring rolling contacts each substep is a
   follow-up for fast rollers.
+
+## As built: heightfields and compounds (2026-10-23)
+
+- **The grid (§4) as planned**, with each cell's diagonal chosen by the
+  builder's input (flipped cells), and the active edges by the mesh
+  builder's rule, in 64 bits: the two builders mark the same edges on the
+  same triangles (tested).
+- **No tree**: a box's cells by arithmetic, a ray's by walking blocks and
+  then cells (Amanatides and Woo 1987). Where the ray leaves a cell through
+  a corner, to rounding, both neighbours across it are tested: the walk
+  steps the ray where the watertight test shears it, and at a corner on a
+  block's side the walk skipped the cell the test found the hit in.
+- **One narrow phase for both surfaces**: `collide_mesh.c` takes any
+  source of triangles, so a heightfield collides as the same triangles
+  built as a mesh (tested). A capsule's merged manifold keeps its deepest
+  point and its ends along its axis (four points in a line came over a
+  heightfield's uniform diagonals, which the reduction keeps whole).
+- **Compounds (§11) as planned**, now tested: mass summed from posed
+  shapes, a table standing on four legs on a box ground and on a
+  heightfield, a compound's own shapes never meeting.
+- **Fuzzed** like the other blocks (`physics_heightfield`).
 
 ## Alternatives considered
 

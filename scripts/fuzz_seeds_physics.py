@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Seed corpora of the physics fuzz targets (tests/fuzz/fuzz_physics_hull.c
-and tests/fuzz/fuzz_physics_mesh.c), written by `python scripts/fuzz_seeds.py`.
+"""Seed corpora of the physics fuzz targets (tests/fuzz/fuzz_physics_hull.c,
+fuzz_physics_mesh.c, and fuzz_physics_heightfield.c), written by
+`python scripts/fuzz_seeds.py`.
 
-The targets read builder input, not blocks: a point cloud or a triangle
-soup with coordinates in 1/256 m, then a truncation and damage records that
+The targets read builder input, not blocks: a point cloud, a triangle
+soup, or a grid of heights, with coordinates in 1/256 m, then a truncation and damage records that
 the target applies to a copy of the block the builder made (the input
 layout is in each target's header comment). So the seeds are shapes worth
 starting from (a cube, a tetrahedron, a ball's cloud, a grid, a crease, a
@@ -133,3 +134,35 @@ def write_physics_seeds(write, corpus):
     write(os.path.join(mesh, "grid_damaged_body"),
           mesh_seed(0, gv, gt, damage(0, [(400, 0x40), (700, 0x01), (900, 0x10)])))
     write(os.path.join(mesh, "grid_truncated"), mesh_seed(0, gv, gt, damage(200)))
+
+    field = os.path.join(corpus, "physics_heightfield")
+
+    def field_seed(flags, columns, rows, heights, cells=None, tail=b""):
+        # The target reads 2 + byte % 31 samples a side.
+        out = bytes([flags, columns - 2, rows - 2])
+        out += b"".join(coord(y) for y in heights)
+        if cells is not None:
+            out += bytes(cells)
+        return out + tail
+
+    write(os.path.join(field, "flat_4"), field_seed(0x11, 4, 4, [0.0] * 16))
+    waves = [0.3 * math.sin(0.9 * i) * math.cos(0.7 * j) for j in range(9) for i in range(9)]
+    write(os.path.join(field, "waves_9"), field_seed(0x00, 9, 9, waves))
+    steps = [0.25 * ((i * 7 + j * 3) % 5) for j in range(12) for i in range(10)]
+    write(os.path.join(field, "steps_10x12_spaced"), field_seed(0x23, 10, 12, steps))
+    holes = [1 if (c % 5) == 2 else 0 for c in range(8 * 8)]
+    flips = [2 if (c % 3) == 0 else 0 for c in range(8 * 8)]
+    mixed = [h | f for h, f in zip(holes, flips)]
+    write(os.path.join(field, "holes_and_flips_9"), field_seed(0x08, 9, 9, waves, mixed))
+    write(os.path.join(field, "ridge_30deg_9"),
+          field_seed(0x04, 9, 9, [1.0 - 0.25 * abs(j - 4) for j in range(9) for i in range(9)]))
+    big = [0.2 * math.sin(0.4 * i + 0.3 * j) for j in range(32) for i in range(32)]
+    write(os.path.join(field, "big_32"), field_seed(0x00, 32, 32, big))
+    # Damage: the header, the heights, the blocks at the end, truncations.
+    write(os.path.join(field, "waves_damaged_header"),
+          field_seed(0x00, 9, 9, waves, None, damage(0, [(4, 0x01), (16, 0x80), (24, 0x10)])))
+    write(os.path.join(field, "waves_damaged_heights"),
+          field_seed(0x00, 9, 9, waves, None, damage(0, [(90, 0xFF), (131, 0x7F), (200, 0x01)])))
+    write(os.path.join(field, "waves_damaged_cells"),
+          field_seed(0x08, 9, 9, waves, mixed, damage(0, [(420, 0x03), (430, 0xFC), (440, 0x01)])))
+    write(os.path.join(field, "waves_truncated"), field_seed(0x00, 9, 9, waves, None, damage(100)))

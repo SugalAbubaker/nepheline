@@ -121,6 +121,7 @@ NphPhysicsMassData nph_physics_geometry_mass(const NphPhysicsGeometry *g, f32 de
     case NPH_PHYSICS_SHAPE_HULL:
         return hull_mass(g->hull, density);
     case NPH_PHYSICS_SHAPE_MESH:
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD:
         // A surface bounds no volume (static and kinematic bodies only).
         return mass_diagonal(0.0F, nph_vec3_zero(), 0.0F, 0.0F, 0.0F);
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
@@ -160,6 +161,9 @@ bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g)
         return g->hull != NULL && g->hull->vertex_count >= 4U;
     case NPH_PHYSICS_SHAPE_MESH:
         return g->mesh != NULL && g->mesh->triangle_count > 0U;
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD:
+        return g->heightfield != NULL && g->heightfield->columns >= 2U &&
+               g->heightfield->rows >= 2U;
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         return false;
@@ -211,6 +215,8 @@ NphAABB nph_physics_geometry_aabb(const NphPhysicsGeometry *g, NphPhysicsPose po
     }
     case NPH_PHYSICS_SHAPE_MESH:
         return transform_box(g->mesh->bounds, pose);
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD:
+        return transform_box(g->heightfield->bounds, pose);
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;
@@ -262,6 +268,21 @@ NphVec3 nph_physics_geometry_support(const NphPhysicsGeometry *g, NphVec3 direct
         }
         return v[best];
     }
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD: {
+        const NphPhysicsHeightfield *h = g->heightfield;
+        const f32 *heights = nph_physics_heightfield_heights(h);
+        NphVec3 best = nph_vec3(0.0F, heights[0], 0.0F);
+        for (u32 j = 0U; j < h->rows; ++j) {
+            for (u32 i = 0U; i < h->columns; ++i) {
+                const NphVec3 p = nph_vec3((f32)i * h->spacing_x, heights[(u64)j * h->columns + i],
+                                           (f32)j * h->spacing_z);
+                if (nph_vec3_dot(p, direction) > nph_vec3_dot(best, direction)) {
+                    best = p;
+                }
+            }
+        }
+        return best;
+    }
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;
@@ -283,6 +304,7 @@ f32 nph_physics_geometry_inner_radius(const NphPhysicsGeometry *g)
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull->inner_radius;
     case NPH_PHYSICS_SHAPE_MESH: // a surface holds no ball
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD:
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         return 0.0F;
@@ -301,9 +323,11 @@ f32 nph_physics_geometry_outer_radius(const NphPhysicsGeometry *g)
         return nph_vec3_length(g->box.half_extents);
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull->outer_radius;
-    case NPH_PHYSICS_SHAPE_MESH: {
+    case NPH_PHYSICS_SHAPE_MESH:
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD: {
         // The farthest corner of the vertices' box: a bound, in constant time.
-        const NphAABB b = g->mesh->bounds;
+        const NphAABB b =
+            g->type == NPH_PHYSICS_SHAPE_MESH ? g->mesh->bounds : g->heightfield->bounds;
         return nph_vec3_length(nph_vec3_max(nph_vec3_abs(b.min), nph_vec3_abs(b.max)));
     }
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
@@ -352,6 +376,7 @@ NphPhysicsProxy nph_physics_geometry_proxy(const NphPhysicsGeometry *g,
         p.radius = 0.0F;
         return p;
     case NPH_PHYSICS_SHAPE_MESH: // not convex
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD:
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;

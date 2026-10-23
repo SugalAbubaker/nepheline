@@ -242,6 +242,15 @@ collide_mesh_box               24600
 collide_mesh_sphere            1920
 collide_mesh_capsule           5430
 collide_mesh_hull_32v          75000
+# Heightfields (ADR-0046 §4): the build allocates (per cell): 5x.
+heightfield_build_256          850
+heightfield_raycast_256        365
+heightfield_raycast_256_long   1230
+heightfield_overlap_256        225
+collide_heightfield_box        23700
+collide_heightfield_sphere     2010
+collide_heightfield_capsule    5430
+collide_heightfield_hull_32v   70100
 # World rows are per 240 Hz step. The _mt rows spin helper threads on the
 # job system: 5x, as the hosted runners have fewer cores.
 world_pyramid_20_st            1110000
@@ -252,6 +261,7 @@ world_pile_1000_mt             3300000
 world_mesh_pile_1000_st        13740000
 world_mesh_pile_1000_mt        3850000
 world_terrain_pile_1000_mt     4275000
+world_heightfield_pile_1000_mt 4115000
 world_sleeping_10k             8400
 world_chains_st                1750000
 world_chains_mt                810000

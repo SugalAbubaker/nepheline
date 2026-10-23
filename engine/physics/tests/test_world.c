@@ -144,6 +144,146 @@ static void build_stack(NphPhysicsWorld *w, u32 count, NphDVec3 base, NphPhysics
     }
 }
 
+// ---------------------------------------------------------------------------
+// Compounds: bodies with several shapes (ADR-0046 §11)
+// ---------------------------------------------------------------------------
+
+// A shape of `g` at `at` on `body`, turned by `q`.
+static void add_part(NphPhysicsWorld *w, NphPhysicsBody body, NphPhysicsGeometry g, NphVec3 at,
+                     NphQuat q)
+{
+    NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
+    sd.pose = nph_physics_pose(at, q);
+    NphPhysicsShape shape;
+    NTEST_ASSERT_EQ_INT(nph_physics_shape_create(w, body, &sd, &shape), NPH_RESULT_OK);
+}
+
+// A table: a top 1 m by 0.6 m by 5 cm on four legs 70 cm tall, its frame
+// at the floor under its middle.
+static NphPhysicsBody add_table(NphPhysicsWorld *w, NphDVec3 at, NphQuat q)
+{
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.position = at;
+    bd.rotation = q;
+    NphPhysicsBody b;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(w, &bd, &b), NPH_RESULT_OK);
+    add_part(w, b, nph_physics_geometry_box(nph_vec3(0.5F, 0.025F, 0.3F)),
+             nph_vec3(0.0F, 0.725F, 0.0F), nph_quat_identity());
+    for (u32 k = 0U; k < 4U; ++k) {
+        const f32 x = (k & 1U) != 0U ? 0.45F : -0.45F;
+        const f32 z = (k & 2U) != 0U ? 0.25F : -0.25F;
+        add_part(w, b, nph_physics_geometry_box(nph_vec3(0.03F, 0.35F, 0.03F)),
+                 nph_vec3(x, 0.35F, z), nph_quat_identity());
+    }
+    return b;
+}
+
+NTEST(world, compounds_sum_their_shapes_mass)
+{
+    Scene s;
+    scene_begin(&s);
+    // Two cubes 2 m apart and a ball between, turned: the parts' mass
+    // properties, moved into the body's frame and summed.
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    NphPhysicsBody b;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(s.w, &bd, &b), NPH_RESULT_OK);
+    const NphQuat turn =
+        nph_quat_from_axis_angle(nph_vec3_normalize(nph_vec3(1.0F, 2.0F, 3.0F)), 0.7F);
+    const NphPhysicsGeometry cube = nph_physics_geometry_box(nph_vec3_splat(0.5F));
+    const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.4F);
+    const NphPhysicsPose poses[3] = {
+        nph_physics_pose(nph_vec3(-1.0F, 0.0F, 0.0F), turn),
+        nph_physics_pose(nph_vec3(1.0F, 0.0F, 0.0F), nph_quat_identity()),
+        nph_physics_pose(nph_vec3(0.0F, 0.3F, 0.2F), nph_quat_identity())};
+    const NphPhysicsGeometry *parts[3] = {&cube, &cube, &ball};
+    NphPhysicsMassData want = {0.0F, nph_vec3_zero(), nph_mat3_zero()};
+    for (u32 k = 0U; k < 3U; ++k) {
+        add_part(s.w, b, *parts[k], poses[k].position, poses[k].rotation);
+        want = nph_physics_mass_add(
+            want,
+            nph_physics_mass_transform(nph_physics_geometry_mass(parts[k], 1000.0F), poses[k]));
+    }
+    const NphPhysicsMassData got = nph_physics_body_mass_data(s.w, b);
+    NTEST_EXPECT_NEAR_F32(got.mass, 2000.0F + 1000.0F * 4.0F / 3.0F * 3.14159265F * 0.064F, 0.5F);
+    NTEST_EXPECT_NEAR_F32(got.mass, want.mass, 1e-3F);
+    NTEST_EXPECT_TRUE(nph_vec3_near(got.center, want.center, 1e-5F));
+    for (u32 c = 0U; c < 3U; ++c) {
+        NTEST_EXPECT_TRUE(nph_vec3_near(got.inertia.c[c], want.inertia.c[c], 1e-2F));
+    }
+    // The centre of mass is the body's, in the world.
+    const NphDVec3 com = nph_physics_body_center_of_mass(s.w, b);
+    NTEST_EXPECT_NEAR_F64(com.x, (f64)want.center.x, 1e-5);
+    NTEST_EXPECT_NEAR_F64(com.y, (f64)want.center.y, 1e-5);
+    NTEST_EXPECT_NEAR_F64(com.z, (f64)want.center.z, 1e-5);
+    scene_end(&s);
+}
+
+NTEST(world, a_table_stands_on_its_legs_and_sleeps)
+{
+    // On a box ground and on a heightfield: a compound's every shape has
+    // its own contacts, and only the legs touch.
+    TestAlloc fta;
+    NphAllocator *fa = test_alloc_begin(&fta);
+    static f32 flat[17U * 17U];
+    NphPhysicsHeightfield *field = test_heightfield(fa, 17U, 17U, 0.5F, flat, NULL);
+    for (u32 floor = 0U; floor < 2U; ++floor) {
+        Scene s;
+        scene_begin(&s);
+        if (floor == 0U) {
+            add_ground(s.w, 0.0);
+        } else {
+            add_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(-4.0, 0.0, -4.0), nph_quat_identity(),
+                     nph_physics_geometry_heightfield(field), 0.6F, 0.0F);
+        }
+        const NphQuat turn = nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.3F);
+        const NphPhysicsBody table = add_table(s.w, nph_dvec3(0.2, 0.05, -0.1), turn);
+        for (u32 i = 0U; i < 240U * 3U; ++i) {
+            step(s.w, NULL, 1U);
+            if (i == 120U) {
+                // Four legs on the floor, four points each: the top touches
+                // nothing.
+                const NphPhysicsStats st = nph_physics_world_stats(s.w);
+                NTEST_EXPECT_EQ_UINT(st.touching_contacts, 4U);
+                NTEST_EXPECT_EQ_UINT(st.manifold_points, 16U);
+            }
+        }
+        NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, table));
+        const NphDVec3 p = nph_physics_body_position(s.w, table);
+        NTEST_EXPECT_NEAR_F64(p.x, 0.2, 2e-3);
+        NTEST_EXPECT_NEAR_F64(p.z, -0.1, 2e-3);
+        NTEST_EXPECT_NEAR_F64(p.y, 0.0, 6e-3); // its frame at the floor
+        const NphQuat q = nph_physics_body_rotation(s.w, table);
+        NTEST_EXPECT_TRUE(nph_quat_angle(nph_quat_mul(nph_quat_conjugate(turn), q)) < 2e-3F);
+        scene_end(&s);
+    }
+    nph_physics_heightfield_free(field, fa);
+    test_alloc_end(&fta);
+}
+
+NTEST(world, a_compounds_shapes_never_touch_each_other)
+{
+    Scene s;
+    scene_begin(&s);
+    add_ground(s.w, 0.0);
+    // Two balls overlapping on one body, and a third body far off: the only
+    // pairs are each ball with the ground.
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.position = nph_dvec3(0.0, 0.3, 0.0);
+    NphPhysicsBody b;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(s.w, &bd, &b), NPH_RESULT_OK);
+    add_part(s.w, b, nph_physics_geometry_sphere(0.3F), nph_vec3(-0.1F, 0.0F, 0.0F),
+             nph_quat_identity());
+    add_part(s.w, b, nph_physics_geometry_sphere(0.3F), nph_vec3(0.1F, 0.0F, 0.0F),
+             nph_quat_identity());
+    step(s.w, NULL, 60U); // resting, not yet asleep
+    const NphPhysicsStats st = nph_physics_world_stats(s.w);
+    NTEST_EXPECT_EQ_UINT(st.contacts, 2U);
+    NTEST_EXPECT_EQ_UINT(st.touching_contacts, 2U);
+    step(s.w, NULL, 180U);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(s.w, b).y, 0.3, 6e-3);
+    scene_end(&s);
+}
+
 NTEST(world, a_stack_of_ten_boxes_stands)
 {
     Scene s;
