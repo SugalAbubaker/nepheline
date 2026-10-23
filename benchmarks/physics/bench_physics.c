@@ -1,0 +1,493 @@
+// SPDX-License-Identifier: Apache-2.0
+// Physics benchmarks (CLAUDE.md §1.5, §8.9; docs/physics.md "Performance").
+//
+// The collision layer, per call: each row cycles through 64 prepared
+// configurations so branch predictors and caches see a realistic mix rather
+// than one memorised pair.
+//
+//   hull_build_1000_64v          Quickhull of 1000 random points, 64-vertex budget
+//   hull_build_box_8             Quickhull of a box's 8 corners
+//   collide_spheres              sphere-sphere, overlapping
+//   collide_capsules             capsule-capsule, random poses near contact
+//   collide_box_sphere           box-sphere, random poses near contact
+//   collide_box_box_resting      a box resting on a box (four points)
+//   collide_box_box_random       boxes in random overlapping poses
+//   collide_box_box_cached_apart separated boxes ended by the cached axis
+//   collide_hull_hull_32v        two 32-vertex hulls, random overlapping poses
+//   collide_hull_capsule_32v     a 32-vertex hull and a capsule near contact
+//   gjk_hull_hull_32v            GJK distance between separated 32-vertex hulls
+//   gjk_hull_hull_32v_cached     the same, warm-started from the last simplex
+//   epa_box_hull_32v             penetration (GJK, then EPA) of overlapping pairs
+//   tree_insert_10k              one proxy into a 10k-proxy tree (insert + remove)
+//   tree_move_10k                one proxy moved in a 10k-proxy tree
+//   tree_query_10k               a 2 m box query in a 10k-proxy tree
+//   tree_raycast_10k             a 50 m closest-hit ray in a 10k-proxy tree
+//   tree_rebuild_10k             a full binned-SAH rebuild of 10k proxies (per proxy)
+
+#include <nepheline/math/random.h>
+#include <nepheline/physics/aabb_tree.h>
+#include <nepheline/physics/collide.h>
+#include <nepheline/physics/hull.h>
+
+#include <nbench/nbench.h>
+
+#include <string.h>
+
+#define PAIRS        64U
+#define TREE_PROXIES 10000U
+
+static NphPcg32 bench_rng(u64 seed)
+{
+    NphPcg32 r;
+    nph_pcg32_seed(&r, seed, 7U);
+    return r;
+}
+
+static NphVec3 rand_vec3(NphPcg32 *r, f32 lo, f32 hi)
+{
+    return nph_vec3(nph_pcg32_next_range_f32(r, lo, hi), nph_pcg32_next_range_f32(r, lo, hi),
+                    nph_pcg32_next_range_f32(r, lo, hi));
+}
+
+static NphVec3 rand_unit(NphPcg32 *r)
+{
+    return nph_sample_sphere_uniform(nph_vec2(nph_pcg32_next_f32(r), nph_pcg32_next_f32(r)));
+}
+
+static NphQuat rand_rotation(NphPcg32 *r)
+{
+    const f32 u1 = nph_pcg32_next_f32(r);
+    const f32 u2 = nph_pcg32_next_f32(r) * 6.2831853F;
+    const f32 u3 = nph_pcg32_next_f32(r) * 6.2831853F;
+    const f32 a = nph_f32_sqrt(1.0F - u1);
+    const f32 b = nph_f32_sqrt(u1);
+    return nph_quat_normalize(nph_quat(a * nph_f32_sin(u2), a * nph_f32_cos(u2),
+                                       b * nph_f32_sin(u3), b * nph_f32_cos(u3)));
+}
+
+static NphPhysicsHull *make_hull(NphPcg32 *r, u32 points, u32 budget)
+{
+    NphVec3 pts[1000];
+    for (u32 i = 0U; i < points; ++i) {
+        pts[i] = nph_vec3_scale(rand_unit(r), nph_pcg32_next_range_f32(r, 0.7F, 1.0F));
+    }
+    NphPhysicsHullDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.points = pts;
+    desc.point_count = points;
+    desc.max_vertices = budget;
+    NphPhysicsHull *hull = NULL;
+    if (nph_physics_hull_build(&desc, nph_allocator_system(), &hull) != NPH_RESULT_OK) {
+        return NULL;
+    }
+    return hull;
+}
+
+// Pose pairs at a centre distance in [lo, hi]: contact or near it.
+static void make_pairs(NphPcg32 *r, f32 lo, f32 hi, NphPhysicsPose a[PAIRS],
+                       NphPhysicsPose b[PAIRS])
+{
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        a[i] = nph_physics_pose(rand_vec3(r, -0.1F, 0.1F), rand_rotation(r));
+        b[i] = nph_physics_pose(
+            nph_vec3_add(a[i].position,
+                         nph_vec3_scale(rand_unit(r), nph_pcg32_next_range_f32(r, lo, hi))),
+            rand_rotation(r));
+    }
+}
+
+static void bench_collide(NbenchState *state, const NphPhysicsGeometry *ga,
+                          const NphPhysicsGeometry *gb, const NphPhysicsPose *pa,
+                          const NphPhysicsPose *pb, bool cache)
+{
+    NphPhysicsCollideCache caches[PAIRS];
+    memset(caches, 0, sizeof caches);
+    NphPhysicsManifold m;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_physics_collide(ga, pa[i], gb, pb[i], NPH_PHYSICS_SPECULATIVE_DISTANCE,
+                                cache ? &caches[i] : NULL, &m);
+            nbench_do_not_optimize(&m);
+        }
+    }
+}
+
+NBENCH(hull_build_1000_64v)
+{
+    NphPcg32 r = bench_rng(1U);
+    static NphVec3 pts[1000];
+    for (u32 i = 0U; i < 1000U; ++i) {
+        pts[i] = nph_vec3_scale(rand_unit(&r), nph_pcg32_next_range_f32(&r, 0.0F, 1.0F));
+    }
+    NphPhysicsHullDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.points = pts;
+    desc.point_count = 1000U;
+    desc.max_vertices = 64U;
+    while (nbench_keep_running(state)) {
+        NphPhysicsHull *hull = NULL;
+        if (nph_physics_hull_build(&desc, nph_allocator_system(), &hull) == NPH_RESULT_OK) {
+            nbench_do_not_optimize(hull);
+            nph_physics_hull_free(hull, nph_allocator_system());
+        }
+    }
+}
+
+NBENCH(hull_build_box_8)
+{
+    NphVec3 pts[8];
+    for (u32 i = 0U; i < 8U; ++i) {
+        pts[i] = nph_vec3((i & 1U) != 0U ? 1.0F : -1.0F, (i & 2U) != 0U ? 1.0F : -1.0F,
+                          (i & 4U) != 0U ? 1.0F : -1.0F);
+    }
+    NphPhysicsHullDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.points = pts;
+    desc.point_count = 8U;
+    while (nbench_keep_running(state)) {
+        NphPhysicsHull *hull = NULL;
+        if (nph_physics_hull_build(&desc, nph_allocator_system(), &hull) == NPH_RESULT_OK) {
+            nbench_do_not_optimize(hull);
+            nph_physics_hull_free(hull, nph_allocator_system());
+        }
+    }
+}
+
+NBENCH(collide_spheres)
+{
+    NphPcg32 r = bench_rng(2U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.5F, 1.0F, pa, pb);
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(0.5F);
+    bench_collide(state, &g, &g, pa, pb, false);
+}
+
+NBENCH(collide_capsules)
+{
+    NphPcg32 r = bench_rng(3U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.3F, 1.2F, pa, pb);
+    const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.5F, 0.25F);
+    bench_collide(state, &g, &g, pa, pb, false);
+}
+
+NBENCH(collide_box_sphere)
+{
+    NphPcg32 r = bench_rng(4U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.5F, 1.0F, pa, pb);
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
+    const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.4F);
+    bench_collide(state, &box, &ball, pa, pb, false);
+}
+
+NBENCH(collide_box_box_resting)
+{
+    NphPcg32 r = bench_rng(5U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        pa[i] = nph_physics_pose_identity();
+        pb[i] =
+            nph_physics_pose(nph_vec3(nph_pcg32_next_range_f32(&r, -0.2F, 0.2F), 0.995F,
+                                      nph_pcg32_next_range_f32(&r, -0.2F, 0.2F)),
+                             nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 1.5F)));
+    }
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
+    bench_collide(state, &box, &box, pa, pb, true);
+}
+
+NBENCH(collide_box_box_random)
+{
+    NphPcg32 r = bench_rng(6U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.6F, 1.2F, pa, pb);
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
+    bench_collide(state, &box, &box, pa, pb, false);
+}
+
+NBENCH(collide_box_box_cached_apart)
+{
+    NphPcg32 r = bench_rng(7U);
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 2.0F, 2.5F, pa, pb);
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
+    bench_collide(state, &box, &box, pa, pb, true);
+}
+
+NBENCH(collide_hull_hull_32v)
+{
+    NphPcg32 r = bench_rng(8U);
+    NphPhysicsHull *ha = make_hull(&r, 200U, 32U);
+    NphPhysicsHull *hb = make_hull(&r, 200U, 32U);
+    if (ha == NULL || hb == NULL) {
+        return;
+    }
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 1.2F, 1.9F, pa, pb);
+    const NphPhysicsGeometry ga = nph_physics_geometry_hull(ha);
+    const NphPhysicsGeometry gb = nph_physics_geometry_hull(hb);
+    bench_collide(state, &ga, &gb, pa, pb, true);
+    nph_physics_hull_free(ha, nph_allocator_system());
+    nph_physics_hull_free(hb, nph_allocator_system());
+}
+
+NBENCH(collide_hull_capsule_32v)
+{
+    NphPcg32 r = bench_rng(9U);
+    NphPhysicsHull *ha = make_hull(&r, 200U, 32U);
+    if (ha == NULL) {
+        return;
+    }
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.8F, 1.6F, pa, pb);
+    const NphPhysicsGeometry ga = nph_physics_geometry_hull(ha);
+    const NphPhysicsGeometry gb = nph_physics_geometry_capsule(0.5F, 0.3F);
+    bench_collide(state, &ga, &gb, pa, pb, false);
+    nph_physics_hull_free(ha, nph_allocator_system());
+}
+
+static void bench_gjk(NbenchState *state, bool cached)
+{
+    NphPcg32 r = bench_rng(10U);
+    NphPhysicsHull *ha = make_hull(&r, 200U, 32U);
+    NphPhysicsHull *hb = make_hull(&r, 200U, 32U);
+    if (ha == NULL || hb == NULL) {
+        return;
+    }
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 2.2F, 3.0F, pa, pb);
+    const NphPhysicsGeometry ga = nph_physics_geometry_hull(ha);
+    const NphPhysicsGeometry gb = nph_physics_geometry_hull(hb);
+    NphVec3 sa[8];
+    NphVec3 sb[8];
+    const NphPhysicsProxy xa = nph_physics_geometry_proxy(&ga, sa);
+    const NphPhysicsProxy xb = nph_physics_geometry_proxy(&gb, sb);
+    NphPhysicsSimplexCache caches[PAIRS];
+    memset(caches, 0, sizeof caches);
+    NphPhysicsDistance d;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_physics_distance(&xa, pa[i], &xb, pb[i], true, cached ? &caches[i] : NULL, &d);
+            nbench_do_not_optimize(&d);
+        }
+    }
+    nph_physics_hull_free(ha, nph_allocator_system());
+    nph_physics_hull_free(hb, nph_allocator_system());
+}
+
+NBENCH(gjk_hull_hull_32v)
+{
+    bench_gjk(state, false);
+}
+
+NBENCH(gjk_hull_hull_32v_cached)
+{
+    bench_gjk(state, true);
+}
+
+NBENCH(epa_box_hull_32v)
+{
+    NphPcg32 r = bench_rng(11U);
+    NphPhysicsHull *hb = make_hull(&r, 200U, 32U);
+    if (hb == NULL) {
+        return;
+    }
+    NphPhysicsPose pa[PAIRS];
+    NphPhysicsPose pb[PAIRS];
+    make_pairs(&r, 0.3F, 0.9F, pa, pb);
+    const NphPhysicsGeometry ga = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
+    const NphPhysicsGeometry gb = nph_physics_geometry_hull(hb);
+    NphVec3 sa[8];
+    NphVec3 sb[8];
+    const NphPhysicsProxy xa = nph_physics_geometry_proxy(&ga, sa);
+    const NphPhysicsProxy xb = nph_physics_geometry_proxy(&gb, sb);
+    NphPhysicsPenetration p;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            const bool hit = nph_physics_penetration(&xa, pa[i], &xb, pb[i], &p);
+            nbench_do_not_optimize(&p);
+            nbench_do_not_optimize_u64(hit ? 1U : 0U);
+        }
+    }
+    nph_physics_hull_free(hb, nph_allocator_system());
+}
+
+// ---------------------------------------------------------------------------
+// The tree
+// ---------------------------------------------------------------------------
+
+static NphAABB rand_box(NphPcg32 *r)
+{
+    const NphVec3 c = rand_vec3(r, -200.0F, 200.0F);
+    const NphVec3 e = rand_vec3(r, 0.2F, 1.0F);
+    return nph_aabb(nph_vec3_sub(c, e), nph_vec3_add(c, e));
+}
+
+static bool fill_tree(NphAabbTree *t, NphPcg32 *r, u32 *proxies)
+{
+    if (nph_aabb_tree_init(t, nph_allocator_system(), 2U * TREE_PROXIES) != NPH_RESULT_OK) {
+        return false;
+    }
+    for (u32 i = 0U; i < TREE_PROXIES; ++i) {
+        if (nph_aabb_tree_create_proxy(t, rand_box(r), 1U, i, &proxies[i]) != NPH_RESULT_OK) {
+            return false;
+        }
+    }
+    return true;
+}
+
+NBENCH(tree_insert_10k)
+{
+    NphPcg32 r = bench_rng(12U);
+    static u32 proxies[TREE_PROXIES];
+    NphAabbTree tree;
+    if (!fill_tree(&tree, &r, proxies)) {
+        return;
+    }
+    NphAABB boxes[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        boxes[i] = rand_box(&r);
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        u32 ids[PAIRS];
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            if (nph_aabb_tree_create_proxy(&tree, boxes[i], 1U, 0U, &ids[i]) != NPH_RESULT_OK) {
+                ids[i] = NPH_AABB_TREE_NULL;
+            }
+        }
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            if (ids[i] != NPH_AABB_TREE_NULL) {
+                nph_aabb_tree_destroy_proxy(&tree, ids[i]);
+            }
+        }
+    }
+    nph_aabb_tree_free(&tree);
+}
+
+NBENCH(tree_move_10k)
+{
+    NphPcg32 r = bench_rng(13U);
+    static u32 proxies[TREE_PROXIES];
+    NphAabbTree tree;
+    if (!fill_tree(&tree, &r, proxies)) {
+        return;
+    }
+    NphAABB boxes[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        boxes[i] = rand_box(&r);
+    }
+    u32 next = 0U;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_aabb_tree_move_proxy(&tree, proxies[next], boxes[i]);
+            next = (next + 1U) % TREE_PROXIES;
+        }
+    }
+    nph_aabb_tree_free(&tree);
+}
+
+static bool count_hit(u32 proxy, u64 user_data, void *context)
+{
+    NPH_UNUSED(proxy);
+    NPH_UNUSED(user_data);
+    *(u32 *)context += 1U;
+    return true;
+}
+
+NBENCH(tree_query_10k)
+{
+    NphPcg32 r = bench_rng(14U);
+    static u32 proxies[TREE_PROXIES];
+    NphAabbTree tree;
+    if (!fill_tree(&tree, &r, proxies)) {
+        return;
+    }
+    u32 leaves = 0U;
+    if (nph_aabb_tree_rebuild(&tree, true, &leaves) != NPH_RESULT_OK) {
+        return;
+    }
+    NphAABB queries[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const NphVec3 c = rand_vec3(&r, -200.0F, 200.0F);
+        queries[i] = nph_aabb(nph_vec3_sub(c, nph_vec3_one()), nph_vec3_add(c, nph_vec3_one()));
+    }
+    u32 hits = 0U;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_aabb_tree_query(&tree, queries[i], ~0ULL, count_hit, &hits);
+        }
+    }
+    nbench_do_not_optimize_u64(hits);
+    nph_aabb_tree_free(&tree);
+}
+
+static f32 clip_ray(const NphAabbTreeRay *ray, u32 proxy, u64 user_data, void *context)
+{
+    NPH_UNUSED(proxy);
+    NPH_UNUSED(user_data);
+    NPH_UNUSED(context);
+    // Every box counts as hit at its midpoint along the ray: the closest-hit
+    // pattern's clipping.
+    return ray->max_fraction * 0.5F;
+}
+
+NBENCH(tree_raycast_10k)
+{
+    NphPcg32 r = bench_rng(15U);
+    static u32 proxies[TREE_PROXIES];
+    NphAabbTree tree;
+    if (!fill_tree(&tree, &r, proxies)) {
+        return;
+    }
+    u32 leaves = 0U;
+    if (nph_aabb_tree_rebuild(&tree, true, &leaves) != NPH_RESULT_OK) {
+        return;
+    }
+    NphAabbTreeRay rays[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        rays[i].origin = rand_vec3(&r, -200.0F, 200.0F);
+        rays[i].translation = nph_vec3_scale(rand_unit(&r), 50.0F);
+        rays[i].max_fraction = 1.0F;
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_aabb_tree_raycast(&tree, &rays[i], ~0ULL, clip_ray, NULL);
+        }
+    }
+    nph_aabb_tree_free(&tree);
+}
+
+NBENCH(tree_rebuild_10k)
+{
+    NphPcg32 r = bench_rng(16U);
+    static u32 proxies[TREE_PROXIES];
+    NphAabbTree tree;
+    if (!fill_tree(&tree, &r, proxies)) {
+        return;
+    }
+    nbench_set_items_per_iteration(state, TREE_PROXIES);
+    while (nbench_keep_running(state)) {
+        u32 leaves = 0U;
+        if (nph_aabb_tree_rebuild(&tree, true, &leaves) != NPH_RESULT_OK) {
+            break;
+        }
+        nbench_do_not_optimize_u64(leaves);
+    }
+    nph_aabb_tree_free(&tree);
+}

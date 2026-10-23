@@ -212,6 +212,28 @@ png_encode_256                 6000000
 png_decode_256                 6500000
 ref_dfg_256_samples            27000
 
+# physics_bench (docs/physics.md "Performance"). Collision rows are per call
+# over 64 prepared configurations; tree rows per operation (rebuild per
+# proxy). The hull builds allocate through the platform allocator: 5x.
+hull_build_1000_64v            1600000
+hull_build_box_8               40000
+collide_spheres                75
+collide_capsules               150
+collide_box_sphere             85
+collide_box_box_resting        1350
+collide_box_box_random         870
+collide_box_box_cached_apart   170
+collide_hull_hull_32v          27500
+collide_hull_capsule_32v       2200
+gjk_hull_hull_32v              2600
+gjk_hull_hull_32v_cached       620
+epa_box_hull_32v               10300
+tree_insert_10k                1400
+tree_move_10k                  5200
+tree_query_10k                 215
+tree_raycast_10k               2600
+tree_rebuild_10k               640
+
 # profile_bench
 profile_zone_enabled           55
 profile_zone_paused            8
