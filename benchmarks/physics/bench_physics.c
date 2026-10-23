@@ -503,8 +503,10 @@ NBENCH(tree_rebuild_10k)
 //   world_sleeping_10k       10k sleeping boxes and one awake ball
 //   world_chains_st          16 chains of 25 ball-jointed links swinging, one thread
 //   world_chains_mt          the same on the job system
-//   *_tgs, *_xpbd            the pyramid, the pile, and the chains with the other
-//                            candidate solvers of the §13 comparison (ADR-0045)
+//   world_ragdolls_32_st     32 ragdolls (352 bodies, 320 joints) lying in heaps, one thread
+//   world_ragdolls_32_mt     the same on the job system
+//   *_tgs, *_xpbd            the pyramid, the pile, the chains, and the ragdolls with
+//                            the other solvers of the §13 comparison (ADR-0045)
 //   *_soft8, *_xpbd16        the soft step at 8 substeps, XPBD at 16
 // ---------------------------------------------------------------------------
 
@@ -841,4 +843,153 @@ NBENCH(world_chains_st_soft8)
 NBENCH(world_chains_st_xpbd16)
 {
     bench_chains(state, NULL, (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U});
+}
+
+// The ragdoll of the tests (test_world_support.h): eleven parts in a
+// T-pose facing +Z, 1.7 m tall, its pelvis at `pelvis` and turned by
+// `turn` about it; ball joints with cones, twists, and 2 N m of friction
+// at the spine, neck, shoulders, and hips, hinges with ranges and the same
+// friction at the elbows and knees.
+static void bench_ragdoll(NphPhysicsWorld *w, NphDVec3 pelvis, NphQuat turn)
+{
+    const f32 deg = 3.14159265F / 180.0F;
+    const NphQuat side = nph_quat_from_axis_angle(nph_vec3(0.0F, 0.0F, 1.0F), 90.0F * deg);
+    // Offsets from the pelvis; boxes (half extents), a sphere, capsules
+    // (half height, radius).
+    const struct {
+        f32 x, y;
+        NphPhysicsGeometry g;
+        bool sideways;
+    } parts[11] = {
+        {0.0F, 0.0F, nph_physics_geometry_box(nph_vec3(0.15F, 0.1F, 0.1F)), false},
+        {0.0F, 0.32F, nph_physics_geometry_box(nph_vec3(0.16F, 0.17F, 0.1F)), false},
+        {0.0F, 0.62F, nph_physics_geometry_sphere(0.1F), false},
+        {-0.33F, 0.4F, nph_physics_geometry_capsule(0.11F, 0.05F), true},
+        {0.33F, 0.4F, nph_physics_geometry_capsule(0.11F, 0.05F), true},
+        {-0.62F, 0.4F, nph_physics_geometry_capsule(0.11F, 0.045F), true},
+        {0.62F, 0.4F, nph_physics_geometry_capsule(0.11F, 0.045F), true},
+        {-0.1F, -0.32F, nph_physics_geometry_capsule(0.14F, 0.07F), false},
+        {0.1F, -0.32F, nph_physics_geometry_capsule(0.14F, 0.07F), false},
+        {-0.1F, -0.75F, nph_physics_geometry_capsule(0.14F, 0.06F), false},
+        {0.1F, -0.75F, nph_physics_geometry_capsule(0.14F, 0.06F), false},
+    };
+    NphPhysicsBody bodies[11];
+    for (u32 i = 0U; i < 11U; ++i) {
+        NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+        bd.position = nph_dvec3_add_vec3(
+            pelvis, nph_quat_rotate(turn, nph_vec3(parts[i].x, parts[i].y, 0.0F)));
+        bd.rotation = nph_quat_mul(turn, parts[i].sideways ? side : nph_quat_identity());
+        if (nph_physics_body_create(w, &bd, &bodies[i]) != NPH_RESULT_OK) {
+            return;
+        }
+        const NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(parts[i].g);
+        NphPhysicsShape shape;
+        NPH_IGNORE_RESULT(nph_physics_shape_create(w, bodies[i], &sd, &shape));
+    }
+    const NphVec3 up = nph_vec3(0.0F, 1.0F, 0.0F);
+    const NphVec3 down = nph_vec3(0.0F, -1.0F, 0.0F);
+    const NphVec3 left = nph_vec3(-1.0F, 0.0F, 0.0F);
+    const NphVec3 right = nph_vec3(1.0F, 0.0F, 0.0F);
+    const struct {
+        u32 a, b;
+        f32 x, y;
+        NphVec3 axis;
+        bool hinge;
+        f32 p0, p1, p2; // degrees: swing_y, swing_z, twist; or lower, upper
+    } joints[10] = {
+        {0U, 1U, 0.0F, 0.12F, up, false, 30.0F, 20.0F, 20.0F},
+        {1U, 2U, 0.0F, 0.5F, up, false, 40.0F, 40.0F, 45.0F},
+        {1U, 3U, -0.17F, 0.42F, left, false, 80.0F, 60.0F, 45.0F},
+        {1U, 4U, 0.17F, 0.42F, right, false, 80.0F, 60.0F, 45.0F},
+        {3U, 5U, -0.48F, 0.4F, up, true, 0.0F, 140.0F, 0.0F},
+        {4U, 6U, 0.48F, 0.4F, down, true, 0.0F, 140.0F, 0.0F},
+        {0U, 7U, -0.1F, -0.1F, down, false, 60.0F, 30.0F, 30.0F},
+        {0U, 8U, 0.1F, -0.1F, down, false, 60.0F, 30.0F, 30.0F},
+        {7U, 9U, -0.1F, -0.54F, right, true, 0.0F, 140.0F, 0.0F},
+        {8U, 10U, 0.1F, -0.54F, right, true, 0.0F, 140.0F, 0.0F},
+    };
+    for (u32 i = 0U; i < 10U; ++i) {
+        const NphPhysicsBody a = bodies[joints[i].a];
+        const NphPhysicsBody b = bodies[joints[i].b];
+        NphPhysicsJointDesc jd = nph_physics_joint_desc_default(
+            joints[i].hinge ? NPH_PHYSICS_JOINT_HINGE : NPH_PHYSICS_JOINT_BALL, a, b);
+        if (joints[i].hinge) {
+            jd.hinge.enable_limit = 1;
+            jd.hinge.lower = joints[i].p0 * deg;
+            jd.hinge.upper = joints[i].p1 * deg;
+            jd.hinge.enable_motor = 1;
+            jd.hinge.max_motor_torque = 2.0F;
+        } else {
+            jd.ball.enable_swing_limit = 1;
+            jd.ball.swing_y = joints[i].p0 * deg;
+            jd.ball.swing_z = joints[i].p1 * deg;
+            jd.ball.enable_twist_limit = 1;
+            jd.ball.twist_lower = -joints[i].p2 * deg;
+            jd.ball.twist_upper = joints[i].p2 * deg;
+            jd.ball.friction_torque = 2.0F;
+        }
+        const NphDVec3 at = nph_dvec3_add_vec3(
+            pelvis, nph_quat_rotate(turn, nph_vec3(joints[i].x, joints[i].y, 0.0F)));
+        nph_physics_joint_frames_at(w, a, b, at, nph_quat_rotate(turn, joints[i].axis), &jd.frame_a,
+                                    &jd.frame_b);
+        NphPhysicsJoint j;
+        NPH_IGNORE_RESULT(nph_physics_joint_create(w, &jd, &j));
+    }
+}
+
+// Thirty-two ragdolls (352 bodies, 320 joints) dropped on their backs in
+// four criss-cross heaps of eight, each a quarter turn from the one below,
+// measured once the heaps lie still (sleep off).
+static void bench_ragdolls(NbenchState *state, NphJobSystem *js, BenchSolver solver)
+{
+    NphPhysicsWorld *w = bench_world(false, solver);
+    if (w == NULL) {
+        return;
+    }
+    bench_ground(w, 30.0F);
+    const NphQuat lying = nph_quat_from_axis_angle(nph_vec3(1.0F, 0.0F, 0.0F), -1.5707963F);
+    const u32 count = WORLD_SCALE > 1U ? 4U : 32U;
+    for (u32 k = 0U; k < count; ++k) {
+        const u32 layer = k / 4U;
+        const f64 x = k % 2U == 0U ? -2.5 : 2.5;
+        const f64 z = k % 4U < 2U ? -2.5 : 2.5;
+        const NphQuat turn = nph_quat_mul(
+            nph_quat_from_axis_angle(nph_vec3(0.0F, 1.0F, 0.0F), (f32)layer * 1.5707963F), lying);
+        bench_ragdoll(w, nph_dvec3(x, 0.15 + 0.3 * (f64)layer, z), turn);
+    }
+    bench_steps(w, bench_jobs(), 960U / WORLD_SCALE); // fall and settle
+    while (nbench_keep_running(state)) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_ragdolls_32_st)
+{
+    bench_ragdolls(state, NULL, k_soft);
+}
+
+NBENCH(world_ragdolls_32_mt)
+{
+    bench_ragdolls(state, bench_jobs(), k_soft);
+}
+
+NBENCH(world_ragdolls_32_mt_tgs)
+{
+    bench_ragdolls(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_TGS, 0U});
+}
+
+NBENCH(world_ragdolls_32_mt_xpbd)
+{
+    bench_ragdolls(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 0U});
+}
+
+NBENCH(world_ragdolls_32_mt_soft8)
+{
+    bench_ragdolls(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_SOFT_STEP, 8U});
+}
+
+NBENCH(world_ragdolls_32_mt_xpbd16)
+{
+    bench_ragdolls(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U});
 }
