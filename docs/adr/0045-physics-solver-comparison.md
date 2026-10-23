@@ -49,10 +49,17 @@ since it converges with substeps.
 | 20 links whipping down from the side: worst joint gap | 1.2 mm | 0.33 mm | 9.7 mm | 2.5 mm | 0.14 mm |
 | 20° pendulum, 10 periods: period error, amplitude kept | 0.000 %, 100 % | 0.000 %, 100 % | 0.000 %, 100 % | −0.083 %, 90 % | −0.022 %, 97 % |
 | door slammed into its hinge limits at 6 rad/s: overshoot, anchor gap | 0.04°, 0.92 mm | 0.04°, 0.21 mm | 0.26°, 0.05 mm | 0.40°, 0.01 mm | 0.08°, 0.00 mm |
-| four ragdolls dropped in a heap: worst joint gap, settled | 16 mm, asleep in 3.1 s | 5.1 mm, asleep 3.1 s | 21 mm, still moving at 5 s | 23 mm, still moving | 4.4 mm, asleep 3.5 s |
+| four ragdolls dropped in a heap: worst joint gap, settled | 20 mm, asleep in 3.5 s | 4.3 mm, asleep 3.5 s | 24 mm, asleep 3.5 s | 33 mm, asleep 3.9 s | 3.9 mm, asleep 3.2 s |
 | ball, restitution 0.5 from 1 m: bounce (0.25 m) | 0.247 | 0.248 | 0.247 | 0.248 | 0.250 |
 | box at μ 0.6 on 20°: creeps in 1.4 s | 0 | 0 | 0 | 2.1 mm | 0.5 mm |
 | box at μ 0.6 on 40°: slides at (1.797 m/s²) | 1.799 | 1.798 | 1.801 | 1.895 | 1.891 |
+
+The ragdolls' elbows and knees carry 2 N m of friction, as their ball
+joints do. Measured first without it, a dangling forearm swung for ever
+and kept the heap awake wherever one ended up hanging: under TGS and XPBD
+here, and under the soft step itself on GCC's rounding, which sends the
+heap elsewhere (a heap is chaotic). The knees, which first bent forward,
+bend back.
 
 ### Cost (µs a 240 Hz step)
 
@@ -78,8 +85,8 @@ since it converges with substeps.
   follow the substep rate.
 - **TGS is the cheapest (9 to 16 % less) and stacks nearly as well**, but
   its Baumgarte-biased joints do not converge under load: the heavy chain
-  stretches 161 mm at 4 substeps and comes apart at 8. Its ragdoll heap is
-  still moving after 5 s. It would need per-joint tuning to be safe.
+  stretches 161 mm at 4 substeps and comes apart at 8. It would need
+  per-joint tuning to be safe.
 - **XPBD has the stiffest joints** (at 16 substeps nearly rigid: 0.8 mm
   under the heavy load, no gap at the door) **but cannot stack**: the
   20-row pyramid collapses at 4 substeps and still at 16, as Catto found in

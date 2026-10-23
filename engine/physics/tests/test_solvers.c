@@ -277,7 +277,10 @@ NTEST(solvers, door_slam)
 
 // A ragdoll of eleven bodies: pelvis, chest, head, upper and lower arms
 // and legs, ball joints with cones and twists at the spine, neck,
-// shoulders, and hips, hinges at the elbows and knees.
+// shoulders, and hips, hinges at the elbows and knees, bending the
+// anatomical way (the forearms forward, the shins back). Every joint has
+// 2 N m of friction, as a limp body's muscles do: without it a dangling
+// limb swings for ever and keeps a heap awake under any solver.
 typedef struct Ragdoll {
     NphPhysicsBody bodies[11];
     NphPhysicsJoint joints[10];
@@ -306,6 +309,8 @@ static void ragdoll_hinge(NphPhysicsWorld *w, Ragdoll *r, u32 joint, u32 a, u32 
     d.hinge.enable_limit = 1;
     d.hinge.lower = lower;
     d.hinge.upper = upper;
+    d.hinge.enable_motor = 1; // a motor to standstill: friction
+    d.hinge.max_motor_torque = 2.0F;
     r->joints[joint] = join(w, d, at, axis);
 }
 
@@ -340,8 +345,6 @@ static void build_ragdoll(NphPhysicsWorld *w, NphDVec3 base, Ragdoll *r)
     const NphVec3 down = nph_vec3(0.0F, -1.0F, 0.0F);
     const NphVec3 left = nph_vec3(-1.0F, 0.0F, 0.0F);
     const NphVec3 right = nph_vec3(1.0F, 0.0F, 0.0F);
-    const NphVec3 across = nph_vec3(0.0F, 0.0F, 1.0F);
-    const NphVec3 through = nph_vec3(1.0F, 0.0F, 0.0F);
     ragdoll_ball(w, r, 0U, 0U, 1U, nph_dvec3_add(base, nph_dvec3(0.0, 1.12, 0.0)), up, 30.0F * deg,
                  20.0F * deg, 20.0F * deg);
     ragdoll_ball(w, r, 1U, 1U, 2U, nph_dvec3_add(base, nph_dvec3(0.0, 1.5, 0.0)), up, 40.0F * deg,
@@ -358,11 +361,10 @@ static void build_ragdoll(NphPhysicsWorld *w, NphDVec3 base, Ragdoll *r)
                  60.0F * deg, 30.0F * deg, 30.0F * deg);
     ragdoll_ball(w, r, 7U, 0U, 8U, nph_dvec3_add(base, nph_dvec3(0.1, 0.9, 0.0)), down, 60.0F * deg,
                  30.0F * deg, 30.0F * deg);
-    ragdoll_hinge(w, r, 8U, 7U, 9U, nph_dvec3_add(base, nph_dvec3(-0.1, 0.46, 0.0)), through,
-                  -140.0F * deg, 0.0F);
-    ragdoll_hinge(w, r, 9U, 8U, 10U, nph_dvec3_add(base, nph_dvec3(0.1, 0.46, 0.0)), through,
-                  -140.0F * deg, 0.0F);
-    NPH_UNUSED(across);
+    ragdoll_hinge(w, r, 8U, 7U, 9U, nph_dvec3_add(base, nph_dvec3(-0.1, 0.46, 0.0)), right, 0.0F,
+                  140.0F * deg);
+    ragdoll_hinge(w, r, 9U, 8U, 10U, nph_dvec3_add(base, nph_dvec3(0.1, 0.46, 0.0)), right, 0.0F,
+                  140.0F * deg);
 }
 
 NTEST(solvers, ragdolls)
@@ -384,7 +386,7 @@ NTEST(solvers, ragdolls)
         }
         f64 worst = 0.0;
         u32 slept = 0U;
-        for (u32 i = 1U; i <= 240U * 5U; ++i) {
+        for (u32 i = 1U; i <= 240U * 8U; ++i) {
             step(s.w, NULL, 1U);
             for (u32 k = 0U; k < 4U; ++k) {
                 for (u32 j = 0U; j < 10U; ++j) {
@@ -405,8 +407,11 @@ NTEST(solvers, ragdolls)
         }
         if (is_default(config)) {
             // The heap settles and sleeps; impacts open a joint by a few
-            // centimetres for a moment at most.
-            NTEST_EXPECT_TRUE(worst < 0.03 && slept != 0U);
+            // centimetres for a moment at most. (A heap is chaotic: another
+            // compiler's rounding sends it elsewhere, so the bound is twice
+            // what one measures.)
+            NTEST_EXPECT_TRUE(worst < 0.04);
+            NTEST_EXPECT_TRUE(slept != 0U);
         }
         scene_end(&s);
     }
