@@ -515,7 +515,7 @@ force it is.
 
 **Cost.** A joint is scalar code, about 1.1 µs a step on one thread
 (preparation and three passes in each of four substeps): sixteen chains of
-25 links (400 joints) step in 0.56 ms on one thread and 0.16 ms on the job
+25 links (400 joints) step in 0.57 ms on one thread and 0.16 ms on the job
 system.
 
 ## Threads
@@ -631,8 +631,8 @@ point):
 | `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 390 000 |
 | `world_pile_1000_mt` | 682 000 |
 | `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
-| `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 556 000 |
-| `world_chains_mt` | 161 000 |
+| `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
+| `world_chains_mt` | 160 000 |
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
 tests for two 32-vertex hulls; the planned optimisation buckets B's arcs on
