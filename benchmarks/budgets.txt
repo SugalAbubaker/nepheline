@@ -251,6 +251,26 @@ collide_heightfield_box        23700
 collide_heightfield_sphere     2010
 collide_heightfield_capsule    5430
 collide_heightfield_hull_32v   70100
+# Casts (ADR-0047): per call against one geometry, per query in a world.
+raycast_sphere                 130
+raycast_capsule                145
+raycast_box                    85
+raycast_hull_32v               320
+shape_cast_sphere_box          2600
+shape_cast_capsule_box         3350
+shape_cast_capsule_capsule     2560
+shape_cast_box_box             7050
+shape_cast_hull_hull_32v       15900
+shape_cast_capsule_mesh        17600
+shape_cast_box_mesh            35300
+shape_cast_capsule_heightfield 18000
+world_raycast_10k              4800
+world_cast_sphere_10k          3100
+world_cast_capsule_10k         3100
+world_overlap_sphere_10k       455
+world_overlap_aabb_10k         365
+world_terrain_collide_capsule  5150
+world_terrain_cast_capsule     7000
 # World rows are per 240 Hz step. The _mt rows spin helper threads on the
 # job system: 5x, as the hosted runners have fewer cores.
 world_pyramid_20_st            1110000

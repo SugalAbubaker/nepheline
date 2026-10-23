@@ -70,18 +70,20 @@ static f32 round_up(f64 x)
     return f;
 }
 
+NphAABB phys_world_box(NphDVec3 origin, NphAABB rel)
+{
+    NphAABB box;
+    box.min = nph_vec3(round_down(origin.x + (f64)rel.min.x), round_down(origin.y + (f64)rel.min.y),
+                       round_down(origin.z + (f64)rel.min.z));
+    box.max = nph_vec3(round_up(origin.x + (f64)rel.max.x), round_up(origin.y + (f64)rel.max.y),
+                       round_up(origin.z + (f64)rel.max.z));
+    return box;
+}
+
 NphAABB phys_shape_world_aabb(const PhysBody *b, const PhysShape *s)
 {
     const NphPhysicsPose pose = phys_shape_pose_relative(b, s, b->origin);
-    const NphAABB rel = nph_physics_geometry_aabb(&s->geometry, pose);
-    NphAABB box;
-    box.min =
-        nph_vec3(round_down(b->origin.x + (f64)rel.min.x), round_down(b->origin.y + (f64)rel.min.y),
-                 round_down(b->origin.z + (f64)rel.min.z));
-    box.max =
-        nph_vec3(round_up(b->origin.x + (f64)rel.max.x), round_up(b->origin.y + (f64)rel.max.y),
-                 round_up(b->origin.z + (f64)rel.max.z));
-    return box;
+    return phys_world_box(b->origin, nph_physics_geometry_aabb(&s->geometry, pose));
 }
 
 static u32 tree_of(const PhysBody *b)

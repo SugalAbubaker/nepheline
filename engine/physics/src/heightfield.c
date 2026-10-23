@@ -584,6 +584,107 @@ void nph_physics_heightfield_overlap(const NphPhysicsHeightfield *h, NphAABB box
 }
 
 // ---------------------------------------------------------------------------
+// Sweeps
+// ---------------------------------------------------------------------------
+
+// Where a box of half extents `extent` centred at `center`, moving by
+// `delta`, first meets the box [lo, hi]: the slab test of its centre
+// against the box grown by its extent. FLT_MAX for a miss before `limit`.
+static f32 sweep_entry(NphVec3 lo, NphVec3 hi, NphVec3 center, NphVec3 extent, NphVec3 delta,
+                       f32 limit)
+{
+    const NphAABB box = {nph_vec3_sub(lo, extent), nph_vec3_add(hi, extent)};
+    f32 t = 0.0F;
+    return nph_ray_intersects_aabb(nph_ray(center, delta), box, limit, &t, NULL) ? t : FLT_MAX;
+}
+
+// The k-th of [lo, hi] in the motion's direction along an axis.
+static u32 in_motion_order(u32 lo, u32 hi, u32 k, bool backwards)
+{
+    return backwards ? hi - k : lo + k;
+}
+
+void nph_physics_heightfield_visit_sweep(const NphPhysicsHeightfield *h, NphVec3 center,
+                                         NphVec3 extent, NphVec3 delta, NphDVec3 origin,
+                                         NphPhysicsSweepVisit visit, void *user)
+{
+    // The cells under the swept box's bounds.
+    const NphVec3 end = nph_vec3_add(center, delta);
+    const NphVec3 lo = nph_vec3_sub(nph_vec3_min(center, end), extent);
+    const NphVec3 hi = nph_vec3_add(nph_vec3_max(center, end), extent);
+    u32 i_lo = 0U;
+    u32 i_hi = 0U;
+    u32 j_lo = 0U;
+    u32 j_hi = 0U;
+    if (!cell_range(lo.x, hi.x, h->spacing_x, h->columns - 1U, &i_lo, &i_hi) ||
+        !cell_range(lo.z, hi.z, h->spacing_z, h->rows - 1U, &j_lo, &j_hi) ||
+        hi.y < h->bounds.min.y || lo.y > h->bounds.max.y) {
+        return;
+    }
+    const u8 *cells = nph_physics_heightfield_cells(h);
+    const f32 *blocks = nph_physics_heightfield_blocks(h);
+    const f32 sx = h->spacing_x;
+    const f32 sz = h->spacing_z;
+    // Blocks, then their cells, in the direction the motion runs along X and
+    // Z: near ones come first, and what the closest hit so far is short of
+    // is skipped.
+    const bool back_x = delta.x < 0.0F;
+    const bool back_z = delta.z < 0.0F;
+    f32 best = 1.0F;
+    const u32 bi_lo = i_lo / BLOCK;
+    const u32 bi_hi = i_hi / BLOCK;
+    const u32 bj_lo = j_lo / BLOCK;
+    const u32 bj_hi = j_hi / BLOCK;
+    for (u32 bjk = 0U; bjk <= bj_hi - bj_lo; ++bjk) {
+        const u32 bj = in_motion_order(bj_lo, bj_hi, bjk, back_z);
+        for (u32 bik = 0U; bik <= bi_hi - bi_lo; ++bik) {
+            const u32 bi = in_motion_order(bi_lo, bi_hi, bik, back_x);
+            const u64 slot = 2ULL * ((u64)bj * h->block_columns + bi);
+            if (!(blocks[slot] <= blocks[slot + 1U])) {
+                continue; // all holes
+            }
+            const u32 i0 = nph_max_u32(i_lo, bi * BLOCK);
+            const u32 i1 = nph_min_u32(i_hi, bi * BLOCK + BLOCK - 1U);
+            const u32 j0 = nph_max_u32(j_lo, bj * BLOCK);
+            const u32 j1 = nph_min_u32(j_hi, bj * BLOCK + BLOCK - 1U);
+            const NphVec3 block_lo = nph_vec3((f32)i0 * sx, blocks[slot], (f32)j0 * sz);
+            const NphVec3 block_hi =
+                nph_vec3((f32)(i1 + 1U) * sx, blocks[slot + 1U], (f32)(j1 + 1U) * sz);
+            if (sweep_entry(block_lo, block_hi, center, extent, delta, best) > best) {
+                continue;
+            }
+            for (u32 jk = 0U; jk <= j1 - j0; ++jk) {
+                const u32 j = in_motion_order(j0, j1, jk, back_z);
+                for (u32 ik = 0U; ik <= i1 - i0; ++ik) {
+                    const u32 i = in_motion_order(i0, i1, ik, back_x);
+                    const u32 c = cell_index(h, i, j);
+                    const u32 cell = cells[c];
+                    if ((cell & NPH_PHYSICS_HEIGHTFIELD_HOLE) != 0U) {
+                        continue;
+                    }
+                    f32 high = 0.0F;
+                    const f32 low = cell_low(h, i, j, &high);
+                    if (sweep_entry(nph_vec3((f32)i * sx, low, (f32)j * sz),
+                                    nph_vec3((f32)(i + 1U) * sx, high, (f32)(j + 1U) * sz), center,
+                                    extent, delta, best) > best) {
+                        continue;
+                    }
+                    for (u32 k = 0U; k < 2U; ++k) {
+                        NphVec3 v[3];
+                        triangle_at(h, i, j, cell, k, origin, v);
+                        const f32 want = visit(user, 2U * c + k, v, triangle_edges(cell, k));
+                        if (want < 0.0F) {
+                            return;
+                        }
+                        best = nph_f32_min(best, want);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rays
 // ---------------------------------------------------------------------------
 

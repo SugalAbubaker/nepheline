@@ -17,6 +17,10 @@
 //                                 proxies
 //   nph_physics_penetration       GJK, then EPA when the cores overlap: the
 //                                 smallest translation that separates them
+//   nph_physics_raycast           where a segment first meets a geometry
+//   nph_physics_shape_cast        where a convex geometry moved without
+//                                 turning first meets another
+//   nph_physics_overlap           whether a convex geometry touches another
 //
 // Both poses are given in one frame, and every output is in that frame. The
 // world uses a frame centred on one of the two bodies, so the coordinates are
@@ -228,6 +232,72 @@ typedef struct NphPhysicsPenetration {
 bool nph_physics_penetration(const NphPhysicsProxy *a, NphPhysicsPose pose_a,
                              const NphPhysicsProxy *b, NphPhysicsPose pose_b,
                              NphPhysicsPenetration *out);
+
+// ---------------------------------------------------------------------------
+// Casts and overlaps (docs/physics.md "Queries"; ADR-0047)
+// ---------------------------------------------------------------------------
+
+// A hit's triangle on convex geometry, which has none.
+#define NPH_PHYSICS_NO_TRIANGLE 0xFFFFFFFFU
+
+// Where a segment or a moving shape first meets a geometry.
+typedef struct NphPhysicsCastHit {
+    NphVec3 point;  // on the geometry's surface
+    NphVec3 normal; // unit: the surface's there, out of it (against the motion)
+    f32 fraction;   // of the motion, in [0, 1]
+    // The triangle met: a mesh's index in its input (mesh.h's originals), a
+    // heightfield's 2 x cell + 0 or 1, or NPH_PHYSICS_NO_TRIANGLE.
+    u32 triangle;
+} NphPhysicsCastHit;
+
+// Where the segment from `origin` to origin + `delta` first meets `g` at
+// `pose` (all in one frame). Exact for spheres and capsules (closest
+// approach, then Pythagoras: no cancellation for a far origin; Ericson
+// §5.3.2 and §5.3.7), boxes (the slab test), and hulls (the segment clipped
+// by their face planes: Haines, "Fast Ray-Convex Polyhedron Intersection",
+// Graphics Gems II, 1991); meshes and heightfields by their own watertight
+// raycasts, one-sided ones from the front only. Convex geometry is met
+// from outside: a segment that starts inside it does not hit it (Box2D's
+// rule; overlaps find such shapes), one that starts on its surface and
+// goes in hits at fraction 0. False for no hit, or a zero `delta`.
+bool nph_physics_raycast(const NphPhysicsGeometry *g, NphPhysicsPose pose, NphVec3 origin,
+                         NphVec3 delta, NphPhysicsCastHit *out);
+
+// Convex `a` at `pose_a`, moved by `translation` without turning, against
+// `b` at `pose_b` (any type): where they first touch. Conservative
+// advancement on GJK distances (Mirtich, "Impulse-based Dynamic Simulation
+// of Rigid Body Systems", PhD thesis, 1996; as Catto's b2ShapeCast, Box2D
+// v3.1): each step moves `a` as far as the plane between the closest points
+// allows, so it never passes the contact, until the two are within 0.01 mm;
+// a last step along the contact's normal then closes what is left of the
+// gap across a face. GJK runs in a frame at a's place, so its digits are
+// the shapes' own however long the cast. The hit's point is on b's
+// surface; its normal is b's there (towards `a`): GJK's for round shapes;
+// for polytopes, whose cores touch at contact, the exact normal of the
+// closest features on GJK's last simplex (a face against a point, or two
+// edges), or GJK's a millimetre back, whichever separates the two farther.
+//
+// A pair already touching or overlapping meets at fraction 0 when the
+// motion goes into the contact (its normal then the narrow phase's,
+// nph_physics_collide, which is defined at any depth), and not at all when
+// the motion leaves it or slides along it (into it by at most 1e-5 of its
+// length: a motion projected onto the contact): a body resting on a floor
+// casts along it freely. A mesh's or a heightfield's triangles follow the
+// contact rules (ADR-0046): one side, and the face's normal on an inactive
+// edge, so a shape crossing a flat seam is not stopped by the next
+// triangle's edge. A grazing approach that has not arrived after 32 steps
+// stops where it is, short of any contact. False for no hit, or a zero
+// translation.
+bool nph_physics_shape_cast(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, NphVec3 translation,
+                            const NphPhysicsGeometry *b, NphPhysicsPose pose_b,
+                            NphPhysicsCastHit *out);
+
+// True when convex `a` at `pose_a` touches or overlaps `b` at `pose_b`: GJK
+// on convex geometry (radii included); a mesh or a heightfield overlaps
+// what touches one of its triangles, from either side (not what lies
+// wholly behind a one-sided surface).
+bool nph_physics_overlap(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                         const NphPhysicsGeometry *b, NphPhysicsPose pose_b);
 
 #ifdef __cplusplus
 }

@@ -153,6 +153,15 @@ typedef f32 (*NphAabbTreeRayFn)(const NphAabbTreeRay *ray, u32 proxy, u64 user_d
 void nph_aabb_tree_raycast(const NphAabbTree *tree, const NphAabbTreeRay *ray, u64 mask_bits,
                            NphAabbTreeRayFn fn, void *context);
 
+// As nph_aabb_tree_raycast for a box of half extents `extent` (>= 0)
+// centred on the ray's origin and swept along it: the leaves whose boxes it
+// may touch (the ray against each box grown by `extent`, Minkowski's sum),
+// nearer children first. The ray's fraction is the box's. Shape casts walk
+// the tree so, and queries from 64-bit origins grow the extent by their
+// rounding to 32 bits, so the walk stays conservative far from the origin.
+void nph_aabb_tree_box_cast(const NphAabbTree *tree, const NphAabbTreeRay *ray, NphVec3 extent,
+                            u64 mask_bits, NphAabbTreeRayFn fn, void *context);
+
 // Rebuilds with binned SAH: the whole tree (`full`), or only the subtrees
 // that enlargements touched since the last rebuild. Returns the number of
 // leaves placed again. NPH_RESULT_OUT_OF_MEMORY when the scratch arrays

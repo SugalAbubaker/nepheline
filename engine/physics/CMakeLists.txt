@@ -9,6 +9,7 @@ nph_add_module(physics
     SOURCES
         src/aabb_tree.c
         src/body.c
+        src/cast.c
         src/collide.c
         src/collide_hull.c
         src/collide_mesh.c
@@ -22,6 +23,7 @@ nph_add_module(physics
         src/joint_solver.c
         src/mesh.c
         src/physics_internal.h
+        src/query.c
         src/shape.c
         src/solver.c
         src/solver_avx2.c
@@ -40,6 +42,7 @@ nph_set_avx2_sources(src/solver_avx2.c)
 nph_add_test(physics
     SOURCES
         tests/test_aabb_tree.c
+        tests/test_cast.c
         tests/test_collide.c
         tests/test_collide_mesh.c
         tests/test_geometry.c
@@ -49,6 +52,7 @@ nph_add_test(physics
         tests/test_joint.c
         tests/test_mesh.c
         tests/test_physics_support.h
+        tests/test_query.c
         tests/test_ragdoll.c
         tests/test_solvers.c
         tests/test_world.c
