@@ -54,6 +54,25 @@ NphPhysicsJointDesc nph_physics_joint_desc_default(NphPhysicsJointType type, Nph
         d.hinge.upper = 0.5F * 3.14159265F;
         d.hinge.spring_hertz = 1.0F;
         d.hinge.spring_damping_ratio = 1.0F;
+    } else if (type == NPH_PHYSICS_JOINT_SLIDER) {
+        d.slider.lower = -1.0F;
+        d.slider.upper = 1.0F;
+        d.slider.spring_hertz = 1.0F;
+        d.slider.spring_damping_ratio = 1.0F;
+    } else if (type == NPH_PHYSICS_JOINT_DISTANCE) {
+        d.distance.length = 1.0F;
+        d.distance.max_length = 1.0F;
+        d.distance.spring_hertz = 1.0F;
+        d.distance.spring_damping_ratio = 1.0F;
+    } else if (type == NPH_PHYSICS_JOINT_D6) {
+        for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+            NphPhysicsD6Axis *axis = &d.d6.axes[i];
+            const f32 range = i < 3U ? 1.0F : 0.25F * 3.14159265F;
+            axis->lower = -range;
+            axis->upper = range;
+            axis->spring_hertz = 1.0F;
+            axis->spring_damping_ratio = 1.0F;
+        }
     }
     return d;
 }
@@ -113,6 +132,72 @@ static bool ball_valid(const NphPhysicsBallJoint *b)
         return false;
     }
     return finite_nonneg(b->friction_torque);
+}
+
+static bool drive_valid(b32 enable_motor, f32 speed, f32 max_force, b32 enable_spring, f32 hertz,
+                        f32 zeta, f32 target)
+{
+    if (enable_motor != 0 && (!nph_f32_is_finite(speed) || !finite_nonneg(max_force))) {
+        return false;
+    }
+    if (enable_spring != 0 && (!(hertz > 0.0F) || !nph_f32_is_finite(hertz) ||
+                               !finite_nonneg(zeta) || !nph_f32_is_finite(target))) {
+        return false;
+    }
+    return true;
+}
+
+static bool slider_valid(const NphPhysicsSliderJoint *s)
+{
+    if (s->enable_limit != 0 &&
+        !(nph_f32_is_finite(s->lower) && nph_f32_is_finite(s->upper) && s->lower <= s->upper)) {
+        return false;
+    }
+    return drive_valid(s->enable_motor, s->motor_speed, s->max_motor_force, s->enable_spring,
+                       s->spring_hertz, s->spring_damping_ratio, s->spring_target);
+}
+
+static bool distance_valid(const NphPhysicsDistanceJoint *d)
+{
+    if (!finite_nonneg(d->length)) {
+        return false;
+    }
+    if (d->enable_limit != 0 && !(finite_nonneg(d->min_length) && finite_nonneg(d->max_length) &&
+                                  d->min_length <= d->max_length)) {
+        return false;
+    }
+    return drive_valid(d->enable_motor, d->motor_speed, d->max_motor_force, d->enable_spring,
+                       d->spring_hertz, d->spring_damping_ratio, 0.0F);
+}
+
+static bool d6_valid(const NphPhysicsD6Joint *d)
+{
+    const f32 pi = 3.14159265F;
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const NphPhysicsD6Axis *a = &d->axes[i];
+        if ((u32)a->motion > (u32)NPH_PHYSICS_AXIS_FREE) {
+            return false;
+        }
+        if (a->motion == NPH_PHYSICS_AXIS_LIMITED) {
+            if (!(nph_f32_is_finite(a->lower) && nph_f32_is_finite(a->upper) &&
+                  a->lower <= a->upper)) {
+                return false;
+            }
+            // Angles stay inside the decomposition's range: twist within
+            // [-pi, pi], swings within (-pi, pi).
+            if (i == NPH_PHYSICS_D6_TWIST && !(a->lower >= -pi && a->upper <= pi)) {
+                return false;
+            }
+            if (i > NPH_PHYSICS_D6_TWIST && !(a->lower > -pi && a->upper < pi)) {
+                return false;
+            }
+        }
+        if (!drive_valid(a->enable_motor, a->motor_speed, a->max_motor_force, a->enable_spring,
+                         a->spring_hertz, a->spring_damping_ratio, a->spring_target)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool hinge_valid(const NphPhysicsHingeJoint *h)
@@ -211,10 +296,47 @@ bool phys_joints_allow_contact(const NphPhysicsWorld *w, u32 body_a, u32 body_b)
 
 static void store_settings(PhysJoint *j, const NphPhysicsJointDesc *desc)
 {
-    if (desc->type == NPH_PHYSICS_JOINT_BALL) {
+    switch (desc->type) {
+    case NPH_PHYSICS_JOINT_BALL:
         j->ball = desc->ball;
-    } else if (desc->type == NPH_PHYSICS_JOINT_HINGE) {
+        break;
+    case NPH_PHYSICS_JOINT_HINGE:
         j->hinge = desc->hinge;
+        break;
+    case NPH_PHYSICS_JOINT_SLIDER:
+        j->slider = desc->slider;
+        break;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        j->distance = desc->distance;
+        break;
+    case NPH_PHYSICS_JOINT_D6:
+        j->d6 = desc->d6;
+        break;
+    case NPH_PHYSICS_JOINT_FIXED:
+    case NPH_PHYSICS_JOINT_TYPE_COUNT:
+    default:
+        break;
+    }
+}
+
+static bool settings_valid(const NphPhysicsJointDesc *desc)
+{
+    switch (desc->type) {
+    case NPH_PHYSICS_JOINT_BALL:
+        return ball_valid(&desc->ball);
+    case NPH_PHYSICS_JOINT_HINGE:
+        return hinge_valid(&desc->hinge);
+    case NPH_PHYSICS_JOINT_SLIDER:
+        return slider_valid(&desc->slider);
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        return distance_valid(&desc->distance);
+    case NPH_PHYSICS_JOINT_D6:
+        return d6_valid(&desc->d6);
+    case NPH_PHYSICS_JOINT_FIXED:
+        return true;
+    case NPH_PHYSICS_JOINT_TYPE_COUNT:
+    default:
+        return false;
     }
 }
 
@@ -225,9 +347,7 @@ NphResult nph_physics_joint_create(NphPhysicsWorld *world, const NphPhysicsJoint
     NPH_ASSERT_MSG(!world->stepping, "nph_physics_joint_create during a step");
     if (desc == NULL || (u32)desc->type >= (u32)NPH_PHYSICS_JOINT_TYPE_COUNT ||
         !pose_valid(desc->frame_a) || !pose_valid(desc->frame_b) ||
-        desc->body_a.value == desc->body_b.value ||
-        (desc->type == NPH_PHYSICS_JOINT_BALL && !ball_valid(&desc->ball)) ||
-        (desc->type == NPH_PHYSICS_JOINT_HINGE && !hinge_valid(&desc->hinge))) {
+        desc->body_a.value == desc->body_b.value || !settings_valid(desc)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const PhysBody *ba = phys_body(world, desc->body_a);
@@ -364,10 +484,26 @@ NphPhysicsJointDesc nph_physics_joint_desc(const NphPhysicsWorld *world, NphPhys
     d.frame_b = j->frame_b;
     d.collide_connected = (j->flags & PHYS_JOINT_COLLIDE_CONNECTED) != 0U ? 1 : 0;
     d.user_data = j->user_data;
-    if (j->type == NPH_PHYSICS_JOINT_BALL) {
+    switch ((NphPhysicsJointType)j->type) {
+    case NPH_PHYSICS_JOINT_BALL:
         d.ball = j->ball;
-    } else if (j->type == NPH_PHYSICS_JOINT_HINGE) {
+        break;
+    case NPH_PHYSICS_JOINT_HINGE:
         d.hinge = j->hinge;
+        break;
+    case NPH_PHYSICS_JOINT_SLIDER:
+        d.slider = j->slider;
+        break;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        d.distance = j->distance;
+        break;
+    case NPH_PHYSICS_JOINT_D6:
+        d.d6 = j->d6;
+        break;
+    case NPH_PHYSICS_JOINT_FIXED:
+    case NPH_PHYSICS_JOINT_TYPE_COUNT:
+    default:
+        break;
     }
     return d;
 }
@@ -412,6 +548,76 @@ void nph_physics_joint_set_hinge(NphPhysicsWorld *world, NphPhysicsJoint joint,
     wake_ends(world, j);
 }
 
+// The joint of `type` behind a handle for a setter, or NULL (asserted).
+static PhysJoint *settable(NphPhysicsWorld *world, NphPhysicsJoint joint, NphPhysicsJointType type,
+                           const char *what)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: joint changed during a step");
+    NPH_UNUSED(what); // in the assert's message only
+    PhysJoint *j = checked(world, joint);
+    if (j == NULL) {
+        return NULL;
+    }
+    NPH_ASSERT_MSG(j->type == (u32)type, "%s: the wrong joint type", what);
+    return j->type == (u32)type ? j : NULL;
+}
+
+void nph_physics_joint_set_slider(NphPhysicsWorld *world, NphPhysicsJoint joint,
+                                  const NphPhysicsSliderJoint *slider)
+{
+    PhysJoint *j = settable(world, joint, NPH_PHYSICS_JOINT_SLIDER, "nph_physics_joint_set_slider");
+    NPH_ASSERT_MSG(slider_valid(slider), "nph_physics_joint_set_slider: settings out of range");
+    if (j == NULL || !slider_valid(slider)) {
+        return;
+    }
+    j->slider = *slider;
+    wake_ends(world, j);
+}
+
+void nph_physics_joint_set_distance(NphPhysicsWorld *world, NphPhysicsJoint joint,
+                                    const NphPhysicsDistanceJoint *distance)
+{
+    PhysJoint *j =
+        settable(world, joint, NPH_PHYSICS_JOINT_DISTANCE, "nph_physics_joint_set_distance");
+    NPH_ASSERT_MSG(distance_valid(distance),
+                   "nph_physics_joint_set_distance: settings out of range");
+    if (j == NULL || !distance_valid(distance)) {
+        return;
+    }
+    j->distance = *distance;
+    wake_ends(world, j);
+}
+
+void nph_physics_joint_set_d6(NphPhysicsWorld *world, NphPhysicsJoint joint,
+                              const NphPhysicsD6Joint *d6)
+{
+    PhysJoint *j = settable(world, joint, NPH_PHYSICS_JOINT_D6, "nph_physics_joint_set_d6");
+    NPH_ASSERT_MSG(d6_valid(d6), "nph_physics_joint_set_d6: settings out of range");
+    if (j == NULL || !d6_valid(d6)) {
+        return;
+    }
+    j->d6 = *d6;
+    wake_ends(world, j);
+}
+
+f32 nph_physics_joint_slider_position(const NphPhysicsWorld *world, NphPhysicsJoint joint)
+{
+    const PhysJoint *j = checked(world, joint);
+    return j != NULL ? phys_joint_slider_value(world, j, false) : 0.0F;
+}
+
+f32 nph_physics_joint_slider_speed(const NphPhysicsWorld *world, NphPhysicsJoint joint)
+{
+    const PhysJoint *j = checked(world, joint);
+    return j != NULL ? phys_joint_slider_value(world, j, true) : 0.0F;
+}
+
+f32 nph_physics_joint_length(const NphPhysicsWorld *world, NphPhysicsJoint joint)
+{
+    const PhysJoint *j = checked(world, joint);
+    return j != NULL ? phys_joint_length(world, j) : 0.0F;
+}
+
 f32 nph_physics_joint_hinge_angle(const NphPhysicsWorld *world, NphPhysicsJoint joint)
 {
     const PhysJoint *j = checked(world, joint);
@@ -442,12 +648,11 @@ void nph_physics_joint_reaction(const NphPhysicsWorld *world, NphPhysicsJoint jo
     // The accumulated impulses are per substep: over the substep's length,
     // they are the last substep's force and torque.
     const f32 inv_h = 1.0F / world->last_substep;
-    const PhysBody *a = &world->bodies.data[j->body_a];
     const PhysBody *b = &world->bodies.data[j->body_b];
-    const NphVec3 angular =
-        phys_joint_angular_impulse(j, nph_quat_mul(a->rotation, j->frame_a.rotation),
-                                   nph_quat_mul(b->rotation, j->frame_b.rotation));
-    *force = nph_vec3_scale(j->linear_impulse, inv_h);
+    NphVec3 linear;
+    NphVec3 angular;
+    phys_joint_reaction_impulses(world, j, &linear, &angular);
+    *force = nph_vec3_scale(linear, inv_h);
     const NphVec3 rb =
         nph_quat_rotate(b->rotation, nph_vec3_sub(j->frame_b.position, b->local_center));
     *torque = nph_vec3_add(nph_vec3_scale(angular, inv_h), nph_vec3_cross(rb, *force));

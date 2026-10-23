@@ -8,7 +8,8 @@ collision, queries, and the character controller, stepped at a fixed
 bridges entities to bodies) or the renderer (debug drawing goes out through
 a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md) (the
 collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
-solver), and [ADR-0044](adr/0044-physics-joints.md) (joints).
+solver), [ADR-0044](adr/0044-physics-joints.md) (joints), and
+[ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -16,8 +17,10 @@ Phase 11 builds it in parts. This document describes what exists:
 |---|---|
 | Geometry, convex hulls, the narrow phase, the AABB tree | done |
 | The world: bodies, shapes, contacts, the soft-step solver, threads, islands, sleep, events | done |
-| Joints: ball (cone, twist, friction), hinge (limits, motor, spring), fixed | done |
-| The solver comparison (§13), slider, distance, and 6-DOF joints, the ragdoll, meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
+| Joints: ball (cone, twist, friction), hinge (limits, motor, spring), fixed, slider (limits, motor, spring), distance (rod, rope, spring, motor), 6-DOF (each axis locked, limited, or free, with drives) | done |
+| The solver comparison (§13): the soft step (the default), TGS, and XPBD | done |
+| The ragdoll: the exit tests of §12 under every solver | done |
+| Meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -29,7 +32,7 @@ Phase 11 builds it in parts. This document describes what exists:
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
 | `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
-| `joint.h` | joints between bodies: ball, hinge, fixed; frames, limits, motors, springs, reactions |
+| `joint.h` | joints between bodies: ball, hinge, fixed, slider, distance, 6-DOF; frames, limits, motors, springs, reactions |
 
 ## Conventions
 
@@ -447,6 +450,9 @@ made from them starts satisfied.
 | ball | the anchors together | rotation | a cone for B's X axis (elliptical: half angles about A's Y and Z), a twist range about it, friction against any rotation |
 | hinge | the anchors together, the X axes aligned | rotation about X | an angle range, a motor (a speed up to a torque), a spring (towards an angle) |
 | fixed | the frames together | nothing | |
+| slider | the rotations, B's anchor on A's X axis | translation along X | a range, a motor (a speed up to a force), a spring (towards a position) |
+| distance | the anchors at the length apart | everything else | a range instead (a rope: slack below its length), a spring towards the length, a motor on its rate |
+| 6-DOF | each axis that is locked: translation along A's X, Y, and Z, the twist about X, the swings about Y and Z | each axis set free | per axis: locked, limited (a range), or free; a motor and a spring |
 
 At least one body must be dynamic; either may be static, a fixed point in
 the world. Joined bodies' shapes do not touch unless the joint says so
@@ -454,11 +460,11 @@ the world. Joined bodies' shapes do not touch unless the joint says so
 way, creating such a joint destroys the bodies' contacts, and destroying it
 queues the shapes so the next step finds their pairs again. Joints link
 islands as touching contacts do, so joined bodies sleep and wake together;
-a moving kinematic body wakes what hangs from it, and a hinge's motor
-driving towards a speed keeps its bodies awake. Destroying a body destroys
-its joints. `nph_physics_joint_reaction` gives the force and torque the
-joint applied to B in the last substep, what a breakable joint compares
-with its strength.
+a moving kinematic body wakes what hangs from it, and any joint's motor
+driving towards a speed keeps its bodies awake, however slow. Destroying a
+body destroys its joints. `nph_physics_joint_reaction` gives the force and
+torque the joint applied to B in the last substep, what a breakable joint
+compares with its strength.
 
 **Solving.** Joints are constraints in the graph like contacts: a joint
 takes a colour free for its dynamic bodies, the colour's stages solve its
@@ -481,9 +487,23 @@ is left exact):
 | hinge limits, ball twist limits | the angle past either end | 1 each, one-sided |
 | ball cone | the angle between the X axes past an ellipse over the swing vector (angle times axis), along the swing's axis | 1, one-sided |
 | ball friction | the relative angular velocity | 3, the impulse within a ball of the torque times the substep |
-| hinge axes | the cross product of the X axes | 2, about A's Y and Z |
-| fixed rotation | the rotation vector from A's frame to B's (twice the error quaternion's vector part) | 3 |
-| anchors | B's anchor less A's | 3 |
+| slider and 6-DOF springs, motors, limits | as the hinge's, on each axis's value | 1 each an axis |
+| distance spring, motor, range | the anchors' distance less the length, its rate, or past either end | 1 each, along the line between the anchors |
+| hinge axes (and a 6-DOF's two swings, both locked, the twist not) | the cross product of the X axes | 2, about A's Y and Z |
+| 6-DOF rotations locked one by one | the axis's angle | 1 each |
+| fixed rotation (and the slider's, a 6-DOF's with all three locked) | the rotation vector from A's frame to B's (twice the error quaternion's vector part) | 3 |
+| slider and 6-DOF translations locked one by one | B's anchor less A's, along the axis | 1 each, B's anchor against the point of A under it |
+| a rod's length (the distance joint without a range or spring) | the anchors' distance less the length | 1 |
+| anchors (and a 6-DOF's with all three translations locked) | B's anchor less A's | 3 |
+
+A 6-DOF joint's values are measured from the frames: the translations are
+B's anchor less A's along A's axes; the twist and swings come from the
+swing-twist decomposition of B's frame in A's (the twist about X, then the
+swing quaternion's angles about A's Y and Z). Each swing is limited on its
+own, so the limits make a pyramid where the ball's make an elliptical cone.
+The twist rows turn about the mean of the two X axes. The slider is the
+6-DOF joint with only translation along X free or limited; one code path
+serves both.
 
 Limits are speculative like contacts: open, they only stop the approach
 within the substep; closed, they are soft while solving and rigid while
@@ -512,10 +532,35 @@ force it is.
   integration (a damping ratio near hω / 2); a welded 2 m, 80 kg cantilever
   sags 0.04 mm at its tip.
 - The reaction holds the body's weight to 0.5 %.
+- A slider keeps its body on its axis to 4 µm under gravity and stops at
+  its limit to 0.1 mm; a force-limited motor reaches the speed its force
+  allows to five digits (0.15625 m/s), and a 2 Hz spring rings at
+  0.5000 s. A rod holds its length within 0.05 mm through a swing, a rope
+  never exceeds its length (1.0000 m), and a distance spring rings at its
+  frequency. A 6-DOF joint welds, slides, and frees as its axes say,
+  holds its twist and swings at 20.00°, 30.03°, and 15.07° against limits
+  of 20, 30, and 15, and drives a wheel at its motor's 3.0000 rad/s.
+- A motor slower than the sleep threshold keeps going: 0.02 m/s for 2 s
+  under every joint type (the bodies would otherwise fall asleep after
+  9 mm).
 
 **Cost.** A joint is scalar code, about 1.1 µs a step on one thread
 (preparation and three passes in each of four substeps): sixteen chains of
 25 links (400 joints) step in 0.57 ms on one thread and 0.16 ms on the job
+system.
+
+**Ragdolls.** The tests' ragdoll is eleven bodies 1.7 m tall: ball joints
+at the spine, neck, shoulders, and hips (cones, twists), hinges at the
+elbows and knees (bending forward and back), and 2 N m of friction in
+every joint (a motor to standstill in the hinges), as a limp body's
+muscles have; without it a dangling forearm swings for ever and keeps its
+heap awake. Under the default solver a ragdoll dropped on its straight
+legs, thrown cartwheeling at the ground, or sent down stairs comes to rest
+in 2 to 5 s with its joints closed to 0.04 mm and within 0.03° of their
+limits, opening at most 12 mm and 5.3° for a moment at the hardest impacts;
+sixteen piled on one another sleep in 5.5 s; a 216 kg crate dropped on one
+lying on its back opens its joints 2 mm. Thirty-two lying in heaps (352
+bodies, 320 joints) step in 1.34 ms on one thread and 0.38 ms on the job
 system.
 
 ## Choosing a solver
@@ -528,8 +573,8 @@ the measurements):
 | Solver | Per substep | Choose it for | Avoid it for |
 |---|---|---|---|
 | soft step (default) | soft solve, then a rigid relax | everything: stacks, piles, ragdolls, exact friction and energy | very heavy loads on joints at 4 substeps (raise the substeps) |
-| TGS (PhysX 4) | rigid rows with a Baumgarte bias on the step's error; one velocity pass after the substeps | stacks and piles where cost matters most (9 to 16 % cheaper) | heavy loads on joints: a 100:1 chain stretches 161 mm and can come apart |
-| XPBD (Müller et al. 2020) | predicted positions corrected by rigid constraints, velocities derived, then a velocity pass | stiff machinery and rigs (near rigid at 16 substeps) | stacks (a 20-row pyramid collapses), sliding friction (5 % weak), long oscillations (10 % of a pendulum's swing lost in 10 periods) |
+| TGS (PhysX 4) | rigid rows with a Baumgarte bias on the step's error; one velocity pass after the substeps | stacks and piles where cost matters most (9 to 16 % cheaper) | heavy loads on joints (a 100:1 chain stretches 161 mm and can come apart), piles of ragdolls (a limb or two never settles), violent impacts on jointed bodies (energy spikes) |
+| XPBD (Müller et al. 2020) | predicted positions corrected by rigid constraints, velocities derived, then a velocity pass | stiff machinery and rigs (near rigid at 16 substeps) | stacks (a 20-row pyramid collapses), sliding friction (5 % weak), long oscillations (10 % of a pendulum's swing lost in 10 periods), piles of ragdolls at 4 substeps, violent impacts on jointed bodies at 16 (energy spikes) |
 
 The soft step is the only one that stacks, keeps energy, gets friction
 exactly, and settles ragdoll heaps; its joints' give falls by four for each
@@ -652,6 +697,8 @@ point):
 | `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
 | `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
 | `world_chains_mt` | 160 000 |
+| `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 340 000 |
+| `world_ragdolls_32_mt` | 380 000 |
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
 tests for two 32-vertex hulls; the planned optimisation buckets B's arcs on
@@ -669,7 +716,7 @@ budget of §8.9 on the six cores of the reference CPU class.
 
 ## Testing
 
-`physics_tests` (87 tests):
+`physics_tests` (113 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -719,4 +766,31 @@ budget of §8.9 on the six cores of the reference CPU class.
   they held; chains sleeping and waking as one; a kinematic crane carrying
   a sleeping load; the reaction against the weight; and the same state
   hash across worker and solver thread counts with chains, a motorized
-  door, a weld, and boxes falling on them.
+  door, a weld, and boxes falling on them. The slider along its axis, at
+  its limit, under its motor's force, and on its spring; an elevator on
+  its limit; a rod holding its length, a rope going slack and taut, and a
+  distance spring's frequency; a 6-DOF joint as a weld, a slider, and
+  nothing, its twist and swings at their limits axis by axis, and its
+  motor and spring; a slow motor of every type keeping its bodies awake.
+- The solver comparison (`test_solvers.c`, ADR-0045): stacks, a 100:1
+  stack, chains, a pendulum, a door slammed into its limits, a ragdoll
+  heap, bounce and friction, and a machine of slider, rope, and 6-DOF
+  joints, each under the soft step at 4 and 8 substeps, TGS at 4, and
+  XPBD at 4 and 16 (the first three in Debug and under the sanitizers):
+  every configuration must stay sound, the default must meet its quality
+  thresholds, and the rest is logged for the ADR. Each solver's kernels
+  agree to the bit across SSE4 and AVX2, and its results across worker
+  counts.
+- The ragdoll (`test_ragdoll.c`, Phase 11's exit criteria): a ragdoll
+  dropped on its straight legs, thrown cartwheeling at the ground, sent
+  down stairs, sixteen piled up (four in Debug), and one under a falling
+  crate, under every configuration. Every one must stay sound (finite,
+  joints within 5 cm and 15° at the worst impact and closed at rest,
+  nothing sunk 5 cm into the floor). The soft step must also never rise
+  above its starting energy and must put every scene to sleep; TGS and
+  XPBD, which gain energy at violent impacts and can leave a limb
+  stirring, must never double it and must end under 2 m/s. The default
+  holds bounds about two and a half times what it measures, since a
+  ragdoll is chaotic and another compiler's rounding sends it elsewhere. A
+  pile replays bit for bit in a new world, on 4 and 8 workers, and on the
+  AVX2 kernel, under every solver.
