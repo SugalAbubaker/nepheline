@@ -24,8 +24,19 @@ typedef struct NphBoxViewStorage {
     NphPlane planes[6];
 } NphBoxViewStorage;
 
+typedef struct NphTriangleViewStorage {
+    NphVec3 vertices[3];
+    NphPlane planes[2];
+} NphTriangleViewStorage;
+
 NphHullView nph_physics_hull_view(const NphPhysicsHull *hull);
 NphHullView nph_physics_box_view(NphVec3 half_extents, NphBoxViewStorage *storage);
+// A triangle as a flat polyhedron for the separating axis test (ADR-0046
+// §7): its front (0, the right-handed normal of v[0], v[1], v[2]) and back
+// (1), and three edges, each the twin pair (v[i] v[i+1], v[i+1] v[i]) with
+// the first on the front. An edge's two faces are opposite, so its
+// Gauss-map arc is a half circle, which the axis test handles.
+NphHullView nph_physics_triangle_view(const NphVec3 v[3], NphTriangleViewStorage *storage);
 
 // The box view's topology, for the test that it matches
 // nph_physics_hull_make_box.

@@ -92,6 +92,36 @@ NphHullView nph_physics_box_view(NphVec3 h, NphBoxViewStorage *storage)
     return v;
 }
 
+// The triangle's topology: faces front (0) and back (1); half-edges in
+// twin pairs v0 v1 | v1 v0, v1 v2 | v2 v1, v2 v0 | v0 v2, the first of each on
+// the front, each face's loop counter-clockwise seen from outside it.
+static const u16 k_triangle_faces[2] = {0U, 1U};
+static const NphPhysicsHullEdge k_triangle_edges[6] = {
+    {2U, 1U, 0U, 0U}, {5U, 0U, 1U, 1U}, {4U, 3U, 1U, 0U},
+    {1U, 2U, 2U, 1U}, {0U, 5U, 2U, 0U}, {3U, 4U, 0U, 1U},
+};
+
+NphHullView nph_physics_triangle_view(const NphVec3 v[3], NphTriangleViewStorage *storage)
+{
+    for (u32 i = 0U; i < 3U; ++i) {
+        storage->vertices[i] = v[i];
+    }
+    const NphVec3 n = nph_vec3_normalize_or_zero(
+        nph_vec3_cross(nph_vec3_sub(v[1], v[0]), nph_vec3_sub(v[2], v[0])));
+    storage->planes[0] = nph_plane(n, -nph_vec3_dot(n, v[0]));
+    storage->planes[1] = nph_plane(nph_vec3_neg(n), nph_vec3_dot(n, v[0]));
+    NphHullView h;
+    h.vertices = storage->vertices;
+    h.planes = storage->planes;
+    h.faces = k_triangle_faces;
+    h.edges = k_triangle_edges;
+    h.vertex_count = 3U;
+    h.face_count = 2U;
+    h.edge_count = 6U;
+    h.centroid = nph_vec3_scale(nph_vec3_add(nph_vec3_add(v[0], v[1]), v[2]), 1.0F / 3.0F);
+    return h;
+}
+
 NphHullView nph_physics_hull_view(const NphPhysicsHull *hull)
 {
     NphHullView v;
@@ -406,12 +436,22 @@ static f32 face_b_separation(const HullPair *hp, u32 f)
     return min_projection(hp->a->vertices, hp->a->vertex_count, pl.normal) + pl.d;
 }
 
+// The normal of the plane of B's arc cd: d x c, or for a flat edge (a
+// triangle's, whose faces are opposite and whose normals' cross product
+// vanishes) the cross product's limit as the angle between the faces
+// closes: the edge reversed (origin less head, in A's frame).
+static NphVec3 arc_plane(NphVec3 c, NphVec3 d, NphVec3 origin, NphVec3 head)
+{
+    const NphVec3 u = nph_vec3_cross(d, c);
+    return nph_vec3_length_sq(u) > 1e-12F ? u : nph_vec3_sub(origin, head);
+}
+
 // Gregorius 2013: arcs ab and cd of the Gauss map intersect. c and d are
-// B's face normals negated (the Minkowski difference A - B).
-static bool is_minkowski_face(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 d)
+// B's face normals negated (the Minkowski difference A - B), dxc the
+// normal of their arc's plane (arc_plane).
+static bool is_minkowski_face(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 d, NphVec3 dxc)
 {
     const NphVec3 bxa = nph_vec3_cross(b, a);
-    const NphVec3 dxc = nph_vec3_cross(d, c);
     const f32 cba = nph_vec3_dot(c, bxa);
     const f32 dba = nph_vec3_dot(d, bxa);
     const f32 adc = nph_vec3_dot(a, dxc);
@@ -618,7 +658,8 @@ static NPH_NO_INLINE bool sat_query(const HullPair *hp, f32 limit, NphPhysicsCol
         for (u32 eb = 0U; eb < b->edge_count; eb += 2U) {
             const NphVec3 c = nph_vec3_neg(bn[b->edges[eb].face]);
             const NphVec3 d = nph_vec3_neg(bn[b->edges[eb + 1U].face]);
-            const NphVec3 u = nph_vec3_cross(d, c);
+            const NphVec3 u =
+                arc_plane(c, d, hp->bv[b->edges[eb].origin], edge_head(b, hp->bv, eb));
             const u32 k = se.count++;
             se.cx[k] = c.x;
             se.cy[k] = c.y;
@@ -714,13 +755,14 @@ static NPH_NO_INLINE bool sat_query(const HullPair *hp, f32 limit, NphPhysicsCol
             const NphVec3 pa = a->vertices[a->edges[ea].origin];
             const NphVec3 ua = nph_vec3_sub(edge_head(a, a->vertices, ea), pa);
             for (u32 eb = 0U; eb < b->edge_count; eb += 2U) {
-                const NphVec3 nb1 = bn[b->edges[eb].face];
-                const NphVec3 nb2 = bn[b->edges[eb + 1U].face];
-                if (!is_minkowski_face(na1, na2, nph_vec3_neg(nb1), nph_vec3_neg(nb2))) {
+                const NphVec3 c = nph_vec3_neg(bn[b->edges[eb].face]);
+                const NphVec3 d = nph_vec3_neg(bn[b->edges[eb + 1U].face]);
+                const NphVec3 pb = hp->bv[b->edges[eb].origin];
+                const NphVec3 hb = edge_head(b, hp->bv, eb);
+                if (!is_minkowski_face(na1, na2, c, d, arc_plane(c, d, pb, hb))) {
                     continue;
                 }
-                const NphVec3 pb = hp->bv[b->edges[eb].origin];
-                const NphVec3 ub = nph_vec3_sub(edge_head(b, hp->bv, eb), pb);
+                const NphVec3 ub = nph_vec3_sub(hb, pb);
                 NphVec3 axis;
                 const f32 s =
                     edge_pair_separation_above(pa, ua, pb, ub, a->centroid, r->edge_sep, &axis);
