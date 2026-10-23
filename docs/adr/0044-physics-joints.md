@@ -1,8 +1,8 @@
 # 0044. Physics: joints in the soft step
 
 - **Date:** 2026-10-23
-- **Status:** Accepted (the solver they ride on stays provisional until the
-  §13 comparison; ADR-0043)
+- **Status:** Accepted; amended 2026-10-23 with the slider, distance, and
+  6-DOF joints (items 10 to 14). The solvers they ride on are ADR-0045's.
 
 ## Context
 
@@ -16,8 +16,9 @@ to be made with benchmarks, and joints are where solvers differ most, so
 they come before it.
 
 This ADR covers the first three joints (ball, hinge, fixed), how joints
-enter the solver, and their semantics in the world. Slider, distance, and
-6-DOF follow with the ragdoll.
+enter the solver, and their semantics in the world; the amendment (items
+10 to 14) adds the slider, distance, and 6-DOF joints, which came with the
+ragdoll's exit tests.
 
 ## Decision
 
@@ -65,9 +66,9 @@ enter the solver, and their semantics in the world. Slider, distance, and
    says so: the pair search skips them, creating the joint destroys their
    contacts (reporting the touching ones' end), and destroying it queues the
    shapes for the next pair search. Joints link islands as touching contacts
-   do. A moving kinematic body wakes what hangs from it; a hinge motor
-   driving towards a speed keeps its bodies awake (otherwise a slow start
-   falls asleep before it gets going). Destroying a body destroys its joints
+   do. A moving kinematic body wakes what hangs from it; a motor driving
+   towards a speed keeps its bodies awake (otherwise a slow start falls
+   asleep before it gets going: item 14). Destroying a body destroys its joints
    and wakes the bodies at their other ends.
 8. **Scalar and compiled once.** Joints are few beside contacts and differ
    by type, so their arithmetic is ordinary scalar code, the same bits on
@@ -75,6 +76,38 @@ enter the solver, and their semantics in the world. Slider, distance, and
    body of static ends is shared).
 9. **Reactions are read back**: the force and torque the joint applied to
    B in the last substep, for breakable joints in game code.
+
+The amendment:
+
+10. **The 6-DOF joint is six axes**: translation along A's X, Y, and Z,
+    the twist about X, and the swings about A's Y and Z, each locked,
+    limited (a range), or free, each with an optional motor (a speed up to
+    a force or torque) and spring (towards a value), PhysX's D6 and Jolt's
+    six-DOF constraint. The values come from the frames: the translations
+    are B's anchor less A's along A's axes; the twist and swings come from
+    the swing-twist decomposition of B's frame in A's, the swing
+    quaternion's angles about Y and Z limited each on its own (a pyramid,
+    where the ball joint's cone is an ellipse). Rows follow item 4's order
+    (springs, motors, limits, locks, then the anchors). Locked groups keep
+    the block rows of the other joints: all three rotations as the fixed
+    joint's, both swings as the hinge's two axes, all three translations
+    as the anchors' 3x3 block, so a fully locked 6-DOF joint is a weld and
+    the rows a joint does not need are never built.
+11. **The slider is the 6-DOF joint** with only translation along X free
+    or limited and its drives on that axis: one code path for both.
+12. **The distance joint is one row** along the line between the anchors:
+    rigid at its length (a rod), a range instead (a rope is 0 to its
+    length, slack below it), or a spring towards the length, and a motor
+    on the length's rate. The anchors are the bodies' frames' origins; the
+    rotations are free.
+13. **Every joint in every solver** (ADR-0045): the soft step's rows (soft
+    while solving, rigid while relaxing), TGS's (the same rows, rigid with
+    a Baumgarte bias), and XPBD's position-level forms (each row's error
+    closed by its compliance: zero for locks and limits, the spring's for
+    springs) with their motors and dampers on the derived velocities.
+14. **Any joint's motor driving towards a speed keeps its bodies awake**,
+    not only the hinge's: a slider motor at 0.02 m/s fell asleep after
+    9 mm, below the 0.05 m/s sleep threshold.
 
 ## Alternatives considered
 
@@ -114,3 +147,15 @@ enter the solver, and their semantics in the world. Slider, distance, and
 - Joints are bit-identical across ISAs and worker counts (tested), and use
   the platform's `atan2f` for angles: deterministic on one platform (§8.9),
   not across C libraries.
+- Measured for the amendment (Profile, the tests): a slider holds its
+  axis to 4 µm under gravity and stops at its limit exactly (0.5000 m); a
+  force-limited motor reaches the speed its force allows (0.15625 m/s); a
+  rod holds its length to 0.05 mm through a swing and a rope never exceeds
+  its length; springs ring at their frequency (0.5000 s at 2 Hz); a 6-DOF
+  joint holds its twist and swings at 20.00°, 30.03°, and 15.07° against
+  limits of 20, 30, and 15, and drives a wheel at its motor's 3.0000 rad/s.
+- A ragdoll is ball joints at the spine, neck, shoulders, and hips and
+  hinges at the elbows and knees, all with 2 N m of friction (the hinges'
+  as a motor to standstill): a joint without friction lets a dangling limb
+  swing for ever and keeps its heap awake. The exit tests drop, throw, pile,
+  and crush ragdolls under every solver (docs/physics.md, ADR-0045).
