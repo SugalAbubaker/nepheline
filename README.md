@@ -143,7 +143,7 @@ Modules depend strictly left-to-right:
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
-- [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, benchmarks
+- [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, the world (bodies, shapes, contacts), the soft-step solver and its threads, islands and sleep, events, benchmarks
 - [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
 - [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework

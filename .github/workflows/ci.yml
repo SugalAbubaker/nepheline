@@ -310,12 +310,14 @@ jobs:
   # in place of ASan and UBSan runs the jobs tests, stress suite included,
   # the scene tests, whose schedules and transform system run on the job
   # system, the profile tests, whose rings are written by many threads and
-  # drained by one, and the game module tests, headless engines whose
-  # simulation job overlaps the main thread's frame (ADR-0023). The fibers
+  # drained by one, the game module tests, headless engines whose
+  # simulation job overlaps the main thread's frame (ADR-0023), and the
+  # physics tests, whose solver stages run on spinning helper jobs
+  # (ADR-0043 §8). The fibers
   # carry the __tsan_*_fiber annotations (ADR-0010 §5), so parked and
   # migrated jobs are tracked correctly.
   tsan:
-    name: tsan (jobs, scene, profile, runtime)
+    name: tsan (jobs, scene, profile, runtime, physics)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -329,14 +331,14 @@ jobs:
         run: >
           cmake --preset linux-clang -DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
           -DNPH_BUILD_BENCHMARKS=OFF -DNPH_BUILD_SAMPLES=OFF
-      - name: Build the jobs, scene, profile, and game module tests
+      - name: Build the jobs, scene, profile, game module, and physics tests
         run: >
           cmake --build --preset linux-clang-debug
-          --target jobs_tests scene_tests profile_tests runtime_game_tests
+          --target jobs_tests scene_tests profile_tests runtime_game_tests physics_tests
       - name: Run them under ThreadSanitizer
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game)$' --output-on-failure
+        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game|physics)$' --output-on-failure
 
   # Single required status check for branch protection; stays stable while the
   # matrix above evolves.

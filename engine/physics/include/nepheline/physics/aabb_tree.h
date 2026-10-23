@@ -104,9 +104,11 @@ void nph_aabb_tree_destroy_proxy(NphAabbTree *tree, u32 proxy);
 // position for the new box).
 void nph_aabb_tree_move_proxy(NphAabbTree *tree, u32 proxy, NphAABB aabb);
 
-// Grows a proxy's box to contain `aabb` and its ancestors with it, without
-// restructuring: O(depth). The tree's quality decays with many
-// enlargements; nph_aabb_tree_rebuild(tree, false) restores it.
+// Gives a proxy the box `aabb` without restructuring, O(depth): its
+// ancestors grow to contain the new box (and still contain the old one, so
+// they stay conservative). For a proxy that moved a little out of its
+// fattened box. The ancestors' boxes and the tree's quality decay with many
+// such moves; nph_aabb_tree_rebuild(tree, false) restores both.
 void nph_aabb_tree_enlarge_proxy(NphAabbTree *tree, u32 proxy, NphAABB aabb);
 
 // Changes a proxy's category bits (and its ancestors' unions).

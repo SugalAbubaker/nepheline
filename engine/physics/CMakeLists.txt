@@ -8,14 +8,25 @@
 nph_add_module(physics
     SOURCES
         src/aabb_tree.c
+        src/body.c
         src/collide.c
         src/collide_hull.c
+        src/contact.c
         src/geometry.c
         src/gjk.c
         src/hull.c
+        src/island.c
         src/physics_internal.h
+        src/shape.c
+        src/solver.c
+        src/solver_avx2.c
+        src/solver_impl.h
+        src/solver_sse4.c
+        src/world.c
+        src/world_internal.h
     PUBLIC_DEPS nph::jobs
 )
+nph_set_avx2_sources(src/solver_avx2.c)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -29,6 +40,7 @@ nph_add_test(physics
         tests/test_gjk.c
         tests/test_hull.c
         tests/test_physics_support.h
+        tests/test_world.c
     DEPS
         nph::physics
 )
