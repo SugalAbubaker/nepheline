@@ -491,3 +491,203 @@ NBENCH(tree_rebuild_10k)
     }
     nph_aabb_tree_free(&tree);
 }
+
+// ---------------------------------------------------------------------------
+// The world, per step (sleep off where the scene must stay awake)
+//
+//   world_pyramid_20_st      a 20-row pyramid (210 boxes) resting, one thread
+//   world_pyramid_20_mt      the same on the job system (all cores)
+//   world_pyramids_16_mt     sixteen of them side by side (3360 boxes)
+//   world_pile_1000_st       1000 boxes, spheres, and capsules settled in a bin
+//   world_pile_1000_mt       the same on the job system
+//   world_sleeping_10k       10k sleeping boxes and one awake ball
+// ---------------------------------------------------------------------------
+
+#include <nepheline/jobs/jobs.h>
+#include <nepheline/physics/body.h>
+#include <nepheline/physics/shape.h>
+#include <nepheline/physics/world.h>
+
+#define WORLD_DT (1.0F / 240.0F)
+
+static NphJobSystem *bench_jobs(void)
+{
+    static NphJobSystem *js = NULL;
+    if (js == NULL) {
+        NphJobSystemDesc d;
+        memset(&d, 0, sizeof d);
+        d.alloc = nph_allocator_system();
+        if (nph_job_system_create(&d, &js) != NPH_RESULT_OK) {
+            js = NULL;
+        }
+    }
+    return js;
+}
+
+static NphPhysicsWorld *bench_world(bool sleep)
+{
+    NphPhysicsWorldDesc d = nph_physics_world_desc_default();
+    d.alloc = nph_allocator_system();
+    d.enable_sleep = sleep ? 1 : 0;
+    NphPhysicsWorld *w = NULL;
+    if (nph_physics_world_create(&d, &w) != NPH_RESULT_OK) {
+        return NULL;
+    }
+    return w;
+}
+
+static void bench_body(NphPhysicsWorld *w, NphPhysicsBodyType type, NphDVec3 p, NphQuat q,
+                       NphPhysicsGeometry g)
+{
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.type = type;
+    bd.position = p;
+    bd.rotation = q;
+    NphPhysicsBody b;
+    if (nph_physics_body_create(w, &bd, &b) != NPH_RESULT_OK) {
+        return;
+    }
+    const NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
+    NphPhysicsShape s;
+    NPH_IGNORE_RESULT(nph_physics_shape_create(w, b, &sd, &s));
+}
+
+static void bench_ground(NphPhysicsWorld *w, f32 half)
+{
+    bench_body(w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(0.0, -1.0, 0.0), nph_quat_identity(),
+               nph_physics_geometry_box(nph_vec3(half, 1.0F, half)));
+}
+
+static void bench_steps(NphPhysicsWorld *w, NphJobSystem *js, u32 n)
+{
+    for (u32 i = 0U; i < n; ++i) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+}
+
+static NphPhysicsWorld *pyramids(u32 rows, u32 copies)
+{
+    NphPhysicsWorld *w = bench_world(false);
+    if (w == NULL) {
+        return NULL;
+    }
+    bench_ground(w, 50.0F);
+    for (u32 k = 0U; k < copies; ++k) {
+        const f64 z = 5.0 * ((f64)k - 0.5 * (f64)(copies - 1U));
+        for (u32 row = 0U; row < rows; ++row) {
+            const u32 count = rows - row;
+            for (u32 i = 0U; i < count; ++i) {
+                const f64 x = ((f64)i - (f64)(count - 1U) * 0.5) * 1.05;
+                bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(x, 0.5 + (f64)row, z),
+                           nph_quat_identity(), nph_physics_geometry_box(nph_vec3_splat(0.5F)));
+            }
+        }
+    }
+    return w;
+}
+
+static void bench_world_steps(NbenchState *state, NphPhysicsWorld *w, NphJobSystem *js)
+{
+    if (w == NULL) {
+        return;
+    }
+    bench_steps(w, js, 240U); // settle
+    while (nbench_keep_running(state)) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_pyramid_20_st)
+{
+    bench_world_steps(state, pyramids(20U, 1U), NULL);
+}
+
+NBENCH(world_pyramid_20_mt)
+{
+    bench_world_steps(state, pyramids(20U, 1U), bench_jobs());
+}
+
+NBENCH(world_pyramids_16_mt)
+{
+    bench_world_steps(state, pyramids(20U, 16U), bench_jobs());
+}
+
+static void bench_pile(NbenchState *state, NphJobSystem *js)
+{
+    NphPhysicsWorld *w = bench_world(false);
+    if (w == NULL) {
+        return;
+    }
+    bench_ground(w, 30.0F);
+    // A 10 m bin.
+    for (u32 k = 0U; k < 4U; ++k) {
+        const f64 s = k < 2U ? 1.0 : -1.0;
+        const NphDVec3 p =
+            k % 2U == 0U ? nph_dvec3(5.25 * s, 5.0, 0.0) : nph_dvec3(0.0, 5.0, 5.25 * s);
+        const NphVec3 h = k % 2U == 0U ? nph_vec3(0.25F, 5.0F, 5.5F) : nph_vec3(5.5F, 5.0F, 0.25F);
+        bench_body(w, NPH_PHYSICS_BODY_STATIC, p, nph_quat_identity(), nph_physics_geometry_box(h));
+    }
+    NphPcg32 r = bench_rng(17U);
+    for (u32 i = 0U; i < 1000U; ++i) {
+        const NphDVec3 p =
+            nph_dvec3((f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F), 1.0 + 0.05 * (f64)i,
+                      (f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F));
+        NphPhysicsGeometry g;
+        if (i % 3U == 0U) {
+            g = nph_physics_geometry_box(rand_vec3(&r, 0.15F, 0.35F));
+        } else if (i % 3U == 1U) {
+            g = nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.15F, 0.3F));
+        } else {
+            g = nph_physics_geometry_capsule(nph_pcg32_next_range_f32(&r, 0.1F, 0.3F),
+                                             nph_pcg32_next_range_f32(&r, 0.1F, 0.2F));
+        }
+        bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, p, rand_rotation(&r), g);
+    }
+    bench_steps(w, bench_jobs(), 960U); // fall and settle
+    while (nbench_keep_running(state)) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_pile_1000_st)
+{
+    bench_pile(state, NULL);
+}
+
+NBENCH(world_pile_1000_mt)
+{
+    bench_pile(state, bench_jobs());
+}
+
+NBENCH(world_sleeping_10k)
+{
+    NphPhysicsWorld *w = bench_world(true);
+    if (w == NULL) {
+        return;
+    }
+    bench_ground(w, 150.0F);
+    for (u32 i = 0U; i < 10000U; ++i) {
+        const f64 x = (f64)(i % 100U) * 2.0 - 99.0;
+        const f64 z = (f64)(u32)(i / 100U) * 2.0 - 99.0; // row index
+        bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(x, 0.5, z), nph_quat_identity(),
+                   nph_physics_geometry_box(nph_vec3_splat(0.5F)));
+    }
+    bench_steps(w, bench_jobs(), 240U); // everything falls asleep
+    // One ball keeps bouncing far from the boxes.
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.position = nph_dvec3(140.0, 3.0, 140.0);
+    bd.enable_sleep = 0;
+    NphPhysicsBody ball;
+    if (nph_physics_body_create(w, &bd, &ball) == NPH_RESULT_OK) {
+        NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(nph_physics_geometry_sphere(0.5F));
+        sd.restitution = 1.0F;
+        NphPhysicsShape s;
+        NPH_IGNORE_RESULT(nph_physics_shape_create(w, ball, &sd, &s));
+    }
+    while (nbench_keep_running(state)) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, bench_jobs()));
+    }
+    nph_physics_world_destroy(w);
+}

@@ -233,6 +233,14 @@ tree_move_10k                  5200
 tree_query_10k                 215
 tree_raycast_10k               2600
 tree_rebuild_10k               640
+# World rows are per 240 Hz step. The _mt rows spin helper threads on the
+# job system: 5x, as the hosted runners have fewer cores.
+world_pyramid_20_st            1110000
+world_pyramid_20_mt            700000
+world_pyramids_16_mt           4950000
+world_pile_1000_st             10200000
+world_pile_1000_mt             3300000
+world_sleeping_10k             8400
 
 # profile_bench
 profile_zone_enabled           55
