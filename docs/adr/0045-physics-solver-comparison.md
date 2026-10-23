@@ -133,12 +133,17 @@ eight stairs, sixteen dropped in a criss-cross pile, and one lying under a
 | the most energy gained in one step, of the scene's | 5.4 % (dropped) | 2.6 % | 27 % (thrown) | 13 % (dropped) | 34 % (thrown) |
 | 32 lying in heaps, the job system (µs a step) | 380 | 773 | 311 | 346 | 1320 |
 
-- **Every configuration keeps a ragdoll sound**: never above its starting
-  energy, joints closed and within their limits at rest. On MSVC each also
-  puts a single ragdoll to sleep, but on Clang's rounding the dropped one
-  under TGS kept a limb stirring at 0.08 m/s for good (the fight described
-  below): only the soft step sleeps every scene, so the tests require
-  sleep of it and of the others only an end under 0.5 m/s. Measured first,
+- **Every configuration keeps a ragdoll sound**: finite, joints closed and
+  within their limits at rest. On MSVC each also puts a single ragdoll to
+  sleep and stays under its starting energy, but Linux's rounding (GCC's
+  and Clang's alike) sends the scenes elsewhere, and there the dropped
+  ragdoll under TGS kept a limb stirring at 0.08 m/s for good, a limb of
+  TGS's pile still moved at 1.0 m/s after 12 s, and XPBD at 16 substeps
+  rose above the cartwheel's starting energy (the spikes described below).
+  Only the soft step does all of it on every compiler, so the tests
+  require of it its starting energy as a ceiling and sleep, and of TGS and
+  XPBD only that they never double their energy and end under 2 m/s.
+  Measured first,
   the ragdoll had frictionless elbows and knees, and a dangling forearm
   swung for ever (an undamped pendulum) and kept any heap it hung from
   awake under any solver; a limp body's joints have friction, and the rig

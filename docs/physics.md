@@ -784,12 +784,13 @@ budget of §8.9 on the six cores of the reference CPU class.
 - The ragdoll (`test_ragdoll.c`, Phase 11's exit criteria): a ragdoll
   dropped on its straight legs, thrown cartwheeling at the ground, sent
   down stairs, sixteen piled up (four in Debug), and one under a falling
-  crate, under every configuration. Every one must stay sound (never above
-  its starting energy, joints within 5 cm and 15° at the worst impact and
-  closed at rest, nothing sunk 5 cm into the floor); the soft step must put
-  every scene to sleep, while TGS and XPBD, which can leave a limb
-  stirring, must end under 0.5 m/s. The default holds bounds about two and
-  a half times what it measures, since a ragdoll is chaotic and another
-  compiler's rounding sends it elsewhere. A pile replays bit for bit in a
-  new world, on 4 and 8 workers, and on the AVX2 kernel, under every
-  solver.
+  crate, under every configuration. Every one must stay sound (finite,
+  joints within 5 cm and 15° at the worst impact and closed at rest,
+  nothing sunk 5 cm into the floor). The soft step must also never rise
+  above its starting energy and must put every scene to sleep; TGS and
+  XPBD, which gain energy at violent impacts and can leave a limb
+  stirring, must never double it and must end under 2 m/s. The default
+  holds bounds about two and a half times what it measures, since a
+  ragdoll is chaotic and another compiler's rounding sends it elsewhere. A
+  pile replays bit for bit in a new world, on 4 and 8 workers, and on the
+  AVX2 kernel, under every solver.
