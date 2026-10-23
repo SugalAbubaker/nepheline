@@ -49,6 +49,29 @@ NTEST(joint, create_and_reject_bad_descriptions)
     h.hinge.enable_spring = 1;
     h.hinge.spring_hertz = 0.0F;
     NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &h, &j), NPH_RESULT_INVALID_ARGUMENT);
+    NphPhysicsJointDesc sl = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, ground, box);
+    sl.slider.enable_limit = 1;
+    sl.slider.lower = 1.0F;
+    sl.slider.upper = -1.0F;
+    NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &sl, &j), NPH_RESULT_INVALID_ARGUMENT);
+    NphPhysicsJointDesc di =
+        nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_DISTANCE, ground, box);
+    di.distance.length = -1.0F;
+    NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &di, &j), NPH_RESULT_INVALID_ARGUMENT);
+    di.distance.length = 1.0F;
+    di.distance.enable_limit = 1;
+    di.distance.min_length = 2.0F;
+    di.distance.max_length = 1.0F;
+    NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &di, &j), NPH_RESULT_INVALID_ARGUMENT);
+    NphPhysicsJointDesc six = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, ground, box);
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Y].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Y].upper = k_pi;
+    NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &six, &j), NPH_RESULT_INVALID_ARGUMENT);
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Y].upper = 0.5F;
+    // An axis motion out of range, as a corrupted description has.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    six.d6.axes[NPH_PHYSICS_D6_LINEAR_Y].motion = (NphPhysicsAxisMotion)7;
+    NTEST_EXPECT_EQ_INT(nph_physics_joint_create(s.w, &six, &j), NPH_RESULT_INVALID_ARGUMENT);
     // A stale body.
     const NphPhysicsBody gone = add_box(s.w, nph_dvec3(3.0, 1.0, 0.0), nph_vec3_splat(0.5F));
     nph_physics_body_destroy(s.w, gone);
@@ -479,6 +502,406 @@ NTEST(joint, a_welded_cantilever_holds_out_straight)
 }
 
 // ---------------------------------------------------------------------------
+// Sliders
+// ---------------------------------------------------------------------------
+
+// A 0.4 m box (64 kg) on a slider along world X from a static anchor.
+static NphPhysicsJoint slider_rig(Scene *s, NphPhysicsSliderJoint settings, NphPhysicsBody *box)
+{
+    const NphDVec3 at = nph_dvec3(0.0, 3.0, 0.0);
+    const NphPhysicsBody rail = add_anchor(s->w, at);
+    *box = add_dynamic(s->w, at, nph_physics_geometry_box(nph_vec3_splat(0.2F)));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, rail, *box);
+    d.slider = settings;
+    return join(s->w, d, at, nph_vec3(1.0F, 0.0F, 0.0F));
+}
+
+NTEST(joint, a_slider_moves_along_its_axis_only)
+{
+    Scene s;
+    scene_begin(&s);
+    NphPhysicsBody box;
+    NphPhysicsSliderJoint free;
+    memset(&free, 0, sizeof free);
+    const NphPhysicsJoint j = slider_rig(&s, free, &box);
+    // Pushed along, across, and spun: only the push along X survives, and
+    // gravity, across the axis, is held.
+    nph_physics_body_set_linear_velocity(s.w, box, nph_vec3(1.0F, 2.0F, -1.0F));
+    nph_physics_body_set_angular_velocity(s.w, box, nph_vec3(3.0F, -2.0F, 1.0F));
+    step(s.w, NULL, 240U);
+    const NphDVec3 p = nph_physics_body_position(s.w, box);
+    const f32 turned =
+        2.0F * nph_f32_atan2(nph_vec3_length(nph_vec3(nph_physics_body_rotation(s.w, box).x,
+                                                      nph_physics_body_rotation(s.w, box).y,
+                                                      nph_physics_body_rotation(s.w, box).z)),
+                             nph_f32_abs(nph_physics_body_rotation(s.w, box).w));
+    NTEST_LOG("after 1 s: along %.4f m, across %.4f / %.4f mm, turned %.4f deg", p.x,
+              (p.y - 3.0) * 1e3, p.z * 1e3, (f64)(turned * 180.0F / k_pi));
+    // The across rows took the push's sideways part at once: the box keeps
+    // its first 1 m/s along X.
+    NTEST_EXPECT_NEAR_F64(p.x, 1.0, 0.01);
+    NTEST_EXPECT_NEAR_F64(p.y, 3.0, 1e-4);
+    NTEST_EXPECT_NEAR_F64(p.z, 0.0, 1e-4);
+    NTEST_EXPECT_TRUE(turned < 0.05F * k_pi / 180.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_joint_slider_position(s.w, j), (f32)p.x, 1e-4F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_joint_slider_speed(s.w, j), 1.0F, 0.01F);
+    scene_end(&s);
+}
+
+NTEST(joint, a_slider_limit_motor_and_spring)
+{
+    // The limit stops a 2 m/s slide at its end.
+    {
+        Scene s;
+        scene_begin(&s);
+        NphPhysicsBody box;
+        NphPhysicsSliderJoint lim;
+        memset(&lim, 0, sizeof lim);
+        lim.enable_limit = 1;
+        lim.lower = -0.5F;
+        lim.upper = 0.5F;
+        const NphPhysicsJoint j = slider_rig(&s, lim, &box);
+        nph_physics_body_set_linear_velocity(s.w, box, nph_vec3(2.0F, 0.0F, 0.0F));
+        f32 most = 0.0F;
+        for (u32 i = 0U; i < 240U; ++i) {
+            step(s.w, NULL, 1U);
+            most = nph_f32_max(most, nph_physics_joint_slider_position(s.w, j));
+        }
+        NTEST_LOG("the slide stops at %.4f m (limit 0.5)", (f64)most);
+        NTEST_EXPECT_NEAR_F32(most, 0.5F, 0.002F);
+        scene_end(&s);
+    }
+    // The motor at its speed, and limited by its force: a = F / m.
+    for (u32 run = 0U; run < 2U; ++run) {
+        Scene s;
+        scene_begin(&s);
+        NphPhysicsBody box;
+        NphPhysicsSliderJoint motor;
+        memset(&motor, 0, sizeof motor);
+        motor.enable_motor = 1;
+        motor.motor_speed = 0.5F;
+        motor.max_motor_force = run == 0U ? 1e5F : 10.0F;
+        const NphPhysicsJoint j = slider_rig(&s, motor, &box);
+        step(s.w, NULL, 240U);
+        const f32 speed = nph_physics_joint_slider_speed(s.w, j);
+        if (run == 0U) {
+            NTEST_EXPECT_NEAR_F32(speed, 0.5F, 0.005F);
+        } else {
+            const f32 expected = 10.0F / nph_physics_body_mass_data(s.w, box).mass;
+            NTEST_LOG("force-limited speed %.5f m/s after 1 s against %.5f", (f64)speed,
+                      (f64)expected);
+            NTEST_EXPECT_NEAR_F32(speed, expected, 0.01F * expected);
+        }
+        scene_end(&s);
+    }
+    // The spring rings at its frequency.
+    {
+        Scene s;
+        scene_begin(&s);
+        NphPhysicsBody box;
+        NphPhysicsSliderJoint spring;
+        memset(&spring, 0, sizeof spring);
+        spring.enable_spring = 1;
+        spring.spring_hertz = 2.0F;
+        const NphPhysicsJoint j = slider_rig(&s, spring, &box);
+        nph_physics_body_set_linear_velocity(s.w, box, nph_vec3(1.0F, 0.0F, 0.0F));
+        f32 prev = 0.0F;
+        f64 first = 0.0;
+        f64 last = 0.0;
+        u32 crossed = 0U;
+        for (u32 i = 1U; i <= 240U * 2U; ++i) {
+            step(s.w, NULL, 1U);
+            const f32 x = nph_physics_joint_slider_position(s.w, j);
+            if (prev > 0.0F && x <= 0.0F) {
+                const f64 t = ((f64)i - 1.0 + (f64)(prev / (prev - x))) / 240.0;
+                first = crossed == 0U ? t : first;
+                last = t;
+                crossed += 1U;
+            }
+            prev = x;
+        }
+        NTEST_ASSERT_TRUE(crossed >= 3U);
+        const f64 period = (last - first) / (f64)(crossed - 1U);
+        NTEST_LOG("slider spring period %.4f s (0.5 for 2 Hz)", period);
+        NTEST_EXPECT_NEAR_F64(period, 0.5, 0.005);
+        scene_end(&s);
+    }
+}
+
+NTEST(joint, an_elevator_rests_on_its_slider_limit)
+{
+    Scene s;
+    scene_begin(&s);
+    // A vertical slider whose lower limit is the floor of the shaft.
+    const NphDVec3 at = nph_dvec3(0.0, 1.0, 0.0);
+    const NphPhysicsBody shaft = add_anchor(s.w, at);
+    const NphPhysicsBody car =
+        add_dynamic(s.w, at, nph_physics_geometry_box(nph_vec3(0.5F, 0.1F, 0.5F)));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, shaft, car);
+    d.slider.enable_limit = 1;
+    d.slider.lower = -0.5F;
+    d.slider.upper = 2.0F;
+    const NphPhysicsJoint j = join(s.w, d, at, nph_vec3(0.0F, 1.0F, 0.0F));
+    s.w->desc.enable_sleep = 0;
+    step(s.w, NULL, 240U * 2U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_joint_slider_position(s.w, j), -0.5F, 0.001F);
+    NphVec3 force;
+    NphVec3 torque;
+    nph_physics_joint_reaction(s.w, j, &force, &torque);
+    const f32 weight = nph_physics_body_mass_data(s.w, car).mass * 9.81F;
+    NTEST_EXPECT_NEAR_F32(force.y, weight, 0.005F * weight);
+    scene_end(&s);
+}
+
+// ---------------------------------------------------------------------------
+// Distance joints
+// ---------------------------------------------------------------------------
+
+NTEST(joint, a_distance_rod_holds_its_length)
+{
+    Scene s;
+    scene_begin(&s);
+    // A ball on a 1 m rod, released sideways: it swings at the rod's
+    // length; the rotation is free (the ball keeps its spin).
+    const NphDVec3 pivot = nph_dvec3(0.0, 5.0, 0.0);
+    const NphPhysicsBody top = add_anchor(s.w, pivot);
+    const NphPhysicsBody ball =
+        add_dynamic(s.w, nph_dvec3(1.0, 5.0, 0.0), nph_physics_geometry_sphere(0.1F));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_DISTANCE, top, ball);
+    d.frame_a = nph_physics_pose_identity();
+    d.frame_b = nph_physics_pose_identity();
+    d.distance.length = 1.0F;
+    NphPhysicsJoint j;
+    NTEST_ASSERT_EQ_INT(nph_physics_joint_create(s.w, &d, &j), NPH_RESULT_OK);
+    nph_physics_body_set_angular_velocity(s.w, ball, nph_vec3(0.0F, 5.0F, 0.0F));
+    f32 worst = 0.0F;
+    for (u32 i = 0U; i < 240U * 2U; ++i) {
+        step(s.w, NULL, 1U);
+        worst = nph_f32_max(worst, nph_f32_abs(nph_physics_joint_length(s.w, j) - 1.0F));
+    }
+    NTEST_LOG("the rod's length strays %.4f mm at worst", (f64)worst * 1e3);
+    NTEST_EXPECT_TRUE(worst < 2e-4F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_angular_velocity(s.w, ball).y, 5.0F, 0.01F);
+    scene_end(&s);
+}
+
+NTEST(joint, a_rope_goes_slack_and_taut)
+{
+    Scene s;
+    scene_begin(&s);
+    // A ball on a 1 m rope (lengths 0 to 1), lifted 0.5 m above its taut
+    // place: it falls freely half a metre, then the rope holds it.
+    const NphDVec3 pivot = nph_dvec3(0.0, 5.0, 0.0);
+    const NphPhysicsBody top = add_anchor(s.w, pivot);
+    const NphPhysicsBody ball =
+        add_dynamic(s.w, nph_dvec3(0.0, 4.5, 0.0), nph_physics_geometry_sphere(0.1F));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_DISTANCE, top, ball);
+    d.distance.length = 1.0F;
+    d.distance.enable_limit = 1;
+    d.distance.min_length = 0.0F;
+    d.distance.max_length = 1.0F;
+    NphPhysicsJoint j;
+    NTEST_ASSERT_EQ_INT(nph_physics_joint_create(s.w, &d, &j), NPH_RESULT_OK);
+    // Free fall: 0.5 m takes sqrt(2 * 0.5 / g) = 0.319 s.
+    step(s.w, NULL, 48U);
+    const f64 fallen = 4.5 - nph_physics_body_position(s.w, ball).y;
+    NTEST_EXPECT_NEAR_F64(fallen, 0.5 * 9.81 * 0.04, 0.002); // 0.2 s of free fall
+    f32 longest = 0.0F;
+    for (u32 i = 0U; i < 240U * 2U; ++i) {
+        step(s.w, NULL, 1U);
+        longest = nph_f32_max(longest, nph_physics_joint_length(s.w, j));
+    }
+    NTEST_LOG("the rope's length peaks at %.4f m (1)", (f64)longest);
+    NTEST_EXPECT_TRUE(longest < 1.002F);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(s.w, ball).y, 4.0, 0.002);
+    scene_end(&s);
+}
+
+NTEST(joint, a_distance_spring_rings_at_its_frequency)
+{
+    Scene s;
+    scene_begin(&s);
+    nph_physics_world_set_gravity(s.w, nph_vec3_zero());
+    const NphDVec3 pivot = nph_dvec3(0.0, 5.0, 0.0);
+    const NphPhysicsBody top = add_anchor(s.w, pivot);
+    const NphPhysicsBody ball =
+        add_dynamic(s.w, nph_dvec3(1.0, 5.0, 0.0), nph_physics_geometry_sphere(0.1F));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_DISTANCE, top, ball);
+    d.distance.length = 1.0F;
+    d.distance.enable_spring = 1;
+    d.distance.spring_hertz = 2.0F;
+    d.distance.spring_damping_ratio = 0.0F;
+    NphPhysicsJoint j;
+    NTEST_ASSERT_EQ_INT(nph_physics_joint_create(s.w, &d, &j), NPH_RESULT_OK);
+    nph_physics_body_set_linear_velocity(s.w, ball, nph_vec3(0.5F, 0.0F, 0.0F));
+    f32 prev = 0.0F;
+    f64 first = 0.0;
+    f64 last = 0.0;
+    u32 crossed = 0U;
+    for (u32 i = 1U; i <= 240U * 2U; ++i) {
+        step(s.w, NULL, 1U);
+        const f32 x = nph_physics_joint_length(s.w, j) - 1.0F;
+        if (prev > 0.0F && x <= 0.0F) {
+            const f64 t = ((f64)i - 1.0 + (f64)(prev / (prev - x))) / 240.0;
+            first = crossed == 0U ? t : first;
+            last = t;
+            crossed += 1U;
+        }
+        prev = x;
+    }
+    NTEST_ASSERT_TRUE(crossed >= 3U);
+    const f64 period = (last - first) / (f64)(crossed - 1U);
+    NTEST_LOG("distance spring period %.4f s (0.5 for 2 Hz)", period);
+    NTEST_EXPECT_NEAR_F64(period, 0.5, 0.005);
+    scene_end(&s);
+}
+
+// ---------------------------------------------------------------------------
+// 6-DOF joints
+// ---------------------------------------------------------------------------
+
+NTEST(joint, a_d6_is_a_weld_a_slider_and_nothing)
+{
+    for (u32 mode = 0U; mode < 3U; ++mode) {
+        Scene s;
+        scene_begin(&s);
+        const NphDVec3 at = nph_dvec3(0.0, 5.0, 0.0);
+        const NphPhysicsBody wall = add_anchor(s.w, at);
+        const NphPhysicsBody beam = add_dynamic(
+            s.w, nph_dvec3(0.5, 5.0, 0.0), nph_physics_geometry_box(nph_vec3(0.5F, 0.1F, 0.1F)));
+        NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, wall, beam);
+        if (mode == 1U) {
+            d.d6.axes[NPH_PHYSICS_D6_LINEAR_X].motion = NPH_PHYSICS_AXIS_FREE;
+        } else if (mode == 2U) {
+            for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+                d.d6.axes[i].motion = NPH_PHYSICS_AXIS_FREE;
+            }
+        }
+        join(s.w, d, at, nph_vec3(1.0F, 0.0F, 0.0F));
+        nph_physics_body_set_linear_velocity(s.w, beam, nph_vec3(1.0F, 0.0F, 0.0F));
+        step(s.w, NULL, 240U);
+        const NphDVec3 p = nph_physics_body_position(s.w, beam);
+        if (mode == 0U) {
+            // Welded: the push is taken, the beam holds out straight.
+            NTEST_EXPECT_NEAR_F64(p.x, 0.5, 1e-3);
+            NTEST_EXPECT_NEAR_F64(p.y, 5.0, 1e-3);
+        } else if (mode == 1U) {
+            // A slider along X: the push carries it 1 m; gravity is held.
+            NTEST_EXPECT_NEAR_F64(p.x, 1.5, 0.01);
+            NTEST_EXPECT_NEAR_F64(p.y, 5.0, 1e-3);
+        } else {
+            // Nothing held: a second of free fall.
+            NTEST_EXPECT_NEAR_F64(p.x, 1.5, 0.01);
+            NTEST_EXPECT_NEAR_F64(p.y, 5.0 - 0.5 * 9.81, 0.01);
+        }
+        scene_end(&s);
+    }
+}
+
+NTEST(joint, a_d6_holds_its_angular_limits_axis_by_axis)
+{
+    // A bone below a 6-DOF pivot with its X axis down it: translation
+    // locked, twist within 20 degrees, swings within 30 (Y) and 15 (Z): a
+    // pyramid. Pushed about each axis in turn.
+    const f32 deg = k_pi / 180.0F;
+    const f32 limits[3] = {20.0F * deg, 30.0F * deg, 15.0F * deg};
+    f32 worst[3] = {0.0F, 0.0F, 0.0F};
+    for (u32 axis = 0U; axis < 3U; ++axis) {
+        Scene s;
+        scene_begin(&s);
+        const NphDVec3 pivot = nph_dvec3(0.0, 5.0, 0.0);
+        const NphPhysicsBody top = add_anchor(s.w, pivot);
+        const NphPhysicsBody bone =
+            add_dynamic(s.w, nph_dvec3(0.0, 4.5, 0.0), nph_physics_geometry_capsule(0.4F, 0.08F));
+        NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, top, bone);
+        for (u32 i = 0U; i < 3U; ++i) {
+            NphPhysicsD6Axis *a = &d.d6.axes[NPH_PHYSICS_D6_TWIST + i];
+            a->motion = NPH_PHYSICS_AXIS_LIMITED;
+            a->lower = -limits[i];
+            a->upper = limits[i];
+        }
+        const NphPhysicsJoint j = join(s.w, d, pivot, nph_vec3(0.0F, -1.0F, 0.0F));
+        const NphQuat frame = nph_physics_joint_desc(s.w, j).frame_a.rotation;
+        const NphVec3 push = axis == 0U   ? nph_quat_axis_x(frame)
+                             : axis == 1U ? nph_quat_axis_y(frame)
+                                          : nph_quat_axis_z(frame);
+        swing_about(s.w, bone, pivot, nph_vec3_scale(push, 6.0F));
+        for (u32 i = 0U; i < 240U * 2U; ++i) {
+            step(s.w, NULL, 1U);
+            // The angle about the pushed axis: B's frame from A's.
+            const NphPhysicsJointDesc now = nph_physics_joint_desc(s.w, j);
+            NphQuat r = nph_quat_mul(
+                nph_quat_conjugate(
+                    nph_quat_mul(nph_physics_body_rotation(s.w, top), now.frame_a.rotation)),
+                nph_quat_mul(nph_physics_body_rotation(s.w, bone), now.frame_b.rotation));
+            if (r.w < 0.0F) {
+                r = nph_quat_neg(r);
+            }
+            const f32 c = axis == 0U ? r.x : axis == 1U ? r.y : r.z;
+            worst[axis] = nph_f32_max(worst[axis], nph_f32_abs(2.0F * nph_f32_atan2(c, r.w)));
+        }
+        scene_end(&s);
+    }
+    NTEST_LOG("worst twist %.2f deg (20), swing Y %.2f (30), swing Z %.2f (15)",
+              (f64)(worst[0] / deg), (f64)(worst[1] / deg), (f64)(worst[2] / deg));
+    for (u32 i = 0U; i < 3U; ++i) {
+        NTEST_EXPECT_TRUE(worst[i] < limits[i] + 1.0F * deg && worst[i] > limits[i] - 3.0F * deg);
+    }
+}
+
+NTEST(joint, a_d6_drives_its_axes)
+{
+    Scene s;
+    scene_begin(&s);
+    nph_physics_world_set_gravity(s.w, nph_vec3_zero());
+    // A wheel on a 6-DOF hub: twist free with a motor at 3 rad/s, the rest
+    // locked but translation along Y, free with a 2 Hz spring.
+    const NphDVec3 at = nph_dvec3(0.0, 2.0, 0.0);
+    const NphPhysicsBody hub = add_anchor(s.w, at);
+    const NphPhysicsBody wheel = add_dynamic(s.w, at, nph_physics_geometry_sphere(0.3F));
+    NphPhysicsJointDesc d = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, hub, wheel);
+    NphPhysicsD6Axis *twist = &d.d6.axes[NPH_PHYSICS_D6_TWIST];
+    twist->motion = NPH_PHYSICS_AXIS_FREE;
+    twist->enable_motor = 1;
+    twist->motor_speed = 3.0F;
+    twist->max_motor_force = 1000.0F;
+    NphPhysicsD6Axis *y = &d.d6.axes[NPH_PHYSICS_D6_LINEAR_Y];
+    y->motion = NPH_PHYSICS_AXIS_FREE;
+    y->enable_spring = 1;
+    y->spring_hertz = 2.0F;
+    y->spring_damping_ratio = 0.0F;
+    const NphPhysicsJoint j = join(s.w, d, at, nph_vec3(0.0F, 0.0F, 1.0F));
+    // The frame's Y axis (the anchor is static at identity: the frame is
+    // the world's).
+    const NphVec3 frame_y = nph_quat_axis_y(nph_physics_joint_desc(s.w, j).frame_a.rotation);
+    nph_physics_body_set_linear_velocity(s.w, wheel, nph_vec3_scale(frame_y, 0.5F));
+    f64 prev = 0.0;
+    f64 first = 0.0;
+    f64 last = 0.0;
+    u32 crossed = 0U;
+    for (u32 i = 1U; i <= 240U * 2U; ++i) {
+        step(s.w, NULL, 1U);
+        const f64 yy = (f64)nph_vec3_dot(
+            nph_dvec3_relative(nph_physics_body_position(s.w, wheel), at), frame_y);
+        if (prev > 0.0 && yy <= 0.0) {
+            const f64 t = ((f64)i - 1.0 + prev / (prev - yy)) / 240.0;
+            first = crossed == 0U ? t : first;
+            last = t;
+            crossed += 1U;
+        }
+        prev = yy;
+    }
+    NTEST_ASSERT_TRUE(crossed >= 3U);
+    const f64 period = (last - first) / (f64)(crossed - 1U);
+    const f32 spin = nph_physics_body_angular_velocity(s.w, wheel).z;
+    NTEST_LOG("the spring's period %.4f s (0.5); the motor's spin %.4f rad/s (3)", period,
+              (f64)spin);
+    NTEST_EXPECT_NEAR_F64(period, 0.5, 0.005);
+    NTEST_EXPECT_NEAR_F32(spin, 3.0F, 0.01F);
+    scene_end(&s);
+}
+
+// ---------------------------------------------------------------------------
 // Joined bodies
 // ---------------------------------------------------------------------------
 
@@ -589,6 +1012,71 @@ NTEST(joint, joined_bodies_sleep_and_wake_together)
     scene_end(&s);
 }
 
+NTEST(joint, a_slow_motor_keeps_its_bodies_awake)
+{
+    // Each type's motor driving a body slower than it would sleep at
+    // (0.05 m/s at its fastest point): it keeps going.
+    const NphPhysicsJointType types[4] = {NPH_PHYSICS_JOINT_HINGE, NPH_PHYSICS_JOINT_SLIDER,
+                                          NPH_PHYSICS_JOINT_DISTANCE, NPH_PHYSICS_JOINT_D6};
+    for (u32 t = 0U; t < 4U; ++t) {
+        Scene s;
+        scene_begin(&s);
+        nph_physics_world_set_gravity(s.w, nph_vec3_zero());
+        const NphDVec3 at = nph_dvec3(0.0, 2.0, 0.0);
+        const NphPhysicsBody base = add_anchor(s.w, at);
+        const NphPhysicsBody body = add_dynamic(s.w, nph_dvec3_add(at, nph_dvec3(0.0, -1.0, 0.0)),
+                                                nph_physics_geometry_box(nph_vec3_splat(0.2F)));
+        NphPhysicsJointDesc d = nph_physics_joint_desc_default(types[t], base, body);
+        const f32 speed = 0.02F; // m/s, or rad/s about an axis 1 m away
+        switch (types[t]) {
+        case NPH_PHYSICS_JOINT_HINGE:
+            d.hinge.enable_motor = 1;
+            d.hinge.motor_speed = speed;
+            d.hinge.max_motor_torque = 10.0F;
+            break;
+        case NPH_PHYSICS_JOINT_SLIDER:
+            d.slider.enable_motor = 1;
+            d.slider.motor_speed = speed;
+            d.slider.max_motor_force = 10.0F;
+            break;
+        case NPH_PHYSICS_JOINT_DISTANCE:
+            d.distance.min_length = 0.5F;
+            d.distance.max_length = 2.0F;
+            d.distance.enable_limit = 1;
+            d.distance.enable_motor = 1;
+            d.distance.motor_speed = speed;
+            d.distance.max_motor_force = 10.0F;
+            break;
+        default: {
+            NphPhysicsD6Axis *twist = &d.d6.axes[NPH_PHYSICS_D6_TWIST];
+            twist->motion = NPH_PHYSICS_AXIS_FREE;
+            twist->enable_motor = 1;
+            twist->motor_speed = speed;
+            twist->max_motor_force = 10.0F;
+            break;
+        }
+        }
+        // The hinge and the 6-DOF turn the body about the anchor; the
+        // slider and the rope (between the bodies' origins) move it along
+        // the line between them.
+        if (types[t] == NPH_PHYSICS_JOINT_DISTANCE) {
+            NphPhysicsJoint j;
+            NTEST_ASSERT_EQ_INT(nph_physics_joint_create(s.w, &d, &j), NPH_RESULT_OK);
+        } else {
+            const bool turns = types[t] != NPH_PHYSICS_JOINT_SLIDER;
+            join(s.w, d, at, turns ? nph_vec3(0.0F, 0.0F, 1.0F) : nph_vec3(0.0F, -1.0F, 0.0F));
+        }
+        const NphDVec3 p0 = nph_physics_body_position(s.w, body);
+        step(s.w, NULL, 240U * 2U);
+        const f64 moved = dist(nph_physics_body_position(s.w, body), p0);
+        NTEST_LOG("type %u: moved %.4f m in 2 s (0.04), %s", (u32)types[t], moved,
+                  nph_physics_body_is_awake(s.w, body) ? "awake" : "asleep");
+        NTEST_EXPECT_TRUE(nph_physics_body_is_awake(s.w, body));
+        NTEST_EXPECT_NEAR_F64(moved, 2.0 * (f64)speed, 0.002);
+        scene_end(&s);
+    }
+}
+
 NTEST(joint, a_kinematic_body_carries_what_hangs_from_it)
 {
     Scene s;
@@ -664,6 +1152,31 @@ static void build_rig(NphPhysicsWorld *w)
     const NphPhysicsBody b = add_box(w, nph_dvec3(0.6, 3.0, -3.0), nph_vec3_splat(0.3F));
     join(w, nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_FIXED, a, b),
          nph_dvec3(0.3, 3.0, -3.0), nph_vec3(1.0F, 0.0F, 0.0F));
+    const NphPhysicsBody rail = add_anchor(w, nph_dvec3(-4.0, 3.0, -3.0));
+    const NphPhysicsBody cart =
+        add_dynamic(w, nph_dvec3(-4.0, 3.0, -3.0), nph_physics_geometry_box(nph_vec3_splat(0.2F)));
+    NphPhysicsJointDesc sl = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, rail, cart);
+    sl.slider.enable_limit = 1;
+    sl.slider.enable_motor = 1;
+    sl.slider.motor_speed = 1.0F;
+    sl.slider.max_motor_force = 200.0F;
+    join(w, sl, nph_dvec3(-4.0, 3.0, -3.0), nph_vec3_normalize(nph_vec3(1.0F, 0.2F, 0.0F)));
+    NphPhysicsJointDesc rope = nph_physics_joint_desc_default(
+        NPH_PHYSICS_JOINT_DISTANCE, cart,
+        add_dynamic(w, nph_dvec3(-4.0, 2.2, -3.0), nph_physics_geometry_sphere(0.15F)));
+    rope.distance.enable_limit = 1;
+    NphPhysicsJoint rj;
+    NTEST_ASSERT_EQ_INT(nph_physics_joint_create(w, &rope, &rj), NPH_RESULT_OK);
+    const NphPhysicsBody hub = add_anchor(w, nph_dvec3(4.0, 2.0, -3.0));
+    const NphPhysicsBody arm =
+        add_dynamic(w, nph_dvec3(4.5, 2.0, -3.0), nph_physics_geometry_capsule(0.3F, 0.06F));
+    NphPhysicsJointDesc six = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, hub, arm);
+    six.d6.axes[NPH_PHYSICS_D6_TWIST].motion = NPH_PHYSICS_AXIS_FREE;
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Y].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Z].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_LINEAR_X].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_LINEAR_X].enable_spring = 1;
+    join(w, six, nph_dvec3(4.0, 2.0, -3.0), nph_vec3(1.0F, 0.0F, 0.0F));
     NphPcg32 rng = test_rng(41U);
     for (u32 i = 0U; i < 12U; ++i) {
         add_body(w, NPH_PHYSICS_BODY_DYNAMIC,

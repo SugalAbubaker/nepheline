@@ -192,6 +192,13 @@ enum {
     PHYS_JOINT_ISLAND = 1U << 1U, // linked in an island (two dynamic bodies)
 };
 
+enum {
+    PHYS_ROW_LOCK = 0, // or the lower limit
+    PHYS_ROW_UPPER = 1,
+    PHYS_ROW_MOTOR = 2,
+    PHYS_ROW_SPRING = 3,
+};
+
 typedef struct PhysJoint {
     u32 handle; // 0 for a free slot
     u32 type;   // NphPhysicsJointType
@@ -211,11 +218,18 @@ typedef struct PhysJoint {
     union {
         NphPhysicsBallJoint ball;
         NphPhysicsHingeJoint hinge;
+        NphPhysicsSliderJoint slider;
+        NphPhysicsDistanceJoint distance;
+        NphPhysicsD6Joint d6;
     };
     u64 user_data;
     // Accumulated impulses, per substep, kept between steps (warm start).
-    NphVec3 linear_impulse;   // the anchors, world
-    NphVec3 angular_impulse;  // the aligned axes (hinge) or the whole rotation (fixed), world
+    NphVec3 linear_impulse;  // the anchors as one block, world
+    NphVec3 angular_impulse; // the aligned axes (hinge) or the whole rotation (fixed), world
+    // A 6-DOF joint's (and a slider's) rows per axis, and a distance joint's
+    // on axis 0: the lock or lower limit, the upper limit, the motor, the
+    // spring (PHYS_ROW_*).
+    f32 axis_impulse[NPH_PHYSICS_D6_AXES][4];
     NphVec3 friction_impulse; // a ball's friction, world
     f32 lower_impulse;        // a hinge's limit or a ball's twist limits, about X
     f32 upper_impulse;
@@ -591,6 +605,16 @@ void phys_joint_xpbd_velocities(PhysSolverBody *bodies, const PhysJointStep *ste
 // The joint's current angle about X and the frames' world rotations, from
 // the bodies' poses (between steps).
 f32 phys_joint_angle(const NphPhysicsWorld *w, const PhysJoint *j);
+// The impulses of the last substep: the linear one on B (at its anchor) and
+// the angular one, world, from the bodies' poses (between steps).
+void phys_joint_reaction_impulses(const NphPhysicsWorld *w, const PhysJoint *j, NphVec3 *linear,
+                                  NphVec3 *angular);
+// A slider's position (or `speed`) along A's X axis, and any joint's
+// anchors' distance, from the bodies (between steps).
+f32 phys_joint_slider_value(const NphPhysicsWorld *w, const PhysJoint *j, bool speed);
+f32 phys_joint_length(const NphPhysicsWorld *w, const PhysJoint *j);
+// A motor driving the joint towards a non-zero speed: its bodies stay awake.
+bool phys_joint_is_driven(const PhysJoint *j);
 
 // The constraint graph: contacts and joints share the colours.
 NphResult phys_graph_add(NphPhysicsWorld *w, u32 contact);

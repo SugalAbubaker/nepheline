@@ -104,6 +104,11 @@ enum {
     // never do; the dummy body is shared and must not be written).
     PHYS_JOINT_WRITE_A = 1U << 8U,
     PHYS_JOINT_WRITE_B = 1U << 9U,
+    // A slider's or 6-DOF joint's rows solved as blocks last step (their
+    // impulses mean something else row by row).
+    PHYS_JOINT_BLOCK_ROTATION = 1U << 11U,
+    PHYS_JOINT_BLOCK_SWING = 1U << 12U,
+    PHYS_JOINT_BLOCK_POINT = 1U << 13U,
 };
 
 typedef struct JointState {
@@ -389,6 +394,332 @@ static void solve_ball(PhysJoint *j, JointState *s, const PhysJointStep *step, b
 }
 
 // ---------------------------------------------------------------------------
+// Axes: the slider and the 6-DOF joint, row by row, and the distance joint
+// ---------------------------------------------------------------------------
+
+// The six axes of a 6-DOF joint, or the slider's: translation along A's X
+// (free or limited, with its drives), the rest locked.
+static void d6_config(const PhysJoint *j, NphPhysicsD6Axis out[NPH_PHYSICS_D6_AXES])
+{
+    if (j->type == NPH_PHYSICS_JOINT_D6) {
+        memcpy(out, j->d6.axes, sizeof j->d6.axes);
+        return;
+    }
+    memset(out, 0, sizeof(NphPhysicsD6Axis) * NPH_PHYSICS_D6_AXES); // all locked
+    const NphPhysicsSliderJoint *s = &j->slider;
+    NphPhysicsD6Axis *x = &out[NPH_PHYSICS_D6_LINEAR_X];
+    x->motion = s->enable_limit != 0 ? NPH_PHYSICS_AXIS_LIMITED : NPH_PHYSICS_AXIS_FREE;
+    x->lower = s->lower;
+    x->upper = s->upper;
+    x->enable_motor = s->enable_motor;
+    x->motor_speed = s->motor_speed;
+    x->max_motor_force = s->max_motor_force;
+    x->enable_spring = s->enable_spring;
+    x->spring_hertz = s->spring_hertz;
+    x->spring_damping_ratio = s->spring_damping_ratio;
+    x->spring_target = s->spring_target;
+}
+
+static bool all_locked(const NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES], u32 first, u32 count)
+{
+    for (u32 i = first; i < first + count; ++i) {
+        if (ax[i].motion != NPH_PHYSICS_AXIS_LOCKED) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The axes now: B's anchor's offset from A's, A's frame axes (translation)
+// and the twist and swing axes, with the positions along them and the
+// angles about them (the swing-twist decomposition of B's frame in A's,
+// twist about X).
+typedef struct AxesNow {
+    NphVec3 d;
+    NphVec3 axis[NPH_PHYSICS_D6_AXES];
+    f32 value[NPH_PHYSICS_D6_AXES];
+} AxesNow;
+
+static AxesNow axes_of(NphQuat qa, NphQuat qb, NphVec3 d)
+{
+    AxesNow n;
+    n.d = d;
+    n.axis[0] = nph_quat_axis_x(qa);
+    n.axis[1] = nph_quat_axis_y(qa);
+    n.axis[2] = nph_quat_axis_z(qa);
+    for (u32 i = 0U; i < 3U; ++i) {
+        n.value[i] = nph_vec3_dot(d, n.axis[i]);
+    }
+    NphQuat r = nph_quat_mul(nph_quat_conjugate(qa), qb);
+    if (r.w < 0.0F) {
+        r = nph_quat_neg(r);
+    }
+    n.value[NPH_PHYSICS_D6_TWIST] = 2.0F * nph_f32_atan2(r.x, r.w);
+    const f32 tl = nph_f32_sqrt(r.x * r.x + r.w * r.w);
+    const NphQuat twist =
+        tl > 1e-9F ? nph_quat(r.x / tl, 0.0F, 0.0F, r.w / tl) : nph_quat_identity();
+    const NphQuat swing = nph_quat_mul(r, nph_quat_conjugate(twist));
+    n.value[NPH_PHYSICS_D6_SWING_Y] = 2.0F * nph_f32_atan2(swing.y, swing.w);
+    n.value[NPH_PHYSICS_D6_SWING_Z] = 2.0F * nph_f32_atan2(swing.z, swing.w);
+    n.axis[NPH_PHYSICS_D6_TWIST] =
+        nph_vec3_normalize_or(nph_vec3_add(n.axis[0], nph_quat_axis_x(qb)), n.axis[0]);
+    n.axis[NPH_PHYSICS_D6_SWING_Y] = n.axis[1];
+    n.axis[NPH_PHYSICS_D6_SWING_Z] = n.axis[2];
+    return n;
+}
+
+// B's anchor less A's, now (in the step).
+static NphVec3 anchor_offset(const PhysJoint *j, const JointState *s)
+{
+    return nph_vec3_add(nph_vec3_add(nph_vec3_sub(s->b->dp, s->a->dp), nph_vec3_sub(s->rb, s->ra)),
+                        j->delta_center);
+}
+
+// One row: a translation along `u` of B's anchor against the point of A
+// under it (A's arm is ra + d), or a rotation about an axis (u zero, both
+// arms the axis).
+typedef struct Row {
+    NphVec3 u;
+    NphVec3 ca; // A's angular Jacobian: (ra + d) x u, or the axis
+    NphVec3 cb; // B's: rb x u, or the axis
+    f32 mass;   // the effective mass
+} Row;
+
+static Row row_make(const PhysJoint *j, NphVec3 u, NphVec3 ca, NphVec3 cb)
+{
+    Row r;
+    r.u = u;
+    r.ca = ca;
+    r.cb = cb;
+    const f32 k = (j->inv_mass_a + j->inv_mass_b) * nph_vec3_dot(u, u) +
+                  nph_vec3_dot(ca, nph_mat3_mul_vec3(j->inv_inertia_a, ca)) +
+                  nph_vec3_dot(cb, nph_mat3_mul_vec3(j->inv_inertia_b, cb));
+    r.mass = k > 0.0F ? 1.0F / k : 0.0F;
+    return r;
+}
+
+static Row linear_row(const PhysJoint *j, const JointState *s, NphVec3 d, NphVec3 u)
+{
+    return row_make(j, u, nph_vec3_cross(nph_vec3_add(s->ra, d), u), nph_vec3_cross(s->rb, u));
+}
+
+static Row angular_row(const PhysJoint *j, NphVec3 axis)
+{
+    return row_make(j, nph_vec3_zero(), axis, axis);
+}
+
+static f32 row_speed(const JointState *s, const Row *r)
+{
+    return nph_vec3_dot(nph_vec3_sub(s->b->v, s->a->v), r->u) + nph_vec3_dot(s->b->w, r->cb) -
+           nph_vec3_dot(s->a->w, r->ca);
+}
+
+static void row_apply(const PhysJoint *j, JointState *s, const Row *r, f32 lambda)
+{
+    if ((j->flags & PHYS_JOINT_WRITE_A) != 0U) {
+        s->a->v = nph_vec3_mul_add(s->a->v, r->u, -j->inv_mass_a * lambda);
+        s->a->w = nph_vec3_sub(s->a->w,
+                               nph_mat3_mul_vec3(j->inv_inertia_a, nph_vec3_scale(r->ca, lambda)));
+    }
+    if ((j->flags & PHYS_JOINT_WRITE_B) != 0U) {
+        s->b->v = nph_vec3_mul_add(s->b->v, r->u, j->inv_mass_b * lambda);
+        s->b->w = nph_vec3_add(s->b->w,
+                               nph_mat3_mul_vec3(j->inv_inertia_b, nph_vec3_scale(r->cb, lambda)));
+    }
+}
+
+// An equality row: the error `c` to zero, soft while solving, rigid while
+// relaxing.
+static void row_lock(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 *accumulated,
+                     const PhysJointStep *step, bool use_bias)
+{
+    f32 bias = 0.0F;
+    f32 mass_scale = 1.0F;
+    f32 impulse_scale = 0.0F;
+    if (use_bias) {
+        bias = step->soft.bias_rate * c;
+        mass_scale = step->soft.mass_scale;
+        impulse_scale = step->soft.impulse_scale;
+    }
+    const f32 impulse =
+        -r->mass * mass_scale * (row_speed(s, r) + bias) - impulse_scale * *accumulated;
+    *accumulated += impulse;
+    row_apply(j, s, r, impulse);
+}
+
+// A one-sided row: the gap `c` (>= 0 allowed) closes as the row's speed
+// times `sign` falls; the impulse stays >= 0, along the row times `sign`.
+static void row_limit(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 sign,
+                      f32 *accumulated, const PhysJointStep *step, bool use_bias)
+{
+    const RowSoft rs = limit_soft(c, step, use_bias);
+    const f32 impulse = -r->mass * rs.mass_scale * (sign * row_speed(s, r) + rs.bias) -
+                        rs.impulse_scale * *accumulated;
+    const f32 total = nph_f32_max(*accumulated + impulse, 0.0F);
+    const f32 delta = total - *accumulated;
+    *accumulated = total;
+    row_apply(j, s, r, sign * delta);
+}
+
+static void row_motor(const PhysJoint *j, JointState *s, const Row *r, f32 speed, f32 max_impulse,
+                      f32 *accumulated)
+{
+    const f32 old = *accumulated;
+    *accumulated =
+        nph_f32_clamp(old - r->mass * (row_speed(s, r) - speed), -max_impulse, max_impulse);
+    row_apply(j, s, r, *accumulated - old);
+}
+
+// A spring of its own frequency and damping (whatever the masses): the
+// solve pass only, since it is a force (solved again while relaxing, its
+// implicit damping doubles).
+static void row_spring(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 hertz, f32 zeta,
+                       f32 h, f32 *accumulated)
+{
+    const PhysSoftness soft = phys_make_soft(hertz, zeta, h);
+    const f32 impulse = -soft.mass_scale * r->mass * (row_speed(s, r) + soft.bias_rate * c) -
+                        soft.impulse_scale * *accumulated;
+    *accumulated += impulse;
+    row_apply(j, s, r, impulse);
+}
+
+// The error of axis `i` from `target`: angles wrap.
+static f32 axis_error(u32 i, f32 value, f32 target)
+{
+    return i >= NPH_PHYSICS_D6_TWIST ? unwind(value - target) : value - target;
+}
+
+static Row axis_row(const PhysJoint *j, const JointState *s, const AxesNow *n, u32 i)
+{
+    return i < 3U ? linear_row(j, s, n->d, n->axis[i]) : angular_row(j, n->axis[i]);
+}
+
+// A slider or 6-DOF joint: every axis's spring and motor, then its limits,
+// then the locks: rotation as one block where all three (or both swings)
+// are locked, else axis by axis; then translation the same way.
+static void solve_axes(PhysJoint *j, JointState *s, const PhysJointStep *step, bool use_bias)
+{
+    NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+    d6_config(j, ax);
+    const AxesNow n = axes_of(s->qa, s->qb, anchor_offset(j, s));
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const NphPhysicsD6Axis *a = &ax[i];
+        if (a->motion == NPH_PHYSICS_AXIS_LOCKED) {
+            continue;
+        }
+        f32 *imp = j->axis_impulse[i];
+        const Row r = axis_row(j, s, &n, i);
+        if (a->enable_spring != 0 && use_bias) {
+            row_spring(j, s, &r, axis_error(i, n.value[i], a->spring_target), a->spring_hertz,
+                       a->spring_damping_ratio, step->h, &imp[PHYS_ROW_SPRING]);
+        }
+        if (a->enable_motor != 0) {
+            row_motor(j, s, &r, a->motor_speed, step->h * a->max_motor_force, &imp[PHYS_ROW_MOTOR]);
+        }
+        if (a->motion == NPH_PHYSICS_AXIS_LIMITED) {
+            row_limit(j, s, &r, n.value[i] - a->lower, 1.0F, &imp[PHYS_ROW_LOCK], step, use_bias);
+            row_limit(j, s, &r, a->upper - n.value[i], -1.0F, &imp[PHYS_ROW_UPPER], step, use_bias);
+        }
+    }
+    // Rotation.
+    if (all_locked(ax, NPH_PHYSICS_D6_TWIST, 3U)) {
+        solve_rotation_lock(j, s, step, use_bias);
+    } else {
+        const bool swings = all_locked(ax, NPH_PHYSICS_D6_SWING_Y, 2U);
+        if (swings) {
+            solve_axis_lock(j, s, step, use_bias);
+        }
+        for (u32 i = NPH_PHYSICS_D6_TWIST; i < NPH_PHYSICS_D6_AXES; ++i) {
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED && (i == NPH_PHYSICS_D6_TWIST || !swings)) {
+                const Row r = angular_row(j, n.axis[i]);
+                row_lock(j, s, &r, n.value[i], &j->axis_impulse[i][PHYS_ROW_LOCK], step, use_bias);
+            }
+        }
+    }
+    // Translation, last: the most important.
+    if (all_locked(ax, 0U, 3U)) {
+        solve_point(j, s, step, use_bias);
+    } else {
+        for (u32 i = 0U; i < 3U; ++i) {
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED) {
+                const Row r = linear_row(j, s, n.d, n.axis[i]);
+                row_lock(j, s, &r, n.value[i], &j->axis_impulse[i][PHYS_ROW_LOCK], step, use_bias);
+            }
+        }
+    }
+}
+
+// The rows' impulses of a slider or 6-DOF joint, applied again about the
+// current axes (the blocks' as the blocks keep them).
+static void warm_axes(PhysJoint *j, JointState *s)
+{
+    NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+    d6_config(j, ax);
+    const AxesNow n = axes_of(s->qa, s->qb, anchor_offset(j, s));
+    const bool rotation_block = all_locked(ax, NPH_PHYSICS_D6_TWIST, 3U);
+    const bool swing_block = !rotation_block && all_locked(ax, NPH_PHYSICS_D6_SWING_Y, 2U);
+    const bool point_block = all_locked(ax, 0U, 3U);
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const f32 *imp = j->axis_impulse[i];
+        const f32 total =
+            imp[PHYS_ROW_LOCK] - imp[PHYS_ROW_UPPER] + imp[PHYS_ROW_MOTOR] + imp[PHYS_ROW_SPRING];
+        if (total != 0.0F) {
+            const Row r = axis_row(j, s, &n, i);
+            row_apply(j, s, &r, total);
+        }
+    }
+    if (rotation_block) {
+        apply_angular(j, s, j->angular_impulse);
+    } else if (swing_block) {
+        apply_angular(j, s,
+                      nph_vec3_add(nph_vec3_scale(nph_quat_axis_y(s->qa), j->angular_impulse.x),
+                                   nph_vec3_scale(nph_quat_axis_z(s->qa), j->angular_impulse.y)));
+    }
+    if (point_block) {
+        apply_linear(j, s, j->linear_impulse);
+    }
+}
+
+// A distance joint: one row along the line between the anchors.
+static void solve_distance(PhysJoint *j, JointState *s, const PhysJointStep *step, bool use_bias)
+{
+    const NphPhysicsDistanceJoint *dj = &j->distance;
+    const NphVec3 d = anchor_offset(j, s);
+    const f32 len = nph_vec3_length(d);
+    if (!(len > 1e-6F)) {
+        return; // the anchors meet: the line has no direction
+    }
+    const Row r = linear_row(j, s, d, nph_vec3_scale(d, 1.0F / len));
+    f32 *imp = j->axis_impulse[0];
+    if (dj->enable_spring != 0 && use_bias) {
+        row_spring(j, s, &r, len - dj->length, dj->spring_hertz, dj->spring_damping_ratio, step->h,
+                   &imp[PHYS_ROW_SPRING]);
+    }
+    if (dj->enable_motor != 0) {
+        row_motor(j, s, &r, dj->motor_speed, step->h * dj->max_motor_force, &imp[PHYS_ROW_MOTOR]);
+    }
+    if (dj->enable_limit != 0) {
+        row_limit(j, s, &r, len - dj->min_length, 1.0F, &imp[PHYS_ROW_LOCK], step, use_bias);
+        row_limit(j, s, &r, dj->max_length - len, -1.0F, &imp[PHYS_ROW_UPPER], step, use_bias);
+    } else if (dj->enable_spring == 0) {
+        row_lock(j, s, &r, len - dj->length, &imp[PHYS_ROW_LOCK], step, use_bias);
+    }
+}
+
+static void warm_distance(PhysJoint *j, JointState *s)
+{
+    const NphVec3 d = anchor_offset(j, s);
+    const f32 len = nph_vec3_length(d);
+    const f32 *imp = j->axis_impulse[0];
+    const f32 total =
+        imp[PHYS_ROW_LOCK] - imp[PHYS_ROW_UPPER] + imp[PHYS_ROW_MOTOR] + imp[PHYS_ROW_SPRING];
+    if (len > 1e-6F && total != 0.0F) {
+        const Row r = linear_row(j, s, d, nph_vec3_scale(d, 1.0F / len));
+        row_apply(j, s, &r, total);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The step
 // ---------------------------------------------------------------------------
 
@@ -438,6 +769,57 @@ void phys_joint_prepare(NphPhysicsWorld *w, const PhysJointStep *step, PhysJoint
         if (!(bj->friction_torque > 0.0F)) {
             j->friction_impulse = nph_vec3_zero();
         }
+    } else if (j->type == NPH_PHYSICS_JOINT_DISTANCE) {
+        const NphPhysicsDistanceJoint *dj = &j->distance;
+        f32 *imp = j->axis_impulse[0];
+        if (dj->enable_limit == 0) {
+            imp[PHYS_ROW_UPPER] = 0.0F;
+            if (dj->enable_spring != 0) {
+                imp[PHYS_ROW_LOCK] = 0.0F;
+            }
+        }
+        if (dj->enable_motor == 0) {
+            imp[PHYS_ROW_MOTOR] = 0.0F;
+        }
+        if (dj->enable_spring == 0) {
+            imp[PHYS_ROW_SPRING] = 0.0F;
+        }
+    } else if (j->type == NPH_PHYSICS_JOINT_SLIDER || j->type == NPH_PHYSICS_JOINT_D6) {
+        NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+        d6_config(j, ax);
+        for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+            f32 *imp = j->axis_impulse[i];
+            if (ax[i].motion != NPH_PHYSICS_AXIS_LIMITED) {
+                imp[PHYS_ROW_UPPER] = 0.0F;
+            }
+            if (ax[i].motion == NPH_PHYSICS_AXIS_FREE) {
+                imp[PHYS_ROW_LOCK] = 0.0F;
+            }
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED || ax[i].enable_motor == 0) {
+                imp[PHYS_ROW_MOTOR] = 0.0F;
+            }
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED || ax[i].enable_spring == 0) {
+                imp[PHYS_ROW_SPRING] = 0.0F;
+            }
+        }
+        // The blocks' impulses mean what their block makes them; a change
+        // of block starts them from nothing.
+        const bool rotation = all_locked(ax, NPH_PHYSICS_D6_TWIST, 3U);
+        const bool swing = !rotation && all_locked(ax, NPH_PHYSICS_D6_SWING_Y, 2U);
+        const bool point = all_locked(ax, 0U, 3U);
+        const u32 blocks = (rotation ? (u32)PHYS_JOINT_BLOCK_ROTATION : 0U) |
+                           (swing ? (u32)PHYS_JOINT_BLOCK_SWING : 0U) |
+                           (point ? (u32)PHYS_JOINT_BLOCK_POINT : 0U);
+        const u32 all_blocks =
+            (u32)(PHYS_JOINT_BLOCK_ROTATION | PHYS_JOINT_BLOCK_SWING | PHYS_JOINT_BLOCK_POINT);
+        if ((j->flags & ((u32)PHYS_JOINT_BLOCK_ROTATION | (u32)PHYS_JOINT_BLOCK_SWING)) !=
+            (blocks & ((u32)PHYS_JOINT_BLOCK_ROTATION | (u32)PHYS_JOINT_BLOCK_SWING))) {
+            j->angular_impulse = nph_vec3_zero();
+        }
+        if ((j->flags & (u32)PHYS_JOINT_BLOCK_POINT) != (blocks & (u32)PHYS_JOINT_BLOCK_POINT)) {
+            j->linear_impulse = nph_vec3_zero();
+        }
+        j->flags = (j->flags & ~all_blocks) | blocks;
     }
 }
 
@@ -473,6 +855,14 @@ NphVec3 phys_joint_angular_impulse(const PhysJoint *j, NphQuat qa, NphQuat qb)
 void phys_joint_warm_start(PhysSolverBody *bodies, PhysJoint *j)
 {
     JointState s = joint_state(bodies, j);
+    if (j->type == NPH_PHYSICS_JOINT_SLIDER || j->type == NPH_PHYSICS_JOINT_D6) {
+        warm_axes(j, &s);
+        return;
+    }
+    if (j->type == NPH_PHYSICS_JOINT_DISTANCE) {
+        warm_distance(j, &s);
+        return;
+    }
     apply_angular(j, &s, phys_joint_angular_impulse(j, s.qa, s.qb));
     apply_linear(j, &s, j->linear_impulse);
 }
@@ -491,6 +881,13 @@ void phys_joint_solve(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoi
     case NPH_PHYSICS_JOINT_FIXED:
         solve_rotation_lock(j, &s, step, use_bias);
         break;
+    case NPH_PHYSICS_JOINT_SLIDER:
+    case NPH_PHYSICS_JOINT_D6:
+        solve_axes(j, &s, step, use_bias);
+        return;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        solve_distance(j, &s, step, use_bias);
+        return;
     case NPH_PHYSICS_JOINT_TYPE_COUNT:
     default:
         NPH_ASSERT_MSG(false, "physics: unknown joint type %u", j->type);
@@ -579,6 +976,205 @@ static void xpbd_point(PhysJoint *j, JointState *s, f32 inv_h)
     move_linear(j, s, p);
 }
 
+// A positional row: B's anchor moved by `lambda` along the row against A
+// (or B turned about it).
+static void row_move(const PhysJoint *j, JointState *s, const Row *r, f32 lambda)
+{
+    if ((j->flags & PHYS_JOINT_WRITE_A) != 0U) {
+        s->a->dp = nph_vec3_mul_add(s->a->dp, r->u, -j->inv_mass_a * lambda);
+        s->a->dq =
+            turn(s->a->dq,
+                 nph_vec3_neg(nph_mat3_mul_vec3(j->inv_inertia_a, nph_vec3_scale(r->ca, lambda))));
+    }
+    if ((j->flags & PHYS_JOINT_WRITE_B) != 0U) {
+        s->b->dp = nph_vec3_mul_add(s->b->dp, r->u, j->inv_mass_b * lambda);
+        s->b->dq =
+            turn(s->b->dq, nph_mat3_mul_vec3(j->inv_inertia_b, nph_vec3_scale(r->cb, lambda)));
+    }
+    refresh(j, s);
+}
+
+// XPBD rows: an equality to zero, a limit's gap closed when negative, a
+// compliant spring (alpha / h^2 = w / (omega h)^2 over the row's inverse
+// mass w). Each keeps its multiplier as an impulse for the reaction.
+static void xpbd_row_lock(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 *accumulated,
+                          f32 inv_h)
+{
+    const f32 lambda = -c * r->mass;
+    *accumulated = lambda * inv_h;
+    row_move(j, s, r, lambda);
+}
+
+static void xpbd_row_limit(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 sign,
+                           f32 *accumulated, f32 inv_h)
+{
+    if (!(c < 0.0F)) {
+        *accumulated = 0.0F;
+        return;
+    }
+    const f32 lambda = -c * r->mass;
+    *accumulated = lambda * inv_h;
+    row_move(j, s, r, sign * lambda);
+}
+
+static void xpbd_row_spring(const PhysJoint *j, JointState *s, const Row *r, f32 c, f32 hertz,
+                            f32 h, f32 *accumulated)
+{
+    if (!(r->mass > 0.0F)) {
+        return;
+    }
+    const f32 omega = 2.0F * 3.14159265F * hertz;
+    const f32 w = 1.0F / r->mass;
+    const f32 alpha = w / (omega * omega * h * h);
+    const f32 lambda = -c / (w + alpha);
+    *accumulated = lambda / h;
+    row_move(j, s, r, lambda);
+}
+
+// A spring's damper on the derived velocities: 2 zeta omega of the row's
+// speed, at most all of it, this substep.
+static void xpbd_row_damper(const PhysJoint *j, JointState *s, const Row *r, f32 hertz, f32 zeta,
+                            f32 h)
+{
+    const f32 share = nph_f32_min(2.0F * zeta * 2.0F * 3.14159265F * hertz * h, 1.0F);
+    row_apply(j, s, r, -share * r->mass * row_speed(s, r));
+}
+
+static AxesNow axes_now(const PhysJoint *j, const JointState *s)
+{
+    return axes_of(s->qa, s->qb, anchor_offset(j, s));
+}
+
+static void xpbd_axes_positions(PhysJoint *j, JointState *s, f32 h, f32 inv_h)
+{
+    NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+    d6_config(j, ax);
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const NphPhysicsD6Axis *a = &ax[i];
+        if (a->motion == NPH_PHYSICS_AXIS_LOCKED) {
+            continue;
+        }
+        f32 *imp = j->axis_impulse[i];
+        if (a->enable_spring != 0) {
+            const AxesNow n = axes_now(j, s);
+            const Row r = axis_row(j, s, &n, i);
+            xpbd_row_spring(j, s, &r, axis_error(i, n.value[i], a->spring_target), a->spring_hertz,
+                            h, &imp[PHYS_ROW_SPRING]);
+        }
+        if (a->motion == NPH_PHYSICS_AXIS_LIMITED) {
+            AxesNow n = axes_now(j, s);
+            Row r = axis_row(j, s, &n, i);
+            xpbd_row_limit(j, s, &r, n.value[i] - a->lower, 1.0F, &imp[PHYS_ROW_LOCK], inv_h);
+            n = axes_now(j, s);
+            r = axis_row(j, s, &n, i);
+            xpbd_row_limit(j, s, &r, a->upper - n.value[i], -1.0F, &imp[PHYS_ROW_UPPER], inv_h);
+        }
+    }
+    NphVec3 k[3];
+    if (all_locked(ax, NPH_PHYSICS_D6_TWIST, 3U)) {
+        NphQuat q = nph_quat_mul(s->qb, nph_quat_conjugate(s->qa));
+        if (q.w < 0.0F) {
+            q = nph_quat_neg(q);
+        }
+        angular_mass(j, k);
+        const NphVec3 l = solve3(k, nph_vec3(-2.0F * q.x, -2.0F * q.y, -2.0F * q.z));
+        j->angular_impulse = nph_vec3_scale(l, inv_h);
+        move_angular(j, s, l);
+    } else {
+        const bool swings = all_locked(ax, NPH_PHYSICS_D6_SWING_Y, 2U);
+        if (swings) {
+            const NphVec3 e = nph_vec3_cross(nph_quat_axis_x(s->qa), nph_quat_axis_x(s->qb));
+            angular_mass(j, k);
+            const NphVec3 l = solve3(k, nph_vec3_neg(e));
+            j->angular_impulse = nph_vec3(nph_vec3_dot(l, nph_quat_axis_y(s->qa)) * inv_h,
+                                          nph_vec3_dot(l, nph_quat_axis_z(s->qa)) * inv_h, 0.0F);
+            move_angular(j, s, l);
+        }
+        for (u32 i = NPH_PHYSICS_D6_TWIST; i < NPH_PHYSICS_D6_AXES; ++i) {
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED && (i == NPH_PHYSICS_D6_TWIST || !swings)) {
+                const AxesNow n = axes_now(j, s);
+                const Row r = angular_row(j, n.axis[i]);
+                xpbd_row_lock(j, s, &r, n.value[i], &j->axis_impulse[i][PHYS_ROW_LOCK], inv_h);
+            }
+        }
+    }
+    if (all_locked(ax, 0U, 3U)) {
+        xpbd_point(j, s, inv_h);
+    } else {
+        for (u32 i = 0U; i < 3U; ++i) {
+            if (ax[i].motion == NPH_PHYSICS_AXIS_LOCKED) {
+                const AxesNow n = axes_now(j, s);
+                const Row r = linear_row(j, s, n.d, n.axis[i]);
+                xpbd_row_lock(j, s, &r, n.value[i], &j->axis_impulse[i][PHYS_ROW_LOCK], inv_h);
+            }
+        }
+    }
+}
+
+static void xpbd_axes_velocities(PhysJoint *j, JointState *s, f32 h)
+{
+    NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+    d6_config(j, ax);
+    const AxesNow n = axes_now(j, s);
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const NphPhysicsD6Axis *a = &ax[i];
+        if (a->motion == NPH_PHYSICS_AXIS_LOCKED) {
+            continue;
+        }
+        const Row r = axis_row(j, s, &n, i);
+        if (a->enable_spring != 0 && a->spring_damping_ratio > 0.0F) {
+            xpbd_row_damper(j, s, &r, a->spring_hertz, a->spring_damping_ratio, h);
+        }
+        if (a->enable_motor != 0) {
+            f32 *motor = &j->axis_impulse[i][PHYS_ROW_MOTOR];
+            *motor = 0.0F; // a substep's own
+            row_motor(j, s, &r, a->motor_speed, h * a->max_motor_force, motor);
+        }
+    }
+}
+
+static void xpbd_distance_positions(PhysJoint *j, JointState *s, f32 h, f32 inv_h)
+{
+    const NphPhysicsDistanceJoint *dj = &j->distance;
+    f32 *imp = j->axis_impulse[0];
+    for (u32 pass = 0U; pass < 3U; ++pass) {
+        const NphVec3 d = anchor_offset(j, s);
+        const f32 len = nph_vec3_length(d);
+        if (!(len > 1e-6F)) {
+            return;
+        }
+        const Row r = linear_row(j, s, d, nph_vec3_scale(d, 1.0F / len));
+        if (pass == 0U && dj->enable_spring != 0) {
+            xpbd_row_spring(j, s, &r, len - dj->length, dj->spring_hertz, h, &imp[PHYS_ROW_SPRING]);
+        } else if (pass == 1U && dj->enable_limit != 0) {
+            xpbd_row_limit(j, s, &r, len - dj->min_length, 1.0F, &imp[PHYS_ROW_LOCK], inv_h);
+        } else if (pass == 2U && dj->enable_limit != 0) {
+            xpbd_row_limit(j, s, &r, dj->max_length - len, -1.0F, &imp[PHYS_ROW_UPPER], inv_h);
+        } else if (pass == 2U && dj->enable_spring == 0) {
+            xpbd_row_lock(j, s, &r, len - dj->length, &imp[PHYS_ROW_LOCK], inv_h);
+        }
+    }
+}
+
+static void xpbd_distance_velocities(PhysJoint *j, JointState *s, f32 h)
+{
+    const NphPhysicsDistanceJoint *dj = &j->distance;
+    const NphVec3 d = anchor_offset(j, s);
+    const f32 len = nph_vec3_length(d);
+    if (!(len > 1e-6F)) {
+        return;
+    }
+    const Row r = linear_row(j, s, d, nph_vec3_scale(d, 1.0F / len));
+    if (dj->enable_spring != 0 && dj->spring_damping_ratio > 0.0F) {
+        xpbd_row_damper(j, s, &r, dj->spring_hertz, dj->spring_damping_ratio, h);
+    }
+    if (dj->enable_motor != 0) {
+        f32 *motor = &j->axis_impulse[0][PHYS_ROW_MOTOR];
+        *motor = 0.0F;
+        row_motor(j, s, &r, dj->motor_speed, h * dj->max_motor_force, motor);
+    }
+}
+
 void phys_joint_xpbd_positions(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j)
 {
     JointState s = joint_state(bodies, j);
@@ -659,6 +1255,13 @@ void phys_joint_xpbd_positions(PhysSolverBody *bodies, const PhysJointStep *step
         move_angular(j, &s, l);
         break;
     }
+    case NPH_PHYSICS_JOINT_SLIDER:
+    case NPH_PHYSICS_JOINT_D6:
+        xpbd_axes_positions(j, &s, step->h, inv_h);
+        return;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        xpbd_distance_positions(j, &s, step->h, inv_h);
+        return;
     case NPH_PHYSICS_JOINT_TYPE_COUNT:
     default:
         NPH_ASSERT_MSG(false, "physics: unknown joint type %u", j->type);
@@ -670,6 +1273,14 @@ void phys_joint_xpbd_positions(PhysSolverBody *bodies, const PhysJointStep *step
 void phys_joint_xpbd_velocities(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j)
 {
     JointState s = joint_state(bodies, j);
+    if (j->type == NPH_PHYSICS_JOINT_SLIDER || j->type == NPH_PHYSICS_JOINT_D6) {
+        xpbd_axes_velocities(j, &s, step->h);
+        return;
+    }
+    if (j->type == NPH_PHYSICS_JOINT_DISTANCE) {
+        xpbd_distance_velocities(j, &s, step->h);
+        return;
+    }
     if (j->type == NPH_PHYSICS_JOINT_HINGE) {
         const NphPhysicsHingeJoint *h = &j->hinge;
         const NphVec3 axis = nph_quat_axis_x(s.qa);
@@ -708,4 +1319,127 @@ f32 phys_joint_angle(const NphPhysicsWorld *w, const PhysJoint *j)
     const PhysBody *b = &w->bodies.data[j->body_b];
     return twist_angle(nph_quat_mul(a->rotation, j->frame_a.rotation),
                        nph_quat_mul(b->rotation, j->frame_b.rotation));
+}
+
+// The frames, anchors, and B's anchor's offset from A's now, from the
+// bodies (between steps).
+static void frames_now(const NphPhysicsWorld *w, const PhysJoint *j, NphQuat *qa, NphQuat *qb,
+                       NphVec3 *ra, NphVec3 *rb, NphVec3 *d)
+{
+    const PhysBody *a = &w->bodies.data[j->body_a];
+    const PhysBody *b = &w->bodies.data[j->body_b];
+    *qa = nph_quat_mul(a->rotation, j->frame_a.rotation);
+    *qb = nph_quat_mul(b->rotation, j->frame_b.rotation);
+    *ra = nph_quat_rotate(a->rotation, nph_vec3_sub(j->frame_a.position, a->local_center));
+    *rb = nph_quat_rotate(b->rotation, nph_vec3_sub(j->frame_b.position, b->local_center));
+    *d = nph_vec3_add(nph_dvec3_relative(b->center, a->center), nph_vec3_sub(*rb, *ra));
+}
+
+void phys_joint_reaction_impulses(const NphPhysicsWorld *w, const PhysJoint *j, NphVec3 *linear,
+                                  NphVec3 *angular)
+{
+    NphQuat qa;
+    NphQuat qb;
+    NphVec3 ra;
+    NphVec3 rb;
+    NphVec3 d;
+    frames_now(w, j, &qa, &qb, &ra, &rb, &d);
+    *linear = nph_vec3_zero();
+    *angular = nph_vec3_zero();
+    if (j->type == NPH_PHYSICS_JOINT_BALL || j->type == NPH_PHYSICS_JOINT_HINGE ||
+        j->type == NPH_PHYSICS_JOINT_FIXED) {
+        *linear = j->linear_impulse;
+        *angular = phys_joint_angular_impulse(j, qa, qb);
+        return;
+    }
+    if (j->type == NPH_PHYSICS_JOINT_DISTANCE) {
+        const f32 len = nph_vec3_length(d);
+        const f32 *imp = j->axis_impulse[0];
+        const f32 total =
+            imp[PHYS_ROW_LOCK] - imp[PHYS_ROW_UPPER] + imp[PHYS_ROW_MOTOR] + imp[PHYS_ROW_SPRING];
+        if (len > 1e-6F) {
+            *linear = nph_vec3_scale(d, total / len);
+        }
+        return;
+    }
+    NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+    d6_config(j, ax);
+    const AxesNow n = axes_of(qa, qb, d);
+    for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+        const f32 *imp = j->axis_impulse[i];
+        const f32 total =
+            imp[PHYS_ROW_LOCK] - imp[PHYS_ROW_UPPER] + imp[PHYS_ROW_MOTOR] + imp[PHYS_ROW_SPRING];
+        if (i < 3U) {
+            *linear = nph_vec3_mul_add(*linear, n.axis[i], total);
+        } else {
+            *angular = nph_vec3_mul_add(*angular, n.axis[i], total);
+        }
+    }
+    if ((j->flags & (u32)PHYS_JOINT_BLOCK_POINT) != 0U) {
+        *linear = nph_vec3_add(*linear, j->linear_impulse);
+    }
+    if ((j->flags & (u32)PHYS_JOINT_BLOCK_ROTATION) != 0U) {
+        *angular = nph_vec3_add(*angular, j->angular_impulse);
+    } else if ((j->flags & (u32)PHYS_JOINT_BLOCK_SWING) != 0U) {
+        *angular = nph_vec3_add(
+            *angular, nph_vec3_add(nph_vec3_scale(nph_quat_axis_y(qa), j->angular_impulse.x),
+                                   nph_vec3_scale(nph_quat_axis_z(qa), j->angular_impulse.y)));
+    }
+}
+
+f32 phys_joint_slider_value(const NphPhysicsWorld *w, const PhysJoint *j, bool speed)
+{
+    NphQuat qa;
+    NphQuat qb;
+    NphVec3 ra;
+    NphVec3 rb;
+    NphVec3 d;
+    frames_now(w, j, &qa, &qb, &ra, &rb, &d);
+    const NphVec3 u = nph_quat_axis_x(qa);
+    if (!speed) {
+        return nph_vec3_dot(d, u);
+    }
+    const PhysBody *a = &w->bodies.data[j->body_a];
+    const PhysBody *b = &w->bodies.data[j->body_b];
+    // As a row's speed: B's anchor against the point of A under it.
+    return nph_vec3_dot(nph_vec3_sub(b->linear_velocity, a->linear_velocity), u) +
+           nph_vec3_dot(b->angular_velocity, nph_vec3_cross(rb, u)) -
+           nph_vec3_dot(a->angular_velocity, nph_vec3_cross(nph_vec3_add(ra, d), u));
+}
+
+bool phys_joint_is_driven(const PhysJoint *j)
+{
+    switch (j->type) {
+    case NPH_PHYSICS_JOINT_HINGE:
+        return j->hinge.enable_motor != 0 && j->hinge.motor_speed != 0.0F &&
+               j->hinge.max_motor_torque > 0.0F;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        return j->distance.enable_motor != 0 && j->distance.motor_speed != 0.0F &&
+               j->distance.max_motor_force > 0.0F;
+    case NPH_PHYSICS_JOINT_SLIDER:
+    case NPH_PHYSICS_JOINT_D6: {
+        NphPhysicsD6Axis ax[NPH_PHYSICS_D6_AXES];
+        d6_config(j, ax);
+        for (u32 i = 0U; i < NPH_PHYSICS_D6_AXES; ++i) {
+            if (ax[i].motion != NPH_PHYSICS_AXIS_LOCKED && ax[i].enable_motor != 0 &&
+                ax[i].motor_speed != 0.0F && ax[i].max_motor_force > 0.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+f32 phys_joint_length(const NphPhysicsWorld *w, const PhysJoint *j)
+{
+    NphQuat qa;
+    NphQuat qb;
+    NphVec3 ra;
+    NphVec3 rb;
+    NphVec3 d;
+    frames_now(w, j, &qa, &qb, &ra, &rb, &d);
+    return nph_vec3_length(d);
 }

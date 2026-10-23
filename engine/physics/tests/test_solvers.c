@@ -9,51 +9,6 @@
 
 #include "test_world_support.h"
 
-// The configurations compared: each solver at the default 4 substeps, then
-// the soft step at 8 (its stiffnesses scale with the substep rate) and XPBD
-// at 16 (it converges with substeps), the last two where the build is fast
-// enough (not Debug or the sanitizers). Quality thresholds hold the default
-// (the soft step at 4); every configuration must stay sound.
-typedef struct SolverConfig {
-    NphPhysicsSolver solver;
-    u32 substeps;
-    const char *name;
-} SolverConfig;
-
-static const SolverConfig k_configs[] = {
-    {NPH_PHYSICS_SOLVER_SOFT_STEP, 4U, "soft 4"}, {NPH_PHYSICS_SOLVER_TGS, 4U, "TGS 4"},
-    {NPH_PHYSICS_SOLVER_XPBD, 4U, "XPBD 4"},      {NPH_PHYSICS_SOLVER_SOFT_STEP, 8U, "soft 8"},
-    {NPH_PHYSICS_SOLVER_XPBD, 16U, "XPBD 16"},
-};
-
-#define CONFIGS (TEST_SCALE >= 8U ? (u32)NPH_ARRAY_COUNT(k_configs) : 3U)
-
-static void solver_scene(Scene *s, u32 config)
-{
-    NphPhysicsWorldDesc d = nph_physics_world_desc_default();
-    d.solver = k_configs[config].solver;
-    d.substeps = k_configs[config].substeps;
-    scene_begin_with(s, d);
-}
-
-// The default configuration: where the quality thresholds apply.
-static bool is_default(u32 config)
-{
-    return config == 0U;
-}
-
-// Every body finite and within `radius` of the origin.
-static bool sound(const NphPhysicsWorld *w, NphPhysicsBody *bodies, u32 count, f64 radius)
-{
-    for (u32 i = 0U; i < count; ++i) {
-        const NphDVec3 p = nph_physics_body_position(w, bodies[i]);
-        if (!(fabs(p.x) < radius && fabs(p.y) < radius && fabs(p.z) < radius)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // ---------------------------------------------------------------------------
 // Stacking
 // ---------------------------------------------------------------------------
@@ -275,98 +230,6 @@ NTEST(solvers, door_slam)
     }
 }
 
-// A ragdoll of eleven bodies: pelvis, chest, head, upper and lower arms
-// and legs, ball joints with cones and twists at the spine, neck,
-// shoulders, and hips, hinges at the elbows and knees, bending the
-// anatomical way (the forearms forward, the shins back). Every joint has
-// 2 N m of friction, as a limp body's muscles do: without it a dangling
-// limb swings for ever and keeps a heap awake under any solver.
-typedef struct Ragdoll {
-    NphPhysicsBody bodies[11];
-    NphPhysicsJoint joints[10];
-} Ragdoll;
-
-static void ragdoll_ball(NphPhysicsWorld *w, Ragdoll *r, u32 joint, u32 a, u32 b, NphDVec3 at,
-                         NphVec3 axis, f32 swing_y, f32 swing_z, f32 twist)
-{
-    NphPhysicsJointDesc d =
-        nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_BALL, r->bodies[a], r->bodies[b]);
-    d.ball.enable_swing_limit = 1;
-    d.ball.swing_y = swing_y;
-    d.ball.swing_z = swing_z;
-    d.ball.enable_twist_limit = 1;
-    d.ball.twist_lower = -twist;
-    d.ball.twist_upper = twist;
-    d.ball.friction_torque = 2.0F;
-    r->joints[joint] = join(w, d, at, axis);
-}
-
-static void ragdoll_hinge(NphPhysicsWorld *w, Ragdoll *r, u32 joint, u32 a, u32 b, NphDVec3 at,
-                          NphVec3 axis, f32 lower, f32 upper)
-{
-    NphPhysicsJointDesc d =
-        nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_HINGE, r->bodies[a], r->bodies[b]);
-    d.hinge.enable_limit = 1;
-    d.hinge.lower = lower;
-    d.hinge.upper = upper;
-    d.hinge.enable_motor = 1; // a motor to standstill: friction
-    d.hinge.max_motor_torque = 2.0F;
-    r->joints[joint] = join(w, d, at, axis);
-}
-
-static void build_ragdoll(NphPhysicsWorld *w, NphDVec3 base, Ragdoll *r)
-{
-    const f32 deg = k_pi / 180.0F;
-    const NphQuat side = nph_quat_from_axis_angle(nph_vec3(0.0F, 0.0F, 1.0F), 90.0F * deg);
-    struct {
-        f64 x, y;
-        NphPhysicsGeometry g;
-        bool sideways;
-    } parts[11] = {
-        {0.0, 1.0, nph_physics_geometry_box(nph_vec3(0.15F, 0.1F, 0.1F)), false},   // pelvis
-        {0.0, 1.32, nph_physics_geometry_box(nph_vec3(0.16F, 0.17F, 0.1F)), false}, // chest
-        {0.0, 1.62, nph_physics_geometry_sphere(0.1F), false},                      // head
-        {-0.33, 1.4, nph_physics_geometry_capsule(0.11F, 0.05F), true},             // upper arms
-        {0.33, 1.4, nph_physics_geometry_capsule(0.11F, 0.05F), true},
-        {-0.62, 1.4, nph_physics_geometry_capsule(0.11F, 0.045F), true}, // forearms
-        {0.62, 1.4, nph_physics_geometry_capsule(0.11F, 0.045F), true},
-        {-0.1, 0.68, nph_physics_geometry_capsule(0.14F, 0.07F), false}, // thighs
-        {0.1, 0.68, nph_physics_geometry_capsule(0.14F, 0.07F), false},
-        {-0.1, 0.25, nph_physics_geometry_capsule(0.14F, 0.06F), false}, // shins
-        {0.1, 0.25, nph_physics_geometry_capsule(0.14F, 0.06F), false},
-    };
-    for (u32 i = 0U; i < 11U; ++i) {
-        r->bodies[i] =
-            add_body(w, NPH_PHYSICS_BODY_DYNAMIC,
-                     nph_dvec3_add(base, nph_dvec3(parts[i].x, parts[i].y, 0.0)),
-                     parts[i].sideways ? side : nph_quat_identity(), parts[i].g, 0.6F, 0.0F);
-    }
-    const NphVec3 up = nph_vec3(0.0F, 1.0F, 0.0F);
-    const NphVec3 down = nph_vec3(0.0F, -1.0F, 0.0F);
-    const NphVec3 left = nph_vec3(-1.0F, 0.0F, 0.0F);
-    const NphVec3 right = nph_vec3(1.0F, 0.0F, 0.0F);
-    ragdoll_ball(w, r, 0U, 0U, 1U, nph_dvec3_add(base, nph_dvec3(0.0, 1.12, 0.0)), up, 30.0F * deg,
-                 20.0F * deg, 20.0F * deg);
-    ragdoll_ball(w, r, 1U, 1U, 2U, nph_dvec3_add(base, nph_dvec3(0.0, 1.5, 0.0)), up, 40.0F * deg,
-                 40.0F * deg, 45.0F * deg);
-    ragdoll_ball(w, r, 2U, 1U, 3U, nph_dvec3_add(base, nph_dvec3(-0.17, 1.42, 0.0)), left,
-                 80.0F * deg, 60.0F * deg, 45.0F * deg);
-    ragdoll_ball(w, r, 3U, 1U, 4U, nph_dvec3_add(base, nph_dvec3(0.17, 1.42, 0.0)), right,
-                 80.0F * deg, 60.0F * deg, 45.0F * deg);
-    ragdoll_hinge(w, r, 4U, 3U, 5U, nph_dvec3_add(base, nph_dvec3(-0.48, 1.4, 0.0)), up, 0.0F,
-                  140.0F * deg);
-    ragdoll_hinge(w, r, 5U, 4U, 6U, nph_dvec3_add(base, nph_dvec3(0.48, 1.4, 0.0)), down, 0.0F,
-                  140.0F * deg);
-    ragdoll_ball(w, r, 6U, 0U, 7U, nph_dvec3_add(base, nph_dvec3(-0.1, 0.9, 0.0)), down,
-                 60.0F * deg, 30.0F * deg, 30.0F * deg);
-    ragdoll_ball(w, r, 7U, 0U, 8U, nph_dvec3_add(base, nph_dvec3(0.1, 0.9, 0.0)), down, 60.0F * deg,
-                 30.0F * deg, 30.0F * deg);
-    ragdoll_hinge(w, r, 8U, 7U, 9U, nph_dvec3_add(base, nph_dvec3(-0.1, 0.46, 0.0)), right, 0.0F,
-                  140.0F * deg);
-    ragdoll_hinge(w, r, 9U, 8U, 10U, nph_dvec3_add(base, nph_dvec3(0.1, 0.46, 0.0)), right, 0.0F,
-                  140.0F * deg);
-}
-
 NTEST(solvers, ragdolls)
 {
     for (u32 config = 0U; config < CONFIGS; ++config) {
@@ -378,8 +241,8 @@ NTEST(solvers, ragdolls)
         NphPcg32 rng = test_rng(77U);
         for (u32 k = 0U; k < 4U; ++k) {
             build_ragdoll(s.w, nph_dvec3(0.3 * (f64)k, 2.0 + 1.8 * (f64)k, 0.2 * (f64)k),
-                          &dolls[k]);
-            for (u32 b = 0U; b < 11U; ++b) {
+                          nph_quat_identity(), &dolls[k]);
+            for (u32 b = 0U; b < RAGDOLL_BODIES; ++b) {
                 nph_physics_body_set_angular_velocity(s.w, dolls[k].bodies[b],
                                                       test_vec3(&rng, -3.0F, 3.0F));
             }
@@ -389,7 +252,7 @@ NTEST(solvers, ragdolls)
         for (u32 i = 1U; i <= 240U * 8U; ++i) {
             step(s.w, NULL, 1U);
             for (u32 k = 0U; k < 4U; ++k) {
-                for (u32 j = 0U; j < 10U; ++j) {
+                for (u32 j = 0U; j < RAGDOLL_JOINTS; ++j) {
                     worst = fmax(worst, joint_gap(s.w, dolls[k].joints[j]));
                 }
             }
@@ -403,7 +266,7 @@ NTEST(solvers, ragdolls)
             NTEST_LOG("%-9s   asleep after %.2f s", k_configs[config].name, (f64)slept / 240.0);
         }
         for (u32 k = 0U; k < 4U; ++k) {
-            NTEST_EXPECT_TRUE(sound(s.w, dolls[k].bodies, 11U, 50.0));
+            NTEST_EXPECT_TRUE(sound(s.w, dolls[k].bodies, RAGDOLL_BODIES, 50.0));
         }
         if (is_default(config)) {
             // The heap settles and sleeps; impacts open a joint by a few
@@ -526,6 +389,105 @@ static void build_mix(NphPhysicsWorld *w)
     d.hinge.motor_speed = 3.0F;
     d.hinge.max_motor_torque = 40.0F;
     join(w, d, nph_dvec3(3.0, 1.0, 3.0), nph_vec3(0.0F, 1.0F, 0.0F));
+    // A motorized slider carrying a rope with a weight, and a 6-DOF arm.
+    const NphDVec3 rail_at = nph_dvec3(-3.0, 4.0, -3.0);
+    const NphPhysicsBody rail = add_anchor(w, rail_at);
+    const NphPhysicsBody cart =
+        add_dynamic(w, rail_at, nph_physics_geometry_box(nph_vec3_splat(0.2F)));
+    NphPhysicsJointDesc sl = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, rail, cart);
+    sl.slider.enable_limit = 1;
+    sl.slider.enable_motor = 1;
+    sl.slider.motor_speed = 1.0F;
+    sl.slider.max_motor_force = 300.0F;
+    join(w, sl, rail_at, nph_vec3(1.0F, 0.0F, 0.0F));
+    NphPhysicsJointDesc rope = nph_physics_joint_desc_default(
+        NPH_PHYSICS_JOINT_DISTANCE, cart,
+        add_dynamic(w, nph_dvec3(-3.0, 3.2, -3.0), nph_physics_geometry_sphere(0.15F)));
+    rope.distance.enable_limit = 1;
+    NphPhysicsJoint rj;
+    NTEST_ASSERT_EQ_INT(nph_physics_joint_create(w, &rope, &rj), NPH_RESULT_OK);
+    const NphDVec3 hub_at = nph_dvec3(3.0, 3.0, -3.0);
+    const NphPhysicsBody hub = add_anchor(w, hub_at);
+    const NphPhysicsBody arm =
+        add_dynamic(w, nph_dvec3(3.5, 3.0, -3.0), nph_physics_geometry_capsule(0.3F, 0.06F));
+    NphPhysicsJointDesc six = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, hub, arm);
+    six.d6.axes[NPH_PHYSICS_D6_TWIST].motion = NPH_PHYSICS_AXIS_FREE;
+    six.d6.axes[NPH_PHYSICS_D6_TWIST].enable_motor = 1;
+    six.d6.axes[NPH_PHYSICS_D6_TWIST].motor_speed = 2.0F;
+    six.d6.axes[NPH_PHYSICS_D6_TWIST].max_motor_force = 50.0F;
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Y].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_SWING_Z].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_LINEAR_X].motion = NPH_PHYSICS_AXIS_LIMITED;
+    six.d6.axes[NPH_PHYSICS_D6_LINEAR_X].enable_spring = 1;
+    join(w, six, hub_at, nph_vec3(1.0F, 0.0F, 0.0F));
+}
+
+NTEST(solvers, machines)
+{
+    for (u32 config = 0U; config < CONFIGS; ++config) {
+        Scene s;
+        solver_scene(&s, config);
+        // A cart pushed into its slider's end at 2 m/s.
+        const NphDVec3 rail_at = nph_dvec3(0.0, 3.0, 0.0);
+        const NphPhysicsBody rail = add_anchor(s.w, rail_at);
+        const NphPhysicsBody cart =
+            add_dynamic(s.w, rail_at, nph_physics_geometry_box(nph_vec3_splat(0.2F)));
+        NphPhysicsJointDesc sl =
+            nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_SLIDER, rail, cart);
+        sl.slider.enable_limit = 1;
+        sl.slider.lower = -0.5F;
+        sl.slider.upper = 0.5F;
+        const NphPhysicsJoint slider = join(s.w, sl, rail_at, nph_vec3(1.0F, 0.0F, 0.0F));
+        nph_physics_body_set_linear_velocity(s.w, cart, nph_vec3(2.0F, 0.0F, 0.0F));
+        // A weight dropped 0.5 m onto a slack 1 m rope.
+        const NphDVec3 hook = nph_dvec3(5.0, 5.0, 0.0);
+        const NphPhysicsBody top = add_anchor(s.w, hook);
+        const NphPhysicsBody weight =
+            add_dynamic(s.w, nph_dvec3(5.0, 4.5, 0.0), nph_physics_geometry_sphere(0.1F));
+        NphPhysicsJointDesc rd =
+            nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_DISTANCE, top, weight);
+        rd.distance.enable_limit = 1;
+        NphPhysicsJoint rope;
+        NTEST_ASSERT_EQ_INT(nph_physics_joint_create(s.w, &rd, &rope), NPH_RESULT_OK);
+        // A bone on a 6-DOF pivot, swung into its 30 degree swing limit.
+        const NphDVec3 pivot = nph_dvec3(-5.0, 5.0, 0.0);
+        const NphPhysicsBody base = add_anchor(s.w, pivot);
+        const NphPhysicsBody bone =
+            add_dynamic(s.w, nph_dvec3(-5.0, 4.5, 0.0), nph_physics_geometry_capsule(0.4F, 0.08F));
+        NphPhysicsJointDesc six = nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_D6, base, bone);
+        for (u32 i = NPH_PHYSICS_D6_TWIST; i < NPH_PHYSICS_D6_AXES; ++i) {
+            six.d6.axes[i].motion = NPH_PHYSICS_AXIS_LIMITED;
+            six.d6.axes[i].lower = -30.0F * k_pi / 180.0F;
+            six.d6.axes[i].upper = 30.0F * k_pi / 180.0F;
+        }
+        const NphPhysicsJoint d6 = join(s.w, six, pivot, nph_vec3(0.0F, -1.0F, 0.0F));
+        const NphQuat frame = nph_physics_joint_desc(s.w, d6).frame_a.rotation;
+        swing_about(s.w, bone, pivot, nph_vec3_scale(nph_quat_axis_y(frame), 6.0F));
+        f32 slide = 0.0F;
+        f32 rope_len = 0.0F;
+        f32 swing = 0.0F;
+        f64 pivot_gap = 0.0;
+        for (u32 i = 0U; i < 240U * 2U; ++i) {
+            step(s.w, NULL, 1U);
+            slide = nph_f32_max(slide, nph_physics_joint_slider_position(s.w, slider));
+            rope_len = nph_f32_max(rope_len, nph_physics_joint_length(s.w, rope));
+            NphVec3 xa;
+            NphVec3 xb;
+            frame_axes(s.w, d6, &xa, &xb);
+            swing = nph_f32_max(swing, angle_between(xa, xb));
+            pivot_gap = fmax(pivot_gap, joint_gap(s.w, d6));
+        }
+        NTEST_LOG("%-9s slider stops at %.4f m (0.5); rope peaks at %.4f m (1); 6-DOF swing %.2f "
+                  "deg (30), pivot gap %.3f mm",
+                  k_configs[config].name, (f64)slide, (f64)rope_len, (f64)(swing * 180.0F / k_pi),
+                  pivot_gap * 1e3);
+        NTEST_EXPECT_TRUE(slide < 0.55F && rope_len < 1.05F && swing < 35.0F * k_pi / 180.0F);
+        if (is_default(config)) {
+            NTEST_EXPECT_NEAR_F32(slide, 0.5F, 0.002F);
+            NTEST_EXPECT_TRUE(rope_len < 1.002F && pivot_gap < 0.002);
+        }
+        scene_end(&s);
+    }
 }
 
 NTEST(solvers, sse4_and_avx2_kernels_agree_to_the_bit)

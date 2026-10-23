@@ -797,11 +797,10 @@ static NphResult build_groups(NphPhysicsWorld *w)
 static NphResult post_finalize(NphPhysicsWorld *w)
 {
     // A motor driving towards a speed keeps its bodies awake: slow as they
-    // may still turn, they are being driven.
+    // may still move, they are being driven.
     for (u32 i = 0U; i < w->step_joints.len; ++i) {
         const PhysJoint *j = &w->joints.data[w->step_joints.data[i]];
-        if (j->type == NPH_PHYSICS_JOINT_HINGE && j->hinge.enable_motor != 0 &&
-            j->hinge.motor_speed != 0.0F && j->hinge.max_motor_torque > 0.0F) {
+        if (phys_joint_is_driven(j)) {
             w->bodies.data[j->body_a].sleep_time = 0.0F;
             w->bodies.data[j->body_b].sleep_time = 0.0F;
         }
