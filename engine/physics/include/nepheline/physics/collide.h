@@ -12,6 +12,7 @@
 //                                 triangle
 //   nph_physics_collide_mesh      a convex geometry's manifolds with a
 //                                 triangle mesh: one per normal, up to four
+//   nph_physics_collide_heightfield  the same with a heightfield
 //   nph_physics_distance          GJK: the closest points of two convex
 //                                 proxies
 //   nph_physics_penetration       GJK, then EPA when the cores overlap: the
@@ -162,6 +163,14 @@ typedef struct NphPhysicsMeshManifolds {
 void nph_physics_collide_mesh(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
                               const NphPhysicsMesh *mesh, NphPhysicsPose pose_mesh,
                               f32 speculative_distance, NphPhysicsMeshManifolds *out);
+
+// Convex `a` at `pose_a` against heightfield `h` at `pose_h`: as
+// nph_physics_collide_mesh, with the cells under a's box found by
+// arithmetic (heightfield.h). Point ids mix the triangle's index (2 x cell
+// + 0 or 1) with its features.
+void nph_physics_collide_heightfield(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                                     const NphPhysicsHeightfield *h, NphPhysicsPose pose_h,
+                                     f32 speculative_distance, NphPhysicsMeshManifolds *out);
 
 // ---------------------------------------------------------------------------
 // Closest points

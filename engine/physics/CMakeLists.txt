@@ -15,6 +15,7 @@ nph_add_module(physics
         src/contact.c
         src/geometry.c
         src/gjk.c
+        src/heightfield.c
         src/hull.c
         src/island.c
         src/joint.c
@@ -43,6 +44,7 @@ nph_add_test(physics
         tests/test_collide_mesh.c
         tests/test_geometry.c
         tests/test_gjk.c
+        tests/test_heightfield.c
         tests/test_hull.c
         tests/test_joint.c
         tests/test_mesh.c

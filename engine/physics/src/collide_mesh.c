@@ -34,6 +34,7 @@
 // are the pair's (ADR-0046 §8).
 
 #include <nepheline/core/assert.h>
+#include <nepheline/physics/heightfield.h>
 #include <nepheline/physics/mesh.h>
 
 #include "physics_internal.h"
@@ -659,18 +660,17 @@ typedef struct Cluster {
     NphPhysicsManifoldPoint points[CLUSTER_POINTS];
 } Cluster;
 
-typedef struct MeshQuery {
-    const NphVec3 *vertices;
-    const u32 *triangles;
-    const u8 *edges;
-    NphDVec3 position; // the shape's, in the mesh's frame
+// A convex shape against a surface's triangles (a mesh's or a
+// heightfield's), each given with its vertices already next to the shape.
+typedef struct SurfaceQuery {
+    NphDVec3 position; // the shape's, in the surface's frame
     f32 speculative;
     bool two_sided;
     bool single; // a sphere: one point per normal
     u32 cluster_count;
     Probe probe;
     Cluster clusters[MAX_CLUSTERS];
-} MeshQuery;
+} SurfaceQuery;
 
 // The directions in the contact plane along which a full cluster keeps its
 // farthest points: every 45 degrees, so each corner of a rectangle (a box's
@@ -729,7 +729,7 @@ static void cluster_compact(Cluster *c)
     c->count = n;
 }
 
-static void cluster_add(MeshQuery *q, const NphTriangleContact *m, u32 triangle)
+static void cluster_add(SurfaceQuery *q, const NphTriangleContact *m, u32 triangle)
 {
     f32 depth = FLT_MAX;
     for (u32 i = 0U; i < m->point_count; ++i) {
@@ -799,19 +799,12 @@ static void cluster_add(MeshQuery *q, const NphTriangleContact *m, u32 triangle)
     }
 }
 
-static bool visit_triangle(void *user, u32 t)
+// One of the surface's triangles, its vertices next to the shape.
+static bool surface_triangle(void *user, u32 t, const NphVec3 v[3], u32 active_edges)
 {
-    MeshQuery *q = (MeshQuery *)user;
-    const u32 *tri = q->triangles + 3ULL * t;
-    NphVec3 v[3];
-    for (u32 i = 0U; i < 3U; ++i) {
-        // Moved next to the shape in 64 bits, then rounded: small and exact.
-        const NphVec3 w = q->vertices[tri[i]];
-        v[i] = nph_vec3((f32)((f64)w.x - q->position.x), (f32)((f64)w.y - q->position.y),
-                        (f32)((f64)w.z - q->position.z));
-    }
+    SurfaceQuery *q = (SurfaceQuery *)user;
     Tri prepared;
-    if (!prepare(&prepared, v, q->edges[t], q->two_sided, q->probe.center)) {
+    if (!prepare(&prepared, v, active_edges, q->two_sided, q->probe.center)) {
         return true;
     }
     NphTriangleContact m;
@@ -822,61 +815,207 @@ static bool visit_triangle(void *user, u32 t)
     return true;
 }
 
-void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation,
-                                    NphDVec3 position, const NphPhysicsMesh *mesh, f32 speculative,
-                                    NphPhysicsMeshManifolds *out)
+// Starts the query for `a` with `rotation` at `position` in the surface's
+// frame: the shape's box there, grown by the speculative distance and by
+// the rounding of its position to 32 bits, is what the surface must visit.
+static NphAABB surface_begin(SurfaceQuery *q, const NphPhysicsGeometry *a, NphQuat rotation,
+                             NphDVec3 position, f32 speculative, bool two_sided)
 {
-    NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
     NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
-    out->count = 0U;
-    MeshQuery q;
-    q.vertices = nph_physics_mesh_vertices(mesh);
-    q.triangles = nph_physics_mesh_triangles(mesh);
-    q.edges = nph_physics_mesh_edges(mesh);
-    q.position = position;
-    q.speculative = nph_f32_max(speculative, 0.0F);
-    q.two_sided = (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U;
-    q.single = a->type == NPH_PHYSICS_SHAPE_SPHERE ||
-               (a->type == NPH_PHYSICS_SHAPE_CAPSULE && !(a->capsule.half_height > 0.0F));
-    q.cluster_count = 0U;
-    probe_init(&q.probe, a, rotation);
-    // The shape's box in the mesh's frame, grown by the speculative
-    // distance and by the rounding of its position to 32 bits.
+    q->position = position;
+    q->speculative = nph_f32_max(speculative, 0.0F);
+    q->two_sided = two_sided;
+    q->single = a->type == NPH_PHYSICS_SHAPE_SPHERE ||
+                (a->type == NPH_PHYSICS_SHAPE_CAPSULE && !(a->capsule.half_height > 0.0F));
+    q->cluster_count = 0U;
+    probe_init(&q->probe, a, rotation);
     const NphVec3 at = nph_vec3((f32)position.x, (f32)position.y, (f32)position.z);
     const f32 rounding = 2.4e-7F * nph_vec3_max_component(nph_vec3_abs(at));
-    const NphAABB box = nph_aabb_grow(nph_physics_geometry_aabb(a, nph_physics_pose(at, rotation)),
-                                      q.speculative + rounding);
-    nph_physics_mesh_overlap(mesh, box, visit_triangle, &q);
-    // Each merged manifold reduced to four points; the deepest four, the
-    // first found of equals first.
+    return nph_aabb_grow(nph_physics_geometry_aabb(a, nph_physics_pose(at, rotation)),
+                         q->speculative + rounding);
+}
+
+typedef struct MeshVisit {
+    SurfaceQuery *query;
+    const NphVec3 *vertices;
+    const u32 *triangles;
+    const u8 *edges;
+} MeshVisit;
+
+static bool mesh_triangle(void *user, u32 t)
+{
+    const MeshVisit *mv = (const MeshVisit *)user;
+    const u32 *tri = mv->triangles + 3ULL * t;
+    const NphDVec3 at = mv->query->position;
+    NphVec3 v[3];
+    for (u32 i = 0U; i < 3U; ++i) {
+        // Moved next to the shape in 64 bits, then rounded: small and exact.
+        const NphVec3 w = mv->vertices[tri[i]];
+        v[i] = nph_vec3((f32)((f64)w.x - at.x), (f32)((f64)w.y - at.y), (f32)((f64)w.z - at.z));
+    }
+    return surface_triangle(mv->query, t, v, mv->edges[t]);
+}
+
+// A capsule's merged manifold: its deepest point, then the extremes along
+// its axis of its touching points, then of all its points, four at most.
+// Its contact with a surface is a segment or a point, so its ends say the
+// rest, however many triangles cut it (the reduction to four keeps every
+// point of four or fewer, and a capsule lying across a heightfield's
+// uniform diagonals brought four in a line); the deepest carries the most
+// load, and the touching points' ends stay when a bump carries the middle
+// and the ends only hover.
+static u32 capsule_extremes(NphPhysicsManifoldPoint *points, u32 count, NphVec3 axis)
+{
+    if (count <= 2U) {
+        return count;
+    }
+    u32 pick[5];
+    u32 n = 0U;
+    u32 deepest = 0U;
+    for (u32 i = 1U; i < count; ++i) {
+        if (points[i].separation < points[deepest].separation) {
+            deepest = i;
+        }
+    }
+    pick[n++] = deepest;
+    for (u32 pass = 0U; pass < 2U; ++pass) {
+        u32 lo = NPH_U32_MAX;
+        u32 hi = NPH_U32_MAX;
+        f32 d_lo = FLT_MAX;
+        f32 d_hi = -FLT_MAX;
+        for (u32 i = 0U; i < count; ++i) {
+            if (pass == 0U && points[i].separation > NPH_PHYSICS_TOUCH_SEPARATION) {
+                continue;
+            }
+            const f32 d = nph_vec3_dot(points[i].point, axis);
+            if (d < d_lo) {
+                d_lo = d;
+                lo = i;
+            }
+            if (d > d_hi) {
+                d_hi = d;
+                hi = i;
+            }
+        }
+        const u32 ends[2] = {lo, hi};
+        for (u32 e = 0U; e < 2U; ++e) {
+            bool have = ends[e] == NPH_U32_MAX;
+            for (u32 k = 0U; k < n && !have; ++k) {
+                have = pick[k] == ends[e];
+            }
+            if (!have) {
+                pick[n++] = ends[e];
+            }
+        }
+    }
+    n = nph_min_u32(n, NPH_PHYSICS_MANIFOLD_MAX_POINTS);
+    NphPhysicsManifoldPoint kept[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    for (u32 k = 0U; k < n; ++k) {
+        kept[k] = points[pick[k]];
+    }
+    for (u32 k = 0U; k < n; ++k) {
+        points[k] = kept[k];
+    }
+    return n;
+}
+
+// Each merged manifold reduced to four points; the deepest four, the first
+// found of equals first.
+static void surface_finish(SurfaceQuery *q, NphPhysicsMeshManifolds *out)
+{
+    const bool capsule = q->probe.g->type == NPH_PHYSICS_SHAPE_CAPSULE && !q->single;
+    const NphVec3 axis = nph_vec3_sub(q->probe.core[1], q->probe.core[0]);
     u32 order[MAX_CLUSTERS];
-    for (u32 k = 0U; k < q.cluster_count; ++k) {
-        Cluster *c = &q.clusters[k];
-        c->count = nph_physics_manifold_reduce(c->points, c->count, c->normal);
+    for (u32 k = 0U; k < q->cluster_count; ++k) {
+        Cluster *c = &q->clusters[k];
+        c->count = capsule ? capsule_extremes(c->points, c->count, axis)
+                           : nph_physics_manifold_reduce(c->points, c->count, c->normal);
         u32 j = k;
-        while (j > 0U && q.clusters[order[j - 1U]].depth > c->depth) {
+        while (j > 0U && q->clusters[order[j - 1U]].depth > c->depth) {
             order[j] = order[j - 1U];
             j -= 1U;
         }
         order[j] = k;
     }
-    const u32 keep = nph_min_u32(q.cluster_count, NPH_PHYSICS_MESH_MAX_MANIFOLDS);
+    const u32 keep = nph_min_u32(q->cluster_count, NPH_PHYSICS_MESH_MAX_MANIFOLDS);
     for (u32 i = 0U; i < keep; ++i) {
-        const Cluster *c = &q.clusters[order[i]];
+        const Cluster *c = &q->clusters[order[i]];
         NphPhysicsManifold *m = &out->manifolds[i];
         m->normal = c->normal;
         m->point_count = c->count;
         for (u32 j = 0U; j < c->count; ++j) {
             m->points[j] = c->points[j];
         }
-        if (q.single) {
+        if (q->single) {
             // The sphere's point under its centre along the merged normal:
             // its push passes through the centre.
             const f32 sep = m->points[0].separation;
-            m->points[0].point = nph_vec3_scale(m->normal, q.probe.radius + 0.5F * sep);
+            m->points[0].point = nph_vec3_scale(m->normal, q->probe.radius + 0.5F * sep);
         }
     }
     out->count = keep;
+}
+
+void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                    NphDVec3 position, const NphPhysicsMesh *mesh, f32 speculative,
+                                    NphPhysicsMeshManifolds *out)
+{
+    NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
+    SurfaceQuery q;
+    const NphAABB box = surface_begin(&q, a, rotation, position, speculative,
+                                      (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U);
+    MeshVisit mv = {&q, nph_physics_mesh_vertices(mesh), nph_physics_mesh_triangles(mesh),
+                    nph_physics_mesh_edges(mesh)};
+    nph_physics_mesh_overlap(mesh, box, mesh_triangle, &mv);
+    surface_finish(&q, out);
+}
+
+void nph_physics_collide_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
+                                           NphDVec3 position, const NphPhysicsHeightfield *h,
+                                           f32 speculative, NphPhysicsMeshManifolds *out)
+{
+    NPH_ASSERT(a != NULL && h != NULL && out != NULL);
+    SurfaceQuery q;
+    const NphAABB box = surface_begin(&q, a, rotation, position, speculative, false);
+    nph_physics_heightfield_visit_box(h, box, position, surface_triangle, &q);
+    surface_finish(&q, out);
+}
+
+// The shape's rotation and position in the surface's frame, in 64 bits.
+static void surface_place(NphPhysicsPose pose_a, NphPhysicsPose pose_surface, NphQuat *rotation,
+                          NphDVec3 *position)
+{
+    *rotation = nph_quat_mul(nph_quat_conjugate(pose_surface.rotation), pose_a.rotation);
+    const NphDVec3 d = nph_dvec3((f64)pose_a.position.x - (f64)pose_surface.position.x,
+                                 (f64)pose_a.position.y - (f64)pose_surface.position.y,
+                                 (f64)pose_a.position.z - (f64)pose_surface.position.z);
+    *position = nph_physics_drotate_inverse(pose_surface.rotation, d);
+}
+
+// The manifolds from the shape's frame (the surface's axes) to the poses'.
+static void surface_unplace(NphPhysicsPose pose_a, NphPhysicsPose pose_surface,
+                            NphPhysicsMeshManifolds *out)
+{
+    for (u32 i = 0U; i < out->count; ++i) {
+        NphPhysicsManifold *m = &out->manifolds[i];
+        m->normal = nph_quat_rotate(pose_surface.rotation, m->normal);
+        for (u32 j = 0U; j < m->point_count; ++j) {
+            m->points[j].point = nph_vec3_add(
+                pose_a.position, nph_quat_rotate(pose_surface.rotation, m->points[j].point));
+        }
+    }
+}
+
+void nph_physics_collide_heightfield(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                                     const NphPhysicsHeightfield *h, NphPhysicsPose pose_h,
+                                     f32 speculative_distance, NphPhysicsMeshManifolds *out)
+{
+    NPH_ASSERT(a != NULL && h != NULL && out != NULL);
+    NphQuat rotation;
+    NphDVec3 position;
+    surface_place(pose_a, pose_h, &rotation, &position);
+    nph_physics_collide_heightfield_local(a, rotation, position, h, speculative_distance, out);
+    surface_unplace(pose_a, pose_h, out);
 }
 
 void nph_physics_collide_mesh(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
@@ -884,18 +1023,9 @@ void nph_physics_collide_mesh(const NphPhysicsGeometry *a, NphPhysicsPose pose_a
                               f32 speculative_distance, NphPhysicsMeshManifolds *out)
 {
     NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
-    const NphQuat rotation = nph_quat_mul(nph_quat_conjugate(pose_mesh.rotation), pose_a.rotation);
-    const NphDVec3 d = nph_dvec3((f64)pose_a.position.x - (f64)pose_mesh.position.x,
-                                 (f64)pose_a.position.y - (f64)pose_mesh.position.y,
-                                 (f64)pose_a.position.z - (f64)pose_mesh.position.z);
-    nph_physics_collide_mesh_local(a, rotation, nph_physics_drotate_inverse(pose_mesh.rotation, d),
-                                   mesh, speculative_distance, out);
-    for (u32 i = 0U; i < out->count; ++i) {
-        NphPhysicsManifold *m = &out->manifolds[i];
-        m->normal = nph_quat_rotate(pose_mesh.rotation, m->normal);
-        for (u32 j = 0U; j < m->point_count; ++j) {
-            m->points[j].point = nph_vec3_add(
-                pose_a.position, nph_quat_rotate(pose_mesh.rotation, m->points[j].point));
-        }
-    }
+    NphQuat rotation;
+    NphDVec3 position;
+    surface_place(pose_a, pose_mesh, &rotation, &position);
+    nph_physics_collide_mesh_local(a, rotation, position, mesh, speculative_distance, out);
+    surface_unplace(pose_a, pose_mesh, out);
 }

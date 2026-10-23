@@ -50,8 +50,11 @@ foreach(target scene_text_fuzz_smoke scene_text_fuzz scene_bin_fuzz_smoke scene_
     endif()
 endforeach()
 
-# The physics module's blocks (engine/physics, ADR-0046): hulls and meshes
-# built from the input, then damaged copies of them, which validation must
-# refuse or the module must survive. Seeds from scripts/fuzz_seeds_physics.py.
+# The physics module's blocks (engine/physics, ADR-0046): hulls, meshes, and
+# heightfields built from the input, then damaged copies of them, which
+# validation must refuse or the module must survive. Seeds from
+# scripts/fuzz_seeds_physics.py.
 nph_add_fuzzer(physics_hull SOURCES fuzz_physics_hull.c fuzz_physics_common.h DEPS nph::physics)
 nph_add_fuzzer(physics_mesh SOURCES fuzz_physics_mesh.c fuzz_physics_common.h DEPS nph::physics)
+nph_add_fuzzer(physics_heightfield SOURCES fuzz_physics_heightfield.c fuzz_physics_common.h
+               DEPS nph::physics)

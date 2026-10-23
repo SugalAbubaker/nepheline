@@ -7,7 +7,11 @@
 // contact at work) and keeping its impulses across them when its points'
 // ids change; a kinematic platform carrying a box; events once per
 // pair; invariants and determinism through a pile on a terrain; and the
-// same motion with the mesh, or the world, far from its origin.
+// same motion with the mesh, or the world, far from its origin. Then
+// heightfields (world_heightfield): on static and kinematic bodies only;
+// shapes resting and sleeping; sliding and rolling across cells without a
+// bump; falling through holes; a pile on a heightfield terrain keeping its
+// course; and far from the world's origin.
 
 #include "test_world_support.h"
 
@@ -168,14 +172,15 @@ typedef struct Glide {
     f64 travelled; // along the line, m
 } Glide;
 
-// One body on `mesh` started along `dir` at `speed` (rolling when `rolls`,
-// with the angular velocity that matches), measured over two seconds.
-static Glide glide(const NphPhysicsMesh *mesh, NphPhysicsGeometry g, NphQuat q, f64 rest,
+// One body on `floor` (placed at `at`) started along `dir` at `speed`
+// (rolling when `rolls`, with the angular velocity that matches), measured
+// over two seconds.
+static Glide glide(NphPhysicsGeometry floor, NphDVec3 at, NphPhysicsGeometry g, NphQuat q, f64 rest,
                    f32 friction, bool rolls, f32 radius, NphVec3 dir, f32 speed)
 {
     Scene s;
     scene_begin(&s);
-    add_mesh_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_zero(), mesh);
+    add_body(s.w, NPH_PHYSICS_BODY_STATIC, at, nph_quat_identity(), floor, 0.6F, 0.0F);
     const NphDVec3 start = nph_dvec3(-3.5, rest - 0.0005, -1.0);
     const NphPhysicsBody b = add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, start, q, g, friction, 0.0F);
     const NphVec3 v0 = nph_vec3_scale(dir, speed);
@@ -205,30 +210,23 @@ static Glide glide(const NphPhysicsMesh *mesh, NphPhysicsGeometry g, NphQuat q, 
     return out;
 }
 
-NTEST(world_mesh, bodies_slide_and_roll_across_seams_without_bumping)
+// A box and a capsule sliding frictionless, and a ball and a capsule
+// rolling, across `floor`: any bump shows as lift, a turn, or lost speed.
+// (Not a vertical speed: a rolling shape's anchor turns up off the floor
+// within a step, so its last substeps go unsupported and it ends each step
+// falling at half g dt while its height holds, on any ground.)
+static void glide_all(NphPhysicsGeometry floor, NphDVec3 at, NphVec3 dir, f32 speed)
 {
-    TestAlloc mta;
-    NphAllocator *ma = test_alloc_begin(&mta);
-    // Quarter-metre cells: a body crosses a seam or a vertex every few steps,
-    // along a heading that meets all three seam directions.
-    NphPhysicsMesh *floor = test_grid_mesh(ma, 40U, 0.25F, -5.0F, -5.0F, NULL, false);
-    const NphVec3 dir = nph_vec3_normalize(nph_vec3(0.956F, 0.0F, 0.292F));
-    const f32 speed = 3.0F;
-    // Frictionless, a slide keeps its speed; rolling without slipping, a
-    // roll does. Any bump shows as lift, a turn, or lost speed. (Not a
-    // vertical speed: a rolling shape's anchor turns up off the floor
-    // within a step, so its last substeps go unsupported and it ends each
-    // step falling at half g dt while its height holds, on any ground.)
     const f32 heading = atan2f(dir.z, dir.x);
     const NphQuat across = nph_quat_mul(yaw(0.5F * k_pi - heading), lying()); // axis across it
     Glide g[4];
-    g[0] = glide(floor, nph_physics_geometry_box(nph_vec3(0.3F, 0.15F, 0.2F)), yaw(0.3F), 0.15,
+    g[0] = glide(floor, at, nph_physics_geometry_box(nph_vec3(0.3F, 0.15F, 0.2F)), yaw(0.3F), 0.15,
                  0.0F, false, 0.0F, dir, speed);
-    g[1] = glide(floor, nph_physics_geometry_capsule(0.3F, 0.1F), across, 0.1, 0.0F, false, 0.0F,
-                 dir, speed);
-    g[2] = glide(floor, nph_physics_geometry_sphere(0.25F), nph_quat_identity(), 0.25, 0.8F, true,
-                 0.25F, dir, speed);
-    g[3] = glide(floor, nph_physics_geometry_capsule(0.3F, 0.1F), across, 0.1, 0.8F, true, 0.1F,
+    g[1] = glide(floor, at, nph_physics_geometry_capsule(0.3F, 0.1F), across, 0.1, 0.0F, false,
+                 0.0F, dir, speed);
+    g[2] = glide(floor, at, nph_physics_geometry_sphere(0.25F), nph_quat_identity(), 0.25, 0.8F,
+                 true, 0.25F, dir, speed);
+    g[3] = glide(floor, at, nph_physics_geometry_capsule(0.3F, 0.1F), across, 0.1, 0.8F, true, 0.1F,
                  dir, speed);
     for (u32 k = 0U; k < 4U; ++k) {
         NTEST_EXPECT_TRUE(g[k].lift < 1e-3);
@@ -238,11 +236,24 @@ NTEST(world_mesh, bodies_slide_and_roll_across_seams_without_bumping)
         // Two seconds and the twelve settling steps.
         NTEST_EXPECT_NEAR_F64(g[k].travelled, (f64)speed * 492.0 / 240.0, 0.06);
     }
+}
+
+NTEST(world_mesh, bodies_slide_and_roll_across_seams_without_bumping)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    // Quarter-metre cells: a body crosses a seam or a vertex every few steps,
+    // along a heading that meets all three seam directions.
+    NphPhysicsMesh *floor = test_grid_mesh(ma, 40U, 0.25F, -5.0F, -5.0F, NULL, false);
+    const NphVec3 dir = nph_vec3_normalize(nph_vec3(0.956F, 0.0F, 0.292F));
+    const f32 speed = 3.0F;
+    glide_all(nph_physics_geometry_mesh(floor), nph_dvec3_zero(), dir, speed);
     // The same slide over open edges bumps: what the test above measures is
     // the active edges at work, not a floor too smooth to matter.
     NphPhysicsMesh *open = unwelded_floor(ma, 40U, 0.25F, -5.0F, -5.0F);
-    const Glide bumpy = glide(open, nph_physics_geometry_box(nph_vec3(0.3F, 0.15F, 0.2F)),
-                              yaw(0.3F), 0.15, 0.0F, false, 0.0F, dir, speed);
+    const Glide bumpy = glide(nph_physics_geometry_mesh(open), nph_dvec3_zero(),
+                              nph_physics_geometry_box(nph_vec3(0.3F, 0.15F, 0.2F)), yaw(0.3F),
+                              0.15, 0.0F, false, 0.0F, dir, speed);
     NTEST_EXPECT_TRUE(bumpy.lift > 2e-3 || bumpy.turn > 0.2 || bumpy.slow > 0.05);
     nph_physics_mesh_free(open, ma);
     nph_physics_mesh_free(floor, ma);
@@ -675,11 +686,12 @@ NTEST(world_mesh, boxes_come_to_rest_on_a_terrain)
 
 // One box slides from (1, 0.2, 0.5) over `floor` placed at `at`, in a world
 // where everything is offset by `world`: its path, relative to `world`.
-static NphDVec3 slide_on(const NphPhysicsMesh *floor, NphDVec3 at, NphDVec3 world)
+static NphDVec3 slide_on(NphPhysicsGeometry floor, NphDVec3 at, NphDVec3 world)
 {
     Scene s;
     scene_begin(&s);
-    add_mesh_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_add(world, at), floor);
+    add_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_add(world, at), nph_quat_identity(), floor,
+             0.6F, 0.0F);
     const NphPhysicsBody b = add_body(
         s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3_add(world, nph_dvec3(1.0, 0.2 - 0.0005, 0.5)),
         yaw(0.2F), nph_physics_geometry_box(nph_vec3(0.3F, 0.2F, 0.25F)), 0.3F, 0.0F);
@@ -699,9 +711,12 @@ NTEST(world_mesh, meshes_far_from_their_origin_or_the_worlds_behave_as_at_home)
     // half); and at home in a world 10 000 km out.
     NphPhysicsMesh *home = test_grid_mesh(ma, 24U, 0.5F, -6.0F, -6.0F, NULL, false);
     NphPhysicsMesh *shifted = test_grid_mesh(ma, 24U, 0.5F, 10000.0F - 6.0F, -6.0F, NULL, false);
-    const NphDVec3 a = slide_on(home, nph_dvec3_zero(), nph_dvec3_zero());
-    const NphDVec3 b = slide_on(shifted, nph_dvec3(-10000.0, 0.0, 0.0), nph_dvec3_zero());
-    const NphDVec3 c = slide_on(home, nph_dvec3_zero(), nph_dvec3(1.0e7, 0.0, -3.0e6));
+    const NphDVec3 a =
+        slide_on(nph_physics_geometry_mesh(home), nph_dvec3_zero(), nph_dvec3_zero());
+    const NphDVec3 b = slide_on(nph_physics_geometry_mesh(shifted), nph_dvec3(-10000.0, 0.0, 0.0),
+                                nph_dvec3_zero());
+    const NphDVec3 c =
+        slide_on(nph_physics_geometry_mesh(home), nph_dvec3_zero(), nph_dvec3(1.0e7, 0.0, -3.0e6));
     NTEST_LOG("home (%.5f %.5f %.5f) shifted (%.5f %.5f %.5f) far (%.5f %.5f %.5f)", a.x, a.y, a.z,
               b.x, b.y, b.z, c.x, c.y, c.z);
     NTEST_EXPECT_TRUE(a.x > 1.5); // it slid (0.85 m before friction stops it)
@@ -713,5 +728,229 @@ NTEST(world_mesh, meshes_far_from_their_origin_or_the_worlds_behave_as_at_home)
     NTEST_EXPECT_NEAR_F64(c.z, a.z, 5e-4);
     nph_physics_mesh_free(home, ma);
     nph_physics_mesh_free(shifted, ma);
+    test_alloc_end(&mta);
+}
+
+// ---------------------------------------------------------------------------
+// Heightfields
+// ---------------------------------------------------------------------------
+
+// The terrain as a heightfield: the same heights at the same places (its
+// first sample at (-6, -6)), cells flipped alternately as the mesh's are.
+static NphPhysicsHeightfield *terrain_field(NphAllocator *alloc)
+{
+    static f32 y[49U * 49U];
+    static u8 cells[48U * 48U];
+    for (u32 j = 0U; j <= 48U; ++j) {
+        for (u32 i = 0U; i <= 48U; ++i) {
+            y[j * 49U + i] = (f32)terrain_height(-6.0 + 0.25 * (f64)i, -6.0 + 0.25 * (f64)j);
+        }
+    }
+    for (u32 c = 0U; c < 48U * 48U; ++c) {
+        cells[c] = ((c / 48U + c % 48U) & 1U) != 0U ? NPH_PHYSICS_HEIGHTFIELD_FLIP : 0U;
+    }
+    return test_heightfield(alloc, 49U, 49U, 0.25F, y, cells);
+}
+
+static NphPhysicsBody add_field_body(NphPhysicsWorld *w, NphPhysicsBodyType type, NphDVec3 p,
+                                     const NphPhysicsHeightfield *h)
+{
+    return add_body(w, type, p, nph_quat_identity(), nph_physics_geometry_heightfield(h), 0.6F,
+                    0.0F);
+}
+
+NTEST(world_heightfield, heightfields_go_on_static_and_kinematic_bodies)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    static f32 flat[9U * 9U];
+    NphPhysicsHeightfield *h = test_heightfield(ma, 9U, 9U, 0.5F, flat, NULL);
+    Scene s;
+    scene_begin(&s);
+    const NphPhysicsShapeDesc sd =
+        nph_physics_shape_desc_default(nph_physics_geometry_heightfield(h));
+    NphPhysicsShape shape;
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    NphPhysicsBody body;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(s.w, &bd, &body), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_create(s.w, body, &sd, &shape),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    const NphPhysicsBodyType types[2] = {NPH_PHYSICS_BODY_STATIC, NPH_PHYSICS_BODY_KINEMATIC};
+    for (u32 k = 0U; k < 2U; ++k) {
+        bd.type = types[k];
+        bd.position = nph_dvec3(10.0, 1.0, 5.0 * (f64)k);
+        NTEST_ASSERT_EQ_INT(nph_physics_body_create(s.w, &bd, &body), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_physics_shape_create(s.w, body, &sd, &shape), NPH_RESULT_OK);
+        const NphAABB box = nph_physics_shape_aabb(s.w, shape);
+        NTEST_EXPECT_TRUE(nph_vec3_near(box.min, nph_vec3(10.0F, 1.0F, 5.0F * (f32)k), 1e-5F));
+        NTEST_EXPECT_TRUE(
+            nph_vec3_near(box.max, nph_vec3(14.0F, 1.0F, 5.0F * (f32)k + 4.0F), 1e-5F));
+    }
+    const NphPhysicsShapeDesc none =
+        nph_physics_shape_desc_default(nph_physics_geometry_heightfield(NULL));
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_create(s.w, body, &none, &shape),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    scene_end(&s);
+    nph_physics_heightfield_free(h, ma);
+    test_alloc_end(&mta);
+}
+
+NTEST(world_heightfield, shapes_rest_and_sleep_on_a_heightfield)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    static f32 flat[17U * 17U];
+    NphPhysicsHeightfield *h = test_heightfield(ma, 17U, 17U, 0.5F, flat, NULL);
+    Scene s;
+    scene_begin(&s);
+    add_field_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(-4.0, 0.0, -4.0), h);
+    // As on the mesh floor: a box turned across the cells, a ball over a
+    // corner, a capsule lying across a cell, dropped 5 cm.
+    const NphQuat box_turn = yaw(0.4F);
+    const NphQuat cap_turn = nph_quat_mul(yaw(0.7F), lying());
+    const NphPhysicsBody bodies[3] = {
+        add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(0.3, 0.3, -0.2), box_turn,
+                 nph_physics_geometry_box(nph_vec3(0.5F, 0.25F, 0.4F)), 0.6F, 0.0F),
+        add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(-2.0, 0.35, 1.5), nph_quat_identity(),
+                 nph_physics_geometry_sphere(0.3F), 0.6F, 0.0F),
+        add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(2.1, 0.15, -2.2), cap_turn,
+                 nph_physics_geometry_capsule(0.4F, 0.1F), 0.6F, 0.0F)};
+    const NphDVec3 starts[3] = {nph_dvec3(0.3, 0.25, -0.2), nph_dvec3(-2.0, 0.3, 1.5),
+                                nph_dvec3(2.1, 0.1, -2.2)};
+    for (u32 i = 0U; i < 240U * 3U; ++i) {
+        step(s.w, NULL, 1U);
+        if (i == 96U) {
+            // Landed, not yet asleep: the box's four points, the ball's one,
+            // the capsule's two (its ends, however many cells it lies on).
+            const NphPhysicsStats st = nph_physics_world_stats(s.w);
+            NTEST_EXPECT_EQ_UINT(st.touching_contacts, 3U);
+            NTEST_EXPECT_EQ_UINT(st.manifold_points, 7U);
+        }
+        if (i % 60U == 0U) {
+            NTEST_ASSERT_TRUE(nph_physics_world_validate(s.w));
+        }
+    }
+    for (u32 k = 0U; k < 3U; ++k) {
+        NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, bodies[k]));
+        const NphDVec3 p = nph_physics_body_position(s.w, bodies[k]);
+        NTEST_EXPECT_NEAR_F64(p.x, starts[k].x, 2e-3);
+        NTEST_EXPECT_NEAR_F64(p.z, starts[k].z, 2e-3);
+        NTEST_EXPECT_NEAR_F64(p.y, starts[k].y, 6e-3);
+    }
+    scene_end(&s);
+    nph_physics_heightfield_free(h, ma);
+    test_alloc_end(&mta);
+}
+
+NTEST(world_heightfield, bodies_slide_and_roll_across_cells_without_bumping)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    // The mesh test's floor as a heightfield: 10 m of quarter-metre cells,
+    // half of them flipped.
+    static f32 flat[41U * 41U];
+    static u8 cells[40U * 40U];
+    for (u32 c = 0U; c < 40U * 40U; ++c) {
+        cells[c] = ((c / 40U + c % 40U) & 1U) != 0U ? NPH_PHYSICS_HEIGHTFIELD_FLIP : 0U;
+    }
+    NphPhysicsHeightfield *h = test_heightfield(ma, 41U, 41U, 0.25F, flat, cells);
+    glide_all(nph_physics_geometry_heightfield(h), nph_dvec3(-5.0, 0.0, -5.0),
+              nph_vec3_normalize(nph_vec3(0.956F, 0.0F, 0.292F)), 3.0F);
+    nph_physics_heightfield_free(h, ma);
+    test_alloc_end(&mta);
+}
+
+NTEST(world_heightfield, bodies_fall_through_holes)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    // A flat field with a 1 m pit: a box dropped over the pit falls through,
+    // one dropped beside it rests, and a ball rolling over the pit's rim
+    // drops in.
+    static f32 flat[17U * 17U];
+    static u8 cells[16U * 16U];
+    for (u32 j = 6U; j < 10U; ++j) {
+        for (u32 i = 6U; i < 10U; ++i) {
+            cells[j * 16U + i] = NPH_PHYSICS_HEIGHTFIELD_HOLE;
+        }
+    }
+    NphPhysicsHeightfield *h = test_heightfield(ma, 17U, 17U, 0.25F, flat, cells);
+    Scene s;
+    scene_begin(&s);
+    add_field_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(-2.0, 0.0, -2.0), h);
+    // The pit spans x and z in [-0.5, 0.5].
+    const NphPhysicsBody over = add_box(s.w, nph_dvec3(0.0, 0.5, 0.0), nph_vec3_splat(0.2F));
+    const NphPhysicsBody beside = add_box(s.w, nph_dvec3(1.2, 0.5, 0.0), nph_vec3_splat(0.2F));
+    const NphPhysicsBody ball =
+        add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(-1.5, 0.15, 0.0), nph_quat_identity(),
+                 nph_physics_geometry_sphere(0.15F), 0.6F, 0.0F);
+    nph_physics_body_set_linear_velocity(s.w, ball, nph_vec3(1.5F, 0.0F, 0.0F));
+    nph_physics_body_set_angular_velocity(s.w, ball, nph_vec3(0.0F, 0.0F, -10.0F));
+    step(s.w, NULL, 240U * 2U);
+    NTEST_EXPECT_TRUE(nph_physics_body_position(s.w, over).y < -1.0);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(s.w, beside).y, 0.2, 6e-3);
+    NTEST_EXPECT_TRUE(nph_physics_body_position(s.w, ball).y < -1.0);
+    scene_end(&s);
+    nph_physics_heightfield_free(h, ma);
+    test_alloc_end(&mta);
+}
+
+NTEST(world_heightfield, a_pile_on_a_heightfield_terrain_keeps_its_course)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    NphPhysicsHeightfield *land = terrain_field(ma);
+    const u32 bodies = 12U * TEST_SCALE;
+    const u32 workers[4] = {0U, 1U, 4U, 8U};
+    u64 reference = 0U;
+    for (u32 run = 0U; run < 4U; ++run) {
+        NphJobSystem *js = workers[run] == 0U ? NULL : make_jobs(workers[run]);
+        Scene s;
+        scene_begin(&s);
+        const NphPhysicsBody ground =
+            add_field_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3(-6.0, 0.0, -6.0), land);
+        drop_mixed(s.w, bodies, 41U);
+        for (u32 i = 0U; i < 600U; ++i) {
+            step(s.w, js, 1U);
+            if (run == 0U && i % 50U == 0U) {
+                NTEST_ASSERT_TRUE(nph_physics_world_validate(s.w));
+                NTEST_EXPECT_EQ_UINT(under_terrain(s.w, 0.5), 0U);
+            }
+        }
+        const u64 hash = nph_physics_world_hash(s.w);
+        if (run == 0U) {
+            reference = hash;
+            const NphPhysicsStats st = nph_physics_world_stats(s.w);
+            NTEST_LOG("%u bodies, %u pairs (%u touching, %u points), %u children", st.bodies,
+                      st.contacts, st.touching_contacts, st.manifold_points, s.w->child_contacts);
+        } else {
+            NTEST_EXPECT_EQ_UINT(hash, reference);
+        }
+        nph_physics_body_destroy(s.w, ground);
+        NTEST_EXPECT_EQ_UINT(s.w->child_contacts, 0U);
+        NTEST_ASSERT_TRUE(nph_physics_world_validate(s.w));
+        scene_end(&s);
+        nph_job_system_destroy(js);
+    }
+    nph_physics_heightfield_free(land, ma);
+    test_alloc_end(&mta);
+}
+
+NTEST(world_heightfield, heightfields_far_from_the_worlds_origin_behave_as_at_home)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    static f32 flat[25U * 25U];
+    NphPhysicsHeightfield *h = test_heightfield(ma, 25U, 25U, 0.5F, flat, NULL);
+    const NphPhysicsGeometry g = nph_physics_geometry_heightfield(h);
+    const NphDVec3 at = nph_dvec3(-6.0, 0.0, -6.0);
+    const NphDVec3 a = slide_on(g, at, nph_dvec3_zero());
+    const NphDVec3 c = slide_on(g, at, nph_dvec3(1.0e7, 0.0, -3.0e6));
+    NTEST_LOG("home (%.5f %.5f %.5f) far (%.5f %.5f %.5f)", a.x, a.y, a.z, c.x, c.y, c.z);
+    NTEST_EXPECT_TRUE(a.x > 1.5);
+    NTEST_EXPECT_NEAR_F64(c.x, a.x, 5e-4);
+    NTEST_EXPECT_NEAR_F64(c.y, a.y, 5e-4);
+    NTEST_EXPECT_NEAR_F64(c.z, a.z, 5e-4);
+    nph_physics_heightfield_free(h, ma);
     test_alloc_end(&mta);
 }

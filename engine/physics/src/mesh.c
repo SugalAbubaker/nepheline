@@ -10,6 +10,8 @@
 #include <nepheline/math/simd.h>
 #include <nepheline/physics/mesh.h>
 
+#include "physics_internal.h"
+
 #include <float.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1047,82 +1049,6 @@ void nph_physics_mesh_overlap(const NphPhysicsMesh *m, NphAABB box, NphPhysicsMe
     }
 }
 
-// The watertight ray (Woop, Benthin, and Wald 2013): the axis the ray runs
-// along most (kz), the other two (kx, ky; swapped when the ray runs down kz
-// so the winding is kept), and the shear that makes it run along kz.
-typedef struct WatertightRay {
-    NphVec3 origin;
-    u32 kx;
-    u32 ky;
-    u32 kz;
-    f32 sx;
-    f32 sy;
-    f32 sz;
-} WatertightRay;
-
-static WatertightRay watertight_ray(NphVec3 origin, NphVec3 delta)
-{
-    WatertightRay r;
-    r.origin = origin;
-    const NphVec3 a = nph_vec3_abs(delta);
-    r.kz = a.x >= a.y ? (a.x >= a.z ? 0U : 2U) : (a.y >= a.z ? 1U : 2U);
-    r.kx = (r.kz + 1U) % 3U;
-    r.ky = (r.kx + 1U) % 3U;
-    const f32 dz = nph_vec3_at(delta, r.kz);
-    if (dz < 0.0F) {
-        const u32 t = r.kx;
-        r.kx = r.ky;
-        r.ky = t;
-    }
-    r.sx = nph_vec3_at(delta, r.kx) / dz;
-    r.sy = nph_vec3_at(delta, r.ky) / dz;
-    r.sz = 1.0F / dz;
-    return r;
-}
-
-// The fraction along the ray where it crosses triangle (a, b, c), or a
-// negative value. `*back` is set when it crosses from behind.
-static f32 watertight_hit(const WatertightRay *r, NphVec3 pa, NphVec3 pb, NphVec3 pc, bool *back)
-{
-    const NphVec3 a = nph_vec3_sub(pa, r->origin);
-    const NphVec3 b = nph_vec3_sub(pb, r->origin);
-    const NphVec3 c = nph_vec3_sub(pc, r->origin);
-    const f32 az = nph_vec3_at(a, r->kz);
-    const f32 bz = nph_vec3_at(b, r->kz);
-    const f32 cz = nph_vec3_at(c, r->kz);
-    const f32 ax = nph_vec3_at(a, r->kx) - r->sx * az;
-    const f32 ay = nph_vec3_at(a, r->ky) - r->sy * az;
-    const f32 bx = nph_vec3_at(b, r->kx) - r->sx * bz;
-    const f32 by = nph_vec3_at(b, r->ky) - r->sy * bz;
-    const f32 cx = nph_vec3_at(c, r->kx) - r->sx * cz;
-    const f32 cy = nph_vec3_at(c, r->ky) - r->sy * cz;
-    f32 u = cx * by - cy * bx;
-    f32 v = ax * cy - ay * cx;
-    f32 w = bx * ay - by * ax;
-    // An edge through the ray: decide it in 64 bits, so two triangles that
-    // share the edge never both miss.
-    if (u == 0.0F || v == 0.0F || w == 0.0F) {
-        u = (f32)((f64)cx * (f64)by - (f64)cy * (f64)bx);
-        v = (f32)((f64)ax * (f64)cy - (f64)ay * (f64)cx);
-        w = (f32)((f64)bx * (f64)ay - (f64)by * (f64)ax);
-    }
-    if ((u < 0.0F || v < 0.0F || w < 0.0F) && (u > 0.0F || v > 0.0F || w > 0.0F)) {
-        return -1.0F;
-    }
-    const f32 det = u + v + w;
-    if (det == 0.0F) {
-        return -1.0F;
-    }
-    const f32 t = (u * r->sz * az + v * r->sz * bz + w * r->sz * cz) / det;
-    if (!(t >= 0.0F && t <= 1.0F)) {
-        return -1.0F;
-    }
-    // The winding as the ray sees it: counter-clockwise (det > 0) is the
-    // front, the ray running against the normal.
-    *back = det < 0.0F;
-    return t;
-}
-
 // The entry fraction of the ray into each of the four boxes (FLT_MAX for
 // a miss), by the slab test with the reciprocal direction.
 static void slab4(const NphPhysicsMeshNode *n, NphVec3 o, NphVec3 inv, f32 limit, f32 out[4])
@@ -1173,7 +1099,7 @@ bool nph_physics_mesh_raycast(const NphPhysicsMesh *m, NphVec3 origin, NphVec3 d
     const u32 *tri = nph_physics_mesh_triangles(m);
     const NphVec3 *v = nph_physics_mesh_vertices(m);
     const bool two_sided = (m->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U;
-    const WatertightRay ray = watertight_ray(origin, delta);
+    const NphWatertightRay ray = nph_physics_watertight_ray(origin, delta);
     const NphVec3 inv =
         nph_vec3(safe_inverse(delta.x), safe_inverse(delta.y), safe_inverse(delta.z));
     f32 best = FLT_MAX;
@@ -1196,8 +1122,8 @@ bool nph_physics_mesh_raycast(const NphPhysicsMesh *m, NphVec3 origin, NphVec3 d
             const u32 last = first + nph_physics_mesh_leaf_count(code);
             for (u32 t = first; t < last; ++t) {
                 bool back = false;
-                const f32 f = watertight_hit(&ray, v[tri[3ULL * t]], v[tri[3ULL * t + 1U]],
-                                             v[tri[3ULL * t + 2U]], &back);
+                const f32 f = nph_physics_watertight_hit(
+                    &ray, v[tri[3ULL * t]], v[tri[3ULL * t + 1U]], v[tri[3ULL * t + 2U]], &back);
                 // Equal fractions keep the first found: deterministic.
                 if (f >= 0.0F && f < best && (two_sided || !back)) {
                     best = f;

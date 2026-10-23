@@ -10,6 +10,7 @@
 #include <nepheline/physics/aabb_tree.h>
 #include <nepheline/physics/collide.h>
 #include <nepheline/physics/geometry.h>
+#include <nepheline/physics/heightfield.h>
 #include <nepheline/physics/hull.h>
 #include <nepheline/physics/mesh.h>
 
@@ -223,6 +224,63 @@ static inline NphPhysicsMesh *test_valley_mesh(NphAllocator *alloc)
                           nph_vec3(2.0F, 2.0F, -2.0F),  nph_vec3(2.0F, 2.0F, 2.0F)};
     const u32 idx[12] = {0U, 1U, 2U, 2U, 1U, 3U, 2U, 3U, 4U, 4U, 3U, 5U};
     return test_mesh(alloc, v, 6U, idx, 4U, false);
+}
+
+// ---------------------------------------------------------------------------
+// Heightfields
+// ---------------------------------------------------------------------------
+
+// A heightfield of `columns` x `rows` samples `spacing` apart (`cells`: NULL
+// or the flags), which must build and validate.
+static inline NphPhysicsHeightfield *test_heightfield(NphAllocator *alloc, u32 columns, u32 rows,
+                                                      f32 spacing, const f32 *heights,
+                                                      const u8 *cells)
+{
+    NphPhysicsHeightfieldDesc d;
+    memset(&d, 0, sizeof d);
+    d.heights = heights;
+    d.columns = columns;
+    d.rows = rows;
+    d.spacing_x = spacing;
+    d.spacing_z = spacing;
+    d.cells = cells;
+    NphPhysicsHeightfield *h = NULL;
+    NTEST_ASSERT_EQ_INT(nph_physics_heightfield_build(&d, alloc, &h), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(h);
+    NTEST_ASSERT_TRUE(nph_physics_heightfield_validate(h, h->byte_size));
+    return h;
+}
+
+// The same triangles as a mesh, in cell order, holes left out.
+static inline NphPhysicsMesh *test_heightfield_as_mesh(NphAllocator *alloc,
+                                                       const NphPhysicsHeightfield *h)
+{
+    const u32 n = nph_physics_heightfield_triangle_count(h);
+    NphVec3 *v = NPH_ALLOC_ARRAY(alloc, NphVec3, 3ULL * n);
+    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, 3ULL * n);
+    NTEST_ASSERT_TRUE(v != NULL && idx != NULL);
+    u32 kept = 0U;
+    for (u32 t = 0U; t < n; ++t) {
+        if (nph_physics_heightfield_triangle(h, t, &v[3ULL * kept], NULL)) {
+            for (u32 k = 0U; k < 3U; ++k) {
+                idx[3ULL * kept + k] = 3U * kept + k;
+            }
+            kept += 1U;
+        }
+    }
+    NphPhysicsMeshDesc d;
+    memset(&d, 0, sizeof d);
+    d.vertices = v;
+    d.vertex_count = 3U * kept;
+    d.indices = idx;
+    d.triangle_count = kept;
+    d.weld_tolerance = -1.0F; // the copies of each sample are exact
+    NphPhysicsMesh *m = NULL;
+    NTEST_EXPECT_EQ_INT(nph_physics_mesh_build(&d, alloc, &m), NPH_RESULT_OK);
+    NPH_FREE_ARRAY(alloc, NphVec3, v, 3ULL * n);
+    NPH_FREE_ARRAY(alloc, u32, idx, 3ULL * n);
+    NTEST_ASSERT_NOT_NULL(m);
+    return m;
 }
 
 // ---------------------------------------------------------------------------
