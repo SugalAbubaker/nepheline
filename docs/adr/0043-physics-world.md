@@ -50,8 +50,10 @@ The rest of the plan constrains it:
    substeps. The current separation inside the step comes from the bodies'
    displacements applied to anchors fixed at the step's start, so no
    collision runs inside the step. Speculative points stop the approach
-   exactly; friction is a coupled two-dimensional row clamped to the
-   friction circle. This is §8.9's choice; whether it stays, against TGS
+   exactly; friction is a coupled two-dimensional row in the friction
+   circle, which past its edge opposes the slip (Coulomb's law), blended
+   towards the stopping impulse's direction near the edge so sticking stays
+   continuous. This is §8.9's choice; whether it stays, against TGS
    and XPBD, is the §13 decision, taken with benchmarks once joints exist
    (they are where the solvers differ most).
 4. **Contacts default to 120 Hz, an eighth of the substep rate.** A soft
@@ -145,8 +147,8 @@ The rest of the plan constrains it:
 
 - Measured on the reference machine (Ryzen 7 5800X, Profile,
   `benchmarks/physics`), per 240 Hz step: a 20-row pyramid (210 boxes)
-  0.369 ms on one thread and 0.140 ms on the job system; sixteen pyramids
-  (3360 boxes) 0.99 ms; a 1000-shape pile in a bin 3.4 ms and 0.66 ms;
+  0.387 ms on one thread and 0.147 ms on the job system; sixteen pyramids
+  (3360 boxes) 0.91 ms; a 1000-shape pile in a bin 3.4 ms and 0.68 ms;
   10 000 sleeping boxes 2.8 µs. The six-core reference CPU class of §3
   holds a few thousand resting bodies, or a thousand piled, inside the
   1.0 ms budget.

@@ -386,10 +386,21 @@ Contacts", 2013), so fast bodies stop at the surface instead of tunnelling,
 without continuous collision for most cases.
 
 **Friction** follows the normal rows, as a coupled two-dimensional impulse
-on the contact's two tangents, clamped to the friction circle
-(|impulse| ≤ μ times the normal impulse): one coupled row instead of two
-independent clamps, which would make a box sliding diagonally feel the
-friction of a square.
+on the contact's two tangents, held in the friction circle (|impulse| ≤ μ
+times the normal impulse): one coupled row instead of two independent
+clamps, which would make a box sliding diagonally feel the friction of a
+square. Inside the circle the impulse stops the slip (sticking). Past it,
+kinetic friction must oppose the slip itself (Coulomb's law, the maximal
+dissipation); scaling the stopping impulse down to the circle would keep
+its direction, which rotation's coupling in the effective mass turns away
+from the slip at each corner: a box sliding down a slope lost 6 % of its
+friction that way, and spun. The impulse on the circle's edge takes a
+direction between the two, weighted by r = limit / |stopping impulse|:
+hard sliding (r near 0) opposes the slip exactly, and barely past the
+circle (r near 1) it keeps the stopping impulse's direction, continuous
+with sticking, where the slip's own direction is noise (taken alone, it
+made a 20-row pyramid creep and stay awake). A box now slides at
+g (sin θ − μ cos θ) to the third decimal, for 3 to 5 % more solver time.
 
 **The gyroscopic term** is integrated implicitly in body space (Catto,
 "Numerical Methods", GDC 2015): one Newton iteration on
@@ -527,11 +538,11 @@ point):
 | `tree_raycast_10k` (50 m, closest hit) | 851 |
 | `tree_rebuild_10k` (per proxy) | 212 |
 | `hull_build_1000_64v` | 311 000 |
-| `world_pyramid_20_st` (210 boxes, one thread) | 369 000 |
-| `world_pyramid_20_mt` (the job system) | 140 000 |
-| `world_pyramids_16_mt` (3360 boxes) | 987 000 |
+| `world_pyramid_20_st` (210 boxes, one thread) | 387 000 |
+| `world_pyramid_20_mt` (the job system) | 147 000 |
+| `world_pyramids_16_mt` (3360 boxes) | 905 000 |
 | `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 390 000 |
-| `world_pile_1000_mt` | 659 000 |
+| `world_pile_1000_mt` | 682 000 |
 | `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
@@ -545,7 +556,7 @@ runs its pair function every step) and 1.2 ms the solver. Resting contacts
 whose bodies have barely moved relative to each other can keep their
 manifold, refreshing only the separations (the persistent manifolds of
 PhysX's PCM); that is the next optimisation. On the job system the 1000
-pile steps in 0.66 ms and 3360 resting boxes in 0.99 ms, against the 1.0 ms
+pile steps in 0.68 ms and 3360 resting boxes in 0.91 ms, against the 1.0 ms
 budget of §8.9 on the six cores of the reference CPU class.
 
 ## Testing

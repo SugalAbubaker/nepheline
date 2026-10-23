@@ -311,7 +311,8 @@ NTEST(world, friction_holds_below_its_angle_and_slides_above)
     const f32 slid = ramp_slide(0.610865F, 0.3F, 1.0F, &accel);
     NTEST_EXPECT_TRUE(slid < -1.0F);
     const f32 expected = 9.81F * (nph_f32_sin(0.610865F) - 0.3F * nph_f32_cos(0.610865F));
-    NTEST_EXPECT_NEAR_F32(-accel, expected, 0.08F * expected);
+    // Coulomb's friction exactly: the box neither tips nor spins.
+    NTEST_EXPECT_NEAR_F32(-accel, expected, 0.005F * expected);
 }
 
 static f32 bounce_height(f32 restitution)

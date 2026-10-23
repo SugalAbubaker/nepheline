@@ -317,6 +317,42 @@ static void PHYS_KERNEL(prepare)(const PhysSolverBody *bodies, const PhysContact
     }
 }
 
+// The friction circle, |impulse| <= `limit` (mu times the normal impulse),
+// for the tangent impulse (new1, new2) that would stop the points' slip
+// (vt1, vt2). Inside the circle it stands (sticking). Past it, kinetic
+// friction must oppose the slip itself (Coulomb's law, the maximal
+// dissipation): scaling the stopping impulse down to the circle keeps its
+// direction, which the coupling of rotation in the effective mass turns
+// away from the slip (a box sliding on its four corners lost 6 % of its
+// friction that way, and spun). The edge's direction blends the two by
+// r = limit / |stopping impulse|: hard sliding (r near 0) opposes the slip
+// exactly, and barely past the circle (r near 1) it stays the stopping
+// impulse's, continuous with sticking, where the slip's own direction is
+// noise. The two are less than 90 degrees apart (K is positive definite),
+// so the blend never vanishes.
+static void PHYS_KERNEL(friction_circle)(W8 vt1, W8 vt2, W8 limit, W8 *new1, W8 *new2)
+{
+    const W8 zero = nph_f32x8_zero();
+    const W8 one = nph_f32x8_splat(1.0F);
+    const W8 len =
+        nph_f32x8_sqrt(nph_f32x8_add(nph_f32x8_mul(*new1, *new1), nph_f32x8_mul(*new2, *new2)));
+    const W8 over = nph_f32x8_cmp_gt(len, limit);
+    const W8 slip = nph_f32x8_sqrt(nph_f32x8_add(nph_f32x8_mul(vt1, vt1), nph_f32x8_mul(vt2, vt2)));
+    const W8 sliding = nph_f32x8_and(over, nph_f32x8_cmp_gt(slip, zero));
+    const W8 r = nph_f32x8_div(limit, nph_f32x8_select(over, len, one));
+    const W8 stop_share = nph_f32x8_div(r, nph_f32x8_select(over, len, one));
+    const W8 slip_share =
+        nph_f32x8_div(nph_f32x8_sub(one, r), nph_f32x8_select(sliding, slip, one));
+    const W8 d1 = nph_f32x8_sub(nph_f32x8_mul(stop_share, *new1), nph_f32x8_mul(slip_share, vt1));
+    const W8 d2 = nph_f32x8_sub(nph_f32x8_mul(stop_share, *new2), nph_f32x8_mul(slip_share, vt2));
+    const W8 dlen = nph_f32x8_sqrt(nph_f32x8_add(nph_f32x8_mul(d1, d1), nph_f32x8_mul(d2, d2)));
+    const W8 to_edge = nph_f32x8_div(limit, nph_f32x8_select(sliding, dlen, one));
+    *new1 = nph_f32x8_select(sliding, nph_f32x8_mul(d1, to_edge),
+                             nph_f32x8_select(over, nph_f32x8_mul(*new1, r), *new1));
+    *new2 = nph_f32x8_select(sliding, nph_f32x8_mul(d2, to_edge),
+                             nph_f32x8_select(over, nph_f32x8_mul(*new2, r), *new2));
+}
+
 // v rotated by the lanes' quaternions: v + 2 w (u x v) + 2 u x (u x v), as
 // nph_quat_rotate.
 static void PHYS_KERNEL(rotate)(const BodyLanes *q, W8 vx, W8 vy, W8 vz, W8 *ox, W8 *oy, W8 *oz)
@@ -427,14 +463,8 @@ static void PHYS_KERNEL(solve)(PhysSolverBody *bodies, PhysContactLanes *g, Phys
             nph_f32x8_sub(old1, nph_f32x8_add(nph_f32x8_mul(m00, vt1), nph_f32x8_mul(m01, vt2)));
         W8 new2 =
             nph_f32x8_sub(old2, nph_f32x8_add(nph_f32x8_mul(m01, vt1), nph_f32x8_mul(m11, vt2)));
-        // The friction circle: |impulse| <= mu * normal impulse.
-        const W8 limit = nph_f32x8_mul(friction, PHYS_KERNEL(load)(p->normal_impulse));
-        const W8 len =
-            nph_f32x8_sqrt(nph_f32x8_add(nph_f32x8_mul(new1, new1), nph_f32x8_mul(new2, new2)));
-        const W8 over = nph_f32x8_cmp_gt(len, limit);
-        const W8 scale = nph_f32x8_select(over, nph_f32x8_div(limit, len), one);
-        new1 = nph_f32x8_mul(new1, scale);
-        new2 = nph_f32x8_mul(new2, scale);
+        PHYS_KERNEL(friction_circle)(
+            vt1, vt2, nph_f32x8_mul(friction, PHYS_KERNEL(load)(p->normal_impulse)), &new1, &new2);
         nph_f32x8_store(p->tangent_impulse[0], new1);
         nph_f32x8_store(p->tangent_impulse[1], new2);
         PHYS_KERNEL(apply)(&a, &b, ma, mb, nph_f32x8_sub(new1, old1), t1x, t1y, t1z, p->ang_a_t1[0],
