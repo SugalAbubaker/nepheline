@@ -119,6 +119,11 @@ void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotatio
 // The inverse rotation by unit `q` of a 64-bit vector, in 64 bits.
 NphDVec3 nph_physics_drotate_inverse(NphQuat q, NphDVec3 v);
 
+// A manifold point this near the surface, or deeper, touches: it carries
+// load. Points farther out are speculative and matter only if the shape
+// turns onto them, so reductions keep touching points first.
+#define NPH_PHYSICS_TOUCH_SEPARATION (0.1F * NPH_PHYSICS_LINEAR_SLOP)
+
 // Combines two feature numbers into a point id.
 NPH_INLINE u32 nph_physics_mix_id(u32 a, u32 b)
 {

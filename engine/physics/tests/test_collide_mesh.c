@@ -69,54 +69,6 @@ static NphPhysicsMeshManifolds collide_mesh(const NphPhysicsGeometry *g, NphPhys
     return mm;
 }
 
-static NphPhysicsMesh *build_mesh(NphAllocator *alloc, const NphVec3 *v, u32 nv, const u32 *idx,
-                                  u32 nt, bool two_sided)
-{
-    NphPhysicsMeshDesc d;
-    memset(&d, 0, sizeof d);
-    d.vertices = v;
-    d.vertex_count = nv;
-    d.indices = idx;
-    d.triangle_count = nt;
-    d.two_sided = two_sided ? 1 : 0;
-    NphPhysicsMesh *m = NULL;
-    NTEST_ASSERT_EQ_INT(nph_physics_mesh_build(&d, alloc, &m), NPH_RESULT_OK);
-    NTEST_ASSERT_NOT_NULL(m);
-    return m;
-}
-
-#define GRID_MAX 16U
-
-// An n by n grid of square cells `cell` metres wide in the plane y = 0,
-// from (x0, z0), facing +Y. The cells' diagonals alternate, so seams run
-// three ways and vertices join four or eight triangles.
-static NphPhysicsMesh *grid_mesh(NphAllocator *alloc, u32 n, f32 cell, f32 x0, f32 z0,
-                                 bool two_sided)
-{
-    static NphVec3 v[(GRID_MAX + 1U) * (GRID_MAX + 1U)];
-    static u32 idx[6U * GRID_MAX * GRID_MAX];
-    NTEST_ASSERT_TRUE(n <= GRID_MAX);
-    for (u32 i = 0U; i <= n; ++i) {
-        for (u32 j = 0U; j <= n; ++j) {
-            v[i * (n + 1U) + j] = nph_vec3(x0 + (f32)i * cell, 0.0F, z0 + (f32)j * cell);
-        }
-    }
-    u32 k = 0U;
-    for (u32 i = 0U; i < n; ++i) {
-        for (u32 j = 0U; j < n; ++j) {
-            const u32 a = i * (n + 1U) + j; // (x, z)
-            const u32 b = a + 1U;           // (x, z + 1)
-            const u32 c = a + n + 1U;       // (x + 1, z)
-            const u32 d = c + 1U;           // (x + 1, z + 1)
-            const u32 quad[2][6] = {{a, b, c, c, b, d}, {a, d, c, a, b, d}};
-            for (u32 q = 0U; q < 6U; ++q) {
-                idx[k++] = quad[(i + j) & 1U][q];
-            }
-        }
-    }
-    return build_mesh(alloc, v, (n + 1U) * (n + 1U), idx, 2U * n * n, two_sided);
-}
-
 // ---------------------------------------------------------------------------
 // The triangle view's axis test
 // ---------------------------------------------------------------------------
@@ -481,7 +433,7 @@ NTEST(collide_mesh, flat_floors_give_one_straight_manifold)
 {
     TestAlloc ta;
     NphAllocator *alloc = test_alloc_begin(&ta);
-    NphPhysicsMesh *mesh = grid_mesh(alloc, 8U, 0.5F, -2.0F, -2.0F, false);
+    NphPhysicsMesh *mesh = test_grid_mesh(alloc, 8U, 0.5F, -2.0F, -2.0F, NULL, false);
     // A hexagonal prism: a hull resting on a face.
     NphVec3 prism[12];
     for (u32 i = 0U; i < 6U; ++i) {
@@ -556,22 +508,11 @@ NTEST(collide_mesh, flat_floors_give_one_straight_manifold)
     test_alloc_end(&ta);
 }
 
-// A valley along Z: two slopes at 45 degrees meeting at a concave crease on
-// the Z axis, facing up and in.
-static NphPhysicsMesh *valley_mesh(NphAllocator *alloc)
-{
-    const NphVec3 v[6] = {nph_vec3(-2.0F, 2.0F, -2.0F), nph_vec3(-2.0F, 2.0F, 2.0F),
-                          nph_vec3(0.0F, 0.0F, -2.0F),  nph_vec3(0.0F, 0.0F, 2.0F),
-                          nph_vec3(2.0F, 2.0F, -2.0F),  nph_vec3(2.0F, 2.0F, 2.0F)};
-    const u32 idx[12] = {0U, 1U, 2U, 2U, 1U, 3U, 2U, 3U, 4U, 4U, 3U, 5U};
-    return build_mesh(alloc, v, 6U, idx, 4U, false);
-}
-
 NTEST(collide_mesh, a_crease_gives_a_manifold_per_face)
 {
     TestAlloc ta;
     NphAllocator *alloc = test_alloc_begin(&ta);
-    NphPhysicsMesh *mesh = valley_mesh(alloc);
+    NphPhysicsMesh *mesh = test_valley_mesh(alloc);
     const NphVec3 left = nph_vec3(-0.70710678F, -0.70710678F, 0.0F); // from the shape into each
     const NphVec3 right = nph_vec3(0.70710678F, -0.70710678F, 0.0F);
     // A cube turned to rest a face on each slope, 1 mm into both.
@@ -626,7 +567,7 @@ NTEST(collide_mesh, many_normals_keep_the_deepest_four)
         idx[3ULL * k + 1U] = 1U + (k + 1U) % 6U;
         idx[3ULL * k + 2U] = 1U + k;
     }
-    NphPhysicsMesh *mesh = build_mesh(alloc, v, 7U, idx, 6U, false);
+    NphPhysicsMesh *mesh = test_mesh(alloc, v, 7U, idx, 6U, false);
     // A ball in the funnel, off its axis: every face touched, some deeper.
     const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.5F);
     const NphPhysicsPose pose = at(0.04F, 0.57F, 0.015F);
@@ -663,7 +604,7 @@ NTEST(collide_mesh, open_edges_stop_and_seams_carry)
     TestAlloc ta;
     NphAllocator *alloc = test_alloc_begin(&ta);
     // A platform of two cells, x in [0, 2], its edges open (active).
-    NphPhysicsMesh *platform = grid_mesh(alloc, 2U, 1.0F, 0.0F, -1.0F, false);
+    NphPhysicsMesh *platform = test_grid_mesh(alloc, 2U, 1.0F, 0.0F, -1.0F, NULL, false);
     const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.2F, 0.2F, 0.2F));
     // Beside the platform, straddling its plane and reaching 0.5 mm over
     // its open edge: stopped, between two of its vertices and at one (where
@@ -691,8 +632,8 @@ NTEST(collide_mesh, two_sided_sheets_face_the_shape)
 {
     TestAlloc ta;
     NphAllocator *alloc = test_alloc_begin(&ta);
-    NphPhysicsMesh *one = grid_mesh(alloc, 4U, 0.5F, -1.0F, -1.0F, false);
-    NphPhysicsMesh *two = grid_mesh(alloc, 4U, 0.5F, -1.0F, -1.0F, true);
+    NphPhysicsMesh *one = test_grid_mesh(alloc, 4U, 0.5F, -1.0F, -1.0F, NULL, false);
+    NphPhysicsMesh *two = test_grid_mesh(alloc, 4U, 0.5F, -1.0F, -1.0F, NULL, true);
     const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.3F);
     const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.2F, 0.1F, 0.3F));
     // Under the sheet: a one-sided mesh lets it pass, a two-sided one
@@ -743,8 +684,8 @@ NTEST(collide_mesh, meshes_keep_full_precision_far_from_their_origin)
     // The same floor at the origin and 10 km along X (every coordinate
     // exact in 32 bits), the second placed back by its pose: the same
     // contacts to the micrometre.
-    NphPhysicsMesh *near = grid_mesh(alloc, 6U, 0.5F, -1.5F, -1.5F, false);
-    NphPhysicsMesh *far = grid_mesh(alloc, 6U, 0.5F, 10000.0F - 1.5F, -1.5F, false);
+    NphPhysicsMesh *near = test_grid_mesh(alloc, 6U, 0.5F, -1.5F, -1.5F, NULL, false);
+    NphPhysicsMesh *far = test_grid_mesh(alloc, 6U, 0.5F, 10000.0F - 1.5F, -1.5F, NULL, false);
     const NphPhysicsPose back = at(-10000.0F, 0.0F, 0.0F);
     const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.3F, 0.2F, 0.25F));
     const NphPhysicsGeometry cap = nph_physics_geometry_capsule(0.25F, 0.1F);

@@ -6,7 +6,11 @@
 // A shape places a geometry (geometry.h) in its body's frame with a pose,
 // gives it a density (its share of the body's mass), surface properties,
 // and a collision filter. A body may have any number of shapes; each is one
-// broadphase proxy. A hull a shape uses must outlive the shape.
+// broadphase proxy, so a body of several shapes is a compound. A hull or
+// mesh a shape uses must outlive the shape. Meshes go on static and
+// kinematic bodies only; a pair with a mesh keeps up to four contact
+// manifolds, one per surface direction (ADR-0046), and reports its events
+// once.
 //
 // Surfaces combine per contact: friction as the geometric mean (sqrt(a b):
 // either surface can make the pair slippery), restitution as the larger.
@@ -51,8 +55,9 @@ typedef struct NphPhysicsShapeDesc {
 NphPhysicsShapeDesc nph_physics_shape_desc_default(NphPhysicsGeometry geometry);
 
 // Attaches a shape and updates the body's mass properties (unless they are
-// set explicitly). NPH_RESULT_INVALID_ARGUMENT for invalid geometry, a bad
-// pose, or a negative density, friction, or restitution;
+// set explicitly). NPH_RESULT_INVALID_ARGUMENT for invalid geometry, a mesh
+// on a dynamic body, a bad pose, or a negative density, friction, or
+// restitution;
 // NPH_RESULT_NOT_FOUND for a stale body; NPH_RESULT_FULL past
 // NPH_PHYSICS_MAX_OBJECTS; NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,

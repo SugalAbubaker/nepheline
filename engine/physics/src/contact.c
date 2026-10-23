@@ -79,40 +79,42 @@ static void awake_list_remove(NphPhysicsWorld *w, u32 contact)
     c->awake_slot = PHYS_NULL;
 }
 
-NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b)
+static bool is_mesh(const PhysShape *s)
 {
-    u32 index;
+    return s->geometry.type == NPH_PHYSICS_SHAPE_MESH;
+}
+
+// A free contact record, uninitialised: from the free list, or a new one
+// with room kept to free every record later without growing.
+static NphResult contact_alloc(NphPhysicsWorld *w, u32 *out)
+{
     if (w->free_contacts.len > 0U) {
-        index = w->free_contacts.data[w->free_contacts.len - 1U];
+        *out = w->free_contacts.data[w->free_contacts.len - 1U];
         w->free_contacts.len -= 1U;
-    } else {
-        if (NPH_ARRAY_PUSH_SLOT(&w->contacts) == NULL) {
-            return NPH_RESULT_OUT_OF_MEMORY;
-        }
-        index = w->contacts.len - 1U;
-        // Room to free every contact later without growing.
-        const NphResult r = NPH_ARRAY_RESERVE(&w->free_contacts, w->contacts.len);
-        if (r != NPH_RESULT_OK) {
-            w->contacts.len -= 1U;
-            return r;
-        }
+        return NPH_RESULT_OK;
     }
-    NphResult r = nph_hashmap_insert_u64(&w->pairs, pair_key(shape_a, shape_b), &index);
-    if (r == NPH_RESULT_OK && w->awake_contacts.cap < w->contacts.len) {
-        r = NPH_ARRAY_RESERVE(&w->awake_contacts, w->contacts.len);
+    if (NPH_ARRAY_PUSH_SLOT(&w->contacts) == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
     }
+    const NphResult r = NPH_ARRAY_RESERVE(&w->free_contacts, w->contacts.len);
     if (r != NPH_RESULT_OK) {
-        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&w->free_contacts, index));
+        w->contacts.len -= 1U;
         return r;
     }
-    const PhysShape *sa = &w->shapes.data[shape_a];
-    const PhysShape *sb = &w->shapes.data[shape_b];
+    *out = w->contacts.len - 1U;
+    return NPH_RESULT_OK;
+}
+
+static void contact_init(NphPhysicsWorld *w, u32 index, u32 shape_a, u32 shape_b)
+{
     PhysContact *c = &w->contacts.data[index];
     memset(c, 0, sizeof *c);
     c->shape_a = shape_a;
     c->shape_b = shape_b;
-    c->body_a = sa->body;
-    c->body_b = sb->body;
+    c->body_a = w->shapes.data[shape_a].body;
+    c->body_b = w->shapes.data[shape_b].body;
+    c->parent = PHYS_NULL;
+    c->child = PHYS_NULL;
     c->color = PHYS_NULL;
     c->color_slot = PHYS_NULL;
     c->island = PHYS_NULL;
@@ -120,6 +122,45 @@ NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b)
     c->island_next = PHYS_NULL;
     c->awake_slot = PHYS_NULL;
     c->normal = nph_vec3_unit_y();
+}
+
+NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b)
+{
+    const PhysShape *sa = &w->shapes.data[shape_a];
+    const PhysShape *sb = &w->shapes.data[shape_b];
+    // Every record first (a mesh pair's children with its own), so a
+    // failure leaves nothing behind.
+    const u32 records = is_mesh(sa) || is_mesh(sb) ? NPH_PHYSICS_MESH_MAX_MANIFOLDS : 1U;
+    u32 rec[NPH_PHYSICS_MESH_MAX_MANIFOLDS] = {PHYS_NULL, PHYS_NULL, PHYS_NULL, PHYS_NULL};
+    NphResult r = NPH_RESULT_OK;
+    u32 made = 0U;
+    while (made < records && r == NPH_RESULT_OK) {
+        r = contact_alloc(w, &rec[made]);
+        made += r == NPH_RESULT_OK ? 1U : 0U;
+    }
+    const u32 index = rec[0];
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_insert_u64(&w->pairs, pair_key(shape_a, shape_b), &index);
+    }
+    if (r == NPH_RESULT_OK && w->awake_contacts.cap < w->contacts.len) {
+        r = NPH_ARRAY_RESERVE(&w->awake_contacts, w->contacts.len);
+        if (r != NPH_RESULT_OK) {
+            NPH_VERIFY(nph_hashmap_remove_u64(&w->pairs, pair_key(shape_a, shape_b)));
+        }
+    }
+    if (r != NPH_RESULT_OK) {
+        for (u32 k = 0U; k < made; ++k) {
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&w->free_contacts, rec[k])); // reserved
+        }
+        return r;
+    }
+    for (u32 k = 0U; k < records; ++k) {
+        contact_init(w, rec[k], shape_a, shape_b);
+        w->contacts.data[rec[k]].parent = k == 0U ? PHYS_NULL : index;
+        w->contacts.data[rec[k]].child = k + 1U < records ? rec[k + 1U] : PHYS_NULL;
+    }
+    w->child_contacts += records - 1U;
+    PhysContact *c = &w->contacts.data[index];
     if (((sa->flags | sb->flags) & PHYS_SHAPE_CONTACT_EVENTS) != 0U) {
         c->flags |= PHYS_CONTACT_EVENTS;
     }
@@ -138,6 +179,24 @@ NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b)
 void phys_contact_destroy(NphPhysicsWorld *w, u32 contact, bool events)
 {
     PhysContact *c = &w->contacts.data[contact];
+    NPH_ASSERT(c->parent == PHYS_NULL);
+    // A mesh pair's children go with it (they hold no events or islands).
+    for (u32 k = c->child; k != PHYS_NULL;) {
+        PhysContact *child = &w->contacts.data[k];
+        const u32 next = child->child;
+        if (child->color != PHYS_NULL) {
+            phys_graph_remove(w, k);
+        }
+        child->shape_a = PHYS_NULL;
+        child->shape_b = PHYS_NULL;
+        child->flags = 0U;
+        child->parent = PHYS_NULL;
+        child->child = PHYS_NULL;
+        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&w->free_contacts, k)); // reserved
+        w->child_contacts -= 1U;
+        k = next;
+    }
+    c->child = PHYS_NULL;
     if ((c->flags & PHYS_CONTACT_TOUCHING) != 0U && events &&
         (c->flags & PHYS_CONTACT_EVENTS) != 0U) {
         NphPhysicsContactEndEvent e;
@@ -177,7 +236,7 @@ static bool body_solvable(const PhysBody *b)
 // bodies and its touching state.
 static NphResult contact_sync(NphPhysicsWorld *w, u32 contact)
 {
-    PhysContact *c = &w->contacts.data[contact];
+    const PhysContact *c = &w->contacts.data[contact];
     const PhysBody *a = &w->bodies.data[c->body_a];
     const PhysBody *b = &w->bodies.data[c->body_b];
     const bool awake = body_awake(a) || body_awake(b);
@@ -186,12 +245,17 @@ static NphResult contact_sync(NphPhysicsWorld *w, u32 contact)
     } else {
         awake_list_remove(w, contact);
     }
-    const bool in_graph =
-        (c->flags & PHYS_CONTACT_TOUCHING) != 0U && awake && body_solvable(a) && body_solvable(b);
-    if (in_graph && c->color == PHYS_NULL) {
-        NPH_TRY(phys_graph_add(w, contact));
-    } else if (!in_graph && c->color != PHYS_NULL) {
-        phys_graph_remove(w, contact);
+    const bool solvable = awake && body_solvable(a) && body_solvable(b);
+    // The pair's contact, then its children: in the graph while they touch
+    // and their bodies are solved.
+    for (u32 k = contact; k != PHYS_NULL; k = w->contacts.data[k].child) {
+        const PhysContact *r = &w->contacts.data[k];
+        const bool in_graph = solvable && (r->flags & PHYS_CONTACT_TOUCHING) != 0U;
+        if (in_graph && r->color == PHYS_NULL) {
+            NPH_TRY(phys_graph_add(w, k));
+        } else if (!in_graph && r->color != PHYS_NULL) {
+            phys_graph_remove(w, k);
+        }
     }
     return NPH_RESULT_OK;
 }
@@ -223,6 +287,191 @@ static bool boxes_overlap(NphAABB a, NphAABB b)
            a.min.z <= b.max.z && b.min.z <= a.max.z;
 }
 
+// ---------------------------------------------------------------------------
+// Warm starting
+// ---------------------------------------------------------------------------
+
+// A point whose features changed takes the impulses of an old point this
+// near on both bodies, as Jolt carries a cached point's impulses to any new
+// point within a centimetre (Rouwe, Jolt Physics, PhysicsSettings::
+// mContactPointPreserveLambdaMaxDistSq). Ids alone are not enough: where a
+// reduction chooses between two near-coincident points (the clipped corners
+// of a box turned a little on another), the choice and so the ids flip from
+// step to step, and a column of boxes settling lost a twentieth of its warm
+// starts to flips between points under a millimetre apart, and drifted
+// millimetres aside.
+#define WARM_DISTANCE (2.0F * NPH_PHYSICS_LINEAR_SLOP)
+// Of a mesh pair's several manifolds, only an old point whose manifold faced
+// within 5 degrees of the new one's (the merge angle: manifolds nearer than
+// that are one) may pass its impulses on. A box in a crease has a corner in
+// each slope's manifold, under a millimetre apart, whose impulses push along
+// normals a right angle apart; on a terrain, impulses carried between
+// neighbouring manifolds 5 to 15 degrees apart pushed boxes sideways and
+// kept them creeping for seconds. A convex pair has one manifold, whose
+// points carry their impulses however its normal turns, as ids do (limbs
+// tumbling through a pile turn theirs that far in a step).
+#define WARM_COS 0.99619470F
+
+// Last step's points of one contact (or of a mesh pair's chain), their
+// manifolds' normals (NULL for one manifold), and which of them have passed
+// their impulses on.
+typedef struct WarmStart {
+    const PhysContactPoint *old;
+    const NphVec3 *normals; // per old point, or NULL
+    u32 count;
+    u32 claimed;
+} WarmStart;
+
+// The most points a contact's chain holds.
+#define CHAIN_POINTS (NPH_PHYSICS_MESH_MAX_MANIFOLDS * NPH_PHYSICS_MANIFOLD_MAX_POINTS)
+
+NPH_STATIC_ASSERT(CHAIN_POINTS < 32U, "a chain's points fit the claimed mask");
+
+static void warm_take(WarmStart *ws, u32 o, PhysContactPoint *p)
+{
+    p->normal_impulse = ws->old[o].normal_impulse;
+    p->tangent_impulse = ws->old[o].tangent_impulse;
+    ws->claimed |= 1U << o;
+}
+
+// The old point with p's id (the same features), if any.
+static bool warm_by_id(WarmStart *ws, PhysContactPoint *p)
+{
+    for (u32 o = 0U; o < ws->count; ++o) {
+        if (ws->old[o].id == p->id) {
+            warm_take(ws, o, p);
+            return true;
+        }
+    }
+    return false;
+}
+
+// For a point no id matched, after every point has tried its id: the
+// nearest unclaimed old point within WARM_DISTANCE on both bodies (and, in
+// a mesh pair, whose manifold's normal agrees with `normal`). Anchors are in
+// world axes, so a body's turn in the step counts as distance.
+static void warm_by_place(WarmStart *ws, PhysContactPoint *p, NphVec3 normal)
+{
+    u32 best = NPH_U32_MAX;
+    f32 best_d = WARM_DISTANCE * WARM_DISTANCE;
+    for (u32 o = 0U; o < ws->count; ++o) {
+        if ((ws->claimed & (1U << o)) != 0U ||
+            (ws->normals != NULL && nph_vec3_dot(ws->normals[o], normal) < WARM_COS)) {
+            continue;
+        }
+        const f32 d = nph_f32_max(nph_vec3_distance_sq(ws->old[o].anchor_a, p->anchor_a),
+                                  nph_vec3_distance_sq(ws->old[o].anchor_b, p->anchor_b));
+        if (d < best_d) {
+            best_d = d;
+            best = o;
+        }
+    }
+    if (best != NPH_U32_MAX) {
+        warm_take(ws, best, p);
+    }
+}
+
+// A pair with a mesh (ADR-0046 §8, §9): up to four manifolds, the deepest
+// into the pair's contact and the rest into its children. A manifold may
+// move from one record to another between steps, so impulses carry over
+// across the whole chain.
+static void mesh_update(NphPhysicsWorld *w, u32 contact)
+{
+    PhysContact *c = &w->contacts.data[contact];
+    const PhysShape *sa = &w->shapes.data[c->shape_a];
+    const PhysShape *sb = &w->shapes.data[c->shape_b];
+    const bool mesh_a = is_mesh(sa);
+    const PhysShape *sm = mesh_a ? sa : sb;
+    const PhysShape *sx = mesh_a ? sb : sa;
+    const PhysBody *bm = &w->bodies.data[sm->body];
+    const PhysBody *bx = &w->bodies.data[sx->body];
+    // The convex shape's place in the mesh's frame, in 64 bits from the
+    // bodies' 64-bit origins: exact however far the shape is from the
+    // mesh's origin.
+    const NphQuat qm = nph_quat_mul(bm->rotation, sm->pose.rotation);
+    const NphQuat qx = nph_quat_mul(bx->rotation, sx->pose.rotation);
+    const NphDVec3 pm =
+        nph_dvec3_add_vec3(bm->origin, nph_quat_rotate(bm->rotation, sm->pose.position));
+    const NphDVec3 px =
+        nph_dvec3_add_vec3(bx->origin, nph_quat_rotate(bx->rotation, sx->pose.position));
+    NphPhysicsMeshManifolds mm;
+    nph_physics_collide_mesh_local(&sx->geometry, nph_quat_mul(nph_quat_conjugate(qm), qx),
+                                   nph_physics_drotate_inverse(qm, nph_dvec3_sub(px, pm)),
+                                   sm->geometry.mesh, NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+    // The points come out relative to the convex shape in the mesh's axes;
+    // the anchors are from each body's centre of mass, in world axes.
+    const NphVec3 shape_from_x = nph_dvec3_relative(px, bx->center);
+    const NphVec3 x_from_m = nph_dvec3_relative(bx->center, bm->center);
+    // The chain's points of the last step, for warm starting.
+    PhysContactPoint old[CHAIN_POINTS];
+    NphVec3 old_normals[CHAIN_POINTS];
+    u32 old_count = 0U;
+    for (u32 k = contact; k != PHYS_NULL; k = w->contacts.data[k].child) {
+        const PhysContact *r = &w->contacts.data[k];
+        for (u32 j = 0U; j < r->point_count; ++j) {
+            old_normals[old_count] = r->normal;
+            old[old_count++] = r->points[j];
+        }
+    }
+    WarmStart ws = {old, old_normals, old_count, 0U};
+    u32 unmatched = 0U; // bit 4i + j: point j of manifold i
+    const f32 friction = nph_f32_sqrt(sa->friction * sb->friction);
+    const f32 restitution = nph_f32_max(sa->restitution, sb->restitution);
+    bool children_changed = false;
+    u32 rec = contact;
+    for (u32 i = 0U; rec != PHYS_NULL; ++i) {
+        PhysContact *r = &w->contacts.data[rec];
+        const bool was = (r->flags & PHYS_CONTACT_TOUCHING) != 0U;
+        r->point_count = 0U;
+        if (i < mm.count) {
+            const NphPhysicsManifold *m = &mm.manifolds[i];
+            const NphVec3 n = nph_quat_rotate(qm, m->normal); // from the shape into the mesh
+            r->normal = mesh_a ? nph_vec3_neg(n) : n;
+            for (u32 j = 0U; j < m->point_count; ++j) {
+                PhysContactPoint *p = &r->points[j];
+                memset(p, 0, sizeof *p);
+                const NphVec3 ax =
+                    nph_vec3_add(shape_from_x, nph_quat_rotate(qm, m->points[j].point));
+                const NphVec3 am = nph_vec3_add(ax, x_from_m);
+                p->anchor_a = mesh_a ? am : ax;
+                p->anchor_b = mesh_a ? ax : am;
+                p->separation = m->points[j].separation;
+                p->id = m->points[j].id;
+                if (!warm_by_id(&ws, p)) {
+                    unmatched |= 1U << (i * NPH_PHYSICS_MANIFOLD_MAX_POINTS + j);
+                }
+            }
+            r->point_count = m->point_count;
+        }
+        r->friction = friction;
+        r->restitution = restitution;
+        const bool touching = r->point_count > 0U;
+        r->change = 0U;
+        if (touching && !was) {
+            r->change = PHYS_CHANGE_STARTED;
+        } else if (!touching && was) {
+            r->change = PHYS_CHANGE_STOPPED;
+        }
+        children_changed = children_changed || (i > 0U && r->change != 0U);
+        rec = r->child;
+    }
+    if (unmatched != 0U && ws.claimed != (1U << old_count) - 1U) {
+        rec = contact;
+        for (u32 i = 0U; rec != PHYS_NULL && i < mm.count; ++i) {
+            PhysContact *r = &w->contacts.data[rec];
+            for (u32 j = 0U; j < r->point_count; ++j) {
+                if ((unmatched & (1U << (i * NPH_PHYSICS_MANIFOLD_MAX_POINTS + j))) != 0U) {
+                    warm_by_place(&ws, &r->points[j], r->normal);
+                }
+            }
+            rec = r->child;
+        }
+    }
+    if (children_changed) {
+        c->change |= PHYS_CHANGE_CHILDREN;
+    }
+}
+
 void phys_contact_update(NphPhysicsWorld *w, u32 contact)
 {
     PhysContact *c = &w->contacts.data[contact];
@@ -232,6 +481,10 @@ void phys_contact_update(NphPhysicsWorld *w, u32 contact)
     const bool was_touching = (c->flags & PHYS_CONTACT_TOUCHING) != 0U;
     if (!boxes_overlap(sa->fat_aabb, sb->fat_aabb)) {
         c->change = PHYS_CHANGE_DISJOINT;
+        return;
+    }
+    if (c->child != PHYS_NULL) {
+        mesh_update(w, contact);
         return;
     }
     const PhysBody *ba = &w->bodies.data[c->body_a];
@@ -245,10 +498,12 @@ void phys_contact_update(NphPhysicsWorld *w, u32 contact)
     nph_physics_collide(&sa->geometry, pa, &sb->geometry, pb, NPH_PHYSICS_SPECULATIVE_DISTANCE,
                         &c->cache, &m);
     const NphVec3 ab = nph_dvec3_relative(bb->center, origin);
-    // Carry impulses to the points that persist (same features), for warm
-    // starting. The tangent impulse is a world vector: it survives a turn of
-    // the tangent basis.
+    // Carry impulses to the points that persist, for warm starting: by id,
+    // then by place. The tangent impulse is a world vector: it survives a
+    // turn of the tangent basis.
     PhysContactPoint points[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    WarmStart ws = {c->points, NULL, c->point_count, 0U};
+    u32 unmatched = 0U;
     for (u32 i = 0U; i < m.point_count; ++i) {
         PhysContactPoint *p = &points[i];
         memset(p, 0, sizeof *p);
@@ -256,11 +511,14 @@ void phys_contact_update(NphPhysicsWorld *w, u32 contact)
         p->anchor_b = nph_vec3_sub(m.points[i].point, ab);
         p->separation = m.points[i].separation;
         p->id = m.points[i].id;
-        for (u32 j = 0U; j < c->point_count; ++j) {
-            if (c->points[j].id == p->id) {
-                p->normal_impulse = c->points[j].normal_impulse;
-                p->tangent_impulse = c->points[j].tangent_impulse;
-                break;
+        if (!warm_by_id(&ws, p)) {
+            unmatched |= 1U << i;
+        }
+    }
+    if (unmatched != 0U && ws.claimed != (1U << c->point_count) - 1U) {
+        for (u32 i = 0U; i < m.point_count; ++i) {
+            if ((unmatched & (1U << i)) != 0U) {
+                warm_by_place(&ws, &points[i], m.normal);
             }
         }
     }
@@ -299,6 +557,19 @@ static NphResult apply_change(NphPhysicsWorld *w, u32 contact)
         phys_contact_destroy(w, contact, true);
         return NPH_RESULT_OK;
     }
+    // A mesh pair's children touch as their manifolds say; their graph
+    // membership follows in contact_sync. (The pair's own contact holds the
+    // deepest manifold, so it touches whenever any of them does: its events
+    // are the pair's.)
+    for (u32 k = c->child; k != PHYS_NULL; k = w->contacts.data[k].child) {
+        PhysContact *child = &w->contacts.data[k];
+        if ((child->change & PHYS_CHANGE_STARTED) != 0U) {
+            child->flags |= PHYS_CONTACT_TOUCHING;
+        } else if ((child->change & PHYS_CHANGE_STOPPED) != 0U) {
+            child->flags &= ~(u32)PHYS_CONTACT_TOUCHING;
+        }
+        child->change = 0U;
+    }
     const PhysBody *a = &w->bodies.data[c->body_a];
     const PhysBody *b = &w->bodies.data[c->body_b];
     const bool both_dynamic =
@@ -335,6 +606,9 @@ static NphResult apply_change(NphPhysicsWorld *w, u32 contact)
         if ((c->flags & PHYS_CONTACT_ISLAND) != 0U) {
             phys_island_unlink_contact(w, contact);
         }
+        return contact_sync(w, contact);
+    }
+    if ((change & PHYS_CHANGE_CHILDREN) != 0U) {
         return contact_sync(w, contact);
     }
     return NPH_RESULT_OK;

@@ -13,13 +13,17 @@
 //   box      centred on the origin, axis-aligned, with half extents
 //   hull     a shared convex polyhedron (hull.h), in the frame of the
 //            points it was built from
+//   mesh     a shared triangle mesh (mesh.h), in the frame of its vertices:
+//            not convex and without mass, for static and kinematic bodies
+//            only (the level's geometry, moving platforms)
 //
 // Sizes are positive and finite (nph_physics_geometry_is_valid).
 //
-// Thread-safety: every function is pure and NPH_THREADSAFE; a hull is read,
-// never written.
+// Thread-safety: every function is pure and NPH_THREADSAFE; a hull or mesh
+// is read, never written.
 
 #include <nepheline/physics/hull.h>
+#include <nepheline/physics/mesh.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,8 +34,16 @@ typedef enum NphPhysicsShapeType {
     NPH_PHYSICS_SHAPE_CAPSULE = 1,
     NPH_PHYSICS_SHAPE_BOX = 2,
     NPH_PHYSICS_SHAPE_HULL = 3,
-    NPH_PHYSICS_SHAPE_TYPE_COUNT = 4,
+    NPH_PHYSICS_SHAPE_MESH = 4,
+    NPH_PHYSICS_SHAPE_TYPE_COUNT = 5,
 } NphPhysicsShapeType;
+
+// True for the convex types (sphere, capsule, box, hull): those that move
+// with dynamic bodies and collide with every type.
+NPH_INLINE bool nph_physics_shape_type_is_convex(NphPhysicsShapeType type)
+{
+    return (u32)type <= (u32)NPH_PHYSICS_SHAPE_HULL;
+}
 
 typedef struct NphPhysicsSphere {
     f32 radius;
@@ -54,6 +66,7 @@ typedef struct NphPhysicsGeometry {
         NphPhysicsCapsule capsule;
         NphPhysicsBox box;
         const NphPhysicsHull *hull;
+        const NphPhysicsMesh *mesh;
     };
 } NphPhysicsGeometry;
 
@@ -74,28 +87,36 @@ NPH_INLINE NphPhysicsGeometry nph_physics_geometry_hull(const NphPhysicsHull *hu
 {
     return (NphPhysicsGeometry){.type = NPH_PHYSICS_SHAPE_HULL, .hull = hull};
 }
+NPH_INLINE NphPhysicsGeometry nph_physics_geometry_mesh(const NphPhysicsMesh *mesh)
+{
+    return (NphPhysicsGeometry){.type = NPH_PHYSICS_SHAPE_MESH, .mesh = mesh};
+}
 
-// True for a known type with positive, finite sizes (and a hull that is not
-// NULL). Shapes are created only from valid geometry.
+// True for a known type with positive, finite sizes (and a hull or mesh
+// that is not NULL). Shapes are created only from valid geometry.
 bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g);
 
-// The tight box around the geometry placed at `pose`.
+// The tight box around the geometry placed at `pose` (a mesh's: its
+// vertices' box, placed).
 NphAABB nph_physics_geometry_aabb(const NphPhysicsGeometry *g, NphPhysicsPose pose);
 
 // The mass properties at uniform `density` (kg/m^3), in the geometry's own
 // frame. Sphere, capsule, and box are exact closed forms; a hull's are
 // precomputed by its builder (Mirtich, "Fast and Accurate Computation of
-// Polyhedral Mass Properties", JGT 1996, in Eberly's formulation).
+// Polyhedral Mass Properties", JGT 1996, in Eberly's formulation). A mesh
+// has none (it bounds no volume).
 NphPhysicsMassData nph_physics_geometry_mass(const NphPhysicsGeometry *g, f32 density);
 
 // The point of the geometry farthest along `direction` (which need not be
-// unit), in its own frame, rounding included.
+// unit), in its own frame, rounding included. A mesh's is its farthest
+// vertex, by a scan of them all.
 NphVec3 nph_physics_geometry_support(const NphPhysicsGeometry *g, NphVec3 direction);
 
 // The radius of the largest ball centred at the geometry's centre of mass
 // that fits inside it, and the distance from that centre to the farthest
 // point. Continuous collision uses them to decide when a body moves fast
-// enough to tunnel (docs/physics.md "Continuous collision").
+// enough to tunnel (docs/physics.md "Continuous collision"). A mesh's are 0
+// and the farthest corner of its vertices' box from its origin.
 f32 nph_physics_geometry_inner_radius(const NphPhysicsGeometry *g);
 f32 nph_physics_geometry_outer_radius(const NphPhysicsGeometry *g);
 
@@ -119,9 +140,9 @@ typedef struct NphPhysicsProxy {
 // allocation.
 #define NPH_PHYSICS_PROXY_STORAGE 8U
 
-// The proxy of convex geometry. Sphere, capsule, and box points are written
-// into `storage`, which must outlive the proxy; a hull's proxy points at its
-// vertices.
+// The proxy of convex geometry (not a mesh). Sphere, capsule, and box
+// points are written into `storage`, which must outlive the proxy; a hull's
+// proxy points at its vertices.
 NphPhysicsProxy nph_physics_geometry_proxy(const NphPhysicsGeometry *g,
                                            NphVec3 storage[NPH_PHYSICS_PROXY_STORAGE]);
 

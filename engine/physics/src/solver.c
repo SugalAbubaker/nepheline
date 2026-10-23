@@ -868,25 +868,32 @@ static NphResult hit_events(NphPhysicsWorld *w)
             if ((contact->flags & PHYS_CONTACT_HIT_EVENTS) == 0U) {
                 continue;
             }
+            // One hit per pair: a mesh pair's fastest point over all its
+            // manifolds (its children have no events of their own).
             f32 best = w->hit_threshold;
+            const PhysContact *hit = NULL;
             u32 best_point = PHYS_NULL;
-            for (u32 k = 0U; k < contact->point_count; ++k) {
-                const PhysContactPoint *p = &contact->points[k];
-                const f32 approach = -p->relative_velocity;
-                if (approach > best && p->max_normal_impulse > 0.0F) {
-                    best = approach;
-                    best_point = k;
+            for (u32 r = list->data[i]; r != PHYS_NULL; r = w->contacts.data[r].child) {
+                const PhysContact *record = &w->contacts.data[r];
+                for (u32 k = 0U; k < record->point_count; ++k) {
+                    const PhysContactPoint *p = &record->points[k];
+                    const f32 approach = -p->relative_velocity;
+                    if (approach > best && p->max_normal_impulse > 0.0F) {
+                        best = approach;
+                        hit = record;
+                        best_point = k;
+                    }
                 }
             }
-            if (best_point == PHYS_NULL) {
+            if (hit == NULL) {
                 continue;
             }
             NphPhysicsContactHitEvent e;
             e.shape_a = phys_shape_handle(w, contact->shape_a);
             e.shape_b = phys_shape_handle(w, contact->shape_b);
             e.point = nph_dvec3_add_vec3(w->bodies.data[contact->body_a].center,
-                                         contact->points[best_point].anchor_a);
-            e.normal = contact->normal;
+                                         hit->points[best_point].anchor_a);
+            e.normal = hit->normal;
             e.approach_speed = best;
             NPH_TRY(NPH_ARRAY_PUSH(&w->hit_events, e));
         }

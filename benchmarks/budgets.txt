@@ -233,6 +233,15 @@ tree_move_10k                  5200
 tree_query_10k                 215
 tree_raycast_10k               2600
 tree_rebuild_10k               640
+# Meshes (ADR-0046): queries and collision per call; the build allocates
+# through the platform allocator (per triangle): 5x.
+mesh_build_grid_128            3450
+mesh_raycast_grid_128          435
+mesh_overlap_grid_128          456
+collide_mesh_box               24600
+collide_mesh_sphere            1920
+collide_mesh_capsule           5430
+collide_mesh_hull_32v          75000
 # World rows are per 240 Hz step. The _mt rows spin helper threads on the
 # job system: 5x, as the hosted runners have fewer cores.
 world_pyramid_20_st            1110000
@@ -240,6 +249,9 @@ world_pyramid_20_mt            700000
 world_pyramids_16_mt           4950000
 world_pile_1000_st             10200000
 world_pile_1000_mt             3300000
+world_mesh_pile_1000_st        13740000
+world_mesh_pile_1000_mt        3850000
+world_terrain_pile_1000_mt     4275000
 world_sleeping_10k             8400
 world_chains_st                1750000
 world_chains_mt                810000

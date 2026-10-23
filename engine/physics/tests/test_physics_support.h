@@ -11,6 +11,7 @@
 #include <nepheline/physics/collide.h>
 #include <nepheline/physics/geometry.h>
 #include <nepheline/physics/hull.h>
+#include <nepheline/physics/mesh.h>
 
 #include <ntest/ntest.h>
 
@@ -157,6 +158,71 @@ static inline f32 test_hull_surface_distance(const NphPhysicsHull *hull, NphVec3
         }
     }
     return best;
+}
+
+// ---------------------------------------------------------------------------
+// Meshes
+// ---------------------------------------------------------------------------
+
+static inline NphPhysicsMesh *test_mesh(NphAllocator *alloc, const NphVec3 *v, u32 nv,
+                                        const u32 *idx, u32 nt, bool two_sided)
+{
+    NphPhysicsMeshDesc d;
+    memset(&d, 0, sizeof d);
+    d.vertices = v;
+    d.vertex_count = nv;
+    d.indices = idx;
+    d.triangle_count = nt;
+    d.two_sided = two_sided ? 1 : 0;
+    NphPhysicsMesh *m = NULL;
+    NTEST_ASSERT_EQ_INT(nph_physics_mesh_build(&d, alloc, &m), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(m);
+    return m;
+}
+
+#define TEST_GRID_MAX 48U
+
+// An n by n grid of square cells `cell` metres wide from (x0, z0), facing
+// +Y, at heights `y` ((n + 1)^2 samples, x-major; NULL: the plane y = 0).
+// The cells' diagonals alternate, so seams run three ways and vertices join
+// four or eight triangles.
+static inline NphPhysicsMesh *test_grid_mesh(NphAllocator *alloc, u32 n, f32 cell, f32 x0, f32 z0,
+                                             const f32 *y, bool two_sided)
+{
+    static NphVec3 v[(TEST_GRID_MAX + 1U) * (TEST_GRID_MAX + 1U)];
+    static u32 idx[6U * TEST_GRID_MAX * TEST_GRID_MAX];
+    NTEST_ASSERT_TRUE(n <= TEST_GRID_MAX);
+    for (u32 i = 0U; i <= n; ++i) {
+        for (u32 j = 0U; j <= n; ++j) {
+            const u32 k = i * (n + 1U) + j;
+            v[k] = nph_vec3(x0 + (f32)i * cell, y != NULL ? y[k] : 0.0F, z0 + (f32)j * cell);
+        }
+    }
+    u32 k = 0U;
+    for (u32 i = 0U; i < n; ++i) {
+        for (u32 j = 0U; j < n; ++j) {
+            const u32 a = i * (n + 1U) + j; // (x, z)
+            const u32 b = a + 1U;           // (x, z + 1)
+            const u32 c = a + n + 1U;       // (x + 1, z)
+            const u32 d = c + 1U;           // (x + 1, z + 1)
+            const u32 quad[2][6] = {{a, b, c, c, b, d}, {a, d, c, a, b, d}};
+            for (u32 q = 0U; q < 6U; ++q) {
+                idx[k++] = quad[(i + j) & 1U][q];
+            }
+        }
+    }
+    return test_mesh(alloc, v, (n + 1U) * (n + 1U), idx, 2U * n * n, two_sided);
+}
+
+// A valley along Z, 4 m wide: two slopes at 45 degrees meeting at a concave
+// crease on the Z axis, facing up and in.
+static inline NphPhysicsMesh *test_valley_mesh(NphAllocator *alloc)
+{
+    const NphVec3 v[6] = {nph_vec3(-2.0F, 2.0F, -2.0F), nph_vec3(-2.0F, 2.0F, 2.0F),
+                          nph_vec3(0.0F, 0.0F, -2.0F),  nph_vec3(0.0F, 0.0F, 2.0F),
+                          nph_vec3(2.0F, 2.0F, -2.0F),  nph_vec3(2.0F, 2.0F, 2.0F)};
+    const u32 idx[12] = {0U, 1U, 2U, 2U, 1U, 3U, 2U, 3U, 4U, 4U, 3U, 5U};
+    return test_mesh(alloc, v, 6U, idx, 4U, false);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # 0046. Physics: triangle meshes and heightfields
 
 - **Date:** 2026-10-23
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-23); meshes built, heightfields to come
 
 ## Context
 
@@ -101,6 +101,72 @@ Three problems are particular to them:
     its shapes', and each shape has its own broadphase proxy and contacts. A
     compound shape type with its own tree (Jolt's, whose bodies hold one
     shape) is not needed while a body's shapes are counted in tens.
+
+## As built: meshes (2026-10-23)
+
+The mesh half is in the engine (`mesh.h`, `collide_mesh.c`, the world's
+child contacts; docs/physics.md "Meshes"); heightfields (§4) and the
+world's queries (§10's last sentence) follow. Building it refined the plan:
+
+- **Triangle contacts keep every clipped point** (up to sixteen), and each
+  merged manifold is reduced once: a box's face clipped to a triangle has
+  up to seven points, and reducing each triangle's contact to four before
+  merging lost corners of the whole contact.
+- **A corrected normal remakes the contact** (§5). A contact that takes
+  the face's normal is made again against the face along it, as Jolt's
+  manifold between two faces is: the shape's supporting feature clipped to
+  the triangle. A shape not over the face gets nothing from that triangle
+  (its neighbour carries it), and a remade contact deeper than the axis
+  test's by more than a slop is dropped (a box straddling a platform's
+  plane beside its open edge would be lifted onto it). Spheres and
+  capsules place their points under the core along the final normal, so
+  no point beside a rolling ball brakes it, and a sphere keeps one point
+  per manifold.
+- **Merging (§8) refined.** A contact joins the cluster whose first
+  member's normal agrees within 5 degrees; the cluster's normal is its
+  members' average, each weighted by its depth. The plan's deepest member's
+  normal flipped between neighbouring triangles' from step to step on
+  curved ground and rocked boxes that never slept. Copies of a point from
+  triangles either side of a seam (within 0.1 mm) are one point, and a
+  cluster of 32 points is compacted to its deepest and the extremes of its
+  touching points along eight directions and of its speculative points
+  along four.
+- **Touching points first**, in every manifold's reduction: points that
+  touch (within a tenth of a slop) are kept before speculative ones, and
+  four or more touching are the only candidates. Trading a supporting point
+  for one merely near the surface let boxes on a curved mesh rock between
+  two pairs of supports.
+- **Islands split by Box2D's rule.** An island that lost constraints is
+  split once any of its bodies is ready to sleep (the island whose body has
+  been still the longest, one a step). Waiting for every body, as before,
+  let one sliding off the edge of a terrain keep the pile it had left
+  awake: 38 of 40 boxes dropped on a terrain now sleep.
+- **Warm starting by place.** A point whose id changed takes the impulses
+  of an unclaimed old point within 1 cm on both bodies (Jolt's matching by
+  position, here behind the ids). The reduction's tie rule above made ids
+  flip between near-coincident clipped corners from step to step: a
+  settling column of ten boxes lost a twentieth of its warm starts and
+  drifted 2 to 5 mm aside (0.04 mm before the rule; 0.09 mm with the
+  fallback). In a mesh pair the old point's manifold must also face within
+  5 degrees of the new one's: a crease's two manifolds share a corner, and
+  on a terrain, impulses passed between manifolds 5 to 15 degrees apart
+  kept boxes creeping for seconds (36 of 40 asleep after 8 s, against 38).
+  A convex pair's one manifold needs no angle: the same limit there refused
+  tumbling limbs' contacts and sent a chaotic ragdoll pile three times
+  deeper into the floor at its worst. Carrying every warm start changed the
+  solver comparison's stacks (ADR-0045, re-measured).
+- **Child contacts as planned (§9)**, kept out of the pair map, the bodies'
+  contact lists, and the awake list: the parent's update writes every
+  record and carries impulses across all four. A pair reports at most one
+  hit a step, at the fastest-approaching point of any manifold.
+- **Known: rolling contacts lose support within a step.** A rolling
+  shape's contact anchors are material points, which rise off the surface
+  as the shape turns (r (ω h)² / 2 over the step), so the later substeps
+  find the contact apart, and a rolling ball's stored normal impulse is
+  zero with an end-of-step vertical velocity of −g h / 2 (Box2D v3 shares
+  this). At 240 Hz it is harmless (balls and capsules roll across seams
+  within 1 mm of height); re-anchoring rolling contacts each substep is a
+  follow-up for fast rollers.
 
 ## Alternatives considered
 

@@ -148,8 +148,15 @@ enum {
     PHYS_CHANGE_STARTED = 1U,
     PHYS_CHANGE_STOPPED = 2U,
     PHYS_CHANGE_DISJOINT = 4U,
+    PHYS_CHANGE_CHILDREN = 8U, // a mesh pair's child began or stopped touching
 };
 
+// A pair with a mesh keeps up to four manifolds (ADR-0046 §9): the pair's
+// contact holds the deepest, and a chain of three child contacts, made and
+// destroyed with it, the rest. A child is a contact to the constraint graph
+// and the solver only: no pair entry, no place in its bodies' lists or the
+// awake list, no events. The pair's narrow phase writes its children, and
+// the serial update after it brings their graph membership along.
 typedef struct PhysContact {
     u32 shape_a; // slots
     u32 shape_b;
@@ -157,6 +164,8 @@ typedef struct PhysContact {
     u32 body_b;
     u32 flags;  // PHYS_CONTACT_*
     u32 change; // PHYS_CHANGE_*, written by the narrow phase
+    u32 parent; // a child's pair contact; PHYS_NULL for a pair's own
+    u32 child;  // the chain's next record (a pair's first child), or PHYS_NULL
     // The bodies' contact lists: keys (contact << 1 | side).
     u32 prev[2];
     u32 next[2];
@@ -485,6 +494,7 @@ struct NphPhysicsWorld {
     PhysShapeArray shapes;
     PhysContactArray contacts;
     NphArrayU32 free_contacts;
+    u32 child_contacts; // live children of mesh pairs (contacts less pairs)
     PhysSlots joint_slots;
     PhysJointArray joints;
     PhysIslandArray islands;

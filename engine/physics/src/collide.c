@@ -71,92 +71,127 @@ static f32 signed_area(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 normal)
 // Points within this of the deepest are as deep (a flat contact's points
 // differ by rounding).
 #define REDUCE_DEPTH_TIE (0.1F * NPH_PHYSICS_LINEAR_SLOP)
+#define REDUCE_TOUCH     NPH_PHYSICS_TOUCH_SEPARATION
+
+static f32 plane_distance_sq(NphVec3 a, NphVec3 b, NphVec3 normal)
+{
+    return nph_vec3_length_sq(nph_vec3_reject(nph_vec3_sub(a, b), normal));
+}
+
+static void swap_points(NphPhysicsManifoldPoint *points, u32 i, u32 j)
+{
+    const NphPhysicsManifoldPoint t = points[i];
+    points[i] = points[j];
+    points[j] = t;
+}
 
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal)
 {
     if (count <= NPH_PHYSICS_MANIFOLD_MAX_POINTS) {
         return count;
     }
-    // 1. The deepest point: it carries the most load. Of points as deep, the
+    // Each point kept is swapped to the front: points[0, k) are kept and
+    // points[k, end) are the candidates.
+    //
+    // The touching points stay before any speculative one: giving up a point
+    // that carries load for a far one only near the surface lets the shape
+    // rock (a box on a curved mesh rocked between two pairs of supports and
+    // never slept). With four or more touching, the choice is among them.
+    u32 touching = 0U;
+    for (u32 i = 0U; i < count; ++i) {
+        if (points[i].separation <= REDUCE_TOUCH) {
+            if (i != touching) {
+                swap_points(points, i, touching);
+            }
+            touching += 1U;
+        }
+    }
+    u32 k = 0U;
+    u32 end = count;
+    if (touching >= NPH_PHYSICS_MANIFOLD_MAX_POINTS) {
+        end = touching;
+    } else {
+        k = touching;
+    }
+    // The rest in Gregorius's order (2015). Every step has a candidate:
+    // more than four points remain, or four or more touch.
+    // 1. The deepest: it carries the most load. Of the points as deep, the
     // one farthest from their centre in the contact plane: a corner of the
     // contact, not a point inside it (a mesh's seams cross a box's face at
     // its depth).
-    f32 deepest = points[0].separation;
-    NphVec3 centre = points[0].point;
-    for (u32 i = 1U; i < count; ++i) {
-        deepest = nph_f32_min(deepest, points[i].separation);
-        centre = nph_vec3_add(centre, points[i].point);
-    }
-    centre = nph_vec3_scale(centre, 1.0F / (f32)count);
-    u32 i0 = 0U;
-    f32 farthest = -1.0F;
-    for (u32 i = 0U; i < count; ++i) {
-        const f32 dd =
-            nph_vec3_length_sq(nph_vec3_reject(nph_vec3_sub(points[i].point, centre), normal));
-        if (points[i].separation <= deepest + REDUCE_DEPTH_TIE && dd > farthest) {
-            farthest = dd;
-            i0 = i;
+    if (k == 0U) {
+        f32 deepest = points[0].separation;
+        NphVec3 centre = points[0].point;
+        for (u32 i = 1U; i < end; ++i) {
+            deepest = nph_f32_min(deepest, points[i].separation);
+            centre = nph_vec3_add(centre, points[i].point);
         }
+        centre = nph_vec3_scale(centre, 1.0F / (f32)end);
+        u32 best = 0U;
+        f32 far = -1.0F;
+        for (u32 i = 0U; i < end; ++i) {
+            const f32 dd = plane_distance_sq(points[i].point, centre, normal);
+            if (points[i].separation <= deepest + REDUCE_DEPTH_TIE && dd > far) {
+                far = dd;
+                best = i;
+            }
+        }
+        swap_points(points, 0U, best);
+        k = 1U;
     }
     // 2. The farthest from it in the contact plane.
-    const NphVec3 p0 = points[i0].point;
-    u32 i1 = i0 == 0U ? 1U : 0U;
-    f32 best = -1.0F;
-    for (u32 i = 0U; i < count; ++i) {
-        const NphVec3 d = nph_vec3_reject(nph_vec3_sub(points[i].point, p0), normal);
-        const f32 dd = nph_vec3_length_sq(d);
-        if (i != i0 && dd > best) {
-            best = dd;
-            i1 = i;
+    if (k == 1U) {
+        const NphVec3 p0 = points[0].point;
+        u32 best = 1U;
+        f32 far = -1.0F;
+        for (u32 i = 1U; i < end; ++i) {
+            const f32 dd = plane_distance_sq(points[i].point, p0, normal);
+            if (dd > far) {
+                far = dd;
+                best = i;
+            }
         }
+        swap_points(points, 1U, best);
+        k = 2U;
     }
-    // 3. The largest triangle with both; the sign fixes the winding.
-    const NphVec3 p1 = points[i1].point;
-    u32 i2 = NPH_U32_MAX;
-    f32 best_area = 0.0F;
-    f32 area_sign = 1.0F;
-    for (u32 i = 0U; i < count; ++i) {
-        if (i == i0 || i == i1) {
-            continue;
+    // 3. The largest triangle with both. Points along a line (a capsule or
+    // a box's edge lying across a mesh's triangles) make none: the line's
+    // two ends are the contact.
+    if (k == 2U) {
+        const NphVec3 p0 = points[0].point;
+        const NphVec3 p1 = points[1].point;
+        u32 best = 2U;
+        f32 best_area = -1.0F;
+        for (u32 i = 2U; i < end; ++i) {
+            const f32 a = nph_f32_abs(signed_area(p0, p1, points[i].point, normal));
+            if (a > best_area) {
+                best_area = a;
+                best = i;
+            }
         }
-        const f32 area = signed_area(p0, p1, points[i].point, normal);
-        if (i2 == NPH_U32_MAX || nph_f32_abs(area) > best_area) {
-            best_area = nph_f32_abs(area);
-            area_sign = area < 0.0F ? -1.0F : 1.0F;
-            i2 = i;
+        if (best_area <= 1e-3F * plane_distance_sq(p0, p1, normal)) {
+            return 2U;
         }
+        swap_points(points, 2U, best);
     }
-    // Points along a line (a capsule or a box's edge lying across a mesh's
-    // triangles) make no triangle: the line's two ends are the contact (p0
-    // is one of them, the farthest from the centre, and p1 the other).
-    if (best_area <= 1e-3F * best) {
-        const NphPhysicsManifoldPoint ends[2] = {points[i0], points[i1]};
-        points[0] = ends[0];
-        points[1] = ends[1];
-        return 2U;
-    }
-    // 4. The point farthest outside the triangle: it adds the most area.
-    const NphVec3 p2 = points[i2].point;
-    u32 i3 = NPH_U32_MAX;
-    f32 best_out = 0.0F;
-    for (u32 i = 0U; i < count; ++i) {
-        if (i == i0 || i == i1 || i == i2) {
-            continue;
-        }
+    // 4. The point farthest outside that triangle: it adds the most area.
+    const NphVec3 p0 = points[0].point;
+    const NphVec3 p1 = points[1].point;
+    const NphVec3 p2 = points[2].point;
+    const f32 sign = signed_area(p0, p1, p2, normal) < 0.0F ? -1.0F : 1.0F;
+    u32 best = 3U;
+    f32 best_out = -FLT_MAX;
+    for (u32 i = 3U; i < end; ++i) {
         const NphVec3 p = points[i].point;
-        const f32 a01 = area_sign * signed_area(p0, p1, p, normal);
-        const f32 a12 = area_sign * signed_area(p1, p2, p, normal);
-        const f32 a20 = area_sign * signed_area(p2, p0, p, normal);
-        const f32 outside = -nph_f32_min3(a01, a12, a20);
-        if (i3 == NPH_U32_MAX || outside > best_out) {
-            best_out = outside;
-            i3 = i;
+        const f32 out = -nph_f32_min3(sign * signed_area(p0, p1, p, normal),
+                                      sign * signed_area(p1, p2, p, normal),
+                                      sign * signed_area(p2, p0, p, normal));
+        if (out > best_out) {
+            best_out = out;
+            best = i;
         }
     }
-    const NphPhysicsManifoldPoint kept[4] = {points[i0], points[i1], points[i2], points[i3]};
-    for (u32 i = 0U; i < 4U; ++i) {
-        points[i] = kept[i];
-    }
+    swap_points(points, 3U, best);
     return 4U;
 }
 
@@ -347,7 +382,7 @@ static void collide_box_sphere(const NphPhysicsBox *a, NphPhysicsPose pa, f32 rb
 
 bool nph_physics_collide_supported(NphPhysicsShapeType a, NphPhysicsShapeType b)
 {
-    return (u32)a < (u32)NPH_PHYSICS_SHAPE_TYPE_COUNT && (u32)b < (u32)NPH_PHYSICS_SHAPE_TYPE_COUNT;
+    return nph_physics_shape_type_is_convex(a) && nph_physics_shape_type_is_convex(b);
 }
 
 static NphHullView view_of(const NphPhysicsGeometry *g, NphBoxViewStorage *storage)
@@ -399,6 +434,7 @@ static void collide_ordered(const NphPhysicsGeometry *a, NphPhysicsPose pa,
         }
         return;
     }
+    case NPH_PHYSICS_SHAPE_MESH: // nph_physics_collide_mesh
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;

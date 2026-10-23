@@ -87,8 +87,8 @@ typedef struct NphPhysicsCollideCache {
 
 NPH_STATIC_ASSERT(sizeof(NphPhysicsCollideCache) == 8U, "the collision cache is eight bytes");
 
-// True when nph_physics_collide handles the pair (every pair of the shape
-// types in geometry.h).
+// True when nph_physics_collide handles the pair: every pair of convex types
+// (geometry.h). A convex shape meets a mesh through nph_physics_collide_mesh.
 bool nph_physics_collide_supported(NphPhysicsShapeType a, NphPhysicsShapeType b);
 
 // The contact manifold of `a` at `pose_a` and `b` at `pose_b`: points whose
@@ -102,10 +102,15 @@ void nph_physics_collide(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
                          NphPhysicsManifold *out);
 
 // Reduces `count` candidate points to at most four, in place, and returns
-// how many remain: the deepest, the one farthest from it, the one that makes
-// the largest triangle with both, and the one that adds the most area beyond
-// that triangle (Gregorius 2015). Areas are measured in the plane
-// perpendicular to `normal`. Counts of four or fewer are left unchanged.
+// how many remain. Points that touch (separation at most a tenth of the
+// linear slop) come before speculative ones: fewer than four are all kept,
+// and the rest is chosen from the others; four or more are the only
+// candidates. The choice follows Gregorius (2015): the deepest (of equals,
+// the one farthest from their centre), the one farthest from it, the one
+// that makes the largest triangle with both, and the one that adds the most
+// area beyond that triangle. Areas are measured in the plane perpendicular
+// to `normal`; points along a line keep its two ends. Counts of four or
+// fewer are left unchanged.
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal);
 
 // ---------------------------------------------------------------------------

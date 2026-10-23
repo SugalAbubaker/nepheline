@@ -50,6 +50,7 @@ nph_add_test(physics
         tests/test_ragdoll.c
         tests/test_solvers.c
         tests/test_world.c
+        tests/test_world_mesh.c
         tests/test_world_support.h
     DEPS
         nph::physics

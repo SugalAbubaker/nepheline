@@ -80,6 +80,23 @@ static inline void step(NphPhysicsWorld *w, NphJobSystem *js, u32 steps)
     }
 }
 
+// Makes the narrow phase find no point of the awake contacts (and their
+// mesh pairs' children) under its last id: every stored point's id is
+// scrambled, and its anchors moved by `offset` on both bodies.
+static inline void scramble_contact_points(NphPhysicsWorld *w, NphVec3 offset)
+{
+    for (u32 i = 0U; i < w->awake_contacts.len; ++i) {
+        for (u32 k = w->awake_contacts.data[i]; k != PHYS_NULL; k = w->contacts.data[k].child) {
+            PhysContact *c = &w->contacts.data[k];
+            for (u32 j = 0U; j < c->point_count; ++j) {
+                c->points[j].id ^= 0x5A5A5A5AU;
+                c->points[j].anchor_a = nph_vec3_add(c->points[j].anchor_a, offset);
+                c->points[j].anchor_b = nph_vec3_add(c->points[j].anchor_b, offset);
+            }
+        }
+    }
+}
+
 static inline NphJobSystem *make_jobs(u32 workers)
 {
     NphJobSystemDesc d;

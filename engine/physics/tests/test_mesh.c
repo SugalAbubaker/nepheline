@@ -46,7 +46,7 @@ static void make_grid(u32 n, f32 cell, NphVec3 *v, u32 *idx)
             const u32 p01 = p00 + n + 1U;
             const u32 p11 = p01 + 1U;
             const u32 tris[6] = {p00, p01, p11, p00, p11, p10};
-            memcpy(&idx[6U * t], tris, sizeof tris);
+            memcpy(&idx[6ULL * t], tris, sizeof tris);
             t += 1U;
         }
     }
@@ -293,7 +293,7 @@ NTEST(mesh, a_large_grid_builds_a_shallow_valid_tree)
     const u32 nv = (n + 1U) * (n + 1U);
     const u32 nt = 2U * n * n;
     NphVec3 *v = NPH_ALLOC_ARRAY(alloc, NphVec3, nv);
-    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, 3U * nt);
+    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, 3ULL * nt);
     NTEST_ASSERT_NOT_NULL(v);
     NTEST_ASSERT_NOT_NULL(idx);
     make_grid(n, 0.5F, v, idx);
@@ -306,7 +306,7 @@ NTEST(mesh, a_large_grid_builds_a_shallow_valid_tree)
     NTEST_LOG("%u triangles: %u nodes, %u bytes", nt, m->node_count, m->byte_size);
     nph_physics_mesh_free(m, alloc);
     NPH_FREE_ARRAY(alloc, NphVec3, v, nv);
-    NPH_FREE_ARRAY(alloc, u32, idx, 3U * nt);
+    NPH_FREE_ARRAY(alloc, u32, idx, 3ULL * nt);
     test_alloc_end(&ta);
 }
 
@@ -320,8 +320,8 @@ NTEST(mesh, a_large_grid_builds_a_shallow_valid_tree)
 static NphPhysicsMesh *soup(NphAllocator *alloc, u64 seed, bool two_sided)
 {
     NphPcg32 r = test_rng(seed);
-    NphVec3 *v = NPH_ALLOC_ARRAY(alloc, NphVec3, 3U * SOUP);
-    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, 3U * SOUP);
+    NphVec3 *v = NPH_ALLOC_ARRAY(alloc, NphVec3, 3ULL * SOUP);
+    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, 3ULL * SOUP);
     NTEST_ASSERT_NOT_NULL(v);
     NTEST_ASSERT_NOT_NULL(idx);
     for (u32 t = 0U; t < SOUP; ++t) {
@@ -332,8 +332,8 @@ static NphPhysicsMesh *soup(NphAllocator *alloc, u64 seed, bool two_sided)
         }
     }
     NphPhysicsMesh *m = build_mesh(alloc, v, 3U * SOUP, idx, SOUP, -1.0F, two_sided);
-    NPH_FREE_ARRAY(alloc, NphVec3, v, 3U * SOUP);
-    NPH_FREE_ARRAY(alloc, u32, idx, 3U * SOUP);
+    NPH_FREE_ARRAY(alloc, NphVec3, v, 3ULL * SOUP);
+    NPH_FREE_ARRAY(alloc, u32, idx, 3ULL * SOUP);
     return m;
 }
 
@@ -389,9 +389,11 @@ NTEST(mesh, overlap_finds_what_brute_force_finds)
 // An independent reference: Moller and Trumbore's test in 64 bits.
 static f64 reference_hit(NphVec3 o, NphVec3 d, const NphVec3 p[3], bool two_sided, bool *back)
 {
-    const f64 e1[3] = {(f64)p[1].x - p[0].x, (f64)p[1].y - p[0].y, (f64)p[1].z - p[0].z};
-    const f64 e2[3] = {(f64)p[2].x - p[0].x, (f64)p[2].y - p[0].y, (f64)p[2].z - p[0].z};
-    const f64 dv[3] = {d.x, d.y, d.z};
+    const f64 e1[3] = {(f64)p[1].x - (f64)p[0].x, (f64)p[1].y - (f64)p[0].y,
+                       (f64)p[1].z - (f64)p[0].z};
+    const f64 e2[3] = {(f64)p[2].x - (f64)p[0].x, (f64)p[2].y - (f64)p[0].y,
+                       (f64)p[2].z - (f64)p[0].z};
+    const f64 dv[3] = {(f64)d.x, (f64)d.y, (f64)d.z};
     const f64 pv[3] = {dv[1] * e2[2] - dv[2] * e2[1], dv[2] * e2[0] - dv[0] * e2[2],
                        dv[0] * e2[1] - dv[1] * e2[0]};
     const f64 det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
@@ -402,7 +404,7 @@ static f64 reference_hit(NphVec3 o, NphVec3 d, const NphVec3 p[3], bool two_side
     if (*back && !two_sided) {
         return -1.0;
     }
-    const f64 tv[3] = {(f64)o.x - p[0].x, (f64)o.y - p[0].y, (f64)o.z - p[0].z};
+    const f64 tv[3] = {(f64)o.x - (f64)p[0].x, (f64)o.y - (f64)p[0].y, (f64)o.z - (f64)p[0].z};
     const f64 u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) / det;
     if (u < 0.0 || u > 1.0) {
         return -1.0;

@@ -47,8 +47,8 @@
 // to rounding. (Wider would merge a corner into a crossing just beside it,
 // and the corner's place is the one that matters.)
 #define MERGE_DISTANCE 1e-4F
-// A merged manifold gathers this many points before it is reduced to four.
-#define CLUSTER_POINTS (4U * NPH_PHYSICS_MANIFOLD_MAX_POINTS)
+// A merged manifold gathers this many points before it is compacted.
+#define CLUSTER_POINTS (8U * NPH_PHYSICS_MANIFOLD_MAX_POINTS)
 // The normals followed at once; past them, the shallowest gives way.
 #define MAX_CLUSTERS 8U
 // A capsule's face contact wins over its nearest edge unless the edge is
@@ -609,17 +609,12 @@ static void probe_triangle(const Probe *p, const Tri *t, f32 speculative, NphTri
     }
 }
 
-static bool convex_type(NphPhysicsShapeType type)
-{
-    return (u32)type <= (u32)NPH_PHYSICS_SHAPE_HULL;
-}
-
 void nph_physics_collide_triangle(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
                                   const NphPhysicsTriangle *t, f32 speculative_distance,
                                   NphPhysicsManifold *out)
 {
     NPH_ASSERT(a != NULL && t != NULL && out != NULL);
-    NPH_ASSERT(convex_type(a->type));
+    NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
     nph_physics_manifold_clear(out);
     Probe p;
     probe_init(&p, a, pose_a.rotation);
@@ -647,9 +642,18 @@ void nph_physics_collide_triangle(const NphPhysicsGeometry *a, NphPhysicsPose po
 // Meshes: every triangle under the shape, the manifolds merged by normal
 // ---------------------------------------------------------------------------
 
-// Manifolds merged into one: the normal and depth of the deepest so far.
+// Manifolds merged into one. A triangle joins the first whose first
+// member's normal is within 5 degrees of its own: a test against fixed
+// geometry, so a resting body's triangles group the same way every step.
+// The normal is the average of the members', each weighted by how near it
+// comes (nothing at the speculative distance, more the deeper it reaches),
+// so it turns smoothly as a body rocks and as triangles come and go. (The
+// deepest member's normal jumps between two members about as deep, step
+// after step: a box on a curved terrain rocked on it and never slept.)
 typedef struct Cluster {
-    NphVec3 normal; // from the shape towards the mesh
+    NphVec3 first;  // the first member's normal, for membership
+    NphVec3 normal; // from the shape towards the mesh: the sum's direction
+    NphVec3 sum;    // the members' weighted normals
     f32 depth;      // the least separation
     u32 count;
     NphPhysicsManifoldPoint points[CLUSTER_POINTS];
@@ -676,11 +680,13 @@ static const f32 k_compact[8][2] = {
     {-1.0F, 0.0F}, {-0.70710678F, -0.70710678F}, {0.0F, -1.0F}, {0.70710678F, -0.70710678F},
 };
 
-// Compacts a full cluster to the points the final reduction can want: the
-// deepest, and the farthest along eight directions in the contact plane, in
-// their order. Reducing to four as it fills would lose corners for good:
-// four of the first sixteen points need not hold a corner of the whole
-// contact (a box over a fine mesh brings dozens).
+// Compacts a full cluster to the points the final reduction can want, in
+// their order: the deepest; of the touching points, the farthest along
+// eight directions in the contact plane; of the speculative ones, along
+// four. Reducing to four as it fills would lose corners for good (four of
+// the first sixteen points need not hold a corner of the whole contact: a
+// box over a fine mesh brings dozens), and keeping extremes alone, touching
+// or not, gave a supporting point's place to a far speculative one.
 static void cluster_compact(Cluster *c)
 {
     const NphVec3 t1 = nph_vec3_perpendicular(c->normal);
@@ -694,19 +700,25 @@ static void cluster_compact(Cluster *c)
         }
     }
     keep[deepest] = true;
-    for (u32 k = 0U; k < 8U; ++k) {
-        const NphVec3 dir =
-            nph_vec3_add(nph_vec3_scale(t1, k_compact[k][0]), nph_vec3_scale(t2, k_compact[k][1]));
-        u32 far = 0U;
-        f32 far_d = nph_vec3_dot(c->points[0].point, dir);
-        for (u32 i = 1U; i < c->count; ++i) {
-            const f32 d = nph_vec3_dot(c->points[i].point, dir);
-            if (d > far_d) {
-                far_d = d;
-                far = i;
+    for (u32 pass = 0U; pass < 2U; ++pass) {
+        const bool touching = pass == 0U;
+        for (u32 k = 0U; k < 8U; k += touching ? 1U : 2U) {
+            const NphVec3 dir = nph_vec3_add(nph_vec3_scale(t1, k_compact[k][0]),
+                                             nph_vec3_scale(t2, k_compact[k][1]));
+            u32 far = NPH_U32_MAX;
+            f32 far_d = -FLT_MAX;
+            for (u32 i = 0U; i < c->count; ++i) {
+                const f32 d = nph_vec3_dot(c->points[i].point, dir);
+                if ((c->points[i].separation <= NPH_PHYSICS_TOUCH_SEPARATION) == touching &&
+                    d > far_d) {
+                    far_d = d;
+                    far = i;
+                }
+            }
+            if (far != NPH_U32_MAX) {
+                keep[far] = true;
             }
         }
-        keep[far] = true;
     }
     u32 n = 0U;
     for (u32 i = 0U; i < c->count; ++i) {
@@ -725,7 +737,7 @@ static void cluster_add(MeshQuery *q, const NphTriangleContact *m, u32 triangle)
     }
     Cluster *c = NULL;
     for (u32 k = 0U; k < q->cluster_count; ++k) {
-        if (nph_vec3_dot(q->clusters[k].normal, m->normal) >= MERGE_COS) {
+        if (nph_vec3_dot(q->clusters[k].first, m->normal) >= MERGE_COS) {
             c = &q->clusters[k];
             break;
         }
@@ -746,16 +758,17 @@ static void cluster_add(MeshQuery *q, const NphTriangleContact *m, u32 triangle)
             }
             c = &q->clusters[s];
         }
-        c->normal = m->normal;
+        c->first = m->normal;
+        c->sum = nph_vec3_zero();
         c->depth = depth;
         c->count = 0U;
-    } else if (depth < c->depth) {
-        c->normal = m->normal;
-        c->depth = depth;
     }
+    c->sum = nph_vec3_mul_add(c->sum, m->normal, nph_f32_max(q->speculative - depth, 0.0F) + 1e-6F);
+    c->normal = nph_vec3_normalize_or(c->sum, m->normal);
+    c->depth = nph_f32_min(c->depth, depth);
     if (q->single) {
         // A sphere touches a surface at one point: the deepest (the first
-        // of equals). The others lie under its centre too (round_point).
+        // of equals), placed again along the merged normal at the end.
         if (c->count == 0U || m->points[0].separation < c->points[0].separation) {
             c->points[0] = m->points[0];
             c->points[0].id = nph_physics_mix_id(triangle, m->points[0].id);
@@ -814,7 +827,7 @@ void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotatio
                                     NphPhysicsMeshManifolds *out)
 {
     NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
-    NPH_ASSERT(convex_type(a->type));
+    NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
     out->count = 0U;
     MeshQuery q;
     q.vertices = nph_physics_mesh_vertices(mesh);
@@ -855,6 +868,12 @@ void nph_physics_collide_mesh_local(const NphPhysicsGeometry *a, NphQuat rotatio
         m->point_count = c->count;
         for (u32 j = 0U; j < c->count; ++j) {
             m->points[j] = c->points[j];
+        }
+        if (q.single) {
+            // The sphere's point under its centre along the merged normal:
+            // its push passes through the centre.
+            const f32 sep = m->points[0].separation;
+            m->points[0].point = nph_vec3_scale(m->normal, q.probe.radius + 0.5F * sep);
         }
     }
     out->count = keep;
