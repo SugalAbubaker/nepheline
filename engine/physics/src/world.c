@@ -88,9 +88,9 @@ NphPhysicsWorldDesc nph_physics_world_desc_default(void)
     memset(&d, 0, sizeof d);
     d.gravity = nph_vec3(0.0F, -9.81F, 0.0F);
     d.substeps = 4U;
-    d.contact_hertz = 120.0F;
+    d.contact_hertz = 0.0F; // an eighth of the substep rate
     d.contact_damping_ratio = 10.0F;
-    d.joint_hertz = 240.0F;
+    d.joint_hertz = 0.0F; // a quarter of the substep rate
     d.joint_damping_ratio = 2.0F;
     d.contact_push_max_velocity = 3.0F;
     d.restitution_threshold = 1.0F;
@@ -111,9 +111,10 @@ static bool finite_nonneg(f32 v)
 NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWorld **out)
 {
     if (desc == NULL || out == NULL || desc->alloc == NULL || desc->substeps == 0U ||
-        desc->substeps > 64U || !nph_vec3_is_finite(desc->gravity) ||
-        !finite_nonneg(desc->contact_hertz) || !finite_nonneg(desc->contact_damping_ratio) ||
-        !finite_nonneg(desc->joint_hertz) || !finite_nonneg(desc->joint_damping_ratio) ||
+        (u32)desc->solver >= (u32)NPH_PHYSICS_SOLVER_COUNT || desc->substeps > 64U ||
+        !nph_vec3_is_finite(desc->gravity) || !finite_nonneg(desc->contact_hertz) ||
+        !finite_nonneg(desc->contact_damping_ratio) || !finite_nonneg(desc->joint_hertz) ||
+        !finite_nonneg(desc->joint_damping_ratio) ||
         !finite_nonneg(desc->contact_push_max_velocity) ||
         !finite_nonneg(desc->restitution_threshold) || !(desc->max_linear_speed > 0.0F) ||
         !nph_f32_is_finite(desc->max_linear_speed) || !finite_nonneg(desc->time_to_sleep)) {
@@ -152,6 +153,7 @@ NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWo
     NPH_ARRAY_INIT(&w->pair_buffer, alloc);
     NPH_ARRAY_INIT(&w->overflow, alloc);
     NPH_ARRAY_INIT(&w->solver_bodies, alloc);
+    NPH_ARRAY_INIT(&w->solver_prev, alloc);
     NPH_ARRAY_INIT(&w->solver_params, alloc);
     NPH_ARRAY_INIT(&w->groups, alloc);
     NPH_ARRAY_INIT(&w->points, alloc);
@@ -233,6 +235,7 @@ void nph_physics_world_destroy(NphPhysicsWorld *world)
     NPH_ARRAY_FREE(&world->pair_buffer);
     NPH_ARRAY_FREE(&world->overflow);
     NPH_ARRAY_FREE(&world->solver_bodies);
+    NPH_ARRAY_FREE(&world->solver_prev);
     NPH_ARRAY_FREE(&world->solver_params);
     NPH_ARRAY_FREE(&world->groups);
     NPH_ARRAY_FREE(&world->points);

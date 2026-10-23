@@ -241,8 +241,22 @@ world_pyramids_16_mt           4950000
 world_pile_1000_st             10200000
 world_pile_1000_mt             3300000
 world_sleeping_10k             8400
-world_chains_st                1700000
+world_chains_st                1750000
 world_chains_mt                810000
+# The other solvers (ADR-0045): TGS and XPBD at 4 substeps, the soft step
+# at 8, XPBD at 16.
+world_pyramid_20_st_tgs        1050000
+world_pyramid_20_st_xpbd       1460000
+world_pile_1000_mt_tgs         2960000
+world_pile_1000_mt_xpbd        3120000
+world_chains_st_tgs            1460000
+world_chains_st_xpbd           1340000
+world_pyramid_20_st_soft8      1570000
+world_pyramid_20_st_xpbd16     2670000
+world_pile_1000_mt_soft8       5640000
+world_pile_1000_mt_xpbd16      7100000
+world_chains_st_soft8          3120000
+world_chains_st_xpbd16         4400000
 
 # profile_bench
 profile_zone_enabled           55

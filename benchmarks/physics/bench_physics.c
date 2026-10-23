@@ -503,6 +503,9 @@ NBENCH(tree_rebuild_10k)
 //   world_sleeping_10k       10k sleeping boxes and one awake ball
 //   world_chains_st          16 chains of 25 ball-jointed links swinging, one thread
 //   world_chains_mt          the same on the job system
+//   *_tgs, *_xpbd            the pyramid, the pile, and the chains with the other
+//                            candidate solvers of the §13 comparison (ADR-0045)
+//   *_soft8, *_xpbd16        the soft step at 8 substeps, XPBD at 16
 // ---------------------------------------------------------------------------
 
 #include <nepheline/jobs/jobs.h>
@@ -517,9 +520,11 @@ NBENCH(tree_rebuild_10k)
 // sanitizer: the scenes shrink tenfold (their numbers are only recorded
 // from Profile builds).
 #if NPH_CONFIG_DEBUG
-#define WORLD_SCALE 10U
+#define WORLD_SCALE  10U
+#define PYRAMID_ROWS 10U
 #else
-#define WORLD_SCALE 1U
+#define WORLD_SCALE  1U
+#define PYRAMID_ROWS 20U
 #endif
 
 static NphJobSystem *bench_jobs(void)
@@ -536,11 +541,23 @@ static NphJobSystem *bench_jobs(void)
     return js;
 }
 
-static NphPhysicsWorld *bench_world(bool sleep)
+// A solver of the §13 comparison and its substeps (0: the default).
+typedef struct BenchSolver {
+    NphPhysicsSolver solver;
+    u32 substeps;
+} BenchSolver;
+
+static const BenchSolver k_soft = {NPH_PHYSICS_SOLVER_SOFT_STEP, 0U};
+
+static NphPhysicsWorld *bench_world(bool sleep, BenchSolver solver)
 {
     NphPhysicsWorldDesc d = nph_physics_world_desc_default();
     d.alloc = nph_allocator_system();
     d.enable_sleep = sleep ? 1 : 0;
+    d.solver = solver.solver;
+    if (solver.substeps != 0U) {
+        d.substeps = solver.substeps;
+    }
     NphPhysicsWorld *w = NULL;
     if (nph_physics_world_create(&d, &w) != NPH_RESULT_OK) {
         return NULL;
@@ -577,9 +594,9 @@ static void bench_steps(NphPhysicsWorld *w, NphJobSystem *js, u32 n)
     }
 }
 
-static NphPhysicsWorld *pyramids(u32 rows, u32 copies)
+static NphPhysicsWorld *pyramids(u32 rows, u32 copies, BenchSolver solver)
 {
-    NphPhysicsWorld *w = bench_world(false);
+    NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
         return NULL;
     }
@@ -612,22 +629,23 @@ static void bench_world_steps(NbenchState *state, NphPhysicsWorld *w, NphJobSyst
 
 NBENCH(world_pyramid_20_st)
 {
-    bench_world_steps(state, pyramids(20U, 1U), NULL);
+    bench_world_steps(state, pyramids(PYRAMID_ROWS, 1U, k_soft), NULL);
 }
 
 NBENCH(world_pyramid_20_mt)
 {
-    bench_world_steps(state, pyramids(20U, 1U), bench_jobs());
+    bench_world_steps(state, pyramids(PYRAMID_ROWS, 1U, k_soft), bench_jobs());
 }
 
 NBENCH(world_pyramids_16_mt)
 {
-    bench_world_steps(state, pyramids(20U, 16U / (WORLD_SCALE > 1U ? 8U : 1U)), bench_jobs());
+    bench_world_steps(state, pyramids(PYRAMID_ROWS, 16U / (WORLD_SCALE > 1U ? 8U : 1U), k_soft),
+                      bench_jobs());
 }
 
-static void bench_pile(NbenchState *state, NphJobSystem *js)
+static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
 {
-    NphPhysicsWorld *w = bench_world(false);
+    NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
         return;
     }
@@ -665,17 +683,17 @@ static void bench_pile(NbenchState *state, NphJobSystem *js)
 
 NBENCH(world_pile_1000_st)
 {
-    bench_pile(state, NULL);
+    bench_pile(state, NULL, k_soft);
 }
 
 NBENCH(world_pile_1000_mt)
 {
-    bench_pile(state, bench_jobs());
+    bench_pile(state, bench_jobs(), k_soft);
 }
 
 NBENCH(world_sleeping_10k)
 {
-    NphPhysicsWorld *w = bench_world(true);
+    NphPhysicsWorld *w = bench_world(true, k_soft);
     if (w == NULL) {
         return;
     }
@@ -706,9 +724,9 @@ NBENCH(world_sleeping_10k)
 
 // Sixteen chains of 25 capsule links, released sideways: they swing for the
 // whole run (400 joints, sleep off).
-static void bench_chains(NbenchState *state, NphJobSystem *js)
+static void bench_chains(NbenchState *state, NphJobSystem *js, BenchSolver solver)
 {
-    NphPhysicsWorld *w = bench_world(false);
+    NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
         return;
     }
@@ -753,10 +771,74 @@ static void bench_chains(NbenchState *state, NphJobSystem *js)
 
 NBENCH(world_chains_st)
 {
-    bench_chains(state, NULL);
+    bench_chains(state, NULL, k_soft);
 }
 
 NBENCH(world_chains_mt)
 {
-    bench_chains(state, bench_jobs());
+    bench_chains(state, bench_jobs(), k_soft);
+}
+
+NBENCH(world_pyramid_20_st_tgs)
+{
+    bench_world_steps(state, pyramids(PYRAMID_ROWS, 1U, (BenchSolver){NPH_PHYSICS_SOLVER_TGS, 0U}),
+                      NULL);
+}
+
+NBENCH(world_pyramid_20_st_xpbd)
+{
+    bench_world_steps(state, pyramids(PYRAMID_ROWS, 1U, (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 0U}),
+                      NULL);
+}
+
+NBENCH(world_pile_1000_mt_tgs)
+{
+    bench_pile(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_TGS, 0U});
+}
+
+NBENCH(world_pile_1000_mt_xpbd)
+{
+    bench_pile(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 0U});
+}
+
+NBENCH(world_chains_st_tgs)
+{
+    bench_chains(state, NULL, (BenchSolver){NPH_PHYSICS_SOLVER_TGS, 0U});
+}
+
+NBENCH(world_chains_st_xpbd)
+{
+    bench_chains(state, NULL, (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 0U});
+}
+
+NBENCH(world_pyramid_20_st_soft8)
+{
+    bench_world_steps(
+        state, pyramids(PYRAMID_ROWS, 1U, (BenchSolver){NPH_PHYSICS_SOLVER_SOFT_STEP, 8U}), NULL);
+}
+
+NBENCH(world_pyramid_20_st_xpbd16)
+{
+    bench_world_steps(
+        state, pyramids(PYRAMID_ROWS, 1U, (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U}), NULL);
+}
+
+NBENCH(world_pile_1000_mt_soft8)
+{
+    bench_pile(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_SOFT_STEP, 8U});
+}
+
+NBENCH(world_pile_1000_mt_xpbd16)
+{
+    bench_pile(state, bench_jobs(), (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U});
+}
+
+NBENCH(world_chains_st_soft8)
+{
+    bench_chains(state, NULL, (BenchSolver){NPH_PHYSICS_SOLVER_SOFT_STEP, 8U});
+}
+
+NBENCH(world_chains_st_xpbd16)
+{
+    bench_chains(state, NULL, (BenchSolver){NPH_PHYSICS_SOLVER_XPBD, 16U});
 }

@@ -16,4 +16,6 @@ const PhysSolverKernels g_phys_solver_avx2 = {
     PHYS_KERNEL(warm_start),
     PHYS_KERNEL(solve),
     PHYS_KERNEL(restitution),
+    PHYS_KERNEL(xpbd_positions),
+    PHYS_KERNEL(xpbd_velocities),
 };

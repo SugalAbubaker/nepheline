@@ -76,6 +76,7 @@ typedef struct StepContext {
     f32 h;
     f32 inv_h;
     f32 push_max;
+    f32 slop; // TGS: the overlap its Baumgarte bias leaves alone
     f32 restitution_threshold;
     PhysSoftness contact_soft;
     PhysSoftness static_soft;
@@ -265,6 +266,38 @@ static void integrate_position(const StepContext *ctx, u32 i)
     sb->dq = nph_quat_integrate(sb->dq, sb->w, ctx->h);
 }
 
+// XPBD: the positions at the substep's start kept, then the bodies moved
+// by their velocities (gravity, forces, and damping applied first).
+static void xpbd_predict(const StepContext *ctx, u32 i)
+{
+    const NphPhysicsWorld *w = ctx->w;
+    const PhysSolverBody *sb = &w->solver_bodies.data[i];
+    PhysSolverBody *prev = &w->solver_prev.data[i];
+    prev->dp = sb->dp;
+    prev->dq = sb->dq;
+    integrate_velocity(ctx, i);
+    integrate_position(ctx, i);
+}
+
+// XPBD: the velocities the corrected positions imply (a kinematic body's
+// are its own).
+static void xpbd_derive(const StepContext *ctx, u32 i)
+{
+    const NphPhysicsWorld *w = ctx->w;
+    const PhysSolverParams *p = &w->solver_params.data[i];
+    if ((p->flags & PHYS_PARAM_DYNAMIC) == 0U) {
+        return;
+    }
+    PhysSolverBody *sb = &w->solver_bodies.data[i];
+    const PhysSolverBody *prev = &w->solver_prev.data[i];
+    sb->v = lock_linear(nph_vec3_scale(nph_vec3_sub(sb->dp, prev->dp), ctx->inv_h), p->locks);
+    NphQuat d = nph_quat_mul(sb->dq, nph_quat_conjugate(prev->dq));
+    if (d.w < 0.0F) {
+        d = nph_quat_neg(d);
+    }
+    sb->w = lock_angular(nph_vec3_scale(nph_vec3(d.x, d.y, d.z), 2.0F * ctx->inv_h), p->locks);
+}
+
 static void finalize_body(const StepContext *ctx, u32 i)
 {
     NphPhysicsWorld *w = ctx->w;
@@ -442,6 +475,14 @@ static void run_joint_block(StepContext *ctx, const PhysStage *s, u32 block)
         case PHYS_STAGE_RELAX:
             phys_joint_solve(bodies, &ctx->joint_step, j, s->type == PHYS_STAGE_SOLVE);
             break;
+        case PHYS_STAGE_XPBD_POSITIONS:
+            phys_joint_xpbd_positions(bodies, &ctx->joint_step, j);
+            break;
+        case PHYS_STAGE_XPBD_VELOCITIES:
+            phys_joint_xpbd_velocities(bodies, &ctx->joint_step, j);
+            break;
+        case PHYS_STAGE_XPBD_PREDICT:
+        case PHYS_STAGE_XPBD_DERIVE:
         case PHYS_STAGE_PREPARE_BODIES:
         case PHYS_STAGE_INTEGRATE_VELOCITIES:
         case PHYS_STAGE_INTEGRATE_POSITIONS:
@@ -487,7 +528,7 @@ static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
         case PHYS_STAGE_RELAX: {
             PhysContactLanes *g = &w->groups.data[i];
             k->solve(bodies, g, &w->points.data[g->first_point], ctx->inv_h, ctx->push_max,
-                     s->type == PHYS_STAGE_SOLVE);
+                     ctx->slop, s->type == PHYS_STAGE_SOLVE);
             break;
         }
         case PHYS_STAGE_INTEGRATE_POSITIONS:
@@ -504,6 +545,23 @@ static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
         case PHYS_STAGE_FINALIZE:
             finalize_body(ctx, i);
             break;
+        case PHYS_STAGE_XPBD_PREDICT:
+            xpbd_predict(ctx, i);
+            break;
+        case PHYS_STAGE_XPBD_POSITIONS: {
+            PhysContactLanes *g = &w->groups.data[i];
+            k->xpbd_positions(bodies, w->solver_prev.data, g, &w->points.data[g->first_point]);
+            break;
+        }
+        case PHYS_STAGE_XPBD_DERIVE:
+            xpbd_derive(ctx, i);
+            break;
+        case PHYS_STAGE_XPBD_VELOCITIES: {
+            PhysContactLanes *g = &w->groups.data[i];
+            k->xpbd_velocities(bodies, g, &w->points.data[g->first_point], ctx->inv_h,
+                               ctx->restitution_threshold);
+            break;
+        }
         default:
             NPH_ASSERT_MSG(false, "physics: unknown solver stage %u", s->type);
             break;
@@ -512,10 +570,11 @@ static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
 }
 
 // As many threads as the step's work pays for. Its cost on one thread is
-// about 600 ns per point row (eight lanes), 290 ns per body, and 1200 ns per
-// joint over a step of four substeps, and a thread pays for itself with about 450 ns of work
-// in each stage it joins (measured on the bench scenes, docs/physics.md
-// "Threads"); the ratio holds across machines, which scale both alike.
+// about 600 ns per point row (eight lanes), 290 ns per body, and 1200 ns
+// per joint over a step of four substeps, and a thread pays for itself with
+// about 450 ns of work in each stage it joins (measured on the bench scenes,
+// docs/physics.md "Threads"); the ratio holds across machines, which scale
+// both alike.
 static u32 solver_participants(const NphPhysicsWorld *w, u32 available)
 {
     if (w->forced_participants != 0U) {
@@ -849,6 +908,11 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     PhysSolverBody *dummy = &w->solver_bodies.data[n];
     memset(dummy, 0, sizeof *dummy);
     dummy->dq = nph_quat_identity();
+    const NphPhysicsSolver solver = w->desc.solver;
+    if (solver == NPH_PHYSICS_SOLVER_XPBD) {
+        NPH_TRY(NPH_ARRAY_RESIZE(&w->solver_prev, n + 1U));
+        w->solver_prev.data[n] = *dummy;
+    }
     NPH_TRY(build_groups(w));
     NPH_TRY(build_step_joints(w));
 
@@ -864,14 +928,30 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     // Contacts at most a quarter of the substep rate stiff; contacts against
     // static and kinematic bodies twice as stiff (they take the whole
     // correction) (Catto, "Solver2D").
-    const f32 hertz = nph_f32_min(w->desc.contact_hertz, 0.25F * ctx.inv_h);
+    // Zero stiffnesses are relative to the substep rate: an eighth for
+    // contacts, a quarter (the most) for joints.
+    const f32 contact_hertz =
+        w->desc.contact_hertz > 0.0F ? w->desc.contact_hertz : 0.125F * ctx.inv_h;
+    const f32 joint_hertz = w->desc.joint_hertz > 0.0F ? w->desc.joint_hertz : 0.25F * ctx.inv_h;
+    const f32 hertz = nph_f32_min(contact_hertz, 0.25F * ctx.inv_h);
     ctx.contact_soft = phys_make_soft(hertz, w->desc.contact_damping_ratio, ctx.h);
     ctx.static_soft = phys_make_soft(2.0F * hertz, w->desc.contact_damping_ratio, ctx.h);
     ctx.joint_step.h = ctx.h;
     ctx.joint_step.inv_h = ctx.inv_h;
-    ctx.joint_step.soft = phys_make_soft(nph_f32_min(w->desc.joint_hertz, 0.25F * ctx.inv_h),
+    ctx.joint_step.soft = phys_make_soft(nph_f32_min(joint_hertz, 0.25F * ctx.inv_h),
                                          w->desc.joint_damping_ratio, ctx.h);
     ctx.joint_step.dummy = n;
+    if (solver == NPH_PHYSICS_SOLVER_TGS) {
+        // Rigid rows that take a fifth of the error a substep (Baumgarte's
+        // factor), the push capped as the soft step's.
+        // A linear slop of overlap is left alone (Box2D v2's, PhysX's rest
+        // offset), so resting contacts do not push.
+        const PhysSoftness hard = {0.2F * ctx.inv_h, 1.0F, 0.0F};
+        ctx.contact_soft = hard;
+        ctx.static_soft = hard;
+        ctx.joint_step.soft = hard;
+        ctx.slop = NPH_PHYSICS_LINEAR_SLOP;
+    }
     w->last_substep = ctx.h;
 
     // Helpers when there is enough work to share, as many as it can use,
@@ -893,13 +973,28 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     NPH_TRY(push_mixed_stage(w, p, PHYS_STAGE_PREPARE_CONTACTS, 0U, w->step_joints.len, 8U, 0U,
                              w->groups.len, 4U));
     for (u32 s = 0U; s < w->desc.substeps; ++s) {
+        if (solver == NPH_PHYSICS_SOLVER_XPBD) {
+            NPH_TRY(push_stage(w, p, PHYS_STAGE_XPBD_PREDICT, 0U, n, 32U));
+            NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_XPBD_POSITIONS));
+            NPH_TRY(push_stage(w, p, PHYS_STAGE_XPBD_DERIVE, 0U, n, 32U));
+            NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_XPBD_VELOCITIES));
+            continue;
+        }
         NPH_TRY(push_stage(w, p, PHYS_STAGE_INTEGRATE_VELOCITIES, 0U, n, 32U));
         NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_WARM_START));
         NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_SOLVE));
         NPH_TRY(push_stage(w, p, PHYS_STAGE_INTEGRATE_POSITIONS, 0U, n, 32U));
+        if (solver == NPH_PHYSICS_SOLVER_SOFT_STEP) {
+            NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_RELAX));
+        }
+    }
+    if (solver == NPH_PHYSICS_SOLVER_TGS) {
+        // TGS's velocity iteration: the bias velocity taken back once.
         NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_RELAX));
     }
-    NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_RESTITUTION));
+    if (solver != NPH_PHYSICS_SOLVER_XPBD) {
+        NPH_TRY(push_contact_pass(w, p, PHYS_STAGE_RESTITUTION));
+    }
     NPH_TRY(push_stage(w, p, PHYS_STAGE_STORE, 0U, w->groups.len, 8U));
     NPH_TRY(push_stage(w, p, PHYS_STAGE_FINALIZE, 0U, n, 32U));
     if (w->claims.len > 0U) {

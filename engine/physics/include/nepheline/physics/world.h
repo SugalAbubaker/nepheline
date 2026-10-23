@@ -71,17 +71,42 @@ NPH_INLINE bool nph_physics_shape_is_null(NphPhysicsShape s)
 // The most bodies or shapes a world holds (the slot bits of a handle).
 #define NPH_PHYSICS_MAX_OBJECTS (1U << 20U)
 
+// The constraint solver (ADR-0045; docs/physics.md "Choosing a solver"):
+// the soft step by default, TGS and XPBD for their trade-offs. Each
+// substeps the step and solves contacts and joints in the constraint
+// graph's colours on the same threads, from the same collision.
+typedef enum NphPhysicsSolver {
+    // Catto's soft step (Box2D v3): per substep, a soft solve towards the
+    // contacts' and joints' springs, then a rigid relax.
+    NPH_PHYSICS_SOLVER_SOFT_STEP = 0,
+    // Temporal Gauss-Seidel (PhysX 4): per substep, a rigid solve with a
+    // Baumgarte bias on the error since the step began; one velocity pass
+    // without bias after the substeps. 9 to 16 % cheaper; joints under
+    // heavy loads do not converge.
+    NPH_PHYSICS_SOLVER_TGS = 1,
+    // Extended position-based dynamics (Mueller et al., SCA 2020): per
+    // substep, positions corrected by rigid (or compliant) constraints,
+    // velocities derived from them, then a velocity pass for friction,
+    // restitution, and motors. The stiffest joints (with 16 substeps); it
+    // cannot stack, and its friction and energy are approximate.
+    NPH_PHYSICS_SOLVER_XPBD = 2,
+    NPH_PHYSICS_SOLVER_COUNT = 3,
+} NphPhysicsSolver;
+
 typedef struct NphPhysicsWorldDesc {
     NphAllocator *alloc; // required: everything the world keeps
     NphVec3 gravity;     // m/s^2
+    NphPhysicsSolver solver;
     // Solver substeps per step: each integrates, solves softly, and relaxes
-    // rigidly. Four at 240 Hz is 960 Hz of solver rate.
+    // rigidly. Four at 240 Hz is 960 Hz of solver rate. With the default
+    // stiffnesses (below), the one quality setting: twice the substeps,
+    // twice the stiffness, a quarter of the give.
     u32 substeps;
-    // The contacts' spring: stiffness (Hz, capped at a quarter of the
-    // substep rate; contacts with static and kinematic bodies are twice as
-    // stiff) and damping ratio. Soft contacts push overlaps out smoothly
-    // instead of exploding (Catto 2024), and hold a load at a depth of
-    // load / mass * g / (2 pi hertz)^2.
+    // The contacts' spring: stiffness (Hz; 0, the default: an eighth of the
+    // substep rate, Box2D's ratio; at most a quarter of it; contacts with
+    // static and kinematic bodies are twice as stiff) and damping ratio.
+    // Soft contacts push overlaps out smoothly instead of exploding (Catto
+    // 2024), and hold a load at a depth of load / mass * g / (2 pi hertz)^2.
     f32 contact_hertz;
     f32 contact_damping_ratio;
     // The fastest an overlap is pushed out, m/s.
@@ -90,9 +115,10 @@ typedef struct NphPhysicsWorldDesc {
     f32 restitution_threshold;
     // Clamp for bodies' speeds, m/s.
     f32 max_linear_speed;
-    // The joints' spring (joint.h): stiffness (Hz, capped at a quarter of
-    // the substep rate) and damping ratio of the soft solve that pulls a
-    // joint back together; the relax pass then holds it rigidly.
+    // The joints' spring (joint.h): stiffness (Hz; 0, the default: a quarter
+    // of the substep rate, also the most) and damping ratio of the soft solve
+    // that pulls a joint back together; the relax pass then holds it
+    // rigidly.
     f32 joint_hertz;
     f32 joint_damping_ratio;
     // Bodies whose islands stay below their sleep threshold this long, in
@@ -105,12 +131,12 @@ typedef struct NphPhysicsWorldDesc {
     u32 contact_capacity;
 } NphPhysicsWorldDesc;
 
-// The defaults: gravity (0, -9.81, 0), 4 substeps, contacts at 120 Hz (an
-// eighth of the substep rate, Box2D's 30 Hz at its 240) with damping ratio
-// 10, joints at 240 Hz (a quarter of the substep rate) with damping ratio 2,
-// a 3 m/s push, a 1 m/s restitution threshold, 400 m/s,
-// half a second to sleep, sleep on, and small initial capacities. Set
-// `alloc` before creating.
+// The defaults: gravity (0, -9.81, 0), the soft step with 4 substeps,
+// contacts at an eighth of the substep rate (120 Hz at 4 substeps, Box2D's
+// 30 Hz at its 240) with damping ratio 10, joints at a quarter of it
+// (240 Hz) with damping ratio 2, a 3 m/s push, a 1 m/s restitution
+// threshold, 400 m/s, half a second to sleep, sleep on, and small initial
+// capacities. Set `alloc` before creating.
 NphPhysicsWorldDesc nph_physics_world_desc_default(void);
 
 // NPH_RESULT_INVALID_ARGUMENT for a NULL allocator, zero substeps, or a
