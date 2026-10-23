@@ -105,8 +105,10 @@ NPH_INLINE const NphPhysicsHullEdge *nph_physics_hull_edges(const NphPhysicsHull
 }
 
 typedef struct NphPhysicsHullDesc {
-    const NphVec3 *points; // the cloud; need not be convex, unique, or ordered
-    u32 point_count;       // at least 4
+    // The cloud; need not be convex, unique, or ordered. Finite, within
+    // NPH_PHYSICS_MAX_COORDINATE of the origin.
+    const NphVec3 *points;
+    u32 point_count; // at least 4
     // The vertex budget: 0 for NPH_PHYSICS_HULL_DEFAULT_MAX_VERTICES, at
     // most NPH_PHYSICS_HULL_MAX_VERTICES (at least 4).
     u32 max_vertices;
@@ -118,9 +120,15 @@ typedef struct NphPhysicsHullDesc {
 } NphPhysicsHullDesc;
 
 // Builds the hull of desc->points into one block from `alloc`, which also
-// provides the build's temporary memory (released before returning).
-// NPH_RESULT_INVALID_ARGUMENT for fewer than 4 points, a non-finite
-// coordinate, a bad budget, or a cloud with no volume (every point within
+// provides the build's temporary memory (released before returning). The
+// hull is validated (nph_physics_hull_validate); where Quickhull's merges
+// leave a face reflex beyond the tolerance (a cloud with features near the
+// tolerance's scale, such as a sliver), it is built again at four, then
+// sixteen times the tolerance, and the hull's `tolerance` is the one it was
+// built at.
+// NPH_RESULT_INVALID_ARGUMENT for fewer than 4 points, a coordinate that is
+// not finite or beyond NPH_PHYSICS_MAX_COORDINATE, a bad budget, or a cloud
+// with no volume (every point within
 // the tolerance of one plane: use a box for a thin plate);
 // NPH_RESULT_OUT_OF_MEMORY. Release the hull with nph_physics_hull_free and
 // the same allocator. Deterministic: the same points give the same hull.
@@ -128,8 +136,9 @@ NPH_MUST_USE NphResult nph_physics_hull_build(const NphPhysicsHullDesc *desc, Np
                                               NphPhysicsHull **out);
 
 // The hull of an axis-aligned box centred on the origin, made directly (its
-// exact topology, no Quickhull). NPH_RESULT_INVALID_ARGUMENT for a
-// non-positive or non-finite half extent; NPH_RESULT_OUT_OF_MEMORY.
+// exact topology, no Quickhull). NPH_RESULT_INVALID_ARGUMENT for a half
+// extent that is not positive or beyond NPH_PHYSICS_MAX_COORDINATE;
+// NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult nph_physics_hull_make_box(NphVec3 half_extents, NphAllocator *alloc,
                                                  NphPhysicsHull **out);
 
@@ -143,12 +152,18 @@ u32 nph_physics_hull_support(const NphPhysicsHull *hull, NphVec3 direction);
 // The number of vertices of face `face`.
 u32 nph_physics_hull_face_vertex_count(const NphPhysicsHull *hull, u32 face);
 
-// Checks the invariants: twin pairing, closed face loops, every face's
-// vertices on its plane and its loop convex, every vertex behind every
-// plane, Euler's V - E + F = 2, and the header's offsets inside the block,
-// all within `tolerance` (0: the hull's own). For tests and for hulls read
-// from files. Logs the first violation.
-bool nph_physics_hull_validate(const NphPhysicsHull *hull, f32 tolerance);
+// Checks a block of `size` bytes before use (CLAUDE.md §8.8 "Robustness"):
+// a 16-byte aligned header and `byte_size` within `size`; the offsets inside
+// the block; the counts within what a hull of NPH_PHYSICS_HULL_MAX_VERTICES
+// has (faces at most 2V - 4, edges 3V - 6) and Euler's V - E + F = 2; the
+// header's numbers finite and in range (bounds within
+// NPH_PHYSICS_MAX_COORDINATE, positive volume and tolerance); twin pairing,
+// closed face loops, every vertex finite and inside the bounds, every
+// face's vertices on its plane and its loop convex, and every vertex behind
+// every plane, all within `tolerance` (0: the hull's own). A hull it accepts
+// is safe for every function of the module. Never reads past `size`; logs
+// the first violation.
+bool nph_physics_hull_validate(const void *block, u32 size, f32 tolerance);
 
 #ifdef __cplusplus
 }

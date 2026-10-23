@@ -53,9 +53,11 @@ NTEST(solvers, stacks)
         }
         NTEST_EXPECT_TRUE(sound(s.w, column, 10U, 100.0) && sound(s.w, &top, 1U, 100.0));
         if (is_default(config)) {
-            // Standing within millimetres, and asleep.
-            NTEST_EXPECT_TRUE(fabs(sink) < 0.005 && fabs(p.x) < 0.003 && slept != 0U);
-            NTEST_EXPECT_TRUE(fabs(9.5 - c.y) < 0.005 && fabs(c.x + 20.0) < 0.003);
+            // Standing within millimetres, a millimetre aside at most, and
+            // asleep. (Points that lost their warm starts to flipping ids
+            // sent the column 2 to 5 mm aside: ADR-0046.)
+            NTEST_EXPECT_TRUE(fabs(sink) < 0.005 && fabs(p.x) < 0.001 && slept != 0U);
+            NTEST_EXPECT_TRUE(fabs(9.5 - c.y) < 0.005 && fabs(c.x + 20.0) < 0.001);
         }
         scene_end(&s);
     }

@@ -5,12 +5,17 @@
 // "Collision"): contact manifolds between two placed geometries, and the
 // queries they are built from.
 //
-//   nph_physics_collide      the manifold of two geometries: a normal and up
-//                            to four points, with separations, within a
-//                            speculative distance
-//   nph_physics_distance     GJK: the closest points of two convex proxies
-//   nph_physics_penetration  GJK, then EPA when the cores overlap: the
-//                            smallest translation that separates them
+//   nph_physics_collide           the manifold of two geometries: a normal
+//                                 and up to four points, with separations,
+//                                 within a speculative distance
+//   nph_physics_collide_triangle  a convex geometry's manifold with a
+//                                 triangle
+//   nph_physics_collide_mesh      a convex geometry's manifolds with a
+//                                 triangle mesh: one per normal, up to four
+//   nph_physics_distance          GJK: the closest points of two convex
+//                                 proxies
+//   nph_physics_penetration       GJK, then EPA when the cores overlap: the
+//                                 smallest translation that separates them
 //
 // Both poses are given in one frame, and every output is in that frame. The
 // world uses a frame centred on one of the two bodies, so the coordinates are
@@ -31,12 +36,17 @@
 //     Barbieri, "Improving the GJK Algorithm for Faster and More Reliable
 //     Distance Queries Between Convex Objects", ACM TOG 2017) and EPA (van
 //     den Bergen, "Proximity Queries and Penetration Depth Computation on 3D
-//     Game Objects", GDC 2001).
+//     Game Objects", GDC 2001);
+//   - triangles: spheres and capsules by closest points, boxes and hulls by
+//     the axis test against the triangle as a flat polyhedron; one-sided,
+//     with active edges, so bodies cross a mesh's seams without bumping
+//     (ADR-0046; docs/physics.md "Meshes").
 //
 // Thread-safety: every function is NPH_THREADSAFE; a cache belongs to one
 // shape pair and is written by the call that receives it.
 
 #include <nepheline/physics/geometry.h>
+#include <nepheline/physics/mesh.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,8 +87,8 @@ typedef struct NphPhysicsCollideCache {
 
 NPH_STATIC_ASSERT(sizeof(NphPhysicsCollideCache) == 8U, "the collision cache is eight bytes");
 
-// True when nph_physics_collide handles the pair (every pair of the shape
-// types in geometry.h).
+// True when nph_physics_collide handles the pair: every pair of convex types
+// (geometry.h). A convex shape meets a mesh through nph_physics_collide_mesh.
 bool nph_physics_collide_supported(NphPhysicsShapeType a, NphPhysicsShapeType b);
 
 // The contact manifold of `a` at `pose_a` and `b` at `pose_b`: points whose
@@ -92,11 +102,66 @@ void nph_physics_collide(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
                          NphPhysicsManifold *out);
 
 // Reduces `count` candidate points to at most four, in place, and returns
-// how many remain: the deepest, the one farthest from it, the one that makes
-// the largest triangle with both, and the one that adds the most area beyond
-// that triangle (Gregorius 2015). Areas are measured in the plane
-// perpendicular to `normal`. Counts of four or fewer are left unchanged.
+// how many remain. Points that touch (separation at most a tenth of the
+// linear slop) come before speculative ones: fewer than four are all kept,
+// and the rest is chosen from the others; four or more are the only
+// candidates. The choice follows Gregorius (2015): the deepest (of equals,
+// the one farthest from their centre), the one farthest from it, the one
+// that makes the largest triangle with both, and the one that adds the most
+// area beyond that triangle. Areas are measured in the plane perpendicular
+// to `normal`; points along a line keep its two ends. Counts of four or
+// fewer are left unchanged.
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal);
+
+// ---------------------------------------------------------------------------
+// Triangles and meshes (ADR-0046; docs/physics.md "Meshes")
+// ---------------------------------------------------------------------------
+
+// A triangle: counter-clockwise seen from its front, the side it collides
+// from unless two-sided.
+typedef struct NphPhysicsTriangle {
+    NphVec3 vertices[3];
+    // NPH_PHYSICS_MESH_EDGE_* (mesh.h): the edges that are edges of the
+    // surface. A contact on the face, on an inactive edge (one the surface
+    // continues across flat or concave), or on a vertex whose normal crosses
+    // none of its active edges takes the face's normal, so a body sliding
+    // over a seam is not pushed back by the next triangle. A lone
+    // triangle's edges are all active.
+    u32 active_edges;
+    b32 two_sided;
+} NphPhysicsTriangle;
+
+// The manifold of convex `a` at `pose_a` and triangle `t` (its vertices in
+// the same frame), the normal from `a` towards the triangle. A one-sided
+// triangle gives nothing when a's centre is behind its plane, or when the
+// contact would push `a` through it from behind; a two-sided one faces a's
+// centre. Point ids name the features of `a` and the triangle only, so
+// callers mix in a triangle's identity. A degenerate triangle gives
+// nothing.
+void nph_physics_collide_triangle(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                                  const NphPhysicsTriangle *t, f32 speculative_distance,
+                                  NphPhysicsManifold *out);
+
+#define NPH_PHYSICS_MESH_MAX_MANIFOLDS 4U
+
+// A convex shape's manifolds against a mesh, one per surface direction.
+typedef struct NphPhysicsMeshManifolds {
+    u32 count; // 0 to NPH_PHYSICS_MESH_MAX_MANIFOLDS
+    NphPhysicsManifold manifolds[NPH_PHYSICS_MESH_MAX_MANIFOLDS]; // the deepest first
+} NphPhysicsMeshManifolds;
+
+// Convex `a` at `pose_a` against `mesh` at `pose_mesh`: each triangle under
+// a's box collided as by nph_physics_collide_triangle (with the mesh's
+// active edges and sides), the manifolds whose normals agree within 5
+// degrees merged (their points reduced to four, each manifold taking its
+// deepest member's normal), and the four with the deepest points kept
+// (ADR-0046 §8). Normals point from `a` towards the mesh; point ids mix the
+// triangle's index (in leaf order) with its features. The triangles are
+// moved next to `a` in 64 bits, so a mesh keeps full precision far from its
+// origin; as for nph_physics_collide, the poses' frame should be near `a`.
+void nph_physics_collide_mesh(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                              const NphPhysicsMesh *mesh, NphPhysicsPose pose_mesh,
+                              f32 speculative_distance, NphPhysicsMeshManifolds *out);
 
 // ---------------------------------------------------------------------------
 // Closest points

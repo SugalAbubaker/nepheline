@@ -384,8 +384,8 @@ NTEST(ragdoll, tumbles_down_stairs)
 NTEST(ragdoll, a_pile_settles_without_gaining_energy)
 {
     // Sixteen where the build is fast enough, four in Debug and under the
-    // sanitizers. The default measures, for sixteen, 10 mm, 0.4 at rest,
-    // 4.2 deg, 0.33 at rest, 5.2 mm sunk, 0.2 at rest, 0.4 % back, 5.5 s.
+    // sanitizers. The default measures, for sixteen, 8.3 mm, 0.47 at rest,
+    // 3.2 deg, 0.26 at rest, 5.1 mm sunk, 0.31 at rest, 0.2 % back, 3.4 s.
     const bool big = TEST_SCALE >= 8U;
     const u32 count = big ? 16U : 4U;
     const Bounds tight = {0.025, 0.001, 10.0F, 0.8F, 0.013, 0.0005, 0.01, big ? 10.0F : 5.0F};

@@ -23,11 +23,22 @@
 //   tree_query_10k               a 2 m box query in a 10k-proxy tree
 //   tree_raycast_10k             a 50 m closest-hit ray in a 10k-proxy tree
 //   tree_rebuild_10k             a full binned-SAH rebuild of 10k proxies (per proxy)
+//   mesh_build_grid_128          a 128 x 128 grid (32768 triangles): welding,
+//                                active edges, the tree (per triangle)
+//   mesh_raycast_grid_128        a closest-hit ray down onto the grid
+//   mesh_overlap_grid_128        the triangles under a 1 m box on the grid
+//   collide_mesh_box             a box resting on a grid of 0.5 m cells, anywhere
+//                                and turned any way (each call: its triangles,
+//                                merged into one manifold)
+//   collide_mesh_sphere          a ball, the same
+//   collide_mesh_capsule         a capsule lying on the grid, the same
+//   collide_mesh_hull_32v        a 32-vertex hull, the same
 
 #include <nepheline/math/random.h>
 #include <nepheline/physics/aabb_tree.h>
 #include <nepheline/physics/collide.h>
 #include <nepheline/physics/hull.h>
+#include <nepheline/physics/mesh.h>
 
 #include <nbench/nbench.h>
 
@@ -500,6 +511,9 @@ NBENCH(tree_rebuild_10k)
 //   world_pyramids_16_mt     sixteen of them side by side (3360 boxes)
 //   world_pile_1000_st       1000 boxes, spheres, and capsules settled in a bin
 //   world_pile_1000_mt       the same on the job system
+//   world_mesh_pile_1000_st  the pile on a mesh floor (0.5 m cells), one thread
+//   world_mesh_pile_1000_mt  the same on the job system
+//   world_terrain_pile_1000_mt  the pile on a rippled mesh, on the job system
 //   world_sleeping_10k       10k sleeping boxes and one awake ball
 //   world_chains_st          16 chains of 25 ball-jointed links swinging, one thread
 //   world_chains_mt          the same on the job system
@@ -515,6 +529,184 @@ NBENCH(tree_rebuild_10k)
 #include <nepheline/physics/joint.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/physics/world.h>
+
+// ---------------------------------------------------------------------------
+// Meshes
+// ---------------------------------------------------------------------------
+
+// An n by n grid of `cell` metre cells centred on the origin, facing +Y, its
+// cells' diagonals alternating; rippled by `ripple` metres (0: flat).
+static NphPhysicsMesh *bench_grid(u32 n, f32 cell, f32 ripple)
+{
+    const u32 nv = (n + 1U) * (n + 1U);
+    NphVec3 *v = NPH_ALLOC_ARRAY(nph_allocator_system(), NphVec3, nv);
+    u32 *idx = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, 6ULL * n * n);
+    NphPhysicsMesh *mesh = NULL;
+    if (v != NULL && idx != NULL) {
+        const f32 x0 = -0.5F * cell * (f32)n;
+        for (u32 i = 0U; i <= n; ++i) {
+            for (u32 j = 0U; j <= n; ++j) {
+                const f32 x = x0 + cell * (f32)i;
+                const f32 z = x0 + cell * (f32)j;
+                const f32 y = ripple * (nph_f32_sin(0.9F * x) * nph_f32_cos(0.7F * z) +
+                                        0.25F * nph_f32_sin(3.1F * x + 1.3F * z));
+                v[i * (n + 1U) + j] = nph_vec3(x, y, z);
+            }
+        }
+        u32 k = 0U;
+        for (u32 i = 0U; i < n; ++i) {
+            for (u32 j = 0U; j < n; ++j) {
+                const u32 a = i * (n + 1U) + j;
+                const u32 quad[2][6] = {{a, a + 1U, a + n + 1U, a + n + 1U, a + 1U, a + n + 2U},
+                                        {a, a + n + 2U, a + n + 1U, a, a + 1U, a + n + 2U}};
+                for (u32 q = 0U; q < 6U; ++q) {
+                    idx[k++] = quad[(i + j) & 1U][q];
+                }
+            }
+        }
+        NphPhysicsMeshDesc d;
+        memset(&d, 0, sizeof d);
+        d.vertices = v;
+        d.vertex_count = nv;
+        d.indices = idx;
+        d.triangle_count = 2U * n * n;
+        if (nph_physics_mesh_build(&d, nph_allocator_system(), &mesh) != NPH_RESULT_OK) {
+            mesh = NULL;
+        }
+    }
+    if (v != NULL) {
+        NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, v, nv);
+    }
+    if (idx != NULL) {
+        NPH_FREE_ARRAY(nph_allocator_system(), u32, idx, 6ULL * n * n);
+    }
+    return mesh;
+}
+
+NBENCH(mesh_build_grid_128)
+{
+    while (nbench_keep_running(state)) {
+        NphPhysicsMesh *mesh = bench_grid(128U, 0.5F, 0.3F);
+        nbench_do_not_optimize(mesh);
+        nph_physics_mesh_free(mesh, nph_allocator_system());
+    }
+    nbench_set_items_per_iteration(state, 2ULL * 128U * 128U);
+}
+
+NBENCH(mesh_raycast_grid_128)
+{
+    NphPhysicsMesh *mesh = bench_grid(128U, 0.5F, 0.3F);
+    if (mesh == NULL) {
+        return;
+    }
+    NphPcg32 r = bench_rng(31U);
+    NphVec3 origins[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        origins[i] = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 5.0F,
+                              nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+    }
+    const NphVec3 delta = nph_vec3(0.3F, -10.0F, 0.2F);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            NphPhysicsMeshHit hit;
+            nbench_do_not_optimize_u64(
+                nph_physics_mesh_raycast(mesh, origins[i], delta, &hit) ? 1U : 0U);
+        }
+    }
+    nph_physics_mesh_free(mesh, nph_allocator_system());
+}
+
+static bool count_triangle(void *user, u32 triangle)
+{
+    *(u32 *)user += triangle != 0U ? 1U : 0U;
+    return true;
+}
+
+NBENCH(mesh_overlap_grid_128)
+{
+    NphPhysicsMesh *mesh = bench_grid(128U, 0.5F, 0.3F);
+    if (mesh == NULL) {
+        return;
+    }
+    NphPcg32 r = bench_rng(32U);
+    NphAABB boxes[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const NphVec3 c = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
+                                   nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        boxes[i] =
+            nph_aabb(nph_vec3_sub(c, nph_vec3_splat(0.5F)), nph_vec3_add(c, nph_vec3_splat(0.5F)));
+    }
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            u32 n = 0U;
+            nph_physics_mesh_overlap(mesh, boxes[i], count_triangle, &n);
+            nbench_do_not_optimize_u64(n);
+        }
+    }
+    nph_physics_mesh_free(mesh, nph_allocator_system());
+}
+
+// One shape resting on a flat 0.5 m grid, 64 places and headings.
+static void bench_collide_mesh(NbenchState *state, const NphPhysicsGeometry *g, f32 rest,
+                               NphQuat lie)
+{
+    NphPhysicsMesh *mesh = bench_grid(64U, 0.5F, 0.0F);
+    if (mesh == NULL) {
+        return;
+    }
+    NphPcg32 r = bench_rng(33U);
+    NphPhysicsPose poses[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        poses[i] = nph_physics_pose(
+            nph_vec3(nph_pcg32_next_range_f32(&r, -10.0F, 10.0F), rest - 0.001F,
+                     nph_pcg32_next_range_f32(&r, -10.0F, 10.0F)),
+            nph_quat_mul(nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)), lie));
+    }
+    NphPhysicsMeshManifolds mm;
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            nph_physics_collide_mesh(g, poses[i], mesh, nph_physics_pose_identity(),
+                                     NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+            nbench_do_not_optimize(&mm);
+        }
+    }
+    nph_physics_mesh_free(mesh, nph_allocator_system());
+}
+
+NBENCH(collide_mesh_box)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_box(nph_vec3(0.4F, 0.25F, 0.3F));
+    bench_collide_mesh(state, &g, 0.25F, nph_quat_identity());
+}
+
+NBENCH(collide_mesh_sphere)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_sphere(0.3F);
+    bench_collide_mesh(state, &g, 0.3F, nph_quat_identity());
+}
+
+NBENCH(collide_mesh_capsule)
+{
+    const NphPhysicsGeometry g = nph_physics_geometry_capsule(0.4F, 0.15F);
+    bench_collide_mesh(state, &g, 0.15F, nph_quat_from_axis_angle(nph_vec3_unit_z(), 1.5707963F));
+}
+
+NBENCH(collide_mesh_hull_32v)
+{
+    NphPcg32 r = bench_rng(34U);
+    NphPhysicsHull *h = make_hull(&r, 200U, 32U);
+    if (h == NULL) {
+        return;
+    }
+    // Resting on its lowest vertex or face, wherever that is.
+    const NphPhysicsGeometry g = nph_physics_geometry_hull(h);
+    const NphVec3 low = nph_physics_geometry_support(&g, nph_vec3(0.0F, -1.0F, 0.0F));
+    bench_collide_mesh(state, &g, -low.y, nph_quat_identity());
+    nph_physics_hull_free(h, nph_allocator_system());
+}
 
 #define WORLD_DT (1.0F / 240.0F)
 
@@ -645,18 +837,26 @@ NBENCH(world_pyramids_16_mt)
                       bench_jobs());
 }
 
-static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
+// The pile of a thousand shapes in a bin, on the box ground or on `floor`
+// (a mesh, which the bin's walls stand on).
+static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solver,
+                          const NphPhysicsMesh *floor)
 {
     NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
         return;
     }
-    bench_ground(w, 30.0F);
-    // A 10 m bin.
+    if (floor != NULL) {
+        bench_body(w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_zero(), nph_quat_identity(),
+                   nph_physics_geometry_mesh(floor));
+    } else {
+        bench_ground(w, 30.0F);
+    }
+    // A 10 m bin, its walls down into a rippled floor's hollows.
     for (u32 k = 0U; k < 4U; ++k) {
         const f64 s = k < 2U ? 1.0 : -1.0;
         const NphDVec3 p =
-            k % 2U == 0U ? nph_dvec3(5.25 * s, 5.0, 0.0) : nph_dvec3(0.0, 5.0, 5.25 * s);
+            k % 2U == 0U ? nph_dvec3(5.25 * s, 4.6, 0.0) : nph_dvec3(0.0, 4.6, 5.25 * s);
         const NphVec3 h = k % 2U == 0U ? nph_vec3(0.25F, 5.0F, 5.5F) : nph_vec3(5.5F, 5.0F, 0.25F);
         bench_body(w, NPH_PHYSICS_BODY_STATIC, p, nph_quat_identity(), nph_physics_geometry_box(h));
     }
@@ -681,6 +881,38 @@ static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
         NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
     }
     nph_physics_world_destroy(w);
+}
+
+static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
+{
+    bench_pile_on(state, js, solver, NULL);
+}
+
+// The pile on a flat mesh of 0.5 m cells (12 m across, 1152 triangles), and
+// on a rippled one (30 cm swells): the narrow phase against triangles.
+static void bench_mesh_pile(NbenchState *state, NphJobSystem *js, f32 ripple)
+{
+    NphPhysicsMesh *floor = bench_grid(24U, 0.5F, ripple);
+    if (floor == NULL) {
+        return;
+    }
+    bench_pile_on(state, js, k_soft, floor);
+    nph_physics_mesh_free(floor, nph_allocator_system());
+}
+
+NBENCH(world_mesh_pile_1000_st)
+{
+    bench_mesh_pile(state, NULL, 0.0F);
+}
+
+NBENCH(world_mesh_pile_1000_mt)
+{
+    bench_mesh_pile(state, bench_jobs(), 0.0F);
+}
+
+NBENCH(world_terrain_pile_1000_mt)
+{
+    bench_mesh_pile(state, bench_jobs(), 0.3F);
 }
 
 NBENCH(world_pile_1000_st)

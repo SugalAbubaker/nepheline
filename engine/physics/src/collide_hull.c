@@ -92,6 +92,35 @@ NphHullView nph_physics_box_view(NphVec3 h, NphBoxViewStorage *storage)
     return v;
 }
 
+// The triangle's topology: faces front (0) and back (1); half-edges in
+// twin pairs v0 v1 | v1 v0, v1 v2 | v2 v1, v2 v0 | v0 v2, the first of each on
+// the front, each face's loop counter-clockwise seen from outside it.
+static const u16 k_triangle_faces[2] = {0U, 1U};
+static const NphPhysicsHullEdge k_triangle_edges[6] = {
+    {2U, 1U, 0U, 0U}, {5U, 0U, 1U, 1U}, {4U, 3U, 1U, 0U},
+    {1U, 2U, 2U, 1U}, {0U, 5U, 2U, 0U}, {3U, 4U, 0U, 1U},
+};
+
+NphHullView nph_physics_triangle_view(const NphVec3 v[3], NphVec3 n,
+                                      NphTriangleViewStorage *storage)
+{
+    for (u32 i = 0U; i < 3U; ++i) {
+        storage->vertices[i] = v[i];
+    }
+    storage->planes[0] = nph_plane(n, -nph_vec3_dot(n, v[0]));
+    storage->planes[1] = nph_plane(nph_vec3_neg(n), nph_vec3_dot(n, v[0]));
+    NphHullView h;
+    h.vertices = storage->vertices;
+    h.planes = storage->planes;
+    h.faces = k_triangle_faces;
+    h.edges = k_triangle_edges;
+    h.vertex_count = 3U;
+    h.face_count = 2U;
+    h.edge_count = 6U;
+    h.centroid = nph_vec3_scale(nph_vec3_add(nph_vec3_add(v[0], v[1]), v[2]), 1.0F / 3.0F);
+    return h;
+}
+
 NphHullView nph_physics_hull_view(const NphPhysicsHull *hull)
 {
     NphHullView v;
@@ -118,13 +147,6 @@ static NphPhysicsProxy view_proxy(const NphHullView *h, const NphVec3 *vertices)
     p.count = h->vertex_count;
     p.radius = 0.0F;
     return p;
-}
-
-static u32 mix_id(u32 a, u32 b)
-{
-    u32 h = a * 0x9E3779B1U;
-    h ^= b + 0x7F4A7C15U + (h << 6U) + (h >> 2U);
-    return h;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,12 +428,22 @@ static f32 face_b_separation(const HullPair *hp, u32 f)
     return min_projection(hp->a->vertices, hp->a->vertex_count, pl.normal) + pl.d;
 }
 
+// The normal of the plane of B's arc cd: d x c, or for a flat edge (a
+// triangle's, whose faces are opposite and whose normals' cross product
+// vanishes) the cross product's limit as the angle between the faces
+// closes: the edge reversed (origin less head, in A's frame).
+static NphVec3 arc_plane(NphVec3 c, NphVec3 d, NphVec3 origin, NphVec3 head)
+{
+    const NphVec3 u = nph_vec3_cross(d, c);
+    return nph_vec3_length_sq(u) > 1e-12F ? u : nph_vec3_sub(origin, head);
+}
+
 // Gregorius 2013: arcs ab and cd of the Gauss map intersect. c and d are
-// B's face normals negated (the Minkowski difference A - B).
-static bool is_minkowski_face(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 d)
+// B's face normals negated (the Minkowski difference A - B), dxc the
+// normal of their arc's plane (arc_plane).
+static bool is_minkowski_face(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 d, NphVec3 dxc)
 {
     const NphVec3 bxa = nph_vec3_cross(b, a);
-    const NphVec3 dxc = nph_vec3_cross(d, c);
     const f32 cba = nph_vec3_dot(c, bxa);
     const f32 dba = nph_vec3_dot(d, bxa);
     const f32 adc = nph_vec3_dot(a, dxc);
@@ -618,7 +650,8 @@ static NPH_NO_INLINE bool sat_query(const HullPair *hp, f32 limit, NphPhysicsCol
         for (u32 eb = 0U; eb < b->edge_count; eb += 2U) {
             const NphVec3 c = nph_vec3_neg(bn[b->edges[eb].face]);
             const NphVec3 d = nph_vec3_neg(bn[b->edges[eb + 1U].face]);
-            const NphVec3 u = nph_vec3_cross(d, c);
+            const NphVec3 u =
+                arc_plane(c, d, hp->bv[b->edges[eb].origin], edge_head(b, hp->bv, eb));
             const u32 k = se.count++;
             se.cx[k] = c.x;
             se.cy[k] = c.y;
@@ -714,13 +747,14 @@ static NPH_NO_INLINE bool sat_query(const HullPair *hp, f32 limit, NphPhysicsCol
             const NphVec3 pa = a->vertices[a->edges[ea].origin];
             const NphVec3 ua = nph_vec3_sub(edge_head(a, a->vertices, ea), pa);
             for (u32 eb = 0U; eb < b->edge_count; eb += 2U) {
-                const NphVec3 nb1 = bn[b->edges[eb].face];
-                const NphVec3 nb2 = bn[b->edges[eb + 1U].face];
-                if (!is_minkowski_face(na1, na2, nph_vec3_neg(nb1), nph_vec3_neg(nb2))) {
+                const NphVec3 c = nph_vec3_neg(bn[b->edges[eb].face]);
+                const NphVec3 d = nph_vec3_neg(bn[b->edges[eb + 1U].face]);
+                const NphVec3 pb = hp->bv[b->edges[eb].origin];
+                const NphVec3 hb = edge_head(b, hp->bv, eb);
+                if (!is_minkowski_face(na1, na2, c, d, arc_plane(c, d, pb, hb))) {
                     continue;
                 }
-                const NphVec3 pb = hp->bv[b->edges[eb].origin];
-                const NphVec3 ub = nph_vec3_sub(edge_head(b, hp->bv, eb), pb);
+                const NphVec3 ub = nph_vec3_sub(hb, pb);
                 NphVec3 axis;
                 const f32 s =
                     edge_pair_separation_above(pa, ua, pb, ub, a->centroid, r->edge_sep, &axis);
@@ -746,11 +780,13 @@ static NPH_NO_INLINE bool sat_query(const HullPair *hp, f32 limit, NphPhysicsCol
 
 // The face contact: reference face `ref` of R (A when !flip), the incident
 // face of the other hull clipped against its side planes. Works in A's
-// frame; writes A-frame points and returns the normal from A to B. The two
-// clip buffers are the frame's only large locals (10 KiB), and the
-// candidates are reduced in place in the free one.
+// frame; writes A-frame points and returns the normal from A to B. More
+// than `max_points` candidates are reduced to four (the manifold's), in
+// place in the free one of the two clip buffers, the frame's only large
+// locals (10 KiB).
 static NPH_NO_INLINE NphVec3 face_contact(const HullPair *hp, bool flip, u32 ref, f32 speculative,
-                                          NphPhysicsManifoldPoint *points, u32 *count)
+                                          u32 max_points, NphPhysicsManifoldPoint *points,
+                                          u32 *count)
 {
     const NphHullView *rh = flip ? hp->b : hp->a;
     const NphHullView *ih = flip ? hp->a : hp->b;
@@ -806,7 +842,8 @@ static NPH_NO_INLINE NphVec3 face_contact(const HullPair *hp, bool flip, u32 ref
                 const f32 t = dp / (dp - dq);
                 outp[out_len].point = nph_vec3_lerp(p.point, q.point, t);
                 outp[out_len].separation = 0.0F;
-                outp[out_len].id = mix_id(mix_id(p.id, q.id), 0x100U + side);
+                outp[out_len].id =
+                    nph_physics_mix_id(nph_physics_mix_id(p.id, q.id), 0x100U + side);
                 out_len += 1U;
             }
         }
@@ -816,7 +853,7 @@ static NPH_NO_INLINE NphVec3 face_contact(const HullPair *hp, bool flip, u32 ref
         side += 1U;
     } while (e != first && len > 0U && side < rh->edge_count);
 
-    const u32 tag = mix_id((flip ? 0x80000000U : 0U) | (ref << 16U), inc);
+    const u32 tag = nph_physics_mix_id((flip ? 0x80000000U : 0U) | (ref << 16U), inc);
     const NphPhysicsManifoldPoint *clipped = buf[cur];
     NphPhysicsManifoldPoint *cand = buf[cur ^ 1U];
     u32 n_out = 0U;
@@ -825,11 +862,13 @@ static NPH_NO_INLINE NphVec3 face_contact(const HullPair *hp, bool flip, u32 ref
         if (sep <= speculative) {
             cand[n_out].point = nph_vec3_mul_add(clipped[i].point, n, -0.5F * sep);
             cand[n_out].separation = sep;
-            cand[n_out].id = mix_id(tag, clipped[i].id);
+            cand[n_out].id = nph_physics_mix_id(tag, clipped[i].id);
             n_out += 1U;
         }
     }
-    n_out = nph_physics_manifold_reduce(cand, n_out, n);
+    if (n_out > max_points) {
+        n_out = nph_physics_manifold_reduce(cand, n_out, n);
+    }
     for (u32 i = 0U; i < n_out; ++i) {
         points[i] = cand[i];
     }
@@ -837,9 +876,53 @@ static NPH_NO_INLINE NphVec3 face_contact(const HullPair *hp, bool flip, u32 ref
     return flip ? nph_vec3_neg(n) : n;
 }
 
-void nph_physics_collide_hulls(const NphHullView *a, NphPhysicsPose pa, const NphHullView *b,
-                               NphPhysicsPose pb, f32 speculative, NphPhysicsCollideCache *cache,
-                               NphPhysicsManifold *out)
+void nph_physics_collide_hull_face(const NphHullView *a, NphPhysicsPose pa, const NphHullView *b,
+                                   NphPhysicsPose pb, u32 face, f32 speculative,
+                                   NphTriangleContact *out)
+{
+    NPH_ASSERT(a->vertex_count <= NPH_PHYSICS_HULL_MAX_VERTICES &&
+               b->vertex_count <= NPH_PHYSICS_HULL_MAX_VERTICES && face < b->face_count);
+    HullPair hp;
+    hp.a = a;
+    hp.b = b;
+    hp.rel = nph_physics_pose_inv_mul(pa, pb);
+    for (u32 i = 0U; i < b->vertex_count; ++i) {
+        hp.bv[i] = nph_physics_pose_transform_point(hp.rel, b->vertices[i]);
+    }
+    NphPhysicsManifoldPoint pts[NPH_TRIANGLE_CONTACT_POINTS];
+    u32 count = 0U;
+    const NphVec3 n =
+        face_contact(&hp, true, face, speculative, NPH_TRIANGLE_CONTACT_POINTS, pts, &count);
+    nph_triangle_contact_clear(out);
+    out->normal = nph_physics_pose_transform_vector(pa, n);
+    for (u32 i = 0U; i < count; ++i) {
+        nph_triangle_contact_push(out, nph_physics_pose_transform_point(pa, pts[i].point),
+                                  pts[i].separation, pts[i].id);
+    }
+}
+
+f32 nph_physics_hulls_separation(const NphHullView *a, NphPhysicsPose pa, const NphHullView *b,
+                                 NphPhysicsPose pb)
+{
+    HullPair hp;
+    hp.a = a;
+    hp.b = b;
+    hp.rel = nph_physics_pose_inv_mul(pa, pb);
+    for (u32 i = 0U; i < b->vertex_count; ++i) {
+        hp.bv[i] = nph_physics_pose_transform_point(hp.rel, b->vertices[i]);
+    }
+    SatResult r;
+    NPH_VERIFY(sat_query(&hp, FLT_MAX, NULL, &r));
+    return nph_f32_max(nph_f32_max(r.face_a_sep, r.face_b_sep), r.edge_sep);
+}
+
+// The pair function, keeping up to `max_points` points. `prefer_b` turns
+// the tie between faces to B's: a triangle's face, so a shape lying flat on
+// it takes the triangle's own normal and its face is clipped to the
+// triangle. `out` is left as it was when nothing touches.
+static void collide_hulls(const NphHullView *a, NphPhysicsPose pa, const NphHullView *b,
+                          NphPhysicsPose pb, f32 speculative, NphPhysicsCollideCache *cache,
+                          bool prefer_b, u32 max_points, NphTriangleContact *out)
 {
     NPH_ASSERT(a->vertex_count <= NPH_PHYSICS_HULL_MAX_VERTICES &&
                b->vertex_count <= NPH_PHYSICS_HULL_MAX_VERTICES);
@@ -857,7 +940,8 @@ void nph_physics_collide_hulls(const NphHullView *a, NphPhysicsPose pa, const Np
     }
     const f32 face_sep = nph_f32_max(r.face_a_sep, r.face_b_sep);
     const bool use_edge = r.edge_sep > face_sep + EDGE_BIAS;
-    const bool flip = !use_edge && r.face_b_sep > r.face_a_sep + FACE_BIAS;
+    const bool flip = !use_edge && (prefer_b ? r.face_b_sep >= r.face_a_sep - FACE_BIAS
+                                             : r.face_b_sep > r.face_a_sep + FACE_BIAS);
     if (cache != NULL) {
         cache->type = (u8)(use_edge ? CACHE_EDGES : (flip ? CACHE_FACE_B : CACHE_FACE_A));
         cache->index_a = (u16)(use_edge ? r.edge_a : r.face_a);
@@ -884,7 +968,7 @@ void nph_physics_collide_hulls(const NphHullView *a, NphPhysicsPose pa, const Np
             (use_edge || nph_vec3_dot(gd.normal, sat_axis) < FEATURE_AGREEMENT)) {
             const NphVec3 mid = nph_vec3_scale(nph_vec3_add(gd.point_a, gd.point_b), 0.5F);
             out->normal = nph_physics_pose_transform_vector(pa, gd.normal);
-            nph_physics_manifold_push(out, nph_physics_pose_transform_point(pa, mid), gd.distance,
+            nph_triangle_contact_push(out, nph_physics_pose_transform_point(pa, mid), gd.distance,
                                       0x40000000U);
             return;
         }
@@ -902,18 +986,44 @@ void nph_physics_collide_hulls(const NphHullView *a, NphPhysicsPose pa, const Np
         }
         const NphVec3 mid = nph_vec3_scale(nph_vec3_add(sd.closest1, sd.closest2), 0.5F);
         out->normal = nph_physics_pose_transform_vector(pa, r.edge_axis);
-        nph_physics_manifold_push(out, nph_physics_pose_transform_point(pa, mid), sep,
-                                  mix_id(0x20000000U | r.edge_a, r.edge_b));
+        nph_triangle_contact_push(out, nph_physics_pose_transform_point(pa, mid), sep,
+                                  nph_physics_mix_id(0x20000000U | r.edge_a, r.edge_b));
         return;
     }
-    NphPhysicsManifoldPoint pts[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    NphPhysicsManifoldPoint pts[NPH_TRIANGLE_CONTACT_POINTS];
     u32 count = 0U;
-    const NphVec3 n = face_contact(&hp, flip, flip ? r.face_b : r.face_a, speculative, pts, &count);
+    const NphVec3 n =
+        face_contact(&hp, flip, flip ? r.face_b : r.face_a, speculative, max_points, pts, &count);
     out->normal = nph_physics_pose_transform_vector(pa, n);
     for (u32 i = 0U; i < count; ++i) {
-        nph_physics_manifold_push(out, nph_physics_pose_transform_point(pa, pts[i].point),
+        nph_triangle_contact_push(out, nph_physics_pose_transform_point(pa, pts[i].point),
                                   pts[i].separation, pts[i].id);
     }
+}
+
+void nph_physics_collide_hulls(const NphHullView *a, NphPhysicsPose pa, const NphHullView *b,
+                               NphPhysicsPose pb, f32 speculative, NphPhysicsCollideCache *cache,
+                               NphPhysicsManifold *out)
+{
+    NphTriangleContact c;
+    nph_triangle_contact_clear(&c);
+    collide_hulls(a, pa, b, pb, speculative, cache, false, NPH_PHYSICS_MANIFOLD_MAX_POINTS, &c);
+    if (c.point_count > 0U) {
+        out->normal = c.normal;
+        for (u32 i = 0U; i < c.point_count; ++i) {
+            nph_physics_manifold_push(out, c.points[i].point, c.points[i].separation,
+                                      c.points[i].id);
+        }
+    }
+}
+
+void nph_physics_collide_hull_triangle(const NphHullView *a, NphPhysicsPose pa,
+                                       const NphHullView *triangle, f32 speculative,
+                                       NphTriangleContact *out)
+{
+    nph_triangle_contact_clear(out);
+    collide_hulls(a, pa, triangle, nph_physics_pose_identity(), speculative, NULL, true,
+                  NPH_TRIANGLE_CONTACT_POINTS, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,12 +1251,13 @@ void nph_physics_collide_boxes(NphVec3 half_a, NphPhysicsPose pa, NphVec3 half_b
         const NphVec3 mid = nph_vec3_scale(nph_vec3_add(sd.closest1, sd.closest2), 0.5F);
         out->normal = nph_physics_pose_transform_vector(pa, edge_axis);
         nph_physics_manifold_push(out, nph_physics_pose_transform_point(pa, mid), sep,
-                                  mix_id(0x20000000U | edge_i, edge_j));
+                                  nph_physics_mix_id(0x20000000U | edge_i, edge_j));
         return;
     }
     NphPhysicsManifoldPoint pts[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
     u32 count = 0U;
-    const NphVec3 n = face_contact(&hp, flip, flip ? face_b : face_a, speculative, pts, &count);
+    const NphVec3 n = face_contact(&hp, flip, flip ? face_b : face_a, speculative,
+                                   NPH_PHYSICS_MANIFOLD_MAX_POINTS, pts, &count);
     out->normal = nph_physics_pose_transform_vector(pa, n);
     for (u32 i = 0U; i < count; ++i) {
         nph_physics_manifold_push(out, nph_physics_pose_transform_point(pa, pts[i].point),

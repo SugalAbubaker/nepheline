@@ -38,18 +38,23 @@ soft step at 8 substeps, whose default stiffnesses scale with the substep
 rate (contacts an eighth of it, joints a quarter); "XPBD 16" is XPBD at 16,
 since it converges with substeps.
 
+Re-measured on 2026-10-23 with the mesh work of ADR-0046, whose changes to
+the contact reduction and whose warm starting by place (a point whose id
+changed keeps the impulses of the point it replaces) moved the stacking
+rows and the ragdoll piles; the other rows did not change.
+
 ### Quality
 
 | Scene | Soft 4 | Soft 8 | TGS 4 | XPBD 4 | XPBD 16 |
 |---|---|---|---|---|---|
-| 20-row pyramid (210 boxes): top sinks / drifts aside | 1.9 / 0.35 mm, asleep in 0.53 s | 0.5 / 0.07 mm, asleep 0.50 s | 2.7 / 1.7 mm, asleep 0.55 s | collapses (2.4 m) | collapses (0.69 m) |
-| a column of 10: top sinks / drifts | 1.7 / 0.04 mm | 0.5 / 0.08 mm | 2.9 / 2.9 mm | 0.6 / 1.0 mm | 0.04 / 0.4 mm |
-| a box under one 100 times heavier: heavy box sinks | 2.2 mm | 0.54 mm | 1.5 mm | 1.5 mm | 0.08 mm |
+| 20-row pyramid (210 boxes): top sinks / drifts aside | 1.9 / 0.17 mm, asleep in 0.55 s | 0.5 / 0.08 mm, asleep 0.50 s | 0.5 / 11 mm, creeping, asleep between 6 and 8 s | collapses (2.4 m) | collapses (0.64 m) |
+| a column of 10: top sinks / drifts | 1.6 / 0.09 mm | 0.4 / 0.00 mm | 0.6 / 1.2 mm | 0.6 / 2.8 mm | 0.04 / 0.5 mm |
+| a box under one 100 times heavier: heavy box sinks | 2.2 mm | 0.54 mm | 1.2 mm | 1.7 mm | 0.08 mm |
 | 10 links carrying a body 100 times a link: stretch | 9.7 mm | 2.2 mm | 161 mm (8 substeps: breaks) | 11.3 mm | 0.8 mm |
 | 20 links whipping down from the side: worst joint gap | 1.2 mm | 0.33 mm | 9.7 mm | 2.5 mm | 0.14 mm |
 | 20° pendulum, 10 periods: period error, amplitude kept | 0.000 %, 100 % | 0.000 %, 100 % | 0.000 %, 100 % | −0.083 %, 90 % | −0.022 %, 97 % |
 | door slammed into its hinge limits at 6 rad/s: overshoot, anchor gap | 0.04°, 0.92 mm | 0.04°, 0.21 mm | 0.26°, 0.05 mm | 0.40°, 0.01 mm | 0.08°, 0.00 mm |
-| four ragdolls dropped in a heap: worst joint gap, settled | 20 mm, asleep in 3.5 s | 4.3 mm, asleep 3.5 s | 24 mm, asleep 3.5 s | 33 mm, asleep 3.9 s | 3.9 mm, asleep 3.2 s |
+| four ragdolls dropped in a heap: worst joint gap, settled | 20 mm, asleep in 3.6 s | 4.3 mm, asleep 3.5 s | 24 mm, asleep 4.1 s | 33 mm, asleep 3.9 s | 3.9 mm, asleep 3.1 s |
 | ball, restitution 0.5 from 1 m: bounce (0.25 m) | 0.247 | 0.248 | 0.247 | 0.248 | 0.250 |
 | box at μ 0.6 on 20°: creeps in 1.4 s | 0 | 0 | 0 | 2.1 mm | 0.5 mm |
 | box at μ 0.6 on 40°: slides at (1.797 m/s²) | 1.799 | 1.798 | 1.801 | 1.895 | 1.891 |
@@ -65,9 +70,9 @@ bend back.
 
 | Scene | Soft 4 | Soft 8 | TGS 4 | XPBD 4 | XPBD 16 |
 |---|---|---|---|---|---|
-| the 20-row pyramid, one thread | 385 | 522 | 349 | 484 | 888 |
-| 1000 mixed shapes piled in a bin, the job system | 673 | 1127 | 591 | 622 | 1418 |
-| 16 swinging chains of 25 links (400 joints), one thread | 573 | 1037 | 483 | 442 | 1444 |
+| the 20-row pyramid, one thread | 406 | 536 | 360 | 492 | 903 |
+| 1000 mixed shapes piled in a bin, the job system | 682 | 1148 | 601 | 671 | 1498 |
+| 16 swinging chains of 25 links (400 joints), one thread | 574 | 1033 | 485 | 448 | 1469 |
 
 (Collision is common to all: 0.19 ms of the pyramid's step.)
 
@@ -83,10 +88,16 @@ bend back.
   briefly (0.9 mm). Doubling the substeps, at 1.4 to 1.8 times the cost,
   quarters that give (2.2 mm, 0.2 mm), because the default stiffnesses now
   follow the substep rate.
-- **TGS is the cheapest (9 to 16 % less) and stacks nearly as well**, but
-  its Baumgarte-biased joints do not converge under load: the heavy chain
-  stretches 161 mm at 4 substeps and comes apart at 8. It would need
-  per-joint tuning to be safe.
+- **TGS is the cheapest (11 to 16 % less)**, but its Baumgarte-biased
+  joints do not converge under load: the heavy chain stretches 161 mm at
+  4 substeps and comes apart at 8. It would need per-joint tuning to be
+  safe. It also stacks less steadily than first measured: with every warm
+  start carried (ADR-0046), its pyramid creeps 11 mm aside for 6 to 8 s
+  before it sleeps, where it had slept in half a second while a twentieth
+  of its points lost their warm starts each step, which damped it. Small
+  changes swing it between the two (one variant of the change slept at
+  4 mm), so its stacking is the less settled of the two solvers that
+  stack.
 - **XPBD has the stiffest joints** (at 16 substeps nearly rigid: 0.8 mm
   under the heavy load, no gap at the door) **but cannot stack**: the
   20-row pyramid collapses at 4 substeps and still at 16, as Catto found in
@@ -108,7 +119,7 @@ options**, selected per world (`NphPhysicsWorldDesc::solver`):
 | Solver | Choose it for | Avoid it for |
 |---|---|---|
 | soft step (default) | everything: stacks, piles, ragdolls, vehicles, exact friction and energy | joints that must stay rigid under very heavy loads at 4 substeps (raise the substeps) |
-| TGS | worlds of stacked and piled bodies where the step's cost matters most (9 to 16 % cheaper) | heavy loads on joints (chains, cranes, ragdolls in piles), violent impacts on jointed bodies |
+| TGS | worlds of stacked and piled bodies where the step's cost matters most (11 to 16 % cheaper) | heavy loads on joints (chains, cranes, ragdolls in piles), tall stacks that must settle at once, violent impacts on jointed bodies |
 | XPBD | stiff machinery and rigs (joints near rigid at 16 substeps) | stacks and piles (ragdolls' too), sliding friction, long-lived oscillations, violent impacts on jointed bodies |
 
 The recommendation was the soft step alone (removing TGS and XPBD, since
@@ -126,12 +137,12 @@ eight stairs, sixteen dropped in a criss-cross pile, and one lying under a
 | Scene | Soft 4 | Soft 8 | TGS 4 | XPBD 4 | XPBD 16 |
 |---|---|---|---|---|---|
 | dropped: worst joint gap, past a limit; asleep | 7.6 mm, 1.1°; 4.8 s | 3.8 mm, 0.4°; 4.5 s | 13 mm, 2.4°; 4.0 s | 17 mm, 1.6°; 3.9 s | 1.1 mm, 0.3°; 2.5 s |
-| thrown: worst joint gap, past a limit; asleep | 12 mm, 5.3°; 2.0 s | 5.1 mm, 2.3°; 1.8 s | 13 mm, 3.3°; 2.7 s | 12 mm, 6.4°; 2.6 s | 3.8 mm, 0.4°; 2.6 s |
-| down the stairs: worst gap, past a limit; asleep | 3.0 mm, 1.3°; 1.9 s | 2.0 mm, 0.9°; 2.0 s | 4.7 mm, 2.8°; 2.3 s | 8.0 mm, 1.1°; 2.2 s | 1.9 mm, 0.4°; 2.9 s |
-| a pile of 16: worst gap, past a limit; asleep | 10 mm, 4.2°; 5.5 s | 4.4 mm, 2.4°; 3.3 s | 21 mm, 6.3°; never | 16 mm, 5.2°; never | 1.5 mm, 1.3°; 9.1 s |
-| under the crate: worst gap; asleep | 2.1 mm; 1.6 s | 0.9 mm; 1.6 s | 2.8 mm; 2.4 s | 6.5 mm; 1.5 s | 0.9 mm; 1.2 s |
+| thrown: worst joint gap, past a limit; asleep | 12 mm, 5.3°; 2.0 s | 5.1 mm, 2.3°; 1.8 s | 13 mm, 3.3°; 2.5 s | 12 mm, 6.4°; 2.6 s | 3.8 mm, 0.4°; 2.6 s |
+| down the stairs: worst gap, past a limit; asleep | 3.0 mm, 1.3°; 1.9 s | 2.0 mm, 0.9°; 2.0 s | 4.7 mm, 2.8°; 2.4 s | 8.0 mm, 1.1°; 2.2 s | 1.9 mm, 0.4°; 2.9 s |
+| a pile of 16: worst gap, past a limit; asleep | 8.3 mm, 3.2°; 3.4 s | 3.3 mm, 3.1°; 3.6 s | 10 mm, 2.7°; never | 20 mm, 5.6°; never | 5.6 mm, 0.6°; 5.3 s |
+| under the crate: worst gap; asleep | 2.1 mm; 1.6 s | 0.9 mm; 1.6 s | 2.8 mm; 2.4 s | 6.5 mm; 1.4 s | 0.9 mm; 1.2 s |
 | the most energy gained in one step, of the scene's | 5.4 % (dropped) | 2.6 % | 27 % (thrown) | 13 % (dropped) | 34 % (thrown) |
-| 32 lying in heaps, the job system (µs a step) | 380 | 773 | 311 | 346 | 1320 |
+| 32 lying in heaps, the job system (µs a step) | 353 | 774 | 331 | 355 | 1322 |
 
 - **Every configuration keeps a ragdoll sound**: finite, joints closed and
   within their limits at rest. On MSVC each also puts a single ragdoll to
@@ -168,9 +179,9 @@ eight stairs, sixteen dropped in a criss-cross pile, and one lying under a
   are, cut its largest one-step gain to 5.6 % but let XPBD 4 sink 3.4 cm
   into the floor and kept the XPBD 16 pile from sleeping; XPBD stays as
   published.
-- **Cost**: the ragdolls rank as the other scenes do (TGS 18 % cheaper
-  than the soft step, XPBD 9 %), and 32 ragdolls step in 0.38 ms on the
-  job system, within §8.9's 1.0 ms.
+- **Cost**: the ragdolls rank as the other scenes do (TGS 6 % cheaper
+  than the soft step, XPBD the same: 18 % and 9 % when first measured),
+  and 32 ragdolls step in 0.35 ms on the job system, within §8.9's 1.0 ms.
 
 The guidance above holds: ragdolls are the soft step's (the default), and
 TGS and XPBD now list piles of ragdolls and violent impacts on jointed

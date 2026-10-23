@@ -37,6 +37,15 @@ NPH_LOG_ENGINE_CATEGORY_DECLARE(NPH_LOG_PHYSICS);
 // b2_linearSlop).
 #define NPH_PHYSICS_LINEAR_SLOP 0.005F
 
+// The largest coordinate a shape may have in its own frame, in metres: a
+// sphere's radius, a box's half extent, a hull's or a mesh's vertex. Past
+// it the products collision forms (edges' cross products, GJK's
+// determinants) would leave f32's range, and a position resolves no finer
+// than a centimetre anyway. Bodies' positions are 64-bit and unbounded
+// (types.h's precision note): this bounds shapes, not worlds. Builders
+// refuse more, and validation refuses blocks that hold more.
+#define NPH_PHYSICS_MAX_COORDINATE 1.0e5F
+
 // How far apart two shapes may be and still get contact points: speculative
 // contacts, which the solver keeps from closing faster than the gap allows
 // (Catto, "Speculative Contacts", 2013). Four slops, as in Box2D.

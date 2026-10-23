@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Convex hulls: Quickhull on known solids and random clouds (topology,
 // containment, budgets, degenerate input, far-from-origin coordinates,
-// determinism), the box hull, mass properties, and validation of corrupted
-// blobs.
+// slivers built again at a larger tolerance, determinism), the box hull,
+// mass properties, and validation of corrupted blobs.
 
 #include "test_physics_support.h"
+
+#include <float.h>
 
 static void cube_corners(NphVec3 out[8], NphVec3 h, NphVec3 offset)
 {
@@ -49,7 +51,7 @@ NTEST(hull, cube_corners_make_a_box)
     NTEST_EXPECT_TRUE(nph_vec3_near(hull->centroid, nph_vec3_zero(), 1e-6F));
     NTEST_EXPECT_NEAR_F32(hull->inner_radius, 0.5F, 1e-6F);
     NTEST_EXPECT_NEAR_F32(hull->outer_radius, nph_f32_sqrt(5.25F), 1e-5F);
-    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
     nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
@@ -73,7 +75,7 @@ NTEST(hull, box_inertia_matches_the_closed_form)
     // The same box made directly.
     NphPhysicsHull *made = NULL;
     NTEST_ASSERT_EQ_INT(nph_physics_hull_make_box(h, alloc, &made), NPH_RESULT_OK);
-    NTEST_EXPECT_TRUE(nph_physics_hull_validate(made, 0.0F));
+    NTEST_EXPECT_TRUE(nph_physics_hull_validate(made, made->byte_size, 0.0F));
     NTEST_EXPECT_NEAR_F32(made->volume, hull->volume, 1e-5F);
     for (u32 c = 0U; c < 3U; ++c) {
         NTEST_EXPECT_TRUE(nph_vec3_near(made->inertia.c[c], hull->inertia.c[c], 1e-5F));
@@ -118,7 +120,7 @@ NTEST(hull, random_clouds_contain_every_point)
             pts[i] = nph_vec3_mul(test_vec3(&rng, -1.0F, 1.0F), scale);
         }
         NphPhysicsHull *hull = test_hull(alloc, pts, count, NPH_PHYSICS_HULL_MAX_VERTICES);
-        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
         expect_contains(hull, pts, count, 8.0F * hull->tolerance + 1e-5F);
         // Every hull vertex is an input point.
         const NphVec3 *v = nph_physics_hull_vertices(hull);
@@ -153,7 +155,7 @@ NTEST(hull, sphere_points_respect_the_budget)
     for (u32 b = 0U; b < 4U; ++b) {
         NphPhysicsHull *hull = test_hull(alloc, pts, (u32)COUNT, budgets[b]);
         NTEST_EXPECT_TRUE(hull->vertex_count <= budgets[b]);
-        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
         // More vertices, more of the ball: farthest-first keeps volume.
         NTEST_EXPECT_TRUE(hull->volume > previous);
         NTEST_EXPECT_TRUE(hull->volume < sphere);
@@ -189,7 +191,7 @@ NTEST(hull, cylinder_merges_its_caps)
         caps += n == (u32)SEGMENTS ? 1U : 0U;
     }
     NTEST_EXPECT_EQ_UINT(caps, 2U);
-    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
     nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
@@ -240,7 +242,7 @@ NTEST(hull, far_from_the_origin)
     NTEST_EXPECT_EQ_UINT(hull->face_count, 6U);
     NTEST_EXPECT_NEAR_F32(hull->volume, 1.0F, 1e-3F);
     NTEST_EXPECT_TRUE(nph_vec3_near(hull->centroid, nph_vec3(1000.0F, -2000.0F, 500.0F), 1e-3F));
-    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
     nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
@@ -289,10 +291,40 @@ NTEST(hull, degenerate_input_is_rejected)
     cube[3].y = nph_f32_from_bits(0x7FC00000U);
     NTEST_EXPECT_EQ_INT(nph_physics_hull_build(&desc, alloc, &hull), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_NULL(hull);
+    // A coordinate beyond the limit.
+    cube[3].y = 2.0F * NPH_PHYSICS_MAX_COORDINATE;
+    NTEST_EXPECT_EQ_INT(nph_physics_hull_build(&desc, alloc, &hull), NPH_RESULT_INVALID_ARGUMENT);
     // Bad box sizes.
     NTEST_EXPECT_EQ_INT(nph_physics_hull_make_box(nph_vec3(1.0F, 0.0F, 1.0F), alloc, &hull),
                         NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_physics_hull_make_box(
+                            nph_vec3(1.0F, 2.0F * NPH_PHYSICS_MAX_COORDINATE, 1.0F), alloc, &hull),
+                        NPH_RESULT_INVALID_ARGUMENT);
     nph_log_set_level(&NPH_LOG_PHYSICS, NPH_LOG_LEVEL_INFO);
+    test_alloc_end(&ta);
+}
+
+// A sliver 4 mm thick and 128 m long (found by fuzzing): Quickhull's merges
+// leave a face reflex beyond the derived tolerance, and the builder builds
+// it again at four times the tolerance, which validates.
+NTEST(hull, slivers_build_again_at_a_larger_tolerance)
+{
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    const f32 lift = 1.0F / 256.0F;
+    const NphVec3 pts[16] = {{0.0F, 0.0F, 0.0F},    {0.0F, 0.0F, 0.5F},
+                             {0.0F, 0.0F, 1.0F},    {0.0F, 0.0F, 1.2773438F},
+                             {0.5F, 0.0F, 0.0F},    {0.5F, 0.0F, 0.5F},
+                             {0.5F, 0.0F, 1.0F},    {0.5F, 0.0F, 1.5F},
+                             {1.0F, 0.0F, 0.0F},    {1.0F, 0.0F, 0.5F},
+                             {1.0F, 0.0F, -128.0F}, {lift, lift, 0.0F},
+                             {0.0F, lift, -128.0F}, {0.0F, lift, 0.0F},
+                             {lift, lift, -128.0F}, {-127.99609F, -117.99609F, -125.00391F}};
+    NphPhysicsHull *hull = test_hull(alloc, pts, 16U, 0U);
+    NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
+    const f32 derived = 3.0F * FLT_EPSILON * (128.0F + 117.99609F + 128.0F);
+    NTEST_EXPECT_NEAR_F32(hull->tolerance, 4.0F * derived, 1e-3F * derived);
+    nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
 
@@ -338,12 +370,18 @@ NTEST(hull, validate_rejects_corrupted_blobs)
     NphAllocator *alloc = test_alloc_begin(&ta);
     NphPhysicsHull *hull = NULL;
     NTEST_ASSERT_EQ_INT(nph_physics_hull_make_box(nph_vec3_one(), alloc, &hull), NPH_RESULT_OK);
-    NphPhysicsHull *copy = (NphPhysicsHull *)NPH_ALLOC(alloc, hull->byte_size, 16U);
+    const u32 size = hull->byte_size;
+    NphPhysicsHull *copy = (NphPhysicsHull *)NPH_ALLOC(alloc, size + 16U, 16U);
     NTEST_ASSERT_NOT_NULL(copy);
     nph_log_set_level(&NPH_LOG_PHYSICS, NPH_LOG_LEVEL_ERROR); // each rejection warns
+    NTEST_EXPECT_FALSE(nph_physics_hull_validate(NULL, size, 0.0F));
+    NTEST_EXPECT_FALSE(nph_physics_hull_validate(hull, 64U, 0.0F));       // shorter than the header
+    NTEST_EXPECT_FALSE(nph_physics_hull_validate(hull, size - 1U, 0.0F)); // than byte_size
+    memcpy((u8 *)copy + 4U, hull, size);
+    NTEST_EXPECT_FALSE(nph_physics_hull_validate((u8 *)copy + 4U, size, 0.0F)); // misaligned
     // Each corruption on a fresh copy; none may crash, all must fail.
-    for (u32 kind = 0U; kind < 7U; ++kind) {
-        memcpy(copy, hull, hull->byte_size);
+    for (u32 kind = 0U; kind < 13U; ++kind) {
+        memcpy(copy, hull, size);
         void *edge_bytes = (u8 *)copy + copy->edges_offset;
         void *vertex_bytes = (u8 *)copy + copy->vertices_offset;
         NphPhysicsHullEdge *edges = edge_bytes;
@@ -367,14 +405,32 @@ NTEST(hull, validate_rejects_corrupted_blobs)
         case 5U:
             edges[9].face = edges[9 ^ 1].face;
             break;
-        default:
+        case 6U:
             copy->vertex_count = 1000U;
             break;
+        case 7U:
+            verts[1].x = nph_f32_from_bits(0x7FC00000U); // NaN passes every comparison
+            break;
+        case 8U:
+            copy->tolerance = nph_f32_from_bits(0x7FC00000U); // so would any geometry
+            break;
+        case 9U:
+            copy->volume = -1.0F;
+            break;
+        case 10U:
+            copy->bounds.max.x = 2.0F * NPH_PHYSICS_MAX_COORDINATE;
+            break;
+        case 11U:
+            copy->face_count = 2U * copy->vertex_count - 3U; // more than a hull can have
+            break;
+        default:
+            copy->inertia.c[1].y = nph_f32_from_bits(0x7F800000U);
+            break;
         }
-        NTEST_EXPECT_FALSE(nph_physics_hull_validate(copy, 0.0F));
+        NTEST_EXPECT_FALSE(nph_physics_hull_validate(copy, size, 0.0F));
     }
     nph_log_set_level(&NPH_LOG_PHYSICS, NPH_LOG_LEVEL_INFO);
-    NPH_FREE(alloc, copy, hull->byte_size, 16U);
+    NPH_FREE(alloc, copy, size + 16U, 16U);
     nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
@@ -402,7 +458,7 @@ NTEST(hull, lattices_give_their_box)
         NTEST_EXPECT_EQ_UINT(hull->face_count, 6U);
         const f32 volume = 10.0F * 5.0F * 20.0F * scales[s] * scales[s] * scales[s];
         NTEST_EXPECT_NEAR_F32(hull->volume, volume, volume * 1e-4F);
-        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
         nph_physics_hull_free(hull, alloc);
     }
     test_alloc_end(&ta);
@@ -428,7 +484,7 @@ NTEST(hull, noisy_spheres_stay_valid)
             pts[i] = nph_vec3_scale(test_unit(&rng), r);
         }
         NphPhysicsHull *hull = test_hull(alloc, pts, (u32)COUNT, NPH_PHYSICS_HULL_MAX_VERTICES);
-        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, 0.0F));
+        NTEST_EXPECT_TRUE(nph_physics_hull_validate(hull, hull->byte_size, 0.0F));
         NTEST_EXPECT_TRUE(hull->vertex_count > 128U);
         const f32 r = radius[c / 3U];
         NTEST_EXPECT_TRUE(hull->volume > 0.9F * 4.18879F * r * r * r);

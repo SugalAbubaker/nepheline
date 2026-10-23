@@ -103,6 +103,39 @@ NTEST(world, a_resting_box_does_not_drift)
     scene_end(&s);
 }
 
+// Warm starting by place (contact.c): a point whose id changes but whose
+// place does not keeps its impulses. Of three twins of a resting box, the
+// second's stored points lose their ids and the third's also move 2 cm,
+// beyond the matching distance: the second steps as the first, to the bit,
+// and the third, its contact started cold, does not.
+NTEST(world, points_keep_their_impulses_when_their_ids_change)
+{
+    Scene s[3];
+    for (u32 k = 0U; k < 3U; ++k) {
+        NphPhysicsWorldDesc d = nph_physics_world_desc_default();
+        d.enable_sleep = 0;
+        scene_begin_with(&s[k], d);
+        add_ground(s[k].w, 0.0);
+        add_body(s[k].w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(0.3, 0.3, -0.2),
+                 nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.4F),
+                 nph_physics_geometry_box(nph_vec3(0.5F, 0.3F, 0.4F)), 0.6F, 0.0F);
+        step(s[k].w, NULL, 120U);
+        NTEST_ASSERT_EQ_UINT(s[k].w->awake_contacts.len, 1U);
+        NTEST_ASSERT_EQ_UINT(s[k].w->contacts.data[s[k].w->awake_contacts.data[0]].point_count, 4U);
+    }
+    NTEST_ASSERT_EQ_UINT(nph_physics_world_hash(s[0].w), nph_physics_world_hash(s[1].w));
+    scramble_contact_points(s[1].w, nph_vec3_zero());
+    scramble_contact_points(s[2].w, nph_vec3(0.02F, 0.0F, 0.0F));
+    for (u32 k = 0U; k < 3U; ++k) {
+        step(s[k].w, NULL, 1U);
+    }
+    NTEST_EXPECT_EQ_UINT(nph_physics_world_hash(s[0].w), nph_physics_world_hash(s[1].w));
+    NTEST_EXPECT_NE_UINT(nph_physics_world_hash(s[0].w), nph_physics_world_hash(s[2].w));
+    for (u32 k = 0U; k < 3U; ++k) {
+        scene_end(&s[k]);
+    }
+}
+
 static void build_stack(NphPhysicsWorld *w, u32 count, NphDVec3 base, NphPhysicsBody *out)
 {
     for (u32 i = 0U; i < count; ++i) {

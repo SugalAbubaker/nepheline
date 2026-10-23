@@ -11,6 +11,7 @@ nph_add_module(physics
         src/body.c
         src/collide.c
         src/collide_hull.c
+        src/collide_mesh.c
         src/contact.c
         src/geometry.c
         src/gjk.c
@@ -18,6 +19,7 @@ nph_add_module(physics
         src/island.c
         src/joint.c
         src/joint_solver.c
+        src/mesh.c
         src/physics_internal.h
         src/shape.c
         src/solver.c
@@ -38,14 +40,17 @@ nph_add_test(physics
     SOURCES
         tests/test_aabb_tree.c
         tests/test_collide.c
+        tests/test_collide_mesh.c
         tests/test_geometry.c
         tests/test_gjk.c
         tests/test_hull.c
         tests/test_joint.c
+        tests/test_mesh.c
         tests/test_physics_support.h
         tests/test_ragdoll.c
         tests/test_solvers.c
         tests/test_world.c
+        tests/test_world_mesh.c
         tests/test_world_support.h
     DEPS
         nph::physics

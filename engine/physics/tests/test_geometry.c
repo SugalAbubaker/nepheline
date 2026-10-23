@@ -220,6 +220,16 @@ NTEST(geometry, validity)
     NTEST_EXPECT_TRUE(nph_physics_geometry_is_valid(&g));
     g = nph_physics_geometry_box(nph_vec3(1.0F, -1.0F, 1.0F));
     NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(&g));
+    // Sizes beyond the coordinate limit.
+    const f32 big = 2.0F * NPH_PHYSICS_MAX_COORDINATE;
+    g = nph_physics_geometry_sphere(big);
+    NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(&g));
+    g = nph_physics_geometry_capsule(big, 1.0F);
+    NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(&g));
+    g = nph_physics_geometry_box(nph_vec3(1.0F, 1.0F, big));
+    NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(&g));
+    g = nph_physics_geometry_box(nph_vec3_splat(NPH_PHYSICS_MAX_COORDINATE));
+    NTEST_EXPECT_TRUE(nph_physics_geometry_is_valid(&g));
     g = nph_physics_geometry_hull(NULL);
     NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(&g));
     NTEST_EXPECT_FALSE(nph_physics_geometry_is_valid(NULL));

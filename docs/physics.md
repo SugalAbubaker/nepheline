@@ -8,8 +8,10 @@ collision, queries, and the character controller, stepped at a fixed
 bridges entities to bodies) or the renderer (debug drawing goes out through
 a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md) (the
 collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
-solver), [ADR-0044](adr/0044-physics-joints.md) (joints), and
-[ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison).
+solver), [ADR-0044](adr/0044-physics-joints.md) (joints),
+[ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison),
+and [ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
+heightfields).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -20,14 +22,16 @@ Phase 11 builds it in parts. This document describes what exists:
 | Joints: ball (cone, twist, friction), hinge (limits, motor, spring), fixed, slider (limits, motor, spring), distance (rod, rope, spring, motor), 6-DOF (each axis locked, limited, or free, with drives) | done |
 | The solver comparison (§13): the soft step (the default), TGS, and XPBD | done |
 | The ragdoll: the exit tests of §12 under every solver | done |
-| Meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
+| Triangle meshes: the block, its builder and queries, convex shapes against triangles, a pair's four manifolds | done |
+| Heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
 | `types.h` | units, tolerances, rigid poses, mass properties |
 | `geometry.h` | the shape types, bounds, mass, support points, GJK proxies |
 | `hull.h` | the convex hull block and the Quickhull builder |
-| `collide.h` | contact manifolds, GJK distance, EPA penetration, segment distance, manifold reduction |
+| `mesh.h` | the triangle mesh block, its builder (welding, active edges, the four-wide tree), box overlaps and raycasts |
+| `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction |
 | `aabb_tree.h` | the dynamic AABB tree |
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
@@ -51,7 +55,10 @@ few metres at most and keep full precision anywhere in the world.
 contact points are reported up to `NPH_PHYSICS_SPECULATIVE_DISTANCE` (four
 slops) apart, so the solver can stop an approaching body before it
 penetrates (speculative contacts, Catto 2013); broadphase boxes are
-fattened by `NPH_PHYSICS_AABB_MARGIN` (10 cm).
+fattened by `NPH_PHYSICS_AABB_MARGIN` (10 cm). A shape's sizes and its
+vertices in its own frame stay within `NPH_PHYSICS_MAX_COORDINATE`
+(100 km), so the products collision forms (edges' cross products, GJK's
+determinants) stay inside f32's range; bodies' positions are unbounded.
 
 **Poses** (`NphPhysicsPose`) are a unit quaternion and a translation,
 32-bit. Mass properties (`NphPhysicsMassData`) are a mass, a centre of
@@ -69,6 +76,7 @@ Every geometry is canonical in its own frame and placed by a pose:
 | capsule | the segment from (0, -h, 0) to (0, +h, 0) swept by a ball; Y is the long axis, as for a standing character |
 | box | axis-aligned, centred, with half extents |
 | hull | a shared convex polyhedron (below) |
+| mesh | a shared triangle mesh (below); on static and kinematic bodies only |
 
 `nph_physics_geometry_aabb` gives the tight box of a placed geometry (for
 a box, |R| times the half extents: Arvo, Graphics Gems 1990),
@@ -77,7 +85,9 @@ for the primitives; the hull's are precomputed by its builder), and
 `nph_physics_geometry_support` the farthest point along a direction. A
 **proxy** (`NphPhysicsProxy`) describes a convex shape to GJK as the hull of
 a few points rounded by a radius: a sphere is one point, a capsule two, a
-box its corners, a hull its vertices.
+box its corners, a hull its vertices. A mesh is a surface, not a convex
+solid: it has no mass and no proxy, and its pairs go through the mesh
+narrow phase.
 
 ## Convex hulls
 
@@ -97,10 +107,15 @@ distance) and outer radius, and the build tolerance. The block holds no
 pointer, so it can be copied, written into a cooked file, and used straight
 from a memory-mapped one. Faces are convex polygons, not triangles: a box
 has six faces and twelve edges, which is what the separating axis test and
-contact clipping want. `nph_physics_hull_validate` checks every invariant
-(twins, closed loops, planar convex faces, every vertex behind every plane,
-Euler's formula, offsets inside the block), for tests and for blobs read
-from files.
+contact clipping want. `nph_physics_hull_validate` checks a block of a
+given size before use (hulls read from files): a 16-byte aligned header
+whose `byte_size` fits, the offsets inside the block, the counts within
+what a hull of 256 vertices can have (at most 2V − 4 faces and 3V − 6
+edges, which the collision code's arrays hold), the header's numbers finite
+and in range, and every invariant: twins, closed loops, every vertex finite
+and inside the bounds, planar convex faces, every vertex behind every
+plane, Euler's formula. A hull it accepts is safe for every function of the
+module, which the fuzzing below holds it to.
 
 **The builder** (`nph_physics_hull_build`) is Quickhull (Barber, Dobkin, and
 Huhdanpaa, ACM TOMS 1996), run in double precision on the 32-bit points:
@@ -130,6 +145,14 @@ round-off bound of a plane distance at the cloud's scale. Build from points
 near the origin: the hull's frame is the points' frame, and coordinates far
 from it cost collision precision. The build is deterministic: the same
 points give the same bytes.
+
+Every hull the builder returns has passed validation. Quickhull's merges
+keep each face convex within the tolerance, but a cloud with features near
+the tolerance's scale can leave a merged face reflex beyond it: fuzzing
+found a sliver 4 mm thick and 128 m long whose hull had a corner 1 mm
+inside its neighbours' line. Such a hull is built again at four, then
+sixteen times the tolerance, which merges what the first could not (the
+sliver's validates at four), and a cloud that still fails is refused.
 
 `nph_physics_hull_make_box` makes a box's hull directly, with its exact
 topology.
@@ -172,10 +195,16 @@ steps. A face contact clips the incident face (the other polyhedron's face
 most anti-parallel to the reference normal) against the side planes of the
 reference face (Sutherland and Hodgman 1974), keeps the points within the
 speculative distance, and reduces them to four (Gregorius, "Robust Contact
-Creation for Physics Simulations", GDC 2015): the deepest, the farthest
-from it, the one that makes the largest triangle with both, and the one
-farthest outside that triangle. An edge pair gives one point, from the
-closest points of the two edges.
+Creation for Physics Simulations", GDC 2015): the deepest (of points as
+deep, the one farthest from their centre: a corner, not a point inside the
+contact), the farthest from it, the one that makes the largest triangle
+with both, and the one farthest outside that triangle; points along a line
+keep its two ends. Points that touch (within a tenth of a slop) come
+before speculative ones: fewer than four are all kept and the rest chosen
+from the others, and four or more are the only candidates. Trading a
+supporting point for one merely near the surface let a box on a curved
+mesh rock between two pairs of supports and never sleep. An edge pair
+gives one point, from the closest points of the two edges.
 
 **Apart, GJK decides.** When the shapes are separated by more than a slop,
 the axis test only bounds the gap from below (two corners approaching each
@@ -223,6 +252,118 @@ of the smallest separating translation and the deepest points of each
 shape. When only the rounding overlaps, GJK's closest points answer
 directly.
 
+## Meshes
+
+A triangle mesh (`NphPhysicsMesh`, `mesh.h`;
+[ADR-0046](adr/0046-physics-meshes-heightfields.md)) is one block like a
+hull: a 64-byte header and its arrays, located by byte offsets (four-wide
+tree nodes, vertices, triangles in leaf order, each triangle's active edges,
+and each triangle's index in the builder's input, which queries report so a
+game can find its material). It holds no pointer, so it can be cooked and
+used from a memory-mapped file, and any number of shapes in any number of
+worlds may share it. `nph_physics_mesh_validate` checks a block of a given
+size before use: offsets and counts inside it, indices in range,
+coordinates finite and within the coordinate limit, every triangle in
+exactly one leaf, every node's boxes finite and holding what they contain,
+every empty slot's box the inverted one the builder writes (the overlap
+query relies on it overlapping nothing), and the tree no deeper than the
+queries' stacks hold whatever order they visit children in: three pending
+siblings a level and a node's four children, which the raycast's
+nearest-first order can reach where the validator's own walk would not.
+
+**The builder** (`nph_physics_mesh_build`) welds vertices closer than a
+tolerance (an exporter repeats a vertex for each face with its own normal),
+drops degenerate triangles, marks the active edges, and builds the tree:
+binned SAH (Wald 2007) down to leaves of at most four triangles, collapsed
+into four-wide nodes whose child boxes are structure-of-arrays (Dammertz,
+Hanika, and Keller, EGSR 2008), so a node meets a box or a ray in a few SSE
+instructions. The build is deterministic. A triangle collides from its
+front, the side its vertices run counter-clockwise from, unless the mesh
+is two-sided (open sheets: fences, thin walls).
+
+**Active edges** (Jolt's, after Bullet's internal-edge utility): an edge is
+active when it bounds one triangle (an open edge), more than two, or two
+meeting at a convex angle of more than 5 degrees; flat and concave edges
+are inactive. They are what lets a body cross a seam without bumping
+(below).
+
+**Queries**: `nph_physics_mesh_overlap` visits the triangles whose boxes
+overlap a box, and `nph_physics_mesh_raycast` finds the closest hit with the
+watertight test of Woop, Benthin, and Wald (JCGT 2013), so a ray never slips
+through an edge or a vertex that triangles share.
+
+**Against a triangle** (`nph_physics_collide_triangle`). Each triangle is
+collided in a frame with its mesh's axes centred on the convex shape, its
+vertices moved there in 64 bits, so a mesh keeps full precision however far
+the shape is from the mesh's origin. Spheres and capsules use closest
+points (Ericson §5.1.5 and §5.1.9), exactly; a capsule lying along the face
+gets the two ends of its part over the triangle. Boxes and hulls use the
+separating axis test against the triangle as a flat polyhedron: its normal,
+the hull's faces, and the edge pairs whose Gauss-map arcs cross, a
+triangle's edge spanning the half circle from its normal to the reverse.
+The triangle's normal is computed in 64 bits (a sliver's cross product
+loses its digits in 32), ties between faces go to the triangle's, so a shape
+lying flat takes the triangle's own normal, and clipping keeps every point,
+up to sixteen: a box's face clipped to a triangle has up to seven, and
+reducing each triangle's to four lost corners of the whole contact. Then
+the triangle's rules:
+
+- **One side.** A shape whose centre is behind a one-sided triangle gets
+  nothing from it, and so does a contact that would push a shape through
+  it from behind. A two-sided triangle turns its front to the shape.
+- **Active edges.** A contact on the face, on an inactive edge, or on a
+  vertex whose normal leans across none of its active edges takes the
+  face's normal, and is made again against the face along it, as Jolt
+  makes the manifold between two faces: the shape's supporting feature
+  clipped to the triangle, the separations along the normal. A shape that
+  is not over the face gets nothing from that triangle (its neighbour
+  carries it), so its points stay true support points: no point beside a
+  ball to brake its roll, none outside a box's face to take a corner's
+  place. A contact remade deeper than the axis test found, by more than a
+  slop, is dropped: a box straddling a platform's plane beside its open
+  edge would otherwise be lifted onto it.
+
+**A mesh's manifolds** (`nph_physics_collide_mesh`). The triangles under the
+shape's box, grown by the speculative distance, each give a contact. A
+contact joins the cluster whose first member's normal agrees with its own
+within 5 degrees (Jolt's manifold reduction), and a cluster's normal is its
+members' average, each weighted by its depth: the deepest member's normal
+alone flipped between neighbouring triangles' from step to step on curved
+ground, and rocked boxes that never slept. Copies of a point from
+triangles either side of a seam (within 0.1 mm) are one point; a cluster
+gathers up to 32 and is compacted to its deepest, the extremes of its
+touching points along eight directions, and those of its speculative
+points along four. Each cluster is then reduced to four points (touching
+points first, as every manifold is), a sphere keeping one point under its
+centre, and the four clusters with the deepest points are the pair's, the
+deepest first. Point ids mix the triangle's index with its features.
+
+**In the world** a mesh goes on a static or a kinematic body (shape
+creation refuses a dynamic one: a surface has no mass); a kinematic mesh is
+a moving platform. A mesh and a convex shape are one pair, found by the
+broadphase like any other, whose contact owns three child contacts, made
+with it, for its second to fourth manifolds. Children are ordinary
+contacts to the constraint graph, the islands, and the solver (a pair's
+manifolds share a body, so they take different colours, and the kernels
+are unchanged), but stay out of the pair map, the bodies' contact lists,
+and the awake list: the parent's narrow phase writes every record,
+carrying impulses across all four (a manifold may move from one record to
+another between steps), and the serial pass after it brings the children's
+touching state and graph membership up to date. Events are the pair's:
+begin and end touching when any manifold does, and at most one hit a step,
+at the fastest-approaching point of any manifold.
+
+Costs (Profile, the reference machine): a 128 × 128 grid of 32 768
+triangles builds in 23 ms (692 ns a triangle); the triangles under a 1 m box
+are found in 152 ns, and a ray's closest hit in 145 ns. A box resting
+anywhere on a grid of 0.5 m cells collides in 8.2 µs, a ball in 0.64 µs, a
+lying capsule in 1.8 µs, and a 32-vertex hull in 25 µs: boxes and hulls pay
+a full axis test per triangle, and a dedicated box-triangle test and
+triangles prepared once per step as structure-of-arrays are the next
+optimisations. A thousand mixed shapes piled on a mesh floor step in
+0.77 ms on the job system (0.68 ms on a box floor), and on a rolling
+terrain in 0.85 ms.
+
 ## Broadphase
 
 `NphAabbTree` is the dynamic bounding volume hierarchy of Catto's "Dynamic
@@ -267,10 +408,10 @@ A step (`nph_physics_world_step`, 1/240 s in the engine) runs five passes:
    contacts in the move buffer's order.
 2. **Collide.** Every contact with an awake body runs the narrow phase, in
    parallel, in a frame centred on its first body's centre of mass (so the
-   manifold's points are that body's anchors). Points that keep their
-   feature ids keep last step's impulses, for warm starting; the tangent
-   impulse is kept as a world vector, which survives a turn of the tangent
-   basis. Then, serially and in the awake list's order, the contacts that
+   manifold's points are that body's anchors). Points keep last step's
+   impulses, for warm starting (below); the tangent impulse is kept as a
+   world vector, which survives a turn of the tangent basis. Then,
+   serially and in the awake list's order, the contacts that
    began or stopped touching, or whose fattened boxes parted, take effect:
    events, waking, island links, graph membership.
 3. **Solve** (below): velocities, positions, and the contact impulses.
@@ -279,6 +420,24 @@ A step (`nph_physics_world_step`, 1/240 s in the engine) runs five passes:
    order, and join the move buffer; move events.
 5. **Islands.** Pending merges, then, when sleep is on, islands that have
    been still for `time_to_sleep` fall asleep.
+
+**Warm starting.** A point takes the impulses of last step's point with
+its id (the same features), and a point whose id changed takes those of an
+unclaimed old point within 1 cm of it on both bodies: Jolt matches all of
+its cached points by position (`mContactPointPreserveLambdaMaxDistSq`);
+here place backs up the ids. Ids alone were not enough: where a reduction
+chooses between two near-coincident points, as the clipped corners of a
+box turned a hair on another are, the choice flips with rounding from step
+to step and so do the ids. A column of ten boxes settling lost a twentieth
+of its warm starts that way, nearly all to a point under a millimetre
+away, and drifted 2 to 5 mm aside; with the fallback it stands within
+0.09 mm. In a mesh pair, whose manifolds face different ways, the old
+point must also come from a manifold facing within 5 degrees of the new
+one's (the merge angle): a box in a crease has a corner in each slope's
+manifold, and on a terrain, impulses passed between neighbouring manifolds
+5 to 15 degrees apart pushed boxes sideways for seconds. A convex pair's
+one manifold carries its points' impulses however its normal turns, as
+ids do.
 
 **Determinism.** Each parallel piece writes only its own records, and each
 serial pass runs in a fixed order (the awake lists, the move buffer), so
@@ -375,7 +534,8 @@ independent of the substep and the damping. Box2D runs its contacts at
 same ratio is 120 Hz, the same arithmetic per substep with sixteen times
 less give. A box carrying a box 100 times heavier sinks 0.44 mm into the
 ground and the heavy box 1.7 mm more into it (at 30 Hz: 7 and 27 mm), and
-the top of a 20-row pyramid stands 1.9 mm low (26 mm).
+the top of a 20-row pyramid stands 1.9 mm low (26 mm), and 0.2 mm at
+most from its place.
 
 Within a substep, the current separation of a point comes from the bodies'
 displacements and rotations since the step began, applied to the anchors
@@ -558,9 +718,9 @@ heap awake. Under the default solver a ragdoll dropped on its straight
 legs, thrown cartwheeling at the ground, or sent down stairs comes to rest
 in 2 to 5 s with its joints closed to 0.04 mm and within 0.03° of their
 limits, opening at most 12 mm and 5.3° for a moment at the hardest impacts;
-sixteen piled on one another sleep in 5.5 s; a 216 kg crate dropped on one
+sixteen piled on one another sleep in 3.4 s; a 216 kg crate dropped on one
 lying on its back opens its joints 2 mm. Thirty-two lying in heaps (352
-bodies, 320 joints) step in 1.34 ms on one thread and 0.38 ms on the job
+bodies, 320 joints) step in 1.34 ms on one thread and 0.35 ms on the job
 system.
 
 ## Choosing a solver
@@ -573,7 +733,7 @@ the measurements):
 | Solver | Per substep | Choose it for | Avoid it for |
 |---|---|---|---|
 | soft step (default) | soft solve, then a rigid relax | everything: stacks, piles, ragdolls, exact friction and energy | very heavy loads on joints at 4 substeps (raise the substeps) |
-| TGS (PhysX 4) | rigid rows with a Baumgarte bias on the step's error; one velocity pass after the substeps | stacks and piles where cost matters most (9 to 16 % cheaper) | heavy loads on joints (a 100:1 chain stretches 161 mm and can come apart), piles of ragdolls (a limb or two never settles), violent impacts on jointed bodies (energy spikes) |
+| TGS (PhysX 4) | rigid rows with a Baumgarte bias on the step's error; one velocity pass after the substeps | stacks and piles where cost matters most (11 to 16 % cheaper) | heavy loads on joints (a 100:1 chain stretches 161 mm and can come apart), tall stacks that must settle at once (a 20-row pyramid creeps 11 mm for 6 to 8 s before it sleeps), piles of ragdolls (a limb or two never settles), violent impacts on jointed bodies (energy spikes) |
 | XPBD (Müller et al. 2020) | predicted positions corrected by rigid constraints, velocities derived, then a velocity pass | stiff machinery and rigs (near rigid at 16 substeps) | stacks (a 20-row pyramid collapses), sliding friction (5 % weak), long oscillations (10 % of a pendulum's swing lost in 10 periods), piles of ragdolls at 4 substeps, violent impacts on jointed bodies at 16 (energy spikes) |
 
 The soft step is the only one that stacks, keeps energy, gets friction
@@ -637,11 +797,15 @@ as a union (the larger absorbs the smaller, so a merge moves the fewest
 records) and carried out at the end of the step; a contact that stops
 touching only counts a possible split. An island whose bodies have all
 been below their sleep thresholds for `time_to_sleep` (half a second by
-default) is a candidate: if contacts left it, it is first split into its
-connected components (one island per step, depth first in list order),
-which are reconsidered next step; otherwise it falls asleep. Finding
-components is spent only where it buys sleep, and an island that has grown
-too big while awake costs nothing until then.
+default) falls asleep, unless contacts or joints left it: an island that
+may have fallen apart is split into its connected components once any one
+of its bodies is ready to sleep (Box2D's rule; one island a step, the one
+whose body has been still the longest, depth first in list order), and its
+parts are reconsidered next step. Waiting for every body to be still let
+one that never stops (a box sliding off the edge of a terrain) keep the
+whole pile it had left awake. Finding components is spent only where it
+buys sleep, and an island that has grown too big while awake costs nothing
+until then.
 
 A sleeping island's bodies leave the awake list, its contacts leave the
 awake list and the graph, and the island costs nothing per step: ten
@@ -660,9 +824,10 @@ the runtime mirrors physics into the scene). Nothing calls back into user
 code during a step, so nothing can change the world while it is in
 flight.
 
-`nph_physics_world_draw` draws shapes, broadphase boxes, contact points and
-normals, and centres of mass through a line callback, in 32-bit
-coordinates relative to the renderer's debug origin.
+`nph_physics_world_draw` draws shapes (a mesh as its triangles' edges, the
+inactive ones dimmed), broadphase boxes, contact points and normals, and
+centres of mass through a line callback, in 32-bit coordinates relative to
+the renderer's debug origin.
 
 ## Performance
 
@@ -676,57 +841,73 @@ point):
 | `collide_spheres` | 24 |
 | `collide_capsules` | 50 |
 | `collide_box_sphere` | 28 |
-| `collide_box_box_random` (overlapping, random poses) | 287 |
-| `collide_box_box_resting` (four points from an octagon) | 450 |
-| `collide_box_box_cached_apart` | 57 |
-| `collide_hull_hull_32v` | 9 100 |
+| `collide_box_box_random` (overlapping, random poses) | 291 |
+| `collide_box_box_resting` (four points from an octagon) | 474 |
+| `collide_box_box_cached_apart` | 56 |
+| `collide_hull_hull_32v` | 9 260 |
 | `collide_hull_capsule_32v` | 720 |
-| `gjk_hull_hull_32v` / `_cached` | 849 / 204 |
-| `epa_box_hull_32v` | 3 370 |
-| `tree_insert_10k` (insert and remove) | 455 |
-| `tree_move_10k` | 1 690 |
-| `tree_query_10k` (2 m box) | 71 |
-| `tree_raycast_10k` (50 m, closest hit) | 851 |
-| `tree_rebuild_10k` (per proxy) | 212 |
-| `hull_build_1000_64v` | 311 000 |
-| `world_pyramid_20_st` (210 boxes, one thread) | 387 000 |
-| `world_pyramid_20_mt` (the job system) | 147 000 |
-| `world_pyramids_16_mt` (3360 boxes) | 905 000 |
-| `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 390 000 |
+| `gjk_hull_hull_32v` / `_cached` | 843 / 204 |
+| `epa_box_hull_32v` | 3 390 |
+| `tree_insert_10k` (insert and remove) | 474 |
+| `tree_move_10k` | 1 710 |
+| `tree_query_10k` (2 m box) | 69 |
+| `tree_raycast_10k` (50 m, closest hit) | 864 |
+| `tree_rebuild_10k` (per proxy) | 210 |
+| `hull_build_1000_64v` | 244 000 |
+| `mesh_build_grid_128` (32 768 triangles, per triangle) | 692 |
+| `mesh_raycast_grid_128` (closest hit, down onto the grid) | 145 |
+| `mesh_overlap_grid_128` (the triangles under a 1 m box) | 152 |
+| `collide_mesh_box` (a box resting on 0.5 m cells, anywhere, turned any way) | 8 190 |
+| `collide_mesh_sphere` / `_capsule` / `_hull_32v` (the same) | 639 / 1 810 / 25 000 |
+| `world_pyramid_20_st` (210 boxes, one thread) | 406 000 |
+| `world_pyramid_20_mt` (the job system) | 151 000 |
+| `world_pyramids_16_mt` (3360 boxes) | 951 000 |
+| `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 590 000 |
 | `world_pile_1000_mt` | 682 000 |
-| `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
+| `world_mesh_pile_1000_st` / `_mt` (the same pile on a mesh floor) | 4 580 000 / 766 000 |
+| `world_terrain_pile_1000_mt` (the pile dropped on a rolling terrain) | 855 000 |
+| `world_sleeping_10k` (10k asleep, one ball awake) | 3 160 |
 | `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
-| `world_chains_mt` | 160 000 |
+| `world_chains_mt` | 165 000 |
 | `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 340 000 |
-| `world_ragdolls_32_mt` | 380 000 |
+| `world_ragdolls_32_mt` | 353 000 |
+
+The resting pyramid costs 3 % more than without warm starting by place
+(407 µs against 394, the same build either way): with every warm start
+carried, its boxes come
+to rest turned by a hair against each other in twice as many contacts
+(143 a step against 75), whose clipped octagons the reduction then cuts to
+four points. The matching itself runs for about one point a step.
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
 tests for two 32-vertex hulls; the planned optimisation buckets B's arcs on
 the Gauss map so each arc of A meets only its neighbours, measured with the
 world's scenes. Until then, hulls of 16 to 32 vertices suit props.
 
-In the world, the narrow phase is now the larger cost on one thread: of the
+In the world, the narrow phase is the larger cost on one thread: of the
 pile's 3.4 ms, 2.1 ms is collision (every awake contact, touching or not,
 runs its pair function every step) and 1.2 ms the solver. Resting contacts
 whose bodies have barely moved relative to each other can keep their
 manifold, refreshing only the separations (the persistent manifolds of
 PhysX's PCM); that is the next optimisation. On the job system the 1000
-pile steps in 0.68 ms and 3360 resting boxes in 0.91 ms, against the 1.0 ms
-budget of §8.9 on the six cores of the reference CPU class.
+pile steps in 0.68 ms (0.77 ms on a mesh floor) and 3360 resting boxes in
+0.95 ms, against the 1.0 ms budget of §8.9 on the six cores of the
+reference CPU class.
 
 ## Testing
 
-`physics_tests` (113 tests):
+`physics_tests` (151 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
   point), budgets (monotonic volume), lattices at four scales and noisy
   spheres at three (the classic degenerate inputs), degenerate and invalid
-  input, far-from-origin coordinates, determinism, and validation of seven
-  kinds of corrupted blob.
+  input (and coordinates past the limit), far-from-origin coordinates, a
+  sliver built again at a larger tolerance, determinism, and validation of
+  thirteen kinds of corrupted blob, a short block, and a misaligned one.
 - Geometry: mass properties against a numeric integration and closed
   forms, the parallel axis sum and rotation, tight bounds, proxies against
-  support points.
+  support points, and validity (sizes past the coordinate limit refused).
 - GJK against closed forms and brute force, warm starts, rounded cores;
   EPA against the separating axis test on random overlapping pairs (each
   method's depth is the separating translation along its own normal, and the
@@ -736,6 +917,33 @@ budget of §8.9 on the six cores of the reference CPU class.
   geometric soundness on random hull pairs (each point's surface points lie
   on or in both shapes) and on 100-vertex hulls (the scalar path), id
   persistence under small motion, the cache, and the reduction.
+- Meshes (`test_mesh.c`): a square's flat diagonal, welding, degenerate
+  triangles dropped, bad descriptions refused, active edges at convex
+  corners and open edges, a large grid's shallow valid tree, overlaps and
+  raycasts against brute force, rays through shared edges and vertices
+  that never slip, one-sided faces, validation of corrupted blocks (an
+  empty slot's box, NaN boxes, bounds past the limit, and 2000 random
+  damages, whatever passes queried safely), and determinism.
+- Triangles and meshes (`test_collide_mesh.c`): the triangle view's axis
+  test against brute force over every edge pair (on the vectorised and
+  scalar paths), the closed forms for spheres and capsules, the rules for
+  faces, edges, and acute vertices, boxes at seams and open edges, random
+  hulls (sound against brute force), flat floors with no sideways normal
+  anywhere (boxes keep their four corners, capsules their ends, spheres one
+  point under the centre), creases, a funnel's deepest four, two-sided
+  sheets, and precision 10 km from the origin.
+- Meshes in the world (`test_world_mesh.c`): mesh shapes on static and
+  kinematic bodies only; shapes resting and sleeping on a mesh floor;
+  boxes and capsules sliding and spheres and capsules rolling across seams
+  without a bump (lifted under 1 mm, turned under 0.05 rad, slowed under
+  1 %), against a floor whose edges are all open, which bumps; a box in a
+  crease on two manifolds (a child contact at work); warm starts kept
+  across a pair's manifolds when ids change, and taken only from a point's
+  own manifold; a kinematic platform carrying a box; events once per pair;
+  a pile on a terrain keeping the invariants, its course on 0 to 8
+  workers, and nothing under the surface; boxes coming to rest on a
+  terrain; and the same motion with the mesh, or the world, far from its
+  origin.
 - The tree against brute force through random edits, moves, enlargements,
   category changes, and rebuilds; raycasts (every hit and the closest);
   partial rebuilds; determinism.
@@ -749,7 +957,8 @@ budget of §8.9 on the six cores of the reference CPU class.
   waking when touched or pushed; begin, end, hit, and move events; filters
   and groups; destroying a support; kinematic bodies pushing and carrying;
   the gyroscopic term flipping the intermediate axis without gaining
-  energy; the world's invariants (`nph_physics_world_validate`) through a
+  energy; a resting box whose points lose their ids stepping as its twin
+  does, to the bit (warm starting by place); the world's invariants (`nph_physics_world_validate`) through a
   pile with teleports and new bodies, and with sleep off; a stack
   10 000 km from the origin behaving as at the origin; the SSE4 and AVX2 kernels
   agreeing to the bit; and the same state hash with no job system, 1, 4,
@@ -778,7 +987,9 @@ budget of §8.9 on the six cores of the reference CPU class.
   joints, each under the soft step at 4 and 8 substeps, TGS at 4, and
   XPBD at 4 and 16 (the first three in Debug and under the sanitizers):
   every configuration must stay sound, the default must meet its quality
-  thresholds, and the rest is logged for the ADR. Each solver's kernels
+  thresholds (its pyramid and column within a millimetre of their places:
+  the 3 mm first allowed let the column's lost warm starts pass), and the
+  rest is logged for the ADR. Each solver's kernels
   agree to the bit across SSE4 and AVX2, and its results across worker
   counts.
 - The ragdoll (`test_ragdoll.c`, Phase 11's exit criteria): a ragdoll
@@ -794,3 +1005,17 @@ budget of §8.9 on the six cores of the reference CPU class.
   ragdoll is chaotic and another compiler's rounding sends it elsewhere. A
   pile replays bit for bit in a new world, on 4 and 8 workers, and on the
   AVX2 kernel, under every solver.
+
+**Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull` and
+`physics_mesh` read builder input from the fuzzer's bytes (a point cloud, a
+triangle soup), require the built block to validate and to survive every
+use (geometry queries, overlaps and raycasts, every convex shape's
+contacts, GJK and EPA, all with finite results), then damage a copy (a
+truncation and byte edits) that validation must refuse or the same uses
+must survive; the copy is exactly as long as the size validation is given,
+so a read past it is a sanitizer's error. Their seeds come from
+`scripts/fuzz_seeds_physics.py`. Writing them found the hull validator
+trusting the header's own size, a NaN vertex or tolerance passing every
+comparison, face counts beyond the collision code's arrays, the mesh's
+empty slots and stack depth above, and the Quickhull sliver; the smoke
+runs replay 40 000 mutations of each seed under ASan clean.

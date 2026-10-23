@@ -120,6 +120,9 @@ NphPhysicsMassData nph_physics_geometry_mass(const NphPhysicsGeometry *g, f32 de
         return box_mass(g->box.half_extents, density);
     case NPH_PHYSICS_SHAPE_HULL:
         return hull_mass(g->hull, density);
+    case NPH_PHYSICS_SHAPE_MESH:
+        // A surface bounds no volume (static and kinematic bodies only).
+        return mass_diagonal(0.0F, nph_vec3_zero(), 0.0F, 0.0F, 0.0F);
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;
@@ -132,9 +135,10 @@ NphPhysicsMassData nph_physics_geometry_mass(const NphPhysicsGeometry *g, f32 de
 // Validity, bounds, support
 // ---------------------------------------------------------------------------
 
-static bool positive_finite(f32 v)
+// Positive, finite, and at most NPH_PHYSICS_MAX_COORDINATE.
+static bool size_ok(f32 v)
 {
-    return nph_f32_is_finite(v) && v > 0.0F;
+    return v > 0.0F && v <= NPH_PHYSICS_MAX_COORDINATE;
 }
 
 bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g)
@@ -144,20 +148,36 @@ bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g)
     }
     switch (g->type) {
     case NPH_PHYSICS_SHAPE_SPHERE:
-        return positive_finite(g->sphere.radius);
+        return size_ok(g->sphere.radius);
     case NPH_PHYSICS_SHAPE_CAPSULE:
         // A capsule of zero height is a sphere and is allowed.
-        return positive_finite(g->capsule.radius) && nph_f32_is_finite(g->capsule.half_height) &&
-               g->capsule.half_height >= 0.0F;
+        return size_ok(g->capsule.radius) && g->capsule.half_height >= 0.0F &&
+               g->capsule.half_height <= NPH_PHYSICS_MAX_COORDINATE;
     case NPH_PHYSICS_SHAPE_BOX:
-        return positive_finite(g->box.half_extents.x) && positive_finite(g->box.half_extents.y) &&
-               positive_finite(g->box.half_extents.z);
+        return size_ok(g->box.half_extents.x) && size_ok(g->box.half_extents.y) &&
+               size_ok(g->box.half_extents.z);
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull != NULL && g->hull->vertex_count >= 4U;
+    case NPH_PHYSICS_SHAPE_MESH:
+        return g->mesh != NULL && g->mesh->triangle_count > 0U;
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         return false;
     }
+}
+
+// A box placed by `pose`: the extent along each axis is |R| times the half
+// extents (Arvo, "Transforming Axis-Aligned Bounding Boxes", Graphics Gems
+// 1990).
+static NphAABB transform_box(NphAABB b, NphPhysicsPose pose)
+{
+    const NphMat3 m = nph_mat3_from_quat(pose.rotation);
+    const NphVec3 h = nph_vec3_scale(nph_vec3_sub(b.max, b.min), 0.5F);
+    const NphVec3 c = nph_physics_pose_transform_point(pose, nph_aabb_center(b));
+    const NphVec3 e = nph_vec3_add(nph_vec3_add(nph_vec3_scale(nph_vec3_abs(m.c[0]), h.x),
+                                                nph_vec3_scale(nph_vec3_abs(m.c[1]), h.y)),
+                                   nph_vec3_scale(nph_vec3_abs(m.c[2]), h.z));
+    return nph_aabb(nph_vec3_sub(c, e), nph_vec3_add(c, e));
 }
 
 NphAABB nph_physics_geometry_aabb(const NphPhysicsGeometry *g, NphPhysicsPose pose)
@@ -175,16 +195,9 @@ NphAABB nph_physics_geometry_aabb(const NphPhysicsGeometry *g, NphPhysicsPose po
         const NphVec3 r = nph_vec3_splat(g->capsule.radius);
         return nph_aabb(nph_vec3_sub(nph_vec3_min(a, b), r), nph_vec3_add(nph_vec3_max(a, b), r));
     }
-    case NPH_PHYSICS_SHAPE_BOX: {
-        // The extent along each world axis is |R| times the half extents
-        // (Arvo, "Transforming Axis-Aligned Bounding Boxes", Graphics Gems 1990).
-        const NphMat3 m = nph_mat3_from_quat(pose.rotation);
-        const NphVec3 h = g->box.half_extents;
-        const NphVec3 e = nph_vec3_add(nph_vec3_add(nph_vec3_scale(nph_vec3_abs(m.c[0]), h.x),
-                                                    nph_vec3_scale(nph_vec3_abs(m.c[1]), h.y)),
-                                       nph_vec3_scale(nph_vec3_abs(m.c[2]), h.z));
-        return nph_aabb(nph_vec3_sub(pose.position, e), nph_vec3_add(pose.position, e));
-    }
+    case NPH_PHYSICS_SHAPE_BOX:
+        return transform_box(nph_aabb(nph_vec3_neg(g->box.half_extents), g->box.half_extents),
+                             pose);
     case NPH_PHYSICS_SHAPE_HULL: {
         const NphPhysicsHull *hull = g->hull;
         const NphVec3 *v = nph_physics_hull_vertices(hull);
@@ -196,6 +209,8 @@ NphAABB nph_physics_geometry_aabb(const NphPhysicsGeometry *g, NphPhysicsPose po
         }
         return box;
     }
+    case NPH_PHYSICS_SHAPE_MESH:
+        return transform_box(g->mesh->bounds, pose);
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;
@@ -237,6 +252,16 @@ NphVec3 nph_physics_geometry_support(const NphPhysicsGeometry *g, NphVec3 direct
     }
     case NPH_PHYSICS_SHAPE_HULL:
         return nph_physics_hull_vertices(g->hull)[nph_physics_hull_support(g->hull, direction)];
+    case NPH_PHYSICS_SHAPE_MESH: {
+        const NphVec3 *v = nph_physics_mesh_vertices(g->mesh);
+        u32 best = 0U;
+        for (u32 i = 1U; i < g->mesh->vertex_count; ++i) {
+            if (nph_vec3_dot(v[i], direction) > nph_vec3_dot(v[best], direction)) {
+                best = i;
+            }
+        }
+        return v[best];
+    }
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;
@@ -257,6 +282,7 @@ f32 nph_physics_geometry_inner_radius(const NphPhysicsGeometry *g)
         return nph_vec3_min_component(g->box.half_extents);
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull->inner_radius;
+    case NPH_PHYSICS_SHAPE_MESH: // a surface holds no ball
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         return 0.0F;
@@ -275,6 +301,11 @@ f32 nph_physics_geometry_outer_radius(const NphPhysicsGeometry *g)
         return nph_vec3_length(g->box.half_extents);
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull->outer_radius;
+    case NPH_PHYSICS_SHAPE_MESH: {
+        // The farthest corner of the vertices' box: a bound, in constant time.
+        const NphAABB b = g->mesh->bounds;
+        return nph_vec3_length(nph_vec3_max(nph_vec3_abs(b.min), nph_vec3_abs(b.max)));
+    }
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         return 0.0F;
@@ -320,6 +351,7 @@ NphPhysicsProxy nph_physics_geometry_proxy(const NphPhysicsGeometry *g,
         p.count = g->hull->vertex_count;
         p.radius = 0.0F;
         return p;
+    case NPH_PHYSICS_SHAPE_MESH: // not convex
     case NPH_PHYSICS_SHAPE_TYPE_COUNT:
     default:
         break;

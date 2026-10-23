@@ -672,40 +672,49 @@ NphResult phys_island_sleep_and_split(NphPhysicsWorld *w)
 {
     const f32 time_to_sleep = w->desc.time_to_sleep;
     // Each awake island's sleep clock is its stillest-moving body's: one
-    // body in motion keeps the island awake.
+    // body in motion keeps the island awake. An island that has lost
+    // constraints may have fallen apart, and is split once any of its bodies
+    // is ready to sleep (one island a step, the sleepiest body's: the work is
+    // proportional to its size), so its still parts sleep apart from what
+    // still moves. (Waiting for every body would let one that never stops, a
+    // box gone over the edge of the world, keep the pile it left awake for
+    // good: Box2D's rule.)
     NPH_ARRAY_CLEAR(&w->candidates);
+    u32 split = PHYS_NULL;
+    f32 split_time = 0.0F;
     for (u32 i = 0U; i < w->awake_islands.len; ++i) {
         const u32 island = w->awake_islands.data[i];
         PhysIsland *is = &w->islands.data[island];
         f32 t = 1e30F;
+        f32 sleepiest = 0.0F;
         for (u32 b = is->body_head; b != PHYS_NULL; b = w->bodies.data[b].island_next) {
             const PhysBody *body = &w->bodies.data[b];
             const f32 bt = (body->flags & PHYS_BODY_ENABLE_SLEEP) != 0U ? body->sleep_time : 0.0F;
             t = nph_f32_min(t, bt);
+            sleepiest = nph_f32_max(sleepiest, bt);
         }
         is->sleep_time = t;
-        if (t >= time_to_sleep) {
+        if (is->constraint_remove_count > 0U) {
+            if (sleepiest >= time_to_sleep && sleepiest > split_time) {
+                split = island;
+                split_time = sleepiest;
+            }
+        } else if (t >= time_to_sleep) {
             NPH_TRY(NPH_ARRAY_PUSH(&w->candidates, island));
         }
     }
-    // Candidates in the awake list's order: islands that may have fallen
-    // apart split first (one a step, the work is proportional to its size)
-    // and are reconsidered next step; whole ones fall asleep.
-    bool split_done = false;
+    // Whole islands fall asleep, in the awake list's order; the island to
+    // split is reconsidered, in parts, next step.
     for (u32 i = 0U; i < w->candidates.len; ++i) {
         const u32 island = w->candidates.data[i];
         const PhysIsland *is = &w->islands.data[island];
         if (is->live == 0U || is->awake == 0U) {
             continue;
         }
-        if (is->constraint_remove_count > 0U) {
-            if (!split_done) {
-                split_done = true;
-                NPH_TRY(island_split(w, island));
-            }
-            continue;
-        }
         NPH_TRY(island_sleep(w, island));
+    }
+    if (split != PHYS_NULL) {
+        NPH_TRY(island_split(w, split));
     }
     // Kinematic bodies sleep on their own clocks.
     for (u32 i = 0U; i < w->awake_bodies.len;) {

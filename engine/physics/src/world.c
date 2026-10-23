@@ -361,7 +361,7 @@ NphPhysicsStats nph_physics_world_stats(const NphPhysicsWorld *world)
     s.bodies = world->body_slots.generation.len - world->body_slots.free.len;
     s.awake_bodies = world->awake_bodies.len;
     s.shapes = world->shape_slots.generation.len - world->shape_slots.free.len;
-    s.contacts = world->contacts.len - world->free_contacts.len;
+    s.contacts = world->contacts.len - world->free_contacts.len - world->child_contacts;
     s.joints = world->joint_slots.generation.len - world->joint_slots.free.len;
     s.islands = world->islands.len - world->free_islands.len;
     s.awake_islands = world->awake_islands.len;
@@ -371,7 +371,10 @@ NphPhysicsStats nph_physics_world_stats(const NphPhysicsWorld *world)
         const PhysContact *c = &world->contacts.data[world->awake_contacts.data[i]];
         if ((c->flags & PHYS_CONTACT_TOUCHING) != 0U) {
             touching += 1U;
-            points += c->point_count;
+            for (u32 k = world->awake_contacts.data[i]; k != PHYS_NULL;
+                 k = world->contacts.data[k].child) {
+                points += world->contacts.data[k].point_count;
+            }
         }
     }
     s.touching_contacts = touching;
@@ -482,6 +485,7 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         const PhysContact *c = &world->contacts.data[world->awake_contacts.data[i]];
         VALID(c->awake_slot == i);
     }
+    u32 children = 0U;
     for (u32 i = 0U; i < world->contacts.len; ++i) {
         const PhysContact *c = &world->contacts.data[i];
         if (c->shape_a == PHYS_NULL) {
@@ -489,7 +493,35 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         }
         const PhysBody *a = &world->bodies.data[c->body_a];
         const PhysBody *b = &world->bodies.data[c->body_b];
-        VALID((c->awake_slot != PHYS_NULL) == (body_awake(a) || body_awake(b)));
+        const bool mesh_pair =
+            world->shapes.data[c->shape_a].geometry.type == NPH_PHYSICS_SHAPE_MESH ||
+            world->shapes.data[c->shape_b].geometry.type == NPH_PHYSICS_SHAPE_MESH;
+        if (c->parent != PHYS_NULL) {
+            // A mesh pair's child: its pair's shapes, found in its pair's
+            // chain, outside the awake list, without events or islands.
+            const PhysContact *pair = &world->contacts.data[c->parent];
+            VALID(mesh_pair && pair->parent == PHYS_NULL && pair->shape_a == c->shape_a &&
+                  pair->shape_b == c->shape_b && pair->body_a == c->body_a &&
+                  pair->body_b == c->body_b);
+            u32 k = pair->child;
+            while (k != PHYS_NULL && k != i) {
+                k = world->contacts.data[k].child;
+            }
+            VALID(k == i);
+            VALID(c->awake_slot == PHYS_NULL && c->island == PHYS_NULL);
+            VALID((c->flags & (u32)~PHYS_CONTACT_TOUCHING) == 0U);
+            children += 1U;
+        } else {
+            // A pair: a mesh pair's chain holds its three children.
+            u32 n = 0U;
+            for (u32 k = c->child; k != PHYS_NULL && n <= NPH_PHYSICS_MESH_MAX_MANIFOLDS;
+                 k = world->contacts.data[k].child) {
+                VALID(world->contacts.data[k].parent == i);
+                n += 1U;
+            }
+            VALID(n == (mesh_pair ? NPH_PHYSICS_MESH_MAX_MANIFOLDS - 1U : 0U));
+            VALID((c->awake_slot != PHYS_NULL) == (body_awake(a) || body_awake(b)));
+        }
         const bool ok_a = body_awake(a) || a->type != NPH_PHYSICS_BODY_DYNAMIC;
         const bool ok_b = body_awake(b) || b->type != NPH_PHYSICS_BODY_DYNAMIC;
         const bool in_graph = (c->flags & PHYS_CONTACT_TOUCHING) != 0U && ok_a && ok_b &&
@@ -512,6 +544,7 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         VALID(island == ((c->flags & PHYS_CONTACT_ISLAND) != 0U));
         VALID(island == (c->island != PHYS_NULL));
     }
+    VALID(children == world->child_contacts);
     // Joints: graph membership and islands, as contacts (always touching).
     u32 live_joints = 0U;
     for (u32 i = 0U; i < world->joints.len; ++i) {
@@ -685,6 +718,23 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
             const NphVec3 p = nph_physics_pose_transform_point(pose, v[e[i].origin]);
             const NphVec3 q = nph_physics_pose_transform_point(pose, v[e[i + 1U].origin]);
             draw_line(d, world_point(b->origin, p), world_point(b->origin, q), rgba);
+        }
+        break;
+    }
+    case NPH_PHYSICS_SHAPE_MESH: {
+        // Every triangle's edges, the active ones (the surface's real
+        // edges) brighter.
+        const NphPhysicsMesh *mesh = s->geometry.mesh;
+        const u8 *active = nph_physics_mesh_edges(mesh);
+        for (u32 t = 0U; t < mesh->triangle_count; ++t) {
+            NphVec3 tv[3];
+            nph_physics_mesh_triangle(mesh, t, tv);
+            for (u32 k = 0U; k < 3U; ++k) {
+                const NphVec3 p = nph_physics_pose_transform_point(pose, tv[k]);
+                const NphVec3 q = nph_physics_pose_transform_point(pose, tv[(k + 1U) % 3U]);
+                const u32 color = ((active[t] >> k) & 1U) != 0U ? rgba : (rgba & 0xFF7F7F7FU);
+                draw_line(d, world_point(b->origin, p), world_point(b->origin, q), color);
+            }
         }
         break;
     }
