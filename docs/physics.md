@@ -518,6 +518,19 @@ force it is.
 25 links (400 joints) step in 0.57 ms on one thread and 0.16 ms on the job
 system.
 
+## The solver comparison
+
+CLAUDE.md §13 leaves the solver's final choice to measurements against TGS
+and XPBD. The world's `solver` setting selects one of the three on the same
+collision, graph, threads, and kernel layout:
+[ADR-0045](adr/0045-physics-solver-comparison.md) has the scenes, the
+measurements, and the reading. In short: the soft step is the only one
+that stacks, keeps energy, gets friction exactly, and settles ragdoll heaps,
+and its joints' give falls by four for each doubling of the substeps; TGS
+is 9 to 16 % cheaper but its joints fail under load; XPBD's joints are the
+stiffest but it cannot stack. The default stiffnesses are fractions of the
+substep rate, so the substep count is the quality setting.
+
 ## Threads
 
 The solver's work is one list of stages, unrolled for the step: prepare
