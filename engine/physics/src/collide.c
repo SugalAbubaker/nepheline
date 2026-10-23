@@ -68,15 +68,33 @@ static f32 signed_area(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 normal)
     return nph_vec3_dot(nph_vec3_cross(nph_vec3_sub(b, a), nph_vec3_sub(c, a)), normal);
 }
 
+// Points within this of the deepest are as deep (a flat contact's points
+// differ by rounding).
+#define REDUCE_DEPTH_TIE (0.1F * NPH_PHYSICS_LINEAR_SLOP)
+
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal)
 {
     if (count <= NPH_PHYSICS_MANIFOLD_MAX_POINTS) {
         return count;
     }
-    // 1. The deepest point: it carries the most load.
-    u32 i0 = 0U;
+    // 1. The deepest point: it carries the most load. Of points as deep, the
+    // one farthest from their centre in the contact plane: a corner of the
+    // contact, not a point inside it (a mesh's seams cross a box's face at
+    // its depth).
+    f32 deepest = points[0].separation;
+    NphVec3 centre = points[0].point;
     for (u32 i = 1U; i < count; ++i) {
-        if (points[i].separation < points[i0].separation) {
+        deepest = nph_f32_min(deepest, points[i].separation);
+        centre = nph_vec3_add(centre, points[i].point);
+    }
+    centre = nph_vec3_scale(centre, 1.0F / (f32)count);
+    u32 i0 = 0U;
+    f32 farthest = -1.0F;
+    for (u32 i = 0U; i < count; ++i) {
+        const f32 dd =
+            nph_vec3_length_sq(nph_vec3_reject(nph_vec3_sub(points[i].point, centre), normal));
+        if (points[i].separation <= deepest + REDUCE_DEPTH_TIE && dd > farthest) {
+            farthest = dd;
             i0 = i;
         }
     }
@@ -107,6 +125,15 @@ u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphV
             area_sign = area < 0.0F ? -1.0F : 1.0F;
             i2 = i;
         }
+    }
+    // Points along a line (a capsule or a box's edge lying across a mesh's
+    // triangles) make no triangle: the line's two ends are the contact (p0
+    // is one of them, the farthest from the centre, and p1 the other).
+    if (best_area <= 1e-3F * best) {
+        const NphPhysicsManifoldPoint ends[2] = {points[i0], points[i1]};
+        points[0] = ends[0];
+        points[1] = ends[1];
+        return 2U;
     }
     // 4. The point farthest outside the triangle: it adds the most area.
     const NphVec3 p2 = points[i2].point;
