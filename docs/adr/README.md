@@ -48,6 +48,7 @@ supersedes it and both link to each other.
 | [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.86 ms against the 4.17 ms frame; gated at Phase 14's exit by [0041](0041-frame-target-gates.md)) |
 | [0041](0041-frame-target-gates.md) | The frame target's gate: Phase 14's exit for the reference scenes, Phase 15 for the game | Accepted (contact shadows placed at Phase 10's review) |
 | [0042](0042-physics-collision.md) | Physics: module boundaries, 64-bit bodies, and the collision layer | Accepted |
+| [0043](0043-physics-world.md) | Physics: the world, the soft-step solver, and its threads | Accepted (the solver provisional until the §13 comparison) |
 
 ## Template
 

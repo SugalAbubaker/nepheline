@@ -6,14 +6,16 @@ collision, queries, and the character controller, stepped at a fixed
 240 Hz on the job system. It depends on `jobs` and through it on
 `platform`, `math`, and `core`; it does not know the ECS (the runtime
 bridges entities to bodies) or the renderer (debug drawing goes out through
-a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md).
+a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md) (the
+collision layer) and [ADR-0043](adr/0043-physics-world.md) (the world and
+the solver).
 
 Phase 11 builds it in parts. This document describes what exists:
 
 | Part | Status |
 |---|---|
-| Geometry, convex hulls, the narrow phase, the AABB tree | done (this page) |
-| The world: bodies, contacts, the soft-step solver, islands, sleep | next |
+| Geometry, convex hulls, the narrow phase, the AABB tree | done |
+| The world: bodies, shapes, contacts, the soft-step solver, threads, islands, sleep, events | done |
 | Joints, the solver comparison (§13), meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
@@ -23,6 +25,9 @@ Phase 11 builds it in parts. This document describes what exists:
 | `hull.h` | the convex hull block and the Quickhull builder |
 | `collide.h` | contact manifolds, GJK distance, EPA penetration, segment distance, manifold reduction |
 | `aabb_tree.h` | the dynamic AABB tree |
+| `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
+| `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
+| `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
 
 ## Conventions
 
@@ -239,10 +244,270 @@ Bounding Volume Hierarchies" (GDC 2019):
 
 The same edits build the same tree, bit for bit.
 
+## The world
+
+`NphPhysicsWorld` (`world.h`) holds bodies and shapes, addressed by 32-bit
+generational handles (20 bits of slot, 12 of generation), so a handle to a
+destroyed object is detected rather than reused. The world owns every
+array it works with and grows them from its allocator only between the
+step's parallel stages, keeping their capacity; a scene in steady state
+steps without allocating.
+
+A step (`nph_physics_world_step`, 1/240 s in the engine) runs five passes:
+
+1. **Pairs.** Shapes whose broadphase box grew last step (the move buffer)
+   query the three trees, static, kinematic, and dynamic, in parallel:
+   once to count each query's new pairs and once to fill them, so every
+   query writes its own slice of the pair buffer. The new pairs become
+   contacts in the move buffer's order.
+2. **Collide.** Every contact with an awake body runs the narrow phase, in
+   parallel, in a frame centred on its first body's centre of mass (so the
+   manifold's points are that body's anchors). Points that keep their
+   feature ids keep last step's impulses, for warm starting; the tangent
+   impulse is kept as a world vector, which survives a turn of the tangent
+   basis. Then, serially and in the awake list's order, the contacts that
+   began or stopped touching, or whose fattened boxes parted, take effect:
+   events, waking, island links, graph membership.
+3. **Solve** (below): velocities, positions, and the contact impulses.
+4. **Finalize.** Positions in 64 bits, shape boxes, sleep timers; boxes
+   that left their fattened proxies grow in the trees, in the awake list's
+   order, and join the move buffer; move events.
+5. **Islands.** Pending merges, then, when sleep is on, islands that have
+   been still for `time_to_sleep` fall asleep.
+
+**Determinism.** Each parallel piece writes only its own records, and each
+serial pass runs in a fixed order (the awake lists, the move buffer), so
+the job system's worker count, the solver's thread count, and the SIMD
+level change nothing: the tests compare state hashes
+(`nph_physics_world_hash`) across all three.
+
+## Bodies and shapes
+
+A body (`body.h`) is static, kinematic, or dynamic. Static bodies never
+move unless teleported; kinematic bodies move by their velocity alone,
+push dynamic bodies, and are never pushed back; dynamic bodies move under
+gravity, forces, and contacts. A body's mass, centre of mass, and inertia
+come from its shapes' densities (summed with the parallel axis theorem)
+unless set explicitly. Locks remove world axes of translation or rotation
+from a dynamic body: a 2.5D game locks Z and the rotations about X and Y,
+a character every rotation. Damping divides velocities by `1 + h c` each
+substep, the Padé fit of `exp(-c h)` that never reverses a velocity.
+Velocities are clamped to `max_linear_speed`, and angular velocities to an
+eighth of a turn per substep (Box2D's limit, 7200 rpm at 960 Hz), beyond
+which the rotation integrator degrades.
+
+A shape (`shape.h`) is a geometry placed in its body, with a density, a
+friction coefficient, a restitution, a filter, and event switches. Two
+shapes meet when their filters allow: shapes of the same positive group
+always do, of the same negative group never do, and otherwise each's
+category must be in the other's mask (Box2D's rule). Shapes of one body
+never meet, and neither do two bodies that are not dynamic. A pair's friction is the geometric mean of the two
+coefficients and its restitution the larger, so a frictionless surface
+makes every contact on it frictionless and a bouncy ball bounces on any
+floor.
+
+## Contacts
+
+A contact exists while two shapes' fattened boxes overlap and their
+filters allow it, and is touching while its manifold has points. Contacts
+live in a pool with a free list, are found from a shape pair through a hash
+map, and sit in both bodies' contact lists (intrusive and doubly linked:
+two `prev`/`next` pairs per contact, keyed by contact and side).
+
+Membership follows the bodies:
+
+| List | Holds |
+|---|---|
+| the awake contacts | contacts with an awake body: the narrow phase runs on them |
+| the constraint graph | touching awake contacts whose bodies are awake, static, or kinematic: the solver runs on them |
+| an island | touching contacts between two dynamic bodies |
+
+`contact_sync` restores the first two after any change to a contact or
+its bodies; island links are made when a contact begins touching and cut
+when it stops.
+
+The **constraint graph** colours contacts so that no two contacts of one
+colour share a dynamic body, which lets a colour's contacts be solved in
+parallel without locks (Catto, "Solver2D", 2024; Box2D v3's graph). Each
+colour keeps a bitset of its dynamic bodies; a contact takes the first
+colour free for both of its dynamic bodies. Contacts with a static or
+kinematic body only need their one dynamic body free, so they start at
+colour 1 and leave colour 0 to dynamic pairs, the harder to place. There
+are 24 colours, the first 20 open to dynamic pairs; a contact that fits
+none goes to the overflow, solved serially before the colours. A dense pile
+of mixed shapes uses about 15.
+
+## The solver
+
+The solver is the **soft step** (Catto, "Solver2D", 2024, after Macklin et
+al., "Small Steps in Physics Simulation", SCA 2019): each step is split into
+substeps (four by default, so 960 Hz at the engine's 240 Hz), and each
+substep
+
+1. integrates velocities (gravity, forces, damping, the gyroscopic term);
+2. **warm starts**: applies each contact point's accumulated impulses;
+3. **solves** each contact as a soft constraint, a spring of the world's
+   stiffness and damping (120 Hz and a ratio of 10 by default, capped at a
+   quarter of the substep rate) that pushes overlaps out no faster than
+   3 m/s;
+4. integrates positions;
+5. **relaxes**: solves the same rows rigidly, without the springs' bias,
+   removing the velocity the springs added, so bodies come to rest instead
+   of bouncing off the push.
+
+After the substeps, **restitution** gives contacts that approached faster
+than the threshold (1 m/s) and carried load the pair's bounce, and the
+impulses are stored for the next step's warm start. Contacts against static
+and kinematic bodies are twice as stiff, since they take the whole
+correction.
+
+**Stiffness.** A soft contact holds a load at a depth: in steady state
+the solve pass's spring must supply what the warm start carries, which
+works out to a penetration of g / ω² for each body weight the contact
+carries per unit of its effective mass (ω = 2π times the stiffness),
+independent of the substep and the damping. Box2D runs its contacts at
+30 Hz with 240 Hz of substeps, an eighth of the rate; at our 960 Hz the
+same ratio is 120 Hz, the same arithmetic per substep with sixteen times
+less give. A box carrying a box 100 times heavier sinks 0.44 mm into the
+ground and the heavy box 1.7 mm more into it (at 30 Hz: 7 and 27 mm), and
+the top of a 20-row pyramid stands 1.9 mm low (26 mm).
+
+Within a substep, the current separation of a point comes from the bodies'
+displacements and rotations since the step began, applied to the anchors
+fixed at the step's start: no collision runs inside the step, and the
+anchors are relative to the centres of mass, so this is exact to 32 bits
+anywhere in the world. Positions accumulate as 32-bit displacements and
+reach the 64-bit body only in the finalize pass.
+
+**Speculative points** (separation above zero, within the speculative
+distance) only stop the approach: the solver removes exactly the velocity
+that would close the gap within the substep (Catto, "Speculative
+Contacts", 2013), so fast bodies stop at the surface instead of tunnelling,
+without continuous collision for most cases.
+
+**Friction** follows the normal rows, as a coupled two-dimensional impulse
+on the contact's two tangents, clamped to the friction circle
+(|impulse| ≤ μ times the normal impulse): one coupled row instead of two
+independent clamps, which would make a box sliding diagonally feel the
+friction of a square.
+
+**The gyroscopic term** is integrated implicitly in body space (Catto,
+"Numerical Methods", GDC 2015): one Newton iteration on
+I ω₂ + h ω₂ × I ω₂ = I ω₁ per substep, which conserves the magnitude of
+angular momentum and never gains energy, where the explicit torque ω × I ω
+would. A box spun about its intermediate axis flips over and over, as it
+should (the Dzhanibekov effect), keeping 98.5 % of its energy over six
+seconds. The iteration needs the body's current rotation: the same
+iteration in the world frame with the step's starting inertia was cheaper
+and kept only 84 %. Bodies whose inertia is a multiple of the identity
+(spheres, cubes) skip it: their term is exactly zero.
+
+**Data layout.** A solver body is one cache line: velocity, angular
+velocity, displacement, and rotation this step, each a 16-byte row. The
+contacts are grouped eight to a `PhysContactLanes` record by colour (one
+per record in the overflow), with their points in structure-of-arrays
+rows: anchors, effective masses, impulses, and the angular terms I⁻¹ (r ×
+axis) for both bodies and all three axes, so applying an impulse needs no
+inertia. The kernels gather eight bodies' rows by 4×4 transposes, compute
+eight contacts per instruction, and scatter the velocities of the lanes
+that own a dynamic body back. The preparation of the rows (the angular
+terms, the effective masses, the approach speed for restitution, the
+warm-start impulses on this step's tangents) is a kernel too.
+
+The kernels are compiled twice, at the SSE4.2 baseline (each eight-lane
+value a pair of SSE registers) and with AVX2 (one AVX register), from one
+source, `solver_impl.h`. Both do the same arithmetic in the same order, and
+contraction to FMA is off (ADR-0008 §6), so they agree to the bit; the
+machine's best is chosen at world creation.
+
+## Threads
+
+The solver's work is one list of stages, unrolled for the step: prepare
+bodies, prepare contacts, then per substep integrate velocities, warm
+start, solve, integrate positions, relax (each contact stage once per
+colour, in order), then restitution, store, and finalize; about 60 stages
+for a pyramid in four colours, 200 for a pile in fifteen. A stage is split
+into blocks, at least 32 bodies or four contact records (32 contacts) and
+at most four per thread.
+
+The threads go through the stages in lockstep. Each starts at its own
+share of a stage's blocks and claims blocks one at a time with an atomic
+exchange, forward while they are free, then backward. A thread therefore
+keeps the same blocks substep after substep, and their records stay in its
+cache. The calling thread then claims whatever is left, so a helper the job
+system has not started yet, or one the operating system preempted, holds
+back only the block it has; whichever thread finishes a stage's last block
+publishes the next. Helpers spin between stages rather than park: a stage
+lasts a few microseconds and a wake costs more (Box2D v3's solver, on our
+job system). A thread that has spun through about ten stages' worth of
+pauses without a new stage also yields: some participant is likely
+preempted and holding a block, and needs a core.
+
+**How many threads.** Every thread that joins a stage costs a few hundred
+nanoseconds of synchronization whether or not it finds work, so the solver
+takes as many threads as the step's work pays for. On one thread a step
+costs about 600 ns per point row and 290 ns per body; a thread pays for
+itself with about 450 ns of work in each stage it joins:
+
+    threads = min(1 + work / (stages × 450 ns), workers + 1, logical cores)
+
+The ratio of work to synchronization is what matters, and machines scale
+both alike. The thread count changes no result.
+
+Measured on the reference machine (Ryzen 7 5800X, 8 cores and 16 threads;
+Profile), the solver's time per step by thread count:
+
+| Scene | 1 | 3 | 6 | 8 | 12 | 16 | chosen |
+|---|---|---|---|---|---|---|---|
+| pyramid, 210 boxes, 4 colours | 0.183 | 0.107 | 0.099 | 0.102 | 0.108 | 0.193 | 7: 0.099 |
+| pile, 1000 mixed shapes, 15 colours | 1.22 | 0.654 | 0.466 | 0.429 | 0.386 | 0.534 | 10: 0.395 |
+| 16 pyramids, 3360 boxes | 3.02 | 1.45 | 0.875 | 0.723 | 0.579 | 0.565 | 16: 0.533 |
+
+(milliseconds, the mean of 400 steps.) With every logical core spinning,
+one preempted thread stalls everyone, so the mean at 16 threads is erratic
+on a desktop with other programs running; its best steps match 12 threads.
+
+## Islands and sleep
+
+Islands are persistent (Catto, "Simulation Islands", 2023). A contact that
+begins touching between two dynamic bodies links their islands, recorded
+as a union (the larger absorbs the smaller, so a merge moves the fewest
+records) and carried out at the end of the step; a contact that stops
+touching only counts a possible split. An island whose bodies have all
+been below their sleep thresholds for `time_to_sleep` (half a second by
+default) is a candidate: if contacts left it, it is first split into its
+connected components (one island per step, depth first in list order),
+which are reconsidered next step; otherwise it falls asleep. Finding
+components is spent only where it buys sleep, and an island that has grown
+too big while awake costs nothing until then.
+
+A sleeping island's bodies leave the awake list, its contacts leave the
+awake list and the graph, and the island costs nothing per step: ten
+thousand sleeping boxes step in 2.8 µs. A body that moves by a call
+(velocity, force, impulse, teleport), a contact that begins touching it,
+or a moving kinematic body touching it wakes its island.
+
+## Events and debug drawing
+
+A step reports what it did as arrays valid until the next step
+(`nph_physics_world_events`): contacts that began and ended touching (for
+shapes with `contact_events`), hits (a contact that began at a speed above
+the hit threshold, with the point and the speed, for sounds and effects;
+for shapes with `hit_events`), and moves (every awake body's new pose, how
+the runtime mirrors physics into the scene). Nothing calls back into user
+code during a step, so nothing can change the world while it is in
+flight.
+
+`nph_physics_world_draw` draws shapes, broadphase boxes, contact points and
+normals, and centres of mass through a line callback, in 32-bit
+coordinates relative to the renderer's debug origin.
+
 ## Performance
 
 Profile build, Ryzen 7 5800X, `benchmarks/physics` (each collision row
-cycles through 64 prepared configurations):
+cycles through 64 prepared configurations; world rows are per step at
+240 Hz, after the scene has settled, with sleep off except where it is the
+point):
 
 | Benchmark | ns/op |
 |---|---|
@@ -262,15 +527,30 @@ cycles through 64 prepared configurations):
 | `tree_raycast_10k` (50 m, closest hit) | 851 |
 | `tree_rebuild_10k` (per proxy) | 212 |
 | `hull_build_1000_64v` | 311 000 |
+| `world_pyramid_20_st` (210 boxes, one thread) | 369 000 |
+| `world_pyramid_20_mt` (the job system) | 140 000 |
+| `world_pyramids_16_mt` (3360 boxes) | 987 000 |
+| `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 390 000 |
+| `world_pile_1000_mt` | 659 000 |
+| `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
 tests for two 32-vertex hulls; the planned optimisation buckets B's arcs on
 the Gauss map so each arc of A meets only its neighbours, measured with the
 world's scenes. Until then, hulls of 16 to 32 vertices suit props.
 
+In the world, the narrow phase is now the larger cost on one thread: of the
+pile's 3.4 ms, 2.1 ms is collision (every awake contact, touching or not,
+runs its pair function every step) and 1.2 ms the solver. Resting contacts
+whose bodies have barely moved relative to each other can keep their
+manifold, refreshing only the separations (the persistent manifolds of
+PhysX's PCM); that is the next optimisation. On the job system the 1000
+pile steps in 0.66 ms and 3360 resting boxes in 0.99 ms, against the 1.0 ms
+budget of §8.9 on the six cores of the reference CPU class.
+
 ## Testing
 
-`physics_tests` (47 tests):
+`physics_tests` (68 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -293,3 +573,18 @@ world's scenes. Until then, hulls of 16 to 32 vertices suit props.
 - The tree against brute force through random edits, moves, enlargements,
   category changes, and rebuilds; raycasts (every hit and the closest);
   partial rebuilds; determinism.
+- The world: creation and bad descriptions; free fall against the
+  integrator's closed form; a dropped sphere settling and sleeping; a box
+  resting without drift; a stack of ten and a pyramid of 20 rows standing
+  (10 in Debug) within millimetres, and asleep; a box carrying one 100 times
+  heavier;
+  friction holding below its angle and sliding above; restitution
+  bouncing to its height; momentum conserved through collisions; sleepers
+  waking when touched or pushed; begin, end, hit, and move events; filters
+  and groups; destroying a support; kinematic bodies pushing and carrying;
+  the gyroscopic term flipping the intermediate axis without gaining
+  energy; the world's invariants (`nph_physics_world_validate`) through a
+  pile with teleports and new bodies, and with sleep off; a stack
+  10 000 km from the origin behaving as at the origin; the SSE4 and AVX2 kernels
+  agreeing to the bit; and the same state hash with no job system, 1, 4,
+  and 8 workers, and 2, 5, and 9 forced solver threads.
