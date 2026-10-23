@@ -352,7 +352,8 @@ typedef struct PhysPointLanes {
     f32 normal_impulse[PHYS_LANES];
     f32 max_normal_impulse[PHYS_LANES];
     f32 relative_velocity[PHYS_LANES];
-    f32 tangent_mass[3][PHYS_LANES]; // the inverse of the 2x2 effective mass: 00, 01, 11
+    f32 substep_velocity[PHYS_LANES]; // XPBD: the normal speed before a substep's positions
+    f32 tangent_mass[3][PHYS_LANES];  // the inverse of the 2x2 effective mass: 00, 01, 11
     f32 tangent_impulse[2][PHYS_LANES];
     // I^-1 (r x axis) for each body and axis: impulses apply without the
     // inertia (Jolt's "invI r x axis" terms).
@@ -385,6 +386,12 @@ typedef enum PhysStageType {
     PHYS_STAGE_RESTITUTION,
     PHYS_STAGE_STORE,
     PHYS_STAGE_FINALIZE,
+    // XPBD (NPH_PHYSICS_SOLVER_XPBD): per substep, predict the bodies,
+    // correct positions, derive velocities, then the velocity pass.
+    PHYS_STAGE_XPBD_PREDICT,
+    PHYS_STAGE_XPBD_POSITIONS,
+    PHYS_STAGE_XPBD_DERIVE,
+    PHYS_STAGE_XPBD_VELOCITIES,
 } PhysStageType;
 
 // A stage's blocks are claimed one by one through its claim words (in the
@@ -416,9 +423,13 @@ typedef struct PhysSolverKernels {
                     const PhysPrepareLanes *in);
     void (*warm_start)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points);
     void (*solve)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points, f32 inv_h,
-                  f32 push_max, bool use_bias);
+                  f32 push_max, f32 slop, bool use_bias);
     void (*restitution)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points,
                         f32 threshold);
+    void (*xpbd_positions)(PhysSolverBody *bodies, const PhysSolverBody *prev, PhysContactLanes *g,
+                           PhysPointLanes *points);
+    void (*xpbd_velocities)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points,
+                            f32 inv_h, f32 threshold);
 } PhysSolverKernels;
 
 extern const PhysSolverKernels g_phys_solver_sse4;
@@ -484,6 +495,7 @@ struct NphPhysicsWorld {
 
     // Step data, kept between steps so steady state allocates nothing.
     PhysSolverBodyArray solver_bodies; // awake bodies, then the dummy
+    PhysSolverBodyArray solver_prev;   // XPBD: their positions at the substep's start
     PhysSolverParamsArray solver_params;
     PhysContactLanesArray groups;
     PhysPointLanesArray points;
@@ -572,6 +584,10 @@ void phys_joint_warm_start(PhysSolverBody *bodies, PhysJoint *j);
 NphVec3 phys_joint_angular_impulse(const PhysJoint *j, NphQuat qa, NphQuat qb);
 void phys_joint_solve(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j,
                       bool use_bias);
+// XPBD (ADR-0045): the joint's position corrections, then its velocity
+// rows (motor, friction, spring damping) on the derived velocities.
+void phys_joint_xpbd_positions(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j);
+void phys_joint_xpbd_velocities(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j);
 // The joint's current angle about X and the frames' world rotations, from
 // the bodies' poses (between steps).
 f32 phys_joint_angle(const NphPhysicsWorld *w, const PhysJoint *j);

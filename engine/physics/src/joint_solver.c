@@ -499,6 +499,209 @@ void phys_joint_solve(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoi
     solve_point(j, &s, step, use_bias);
 }
 
+// ---------------------------------------------------------------------------
+// XPBD (Mueller et al., "Detailed Rigid Body Simulation with Extended
+// Position Based Dynamics", SCA 2020; ADR-0045): the joints' errors are
+// closed by moving the bodies, rigidly (the spring compliantly), and the
+// motor, the spring's damper, and friction act on the velocities the
+// positions give. Multipliers are kept as impulses (lambda over the
+// substep) for the reaction.
+// ---------------------------------------------------------------------------
+
+// q turned by the small rotation vector t: q + (t, 0) q / 2, normalized.
+static NphQuat turn(NphQuat q, NphVec3 t)
+{
+    const NphQuat r = nph_quat(
+        0.5F * (t.x * q.w + (t.y * q.z - t.z * q.y)), 0.5F * (t.y * q.w + (t.z * q.x - t.x * q.z)),
+        0.5F * (t.z * q.w + (t.x * q.y - t.y * q.x)), -0.5F * (t.x * q.x + t.y * q.y + t.z * q.z));
+    return nph_quat_normalize(nph_quat_add(q, r));
+}
+
+static void refresh(const PhysJoint *j, JointState *s)
+{
+    s->ra = nph_quat_rotate(s->a->dq, j->anchor_a);
+    s->rb = nph_quat_rotate(s->b->dq, j->anchor_b);
+    s->qa = nph_quat_mul(s->a->dq, j->frame_q_a);
+    s->qb = nph_quat_mul(s->b->dq, j->frame_q_b);
+}
+
+// A positional impulse `p` at the anchors: B moves by it, A against it.
+static void move_linear(const PhysJoint *j, JointState *s, NphVec3 p)
+{
+    if ((j->flags & PHYS_JOINT_WRITE_A) != 0U) {
+        s->a->dp = nph_vec3_mul_add(s->a->dp, p, -j->inv_mass_a);
+        s->a->dq = turn(
+            s->a->dq, nph_vec3_neg(nph_mat3_mul_vec3(j->inv_inertia_a, nph_vec3_cross(s->ra, p))));
+    }
+    if ((j->flags & PHYS_JOINT_WRITE_B) != 0U) {
+        s->b->dp = nph_vec3_mul_add(s->b->dp, p, j->inv_mass_b);
+        s->b->dq = turn(s->b->dq, nph_mat3_mul_vec3(j->inv_inertia_b, nph_vec3_cross(s->rb, p)));
+    }
+    refresh(j, s);
+}
+
+// A positional angular impulse `l`: B turns by it, A against it.
+static void move_angular(const PhysJoint *j, JointState *s, NphVec3 l)
+{
+    if ((j->flags & PHYS_JOINT_WRITE_A) != 0U) {
+        s->a->dq = turn(s->a->dq, nph_vec3_neg(nph_mat3_mul_vec3(j->inv_inertia_a, l)));
+    }
+    if ((j->flags & PHYS_JOINT_WRITE_B) != 0U) {
+        s->b->dq = turn(s->b->dq, nph_mat3_mul_vec3(j->inv_inertia_b, l));
+    }
+    refresh(j, s);
+}
+
+// A one-sided angular row: the gap `c` (>= 0 allowed) closes as B turns
+// about `axis`; a negative gap turns B back by it. The accumulated impulse
+// keeps the soft step's sign (B gets -impulse about `axis`).
+static void xpbd_limit(const PhysJoint *j, JointState *s, NphVec3 axis, f32 c, f32 *accumulated,
+                       f32 inv_h)
+{
+    if (!(c < 0.0F)) {
+        *accumulated = 0.0F;
+        return;
+    }
+    const f32 lambda = c * axial_mass(j, axis);
+    *accumulated = -lambda * inv_h;
+    move_angular(j, s, nph_vec3_scale(axis, lambda));
+}
+
+static void xpbd_point(PhysJoint *j, JointState *s, f32 inv_h)
+{
+    const NphVec3 c =
+        nph_vec3_add(nph_vec3_add(nph_vec3_sub(s->b->dp, s->a->dp), nph_vec3_sub(s->rb, s->ra)),
+                     j->delta_center);
+    NphVec3 k[3];
+    point_mass(j, s->ra, s->rb, k);
+    const NphVec3 p = solve3(k, nph_vec3_neg(c));
+    j->linear_impulse = nph_vec3_scale(p, inv_h);
+    move_linear(j, s, p);
+}
+
+void phys_joint_xpbd_positions(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j)
+{
+    JointState s = joint_state(bodies, j);
+    const f32 inv_h = step->inv_h;
+    NphVec3 k[3];
+    switch ((NphPhysicsJointType)j->type) {
+    case NPH_PHYSICS_JOINT_BALL: {
+        const NphPhysicsBallJoint *b = &j->ball;
+        if (b->enable_swing_limit != 0) {
+            const NphVec3 xa = nph_quat_axis_x(s.qa);
+            const NphVec3 xb = nph_quat_axis_x(s.qb);
+            const NphVec3 n = nph_vec3_cross(xa, xb);
+            const f32 sin_phi = nph_vec3_length(n);
+            if (sin_phi > 1e-6F) {
+                const NphVec3 axis = nph_vec3_scale(n, 1.0F / sin_phi);
+                const NphVec3 local = nph_quat_rotate_inverse(s.qa, axis);
+                const f32 ey = local.y / b->swing_y;
+                const f32 ez = local.z / b->swing_z;
+                const f32 limit = 1.0F / nph_f32_sqrt(ey * ey + ez * ez);
+                const f32 phi = nph_f32_atan2(sin_phi, nph_vec3_dot(xa, xb));
+                xpbd_limit(j, &s, axis, limit - phi, &j->swing_impulse, inv_h);
+            }
+        }
+        if (b->enable_twist_limit != 0) {
+            const NphVec3 sum = nph_vec3_add(nph_quat_axis_x(s.qa), nph_quat_axis_x(s.qb));
+            const f32 len = nph_vec3_length(sum);
+            if (len > 1e-3F) {
+                const NphVec3 axis = nph_vec3_scale(sum, 1.0F / len);
+                const f32 lower = twist_angle(s.qa, s.qb) - b->twist_lower;
+                xpbd_limit(j, &s, nph_vec3_neg(axis), lower, &j->lower_impulse, inv_h);
+                const f32 upper = b->twist_upper - twist_angle(s.qa, s.qb);
+                xpbd_limit(j, &s, axis, upper, &j->upper_impulse, inv_h);
+            }
+        }
+        break;
+    }
+    case NPH_PHYSICS_JOINT_HINGE: {
+        const NphPhysicsHingeJoint *h = &j->hinge;
+        if (h->enable_spring != 0) {
+            // A compliant row: alpha = 1 / k with k the angular stiffness
+            // (omega^2 over the axial inverse mass), alpha / h^2 in the
+            // update (one iteration: the multiplier starts at zero).
+            const NphVec3 axis = nph_quat_axis_x(s.qa);
+            const f32 mass = axial_mass(j, axis);
+            if (mass > 0.0F) {
+                const f32 omega = 2.0F * 3.14159265F * h->spring_hertz;
+                const f32 w = 1.0F / mass;
+                const f32 alpha = w / (omega * omega * step->h * step->h);
+                const f32 c = unwind(twist_angle(s.qa, s.qb) - h->spring_target);
+                const f32 lambda = -c / (w + alpha);
+                j->spring_impulse = lambda * inv_h;
+                move_angular(j, &s, nph_vec3_scale(axis, lambda));
+            }
+        }
+        if (h->enable_limit != 0) {
+            const NphVec3 axis = nph_quat_axis_x(s.qa);
+            xpbd_limit(j, &s, nph_vec3_neg(axis), twist_angle(s.qa, s.qb) - h->lower,
+                       &j->lower_impulse, inv_h);
+            xpbd_limit(j, &s, axis, h->upper - twist_angle(s.qa, s.qb), &j->upper_impulse, inv_h);
+        }
+        // The X axes aligned.
+        const NphVec3 e = nph_vec3_cross(nph_quat_axis_x(s.qa), nph_quat_axis_x(s.qb));
+        angular_mass(j, k);
+        const NphVec3 l = solve3(k, nph_vec3_neg(e));
+        j->angular_impulse = nph_vec3(nph_vec3_dot(l, nph_quat_axis_y(s.qa)) * inv_h,
+                                      nph_vec3_dot(l, nph_quat_axis_z(s.qa)) * inv_h, 0.0F);
+        move_angular(j, &s, l);
+        break;
+    }
+    case NPH_PHYSICS_JOINT_FIXED: {
+        NphQuat q = nph_quat_mul(s.qb, nph_quat_conjugate(s.qa));
+        if (q.w < 0.0F) {
+            q = nph_quat_neg(q);
+        }
+        angular_mass(j, k);
+        const NphVec3 l = solve3(k, nph_vec3(-2.0F * q.x, -2.0F * q.y, -2.0F * q.z));
+        j->angular_impulse = nph_vec3_scale(l, inv_h);
+        move_angular(j, &s, l);
+        break;
+    }
+    case NPH_PHYSICS_JOINT_TYPE_COUNT:
+    default:
+        NPH_ASSERT_MSG(false, "physics: unknown joint type %u", j->type);
+        return;
+    }
+    xpbd_point(j, &s, inv_h);
+}
+
+void phys_joint_xpbd_velocities(PhysSolverBody *bodies, const PhysJointStep *step, PhysJoint *j)
+{
+    JointState s = joint_state(bodies, j);
+    if (j->type == NPH_PHYSICS_JOINT_HINGE) {
+        const NphPhysicsHingeJoint *h = &j->hinge;
+        const NphVec3 axis = nph_quat_axis_x(s.qa);
+        const f32 mass = axial_mass(j, axis);
+        if (h->enable_spring != 0 && h->spring_damping_ratio > 0.0F) {
+            // The spring's damper: 2 zeta omega of the relative speed, at
+            // most all of it, this substep.
+            const f32 omega = 2.0F * 3.14159265F * h->spring_hertz;
+            const f32 share = nph_f32_min(2.0F * h->spring_damping_ratio * omega * step->h, 1.0F);
+            const f32 cdot = nph_vec3_dot(relative_angular(&s), axis);
+            apply_angular(j, &s, nph_vec3_scale(axis, -share * mass * cdot));
+        }
+        if (h->enable_motor != 0) {
+            const f32 cdot = nph_vec3_dot(relative_angular(&s), axis) - h->motor_speed;
+            const f32 max_impulse = step->h * h->max_motor_torque;
+            j->motor_impulse = nph_f32_clamp(-mass * cdot, -max_impulse, max_impulse);
+            apply_angular(j, &s, nph_vec3_scale(axis, j->motor_impulse));
+        }
+    } else if (j->type == NPH_PHYSICS_JOINT_BALL && j->ball.friction_torque > 0.0F) {
+        NphVec3 k[3];
+        angular_mass(j, k);
+        NphVec3 impulse = nph_vec3_neg(solve3(k, relative_angular(&s)));
+        const f32 max_impulse = step->h * j->ball.friction_torque;
+        const f32 len_sq = nph_vec3_length_sq(impulse);
+        if (len_sq > max_impulse * max_impulse) {
+            impulse = nph_vec3_scale(impulse, max_impulse / nph_f32_sqrt(len_sq));
+        }
+        j->friction_impulse = impulse;
+        apply_angular(j, &s, impulse);
+    }
+}
+
 f32 phys_joint_angle(const NphPhysicsWorld *w, const PhysJoint *j)
 {
     const PhysBody *a = &w->bodies.data[j->body_a];
