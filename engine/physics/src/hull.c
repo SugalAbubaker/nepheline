@@ -325,8 +325,9 @@ void nph_physics_hull_free(NphPhysicsHull *hull, NphAllocator *alloc)
 
 NphResult nph_physics_hull_make_box(NphVec3 h, NphAllocator *alloc, NphPhysicsHull **out)
 {
-    if (alloc == NULL || out == NULL || !nph_vec3_is_finite(h) || !(h.x > 0.0F) || !(h.y > 0.0F) ||
-        !(h.z > 0.0F)) {
+    if (alloc == NULL || out == NULL || !(h.x > 0.0F && h.x <= NPH_PHYSICS_MAX_COORDINATE) ||
+        !(h.y > 0.0F && h.y <= NPH_PHYSICS_MAX_COORDINATE) ||
+        !(h.z > 0.0F && h.z <= NPH_PHYSICS_MAX_COORDINATE)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // Corner i has +x when bit 0 is set, +y with bit 1, +z with bit 2.
@@ -1068,38 +1069,13 @@ static NphResult qh_finish(Quickhull *qh, const NphVec3 *input, f32 tolerance, N
     return result;
 }
 
-NphResult nph_physics_hull_build(const NphPhysicsHullDesc *desc, NphAllocator *alloc,
-                                 NphPhysicsHull **out)
-{
-    if (desc == NULL || alloc == NULL || out == NULL || desc->points == NULL ||
-        desc->point_count < 4U) {
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
-    const u32 budget =
-        desc->max_vertices == 0U ? NPH_PHYSICS_HULL_DEFAULT_MAX_VERTICES : desc->max_vertices;
-    if (budget < 4U || budget > NPH_PHYSICS_HULL_MAX_VERTICES || !(desc->tolerance >= 0.0F) ||
-        !nph_f32_is_finite(desc->tolerance)) {
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
-    f64 extent = 0.0;
-    {
-        f64 mx = 0.0;
-        f64 my = 0.0;
-        f64 mz = 0.0;
-        for (u32 i = 0U; i < desc->point_count; ++i) {
-            const NphVec3 p = desc->points[i];
-            if (!nph_vec3_is_finite(p)) {
-                return NPH_RESULT_INVALID_ARGUMENT;
-            }
-            mx = nph_f64_max(mx, nph_f64_abs((f64)p.x));
-            my = nph_f64_max(my, nph_f64_abs((f64)p.y));
-            mz = nph_f64_max(mz, nph_f64_abs((f64)p.z));
-        }
-        extent = mx + my + mz;
-    }
-    const f64 tolerance =
-        desc->tolerance > 0.0F ? (f64)desc->tolerance : 3.0 * (f64)FLT_EPSILON * extent;
+// The validator's checks (below), logging each violation only when `log`.
+static bool hull_check(const void *block, u32 block_size, f32 tolerance, bool log);
 
+// One Quickhull run at `tolerance` (the builder below).
+static NphResult quickhull(const NphPhysicsHullDesc *desc, u32 budget, f64 tolerance,
+                           NphAllocator *alloc, NphPhysicsHull **out)
+{
     Quickhull qh;
     memset(&qh, 0, sizeof qh);
     qh.alloc = alloc;
@@ -1159,11 +1135,61 @@ NphResult nph_physics_hull_build(const NphPhysicsHullDesc *desc, NphAllocator *a
         result = qh_finish(&qh, desc->points, (f32)tolerance, alloc, out);
     }
     qh_free(&qh);
-    if (result == NPH_RESULT_OK) {
-        NPH_ASSERT_MSG(nph_physics_hull_validate(*out, 0.0F),
-                       "hull build produced an invalid hull");
-    }
     return result;
+}
+
+NphResult nph_physics_hull_build(const NphPhysicsHullDesc *desc, NphAllocator *alloc,
+                                 NphPhysicsHull **out)
+{
+    if (desc == NULL || alloc == NULL || out == NULL || desc->points == NULL ||
+        desc->point_count < 4U) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const u32 budget =
+        desc->max_vertices == 0U ? NPH_PHYSICS_HULL_DEFAULT_MAX_VERTICES : desc->max_vertices;
+    if (budget < 4U || budget > NPH_PHYSICS_HULL_MAX_VERTICES || !(desc->tolerance >= 0.0F) ||
+        !nph_f32_is_finite(desc->tolerance)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    f64 extent = 0.0;
+    {
+        f64 mx = 0.0;
+        f64 my = 0.0;
+        f64 mz = 0.0;
+        for (u32 i = 0U; i < desc->point_count; ++i) {
+            const NphVec3 p = desc->points[i];
+            if (!nph_vec3_is_finite(p) ||
+                nph_vec3_max_component(nph_vec3_abs(p)) > NPH_PHYSICS_MAX_COORDINATE) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+            mx = nph_f64_max(mx, nph_f64_abs((f64)p.x));
+            my = nph_f64_max(my, nph_f64_abs((f64)p.y));
+            mz = nph_f64_max(mz, nph_f64_abs((f64)p.z));
+        }
+        extent = mx + my + mz;
+    }
+    f64 tolerance = desc->tolerance > 0.0F ? (f64)desc->tolerance : 3.0 * (f64)FLT_EPSILON * extent;
+    // Quickhull's merges keep each face convex within the tolerance, but a
+    // cloud with features near the tolerance's scale can still leave a
+    // merged face reflex beyond it (fuzzing found a sliver 4 mm thick and
+    // 128 m long). Such a hull is built again at four, then sixteen times
+    // the tolerance, which merges what the first could not; one that still
+    // fails validation is refused.
+    for (u32 attempt = 0U; attempt < 3U; ++attempt) {
+        const NphResult result = quickhull(desc, budget, tolerance, alloc, out);
+        if (result != NPH_RESULT_OK) {
+            return result;
+        }
+        if (hull_check(*out, (*out)->byte_size, 0.0F, false)) {
+            return NPH_RESULT_OK;
+        }
+        nph_physics_hull_free(*out, alloc);
+        *out = NULL;
+        tolerance *= 4.0;
+    }
+    NPH_LOG_WARN(&NPH_LOG_PHYSICS, "hull build: the %u points give no hull valid within %g",
+                 desc->point_count, tolerance / 4.0);
+    return NPH_RESULT_INVALID_ARGUMENT;
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,18 +1226,35 @@ u32 nph_physics_hull_face_vertex_count(const NphPhysicsHull *hull, u32 face)
     return n;
 }
 
+// A violation: logged when the check is asked to (`log` in scope).
 #define HULL_FAIL(...)                                                                             \
     do {                                                                                           \
-        NPH_LOG_WARN(&NPH_LOG_PHYSICS, "hull validate: " __VA_ARGS__);                             \
+        if (log) {                                                                                 \
+            NPH_LOG_WARN(&NPH_LOG_PHYSICS, "hull validate: " __VA_ARGS__);                         \
+        }                                                                                          \
         return false;                                                                              \
     } while (0)
 
-bool nph_physics_hull_validate(const NphPhysicsHull *hull, f32 tolerance)
+static bool finite_in_range(f32 v)
 {
-    if (hull == NULL) {
-        return false;
-    }
+    return nph_f32_abs(v) <= NPH_PHYSICS_MAX_COORDINATE; // false for NaN
+}
+
+static bool vec3_in_range(NphVec3 v)
+{
+    return finite_in_range(v.x) && finite_in_range(v.y) && finite_in_range(v.z);
+}
+
+static bool hull_check(const void *block, u32 block_size, f32 tolerance, bool log)
+{
     const u32 header = (u32)sizeof(NphPhysicsHull);
+    if (block == NULL || block_size < header || ((uptr)block & 15U) != 0U) {
+        HULL_FAIL("no 16-byte aligned header in %u bytes", block_size);
+    }
+    const NphPhysicsHull *hull = block;
+    if (hull->byte_size < header || hull->byte_size > block_size) {
+        HULL_FAIL("byte_size %u outside the %u-byte block", hull->byte_size, block_size);
+    }
     const u64 size = hull->byte_size;
     const u64 v_end = (u64)hull->vertices_offset + (u64)hull->vertex_count * sizeof(NphVec3);
     const u64 p_end = (u64)hull->planes_offset + (u64)hull->face_count * sizeof(NphPlane);
@@ -1227,16 +1270,39 @@ bool nph_physics_hull_validate(const NphPhysicsHull *hull, f32 tolerance)
     const u32 nv = hull->vertex_count;
     const u32 ne = hull->edge_count;
     const u32 nf = hull->face_count;
-    if (nv < 4U || nv > NPH_PHYSICS_HULL_MAX_VERTICES || nf < 4U || ne < 12U || (ne & 1U) != 0U ||
-        ne > NPH_U16_MAX) {
+    // A convex polyhedron of V vertices has at most 2V - 4 faces and 3V - 6
+    // edges (Euler, with three edges a face); the collision code's arrays
+    // are sized by these bounds.
+    if (nv < 4U || nv > NPH_PHYSICS_HULL_MAX_VERTICES || nf < 4U || nf > 2U * nv - 4U || ne < 12U ||
+        (ne & 1U) != 0U || ne / 2U > 3U * nv - 6U) {
         HULL_FAIL("counts nv=%u ne=%u nf=%u", nv, ne, nf);
     }
     if ((i64)nv - (i64)(ne / 2U) + (i64)nf != 2) {
         HULL_FAIL("Euler characteristic nv - ne + nf = %lld",
                   (long long)((i64)nv - (i64)(ne / 2U) + (i64)nf));
     }
+    // The header's numbers: what mass, bounds, and continuous collision read.
+    const NphAABB bounds = hull->bounds;
+    bool numbers = vec3_in_range(bounds.min) && vec3_in_range(bounds.max) &&
+                   bounds.min.x <= bounds.max.x && bounds.min.y <= bounds.max.y &&
+                   bounds.min.z <= bounds.max.z && vec3_in_range(hull->centroid) &&
+                   hull->volume > 0.0F && nph_f32_is_finite(hull->volume) &&
+                   hull->tolerance > 0.0F && hull->tolerance <= NPH_PHYSICS_MAX_COORDINATE &&
+                   hull->inner_radius >= 0.0F && hull->inner_radius <= hull->outer_radius &&
+                   hull->outer_radius <= 4.0F * NPH_PHYSICS_MAX_COORDINATE;
+    for (u32 i = 0U; i < 3U; ++i) {
+        numbers = numbers && nph_vec3_is_finite(hull->inertia.c[i]);
+    }
+    if (!numbers) {
+        HULL_FAIL("header numbers not finite or out of range");
+    }
     const f32 tol = tolerance > 0.0F ? tolerance : nph_f32_max(hull->tolerance, 1e-6F) * 8.0F;
     const NphVec3 *verts = nph_physics_hull_vertices(hull);
+    for (u32 v = 0U; v < nv; ++v) {
+        if (!nph_vec3_is_finite(verts[v]) || !nph_aabb_contains_point(bounds, verts[v])) {
+            HULL_FAIL("vertex %u not finite or outside the bounds", v);
+        }
+    }
     const NphPlane *planes = nph_physics_hull_planes(hull);
     const u16 *faces = nph_physics_hull_faces(hull);
     const NphPhysicsHullEdge *edges = nph_physics_hull_edges(hull);
@@ -1303,4 +1369,9 @@ bool nph_physics_hull_validate(const NphPhysicsHull *hull, f32 tolerance)
         }
     }
     return true;
+}
+
+bool nph_physics_hull_validate(const void *block, u32 size, f32 tolerance)
+{
+    return hull_check(block, size, tolerance, true);
 }

@@ -148,7 +148,7 @@ NPH_INLINE const u32 *nph_physics_mesh_originals(const NphPhysicsMesh *m)
 void nph_physics_mesh_triangle(const NphPhysicsMesh *m, u32 t, NphVec3 out[3]);
 
 typedef struct NphPhysicsMeshDesc {
-    const NphVec3 *vertices; // finite
+    const NphVec3 *vertices; // finite, within NPH_PHYSICS_MAX_COORDINATE of the origin
     u32 vertex_count;
     const u32 *indices; // three per triangle, each below vertex_count
     u32 triangle_count; // 1 to NPH_PHYSICS_MESH_MAX_TRIANGLES
@@ -170,7 +170,8 @@ typedef struct NphPhysicsMeshDesc {
 // the build's temporary memory (released before returning). Degenerate
 // triangles (repeated vertices after welding, or no area) are dropped; at
 // least one must remain. NPH_RESULT_INVALID_ARGUMENT for no triangles, an
-// index out of range, a non-finite coordinate or setting, or nothing left
+// index out of range, a coordinate that is not finite or beyond
+// NPH_PHYSICS_MAX_COORDINATE, a setting that is not finite, or nothing left
 // after dropping; NPH_RESULT_OUT_OF_MEMORY. Release the mesh with
 // nph_physics_mesh_free and the same allocator. Deterministic: the same
 // input gives the same bytes.
@@ -183,9 +184,13 @@ void nph_physics_mesh_free(NphPhysicsMesh *mesh, NphAllocator *alloc);
 // Checks a block of `size` bytes (at least the header) before use: the
 // offsets and counts inside the block and aligned, every index in range,
 // every child an inner node after its parent or a leaf within the
-// triangles, every triangle in exactly one leaf, finite coordinates, and
-// each child's box holding what it contains. For meshes read from files;
-// never reads past `size`. Logs the first violation.
+// triangles, every triangle in exactly one leaf, coordinates finite and
+// within NPH_PHYSICS_MAX_COORDINATE, each child's box finite and holding
+// what it contains, every empty slot's box the inverted one the builder
+// writes (so nothing overlaps it), and the tree no deeper than the queries'
+// stacks hold in any order of visit. A mesh it accepts is safe for every
+// function of the module. For meshes read from files; never reads past
+// `size`. Logs the first violation.
 bool nph_physics_mesh_validate(const void *block, u32 size);
 
 // ---------------------------------------------------------------------------

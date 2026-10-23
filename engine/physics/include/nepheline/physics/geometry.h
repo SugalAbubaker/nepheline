@@ -17,7 +17,8 @@
 //            not convex and without mass, for static and kinematic bodies
 //            only (the level's geometry, moving platforms)
 //
-// Sizes are positive and finite (nph_physics_geometry_is_valid).
+// Sizes are positive and at most NPH_PHYSICS_MAX_COORDINATE
+// (nph_physics_geometry_is_valid).
 //
 // Thread-safety: every function is pure and NPH_THREADSAFE; a hull or mesh
 // is read, never written.

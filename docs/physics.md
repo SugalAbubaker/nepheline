@@ -55,7 +55,10 @@ few metres at most and keep full precision anywhere in the world.
 contact points are reported up to `NPH_PHYSICS_SPECULATIVE_DISTANCE` (four
 slops) apart, so the solver can stop an approaching body before it
 penetrates (speculative contacts, Catto 2013); broadphase boxes are
-fattened by `NPH_PHYSICS_AABB_MARGIN` (10 cm).
+fattened by `NPH_PHYSICS_AABB_MARGIN` (10 cm). A shape's sizes and its
+vertices in its own frame stay within `NPH_PHYSICS_MAX_COORDINATE`
+(100 km), so the products collision forms (edges' cross products, GJK's
+determinants) stay inside f32's range; bodies' positions are unbounded.
 
 **Poses** (`NphPhysicsPose`) are a unit quaternion and a translation,
 32-bit. Mass properties (`NphPhysicsMassData`) are a mass, a centre of
@@ -104,10 +107,15 @@ distance) and outer radius, and the build tolerance. The block holds no
 pointer, so it can be copied, written into a cooked file, and used straight
 from a memory-mapped one. Faces are convex polygons, not triangles: a box
 has six faces and twelve edges, which is what the separating axis test and
-contact clipping want. `nph_physics_hull_validate` checks every invariant
-(twins, closed loops, planar convex faces, every vertex behind every plane,
-Euler's formula, offsets inside the block), for tests and for blobs read
-from files.
+contact clipping want. `nph_physics_hull_validate` checks a block of a
+given size before use (hulls read from files): a 16-byte aligned header
+whose `byte_size` fits, the offsets inside the block, the counts within
+what a hull of 256 vertices can have (at most 2V − 4 faces and 3V − 6
+edges, which the collision code's arrays hold), the header's numbers finite
+and in range, and every invariant: twins, closed loops, every vertex finite
+and inside the bounds, planar convex faces, every vertex behind every
+plane, Euler's formula. A hull it accepts is safe for every function of the
+module, which the fuzzing below holds it to.
 
 **The builder** (`nph_physics_hull_build`) is Quickhull (Barber, Dobkin, and
 Huhdanpaa, ACM TOMS 1996), run in double precision on the 32-bit points:
@@ -137,6 +145,14 @@ round-off bound of a plane distance at the cloud's scale. Build from points
 near the origin: the hull's frame is the points' frame, and coordinates far
 from it cost collision precision. The build is deterministic: the same
 points give the same bytes.
+
+Every hull the builder returns has passed validation. Quickhull's merges
+keep each face convex within the tolerance, but a cloud with features near
+the tolerance's scale can leave a merged face reflex beyond it: fuzzing
+found a sliver 4 mm thick and 128 m long whose hull had a corner 1 mm
+inside its neighbours' line. Such a hull is built again at four, then
+sixteen times the tolerance, which merges what the first could not (the
+sliver's validates at four), and a cloud that still fails is refused.
 
 `nph_physics_hull_make_box` makes a box's hull directly, with its exact
 topology.
@@ -246,9 +262,14 @@ and each triangle's index in the builder's input, which queries report so a
 game can find its material). It holds no pointer, so it can be cooked and
 used from a memory-mapped file, and any number of shapes in any number of
 worlds may share it. `nph_physics_mesh_validate` checks a block of a given
-size before use: offsets and counts inside it, indices in range, finite
-coordinates, every triangle in exactly one leaf, and every node's boxes
-holding what they contain.
+size before use: offsets and counts inside it, indices in range,
+coordinates finite and within the coordinate limit, every triangle in
+exactly one leaf, every node's boxes finite and holding what they contain,
+every empty slot's box the inverted one the builder writes (the overlap
+query relies on it overlapping nothing), and the tree no deeper than the
+queries' stacks hold whatever order they visit children in: three pending
+siblings a level and a node's four children, which the raycast's
+nearest-first order can reach where the validator's own walk would not.
 
 **The builder** (`nph_physics_mesh_build`) welds vertices closer than a
 tolerance (an exporter repeats a vertex for each face with its own normal),
@@ -875,17 +896,18 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (150 tests):
+`physics_tests` (151 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
   point), budgets (monotonic volume), lattices at four scales and noisy
   spheres at three (the classic degenerate inputs), degenerate and invalid
-  input, far-from-origin coordinates, determinism, and validation of seven
-  kinds of corrupted blob.
+  input (and coordinates past the limit), far-from-origin coordinates, a
+  sliver built again at a larger tolerance, determinism, and validation of
+  thirteen kinds of corrupted blob, a short block, and a misaligned one.
 - Geometry: mass properties against a numeric integration and closed
   forms, the parallel axis sum and rotation, tight bounds, proxies against
-  support points.
+  support points, and validity (sizes past the coordinate limit refused).
 - GJK against closed forms and brute force, warm starts, rounded cores;
   EPA against the separating axis test on random overlapping pairs (each
   method's depth is the separating translation along its own normal, and the
@@ -899,8 +921,9 @@ reference CPU class.
   triangles dropped, bad descriptions refused, active edges at convex
   corners and open edges, a large grid's shallow valid tree, overlaps and
   raycasts against brute force, rays through shared edges and vertices
-  that never slip, one-sided faces, validation of corrupted blocks, and
-  determinism.
+  that never slip, one-sided faces, validation of corrupted blocks (an
+  empty slot's box, NaN boxes, bounds past the limit, and 2000 random
+  damages, whatever passes queried safely), and determinism.
 - Triangles and meshes (`test_collide_mesh.c`): the triangle view's axis
   test against brute force over every edge pair (on the vectorised and
   scalar paths), the closed forms for spheres and capsules, the rules for
@@ -982,3 +1005,17 @@ reference CPU class.
   ragdoll is chaotic and another compiler's rounding sends it elsewhere. A
   pile replays bit for bit in a new world, on 4 and 8 workers, and on the
   AVX2 kernel, under every solver.
+
+**Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull` and
+`physics_mesh` read builder input from the fuzzer's bytes (a point cloud, a
+triangle soup), require the built block to validate and to survive every
+use (geometry queries, overlaps and raycasts, every convex shape's
+contacts, GJK and EPA, all with finite results), then damage a copy (a
+truncation and byte edits) that validation must refuse or the same uses
+must survive; the copy is exactly as long as the size validation is given,
+so a read past it is a sanitizer's error. Their seeds come from
+`scripts/fuzz_seeds_physics.py`. Writing them found the hull validator
+trusting the header's own size, a NaN vertex or tolerance passing every
+comparison, face counts beyond the collision code's arrays, the mesh's
+empty slots and stack depth above, and the Quickhull sliver; the smoke
+runs replay 40 000 mutations of each seed under ASan clean.

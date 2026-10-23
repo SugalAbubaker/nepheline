@@ -655,7 +655,9 @@ static bool desc_valid(const NphPhysicsMeshDesc *d)
         return false;
     }
     for (u32 i = 0U; i < d->vertex_count; ++i) {
-        if (!nph_vec3_is_finite(d->vertices[i])) {
+        const NphVec3 v = d->vertices[i];
+        if (!nph_vec3_is_finite(v) ||
+            nph_vec3_max_component(nph_vec3_abs(v)) > NPH_PHYSICS_MAX_COORDINATE) {
             return false;
         }
     }
@@ -816,7 +818,28 @@ typedef struct Pending {
     u32 child;
     u32 parent;
     u32 slot;
+    u32 depth; // of the child, the root's children at 1
 } Pending;
+
+// A query at an inner node of depth d holds at most three siblings a level
+// above it and the node's four children: whatever order it visits them in
+// (the raycast's nearest first), its stack stays within this.
+NPH_INLINE u32 stack_need(u32 depth)
+{
+    return 3U * depth + 4U;
+}
+
+static bool vertex_in_range(NphVec3 v)
+{
+    return nph_vec3_max_component(nph_vec3_abs(v)) <= NPH_PHYSICS_MAX_COORDINATE; // not NaN
+}
+
+// An empty slot's box: what the builder writes, which no box overlaps.
+static bool empty_box(const NphPhysicsMeshNode *n, u32 k)
+{
+    return n->min_x[k] == FLT_MAX && n->min_y[k] == FLT_MAX && n->min_z[k] == FLT_MAX &&
+           n->max_x[k] == -FLT_MAX && n->max_y[k] == -FLT_MAX && n->max_z[k] == -FLT_MAX;
+}
 
 static bool range_ok(u64 offset, u64 count, u64 elem, u64 align, u64 size)
 {
@@ -868,6 +891,9 @@ bool nph_physics_mesh_validate(const void *block, u32 size)
         !range_ok(m->originals_offset, nt, sizeof(u32), 4U, bytes)) {
         MESH_FAIL("arrays outside the %u-byte block", m->byte_size);
     }
+    if (!vertex_in_range(m->bounds.min) || !vertex_in_range(m->bounds.max)) {
+        MESH_FAIL("bounds not finite or beyond the coordinate limit");
+    }
     const NphVec3 *v = nph_physics_mesh_vertices(m);
     for (u32 i = 0U; i < nv; ++i) {
         if (!nph_vec3_is_finite(v[i]) || !nph_aabb_contains_point(m->bounds, v[i])) {
@@ -892,7 +918,7 @@ bool nph_physics_mesh_validate(const void *block, u32 size)
     const NphPhysicsMeshNode *nodes = nph_physics_mesh_nodes(m);
     Pending stack[STACK_DEPTH];
     u32 top = 0U;
-    stack[top++] = (Pending){0U, NONE, 0U};
+    stack[top++] = (Pending){0U, NONE, 0U, 0U};
     u32 visited = 0U;
     u32 next_triangle = 0U;
     while (top > 0U) {
@@ -928,26 +954,31 @@ bool nph_physics_mesh_validate(const void *block, u32 size)
         for (u32 k = 0U; k < 4U; ++k) {
             const u32 c = n->child[k];
             if (c == NPH_PHYSICS_MESH_CHILD_EMPTY) {
+                if (!empty_box(n, k)) {
+                    MESH_FAIL("node %u: empty slot %u's box is not the empty box", index, k);
+                }
                 continue;
             }
             if (used != k) {
                 MESH_FAIL("node %u: a child after an empty slot", index);
             }
-            if (!(n->min_x[k] <= n->max_x[k] && n->min_y[k] <= n->max_y[k] &&
-                  n->min_z[k] <= n->max_z[k])) {
-                MESH_FAIL("node %u: child %u's box inverted", index, k);
+            const NphVec3 lo = nph_vec3(n->min_x[k], n->min_y[k], n->min_z[k]);
+            const NphVec3 hi = nph_vec3(n->max_x[k], n->max_y[k], n->max_z[k]);
+            if (!vertex_in_range(lo) || !vertex_in_range(hi) || !(lo.x <= hi.x) ||
+                !(lo.y <= hi.y) || !(lo.z <= hi.z)) {
+                MESH_FAIL("node %u: child %u's box inverted or not finite", index, k);
             }
             used += 1U;
         }
         if (used == 0U) {
             MESH_FAIL("node %u is empty", index);
         }
-        if (top + used > STACK_DEPTH) {
+        if (stack_need(e.depth) > STACK_DEPTH || top + used > STACK_DEPTH) {
             MESH_FAIL("deeper than the query stack");
         }
         // In reverse onto the stack, so the children come off in order.
         for (u32 k = used; k > 0U; --k) {
-            stack[top++] = (Pending){n->child[k - 1U], index, k - 1U};
+            stack[top++] = (Pending){n->child[k - 1U], index, k - 1U, e.depth + 1U};
         }
     }
     if (visited != nn || next_triangle != nt) {
@@ -992,7 +1023,8 @@ void nph_physics_mesh_overlap(const NphPhysicsMesh *m, NphAABB box, NphPhysicsMe
             const NphPhysicsMeshNode *n = &nodes[code];
             const u32 mask = overlap_mask(n, box); // empty slots' boxes overlap nothing
             for (u32 k = 4U; k > 0U; --k) {
-                if ((mask & (1U << (k - 1U))) != 0U) {
+                if ((mask & (1U << (k - 1U))) != 0U &&
+                    n->child[k - 1U] != NPH_PHYSICS_MESH_CHILD_EMPTY) {
                     NPH_ASSERT(top < STACK_DEPTH);
                     stack[top++] = n->child[k - 1U];
                 }

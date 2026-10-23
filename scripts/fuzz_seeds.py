@@ -306,6 +306,9 @@ def main():
     # The scene files (engine/scene; scripts/fuzz_seeds_scene.py).
     import fuzz_seeds_scene
     fuzz_seeds_scene.write_scene_seeds(write, CORPUS)
+    # The physics blocks: hulls and meshes (scripts/fuzz_seeds_physics.py).
+    import fuzz_seeds_physics
+    fuzz_seeds_physics.write_physics_seeds(write, CORPUS)
     return 0
 
 

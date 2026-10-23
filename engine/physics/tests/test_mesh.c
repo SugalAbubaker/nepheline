@@ -185,6 +185,8 @@ NTEST(mesh, bad_descriptions_are_refused)
     idx[2] = 2U;
     v[1].y = (f32)NAN;
     NTEST_EXPECT_EQ_INT(nph_physics_mesh_build(&d, alloc, &m), NPH_RESULT_INVALID_ARGUMENT);
+    v[1].y = 2.0F * NPH_PHYSICS_MAX_COORDINATE; // beyond the limit
+    NTEST_EXPECT_EQ_INT(nph_physics_mesh_build(&d, alloc, &m), NPH_RESULT_INVALID_ARGUMENT);
     v[1].y = 0.0F;
     bad = d;
     bad.weld_tolerance = (f32)NAN;
@@ -605,6 +607,12 @@ NTEST(mesh, validation_rejects_corrupted_blocks)
     RESET();
     c->node_count += 1U; // a node no parent reaches
     NTEST_EXPECT_FALSE(nph_physics_mesh_validate(c, size));
+    RESET();
+    c->bounds.max.x = 2.0F * NPH_PHYSICS_MAX_COORDINATE; // beyond the limit
+    NTEST_EXPECT_FALSE(nph_physics_mesh_validate(c, size));
+    RESET();
+    nodes[0].min_z[inner_slot] = (f32)NAN; // a box no comparison rejects
+    NTEST_EXPECT_FALSE(nph_physics_mesh_validate(c, size));
     // A misaligned block.
     memcpy((u8 *)c + 4U, m, size);
     NTEST_EXPECT_FALSE(nph_physics_mesh_validate((u8 *)c + 4U, size));
@@ -631,11 +639,29 @@ NTEST(mesh, validation_rejects_corrupted_blocks)
                                                 nph_vec3(0.0F, -10.0F, 0.0F), &hit));
         }
     }
-    nph_log_set_level(&NPH_LOG_PHYSICS, level);
     NTEST_LOG("%u of 2000 damaged blocks still valid (damage to coordinates and slack)", passed);
 #undef RESET
     NPH_FREE(alloc, c, size + 16U, 16U);
     nph_physics_mesh_free(m, alloc);
+    // An empty slot's box must be the empty one: an overlap query would take
+    // any other for a child (one triangle: the root has three empty slots).
+    NphPhysicsMesh *one = build_mesh(alloc, v, (N + 1) * (N + 1), idx, 1U, 0.0F, false);
+    NphPhysicsMesh *e = NPH_ALLOC(alloc, one->byte_size, 16U);
+    NTEST_ASSERT_NOT_NULL(e);
+    memcpy(e, one, one->byte_size);
+    NTEST_EXPECT_TRUE(nph_physics_mesh_validate(e, e->byte_size));
+    NphPhysicsMeshNode *root = (NphPhysicsMeshNode *)((u8 *)e + e->nodes_offset);
+    NTEST_ASSERT_EQ_UINT(root->child[3], NPH_PHYSICS_MESH_CHILD_EMPTY);
+    root->min_x[3] = -1.0F;
+    root->min_y[3] = -1.0F;
+    root->min_z[3] = -1.0F;
+    root->max_x[3] = 1.0F;
+    root->max_y[3] = 1.0F;
+    root->max_z[3] = 1.0F;
+    NTEST_EXPECT_FALSE(nph_physics_mesh_validate(e, e->byte_size));
+    nph_log_set_level(&NPH_LOG_PHYSICS, level);
+    NPH_FREE(alloc, e, one->byte_size, 16U);
+    nph_physics_mesh_free(one, alloc);
     test_alloc_end(&ta);
 }
 

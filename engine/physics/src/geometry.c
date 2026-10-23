@@ -135,9 +135,10 @@ NphPhysicsMassData nph_physics_geometry_mass(const NphPhysicsGeometry *g, f32 de
 // Validity, bounds, support
 // ---------------------------------------------------------------------------
 
-static bool positive_finite(f32 v)
+// Positive, finite, and at most NPH_PHYSICS_MAX_COORDINATE.
+static bool size_ok(f32 v)
 {
-    return nph_f32_is_finite(v) && v > 0.0F;
+    return v > 0.0F && v <= NPH_PHYSICS_MAX_COORDINATE;
 }
 
 bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g)
@@ -147,14 +148,14 @@ bool nph_physics_geometry_is_valid(const NphPhysicsGeometry *g)
     }
     switch (g->type) {
     case NPH_PHYSICS_SHAPE_SPHERE:
-        return positive_finite(g->sphere.radius);
+        return size_ok(g->sphere.radius);
     case NPH_PHYSICS_SHAPE_CAPSULE:
         // A capsule of zero height is a sphere and is allowed.
-        return positive_finite(g->capsule.radius) && nph_f32_is_finite(g->capsule.half_height) &&
-               g->capsule.half_height >= 0.0F;
+        return size_ok(g->capsule.radius) && g->capsule.half_height >= 0.0F &&
+               g->capsule.half_height <= NPH_PHYSICS_MAX_COORDINATE;
     case NPH_PHYSICS_SHAPE_BOX:
-        return positive_finite(g->box.half_extents.x) && positive_finite(g->box.half_extents.y) &&
-               positive_finite(g->box.half_extents.z);
+        return size_ok(g->box.half_extents.x) && size_ok(g->box.half_extents.y) &&
+               size_ok(g->box.half_extents.z);
     case NPH_PHYSICS_SHAPE_HULL:
         return g->hull != NULL && g->hull->vertex_count >= 4U;
     case NPH_PHYSICS_SHAPE_MESH:

@@ -159,6 +159,20 @@ world's queries (§10's last sentence) follow. Building it refined the plan:
   contact lists, and the awake list: the parent's update writes every
   record and carries impulses across all four. A pair reports at most one
   hit a step, at the fastest-approaching point of any manifold.
+- **Validation and fuzzing** (the plan's consequence below, now done for
+  hulls and meshes). `nph_physics_hull_validate` takes the block's size,
+  as the mesh's does, instead of trusting the header's, and both bound
+  what the module's arrays and arithmetic assume: counts (a hull's faces
+  at most 2V − 4), coordinates within `NPH_PHYSICS_MAX_COORDINATE`
+  (100 km, also enforced by the builders and on primitive sizes), finite
+  header numbers (a NaN tolerance or vertex passes every comparison), a
+  mesh's empty slots exactly the builder's inverted box (the overlap query
+  would take another for a child, and read node 0xFFFFFFFF), and a tree no
+  deeper than the queries' stacks in any order of visit. The fuzz targets
+  `physics_hull` and `physics_mesh` build from the input, use the block,
+  then damage a copy; they also found Quickhull leaving a sliver's merged
+  face reflex beyond its tolerance, which the builder now builds again at
+  four, then sixteen times the tolerance.
 - **Known: rolling contacts lose support within a step.** A rolling
   shape's contact anchors are material points, which rise off the surface
   as the shape turns (r (ω h)² / 2 over the step), so the later substeps
@@ -193,4 +207,4 @@ world's queries (§10's last sentence) follow. Building it refined the plan:
 - A pair against a mesh holds up to four contacts (sixteen points); a pair
   of convex shapes stays one.
 - Mesh and heightfield blobs are validated before use from a file, and
-  fuzzed, with the hull's validation (which was not yet).
+  fuzzed, with the hull's validation (done for hulls and meshes: above).
