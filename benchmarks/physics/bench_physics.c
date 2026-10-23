@@ -501,10 +501,13 @@ NBENCH(tree_rebuild_10k)
 //   world_pile_1000_st       1000 boxes, spheres, and capsules settled in a bin
 //   world_pile_1000_mt       the same on the job system
 //   world_sleeping_10k       10k sleeping boxes and one awake ball
+//   world_chains_st          16 chains of 25 ball-jointed links swinging, one thread
+//   world_chains_mt          the same on the job system
 // ---------------------------------------------------------------------------
 
 #include <nepheline/jobs/jobs.h>
 #include <nepheline/physics/body.h>
+#include <nepheline/physics/joint.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/physics/world.h>
 
@@ -699,4 +702,61 @@ NBENCH(world_sleeping_10k)
         NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, bench_jobs()));
     }
     nph_physics_world_destroy(w);
+}
+
+// Sixteen chains of 25 capsule links, released sideways: they swing for the
+// whole run (400 joints, sleep off).
+static void bench_chains(NbenchState *state, NphJobSystem *js)
+{
+    NphPhysicsWorld *w = bench_world(false);
+    if (w == NULL) {
+        return;
+    }
+    const u32 links = 25U / (WORLD_SCALE > 1U ? 5U : 1U);
+    for (u32 c = 0U; c < 16U; ++c) {
+        const NphDVec3 top = nph_dvec3(0.0, 20.0, 2.0 * (f64)c);
+        NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+        bd.type = NPH_PHYSICS_BODY_STATIC;
+        bd.position = top;
+        NphPhysicsBody prev;
+        if (nph_physics_body_create(w, &bd, &prev) != NPH_RESULT_OK) {
+            break;
+        }
+        for (u32 i = 0U; i < links; ++i) {
+            bd = nph_physics_body_desc_default();
+            bd.position = nph_dvec3_add(top, nph_dvec3(0.5 * ((f64)i + 0.5), 0.0, 0.0));
+            bd.rotation = nph_quat_from_axis_angle(nph_vec3(0.0F, 0.0F, 1.0F), 1.5707963F);
+            NphPhysicsBody link;
+            if (nph_physics_body_create(w, &bd, &link) != NPH_RESULT_OK) {
+                break;
+            }
+            const NphPhysicsShapeDesc sd =
+                nph_physics_shape_desc_default(nph_physics_geometry_capsule(0.2F, 0.05F));
+            NphPhysicsShape shape;
+            NPH_IGNORE_RESULT(nph_physics_shape_create(w, link, &sd, &shape));
+            NphPhysicsJointDesc jd =
+                nph_physics_joint_desc_default(NPH_PHYSICS_JOINT_BALL, prev, link);
+            nph_physics_joint_frames_at(w, prev, link,
+                                        nph_dvec3_add(top, nph_dvec3(0.5 * (f64)i, 0.0, 0.0)),
+                                        nph_vec3(1.0F, 0.0F, 0.0F), &jd.frame_a, &jd.frame_b);
+            NphPhysicsJoint j;
+            NPH_IGNORE_RESULT(nph_physics_joint_create(w, &jd, &j));
+            prev = link;
+        }
+    }
+    bench_steps(w, js, 60U); // swinging down
+    while (nbench_keep_running(state)) {
+        NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+    nph_physics_world_destroy(w);
+}
+
+NBENCH(world_chains_st)
+{
+    bench_chains(state, NULL);
+}
+
+NBENCH(world_chains_mt)
+{
+    bench_chains(state, bench_jobs());
 }

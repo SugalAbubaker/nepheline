@@ -241,6 +241,8 @@ world_pyramids_16_mt           4950000
 world_pile_1000_st             10200000
 world_pile_1000_mt             3300000
 world_sleeping_10k             8400
+world_chains_st                1700000
+world_chains_mt                810000
 
 # profile_bench
 profile_zone_enabled           55

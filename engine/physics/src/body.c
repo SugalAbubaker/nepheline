@@ -97,6 +97,7 @@ NphResult nph_physics_body_create(NphPhysicsWorld *world, const NphPhysicsBodyDe
                (desc->gyroscopic != 0 ? PHYS_BODY_GYROSCOPIC : 0U);
     b->shape_head = PHYS_NULL;
     b->contact_head = PHYS_NULL;
+    b->joint_head = PHYS_NULL;
     b->island = PHYS_NULL;
     b->island_prev = PHYS_NULL;
     b->island_next = PHYS_NULL;
@@ -133,8 +134,16 @@ void nph_physics_body_destroy(NphPhysicsWorld *world, NphPhysicsBody body)
         return;
     }
     const u32 slot = phys_handle_slot(body.value);
-    // Contacts first (touching neighbours wake: what rested on this body
-    // must fall), then the shapes, the island, the awake list.
+    // Joints first (the bodies at their other ends wake), then contacts
+    // (touching neighbours wake: what rested on this body must fall), then
+    // the shapes, the island, the awake list.
+    while (b->joint_head != PHYS_NULL) {
+        const u32 j = b->joint_head >> 1U;
+        const PhysJoint *joint = &world->joints.data[j];
+        const u32 other = joint->body_a == slot ? joint->body_b : joint->body_a;
+        phys_joint_destroy(world, j, false);
+        NPH_IGNORE_RESULT(phys_wake_body(world, other));
+    }
     while (b->contact_head != PHYS_NULL) {
         const u32 c = b->contact_head >> 1U;
         const PhysContact *contact = &world->contacts.data[c];

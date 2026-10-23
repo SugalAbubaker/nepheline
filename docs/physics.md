@@ -7,8 +7,8 @@ collision, queries, and the character controller, stepped at a fixed
 `platform`, `math`, and `core`; it does not know the ECS (the runtime
 bridges entities to bodies) or the renderer (debug drawing goes out through
 a callback). Decisions: [ADR-0042](adr/0042-physics-collision.md) (the
-collision layer) and [ADR-0043](adr/0043-physics-world.md) (the world and
-the solver).
+collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
+solver), and [ADR-0044](adr/0044-physics-joints.md) (joints).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -16,7 +16,8 @@ Phase 11 builds it in parts. This document describes what exists:
 |---|---|
 | Geometry, convex hulls, the narrow phase, the AABB tree | done |
 | The world: bodies, shapes, contacts, the soft-step solver, threads, islands, sleep, events | done |
-| Joints, the solver comparison (§13), meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
+| Joints: ball (cone, twist, friction), hinge (limits, motor, spring), fixed | done |
+| The solver comparison (§13), slider, distance, and 6-DOF joints, the ragdoll, meshes, heightfields, compounds, queries, continuous collision, the character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -28,6 +29,7 @@ Phase 11 builds it in parts. This document describes what exists:
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
 | `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
+| `joint.h` | joints between bodies: ball, hinge, fixed; frames, limits, motors, springs, reactions |
 
 ## Conventions
 
@@ -431,6 +433,91 @@ source, `solver_impl.h`. Both do the same arithmetic in the same order, and
 contraction to FMA is off (ADR-0008 §6), so they agree to the bit; the
 machine's best is chosen at world creation.
 
+## Joints
+
+A joint (`joint.h`) holds a frame on each of two bodies, given in the
+body's frame: an anchor and three axes, of which X is the hinge or twist
+axis. The joint is satisfied when the frames coincide, less the motion it
+allows. `nph_physics_joint_frames_at` makes frames that meet at a world
+point with X along a world axis for the bodies' current poses, so a joint
+made from them starts satisfied.
+
+| Type | Holds | Frees | Options |
+|---|---|---|---|
+| ball | the anchors together | rotation | a cone for B's X axis (elliptical: half angles about A's Y and Z), a twist range about it, friction against any rotation |
+| hinge | the anchors together, the X axes aligned | rotation about X | an angle range, a motor (a speed up to a torque), a spring (towards an angle) |
+| fixed | the frames together | nothing | |
+
+At least one body must be dynamic; either may be static, a fixed point in
+the world. Joined bodies' shapes do not touch unless the joint says so
+(`collide_connected`): the pair search skips pairs of bodies joined that
+way, creating such a joint destroys the bodies' contacts, and destroying it
+queues the shapes so the next step finds their pairs again. Joints link
+islands as touching contacts do, so joined bodies sleep and wake together;
+a moving kinematic body wakes what hangs from it, and a hinge's motor
+driving towards a speed keeps its bodies awake. Destroying a body destroys
+its joints. `nph_physics_joint_reaction` gives the force and torque the
+joint applied to B in the last substep, what a breakable joint compares
+with its strength.
+
+**Solving.** Joints are constraints in the graph like contacts: a joint
+takes a colour free for its dynamic bodies, the colour's stages solve its
+joints and its contacts together, and joints that fit no colour are solved
+serially before the overflow's contacts. Each step prepares them with the
+contacts (anchors from the centres of mass and the frames' rotations in
+the world, fixed for the step; the inverse masses and inertias), and each
+substep warm starts them, solves them softly, and relaxes them rigidly, as
+the soft step does contacts. Inside the step, the bodies' displacements and
+rotations since its start move the fixed anchors and frames, so a joint's
+error needs no 64-bit arithmetic.
+
+The rows, in the order a joint solves them (the most important last, so it
+is left exact):
+
+| Row | Error | Rows |
+|---|---|---|
+| hinge spring | the angle less its target | 1, about X, soft at the spring's frequency, in the solve pass only |
+| hinge motor | the relative speed less the target | 1, its impulse within the torque times the substep |
+| hinge limits, ball twist limits | the angle past either end | 1 each, one-sided |
+| ball cone | the angle between the X axes past an ellipse over the swing vector (angle times axis), along the swing's axis | 1, one-sided |
+| ball friction | the relative angular velocity | 3, the impulse within a ball of the torque times the substep |
+| hinge axes | the cross product of the X axes | 2, about A's Y and Z |
+| fixed rotation | the rotation vector from A's frame to B's (twice the error quaternion's vector part) | 3 |
+| anchors | B's anchor less A's | 3 |
+
+Limits are speculative like contacts: open, they only stop the approach
+within the substep; closed, they are soft while solving and rigid while
+relaxing. The soft rows use the world's joint stiffness, 240 Hz with a
+damping ratio of 2 by default (a quarter of the substep rate, twice the
+contacts', Box2D's ratio). A spring solved again in the relax pass would
+double its implicit damping, so the spring acts once a substep, like the
+force it is.
+
+**Accuracy** (the tests, Profile):
+
+- A pendulum on a ball joint swings at its closed-form period
+  (2π √((⅖r² + L²) / gL) with the large-amplitude term) to 0.000 %, its
+  anchors within 5 µm, with no loss of amplitude in four periods.
+- A soft joint gives g / ω² (4.3 µm at 240 Hz) per body weight it carries
+  over its effective mass: a hanging chain of 20 links is 1.7 mm long in
+  all, and 10 links carrying a body 100 times heavier than a link stretch
+  9.7 mm. A chain released sideways whips down at 28 m/s with its anchors
+  at most 1.2 mm apart.
+- Cones and twist ranges hold within 0.07° of their limits; a door slammed
+  into its hinge's limits at 6 rad/s stops within 0.04°, its axis within
+  0.0003°, and its anchors open by 0.8 mm for a few substeps before closing.
+- A motor reaches its speed exactly, or accelerates at its torque over the
+  inertia; ball friction slows a spin at its torque to 0.01 %; an undamped
+  spring rings at its frequency, losing about 4 % a period to its implicit
+  integration (a damping ratio near hω / 2); a welded 2 m, 80 kg cantilever
+  sags 0.04 mm at its tip.
+- The reaction holds the body's weight to 0.5 %.
+
+**Cost.** A joint is scalar code, about 1.1 µs a step on one thread
+(preparation and three passes in each of four substeps): sixteen chains of
+25 links (400 joints) step in 0.57 ms on one thread and 0.16 ms on the job
+system.
+
 ## Threads
 
 The solver's work is one list of stages, unrolled for the step: prepare
@@ -457,8 +544,8 @@ preempted and holding a block, and needs a core.
 **How many threads.** Every thread that joins a stage costs a few hundred
 nanoseconds of synchronization whether or not it finds work, so the solver
 takes as many threads as the step's work pays for. On one thread a step
-costs about 600 ns per point row and 290 ns per body; a thread pays for
-itself with about 450 ns of work in each stage it joins:
+costs about 600 ns per point row, 290 ns per body, and 1200 ns per joint; a
+thread pays for itself with about 450 ns of work in each stage it joins:
 
     threads = min(1 + work / (stages × 450 ns), workers + 1, logical cores)
 
@@ -544,6 +631,8 @@ point):
 | `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 390 000 |
 | `world_pile_1000_mt` | 682 000 |
 | `world_sleeping_10k` (10k asleep, one ball awake) | 2 800 |
+| `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
+| `world_chains_mt` | 160 000 |
 
 Hull against hull is dominated by the edge-pair pass, about 8000 Gauss-map
 tests for two 32-vertex hulls; the planned optimisation buckets B's arcs on
@@ -561,7 +650,7 @@ budget of §8.9 on the six cores of the reference CPU class.
 
 ## Testing
 
-`physics_tests` (68 tests):
+`physics_tests` (87 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -599,3 +688,16 @@ budget of §8.9 on the six cores of the reference CPU class.
   10 000 km from the origin behaving as at the origin; the SSE4 and AVX2 kernels
   agreeing to the bit; and the same state hash with no job system, 1, 4,
   and 8 workers, and 2, 5, and 9 forced solver threads.
+- Joints: descriptions and their errors; frames that start satisfied; a
+  pendulum's period against its closed form; a chain hanging, whipping
+  down from the side, and carrying a body 100 times heavier than a link;
+  ball cones (elliptical) and twists pushed into their limits about each
+  axis; ball friction against a constant torque; a door slammed into both
+  of its hinge's limits; a motor at its speed and at its torque limit; a
+  spring's frequency and its implicit damping; a welded cantilever's sag;
+  joined bodies touching only when asked, and touching again once
+  unjoined; destruction (of joints and of bodies) waking and dropping what
+  they held; chains sleeping and waking as one; a kinematic crane carrying
+  a sleeping load; the reaction against the weight; and the same state
+  hash across worker and solver thread counts with chains, a motorized
+  door, a weld, and boxes falling on them.

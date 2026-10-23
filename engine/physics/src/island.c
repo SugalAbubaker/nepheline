@@ -18,6 +18,7 @@
 enum {
     PHYS_BODY_VISITED = 1U << 8U,
     PHYS_CONTACT_VISITED = 1U << 8U,
+    PHYS_JOINT_VISITED = 1U << 10U, // past joint_solver.c's per-step bits
 };
 
 static bool body_awake(const PhysBody *b)
@@ -29,42 +30,58 @@ static bool body_awake(const PhysBody *b)
 // The constraint graph
 // ---------------------------------------------------------------------------
 
+// The first colour free for a constraint's dynamic bodies, or the overflow.
+static u32 graph_pick_color(const NphPhysicsWorld *w, u32 body_a, u32 body_b)
+{
+    const bool dyn_a = w->bodies.data[body_a].type == NPH_PHYSICS_BODY_DYNAMIC;
+    const bool dyn_b = w->bodies.data[body_b].type == NPH_PHYSICS_BODY_DYNAMIC;
+    if (dyn_a && dyn_b) {
+        for (u32 k = 0U; k < PHYS_GRAPH_DYNAMIC_COLORS; ++k) {
+            const NphBitset *bits = &w->colors[k].bodies;
+            if (!nph_bitset_test(bits, body_a) && !nph_bitset_test(bits, body_b)) {
+                return k;
+            }
+        }
+        return PHYS_GRAPH_OVERFLOW;
+    }
+    // One dynamic body: colour 0 stays for pairs, which are the harder to
+    // place (Box2D's graph).
+    const u32 body = dyn_a ? body_a : body_b;
+    for (u32 k = 1U; k < PHYS_GRAPH_COLORS; ++k) {
+        if (!nph_bitset_test(&w->colors[k].bodies, body)) {
+            return k;
+        }
+    }
+    return PHYS_GRAPH_OVERFLOW;
+}
+
+static void graph_set_bodies(NphPhysicsWorld *w, u32 color, u32 body_a, u32 body_b, bool set)
+{
+    if (color == PHYS_GRAPH_OVERFLOW) {
+        return;
+    }
+    NphBitset *bits = &w->colors[color].bodies;
+    const u32 bodies[2] = {body_a, body_b};
+    for (u32 i = 0U; i < 2U; ++i) {
+        if (w->bodies.data[bodies[i]].type != NPH_PHYSICS_BODY_DYNAMIC) {
+            continue;
+        }
+        if (set) {
+            nph_bitset_set(bits, bodies[i]);
+        } else {
+            nph_bitset_clear(bits, bodies[i]);
+        }
+    }
+}
+
 NphResult phys_graph_add(NphPhysicsWorld *w, u32 contact)
 {
     PhysContact *c = &w->contacts.data[contact];
     NPH_ASSERT(c->color == PHYS_NULL);
-    const bool dyn_a = w->bodies.data[c->body_a].type == NPH_PHYSICS_BODY_DYNAMIC;
-    const bool dyn_b = w->bodies.data[c->body_b].type == NPH_PHYSICS_BODY_DYNAMIC;
-    u32 color = PHYS_GRAPH_OVERFLOW;
-    if (dyn_a && dyn_b) {
-        for (u32 k = 0U; k < PHYS_GRAPH_DYNAMIC_COLORS; ++k) {
-            NphBitset *bits = &w->colors[k].bodies;
-            if (!nph_bitset_test(bits, c->body_a) && !nph_bitset_test(bits, c->body_b)) {
-                color = k;
-                break;
-            }
-        }
-    } else {
-        // One dynamic body: colour 0 stays for pairs, which are the harder
-        // to place (Box2D's graph).
-        const u32 body = dyn_a ? c->body_a : c->body_b;
-        for (u32 k = 1U; k < PHYS_GRAPH_COLORS; ++k) {
-            if (!nph_bitset_test(&w->colors[k].bodies, body)) {
-                color = k;
-                break;
-            }
-        }
-    }
+    const u32 color = graph_pick_color(w, c->body_a, c->body_b);
     NphArrayU32 *list = color == PHYS_GRAPH_OVERFLOW ? &w->overflow : &w->colors[color].contacts;
     NPH_TRY(NPH_ARRAY_PUSH(list, contact));
-    if (color != PHYS_GRAPH_OVERFLOW) {
-        if (dyn_a) {
-            nph_bitset_set(&w->colors[color].bodies, c->body_a);
-        }
-        if (dyn_b) {
-            nph_bitset_set(&w->colors[color].bodies, c->body_b);
-        }
-    }
+    graph_set_bodies(w, color, c->body_a, c->body_b, true);
     c->color = color;
     c->color_slot = list->len - 1U;
     return NPH_RESULT_OK;
@@ -81,16 +98,40 @@ void phys_graph_remove(NphPhysicsWorld *w, u32 contact)
     list->data[slot] = last;
     w->contacts.data[last].color_slot = slot;
     list->len -= 1U;
-    if (color != PHYS_GRAPH_OVERFLOW) {
-        if (w->bodies.data[c->body_a].type == NPH_PHYSICS_BODY_DYNAMIC) {
-            nph_bitset_clear(&w->colors[color].bodies, c->body_a);
-        }
-        if (w->bodies.data[c->body_b].type == NPH_PHYSICS_BODY_DYNAMIC) {
-            nph_bitset_clear(&w->colors[color].bodies, c->body_b);
-        }
-    }
+    graph_set_bodies(w, color, c->body_a, c->body_b, false);
     c->color = PHYS_NULL;
     c->color_slot = PHYS_NULL;
+}
+
+NphResult phys_graph_add_joint(NphPhysicsWorld *w, u32 joint)
+{
+    PhysJoint *j = &w->joints.data[joint];
+    NPH_ASSERT(j->color == PHYS_NULL);
+    const u32 color = graph_pick_color(w, j->body_a, j->body_b);
+    NphArrayU32 *list =
+        color == PHYS_GRAPH_OVERFLOW ? &w->overflow_joints : &w->colors[color].joints;
+    NPH_TRY(NPH_ARRAY_PUSH(list, joint));
+    graph_set_bodies(w, color, j->body_a, j->body_b, true);
+    j->color = color;
+    j->color_slot = list->len - 1U;
+    return NPH_RESULT_OK;
+}
+
+void phys_graph_remove_joint(NphPhysicsWorld *w, u32 joint)
+{
+    PhysJoint *j = &w->joints.data[joint];
+    const u32 color = j->color;
+    NPH_ASSERT(color != PHYS_NULL);
+    NphArrayU32 *list =
+        color == PHYS_GRAPH_OVERFLOW ? &w->overflow_joints : &w->colors[color].joints;
+    const u32 slot = j->color_slot;
+    const u32 last = list->data[list->len - 1U];
+    list->data[slot] = last;
+    w->joints.data[last].color_slot = slot;
+    list->len -= 1U;
+    graph_set_bodies(w, color, j->body_a, j->body_b, false);
+    j->color = PHYS_NULL;
+    j->color_slot = PHYS_NULL;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +199,7 @@ static NphResult body_list_set(NphPhysicsWorld *w, u32 body, bool awake)
 NphResult phys_body_set_awake_list(NphPhysicsWorld *w, u32 body, bool awake)
 {
     NPH_TRY(body_list_set(w, body, awake));
-    return phys_body_contacts_sync(w, body);
+    return phys_body_constraints_sync(w, body);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +230,8 @@ static NphResult island_alloc(NphPhysicsWorld *w, bool awake, u32 *out)
     is->body_tail = PHYS_NULL;
     is->contact_head = PHYS_NULL;
     is->contact_tail = PHYS_NULL;
+    is->joint_head = PHYS_NULL;
+    is->joint_tail = PHYS_NULL;
     is->parent = PHYS_NULL;
     is->awake_slot = PHYS_NULL;
     if (awake) {
@@ -244,6 +287,22 @@ static void island_append_contact(NphPhysicsWorld *w, u32 island, u32 contact)
     is->contact_count += 1U;
 }
 
+static void island_append_joint(NphPhysicsWorld *w, u32 island, u32 joint)
+{
+    PhysIsland *is = &w->islands.data[island];
+    PhysJoint *j = &w->joints.data[joint];
+    j->island = island;
+    j->island_prev = is->joint_tail;
+    j->island_next = PHYS_NULL;
+    if (is->joint_tail != PHYS_NULL) {
+        w->joints.data[is->joint_tail].island_next = joint;
+    } else {
+        is->joint_head = joint;
+    }
+    is->joint_tail = joint;
+    is->joint_count += 1U;
+}
+
 NphResult phys_island_add_body(NphPhysicsWorld *w, u32 body)
 {
     u32 island = PHYS_NULL;
@@ -274,7 +333,7 @@ void phys_island_remove_body(NphPhysicsWorld *w, u32 body)
     b->island_prev = PHYS_NULL;
     b->island_next = PHYS_NULL;
     if (is->body_count == 0U) {
-        NPH_ASSERT(is->contact_count == 0U);
+        NPH_ASSERT(is->contact_count == 0U && is->joint_count == 0U);
         island_free(w, island);
     } else {
         // Its contacts were destroyed first; what is left may fall apart.
@@ -298,26 +357,62 @@ u32 phys_island_root(NphPhysicsWorld *w, u32 island)
     return r;
 }
 
+// The root two bodies' islands share once linked: a union recorded as a
+// parent and carried out at the step's end.
+static u32 island_union(NphPhysicsWorld *w, u32 body_a, u32 body_b)
+{
+    const u32 ia = phys_island_root(w, w->bodies.data[body_a].island);
+    const u32 ib = phys_island_root(w, w->bodies.data[body_b].island);
+    NPH_ASSERT(w->islands.data[ia].awake != 0U && w->islands.data[ib].awake != 0U);
+    if (ia == ib) {
+        return ia;
+    }
+    // The bigger island absorbs the smaller (ties: the lower index), so a
+    // merge moves the fewest records.
+    const PhysIsland *a = &w->islands.data[ia];
+    const PhysIsland *b = &w->islands.data[ib];
+    const bool a_wins =
+        a->body_count > b->body_count || (a->body_count == b->body_count && ia < ib);
+    const u32 root = a_wins ? ia : ib;
+    w->islands.data[a_wins ? ib : ia].parent = root;
+    return root;
+}
+
 NphResult phys_island_link_contact(NphPhysicsWorld *w, u32 contact)
 {
     PhysContact *c = &w->contacts.data[contact];
-    const u32 ia = phys_island_root(w, w->bodies.data[c->body_a].island);
-    const u32 ib = phys_island_root(w, w->bodies.data[c->body_b].island);
-    NPH_ASSERT(w->islands.data[ia].awake != 0U && w->islands.data[ib].awake != 0U);
-    u32 root = ia;
-    if (ia != ib) {
-        // The bigger island absorbs the smaller (ties: the lower index), so
-        // a merge moves the fewest records.
-        const PhysIsland *a = &w->islands.data[ia];
-        const PhysIsland *b = &w->islands.data[ib];
-        const bool a_wins =
-            a->body_count > b->body_count || (a->body_count == b->body_count && ia < ib);
-        root = a_wins ? ia : ib;
-        w->islands.data[a_wins ? ib : ia].parent = root;
-    }
-    island_append_contact(w, root, contact);
+    island_append_contact(w, island_union(w, c->body_a, c->body_b), contact);
     c->flags |= PHYS_CONTACT_ISLAND;
     return NPH_RESULT_OK;
+}
+
+void phys_island_link_joint(NphPhysicsWorld *w, u32 joint)
+{
+    PhysJoint *j = &w->joints.data[joint];
+    island_append_joint(w, island_union(w, j->body_a, j->body_b), joint);
+    j->flags |= PHYS_JOINT_ISLAND;
+}
+
+void phys_island_unlink_joint(NphPhysicsWorld *w, u32 joint)
+{
+    PhysJoint *j = &w->joints.data[joint];
+    PhysIsland *is = &w->islands.data[j->island];
+    if (j->island_prev != PHYS_NULL) {
+        w->joints.data[j->island_prev].island_next = j->island_next;
+    } else {
+        is->joint_head = j->island_next;
+    }
+    if (j->island_next != PHYS_NULL) {
+        w->joints.data[j->island_next].island_prev = j->island_prev;
+    } else {
+        is->joint_tail = j->island_prev;
+    }
+    is->joint_count -= 1U;
+    is->constraint_remove_count += 1U;
+    j->island = PHYS_NULL;
+    j->island_prev = PHYS_NULL;
+    j->island_next = PHYS_NULL;
+    j->flags &= ~(u32)PHYS_JOINT_ISLAND;
 }
 
 void phys_island_unlink_contact(NphPhysicsWorld *w, u32 contact)
@@ -357,13 +452,21 @@ static void island_absorb(NphPhysicsWorld *w, u32 into, u32 from)
         island_append_contact(w, into, c);
         c = next;
     }
+    for (u32 j = src->joint_head; j != PHYS_NULL;) {
+        const u32 next = w->joints.data[j].island_next;
+        island_append_joint(w, into, j);
+        j = next;
+    }
     w->islands.data[into].constraint_remove_count += src->constraint_remove_count;
     src->body_head = PHYS_NULL;
     src->body_tail = PHYS_NULL;
     src->contact_head = PHYS_NULL;
     src->contact_tail = PHYS_NULL;
+    src->joint_head = PHYS_NULL;
+    src->joint_tail = PHYS_NULL;
     src->body_count = 0U;
     src->contact_count = 0U;
+    src->joint_count = 0U;
     island_free(w, from);
 }
 
@@ -408,7 +511,7 @@ NphResult phys_island_wake(NphPhysicsWorld *w, u32 island)
     }
     for (u32 b = w->islands.data[island].body_head; b != PHYS_NULL;
          b = w->bodies.data[b].island_next) {
-        NPH_TRY(phys_body_contacts_sync(w, b));
+        NPH_TRY(phys_body_constraints_sync(w, b));
     }
     return NPH_RESULT_OK;
 }
@@ -443,7 +546,7 @@ static NphResult island_sleep(NphPhysicsWorld *w, u32 island)
         NPH_TRY(body_list_set(w, b, false));
     }
     for (u32 b = is->body_head; b != PHYS_NULL; b = w->bodies.data[b].island_next) {
-        NPH_TRY(phys_body_contacts_sync(w, b));
+        NPH_TRY(phys_body_constraints_sync(w, b));
     }
     is->awake = 0U;
     awake_islands_remove(w, island);
@@ -451,7 +554,7 @@ static NphResult island_sleep(NphPhysicsWorld *w, u32 island)
 }
 
 // Splits an island into its connected components (bodies joined by
-// touching contacts), depth first from its bodies in list order.
+// touching contacts or joints), depth first from its bodies in list order.
 static NphResult island_split(NphPhysicsWorld *w, u32 island)
 {
     PhysIsland *is = &w->islands.data[island];
@@ -467,12 +570,20 @@ static NphResult island_split(NphPhysicsWorld *w, u32 island)
         w->contacts.data[c].island = PHYS_NULL;
         c = next;
     }
+    for (u32 j = is->joint_head; j != PHYS_NULL;) {
+        const u32 next = w->joints.data[j].island_next;
+        w->joints.data[j].island = PHYS_NULL;
+        j = next;
+    }
     is->body_head = PHYS_NULL;
     is->body_tail = PHYS_NULL;
     is->contact_head = PHYS_NULL;
     is->contact_tail = PHYS_NULL;
+    is->joint_head = PHYS_NULL;
+    is->joint_tail = PHYS_NULL;
     is->body_count = 0U;
     is->contact_count = 0U;
+    is->joint_count = 0U;
     NphResult result = NPH_RESULT_OK;
     for (u32 i = 0U; i < body_count && result == NPH_RESULT_OK; ++i) {
         const u32 seed = w->scratch.data[i];
@@ -513,6 +624,22 @@ static NphResult island_split(NphPhysicsWorld *w, u32 island)
                     NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&w->scratch2, other)); // reserved
                 }
             }
+            for (u32 key = w->bodies.data[x].joint_head; key != PHYS_NULL;) {
+                PhysJoint *j = &w->joints.data[key >> 1U];
+                const u32 joint = key >> 1U;
+                const u32 other = (key & 1U) == 0U ? j->body_b : j->body_a;
+                key = j->next[key & 1U];
+                if ((j->flags & PHYS_JOINT_ISLAND) == 0U || (j->flags & PHYS_JOINT_VISITED) != 0U) {
+                    continue;
+                }
+                j->flags |= PHYS_JOINT_VISITED;
+                island_append_joint(w, part, joint);
+                PhysBody *ob = &w->bodies.data[other];
+                if ((ob->flags & PHYS_BODY_VISITED) == 0U) {
+                    ob->flags |= PHYS_BODY_VISITED;
+                    NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&w->scratch2, other)); // reserved
+                }
+            }
         }
     }
     for (u32 i = 0U; i < body_count; ++i) {
@@ -522,6 +649,11 @@ static NphResult island_split(NphPhysicsWorld *w, u32 island)
             PhysContact *c = &w->contacts.data[key >> 1U];
             c->flags &= ~(u32)PHYS_CONTACT_VISITED;
             key = c->next[key & 1U];
+        }
+        for (u32 key = b->joint_head; key != PHYS_NULL;) {
+            PhysJoint *j = &w->joints.data[key >> 1U];
+            j->flags &= ~(u32)PHYS_JOINT_VISITED;
+            key = j->next[key & 1U];
         }
     }
     w->islands.data[island].constraint_remove_count = 0U;

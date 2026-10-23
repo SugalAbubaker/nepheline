@@ -90,6 +90,11 @@ typedef struct NphPhysicsWorldDesc {
     f32 restitution_threshold;
     // Clamp for bodies' speeds, m/s.
     f32 max_linear_speed;
+    // The joints' spring (joint.h): stiffness (Hz, capped at a quarter of
+    // the substep rate) and damping ratio of the soft solve that pulls a
+    // joint back together; the relax pass then holds it rigidly.
+    f32 joint_hertz;
+    f32 joint_damping_ratio;
     // Bodies whose islands stay below their sleep threshold this long, in
     // seconds, fall asleep.
     f32 time_to_sleep;
@@ -102,7 +107,8 @@ typedef struct NphPhysicsWorldDesc {
 
 // The defaults: gravity (0, -9.81, 0), 4 substeps, contacts at 120 Hz (an
 // eighth of the substep rate, Box2D's 30 Hz at its 240) with damping ratio
-// 10, a 3 m/s push, a 1 m/s restitution threshold, 400 m/s,
+// 10, joints at 240 Hz (a quarter of the substep rate) with damping ratio 2,
+// a 3 m/s push, a 1 m/s restitution threshold, 400 m/s,
 // half a second to sleep, sleep on, and small initial capacities. Set
 // `alloc` before creating.
 NphPhysicsWorldDesc nph_physics_world_desc_default(void);
@@ -189,6 +195,7 @@ typedef struct NphPhysicsStats {
     u32 contacts;          // pairs whose fattened boxes overlap
     u32 touching_contacts; // of those, with manifold points
     u32 manifold_points;
+    u32 joints;
     u32 islands;
     u32 awake_islands;
     u32 colors_used;          // constraint-graph colours holding contacts
@@ -226,6 +233,7 @@ enum {
     NPH_PHYSICS_DRAW_CONTACTS = 1U << 2U, // points and normals
     NPH_PHYSICS_DRAW_MASS = 1U << 3U,     // centres of mass
     NPH_PHYSICS_DRAW_SLEEP = 1U << 4U,    // sleeping bodies' shapes in their own colour
+    NPH_PHYSICS_DRAW_JOINTS = 1U << 5U,   // anchors joined to the centres, and the frames' X axes
 };
 
 // Lines in 32-bit coordinates relative to `origin` (the renderer's debug
