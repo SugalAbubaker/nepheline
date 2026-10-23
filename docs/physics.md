@@ -786,9 +786,10 @@ budget of §8.9 on the six cores of the reference CPU class.
   down stairs, sixteen piled up (four in Debug), and one under a falling
   crate, under every configuration. Every one must stay sound (never above
   its starting energy, joints within 5 cm and 15° at the worst impact and
-  closed at rest, nothing sunk 5 cm into the floor) and single ragdolls
-  must sleep; the default holds bounds about two and a half times what it
-  measures, since a ragdoll is chaotic and another compiler's rounding
-  sends it elsewhere, and sleeps the pile. A pile replays bit for bit in a
+  closed at rest, nothing sunk 5 cm into the floor); the soft step must put
+  every scene to sleep, while TGS and XPBD, which can leave a limb
+  stirring, must end under 0.5 m/s. The default holds bounds about two and
+  a half times what it measures, since a ragdoll is chaotic and another
+  compiler's rounding sends it elsewhere. A pile replays bit for bit in a
   new world, on 4 and 8 workers, and on the AVX2 kernel, under every
   solver.

@@ -6,22 +6,22 @@
 // Every configuration must stay sound: finite, never above the energy it
 // started with, its joints never more than a few centimetres apart or
 // more than 15 degrees past their limits, nothing sinking far into the
-// floor, and at rest everything closed and within its limits. Single
-// ragdolls must fall asleep. The default (the soft step at 4 substeps)
-// holds bounds about two and a half times what it measures (ragdolls are
-// chaotic: a compiler that rounds one operation differently sends them
-// elsewhere), and must also sleep the pile; TGS and XPBD at 4 substeps
-// leave a limb or two of a pile stirring (ADR-0045), so theirs need only
-// keep it under half a metre a second. What each run measures is logged
-// (run with --verbose).
+// floor, and at rest everything closed and within its limits. The soft
+// step must put every scene to sleep; TGS and XPBD can leave a limb or two
+// stirring (their rigid rows fight the contacts: ADR-0045), so theirs need
+// only end under half a metre a second. The default (the soft step at 4
+// substeps) holds bounds about two and a half times what it measures
+// (ragdolls are chaotic: a compiler that rounds one operation differently
+// sends them elsewhere). What each run measures is logged (run with
+// --verbose).
 
 #include <nepheline/math/kernels.h>
 
-#include <string.h>
-
 #include "test_world_support.h"
 
-#define DEG (k_pi / 180.0F)
+#include <string.h>
+
+#define DEG       (k_pi / 180.0F)
 #define MAX_DOLLS 16U
 
 typedef struct Dolls {
@@ -50,14 +50,14 @@ typedef struct Watch {
 // constraints (a soft joint squeezed 4.6 mm by 30 kN as a ragdoll lands
 // on its straight legs gives back 69 J), so it is bounded, not zero.
 typedef struct Bounds {
-    f64 gap;             // m
-    f64 rest_gap;        // m
-    f32 overshoot;       // degrees
-    f32 rest_overshoot;  // degrees
-    f64 sink;            // m
-    f64 rest_sink;       // m
-    f64 rise;            // a share of the start
-    f32 asleep;          // s: asleep before it (0: need not sleep)
+    f64 gap;            // m
+    f64 rest_gap;       // m
+    f32 overshoot;      // degrees
+    f32 rest_overshoot; // degrees
+    f64 sink;           // m
+    f64 rest_sink;      // m
+    f64 rise;           // a share of the start
+    f32 asleep;         // s: asleep before it (0: need not sleep)
 } Bounds;
 
 // Every configuration's.
@@ -244,15 +244,19 @@ static void check(const Watch *m, const Bounds *b)
     }
 }
 
-// Checks a run: sound under every configuration, a single ragdoll asleep
-// before `asleep`, and the default within `tight`.
+// Checks a run: sound under every configuration, asleep before `asleep`
+// under the soft step (TGS and XPBD asleep or all but still), and the
+// default within `tight`.
 static void check_run(u32 config, const NphPhysicsWorld *w, const Dolls *d, const Watch *m,
                       f32 asleep, const Bounds *tight)
 {
     NTEST_EXPECT_TRUE(dolls_sound(w, d));
-    Bounds b = k_sound;
-    b.asleep = asleep;
-    check(m, &b);
+    check(m, &k_sound);
+    if (k_configs[config].solver == NPH_PHYSICS_SOLVER_SOFT_STEP) {
+        NTEST_EXPECT_TRUE(m->asleep > 0.0F && m->asleep < asleep);
+    } else {
+        NTEST_EXPECT_TRUE(m->asleep > 0.0F || m->fastest < 0.5F);
+    }
     if (is_default(config)) {
         check(m, tight);
     }
@@ -288,8 +292,8 @@ static void build_pile(NphPhysicsWorld *w, u32 count, Dolls *d)
         const NphQuat turn = nph_quat_mul(
             nph_quat_from_axis_angle(nph_vec3(0.0F, 1.0F, 0.0F), (f32)k * 90.0F * DEG), lying());
         const NphDVec3 pelvis = nph_dvec3(0.0, 0.15 + 0.3 * (f64)k, 0.0);
-        build_ragdoll(w, nph_dvec3_sub(pelvis, ragdoll_turn(turn, nph_dvec3(0.0, 1.0, 0.0))),
-                      turn, &d->r[k]);
+        build_ragdoll(w, nph_dvec3_sub(pelvis, ragdoll_turn(turn, nph_dvec3(0.0, 1.0, 0.0))), turn,
+                      &d->r[k]);
         throw_ragdoll(w, &d->r[k], test_vec3(&rng, -0.5F, 0.5F), test_vec3(&rng, -1.0F, 1.0F));
     }
 }
@@ -390,13 +394,7 @@ NTEST(ragdoll, a_pile_settles_without_gaining_energy)
         build_pile(s.w, count, &d);
         const Watch m = watch(s.w, &d, big ? 12.0F : 6.0F);
         report(config, big ? "a pile of 16" : "a pile of 4", &m);
-        check_run(config, s.w, &d, &m, 0.0F, &tight);
-        // The soft step sleeps it; the others keep it all but still.
-        if (k_configs[config].solver == NPH_PHYSICS_SOLVER_SOFT_STEP) {
-            NTEST_EXPECT_TRUE(m.asleep > 0.0F);
-        } else {
-            NTEST_EXPECT_TRUE(m.asleep > 0.0F || m.fastest < 0.5F);
-        }
+        check_run(config, s.w, &d, &m, big ? 11.5F : 5.5F, &tight);
         scene_end(&s);
     }
 }

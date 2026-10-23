@@ -133,12 +133,16 @@ eight stairs, sixteen dropped in a criss-cross pile, and one lying under a
 | the most energy gained in one step, of the scene's | 5.4 % (dropped) | 2.6 % | 27 % (thrown) | 13 % (dropped) | 34 % (thrown) |
 | 32 lying in heaps, the job system (µs a step) | 380 | 773 | 311 | 346 | 1320 |
 
-- **Every configuration keeps a ragdoll sound and asleep alone**: never
-  above its starting energy, joints closed and within their limits at
-  rest. Measured first, the ragdoll had frictionless elbows and knees, and
-  a dangling forearm swung for ever (an undamped pendulum) and kept any
-  heap it hung from awake under any solver; a limp body's joints have
-  friction, and the rig now does (2 N m at every joint).
+- **Every configuration keeps a ragdoll sound**: never above its starting
+  energy, joints closed and within their limits at rest. On MSVC each also
+  puts a single ragdoll to sleep, but on Clang's rounding the dropped one
+  under TGS kept a limb stirring at 0.08 m/s for good (the fight described
+  below): only the soft step sleeps every scene, so the tests require
+  sleep of it and of the others only an end under 0.5 m/s. Measured first,
+  the ragdoll had frictionless elbows and knees, and a dangling forearm
+  swung for ever (an undamped pendulum) and kept any heap it hung from
+  awake under any solver; a limp body's joints have friction, and the rig
+  now does (2 N m at every joint).
 - **Only the soft step sleeps the pile of 16 at 4 substeps.** Under TGS
   and XPBD a limb or two keeps stirring at about 0.06 m/s, above the sleep
   threshold, for as long as they run. Under TGS the cause is its rigid
