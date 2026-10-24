@@ -164,8 +164,13 @@ the 512 × 512 grids measured 0.60 and 0.72 ms against 0.33 and 0.39. On
 driver 621.01 with the overlay on (2026-10-21), the renderer's resolve and
 the occlusion's denoise slowed two- to fourfold for 20 frames some four
 seconds after rendering began, then ran 0.3 to 0.7 ms slow for three
-seconds, and again at random later; none of the runs since, on 610.74
-without the overlay, has shown it. The two drivers also allocate the
+seconds, and again at random later. On 610.74 without the overlay it has
+been seen once, milder: on 2026-10-24 (GPU performance run 40139304210)
+the hedge view's p99 came out 0.65 ms high from a few frames where the
+occlusion, the resolve, and the masked raster slowed together, its mean
+unchanged, and the rerun minutes later was clean. A single view's p99
+that jumps while its mean holds is rerun before it is believed. The two
+drivers also allocate the
 resolve's registers differently, so shader changes measured on one need
 measuring on the other.
 
