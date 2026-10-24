@@ -151,6 +151,9 @@ static void prepare_body(StepContext *ctx, u32 i)
         if ((b->flags & PHYS_BODY_GYROSCOPIC) != 0U && !inertia_is_isotropic(b->inertia)) {
             p->flags |= PHYS_PARAM_GYROSCOPIC;
         }
+        if ((b->flags & PHYS_BODY_BULLET) != 0U) {
+            p->flags |= PHYS_PARAM_BULLET;
+        }
         p->linear_accel = nph_vec3_add(nph_vec3_scale(w->desc.gravity, b->gravity_scale),
                                        nph_vec3_scale(b->force, b->inv_mass));
         const NphMat3 r = nph_mat3_from_quat(b->rotation);
@@ -337,7 +340,7 @@ static void finalize_body(const StepContext *ctx, u32 i)
         if ((nph_vec3_length_sq(sb->dp) > half || turned > half) &&
             nph_vec3_length(sb->dp) + nph_quat_angle(sb->dq) * b->max_extent > limit) {
             b->flags |= PHYS_BODY_FAST;
-            if ((b->flags & PHYS_BODY_BULLET) == 0U) {
+            if ((p->flags & PHYS_PARAM_BULLET) == 0U) {
                 phys_continuous_body(w, i, false);
             }
         }

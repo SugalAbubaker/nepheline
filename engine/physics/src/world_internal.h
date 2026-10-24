@@ -356,6 +356,9 @@ typedef struct PhysSolverParams {
 enum {
     PHYS_PARAM_DYNAMIC = 1U << 0U,
     PHYS_PARAM_GYROSCOPIC = 1U << 1U,
+    // A bullet (PHYS_BODY_BULLET at the step's start). Sweeps read it here:
+    // a body's own flags change while it is swept (continuous.c).
+    PHYS_PARAM_BULLET = 1U << 2U,
 };
 
 // Eight contacts, one per lane; their points in `point_count` consecutive

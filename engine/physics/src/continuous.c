@@ -20,9 +20,10 @@
 // normal plus the body's spin times its reach, so each step stops short of
 // the contact. Three rules keep it from stopping what is not tunnelling:
 //   - a shape already within reach of a target at the start (resting on it,
-//     sliding along it) is swept as a small ball at its centroid instead, so
-//     it is stopped only where its middle would pass through (Box2D's
-//     fallback);
+//     sliding along it, or set back against it last step) is swept inset by
+//     half its inner radius, so it is stopped only where it would go that far
+//     in; and one in that deep, as a small ball at its centroid, stopped only
+//     where its middle would pass through (Box2D's fallback);
 //   - a triangle is swept against only when the shape's centroid comes
 //     towards its plane by more than a slop over the step, so a fast body
 //     sliding across a mesh's seams is never stopped at one (Box2D's rule for
@@ -48,9 +49,13 @@
 // Arrived when within this beyond the target.
 #define TOI_TOLERANCE (0.25F * NPH_PHYSICS_LINEAR_SLOP)
 #define TOI_STEPS     32U
-// A shape that starts within reach of a target is swept as a ball at its
-// centroid this fraction of its inner radius wide.
-#define CORE_FRACTION 0.25F
+// A shape that starts within reach of a target is swept inset by this
+// fraction of its inner radius; and one whose inset starts within reach, as
+// a ball at its centroid CORE_FRACTION of it wide. The ball alone let a
+// capsule set back against a wall, hit end-first and spinning, swing its far
+// end 14 cm into it.
+#define INSET_FRACTION 0.5F
+#define CORE_FRACTION  0.25F
 // A triangle is swept against only when the shape's centroid comes towards
 // its plane by more than this over the step.
 #define TRIANGLE_APPROACH NPH_PHYSICS_LINEAR_SLOP
@@ -71,12 +76,16 @@ static void sweep_at(const Sweep *s, f32 t, NphVec3 *centre, NphQuat *rotation)
     *rotation = t <= 0.0F ? s->q0 : (t >= 1.0F ? s->q1 : nph_quat_slerp(s->q0, s->q1, t));
 }
 
-// One of the fast body's shapes: its proxy, the ball at its centroid, and
-// its frame relative to the centre of mass (body axes).
+// One of the fast body's shapes: its proxy, the proxy inset (the same
+// points, the radius less INSET_FRACTION of the inner radius: a polytope's
+// negative, so its distances are its core's plus the inset, a lower bound on
+// the eroded shape's), the ball at its centroid, and its frame relative to
+// the centre of mass (body axes).
 typedef struct Mover {
     const PhysShape *shape;
     NphPhysicsProxy proxy;
     NphVec3 storage[NPH_PHYSICS_PROXY_STORAGE];
+    NphPhysicsProxy inset;
     NphPhysicsProxy core;
     NphVec3 core_point;
     NphVec3 local;
@@ -87,11 +96,14 @@ static void mover_init(Mover *mv, const PhysBody *b, const PhysShape *s)
 {
     mv->shape = s;
     mv->proxy = nph_physics_geometry_proxy(&s->geometry, mv->storage);
+    const f32 inner = nph_physics_geometry_inner_radius(&s->geometry);
+    mv->inset = mv->proxy;
+    mv->inset.radius = mv->proxy.radius - INSET_FRACTION * inner;
     mv->core_point =
         s->geometry.type == NPH_PHYSICS_SHAPE_HULL ? s->geometry.hull->centroid : nph_vec3_zero();
     mv->core.points = &mv->core_point;
     mv->core.count = 1U;
-    mv->core.radius = CORE_FRACTION * nph_physics_geometry_inner_radius(&s->geometry);
+    mv->core.radius = CORE_FRACTION * inner;
     mv->local = nph_vec3_sub(s->pose.position, b->local_center);
     mv->local_q = s->pose.rotation;
 }
@@ -159,9 +171,9 @@ static f32 gap_at(const Mover *mv, const NphPhysicsProxy *m, const Sweep *s,
         nph_physics_pose(nph_vec3_sub(pose_t.position, pm.position), pose_t.rotation), axis);
 }
 
-// The shape's time of impact with a still target: its own, or where it
-// starts within reach, its core's (negative for none: a core that starts
-// within reach too is the contacts' to push out).
+// The shape's time of impact with a still target: its own; where it starts
+// within reach, its inset's; where that does too, its core's (negative for
+// none: a core that starts within reach too is the contacts' to push out).
 //
 // An impact the step's contacts already stopped is none. They reach as far
 // as a pair can close in a step (phys_pair_speculative), so a body falling
@@ -187,8 +199,12 @@ static f32 shape_toi(const Mover *mv, const Sweep *s, const NphPhysicsProxy *t,
     if (f < 0.0F) {
         return f;
     }
-    const f32 g = advance(mv, &mv->core, s, t, pose_t, limit, &axis);
-    return g > 0.0F ? g : -1.0F;
+    const f32 g = advance(mv, &mv->inset, s, t, pose_t, limit, &axis);
+    if (g != 0.0F) {
+        return g > 0.0F ? g : -1.0F;
+    }
+    const f32 h = advance(mv, &mv->core, s, t, pose_t, limit, &axis);
+    return h > 0.0F ? h : -1.0F;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,13 +302,23 @@ typedef struct BodySweep {
     f32 best;       // the first impact so far (1: none)
 } BodySweep;
 
+// Whether `b` is a bullet. An awake body's own sweep writes its flags while
+// others read them (bullets sweep at once): its solver record holds the bit
+// as the step began. A sleeping body is not swept.
+static bool is_bullet(const NphPhysicsWorld *w, const PhysBody *b)
+{
+    if (b->awake_slot != PHYS_NULL) {
+        return (w->solver_params.data[b->awake_slot].flags & PHYS_PARAM_BULLET) != 0U;
+    }
+    return (b->flags & PHYS_BODY_BULLET) != 0U;
+}
+
 static void sweep_target(BodySweep *bs, const PhysBody *tb, const PhysShape *ts)
 {
     const NphPhysicsWorld *w = bs->w;
     // Not its own shapes, nor a bullet's (bullets do not sweep against
     // each other), nor a body a joint keeps it from touching.
-    if (ts->body == bs->slot ||
-        (tb->type != NPH_PHYSICS_BODY_STATIC && (tb->flags & PHYS_BODY_BULLET) != 0U) ||
+    if (ts->body == bs->slot || (tb->type != NPH_PHYSICS_BODY_STATIC && is_bullet(w, tb)) ||
         !phys_joints_allow_contact(w, bs->slot, ts->body)) {
         return;
     }
@@ -334,7 +360,7 @@ void phys_continuous_body(NphPhysicsWorld *w, u32 solver_index, bool bullets)
     const PhysSolverParams *p = &w->solver_params.data[solver_index];
     const PhysSolverBody *sb = &w->solver_bodies.data[solver_index];
     PhysBody *b = &w->bodies.data[p->body];
-    if ((b->flags & PHYS_BODY_FAST) == 0U || ((b->flags & PHYS_BODY_BULLET) != 0U) != bullets) {
+    if ((b->flags & PHYS_BODY_FAST) == 0U || ((p->flags & PHYS_PARAM_BULLET) != 0U) != bullets) {
         return;
     }
     b->flags &= ~(u32)PHYS_BODY_FAST;

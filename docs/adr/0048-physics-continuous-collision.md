@@ -50,7 +50,10 @@ Five mechanisms, each measured by switching it alone:
    bound on rotation (Mirtich 1996; Bullet's btContinuousConvexCollision),
    in a frame at the moving shape (the casts' precision, ADR-0047).
 3. **Three rules against stopping what does not tunnel.** A shape already
-   within reach of a target at the start is swept as its core, a ball at
+   within reach of a target at the start is swept inset by half its inner
+   radius (its radius that much less; a polytope's negative, which makes
+   its distances its core's plus the inset, a lower bound on the eroded
+   shape's), and one whose inset starts within reach as its core, a ball at
    its centroid a quarter of its inner radius wide (Box2D's fallback). A
    triangle is swept against only when the shape's centroid comes towards
    its plane by more than a slop (Box2D's rule for chain segments). An
@@ -128,6 +131,13 @@ Five mechanisms, each measured by switching it alone:
 - **A separate stage for the sweeps**: one more barrier a step, 3 % of a
   small world's step; plain fast bodies are swept in the finalize pass,
   which leaves the static shapes alone, and only bullets wait for a stage.
+- **The core ball alone for a shape that starts within reach** (Box2D's):
+  a capsule set back against a wall, hit end-first and spinning hard,
+  swung its far end round 14 cm into a wall 2 cm thick, its middle 5 mm
+  past the near face, in 10 of 1600 random throws at 300 m/s (found on
+  Linux, whose compilers build other random scenes). The inset sweep first
+  stops what swings in by half the inner radius: none of 1600, and the
+  rebound off the wall fell from 25 m/s to 2.
 
 ## Consequences
 
@@ -150,8 +160,8 @@ Five mechanisms, each measured by switching it alone:
   pyramid 0.2 %, the pile 2.1 %, the heap of ragdolls 2.4 %); chains whose
   lower links swing fast enough to be swept 2.7 % (65 of 400 links a step),
   under TGS 4.6 % (303). A gallery of 200 balls and boxes at 50 to 200 m/s,
-  a third of them bullets, all swept every step, steps in 323 µs on one
-  thread and 190 µs on the job system.
+  a third of them bullets, all swept every step, steps in 331 µs on one
+  thread and 192 µs on the job system.
 - XPBD at 16 substeps keeps more of a pile in its bin (805 of 1000 shapes,
   against about 500: they used to be thrown out), so the pile costs more
   to step, 2.3 ms against 1.5.

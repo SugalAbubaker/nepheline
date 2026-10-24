@@ -1055,11 +1055,19 @@ short of the contact. GJK runs in a frame at the moving shape, as the
 casts' does. Three rules keep it from stopping what is not tunnelling:
 
 - **A shape already within reach** of a target at the step's start
-  (resting on it, sliding along it) is swept as its core, a ball at its
-  centroid a quarter of its inner radius wide, and set back only where its
-  middle would pass through (Box2D's fallback). The contact it rests on
+  (resting on it, sliding along it, or set back against it last step) is
+  swept inset by half its inner radius (the same points, its radius that
+  much less: a polytope's negative, which makes its distances its core's
+  plus the inset, a lower bound on the eroded shape's), so it is set back
+  only where it would go that far in; and if the inset starts within reach
+  too, as its core, a ball at its centroid a quarter of its inner radius
+  wide, set back only where its middle would pass through (Box2D's
+  fallback). The core alone let a capsule set back against a wall, hit
+  end-first and spinning, swing its far end round 14 cm into it, its
+  middle 5 mm in (10 runs in 1600 at 300 m/s). The contact a shape rests on
   holds it otherwise: a ball 2 cm across resting on a sheet 1 mm thick and
-  sent at it at 400 m/s stays on it with or without continuous collision.
+  sent at it at 400 m/s stays on it with or without continuous
+  collision.
 - **A triangle** of a mesh or a heightfield is swept against only when the
   shape's centroid comes towards its plane by more than a slop over the
   step, so a body sliding fast across a mesh's seams is never stopped at
@@ -1085,7 +1093,9 @@ plain fast body passes through. Bullets do not sweep against each other.
 A fast body reads only shapes that do not move while it is swept, and
 writes only its own pose and boxes: the sweeps run in parallel, and the
 result does not depend on their order or on the number of threads (tested
-on 0 to 8 workers, and 10 000 km out). The statistics count the step's
+on 0 to 8 workers, and 10 000 km out; under ThreadSanitizer). A bullet
+learns whether a target is a bullet from the target's solver record, not
+its flags, which that body's own sweep writes meanwhile. The statistics count the step's
 sweeps (`swept_bodies`) and set-backs (`impact_bodies`).
 
 ## Performance
@@ -1139,8 +1149,8 @@ is the point; world query rows are per query):
 | `world_chains_mt` | 166 000 |
 | `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 370 000 |
 | `world_ragdolls_32_mt` | 357 000 |
-| `world_gallery_200_st` (200 balls and boxes at 50 to 200 m/s, a third bullets, rattling about a room of walls 2 cm thick: every one swept every step) | 323 000 |
-| `world_gallery_200_mt` | 190 000 |
+| `world_gallery_200_st` (200 balls and boxes at 50 to 200 m/s, a third bullets, rattling about a room of walls 2 cm thick: every one swept every step) | 331 000 |
+| `world_gallery_200_mt` | 192 000 |
 | `world_raycast_10k` (50 m, closest hit, 10 000 static shapes) | 1 610 |
 | `world_cast_sphere_10k` / `_capsule_10k` (10 m among them) | 1 040 / 1 050 |
 | `world_overlap_sphere_10k` / `world_overlap_aabb_10k` | 152 / 122 |
@@ -1179,7 +1189,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (207 tests):
+`physics_tests` (208 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1340,7 +1350,8 @@ reference CPU class.
   AVX2 kernel, under every solver.
 - Continuous collision (`test_continuous.c`, ADR-0048): balls, boxes,
   capsules, and hulls at 300 m/s, turning, never past a wall 2 cm thick
-  (and straight through it without); bodies thrown down at 150 m/s onto a
+  (and straight through it without), and 400 runs of them turned and
+  spinning at random whose middles never reach it; bodies thrown down at 150 m/s onto a
   one-sided mesh and a heightfield staying on them; a blade spinning a
   tenth of a turn a step never cutting through a wall (which its corners
   cross without); a box and a capsule sliding at 60 m/s across a mesh's

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Continuous collision (world.h step 5; docs/physics.md "Continuous
 // collision"): fast bodies against thin walls, meshes, and heightfields,
-// with and without; spin through a wall; sliding fast across a mesh's
+// with and without; turning bodies thrown at a wall at random; spin through
+// a wall; sliding fast across a mesh's
 // seams with no stop; bullets against dynamic bodies; a body shot into the
 // floor it rests on; slow bodies never swept; the same course on 0 to 8
 // workers; and 10 000 km out.
@@ -110,6 +111,54 @@ NTEST(continuous, fast_bodies_do_not_pass_through_a_thin_wall)
         }
         scene_end(&s);
     }
+    nph_physics_hull_free(hull, alloc);
+    test_alloc_end(&ta);
+}
+
+NTEST(continuous, thrown_turning_bodies_never_pass_a_thin_wall)
+{
+    // The thin wall's four shapes at 300 m/s, turned and spinning at
+    // random. The first impact sets each back against the wall, turning
+    // hard (a capsule hit end-first swings its far end round into it), and
+    // the inset sweep stops what swings in: the middle never reaches the
+    // wall's near face. With only the core ball for a shape that starts
+    // within reach, a capsule's middle went 5 mm in, its far end through,
+    // in 10 runs of 1600. Each turn and spin is drawn in its own statement,
+    // not in one call's arguments, whose order is the compiler's.
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    NphPcg32 hr = test_rng(301U);
+    NphPhysicsHull *hull = test_random_hull(alloc, &hr, 24U, 0.12F, nph_vec3(1.0F, 0.7F, 0.9F));
+    const NphPhysicsGeometry shapes[4] = {
+        nph_physics_geometry_sphere(0.05F), nph_physics_geometry_box(nph_vec3(0.05F, 0.1F, 0.08F)),
+        nph_physics_geometry_capsule(0.1F, 0.05F), nph_physics_geometry_hull(hull)};
+    f64 deepest = 0.0;
+    for (u32 run = 0U; run < 50U * TEST_SCALE; ++run) {
+        Scene s;
+        scene_begin_with(&s, weightless(true));
+        NphPcg32 r = test_rng(1000U + run);
+        add_wall(s.w, nph_dvec3_zero(), 5.0);
+        NphPhysicsBody b[4];
+        for (u32 k = 0U; k < 4U; ++k) {
+            const NphQuat q = test_rotation(&r);
+            const f32 wx = test_range(&r, -5.0F, 5.0F);
+            const f32 wy = test_range(&r, -5.0F, 5.0F);
+            const f32 wz = test_range(&r, -5.0F, 5.0F);
+            b[k] = add_moving(s.w, nph_dvec3(0.3, -1.5 + (f64)k, 0.3), q, shapes[k],
+                              nph_vec3(300.0F, 0.0F, 0.0F), nph_vec3(wx, wy, wz), false);
+        }
+        for (u32 i = 0U; i < 24U; ++i) {
+            step(s.w, NULL, 1U);
+            for (u32 k = 0U; k < 4U; ++k) {
+                const f64 x = nph_physics_body_position(s.w, b[k]).x;
+                deepest = fmax(deepest, x);
+                NTEST_EXPECT_TRUE(x < 4.99);
+            }
+        }
+        scene_end(&s);
+    }
+    NTEST_LOG("%u runs: the middles at most %.4f m (the wall's near face at 4.99)",
+              50U * TEST_SCALE, deepest);
     nph_physics_hull_free(hull, alloc);
     test_alloc_end(&ta);
 }
