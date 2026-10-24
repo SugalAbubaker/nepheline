@@ -44,6 +44,9 @@ typedef enum BodyFlags {
         1U << 2U, // the body could not be made (logged): retried when its components change
     BODY_SHAPED = 1U << 3U,   // made with a Collider
     BODY_UNSHAPED = 1U << 4U, // its Collider could not be made (logged): a body without a shape
+    // Its entity has a parent (BODY_FOLLOWS too, unless the follow list
+    // could not grow): a root's LocalTransform is its pose in the world.
+    BODY_PARENTED = 1U << 5U,
 } BodyFlags;
 
 typedef struct BodyRecord {
@@ -54,13 +57,14 @@ typedef struct BodyRecord {
     NphPhysicsBody body;
     NphPhysicsShape shape;
     // What the body was made from, or last wrote back: the game's changes
-    // are what differs.
+    // are what differs. What the write-back touches comes first, together
+    // (three cache lines a moving body), the Collider last.
     NphRigidBody rigid; // zeroed without a RigidBody
-    NphCollider collider;
     NphLocalTransform local;
     NphDVec3 position; // the pose the body was given: the entity's in the world
     NphQuat rotation;
     NphVec3 scale; // the world scale its shape was made at
+    NphCollider collider;
 } BodyRecord;
 
 struct PhysicsBridge {
@@ -475,6 +479,7 @@ static bool is_dynamic(const BodyRecord *r)
 
 static void set_follows(PhysicsBridge *b, BodyRecord *r, bool follows)
 {
+    r->flags = follows ? (r->flags | (u32)BODY_PARENTED) : (r->flags & ~(u32)BODY_PARENTED);
     const bool now = (r->flags & BODY_FOLLOWS) != 0U;
     if (follows == now) {
         return;
@@ -785,33 +790,49 @@ typedef struct WriteView {
 static bool write_view(PhysicsBridge *b, WriteView *wv, NphEntity e, u32 tick, u32 *row)
 {
     void *chunk = nph_world_entity_chunk(b->world, e, row);
+    if (chunk == wv->chunk) {
+        return chunk != NULL; // viewed, so matched
+    }
     if (chunk == NULL || !nph_query_matches_chunk(b->write_query, chunk)) {
         return false;
     }
-    if (chunk != wv->chunk) {
-        nph_query_chunk_view(b->write_query, chunk, tick, &wv->view);
-        wv->chunk = chunk;
-    }
+    nph_query_chunk_view(b->write_query, chunk, tick, &wv->view);
+    wv->chunk = chunk;
     return true;
 }
 
 // Writes a body's pose into its entity's LocalTransform (against its parent
 // as it was at the step's start) and its velocities into its RigidBody.
 static void write_body(PhysicsBridge *b, BodyRecord *r, const WriteView *wv, u32 row,
-                       NphDVec3 position, NphQuat rotation)
+                       NphDVec3 position, NphQuat rotation, NphVec3 linear, NphVec3 angular)
 {
     NphRigidBody *rb = &NPH_CHUNK_COLUMN(&wv->view, 0, NphRigidBody)[row];
     NphLocalTransform *lt = &NPH_CHUNK_COLUMN(&wv->view, 1, NphLocalTransform)[row];
-    local_from_pose(b, r->entity, position, rotation, lt);
-    rb->linear_velocity = nph_physics_body_linear_velocity(b->physics, r->body);
-    rb->angular_velocity = nph_physics_body_angular_velocity(b->physics, r->body);
-    r->rigid = *rb;
-    r->local = *lt;
+    const bool parented = (r->flags & BODY_PARENTED) != 0U;
+    if (parented) {
+        local_from_pose(b, r->entity, position, rotation, lt);
+    } else {
+        lt->translation = position; // a root's: no parent to look up
+        lt->rotation = rotation;
+    }
+    rb->linear_velocity = linear;
+    rb->angular_velocity = angular;
+    // The rest of both is the record's already (the change pass, which ran
+    // before the step, made them equal, and nothing has run since).
+    r->rigid.linear_velocity = linear;
+    r->rigid.angular_velocity = angular;
+    r->local.translation = lt->translation;
+    r->local.rotation = lt->rotation;
     // The pose the next step compares with: the one the LocalTransform now
     // gives (for a root, exactly the body's).
-    const EntityPose p = entity_pose(b, r->entity, lt);
-    r->position = p.position;
-    r->rotation = p.rotation;
+    if (parented) {
+        const EntityPose p = entity_pose(b, r->entity, lt);
+        r->position = p.position;
+        r->rotation = p.rotation;
+    } else {
+        r->position = lt->translation;
+        r->rotation = body_rotation(lt->rotation);
+    }
 }
 
 // The bodies the step moved, into their entities; and dynamic bodies under
@@ -831,7 +852,8 @@ static void write_back(PhysicsBridge *b, u32 tick)
             !write_view(b, &wv, e, tick, &row)) {
             continue; // a body the game made itself
         }
-        write_body(b, r, &wv, row, m->position, m->rotation);
+        write_body(b, r, &wv, row, m->position, m->rotation, m->linear_velocity,
+                   m->angular_velocity);
     }
     for (u32 i = 0; i < b->follows.len; ++i) {
         BodyRecord *r = &b->records[b->slot_record[b->follows.data[i]]];
@@ -846,7 +868,9 @@ static void write_back(PhysicsBridge *b, u32 tick)
                            !quat_bits_equal(at.rotation, r->local.rotation);
         u32 row = 0U;
         if (moved && write_view(b, &wv, r->entity, tick, &row)) {
-            write_body(b, r, &wv, row, position, rotation);
+            write_body(b, r, &wv, row, position, rotation,
+                       nph_physics_body_linear_velocity(b->physics, r->body),
+                       nph_physics_body_angular_velocity(b->physics, r->body));
         }
     }
 }

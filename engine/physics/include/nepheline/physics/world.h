@@ -191,14 +191,18 @@ typedef struct NphPhysicsContactHitEvent {
     f32 approach_speed; // m/s along the normal, > the hit threshold
 } NphPhysicsContactHitEvent;
 
-// A body that moved during the step (every awake body), with its new pose:
-// how the runtime mirrors physics into the scene.
+// A body that moved during the step (every awake body), with its new pose
+// and velocities: how the runtime mirrors physics into the scene.
 typedef struct NphPhysicsBodyMoveEvent {
     NphPhysicsBody body;
     u32 fell_asleep; // the body's island fell asleep at the end of this step
     u64 user_data;
     NphDVec3 position;
     NphQuat rotation;
+    // Of its centre of mass, as the body's getters give them after the step
+    // (zero when it fell asleep: asleep is at rest).
+    NphVec3 linear_velocity;
+    NphVec3 angular_velocity;
 } NphPhysicsBodyMoveEvent;
 
 typedef struct NphPhysicsEvents {

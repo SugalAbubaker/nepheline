@@ -583,9 +583,22 @@ NTEST(world, events_report_touching_and_motion)
     NTEST_ASSERT_EQ_INT(nph_physics_shape_create(s.w, ball, &sd, &ball_shape), NPH_RESULT_OK);
     u32 begins = 0U;
     u32 hits = 0U;
+    u32 asleep = 0U;
     for (u32 i = 0U; i < 240U; ++i) {
         step(s.w, NULL, 1U);
         const NphPhysicsEvents e = nph_physics_world_events(s.w);
+        // A move event's velocities are the body's after the step, zero
+        // when it fell asleep.
+        for (u32 k = 0U; k < e.move_count; ++k) {
+            const NphVec3 v = nph_physics_body_linear_velocity(s.w, e.move[k].body);
+            const NphVec3 av = nph_physics_body_angular_velocity(s.w, e.move[k].body);
+            NTEST_EXPECT_TRUE(nph_vec3_eq(e.move[k].linear_velocity, v));
+            NTEST_EXPECT_TRUE(nph_vec3_eq(e.move[k].angular_velocity, av));
+            if (e.move[k].fell_asleep != 0U) {
+                NTEST_EXPECT_TRUE(nph_vec3_eq(v, nph_vec3_zero()));
+                asleep += 1U;
+            }
+        }
         for (u32 k = 0U; k < e.begin_count; ++k) {
             const bool ours = (e.begin[k].shape_a.value == ball_shape.value &&
                                e.begin[k].shape_b.value == ground_shape.value) ||
@@ -607,6 +620,7 @@ NTEST(world, events_report_touching_and_motion)
     }
     NTEST_EXPECT_EQ_UINT(begins, 1U);
     NTEST_EXPECT_EQ_UINT(hits, 1U);
+    NTEST_EXPECT_EQ_UINT(asleep, 1U); // at rest half a second after landing
     // Lifting it away ends the contact.
     nph_physics_body_set_transform(s.w, ball, nph_dvec3(0.0, 3.0, 0.0), nph_quat_identity());
     step(s.w, NULL, 1U);

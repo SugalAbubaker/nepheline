@@ -882,6 +882,8 @@ static NphResult post_finalize(NphPhysicsWorld *w)
         e.user_data = b->user_data;
         e.position = b->origin;
         e.rotation = b->rotation;
+        e.linear_velocity = b->linear_velocity;
+        e.angular_velocity = b->angular_velocity;
         b->move_event = w->move_events.len;
         NPH_TRY(NPH_ARRAY_PUSH(&w->move_events, e));
     }

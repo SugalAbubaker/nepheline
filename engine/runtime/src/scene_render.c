@@ -79,7 +79,10 @@ struct NphSceneRenderer {
     u32 record_high;
     u32 free_head;
     u32 live_records;
-    NphHashMap by_entity; // u64 entity value -> u32 record index
+    // Per entity slot of the world: its record, or RENDER_ASSET_NONE (the
+    // record's handle tells its entity from a later one in the slot).
+    u32 *slot_record;
+    u32 slot_cap;
     NphArrayU32 pending;
     // Asset references of the previous world, released after the next sync
     // has acquired the new world's: assets both use are not reloaded.
@@ -125,23 +128,41 @@ struct NphSceneRenderer {
 // Records
 // ---------------------------------------------------------------------------
 
+// The record index of `e`, or RENDER_ASSET_NONE.
+static u32 record_index(const NphSceneRenderer *sr, NphEntity e)
+{
+    if (sr->world == NULL || nph_entity_is_null(e)) {
+        return RENDER_ASSET_NONE;
+    }
+    const u32 slot = nph_world_handle_slot(sr->world, e);
+    if (slot >= sr->slot_cap) {
+        return RENDER_ASSET_NONE;
+    }
+    const u32 index = sr->slot_record[slot];
+    return index != RENDER_ASSET_NONE && sr->records[index].entity.value == e.value
+               ? index
+               : RENDER_ASSET_NONE;
+}
+
 static EntityRecord *find_record(NphSceneRenderer *sr, NphEntity e, u32 *out_index)
 {
-    const u32 *found = (const u32 *)nph_hashmap_find_u64(&sr->by_entity, e.value);
-    if (found == NULL) {
+    const u32 index = record_index(sr, e);
+    if (index == RENDER_ASSET_NONE) {
         return NULL;
     }
     if (out_index != NULL) {
-        *out_index = *found;
+        *out_index = index;
     }
-    return &sr->records[*found];
+    return &sr->records[index];
 }
 
 static const EntityRecord *find_record_const(const NphSceneRenderer *sr, NphEntity e)
 {
-    const u32 *found = (const u32 *)nph_hashmap_find_u64(&sr->by_entity, e.value);
-    return found != NULL ? &sr->records[*found] : NULL;
+    const u32 index = record_index(sr, e);
+    return index != RENDER_ASSET_NONE ? &sr->records[index] : NULL;
 }
+
+static void release_record(NphSceneRenderer *sr, u32 index);
 
 static NphResult record_for(NphSceneRenderer *sr, NphEntity e, EntityRecord **out)
 {
@@ -151,6 +172,13 @@ static NphResult record_for(NphSceneRenderer *sr, NphEntity e, EntityRecord **ou
     if (existing != NULL) {
         *out = existing;
         return NPH_RESULT_OK;
+    }
+    const u32 slot = nph_world_handle_slot(sr->world, e);
+    NPH_ASSERT(slot < sr->slot_cap);
+    if (sr->slot_record[slot] != RENDER_ASSET_NONE) {
+        // An entity that went from this slot without its events being read
+        // (an overflowed stream): its record goes now.
+        release_record(sr, sr->slot_record[slot]);
     }
     u32 index = sr->free_head;
     if (index != RENDER_ASSET_NONE) {
@@ -173,7 +201,7 @@ static NphResult record_for(NphSceneRenderer *sr, NphEntity e, EntityRecord **ou
         sr->seen = grown;
         sr->seen_cap = cap;
     }
-    NPH_TRY(nph_hashmap_insert_u64(&sr->by_entity, e.value, &index));
+    sr->slot_record[slot] = index;
     EntityRecord *r = &records[index];
     memset(r, 0, sizeof *r);
     r->entity = e;
@@ -245,7 +273,10 @@ static void free_record_if_empty(NphSceneRenderer *sr, u32 index)
     if (r->moving != MOVING_NONE) {
         moving_remove(sr, r->moving);
     }
-    NPH_VERIFY(nph_hashmap_remove_u64(&sr->by_entity, r->entity.value));
+    const u32 slot = sr->world != NULL ? nph_world_handle_slot(sr->world, r->entity) : NPH_U32_MAX;
+    if (slot < sr->slot_cap && sr->slot_record[slot] == index) {
+        sr->slot_record[slot] = RENDER_ASSET_NONE;
+    }
     r->entity = NPH_ENTITY_NULL;
     r->flags = 0U;
     r->next_free = sr->free_head;
@@ -353,6 +384,18 @@ static NphResult bind_world(NphSceneRenderer *sr, NphWorld *world)
         sr->records = grown;
         sr->record_cap = capacity;
     }
+    if (capacity > sr->slot_cap) {
+        u32 *slots = NPH_ALLOC_ARRAY(sr->alloc, u32, capacity);
+        if (slots == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        if (sr->slot_record != NULL) {
+            NPH_FREE_ARRAY(sr->alloc, u32, sr->slot_record, sr->slot_cap);
+        }
+        sr->slot_record = slots;
+        sr->slot_cap = capacity;
+    }
+    memset(sr->slot_record, 0xFF, (u64)sr->slot_cap * sizeof(u32)); // RENDER_ASSET_NONE
     sr->record_high = 0U;
     sr->free_head = RENDER_ASSET_NONE;
     sr->live_records = 0U;
@@ -413,13 +456,9 @@ NphResult nph_scene_renderer_create(const NphSceneRendererDesc *desc, NphSceneRe
     NPH_ARRAY_INIT(&sr->pending, desc->alloc);
     NPH_ARRAY_INIT(&sr->retired, desc->alloc);
     NPH_ARRAY_INIT(&sr->walk, desc->alloc);
-    const NphHashMapDesc map = nph_hashmap_desc_u64((u32)sizeof(u32));
-    NphResult r = nph_hashmap_init(&sr->by_entity, desc->alloc, &map);
-    if (r == NPH_RESULT_OK) {
-        r = render_assets_init(&sr->assets, desc->alloc, desc->renderer, desc->loader,
-                               desc->max_assets != 0U ? desc->max_assets : DEFAULT_MAX_ASSETS,
-                               desc->emissive_scale);
-    }
+    NphResult r = render_assets_init(&sr->assets, desc->alloc, desc->renderer, desc->loader,
+                                     desc->max_assets != 0U ? desc->max_assets : DEFAULT_MAX_ASSETS,
+                                     desc->emissive_scale);
     if (r == NPH_RESULT_OK) {
         r = bind_world(sr, desc->world);
     }
@@ -445,7 +484,9 @@ void nph_scene_renderer_destroy(NphSceneRenderer *sr)
     }
     destroy_queries(sr);
     render_assets_free(&sr->assets);
-    nph_hashmap_free(&sr->by_entity);
+    if (sr->slot_record != NULL) {
+        NPH_FREE_ARRAY(sr->alloc, u32, sr->slot_record, sr->slot_cap);
+    }
     NPH_ARRAY_FREE(&sr->pending);
     NPH_ARRAY_FREE(&sr->retired);
     NPH_ARRAY_FREE(&sr->walk);
@@ -464,7 +505,6 @@ NphResult nph_scene_renderer_set_world(NphSceneRenderer *sr, NphWorld *world)
     if (sr->records != NULL) {
         retire_all(sr);
     }
-    nph_hashmap_clear(&sr->by_entity);
     destroy_queries(sr);
     sr->world = NULL;
     return bind_world(sr, world);

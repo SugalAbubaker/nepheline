@@ -538,10 +538,14 @@ static NphResult island_sleep(NphPhysicsWorld *w, u32 island)
     NPH_ASSERT(is->parent == PHYS_NULL);
     for (u32 b = is->body_head; b != PHYS_NULL; b = w->bodies.data[b].island_next) {
         PhysBody *body = &w->bodies.data[b];
-        // Its move event of this step says so (the runtime stops mirroring).
+        // Its move event of this step says so (the runtime stops mirroring),
+        // at rest, as body_list_set leaves it.
         if (body->move_event < w->move_events.len &&
             w->move_events.data[body->move_event].body.value == body->handle) {
-            w->move_events.data[body->move_event].fell_asleep = 1U;
+            NphPhysicsBodyMoveEvent *ev = &w->move_events.data[body->move_event];
+            ev->fell_asleep = 1U;
+            ev->linear_velocity = nph_vec3_zero();
+            ev->angular_velocity = nph_vec3_zero();
         }
         NPH_TRY(body_list_set(w, b, false));
     }
