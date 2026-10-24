@@ -107,15 +107,17 @@ void nph_physics_collide(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
                          NphPhysicsManifold *out);
 
 // Reduces `count` candidate points to at most four, in place, and returns
-// how many remain. Points that touch (separation at most a tenth of the
-// linear slop) come before speculative ones: fewer than four are all kept,
-// and the rest is chosen from the others; four or more are the only
-// candidates. The choice follows Gregorius (2015): the deepest (of equals,
-// the one farthest from their centre), the one farthest from it, the one
-// that makes the largest triangle with both, and the one that adds the most
-// area beyond that triangle. Areas are measured in the plane perpendicular
-// to `normal`; points along a line keep its two ends. Counts of four or
-// fewer are left unchanged.
+// how many remain: the deepest (of equals, the one farthest from their
+// centre), then each the one that touches first as the shape turns about
+// those kept: about the deepest, about the line through the first two (on
+// either side), and on that line's other side (with none there, the point
+// farthest outside the three's triangle). A candidate touches first when its
+// catch angle, its height above the touching points (above the deepest, when
+// none touch) over its lever arm about the turn's axis, is the least; of
+// angles as small, the one with the longest arm. Touching points have no
+// height, so a flat contact keeps Gregorius's (2015) choice: the most area.
+// Distances are measured in the plane perpendicular to `normal`; points along
+// a line keep its two ends. Counts of four or fewer are left unchanged.
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal);
 
 // ---------------------------------------------------------------------------

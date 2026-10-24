@@ -151,6 +151,9 @@ static void prepare_body(StepContext *ctx, u32 i)
         if ((b->flags & PHYS_BODY_GYROSCOPIC) != 0U && !inertia_is_isotropic(b->inertia)) {
             p->flags |= PHYS_PARAM_GYROSCOPIC;
         }
+        if ((b->flags & PHYS_BODY_BULLET) != 0U) {
+            p->flags |= PHYS_PARAM_BULLET;
+        }
         p->linear_accel = nph_vec3_add(nph_vec3_scale(w->desc.gravity, b->gravity_scale),
                                        nph_vec3_scale(b->force, b->inv_mass));
         const NphMat3 r = nph_mat3_from_quat(b->rotation);
@@ -319,6 +322,34 @@ static void finalize_body(const StepContext *ctx, u32 i)
     } else {
         b->sleep_time += ctx->dt;
     }
+    // Moved farther than half its thinnest shape's inner radius (its
+    // centre, and how far its farthest point turned): it may have passed
+    // through something thin (Box2D's safety factor); or farther than
+    // speculative contacts reach (phys_pair_speculative): it may have
+    // passed into something. Swept here against the static shapes, which
+    // this pass does not move (continuous.c); bullets after it. The turn's
+    // angle 2 atan2(|v|, |w|) is at most pi |v| for the rotation's vector
+    // part v: most bodies are slow by half the limit each way, without a
+    // root.
+    if (w->desc.enable_continuous != 0 && (p->flags & PHYS_PARAM_DYNAMIC) != 0U) {
+        const f32 limit =
+            nph_f32_min(0.5F * b->min_extent, NPH_PHYSICS_AABB_MARGIN - NPH_PHYSICS_LINEAR_SLOP);
+        const f32 half = 0.25F * limit * limit;
+        const f32 arm = 3.14159265F * b->max_extent;
+        const f32 turned = nph_vec3_length_sq(nph_quat_xyz(sb->dq)) * arm * arm;
+        if ((nph_vec3_length_sq(sb->dp) > half || turned > half) &&
+            nph_vec3_length(sb->dp) + nph_quat_angle(sb->dq) * b->max_extent > limit) {
+            b->flags |= PHYS_BODY_FAST;
+            if ((p->flags & PHYS_PARAM_BULLET) == 0U) {
+                phys_continuous_body(w, i, false);
+            }
+        }
+    }
+    phys_body_refresh_boxes(w, b);
+}
+
+void phys_body_refresh_boxes(NphPhysicsWorld *w, PhysBody *b)
+{
     // Shapes that left their proxies get new fattened boxes; the trees grow
     // after the stages, in a fixed order.
     for (u32 s = b->shape_head; s != PHYS_NULL; s = w->shapes.data[s].next) {
@@ -377,6 +408,12 @@ static void prepare_group(const StepContext *ctx, u32 index)
     g->lane_count = lane_count;
     g->point_count = point_count;
     g->first_point = first_point;
+    // TGS's rigid rows cannot take back what a hit's warm start overdoes
+    // (solver_impl.h, warm_start); the soft step's softness does, and its
+    // warm starts carry a heavy body's landing on a light one through them
+    // over several substeps (scaled, a crate dropped on a ragdoll sank four
+    // times deeper and a heap of ragdolls strained its joints twice as far).
+    g->scale_hits = ctx->w->desc.solver == NPH_PHYSICS_SOLVER_TGS ? 1U : 0U;
     for (u32 l = 0U; l < PHYS_LANES; ++l) {
         g->contact[l] = contacts[l];
         g->body_a[l] = ctx->dummy;
@@ -415,6 +452,10 @@ static void prepare_group(const StepContext *ctx, u32 index)
         g->bias_rate[l] = soft.bias_rate;
         g->mass_scale[l] = soft.mass_scale;
         g->impulse_scale[l] = soft.impulse_scale;
+        if ((c->flags & PHYS_CONTACT_HIT) != 0U) {
+            const u32 all = 0xFFFFFFFFU;
+            memcpy(&g->impacted[l], &all, sizeof all);
+        }
         set_lanes_mat3(in.inv_inertia_a, l, ii_a);
         set_lanes_mat3(in.inv_inertia_b, l, ii_b);
         for (u32 k = 0U; k < c->point_count; ++k) {
@@ -440,6 +481,11 @@ static void store_group(const StepContext *ctx, u32 index)
         PhysContact *c = &w->contacts.data[g->contact[l]];
         const NphVec3 t1 = lanes3(g->tangent1, l);
         const NphVec3 t2 = lanes3(g->tangent2, l);
+        // A hit in the last substep reaches the next step's first warm
+        // start (solver_impl.h).
+        u32 hit;
+        memcpy(&hit, &g->impacted[l], sizeof hit);
+        c->flags = hit != 0U ? c->flags | PHYS_CONTACT_HIT : c->flags & ~(u32)PHYS_CONTACT_HIT;
         for (u32 k = 0U; k < c->point_count; ++k) {
             PhysContactPoint *cp = &c->points[k];
             const PhysPointLanes *p = &pts[k];
@@ -489,6 +535,7 @@ static void run_joint_block(StepContext *ctx, const PhysStage *s, u32 block)
         case PHYS_STAGE_RESTITUTION:
         case PHYS_STAGE_STORE:
         case PHYS_STAGE_FINALIZE:
+        case PHYS_STAGE_CONTINUOUS_BULLETS:
         default:
             NPH_ASSERT_MSG(false, "physics: stage %u has no joints", s->type);
             break;
@@ -544,6 +591,9 @@ static void run_block(StepContext *ctx, const PhysStage *s, u32 block)
             break;
         case PHYS_STAGE_FINALIZE:
             finalize_body(ctx, i);
+            break;
+        case PHYS_STAGE_CONTINUOUS_BULLETS:
+            phys_continuous_body(w, i, true);
             break;
         case PHYS_STAGE_XPBD_PREDICT:
             xpbd_predict(ctx, i);
@@ -806,9 +856,14 @@ static NphResult post_finalize(NphPhysicsWorld *w)
         }
     }
     NPH_TRY(NPH_ARRAY_RESERVE(&w->move_events, w->awake_bodies.len));
+    w->stats.swept_bodies = 0U;
+    w->stats.impact_bodies = 0U;
     for (u32 i = 0U; i < w->awake_bodies.len; ++i) {
         const u32 slot = w->awake_bodies.data[i];
         PhysBody *b = &w->bodies.data[slot];
+        w->stats.swept_bodies += (b->flags & PHYS_BODY_SWEPT) != 0U ? 1U : 0U;
+        w->stats.impact_bodies += (b->flags & PHYS_BODY_IMPACT) != 0U ? 1U : 0U;
+        b->flags &= ~(u32)(PHYS_BODY_SWEPT | PHYS_BODY_IMPACT | PHYS_BODY_FAST);
         if ((b->flags & PHYS_BODY_ENLARGED) != 0U) {
             b->flags &= ~(u32)PHYS_BODY_ENLARGED;
             for (u32 s = b->shape_head; s != PHYS_NULL; s = w->shapes.data[s].next) {
@@ -1003,6 +1058,11 @@ NphResult phys_solve(NphPhysicsWorld *w, f32 dt, NphJobSystem *js)
     }
     NPH_TRY(push_stage(w, p, PHYS_STAGE_STORE, 0U, w->groups.len, 8U));
     NPH_TRY(push_stage(w, p, PHYS_STAGE_FINALIZE, 0U, n, 32U));
+    if (w->desc.enable_continuous != 0 && w->bullets > 0U) {
+        // Bullets after the others: they sweep against bodies' final poses
+        // (a bullet's sweep is costly and rare: small blocks spread them).
+        NPH_TRY(push_stage(w, p, PHYS_STAGE_CONTINUOUS_BULLETS, 0U, n, 8U));
+    }
     if (w->claims.len > 0U) {
         memset(w->claims.data, 0, (size_t)w->claims.len * sizeof *w->claims.data);
     }

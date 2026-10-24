@@ -61,6 +61,10 @@ enum {
     PHYS_BODY_GYROSCOPIC = 1U << 2U,
     PHYS_BODY_MASS_SET = 1U << 3U, // mass properties set explicitly
     PHYS_BODY_ENLARGED = 1U << 4U, // a shape's proxy grew this step
+    PHYS_BODY_BULLET = 1U << 5U,   // swept against every kind of body
+    PHYS_BODY_FAST = 1U << 6U,     // to sweep this step (continuous.c)
+    PHYS_BODY_SWEPT = 1U << 7U,    // swept this step
+    PHYS_BODY_IMPACT = 1U << 8U,   // set back to an impact this step
 };
 
 typedef struct PhysBody {
@@ -86,6 +90,7 @@ typedef struct PhysBody {
     f32 sleep_threshold;
     f32 sleep_time;
     f32 max_extent; // the farthest shape point from the centre of mass
+    f32 min_extent; // the least inner radius of its shapes (continuous collision)
     u32 shape_head;
     u32 shape_count;
     u32 contact_head; // a contact key (contact << 1 | side), or PHYS_NULL
@@ -141,6 +146,7 @@ enum {
     PHYS_CONTACT_EVENTS = 1U << 1U,     // either shape reports begin and end
     PHYS_CONTACT_HIT_EVENTS = 1U << 2U, // either shape reports hits
     PHYS_CONTACT_ISLAND = 1U << 3U,     // linked in an island (two dynamic bodies)
+    PHYS_CONTACT_HIT = 1U << 4U,        // hit in the step's last substep (solver_impl.h)
 };
 
 // What the parallel narrow phase found, for the serial update after it.
@@ -303,6 +309,16 @@ typedef struct PhysColor {
 
 #define PHYS_LANES 8U
 
+// A manifold with a point approaching faster than this (m/s) at the step's
+// start is an impact: its normal rows get PHYS_IMPACT_SWEEPS more sweeps
+// in each pass (for XPBD, its corrections and its velocity pass), and under
+// TGS its warm starts are scaled (solver_impl.h). Resting and sliding
+// contacts approach at a substep's gravity, centimetres a second; judged
+// in the middle of a pass instead, contacts in a heap of jointed ragdolls
+// passed it every step (the joints' pull) and cost 12 % more.
+#define PHYS_IMPACT_SPEED  1.0F
+#define PHYS_IMPACT_SWEEPS 7U
+
 // A body's state in the solver: one cache line of four 16-byte rows, which
 // the kernels gather eight at a time by 4x4 transposes (`rows`).
 typedef union PhysSolverBody {
@@ -340,6 +356,9 @@ typedef struct PhysSolverParams {
 enum {
     PHYS_PARAM_DYNAMIC = 1U << 0U,
     PHYS_PARAM_GYROSCOPIC = 1U << 1U,
+    // A bullet (PHYS_BODY_BULLET at the step's start). Sweeps read it here:
+    // a body's own flags change while it is swept (continuous.c).
+    PHYS_PARAM_BULLET = 1U << 2U,
 };
 
 // Eight contacts, one per lane; their points in `point_count` consecutive
@@ -354,7 +373,8 @@ typedef struct PhysContactLanes {
     u32 lane_count;
     u32 point_count; // the largest of the lanes'
     u32 first_point; // into the step's point array
-    u32 pad[3];
+    u32 scale_hits;  // TGS: a hit scales the next warm start (solver_impl.h, warm_start)
+    u32 pad[2];
     f32 inv_mass_a[PHYS_LANES];
     f32 inv_mass_b[PHYS_LANES];
     f32 normal[3][PHYS_LANES];
@@ -365,6 +385,13 @@ typedef struct PhysContactLanes {
     f32 bias_rate[PHYS_LANES];
     f32 mass_scale[PHYS_LANES];
     f32 impulse_scale[PHYS_LANES];
+    // All bits set in a lane with a point approaching faster than
+    // PHYS_IMPACT_SPEED at the step's start (the prepare kernel).
+    f32 impact_lanes[PHYS_LANES];
+    // With `scale_hits`, all bits set in a lane hit (PHYS_IMPACT_SPEED)
+    // since the last warm start, or bounced by restitution: its next warm
+    // start pushes none of its points apart (solver_impl.h, warm_start).
+    f32 impacted[PHYS_LANES];
 } PhysContactLanes;
 
 typedef struct PhysPointLanes {
@@ -409,6 +436,9 @@ typedef enum PhysStageType {
     PHYS_STAGE_RESTITUTION,
     PHYS_STAGE_STORE,
     PHYS_STAGE_FINALIZE,
+    // Continuous collision (continuous.c) of fast bullets, after the others'
+    // in the finalize pass.
+    PHYS_STAGE_CONTINUOUS_BULLETS,
     // XPBD (NPH_PHYSICS_SOLVER_XPBD): per substep, predict the bodies,
     // correct positions, derive velocities, then the velocity pass.
     PHYS_STAGE_XPBD_PREDICT,
@@ -442,7 +472,7 @@ typedef struct PhysStage {
 // arithmetic (solver_impl.h), so the results agree to the bit.
 typedef struct PhysSolverKernels {
     const char *name;
-    void (*prepare)(const PhysSolverBody *bodies, const PhysContactLanes *g, PhysPointLanes *points,
+    void (*prepare)(const PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points,
                     const PhysPrepareLanes *in);
     void (*warm_start)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points);
     void (*solve)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points, f32 inv_h,
@@ -495,6 +525,7 @@ struct NphPhysicsWorld {
     PhysContactArray contacts;
     NphArrayU32 free_contacts;
     u32 child_contacts; // live children of mesh pairs (contacts less pairs)
+    u32 bullets;        // dynamic bodies that are bullets
     PhysSlots joint_slots;
     PhysJointArray joints;
     PhysIslandArray islands;
@@ -545,6 +576,7 @@ struct NphPhysicsWorld {
     u32 split_candidate;
     u32 forced_participants; // white-box tests: nonzero fixes the solver's thread count
     f32 last_substep;        // the last step's substep, seconds (joint reactions)
+    f32 step_dt;             // the step being taken, seconds (speculative reach)
 };
 
 // ---------------------------------------------------------------------------
@@ -570,10 +602,21 @@ NphPhysicsPose phys_shape_pose_relative(const PhysBody *b, const PhysShape *s, N
 NphAABB phys_world_box(NphDVec3 origin, NphAABB rel);
 // Tight world box of a shape, rounded outward to 32 bits.
 NphAABB phys_shape_world_aabb(const PhysBody *b, const PhysShape *s);
+// A moved body's shapes' boxes, and the fattened ones of those that left
+// theirs (marked to grow in the trees after the stages).
+void phys_body_refresh_boxes(NphPhysicsWorld *w, PhysBody *b);
+// Continuous collision for the body in solver slot `solver_index`, if it is
+// fast and (`bullets`) a bullet or not (continuous.c).
+void phys_continuous_body(NphPhysicsWorld *w, u32 solver_index, bool bullets);
 // Creates the shape's proxy in its body type's tree and queues it.
 NphResult phys_shape_create_proxy(NphPhysicsWorld *w, u32 shape_slot);
 void phys_shape_destroy_proxy(NphPhysicsWorld *w, u32 shape_slot);
 NphResult phys_move_buffer_push(NphPhysicsWorld *w, u32 shape_slot);
+
+// How far apart a pair's manifold reaches: the fixed speculative distance,
+// or for bodies that close faster, how far they may close this step and a
+// slop, up to the fattened boxes' margin (contact.c).
+f32 phys_pair_speculative(const NphPhysicsWorld *w, const PhysBody *a, const PhysBody *b);
 
 // Contacts.
 NphResult phys_contact_create(NphPhysicsWorld *w, u32 shape_a, u32 shape_b);

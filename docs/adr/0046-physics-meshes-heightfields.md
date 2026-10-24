@@ -203,6 +203,55 @@ world's queries (§10's last sentence) follow. Building it refined the plan:
   heightfield, a compound's own shapes never meeting.
 - **Fuzzed** like the other blocks (`physics_heightfield`).
 
+## As built: catch angles (2026-10-24)
+
+A coverage run (Linux Clang, Debug) left two of ten boxes dropped on the
+terrain awake after 8 s. Sixty such scenes (thirty of forty boxes, thirty
+of ten) found two in which a box never slept: alone on the terrain it
+rocked at 6 Hz, its peaks at 6 to 7 cm/s, 30 s on, and placed at rest
+where it rocked it began to rock again. The reduction was the cause, twice
+over:
+
+- **The reduction by catch angle**, in every manifold (ADR-0042's
+  included), replaces "touching points first" above. Gregorius's choice by
+  area counted every point within a tenth of a slop as touching: of two
+  points 3 cm apart across a seam, it kept the one 0.47 mm from its
+  triangle over the one 0.07 mm from its own, and that one sank 0.35 mm
+  unseen as the box rocked onto it, every rock. Each point after the
+  deepest is now the one that touches first as the shape turns about those
+  kept (about the deepest, about the line through the first two, and on
+  that line's other side): the least catch angle, height above the
+  touching points over lever arm about the turn's axis, and of angles
+  within a tenth of it, the longest arm. Touching points have no height,
+  so a flat contact keeps Gregorius's choice.
+- **A cluster's compaction keeps its eight nearest points** besides the
+  extremes: a box's edge across a ridge brought three points in a line,
+  and the middle one, nearest the surface, was no direction's extreme.
+  With catch angles alone, two of the sixty scenes still had a box that
+  rocked for good.
+- **Measured.** Of the sixty scenes none now has a box that never sleeps
+  (two before); the last box sleeps within 17 s (20 s before) and nine in
+  ten within 8.4 s (8.6 s). A box whose face lies on a swell's crown still
+  rocks for seconds, as a rocking chair's runner rolls on the floor
+  (rolling loses nothing; the seams take its swing), so the terrain test
+  now waits, up to 30 s, for every box to sleep. The four boxes that had
+  rocked for good, each placed alone where it rocked, at rest, moving as
+  it was, and twice as fast, sleep within 0.5 to 6.6 s; nine of those
+  twelve runs never slept before. The cost, Profile on the reference
+  machine, side by side: `collide_box_box_resting` +4.5 % (473 to 494 ns),
+  `collide_mesh_box` and `collide_heightfield_box` +1.5 %, the world rows
+  within their ±2 % noise, and the terrain and heightfield piles 1 to 2 %
+  faster. Angles are compared multiplied out and squared about a point (a
+  first version with a division and a square root per candidate cost
+  `collide_box_box_resting` 24 %).
+- **Alternatives.** A chosen point giving way to a nearer neighbour
+  within an eighth of the contact's extent (measured) fixed the two scenes
+  and left a third rocking for good: there the nearer point never reached
+  the reduction, which is how the compaction's flaw was found. A movement
+  test for sleep (Jolt's: a body whose points stay within a small sphere
+  for the sleep time sleeps) would put rocking boxes to sleep, but leave
+  the sink, and the energy it fed, in every awake contact.
+
 ## Alternatives considered
 
 - **One manifold per pair, the best normal**: a box in a crease gets one

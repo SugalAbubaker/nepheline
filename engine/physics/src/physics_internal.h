@@ -181,6 +181,16 @@ void nph_physics_surface_place(NphPhysicsPose pose_a, NphPhysicsPose pose_surfac
 f32 nph_physics_proxy_gap(const NphPhysicsProxy *m, NphPhysicsPose pose_m, const NphPhysicsProxy *t,
                           NphPhysicsPose pose_t, NphVec3 n);
 
+// Of `hint` (GJK's normal between proxies `m` and `t` at their poses, from
+// t towards m) and the exact normal of the closest features GJK's simplex
+// `features` ended on (a face against a point, or two edges), the one along
+// which the two are farther apart: the axis test's measure. GJK's own is a
+// thousandth of a radian off across a face; along it a large target's far
+// corner stands centimetres proud.
+NphVec3 nph_physics_contact_axis(const NphPhysicsProxy *m, NphPhysicsPose pose_m,
+                                 const NphPhysicsProxy *t, NphPhysicsPose pose_t,
+                                 const NphPhysicsSimplexCache *features, NphVec3 hint);
+
 // Where a shape cast arrived (cast.c).
 typedef struct NphPhysicsArrival {
     f32 fraction;         // of the motion

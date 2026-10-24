@@ -424,6 +424,52 @@ NTEST(collide, reduction_keeps_the_largest_area)
     NTEST_EXPECT_EQ_UINT(nph_physics_manifold_reduce(pts, 3U, nph_vec3_unit_y()), 3U);
 }
 
+// A box's face resting on two points of a ridge (along x), the rest of it
+// a little above the surface either side: of the points either side, the
+// reduction keeps the one that touches first as the box turns about the
+// ridge, the near one, not the far one that spans more area. A flat face
+// keeps the far ones.
+static u32 reduce_ridge(f32 lift, u32 kept[4])
+{
+    NphPhysicsManifoldPoint pts[6];
+    const f32 xz[6][2] = {{-1.0F, 0.0F}, {1.0F, 0.0F},  {0.2F, 0.8F},
+                          {0.0F, 1.0F},  {0.0F, -1.0F}, {0.5F, -0.5F}};
+    // Heights above the ridge: the near points are 0.1 mm up, a turn of
+    // 0.13 and 0.2 mrad away; the far ones 1 and 0.5 mm, 1 and 0.5 mrad.
+    const f32 height[6] = {0.0F, 0.0F, 1e-4F, 1e-3F, 5e-4F, 1e-4F};
+    for (u32 i = 0U; i < 6U; ++i) {
+        pts[i].point = nph_vec3(xz[i][0], 0.0F, xz[i][1]);
+        pts[i].separation = -1e-5F + lift * height[i];
+        pts[i].id = i;
+    }
+    const u32 n = nph_physics_manifold_reduce(pts, 6U, nph_vec3_unit_y());
+    for (u32 i = 0U; i < n; ++i) {
+        kept[i] = pts[i].id;
+    }
+    return n;
+}
+
+static bool kept_set(const u32 kept[4], u32 a, u32 b, u32 c, u32 d)
+{
+    u32 mask = 0U;
+    for (u32 i = 0U; i < 4U; ++i) {
+        mask |= 1U << kept[i];
+    }
+    return mask == ((1U << a) | (1U << b) | (1U << c) | (1U << d));
+}
+
+NTEST(collide, reduction_keeps_the_points_that_touch_first)
+{
+    u32 kept[4];
+    NTEST_ASSERT_EQ_UINT(reduce_ridge(1.0F, kept), 4U);
+    NTEST_EXPECT_EQ_UINT(kept[0], 0U); // the ridge's farther end from the centre
+    NTEST_EXPECT_EQ_UINT(kept[1], 1U);
+    NTEST_EXPECT_TRUE(kept_set(kept, 0U, 1U, 2U, 5U));
+    // Flat (no heights): the most area.
+    NTEST_ASSERT_EQ_UINT(reduce_ridge(0.0F, kept), 4U);
+    NTEST_EXPECT_TRUE(kept_set(kept, 0U, 1U, 3U, 4U));
+}
+
 // Hulls beyond the vectorised test's 64 vertices take the scalar path:
 // the same soundness on 100-vertex hulls.
 NTEST(collide, large_hulls_take_the_scalar_path)

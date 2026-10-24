@@ -657,7 +657,13 @@ NTEST(world_mesh, boxes_come_to_rest_on_a_terrain)
     scene_begin(&s);
     add_mesh_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_zero(), land);
     // Boxes, which do not roll, across the swells and ripples: they settle
-    // on slopes, seams, and each other, and sleep.
+    // on slopes, seams, and each other, and every one sleeps. Most do in a
+    // few seconds; a box whose face lies on a swell's crown rolls on it as
+    // a rocking chair's runner rolls on the floor, losing nothing but what
+    // the mesh's seams take from each swing, and the last of forty took
+    // 17 s in sixty such scenes. Dropped from up to 12 m onto each other,
+    // one may be knocked off the terrain's edge (in two of those scenes):
+    // it falls for good, and is not waited for.
     const u32 count = 5U * TEST_SCALE;
     NphPcg32 rng = test_rng(51U);
     NphPhysicsBody boxes[40];
@@ -670,16 +676,112 @@ NTEST(world_mesh, boxes_come_to_rest_on_a_terrain)
                             test_rotation(&rng),
                             nph_physics_geometry_box(test_vec3(&rng, 0.15F, 0.4F)), 0.6F, 0.0F);
     }
-    step(s.w, NULL, 240U * 8U);
     u32 asleep = 0U;
-    for (u32 i = 0U; i < count; ++i) {
-        asleep += nph_physics_body_is_awake(s.w, boxes[i]) ? 0U : 1U;
+    u32 gone = 0U;
+    u32 most = 0U; // the step by which nine in ten slept
+    u32 k = 0U;
+    for (; k < 240U * 30U && asleep + gone < count; ++k) {
+        NTEST_ASSERT_EQ_INT(nph_physics_world_step(s.w, DT, NULL), NPH_RESULT_OK);
+        asleep = 0U;
+        gone = 0U;
+        for (u32 i = 0U; i < count; ++i) {
+            const NphDVec3 p = nph_physics_body_position(s.w, boxes[i]);
+            if (!(fabs(p.x) < 6.0 && fabs(p.z) < 6.0)) {
+                gone += 1U;
+            } else if (!nph_physics_body_is_awake(s.w, boxes[i])) {
+                asleep += 1U;
+            }
+        }
+        most = most == 0U && asleep * 10U >= (count - gone) * 9U ? k + 1U : most;
     }
     const NphPhysicsStats st = nph_physics_world_stats(s.w);
-    NTEST_LOG("%u of %u boxes asleep, %u awake islands", asleep, count, st.awake_islands);
-    NTEST_EXPECT_TRUE(asleep * 10U >= count * 9U);
+    NTEST_LOG("%u of %u boxes asleep after %.2f s (nine in ten after %.2f s), %u off the edge, %u "
+              "awake islands",
+              asleep, count, (f64)k * (f64)DT, (f64)most * (f64)DT, gone, st.awake_islands);
+    NTEST_EXPECT_EQ_UINT(asleep + gone, count);
+    NTEST_EXPECT_TRUE(gone <= 1U);
     NTEST_EXPECT_EQ_UINT(under_terrain(s.w, 0.1), 0U);
     scene_end(&s);
+    nph_physics_mesh_free(land, ma);
+    test_alloc_end(&mta);
+}
+
+// Boxes that once rocked on the terrain for good, each alone where it
+// rocked (as found by sixty scenes of boxes dropped on it, 30 s in): one
+// box's face across a seam kept, of its points, one a few tenths of a
+// millimetre farther from its triangle than its neighbour a few
+// centimetres away, and the neighbour sank unseen each time the box rocked
+// onto it; another's edge across a ridge brought points in a line whose
+// middle, the first to touch, the cluster's compaction dropped
+// (collide.c, collide_mesh.c).
+typedef struct RockedBox {
+    f32 half[3];
+    f64 origin[3];
+    f32 rotation[4];
+    f32 v[3];
+    f32 w[3];
+} RockedBox;
+
+static const RockedBox k_rocked[4] = {
+    {{0.263268948F, 0.226608664F, 0.222357884F},
+     {-0.813163389042, 0.571290270816, 3.77859713725},
+     {-0.451463401F, 0.0914111361F, 0.885298073F, 0.0638146326F},
+     {0.015386682F, 0.00232245517F, 0.013443823F},
+     {0.0589347668F, -0.0187158678F, -0.0642214641F}},
+    {{0.327025175F, 0.194660679F, 0.266864359F},
+     {1.15041730939, 0.464570692377, 0.0276558416508},
+     {0.289247036F, 0.26828891F, 0.660987973F, 0.638319731F},
+     {-0.0272281449F, -0.00970178191F, 0.0312481225F},
+     {0.0967307165F, -0.00144110061F, 0.0838418081F}},
+    {{0.347755432F, 0.29911828F, 0.28294307F},
+     {-0.408639715776, 0.29973526791, -1.42467261583},
+     {0.0443149097F, 0.744474769F, -0.665915489F, 0.0187128782F},
+     {0.0202726182F, 0.00157122873F, -0.0195992794F},
+     {-0.069420062F, 0.0102136862F, -0.0709844679F}},
+    {{0.342876196F, 0.200958028F, 0.385083854F},
+     {-0.150285051786, 0.266297361238, -1.89414262585},
+     {0.772569954F, 0.021445239F, -0.632060647F, -0.0563473739F},
+     {-0.0210849512F, 0.00245124567F, 0.0179050211F},
+     {0.0871955901F, -0.0154111581F, 0.104606755F}},
+};
+
+NTEST(world_mesh, boxes_resting_on_a_terrain_never_rock_for_good)
+{
+    TestAlloc mta;
+    NphAllocator *ma = test_alloc_begin(&mta);
+    NphPhysicsMesh *land = terrain(ma);
+    // Each placed at rest, moving as it was, and moving twice as fast: it
+    // sleeps within 10 s (from 0.5 s, the least, to 6.6 s here; nine of the
+    // twelve never slept before).
+    f64 slowest = 0.0;
+    for (u32 c = 0U; c < 4U; ++c) {
+        const RockedBox *r = &k_rocked[c];
+        for (u32 kick = 0U; kick < 3U; ++kick) {
+            Scene s;
+            scene_begin(&s);
+            add_mesh_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_zero(), land);
+            const NphPhysicsBody b = add_body(
+                s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(r->origin[0], r->origin[1], r->origin[2]),
+                nph_quat_normalize(
+                    nph_quat(r->rotation[0], r->rotation[1], r->rotation[2], r->rotation[3])),
+                nph_physics_geometry_box(nph_vec3(r->half[0], r->half[1], r->half[2])), 0.6F, 0.0F);
+            const f32 scale = (f32)kick;
+            nph_physics_body_set_linear_velocity(
+                s.w, b, nph_vec3_scale(nph_vec3(r->v[0], r->v[1], r->v[2]), scale));
+            nph_physics_body_set_angular_velocity(
+                s.w, b, nph_vec3_scale(nph_vec3(r->w[0], r->w[1], r->w[2]), scale));
+            u32 k = 0U;
+            while (k < 240U * 10U && nph_physics_body_is_awake(s.w, b)) {
+                NTEST_ASSERT_EQ_INT(nph_physics_world_step(s.w, DT, NULL), NPH_RESULT_OK);
+                k += 1U;
+            }
+            NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, b));
+            slowest = nph_f64_max(slowest, (f64)k * (f64)DT);
+            NTEST_EXPECT_EQ_UINT(under_terrain(s.w, 0.1), 0U);
+            scene_end(&s);
+        }
+    }
+    NTEST_LOG("the slowest asleep after %.2f s", slowest);
     nph_physics_mesh_free(land, ma);
     test_alloc_end(&mta);
 }

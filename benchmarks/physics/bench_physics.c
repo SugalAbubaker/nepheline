@@ -1654,6 +1654,79 @@ NBENCH(world_ragdolls_32_mt_xpbd16)
 }
 
 // ---------------------------------------------------------------------------
+// Continuous collision
+// ---------------------------------------------------------------------------
+
+static void gallery_body(NphPhysicsWorld *w, NphPhysicsBodyType type, NphDVec3 p, NphQuat q,
+                         NphPhysicsGeometry g, NphVec3 v, bool bullet)
+{
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.type = type;
+    bd.position = p;
+    bd.rotation = q;
+    bd.linear_velocity = v;
+    bd.bullet = bullet ? 1 : 0;
+    NphPhysicsBody b;
+    if (nph_physics_body_create(w, &bd, &b) != NPH_RESULT_OK) {
+        return;
+    }
+    NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
+    sd.friction = 0.0F;
+    sd.restitution = 1.0F;
+    NphPhysicsShape s;
+    NPH_IGNORE_RESULT(nph_physics_shape_create(w, b, &sd, &s));
+}
+
+// Two hundred balls and boxes 10 to 20 cm across at 50 to 200 m/s (20 to
+// 80 cm a step), a third of them bullets, rattling about a room of walls
+// 2 cm thick with no gravity, restitution 1, and no friction: most are
+// swept every step, and some hit a wall or each other.
+static NphPhysicsWorld *gallery(void)
+{
+    NphPhysicsWorldDesc d = nph_physics_world_desc_default();
+    d.alloc = nph_allocator_system();
+    d.gravity = nph_vec3_zero();
+    d.enable_sleep = 0;
+    NphPhysicsWorld *w = NULL;
+    if (nph_physics_world_create(&d, &w) != NPH_RESULT_OK) {
+        return NULL;
+    }
+    for (u32 k = 0U; k < 6U; ++k) {
+        const f64 side = k % 2U == 0U ? 5.01 : -5.01;
+        const NphDVec3 p = k < 2U   ? nph_dvec3(side, 0.0, 0.0)
+                           : k < 4U ? nph_dvec3(0.0, side, 0.0)
+                                    : nph_dvec3(0.0, 0.0, side);
+        const NphVec3 h = k < 2U   ? nph_vec3(0.01F, 5.1F, 5.1F)
+                          : k < 4U ? nph_vec3(5.1F, 0.01F, 5.1F)
+                                   : nph_vec3(5.1F, 5.1F, 0.01F);
+        gallery_body(w, NPH_PHYSICS_BODY_STATIC, p, nph_quat_identity(),
+                     nph_physics_geometry_box(h), nph_vec3_zero(), false);
+    }
+    NphPcg32 r = bench_rng(23U);
+    for (u32 i = 0U; i < 200U / WORLD_SCALE; ++i) {
+        const NphVec3 p = rand_vec3(&r, -4.0F, 4.0F);
+        const NphPhysicsGeometry g =
+            i % 2U == 0U ? nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.05F, 0.1F))
+                         : nph_physics_geometry_box(rand_vec3(&r, 0.05F, 0.1F));
+        const NphVec3 v =
+            nph_vec3_scale(rand_unit(&r), nph_pcg32_next_range_f32(&r, 50.0F, 200.0F));
+        gallery_body(w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3((f64)p.x, (f64)p.y, (f64)p.z),
+                     rand_rotation(&r), g, v, i % 3U == 0U);
+    }
+    return w;
+}
+
+NBENCH(world_gallery_200_st)
+{
+    bench_world_steps(state, gallery(), NULL);
+}
+
+NBENCH(world_gallery_200_mt)
+{
+    bench_world_steps(state, gallery(), bench_jobs());
+}
+
+// ---------------------------------------------------------------------------
 // World queries
 // ---------------------------------------------------------------------------
 

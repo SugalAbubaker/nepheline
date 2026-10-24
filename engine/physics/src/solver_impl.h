@@ -167,6 +167,17 @@ static void PHYS_KERNEL(apply)(BodyLanes *a, BodyLanes *b, W8 ma, W8 mb, W8 lamb
     b->wz = nph_f32x8_add(b->wz, nph_f32x8_mul(lambda, PHYS_KERNEL(load)(b_z)));
 }
 
+// Each point starts the substep with the impulses it ended the last with
+// (Catto, "Iterative Dynamics with Temporal Coherence", GDC 2005). Under
+// TGS, after a hit (`impacted`: a point approached faster than
+// PHYS_IMPACT_SPEED, or bounced), with as much of them as pushes none of
+// the lane's points apart: what stopped an approach that is over launches
+// the bodies. A box stopped dead on a floor keeps its weight's worth, a
+// heavy body still coming down on a light one the impulses that slow it,
+// and a bounce none. Four points share a load in many ways, and rigid rows
+// cannot take back a share that moves nothing: warm-starting all of a hit
+// tipped boxes dropped flat from a metre over (prepare_group says why the
+// soft step warm-starts all of it).
 static void PHYS_KERNEL(warm_start)(PhysSolverBody *bodies, PhysContactLanes *g,
                                     PhysPointLanes *points)
 {
@@ -174,6 +185,8 @@ static void PHYS_KERNEL(warm_start)(PhysSolverBody *bodies, PhysContactLanes *g,
     BodyLanes b;
     PHYS_KERNEL(gather)(bodies, g->body_a, false, &a);
     PHYS_KERNEL(gather)(bodies, g->body_b, false, &b);
+    const W8 zero = nph_f32x8_zero();
+    const W8 one = nph_f32x8_splat(1.0F);
     const W8 ma = PHYS_KERNEL(load)(g->inv_mass_a);
     const W8 mb = PHYS_KERNEL(load)(g->inv_mass_b);
     const W8 nx = PHYS_KERNEL(load)(g->normal[0]);
@@ -185,14 +198,60 @@ static void PHYS_KERNEL(warm_start)(PhysSolverBody *bodies, PhysContactLanes *g,
     const W8 t2x = PHYS_KERNEL(load)(g->tangent2[0]);
     const W8 t2y = PHYS_KERNEL(load)(g->tangent2[1]);
     const W8 t2z = PHYS_KERNEL(load)(g->tangent2[2]);
+    const W8 hit = PHYS_KERNEL(load)(g->impacted);
+    const bool any_hit = nph_f32x8_movemask(hit) != 0U;
+    W8 scale = one;
+    if (any_hit) {
+        // The normal speeds now and after the whole warm start (on copies:
+        // impulses add linearly), and the share of it that pushes no point
+        // apart faster than it was already moving apart.
+        BodyLanes a1 = a;
+        BodyLanes b1 = b;
+        for (u32 k = 0U; k < g->point_count; ++k) {
+            const PhysPointLanes *p = &points[k];
+            PHYS_KERNEL(apply)(&a1, &b1, ma, mb, PHYS_KERNEL(load)(p->normal_impulse), nx, ny, nz,
+                               p->ang_a_n[0], p->ang_b_n[0]);
+            PHYS_KERNEL(apply)(&a1, &b1, ma, mb, PHYS_KERNEL(load)(p->tangent_impulse[0]), t1x, t1y,
+                               t1z, p->ang_a_t1[0], p->ang_b_t1[0]);
+            PHYS_KERNEL(apply)(&a1, &b1, ma, mb, PHYS_KERNEL(load)(p->tangent_impulse[1]), t2x, t2y,
+                               t2z, p->ang_a_t2[0], p->ang_b_t2[0]);
+        }
+        W8 share = one;
+        for (u32 k = 0U; k < g->point_count; ++k) {
+            const PhysPointLanes *p = &points[k];
+            W8 vx;
+            W8 vy;
+            W8 vz;
+            PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
+            const W8 before = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+            PHYS_KERNEL(relative_velocity)(&a1, &b1, p, &vx, &vy, &vz);
+            const W8 after = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+            const W8 allowed = nph_f32x8_max(before, zero);
+            const W8 pushed = nph_f32x8_cmp_gt(after, allowed);
+            const W8 part =
+                nph_f32x8_div(nph_f32x8_sub(allowed, before),
+                              nph_f32x8_select(pushed, nph_f32x8_sub(after, before), one));
+            share = nph_f32x8_min(share, nph_f32x8_select(pushed, part, one));
+        }
+        scale = nph_f32x8_select(hit, share, one);
+        nph_f32x8_store(g->impacted, zero);
+    }
     for (u32 k = 0U; k < g->point_count; ++k) {
         PhysPointLanes *p = &points[k];
-        PHYS_KERNEL(apply)(&a, &b, ma, mb, PHYS_KERNEL(load)(p->normal_impulse), nx, ny, nz,
-                           p->ang_a_n[0], p->ang_b_n[0]);
-        PHYS_KERNEL(apply)(&a, &b, ma, mb, PHYS_KERNEL(load)(p->tangent_impulse[0]), t1x, t1y, t1z,
-                           p->ang_a_t1[0], p->ang_b_t1[0]);
-        PHYS_KERNEL(apply)(&a, &b, ma, mb, PHYS_KERNEL(load)(p->tangent_impulse[1]), t2x, t2y, t2z,
-                           p->ang_a_t2[0], p->ang_b_t2[0]);
+        W8 normal = PHYS_KERNEL(load)(p->normal_impulse);
+        W8 tangent1 = PHYS_KERNEL(load)(p->tangent_impulse[0]);
+        W8 tangent2 = PHYS_KERNEL(load)(p->tangent_impulse[1]);
+        if (any_hit) {
+            normal = nph_f32x8_mul(normal, scale);
+            tangent1 = nph_f32x8_mul(tangent1, scale);
+            tangent2 = nph_f32x8_mul(tangent2, scale);
+            nph_f32x8_store(p->normal_impulse, normal);
+            nph_f32x8_store(p->tangent_impulse[0], tangent1);
+            nph_f32x8_store(p->tangent_impulse[1], tangent2);
+        }
+        PHYS_KERNEL(apply)(&a, &b, ma, mb, normal, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+        PHYS_KERNEL(apply)(&a, &b, ma, mb, tangent1, t1x, t1y, t1z, p->ang_a_t1[0], p->ang_b_t1[0]);
+        PHYS_KERNEL(apply)(&a, &b, ma, mb, tangent2, t2x, t2y, t2z, p->ang_a_t2[0], p->ang_b_t2[0]);
     }
     PHYS_KERNEL(scatter)(bodies, g->body_a, g->write_mask_a, &a);
     PHYS_KERNEL(scatter)(bodies, g->body_b, g->write_mask_b, &b);
@@ -214,7 +273,7 @@ static void PHYS_KERNEL(mat3_mul)(const W8 m[9], const W8 v[3], W8 out[3])
 // angular terms I^-1 (r x axis), the effective masses, the approach speed
 // for restitution, and the warm-start impulses on this step's tangents.
 // Points a lane does not have keep zero masses and change nothing.
-static void PHYS_KERNEL(prepare)(const PhysSolverBody *bodies, const PhysContactLanes *g,
+static void PHYS_KERNEL(prepare)(const PhysSolverBody *bodies, PhysContactLanes *g,
                                  PhysPointLanes *points, const PhysPrepareLanes *in)
 {
     BodyLanes a;
@@ -315,6 +374,14 @@ static void PHYS_KERNEL(prepare)(const PhysSolverBody *bodies, const PhysContact
         nph_f32x8_store(p->tangent_impulse[1],
                         PHYS_KERNEL(dot)(tx, ty, tz, axes[2][0], axes[2][1], axes[2][2]));
     }
+    // Impacts (PHYS_IMPACT_SPEED).
+    const W8 impact_speed = nph_f32x8_splat(-PHYS_IMPACT_SPEED);
+    W8 impact = zero;
+    for (u32 k = 0U; k < g->point_count; ++k) {
+        impact = nph_f32x8_or(
+            impact, nph_f32x8_cmp_lt(PHYS_KERNEL(load)(points[k].relative_velocity), impact_speed));
+    }
+    nph_f32x8_store(g->impact_lanes, impact);
 }
 
 // The friction circle, |impulse| <= `limit` (mu times the normal impulse),
@@ -374,8 +441,46 @@ static void PHYS_KERNEL(rotate)(const BodyLanes *q, W8 vx, W8 vy, W8 vz, W8 *ox,
     *oz = nph_f32x8_add(nph_f32x8_add(vz, nph_f32x8_mul(tz, q->qw)), cz);
 }
 
-// `slop` (TGS's Baumgarte slop; 0 for the soft step) is the overlap the
-// bias leaves alone.
+// A point's current separation: the bodies' displacements this step move
+// the fixed anchors (rotated by the bodies' rotations this step).
+static W8 PHYS_KERNEL(separation)(const BodyLanes *a, const BodyLanes *b, const PhysPointLanes *p,
+                                  W8 nx, W8 ny, W8 nz)
+{
+    W8 pax;
+    W8 pay;
+    W8 paz;
+    W8 pbx;
+    W8 pby;
+    W8 pbz;
+    PHYS_KERNEL(rotate)(a, PHYS_KERNEL(load)(p->anchor_a[0]), PHYS_KERNEL(load)(p->anchor_a[1]),
+                        PHYS_KERNEL(load)(p->anchor_a[2]), &pax, &pay, &paz);
+    PHYS_KERNEL(rotate)(b, PHYS_KERNEL(load)(p->anchor_b[0]), PHYS_KERNEL(load)(p->anchor_b[1]),
+                        PHYS_KERNEL(load)(p->anchor_b[2]), &pbx, &pby, &pbz);
+    const W8 dx = nph_f32x8_add(nph_f32x8_sub(b->dpx, a->dpx), nph_f32x8_sub(pbx, pax));
+    const W8 dy = nph_f32x8_add(nph_f32x8_sub(b->dpy, a->dpy), nph_f32x8_sub(pby, pay));
+    const W8 dz = nph_f32x8_add(nph_f32x8_sub(b->dpz, a->dpz), nph_f32x8_sub(pbz, paz));
+    return nph_f32x8_add(PHYS_KERNEL(dot)(dx, dy, dz, nx, ny, nz),
+                         PHYS_KERNEL(load)(p->adjusted_separation));
+}
+
+// A normal row at separation `s`: apart, it closes at most the gap
+// (speculative); overlapping, the spring's push, capped, with its softness,
+// or rigid when relaxing (the soft terms one, zero, zero). `slop` (TGS's
+// Baumgarte slop; 0 for the soft step) is the overlap the bias leaves
+// alone.
+static void PHYS_KERNEL(normal_row)(W8 s, W8 inv_h, W8 slop, W8 soft_bias, W8 push_max,
+                                    W8 soft_mass, W8 soft_impulse, W8 *bias, W8 *mass_scale,
+                                    W8 *impulse_scale)
+{
+    const W8 zero = nph_f32x8_zero();
+    const W8 apart = nph_f32x8_cmp_gt(s, zero);
+    const W8 overlap = nph_f32x8_min(nph_f32x8_add(s, slop), zero);
+    *bias = nph_f32x8_select(apart, nph_f32x8_mul(s, inv_h),
+                             nph_f32x8_max(nph_f32x8_mul(soft_bias, overlap), push_max));
+    *mass_scale = nph_f32x8_select(apart, nph_f32x8_splat(1.0F), soft_mass);
+    *impulse_scale = nph_f32x8_select(apart, zero, soft_impulse);
+}
+
 static void PHYS_KERNEL(solve)(PhysSolverBody *bodies, PhysContactLanes *g, PhysPointLanes *points,
                                f32 inv_h, f32 push_max, f32 slop, bool use_bias)
 {
@@ -398,51 +503,66 @@ static void PHYS_KERNEL(solve)(PhysSolverBody *bodies, PhysContactLanes *g, Phys
     const W8 soft_impulse = use_bias ? PHYS_KERNEL(load)(g->impulse_scale) : zero;
     for (u32 k = 0U; k < g->point_count; ++k) {
         PhysPointLanes *p = &points[k];
-        // The current separation: the bodies' displacements this step move
-        // the fixed anchors (rotated by the bodies' rotations this step).
-        W8 pax;
-        W8 pay;
-        W8 paz;
-        W8 pbx;
-        W8 pby;
-        W8 pbz;
-        PHYS_KERNEL(rotate)(&a, PHYS_KERNEL(load)(p->anchor_a[0]),
-                            PHYS_KERNEL(load)(p->anchor_a[1]), PHYS_KERNEL(load)(p->anchor_a[2]),
-                            &pax, &pay, &paz);
-        PHYS_KERNEL(rotate)(&b, PHYS_KERNEL(load)(p->anchor_b[0]),
-                            PHYS_KERNEL(load)(p->anchor_b[1]), PHYS_KERNEL(load)(p->anchor_b[2]),
-                            &pbx, &pby, &pbz);
-        const W8 dx = nph_f32x8_add(nph_f32x8_sub(b.dpx, a.dpx), nph_f32x8_sub(pbx, pax));
-        const W8 dy = nph_f32x8_add(nph_f32x8_sub(b.dpy, a.dpy), nph_f32x8_sub(pby, pay));
-        const W8 dz = nph_f32x8_add(nph_f32x8_sub(b.dpz, a.dpz), nph_f32x8_sub(pbz, paz));
-        const W8 s = nph_f32x8_add(PHYS_KERNEL(dot)(dx, dy, dz, nx, ny, nz),
-                                   PHYS_KERNEL(load)(p->adjusted_separation));
-        // Apart: close at most the gap (speculative). Overlapping: the
-        // spring's push, capped, with its softness; or rigid when relaxing.
-        const W8 apart = nph_f32x8_cmp_gt(s, zero);
-        const W8 overlap = nph_f32x8_min(nph_f32x8_add(s, vslop), zero);
-        const W8 bias =
-            nph_f32x8_select(apart, nph_f32x8_mul(s, vinv_h),
-                             nph_f32x8_max(nph_f32x8_mul(soft_bias, overlap), min_bias));
-        const W8 mass_scale = nph_f32x8_select(apart, one, soft_mass);
-        const W8 impulse_scale = nph_f32x8_select(apart, zero, soft_impulse);
+        W8 bias;
+        W8 mass_scale;
+        W8 impulse_scale;
+        PHYS_KERNEL(normal_row)(PHYS_KERNEL(separation)(&a, &b, p, nx, ny, nz), vinv_h, vslop,
+                                soft_bias, min_bias, soft_mass, soft_impulse, &bias, &mass_scale,
+                                &impulse_scale);
         W8 vx;
         W8 vy;
         W8 vz;
         PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
         const W8 vn = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+        const W8 row = nph_f32x8_mul(PHYS_KERNEL(load)(p->normal_mass), mass_scale);
         const W8 accumulated = PHYS_KERNEL(load)(p->normal_impulse);
-        const W8 impulse =
-            nph_f32x8_sub(nph_f32x8_neg(nph_f32x8_mul(
-                              nph_f32x8_mul(PHYS_KERNEL(load)(p->normal_mass), mass_scale),
-                              nph_f32x8_add(vn, bias))),
-                          nph_f32x8_mul(impulse_scale, accumulated));
+        const W8 impulse = nph_f32x8_sub(nph_f32x8_neg(nph_f32x8_mul(row, nph_f32x8_add(vn, bias))),
+                                         nph_f32x8_mul(impulse_scale, accumulated));
         const W8 total = nph_f32x8_max(nph_f32x8_add(accumulated, impulse), zero);
         const W8 delta = nph_f32x8_sub(total, accumulated);
         nph_f32x8_store(p->normal_impulse, total);
         nph_f32x8_store(p->max_normal_impulse,
                         nph_f32x8_max(PHYS_KERNEL(load)(p->max_normal_impulse), total));
         PHYS_KERNEL(apply)(&a, &b, ma, mb, delta, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+    }
+    const W8 impact = PHYS_KERNEL(load)(g->impact_lanes);
+    // Under TGS a hit scales the next warm start (warm_start).
+    if (g->scale_hits != 0U && nph_f32x8_movemask(impact) != 0U) {
+        nph_f32x8_store(g->impacted, nph_f32x8_or(PHYS_KERNEL(load)(g->impacted), impact));
+    }
+    if (g->point_count > 1U && nph_f32x8_movemask(impact) != 0U) {
+        // The rows as the pass made them (the bodies have not moved).
+        W8 row_bias[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+        W8 row_mass[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+        W8 row_soft[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+        for (u32 k = 0U; k < g->point_count; ++k) {
+            W8 mass_scale;
+            PHYS_KERNEL(normal_row)(PHYS_KERNEL(separation)(&a, &b, &points[k], nx, ny, nz), vinv_h,
+                                    vslop, soft_bias, min_bias, soft_mass, soft_impulse,
+                                    &row_bias[k], &mass_scale, &row_soft[k]);
+            row_mass[k] = nph_f32x8_mul(PHYS_KERNEL(load)(points[k].normal_mass), mass_scale);
+        }
+        for (u32 sweep = 0U; sweep < PHYS_IMPACT_SWEEPS; ++sweep) {
+            for (u32 k = 0U; k < g->point_count; ++k) {
+                PhysPointLanes *p = &points[k];
+                W8 vx;
+                W8 vy;
+                W8 vz;
+                PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
+                const W8 vn = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+                const W8 accumulated = PHYS_KERNEL(load)(p->normal_impulse);
+                const W8 impulse = nph_f32x8_sub(
+                    nph_f32x8_neg(nph_f32x8_mul(row_mass[k], nph_f32x8_add(vn, row_bias[k]))),
+                    nph_f32x8_mul(row_soft[k], accumulated));
+                const W8 total = nph_f32x8_select(
+                    impact, nph_f32x8_max(nph_f32x8_add(accumulated, impulse), zero), accumulated);
+                const W8 delta = nph_f32x8_sub(total, accumulated);
+                nph_f32x8_store(p->normal_impulse, total);
+                nph_f32x8_store(p->max_normal_impulse,
+                                nph_f32x8_max(PHYS_KERNEL(load)(p->max_normal_impulse), total));
+                PHYS_KERNEL(apply)(&a, &b, ma, mb, delta, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+            }
+        }
     }
     const W8 t1x = PHYS_KERNEL(load)(g->tangent1[0]);
     const W8 t1y = PHYS_KERNEL(load)(g->tangent1[1]);
@@ -482,14 +602,15 @@ static void PHYS_KERNEL(solve)(PhysSolverBody *bodies, PhysContactLanes *g, Phys
 }
 
 // Restitution after the substeps: points that approached faster than the
-// threshold and carried load bounce with the pair's restitution.
+// threshold and carried load leave at the pair's restitution of that speed
+// (Box2D v3's). Points still a little apart count: the relax pass held their
+// approach to the gap, slowing them before they touched, and a ball left to
+// land on the next step came back at half its speed. One pass over a
+// manifold's points stops them one at a time, which spun boxes landing flat
+// (5 rad/s from half a metre); more sweeps over those lanes converge them.
 static void PHYS_KERNEL(restitution)(PhysSolverBody *bodies, PhysContactLanes *g,
                                      PhysPointLanes *points, f32 threshold)
 {
-    BodyLanes a;
-    BodyLanes b;
-    PHYS_KERNEL(gather)(bodies, g->body_a, false, &a);
-    PHYS_KERNEL(gather)(bodies, g->body_b, false, &b);
     const W8 zero = nph_f32x8_zero();
     const W8 ma = PHYS_KERNEL(load)(g->inv_mass_a);
     const W8 mb = PHYS_KERNEL(load)(g->inv_mass_b);
@@ -498,30 +619,49 @@ static void PHYS_KERNEL(restitution)(PhysSolverBody *bodies, PhysContactLanes *g
     const W8 nz = PHYS_KERNEL(load)(g->normal[2]);
     const W8 e = PHYS_KERNEL(load)(g->restitution);
     const W8 vthreshold = nph_f32x8_splat(-threshold);
+    W8 loaded[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    W8 bounced = zero;
     for (u32 k = 0U; k < g->point_count; ++k) {
-        PhysPointLanes *p = &points[k];
-        const W8 rel = PHYS_KERNEL(load)(p->relative_velocity);
-        const W8 active =
-            nph_f32x8_and(nph_f32x8_cmp_lt(rel, vthreshold),
-                          nph_f32x8_cmp_gt(PHYS_KERNEL(load)(p->max_normal_impulse), zero));
-        if (nph_f32x8_movemask(active) == 0U) {
-            continue;
+        loaded[k] = nph_f32x8_and(
+            nph_f32x8_cmp_lt(PHYS_KERNEL(load)(points[k].relative_velocity), vthreshold),
+            nph_f32x8_cmp_gt(PHYS_KERNEL(load)(points[k].max_normal_impulse), zero));
+        bounced = nph_f32x8_or(bounced, loaded[k]);
+    }
+    if (nph_f32x8_movemask(bounced) == 0U) {
+        return;
+    }
+    BodyLanes a;
+    BodyLanes b;
+    PHYS_KERNEL(gather)(bodies, g->body_a, false, &a);
+    PHYS_KERNEL(gather)(bodies, g->body_b, false, &b);
+    const u32 sweeps = g->point_count > 1U ? 1U + PHYS_IMPACT_SWEEPS : 1U;
+    for (u32 sweep = 0U; sweep < sweeps; ++sweep) {
+        for (u32 k = 0U; k < g->point_count; ++k) {
+            PhysPointLanes *p = &points[k];
+            if (nph_f32x8_movemask(loaded[k]) == 0U) {
+                continue;
+            }
+            W8 vx;
+            W8 vy;
+            W8 vz;
+            PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
+            const W8 vn = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+            const W8 rel = PHYS_KERNEL(load)(p->relative_velocity);
+            const W8 accumulated = PHYS_KERNEL(load)(p->normal_impulse);
+            const W8 impulse = nph_f32x8_neg(nph_f32x8_mul(
+                PHYS_KERNEL(load)(p->normal_mass), nph_f32x8_add(vn, nph_f32x8_mul(e, rel))));
+            const W8 total = nph_f32x8_max(nph_f32x8_add(accumulated, impulse), zero);
+            const W8 delta = nph_f32x8_select(loaded[k], nph_f32x8_sub(total, accumulated), zero);
+            nph_f32x8_store(p->normal_impulse, nph_f32x8_add(accumulated, delta));
+            nph_f32x8_store(p->max_normal_impulse,
+                            nph_f32x8_max(PHYS_KERNEL(load)(p->max_normal_impulse),
+                                          nph_f32x8_add(accumulated, delta)));
+            PHYS_KERNEL(apply)(&a, &b, ma, mb, delta, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
         }
-        W8 vx;
-        W8 vy;
-        W8 vz;
-        PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
-        const W8 vn = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
-        const W8 accumulated = PHYS_KERNEL(load)(p->normal_impulse);
-        const W8 impulse = nph_f32x8_neg(nph_f32x8_mul(PHYS_KERNEL(load)(p->normal_mass),
-                                                       nph_f32x8_add(vn, nph_f32x8_mul(e, rel))));
-        const W8 total = nph_f32x8_max(nph_f32x8_add(accumulated, impulse), zero);
-        const W8 delta = nph_f32x8_select(active, nph_f32x8_sub(total, accumulated), zero);
-        nph_f32x8_store(p->normal_impulse, nph_f32x8_add(accumulated, delta));
-        nph_f32x8_store(p->max_normal_impulse,
-                        nph_f32x8_max(PHYS_KERNEL(load)(p->max_normal_impulse),
-                                      nph_f32x8_add(accumulated, delta)));
-        PHYS_KERNEL(apply)(&a, &b, ma, mb, delta, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+    }
+    // A bounce is the step's alone, not the next step's warm start.
+    if (g->scale_hits != 0U) {
+        nph_f32x8_store(g->impacted, nph_f32x8_or(PHYS_KERNEL(load)(g->impacted), bounced));
     }
     PHYS_KERNEL(scatter)(bodies, g->body_a, g->write_mask_a, &a);
     PHYS_KERNEL(scatter)(bodies, g->body_b, g->write_mask_b, &b);
@@ -728,6 +868,34 @@ static void PHYS_KERNEL(xpbd_positions)(PhysSolverBody *bodies, const PhysSolver
         PHYS_KERNEL(move)(&a, &b, ma, mb, l1, t1x, t1y, t1z, p->ang_a_t1[0], p->ang_b_t1[0]);
         PHYS_KERNEL(move)(&a, &b, ma, mb, l2, t2x, t2y, t2z, p->ang_a_t2[0], p->ang_b_t2[0]);
     }
+    // An impact (a point approaching faster than PHYS_IMPACT_SPEED) moves
+    // the points out one at a time: the first moves the most, and the turn
+    // that leaves tipped boxes landing flat by 8 degrees from 10 m. More
+    // sweeps of the normal corrections, their multipliers accumulated and
+    // kept at or above zero, share it as the rows' coupling demands; resting
+    // and sliding lanes are left as they were.
+    if (g->point_count > 1U) {
+        const W8 impact = PHYS_KERNEL(load)(g->impact_lanes);
+        for (u32 sweep = 0U; sweep < PHYS_IMPACT_SWEEPS && nph_f32x8_movemask(impact) != 0U;
+             ++sweep) {
+            for (u32 k = 0U; k < g->point_count; ++k) {
+                PhysPointLanes *p = &points[k];
+                const W8 s = PHYS_KERNEL(separation)(&a, &b, p, nx, ny, nz);
+                const W8 accumulated = PHYS_KERNEL(load)(p->normal_impulse);
+                const W8 total = nph_f32x8_select(
+                    impact,
+                    nph_f32x8_max(nph_f32x8_sub(accumulated, nph_f32x8_mul(s, PHYS_KERNEL(load)(
+                                                                                  p->normal_mass))),
+                                  zero),
+                    accumulated);
+                nph_f32x8_store(p->normal_impulse, total);
+                nph_f32x8_store(p->max_normal_impulse,
+                                nph_f32x8_max(PHYS_KERNEL(load)(p->max_normal_impulse), total));
+                PHYS_KERNEL(move)(&a, &b, ma, mb, nph_f32x8_sub(total, accumulated), nx, ny, nz,
+                                  p->ang_a_n[0], p->ang_b_n[0]);
+            }
+        }
+    }
     PHYS_KERNEL(scatter_positions)(bodies, g->body_a, g->write_mask_a, &a);
     PHYS_KERNEL(scatter_positions)(bodies, g->body_b, g->write_mask_b, &b);
 }
@@ -760,6 +928,13 @@ static void PHYS_KERNEL(xpbd_velocities)(PhysSolverBody *bodies, PhysContactLane
     const W8 t2z = PHYS_KERNEL(load)(g->tangent2[2]);
     const W8 friction = PHYS_KERNEL(load)(g->friction);
     const W8 e = PHYS_KERNEL(load)(g->restitution);
+    // The friction each point took this pass, for the impact sweeps.
+    W8 took1[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    W8 took2[NPH_PHYSICS_MANIFOLD_MAX_POINTS];
+    for (u32 k = 0U; k < NPH_PHYSICS_MANIFOLD_MAX_POINTS; ++k) {
+        took1[k] = zero;
+        took2[k] = zero;
+    }
     for (u32 k = 0U; k < g->point_count; ++k) {
         PhysPointLanes *p = &points[k];
         const W8 lambda = PHYS_KERNEL(load)(p->normal_impulse);
@@ -785,6 +960,8 @@ static void PHYS_KERNEL(xpbd_velocities)(PhysSolverBody *bodies, PhysContactLane
             vt1, vt2, nph_f32x8_mul(nph_f32x8_mul(friction, lambda), vinv_h), &f1, &f2);
         f1 = nph_f32x8_select(active, f1, zero);
         f2 = nph_f32x8_select(active, f2, zero);
+        took1[k] = f1;
+        took2[k] = f2;
         PHYS_KERNEL(apply)(&a, &b, ma, mb, f1, t1x, t1y, t1z, p->ang_a_t1[0], p->ang_b_t1[0]);
         PHYS_KERNEL(apply)(&a, &b, ma, mb, f2, t2x, t2y, t2z, p->ang_a_t2[0], p->ang_b_t2[0]);
         // Restitution, from the normal speed after friction.
@@ -797,6 +974,56 @@ static void PHYS_KERNEL(xpbd_velocities)(PhysSolverBody *bodies, PhysContactLane
             active, nph_f32x8_mul(nph_f32x8_sub(bounce, vn), PHYS_KERNEL(load)(p->normal_mass)),
             zero);
         PHYS_KERNEL(apply)(&a, &b, ma, mb, dn, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+    }
+    // An impact's velocities come from positions moved one point at a time,
+    // and one pass of four rows each stopping its own point, its friction
+    // within mu times the hit's multiplier, spun a box landing flat about
+    // its vertical to 7 rad/s. More sweeps of friction (accumulated, within
+    // the cone) and the normal rows converge them; others are left alone.
+    if (g->point_count > 1U) {
+        const W8 impact = PHYS_KERNEL(load)(g->impact_lanes);
+        for (u32 sweep = 0U; sweep < PHYS_IMPACT_SWEEPS && nph_f32x8_movemask(impact) != 0U;
+             ++sweep) {
+            for (u32 k = 0U; k < g->point_count; ++k) {
+                PhysPointLanes *p = &points[k];
+                const W8 lambda = PHYS_KERNEL(load)(p->normal_impulse);
+                const W8 active = nph_f32x8_and(impact, nph_f32x8_cmp_gt(lambda, zero));
+                W8 vx;
+                W8 vy;
+                W8 vz;
+                PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
+                const W8 vt1 = PHYS_KERNEL(dot)(vx, vy, vz, t1x, t1y, t1z);
+                const W8 vt2 = PHYS_KERNEL(dot)(vx, vy, vz, t2x, t2y, t2z);
+                W8 new1 = nph_f32x8_sub(
+                    took1[k],
+                    nph_f32x8_add(nph_f32x8_mul(PHYS_KERNEL(load)(p->tangent_mass[0]), vt1),
+                                  nph_f32x8_mul(PHYS_KERNEL(load)(p->tangent_mass[1]), vt2)));
+                W8 new2 = nph_f32x8_sub(
+                    took2[k],
+                    nph_f32x8_add(nph_f32x8_mul(PHYS_KERNEL(load)(p->tangent_mass[1]), vt1),
+                                  nph_f32x8_mul(PHYS_KERNEL(load)(p->tangent_mass[2]), vt2)));
+                PHYS_KERNEL(friction_circle)(
+                    vt1, vt2, nph_f32x8_mul(nph_f32x8_mul(friction, lambda), vinv_h), &new1, &new2);
+                const W8 d1 = nph_f32x8_select(active, nph_f32x8_sub(new1, took1[k]), zero);
+                const W8 d2 = nph_f32x8_select(active, nph_f32x8_sub(new2, took2[k]), zero);
+                took1[k] = nph_f32x8_add(took1[k], d1);
+                took2[k] = nph_f32x8_add(took2[k], d2);
+                PHYS_KERNEL(apply)(&a, &b, ma, mb, d1, t1x, t1y, t1z, p->ang_a_t1[0],
+                                   p->ang_b_t1[0]);
+                PHYS_KERNEL(apply)(&a, &b, ma, mb, d2, t2x, t2y, t2z, p->ang_a_t2[0],
+                                   p->ang_b_t2[0]);
+                PHYS_KERNEL(relative_velocity)(&a, &b, p, &vx, &vy, &vz);
+                const W8 vn = PHYS_KERNEL(dot)(vx, vy, vz, nx, ny, nz);
+                const W8 before = PHYS_KERNEL(load)(p->substep_velocity);
+                const W8 bounce = nph_f32x8_select(nph_f32x8_cmp_lt(before, vthreshold),
+                                                   nph_f32x8_mul(nph_f32x8_neg(e), before), zero);
+                const W8 dn = nph_f32x8_select(
+                    active,
+                    nph_f32x8_mul(nph_f32x8_sub(bounce, vn), PHYS_KERNEL(load)(p->normal_mass)),
+                    zero);
+                PHYS_KERNEL(apply)(&a, &b, ma, mb, dn, nx, ny, nz, p->ang_a_n[0], p->ang_b_n[0]);
+            }
+        }
     }
     PHYS_KERNEL(scatter)(bodies, g->body_a, g->write_mask_a, &a);
     PHYS_KERNEL(scatter)(bodies, g->body_b, g->write_mask_b, &b);
