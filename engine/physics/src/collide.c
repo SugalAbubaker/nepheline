@@ -60,7 +60,8 @@ NphPhysicsSegmentDistance nph_physics_segment_distance(NphVec3 p1, NphVec3 q1, N
 }
 
 // ---------------------------------------------------------------------------
-// Manifold reduction (Gregorius, "Robust Contact Creation", GDC 2015)
+// Manifold reduction: Gregorius ("Robust Contact Creation for Physics
+// Simulations", GDC 2015), by catch angle
 // ---------------------------------------------------------------------------
 
 static f32 signed_area(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 normal)
@@ -68,10 +69,15 @@ static f32 signed_area(NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 normal)
     return nph_vec3_dot(nph_vec3_cross(nph_vec3_sub(b, a), nph_vec3_sub(c, a)), normal);
 }
 
-// Points within this of the deepest are as deep (a flat contact's points
-// differ by rounding).
-#define REDUCE_DEPTH_TIE (0.1F * NPH_PHYSICS_LINEAR_SLOP)
-#define REDUCE_TOUCH     NPH_PHYSICS_TOUCH_SEPARATION
+// Points within this of the deepest are as deep: they differ by rounding.
+#define REDUCE_LEVEL (0.002F * NPH_PHYSICS_LINEAR_SLOP)
+// Catch angles within this fraction of the least are as small.
+#define REDUCE_ANGLE_TIE 0.1F
+// Candidates nearer a line than this fraction of its length turn with it,
+// and never catch the shape turning about it; those nearer the deepest
+// than this (metres) are at its place.
+#define REDUCE_ON_LINE  1e-3F
+#define REDUCE_AT_POINT 1e-6F
 
 static f32 plane_distance_sq(NphVec3 a, NphVec3 b, NphVec3 normal)
 {
@@ -85,113 +91,184 @@ static void swap_points(NphPhysicsManifoldPoint *points, u32 i, u32 j)
     points[j] = t;
 }
 
+// An axis the shape may turn about on its contact's first points: the
+// deepest alone, or a line through it.
+typedef struct ReduceAxis {
+    NphVec3 origin;
+    NphVec3 across; // a line's: unit, in the contact plane, across it
+    NphVec3 normal;
+    bool about_point;
+    f32 side;    // a line's: +1 or -1, candidates on that side only; 0, either
+    f32 min_arm; // arms at most this cannot catch the turn
+} ReduceAxis;
+
+// A candidate's lever arm about the axis (squared about a point: a
+// distance, kept free of the square root), or none when it cannot catch
+// the turn.
+static f32 reduce_arm(const ReduceAxis *ax, NphVec3 p)
+{
+    const NphVec3 d = nph_vec3_sub(p, ax->origin);
+    f32 arm;
+    if (ax->about_point) {
+        arm = nph_vec3_length_sq(nph_vec3_reject(d, ax->normal));
+    } else {
+        const f32 a = nph_vec3_dot(d, ax->across);
+        arm = ax->side == 0.0F ? nph_f32_abs(a) : ax->side * a;
+    }
+    return arm > ax->min_arm ? arm : 0.0F;
+}
+
+// The candidate in points[from, end) that touches first as the shape turns
+// about the axis: the least catch angle, height above `level` over arm, and
+// of angles within REDUCE_ANGLE_TIE of it, the longest arm. A level
+// candidate (no height) has the least, and of several the longest arm is
+// found in the one pass, as a flat contact's points all are. Angles are
+// compared multiplied out (no division), squared about a point. `end` when
+// no candidate has an arm.
+static u32 catches_first(const NphPhysicsManifoldPoint *points, u32 from, u32 end, f32 level,
+                         const ReduceAxis *ax)
+{
+    u32 level_best = end;
+    f32 level_arm = 0.0F;
+    u32 least = end;
+    f32 least_height = 0.0F;
+    f32 least_arm = 0.0F;
+    for (u32 i = from; i < end; ++i) {
+        const f32 arm = reduce_arm(ax, points[i].point);
+        if (!(arm > 0.0F)) {
+            continue;
+        }
+        f32 height = points[i].separation - level;
+        if (!(height > 0.0F)) {
+            if (arm > level_arm) {
+                level_arm = arm;
+                level_best = i;
+            }
+            continue;
+        }
+        height = ax->about_point ? height * height : height;
+        if (least == end || height * least_arm < least_height * arm) {
+            least = i;
+            least_height = height;
+            least_arm = arm;
+        }
+    }
+    if (level_best != end || least == end) {
+        return level_best;
+    }
+    const f32 tie = ax->about_point ? (1.0F + REDUCE_ANGLE_TIE) * (1.0F + REDUCE_ANGLE_TIE)
+                                    : 1.0F + REDUCE_ANGLE_TIE;
+    u32 best = least;
+    f32 best_arm = least_arm;
+    for (u32 i = from; i < end; ++i) {
+        const f32 arm = reduce_arm(ax, points[i].point);
+        if (arm > best_arm) {
+            f32 height = points[i].separation - level;
+            height = ax->about_point ? height * height : height;
+            if (height * least_arm <= tie * least_height * arm) {
+                best_arm = arm;
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 u32 nph_physics_manifold_reduce(NphPhysicsManifoldPoint *points, u32 count, NphVec3 normal)
 {
     if (count <= NPH_PHYSICS_MANIFOLD_MAX_POINTS) {
         return count;
     }
     // Each point kept is swapped to the front: points[0, k) are kept and
-    // points[k, end) are the candidates.
+    // points[k, count) are the candidates.
     //
-    // The touching points stay before any speculative one: giving up a point
-    // that carries load for a far one only near the surface lets the shape
-    // rock (a box on a curved mesh rocked between two pairs of supports and
-    // never slept). With four or more touching, the choice is among them.
-    u32 touching = 0U;
-    for (u32 i = 0U; i < count; ++i) {
-        if (points[i].separation <= REDUCE_TOUCH) {
-            if (i != touching) {
-                swap_points(points, i, touching);
-            }
-            touching += 1U;
-        }
+    // Gregorius keeps the deepest point, the farthest from it, the one that
+    // makes the largest triangle with both, and the one farthest outside
+    // it: the most area for the points that touch. Points only near the
+    // surface matter as much: as the shape turns on the points that touch,
+    // the first a turn brings down is the one that catches it, and a point
+    // left out sinks unseen. Across a mesh's seams, points centimetres
+    // apart stand tenths of a millimetre apart from their triangles: a box
+    // rocking on a terrain kept the farther, sank 0.35 mm at the nearer
+    // every rock, and rocked for good. So after the deepest, each point is
+    // the one that touches first as the shape turns about those kept: the
+    // least catch angle, its height over its lever arm about the turn's
+    // axis, and of angles as small, the longest arm. Heights are taken
+    // above the touching points (above the deepest, when none touch), so
+    // touching points have none, and a flat contact keeps Gregorius's
+    // choice.
+    //
+    // 1. The deepest: of the points as deep, the one farthest from their
+    // centre in the contact plane: a corner of the contact, not a point
+    // inside it (a mesh's seams cross a box's face at its depth).
+    f32 deepest = points[0].separation;
+    NphVec3 centre = points[0].point;
+    for (u32 i = 1U; i < count; ++i) {
+        deepest = nph_f32_min(deepest, points[i].separation);
+        centre = nph_vec3_add(centre, points[i].point);
     }
-    u32 k = 0U;
-    u32 end = count;
-    if (touching >= NPH_PHYSICS_MANIFOLD_MAX_POINTS) {
-        end = touching;
-    } else {
-        k = touching;
-    }
-    // The rest in Gregorius's order (2015). Every step has a candidate:
-    // more than four points remain, or four or more touch.
-    // 1. The deepest: it carries the most load. Of the points as deep, the
-    // one farthest from their centre in the contact plane: a corner of the
-    // contact, not a point inside it (a mesh's seams cross a box's face at
-    // its depth).
-    if (k == 0U) {
-        f32 deepest = points[0].separation;
-        NphVec3 centre = points[0].point;
-        for (u32 i = 1U; i < end; ++i) {
-            deepest = nph_f32_min(deepest, points[i].separation);
-            centre = nph_vec3_add(centre, points[i].point);
-        }
-        centre = nph_vec3_scale(centre, 1.0F / (f32)end);
+    centre = nph_vec3_scale(centre, 1.0F / (f32)count);
+    {
         u32 best = 0U;
         f32 far = -1.0F;
-        for (u32 i = 0U; i < end; ++i) {
+        for (u32 i = 0U; i < count; ++i) {
             const f32 dd = plane_distance_sq(points[i].point, centre, normal);
-            if (points[i].separation <= deepest + REDUCE_DEPTH_TIE && dd > far) {
+            if (points[i].separation <= deepest + REDUCE_LEVEL && dd > far) {
                 far = dd;
                 best = i;
             }
         }
         swap_points(points, 0U, best);
-        k = 1U;
     }
-    // 2. The farthest from it in the contact plane.
-    if (k == 1U) {
-        const NphVec3 p0 = points[0].point;
-        u32 best = 1U;
-        f32 far = -1.0F;
-        for (u32 i = 1U; i < end; ++i) {
-            const f32 dd = plane_distance_sq(points[i].point, p0, normal);
-            if (dd > far) {
-                far = dd;
-                best = i;
-            }
-        }
-        swap_points(points, 1U, best);
-        k = 2U;
-    }
-    // 3. The largest triangle with both. Points along a line (a capsule or
-    // a box's edge lying across a mesh's triangles) make none: the line's
-    // two ends are the contact.
-    if (k == 2U) {
-        const NphVec3 p0 = points[0].point;
-        const NphVec3 p1 = points[1].point;
-        u32 best = 2U;
-        f32 best_area = -1.0F;
-        for (u32 i = 2U; i < end; ++i) {
-            const f32 a = nph_f32_abs(signed_area(p0, p1, points[i].point, normal));
-            if (a > best_area) {
-                best_area = a;
-                best = i;
-            }
-        }
-        if (best_area <= 1e-3F * plane_distance_sq(p0, p1, normal)) {
-            return 2U;
-        }
-        swap_points(points, 2U, best);
-    }
-    // 4. The point farthest outside that triangle: it adds the most area.
+    // The level the others' heights are taken from: every touching point
+    // is on it, already caught.
+    const f32 level = nph_f32_max(deepest, 0.0F) + REDUCE_LEVEL;
     const NphVec3 p0 = points[0].point;
+    // 2. The first to touch as the shape turns about the deepest: with other
+    // points level, the farthest of them (the contact's line); else the
+    // one it would tip onto. Points all at the deepest's place are one.
+    ReduceAxis ax = {p0, nph_vec3_zero(), normal, true, 0.0F, REDUCE_AT_POINT * REDUCE_AT_POINT};
+    const u32 second = catches_first(points, 1U, count, level, &ax);
+    if (second == count) {
+        return 1U;
+    }
+    swap_points(points, 1U, second);
+    // 3. The first to touch as it turns about the line through the two, on
+    // either side. Points along the line (a capsule or a box's edge lying
+    // across a mesh's triangles) turn with it: the line's two ends are the
+    // contact.
     const NphVec3 p1 = points[1].point;
+    const NphVec3 line = nph_vec3_reject(nph_vec3_sub(p1, p0), normal);
+    const f32 line_length = nph_vec3_length(line);
+    ax.about_point = false;
+    ax.across = nph_vec3_scale(nph_vec3_cross(normal, line), 1.0F / line_length);
+    ax.min_arm = REDUCE_ON_LINE * line_length;
+    const u32 third = catches_first(points, 2U, count, level, &ax);
+    if (third == count) {
+        return 2U;
+    }
+    swap_points(points, 2U, third);
+    // 4. The first to touch on the line's other side; with none there, the
+    // point farthest outside the three's triangle: it adds the most area.
     const NphVec3 p2 = points[2].point;
-    const f32 sign = signed_area(p0, p1, p2, normal) < 0.0F ? -1.0F : 1.0F;
-    u32 best = 3U;
-    f32 best_out = -FLT_MAX;
-    for (u32 i = 3U; i < end; ++i) {
-        const NphVec3 p = points[i].point;
-        const f32 out = -nph_f32_min3(sign * signed_area(p0, p1, p, normal),
-                                      sign * signed_area(p1, p2, p, normal),
-                                      sign * signed_area(p2, p0, p, normal));
-        if (out > best_out) {
-            best_out = out;
-            best = i;
+    ax.side = nph_vec3_dot(nph_vec3_sub(p2, p0), ax.across) < 0.0F ? 1.0F : -1.0F;
+    u32 fourth = catches_first(points, 3U, count, level, &ax);
+    if (fourth == count) {
+        const f32 sign = signed_area(p0, p1, p2, normal) < 0.0F ? -1.0F : 1.0F;
+        f32 best_out = -FLT_MAX;
+        fourth = 3U;
+        for (u32 i = 3U; i < count; ++i) {
+            const NphVec3 p = points[i].point;
+            const f32 out = -nph_f32_min3(sign * signed_area(p0, p1, p, normal),
+                                          sign * signed_area(p1, p2, p, normal),
+                                          sign * signed_area(p2, p0, p, normal));
+            if (out > best_out) {
+                best_out = out;
+                fourth = i;
+            }
         }
     }
-    swap_points(points, 3U, best);
+    swap_points(points, 3U, fourth);
     return 4U;
 }
 

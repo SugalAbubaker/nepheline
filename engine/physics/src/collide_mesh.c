@@ -680,26 +680,47 @@ static const f32 k_compact[8][2] = {
     {-1.0F, 0.0F}, {-0.70710678F, -0.70710678F}, {0.0F, -1.0F}, {0.70710678F, -0.70710678F},
 };
 
+// A full cluster keeps this many of its nearest points.
+#define COMPACT_NEAREST 8U
+
 // Compacts a full cluster to the points the final reduction can want, in
-// their order: the deepest; of the touching points, the farthest along
-// eight directions in the contact plane; of the speculative ones, along
-// four. Reducing to four as it fills would lose corners for good (four of
-// the first sixteen points need not hold a corner of the whole contact: a
-// box over a fine mesh brings dozens), and keeping extremes alone, touching
-// or not, gave a supporting point's place to a far speculative one.
+// their order: the nearest the surface; of the touching points, the
+// farthest along eight directions in the contact plane; of the speculative
+// ones, along four. Reducing to four as it fills would lose corners for
+// good (four of the first sixteen points need not hold a corner of the
+// whole contact: a box over a fine mesh brings dozens). Keeping extremes
+// alone, touching or not, gave a supporting point's place to a far
+// speculative one; and a box's edge across a ridge brings points in a
+// line, whose middle is no extreme but may be the first to touch as the
+// box turns.
 static void cluster_compact(Cluster *c)
 {
     const NphVec3 t1 = nph_vec3_perpendicular(c->normal);
     const NphVec3 t2 = nph_vec3_cross(c->normal, t1);
     bool keep[CLUSTER_POINTS];
-    u32 deepest = 0U;
     for (u32 i = 0U; i < c->count; ++i) {
         keep[i] = false;
-        if (c->points[i].separation < c->points[deepest].separation) {
-            deepest = i;
-        }
     }
-    keep[deepest] = true;
+    // The nearest, in one pass: each point inserted into the short list,
+    // nearest first (of equals, the first).
+    u32 nearest[COMPACT_NEAREST];
+    u32 near_count = 0U;
+    for (u32 i = 0U; i < c->count; ++i) {
+        const f32 s = c->points[i].separation;
+        if (near_count == COMPACT_NEAREST &&
+            !(s < c->points[nearest[COMPACT_NEAREST - 1U]].separation)) {
+            continue;
+        }
+        u32 j = near_count < COMPACT_NEAREST ? near_count++ : COMPACT_NEAREST - 1U;
+        while (j > 0U && s < c->points[nearest[j - 1U]].separation) {
+            nearest[j] = nearest[j - 1U];
+            j -= 1U;
+        }
+        nearest[j] = i;
+    }
+    for (u32 k = 0U; k < near_count; ++k) {
+        keep[nearest[k]] = true;
+    }
     for (u32 pass = 0U; pass < 2U; ++pass) {
         const bool touching = pass == 0U;
         for (u32 k = 0U; k < 8U; k += touching ? 1U : 2U) {

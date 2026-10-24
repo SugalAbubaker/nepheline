@@ -202,17 +202,24 @@ the edge pair separates by half a slop more: a tie must not flip between
 steps. A face contact clips the incident face (the other polyhedron's face
 most anti-parallel to the reference normal) against the side planes of the
 reference face (Sutherland and Hodgman 1974), keeps the points within the
-speculative distance, and reduces them to four (Gregorius, "Robust Contact
-Creation for Physics Simulations", GDC 2015): the deepest (of points as
-deep, the one farthest from their centre: a corner, not a point inside the
-contact), the farthest from it, the one that makes the largest triangle
-with both, and the one farthest outside that triangle; points along a line
-keep its two ends. Points that touch (within a tenth of a slop) come
-before speculative ones: fewer than four are all kept and the rest chosen
-from the others, and four or more are the only candidates. Trading a
-supporting point for one merely near the surface let a box on a curved
-mesh rock between two pairs of supports and never sleep. An edge pair
-gives one point, from the closest points of the two edges.
+speculative distance, and reduces them to four, after Gregorius ("Robust
+Contact Creation for Physics Simulations", GDC 2015) but by catch angle:
+the deepest (of points as deep, the one farthest from their centre: a
+corner, not a point inside the contact), then each the point that touches
+first as the shape turns about those kept: about the deepest, about the
+line through the first two, and on that line's other side (with none
+there, the point farthest outside the three's triangle). A point's catch
+angle is its height above the touching points (above the deepest, when
+none touch) over its lever arm about the turn's axis; the least wins, and
+of angles within a tenth of it, the longest arm. Touching points have no
+height, so a flat contact keeps Gregorius's choice, the most area, and
+points along a line keep its two ends. Area alone kept, of two points
+centimetres apart across a mesh's seam, the one a few tenths of a
+millimetre farther from its triangle: the nearer sank 0.35 mm unseen each
+time a box rocked onto it, and boxes rocked on a terrain for good (in two
+of thirty scenes of forty boxes dropped on it; in none of sixty scenes
+since). An edge pair gives one point, from the closest points of the two
+edges.
 
 **Apart, GJK decides.** When the shapes are separated by more than a slop,
 the axis test only bounds the gap from below (two corners approaching each
@@ -339,16 +346,17 @@ members' average, each weighted by its depth: the deepest member's normal
 alone flipped between neighbouring triangles' from step to step on curved
 ground, and rocked boxes that never slept. Copies of a point from
 triangles either side of a seam (within 0.1 mm) are one point; a cluster
-gathers up to 32 and is compacted to its deepest, the extremes of its
-touching points along eight directions, and those of its speculative
-points along four. Each cluster is then reduced to four points (touching
-points first, as every manifold is), a sphere keeping one point under its
-centre and a capsule its deepest point and its ends along its axis (of its
-touching points, then of all: its contact is a segment, however many
-triangles cut it, and four points in a line came over a heightfield's
-uniform diagonals); the four clusters with the deepest points are the
-pair's, the deepest first. Point ids mix the triangle's index with its
-features.
+gathers up to 32 and is compacted to its eight nearest the surface, the
+extremes of its touching points along eight directions, and those of its
+speculative points along four: a box's edge across a ridge brings points
+in a line, whose middle is no extreme but may be the first to touch. Each
+cluster is then reduced to four points (by catch angle, as every manifold
+is), a sphere keeping one point under its centre and a capsule its deepest
+point and its ends along its axis (of its touching points, then of all:
+its contact is a segment, however many triangles cut it, and four points
+in a line came over a heightfield's uniform diagonals); the four clusters
+with the deepest points are the pair's, the deepest first. Point ids mix
+the triangle's index with its features.
 
 **In the world** a mesh goes on a static or a kinematic body (shape
 creation refuses a dynamic one: a surface has no mass); a kinematic mesh is
@@ -1111,7 +1119,7 @@ is the point; world query rows are per query):
 | `collide_capsules` | 50 |
 | `collide_box_sphere` | 28 |
 | `collide_box_box_random` (overlapping, random poses) | 291 |
-| `collide_box_box_resting` (four points from an octagon) | 474 |
+| `collide_box_box_resting` (four points from an octagon) | 494 |
 | `collide_box_box_cached_apart` | 56 |
 | `collide_hull_hull_32v` | 9 260 |
 | `collide_hull_capsule_32v` | 720 |
@@ -1126,12 +1134,12 @@ is the point; world query rows are per query):
 | `mesh_build_grid_128` (32 768 triangles, per triangle) | 692 |
 | `mesh_raycast_grid_128` (closest hit, down onto the grid) | 145 |
 | `mesh_overlap_grid_128` (the triangles under a 1 m box) | 152 |
-| `collide_mesh_box` (a box resting on 0.5 m cells, anywhere, turned any way) | 8 190 |
+| `collide_mesh_box` (a box resting on 0.5 m cells, anywhere, turned any way) | 8 270 |
 | `collide_mesh_sphere` / `_capsule` / `_hull_32v` (the same) | 639 / 1 810 / 25 000 |
 | `heightfield_build_256` (257 × 257 samples, per cell) | 168 |
 | `heightfield_raycast_256` / `_long` (down onto it / 100 m across it) | 121 / 409 |
 | `heightfield_overlap_256` (the triangles under a 1 m box) | 75 |
-| `collide_heightfield_box` / `_sphere` / `_capsule` / `_hull_32v` (flat, 0.5 m cells) | 7 880 / 667 / 1 810 / 23 400 |
+| `collide_heightfield_box` / `_sphere` / `_capsule` / `_hull_32v` (flat, 0.5 m cells) | 8 100 / 667 / 1 810 / 23 400 |
 | `raycast_sphere` / `_capsule` / `_box` / `_hull_32v` (from 3 to 6 m out, about half hit) | 44 / 48 / 27 / 107 |
 | `shape_cast_sphere_box` / `_capsule_box` / `_capsule_capsule` | 881 / 1 130 / 845 |
 | `shape_cast_box_box` / `_hull_hull_32v` | 2 360 / 5 330 |
@@ -1189,7 +1197,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (208 tests):
+`physics_tests` (210 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1209,7 +1217,9 @@ reference CPU class.
   against the box hull (same topology, same results), argument order,
   geometric soundness on random hull pairs (each point's surface points lie
   on or in both shapes) and on 100-vertex hulls (the scalar path), id
-  persistence under small motion, the cache, and the reduction.
+  persistence under small motion, the cache, and the reduction (the most
+  area for a flat contact; on a ridge, the points either side that touch
+  first).
 - Meshes (`test_mesh.c`): a square's flat diagonal, welding, degenerate
   triangles dropped, bad descriptions refused, active edges at convex
   corners and open edges, a large grid's shallow valid tree, overlaps and
@@ -1235,7 +1245,9 @@ reference CPU class.
   own manifold; a kinematic platform carrying a box; events once per pair;
   a pile on a terrain keeping the invariants, its course on 0 to 8
   workers, and nothing under the surface; boxes coming to rest on a
-  terrain; and the same motion with the mesh, or the world, far from its
+  terrain, every one asleep; four boxes that once rocked on it for good,
+  each placed alone where it rocked, at rest and moving, asleep within
+  10 s; and the same motion with the mesh, or the world, far from its
   origin.
 - Heightfields (`test_heightfield.c`): the grid's layout and triangles,
   refused descriptions, active edges at borders, holes' rims, and convex
