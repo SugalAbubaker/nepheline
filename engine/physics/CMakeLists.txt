@@ -10,6 +10,7 @@ nph_add_module(physics
         src/aabb_tree.c
         src/body.c
         src/cast.c
+        src/character.c
         src/collide.c
         src/collide_hull.c
         src/collide_mesh.c
@@ -44,6 +45,7 @@ nph_add_test(physics
     SOURCES
         tests/test_aabb_tree.c
         tests/test_cast.c
+        tests/test_character.c
         tests/test_collide.c
         tests/test_collide_mesh.c
         tests/test_continuous.c

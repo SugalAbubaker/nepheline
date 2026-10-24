@@ -62,9 +62,17 @@
 //                                heightfield among rocks: its contacts
 //   world_terrain_cast_capsule   the same capsule cast a step along the
 //                                ground (5 cm, and 1 cm down)
+//
+// The character controller (character.h), per move:
+//
+//   character_walk_terrain       64 characters (the terrain rows' capsule)
+//                                walking at 1.5 m/s over the rocky
+//                                heightfield, a move a frame (240 Hz)
+//   character_walk_flat          the same on a flat floor
 
 #include <nepheline/math/random.h>
 #include <nepheline/physics/aabb_tree.h>
+#include <nepheline/physics/character.h>
 #include <nepheline/physics/collide.h>
 #include <nepheline/physics/heightfield.h>
 #include <nepheline/physics/hull.h>
@@ -1967,4 +1975,96 @@ NBENCH(world_terrain_cast_capsule)
         }
     }
     terrain_end(&t);
+}
+
+// ---------------------------------------------------------------------------
+// The character controller (character.h), per move
+// ---------------------------------------------------------------------------
+
+// Characters (capsules of a 0.5 m core and a 0.3 m radius) walking at
+// 1.5 m/s, a move a frame, each turning back at the edges of a 56 m square.
+typedef struct Walkers {
+    NphPhysicsCharacterDesc desc;
+    NphPhysicsCharacter c[PAIRS];
+    NphVec3 v[PAIRS];
+    f32 fall[PAIRS];
+} Walkers;
+
+static bool walkers_begin(Walkers *k, const NphPhysicsWorld *w, const NphDVec3 *at)
+{
+    k->desc = nph_physics_character_desc_default(nph_physics_geometry_capsule(0.5F, 0.3F));
+    NphPcg32 r = bench_rng(56U);
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const f32 a = nph_pcg32_next_f32(&r) * 6.2831853F;
+        k->v[i] = nph_vec3(1.5F * nph_f32_cos(a), 0.0F, 1.5F * nph_f32_sin(a));
+        k->fall[i] = 0.0F;
+        if (nph_physics_character_init(w, &k->desc, at[i], nph_quat_identity(), &k->c[i]) !=
+            NPH_RESULT_OK) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void walkers_frame(Walkers *k, const NphPhysicsWorld *w)
+{
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        NphPhysicsCharacter *c = &k->c[i];
+        k->fall[i] =
+            c->ground == NPH_PHYSICS_CHARACTER_WALKABLE ? 0.0F : k->fall[i] - 9.81F * WORLD_DT;
+        if (nph_f64_abs(c->position.x) > 28.0 && (c->position.x > 0.0) == (k->v[i].x > 0.0F)) {
+            k->v[i].x = -k->v[i].x;
+        }
+        if (nph_f64_abs(c->position.z) > 28.0 && (c->position.z > 0.0) == (k->v[i].z > 0.0F)) {
+            k->v[i].z = -k->v[i].z;
+        }
+        const NphVec3 d = nph_vec3_scale(nph_vec3(k->v[i].x, k->fall[i], k->v[i].z), WORLD_DT);
+        NPH_IGNORE_RESULT(nph_physics_character_move(w, &k->desc, c, d, NULL, 0U, NULL));
+    }
+}
+
+static void bench_walkers(NbenchState *state, const NphPhysicsWorld *w, const NphDVec3 *at)
+{
+    Walkers k;
+    if (!walkers_begin(&k, w, at)) {
+        return;
+    }
+    walkers_frame(&k, w);
+    nbench_set_items_per_iteration(state, PAIRS);
+    while (nbench_keep_running(state)) {
+        walkers_frame(&k, w);
+    }
+}
+
+NBENCH(character_walk_terrain)
+{
+    Terrain t;
+    if (terrain_begin(&t)) {
+        // The terrain rows' capsule places, a skin above the ground.
+        NphDVec3 at[PAIRS];
+        for (u32 i = 0U; i < PAIRS; ++i) {
+            at[i] =
+                nph_dvec3(t.at[i].x, t.at[i].y + 0.002 + (f64)NPH_PHYSICS_LINEAR_SLOP, t.at[i].z);
+        }
+        bench_walkers(state, t.w, at);
+    }
+    terrain_end(&t);
+}
+
+NBENCH(character_walk_flat)
+{
+    NphPhysicsWorld *w = bench_world(true, k_soft);
+    if (w == NULL) {
+        return;
+    }
+    bench_ground(w, 40.0F);
+    NphPcg32 r = bench_rng(57U);
+    NphDVec3 at[PAIRS];
+    for (u32 i = 0U; i < PAIRS; ++i) {
+        const f32 x = nph_pcg32_next_range_f32(&r, -28.0F, 28.0F);
+        const f32 z = nph_pcg32_next_range_f32(&r, -28.0F, 28.0F);
+        at[i] = nph_dvec3((f64)x, 0.8 + (f64)NPH_PHYSICS_LINEAR_SLOP, (f64)z);
+    }
+    bench_walkers(state, w, at);
+    nph_physics_world_destroy(w);
 }

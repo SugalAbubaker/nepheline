@@ -294,6 +294,16 @@ bool nph_physics_shape_cast(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, 
                             const NphPhysicsGeometry *b, NphPhysicsPose pose_b,
                             NphPhysicsCastHit *out);
 
+// As nph_physics_shape_cast, with `a` rounded by `margin` (metres, >= 0:
+// every point within the margin of `a` taken as part of it): the cast stops
+// where `a` comes within the margin of `b` (to the 0.1 mm touch), measured
+// along the true closest direction, whatever the shapes, and "touching" is
+// being within the margin. A mover that keeps a skin off what it meets
+// (character.h) casts with its skin. The hit's point is on `b`'s surface.
+bool nph_physics_shape_cast_margin(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                                   NphVec3 translation, f32 margin, const NphPhysicsGeometry *b,
+                                   NphPhysicsPose pose_b, NphPhysicsCastHit *out);
+
 // True when convex `a` at `pose_a` touches or overlaps `b` at `pose_b`: GJK
 // on convex geometry (radii included); a mesh or a heightfield overlaps
 // what touches one of its triangles, from either side (not what lies

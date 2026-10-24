@@ -271,6 +271,9 @@ world_overlap_sphere_10k       455
 world_overlap_aabb_10k         365
 world_terrain_collide_capsule  5150
 world_terrain_cast_capsule     7000
+# The character controller, per move (2.1 and 13.1 us measured).
+character_walk_flat            6000
+character_walk_terrain         35000
 # World rows are per 240 Hz step. The _mt rows spin helper threads on the
 # job system: 5x, as the hosted runners have fewer cores.
 world_pyramid_20_st            1110000

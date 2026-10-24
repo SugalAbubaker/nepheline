@@ -624,6 +624,59 @@ typedef struct Count {
     u32 n;
 } Count;
 
+// A capsule cast down onto a box step's edge (the step turned about the up
+// axis, at `origin`): the hit's normal leans between the step's top and its
+// riser; the surface's normal there is the top's, or asked for the riser's
+// way, the riser's.
+static void step_edge_normals(NphDVec3 origin, NphVec3 *hit_normal, NphVec3 *top, NphVec3 *riser)
+{
+    Scene s;
+    scene_begin(&s);
+    const NphQuat turn = nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.4F);
+    // The step's riser through the origin (turned), its top 0.25 m up.
+    const NphVec3 centre = nph_quat_rotate(turn, nph_vec3(1.0F, 0.125F, 0.0F));
+    add_body(s.w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_add_vec3(origin, centre), turn,
+             nph_physics_geometry_box(nph_vec3(1.0F, 0.125F, 1.0F)), 0.6F, 0.0F);
+    // The capsule's bottom 0.2 m behind the riser's line, high above it.
+    const NphPhysicsGeometry pill = nph_physics_geometry_capsule(0.6F, 0.3F);
+    const NphVec3 from = nph_quat_rotate(turn, nph_vec3(-0.2F, 2.0F, 0.0F));
+    NphPhysicsQueryHit hit;
+    NTEST_ASSERT_TRUE(nph_physics_world_cast_shape_closest(
+        s.w, &pill, nph_dvec3_add_vec3(origin, from), nph_quat_identity(),
+        nph_vec3(0.0F, -2.0F, 0.0F), NULL, &hit));
+    *hit_normal = nph_quat_rotate_inverse(turn, hit.normal);
+    *top = nph_quat_rotate_inverse(turn, nph_physics_world_surface_normal(s.w, hit.shape, hit.point,
+                                                                          hit.triangle,
+                                                                          nph_vec3_unit_y()));
+    *riser = nph_quat_rotate_inverse(
+        turn, nph_physics_world_surface_normal(s.w, hit.shape, hit.point, hit.triangle,
+                                               nph_quat_rotate(turn, nph_vec3(-1.0F, 0.0F, 0.0F))));
+    scene_end(&s);
+}
+
+NTEST(query, surface_normals_where_a_cast_meets_an_edge)
+{
+    NphVec3 hit;
+    NphVec3 top;
+    NphVec3 riser;
+    step_edge_normals(nph_dvec3_zero(), &hit, &top, &riser);
+    NTEST_LOG("on the step's edge: the hit's normal (%.3f %.3f %.3f)", (f64)hit.x, (f64)hit.y,
+              (f64)hit.z);
+    // The capsule's round bottom meets the edge 0.2 m from its axis: a
+    // slant, 42 degrees from up.
+    NTEST_EXPECT_NEAR_F32(hit.y, 0.7453560F, 1e-3F);
+    NTEST_EXPECT_TRUE(nph_vec3_near(top, nph_vec3_unit_y(), 1e-5F));
+    NTEST_EXPECT_TRUE(nph_vec3_near(riser, nph_vec3(-1.0F, 0.0F, 0.0F), 1e-5F));
+    // 10 000 km out: the same.
+    NphVec3 hit_far;
+    NphVec3 top_far;
+    NphVec3 riser_far;
+    step_edge_normals(nph_dvec3(1e7, 3e3, -1e7), &hit_far, &top_far, &riser_far);
+    NTEST_EXPECT_TRUE(nph_vec3_near(hit_far, hit, 1e-4F));
+    NTEST_EXPECT_TRUE(nph_vec3_near(top_far, top, 1e-5F));
+    NTEST_EXPECT_TRUE(nph_vec3_near(riser_far, riser, 1e-5F));
+}
+
 static bool count_shape(void *user, NphPhysicsShape shape, NphPhysicsBody body)
 {
     NPH_UNUSED(shape);

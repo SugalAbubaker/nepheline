@@ -11,9 +11,10 @@ collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
 solver), [ADR-0044](adr/0044-physics-joints.md) (joints),
 [ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison),
 [ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
-heightfields), [ADR-0047](adr/0047-physics-queries.md) (queries), and
+heightfields), [ADR-0047](adr/0047-physics-queries.md) (queries),
 [ADR-0048](adr/0048-physics-continuous-collision.md) (continuous collision,
-and impacts).
+and impacts), and [ADR-0049](adr/0049-physics-character-controller.md)
+(the character controller).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -28,7 +29,8 @@ Phase 11 builds it in parts. This document describes what exists:
 | Heightfields: the grid, its builder and queries, collision as a mesh's; compounds (bodies with several shapes) | done |
 | Queries: rays, shape casts, overlaps, and contacts, against one geometry and a world | done |
 | Continuous collision: fast bodies and bullets swept; impacts that land flat | done |
-| The character controller, the runtime bridge | to come |
+| The character controller: walls, corners, slopes, steps, stairs, ledges, surfaces, platforms, pushing | done |
+| The runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -39,7 +41,8 @@ Phase 11 builds it in parts. This document describes what exists:
 | `heightfield.h` | the heightfield block, its builder (active edges, block heights), box overlaps, raycasts, and heights |
 | `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction, ray and shape casts, overlaps |
 | `aabb_tree.h` | the dynamic AABB tree: box queries, raycasts, box casts |
-| `query.h` | world queries: raycasts, shape casts, overlaps, contacts, filters |
+| `query.h` | world queries: raycasts, shape casts (with a margin), overlaps, contacts, filters, surface normals |
+| `character.h` | the character controller: a convex shape moved by queries alone |
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
 | `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
@@ -337,6 +340,18 @@ the triangle's rules:
   place. A contact remade deeper than the axis test found, by more than a
   slop, is dropped: a box straddling a platform's plane beside its open
   edge would otherwise be lifted onto it.
+- **Gentle ridges.** Over a convex crease too gentle to be active, a
+  ball's centre or a capsule's core lies beyond both triangles' edges
+  along each one's normal, by up to half its height over the plane times
+  the sine of the crease's angle, and neither triangle kept it: a shape
+  cast straight down onto such a ridge went through it, and a character
+  walking a rippled terrain lost its footing there. Across inactive edges,
+  a round shape's "over the face" reaches 0.087 of its height further
+  (half the sine of 10 degrees, twice the builders' default angle), so one
+  side or both keep it. (A box's or a hull's face is clipped to the
+  triangle, and the half over it stays.) A mesh built with an inactive
+  angle above 10 degrees can still leave a ball directly over its ridges
+  without a contact.
 
 **A mesh's manifolds** (`nph_physics_collide_mesh`). The triangles under the
 shape's box, grown by the speculative distance, each give a contact. A
@@ -990,16 +1005,38 @@ point is on the target's surface and its normal the target's there:
 - for a mesh's or heightfield's triangle, the contact rules' (ADR-0046 §5:
   one side, the face's normal on an inactive edge, nothing beside it), so a
   shape crossing a flat seam is not stopped by the next triangle's edge.
-  Each triangle under the swept box is cast in the start's frame (vertices
-  moved there in 64 bits); a triangle whose plane the shape does not reach
-  before the nearest hit so far is skipped, and the walk ends at a hit at
-  fraction 0.
+  The rules' normal judges the motion, and the shape must also be coming
+  nearer the triangle itself, along GJK's normal where it arrived: its gap
+  to a triangle along a straight motion is convex, so leaving it there it
+  never meets it. (Beyond a gentle ridge a face's plane rises above the far
+  side, and a character walking off a bump in a mesh met the planes of the
+  triangles behind it.) Each triangle under the swept box is cast in the
+  start's frame (vertices moved there in 64 bits); a triangle whose plane
+  the shape does not reach before the nearest hit so far is skipped, and
+  the walk ends at a hit at fraction 0.
 
 A shape already touching or overlapping another stops a cast at fraction 0
 only if the motion goes into the contact (by more than 1e-5 of its length:
 a motion projected onto a contact is off it by rounding), its normal then
 the narrow phase's (defined at any depth): a body resting on a floor casts
 along it freely, and stops at once when cast into it.
+
+**Margins** (`nph_physics_shape_cast_margin`,
+`nph_physics_world_cast_shape_margin_closest`): the moving shape rounded
+by a margin, its GJK proxy's radius grown by it, so the cast stops where the
+shape comes within the margin of the other, measured along the true
+closest direction for every kind of pair (to the touch: 0.8 µm at worst
+over 480 random pairs), and "touching" is being within the margin. A
+character keeps a skin off what it meets by casting with the skin.
+
+**Surface normals** (`nph_physics_geometry_surface_normal`,
+`nph_physics_world_surface_normal`): the normal of a shape's own surface at
+a hit's point. A cast's normal is the direction the two shapes part in, and
+at an edge it points between the faces there by where the other shape
+meets it (a capsule's round bottom on a step's edge meets it at a slant);
+this is the surface: a sphere's and a capsule's radius, the face a box's or
+a hull's point is on and, where faces meet, the one nearest the way asked
+(the step's top, asked for up), a mesh's or a heightfield's triangle's.
 
 **Overlaps** (`nph_physics_overlap`): GJK with radii between convex
 shapes; a mesh or a heightfield overlaps what touches one of its
@@ -1106,6 +1143,88 @@ learns whether a target is a bullet from the target's solver record, not
 its flags, which that body's own sweep writes meanwhile. The statistics count the step's
 sweeps (`swept_bodies`) and set-backs (`impact_bodies`).
 
+## The character controller
+
+A character (`character.h`, [ADR-0049](adr/0049-physics-character-controller.md))
+is a convex shape the game moves by a displacement a frame (its velocity
+times the time step, gravity included). It is not a body: the world does
+not know it, and a move only queries the world, so it allocates nothing,
+locks nothing, and any number of characters move at once, on any threads,
+between steps. The scheme is Box2D v3.1's mover and Unreal's walking
+movement, in 3D: Quake's slide, Jolt's surface normals for what a
+character stands on, and casts that keep a skin (5 mm by default) off
+everything. A move:
+
+1. **Slides.** The shape, rounded by its skin, is cast along what is left
+   of the displacement, up to `iterations` (4) times: each cast stops
+   exactly a skin off what it meets, along the true closest direction,
+   whatever the shapes (`nph_physics_world_cast_shape_margin_closest`), and
+   the motion keeps its part along the surfaces met: one, along it; two,
+   along their crease; three, none (Quake's PM_SlideMove). A plane within
+   10 degrees of one met before is that one again: a curved wall's facets
+   make no crease.
+2. **Walks**, when on walkable ground and not moving up. Only the
+   displacement's part across the up axis is the walk, and it goes along
+   the ground from the start (raised onto the ground's plane, as Unreal's
+   walk along the floor goes): what pulls the character down is the
+   snap's, so on a walkable slope it stands still, and never bobs by its
+   skin on flat ground. Ground rising ahead raises the walk over every
+   ground plane met, its pace across kept; a bump's other faces, met where
+   it stands, take no iteration. A slope steeper than `max_slope` (45
+   degrees) is a wall, its normal laid level, so the walk goes along its
+   foot. A wall is climbed if it is a step: up by the step height (0.3 m)
+   as far as a ceiling lets it, forward by the walk, and down onto ground to
+   stand on that is no lower than where the wall was met (beside a wall the
+   way down finds the same floor), no higher than the step height above
+   the feet, and no higher than the rise (under a low ceiling the
+   character would perch on the step's edge). Then the character snaps down
+   onto ground to stand on within `snap_distance` (0.3 m): it walks down
+   stairs and slopes on the ground.
+3. **Pushes out** of anything nearer than the skin (what moved into it,
+   and a corner narrower than a right angle, where each wall the slide met
+   left it a skin off along that wall's own normal), along the contacts'
+   normals, solved together as Box2D's b2SolvePlanes does: sweeps over
+   each plane's push, which stays at least nothing but may shrink when a
+   later plane makes it too large.
+4. **Finds the ground**: the snap's, or a short cast down: walkable, too
+   steep (the character slides down it), or none, with its normal, point,
+   body, and the body's velocity there (a platform's: the game adds it to
+   the next displacement to ride along).
+
+**Standing on.** Ground is walkable when the contact's normal is no
+steeper than the slope limit, or the surface's own normal is
+(`nph_physics_world_surface_normal`, asked for up): a capsule's round
+bottom meets a 0.25 m step's edge 79 degrees from up, though the step's top
+is level, so the character perches on the edge while it climbs it or walks
+off it, as Unreal's walkers do. Judged by the contact's normal alone, a
+character walking down stairs was off the ground at every step's edge, and
+none climbed a step.
+
+**Pushing bodies.** A move reports the surfaces it ran into;
+`nph_physics_character_push` gives each dynamic body hit, at its point and
+along the surface's normal into it, the impulse that brings the two to one
+speed there (their reduced mass times the speed they close at), as an
+inelastic collision would. The character is not slowed (the game drives
+it); a box it walks into comes up to its pace and goes no faster.
+
+What building it found, besides the edges' normals: a skin kept straight
+up from a slope is less than a skin off it along its normal, and the push
+out along the normal moved a character standing on a 30 degree slope
+0.3 mm down it every frame; casting the shape without its skin, a walk
+slower than a skin a frame (1.2 m/s at 240 Hz) never reached a step's
+riser and never climbed it; pushes that were only ever added left the
+character inside both walls' skins in a 30 degree corner; a ball or a
+capsule over a gentle ridge in a mesh had no contact from either triangle
+("Gentle ridges", above), and beyond the ridge the faces' planes, rising
+above the far side, stopped a cast leaving it (the cast's convexity test,
+"Queries"); and four triangles around a bump's peak, each a cast at
+fraction 0, used up a move's slides.
+
+Costs (Profile, the reference machine, per move): 2.1 µs walking on a flat
+floor and 13.1 µs on the rippled heightfield among a thousand rocks of the
+terrain rows (64 characters at 1.5 m/s, a move a frame). A move is about
+two shape casts and a contact query, so their cost, GJK's, is the lever.
+
 ## Performance
 
 Profile build, Ryzen 7 5800X, `benchmarks/physics` (each collision and
@@ -1163,6 +1282,7 @@ is the point; world query rows are per query):
 | `world_cast_sphere_10k` / `_capsule_10k` (10 m among them) | 1 040 / 1 050 |
 | `world_overlap_sphere_10k` / `world_overlap_aabb_10k` | 152 / 122 |
 | `world_terrain_collide_capsule` / `_cast_capsule` (a character on a rocky heightfield: its contacts, a step) | 1 720 / 2 350 |
+| `character_walk_flat` / `_terrain` (64 characters walking, a move each: a flat floor; the rocky heightfield) | 2 100 / 13 100 |
 
 Impacts and continuous collision (ADR-0048) cost the resting scenes 0 to
 3 % against the same build without them, measured side by side (two lane
@@ -1197,7 +1317,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (210 tests):
+`physics_tests` (232 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1372,6 +1492,29 @@ reference CPU class.
   the floor it rests on staying on it; boxes dropped onto each other never
   swept; the same course on 0 to 8 workers and solver threads; and the same
   impacts 10 000 km out.
+- The character controller (`test_character.c`, ADR-0049): a capsule
+  landing and standing still a skin above the floor (to a micrometre, for
+  two seconds); walking at its speed; sliding along a wall at its part
+  along it, never nearer than the skin; standing still in a right-angled
+  and a 30 degree corner, a skin off both walls; climbing a 30 degree slope
+  and stopped by a 60 degree one, standing on the first without drifting
+  and sliding down the second; climbing steps of 0.1 and 0.25 m and not one
+  of 0.4 m, at a run and at a stroll; down ten stairs never off the ground;
+  off a ledge, falling and landing; kept off a step by a low ceiling;
+  across a rippled mesh and a heightfield never off the ground and never
+  caught (at over 1.7 of its 1.8 m/s); riding a kinematic platform;
+  pushing a box ahead of it; pushed out of a wall and a floor it starts in;
+  the same path 10 000 km out; a box and a ball walking and climbing too;
+  and descriptions refused.
+- Margins and surfaces (`test_cast.c`, `test_geometry.c`, `test_query.c`,
+  `test_collide_mesh.c`): casts with a margin stopping within the touch of
+  it for every kind of pair (480 random ones) and over a mesh and a
+  heightfield, never later than without one; surface normals of every
+  shape type, at faces, edges and corners as asked, a two-sided mesh's
+  turned, a heightfield's hole none; a cast meeting a step's edge, its
+  normal slanted and the surface's the step's top, the same 10 000 km out;
+  and a ball and a standing capsule over a gentle ridge keeping their
+  contacts, a cast down meeting it.
 
 **Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull`,
 `physics_mesh`, and `physics_heightfield` read builder input from the

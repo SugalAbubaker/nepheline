@@ -123,7 +123,8 @@ typedef struct CastQuery {
     const NphPhysicsGeometry *g;
     NphQuat rotation;
     NphVec3 translation;
-    f32 max; // the fraction still searched
+    f32 margin; // a shape cast's: the shape rounded by it
+    f32 max;    // the fraction still searched
     NphPhysicsQueryCastFn fn;
     void *user;
 } CastQuery;
@@ -195,18 +196,19 @@ static f32 cast_leaf(const NphAabbTreeRay *ray, u32 proxy, u64 leaf, void *conte
         const NphDVec3 position = origin_in_shape(rotation, offset);
         const NphQuat q = nph_quat_mul(nph_quat_conjugate(rotation), c->rotation);
         const NphVec3 d = nph_quat_rotate_inverse(rotation, c->translation);
-        const bool hit = s->geometry.type == NPH_PHYSICS_SHAPE_MESH
-                             ? nph_physics_cast_mesh_local(c->g, q, position, d, s->geometry.mesh,
-                                                           c->max, &local)
-                             : nph_physics_cast_heightfield_local(
-                                   c->g, q, position, d, s->geometry.heightfield, c->max, &local);
+        const bool hit =
+            s->geometry.type == NPH_PHYSICS_SHAPE_MESH
+                ? nph_physics_cast_mesh_local(c->g, q, position, d, c->margin, s->geometry.mesh,
+                                              c->max, &local)
+                : nph_physics_cast_heightfield_local(c->g, q, position, d, c->margin,
+                                                     s->geometry.heightfield, c->max, &local);
         if (!hit) {
             return c->max;
         }
         local.point = nph_quat_rotate(rotation, local.point);
         local.normal = nph_quat_rotate(rotation, local.normal);
     } else if (!nph_physics_cast_convex(c->g, nph_physics_pose(nph_vec3_zero(), c->rotation),
-                                        c->translation, &s->geometry,
+                                        c->translation, c->margin, &s->geometry,
                                         nph_physics_pose(nph_dvec3_to_vec3(offset), rotation),
                                         c->max, &local)) {
         return c->max;
@@ -258,6 +260,7 @@ void nph_physics_world_raycast(const NphPhysicsWorld *world, NphDVec3 origin, Np
     c.g = NULL;
     c.rotation = nph_quat_identity();
     c.translation = translation;
+    c.margin = 0.0F;
     c.max = 1.0F;
     c.fn = fn;
     c.user = user;
@@ -284,9 +287,21 @@ void nph_physics_world_cast_shape(const NphPhysicsWorld *world, const NphPhysics
                                   const NphPhysicsQueryFilter *filter, NphPhysicsQueryCastFn fn,
                                   void *user)
 {
+    nph_physics_world_cast_shape_margin(world, geometry, position, rotation, translation, 0.0F,
+                                        filter, fn, user);
+}
+
+void nph_physics_world_cast_shape_margin(const NphPhysicsWorld *world,
+                                         const NphPhysicsGeometry *geometry, NphDVec3 position,
+                                         NphQuat rotation, NphVec3 translation, f32 margin,
+                                         const NphPhysicsQueryFilter *filter,
+                                         NphPhysicsQueryCastFn fn, void *user)
+{
     NPH_ASSERT(world != NULL && fn != NULL);
+    NPH_ASSERT(margin >= 0.0F);
     if (!shape_input_ok(geometry, position, rotation) || !nph_vec3_is_finite(translation) ||
-        !(nph_vec3_length_sq(translation) > 0.0F)) {
+        !(nph_vec3_length_sq(translation) > 0.0F) || !(margin >= 0.0F) ||
+        !nph_f32_is_finite(margin)) {
         return;
     }
     CastQuery c;
@@ -294,6 +309,7 @@ void nph_physics_world_cast_shape(const NphPhysicsWorld *world, const NphPhysics
     c.g = geometry;
     c.rotation = nph_quat_normalize(rotation);
     c.translation = translation;
+    c.margin = margin;
     c.max = 1.0F;
     c.fn = fn;
     c.user = user;
@@ -304,8 +320,8 @@ void nph_physics_world_cast_shape(const NphPhysicsWorld *world, const NphPhysics
     const NphVec3 mid = nph_vec3_scale(nph_vec3_add(rel.min, rel.max), 0.5F);
     const NphVec3 half = nph_vec3_scale(nph_vec3_sub(rel.max, rel.min), 0.5F);
     const NphVec3 at = nph_dvec3_to_vec3(nph_dvec3_add_vec3(position, mid));
-    const NphVec3 extent =
-        nph_vec3_add(half, nph_vec3_splat(NPH_PHYSICS_CAST_REACH + rounding(at, translation)));
+    const NphVec3 extent = nph_vec3_add(
+        half, nph_vec3_splat(NPH_PHYSICS_CAST_REACH + margin + rounding(at, translation)));
     cast_walk(&c, at, extent, cast_leaf);
 }
 
@@ -315,11 +331,22 @@ bool nph_physics_world_cast_shape_closest(const NphPhysicsWorld *world,
                                           const NphPhysicsQueryFilter *filter,
                                           NphPhysicsQueryHit *out)
 {
+    return nph_physics_world_cast_shape_margin_closest(world, geometry, position, rotation,
+                                                       translation, 0.0F, filter, out);
+}
+
+bool nph_physics_world_cast_shape_margin_closest(const NphPhysicsWorld *world,
+                                                 const NphPhysicsGeometry *geometry,
+                                                 NphDVec3 position, NphQuat rotation,
+                                                 NphVec3 translation, f32 margin,
+                                                 const NphPhysicsQueryFilter *filter,
+                                                 NphPhysicsQueryHit *out)
+{
     NPH_ASSERT(out != NULL);
     Closest c;
     memset(&c, 0, sizeof c);
-    nph_physics_world_cast_shape(world, geometry, position, rotation, translation, filter,
-                                 keep_closest, &c);
+    nph_physics_world_cast_shape_margin(world, geometry, position, rotation, translation, margin,
+                                        filter, keep_closest, &c);
     if (c.found) {
         *out = c.hit;
     }
@@ -518,4 +545,30 @@ void nph_physics_world_collide_shape(const NphPhysicsWorld *world,
         nph_physics_geometry_aabb(geometry, nph_physics_pose(nph_vec3_zero(), sq.rotation));
     shape_walk(&sq, phys_world_box(position, nph_aabb_grow(rel, speculative_distance)),
                collide_leaf);
+}
+
+// ---------------------------------------------------------------------------
+// Surface normals
+// ---------------------------------------------------------------------------
+
+NphVec3 nph_physics_world_surface_normal(const NphPhysicsWorld *world, NphPhysicsShape shape,
+                                         NphDVec3 point, u32 triangle, NphVec3 toward)
+{
+    NPH_ASSERT(world != NULL);
+    const PhysShape *s = phys_shape(world, shape);
+    if (s == NULL || !dvec3_is_finite(point) || !nph_vec3_is_finite(toward)) {
+        return toward;
+    }
+    // The point in the shape's frame, from a frame centred on it (64 bits
+    // to the body's origin).
+    Query q;
+    query_begin(&q, world, NULL, point);
+    NphQuat rotation;
+    NphDVec3 offset;
+    shape_frame(&q, &world->bodies.data[s->body], s, &rotation, &offset);
+    const NphDVec3 local = origin_in_shape(rotation, offset);
+    const NphVec3 n = nph_physics_geometry_surface_normal(
+        &s->geometry, nph_vec3((f32)local.x, (f32)local.y, (f32)local.z), triangle,
+        nph_quat_rotate_inverse(rotation, toward));
+    return nph_quat_rotate(rotation, n);
 }

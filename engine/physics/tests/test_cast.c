@@ -408,6 +408,112 @@ NTEST(cast, shape_casts_stop_where_bisection_finds_contact)
     test_alloc_end(&ta);
 }
 
+// A shape rounded by a margin: the cast stops where the gap is the margin
+// (to the touch), measured as GJK measures it, for every kind of pair, and
+// never later than the same cast without one.
+NTEST(cast, margins_stop_a_margin_off)
+{
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    NphPcg32 r = test_rng(211U);
+    NphPhysicsHull *hulls[2];
+    make_hulls(alloc, &r, hulls);
+    u32 hits = 0U;
+    f32 worst = 0.0F;
+    for (u32 k = 0U; k < 60U * TEST_SCALE; ++k) {
+        const NphPhysicsGeometry a = random_convex(&r, hulls, k);
+        const NphPhysicsGeometry b = random_convex(&r, hulls, k / 4U + 1U);
+        const NphPhysicsPose pb = test_pose(&r, 2.0F);
+        const NphVec3 dir = test_unit(&r);
+        const f32 out = test_range(&r, 3.0F, 6.0F);
+        const NphQuat turn = test_rotation(&r);
+        const NphPhysicsPose pa = nph_physics_pose(nph_vec3_mul_add(pb.position, dir, out), turn);
+        const NphVec3 delta = nph_vec3_scale(nph_vec3_sub(pb.position, pa.position), 1.5F);
+        const f32 margin = test_range(&r, 0.001F, 0.1F);
+        if (gap(&a, pa, &b, pb) <= margin) {
+            continue;
+        }
+        NphPhysicsCastHit with;
+        NphPhysicsCastHit without;
+        const bool got = nph_physics_shape_cast_margin(&a, pa, delta, margin, &b, pb, &with);
+        const bool got0 = nph_physics_shape_cast(&a, pa, delta, &b, pb, &without);
+        NTEST_EXPECT_TRUE(got || !got0);
+        if (!got) {
+            continue;
+        }
+        hits += 1U;
+        const f32 g = gap(&a, moved(pa, delta, with.fraction), &b, pb);
+        worst = nph_f32_max(worst, nph_f32_abs(g - margin));
+        NTEST_EXPECT_TRUE(g >= margin - 2e-6F && g <= margin + NPH_PHYSICS_CAST_TOUCH + 2e-6F);
+        if (got0) {
+            NTEST_EXPECT_TRUE(with.fraction <= without.fraction + 1e-6F);
+        }
+        NTEST_EXPECT_NEAR_F32(nph_vec3_length(with.normal), 1.0F, 1e-5F);
+    }
+    NTEST_LOG("margin casts: %u hits, at most %.3g mm from the margin", hits, (f64)worst * 1e3);
+    NTEST_EXPECT_TRUE(hits > 30U * TEST_SCALE);
+    // A ball a margin off a box's face: moving along it, no hit; into it, at
+    // once.
+    const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.3F);
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3_splat(0.5F));
+    const NphPhysicsPose id = nph_physics_pose_identity();
+    const NphPhysicsPose near = nph_physics_pose(nph_vec3(0.0F, 0.85F, 0.0F), nph_quat_identity());
+    NphPhysicsCastHit hit;
+    NTEST_EXPECT_FALSE(nph_physics_shape_cast_margin(&ball, near, nph_vec3(0.2F, 0.0F, 0.0F), 0.05F,
+                                                     &box, id, &hit));
+    NTEST_ASSERT_TRUE(nph_physics_shape_cast_margin(&ball, near, nph_vec3(0.0F, -0.2F, 0.0F), 0.05F,
+                                                    &box, id, &hit));
+    NTEST_EXPECT_NEAR_F32(hit.fraction, 0.0F, 1e-3F);
+    nph_physics_hull_free(hulls[0], alloc);
+    nph_physics_hull_free(hulls[1], alloc);
+    test_alloc_end(&ta);
+}
+
+// The same onto a rippled mesh and a heightfield: a standing capsule cast
+// down stops its margin above the surface under it.
+NTEST(cast, margins_stop_a_margin_off_surfaces)
+{
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    f32 y[9U * 9U];
+    for (u32 i = 0U; i < 81U; ++i) {
+        const u32 row = i / 9U; // a sample's row and column
+        const u32 column = i % 9U;
+        y[i] = 0.05F * nph_f32_sin(1.3F * (f32)row) + 0.03F * nph_f32_cos(0.9F * (f32)column);
+    }
+    NphPhysicsMesh *mesh = test_grid_mesh(alloc, 8U, 0.5F, -2.0F, -2.0F, y, false);
+    NphPhysicsHeightfield *field = test_heightfield(alloc, 9U, 9U, 0.5F, y, NULL);
+    const NphPhysicsGeometry floors[2] = {nph_physics_geometry_mesh(mesh),
+                                          nph_physics_geometry_heightfield(field)};
+    const NphPhysicsPose at[2] = {
+        nph_physics_pose_identity(),
+        nph_physics_pose(nph_vec3(-2.0F, 0.0F, -2.0F), nph_quat_identity())};
+    const NphPhysicsGeometry pill = nph_physics_geometry_capsule(0.5F, 0.3F);
+    NphPcg32 r = test_rng(212U);
+    for (u32 f = 0U; f < 2U; ++f) {
+        for (u32 k = 0U; k < 16U; ++k) {
+            const f32 x = test_range(&r, -1.0F, 1.0F);
+            const f32 z = test_range(&r, -1.0F, 1.0F);
+            const f32 margin = test_range(&r, 0.002F, 0.05F);
+            const NphPhysicsPose start =
+                nph_physics_pose(nph_vec3(x, 2.0F, z), nph_quat_identity());
+            NphPhysicsCastHit hit;
+            NTEST_ASSERT_TRUE(nph_physics_shape_cast_margin(
+                &pill, start, nph_vec3(0.0F, -3.0F, 0.0F), margin, &floors[f], at[f], &hit));
+            NphPhysicsCastHit bare;
+            NTEST_ASSERT_TRUE(nph_physics_shape_cast(&pill, start, nph_vec3(0.0F, -3.0F, 0.0F),
+                                                     &floors[f], at[f], &bare));
+            // As far above the bare cast's stop along the normal as the
+            // margin (the floor near it a plane, to the ripple's bend).
+            const f32 along = (bare.fraction - hit.fraction) * 3.0F * hit.normal.y;
+            NTEST_EXPECT_NEAR_F32(along, margin, 3e-4F + 0.02F * margin);
+        }
+    }
+    nph_physics_mesh_free(mesh, alloc);
+    nph_physics_heightfield_free(field, alloc);
+    test_alloc_end(&ta);
+}
+
 NTEST(cast, flat_contacts_are_met_exactly)
 {
     // Faces meeting faces: the gap crossed along the plane between them

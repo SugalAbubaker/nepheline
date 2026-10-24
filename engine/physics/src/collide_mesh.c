@@ -57,6 +57,16 @@
 #define FACE_PREFERENCE (0.5F * NPH_PHYSICS_LINEAR_SLOP)
 // A point this near an edge's line, in metres, lies on the edge.
 #define EDGE_TOLERANCE 1e-4F
+// Across an inactive edge a round shape's contact is made again against the
+// face, and a shape not over the face is left to the neighbour. Over a
+// convex crease too gentle to be active, a sphere's centre, or a capsule's
+// core, lies beyond both triangles' edges along each one's normal, by up to
+// half its height over the plane times the sine of the crease's angle, and
+// neither kept it: a shape cast straight down onto such a ridge went
+// through it, and a character walking a rippled terrain lost its footing.
+// Across inactive edges, "over the face" reaches this much of the height
+// further: half the sine of 10 degrees, twice the builders' default angle.
+#define RIDGE_REACH 0.0868F
 // A normal this far below the face (its cosine with the face's normal)
 // would push the shape through the triangle from behind.
 #define AGAINST_FACE (-1e-4F)
@@ -282,12 +292,14 @@ static Rule settle(const Tri *t, u32 feature, NphVec3 n)
 }
 
 // Whether point p, on or near the plane, lies over the triangle: inside its
-// three side planes moved out by `grow`.
-static bool over_triangle(const Tri *t, NphVec3 p, f32 grow)
+// three side planes moved out by `grow`, and inactive edges' by `ridge`
+// more (RIDGE_REACH).
+static bool over_triangle(const Tri *t, NphVec3 p, f32 grow, f32 ridge)
 {
     for (u32 e = 0U; e < 3U; ++e) {
         const NphVec3 m = edge_outward(t, e);
-        if (nph_vec3_dot(m, nph_vec3_sub(p, t->v[e])) > grow * nph_vec3_length(m)) {
+        const f32 out = edge_active(t, e) ? grow : grow + ridge;
+        if (nph_vec3_dot(m, nph_vec3_sub(p, t->v[e])) > out * nph_vec3_length(m)) {
             return false;
         }
     }
@@ -339,7 +351,8 @@ static void sphere_triangle(const Tri *t, NphVec3 c, f32 radius, f32 speculative
         // centre: a centre beside the triangle is its neighbour's (to the
         // tolerance, so a centre over a seam belongs to both sides).
         const f32 h = nph_vec3_dot(t->n, nph_vec3_sub(c, t->v[0]));
-        if (!over_triangle(t, nph_vec3_mul_add(c, t->n, -h), EDGE_TOLERANCE)) {
+        if (!over_triangle(t, nph_vec3_mul_add(c, t->n, -h), EDGE_TOLERANCE,
+                           RIDGE_REACH * nph_f32_max(h, 0.0F))) {
             return;
         }
         n = t->n;
@@ -350,15 +363,17 @@ static void sphere_triangle(const Tri *t, NphVec3 c, f32 radius, f32 speculative
 }
 
 // The part [x_lo, x_hi] of the core p0 + x d (x in [0, 1]) over the
-// triangle: inside its three side planes, moved out by `grow`. False when
-// none of it is.
-static bool core_over(const Tri *t, NphVec3 p0, NphVec3 d, f32 grow, f32 *x_lo, f32 *x_hi)
+// triangle: inside its three side planes, moved out by `grow`, and inactive
+// edges' by `ridge` more (RIDGE_REACH). False when none of it is.
+static bool core_over(const Tri *t, NphVec3 p0, NphVec3 d, f32 grow, f32 ridge, f32 *x_lo,
+                      f32 *x_hi)
 {
     f32 lo = 0.0F;
     f32 hi = 1.0F;
     for (u32 e = 0U; e < 3U; ++e) {
         const NphVec3 m = edge_outward(t, e);
-        const f32 s0 = nph_vec3_dot(m, nph_vec3_sub(p0, t->v[e])) - grow * nph_vec3_length(m);
+        const f32 out = edge_active(t, e) ? grow : grow + ridge;
+        const f32 s0 = nph_vec3_dot(m, nph_vec3_sub(p0, t->v[e])) - out * nph_vec3_length(m);
         const f32 sd = nph_vec3_dot(m, d);
         // Inside where s0 + x sd <= 0.
         if (sd == 0.0F) {
@@ -427,7 +442,7 @@ static void capsule_triangle(const Tri *t, NphVec3 p0, NphVec3 p1, f32 radius, f
     // The face, when part of the core is over it no farther than the edge.
     f32 x_lo = 0.0F;
     f32 x_hi = 0.0F;
-    if (core_over(t, p0, d, 0.0F, &x_lo, &x_hi)) {
+    if (core_over(t, p0, d, 0.0F, 0.0F, &x_lo, &x_hi)) {
         const f32 h0 = nph_vec3_dot(t->n, nph_vec3_sub(p0, t->v[0]));
         const f32 hd = nph_vec3_dot(t->n, d);
         const f32 low = nph_f32_min(h0 + x_lo * hd, h0 + x_hi * hd);
@@ -460,7 +475,10 @@ static void capsule_triangle(const Tri *t, NphVec3 p0, NphVec3 p1, f32 radius, f
         // so a core over a seam belongs to both sides); a core beside it is
         // its neighbour's. A face contact far deeper than the true distance
         // is a core straddling the plane beside the triangle (hull_triangle).
-        if (core_over(t, p0, d, EDGE_TOLERANCE, &x_lo, &x_hi)) {
+        const f32 h0 = nph_vec3_dot(t->n, nph_vec3_sub(p0, t->v[0]));
+        const f32 h1 = h0 + nph_vec3_dot(t->n, d);
+        if (core_over(t, p0, d, EDGE_TOLERANCE,
+                      RIDGE_REACH * nph_f32_max(nph_f32_max(h0, h1), 0.0F), &x_lo, &x_hi)) {
             capsule_face(t, p0, d, x_lo, x_hi, radius, speculative, out);
             if (min_separation(out) < edge_dist - radius - NPH_PHYSICS_LINEAR_SLOP) {
                 out->point_count = 0U;
@@ -1071,6 +1089,7 @@ typedef struct SurfaceCast {
     NphPhysicsProxy proxy;
     NphVec3 storage[NPH_PHYSICS_PROXY_STORAGE];
     NphVec3 delta;
+    f32 margin; // the mover rounded by it (nph_physics_shape_cast_margin)
     bool two_sided;
     bool hit;
     NphPhysicsCastHit best; // the closest hit; its fraction 1 until one
@@ -1092,7 +1111,7 @@ static bool triangle_contact(const SurfaceCast *q, const Tri *tri, f32 t, NphVec
         moved.v[i] = nph_vec3_sub(tri->v[i], shift);
     }
     NphTriangleContact c;
-    probe_triangle(&q->probe, &moved, NPH_PHYSICS_CAST_REACH, &c);
+    probe_triangle(&q->probe, &moved, NPH_PHYSICS_CAST_REACH + q->margin, &c);
     if (c.point_count == 0U) {
         return false;
     }
@@ -1145,6 +1164,15 @@ static f32 cast_triangle(void *user, u32 t, const NphVec3 v[3], u32 active_edges
         !triangle_contact(q, &tri, arr.fraction, &normal, &point)) {
         return q->best.fraction;
     }
+    // The rules' normal judges the motion (the face's, on an inactive edge);
+    // the shape must also be coming nearer the triangle itself. Its gap to
+    // the triangle along the motion is convex: leaving it where it arrived,
+    // it never meets it. (Beyond a gentle ridge, RIDGE_REACH, the face's
+    // plane rises above the far side, and a shape walking off a bump in a
+    // mesh met the planes of the triangles behind it and stopped.)
+    if (arr.known && !(nph_vec3_dot(q->delta, arr.normal) < 0.0F)) {
+        return q->best.fraction;
+    }
     const f32 f = nph_physics_cast_finish(&q->proxy, &target, &arr, q->delta, normal);
     // Within the limit; of equal fractions the first found: deterministic.
     if (f < 0.0F || (q->hit ? !(f < q->best.fraction) : f > q->best.fraction)) {
@@ -1163,12 +1191,14 @@ static f32 cast_triangle(void *user, u32 t, const NphVec3 v[3], u32 active_edges
 // frame): the swept box's centre and half extents there, grown by the
 // narrow phase's reach and by the rounding of the position to 32 bits.
 static void cast_begin(SurfaceCast *q, const NphPhysicsGeometry *a, NphQuat rotation,
-                       NphDVec3 position, NphVec3 delta, bool two_sided, f32 limit, NphVec3 *center,
-                       NphVec3 *extent)
+                       NphDVec3 position, NphVec3 delta, f32 margin, bool two_sided, f32 limit,
+                       NphVec3 *center, NphVec3 *extent)
 {
     NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
     probe_init(&q->probe, a, rotation);
     q->proxy = nph_physics_geometry_proxy(a, q->storage);
+    q->proxy.radius += margin;
+    q->margin = margin;
     q->delta = delta;
     q->two_sided = two_sided;
     q->hit = false;
@@ -1178,19 +1208,19 @@ static void cast_begin(SurfaceCast *q, const NphPhysicsGeometry *a, NphQuat rota
     const NphAABB box = nph_physics_geometry_aabb(a, nph_physics_pose(at, rotation));
     *center = nph_vec3_scale(nph_vec3_add(box.min, box.max), 0.5F);
     *extent = nph_vec3_add(nph_vec3_scale(nph_vec3_sub(box.max, box.min), 0.5F),
-                           nph_vec3_splat(NPH_PHYSICS_CAST_REACH + rounding));
+                           nph_vec3_splat(NPH_PHYSICS_CAST_REACH + margin + rounding));
 }
 
 bool nph_physics_cast_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation, NphDVec3 position,
-                                 NphVec3 delta, const NphPhysicsMesh *mesh, f32 limit,
+                                 NphVec3 delta, f32 margin, const NphPhysicsMesh *mesh, f32 limit,
                                  NphPhysicsCastHit *out)
 {
     NPH_ASSERT(a != NULL && mesh != NULL && out != NULL);
     SurfaceCast q;
     NphVec3 center;
     NphVec3 extent;
-    cast_begin(&q, a, rotation, position, delta, (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U,
-               limit, &center, &extent);
+    cast_begin(&q, a, rotation, position, delta, margin,
+               (mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U, limit, &center, &extent);
     nph_physics_mesh_visit_sweep(mesh, center, extent, delta, position, cast_triangle, &q);
     if (!q.hit) {
         return false;
@@ -1201,7 +1231,7 @@ bool nph_physics_cast_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation, 
 }
 
 bool nph_physics_cast_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
-                                        NphDVec3 position, NphVec3 delta,
+                                        NphDVec3 position, NphVec3 delta, f32 margin,
                                         const NphPhysicsHeightfield *h, f32 limit,
                                         NphPhysicsCastHit *out)
 {
@@ -1209,7 +1239,7 @@ bool nph_physics_cast_heightfield_local(const NphPhysicsGeometry *a, NphQuat rot
     SurfaceCast q;
     NphVec3 center;
     NphVec3 extent;
-    cast_begin(&q, a, rotation, position, delta, false, limit, &center, &extent);
+    cast_begin(&q, a, rotation, position, delta, margin, false, limit, &center, &extent);
     nph_physics_heightfield_visit_sweep(h, center, extent, delta, position, cast_triangle, &q);
     if (!q.hit) {
         return false;
