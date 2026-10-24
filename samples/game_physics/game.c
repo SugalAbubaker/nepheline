@@ -52,8 +52,8 @@ NPH_LOG_CATEGORY_DEFINE(LOG_PLAYGROUND, "playground", NPH_LOG_LEVEL_INFO);
 #define BALL_RADIUS        0.2F
 #define BALL_DENSITY       2000.0F // kg/m^3: 67 kg, enough to knock a crate over
 #define MAX_BALLS          64U
-#define CRATE_DENSITY      150.0F // kg/m^3: a crate of 1 m weighs 150 kg
-#define CRATE_SPACING      1.02   // metres between crates' centres in a row
+#define CRATE_DENSITY      150.0F  // kg/m^3: a crate of 1 m weighs 150 kg
+#define CRATE_SPACING      1.02    // metres between crates' centres in a row
 #define FALL_LIMIT         (-30.0) // below this the player starts over
 
 // The cooked content (content/make_physics_content.py).
@@ -254,8 +254,7 @@ static NphResult spawn_crate(NphGame *game, NphDVec3 at, bool warm, NphEntity *o
 }
 
 // A ball of `radius`: the sphere mesh scaled, and its Collider with it.
-static NphResult spawn_ball(NphGame *game, NphDVec3 at, f32 radius, f32 restitution,
-                            NphEntity *out)
+static NphResult spawn_ball(NphGame *game, NphDVec3 at, f32 radius, f32 restitution, NphEntity *out)
 {
     NphLocalTransform t = nph_local_transform_identity();
     t.translation = at;
@@ -297,8 +296,8 @@ static NphResult build_pyramid(NphGame *game, NphDVec3 at, u32 base)
         for (u32 i = 0; i < count; ++i) {
             const f64 x = at.x + ((f64)i - 0.5 * (f64)(count - 1U)) * CRATE_SPACING;
             NphEntity e;
-            NPH_TRY(spawn_crate(game, nph_dvec3(x, at.y + 0.5 + (f64)row, at.z), (n++ & 1U) == 0U,
-                                &e));
+            NPH_TRY(
+                spawn_crate(game, nph_dvec3(x, at.y + 0.5 + (f64)row, at.z), (n++ & 1U) == 0U, &e));
         }
     }
     return NPH_RESULT_OK;
@@ -306,8 +305,8 @@ static NphResult build_pyramid(NphGame *game, NphDVec3 at, u32 base)
 
 // Steps `rise` high and `tread` deep up to a landing, climbing towards -Z
 // from `at` (the foot of the first step's front), `width` wide.
-static NphResult build_stairs(NphGame *game, NphDVec3 at, u32 steps, f32 rise, f32 tread,
-                              f32 width, f32 landing)
+static NphResult build_stairs(NphGame *game, NphDVec3 at, u32 steps, f32 rise, f32 tread, f32 width,
+                              f32 landing)
 {
     for (u32 k = 0; k < steps; ++k) {
         const f32 h = rise * (f32)(k + 1U);
@@ -400,8 +399,8 @@ static NphResult build_playground(NphGame *game)
         c->friction = 0.8F;
     }
     // The sun casts the bodies' shadows (an imported light casts none).
-    NphLight *sun = NPH_WORLD_GET_MUT(w, find_named(w, "sun"), nph_engine_components(engine)->light,
-                                      NphLight);
+    NphLight *sun =
+        NPH_WORLD_GET_MUT(w, find_named(w, "sun"), nph_engine_components(engine)->light, NphLight);
     if (sun != NULL) {
         sun->shadows = 1;
     }
@@ -468,8 +467,8 @@ static NphResult spawn_player(NphGame *game, NphDVec3 at)
                  NPH_STR("player"));
     nph_text_set(&NPH_WORLD_GET_MUT(w, camera, NPH_COMPONENT_ID_NAME, NphName)->text,
                  NPH_STR("camera"));
-    NPH_WORLD_GET_MUT(w, player, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
-        ->translation = at;
+    NPH_WORLD_GET_MUT(w, player, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation =
+        at;
     NphMeshRenderer *m = NPH_WORLD_GET_MUT(w, player, ids->mesh_renderer, NphMeshRenderer);
     m->mesh = nph_guid_from_cstr(g_meshes[MESH_CAPSULE]);
     nph_mesh_renderer_set_material(m, 0U, nph_guid_from_cstr(g_materials[MATERIAL_PLAYER]));
@@ -597,8 +596,8 @@ static PlayerInput pilot_input(PlaygroundState *st, const NphWorld *w, const Nph
     }
     a->leg_steps += 1U;
     if (done) {
-        NPH_LOG_INFO(&LOG_PLAYGROUND, "autopilot: leg %u in %u steps, at (%.2f, %.2f, %.2f)", a->leg,
-                     a->leg_steps, c->position.x, c->position.y, c->position.z);
+        NPH_LOG_INFO(&LOG_PLAYGROUND, "autopilot: leg %u in %u steps, at (%.2f, %.2f, %.2f)",
+                     a->leg, a->leg_steps, c->position.x, c->position.y, c->position.z);
         a->leg += 1U;
         a->leg_steps = 0U;
         a->top = c->position.y;
@@ -622,8 +621,8 @@ static void move_player(NphGame *game, NphWorld *w, NphPhysicsWorld *pw, const P
     const NphQuat yaw = nph_quat_from_rotation_y(p->yaw);
     const NphVec3 forward = nph_quat_rotate(yaw, nph_vec3(0.0F, 0.0F, -1.0F));
     const NphVec3 right = nph_quat_rotate(yaw, nph_vec3(1.0F, 0.0F, 0.0F));
-    NphVec3 walk = nph_vec3_add(nph_vec3_scale(right, cmd->right),
-                                nph_vec3_scale(forward, cmd->forward));
+    NphVec3 walk =
+        nph_vec3_add(nph_vec3_scale(right, cmd->right), nph_vec3_scale(forward, cmd->forward));
     const f32 pace = nph_vec3_length(walk);
     if (pace > 1.0F) {
         walk = nph_vec3_scale(walk, 1.0F / pace); // no faster on a diagonal
@@ -650,8 +649,7 @@ static void move_player(NphGame *game, NphWorld *w, NphPhysicsWorld *pw, const P
     }
     if (c->position.y < FALL_LIMIT) {
         // Off the edge of the world: back to the start, drawn there at once.
-        NPH_IGNORE_RESULT(
-            nph_physics_character_init(pw, &desc, st->start, nph_quat_identity(), c));
+        NPH_IGNORE_RESULT(nph_physics_character_init(pw, &desc, st->start, nph_quat_identity(), c));
         st->up_speed = 0.0F;
         nph_game_reset_interpolation(game, st->player);
     }
