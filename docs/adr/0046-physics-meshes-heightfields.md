@@ -252,6 +252,32 @@ over:
   for the sleep time sleeps) would put rocking boxes to sleep, but leave
   the sink, and the energy it fed, in every awake contact.
 
+## As built: gentle ridges (2026-10-24)
+
+The character controller (ADR-0049), walking a rippled terrain, found two
+flaws in how round shapes meet a convex crease too gentle to be an active
+edge (under 5 degrees):
+
+- **No contact at all.** A ball's centre or a capsule's core over such a
+  ridge lies beyond both triangles' edges along each one's normal (by half
+  its height over the plane times the sine of the crease's angle: 4 mm for
+  a 0.3 m ball over a 3 degree ridge), and each triangle left the shape to
+  its neighbour: a shape cast straight down onto the ridge went through it,
+  and the controller found no ground there. Across inactive edges, a round
+  shape's "over the face" now reaches 0.087 of its height further (half the
+  sine of 10 degrees, twice the builders' default angle), so one side or
+  both keep it; on flat seams and in valleys that only adds a copy of a
+  point the cluster merges. A box's or a hull's face is clipped to the
+  triangle, and the half over it already stayed. A mesh built with an
+  inactive angle above 10 degrees can still leave a ball over its ridges
+  without a contact (the block does not record its angle).
+- **Ghost planes beyond the ridge.** Beyond a gentle ridge a face's plane
+  rises above the far side, and a cast leaving the ridge met it: a
+  character walking off a bump in a mesh stopped there. A triangle's cast
+  now also needs the shape to be coming nearer the triangle itself, along
+  GJK's normal where it arrived; the gap to a triangle along a straight
+  motion is convex, so a shape leaving it there never meets it.
+
 ## Alternatives considered
 
 - **One manifold per pair, the best normal**: a box in a crease gets one

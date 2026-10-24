@@ -39,7 +39,7 @@ Phase 11 builds it in parts. This document describes what exists:
 | `heightfield.h` | the heightfield block, its builder (active edges, block heights), box overlaps, raycasts, and heights |
 | `collide.h` | contact manifolds, convex shapes against triangles and meshes, GJK distance, EPA penetration, segment distance, manifold reduction, ray and shape casts, overlaps |
 | `aabb_tree.h` | the dynamic AABB tree: box queries, raycasts, box casts |
-| `query.h` | world queries: raycasts, shape casts, overlaps, contacts, filters |
+| `query.h` | world queries: raycasts, shape casts (with a margin), overlaps, contacts, filters, surface normals |
 | `world.h` | the world: creation, the step, events, statistics, the state hash, debug drawing |
 | `body.h` | rigid bodies: types, poses, velocities, forces, mass, locks, sleep |
 | `shape.h` | shapes on bodies: geometry, density, friction, restitution, filters, events |
@@ -337,6 +337,18 @@ the triangle's rules:
   place. A contact remade deeper than the axis test found, by more than a
   slop, is dropped: a box straddling a platform's plane beside its open
   edge would otherwise be lifted onto it.
+- **Gentle ridges.** Over a convex crease too gentle to be active, a
+  ball's centre or a capsule's core lies beyond both triangles' edges
+  along each one's normal, by up to half its height over the plane times
+  the sine of the crease's angle, and neither triangle kept it: a shape
+  cast straight down onto such a ridge went through it, and a character
+  walking a rippled terrain lost its footing there. Across inactive edges,
+  a round shape's "over the face" reaches 0.087 of its height further
+  (half the sine of 10 degrees, twice the builders' default angle), so one
+  side or both keep it. (A box's or a hull's face is clipped to the
+  triangle, and the half over it stays.) A mesh built with an inactive
+  angle above 10 degrees can still leave a ball directly over its ridges
+  without a contact.
 
 **A mesh's manifolds** (`nph_physics_collide_mesh`). The triangles under the
 shape's box, grown by the speculative distance, each give a contact. A
@@ -990,16 +1002,38 @@ point is on the target's surface and its normal the target's there:
 - for a mesh's or heightfield's triangle, the contact rules' (ADR-0046 §5:
   one side, the face's normal on an inactive edge, nothing beside it), so a
   shape crossing a flat seam is not stopped by the next triangle's edge.
-  Each triangle under the swept box is cast in the start's frame (vertices
-  moved there in 64 bits); a triangle whose plane the shape does not reach
-  before the nearest hit so far is skipped, and the walk ends at a hit at
-  fraction 0.
+  The rules' normal judges the motion, and the shape must also be coming
+  nearer the triangle itself, along GJK's normal where it arrived: its gap
+  to a triangle along a straight motion is convex, so leaving it there it
+  never meets it. (Beyond a gentle ridge a face's plane rises above the far
+  side, and a character walking off a bump in a mesh met the planes of the
+  triangles behind it.) Each triangle under the swept box is cast in the
+  start's frame (vertices moved there in 64 bits); a triangle whose plane
+  the shape does not reach before the nearest hit so far is skipped, and
+  the walk ends at a hit at fraction 0.
 
 A shape already touching or overlapping another stops a cast at fraction 0
 only if the motion goes into the contact (by more than 1e-5 of its length:
 a motion projected onto a contact is off it by rounding), its normal then
 the narrow phase's (defined at any depth): a body resting on a floor casts
 along it freely, and stops at once when cast into it.
+
+**Margins** (`nph_physics_shape_cast_margin`,
+`nph_physics_world_cast_shape_margin_closest`): the moving shape rounded
+by a margin, its GJK proxy's radius grown by it, so the cast stops where the
+shape comes within the margin of the other, measured along the true
+closest direction for every kind of pair (to the touch: 0.8 µm at worst
+over 480 random pairs), and "touching" is being within the margin. A
+character keeps a skin off what it meets by casting with the skin.
+
+**Surface normals** (`nph_physics_geometry_surface_normal`,
+`nph_physics_world_surface_normal`): the normal of a shape's own surface at
+a hit's point. A cast's normal is the direction the two shapes part in, and
+at an edge it points between the faces there by where the other shape
+meets it (a capsule's round bottom on a step's edge meets it at a slant);
+this is the surface: a sphere's and a capsule's radius, the face a box's or
+a hull's point is on and, where faces meet, the one nearest the way asked
+(the step's top, asked for up), a mesh's or a heightfield's triangle's.
 
 **Overlaps** (`nph_physics_overlap`): GJK with radii between convex
 shapes; a mesh or a heightfield overlaps what touches one of its
@@ -1197,7 +1231,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (210 tests):
+`physics_tests` (215 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1372,6 +1406,15 @@ reference CPU class.
   the floor it rests on staying on it; boxes dropped onto each other never
   swept; the same course on 0 to 8 workers and solver threads; and the same
   impacts 10 000 km out.
+- Margins and surfaces (`test_cast.c`, `test_geometry.c`, `test_query.c`,
+  `test_collide_mesh.c`): casts with a margin stopping within the touch of
+  it for every kind of pair (480 random ones) and over a mesh and a
+  heightfield, never later than without one; surface normals of every
+  shape type, at faces, edges and corners as asked, a two-sided mesh's
+  turned, a heightfield's hole none; a cast meeting a step's edge, its
+  normal slanted and the surface's the step's top, the same 10 000 km out;
+  and a ball and a standing capsule over a gentle ridge keeping their
+  contacts, a cast down meeting it.
 
 **Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull`,
 `physics_mesh`, and `physics_heightfield` read builder input from the

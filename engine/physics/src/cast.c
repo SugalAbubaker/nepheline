@@ -459,12 +459,15 @@ NphVec3 nph_physics_contact_axis(const NphPhysicsProxy *m, NphPhysicsPose pose_m
 }
 
 bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, NphVec3 delta,
-                             const NphPhysicsGeometry *b, NphPhysicsPose pose_b, f32 limit,
-                             NphPhysicsCastHit *out)
+                             f32 margin, const NphPhysicsGeometry *b, NphPhysicsPose pose_b,
+                             f32 limit, NphPhysicsCastHit *out)
 {
     NphVec3 storage_a[NPH_PHYSICS_PROXY_STORAGE];
     NphVec3 storage_b[NPH_PHYSICS_PROXY_STORAGE];
-    const NphPhysicsProxy pa = nph_physics_geometry_proxy(a, storage_a);
+    // The margin rounds the mover: its proxy's radius, which GJK takes off
+    // its distance.
+    NphPhysicsProxy pa = nph_physics_geometry_proxy(a, storage_a);
+    pa.radius += margin;
     const NphPhysicsProxy pb = nph_physics_geometry_proxy(b, storage_b);
     NphPhysicsArrival arr;
     if (!nph_physics_cast_arrive(&pa, pose_a, delta, &pb, pose_b, limit, &arr)) {
@@ -493,7 +496,7 @@ bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
         nph_physics_collide(b, pose_b, a,
                             nph_physics_pose(nph_vec3_mul_add(pose_a.position, delta, arr.fraction),
                                              pose_a.rotation),
-                            NPH_PHYSICS_CAST_REACH, NULL, &m);
+                            NPH_PHYSICS_CAST_REACH + margin, NULL, &m);
         if (m.point_count > 0U) {
             const NphPhysicsManifoldPoint p = m.points[deepest_point(&m)];
             normal = m.normal; // from b towards a
@@ -523,24 +526,33 @@ bool nph_physics_shape_cast(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, 
                             const NphPhysicsGeometry *b, NphPhysicsPose pose_b,
                             NphPhysicsCastHit *out)
 {
+    return nph_physics_shape_cast_margin(a, pose_a, translation, 0.0F, b, pose_b, out);
+}
+
+bool nph_physics_shape_cast_margin(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
+                                   NphVec3 translation, f32 margin, const NphPhysicsGeometry *b,
+                                   NphPhysicsPose pose_b, NphPhysicsCastHit *out)
+{
     NPH_ASSERT(a != NULL && b != NULL && out != NULL);
     NPH_ASSERT(nph_physics_shape_type_is_convex(a->type));
-    if (!(nph_vec3_length_sq(translation) > 0.0F)) {
+    NPH_ASSERT(margin >= 0.0F);
+    if (!(nph_vec3_length_sq(translation) > 0.0F) || !(margin >= 0.0F) ||
+        !nph_f32_is_finite(margin)) {
         return false;
     }
     if (!is_surface(b->type)) {
-        return nph_physics_cast_convex(a, pose_a, translation, b, pose_b, 1.0F, out);
+        return nph_physics_cast_convex(a, pose_a, translation, margin, b, pose_b, 1.0F, out);
     }
     NphQuat rotation;
     NphDVec3 position;
     nph_physics_surface_place(pose_a, pose_b, &rotation, &position);
     const NphVec3 delta = nph_quat_rotate_inverse(pose_b.rotation, translation);
     NphPhysicsCastHit local;
-    const bool hit =
-        b->type == NPH_PHYSICS_SHAPE_MESH
-            ? nph_physics_cast_mesh_local(a, rotation, position, delta, b->mesh, 1.0F, &local)
-            : nph_physics_cast_heightfield_local(a, rotation, position, delta, b->heightfield, 1.0F,
-                                                 &local);
+    const bool hit = b->type == NPH_PHYSICS_SHAPE_MESH
+                         ? nph_physics_cast_mesh_local(a, rotation, position, delta, margin,
+                                                       b->mesh, 1.0F, &local)
+                         : nph_physics_cast_heightfield_local(a, rotation, position, delta, margin,
+                                                              b->heightfield, 1.0F, &local);
     if (!hit) {
         return false;
     }

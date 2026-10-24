@@ -237,3 +237,109 @@ NTEST(geometry, validity)
     NTEST_EXPECT_NEAR_F32(nph_physics_geometry_inner_radius(&b), 0.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(nph_physics_geometry_outer_radius(&b), nph_f32_sqrt(5.25F), 1e-6F);
 }
+
+// ---------------------------------------------------------------------------
+// Surface normals
+// ---------------------------------------------------------------------------
+
+static bool normal_is(NphVec3 n, f32 x, f32 y, f32 z)
+{
+    return nph_vec3_near(n, nph_vec3_normalize(nph_vec3(x, y, z)), 1e-5F);
+}
+
+NTEST(geometry, surface_normals_are_the_faces_there)
+{
+    const NphVec3 up = nph_vec3_unit_y();
+    const u32 none = 0xFFFFFFFFU;
+    // Round shapes: out from the centre, or from the axis.
+    const NphPhysicsGeometry ball = nph_physics_geometry_sphere(0.5F);
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&ball, nph_vec3(0.3F, 0.4F, 0.0F), none, up),
+                  0.6F, 0.8F, 0.0F));
+    const NphPhysicsGeometry pill = nph_physics_geometry_capsule(0.6F, 0.3F);
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&pill, nph_vec3(0.3F, 0.2F, 0.0F), none, up),
+                  1.0F, 0.0F, 0.0F));
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&pill, nph_vec3(0.0F, -0.9F, 0.0F), none, up),
+                  0.0F, -1.0F, 0.0F));
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(
+                      &pill, nph_vec3(0.21213203F, 0.81213203F, 0.0F), none, nph_vec3_unit_x()),
+                  1.0F, 1.0F, 0.0F));
+    // A box: the face a point is on; at an edge or a corner, of the faces
+    // there, the one nearest the way asked.
+    const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(1.0F, 0.5F, 2.0F));
+    NTEST_EXPECT_TRUE(normal_is(nph_physics_geometry_surface_normal(
+                                    &box, nph_vec3(0.2F, 0.5F, -0.3F), none, nph_vec3_unit_x()),
+                                0.0F, 1.0F, 0.0F));
+    const NphVec3 edge = nph_vec3(1.0F, 0.5F, 0.4F);
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&box, edge, none, up), 0.0F, 1.0F, 0.0F));
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&box, edge, none, nph_vec3(0.8F, 0.6F, 0.0F)),
+                  1.0F, 0.0F, 0.0F));
+    NTEST_EXPECT_TRUE(normal_is(
+        nph_physics_geometry_surface_normal(&box, nph_vec3(-1.0F, -0.5F, 2.0F), none,
+                                            nph_vec3_normalize(nph_vec3(-0.1F, -0.2F, 0.9F))),
+        0.0F, 0.0F, 1.0F));
+    // Rounding off the surface: still the faces there (within 0.1 mm).
+    NTEST_EXPECT_TRUE(normal_is(
+        nph_physics_geometry_surface_normal(&box, nph_vec3(0.99995F, 0.49996F, 0.0F), none, up),
+        0.0F, 1.0F, 0.0F));
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&box, nph_vec3(0.99995F, 0.49996F, 0.0F),
+                                                      none, nph_vec3_unit_x()),
+                  1.0F, 0.0F, 0.0F));
+    // A hull: the same rule over its planes (a box's corners as a hull).
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    NphVec3 corners[8];
+    for (u32 i = 0U; i < 8U; ++i) {
+        corners[i] = nph_vec3((i & 1U) != 0U ? 1.0F : -1.0F, (i & 2U) != 0U ? 0.5F : -0.5F,
+                              (i & 4U) != 0U ? 2.0F : -2.0F);
+    }
+    NphPhysicsHull *hull = test_hull(alloc, corners, 8U, 0U);
+    const NphPhysicsGeometry h = nph_physics_geometry_hull(hull);
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&h, edge, none, up), 0.0F, 1.0F, 0.0F));
+    NTEST_EXPECT_TRUE(
+        normal_is(nph_physics_geometry_surface_normal(&h, edge, none, nph_vec3(0.8F, 0.6F, 0.0F)),
+                  1.0F, 0.0F, 0.0F));
+    nph_physics_hull_free(hull, alloc);
+    // A mesh: the triangle's; a two-sided mesh's turned the way asked; none
+    // given, the way asked.
+    f32 slope[9];
+    for (u32 i = 0U; i < 9U; ++i) {
+        const u32 row = i / 3U; // rising along x, a half in a cell
+        slope[i] = 0.5F * (f32)row;
+    }
+    NphPhysicsMesh *one = test_grid_mesh(alloc, 2U, 1.0F, 0.0F, 0.0F, slope, false);
+    NphPhysicsMesh *two = test_grid_mesh(alloc, 2U, 1.0F, 0.0F, 0.0F, slope, true);
+    const NphPhysicsGeometry m1 = nph_physics_geometry_mesh(one);
+    const NphPhysicsGeometry m2 = nph_physics_geometry_mesh(two);
+    const NphVec3 down = nph_vec3_neg(up);
+    for (u32 t = 0U; t < one->triangle_count; ++t) {
+        NTEST_EXPECT_TRUE(normal_is(
+            nph_physics_geometry_surface_normal(&m1, nph_vec3_zero(), t, down), -0.5F, 1.0F, 0.0F));
+        NTEST_EXPECT_TRUE(normal_is(
+            nph_physics_geometry_surface_normal(&m2, nph_vec3_zero(), t, down), 0.5F, -1.0F, 0.0F));
+    }
+    NTEST_EXPECT_TRUE(nph_vec3_near(
+        nph_physics_geometry_surface_normal(&m1, nph_vec3_zero(), none, down), down, 0.0F));
+    nph_physics_mesh_free(one, alloc);
+    nph_physics_mesh_free(two, alloc);
+    // A heightfield: the triangle's; a hole's, the way asked.
+    u8 cells[4] = {0U, 0U, 0U, NPH_PHYSICS_HEIGHTFIELD_HOLE};
+    NphPhysicsHeightfield *field = test_heightfield(alloc, 3U, 3U, 1.0F, slope, cells);
+    const NphPhysicsGeometry hf = nph_physics_geometry_heightfield(field);
+    for (u32 t = 0U; t < 6U; ++t) {
+        // Heights rise along z in the heightfield's (row-major) layout.
+        NTEST_EXPECT_TRUE(normal_is(
+            nph_physics_geometry_surface_normal(&hf, nph_vec3_zero(), t, up), 0.0F, 1.0F, -0.5F));
+    }
+    NTEST_EXPECT_TRUE(nph_vec3_near(
+        nph_physics_geometry_surface_normal(&hf, nph_vec3_zero(), 6U, down), down, 0.0F));
+    nph_physics_heightfield_free(field, alloc);
+    test_alloc_end(&ta);
+}

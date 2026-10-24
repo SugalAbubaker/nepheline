@@ -80,6 +80,27 @@ when a fast body first meets the static world. The answers must be:
    Callbacks return the fraction to clip to (Box2D's contract); the closest
    queries keep the first of equals and end at a hit at fraction 0.
 
+## As built: margins and surface normals (2026-10-24)
+
+The character controller (ADR-0049) added two queries:
+
+- **Shape casts with a margin** (`nph_physics_shape_cast_margin`,
+  `nph_physics_world_cast_shape_margin_closest` and the callback form): the
+  moving shape rounded by the margin, its GJK proxy's radius grown by it,
+  so conservative advancement, the last step along the normal, and a
+  surface's triangle rules all stop where the shape comes within the
+  margin of the other (within the touch: 0.8 µm at worst over 480 random
+  pairs), whatever the shapes. A shape within the margin is touching, and
+  stops at fraction 0 only when moving in. The plain casts are the margin
+  0.
+- **Surface normals** (`nph_physics_geometry_surface_normal`,
+  `nph_physics_world_surface_normal`): the normal of a shape's own surface
+  at a hit's point, where a cast's normal is the direction the shapes part
+  in (at an edge, between its faces): a sphere's and a capsule's radius,
+  the face a box's or a hull's point is on and, where faces meet (to
+  0.1 mm), the one nearest the way asked; a mesh's or a heightfield's
+  triangle's.
+
 ## Alternatives considered
 
 - **GJK ray casting** (van den Bergen 2004, Jolt's CastShape): one support

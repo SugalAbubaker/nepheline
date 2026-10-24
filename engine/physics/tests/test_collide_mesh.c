@@ -549,6 +549,50 @@ NTEST(collide_mesh, a_crease_gives_a_manifold_per_face)
     test_alloc_end(&ta);
 }
 
+// A ridge along Z too gentle to be an active edge: two faces 1.5 degrees
+// either side of level, 3 degrees convex, meeting on the Z axis. A ball and
+// a standing capsule centred over it lie beyond both faces' edges along
+// each one's normal, by 4 mm: the faces must keep them all the same, and a
+// cast straight down must meet the ridge.
+NTEST(collide_mesh, round_shapes_keep_their_contacts_on_a_gentle_ridge)
+{
+    TestAlloc ta;
+    NphAllocator *alloc = test_alloc_begin(&ta);
+    f32 y[9];
+    for (u32 i = 0U; i <= 2U; ++i) {
+        for (u32 j = 0U; j <= 2U; ++j) {
+            y[i * 3U + j] = i == 1U ? 0.0F : -0.026185F; // tan(1.5 deg)
+        }
+    }
+    NphPhysicsMesh *mesh = test_grid_mesh(alloc, 2U, 1.0F, -1.0F, -1.0F, y, false);
+    const NphPhysicsGeometry shapes[2] = {nph_physics_geometry_sphere(0.3F),
+                                          nph_physics_geometry_capsule(0.6F, 0.3F)};
+    const f32 lowest[2] = {0.3F, 0.9F}; // the centre's height over the shape's bottom
+    for (u32 s = 0U; s < 2U; ++s) {
+        // 1 mm into the ridge and 1 mm above it.
+        for (u32 k = 0U; k < 2U; ++k) {
+            const f32 gap = k == 0U ? -0.001F : 0.001F;
+            const NphPhysicsMeshManifolds mm = collide_mesh(
+                &shapes[s], at(0.0F, lowest[s] + gap, 0.2F), mesh, nph_physics_pose_identity());
+            NTEST_ASSERT_TRUE(mm.count >= 1U);
+            // Within the ridge's angle of straight down, and as near as the
+            // ridge (the faces' planes pass 0.1 mm nearer the centre).
+            NTEST_EXPECT_TRUE(nph_vec3_dot(mm.manifolds[0].normal, k_down) > 0.9993F);
+            NTEST_EXPECT_NEAR_F32(test_min_separation(&mm.manifolds[0]), gap, 3e-4F);
+        }
+        // Cast straight down from 0.7 m above touching: met there.
+        NphPhysicsCastHit hit;
+        const bool got = nph_physics_cast_mesh_local(
+            &shapes[s], nph_quat_identity(), nph_dvec3(0.0, (f64)lowest[s] + 0.7, 0.2),
+            nph_vec3(0.0F, -1.4F, 0.0F), 0.0F, mesh, 1.0F, &hit);
+        NTEST_ASSERT_TRUE(got);
+        NTEST_EXPECT_NEAR_F32(hit.fraction * 1.4F, 0.7F, 1e-3F);
+        NTEST_EXPECT_TRUE(nph_vec3_dot(hit.normal, nph_vec3_neg(k_down)) > 0.9993F);
+    }
+    nph_physics_mesh_free(mesh, alloc);
+    test_alloc_end(&ta);
+}
+
 NTEST(collide_mesh, many_normals_keep_the_deepest_four)
 {
     TestAlloc ta;

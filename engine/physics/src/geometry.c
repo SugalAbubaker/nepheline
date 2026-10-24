@@ -5,6 +5,8 @@
 #include <nepheline/core/assert.h>
 #include <nepheline/physics/geometry.h>
 
+#include <float.h>
+
 #define NPH_PI_F64 3.14159265358979323846
 
 // ---------------------------------------------------------------------------
@@ -289,6 +291,107 @@ NphVec3 nph_physics_geometry_support(const NphPhysicsGeometry *g, NphVec3 direct
     }
     NPH_ASSERT_MSG(false, "nph_physics_geometry_support: unknown shape type %u", (u32)g->type);
     return nph_vec3_zero();
+}
+
+// ---------------------------------------------------------------------------
+// Surface normals
+// ---------------------------------------------------------------------------
+
+// Faces within this of the point's nearest face (metres, and the point's
+// rounding) are at the point too: it is on their edge or corner.
+#define SURFACE_TOLERANCE 1e-4F
+
+static NphVec3 unit_or(NphVec3 v, NphVec3 fallback)
+{
+    const f32 len_sq = nph_vec3_length_sq(v);
+    return len_sq > 1e-24F ? nph_vec3_scale(v, 1.0F / nph_f32_sqrt(len_sq)) : fallback;
+}
+
+static NphVec3 triangle_normal(const NphVec3 v[3], NphVec3 fallback)
+{
+    return unit_or(nph_vec3_cross(nph_vec3_sub(v[1], v[0]), nph_vec3_sub(v[2], v[0])), fallback);
+}
+
+NphVec3 nph_physics_geometry_surface_normal(const NphPhysicsGeometry *g, NphVec3 point,
+                                            u32 triangle, NphVec3 toward)
+{
+    NPH_ASSERT(g != NULL);
+    const f32 tolerance = SURFACE_TOLERANCE + 1e-6F * nph_vec3_max_component(nph_vec3_abs(point));
+    switch (g->type) {
+    case NPH_PHYSICS_SHAPE_SPHERE:
+        return unit_or(point, toward);
+    case NPH_PHYSICS_SHAPE_CAPSULE: {
+        const f32 h = g->capsule.half_height;
+        return unit_or(nph_vec3_sub(point, nph_vec3(0.0F, nph_f32_clamp(point.y, -h, h), 0.0F)),
+                       toward);
+    }
+    case NPH_PHYSICS_SHAPE_BOX: {
+        // Each face's signed distance to the point; the faces as near as the
+        // nearest are at it.
+        const f32 p[3] = {point.x, point.y, point.z};
+        const f32 e[3] = {g->box.half_extents.x, g->box.half_extents.y, g->box.half_extents.z};
+        const f32 t[3] = {toward.x, toward.y, toward.z};
+        f32 nearest = -FLT_MAX;
+        for (u32 i = 0U; i < 3U; ++i) {
+            nearest = nph_f32_max(nearest, nph_f32_abs(p[i]) - e[i]);
+        }
+        u32 best = 0U;
+        f32 best_dot = -FLT_MAX;
+        for (u32 i = 0U; i < 3U; ++i) {
+            const f32 side = p[i] < 0.0F ? -1.0F : 1.0F;
+            if (nph_f32_abs(p[i]) - e[i] >= nearest - tolerance && side * t[i] > best_dot) {
+                best_dot = side * t[i];
+                best = i;
+            }
+        }
+        f32 n[3] = {0.0F, 0.0F, 0.0F};
+        n[best] = p[best] < 0.0F ? -1.0F : 1.0F;
+        return nph_vec3(n[0], n[1], n[2]);
+    }
+    case NPH_PHYSICS_SHAPE_HULL: {
+        const NphPlane *planes = nph_physics_hull_planes(g->hull);
+        const u32 count = g->hull->face_count;
+        f32 nearest = -FLT_MAX;
+        for (u32 f = 0U; f < count; ++f) {
+            nearest = nph_f32_max(nearest, nph_plane_distance(planes[f], point));
+        }
+        u32 best = 0U;
+        f32 best_dot = -FLT_MAX;
+        for (u32 f = 0U; f < count; ++f) {
+            const f32 along = nph_vec3_dot(planes[f].normal, toward);
+            if (nph_plane_distance(planes[f], point) >= nearest - tolerance && along > best_dot) {
+                best_dot = along;
+                best = f;
+            }
+        }
+        return planes[best].normal;
+    }
+    case NPH_PHYSICS_SHAPE_MESH: {
+        if (triangle >= g->mesh->triangle_count) {
+            return toward;
+        }
+        NphVec3 v[3];
+        nph_physics_mesh_triangle(g->mesh, triangle, v);
+        const NphVec3 n = triangle_normal(v, toward);
+        const bool two_sided = (g->mesh->flags & NPH_PHYSICS_MESH_TWO_SIDED) != 0U;
+        return two_sided && nph_vec3_dot(n, toward) < 0.0F ? nph_vec3_neg(n) : n;
+    }
+    case NPH_PHYSICS_SHAPE_HEIGHTFIELD: {
+        NphVec3 v[3];
+        u32 edges = 0U;
+        if (triangle >= nph_physics_heightfield_triangle_count(g->heightfield) ||
+            !nph_physics_heightfield_triangle(g->heightfield, triangle, v, &edges)) {
+            return toward;
+        }
+        return triangle_normal(v, toward);
+    }
+    case NPH_PHYSICS_SHAPE_TYPE_COUNT:
+    default:
+        break;
+    }
+    NPH_ASSERT_MSG(false, "nph_physics_geometry_surface_normal: unknown shape type %u",
+                   (u32)g->type);
+    return toward;
 }
 
 f32 nph_physics_geometry_inner_radius(const NphPhysicsGeometry *g)

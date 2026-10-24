@@ -131,6 +131,22 @@ void nph_physics_world_cast_shape(const NphPhysicsWorld *world, const NphPhysics
                                   const NphPhysicsQueryFilter *filter, NphPhysicsQueryCastFn fn,
                                   void *user);
 
+// As nph_physics_world_cast_shape_closest and nph_physics_world_cast_shape,
+// with the shape rounded by `margin` (metres, >= 0), each shape met as by
+// nph_physics_shape_cast_margin: the cast stops where the shape comes within
+// the margin of another. A character casts with its skin (character.h).
+bool nph_physics_world_cast_shape_margin_closest(const NphPhysicsWorld *world,
+                                                 const NphPhysicsGeometry *geometry,
+                                                 NphDVec3 position, NphQuat rotation,
+                                                 NphVec3 translation, f32 margin,
+                                                 const NphPhysicsQueryFilter *filter,
+                                                 NphPhysicsQueryHit *out);
+void nph_physics_world_cast_shape_margin(const NphPhysicsWorld *world,
+                                         const NphPhysicsGeometry *geometry, NphDVec3 position,
+                                         NphQuat rotation, NphVec3 translation, f32 margin,
+                                         const NphPhysicsQueryFilter *filter,
+                                         NphPhysicsQueryCastFn fn, void *user);
+
 // The shapes `filter` passes that convex `geometry` (valid) at `position`
 // with `rotation` touches or overlaps, as nph_physics_overlap decides.
 void nph_physics_world_overlap_shape(const NphPhysicsWorld *world,
@@ -153,6 +169,15 @@ void nph_physics_world_collide_shape(const NphPhysicsWorld *world,
                                      NphQuat rotation, f32 speculative_distance,
                                      const NphPhysicsQueryFilter *filter,
                                      NphPhysicsQueryContactFn fn, void *user);
+
+// The outward unit normal of `shape`'s own surface at a hit's `point` (in
+// the world), as nph_physics_geometry_surface_normal gives it: where faces
+// meet, of those at the point the one nearest `toward` (unit, the world's);
+// a mesh's or a heightfield's triangle `triangle`'s. A hit's own normal is
+// the direction the shapes part in, which at an edge lies between its
+// faces.
+NphVec3 nph_physics_world_surface_normal(const NphPhysicsWorld *world, NphPhysicsShape shape,
+                                         NphDVec3 point, u32 triangle, NphVec3 toward);
 
 #ifdef __cplusplus
 }

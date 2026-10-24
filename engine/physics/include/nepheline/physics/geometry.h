@@ -133,6 +133,23 @@ NphVec3 nph_physics_geometry_support(const NphPhysicsGeometry *g, NphVec3 direct
 f32 nph_physics_geometry_inner_radius(const NphPhysicsGeometry *g);
 f32 nph_physics_geometry_outer_radius(const NphPhysicsGeometry *g);
 
+// The outward unit normal of the geometry's own surface at `point` (in its
+// frame, on the surface to rounding: a query's hit, brought into the
+// frame). A sphere's and a capsule's point outwards from the centre or the
+// axis; a box's and a hull's are the face's the point is on, and where
+// faces meet (an edge, a corner), of the faces at the point, the one
+// nearest `toward` (unit), the way the caller asks. A mesh's and a
+// heightfield's are triangle `triangle`'s (a query hit's;
+// NPH_PHYSICS_NO_TRIANGLE, a heightfield's hole, or an index past the
+// triangles: `toward`), a two-sided mesh's turned to face `toward`.
+//
+// A contact's or a cast's normal is the direction the two shapes part in:
+// at an edge it points between the faces there, by where the other shape
+// meets it. This is the surface itself, what a character stands on
+// (character.h) or a decal lies on.
+NphVec3 nph_physics_geometry_surface_normal(const NphPhysicsGeometry *g, NphVec3 point,
+                                            u32 triangle, NphVec3 toward);
+
 // ---------------------------------------------------------------------------
 // Support proxies for GJK
 // ---------------------------------------------------------------------------

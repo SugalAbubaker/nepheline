@@ -232,11 +232,11 @@ bool nph_physics_cast_normal_back(const NphPhysicsProxy *m, NphPhysicsPose pose_
 f32 nph_physics_cast_finish(const NphPhysicsProxy *m, const NphPhysicsProxy *t,
                             const NphPhysicsArrival *a, NphVec3 delta, NphVec3 normal);
 
-// nph_physics_shape_cast between convex geometries, for hits up to `limit`
-// (a world query's nearest so far).
+// nph_physics_shape_cast_margin between convex geometries, for hits up to
+// `limit` (a world query's nearest so far).
 bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, NphVec3 delta,
-                             const NphPhysicsGeometry *b, NphPhysicsPose pose_b, f32 limit,
-                             NphPhysicsCastHit *out);
+                             f32 margin, const NphPhysicsGeometry *b, NphPhysicsPose pose_b,
+                             f32 limit, NphPhysicsCastHit *out);
 
 // nph_physics_raycast in the geometry's own frame.
 bool nph_physics_raycast_local(const NphPhysicsGeometry *g, NphVec3 origin, NphVec3 delta,
@@ -261,14 +261,15 @@ void nph_physics_heightfield_visit_sweep(const NphPhysicsHeightfield *h, NphVec3
 
 // Shape casts and overlaps against a surface (collide_mesh.c), with `a`
 // placed as for nph_physics_collide_mesh_local and `delta` in the
-// surface's axes; casts find hits up to `limit`. A hit comes out in a
-// frame with the surface's axes and its origin at a's start; its triangle
-// is the mesh's input index.
+// surface's axes; casts find hits up to `limit`, `a` rounded by `margin`
+// (nph_physics_shape_cast_margin). A hit comes out in a frame with the
+// surface's axes and its origin at a's start; its triangle is the mesh's
+// input index.
 bool nph_physics_cast_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation, NphDVec3 position,
-                                 NphVec3 delta, const NphPhysicsMesh *mesh, f32 limit,
+                                 NphVec3 delta, f32 margin, const NphPhysicsMesh *mesh, f32 limit,
                                  NphPhysicsCastHit *out);
 bool nph_physics_cast_heightfield_local(const NphPhysicsGeometry *a, NphQuat rotation,
-                                        NphDVec3 position, NphVec3 delta,
+                                        NphDVec3 position, NphVec3 delta, f32 margin,
                                         const NphPhysicsHeightfield *h, f32 limit,
                                         NphPhysicsCastHit *out);
 bool nph_physics_overlap_mesh_local(const NphPhysicsGeometry *a, NphQuat rotation,
