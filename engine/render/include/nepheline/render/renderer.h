@@ -397,6 +397,11 @@ NPH_MUST_USE NphResult nph_render_instance_create(NphRenderer *r, const NphRende
                                                   NphRenderInstance *out);
 NPH_MUST_USE NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,
                                                          const NphRenderTransform *transform);
+// The transform the instance is drawn with, as last set.
+// NPH_RESULT_INVALID_ARGUMENT for a stale handle.
+NPH_MUST_USE NphResult nph_render_instance_transform(const NphRenderer *r,
+                                                     NphRenderInstance instance,
+                                                     NphRenderTransform *out);
 void nph_render_instance_set_hidden(NphRenderer *r, NphRenderInstance instance, bool hidden);
 void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance);
 bool nph_render_instance_is_valid(const NphRenderer *r, NphRenderInstance instance);
@@ -431,6 +436,10 @@ NPH_MUST_USE NphResult nph_render_light_create(NphRenderer *r, const NphRenderLi
                                                NphRenderLight *out);
 NPH_MUST_USE NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
                                                const NphRenderLightDesc *desc);
+// The light's description as last set. NPH_RESULT_INVALID_ARGUMENT for a
+// stale handle.
+NPH_MUST_USE NphResult nph_render_light_desc(const NphRenderer *r, NphRenderLight light,
+                                             NphRenderLightDesc *out);
 void nph_render_light_destroy(NphRenderer *r, NphRenderLight light);
 bool nph_render_light_is_valid(const NphRenderer *r, NphRenderLight light);
 

@@ -209,6 +209,13 @@ u32 nph_world_entity_capacity(const NphWorld *world);
 // tables. Asserts that `e` is alive.
 u32 nph_world_entity_index(const NphWorld *world, NphEntity e);
 
+// The slot index packed in an entity handle, whether the entity is alive
+// or not (nothing is checked): for side tables indexed by slot that the
+// event stream tells of entities that went. A table keeps each slot's
+// handle to tell the entity that went from a later one in the same slot.
+// Below the capacity for any handle the world issued.
+u32 nph_world_handle_slot(const NphWorld *world, NphEntity e);
+
 // The live entity occupying slot `index`, or NPH_ENTITY_NULL. With
 // nph_world_entity_slot_count this walks every entity in slot order, the
 // order the serializer and the state hash use.

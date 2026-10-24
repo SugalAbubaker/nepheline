@@ -231,6 +231,9 @@ NTEST(world, slot_iteration_and_indices)
         NTEST_EXPECT_EQ_UINT(nph_world_entity_index(w, e[i]), i);
     }
     NTEST_ASSERT_EQ_INT(nph_world_despawn(w, e[2]), NPH_RESULT_OK);
+    // A handle names its slot alive or dead.
+    NTEST_EXPECT_EQ_UINT(nph_world_handle_slot(w, e[2]), 2U);
+    NTEST_EXPECT_EQ_UINT(nph_world_handle_slot(w, e[4]), 4U);
     NTEST_EXPECT_EQ_UINT(nph_world_entity_slot_count(w), 5U);
     NTEST_EXPECT_TRUE(nph_entity_equals(nph_world_entity_at(w, 1U), e[1]));
     NTEST_EXPECT_TRUE(nph_entity_is_null(nph_world_entity_at(w, 2U)));

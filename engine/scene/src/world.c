@@ -1072,6 +1072,12 @@ u32 nph_world_entity_index(const NphWorld *w, NphEntity e)
     return nph_handle_pool_index(&w->handles, (NphHandle){e.value});
 }
 
+u32 nph_world_handle_slot(const NphWorld *w, NphEntity e)
+{
+    NPH_ASSERT(w != NULL);
+    return nph_handle_pool_index(&w->handles, (NphHandle){e.value});
+}
+
 NphEntity nph_world_entity_at(const NphWorld *w, u32 index)
 {
     NPH_ASSERT(w != NULL);

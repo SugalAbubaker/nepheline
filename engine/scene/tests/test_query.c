@@ -154,6 +154,63 @@ NTEST(query, collect_and_view_match_iteration)
     nph_world_destroy(w);
 }
 
+NTEST(query, an_entity_names_its_chunk_and_row)
+{
+    TestIds ids;
+    NphWorld *w = test_world_create(1U << 16U, &ids);
+    NphEntity moving[600];
+    const NphComponentId comps[2] = {ids.position, ids.velocity};
+    NTEST_ASSERT_EQ_INT(nph_world_spawn_batch(w, comps, 2U, 600U, moving), NPH_RESULT_OK);
+    NphEntity still;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(w, &ids.position, 1U, &still), NPH_RESULT_OK);
+    const NphQueryTerm terms[2] = {nph_term_write(ids.position), nph_term_read(ids.velocity)};
+    NphQuery *q = make_query(w, terms, 2U);
+    NTEST_ASSERT_GT_UINT(nph_query_collect_chunks(q, 0U, NULL, 0U), 1U); // rows in several chunks
+
+    // Each entity's chunk and row hold it, and writing there writes it (at
+    // a tick after the spawns' stamps).
+    (void)nph_world_advance_tick(w);
+    const u32 tick = nph_world_advance_tick(w);
+    for (u32 i = 0; i < 600U; i += 7U) {
+        u32 row = NPH_U32_MAX;
+        void *chunk = nph_world_entity_chunk(w, moving[i], &row);
+        NTEST_ASSERT_NOT_NULL(chunk);
+        NTEST_ASSERT_TRUE(nph_query_matches_chunk(q, chunk));
+        NphChunkView v;
+        nph_query_chunk_view(q, chunk, tick, &v);
+        NTEST_ASSERT_LT_UINT(row, v.count);
+        NTEST_EXPECT_EQ_UINT(v.entities[row].value, moving[i].value);
+        NPH_CHUNK_COLUMN(&v, 0, TestPosition)[row].value.x = (f32)i;
+    }
+    for (u32 i = 0; i < 600U; i += 7U) {
+        const TestPosition *p = NPH_WORLD_GET(w, moving[i], ids.position, TestPosition);
+        NTEST_EXPECT_NEAR_F32(p->value.x, (f32)i, 0.0F);
+    }
+    // The view stamped the chunks it showed.
+    const NphQueryTerm changed = nph_term_changed(nph_term_read(ids.position));
+    NphQuery *watch = make_query(w, &changed, 1U);
+    NTEST_EXPECT_EQ_UINT(nph_query_collect_chunks(watch, tick - 1U, NULL, 0U),
+                         nph_query_collect_chunks(q, 0U, NULL, 0U));
+
+    // Another archetype's chunk is not the query's; a dead entity has none.
+    void *other = nph_world_entity_chunk(w, still, NULL);
+    NTEST_ASSERT_NOT_NULL(other);
+    NTEST_EXPECT_FALSE(nph_query_matches_chunk(q, other));
+    NTEST_EXPECT_TRUE(nph_query_matches_chunk(watch, other));
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(w, moving[3]), NPH_RESULT_OK);
+    u32 row = 77U;
+    NTEST_EXPECT_NULL(nph_world_entity_chunk(w, moving[3], &row));
+    NTEST_EXPECT_EQ_UINT(row, 77U);
+    // The entity that filled its row is found where it is now.
+    void *chunk = nph_world_entity_chunk(w, moving[599], &row);
+    NphChunkView v;
+    nph_query_chunk_view(q, chunk, tick, &v);
+    NTEST_EXPECT_EQ_UINT(v.entities[row].value, moving[599].value);
+    nph_query_destroy(watch);
+    nph_query_destroy(q);
+    nph_world_destroy(w);
+}
+
 NTEST(query, change_filters_follow_writes)
 {
     TestIds ids;

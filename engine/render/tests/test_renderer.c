@@ -221,6 +221,10 @@ NTEST_F(Api, instances_and_transforms)
     NTEST_EXPECT_NEAR_F64(from4.translation.z, 3.0, 0.0);
     NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(f->renderer, inst, &from4),
                         NPH_RESULT_OK);
+    NphRenderTransform got;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_transform(f->renderer, inst, &got), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F64(got.translation.y, 2.0, 0.0);
+    NTEST_EXPECT_NEAR_F32(got.linear.c[1].y, 1.0F, 0.0F);
     nph_render_instance_set_hidden(f->renderer, inst, true);
 
     NphRenderInstance bad = NPH_RENDER_INSTANCE_NULL;
@@ -239,6 +243,8 @@ NTEST_F(Api, instances_and_transforms)
 
     nph_render_instance_destroy(f->renderer, inst);
     NTEST_EXPECT_TRUE(!nph_render_instance_is_valid(f->renderer, inst));
+    NTEST_EXPECT_EQ_INT(nph_render_instance_transform(f->renderer, inst, &got),
+                        NPH_RESULT_INVALID_ARGUMENT);
     nph_render_instance_destroy(f->renderer, NPH_RENDER_INSTANCE_NULL);
     nph_render_material_destroy(f->renderer, mat);
     nph_render_mesh_destroy(f->renderer, mesh);
@@ -268,10 +274,15 @@ NTEST_F(Api, lights)
     bad = ld;
     bad.intensity = -1.0F;
     NTEST_EXPECT_EQ_INT(nph_render_light_update(f->renderer, l, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NphRenderLightDesc got;
+    NTEST_ASSERT_EQ_INT(nph_render_light_desc(f->renderer, l, &got), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(got.intensity, 100.0F, 0.0F); // the refused updates changed nothing
     bad = ld;
     bad.type = NPH_RENDER_LIGHT_TYPE_POINT; // a point light needs no direction
     bad.direction = nph_vec3_zero();
     NTEST_EXPECT_EQ_INT(nph_render_light_update(f->renderer, l, &bad), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_render_light_desc(f->renderer, l, &got), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT((int)got.type, (int)NPH_RENDER_LIGHT_TYPE_POINT);
 
     // Capacity: the fixture allows 8 lights.
     NphRenderLight more[8];

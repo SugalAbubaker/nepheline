@@ -509,6 +509,62 @@ NTEST(world, sleepers_wake_when_touched_or_pushed)
     scene_end(&s);
 }
 
+NTEST(world, a_bodys_movement_settings_change_in_place)
+{
+    Scene s;
+    scene_begin(&s);
+    const NphPhysicsBody ground = add_ground(s.w, 0.0);
+    const NphPhysicsBody ball =
+        add_body(s.w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3(0.0, 0.5, 0.0), nph_quat_identity(),
+                 nph_physics_geometry_sphere(0.5F), 0.6F, 0.0F);
+    step(s.w, NULL, 240U * 2U);
+    NTEST_ASSERT_FALSE(nph_physics_body_is_awake(s.w, ball));
+
+    // A gravity scale below zero wakes the sleeper, and it rises.
+    nph_physics_body_set_gravity_scale(s.w, ball, -1.0F);
+    NTEST_EXPECT_TRUE(nph_physics_body_is_awake(s.w, ball));
+    step(s.w, NULL, 120U);
+    const f64 risen = nph_physics_body_position(s.w, ball).y;
+    NTEST_EXPECT_TRUE(risen > 1.5);
+    // None: it coasts at the speed it had.
+    nph_physics_body_set_gravity_scale(s.w, ball, 0.0F);
+    const f32 vy = nph_physics_body_linear_velocity(s.w, ball).y;
+    step(s.w, NULL, 60U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_linear_velocity(s.w, ball).y, vy, 1e-4F);
+
+    // Damping: v' = v / (1 + h c) every substep.
+    nph_physics_body_set_damping(s.w, ball, 2.0F, 0.0F);
+    step(s.w, NULL, 1U);
+    const f32 k = 1.0F / (1.0F + (DT / 4.0F) * 2.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_linear_velocity(s.w, ball).y, vy * k * k * k * k, 1e-4F);
+    nph_physics_body_set_damping(s.w, ball, 0.0F, 0.0F);
+
+    // A lock along Y holds it where it is, whatever gravity does.
+    nph_physics_body_set_gravity_scale(s.w, ball, 1.0F);
+    nph_physics_body_set_locks(s.w, ball, (u32)NPH_PHYSICS_LOCK_LINEAR_Y);
+    const f64 held = nph_physics_body_position(s.w, ball).y;
+    step(s.w, NULL, 60U);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(s.w, ball).y, held, 1e-9);
+    nph_physics_body_set_locks(s.w, ball, 0U);
+    step(s.w, NULL, 240U * 3U);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(s.w, ball).y, 0.5, 0.01);
+    NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, ball));
+
+    // Sleep off wakes it and keeps it awake; on again, it sleeps.
+    nph_physics_body_set_sleep(s.w, ball, false, 0.05F);
+    NTEST_EXPECT_TRUE(nph_physics_body_is_awake(s.w, ball));
+    step(s.w, NULL, 240U * 2U);
+    NTEST_EXPECT_TRUE(nph_physics_body_is_awake(s.w, ball));
+    nph_physics_body_set_sleep(s.w, ball, true, 0.05F);
+    step(s.w, NULL, 240U * 2U);
+    NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, ball));
+    // Static bodies take the settings and stay asleep.
+    nph_physics_body_set_sleep(s.w, ground, false, 0.0F);
+    nph_physics_body_set_gravity_scale(s.w, ground, 2.0F);
+    NTEST_EXPECT_FALSE(nph_physics_body_is_awake(s.w, ground));
+    scene_end(&s);
+}
+
 NTEST(world, events_report_touching_and_motion)
 {
     Scene s;

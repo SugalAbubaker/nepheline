@@ -307,3 +307,23 @@ void nph_query_chunk_view(const NphQuery *q, void *chunk, u32 write_tick, NphChu
     NPH_ASSERT(archetype_matches(q, c->archetype));
     fill_view(q, c, write_tick, out);
 }
+
+void *nph_world_entity_chunk(const NphWorld *w, NphEntity e, u32 *out_row)
+{
+    NPH_ASSERT(w != NULL);
+    const NphEntityRecord *rec = nph_world_record(w, e);
+    if (rec == NULL) {
+        return NULL;
+    }
+    if (out_row != NULL) {
+        *out_row = rec->row;
+    }
+    return rec->chunk;
+}
+
+bool nph_query_matches_chunk(const NphQuery *q, const void *chunk)
+{
+    NPH_ASSERT(q != NULL && chunk != NULL);
+    const NphChunk *c = chunk;
+    return archetype_matches(q, c->archetype);
+}

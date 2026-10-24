@@ -173,6 +173,18 @@ u32 nph_query_collect_chunks(const NphQuery *query, u32 since_tick, void **out, 
 // once.
 void nph_query_chunk_view(const NphQuery *query, void *chunk, u32 write_tick, NphChunkView *out);
 
+// The chunk holding the live entity `e`, as nph_query_collect_chunks gives
+// chunks, and the entity's row in it (`out_row`; may be NULL): for writing
+// the entities another source names, such as the bodies a physics step
+// moved, through nph_query_chunk_view without visiting every chunk. NULL for
+// a dead entity. Valid until the next structural change.
+void *nph_world_entity_chunk(const NphWorld *world, NphEntity e, u32 *out_row);
+
+// True when `chunk` (from nph_query_collect_chunks or
+// nph_world_entity_chunk) belongs to an archetype the query matches, which
+// nph_query_chunk_view requires.
+bool nph_query_matches_chunk(const NphQuery *query, const void *chunk);
+
 #ifdef __cplusplus
 }
 #endif

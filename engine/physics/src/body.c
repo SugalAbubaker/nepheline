@@ -501,6 +501,65 @@ void nph_physics_body_set_bullet(NphPhysicsWorld *world, NphPhysicsBody body, bo
     }
 }
 
+void nph_physics_body_set_damping(NphPhysicsWorld *world, NphPhysicsBody body, f32 linear,
+                                  f32 angular)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: body changed during a step");
+    PhysBody *b = checked(world, body);
+    NPH_ASSERT(finite_nonneg(linear) && finite_nonneg(angular));
+    if (b == NULL || !finite_nonneg(linear) || !finite_nonneg(angular)) {
+        return;
+    }
+    b->linear_damping = linear;
+    b->angular_damping = angular;
+}
+
+void nph_physics_body_set_gravity_scale(NphPhysicsWorld *world, NphPhysicsBody body, f32 scale)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: body changed during a step");
+    PhysBody *b = checked(world, body);
+    NPH_ASSERT(nph_f32_is_finite(scale));
+    if (b == NULL || !nph_f32_is_finite(scale) || b->gravity_scale == scale) {
+        return;
+    }
+    b->gravity_scale = scale;
+    if (b->type == NPH_PHYSICS_BODY_DYNAMIC) {
+        NPH_IGNORE_RESULT(phys_wake_body(world, phys_handle_slot(body.value)));
+    }
+}
+
+void nph_physics_body_set_locks(NphPhysicsWorld *world, NphPhysicsBody body, u32 locks)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: body changed during a step");
+    PhysBody *b = checked(world, body);
+    NPH_ASSERT((locks & ~0x3FU) == 0U);
+    if (b == NULL || (locks & ~0x3FU) != 0U) {
+        return;
+    }
+    b->locks = locks;
+}
+
+void nph_physics_body_set_sleep(NphPhysicsWorld *world, NphPhysicsBody body, bool enable,
+                                f32 threshold)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: body changed during a step");
+    PhysBody *b = checked(world, body);
+    NPH_ASSERT(finite_nonneg(threshold));
+    if (b == NULL || !finite_nonneg(threshold)) {
+        return;
+    }
+    b->sleep_threshold = threshold;
+    if (enable) {
+        b->flags |= PHYS_BODY_ENABLE_SLEEP;
+        return;
+    }
+    b->flags &= ~(u32)PHYS_BODY_ENABLE_SLEEP;
+    b->sleep_time = 0.0F;
+    if (b->type != NPH_PHYSICS_BODY_STATIC) {
+        NPH_IGNORE_RESULT(phys_wake_body(world, phys_handle_slot(body.value)));
+    }
+}
+
 bool nph_physics_body_is_awake(const NphPhysicsWorld *world, NphPhysicsBody body)
 {
     const PhysBody *b = checked(world, body);

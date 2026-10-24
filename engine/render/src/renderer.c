@@ -1069,6 +1069,18 @@ NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance in
     return NPH_RESULT_OK;
 }
 
+NphResult nph_render_instance_transform(const NphRenderer *r, NphRenderInstance instance,
+                                        NphRenderTransform *out)
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    const u32 slot = render_slot_of(&r->instance_pool, instance.value);
+    if (slot == NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    *out = r->instances[slot].transform;
+    return NPH_RESULT_OK;
+}
+
 void nph_render_instance_set_hidden(NphRenderer *r, NphRenderInstance instance, bool hidden)
 {
     NPH_ASSERT(r != NULL);
@@ -1168,6 +1180,17 @@ NphResult nph_render_light_update(NphRenderer *r, NphRenderLight light,
     render_vis_light_changed(r, slot);
     render_vsm_light_changed(r, slot);
     render_gi_light_changed(r, slot);
+    return NPH_RESULT_OK;
+}
+
+NphResult nph_render_light_desc(const NphRenderer *r, NphRenderLight light, NphRenderLightDesc *out)
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    const u32 slot = render_slot_of(&r->light_pool, light.value);
+    if (slot == NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    *out = r->lights[slot].desc;
     return NPH_RESULT_OK;
 }
 

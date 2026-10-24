@@ -137,6 +137,20 @@ bool nph_physics_body_is_bullet(const NphPhysicsWorld *world, NphPhysicsBody bod
 // bodies), from the next step.
 void nph_physics_body_set_bullet(NphPhysicsWorld *world, NphPhysicsBody body, bool bullet);
 
+// How the body moves, as its description set it (NphPhysicsBodyDesc),
+// changed in place from the next step: what the runtime does when a game
+// edits a RigidBody component while it plays. Asserted and ignored: a
+// non-finite value, a negative damping or threshold, a lock outside
+// NPH_PHYSICS_LOCK_*. A new gravity scale wakes the body, which now falls
+// differently, as does turning its sleep off; damping, locks, and the
+// threshold take effect when it next moves.
+void nph_physics_body_set_damping(NphPhysicsWorld *world, NphPhysicsBody body, f32 linear,
+                                  f32 angular);
+void nph_physics_body_set_gravity_scale(NphPhysicsWorld *world, NphPhysicsBody body, f32 scale);
+void nph_physics_body_set_locks(NphPhysicsWorld *world, NphPhysicsBody body, u32 locks);
+void nph_physics_body_set_sleep(NphPhysicsWorld *world, NphPhysicsBody body, bool enable,
+                                f32 threshold);
+
 bool nph_physics_body_is_awake(const NphPhysicsWorld *world, NphPhysicsBody body);
 // Wakes the body's island, or puts it to sleep (dynamic and kinematic
 // bodies; ignored on static ones).
