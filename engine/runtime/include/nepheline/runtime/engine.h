@@ -10,14 +10,16 @@
 //
 //   1. window events become input (the host's event hook sees them first);
 //   2. the sync point: the simulation job of the previous frame has
-//      finished, so the world is quiescent. A newer game build is swapped
-//      in here, the game's `frame` and the host's `sync` hook run (the
+//      finished, so the world is quiescent. The scene renderer captures
+//      what the steps moved (for interpolation), a newer game build is
+//      swapped in, the game's `frame` and the host's `sync` hook run (the
 //      editor applies its edits), the world transforms are updated, the
-//      scene renderer mirrors the world, and the world's events are
-//      cleared;
+//      scene renderer mirrors the world, drawing what moves between its
+//      last two simulated states, and the world's events are cleared;
 //   3. the simulation of the next frame starts as a job: the fixed-step
 //      clock decides how many steps, each a run of the schedule (the
-//      game's systems and the transform system) with that step's input;
+//      game's systems, the physics system, and the transform system) with
+//      that step's input;
 //   4. meanwhile this thread records and submits the frame: the renderer's
 //      passes, the host's render hook (the editor's UI), and the present.
 //
@@ -293,6 +295,33 @@ const NphEngineFrameStats *nph_engine_frame_stats(const NphEngine *engine);
 
 // The fixed-step clock (rate from sim.rate).
 const NphFixedClock *nph_engine_clock(const NphEngine *engine);
+
+// ---------------------------------------------------------------------------
+// Physics (docs/runtime.md "Physics")
+// ---------------------------------------------------------------------------
+
+// The physics world while the world plays (NULL otherwise): a body for every
+// entity with a RigidBody or a Collider (components.h), and any the game
+// makes itself. Use it between steps: from the simulation's systems (the
+// physics system, NPH_PHYSICS_SYSTEM_NAME, runs alone), at the sync point,
+// or after nph_engine_wait. Made at play_begin with the phys.* cvars.
+NphPhysicsWorld *nph_engine_physics(NphEngine *engine);
+
+// The body of an entity's RigidBody or Collider while playing, or a null
+// handle (none, not playing, or a body that could not be made).
+NphPhysicsBody nph_engine_physics_body(const NphEngine *engine, NphEntity entity);
+
+// The physics world's statistics after the last step (zeros when not
+// playing).
+const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);
+
+// Draws `entity` and its descendants where they are from the next frame on,
+// rather than between where they were and where they are (sim.interpolate):
+// for a move that is no motion, a teleport or a respawn; the view is a
+// camera cut when its camera is among them. NPH_THREADSAFE: the
+// simulation's systems call it too. The engine resets the bodies it
+// teleports itself (a new LocalTransform for a dynamic or static body).
+void nph_engine_reset_interpolation(NphEngine *engine, NphEntity entity);
 
 #ifdef __cplusplus
 }

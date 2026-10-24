@@ -64,6 +64,16 @@ NPH_INLINE f64 nph_fixed_clock_step_seconds(const NphFixedClock *c)
 // for interpolating between the last two simulated states.
 f64 nph_fixed_clock_alpha(const NphFixedClock *c);
 
+// Where a frame draws the world when the last batch of steps that ran was
+// `steps` long: the fraction of the way from the state before that batch
+// to the state after it, 1 - (1 - alpha) / steps (1 for none). That is the
+// state one step behind the time the clock has reached, which the two
+// states bracket, so what is drawn advances with the frames' real time
+// whatever the frame rate (scene_render.h "Interpolation"; exact between
+// steps when frames take at most one, a straight line through the batch
+// otherwise).
+f64 nph_fixed_clock_blend(const NphFixedClock *c, u32 steps);
+
 // Discards the owed time, keeping the counters: a paused simulation that
 // resumes starts on a step boundary.
 void nph_fixed_clock_reset(NphFixedClock *c);

@@ -69,6 +69,15 @@ f64 nph_fixed_clock_alpha(const NphFixedClock *c)
     return (f64)c->accumulator_ns / (f64)c->step_ns;
 }
 
+f64 nph_fixed_clock_blend(const NphFixedClock *c, u32 steps)
+{
+    NPH_ASSERT(c != NULL);
+    if (steps == 0U) {
+        return 1.0;
+    }
+    return 1.0 - (1.0 - nph_fixed_clock_alpha(c)) / (f64)steps;
+}
+
 void nph_fixed_clock_reset(NphFixedClock *c)
 {
     NPH_ASSERT(c != NULL);

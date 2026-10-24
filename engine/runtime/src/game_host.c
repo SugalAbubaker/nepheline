@@ -901,6 +901,24 @@ u64 nph_game_step(const NphGame *game)
     return game->step;
 }
 
+NphPhysicsWorld *nph_game_physics(const NphGame *game)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_physics(game->engine);
+}
+
+NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_physics_body(game->engine, entity);
+}
+
+void nph_game_reset_interpolation(NphGame *game, NphEntity entity)
+{
+    NPH_ASSERT(game != NULL);
+    engine_reset_interpolation(game->engine, entity);
+}
+
 NphResult nph_game_action(NphGame *game, const char *name, NphActionId *out)
 {
     NPH_ASSERT(game != NULL && name != NULL && out != NULL);

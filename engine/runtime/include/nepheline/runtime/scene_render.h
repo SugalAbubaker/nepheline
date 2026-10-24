@@ -38,9 +38,33 @@
 // sync point). When the stream overflowed, the sync re-validates every
 // entity it mirrors.
 //
+// Interpolation: a world simulated in fixed steps is drawn between its last
+// two simulated states, so motion stays smooth when the frame rate differs
+// from the simulation's (Fiedler, "Fix Your Timestep!", 2004; CLAUDE.md
+// §8.9). The host captures what the simulation moved right after its steps,
+// before anything else changes the world for the frame, and syncs with the
+// fraction of the way from where those things were at the capture before
+// to where they are now:
+//
+//     nph_scene_renderer_capture(sr);                 // after the steps
+//     ... the frame's own changes (a camera rig, an editor) ...
+//     nph_scene_renderer_sync_at(sr, fraction, &st);
+//
+// What the capture saw move (instances, lights, the view's camera) is
+// drawn at the fraction by every sync until the next capture, at which what
+// moved no more comes to rest where it went. What changes after a capture
+// is drawn as it is, its interpolation over (motion at the frame rate needs
+// none), and so is anything drawn the first time. A fraction of 1 draws
+// everything as it is and ends every interpolation (a paused world, single
+// steps, lockstep); nph_scene_renderer_sync is sync_at 1.
+// nph_scene_renderer_snap ends an entity's and its descendants', for a
+// discontinuous move (a teleport, a respawn): drawn where it lands, not on
+// the way there.
+//
 // Costs (§1.4): create allocates the asset cache and an entity table the
-// size of the world's capacity; render resources, asset loads, and the
-// pending list allocate as they grow.
+// size of the world's capacity; render resources, asset loads, the pending
+// list, every mirrored entity's last world transform (64 bytes), and the
+// list of what moves allocate as they grow.
 //
 // Thread-safety: NPH_MAIN_THREAD_ONLY, like the renderer. The sync reads
 // the world while nothing else changes it (the frame's sync point).
@@ -74,9 +98,10 @@ typedef struct NphSceneRenderStats {
     u32 assets_loading; // cached assets not ready yet
     u32 assets_ready;
     u32 assets_failed;
-    u32 created;   // instances created by the last sync
-    u32 destroyed; // instances destroyed by the last sync
-    u32 moved;     // instances whose transform the last sync wrote
+    u32 created;       // instances created by the last sync
+    u32 destroyed;     // instances destroyed by the last sync
+    u32 moved;         // instances whose transform the last sync wrote
+    u32 interpolating; // entities the last sync drew between two simulated states
 } NphSceneRenderStats;
 
 // NPH_RESULT_INVALID_ARGUMENT for a missing field, a world without the
@@ -108,15 +133,38 @@ NphWorld *nph_scene_renderer_world(const NphSceneRenderer *sr);
 // counted, not returned. `out` may be NULL.
 NPH_MUST_USE NphResult nph_scene_renderer_sync(NphSceneRenderer *sr, NphSceneRenderStats *out);
 
+// As nph_scene_renderer_sync, drawing what the last capture saw move at
+// `fraction` (in [0, 1); 1, or anything outside, draws everything as it is
+// and ends the interpolation): see "Interpolation" above.
+NPH_MUST_USE NphResult nph_scene_renderer_sync_at(NphSceneRenderer *sr, f32 fraction,
+                                                  NphSceneRenderStats *out);
+
+// Records what the world's simulation moved since the last sync: every
+// mirrored entity and the view's camera whose world transform changed,
+// where they were then and where they are now. Call it after the steps and
+// before the frame's other changes, then sync_at. Entities the previous
+// capture saw move and this one does not are drawn at rest. The renderer's
+// failures to update an instance or a light (the next sync then looks at
+// every entity again).
+NPH_MUST_USE NphResult nph_scene_renderer_capture(NphSceneRenderer *sr);
+
+// Ends the interpolation of `entity` and of its descendants: they are drawn
+// where they are now (a discontinuous move: a teleport, a respawn), and when
+// the view's camera is among them, the next view is a camera cut. Between a
+// capture and the sync. Nothing for a dead entity.
+void nph_scene_renderer_snap(NphSceneRenderer *sr, NphEntity entity);
+
 // Blocks until every asset in flight has loaded or failed (tests, loading
 // screens). The next sync then creates whatever was waiting.
 void nph_scene_renderer_wait(NphSceneRenderer *sr);
 
 // Fills `view` from the world's first active Camera (by entity slot) as of
-// the last sync: its position, orientation, field of view, near plane,
-// exposure, tonemapper, shutter, and lens (a pinhole where it cannot focus);
-// other fields keep their values. False (and `view` untouched) when the
-// world has no active camera.
+// the last sync: its position and orientation (between its states while
+// interpolating), field of view, near plane, exposure, tonemapper, shutter,
+// and lens (a pinhole where it cannot focus), and `camera_cut` when the
+// sync's camera is another entity than the one before or was snapped
+// (nph_scene_renderer_snap); other fields keep their values. False (and
+// `view` untouched) when the world has no active camera.
 bool nph_scene_renderer_view(const NphSceneRenderer *sr, NphRenderView *view);
 
 // The loaded mesh asset an entity draws, for picking and bounds (READY
@@ -125,6 +173,9 @@ const NphAsset *nph_scene_renderer_mesh_asset(const NphSceneRenderer *sr, NphEnt
 
 // The render instance of an entity, or a null handle while it has none.
 NphRenderInstance nph_scene_renderer_instance(const NphSceneRenderer *sr, NphEntity entity);
+
+// The render light of an entity, or a null handle while it has none.
+NphRenderLight nph_scene_renderer_light(const NphSceneRenderer *sr, NphEntity entity);
 
 // Hides the instance of `entity` whatever its MeshRenderer says, or lets the
 // component decide again: the host draws the entity its own way meanwhile

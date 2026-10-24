@@ -107,6 +107,24 @@ static const NPH_CVAR_BOOL(k_prof_enabled, "prof.enabled", DEV_DEFAULT,
                            "record CPU profiling zones", NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_prof_history, "prof.history", 240, 16, 4096,
                           "frames of profile history", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_BOOL(k_sim_interpolate, "sim.interpolate", 1,
+                           "draw the world between its last two simulated states",
+                           NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_INT(k_phys_solver, "phys.solver", 0, 0, 2,
+                          "0: the soft step, 1: TGS, 2: XPBD (from the next play)",
+                          NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_INT(k_phys_substeps, "phys.substeps", 4, 1, 64,
+                          "solver substeps per step (from the next play)", NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_BOOL(k_phys_sleep, "phys.sleep", 1,
+                           "bodies at rest fall asleep (from the next play)", NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_BOOL(k_phys_continuous, "phys.continuous", 1,
+                           "sweep fast bodies so they do not pass through thin ones (from the "
+                           "next play)",
+                           NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_INT(k_phys_debug_draw, "phys.debug_draw", 0, 0, 63,
+                          "draw the physics world: 1 shapes, 2 boxes, 4 contacts, 8 centres of "
+                          "mass, 16 sleep, 32 joints",
+                          NPH_CVAR_FLAG_NONE);
 
 // The engine's cvars are its members (two engines may coexist), each
 // starting as a copy of its static template.
@@ -145,6 +163,12 @@ static NphResult register_cvars(NphEngine *e)
         &cv->dof,
         &cv->ao,
         &cv->gi,
+        &cv->sim_interpolate,
+        &cv->phys_solver,
+        &cv->phys_substeps,
+        &cv->phys_sleep,
+        &cv->phys_continuous,
+        &cv->phys_debug_draw,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,
@@ -178,6 +202,12 @@ static NphResult register_cvars(NphEngine *e)
         &k_dof,
         &k_ao,
         &k_gi,
+        &k_sim_interpolate,
+        &k_phys_solver,
+        &k_phys_substeps,
+        &k_phys_sleep,
+        &k_phys_continuous,
+        &k_phys_debug_draw,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -375,6 +405,10 @@ static NphResult schedule_create(NphEngine *e, bool with_game)
         r = game_add_systems(e, e->schedule);
     }
     if (r == NPH_RESULT_OK) {
+        // After the game's systems, which move bodies (game.h).
+        r = physics_bridge_add_system(e->physics, e->schedule);
+    }
+    if (r == NPH_RESULT_OK) {
         r = nph_schedule_build(e->schedule);
         if (r != NPH_RESULT_OK) {
             NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "the schedule: %s", nph_schedule_error(e->schedule));
@@ -425,10 +459,12 @@ NphResult engine_world_activate(NphEngine *e, NphWorld *world, bool edit, NphWor
     e->schedule = NULL;
     nph_transform_system_destroy(e->transforms);
     e->transforms = NULL;
-    NphResult r = NPH_RESULT_OK;
+    NphResult r = physics_bridge_set_world(e->physics, e->world);
     if (e->world != NULL) {
-        r = nph_transform_system_create(e->world, engine_alloc(e, ENGINE_ALLOC_WORLD),
-                                        &e->transforms);
+        if (r == NPH_RESULT_OK) {
+            r = nph_transform_system_create(e->world, engine_alloc(e, ENGINE_ALLOC_WORLD),
+                                            &e->transforms);
+        }
         if (r == NPH_RESULT_OK) {
             r = engine_schedule_rebuild(e);
         }
@@ -497,6 +533,7 @@ static NphResult sim_kick(NphEngine *e, u64 now)
     e->step_once = false;
     steps = nph_min_u32(steps, ENGINE_MAX_STEPS);
     e->stats.steps = steps;
+    e->sim_batch = e->schedule != NULL ? steps : 0U;
     e->stats.dropped_ns = clock->dropped_ns;
     if (steps == 0U || e->schedule == NULL) {
         return NPH_RESULT_OK;
@@ -543,10 +580,28 @@ NphResult nph_engine_play_begin(NphEngine *e, bool copy)
     }
     nph_fixed_clock_reset(&e->clock);
     nph_sim_input_reset(&e->sim_acc);
+    // A body for every entity, where it is, before the game's play_begin
+    // (which may join them).
+    NphResult r = nph_transform_system_update(e->transforms, e->jobs);
+    if (r == NPH_RESULT_OK) {
+        r = physics_bridge_begin(e->physics);
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "play did not begin: %s", nph_result_string(r));
+        if (copy) {
+            NphWorld *undo = NULL;
+            NPH_IGNORE_RESULT(engine_world_activate(e, NULL, false, &undo));
+            nph_world_destroy(undo);
+        }
+        return r;
+    }
     e->playing = true;
     e->paused = false;
     e->stats.total_steps = 0U;
-    const NphResult r = game_play_begin(e);
+    e->sim_batch = 0U;
+    e->interp_steps = 0U;
+    nph_atomic_store_u32(&e->reset_count, 0U, NPH_MEMORY_ORDER_RELAXED);
+    r = game_play_begin(e);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "play_begin failed: %s", nph_result_string(r));
         nph_engine_play_end(e);
@@ -562,6 +617,7 @@ void nph_engine_play_end(NphEngine *e)
     }
     NPH_IGNORE_RESULT(engine_sim_wait(e));
     game_play_end(e);
+    physics_bridge_end(e->physics);
     e->playing = false;
     e->paused = false;
     if (e->play_world != NULL) {
@@ -634,8 +690,8 @@ static void choose_view(NphEngine *e, f64 dt)
         e->view = e->view_override;
         cut = e->view_override.camera_cut != 0;
         e->view_override.camera_cut = 0;
-    } else if (e->scene_renderer != NULL) {
-        (void)nph_scene_renderer_view(e->scene_renderer, &e->view);
+    } else if (e->scene_renderer != NULL && nph_scene_renderer_view(e->scene_renderer, &e->view)) {
+        cut = e->view.camera_cut != 0; // another camera, or one reset (a teleport)
     }
     if (e->has_view_override != e->view_was_override) {
         cut = true;
@@ -678,6 +734,44 @@ static void choose_view(NphEngine *e, f64 dt)
     e->view.frame_seconds = (f32)seconds;
 }
 
+// The world is drawn between its last two simulated states while it runs
+// on the clock: not paused, not one step a frame whatever the time.
+static bool interpolating(const NphEngine *e)
+{
+    return e->playing && !e->paused && nph_cvar_get_bool(&e->cv.sim_interpolate) &&
+           !nph_cvar_get_bool(&e->cv.lockstep);
+}
+
+// What the simulation just moved, for the frame to draw between its states,
+// and the entities to draw where they are (interpolation resets); returns
+// whether interpolation goes on this frame (false when more resets came than
+// it keeps: every entity is drawn where it is).
+static bool capture_motion(NphEngine *e)
+{
+    const u32 batch = e->sim_batch;
+    e->sim_batch = 0U;
+    const u32 resets = nph_atomic_load_u32(&e->reset_count, NPH_MEMORY_ORDER_RELAXED);
+    nph_atomic_store_u32(&e->reset_count, 0U, NPH_MEMORY_ORDER_RELAXED);
+    if (e->scene_renderer == NULL || !interpolating(e)) {
+        return false;
+    }
+    if (batch > 0U) {
+        const NphResult r = nph_scene_renderer_capture(e->scene_renderer);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "capturing the motion: %s", nph_result_string(r));
+        }
+        e->interp_steps = batch;
+    }
+    if (resets > ENGINE_MAX_RESETS) {
+        return false;
+    }
+    for (u32 i = 0; i < resets; ++i) {
+        const NphEntity entity = {e->resets[i]};
+        nph_scene_renderer_snap(e->scene_renderer, entity);
+    }
+    return true;
+}
+
 // The sync point: the world is quiescent from here to the simulation's
 // start.
 static NphResult sync_point(NphEngine *e, f64 dt)
@@ -690,6 +784,7 @@ static NphResult sync_point(NphEngine *e, f64 dt)
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "the simulation failed (%s); paused", nph_result_string(r));
         e->paused = true;
     }
+    const bool interpolate = capture_motion(e);
     if (nph_cvar_get_bool(&e->cv.hot_reload)) {
         bool reloaded = false;
         NPH_IGNORE_RESULT(game_poll_reload(e, false, &reloaded)); // logged; the old build runs on
@@ -706,10 +801,14 @@ static NphResult sync_point(NphEngine *e, f64 dt)
         r = nph_transform_system_update(e->transforms, e->jobs);
     }
     if (r == NPH_RESULT_OK && e->scene_renderer != NULL) {
-        r = nph_scene_renderer_sync(e->scene_renderer, &e->stats.scene);
+        const f32 fraction =
+            interpolate ? (f32)nph_fixed_clock_blend(&e->clock, e->interp_steps) : 1.0F;
+        r = nph_scene_renderer_sync_at(e->scene_renderer, fraction, &e->stats.scene);
     }
+    physics_bridge_sync(e->physics);
     nph_world_clear_events(e->world);
     if (r == NPH_RESULT_OK && e->renderer != NULL) {
+        physics_bridge_draw(e->physics, e->renderer, (u32)nph_cvar_get_int(&e->cv.phys_debug_draw));
         nph_render_debug_flip(e->renderer);
     }
     choose_view(e, dt);
@@ -1078,8 +1177,8 @@ static const EngineCommand g_commands[] = {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-static const char *const g_alloc_tags[ENGINE_ALLOC_COUNT] = {"engine", "world", "render", "assets",
-                                                             "game"};
+static const char *const g_alloc_tags[ENGINE_ALLOC_COUNT] = {"engine", "world", "render",
+                                                             "assets", "game",  "physics"};
 
 static NphResult start_profiling(NphEngine *e)
 {
@@ -1221,6 +1320,8 @@ static NphResult start_world(NphEngine *e)
 {
     NPH_TRY(engine_world_create(e, NULL, &e->edit_world));
     e->world = e->edit_world;
+    NPH_TRY(physics_bridge_create(e, &e->physics));
+    NPH_TRY(physics_bridge_set_world(e->physics, e->world));
     NPH_TRY(
         nph_transform_system_create(e->world, engine_alloc(e, ENGINE_ALLOC_WORLD), &e->transforms));
     NPH_TRY(engine_schedule_rebuild(e));
@@ -1368,6 +1469,7 @@ void nph_engine_destroy(NphEngine *e)
     forget_names(e);
     nph_schedule_destroy(e->schedule);
     nph_transform_system_destroy(e->transforms);
+    physics_bridge_destroy(e->physics);
     nph_world_destroy(e->play_world);
     nph_world_destroy(e->edit_world);
     e->world = NULL;
@@ -1612,4 +1714,40 @@ const NphFixedClock *nph_engine_clock(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);
     return &e->clock;
+}
+
+// ---------------------------------------------------------------------------
+// Physics
+// ---------------------------------------------------------------------------
+
+NphPhysicsWorld *nph_engine_physics(NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    return e->physics != NULL ? physics_bridge_world(e->physics) : NULL;
+}
+
+NphPhysicsBody nph_engine_physics_body(const NphEngine *e, NphEntity entity)
+{
+    NPH_ASSERT(e != NULL);
+    return e->physics != NULL ? physics_bridge_body(e->physics, entity) : NPH_PHYSICS_BODY_NULL;
+}
+
+const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *e)
+{
+    NPH_ASSERT(e != NULL && e->physics != NULL);
+    return physics_bridge_stats(e->physics);
+}
+
+void engine_reset_interpolation(NphEngine *e, NphEntity entity)
+{
+    const u32 i = nph_atomic_fetch_add_u32(&e->reset_count, 1U, NPH_MEMORY_ORDER_RELAXED);
+    if (i < ENGINE_MAX_RESETS) {
+        e->resets[i] = entity.value;
+    }
+}
+
+void nph_engine_reset_interpolation(NphEngine *e, NphEntity entity)
+{
+    NPH_ASSERT(e != NULL);
+    engine_reset_interpolation(e, entity);
 }

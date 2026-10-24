@@ -11,6 +11,9 @@
 //   Camera        a perspective camera at the entity, looking along -Z;
 //                 the first active one is the game's view
 //   Environment   the sky that lights the world (the first one found)
+//   RigidBody     a body the physics world moves while the world plays
+//   Collider      the shape of the entity's body, or a static body of its
+//                 own
 //
 // Every world the engine creates registers them right after the built-in
 // components (scene/world.h), in this order, so their ids are the same in
@@ -133,15 +136,101 @@ NPH_COMPONENT_DECLARE(NphCamera);
 NPH_COMPONENT_STRUCT(NphEnvironment, NPH_ENVIRONMENT_FIELDS);
 NPH_COMPONENT_DECLARE(NphEnvironment);
 
+// ---------------------------------------------------------------------------
+// Physics (docs/runtime.md "Physics"; docs/adr/0050-physics-in-the-engine.md)
+// ---------------------------------------------------------------------------
+//
+// While the world plays, the engine gives every entity with a RigidBody or
+// a Collider a body in its physics world (physics/world.h), placed where
+// the entity is and shaped by its Collider: a Collider without a RigidBody
+// is a static body, and a RigidBody without a Collider a point of 1 kg
+// (or of `mass`). A dynamic body moves its entity: each step writes its
+// pose into the entity's LocalTransform and its velocities into its
+// RigidBody. The game moves bodies by writing their components:
+//   - new velocities, or any other RigidBody field, change the body;
+//   - a new LocalTransform teleports a dynamic or static body there, and
+//     moves a kinematic one there over the step (pushing what it meets on
+//     the way), after which it stops unless moved again or given a
+//     velocity;
+//   - a new Collider makes the body's shape again (and its mass).
+// Bodies move in the world: a dynamic body's parent moving does not carry
+// it (its LocalTransform is written relative to wherever the parent is), a
+// static or kinematic one follows its parent.
+
+typedef enum NphRigidBodyType {
+    NPH_RIGID_BODY_STATIC = 0,    // stays where the game puts it: the level
+    NPH_RIGID_BODY_KINEMATIC = 1, // moved by the game, pushes, is never pushed: platforms, doors
+    NPH_RIGID_BODY_DYNAMIC = 2,   // moved by gravity, forces, and contacts
+} NphRigidBodyType;
+
+// `mass`: kg, or 0 for the Collider's (its volume times its density).
+// Velocities: of the centre of mass, in world axes (radians per second for
+// the angular one). Damping: per second (physics/body.h). `locks`: the
+// world axes the body does not move along or turn about
+// (NPH_PHYSICS_LOCK_* bits). `bullet`: a fast projectile, swept against
+// moving bodies too, not only static ones. `can_sleep`: the body may fall
+// asleep when it comes to rest, which makes it free until something wakes
+// it.
+#define NPH_RIGID_BODY_FIELDS(F)                                                                   \
+    F(U32, type, NPH_FIELD_RANGE(0.0F, 2.0F))                                                      \
+    F(F32, mass, NPH_FIELD_RANGE(0.0F, 100000.0F))                                                 \
+    F(VEC3, linear_velocity, NPH_FIELD_NO_HINTS)                                                   \
+    F(VEC3, angular_velocity, NPH_FIELD_NO_HINTS)                                                  \
+    F(F32, linear_damping, NPH_FIELD_RANGE(0.0F, 100.0F))                                          \
+    F(F32, angular_damping, NPH_FIELD_RANGE(0.0F, 100.0F))                                         \
+    F(F32, gravity_scale, NPH_FIELD_RANGE(-10.0F, 10.0F))                                          \
+    F(U32, locks, NPH_FIELD_RANGE(0.0F, 63.0F))                                                    \
+    F(BOOL, bullet, NPH_FIELD_NO_HINTS)                                                            \
+    F(BOOL, can_sleep, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphRigidBody, NPH_RIGID_BODY_FIELDS);
+NPH_COMPONENT_DECLARE(NphRigidBody);
+
+typedef enum NphColliderShape {
+    NPH_COLLIDER_SPHERE = 0,
+    NPH_COLLIDER_CAPSULE = 1, // its core along the entity's Y
+    NPH_COLLIDER_BOX = 2,
+} NphColliderShape;
+
+// A sphere (`radius`), a capsule (`radius` around a core 2 * `half_height`
+// long), or a box (`half_extents`), at `center` and `rotation` in the
+// entity's frame, scaled by the entity's world scale: a box along each of
+// its axes, a sphere by the largest, a capsule's core by Y and its radius
+// by the larger of X and Z. Its material: `density` in kg/m^3, `friction`,
+// and `restitution`. Its filter (physics/shape.h NphPhysicsFilter): two
+// shapes touch when each one's category bits meet the other's mask, unless
+// they share a group (negative: never; positive: always). `hit_events`:
+// report hits above the world's threshold (physics/world.h).
+#define NPH_COLLIDER_FIELDS(F)                                                                     \
+    F(U32, shape, NPH_FIELD_RANGE(0.0F, 2.0F))                                                     \
+    F(F32, radius, NPH_FIELD_RANGE(0.001F, 100.0F))                                                \
+    F(F32, half_height, NPH_FIELD_RANGE(0.0F, 100.0F))                                             \
+    F(VEC3, half_extents, NPH_FIELD_NO_HINTS)                                                      \
+    F(VEC3, center, NPH_FIELD_NO_HINTS)                                                            \
+    F(QUAT, rotation, NPH_FIELD_NO_HINTS)                                                          \
+    F(F32, density, NPH_FIELD_RANGE(0.0F, 20000.0F))                                               \
+    F(F32, friction, NPH_FIELD_RANGE(0.0F, 2.0F))                                                  \
+    F(F32, restitution, NPH_FIELD_RANGE(0.0F, 1.0F))                                               \
+    F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
+    F(U64, mask, NPH_FIELD_NO_HINTS)                                                               \
+    F(I32, group, NPH_FIELD_NO_HINTS)                                                              \
+    F(BOOL, hit_events, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphCollider, NPH_COLLIDER_FIELDS);
+NPH_COMPONENT_DECLARE(NphCollider);
+
+NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
+NPH_STATIC_ASSERT(sizeof(NphCollider) == 88U, "Collider is 88 bytes");
+
 // The ids of the runtime's components in a world.
 typedef struct NphRuntimeComponents {
     NphComponentId mesh_renderer;
     NphComponentId light;
     NphComponentId camera;
     NphComponentId environment;
+    NphComponentId rigid_body;
+    NphComponentId collider;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 4U
+#define NPH_RUNTIME_COMPONENT_COUNT 6U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

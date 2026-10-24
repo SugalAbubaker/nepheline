@@ -14,12 +14,13 @@ nph_add_module(runtime
         src/engine.c
         src/engine_internal.h
         src/game_host.c
+        src/physics_bridge.c
         src/render_assets.c
         src/runtime_internal.h
         src/scene_import.c
         src/scene_render.c
         src/sim_input.c
-    PUBLIC_DEPS nph::render nph::asset nph::scene nph::profile
+    PUBLIC_DEPS nph::render nph::asset nph::scene nph::physics nph::profile
 )
 if(MSVC)
     target_compile_definitions(nph_runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -45,6 +46,7 @@ nph_add_test(runtime
         tests/test_clock.c
         tests/test_console.c
         tests/test_engine.c
+        tests/test_physics_bridge.c
         tests/test_scene_render.c
         tests/test_sim_input.c
     DEPS

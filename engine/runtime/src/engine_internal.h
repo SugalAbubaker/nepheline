@@ -4,6 +4,8 @@
 // The engine and the game host, shared by engine.c and game_host.c.
 
 #include <nepheline/core/array.h>
+#include <nepheline/core/atomic.h>
+#include <nepheline/physics/world.h>
 #include <nepheline/platform/dylib.h>
 #include <nepheline/platform/input.h>
 #include <nepheline/profile/memory.h>
@@ -16,7 +18,8 @@
 #define GAME_PATH_MAX     512U
 #define GAME_MAX_COMMANDS 64U
 #define GAME_MAX_RETIRED  16U
-#define ENGINE_MAX_STEPS  64U // sim.max_steps's ceiling: the step inputs of one frame
+#define ENGINE_MAX_STEPS  64U  // sim.max_steps's ceiling: the step inputs of one frame
+#define ENGINE_MAX_RESETS 256U // interpolation resets one frame keeps (beyond: every one)
 
 // ---------------------------------------------------------------------------
 // The game host (game_host.c)
@@ -133,6 +136,12 @@ typedef struct EngineCvars {
     NphCvar dof;                   // r.dof
     NphCvar ao;                    // r.ao
     NphCvar gi;                    // r.gi
+    NphCvar sim_interpolate;       // sim.interpolate
+    NphCvar phys_solver;           // phys.solver: NphPhysicsSolver
+    NphCvar phys_substeps;         // phys.substeps
+    NphCvar phys_sleep;            // phys.sleep
+    NphCvar phys_continuous;       // phys.continuous
+    NphCvar phys_debug_draw;       // phys.debug_draw: NPH_PHYSICS_DRAW_* bits
 } EngineCvars;
 
 typedef enum EngineAllocTag {
@@ -141,8 +150,41 @@ typedef enum EngineAllocTag {
     ENGINE_ALLOC_RENDER,
     ENGINE_ALLOC_ASSETS,
     ENGINE_ALLOC_GAME,
+    ENGINE_ALLOC_PHYSICS,
     ENGINE_ALLOC_COUNT,
 } EngineAllocTag;
+
+// ---------------------------------------------------------------------------
+// The physics bridge (physics_bridge.c): the active world's RigidBody and
+// Collider components as bodies of a physics world while playing.
+// ---------------------------------------------------------------------------
+
+typedef struct PhysicsBridge PhysicsBridge;
+
+NPH_MUST_USE NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out);
+void physics_bridge_destroy(PhysicsBridge *b);
+// Follows the active world (its queries). While playing, a world rebuilt
+// with the same handles (a reload's migration) keeps the bodies, compared
+// with the new world's components at the next step.
+NPH_MUST_USE NphResult physics_bridge_set_world(PhysicsBridge *b, NphWorld *world);
+// Play: the physics world (phys.* cvars) and a body for every entity, with
+// the world's transforms up to date.
+NPH_MUST_USE NphResult physics_bridge_begin(PhysicsBridge *b);
+void physics_bridge_end(PhysicsBridge *b);
+// The schedule's physics system (NPH_PHYSICS_SYSTEM_NAME), after the
+// systems added so far and before the transform system.
+NPH_MUST_USE NphResult physics_bridge_add_system(PhysicsBridge *b, NphSchedule *schedule);
+// At the sync point, before the world's events are cleared: what went
+// since the last step.
+void physics_bridge_sync(PhysicsBridge *b);
+// The physics world's debug lines (NPH_PHYSICS_DRAW_* `flags`), into the
+// renderer's list for this frame.
+void physics_bridge_draw(const PhysicsBridge *b, NphRenderer *r, u32 flags);
+NphPhysicsWorld *physics_bridge_world(const PhysicsBridge *b);
+NphPhysicsBody physics_bridge_body(const PhysicsBridge *b, NphEntity e);
+// The physics world's statistics after the last step (zeroed when not
+// playing).
+const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
 
 struct NphEngine {
     NphAllocator *backing;
@@ -190,18 +232,25 @@ struct NphEngine {
     NphRuntimeComponents ids;
     NphTransformSystem *transforms; // of the active world
     NphSchedule *schedule;          // of the active world
+    PhysicsBridge *physics;
 
     // The simulation.
     NphFixedClock clock;
     NphSimInputAccumulator sim_acc;
     NphSimInput step_inputs[ENGINE_MAX_STEPS];
     u32 sim_steps; // the steps of the job in flight (or the next inline run)
+    u32 sim_batch; // steps the last kick started (0 when it started none)
     NphJobCounter sim_counter;
     bool sim_in_flight;
     NphResult sim_result;
     bool playing;
     bool paused;
     bool step_once;
+    // Interpolation (scene_render.h): the length of the last batch of steps
+    // the scene renderer captured, and the entities to draw where they are.
+    u32 interp_steps;
+    NphAtomicU32 reset_count;
+    u32 resets[ENGINE_MAX_RESETS];
 
     // The game.
     NphGame game;
@@ -224,6 +273,9 @@ NPH_INLINE NphAllocator *engine_alloc(NphEngine *e, EngineAllocTag tag)
 // Waits for the simulation job in flight, if any, and returns its result
 // (the world is quiescent afterwards).
 NPH_MUST_USE NphResult engine_sim_wait(NphEngine *e);
+
+// nph_engine_reset_interpolation: thread-safe, from systems too.
+void engine_reset_interpolation(NphEngine *e, NphEntity entity);
 
 // Creates an empty world registered with the runtime's components and the
 // components of `set` (may be NULL), whose descriptors must outlive it.

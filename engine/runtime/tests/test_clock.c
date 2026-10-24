@@ -26,6 +26,43 @@ NTEST(clock, steps_follow_real_time)
     NTEST_ASSERT_EQ_UINT(c.dropped_ns, 0U);
 }
 
+// Drawing at the blend of the last batch, the world is shown one step
+// behind real time: it advances by exactly each frame's time, whatever the
+// frames take, from several steps to none.
+NTEST(clock, the_blend_draws_at_the_pace_of_real_time)
+{
+    NphFixedClock c;
+    nph_fixed_clock_init(&c, 100U, 64U); // 10 ms steps
+    NTEST_ASSERT_NEAR_F64(nph_fixed_clock_blend(&c, 0U), 1.0, 0.0);
+    u64 now = 1000U * MS;
+    (void)nph_fixed_clock_advance(&c, now);
+    const u64 frames[12] = {3U * MS,  4U * MS,  7U * MS, 25U * MS, 1U * MS,  9U * MS,
+                            10U * MS, 33U * MS, 2U * MS, 2U * MS,  16U * MS, 6U * MS};
+    u64 simulated = 0U; // steps
+    u32 last_batch = 0U;
+    f64 drawn_before = 0.0;
+    for (u32 i = 0; i < 12U; ++i) {
+        now += frames[i];
+        const u32 steps = nph_fixed_clock_advance(&c, now);
+        simulated += steps;
+        last_batch = steps != 0U ? steps : last_batch;
+        if (last_batch == 0U) {
+            continue; // nothing simulated yet
+        }
+        const f64 blend = nph_fixed_clock_blend(&c, last_batch);
+        NTEST_ASSERT_TRUE(blend >= 0.0 && blend < 1.0);
+        const f64 after = (f64)simulated * 0.01;
+        const f64 before = after - (f64)last_batch * 0.01;
+        const f64 drawn = before + blend * (after - before);
+        const f64 real = (f64)(now - 1000U * MS) * 1e-9;
+        NTEST_EXPECT_NEAR_F64(drawn, real - 0.01, 1e-12);
+        if (i > 0U && drawn_before > 0.0) {
+            NTEST_EXPECT_NEAR_F64(drawn - drawn_before, (f64)frames[i] * 1e-9, 1e-12);
+        }
+        drawn_before = drawn;
+    }
+}
+
 NTEST(clock, a_stall_is_capped_and_the_excess_dropped)
 {
     NphFixedClock c;

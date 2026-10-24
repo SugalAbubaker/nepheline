@@ -750,6 +750,221 @@ NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
     scene_teardown(&fx);
 }
 
+// ---------------------------------------------------------------------------
+// Interpolation
+// ---------------------------------------------------------------------------
+
+// A simulation step's end: the world transforms composed, as the step's
+// transform system does, and the scene renderer's capture.
+static void step_and_capture(SceneFixture *f)
+{
+    NTEST_ASSERT_EQ_INT(nph_transform_system_update(f->transforms, f->jobs), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_capture(f->sr), NPH_RESULT_OK);
+}
+
+// The rest of a frame: its own changes composed, the sync at `fraction`, the
+// world's events cleared.
+static NphSceneRenderStats draw_at(SceneFixture *f, f32 fraction)
+{
+    NTEST_ASSERT_EQ_INT(nph_transform_system_update(f->transforms, f->jobs), NPH_RESULT_OK);
+    NphSceneRenderStats st;
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_sync_at(f->sr, fraction, &st), NPH_RESULT_OK);
+    nph_world_clear_events(f->world);
+    return st;
+}
+
+static NphRenderTransform drawn(const SceneFixture *f, NphEntity e)
+{
+    NphRenderTransform t;
+    NTEST_ASSERT_EQ_INT(
+        nph_render_instance_transform(f->rf.renderer, nph_scene_renderer_instance(f->sr, e), &t),
+        NPH_RESULT_OK);
+    return t;
+}
+
+static NphWorldTransform world_of(const SceneFixture *f, NphEntity e)
+{
+    const NphWorldTransform *wt =
+        NPH_WORLD_GET(f->world, e, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+    NTEST_ASSERT_NOT_NULL(wt);
+    return *wt;
+}
+
+NTEST(SceneRender, what_the_simulation_moved_is_drawn_between_its_states)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx);
+    const NphEntity torus = named(&fx, "torus");
+    const NphEntity stage = named(&fx, "stage");
+    const f64 x0 = world_of(&fx, torus).translation.x;
+
+    // A step moves it a metre: drawn a quarter and three quarters of the way
+    // by two frames, the second without a step of its own.
+    local(&fx, torus)->translation.x += 1.0;
+    step_and_capture(&fx);
+    NphSceneRenderStats st = draw_at(&fx, 0.25F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 1U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, x0 + 0.25, 1e-6);
+    st = draw_at(&fx, 0.75F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 1U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, x0 + 0.75, 1e-6);
+    // The next step moves it on, from where the last one left it.
+    local(&fx, torus)->translation.x += 1.0;
+    step_and_capture(&fx);
+    (void)draw_at(&fx, 0.5F);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, x0 + 1.5, 1e-6);
+    // A step that does not move it: at rest where it went.
+    step_and_capture(&fx);
+    st = draw_at(&fx, 0.5F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, x0 + 2.0, 1e-9);
+
+    // A turn of 90 degrees is drawn half turned, its size kept (not the
+    // columns' average, 0.71 long).
+    const NphWorldTransform before = world_of(&fx, torus);
+    local(&fx, torus)->rotation =
+        nph_quat_mul(nph_quat_from_rotation_y(1.5707964F), local(&fx, torus)->rotation);
+    step_and_capture(&fx);
+    (void)draw_at(&fx, 0.5F);
+    const NphRenderTransform half = drawn(&fx, torus);
+    const NphWorldTransform after = world_of(&fx, torus);
+    for (u32 c = 0; c < 3U; ++c) {
+        const NphVec3 axis = c == 0U ? before.x_axis : c == 1U ? before.y_axis : before.z_axis;
+        NTEST_EXPECT_NEAR_F32(nph_vec3_length(half.linear.c[c]), nph_vec3_length(axis), 1e-5F);
+    }
+    const NphVec3 x_from = nph_vec3_normalize(before.x_axis);
+    const NphVec3 x_to = nph_vec3_normalize(after.x_axis);
+    const NphVec3 x_half = nph_vec3_normalize(half.linear.c[0]);
+    NTEST_EXPECT_NEAR_F32(nph_vec3_dot(x_half, x_from), 0.70710678F, 1e-4F);
+    NTEST_EXPECT_NEAR_F32(nph_vec3_dot(x_half, x_to), 0.70710678F, 1e-4F);
+    step_and_capture(&fx); // at rest
+
+    // A change after the capture (at the frame rate) is drawn as it is.
+    local(&fx, torus)->translation.x += 1.0;
+    step_and_capture(&fx);
+    local(&fx, torus)->translation.x += 5.0;
+    st = draw_at(&fx, 0.5F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, x0 + 8.0, 1e-9);
+
+    // A snapped entity is drawn where it is, its descendants with it: the
+    // stage teleported carries the torus.
+    local(&fx, stage)->translation.x += 1.0;
+    step_and_capture(&fx);
+    nph_scene_renderer_snap(fx.sr, stage);
+    st = draw_at(&fx, 0.5F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, world_of(&fx, torus).translation.x,
+                          1e-9);
+    // A fraction of 1 draws everything as it is and ends the interpolation.
+    local(&fx, torus)->translation.x += 1.0;
+    step_and_capture(&fx);
+    (void)draw_at(&fx, 0.5F);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, world_of(&fx, torus).translation.x - 0.5,
+                          1e-6);
+    st = draw_at(&fx, 1.0F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, world_of(&fx, torus).translation.x,
+                          1e-9);
+    st = draw_at(&fx, 0.5F); // and stays so
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_NEAR_F64(drawn(&fx, torus).translation.x, world_of(&fx, torus).translation.x,
+                          1e-9);
+    // Despawned while moving: gone from the interpolation too.
+    local(&fx, torus)->translation.x += 1.0;
+    step_and_capture(&fx);
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, torus), NPH_RESULT_OK);
+    st = draw_at(&fx, 0.5F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 0U);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    scene_teardown(&fx);
+}
+
+NTEST(SceneRender, lights_and_the_camera_move_between_their_states_too)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx);
+    // The sun turns 60 degrees about Z in a step: half way, 30.
+    const NphEntity sun = named(&fx, "sun");
+    const NphVec3 dir_from = nph_vec3_neg(nph_vec3_normalize(world_of(&fx, sun).z_axis));
+    local(&fx, sun)->rotation =
+        nph_quat_mul(nph_quat_from_rotation_z(1.0471976F), local(&fx, sun)->rotation);
+    step_and_capture(&fx);
+    const NphSceneRenderStats st = draw_at(&fx, 0.5F);
+    NTEST_EXPECT_EQ_UINT(st.interpolating, 1U);
+    NphSceneRenderer *sr = fx.sr;
+    NphRenderLightDesc ld;
+    NTEST_ASSERT_EQ_INT(
+        nph_render_light_desc(fx.rf.renderer, nph_scene_renderer_light(sr, sun), &ld),
+        NPH_RESULT_OK);
+    // Turned half way about Z: 30 degrees.
+    const NphVec3 want = nph_quat_rotate(nph_quat_from_rotation_z(0.5235988F), dir_from);
+    NTEST_EXPECT_NEAR_F32(nph_vec3_dot(nph_vec3_normalize(ld.direction), want), 1.0F, 1e-5F);
+    NTEST_EXPECT_TRUE(nph_render_light_is_valid(fx.rf.renderer, nph_scene_renderer_light(sr, sun)));
+    NTEST_EXPECT_FALSE(nph_render_light_is_valid(
+        fx.rf.renderer, nph_scene_renderer_light(sr, named(&fx, "torus"))));
+
+    // A camera carried by the simulation is drawn between its states; one
+    // moved at the frame rate where it is; another camera is a cut, and so
+    // is a snapped one.
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, fx.ids.camera};
+    NphEntity cam;
+    NphEntity other;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(fx.world, comps, 3U, &cam), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(fx.world, comps, 3U, &other), NPH_RESULT_OK);
+    ((NphCamera *)nph_world_get_mut(fx.world, other, fx.ids.camera))->active = 0;
+    local(&fx, other)->translation.x = 50.0;
+    (void)draw_at(&fx, 1.0F);
+    NphRenderView view = test_view();
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_FALSE(view.camera_cut); // the first camera there is
+    local(&fx, cam)->translation.x = 2.0;
+    step_and_capture(&fx);
+    (void)draw_at(&fx, 0.25F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_NEAR_F64(view.camera.position.x, 0.5, 1e-6);
+    NTEST_EXPECT_FALSE(view.camera_cut);
+    (void)draw_at(&fx, 0.75F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_NEAR_F64(view.camera.position.x, 1.5, 1e-6);
+    local(&fx, cam)->translation.x = 3.0; // the frame's own move
+    (void)draw_at(&fx, 0.75F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_NEAR_F64(view.camera.position.x, 3.0, 1e-9);
+    // Another camera.
+    ((NphCamera *)nph_world_get_mut(fx.world, cam, fx.ids.camera))->active = 0;
+    ((NphCamera *)nph_world_get_mut(fx.world, other, fx.ids.camera))->active = 1;
+    (void)draw_at(&fx, 1.0F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_NEAR_F64(view.camera.position.x, 50.0, 1e-9);
+    NTEST_EXPECT_TRUE(view.camera_cut);
+    (void)draw_at(&fx, 1.0F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_FALSE(view.camera_cut);
+    // Snapped: a cut, drawn where it is.
+    local(&fx, other)->translation.x = 60.0;
+    step_and_capture(&fx);
+    nph_scene_renderer_snap(sr, other);
+    (void)draw_at(&fx, 0.5F);
+    NTEST_ASSERT_TRUE(nph_scene_renderer_view(sr, &view));
+    NTEST_EXPECT_NEAR_F64(view.camera.position.x, 60.0, 1e-9);
+    NTEST_EXPECT_TRUE(view.camera_cut);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, create_refuses_an_unprepared_world)
 {
     static SceneFixture fx;

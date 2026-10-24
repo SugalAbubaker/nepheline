@@ -65,6 +65,7 @@
 // (scene/schedule.h), on the job system.
 
 #include <nepheline/core/cvar.h>
+#include <nepheline/physics/world.h>
 #include <nepheline/runtime/console.h>
 #include <nepheline/runtime/sim_input.h>
 #include <nepheline/scene/schedule.h>
@@ -79,6 +80,12 @@ extern "C" {
 
 // The exported entry point's name.
 #define NPH_GAME_ENTRY_NAME "nph_game_entry"
+
+// The engine's physics system in the schedule: it steps the physics world
+// once per step, after the game's systems (they run before it unless they
+// ask otherwise) and before the transform system. A system that reacts to
+// this step's contacts or poses runs `after` it.
+#define NPH_PHYSICS_SYSTEM_NAME "nph.physics"
 
 // Marks the entry point (core/base.h NPH_EXPORT).
 #define NPH_GAME_EXPORT NPH_EXPORT
@@ -115,8 +122,9 @@ typedef struct NphGameApi {
     void (*unload)(NphGame *game, b32 reloading);
     // Adds the game's systems to the fixed-step simulation. The engine's
     // transform system is in the schedule already (scene/transform.h
-    // NPH_TRANSFORM_SYSTEM_NAME); systems that need this step's world
-    // transforms run after it.
+    // NPH_TRANSFORM_SYSTEM_NAME), and its physics system follows the game's
+    // (NPH_PHYSICS_SYSTEM_NAME); systems that need this step's world
+    // transforms run after the transform system.
     NphResult (*add_systems)(NphGame *game, NphSchedule *schedule);
     // Once per frame at the sync point, at the frame rate (`dt`: the
     // frame's real duration), whether or not the world simulates: cameras
@@ -160,6 +168,21 @@ const NphSimInput *nph_game_input(const NphGame *game);
 // The fixed step, in seconds, and the steps simulated since play began.
 f64 nph_game_step_seconds(const NphGame *game);
 u64 nph_game_step(const NphGame *game);
+
+// The physics world while playing, or NULL (engine.h nph_engine_physics):
+// queries, characters, joints, events, bodies of the game's own. Systems
+// that change bodies declare a write of RigidBody, so that two of them never
+// run at once; systems that only query declare a read.
+NphPhysicsWorld *nph_game_physics(const NphGame *game);
+
+// The body of an entity's RigidBody or Collider while playing, or a null
+// handle.
+NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity);
+
+// Draws `entity` and its descendants where they are from the next frame,
+// not between where they were and where they are: a teleport, a respawn
+// (engine.h nph_engine_reset_interpolation). NPH_THREADSAFE.
+void nph_game_reset_interpolation(NphGame *game, NphEntity entity);
 
 // The input action named `name`, registered with the engine's input on
 // first use (unbound until bindings are added through the engine's input).

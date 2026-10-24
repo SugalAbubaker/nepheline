@@ -32,11 +32,44 @@ static const NphEnvironment g_environment_defaults = {
 NPH_COMPONENT_DEFINE(NphEnvironment, NPH_ENVIRONMENT_FIELDS, "Environment", 0U,
                      &g_environment_defaults)
 
+// A dynamic body with its Collider's mass, undamped, under gravity, free to
+// sleep.
+static const NphRigidBody g_rigid_body_defaults = {(u32)NPH_RIGID_BODY_DYNAMIC,
+                                                   0.0F,
+                                                   {0.0F, 0.0F, 0.0F},
+                                                   {0.0F, 0.0F, 0.0F},
+                                                   0.0F,
+                                                   0.0F,
+                                                   1.0F,
+                                                   0U,
+                                                   0,
+                                                   1};
+NPH_COMPONENT_DEFINE(NphRigidBody, NPH_RIGID_BODY_FIELDS, "RigidBody", 0U, &g_rigid_body_defaults)
+
+// The unit cube the editor's primitive is, of water, with the physics
+// module's default friction and filter (physics/shape.h).
+static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
+                                                0.5F,
+                                                0.5F,
+                                                {0.5F, 0.5F, 0.5F},
+                                                {0.0F, 0.0F, 0.0F},
+                                                {0.0F, 0.0F, 0.0F, 1.0F},
+                                                1000.0F,
+                                                0.6F,
+                                                0.0F,
+                                                1U,
+                                                NPH_U64_MAX,
+                                                0,
+                                                0};
+NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
+
 NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents *out)
 {
     NPH_ASSERT(world != NULL && out != NULL);
     NPH_TRY(nph_world_register_component(world, NphMeshRenderer_component(), &out->mesh_renderer));
     NPH_TRY(nph_world_register_component(world, NphLight_component(), &out->light));
     NPH_TRY(nph_world_register_component(world, NphCamera_component(), &out->camera));
-    return nph_world_register_component(world, NphEnvironment_component(), &out->environment);
+    NPH_TRY(nph_world_register_component(world, NphEnvironment_component(), &out->environment));
+    NPH_TRY(nph_world_register_component(world, NphRigidBody_component(), &out->rigid_body));
+    return nph_world_register_component(world, NphCollider_component(), &out->collider);
 }
