@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "executable": "runtime_bench.exe",
+  "timestamp": "2026-10-24T18:35:20Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "engine_frame_headless", "label": "", "iterations": 54875, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 4053.460, "min_ns_per_op": 3944.093, "max_ns_per_op": 4660.501},
+    {"name": "engine_frame_headless_10k", "label": "", "iterations": 35642, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 6698.404, "min_ns_per_op": 6549.172, "max_ns_per_op": 6872.611},
+    {"name": "engine_frame_headless_10k_moving", "label": "", "iterations": 5562, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 47377.382, "min_ns_per_op": 45465.750, "max_ns_per_op": 66515.444},
+    {"name": "engine_play_copy_10k", "label": "", "iterations": 90, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 2264937.778, "min_ns_per_op": 2250855.556, "max_ns_per_op": 2791257.778},
+    {"name": "engine_frame_physics_1k_resting", "label": "", "iterations": 47462, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 4435.610, "min_ns_per_op": 4386.834, "max_ns_per_op": 4571.078},
+    {"name": "engine_frame_physics_1k_spinning", "label": "", "iterations": 2000, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 120630.500, "min_ns_per_op": 118265.150, "max_ns_per_op": 123453.150},
+    {"name": "physics_step_1k_spinning", "label": "", "iterations": 3846, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 68114.093, "min_ns_per_op": 66250.104, "max_ns_per_op": 68491.628},
+    {"name": "scene_sync_10k_moving", "label": "", "iterations": 318, "items_per_iteration": 10000, "repeats": 5, "ns_per_op": 79.087, "min_ns_per_op": 79.008, "max_ns_per_op": 79.925},
+    {"name": "scene_interpolate_10k_moving", "label": "", "iterations": 106, "items_per_iteration": 10000, "repeats": 5, "ns_per_op": 261.758, "min_ns_per_op": 261.267, "max_ns_per_op": 261.932},
+    {"name": "sim_input_frame", "label": "", "iterations": 858221, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 292.774, "min_ns_per_op": 291.901, "max_ns_per_op": 293.009},
+    {"name": "console_set_cvar", "label": "", "iterations": 1560062, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 244.283, "min_ns_per_op": 243.899, "max_ns_per_op": 244.703}
+  ]
+}

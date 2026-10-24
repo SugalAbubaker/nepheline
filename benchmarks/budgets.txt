@@ -320,10 +320,17 @@ tracked_alloc_free_64          250
 system_alloc_free_64           180
 
 # runtime_bench (docs/runtime.md). The engine frames wait for a job on
-# another thread and wake it: 5x, as the hosted runners have fewer cores.
-engine_frame_headless          16000
-engine_frame_headless_10k      28000
-engine_frame_headless_10k_moving 235000
+# another thread and wake it, and the physics step spreads over the job
+# system: 5x, as the hosted runners have fewer cores. The scene renderer's
+# need a Vulkan device, which hosted runners lack (not measured there).
+engine_frame_headless          20000
+engine_frame_headless_10k      34000
+engine_frame_headless_10k_moving 240000
 engine_play_copy_10k           9000000
+engine_frame_physics_1k_resting 22000
+engine_frame_physics_1k_spinning 600000
+physics_step_1k_spinning       340000
+scene_sync_10k_moving          240
+scene_interpolate_10k_moving   790
 sim_input_frame                870
 console_set_cvar               750
