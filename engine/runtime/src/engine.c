@@ -602,6 +602,14 @@ NphResult nph_engine_play_begin(NphEngine *e, bool copy)
     e->interp_steps = 0U;
     nph_atomic_store_u32(&e->reset_count, 0U, NPH_MEMORY_ORDER_RELAXED);
     r = game_play_begin(e);
+    if (r == NPH_RESULT_OK) {
+        // Bodies for what play_begin made, where it put them: the first
+        // step's systems find them.
+        r = nph_transform_system_update(e->transforms, e->jobs);
+        if (r == NPH_RESULT_OK) {
+            r = physics_bridge_refresh(e->physics);
+        }
+    }
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "play_begin failed: %s", nph_result_string(r));
         nph_engine_play_end(e);

@@ -27,6 +27,8 @@ typedef struct TestGameState {
     u32 playing;
     NphActionId action;
     u32 last_step_input_down;
+    u32 physics_at_play_begin; // the physics world was there
+    u32 crate;                 // the entity (its value) play_begin made, a static body
 } TestGameState;
 
 // The layout of build 2's Counter, for reading it from the tests.

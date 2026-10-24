@@ -528,7 +528,9 @@ static void move_body(PhysicsBridge *b, BodyRecord *r, const EntityPose *p, f32 
         return;
     }
     const NphPhysicsBodyType type = nph_physics_body_type(b->physics, r->body);
-    if (type != NPH_PHYSICS_BODY_KINEMATIC) {
+    // Before the first step (the game's play_begin), every body is placed,
+    // kinematic ones too: nothing has moved yet.
+    if (type != NPH_PHYSICS_BODY_KINEMATIC || b->step == 0U) {
         nph_physics_body_set_transform(b->physics, r->body, p->position, p->rotation);
         if (type == NPH_PHYSICS_BODY_DYNAMIC) {
             nph_physics_body_set_awake(b->physics, r->body, true);
@@ -1027,6 +1029,18 @@ NphResult physics_bridge_begin(PhysicsBridge *b)
         physics_bridge_end(b);
     }
     return r;
+}
+
+NphResult physics_bridge_refresh(PhysicsBridge *b)
+{
+    NPH_ASSERT(b != NULL);
+    if (b->physics == NULL || b->world == NULL) {
+        return NPH_RESULT_OK;
+    }
+    read_events(b);
+    b->full_pass = 1;
+    return change_pass(b, 0U, nph_world_tick(b->world),
+                       (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
 }
 
 void physics_bridge_end(PhysicsBridge *b)

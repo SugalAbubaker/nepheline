@@ -9,6 +9,8 @@
 //      version is unchanged, so the state block carries over;
 //   3: Counter is gone, so entities lose it; the state's version changed,
 //      so the block starts over.
+// Every build's play_begin makes a crate (an entity with a Collider) and
+// lifts every kinematic body a metre.
 #include "test_game.h"
 
 #include <nepheline/runtime/engine.h>
@@ -133,7 +135,24 @@ static void frame(NphGame *game, f64 dt)
 
 static NphResult play_begin(NphGame *game)
 {
-    state_of(game)->playing = 1U;
+    TestGameState *s = state_of(game);
+    s->playing = 1U;
+    s->physics_at_play_begin = nph_game_physics(game) != NULL ? 1U : 0U;
+    const NphRuntimeComponents *ids = nph_engine_components(nph_game_engine(game));
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->collider};
+    NphWorld *w = nph_game_world(game);
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        const NphRigidBody *rb = NPH_WORLD_GET(w, e, ids->rigid_body, NphRigidBody);
+        if (rb != NULL && rb->type == (u32)NPH_RIGID_BODY_KINEMATIC) {
+            NPH_WORLD_GET_MUT(w, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+                ->translation.y += 1.0;
+        }
+    }
+    NphEntity crate;
+    NPH_TRY(nph_world_spawn(w, comps, 3U, &crate));
+    s->crate = crate.value;
     return NPH_RESULT_OK;
 }
 

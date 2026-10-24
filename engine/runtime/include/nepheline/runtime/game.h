@@ -132,7 +132,9 @@ typedef struct NphGameApi {
     void (*frame)(NphGame *game, f64 dt);
     // The world starts and stops simulating (the player starts playing at
     // once; the editor's play button). play_end also runs before an unload
-    // while playing.
+    // while playing. play_begin runs with a body for every entity that has
+    // one (nph_game_physics); the bodies of what it makes, or places, are
+    // made when it returns, before the first step.
     NphResult (*play_begin)(NphGame *game);
     void (*play_end)(NphGame *game);
 } NphGameApi;

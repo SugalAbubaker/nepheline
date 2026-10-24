@@ -8,6 +8,7 @@
 // editor plays a copy of the world with the same handles; pipelined and
 // sequential frames agree.
 #include <nepheline/core/alloc_debug.h>
+#include <nepheline/physics/body.h>
 #include <nepheline/platform/dylib.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/path.h>
@@ -161,12 +162,34 @@ NTEST(GameModules, a_build_loads_and_simulates)
         NPH_RESULT_OK);
     NphEntity e[3];
     spawn_counters(&fx, e, 3U, 0);
+    // A kinematic body, which the game's play_begin lifts a metre.
+    NphWorld *edit_world = nph_engine_edit_world(fx.engine);
+    const NphRuntimeComponents *ids = nph_engine_components(fx.engine);
+    const NphComponentId lift_comps[4] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                          NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->rigid_body,
+                                          ids->collider};
+    NphEntity lift;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(edit_world, lift_comps, 4U, &lift), NPH_RESULT_OK);
+    NPH_WORLD_GET_MUT(edit_world, lift, ids->rigid_body, NphRigidBody)->type =
+        (u32)NPH_RIGID_BODY_KINEMATIC;
     // Frames before play run the game's frame callback, not its systems.
     frames(&fx, 2U);
     NTEST_EXPECT_EQ_UINT(s->steps, 0U);
     NTEST_EXPECT_EQ_UINT(s->frames, 2U);
     NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(s->playing, 1U);
+    // play_begin had the physics world, and what it made has its body
+    // before the first step.
+    NTEST_EXPECT_EQ_UINT(s->physics_at_play_begin, 1U);
+    const NphEntity crate = {s->crate};
+    NTEST_EXPECT_FALSE(nph_physics_body_is_null(nph_engine_physics_body(fx.engine, crate)));
+    // A kinematic body play_begin moved is placed there, not on its way.
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    const NphPhysicsBody lift_body = nph_engine_physics_body(fx.engine, lift);
+    NTEST_ASSERT_FALSE(nph_physics_body_is_null(lift_body));
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(pw, lift_body).y, 1.0, 0.0);
+    NTEST_EXPECT_NEAR_F32(nph_vec3_length(nph_physics_body_linear_velocity(pw, lift_body)), 0.0F,
+                          0.0F);
     frames(&fx, 5U);
     NTEST_EXPECT_EQ_UINT(s->steps, 5U);
     for (u32 i = 0; i < 3U; ++i) {

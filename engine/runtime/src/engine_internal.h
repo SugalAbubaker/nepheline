@@ -170,6 +170,9 @@ NPH_MUST_USE NphResult physics_bridge_set_world(PhysicsBridge *b, NphWorld *worl
 // Play: the physics world (phys.* cvars) and a body for every entity, with
 // the world's transforms up to date.
 NPH_MUST_USE NphResult physics_bridge_begin(PhysicsBridge *b);
+// After the game's play_begin: bodies for what it made, and placed where it
+// moved them (kinematic ones too), before the first step.
+NPH_MUST_USE NphResult physics_bridge_refresh(PhysicsBridge *b);
 void physics_bridge_end(PhysicsBridge *b);
 // The schedule's physics system (NPH_PHYSICS_SYSTEM_NAME), after the
 // systems added so far and before the transform system.
