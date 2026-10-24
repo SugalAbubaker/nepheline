@@ -605,17 +605,22 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
             sr->pending.data[kept++] = index;
             continue;
         }
+        // The table up to the last material named: the slots past it draw
+        // with the default material as null ones would, without taking the
+        // renderer's material slots (4 per instance by default).
         NphRenderMaterial table[NPH_MESH_RENDERER_MATERIALS];
+        u32 used = 0U;
         for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS; ++s) {
             const RenderAsset *mat = render_asset(&sr->assets, r->materials[s]);
             table[s] = mat != NULL && mat->state == RENDER_ASSET_READY ? mat->material
                                                                        : NPH_RENDER_MATERIAL_NULL;
+            used = table[s].value != 0U ? s + 1U : used;
         }
         NphRenderInstanceDesc d;
         memset(&d, 0, sizeof d);
         d.mesh = mesh->mesh;
         d.materials = table;
-        d.material_count = NPH_MESH_RENDERER_MATERIALS;
+        d.material_count = used;
         d.transform = render_transform(wt);
         d.hidden = hidden_now(r, m, wt) ? 1 : 0;
         const NphResult cr = nph_render_instance_create(sr->renderer, &d, &r->instance);

@@ -425,6 +425,39 @@ NTEST(SceneRender, a_missing_mesh_fails_and_a_missing_material_defaults)
     scene_teardown(&fx);
 }
 
+// An instance takes the renderer's material slots up to the last material
+// its entity names (the rest draw with the default material): the test
+// renderer's 64 instances fit its 256 slots when most name none, where
+// eight a piece would fill them at 32.
+NTEST(SceneRender, instances_take_only_the_material_slots_they_name)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx); // the torus and the ground, each with its material
+    const NphGuid torus_mesh = mesh_renderer(&fx, named(&fx, "torus"))->mesh;
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, fx.ids.mesh_renderer};
+    for (u32 i = 0; i < 62U; ++i) {
+        NphEntity e;
+        NTEST_ASSERT_EQ_INT(nph_world_spawn(fx.world, comps, 3U, &e), NPH_RESULT_OK);
+        mesh_renderer(&fx, e)->mesh = torus_mesh;
+        const u32 row = i / 8U;
+        local(&fx, e)->translation = nph_dvec3(0.5 * (f64)(i % 8U), 0.0, -0.5 * (f64)row);
+    }
+    const NphSceneRenderStats st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 64U);
+    NTEST_EXPECT_EQ_UINT(st.pending, 0U);
+    const NphRenderView view = test_view();
+    const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.instances, 64U);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, the_camera_and_the_environment)
 {
     static SceneFixture fx;
