@@ -147,3 +147,43 @@ if(TARGET asset_viewer_content AND NPH_BUILD_SAMPLES)
                              TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
     endif()
 endif()
+
+# The Phase 11 sample (CLAUDE.md §12, "Physics"): a game module whose
+# playground is all bodies (crates, balls, stairs, ramps, a swinging
+# platform) and whose player walks it as a character. Its content is cooked
+# when it is built. Its smoke runs play 240 frames in a window (77 without
+# one or without a device), and headless with the autopilot, which walks the
+# player round a course (stairs, a drop, a jump, a ride on the platform,
+# throws) and says at the end whether it got round.
+if(TARGET nph_cook AND NPH_BUILD_SAMPLES)
+    set(game_physics_content "${CMAKE_CURRENT_SOURCE_DIR}/game_physics/content")
+    set(game_physics_out "${CMAKE_CURRENT_BINARY_DIR}/game_physics/$<CONFIG>")
+    add_custom_command(
+        OUTPUT "${game_physics_out}/physics.npk"
+        COMMAND nph_cook "${game_physics_content}/physics.gltf" --root "${game_physics_content}"
+                -o "${game_physics_out}/cooked" --pack "${game_physics_out}/physics.npk" --quiet
+        DEPENDS nph_cook "${game_physics_content}/physics.gltf"
+        COMMENT "Cooking the game_physics content"
+        VERBATIM)
+    add_custom_target(game_physics_content DEPENDS "${game_physics_out}/physics.npk")
+    set_target_properties(game_physics_content PROPERTIES FOLDER "samples")
+    nph_add_game_module(game_physics SOURCES game_physics/game.c)
+    set_target_properties(game_physics PROPERTIES FOLDER "samples")
+    add_dependencies(game_physics game_physics_content nph_player)
+    if(NPH_BUILD_TESTS)
+        add_test(NAME sample.game_physics
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_physics>"
+                         "--pack=${game_physics_out}/physics.npk" --frames=240)
+        add_test(NAME sample.game_physics_headless
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_physics>"
+                         "--pack=${game_physics_out}/physics.npk" --frames=4000 --headless
+                         rt.lockstep=true playground.autopilot=true)
+        set_tests_properties(sample.game_physics sample.game_physics_headless PROPERTIES
+                             TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+        # The verdict is in the log: the exit code alone would pass a player
+        # that never got round.
+        set_tests_properties(sample.game_physics_headless PROPERTIES
+                             PASS_REGULAR_EXPRESSION "autopilot: the course is done"
+                             FAIL_REGULAR_EXPRESSION "autopilot failed|ERROR|Assertion failed")
+    endif()
+endif()
