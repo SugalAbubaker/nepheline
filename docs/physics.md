@@ -13,8 +13,9 @@ solver), [ADR-0044](adr/0044-physics-joints.md) (joints),
 [ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
 heightfields), [ADR-0047](adr/0047-physics-queries.md) (queries),
 [ADR-0048](adr/0048-physics-continuous-collision.md) (continuous collision,
-and impacts), and [ADR-0049](adr/0049-physics-character-controller.md)
-(the character controller).
+and impacts), [ADR-0049](adr/0049-physics-character-controller.md) (the
+character controller), and [ADR-0050](adr/0050-physics-in-the-engine.md)
+(physics in the engine).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -30,7 +31,7 @@ Phase 11 builds it in parts. This document describes what exists:
 | Queries: rays, shape casts, overlaps, and contacts, against one geometry and a world | done |
 | Continuous collision: fast bodies and bullets swept; impacts that land flat | done |
 | The character controller: walls, corners, slopes, steps, stairs, ledges, surfaces, platforms, pushing | done |
-| The runtime bridge | to come |
+| The engine: RigidBody and Collider components, the bridge, drawing between steps, the editor's toggles, the sample | done ("In the engine"; runtime.md "Physics") |
 
 | Header | Contents |
 |---|---|
@@ -956,10 +957,10 @@ A step reports what it did as arrays valid until the next step
 (`nph_physics_world_events`): contacts that began and ended touching (for
 shapes with `contact_events`), hits (a contact that began at a speed above
 the hit threshold, with the point and the speed, for sounds and effects;
-for shapes with `hit_events`), and moves (every awake body's new pose, how
-the runtime mirrors physics into the scene). Nothing calls back into user
-code during a step, so nothing can change the world while it is in
-flight.
+for shapes with `hit_events`), and moves (every awake body's new pose and
+velocities, zero for one that fell asleep that step: how the runtime
+mirrors physics into the scene). Nothing calls back into user code during
+a step, so nothing can change the world while it is in flight.
 
 `nph_physics_world_draw` draws shapes (a mesh as its triangles' edges, the
 inactive ones dimmed), broadphase boxes, contact points and normals, and
@@ -1224,6 +1225,27 @@ Costs (Profile, the reference machine, per move): 2.1 µs walking on a flat
 floor and 13.1 µs on the rippled heightfield among a thousand rocks of the
 terrain rows (64 characters at 1.5 m/s, a move a frame). A move is about
 two shape casts and a contact query, so their cost, GJK's, is the lever.
+
+## In the engine
+
+The runtime gives entities bodies (runtime.md "Physics";
+[ADR-0050](adr/0050-physics-in-the-engine.md)): an entity with a
+`RigidBody` or a `Collider` component (a sphere, a capsule, or a box,
+scaled by the entity) has a body while the world plays, stepped by the
+engine's physics system once per simulation step, after the game's
+systems and before the transforms. The game moves bodies by writing their
+components (velocities; a LocalTransform teleports a body, or moves a
+kinematic one over the step) and reads their motion back from them; the
+bridge writes every moved body's pose and velocities into its entity from
+the step's move events. Everything else is this module's API on the
+engine's world (`nph_game_physics`): queries, joints, events, and the
+character controller, which a game keeps in its own state and moves from
+its own systems.
+
+Frames draw the world between its last two steps (runtime.md
+"Interpolation"), so the fixed step need not match the frame rate.
+`samples/game_physics` is a playground of all of it, with a player walking
+it as a character; its headless smoke run walks a course on its own.
 
 ## Performance
 

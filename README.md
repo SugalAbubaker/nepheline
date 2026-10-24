@@ -85,6 +85,16 @@ nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
            --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
 ```
 
+`samples/game_physics` is a physics playground (crates, balls, stairs,
+ramps, a swinging platform) walked by a character: W/A/S/D, Space to jump,
+the right mouse button to look, the left one to throw
+([`docs/physics.md`](docs/physics.md)):
+
+```sh
+nph_player --game=build/win-msvc/bin/Debug/game_physics.dll \
+           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk
+```
+
 The editor ([`docs/editor.md`](docs/editor.md)) builds scenes in a docked
 Dear ImGui interface. It has:
 - a viewport with an orbit and fly camera, gizmos, the outliner, and the
@@ -95,7 +105,9 @@ Dear ImGui interface. It has:
   cooked;
 - model creation: Create makes primitives, and Tab edits a mesh's vertices
   and faces;
-- the console, the profiler's timeline, and the statistics with every cvar.
+- the console, the profiler's timeline, and the statistics with every cvar;
+- bodies from RigidBody and Collider components, their outlines, and the
+  physics debug toggles.
 
 ```sh
 nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
@@ -115,7 +127,7 @@ tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_f
 editor/         nph_editor: the shell, Dear ImGui backends on the window and the RHI, panels, scene editing, import, mesh editing, tests
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, render_perf, the reference scenes' manifests, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and game_sandbox, a game module; samples/common/ holds the cooked-scene bridge and BMP capture they share
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and the game modules game_sandbox and game_physics; samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
@@ -143,8 +155,8 @@ Modules depend strictly left-to-right:
 - [`docs/cook.md`](docs/cook.md) — the asset cooker: identities and incremental cooks, glTF import, the mesh pipeline, textures and the BC encoders, fuzzing, benchmarks
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
-- [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, the world (bodies, shapes, contacts), the soft-step solver and its threads, joints, islands and sleep, events, benchmarks
-- [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, game modules and hot reload, the player
+- [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, the world (bodies, shapes, contacts), the solvers (the soft step, TGS, XPBD) and their threads, joints, islands and sleep, events, meshes and heightfields, queries, continuous collision, the character controller, the engine's bodies, benchmarks
+- [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, physics in the engine, drawing between steps, game modules and hot reload, the player
 - [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks, render_perf and the reference scenes, and their budgets

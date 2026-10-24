@@ -112,9 +112,11 @@ nearest hit wins.
 
 **Overlays** are the renderer's debug lines: the ground grid (a metre a
 cell, under the pivot), a sphere and an arrow for each light and camera,
-and the bounds of the selected meshes. They are drawn relative to the
-frame's debug origin, which belongs to whoever owns the frame (the
-renderer takes one origin per frame).
+the bounds of the selected meshes, and the outlines of Colliders (the
+selection's over the scene, every one's in it with View > Colliders; see
+"Physics"). They are drawn relative to the frame's debug origin, which
+belongs to whoever owns the frame (the renderer takes one origin per
+frame).
 
 The view keeps the world's exposure and tonemapper, from its active
 Camera, and replaces only the camera. While playing, the view is the
@@ -217,6 +219,24 @@ Pause keeps the frame on screen. Save trace writes the Chrome trace
 - Every cvar, edited in place through the registry, with its type, range,
   read-only, and cheat rules. Hovering a cvar's name shows its
   description.
+
+### Physics
+
+Entities get bodies through their RigidBody and Collider components,
+edited in the inspector like any other (runtime.md "Physics"); Play makes
+the bodies from the play copy, and Stop leaves the edited world as it was.
+
+- The viewport outlines every Collider's shape where its body is (while
+  playing) or will be: the selection's over the scene, every one's in the
+  scene with View > Colliders (or the checkbox below).
+- The Statistics panel's Physics section shows, while playing, the
+  physics world's bodies (and how many are awake), shapes, joints,
+  contacts (touching, and their points), islands, the step's time by stage
+  and its threads, and the bodies swept by continuous collision. Its
+  checkboxes draw the physics world (`phys.debug_draw`: shapes, boxes,
+  contacts, centres of mass, sleep, joints) and turn drawing between steps
+  on and off (`sim.interpolate`). The scene mirror's line counts the
+  entities drawn between steps.
 
 ## Editing
 
@@ -511,7 +531,7 @@ step runs on the job system. It reads nothing the simulation writes.
 
 ## Testing
 
-`editor_tests` (66 tests):
+`editor_tests` (67 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -556,6 +576,9 @@ step runs on the job system. It reads nothing the simulation writes.
   - Mesh editing with the mouse: a click picks a vertex and a face, the
     gizmo drags a vertex in one change, and selecting another entity ends
     editing.
+  - Colliders are outlined (the selection's over the scene, all with
+    View > Colliders), and a box with a RigidBody falls in play onto a
+    floor with a Collider, the edited scene untouched after Stop.
   - **Phase 9's exit criterion** (CLAUDE.md §12): a scene is built from
     an imported scene, a move, a light, and a camera; saved; opened by a
     second editor on the same project (as after a restart), where its

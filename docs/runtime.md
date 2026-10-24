@@ -2,12 +2,14 @@
 
 The last module in the order (CLAUDE.md §4): the `NphEngine` context that
 owns every subsystem, the frame loop, configuration and the console, input
-as the simulation sees it, the bridge from the ECS world to the renderer,
-and game modules with hot reload (§8.12). The player (`nph_player`) and the
-editor are hosts of an engine. Decisions:
-[ADR-0023](adr/0023-runtime.md) (the engine and its frame) and
-[ADR-0024](adr/0024-game-modules.md) (game modules, hot reload, and the
-§13 scripting decision: C only).
+as the simulation sees it, the bridges from the ECS world to the renderer
+and to the physics world, drawing between simulation steps, and game
+modules with hot reload (§8.12). The player (`nph_player`) and the editor
+are hosts of an engine. Decisions: [ADR-0023](adr/0023-runtime.md) (the
+engine and its frame), [ADR-0024](adr/0024-game-modules.md) (game modules,
+hot reload, and the §13 scripting decision: C only), and
+[ADR-0050](adr/0050-physics-in-the-engine.md) (physics in the engine and
+drawing between steps).
 
 | Header | What |
 |---|---|
@@ -15,10 +17,10 @@ editor are hosts of an engine. Decisions:
 | `game.h` | the game module ABI (`NphGameApi`, `nph_game_entry`) and the services game code calls |
 | `config.h` | the command line: options and cvar assignments |
 | `console.h` | commands and cvars behind one command line |
-| `clock.h` | the fixed-step clock |
+| `clock.h` | the fixed-step clock, and where frames draw between its steps |
 | `sim_input.h` | input snapshots for simulation steps |
-| `components.h` | MeshRenderer, Light, Camera, Environment |
-| `scene_render.h` | the scene renderer (world to renderer) and the cooked-scene importer |
+| `components.h` | MeshRenderer, Light, Camera, Environment, RigidBody, Collider |
+| `scene_render.h` | the scene renderer (world to renderer, between steps) and the cooked-scene importer |
 
 ## The engine
 
@@ -58,10 +60,12 @@ and the editor do, tests may not. The engine only logs.
 
 ```
 poll events -> input -> sim input
-sync point:  wait for the simulation | swap in a new game build
+sync point:  wait for the simulation | capture what it moved | swap in a new game build
              gpu frame begin | game frame | host sync hook
-             transforms | scene renderer sync | clear world events | debug flip
-kick:        the next frame's simulation (a job)
+             transforms | scene renderer sync (between steps) | physics events read
+             clear world events | physics debug lines | debug flip
+kick:        the next frame's simulation (a job): each step runs the game's systems,
+             the physics system, and the transform system
 render:      acquire | renderer passes | host render hook | present | frame end
 collect profile, frame limiter
 ```
@@ -82,13 +86,13 @@ before rendering: one thing at a time, for debugging and profiling.
 **Steps.** The fixed-step clock (`sim.rate`, 240 by default for the §8.9
 target; `sim.max_steps` per frame, beyond which time is dropped and
 counted; `sim.time_scale`) decides how many steps a frame takes. Each
-step is a run of the schedule (the game's systems and the transform
-system) with that step's input (`sim_input.h`): the first step of a frame
-gets the edges and the motion gathered since the last step, so a key
-tapped between steps is seen once. `rt.lockstep` takes exactly one step
-per frame whatever the time: tests, frame-by-frame debugging. Rendering
-does not interpolate between steps yet; Phase 11 adds interpolation for
-rates that differ from the frame rate (§8.9).
+step is a run of the schedule (the game's systems, the physics system, and
+the transform system) with that step's input (`sim_input.h`): the first
+step of a frame gets the edges and the motion gathered since the last
+step, so a key tapped between steps is seen once. `rt.lockstep` takes
+exactly one step per frame whatever the time: tests, frame-by-frame
+debugging. Frames draw the world between its last two steps
+("Interpolation" below).
 
 **Play.** A world simulates only while playing. The player plays from the
 first frame (`play_on_start`); the editor plays a copy
@@ -131,6 +135,10 @@ Settings are cvars. The engine's:
 | `rt.lockstep` | false | one step per frame |
 | `rt.max_entities`, `rt.world_events`, `rt.workers` | 65536, 16384, 0 | latched |
 | `sim.rate`, `sim.max_steps`, `sim.time_scale` | 240, 8, 1 | the clock |
+| `sim.interpolate` | true | draw the world between its last two steps ("Interpolation") |
+| `phys.solver`, `phys.substeps` | 0, 4 | the physics solver (0 the soft step, 1 TGS, 2 XPBD; physics.md "Choosing a solver") and its substeps, from the next play |
+| `phys.sleep`, `phys.continuous` | true, true | bodies at rest fall asleep; fast bodies are swept (physics.md), from the next play |
+| `phys.debug_draw` | 0 | draw the physics world: 1 shapes, 2 boxes, 4 contacts, 8 centres of mass, 16 sleep, 32 joints |
 | `r.vsync`, `r.width`, `r.height` | true, 1280, 720 | saved, latched |
 | `r.pipeline` | 1 | 0: the forward reference renderer, 1: the GPU-driven production one (saved) |
 | `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
@@ -283,6 +291,106 @@ under a named root: one entity per node with its transform and hierarchy,
 a MeshRenderer per mesh instance, a Light per light, and an inactive
 Camera per perspective camera. It is all or nothing.
 
+## Physics
+
+While the world plays, every entity with a LocalTransform and a RigidBody
+or a Collider (`components.h`) has a body in the engine's physics world
+(physics.md),
+which the physics system (`nph.physics`) steps once per simulation step,
+after the game's systems and before the transform system:
+
+| Component | |
+|---|---|
+| `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
+| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); its density, friction, restitution; its filter (category, mask, group); hit events |
+
+A Collider alone is a static body (the level); a RigidBody alone, a point
+of 1 kg (or of its `mass`).
+
+**The game moves bodies through their components.** A dynamic body's pose
+is written into its entity's LocalTransform and its velocities into its
+RigidBody after every step. The game:
+
+- changes velocities, or any other RigidBody field, and the body follows;
+- writes a LocalTransform to teleport a dynamic or static body (drawn
+  where it lands), or to move a kinematic one there over the step, pushing
+  what it meets on the way (it stops the step after, unless moved again):
+  a platform, a door;
+- writes a Collider to make the shape (and the mass over it) again, and a
+  new body type makes a new body.
+
+A dynamic body moves in the world: its parent's motion does not carry it
+(its LocalTransform is written relative to wherever the parent is); a
+static or kinematic body follows its parent.
+
+**The game uses the physics world** for what components do not say:
+`nph_game_physics` returns it while playing (queries, character
+controllers, joints, events, bodies of the game's own) and
+`nph_game_physics_body` an entity's body. The physics system runs alone,
+so systems in the stages before and after it may use the world: those that
+change bodies declare a write of RigidBody (so that no two run at once),
+those that only query declare a read. A character controller's moves and
+pushes run in an exclusive system (`samples/game_physics`).
+
+**Play.** The physics world is made when play begins (with the `phys.*`
+cvars) and a body for every entity, where it is, before the game's
+`play_begin`, which may use them; the bodies of what `play_begin` makes or
+moves are made when it returns, placed where it put them, before the first
+step. Play end destroys them all. Play-in-editor plays a copy, so the
+edited world's components never change. A hot reload keeps the bodies,
+and a world migrated for new component layouts keeps every handle, so the
+next step only compares.
+
+**Finding changes.** The bridge keeps, per body, the components it was made
+from or last wrote back. A step looks at the chunks whose RigidBody,
+Collider, or LocalTransform columns were written since its previous run
+(change ticks; its own writes carry its own tick) and applies what differs.
+The world's event stream says what went and what changed parent; when it
+overflowed, the next step checks every body. The write-back goes to the
+chunks of the bodies that moved, through a query view stamping each chunk
+once, with no per-entity events: a pile of a thousand moving boxes does not
+touch the event stream.
+
+**Debug drawing.** `phys.debug_draw` draws the physics world through the
+renderer's debug lines at each frame's sync point; the editor shows every
+Collider's outline and toggles these (editor.md "Physics").
+
+## Interpolation
+
+With the simulation stepping at `sim.rate` and frames coming at their own
+rate, a frame may fall anywhere between two steps; drawn as of the last
+step, motion stutters (a 144 Hz display over a 60 Hz simulation shows some
+states twice and some once). The engine draws the world between its last
+two simulated states instead (Fiedler, "Fix Your Timestep!", 2004;
+§8.9):
+
+1. after a frame's batch of steps, before anything else changes the world,
+   the scene renderer captures what the simulation moved: where each
+   instance, light, and the view's camera was at the previous capture and
+   where it is now (`nph_scene_renderer_capture`);
+2. every sync until the next capture draws them `fraction` of the way from
+   one to the other (`nph_scene_renderer_sync_at`): positions linearly in
+   64 bits, turns by normalised linear interpolation, scale and shear
+   linearly (ADR-0050).
+
+The fraction is 1 − (1 − α) / N (`nph_fixed_clock_blend`), with α the
+clock's leftover fraction of a step and N the steps of the last batch: the
+state one step behind the time the clock has reached, which the two states
+bracket, so what is drawn moves at the pace of real time at any frame
+rate. The cost is one step of delay (4.2 ms at 240 Hz), inside §10.6's
+three frames. What changes outside the simulation (a camera rig in the
+game's `frame`, an edit) is drawn as it is, and so is anything drawn the
+first time.
+
+It is off (everything drawn as it is) while paused, for single steps, in
+lockstep (`rt.lockstep`, so runs repeat frame for frame), and with
+`sim.interpolate` off. A move that is no motion, a teleport or a respawn,
+is drawn where it lands rather than on the way: the game calls
+`nph_game_reset_interpolation` (thread-safe; systems call it) for the
+entity and its descendants, and the physics bridge does for the bodies it
+teleports. A reset camera, or another camera than the last frame's, is a
+camera cut (a new temporal history).
+
 ## The player
 
 `nph_player` runs a game module in a window, playing from the first frame:
@@ -295,23 +403,29 @@ nph_player --game=... --headless --frames=600 sim.rate=120
 
 It exits with 0, 1 on a failure (validation errors included), 2 for a bad
 command line, and 77 without a window system or a device, which CTest
-reports as a skip (`sample.game_sandbox`, `sample.game_sandbox_headless`).
+reports as a skip (`sample.game_sandbox`, `sample.game_sandbox_headless`,
+and `sample.game_physics`; `sample.game_physics_headless` runs the physics
+sample's autopilot and checks its verdict in the log).
 
 ## Threading model
 
 The engine belongs to the thread that created it (NPH_MAIN_THREAD_ONLY);
 with a window, that thread also initialised the window system. Systems run
-on the job system during the simulation; the game's callbacks, the host's
-hooks, and the console run on the engine's thread at the sync point, with
-the world quiescent. The render hook runs while the next simulation runs:
-it must not touch the world.
+on the job system during the simulation; the physics system runs alone in
+its stage, on the thread running the schedule, and its step spreads over
+the job system. The game's callbacks, the host's hooks, and the console run
+on the engine's thread at the sync point, with the world quiescent. The
+render hook runs while the next simulation runs: it must not touch the
+world. `nph_engine_reset_interpolation` may be called from any thread.
 
 ## Costs (§1.4)
 
 Creation allocates every subsystem from the host's allocator. A frame
 allocates nothing on the heap in steady state: the schedule's scratch
-arenas, the render graph's cached transients, and the scene renderer's
-tables are reused. Reloads, migrations, play copies, and scene files
+arenas, the render graph's cached transients, the scene renderer's tables,
+and the physics bridge's records and lists are reused (the physics world's
+arrays keep their size, physics.md). Play begin allocates the physics world
+and a record per body. Reloads, migrations, play copies, and scene files
 allocate while they run. Steady-state costs: the sync point is a wait for
 the simulation, the transform update, and the scene renderer's sync (one
 version check per chunk of a static world); kicking the simulation is one
@@ -336,6 +450,29 @@ The engine's own frame overhead is a few microseconds, well inside the
 entity (one version check per chunk). Play-in-editor starts in about 2 ms
 for an editor-sized world.
 
+Physics and interpolation
+(`benchmarks/results/runtime-2026-10-24-win-msvc-profile-ryzen7-5800x.json`;
+the scene renderer's on an offscreen engine on the RTX 3060 Ti, per
+instance):
+
+| Benchmark | Median | |
+|---|---|---|
+| `engine_frame_headless` | 4.05 µs | the empty frame above, now with the physics system: 3.04 µs without it (an empty step and the bridge's checks; its stage boundary measured free) |
+| `engine_frame_physics_1k_resting` | 4.44 µs | 1,000 crates asleep on a floor: a settled scene adds 0.4 µs |
+| `engine_frame_physics_1k_spinning` | 120.6 µs | 1,000 bodies turning in place, each moved, written back, and composed every step |
+| `physics_step_1k_spinning` | 68.1 µs | the same bodies stepped in a physics world of their own |
+| `scene_sync_10k_moving` | 79 ns | the scene renderer bringing a moved instance up to date |
+| `scene_interpolate_10k_moving` | 262 ns | the same, captured and drawn between its states |
+
+A frame of moving bodies costs about 48 ns a body more than their step
+alone: the write-back's 18 ns (its chunk and row, the LocalTransform and
+RigidBody written, the record's copy), the transforms' 4 ns, and the step
+itself running slower inside the simulation's job than on its own (70 to
+88 µs there, timed inside the bridge). Drawing between steps costs a moving
+instance about 180 ns more than drawing it as it is: its decomposition at
+the capture and its blend at the sync, on the main thread at the sync point
+(Limitations).
+
 ## Testing
 
 `engine/runtime/tests` (`runtime_tests`, statically linked):
@@ -355,18 +492,46 @@ for an editor-sized world.
   under the validation gate (the test that found the read-only depth
   store; gpu.md).
 
+- physics: a box falls onto a floor and rests where its body does; play
+  in the editor leaves the edited world alone; the game moves bodies
+  through their components (velocities, teleports, kinematic targets that
+  carry a rider, type changes); components coming and going make and
+  unmake bodies; children follow their parents unless dynamic; a flood of
+  world events is recovered; and runs repeat whatever the threads, under
+  every solver (the state hashes of a pile);
+- interpolation: the clock's blend advances at the pace of real time; the
+  scene renderer draws what the simulation moved between its states
+  (instances turning without shrinking, frame-rate changes, snaps,
+  despawns), lights and the camera too, with cuts; instances take only the
+  material slots they name.
+
 `runtime_game_tests` (against `nepheline_shared`, with three builds of a
 test game): loading and simulating; reloads that migrate the world (a new
 field with its default, every handle kept), keep or reset the state block,
 carry tuned cvars over, and drop a removed component; a broken build that
 leaves the running one in place; play-in-editor on a copy with the same
 handles, and a reload during play; pipelined and sequential frames
-agreeing; unloading and loading again.
+agreeing; unloading and loading again; what `play_begin` makes has its
+body, placed and at rest, before the first step.
+
+`samples/game_physics` (`sample.game_physics_headless`): the autopilot
+walks the player round the playground (up the stairs, off the landing, a
+jump, onto the swinging platform for a ride, more balls thrown than are
+kept) and the run fails unless it says it got round.
 
 ## Limitations and future work
 
-- Rendering does not interpolate between simulation steps (Phase 11, with
-  physics).
+- The scene renderer's sync runs serially on the main thread: 10,000
+  moving instances cost 0.79 ms (2.6 ms drawn between steps) of the 1 ms
+  main-thread budget. Capturing and blending in parallel jobs, or blending
+  on the GPU (every consumer of instance transforms would), comes before
+  games move that many.
+- Colliders are spheres, capsules, and boxes. Convex hulls, triangle
+  meshes, and heightfields need cooked collision assets; compounds through
+  the hierarchy, joint components, and sensors are to come (the physics
+  API has them all meanwhile).
+- The character controller is not a component: a game keeps its
+  characters in its state block and moves them in its systems.
 - Hot reload unloads the old image only after checking the engine's own
   references; pointers a game keeps in places the engine cannot see (its
   own threads, OS callbacks) are ruled out by game.h's rules, not checked.
