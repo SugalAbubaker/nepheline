@@ -145,6 +145,9 @@ if(TARGET asset_viewer_content AND NPH_BUILD_SAMPLES)
                          rt.lockstep=true)
         set_tests_properties(sample.game_sandbox sample.game_sandbox_headless PROPERTIES
                              TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+        # A windowed frame on lavapipe in a Debug build with ASan takes about
+        # 0.4 s: 240 of them pass two minutes.
+        set_tests_properties(sample.game_sandbox PROPERTIES TIMEOUT 300)
     endif()
 endif()
 
@@ -180,6 +183,7 @@ if(TARGET nph_cook AND NPH_BUILD_SAMPLES)
                          rt.lockstep=true playground.autopilot=true)
         set_tests_properties(sample.game_physics sample.game_physics_headless PROPERTIES
                              TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+        set_tests_properties(sample.game_physics PROPERTIES TIMEOUT 300) # as game_sandbox's
         # The verdict is in the log: the exit code alone would pass a player
         # that never got round.
         set_tests_properties(sample.game_physics_headless PROPERTIES
