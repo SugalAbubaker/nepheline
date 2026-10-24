@@ -83,7 +83,16 @@ that blows through its budget on one hosted CPU model only usually has a
 microarchitectural cause worth fixing rather than a budget to raise:
 `lz_decompress_zeros` ran 4.5x slower on some runners because each copy
 step waited on store-to-load forwarding (docs/asset.md). The workflow
-prints each runner's CPU model before the run for this reason. The GPU
+prints each runner's CPU model before the run for this reason. When the
+cause is the hardware's own cost of what the code cannot do without, the
+budget follows the slowest runner instead: `counter_signal` is two
+uncontended locked instructions (a counter's add and its signal), and on
+the Intel Xeon Platinum 8573C some Windows runners have it took 16.2 ns,
+4.1x the reference's and 2.75x an AMD EPYC 7763's, while that runner
+matched the EPYC elsewhere (a median ratio of 0.91 over 95 benchmarks;
+the job system's other atomic-bound rows were 1.7 to 2.8x slower, within
+their budgets). An AMD EPYC 9V45 took 11.0 ns. Its budget is 5x, as for
+the entries that wake threads. The GPU
 budgets are the tight kind: measured on the reference machine and enforced
 there, within 5 % (below).
 
