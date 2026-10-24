@@ -13,7 +13,9 @@
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/gpu/resources.h>
+#include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/physics/world.h>
 #include <nepheline/render/debug_draw.h>
 
 #include "editor_internal.h"
@@ -186,6 +188,51 @@ bool editor_viewport_point(Editor *ed, f32 x, f32 y, NphDVec3 *out)
 #define COLOR_SELECTED NPH_RENDER_RGBA(255, 160, 40, 255)
 #define COLOR_MARKER   NPH_RENDER_RGBA(230, 220, 120, 255)
 #define COLOR_GRID     NPH_RENDER_RGBA(90, 90, 96, 255)
+#define COLOR_COLLIDER NPH_RENDER_RGBA(90, 230, 120, 255)
+
+typedef struct ColliderLines {
+    NphRenderer *renderer;
+    u32 flags; // NphRenderDebugFlags
+} ColliderLines;
+
+static void collider_line(void *user, NphVec3 a, NphVec3 b, u32 rgba)
+{
+    const ColliderLines *cl = (const ColliderLines *)user;
+    (void)nph_render_debug_line(cl->renderer, a, b, rgba, cl->flags);
+}
+
+// The outline of the shape an entity's Collider makes (components.h
+// nph_collider_shape): where its body is while playing, where it will be
+// otherwise. Over the scene when selected, in it otherwise.
+static void draw_collider(NphRenderer *r, const NphCollider *c, const NphWorldTransform *t,
+                          bool selected)
+{
+    const NphVec3 scale = nph_vec3(nph_vec3_length(t->x_axis), nph_vec3_length(t->y_axis),
+                                   nph_vec3_length(t->z_axis));
+    NphPhysicsGeometry g;
+    NphPhysicsPose local;
+    if (!nph_collider_shape(c, scale, &g, &local)) {
+        return; // no shape: nothing the body has
+    }
+    // The body's frame: the entity's axes with their scale taken out.
+    const NphVec3 x = nph_vec3_normalize_or(t->x_axis, nph_vec3_unit_x());
+    NphVec3 y = nph_vec3_sub(t->y_axis, nph_vec3_scale(x, nph_vec3_dot(t->y_axis, x)));
+    y = nph_vec3_normalize_or(y, nph_vec3_perpendicular(x));
+    const NphQuat frame =
+        nph_quat_normalize(nph_quat_from_mat3(nph_mat3_from_cols(x, y, nph_vec3_cross(x, y))));
+    NphPhysicsPose pose;
+    pose.position = nph_quat_rotate(frame, local.position);
+    pose.rotation = nph_quat_normalize(nph_quat_mul(frame, local.rotation));
+    ColliderLines cl;
+    cl.renderer = r;
+    cl.flags = selected ? (u32)NPH_RENDER_DEBUG_OVERLAY : (u32)NPH_RENDER_DEBUG_DEPTH_TESTED;
+    NphPhysicsDebugDraw d;
+    memset(&d, 0, sizeof d);
+    d.line = collider_line;
+    d.user = &cl;
+    d.origin = nph_render_debug_origin(r);
+    nph_physics_geometry_draw(&d, &g, t->translation, pose, COLOR_COLLIDER);
+}
 
 // The ground grid, markers for lights and cameras (which have no mesh to
 // see), and boxes around the selection, as the renderer's debug lines.
@@ -222,6 +269,10 @@ static void overlays(Editor *ed)
         const bool selected =
             editor_selection_contains(&ed->selection, e) &&
             !(editor_mesh_editing(ed) && nph_entity_equals(e, ed->mesh_edit.entity));
+        const NphCollider *collider = NPH_WORLD_GET(w, e, rc->collider, NphCollider);
+        if (collider != NULL && (selected || ed->show_colliders)) {
+            draw_collider(r, collider, t, selected);
+        }
         const bool marker = nph_world_has(w, e, rc->light) || nph_world_has(w, e, rc->camera);
         if (!selected && !marker) {
             continue;

@@ -439,6 +439,7 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
         igSeparator();
         (void)igMenuItem_BoolPtr("Grid", NULL, &ed->show_grid, true);
+        (void)igMenuItem_BoolPtr("Colliders", NULL, &ed->show_colliders, true);
         igSeparator();
         if (igMenuItem_Bool("Reset Layout", NULL, false, true)) {
             ed->build_layout = true;

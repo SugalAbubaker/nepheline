@@ -1448,3 +1448,75 @@ NTEST(Editor, mesh_editing_picks_and_drags_with_the_mouse)
     NTEST_EXPECT_FALSE(editor_mesh_editing(ed));
     finish(&fx);
 }
+
+// Physics in the editor (docs/editor.md "Physics"): a Collider's outline in
+// the viewport (the selection's, or every one's), and a scene played with
+// its bodies falling, the edited world untouched.
+NTEST(Editor, colliders_show_and_bodies_fall_in_play)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    NphEngine *e = fx.engine;
+    NphCvarRegistry *cvars = nph_engine_cvars(e);
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_bool(cvars, nph_cvar_find(cvars, NPH_STR("rt.lockstep")), true),
+        NPH_RESULT_OK);
+    frames(&fx, 3U);
+    NTEST_ASSERT_EQ_INT(editor_create_primitive(ed, EDITOR_PRIMITIVE_CUBE), NPH_RESULT_OK);
+    settle(&fx);
+    const NphEntity cube = ed->selection.primary;
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *rc = nph_engine_components(e);
+    const u32 lines_before = nph_engine_frame_stats(e)->render.debug_lines;
+    // A body, three metres up, and a floor whose top is the ground.
+    NTEST_ASSERT_EQ_INT(nph_world_add(w, cube, rc->rigid_body, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_add(w, cube, rc->collider, NULL), NPH_RESULT_OK);
+    NPH_WORLD_GET_MUT(w, cube, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.y =
+        3.0;
+    const NphComponentId floor_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                           NPH_COMPONENT_ID_WORLD_TRANSFORM, rc->collider};
+    NphEntity floor;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(w, floor_comps, 3U, &floor), NPH_RESULT_OK);
+    NphLocalTransform *ft =
+        NPH_WORLD_GET_MUT(w, floor, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    ft->translation = nph_dvec3(0.0, -0.5, 0.0);
+    ft->scale = nph_vec3(20.0F, 1.0F, 20.0F); // the unit cube scaled
+    frames(&fx, 2U);
+    // The selected cube's collider adds its twelve edges.
+    const u32 lines_selected = nph_engine_frame_stats(e)->render.debug_lines;
+    NTEST_EXPECT_EQ_UINT(lines_selected, lines_before + 12U);
+    ed->show_colliders = true;
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->render.debug_lines, lines_selected + 12U);
+    ed->show_colliders = false;
+
+    // Play: the cube falls onto the floor and rests there.
+    editor_play_toggle(ed);
+    NTEST_ASSERT_TRUE(nph_engine_is_playing(e));
+    NTEST_ASSERT_NOT_NULL(nph_engine_physics(e));
+    frames(&fx, 480U);
+    NTEST_ASSERT_EQ_INT(nph_engine_wait(e), NPH_RESULT_OK);
+    const NphWorld *play = nph_engine_world(e);
+    NTEST_EXPECT_TRUE(play != w);
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(play, cube, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation.y,
+        0.5, 0.005);
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_stats(e)->bodies, 2U);
+    // The physics world's own lines, through phys.debug_draw.
+    const u32 lines_playing = nph_engine_frame_stats(e)->render.debug_lines;
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_int(cvars, nph_cvar_find(cvars, NPH_STR("phys.debug_draw")), 1),
+        NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(e)->render.debug_lines, lines_playing + 24U);
+    editor_play_toggle(ed);
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(nph_engine_is_playing(e));
+    NTEST_EXPECT_NULL(nph_engine_physics(e));
+    NTEST_EXPECT_NEAR_F64(
+        NPH_WORLD_GET(w, cube, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.y,
+        3.0, 0.0);
+    finish(&fx);
+}

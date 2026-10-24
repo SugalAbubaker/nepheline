@@ -180,8 +180,8 @@ NTEST(Physics, a_box_falls_onto_the_floor_and_rests)
     NTEST_EXPECT_TRUE(nph_vec3_length(rigid(&fx, box)->linear_velocity) < 0.01F);
     NTEST_EXPECT_FALSE(nph_physics_body_is_awake(pw, body_of(&fx, box)));
     // The world transform composed from where the body went.
-    const NphWorldTransform *wt = NPH_WORLD_GET(nph_engine_world(e), box,
-                                                NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+    const NphWorldTransform *wt = NPH_WORLD_GET(
+        nph_engine_world(e), box, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
     NTEST_EXPECT_NEAR_F64(wt->translation.y, 0.5, 0.005);
     // The floor never moved.
     NTEST_EXPECT_NEAR_F64(local_of(&fx, floor)->translation.y, -0.5, 0.0);
@@ -351,8 +351,7 @@ NTEST(Physics, components_coming_and_going_make_and_unmake_bodies)
     NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, body_of(&fx, a)).mass, 1.0F, 0.0F);
 
     // Without its RigidBody either, and despawned: no body.
-    NTEST_ASSERT_EQ_INT(nph_world_remove(nph_engine_world(e), a, fx.ids.rigid_body),
-                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_remove(nph_engine_world(e), a, fx.ids.rigid_body), NPH_RESULT_OK);
     frames(&fx, 1U);
     NTEST_EXPECT_TRUE(nph_physics_body_is_null(body_of(&fx, a)));
     NTEST_EXPECT_EQ_UINT(body_count(&fx), 1U);
@@ -423,8 +422,8 @@ NTEST(Physics, a_flood_of_world_events_is_recovered)
     const NphCollider cube = box_collider(nph_vec3(0.2F, 0.2F, 0.2F));
     NphEntity first[20];
     for (u32 i = 0; i < 20U; ++i) {
-        first[i] = spawn(&fx, nph_dvec3((f64)i * 0.5 - 5.0, 0.2, 0.0), NPH_RIGID_BODY_DYNAMIC,
-                         &cube);
+        first[i] =
+            spawn(&fx, nph_dvec3((f64)i * 0.5 - 5.0, 0.2, 0.0), NPH_RIGID_BODY_DYNAMIC, &cube);
     }
     NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
     frames(&fx, 2U);

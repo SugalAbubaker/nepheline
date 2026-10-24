@@ -24,6 +24,7 @@
 // Thread-safety: the descriptors are immutable statics (NPH_THREADSAFE);
 // registration is a change to the world.
 
+#include <nepheline/physics/geometry.h>
 #include <nepheline/scene/world.h>
 
 #include <stddef.h>
@@ -219,6 +220,14 @@ NPH_COMPONENT_DECLARE(NphCollider);
 
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
 NPH_STATIC_ASSERT(sizeof(NphCollider) == 88U, "Collider is 88 bytes");
+
+// The shape a Collider makes on an entity of world scale `scale` (absolute,
+// per local axis): its geometry and its pose in the entity's frame (the
+// centre scaled, the rotation unit). Negative and non-finite sizes count as
+// zero. False when that is no valid shape (a sphere of radius 0, an unknown
+// `shape`); the outputs are then unspecified.
+bool nph_collider_shape(const NphCollider *collider, NphVec3 scale,
+                        NphPhysicsGeometry *out_geometry, NphPhysicsPose *out_pose);
 
 // The ids of the runtime's components in a world.
 typedef struct NphRuntimeComponents {

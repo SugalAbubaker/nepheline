@@ -40,7 +40,8 @@ typedef enum BodyFlags {
     // Under a parent: a static or kinematic body follows it every step, and
     // a dynamic one's LocalTransform is written against it every step.
     BODY_FOLLOWS = 1U << 1U,
-    BODY_FAILED = 1U << 2U,  // the body could not be made (logged): retried when its components change
+    BODY_FAILED =
+        1U << 2U, // the body could not be made (logged): retried when its components change
     BODY_SHAPED = 1U << 3U,   // made with a Collider
     BODY_UNSHAPED = 1U << 4U, // its Collider could not be made (logged): a body without a shape
 } BodyFlags;
@@ -65,23 +66,23 @@ typedef struct BodyRecord {
 struct PhysicsBridge {
     NphEngine *engine;
     NphAllocator *alloc;
-    NphWorld *world; // the active world
-    NphQuery *rigid_query;  // RigidBody, LocalTransform, Collider (optional): changes
-    NphQuery *static_query; // Collider, LocalTransform, no RigidBody: changes
-    NphQuery *write_query;  // RigidBody, LocalTransform: the write-back
+    NphWorld *world;          // the active world
+    NphQuery *rigid_query;    // RigidBody, LocalTransform, Collider (optional): changes
+    NphQuery *static_query;   // Collider, LocalTransform, no RigidBody: changes
+    NphQuery *write_query;    // RigidBody, LocalTransform: the write-back
     NphPhysicsWorld *physics; // while playing
     BodyRecord *records;
     u32 count;
     u32 cap;
     u32 *slot_record; // per entity slot: its record, or NO_RECORD
     u32 slot_cap;
-    NphArrayU32 follows;  // slots of the records under parents (BODY_FOLLOWS)
-    NphArrayU32 targeted; // entities whose kinematic bodies this step moves to a target
+    NphArrayU32 follows;       // slots of the records under parents (BODY_FOLLOWS)
+    NphArrayU32 targeted;      // entities whose kinematic bodies this step moves to a target
     NphArrayU32 last_targeted; // the last step's
-    u32 event_cursor;   // world events read so far
-    u32 events_dropped; // the stream's drop count when last read
-    b32 full_pass;      // look at every chunk at the next step
-    u32 step;           // steps since play began
+    u32 event_cursor;          // world events read so far
+    u32 events_dropped;        // the stream's drop count when last read
+    b32 full_pass;             // look at every chunk at the next step
+    u32 step;                  // steps since play began
     NphPhysicsStats stats;
 };
 
@@ -298,8 +299,8 @@ static EntityPose entity_pose(const PhysicsBridge *b, NphEntity e, const NphLoca
     const NphWorldTransform w = nph_world_transform_compose(pw, local);
     p.position = w.translation;
     p.rotation = axes_rotation(w.x_axis, w.y_axis);
-    p.scale = nph_vec3(nph_vec3_length(w.x_axis), nph_vec3_length(w.y_axis),
-                       nph_vec3_length(w.z_axis));
+    p.scale =
+        nph_vec3(nph_vec3_length(w.x_axis), nph_vec3_length(w.y_axis), nph_vec3_length(w.z_axis));
     p.parented = true;
     return p;
 }
@@ -361,33 +362,6 @@ static NphVec3 finite_vec3(NphVec3 v)
     return nph_vec3_is_finite(v) ? v : nph_vec3_zero();
 }
 
-// The Collider's geometry at the entity's world scale, or false when it
-// names no valid shape there (logged by the caller).
-static bool collider_geometry(const NphCollider *c, NphVec3 scale, NphPhysicsGeometry *out)
-{
-    switch (c->shape) {
-    case NPH_COLLIDER_SPHERE: {
-        const f32 s = nph_f32_max(scale.x, nph_f32_max(scale.y, scale.z));
-        *out = nph_physics_geometry_sphere(nonneg(c->radius) * s);
-        break;
-    }
-    case NPH_COLLIDER_CAPSULE: {
-        const f32 s = nph_f32_max(scale.x, scale.z);
-        *out = nph_physics_geometry_capsule(nonneg(c->half_height) * scale.y,
-                                            nonneg(c->radius) * s);
-        break;
-    }
-    case NPH_COLLIDER_BOX:
-        *out = nph_physics_geometry_box(nph_vec3(nonneg(c->half_extents.x) * scale.x,
-                                                 nonneg(c->half_extents.y) * scale.y,
-                                                 nonneg(c->half_extents.z) * scale.z));
-        break;
-    default:
-        return false;
-    }
-    return nph_physics_geometry_is_valid(out);
-}
-
 // A RigidBody's mass, when it names one, replaces the shapes' with their
 // distribution kept: the tensor scaled by the ratio (a point of that mass,
 // rotating like a ball of 0.5 m, without a shape).
@@ -427,7 +401,8 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
     r->shape = NPH_PHYSICS_SHAPE_NULL;
     r->flags &= ~(u32)BODY_UNSHAPED;
     NphPhysicsGeometry g;
-    if (!collider_geometry(c, r->scale, &g)) {
+    NphPhysicsPose pose;
+    if (!nph_collider_shape(c, r->scale, &g, &pose)) {
         NPH_LOG_WARN(&NPH_LOG_RUNTIME,
                      "entity 0x%08x: its Collider is no shape at its scale; its body has none",
                      r->entity.value);
@@ -435,8 +410,7 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
         return;
     }
     NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
-    sd.pose.position = finite_vec3(nph_vec3_mul(c->center, r->scale));
-    sd.pose.rotation = body_rotation(c->rotation);
+    sd.pose = pose;
     sd.density = nonneg(c->density);
     sd.friction = nonneg(c->friction);
     sd.restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
@@ -476,8 +450,9 @@ static NphResult make_body(PhysicsBridge *b, BodyRecord *r)
     const NphResult res = nph_physics_body_create(b->physics, &bd, &r->body);
     if (res != NPH_RESULT_OK) {
         if ((r->flags & BODY_FAILED) == 0U) {
-            NPH_LOG_WARN(&NPH_LOG_RUNTIME, "entity 0x%08x: no body (%s) until its components change",
-                         r->entity.value, nph_result_string(res));
+            NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                         "entity 0x%08x: no body (%s) until its components change", r->entity.value,
+                         nph_result_string(res));
         }
         r->flags |= BODY_FAILED;
         r->body = NPH_PHYSICS_BODY_NULL;
@@ -576,8 +551,8 @@ static void move_body(PhysicsBridge *b, BodyRecord *r, const EntityPose *p, f32 
     // The physics module moves the frame's origin by the centre's velocity
     // plus the turn about it: the origin's velocity is v, so the centre's
     // is v + w x (centre - origin).
-    const NphVec3 arm =
-        nph_dvec3_to_vec3(nph_dvec3_sub(nph_physics_body_center_of_mass(b->physics, r->body), from));
+    const NphVec3 arm = nph_dvec3_to_vec3(
+        nph_dvec3_sub(nph_physics_body_center_of_mass(b->physics, r->body), from));
     v = nph_vec3_add(v, nph_vec3_cross(w, arm));
     v = finite_vec3(v);
     w = finite_vec3(w);
@@ -681,7 +656,8 @@ static bool qualifies(const PhysicsBridge *b, NphEntity e)
 {
     const NphRuntimeComponents *ids = &b->engine->ids;
     return nph_world_has(b->world, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM) &&
-           (nph_world_has(b->world, e, ids->rigid_body) || nph_world_has(b->world, e, ids->collider));
+           (nph_world_has(b->world, e, ids->rigid_body) ||
+            nph_world_has(b->world, e, ids->collider));
 }
 
 // The records of entities that went, or whose components changed in kind

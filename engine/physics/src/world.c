@@ -669,64 +669,64 @@ static void draw_circle(const NphPhysicsDebugDraw *d, NphDVec3 base, NphVec3 cen
     }
 }
 
-static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const PhysShape *s,
-                       u32 rgba)
+void nph_physics_geometry_draw(const NphPhysicsDebugDraw *d, const NphPhysicsGeometry *g,
+                               NphDVec3 base, NphPhysicsPose pose, u32 rgba)
 {
-    const NphPhysicsPose pose = phys_shape_pose_relative(b, s, b->origin);
+    NPH_ASSERT(d != NULL && d->line != NULL && g != NULL);
     const NphVec3 x = nph_quat_axis_x(pose.rotation);
     const NphVec3 y = nph_quat_axis_y(pose.rotation);
     const NphVec3 z = nph_quat_axis_z(pose.rotation);
-    switch (s->geometry.type) {
+    switch (g->type) {
     case NPH_PHYSICS_SHAPE_SPHERE: {
-        const f32 r = s->geometry.sphere.radius;
-        draw_circle(d, b->origin, pose.position, x, y, r, rgba);
-        draw_circle(d, b->origin, pose.position, y, z, r, rgba);
-        draw_circle(d, b->origin, pose.position, z, x, r, rgba);
+        const f32 r = g->sphere.radius;
+        draw_circle(d, base, pose.position, x, y, r, rgba);
+        draw_circle(d, base, pose.position, y, z, r, rgba);
+        draw_circle(d, base, pose.position, z, x, r, rgba);
         break;
     }
     case NPH_PHYSICS_SHAPE_CAPSULE: {
-        const f32 r = s->geometry.capsule.radius;
-        const NphVec3 h = nph_vec3_scale(y, s->geometry.capsule.half_height);
+        const f32 r = g->capsule.radius;
+        const NphVec3 h = nph_vec3_scale(y, g->capsule.half_height);
         const NphVec3 c0 = nph_vec3_sub(pose.position, h);
         const NphVec3 c1 = nph_vec3_add(pose.position, h);
-        draw_circle(d, b->origin, c0, x, z, r, rgba);
-        draw_circle(d, b->origin, c1, x, z, r, rgba);
-        draw_circle(d, b->origin, c0, x, y, r, rgba);
-        draw_circle(d, b->origin, c1, x, y, r, rgba);
+        draw_circle(d, base, c0, x, z, r, rgba);
+        draw_circle(d, base, c1, x, z, r, rgba);
+        draw_circle(d, base, c0, x, y, r, rgba);
+        draw_circle(d, base, c1, x, y, r, rgba);
         const NphVec3 sides[4] = {x, nph_vec3_neg(x), z, nph_vec3_neg(z)};
         for (u32 k = 0U; k < 4U; ++k) {
-            draw_line(d, world_point(b->origin, nph_vec3_mul_add(c0, sides[k], r)),
-                      world_point(b->origin, nph_vec3_mul_add(c1, sides[k], r)), rgba);
+            draw_line(d, world_point(base, nph_vec3_mul_add(c0, sides[k], r)),
+                      world_point(base, nph_vec3_mul_add(c1, sides[k], r)), rgba);
         }
         break;
     }
     case NPH_PHYSICS_SHAPE_BOX: {
-        const NphVec3 he = s->geometry.box.half_extents;
+        const NphVec3 he = g->box.half_extents;
         NphDVec3 corners[8];
         for (u32 i = 0U; i < 8U; ++i) {
             const NphVec3 local =
                 nph_vec3((i & 1U) != 0U ? he.x : -he.x, (i & 2U) != 0U ? he.y : -he.y,
                          (i & 4U) != 0U ? he.z : -he.z);
-            corners[i] = world_point(b->origin, nph_physics_pose_transform_point(pose, local));
+            corners[i] = world_point(base, nph_physics_pose_transform_point(pose, local));
         }
         draw_box_lines(d, corners, rgba);
         break;
     }
     case NPH_PHYSICS_SHAPE_HULL: {
-        const NphPhysicsHull *hull = s->geometry.hull;
+        const NphPhysicsHull *hull = g->hull;
         const NphVec3 *v = nph_physics_hull_vertices(hull);
         const NphPhysicsHullEdge *e = nph_physics_hull_edges(hull);
         for (u32 i = 0U; i < hull->edge_count; i += 2U) {
             const NphVec3 p = nph_physics_pose_transform_point(pose, v[e[i].origin]);
             const NphVec3 q = nph_physics_pose_transform_point(pose, v[e[i + 1U].origin]);
-            draw_line(d, world_point(b->origin, p), world_point(b->origin, q), rgba);
+            draw_line(d, world_point(base, p), world_point(base, q), rgba);
         }
         break;
     }
     case NPH_PHYSICS_SHAPE_MESH: {
         // Every triangle's edges, the active ones (the surface's real
         // edges) brighter.
-        const NphPhysicsMesh *mesh = s->geometry.mesh;
+        const NphPhysicsMesh *mesh = g->mesh;
         const u8 *active = nph_physics_mesh_edges(mesh);
         for (u32 t = 0U; t < mesh->triangle_count; ++t) {
             NphVec3 tv[3];
@@ -735,7 +735,7 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
                 const NphVec3 p = nph_physics_pose_transform_point(pose, tv[k]);
                 const NphVec3 q = nph_physics_pose_transform_point(pose, tv[(k + 1U) % 3U]);
                 const u32 color = ((active[t] >> k) & 1U) != 0U ? rgba : (rgba & 0xFF7F7F7FU);
-                draw_line(d, world_point(b->origin, p), world_point(b->origin, q), color);
+                draw_line(d, world_point(base, p), world_point(base, q), color);
             }
         }
         break;
@@ -743,7 +743,7 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
     case NPH_PHYSICS_SHAPE_HEIGHTFIELD: {
         // As a mesh: every triangle's edges (holes have none), the active
         // ones brighter.
-        const NphPhysicsHeightfield *h = s->geometry.heightfield;
+        const NphPhysicsHeightfield *h = g->heightfield;
         const u32 triangles = nph_physics_heightfield_triangle_count(h);
         for (u32 t = 0U; t < triangles; ++t) {
             NphVec3 tv[3];
@@ -755,7 +755,7 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
                 const NphVec3 p = nph_physics_pose_transform_point(pose, tv[k]);
                 const NphVec3 q = nph_physics_pose_transform_point(pose, tv[(k + 1U) % 3U]);
                 const u32 color = ((active >> k) & 1U) != 0U ? rgba : (rgba & 0xFF7F7F7FU);
-                draw_line(d, world_point(b->origin, p), world_point(b->origin, q), color);
+                draw_line(d, world_point(base, p), world_point(base, q), color);
             }
         }
         break;
@@ -764,6 +764,13 @@ static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const Ph
     default:
         break;
     }
+}
+
+static void draw_shape(const NphPhysicsDebugDraw *d, const PhysBody *b, const PhysShape *s,
+                       u32 rgba)
+{
+    nph_physics_geometry_draw(d, &s->geometry, b->origin, phys_shape_pose_relative(b, s, b->origin),
+                              rgba);
 }
 
 void nph_physics_world_draw(const NphPhysicsWorld *world, const NphPhysicsDebugDraw *draw)

@@ -287,6 +287,13 @@ typedef struct NphPhysicsDebugDraw {
 // Draws the world through `draw`. Reads only; between steps.
 void nph_physics_world_draw(const NphPhysicsWorld *world, const NphPhysicsDebugDraw *draw);
 
+// Draws one shape's outline through `draw` (its line callback and origin;
+// the flags are not read), the way the world draws its shapes: `geometry`
+// at `pose`, which is relative to the 64-bit point `base` (an editor's
+// collider before any body exists, a game's query shape).
+void nph_physics_geometry_draw(const NphPhysicsDebugDraw *draw, const NphPhysicsGeometry *geometry,
+                               NphDVec3 base, NphPhysicsPose pose, u32 rgba);
+
 #ifdef __cplusplus
 }
 #endif

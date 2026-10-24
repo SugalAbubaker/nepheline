@@ -276,6 +276,7 @@ struct Editor {
     NphLocalTransform gizmo_start_local;
     u64 gizmo_drag_id; // a merge key per drag
     bool show_grid;
+    bool show_colliders; // every Collider's outline (the selection's always)
 };
 
 // editor.c

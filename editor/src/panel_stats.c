@@ -85,7 +85,8 @@ static void frame_stats(Editor *ed)
         igText("waiting %u   failed %u", m->pending, m->failed);
         igText("assets: loading %u, ready %u, failed %u", m->assets_loading, m->assets_ready,
                m->assets_failed);
-        igText("last sync: created %u, destroyed %u, moved %u", m->created, m->destroyed, m->moved);
+        igText("last sync: created %u, destroyed %u, moved %u, between steps %u", m->created,
+               m->destroyed, m->moved, m->interpolating);
     }
 }
 
@@ -186,6 +187,66 @@ static void cvars(Editor *ed)
     igEndTable();
 }
 
+// A cvar's bit as a checkbox (phys.debug_draw's).
+static void cvar_bit(NphCvarRegistry *reg, NphCvar *cv, const char *label, i64 bit)
+{
+    const i64 value = nph_cvar_get_int(cv);
+    bool on = (value & bit) != 0;
+    if (igCheckbox(label, &on)) {
+        report(nph_cvar_set_int(reg, cv, on ? (value | bit) : (value & ~bit)), cv);
+    }
+}
+
+static void cvar_checkbox(NphCvarRegistry *reg, NphCvar *cv, const char *label)
+{
+    bool on = nph_cvar_get_bool(cv);
+    if (igCheckbox(label, &on)) {
+        report(nph_cvar_set_bool(reg, cv, on ? 1 : 0), cv);
+    }
+}
+
+// The physics world while playing (docs/runtime.md "Physics"), and the
+// physics debug toggles (CLAUDE.md §8.13): what phys.debug_draw draws and
+// whether the world is drawn between its steps (sim.interpolate).
+static void physics(Editor *ed)
+{
+    if (!igCollapsingHeader_TreeNodeFlags("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    NphEngine *e = ed->engine;
+    if (nph_engine_physics(e) != NULL) {
+        const NphPhysicsStats *p = nph_engine_physics_stats(e);
+        igText("bodies %u (awake %u)   shapes %u   joints %u", p->bodies, p->awake_bodies,
+               p->shapes, p->joints);
+        igText("contacts %u (touching %u, points %u)   islands %u (awake %u)", p->contacts,
+               p->touching_contacts, p->manifold_points, p->islands, p->awake_islands);
+        igText("step %.3f ms: pairs %.3f, collide %.3f, solve %.3f, finalize %.3f   threads %u",
+               p->step_ms, p->pairs_ms, p->collide_ms, p->solve_ms, p->finalize_ms, p->workers);
+        igText("swept %u (set back %u)", p->swept_bodies, p->impact_bodies);
+    } else {
+        igTextDisabled("not playing: the bodies are made when play begins");
+    }
+    NphCvarRegistry *reg = nph_engine_cvars(e);
+    NphCvar *draw = nph_cvar_find(reg, NPH_STR("phys.debug_draw"));
+    NphCvar *interp = nph_cvar_find(reg, NPH_STR("sim.interpolate"));
+    if (draw != NULL) {
+        cvar_bit(reg, draw, "shapes", NPH_PHYSICS_DRAW_SHAPES);
+        igSameLine(0.0F, -1.0F);
+        cvar_bit(reg, draw, "boxes", NPH_PHYSICS_DRAW_AABBS);
+        igSameLine(0.0F, -1.0F);
+        cvar_bit(reg, draw, "contacts", NPH_PHYSICS_DRAW_CONTACTS);
+        cvar_bit(reg, draw, "centres of mass", NPH_PHYSICS_DRAW_MASS);
+        igSameLine(0.0F, -1.0F);
+        cvar_bit(reg, draw, "sleep", NPH_PHYSICS_DRAW_SLEEP);
+        igSameLine(0.0F, -1.0F);
+        cvar_bit(reg, draw, "joints", NPH_PHYSICS_DRAW_JOINTS);
+    }
+    if (interp != NULL) {
+        cvar_checkbox(reg, interp, "draw between steps (sim.interpolate)");
+    }
+    (void)igCheckbox("show colliders in the viewport", &ed->show_colliders);
+}
+
 void editor_panel_stats(Editor *ed)
 {
     if (!igBegin(EDITOR_WINDOW_STATS, &ed->show.stats, ImGuiWindowFlags_None)) {
@@ -193,6 +254,7 @@ void editor_panel_stats(Editor *ed)
         return;
     }
     frame_stats(ed);
+    physics(ed);
     cvars(ed);
     igEnd();
 }

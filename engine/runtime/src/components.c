@@ -63,6 +63,46 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 0};
 NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
 
+static f32 size_of(f32 v)
+{
+    return nph_f32_is_finite(v) && v > 0.0F ? v : 0.0F;
+}
+
+bool nph_collider_shape(const NphCollider *c, NphVec3 scale, NphPhysicsGeometry *out_geometry,
+                        NphPhysicsPose *out_pose)
+{
+    NPH_ASSERT(c != NULL && out_geometry != NULL && out_pose != NULL);
+    const NphVec3 s = nph_vec3(size_of(scale.x), size_of(scale.y), size_of(scale.z));
+    switch (c->shape) {
+    case NPH_COLLIDER_SPHERE:
+        *out_geometry = nph_physics_geometry_sphere(size_of(c->radius) *
+                                                    nph_f32_max(s.x, nph_f32_max(s.y, s.z)));
+        break;
+    case NPH_COLLIDER_CAPSULE:
+        *out_geometry = nph_physics_geometry_capsule(size_of(c->half_height) * s.y,
+                                                     size_of(c->radius) * nph_f32_max(s.x, s.z));
+        break;
+    case NPH_COLLIDER_BOX:
+        *out_geometry = nph_physics_geometry_box(nph_vec3(size_of(c->half_extents.x) * s.x,
+                                                          size_of(c->half_extents.y) * s.y,
+                                                          size_of(c->half_extents.z) * s.z));
+        break;
+    default:
+        return false;
+    }
+    const NphVec3 center = nph_vec3_mul(c->center, s);
+    out_pose->position = nph_vec3_is_finite(center) ? center : nph_vec3_zero();
+    // A rotation as it is when unit to rounding, normalised otherwise (the
+    // identity for zero or non-finite).
+    const NphQuat q = c->rotation;
+    const bool finite = nph_f32_is_finite(q.x) && nph_f32_is_finite(q.y) &&
+                        nph_f32_is_finite(q.z) && nph_f32_is_finite(q.w);
+    out_pose->rotation = !finite                            ? nph_quat_identity()
+                         : nph_quat_is_normalized(q, 1e-6F) ? q
+                                                            : nph_quat_normalize_or_identity(q);
+    return nph_physics_geometry_is_valid(out_geometry);
+}
+
 NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents *out)
 {
     NPH_ASSERT(world != NULL && out != NULL);
