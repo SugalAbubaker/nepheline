@@ -386,18 +386,24 @@ NTEST(cast, shape_casts_stop_where_bisection_finds_contact)
         NTEST_EXPECT_NEAR_F32(signed_distance(&b, p), 0.0F, 1e-5F);
         NTEST_EXPECT_TRUE(supports_at(&b, p, n, 1e-4F));
         if (want >= 0.0F) {
-            // Never past the contact, and short of it only by the touch.
-            NTEST_EXPECT_TRUE(hit.fraction <= want + 1e-5F);
-            worst_short = nph_f32_max(worst_short, (want - hit.fraction) * nph_vec3_length(delta));
+            // Never past the contact, and short of it only by the touch,
+            // along the contact's normal: a cast that grazes its target (a
+            // hundredth into it) stops micrometres from it and millimetres
+            // of motion short, and the reference's own GJK rounding is
+            // micrometres too, a ten-thousandth of the motion there.
+            const f32 approach = -nph_vec3_dot(hit.normal, delta);
+            NTEST_EXPECT_TRUE((hit.fraction - want) * approach <= 2e-6F + 1e-5F * approach);
+            worst_short = nph_f32_max(worst_short, (want - hit.fraction) * approach);
             hits += 1U;
         } else {
             grazes += 1U; // passing within the touch
         }
     }
-    NTEST_LOG("shape casts: %u hits (at most %.3g mm short, %.3g mm apart), %u misses, %u grazes",
+    NTEST_LOG("shape casts: %u hits (at most %.3g mm short along the normal, %.3g mm apart), %u "
+              "misses, %u grazes",
               hits, (f64)worst_short * 1e3, (f64)worst_gap * 1e3, misses, grazes);
     NTEST_EXPECT_TRUE(hits > 40U * TEST_SCALE && misses > 10U * TEST_SCALE);
-    NTEST_EXPECT_TRUE(worst_short <= 0.1F * NPH_PHYSICS_LINEAR_SLOP);
+    NTEST_EXPECT_TRUE(worst_short <= NPH_PHYSICS_CAST_TOUCH + 2e-6F);
     nph_physics_hull_free(hulls[0], alloc);
     nph_physics_hull_free(hulls[1], alloc);
     test_alloc_end(&ta);
