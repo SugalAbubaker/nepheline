@@ -308,7 +308,7 @@ static void build_pile(NphPhysicsWorld *w, u32 count, Dolls *d)
 
 NTEST(ragdoll, a_dropped_ragdoll_settles_and_sleeps)
 {
-    // The default measures 7.6 mm, 1.1 deg, 1.7 mm sunk, 5.4 % back, 4.8 s.
+    // The default measures 6.7 mm, 1.0 deg, 1.8 mm sunk, 4.3 % back, 4.3 s.
     const Bounds tight = {0.02, 0.00025, 3.0F, 0.1F, 0.006, 0.0005, 0.12, 8.0F};
     for (u32 config = 0U; config < CONFIGS; ++config) {
         Scene s;
@@ -327,8 +327,10 @@ NTEST(ragdoll, a_dropped_ragdoll_settles_and_sleeps)
 
 NTEST(ragdoll, limits_hold_through_a_tumble)
 {
-    // The default measures 12 mm, 5.3 deg, 5.9 mm sunk, 1.3 % back, 2.0 s.
-    const Bounds tight = {0.03, 0.00025, 10.0F, 0.1F, 0.015, 0.0005, 0.04, 5.0F};
+    // The default measures 12 mm, 5.3 deg, 4.2 mm sunk, 3.5 % back, 2.8 s
+    // (1.3 % back with speculative contacts that reached a fixed 2 cm,
+    // 5.9 mm sunk: ADR-0048).
+    const Bounds tight = {0.03, 0.00025, 10.0F, 0.1F, 0.015, 0.0005, 0.09, 5.0F};
     for (u32 config = 0U; config < CONFIGS; ++config) {
         Scene s;
         solver_scene(&s, config);
@@ -347,7 +349,7 @@ NTEST(ragdoll, limits_hold_through_a_tumble)
 
 NTEST(ragdoll, tumbles_down_stairs)
 {
-    // The default measures 3.0 mm, 1.3 deg, 0.1 % back, 1.9 s.
+    // The default measures 3.0 mm, 1.4 deg, 0.1 % back, 2.1 s.
     const Bounds tight = {0.01, 0.00025, 3.5F, 0.1F, 0.002, 0.0005, 0.01, 5.0F};
     for (u32 config = 0U; config < CONFIGS; ++config) {
         Scene s;
@@ -384,11 +386,11 @@ NTEST(ragdoll, tumbles_down_stairs)
 NTEST(ragdoll, a_pile_settles_without_gaining_energy)
 {
     // Sixteen where the build is fast enough, four in Debug and under the
-    // sanitizers. The default measures, for sixteen, 8.3 mm, 0.47 at rest,
-    // 3.2 deg, 0.26 at rest, 5.1 mm sunk, 0.31 at rest, 0.2 % back, 3.4 s.
+    // sanitizers. The default measures, for sixteen, 8.9 mm, 0.74 at rest,
+    // 3.3 deg, 0.52 at rest, 4.2 mm sunk, 0.21 at rest, nothing back, 3.8 s.
     const bool big = TEST_SCALE >= 8U;
     const u32 count = big ? 16U : 4U;
-    const Bounds tight = {0.025, 0.001, 10.0F, 0.8F, 0.013, 0.0005, 0.01, big ? 10.0F : 5.0F};
+    const Bounds tight = {0.025, 0.002, 10.0F, 1.3F, 0.013, 0.0005, 0.01, big ? 10.0F : 5.0F};
     for (u32 config = 0U; config < CONFIGS; ++config) {
         Scene s;
         solver_scene(&s, config);
@@ -405,7 +407,7 @@ NTEST(ragdoll, a_pile_settles_without_gaining_energy)
 
 NTEST(ragdoll, a_crate_lands_on_a_lying_ragdoll)
 {
-    // The default measures 2.1 mm, 0.1 deg, 2.2 mm sunk, 1.7 % back, 1.6 s.
+    // The default measures 2.2 mm, 0.14 deg, 1.2 mm sunk, 1.0 % back, 1.5 s.
     const Bounds tight = {0.006, 0.00025, 0.5F, 0.1F, 0.006, 0.0005, 0.05, 4.0F};
     for (u32 config = 0U; config < CONFIGS; ++config) {
         Scene s;

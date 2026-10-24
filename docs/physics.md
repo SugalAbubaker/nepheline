@@ -11,7 +11,9 @@ collision layer), [ADR-0043](adr/0043-physics-world.md) (the world and the
 solver), [ADR-0044](adr/0044-physics-joints.md) (joints),
 [ADR-0045](adr/0045-physics-solver-comparison.md) (the solver comparison),
 [ADR-0046](adr/0046-physics-meshes-heightfields.md) (meshes and
-heightfields), and [ADR-0047](adr/0047-physics-queries.md) (queries).
+heightfields), [ADR-0047](adr/0047-physics-queries.md) (queries), and
+[ADR-0048](adr/0048-physics-continuous-collision.md) (continuous collision,
+and impacts).
 
 Phase 11 builds it in parts. This document describes what exists:
 
@@ -25,7 +27,8 @@ Phase 11 builds it in parts. This document describes what exists:
 | Triangle meshes: the block, its builder and queries, convex shapes against triangles, a pair's four manifolds | done |
 | Heightfields: the grid, its builder and queries, collision as a mesh's; compounds (bodies with several shapes) | done |
 | Queries: rays, shape casts, overlaps, and contacts, against one geometry and a world | done |
-| Continuous collision, the character controller, the runtime bridge | to come |
+| Continuous collision: fast bodies and bullets swept; impacts that land flat | done |
+| The character controller, the runtime bridge | to come |
 
 | Header | Contents |
 |---|---|
@@ -593,8 +596,11 @@ substep
    of bouncing off the push.
 
 After the substeps, **restitution** gives contacts that approached faster
-than the threshold (1 m/s) and carried load the pair's bounce, and the
-impulses are stored for the next step's warm start. Contacts against static
+than the threshold (1 m/s) and carried load the pair's bounce, points still
+a little apart included (the relax pass held their approach to the gap,
+slowing them before they touched: left to land on the next step, a ball of
+restitution 1 came back at half its speed), and the impulses are stored
+for the next step's warm start. Contacts against static
 and kinematic bodies are twice as stiff, since they take the whole
 correction.
 
@@ -617,11 +623,46 @@ anchors are relative to the centres of mass, so this is exact to 32 bits
 anywhere in the world. Positions accumulate as 32-bit displacements and
 reach the 64-bit body only in the finalize pass.
 
-**Speculative points** (separation above zero, within the speculative
-distance) only stop the approach: the solver removes exactly the velocity
-that would close the gap within the substep (Catto, "Speculative
-Contacts", 2013), so fast bodies stop at the surface instead of tunnelling,
-without continuous collision for most cases.
+**Speculative points** (separation above zero, within the manifold's
+reach) only stop the approach: the solver removes exactly the velocity that
+would close the gap within the substep (Catto, "Speculative Contacts",
+2013), so fast bodies stop at the surface instead of tunnelling. A pair's
+manifold reaches 2 cm, or as far as the two may close in the step and a
+slop, up to the fattened boxes' 10 cm margin (`phys_pair_speculative`: the
+centres' relative motion and each body's spin times its reach; a root-free
+bound passes slow pairs). With a fixed 2 cm a box landing flat at 10 m/s
+was found 1.9 cm inside the floor at the next collision and pushed out
+turning; past the margin, continuous collision takes over.
+
+**Impacts.** A box landing flat loads the four points of its manifold, and
+the solver loads them one at a time: the first takes nearly all of the
+impact, and the torque left over tips the box. Four points share a load in
+many ways, one of which moves nothing, and what the solvers did with that
+share decided how boxes land (ADR-0048). Boxes 0.2 × 0.2 × 0.3 m dropped
+flat from 0.5 to 10 m:
+
+| Solver | Before | Now |
+|---|---|---|
+| soft step | tilted up to 18°, rebounded at 1 m/s | 0.18°, nothing |
+| TGS | on its side from 1 m, upside down from 5 m | flat, 1.4 cm/s |
+| XPBD | on its side from 10 m | flat, nothing |
+
+A manifold with a point approaching faster than 1 m/s at the step's start
+(`PHYS_IMPACT_SPEED`) gets seven more sweeps of its normal rows in each pass
+(`PHYS_IMPACT_SWEEPS`) and of its restitution, and XPBD's of its position
+corrections and of its velocity pass, friction included (within μ times
+each point's uneven multiplier, one pass of it spun boxes about their
+vertical at 7 rad/s); other manifolds are left exactly as they were.
+Judged in the middle of a pass instead, contacts in a heap of jointed
+ragdolls passed the speed every step and cost it 12 %. Under TGS a hit's
+warm start is scaled until it pushes none of its points apart: what
+stopped an approach that is over launched the box resting where it landed
+(a box stopped dead keeps its weight's worth, a bounce none), and rigid
+rows cannot take back the share that moves nothing. The soft step
+warm-starts all of it: its softness takes back what that overdoes, and a
+heavy body landing on a light one is stopped over several substeps, which
+the warm starts carry (scaled, a crate dropped on a ragdoll sank four times
+deeper).
 
 **Friction** follows the normal rows, as a coupled two-dimensional impulse
 on the contact's two tangents, held in the friction circle (|impulse| ≤ μ
@@ -986,6 +1027,67 @@ cast a step along a rocky heightfield costs 2.3 µs, and its contacts there
 for a sphere and a box; a faster GJK is the next optimisation, for queries
 and contacts both.
 
+## Continuous collision
+
+A body fast enough can pass through a thin wall between two steps'
+collisions, or sink into a block too far to come back out the way it went
+([ADR-0048](adr/0048-physics-continuous-collision.md)). Speculative
+contacts reach as far as a pair can close in a step (The solver, above);
+past that, **continuous collision** (`enable_continuous`, on by default)
+sweeps the bodies that moved too far.
+
+A dynamic body is **fast** when it moved farther in the step than half the
+inner radius of its thinnest shape (its centre's motion plus its turn's
+angle times its reach: Box2D's safety factor), or farther than the
+speculative contacts can reach (the fattened boxes' margin less a slop). In
+the finalize pass each fast body's shapes are swept over the step, the
+centre of mass along a line and the rotation by slerp, against the static
+shapes they may meet; the body is set back to the first time any comes
+within a slop of one, its velocity kept, and the next step's speculative
+contacts stop it there (Box2D v3's scheme; Catto, "Continuous Collision",
+GDC 2013). A body that is not fast costs a root-free test.
+
+Times of impact come from conservative advancement on GJK distances with a
+bound on rotation (Mirtich 1996; Bullet's btContinuousConvexCollision):
+the gap closes no faster than the centre approaches along the closest
+points' normal plus the body's spin times its reach, so each advance stops
+short of the contact. GJK runs in a frame at the moving shape, as the
+casts' does. Three rules keep it from stopping what is not tunnelling:
+
+- **A shape already within reach** of a target at the step's start
+  (resting on it, sliding along it) is swept as its core, a ball at its
+  centroid a quarter of its inner radius wide, and set back only where its
+  middle would pass through (Box2D's fallback). The contact it rests on
+  holds it otherwise: a ball 2 cm across resting on a sheet 1 mm thick and
+  sent at it at 400 m/s stays on it with or without continuous collision.
+- **A triangle** of a mesh or a heightfield is swept against only when the
+  shape's centroid comes towards its plane by more than a slop over the
+  step, so a body sliding fast across a mesh's seams is never stopped at
+  one (Box2D's rule for chain segments).
+- **An impact the speculative contacts already stopped** is not set back.
+  Along the impact's axis the gap is linear in the fraction for a body
+  that does not turn, and dips below the smaller of its two ends by at most
+  the arc's bow (r θ² / 8) for one that does: a shape within a slop of the
+  target at both ends with that taken off never went through it. The axis
+  is the closest features' exact normal or GJK's, whichever separates the
+  two farther (`nph_physics_contact_axis`, the casts' rule): GJK's own is
+  a thousandth of a radian off across a face, and along it the far corner
+  of a 100 m floor stood 5 cm proud of a box resting on it. Without this
+  rule a box falling at 14 m/s onto a floor landed, was set back 6 mm
+  above it, and landed again.
+
+**Bullets** (`bullet` in the body's description, or
+`nph_physics_body_set_bullet`) are also swept against kinematic and
+dynamic bodies at their poses at the step's end, in a stage after the
+finalize pass: a ball at 300 m/s hits a dynamic plate 2 cm thick that a
+plain fast body passes through. Bullets do not sweep against each other.
+
+A fast body reads only shapes that do not move while it is swept, and
+writes only its own pose and boxes: the sweeps run in parallel, and the
+result does not depend on their order or on the number of threads (tested
+on 0 to 8 workers, and 10 000 km out). The statistics count the step's
+sweeps (`swept_bodies`) and set-backs (`impact_bodies`).
+
 ## Performance
 
 Profile build, Ryzen 7 5800X, `benchmarks/physics` (each collision and
@@ -1024,23 +1126,34 @@ is the point; world query rows are per query):
 | `shape_cast_sphere_box` / `_capsule_box` / `_capsule_capsule` | 881 / 1 130 / 845 |
 | `shape_cast_box_box` / `_hull_hull_32v` | 2 360 / 5 330 |
 | `shape_cast_capsule_mesh` / `_box_mesh` / `_capsule_heightfield` (down onto the rippled grid) | 5 820 / 11 700 / 5 950 |
-| `world_pyramid_20_st` (210 boxes, one thread) | 406 000 |
-| `world_pyramid_20_mt` (the job system) | 151 000 |
+| `world_pyramid_20_st` (210 boxes, one thread) | 403 000 |
+| `world_pyramid_20_mt` (the job system) | 150 000 |
 | `world_pyramids_16_mt` (3360 boxes) | 951 000 |
-| `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 590 000 |
-| `world_pile_1000_mt` | 682 000 |
-| `world_mesh_pile_1000_st` / `_mt` (the same pile on a mesh floor) | 4 580 000 / 766 000 |
-| `world_terrain_pile_1000_mt` (the pile dropped on a rolling terrain) | 855 000 |
-| `world_heightfield_pile_1000_mt` (the same surface as a heightfield) | 823 000 |
-| `world_sleeping_10k` (10k asleep, one ball awake) | 3 160 |
-| `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 574 000 |
-| `world_chains_mt` | 165 000 |
-| `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 340 000 |
-| `world_ragdolls_32_mt` | 353 000 |
+| `world_pile_1000_st` (1000 mixed shapes in a bin) | 3 550 000 |
+| `world_pile_1000_mt` | 688 000 |
+| `world_mesh_pile_1000_st` / `_mt` (the same pile on a mesh floor) | 4 600 000 / 775 000 |
+| `world_terrain_pile_1000_mt` (the pile dropped on a rolling terrain) | 857 000 |
+| `world_heightfield_pile_1000_mt` (the same surface as a heightfield) | 840 000 |
+| `world_sleeping_10k` (10k asleep, one ball awake) | 3 190 |
+| `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 586 000 |
+| `world_chains_mt` | 166 000 |
+| `world_ragdolls_32_st` (32 ragdolls lying in heaps: 352 bodies, 320 joints) | 1 370 000 |
+| `world_ragdolls_32_mt` | 357 000 |
+| `world_gallery_200_st` (200 balls and boxes at 50 to 200 m/s, a third bullets, rattling about a room of walls 2 cm thick: every one swept every step) | 323 000 |
+| `world_gallery_200_mt` | 190 000 |
 | `world_raycast_10k` (50 m, closest hit, 10 000 static shapes) | 1 610 |
 | `world_cast_sphere_10k` / `_capsule_10k` (10 m among them) | 1 040 / 1 050 |
 | `world_overlap_sphere_10k` / `world_overlap_aabb_10k` | 152 / 122 |
 | `world_terrain_collide_capsule` / `_cast_capsule` (a character on a rocky heightfield: its contacts, a step) | 1 720 / 2 350 |
+
+Impacts and continuous collision (ADR-0048) cost the resting scenes 0 to
+3 % against the same build without them, measured side by side (two lane
+masks per contact group, a root-free test per body and per contact: the
+pyramid 0.2 %, the pile 2.1 %, the heap of ragdolls 2.4 %); more where
+bodies are fast enough to sweep: chains whose lower links swing that fast
+2.7 % (65 of the 400 links a step), and 4.6 % under TGS (303). XPBD at 16
+substeps keeps more of its pile in the bin (805 of the 1000 shapes, against
+about 500, which it used to throw out) and steps it in 2.3 ms against 1.5.
 
 The resting pyramid costs 3 % more than without warm starting by place
 (407 µs against 394, the same build either way): with every warm start
@@ -1066,7 +1179,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (197 tests):
+`physics_tests` (207 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1201,8 +1314,10 @@ reference CPU class.
   motor and spring; a slow motor of every type keeping its bodies awake.
 - The solver comparison (`test_solvers.c`, ADR-0045): stacks, a 100:1
   stack, chains, a pendulum, a door slammed into its limits, a ragdoll
-  heap, bounce and friction, and a machine of slider, rope, and 6-DOF
-  joints, each under the soft step at 4 and 8 substeps, TGS at 4, and
+  heap, bounce and friction, a machine of slider, rope, and 6-DOF joints,
+  and boxes dropped flat from 0.5 to 10 m landing flat (within 1.5° and
+  1.5 rad/s, under 5 cm/s of rebound, flat and still at the end: ADR-0048),
+  each under the soft step at 4 and 8 substeps, TGS at 4, and
   XPBD at 4 and 16 (the first three in Debug and under the sanitizers):
   every configuration must stay sound, the default must meet its quality
   thresholds (its pyramid and column within a millimetre of their places:
@@ -1223,6 +1338,17 @@ reference CPU class.
   ragdoll is chaotic and another compiler's rounding sends it elsewhere. A
   pile replays bit for bit in a new world, on 4 and 8 workers, and on the
   AVX2 kernel, under every solver.
+- Continuous collision (`test_continuous.c`, ADR-0048): balls, boxes,
+  capsules, and hulls at 300 m/s, turning, never past a wall 2 cm thick
+  (and straight through it without); bodies thrown down at 150 m/s onto a
+  one-sided mesh and a heightfield staying on them; a blade spinning a
+  tenth of a turn a step never cutting through a wall (which its corners
+  cross without); a box and a capsule sliding at 60 m/s across a mesh's
+  seams never stopped (the same course as without, swept every step); a
+  bullet hitting a dynamic plate a plain fast body passes; a box shot into
+  the floor it rests on staying on it; boxes dropped onto each other never
+  swept; the same course on 0 to 8 workers and solver threads; and the same
+  impacts 10 000 km out.
 
 **Fuzzing** (`tests/fuzz`, CLAUDE.md §8.8 "Robustness"). `physics_hull`,
 `physics_mesh`, and `physics_heightfield` read builder input from the

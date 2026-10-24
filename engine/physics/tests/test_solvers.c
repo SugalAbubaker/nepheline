@@ -63,6 +63,70 @@ NTEST(solvers, stacks)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Landing
+// ---------------------------------------------------------------------------
+
+// Boxes dropped flat land flat and stay there. An impact loads a
+// manifold's four points one at a time, and four points can share a load
+// in many ways: before the solver swept impacts' rows more, reached as far
+// as a pair closes in a step, and (TGS) scaled hits' warm starts
+// (solver_impl.h), TGS tipped boxes onto their sides from a metre and over
+// from 5 m, XPBD laid them on their sides from 10 m, and the soft step
+// rocked them 18 degrees. The soft step measures 0.8 degrees and 0.8 rad/s
+// at worst, TGS 0.2 and 0.23, XPBD nothing.
+NTEST(solvers, boxes_dropped_flat_land_flat)
+{
+    static const f64 heights[] = {0.5, 2.0, 10.0};
+    for (u32 config = 0U; config < CONFIGS; ++config) {
+        f32 tilt = 0.0F;    // degrees, the most after landing
+        f32 rebound = 0.0F; // m/s upwards, the most after landing
+        f32 rock = 0.0F;    // rad/s, the most from four steps after landing
+        f32 spin = 0.0F;    // rad/s, the most at the end
+        f32 lean = 0.0F;    // degrees, the most at the end
+        for (u32 h = 0U; h < NPH_ARRAY_COUNT(heights); ++h) {
+            // Four phases of the step at the impact.
+            for (u32 j = 0U; j < 4U; ++j) {
+                Scene s;
+                solver_scene(&s, config);
+                add_ground(s.w, 0.0);
+                const NphPhysicsBody b = add_body(
+                    s.w, NPH_PHYSICS_BODY_DYNAMIC,
+                    nph_dvec3(0.0, heights[h] + 0.1 + 0.003 * (f64)j, 0.0), nph_quat_identity(),
+                    nph_physics_geometry_box(nph_vec3(0.1F, 0.1F, 0.15F)), 0.6F, 0.0F);
+                i32 landed = -1;
+                f32 t = 0.0F;
+                f32 w = 0.0F;
+                for (u32 i = 0U; i < 600U; ++i) {
+                    step(s.w, NULL, 1U);
+                    const NphVec3 up = nph_quat_axis_y(nph_physics_body_rotation(s.w, b));
+                    t = acosf(nph_f32_clamp(up.y, -1.0F, 1.0F)) * (180.0F / k_pi);
+                    w = nph_vec3_length(nph_physics_body_angular_velocity(s.w, b));
+                    if (landed < 0 && nph_physics_body_position(s.w, b).y < 0.11) {
+                        landed = (i32)i;
+                    }
+                    if (landed >= 0) {
+                        tilt = nph_f32_max(tilt, t);
+                        rebound = nph_f32_max(rebound, nph_physics_body_linear_velocity(s.w, b).y);
+                        if ((i32)i >= landed + 4) {
+                            rock = nph_f32_max(rock, w);
+                        }
+                    }
+                }
+                NTEST_EXPECT_TRUE(landed >= 0);
+                spin = nph_f32_max(spin, w);
+                lean = nph_f32_max(lean, t);
+                scene_end(&s);
+            }
+        }
+        NTEST_LOG("%-9s flat from 0.5 to 10 m: tilts %.3f deg, rebounds %.4f m/s, rocks %.3f "
+                  "rad/s; at the end %.4f rad/s, %.4f deg",
+                  k_configs[config].name, (f64)tilt, (f64)rebound, (f64)rock, (f64)spin, (f64)lean);
+        NTEST_EXPECT_TRUE(tilt < 1.5F && rebound < 0.05F && rock < 1.5F);
+        NTEST_EXPECT_TRUE(spin < 0.01F && lean < 0.1F);
+    }
+}
+
 NTEST(solvers, mass_ratio)
 {
     for (u32 config = 0U; config < CONFIGS; ++config) {

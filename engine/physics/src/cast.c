@@ -388,16 +388,16 @@ static u32 deepest_point(const NphPhysicsManifold *m)
     return deepest;
 }
 
-// The contact's normal from the closest features GJK's simplex ended on
-// (as Box2D's separation functions take their axis from it): a face of the
-// target against a point of the mover, a point against a face of the
+// The contact's normal from the closest features GJK's simplex `c` ended
+// on (as Box2D's separation functions take their axis from it): a face of
+// the target against a point of the mover, a point against a face of the
 // mover, or two edges, each exactly; oriented as `hint` (GJK's own).
 // False for a point or an edge against a point, whose normals form a cone
 // that GJK's estimate is in.
-static bool feature_normal(const NphPhysicsProxy *m, const NphPhysicsProxy *t,
-                           const NphPhysicsArrival *a, NphVec3 hint, NphVec3 *out)
+static bool feature_normal(const NphPhysicsProxy *m, NphPhysicsPose pose_m,
+                           const NphPhysicsProxy *t, NphPhysicsPose pose_t,
+                           const NphPhysicsSimplexCache *c, NphVec3 hint, NphVec3 *out)
 {
-    const NphPhysicsSimplexCache *c = &a->features;
     u32 ti[4];
     u32 mi[4];
     u32 nt = 0U;
@@ -421,10 +421,10 @@ static bool feature_normal(const NphPhysicsProxy *m, const NphPhysicsProxy *t,
     NphVec3 tp[4];
     NphVec3 mp[4];
     for (u32 j = 0U; j < nt; ++j) {
-        tp[j] = nph_physics_pose_transform_point(a->target, t->points[ti[j]]);
+        tp[j] = nph_physics_pose_transform_point(pose_t, t->points[ti[j]]);
     }
     for (u32 j = 0U; j < nm; ++j) {
-        mp[j] = nph_physics_pose_transform_point(a->mover, m->points[mi[j]]);
+        mp[j] = nph_physics_pose_transform_point(pose_m, m->points[mi[j]]);
     }
     NphVec3 n;
     if (nt >= 3U && nm == 1U) {
@@ -443,6 +443,19 @@ static bool feature_normal(const NphPhysicsProxy *m, const NphPhysicsProxy *t,
     n = nph_vec3_scale(n, 1.0F / len);
     *out = nph_vec3_dot(n, hint) < 0.0F ? nph_vec3_neg(n) : n;
     return true;
+}
+
+NphVec3 nph_physics_contact_axis(const NphPhysicsProxy *m, NphPhysicsPose pose_m,
+                                 const NphPhysicsProxy *t, NphPhysicsPose pose_t,
+                                 const NphPhysicsSimplexCache *features, NphVec3 hint)
+{
+    NphVec3 n;
+    if (feature_normal(m, pose_m, t, pose_t, features, hint, &n) &&
+        nph_physics_proxy_gap(m, pose_m, t, pose_t, n) >=
+            nph_physics_proxy_gap(m, pose_m, t, pose_t, hint)) {
+        return n;
+    }
+    return hint;
 }
 
 bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a, NphVec3 delta,
@@ -466,15 +479,9 @@ bool nph_physics_cast_convex(const NphPhysicsGeometry *a, NphPhysicsPose pose_a,
         // one), the features' exact one, and GJK's a millimetre back, the
         // one along which the two are farthest apart: the axis test's own
         // measure.
-        f32 best = nph_physics_proxy_gap(&pa, arr.mover, &pb, arr.target, normal);
+        normal = nph_physics_contact_axis(&pa, arr.mover, &pb, arr.target, &arr.features, normal);
+        const f32 best = nph_physics_proxy_gap(&pa, arr.mover, &pb, arr.target, normal);
         NphVec3 n;
-        if (feature_normal(&pa, &pb, &arr, arr.normal, &n)) {
-            const f32 g = nph_physics_proxy_gap(&pa, arr.mover, &pb, arr.target, n);
-            if (g >= best) {
-                normal = n;
-                best = g;
-            }
-        }
         if (nph_physics_cast_normal_back(&pa, pose_a, delta, &pb, pose_b, &arr, &n) &&
             nph_physics_proxy_gap(&pa, arr.mover, &pb, arr.target, n) > best) {
             normal = n;

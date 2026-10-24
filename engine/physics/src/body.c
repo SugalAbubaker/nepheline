@@ -6,6 +6,7 @@
 
 #include "world_internal.h"
 
+#include <float.h>
 #include <string.h>
 
 NphPhysicsBodyDesc nph_physics_body_desc_default(void)
@@ -93,8 +94,10 @@ NphResult nph_physics_body_create(NphPhysicsWorld *world, const NphPhysicsBodyDe
     b->angular_damping = desc->angular_damping;
     b->gravity_scale = desc->gravity_scale;
     b->sleep_threshold = desc->sleep_threshold;
-    b->flags = (desc->enable_sleep != 0 ? PHYS_BODY_ENABLE_SLEEP : 0U) |
-               (desc->gyroscopic != 0 ? PHYS_BODY_GYROSCOPIC : 0U);
+    b->flags =
+        (desc->enable_sleep != 0 ? PHYS_BODY_ENABLE_SLEEP : 0U) |
+        (desc->gyroscopic != 0 ? PHYS_BODY_GYROSCOPIC : 0U) |
+        (desc->bullet != 0 && desc->type == NPH_PHYSICS_BODY_DYNAMIC ? PHYS_BODY_BULLET : 0U);
     b->shape_head = PHYS_NULL;
     b->contact_head = PHYS_NULL;
     b->joint_head = PHYS_NULL;
@@ -121,6 +124,7 @@ NphResult nph_physics_body_create(NphPhysicsWorld *world, const NphPhysicsBodyDe
         phys_slots_release(&world->body_slots, slot);
         return r;
     }
+    world->bullets += (b->flags & PHYS_BODY_BULLET) != 0U ? 1U : 0U;
     *out = (NphPhysicsBody){b->handle};
     return NPH_RESULT_OK;
 }
@@ -169,6 +173,7 @@ void nph_physics_body_destroy(NphPhysicsWorld *world, NphPhysicsBody body)
     if (b->island != PHYS_NULL) {
         phys_island_remove_body(world, slot);
     }
+    world->bullets -= (b->flags & PHYS_BODY_BULLET) != 0U ? 1U : 0U;
     b->handle = 0U;
     phys_slots_release(&world->body_slots, slot);
 }
@@ -406,13 +411,16 @@ void phys_body_update_mass(NphPhysicsWorld *w, PhysBody *b)
         total.center = b->local_center;
         total.inertia = b->inertia;
     }
+    f32 inner = FLT_MAX;
     for (u32 s = b->shape_head; s != PHYS_NULL; s = w->shapes.data[s].next) {
         const PhysShape *shape = &w->shapes.data[s];
         const f32 d = nph_vec3_distance(shape->pose.position, b->local_center) +
                       nph_physics_geometry_outer_radius(&shape->geometry);
         extent = nph_f32_max(extent, d);
+        inner = nph_f32_min(inner, nph_physics_geometry_inner_radius(&shape->geometry));
     }
     b->max_extent = extent;
+    b->min_extent = inner;
     if (b->type == NPH_PHYSICS_BODY_DYNAMIC) {
         if (b->mass > 0.0F) {
             b->inv_mass = 1.0F / b->mass;
@@ -468,6 +476,29 @@ void nph_physics_body_set_mass_data(NphPhysicsWorld *world, NphPhysicsBody body,
         b->inertia = mass->inertia;
     }
     phys_body_update_mass(world, b);
+}
+
+bool nph_physics_body_is_bullet(const NphPhysicsWorld *world, NphPhysicsBody body)
+{
+    const PhysBody *b = checked(world, body);
+    return b != NULL && (b->flags & PHYS_BODY_BULLET) != 0U;
+}
+
+void nph_physics_body_set_bullet(NphPhysicsWorld *world, NphPhysicsBody body, bool bullet)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: body changed during a step");
+    PhysBody *b = checked(world, body);
+    if (b == NULL || b->type != NPH_PHYSICS_BODY_DYNAMIC ||
+        ((b->flags & PHYS_BODY_BULLET) != 0U) == bullet) {
+        return;
+    }
+    if (bullet) {
+        b->flags |= PHYS_BODY_BULLET;
+        world->bullets += 1U;
+    } else {
+        b->flags &= ~(u32)PHYS_BODY_BULLET;
+        world->bullets -= 1U;
+    }
 }
 
 bool nph_physics_body_is_awake(const NphPhysicsWorld *world, NphPhysicsBody body)

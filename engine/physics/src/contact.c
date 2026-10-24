@@ -399,13 +399,13 @@ static void mesh_update(NphPhysicsWorld *w, u32 contact)
     const NphQuat rotation = nph_quat_mul(nph_quat_conjugate(qm), qx);
     const NphDVec3 position = nph_physics_drotate_inverse(qm, nph_dvec3_sub(px, pm));
     NphPhysicsMeshManifolds mm;
+    const f32 speculative = phys_pair_speculative(w, bm, bx);
     if (sm->geometry.type == NPH_PHYSICS_SHAPE_MESH) {
         nph_physics_collide_mesh_local(&sx->geometry, rotation, position, sm->geometry.mesh,
-                                       NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+                                       speculative, &mm);
     } else {
         nph_physics_collide_heightfield_local(&sx->geometry, rotation, position,
-                                              sm->geometry.heightfield,
-                                              NPH_PHYSICS_SPECULATIVE_DISTANCE, &mm);
+                                              sm->geometry.heightfield, speculative, &mm);
     }
     // The points come out relative to the convex shape in the mesh's axes;
     // the anchors are from each body's centre of mass, in world axes.
@@ -481,6 +481,37 @@ static void mesh_update(NphPhysicsWorld *w, u32 contact)
     }
 }
 
+f32 phys_pair_speculative(const NphPhysicsWorld *w, const PhysBody *a, const PhysBody *b)
+{
+    // The most the pair may close this step: their centres' relative
+    // motion, and each body's spin times its reach. Points out that far let
+    // the solver stop a fast approach at the surface (the speculative rows
+    // hold it to the gap) instead of finding the body inside, pushing it out,
+    // and spinning it (Catto, "Continuous Collision", GDC 2013): a box landing
+    // flat at 10 m/s sank 2 cm and left at 3 rad/s. Slow pairs keep the
+    // fixed distance exactly; past the fattened boxes' margin the pair may
+    // not exist in time, which continuous collision covers. Most pairs are
+    // slow, and (x + y + z)^2 <= 3 (x^2 + y^2 + z^2) shows it without roots.
+    const NphVec3 dv = nph_vec3_sub(b->linear_velocity, a->linear_velocity);
+    const f32 turn_a = a->max_extent * a->max_extent;
+    const f32 turn_b = b->max_extent * b->max_extent;
+    const f32 room = (NPH_PHYSICS_SPECULATIVE_DISTANCE - NPH_PHYSICS_LINEAR_SLOP) /
+                     nph_f32_max(w->step_dt, 1e-9F);
+    if (3.0F * (nph_vec3_length_sq(dv) + nph_vec3_length_sq(a->angular_velocity) * turn_a +
+                nph_vec3_length_sq(b->angular_velocity) * turn_b) <=
+        room * room) {
+        return NPH_PHYSICS_SPECULATIVE_DISTANCE;
+    }
+    const f32 closing =
+        w->step_dt * (nph_vec3_length(dv) + nph_vec3_length(a->angular_velocity) * a->max_extent +
+                      nph_vec3_length(b->angular_velocity) * b->max_extent);
+    const f32 reach = closing + NPH_PHYSICS_LINEAR_SLOP;
+    if (!(reach > NPH_PHYSICS_SPECULATIVE_DISTANCE)) {
+        return NPH_PHYSICS_SPECULATIVE_DISTANCE;
+    }
+    return nph_f32_min(reach, NPH_PHYSICS_AABB_MARGIN);
+}
+
 void phys_contact_update(NphPhysicsWorld *w, u32 contact)
 {
     PhysContact *c = &w->contacts.data[contact];
@@ -504,7 +535,7 @@ void phys_contact_update(NphPhysicsWorld *w, u32 contact)
     const NphPhysicsPose pa = phys_shape_pose_relative(ba, sa, origin);
     const NphPhysicsPose pb = phys_shape_pose_relative(bb, sb, origin);
     NphPhysicsManifold m;
-    nph_physics_collide(&sa->geometry, pa, &sb->geometry, pb, NPH_PHYSICS_SPECULATIVE_DISTANCE,
+    nph_physics_collide(&sa->geometry, pa, &sb->geometry, pb, phys_pair_speculative(w, ba, bb),
                         &c->cache, &m);
     const NphVec3 ab = nph_dvec3_relative(bb->center, origin);
     // Carry impulses to the points that persist, for warm starting: by id,

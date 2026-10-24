@@ -97,6 +97,7 @@ NphPhysicsWorldDesc nph_physics_world_desc_default(void)
     d.max_linear_speed = 400.0F;
     d.time_to_sleep = 0.5F;
     d.enable_sleep = 1;
+    d.enable_continuous = 1;
     d.body_capacity = 64U;
     d.shape_capacity = 64U;
     d.contact_capacity = 256U;
@@ -297,6 +298,7 @@ NphResult nph_physics_world_step(NphPhysicsWorld *world, f32 dt, NphJobSystem *j
     NPH_PROFILE_BEGIN("physics.step");
     const u64 t0 = nph_time_now_ns();
     world->stepping = true;
+    world->step_dt = dt;
     NPH_ARRAY_CLEAR(&world->begin_events);
     NPH_ARRAY_CLEAR(&world->end_events);
     NPH_ARRAY_CLEAR(&world->hit_events);

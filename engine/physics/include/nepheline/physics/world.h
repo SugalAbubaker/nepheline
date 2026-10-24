@@ -10,8 +10,9 @@
 //      trees (static, kinematic, dynamic), and new overlapping pairs become
 //      contacts;
 //   2. collide: every contact of an awake body updates its manifold in
-//      parallel; contacts that began or stopped touching join or leave the
-//      constraint graph and the islands, in contact order;
+//      parallel, reaching as far as the pair can close in the step (2 cm
+//      for slow pairs); contacts that began or stopped touching join or
+//      leave the constraint graph and the islands, in contact order;
 //   3. solve: the soft-step solver (Catto, "Solver2D", 2024, after Macklin
 //      et al., "Small Steps in Physics Simulation", SCA 2019): per substep,
 //      integrate velocities, warm start, solve with soft contacts, integrate
@@ -19,7 +20,14 @@
 //      eight contacts per instruction, the colours' contacts in parallel;
 //   4. finalize: positions in 64 bits, shapes' boxes, the boxes that left
 //      their fattened proxies grow in the trees, sleep timers;
-//   5. islands that stayed still long enough fall asleep, and cost nothing
+//   5. continuous collision: a body that moved farther than half the inner
+//      radius of its thinnest shape, or than its contacts reach, is swept
+//      over the step against static shapes (a bullet against every kind)
+//      and set back to its first time of impact, a slop short of it, where
+//      the next step's speculative contacts stop it; one its contacts
+//      already stopped stays (docs/physics.md "Continuous collision";
+//      ADR-0048);
+//   6. islands that stayed still long enough fall asleep, and cost nothing
 //      until something touches them.
 //
 // Determinism: the same calls give the same world, bit for bit, whatever
@@ -125,6 +133,9 @@ typedef struct NphPhysicsWorldDesc {
     // seconds, fall asleep.
     f32 time_to_sleep;
     b32 enable_sleep;
+    // Sweep fast bodies over each step so they do not pass through thin
+    // shapes (step 5 above).
+    b32 enable_continuous;
     // Initial capacities (the arrays grow past them).
     u32 body_capacity;
     u32 shape_capacity;
@@ -135,8 +146,8 @@ typedef struct NphPhysicsWorldDesc {
 // contacts at an eighth of the substep rate (120 Hz at 4 substeps, Box2D's
 // 30 Hz at its 240) with damping ratio 10, joints at a quarter of it
 // (240 Hz) with damping ratio 2, a 3 m/s push, a 1 m/s restitution
-// threshold, 400 m/s, half a second to sleep, sleep on, and small initial
-// capacities. Set `alloc` before creating.
+// threshold, 400 m/s, half a second to sleep, sleep and continuous
+// collision on, and small initial capacities. Set `alloc` before creating.
 NphPhysicsWorldDesc nph_physics_world_desc_default(void);
 
 // NPH_RESULT_INVALID_ARGUMENT for a NULL allocator, zero substeps, or a
@@ -228,7 +239,9 @@ typedef struct NphPhysicsStats {
     u32 overflow_constraints; // contacts no colour could take, solved serially
     u32 moved_proxies;        // broadphase proxies that grew last step
     u32 new_pairs;
-    u32 workers; // threads that worked the solver's stages
+    u32 swept_bodies;  // fast bodies swept by continuous collision last step
+    u32 impact_bodies; // of those, set back to an impact
+    u32 workers;       // threads that worked the solver's stages
     u64 steps;
     // The last step's wall time and its stages', in milliseconds.
     f64 step_ms;

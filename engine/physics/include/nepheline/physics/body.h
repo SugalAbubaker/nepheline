@@ -64,11 +64,15 @@ typedef struct NphPhysicsBodyDesc {
     // they should (the Dzhanibekov effect) without the explicit term's
     // instability.
     b32 gyroscopic;
+    // A dynamic body swept, when fast, against kinematic and dynamic bodies
+    // too, not only static ones (Box2D's bullets; world.h "Continuous
+    // collision"): projectiles. Bullets do not sweep against each other.
+    b32 bullet;
     u64 user_data;
 } NphPhysicsBodyDesc;
 
 // A dynamic body at the origin, at rest: damping 0, gravity scale 1, sleep
-// threshold 0.05 m/s, sleep allowed, awake, gyroscopic.
+// threshold 0.05 m/s, sleep allowed, awake, gyroscopic, not a bullet.
 NphPhysicsBodyDesc nph_physics_body_desc_default(void);
 
 // NPH_RESULT_INVALID_ARGUMENT for a non-finite pose or velocity, a rotation
@@ -127,6 +131,11 @@ NphPhysicsMassData nph_physics_body_mass_data(const NphPhysicsWorld *world, NphP
 // non-finite value or a tensor that is not positive definite.
 void nph_physics_body_set_mass_data(NphPhysicsWorld *world, NphPhysicsBody body,
                                     const NphPhysicsMassData *mass);
+
+bool nph_physics_body_is_bullet(const NphPhysicsWorld *world, NphPhysicsBody body);
+// Makes a dynamic body a bullet or not (ignored on static and kinematic
+// bodies), from the next step.
+void nph_physics_body_set_bullet(NphPhysicsWorld *world, NphPhysicsBody body, bool bullet);
 
 bool nph_physics_body_is_awake(const NphPhysicsWorld *world, NphPhysicsBody body);
 // Wakes the body's island, or puts it to sleep (dynamic and kinematic
