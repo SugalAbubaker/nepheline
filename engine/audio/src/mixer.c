@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The mixer (mixer.h): creation, destruction, and the published statistics.
-// The game thread's API is in mixer_api.c, the audio thread's block in
-// mixer_render.c, and one voice's block in mixer_voice.c.
+// The game thread's API is in mixer_api.c (effects in mixer_effects.c), the
+// audio thread's block in mixer_render.c, and one voice's block in
+// mixer_voice.c.
 
 #include <nepheline/core/assert.h>
 
@@ -41,11 +42,17 @@ void nph_audio_mixer_destroy(NphAudioMixer *mixer)
             mix_free_clip(m, m->clip_slots[i].clip);
         }
     }
+    if (m->effect_slots != NULL) {
+        for (u32 i = 0U; i < m->max_effects; ++i) {
+            mix_effect_free(m, m->effect_slots[i].effect);
+        }
+    }
     nph_audio_resampler_destroy(m->resampler);
     nph_spsc_ring_free(&m->commands);
     nph_spsc_ring_free(&m->events);
     nph_handle_pool_free(&m->voice_handles);
     nph_handle_pool_free(&m->clip_handles);
+    nph_handle_pool_free(&m->effect_handles);
     if (m->buses != NULL) {
         for (u32 i = 0U; i < m->max_buses; ++i) {
             for (u32 c = 0U; c < NPH_AUDIO_MAX_CHANNELS; ++c) {
@@ -61,6 +68,9 @@ void nph_audio_mixer_destroy(NphAudioMixer *mixer)
         }
         if (m->voice_out[c] != NULL) {
             NPH_FREE_ARRAY(a, f32, m->voice_out[c], MIX_BLOCK);
+        }
+        if (m->effect_dry[c] != NULL) {
+            NPH_FREE_ARRAY(a, f32, m->effect_dry[c], MIX_BLOCK);
         }
     }
 #define MIX_RELEASE(ptr, type, count)                                                              \
@@ -91,6 +101,10 @@ void nph_audio_mixer_destroy(NphAudioMixer *mixer)
     MIX_RELEASE(m->bus_rms, NphAtomicU32, m->max_buses);
     MIX_RELEASE(m->pending_clip_removals, u32, m->max_clips);
     MIX_RELEASE(m->pending_bus_removals, u32, m->max_buses);
+    MIX_RELEASE(m->effect_slots, MixEffectSlot, m->max_effects);
+    MIX_RELEASE(m->pending_effect_removals, u32, m->max_effects);
+    MIX_RELEASE(m->audio_effects, MixEffect *, m->max_effects);
+    MIX_RELEASE(m->effect_meter, NphAtomicU32, m->max_effects);
 #undef MIX_RELEASE
     NPH_FREE_TYPE(a, NphAudioMixer, m);
 }
@@ -110,11 +124,13 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
     const u32 max_buses = desc->max_buses != 0U ? desc->max_buses : 32U;
     const u32 max_snapshots = desc->max_snapshots != 0U ? desc->max_snapshots : 32U;
     const u32 commands = desc->command_capacity != 0U ? desc->command_capacity : 4096U;
+    const u32 max_effects = desc->max_effects != 0U ? desc->max_effects : 64U;
     NphAudioLayout layout;
     if (rate < NPH_AUDIO_MIN_RATE || rate > NPH_AUDIO_MAX_RATE ||
         nph_audio_layout_for_channels(channels, &layout) != NPH_RESULT_OK ||
         max_voices > (1U << 16U) || max_real > max_voices || max_clips > (1U << 20U) ||
-        max_buses > MIX_MAX_BUSES || max_snapshots > 4096U || !nph_is_pow2_u32(commands)) {
+        max_buses > MIX_MAX_BUSES || max_snapshots > 4096U || !nph_is_pow2_u32(commands) ||
+        max_effects > 4096U) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NphAllocator *a = desc->alloc;
@@ -131,6 +147,9 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
     m->max_clips = max_clips;
     m->max_buses = max_buses;
     m->max_snapshots = max_snapshots;
+    m->max_effects = max_effects;
+    m->speed_of_sound =
+        desc->speed_of_sound > 0.0F ? desc->speed_of_sound : NPH_AUDIO_SPEED_OF_SOUND;
     m->kernels = nph_audio_kernels_best();
     // A promotion needs a free context while its demoted voice still fades
     // in another: a quarter more than the real voices covers a busy block.
@@ -146,7 +165,8 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
         // Room for every voice's end and every clip's and bus's release at
         // once: each event belongs to one slot, which is not reused until the
         // game thread has heard it, so a push can never find the ring full.
-        const u32 events = nph_next_pow2_u32(max_voices + max_clips + max_buses + 64U);
+        const u32 events =
+            nph_next_pow2_u32(max_voices + max_clips + max_buses + max_effects + 64U);
         r = nph_spsc_ring_init(&m->events, a, sizeof(MixEvent), events);
     }
     if (r == NPH_RESULT_OK) {
@@ -158,6 +178,10 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
         r = nph_handle_pool_init(
             &m->clip_handles, a, max_clips,
             nph_log2_ceil_u32(max_clips) > 0U ? nph_log2_ceil_u32(max_clips) : 1U, 0U);
+    }
+    if (r == NPH_RESULT_OK) {
+        const u32 bits = nph_log2_ceil_u32(max_effects);
+        r = nph_handle_pool_init(&m->effect_handles, a, max_effects, bits > 0U ? bits : 1U, 0U);
     }
     if (r != NPH_RESULT_OK) {
         nph_audio_mixer_destroy(m);
@@ -184,6 +208,10 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
     m->bus_rms = NPH_ALLOC_ARRAY_ZEROED(a, NphAtomicU32, max_buses);
     m->pending_clip_removals = NPH_ALLOC_ARRAY_ZEROED(a, u32, max_clips);
     m->pending_bus_removals = NPH_ALLOC_ARRAY_ZEROED(a, u32, max_buses);
+    m->effect_slots = NPH_ALLOC_ARRAY_ZEROED(a, MixEffectSlot, max_effects);
+    m->pending_effect_removals = NPH_ALLOC_ARRAY_ZEROED(a, u32, max_effects);
+    m->audio_effects = NPH_ALLOC_ARRAY_ZEROED(a, MixEffect *, max_effects);
+    m->effect_meter = NPH_ALLOC_ARRAY_ZEROED(a, NphAtomicU32, max_effects);
     bool ok = m->pending_clip_removals != NULL && m->pending_bus_removals != NULL &&
               m->mailbox != NULL && m->clip_slots != NULL && m->voice_clip != NULL &&
               m->bus_mirror != NULL && m->snapshot_mailbox != NULL && m->voices != NULL &&
@@ -191,7 +219,8 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
               m->buses != NULL && m->bus_order != NULL && m->snapshots != NULL &&
               m->contexts != NULL && m->ranking_keys != NULL && m->block_out != NULL &&
               m->bus_level != NULL && m->bus_target != NULL && m->bus_peak != NULL &&
-              m->bus_rms != NULL;
+              m->bus_rms != NULL && m->effect_slots != NULL && m->audio_effects != NULL &&
+              m->effect_meter != NULL && m->pending_effect_removals != NULL;
     // Clips may have more channels than the output: the window and the
     // resampled block are per source channel.
     for (u32 c = 0U; ok && c < NPH_AUDIO_MAX_CHANNELS; ++c) {
@@ -202,6 +231,10 @@ NphResult nph_audio_mixer_create(const NphAudioMixerDesc *desc, NphAudioMixer **
     if (ok) {
         m->filter_dry = NPH_ALLOC_ARRAY_ZEROED(a, f32, MIX_BLOCK);
         ok = m->filter_dry != NULL;
+    }
+    for (u32 c = 0U; ok && c < channels; ++c) {
+        m->effect_dry[c] = NPH_ALLOC_ARRAY_ZEROED(a, f32, MIX_BLOCK);
+        ok = m->effect_dry[c] != NULL;
     }
     for (u32 i = 0U; ok && i < max_buses; ++i) {
         for (u32 c = 0U; ok && c < channels; ++c) {

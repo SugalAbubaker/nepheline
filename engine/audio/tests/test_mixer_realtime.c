@@ -83,6 +83,7 @@ typedef struct RtScene {
     NphAudioBus effects;
     NphAudioBus reverb;
     NphAudioSnapshot pause;
+    NphAudioEffect fx[5]; // equaliser, compressor, echo, reverberator, limiter
     NphAudioVoice voices[48];
     u64 rng;
 } RtScene;
@@ -158,6 +159,22 @@ static void rt_scene_build(RtScene *s)
     const NphAudioSnapshotEntry entries[2] = {{s->music, -6.0F, 1200.0F},
                                               {s->effects, -12.0F, 0.0F}};
     NTEST_ASSERT_EQ_INT(nph_audio_snapshot_create(s->m, entries, 2U, &s->pause), NPH_RESULT_OK);
+    // Every effect: an equaliser and a compressor on the music, an echo on
+    // the effects, a reverberator on the send bus, a limiter on the master.
+    NphAudioEffectDesc fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_EQ);
+    fx.eq[0] = (NphAudioEqBand){NPH_AUDIO_FILTER_LOW_SHELF, 150.0F, 0.7071F, 3.0F, 1};
+    fx.eq[1] = (NphAudioEqBand){NPH_AUDIO_FILTER_PEAK, 2500.0F, 1.0F, -4.0F, 1};
+    NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->music, &fx, &s->fx[0]), NPH_RESULT_OK);
+    fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_COMPRESSOR);
+    NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->music, &fx, &s->fx[1]), NPH_RESULT_OK);
+    fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_ECHO);
+    fx.echo.ping_pong = 1;
+    NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->effects, &fx, &s->fx[2]), NPH_RESULT_OK);
+    fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_REVERB);
+    NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->reverb, &fx, &s->fx[3]), NPH_RESULT_OK);
+    fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_LIMITER);
+    NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, NPH_AUDIO_MASTER_BUS, &fx, &s->fx[4]),
+                        NPH_RESULT_OK);
 }
 
 static void rt_scene_play(RtScene *s, u32 i)
@@ -176,6 +193,14 @@ static void rt_scene_play(RtScene *s, u32 i)
     d.sends[0] = s->reverb;
     d.send_gains[0] = (i % 4U) == 1U ? 0.4F : 0.0F;
     d.fade_in = (i % 6U) == 0U ? 0.05F : 0.0F;
+    // A third are in 3D: placed, moving, near and far.
+    if ((i % 3U) == 2U) {
+        d.spatial = 1;
+        d.position =
+            (NphVec3){test_rng_signed(&s->rng) * 20.0F, 0.0F, test_rng_signed(&s->rng) * 20.0F};
+        d.velocity = (NphVec3){test_rng_signed(&s->rng) * 10.0F, 0.0F, 0.0F};
+        d.size = (i % 5U) == 0U ? 2.0F : 0.0F;
+    }
     NphAudioVoice v;
     if (nph_audio_voice_play(s->m, &d, &v) == NPH_RESULT_OK) {
         s->voices[i] = v;
@@ -201,12 +226,37 @@ static void rt_scene_steer(RtScene *s, u32 step)
         break;
     case 3U:
         nph_audio_voice_set_filters(s->m, s->voices[i], (step % 2U) != 0U ? 800.0F : 0.0F, 0.0F);
+        // And the 3D voices move, behind walls and round corners.
+        nph_audio_voice_set_position(
+            s->m, s->voices[(i + 1U) % 48U],
+            (NphVec3){test_rng_signed(&s->rng) * 30.0F, 1.0F, test_rng_signed(&s->rng) * 30.0F},
+            (NphVec3){test_rng_signed(&s->rng) * 20.0F, 0.0F, test_rng_signed(&s->rng) * 20.0F});
+        nph_audio_voice_set_occlusion(s->m, s->voices[(i + 2U) % 48U], (f32)(step % 3U) * 0.5F,
+                                      (f32)(step % 2U));
         break;
     case 4U:
         nph_audio_snapshot_set_weight(s->m, s->pause, (step % 12U) < 6U ? 1.0F : 0.0F, 0.1F);
+        // The effects move too: the reverberator's size and decay, the
+        // equaliser's bell, the echo's time, bypasses.
+        nph_audio_effect_set_param(s->m, s->fx[3], NPH_AUDIO_REVERB_SIZE,
+                                   0.5F + 0.1F * (f32)(step % 10U));
+        nph_audio_effect_set_param(s->m, s->fx[3], NPH_AUDIO_REVERB_DECAY,
+                                   0.5F + 0.2F * (f32)(step % 7U));
+        nph_audio_effect_set_param(s->m, s->fx[0], NPH_AUDIO_EQ_PARAM(1, NPH_AUDIO_EQ_FREQ),
+                                   1000.0F + 300.0F * (f32)(step % 9U));
+        nph_audio_effect_set_param(s->m, s->fx[2], NPH_AUDIO_ECHO_DELAY,
+                                   200.0F + 30.0F * (f32)(step % 5U));
+        nph_audio_effect_set_bypass(s->m, s->fx[1], (step % 18U) < 6U);
         break;
     default:
         nph_audio_voice_set_paused(s->m, s->voices[i], (step % 4U) == 1U);
+        // Now and then an effect goes and another comes in its place.
+        if (step % 30U == 5U) {
+            nph_audio_effect_destroy(s->m, s->fx[2]);
+            const NphAudioEffectDesc echo = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_ECHO);
+            NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->effects, &echo, &s->fx[2]),
+                                NPH_RESULT_OK);
+        }
         break;
     }
 }

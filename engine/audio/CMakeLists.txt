@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # The audio module (CLAUDE.md §8.10; docs/audio.md; docs/adr/0051-audio-module.md):
 # the DSP building blocks, the resampler, the block kernels, the codecs (WAV,
-# our ADPCM, our lossless codec), the effects, the mixer, and (later in Phase
-# 12) spatialisation, streaming, and the output device. Depends on platform
+# our ADPCM, our lossless codec), the effects, the mixer, spatialisation, and
+# (later in Phase 12) streaming and the output device. Depends on platform
 # (threads, files, asynchronous I/O) and through it on math and core; never
 # on asset, scene, or physics: the runtime connects them.
 
@@ -23,6 +23,7 @@ nph_add_module(audio
         src/lossless.c
         src/mixer.c
         src/mixer_api.c
+        src/mixer_effects.c
         src/mixer_internal.h
         src/mixer_render.c
         src/mixer_voice.c
@@ -52,7 +53,9 @@ nph_add_test(audio
         tests/test_kernels.c
         tests/test_lossless.c
         tests/test_mixer.c
+        tests/test_mixer_effects.c
         tests/test_mixer_realtime.c
+        tests/test_mixer_spatial.c
         tests/test_mixer_support.h
         tests/test_pan.c
         tests/test_resampler.c

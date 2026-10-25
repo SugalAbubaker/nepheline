@@ -46,6 +46,21 @@ static u32 api_bus_slot(const NphAudioMixer *m, NphAudioBus bus)
     return b->generation != 0U && b->generation == generation && !b->releasing ? index : MIX_NONE;
 }
 
+bool mix_push(NphAudioMixer *m, const MixCommand *cmd)
+{
+    return api_push(m, cmd);
+}
+
+MixCommand mix_command(u32 type, u32 index)
+{
+    return api_command(type, index);
+}
+
+u32 mix_bus_slot(const NphAudioMixer *m, NphAudioBus bus)
+{
+    return api_bus_slot(m, bus);
+}
+
 static u32 api_voice_slot(const NphAudioMixer *m, NphAudioVoice voice)
 {
     const NphHandle h = {voice.value};
@@ -102,6 +117,14 @@ void nph_audio_mixer_update(NphAudioMixer *mixer)
         }
     }
     m->pending_bus_removal_count = kept;
+    kept = 0U;
+    for (u32 i = 0U; i < m->pending_effect_removal_count; ++i) {
+        const MixCommand c = api_command(MIX_CMD_EFFECT_REMOVE, m->pending_effect_removals[i]);
+        if (!api_push(m, &c)) {
+            m->pending_effect_removals[kept++] = m->pending_effect_removals[i];
+        }
+    }
+    m->pending_effect_removal_count = kept;
     MixEvent e;
     while (nph_spsc_ring_pop(&m->events, &e)) {
         switch (e.type) {
@@ -120,6 +143,13 @@ void nph_audio_mixer_update(NphAudioMixer *mixer)
         case MIX_EVENT_BUS_RELEASED: {
             MixBusMirror *b = &m->bus_mirror[e.index];
             memset(b, 0, sizeof *b);
+            break;
+        }
+        case MIX_EVENT_EFFECT_RELEASED: {
+            MixEffectSlot *slot = &m->effect_slots[e.index];
+            mix_effect_free(m, slot->effect);
+            NPH_VERIFY(nph_handle_pool_release(&m->effect_handles, slot->handle));
+            memset(slot, 0, sizeof *slot);
             break;
         }
         default:
@@ -336,6 +366,14 @@ void nph_audio_bus_destroy(NphAudioMixer *mixer, NphAudioBus bus)
     }
     MixBusMirror *b = &m->bus_mirror[index];
     b->releasing = 1;
+    // Its effects go with it: the audio thread releases them when it
+    // removes the bus.
+    for (u32 i = 0U; i < m->max_effects; ++i) {
+        MixEffectSlot *s = &m->effect_slots[i];
+        if (s->effect != NULL && s->bus == index) {
+            s->releasing = 1;
+        }
+    }
     // The mirror moves its children to its parent and forgets sends to it,
     // as the audio thread will.
     for (u32 i = 1U; i < m->max_buses; ++i) {
@@ -535,6 +573,10 @@ NphAudioPlayDesc nph_audio_play_desc_default(NphAudioClip clip)
     d.volume = 1.0F;
     d.pitch = 1.0F;
     d.priority = 128U;
+    d.attenuation = nph_audio_attenuation_default();
+    d.doppler = 1.0F;
+    d.air_absorption = 1.0F;
+    d.send_distance = 0.5F;
     return d;
 }
 
@@ -583,6 +625,20 @@ NphResult nph_audio_voice_play(NphAudioMixer *mixer, const NphAudioPlayDesc *des
         init->send_gain[s] = sends[s] != MIX_NONE ? desc->send_gains[s] : 0.0F;
     }
     init->sequence = m->sequence++;
+    init->spatial = desc->spatial != 0;
+    init->position[0] = desc->position.x;
+    init->position[1] = desc->position.y;
+    init->position[2] = desc->position.z;
+    init->velocity[0] = desc->velocity.x;
+    init->velocity[1] = desc->velocity.y;
+    init->velocity[2] = desc->velocity.z;
+    init->attenuation = desc->attenuation;
+    init->size = desc->size > 0.0F ? desc->size : 0.0F;
+    init->doppler = desc->doppler > 0.0F ? desc->doppler : 0.0F;
+    init->air = desc->air_absorption > 0.0F ? desc->air_absorption : 0.0F;
+    init->send_distance = desc->send_distance < 0.0F
+                              ? 0.0F
+                              : (desc->send_distance > 1.0F ? 1.0F : desc->send_distance);
     MixCommand c = api_command(MIX_CMD_VOICE_PLAY, index);
     c.generation = h.value;
     if (!api_push(m, &c)) {
@@ -649,6 +705,45 @@ void nph_audio_voice_set_filters(NphAudioMixer *mixer, NphAudioVoice voice, f32 
     api_voice_command(mixer, voice, MIX_CMD_VOICE_SET, MIX_VOICE_FILTERS,
                       lowpass_hz > 0.0F ? lowpass_hz : 0.0F,
                       highpass_hz > 0.0F ? highpass_hz : 0.0F);
+}
+
+static bool api_finite3(NphVec3 v)
+{
+    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
+void nph_audio_voice_set_position(NphAudioMixer *mixer, NphAudioVoice voice, NphVec3 position,
+                                  NphVec3 velocity)
+{
+    const u32 index = api_voice_slot(mixer, voice);
+    if (index == MIX_NONE || !api_finite3(position) || !api_finite3(velocity)) {
+        return;
+    }
+    MixCommand c = api_command(MIX_CMD_VOICE_SET, index);
+    c.generation = voice.value;
+    c.param = MIX_VOICE_POSITION;
+    c.values[0] = position.x;
+    c.values[1] = position.y;
+    c.values[2] = position.z;
+    c.values[3] = velocity.x;
+    c.values[4] = velocity.y;
+    c.values[5] = velocity.z;
+    (void)api_push(mixer, &c);
+}
+
+void nph_audio_voice_set_occlusion(NphAudioMixer *mixer, NphAudioVoice voice, f32 occlusion,
+                                   f32 obstruction)
+{
+    const u32 index = api_voice_slot(mixer, voice);
+    if (index == MIX_NONE) {
+        return;
+    }
+    MixCommand c = api_command(MIX_CMD_VOICE_SET, index);
+    c.generation = voice.value;
+    c.param = MIX_VOICE_OCCLUSION;
+    c.values[0] = occlusion > 0.0F ? (occlusion < 1.0F ? occlusion : 1.0F) : 0.0F;
+    c.values[1] = obstruction > 0.0F ? (obstruction < 1.0F ? obstruction : 1.0F) : 0.0F;
+    (void)api_push(mixer, &c);
 }
 
 void nph_audio_voice_set_send(NphAudioMixer *mixer, NphAudioVoice voice, u32 slot, f32 gain)

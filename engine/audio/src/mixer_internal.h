@@ -72,6 +72,10 @@ typedef enum MixCommandType {
     MIX_CMD_BUS_DUCK,
     MIX_CMD_SNAPSHOT_ADD,
     MIX_CMD_SNAPSHOT_WEIGHT,
+    MIX_CMD_EFFECT_ADD,
+    MIX_CMD_EFFECT_REMOVE,
+    MIX_CMD_EFFECT_PARAM,
+    MIX_CMD_EFFECT_BYPASS,
 } MixCommandType;
 
 typedef enum MixVoiceParam {
@@ -81,6 +85,8 @@ typedef enum MixVoiceParam {
     MIX_VOICE_PAUSED,
     MIX_VOICE_FILTERS,
     MIX_VOICE_SEND,
+    MIX_VOICE_POSITION,
+    MIX_VOICE_OCCLUSION,
 } MixVoiceParam;
 
 typedef enum MixBusParam {
@@ -101,6 +107,7 @@ typedef enum MixEventType {
     MIX_EVENT_VOICE_END = 0,
     MIX_EVENT_CLIP_RELEASED,
     MIX_EVENT_BUS_RELEASED,
+    MIX_EVENT_EFFECT_RELEASED,
 } MixEventType;
 
 typedef struct MixEvent {
@@ -128,6 +135,14 @@ typedef struct MixVoiceInit {
     u32 send_bus[NPH_AUDIO_MAX_SENDS];
     f32 send_gain[NPH_AUDIO_MAX_SENDS];
     u64 sequence; // play order: ties go to the older voice
+    b32 spatial;
+    f32 position[3];
+    f32 velocity[3];
+    NphAudioAttenuation attenuation;
+    f32 size;
+    f32 doppler;
+    f32 air;
+    f32 send_distance;
 } MixVoiceInit;
 
 typedef enum MixVoiceState {
@@ -146,6 +161,8 @@ typedef struct MixContext {
     u64 decoder_frame; // the clip frame it produces next
     NphAudioFilterState lowpass[NPH_AUDIO_MAX_CHANNELS];
     NphAudioFilterState highpass[NPH_AUDIO_MAX_CHANNELS];
+    NphAudioFilterState obstruct[NPH_AUDIO_MAX_CHANNELS]; // the direct path's
+    f32 air[NPH_AUDIO_MAX_CHANNELS];                      // the air's one-poles
     u32 next_free;
 } MixContext;
 
@@ -180,11 +197,61 @@ typedef struct MixVoice {
     b32 demoting; // mixed this block toward silence, then virtual
     b32 entering; // came back from virtual (or started mid-clip): fades in over its first block
     b32 fresh;    // not rendered yet: starts at full gain (its own attack), no ramp
-    f32 gains[NPH_AUDIO_MAX_CHANNELS]
-             [NPH_AUDIO_MAX_CHANNELS]; // source x output, at the block's end
+    // The pan matrix (source x output) and the two paths' levels at the
+    // last block's end, where this block's ramps start.
+    f32 matrix[NPH_AUDIO_MAX_CHANNELS][NPH_AUDIO_MAX_CHANNELS];
+    f32 direct_now; // the volume and fade, and 3D's direct gain
+    f32 send_now;   // the volume and fade, and 3D's send gain
     f32 sends_current[NPH_AUDIO_MAX_SENDS];
     f32 score; // audibility for the ranking
+    // 3D (spatial.h): the place the game thread gave the voice ...
+    b32 spatial;
+    f32 position[3];
+    f32 velocity[3];
+    NphAudioAttenuation attenuation;
+    f32 size;
+    f32 doppler;
+    f32 air;
+    f32 send_distance;
+    f32 occlusion;
+    f32 obstruction;
+    // ... and what follows from it this block (mix_voice_spatial).
+    f32 sp_direct;    // the direct path's gain: distance, occlusion, obstruction
+    f32 sp_send;      // the sends' gain: distance (in part) and occlusion
+    f32 sp_pitch;     // Doppler's ratio
+    f32 sp_azimuth;   // radians
+    f32 sp_spread;    // radians
+    f32 sp_lowpass;   // occlusion's corner (MIX_FULL_BAND: none)
+    f32 sp_obstruct;  // obstruction's corner, the direct path only (MIX_FULL_BAND: none)
+    f32 sp_air;       // the air's one-pole coefficient (1: none)
+    f32 air_now;      // the coefficient the last block ended at
+    f32 obstruct_now; // the obstruction low-pass's corner, gliding to sp_obstruct
+    NphAudioFilterCoeffs obstruct;
 } MixVoice;
+
+// An insert effect: made and freed by the game thread, run by the audio
+// thread on its bus.
+typedef struct MixEffect {
+    NphAudioEffectType type;
+    b32 bypass;   // the audio thread's target
+    b32 bypassed; // as its last block ran
+    b32 removing; // fading out of its chain, then released
+    union {
+        NphAudioEq eq;
+        NphAudioCompressor compressor;
+        NphAudioLimiter limiter;
+        NphAudioEcho echo;
+        NphAudioReverb reverb;
+    } dsp;
+} MixEffect;
+
+// The game thread's view of an effect slot.
+typedef struct MixEffectSlot {
+    MixEffect *effect;
+    NphHandle handle;
+    u32 bus;       // its bus's slot
+    b32 releasing; // destroyed; waiting for the audio thread
+} MixEffectSlot;
 
 typedef struct MixBus {
     b32 active;
@@ -203,6 +270,9 @@ typedef struct MixBus {
     f32 duck_attack;    // per-block smoothing coefficients
     f32 duck_release;
     f32 duck_db; // the current reduction
+    // Insert effects, in order (effect slots).
+    u32 effects[NPH_AUDIO_BUS_EFFECTS];
+    u32 effect_count;
     // Snapshots' low-pass: its corner (0: none), design, and state.
     f32 lowpass_hz;
     NphAudioFilterCoeffs lowpass;
@@ -248,6 +318,8 @@ struct NphAudioMixer {
     u32 max_clips;
     u32 max_buses;
     u32 max_snapshots;
+    u32 max_effects;
+    f32 speed_of_sound;
     const NphAudioKernels *kernels;
     NphAudioResampler *resampler;
     NphAudioPanner panner;
@@ -259,10 +331,12 @@ struct NphAudioMixer {
     // --- The game thread's half ---
     NphHandlePool voice_handles;
     NphHandlePool clip_handles;
-    MixVoiceInit *mailbox;    // per voice slot
-    MixClipSlot *clip_slots;  // per clip slot
-    u32 *voice_clip;          // per voice slot: its clip's slot (for stopping a clip's voices)
-    MixBusMirror *bus_mirror; // per bus slot
+    NphHandlePool effect_handles;
+    MixEffectSlot *effect_slots; // per effect slot
+    MixVoiceInit *mailbox;       // per voice slot
+    MixClipSlot *clip_slots;     // per clip slot
+    u32 *voice_clip;             // per voice slot: its clip's slot (for stopping a clip's voices)
+    MixBusMirror *bus_mirror;    // per bus slot
     u32 bus_generation_next;
     MixSnapshot *snapshot_mailbox; // per snapshot slot
     u32 snapshot_count;
@@ -272,6 +346,8 @@ struct NphAudioMixer {
     u32 pending_clip_removal_count;
     u32 *pending_bus_removals;
     u32 pending_bus_removal_count;
+    u32 *pending_effect_removals;
+    u32 pending_effect_removal_count;
 
     // --- The audio thread's half ---
     MixVoice *voices;
@@ -283,14 +359,16 @@ struct NphAudioMixer {
     u32 bus_order_count;
     b32 bus_order_dirty;
     MixSnapshot *snapshots;
+    MixEffect **audio_effects; // per effect slot, while on a bus
     MixContext *contexts;
     u32 context_count;
-    u32 context_free;                       // the free list's head
-    u64 *ranking_keys;                      // scratch: (priority, score, slot) per candidate
-    f32 *window[NPH_AUDIO_MAX_CHANNELS];    // a voice's source window
-    f32 *voice_out[NPH_AUDIO_MAX_CHANNELS]; // a voice's resampled block
-    f32 *filter_dry;                        // a block before a filter that switches on or off
-    f32 *block_out;                         // the master block, interleaved
+    u32 context_free;                        // the free list's head
+    u64 *ranking_keys;                       // scratch: (priority, score, slot) per candidate
+    f32 *window[NPH_AUDIO_MAX_CHANNELS];     // a voice's source window
+    f32 *voice_out[NPH_AUDIO_MAX_CHANNELS];  // a voice's resampled block
+    f32 *filter_dry;                         // a block before a filter that switches on or off
+    f32 *effect_dry[NPH_AUDIO_MAX_CHANNELS]; // a bus's block before an effect fading in or out
+    f32 *block_out;                          // the master block, interleaved
     f32 *bus_level;  // per bus: its gain times its ancestors' (for the ranking)
     f32 *bus_target; // per bus: this block's final gain
     u32 block_left;  // frames of block_out not yet handed out
@@ -311,13 +389,37 @@ struct NphAudioMixer {
     NphAtomicU32 stat_dropped; // written by the game thread
     NphAtomicU32 *bus_peak;    // f32 bits per bus
     NphAtomicU32 *bus_rms;
+    NphAtomicU32 *effect_meter; // f32 bits per effect slot: dynamics' deepest reduction
 };
+
+// mixer_api.c, for mixer_effects.c: a command pushed (false, and counted,
+// when the ring is full), a command of `type` for slot `index`, and a bus
+// handle's slot (MIX_NONE when stale).
+bool mix_push(NphAudioMixer *m, const MixCommand *cmd);
+MixCommand mix_command(u32 type, u32 index);
+u32 mix_bus_slot(const NphAudioMixer *m, NphAudioBus bus);
+
+// mixer_effects.c: a bus's insert chain on its block (the audio thread).
+void mix_effects_process(NphAudioMixer *m, MixBus *b);
+
+// mixer_effects.c: one parameter of an effect (the audio thread).
+void mix_effect_set_param(MixEffect *e, u32 param, f32 value);
+
+// mixer_effects.c: releases an effect's memory (the game thread).
+void mix_effect_free(NphAudioMixer *m, MixEffect *e);
+
+// mixer_render.c: an event for the game thread (a push never fails).
+void mix_event(NphAudioMixer *m, u32 type, u32 index, u32 generation);
 
 // mixer_voice.c: one real voice's block, mixed into its bus and sends.
 void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames);
 
 // mixer_voice.c: a virtual voice's block (its position advanced).
 void mix_voice_advance(NphAudioMixer *m, MixVoice *v, u32 frames);
+
+// mixer_voice.c: a spatial voice's gains, pitch, direction, and corners for
+// this block, from its place (the audio thread, before the ranking).
+void mix_voice_spatial(const NphAudioMixer *m, MixVoice *v);
 
 // mixer_voice.c: the 32.32 step of a voice this block.
 u64 mix_voice_step(const NphAudioMixer *m, const MixVoice *v);

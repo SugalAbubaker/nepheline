@@ -42,24 +42,50 @@ void mix_filter_block(NphAudioMixer *m, const NphAudioFilterCoeffs *from,
     // A filter switching on starts from silence, and one switching off
     // leaves its last state behind: either way its output and the signal
     // without it differ for a moment, so the block crossfades between the
-    // two. The crossfade is a smoothstep, t^2 (3 - 2t), whose share starts
-    // at about 3 t^2: the filter's first samples, where the difference is,
-    // come in at a hundred-thousandth, where a linear ramp's 1/256 would
-    // leave a tick. It ends at exactly the filtered signal (or the dry one).
-    const f32 *dry = m->filter_dry;
-    const f32 step = 1.0F / (f32)frames;
-    const bool on = change == MIX_FILTER_SWITCH_ON;
-    for (u32 i = 0U; i < frames; ++i) {
-        const f32 t = (f32)(i + 1U) * step;
-        const f32 s = t * t * (3.0F - 2.0F * t);
-        const f32 wet = on ? s : 1.0F - s;
-        x[i] = dry[i] + (x[i] - dry[i]) * wet;
-    }
+    // two (filter.h).
+    nph_audio_smooth_crossfade(x, m->filter_dry, frames, change == MIX_FILTER_SWITCH_ON);
+}
+
+// Occlusion takes the highs down to this at its fullest; obstruction to
+// this on the direct path; and they cost these levels (dB).
+#define MV_OCCLUSION_CORNER   700.0F
+#define MV_OBSTRUCTION_CORNER 1000.0F
+#define MV_OCCLUSION_DB       (-24.0F)
+#define MV_OBSTRUCTION_DB     (-12.0F)
+
+void mix_voice_spatial(const NphAudioMixer *m, MixVoice *v)
+{
+    const f32 x = v->position[0];
+    const f32 y = v->position[1];
+    const f32 z = v->position[2];
+    const f32 d = sqrtf(x * x + y * y + z * z);
+    const f32 distance = nph_audio_attenuation_gain(&v->attenuation, d);
+    const f32 occ = v->occlusion;
+    const f32 obs = v->obstruction;
+    const f32 occ_gain = occ > 0.0F ? nph_audio_db_to_gain(MV_OCCLUSION_DB * occ) : 1.0F;
+    const f32 obs_gain = obs > 0.0F ? nph_audio_db_to_gain(MV_OBSTRUCTION_DB * obs) : 1.0F;
+    v->sp_direct = distance * occ_gain * obs_gain;
+    v->sp_send = (v->send_distance > 0.0F ? powf(distance, v->send_distance) : 1.0F) * occ_gain;
+    // Doppler: the rate at which the distance grows.
+    const f32 radial =
+        d > 1e-6F ? (x * v->velocity[0] + y * v->velocity[1] + z * v->velocity[2]) / d : 0.0F;
+    v->sp_pitch = nph_audio_doppler_ratio(radial, m->speed_of_sound, v->doppler);
+    v->sp_azimuth = nph_audio_azimuth(x, z);
+    v->sp_spread = nph_audio_spread(v->size, d);
+    // Corners glide in log frequency from fully open with the amount.
+    v->sp_lowpass =
+        occ > 0.0F ? MIX_FULL_BAND * powf(MV_OCCLUSION_CORNER / MIX_FULL_BAND, occ) : MIX_FULL_BAND;
+    v->sp_obstruct = obs > 0.0F ? MIX_FULL_BAND * powf(MV_OBSTRUCTION_CORNER / MIX_FULL_BAND, obs)
+                                : MIX_FULL_BAND;
+    v->sp_air = nph_audio_air_coeff(d, v->air, (f32)m->rate);
 }
 
 u64 mix_voice_step(const NphAudioMixer *m, const MixVoice *v)
 {
     const MixClip *c = m->audio_clips[v->clip];
+    if (v->spatial) {
+        return nph_audio_resample_step(c->rate_ratio * (f64)v->pitch * (f64)v->sp_pitch);
+    }
     return nph_audio_resample_step(c->rate_ratio * (f64)v->pitch);
 }
 
@@ -222,11 +248,64 @@ static void mv_read_timeline(NphAudioMixer *m, const MixClip *c, const MixVoice 
     }
 }
 
+// Obstruction's low-pass on the direct path, gliding and switching as the
+// voice's own filters do.
+static void mv_obstruct(NphAudioMixer *m, MixVoice *v, MixContext *ctx, u32 channels, u32 frames)
+{
+    const bool was = v->obstruct_now < MIX_FULL_BAND;
+    const f32 before = v->obstruct_now;
+    const NphAudioFilterCoeffs from = v->obstruct;
+    v->obstruct_now = mv_glide(v->obstruct_now, v->sp_obstruct);
+    const bool now = v->obstruct_now < MIX_FULL_BAND;
+    if (!now && !was) {
+        return;
+    }
+    const MixFilterChange change = now == was || v->fresh
+                                       ? MIX_FILTER_STEADY
+                                       : (now ? MIX_FILTER_SWITCH_ON : MIX_FILTER_SWITCH_OFF);
+    v->obstruct = nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, v->obstruct_now, 0.7071068F,
+                                          0.0F, (f32)m->rate);
+    const bool glides = was && !v->fresh && v->obstruct_now != before;
+    for (u32 ch = 0U; ch < channels; ++ch) {
+        mix_filter_block(m, glides ? &from : NULL, &v->obstruct, &ctx->obstruct[ch],
+                         m->voice_out[ch], frames, change);
+    }
+    if (!now) {
+        memset(ctx->obstruct, 0, sizeof ctx->obstruct);
+    }
+}
+
 void mix_voice_pan_matrix(const NphAudioMixer *m, const MixVoice *v, u32 channels,
                           f32 out[NPH_AUDIO_MAX_CHANNELS][NPH_AUDIO_MAX_CHANNELS])
 {
     memset(out, 0, sizeof(f32) * NPH_AUDIO_MAX_CHANNELS * NPH_AUDIO_MAX_CHANNELS);
     const NphAudioLayoutInfo *out_info = nph_audio_layout_info(m->layout);
+    if (v->spatial) {
+        // A point (or an extent, its spread) in the voice's direction. A
+        // multichannel clip is its layout turned to face that way, narrowed
+        // to a point far off and opened to its own angles from a spread of
+        // 60 degrees.
+        if (channels == 1U) {
+            nph_audio_pan(&m->panner, v->sp_azimuth, v->sp_spread, out[0]);
+            return;
+        }
+        NphAudioLayout clip_layout;
+        const NphAudioLayoutInfo *in =
+            nph_audio_layout_for_channels(channels, &clip_layout) == NPH_RESULT_OK
+                ? nph_audio_layout_info(clip_layout)
+                : nph_audio_layout_info(NPH_AUDIO_LAYOUT_SURROUND_7_1);
+        const f32 width = v->sp_spread < 1.0471976F ? v->sp_spread / 1.0471976F : 1.0F;
+        for (u32 c = 0U; c < channels && c < NPH_AUDIO_MAX_CHANNELS; ++c) {
+            if (c == in->lfe) {
+                if (out_info->lfe != NPH_AUDIO_NO_LFE) {
+                    out[c][out_info->lfe] = 1.0F;
+                }
+                continue;
+            }
+            nph_audio_pan(&m->panner, v->sp_azimuth + in->azimuth[c] * width, 0.0F, out[c]);
+        }
+        return;
+    }
     const f32 pan = v->pan < -1.0F ? -1.0F : (v->pan > 1.0F ? 1.0F : v->pan);
     if (channels == 1U) {
         // A point in front: on two channels the pan is the sine law's
@@ -395,7 +474,10 @@ void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
     const f32 highpass_before = v->highpass_now;
     const NphAudioFilterCoeffs lowpass_from = v->lowpass;
     const NphAudioFilterCoeffs highpass_from = v->highpass;
-    const f32 lp_target = v->lowpass_hz > 0.0F ? v->lowpass_hz : MIX_FULL_BAND;
+    f32 lp_target = v->lowpass_hz > 0.0F ? v->lowpass_hz : MIX_FULL_BAND;
+    if (v->spatial && v->sp_lowpass < lp_target) {
+        lp_target = v->sp_lowpass; // occlusion darkens through the same low-pass
+    }
     const f32 hp_target = v->highpass_hz > 0.0F ? v->highpass_hz : MIX_HIGHPASS_OFF;
     v->lowpass_now = mv_glide(v->lowpass_now, lp_target);
     v->highpass_now = mv_glide(v->highpass_now, hp_target);
@@ -439,6 +521,22 @@ void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
     if (!highpass) {
         memset(ctx->highpass, 0, sizeof ctx->highpass);
     }
+    // The air: a one-pole whose coefficient ramps across the block to this
+    // block's distance (at 1 it passes its input exactly).
+    if (v->spatial && v->air > 0.0F) {
+        const f32 a0 = v->air_now;
+        const f32 da = (v->sp_air - a0) / (f32)frames;
+        for (u32 ch = 0U; ch < channels; ++ch) {
+            f32 *x = m->voice_out[ch];
+            f32 s = ctx->air[ch];
+            for (u32 i = 0U; i < frames; ++i) {
+                s += (a0 + da * (f32)(i + 1U)) * (x[i] - s);
+                x[i] = s;
+            }
+            ctx->air[ch] = s;
+        }
+        v->air_now = v->sp_air;
+    }
 
     // Gains: from where the last block left them to this block's, which
     // carry the volume, the fade at the block's end, and the pan.
@@ -449,6 +547,10 @@ void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
     // A demoted voice ramps to silence this block, but its fade runs on: it
     // comes back where the fade would be.
     const f32 level = v->demoting ? 0.0F : v->volume * fade_end;
+    // The two paths' levels: 3D's gains on each (a voice that is not
+    // spatial has the level on both).
+    const f32 direct1 = v->spatial ? level * v->sp_direct : level;
+    const f32 send1 = v->spatial ? level * v->sp_send : level;
     MixBus *bus = &m->buses[v->bus];
     // Sends take the voice as panned, scaled by their own gains, and ramp
     // with it: from the last block's gain times the send's last gain to this
@@ -464,22 +566,38 @@ void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
             send_target[s] = NULL;
         }
     }
+    // The sends first: they take the voice before obstruction, which
+    // blocks the direct path alone.
     for (u32 ch = 0U; ch < channels; ++ch) {
         for (u32 o = 0U; o < m->channels; ++o) {
-            const f32 g1 = matrix[ch][o] * level;
-            const f32 g0 = v->fresh ? g1 : (v->entering ? 0.0F : v->gains[ch][o]);
-            if (g0 != 0.0F || g1 != 0.0F) {
-                m->kernels->mix_ramp(bus->buffer[o] + offset, m->voice_out[ch], frames, g0, g1);
-                for (u32 s = 0U; s < NPH_AUDIO_MAX_SENDS; ++s) {
-                    if (send_target[s] != NULL) {
-                        m->kernels->mix_ramp(send_target[s]->buffer[o] + offset, m->voice_out[ch],
-                                             frames, g0 * s0[s], g1 * s1[s]);
-                    }
+            const f32 g1 = matrix[ch][o] * send1;
+            const f32 g0 = v->fresh ? g1 : (v->entering ? 0.0F : v->matrix[ch][o] * v->send_now);
+            if (g0 == 0.0F && g1 == 0.0F) {
+                continue;
+            }
+            for (u32 s = 0U; s < NPH_AUDIO_MAX_SENDS; ++s) {
+                if (send_target[s] != NULL) {
+                    m->kernels->mix_ramp(send_target[s]->buffer[o] + offset, m->voice_out[ch],
+                                         frames, g0 * s0[s], g1 * s1[s]);
                 }
             }
-            v->gains[ch][o] = g1;
         }
     }
+    if (v->spatial) {
+        mv_obstruct(m, v, ctx, channels, frames);
+    }
+    for (u32 ch = 0U; ch < channels; ++ch) {
+        for (u32 o = 0U; o < m->channels; ++o) {
+            const f32 g1 = matrix[ch][o] * direct1;
+            const f32 g0 = v->fresh ? g1 : (v->entering ? 0.0F : v->matrix[ch][o] * v->direct_now);
+            if (g0 != 0.0F || g1 != 0.0F) {
+                m->kernels->mix_ramp(bus->buffer[o] + offset, m->voice_out[ch], frames, g0, g1);
+            }
+            v->matrix[ch][o] = matrix[ch][o];
+        }
+    }
+    v->direct_now = direct1;
+    v->send_now = send1;
     for (u32 s = 0U; s < NPH_AUDIO_MAX_SENDS; ++s) {
         v->sends_current[s] = s1[s];
     }

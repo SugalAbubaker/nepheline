@@ -33,16 +33,24 @@
 // their clips in silence, ready to come back at the right place.
 //
 // Buses form a tree under the master. Voices mix into their bus, buses
-// into their parent, children first; each bus has a volume, a mute, a
-// low-pass for snapshots, sends, and (part D) effects. Ducking lowers a
+// into their parent, children first; each bus has insert effects, a
+// low-pass for snapshots, a volume, a mute, and sends. Ducking lowers a
 // bus while another sounds; snapshots fade sets of bus changes in and out.
 //
 // Thread-safety: everything is NPH_MAIN_THREAD_ONLY (the game thread) but
-// nph_audio_mixer_render (the audio thread, one at a time) and the reads
-// of nph_audio_mixer_stats and nph_audio_bus_meter (any thread).
+// nph_audio_mixer_render (the audio thread, one at a time) and
+// nph_audio_mixer_stats (any thread). The meters are the game thread's:
+// the audio thread publishes their values through atomics, but checking
+// the handle reads the game thread's tables.
 
 #include <nepheline/audio/audio.h>
+#include <nepheline/audio/dynamics.h>
+#include <nepheline/audio/echo.h>
+#include <nepheline/audio/eq.h>
+#include <nepheline/audio/reverb.h>
+#include <nepheline/audio/spatial.h>
 #include <nepheline/core/alloc.h>
+#include <nepheline/math/vec.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,6 +93,8 @@ typedef struct NphAudioMixerDesc {
     u32 max_buses;        // the master included (0: 32)
     u32 max_snapshots;    // (0: 32)
     u32 command_capacity; // commands in flight to the audio thread (0: 4096; a power of two)
+    u32 max_effects;      // effects on all buses (0: 64; at most 4096)
+    f32 speed_of_sound;   // for Doppler, m/s (0: NPH_AUDIO_SPEED_OF_SOUND)
 } NphAudioMixerDesc;
 
 // Creates a mixer: every buffer and table the audio thread will use, and
@@ -223,7 +233,7 @@ void nph_audio_bus_set_duck(NphAudioMixer *mixer, NphAudioBus target, NphAudioBu
                             f32 depth_db, f32 threshold_db, f32 attack, f32 release);
 
 // The bus's level after its volume in the last block: peak and RMS, as
-// linear gains. NPH_THREADSAFE.
+// linear gains (published by the audio thread; read on the game thread).
 void nph_audio_bus_meter(const NphAudioMixer *mixer, NphAudioBus bus, f32 *out_peak, f32 *out_rms);
 
 // ---------------------------------------------------------------------------
@@ -255,6 +265,141 @@ void nph_audio_snapshot_set_weight(NphAudioMixer *mixer, NphAudioSnapshot snapsh
                                    f32 seconds);
 
 // ---------------------------------------------------------------------------
+// Effects
+// ---------------------------------------------------------------------------
+
+// A bus's insert effects run in order on its signal, before its snapshot
+// low-pass, gain, meters, and sends (docs/audio.md "Effects"):
+//   - the equaliser (eq.h), the compressor and the limiter (dynamics.h),
+//     the echo (echo.h), and the reverberator (reverb.h), each as its own
+//     header describes;
+//   - an effect is made on the game thread with all its memory, handed to
+//     the audio thread, and freed by an update after the audio thread lets
+//     go, as clips are;
+//   - its parameters change one at a time, as commands, so nothing the
+//     audio thread reads is rewritten under it; each effect smooths its
+//     own changes;
+//   - an effect coming in (made, or brought back from bypass) fades its
+//     input in across a block while the bus's signal without it fades out,
+//     so what its delays and tails make starts from silence; one going out
+//     (bypassed or destroyed) crossfades its output to the signal without
+//     it. A bypassed effect's state starts over: it comes back without the
+//     tail it had.
+// A limiter delays its bus by its latency (dynamics.h), so it belongs on
+// the master, where everything waits alike, made before anything plays (in
+// the block it comes in, the signal without it is still heard).
+
+typedef struct NphAudioEffect {
+    u32 value;
+} NphAudioEffect;
+
+typedef enum NphAudioEffectType {
+    NPH_AUDIO_EFFECT_EQ = 0,
+    NPH_AUDIO_EFFECT_COMPRESSOR = 1,
+    NPH_AUDIO_EFFECT_LIMITER = 2,
+    NPH_AUDIO_EFFECT_ECHO = 3,
+    NPH_AUDIO_EFFECT_REVERB = 4,
+    NPH_AUDIO_EFFECT_COUNT = 5
+} NphAudioEffectType;
+
+// Effects a bus may carry.
+#define NPH_AUDIO_BUS_EFFECTS 4U
+
+typedef struct NphAudioEffectDesc {
+    NphAudioEffectType type;
+    // The settings of its type (only that one is read).
+    NphAudioEqBand eq[NPH_AUDIO_EQ_BANDS];
+    NphAudioCompressorParams compressor;
+    NphAudioLimiterParams limiter;
+    NphAudioEchoParams echo;
+    f32 echo_max_delay_ms; // the longest delay the echo will be set to (0: 2000)
+    NphAudioReverbParams reverb;
+} NphAudioEffectDesc;
+
+// An effect of `type` with its default settings (the equaliser's bands
+// off).
+NphAudioEffectDesc nph_audio_effect_desc_default(NphAudioEffectType type);
+
+// Appends an effect to the bus's chain. NPH_RESULT_INVALID_ARGUMENT for a
+// stale bus or impossible settings; NPH_RESULT_FULL past max_effects or
+// NPH_AUDIO_BUS_EFFECTS on the bus (a destroyed effect keeps its place
+// until an update after the audio thread lets it go);
+// NPH_RESULT_OUT_OF_MEMORY.
+NPH_MUST_USE NphResult nph_audio_effect_create(NphAudioMixer *mixer, NphAudioBus bus,
+                                               const NphAudioEffectDesc *desc, NphAudioEffect *out);
+
+// Fades the effect out of its chain and releases it (its memory goes at an
+// update after the audio thread lets go). The handle is stale at once.
+// Ignores a stale handle. Destroying a bus destroys its effects.
+void nph_audio_effect_destroy(NphAudioMixer *mixer, NphAudioEffect effect);
+
+bool nph_audio_effect_is_valid(const NphAudioMixer *mixer, NphAudioEffect effect);
+
+// The parameters, by type: an equaliser's are NPH_AUDIO_EQ_PARAM(band,
+// field); the others' are their enums below. Values are those of the
+// type's parameter struct (an equaliser band's type as its
+// NphAudioFilterType, a flag as 0 or 1).
+typedef enum NphAudioEqField {
+    NPH_AUDIO_EQ_TYPE = 0,
+    NPH_AUDIO_EQ_FREQ = 1,
+    NPH_AUDIO_EQ_Q = 2,
+    NPH_AUDIO_EQ_GAIN = 3,
+    NPH_AUDIO_EQ_ENABLED = 4,
+    NPH_AUDIO_EQ_FIELDS = 5
+} NphAudioEqField;
+
+#define NPH_AUDIO_EQ_PARAM(band, field) ((u32)(band) * (u32)NPH_AUDIO_EQ_FIELDS + (u32)(field))
+
+typedef enum NphAudioCompressorParam {
+    NPH_AUDIO_COMPRESSOR_THRESHOLD = 0,
+    NPH_AUDIO_COMPRESSOR_RATIO = 1,
+    NPH_AUDIO_COMPRESSOR_KNEE = 2,
+    NPH_AUDIO_COMPRESSOR_ATTACK = 3,
+    NPH_AUDIO_COMPRESSOR_RELEASE = 4,
+    NPH_AUDIO_COMPRESSOR_MAKEUP = 5
+} NphAudioCompressorParam;
+
+typedef enum NphAudioLimiterParam {
+    NPH_AUDIO_LIMITER_CEILING = 0,
+    NPH_AUDIO_LIMITER_RELEASE = 1
+} NphAudioLimiterParam;
+
+typedef enum NphAudioEchoParam {
+    NPH_AUDIO_ECHO_DELAY = 0,
+    NPH_AUDIO_ECHO_FEEDBACK = 1,
+    NPH_AUDIO_ECHO_DAMPING = 2,
+    NPH_AUDIO_ECHO_HIGHPASS = 3,
+    NPH_AUDIO_ECHO_WET = 4,
+    NPH_AUDIO_ECHO_DRY = 5,
+    NPH_AUDIO_ECHO_PING_PONG = 6
+} NphAudioEchoParam;
+
+typedef enum NphAudioReverbParam {
+    NPH_AUDIO_REVERB_SIZE = 0,
+    NPH_AUDIO_REVERB_DECAY = 1,
+    NPH_AUDIO_REVERB_DAMPING = 2,
+    NPH_AUDIO_REVERB_CROSSOVER = 3,
+    NPH_AUDIO_REVERB_PREDELAY = 4,
+    NPH_AUDIO_REVERB_DIFFUSION = 5,
+    NPH_AUDIO_REVERB_MODULATION = 6,
+    NPH_AUDIO_REVERB_EARLY = 7,
+    NPH_AUDIO_REVERB_LATE = 8,
+    NPH_AUDIO_REVERB_WIDTH = 9,
+    NPH_AUDIO_REVERB_DRY = 10
+} NphAudioReverbParam;
+
+// Sets one parameter, heard from the next block. Ignores a stale handle
+// and a parameter the type does not have.
+void nph_audio_effect_set_param(NphAudioMixer *mixer, NphAudioEffect effect, u32 param, f32 value);
+
+// Bypasses the effect (crossfading across a block) or brings it back.
+void nph_audio_effect_set_bypass(NphAudioMixer *mixer, NphAudioEffect effect, bool bypass);
+
+// A compressor's or limiter's deepest gain reduction in its last block, in
+// dB (>= 0); 0 for the other types and stale handles.
+f32 nph_audio_effect_meter(const NphAudioMixer *mixer, NphAudioEffect effect);
+
+// ---------------------------------------------------------------------------
 // Voices
 // ---------------------------------------------------------------------------
 
@@ -273,9 +418,25 @@ typedef struct NphAudioPlayDesc {
     f32 highpass_hz;  // a high-pass on the voice (0: none)
     NphAudioBus sends[NPH_AUDIO_MAX_SENDS]; // extra buses fed by the voice (reverb)
     f32 send_gains[NPH_AUDIO_MAX_SENDS];    // their gains (0: unused)
+    // 3D (spatial.h). A spatial voice is placed by its position instead of
+    // its pan: attenuated by distance, spread when near, pitched by Doppler,
+    // darkened by air, occlusion, and obstruction. The sends take the
+    // distance's attenuation only in part (send_distance), as a room's
+    // reverberation stays while the direct sound falls.
+    b32 spatial;
+    NphVec3 position; // in the listener's frame: m, +x right, +y up, -z ahead
+    NphVec3 velocity; // relative to the listener, in its frame (m/s)
+    NphAudioAttenuation attenuation;
+    f32 size;           // the source's radius (m): its spread when near (0: a point)
+    f32 doppler;        // 0: none, 1: physical (the default)
+    f32 air_absorption; // 0: none, 1: ISO 9613-1 at 20 C and 50% humidity (the default)
+    f32 send_distance;  // 0 .. 1: the share of the distance attenuation the sends take (0.5)
 } NphAudioPlayDesc;
 
-// A desc with volume and pitch 1, centred, priority 128, on the master.
+// A desc with volume and pitch 1, centred, priority 128, on the master;
+// not spatial, but ready to be: the default attenuation (spatial.h),
+// physical Doppler and air absorption, and sends taking half the distance's
+// attenuation.
 NphAudioPlayDesc nph_audio_play_desc_default(NphAudioClip clip);
 
 // Starts a voice. NPH_RESULT_INVALID_ARGUMENT for a stale clip or bus, or a
@@ -299,6 +460,22 @@ void nph_audio_voice_set_paused(NphAudioMixer *mixer, NphAudioVoice voice, bool 
 void nph_audio_voice_set_filters(NphAudioMixer *mixer, NphAudioVoice voice, f32 lowpass_hz,
                                  f32 highpass_hz);
 void nph_audio_voice_set_send(NphAudioMixer *mixer, NphAudioVoice voice, u32 slot, f32 gain);
+
+// A spatial voice's place: its position and velocity in the listener's
+// frame (the runtime's job each frame, from the world's 64-bit positions).
+// Ignored for a voice that is not spatial.
+void nph_audio_voice_set_position(NphAudioMixer *mixer, NphAudioVoice voice, NphVec3 position,
+                                  NphVec3 velocity);
+
+// A spatial voice's occlusion and obstruction, 0 .. 1 each (the runtime's
+// rays decide them):
+//   - occlusion, the sound through a wall: the direct sound and the sends
+//     lose up to 24 dB, and their highs from 20 kHz down to 700 Hz;
+//   - obstruction, the direct path alone blocked (round a corner, behind a
+//     pillar): the direct sound loses up to 12 dB and its highs down to
+//     1 kHz, while the sends, the room's reflections, keep theirs.
+void nph_audio_voice_set_occlusion(NphAudioMixer *mixer, NphAudioVoice voice, f32 occlusion,
+                                   f32 obstruction);
 
 #ifdef __cplusplus
 }

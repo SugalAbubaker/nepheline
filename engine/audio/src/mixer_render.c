@@ -29,7 +29,7 @@ static u32 mr_bits(f32 v)
     return u;
 }
 
-static void mr_event(NphAudioMixer *m, u32 type, u32 index, u32 generation)
+void mix_event(NphAudioMixer *m, u32 type, u32 index, u32 generation)
 {
     const MixEvent e = {type, index, generation, 0U};
     // The ring holds an event for every slot at once (mixer.c): never full.
@@ -54,6 +54,8 @@ static u32 mr_context_acquire(NphAudioMixer *m)
     ctx->decoder_frame = 0U;
     memset(ctx->lowpass, 0, sizeof ctx->lowpass);
     memset(ctx->highpass, 0, sizeof ctx->highpass);
+    memset(ctx->obstruct, 0, sizeof ctx->obstruct);
+    memset(ctx->air, 0, sizeof ctx->air);
     return index;
 }
 
@@ -77,11 +79,11 @@ static void mr_voice_end(NphAudioMixer *m, u32 index)
     const u32 clip = v->clip;
     NPH_ASSERT(m->clip_voice_count[clip] > 0U);
     m->clip_voice_count[clip] -= 1U;
-    mr_event(m, MIX_EVENT_VOICE_END, index, v->generation);
+    mix_event(m, MIX_EVENT_VOICE_END, index, v->generation);
     if (m->clip_removing[clip] && m->clip_voice_count[clip] == 0U) {
         m->audio_clips[clip] = NULL;
         m->clip_removing[clip] = 0;
-        mr_event(m, MIX_EVENT_CLIP_RELEASED, clip, 0U);
+        mix_event(m, MIX_EVENT_CLIP_RELEASED, clip, 0U);
     }
 }
 
@@ -127,6 +129,32 @@ static void mr_play(NphAudioMixer *m, const MixCommand *c)
     v->highpass_hz = in->highpass_hz;
     v->lowpass_now = in->lowpass_hz > 0.0F ? in->lowpass_hz : MIX_FULL_BAND;
     v->highpass_now = in->highpass_hz > 0.0F ? in->highpass_hz : MIX_HIGHPASS_OFF;
+    v->spatial = in->spatial;
+    for (u32 k = 0U; k < 3U; ++k) {
+        v->position[k] = in->position[k];
+        v->velocity[k] = in->velocity[k];
+    }
+    v->attenuation = in->attenuation;
+    v->size = in->size;
+    v->doppler = in->doppler;
+    v->air = in->air;
+    v->send_distance = in->send_distance;
+    // Until the first ranking works them out: nothing.
+    v->sp_direct = 1.0F;
+    v->sp_send = 1.0F;
+    v->sp_pitch = 1.0F;
+    v->sp_lowpass = MIX_FULL_BAND;
+    v->sp_obstruct = MIX_FULL_BAND;
+    v->sp_air = 1.0F;
+    v->air_now = 1.0F;
+    v->obstruct_now = MIX_FULL_BAND;
+    if (v->spatial) {
+        // So that the first block's filters start where the voice is.
+        mix_voice_spatial(m, v);
+        v->air_now = v->sp_air;
+        v->obstruct_now = v->sp_obstruct;
+        v->lowpass_now = v->lowpass_now < v->sp_lowpass ? v->lowpass_now : v->sp_lowpass;
+    }
     for (u32 s = 0U; s < NPH_AUDIO_MAX_SENDS; ++s) {
         const u32 bus = in->send_bus[s];
         v->send_bus[s] = bus != MIX_NONE && m->buses[bus].active ? bus : MIX_NONE;
@@ -162,7 +190,7 @@ static void mr_clip_remove(NphAudioMixer *m, u32 clip)
     if (m->clip_voice_count[clip] == 0U && m->audio_clips[clip] != NULL) {
         m->audio_clips[clip] = NULL;
         m->clip_removing[clip] = 0;
-        mr_event(m, MIX_EVENT_CLIP_RELEASED, clip, 0U);
+        mix_event(m, MIX_EVENT_CLIP_RELEASED, clip, 0U);
     }
 }
 
@@ -230,9 +258,15 @@ static void mr_bus_remove(NphAudioMixer *m, u32 index)
             }
         }
     }
+    // Its effects go with it.
+    for (u32 k = 0U; k < gone->effect_count; ++k) {
+        m->audio_effects[gone->effects[k]] = NULL;
+        mix_event(m, MIX_EVENT_EFFECT_RELEASED, gone->effects[k], 0U);
+    }
+    gone->effect_count = 0U;
     gone->active = 0;
     m->bus_order_dirty = 1;
-    mr_event(m, MIX_EVENT_BUS_RELEASED, index, 0U);
+    mix_event(m, MIX_EVENT_BUS_RELEASED, index, 0U);
 }
 
 // Kahn's topological order over "feeds" (a bus into its parent and its
@@ -351,6 +385,16 @@ static void mr_apply(NphAudioMixer *m, const MixCommand *c)
             }
             break;
         }
+        case MIX_VOICE_POSITION:
+            for (u32 k = 0U; k < 3U; ++k) {
+                v->position[k] = c->values[k];
+                v->velocity[k] = c->values[3U + k];
+            }
+            break;
+        case MIX_VOICE_OCCLUSION:
+            v->occlusion = c->values[0];
+            v->obstruction = c->values[1];
+            break;
         }
         break;
     }
@@ -399,6 +443,32 @@ static void mr_apply(NphAudioMixer *m, const MixCommand *c)
         s->rate = frames > (f32)MIX_BLOCK ? (f32)MIX_BLOCK / frames : 1.0F;
         break;
     }
+    case MIX_CMD_EFFECT_ADD: {
+        MixEffect *e = (MixEffect *)c->ptr;
+        MixBus *b = &m->buses[c->param];
+        if (b->active && b->effect_count < NPH_AUDIO_BUS_EFFECTS) {
+            m->audio_effects[c->index] = e;
+            b->effects[b->effect_count++] = c->index;
+        } else {
+            mix_event(m, MIX_EVENT_EFFECT_RELEASED, c->index, 0U); // its bus went first
+        }
+        break;
+    }
+    case MIX_CMD_EFFECT_REMOVE:
+        if (m->audio_effects[c->index] != NULL) {
+            m->audio_effects[c->index]->removing = 1; // fades out, then is released
+        }
+        break;
+    case MIX_CMD_EFFECT_PARAM:
+        if (m->audio_effects[c->index] != NULL) {
+            mix_effect_set_param(m->audio_effects[c->index], c->param, c->values[0]);
+        }
+        break;
+    case MIX_CMD_EFFECT_BYPASS:
+        if (m->audio_effects[c->index] != NULL) {
+            m->audio_effects[c->index]->bypass = c->values[0] != 0.0F;
+        }
+        break;
     }
 }
 
@@ -532,6 +602,11 @@ static void mr_rank(NphAudioMixer *m)
             continue;
         }
         f32 score = v->volume * (v->fade_rate < 0.0F ? v->fade : 1.0F) * m->bus_level[v->bus];
+        if (v->spatial) {
+            // Where it is, and what is in the way: the louder of its paths.
+            mix_voice_spatial(m, v);
+            score *= v->sp_direct > v->sp_send ? v->sp_direct : v->sp_send;
+        }
         if (v->real) {
             score *= MR_REAL_BONUS;
         }
@@ -590,6 +665,7 @@ static void mr_buses(NphAudioMixer *m)
     for (u32 k = 0U; k < m->bus_order_count; ++k) {
         const u32 i = m->bus_order[k];
         MixBus *b = &m->buses[i];
+        mix_effects_process(m, b);
         mr_bus_lowpass(m, b);
         const f32 g0 = b->gain_current;
         const f32 g1 = m->bus_target[i];
