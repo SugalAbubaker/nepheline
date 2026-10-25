@@ -315,6 +315,30 @@ world_ragdolls_32_mt_xpbd      1750000
 world_ragdolls_32_mt_soft8     3800000
 world_ragdolls_32_mt_xpbd16    6600000
 
+# audio_bench (docs/audio.md "Performance"): per sample, or per output
+# frame for the resampler.
+mix_ramp_scalar                0.8
+mix_ramp_sse4                  0.5
+mix_ramp_avx2                  0.26
+resample_mono_scalar           96
+resample_stereo_scalar         186
+resample_mono_sse4             50
+resample_stereo_sse4           98
+resample_mono_avx2             26
+resample_stereo_avx2           45
+resample_stereo_pitch_1_5      65
+resample_stereo_pitch_4        115
+peak_256                       0.13
+sum_squares_256                0.18
+load_s16_stereo                0.87
+store_f32_stereo               0.53
+filter_lowpass                 9.8
+filter_design                  105
+delay_read_frac                5.4
+pan_vbap_7_1                   180
+pan_vbap_7_1_spread            1330
+resampler_create               31000000
+
 # profile_bench
 profile_zone_enabled           55
 profile_zone_paused            8

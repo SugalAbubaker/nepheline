@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "executable": "audio_bench.exe",
+  "timestamp": "2026-10-25T02:41:37Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "resample_mono_scalar", "label": "scalar", "iterations": 2000, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 31.858, "min_ns_per_op": 31.831, "max_ns_per_op": 31.885},
+    {"name": "resample_stereo_scalar", "label": "scalar", "iterations": 964, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 61.991, "min_ns_per_op": 61.939, "max_ns_per_op": 62.034},
+    {"name": "mix_ramp_scalar", "label": "scalar", "iterations": 3640605, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 0.268, "min_ns_per_op": 0.268, "max_ns_per_op": 0.271},
+    {"name": "mix_ramp_sse4", "label": "sse4", "iterations": 6157665, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 0.158, "min_ns_per_op": 0.157, "max_ns_per_op": 0.158},
+    {"name": "resample_mono_sse4", "label": "sse4", "iterations": 3642, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 16.715, "min_ns_per_op": 16.713, "max_ns_per_op": 16.741},
+    {"name": "resample_stereo_sse4", "label": "sse4", "iterations": 2000, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 32.472, "min_ns_per_op": 32.448, "max_ns_per_op": 32.797},
+    {"name": "resample_mono_avx2", "label": "avx2", "iterations": 7150, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 8.511, "min_ns_per_op": 8.493, "max_ns_per_op": 8.531},
+    {"name": "resample_stereo_avx2", "label": "avx2", "iterations": 4082, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 14.875, "min_ns_per_op": 14.868, "max_ns_per_op": 14.902},
+    {"name": "mix_ramp_avx2", "label": "avx2", "iterations": 11674441, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 0.085, "min_ns_per_op": 0.084, "max_ns_per_op": 0.085},
+    {"name": "resample_stereo_pitch_1_5", "label": "", "iterations": 2842, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 21.475, "min_ns_per_op": 21.428, "max_ns_per_op": 21.834},
+    {"name": "resample_stereo_pitch_4", "label": "", "iterations": 2000, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 37.739, "min_ns_per_op": 37.585, "max_ns_per_op": 37.828},
+    {"name": "peak_256", "label": "", "iterations": 23017926, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 0.042, "min_ns_per_op": 0.042, "max_ns_per_op": 0.043},
+    {"name": "sum_squares_256", "label": "", "iterations": 20000000, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 0.061, "min_ns_per_op": 0.060, "max_ns_per_op": 0.061},
+    {"name": "load_s16_stereo", "label": "", "iterations": 210881, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 0.287, "min_ns_per_op": 0.287, "max_ns_per_op": 0.287},
+    {"name": "store_f32_stereo", "label": "", "iterations": 354459, "items_per_iteration": 4096, "repeats": 5, "ns_per_op": 0.175, "min_ns_per_op": 0.175, "max_ns_per_op": 0.175},
+    {"name": "filter_lowpass", "label": "", "iterations": 294152, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 3.268, "min_ns_per_op": 3.268, "max_ns_per_op": 3.279},
+    {"name": "filter_design", "label": "", "iterations": 7164740, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 34.532, "min_ns_per_op": 34.423, "max_ns_per_op": 34.611},
+    {"name": "delay_read_frac", "label": "", "iterations": 545375, "items_per_iteration": 256, "repeats": 5, "ns_per_op": 1.792, "min_ns_per_op": 1.792, "max_ns_per_op": 1.793},
+    {"name": "pan_vbap_7_1", "label": "", "iterations": 4129849, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 60.160, "min_ns_per_op": 60.133, "max_ns_per_op": 60.508},
+    {"name": "pan_vbap_7_1_spread", "label": "", "iterations": 456121, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 441.697, "min_ns_per_op": 441.394, "max_ns_per_op": 442.151},
+    {"name": "resampler_create", "label": "", "iterations": 24, "items_per_iteration": 1, "repeats": 5, "ns_per_op": 10259787.500, "min_ns_per_op": 10252358.333, "max_ns_per_op": 10283120.833}
+  ]
+}
