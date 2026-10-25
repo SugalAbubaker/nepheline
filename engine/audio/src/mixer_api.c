@@ -322,6 +322,22 @@ u64 nph_audio_clip_stream_ahead(const NphAudioMixer *mixer, NphAudioClip clip)
     return produced > consumed ? produced - consumed : 0U;
 }
 
+bool nph_audio_clip_stream_ready(const NphAudioMixer *mixer, NphAudioClip clip, u64 frames)
+{
+    const u32 index = api_clip_slot(mixer, clip);
+    if (index == MIX_NONE || mixer->clip_slots[index].clip->stream == NULL) {
+        return true;
+    }
+    const MixStream *st = mixer->clip_slots[index].clip->stream;
+    if (nph_atomic_load_u32(&st->failed, NPH_MEMORY_ORDER_ACQUIRE) != 0U) {
+        return true;
+    }
+    const u64 consumed = nph_atomic_load_u64(&st->consumed, NPH_MEMORY_ORDER_ACQUIRE);
+    const u64 produced = nph_atomic_load_u64(&st->produced, NPH_MEMORY_ORDER_ACQUIRE);
+    const u64 want = consumed + nph_min_u64(frames, (u64)st->capacity / 2U);
+    return produced >= nph_min_u64(want, st->total);
+}
+
 NphResult nph_audio_clip_create_stream(NphAudioMixer *mixer, NphAudioStreamer *streamer,
                                        const NphAudioStreamDesc *desc, NphAudioClip *out)
 {

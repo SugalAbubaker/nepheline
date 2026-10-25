@@ -3,8 +3,9 @@
 // AudioSources play their sounds while the world plays, by themselves or
 // as the game says; spatial ones sound from where they are around the
 // listener (an AudioListener, else the camera), behind walls darker and
-// quieter, but not hidden by the floor they rest on; one-shots play from any thread; streamed sounds prime and play;
-// sources that go stop; and what cannot load gives up. Headless engines in
+// quieter, but not hidden by the floor they rest on; one-shots play from any thread; streamed
+// sounds prime and play; sources that go stop; offline, the mix waits for its streams; and what
+// cannot load gives up. Headless engines in
 // lockstep (a step's worth of sound a frame), mixing offline, with sound
 // assets written for the test and found through the engine's resolver.
 #include <nepheline/asset/format.h>
@@ -132,7 +133,9 @@ static NphGuid ta_sound(AudioFixture *f, const char *name, u64 frames, f32 amp, 
     return guid;
 }
 
-static void start_with(AudioFixture *f, const char *device)
+// The fixture with audio.device=`device`, and one more assignment when
+// `extra` is not NULL.
+static void start_with_more(AudioFixture *f, const char *device, const char *extra)
 {
     memset(f, 0, sizeof *f);
     nph_debug_allocator_init(&f->da, nph_allocator_system());
@@ -150,8 +153,16 @@ static void start_with(AudioFixture *f, const char *device)
     f->config.assignments[2] = "audio.sample_rate=48000";
     f->config.assignments[3] = "audio.channels=2";
     f->config.assignment_count = 4U;
+    if (extra != NULL) {
+        f->config.assignments[f->config.assignment_count++] = extra;
+    }
     f->config.contents[0] = f->dir;
     f->config.content_count = 1U;
+}
+
+static void start_with(AudioFixture *f, const char *device)
+{
+    start_with_more(f, device, NULL);
 }
 
 static void create(AudioFixture *f)
@@ -494,8 +505,9 @@ NTEST(audio_bridge, a_sound_that_starts_behind_a_wall_starts_hidden)
         most = nph_max_u32(most, stats_of(&f).occlusion_rays);
     }
     const f64 hidden3 = loudness(&f, 4000U);
-    NTEST_LOG("three knocks through no wall %.6f, behind it %.6f (%.1f dB), at most %u rays a frame",
-              open3, hidden3, 10.0 * log10(hidden3 / open3), most);
+    NTEST_LOG(
+        "three knocks through no wall %.6f, behind it %.6f (%.1f dB), at most %u rays a frame",
+        open3, hidden3, 10.0 * log10(hidden3 / open3), most);
     NTEST_EXPECT_TRUE(most <= 9U);
     NTEST_EXPECT_TRUE(hidden3 < open3 / 10.0);
     nph_engine_play_end(f.engine);
@@ -642,6 +654,51 @@ NTEST(audio_bridge, a_streamed_sound_primes_and_plays)
     const NphEngineAudioStats after = stats_of(&f);
     NTEST_EXPECT_EQ_UINT(after.streamer.streams, 0U);
     NTEST_EXPECT_EQ_UINT(after.sounds, 0U);
+    finish(&f);
+}
+
+NTEST(audio_bridge, offline_the_mix_waits_for_its_streams)
+{
+    // A streamed loop with a small ring (a tenth of a second, less than the
+    // quarter second a voice primes: it starts at half the ring), rendered
+    // offline as fast as the engine goes, far faster than real time: every
+    // render waits for the streamer, so nothing starves and no frame is
+    // silent.
+    AudioFixture f;
+    start_with_more(&f, "offline", "audio.stream_seconds=0.1");
+    const NphGuid song = ta_sound(&f, "loop", 3ULL * TA_RATE, 0.5F, true);
+    create(&f);
+    (void)spawn_source(&f, song, nph_dvec3_zero(), false, true, true);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(f.engine, false), NPH_RESULT_OK);
+    frames(&f, 1U); // its voice and stream made
+    NTEST_ASSERT_EQ_UINT(stats_of(&f).voices, 1U);
+    const u64 t0 = nph_time_now_ns();
+    while (stats_of(&f).voices_waiting > 0U && nph_time_now_ns() - t0 < nph_time_ms_to_ns(1000U)) {
+        frames(&f, 1U);
+        nph_thread_sleep_ns(nph_time_ms_to_ns(1U));
+    }
+    // Primed well before PRIME_WAIT_NS (2 s): its ring is smaller than what
+    // a voice primes, and half of it was enough.
+    NTEST_ASSERT_EQ_UINT(stats_of(&f).voices_waiting, 0U);
+    // 1200 steps: 5 s of the loop, twice round its 3 s.
+    const u64 from = f.heard_frames;
+    frames(&f, 1200U);
+    u64 silent = 0U;
+    for (u64 i = from; i + 200U <= f.heard_frames; i += 200U) {
+        f64 e = 0.0;
+        for (u64 k = i; k < i + 200U; ++k) {
+            e += (f64)f.heard[k * 2U] * (f64)f.heard[k * 2U];
+        }
+        silent += e == 0.0 ? 1U : 0U;
+    }
+    const NphEngineAudioStats st = stats_of(&f);
+    NTEST_LOG("rendered %llu frames; starved %llu; silent steps %llu; decoded %llu",
+              (unsigned long long)(f.heard_frames - from),
+              (unsigned long long)st.mixer.stream_starved, (unsigned long long)silent,
+              (unsigned long long)st.streamer.frames_decoded);
+    NTEST_EXPECT_EQ_UINT(st.mixer.stream_starved, 0U);
+    NTEST_EXPECT_EQ_UINT(silent, 0U);
+    nph_engine_play_end(f.engine);
     finish(&f);
 }
 

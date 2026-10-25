@@ -641,7 +641,12 @@ decoded frames ahead of its voice:
     Playing it again is `NPH_RESULT_INVALID_STATE`: make another clip,
     which is also how a stream seeks.
   - `nph_audio_clip_stream_ahead` reads how far the ring is ahead of the
-    voice, for a health readout.
+    voice, for a health readout, and `nph_audio_clip_stream_ready` whether
+    it holds what a voice needs (at most half the ring) or has nothing more
+    to give (its end decoded, or a failure): what a deferred stream's voice
+    waits for before it starts, and what rendering faster than real time
+    waits for before each render, so its voices never outrun their
+    streams.
   - Destroying the clip closes the stream once the audio thread lets go,
     and the streamer frees it on its own thread. The streamer's allocator
     must therefore be thread-safe.

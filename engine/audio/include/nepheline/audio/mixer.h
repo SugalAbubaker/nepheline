@@ -216,6 +216,14 @@ NPH_MUST_USE NphResult nph_audio_clip_create_stream(NphAudioMixer *mixer,
 // streamer move it as it is read.
 u64 nph_audio_clip_stream_ahead(const NphAudioMixer *mixer, NphAudioClip clip);
 
+// Whether a stream's clip holds `frames` decoded ahead of its voice (half
+// its ring, when that is fewer: NPH_U64_MAX asks for half the ring), or all
+// it has left: its end decoded, or the failure that ended it. True for a
+// stale handle and a clip in memory, which have nothing to wait for.
+// Rendering faster than real time (offline) waits for it before each
+// render, so its voices never outrun their streams.
+bool nph_audio_clip_stream_ready(const NphAudioMixer *mixer, NphAudioClip clip, u64 frames);
+
 // ---------------------------------------------------------------------------
 // Buses
 // ---------------------------------------------------------------------------

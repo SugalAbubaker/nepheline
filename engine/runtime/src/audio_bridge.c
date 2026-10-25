@@ -50,6 +50,9 @@
 // and a stream for its ring to fill before its voice starts anyway.
 #define ONESHOT_WAIT_NS (250ULL * 1000000ULL)
 #define PRIME_WAIT_NS   (2000ULL * 1000000ULL)
+// How long an offline render waits for the streamer before it renders a
+// stream starved (render_offline).
+#define OFFLINE_WAIT_NS (1000ULL * 1000000ULL)
 // A spatial source's occlusion samples its centre and four points around
 // it, as Steam Audio's volumetric occlusion samples a sphere round a
 // source: a probe from the centre to each of the four (a point the source
@@ -143,6 +146,7 @@ struct AudioBridge {
     u32 offline_cap; // frames
     u32 offline_frames;
     f64 offline_carry; // the fraction of a sample frame a frame left over
+    b32 offline_late;  // a stream was rendered starved (logged once)
     // The world.
     NphWorld *world;
     NphQuery *source_query;   // AudioSource: changes
@@ -402,6 +406,34 @@ static f64 frame_seconds(const AudioBridge *b, f64 dt)
     return dt > 0.0 && dt < 1.0 ? dt : 0.0;
 }
 
+// Offline frames come as fast as the engine goes, faster than real time,
+// and would outrun the streamer: before each render, every playing stream
+// must hold half its ring ahead of its voice (more than a voice reads in
+// a render at any pitch) or have nothing more to give, so a capture never
+// starves for the machine's speed. A stream the streamer leaves behind for
+// a second renders starved, logged.
+static void wait_for_streams(AudioBridge *b)
+{
+    const u64 t0 = nph_time_now_ns();
+    for (u32 i = 0U; i < b->voice_count; ++i) {
+        const VoiceRecord *v = &b->voices[i];
+        if (v->state != VOICE_PLAYING || v->stream_clip.value == 0U) {
+            continue;
+        }
+        while (!nph_audio_clip_stream_ready(b->mixer, v->stream_clip, NPH_U64_MAX)) {
+            if (nph_time_now_ns() - t0 > OFFLINE_WAIT_NS) {
+                if (!b->offline_late) {
+                    NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                                 "audio: the streamer fell a second behind the offline mix");
+                    b->offline_late = 1;
+                }
+                return;
+            }
+            nph_thread_sleep_ns(nph_time_us_to_ns(200U));
+        }
+    }
+}
+
 // Offline: the frame's worth of the mix, rendered on this thread as the
 // device's would be.
 static void render_offline(AudioBridge *b, f64 seconds)
@@ -414,10 +446,12 @@ static void render_offline(AudioBridge *b, f64 seconds)
     // on), so the buffer ends with the frame's last second.
     while (frames > b->offline_cap) {
         const u32 n = (u32)nph_min_u64(frames - b->offline_cap, b->offline_cap);
+        wait_for_streams(b);
         nph_audio_mixer_render(b->mixer, b->offline, n);
         frames -= n;
     }
     if (frames > 0U) {
+        wait_for_streams(b);
         nph_audio_mixer_render(b->mixer, b->offline, (u32)frames);
     }
     b->offline_frames = (u32)frames;
@@ -1003,15 +1037,15 @@ static void start_voice(AudioBridge *b, u32 index)
     v->since_ns = nph_time_now_ns();
 }
 
-// A priming voice starts once its ring holds a quarter second (or all of a
-// shorter sound), or when the streamer has taken too long (it starts dry,
-// counted as starvation).
+// A priming voice starts once its ring holds a quarter second (or half a
+// smaller ring, or all of a shorter sound, or nothing more to give), or
+// when the streamer has taken too long (it starts dry, counted as
+// starvation).
 static void prime_voice(AudioBridge *b, u32 index)
 {
     VoiceRecord *v = &b->voices[index];
     const SoundEntry *s = &b->sounds[v->sound];
-    const u64 need = nph_min_u64(s->header.sample_rate / 4U, s->header.frames);
-    if (nph_audio_clip_stream_ahead(b->mixer, v->stream_clip) < need &&
+    if (!nph_audio_clip_stream_ready(b->mixer, v->stream_clip, s->header.sample_rate / 4U) &&
         nph_time_now_ns() - v->since_ns < PRIME_WAIT_NS) {
         return;
     }

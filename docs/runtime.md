@@ -421,7 +421,9 @@ a window and to nothing without one; `system` (falling back to `null` when
 the machine has no device), `null` (a thread asking for the mix in real
 time, without hardware), `offline` (each frame renders its own duration, a
 step's in lockstep, on the engine's thread: tests and capture,
-`nph_engine_audio_output`), or `off`. The mix runs at the device's own rate
+`nph_engine_audio_output`; faster than real time, so before each render it
+waits for the streamer to hold half of every playing stream's ring, and a
+capture never starves for the machine's speed), or `off`. The mix runs at the device's own rate
 and channels unless `audio.sample_rate` and `audio.channels` say otherwise,
 so nothing converts at the edge.
 
@@ -473,7 +475,8 @@ file open, checked against the asset the loader mapped, and each of its
 voices gets a stream that reads it at DATA's offset
 ([asset.md](asset.md) "The loader"). The streamer primes the stream
 (stream.h `defer_fill`), so the main thread does no I/O, and the voice
-starts once its ring holds a quarter second. Sounds stay loaded until play
+starts once its ring holds a quarter second (half the ring, when
+`audio.stream_seconds` makes it smaller). Sounds stay loaded until play
 ends, which stops every voice, waits for the streams to close, and
 releases them all.
 
@@ -649,7 +652,10 @@ body, placed and at rest, before the first step.
   and the floor a source rests on does not hide it; one-shots from another
   thread, a full queue counted, a
   sound that cannot load given up; a streamed sound primes on the streamer
-  and plays without starving, and play's end closes it; despawned and
+  and plays without starving, and play's end closes it; offline, a loop
+  with a tenth-second ring (smaller than a voice primes) starts at half of
+  it and renders five seconds far faster than real time without a frame
+  starved; despawned and
   removed sources stop, and one added back plays again; the buses'
   volumes; with audio off, nothing plays.
 

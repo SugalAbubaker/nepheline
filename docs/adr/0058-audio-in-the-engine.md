@@ -26,7 +26,9 @@ system.
    without), `system` (falling back to `null` without a device), `null` (a
    real-time thread without hardware: CI), `offline` (each frame renders
    its own duration on the engine's thread, a step's in lockstep: tests
-   and capture), and `off`. The mix runs at the device's own rate and
+   and capture; before each render it waits for every playing stream to
+   hold half its ring, since it runs faster than real time and would
+   otherwise starve its streams by the machine's speed), and `off`. The mix runs at the device's own rate and
    channels, so nothing converts at the edge (ADR-0056).
 
 2. **Two components.** `AudioSource`: a sound by GUID, a bus, volume,
@@ -87,8 +89,9 @@ system.
    asset is released. A streamed sound keeps its file open (checked against
    the mapped asset's header), and each of its voices gets a stream whose
    ring the streamer fills (`defer_fill`, new in stream.h): the voice starts
-   once the ring holds a quarter second (or when two seconds pass, starting
-   dry and counted).
+   once the ring holds a quarter second, or half a smaller ring
+   (`nph_audio_clip_stream_ready`, new in mixer.h), or when two seconds
+   pass, starting dry and counted.
 
 9. **Lifetimes by play.** The world's sounds load when play begins (waited
    for: what plays by itself starts on time); others when first named.

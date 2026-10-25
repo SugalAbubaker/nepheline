@@ -2,8 +2,8 @@
 // Streaming (stream.h, mixer.h): a stream plays what its clip would, to the
 // bit, looping and starting part-way; it starves to silence, counted;
 // a voice that goes virtual skips it ahead; a failed read or a corrupt
-// block ends it in silence, counted apart; closing frees it on the
-// streamer; refusals.
+// block ends it in silence, counted apart; it says when its voice can read;
+// closing frees it on the streamer; refusals.
 
 #include <nepheline/core/atomic.h>
 #include <nepheline/platform/thread.h>
@@ -734,6 +734,79 @@ NTEST(audio_stream, a_deferred_stream_is_filled_by_the_streamer)
     nph_audio_streamer_destroy(s);
     test_buffer_free(from_clip, BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
     test_buffer_free(from_stream, BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
+    ts_samples_free(pcm);
+}
+
+// Waits up to two seconds for nph_audio_clip_stream_ready.
+static bool ts_wait_ready(const NphAudioMixer *m, NphAudioClip clip, u64 frames)
+{
+    const u64 t0 = nph_time_now_ns();
+    while (!nph_audio_clip_stream_ready(m, clip, frames)) {
+        if (nph_time_now_ns() - t0 > nph_time_ms_to_ns(2000U)) {
+            return false;
+        }
+        nph_thread_sleep_ns(nph_time_ms_to_ns(1U));
+    }
+    return true;
+}
+
+NTEST(audio_stream, a_stream_says_when_its_voice_can_read)
+{
+    // A deferred stream whose reads are slow: not ready before the streamer
+    // has decoded what was asked, then ready; asked for more than half its
+    // ring, ready at half. A short stream is ready for more than it holds
+    // once its end is decoded, a failed one at once; a clip in memory and a
+    // stale handle always.
+    i16 *pcm = ts_samples();
+    TsSource src;
+    memset(&src, 0, sizeof src);
+    src.data = (const u8 *)pcm;
+    src.size = (u64)TS_FRAMES * 4U;
+    nph_atomic_store_u64(&src.delay_ns, nph_time_ms_to_ns(50U), NPH_MEMORY_ORDER_RELAXED);
+    NphAudioStreamDesc sd;
+    memset(&sd, 0, sizeof sd);
+    sd.source = (NphAudioStreamSource){ts_read, &src};
+    sd.codec = NPH_AUDIO_CODEC_PCM;
+    sd.format = NPH_AUDIO_FORMAT_S16;
+    sd.channels = 2U;
+    sd.sample_rate = 48000U;
+    sd.frames = TS_FRAMES;
+    sd.size = src.size;
+    sd.buffer_seconds = 0.25F;
+    sd.defer_fill = 1;
+    NphAudioStreamer *s = ts_streamer();
+    NphAudioMixer *m = tm_mixer(2U, 4U, 4U);
+    MixStream *st = NULL;
+    const NphAudioClip clip = ts_stream_clip(m, s, &sd, &st);
+    NTEST_EXPECT_FALSE(nph_audio_clip_stream_ready(m, clip, 256U)); // its first read sleeps
+    NTEST_EXPECT_TRUE(ts_wait_ready(m, clip, 256U));
+    NTEST_EXPECT_TRUE(nph_audio_clip_stream_ahead(m, clip) >= 256U);
+    NTEST_EXPECT_TRUE(ts_wait_ready(m, clip, NPH_U64_MAX));
+    NTEST_EXPECT_TRUE(nph_audio_clip_stream_ahead(m, clip) >= (u64)st->capacity / 2U);
+    // A stream of 1000 frames, all of them decoded: ready for more.
+    nph_atomic_store_u64(&src.delay_ns, 0U, NPH_MEMORY_ORDER_RELAXED);
+    NphAudioStreamDesc shorter = sd;
+    shorter.frames = 1000U;
+    shorter.size = 4000U;
+    MixStream *short_st = NULL;
+    const NphAudioClip short_clip = ts_stream_clip(m, s, &shorter, &short_st);
+    NTEST_EXPECT_TRUE(ts_wait_ready(m, short_clip, 48000U));
+    NTEST_EXPECT_EQ_UINT(nph_audio_clip_stream_ahead(m, short_clip), 1000U);
+    // A stream whose source fails: ready, with nothing ahead.
+    TsSource failing = src;
+    nph_atomic_store_u32(&failing.fail, 1U, NPH_MEMORY_ORDER_RELAXED);
+    NphAudioStreamDesc broken = sd;
+    broken.source = (NphAudioStreamSource){ts_read, &failing};
+    MixStream *broken_st = NULL;
+    const NphAudioClip broken_clip = ts_stream_clip(m, s, &broken, &broken_st);
+    NTEST_EXPECT_TRUE(ts_wait_ready(m, broken_clip, 256U));
+    NTEST_EXPECT_EQ_UINT(nph_audio_clip_stream_ahead(m, broken_clip), 0U);
+    // Nothing to wait for.
+    const NphAudioClip tone = tm_tone(m, 440.0, 4800U, 48000U, 0.5F, NULL);
+    NTEST_EXPECT_TRUE(nph_audio_clip_stream_ready(m, tone, NPH_U64_MAX));
+    NTEST_EXPECT_TRUE(nph_audio_clip_stream_ready(m, (NphAudioClip){0U}, NPH_U64_MAX));
+    nph_audio_mixer_destroy(m);
+    nph_audio_streamer_destroy(s);
     ts_samples_free(pcm);
 }
 
