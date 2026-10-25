@@ -19,6 +19,8 @@
 #include <nepheline/core/handle.h>
 #include <nepheline/core/ring.h>
 
+#include "stream_internal.h"
+
 #define MIX_BLOCK NPH_AUDIO_BLOCK_FRAMES
 // Source frames a real voice keeps from one block to the next: the widest
 // kernel's reach before a position, and its reach after (read ahead).
@@ -32,6 +34,12 @@
 // How far past its last frame a voice that does not loop keeps going: the
 // full-band kernel's half-width, so its ring-out is heard rather than cut.
 #define MIX_TAIL_FRAMES (NPH_AUDIO_RESAMPLE_ZERO_CROSSINGS)
+
+// A stream's voice never wraps its position (the stream unrolls the loop),
+// so when the 32.32 position's frame reaches MIX_STREAM_REBASE_AT it moves
+// back by MIX_STREAM_REBASE_BY, and the voice's stream_base forward.
+#define MIX_STREAM_REBASE_AT (1ULL << 31U)
+#define MIX_STREAM_REBASE_BY (1ULL << 30U)
 
 // Filter corners that mean no filter: a low-pass at or above MIX_FULL_BAND,
 // a high-pass at or below MIX_HIGHPASS_OFF.
@@ -57,6 +65,9 @@ typedef struct MixClip {
     u8 *owned_data;
     u32 *owned_offsets;
     u32 owned_offset_count;
+    // A stream's clip: its frames come from the stream's ring.
+    MixStream *stream;
+    NphAudioStreamer *streamer;
 } MixClip;
 
 typedef enum MixCommandType {
@@ -172,7 +183,8 @@ typedef struct MixVoice {
     u32 generation;
     u32 clip;
     u32 bus;
-    u64 pos; // 32.32 frames of the voice's timeline (looping wraps it)
+    u64 pos;         // 32.32 frames of the voice's timeline (looping wraps it)
+    u64 stream_base; // a stream's voice: the stream frame of its timeline's frame 0
     f32 volume;
     f32 pitch;
     f32 pan;
@@ -306,6 +318,7 @@ typedef struct MixClipSlot {
     MixClip *clip;
     NphHandle handle;
     b32 releasing;
+    b32 stream_played; // a stream's clip: played (a stream plays once)
 } MixClipSlot;
 
 struct NphAudioMixer {
@@ -376,6 +389,7 @@ struct NphAudioMixer {
     u64 block_ns_max;
     u64 block_ns_total;
     u32 corrupt_reads;
+    u64 stream_starved;
 
     // --- Published by the audio thread (atomics) ---
     NphAtomicU64 stat_blocks;
@@ -386,6 +400,7 @@ struct NphAudioMixer {
     NphAtomicU64 stat_ns_max;
     NphAtomicU64 stat_ns_total;
     NphAtomicU32 stat_corrupt;
+    NphAtomicU64 stat_starved;
     NphAtomicU32 stat_dropped; // written by the game thread
     NphAtomicU32 *bus_peak;    // f32 bits per bus
     NphAtomicU32 *bus_rms;

@@ -97,6 +97,11 @@ static i64 mv_clip_frame(const MixClip *c, const MixVoice *v, i64 t)
     if (t < 0) {
         return -1;
     }
+    if (c->stream != NULL) {
+        // The stream's own frames (loops unrolled), from the voice's base.
+        const u64 s = v->stream_base + (u64)t;
+        return s < c->frames ? (i64)s : -1;
+    }
     if (v->loop) {
         const i64 end = (i64)c->loop_end;
         if (t >= end) {
@@ -147,6 +152,10 @@ static bool mv_seek(NphAudioMixer *m, const MixClip *c, MixContext *ctx, u64 fra
 static void mv_read_clip(NphAudioMixer *m, const MixClip *c, MixContext *ctx, u64 frame, u32 count,
                          f32 *const *dst, u32 at)
 {
+    if (c->stream != NULL) {
+        m->stream_starved += mix_stream_read(c->stream, frame, count, dst, at);
+        return;
+    }
     switch (c->codec) {
     case NPH_AUDIO_CODEC_PCM: {
         const u32 bytes = nph_audio_format_bytes(c->format);
@@ -369,7 +378,7 @@ bool mix_voice_finished(const NphAudioMixer *m, const MixVoice *v)
         return false;
     }
     const MixClip *c = m->audio_clips[v->clip];
-    return (v->pos >> 32U) >= c->frames + MIX_TAIL_FRAMES;
+    return v->stream_base + (v->pos >> 32U) >= c->frames + MIX_TAIL_FRAMES;
 }
 
 // Wraps a looping voice's position back into its loop.
@@ -392,11 +401,39 @@ static void mv_wrap(const MixClip *c, MixVoice *v, MixContext *ctx)
     }
 }
 
+// Moves a stream's voice's position back, and its base on, before the
+// position's 32 bits of frames run out (MIX_STREAM_REBASE_AT): a stream
+// unrolls its loop, so its voice's position never wraps. Out of line, and
+// called for streams alone: inlined into mix_voice_render, it cost every
+// 3D voice a tenth more (mixer_block_64_spatial, 255 against 229 us on a
+// Ryzen 7 5800X), through the code the compiler made of the hot loops.
+NPH_NO_INLINE static void mv_rebase(MixVoice *v, MixContext *ctx)
+{
+    if ((v->pos >> 32U) < MIX_STREAM_REBASE_AT) {
+        return;
+    }
+    v->pos -= MIX_STREAM_REBASE_BY << 32U;
+    v->stream_base += MIX_STREAM_REBASE_BY;
+    if (ctx != NULL) {
+        ctx->history_first -= (i64)MIX_STREAM_REBASE_BY;
+    }
+}
+
 void mix_voice_advance(NphAudioMixer *m, MixVoice *v, u32 frames)
 {
     const MixClip *c = m->audio_clips[v->clip];
     v->pos += (u64)frames * mix_voice_step(m, v);
     mv_wrap(c, v, NULL);
+    if (c->stream != NULL) {
+        mv_rebase(v, NULL);
+        // A virtual voice's stream keeps time with it, so the streamer keeps
+        // the ring ahead of it and it comes back on sound: what being
+        // virtual saves is the mixing, not the streaming.
+        const i64 next = (i64)(v->pos >> 32U) - (i64)MV_HALF_MAX;
+        if (next > 0) {
+            mix_stream_skip(c->stream, v->stream_base + (u64)next);
+        }
+    }
 }
 
 void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
@@ -461,6 +498,9 @@ void mix_voice_render(NphAudioMixer *m, MixVoice *v, u32 offset, u32 frames)
     ctx->history_first = keep_from;
     ctx->history_len = keep;
     mv_wrap(c, v, ctx);
+    if (c->stream != NULL) {
+        mv_rebase(v, ctx);
+    }
 
     // Filters, their corners moving a third of the way (in octaves) to
     // their targets each block, and gliding there sample by sample, so a

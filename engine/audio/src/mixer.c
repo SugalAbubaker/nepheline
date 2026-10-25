@@ -27,6 +27,9 @@ static void mix_free_clip(NphAudioMixer *m, MixClip *c)
     if (c->owned_offsets != NULL) {
         NPH_FREE_ARRAY(m->alloc, u32, c->owned_offsets, c->owned_offset_count);
     }
+    if (c->stream != NULL) {
+        mix_stream_close(c->streamer, c->stream);
+    }
     NPH_FREE_TYPE(m->alloc, MixClip, c);
 }
 
@@ -298,4 +301,5 @@ void nph_audio_mixer_stats(const NphAudioMixer *mixer, NphAudioMixerStats *out)
     out->block_ns_max = nph_atomic_load_u64(&mixer->stat_ns_max, NPH_MEMORY_ORDER_RELAXED);
     out->block_ns_total = nph_atomic_load_u64(&mixer->stat_ns_total, NPH_MEMORY_ORDER_RELAXED);
     out->corrupt_reads = nph_atomic_load_u32(&mixer->stat_corrupt, NPH_MEMORY_ORDER_RELAXED);
+    out->stream_starved = nph_atomic_load_u64(&mixer->stat_starved, NPH_MEMORY_ORDER_RELAXED);
 }

@@ -90,6 +90,9 @@ static void api_free_clip(NphAudioMixer *m, MixClip *c)
     if (c->owned_offsets != NULL) {
         NPH_FREE_ARRAY(m->alloc, u32, c->owned_offsets, c->owned_offset_count);
     }
+    if (c->stream != NULL) {
+        mix_stream_close(c->streamer, c->stream); // the streamer frees it
+    }
     NPH_FREE_TYPE(m->alloc, MixClip, c);
 }
 
@@ -170,7 +173,8 @@ NphResult nph_audio_clip_create(NphAudioMixer *mixer, const NphAudioClipDesc *de
     out->value = 0U;
     if ((u32)desc->codec >= (u32)NPH_AUDIO_CODEC_COUNT || desc->channels == 0U ||
         desc->channels > NPH_AUDIO_MAX_CHANNELS || desc->sample_rate < NPH_AUDIO_MIN_RATE ||
-        desc->sample_rate > NPH_AUDIO_MAX_RATE || desc->frames == 0U || desc->data == NULL) {
+        desc->sample_rate > NPH_AUDIO_MAX_RATE || desc->frames == 0U ||
+        desc->frames > NPH_AUDIO_MAX_CLIP_FRAMES || desc->data == NULL) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     const u64 loop_end = desc->loop_end != 0U ? desc->loop_end : desc->frames;
@@ -294,7 +298,72 @@ f64 nph_audio_clip_duration(const NphAudioMixer *mixer, NphAudioClip clip)
         return 0.0;
     }
     const MixClip *c = mixer->clip_slots[index].clip;
+    if (c->stream != NULL && c->stream->loop) {
+        return (f64)INFINITY;
+    }
     return (f64)c->frames / (f64)c->sample_rate;
+}
+
+u64 nph_audio_clip_stream_ahead(const NphAudioMixer *mixer, NphAudioClip clip)
+{
+    const u32 index = api_clip_slot(mixer, clip);
+    if (index == MIX_NONE || mixer->clip_slots[index].clip->stream == NULL) {
+        return 0U;
+    }
+    const MixStream *st = mixer->clip_slots[index].clip->stream;
+    const u64 consumed = nph_atomic_load_u64(&st->consumed, NPH_MEMORY_ORDER_ACQUIRE);
+    const u64 produced = nph_atomic_load_u64(&st->produced, NPH_MEMORY_ORDER_ACQUIRE);
+    return produced > consumed ? produced - consumed : 0U;
+}
+
+NphResult nph_audio_clip_create_stream(NphAudioMixer *mixer, NphAudioStreamer *streamer,
+                                       const NphAudioStreamDesc *desc, NphAudioClip *out)
+{
+    NphAudioMixer *m = mixer;
+    NPH_ASSERT(desc != NULL && out != NULL);
+    out->value = 0U;
+    if (streamer == NULL) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    MixClip *c = NPH_ALLOC_TYPE(m->alloc, MixClip);
+    if (c == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    memset(c, 0, sizeof *c);
+    NphResult r = mix_stream_open(streamer, desc, &c->stream);
+    if (r != NPH_RESULT_OK) {
+        NPH_FREE_TYPE(m->alloc, MixClip, c);
+        return r;
+    }
+    c->streamer = streamer;
+    c->codec = desc->codec;
+    c->format = NPH_AUDIO_FORMAT_F32;
+    c->channels = desc->channels;
+    c->sample_rate = desc->sample_rate;
+    c->frames = c->stream->total;
+    c->loop_start = 0U;
+    c->loop_end = c->frames;
+    c->rate_ratio = (f64)desc->sample_rate / (f64)m->rate;
+    NphHandle h;
+    if (nph_handle_pool_alloc(&m->clip_handles, &h) != NPH_RESULT_OK) {
+        api_free_clip(m, c);
+        return NPH_RESULT_FULL;
+    }
+    const u32 index = nph_handle_pool_index(&m->clip_handles, h);
+    MixCommand cmd = api_command(MIX_CMD_CLIP_ADD, index);
+    cmd.ptr = c;
+    if (!api_push(m, &cmd)) {
+        NPH_VERIFY(nph_handle_pool_release(&m->clip_handles, h));
+        api_free_clip(m, c);
+        return NPH_RESULT_FULL;
+    }
+    MixClipSlot *slot = &m->clip_slots[index];
+    slot->clip = c;
+    slot->handle = h;
+    slot->releasing = 0;
+    slot->stream_played = 0;
+    out->value = h.value;
+    return NPH_RESULT_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +661,14 @@ NphResult nph_audio_voice_play(NphAudioMixer *mixer, const NphAudioPlayDesc *des
         desc->start_frame >= m->clip_slots[clip].clip->frames) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // A stream plays once, from where it was opened.
+    const bool stream = m->clip_slots[clip].clip->stream != NULL;
+    if (stream && desc->start_frame != 0U) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (stream && m->clip_slots[clip].stream_played) {
+        return NPH_RESULT_INVALID_STATE;
+    }
     u32 sends[NPH_AUDIO_MAX_SENDS];
     for (u32 s = 0U; s < NPH_AUDIO_MAX_SENDS; ++s) {
         sends[s] = MIX_NONE;
@@ -646,6 +723,9 @@ NphResult nph_audio_voice_play(NphAudioMixer *mixer, const NphAudioPlayDesc *des
         return NPH_RESULT_FULL;
     }
     m->voice_clip[index] = clip;
+    if (stream) {
+        m->clip_slots[clip].stream_played = 1;
+    }
     out->value = h.value;
     return NPH_RESULT_OK;
 }

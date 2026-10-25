@@ -71,6 +71,14 @@ u32 nph_audio_format_bytes(NphAudioSampleFormat format);
 // A static name ("s16", "s24", "s32", "f32"; "unknown" otherwise).
 const char *nph_audio_format_name(NphAudioSampleFormat format);
 
+// How a clip's or a stream's samples are encoded.
+typedef enum NphAudioCodec {
+    NPH_AUDIO_CODEC_PCM = 0,      // interleaved samples in a sample format
+    NPH_AUDIO_CODEC_LOSSLESS = 1, // lossless.h
+    NPH_AUDIO_CODEC_ADPCM = 2,    // adpcm.h
+    NPH_AUDIO_CODEC_COUNT = 3
+} NphAudioCodec;
+
 // ---------------------------------------------------------------------------
 // Channel layouts
 // ---------------------------------------------------------------------------

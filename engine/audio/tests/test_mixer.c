@@ -785,6 +785,13 @@ NTEST(audio_mixer, bad_clips_and_voices_are_refused)
     bad = cd;
     bad.sample_rate = 100U;
     NTEST_ASSERT_EQ_INT(nph_audio_clip_create(m, &bad, &clip), NPH_RESULT_INVALID_ARGUMENT);
+    // Longer than a voice's position reaches (borrowed, so nothing is copied
+    // were it let through).
+    bad = cd;
+    bad.frames = NPH_AUDIO_MAX_CLIP_FRAMES + 1U;
+    bad.size = bad.frames * sizeof(f32);
+    bad.borrow = 1;
+    NTEST_ASSERT_EQ_INT(nph_audio_clip_create(m, &bad, &clip), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_ASSERT_EQ_INT(nph_audio_clip_create(m, &cd, &clip), NPH_RESULT_OK);
     NphAudioPlayDesc d = nph_audio_play_desc_default(clip);
     d.start_frame = 64U;

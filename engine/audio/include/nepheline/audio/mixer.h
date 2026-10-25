@@ -49,6 +49,7 @@
 #include <nepheline/audio/eq.h>
 #include <nepheline/audio/reverb.h>
 #include <nepheline/audio/spatial.h>
+#include <nepheline/audio/stream.h>
 #include <nepheline/core/alloc.h>
 #include <nepheline/math/vec.h>
 
@@ -131,6 +132,7 @@ typedef struct NphAudioMixerStats {
     u64 block_ns_max;     // the slowest block's
     u64 block_ns_total;   // all blocks'
     u32 corrupt_reads;    // blocks of compressed clips that failed to decode (silence instead)
+    u64 stream_starved;   // frames streams had not delivered in time (silence instead)
 } NphAudioMixerStats;
 
 // The audio thread's statistics, as of its last block. NPH_THREADSAFE.
@@ -140,21 +142,19 @@ void nph_audio_mixer_stats(const NphAudioMixer *mixer, NphAudioMixerStats *out);
 // Clips
 // ---------------------------------------------------------------------------
 
-typedef enum NphAudioCodec {
-    NPH_AUDIO_CODEC_PCM = 0,      // interleaved samples in `format`
-    NPH_AUDIO_CODEC_LOSSLESS = 1, // lossless.h
-    NPH_AUDIO_CODEC_ADPCM = 2,    // adpcm.h
-    NPH_AUDIO_CODEC_COUNT = 3
-} NphAudioCodec;
+// The most frames a clip in memory holds (12.4 hours at 48 kHz): a voice's
+// position is 32.32 fixed point. Longer sounds stream (a stream's voice
+// moves its position on as it goes).
+#define NPH_AUDIO_MAX_CLIP_FRAMES (1ULL << 31U)
 
 typedef struct NphAudioClipDesc {
     NphAudioCodec codec;
     NphAudioSampleFormat format; // PCM: the samples' format
     u32 channels;                // 1 .. NPH_AUDIO_MAX_CHANNELS
     u32 sample_rate;             // NPH_AUDIO_MIN_RATE .. NPH_AUDIO_MAX_RATE
-    u64 frames;
-    const void *data; // the samples, the lossless stream's blocks, or the ADPCM stream
-    u64 size;         // bytes of data
+    u64 frames;                  // 1 .. NPH_AUDIO_MAX_CLIP_FRAMES
+    const void *data;            // the samples, the lossless stream's blocks, or the ADPCM stream
+    u64 size;                    // bytes of data
     // Lossless only: the stream's depth, block size, and block offsets
     // (lossless.h NphLosslessStream).
     u32 bits;
@@ -190,6 +190,29 @@ bool nph_audio_clip_is_valid(const NphAudioMixer *mixer, NphAudioClip clip);
 
 // The clip's length in seconds (0 for a stale handle).
 f64 nph_audio_clip_duration(const NphAudioMixer *mixer, NphAudioClip clip);
+
+// A clip whose frames `streamer` reads from storage as it plays (stream.h).
+// It plays once: one voice plays it from where the stream was opened, and
+// another play (while that voice plays or after it ends) is
+// NPH_RESULT_INVALID_STATE; to play the stream again, make another clip
+// (which reads and fills its ring here, where the cost is seen). The voice
+// neither loops it (desc->loop does) nor starts it part-way
+// (desc->start_frame does). Destroying the clip closes the stream once the
+// audio thread lets go. NPH_RESULT_INVALID_ARGUMENT for a malformed
+// description (ADPCM too: it is for clips in memory); NPH_RESULT_FULL past
+// max_clips or the streamer's max_streams; NPH_RESULT_IO_ERROR when the
+// first fill cannot read, NPH_RESULT_CORRUPT when it meets a corrupt block;
+// NPH_RESULT_OUT_OF_MEMORY. Its duration is infinite when it loops.
+NPH_MUST_USE NphResult nph_audio_clip_create_stream(NphAudioMixer *mixer,
+                                                    NphAudioStreamer *streamer,
+                                                    const NphAudioStreamDesc *desc,
+                                                    NphAudioClip *out);
+
+// The frames a stream's clip holds decoded ahead of its voice: the ring's
+// fill, the streamer's lead (0 for a stale handle, a clip in memory, or a
+// stream its voice has outrun). A health readout: the audio thread and the
+// streamer move it as it is read.
+u64 nph_audio_clip_stream_ahead(const NphAudioMixer *mixer, NphAudioClip clip);
 
 // ---------------------------------------------------------------------------
 // Buses
@@ -440,8 +463,10 @@ typedef struct NphAudioPlayDesc {
 NphAudioPlayDesc nph_audio_play_desc_default(NphAudioClip clip);
 
 // Starts a voice. NPH_RESULT_INVALID_ARGUMENT for a stale clip or bus, or a
-// start past the clip's end; NPH_RESULT_FULL when every voice slot is
-// taken or the command ring is (nothing is played then).
+// start past the clip's end (or anywhere but 0 on a stream's clip);
+// NPH_RESULT_INVALID_STATE for a stream's clip played before;
+// NPH_RESULT_FULL when every voice slot is taken or the command ring is
+// (nothing is played then).
 NPH_MUST_USE NphResult nph_audio_voice_play(NphAudioMixer *mixer, const NphAudioPlayDesc *desc,
                                             NphAudioVoice *out);
 

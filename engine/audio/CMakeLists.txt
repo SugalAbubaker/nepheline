@@ -2,7 +2,7 @@
 # The audio module (CLAUDE.md §8.10; docs/audio.md; docs/adr/0051-audio-module.md):
 # the DSP building blocks, the resampler, the block kernels, the codecs (WAV,
 # our ADPCM, our lossless codec), the effects, the mixer, spatialisation, the
-# output device (over miniaudio), and (later in Phase 12) streaming. Depends on platform
+# output device (over miniaudio), and streaming. Depends on platform
 # (threads, files, asynchronous I/O) and through it on math and core; never
 # on asset, scene, or physics: the runtime connects them.
 
@@ -31,6 +31,8 @@ nph_add_module(audio
         src/pan.c
         src/resampler.c
         src/spatial.c
+        src/stream.c
+        src/stream_internal.h
         src/reverb.c
         src/wav.c
     PUBLIC_DEPS nph::platform
@@ -87,6 +89,7 @@ nph_add_test(audio
         tests/test_pan.c
         tests/test_resampler.c
         tests/test_spatial.c
+        tests/test_stream.c
         tests/test_reverb.c
         tests/test_wav.c
     DEPS

@@ -121,7 +121,7 @@ static void mr_play(NphAudioMixer *m, const MixCommand *c)
     v->pitch = in->pitch;
     v->pan = in->pan;
     v->priority = in->priority;
-    v->loop = in->loop;
+    v->loop = m->audio_clips[in->clip]->stream != NULL ? 0 : in->loop; // a stream loops itself
     v->delay = in->delay_frames;
     v->context = MIX_NONE;
     v->sequence = in->sequence;
@@ -796,6 +796,7 @@ static void mr_block(NphAudioMixer *m)
     nph_atomic_store_u64(&m->stat_ns_max, m->block_ns_max, NPH_MEMORY_ORDER_RELAXED);
     nph_atomic_store_u64(&m->stat_ns_total, m->block_ns_total, NPH_MEMORY_ORDER_RELAXED);
     nph_atomic_store_u32(&m->stat_corrupt, m->corrupt_reads, NPH_MEMORY_ORDER_RELAXED);
+    nph_atomic_store_u64(&m->stat_starved, m->stream_starved, NPH_MEMORY_ORDER_RELAXED);
 }
 
 void nph_audio_mixer_render(NphAudioMixer *mixer, f32 *out, u32 frames)

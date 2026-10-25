@@ -73,9 +73,25 @@ static void rt_install_malloc_hooks(void)
 }
 #endif
 
-// A scene that uses everything a block can do: every codec, loops, pitch,
-// filters, sends, delays, buses, ducking, snapshots, and more voices than
-// real ones, so voices go virtual and come back all the time.
+// A stream's bytes, from memory as a file's would be.
+typedef struct RtSource {
+    const u8 *data;
+    u64 size;
+} RtSource;
+
+static NphResult rt_read(void *user, u64 offset, void *dst, u64 size)
+{
+    const RtSource *s = (const RtSource *)user;
+    if (offset > s->size || size > s->size - offset) {
+        return NPH_RESULT_IO_ERROR;
+    }
+    memcpy(dst, s->data + offset, (size_t)size);
+    return NPH_RESULT_OK;
+}
+
+// A scene that uses everything a block can do: every codec, streams, loops,
+// pitch, filters, sends, delays, buses, ducking, snapshots, and more voices
+// than real ones, so voices go virtual and come back all the time.
 typedef struct RtScene {
     NphAudioMixer *m;
     NphAudioClip clips[4];
@@ -85,9 +101,22 @@ typedef struct RtScene {
     NphAudioSnapshot pause;
     NphAudioEffect fx[5]; // equaliser, compressor, echo, reverberator, limiter
     NphAudioVoice voices[48];
+    // Two streams, PCM looping and lossless in 3D, made again now and then
+    // (a stream's clip plays once).
+    NphAudioStreamer *streamer;
+    i16 *stream_pcm;
+    NphLosslessEncoded stream_enc;
+    RtSource sources[2];
+    NphAudioStreamDesc stream_descs[2];
+    NphAudioClip streams[2];
+    NphAudioVoice stream_voices[2];
     u64 rng;
     bool threaded; // an audio thread renders it as the game thread steers
 } RtScene;
+
+enum {
+    RT_FRAMES = 20000
+};
 
 static void rt_scene_build(RtScene *s)
 {
@@ -95,7 +124,7 @@ static void rt_scene_build(RtScene *s)
     s->rng = 99U;
     s->m = tm_mixer(2U, 64U, 12U);
     enum {
-        FRAMES = 20000
+        FRAMES = RT_FRAMES
     };
     i16 *pcm = (i16 *)NPH_ALLOC(nph_allocator_system(), (u64)FRAMES * 2U * sizeof(i16), 16U);
     i32 *ints = (i32 *)NPH_ALLOC(nph_allocator_system(), (u64)FRAMES * 2U * sizeof(i32), 16U);
@@ -135,7 +164,6 @@ static void rt_scene_build(RtScene *s)
     ld.block_offsets = enc.stream.block_offsets;
     ld.block_count = enc.stream.block_count;
     NTEST_ASSERT_EQ_INT(nph_audio_clip_create(s->m, &ld, &s->clips[1]), NPH_RESULT_OK);
-    nph_lossless_encoded_free(&enc);
     NphAdpcmEncoded aenc;
     NTEST_ASSERT_EQ_INT(nph_adpcm_encode(nph_allocator_system(), pcm, 2U, FRAMES, &aenc),
                         NPH_RESULT_OK);
@@ -146,8 +174,37 @@ static void rt_scene_build(RtScene *s)
     NTEST_ASSERT_EQ_INT(nph_audio_clip_create(s->m, &ad, &s->clips[2]), NPH_RESULT_OK);
     nph_adpcm_encoded_free(&aenc);
     s->clips[3] = tm_tone(s->m, 523.25, 30000U, 32000U, 0.4F, NULL);
-    NPH_FREE(nph_allocator_system(), pcm, (u64)FRAMES * 2U * sizeof(i16), 16U);
     NPH_FREE(nph_allocator_system(), ints, (u64)FRAMES * 2U * sizeof(i32), 16U);
+
+    // The streams read the same material as it plays: it stays.
+    NphAudioStreamerDesc sdesc;
+    memset(&sdesc, 0, sizeof sdesc);
+    sdesc.alloc = nph_allocator_system();
+    sdesc.period_ms = 2U;
+    NTEST_ASSERT_EQ_INT(nph_audio_streamer_create(&sdesc, &s->streamer), NPH_RESULT_OK);
+    s->stream_pcm = pcm;
+    s->stream_enc = enc;
+    s->sources[0] = (RtSource){(const u8 *)pcm, cd.size};
+    s->sources[1] = (RtSource){enc.stream.data, enc.stream.size};
+    for (u32 k = 0U; k < 2U; ++k) {
+        NphAudioStreamDesc *sd = &s->stream_descs[k];
+        memset(sd, 0, sizeof *sd);
+        sd->source = (NphAudioStreamSource){rt_read, &s->sources[k]};
+        sd->codec = k == 0U ? NPH_AUDIO_CODEC_PCM : NPH_AUDIO_CODEC_LOSSLESS;
+        sd->format = NPH_AUDIO_FORMAT_S16;
+        sd->channels = 2U;
+        sd->sample_rate = 44100U;
+        sd->frames = FRAMES;
+        sd->size = s->sources[k].size;
+        sd->bits = 16U;
+        sd->block_frames = enc.stream.block_frames;
+        sd->block_offsets = enc.stream.block_offsets;
+        sd->block_count = enc.stream.block_count;
+        sd->loop_start = 1000U;
+        sd->loop_end = 15000U;
+        sd->loop = k == 0U;
+        sd->buffer_seconds = 0.2F;
+    }
 
     NphAudioBusDesc bd = nph_audio_bus_desc_default();
     NTEST_ASSERT_EQ_INT(nph_audio_bus_create(s->m, &bd, &s->music), NPH_RESULT_OK);
@@ -176,6 +233,40 @@ static void rt_scene_build(RtScene *s)
     fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_LIMITER);
     NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, NPH_AUDIO_MASTER_BUS, &fx, &s->fx[4]),
                         NPH_RESULT_OK);
+}
+
+static void rt_scene_destroy(RtScene *s)
+{
+    nph_audio_mixer_destroy(s->m); // first: it closes its streams
+    nph_audio_streamer_destroy(s->streamer);
+    nph_lossless_encoded_free(&s->stream_enc);
+    NPH_FREE(nph_allocator_system(), s->stream_pcm, (u64)RT_FRAMES * 2U * sizeof(i16), 16U);
+}
+
+// Makes stream k's clip (again: the last one goes) and plays it.
+static void rt_scene_stream(RtScene *s, u32 k)
+{
+    nph_audio_clip_destroy(s->m, s->streams[k]);
+    s->streams[k].value = 0U;
+    // The streamer frees closed streams on its own time: its slots may all
+    // be taken a moment, and then this one waits for the next turn.
+    if (nph_audio_clip_create_stream(s->m, s->streamer, &s->stream_descs[k], &s->streams[k]) !=
+        NPH_RESULT_OK) {
+        return;
+    }
+    NphAudioPlayDesc d = nph_audio_play_desc_default(s->streams[k]);
+    d.bus = s->music;
+    d.volume = 0.3F;
+    d.pitch = k == 0U ? 1.0F : 0.83F;
+    d.priority = (u8)(test_rng_next(&s->rng) % 256U);
+    if (k == 1U) {
+        d.spatial = 1;
+        d.position = (NphVec3){5.0F, 0.0F, -3.0F};
+    }
+    NphAudioVoice v;
+    if (nph_audio_voice_play(s->m, &d, &v) == NPH_RESULT_OK) {
+        s->stream_voices[k] = v;
+    }
 }
 
 static void rt_scene_play(RtScene *s, u32 i)
@@ -213,9 +304,14 @@ static void rt_scene_steer(RtScene *s, u32 step)
 {
     nph_audio_mixer_update(s->m);
     const u32 i = (u32)(test_rng_next(&s->rng) % 48U);
+    if (step % 40U == 7U) {
+        rt_scene_stream(s, (step / 40U) % 2U);
+    }
     switch (step % 6U) {
     case 0U:
         nph_audio_voice_set_pitch(s->m, s->voices[i], 0.5F + 0.1F * (f32)(step % 30U));
+        nph_audio_voice_set_pitch(s->m, s->stream_voices[step % 2U],
+                                  0.7F + 0.1F * (f32)(step % 7U));
         break;
     case 1U:
         nph_audio_voice_stop(s->m, s->voices[i], 0.02F);
@@ -251,6 +347,7 @@ static void rt_scene_steer(RtScene *s, u32 step)
         break;
     default:
         nph_audio_voice_set_paused(s->m, s->voices[i], (step % 4U) == 1U);
+        nph_audio_voice_set_paused(s->m, s->stream_voices[(step / 6U) % 2U], (step % 4U) == 1U);
         // Now and then an effect goes and another comes in its place.
         if (step % 30U == 5U) {
             nph_audio_effect_destroy(s->m, s->fx[2]);
@@ -285,6 +382,8 @@ NTEST(audio_mixer_realtime, rendering_allocates_and_locks_nothing)
     for (u32 i = 0U; i < 48U; ++i) {
         rt_scene_play(&s, i);
     }
+    rt_scene_stream(&s, 0U);
+    rt_scene_stream(&s, 1U);
     // Four seconds in uneven pieces, the game thread working between them.
     f32 *out = test_buffer(2U * 1500U);
     u32 rendered = 0U;
@@ -296,13 +395,21 @@ NTEST(audio_mixer_realtime, rendering_allocates_and_locks_nothing)
     }
     NphAudioMixerStats st;
     nph_audio_mixer_stats(s.m, &st);
-    NTEST_LOG("%llu blocks; last block %u real, %u virtual; slowest block %.1f us",
+    NphAudioStreamerStats ss;
+    nph_audio_streamer_stats(s.streamer, &ss);
+    NTEST_LOG("%llu blocks; last block %u real, %u virtual; slowest block %.1f us; streams "
+              "decoded %llu frames (%llu starved, rendering ahead of real time)",
               (unsigned long long)st.blocks, st.voices_real, st.voices_virtual,
-              (f64)st.block_ns_max / 1000.0);
-    NTEST_ASSERT_GT_UINT(st.blocks, 700U);
-    NTEST_ASSERT_EQ_UINT(st.corrupt_reads, 0U);
+              (f64)st.block_ns_max / 1000.0, (unsigned long long)ss.frames_decoded,
+              (unsigned long long)st.stream_starved);
+    // Not fatal while the streams are open: their sources are on this frame.
+    NTEST_EXPECT_GT_UINT(st.blocks, 700U);
+    NTEST_EXPECT_EQ_UINT(st.corrupt_reads, 0U);
+    NTEST_EXPECT_EQ_UINT(ss.read_errors, 0U);
+    NTEST_EXPECT_EQ_UINT(ss.corrupt_blocks, 0U);
+    NTEST_EXPECT_GT_UINT(ss.frames_decoded, 0U);
     test_buffer_free(out, 2U * 1500U);
-    nph_audio_mixer_destroy(s.m);
+    rt_scene_destroy(&s);
 #if NPH_ASSERTS_ENABLED
     nph_realtime_set_hook(previous, previous_user, NULL, NULL);
 #endif
@@ -364,6 +471,18 @@ NTEST(audio_mixer_realtime, the_game_and_audio_threads_run_together)
     t.m = s.m;
     nph_atomic_store_u32(&t.stop, 0U, NPH_MEMORY_ORDER_RELAXED);
     nph_atomic_store_u64(&t.frames, 0U, NPH_MEMORY_ORDER_RELAXED);
+    // The clip the loop makes and removes (the mixer copies its samples).
+    f32 *tone = test_buffer(8000U);
+    test_sine(tone, 8000U, 880.0, (f64)TM_RATE, 0.0, 0.3);
+    NphAudioClipDesc tone_desc;
+    memset(&tone_desc, 0, sizeof tone_desc);
+    tone_desc.codec = NPH_AUDIO_CODEC_PCM;
+    tone_desc.format = NPH_AUDIO_FORMAT_F32;
+    tone_desc.channels = 1U;
+    tone_desc.sample_rate = TM_RATE;
+    tone_desc.frames = 8000U;
+    tone_desc.data = tone;
+    tone_desc.size = 8000U * sizeof(f32);
     NphThread audio;
     const NphThreadDesc desc = {rt_audio_thread, &t, "test-audio", 0U};
     NTEST_ASSERT_EQ_INT(nph_thread_create(&audio, &desc), NPH_RESULT_OK);
@@ -376,16 +495,30 @@ NTEST(audio_mixer_realtime, the_game_and_audio_threads_run_together)
                     rt_scene_play(&s, i);
                 }
             }
+            for (u32 k = 0U; k < 2U; ++k) {
+                if (!nph_audio_voice_is_playing(s.m, s.stream_voices[k])) {
+                    rt_scene_stream(&s, k);
+                }
+            }
         }
         rt_scene_steer(&s, step);
         if (step % 97U == 13U) {
-            // A clip made and removed under the voices that play it.
-            const NphAudioClip c = tm_tone(s.m, 880.0, 8000U, TM_RATE, 0.3F, NULL);
-            NphAudioPlayDesc d = nph_audio_play_desc_default(c);
-            NphAudioVoice v;
-            // Every slot may be busy: then nothing plays, which is the test too.
-            NPH_IGNORE_RESULT(nph_audio_voice_play(s.m, &d, &v));
-            nph_audio_clip_destroy(s.m, c);
+            // A clip made and removed under the voices that play it. A
+            // destroyed clip's slot is free again once the audio thread lets
+            // go, and the streams' clips come and go too, so behind a lagging
+            // audio thread every slot may be taken a moment. Not fatal: this
+            // test must stop its threads before it ends.
+            NphAudioClip c;
+            const NphResult r = nph_audio_clip_create(s.m, &tone_desc, &c);
+            NTEST_EXPECT_TRUE(r == NPH_RESULT_OK || r == NPH_RESULT_FULL);
+            if (r == NPH_RESULT_OK) {
+                NphAudioPlayDesc d = nph_audio_play_desc_default(c);
+                NphAudioVoice v;
+                // Every voice may be busy: then nothing plays, which is the
+                // test too.
+                NPH_IGNORE_RESULT(nph_audio_voice_play(s.m, &d, &v));
+                nph_audio_clip_destroy(s.m, c);
+            }
             NphAudioBusDesc bd = nph_audio_bus_desc_default();
             NphAudioBus b;
             if (nph_audio_bus_create(s.m, &bd, &b) == NPH_RESULT_OK) {
@@ -398,6 +531,9 @@ NTEST(audio_mixer_realtime, the_game_and_audio_threads_run_together)
     // Stop everything and wait for the audio thread to say it is done.
     for (u32 i = 0U; i < 48U; ++i) {
         nph_audio_voice_stop(s.m, s.voices[i], 0.0F);
+    }
+    for (u32 k = 0U; k < 2U; ++k) {
+        nph_audio_voice_stop(s.m, s.stream_voices[k], 0.0F);
     }
     for (u32 tries = 0U; tries < 2000U; ++tries) {
         nph_audio_mixer_update(s.m);
@@ -417,11 +553,13 @@ NTEST(audio_mixer_realtime, the_game_and_audio_threads_run_together)
     nph_audio_mixer_update(s.m);
     NTEST_LOG("%u game steps; %llu frames rendered", step,
               (unsigned long long)nph_atomic_load_u64(&t.frames, NPH_MEMORY_ORDER_RELAXED));
-    NTEST_ASSERT_GT_UINT(nph_atomic_load_u64(&t.frames, NPH_MEMORY_ORDER_RELAXED), 4800U);
+    // Not fatal while the streams are open: their sources are on this frame.
+    NTEST_EXPECT_GT_UINT(nph_atomic_load_u64(&t.frames, NPH_MEMORY_ORDER_RELAXED), 4800U);
     for (u32 i = 0U; i < 48U; ++i) {
-        NTEST_ASSERT_FALSE(nph_audio_voice_is_playing(s.m, s.voices[i]));
+        NTEST_EXPECT_FALSE(nph_audio_voice_is_playing(s.m, s.voices[i]));
     }
-    nph_audio_mixer_destroy(s.m);
+    rt_scene_destroy(&s);
+    test_buffer_free(tone, 8000U);
 #if NPH_ASSERTS_ENABLED
     nph_realtime_set_hook(previous, previous_user, NULL, NULL);
 #endif
