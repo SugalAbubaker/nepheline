@@ -26,10 +26,18 @@
 // goes there over each step, carrying what rides it), a ball by its
 // RigidBody's velocity when it is thrown.
 //
+// Crates and balls report their hits (Collider hit_events), and each step
+// the hardest few play a thud or a bonk (runtime.md "Audio"), from the
+// samples' sounds: mount them too, --pack=<build>/samples/sounds/<Config>/
+// sounds.npk (without them the playground is silent).
+//
 // What the game keeps lives in the world or in its state block, so a
 // rebuild of this file is picked up while it runs (game.hot_reload).
+#include <nepheline/math/random.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/character.h>
+#include <nepheline/physics/shape.h>
+#include <nepheline/runtime/audio.h>
 #include <nepheline/runtime/components.h>
 #include <nepheline/runtime/engine.h>
 #include <nepheline/runtime/game.h>
@@ -55,6 +63,11 @@ NPH_LOG_CATEGORY_DEFINE(LOG_PLAYGROUND, "playground", NPH_LOG_LEVEL_INFO);
 #define CRATE_DENSITY      150.0F  // kg/m^3: a crate of 1 m weighs 150 kg
 #define CRATE_SPACING      1.02    // metres between crates' centres in a row
 #define FALL_LIMIT         (-30.0) // below this the player starts over
+#define IMPACTS_PER_STEP   4U      // the hardest hits a step that sound
+
+// The samples' sounds (samples/sounds/make_sounds.c), by their cooked GUIDs.
+#define SOUND_THUD "thud.wav#sound"
+#define SOUND_BONK "bonk.wav#sound"
 
 // The cooked content (content/make_physics_content.py).
 enum {
@@ -180,6 +193,8 @@ typedef struct PlaygroundState {
     NphEntity platform; // the playground's, which the autopilot rides
     b32 autopilot;      // playground.autopilot when play began
     Autopilot pilot;
+    b32 impact_sounds; // the impacts' sounds loaded when play began
+    u32 impacts;       // sounded since
     u64 plays;
 } PlaygroundState;
 
@@ -249,7 +264,9 @@ static NphResult spawn_crate(NphGame *game, NphDVec3 at, bool warm, NphEntity *o
     t.translation = at;
     NPH_TRY(spawn_piece(game, "crate", MESH_CUBE, warm ? MATERIAL_CRATE_WARM : MATERIAL_CRATE_COOL,
                         &t, NPH_RIGID_BODY_DYNAMIC, out));
-    collider_of(game, *out)->density = CRATE_DENSITY;
+    NphCollider *c = collider_of(game, *out);
+    c->density = CRATE_DENSITY;
+    c->hit_events = 1; // its impacts sound
     return NPH_RESULT_OK;
 }
 
@@ -266,6 +283,7 @@ static NphResult spawn_ball(NphGame *game, NphDVec3 at, f32 radius, f32 restitut
     c->density = BALL_DENSITY;
     c->friction = 0.5F;
     c->restitution = restitution;
+    c->hit_events = 1;
     // Rolling stops in a few seconds on the flat (rigid balls on a rigid
     // floor would roll for ever).
     rigid_body_of(game, *out)->angular_damping = 1.0F;
@@ -732,6 +750,67 @@ static void drive(NphSystemContext *ctx)
     }
 }
 
+// Impacts: the hardest IMPACTS_PER_STEP hits of the last step (crates' and
+// balls', above the world's hit threshold) each play a thud or a bonk,
+// following the body that struck (so its own body does not hide it), or at
+// the hit if that body is gone, as loud as the hit was hard. The events are
+// the last step's until the physics system steps again, after this system.
+static void impacts(NphSystemContext *ctx)
+{
+    NphGame *game = (NphGame *)ctx->user;
+    PlaygroundState *st = state(game);
+    const NphPhysicsWorld *pw = nph_game_physics(game);
+    if (pw == NULL || !st->impact_sounds) {
+        return;
+    }
+    const NphPhysicsEvents ev = nph_physics_world_events(pw);
+    const NphPhysicsContactHitEvent *hardest[IMPACTS_PER_STEP] = {NULL};
+    u32 n = 0U;
+    for (u32 i = 0; i < ev.hit_count; ++i) {
+        const NphPhysicsContactHitEvent *h = &ev.hit[i];
+        u32 at = n < IMPACTS_PER_STEP ? n++ : IMPACTS_PER_STEP;
+        while (at > 0U && hardest[at - 1U]->approach_speed < h->approach_speed) {
+            if (at < IMPACTS_PER_STEP) {
+                hardest[at] = hardest[at - 1U];
+            }
+            --at;
+        }
+        if (at < IMPACTS_PER_STEP) {
+            hardest[at] = h;
+        }
+    }
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, nph_game_step(game), 11U);
+    for (u32 i = 0; i < n; ++i) {
+        const NphPhysicsContactHitEvent *h = hardest[i];
+        if (!nph_physics_shape_is_valid(pw, h->shape_a) ||
+            !nph_physics_shape_is_valid(pw, h->shape_b)) {
+            continue;
+        }
+        // The one that struck: the dynamic one, a ball before a crate.
+        NphPhysicsShape shape = h->shape_a;
+        const NphPhysicsBody a = nph_physics_shape_body(pw, h->shape_a);
+        const NphPhysicsBody b = nph_physics_shape_body(pw, h->shape_b);
+        const bool a_moves = nph_physics_body_type(pw, a) == NPH_PHYSICS_BODY_DYNAMIC;
+        const bool b_moves = nph_physics_body_type(pw, b) == NPH_PHYSICS_BODY_DYNAMIC;
+        const bool b_ball =
+            nph_physics_shape_geometry(pw, h->shape_b).type == NPH_PHYSICS_SHAPE_SPHERE;
+        if ((b_moves && !a_moves) || (a_moves && b_moves && b_ball)) {
+            shape = h->shape_b;
+        }
+        const bool ball = nph_physics_shape_geometry(pw, shape).type == NPH_PHYSICS_SHAPE_SPHERE;
+        NphSoundPlayDesc d = nph_sound_play_desc_default();
+        d.follow = nph_game_physics_entity(game, nph_physics_shape_body(pw, shape));
+        d.position = h->point;
+        d.volume = nph_f32_clamp((h->approach_speed - 0.8F) / 7.0F, 0.08F, 1.0F);
+        d.pitch = (ball ? 0.95F : 0.88F) + (ball ? 0.1F : 0.24F) * nph_pcg32_next_f32(&rng);
+        d.priority = 100U;
+        const NphResult r =
+            nph_game_play_sound(game, nph_guid_from_cstr(ball ? SOUND_BONK : SOUND_THUD), &d);
+        st->impacts += r == NPH_RESULT_OK ? 1U : 0U;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Callbacks
 // ---------------------------------------------------------------------------
@@ -792,6 +871,18 @@ static NphResult add_systems(NphGame *game, NphSchedule *schedule)
     d.run = drive;
     d.terms = player_terms;
     d.flags = (u32)NPH_SYSTEM_EXCLUSIVE;
+    NPH_TRY(nph_schedule_add_system(schedule, &d, NULL));
+    // The impacts only read the physics world (a read of RigidBody keeps
+    // them off any system that changes bodies), and play sounds.
+    const NphComponentId reads[1] = {nph_engine_components(nph_game_engine(game))->rigid_body};
+    memset(&d, 0, sizeof d);
+    d.name = "playground.impacts";
+    d.run = impacts;
+    d.user = game;
+    d.reads = reads;
+    d.read_count = 1U;
+    d.before = before;
+    d.before_count = 1U;
     return nph_schedule_add_system(schedule, &d, NULL);
 }
 
@@ -819,6 +910,15 @@ static NphResult play_begin(NphGame *game)
     st->platform = NPH_ENTITY_NULL;
     st->autopilot = nph_cvar_get_bool(&g_autopilot);
     memset(&st->pilot, 0, sizeof st->pilot);
+    st->impacts = 0U;
+    // The impacts' sounds, loaded before the first (a late one is dropped).
+    st->impact_sounds =
+        nph_game_preload_sound(game, nph_guid_from_cstr(SOUND_THUD)) == NPH_RESULT_OK &&
+        nph_game_preload_sound(game, nph_guid_from_cstr(SOUND_BONK)) == NPH_RESULT_OK;
+    if (!st->impact_sounds && nph_game_audio_mixer(game) != NULL) {
+        NPH_LOG_WARN(&LOG_PLAYGROUND,
+                     "no impact sounds: mount the samples' sounds pack (samples/sounds)");
+    }
     if (!world_draws_something(w, ids->mesh_renderer)) {
         NPH_TRY(build_playground(game));
     }
@@ -839,9 +939,10 @@ static void play_end(NphGame *game)
 {
     const PlaygroundState *st = state(game);
     const NphPhysicsStats *s = nph_engine_physics_stats(nph_game_engine(game));
-    NPH_LOG_INFO(&LOG_PLAYGROUND, "played %llu steps: %u bodies, %u awake, %u balls out",
+    NPH_LOG_INFO(&LOG_PLAYGROUND,
+                 "played %llu steps: %u bodies, %u awake, %u balls out, %u impacts sounded",
                  (unsigned long long)nph_game_step(game), s->bodies, s->awake_bodies,
-                 st->ball_count);
+                 st->ball_count, st->impacts);
     if (!st->autopilot) {
         return;
     }
