@@ -119,7 +119,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         NphLosslessStream copy = enc.stream;
         copy.data = damaged;
         copy.size = damaged_size;
-        (void)nph_lossless_validate(&copy);
+        NPH_IGNORE_RESULT(nph_lossless_validate(&copy)); // refused or not, decoding must survive
         (void)decode_blocks(&copy, NULL);
         fuzz_audio_free(damaged, damaged_size);
     }
