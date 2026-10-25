@@ -86,6 +86,7 @@ NphResult cook_sound_settings_parse(NphAllocator *alloc, const void *json, u64 s
     NphJsonDoc doc;
     NphResult r = nph_json_parse(nph_str((const char *)json, size), alloc, &doc);
     if (r != NPH_RESULT_OK) {
+        nph_json_doc_free(&doc); // what it parsed before failing (json.h)
         return r == NPH_RESULT_OUT_OF_MEMORY ? r : NPH_RESULT_PARSE_ERROR;
     }
     CookSoundSettings s = *inout;

@@ -5,6 +5,7 @@
 #include <nepheline/asset/sound.h>
 #include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/lossless.h>
+#include <nepheline/core/alloc_debug.h>
 
 #include "test_cook_support.h"
 
@@ -192,9 +193,16 @@ static NphLosslessStream ts_lossless(const NphSoundView *v)
 // Settings
 // ---------------------------------------------------------------------------
 
+// Through a debug allocator: whatever the parse allocates is freed, on every
+// path (a refusal too).
 static NphResult ts_parse(const char *json, CookSoundSettings *s)
 {
-    return cook_sound_settings_parse(nph_allocator_system(), json, strlen(json), s);
+    NphDebugAllocator da;
+    nph_debug_allocator_init(&da, nph_allocator_system());
+    const NphResult r =
+        cook_sound_settings_parse(nph_debug_allocator_allocator(&da), json, strlen(json), s);
+    NTEST_EXPECT_EQ_UINT(nph_debug_allocator_destroy(&da, NULL, NULL), 0U);
+    return r;
 }
 
 NTEST(cook_sound, settings_default_and_parse)
