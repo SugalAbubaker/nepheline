@@ -108,6 +108,12 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
                 return NPH_RESULT_CORRUPT;
             }
         }
+        if (m->triangle_count == 0U) {
+            // Nothing to check, and no pointer to form: with no meshlet
+            // triangles in the mesh their blob is absent (NULL), and C has no
+            // arithmetic on a null pointer, not even by zero.
+            continue;
+        }
         const u8 *tris = meshlet_triangles + (u64)m->triangle_offset * 3U;
         for (u32 t = 0; t < (u32)m->triangle_count * 3U; ++t) {
             if (tris[t] >= m->vertex_count) {

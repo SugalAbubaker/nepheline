@@ -231,6 +231,30 @@ NTEST(views, mesh_view_rejects_bad_ranges)
     image_asset_free(&ia);
 }
 
+NTEST(views, mesh_view_takes_a_meshlet_without_triangles)
+{
+    // A meshlet may hold no triangles, and a mesh with none needs no triangle
+    // blob: the view takes it without forming a pointer into the blob that
+    // is not there (the nightly fuzzer's find, 2026-10-25, as UBSan's
+    // "applying zero offset to null pointer"; its input is the nph corpus's
+    // regression_meshlet_without_triangles).
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_cube(&ia, NPH_MESH_TYPE_VERSION);
+    NphMeshHeader *h = (NphMeshHeader *)blob_bytes(&ia, NPH_MESH_TAG_HEADER, 0U);
+    h->meshlet_triangle_count = 0U;
+    NphMeshlet *ml = (NphMeshlet *)blob_bytes(&ia, NPH_MESH_TAG_MESHLETS, 0U);
+    ml->triangle_count = 0U;
+    ia.asset.blob_count -= 1U; // drops the last blob (MLTR)
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(v.meshlet_triangles);
+    NTEST_EXPECT_EQ_UINT(v.meshlets[0].triangle_count, 0U);
+    NTEST_EXPECT_EQ_UINT(v.meshlets[0].vertex_count, 8U);
+    image_asset_free(&ia);
+}
+
 // ---------------------------------------------------------------------------
 // Texture
 // ---------------------------------------------------------------------------
