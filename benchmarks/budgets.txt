@@ -338,6 +338,11 @@ delay_read_frac                5.4
 pan_vbap_7_1                   180
 pan_vbap_7_1_spread            1330
 resampler_create               31000000
+lossless_encode_stereo16       2800
+lossless_decode_stereo16       62
+lossless_decode_stereo24       62
+adpcm_encode_stereo            1020
+adpcm_decode_stereo            13
 
 # profile_bench
 profile_zone_enabled           55

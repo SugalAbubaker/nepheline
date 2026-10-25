@@ -19,10 +19,20 @@
 //   delay_read_frac                   a Catmull-Rom read, per sample
 //   pan_vbap_7_1, pan_vbap_7_1_spread one voice's gains (per call)
 //   resampler_create                  every bank computed (per call)
+//
+// The codecs, per frame, on 10 s of a synthesised stereo mix (harmonics
+// under envelopes, a melody, a noise floor at -50 dB):
+//
+//   lossless_encode_stereo16          the cooker's encode, default search
+//   lossless_decode_stereo16 / _24    the mixer's decode: 256 frames at a time
+//   adpcm_encode_stereo               the closed-loop block search
+//   adpcm_decode_stereo               random-access decode, 256 frames at a time
 
+#include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/delay.h>
 #include <nepheline/audio/filter.h>
 #include <nepheline/audio/kernels.h>
+#include <nepheline/audio/lossless.h>
 #include <nepheline/audio/pan.h>
 #include <nepheline/audio/resampler.h>
 #include <nepheline/core/alloc.h>
@@ -254,4 +264,144 @@ NBENCH(resampler_create)
         nbench_do_not_optimize(rs);
         nph_audio_resampler_destroy(rs);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Codecs
+// ---------------------------------------------------------------------------
+
+#define MIX_FRAMES 480000U // ten seconds at 48 kHz
+
+static i32 g_mix16[2U * MIX_FRAMES];
+static i32 g_mix24[2U * MIX_FRAMES];
+static i16 g_mix_s16[2U * MIX_FRAMES];
+static bool g_mix_ready;
+
+// A stand-in for music: decaying harmonic notes, a melody that moves between
+// the channels, and a noise floor, so neither predictor has it easy.
+static void prepare_mix(void)
+{
+    if (g_mix_ready) {
+        return;
+    }
+    u64 s = 777U;
+    for (u32 i = 0U; i < MIX_FRAMES; ++i) {
+        const f64 t = (f64)i / 48000.0;
+        const f64 note = 110.0 * pow(2.0, (f64)((i / 12000U) % 12U) / 12.0);
+        const f64 env = exp(-4.0 * fmod(t, 0.25));
+        f64 l = 0.0;
+        for (u32 h = 1U; h <= 8U; ++h) {
+            l += env * 0.1 / (f64)h * sin(2.0 * 3.14159265358979 * note * h * t);
+        }
+        const f64 melody = 0.15 * sin(2.0 * 3.14159265358979 * 2.0 * note * t + sin(5.0 * t));
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        const f64 noise = ((f64)(s >> 11U) / 9007199254740992.0 - 0.5) * 0.006;
+        const f64 pan = 0.5 + 0.4 * sin(0.7 * t);
+        const f64 left = l + melody * (1.0 - pan) + noise;
+        const f64 right = 0.8 * l + melody * pan - noise * 0.5;
+        g_mix16[(u64)i * 2U] = (i32)floor(left * 32767.0 + 0.5);
+        g_mix16[(u64)i * 2U + 1U] = (i32)floor(right * 32767.0 + 0.5);
+        g_mix24[(u64)i * 2U] = (i32)floor(left * 8388607.0 + 0.5);
+        g_mix24[(u64)i * 2U + 1U] = (i32)floor(right * 8388607.0 + 0.5);
+        g_mix_s16[(u64)i * 2U] = (i16)g_mix16[(u64)i * 2U];
+        g_mix_s16[(u64)i * 2U + 1U] = (i16)g_mix16[(u64)i * 2U + 1U];
+    }
+    g_mix_ready = true;
+}
+
+NBENCH(lossless_encode_stereo16)
+{
+    prepare_mix();
+    // Two seconds a run: the encoder is offline and slow per frame.
+    const u64 frames = 96000U;
+    nbench_set_items_per_iteration(state, frames);
+    u64 bytes = 0U;
+    while (nbench_keep_running(state)) {
+        NphLosslessEncoded enc;
+        if (nph_lossless_encode(nph_allocator_system(), g_mix16, 2U, 16U, frames, NULL, &enc) !=
+            NPH_RESULT_OK) {
+            return;
+        }
+        bytes = enc.stream.size;
+        nph_lossless_encoded_free(&enc);
+    }
+    nbench_do_not_optimize_u64(bytes);
+}
+
+static void run_lossless_decode(NbenchState *state, const i32 *mix, u32 bits)
+{
+    prepare_mix();
+    NphLosslessEncoded enc;
+    if (nph_lossless_encode(nph_allocator_system(), mix, 2U, bits, MIX_FRAMES, NULL, &enc) !=
+        NPH_RESULT_OK) {
+        return;
+    }
+    f32 *planes[2] = {g_dst[0], g_dst[1]};
+    i32 scratch[2U * BLOCK];
+    nbench_set_items_per_iteration(state, MIX_FRAMES);
+    while (nbench_keep_running(state)) {
+        NphLosslessDecoder dec;
+        for (u32 b = 0U; b < enc.stream.block_count; ++b) {
+            const u64 start = enc.stream.block_offsets[b];
+            const u64 end = b + 1U < enc.stream.block_count ? enc.stream.block_offsets[b + 1U]
+                                                            : enc.stream.size;
+            if (nph_lossless_decoder_begin(&dec, enc.stream.data + start, end - start, 2U, bits) !=
+                NPH_RESULT_OK) {
+                return;
+            }
+            while (nph_lossless_decoder_remaining(&dec) > 0U) {
+                const u32 n = nph_min_u32(BLOCK, nph_lossless_decoder_remaining(&dec));
+                if (nph_lossless_decoder_read(&dec, planes, n, scratch) != NPH_RESULT_OK) {
+                    return;
+                }
+            }
+        }
+        nbench_do_not_optimize(g_dst);
+    }
+    nph_lossless_encoded_free(&enc);
+}
+
+NBENCH(lossless_decode_stereo16)
+{
+    run_lossless_decode(state, g_mix16, 16U);
+}
+
+NBENCH(lossless_decode_stereo24)
+{
+    run_lossless_decode(state, g_mix24, 24U);
+}
+
+NBENCH(adpcm_encode_stereo)
+{
+    prepare_mix();
+    const u64 frames = 48000U;
+    nbench_set_items_per_iteration(state, frames);
+    while (nbench_keep_running(state)) {
+        NphAdpcmEncoded enc;
+        if (nph_adpcm_encode(nph_allocator_system(), g_mix_s16, 2U, frames, &enc) !=
+            NPH_RESULT_OK) {
+            return;
+        }
+        nbench_do_not_optimize(enc.data);
+        nph_adpcm_encoded_free(&enc);
+    }
+}
+
+NBENCH(adpcm_decode_stereo)
+{
+    prepare_mix();
+    NphAdpcmEncoded enc;
+    if (nph_adpcm_encode(nph_allocator_system(), g_mix_s16, 2U, MIX_FRAMES, &enc) !=
+        NPH_RESULT_OK) {
+        return;
+    }
+    f32 *planes[2] = {g_dst[0], g_dst[1]};
+    nbench_set_items_per_iteration(state, MIX_FRAMES);
+    while (nbench_keep_running(state)) {
+        for (u64 f = 0U; f < MIX_FRAMES; f += BLOCK) {
+            nph_adpcm_decode(&enc.stream, f, BLOCK, planes);
+        }
+        nbench_do_not_optimize(g_dst);
+    }
+    nph_adpcm_encoded_free(&enc);
 }
