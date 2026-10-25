@@ -401,6 +401,12 @@ nph_player --game=build/bin/Debug/game_sandbox.dll \
 nph_player --game=... --headless --frames=600 sim.rate=120
 ```
 
+`player.title_fps=true` puts the frame rate and the frame time in the
+window's title, measured twice a second (`r.vsync=false` uncaps them from
+the display's refresh). The sandbox sample flies a camera through any cooked
+scene: `sandbox.scene=bistro.gltf#scene` with Bistro's pack mounted, lit by
+its manifest's values (the sample's header gives the command).
+
 It exits with 0, 1 on a failure (validation errors included), 2 for a bad
 command line, and 77 without a window system or a device, which CTest
 reports as a skip (`sample.game_sandbox`, `sample.game_sandbox_headless`,
