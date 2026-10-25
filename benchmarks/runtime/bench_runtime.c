@@ -37,6 +37,29 @@
 //                                    less this and an empty frame is what
 //                                    the engine adds for 1,000 moving bodies
 //
+// Audio in the engine (docs/runtime.md "Audio"), the mix on the null
+// device's thread:
+//
+//   engine_frame_audio_idle          a frame of a headless engine playing with
+//                                    audio on and nothing sounding: what the
+//                                    bridge costs every frame (the listener,
+//                                    the mixer's update)
+//   engine_frame_audio_256_moving    a frame of 256 spatial sources circling
+//                                    the listener (their LocalTransforms
+//                                    written outside the timing), 64 mixed
+//                                    and the rest virtual: each voice placed
+//                                    in the listener's frame, its velocity
+//                                    for Doppler, eight of them's occlusion
+//                                    rays (an empty physics world), and the
+//                                    transforms
+//   engine_frame_audio_64_in_10k     a frame of 64 spatial sources standing
+//                                    among 10,000 static boxes, occlusion off
+//   engine_frame_audio_64_in_10k_occluded
+//                                    the same with the default occlusion
+//                                    budget (72 rays a frame, up to nine a
+//                                    source): the difference is what the rays
+//                                    cost in a dense world
+//
 // Drawing between steps (docs/runtime.md "Interpolation"), per instance, on
 // an offscreen engine with the cooked showcase (not measured, and so
 // labelled, without a Vulkan device or the content):
@@ -49,8 +72,12 @@
 //                                    sync_at): the difference is what
 //                                    interpolation costs a moving instance
 
+#include <nepheline/asset/format.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/shape.h>
+#include <nepheline/platform/file.h>
+#include <nepheline/platform/platform.h>
 #include <nepheline/runtime/console.h>
 #include <nepheline/runtime/engine.h>
 #include <nepheline/runtime/scene_render.h>
@@ -58,6 +85,7 @@
 
 #include <nbench/nbench.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,6 +202,279 @@ NBENCH(engine_frame_headless_10k_moving)
     }
     nph_engine_destroy(e);
     free(entities);
+}
+
+// ---------------------------------------------------------------------------
+// Audio in the engine
+// ---------------------------------------------------------------------------
+
+#define SOURCES 256U
+
+typedef struct AudioBench {
+    char dir[1024];
+    char path[1100];
+    NphGuid sound;
+} AudioBench;
+
+static NphResult bench_resolve(void *user, NphGuid guid, char *buf, u64 cap, u64 *out_len)
+{
+    const AudioBench *ab = (const AudioBench *)user;
+    if (!nph_guid_equals(guid, ab->sound) || cap < 10U) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    memcpy(buf, "tone.nph", 9U);
+    *out_len = 8U;
+    return NPH_RESULT_OK;
+}
+
+// A second of a mono 16-bit tone as a sound asset in a directory of its own.
+static void write_tone(AudioBench *ab)
+{
+    char tmp[800];
+    if (nph_fs_temp_directory(tmp, sizeof tmp, NULL) != NPH_RESULT_OK) {
+        fail("no temporary directory");
+    }
+    (void)snprintf(ab->dir, sizeof ab->dir, "%s/nph_runtime_bench_%llu", tmp,
+                   (unsigned long long)nph_platform_process_id());
+    if (nph_fs_create_directories(ab->dir) != NPH_RESULT_OK) {
+        fail("the content directory");
+    }
+    static i16 pcm[48000];
+    for (u32 i = 0; i < 48000U; ++i) {
+        pcm[i] = (i16)(8000.0 * sin(2.0 * 3.14159265358979323846 * 440.0 * (f64)i / 48000.0));
+    }
+    ab->sound = nph_guid_from_cstr("bench tone");
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, nph_allocator_system(), NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION,
+                          ab->sound, 1U);
+    NphSoundHeader h;
+    memset(&h, 0, sizeof h);
+    h.codec = NPH_SOUND_CODEC_PCM;
+    h.format = NPH_SOUND_FORMAT_S16;
+    h.channels = 1U;
+    h.sample_rate = 48000U;
+    h.frames = 48000U;
+    h.loop_end = 48000U;
+    h.bits = 16U;
+    (void)snprintf(ab->path, sizeof ab->path, "%s/tone.nph", ab->dir);
+    if (nph_asset_writer_add_blob(&w, NPH_SOUND_TAG_HEADER, 0U, &h, sizeof h, NPH_ASSET_CODEC_NONE,
+                                  0U) != NPH_RESULT_OK ||
+        nph_asset_writer_add_blob(&w, NPH_SOUND_TAG_DATA, 0U, pcm, sizeof pcm, NPH_ASSET_CODEC_NONE,
+                                  0U) != NPH_RESULT_OK ||
+        nph_asset_writer_write_file(&w, ab->path) != NPH_RESULT_OK) {
+        fail("writing the sound");
+    }
+    nph_asset_writer_free(&w);
+}
+
+// A headless engine in lockstep whose sound goes to the null device: the
+// mix runs on the device's thread, as a game's does on the hardware's, so a
+// frame is what the main thread does.
+static NphEngine *audio_engine(AudioBench *ab, const char *extra)
+{
+    static const char *const assignments[3] = {"rt.lockstep=true", "audio.device=null",
+                                               "audio.sample_rate=48000"};
+    NphEngineConfig config;
+    memset(&config, 0, sizeof config);
+    config.headless = 1;
+    for (u32 i = 0; i < 3U; ++i) {
+        config.assignments[i] = assignments[i];
+    }
+    config.assignment_count = 3U;
+    if (extra != NULL) {
+        config.assignments[config.assignment_count++] = extra;
+    }
+    config.contents[0] = ab->dir;
+    config.content_count = 1U;
+    NphEngineDesc d;
+    memset(&d, 0, sizeof d);
+    d.config = &config;
+    d.mode = NPH_ENGINE_MODE_HEADLESS;
+    d.app_name = "runtime bench";
+    d.resolve = bench_resolve;
+    d.resolve_user = ab;
+    NphEngine *e = NULL;
+    if (nph_engine_create(&d, &e) != NPH_RESULT_OK) {
+        abort();
+    }
+    return e;
+}
+
+static void audio_bench_end(NphEngine *e, AudioBench *ab)
+{
+    nph_engine_destroy(e);
+    NPH_IGNORE_RESULT(nph_fs_remove_tree(ab->dir));
+}
+
+NBENCH(engine_frame_audio_idle)
+{
+    AudioBench ab;
+    write_tone(&ab);
+    NphEngine *e = audio_engine(&ab, NULL);
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    audio_bench_end(e, &ab);
+}
+
+NBENCH(engine_frame_audio_256_moving)
+{
+    AudioBench ab;
+    write_tone(&ab);
+    NphEngine *e = audio_engine(&ab, NULL);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->audio_source};
+    static NphEntity sources[SOURCES];
+    if (nph_world_spawn_batch(w, comps, 3U, SOURCES, sources) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < SOURCES; ++i) {
+        NphAudioSource *src = NPH_WORLD_GET_MUT(w, sources[i], ids->audio_source, NphAudioSource);
+        src->sound = ab.sound;
+        src->autoplay = 1;
+        src->loop = 1;
+        src->spatial = 1;
+        src->volume = 0.05F;
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    NphEngineAudioStats st;
+    nph_engine_audio_stats(e, &st);
+    if (st.voices != SOURCES) {
+        fail("not every source plays");
+    }
+    f64 t = 0.0;
+    while (nbench_keep_running(state)) {
+        nbench_pause_timing(state);
+        if (nph_engine_wait(e) != NPH_RESULT_OK) {
+            abort();
+        }
+        t += 0.004;
+        for (u32 i = 0; i < SOURCES; ++i) {
+            const f64 a = t + (f64)i * 0.1;
+            NPH_WORLD_GET_MUT(w, sources[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+                ->translation = nph_dvec3(20.0 * cos(a), 1.0, 20.0 * sin(a));
+        }
+        nbench_resume_timing(state);
+        frame(e);
+    }
+    audio_bench_end(e, &ab);
+}
+
+// ---------------------------------------------------------------------------
+// Occlusion among 10,000 boxes
+// ---------------------------------------------------------------------------
+
+#define FIELD_SIDE    100U // boxes a side
+#define FIELD_SOURCES 64U
+
+// FIELD_SOURCES spatial sources among FIELD_SIDE^2 static boxes of 1 m, 4 m
+// apart on a 400 m square, the listener at head height near its centre and
+// the sources from 5 to 40 m around it, 20 cm above the boxes' tops (fixed
+// positions): about as dense as a town's walls and props.
+static NphEngine *field_engine(AudioBench *ab, const char *occlusion_rays)
+{
+    NphEngine *e = audio_engine(ab, occlusion_rays);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId box_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                         NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->collider};
+    const u32 boxes = FIELD_SIDE * FIELD_SIDE;
+    NphEntity *box = (NphEntity *)malloc(sizeof(NphEntity) * boxes);
+    if (box == NULL || nph_world_spawn_batch(w, box_comps, 3U, boxes, box) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < boxes; ++i) {
+        const u32 row = i / FIELD_SIDE;
+        const u32 column = i % FIELD_SIDE;
+        NPH_WORLD_GET_MUT(w, box[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = nph_dvec3(4.0 * (f64)column - 198.0, 0.5, 4.0 * (f64)row - 198.0);
+    }
+    free(box);
+    const NphComponentId listener_comps[3] = {
+        NPH_COMPONENT_ID_LOCAL_TRANSFORM, NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->audio_listener};
+    NphEntity listener;
+    if (nph_world_spawn(w, listener_comps, 3U, &listener) != NPH_RESULT_OK) {
+        abort();
+    }
+    NPH_WORLD_GET_MUT(w, listener, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+        ->translation = nph_dvec3(0.0, 1.7, 0.0);
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->audio_source};
+    NphEntity sources[FIELD_SOURCES];
+    if (nph_world_spawn_batch(w, comps, 3U, FIELD_SOURCES, sources) != NPH_RESULT_OK) {
+        abort();
+    }
+    u32 seed = 12345U;
+    for (u32 i = 0; i < FIELD_SOURCES; ++i) {
+        seed = seed * 1664525U + 1013904223U;
+        const f64 angle = 6.283185307179586 * (f64)(seed >> 8) / 16777216.0;
+        seed = seed * 1664525U + 1013904223U;
+        const f64 radius = 5.0 + 35.0 * (f64)(seed >> 8) / 16777216.0;
+        NPH_WORLD_GET_MUT(w, sources[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = nph_dvec3(radius * cos(angle), 1.2, radius * sin(angle));
+        NphAudioSource *src = NPH_WORLD_GET_MUT(w, sources[i], ids->audio_source, NphAudioSource);
+        src->sound = ab->sound;
+        src->autoplay = 1;
+        src->loop = 1;
+        src->spatial = 1;
+        src->occlusion = 1;
+        src->volume = 0.05F;
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < 16U; ++i) {
+        frame(e);
+    }
+    NphEngineAudioStats st;
+    nph_engine_audio_stats(e, &st);
+    if (st.voices != FIELD_SOURCES) {
+        fail("not every source plays");
+    }
+    if ((st.occlusion_rays == 0U) != (strcmp(occlusion_rays, "audio.occlusion_rays=0") == 0)) {
+        fail("the occlusion rays are not as asked");
+    }
+    return e;
+}
+
+NBENCH(engine_frame_audio_64_in_10k)
+{
+    AudioBench ab;
+    write_tone(&ab);
+    NphEngine *e = field_engine(&ab, "audio.occlusion_rays=0");
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    audio_bench_end(e, &ab);
+}
+
+NBENCH(engine_frame_audio_64_in_10k_occluded)
+{
+    AudioBench ab;
+    write_tone(&ab);
+    NphEngine *e = field_engine(&ab, "audio.occlusion_rays=72");
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    NphEngineAudioStats st;
+    nph_engine_audio_stats(e, &st);
+    static char label[48];
+    (void)snprintf(label, sizeof label, "%u rays a frame", st.occlusion_rays);
+    nbench_set_label(state, label);
+    audio_bench_end(e, &ab);
 }
 
 NBENCH(engine_play_copy_10k)

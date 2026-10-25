@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "executable": "runtime_bench.exe",
+  "timestamp": "2026-10-25T19:28:56Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.2,
+  "benchmarks": [
+    {"name": "engine_frame_headless", "label": "", "iterations": 58243, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 4381.308, "min_ns_per_op": 3874.368, "max_ns_per_op": 4769.596},
+    {"name": "engine_frame_headless_10k", "label": "", "iterations": 35545, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 6422.763, "min_ns_per_op": 6349.357, "max_ns_per_op": 7651.889},
+    {"name": "engine_frame_headless_10k_moving", "label": "", "iterations": 5102, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 46950.157, "min_ns_per_op": 45729.890, "max_ns_per_op": 47632.458},
+    {"name": "engine_frame_audio_idle", "label": "", "iterations": 52131, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 4282.444, "min_ns_per_op": 4140.072, "max_ns_per_op": 4559.406},
+    {"name": "engine_frame_audio_256_moving", "label": "", "iterations": 10868, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 22990.918, "min_ns_per_op": 22882.702, "max_ns_per_op": 23081.450},
+    {"name": "engine_frame_audio_64_in_10k", "label": "", "iterations": 20643, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 12354.871, "min_ns_per_op": 12080.051, "max_ns_per_op": 12746.597},
+    {"name": "engine_frame_audio_64_in_10k_occluded", "label": "72 rays a frame", "iterations": 10032, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 25164.862, "min_ns_per_op": 24669.647, "max_ns_per_op": 26672.478},
+    {"name": "engine_play_copy_10k", "label": "", "iterations": 174, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 2247006.897, "min_ns_per_op": 2152100.000, "max_ns_per_op": 2462432.184},
+    {"name": "engine_frame_physics_1k_resting", "label": "", "iterations": 45346, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 4580.536, "min_ns_per_op": 4520.068, "max_ns_per_op": 4810.195},
+    {"name": "engine_frame_physics_1k_spinning", "label": "", "iterations": 2069, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 119829.531, "min_ns_per_op": 119675.350, "max_ns_per_op": 123001.015},
+    {"name": "physics_step_1k_spinning", "label": "", "iterations": 3884, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 68316.555, "min_ns_per_op": 66013.054, "max_ns_per_op": 121485.067},
+    {"name": "scene_sync_10k_moving", "label": "", "iterations": 288, "items_per_iteration": 10000, "repeats": 7, "ns_per_op": 79.790, "min_ns_per_op": 79.707, "max_ns_per_op": 80.174},
+    {"name": "scene_interpolate_10k_moving", "label": "", "iterations": 94, "items_per_iteration": 10000, "repeats": 7, "ns_per_op": 263.002, "min_ns_per_op": 262.112, "max_ns_per_op": 263.930},
+    {"name": "sim_input_frame", "label": "", "iterations": 865351, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 289.491, "min_ns_per_op": 289.091, "max_ns_per_op": 292.206},
+    {"name": "console_set_cvar", "label": "", "iterations": 1583280, "items_per_iteration": 1, "repeats": 7, "ns_per_op": 240.286, "min_ns_per_op": 240.193, "max_ns_per_op": 240.803}
+  ]
+}

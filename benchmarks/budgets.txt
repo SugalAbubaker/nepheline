@@ -368,15 +368,21 @@ tracked_alloc_free_64          250
 system_alloc_free_64           180
 
 # runtime_bench (docs/runtime.md). The engine frames wait for a job on
-# another thread and wake it, and the physics step spreads over the job
-# system: 5x, as the hosted runners have fewer cores. The scene renderer's
-# need a Vulkan device, which hosted runners lack (not measured there).
+# another thread and wake it, the physics step spreads over the job
+# system, and the audio frames' mix runs on the null device's thread
+# beside them: 5x, as the hosted runners have fewer cores. The scene
+# renderer's need a Vulkan device, which hosted runners lack (not measured
+# there).
 engine_frame_headless          20000
 engine_frame_headless_10k      34000
 engine_frame_headless_10k_moving 240000
 engine_play_copy_10k           9000000
 engine_frame_physics_1k_resting 22000
 engine_frame_physics_1k_spinning 600000
+engine_frame_audio_idle        22000
+engine_frame_audio_256_moving  115000
+engine_frame_audio_64_in_10k   62000
+engine_frame_audio_64_in_10k_occluded 126000
 physics_step_1k_spinning       340000
 scene_sync_10k_moving          240
 scene_interpolate_10k_moving   790
