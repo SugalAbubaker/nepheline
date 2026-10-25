@@ -43,6 +43,7 @@ typedef struct GoldenScene {
     NphAudioBus buses[4];
     NphAudioVoice voices[32];
     NphAudioSnapshot snapshots[2];
+    NphAudioEffect effects[8];
     u64 rng;
 } GoldenScene;
 
@@ -345,6 +346,153 @@ static void script_virtual(GoldenScene *s, u32 block)
     }
 }
 
+// --- Scene: effects on buses ---------------------------------------------
+
+static f64 sig_buzz(u32 i, u32 c, u32 rate)
+{
+    // An engine's stand-in: a 110 Hz buzz, eight harmonics falling.
+    NPH_UNUSED(c);
+    const f64 t = (f64)i / (f64)rate;
+    f64 v = 0.0;
+    for (u32 h = 1U; h <= 8U; ++h) {
+        v += sin(2.0 * GOLDEN_PI * 110.0 * (f64)h * t) / (f64)(h * h);
+    }
+    return 0.3 * v;
+}
+
+static void script_effects(GoldenScene *s, u32 block)
+{
+    if (block == 0U) {
+        s->clips[0] = golden_clip(s->m, 2U, GOLDEN_RATE, 96000U, sig_chord);
+        s->clips[1] = golden_clip(s->m, 1U, GOLDEN_RATE, 48000U, sig_pluck);
+        NphAudioBusDesc bd = nph_audio_bus_desc_default();
+        NTEST_ASSERT_EQ_INT(nph_audio_bus_create(s->m, &bd, &s->buses[0]), NPH_RESULT_OK); // music
+        NTEST_ASSERT_EQ_INT(nph_audio_bus_create(s->m, &bd, &s->buses[1]),
+                            NPH_RESULT_OK); // effects
+        NTEST_ASSERT_EQ_INT(nph_audio_bus_create(s->m, &bd, &s->buses[2]), NPH_RESULT_OK); // room
+        // The music: shaped and held together.
+        NphAudioEffectDesc fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_EQ);
+        fx.eq[0] = (NphAudioEqBand){NPH_AUDIO_FILTER_LOW_SHELF, 150.0F, 0.7071F, 4.0F, 1};
+        fx.eq[1] = (NphAudioEqBand){NPH_AUDIO_FILTER_PEAK, 2500.0F, 1.2F, -5.0F, 1};
+        NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->buses[0], &fx, &s->effects[0]),
+                            NPH_RESULT_OK);
+        fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_COMPRESSOR);
+        fx.compressor.threshold_db = -16.0F;
+        fx.compressor.ratio = 3.0F;
+        NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->buses[0], &fx, &s->effects[1]),
+                            NPH_RESULT_OK);
+        // The plucks: echoes from side to side, and a room.
+        fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_ECHO);
+        fx.echo.delay_ms = 180.0F;
+        fx.echo.feedback = 0.35F;
+        fx.echo.wet = 0.4F;
+        fx.echo.ping_pong = 1;
+        NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->buses[1], &fx, &s->effects[2]),
+                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_audio_bus_set_send(s->m, s->buses[1], 0U, s->buses[2], 0.6F),
+                            NPH_RESULT_OK);
+        fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_REVERB);
+        fx.reverb.decay_s = 1.2F;
+        fx.reverb.size = 0.8F;
+        fx.reverb.late = 0.6F;
+        NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->buses[2], &fx, &s->effects[3]),
+                            NPH_RESULT_OK);
+        // And the master never past -1 dB.
+        fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_LIMITER);
+        NTEST_ASSERT_EQ_INT(
+            nph_audio_effect_create(s->m, NPH_AUDIO_MASTER_BUS, &fx, &s->effects[4]),
+            NPH_RESULT_OK);
+    }
+    if (block == 2U) {
+        // The effects came in over silence; now the sound.
+        NphAudioPlayDesc d = nph_audio_play_desc_default(s->clips[0]);
+        d.bus = s->buses[0];
+        d.loop = 1;
+        d.volume = 0.9F;
+        NTEST_ASSERT_EQ_INT(nph_audio_voice_play(s->m, &d, &s->voices[0]), NPH_RESULT_OK);
+    }
+    if (block % 31U == 4U && block < 200U) {
+        NphAudioPlayDesc d = nph_audio_play_desc_default(s->clips[1]);
+        d.bus = s->buses[1];
+        d.volume = 0.5F;
+        d.pan = -0.6F + 0.3F * (f32)(block % 5U);
+        d.pitch = 0.75F + 0.125F * (f32)(block % 3U);
+        NphAudioVoice v;
+        NTEST_ASSERT_EQ_INT(nph_audio_voice_play(s->m, &d, &v), NPH_RESULT_OK);
+    }
+    if (block == 100U) {
+        nph_audio_effect_set_param(s->m, s->effects[0], NPH_AUDIO_EQ_PARAM(1, NPH_AUDIO_EQ_GAIN),
+                                   4.0F);
+    }
+    if (block == 150U) {
+        nph_audio_effect_set_bypass(s->m, s->effects[2], true);
+    }
+    if (block == 200U) {
+        nph_audio_effect_set_param(s->m, s->effects[3], NPH_AUDIO_REVERB_DECAY, 0.4F);
+    }
+    if (block == 240U) {
+        nph_audio_effect_destroy(s->m, s->effects[1]);
+    }
+}
+
+// --- Scene: 3D ---------------------------------------------------------------
+
+static void script_spatial(GoldenScene *s, u32 block)
+{
+    // A buzz passes from left to right 6 m ahead at 25 m/s (in a straight
+    // line, arithmetic only: Doppler turns a position's error into phase);
+    // a pluck plays behind a wall that falls away; a chord behind a pillar
+    // keeps its room.
+    const f32 t = (f32)(block * NPH_AUDIO_BLOCK_FRAMES) / (f32)GOLDEN_RATE;
+    if (block == 0U) {
+        s->clips[0] = golden_clip(s->m, 1U, GOLDEN_RATE, 96000U, sig_buzz);
+        s->clips[1] = golden_clip(s->m, 1U, GOLDEN_RATE, 48000U, sig_pluck);
+        s->clips[2] = golden_clip(s->m, 2U, GOLDEN_RATE, 96000U, sig_chord);
+        NphAudioBusDesc bd = nph_audio_bus_desc_default();
+        NTEST_ASSERT_EQ_INT(nph_audio_bus_create(s->m, &bd, &s->buses[0]), NPH_RESULT_OK); // room
+        NphAudioEffectDesc fx = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_REVERB);
+        fx.reverb.decay_s = 0.9F;
+        NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->buses[0], &fx, &s->effects[0]),
+                            NPH_RESULT_OK);
+        NphAudioPlayDesc d = nph_audio_play_desc_default(s->clips[0]);
+        d.spatial = 1;
+        d.loop = 1;
+        d.position = (NphVec3){-20.0F, 0.0F, -6.0F};
+        d.velocity = (NphVec3){25.0F, 0.0F, 0.0F};
+        d.attenuation.max_distance = 60.0F;
+        d.size = 1.5F;
+        NTEST_ASSERT_EQ_INT(nph_audio_voice_play(s->m, &d, &s->voices[0]), NPH_RESULT_OK);
+        d = nph_audio_play_desc_default(s->clips[2]);
+        d.spatial = 1;
+        d.loop = 1;
+        d.volume = 0.5F;
+        d.position = (NphVec3){8.0F, 0.0F, 2.0F}; // behind, to the right
+        d.doppler = 0.0F;
+        d.sends[0] = s->buses[0];
+        d.send_gains[0] = 0.7F;
+        NTEST_ASSERT_EQ_INT(nph_audio_voice_play(s->m, &d, &s->voices[1]), NPH_RESULT_OK);
+        nph_audio_voice_set_occlusion(s->m, s->voices[1], 0.0F, 1.0F);
+    }
+    // The buzz moves on.
+    nph_audio_voice_set_position(s->m, s->voices[0], (NphVec3){-20.0F + 25.0F * t, 0.0F, -6.0F},
+                                 (NphVec3){25.0F, 0.0F, 0.0F});
+    if (block % 40U == 10U) {
+        NphAudioPlayDesc d = nph_audio_play_desc_default(s->clips[1]);
+        d.spatial = 1;
+        d.position = (NphVec3){-3.0F, 0.0F, 4.0F};
+        d.doppler = 0.0F;
+        d.sends[0] = s->buses[0];
+        d.send_gains[0] = 0.5F;
+        NphAudioVoice v;
+        NTEST_ASSERT_EQ_INT(nph_audio_voice_play(s->m, &d, &v), NPH_RESULT_OK);
+        // The wall falls away as the scene goes on.
+        nph_audio_voice_set_occlusion(s->m, v, 1.0F - (f32)block / (f32)GOLDEN_BLOCKS, 0.0F);
+    }
+    if (block == 180U) {
+        nph_audio_voice_set_occlusion(s->m, s->voices[1], 0.0F, 0.0F); // round the pillar
+    }
+}
+
 // --- The comparison --------------------------------------------------------
 
 typedef enum GoldenOutcome {
@@ -500,4 +648,14 @@ NTEST(audio_golden, buses_ducking_snapshots)
 NTEST(audio_golden, virtual_voices)
 {
     golden_run("virtual_voices", script_virtual, 4U);
+}
+
+NTEST(audio_golden, effects)
+{
+    golden_run("effects", script_effects, 16U);
+}
+
+NTEST(audio_golden, spatial)
+{
+    golden_run("spatial", script_spatial, 16U);
 }
