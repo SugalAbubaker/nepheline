@@ -66,6 +66,7 @@
 
 #include <nepheline/core/cvar.h>
 #include <nepheline/physics/world.h>
+#include <nepheline/runtime/audio.h>
 #include <nepheline/runtime/console.h>
 #include <nepheline/runtime/sim_input.h>
 #include <nepheline/scene/schedule.h>
@@ -190,6 +191,20 @@ void nph_game_reset_interpolation(NphGame *game, NphEntity entity);
 // first use (unbound until bindings are added through the engine's input).
 // Actions outlive reloads. NPH_RESULT_FULL past NPH_SIM_INPUT_MAX_ACTIONS.
 NPH_MUST_USE NphResult nph_game_action(NphGame *game, const char *name, NphActionId *out);
+
+// Plays `sound` once while the world plays (engine.h nph_engine_play_sound):
+// a footstep, an impact, a line of interface. NPH_THREADSAFE: from systems
+// too. NPH_RESULT_FULL when the frame's queue is full.
+NPH_MUST_USE NphResult nph_game_play_sound(NphGame *game, NphGuid sound,
+                                           const NphSoundPlayDesc *desc);
+
+// Loads `sound` before its first one-shot (engine.h nph_engine_preload_sound):
+// from play_begin, on the main thread.
+NPH_MUST_USE NphResult nph_game_preload_sound(NphGame *game, NphGuid sound);
+
+// The engine's mixer, or NULL without audio (engine.h nph_engine_audio_mixer):
+// from the game's callbacks only (the main thread, at the sync point).
+NphAudioMixer *nph_game_audio_mixer(const NphGame *game);
 
 // Registers a cvar of the game with the engine's registry; it is removed
 // before the module is unloaded, keeping a tuned value for the next build

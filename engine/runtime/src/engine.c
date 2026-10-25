@@ -125,6 +125,43 @@ static const NPH_CVAR_INT(k_phys_debug_draw, "phys.debug_draw", 0, 0, 63,
                           "draw the physics world: 1 shapes, 2 boxes, 4 contacts, 8 centres of "
                           "mass, 16 sleep, 32 joints",
                           NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_STRING(k_audio_device, "audio.device", "auto",
+                             "auto (the speakers with a window, none without), off, system, null "
+                             "(real time, no hardware), or offline (rendered by each frame)",
+                             CVAR_SAVED_LATCHED);
+static const NPH_CVAR_INT(k_audio_rate, "audio.sample_rate", 0, 0, 192000,
+                          "the mix's rate (0: the device's own)", CVAR_SAVED_LATCHED);
+static const NPH_CVAR_INT(k_audio_channels, "audio.channels", 0, 0, 8,
+                          "the mix's channels: 1, 2, 4, 6, or 8 (0: the device's own)",
+                          CVAR_SAVED_LATCHED);
+static const NPH_CVAR_INT(k_audio_voices, "audio.voices", 512, 1, 16384,
+                          "voices playing at once, mixed or virtual", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_audio_real_voices, "audio.real_voices", 64, 1, 4096,
+                          "voices mixed at once (the rest play virtually)", CVAR_SAVED_LATCHED);
+static const NPH_CVAR_INT(k_audio_streams, "audio.streams", 32, 1, 1024,
+                          "sounds streamed from storage at once", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_FLOAT(k_audio_stream_seconds, "audio.stream_seconds", 1.0, 0.1, 30.0,
+                            "seconds a streamed sound's ring holds ahead of its voice",
+                            NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_FLOAT(k_audio_volume, "audio.volume", 1.0, 0.0, 4.0,
+                            "the master volume (linear)", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_audio_volume_effects, "audio.volume_effects", 1.0, 0.0, 4.0,
+                            "the effects bus's volume", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_audio_volume_music, "audio.volume_music", 1.0, 0.0, 4.0,
+                            "the music bus's volume", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_audio_volume_dialogue, "audio.volume_dialogue", 1.0, 0.0, 4.0,
+                            "the dialogue bus's volume", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_audio_volume_ambience, "audio.volume_ambience", 1.0, 0.0, 4.0,
+                            "the ambience bus's volume", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_FLOAT(k_audio_volume_ui, "audio.volume_ui", 1.0, 0.0, 4.0,
+                            "the interface bus's volume", NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_BOOL(k_audio_reverb, "audio.reverb", 1,
+                           "sources send to the room's reverberation (their next voices)",
+                           NPH_CVAR_FLAG_NONE);
+static const NPH_CVAR_INT(
+    k_audio_occlusion_rays, "audio.occlusion_rays", 72, 0, 4096,
+    "rays a frame for the occlusion of spatial sounds, up to nine each (0: none)",
+    NPH_CVAR_FLAG_NONE);
 
 // The engine's cvars are its members (two engines may coexist), each
 // starting as a copy of its static template.
@@ -169,6 +206,21 @@ static NphResult register_cvars(NphEngine *e)
         &cv->phys_sleep,
         &cv->phys_continuous,
         &cv->phys_debug_draw,
+        &cv->audio_device,
+        &cv->audio_rate,
+        &cv->audio_channels,
+        &cv->audio_voices,
+        &cv->audio_real_voices,
+        &cv->audio_streams,
+        &cv->audio_stream_seconds,
+        &cv->audio_volume,
+        &cv->audio_volume_effects,
+        &cv->audio_volume_music,
+        &cv->audio_volume_dialogue,
+        &cv->audio_volume_ambience,
+        &cv->audio_volume_ui,
+        &cv->audio_reverb,
+        &cv->audio_occlusion_rays,
     };
     const NphCvar *const templates[] = {
         &k_max_frames,
@@ -208,6 +260,21 @@ static NphResult register_cvars(NphEngine *e)
         &k_phys_sleep,
         &k_phys_continuous,
         &k_phys_debug_draw,
+        &k_audio_device,
+        &k_audio_rate,
+        &k_audio_channels,
+        &k_audio_voices,
+        &k_audio_real_voices,
+        &k_audio_streams,
+        &k_audio_stream_seconds,
+        &k_audio_volume,
+        &k_audio_volume_effects,
+        &k_audio_volume_music,
+        &k_audio_volume_dialogue,
+        &k_audio_volume_ambience,
+        &k_audio_volume_ui,
+        &k_audio_reverb,
+        &k_audio_occlusion_rays,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
                       "one template per engine cvar");
@@ -460,6 +527,9 @@ NphResult engine_world_activate(NphEngine *e, NphWorld *world, bool edit, NphWor
     nph_transform_system_destroy(e->transforms);
     e->transforms = NULL;
     NphResult r = physics_bridge_set_world(e->physics, e->world);
+    if (r == NPH_RESULT_OK) {
+        r = audio_bridge_set_world(e->audio, e->world);
+    }
     if (e->world != NULL) {
         if (r == NPH_RESULT_OK) {
             r = nph_transform_system_create(e->world, engine_alloc(e, ENGINE_ALLOC_WORLD),
@@ -609,6 +679,11 @@ NphResult nph_engine_play_begin(NphEngine *e, bool copy)
         if (r == NPH_RESULT_OK) {
             r = physics_bridge_refresh(e->physics);
         }
+        if (r == NPH_RESULT_OK) {
+            // The sounds the world names, play_begin's included, loaded
+            // before the first frame.
+            r = audio_bridge_begin(e->audio);
+        }
     }
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "play_begin failed: %s", nph_result_string(r));
@@ -625,6 +700,7 @@ void nph_engine_play_end(NphEngine *e)
     }
     NPH_IGNORE_RESULT(engine_sim_wait(e));
     game_play_end(e);
+    audio_bridge_end(e->audio);
     physics_bridge_end(e->physics);
     e->playing = false;
     e->paused = false;
@@ -760,6 +836,7 @@ static bool capture_motion(NphEngine *e)
     e->sim_batch = 0U;
     const u32 resets = nph_atomic_load_u32(&e->reset_count, NPH_MEMORY_ORDER_RELAXED);
     nph_atomic_store_u32(&e->reset_count, 0U, NPH_MEMORY_ORDER_RELAXED);
+    e->frame_resets = resets;
     if (e->scene_renderer == NULL || !interpolating(e)) {
         return false;
     }
@@ -814,12 +891,14 @@ static NphResult sync_point(NphEngine *e, f64 dt)
         r = nph_scene_renderer_sync_at(e->scene_renderer, fraction, &e->stats.scene);
     }
     physics_bridge_sync(e->physics);
+    audio_bridge_sync(e->audio);
     nph_world_clear_events(e->world);
     if (r == NPH_RESULT_OK && e->renderer != NULL) {
         physics_bridge_draw(e->physics, e->renderer, (u32)nph_cvar_get_int(&e->cv.phys_debug_draw));
         nph_render_debug_flip(e->renderer);
     }
     choose_view(e, dt);
+    audio_bridge_frame(e->audio, dt);
     e->stats.sync_ms = nph_time_ns_to_ms(nph_time_now_ns() - t0);
     NPH_PROFILE_END();
     return r;
@@ -1185,8 +1264,8 @@ static const EngineCommand g_commands[] = {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-static const char *const g_alloc_tags[ENGINE_ALLOC_COUNT] = {"engine", "world", "render",
-                                                             "assets", "game",  "physics"};
+static const char *const g_alloc_tags[ENGINE_ALLOC_COUNT] = {
+    "engine", "world", "render", "assets", "game", "physics", "audio"};
 
 static NphResult start_profiling(NphEngine *e)
 {
@@ -1330,6 +1409,8 @@ static NphResult start_world(NphEngine *e)
     e->world = e->edit_world;
     NPH_TRY(physics_bridge_create(e, &e->physics));
     NPH_TRY(physics_bridge_set_world(e->physics, e->world));
+    NPH_TRY(audio_bridge_create(e, &e->audio));
+    NPH_TRY(audio_bridge_set_world(e->audio, e->world));
     NPH_TRY(
         nph_transform_system_create(e->world, engine_alloc(e, ENGINE_ALLOC_WORLD), &e->transforms));
     NPH_TRY(engine_schedule_rebuild(e));
@@ -1472,7 +1553,10 @@ void nph_engine_destroy(NphEngine *e)
         }
     }
     write_user_config(e);
-    // The worlds and what queries them.
+    // The worlds and what queries them: the audio first (its device thread
+    // renders until it closes).
+    audio_bridge_destroy(e->audio);
+    e->audio = NULL;
     nph_scene_renderer_destroy(e->scene_renderer);
     forget_names(e);
     nph_schedule_destroy(e->schedule);
@@ -1744,6 +1828,47 @@ const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL && e->physics != NULL);
     return physics_bridge_stats(e->physics);
+}
+
+NphResult nph_engine_play_sound(NphEngine *e, NphGuid sound, const NphSoundPlayDesc *desc)
+{
+    NPH_ASSERT(e != NULL && desc != NULL);
+    return e->audio != NULL ? audio_bridge_play(e->audio, sound, desc) : NPH_RESULT_OK;
+}
+
+NphResult nph_engine_preload_sound(NphEngine *e, NphGuid sound)
+{
+    NPH_ASSERT(e != NULL);
+    return e->audio != NULL ? audio_bridge_preload(e->audio, sound) : NPH_RESULT_OK;
+}
+
+NphAudioMixer *nph_engine_audio_mixer(NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    return e->audio != NULL ? audio_bridge_mixer(e->audio) : NULL;
+}
+
+NphAudioBus nph_engine_audio_bus(const NphEngine *e, NphAudioSourceBus bus)
+{
+    NPH_ASSERT(e != NULL);
+    return e->audio != NULL ? audio_bridge_bus(e->audio, (u32)bus) : NPH_AUDIO_MASTER_BUS;
+}
+
+const f32 *nph_engine_audio_output(const NphEngine *e, u32 *out_frames)
+{
+    NPH_ASSERT(e != NULL && out_frames != NULL);
+    *out_frames = 0U;
+    return e->audio != NULL ? audio_bridge_output(e->audio, out_frames) : NULL;
+}
+
+void nph_engine_audio_stats(const NphEngine *e, NphEngineAudioStats *out)
+{
+    NPH_ASSERT(e != NULL && out != NULL);
+    if (e->audio == NULL) {
+        memset(out, 0, sizeof *out);
+        return;
+    }
+    audio_bridge_stats(e->audio, out);
 }
 
 void engine_reset_interpolation(NphEngine *e, NphEntity entity)

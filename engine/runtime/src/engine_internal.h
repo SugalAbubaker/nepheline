@@ -142,6 +142,21 @@ typedef struct EngineCvars {
     NphCvar phys_sleep;            // phys.sleep
     NphCvar phys_continuous;       // phys.continuous
     NphCvar phys_debug_draw;       // phys.debug_draw: NPH_PHYSICS_DRAW_* bits
+    NphCvar audio_device;          // audio.device: auto, off, system, null, offline
+    NphCvar audio_rate;            // audio.sample_rate (0: the device's)
+    NphCvar audio_channels;        // audio.channels (0: the device's)
+    NphCvar audio_voices;          // audio.voices
+    NphCvar audio_real_voices;     // audio.real_voices
+    NphCvar audio_streams;         // audio.streams
+    NphCvar audio_stream_seconds;  // audio.stream_seconds
+    NphCvar audio_volume;          // audio.volume: the master's
+    NphCvar audio_volume_effects;  // audio.volume_effects
+    NphCvar audio_volume_music;    // audio.volume_music
+    NphCvar audio_volume_dialogue; // audio.volume_dialogue
+    NphCvar audio_volume_ambience; // audio.volume_ambience
+    NphCvar audio_volume_ui;       // audio.volume_ui
+    NphCvar audio_reverb;          // audio.reverb
+    NphCvar audio_occlusion_rays;  // audio.occlusion_rays
 } EngineCvars;
 
 typedef enum EngineAllocTag {
@@ -151,6 +166,7 @@ typedef enum EngineAllocTag {
     ENGINE_ALLOC_ASSETS,
     ENGINE_ALLOC_GAME,
     ENGINE_ALLOC_PHYSICS,
+    ENGINE_ALLOC_AUDIO,
     ENGINE_ALLOC_COUNT,
 } EngineAllocTag;
 
@@ -188,6 +204,39 @@ NphPhysicsBody physics_bridge_body(const PhysicsBridge *b, NphEntity e);
 // The physics world's statistics after the last step (zeroed when not
 // playing).
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
+
+// ---------------------------------------------------------------------------
+// The audio bridge (audio_bridge.c): the mixer, the streamer, and the device,
+// and the active world's AudioSources as voices while playing.
+// ---------------------------------------------------------------------------
+
+typedef struct AudioBridge AudioBridge;
+
+// The output the audio.* cvars ask for (nothing with audio.device off).
+NPH_MUST_USE NphResult audio_bridge_create(NphEngine *e, AudioBridge **out);
+void audio_bridge_destroy(AudioBridge *b);
+// Follows the active world (its queries). A world rebuilt with the same
+// handles keeps its voices, compared with its sources at the next pass.
+NPH_MUST_USE NphResult audio_bridge_set_world(AudioBridge *b, NphWorld *world);
+// Play: the sounds the world names, loaded before the first frame.
+NPH_MUST_USE NphResult audio_bridge_begin(AudioBridge *b);
+// Every voice stopped, every stream closed, every sound released.
+void audio_bridge_end(AudioBridge *b);
+// At the sync point, before the world's events are cleared: what went, and
+// the AudioSources that changed.
+void audio_bridge_sync(AudioBridge *b);
+// After the view is chosen: the listener, one-shots, voices started and
+// placed, occlusion, the mixer's update, and an offline frame's render.
+void audio_bridge_frame(AudioBridge *b, f64 dt);
+// nph_engine_play_sound (NPH_THREADSAFE).
+NPH_MUST_USE NphResult audio_bridge_play(AudioBridge *b, NphGuid sound,
+                                         const NphSoundPlayDesc *desc);
+// nph_engine_preload_sound.
+NPH_MUST_USE NphResult audio_bridge_preload(AudioBridge *b, NphGuid sound);
+NphAudioMixer *audio_bridge_mixer(const AudioBridge *b);
+NphAudioBus audio_bridge_bus(const AudioBridge *b, u32 bus);
+const f32 *audio_bridge_output(const AudioBridge *b, u32 *out_frames);
+void audio_bridge_stats(const AudioBridge *b, NphEngineAudioStats *out);
 
 struct NphEngine {
     NphAllocator *backing;
@@ -236,6 +285,7 @@ struct NphEngine {
     NphTransformSystem *transforms; // of the active world
     NphSchedule *schedule;          // of the active world
     PhysicsBridge *physics;
+    AudioBridge *audio;
 
     // The simulation.
     NphFixedClock clock;
@@ -254,6 +304,7 @@ struct NphEngine {
     u32 interp_steps;
     NphAtomicU32 reset_count;
     u32 resets[ENGINE_MAX_RESETS];
+    u32 frame_resets; // the resets the last sync point took (the audio bridge's Doppler)
 
     // The game.
     NphGame game;

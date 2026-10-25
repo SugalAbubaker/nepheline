@@ -14,6 +14,8 @@
 //   RigidBody     a body the physics world moves while the world plays
 //   Collider      the shape of the entity's body, or a static body of its
 //                 own
+//   AudioSource   a sound the entity plays while the world plays
+//   AudioListener where spatial sounds are heard from
 //
 // Every world the engine creates registers them right after the built-in
 // components (scene/world.h), in this order, so their ids are the same in
@@ -221,6 +223,76 @@ NPH_COMPONENT_DECLARE(NphCollider);
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
 NPH_STATIC_ASSERT(sizeof(NphCollider) == 88U, "Collider is 88 bytes");
 
+// ---------------------------------------------------------------------------
+// Audio (docs/runtime.md "Audio"; docs/adr/0058-audio-in-the-engine.md)
+// ---------------------------------------------------------------------------
+//
+// While the world plays, an entity with an AudioSource plays its sound
+// (asset/sound.h, by GUID) through the engine's mixer: from memory, or
+// streamed from storage when the cooker made it so. The game starts and
+// stops it by writing `playing`; the engine writes it false when the sound
+// ends, and true when `autoplay` starts it (when play begins, or when the
+// entity appears while playing). A spatial source sounds from where its
+// entity is in the world, around the listener: the first active
+// AudioListener, else the view the host set (the editor's camera), else the
+// first active Camera. Changes to any other field apply to the sound
+// playing.
+
+// The engine's buses, under the master; each has its volume cvar
+// (audio.volume_<name>), and every voice also sends to the reverberation.
+typedef enum NphAudioSourceBus {
+    NPH_AUDIO_SOURCE_BUS_EFFECTS = 0,
+    NPH_AUDIO_SOURCE_BUS_MUSIC = 1,
+    NPH_AUDIO_SOURCE_BUS_DIALOGUE = 2,
+    NPH_AUDIO_SOURCE_BUS_AMBIENCE = 3,
+    NPH_AUDIO_SOURCE_BUS_UI = 4,
+} NphAudioSourceBus;
+
+#define NPH_AUDIO_SOURCE_BUS_COUNT 5U
+
+// `volume` is linear and `pitch` a playback rate (1: as recorded). A
+// spatial source falls off with distance by `rolloff` (audio/spatial.h
+// NphAudioRolloff: 0 inverse, at `rolloff_factor`'s steepness, full within
+// `min_distance` and falling no further past `max_distance`; 1 linear,
+// silent from `max_distance`; 2 the curve through four points, distances
+// in metres rising in `curve_distances` and gains in dB in `curve_gains`;
+// 3 none), spreads over its `size` (m) when near, pitches by `doppler` (0
+// none, 1 physical), and, with `occlusion`, is darkened and quietened by
+// what lies between it and the listener (rays through the physics world).
+// `reverb` is its send to the room's reverberation (0 .. 1); `priority`
+// keeps its voice real over lower ones (0 .. 255).
+#define NPH_AUDIO_SOURCE_FIELDS(F)                                                                 \
+    F(GUID, sound, NPH_FIELD_NO_HINTS)                                                             \
+    F(U32, bus, NPH_FIELD_RANGE(0.0F, 4.0F))                                                       \
+    F(F32, volume, NPH_FIELD_RANGE(0.0F, 4.0F))                                                    \
+    F(F32, pitch, NPH_FIELD_RANGE(0.125F, 8.0F))                                                   \
+    F(BOOL, loop, NPH_FIELD_NO_HINTS)                                                              \
+    F(BOOL, autoplay, NPH_FIELD_NO_HINTS)                                                          \
+    F(BOOL, playing, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_TRANSIENT))                                    \
+    F(BOOL, spatial, NPH_FIELD_NO_HINTS)                                                           \
+    F(U32, rolloff, NPH_FIELD_RANGE(0.0F, 3.0F))                                                   \
+    F(F32, min_distance, NPH_FIELD_RANGE(0.01F, 1000.0F))                                          \
+    F(F32, max_distance, NPH_FIELD_RANGE(0.01F, 100000.0F))                                        \
+    F(F32, rolloff_factor, NPH_FIELD_RANGE(0.0F, 10.0F))                                           \
+    F(VEC4, curve_distances, NPH_FIELD_NO_HINTS)                                                   \
+    F(VEC4, curve_gains, NPH_FIELD_NO_HINTS)                                                       \
+    F(F32, doppler, NPH_FIELD_RANGE(0.0F, 4.0F))                                                   \
+    F(F32, size, NPH_FIELD_RANGE(0.0F, 100.0F))                                                    \
+    F(BOOL, occlusion, NPH_FIELD_NO_HINTS)                                                         \
+    F(F32, reverb, NPH_FIELD_RANGE(0.0F, 1.0F))                                                    \
+    F(U32, priority, NPH_FIELD_RANGE(0.0F, 255.0F))
+NPH_COMPONENT_STRUCT(NphAudioSource, NPH_AUDIO_SOURCE_FIELDS);
+NPH_COMPONENT_DECLARE(NphAudioSource);
+
+// The listener the engine places spatial sounds around: at the entity, its
+// -Z ahead and +Y up, as a Camera looks. The first active one is the
+// listener.
+#define NPH_AUDIO_LISTENER_FIELDS(F) F(BOOL, active, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphAudioListener, NPH_AUDIO_LISTENER_FIELDS);
+NPH_COMPONENT_DECLARE(NphAudioListener);
+
+NPH_STATIC_ASSERT(sizeof(NphAudioSource) == 112U, "AudioSource is 112 bytes");
+
 // The shape a Collider makes on an entity of world scale `scale` (absolute,
 // per local axis): its geometry and its pose in the entity's frame (the
 // centre scaled, the rotation unit). Negative and non-finite sizes count as
@@ -237,9 +309,11 @@ typedef struct NphRuntimeComponents {
     NphComponentId environment;
     NphComponentId rigid_body;
     NphComponentId collider;
+    NphComponentId audio_source;
+    NphComponentId audio_listener;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 6U
+#define NPH_RUNTIME_COMPONENT_COUNT 8U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

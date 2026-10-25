@@ -913,6 +913,24 @@ NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity)
     return nph_engine_physics_body(game->engine, entity);
 }
 
+NphResult nph_game_play_sound(NphGame *game, NphGuid sound, const NphSoundPlayDesc *desc)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_play_sound(game->engine, sound, desc);
+}
+
+NphResult nph_game_preload_sound(NphGame *game, NphGuid sound)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_preload_sound(game->engine, sound);
+}
+
+NphAudioMixer *nph_game_audio_mixer(const NphGame *game)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_audio_mixer(game->engine);
+}
+
 void nph_game_reset_interpolation(NphGame *game, NphEntity entity)
 {
     NPH_ASSERT(game != NULL);

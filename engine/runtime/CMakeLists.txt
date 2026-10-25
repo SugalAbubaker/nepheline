@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # The runtime module: the engine's lifecycle and frame loop, configuration,
-# the console, simulation input, the ECS-to-renderer bridge, and game
-# modules with hot reload (CLAUDE.md §8.12; docs/runtime.md;
+# the console, simulation input, the ECS-to-renderer, physics, and audio
+# bridges, and game modules with hot reload (CLAUDE.md §8.12; docs/runtime.md;
 # docs/adr/0023-runtime.md, docs/adr/0024-game-modules.md). The last
 # module in the order: it depends on every other.
 
 nph_add_module(runtime
     SOURCES
+        src/audio_bridge.c
         src/clock.c
         src/components.c
         src/config.c
@@ -20,7 +21,7 @@ nph_add_module(runtime
         src/scene_import.c
         src/scene_render.c
         src/sim_input.c
-    PUBLIC_DEPS nph::render nph::asset nph::scene nph::physics nph::profile
+    PUBLIC_DEPS nph::render nph::asset nph::scene nph::physics nph::audio nph::profile
 )
 if(MSVC)
     target_compile_definitions(nph_runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -43,6 +44,7 @@ endif()
 
 nph_add_test(runtime
     SOURCES
+        tests/test_audio_bridge.c
         tests/test_clock.c
         tests/test_console.c
         tests/test_engine.c

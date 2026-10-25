@@ -63,6 +63,37 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 0};
 NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
 
+// An effect at full volume and as recorded, not playing until the game
+// says so, in 3D with the mixer's default fall-off (inverse, physical,
+// full within 1 m, down to 50 m; the curve, if chosen, from 0 dB at 1 m to
+// -40 dB at 50 m), physical Doppler, a point source, occluded, a little
+// of the room, middling priority.
+static const NphAudioSource g_audio_source_defaults = {{0U, 0U},
+                                                       (u32)NPH_AUDIO_SOURCE_BUS_EFFECTS,
+                                                       1.0F,
+                                                       1.0F,
+                                                       0,
+                                                       0,
+                                                       0,
+                                                       1,
+                                                       0U,
+                                                       1.0F,
+                                                       50.0F,
+                                                       1.0F,
+                                                       {1.0F, 5.0F, 20.0F, 50.0F},
+                                                       {0.0F, -14.0F, -26.0F, -40.0F},
+                                                       1.0F,
+                                                       0.0F,
+                                                       1,
+                                                       0.25F,
+                                                       128U};
+NPH_COMPONENT_DEFINE(NphAudioSource, NPH_AUDIO_SOURCE_FIELDS, "AudioSource", 0U,
+                     &g_audio_source_defaults)
+
+static const NphAudioListener g_audio_listener_defaults = {1};
+NPH_COMPONENT_DEFINE(NphAudioListener, NPH_AUDIO_LISTENER_FIELDS, "AudioListener", 0U,
+                     &g_audio_listener_defaults)
+
 static f32 size_of(f32 v)
 {
     return nph_f32_is_finite(v) && v > 0.0F ? v : 0.0F;
@@ -111,5 +142,7 @@ NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents 
     NPH_TRY(nph_world_register_component(world, NphCamera_component(), &out->camera));
     NPH_TRY(nph_world_register_component(world, NphEnvironment_component(), &out->environment));
     NPH_TRY(nph_world_register_component(world, NphRigidBody_component(), &out->rigid_body));
-    return nph_world_register_component(world, NphCollider_component(), &out->collider);
+    NPH_TRY(nph_world_register_component(world, NphCollider_component(), &out->collider));
+    NPH_TRY(nph_world_register_component(world, NphAudioSource_component(), &out->audio_source));
+    return nph_world_register_component(world, NphAudioListener_component(), &out->audio_listener);
 }

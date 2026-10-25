@@ -35,7 +35,8 @@
 // HEADLESS (no window and no GPU: the simulation only; tests, servers).
 //
 // Configuration: the engine's settings are cvars (`rt.*`, `r.*`, `sim.*`,
-// `game.*`, `prof.*`; `cvars` in the console lists them) set, in rising
+// `phys.*`, `audio.*`, `game.*`, `prof.*`; `cvars` in the console lists
+// them) set, in rising
 // precedence, by the defaults, the user config, --config files, and
 // command-line assignments (config.h).
 //
@@ -55,6 +56,7 @@
 #include <nepheline/profile/profiler.h>
 #include <nepheline/render/gpu_profiler.h>
 #include <nepheline/render/renderer.h>
+#include <nepheline/runtime/audio.h>
 #include <nepheline/runtime/clock.h>
 #include <nepheline/runtime/config.h>
 #include <nepheline/runtime/game.h>
@@ -322,6 +324,43 @@ const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);
 // simulation's systems call it too. The engine resets the bodies it
 // teleports itself (a new LocalTransform for a dynamic or static body).
 void nph_engine_reset_interpolation(NphEngine *engine, NphEntity entity);
+
+// ---------------------------------------------------------------------------
+// Audio (docs/runtime.md "Audio"; runtime/audio.h)
+// ---------------------------------------------------------------------------
+
+// Plays `sound` once while the world plays, as nph_sound_play_desc_default
+// and `desc` say: queued now, started at the next frame's sync point once
+// the sound has loaded (a sound that takes a quarter second more is
+// dropped: late is worse than not at all). NPH_THREADSAFE: the simulation's
+// systems call it. NPH_RESULT_FULL when the queue is (256 a frame);
+// NPH_RESULT_OK without audio (nothing to hear).
+NPH_MUST_USE NphResult nph_engine_play_sound(NphEngine *engine, NphGuid sound,
+                                             const NphSoundPlayDesc *desc);
+
+// Loads `sound` now, waiting for it, so that its one-shots start at once (a
+// footstep, a shot): the world's AudioSources' sounds are loaded when play
+// begins, but a sound only one-shots name loads on first use. It stays
+// loaded until play ends. NPH_MAIN_THREAD_ONLY (the game's play_begin is
+// the place). NPH_RESULT_NOT_FOUND when it cannot be loaded or played
+// (logged); NPH_RESULT_OK without audio.
+NPH_MUST_USE NphResult nph_engine_preload_sound(NphEngine *engine, NphGuid sound);
+
+// The engine's mixer (audio/mixer.h), or NULL with audio.device off: for
+// what the components do not say (effects on the engine's buses, buses
+// and snapshots of a game's own). NPH_MAIN_THREAD_ONLY, as the mixer is:
+// from the game's callbacks or the host's hooks, at the sync point.
+NphAudioMixer *nph_engine_audio_mixer(NphEngine *engine);
+
+// The mixer's bus that AudioSources with `bus` play on (the master
+// without audio).
+NphAudioBus nph_engine_audio_bus(const NphEngine *engine, NphAudioSourceBus bus);
+
+// audio.device offline: the mix the last frame rendered, interleaved in the
+// mix's channels, and its frame count (`out_frames`); NULL and 0 otherwise.
+const f32 *nph_engine_audio_output(const NphEngine *engine, u32 *out_frames);
+
+void nph_engine_audio_stats(const NphEngine *engine, NphEngineAudioStats *out);
 
 #ifdef __cplusplus
 }
