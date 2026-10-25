@@ -86,6 +86,7 @@ typedef struct RtScene {
     NphAudioEffect fx[5]; // equaliser, compressor, echo, reverberator, limiter
     NphAudioVoice voices[48];
     u64 rng;
+    bool threaded; // an audio thread renders it as the game thread steers
 } RtScene;
 
 static void rt_scene_build(RtScene *s)
@@ -254,8 +255,14 @@ static void rt_scene_steer(RtScene *s, u32 step)
         if (step % 30U == 5U) {
             nph_audio_effect_destroy(s->m, s->fx[2]);
             const NphAudioEffectDesc echo = nph_audio_effect_desc_default(NPH_AUDIO_EFFECT_ECHO);
-            NTEST_ASSERT_EQ_INT(nph_audio_effect_create(s->m, s->effects, &echo, &s->fx[2]),
-                                NPH_RESULT_OK);
+            const NphResult r = nph_audio_effect_create(s->m, s->effects, &echo, &s->fx[2]);
+            // A destroyed effect keeps its place on its bus until the audio
+            // thread lets it go, and a bus holds four. An audio thread that
+            // lags (a slow machine, a sanitizer) may still hold the last
+            // echoes: the bus is full, and the echo comes back next time.
+            // Offline, each render lets them go, so the echo must fit. Not
+            // fatal: leaving the test would leave an audio thread behind.
+            NTEST_EXPECT_TRUE(r == NPH_RESULT_OK || (s->threaded && r == NPH_RESULT_FULL));
         }
         break;
     }
@@ -352,6 +359,7 @@ NTEST(audio_mixer_realtime, the_game_and_audio_threads_run_together)
     nph_atomic_store_u64(&g_rt_violations, 0U, NPH_MEMORY_ORDER_RELAXED);
     RtScene s;
     rt_scene_build(&s);
+    s.threaded = true;
     RtThreads t;
     t.m = s.m;
     nph_atomic_store_u32(&t.stop, 0U, NPH_MEMORY_ORDER_RELAXED);
