@@ -10,8 +10,9 @@ and casts its occlusion rays. Decisions:
 signal format, the resampler), [ADR-0052](adr/0052-audio-codecs.md) (the
 codecs, and the user's choice of a lossless one),
 [ADR-0053](adr/0053-audio-mixer.md) (the mixer and its golden mixes),
-[ADR-0054](adr/0054-audio-effects.md) (the effects), and
-[ADR-0055](adr/0055-audio-spatialisation.md) (3D).
+[ADR-0054](adr/0054-audio-effects.md) (the effects),
+[ADR-0055](adr/0055-audio-spatialisation.md) (3D), and
+[ADR-0056](adr/0056-audio-device-streaming.md) (the device and streaming).
 
 Phase 12 builds it in parts. This document describes what exists:
 
@@ -21,7 +22,7 @@ Phase 12 builds it in parts. This document describes what exists:
 | Codecs: PCM, our lossless codec, our ADPCM; WAV files | done |
 | The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering, golden mixes | done |
 | Effects and 3D: EQ, compressor, limiter, echo, reverberation; attenuation, Doppler, air absorption, occlusion, obstruction | done |
-| The device and streaming | planned |
+| The device and streaming | done |
 | The engine: components, the bridge, cooked sounds, the editor, the sample | planned |
 
 | Header | Contents |
@@ -41,6 +42,8 @@ Phase 12 builds it in parts. This document describes what exists:
 | `echo.h` | the echo |
 | `reverb.h` | the reverberator: a 16-line feedback delay network |
 | `spatial.h` | attenuation laws, Doppler, air absorption, directions, spread |
+| `device.h` | the output device (miniaudio): the system's or the null one, statistics |
+| `stream.h` | the streamer, and streams' descriptions and sources |
 
 ## Conventions
 
@@ -78,8 +81,8 @@ prove a path clean; without asserts, scopes and checks compile to nothing.
 
 Every kernel and DSP routine in this module is real-time safe: none
 allocates, locks, or keeps hidden state. The things that allocate (a
-resampler's banks, a delay line's ring) do it once, at creation, on the
-caller's thread.
+resampler's banks, a delay line's ring, a stream's ring) do it once, at
+creation, on the caller's thread.
 
 ## Kernels
 
@@ -561,6 +564,87 @@ occlusion takes 24.02 dB from both. A source circling the listener,
 re-placed and re-occluded every block, bends the signal less than a still
 tone does.
 
+## The device
+
+`device.h` (ADR-0056) plays a mixer on the output device, the one use of
+miniaudio (0.11.25, a pinned submodule). Its implementation is a translation
+unit of its own, compiled without our warnings, and `device.c` is the only
+file that includes it. Decoding, the resource manager, the node graph, and
+the engine are compiled out, and so is every backend but WASAPI, PulseAudio
+(PipeWire through it), ALSA, and the null device.
+
+- **A callback is one render:** `nph_audio_mixer_render` of the frames the
+  system asks for, into its buffer, at the mixer's rate and layout.
+  - The channel map comes from the speaker roles.
+  - miniaudio neither pre-silences, clips, nor regroups the frames: the
+    mixer writes them all, clamped, in any count.
+  - On WASAPI the thread joins MMCSS's "Pro Audio" class.
+- **The format:** `nph_audio_device_query` reports the default output's own
+  rate and channels (as one of the mixer's layouts).
+  - Make the mixer at that format and nothing converts at the edge.
+  - The device's stats report the hardware's format beside the mix's. A
+    difference means the system (WASAPI's resampler) or miniaudio (linear,
+    behind an eighth-order low-pass) converts, and the device logs a
+    warning when it opens that way.
+  - When the default output changes, WASAPI's stream follows it.
+- **The null device** asks for periods in real time without hardware, for
+  CI and headless runs.
+- **Memory:** miniaudio's comes from the device's allocator when it opens,
+  each block with a 16-byte header for its size. The callback allocates
+  nothing.
+
+## Streaming
+
+`stream.h` (ADR-0056) plays long sounds (music, ambience, dialogue) from
+storage. A streamer is a thread that keeps each open stream's ring of
+decoded frames ahead of its voice:
+
+- **Reading.** The streamer reads the stream's bytes through its source,
+  `read(user, offset, dst, size)`, which the runtime implements over loose
+  files or packs.
+  - It decodes PCM, or our lossless codec block by block through the cooked
+    block offsets, into the ring.
+  - It unrolls loops itself, so the voice sees one endless run of frames.
+  - The streamer checks each lossless block it reads, its header and CRC
+    (`nph_lossless_check_block`), as a clip's blocks are checked when it
+    is made: a flipped bit in a file would otherwise play as wrong
+    samples, since the decoder alone cannot tell.
+  - A read that fails, or a block that fails its checks, ends the stream:
+    it plays on as silence, and the streamer counts the one
+    (`read_errors`) or the other (`corrupt_blocks`).
+- **The ring** holds planar 32-bit frames, a power of two long (one second
+  by default: 512 KB for stereo at 48 kHz), between two atomic indices.
+  - The streamer writes `produced` and the audio thread `consumed`.
+  - Each side publishes its own index with release and reads the other's
+    with acquire.
+  - The audio thread copies what has arrived and never waits. Frames that
+    have not arrived play as silence and count as starvation
+    (`stream_starved` in the mixer's stats).
+  - The read index moves on regardless, so the stream keeps time. The
+    streamer, finding the voice ahead of what it decoded, seeks there.
+- **Virtual voices** keep their streams' read indices moving as their time
+  passes, so a voice coming back finds its frames there: being virtual saves
+  the mixing, not the streaming.
+- **A stream plays as a clip.** `nph_audio_clip_create_stream` allocates the
+  ring and fills it on the calling thread, so the cost is seen where it is
+  paid and a voice played at once starts on sound.
+  - The clip plays once, from where the stream was opened (`start_frame`).
+    Playing it again is `NPH_RESULT_INVALID_STATE`: make another clip,
+    which is also how a stream seeks.
+  - `nph_audio_clip_stream_ahead` reads how far the ring is ahead of the
+    voice, for a health readout.
+  - Destroying the clip closes the stream once the audio thread lets go,
+    and the streamer frees it on its own thread. The streamer's allocator
+    must therefore be thread-safe.
+- **Positions.** A stream's voice never wraps its 32.32 position, since the
+  stream unrolls the loop. It moves the position back by 2^30 frames, and
+  its base on by as much, each time it reaches 2^31, so a looping stream
+  plays as long as the game does. Clips in memory hold at most 2^31 frames
+  (`NPH_AUDIO_MAX_CLIP_FRAMES`, 12.4 hours at 48 kHz).
+
+A stream plays the same frames its clip would play from memory, to the bit,
+looping or not, through the resampler (`test_stream.c`).
+
 ## Golden mixes
 
 `tests/audio` renders scripted scenes offline: 1.49 s of stereo at 48 kHz,
@@ -668,6 +752,15 @@ On SSE4.2 the resampler runs channel by channel: two channels' eight
 accumulators are sixteen SSE registers, and spilling them made a stereo frame
 40.9 ns where two single channels take 32.5. AVX2 keeps the pairs.
 
+Streams (`benchmarks/results/audio-2026-10-25c-*.json`): eight stereo loops
+at the mix rate cost the audio thread 44.6 µs a block as lossless clips in
+memory (`mixer_block_8_lossless_loops`), and 2.94 µs as streams
+(`mixer_block_8_streamed_loops`), whose voices copy from rings that the
+streamer has decoded. That is 15 times less. The streamer pays what the
+audio thread no longer does, the codec's 20.3 ns a frame. The rings in that
+benchmark are long, 32 MB in all, so the voices read them from memory, as a
+game's voices do a second after the streamer wrote them.
+
 ## Testing
 
 `audio_tests` (engine/audio/tests): the WAV reader and writer (every depth,
@@ -707,7 +800,17 @@ damping, and time changes; and the reverberator's decay times, echo
 density, decorrelation, stability, and changes. `test_mixer_effects.c` and
 `test_mixer_spatial.c` check the effects and 3D in the mixer, and
 `test_spatial.c` the functions against their laws and ISO 9613-1.
-`test_mixer_realtime.c` is the real-time proof above, now with every effect
-and a third of its voices in 3D, and `tests/audio` the golden mixes. The real-time scopes have their own tests in core
+`test_mixer_realtime.c` is the real-time proof above, now with every effect,
+a third of its voices in 3D, and two streams made again and again, and
+`tests/audio` the golden mixes. `test_device.c` renders a mixer on the null
+device in real time inside the real-time rules, and plays silence on the
+system's device where the machine has one. `test_stream.c` covers:
+- streams against the same clips in memory, PCM and lossless, looping and
+  not, to the bit;
+- starvation as silence that keeps time, and the streamer's seek;
+- a virtual voice coming back on sound, to the bit, with nothing starved;
+- a looping stream's voice across the rebasing of its position;
+- a source failing mid-stream, and a corrupt block, each counted;
+- closing while it plays, playing once, and refusals. The real-time scopes have their own tests in core
 (`test_realtime.c`: allocations, the spin lock, nesting, the assertion) and
 platform (`test_realtime.c`: every blocking call, per thread).
