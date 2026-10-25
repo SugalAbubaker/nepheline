@@ -42,6 +42,12 @@
 //
 // And filter_lowpass_glide: the state-variable section moving its corner
 // sample by sample (per sample).
+//
+// The effects, per stereo frame, on the mix: effect_eq_6_bands (six bells),
+// effect_compressor, effect_limiter (true peak, 1.5 ms lookahead),
+// effect_echo, effect_reverb (the default room); and
+// mixer_block_64_spatial, per block: 64 moving 3D voices with Doppler, the
+// air, occlusion, and obstruction.
 
 #include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/delay.h>
@@ -714,4 +720,191 @@ NBENCH(mixer_block_16_of_512_virtual)
     const BenchScene scene = {512U, 16U, mix, 2U, true, false};
     static char label[48];
     run_mixer(state, &scene, label, (u32)sizeof label);
+}
+
+// ---------------------------------------------------------------------------
+// Effects and 3D
+// ---------------------------------------------------------------------------
+
+// Two channels of noise-like material for the effects (the mix's first
+// block, then the next, round and round).
+static void bench_stereo_block(u32 n, f32 *l, f32 *r)
+{
+    prepare_mix();
+    const u32 at = (n * BLOCK) % (MIX_FRAMES - BLOCK);
+    for (u32 i = 0U; i < BLOCK; ++i) {
+        l[i] = (f32)g_mix16[(u64)(at + i) * 2U] / 32768.0F;
+        r[i] = (f32)g_mix16[(u64)(at + i) * 2U + 1U] / 32768.0F;
+    }
+}
+
+typedef enum BenchEffect {
+    BENCH_EQ = 0,
+    BENCH_COMPRESSOR,
+    BENCH_LIMITER,
+    BENCH_ECHO,
+    BENCH_REVERB,
+} BenchEffect;
+
+static void run_effect(NbenchState *state, BenchEffect which)
+{
+    static f32 l[BLOCK];
+    static f32 r[BLOCK];
+    f32 *planes[2] = {l, r};
+    f32 scratch[BLOCK];
+    NphAudioEq eq;
+    NphAudioCompressor comp;
+    NphAudioLimiter lim;
+    NphAudioEcho echo;
+    NphAudioReverb reverb;
+    const NphAudioLimiterParams lp = nph_audio_limiter_params_default();
+    const NphAudioEchoParams ep = nph_audio_echo_params_default();
+    const NphAudioReverbParams rp = nph_audio_reverb_params_default();
+    const NphAudioCompressorParams cp = nph_audio_compressor_params_default();
+    switch (which) {
+    case BENCH_EQ:
+        nph_audio_eq_init(&eq, 2U, 48000.0F);
+        for (u32 b = 0U; b < NPH_AUDIO_EQ_BANDS; ++b) {
+            const NphAudioEqBand band = {NPH_AUDIO_FILTER_PEAK,
+                                         100.0F * (f32)(b + 1U) * (f32)(b + 1U), 1.0F, 3.0F, 1};
+            nph_audio_eq_set_band(&eq, b, &band);
+        }
+        break;
+    case BENCH_COMPRESSOR:
+        nph_audio_compressor_init(&comp, 2U, 48000.0F, &cp);
+        break;
+    case BENCH_LIMITER:
+        if (nph_audio_limiter_init(&lim, nph_allocator_system(), 2U, 48000.0F, &lp) !=
+            NPH_RESULT_OK) {
+            return;
+        }
+        break;
+    case BENCH_ECHO:
+        if (nph_audio_echo_init(&echo, nph_allocator_system(), 2U, 48000.0F, 1000.0F, &ep) !=
+            NPH_RESULT_OK) {
+            return;
+        }
+        break;
+    case BENCH_REVERB:
+        if (nph_audio_reverb_init(&reverb, nph_allocator_system(), 2U, 48000.0F, &rp) !=
+            NPH_RESULT_OK) {
+            return;
+        }
+        break;
+    }
+    u32 n = 0U;
+    nbench_set_items_per_iteration(state, BLOCK);
+    while (nbench_keep_running(state)) {
+        nbench_pause_timing(state);
+        bench_stereo_block(n++, l, r);
+        nbench_resume_timing(state);
+        switch (which) {
+        case BENCH_EQ:
+            nph_audio_eq_process(&eq, planes, BLOCK, scratch);
+            break;
+        case BENCH_COMPRESSOR:
+            nph_audio_compressor_process(&comp, planes, BLOCK);
+            break;
+        case BENCH_LIMITER:
+            nph_audio_limiter_process(&lim, planes, BLOCK);
+            break;
+        case BENCH_ECHO:
+            nph_audio_echo_process(&echo, planes, BLOCK);
+            break;
+        case BENCH_REVERB:
+            nph_audio_reverb_process(&reverb, planes, BLOCK);
+            break;
+        }
+        nbench_do_not_optimize(l);
+    }
+    if (which == BENCH_LIMITER) {
+        nph_audio_limiter_free(&lim);
+    } else if (which == BENCH_ECHO) {
+        nph_audio_echo_free(&echo);
+    } else if (which == BENCH_REVERB) {
+        nph_audio_reverb_free(&reverb);
+    }
+}
+
+NBENCH(effect_eq_6_bands)
+{
+    run_effect(state, BENCH_EQ);
+}
+
+NBENCH(effect_compressor)
+{
+    run_effect(state, BENCH_COMPRESSOR);
+}
+
+NBENCH(effect_limiter)
+{
+    run_effect(state, BENCH_LIMITER);
+}
+
+NBENCH(effect_echo)
+{
+    run_effect(state, BENCH_ECHO);
+}
+
+NBENCH(effect_reverb)
+{
+    run_effect(state, BENCH_REVERB);
+}
+
+NBENCH(mixer_block_64_spatial)
+{
+    // 64 mono 3D voices from 44.1 kHz, scattered over 40 m, moving (so
+    // Doppler resamples every one), the air on, a third occluded and a
+    // third obstructed: what 3D adds to a block.
+    BenchClips clips;
+    if (!bench_clips_make(&clips)) {
+        nbench_set_label(state, "the clips failed to encode");
+        return;
+    }
+    NphAudioMixerDesc md;
+    memset(&md, 0, sizeof md);
+    md.alloc = nph_allocator_system();
+    md.max_voices = 64U;
+    md.max_real_voices = 64U;
+    NphAudioMixer *m = NULL;
+    NphAudioClip clip;
+    if (nph_audio_mixer_create(&md, &m) != NPH_RESULT_OK) {
+        bench_clips_free(&clips);
+        return;
+    }
+    if (bench_clip(m, &clips, BENCH_CLIP_PCM44, &clip) != NPH_RESULT_OK) {
+        nph_audio_mixer_destroy(m);
+        bench_clips_free(&clips);
+        return;
+    }
+    u64 rng = 7U;
+    NphAudioVoice voices[64];
+    for (u32 i = 0U; i < 64U; ++i) {
+        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        const f32 u = (f32)(rng >> 40U) / 16777216.0F;
+        NphAudioPlayDesc d = nph_audio_play_desc_default(clip);
+        d.spatial = 1;
+        d.loop = 1;
+        d.volume = 0.2F;
+        d.position = (NphVec3){40.0F * u - 20.0F, 0.0F, 20.0F - 40.0F * (1.0F - u)};
+        d.velocity = (NphVec3){8.0F, 0.0F, -3.0F};
+        d.size = (i % 4U) == 0U ? 1.5F : 0.0F;
+        if (nph_audio_voice_play(m, &d, &voices[i]) != NPH_RESULT_OK) {
+            nph_audio_mixer_destroy(m);
+            bench_clips_free(&clips);
+            return;
+        }
+        nph_audio_voice_set_occlusion(m, voices[i], (i % 3U) == 0U ? 0.6F : 0.0F,
+                                      (i % 3U) == 1U ? 0.8F : 0.0F);
+    }
+    for (u32 b = 0U; b < 16U; ++b) {
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+    }
+    nbench_set_items_per_iteration(state, 1U);
+    while (nbench_keep_running(state)) {
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+        nbench_do_not_optimize(g_out_interleaved);
+    }
+    nph_audio_mixer_destroy(m);
+    bench_clips_free(&clips);
 }

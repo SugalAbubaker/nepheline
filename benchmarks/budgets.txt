@@ -349,6 +349,13 @@ mixer_block_64_copy            36000
 mixer_block_64_resampled       545000
 mixer_block_128_of_512_game    1360000
 mixer_block_16_of_512_virtual  175000
+mixer_block_64_spatial         700000
+# The effects, per stereo frame.
+effect_eq_6_bands              120
+effect_compressor              50
+effect_limiter                 100
+effect_echo                    42
+effect_reverb                  270
 
 # profile_bench
 profile_zone_enabled           55
