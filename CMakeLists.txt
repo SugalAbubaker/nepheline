@@ -118,6 +118,8 @@ if(NPH_BUILD_TESTS)
     add_subdirectory(tests/integration)
     # Golden-image tests of the renderer against approved baselines.
     add_subdirectory(tests/golden)
+    # Golden mixes of the audio mixer against approved baselines.
+    add_subdirectory(tests/audio)
 endif()
 
 # The aggregate target a game or tool links to get the whole engine.
