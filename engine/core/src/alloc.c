@@ -8,16 +8,20 @@
 
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/assert.h>
+#include <nepheline/core/realtime.h>
 
 #include <stdlib.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
-// Entry points
+// Entry points. Each reports a call made inside a real-time scope
+// (realtime.h): an allocator's cost and its lock, if it has one, are what a
+// real-time thread must never wait on.
 // ---------------------------------------------------------------------------
 
 void *nph_alloc_at(NphAllocator *a, u64 size, u32 align, NphCallsite site)
 {
+    NPH_REALTIME_CHECK(NPH_REALTIME_VIOLATION_ALLOC, "nph_alloc", site);
     NPH_ASSERT(a != NULL);
     NPH_ASSERT_MSG(size > 0U, "zero-byte allocation at %s:%u", site.file, site.line);
     NPH_ASSERT_MSG(nph_is_pow2_u32(align), "alignment %u is not a power of two at %s:%u", align,
@@ -57,6 +61,7 @@ void *nph_alloc_array_at(NphAllocator *a, u64 elem_size, u32 align, u64 count, b
 void *nph_realloc_at(NphAllocator *a, void *ptr, u64 old_size, u64 new_size, u32 align,
                      NphCallsite site)
 {
+    NPH_REALTIME_CHECK(NPH_REALTIME_VIOLATION_ALLOC, "nph_realloc", site);
     NPH_ASSERT(a != NULL);
     NPH_ASSERT_MSG(new_size > 0U, "zero-byte reallocation at %s:%u", site.file, site.line);
     NPH_ASSERT_MSG(nph_is_pow2_u32(align), "alignment %u is not a power of two at %s:%u", align,
@@ -77,6 +82,7 @@ void nph_free_at(NphAllocator *a, void *ptr, u64 size, u32 align, NphCallsite si
     if (ptr == NULL) {
         return;
     }
+    NPH_REALTIME_CHECK(NPH_REALTIME_VIOLATION_ALLOC, "nph_free", site);
     a->vtable->free(a, ptr, size, nph_alloc_normalize_align(align), site);
 }
 

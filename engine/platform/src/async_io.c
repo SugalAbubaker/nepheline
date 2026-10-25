@@ -3,6 +3,7 @@
 // backend (docs/adr/0011-async-io.md).
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
+#include <nepheline/core/realtime.h>
 #include <nepheline/platform/async_io.h>
 #include <nepheline/platform/time.h>
 
@@ -235,12 +236,14 @@ static NphResult submit(NphAsyncIo *io, NphFile *file, u64 offset, void *buf, u3
 NphResult nph_async_io_read(NphAsyncIo *io, NphFile *file, u64 offset, void *buf, u32 size,
                             u64 user)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_async_io_read");
     return submit(io, file, offset, buf, size, user, false);
 }
 
 NphResult nph_async_io_write(NphAsyncIo *io, NphFile *file, u64 offset, const void *buf, u32 size,
                              u64 user)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_async_io_write");
     // The buffer is only read; the OS primitives take a non-const pointer.
     union {
         const void *read_only;
@@ -252,6 +255,7 @@ NphResult nph_async_io_write(NphAsyncIo *io, NphFile *file, u64 offset, const vo
 
 u32 nph_async_io_poll(NphAsyncIo *io, NphAsyncIoCompletion *out, u32 max, u64 timeout_ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_async_io_poll");
     NPH_ASSERT(io != NULL && out != NULL);
     if (max == 0U) {
         return 0U;

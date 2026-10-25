@@ -452,6 +452,24 @@ instrumented; the collector that turns events into zones, frames, and
 statistics is the profile module ([profile.md](profile.md),
 [ADR-0022](adr/0022-profiling.md)). Compiled out of Shipping.
 
+## Real-time scopes (`realtime.h`)
+
+A thread with a deadline it cannot miss (the audio thread's mix: a late
+block is a click) promises not to allocate, take a lock, wait, sleep, or do
+file I/O. `nph_realtime_enter` / `nph_realtime_exit` bracket that work
+(scopes nest; the depth is per thread), and the places where those costs
+live report a call made inside a scope: the allocation entry points
+(`nph_alloc_at`, `nph_realloc_at`, `nph_free_at` and the macros over them),
+the spin lock's acquire, and the platform's blocking calls (platform.md
+"Threads and synchronisation"). Non-blocking variants (a try-lock, a
+try-wait, a post) are allowed. A violation is counted
+(`nph_realtime_violations`), then either fails an assertion naming the call
+and its callsite, or goes to a hook (`nph_realtime_set_hook`) that a test
+installs to record violations while it proves a path clean. Checks exist
+only with asserts (Debug, Development): in Profile and Shipping a scope and
+its checks compile to nothing, so the hot paths pay nothing.
+Decisions: [ADR-0051](adr/0051-audio-module.md).
+
 ## CVars (`cvar.h`)
 
 A cvar is a static object defined next to the code that reads it

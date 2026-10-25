@@ -2,6 +2,7 @@
 // Threads, SRW locks, condition variables, and kernel semaphores on Win32.
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
+#include <nepheline/core/realtime.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/platform/time.h>
 
@@ -91,6 +92,7 @@ NphResult nph_thread_create(NphThread *out, const NphThreadDesc *desc)
 
 void nph_thread_join(NphThread *t)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_thread_join");
     NPH_ASSERT(t != NULL && t->joinable);
     NPH_ASSERT_MSG(!nph_thread_is_current(t), "a thread cannot join itself");
     const HANDLE h = thread_handle(t);
@@ -185,6 +187,7 @@ void nph_thread_set_current_name(const char *name)
 
 void nph_thread_sleep_ns(u64 ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_SLEEP, "nph_thread_sleep_ns");
     if (ns == 0U) {
         nph_thread_yield();
         return;
@@ -210,6 +213,7 @@ void nph_thread_sleep_ns(u64 ns)
 
 void nph_thread_yield(void)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_SLEEP, "nph_thread_yield");
     SwitchToThread();
 }
 
@@ -243,6 +247,7 @@ void nph_mutex_destroy(NphMutex *m)
 
 void nph_mutex_lock(NphMutex *m)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_mutex_lock");
     AcquireSRWLockExclusive(mutex_lock(m));
 }
 
@@ -284,11 +289,13 @@ void nph_condvar_destroy(NphCondVar *cv)
 
 void nph_condvar_wait(NphCondVar *cv, NphMutex *m)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_condvar_wait");
     NPH_VERIFY(SleepConditionVariableSRW(condvar(cv), mutex_lock(m), INFINITE, 0U));
 }
 
 bool nph_condvar_wait_timeout(NphCondVar *cv, NphMutex *m, u64 timeout_ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_condvar_wait_timeout");
     if (SleepConditionVariableSRW(condvar(cv), mutex_lock(m), timeout_ms(timeout_ns), 0U)) {
         return true;
     }
@@ -336,6 +343,7 @@ void nph_rwlock_destroy(NphRwLock *rw)
 
 void nph_rwlock_lock_shared(NphRwLock *rw)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_rwlock_lock_shared");
     AcquireSRWLockShared(rw_lock(rw));
 }
 
@@ -351,6 +359,7 @@ void nph_rwlock_unlock_shared(NphRwLock *rw)
 
 void nph_rwlock_lock_exclusive(NphRwLock *rw)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_rwlock_lock_exclusive");
     AcquireSRWLockExclusive(rw_lock(rw));
 }
 

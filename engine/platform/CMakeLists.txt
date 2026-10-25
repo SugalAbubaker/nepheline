@@ -95,6 +95,7 @@ nph_add_test(platform
         tests/test_path.c
         tests/test_platform.c
         tests/test_platform_support.h
+        tests/test_realtime.c
         tests/test_sync.c
         tests/test_thread.c
         tests/test_time.c

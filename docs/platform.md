@@ -74,6 +74,13 @@ common "how long did this take" pattern.
   the ordering in terms it models.
 - **Once.** `nph_once` runs an initialiser exactly once; racers spin until
   it is done. Used for the cached CPU info and the virtual-memory sizes.
+- **Real-time scopes** (core.md "Real-time scopes"). Every call here that
+  can block reports itself when the calling thread is inside a real-time
+  scope: the mutex and read-write lock acquisitions, the condition and
+  semaphore waits (timed or not, whether or not they would sleep), joins,
+  sleeps and yields, and a once that runs or waits for its initialiser.
+  The try-variants and posts do not. So do the file calls of `file.h` and
+  the submissions and polls of `async_io.h`. Debug and Development only.
 
 ## Fibers (`fiber.h`)
 

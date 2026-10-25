@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Files, memory mapping, and the file system on Win32.
 #include <nepheline/core/assert.h>
+#include <nepheline/core/realtime.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/vmem.h>
 
@@ -57,6 +58,7 @@ static u64 filetime_to_unix_ns(FILETIME ft)
 
 NphResult nph_file_open(const char *path, u32 mode, NphFile *out)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_open");
     NPH_ASSERT(path != NULL && out != NULL);
     memset(out, 0, sizeof *out);
     const bool read = (mode & NPH_FILE_READ) != 0U;
@@ -161,6 +163,7 @@ static NphResult transfer_at(NphFile *f, u64 offset, void *buf, u64 size, bool w
 
 NphResult nph_file_read_at(NphFile *f, u64 offset, void *buf, u64 size, u64 *out_read)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_read_at");
     NPH_ASSERT(f != NULL && f->open && out_read != NULL && (buf != NULL || size == 0U));
     *out_read = 0U;
     while (*out_read < size) {
@@ -177,6 +180,7 @@ NphResult nph_file_read_at(NphFile *f, u64 offset, void *buf, u64 size, u64 *out
 
 NphResult nph_file_write_at(NphFile *f, u64 offset, const void *buf, u64 size, u64 *out_written)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_write_at");
     NPH_ASSERT(f != NULL && f->open && (buf != NULL || size == 0U));
     u64 written = 0U;
     NphResult r = NPH_RESULT_OK;
@@ -202,6 +206,7 @@ NphResult nph_file_write_at(NphFile *f, u64 offset, const void *buf, u64 size, u
 
 NphResult nph_file_read(NphFile *f, void *buf, u64 size, u64 *out_read)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_read");
     NPH_ASSERT(f != NULL && f->open && out_read != NULL);
     if (is_async(f)) {
         NPH_TRY(nph_file_read_at(f, f->position, buf, size, out_read));
@@ -230,6 +235,7 @@ NphResult nph_file_read(NphFile *f, void *buf, u64 size, u64 *out_read)
 
 NphResult nph_file_write(NphFile *f, const void *buf, u64 size, u64 *out_written)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_write");
     NPH_ASSERT(f != NULL && f->open);
     if (is_async(f)) {
         if ((f->mode & NPH_FILE_APPEND) != 0U) {
@@ -273,6 +279,7 @@ NphResult nph_file_write(NphFile *f, const void *buf, u64 size, u64 *out_written
 
 NphResult nph_file_seek(NphFile *f, i64 offset, NphFileSeek origin, u64 *out_position)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_seek");
     NPH_ASSERT(f != NULL && f->open);
     if (is_async(f)) {
         i64 base;
@@ -337,6 +344,7 @@ NphResult nph_file_tell(NphFile *f, u64 *out_position)
 
 NphResult nph_file_size(NphFile *f, u64 *out_size)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_size");
     NPH_ASSERT(f != NULL && f->open && out_size != NULL);
     LARGE_INTEGER size;
     if (!GetFileSizeEx(file_handle(f), &size)) {
@@ -349,6 +357,7 @@ NphResult nph_file_size(NphFile *f, u64 *out_size)
 
 NphResult nph_file_truncate(NphFile *f, u64 size)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_truncate");
     NPH_ASSERT(f != NULL && f->open);
     // SetEndOfFile cuts at the file pointer; move it there and back.
     LARGE_INTEGER saved;
@@ -376,6 +385,7 @@ NphResult nph_file_truncate(NphFile *f, u64 size)
 
 NphResult nph_file_flush(NphFile *f)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_flush");
     NPH_ASSERT(f != NULL && f->open);
     if (!FlushFileBuffers(file_handle(f))) {
         return file_fail("FlushFileBuffers", NULL, GetLastError());
@@ -390,6 +400,7 @@ NphResult nph_file_flush(NphFile *f)
 NphResult nph_file_map(NphFile *f, u64 offset, u64 size, NphFileMapAccess access,
                        NphFileMapping *out)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_IO, "nph_file_map");
     NPH_ASSERT(f != NULL && f->open && out != NULL);
     memset(out, 0, sizeof *out);
     u64 file_size = 0U;

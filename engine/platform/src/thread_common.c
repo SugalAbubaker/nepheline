@@ -2,6 +2,7 @@
 // The OS-independent halves of thread.h: the semaphore's user-space count
 // and nph_once.
 #include <nepheline/core/assert.h>
+#include <nepheline/core/realtime.h>
 #include <nepheline/platform/thread.h>
 
 #include "platform_internal.h"
@@ -77,6 +78,7 @@ static void acquire_after_kernel_wait(const NphSemaphore *s)
 
 void nph_semaphore_wait(NphSemaphore *s)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_semaphore_wait");
     NPH_ASSERT(s != NULL);
     if (wait_spinning(s)) {
         return;
@@ -93,6 +95,7 @@ void nph_semaphore_wait(NphSemaphore *s)
 
 bool nph_semaphore_wait_timeout(NphSemaphore *s, u64 timeout_ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_semaphore_wait_timeout");
     NPH_ASSERT(s != NULL);
     if (timeout_ns == 0U) {
         return try_take(s); // a poll: no spinning, no kernel
@@ -152,6 +155,8 @@ void nph_once(NphOnce *once, NphOnceFn fn, void *user)
     if (nph_atomic_load_u32(&once->state, NPH_MEMORY_ORDER_ACQUIRE) == 2U) {
         return;
     }
+    // Past the fast path the call runs the initialiser or waits for it.
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_once");
     u32 expected = 0U;
     if (nph_atomic_compare_exchange_u32(&once->state, &expected, 1U, NPH_MEMORY_ORDER_ACQ_REL,
                                         NPH_MEMORY_ORDER_ACQUIRE)) {

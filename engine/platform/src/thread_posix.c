@@ -2,6 +2,7 @@
 // Threads and synchronisation on pthreads (Linux).
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
+#include <nepheline/core/realtime.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/platform/time.h>
 
@@ -112,6 +113,7 @@ NphResult nph_thread_create(NphThread *out, const NphThreadDesc *desc)
 
 void nph_thread_join(NphThread *t)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_thread_join");
     NPH_ASSERT(t != NULL && t->joinable);
     NPH_ASSERT_MSG(!nph_thread_is_current(t), "a thread cannot join itself");
     NPH_VERIFY(pthread_join((pthread_t)t->native, NULL) == 0);
@@ -230,6 +232,7 @@ static struct timespec deadline_from_now(u64 timeout_ns)
 
 void nph_thread_sleep_ns(u64 ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_SLEEP, "nph_thread_sleep_ns");
     if (ns == 0U) {
         nph_thread_yield();
         return;
@@ -241,6 +244,7 @@ void nph_thread_sleep_ns(u64 ns)
 
 void nph_thread_yield(void)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_SLEEP, "nph_thread_yield");
     sched_yield();
 }
 
@@ -267,6 +271,7 @@ void nph_mutex_destroy(NphMutex *m)
 
 void nph_mutex_lock(NphMutex *m)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_mutex_lock");
     NPH_VERIFY(pthread_mutex_lock(mutex_native(m)) == 0);
 }
 
@@ -304,11 +309,13 @@ void nph_condvar_destroy(NphCondVar *cv)
 
 void nph_condvar_wait(NphCondVar *cv, NphMutex *m)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_condvar_wait");
     NPH_VERIFY(pthread_cond_wait(condvar_native(cv), mutex_native(m)) == 0);
 }
 
 bool nph_condvar_wait_timeout(NphCondVar *cv, NphMutex *m, u64 timeout_ns)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_WAIT, "nph_condvar_wait_timeout");
     const struct timespec deadline = deadline_from_now(timeout_ns);
     const int err =
         pthread_cond_clockwait(condvar_native(cv), mutex_native(m), CLOCK_MONOTONIC, &deadline);
@@ -349,6 +356,7 @@ void nph_rwlock_destroy(NphRwLock *rw)
 
 void nph_rwlock_lock_shared(NphRwLock *rw)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_rwlock_lock_shared");
     NPH_VERIFY(pthread_rwlock_rdlock(rwlock_native(rw)) == 0);
 }
 
@@ -364,6 +372,7 @@ void nph_rwlock_unlock_shared(NphRwLock *rw)
 
 void nph_rwlock_lock_exclusive(NphRwLock *rw)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_rwlock_lock_exclusive");
     NPH_VERIFY(pthread_rwlock_wrlock(rwlock_native(rw)) == 0);
 }
 

@@ -17,6 +17,7 @@ nph_add_module(core
         src/pool.c
         src/profile.c
         src/range_alloc.c
+        src/realtime.c
         src/result.c
         src/ring.c
         src/serialize.c
@@ -53,6 +54,7 @@ nph_add_test(core
         tests/test_pool.c
         tests/test_profile.c
         tests/test_range_alloc.c
+        tests/test_realtime.c
         tests/test_ring.c
         tests/test_serialize.c
         tests/test_sparse_set.c

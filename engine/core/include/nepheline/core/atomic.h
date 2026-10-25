@@ -16,6 +16,7 @@
 // Thread-safety: every function here is NPH_THREADSAFE by definition.
 
 #include <nepheline/core/base.h>
+#include <nepheline/core/realtime.h>
 
 #if NPH_COMPILER_MSVC
 #include <intrin.h>
@@ -472,6 +473,7 @@ NPH_INLINE bool nph_spin_lock_try_acquire(NphSpinLock *lock)
 
 NPH_INLINE void nph_spin_lock_acquire(NphSpinLock *lock)
 {
+    NPH_REALTIME_CHECK_HERE(NPH_REALTIME_VIOLATION_LOCK, "nph_spin_lock_acquire");
     for (;;) {
         if (nph_atomic_exchange_u32(&lock->locked, 1U, NPH_MEMORY_ORDER_ACQUIRE) == 0U) {
             return;
