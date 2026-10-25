@@ -151,6 +151,30 @@ if(TARGET asset_viewer_content AND NPH_BUILD_SAMPLES)
     endif()
 endif()
 
+# The samples' sounds (CLAUDE.md §12 Phase 12): synthesized when they are
+# built (sounds/make_sounds.c; the repository holds no recordings) and cooked
+# into a pack of their own, which the audio sample and game_physics's
+# impacts mount.
+if(TARGET nph_cook AND NPH_BUILD_SAMPLES)
+    add_executable(make_sounds sounds/make_sounds.c)
+    target_link_libraries(make_sounds PRIVATE nph::options nph::audio)
+    set_target_properties(make_sounds PROPERTIES FOLDER "samples")
+    if(MSVC)
+        target_compile_definitions(make_sounds PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    set(sample_sounds_out "${CMAKE_CURRENT_BINARY_DIR}/sounds/$<CONFIG>")
+    add_custom_command(
+        OUTPUT "${sample_sounds_out}/sounds.npk"
+        COMMAND make_sounds "${sample_sounds_out}/source"
+        COMMAND nph_cook "${sample_sounds_out}/source" --root "${sample_sounds_out}/source"
+                -o "${sample_sounds_out}/cooked" --pack "${sample_sounds_out}/sounds.npk" --quiet
+        DEPENDS make_sounds nph_cook
+        COMMENT "Synthesizing and cooking the samples' sounds"
+        VERBATIM)
+    add_custom_target(sample_sounds DEPENDS "${sample_sounds_out}/sounds.npk")
+    set_target_properties(sample_sounds PROPERTIES FOLDER "samples")
+endif()
+
 # The Phase 11 sample (CLAUDE.md §12, "Physics"): a game module whose
 # playground is all bodies (crates, balls, stairs, ramps, a swinging
 # platform) and whose player walks it as a character. Its content is cooked
