@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # The audio module (CLAUDE.md §8.10; docs/audio.md; docs/adr/0051-audio-module.md):
-# the DSP building blocks, the resampler, and the block kernels, and (later
-# in Phase 12) the codecs, the mixer, spatialisation, streaming, and the
-# output device. Depends on platform (threads, files, asynchronous I/O) and
-# through it on math and core; never on asset, scene, or physics: the
-# runtime connects them.
+# the DSP building blocks, the resampler, the block kernels, and the codecs
+# (WAV, our ADPCM, our lossless codec), and (later in Phase 12) the mixer,
+# spatialisation, streaming, and the output device. Depends on platform
+# (threads, files, asynchronous I/O) and through it on math and core; never
+# on asset, scene, or physics: the runtime connects them.
 
 nph_add_module(audio
     SOURCES
+        src/adpcm.c
         src/audio.c
         src/audio_internal.h
         src/delay.c
@@ -16,8 +17,10 @@ nph_add_module(audio
         src/kernels_avx2.c
         src/kernels_impl.h
         src/kernels_sse4.c
+        src/lossless.c
         src/pan.c
         src/resampler.c
+        src/wav.c
     PUBLIC_DEPS nph::platform
 )
 nph_set_avx2_sources(src/kernels_avx2.c)
@@ -28,13 +31,16 @@ nph_set_avx2_sources(src/kernels_avx2.c)
 
 nph_add_test(audio
     SOURCES
+        tests/test_adpcm.c
         tests/test_audio.c
         tests/test_audio_support.h
         tests/test_delay.c
         tests/test_filter.c
         tests/test_kernels.c
+        tests/test_lossless.c
         tests/test_pan.c
         tests/test_resampler.c
+        tests/test_wav.c
     DEPS
         nph::audio
 )

@@ -7,14 +7,15 @@ and the output device, the one place miniaudio is used. It depends on
 entities, or physics: the runtime gives it clips and streams, moves its voices,
 and casts its occlusion rays. Decisions:
 [ADR-0051](adr/0051-audio-module.md) (module boundaries, real-time scopes, the
-signal format, the resampler).
+signal format, the resampler) and [ADR-0052](adr/0052-audio-codecs.md) (the
+codecs, and the user's choice of a lossless one).
 
 Phase 12 builds it in parts. This document describes what exists:
 
 | Part | Status |
 |---|---|
 | Real-time scopes (core, platform); the signal format; the block kernels per SIMD level; the resampler; filters; delay lines; panning | done |
-| Codecs: PCM, our ADPCM, our lossless codec; WAV | planned |
+| Codecs: PCM, our lossless codec, our ADPCM; WAV files | done |
 | The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering | planned |
 | Effects and 3D: EQ, compressor, limiter, delay, reverberation; attenuation, Doppler, air absorption, occlusion | planned |
 | The device and streaming | planned |
@@ -28,6 +29,9 @@ Phase 12 builds it in parts. This document describes what exists:
 | `filter.h` | the cookbook's biquads in state-variable form; the one-pole low-pass |
 | `delay.h` | the delay line: whole and fractional reads, per block or per sample |
 | `pan.h` | equal-power stereo panning, pairwise VBAP, spread |
+| `wav.h` | WAV files: the reader the cooker uses, and a writer |
+| `lossless.h` | the lossless codec: streams, validation, the encoder, the incremental decoder |
+| `adpcm.h` | our ADPCM: streams, validation, random-access decoding, the encoder |
 
 ## Conventions
 
@@ -192,6 +196,116 @@ dips.
   1999), normalised to unit power: a wide source covers more speakers, and one
   spread all around comes from everywhere.
 
+## Codecs
+
+Every clip is stored in one of three ways (ADR-0052):
+
+- **PCM**, as authored: signed 16, 24, or 32 bits, or 32-bit float.
+- **The lossless codec**, the default for everything: bit-exact at about
+  half the size.
+- **Our ADPCM**, lossy at 4.3 bits a sample, only where a clip's import
+  settings ask for it (effects whose memory matters more than their last
+  decibels).
+
+The user chose lossless over a lossy codec on 2026-10-24 (§13). Every
+format's reader is fuzzed (`tests/fuzz/fuzz_audio_*.c`, seeds from
+`scripts/fuzz_seeds_audio.py`): the codec targets encode the input, check
+the round trip, and then damage the stream, which validation must refuse
+or the decoder survive.
+
+### WAV
+
+`wav.h` reads RIFF/WAVE images in memory without copying:
+- integer PCM of 8, 16, 24, or 32 bits and IEEE floats of 32 or 64 bits,
+  plain or `WAVE_FORMAT_EXTENSIBLE`;
+- the first loop of the sampler chunk (`smpl`, whose end is inclusive in
+  the file and exclusive here);
+- every other chunk is skipped, odd sizes padded.
+
+Every size is checked against the image. A data chunk that claims more than
+the file holds is cut to whole frames (a common writer bug), and a loop
+outside the data is dropped. The writer produces 16-bit, 24-bit, and float
+files from planar floats (integers at x (2^(b-1) - 1), so +1 does not
+clip).
+
+### The lossless codec
+
+The design is FLAC's (Coalson; RFC 9639): each channel of a block is
+predicted, and what the prediction misses is entropy coded.
+- **Predictors.** A fixed polynomial of order 0 to 4, or linear prediction
+  of order 1 to 32 from Levinson-Durbin on the Tukey(0.5)-windowed
+  autocorrelation (Makhoul 1975), quantised at 15 bits (fewer for short
+  blocks) with the rounding error carried forward.
+- **Stereo pairs** are coded as left/right, left/side, side/right, or
+  mid/side.
+- **The residual** uses partitioned Rice codes (Rice 1979), escaping to raw
+  samples where that is smaller.
+- **Wasted bits**: low bits that are zero throughout a block are shifted
+  out.
+
+The bitstream is our own, laid out for the mixer:
+
+| Choice | Why |
+|---|---|
+| Blocks of 4096 frames (up to 65535), found through an offset table | a voice starts, resumes, or loops anywhere, decoding at most a block's lead-in |
+| A block lists where each channel's subframe starts | a voice decodes all its channels in lockstep, 256 frames a mixer block, with a 464-byte state per channel instead of a decoded block per voice |
+| Bits least significant first, refilled a little-endian word at a time | one load refills the reader; a Rice code's unary part is a count of trailing zeros |
+| A CRC-32C per block, checked off the audio thread | a corrupt clip is refused when it is made, or when a stream reads it |
+| A bounded decoder | reads checked against the subframe's end, samples against the depth, partitions against the block: garbage yields `NPH_RESULT_CORRUPT`, never a fault |
+
+Block layout (little-endian): a CRC-32C of the rest, the block's size, its
+frame count (u16), the stereo mode and channel count (u8 each), then each
+channel's subframe offset (u32), then the subframes. A subframe is a kind
+byte and a wasted-bits byte, then its bit stream: the constant, the verbatim
+samples, or the warm-up samples, the coefficients (linear prediction:
+precision and shift, then each), and the residual's partitions (order;
+then per partition a Rice parameter, 31 escaping to a 5-bit raw width).
+
+The encoder codes each candidate channel (for stereo: left, right, side,
+mid) with its cheapest subframe and keeps the cheapest pairing: an estimate
+from fixed predictors, as libFLAC uses, picked mid/side for uncorrelated
+noise and paid the side channel's extra bit (102.4% of PCM, against 100.2%
+coded exactly). Linear prediction tries the four orders whose error
+promises the fewest bits; `exhaustive` tries all.
+
+Measured on synthetic material (`audio_tests --filter=audio_lossless.*
+--verbose`, 16-bit stereo):
+
+| Signal | Size against PCM |
+|---|---|
+| A 440 Hz tone at -6 dB | 14.9% |
+| A chirp | 12.3% |
+| Impulses | 5.4% |
+| Low bits unused (an 8-bit signal in 16) | 6.6% |
+| A square wave | 43.9% |
+| Harmonics with a -40 dB noise floor | 63.2% |
+| Full-scale white noise | 100.2% |
+
+Recorded music typically lands near half of PCM.
+
+### ADPCM
+
+Our ADPCM is block-adaptive, in the line of Microsoft ADPCM and the
+GameCube's DSP-ADPCM rather than IMA's per-sample step adaptation:
+- **The block.** 128 frames of one channel in 69 bytes (4.3 bits a sample,
+  3.7:1 against 16-bit): the two samples before it (so it decodes on its
+  own), a byte naming one of the clip's 16 predictors and a shift, and 128
+  four-bit codes.
+- **The decoder.** A sample is p + code * 2^shift, clamped to 16 bits, with
+  p = (c1 s[n-1] + c2 s[n-2] + 1024) >> 11. It decodes any range directly,
+  and reads silence past the end or where a stream is shorter than it says.
+- **The predictors.** The encoder fits them to the clip: Microsoft's seven
+  standard pairs, plus nine from weighted k-means over the blocks' own
+  least-squares predictors, held inside the stability triangle.
+- **The search.** Per block, the encoder tries every predictor and shift in
+  closed loop, quantising against its own reconstruction as the decoder will
+  see it, and per sample keeps the code with the least error after
+  clamping.
+
+Measured: 87.8 dB signal-to-noise on a 110 Hz tone, 66.0 at 1 kHz, 53.3 at
+6 kHz, 74.7 dB on a quiet 440 Hz tone (-40 dB); 23.8 dB on full-scale white
+noise, where there is nothing to predict.
+
 ## Performance
 
 `audio_bench` (benchmarks/audio), Profile, Ryzen 7 5800X
@@ -214,6 +328,9 @@ dips.
 | A Catmull-Rom delay read | 1.8 ns a sample |
 | VBAP gains for 7.1 / with spread | 60 / 442 ns |
 | Creating the resampler (every bank) | 10.3 ms |
+| Lossless decode, 16 or 24-bit stereo, 256 frames at a time | 20.6 ns a frame (0.1% of a core per stream) |
+| Lossless encode, 16-bit stereo (the cooker) | 933 ns a frame: 22x real time |
+| ADPCM decode / encode, stereo | 4.4 / 340 ns a frame |
 
 A stereo voice resampled from 44.1 kHz to 48 kHz costs 0.7 ms of one core per
 second of sound (0.07% of a core); a voice at its source's own rate and pitch
@@ -225,7 +342,14 @@ accumulators are sixteen SSE registers, and spilling them made a stereo frame
 
 ## Testing
 
-`audio_tests` (engine/audio/tests): the formats, layouts, and levels; every
+`audio_tests` (engine/audio/tests): the WAV reader and writer (every depth,
+the extensible header, loops, refusals, truncations); the lossless codec
+(bit-exact round trips over eleven signals at 8, 16, 20, and 24 bits, one to
+eight channels, block sizes from 1 to 65535; the stereo modes; incremental
+decoding in uneven pieces and skips; determinism; validation of damage; a
+decoder fed garbage); ADPCM (quality on tones, noise, and silence; any range
+against the whole; channels apart; garbage); the formats, layouts, and
+levels; every
 kernel at every level against the scalar reference and SSE4.2 against AVX2 to
 the bit, with tails, NaNs, clamping, and format extremes; the resampler's
 banks, its table against the exact kernel, and its quality on tones; every
