@@ -28,7 +28,22 @@ NTEST(audio, layouts_are_the_wave_orders)
         NphAudioLayout back;
         NTEST_ASSERT_EQ_INT(nph_audio_layout_for_channels(channels[l], &back), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_INT(back, l);
+        // The WAVE order is the order of the speakers' mask bits, which the
+        // enum follows: each layout's speakers strictly increase.
+        for (u32 c = 1U; c < info->channels; ++c) {
+            NTEST_ASSERT_TRUE(info->speaker[c] > info->speaker[c - 1U]);
+        }
+        for (u32 c = 0U; c < info->channels; ++c) {
+            NTEST_ASSERT_EQ_INT(info->speaker[c] == NPH_AUDIO_SPEAKER_LOW_FREQUENCY,
+                                c == info->lfe);
+        }
     }
+    NTEST_ASSERT_EQ_INT(nph_audio_layout_info(NPH_AUDIO_LAYOUT_MONO)->speaker[0],
+                        NPH_AUDIO_SPEAKER_FRONT_CENTER);
+    NTEST_ASSERT_EQ_INT(nph_audio_layout_info(NPH_AUDIO_LAYOUT_SURROUND_5_1)->speaker[4],
+                        NPH_AUDIO_SPEAKER_SIDE_LEFT);
+    NTEST_ASSERT_EQ_INT(nph_audio_layout_info(NPH_AUDIO_LAYOUT_QUAD)->speaker[2],
+                        NPH_AUDIO_SPEAKER_BACK_LEFT);
     NTEST_ASSERT_NULL(nph_audio_layout_info(NPH_AUDIO_LAYOUT_COUNT));
     NphAudioLayout unused;
     NTEST_ASSERT_EQ_INT(nph_audio_layout_for_channels(3U, &unused), NPH_RESULT_UNSUPPORTED);

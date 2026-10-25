@@ -190,6 +190,137 @@ NTEST(audio_filter, modulation_every_block_stays_bounded)
     NTEST_ASSERT_TRUE(worst < 40.0F); // a resonance of Q 10 on noise, not a blow-up
 }
 
+// The glide's reference, in double precision: per sample, the parameters
+// the contract names (g by a constant ratio, k and the mix linearly, at a
+// fraction (i + 1) / count of the way) and the trapezoidal SVF.
+static void glide_reference(const NphAudioFilterCoeffs *from, const NphAudioFilterCoeffs *to,
+                            f64 state[2], const f32 *in, f64 *out, u32 count)
+{
+    for (u32 i = 0U; i < count; ++i) {
+        const f64 t = (f64)(i + 1U) / (f64)count;
+        const f64 g = (f64)from->g * pow((f64)to->g / (f64)from->g, t);
+        const f64 k = (f64)from->k + ((f64)to->k - (f64)from->k) * t;
+        const f64 m0 = (f64)from->m0 + ((f64)to->m0 - (f64)from->m0) * t;
+        const f64 m1 = (f64)from->m1 + ((f64)to->m1 - (f64)from->m1) * t;
+        const f64 m2 = (f64)from->m2 + ((f64)to->m2 - (f64)from->m2) * t;
+        const f64 a1 = 1.0 / (1.0 + g * (g + k));
+        const f64 a2 = g * a1;
+        const f64 a3 = g * a2;
+        const f64 v0 = (f64)in[i];
+        const f64 v3 = v0 - state[1];
+        const f64 v1 = a1 * state[0] + a2 * v3;
+        const f64 v2 = state[1] + a2 * state[0] + a3 * v3;
+        state[0] = 2.0 * v1 - state[0];
+        state[1] = 2.0 * v2 - state[1];
+        out[i] = m0 * v0 + m1 * v1 + m2 * v2;
+    }
+}
+
+NTEST(audio_filter, a_glide_moves_its_parameters_sample_by_sample)
+{
+    const f32 fs = 48000.0F;
+    enum {
+        N = 256
+    };
+    f32 x[N];
+    f32 y[N];
+    f64 ref[N];
+    // Sweeps of every kind a voice or a bus makes, and an equalizer's bell
+    // changing its gain (k and the mix move too), on full-scale noise.
+    const NphAudioFilterCoeffs pairs[4][2] = {
+        {nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 300.0F, 0.7071F, 0.0F, fs),
+         nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 9000.0F, 0.7071F, 0.0F, fs)},
+        {nph_audio_filter_design(NPH_AUDIO_FILTER_HIGHPASS, 20.0F, 0.7071F, 0.0F, fs),
+         nph_audio_filter_design(NPH_AUDIO_FILTER_HIGHPASS, 2000.0F, 0.7071F, 0.0F, fs)},
+        {nph_audio_filter_design(NPH_AUDIO_FILTER_PEAK, 1000.0F, 2.0F, -12.0F, fs),
+         nph_audio_filter_design(NPH_AUDIO_FILTER_PEAK, 1500.0F, 2.0F, 9.0F, fs)},
+        {nph_audio_filter_design(NPH_AUDIO_FILTER_HIGH_SHELF, 4000.0F, 0.7071F, -6.0F, fs),
+         nph_audio_filter_design(NPH_AUDIO_FILTER_HIGH_SHELF, 2000.0F, 0.7071F, 3.0F, fs)},
+    };
+    for (u32 p = 0U; p < 4U; ++p) {
+        NphAudioFilterState s;
+        nph_audio_filter_reset(&s);
+        f64 rs[2] = {0.0, 0.0};
+        // A block steady at `from`, the glide, and a block steady at `to`:
+        // the reference agrees throughout, so the glide starts where `from`
+        // left off and hands over to `to` without a step.
+        f64 worst = 0.0;
+        for (u32 phase = 0U; phase < 3U; ++phase) {
+            test_noise(x, N, 77U + p * 3U + phase, 1.0F);
+            if (phase == 1U) {
+                nph_audio_filter_process_glide(&pairs[p][0], &pairs[p][1], &s, x, y, N);
+                glide_reference(&pairs[p][0], &pairs[p][1], rs, x, ref, N);
+            } else {
+                const NphAudioFilterCoeffs *c = &pairs[p][phase == 0U ? 0U : 1U];
+                nph_audio_filter_process(c, &s, x, y, N);
+                glide_reference(c, c, rs, x, ref, N);
+            }
+            for (u32 i = 0U; i < (u32)N; ++i) {
+                const f64 e = fabs((f64)y[i] - ref[i]);
+                worst = e > worst ? e : worst;
+            }
+        }
+        NTEST_LOG("glide %u: largest difference from the double-precision reference %.3g", p,
+                  worst);
+        NTEST_ASSERT_TRUE(worst < 2e-5);
+    }
+    // A glide between equal designs is the steady filter; one from (or to)
+    // a design without a cutoff filters with `to`.
+    const NphAudioFilterCoeffs lp =
+        nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 2000.0F, 0.7071F, 0.0F, fs);
+    const NphAudioFilterCoeffs pass = nph_audio_filter_passthrough();
+    test_noise(x, N, 5U, 1.0F);
+    NphAudioFilterState a;
+    NphAudioFilterState b;
+    nph_audio_filter_reset(&a);
+    nph_audio_filter_reset(&b);
+    f32 z[N];
+    nph_audio_filter_process_glide(&lp, &lp, &a, x, y, N);
+    nph_audio_filter_process(&lp, &b, x, z, N);
+    for (u32 i = 0U; i < (u32)N; ++i) {
+        NTEST_ASSERT_NEAR_F32(y[i], z[i], 1e-6F);
+    }
+    nph_audio_filter_reset(&a);
+    nph_audio_filter_reset(&b);
+    nph_audio_filter_process_glide(&pass, &lp, &a, x, y, N);
+    nph_audio_filter_process(&lp, &b, x, z, N);
+    NTEST_ASSERT_TRUE(test_same_bits(y, z, N));
+    nph_audio_filter_process_glide(&lp, &pass, &a, x, y, 0U); // nothing to do
+}
+
+NTEST(audio_filter, gliding_every_block_stays_bounded)
+{
+    // The modulation test's corners, reached by glides: from 50 Hz to
+    // 20 kHz and back in a block, a Q up to 10, on full-scale noise.
+    const f32 fs = 48000.0F;
+    enum {
+        BLOCK = 64,
+        BLOCKS = 4000
+    };
+    f32 x[BLOCK];
+    u64 rng = 43U;
+    NphAudioFilterState s;
+    nph_audio_filter_reset(&s);
+    NphAudioFilterCoeffs last =
+        nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 1000.0F, 0.7071F, 0.0F, fs);
+    f32 worst = 0.0F;
+    for (u32 b = 0U; b < (u32)BLOCKS; ++b) {
+        const f32 corner = 50.0F * powf(400.0F, 0.5F + 0.5F * test_rng_signed(&rng));
+        const f32 q = 0.5F + 4.75F * (1.0F + test_rng_signed(&rng));
+        const NphAudioFilterCoeffs c =
+            nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, corner, q, 0.0F, fs);
+        test_noise(x, BLOCK, 2000U + b, 1.0F);
+        nph_audio_filter_process_glide(&last, &c, &s, x, x, BLOCK);
+        last = c;
+        for (u32 i = 0U; i < (u32)BLOCK; ++i) {
+            NTEST_ASSERT_FALSE(isnan(x[i]));
+            worst = fabsf(x[i]) > worst ? fabsf(x[i]) : worst;
+        }
+    }
+    NTEST_LOG("loudest output gliding: %.2f", (f64)worst);
+    NTEST_ASSERT_TRUE(worst < 40.0F);
+}
+
 NTEST(audio_filter, the_passthrough_and_invalid_designs_change_nothing)
 {
     f32 x[64];

@@ -88,10 +88,28 @@ typedef enum NphAudioLayout {
     NPH_AUDIO_LAYOUT_COUNT = 5
 } NphAudioLayout;
 
+// The speakers, as WAVEFORMATEXTENSIBLE names them. 5.1's surrounds (at
+// +-110 degrees) are the side pair, as in Microsoft's
+// KSAUDIO_SPEAKER_5POINT1_SURROUND and in the up-mix of 5.1 to 7.1 that
+// feeds them to 7.1's sides; quad's and 7.1's back pairs are the backs.
+typedef enum NphAudioSpeaker {
+    NPH_AUDIO_SPEAKER_FRONT_LEFT = 0,
+    NPH_AUDIO_SPEAKER_FRONT_RIGHT = 1,
+    NPH_AUDIO_SPEAKER_FRONT_CENTER = 2,
+    NPH_AUDIO_SPEAKER_LOW_FREQUENCY = 3,
+    NPH_AUDIO_SPEAKER_BACK_LEFT = 4,
+    NPH_AUDIO_SPEAKER_BACK_RIGHT = 5,
+    NPH_AUDIO_SPEAKER_SIDE_LEFT = 6,
+    NPH_AUDIO_SPEAKER_SIDE_RIGHT = 7,
+    NPH_AUDIO_SPEAKER_COUNT = 8
+} NphAudioSpeaker;
+
 typedef struct NphAudioLayoutInfo {
     const char *name; // "mono", "stereo", "quad", "5.1", "7.1"
     u32 channels;
     u32 lfe; // index of the low-frequency channel, or NPH_AUDIO_NO_LFE
+    // Each channel's speaker (mono's one channel is the front centre).
+    NphAudioSpeaker speaker[NPH_AUDIO_MAX_CHANNELS];
     // Each channel's azimuth in radians (0 ahead, positive to the right);
     // the LFE channel's is 0 and means nothing: it is not a direction.
     f32 azimuth[NPH_AUDIO_MAX_CHANNELS];

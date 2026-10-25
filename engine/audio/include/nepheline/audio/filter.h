@@ -12,9 +12,12 @@
 // Simper, "Linear Trapezoidal Integrated SVF", Cytomic, 2013) rather than
 // a direct form: the same transfer function, but its states are the
 // integrators' and its coefficients are smooth functions of the cutoff, so
-// the filter stays stable and free of zipper noise when its parameters
-// change every block (a voice's occlusion), and it keeps its precision at
-// low cutoffs, where a direct form's poles crowd against the unit circle.
+// the filter stays stable however its parameters move, and it keeps its
+// precision at low cutoffs, where a direct form's poles crowd against the
+// unit circle. A cutoff that steps once a block still kinks the output a
+// little at each step (the phase response jumps), so a filter in motion
+// glides: nph_audio_filter_process_glide moves the cutoff sample by sample
+// from one design to the next.
 //
 // The one-pole low-pass smooths and darkens (air absorption): y += a (x - y)
 // with a = 1 - exp(-2 pi f / rate), the impulse-invariant pole.
@@ -78,6 +81,18 @@ NPH_INLINE void nph_audio_filter_reset(NphAudioFilterState *state)
 // Filters `count` samples of one channel; `out` may be `in`.
 void nph_audio_filter_process(const NphAudioFilterCoeffs *coeffs, NphAudioFilterState *state,
                               const f32 *in, f32 *out, u32 count);
+
+// Filters `count` samples of one channel while the section moves from
+// `from` to `to`, two designs of the same type: the prewarped cutoff g
+// glides by a constant ratio each sample and the damping k and the output
+// mix move linearly, so sample i is filtered with the parameters a
+// fraction (i + 1) / count of the way and the last one with `to`'s. Costs
+// a division a sample more than nph_audio_filter_process. A design with no
+// cutoff (g of 0: the passthrough) cannot glide: then it filters with
+// `to`. `out` may be `in`.
+void nph_audio_filter_process_glide(const NphAudioFilterCoeffs *from,
+                                    const NphAudioFilterCoeffs *to, NphAudioFilterState *state,
+                                    const f32 *in, f32 *out, u32 count);
 
 // The magnitude of the filter's response at `freq` Hz for `rate`, from its
 // transfer function (the bilinear transform of the analog section,

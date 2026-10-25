@@ -47,20 +47,32 @@ const char *nph_audio_format_name(NphAudioSampleFormat format)
 // Speaker angles: ITU-R BS.775-3 for stereo and 5.1 (fronts at 30 degrees,
 // surrounds at 110), the Dolby 7.1 arrangement (sides at 90, backs at 150),
 // and the square for quad.
+#define AUDIO_FL  NPH_AUDIO_SPEAKER_FRONT_LEFT
+#define AUDIO_FR  NPH_AUDIO_SPEAKER_FRONT_RIGHT
+#define AUDIO_FC  NPH_AUDIO_SPEAKER_FRONT_CENTER
+#define AUDIO_LFE NPH_AUDIO_SPEAKER_LOW_FREQUENCY
+#define AUDIO_BL  NPH_AUDIO_SPEAKER_BACK_LEFT
+#define AUDIO_BR  NPH_AUDIO_SPEAKER_BACK_RIGHT
+#define AUDIO_SL  NPH_AUDIO_SPEAKER_SIDE_LEFT
+#define AUDIO_SR  NPH_AUDIO_SPEAKER_SIDE_RIGHT
+
 static const NphAudioLayoutInfo g_audio_layouts[NPH_AUDIO_LAYOUT_COUNT] = {
-    {"mono", 1U, NPH_AUDIO_NO_LFE, {0.0F}},
-    {"stereo", 2U, NPH_AUDIO_NO_LFE, {AUDIO_DEG(-30.0), AUDIO_DEG(30.0)}},
+    {"mono", 1U, NPH_AUDIO_NO_LFE, {AUDIO_FC}, {0.0F}},
+    {"stereo", 2U, NPH_AUDIO_NO_LFE, {AUDIO_FL, AUDIO_FR}, {AUDIO_DEG(-30.0), AUDIO_DEG(30.0)}},
     {"quad",
      4U,
      NPH_AUDIO_NO_LFE,
+     {AUDIO_FL, AUDIO_FR, AUDIO_BL, AUDIO_BR},
      {AUDIO_DEG(-45.0), AUDIO_DEG(45.0), AUDIO_DEG(-135.0), AUDIO_DEG(135.0)}},
     {"5.1",
      6U,
      3U,
+     {AUDIO_FL, AUDIO_FR, AUDIO_FC, AUDIO_LFE, AUDIO_SL, AUDIO_SR},
      {AUDIO_DEG(-30.0), AUDIO_DEG(30.0), 0.0F, 0.0F, AUDIO_DEG(-110.0), AUDIO_DEG(110.0)}},
     {"7.1",
      8U,
      3U,
+     {AUDIO_FL, AUDIO_FR, AUDIO_FC, AUDIO_LFE, AUDIO_BL, AUDIO_BR, AUDIO_SL, AUDIO_SR},
      {AUDIO_DEG(-30.0), AUDIO_DEG(30.0), 0.0F, 0.0F, AUDIO_DEG(-150.0), AUDIO_DEG(150.0),
       AUDIO_DEG(-90.0), AUDIO_DEG(90.0)}},
 };

@@ -130,6 +130,51 @@ void nph_audio_filter_process(const NphAudioFilterCoeffs *coeffs, NphAudioFilter
     state->ic2eq = ic2;
 }
 
+void nph_audio_filter_process_glide(const NphAudioFilterCoeffs *from,
+                                    const NphAudioFilterCoeffs *to, NphAudioFilterState *state,
+                                    const f32 *in, f32 *out, u32 count)
+{
+    if (count == 0U || !(from->g > 0.0F) || !(to->g > 0.0F)) {
+        nph_audio_filter_process(to, state, in, out, count);
+        return;
+    }
+    // The cutoff moves in log frequency: a constant ratio per sample (the
+    // root in double precision; the products drift by an ulp or so a step,
+    // and the next block starts again from `to` exactly).
+    const f32 ratio = (f32)pow((f64)to->g / (f64)from->g, 1.0 / (f64)count);
+    const f32 step = 1.0F / (f32)count;
+    const f32 dk = (to->k - from->k) * step;
+    const f32 dm0 = (to->m0 - from->m0) * step;
+    const f32 dm1 = (to->m1 - from->m1) * step;
+    const f32 dm2 = (to->m2 - from->m2) * step;
+    f32 g = from->g;
+    f32 k = from->k;
+    f32 m0 = from->m0;
+    f32 m1 = from->m1;
+    f32 m2 = from->m2;
+    f32 ic1 = state->ic1eq;
+    f32 ic2 = state->ic2eq;
+    for (u32 i = 0U; i < count; ++i) {
+        g *= ratio;
+        k += dk;
+        m0 += dm0;
+        m1 += dm1;
+        m2 += dm2;
+        const f32 a1 = 1.0F / (1.0F + g * (g + k));
+        const f32 a2 = g * a1;
+        const f32 a3 = g * a2;
+        const f32 v0 = in[i];
+        const f32 v3 = v0 - ic2;
+        const f32 v1 = a1 * ic1 + a2 * v3;
+        const f32 v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2.0F * v1 - ic1;
+        ic2 = 2.0F * v2 - ic2;
+        out[i] = m0 * v0 + m1 * v1 + m2 * v2;
+    }
+    state->ic1eq = ic1;
+    state->ic2eq = ic2;
+}
+
 // Complex arithmetic for the transfer function (MSVC's C has no _Complex).
 typedef struct FilterComplex {
     f64 re, im;
