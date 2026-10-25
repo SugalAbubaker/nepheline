@@ -18,6 +18,11 @@ nph_add_module(audio
         src/kernels_impl.h
         src/kernels_sse4.c
         src/lossless.c
+        src/mixer.c
+        src/mixer_api.c
+        src/mixer_internal.h
+        src/mixer_render.c
+        src/mixer_voice.c
         src/pan.c
         src/resampler.c
         src/wav.c
@@ -38,6 +43,9 @@ nph_add_test(audio
         tests/test_filter.c
         tests/test_kernels.c
         tests/test_lossless.c
+        tests/test_mixer.c
+        tests/test_mixer_realtime.c
+        tests/test_mixer_support.h
         tests/test_pan.c
         tests/test_resampler.c
         tests/test_wav.c
