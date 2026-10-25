@@ -87,6 +87,7 @@ add_subdirectory(engine/render)
 add_subdirectory(engine/asset)
 add_subdirectory(engine/scene)
 add_subdirectory(engine/physics)
+add_subdirectory(engine/audio)
 add_subdirectory(engine/profile)
 add_subdirectory(engine/runtime)
 
@@ -123,7 +124,7 @@ endif()
 add_library(nepheline INTERFACE)
 target_link_libraries(nepheline INTERFACE nph::core nph::math nph::platform nph::jobs nph::gpu
                                           nph::render nph::asset nph::scene nph::physics
-                                          nph::profile nph::runtime)
+                                          nph::audio nph::profile nph::runtime)
 
 if(NPH_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)

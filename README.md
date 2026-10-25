@@ -145,7 +145,7 @@ Modules depend strictly left-to-right:
 ## Documentation
 
 - [`docs/build.md`](docs/build.md) — build system, presets, options, CI
-- [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, hashing, containers, strings, logging, cvars, serialization
+- [`docs/core.md`](docs/core.md) — core module: base, errors, assertions, atomics, allocators, real-time scopes, hashing, containers, strings, logging, cvars, serialization
 - [`docs/math.md`](docs/math.md) — math module: conventions, scalar/vector/quaternion/matrix layer, SIMD, geometry, random
 - [`docs/platform.md`](docs/platform.md) — platform module: clocks, threads, fibers, virtual memory, files and async I/O, CPU, window and input
 - [`docs/jobs.md`](docs/jobs.md) — job system: fiber workers, work-stealing deques, counters, priorities, I/O threads, fiber exhaustion, scaling results
@@ -157,6 +157,7 @@ Modules depend strictly left-to-right:
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
 - [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, the world (bodies, shapes, contacts), the solvers (the soft step, TGS, XPBD) and their threads, joints, islands and sleep, events, meshes and heightfields, queries, continuous collision, the character controller, the engine's bodies, benchmarks
+- [`docs/audio.md`](docs/audio.md) — audio module: conventions, real-time scopes, the block kernels per SIMD level, resampling (bandlimited interpolation), filters, delay lines, panning, benchmarks
 - [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, physics in the engine, drawing between steps, game modules and hot reload, the player
 - [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework

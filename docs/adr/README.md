@@ -56,6 +56,7 @@ supersedes it and both link to each other.
 | [0048](0048-physics-continuous-collision.md) | Physics: continuous collision, and impacts | Accepted |
 | [0049](0049-physics-character-controller.md) | Physics: the character controller | Accepted |
 | [0050](0050-physics-in-the-engine.md) | Physics in the engine: components, the bridge, and drawing between steps | Accepted |
+| [0051](0051-audio-module.md) | Audio: module boundaries, real-time scopes, the signal format, and the resampler | Accepted |
 
 ## Template
 

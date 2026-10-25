@@ -14,7 +14,8 @@
 # NPH_ENGINE_SHARED_IMPORT, defined for every target that links it, turns
 # on. Third-party code linked into the library stays private to it.
 
-set(NPH_ENGINE_MODULES core math platform jobs gpu render asset scene physics profile runtime)
+set(NPH_ENGINE_MODULES core math platform jobs gpu render asset scene physics audio profile
+                       runtime)
 
 # nph_add_engine_shared_library()
 #
