@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The statistics panel (docs/editor.md "Statistics"; CLAUDE.md §8.11 "a
 // debug overlay with frame stats, cvars, and a console"): the last frame's
-// times and counts, and every cvar, editable in place through the registry
+// times and counts, physics and audio, and every cvar, editable in place
+// through the registry
 // (core/cvar.h), with its type checks, ranges, and read-only and cheat
 // rules.
 #include <nepheline/core/assert.h>
@@ -10,6 +11,7 @@
 #include "editor_internal.h"
 
 #include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -247,6 +249,90 @@ static void physics(Editor *ed)
     (void)igCheckbox("show colliders in the viewport", &ed->show_colliders);
 }
 
+// A level as dB for the meters (silence as -inf).
+static f64 meter_db(f32 level)
+{
+    return level > 0.0F ? 20.0 * log10((f64)level) : -(f64)INFINITY;
+}
+
+// The engine's sound (docs/editor.md "Audio"): the output and the
+// hardware's format, the mixer's voices and blocks, sounds and streams, and
+// each bus's meter with its volume (its cvar, edited in place).
+static void audio(Editor *ed)
+{
+    if (!igCollapsingHeader_TreeNodeFlags("Audio", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    NphEngine *e = ed->engine;
+    NphEngineAudioStats st;
+    nph_engine_audio_stats(e, &st);
+    if (st.mode == NPH_ENGINE_AUDIO_OFF) {
+        igTextDisabled("off (audio.device)");
+        return;
+    }
+    static const char *const modes[] = {"off", "the system's device", "the null device",
+                                        "rendered offline"};
+    igText("%s, %u Hz, %u channels", modes[st.mode], st.sample_rate, st.channels);
+    if (st.mode == NPH_ENGINE_AUDIO_SYSTEM || st.mode == NPH_ENGINE_AUDIO_NULL) {
+        const NphAudioDeviceStats *d = &st.device;
+        const bool converted =
+            d->device_sample_rate != st.sample_rate || d->device_channels != st.channels;
+        igText("device %u Hz, %u channels, %u-frame periods%s", d->device_sample_rate,
+               d->device_channels, d->period_frames, converted ? "   (converted at the edge)" : "");
+        igText("callbacks %llu, slowest %.3f ms", (unsigned long long)d->callbacks,
+               (f64)d->longest_ns / 1.0e6);
+    }
+    const NphAudioMixerStats *m = &st.mixer;
+    igText("voices %u (mixed %u, virtual %u)   blocks %llu: slowest %.3f ms, average %.3f ms",
+           m->voices_playing, m->voices_real, m->voices_virtual, (unsigned long long)m->blocks,
+           (f64)m->block_ns_max / 1.0e6,
+           m->blocks > 0U ? (f64)m->block_ns_total / 1.0e6 / (f64)m->blocks : 0.0);
+    if (m->commands_dropped != 0U || m->corrupt_reads != 0U || m->stream_starved != 0U) {
+        igText("commands dropped %u   corrupt reads %u   frames starved %llu", m->commands_dropped,
+               m->corrupt_reads, (unsigned long long)m->stream_starved);
+    }
+    igText("sounds %u (loading %u, failed %u, streamed %u)   sources playing %u (waiting %u)",
+           st.sounds, st.sounds_loading, st.sounds_failed, st.sounds_streamed, st.voices,
+           st.voices_waiting);
+    const NphAudioStreamerStats *s = &st.streamer;
+    igText("streams %u: decoded %llu frames, seeks %llu, read errors %u, corrupt blocks %u",
+           s->streams, (unsigned long long)s->frames_decoded, (unsigned long long)s->seeks,
+           s->read_errors, s->corrupt_blocks);
+    igText("occlusion rays %u   one-shots dropped %u", st.occlusion_rays, st.oneshots_dropped);
+    NphAudioMixer *mixer = nph_engine_audio_mixer(e);
+    NphCvarRegistry *reg = nph_engine_cvars(e);
+    static const char *const names[NPH_AUDIO_SOURCE_BUS_COUNT + 1U] = {
+        "effects", "music", "dialogue", "ambience", "ui", "master"};
+    static const char *const vars[NPH_AUDIO_SOURCE_BUS_COUNT + 1U] = {
+        "audio.volume_effects",  "audio.volume_music", "audio.volume_dialogue",
+        "audio.volume_ambience", "audio.volume_ui",    "audio.volume"};
+    if (mixer == NULL ||
+        !igBeginTable("##buses", 3, ImGuiTableFlags_SizingStretchProp, ui_vec2(0.0F, 0.0F), 0.0F)) {
+        return;
+    }
+    for (u32 i = 0U; i <= NPH_AUDIO_SOURCE_BUS_COUNT; ++i) {
+        const NphAudioBus bus = i < NPH_AUDIO_SOURCE_BUS_COUNT
+                                    ? nph_engine_audio_bus(e, (NphAudioSourceBus)i)
+                                    : NPH_AUDIO_MASTER_BUS;
+        f32 peak = 0.0F;
+        f32 rms = 0.0F;
+        nph_audio_bus_meter(mixer, bus, &peak, &rms);
+        igTableNextRow(ImGuiTableRowFlags_None, 0.0F);
+        igTableNextColumn();
+        igTextUnformatted(names[i], NULL);
+        igTableNextColumn();
+        igText("peak %6.1f dB  rms %6.1f dB", meter_db(peak), meter_db(rms));
+        igTableNextColumn();
+        NphCvar *cv = nph_cvar_find(reg, nph_str_from_cstr(vars[i]));
+        if (cv != NULL) {
+            igPushID_Int((int)i);
+            cvar_value(reg, cv);
+            igPopID();
+        }
+    }
+    igEndTable();
+}
+
 void editor_panel_stats(Editor *ed)
 {
     if (!igBegin(EDITOR_WINDOW_STATS, &ed->show.stats, ImGuiWindowFlags_None)) {
@@ -255,6 +341,7 @@ void editor_panel_stats(Editor *ed)
     }
     frame_stats(ed);
     physics(ed);
+    audio(ed);
     cvars(ed);
     igEnd();
 }

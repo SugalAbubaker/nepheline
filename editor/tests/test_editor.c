@@ -46,7 +46,9 @@ static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *l
     memset(f, 0, sizeof *f);
     nph_debug_allocator_init(&f->engine_memory, nph_allocator_system());
     nph_debug_allocator_init(&f->editor_memory, nph_allocator_system());
-    static const char *const assignments[1] = {"editor.layout="}; // no layout file
+    // No layout file; sound on the null device (real time, no hardware), so
+    // the statistics panel shows a live mixer.
+    static const char *const assignments[2] = {"editor.layout=", "audio.device=null"};
     // The project in a directory of its own.
     static u32 counter = 0U;
     char tmp[800];
@@ -64,7 +66,8 @@ static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *l
     f->config.assignments[0] = assignments[0];
     f->config.assignments[1] = f->assets_assignment;
     f->config.assignments[2] = f->cooked_assignment;
-    f->config.assignment_count = 3U;
+    f->config.assignments[3] = assignments[1];
+    f->config.assignment_count = 4U;
     f->config.packs[0] = NPH_TEST_PACK;
     f->config.pack_count = 1U;
     f->config.headless = mode == NPH_ENGINE_MODE_HEADLESS ? 1 : 0;
