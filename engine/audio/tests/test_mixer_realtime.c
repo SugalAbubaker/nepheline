@@ -24,7 +24,7 @@
 // GCC's sanitizer runtime has the hooks (they are sanitizer_common's) but
 // GCC does not install compiler-rt's header for them.
 int __sanitizer_install_malloc_and_free_hooks(void (*malloc_hook)(const volatile void *, size_t),
-                                               void (*free_hook)(const volatile void *));
+                                              void (*free_hook)(const volatile void *));
 #endif
 #define TEST_MALLOC_HOOKS 1
 #else
