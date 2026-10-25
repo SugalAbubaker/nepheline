@@ -4,10 +4,13 @@
 //     nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
 //              [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
 //              [--uncompressed] [--no-mips] [--max-extent N]
-//              [--no-optimize] [--threads N] [--quiet]
+//              [--no-optimize] [--sound-codec auto|pcm|lossless|adpcm]
+//              [--sound-stream auto|always|never] [--stream-seconds S]
+//              [--threads N] [--quiet]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
 //
-// A source may be a directory: every .gltf and .glb under it is cooked.
+// A source may be a directory: every .gltf, .glb, .nmesh, and .wav under it
+// is cooked.
 //
 // Exit status: 0 when every source cooked (or was current), 1 when any
 // failed, 2 for a usage error.
@@ -25,9 +28,11 @@ static void usage(FILE *out)
     fputs("usage: nph_cook <source>... -o <out_dir> [options]\n"
           "       nph_cook --pack-only -o <out_dir> --pack <file.npk>\n"
           "\n"
-          "Cooks glTF scenes (.gltf, .glb) and images (.png, .jpg, .tga, .bmp, .hdr, .dds)\n"
-          "into <out_dir>, keeping cook.db.json there for incremental runs. A\n"
-          "directory source cooks every .gltf and .glb under it.\n"
+          "Cooks glTF scenes (.gltf, .glb), images (.png, .jpg, .tga, .bmp, .hdr, .dds),\n"
+          "editable meshes (.nmesh), and sounds (.wav) into <out_dir>, keeping\n"
+          "cook.db.json there for incremental runs. A directory source cooks every\n"
+          ".gltf, .glb, .nmesh, and .wav under it. A sound's <name>.wav.import.json,\n"
+          "beside it, overrides the sound options for it (docs/cook.md).\n"
           "\n"
           "options:\n"
           "  -o, --out <dir>       output directory (required)\n"
@@ -44,6 +49,11 @@ static void usage(FILE *out)
           "  --no-mips             base level only\n"
           "  --max-extent <n>      downsample textures larger than n texels a side\n"
           "  --no-optimize         keep the source triangle and vertex order\n"
+          "  --sound-codec <c>     auto (default: PCM in memory, lossless streamed),\n"
+          "                        pcm, lossless, or adpcm (lossy, in memory only)\n"
+          "  --sound-stream <s>    auto (default: sounds of --stream-seconds or more),\n"
+          "                        always, or never\n"
+          "  --stream-seconds <s>  auto's threshold (default 8)\n"
           "  --threads <n>         worker threads for encoding (default: cores - 1)\n"
           "  --quiet               warnings and errors only\n",
           out);
@@ -71,6 +81,7 @@ int main(int argc, char **argv)
     memset(&desc, 0, sizeof desc);
     cook_texture_settings_default(&desc.texture);
     cook_mesh_settings_default(&desc.mesh);
+    cook_sound_settings_default(&desc.sound);
     NphAllocator *alloc = nph_allocator_system();
     const char **sources = NPH_ALLOC_ARRAY_ZEROED(alloc, const char *, (u32)argc + 1U);
     u32 source_count = 0U;
@@ -149,6 +160,29 @@ int main(int argc, char **argv)
             ++i;
         } else if (strcmp(a, "--no-optimize") == 0) {
             desc.mesh.no_optimize = 1;
+        } else if ((strcmp(a, "--sound-codec") == 0 || strcmp(a, "--sound-stream") == 0) &&
+                   next != NULL) {
+            // The per-source settings file's own words (sound.h).
+            char json[96];
+            snprintf(json, sizeof json, "{\"%s\": \"%s\"}",
+                     strcmp(a, "--sound-codec") == 0 ? "codec" : "stream", next);
+            if (cook_sound_settings_parse(alloc, json, strlen(json), &desc.sound) !=
+                NPH_RESULT_OK) {
+                usage(stderr);
+                NPH_FREE_ARRAY(alloc, const char *, sources, (u32)argc + 1U);
+                return 2;
+            }
+            ++i;
+        } else if (strcmp(a, "--stream-seconds") == 0 && next != NULL) {
+            f64 seconds = 0.0;
+            if (!nph_str_parse_f64(nph_str_from_cstr(next), &seconds) || !(seconds > 0.0) ||
+                seconds > 1.0e9) {
+                usage(stderr);
+                NPH_FREE_ARRAY(alloc, const char *, sources, (u32)argc + 1U);
+                return 2;
+            }
+            desc.sound.stream_seconds = (f32)seconds;
+            ++i;
         } else if (strcmp(a, "--threads") == 0 && next != NULL) {
             if (!parse_u32(next, &threads)) {
                 usage(stderr);

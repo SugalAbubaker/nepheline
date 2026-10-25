@@ -174,9 +174,11 @@ changes directly, and those changes go with it when play stops.
 
 The asset browser shows the project's sources one folder at a time, with
 the path as buttons leading back up. Each file shows its kind (scene,
-image, or neither) and whether the cooker has cooked it.
+editable mesh, image, sound, or neither) and whether the cooker has cooked
+it.
 - Double-clicking a folder opens it, a scene places it in front of the
-  camera (cooking it first if it has not been), and an image cooks it.
+  camera (cooking it first if it has not been), and an image or a sound
+  cooks it.
 - A scene dragged into the viewport is placed where the mouse is.
 - The context menu places, cooks, or cooks again even when current; Cook
   Folder cooks every scene under the folder shown.
@@ -330,11 +332,13 @@ Files dropped on the window, or given to `editor_import`, are imported
 into the folder the asset browser shows:
 1. A file outside the sources is **copied** in, replacing a file of the
    same name (re-importing an edited file updates it). A `.gltf` or `.glb`
-   brings the files it names with it (`cook_gltf_files`), and a folder
-   everything under it. A file already inside the sources is used where
-   it is.
-2. Each scene, editable mesh (`.nmesh`), and image is **cooked**, and the
-   scenes and editable meshes under each folder. Images dropped together
+   brings the files it names with it (`cook_gltf_files`), a `.wav` its
+   settings file (`<name>.wav.import.json`, [cook.md](cook.md) "Sounds"),
+   and a folder everything under it. A file already inside the sources is
+   used where it is.
+2. Each scene, editable mesh (`.nmesh`), sound (`.wav`), and image is
+   **cooked**, and the scenes, editable meshes, and sounds under each
+   folder. Images dropped together
    with a scene come along without being cooked alone: the scene cooks the
    ones it uses, with the usage each material slot needs.
 3. Scenes and editable meshes dropped on the viewport are **placed** where

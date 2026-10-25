@@ -2,6 +2,7 @@
 // The cooker (cooker.h): source keys, output paths, the incremental
 // decisions, the glTF and image drivers, and packing.
 #include <nepheline/asset/scene.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
 #include <nepheline/platform/file.h>
@@ -26,6 +27,7 @@ struct Cooker {
     CookDb db;
     CookTextureSettings texture;
     CookMeshSettings mesh;
+    CookSoundSettings sound;
     b32 force;
     CookerStats stats;
     void (*on_cooked)(void *user, NphGuid guid, u32 type);
@@ -259,6 +261,7 @@ NphResult cooker_create(const CookerDesc *desc, Cooker **out)
     c->force = desc->force;
     c->texture = desc->texture;
     c->mesh = desc->mesh;
+    c->sound = desc->sound;
     c->on_cooked = desc->on_cooked;
     c->on_cooked_user = desc->on_cooked_user;
     NphResult r = cooker_canonical_path(desc->out_dir, c->out_dir, sizeof c->out_dir);
@@ -341,6 +344,7 @@ static u32 type_version(u32 type)
         {NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION},
         {NPH_ASSET_TYPE_MATERIAL, NPH_MATERIAL_TYPE_VERSION},
         {NPH_ASSET_TYPE_SCENE, NPH_SCENE_TYPE_VERSION},
+        {NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION},
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(versions); ++i) {
         if (versions[i][0] == type) {
@@ -362,6 +366,10 @@ static u64 settings_hash(const Cooker *c, u32 type)
         h = nph_hash_combine(h, nph_hash64(&t, sizeof t, 1U));
     } else if (type == NPH_ASSET_TYPE_MESH) {
         h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
+    } else if (type == NPH_ASSET_TYPE_SOUND) {
+        // The cooker's defaults; a source's own settings are in its content
+        // hash (cooker_cook_sound).
+        h = nph_hash_combine(h, nph_hash64(&c->sound, sizeof c->sound, 3U));
     }
     return h;
 }
@@ -631,6 +639,153 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
     }
     cook_mesh_free(&mesh);
     cook_polymesh_free(&poly);
+    if (r != NPH_RESULT_OK) {
+        c->stats.failed += 1U;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Sounds
+// ---------------------------------------------------------------------------
+
+static const char *sound_codec_name(NphSoundCodec codec)
+{
+    switch (codec) {
+    case NPH_SOUND_CODEC_PCM:
+        return "PCM";
+    case NPH_SOUND_CODEC_ADPCM:
+        return "ADPCM";
+    case NPH_SOUND_CODEC_LOSSLESS:
+        return "lossless";
+    }
+    return "?";
+}
+
+// The settings file beside a source (sound.h): its settings over `inout`,
+// and its bytes into `*inout_hash`. Nothing when there is none.
+static NphResult read_import_settings(Cooker *c, const char *source_path, CookSoundSettings *inout,
+                                      u64 *inout_hash)
+{
+    char path[COOKER_PATH_MAX + 16U];
+    if ((u64)snprintf(path, sizeof path, "%s.import.json", source_path) >= sizeof path) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    if (!nph_fs_exists(path)) {
+        return NPH_RESULT_OK;
+    }
+    void *json = NULL;
+    u64 size = 0U;
+    NphResult r = nph_file_read_all(path, c->alloc, &json, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, nph_result_string(r));
+        return r;
+    }
+    *inout_hash = nph_hash_combine(*inout_hash, nph_hash64(json, size, NPH_HASH_DEFAULT_SEED));
+    *inout_hash = nph_hash_combine(*inout_hash, size);
+    r = cook_sound_settings_parse(c->alloc, json, size, inout);
+    nph_file_free_all(c->alloc, json, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path,
+                      r == NPH_RESULT_PARSE_ERROR ? "not a JSON object"
+                                                  : "an unknown key or value (docs/cook.md)");
+    }
+    return r;
+}
+
+// True when rounding the 64-bit float samples to 32 bits changes one.
+static bool rounding_changes(const NphWavInfo *wav)
+{
+    const u64 n = wav->frames * wav->channels;
+    for (u64 i = 0U; i < n; ++i) {
+        const f64 x = nph_wav_sample_float(wav, i / wav->channels, (u32)(i % wav->channels));
+        if ((f64)(f32)x != x) {
+            return true;
+        }
+    }
+    return false;
+}
+
+NphResult cooker_cook_sound(Cooker *c, const char *source_path)
+{
+    NPH_ASSERT(c != NULL && source_path != NULL);
+    char key[COOKER_PATH_MAX];
+    NphResult r = cooker_source_key(c, source_path, key, sizeof key);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not under the source root %s", source_path, c->root);
+        c->stats.failed += 1U;
+        return r;
+    }
+    void *bytes = NULL;
+    u64 size = 0U;
+    r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
+        c->stats.failed += 1U;
+        return r;
+    }
+    u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
+    CookSoundSettings settings = c->sound;
+    r = read_import_settings(c, source_path, &settings, &content_hash);
+    const u64 shash = settings_hash(c, NPH_ASSET_TYPE_SOUND);
+    const NphGuid guid = asset_guid(key, "sound");
+    if (r == NPH_RESULT_OK && is_current(c, key, "sound", content_hash, shash)) {
+        c->stats.skipped += 1U;
+        nph_file_free_all(c->alloc, bytes, size);
+        return NPH_RESULT_OK;
+    }
+    NphWavInfo wav;
+    memset(&wav, 0, sizeof wav);
+    if (r == NPH_RESULT_OK) {
+        r = nph_wav_parse(bytes, size, &wav);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not a WAV file the cooker reads: %s", key,
+                          nph_result_string(r));
+        }
+    }
+    CookSoundPlan plan;
+    memset(&plan, 0, sizeof plan);
+    if (r == NPH_RESULT_OK) {
+        r = cook_sound_plan(&wav, &settings, &plan);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK,
+                          "%s: cannot be cooked so (ADPCM streamed, too long to keep in memory, "
+                          "or a sample that is not a number)",
+                          key);
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        const bool asked_lossless = settings.codec == COOK_SOUND_CODEC_LOSSLESS ||
+                                    (settings.codec == COOK_SOUND_CODEC_AUTO && plan.stream);
+        if (asked_lossless && plan.codec == NPH_SOUND_CODEC_PCM) {
+            NPH_LOG_INFO(&NPH_LOG_COOK,
+                         "%s: kept as %u-bit PCM: the lossless codec cannot hold its samples "
+                         "exactly",
+                         key, plan.bits);
+        }
+        if (wav.encoding == NPH_WAV_FLOAT64 && plan.codec == NPH_SOUND_CODEC_PCM &&
+            rounding_changes(&wav)) {
+            NPH_LOG_WARN(&NPH_LOG_COOK, "%s: its 64-bit float samples are rounded to 32 bits", key);
+        }
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION, guid,
+                              content_hash);
+        r = cook_sound(c->alloc, &wav, &settings, &w);
+        if (r == NPH_RESULT_OK) {
+            NPH_LOG_INFO(&NPH_LOG_COOK, "%s: %.2f s, %u channels at %u Hz: %s %u-bit, %s", key,
+                         (f64)wav.frames / (f64)wav.sample_rate, wav.channels, wav.sample_rate,
+                         sound_codec_name(plan.codec), plan.bits,
+                         plan.stream ? "streamed" : "in memory");
+            char relative[COOKER_PATH_MAX];
+            output_path(c, key, "sound", "sound", guid, relative, sizeof relative);
+            r = emit(c, &w, key, "sound", relative, NPH_ASSET_TYPE_SOUND, content_hash, shash, NULL,
+                     0U);
+        } else {
+            NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", key, nph_result_string(r));
+        }
+        nph_asset_writer_free(&w);
+    }
+    nph_file_free_all(c->alloc, bytes, size);
     if (r != NPH_RESULT_OK) {
         c->stats.failed += 1U;
     }
@@ -1186,6 +1341,9 @@ CookerSourceKind cooker_source_kind(const char *path)
     if (nph_str_equals_ignore_case(ext, NPH_STR(".nmesh"))) {
         return COOKER_SOURCE_MESH;
     }
+    if (nph_str_equals_ignore_case(ext, NPH_STR(".wav"))) {
+        return COOKER_SOURCE_SOUND;
+    }
     for (u32 i = 0; i < NPH_ARRAY_COUNT(images); ++i) {
         if (nph_str_equals_ignore_case(ext, nph_str_from_cstr(images[i]))) {
             return COOKER_SOURCE_IMAGE;
@@ -1206,6 +1364,8 @@ NphResult cooker_cook_file(Cooker *c, const char *source_path)
         return cooker_cook_gltf(c, source_path);
     case COOKER_SOURCE_MESH:
         return cooker_cook_mesh(c, source_path);
+    case COOKER_SOURCE_SOUND:
+        return cooker_cook_sound(c, source_path);
     case COOKER_SOURCE_IMAGE: {
         const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
         return cooker_cook_image(
@@ -1273,11 +1433,13 @@ static NphResult cook_tree(Cooker *c, const char *dir, u32 depth, NphResult *fir
             continue;
         }
         const CookerSourceKind kind = cooker_source_kind(e->name);
-        if (kind != COOKER_SOURCE_SCENE && kind != COOKER_SOURCE_MESH) {
+        if (kind != COOKER_SOURCE_SCENE && kind != COOKER_SOURCE_MESH &&
+            kind != COOKER_SOURCE_SOUND) {
             continue;
         }
-        const NphResult fr =
-            kind == COOKER_SOURCE_SCENE ? cooker_cook_gltf(c, path) : cooker_cook_mesh(c, path);
+        const NphResult fr = kind == COOKER_SOURCE_SCENE  ? cooker_cook_gltf(c, path)
+                             : kind == COOKER_SOURCE_MESH ? cooker_cook_mesh(c, path)
+                                                          : cooker_cook_sound(c, path);
         if (fr != NPH_RESULT_OK && *first_error == NPH_RESULT_OK) {
             *first_error = fr; // keep going: one bad file does not stop the rest
         }

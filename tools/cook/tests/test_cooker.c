@@ -7,8 +7,10 @@
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/scene.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 #include <nepheline/asset/vfs.h>
+#include <nepheline/audio/wav.h>
 
 #include "test_cook_support.h"
 
@@ -825,6 +827,135 @@ NTEST_F(CookFixture, cooks_editable_meshes_and_tells_what_it_wrote)
     cook_polymesh_free(&m);
 }
 
+// A WAV file at `path`: `seconds` of a mono 16-bit tone at 8 kHz.
+static void write_tone_wav(const char *path, f64 seconds, f64 freq)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u64 frames = (u64)(seconds * 8000.0);
+    f32 *x = (f32 *)NPH_ALLOC(a, frames * sizeof(f32), 16U);
+    NTEST_ASSERT_NOT_NULL(x);
+    for (u64 i = 0U; i < frames; ++i) {
+        x[i] = (f32)(0.5 * sin(2.0 * 3.14159265358979323846 * freq * (f64)i / 8000.0));
+    }
+    const f32 *planes[1] = {x};
+    const u64 size = nph_wav_size(NPH_WAV_PCM_S16, 1U, frames);
+    void *image = NPH_ALLOC(a, size, 16U);
+    NTEST_ASSERT_NOT_NULL(image);
+    NTEST_ASSERT_EQ_INT(nph_wav_write(NPH_WAV_PCM_S16, 1U, 8000U, planes, frames, image),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, image, size), NPH_RESULT_OK);
+    NPH_FREE(a, image, size, 16U);
+    NPH_FREE(a, x, frames * sizeof(f32), 16U);
+}
+
+// The sound at `vpath` through the loader: its header, and for one that
+// streams, DATA read again through the VFS where the view says it lies.
+static NphSoundHeader load_sound(NphVfs *vfs, NphAssetLoader *loader, const char *vpath)
+{
+    NphAssetHandle h;
+    NTEST_ASSERT_EQ_INT(nph_asset_load(loader, nph_str_from_cstr(vpath), &h), NPH_RESULT_OK);
+    const NphAsset *asset = nph_asset_get(loader, h);
+    NphSoundView v;
+    NTEST_ASSERT_EQ_INT(nph_sound_view(asset, &v), NPH_RESULT_OK);
+    const NphSoundHeader header = *v.header;
+    if ((header.flags & NPH_SOUND_FLAG_STREAM) != 0U) {
+        NphVfsFile file;
+        NTEST_ASSERT_EQ_INT(nph_vfs_open(vfs, asset->path, 0U, &file), NPH_RESULT_OK);
+        u8 *bytes = (u8 *)NPH_ALLOC(nph_allocator_system(), v.size, 16U);
+        NTEST_ASSERT_NOT_NULL(bytes);
+        u64 got = 0U;
+        NTEST_EXPECT_EQ_INT(nph_vfs_read_at(&file, v.offset, bytes, v.size, &got), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(got, v.size);
+        NTEST_EXPECT_TRUE(memcmp(bytes, v.data, (size_t)v.size) == 0);
+        NPH_FREE(nph_allocator_system(), bytes, v.size, 16U);
+        nph_vfs_close(vfs, &file);
+    }
+    nph_asset_release(loader, h);
+    return header;
+}
+
+NTEST_F(CookFixture, cooks_sounds_with_their_settings_files)
+{
+    char dir[1200];
+    test_path_in(&f->dir, "sounds", dir, sizeof dir);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    char boom[1300];
+    char music[1300];
+    char settings[1400];
+    (void)snprintf(boom, sizeof boom, "%s/boom.wav", dir);
+    (void)snprintf(music, sizeof music, "%s/music.wav", dir);
+    (void)snprintf(settings, sizeof settings, "%s.import.json", boom);
+    write_tone_wav(boom, 0.5, 440.0);
+    write_tone_wav(music, 9.0, 220.0);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind(boom), COOKER_SOURCE_SOUND);
+    NTEST_EXPECT_EQ_INT(cooker_source_kind("LOUD.WAV"), COOKER_SOURCE_SOUND);
+
+    // A directory's sounds cook with it: the short one to play from memory,
+    // the long one to stream.
+    Cooker *c = make_cooker(f, false);
+    NTEST_ASSERT_EQ_INT(cooker_cook_directory(c, dir), NPH_RESULT_OK);
+    const CookDbEntry *e = cook_db_find(cooker_db(c), NPH_STR("sounds/boom.wav"), NPH_STR("sound"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_EXPECT_EQ_UINT(e->type, (u32)NPH_ASSET_TYPE_SOUND);
+    NTEST_EXPECT_EQ_STR(e->output, "sounds/boom_wav/sound.nph");
+    NTEST_EXPECT_TRUE(nph_guid_equals(e->guid, nph_guid_from_cstr("sounds/boom.wav#sound")));
+    NTEST_ASSERT_NOT_NULL(
+        cook_db_find(cooker_db(c), NPH_STR("sounds/music.wav"), NPH_STR("sound")));
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).cooked, 2U);
+
+    // Loaded through a VFS and the loader, as the runtime loads them; the
+    // streamed one's samples read again from the file where its view says.
+    NphVfs *vfs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_vfs_create(f->alloc, &vfs), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(vfs, nph_str_empty(), f->out_dir, NULL),
+                        NPH_RESULT_OK);
+    NphAssetLoaderDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.alloc = f->alloc;
+    ld.vfs = vfs;
+    ld.verify = NPH_ASSET_VERIFY_ALWAYS;
+    NphAssetLoader *loader = NULL;
+    NTEST_ASSERT_EQ_INT(nph_asset_loader_create(&ld, &loader), NPH_RESULT_OK);
+    NphSoundHeader h = load_sound(vfs, loader, "sounds/boom_wav/sound.nph");
+    NTEST_EXPECT_EQ_UINT(h.codec, (u32)NPH_SOUND_CODEC_PCM);
+    NTEST_EXPECT_EQ_UINT(h.format, (u32)NPH_SOUND_FORMAT_S16);
+    NTEST_EXPECT_EQ_UINT(h.flags, 0U);
+    NTEST_EXPECT_EQ_UINT(h.frames, 4000U);
+    h = load_sound(vfs, loader, "sounds/music_wav/sound.nph");
+    NTEST_EXPECT_EQ_UINT(h.codec, (u32)NPH_SOUND_CODEC_LOSSLESS);
+    NTEST_EXPECT_EQ_UINT(h.flags, (u32)NPH_SOUND_FLAG_STREAM);
+    NTEST_EXPECT_EQ_UINT(h.frames, 72000U);
+
+    // Current: skipped. A settings file beside a sound cooks it again, its
+    // way; a changed settings file too.
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, boom), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).skipped, 1U);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, "{\"codec\": \"adpcm\"}", 18U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, boom), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).cooked, 3U);
+    // (load_sound released the first: this loads the new file.)
+    h = load_sound(vfs, loader, "sounds/boom_wav/sound.nph");
+    NTEST_EXPECT_EQ_UINT(h.codec, (u32)NPH_SOUND_CODEC_ADPCM);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, "{\"stream\": \"always\"}", 20U),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, boom), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).cooked, 4U);
+
+    // A settings file the cooker cannot take, and a file that is not a
+    // WAV, fail their sources.
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, "{\"codec\": \"mp3\"}", 16U), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_cook_sound(c, boom), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, "{ nope", 6U), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_cook_sound(c, boom), NPH_RESULT_PARSE_ERROR);
+    NTEST_ASSERT_EQ_INT(nph_fs_remove_file(settings), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(boom, "RIFX----WAVE", 12U), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cooker_cook_sound(c, boom), NPH_RESULT_PARSE_ERROR);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).failed, 3U);
+    nph_asset_loader_destroy(loader);
+    nph_vfs_destroy(vfs);
+    cooker_destroy(c);
+}
+
 #ifdef NPH_COOK_EXE
 static int run_command(const char *command)
 {
@@ -859,5 +990,41 @@ NTEST_F(CookFixture, the_command_line_tool_cooks_and_packs)
     NTEST_ASSERT_EQ_INT(run_command(command), 1);
     snprintf(command, sizeof command, "\"%s\" --bogus", NPH_COOK_EXE);
     NTEST_ASSERT_EQ_INT(run_command(command), 2);
+}
+
+NTEST_F(CookFixture, the_command_line_tool_takes_the_sound_options)
+{
+    char wav[1200];
+    test_path_in(&f->dir, "hit.wav", wav, sizeof wav);
+    write_tone_wav(wav, 0.25, 880.0);
+    char command[8192];
+    snprintf(command, sizeof command,
+             "\"%s\" \"%s\" -o \"%s\" --root \"%s\" --sound-codec lossless --sound-stream "
+             "always --stream-seconds 2 --quiet",
+             NPH_COOK_EXE, wav, f->out_dir, f->dir.dir);
+    NTEST_ASSERT_EQ_INT(run_command(command), 0);
+    char cooked[1400];
+    (void)snprintf(cooked, sizeof cooked, "%s/hit_wav/sound.nph", f->out_dir);
+    void *image = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(cooked, f->alloc, &image, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(image, size, &info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(info.header.type, (u32)NPH_ASSET_TYPE_SOUND);
+    const NphAssetBlobEntry *head = nph_asset_file_find(&info, NPH_SOUND_TAG_HEADER, 0U);
+    NTEST_ASSERT_NOT_NULL(head);
+    NphSoundHeader h;
+    memcpy(&h, nph_asset_file_blob(image, head), sizeof h);
+    NTEST_EXPECT_EQ_UINT(h.codec, (u32)NPH_SOUND_CODEC_LOSSLESS);
+    NTEST_EXPECT_EQ_UINT(h.flags, (u32)NPH_SOUND_FLAG_STREAM);
+    nph_file_free_all(f->alloc, image, size);
+    // Values the tool does not know are usage errors.
+    static const char *const bad[] = {"--sound-codec mp3", "--sound-stream maybe",
+                                      "--stream-seconds 0", "--stream-seconds x"};
+    for (u32 i = 0U; i < NPH_ARRAY_COUNT(bad); ++i) {
+        snprintf(command, sizeof command, "\"%s\" \"%s\" -o \"%s\" %s --quiet", NPH_COOK_EXE, wav,
+                 f->out_dir, bad[i]);
+        NTEST_EXPECT_EQ_INT(run_command(command), 2);
+    }
 }
 #endif

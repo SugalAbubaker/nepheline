@@ -243,6 +243,20 @@ static void dirname_of(const char *path, char *out, u64 cap)
 static NphResult copy_source(EditorProject *p, const char *from, const char *to)
 {
     NPH_TRY(nph_fs_copy_file(from, to));
+    if (cooker_source_kind(from) == COOKER_SOURCE_SOUND) {
+        // A sound's settings file comes with it (cook/sound.h); one already
+        // in the project stays when the sound comes without.
+        char settings_from[EDITOR_PROJECT_PATH_MAX + 16U];
+        char settings_to[EDITOR_PROJECT_PATH_MAX + 16U];
+        if ((u64)snprintf(settings_from, sizeof settings_from, "%s.import.json", from) >=
+                sizeof settings_from ||
+            (u64)snprintf(settings_to, sizeof settings_to, "%s.import.json", to) >=
+                sizeof settings_to) {
+            return NPH_RESULT_OVERFLOW;
+        }
+        return nph_fs_exists(settings_from) ? nph_fs_copy_file(settings_from, settings_to)
+                                            : NPH_RESULT_OK;
+    }
     if (cooker_source_kind(from) != COOKER_SOURCE_SCENE) {
         return NPH_RESULT_OK;
     }
@@ -276,9 +290,9 @@ static void note(Cooker *c, const char *source, const char *sub, NphGuid *guids,
     ++*count;
 }
 
-// Cooks a source of the project: a directory's scenes and editable meshes,
-// a scene, an editable mesh, or an image (unless images are only along for a
-// scene). Anything else was only copied.
+// Cooks a source of the project: a directory's scenes, editable meshes, and
+// sounds, a scene, an editable mesh, a sound, or an image (unless images
+// are only along for a scene). Anything else was only copied.
 static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bool is_directory,
                              bool images_alone, EditorImportResult *res)
 {
@@ -304,6 +318,9 @@ static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bo
     }
     case COOKER_SOURCE_IMAGE:
         return images_alone ? cooker_cook_file(c, source) : NPH_RESULT_OK;
+    case COOKER_SOURCE_SOUND:
+        // No scene names a sound: it cooks whenever it comes in.
+        return cooker_cook_sound(c, source);
     case COOKER_SOURCE_NONE:
         break;
     }

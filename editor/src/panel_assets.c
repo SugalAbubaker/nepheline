@@ -656,6 +656,8 @@ static const char *kind_name(const EditorAssetEntry *e)
         return "mesh";
     case COOKER_SOURCE_IMAGE:
         return "image";
+    case COOKER_SOURCE_SOUND:
+        return "sound";
     case COOKER_SOURCE_NONE:
         break;
     }
@@ -695,7 +697,8 @@ static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
     return action;
 }
 
-// What a double-click does: open a folder, place a scene, cook an image.
+// What a double-click does: open a folder, place a scene, cook an image or
+// a sound.
 static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing)
 {
     if (e->is_directory) {
@@ -706,6 +709,7 @@ static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing
     case COOKER_SOURCE_MESH:
         return playing ? ACTION_NONE : ACTION_PLACE;
     case COOKER_SOURCE_IMAGE:
+    case COOKER_SOURCE_SOUND:
         return ACTION_COOK;
     case COOKER_SOURCE_NONE:
         break;
@@ -827,7 +831,8 @@ void editor_panel_assets(Editor *ed)
         igEndTable();
     }
     if (a->entry_count == 0U) {
-        igTextDisabled("Drop scenes (.gltf, .glb) or images on the window to import them here.");
+        igTextDisabled("Drop scenes (.gltf, .glb), images, or sounds (.wav) on the window to "
+                       "import them here.");
     }
     // After the table: an action may list another folder.
     if (action != ACTION_NONE) {

@@ -1,7 +1,8 @@
 # The asset cooker (`tools/cook`)
 
 The offline cooker of CLAUDE.md §8.8: it turns source content (glTF 2.0
-scenes, images) into the cooked runtime files of the asset module
+scenes, images, editable meshes, WAV sounds) into the cooked runtime files
+of the asset module
 ([asset.md](asset.md)) and packs them. It is a library, `nph::cook`, used
 by the tests, the benchmarks, and the build of the samples, and a
 command-line tool, `nph_cook`. Decisions:
@@ -28,6 +29,7 @@ asset database, and the identity scheme.
 | `texture.h` | an image to a texture asset: usage, mip chain, encoding |
 | `mesh.h` | the mesh pipeline: cleaning, normals, welding, tangents, reordering, meshlets, quantisation |
 | `gltf.h` | glTF 2.0 import into the cooker's intermediate form |
+| `sound.h` | a WAV file to a sound asset: streaming, the codec, per-source settings |
 | `database.h` | the asset database, `cook.db.json` |
 | `cooker.h` | the cook of a source tree: identity, incremental decisions, outputs, packs |
 
@@ -400,6 +402,57 @@ exact). The tolerance (1.5 levels plus a fifth of the block's palette
 step) still catches any bitstream error, which moves texels by whole
 steps.
 
+## Sounds (`sound.h`)
+
+A WAV file (`.wav`: integer PCM of 8 to 32 bits or floats of 32 or 64,
+plain or extensible, read by the audio module's reader) becomes one sound
+asset, sub-asset `sound` (`<key>/sound.nph`), with the file's first sampler
+loop or else the whole sound as its loop. `cooker_cook_file` takes a WAV
+file, and `cooker_cook_directory` cooks every one it finds
+([ADR-0057](adr/0057-sound-assets.md)). Two choices are made per sound
+(`CookSoundSettings`):
+
+- **Streaming.** AUTO streams sounds of `stream_seconds` (8) or more:
+  music, ambience, long dialogue; shorter ones play from memory. ALWAYS and
+  NEVER decide outright. A sound too long for memory (2^31 frames) always
+  streams under AUTO.
+- **The codec.** AUTO keeps every sample, whichever way the sound plays:
+  PCM in memory, where nothing has to be decoded as it plays, and the
+  lossless codec when it streams, about half the bytes to read and store.
+  PCM and LOSSLESS ask for one; ADPCM, a quarter of 16-bit PCM and lossy
+  (54 to 88 dB on tones), is for short effects whose memory counts more
+  than their last bits, and plays from memory only.
+
+Samples are kept exactly. The lossless codec takes integers of 8 to 24
+bits at their depth, 32-bit integers at 24 bits when their low byte is
+always zero, and floats at 24 bits when every one is a 24-bit integer over
+2^23; anything else it cannot hold exactly stays PCM at its own depth,
+logged. 8-bit PCM is stored as 16-bit (exactly); 64-bit floats become
+32-bit (logged when that rounds a sample). ADPCM codes 16-bit samples, so
+deeper ones are rounded to 16 bits first, well below its own noise.
+Samples that are not numbers are refused: in a mix they would reach every
+bus their voice feeds.
+
+**Settings per source.** A JSON object beside the source, named as the
+source with `.import.json` appended, overrides the cooker's defaults for
+it:
+
+```json
+{"codec": "adpcm", "stream": "never"}
+```
+
+| Key | Values |
+|---|---|
+| `codec` | `"auto"`, `"pcm"`, `"lossless"`, `"adpcm"` |
+| `stream` | `"auto"`, `"always"`, `"never"` |
+| `stream_seconds` | a number above 0 |
+| `exhaustive` | `true`: the lossless encoder tries every prediction order (a slower cook, a smaller file) |
+
+Its bytes join the source's content hash, so editing it recooks the
+sound; an unknown key or value fails the source rather than being ignored.
+The defaults come from `nph_cook`'s `--sound-codec`, `--sound-stream`, and
+`--stream-seconds` (the settings file's own words).
+
 ## Fuzzing
 
 The cooker's inputs are hostile until proven otherwise (§8.8 "malformed
@@ -415,6 +468,12 @@ input must never crash"):
   when its faces (up to 64) are extruded, and cook, before and after, into
   a mesh the runtime can view (the check `fuzz_mesh_check.h` shares with
   the glTF target).
+- `tests/fuzz/fuzz_cook_sound.c`: a settings byte, then a WAV file.
+  Whatever the reader takes (up to 2^17 samples) is cooked under those
+  settings, and the asset written must pass the runtime's validation, the
+  sound view, and the audio module's checks of its codec data; a lossless
+  sound must decode to the source's samples exactly, and a PCM one hold
+  them.
 - `tests/fuzz/fuzz_image.c`: PNG, JPEG, TGA, BMP, and HDR through
   `cook_image_info` (header only; at most a million texels are decoded)
   and the decoder, then images up to 64 x 64 through the texture cook with
@@ -512,7 +571,14 @@ are logged with everything outside printable ASCII replaced.
   that keeps a mesh closed, copies); the cooker's canonical and relative
   paths, identities, outputs, collisions, incremental decisions,
   stale-asset removal, directories, packs, and editable meshes cooked
-  with the assets written reported; the command-line tool end to end.
+  with the assets written reported; sounds: the plan by length and
+  settings, every WAV encoding as PCM holding its samples and as lossless
+  decoding to them to the bit, ADPCM from deeper samples, the file's loop,
+  settings files parsed, refused, and recooking their source, refusals
+  (samples that are not numbers, a sound too long for memory that may not
+  stream), cooked sounds loaded through the VFS and a streamed one's
+  samples read back at its offset; the command-line tool end to end, its
+  sound options too.
 - `integration_tests` (label `integration`): the GPU BC check above, and
   `test_cook_load.c`, the Phase 6 exit criterion end to end: a generated
   scene with external buffers and images, a data-URI normal map, a mesh
@@ -589,6 +655,9 @@ What the numbers say:
   BC6H is not produced.
 - No KTX2, Basis, or WebP input; no texture arrays or cube maps from the
   cooker (the runtime format has layers).
+- Sounds: WAV only (no FLAC, Ogg, or AIFF); settings per source only, not
+  per folder; floats that are not 24-bit integers stay 32-bit PCM, with no
+  option yet to quantise them for the lossless codec.
 - glTF: no skins, morph targets, or animations (Phase 9+ needs them); no
   TEXCOORD_1, KHR_texture_transform, or the PBR extension materials but
   specular-glossiness (KHR_materials_transmission and the others are

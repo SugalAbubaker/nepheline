@@ -30,6 +30,9 @@ nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)
 # Editable meshes (tools/cook/polymesh.h): read, written back, extruded,
 # and cooked.
 nph_add_fuzzer(nmesh SOURCES fuzz_nmesh.c fuzz_mesh_check.h DEPS nph::cook)
+# Sounds (tools/cook/sound.h): a WAV file cooked under the settings the
+# input picks, the asset checked and decoded back.
+nph_add_fuzzer(cook_sound SOURCES fuzz_cook_sound.c DEPS nph::cook)
 
 # The golden toolkit's PNG reader and inflate (tools/golden), which read
 # baselines from the repository (CLAUDE.md §9 golden-image tests).

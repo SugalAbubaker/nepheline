@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Seed corpora of the audio fuzz targets (tests/fuzz/fuzz_audio_wav.c,
-fuzz_audio_lossless.c, fuzz_audio_adpcm.c), written by
-`python scripts/fuzz_seeds.py`.
+fuzz_audio_lossless.c, fuzz_audio_adpcm.c) and of the cooker's sounds
+(fuzz_cook_sound.c), written by `python scripts/fuzz_seeds.py`.
 
 The WAV seeds are files built here from the RIFF/WAVE layout (an
 independent reading of the format the reader takes): every depth, the
@@ -111,6 +111,38 @@ def write_audio_seeds(write, corpus):
     write(os.path.join(wav, "loop_outside"),
           riff([fmt(1, 1, 48000, 16), chunk("data", pcm(tone(10, 1, 300.0, 0.3), 16)), smpl(5, 900)]))
     write(os.path.join(wav, "adpcm_refused"), riff([fmt(2, 1, 48000, 16), chunk("data", b"\x00" * 8)]))
+
+    # The cooker's sounds (fuzz_cook_sound.c): a settings byte (bits 0-1 the
+    # codec: auto, pcm, lossless, adpcm; 2-3 the streaming: auto, always,
+    # never; 4 exhaustive; 5-7 AUTO's threshold in tenths of a second),
+    # then a WAV file.
+    cook = os.path.join(corpus, "cook_sound")
+
+    def settings(codec=0, stream=0, exhaustive=0, tenths=0):
+        return bytes([codec | (stream << 2) | (exhaustive << 4) | (tenths << 5)])
+
+    exact24 = [[(((i * 7919) % 16777216) - 8388608) / 8388608.0] for i in range(48)]
+    write(os.path.join(cook, "auto_pcm16"),
+          settings() + riff([fmt(1, 2, 48000, 16), chunk("data", pcm(t, 16))]))
+    write(os.path.join(cook, "auto_streamed"),
+          settings(tenths=1) + riff([fmt(1, 1, 8000, 16),
+                                     chunk("data", pcm(tone(900, 1, 300.0, 0.5, 8000), 16))]))
+    write(os.path.join(cook, "lossless24_streamed_loop"),
+          settings(2, 1) + riff([fmt_extensible(2, 44100, 24, 24, 1), chunk("data", pcm(t, 24)),
+                                 smpl(4, 40)]))
+    write(os.path.join(cook, "adpcm8_mono"),
+          settings(3, 2) + riff([fmt(1, 1, 22050, 8),
+                                 chunk("data", pcm(tone(300, 1, 200.0, 0.8, 22050), 8))]))
+    write(os.path.join(cook, "lossless_float_exact"),
+          settings(2, 2, 1) + riff([fmt(3, 1, 48000, 32), chunk("data", floats(exact24, 32))]))
+    write(os.path.join(cook, "lossless_float_kept"),
+          settings(2) + riff([fmt(3, 1, 48000, 32),
+                              chunk("data", floats(tone(32, 1, 1000.0, 0.25), 32))]))
+    write(os.path.join(cook, "pcm_float64"),
+          settings(1) + riff([fmt_extensible(2, 48000, 64, 64, 3),
+                              chunk("data", floats(tone(16, 2, 50.0, 1.0), 64))]))
+    write(os.path.join(cook, "lossless_s32_six"),
+          settings(2) + riff([fmt(1, 6, 96000, 32), chunk("data", pcm(tone(20, 6, 100.0, 0.9), 32))]))
 
     # Lossless: u8 channels, u8 bits, u8 block, u16 frames, samples, damage.
     lossless = os.path.join(corpus, "audio_lossless")

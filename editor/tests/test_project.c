@@ -4,6 +4,8 @@
 // whole), cook on the import thread, and leave a snapshot of the database
 // that the resolver reads, also while other imports run. Failures arrive
 // in the results, and the requests in flight are bounded.
+#include <nepheline/asset/sound.h>
+#include <nepheline/audio/wav.h>
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/core/atomic.h>
 #include <nepheline/core/guid.h>
@@ -224,6 +226,70 @@ NTEST_F(ProjectFixture, an_image_alone_cooks_and_one_beside_a_scene_comes_along)
     NTEST_EXPECT_TRUE(exists_in(f->assets, "extra.tga"));
     NTEST_EXPECT_FALSE(editor_project_is_cooked(f->p, "extra.tga"));
     NTEST_EXPECT_TRUE(editor_project_is_cooked(f->p, "c.gltf"));
+}
+
+// A second of a mono 16-bit tone at 8 kHz, as a WAV file at `path`.
+static void write_wav(const char *path)
+{
+    f32 x[8000];
+    for (u32 i = 0U; i < 8000U; ++i) {
+        x[i] = (f32)(0.5 * sin(2.0 * 3.14159265358979323846 * 440.0 * (f64)i / 8000.0));
+    }
+    const f32 *planes[1] = {x};
+    const u64 size = nph_wav_size(NPH_WAV_PCM_S16, 1U, 8000U);
+    void *image = NPH_ALLOC(nph_allocator_system(), size, 16U);
+    NTEST_ASSERT_NOT_NULL(image);
+    NTEST_ASSERT_EQ_INT(nph_wav_write(NPH_WAV_PCM_S16, 1U, 8000U, planes, 8000U, image),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, image, size), NPH_RESULT_OK);
+    NPH_FREE(nph_allocator_system(), image, size, 16U);
+}
+
+// The codec of the cooked sound at `cooked`/`output`.
+static u32 cooked_codec(const char *cooked, const char *output)
+{
+    char path[1600];
+    (void)snprintf(path, sizeof path, "%s/%s", cooked, output);
+    void *image = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, nph_allocator_system(), &image, &size),
+                        NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(image, size, &info), NPH_RESULT_OK);
+    const NphAssetBlobEntry *head = nph_asset_file_find(&info, NPH_SOUND_TAG_HEADER, 0U);
+    NTEST_ASSERT_NOT_NULL(head);
+    NphSoundHeader h;
+    memcpy(&h, nph_asset_file_blob(image, head), sizeof h);
+    nph_file_free_all(nph_allocator_system(), image, size);
+    return h.codec;
+}
+
+NTEST_F(ProjectFixture, a_sound_comes_with_its_settings_and_cooks)
+{
+    // A sound dropped with its settings file beside it brings the file
+    // along and cooks its way; one without cooks the cooker's way.
+    char hit[1200];
+    char settings[1300];
+    char hum[1200];
+    test_path_in(&f->src, "hit.wav", hit, sizeof hit);
+    (void)snprintf(settings, sizeof settings, "%s.import.json", hit);
+    test_path_in(&f->src, "hum.wav", hum, sizeof hum);
+    write_wav(hit);
+    write_wav(hum);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, "{\"codec\": \"adpcm\"}", 18U), NPH_RESULT_OK);
+    const char *paths[2] = {hit, hum};
+    const EditorImportResult res = import_now(f, paths, 2U, "sounds");
+    NTEST_ASSERT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(res.cooked, 2U);
+    NTEST_EXPECT_TRUE(exists_in(f->assets, "sounds/hit.wav"));
+    NTEST_EXPECT_TRUE(exists_in(f->assets, "sounds/hit.wav.import.json"));
+    NTEST_EXPECT_FALSE(exists_in(f->assets, "sounds/hum.wav.import.json"));
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(f->p, "sounds/hit.wav"));
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(f->p, "sounds/hum.wav"));
+    NTEST_EXPECT_EQ_UINT(cooked_codec(f->cooked, "sounds/hit_wav/sound.nph"),
+                         (u32)NPH_SOUND_CODEC_ADPCM);
+    NTEST_EXPECT_EQ_UINT(cooked_codec(f->cooked, "sounds/hum_wav/sound.nph"),
+                         (u32)NPH_SOUND_CODEC_PCM);
 }
 
 NTEST_F(ProjectFixture, what_an_import_refuses_and_how_failures_arrive)

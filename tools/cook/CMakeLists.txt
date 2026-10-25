@@ -42,6 +42,7 @@ set(cook_sources
     src/mesh_optimize.c
     src/mesh_tangent.c
     src/polymesh.c
+    src/sound.c
     src/specgloss.c
     src/texture.c
 )
@@ -63,9 +64,11 @@ function(nph_add_cooklib target)
     set_target_properties(${target} PROPERTIES FOLDER "tools")
 endfunction()
 
-# The asset runtime for the formats, and the renderer for its meshlet
-# builder (render/meshlet.h), which cooked and run-time meshes share.
-nph_add_cooklib(nph_cooklib nph::asset nph::render)
+# The asset runtime for the formats, the renderer for its meshlet builder
+# (render/meshlet.h), which cooked and run-time meshes share, and the audio
+# module for the WAV reader and the sound encoders (audio/lossless.h,
+# audio/adpcm.h), which the runtime's decoders pair with.
+nph_add_cooklib(nph_cooklib nph::asset nph::render nph::audio)
 add_library(nph::cook ALIAS nph_cooklib)
 
 # The editor's cooker (docs/adr/0026-editor-import.md): the same sources
@@ -99,6 +102,7 @@ nph_add_test(cook
         tests/test_image.c
         tests/test_mesh.c
         tests/test_polymesh.c
+        tests/test_sound.c
         tests/test_specgloss.c
         tests/test_texture.c
     DEPS

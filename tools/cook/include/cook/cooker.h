@@ -15,7 +15,9 @@
 // A glTF file becomes one asset per mesh, material, and texture (one per
 // image and usage) plus one scene asset; an image file becomes one
 // texture asset; an editable mesh (`.nmesh`, polymesh.h) becomes one mesh
-// asset. Output paths mirror the source tree:
+// asset; a WAV file becomes one sound asset (sound.h), with the settings
+// of the JSON file beside it when there is one. Output paths mirror the
+// source tree:
 // `<key, its '.' made '_'>/<kind>_<index>_<name>.nph` (for example
 // `models/crate_gltf/mesh_0_Crate.nph`), sanitised to [A-Za-z0-9._-];
 // if sanitising ever makes two assets collide, the later one gets a
@@ -37,6 +39,7 @@
 
 #include <cook/database.h>
 #include <cook/mesh.h>
+#include <cook/sound.h>
 #include <cook/texture.h>
 
 #ifdef __cplusplus
@@ -55,6 +58,7 @@ typedef struct CookerDesc {
     b32 force;                   // recook everything
     CookTextureSettings texture; // defaults for textures; the usage is set per material slot
     CookMeshSettings mesh;
+    CookSoundSettings sound; // defaults for sounds; a source's settings file overrides them
     // Optional: told of every asset written (not of those found current), on
     // the cooker's thread, with its GUID and NphAssetType: how the editor
     // knows what to reload.
@@ -82,19 +86,21 @@ typedef enum CookerSourceKind {
     COOKER_SOURCE_SCENE,    // .gltf and .glb
     COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, .hdr, and .dds
     COOKER_SOURCE_MESH,     // .nmesh (polymesh.h)
+    COOKER_SOURCE_SOUND,    // .wav (sound.h)
 } CookerSourceKind;
 
 CookerSourceKind cooker_source_kind(const char *path);
 
-// Cooks one source by its kind: a scene, or an image as a texture with the
-// default usage (HDR for .hdr). A directory is walked
-// (cooker_cook_directory). NPH_RESULT_UNSUPPORTED for another extension.
+// Cooks one source by its kind: a scene, an image as a texture with the
+// default usage (HDR for .hdr), an editable mesh, or a sound. A directory
+// is walked (cooker_cook_directory). NPH_RESULT_UNSUPPORTED for another
+// extension.
 NPH_MUST_USE NphResult cooker_cook_file(Cooker *cooker, const char *source_path);
 
-// Cooks every scene (.gltf, .glb) and editable mesh (.nmesh) under `dir`,
-// recursively, in name order (images are cooked through the scenes that
-// use them, or one by one with cooker_cook_image). The first error is
-// returned after every file was tried.
+// Cooks every scene (.gltf, .glb), editable mesh (.nmesh), and sound (.wav)
+// under `dir`, recursively, in name order (images are cooked through the
+// scenes that use them, or one by one with cooker_cook_image). The first
+// error is returned after every file was tried.
 NPH_MUST_USE NphResult cooker_cook_directory(Cooker *cooker, const char *dir);
 
 // Cooks a glTF scene with every asset it contains.
@@ -109,6 +115,13 @@ NPH_MUST_USE NphResult cooker_cook_image(Cooker *cooker, const char *source_path
 // mesh pipeline. NPH_RESULT_INVALID_ARGUMENT for a mesh without faces; the
 // reader's errors.
 NPH_MUST_USE NphResult cooker_cook_mesh(Cooker *cooker, const char *source_path);
+
+// Cooks a WAV file as a sound asset, sub-asset "sound", with the cooker's
+// sound settings under those of the source's settings file
+// (<source>.import.json, sound.h), whose bytes join the content hash.
+// NPH_RESULT_PARSE_ERROR or NPH_RESULT_INVALID_ARGUMENT for a bad settings
+// file; the WAV reader's errors; cook_sound's.
+NPH_MUST_USE NphResult cooker_cook_sound(Cooker *cooker, const char *source_path);
 
 // Writes every asset the database knows into a pack at `pack_path`, with
 // the output paths as entry paths. NPH_RESULT_NOT_FOUND when an asset's
