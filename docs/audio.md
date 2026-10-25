@@ -25,7 +25,7 @@ Phase 12 builds it in parts. This document describes what exists:
 | The device and streaming | done |
 | Cooked sounds: the sound asset and the cooker's WAV import ([ADR-0057](adr/0057-sound-assets.md), [cook.md](cook.md) "Sounds") | done |
 | The engine: AudioSource and AudioListener, the bridge, one-shots, occlusion rays, the editor ([ADR-0058](adr/0058-audio-in-the-engine.md), [runtime.md](runtime.md) "Audio") | done |
-| The sample, and the Phase 12 wrap-up | planned |
+| The samples: synthesized sounds, `samples/game_audio`, `game_physics`'s impacts ("The samples") | done |
 
 | Header | Contents |
 |---|---|
@@ -706,6 +706,85 @@ Both have unit tests now
 (`multichannel_clips_map_speaker_to_speaker`,
 `filters_switch_on_and_off_without_a_click`).
 
+## The samples
+
+The samples' sounds are synthesized when they are built
+(`samples/sounds/make_sounds.c`; the repository holds no recordings) and
+cooked by `nph_cook` into `<build>/samples/sounds/<Config>/sounds.npk`:
+
+| Sound | |
+|---|---|
+| `music.wav` | 16 s, stereo, 24-bit: a slow progression as a pad, a bass, and an arpeggio, every note inside its bar so the loop meets itself in silence; streamed, lossless |
+| `wind.wav` | 12 s, stereo: noise through wandering low-passes, in gusts, its end crossfaded into its start; streamed |
+| `hum.wav` | 2 s, mono: a machine's hum, whole cycles of everything so it loops; in memory |
+| `chime.wav` | 1.5 s: a bell by frequency modulation (Chowning, JAES 1973) |
+| `knock.wav` | 0.2 s: a knock on wood, cooked as ADPCM by its `knock.wav.import.json` |
+| `thud.wav`, `bonk.wav` | a crate landing, a ball bouncing (`game_physics`'s impacts) |
+
+`samples/game_audio` is a game module whose yard, on the physics sample's
+ground, is all sound (runtime.md "Audio"):
+
+- music and wind everywhere, on their buses;
+- a drone, a ball humming in 3D, circling in front of the listener: heard
+  from its side, louder near, bent by Doppler as it comes and goes, and
+  darkened while a wall stands between;
+- chimes played once round the yard by a system on the job system, some
+  behind the wall, and knocks following the drone.
+
+```sh
+nph_player --game=build/win-msvc/bin/Debug/game_audio.dll \
+           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk \
+           --pack=build/win-msvc/samples/sounds/Debug/sounds.npk
+```
+
+Its headless smoke run mixes offline with `yard.check` set. The game
+listens to its own mix each frame, and at the end it says whether the run
+was clean:
+
+- sound from the first frame to the last;
+- the mix leaning towards whichever side the drone is on, by more than a
+  fifth of its energy on average. That separates the drone from the chimes
+  and the arpeggio, which lean it this way and that too;
+- the chimes and knocks played;
+- nothing starved, dropped, refused, or failed.
+
+It writes what it heard to `<build>/samples/game_audio/yard.wav`
+(`yard.capture`), to listen to. A Development build's run on the Ryzen 7
+5800X gives:
+
+- 12.5 s heard;
+- a lean of +0.31 with the drone on the right and −0.37 on the left;
+- 9 chimes and 6 knocks;
+- a peak of −7.2 dBFS.
+
+It renders those 12.5 s in 0.4 s of wall time. `samples/game_physics`
+sounds its crates' and balls' hits from the same pack: each step's four
+hardest, as loud as they were hard, follow the body that struck. 425 sound
+in the autopilot's course.
+
+## Phase 12's exit
+
+CLAUDE.md §12 asks for two things.
+
+**Offline mix tests pass.** The golden mixes (`tests/audio`, above) render
+six scripted scenes offline, through every codec, the buses and their
+effects, and 3D. Each must stay within 2e-5 of its approved baseline, in
+every CI configuration. Beside them, the runtime's tests listen to headless
+engines mixing offline, and the audio sample checks its own mix.
+
+**No audio-thread allocations, verified.** The mixer renders inside a
+real-time scope, and so does the device's callback around it. In Debug and
+Development, any allocation, lock, wait, sleep, or file call made there
+fails an assertion, or is counted by a test's hook.
+
+- `test_mixer_realtime.c` plays a busy scene with every codec, effect, and
+  stream, and requires a count of zero. On the Linux sanitizer builds, the
+  sanitizer allocator's hooks count every `malloc` the audio thread makes,
+  and that count must be zero as well.
+- `test_device.c` renders on the null device's thread inside the same
+  rules.
+- The threaded runs also pass under ThreadSanitizer in CI.
+
 ## Performance
 
 `audio_bench` (benchmarks/audio), Profile, Ryzen 7 5800X
@@ -825,6 +904,10 @@ system's device where the machine has one. `test_stream.c` covers:
 - a virtual voice coming back on sound, to the bit, with nothing starved;
 - a looping stream's voice across the rebasing of its position;
 - a source failing mid-stream, and a corrupt block, each counted;
-- closing while it plays, playing once, and refusals. The real-time scopes have their own tests in core
-(`test_realtime.c`: allocations, the spin lock, nesting, the assertion) and
-platform (`test_realtime.c`: every blocking call, per thread).
+- when its voice can read: a lagging stream, half its ring, a short one's
+  end, a failed one, and clips with nothing to wait for;
+- closing while it plays, playing once, and refusals.
+
+The real-time scopes have their own tests in core (`test_realtime.c`:
+allocations, the spin lock, nesting, the assertion) and platform
+(`test_realtime.c`: every blocking call, per thread).

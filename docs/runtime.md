@@ -489,6 +489,10 @@ point, in 3D at a position or following an entity. One whose sound takes
 more than a quarter second to load is dropped: late is worse than not at
 all.
 
+`samples/game_audio` plays a yard of sound through all of this
+([audio.md](audio.md) "The samples"), and `samples/game_physics` sounds its
+impacts.
+
 **Buses.** Five buses under the master take the sources, each with a
 volume cvar (`audio.volume_effects` and the others, with `audio.volume`
 for the master; saved), and every voice also sends to a sixth with the
@@ -664,7 +668,14 @@ body, placed and at rest, before the first step.
 `samples/game_physics` (`sample.game_physics_headless`): the autopilot
 walks the player round the playground (up the stairs, off the landing, a
 jump, onto the swinging platform for a ride, more balls thrown than are
-kept) and the run fails unless it says it got round.
+kept) and the run fails unless it says it got round; its impacts sound,
+mixed offline.
+
+`samples/game_audio` (`sample.game_audio_headless`): the yard plays 12.5 s
+mixed offline, and the run fails unless the game, listening to its mix,
+says it ran clean: sound throughout, the mix leaning towards the drone's
+side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
+"The samples"). The windowed runs of both play to the null device.
 
 ## Limitations and future work
 

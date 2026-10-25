@@ -29,7 +29,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 9 | Runtime + Editor v1: profiling (zones, timeline, memory); the engine context and its pipelined fixed-step frame; the console, cvars, and the command line; the world-to-renderer bridge; C game modules with hot reload that migrates the world; the player; the editor: scene editing with gizmos and undo/redo, drag-and-drop import through the cooker, primitives and mesh editing | **done** (`v0.4.0`) |
 | 10 | Renderer v2: the GPU-driven production path (two-phase occlusion culling, a 64-bit visibility buffer, hybrid hardware and software raster); a light grid with exact culling; ray-traced shadows and the sun's virtual shadow map; temporal anti-aliasing at native resolution, bloom and exposure, motion blur, depth of field; full-resolution ground-truth ambient occlusion and a hashed radiance cache; Amazon Lumberyard Bistro as the reference scene, measured nightly at native 4K against every §10.4 line (the 4.17 ms frame gates at Phase 14's exit: ADR-0041) | **done** (`v0.5.0`) |
 | 11 | Physics: collision (spheres, capsules, boxes, convex hulls by Quickhull, triangle meshes, heightfields, compounds; separating axes, clipping, GJK and EPA; contact reduction and warm starts kept across steps), a dynamic AABB tree with SAH rebuilds; the world with the substepped soft-step solver (TGS and XPBD kept as options, after a benchmarked comparison), graph-coloured parallel solving, islands and sleep; ball, hinge, fixed, slider, distance, and 6-DOF joints with limits and motors, and ragdolls; continuous collision; ray and shape casts, overlaps; the character controller; in the engine, RigidBody and Collider components and frames drawn between steps; a physics playground sample | **done** (`v0.6.0`) |
-| 12–15 | Audio → Streaming → Ray tracing → Hardening | planned |
+| 12 | Audio: real-time scopes that prove the audio thread never allocates or blocks; SIMD mix kernels, a bandlimited resampler, filters, delays, panning; WAV, our own lossless codec (the §13 decision), and our ADPCM; the mixer (virtual voices, buses, sends, ducking, snapshots); an equaliser, dynamics, echo, and an FDN reverberator; 3D attenuation, Doppler, air absorption, occlusion, and obstruction; the output device through miniaudio, and streaming; sound assets and their cooking; in the engine, AudioSource and AudioListener components, one-shots from any thread, and occlusion rays through the physics world; golden offline mixes; an audio sample | **done** (`v0.7.0`) |
+| 13–15 | Streaming → Ray tracing → Hardening | planned |
 
 ## Building
 
@@ -89,11 +90,25 @@ nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
 `samples/game_physics` is a physics playground (crates, balls, stairs,
 ramps, a swinging platform) walked by a character: W/A/S/D, Space to jump,
 the right mouse button to look, the left one to throw
-([`docs/physics.md`](docs/physics.md)):
+([`docs/physics.md`](docs/physics.md)). Its impacts sound from the samples'
+sounds, which are synthesized and cooked at build time:
 
 ```sh
 nph_player --game=build/win-msvc/bin/Debug/game_physics.dll \
-           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk
+           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk \
+           --pack=build/win-msvc/samples/sounds/Debug/sounds.npk
+```
+
+`samples/game_audio` is a yard of sound ([`docs/audio.md`](docs/audio.md)):
+- music and wind, streamed;
+- a humming drone circling the listener and passing behind a wall, so its
+  direction, distance, Doppler, and occlusion can all be heard;
+- chimes and knocks played once from the job system.
+
+```sh
+nph_player --game=build/win-msvc/bin/Debug/game_audio.dll \
+           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk \
+           --pack=build/win-msvc/samples/sounds/Debug/sounds.npk
 ```
 
 The editor ([`docs/editor.md`](docs/editor.md)) builds scenes in a docked
@@ -108,7 +123,10 @@ Dear ImGui interface. It has:
   and faces;
 - the console, the profiler's timeline, and the statistics with every cvar;
 - bodies from RigidBody and Collider components, their outlines, and the
-  physics debug toggles.
+  physics debug toggles;
+- sound from AudioSource components and WAV imports, and the audio
+  statistics: the output, the voices and streams, and the buses' meters and
+  volumes.
 
 ```sh
 nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
@@ -128,7 +146,7 @@ tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_f
 editor/         nph_editor: the shell, Dear ImGui backends on the window and the RHI, panels, scene editing, import, mesh editing, tests
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, render_perf, the reference scenes' manifests, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and the game modules game_sandbox and game_physics; samples/common/ holds the cooked-scene bridge and BMP capture they share
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and the game modules game_sandbox, game_physics, and game_audio; samples/sounds/ synthesizes the samples' sounds; samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)
@@ -157,8 +175,8 @@ Modules depend strictly left-to-right:
 - [`docs/profile.md`](docs/profile.md) — profiling: CPU zones recorded per thread in core, the collector that rebuilds them per fiber into frames, statistics, Chrome trace export, tracked allocators
 - [`docs/scene.md`](docs/scene.md) — scene module: the ECS (storage, components and reflection, queries and change detection, command buffers), the scheduler, transforms and the hierarchy, prefabs, scene files, copies that keep their handles, benchmarks
 - [`docs/physics.md`](docs/physics.md) — physics module: conventions and precision in a 64-bit world, collision geometry, convex hulls and Quickhull, the narrow phase (separating axes, clipping, GJK and EPA), the dynamic AABB tree, the world (bodies, shapes, contacts), the solvers (the soft step, TGS, XPBD) and their threads, joints, islands and sleep, events, meshes and heightfields, queries, continuous collision, the character controller, the engine's bodies, benchmarks
-- [`docs/audio.md`](docs/audio.md) — audio module: conventions, real-time scopes, the block kernels per SIMD level, resampling (bandlimited interpolation), filters, delay lines, panning, the codecs (WAV, our lossless codec, our ADPCM), benchmarks
-- [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, physics in the engine, drawing between steps, game modules and hot reload, the player
+- [`docs/audio.md`](docs/audio.md) — audio module: conventions, real-time scopes, the block kernels per SIMD level, resampling (bandlimited interpolation), filters, delay lines, panning, the codecs (WAV, our lossless codec, our ADPCM), the mixer, effects, 3D, the device, streaming, golden mixes, the samples, benchmarks
+- [`docs/runtime.md`](docs/runtime.md) — runtime module: the engine and its frame, configuration and the console, input for the simulation, the world-to-renderer bridge, physics in the engine, drawing between steps, audio in the engine, game modules and hot reload, the player
 - [`docs/editor.md`](docs/editor.md) — the editor: running it, the panels, editing and undo, projects and import, model creation, the engine hooks it is built on, the Dear ImGui backends, testing
 - [`docs/ntest.md`](docs/ntest.md) — test framework
 - [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark harness, methodology, the GPU microbenchmarks, render_perf and the reference scenes, and their budgets
