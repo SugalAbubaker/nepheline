@@ -215,3 +215,36 @@ if(TARGET nph_cook AND NPH_BUILD_SAMPLES)
                              FAIL_REGULAR_EXPRESSION "autopilot failed|ERROR|Assertion failed")
     endif()
 endif()
+
+# The Phase 12 sample (CLAUDE.md §12, "Audio"): a game module whose yard, on
+# the physics sample's ground, is all sound (music, wind, a drone circling
+# the listener past a wall, chimes and knocks played once). Its smoke runs
+# play 240 frames in a window, to the null device, since a test must not
+# play through the machine's speakers (77 without a window or a device), and
+# headless, mixing offline, where the game listens to its mix and says at the
+# end whether it ran clean.
+if(TARGET game_physics_content AND TARGET sample_sounds)
+    nph_add_game_module(game_audio SOURCES game_audio/game.c)
+    set_target_properties(game_audio PROPERTIES FOLDER "samples")
+    add_dependencies(game_audio game_physics_content sample_sounds nph_player)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/game_audio")
+    if(NPH_BUILD_TESTS)
+        set(game_audio_packs "--pack=${game_physics_out}/physics.npk"
+                             "--pack=${sample_sounds_out}/sounds.npk")
+        add_test(NAME sample.game_audio
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_audio>" ${game_audio_packs}
+                         --frames=240 audio.device=null)
+        add_test(NAME sample.game_audio_headless
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_audio>" ${game_audio_packs}
+                         --frames=3000 --headless rt.lockstep=true audio.device=offline
+                         yard.check=true
+                         "yard.capture=${CMAKE_CURRENT_BINARY_DIR}/game_audio/yard.wav")
+        set_tests_properties(sample.game_audio sample.game_audio_headless PROPERTIES
+                             TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+        set_tests_properties(sample.game_audio PROPERTIES TIMEOUT 300) # as game_sandbox's
+        # The verdict is in the log, as game_physics's is.
+        set_tests_properties(sample.game_audio_headless PROPERTIES
+                             PASS_REGULAR_EXPRESSION "check: the mix ran clean"
+                             FAIL_REGULAR_EXPRESSION "check failed|ERROR|Assertion failed")
+    endif()
+endif()
