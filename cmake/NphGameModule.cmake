@@ -66,7 +66,7 @@ function(nph_add_engine_shared_library)
     endforeach()
     target_link_libraries(nepheline_shared
         PUBLIC nph::options
-        PRIVATE glfw volk nph_gpu_vma)
+        PRIVATE glfw volk nph_gpu_vma nph_audio_miniaudio)
     if(TARGET nph_platform_fiber_asm)
         target_link_libraries(nepheline_shared PRIVATE nph_platform_fiber_asm)
     endif()

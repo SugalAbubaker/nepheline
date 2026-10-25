@@ -25,13 +25,24 @@ function(_nph_msvc_copy_asan_runtime)
     file(COPY ${dlls} DESTINATION "${dest}")
 endfunction()
 
+# nph_apply_sanitizers(<target> [<scope>])
+#
+# The configured sanitizers' compile and link options on <target>, as
+# INTERFACE by default (nph::options passes them to every Nepheline target)
+# or PRIVATE for a third-party unit that must be instrumented like the code
+# around it (its threads call ours, so ThreadSanitizer must see its
+# synchronisation) without inheriting nph::options' warnings.
 function(nph_apply_sanitizers target)
     set(dbg "$<CONFIG:Debug>")
+    set(scope INTERFACE)
+    if(ARGC GREATER 1)
+        set(scope ${ARGV1})
+    endif()
 
     if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
         if(NPH_ASAN)
             # The compiler emits /INFERASANLIBS into the objects; no link flag needed.
-            target_compile_options(${target} INTERFACE "$<${dbg}:/fsanitize=address>")
+            target_compile_options(${target} ${scope} "$<${dbg}:/fsanitize=address>")
             _nph_msvc_copy_asan_runtime()
         endif()
         if(NPH_UBSAN OR NPH_TSAN)
@@ -41,8 +52,8 @@ function(nph_apply_sanitizers target)
         # clang-cl: unverified, off by default (NphOptions.cmake).
         if(NPH_ASAN)
             message(WARNING "ASan with clang-cl is not yet verified in CI; enabling best-effort.")
-            target_compile_options(${target} INTERFACE "$<${dbg}:-fsanitize=address>")
-            target_link_options(${target} INTERFACE "$<${dbg}:-fsanitize=address>")
+            target_compile_options(${target} ${scope} "$<${dbg}:-fsanitize=address>")
+            target_link_options(${target} ${scope} "$<${dbg}:-fsanitize=address>")
         endif()
         if(NPH_UBSAN OR NPH_TSAN)
             message(STATUS "UBSan/TSan are not supported with clang-cl; ignoring.")
@@ -60,11 +71,11 @@ function(nph_apply_sanitizers target)
         endif()
         if(san)
             list(JOIN san "," san)
-            target_compile_options(${target} INTERFACE
+            target_compile_options(${target} ${scope}
                 "$<${dbg}:-fsanitize=${san}>"
                 "$<${dbg}:-fno-sanitize-recover=all>"   # UB is a test failure, not a log line
                 "$<${dbg}:-fno-omit-frame-pointer>")
-            target_link_options(${target} INTERFACE "$<${dbg}:-fsanitize=${san}>")
+            target_link_options(${target} ${scope} "$<${dbg}:-fsanitize=${san}>")
         endif()
         # libFuzzer steers by the coverage of the code under test, so with
         # the fuzzers on every first-party object is instrumented (the
@@ -74,8 +85,8 @@ function(nph_apply_sanitizers target)
         # -fsanitize=fuzzer (nph_add_fuzzer) takes precedence and links the
         # one with libFuzzer's main.
         if(NPH_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
-            target_compile_options(${target} INTERFACE -fsanitize=fuzzer-no-link)
-            target_link_options(${target} INTERFACE -fsanitize=fuzzer-no-link)
+            target_compile_options(${target} ${scope} -fsanitize=fuzzer-no-link)
+            target_link_options(${target} ${scope} -fsanitize=fuzzer-no-link)
         endif()
     endif()
 endfunction()

@@ -17,6 +17,7 @@ _nph_require_submodule(volk CMakeLists.txt)
 _nph_require_submodule(vma CMakeLists.txt)
 _nph_require_submodule(cgltf cgltf.h)
 _nph_require_submodule(stb stb_image.h)
+_nph_require_submodule(miniaudio miniaudio.h)
 if(NPH_BUILD_EDITOR)
     _nph_require_submodule(cimgui imgui/imgui.h) # cimgui's own submodule, Dear ImGui
 endif()
@@ -65,6 +66,26 @@ add_subdirectory(vma SYSTEM)
 # policy. Never linked into the runtime.
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/cgltf")
+
+# miniaudio 0.11.25: the audio output device, and only the device
+# (wrapped by engine/audio, src/device.c; CLAUDE.md §3: "Mixing, DSP, and
+# spatialization are ours"; docs/adr/0056-audio-device-streaming.md). The
+# implementation is one unit at the library's own warning level
+# (engine/audio/src/miniaudio_impl.c). Its configuration lives on this
+# interface, so every unit that includes miniaudio.h sees the same
+# structures: no decoding, encoding, generation, resource manager, node
+# graph, or engine; only WASAPI on Windows, ALSA and PulseAudio (PipeWire's
+# too) on Linux, and the null device for headless runs.
+add_library(miniaudio INTERFACE)
+target_include_directories(miniaudio SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/miniaudio")
+target_compile_definitions(miniaudio INTERFACE
+    MA_NO_DECODING MA_NO_ENCODING MA_NO_GENERATION MA_NO_RESOURCE_MANAGER MA_NO_NODE_GRAPH
+    MA_NO_ENGINE MA_ENABLE_ONLY_SPECIFIC_BACKENDS MA_ENABLE_NULL)
+if(WIN32)
+    target_compile_definitions(miniaudio INTERFACE MA_ENABLE_WASAPI)
+else()
+    target_compile_definitions(miniaudio INTERFACE MA_ENABLE_ALSA MA_ENABLE_PULSEAUDIO)
+endif()
 
 # stb_image 2.30 (stb at 2c980bb5): PNG, JPEG, TGA, BMP, and Radiance HDR
 # decoding, offline only (wrapped by tools/cook, src/image.c). Header-only;
