@@ -48,6 +48,11 @@
 // effect_echo, effect_reverb (the default room); and
 // mixer_block_64_spatial, per block: 64 moving 3D voices with Doppler, the
 // air, occlusion, and obstruction.
+//
+// Streams, per block: mixer_block_8_lossless_loops, eight stereo lossless
+// loops the audio thread decodes from memory, against
+// mixer_block_8_streamed_loops, the same eight as streams the streamer
+// decodes, the audio thread copying from their rings.
 
 #include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/delay.h>
@@ -58,6 +63,7 @@
 #include <nepheline/audio/pan.h>
 #include <nepheline/audio/resampler.h>
 #include <nepheline/core/alloc.h>
+#include <nepheline/platform/thread.h>
 
 #include <nbench/nbench.h>
 
@@ -907,4 +913,176 @@ NBENCH(mixer_block_64_spatial)
     }
     nph_audio_mixer_destroy(m);
     bench_clips_free(&clips);
+}
+
+// ---------------------------------------------------------------------------
+// Streams
+// ---------------------------------------------------------------------------
+
+// Eight stereo loops at the mix rate and pitch 1, as music and ambience
+// play: clips in memory the audio thread decodes (lossless), or streams the
+// streamer decodes into rings the audio thread copies from. What a stream
+// costs the audio thread does not depend on its codec (its ring holds float
+// frames), so these streams are float PCM, which the streamer keeps up
+// with; what one costs the streamer is its codec's decode
+// (lossless_decode_stereo16, per frame).
+#define BENCH_LOOPS 8U
+
+static f32 g_stream_f32[2U * BENCH_CLIP_FRAMES];
+
+static NphResult bench_stream_read(void *user, u64 offset, void *dst, u64 size)
+{
+    NPH_UNUSED(user);
+    if (offset > sizeof g_stream_f32 || size > sizeof g_stream_f32 - offset) {
+        return NPH_RESULT_IO_ERROR;
+    }
+    memcpy(dst, (const u8 *)g_stream_f32 + offset, (size_t)size);
+    return NPH_RESULT_OK;
+}
+
+// True when every stream holds two blocks ahead of its voice.
+static bool bench_streams_ready(const NphAudioMixer *m, const NphAudioClip *loops)
+{
+    for (u32 i = 0U; i < BENCH_LOOPS; ++i) {
+        if (nph_audio_clip_stream_ahead(m, loops[i]) < 2ULL * BLOCK) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The eight loops' voices, as clips or streams; false (all released) if
+// anything fails.
+static bool bench_loops_start(const BenchClips *c, bool streamed, NphAudioMixer **out_mixer,
+                              NphAudioStreamer **out_streamer, NphAudioClip *loops)
+{
+    for (u32 i = 0U; i < 2U * BENCH_CLIP_FRAMES; ++i) {
+        g_stream_f32[i] = (f32)g_mix16[i] / 32768.0F;
+    }
+    NphAudioMixerDesc md;
+    memset(&md, 0, sizeof md);
+    md.alloc = nph_allocator_system();
+    md.max_voices = BENCH_LOOPS;
+    md.max_real_voices = BENCH_LOOPS;
+    md.max_clips = BENCH_LOOPS;
+    NphAudioStreamerDesc sd;
+    memset(&sd, 0, sizeof sd);
+    sd.alloc = nph_allocator_system();
+    sd.max_streams = BENCH_LOOPS;
+    sd.period_ms = 1U;
+    NphAudioMixer *m = NULL;
+    NphAudioStreamer *streamer = NULL;
+    bool ok = nph_audio_mixer_create(&md, &m) == NPH_RESULT_OK &&
+              (!streamed || nph_audio_streamer_create(&sd, &streamer) == NPH_RESULT_OK);
+    if (ok && !streamed) {
+        ok = bench_clip(m, c, BENCH_CLIP_LOSSLESS, &loops[0]) == NPH_RESULT_OK;
+    }
+    for (u32 i = 0U; ok && i < BENCH_LOOPS; ++i) {
+        // Spread through the loop, panned across the stage.
+        const u64 start = (u64)i * 4000U;
+        if (streamed) {
+            NphAudioStreamDesc d;
+            memset(&d, 0, sizeof d);
+            d.source = (NphAudioStreamSource){bench_stream_read, NULL};
+            d.codec = NPH_AUDIO_CODEC_PCM;
+            d.format = NPH_AUDIO_FORMAT_F32;
+            d.channels = 2U;
+            d.sample_rate = 48000U;
+            d.frames = BENCH_CLIP_FRAMES;
+            d.size = sizeof g_stream_f32;
+            d.loop = 1;
+            d.start_frame = start;
+            // Long rings, so the offline loop seldom waits for the streamer
+            // (it wakes on the system timer); 32 MB of them, so the voices
+            // read from memory, as a game's do a second after the streamer
+            // wrote the frames.
+            d.buffer_seconds = 8.0F;
+            ok = nph_audio_clip_create_stream(m, streamer, &d, &loops[i]) == NPH_RESULT_OK;
+        }
+        NphAudioPlayDesc p = nph_audio_play_desc_default(streamed ? loops[i] : loops[0]);
+        p.volume = 0.1F;
+        p.pan = 2.0F * (f32)i / (f32)(BENCH_LOOPS - 1U) - 1.0F;
+        if (!streamed) {
+            p.loop = 1;
+            p.start_frame = start;
+        }
+        NphAudioVoice v;
+        ok = ok && nph_audio_voice_play(m, &p, &v) == NPH_RESULT_OK;
+    }
+    if (!ok) {
+        nph_audio_mixer_destroy(m); // first: it closes its streams
+        nph_audio_streamer_destroy(streamer);
+        return false;
+    }
+    *out_mixer = m;
+    *out_streamer = streamer;
+    return true;
+}
+
+static void run_loops(NbenchState *state, bool streamed, char *label, u32 label_size)
+{
+    BenchClips clips;
+    if (!bench_clips_make(&clips)) {
+        nbench_set_label(state, "the clips failed to encode");
+        return;
+    }
+    NphAudioMixer *m = NULL;
+    NphAudioStreamer *streamer = NULL;
+    NphAudioClip loops[BENCH_LOOPS];
+    memset(loops, 0, sizeof loops);
+    if (!bench_loops_start(&clips, streamed, &m, &streamer, loops)) {
+        nbench_set_label(state, "the scene failed to start");
+        bench_clips_free(&clips);
+        return;
+    }
+    for (u32 b = 0U; b < 8U; ++b) {
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+    }
+    nbench_set_items_per_iteration(state, 1U);
+    bool stalled = false;
+    while (nbench_keep_running(state)) {
+        // Offline, the mixer outruns any streamer: the streamer is waited
+        // for, untimed (the check itself, a few tens of ns, is timed).
+        if (streamed && !stalled && !bench_streams_ready(m, loops)) {
+            nbench_pause_timing(state);
+            const u64 t0 = nbench_now_ns();
+            while (!bench_streams_ready(m, loops)) {
+                if (nbench_now_ns() - t0 > 2000000000ULL) {
+                    stalled = true;
+                    break;
+                }
+                nph_thread_yield();
+            }
+            nbench_resume_timing(state);
+        }
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+        nbench_do_not_optimize(g_out_interleaved);
+    }
+    NphAudioMixerStats stats;
+    nph_audio_mixer_stats(m, &stats);
+    if (stalled) {
+        nbench_set_label(state, "the streamer stalled");
+    } else if (streamed) {
+        (void)snprintf(label, label_size, "%u real, %llu frames starved", stats.voices_real,
+                       (unsigned long long)stats.stream_starved);
+        nbench_set_label(state, label);
+    } else {
+        (void)snprintf(label, label_size, "%u real", stats.voices_real);
+        nbench_set_label(state, label);
+    }
+    nph_audio_mixer_destroy(m);
+    nph_audio_streamer_destroy(streamer);
+    bench_clips_free(&clips);
+}
+
+NBENCH(mixer_block_8_lossless_loops)
+{
+    static char label[48];
+    run_loops(state, false, label, (u32)sizeof label);
+}
+
+NBENCH(mixer_block_8_streamed_loops)
+{
+    static char label[48];
+    run_loops(state, true, label, (u32)sizeof label);
 }
