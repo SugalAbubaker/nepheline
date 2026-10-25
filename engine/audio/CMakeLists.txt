@@ -28,6 +28,7 @@ nph_add_module(audio
         src/mixer_voice.c
         src/pan.c
         src/resampler.c
+        src/spatial.c
         src/reverb.c
         src/wav.c
     PUBLIC_DEPS nph::platform
@@ -55,6 +56,7 @@ nph_add_test(audio
         tests/test_mixer_support.h
         tests/test_pan.c
         tests/test_resampler.c
+        tests/test_spatial.c
         tests/test_reverb.c
         tests/test_wav.c
     DEPS
