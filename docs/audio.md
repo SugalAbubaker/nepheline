@@ -7,8 +7,9 @@ and the output device, the one place miniaudio is used. It depends on
 entities, or physics: the runtime gives it clips and streams, moves its voices,
 and casts its occlusion rays. Decisions:
 [ADR-0051](adr/0051-audio-module.md) (module boundaries, real-time scopes, the
-signal format, the resampler) and [ADR-0052](adr/0052-audio-codecs.md) (the
-codecs, and the user's choice of a lossless one).
+signal format, the resampler), [ADR-0052](adr/0052-audio-codecs.md) (the
+codecs, and the user's choice of a lossless one), and
+[ADR-0053](adr/0053-audio-mixer.md) (the mixer and its golden mixes).
 
 Phase 12 builds it in parts. This document describes what exists:
 
@@ -16,7 +17,7 @@ Phase 12 builds it in parts. This document describes what exists:
 |---|---|
 | Real-time scopes (core, platform); the signal format; the block kernels per SIMD level; the resampler; filters; delay lines; panning | done |
 | Codecs: PCM, our lossless codec, our ADPCM; WAV files | done |
-| The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering | planned |
+| The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering, golden mixes | done |
 | Effects and 3D: EQ, compressor, limiter, delay, reverberation; attenuation, Doppler, air absorption, occlusion | planned |
 | The device and streaming | planned |
 | The engine: components, the bridge, cooked sounds, the editor, the sample | planned |
@@ -32,6 +33,7 @@ Phase 12 builds it in parts. This document describes what exists:
 | `wav.h` | WAV files: the reader the cooker uses, and a writer |
 | `lossless.h` | the lossless codec: streams, validation, the encoder, the incremental decoder |
 | `adpcm.h` | our ADPCM: streams, validation, random-access decoding, the encoder |
+| `mixer.h` | the mixer: clips, voices, buses, ducking, snapshots, rendering, statistics |
 
 ## Conventions
 
@@ -46,7 +48,9 @@ Phase 12 builds it in parts. This document describes what exists:
   order (front left, front right, centre, LFE, back left, back right, side left,
   side right, as the layout has them). Speakers stand at the ITU-R BS.775 angles
   (fronts at 30 degrees, 5.1's surrounds at 110) and Dolby's 7.1 ones (sides at
-  90, backs at 150); quad is a square.
+  90, backs at 150); quad is a square. Each channel names its speaker
+  (`NphAudioSpeaker`). 5.1's surrounds are the side pair, as in Microsoft's
+  `KSAUDIO_SPEAKER_5POINT1_SURROUND`, so they play on 7.1's sides.
 - **Directions** are azimuths in the listener's frame of the engine's
   convention (ADR-0008: right-handed, Y up, looking along -Z): 0 straight
   ahead, +pi/2 to the right, -pi/2 to the left, +-pi behind.
@@ -148,17 +152,26 @@ section with the corner prewarped. They are realised as the
 topology-preserving state-variable filter (Zavalishin, "The Art of VA Filter
 Design", 2012; Simper, "Linear Trapezoidal Integrated SVF", Cytomic, 2013):
 the same transfer functions, but the states are the integrators' and the
-coefficients smooth functions of the corner, so the filter stays stable and
-quiet when its parameters change every block (a voice's occlusion), and it
-keeps its precision at low corners, where a direct form's poles crowd
-against the unit circle.
+coefficients smooth functions of the corner. The filter stays stable however
+its parameters move (a voice's occlusion), and it keeps its precision at low
+corners, where a direct form's poles crowd against the unit circle.
+
+A corner that steps once a block still kinks the output at each step, as
+the phase response jumps: a second difference of 0.003 on a 200 Hz tone at
+-6 dBFS, whose own is 0.00034. So a filter in motion glides.
+`nph_audio_filter_process_glide` moves from one design to the next sample by
+sample: the prewarped cutoff by a constant ratio, the damping and the output
+mix linearly. It costs a division a sample.
 
 `nph_audio_filter_magnitude` evaluates a section's transfer function exactly.
 The tests compare every type with the cookbook's own direct-form formulas
 (within 0.0001 dB from 20 Hz to 20 kHz), the processing with the response on
 tones (within 0.01 dB), a 20 Hz high-pass at 48 kHz in f32 (-3.01 dB at its
 corner, within 0.02 dB), and a resonant low-pass whose corner and Q jump every
-64 samples on full-scale noise (bounded, no NaN).
+64 samples on full-scale noise (bounded, no NaN). They also check glides of
+four kinds against a double-precision reference (within 9e-6), from a
+steady block into a glide and on into a steady block, and the same jumps
+taken as glides (bounded).
 
 The one-pole low-pass, y += a (x - y) with a = 1 - exp(-2 pi f / rate), smooths
 and darkens (air absorption).
@@ -306,6 +319,172 @@ Measured: 87.8 dB signal-to-noise on a 110 Hz tone, 66.0 at 1 kHz, 53.3 at
 6 kHz, 74.7 dB on a quiet 440 Hz tone (-40 dB); 23.8 dB on full-scale white
 noise, where there is nothing to predict.
 
+## The mixer
+
+`mixer.h` (ADR-0053) is the module's centre: clips, voices, buses, and
+snapshots, rendered a block at a time.
+
+**Two threads.** The game thread owns the mixer. It makes clips, buses, and
+snapshots, plays and steers voices, and calls `nph_audio_mixer_update` once
+a frame. The audio thread calls `nph_audio_mixer_render`; so does a test,
+offline. The two talk only through:
+- a command ring (game to audio), applied at the start of the next block;
+- an event ring (audio to game): a voice ended, a clip or a bus may be freed;
+- per-slot mailboxes for payloads too big for a command;
+- relaxed atomics for the statistics and the bus meters.
+
+Everything the audio thread touches is allocated by
+`nph_audio_mixer_create`:
+- the voice slots;
+- a context per real voice, plus a quarter more for the voices fading out
+  as others fade in, holding the source history, a lossless decoder, and
+  filter states;
+- the bus buffers and the scratch blocks.
+
+A clip or a bus is freed by an update only after the audio thread's event
+says it is done with it. The event ring holds every slot's event at once,
+so it never refuses one. The command ring can fill: a play then fails with
+`NPH_RESULT_FULL`, and every refused command is counted in the statistics.
+
+**Clips** are PCM (16, 24, or 32-bit integers, or floats), lossless, or
+ADPCM, at any rate from 8 to 192 kHz, with a loop region. A clip is checked
+when it is made: every lossless block's CRC, an ADPCM stream's size and
+shifts. The audio thread therefore never meets a malformed one, and a
+decode that still fails (memory gone bad) plays silence and is counted. A
+clip copies its data, or borrows it with `borrow`.
+
+**Voices.**
+- A voice plays a clip on a bus at a volume, pitch, and pan, from any frame
+  (`start_frame`), after any delay (`delay_frames`, sample-accurate), once
+  or looping, with up to two sends.
+- Its position is 32.32 fixed point. It is resampled at the clip's rate
+  times the pitch, or copied at the mix rate and pitch 1.
+- A start at frame 0 keeps its attack. Any other start fades in over a
+  block, and a stop fades over at least a block.
+- A one-shot plays out its clip, then the resampler's 24-frame ring-out.
+
+**Filters on voices** (the designers', and occlusion's in part D). A
+low-pass and a high-pass, each of which:
+- moves its corner a third of the way in octaves to its target each block;
+- glides there sample by sample (`nph_audio_filter_process_glide`), so a
+  sweep has no steps;
+- is off when fully open (20 kHz, 10 Hz), and its state starts over;
+- crossfades, over the block in which it switches on or off, between the
+  voice through it and the voice without it, along a smoothstep, so the
+  filter's start from silence is not heard. A linear crossfade let 1/256
+  of the step through; the smoothstep lets through a hundred-thousandth.
+
+**Multichannel clips** play speaker to speaker. A channel whose speaker
+the output has plays there alone, so matching layouts map channel to
+channel, and a stereo clip keeps its width everywhere. A channel the output
+lacks plays as a speaker at its own angle:
+- on stereo it goes to its side at constant power: the front stage's
+  +-30 degrees are the pair's ends, sides and backs fold onto them, and the
+  centre splits at -3 dB;
+- on more channels it is panned between the two speakers that bracket it
+  (VBAP).
+
+The LFE goes to the LFE or nowhere. A mono clip's pan is its place; a
+multichannel clip's pan is a balance, lowering the other side.
+
+**Virtual voices.** Each block every playing voice is ranked by:
+1. its priority (0 to 255);
+2. then its score: its volume, times its fade while fading out, times its
+   bus's gain and all its ancestors'.
+
+A real voice's score counts double, a 6 dB hysteresis against two near
+equals trading places every block. The first `max_real_voices` are mixed.
+The rest are virtual: they advance through their clips and fades in
+silence, holding no context, and come back exactly where they would be.
+- A promotion fades in over a block, and so does a demotion out.
+- A promoted lossless voice decodes its block's lead-in, at most 4095
+  frames.
+- Ties fall to the lower slot, so the ranking is deterministic. It is an
+  in-place heapsort of 64-bit keys.
+
+**Buses** form a tree under the master (`NPH_AUDIO_MASTER_BUS`), mixed
+children first in an order Kahn's algorithm keeps. Sends count as edges,
+and the game thread refuses a send or parent that would close a cycle. Each
+bus has:
+- a volume and a mute, which ramp;
+- two sends, each ramping from the last block's bus gain times the send's
+  last gain to the new pair;
+- the snapshots' low-pass, gliding and crossfading as a voice's filters do;
+- peak and RMS meters after its gain, readable from any thread
+  (`nph_audio_bus_meter`).
+
+**Ducking** lowers a bus by up to `depth_db` while a trigger bus's RMS over
+the previous block is above a threshold, with one-pole attack and release
+per block. Reading the previous block makes the result independent of the
+order of the buses.
+
+**Snapshots** are sets of (bus, volume in dB, low-pass corner). A
+snapshot's weight moves linearly to a target over a time. The weighted
+decibels of all active snapshots add per bus, and their corners glide from
+fully open in log frequency with the weight, the lowest winning.
+
+**The output.** The master is clamped to [-1, 1] as it is interleaved (the
+limiter is part D's). While it renders, the mixer sets flush-to-zero and
+denormals-are-zero and restores the caller's MXCSR afterwards: a decaying
+tail in denormals runs a hundred times slower on x86. `render` takes any
+frame count, rendering whole blocks and keeping the rest of the last one.
+The output is a function of the commands and the blocks they arrive in,
+whatever the sizes of the render calls.
+
+**Real time, verified.** Rendering runs inside a real-time scope.
+`test_mixer_realtime.c` plays a busy scene with a hook that counts any
+allocation or blocking call, and the count must be zero. The scene has
+every codec, starts, stops, promotions and demotions, filters, sends,
+delays, ducking, and snapshots. On the Linux sanitizer builds, the
+sanitizer allocator's own hooks also count every `malloc` and `free` the
+audio thread makes. A threaded run drives the rings from a game thread and
+an audio thread at once, under ThreadSanitizer in CI.
+
+## Golden mixes
+
+`tests/audio` renders scripted scenes offline: 1.49 s of stereo at 48 kHz,
+commands at given blocks. It compares each with its approved baseline in
+`tests/audio/baselines` (Git LFS, 32-bit float WAV):
+
+| Scene | What it holds |
+|---|---|
+| `tones_and_pans` | two tones, one swelling and fading out, one sweeping left to right; a pluck after a sample-accurate delay |
+| `codecs_and_rates` | one 44.1 kHz chord as PCM, lossless, and ADPCM, three pitches, loops that wrap; a pitch glide; filters switched on |
+| `buses_ducking_snapshots` | music, dialogue, and effects buses; an effects send; the music ducked under the dialogue; a snapshot darkening and lowering two buses, in and out; a mute |
+| `virtual_voices` | 27 voices of two clips at random volumes, pitches, priorities, and pans, some looping, through four real voices, starting and stopping |
+
+The largest difference from the baseline must be at most 2e-5 of full scale
+and the RMS of the difference at most 2e-6. Those limits absorb the
+differences, in the last bit, of the C libraries' `sinf`, `powf`, and `tan`
+between MSVC, GCC, and Clang, while catching any change a listener could
+hear. To stay comparable across compilers, the scripts keep library
+functions out of quantities that accumulate: a pitch from `powf` would turn
+its last bit into a phase error that grows. A scene that clips fails, since
+the output's clamp would hide its gains.
+
+Every CI job compares, the Windows ones included: they fetch the baselines
+from LFS. The three MSVC configurations match the baselines bit for bit. A
+checkout without LFS sees pointer files, and the tests skip. Renders go to
+`<build>/audio_golden/<Config>/`, and CI uploads them when a job fails. A
+change that alters a mix fails the test until its renders are approved:
+listen to the new renders, look at the difference against the old ones,
+then run
+
+    python scripts/audio_golden_approve.py --from <build>/audio_golden/<Config> NAME...
+
+The approval script reports each baseline as new, changed (with its
+largest difference), or unchanged.
+
+Reviewing the first renders found two defects:
+- the stereo clips' crosstalk, as a 2.2 dB beat between the music's
+  detuned channels;
+- the filters' switch-on click, a second difference of 0.19 in the codecs
+  scene.
+
+Both have unit tests now
+(`multichannel_clips_map_speaker_to_speaker`,
+`filters_switch_on_and_off_without_a_click`).
+
 ## Performance
 
 `audio_bench` (benchmarks/audio), Profile, Ryzen 7 5800X
@@ -336,6 +515,19 @@ A stereo voice resampled from 44.1 kHz to 48 kHz costs 0.7 ms of one core per
 second of sound (0.07% of a core); a voice at its source's own rate and pitch
 skips the resampler.
 
+The mixer, per 256-frame block of stereo output, with voices looping and
+settled (`mixer_block_*`; `benchmarks/results/audio-2026-10-25-*.json`):
+
+| Scene | Per block | Per voice |
+|---|---|---|
+| 64 voices at the mix rate and pitch 1 (copied) | 11.9 µs | 0.19 µs |
+| 64 voices from 44.1 kHz at pitches 0.8 to 1.25, a quarter low-passed | 177 µs | 2.8 µs |
+| A game's load: 128 real of 512 (lossless loops, ADPCM effects, 44.1 kHz PCM, filters, sends, three buses, a duck, a snapshot) | 440 µs, 8.3% of a core | 3.4 µs |
+| 16 real of 512 (the ranking and the virtual voices) | 59 µs | |
+
+The resampler is two thirds of a resampled voice. A filter in glide costs
+3.5 ns a sample against 3.3 steady (`filter_lowpass_glide`).
+
 On SSE4.2 the resampler runs channel by channel: two channels' eight
 accumulators are sixteen SSE registers, and spilling them made a stereo frame
 40.9 ns where two single channels take 32.5. AVX2 keeps the pairs.
@@ -356,6 +548,22 @@ banks, its table against the exact kernel, and its quality on tones; every
 filter type against the cookbook, the processing against the response, a low
 corner, modulation; the delay line's reads, wrap, and a feedback loop per
 block against per sample; and the panners' power, speaker hits, continuity,
-and spread. The real-time scopes have their own tests in core
+and spread. The mixer's tests (`test_mixer.c`) cover:
+- gains, pans, and the equal-power law to the bit;
+- pitch and clip rates, sample-accurate delays, and starts keeping their
+  attack;
+- loops, stops, and fades;
+- multichannel clips speaker to speaker, on every layout pair that matters;
+- filters switching and sweeping without a click;
+- buses, sends, and mutes;
+- virtual voices resuming in place, and priority over loudness;
+- ducking, and snapshots in and out;
+- every codec through the mixer;
+- clips destroyed while playing, and refusals;
+- a full command ring;
+- rendering in any pieces to the same bits.
+
+`test_mixer_realtime.c` is the real-time proof above, and `tests/audio` the
+golden mixes. The real-time scopes have their own tests in core
 (`test_realtime.c`: allocations, the spin lock, nesting, the assertion) and
 platform (`test_realtime.c`: every blocking call, per thread).
