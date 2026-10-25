@@ -72,6 +72,18 @@ static inline f64 test_rms(const f32 *x, u32 count)
     return count > 0U ? sqrt(sum / (f64)count) : 0.0;
 }
 
+// The largest second difference of x: a smooth signal's is its curvature
+// (a sine's, amp * (2 pi f / rate)^2); a click's is the size of its step.
+static inline f64 test_largest_bend(const f32 *x, u32 count)
+{
+    f64 worst = 0.0;
+    for (u32 i = 2U; i < count; ++i) {
+        const f64 d2 = fabs((f64)x[i] - 2.0 * (f64)x[i - 1U] + (f64)x[i - 2U]);
+        worst = d2 > worst ? d2 : worst;
+    }
+    return worst;
+}
+
 static inline f64 test_db(f64 ratio)
 {
     return 20.0 * log10(ratio > 1e-30 ? ratio : 1e-30);

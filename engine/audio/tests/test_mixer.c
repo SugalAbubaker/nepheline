@@ -575,18 +575,6 @@ NTEST(audio_mixer, snapshots_fade_their_bus_changes_in_and_out)
     nph_audio_mixer_destroy(m);
 }
 
-// The largest second difference of x: a smooth signal's is its curvature
-// (a sine's, amp * (2 pi f / rate)^2); a click's is the size of its step.
-static f64 tm_largest_bend(const f32 *x, u32 count)
-{
-    f64 worst = 0.0;
-    for (u32 i = 2U; i < count; ++i) {
-        const f64 d2 = fabs((f64)x[i] - 2.0 * (f64)x[i - 1U] + (f64)x[i - 2U]);
-        worst = d2 > worst ? d2 : worst;
-    }
-    return worst;
-}
-
 NTEST(audio_mixer, filters_switch_on_and_off_without_a_click)
 {
     // A steady 200 Hz tone, whose own bend is 0.5 (2 pi 200 / 48000)^2 =
@@ -627,7 +615,7 @@ NTEST(audio_mixer, filters_switch_on_and_off_without_a_click)
             nph_audio_mixer_render(m, out + (u64)b * NPH_AUDIO_BLOCK_FRAMES,
                                    NPH_AUDIO_BLOCK_FRAMES);
         }
-        const f64 bend = tm_largest_bend(out, BLOCKS * NPH_AUDIO_BLOCK_FRAMES);
+        const f64 bend = test_largest_bend(out, BLOCKS * NPH_AUDIO_BLOCK_FRAMES);
         NTEST_LOG("%s filters: largest bend %.3g (the tone's own %.3g)",
                   where == 0U ? "voice" : "bus", bend, own);
         NTEST_ASSERT_TRUE(bend < 1.5 * own);

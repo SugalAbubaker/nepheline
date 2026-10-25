@@ -175,6 +175,33 @@ void nph_audio_filter_process_glide(const NphAudioFilterCoeffs *from,
     state->ic2eq = ic2;
 }
 
+void nph_audio_smooth_crossfade(f32 *wet, const f32 *dry, u32 count, bool to_wet)
+{
+    if (count == 0U) {
+        return;
+    }
+    const f32 step = 1.0F / (f32)count;
+    for (u32 i = 0U; i < count; ++i) {
+        const f32 t = (f32)(i + 1U) * step;
+        const f32 s = t * t * (3.0F - 2.0F * t);
+        const f32 share = to_wet ? s : 1.0F - s;
+        wet[i] = dry[i] + (wet[i] - dry[i]) * share;
+    }
+}
+
+void nph_audio_smooth_ramp(f32 *x, u32 count, bool up)
+{
+    if (count == 0U) {
+        return;
+    }
+    const f32 step = 1.0F / (f32)count;
+    for (u32 i = 0U; i < count; ++i) {
+        const f32 t = (f32)(i + 1U) * step;
+        const f32 s = t * t * (3.0F - 2.0F * t);
+        x[i] *= up ? s : 1.0F - s;
+    }
+}
+
 // Complex arithmetic for the transfer function (MSVC's C has no _Complex).
 typedef struct FilterComplex {
     f64 re, im;

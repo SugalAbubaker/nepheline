@@ -94,6 +94,23 @@ void nph_audio_filter_process_glide(const NphAudioFilterCoeffs *from,
                                     const NphAudioFilterCoeffs *to, NphAudioFilterState *state,
                                     const f32 *in, f32 *out, u32 count);
 
+// Blends `wet` in place with `dry` across `count` samples along a
+// smoothstep, s = t^2 (3 - 2t) with t = (i + 1) / count: from all `dry` to
+// all `wet` when `to_wet`, or back. For switching a filter (or any
+// stateful section) on or off without a click: its first samples, where a
+// section starting from silence differs from the signal, come in with a
+// share of about 3 t^2, a hundred-thousandth for a block of 256, where a
+// linear ramp's 1/256 leaves a tick. The last sample is all `wet` (or all
+// `dry`), so the next block continues without a step.
+void nph_audio_smooth_crossfade(f32 *wet, const f32 *dry, u32 count, bool to_wet);
+
+// Scales `x` in place across `count` samples by the same smoothstep, s
+// rising from 0 to 1 (`up`), or by 1 - s. For fading the input of a section
+// with memory (a delay, a reverberator) into a running signal: its delayed
+// copies then start from silence too, where a crossfade of its output would
+// let their sudden start through.
+void nph_audio_smooth_ramp(f32 *x, u32 count, bool up);
+
 // The magnitude of the filter's response at `freq` Hz for `rate`, from its
 // transfer function (the bilinear transform of the analog section,
 // evaluated exactly): what the processing converges to on a sine.
