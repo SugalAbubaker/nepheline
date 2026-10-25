@@ -87,7 +87,7 @@ jobs:
         run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-objects
       - name: Cache the LFS objects
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .git/lfs
           key: lfs-${{ hashFiles('.lfs-objects') }}
@@ -104,7 +104,7 @@ jobs:
         run: git lfs ls-files --long --include "tests/audio/baselines/**" | cut -d ' ' -f1 | sort > .lfs-audio-objects
       - name: Cache the audio baselines' LFS objects
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .git/lfs
           key: lfs-audio-${{ hashFiles('.lfs-audio-objects') }}
@@ -122,7 +122,7 @@ jobs:
       - name: Cache the Vulkan SDK
         if: runner.os == 'Windows'
         id: vulkan-sdk
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
           key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}-windows
@@ -151,7 +151,7 @@ jobs:
       - name: Cache the Vulkan validation layer
         if: runner.os == 'Linux'
         id: vulkan-layer
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/vulkan-sdk
           key: vulkan-layer-${{ env.VULKAN_SDK_VERSION }}-linux
@@ -280,7 +280,7 @@ jobs:
       # VK_LAYER_PATH points the loader at it alone.
       - name: Cache the Vulkan validation layer
         id: vulkan-layer
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/vulkan-sdk
           key: vulkan-layer-${{ env.VULKAN_SDK_VERSION }}-linux
