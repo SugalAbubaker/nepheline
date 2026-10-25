@@ -94,6 +94,23 @@ jobs:
       - name: Fetch the LFS objects
         if: runner.os == 'Linux'
         run: git lfs pull
+      # The golden mixes' baselines (tests/audio/baselines, docs/audio.md)
+      # are LFS objects too, and every job renders the mixes, so the Windows
+      # jobs fetch those few megabytes, cached the same way, and hold MSVC
+      # and clang-cl to them as well.
+      - name: List the audio baselines' LFS objects
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git lfs ls-files --long --include "tests/audio/baselines/**" | cut -d ' ' -f1 | sort > .lfs-audio-objects
+      - name: Cache the audio baselines' LFS objects
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-audio-${{ hashFiles('.lfs-audio-objects') }}
+      - name: Fetch the audio baselines
+        if: runner.os == 'Windows'
+        run: git lfs pull --include "tests/audio/baselines/**"
 
       - name: Set up the MSVC environment
         if: runner.os == 'Windows'
@@ -208,6 +225,17 @@ jobs:
           path: build/${{ matrix.preset }}/golden/
           if-no-files-found: ignore
 
+      # The golden mixes as this job rendered them, when a test failed:
+      # what a reviewer listens to, and what scripts/audio_golden_approve.py
+      # approves from.
+      - name: Upload the golden mixes
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audio-golden-${{ matrix.name }}-${{ matrix.cfg }}
+          path: build/${{ matrix.preset }}/audio_golden/
+          if-no-files-found: ignore
+
   tidy:
     name: clang-tidy
     runs-on: ubuntu-24.04
@@ -315,9 +343,11 @@ jobs:
   # physics tests, whose solver stages run on spinning helper jobs
   # (ADR-0043 §8). The fibers
   # carry the __tsan_*_fiber annotations (ADR-0010 §5), so parked and
-  # migrated jobs are tracked correctly.
+  # migrated jobs are tracked correctly. And the audio tests, whose mixer
+  # is driven by a game thread and an audio thread through lock-free rings
+  # (ADR-0053).
   tsan:
-    name: tsan (jobs, scene, profile, runtime, physics)
+    name: tsan (jobs, scene, profile, runtime, physics, audio)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -331,14 +361,14 @@ jobs:
         run: >
           cmake --preset linux-clang -DNPH_TSAN=ON -DNPH_ASAN=OFF -DNPH_UBSAN=OFF
           -DNPH_BUILD_BENCHMARKS=OFF -DNPH_BUILD_SAMPLES=OFF
-      - name: Build the jobs, scene, profile, game module, and physics tests
+      - name: Build the jobs, scene, profile, game module, physics, and audio tests
         run: >
           cmake --build --preset linux-clang-debug
-          --target jobs_tests scene_tests profile_tests runtime_game_tests physics_tests
+          --target jobs_tests scene_tests profile_tests runtime_game_tests physics_tests audio_tests
       - name: Run them under ThreadSanitizer
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game|physics)$' --output-on-failure
+        run: ctest --preset linux-clang-debug -R '^(jobs|scene|profile|runtime_game|physics|audio)$' --output-on-failure
 
   # Single required status check for branch protection; stays stable while the
   # matrix above evolves.
