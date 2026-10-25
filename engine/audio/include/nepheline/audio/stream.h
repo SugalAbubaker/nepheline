@@ -26,13 +26,16 @@
 // A stream plays as a clip: nph_audio_clip_create_stream (mixer.h) opens it
 // on a streamer and returns the clip a voice plays, once. Making it fills
 // the ring on the calling thread, so a voice played at once does not start
-// dry. Destroying the clip closes the stream when the audio thread lets go;
+// dry; or, with defer_fill, leaves the filling to the streamer, so the
+// caller does no I/O and no decoding (a game's main thread), and its voice
+// starts once nph_audio_clip_stream_ahead shows the ring holds what it
+// needs. Destroying the clip closes the stream when the audio thread lets go;
 // the streamer frees it on its own thread, with its allocator, which must
 // therefore be thread-safe.
 //
 // Thread-safety: create and destroy are NPH_MAIN_THREAD_ONLY; a source's
 // read callback is called on the streamer's thread, and on the thread
-// making the clip while it fills the ring.
+// making the clip while it fills the ring (not with defer_fill).
 
 #include <nepheline/audio/audio.h>
 #include <nepheline/core/alloc.h>
@@ -86,6 +89,12 @@ typedef struct NphAudioStreamDesc {
     b32 loop;
     u64 start_frame;    // where it starts
     f32 buffer_seconds; // the ring's length (0: 1 s)
+    // The streamer fills the ring, from its thread, rather than the call
+    // that makes the clip: a voice played before the ring holds frames
+    // starts dry (silence, counted as starvation), and a source that fails
+    // or a corrupt block ends the stream there rather than refusing the
+    // clip.
+    b32 defer_fill;
 } NphAudioStreamDesc;
 
 // A stream whose source fails a read, or whose lossless block fails its

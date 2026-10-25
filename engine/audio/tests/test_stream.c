@@ -655,6 +655,88 @@ NTEST(audio_stream, a_corrupt_block_ends_its_stream_in_silence)
     ts_samples_free(pcm);
 }
 
+// Counts the reads made on one thread (the one that made the clip).
+typedef struct TsWatchedSource {
+    TsSource src;
+    u64 thread;
+    NphAtomicU32 reads_there;
+} TsWatchedSource;
+
+static NphResult ts_watched_read(void *user, u64 offset, void *dst, u64 size)
+{
+    TsWatchedSource *w = (TsWatchedSource *)user;
+    if (nph_thread_current_id() == w->thread) {
+        (void)nph_atomic_fetch_add_u32(&w->reads_there, 1U, NPH_MEMORY_ORDER_RELAXED);
+    }
+    return ts_read(&w->src, offset, dst, size);
+}
+
+NTEST(audio_stream, a_deferred_stream_is_filled_by_the_streamer)
+{
+    // With defer_fill, making the clip reads nothing on the calling thread;
+    // the streamer fills the ring, and a voice started once it has plays
+    // what the clip in memory plays, to the bit.
+    enum {
+        BLOCKS = 300
+    };
+    i16 *pcm = ts_samples();
+    TsWatchedSource w;
+    memset(&w, 0, sizeof w);
+    w.src.data = (const u8 *)pcm;
+    w.src.size = (u64)TS_FRAMES * 4U;
+    w.thread = nph_thread_current_id();
+    NphAudioClipDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.codec = NPH_AUDIO_CODEC_PCM;
+    cd.format = NPH_AUDIO_FORMAT_S16;
+    cd.channels = 2U;
+    cd.sample_rate = 48000U;
+    cd.frames = TS_FRAMES;
+    cd.data = pcm;
+    cd.size = w.src.size;
+    NphAudioStreamDesc sd;
+    memset(&sd, 0, sizeof sd);
+    sd.source = (NphAudioStreamSource){ts_watched_read, &w};
+    sd.codec = NPH_AUDIO_CODEC_PCM;
+    sd.format = NPH_AUDIO_FORMAT_S16;
+    sd.channels = 2U;
+    sd.sample_rate = 48000U;
+    sd.frames = TS_FRAMES;
+    sd.size = w.src.size;
+    sd.buffer_seconds = 0.25F;
+    sd.defer_fill = 1;
+    f32 *from_clip = test_buffer(BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
+    f32 *from_stream = test_buffer(BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
+    NphAudioMixer *a = tm_mixer(2U, 4U, 4U);
+    NphAudioClip clip;
+    NTEST_ASSERT_EQ_INT(nph_audio_clip_create(a, &cd, &clip), NPH_RESULT_OK);
+    ts_play(a, clip, false, NULL, from_clip, BLOCKS);
+    nph_audio_mixer_destroy(a);
+    NphAudioStreamer *s = ts_streamer();
+    NphAudioMixer *b = tm_mixer(2U, 4U, 4U);
+    MixStream *st = NULL;
+    const NphAudioClip sclip = ts_stream_clip(b, s, &sd, &st);
+    NTEST_EXPECT_EQ_UINT(nph_atomic_load_u32(&w.reads_there, NPH_MEMORY_ORDER_RELAXED), 0U);
+    // The streamer fills the whole ring (a quarter second, a power of two).
+    const u64 t0 = nph_time_now_ns();
+    while (nph_audio_clip_stream_ahead(b, sclip) < (u64)st->capacity &&
+           nph_time_now_ns() - t0 < nph_time_ms_to_ns(2000U)) {
+        nph_thread_sleep_ns(nph_time_ms_to_ns(1U));
+    }
+    NTEST_EXPECT_EQ_UINT(nph_audio_clip_stream_ahead(b, sclip), (u64)st->capacity);
+    ts_play(b, sclip, false, st, from_stream, BLOCKS);
+    NphAudioMixerStats stats;
+    nph_audio_mixer_stats(b, &stats);
+    NTEST_EXPECT_EQ_UINT(stats.stream_starved, 0U);
+    NTEST_EXPECT_TRUE(test_same_bits(from_clip, from_stream, BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U));
+    NTEST_EXPECT_EQ_UINT(nph_atomic_load_u32(&w.reads_there, NPH_MEMORY_ORDER_RELAXED), 0U);
+    nph_audio_mixer_destroy(b);
+    nph_audio_streamer_destroy(s);
+    test_buffer_free(from_clip, BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
+    test_buffer_free(from_stream, BLOCKS * NPH_AUDIO_BLOCK_FRAMES * 2U);
+    ts_samples_free(pcm);
+}
+
 NTEST(audio_stream, closing_refusals_and_errors)
 {
     i16 *pcm = ts_samples();

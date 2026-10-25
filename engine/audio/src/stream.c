@@ -434,12 +434,15 @@ NphResult mix_stream_open(NphAudioStreamer *streamer, const NphAudioStreamDesc *
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     // The ring filled here, before the streamer has the stream, so a voice
-    // played at once starts on sound.
-    st_fill(streamer, st);
-    const u32 failed = nph_atomic_load_u32(&st->failed, NPH_MEMORY_ORDER_RELAXED);
-    if (failed != 0U) {
-        st_free(st);
-        return (NphResult)failed;
+    // played at once starts on sound; or, deferred, by the streamer, which
+    // the semaphore below wakes.
+    if (!desc->defer_fill) {
+        st_fill(streamer, st);
+        const u32 failed = nph_atomic_load_u32(&st->failed, NPH_MEMORY_ORDER_RELAXED);
+        if (failed != 0U) {
+            st_free(st);
+            return (NphResult)failed;
+        }
     }
     streamer->slots[slot] = st;
     nph_atomic_store_u32(&streamer->state[slot], ST_ACTIVE, NPH_MEMORY_ORDER_RELEASE);

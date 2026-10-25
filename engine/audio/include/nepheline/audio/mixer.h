@@ -195,13 +195,15 @@ f64 nph_audio_clip_duration(const NphAudioMixer *mixer, NphAudioClip clip);
 // It plays once: one voice plays it from where the stream was opened, and
 // another play (while that voice plays or after it ends) is
 // NPH_RESULT_INVALID_STATE; to play the stream again, make another clip
-// (which reads and fills its ring here, where the cost is seen). The voice
+// (which reads and fills its ring here, where the cost is seen, unless the
+// description defers that to the streamer: stream.h defer_fill). The voice
 // neither loops it (desc->loop does) nor starts it part-way
 // (desc->start_frame does). Destroying the clip closes the stream once the
 // audio thread lets go. NPH_RESULT_INVALID_ARGUMENT for a malformed
 // description (ADPCM too: it is for clips in memory); NPH_RESULT_FULL past
 // max_clips or the streamer's max_streams; NPH_RESULT_IO_ERROR when the
-// first fill cannot read, NPH_RESULT_CORRUPT when it meets a corrupt block;
+// first fill cannot read, NPH_RESULT_CORRUPT when it meets a corrupt block
+// (a deferred fill reports neither: the stream ends there, counted);
 // NPH_RESULT_OUT_OF_MEMORY. Its duration is infinite when it loops.
 NPH_MUST_USE NphResult nph_audio_clip_create_stream(NphAudioMixer *mixer,
                                                     NphAudioStreamer *streamer,
