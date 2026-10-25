@@ -57,11 +57,17 @@ Configurations: **Debug** (asserts, validation, ASan/UBSan), **Development**
 (optimised, asserts, validation, profiler), **Profile** (optimised, profiler),
 **Shipping** (LTO, everything compiled out).
 
+The build puts the tools in `build/win-msvc/bin/<Config>/` (on Linux
+`build/linux-gcc/bin/<Config>/`, where game modules end in `.so`); they are
+not on PATH, so the examples below run them from the repository root after
+a Debug build, in PowerShell. The samples' content is cooked by the build
+too, into `build/win-msvc/samples/<sample>/<Config>/`.
+
 Content is cooked offline into packs the runtime maps without parsing
 ([`docs/cook.md`](docs/cook.md)):
 
-```sh
-nph_cook content/ --root content -o build/cooked --pack build/game.npk
+```powershell
+.\build\win-msvc\bin\Debug\nph_cook.exe content --root content -o build\cooked --pack build\game.npk
 ```
 
 `samples/asset_viewer` does exactly that at build time and renders the
@@ -82,9 +88,9 @@ runner enforces their budgets.
 Games are C shared libraries that `nph_player` (and the editor) run, and
 swap in again when they are rebuilt ([`docs/runtime.md`](docs/runtime.md)):
 
-```sh
-nph_player --game=build/win-msvc/bin/Debug/game_sandbox.dll \
-           --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
+```powershell
+.\build\win-msvc\bin\Debug\nph_player.exe --game=build\win-msvc\bin\Debug\game_sandbox.dll `
+    --pack=build\win-msvc\samples\asset_viewer\Debug\showcase.npk
 ```
 
 `samples/game_physics` is a physics playground (crates, balls, stairs,
@@ -93,10 +99,10 @@ the right mouse button to look, the left one to throw
 ([`docs/physics.md`](docs/physics.md)). Its impacts sound from the samples'
 sounds, which are synthesized and cooked at build time:
 
-```sh
-nph_player --game=build/win-msvc/bin/Debug/game_physics.dll \
-           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk \
-           --pack=build/win-msvc/samples/sounds/Debug/sounds.npk
+```powershell
+.\build\win-msvc\bin\Debug\nph_player.exe --game=build\win-msvc\bin\Debug\game_physics.dll `
+    --pack=build\win-msvc\samples\game_physics\Debug\physics.npk `
+    --pack=build\win-msvc\samples\sounds\Debug\sounds.npk
 ```
 
 `samples/game_audio` is a yard of sound ([`docs/audio.md`](docs/audio.md)):
@@ -105,10 +111,10 @@ nph_player --game=build/win-msvc/bin/Debug/game_physics.dll \
   direction, distance, Doppler, and occlusion can all be heard;
 - chimes and knocks played once from the job system.
 
-```sh
-nph_player --game=build/win-msvc/bin/Debug/game_audio.dll \
-           --pack=build/win-msvc/samples/game_physics/Debug/physics.npk \
-           --pack=build/win-msvc/samples/sounds/Debug/sounds.npk
+```powershell
+.\build\win-msvc\bin\Debug\nph_player.exe --game=build\win-msvc\bin\Debug\game_audio.dll `
+    --pack=build\win-msvc\samples\game_physics\Debug\physics.npk `
+    --pack=build\win-msvc\samples\sounds\Debug\sounds.npk
 ```
 
 The editor ([`docs/editor.md`](docs/editor.md)) builds scenes in a docked
@@ -128,9 +134,9 @@ Dear ImGui interface. It has:
   statistics: the output, the voices and streams, and the buses' meters and
   volumes.
 
-```sh
-nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
-nph_editor --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
+```powershell
+.\build\win-msvc\bin\Debug\nph_editor.exe editor.assets=my_game\assets editor.cooked=my_game\cooked
+.\build\win-msvc\bin\Debug\nph_editor.exe --pack=build\win-msvc\samples\asset_viewer\Debug\showcase.npk
 ```
 
 ## Repository layout
