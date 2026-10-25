@@ -124,11 +124,15 @@ async_read_4k_depth_32         40000
 async_read_4k_threads_32       20000
 
 # jobs_bench (docs/jobs.md). Entries that wake a sleeping thread
-# (run_wait_1_main, io_run_wait_1) get 5x; parallel_for_1M depends on the
-# core count, so its budget assumes a two-core runner; the scaling_w*
+# (run_wait_1_main, io_run_wait_1) get 5x, and so does counter_signal,
+# which is two locked instructions and nothing else, whose cost varies
+# between runners' CPUs (docs/benchmarks.md): 16.2 ns on an Intel Xeon
+# Platinum 8573C, 11.0 on an AMD EPYC 9V45, 5.9 on an EPYC 7763, against
+# the reference's 3.9. parallel_for_1M depends on
+# the core count, so its budget assumes a two-core runner; the scaling_w*
 # series is machine-specific and has no budget (its ratios are the
 # Phase 4 exit criterion, judged on the reference machine).
-counter_signal                 12
+counter_signal                 20
 run_wait_1_main                3000
 run_wait_1_worker              1300
 run_wait_batch_256             700

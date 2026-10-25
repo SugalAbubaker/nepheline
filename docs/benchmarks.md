@@ -83,7 +83,16 @@ that blows through its budget on one hosted CPU model only usually has a
 microarchitectural cause worth fixing rather than a budget to raise:
 `lz_decompress_zeros` ran 4.5x slower on some runners because each copy
 step waited on store-to-load forwarding (docs/asset.md). The workflow
-prints each runner's CPU model before the run for this reason. The GPU
+prints each runner's CPU model before the run for this reason. When the
+cause is the hardware's own cost of what the code cannot do without, the
+budget follows the slowest runner instead: `counter_signal` is two
+uncontended locked instructions (a counter's add and its signal), and on
+the Intel Xeon Platinum 8573C some Windows runners have it took 16.2 ns,
+4.1x the reference's and 2.75x an AMD EPYC 7763's, while that runner
+matched the EPYC elsewhere (a median ratio of 0.91 over 95 benchmarks;
+the job system's other atomic-bound rows were 1.7 to 2.8x slower, within
+their budgets). An AMD EPYC 9V45 took 11.0 ns. Its budget is 5x, as for
+the entries that wake threads. The GPU
 budgets are the tight kind: measured on the reference machine and enforced
 there, within 5 % (below).
 
@@ -155,8 +164,13 @@ the 512 × 512 grids measured 0.60 and 0.72 ms against 0.33 and 0.39. On
 driver 621.01 with the overlay on (2026-10-21), the renderer's resolve and
 the occlusion's denoise slowed two- to fourfold for 20 frames some four
 seconds after rendering began, then ran 0.3 to 0.7 ms slow for three
-seconds, and again at random later; none of the runs since, on 610.74
-without the overlay, has shown it. The two drivers also allocate the
+seconds, and again at random later. On 610.74 without the overlay it has
+been seen once, milder: on 2026-10-24 (GPU performance run 40139304210)
+the hedge view's p99 came out 0.65 ms high from a few frames where the
+occlusion, the resolve, and the masked raster slowed together, its mean
+unchanged, and the rerun minutes later was clean. A single view's p99
+that jumps while its mean holds is rerun before it is believed. The two
+drivers also allocate the
 resolve's registers differently, so shader changes measured on one need
 measuring on the other.
 
