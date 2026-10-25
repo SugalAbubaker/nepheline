@@ -557,11 +557,18 @@ the ranking, the mixer works out from its place:
   up to 12 dB and its highs down to 1 kHz on a filter of its own; the
   sends take the voice before it and keep the room.
 
+A voice starts as occluded and obstructed as its play description says
+(`occlusion`, `obstruction`), its filters already there in its first
+block: a sound that begins behind a wall is dark from its first frame,
+and the runtime casts a voice's rays before it plays (runtime.md
+"Audio").
+
 Measured: a 1 kHz source receding at a tenth of the speed of sound sounds
 at 909.07 Hz (909.09 expected), and approaching at 1111.08 Hz (1111.11).
 The air takes 7.66 dB from 8 kHz over 100 m and 0.09 dB from 500 Hz.
 Obstruction takes 12.01 dB from the direct path and nothing from the send;
-occlusion takes 24.02 dB from both. A source circling the listener,
+occlusion takes 24.02 dB from both, and a voice played occluded is
+24.07 dB down in its first block. A source circling the listener,
 re-placed and re-occluded every block, bends the signal less than a still
 tone does.
 

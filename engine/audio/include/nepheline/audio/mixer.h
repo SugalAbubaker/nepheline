@@ -456,6 +456,11 @@ typedef struct NphAudioPlayDesc {
     f32 doppler;        // 0: none, 1: physical (the default)
     f32 air_absorption; // 0: none, 1: ISO 9613-1 at 20 C and 50% humidity (the default)
     f32 send_distance;  // 0 .. 1: the share of the distance attenuation the sends take (0.5)
+    // Where its occlusion and obstruction start, 0 .. 1 each (0), as
+    // nph_audio_voice_set_occlusion sets them: a sound that begins behind a
+    // wall is dark from its first frame.
+    f32 occlusion;
+    f32 obstruction;
 } NphAudioPlayDesc;
 
 // A desc with volume and pitch 1, centred, priority 128, on the master;

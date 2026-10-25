@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The mixer's 3D voices (mixer.h, spatial.h): distance and direction,
-// Doppler, the air, occlusion and obstruction, smooth motion, distance in
-// the ranking, and a stereo clip's width.
+// Doppler, the air, occlusion and obstruction (from a voice's first block),
+// smooth motion, distance in the ranking, and a stereo clip's width.
 
 #include <nepheline/audio/pan.h>
 
@@ -173,6 +173,46 @@ NTEST(audio_mixer_spatial, occlusion_and_obstruction)
     NTEST_ASSERT_NEAR_F64(obstructed_room, 0.0, 0.01);
     NTEST_ASSERT_NEAR_F64(occluded_direct, -24.0, 0.25);
     NTEST_ASSERT_NEAR_F64(occluded_room, -24.0, 0.25);
+    nph_audio_mixer_destroy(m);
+}
+
+NTEST(audio_mixer_spatial, a_voice_starts_as_occluded_as_it_is_played)
+{
+    // The same tone 1 m away twice, on buses of their own, the second played
+    // occluded: dark from its first block, as dark as once it has settled
+    // (a sound that begins behind a wall never starts bright). A cycle a
+    // block, as above.
+    NphAudioMixer *m = tm_mixer(2U, 4U, 4U);
+    const NphAudioClip clip = tm_tone(m, 187.5, 96000U, TM_RATE, 0.5F, NULL);
+    const NphAudioBusDesc bd = nph_audio_bus_desc_default();
+    NphAudioBus open;
+    NphAudioBus shut;
+    NTEST_ASSERT_EQ_INT(nph_audio_bus_create(m, &bd, &open), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_audio_bus_create(m, &bd, &shut), NPH_RESULT_OK);
+    NphAudioPlayDesc d = tms_desc(clip, (NphVec3){0.0F, 0.0F, -1.0F});
+    d.bus = open;
+    (void)tm_play(m, &d);
+    d.bus = shut;
+    d.occlusion = 1.0F;
+    (void)tm_play(m, &d);
+    f32 out[2U * 256U];
+    nph_audio_mixer_render(m, out, 256U);
+    f32 open_first = 0.0F;
+    f32 shut_first = 0.0F;
+    nph_audio_bus_meter(m, open, NULL, &open_first);
+    nph_audio_bus_meter(m, shut, NULL, &shut_first);
+    for (u32 b = 0U; b < 40U; ++b) {
+        nph_audio_mixer_render(m, out, 256U);
+    }
+    f32 open_late = 0.0F;
+    f32 shut_late = 0.0F;
+    nph_audio_bus_meter(m, open, NULL, &open_late);
+    nph_audio_bus_meter(m, shut, NULL, &shut_late);
+    const f64 first = test_db((f64)shut_first / (f64)open_first);
+    const f64 late = test_db((f64)shut_late / (f64)open_late);
+    NTEST_LOG("played occluded: %.2f dB in its first block, %.2f dB settled", first, late);
+    NTEST_ASSERT_NEAR_F64(late, -24.0, 0.25);
+    NTEST_ASSERT_NEAR_F64(first, late, 0.5);
     nph_audio_mixer_destroy(m);
 }
 

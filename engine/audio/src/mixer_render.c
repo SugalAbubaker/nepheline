@@ -139,6 +139,8 @@ static void mr_play(NphAudioMixer *m, const MixCommand *c)
     v->doppler = in->doppler;
     v->air = in->air;
     v->send_distance = in->send_distance;
+    v->occlusion = in->occlusion;
+    v->obstruction = in->obstruction;
     // Until the first ranking works them out: nothing.
     v->sp_direct = 1.0F;
     v->sp_send = 1.0F;

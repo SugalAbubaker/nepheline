@@ -23,6 +23,12 @@ static bool api_push(NphAudioMixer *m, const MixCommand *cmd)
     return true;
 }
 
+// 0 .. 1, and 0 for what is not a number.
+static f32 api_unit(f32 x)
+{
+    return x > 0.0F ? (x < 1.0F ? x : 1.0F) : 0.0F;
+}
+
 static MixCommand api_command(u32 type, u32 index)
 {
     MixCommand c;
@@ -716,6 +722,8 @@ NphResult nph_audio_voice_play(NphAudioMixer *mixer, const NphAudioPlayDesc *des
     init->send_distance = desc->send_distance < 0.0F
                               ? 0.0F
                               : (desc->send_distance > 1.0F ? 1.0F : desc->send_distance);
+    init->occlusion = api_unit(desc->occlusion);
+    init->obstruction = api_unit(desc->obstruction);
     MixCommand c = api_command(MIX_CMD_VOICE_PLAY, index);
     c.generation = h.value;
     if (!api_push(m, &c)) {
@@ -821,8 +829,8 @@ void nph_audio_voice_set_occlusion(NphAudioMixer *mixer, NphAudioVoice voice, f3
     MixCommand c = api_command(MIX_CMD_VOICE_SET, index);
     c.generation = voice.value;
     c.param = MIX_VOICE_OCCLUSION;
-    c.values[0] = occlusion > 0.0F ? (occlusion < 1.0F ? occlusion : 1.0F) : 0.0F;
-    c.values[1] = obstruction > 0.0F ? (obstruction < 1.0F ? obstruction : 1.0F) : 0.0F;
+    c.values[0] = api_unit(occlusion);
+    c.values[1] = api_unit(obstruction);
     (void)api_push(mixer, &c);
 }
 

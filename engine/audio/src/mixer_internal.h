@@ -154,6 +154,8 @@ typedef struct MixVoiceInit {
     f32 doppler;
     f32 air;
     f32 send_distance;
+    f32 occlusion;
+    f32 obstruction;
 } MixVoiceInit;
 
 typedef enum MixVoiceState {
