@@ -218,6 +218,7 @@ Pause keeps the frame on screen. Save trace writes the Chrome trace
   simulation, and rendering.
 - The steps, the entity count, and the renderer's and the scene mirror's
   counts.
+- Physics ("Physics" below) and audio ("Audio" below).
 - Every cvar, edited in place through the registry, with its type, range,
   read-only, and cheat rules. Hovering a cvar's name shows its
   description.
@@ -239,6 +240,26 @@ the bodies from the play copy, and Stop leaves the edited world as it was.
   contacts, centres of mass, sleep, joints) and turn drawing between steps
   on and off (`sim.interpolate`). The scene mirror's line counts the
   entities drawn between steps.
+
+### Audio
+
+Entities sound through their AudioSource components, and are heard from
+the first active AudioListener, else the editor's camera (runtime.md
+"Audio"). Play loads the world's sounds and starts what plays by itself;
+Stop stops every voice and releases them. Sounds are imported from WAV
+files like any other asset ("Importing").
+
+- The Statistics panel's Audio section shows the output (the system's
+  device, the null device, or rendered offline; `audio.device`) and its
+  format, the device's (a note when the hardware's differs and it converts
+  at the edge), its callbacks and the slowest; the mixer's voices (mixed
+  and virtual) and blocks, with the slowest and the average; dropped
+  commands, corrupt reads, and starved frames when there are any; the
+  sounds (loading, failed, streamed) and the sources playing; the streams
+  and the streamer's decoding, seeks, and errors; the occlusion rays cast
+  and the one-shots dropped. A table gives each bus (effects, music,
+  dialogue, ambience, interface, and the master) its meter, peak and RMS
+  in dB, and its volume cvar, edited in place.
 
 ## Editing
 

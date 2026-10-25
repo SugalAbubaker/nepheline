@@ -2,14 +2,16 @@
 
 The last module in the order (CLAUDE.md §4): the `NphEngine` context that
 owns every subsystem, the frame loop, configuration and the console, input
-as the simulation sees it, the bridges from the ECS world to the renderer
-and to the physics world, drawing between simulation steps, and game
-modules with hot reload (§8.12). The player (`nph_player`) and the editor
-are hosts of an engine. Decisions: [ADR-0023](adr/0023-runtime.md) (the
-engine and its frame), [ADR-0024](adr/0024-game-modules.md) (game modules,
-hot reload, and the §13 scripting decision: C only), and
+as the simulation sees it, the bridges from the ECS world to the
+renderer, to the physics world, and to the mixer, drawing between
+simulation steps, and game modules with hot reload (§8.12). The player
+(`nph_player`) and the editor are hosts of an engine. Decisions:
+[ADR-0023](adr/0023-runtime.md) (the engine and its frame),
+[ADR-0024](adr/0024-game-modules.md) (game modules, hot reload, and the
+§13 scripting decision: C only),
 [ADR-0050](adr/0050-physics-in-the-engine.md) (physics in the engine and
-drawing between steps).
+drawing between steps), and [ADR-0058](adr/0058-audio-in-the-engine.md)
+(audio in the engine).
 
 | Header | What |
 |---|---|
@@ -19,7 +21,8 @@ drawing between steps).
 | `console.h` | commands and cvars behind one command line |
 | `clock.h` | the fixed-step clock, and where frames draw between its steps |
 | `sim_input.h` | input snapshots for simulation steps |
-| `components.h` | MeshRenderer, Light, Camera, Environment, RigidBody, Collider |
+| `components.h` | MeshRenderer, Light, Camera, Environment, RigidBody, Collider, AudioSource, AudioListener |
+| `audio.h` | the audio output's modes, one-shots, and the audio statistics |
 | `scene_render.h` | the scene renderer (world to renderer, between steps) and the cooked-scene importer |
 
 ## The engine
@@ -30,13 +33,15 @@ drawing between steps).
 1. cvars, the console and its commands; the user config, `--config`
    files, and command-line assignments, in rising precedence;
 2. profiling (`prof.enabled`): core recording, unless the host started it,
-   and the collector, tracking the engine's five allocators;
+   and the collector, tracking the engine's seven allocators;
 3. the job system; the VFS with every `--pack` and `--content` mounted; the
    asset loader (with the host's resolver for loose cooked files);
 4. input; then by mode the window, the device, the swapchain or offscreen
    target, the render graph (recording passes on jobs), the renderer, the
    GPU profiler, and the scene renderer;
-5. the edited world, its transform system, and its schedule;
+5. the edited world, its transform system, and its schedule; the physics
+   bridge; the audio bridge with its mixer, streamer, and device
+   (`audio.device`);
 6. the game module (`--game`), a scene (`--scene`), play (`play_on_start`),
    and the console script (`--script`).
 
@@ -50,8 +55,10 @@ HEADLESS (no window and no device: the simulation only). `--headless`
 selects HEADLESS whatever the host asked for.
 
 **Allocators.** The engine's memory comes from the host's allocator through
-five tracked wrappers: engine, world, render, assets, game. The profiler
-reports them; destruction logs any bytes still live in one.
+seven tracked wrappers: engine, world, render, assets, game, physics, and
+audio. The profiler reports them; destruction logs any bytes still live in
+one. The host's allocator must be thread-safe: the asset loader's I/O
+thread and the audio streamer's free from it too.
 
 **Logging** is the host's to set up (sinks, the logger thread): the player
 and the editor do, tests may not. The engine only logs.
@@ -139,6 +146,13 @@ Settings are cvars. The engine's:
 | `phys.solver`, `phys.substeps` | 0, 4 | the physics solver (0 the soft step, 1 TGS, 2 XPBD; physics.md "Choosing a solver") and its substeps, from the next play |
 | `phys.sleep`, `phys.continuous` | true, true | bodies at rest fall asleep; fast bodies are swept (physics.md), from the next play |
 | `phys.debug_draw` | 0 | draw the physics world: 1 shapes, 2 boxes, 4 contacts, 8 centres of mass, 16 sleep, 32 joints |
+| `audio.device` | auto | the output: auto, off, system, null, offline ("Audio"; saved, latched) |
+| `audio.sample_rate`, `audio.channels` | 0, 0 | the mix's format (0: the device's own; saved, latched) |
+| `audio.voices`, `audio.real_voices`, `audio.streams` | 512, 64, 32 | voices at once (latched), voices mixed at once, the rest virtual (saved, latched), streams at once (latched) |
+| `audio.stream_seconds` | 1 | the frames a stream's ring holds ahead of its voice |
+| `audio.volume`, `audio.volume_effects`, `audio.volume_music`, `audio.volume_dialogue`, `audio.volume_ambience`, `audio.volume_ui` | 1 | the master's and the buses' volumes (saved) |
+| `audio.reverb` | true | sources send to the room's reverberation (their next voices) |
+| `audio.occlusion_rays` | 72 | occlusion rays a frame, up to nine a source ("Audio"; 0: none) |
 | `r.vsync`, `r.width`, `r.height` | true, 1280, 720 | saved, latched |
 | `r.pipeline` | 1 | 0: the forward reference renderer, 1: the GPU-driven production one (saved) |
 | `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
@@ -391,6 +405,92 @@ entity and its descendants, and the physics bridge does for the bodies it
 teleports. A reset camera, or another camera than the last frame's, is a
 camera cut (a new temporal history).
 
+## Audio
+
+The engine plays the world's sound through the audio module's mixer
+([audio.md](audio.md)), which the audio bridge owns with the streamer and
+the output device ([ADR-0058](adr/0058-audio-in-the-engine.md)):
+
+| Component | |
+|---|---|
+| `AudioSource` | a sound (by GUID: a cooked sound asset, [cook.md](cook.md) "Sounds") on a bus (effects, music, dialogue, ambience, interface), at a volume and pitch, looping or not; `autoplay`; `playing`, which the game writes to start or stop it and the engine writes back when it starts by itself or ends; in 3D or not, with its fall-off (inverse, linear, a four-point curve in dB, or none), size, Doppler, occlusion, reverberation send, and priority |
+| `AudioListener` | where 3D sound is heard: the first active one; else the host's view (the editor's camera), else the first active Camera |
+
+**The output** (`audio.device`): `auto` plays to the system's device with
+a window and to nothing without one; `system` (falling back to `null` when
+the machine has no device), `null` (a thread asking for the mix in real
+time, without hardware), `offline` (each frame renders its own duration, a
+step's in lockstep, on the engine's thread: tests and capture,
+`nph_engine_audio_output`), or `off`. The mix runs at the device's own rate
+and channels unless `audio.sample_rate` and `audio.channels` say otherwise,
+so nothing converts at the edge.
+
+**While the world plays**, at each sync point:
+
+- Like a system run, the bridge looks at the chunks whose AudioSources were
+  written since its last pass (change ticks) and compares each with its
+  voice's record.
+  - A source that starts playing gets a voice, and one that stops loses it
+    (a short fade).
+  - Volume, pitch, the reverberation's send, and occlusion change a playing
+    voice at once, and a new sound plays again. The rest (looping, bus, 3D,
+    fall-off, size, Doppler, priority), which a mixer voice keeps from its
+    start, applies when it next plays.
+  - A source seen for the first time with `autoplay` starts by itself: when
+    play begins, or when it is spawned or given its AudioSource while
+    playing.
+  - The event stream says what went: a despawn or a removed AudioSource
+    stops its voice.
+- After the view is chosen, every 3D voice is placed in the listener's
+  frame: its entity's world position less the listener's, in 64 bits,
+  rounded to 32 in the listener's axes, with the velocity of its motion
+  since the last frame (smoothed over 50 ms; none across a teleport,
+  `nph_engine_reset_interpolation`) for Doppler.
+- Sources that ask for occlusion sample their centre and four points
+  around it, at their size or 30 cm, through the physics world, their own
+  body ignored (as Steam Audio's volumetric occlusion samples a sphere
+  round a source):
+  - a probe from the centre to each point finds those it cannot see, which
+    lie in or behind what the source rests against and are not part of it;
+  - a sight line from the listener to each of the rest finds what hides
+    it, every line ending 5 cm short, so the surface a source rests on (an
+    impact's) does not.
+
+  The share hidden becomes the voice's occlusion, followed over 80 ms
+  ([audio.md](audio.md) "3D"), except as it starts: its first rays are
+  cast before it plays, and it starts as hidden as they say, so a knock
+  behind a wall is dark from its attack. At most `audio.occlusion_rays`
+  are cast a frame (up to nine a source), the voices starting in it
+  first, then round the rest; one that starts past the budget starts open
+  and is cast first thing the next frame.
+
+**Sounds** load when first named: the world's when play begins (waited
+for, so what plays by itself starts on time), a one-shot's on first use
+(`nph_engine_preload_sound` loads it ahead, from the game's `play_begin`).
+A sound in memory becomes a clip, a copy, since the audio thread must never
+fault on a mapping, and its asset is released. A streamed sound keeps its
+file open, checked against the asset the loader mapped, and each of its
+voices gets a stream that reads it at DATA's offset
+([asset.md](asset.md) "The loader"). The streamer primes the stream
+(stream.h `defer_fill`), so the main thread does no I/O, and the voice
+starts once its ring holds a quarter second. Sounds stay loaded until play
+ends, which stops every voice, waits for the streams to close, and
+releases them all.
+
+**One-shots** (`nph_engine_play_sound`, `nph_game_play_sound`): a sound
+played once without an entity of its own, from any thread (the
+simulation's systems), queued (256 a frame) and started at the next sync
+point, in 3D at a position or following an entity. One whose sound takes
+more than a quarter second to load is dropped: late is worse than not at
+all.
+
+**Buses.** Five buses under the master take the sources, each with a
+volume cvar (`audio.volume_effects` and the others, with `audio.volume`
+for the master; saved), and every voice also sends to a sixth with the
+room's reverberation (`audio.reverb`). `nph_engine_audio_bus` and
+`nph_engine_audio_mixer` give a game the rest of the mixer from its
+callbacks: effects on the engine's buses, buses and snapshots of its own.
+
 ## The player
 
 `nph_player` runs a game module in a window, playing from the first frame:
@@ -422,7 +522,10 @@ its stage, on the thread running the schedule, and its step spreads over
 the job system. The game's callbacks, the host's hooks, and the console run
 on the engine's thread at the sync point, with the world quiescent. The
 render hook runs while the next simulation runs: it must not touch the
-world. `nph_engine_reset_interpolation` may be called from any thread.
+world. `nph_engine_reset_interpolation` and `nph_engine_play_sound` may be
+called from any thread. The mixer is the engine's thread's (its commands);
+the device's thread renders it (offline, the engine's own, at the end of
+the sync point), and the streamer's thread fills the streams.
 
 ## Costs (§1.4)
 
@@ -431,7 +534,10 @@ allocates nothing on the heap in steady state: the schedule's scratch
 arenas, the render graph's cached transients, the scene renderer's tables,
 and the physics bridge's records and lists are reused (the physics world's
 arrays keep their size, physics.md). Play begin allocates the physics world
-and a record per body. Reloads, migrations, play copies, and scene files
+and a record per body. The audio bridge's records and sound table grow
+when needed and are kept; a sound allocates its clip or its file when it
+loads, and a streamed sound's voice its stream's ring when it starts.
+Reloads, migrations, play copies, and scene files
 allocate while they run. Steady-state costs: the sync point is a wait for
 the simulation, the transform update, and the scene renderer's sync (one
 version check per chunk of a static world); kicking the simulation is one
@@ -479,6 +585,19 @@ instance about 180 ns more than drawing it as it is: its decomposition at
 the capture and its blend at the sync, on the main thread at the sync point
 (Limitations).
 
+Audio (`benchmarks/results/runtime-2026-10-25-win-msvc-profile-ryzen7-5800x.json`;
+the mix on the null device's thread, as a game's is on the hardware's):
+
+| Benchmark | Median | |
+|---|---|---|
+| `engine_frame_audio_idle` | 4.3 µs | the empty frame with audio on and nothing sounding: about 0.2 µs more than without it, run back to back (the listener, the buses' volumes, the mixer's update) |
+| `engine_frame_audio_256_moving` | 23.0 µs | 256 spatial sources circling the listener, 64 mixed and the rest virtual: about 70 ns a source a frame (placed in the listener's frame with its velocity, eight sources' occlusion in an empty physics world, and its transform) |
+| `engine_frame_audio_64_in_10k` | 12.4 µs | 64 sources standing among 10,000 static boxes, occlusion off |
+| `engine_frame_audio_64_in_10k_occluded` | 25.2 µs | the same with the default occlusion budget, 72 rays a frame: 12.8 µs, 0.18 µs a ray |
+
+The bridge stays a small share of §10.5's 1 ms on the main thread; its
+largest part, occlusion, is bounded by `audio.occlusion_rays`.
+
 ## Testing
 
 `engine/runtime/tests` (`runtime_tests`, statically linked):
@@ -520,6 +639,20 @@ handles, and a reload during play; pipelined and sequential frames
 agreeing; unloading and loading again; what `play_begin` makes has its
 body, placed and at rest, before the first step.
 
+- audio (`test_audio_bridge.c`, headless engines mixing offline in
+  lockstep, sound assets written for the test): a source plays by itself
+  and says when it ends; the game starts, retunes, and stops one; a 3D
+  source sounds from its side of the listener and falls off with distance,
+  and the camera hears when there is no listener; a wall between darkens
+  and quietens, a knock that starts behind one is dark from its attack
+  (three at once under the least budget too, at most nine rays a frame),
+  and the floor a source rests on does not hide it; one-shots from another
+  thread, a full queue counted, a
+  sound that cannot load given up; a streamed sound primes on the streamer
+  and plays without starving, and play's end closes it; despawned and
+  removed sources stop, and one added back plays again; the buses'
+  volumes; with audio off, nothing plays.
+
 `samples/game_physics` (`sample.game_physics_headless`): the autopilot
 walks the player round the playground (up the stairs, off the landing, a
 jump, onto the swinging platform for a ride, more balls thrown than are
@@ -543,6 +676,13 @@ kept) and the run fails unless it says it got round.
   own threads, OS callbacks) are ruled out by game.h's rules, not checked.
 - A reload that changes components while a play copy runs stops play
   instead of migrating both worlds.
+- Audio: sounds stay loaded until play ends (unloading a region's sounds
+  as it streams out comes with world partition, Phase 13); a playing
+  voice keeps its fall-off, size, Doppler, looping, and bus from its start;
+  one listener; occlusion is the share of five points hidden, with no
+  obstruction from it (a game sets that through the mixer) and no
+  propagation round corners;
+  HRTF and ambisonics are §8.10's "later".
 - On Windows a debugger may hold a game module's PDB; game modules that
   need it link with a unique PDB name per build.
 - Shipping builds still load the game as a module; linking a game into

@@ -24,7 +24,8 @@ Phase 12 builds it in parts. This document describes what exists:
 | Effects and 3D: EQ, compressor, limiter, echo, reverberation; attenuation, Doppler, air absorption, occlusion, obstruction | done |
 | The device and streaming | done |
 | Cooked sounds: the sound asset and the cooker's WAV import ([ADR-0057](adr/0057-sound-assets.md), [cook.md](cook.md) "Sounds") | done |
-| The engine: components, the bridge, the editor, the sample | planned |
+| The engine: AudioSource and AudioListener, the bridge, one-shots, occlusion rays, the editor ([ADR-0058](adr/0058-audio-in-the-engine.md), [runtime.md](runtime.md) "Audio") | done |
+| The sample, and the Phase 12 wrap-up | planned |
 
 | Header | Contents |
 |---|---|
