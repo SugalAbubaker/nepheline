@@ -59,6 +59,8 @@ supersedes it and both link to each other.
 | [0051](0051-audio-module.md) | Audio: module boundaries, real-time scopes, the signal format, and the resampler | Accepted |
 | [0052](0052-audio-codecs.md) | Audio codecs: PCM, our lossless codec, and our ADPCM | Accepted |
 | [0053](0053-audio-mixer.md) | The audio mixer: threads, voices, virtual voices, buses, and golden mixes | Accepted |
+| [0054](0054-audio-effects.md) | Audio effects: the equaliser, dynamics, echo, and the reverberator | Accepted |
+| [0055](0055-audio-spatialisation.md) | Audio spatialisation: listener-frame voices, attenuation, Doppler, air, occlusion | Accepted |
 
 ## Template
 

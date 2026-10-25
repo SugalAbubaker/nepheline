@@ -8,8 +8,10 @@ entities, or physics: the runtime gives it clips and streams, moves its voices,
 and casts its occlusion rays. Decisions:
 [ADR-0051](adr/0051-audio-module.md) (module boundaries, real-time scopes, the
 signal format, the resampler), [ADR-0052](adr/0052-audio-codecs.md) (the
-codecs, and the user's choice of a lossless one), and
-[ADR-0053](adr/0053-audio-mixer.md) (the mixer and its golden mixes).
+codecs, and the user's choice of a lossless one),
+[ADR-0053](adr/0053-audio-mixer.md) (the mixer and its golden mixes),
+[ADR-0054](adr/0054-audio-effects.md) (the effects), and
+[ADR-0055](adr/0055-audio-spatialisation.md) (3D).
 
 Phase 12 builds it in parts. This document describes what exists:
 
@@ -18,7 +20,7 @@ Phase 12 builds it in parts. This document describes what exists:
 | Real-time scopes (core, platform); the signal format; the block kernels per SIMD level; the resampler; filters; delay lines; panning | done |
 | Codecs: PCM, our lossless codec, our ADPCM; WAV files | done |
 | The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering, golden mixes | done |
-| Effects and 3D: EQ, compressor, limiter, delay, reverberation; attenuation, Doppler, air absorption, occlusion | planned |
+| Effects and 3D: EQ, compressor, limiter, echo, reverberation; attenuation, Doppler, air absorption, occlusion, obstruction | done |
 | The device and streaming | planned |
 | The engine: components, the bridge, cooked sounds, the editor, the sample | planned |
 
@@ -33,7 +35,12 @@ Phase 12 builds it in parts. This document describes what exists:
 | `wav.h` | WAV files: the reader the cooker uses, and a writer |
 | `lossless.h` | the lossless codec: streams, validation, the encoder, the incremental decoder |
 | `adpcm.h` | our ADPCM: streams, validation, random-access decoding, the encoder |
-| `mixer.h` | the mixer: clips, voices, buses, ducking, snapshots, rendering, statistics |
+| `mixer.h` | the mixer: clips, voices (3D too), buses, effects, ducking, snapshots, rendering, statistics |
+| `eq.h` | the six-band equaliser |
+| `dynamics.h` | the compressor and the lookahead true-peak limiter |
+| `echo.h` | the echo |
+| `reverb.h` | the reverberator: a 16-line feedback delay network |
+| `spatial.h` | attenuation laws, Doppler, air absorption, directions, spread |
 
 ## Conventions
 
@@ -363,7 +370,7 @@ clip copies its data, or borrows it with `borrow`.
   block, and a stop fades over at least a block.
 - A one-shot plays out its clip, then the resampler's 24-frame ring-out.
 
-**Filters on voices** (the designers', and occlusion's in part D). A
+**Filters on voices** (the designers', and occlusion's: 3D below). A
 low-pass and a high-pass, each of which:
 - moves its corner a third of the way in octaves to its target each block;
 - glides there sample by sample (`nph_audio_filter_process_glide`), so a
@@ -423,8 +430,8 @@ snapshot's weight moves linearly to a target over a time. The weighted
 decibels of all active snapshots add per bus, and their corners glide from
 fully open in log frequency with the weight, the lowest winning.
 
-**The output.** The master is clamped to [-1, 1] as it is interleaved (the
-limiter is part D's). While it renders, the mixer sets flush-to-zero and
+**The output.** The master is clamped to [-1, 1] as it is interleaved (a
+limiter on the master keeps it from getting there: Effects below). While it renders, the mixer sets flush-to-zero and
 denormals-are-zero and restores the caller's MXCSR afterwards: a decaying
 tail in denormals runs a hundred times slower on x86. `render` takes any
 frame count, rendering whole blocks and keeping the rest of the last one.
@@ -440,6 +447,120 @@ sanitizer allocator's own hooks also count every `malloc` and `free` the
 audio thread makes. A threaded run drives the rings from a game thread and
 an audio thread at once, under ThreadSanitizer in CI.
 
+## Effects
+
+A bus carries up to four insert effects (ADR-0054), run in order on its
+block before its snapshot low-pass, gain, meters, and sends. Each is a
+plain DSP object with its own header, tested alone, and hosted by the
+mixer (`nph_audio_effect_*`).
+
+**In the mixer.**
+- The game thread builds an effect with all its memory and hands over a
+  pointer; an update frees it after the audio thread's release event, as
+  it does clips.
+- Parameters travel one at a time as commands: a type's enum, or
+  `NPH_AUDIO_EQ_PARAM(band, field)` for the equaliser. The audio thread
+  applies them to its own copy, so nothing it reads is rewritten under it.
+- An effect comes in, when made or brought back from bypass, by its input:
+  (1 - s) x + E(s x) along a smoothstep, so what its delays and tails make
+  starts from silence too. Crossfading its output instead clicked: a 1 ms
+  echo's first copy starts as a step 48 frames into the fade.
+- An effect goes out, bypassed or destroyed, by crossfading its output to
+  the signal without it. A bypassed effect starts over: it comes back
+  without its old tail.
+- A destroyed effect keeps its place in its bus's count until it is
+  released, so a full bus never holds five, even for a block.
+- `nph_audio_effect_meter` reads a compressor's or limiter's deepest gain
+  reduction.
+
+**The equaliser** (`eq.h`): six bands of any filter type, in series. Each
+band's changes glide sample by sample; a band switched on or off
+crossfades; a band changed to another type crossfades from its old
+section's output to its new one's.
+
+**The compressor** (`dynamics.h`) is Giannoulis, Massberg & Reiss's
+feed-forward design (JAES 60(6), 2012):
+- the stereo-linked peak level in dB;
+- a static curve with a soft knee;
+- their smooth branching peak detector on the gain reduction, with an
+  attack and a release time constant;
+- makeup gain, ramped per block.
+
+**The limiter** (`dynamics.h`) holds the true peak, not just the samples.
+Its detector interpolates each channel at the quarter positions between
+samples, as ITU-R BS.1770-4 measures true peak, with our own 48-tap
+Kaiser-windowed sinc. Each sample's required gain:
+1. recovers exponentially at the release rate;
+2. is held at its minimum over the lookahead window (a monotonic deque);
+3. is averaged over the window.
+
+So when a peak leaves the lookahead delay, the gain has fallen exactly to
+what that peak needs, along a ramp. Its latency is the lookahead plus 6
+frames, which is why it belongs on the master, made before anything plays.
+
+**The echo** (`echo.h`): per channel, a delay line whose output feeds back
+through a damping low-pass and a rumble high-pass, with ping-pong for
+stereo. A new delay time crossfades between taps over 50 ms instead of
+sweeping the pitch.
+
+**The reverberator** (`reverb.h`; Valimaki et al., IEEE TASLP 2012, for
+the lineage):
+- **The input:** a pre-delay; eight early reflections (Moorer 1979),
+  alternating sides; four Schroeder all-passes for diffusion (Dattorro's
+  lengths and gains).
+- **The tail:** a 16-line feedback delay network (Jot & Chaigne 1991) of
+  mutually prime lengths, mixed by the orthonormal Hadamard matrix (a fast
+  Walsh-Hadamard transform).
+- **The decay:** per line, a first-order shelf whose gains at DC and
+  Nyquist lose exactly 60 dB in the low and the high decay time (Jot 1992).
+- **The modulation:** four lines wander slowly, so modes do not ring.
+- **The outputs:** each output channel reads the lines through its own
+  Hadamard row, so the outputs are uncorrelated; a width blends them.
+- **Changes:** decay times glide; a new size or pre-delay crossfades in
+  over a block.
+
+Measured: decay times by Schroeder's backward integration within 2% of
+their settings (1.523 s for 1.5, 0.601 s for 0.6, 2.995 s for 3.0); echo
+density 0.88 to 1.04 from 100 ms on; stereo tails correlated at 0.04.
+
+## 3D
+
+A spatial voice (`NphAudioPlayDesc.spatial`, `spatial.h`, ADR-0055) is
+placed by its position and velocity in the listener's frame (+x right, +y
+up, -z ahead). The runtime computes them each frame from the engine's
+64-bit world positions, so precision holds anywhere. Each block, before
+the ranking, the mixer works out from its place:
+
+- **Distance:** an inverse law (OpenAL's "inverse distance clamped",
+  physical at a factor of 1), a linear fade, a designer's curve in
+  decibels, or none. The default is inverse from 1 m to 50 m. Sends take
+  the distance's attenuation only in part (`send_distance`, 0.5), as a
+  room's reverberation stays while the direct sound falls.
+- **Direction:** the azimuth, through pan.h, with a spread from the
+  source's size: the angle it subtends, pi at its surface, widening to all
+  around at its centre. A multichannel clip is its own layout turned to
+  face the voice, a point far away, opening to its own angles from a
+  spread of 60 degrees.
+- **Doppler:** c / (c + v_r), with v_r the rate at which the distance
+  grows, applied to the resampler's step and clamped to [0.5, 2].
+- **The air:** ISO 9613-1 at 20 C and 50% humidity. A one-pole low-pass,
+  whose loss grows as the square of the frequency like the air's, has its
+  coefficient solved exactly so the digital filter loses 0.0766 dB a metre
+  at 8 kHz.
+- **Occlusion** (through a wall): the direct sound and the sends lose up
+  to 24 dB and their highs down to 700 Hz.
+- **Obstruction** (the direct path alone blocked): the direct sound loses
+  up to 12 dB and its highs down to 1 kHz on a filter of its own; the
+  sends take the voice before it and keep the room.
+
+Measured: a 1 kHz source receding at a tenth of the speed of sound sounds
+at 909.07 Hz (909.09 expected), and approaching at 1111.08 Hz (1111.11).
+The air takes 7.66 dB from 8 kHz over 100 m and 0.09 dB from 500 Hz.
+Obstruction takes 12.01 dB from the direct path and nothing from the send;
+occlusion takes 24.02 dB from both. A source circling the listener,
+re-placed and re-occluded every block, bends the signal less than a still
+tone does.
+
 ## Golden mixes
 
 `tests/audio` renders scripted scenes offline: 1.49 s of stereo at 48 kHz,
@@ -452,6 +573,8 @@ commands at given blocks. It compares each with its approved baseline in
 | `codecs_and_rates` | one 44.1 kHz chord as PCM, lossless, and ADPCM, three pitches, loops that wrap; a pitch glide; filters switched on |
 | `buses_ducking_snapshots` | music, dialogue, and effects buses; an effects send; the music ducked under the dialogue; a snapshot darkening and lowering two buses, in and out; a mute |
 | `virtual_voices` | 27 voices of two clips at random volumes, pitches, priorities, and pans, some looping, through four real voices, starting and stopping |
+| `effects` | music through an equaliser and a compressor, plucks through a ping-pong echo and a room's reverberator, a limiter on the master; a band moved, the echo bypassed, the room shortened, the compressor destroyed |
+| `spatial` | a buzz passing from left to right with Doppler and the air; plucks behind a wall that falls away; a chord behind a pillar, obstructed, sending to a room, then round it |
 
 The largest difference from the baseline must be at most 2e-5 of full scale
 and the RMS of the difference at most 2e-6. Those limits absorb the
@@ -526,7 +649,20 @@ settled (`mixer_block_*`; `benchmarks/results/audio-2026-10-25-*.json`):
 | 16 real of 512 (the ranking and the virtual voices) | 59 µs | |
 
 The resampler is two thirds of a resampled voice. A filter in glide costs
-3.5 ns a sample against 3.3 steady (`filter_lowpass_glide`).
+3.5 ns a sample against 3.3 steady (`filter_lowpass_glide`). 64 moving 3D
+voices (`mixer_block_64_spatial`: Doppler, the air, occlusion, obstruction,
+a spread for a quarter) take 230 µs, against 177 µs for 64 plain resampled
+ones.
+
+The effects, per stereo frame (`effect_*`):
+
+| Effect | Per frame | Per block |
+|---|---|---|
+| Six-band equaliser | 40 ns | 10 µs |
+| Compressor | 16 ns | 4.2 µs |
+| True-peak limiter | 33 ns | 8.4 µs |
+| Echo | 14 ns | 3.6 µs |
+| Reverberator | 89 ns | 23 µs (0.4% of a core) |
 
 On SSE4.2 the resampler runs channel by channel: two channels' eight
 accumulators are sixteen SSE registers, and spilling them made a stereo frame
@@ -563,7 +699,15 @@ and spread. The mixer's tests (`test_mixer.c`) cover:
 - a full command ring;
 - rendering in any pieces to the same bits.
 
-`test_mixer_realtime.c` is the real-time proof above, and `tests/audio` the
-golden mixes. The real-time scopes have their own tests in core
+The effects' own tests check the equaliser's bands against their responses
+in series and every kind of change for clicks; the compressor's curve,
+levels, and time constants; the limiter's ceiling on samples and between
+them, its transparency, latency, and ramps; the echo's repeats, ping-pong,
+damping, and time changes; and the reverberator's decay times, echo
+density, decorrelation, stability, and changes. `test_mixer_effects.c` and
+`test_mixer_spatial.c` check the effects and 3D in the mixer, and
+`test_spatial.c` the functions against their laws and ISO 9613-1.
+`test_mixer_realtime.c` is the real-time proof above, now with every effect
+and a third of its voices in 3D, and `tests/audio` the golden mixes. The real-time scopes have their own tests in core
 (`test_realtime.c`: allocations, the spin lock, nesting, the assertion) and
 platform (`test_realtime.c`: every blocking call, per thread).
