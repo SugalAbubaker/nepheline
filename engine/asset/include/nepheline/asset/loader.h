@@ -94,7 +94,10 @@ typedef struct NphAssetLoaderDesc {
 
 // A blob of a loaded asset: `data` is the raw bytes (in the mapping for
 // stored blobs, in the asset's decompression block otherwise), aligned as
-// the entry asked.
+// the entry asked. `offset` is where its stored bytes begin in the asset's
+// file: a stored blob read there through the VFS (vfs.h nph_vfs_open) is
+// `data` again, which is how a sound streams from storage rather than
+// from the mapping (sound.h).
 typedef struct NphAssetBlob {
     u32 tag;
     u32 index;
@@ -102,6 +105,7 @@ typedef struct NphAssetBlob {
     u32 alignment;
     const void *data;
     u64 size;
+    u64 offset;
 } NphAssetBlob;
 
 typedef struct NphAsset {

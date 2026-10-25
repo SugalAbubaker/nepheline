@@ -259,6 +259,7 @@ static NphResult load_prepare(NphAssetLoader *l, Slot *s)
         b->codec = e->codec;
         b->alignment = e->alignment;
         b->size = e->raw_size;
+        b->offset = e->offset;
         if (e->codec == NPH_ASSET_CODEC_NONE) {
             b->data = nph_asset_file_blob(s->mapping.data, e);
             if (l->verify) {

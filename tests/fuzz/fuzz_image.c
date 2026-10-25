@@ -54,6 +54,7 @@ static void cook_and_check(NphAllocator *alloc, const CookImage *img, CookTextur
                 blobs[i].codec = e->codec;
                 blobs[i].alignment = e->alignment;
                 blobs[i].size = e->raw_size;
+                blobs[i].offset = e->offset;
                 blobs[i].data = raw;
                 owned[i] = raw;
                 ++count;

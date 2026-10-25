@@ -8,6 +8,7 @@
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/scene.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 
 #include <stddef.h>
@@ -60,6 +61,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             blobs[i].codec = e->codec;
             blobs[i].alignment = e->alignment;
             blobs[i].size = e->raw_size;
+            blobs[i].offset = e->offset;
             // Bound the memory a hostile table can ask for.
             if (e->raw_size > (1U << 24U) || unpacked_bytes + e->raw_size > (1U << 26U)) {
                 blobs[i].size = 0U;
@@ -98,6 +100,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 for (u32 i = 0; i < scene.header->node_count; ++i) {
                     (void)nph_scene_node_name(&scene, i);
                 }
+            }
+            NphSoundView sound;
+            if (nph_sound_view(&asset, &sound) == NPH_RESULT_OK) {
+                // Touch what the view vouches for: DATA's last byte and the
+                // first of every block (ASan sees a view that lied).
+                volatile u8 sink = sound.data[sound.size - 1U];
+                for (u32 b = 0; sound.block_offsets != NULL && b < sound.header->block_count; ++b) {
+                    sink = sound.data[sound.block_offsets[b]];
+                }
+                (void)sink;
             }
             for (u32 i = 0; i < info.blob_count; ++i) {
                 if (owned[i] != NULL) {

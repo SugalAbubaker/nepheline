@@ -2,16 +2,17 @@
 
 The cooked asset runtime (CLAUDE.md §8.8): the `.nph` container, pack
 archives (`.npk`), the virtual file system, the LZ codec, GUIDs, the
-loader, and the typed views of meshes, textures, materials, and scenes.
-Decisions: [ADR-0016](adr/0016-asset-format.md). The offline cooker that
+loader, and the typed views of meshes, textures, materials, scenes, and
+sounds. Decisions: [ADR-0016](adr/0016-asset-format.md),
+[ADR-0057](adr/0057-sound-assets.md) (sounds). The offline cooker that
 produces these files lives in `tools/cook` ([cook.md](cook.md),
 [ADR-0017](adr/0017-cooker.md)).
 
 Depends on `jobs` (asynchronous loads and parallel decompression) and
 through it on `platform` (files, memory mapping, the mutex of the loader),
 `math` (bounds in the typed headers), and `core`. It does not depend on
-`gpu`: texture formats and the like are pinned numbers that the renderer
-maps.
+`gpu`, nor on `audio`: texture formats, sound codecs, and the like are
+pinned numbers that the renderer and the audio runtime map.
 
 | Header | Contents |
 |---|---|
@@ -22,7 +23,7 @@ maps.
 | `pack.h` | pack archives: reader (mapped, binary search) and streaming writer |
 | `vfs.h` | mounts, path normalisation, reads as copies, mappings, or handles |
 | `loader.h` | shared handles, synchronous and asynchronous loads, blob access |
-| `mesh.h`, `texture.h`, `material.h`, `scene.h` | the typed headers and the views that validate them |
+| `mesh.h`, `texture.h`, `material.h`, `scene.h`, `sound.h` | the typed headers and the views that validate them |
 
 ## The container (`format.h`)
 
@@ -161,8 +162,11 @@ handle holding one reference. A path already loaded returns the same
 handle with one more reference; one still loading is waited for. Handles
 are generational (core/handle.h); `nph_asset_get` returns the `NphAsset`
 (header, blobs with raw pointers and sizes, path) for a READY handle and
-NULL for anything else. `nph_asset_release` drops a reference; the last
-one unloads. `nph_asset_load_guid` and `nph_asset_load_guid_async` load
+NULL for anything else. Each blob also carries its `offset` in the file:
+a stored blob read there through the VFS (`nph_vfs_open`,
+`nph_vfs_read_at`) is the same bytes, which is how a sound streams from
+the file rather than from the mapping. `nph_asset_release` drops a
+reference; the last one unloads. `nph_asset_load_guid` and `nph_asset_load_guid_async` load
 by identity, resolving the GUID to a path through `nph_vfs_find_guid`:
 that is how a scene's references to meshes and materials, and a
 material's to textures, are followed (the cooker derives every GUID from
@@ -239,6 +243,17 @@ can be handed to the renderer without further checks:
   with local TRS, child and sibling links, names), `INST` (a mesh GUID at
   a node with a range of material GUIDs in `MTRL`), `CAMS`, `LGHT`, and
   `STRS` (NUL-terminated names).
+- **Sound** (`sound.h`): `HEAD` (codec, PCM format, channels, rate,
+  frames, the loop, depth, the lossless block size and count, flags:
+  `NPH_SOUND_FLAG_STREAM` for one played from storage), `DATA` (the
+  samples: PCM, our ADPCM stream, or our lossless codec's blocks; always
+  stored, so a stream reads it in the file at the view's `offset`), and
+  `BLKS` (a u32 offset in `DATA` per lossless block). The view checks the
+  header's ranges, PCM's exact size, and that the lossless blocks tile
+  `DATA` in order; the samples themselves are checked by the audio module
+  where they are decoded (a clip's every block when it is made, a stream's
+  as it reads it), since the asset module does not depend on it
+  ([ADR-0057](adr/0057-sound-assets.md)).
 
 ## Testing
 
@@ -257,7 +272,9 @@ synchronous and asynchronous, loads by GUID through a pack, shared handles,
 release during a load, parallel decompression, checksum policies,
 failure paths, leak reporting, and forgotten assets (read again while
 their holders keep them, also during a load); every typed view on valid and corrupted
-data. The fuzz seeds, written by `scripts/fuzz_seeds.py` from an
+data, sounds of each codec among them; a stored blob read back through
+the VFS at its offset, from a directory and from a pack. The fuzz seeds,
+written by `scripts/fuzz_seeds.py` from an
 independent Python description of the formats (with a port of
 `nph_hash64` in `scripts/nph_hash64.py`), must validate with the C
 readers, so a drift between the description and the code fails the unit
@@ -266,7 +283,7 @@ tests.
 Fuzz targets (`tests/fuzz`): `lz` (decode arbitrary bytes into several
 output sizes, then compress-decompress the input at both levels and
 compare), `nph` (validate, checksum, unpack, and resolve every typed
-view), `pack` (validate, then look every entry up by path and GUID and
+view, touching every byte a sound's view vouches for), `pack` (validate, then look every entry up by path and GUID and
 touch its bytes). Besides the nightly libFuzzer runs, each builds as a
 CTest smoke test in every configuration (`fuzz_smoke.lz` and so on) that
 replays the corpus and a fixed set of mutations under the sanitizers

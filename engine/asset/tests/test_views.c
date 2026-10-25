@@ -3,6 +3,7 @@
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/pack.h>
 #include <nepheline/asset/scene.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 #include <nepheline/math/pack.h>
 
@@ -33,6 +34,7 @@ static void image_asset_finish(ImageAsset *ia, NphAssetWriter *w)
         ia->blobs[i].alignment = info.blobs[i].alignment;
         ia->blobs[i].data = nph_asset_file_blob(ia->image, &info.blobs[i]);
         ia->blobs[i].size = info.blobs[i].raw_size;
+        ia->blobs[i].offset = info.blobs[i].offset;
     }
     ia->asset.header = info.header;
     ia->asset.blobs = ia->blobs;
@@ -480,6 +482,215 @@ NTEST(views, scene_view_resolves_and_validates)
 }
 
 // ---------------------------------------------------------------------------
+// Sound
+// ---------------------------------------------------------------------------
+
+// A sound of `codec`, 100 frames of stereo at 48 kHz with `flags`: PCM in
+// 16 bits; ADPCM and lossless as made-up bytes, the lossless ones as four
+// blocks of 25 frames (the view checks how blocks tile DATA, not what they
+// hold). `lz`: DATA compressed, which a sound's may not be.
+static void build_sound(ImageAsset *ia, u32 codec, u32 flags, bool lz)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION,
+                          nph_guid_from_cstr("snd"), 1U);
+    NphSoundHeader h;
+    memset(&h, 0, sizeof h);
+    h.codec = codec;
+    h.channels = 2U;
+    h.sample_rate = 48000U;
+    h.frames = 100U;
+    h.loop_end = 100U;
+    h.bits = 16U;
+    h.flags = flags;
+    u8 data[400];
+    test_fill_pattern(data, sizeof data, 7U);
+    u64 size = sizeof data; // PCM: 100 frames of 2 channels of 2 bytes
+    if (codec == NPH_SOUND_CODEC_PCM) {
+        h.format = NPH_SOUND_FORMAT_S16;
+    } else if (codec == NPH_SOUND_CODEC_ADPCM) {
+        size = 150U;
+    } else {
+        h.block_frames = 25U;
+        h.block_count = 4U;
+        const u32 offsets[4] = {0U, 90U, 170U, 260U};
+        add(&w, NPH_SOUND_TAG_BLOCKS, 0U, offsets, sizeof offsets);
+        size = 330U;
+    }
+    add(&w, NPH_SOUND_TAG_HEADER, 0U, &h, sizeof h);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, NPH_SOUND_TAG_DATA, 0U, data, size,
+                                                  lz ? NPH_ASSET_CODEC_LZ : NPH_ASSET_CODEC_NONE,
+                                                  0U),
+                        NPH_RESULT_OK);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, sound_view_resolves_each_codec)
+{
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(NPH_SOUND_FORMAT_S16), 2U);
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(NPH_SOUND_FORMAT_S24), 3U);
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(NPH_SOUND_FORMAT_S32), 4U);
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(NPH_SOUND_FORMAT_F32), 4U);
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(NPH_SOUND_FORMAT_NONE), 0U);
+    NTEST_ASSERT_EQ_UINT(nph_sound_format_bytes(5U), 0U);
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    NphSoundView v;
+    // PCM, from memory and streamed: DATA's bytes, and where they lie in
+    // the file, which is where a stream reads them.
+    for (u32 flags = 0U; flags <= (u32)NPH_SOUND_FLAG_STREAM; ++flags) {
+        build_sound(&ia, NPH_SOUND_CODEC_PCM, flags, false);
+        NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.size, 400U);
+        NTEST_ASSERT_TRUE(test_check_pattern(v.data, 400U, 7U));
+        NTEST_ASSERT_EQ_UINT(v.offset, nph_ptr_diff(ia.image, v.data));
+        NTEST_ASSERT_NULL(v.block_offsets);
+        NTEST_ASSERT_EQ_UINT(v.header->frames, 100U);
+        image_asset_free(&ia);
+    }
+    // ADPCM from memory; it never streams.
+    build_sound(&ia, NPH_SOUND_CODEC_ADPCM, 0U, false);
+    NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(v.size, 150U);
+    image_asset_free(&ia);
+    build_sound(&ia, NPH_SOUND_CODEC_ADPCM, NPH_SOUND_FLAG_STREAM, false);
+    NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    // Lossless, streamed: the blocks.
+    build_sound(&ia, NPH_SOUND_CODEC_LOSSLESS, NPH_SOUND_FLAG_STREAM, false);
+    NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.block_offsets);
+    NTEST_ASSERT_EQ_UINT(v.block_offsets[3], 260U);
+    NTEST_ASSERT_EQ_UINT(v.size, 330U);
+    image_asset_free(&ia);
+    // Compressed samples could not be read from the file as they are.
+    build_sound(&ia, NPH_SOUND_CODEC_PCM, 0U, true);
+    NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
+NTEST(views, sound_view_rejects_what_is_out_of_range)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    NphSoundView v;
+    build_sound(&ia, NPH_SOUND_CODEC_PCM, 0U, false);
+    NphSoundHeader *h = (NphSoundHeader *)blob_bytes(&ia, NPH_SOUND_TAG_HEADER, 0U);
+    const NphSoundHeader good = *h;
+    // Each field out of range on its own.
+    h->codec = 0U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->codec = 4U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->channels = 0U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->channels = NPH_SOUND_MAX_CHANNELS + 1U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->sample_rate = NPH_SOUND_MIN_RATE - 1U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->sample_rate = NPH_SOUND_MAX_RATE + 1U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->frames = 101U; // DATA no longer holds them
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->frames = 0U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->frames = NPH_SOUND_MAX_FRAMES + 1U; // too long for memory
+    h->loop_end = h->frames;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->loop_start = 100U; // an empty loop
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->loop_end = 101U; // past the end
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->loop_end = 0U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->format = NPH_SOUND_FORMAT_NONE;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->format = 5U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->bits = 24U; // not the format's
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->block_frames = 25U; // PCM has no blocks
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->flags = 2U; // unknown
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    h->reserved[1] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = good;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    ia.asset.header.type_version = NPH_SOUND_TYPE_VERSION + 1U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_VERSION_MISMATCH);
+    ia.asset.header.type_version = NPH_SOUND_TYPE_VERSION;
+    ia.asset.header.type = NPH_ASSET_TYPE_TEXTURE;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_TYPE_MISMATCH);
+    image_asset_free(&ia);
+
+    // The lossless blocks must tile DATA in order.
+    build_sound(&ia, NPH_SOUND_CODEC_LOSSLESS, 0U, false);
+    h = (NphSoundHeader *)blob_bytes(&ia, NPH_SOUND_TAG_HEADER, 0U);
+    u32 *offsets = (u32 *)blob_bytes(&ia, NPH_SOUND_TAG_BLOCKS, 0U);
+    const NphSoundHeader lossless = *h;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    offsets[0] = 1U; // bytes before the first block
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    offsets[0] = 0U;
+    offsets[2] = 90U; // an empty block
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    offsets[2] = 60U; // out of order
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    offsets[2] = 170U;
+    offsets[3] = 330U; // the last block empty
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    offsets[3] = 400U; // past DATA
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    offsets[3] = 260U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    h->block_count = 3U; // not the frames' count, nor BLKS's
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = lossless;
+    h->block_frames = 0U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = lossless;
+    h->block_frames = 34U; // three blocks' worth, where BLKS holds four
+    h->block_count = 3U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = lossless;
+    h->bits = 25U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->bits = 3U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = lossless;
+    h->format = NPH_SOUND_FORMAT_S16; // lossless has no PCM format
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *h = lossless;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+
+    // ADPCM: 16-bit, no format.
+    build_sound(&ia, NPH_SOUND_CODEC_ADPCM, 0U, false);
+    h = (NphSoundHeader *)blob_bytes(&ia, NPH_SOUND_TAG_HEADER, 0U);
+    h->bits = 24U;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->bits = 16U;
+    h->format = NPH_SOUND_FORMAT_S16;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->format = NPH_SOUND_FORMAT_NONE;
+    NTEST_EXPECT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+}
+
+// ---------------------------------------------------------------------------
 // The fuzz seed corpora (scripts/fuzz_seeds.py) are written by an
 // independent Python description of the formats; every seed must pass the
 // engine's validation and resolve its typed view.
@@ -518,6 +729,7 @@ static void check_seed_asset(const char *name, u32 type)
         ia.blobs[i].codec = e->codec;
         ia.blobs[i].alignment = e->alignment;
         ia.blobs[i].size = e->raw_size;
+        ia.blobs[i].offset = e->offset;
         void *unpacked = NPH_ALLOC(alloc, nph_max_u64(e->raw_size, 1U), e->alignment);
         NTEST_ASSERT_NOT_NULL(unpacked);
         NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(raw, e, unpacked), NPH_RESULT_OK);
@@ -543,6 +755,11 @@ static void check_seed_asset(const char *name, u32 type)
         NphSceneView v;
         NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
         NTEST_ASSERT_TRUE(nph_str_equals(nph_scene_node_name(&v, 1U), NPH_STR("child")));
+    } else if (type == NPH_ASSET_TYPE_SOUND) {
+        NphSoundView v;
+        NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.header->frames, 4U);
+        NTEST_ASSERT_EQ_UINT(v.header->channels, 2U);
     }
     for (u32 i = 0; i < info.blob_count; ++i) {
         NPH_FREE(alloc, owned[i], nph_max_u64(ia.blobs[i].size, 1U), ia.blobs[i].alignment);
@@ -557,6 +774,8 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);
+    check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);
+    check_seed_asset("nph/sound_streamed", NPH_ASSET_TYPE_SOUND);
 
     NphAllocator *alloc = nph_allocator_system();
     void *raw = NULL;

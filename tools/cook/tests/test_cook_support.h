@@ -200,6 +200,7 @@ static inline void test_asset_from_writer(NphAllocator *alloc, NphAssetWriter *w
         out->blobs[i].codec = e->codec;
         out->blobs[i].alignment = e->alignment;
         out->blobs[i].size = e->raw_size;
+        out->blobs[i].offset = e->offset;
         void *raw = NPH_ALLOC(alloc, nph_max_u64(e->raw_size, 1U), e->alignment);
         NTEST_ASSERT_NOT_NULL(raw);
         NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(out->image, e, raw), NPH_RESULT_OK);

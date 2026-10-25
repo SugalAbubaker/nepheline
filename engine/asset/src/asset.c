@@ -14,6 +14,8 @@ const char *nph_asset_type_name(u32 type)
         return "material";
     case NPH_ASSET_TYPE_SCENE:
         return "scene";
+    case NPH_ASSET_TYPE_SOUND:
+        return "sound";
     case NPH_ASSET_TYPE_BLOB:
         return "blob";
     default:

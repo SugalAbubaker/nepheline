@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Typed views over loaded assets (mesh.h, texture.h, material.h, scene.h):
-// each resolves the blobs an asset type defines and checks every count
-// and range, so the renderer and the scene code can use the pointers
-// without further validation.
+// Typed views over loaded assets (mesh.h, texture.h, material.h, scene.h,
+// sound.h): each resolves the blobs an asset type defines and checks every
+// count and range, so the renderer, the scene code, and the audio runtime
+// can use the pointers without further validation.
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/scene.h>
+#include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 #include <nepheline/core/assert.h>
 
@@ -319,4 +320,110 @@ NphStr nph_scene_node_name(const NphSceneView *view, u32 index)
 {
     NPH_ASSERT(view != NULL && index < view->header->node_count);
     return nph_str_from_cstr(view->strings + view->nodes[index].name);
+}
+
+// ---------------------------------------------------------------------------
+// Sound
+// ---------------------------------------------------------------------------
+
+u32 nph_sound_format_bytes(u32 format)
+{
+    switch (format) {
+    case NPH_SOUND_FORMAT_S16:
+        return 2U;
+    case NPH_SOUND_FORMAT_S24:
+        return 3U;
+    case NPH_SOUND_FORMAT_S32:
+    case NPH_SOUND_FORMAT_F32:
+        return 4U;
+    default:
+        return 0U;
+    }
+}
+
+// The codec's own fields: PCM's format, depth, and size; ADPCM's depth and
+// memory-only rule; lossless's depth and blocks, which tile DATA in order
+// (offsets rising from 0, every block at least a byte), so a stream that
+// reads block b reads [offsets[b], offsets[b + 1]) inside it.
+static NphResult sound_codec_check(const NphAsset *asset, const NphSoundHeader *h, u64 size,
+                                   const u32 **out_offsets)
+{
+    *out_offsets = NULL;
+    if (h->codec != NPH_SOUND_CODEC_LOSSLESS && (h->block_frames != 0U || h->block_count != 0U)) {
+        return NPH_RESULT_CORRUPT;
+    }
+    switch (h->codec) {
+    case NPH_SOUND_CODEC_PCM: {
+        // frames <= 2^40 and channels * bytes <= 32: the product fits.
+        const u32 bytes = nph_sound_format_bytes(h->format);
+        if (bytes == 0U || h->bits != bytes * 8U || size != h->frames * h->channels * bytes) {
+            return NPH_RESULT_CORRUPT;
+        }
+        return NPH_RESULT_OK;
+    }
+    case NPH_SOUND_CODEC_ADPCM:
+        // Its exact size is the codec's to check, when a clip is made.
+        if (h->format != NPH_SOUND_FORMAT_NONE || h->bits != 16U ||
+            (h->flags & NPH_SOUND_FLAG_STREAM) != 0U) {
+            return NPH_RESULT_CORRUPT;
+        }
+        return NPH_RESULT_OK;
+    case NPH_SOUND_CODEC_LOSSLESS: {
+        if (h->format != NPH_SOUND_FORMAT_NONE || h->bits < 4U || h->bits > 24U ||
+            h->block_frames == 0U ||
+            (u64)h->block_count != (h->frames + h->block_frames - 1U) / h->block_frames) {
+            return NPH_RESULT_CORRUPT;
+        }
+        const void *p = NULL;
+        NPH_TRY(typed_blob(asset, NPH_SOUND_TAG_BLOCKS, 0U, sizeof(u32), h->block_count, &p));
+        const u32 *offsets = (const u32 *)p;
+        if (offsets == NULL || offsets[0] != 0U) {
+            return NPH_RESULT_CORRUPT;
+        }
+        for (u32 b = 0U; b < h->block_count; ++b) {
+            const u64 next = b + 1U < h->block_count ? offsets[b + 1U] : size;
+            if (offsets[b] >= next || next > size) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+        *out_offsets = offsets;
+        return NPH_RESULT_OK;
+    }
+    default:
+        return NPH_RESULT_CORRUPT;
+    }
+}
+
+NphResult nph_sound_view(const NphAsset *asset, NphSoundView *out)
+{
+    NPH_ASSERT(out != NULL);
+    memset(out, 0, sizeof *out);
+    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION));
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_SOUND_TAG_HEADER, 0U, sizeof(NphSoundHeader), 1U, &p));
+    const NphSoundHeader *h = (const NphSoundHeader *)p;
+    const bool stream = (h->flags & NPH_SOUND_FLAG_STREAM) != 0U;
+    if (h->channels == 0U || h->channels > NPH_SOUND_MAX_CHANNELS ||
+        h->sample_rate < NPH_SOUND_MIN_RATE || h->sample_rate > NPH_SOUND_MAX_RATE ||
+        h->frames == 0U ||
+        h->frames > (stream ? NPH_SOUND_MAX_STREAM_FRAMES : NPH_SOUND_MAX_FRAMES) ||
+        h->loop_start >= h->loop_end || h->loop_end > h->frames ||
+        (h->flags & ~(u32)NPH_SOUND_FLAG_STREAM) != 0U || h->reserved[0] != 0U ||
+        h->reserved[1] != 0U) {
+        return NPH_RESULT_CORRUPT;
+    }
+    // Stored: a stream reads the samples from the file, where a compressed
+    // blob's bytes are not them.
+    const NphAssetBlob *data = nph_asset_blob(asset, NPH_SOUND_TAG_DATA, 0U);
+    if (data == NULL || data->size == 0U || data->codec != NPH_ASSET_CODEC_NONE) {
+        return NPH_RESULT_CORRUPT;
+    }
+    const u32 *offsets = NULL;
+    NPH_TRY(sound_codec_check(asset, h, data->size, &offsets));
+    out->header = h;
+    out->data = (const u8 *)data->data;
+    out->size = data->size;
+    out->offset = data->offset;
+    out->block_offsets = offsets;
+    return NPH_RESULT_OK;
 }

@@ -167,6 +167,21 @@ def material_blobs():
     return [("HEAD", 0, 0, 16, header, header)]
 
 
+def sound_blobs(lossless):
+    """A 4-frame stereo sound at 48 kHz (format: sound.h): 16-bit PCM, or a
+    streamed lossless sound's layout around made-up blocks (the view checks
+    how the blocks tile DATA; a clip or a stream checks what they hold)."""
+    if lossless:
+        header = struct.pack("<4I3Q4I2I", 3, 0, 2, 48000, 4, 0, 4, 16, 2, 2, 1, 0, 0)
+        data = bytes(range(40))
+        blocks = struct.pack("<2I", 0, 24)
+        return [("HEAD", 0, 0, 16, header, header), ("DATA", 0, 0, 16, data, data),
+                ("BLKS", 0, 0, 16, blocks, blocks)]
+    header = struct.pack("<4I3Q4I2I", 1, 1, 2, 48000, 4, 0, 4, 16, 0, 0, 0, 0, 0)
+    data = struct.pack("<8h", 0, 0, 1000, -1000, 2000, -2000, 3000, -3000)
+    return [("HEAD", 0, 0, 16, header, header), ("DATA", 0, 0, 16, data, data)]
+
+
 def scene_blobs():
     strings = b"root\0child\0"
     header = struct.pack("<16I", 2, 1, 1, 1, 1, len(strings), 0, *([0] * 9))
@@ -285,6 +300,9 @@ def main():
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
+    write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))
+    write(os.path.join(CORPUS, "nph", "sound_streamed"),
+          nph_file(fourcc("SND "), 1, sound_blobs(True)))
     blob = nph_file(fourcc("BLOB"), 1, [("DATA", 0, 0, 16, b"pack", b"pack")])
     write(os.path.join(CORPUS, "pack", "one_entry"),
           pack_file([("assets/one.nph", guid_from_str("one"), fourcc("BLOB"), blob)]))

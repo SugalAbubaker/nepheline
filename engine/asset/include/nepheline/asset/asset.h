@@ -37,6 +37,7 @@ typedef enum NphAssetType {
     NPH_ASSET_TYPE_TEXTURE = NPH_FOURCC('T', 'E', 'X', ' '),
     NPH_ASSET_TYPE_MATERIAL = NPH_FOURCC('M', 'A', 'T', 'L'),
     NPH_ASSET_TYPE_SCENE = NPH_FOURCC('S', 'C', 'E', 'N'),
+    NPH_ASSET_TYPE_SOUND = NPH_FOURCC('S', 'N', 'D', ' '),
     NPH_ASSET_TYPE_BLOB = NPH_FOURCC('B', 'L', 'O', 'B'), // untyped bytes (tests, tools)
 } NphAssetType;
 

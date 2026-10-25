@@ -122,6 +122,27 @@ static void check_blobs(const NphAsset *a, u32 blob_count, u64 blob_size, NphAss
     NTEST_ASSERT_NULL(nph_asset_blob(a, TAG_DATA, blob_count));
 }
 
+// A stored blob read again through the VFS at its offset is its bytes: how
+// a sound streams (sound.h), from loose files and packs alike.
+static void check_offsets(LoaderFixture *f, NphStr path, const NphAsset *a)
+{
+    NphVfsFile file;
+    NTEST_ASSERT_EQ_INT(nph_vfs_open(f->vfs, path, 0U, &file), NPH_RESULT_OK);
+    for (u32 i = 0; i < a->blob_count; ++i) {
+        const NphAssetBlob *b = &a->blobs[i];
+        if (b->codec != NPH_ASSET_CODEC_NONE) {
+            continue;
+        }
+        u8 bytes[1000];
+        NTEST_ASSERT_LE_UINT(b->size, sizeof bytes);
+        u64 got = 0U;
+        NTEST_EXPECT_EQ_INT(nph_vfs_read_at(&file, b->offset, bytes, b->size, &got), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(got, b->size);
+        NTEST_EXPECT_TRUE(memcmp(bytes, b->data, (size_t)b->size) == 0);
+    }
+    nph_vfs_close(f->vfs, &file);
+}
+
 NTEST_F(LoaderFixture, sync_loads_from_a_directory)
 {
     make_loader(f, false, NPH_ASSET_VERIFY_DEFAULT, 0U);
@@ -139,6 +160,7 @@ NTEST_F(LoaderFixture, sync_loads_from_a_directory)
     NTEST_ASSERT_TRUE(nph_guid_equals(a->header.guid, nph_guid_from_cstr("stored.nph")));
     NTEST_ASSERT_TRUE(nph_str_equals(a->path, NPH_STR("game/stored.nph")));
     check_blobs(a, 3U, 1000U, NPH_ASSET_CODEC_NONE);
+    check_offsets(f, a->path, a);
     NTEST_ASSERT_EQ_UINT(nph_asset_find_guid(f->loader, nph_guid_from_cstr("stored.nph")).value,
                          h.value);
     NTEST_ASSERT_TRUE(
@@ -196,6 +218,7 @@ NTEST_F(LoaderFixture, sync_loads_from_a_pack)
     NphAssetHandle h;
     NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("pak/stored.nph"), &h), NPH_RESULT_OK);
     check_blobs(nph_asset_get(f->loader, h), 3U, 1000U, NPH_ASSET_CODEC_NONE);
+    check_offsets(f, NPH_STR("pak/stored.nph"), nph_asset_get(f->loader, h));
     nph_asset_release(f->loader, h);
     NTEST_ASSERT_EQ_INT(nph_asset_load(f->loader, NPH_STR("pak/packed.nph"), &h), NPH_RESULT_OK);
     check_blobs(nph_asset_get(f->loader, h), 3U, NPH_KIB(40), NPH_ASSET_CODEC_LZ);
