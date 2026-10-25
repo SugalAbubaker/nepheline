@@ -69,7 +69,7 @@ static void adpcm_decode_block(const u8 *table, const u8 *block, u32 skip, u32 c
     const u8 *codes = block + 5;
     const u32 end = skip + count;
     for (u32 i = 0U; i < end; ++i) {
-        const u32 nibble = (codes[i >> 1U] >> ((i & 1U) * 4U)) & 0x0FU;
+        const u32 nibble = ((u32)codes[i >> 1U] >> ((i & 1U) * 4U)) & 0x0FU;
         const i32 code = (i32)(nibble ^ 8U) - 8; // sign-extend four bits
         // 64-bit products: a hostile table's extremes would overflow 32.
         const i32 p = (i32)((c1 * s1 + c2 * s2 + 1024) >> 11);
