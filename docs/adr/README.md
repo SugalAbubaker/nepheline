@@ -62,6 +62,7 @@ supersedes it and both link to each other.
 | [0054](0054-audio-effects.md) | Audio effects: the equaliser, dynamics, echo, and the reverberator | Accepted |
 | [0055](0055-audio-spatialisation.md) | Audio spatialisation: listener-frame voices, attenuation, Doppler, air, occlusion | Accepted |
 | [0056](0056-audio-device-streaming.md) | Audio output device and streaming | Accepted |
+| [0057](0057-sound-assets.md) | Sound assets and their cooking | Accepted |
 
 ## Template
 

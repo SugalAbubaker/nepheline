@@ -23,7 +23,8 @@ Phase 12 builds it in parts. This document describes what exists:
 | The mixer: voices, clips, buses, virtual voices, ducking, snapshots, offline rendering, golden mixes | done |
 | Effects and 3D: EQ, compressor, limiter, echo, reverberation; attenuation, Doppler, air absorption, occlusion, obstruction | done |
 | The device and streaming | done |
-| The engine: components, the bridge, cooked sounds, the editor, the sample | planned |
+| Cooked sounds: the sound asset and the cooker's WAV import ([ADR-0057](adr/0057-sound-assets.md), [cook.md](cook.md) "Sounds") | done |
+| The engine: components, the bridge, the editor, the sample | planned |
 
 | Header | Contents |
 |---|---|
