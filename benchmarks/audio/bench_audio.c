@@ -27,12 +27,28 @@
 //   lossless_decode_stereo16 / _24    the mixer's decode: 256 frames at a time
 //   adpcm_encode_stereo               the closed-loop block search
 //   adpcm_decode_stereo               random-access decode, 256 frames at a time
+//
+// The mixer, per 256-frame block of stereo output, voices looping and
+// settled, pans and volumes spread:
+//
+//   mixer_block_64_copy               64 mono float voices at the mix rate and pitch 1:
+//                                     the copy path, panned, ramped, mixed
+//   mixer_block_64_resampled          64 mono 16-bit voices recorded at 44.1 kHz, pitches
+//                                     0.8 to 1.25, a quarter low-passed
+//   mixer_block_128_of_512_game       a game's load: 128 real of 512, stereo lossless loops,
+//                                     ADPCM effects mono and stereo, 44.1 kHz PCM, filters,
+//                                     sends, three buses with a duck and a snapshot
+//   mixer_block_16_of_512_virtual     16 real of 512: the ranking and the virtual voices
+//
+// And filter_lowpass_glide: the state-variable section moving its corner
+// sample by sample (per sample).
 
 #include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/delay.h>
 #include <nepheline/audio/filter.h>
 #include <nepheline/audio/kernels.h>
 #include <nepheline/audio/lossless.h>
+#include <nepheline/audio/mixer.h>
 #include <nepheline/audio/pan.h>
 #include <nepheline/audio/resampler.h>
 #include <nepheline/core/alloc.h>
@@ -40,6 +56,7 @@
 #include <nbench/nbench.h>
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BLOCK  NPH_AUDIO_BLOCK_FRAMES
@@ -197,6 +214,25 @@ NBENCH(filter_lowpass)
     while (nbench_keep_running(state)) {
         nph_audio_filter_process(&c, &s, g_src[0], g_dst[0], BLOCK);
         nbench_do_not_optimize(g_dst[0]);
+    }
+}
+
+NBENCH(filter_lowpass_glide)
+{
+    prepare();
+    const NphAudioFilterCoeffs lo =
+        nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 500.0F, 0.7071F, 0.0F, 48000.0F);
+    const NphAudioFilterCoeffs hi =
+        nph_audio_filter_design(NPH_AUDIO_FILTER_LOWPASS, 8000.0F, 0.7071F, 0.0F, 48000.0F);
+    NphAudioFilterState s;
+    nph_audio_filter_reset(&s);
+    bool up = true;
+    nbench_set_items_per_iteration(state, BLOCK);
+    while (nbench_keep_running(state)) {
+        nph_audio_filter_process_glide(up ? &lo : &hi, up ? &hi : &lo, &s, g_src[0], g_dst[0],
+                                       BLOCK);
+        nbench_do_not_optimize(g_dst[0]);
+        up = !up;
     }
 }
 
@@ -404,4 +440,278 @@ NBENCH(adpcm_decode_stereo)
         nbench_do_not_optimize(g_dst);
     }
     nph_adpcm_encoded_free(&enc);
+}
+
+// ---------------------------------------------------------------------------
+// The mixer
+// ---------------------------------------------------------------------------
+
+// Clips for the mixer's scenes: the mix's first second as stereo lossless,
+// stereo and mono ADPCM, mono 16-bit PCM (played as a 44.1 kHz recording),
+// and mono float PCM at the mix rate. The samples are made once; the
+// encodings each run, and freed with its mixer.
+#define BENCH_CLIP_FRAMES 48000U
+
+static i16 g_pcm_mono[BENCH_CLIP_FRAMES];
+static f32 g_float_mono[BENCH_CLIP_FRAMES];
+
+typedef struct BenchClips {
+    NphLosslessEncoded lossless;
+    NphAdpcmEncoded adpcm_stereo;
+    NphAdpcmEncoded adpcm_mono;
+} BenchClips;
+
+static void bench_clips_free(BenchClips *c)
+{
+    if (c->lossless.alloc != NULL) {
+        nph_lossless_encoded_free(&c->lossless);
+    }
+    if (c->adpcm_stereo.alloc != NULL) {
+        nph_adpcm_encoded_free(&c->adpcm_stereo);
+    }
+    if (c->adpcm_mono.alloc != NULL) {
+        nph_adpcm_encoded_free(&c->adpcm_mono);
+    }
+}
+
+static bool bench_clips_make(BenchClips *c)
+{
+    memset(c, 0, sizeof *c);
+    prepare_mix();
+    for (u32 i = 0U; i < BENCH_CLIP_FRAMES; ++i) {
+        g_pcm_mono[i] = g_mix_s16[(u64)i * 2U];
+        g_float_mono[i] = (f32)g_mix_s16[(u64)i * 2U] / 32768.0F;
+    }
+    const bool ok = nph_lossless_encode(nph_allocator_system(), g_mix16, 2U, 16U, BENCH_CLIP_FRAMES,
+                                        NULL, &c->lossless) == NPH_RESULT_OK &&
+                    nph_adpcm_encode(nph_allocator_system(), g_mix_s16, 2U, BENCH_CLIP_FRAMES,
+                                     &c->adpcm_stereo) == NPH_RESULT_OK &&
+                    nph_adpcm_encode(nph_allocator_system(), g_pcm_mono, 1U, BENCH_CLIP_FRAMES,
+                                     &c->adpcm_mono) == NPH_RESULT_OK;
+    if (!ok) {
+        bench_clips_free(c);
+    }
+    return ok;
+}
+
+typedef enum BenchClipKind {
+    BENCH_CLIP_FLOAT48 = 0, // mono float at 48 kHz: the copy path
+    BENCH_CLIP_PCM44,       // mono 16-bit at 44.1 kHz: the resampler
+    BENCH_CLIP_LOSSLESS,    // stereo lossless at 48 kHz
+    BENCH_CLIP_ADPCM_STEREO,
+    BENCH_CLIP_ADPCM_MONO,
+    BENCH_CLIP_COUNT
+} BenchClipKind;
+
+static NphResult bench_clip(NphAudioMixer *m, const BenchClips *c, BenchClipKind kind,
+                            NphAudioClip *out)
+{
+    const u32 frames = BENCH_CLIP_FRAMES;
+    NphAudioClipDesc d;
+    memset(&d, 0, sizeof d);
+    d.sample_rate = 48000U;
+    d.borrow = true;
+    switch (kind) {
+    case BENCH_CLIP_FLOAT48:
+        d.codec = NPH_AUDIO_CODEC_PCM;
+        d.format = NPH_AUDIO_FORMAT_F32;
+        d.channels = 1U;
+        d.frames = frames;
+        d.data = g_float_mono;
+        d.size = sizeof g_float_mono;
+        break;
+    case BENCH_CLIP_PCM44:
+        d.codec = NPH_AUDIO_CODEC_PCM;
+        d.format = NPH_AUDIO_FORMAT_S16;
+        d.channels = 1U;
+        d.sample_rate = 44100U;
+        d.frames = frames;
+        d.data = g_pcm_mono;
+        d.size = sizeof g_pcm_mono;
+        break;
+    case BENCH_CLIP_LOSSLESS:
+        d.codec = NPH_AUDIO_CODEC_LOSSLESS;
+        d.channels = 2U;
+        d.frames = c->lossless.stream.frames;
+        d.data = c->lossless.stream.data;
+        d.size = c->lossless.stream.size;
+        d.bits = 16U;
+        d.block_frames = c->lossless.stream.block_frames;
+        d.block_offsets = c->lossless.stream.block_offsets;
+        d.block_count = c->lossless.stream.block_count;
+        break;
+    case BENCH_CLIP_ADPCM_STEREO:
+    case BENCH_CLIP_ADPCM_MONO: {
+        const NphAdpcmStream *s =
+            kind == BENCH_CLIP_ADPCM_STEREO ? &c->adpcm_stereo.stream : &c->adpcm_mono.stream;
+        d.codec = NPH_AUDIO_CODEC_ADPCM;
+        d.channels = s->channels;
+        d.frames = s->frames;
+        d.data = s->data;
+        d.size = s->size;
+        break;
+    }
+    case BENCH_CLIP_COUNT:
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    return nph_audio_clip_create(m, &d, out);
+}
+
+// A scene: `voices` looping voices, `real` of them mixed, on clips of the
+// kinds in `mix` (cycled), with pitches spread from 0.8 to 1.25 (or 1 for
+// the copy path), every fourth with a low-pass, every eighth sending to a
+// bus. Renders until every voice has settled, then measures one block.
+typedef struct BenchScene {
+    u32 voices;
+    u32 real;
+    const BenchClipKind *mix;
+    u32 mix_count;
+    bool pitched;
+    bool buses; // music, effects, and a send bus, a snapshot, and a duck
+} BenchScene;
+
+// The scene's mixer, clips, buses, and voices; false (all released) if
+// anything fails.
+static bool bench_scene_start(const BenchScene *scene, const BenchClips *c, NphAudioMixer **out)
+{
+    NphAudioMixerDesc md;
+    memset(&md, 0, sizeof md);
+    md.alloc = nph_allocator_system();
+    md.max_voices = scene->voices;
+    md.max_real_voices = scene->real;
+    md.max_clips = 16U;
+    NphAudioMixer *m = NULL;
+    if (nph_audio_mixer_create(&md, &m) != NPH_RESULT_OK) {
+        return false;
+    }
+    NphAudioClip clips[BENCH_CLIP_COUNT];
+    for (u32 k = 0U; k < (u32)BENCH_CLIP_COUNT; ++k) {
+        if (bench_clip(m, c, (BenchClipKind)k, &clips[k]) != NPH_RESULT_OK) {
+            nph_audio_mixer_destroy(m);
+            return false;
+        }
+    }
+    NphAudioBus music = NPH_AUDIO_MASTER_BUS;
+    NphAudioBus effects = NPH_AUDIO_MASTER_BUS;
+    NphAudioBus send = NPH_AUDIO_MASTER_BUS;
+    if (scene->buses) {
+        const NphAudioBusDesc bd = nph_audio_bus_desc_default();
+        if (nph_audio_bus_create(m, &bd, &music) != NPH_RESULT_OK ||
+            nph_audio_bus_create(m, &bd, &effects) != NPH_RESULT_OK ||
+            nph_audio_bus_create(m, &bd, &send) != NPH_RESULT_OK) {
+            nph_audio_mixer_destroy(m);
+            return false;
+        }
+        nph_audio_bus_set_duck(m, music, effects, -6.0F, -30.0F, 0.05F, 0.3F);
+        const NphAudioSnapshotEntry e[1] = {{music, -3.0F, 4000.0F}};
+        NphAudioSnapshot snapshot;
+        if (nph_audio_snapshot_create(m, e, 1U, &snapshot) != NPH_RESULT_OK) {
+            nph_audio_mixer_destroy(m);
+            return false;
+        }
+        nph_audio_snapshot_set_weight(m, snapshot, 0.5F, 0.0F);
+    }
+    u64 rng = 99U;
+    for (u32 i = 0U; i < scene->voices; ++i) {
+        const BenchClipKind kind = scene->mix[i % scene->mix_count];
+        NphAudioPlayDesc d = nph_audio_play_desc_default(clips[kind]);
+        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        const f32 u = (f32)(rng >> 40U) / 16777216.0F; // [0, 1)
+        d.loop = true;
+        d.volume = 0.05F + 0.5F * u;
+        d.pan = 2.0F * u - 1.0F;
+        d.pitch = scene->pitched ? 0.8F * powf(1.5625F, u) : 1.0F;
+        d.start_frame = (u64)(u * 20000.0F);
+        d.priority = (u8)(i % 4U * 40U);
+        if (scene->pitched && i % 4U == 1U) {
+            d.lowpass_hz = 2000.0F + 6000.0F * u;
+        }
+        if (scene->buses) {
+            d.bus = kind == BENCH_CLIP_LOSSLESS ? music : effects;
+            if (i % 8U == 3U) {
+                d.sends[0] = send;
+                d.send_gains[0] = 0.3F;
+            }
+        }
+        NphAudioVoice v;
+        if (nph_audio_voice_play(m, &d, &v) != NPH_RESULT_OK) {
+            nph_audio_mixer_destroy(m);
+            return false;
+        }
+    }
+    *out = m;
+    return true;
+}
+
+// `label` is the benchmark's own buffer: nbench keeps the pointer, not a
+// copy.
+static void run_mixer(NbenchState *state, const BenchScene *scene, char *label, u32 label_size)
+{
+    BenchClips clips;
+    NphAudioMixer *m = NULL;
+    if (!bench_clips_make(&clips)) {
+        nbench_set_label(state, "the clips failed to encode");
+        return;
+    }
+    if (!bench_scene_start(scene, &clips, &m)) {
+        nbench_set_label(state, "the scene failed to start");
+        bench_clips_free(&clips);
+        return;
+    }
+    // Settle: every start's fade done, the ranking stable.
+    for (u32 b = 0U; b < 8U; ++b) {
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+    }
+    nbench_set_items_per_iteration(state, 1U);
+    while (nbench_keep_running(state)) {
+        nph_audio_mixer_render(m, g_out_interleaved, BLOCK);
+        nbench_do_not_optimize(g_out_interleaved);
+    }
+    NphAudioMixerStats stats;
+    nph_audio_mixer_stats(m, &stats);
+    (void)snprintf(label, label_size, "%u real, %u virtual", stats.voices_real,
+                   stats.voices_virtual);
+    nbench_set_label(state, label);
+    nph_audio_mixer_destroy(m);
+    bench_clips_free(&clips);
+}
+
+NBENCH(mixer_block_64_copy)
+{
+    static const BenchClipKind mix[1] = {BENCH_CLIP_FLOAT48};
+    const BenchScene scene = {64U, 64U, mix, 1U, false, false};
+    static char label[48];
+    run_mixer(state, &scene, label, (u32)sizeof label);
+}
+
+NBENCH(mixer_block_64_resampled)
+{
+    static const BenchClipKind mix[1] = {BENCH_CLIP_PCM44};
+    const BenchScene scene = {64U, 64U, mix, 1U, true, false};
+    static char label[48];
+    run_mixer(state, &scene, label, (u32)sizeof label);
+}
+
+NBENCH(mixer_block_128_of_512_game)
+{
+    // A game's load: a few stereo lossless loops (music and ambience), the
+    // rest ADPCM effects, mono and stereo, a quarter of them low-passed, an
+    // eighth sending, on three buses with a duck and a snapshot.
+    static const BenchClipKind mix[8] = {
+        BENCH_CLIP_LOSSLESS,   BENCH_CLIP_ADPCM_MONO,   BENCH_CLIP_ADPCM_MONO,
+        BENCH_CLIP_ADPCM_MONO, BENCH_CLIP_ADPCM_STEREO, BENCH_CLIP_ADPCM_MONO,
+        BENCH_CLIP_PCM44,      BENCH_CLIP_ADPCM_MONO,
+    };
+    const BenchScene scene = {512U, 128U, mix, 8U, true, true};
+    static char label[48];
+    run_mixer(state, &scene, label, (u32)sizeof label);
+}
+
+NBENCH(mixer_block_16_of_512_virtual)
+{
+    // Mostly virtual: the ranking's sort and the virtual voices' advance.
+    static const BenchClipKind mix[2] = {BENCH_CLIP_ADPCM_MONO, BENCH_CLIP_PCM44};
+    const BenchScene scene = {512U, 16U, mix, 2U, true, false};
+    static char label[48];
+    run_mixer(state, &scene, label, (u32)sizeof label);
 }

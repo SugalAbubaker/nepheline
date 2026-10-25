@@ -315,8 +315,8 @@ world_ragdolls_32_mt_xpbd      1750000
 world_ragdolls_32_mt_soft8     3800000
 world_ragdolls_32_mt_xpbd16    6600000
 
-# audio_bench (docs/audio.md "Performance"): per sample, or per output
-# frame for the resampler.
+# audio_bench (docs/audio.md "Performance"): per sample, per output frame
+# for the resampler and the codecs, per block for the mixer.
 mix_ramp_scalar                0.8
 mix_ramp_sse4                  0.5
 mix_ramp_avx2                  0.26
@@ -333,6 +333,7 @@ sum_squares_256                0.18
 load_s16_stereo                0.87
 store_f32_stereo               0.53
 filter_lowpass                 9.8
+filter_lowpass_glide           10.5
 filter_design                  105
 delay_read_frac                5.4
 pan_vbap_7_1                   180
@@ -343,6 +344,11 @@ lossless_decode_stereo16       62
 lossless_decode_stereo24       62
 adpcm_encode_stereo            1020
 adpcm_decode_stereo            13
+# The mixer, per 256-frame block of stereo output.
+mixer_block_64_copy            36000
+mixer_block_64_resampled       545000
+mixer_block_128_of_512_game    1360000
+mixer_block_16_of_512_virtual  175000
 
 # profile_bench
 profile_zone_enabled           55
