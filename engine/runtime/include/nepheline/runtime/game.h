@@ -182,6 +182,10 @@ NphPhysicsWorld *nph_game_physics(const NphGame *game);
 // handle.
 NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity);
 
+// The entity a body belongs to, or the null entity (engine.h
+// nph_engine_physics_entity): what a hit or a contact names.
+NphEntity nph_game_physics_entity(const NphGame *game, NphPhysicsBody body);
+
 // Draws `entity` and its descendants where they are from the next frame,
 // not between where they were and where they are: a teleport, a respawn
 // (engine.h nph_engine_reset_interpolation). NPH_THREADSAFE.

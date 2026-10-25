@@ -1150,6 +1150,20 @@ NphPhysicsBody physics_bridge_body(const PhysicsBridge *b, NphEntity e)
     return r != NULL ? r->body : NPH_PHYSICS_BODY_NULL;
 }
 
+NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body)
+{
+    NPH_ASSERT(b != NULL);
+    if (b->physics == NULL || !nph_physics_body_is_valid(b->physics, body)) {
+        return NPH_ENTITY_NULL;
+    }
+    // Each of the bridge's bodies holds its entity in its user data; a body
+    // of the game's own holds what the game chose, so the entity's record
+    // must hold this very body.
+    const NphEntity e = {(u32)nph_physics_body_user_data(b->physics, body)};
+    const BodyRecord *r = record_of(b, e);
+    return r != NULL && r->body.value == body.value ? e : NPH_ENTITY_NULL;
+}
+
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b)
 {
     NPH_ASSERT(b != NULL);

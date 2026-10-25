@@ -1824,6 +1824,12 @@ NphPhysicsBody nph_engine_physics_body(const NphEngine *e, NphEntity entity)
     return e->physics != NULL ? physics_bridge_body(e->physics, entity) : NPH_PHYSICS_BODY_NULL;
 }
 
+NphEntity nph_engine_physics_entity(const NphEngine *e, NphPhysicsBody body)
+{
+    NPH_ASSERT(e != NULL);
+    return e->physics != NULL ? physics_bridge_entity(e->physics, body) : NPH_ENTITY_NULL;
+}
+
 const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL && e->physics != NULL);

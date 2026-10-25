@@ -313,6 +313,13 @@ NphPhysicsWorld *nph_engine_physics(NphEngine *engine);
 // handle (none, not playing, or a body that could not be made).
 NphPhysicsBody nph_engine_physics_body(const NphEngine *engine, NphEntity entity);
 
+// The entity whose RigidBody or Collider `body` is, while playing: what a
+// query's hit or a contact event names (a shape's body:
+// nph_physics_shape_body). The null entity for a body of the game's own, a
+// stale or null handle, or when not playing. As nph_engine_physics_body,
+// from the simulation's systems or at the sync point.
+NphEntity nph_engine_physics_entity(const NphEngine *engine, NphPhysicsBody body);
+
 // The physics world's statistics after the last step (zeros when not
 // playing).
 const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);

@@ -2,11 +2,12 @@
 // Physics in the engine (components.h "Physics"; docs/runtime.md
 // "Physics"): RigidBody and Collider components become bodies when play
 // begins, bodies move their entities, the game moves bodies through the
-// components, components coming and going make and unmake bodies, children
-// follow or not, the world's events overflowing is recovered, and runs
-// repeat. Headless engines in lockstep: one step a frame.
+// components, components coming and going make and unmake bodies, bodies
+// name their entities, children follow or not, the world's events
+// overflowing is recovered, and runs repeat. Headless engines in lockstep: one step a frame.
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/physics/body.h>
+#include <nepheline/physics/query.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/runtime/engine.h>
 
@@ -189,6 +190,52 @@ NTEST(Physics, a_box_falls_onto_the_floor_and_rests)
     nph_engine_play_end(e);
     NTEST_EXPECT_NULL(nph_engine_physics(e));
     NTEST_EXPECT_TRUE(nph_physics_body_is_null(body_of(&fx, box)));
+    finish(&fx);
+}
+
+NTEST(Physics, a_body_names_its_entity)
+{
+    // While playing, each body names the entity whose components made it,
+    // so what a query hits or an event reports says what it was; a body of
+    // the game's own names none, whatever its user data says, and neither
+    // does one that went.
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphEntity floor = spawn_floor(&fx);
+    const NphCollider sphere = sphere_collider(0.5F);
+    const NphEntity ball = spawn(&fx, nph_dvec3(0.0, 3.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &sphere);
+    NTEST_EXPECT_TRUE(nph_entity_is_null(nph_engine_physics_entity(e, NPH_PHYSICS_BODY_NULL)));
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    const NphPhysicsBody floor_body = body_of(&fx, floor);
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_entity(e, floor_body).value, floor.value);
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_entity(e, body_of(&fx, ball)).value, ball.value);
+    // A ray down meets the ball, and past it the floor, through its shape.
+    const NphDVec3 above = nph_dvec3(0.0, 10.0, 0.0);
+    const NphVec3 down = nph_vec3(0.0F, -20.0F, 0.0F);
+    NphPhysicsQueryHit hit;
+    NTEST_ASSERT_TRUE(nph_physics_world_raycast_closest(pw, above, down, NULL, &hit));
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_entity(e, hit.body).value, ball.value);
+    NphPhysicsQueryFilter past = nph_physics_query_filter_default();
+    past.ignore = hit.body;
+    NTEST_ASSERT_TRUE(nph_physics_world_raycast_closest(pw, above, down, &past, &hit));
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_entity(e, nph_physics_shape_body(pw, hit.shape)).value,
+                         floor.value);
+    // A body of the game's own that claims the ball's entity: none.
+    NphPhysicsBodyDesc d = nph_physics_body_desc_default();
+    d.user_data = ball.value;
+    NphPhysicsBody own;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(pw, &d, &own), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_entity_is_null(nph_engine_physics_entity(e, own)));
+    nph_physics_body_destroy(pw, own);
+    // The ball gone, its body names nothing; and nothing does after play.
+    const NphPhysicsBody ball_body = body_of(&fx, ball);
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(nph_engine_world(e), ball), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    NTEST_EXPECT_TRUE(nph_entity_is_null(nph_engine_physics_entity(e, ball_body)));
+    nph_engine_play_end(e);
+    NTEST_EXPECT_TRUE(nph_entity_is_null(nph_engine_physics_entity(e, floor_body)));
     finish(&fx);
 }
 

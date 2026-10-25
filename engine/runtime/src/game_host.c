@@ -913,6 +913,12 @@ NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity)
     return nph_engine_physics_body(game->engine, entity);
 }
 
+NphEntity nph_game_physics_entity(const NphGame *game, NphPhysicsBody body)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_physics_entity(game->engine, body);
+}
+
 NphResult nph_game_play_sound(NphGame *game, NphGuid sound, const NphSoundPlayDesc *desc)
 {
     NPH_ASSERT(game != NULL);

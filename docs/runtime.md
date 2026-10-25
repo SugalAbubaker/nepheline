@@ -339,8 +339,10 @@ static or kinematic body follows its parent.
 
 **The game uses the physics world** for what components do not say:
 `nph_game_physics` returns it while playing (queries, character
-controllers, joints, events, bodies of the game's own) and
-`nph_game_physics_body` an entity's body. The physics system runs alone,
+controllers, joints, events, bodies of the game's own),
+`nph_game_physics_body` an entity's body, and `nph_game_physics_entity` a
+body's entity: what a query hit or an event reports (none for a body of
+the game's own). The physics system runs alone,
 so systems in the stages before and after it may use the world: those that
 change bodies declare a write of RigidBody (so that no two run at once),
 those that only query declare a read. A character controller's moves and

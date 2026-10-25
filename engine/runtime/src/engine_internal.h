@@ -201,6 +201,8 @@ void physics_bridge_sync(PhysicsBridge *b);
 void physics_bridge_draw(const PhysicsBridge *b, NphRenderer *r, u32 flags);
 NphPhysicsWorld *physics_bridge_world(const PhysicsBridge *b);
 NphPhysicsBody physics_bridge_body(const PhysicsBridge *b, NphEntity e);
+// The entity of one of the bridge's bodies, or the null entity.
+NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body);
 // The physics world's statistics after the last step (zeroed when not
 // playing).
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
