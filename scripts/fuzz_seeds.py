@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate the seed corpora of the asset module's fuzz targets.
 
-    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,png,image,gltf,scene_*}/
+    python scripts/fuzz_seeds.py   # writes tests/fuzz/corpus/{lz,nph,pack,png,image,gltf,scene_*,physics_*,audio_*}/
 
 The files are built here, in Python, from the format descriptions in
 engine/asset/include/nepheline/asset/{lz,format,pack}.h rather than by the
@@ -309,6 +309,9 @@ def main():
     # The physics blocks: hulls and meshes (scripts/fuzz_seeds_physics.py).
     import fuzz_seeds_physics
     fuzz_seeds_physics.write_physics_seeds(write, CORPUS)
+    # The audio codecs and the WAV reader (scripts/fuzz_seeds_audio.py).
+    import fuzz_seeds_audio
+    fuzz_seeds_audio.write_audio_seeds(write, CORPUS)
     return 0
 
 

@@ -58,3 +58,11 @@ nph_add_fuzzer(physics_hull SOURCES fuzz_physics_hull.c fuzz_physics_common.h DE
 nph_add_fuzzer(physics_mesh SOURCES fuzz_physics_mesh.c fuzz_physics_common.h DEPS nph::physics)
 nph_add_fuzzer(physics_heightfield SOURCES fuzz_physics_heightfield.c fuzz_physics_common.h
                DEPS nph::physics)
+
+# The audio module's readers (engine/audio, CLAUDE.md §8.10): WAV files,
+# and the two codecs' streams built from samples, then damaged copies of
+# them, which validation must refuse or the decoder must survive. Seeds
+# from scripts/fuzz_seeds_audio.py.
+nph_add_fuzzer(audio_wav SOURCES fuzz_audio_wav.c DEPS nph::audio)
+nph_add_fuzzer(audio_lossless SOURCES fuzz_audio_lossless.c fuzz_audio_common.h DEPS nph::audio)
+nph_add_fuzzer(audio_adpcm SOURCES fuzz_audio_adpcm.c fuzz_audio_common.h DEPS nph::audio)
