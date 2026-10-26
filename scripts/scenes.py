@@ -17,16 +17,26 @@ are redistributed, which this script does not do). DIR holds, per scene:
 
 `fetch` checks out exactly the manifest's commit (a shallow fetch of that
 commit, so a moved branch changes nothing) and leaves a finished checkout
-alone. `cook` runs the cooker on the manifest's document, packing what it
-cooked; a second cook only redoes what changed. No names: every manifest.
+alone. A Poly Haven source (CC0 assets in a layout of ours) instead names
+every file it takes with its md5: `fetch` downloads them into
+DIR/<name>/assets/<asset>/ (a file already there with its md5 is kept, a
+download that does not match is refused), then lays the scene out with the
+manifest's generator (scripts/landscape.py). `cook` runs the cooker on the
+manifest's document, packing what it cooked; a second cook only redoes what
+changed. No names: every manifest.
 """
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import urllib.request
+
+# Poly Haven asks its API's and downloads' clients to name themselves.
+AGENT = {"User-Agent": "nepheline-scenes/1.0 (+https://github.com/SugalAbubaker/nepheline)"}
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFESTS = os.path.join(ROOT, "benchmarks", "scenes")
@@ -55,8 +65,63 @@ def head_commit(path):
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download(url, path, md5):
+    """`url` into `path`, unless the file is there with its md5; a download
+    whose md5 differs is refused (the pinned file changed upstream)."""
+    if os.path.isfile(path) and md5_of(path) == md5:
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    part = path + ".part"
+    request = urllib.request.Request(url, headers=AGENT)
+    with urllib.request.urlopen(request, timeout=120) as r, open(part, "wb") as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+    got = md5_of(part)
+    if got != md5:
+        os.remove(part)
+        sys.exit(f"{url}: md5 {got}, the manifest pins {md5}")
+    os.replace(part, path)
+    return True
+
+
+def fetch_polyhaven(m, root):
+    src = m["source"]["polyhaven"]
+    path = os.path.join(root, m["name"])
+    fetched = kept = 0
+    for asset in src["models"] + src["textures"]:
+        for f in asset["files"]:
+            target = os.path.join(path, "assets", asset["asset"], f["path"])
+            if download(f["url"], target, f["md5"]):
+                fetched += 1
+                print(f"{m['name']}: {asset['asset']}/{f['path']} ({f['size'] / 1e6:.1f} MB)",
+                      flush=True)
+            else:
+                kept += 1
+    print(f"{m['name']}: {fetched} files fetched, {kept} kept")
+    generator = os.path.join(ROOT, m["layout"].get("generator", "scripts/landscape.py"))
+    manifest = os.path.join(MANIFESTS, m["name"] + ".json")
+    r = subprocess.run([sys.executable, generator, manifest, root])
+    if r.returncode != 0:
+        sys.exit(f"{m['name']}: the layout failed ({r.returncode})")
+    print(f"{m['name']}: licence: {m.get('license', '(see the manifest)')}")
+
+
 def fetch(m, root):
     src = m["source"]
+    if "polyhaven" in src:
+        fetch_polyhaven(m, root)
+        return
     path = os.path.join(root, m["name"])
     if os.path.isdir(os.path.join(path, ".git")) and head_commit(path) == src["commit"]:
         print(f"{m['name']}: {path} is at {src['commit'][:12]}")

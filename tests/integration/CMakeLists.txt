@@ -27,3 +27,14 @@ if(NPH_BUILD_TESTS)
     endif()
     set_tests_properties(integration PROPERTIES LABELS "integration")
 endif()
+
+# The open-landscape reference scene's layout (scripts/landscape.py): its
+# self-test lays a small scene out over fake assets and checks it (the
+# merged document's indices, every instance on the ground and off the
+# trail, the same layout twice, the sun), with Python's standard library.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(NPH_BUILD_TESTS AND Python3_Interpreter_FOUND)
+    add_test(NAME scripts.landscape
+             COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/scripts/landscape.py" --self-test)
+    set_tests_properties(scripts.landscape PROPERTIES LABELS "integration")
+endif()

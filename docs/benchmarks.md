@@ -275,6 +275,19 @@ run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,
 reads its manifest from `benchmarks/render/test_scenes` (`--manifests`),
 and renders it at 320 × 180 (`--ref-size`) for four frames.
 
+A manifest's source is a git repository at a commit (Bistro) or, for the
+landscape, Poly Haven files each pinned by URL and md5: `fetch` downloads
+them (1.4 GB; a file already there with its md5 is kept, a changed one
+refused), then runs the manifest's generator, which merges the assets'
+documents into one (their buffers and images referenced where they are),
+adds the terrain and the sun, and places every instance from the layout's
+seed: Poisson-disk scatters (Bridson 2007) masked for clearings and kept
+off the trail. The same manifest lays out the same scene. Only modelled,
+opaque assets are used: the collection's fir tree, grass, ferns, and moss
+are alpha-blended or alpha-tested cards, which the first game's forest
+does not have (ADR-0059). The cook takes 20 minutes (the pines' 17
+million triangles most of it) and makes a 1.2 GB pack.
+
 The RTX 3060 Ti runner measures them nightly, not on pull requests (the
 user's decision, ADR-0040). `.github/workflows/gpu-perf.yml`, when
 scheduled or dispatched, fetches and cooks every manifest's scene into a
@@ -289,6 +302,7 @@ results like the synthetic budgets.
 | Scene | Source | What it is |
 |---|---|---|
 | `bistro` | Amazon Lumberyard Bistro, exterior (CC BY 4.0; NVIDIA's glTF conversion, MIT, as `zeux/niagara_bistro` edits it) | a street at dusk: 2,909 instances of 551 meshes, 254 materials (234 specular-glossiness) using 338 BC7 DDS textures, the sun at 6,830 lux and 96 street lamps |
+| `landscape` | Poly Haven's pine-forest assets (CC0; Rob Tuytel and Rico Cilliers), laid out by `scripts/landscape.py` (Phase 13; ADR-0040, ADR-0059) | a forested valley 1 × 1.5 km at midday: a terrain of 750,000 triangles under 47,862 instances of 30 modelled meshes (9,729 pines of 4.2 to 7.0 million triangles, 8,786 pine saplings of 1.5 to 2.7 million, 16,057 fir saplings, rocks, stumps, roots, branches), the sun at 30,000 lux; views at 1.7 m along a trail: still, walking, sprinting, turning, across the valley, and along it from its side |
 
 Measured on the RTX 3060 Ti (Profile, 240 frames, 2026-10-22), against
 the 4.17 ms frame of §10.1:
