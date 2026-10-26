@@ -92,3 +92,60 @@ typedef struct LodSimplifyInput {
 // in them) are appended to `orphans`. The quadrics, normals and lists of the
 // classes collapsed are added to those they collapsed into.
 NPH_MUST_USE NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_error);
+
+// ---------------------------------------------------------------------------
+// Voxels (cluster_voxel.c; render/voxel.h; ADR-0061)
+// ---------------------------------------------------------------------------
+
+#include <nepheline/render/voxel.h>
+
+// A triangle a group voxelizes: three mesh vertices and its submesh.
+typedef struct LodVoxelSource {
+    u32 v[3];
+    u32 submesh;
+} LodVoxelSource;
+
+typedef NPH_ARRAY(LodVoxelSource) LodVoxelSourceArray;
+
+// What a group voxelizes: its triangles, over the mesh's positions, with the
+// caller's materials.
+typedef struct LodVoxelInput {
+    const NphVec3 *positions;
+    const LodVoxelSource *sources;
+    u32 source_count;
+    const NphRenderVoxelSampler *sampler;
+    NphAllocator *scratch;
+} LodVoxelInput;
+
+// Cell coordinates are kept within +-2^20 cells of the mesh's origin (21
+// bits each in a 64-bit key).
+#define LOD_VOXEL_COORD_LIMIT 1048576
+
+// One cell the rays hit: its coordinates (its lowest corner is the cell size
+// times them), its voxel, and the submesh most of its hits show.
+typedef struct LodVoxelCell {
+    i32 c[3];
+    u32 submesh;
+    NphRenderVoxel voxel;
+} LodVoxelCell;
+
+typedef NPH_ARRAY(LodVoxelCell) LodVoxelCellArray;
+
+// The cells of edge `cell` that the sources' triangles overlap (Akenine-
+// Möller's triangle-box test), counted up to `limit`: *out_count is more
+// than `limit` when there are more. NPH_RESULT_OVERFLOW when a cell lies
+// past LOD_VOXEL_COORD_LIMIT.
+NPH_MUST_USE NphResult lod_voxel_count(const LodVoxelInput *in, f64 cell, u32 limit,
+                                       u32 *out_count);
+
+// Voxelizes the sources at cells of edge `cell` (render/voxel.h): for each
+// cell they overlap, NPH_RENDER_VOXEL_RAYS^2 jittered rays along each axis
+// against its triangles (a masked submesh's points through the sampler's
+// `covers`), and from the rays that hit, the voxel. `out` (cleared first)
+// takes the cells some ray hit, in order of their coordinates (z, then y,
+// then x); `source_cell` (source_count entries) takes for each source the
+// index in `out` of the cell holding its centroid where some ray hit there,
+// else of the first cell where a ray hit the source itself, else
+// NPH_U32_MAX. Deterministic. NPH_RESULT_OVERFLOW as lod_voxel_count.
+NPH_MUST_USE NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out,
+                                    u32 *source_cell);
