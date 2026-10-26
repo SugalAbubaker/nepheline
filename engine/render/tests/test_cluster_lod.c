@@ -602,10 +602,25 @@ NTEST_F(ClusterLod, every_cluster_has_one_maker_and_one_consumer)
             NTEST_EXPECT_EQ_UINT(lod->level, l->groups.data[lod->group].level + 1U);
         }
     }
-    // The root group last, with the coarsest clusters.
-    const NphRenderLodGroup *root = &l->groups.data[l->groups.len - 1U];
-    NTEST_EXPECT_TRUE(root->error == NPH_F32_MAX);
-    NTEST_EXPECT_EQ_UINT(root->level, l->levels - 1U);
+    // The root groups last (error the largest float, the coarsest level),
+    // consuming the coarsest clusters, a few each.
+    u32 first_root = l->groups.len;
+    while (first_root > 0U && l->groups.data[first_root - 1U].error == NPH_F32_MAX) {
+        --first_root;
+    }
+    NTEST_ASSERT_LT_UINT(first_root, l->groups.len);
+    for (u32 g = 0; g < l->groups.len; ++g) {
+        const NphRenderLodGroup *rg = &l->groups.data[g];
+        NTEST_EXPECT_TRUE((rg->error == NPH_F32_MAX) == (g >= first_root));
+        if (g >= first_root) {
+            NTEST_EXPECT_EQ_UINT(rg->level, l->levels - 1U);
+            NTEST_EXPECT_LE_UINT(rg->cluster_count, 2U * 8U);
+        }
+    }
+    for (u32 c = 0; c < clusters; ++c) {
+        const bool coarsest = l->lods.data[c].level == l->levels - 1U;
+        NTEST_EXPECT_TRUE((l->lods.data[c].parent >= first_root) == coarsest);
+    }
     NPH_FREE_ARRAY(f->a, u32, seen, clusters);
 }
 
@@ -947,6 +962,61 @@ NTEST(ClusterLod, the_projected_error_follows_distance_and_scale)
     const f32 e3 =
         nph_render_lod_projected_error(c, 20.0F, 0.01F, 1.0F, nph_vec3_zero(), 1000.0F, 0.1F);
     NTEST_EXPECT_NEAR_F32(e3, 0.01F * 1000.0F / 0.1F, 1e-2F);
+}
+
+// A surface the levels cannot simplify (flat shaded: every triangle's
+// corners its own, on a chart of its own, so every vertex is a seam corner):
+// the levels stop at once, and the coarsest level's many clusters are
+// grouped into root groups of a few each, under a tree of their own, so that
+// they are culled and handed on a few at a time.
+NTEST_F(ClusterLod, a_level_that_stops_shrinking_splits_into_root_groups)
+{
+    const u32 n = 40U;
+    for (u32 z = 0; z < n; ++z) {
+        for (u32 x = 0; x < n; ++x) {
+            const f32 fx = (f32)x;
+            const f32 fz = (f32)z;
+            const NphVec3 p00 = nph_vec3(fx, nph_f32_sin(fx * 0.4F) * 0.3F, fz);
+            const NphVec3 p10 = nph_vec3(fx + 1.0F, nph_f32_sin((fx + 1.0F) * 0.4F) * 0.3F, fz);
+            const NphVec3 p01 = nph_vec3(fx, nph_f32_sin(fx * 0.4F) * 0.3F, fz + 1.0F);
+            const NphVec3 p11 =
+                nph_vec3(fx + 1.0F, nph_f32_sin((fx + 1.0F) * 0.4F) * 0.3F, fz + 1.0F);
+            const u32 chart = (z * n + x) * 2U;
+            mesh_tri(&f->mesh, mesh_vertex(&f->mesh, p00, chart), mesh_vertex(&f->mesh, p01, chart),
+                     mesh_vertex(&f->mesh, p11, chart));
+            mesh_tri(&f->mesh, mesh_vertex(&f->mesh, p00, chart + 1U),
+                     mesh_vertex(&f->mesh, p11, chart + 1U),
+                     mesh_vertex(&f->mesh, p10, chart + 1U));
+        }
+    }
+    mesh_one_range(&f->mesh);
+    NTEST_ASSERT_EQ_INT(build_lods(&f->mesh, f->a, &f->meshlets, &f->lods), NPH_RESULT_OK);
+    const NphRenderClusterLods *l = &f->lods;
+    u32 roots = 0U;
+    u32 largest = 0U;
+    for (u32 g = 0; g < l->groups.len; ++g) {
+        if (l->groups.data[g].error == NPH_F32_MAX) {
+            roots += 1U;
+            largest = nph_max_u32(largest, l->groups.data[g].cluster_count);
+        }
+    }
+    u32 coarsest = 0U;
+    for (u32 c = 0; c < l->lods.len; ++c) {
+        coarsest += l->lods.data[c].level == l->levels - 1U ? 1U : 0U;
+    }
+    NTEST_LOG("%u levels; the coarsest has %u clusters in %u root groups (at most %u each)",
+              l->levels, coarsest, roots, largest);
+    NTEST_EXPECT_GT_UINT(coarsest, 8U);
+    NTEST_EXPECT_GE_UINT(roots * 8U, coarsest / 2U);
+    NTEST_EXPECT_LE_UINT(largest, 2U * 8U);
+    // The root node holds no group directly when there are many: the root
+    // groups lie under a tree of their own.
+    u32 leaves = 0U;
+    for (u32 i = 0; i < NPH_RENDER_LOD_NODE_CHILDREN; ++i) {
+        const u32 ch = l->nodes.data[0].child[i];
+        leaves += ch != NPH_RENDER_LOD_NONE && (ch & NPH_RENDER_LOD_LEAF) != 0U ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(leaves, 0U);
 }
 
 NTEST_F(ClusterLod, small_and_empty_meshes_keep_level_zero_under_a_root)

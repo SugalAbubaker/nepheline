@@ -46,7 +46,7 @@
 extern "C" {
 #endif
 
-// No group: a level-0 cluster's maker, or a root cluster's consumer.
+// No group: a level-0 cluster's maker.
 #define NPH_RENDER_LOD_NONE 0xFFFFFFFFU
 // The children of a hierarchy node.
 #define NPH_RENDER_LOD_NODE_CHILDREN 8U
@@ -74,7 +74,7 @@ typedef struct NphRenderLodGroup {
 // A cluster's place in the levels, beside its meshlet record.
 typedef struct NphRenderClusterLod {
     u32 group;  // the group whose simplification made it; NPH_RENDER_LOD_NONE at level 0
-    u32 parent; // the group that consumes it (the root group for the coarsest clusters)
+    u32 parent; // the group that consumes it (a root group for the coarsest clusters)
     u32 level;
     u32 reserved;
 } NphRenderClusterLod;
@@ -111,7 +111,8 @@ typedef NPH_ARRAY(NphRenderLodNode) NphRenderLodNodeArray;
 typedef struct NphRenderClusterLods {
     NphRenderMeshlets clusters; // records, bounds, vertices (the mesh's), corners
     NphRenderClusterLodArray lods;
-    NphRenderLodGroupArray groups; // level by level; the root group last
+    NphRenderLodGroupArray groups; // level by level; the root groups (error the
+                                   // largest float) last
     NphArrayU32 group_clusters;    // each group's clusters in turn
     NphRenderLodNodeArray nodes;   // node 0 the root
     u32 levels;                    // levels of clusters (1: level 0 alone)

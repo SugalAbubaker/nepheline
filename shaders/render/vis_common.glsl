@@ -593,22 +593,23 @@ bool vis_lod_node_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, float 
     return e > view.v.lod.y && reach * reach > dot(c, c);
 }
 
-// The steps' other prune: whether every group that made a cluster below a
-// child is too coarse for the view, so that the meshlet cull would drop each
-// of those clusters (vis_lod_group_too_coarse of its maker) and the child
-// leads to nothing. The makers' spheres lie inside the child's, so the
-// distance to its farthest point bounds each one's nearest, and their
-// smallest error bounds theirs; tightened past the rounding between the
-// tests as vis_lod_node_too_coarse is loosened, so that it never skips a
-// cluster the exact test keeps. A maker error of 0 (a level-0 cluster
-// below) never is.
-bool vis_lod_makers_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, float scale,
-                               vec4 sphere, float maker_error)
+// Whether every group whose sphere lies inside `sphere` (mesh space) and
+// whose error is at least `error` is surely too coarse for the view
+// (vis_lod_group_too_coarse): the distance to the sphere's farthest point
+// bounds each group's nearest, tightened past the rounding between the
+// tests as vis_lod_node_too_coarse is loosened, so that it never says so of
+// a group the exact test finds fine. An error of 0 never is. Two uses: the
+// walk skips a child whose makers below (their smallest error, `maker_error`
+// of the node) are all too coarse, since the meshlet cull would drop every
+// cluster it leads to; and the instance cull draws level 0 directly where
+// all of level 0's consumers are (NphVisMesh.lod_level0_error).
+bool vis_lod_surely_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, float scale,
+                               vec4 sphere, float error)
 {
     const vec3 m = vis_transform_vector(tr, sphere.xyz);
     const vec3 c = m + t;
     const vec3 magnitude = abs(m) + abs(t);
-    const float e = maker_error * view.v.lod.x * scale * (1.0 - 1.0 / 4096.0);
+    const float e = error * view.v.lod.x * scale * (1.0 - 1.0 / 4096.0);
     const float far = length(c) + sphere.w * scale * (1.0 + 1.0 / 4096.0) +
                       (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
     return e > far && e > view.v.lod.y * (1.0 + 1.0 / 4096.0);

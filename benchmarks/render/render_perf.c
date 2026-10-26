@@ -31,11 +31,13 @@
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
-//                 [--debug-view=NAME] [--reference-only]
+//                 [--debug-view=NAME] [--reference-only] [--lod-error=PX]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
-// the hybrid raster's split.
+// the hybrid raster's split. --lod-error sets the reference scenes'
+// NphRenderView.lod_error (0: every mesh at level 0), for comparing a
+// scene with its levels of detail and without.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -372,6 +374,7 @@ static const char *const k_debug_views[] = {
 NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT - 1U,
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
+static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
 
 typedef struct Result {
     char name[128];
@@ -1553,6 +1556,9 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     view.ao_radius = RUNTIME_AO;
     view.gi = 1;
     view.debug_view = g_debug_view;
+    if (g_lod_error >= 0.0F) {
+        view.lod_error = g_lod_error;
+    }
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
@@ -1768,7 +1774,8 @@ static int usage(void)
     fprintf(stderr, "usage: render_perf [--filter=GLOB] [--frames=N] [--json=FILE] "
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
-                    "[--ref-size=WxH] [--debug-view=NAME] [--reference-only]\n");
+                    "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
+                    "[--lod-error=PX]\n");
     return 2;
 }
 
@@ -1798,6 +1805,8 @@ int main(int argc, char **argv)
             list = true;
         } else if (strncmp(argv[i], "--sw-pixels=", 12U) == 0) {
             sw_pixels = strtod(argv[i] + 12, NULL);
+        } else if (strncmp(argv[i], "--lod-error=", 12U) == 0) {
+            g_lod_error = (f32)strtod(argv[i] + 12, NULL);
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {

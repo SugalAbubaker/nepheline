@@ -23,8 +23,9 @@
 //
 // An instance whose mesh has levels of detail hands its hierarchy's root to
 // the first of the hierarchy's steps instead (vis_cull_nodes.comp), which
-// find the clusters of the level each part of it needs; a view without them
-// (NPH_VIS_VIEW_LOD unset) has it hand on level 0's meshlets as any mesh's.
+// find the clusters of the level each part of it needs; one so near that
+// every part needs level 0, and any in a view without the levels
+// (NPH_VIS_VIEW_LOD unset), hands on level 0's meshlets as any mesh's.
 //
 // The meshlets go out as (instance, meshlet) work items, one per meshlet,
 // so the meshlet cull runs an invocation per meshlet with every lane busy,
@@ -97,11 +98,15 @@ void main()
                                    vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
             }
             if (!culled_frustum && !defer && !culled_occlusion) {
-                if (mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u) {
-                    root = true;
-                } else {
-                    meshlets = mesh.meshlet_count;
-                }
+                // A mesh with levels walks its hierarchy, unless even the
+                // finest of the groups that consume level 0 is too coarse
+                // from the far side of its sphere: then the cut is level 0
+                // whole, as the mesh's own meshlets.
+                root = mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u &&
+                       !vis_lod_surely_too_coarse(view, inst.transform, t,
+                                                  vis_max_scale(inst.transform), mesh.sphere,
+                                                  mesh.lod_level0_error);
+                meshlets = root ? 0u : mesh.meshlet_count;
             }
         }
     }
