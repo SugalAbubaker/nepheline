@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: Apache-2.0
+// A step down the hierarchy of a mesh's levels of detail (render/cluster_lod.h;
+// docs/render.md "Levels of detail"; Karis, Stubbe & Thomas, "Nanite: A Deep
+// Dive", SIGGRAPH 2021), two of its levels at once: each work item, an
+// (instance, node) pair from queue arg0, takes 64 lanes, one per child of
+// the node and child of that child, so that a frame takes half as many
+// steps, each a dispatch the next must wait for. A lane tests its child,
+// and where that is a node and passes, its grandchild; each test is of a
+// node or a group, by the sphere and the largest group error below it:
+//
+//   - an error that projects within the view's threshold: everything below
+//     is fine enough, so the clusters it would lead to are not wanted (their
+//     coarser stand-ins are drawn from elsewhere). A group is tested exactly
+//     as the meshlet cull tests the group that made a cluster
+//     (vis_lod_group_too_coarse), a node a little more loosely
+//     (vis_lod_node_too_coarse), so that no group it holds is lost;
+//   - a smallest maker error that projects beyond the threshold even from
+//     the sphere's far side: every cluster below would be replaced by a
+//     finer one in turn (vis_lod_makers_too_coarse);
+//   - a sphere outside the frustum, or in phase 1 behind this frame's
+//     depth pyramid: nothing below is seen;
+//   - otherwise a grandchild that is a node goes to queue arg1 for the next
+//     step, and a group's clusters (the clusters it consumes) to the phase's
+//     meshlet list, where the meshlet cull keeps those its maker's error lets
+//     through (vis_cull_meshlets.comp) and tests them as any cluster.
+//
+// The step raises the next step's workgroups to take what it put in queue
+// arg1, and empties queue arg2 (the step before read it) for the step after
+// the next to fill: the steps follow one another without a pass between.
+//
+// Phase 0 does not test occlusion: the previous frame's depth could hide a
+// part that is visible now, and the clusters' own two-phase test catches
+// what it would have (an occluded cluster waits for phase 1). Phase 1 takes
+// the hierarchies of the instances phase 0 deferred, against the depth phase
+// 0 drew.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 512) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the child `lane` of node `n` (a node or a group, `ref`) is to be
+// taken: too coarse, not every maker below too coarse, in the frustum, and
+// in phase 1 not behind the depth pyramid.
+bool take(VisViewRef view, NphVisTransform tr, vec3 t, float scale, VisLodNodesRef tree, uint n,
+          uint lane, uint ref, uint phase)
+{
+    const vec4 s = tree.n[n].sphere[lane];
+    const float e = tree.n[n].error[lane];
+    const bool leaf = (ref & NPH_VIS_LOD_LEAF) != 0u;
+    bool keep = leaf ? vis_lod_group_too_coarse(view, tr, s, e)
+                     : vis_lod_node_too_coarse(view, tr, t, scale, s, e);
+    keep = keep && !vis_lod_makers_too_coarse(view, tr, t, scale, s, tree.n[n].maker_error[lane]);
+    const vec3 c = vis_transform_vector(tr, s.xyz) + t;
+    const float r = s.w * scale;
+    keep = keep && vis_sphere_in_frustum(view, c, r);
+    if (keep && phase == 1u && (view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u) {
+        const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
+        vec4 rect;
+        float depth;
+        keep = !(vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
+                 vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth));
+    }
+    return keep;
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    VisArgsRef args = VisArgsRef(view.v.args);
+    const uint phase = pc.phase;
+    const uint qin = pc.arg0;
+    const uint qout = pc.arg1;
+    const uint invocation = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 512u +
+                            gl_LocalInvocationIndex;
+    if (invocation == 0u) {
+        counters.c.lod_nodes[pc.arg2] = 0u;
+        args.a.lod_node_args[pc.arg2][0] = 0u;
+    }
+    const uint id = invocation >> 6u;                // the work item
+    const uint child_lane = (invocation >> 3u) & 7u; // its node's child
+    const uint grand_lane = invocation & 7u;         // and that child's child
+    const bool valid = id < min(counters.c.lod_nodes[qin], view.v.max_lod_nodes);
+    uvec2 item = uvec2(0u);
+    uint found = NPH_VIS_LOD_NONE; // a node for the next step
+    uint group = NPH_VIS_LOD_NONE; // a group whose clusters go to the meshlet cull
+    bool counted = false;          // a node of the hierarchy this lane counts as visited
+    uint64_t groups_address = 0ul;
+    uint64_t members_address = 0ul;
+    if (valid) {
+        item = VisUvec2Ref(view.v.lod_queue[qin]).v[id];
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[item.x];
+        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        groups_address = mesh.lod_groups;
+        members_address = mesh.lod_group_clusters;
+        VisLodNodesRef tree = VisLodNodesRef(mesh.lod_nodes);
+        const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                view.v.camera_low.xyz);
+        const float scale = vis_max_scale(inst.transform);
+        counted = child_lane == 0u && grand_lane == 0u;
+        const uint child = tree.n[item.y].child[child_lane];
+        if (child != NPH_VIS_LOD_NONE &&
+            take(view, inst.transform, t, scale, tree, item.y, child_lane, child, phase)) {
+            if ((child & NPH_VIS_LOD_LEAF) != 0u) {
+                // A group among the node's children: its first lane takes it.
+                group = grand_lane == 0u ? child & ~NPH_VIS_LOD_LEAF : NPH_VIS_LOD_NONE;
+            } else {
+                counted = counted || grand_lane == 0u;
+                const uint grand = tree.n[child].child[grand_lane];
+                if (grand != NPH_VIS_LOD_NONE &&
+                    take(view, inst.transform, t, scale, tree, child, grand_lane, grand, phase)) {
+                    if ((grand & NPH_VIS_LOD_LEAF) != 0u) {
+                        group = grand & ~NPH_VIS_LOD_LEAF;
+                    } else {
+                        found = grand;
+                    }
+                }
+            }
+        }
+    }
+    VIS_COUNT(counters.c.lod_nodes_visited, counted);
+
+    // The nodes found, into the next queue, and the next step's workgroups
+    // raised to take them.
+    const bool node = found != NPH_VIS_LOD_NONE;
+    uint nbase;
+    VIS_RESERVE(counters.c.lod_nodes[qout], node ? 1u : 0u, nbase);
+    if (node) {
+        if (nbase < view.v.max_lod_nodes) {
+            VisUvec2Ref(view.v.lod_queue[qout]).v[nbase] = uvec2(item.x, found);
+        } else {
+            atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_LOD_NODES));
+        }
+    }
+    const uint end = subgroupMax(node ? min(nbase + 1u, view.v.max_lod_nodes) : 0u);
+    if (end != 0u && subgroupElect()) {
+        atomicMax(args.a.lod_node_args[qout][0],
+                  (end + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
+    }
+
+    // The groups' clusters, into the phase's meshlet list.
+    uint clusters = 0u;
+    uint first = 0u;
+    if (group != NPH_VIS_LOD_NONE) {
+        VisLodGroupsRef groups = VisLodGroupsRef(groups_address);
+        clusters = groups.g[group].cluster_count;
+        first = groups.g[group].cluster_offset;
+    }
+    uint mbase;
+    if (phase == 0u) {
+        VIS_RESERVE(counters.c.cull_meshlets, clusters, mbase);
+    } else {
+        VIS_RESERVE(counters.c.deferred_meshlets, clusters, mbase);
+    }
+    if (clusters != 0u) {
+        VisUintRef members = VisUintRef(members_address);
+        const uint capacity = phase == 0u ? view.v.max_cull_meshlets : view.v.max_deferred;
+        VisUvec2Ref list = VisUvec2Ref(phase == 0u ? view.v.cull_meshlets : view.v.deferred_meshlets);
+        for (uint j = 0u; j < clusters; ++j) {
+            if (mbase + j < capacity) {
+                list.v[mbase + j] = uvec2(item.x, members.v[first + j]);
+            } else {
+                atomicOr(counters.c.overflow, phase == 0u ? uint(NPH_VIS_OVERFLOW_MESHLETS)
+                                                          : uint(NPH_VIS_OVERFLOW_DEFERRED));
+            }
+        }
+    }
+}

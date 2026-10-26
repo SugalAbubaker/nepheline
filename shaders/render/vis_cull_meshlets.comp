@@ -22,6 +22,11 @@
 // triangles at most sw_raster_pixels across each; the rest to the hardware
 // raster. Blended materials are not drawn into the visibility
 // buffer at all: the transparent pass draws them.
+//
+// A cluster of a mesh's coarser levels of detail came from a group of the
+// hierarchy (vis_cull_nodes.comp) whose own error is too large for the view;
+// it is drawn only where the error of the group that made it is not
+// (render/cluster_lod.h): otherwise the finer clusters it stands for are.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -56,6 +61,7 @@ void main()
     bool culled_frustum = false;
     bool culled_cone = false;
     bool culled_occlusion = false;
+    bool culled_lod = false;
     uint material = view.v.default_material;
     uint flags = 0u;
     uint triangles = 0u;
@@ -101,7 +107,19 @@ void main()
             c = vis_transform_vector(inst.transform, center) + t;
             r = radius * scale;
             const vec4 cone = unpackSnorm4x8(b1.x);
-            if (!vis_sphere_in_frustum(view, c, r)) {
+            if ((view.v.flags & NPH_VIS_VIEW_LOD) != 0u && mesh.lod_makers != 0ul) {
+                const uint maker = VisUintRef(mesh.lod_makers).v[meshlet];
+                if (maker != NPH_VIS_LOD_NONE) {
+                    VisLodGroupsRef groups = VisLodGroupsRef(mesh.lod_groups);
+                    culled_lod = vis_lod_group_too_coarse(
+                        view, inst.transform,
+                        vec4(groups.g[maker].center, groups.g[maker].radius),
+                        groups.g[maker].error);
+                }
+            }
+            if (culled_lod) {
+                // A finer level's clusters are drawn instead.
+            } else if (!vis_sphere_in_frustum(view, c, r)) {
                 culled_frustum = true;
             } else if ((view.v.flags & NPH_VIS_VIEW_CONE_CULLING) != 0u && !double_sided &&
                        (inst.flags & NPH_VIS_INSTANCE_SIMILAR) != 0u &&
@@ -130,7 +148,7 @@ void main()
                                        vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
                 }
             }
-            visible = !culled_frustum && !culled_cone && !defer && !culled_occlusion;
+            visible = !culled_lod && !culled_frustum && !culled_cone && !defer && !culled_occlusion;
         }
         // The front of a masked instance on the mesh path (the skin): the
         // cluster's centre within the nearest skin_fraction of the chord its
@@ -159,6 +177,7 @@ void main()
     VIS_COUNT(counters.c.meshlets_culled_frustum, culled_frustum);
     VIS_COUNT(counters.c.meshlets_culled_cone, culled_cone);
     VIS_COUNT(counters.c.meshlets_culled_occlusion, culled_occlusion);
+    VIS_COUNT(counters.c.lod_clusters_culled, culled_lod);
 
     // Deferred to phase 1.
     if (phase == 0u) {

@@ -45,9 +45,22 @@
 #define NPH_VIS_MAX_CLUSTERS  33554432 // 2^25
 
 // NphVisCounters.overflow bits: a list was full and items were dropped.
-#define NPH_VIS_OVERFLOW_MESHLETS 1 // phase 0's meshlet candidates (max_cull_meshlets)
-#define NPH_VIS_OVERFLOW_CLUSTERS 2
-#define NPH_VIS_OVERFLOW_DEFERRED 4
+#define NPH_VIS_OVERFLOW_MESHLETS  1 // phase 0's meshlet candidates (max_cull_meshlets)
+#define NPH_VIS_OVERFLOW_CLUSTERS  2
+#define NPH_VIS_OVERFLOW_DEFERRED  4
+#define NPH_VIS_OVERFLOW_LOD_NODES 8 // the hierarchy's work items (max_lod_nodes)
+
+// Levels of detail (render/cluster_lod.h; docs/render.md "Levels of
+// detail"): a hierarchy node's children, a child that is a group, and none;
+// the hierarchy's work queues, three in turn (a step reads one, fills the
+// next, and empties the one after for the step after it), and the work
+// items a workgroup of vis_cull_nodes.comp takes (64 lanes an item: a step
+// takes two of the hierarchy's levels).
+#define NPH_VIS_LOD_CHILDREN 8
+#define NPH_VIS_LOD_LEAF     0x80000000u
+#define NPH_VIS_LOD_NONE     0xFFFFFFFFu
+#define NPH_VIS_LOD_QUEUES   3
+#define NPH_VIS_LOD_ITEMS    8 // per workgroup of 512 invocations
 
 // Raster lists, per phase: how each visible cluster is rasterised.
 #define NPH_VIS_RASTER_OPAQUE   0 // hardware
@@ -82,6 +95,9 @@
 #define NPH_VIS_VIEW_SKIN                                                                          \
     128 // masked clusters at the front of their instance draw first,
         // writing depth (mesh path; NphVisViewData.skin_fraction)
+#define NPH_VIS_VIEW_LOD                                                                           \
+    256 // meshes with levels of detail draw the levels the view needs (else
+        // level 0: NphRenderView.lod_error 0)
 
 // vis_lights.comp modes (NphVisPush.mode).
 #define NPH_VIS_LIGHTS_UPDATE 0 // apply the frame's light updates
@@ -172,6 +188,15 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 blas;       // its bottom-level acceleration structure, over the quantised positions
                     // (0: none)
     u64 indices;    // u32[]: the triangles' corners, three a triangle, as the mesh has them
+    // Its levels of detail (render/cluster_lod.h), 0 without: the hierarchy
+    // (NphRenderLodNode[], node 0 the root), the groups (NphRenderLodGroup[]),
+    // each group's clusters (u32[]), and each cluster's maker (u32[], the
+    // group that made it; NPH_VIS_LOD_NONE at level 0). `meshlets` then holds
+    // every level's clusters, and `meshlet_count` level 0's.
+    u64 lod_nodes;
+    u64 lod_groups;
+    u64 lod_group_clusters;
+    u64 lod_makers;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.
@@ -202,6 +227,10 @@ NPH_SHARED_STRUCT(NphVisArgs)
     u32 instance2_args[4];    // phase 1's cull of the instances phase 0 deferred
     u32 raster_args[2][4][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
     u32 light_tile_args[4];   // the light masks: tile groups in x and y, light words in z
+    // A hierarchy step from each queue: workgroups in x, raised by whatever
+    // fills the queue (the instance cull, the step before), and 1 in y and
+    // z (vis clear writes them).
+    u32 lod_node_args[NPH_VIS_LOD_QUEUES][4];
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -226,6 +255,13 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 meshlets_culled_occlusion; // after phase 2
     u32 triangles;                 // in the visible clusters
     u32 rt_instances;              // the top level's active instance records (rt_instances.comp)
+    // The hierarchy's work queues (levels of detail): the nodes each step
+    // takes and finds, three in turn.
+    u32 lod_nodes[NPH_VIS_LOD_QUEUES];
+    // Statistics: the nodes the steps took, and the clusters a finer level
+    // replaced (their maker's error too large).
+    u32 lod_nodes_visited;
+    u32 lod_clusters_culled;
 };
 
 // The production path's view of a frame.
@@ -296,6 +332,15 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 light_slots;         // slots the light pass walks
     u32 light_tiles_y;       // rows of light tiles (the grid has the row length)
     f32 skin_fraction;       // NphRendererDesc.masked_skin (NPH_VIS_VIEW_SKIN)
+    // Levels of detail: the hierarchy's work queues (uvec2[max_lod_nodes]
+    // each: instance slot, node), and the test (vis_lod_group_too_coarse): x
+    // the pixels a world unit spans at a distance of one over the view's
+    // threshold (finite: a threshold of zero gives the largest float), y
+    // the near plane, which bounds the distances.
+    u64 lod_queue[NPH_VIS_LOD_QUEUES];
+    u32 max_lod_nodes;
+    u32 lod_pad0;
+    NphVec4 lod;
 };
 
 // Push constants of every production-path shader. The visibility buffer

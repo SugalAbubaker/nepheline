@@ -11,12 +11,17 @@
 //                         the light grid the shading reads (docs/render.md
 //                         "Lights")
 //   vis cull instances 0  frustum, then last frame's HZB from last frame's view
+//   vis args, vis cull nodes 0 (as many steps as the deepest hierarchy of
+//                         the meshes' levels of detail has levels; none
+//                         without them)
 //   vis args, vis cull meshlets 0, vis args, vis raster 0 (hardware), vis sw
 //                         raster 0 (small clusters, in compute)
 //   vis hzb 0             this frame's depth so far
-//   vis args, vis cull instances 1, vis args, vis cull meshlets 1 (the
-//                         meshlets phase 0 deferred, then those of instances
-//                         now visible), vis args, vis raster 1, vis sw raster 1
+//   vis args, vis cull instances 1, vis args, vis cull nodes 1 (the
+//                         hierarchies of instances now visible), vis args,
+//                         vis cull meshlets 1 (the meshlets phase 0
+//                         deferred, then those of instances now visible),
+//                         vis args, vis raster 1, vis sw raster 1
 //   vis hzb 1             the frame's depth: next frame's phase 0 tests it
 //   vsm ...               the sun's virtual shadow map (vsm.c), its page
 //                         requests made by the vis hzb passes (and, with
@@ -47,7 +52,8 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 872U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 920U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisViewData, lod_queue) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
 NPH_STATIC_ASSERT(sizeof(NphVisPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push constants fit");
@@ -79,14 +85,20 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_raster_vert_masked.frag",
     "vis_debug_line.frag",
     "vis_hzb_mips.comp",
+    "vis_cull_nodes.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
-    VIS_SHADER_SCATTER, VIS_SHADER_CULL_INSTANCES, VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
-    VIS_SHADER_HZB,     VIS_SHADER_HZB_MIPS,       VIS_SHADER_RESOLVE,       VIS_SHADER_SW_RASTER,
-    VIS_SHADER_LIGHTS,  VIS_SHADER_LIGHT_BINS,     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE, VIS_SHADER_RESOLVE_RT,     VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE, VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_SCATTER,       VIS_SHADER_CULL_INSTANCES,
+    VIS_SHADER_CULL_MESHLETS, VIS_SHADER_ARGS,
+    VIS_SHADER_HZB,           VIS_SHADER_HZB_MIPS,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_SW_RASTER,
+    VIS_SHADER_LIGHTS,        VIS_SHADER_LIGHT_BINS,
+    VIS_SHADER_LIGHT_TILES,   VIS_SHADER_CULL_NODES,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -101,6 +113,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis lights",
     "vis light bins",
     "vis light tiles",
+    "vis cull nodes",
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
@@ -472,17 +485,20 @@ static void read_stats(NphRenderer *r)
     s->vis_meshlets_culled_frustum = c->meshlets_culled_frustum;
     s->vis_meshlets_culled_cone = c->meshlets_culled_cone;
     s->vis_meshlets_culled_occlusion = c->meshlets_culled_occlusion;
+    s->vis_lod_nodes = c->lod_nodes_visited;
+    s->vis_lod_clusters_culled = c->lod_clusters_culled;
     s->vis_lights = c->lights_global + c->lights_local;
     s->vis_overflow = c->overflow;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
-                     "%s: GPU culling dropped work (frame %llu):%s%s%s; raise the capacities in "
-                     "NphRendererDesc (said once per list)",
+                     "%s: GPU culling dropped work (frame %llu):%s%s%s%s; raise the capacities "
+                     "in NphRendererDesc (said once per list)",
                      r->name, (unsigned long long)s->vis_frame,
                      (fresh & (u32)NPH_VIS_OVERFLOW_MESHLETS) != 0U ? " max_cull_meshlets" : "",
                      (fresh & (u32)NPH_VIS_OVERFLOW_CLUSTERS) != 0U ? " max_visible_clusters" : "",
-                     (fresh & (u32)NPH_VIS_OVERFLOW_DEFERRED) != 0U ? " max_deferred" : "");
+                     (fresh & (u32)NPH_VIS_OVERFLOW_DEFERRED) != 0U ? " max_deferred" : "",
+                     (fresh & (u32)NPH_VIS_OVERFLOW_LOD_NODES) != 0U ? " max_lod_nodes" : "");
         v->overflow_logged |= fresh;
     }
 }
@@ -589,6 +605,18 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->skin_fraction = d->masked_skin;
     vd->hzb_dirty = nph_gpu_buffer_address(dev, v->hzb_dirty);
     vd->hzb_tiles_x = v->hzb_tiles_x;
+    // The levels of detail (vis_lod_group_too_coarse): the pixels a unit
+    // spans at a distance of one, over the threshold. A threshold of 0
+    // turns them off (NPH_VIS_VIEW_LOD unset) and leaves the largest float.
+    for (u32 q = 0; q < (u32)NPH_VIS_LOD_QUEUES; ++q) {
+        vd->lod_queue[q] = region(dev, v->lod_queue, (u64)q * d->max_lod_nodes * 8U);
+    }
+    vd->max_lod_nodes = d->max_lod_nodes;
+    const f32 pixels_per_unit = nph_f32_abs(proj->c[1].y) * 0.5F * (f32)height;
+    const f32 per_threshold =
+        view->lod_error > 0.0F ? pixels_per_unit / view->lod_error : NPH_F32_MAX;
+    vd->lod = nph_vec4(nph_f32_is_finite(per_threshold) ? per_threshold : NPH_F32_MAX,
+                       view->camera.znear, 0.0F, 0.0F);
 
     // The lights: the table, this frame's updates, and the grid, whose
     // record the shading finds through the render view.
@@ -665,6 +693,11 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
                             r->vis.light_layout.histogram, (u64)NPH_RENDER_ZBINS * sizeof(u32), 0U);
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->hzb_dirty), 0U, NPH_GPU_WHOLE_SIZE,
                             r->vis.hzb_full_rebuild ? NPH_U32_MAX : 0U);
+    // The hierarchy steps' arguments: one workgroup each until whatever fills
+    // its queue raises it (vis_cull_nodes.comp), and one in y and z.
+    nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
+                            (u64)offsetof(NphVisArgs, lod_node_args),
+                            sizeof(((NphVisArgs *)NULL)->lod_node_args), 1U);
     if (!r->vis.mesh_shaders) {
         const NphGpuClearValue zero = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 0.0F);
         nph_gpu_cmd_clear_color_image(cmd, nph_gpu_rg_image(graph, f->visbuffer),
@@ -756,6 +789,35 @@ ARGS_EXECUTE(args_phase2_mesh_execute, NPH_VIS_ARGS_PHASE2_MESH)
 ARGS_EXECUTE(args_raster2_execute, NPH_VIS_ARGS_RASTER2)
 
 #define ARGS_OFFSET(field) ((u64)offsetof(NphVisArgs, field))
+
+// A step of the hierarchies (vis_cull_nodes.comp) in a phase: from a queue
+// into the next, emptying the one after, dispatched with the workgroups
+// whatever filled the queue raised its arguments to.
+static void cull_nodes_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase,
+                              u32 queue)
+{
+    NphVisPush p = push_of(r, phase, 0U);
+    p.arg0 = queue;
+    p.arg1 = (queue + 1U) % (u32)NPH_VIS_LOD_QUEUES;
+    p.arg2 = (queue + 2U) % (u32)NPH_VIS_LOD_QUEUES;
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_NODES]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
+                                  ARGS_OFFSET(lod_node_args) + (u64)queue * 16U);
+}
+
+#define CULL_NODES_EXECUTE(name, phase, queue)                                                     \
+    static void name(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)                         \
+    {                                                                                              \
+        cull_nodes_record((NphRenderer *)user, graph, cmd, (phase), (queue));                      \
+    }
+
+CULL_NODES_EXECUTE(cull_nodes00_execute, 0U, 0U)
+CULL_NODES_EXECUTE(cull_nodes01_execute, 0U, 1U)
+CULL_NODES_EXECUTE(cull_nodes02_execute, 0U, 2U)
+CULL_NODES_EXECUTE(cull_nodes10_execute, 1U, 0U)
+CULL_NODES_EXECUTE(cull_nodes11_execute, 1U, 1U)
+CULL_NODES_EXECUTE(cull_nodes12_execute, 1U, 2U)
 
 static void cull_meshlets0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
@@ -1008,6 +1070,7 @@ typedef struct VisGraph {
     NphGpuRgBuffer deferred;
     NphGpuRgBuffer clusters;
     NphGpuRgBuffer lists;
+    NphGpuRgBuffer lod_queue;
 } VisGraph;
 
 static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
@@ -1242,6 +1305,53 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
     return NPH_RESULT_OK;
 }
 
+// The steps down the hierarchies of the levels of detail in a phase, after
+// its instance cull: one per two node levels of the deepest live hierarchy,
+// each from one queue into the next (vis_cull_nodes.comp). The groups they take
+// append their clusters to the phase's meshlet list.
+static NphResult declare_nodes(NphGpuRenderGraph *graph, NphRenderer *r, const VisGraph *g,
+                               u32 phase, u32 steps)
+{
+    static const NphGpuRgExecuteFn k_cull[2][NPH_VIS_LOD_QUEUES] = {
+        {cull_nodes00_execute, cull_nodes01_execute, cull_nodes02_execute},
+        {cull_nodes10_execute, cull_nodes11_execute, cull_nodes12_execute}};
+    static const char *const k_names[2] = {"vis cull nodes 0", "vis cull nodes 1"};
+    const VisFrame *f = &r->vis.frame;
+    for (u32 i = 0; i < steps; ++i) {
+        const u32 queue = i % (u32)NPH_VIS_LOD_QUEUES;
+        NphGpuRgPass *p =
+            add_pass(graph, r, k_names[phase], NPH_GPU_RG_PASS_COMPUTE, k_cull[phase][queue]);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        read_scene(p, g, f->hzb);
+        // The arguments it is dispatched with, and the next steps' it writes.
+        nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_STORAGE_WRITE);
+        nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+        nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
+        // Reads one queue and writes the other.
+        nph_gpu_rg_write_buffer(p, g->lod_queue, NPH_GPU_RG_USE_STORAGE_WRITE);
+        nph_gpu_rg_write_buffer(p, phase == 0U ? g->cull_meshlets : g->deferred,
+                                NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
+    return NPH_RESULT_OK;
+}
+
+// The steps down the deepest live hierarchy, when the view walks them: two
+// of its node levels a step (vis_cull_nodes.comp).
+static u32 lod_steps(const NphRenderer *r, u32 flags)
+{
+    if ((flags & (u32)NPH_VIS_VIEW_LOD) == 0U) {
+        return 0U;
+    }
+    for (u32 d = RENDER_LOD_MAX_DEPTH; d > 0U; --d) {
+        if (r->vis.lod_depths[d - 1U] != 0U) {
+            return (d + 1U) / 2U;
+        }
+    }
+    return 0U;
+}
+
 static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const VisGraph *g)
 {
     RenderVis *v = &r->vis;
@@ -1252,6 +1362,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
         return NPH_RESULT_FULL;
     }
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_DST);
+    nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->light_grid, NPH_GPU_RG_USE_TRANSFER_DST);
     if (!v->mesh_shaders) {
@@ -1283,6 +1394,12 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, g->cull_meshlets, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_WRITE);
+    if (f->lod_steps != 0U) {
+        // The hierarchies' roots, and the first step's workgroups.
+        nph_gpu_rg_write_buffer(p, g->lod_queue, NPH_GPU_RG_USE_SHADER_WRITE);
+        nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
+    NPH_TRY(declare_nodes(graph, r, g, 0U, f->lod_steps));
     if (args_pass(graph, r, "vis args 0", args_phase1_execute) == NULL) {
         return NPH_RESULT_FULL;
     }
@@ -1320,6 +1437,12 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     // Reads the deferred instances, appends meshlets after the deferred ones.
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_STORAGE_WRITE);
+    if (f->lod_steps != 0U) {
+        // The hierarchies' roots, and the first step's workgroups.
+        nph_gpu_rg_write_buffer(p, g->lod_queue, NPH_GPU_RG_USE_SHADER_WRITE);
+        nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
+    NPH_TRY(declare_nodes(graph, r, g, 1U, f->lod_steps));
     if (args_pass(graph, r, "vis args 1 meshlets", args_phase2_mesh_execute) == NULL) {
         return NPH_RESULT_FULL;
     }
@@ -1399,6 +1522,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_LIGHT_GRID) == 0U) {
         flags |= (u32)NPH_VIS_VIEW_LIGHT_GRID;
     }
+    if (view->lod_error > 0.0F) {
+        flags |= (u32)NPH_VIS_VIEW_LOD;
+    }
     write_view(r, view, width, height, view_m, proj, flags);
     v->debug_view = view->debug_view != NPH_RENDER_VIEW_LIT ? 1 : 0;
     memset(f, 0, sizeof *f);
@@ -1407,6 +1533,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->light_update_count = render_vis_write_light_updates(r);
     f->width = width;
     f->height = height;
+    f->lod_steps = lod_steps(r, flags);
 
     // Resources.
     NphGpuImageDesc vd;
@@ -1462,6 +1589,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.deferred = nph_gpu_rg_import_buffer(graph, v->deferred);
     g.clusters = nph_gpu_rg_import_buffer(graph, v->clusters);
     g.lists = nph_gpu_rg_import_buffer(graph, v->lists);
+    g.lod_queue = nph_gpu_rg_import_buffer(graph, v->lod_queue);
     f->instances = g.instances;
     f->prev_transforms = g.prev_transforms;
     f->clusters = g.clusters;
@@ -1546,6 +1674,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_meshlets_culled_frustum = last->vis_meshlets_culled_frustum;
         stats->vis_meshlets_culled_cone = last->vis_meshlets_culled_cone;
         stats->vis_meshlets_culled_occlusion = last->vis_meshlets_culled_occlusion;
+        stats->vis_lod_nodes = last->vis_lod_nodes;
+        stats->vis_lod_clusters_culled = last->vis_lod_clusters_culled;
+        stats->vis_lod_steps = f->lod_steps;
         stats->vis_lights = last->vis_lights;
         stats->vis_overflow = last->vis_overflow;
         stats->vsm_requested = last->vsm_requested;

@@ -154,6 +154,13 @@ typedef struct RenderMesh {
     u32 meshlet_count;
     u32 meshlet_triangle_count;
     NphSphere sphere; // mesh space
+    // Its levels of detail (NphVisMesh.lod_*; null buffers without), and
+    // the steps its hierarchy takes: its node levels (0 without).
+    NphGpuBuffer lod_nodes;
+    NphGpuBuffer lod_groups;
+    NphGpuBuffer lod_group_clusters;
+    NphGpuBuffer lod_makers;
+    u32 lod_depth;
 } RenderMesh;
 
 typedef struct RenderMaterial {
@@ -326,6 +333,10 @@ typedef struct RenderFrameLayout {
 // The production path (vis.c, vis_scene.c)
 // ---------------------------------------------------------------------------
 
+// The most node levels a mesh's hierarchy of levels of detail may have
+// (NphRenderMeshDesc.lod_nodes): eight children a node, ample for any mesh.
+#define RENDER_LOD_MAX_DEPTH 32U
+
 typedef enum VisShader {
     VIS_SHADER_SCATTER = 0,
     VIS_SHADER_CULL_INSTANCES,
@@ -350,6 +361,7 @@ typedef enum VisShader {
     VIS_SHADER_VERT_FRAG_MASKED,
     VIS_SHADER_DEBUG_LINE,
     VIS_SHADER_HZB_MIPS,
+    VIS_SHADER_CULL_NODES,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -365,6 +377,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHTS,
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
+    VIS_COMPUTE_CULL_NODES, // a step down the levels of detail's hierarchies
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both
@@ -406,6 +419,7 @@ typedef struct VisFrame {
     u32 light_update_count;
     u32 width;
     u32 height;
+    u32 lod_steps; // the steps down the levels of detail's hierarchies, each phase
     NphGpuRgImage visbuffer;
     NphGpuRgImage hdr;
     NphGpuRgImage raster_depth; // the hardware raster's early depth test (mesh path; else null)
@@ -459,6 +473,11 @@ typedef struct RenderVis {
     NphGpuBuffer clusters;      // NphVisCluster[max_visible_clusters]
     NphGpuBuffer lists;         // u32[2][NPH_VIS_RASTER_KINDS][max_visible_clusters]
     NphGpuBuffer draws;         // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
+    NphGpuBuffer lod_queue;     // uvec2[3][max_lod_nodes]: the hierarchies' work, three in turn
+    // The live meshes with levels of detail, by their hierarchies' node
+    // levels (lod_depths[d - 1]: those of d): the frame takes as many steps
+    // as the deepest needs.
+    u32 lod_depths[RENDER_LOD_MAX_DEPTH];
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
 
@@ -1107,7 +1126,10 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
 NphResult render_vis_scene_create(NphRenderer *r);
 void render_vis_scene_destroy(NphRenderer *r);
 // Uploads a mesh's meshlet streams and writes its table record.
-NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *desc);
+// `lod_depth`: the node levels of the mesh's hierarchy of levels of detail
+// (0 without one), as validation found them.
+NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *desc,
+                                 u32 lod_depth);
 void render_vis_mesh_destroy(NphRenderer *r, u32 slot);
 // Instance changes: a created instance gets its material entries and a
 // fresh record; any change marks it to be sent; a destroyed one is sent

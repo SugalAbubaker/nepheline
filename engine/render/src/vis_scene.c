@@ -35,7 +35,10 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 128U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 160U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_nodes) % 8U == 0U, "addresses are aligned");
+NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) == 32U,
+                  "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
@@ -164,14 +167,18 @@ NphResult render_vis_scene_create(NphRenderer *r)
                         NPH_GPU_MEMORY_DEVICE, "vis meshlet candidates", &v->cull_meshlets));
     NPH_TRY(make_buffer(r, (u64)d->max_deferred * (sizeof(u32) + 2U * sizeof(u32)), storage,
                         NPH_GPU_MEMORY_DEVICE, "vis deferred", &v->deferred));
-    NPH_TRY(make_buffer(r, (u64)d->max_visible_clusters * sizeof(NphVisCluster), storage,
-                        NPH_GPU_MEMORY_DEVICE, "vis clusters", &v->clusters));
+    // Read back by the tests (the clusters a frame drew).
+    NPH_TRY(make_buffer(r, (u64)d->max_visible_clusters * sizeof(NphVisCluster),
+                        storage | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC, NPH_GPU_MEMORY_DEVICE,
+                        "vis clusters", &v->clusters));
     NPH_TRY(make_buffer(r, 2U * (u64)NPH_VIS_RASTER_KINDS * d->max_visible_clusters * sizeof(u32),
                         storage, NPH_GPU_MEMORY_DEVICE, "vis raster lists", &v->lists));
     if (!v->mesh_shaders) {
         NPH_TRY(make_buffer(r, 4U * (u64)d->max_visible_clusters * sizeof(NphVisDraw), indirect,
                             NPH_GPU_MEMORY_DEVICE, "vis draws", &v->draws));
     }
+    NPH_TRY(make_buffer(r, (u64)NPH_VIS_LOD_QUEUES * d->max_lod_nodes * 2U * sizeof(u32), storage,
+                        NPH_GPU_MEMORY_DEVICE, "vis hierarchy queues", &v->lod_queue));
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         NPH_TRY(make_buffer(r, sizeof(NphVisCounters), (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                             NPH_GPU_MEMORY_READBACK, "vis statistics", &v->stats[i]));
@@ -218,6 +225,7 @@ void render_vis_scene_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->clusters);
     nph_gpu_buffer_destroy(dev, v->lists);
     nph_gpu_buffer_destroy(dev, v->draws);
+    nph_gpu_buffer_destroy(dev, v->lod_queue);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, v->stats[i]);
     }
@@ -320,6 +328,38 @@ static NphResult build_meshlets(NphRenderer *r, const NphRenderMeshDesc *d, NphR
     return res;
 }
 
+// A mesh's levels of detail (NphVisMesh.lod_*): the hierarchy, the groups,
+// their clusters, and each cluster's maker.
+static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d,
+                             NphVisMesh *rec)
+{
+    NPH_TRY(upload_stream(r, d->lod_nodes, (u64)d->lod_node_count * sizeof(NphRenderLodNode),
+                          "mesh lod nodes", &m->lod_nodes));
+    NPH_TRY(upload_stream(r, d->lod_groups, (u64)d->lod_group_count * sizeof(NphRenderLodGroup),
+                          "mesh lod groups", &m->lod_groups));
+    NPH_TRY(upload_stream(r, d->lod_group_clusters, (u64)d->lod_group_cluster_count * sizeof(u32),
+                          "mesh lod group clusters", &m->lod_group_clusters));
+    u32 *makers = NPH_ALLOC_ARRAY(r->alloc, u32, d->meshlet_count);
+    if (makers == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    for (u32 i = 0; i < d->meshlet_count; ++i) {
+        makers[i] = d->cluster_lods[i].group;
+    }
+    const NphResult res = upload_stream(r, makers, (u64)d->meshlet_count * sizeof(u32),
+                                        "mesh lod makers", &m->lod_makers);
+    NPH_FREE_ARRAY(r->alloc, u32, makers, d->meshlet_count);
+    NPH_TRY(res);
+    rec->lod_nodes = nph_gpu_buffer_address(r->dev, m->lod_nodes);
+    rec->lod_groups = nph_gpu_buffer_address(r->dev, m->lod_groups);
+    rec->lod_group_clusters = nph_gpu_buffer_address(r->dev, m->lod_group_clusters);
+    rec->lod_makers = nph_gpu_buffer_address(r->dev, m->lod_makers);
+    // Without the levels (a view at threshold 0, the shadow map's pages),
+    // the mesh draws level 0's meshlets.
+    rec->meshlet_count = d->lod_level0_meshlets;
+    return NPH_RESULT_OK;
+}
+
 static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphRenderMeshDesc *d,
                              const NphRenderMeshlet *meshlets, const NphRenderMeshletBounds *bounds,
                              u32 meshlet_count, const u32 *vertices, u32 vertex_count,
@@ -383,10 +423,14 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     rec.index_base = index_base;
     rec.blas =
         nph_gpu_accel_is_valid(r->dev, m->blas) ? nph_gpu_accel_address(r->dev, m->blas) : 0U;
+    if (d->lod_nodes != NULL) {
+        NPH_TRY(upload_lods(r, m, d, &rec));
+    }
     return nph_gpu_upload_buffer(r->dev, v->meshes, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
-NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d)
+NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d,
+                                 u32 lod_depth)
 {
     RenderMesh *m = &r->meshes[slot];
     m->index_range = NPH_RANGE_NULL;
@@ -394,9 +438,16 @@ NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDe
         return NPH_RESULT_OK;
     }
     if (d->meshlets != NULL) {
-        return upload_mesh(r, m, slot, d, d->meshlets, d->meshlet_bounds, d->meshlet_count,
-                           d->meshlet_vertices, d->meshlet_vertex_count, d->meshlet_triangles,
-                           d->meshlet_triangle_count);
+        NPH_TRY(upload_mesh(r, m, slot, d, d->meshlets, d->meshlet_bounds, d->meshlet_count,
+                            d->meshlet_vertices, d->meshlet_vertex_count, d->meshlet_triangles,
+                            d->meshlet_triangle_count));
+        if (lod_depth != 0U) {
+            // Counted once created, so that a failed creation's clean-up
+            // has nothing to take back.
+            m->lod_depth = lod_depth;
+            r->vis.lod_depths[lod_depth - 1U] += 1U;
+        }
+        return NPH_RESULT_OK;
     }
     NphRenderMeshlets built;
     nph_render_meshlets_init(&built, r->alloc);
@@ -418,11 +469,23 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->meshlet_vertices);
     nph_gpu_buffer_destroy(r->dev, m->meshlet_triangles);
     nph_gpu_buffer_destroy(r->dev, m->submesh_table);
+    nph_gpu_buffer_destroy(r->dev, m->lod_nodes);
+    nph_gpu_buffer_destroy(r->dev, m->lod_groups);
+    nph_gpu_buffer_destroy(r->dev, m->lod_group_clusters);
+    nph_gpu_buffer_destroy(r->dev, m->lod_makers);
     m->meshlets = NPH_GPU_BUFFER_NULL;
     m->meshlet_bounds = NPH_GPU_BUFFER_NULL;
     m->meshlet_vertices = NPH_GPU_BUFFER_NULL;
     m->meshlet_triangles = NPH_GPU_BUFFER_NULL;
     m->submesh_table = NPH_GPU_BUFFER_NULL;
+    m->lod_nodes = NPH_GPU_BUFFER_NULL;
+    m->lod_groups = NPH_GPU_BUFFER_NULL;
+    m->lod_group_clusters = NPH_GPU_BUFFER_NULL;
+    m->lod_makers = NPH_GPU_BUFFER_NULL;
+    if (m->lod_depth != 0U) {
+        r->vis.lod_depths[m->lod_depth - 1U] -= 1U;
+        m->lod_depth = 0U;
+    }
     if (r->vis.supported) {
         free_later(r, 1U, m->index_range);
     }

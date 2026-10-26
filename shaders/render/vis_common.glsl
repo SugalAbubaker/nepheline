@@ -497,6 +497,123 @@ uint vis_triangle(uint64_t v)
 // with the camera's move alone (NphVisViewData.reproject), which leaves the
 // sky's points at infinity to the camera's rotation. The temporal resolve
 // (taa.frag) and the motion blur's motion (motion.comp) share it.
+// ---------------------------------------------------------------------------
+// Levels of detail (render/cluster_lod.h; docs/render.md "Levels of detail")
+// ---------------------------------------------------------------------------
+
+// A hierarchy node and a group, as render/cluster_lod.h has them. Read
+// field by field: Ubuntu 24.04's glslang (14.0) gives a local copy of a
+// struct with array members the buffer's array types (docs/build.md
+// "Shaders").
+struct NphVisLodNode {
+    vec4 sphere[NPH_VIS_LOD_CHILDREN];       // xyz centre, w radius (mesh space)
+    float error[NPH_VIS_LOD_CHILDREN];       // the largest group error below
+    float maker_error[NPH_VIS_LOD_CHILDREN]; // the smallest maker error below
+    uint child[NPH_VIS_LOD_CHILDREN];        // node, group | NPH_VIS_LOD_LEAF, or NPH_VIS_LOD_NONE
+};
+struct NphVisLodGroup {
+    vec3 center;
+    float radius;
+    float error;
+    uint level;
+    uint cluster_offset;
+    uint cluster_count;
+};
+NPH_BUFFER_REF(VisLodNodesRef) { NphVisLodNode n[]; };
+NPH_BUFFER_REF(VisLodGroupsRef) { NphVisLodGroup g[]; };
+
+// The root group's error (render/cluster_lod.h: the largest float): always
+// too coarse, whatever the view and the instance's scale.
+#define VIS_LOD_ROOT_ERROR 3.402823466e38
+
+// Whether a group of a mesh's levels of detail is too coarse for the view
+// (C twin: nph_render_lod_projected_error over the threshold): its error at
+// the instance's scale, times the pixels a unit spans at a distance of one,
+// over the distance to its sphere's nearest point (at least the near
+// plane), is more than the threshold. With k = view.lod.x (pixels a unit
+// spans at distance one, over the threshold), the instance's scale s (the
+// longest column of its linear part), and the camera-relative centre c,
+//
+//     s e k > max(|c| - s r, near)  <=>  s^2 (e k)^2 > near^2
+//                                        and s^2 (e k + r)^2 > |c|^2,
+//
+// which needs no square root. The hierarchy's steps (vis_cull_nodes.comp)
+// take a group's clusters where it is too coarse, and the meshlet cull
+// (vis_cull_meshlets.comp) drops a cluster where the group that made it is:
+// the two must decide alike for every group, bit for bit, or a part of the
+// mesh is drawn at two levels, or at none. So the decision is made here
+// alone, from the instance's record and the group's own numbers, with every
+// step `precise` (SPIR-V NoContraction: no fused or reordered arithmetic),
+// where Vulkan rounds each addition and multiplication correctly.
+bool vis_lod_group_too_coarse(VisViewRef view, NphVisTransform tr, vec4 sphere, float error)
+{
+    if (error >= VIS_LOD_ROOT_ERROR) {
+        return true;
+    }
+    precise float tx = (tr.row0.w - view.v.camera_high.x) + (tr.translation_low.x - view.v.camera_low.x);
+    precise float ty = (tr.row1.w - view.v.camera_high.y) + (tr.translation_low.y - view.v.camera_low.y);
+    precise float tz = (tr.row2.w - view.v.camera_high.z) + (tr.translation_low.z - view.v.camera_low.z);
+    precise float cx = ((tr.row0.x * sphere.x + tr.row0.y * sphere.y) + tr.row0.z * sphere.z) + tx;
+    precise float cy = ((tr.row1.x * sphere.x + tr.row1.y * sphere.y) + tr.row1.z * sphere.z) + ty;
+    precise float cz = ((tr.row2.x * sphere.x + tr.row2.y * sphere.y) + tr.row2.z * sphere.z) + tz;
+    precise float d2 = (cx * cx + cy * cy) + cz * cz;
+    precise float s0 = (tr.row0.x * tr.row0.x + tr.row1.x * tr.row1.x) + tr.row2.x * tr.row2.x;
+    precise float s1 = (tr.row0.y * tr.row0.y + tr.row1.y * tr.row1.y) + tr.row2.y * tr.row2.y;
+    precise float s2 = (tr.row0.z * tr.row0.z + tr.row1.z * tr.row1.z) + tr.row2.z * tr.row2.z;
+    precise float s = max(max(s0, s1), s2);
+    precise float ek = error * view.v.lod.x;
+    precise float reach = ek + sphere.w;
+    precise float near2 = view.v.lod.y * view.v.lod.y;
+    precise float far = s * (ek * ek);
+    precise float wide = s * (reach * reach);
+    return far > near2 && wide > d2;
+}
+
+// The steps' prune of a child that is a node: whether a group below it may
+// be too coarse (vis_lod_group_too_coarse). The node's sphere holds the
+// groups' and its error is their largest, so their test on the node's
+// numbers bounds theirs; it is loosened here past the rounding between
+// them (a part in 2^12 of the error and the radius, and 2^-16 of the
+// magnitudes the centre's rounding is relative to), so that a prune never
+// drops a group the exact test takes. `t` and `scale` are the instance's
+// (vis_relative_translation, vis_max_scale).
+bool vis_lod_node_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, float scale,
+                             vec4 sphere, float error)
+{
+    if (error >= VIS_LOD_ROOT_ERROR) {
+        return true;
+    }
+    const vec3 m = vis_transform_vector(tr, sphere.xyz);
+    const vec3 c = m + t;
+    const vec3 magnitude = abs(m) + abs(t);
+    const float loose = 1.0 + 1.0 / 4096.0;
+    const float e = error * view.v.lod.x * scale * loose;
+    const float reach = e + sphere.w * scale * loose +
+                        (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
+    return e > view.v.lod.y && reach * reach > dot(c, c);
+}
+
+// The steps' other prune: whether every group that made a cluster below a
+// child is too coarse for the view, so that the meshlet cull would drop each
+// of those clusters (vis_lod_group_too_coarse of its maker) and the child
+// leads to nothing. The makers' spheres lie inside the child's, so the
+// distance to its farthest point bounds each one's nearest, and their
+// smallest error bounds theirs; tightened past the rounding between the
+// tests as vis_lod_node_too_coarse is loosened, so that it never skips a
+// cluster the exact test keeps. A maker error of 0 (a level-0 cluster
+// below) never is.
+bool vis_lod_makers_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, float scale,
+                               vec4 sphere, float maker_error)
+{
+    const vec3 m = vis_transform_vector(tr, sphere.xyz);
+    const vec3 c = m + t;
+    const vec3 magnitude = abs(m) + abs(t);
+    const float e = maker_error * view.v.lod.x * scale * (1.0 - 1.0 / 4096.0);
+    const float far = length(c) + sphere.w * scale * (1.0 + 1.0 / 4096.0) +
+                      (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
+    return e > far && e > view.v.lod.y * (1.0 + 1.0 / 4096.0);
+}
+
 bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
 {
     const vec2 ndc = (vec2(q) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
