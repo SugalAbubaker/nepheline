@@ -33,14 +33,38 @@
 // quadrics accumulate from level 0, so a level's error is measured against
 // the mesh itself rather than the level before.
 //
+// Aggregate geometry (foliage, twigs, debris: many small disconnected
+// pieces) stalls those collapses, which cannot take a piece away. Given a
+// material sampler (NphRenderClusterLodInput.voxels), a group becomes voxels
+// instead (render/voxel.h; ADR-0061) where its simplification stalls (keeps
+// more than three quarters of its triangles) or its quadric error passes the
+// voxels' error (a group of fewer than 256 triangles stays triangles: it
+// costs little as it is), and a group that holds a voxel cluster always
+// does: a voxel
+// cluster is a cluster whose meshlet record has no vertices, its bricks
+// `triangle_count` records of `bricks` from `vertex_offset`, its `submesh`
+// the one most of its voxels show. Cells are powers of two in mesh units, and
+// a voxel group's error is its cell (at least its makers' errors):
+//   - where triangles first become voxels, the smallest cell at least twice
+//     the group's error so far whose cells the triangles overlap at most four
+//     times their count, so that the error steps on from the stalled level's
+//     rather than jumping (a stalled level's error is its finest pieces');
+//   - above that, at least twice the inputs' cell, with at most half the
+//     inputs' primitives (voxels and triangles).
+// A group voxelizes the triangles its clusters hold, or for a voxel cluster
+// the triangles it was made from: every level of voxels is made from the
+// triangles where they first became voxels, each in one cluster of each
+// level, never from finer voxels.
+//
 // Thread-safety: the functions are pure (NPH_THREADSAFE) given distinct
-// outputs. Deterministic: the same input gives the same output, byte for
-// byte.
+// outputs; the sampler's functions must be NPH_THREADSAFE too.
+// Deterministic: the same input gives the same output, byte for byte.
 
 #include <nepheline/core/array.h>
 #include <nepheline/core/result.h>
 #include <nepheline/math/vec.h>
 #include <nepheline/render/meshlet.h>
+#include <nepheline/render/voxel.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,6 +128,8 @@ NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U, "a node is 224 bytes");
 typedef NPH_ARRAY(NphRenderLodGroup) NphRenderLodGroupArray;
 typedef NPH_ARRAY(NphRenderClusterLod) NphRenderClusterLodArray;
 typedef NPH_ARRAY(NphRenderLodNode) NphRenderLodNodeArray;
+typedef NPH_ARRAY(NphRenderVoxelBrick) NphRenderVoxelBrickArray;
+typedef NPH_ARRAY(NphRenderVoxel) NphRenderVoxelArray;
 
 // A mesh's levels: every level's clusters, level 0 first (the input's
 // meshlets, unchanged and in their order), then each coarser level's, with
@@ -115,8 +141,12 @@ typedef struct NphRenderClusterLods {
                                    // largest float) last
     NphArrayU32 group_clusters;    // each group's clusters in turn
     NphRenderLodNodeArray nodes;   // node 0 the root
-    u32 levels;                    // levels of clusters (1: level 0 alone)
-    u32 level0_clusters;           // the input's meshlets: clusters [0, level0_clusters)
+    // The voxel clusters' bricks, each cluster's contiguous, and the bricks'
+    // voxels (render/voxel.h); empty without a sampler.
+    NphRenderVoxelBrickArray bricks;
+    NphRenderVoxelArray voxels;
+    u32 levels;          // levels of clusters (1: level 0 alone)
+    u32 level0_clusters; // the input's meshlets: clusters [0, level0_clusters)
 } NphRenderClusterLods;
 
 void nph_render_cluster_lods_init(NphRenderClusterLods *l, NphAllocator *alloc);
@@ -138,15 +168,19 @@ typedef struct NphRenderClusterLodInput {
     u32 max_vertices; // the coarser levels' cluster limits (0: as nph_render_meshlets_build's)
     u32 max_triangles;
     f32 cone_weight;
-    u32 group_size;        // clusters per group (0: 8)
-    u32 max_levels;        // 0: until one cluster is left or the levels stop shrinking
+    u32 group_size; // clusters per group (0: 8)
+    u32 max_levels; // 0: until one cluster is left or the levels stop shrinking
+    // The materials aggregate geometry is voxelized with (render/voxel.h):
+    // its submesh_surface has range_count entries. NULL: triangles only.
+    const NphRenderVoxelSampler *voxels;
     NphAllocator *scratch; // working memory, released before returning
 } NphRenderClusterLodInput;
 
 // Builds the levels of `in`'s mesh into `out` (initialised by the caller).
 // NPH_RESULT_INVALID_ARGUMENT for limits outside the meshlet builder's, an
-// index outside the vertices, ranges that do not match the meshlets, or a
-// non-finite position; NPH_RESULT_OUT_OF_MEMORY otherwise. A mesh that
+// index outside the vertices, ranges that do not match the meshlets, a
+// meshlet without vertices or triangles, a non-finite position, or a sampler
+// without its functions or surfaces; NPH_RESULT_OUT_OF_MEMORY otherwise. A mesh that
 // cannot be simplified (a single cluster, or none) gets level 0 alone under
 // its root group. On failure `out` may hold a partial result to free.
 NPH_MUST_USE NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,

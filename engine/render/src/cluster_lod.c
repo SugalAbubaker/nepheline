@@ -44,6 +44,7 @@
 
 #include "cluster_lod_internal.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -55,6 +56,15 @@
 #define NEAR_RADII 2.0F
 // How far ahead in Morton order the nearest such cluster is looked for.
 #define NEAR_WINDOW 64U
+// A group of fewer triangles stays triangles (ADR-0061): it costs little
+// drawn as it is.
+#define VOXEL_MIN_TRIANGLES 256U
+// A group is aggregate geometry, which alone becomes voxels, where its
+// pieces (triangles connected through shared positions) average at most
+// this many triangles: a surface that stalls on its borders or seams (an
+// open sheet's coarsest groups, a flat-shaded mesh's) is one piece or a few,
+// and stays triangles.
+#define VOXEL_PIECE_TRIANGLES 32U
 
 void nph_render_cluster_lods_init(NphRenderClusterLods *l, NphAllocator *alloc)
 {
@@ -65,6 +75,8 @@ void nph_render_cluster_lods_init(NphRenderClusterLods *l, NphAllocator *alloc)
     NPH_ARRAY_INIT(&l->groups, alloc);
     NPH_ARRAY_INIT(&l->group_clusters, alloc);
     NPH_ARRAY_INIT(&l->nodes, alloc);
+    NPH_ARRAY_INIT(&l->bricks, alloc);
+    NPH_ARRAY_INIT(&l->voxels, alloc);
 }
 
 void nph_render_cluster_lods_free(NphRenderClusterLods *l)
@@ -77,6 +89,8 @@ void nph_render_cluster_lods_free(NphRenderClusterLods *l)
     NPH_ARRAY_FREE(&l->groups);
     NPH_ARRAY_FREE(&l->group_clusters);
     NPH_ARRAY_FREE(&l->nodes);
+    NPH_ARRAY_FREE(&l->bricks);
+    NPH_ARRAY_FREE(&l->voxels);
 }
 
 f32 nph_render_lod_projected_error(NphVec3 center, f32 radius, f32 error, f32 scale, NphVec3 camera,
@@ -360,9 +374,24 @@ typedef struct Build {
     u32 *class_tri_count; // per class: scratch for its triangles in a level's result (0 between)
     u32 *class_tri_start;
     LevelGrid ground; // level 0's triangles: the mesh the levels are measured back to
+    // Voxels (ADR-0061), per cluster of every level: its cell (0 for
+    // triangles), and the run of the triangles it was made from in
+    // `sources` (the level being built's inputs') or `next_sources` (its
+    // results'), which take each other's place between levels.
+    NphArrayF32 cell_of;
+    NphArrayU32 source_start;
+    NphArrayU32 source_count;
+    LodVoxelSourceArray sources;
+    LodVoxelSourceArray next_sources;
 } Build;
 
 typedef NPH_ARRAY(Ranked) RankedArray;
+
+// A voxel cluster's record has no vertices (ADR-0061).
+static bool is_voxel_cluster(const NphRenderMeshlet *m)
+{
+    return m->vertex_count == 0U;
+}
 
 // One cluster's classes, appended to `out` (duplicates kept).
 static NphResult cluster_classes(const Build *b, u32 cluster, NphArrayU32 *out)
@@ -747,7 +776,8 @@ static NphResult recluster(Build *b, const u32 *indices, const u32 *submeshes, u
     return r;
 }
 
-// A group's triangles, from its clusters: mesh vertices and submeshes.
+// A group's triangles, from its clusters: mesh vertices and submeshes (a
+// voxel cluster has none).
 static NphResult gather(const Build *b, const u32 *clusters, u32 count, NphArrayU32 *indices,
                         NphArrayU32 *submeshes)
 {
@@ -756,6 +786,9 @@ static NphResult gather(const Build *b, const u32 *clusters, u32 count, NphArray
     const NphRenderMeshlets *c = &b->out->clusters;
     for (u32 i = 0; i < count; ++i) {
         const NphRenderMeshlet *m = &c->meshlets.data[clusters[i]];
+        if (is_voxel_cluster(m)) {
+            continue;
+        }
         for (u32 t = 0; t < m->triangle_count; ++t) {
             for (u32 k = 0; k < 3U; ++k) {
                 const u8 corner = c->triangles.data[((u64)m->triangle_offset + t) * 3U + k];
@@ -886,12 +919,15 @@ static NphResult grid_index(LevelGrid *g, NphAllocator *alloc)
     return NPH_RESULT_OK;
 }
 
-// The grid of clusters [first, end)'s triangles.
+// The grid of clusters [first, end)'s triangles (voxel clusters have none).
 static NphResult grid_build(Build *b, LevelGrid *g, u32 first, u32 end)
 {
     const NphRenderMeshlets *c = &b->out->clusters;
     for (u32 i = first; i < end; ++i) {
         const NphRenderMeshlet *m = &c->meshlets.data[i];
+        if (is_voxel_cluster(m)) {
+            continue;
+        }
         for (u32 k = 0; k < (u32)m->triangle_count * 3U; ++k) {
             const u8 corner = c->triangles.data[(u64)m->triangle_offset * 3U + k];
             NPH_TRY(NPH_ARRAY_PUSH(&g->owned, c->vertices.data[m->vertex_offset + corner]));
@@ -1010,19 +1046,475 @@ static f32 class_distance(const Build *b, const LevelGrid *g, u32 c, const u32 *
 }
 
 // ---------------------------------------------------------------------------
+// Voxel groups (ADR-0061)
+// ---------------------------------------------------------------------------
+
+// The voxels of voxel cluster `cl`.
+static u32 cluster_voxels(const Build *b, u32 cl)
+{
+    const NphRenderMeshlet *m = &b->out->clusters.meshlets.data[cl];
+    u32 n = 0U;
+    for (u32 k = 0; k < m->triangle_count; ++k) {
+        const NphRenderVoxelBrick *br = &b->out->bricks.data[m->vertex_offset + k];
+        n += nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+    }
+    return n;
+}
+
+// Whether a group's triangles (their submeshes) may all become voxels.
+static bool voxelizable(const Build *b, const u32 *submeshes, u32 tris)
+{
+    const NphRenderVoxelSampler *s = b->in->voxels;
+    if (s == NULL) {
+        return false;
+    }
+    for (u32 t = 0; t < tris; ++t) {
+        if (s->submesh_surface[submeshes[t]] == NPH_RENDER_VOXEL_SURFACE_NONE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static u32 find_root(u32 *parent, u32 x)
+{
+    NPH_ASSERT(parent != NULL);
+    while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    return x;
+}
+
+// The pieces of a group's triangles (`indices`, mesh vertices): connected
+// through their vertices' classes (positions), by union-find over the
+// classes the triangles touch, numbered locally through the mesh's
+// local_class scratch.
+static NphResult count_pieces(Build *b, const u32 *indices, u32 tris, u32 *out_pieces)
+{
+    LodMesh *m = &b->mesh;
+    NphArrayU32 classes; // local -> class
+    NPH_ARRAY_INIT(&classes, b->alloc);
+    NphArrayU32 parent;
+    NPH_ARRAY_INIT(&parent, b->alloc);
+    NphResult r = NPH_RESULT_OK;
+    for (u32 i = 0; i < tris * 3U && r == NPH_RESULT_OK; ++i) {
+        const u32 c = m->class_of[indices[i]];
+        if (m->local_class[c] == NPH_U32_MAX) {
+            const u32 local = classes.len; // its own root, read before the push grows it
+            m->local_class[c] = local;
+            r = NPH_ARRAY_PUSH(&classes, c);
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(&parent, local);
+            }
+        }
+    }
+    for (u32 t = 0; t < tris && r == NPH_RESULT_OK; ++t) {
+        // Every triangle's classes were numbered above (the analyzer cannot
+        // tell the arrays are not empty).
+        NPH_ASSERT(parent.data != NULL && parent.len != 0U);
+        const u32 a = find_root(parent.data, m->local_class[m->class_of[indices[(u64)t * 3U]]]);
+        for (u32 k = 1U; k < 3U; ++k) {
+            const u32 o =
+                find_root(parent.data, m->local_class[m->class_of[indices[(u64)t * 3U + k]]]);
+            if (o != a) {
+                parent.data[o] = a;
+            }
+        }
+    }
+    u32 pieces = 0U;
+    for (u32 i = 0; i < parent.len; ++i) {
+        pieces += parent.data[i] == i ? 1U : 0U;
+    }
+    for (u32 i = 0; i < classes.len; ++i) {
+        m->local_class[classes.data[i]] = NPH_U32_MAX;
+    }
+    NPH_ARRAY_FREE(&classes);
+    NPH_ARRAY_FREE(&parent);
+    *out_pieces = pieces;
+    return r;
+}
+
+// The finest cell the coordinates allow for the sources (their largest
+// magnitude within LOD_VOXEL_COORD_LIMIT / 2 cells), and their area.
+static f64 voxel_floor(const LodVoxelInput *vin, f64 *out_area)
+{
+    f64 reach = 0.0;
+    f64 area = 0.0;
+    for (u32 s = 0; s < vin->source_count; ++s) {
+        f64 p[3][3];
+        for (u32 k = 0; k < 3U; ++k) {
+            const NphVec3 q = vin->positions[vin->sources[s].v[k]];
+            p[k][0] = (f64)q.x;
+            p[k][1] = (f64)q.y;
+            p[k][2] = (f64)q.z;
+            for (u32 a = 0; a < 3U; ++a) {
+                reach = nph_f64_max(reach, nph_f64_abs(p[k][a]));
+            }
+        }
+        const f64 e0[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+        const f64 e1[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+        const f64 n[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2],
+                          e0[0] * e1[1] - e0[1] * e1[0]};
+        area += 0.5 * nph_f64_sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    }
+    *out_area = area;
+    return nph_f64_max(reach / (0.5 * (f64)LOD_VOXEL_COORD_LIMIT), 1e-30);
+}
+
+// The smallest power of two at least `least` (> 0) whose cells the sources
+// overlap at most `budget` times. The count only falls as the cell grows
+// (each cell of a size holds eight of the next finer, on one grid), so the
+// search starts near where about `budget` cells cover the sources' area
+// and walks from there.
+static NphResult voxel_cell(const LodVoxelInput *vin, f64 least, u32 budget, f64 *out_cell)
+{
+    f64 area = 0.0;
+    least = nph_f64_max(least, voxel_floor(vin, &area));
+    f64 cell = ldexp(1.0, (int)ceil(log2(least)));
+    const f64 guess = nph_f64_sqrt(area / (f64)nph_max_u32(budget, 1U));
+    while (cell < guess) {
+        cell *= 2.0;
+    }
+    u32 n = 0U;
+    NPH_TRY(lod_voxel_count(vin, cell, budget, &n));
+    if (n <= budget) {
+        while (cell * 0.5 >= least) {
+            u32 m = 0U;
+            NPH_TRY(lod_voxel_count(vin, cell * 0.5, budget, &m));
+            if (m > budget) {
+                break;
+            }
+            cell *= 0.5;
+        }
+    } else {
+        while (n > budget) {
+            cell *= 2.0;
+            if (cell > 1e30) {
+                return NPH_RESULT_OVERFLOW;
+            }
+            NPH_TRY(lod_voxel_count(vin, cell, budget, &n));
+        }
+    }
+    *out_cell = cell;
+    return NPH_RESULT_OK;
+}
+
+typedef struct CellOrder {
+    u64 brick; // the brick's key
+    u32 bit;   // the cell's bit within it
+    u32 cell;  // index into the cells
+} CellOrder;
+
+static int compare_cell_order(const void *x, const void *y)
+{
+    const CellOrder *p = (const CellOrder *)x;
+    const CellOrder *q = (const CellOrder *)y;
+    if (p->brick != q->brick) {
+        return p->brick < q->brick ? -1 : 1;
+    }
+    return p->bit < q->bit ? -1 : (p->bit > q->bit ? 1 : 0);
+}
+
+typedef struct BrickRun {
+    i64 bc[3]; // the brick's coordinates (its lowest cell's over four)
+    u32 first; // its cells in the cell order
+    u32 count;
+    u64 sort; // scratch for the splits
+} BrickRun;
+
+static int compare_runs(const void *x, const void *y)
+{
+    const BrickRun *p = (const BrickRun *)x;
+    const BrickRun *q = (const BrickRun *)y;
+    return p->sort < q->sort ? -1 : (p->sort > q->sort ? 1 : 0);
+}
+
+static i64 floor_div4(i64 x)
+{
+    return x >= 0 ? x / 4 : -((-x + 3) / 4);
+}
+
+// The clusters of the bricks runs[first, first + count): split at their
+// voxels' median along the longest axis of the bricks' span until each fits
+// a voxel cluster, compact parts for the culling; each part's (first,
+// count) appended to `ranges`. The order within a part is kept, so the
+// split is the same for the same input.
+static NphResult split_runs(BrickRun *runs, u32 first, u32 count, NphArrayU32 *ranges)
+{
+    u32 voxels = 0U;
+    i64 lo[3] = {INT64_MAX, INT64_MAX, INT64_MAX};
+    i64 hi[3] = {INT64_MIN, INT64_MIN, INT64_MIN};
+    for (u32 k = first; k < first + count; ++k) {
+        voxels += runs[k].count;
+        for (u32 a = 0; a < 3U; ++a) {
+            lo[a] = runs[k].bc[a] < lo[a] ? runs[k].bc[a] : lo[a];
+            hi[a] = runs[k].bc[a] > hi[a] ? runs[k].bc[a] : hi[a];
+        }
+    }
+    if (count <= NPH_RENDER_VOXEL_CLUSTER_BRICKS && voxels <= NPH_RENDER_VOXEL_CLUSTER_VOXELS) {
+        NPH_TRY(NPH_ARRAY_PUSH(ranges, first));
+        return NPH_ARRAY_PUSH(ranges, count);
+    }
+    u32 axis = 0U;
+    for (u32 a = 1U; a < 3U; ++a) {
+        if (hi[a] - lo[a] > hi[axis] - lo[axis]) {
+            axis = a;
+        }
+    }
+    for (u32 k = first; k < first + count; ++k) {
+        runs[k].sort = ((u64)(runs[k].bc[axis] - lo[axis]) << 32U) | (u64)(k - first);
+    }
+    qsort(runs + first, count, sizeof(BrickRun), compare_runs);
+    u32 split = 0U;
+    u32 acc = 0U;
+    while (split + 1U < count && acc + runs[first + split].count <= voxels / 2U) {
+        acc += runs[first + split].count;
+        ++split;
+    }
+    split = nph_max_u32(split, 1U);
+    NPH_TRY(split_runs(runs, first, split, ranges));
+    return split_runs(runs, first + split, count - split, ranges);
+}
+
+// The submeshes a cluster's voxels show, with their counts.
+typedef struct SubmeshVotes {
+    NphArrayU32 submesh;
+    NphArrayU32 votes;
+} SubmeshVotes;
+
+static NphResult vote(SubmeshVotes *v, u32 submesh)
+{
+    for (u32 k = 0; k < v->submesh.len; ++k) {
+        if (v->submesh.data[k] == submesh) {
+            v->votes.data[k] += 1U;
+            return NPH_RESULT_OK;
+        }
+    }
+    NPH_TRY(NPH_ARRAY_PUSH(&v->submesh, submesh));
+    return NPH_ARRAY_PUSH(&v->votes, 1U);
+}
+
+// The submesh most of them show (the lowest on a tie).
+static u32 elected(const SubmeshVotes *v)
+{
+    u32 best = 0U;
+    for (u32 k = 1U; k < v->submesh.len; ++k) {
+        if (v->votes.data[k] > v->votes.data[best] ||
+            (v->votes.data[k] == v->votes.data[best] &&
+             v->submesh.data[k] < v->submesh.data[best])) {
+            best = k;
+        }
+    }
+    return v->submesh.len != 0U ? v->submesh.data[best] : 0U;
+}
+
+// The voxel clusters of group `group` (level `level`) from its cells: bricks
+// of their cells, split into clusters, appended to the output with their
+// bounds and places; each source to the cluster of its home cell (the
+// first cluster where it has none), in `next_sources` cluster by cluster.
+// `*out_voxels` takes the voxels made.
+static NphResult emit_voxels(Build *b, const LodVoxelCellArray *cells, f64 cell, u32 group,
+                             u32 level, const LodVoxelSource *sources, const u32 *source_cell,
+                             u32 source_count, u32 *out_voxels)
+{
+    NphAllocator *a = b->alloc;
+    NphRenderClusterLods *out = b->out;
+    const u32 n = cells->len;
+    *out_voxels = n;
+    CellOrder *order = NPH_ALLOC_ARRAY(a, CellOrder, nph_max_u32(n, 1U));
+    u32 *cell_cluster = NPH_ALLOC_ARRAY(a, u32, nph_max_u32(n, 1U));
+    NPH_ARRAY(BrickRun) runs;
+    NPH_ARRAY_INIT(&runs, a);
+    NphArrayU32 ranges;
+    NPH_ARRAY_INIT(&ranges, a);
+    NphArrayU32 counts; // sources per new cluster
+    NPH_ARRAY_INIT(&counts, a);
+    SubmeshVotes votes;
+    NPH_ARRAY_INIT(&votes.submesh, a);
+    NPH_ARRAY_INIT(&votes.votes, a);
+    NphResult r = order != NULL && cell_cluster != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    const i64 bias = LOD_VOXEL_COORD_LIMIT;
+    for (u32 i = 0; i < n && r == NPH_RESULT_OK; ++i) {
+        const LodVoxelCell *c = &cells->data[i];
+        i64 bc[3];
+        u32 bit = 0U;
+        for (u32 k = 0; k < 3U; ++k) {
+            bc[k] = floor_div4((i64)c->c[k]);
+            bit += (u32)((i64)c->c[k] - 4 * bc[k]) << (2U * k);
+        }
+        order[i].brick =
+            ((u64)(bc[2] + bias) << 42U) | ((u64)(bc[1] + bias) << 21U) | (u64)(bc[0] + bias);
+        order[i].bit = bit;
+        order[i].cell = i;
+    }
+    if (r == NPH_RESULT_OK && n > 1U) {
+        qsort(order, n, sizeof(CellOrder), compare_cell_order);
+    }
+    for (u32 i = 0; i < n && r == NPH_RESULT_OK;) {
+        u32 j = i;
+        while (j < n && order[j].brick == order[i].brick) {
+            ++j;
+        }
+        BrickRun run;
+        memset(&run, 0, sizeof run);
+        const LodVoxelCell *c = &cells->data[order[i].cell];
+        for (u32 k = 0; k < 3U; ++k) {
+            run.bc[k] = floor_div4((i64)c->c[k]);
+        }
+        run.first = i;
+        run.count = j - i;
+        r = NPH_ARRAY_PUSH(&runs, run);
+        i = j;
+    }
+    if (r == NPH_RESULT_OK && runs.len != 0U) {
+        r = split_runs(runs.data, 0U, runs.len, &ranges);
+    }
+    const u32 first_cluster = out->clusters.meshlets.len;
+    const f64 step = cell / (f64)NPH_RENDER_VOXEL_BOX_STEPS;
+    for (u32 q = 0; q + 1U < ranges.len && r == NPH_RESULT_OK; q += 2U) {
+        const u32 k = q / 2U;
+        NphRenderMeshlet ml;
+        memset(&ml, 0, sizeof ml);
+        ml.vertex_offset = out->bricks.len;
+        ml.triangle_count = (u16)ranges.data[q + 1U];
+        f64 lo[3] = {NPH_F64_MAX, NPH_F64_MAX, NPH_F64_MAX};
+        f64 hi[3] = {-NPH_F64_MAX, -NPH_F64_MAX, -NPH_F64_MAX};
+        NPH_ARRAY_CLEAR(&votes.submesh);
+        NPH_ARRAY_CLEAR(&votes.votes);
+        const u32 run_end = ranges.data[q] + ranges.data[q + 1U];
+        for (u32 ri = ranges.data[q]; ri < run_end && r == NPH_RESULT_OK; ++ri) {
+            const BrickRun *run = &runs.data[ri];
+            NphRenderVoxelBrick br;
+            memset(&br, 0, sizeof br);
+            br.origin =
+                nph_vec3((f32)((f64)run->bc[0] * 4.0 * cell), (f32)((f64)run->bc[1] * 4.0 * cell),
+                         (f32)((f64)run->bc[2] * 4.0 * cell));
+            br.cell = (f32)cell;
+            br.first_voxel = out->voxels.len;
+            for (u32 o = run->first; o < run->first + run->count && r == NPH_RESULT_OK; ++o) {
+                const u32 ci = order[o].cell;
+                const LodVoxelCell *c = &cells->data[ci];
+                br.mask[order[o].bit >> 5U] |= 1U << (order[o].bit & 31U);
+                cell_cluster[ci] = k;
+                r = NPH_ARRAY_PUSH(&out->voxels, c->voxel);
+                if (r == NPH_RESULT_OK) {
+                    r = vote(&votes, c->submesh);
+                }
+                // The footprint's box, mesh space; a capsule reaches past it by
+                // its radius, within the cell.
+                const u32 box = c->voxel.box;
+                const f64 reach =
+                    (box >> NPH_RENDER_VOXEL_SHAPE_SHIFT) == NPH_RENDER_VOXEL_SHAPE_CAPSULE
+                        ? (f64)nph_render_voxel_radius_decode((c->voxel.material >> 26U) & 63U) *
+                              cell
+                        : 0.0;
+                for (u32 ax = 0; ax < 3U; ++ax) {
+                    const f64 base = (f64)c->c[ax] * cell;
+                    const f64 bl = base + (f64)((box >> (5U * ax)) & 31U) * step - reach;
+                    const f64 bh =
+                        base + (f64)(((box >> (15U + 5U * ax)) & 31U) + 1U) * step + reach;
+                    lo[ax] = nph_f64_min(lo[ax], nph_f64_max(bl, base));
+                    hi[ax] = nph_f64_max(hi[ax], nph_f64_min(bh, base + cell));
+                }
+            }
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(&out->bricks, br);
+            }
+        }
+        ml.submesh = elected(&votes);
+        // The sphere round the footprints' box, its radius rounded up past
+        // the rounding of its centre to floats.
+        NphRenderMeshletBounds bd;
+        memset(&bd, 0, sizeof bd);
+        bd.center = nph_vec3((f32)(0.5 * (lo[0] + hi[0])), (f32)(0.5 * (lo[1] + hi[1])),
+                             (f32)(0.5 * (lo[2] + hi[2])));
+        const f64 center[3] = {(f64)bd.center.x, (f64)bd.center.y, (f64)bd.center.z};
+        f64 r2 = 0.0;
+        for (u32 ax = 0; ax < 3U; ++ax) {
+            const f64 d =
+                nph_f64_max(nph_f64_abs(lo[ax] - center[ax]), nph_f64_abs(hi[ax] - center[ax]));
+            r2 += d * d;
+        }
+        const f64 radius = nph_f64_sqrt(r2);
+        f32 rf = (f32)radius;
+        while ((f64)rf < radius) {
+            rf = nph_f32_from_bits(nph_f32_to_bits(rf) + 1U);
+        }
+        bd.radius = rf;
+        bd.cone_cutoff = 127; // with a zero axis: never culled as facing away
+        bd.cone_apex = bd.center;
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&out->clusters.meshlets, ml);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&out->clusters.bounds, bd);
+        }
+        if (r == NPH_RESULT_OK) {
+            const NphRenderClusterLod lod = {group, NPH_RENDER_LOD_NONE, level, 0U};
+            r = NPH_ARRAY_PUSH(&out->lods, lod);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&b->cell_of, (f32)cell);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&counts, 0U);
+        }
+    }
+    // The sources, cluster by cluster (a counting sort, in source order).
+    const u32 made = out->clusters.meshlets.len - first_cluster;
+    for (u32 s = 0; s < source_count && r == NPH_RESULT_OK && made != 0U; ++s) {
+        const u32 k = source_cell[s] != NPH_U32_MAX ? cell_cluster[source_cell[s]] : 0U;
+        counts.data[k] += 1U;
+    }
+    u32 at = b->next_sources.len;
+    for (u32 k = 0; k < made && r == NPH_RESULT_OK; ++k) {
+        r = NPH_ARRAY_PUSH(&b->source_start, at);
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&b->source_count, counts.data[k]);
+        }
+        at += counts.data[k];
+        counts.data[k] = 0U;
+    }
+    if (r == NPH_RESULT_OK && made != 0U) {
+        r = NPH_ARRAY_RESIZE(&b->next_sources, at);
+    }
+    for (u32 s = 0; s < source_count && r == NPH_RESULT_OK && made != 0U; ++s) {
+        const u32 k = source_cell[s] != NPH_U32_MAX ? cell_cluster[source_cell[s]] : 0U;
+        b->next_sources.data[b->source_start.data[first_cluster + k] + counts.data[k]] = sources[s];
+        counts.data[k] += 1U;
+    }
+    NPH_ARRAY_FREE(&votes.submesh);
+    NPH_ARRAY_FREE(&votes.votes);
+    NPH_ARRAY_FREE(&counts);
+    NPH_ARRAY_FREE(&ranges);
+    NPH_ARRAY_FREE(&runs);
+    if (cell_cluster != NULL) {
+        NPH_FREE_ARRAY(a, u32, cell_cluster, nph_max_u32(n, 1U));
+    }
+    if (order != NULL) {
+        NPH_FREE_ARRAY(a, CellOrder, order, nph_max_u32(n, 1U));
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // Levels
 // ---------------------------------------------------------------------------
 
 // The groups of the level [first, first + n), simplified into the next.
-// `*out_made` takes the next level's cluster count.
-static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_made,
-                             u32 *out_tris_before, u32 *out_tris_after)
+// `*out_made` takes the next level's cluster count, `*out_before` and
+// `*out_after` the primitives (triangles and voxels) the groups took and
+// made, and `*out_changed` the groups whose triangles became voxels.
+static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_made, u64 *out_before,
+                             u64 *out_after, u32 *out_changed)
 {
     NphAllocator *a = b->alloc;
     NphRenderClusterLods *out = b->out;
     *out_made = 0U;
-    *out_tris_before = 0U;
-    *out_tris_after = 0U;
+    *out_before = 0U;
+    *out_after = 0U;
+    *out_changed = 0U;
     u32 *group_of = NPH_ALLOC_ARRAY(a, u32, nph_max_u32(n, 1U));
     if (group_of == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
@@ -1052,6 +1544,16 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
     NPH_ARRAY_INIT(&hull_parts, a);
     NphArrayU32 orphans;
     NPH_ARRAY_INIT(&orphans, a);
+    // Voxels: per group whether it made voxels (its error is its cell's,
+    // not measured), the triangles it voxelizes, and their cells.
+    NphArrayU8 voxel_group;
+    NPH_ARRAY_INIT(&voxel_group, a);
+    LodVoxelSourceArray group_sources;
+    NPH_ARRAY_INIT(&group_sources, a);
+    NphArrayU32 source_cell;
+    NPH_ARRAY_INIT(&source_cell, a);
+    LodVoxelCellArray cells;
+    NPH_ARRAY_INIT(&cells, a);
     if (r == NPH_RESULT_OK) {
         r = NPH_ARRAY_RESIZE(&start, groups + 1U);
     }
@@ -1101,9 +1603,18 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
         memset(&rec, 0, sizeof rec);
         f32 error = 0.0F;
         NPH_ARRAY_CLEAR(&hull_parts);
+        // Its voxel clusters' cell and voxels (ADR-0061).
+        bool voxel_in = false;
+        f64 cell_in = 0.0;
+        u32 voxels_in = 0U;
         for (u32 i = 0; i < count && r == NPH_RESULT_OK; ++i) {
             r = NPH_ARRAY_PUSH(&hull_parts, b->own_sphere.data[cl[i]]);
             error = nph_f32_max(error, b->own_error.data[cl[i]]);
+            if (is_voxel_cluster(&out->clusters.meshlets.data[cl[i]])) {
+                voxel_in = true;
+                cell_in = nph_f64_max(cell_in, (f64)b->cell_of.data[cl[i]]);
+                voxels_in += cluster_voxels(b, cl[i]);
+            }
         }
         if (r != NPH_RESULT_OK) {
             break;
@@ -1114,35 +1625,104 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
             break;
         }
         const u32 tris = submeshes.len;
-        *out_tris_before += tris;
-        LodSimplifyInput si;
-        memset(&si, 0, sizeof si);
-        si.mesh = &b->mesh;
-        si.indices = indices.data;
-        si.submeshes = submeshes.data;
-        si.triangle_count = tris;
-        si.locked = b->locked;
-        si.target_triangles = (tris + 1U) / 2U;
-        si.orphans = &orphans;
-        si.scratch = a;
-        r = NPH_ARRAY_PUSH(&orphan_start, orphans.len);
+        *out_before += (u64)tris + voxels_in;
+        // What it would voxelize: its triangles as they are before the
+        // simplifier rewrites them, then those its voxel clusters were made
+        // from.
+        bool may_voxelize =
+            voxel_in || (tris >= VOXEL_MIN_TRIANGLES && voxelizable(b, submeshes.data, tris));
+        if (may_voxelize && !voxel_in) {
+            u32 pieces = 0U;
+            r = count_pieces(b, indices.data, tris, &pieces);
+            may_voxelize = (u64)pieces * VOXEL_PIECE_TRIANGLES >= tris;
+        }
+        NPH_ARRAY_CLEAR(&group_sources);
+        for (u32 t = 0; t < tris && may_voxelize && r == NPH_RESULT_OK; ++t) {
+            LodVoxelSource src;
+            src.v[0] = indices.data[(u64)t * 3U];
+            src.v[1] = indices.data[(u64)t * 3U + 1U];
+            src.v[2] = indices.data[(u64)t * 3U + 2U];
+            src.submesh = submeshes.data[t];
+            r = NPH_ARRAY_PUSH(&group_sources, src);
+        }
+        for (u32 i = 0; i < count && voxel_in && r == NPH_RESULT_OK; ++i) {
+            if (is_voxel_cluster(&out->clusters.meshlets.data[cl[i]])) {
+                r = NPH_ARRAY_PUSH_N(&group_sources, b->sources.data + b->source_start.data[cl[i]],
+                                     b->source_count.data[cl[i]]);
+            }
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&orphan_start, orphans.len);
+        }
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&made_start, out->clusters.meshlets.len);
         }
         if (r != NPH_RESULT_OK) {
             break;
         }
+        LodVoxelInput vin;
+        memset(&vin, 0, sizeof vin);
+        vin.positions = b->in->positions;
+        vin.sources = group_sources.data;
+        vin.source_count = group_sources.len;
+        vin.sampler = b->in->voxels;
+        vin.scratch = a;
         u32 kept = tris;
         f32 simplify_error = 0.0F;
-        r = lod_simplify(&si, &kept, &simplify_error);
+        bool voxels = voxel_in;
+        f64 cell = 0.0;
+        if (!voxel_in) {
+            LodSimplifyInput si;
+            memset(&si, 0, sizeof si);
+            si.mesh = &b->mesh;
+            si.indices = indices.data;
+            si.submeshes = submeshes.data;
+            si.triangle_count = tris;
+            si.locked = b->locked;
+            si.target_triangles = (tris + 1U) / 2U;
+            si.orphans = &orphans;
+            si.scratch = a;
+            r = lod_simplify(&si, &kept, &simplify_error);
+            if (r != NPH_RESULT_OK) {
+                break;
+            }
+            if (may_voxelize && tris != 0U) {
+                // Voxels where the collapses stall, or where their error
+                // passes the voxels' own: cells from twice the error so far,
+                // as many as four times the triangles (ADR-0061).
+                const bool stalled = (u64)kept * 4U > (u64)tris * 3U;
+                const u32 budget = (u32)nph_min_u64((u64)tris * 4U, NPH_U32_MAX);
+                const NphResult rc = voxel_cell(&vin, 2.0 * (f64)error, budget, &cell);
+                if (rc == NPH_RESULT_OK) {
+                    voxels = stalled || (f64)simplify_error > cell;
+                } else if (rc != NPH_RESULT_OVERFLOW) {
+                    r = rc; // past the coordinates' reach the group keeps its triangles
+                }
+            }
+        } else {
+            // Coarser voxels: at least twice the inputs' cell, at most half
+            // the inputs' primitives.
+            const u64 budget = nph_max_u64(((u64)tris + voxels_in) / 2U, 1U);
+            r = voxel_cell(&vin, 2.0 * cell_in, (u32)nph_min_u64(budget, NPH_U32_MAX), &cell);
+        }
+        if (r == NPH_RESULT_OK && voxels) {
+            r = NPH_ARRAY_RESIZE(&source_cell, nph_max_u32(group_sources.len, 1U));
+            if (r == NPH_RESULT_OK) {
+                r = lod_voxelize(&vin, cell, &cells, source_cell.data);
+            }
+            // A group of triangles whose rays hit nothing keeps its
+            // triangles; one of voxels may end in none (all masked away).
+            if (r == NPH_RESULT_OK && cells.len == 0U && !voxel_in) {
+                voxels = false;
+            }
+        }
         if (r != NPH_RESULT_OK) {
             break;
         }
-        *out_tris_after += kept;
         const u32 group_index = out->groups.len;
         rec.center = sphere.center;
         rec.radius = sphere.radius;
-        rec.error = nph_f32_max(error, simplify_error);
+        rec.error = voxels ? nph_f32_max(error, (f32)cell) : nph_f32_max(error, simplify_error);
         rec.level = level;
         rec.cluster_offset = out->group_clusters.len;
         rec.cluster_count = count;
@@ -1150,17 +1730,38 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH_N(&out->group_clusters, cl, count);
         }
+        if (r == NPH_RESULT_OK) {
+            const u8 flag = voxels ? 1U : 0U;
+            r = NPH_ARRAY_PUSH(&voxel_group, flag);
+        }
         for (u32 i = 0; i < count; ++i) {
             out->lods.data[cl[i]].parent = group_index;
         }
-        if (r == NPH_RESULT_OK) {
+        if (r == NPH_RESULT_OK && voxels) {
+            u32 made_voxels = 0U;
+            r = emit_voxels(b, &cells, cell, group_index, level + 1U, group_sources.data,
+                            source_cell.data, group_sources.len, &made_voxels);
+            *out_after += made_voxels;
+            *out_changed += voxel_in ? 0U : 1U;
+        } else if (r == NPH_RESULT_OK) {
             r = recluster(b, indices.data, submeshes.data, kept, group_index, level + 1U);
+            *out_after += kept;
         }
-        // The new clusters' own sphere and error: the group's.
+        // The new clusters' own sphere and error: the group's; a triangle
+        // cluster has no cell and no sources.
         while (r == NPH_RESULT_OK && b->own_sphere.len < out->clusters.meshlets.len) {
             r = NPH_ARRAY_PUSH(&b->own_sphere, sphere);
             if (r == NPH_RESULT_OK) {
                 r = NPH_ARRAY_PUSH(&b->own_error, rec.error);
+            }
+        }
+        while (r == NPH_RESULT_OK && b->cell_of.len < out->clusters.meshlets.len) {
+            r = NPH_ARRAY_PUSH(&b->cell_of, 0.0F);
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(&b->source_start, 0U);
+            }
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(&b->source_count, 0U);
             }
         }
     }
@@ -1218,6 +1819,11 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
     NPH_ARRAY_CLEAR(&touched);
     const u32 groups_first = out->groups.len - (made_start.len > 0U ? made_start.len - 1U : 0U);
     for (u32 g = 0; g + 1U < made_start.len && r == NPH_RESULT_OK; ++g) {
+        // A flag a group, pushed with its record (the analyzer cannot tell).
+        NPH_ASSERT(voxel_group.data != NULL && g < voxel_group.len);
+        if (voxel_group.data[g] != 0U) {
+            continue; // a voxel group's error is its cell's
+        }
         f32 measured = 0.0F;
         for (u32 cl = made_start.data[g]; cl < made_start.data[g + 1U] && r == NPH_RESULT_OK;
              ++cl) {
@@ -1282,6 +1888,10 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
     NPH_ARRAY_FREE(&orphan_start);
     NPH_ARRAY_FREE(&orphans);
     NPH_ARRAY_FREE(&hull_parts);
+    NPH_ARRAY_FREE(&voxel_group);
+    NPH_ARRAY_FREE(&group_sources);
+    NPH_ARRAY_FREE(&source_cell);
+    NPH_ARRAY_FREE(&cells);
     *out_made = out->clusters.meshlets.len - made_first;
     NPH_ARRAY_FREE(&start);
     NPH_ARRAY_FREE(&members);
@@ -1573,6 +2183,21 @@ static NphResult validate(const NphRenderClusterLodInput *in, u32 *max_vertices,
         (in->attribs != NULL && in->attrib_stride == 0U)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // A sampler has its functions and a surface per submesh (a masked one
+    // needs `covers`).
+    const NphRenderVoxelSampler *vs = in->voxels;
+    if (vs != NULL) {
+        if (vs->sample == NULL || (in->range_count != 0U && vs->submesh_surface == NULL)) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        for (u32 i = 0; i < in->range_count; ++i) {
+            const u8 kind = vs->submesh_surface[i];
+            if (kind > (u8)NPH_RENDER_VOXEL_SURFACE_MASKED ||
+                (kind == (u8)NPH_RENDER_VOXEL_SURFACE_MASKED && vs->covers == NULL)) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+        }
+    }
     for (u32 i = 0; i < in->index_count; ++i) {
         if (in->indices[i] >= in->vertex_count) {
             return NPH_RESULT_INVALID_ARGUMENT;
@@ -1588,7 +2213,10 @@ static NphResult validate(const NphRenderClusterLodInput *in, u32 *max_vertices,
     // submesh a range.
     for (u32 i = 0; i < m->meshlets.len; ++i) {
         const NphRenderMeshlet *ml = &m->meshlets.data[i];
-        if (ml->submesh >= in->range_count || ml->vertex_count > *max_vertices ||
+        // A record without vertices is a voxel cluster's, which only the
+        // levels make.
+        if (ml->submesh >= in->range_count || ml->vertex_count == 0U || ml->triangle_count == 0U ||
+            ml->vertex_count > *max_vertices ||
             (u64)ml->vertex_offset + ml->vertex_count > m->vertices.len ||
             ((u64)ml->triangle_offset + ml->triangle_count) * 3U > m->triangles.len) {
             return NPH_RESULT_INVALID_ARGUMENT;
@@ -1628,6 +2256,11 @@ static void build_free(Build *b)
     }
     NPH_ARRAY_FREE(&b->own_sphere);
     NPH_ARRAY_FREE(&b->own_error);
+    NPH_ARRAY_FREE(&b->cell_of);
+    NPH_ARRAY_FREE(&b->source_start);
+    NPH_ARRAY_FREE(&b->source_count);
+    NPH_ARRAY_FREE(&b->sources);
+    NPH_ARRAY_FREE(&b->next_sources);
     grid_free(a, &b->ground);
     lod_mesh_free(&b->mesh, a);
 }
@@ -1649,6 +2282,11 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
     b.group_size = in->group_size != 0U ? in->group_size : 8U;
     NPH_ARRAY_INIT(&b.own_sphere, b.alloc);
     NPH_ARRAY_INIT(&b.own_error, b.alloc);
+    NPH_ARRAY_INIT(&b.cell_of, b.alloc);
+    NPH_ARRAY_INIT(&b.source_start, b.alloc);
+    NPH_ARRAY_INIT(&b.source_count, b.alloc);
+    NPH_ARRAY_INIT(&b.sources, b.alloc);
+    NPH_ARRAY_INIT(&b.next_sources, b.alloc);
     NPH_ARRAY_INIT(&b.ground.items, b.alloc);
     NPH_ARRAY_INIT(&b.ground.owned, b.alloc);
     NphResult r = lod_mesh_init(&b.mesh, b.alloc, in->positions, in->attribs, in->attrib_stride,
@@ -1701,6 +2339,15 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&b.own_error, 0.0F);
         }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&b.cell_of, 0.0F);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&b.source_start, 0U);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&b.source_count, 0U);
+        }
     }
     out->level0_clusters = m0->meshlets.len;
     out->levels = 1U;
@@ -1709,16 +2356,25 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
     while (r == NPH_RESULT_OK && count > 1U &&
            (in->max_levels == 0U || out->levels < in->max_levels)) {
         u32 made = 0U;
-        u32 before = 0U;
-        u32 after = 0U;
-        r = build_level(&b, out->levels - 1U, first, count, &made, &before, &after);
+        u64 before = 0U;
+        u64 after = 0U;
+        u32 changed = 0U;
+        r = build_level(&b, out->levels - 1U, first, count, &made, &before, &after, &changed);
         if (r != NPH_RESULT_OK) {
             break;
         }
         first += count;
         count = made;
         out->levels += 1U;
-        if ((f32)after > STALL_RATIO * (f32)before) {
+        // The voxels the level made are the next level's sources.
+        NPH_ARRAY_CLEAR(&b.sources);
+        const LodVoxelSourceArray swap = b.sources;
+        b.sources = b.next_sources;
+        b.next_sources = swap;
+        // The levels stop when they stop shrinking, unless triangles just
+        // became voxels (which may make more primitives, never more levels
+        // than that once per group).
+        if (changed == 0U && (f64)after > (f64)STALL_RATIO * (f64)before) {
             break;
         }
     }

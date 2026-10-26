@@ -629,6 +629,128 @@ level 0 (`render_perf --lod-error=0`), interleaved: street +0.03 ms, walk
 0.05 to 0.1 ms; the street draws 1.15 million triangles against 1.42, its
 walk 0.03 + 0.02 ms. Its geometry is near, where level 0 is the cut.
 
+### Voxels
+
+Aggregate geometry (foliage, twigs, debris: many small disconnected pieces)
+stalls the levels' collapses, which cannot take a closed piece away: the
+landscape's pine sapling stops at 95,716 triangles in 1,539 clusters, and a
+forest of them drawn at that level overflows every list. Given a material
+sampler, the builder makes such groups voxels instead (ADR-0061;
+`render/voxel.h`, `cluster_voxel.c`), as Nanite's foliage does (Epic,
+"Nanite Foliage", UE 5.7). This is the first of ADR-0061's stages: the
+voxels, their levels, the traversal and the shading model's terms on the
+CPU. The renderer refuses meshes with voxel clusters until it draws them.
+
+**The records.** A voxel cluster is a cluster whose meshlet record has no
+vertices: `triangle_count` bricks from `vertex_offset`, at most 32 bricks
+and 1,024 voxels. A brick (32 bytes) is 4 x 4 x 4 cells of one power-of-two
+size on the mesh's grid, with a 64-bit occupancy mask and its first voxel;
+a voxel (16 bytes) is its cell's footprint (a box in 32nds of the cell, the
+ellipsoid inscribed in it, or a capsule between two of its opposite corners
+with a radius of `2^(c/8 - 8)` of the cell), albedo and ambient occlusion,
+roughness and metallic, and a two-sided von Mises-Fisher lobe of normals (an
+axis and a concentration, its byte `kappa = 2^(b/16) - 1`).
+
+**When a group becomes voxels.** A group of at least 256 triangles whose
+pieces average at most 32 triangles (union-find over its vertices'
+positions: an open sheet or a flat-shaded mesh that stalls on its borders or
+seams is one piece or a few, and stays triangles), every submesh opaque or
+masked, becomes voxels where its simplification keeps more than three
+quarters of its triangles, or where its quadric error passes the voxels'.
+A group holding a voxel cluster always does. The first cells are the
+smallest power of two at least twice the error so far whose cells the
+triangles overlap at most four times their count (a stalled level's error
+is its finest pieces', so halving its primitives would jump the error, and
+every distance between would draw the stalled triangles); coarser voxel
+groups take at least twice their inputs' cell and at most half their
+inputs' primitives. A voxel group's error is its cell. Every voxel level is
+made again from the triangles where they first became voxels, each in one
+cluster of each level (the cluster of the cell holding its centroid), never
+from finer voxels, which would lose the correlation the footprints measure.
+
+**A cell's voxel** (`lod_voxelize`). Each cell the triangles overlap
+(Akenine-Möller's triangle-box test) is probed by 16 x 16 jittered rays
+along each axis, against its triangles over the cell's own extent (a masked
+submesh's points through the sampler's `covers`):
+
+- *Coverage*: the share of an axis's rays that hit, the union of the
+  triangles' projections, so that geometry behind other geometry in the
+  cell counts once (Heitz & Neyret, HPG 2012).
+- *Footprint*: within the box of every hit point, widened by half a ray's
+  spacing.
+  - A *surface's* (its normals' second moment 0.9 or more along one axis,
+    and the box's shadow along the axis of most coverage within a quarter of
+    that coverage: a sheet across the cell fills it, a slanted sliver does
+    not) is that box, which closes up with its neighbours'.
+  - A *needle's* (its hits strung along one line: their spread's largest
+    eigenvalue 0.9 of the whole) is a capsule along that line between the
+    hits' farthest points on it, of the radius of their spread across it
+    (the hits lie on the needle's surface; a needle a hundredth of the
+    face across meets only two or three of an axis's rays, so its coverage
+    is known only to about 40 %, its surface points exactly), held to the
+    cell. Its projected area follows the needle's as the view turns, down
+    to its section end-on, as no axis-aligned shape's can.
+  - An *aggregate's* is sized so its projected area along each axis is the
+    coverage: the ellipsoid inscribed in a box, whose projected area along
+    a direction `d` is `sqrt((c_x d_x)^2 + (c_y d_y)^2 + (c_z d_z)^2)` of
+    the cell's face, as an SGGX distribution's is (Heitz et al., SIGGRAPH
+    2015), where a box's is `c_x |d_x| + c_y |d_y| + c_z |d_z|`, up to
+    `sqrt(3)` times an isotropic cloud's along a diagonal; a box where an
+    ellipsoid cannot reach the coverages. It lies at a place within the
+    hits' box hashed from the cell: footprints that sat in their cells'
+    middles would line up along each axis and let rays down a column
+    through, where the pieces are independent from cell to cell (Cook et
+    al., SIGGRAPH 2007).
+- *Look*: albedo, roughness, metallic and occlusion averaged over the
+  rays' first and last hits (what is seen from outside the cell), every
+  other ray each way; the lobe from those hits' normals, each weighed by
+  `1 / (|n_x| + |n_y| + |n_z|)` so that the three axes' views count the
+  surface by its area: the axis the second moment's dominant eigenvector,
+  the concentration the one whose second moment along its axis is the
+  dominant eigenvalue.
+
+**The traversal** (`nph_render_voxel_trace`, the shaders' twin to come)
+walks a brick's cells in the order a ray crosses them (Amanatides & Woo,
+Eurographics 1987) and tests each occupied cell's footprint; the round
+shapes' quadratics are taken from where the ray enters the cell, so their
+terms keep their precision however far the ray came, and a capsule's is the
+earliest entry of its body and its ends' spheres within the cell. Against a
+search of every footprint (the capsule as the points within its radius of
+its segment, by bisection), 25,600 rays at 400 random bricks of every shape
+agree on every hit, and on its `t` within 2e-5 of the brick.
+
+**The shading model** (`nph_render_voxel_diffuse` and its fellows). For
+the lobe turned toward the viewer, the diffuse response to a light is the
+clamped cosine toward it averaged over the normals the viewer sees, `D(m)
+(m.v)+` normalised. The viewer's cosine is taken as a spherical Gaussian of
+sharpness 2.8, whose product with the lobe is a lobe again (Wang et al.,
+SIGGRAPH Asia 2009), and that lobe's mean clamped cosine toward the light
+has Stephen Hill's fitted closed form (in Pettineo, "SG Series Part 3",
+2016), which is the cosine itself for a lobe of one normal: a sheet's voxel
+shades as its triangles. Against quadrature of the definition, over a grid
+of lobes, views and lights, its error averages 0.7 % of a facing light's
+response, at most 5 % within 60 degrees of the lobe's axis, and 8.3 % at a
+grazing 84 degrees, where the Gaussian does not cut the lobe at its horizon
+as the cosine does (a viewer's sharpness of 2.8 measured best of those
+tried; one rising with the grazing angle traded the error between lobes).
+Specular is GGX with the lobe's variance added (`alpha^2 + 2 / kappa`), and
+the environment's harmonics are convolved with the lobe (bands 1 and 2
+scaled by `A(kappa)` and `1 - 3 A(kappa) / kappa`).
+
+**Measured** (`test_voxel.c`): a sheet across cells and a slanted one leave
+no ray through them unstopped (4,000 and 4,500 rays); a cloud of 2,000
+needles keeps its coverage within 9 % from the axes, the diagonals and a
+random direction (0.069 against the needles' 0.073 along x, 0.082 against
+0.075 along the cube's diagonal); a needle across a cell becomes a capsule
+whose coverage is within 11 % of the needle's from six directions, and a
+dot end-on; cuts through a foliage mesh's levels at 300 m and 1.2 km are
+all voxels and cover what level 0 covers (1,778 rays of 9,216 against
+1,777, with 174 and 4 clusters); a wavy sheet's levels make no voxels.
+ADR-0061 records the footprints these replaced and what each measured. The
+build of 2,000 closed
+needles (16,000 triangles) takes 0.89 s on one thread, about 55 µs a
+triangle, most of it in the cells' rays.
+
 ### A frame
 
 | Pass | What it does |

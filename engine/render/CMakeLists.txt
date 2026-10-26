@@ -11,6 +11,7 @@ nph_add_module(render
         src/cluster_lod.c
         src/cluster_lod_internal.h
         src/cluster_simplify.c
+        src/cluster_voxel.c
         src/debug_draw.c
         src/dof.c
         src/frame.c
@@ -28,6 +29,7 @@ nph_add_module(render
         src/taa.c
         src/vis.c
         src/vis_scene.c
+        src/voxel.c
         src/vsm.c
     PUBLIC_DEPS nph::gpu
 )
@@ -63,6 +65,7 @@ nph_add_test(render
         tests/test_taa.c
         tests/test_vis.c
         tests/test_vis_lod.c
+        tests/test_voxel.c
         tests/test_vsm.c
     DEPS
         nph::render
