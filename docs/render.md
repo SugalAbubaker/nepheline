@@ -243,7 +243,17 @@ against.
   stream stores them (R16G16B16A16_UNORM, where the device builds from that
   format; a float copy of the same values elsewhere). It is built once, in
   the first frame that traces after the mesh's creation
-  (`NphRenderFrameStats.shadow_builds`), preferring trace speed.
+  (`NphRenderFrameStats.shadow_builds`), preferring trace speed, and
+  compacted after: its compacted size is queried in the pass that built
+  it, read when that frame completes two frames on, and a structure of
+  that size made; the next frame that traces copies it there and swaps it
+  in (the reference's records name the copy from the next frame, the
+  production path's once the GPU scene's mesh record, uploaded in the
+  swap's frame, reaches the GPU), and the original is retired two frames
+  after the swap, when no top level still to be traced names it. A device
+  that saves nothing (lavapipe reports the size as built) keeps the
+  structure as built. `shadow_blas_bytes` in the frame statistics is the
+  bottom levels' size, `shadow_compactions` the swaps a frame made.
 - **A top level over the instances.** Each record's transform folds in its
   mesh's dequantisation (`L·diag(scale)`, `L·offset + t`), and its custom
   index names its slot. The live, shown instances' records come first;
@@ -259,9 +269,10 @@ against.
     scene (`rt instances`: every slot's record inactive, then the active
     ones appended from the start), so its CPU cost does not depend on the
     instance count. It rebuilds the top level only when its instances
-    changed, after a frame that traced nothing, or when the camera has
-    moved more than 16 m from the anchor, which then moves to the camera.
-    A camera moving through a still scene costs no build.
+    changed, after a frame that traced nothing, when the camera has moved
+    more than 16 m from the anchor, which then moves to the camera, and
+    the frame after a swap of compacted bottom levels. A camera moving
+    through a still scene costs no build.
   - **The reference** writes the active records on the CPU into its frame
     records, as it does its draws, and rebuilds every frame over them, with
     the anchor at the camera. `shadow_rebuild` in the frame statistics says
@@ -275,7 +286,13 @@ against.
 
 The top level for 119,041 slots (`render_perf`) takes 20.7 MB, its records
 7.6 MB (and, for the reference, 7.6 MB more in each frame's upload
-buffer), and the scratch 9.8 MB. The bottom levels are not compacted.
+buffer), and the scratch 9.8 MB. Compacted, Bistro's 554 bottom levels (1.76 million triangles) hold
+55.7 MB against 124.1 MB as built (70 bytes a triangle on the RTX 3060
+Ti), and `lod_4k_production`'s 5.8 MB against 13.8. The rays trace them
+as fast: interleaved, the radiance cache's update takes 0.192 ms against
+0.197 in Bistro's street, 0.178 against 0.177 as it turns, and 0.037 in
+both in the LOD scene; the resolve is unchanged and the frames within
+0.02 ms. A swap costs one more top-level build, the frame after it.
 
 ### The sun's virtual shadow map
 

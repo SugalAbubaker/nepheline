@@ -54,6 +54,10 @@ typedef enum NphGpuAccelType {
 typedef enum NphGpuAccelBuildFlags {
     NPH_GPU_ACCEL_PREFER_TRACE = 1U << 0U, // a slower build for faster rays (static geometry)
     NPH_GPU_ACCEL_PREFER_BUILD = 1U << 1U, // a faster build (rebuilt every frame)
+    // Its compacted size can be queried and it copied into a structure of
+    // that size (nph_gpu_cmd_query_accel_compacted_size,
+    // nph_gpu_cmd_copy_accel_compact).
+    NPH_GPU_ACCEL_ALLOW_COMPACTION = 1U << 2U,
 } NphGpuAccelBuildFlags;
 
 // One geometry of a bottom-level structure: an indexed triangle list.
@@ -132,6 +136,31 @@ void nph_gpu_cmd_build_blas(NphGpuCmd *cmd, NphGpuAccel dst, const NphGpuAccelTr
 // most its max_instances) read at `offset` of `instances` (16-byte aligned).
 void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
                             u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset);
+
+// Records a query of a bottom level's compacted size into the frame's
+// queries (NphGpuDeviceDesc.accel_queries_per_frame): `accel` built with
+// NPH_GPU_ACCEL_ALLOW_COMPACTION, its build ordered before by a barrier
+// from acceleration-structure writes to acceleration-structure reads at
+// NPH_GPU_STAGE_ACCEL_BUILD. Returns the query's index, or
+// NPH_GPU_INVALID_INDEX when the frame's queries are taken (query it in a
+// later frame). The result: nph_gpu_frame_accel_sizes, from the frame
+// NPH_GPU_FRAMES_IN_FLIGHT later. Thread-safe across command buffers.
+u32 nph_gpu_cmd_query_accel_compacted_size(NphGpuCmd *cmd, NphGpuAccel accel);
+
+// The compacted sizes queried by the frame that last completed in the
+// current slot (frame N - NPH_GPU_FRAMES_IN_FLIGHT), indexed by the values
+// nph_gpu_cmd_query_accel_compacted_size returned; 0 for a query whose
+// command buffer was not submitted. False before such a frame, or without
+// ray queries. Valid from nph_gpu_frame_begin to the next.
+bool nph_gpu_frame_accel_sizes(const NphGpuDevice *dev, u64 *out_frame_index, const u64 **out_sizes,
+                               u32 *out_count);
+
+// Records a copy of `src` (built with NPH_GPU_ACCEL_ALLOW_COMPACTION, the
+// build ordered before) into `dst`, compacted: `dst` was created with at
+// least the queried compacted size. The copy writes `dst` at
+// NPH_GPU_STAGE_ACCEL_BUILD (NPH_GPU_ACCESS_ACCEL_WRITE); `dst` then
+// serves wherever `src` did, after a barrier, and `src` may be destroyed.
+void nph_gpu_cmd_copy_accel_compact(NphGpuCmd *cmd, NphGpuAccel src, NphGpuAccel dst);
 
 #ifdef __cplusplus
 }

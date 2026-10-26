@@ -2,7 +2,9 @@
 // Acceleration structures and ray queries (gpu/accel.h): bottom levels from
 // float and 16-bit unorm vertices, a top level of their instances written
 // by the CPU, and rays traced against it in a compute shader, with what
-// each ray hits checked; and the usages refused without the feature.
+// each ray hits checked; a bottom level compacted after its size was
+// queried, which traces as its original; and the usages refused without
+// the feature.
 #include <nepheline/gpu/accel.h>
 
 #include "test_gpu_support.h"
@@ -235,6 +237,202 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
     nph_gpu_buffer_destroy(dev, qb);
     nph_gpu_buffer_destroy(dev, vb);
     NTEST_EXPECT_FALSE(nph_gpu_accel_is_valid(dev, tlas));
+}
+
+// Submits `cmd` as the frame's one command buffer and ends the frame.
+static void end_frame(NphGpuDevice *dev, NphGpuCmd *cmd)
+{
+    nph_gpu_cmd_end(cmd);
+    NphGpuSubmitDesc sd;
+    memset(&sd, 0, sizeof sd);
+    sd.cmds = &cmd;
+    sd.cmd_count = 1U;
+    NTEST_ASSERT_EQ_INT(nph_gpu_submit(dev, &sd, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(dev), NPH_RESULT_OK);
+}
+
+// A grid of 32 x 32 quads in the xy plane (2,048 triangles) built with
+// compaction allowed in frame 0, its compacted size queried there and read
+// once that frame completes, then copied into a structure of that size:
+// no larger than the original, and rays straight down through a top level
+// over each hit the same triangles at the same distances.
+NTEST_F(GpuFixture, a_compacted_bottom_level_traces_as_its_original)
+{
+    REQUIRE_RAY_QUERY(f);
+    NphGpuDevice *dev = f->dev;
+    enum {
+        SIDE = 32U,
+        VERTS = (SIDE + 1U) * (SIDE + 1U),
+        TRIS = SIDE * SIDE * 2U,
+        RAYS = 64U
+    };
+    static f32 positions[VERTS * 3U];
+    static u32 indices[TRIS * 3U];
+    for (u32 y = 0; y <= SIDE; ++y) {
+        for (u32 x = 0; x <= SIDE; ++x) {
+            f32 *p = &positions[((u64)y * (SIDE + 1U) + x) * 3U];
+            p[0] = (f32)x / (f32)SIDE;
+            p[1] = (f32)y / (f32)SIDE;
+            p[2] = 0.05F * (f32)((x * 7U + y * 3U) % 5U); // not flat: distinct hits
+        }
+    }
+    u32 k = 0U;
+    for (u32 y = 0; y < SIDE; ++y) {
+        for (u32 x = 0; x < SIDE; ++x) {
+            const u32 v = y * (SIDE + 1U) + x;
+            const u32 quad[6] = {v, v + 1U, v + SIDE + 2U, v, v + SIDE + 2U, v + SIDE + 1U};
+            for (u32 i = 0; i < 6U; ++i) {
+                indices[k++] = quad[i];
+            }
+        }
+    }
+    const u32 input = (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT | (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    NphGpuBuffer vb = upload_buffer(dev, positions, sizeof positions, input, "grid vertices");
+    NphGpuBuffer ib = upload_buffer(dev, indices, sizeof indices, input, "grid indices");
+    NphGpuAccelTriangles tri;
+    memset(&tri, 0, sizeof tri);
+    tri.vertices = vb;
+    tri.vertex_stride = 12U;
+    tri.vertex_count = VERTS;
+    tri.vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+    tri.indices = ib;
+    tri.triangle_count = TRIS;
+    tri.opaque = 1;
+    const u32 flags = (u32)NPH_GPU_ACCEL_PREFER_TRACE | (u32)NPH_GPU_ACCEL_ALLOW_COMPACTION;
+    NphGpuAccelSizes sizes;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_blas_sizes(dev, &tri, 1U, flags, &sizes), NPH_RESULT_OK);
+    NphGpuAccelDesc ad = {NPH_GPU_ACCEL_BOTTOM, sizes.accel, "grid blas"};
+    NphGpuAccel blas = NPH_GPU_ACCEL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &ad, &blas), NPH_RESULT_OK);
+    NphGpuAccelSizes tsizes;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_tlas_sizes(dev, 1U, (u32)NPH_GPU_ACCEL_PREFER_BUILD, &tsizes),
+                        NPH_RESULT_OK);
+    const u64 align = nph_max_u32(nph_gpu_device_info(dev)->limits.accel_scratch_alignment, 1U);
+    const u64 tlas_at = align_up(sizes.scratch, align);
+    const u64 scratch_size = tlas_at + 2U * align_up(tsizes.scratch, align) + align;
+    NphGpuBuffer scratch = test_make_buffer(dev, scratch_size, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                                            NPH_GPU_MEMORY_DEVICE, "grid scratch");
+    const u64 base = nph_gpu_buffer_address(dev, scratch);
+    const u64 lead = align_up(base, align) - base;
+
+    // Frame 0: the build and the query.
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+    const u64 built_frame = nph_gpu_frame_index(dev);
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "grid build", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_build_blas(cmd, blas, &tri, 1U, flags, scratch, lead);
+    accel_barrier(cmd, (u32)NPH_GPU_STAGE_ACCEL_BUILD);
+    const u32 query = nph_gpu_cmd_query_accel_compacted_size(cmd, blas);
+    NTEST_ASSERT_EQ_UINT(query, 0U);
+    end_frame(dev, cmd);
+    // A wait between frames reads the slot's results early; they stand.
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+
+    // The size, from the frame NPH_GPU_FRAMES_IN_FLIGHT later.
+    u64 compacted = 0U;
+    for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+        u64 frame = 0U;
+        const u64 *results = NULL;
+        u32 count = 0U;
+        if (nph_gpu_frame_accel_sizes(dev, &frame, &results, &count)) {
+            NTEST_ASSERT_EQ_UINT(frame, built_frame);
+            NTEST_ASSERT_EQ_UINT(count, 1U);
+            compacted = results[query];
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "idle", &cmd),
+                            NPH_RESULT_OK);
+        end_frame(dev, cmd);
+    }
+    NTEST_LOG("bottom level of %u triangles: %llu bytes, %llu compacted", (u32)TRIS,
+              (unsigned long long)sizes.accel, (unsigned long long)compacted);
+    NTEST_ASSERT_TRUE(compacted != 0U);
+    NTEST_EXPECT_TRUE(compacted <= sizes.accel);
+
+    // The copy, a top level over each, and the rays.
+    NphGpuAccelDesc cdesc = {NPH_GPU_ACCEL_BOTTOM, compacted, "grid blas compacted"};
+    NphGpuAccel small = NPH_GPU_ACCEL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &cdesc, &small), NPH_RESULT_OK);
+    NphGpuAccelDesc td = {NPH_GPU_ACCEL_TOP, tsizes.accel, "grid tlas"};
+    NphGpuAccel tlas[2] = {NPH_GPU_ACCEL_NULL, NPH_GPU_ACCEL_NULL};
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &td, &tlas[0]), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &td, &tlas[1]), NPH_RESULT_OK);
+    const NphGpuAccelInstance inst[2] = {instance_of(nph_gpu_accel_address(dev, blas), 0.0F, 3U),
+                                         instance_of(nph_gpu_accel_address(dev, small), 0.0F, 3U)};
+    NphGpuBuffer instances = upload_buffer(dev, inst, sizeof inst, input, "grid instances");
+    static f32 rays[RAYS][8];
+    for (u32 i = 0; i < RAYS; ++i) {
+        const f32 x = 0.013F + 0.97F * (f32)((i * 37U) % RAYS) / (f32)RAYS;
+        const f32 y = 0.011F + 0.97F * (f32)((i * 11U + 5U) % RAYS) / (f32)RAYS;
+        const f32 r[8] = {x, y, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F};
+        memcpy(rays[i], r, sizeof r);
+    }
+    NphGpuBuffer rb =
+        upload_buffer(dev, rays, sizeof rays, (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "grid rays");
+    NphGpuBuffer hb[2];
+    for (u32 t = 0; t < 2U; ++t) {
+        hb[t] = test_make_buffer(dev, (u64)RAYS * 16U, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                                 NPH_GPU_MEMORY_READBACK, "grid hits");
+    }
+    NphGpuShader shader = test_load_shader(dev, "test_ray_query.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    cd.name = "ray query";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(dev, &cd, &pipeline), NPH_RESULT_OK);
+
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "grid rays", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_copy_accel_compact(cmd, blas, small);
+    accel_barrier(cmd, (u32)NPH_GPU_STAGE_ACCEL_BUILD);
+    for (u32 t = 0; t < 2U; ++t) {
+        nph_gpu_cmd_build_tlas(cmd, tlas[t], instances, (u64)t * sizeof inst[0], 1U,
+                               (u32)NPH_GPU_ACCEL_PREFER_BUILD, scratch,
+                               lead + tlas_at + (u64)t * align_up(tsizes.scratch, align));
+    }
+    accel_barrier(cmd, (u32)NPH_GPU_STAGE_COMPUTE);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    for (u32 t = 0; t < 2U; ++t) {
+        RayPush push;
+        memset(&push, 0, sizeof push);
+        push.tlas = nph_gpu_accel_address(dev, tlas[t]);
+        push.rays = nph_gpu_buffer_address(dev, rb);
+        push.hits = nph_gpu_buffer_address(dev, hb[t]);
+        push.count = RAYS;
+        nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+        nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+        nph_gpu_cmd_buffer_barrier(cmd, hb[t], (u32)NPH_GPU_STAGE_COMPUTE,
+                                   (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_HOST,
+                                   (u32)NPH_GPU_ACCESS_HOST_READ);
+    }
+    end_frame(dev, cmd);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(dev), NPH_RESULT_OK);
+
+    const f32 *a = (const f32 *)nph_gpu_buffer_map(dev, hb[0]);
+    const f32 *b = (const f32 *)nph_gpu_buffer_map(dev, hb[1]);
+    u32 hit = 0U;
+    for (u32 i = 0; i < RAYS; ++i) {
+        hit += a[(u64)i * 4U + 1U] == 3.0F ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(hit, (u32)RAYS);
+    NTEST_EXPECT_EQ_MEM(a, b, (u64)RAYS * 16U);
+
+    nph_gpu_pipeline_destroy(dev, pipeline);
+    nph_gpu_shader_destroy(dev, shader);
+    for (u32 t = 0; t < 2U; ++t) {
+        nph_gpu_buffer_destroy(dev, hb[t]);
+        nph_gpu_accel_destroy(dev, tlas[t]);
+    }
+    nph_gpu_buffer_destroy(dev, rb);
+    nph_gpu_buffer_destroy(dev, instances);
+    nph_gpu_buffer_destroy(dev, scratch);
+    nph_gpu_accel_destroy(dev, small);
+    nph_gpu_accel_destroy(dev, blas);
+    nph_gpu_buffer_destroy(dev, ib);
+    nph_gpu_buffer_destroy(dev, vb);
 }
 
 // Bad descriptions are refused: no geometry, a vertex format the device

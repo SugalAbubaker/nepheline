@@ -27,6 +27,9 @@ static VkBuildAccelerationStructureFlagsKHR build_flags(u32 flags)
     if ((flags & (u32)NPH_GPU_ACCEL_PREFER_BUILD) != 0U) {
         out |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
     }
+    if ((flags & (u32)NPH_GPU_ACCEL_ALLOW_COMPACTION) != 0U) {
+        out |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    }
     return out;
 }
 
@@ -284,4 +287,62 @@ void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instan
     range.primitiveCount = count;
     const VkAccelerationStructureBuildRangeInfoKHR *range_list = &range;
     vkCmdBuildAccelerationStructuresKHR(cmd->vk, 1U, &info, &range_list);
+}
+
+u32 nph_gpu_cmd_query_accel_compacted_size(NphGpuCmd *cmd, NphGpuAccel accel)
+{
+    NPH_ASSERT(cmd != NULL && cmd->recording);
+    NphGpuDevice *dev = cmd->dev;
+    NphGpuFrameSlot *fs = &dev->frames[cmd->frame_slot];
+    const NphGpuAccelSlot *slot = accel_slot(dev, accel);
+    NPH_ASSERT(slot != NULL && slot->type == (u32)NPH_GPU_ACCEL_BOTTOM);
+    if (slot == NULL || fs->accel_pool == VK_NULL_HANDLE) {
+        return NPH_GPU_INVALID_INDEX;
+    }
+    const u32 index = nph_atomic_fetch_add_u32(&fs->accel_next, 1U, NPH_MEMORY_ORDER_RELAXED);
+    if (index >= fs->accel_cap) {
+        return NPH_GPU_INVALID_INDEX;
+    }
+    vkCmdWriteAccelerationStructuresPropertiesKHR(
+        cmd->vk, 1U, &slot->vk, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+        fs->accel_pool, index);
+    return index;
+}
+
+bool nph_gpu_frame_accel_sizes(const NphGpuDevice *dev, u64 *out_frame_index, const u64 **out_sizes,
+                               u32 *out_count)
+{
+    const NphGpuFrameSlot *fs = &dev->frames[dev->frame_slot];
+    if (!fs->accel_results_valid) {
+        return false;
+    }
+    if (out_frame_index != NULL) {
+        *out_frame_index = fs->accel_frame_index;
+    }
+    if (out_sizes != NULL) {
+        *out_sizes = fs->accel_results;
+    }
+    if (out_count != NULL) {
+        *out_count = fs->accel_result_count;
+    }
+    return true;
+}
+
+void nph_gpu_cmd_copy_accel_compact(NphGpuCmd *cmd, NphGpuAccel src, NphGpuAccel dst)
+{
+    NPH_ASSERT(cmd != NULL && cmd->recording);
+    NphGpuDevice *dev = cmd->dev;
+    const NphGpuAccelSlot *from = accel_slot(dev, src);
+    const NphGpuAccelSlot *to = accel_slot(dev, dst);
+    NPH_ASSERT(from != NULL && to != NULL && from->type == to->type);
+    if (from == NULL || to == NULL) {
+        return;
+    }
+    VkCopyAccelerationStructureInfoKHR ci;
+    memset(&ci, 0, sizeof ci);
+    ci.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+    ci.src = from->vk;
+    ci.dst = to->vk;
+    ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+    vkCmdCopyAccelerationStructureKHR(cmd->vk, &ci);
 }

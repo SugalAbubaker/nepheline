@@ -127,6 +127,7 @@ typedef struct NphGpuDeviceDesc {
     u32 max_command_threads;         // threads that may record commands (64)
     u32 max_commands_per_thread;     // command buffers per thread per frame per queue (32)
     u32 timestamp_queries_per_frame; // (1024)
+    u32 accel_queries_per_frame;     // compacted-size queries (4096; with ray queries)
     u32 bindless_sampled_images; // slots in the global descriptor set (65536, clamped to the limit)
     u32 bindless_storage_images; // (16384, clamped)
     u32 bindless_samplers;       // (1024, clamped)

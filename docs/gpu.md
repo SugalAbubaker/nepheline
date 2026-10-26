@@ -158,7 +158,17 @@ frame loop the next frame's depth clear raced the store
 Timestamps: `nph_gpu_cmd_write_timestamp` writes into the frame slot's
 query pool; results are read when the slot is recycled two frames later
 (`nph_gpu_frame_timestamps`), which is how the render graph reports
-per-pass GPU time.
+per-pass GPU time. A bottom-level acceleration structure's compacted size
+takes the same path: `nph_gpu_cmd_query_accel_compacted_size` writes into
+the slot's pool of compacted-size queries (`accel_queries_per_frame`,
+4,096), after a barrier that orders the structure's build
+(`NPH_GPU_ACCEL_ALLOW_COMPACTION`), and `nph_gpu_frame_accel_sizes` reads
+them two frames later; `nph_gpu_cmd_copy_accel_compact` then copies the
+structure into one of that size. A slot recycled twice for one frame
+(`nph_gpu_device_wait_idle` recycles every slot, then the next frame in
+the slot recycles it again) keeps the results the first recycle read:
+before, the second read an emptied pool and lost them, which every render
+test, waiting after each frame, would have hit.
 
 ## Uploads
 

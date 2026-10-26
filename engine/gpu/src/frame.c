@@ -366,6 +366,19 @@ NphResult gpu_frames_init(NphGpuDevice *dev)
         vkResetQueryPool(dev->device, fs->query_pool, 0U, fs->query_cap);
         gpu_set_name(dev, VK_OBJECT_TYPE_QUERY_POOL, (u64)(uptr)fs->query_pool,
                      i == 0U ? "timestamps frame slot 0" : "timestamps frame slot 1");
+        if (dev->info.features.ray_query) {
+            fs->accel_cap = dev->desc.accel_queries_per_frame;
+            fs->accel_results = NPH_ALLOC_ARRAY_ZEROED(alloc, u64, fs->accel_cap);
+            if (fs->accel_results == NULL) {
+                return NPH_RESULT_OUT_OF_MEMORY;
+            }
+            qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+            qi.queryCount = fs->accel_cap;
+            VK_TRY(dev, vkCreateQueryPool(dev->device, &qi, NULL, &fs->accel_pool));
+            vkResetQueryPool(dev->device, fs->accel_pool, 0U, fs->accel_cap);
+            gpu_set_name(dev, VK_OBJECT_TYPE_QUERY_POOL, (u64)(uptr)fs->accel_pool,
+                         i == 0U ? "compacted sizes frame slot 0" : "compacted sizes frame slot 1");
+        }
     }
     return NPH_RESULT_OK;
 }
@@ -397,6 +410,14 @@ void gpu_frames_shutdown(NphGpuDevice *dev)
             NPH_FREE_ARRAY(alloc, u64, fs->query_results, fs->query_cap);
             fs->query_results = NULL;
         }
+        if (fs->accel_pool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(dev->device, fs->accel_pool, NULL);
+            fs->accel_pool = VK_NULL_HANDLE;
+        }
+        if (fs->accel_results != NULL) {
+            NPH_FREE_ARRAY(alloc, u64, fs->accel_results, fs->accel_cap);
+            fs->accel_results = NULL;
+        }
         if (fs->deferred != NULL) {
             NPH_ASSERT(fs->deferred_count == 0U);
             NPH_FREE_ARRAY(alloc, NphGpuDeferred, fs->deferred, fs->deferred_cap);
@@ -411,6 +432,12 @@ void gpu_frames_shutdown(NphGpuDevice *dev)
 
 static void read_timestamps(NphGpuDevice *dev, NphGpuFrameSlot *fs)
 {
+    // Read already for the slot's frame (nph_gpu_device_wait_idle recycles
+    // every slot, then the next nph_gpu_frame_begin recycles this one
+    // again): the pool was reset since, and the results stand.
+    if (fs->query_results_valid && fs->query_frame_index == fs->frame_index) {
+        return;
+    }
     const u32 used =
         nph_min_u32(nph_atomic_load_u32(&fs->query_next, NPH_MEMORY_ORDER_RELAXED), fs->query_cap);
     fs->query_result_count = 0U;
@@ -438,6 +465,42 @@ static void read_timestamps(NphGpuDevice *dev, NphGpuFrameSlot *fs)
     NPH_FREE_ARRAY(dev->alloc, u64, scratch, (u64)used * 2U);
 }
 
+// The slot's compacted sizes, as read_timestamps: 0 for a query that did
+// not complete.
+static void read_accel_sizes(NphGpuDevice *dev, NphGpuFrameSlot *fs)
+{
+    if (fs->accel_results_valid && fs->accel_frame_index == fs->frame_index) {
+        return; // read already for the slot's frame (read_timestamps)
+    }
+    const u32 used =
+        nph_min_u32(nph_atomic_load_u32(&fs->accel_next, NPH_MEMORY_ORDER_RELAXED), fs->accel_cap);
+    fs->accel_result_count = 0U;
+    fs->accel_results_valid = 0;
+    if (fs->accel_pool == VK_NULL_HANDLE || fs->frame_index == NPH_U64_MAX) {
+        return;
+    }
+    if (used != 0U) {
+        u64 *scratch = NPH_ALLOC_ARRAY(dev->alloc, u64, (u64)used * 2U);
+        if (scratch == NULL) {
+            return;
+        }
+        const VkResult r = vkGetQueryPoolResults(
+            dev->device, fs->accel_pool, 0U, used, (size_t)used * 2U * sizeof(u64), scratch,
+            2U * sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        const bool ok = r == VK_SUCCESS || r == VK_NOT_READY;
+        for (u32 i = 0; i < used && ok; ++i) {
+            fs->accel_results[i] = scratch[(u64)i * 2U + 1U] != 0U ? scratch[(u64)i * 2U] : 0U;
+        }
+        NPH_FREE_ARRAY(dev->alloc, u64, scratch, (u64)used * 2U);
+        if (!ok) {
+            return;
+        }
+    }
+    fs->accel_result_count = used;
+    fs->accel_results_valid = 1;
+    fs->accel_frame_index = fs->frame_index;
+}
+
 void gpu_frames_recycle_slot(NphGpuDevice *dev, u32 slot)
 {
     for (u32 t = 0; t <= dev->thread_cap; ++t) {
@@ -449,6 +512,11 @@ void gpu_frames_recycle_slot(NphGpuDevice *dev, u32 slot)
     read_timestamps(dev, fs);
     vkResetQueryPool(dev->device, fs->query_pool, 0U, fs->query_cap);
     nph_atomic_store_u32(&fs->query_next, 0U, NPH_MEMORY_ORDER_RELAXED);
+    read_accel_sizes(dev, fs);
+    if (fs->accel_pool != VK_NULL_HANDLE) {
+        vkResetQueryPool(dev->device, fs->accel_pool, 0U, fs->accel_cap);
+    }
+    nph_atomic_store_u32(&fs->accel_next, 0U, NPH_MEMORY_ORDER_RELAXED);
 }
 
 NphResult nph_gpu_frame_begin(NphGpuDevice *dev)

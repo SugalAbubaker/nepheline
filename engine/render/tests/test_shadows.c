@@ -4,7 +4,8 @@
 // a light is dark exactly where the geometry says (every pixel classified
 // analytically, away from the shadow's edges) and nothing else changes; a
 // shadow ray stops at its light; the structures follow the scene (instances
-// that move, hide, and go; meshes created later); and a renderer without
+// that move, hide, and go; meshes created later); the bottom levels are
+// compacted and cast the same through the swap; and a renderer without
 // ray tracing draws the same lights unshadowed. Skipped where the device
 // has no ray queries; the fixture's teardown asserts zero validation and
 // synchronisation-validation errors and nothing leaked.
@@ -314,6 +315,88 @@ NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
     NTEST_EXPECT_TRUE(test_render_read(f, &ref).shadow_rebuild);
     NTEST_EXPECT_TRUE(test_render_read(f, &views[2]).shadow_rebuild);
     NTEST_EXPECT_FALSE(test_render_read(f, &views[2]).shadow_rebuild);
+}
+
+// The bottom levels are built with compaction allowed and compacted a few
+// frames on, where the device saves anything (lavapipe does not): every
+// frame through the build, the queries, the copies' swap, and the
+// originals' retirement shadows what the geometry says; the bytes they hold
+// fall, the frame of the swap reports the compactions, and the production
+// path rebuilds its top level the frame after (the GPU scene's records name
+// the copies from then on). The reference path, whose records the CPU
+// writes, casts the same; and a mesh destroyed while its original waits to
+// be retired leaves nothing behind (the teardown checks).
+NTEST_F(Shadows, bottom_levels_are_compacted_and_cast_the_same)
+{
+    REQUIRE_RAY_TRACING(f);
+    Scene s;
+    scene_build(f, &s, at(0.0, 1.0, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(false);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphRenderCamera cam = top_camera();
+    const Light l = {true, ld.direction, nph_vec3_zero()};
+    const Box occluder = box_at(nph_vec3(0.0F, 1.0F, 0.0F), 1.0F);
+    static u8 off[PIXELS];
+    NphRenderView v;
+    shadow_view(&v, cam, 13.0F, k_pipelines[pipeline_count(f) - 1U], RT_FLAGS);
+    render_into(f, &v, off);
+    set_shadows(f, sun, &ld, true);
+    NphRenderFrameStats st = test_render_read(f, &v);
+    NTEST_EXPECT_EQ_UINT(st.shadow_builds, 2U);
+    const u64 built = st.shadow_blas_bytes;
+    NTEST_EXPECT_TRUE(built != 0U);
+    u32 compactions = 0U;
+    u32 swap_frame = 0U;
+    bool rebuilt_after = false;
+    for (u32 i = 1; i <= 8U; ++i) {
+        st = test_render_read(f, &v);
+        if (swap_frame != 0U && i == swap_frame + 1U) {
+            rebuilt_after = st.shadow_rebuild != 0;
+        }
+        if (st.shadow_compactions != 0U) {
+            compactions += st.shadow_compactions;
+            swap_frame = i;
+        }
+        const ShadowCheck c = check_shadow(f->pixels, off, &cam, &l, &occluder, RT_GROW);
+        NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
+        NTEST_EXPECT_GT_UINT(c.shadow, 100U);
+    }
+    NTEST_LOG("bottom levels: %llu bytes built, %llu after %u compactions (frame %u after the "
+              "build)",
+              (unsigned long long)built, (unsigned long long)st.shadow_blas_bytes, compactions,
+              swap_frame);
+    NTEST_EXPECT_TRUE(st.shadow_blas_bytes <= built);
+    if (compactions != 0U) {
+        NTEST_EXPECT_EQ_UINT(compactions, 2U);
+        NTEST_EXPECT_TRUE(st.shadow_blas_bytes < built);
+        if (v.pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
+            NTEST_EXPECT_TRUE(rebuilt_after);
+        }
+    }
+    // The other pipeline traces the copies too.
+    shadow_view(&v, cam, 13.0F, k_pipelines[0], RT_FLAGS);
+    static u8 on[PIXELS];
+    render_into(f, &v, on);
+    const ShadowCheck c = check_shadow(on, off, &cam, &l, &occluder, RT_GROW);
+    log_check("compacted", k_pipeline_names[0], &c);
+    NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
+    NTEST_EXPECT_GT_UINT(c.shadow, 100U);
+
+    // A new caster, compacted up to its swap, then destroyed while its
+    // original waits to be retired.
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderInstance inst = instance(f, cube, s.grey, at(2.0, 1.0, 2.0, 0.5F));
+    for (u32 i = 0; i < 8U; ++i) {
+        st = test_render_read(f, &v);
+        if (st.shadow_compactions != 0U) {
+            break;
+        }
+    }
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, cube);
+    render_into(f, &v, on);
+    const ShadowCheck again = check_shadow(on, off, &cam, &l, &occluder, RT_GROW);
+    NTEST_EXPECT_EQ_UINT(again.wrong, 0U);
 }
 
 // Shadow rays are traced while some light casts shadows, and only then.

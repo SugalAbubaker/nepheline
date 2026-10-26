@@ -1275,6 +1275,10 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                    st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
                    st->vsm_draws, st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
         }
+        if (st->shadow_blas_bytes != 0U) {
+            printf("    ray tracing: bottom levels %.1f MB (compacted after their builds)\n",
+                   (f64)st->shadow_blas_bytes / 1.0e6);
+        }
     } else {
         printf("    draws %u, triangles %u, culled %u, lights %u%s\n", st->draws, st->triangles,
                st->culled, st->lights, st->shadow_rays ? "; shadow rays" : "");

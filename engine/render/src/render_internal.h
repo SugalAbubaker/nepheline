@@ -143,6 +143,15 @@ typedef struct RenderMesh {
     NphGpuBuffer blas_vertices;
     u64 blas_scratch;
     b32 blas_pending; // listed in RenderRt.pending
+    // Its compaction (rt.c): RenderRtCompaction, listed in
+    // RenderRt.compacting from the build until the original is retired.
+    u32 blas_state;
+    u32 blas_query;        // the compacted size's query in blas_query_frame
+    u64 blas_query_frame;  // and the frame that recorded it (or swapped it in)
+    u64 blas_bytes;        // the structure's size now
+    NphGpuAccel blas_next; // the compacted copy, until it is swapped in
+    u64 blas_next_bytes;   // and its size
+    NphGpuAccel blas_old;  // the original, until it is retired
     // The production path (vis_scene.c): the meshlet streams and the
     // mesh's corners in the index pool (indirect raster only).
     NphGpuBuffer meshlets;
@@ -284,6 +293,17 @@ typedef struct RenderRt {
     u32 frame_builds;     // the first pending bottom levels, built this frame
     b32 unsupported_logged;
     NphGpuPipeline instance_writer; // rt_instances.comp
+    // Compaction (rt.c): the meshes on their way, and this frame's queries
+    // and copies (lists the build pass records, made before it runs).
+    u32 *compacting;
+    u32 compacting_count;
+    u32 *frame_queries; // mesh slots
+    u32 frame_query_count;
+    NphGpuAccel *frame_copies; // pairs: original, compacted copy
+    u32 frame_copy_count;
+    u32 frame_compactions; // swapped in this frame
+    b32 rebuild_owed;      // a swap's new address reaches the GPU scene next frame
+    u64 blas_bytes;        // every bottom level's size now
 } RenderRt;
 
 typedef struct RenderLight {
@@ -1130,6 +1150,10 @@ void render_vis_scene_destroy(NphRenderer *r);
 // Uploads a mesh's meshlet streams and writes its table record.
 // `lod_depth`: the node levels of the mesh's hierarchy of levels of detail
 // (0 without one), as validation found them.
+// The mesh's bottom-level address in its GPU scene record, after rt.c
+// swapped in a compacted structure: an upload, so the frames after this one
+// read it.
+NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u64 address);
 NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *desc,
                                  u32 lod_depth);
 void render_vis_mesh_destroy(NphRenderer *r, u32 slot);

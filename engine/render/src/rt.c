@@ -48,7 +48,26 @@ NPH_STATIC_ASSERT(sizeof(NphGpuAccelInstance) == 64U, "an instance record is 64 
 // production path rebuilds it around the camera. Ray origins are offset by
 // units in the last place of their coordinates in that space (rt_common.glsl),
 // so near the camera the offset is at most 256 ulp(16 m), half a millimetre.
+// Every bottom level: built once for fast rays, then compacted.
+#define RT_BLAS_FLAGS ((u32)NPH_GPU_ACCEL_PREFER_TRACE | (u32)NPH_GPU_ACCEL_ALLOW_COMPACTION)
+
 #define RT_ANCHOR_RADIUS 16.0
+
+// A bottom level's compaction (RenderMesh.blas_state): built with
+// compaction allowed, its compacted size queried in the pass that built it
+// and read when that frame completes (NPH_GPU_FRAMES_IN_FLIGHT later); a
+// structure of that size made, the copy recorded in the next frame that
+// traces, and the copy swapped in there (the GPU scene's record updated for
+// the next frame, whose top level is rebuilt); the original retired two
+// frames after the swap, when no top level still to be traced names it.
+typedef enum RenderRtCompaction {
+    RT_BLAS_DONE = 0, // compacted, or nothing to gain
+    RT_BLAS_BUILD,    // waiting for its build
+    RT_BLAS_QUERY,    // built: its query to record
+    RT_BLAS_QUERIED,  // the query recorded in blas_query_frame
+    RT_BLAS_COPY,     // blas_next made: the copy to record
+    RT_BLAS_RETIRE,   // swapped in at blas_query_frame: blas_old to retire
+} RenderRtCompaction;
 
 static u64 align_up(u64 v, u64 a)
 {
@@ -139,7 +158,11 @@ NphResult render_rt_create(NphRenderer *r)
     NPH_TRY(nph_gpu_buffer_create(dev, &bd, &rt->instances));
     rt->pending = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
     rt->geometries = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccelTriangles, NPH_RENDER_MAX_SUBMESHES);
-    if (rt->pending == NULL || rt->geometries == NULL) {
+    rt->compacting = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
+    rt->frame_queries = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
+    rt->frame_copies = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccel, (u64)r->desc.max_meshes * 2U);
+    if (rt->pending == NULL || rt->geometries == NULL || rt->compacting == NULL ||
+        rt->frame_queries == NULL || rt->frame_copies == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     NphGpuComputePipelineDesc cd;
@@ -171,6 +194,15 @@ void render_rt_destroy(NphRenderer *r)
     }
     if (rt->geometries != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphGpuAccelTriangles, rt->geometries, NPH_RENDER_MAX_SUBMESHES);
+    }
+    if (rt->compacting != NULL) {
+        NPH_FREE_ARRAY(r->alloc, u32, rt->compacting, r->desc.max_meshes);
+    }
+    if (rt->frame_queries != NULL) {
+        NPH_FREE_ARRAY(r->alloc, u32, rt->frame_queries, r->desc.max_meshes);
+    }
+    if (rt->frame_copies != NULL) {
+        NPH_FREE_ARRAY(r->alloc, NphGpuAccel, rt->frame_copies, (u64)r->desc.max_meshes * 2U);
     }
     memset(rt, 0, sizeof *rt);
 }
@@ -211,8 +243,7 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
     }
     const u32 geometries = mesh_geometries(r, m);
     NphGpuAccelSizes sizes;
-    NPH_TRY(nph_gpu_accel_blas_sizes(dev, rt->geometries, geometries,
-                                     (u32)NPH_GPU_ACCEL_PREFER_TRACE, &sizes));
+    NPH_TRY(nph_gpu_accel_blas_sizes(dev, rt->geometries, geometries, RT_BLAS_FLAGS, &sizes));
     NPH_TRY(reserve_scratch(r, sizes.scratch));
     NphGpuAccelDesc ad;
     memset(&ad, 0, sizeof ad);
@@ -226,6 +257,12 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
     m->blas_scratch = sizes.scratch;
     m->blas_pending = 1;
     rt->pending[rt->pending_count++] = slot;
+    m->blas_bytes = sizes.accel;
+    m->blas_state = RT_BLAS_BUILD;
+    m->blas_next = NPH_GPU_ACCEL_NULL;
+    m->blas_old = NPH_GPU_ACCEL_NULL;
+    rt->compacting[rt->compacting_count++] = slot;
+    rt->blas_bytes += sizes.accel;
     return NPH_RESULT_OK;
 }
 
@@ -244,11 +281,129 @@ void render_rt_mesh_destroy(NphRenderer *r, u32 slot)
             }
         }
     }
+    if (m->blas_state != RT_BLAS_DONE) {
+        for (u32 i = 0; i < rt->compacting_count; ++i) {
+            if (rt->compacting[i] == slot) {
+                rt->compacting[i] = rt->compacting[--rt->compacting_count];
+                break;
+            }
+        }
+    }
+    rt->blas_bytes -= nph_gpu_accel_is_valid(r->dev, m->blas) ? m->blas_bytes : 0U;
     nph_gpu_accel_destroy(r->dev, m->blas);
+    nph_gpu_accel_destroy(r->dev, m->blas_next);
+    nph_gpu_accel_destroy(r->dev, m->blas_old);
     nph_gpu_buffer_destroy(r->dev, m->blas_vertices);
     m->blas = NPH_GPU_ACCEL_NULL;
+    m->blas_next = NPH_GPU_ACCEL_NULL;
+    m->blas_old = NPH_GPU_ACCEL_NULL;
     m->blas_vertices = NPH_GPU_BUFFER_NULL;
     m->blas_pending = 0;
+    m->blas_state = RT_BLAS_DONE;
+}
+
+// The compactions' work at a frame's start, traced or not: the sizes the
+// frame that last completed in this slot queried (a query whose frame
+// passed unread is asked again), structures of those sizes made for the
+// copies, and the originals swapped out two frames ago retired.
+static void compaction_begin(NphRenderer *r)
+{
+    RenderRt *rt = &r->rt;
+    NphGpuDevice *dev = r->dev;
+    rt->frame_compactions = 0U;
+    const u64 now = nph_gpu_frame_index(dev);
+    u64 sizes_frame = NPH_U64_MAX;
+    const u64 *sizes = NULL;
+    u32 size_count = 0U;
+    if (!nph_gpu_frame_accel_sizes(dev, &sizes_frame, &sizes, &size_count)) {
+        sizes_frame = NPH_U64_MAX;
+    }
+    for (u32 i = 0; i < rt->compacting_count;) {
+        const u32 slot = rt->compacting[i];
+        RenderMesh *m = &r->meshes[slot];
+        if (m->blas_state == RT_BLAS_QUERIED && sizes_frame != NPH_U64_MAX &&
+            m->blas_query_frame <= sizes_frame) {
+            const u64 size = m->blas_query_frame == sizes_frame && m->blas_query < size_count
+                                 ? sizes[m->blas_query]
+                                 : 0U;
+            if (m->blas_query_frame != sizes_frame || size == 0U) {
+                m->blas_state = RT_BLAS_QUERY; // missed or not run: ask again
+            } else if (size >= m->blas_bytes) {
+                m->blas_state = RT_BLAS_DONE; // nothing to gain (lavapipe)
+            } else {
+                NphGpuAccelDesc ad;
+                memset(&ad, 0, sizeof ad);
+                ad.type = NPH_GPU_ACCEL_BOTTOM;
+                ad.size = size;
+                ad.name = "rt mesh (compacted)";
+                if (nph_gpu_accel_create(dev, &ad, &m->blas_next) == NPH_RESULT_OK) {
+                    m->blas_next_bytes = size;
+                    m->blas_state = RT_BLAS_COPY;
+                } else {
+                    m->blas_state = RT_BLAS_DONE; // kept as built
+                }
+            }
+        } else if (m->blas_state == RT_BLAS_RETIRE && now >= m->blas_query_frame + 2U) {
+            nph_gpu_accel_destroy(dev, m->blas_old);
+            m->blas_old = NPH_GPU_ACCEL_NULL;
+            m->blas_state = RT_BLAS_DONE;
+        }
+        if (m->blas_state == RT_BLAS_DONE) {
+            rt->compacting[i] = rt->compacting[--rt->compacting_count];
+        } else {
+            ++i;
+        }
+    }
+}
+
+// The queries and copies this frame's build pass records, listed before it
+// runs (the pass reads only the lists).
+static void compaction_declare(NphRenderer *r)
+{
+    RenderRt *rt = &r->rt;
+    rt->frame_query_count = 0U;
+    rt->frame_copy_count = 0U;
+    for (u32 i = 0; i < rt->compacting_count; ++i) {
+        const u32 slot = rt->compacting[i];
+        const RenderMesh *m = &r->meshes[slot];
+        if (m->blas_state == RT_BLAS_QUERY) {
+            rt->frame_queries[rt->frame_query_count++] = slot;
+        } else if (m->blas_state == RT_BLAS_COPY) {
+            rt->frame_copies[(u64)rt->frame_copy_count * 2U] = m->blas;
+            rt->frame_copies[(u64)rt->frame_copy_count * 2U + 1U] = m->blas_next;
+            ++rt->frame_copy_count;
+        }
+    }
+}
+
+// The copies the declared pass records, swapped in: the reference path's
+// records name a copy from the next frame, the production path's once the
+// GPU scene's record is uploaded (the next frame too, whose top level is
+// rebuilt). The original stays until no frame still to trace names it.
+static NphResult compaction_swap(NphRenderer *r)
+{
+    RenderRt *rt = &r->rt;
+    NphResult res = NPH_RESULT_OK;
+    for (u32 i = 0; i < rt->compacting_count; ++i) {
+        const u32 slot = rt->compacting[i];
+        RenderMesh *m = &r->meshes[slot];
+        if (m->blas_state != RT_BLAS_COPY) {
+            continue;
+        }
+        rt->blas_bytes = rt->blas_bytes - m->blas_bytes + m->blas_next_bytes;
+        m->blas_bytes = m->blas_next_bytes;
+        m->blas_old = m->blas;
+        m->blas = m->blas_next;
+        m->blas_next = NPH_GPU_ACCEL_NULL;
+        m->blas_state = RT_BLAS_RETIRE;
+        m->blas_query_frame = nph_gpu_frame_index(r->dev);
+        const NphResult u =
+            render_vis_mesh_set_blas(r, slot, nph_gpu_accel_address(r->dev, m->blas));
+        res = res == NPH_RESULT_OK ? u : res;
+        rt->rebuild_owed = 1;
+        rt->frame_compactions += 1U;
+    }
+    return res;
 }
 
 void render_rt_shadow_lights(NphRenderer *r, i32 change)
@@ -260,6 +415,9 @@ void render_rt_shadow_lights(NphRenderer *r, i32 change)
 bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32 handled, bool gi)
 {
     RenderRt *rt = &r->rt;
+    if (rt->supported) {
+        compaction_begin(r);
+    }
     rt->frame_active = 0;
     rt->frame_shadows = 0;
     rt->frame_production = production ? 1 : 0;
@@ -295,6 +453,11 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
         nph_vec3_length_sq(moved) > (f32)(RT_ANCHOR_RADIUS * RT_ANCHOR_RADIUS)) {
         rt->anchor = camera;
         rt->frame_rebuild = 1;
+    }
+    // A structure swapped in last frame: its address is in the GPU scene now.
+    if (rt->rebuild_owed) {
+        rt->frame_rebuild = 1;
+        rt->rebuild_owed = 0;
     }
     rt->tlas_offset = nph_dvec3_relative(camera, rt->anchor);
     return true;
@@ -411,16 +574,44 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
             accel_barrier(cmd); // the batch is done with the scratch
             at = 0U;
         }
-        nph_gpu_cmd_build_blas(cmd, m->blas, rt->geometries, mesh_geometries(r, m),
-                               (u32)NPH_GPU_ACCEL_PREFER_TRACE, rt->scratch, lead + at);
+        nph_gpu_cmd_build_blas(cmd, m->blas, rt->geometries, mesh_geometries(r, m), RT_BLAS_FLAGS,
+                               rt->scratch, lead + at);
         m->blas_pending = 0;
+        m->blas_state = RT_BLAS_QUERY;
         at += s;
     }
     if (rt->frame_builds != 0U) {
         accel_barrier(cmd);
+    }
+    // The compacted sizes of the structures built in earlier frames and of
+    // those just built (the barrier above orders their builds); a query the
+    // frame has no room for waits for a later frame.
+    const u64 frame = nph_gpu_frame_index(dev);
+    for (u32 i = 0; i < rt->frame_query_count + rt->frame_builds; ++i) {
+        const u32 slot = i < rt->frame_query_count ? rt->frame_queries[i]
+                                                   : rt->pending[i - rt->frame_query_count];
+        RenderMesh *m = &r->meshes[slot];
+        if (m->blas_state != RT_BLAS_QUERY) {
+            continue;
+        }
+        const u32 q = nph_gpu_cmd_query_accel_compacted_size(cmd, m->blas);
+        if (q != NPH_GPU_INVALID_INDEX) {
+            m->blas_query = q;
+            m->blas_query_frame = frame;
+            m->blas_state = RT_BLAS_QUERIED;
+        }
+    }
+    if (rt->frame_builds != 0U) {
         // Built: off the list, which only this frame's declaration grew.
         rt->pending_count -= rt->frame_builds;
         memmove(rt->pending, rt->pending + rt->frame_builds, sizeof(u32) * rt->pending_count);
+    }
+    for (u32 i = 0; i < rt->frame_copy_count; ++i) {
+        nph_gpu_cmd_copy_accel_compact(cmd, rt->frame_copies[(u64)i * 2U],
+                                       rt->frame_copies[(u64)i * 2U + 1U]);
+    }
+    if (rt->frame_copy_count != 0U) {
+        accel_barrier(cmd); // the copies, before the top level names them
     }
     if (!rt->frame_rebuild) {
         return;
@@ -443,8 +634,10 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
     if (rt->frame_production && r->vis.frame_changed != 0U) {
         rt->frame_rebuild = 1;
     }
-    // The bottom levels waiting now are this frame's.
+    // The bottom levels waiting now are this frame's, and the compactions'
+    // queries and copies.
     rt->frame_builds = rt->pending_count;
+    compaction_declare(r);
     const NphGpuRgBuffer tlas =
         nph_gpu_rg_import_buffer(graph, nph_gpu_accel_buffer(r->dev, rt->tlas));
     const NphGpuRgBuffer scratch = nph_gpu_rg_import_buffer(graph, rt->scratch);
@@ -457,7 +650,8 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
         return NPH_RESULT_FULL;
     }
     *out_tlas = tlas;
-    if (!rt->frame_rebuild && rt->frame_builds == 0U) {
+    if (!rt->frame_rebuild && rt->frame_builds == 0U && rt->frame_query_count == 0U &&
+        rt->frame_copy_count == 0U) {
         return NPH_RESULT_OK; // the top level as an earlier frame built it
     }
     NphGpuRgPassDesc pd;
@@ -493,5 +687,6 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
         rt->tlas_valid = 1;
         rt->tlas_production = rt->frame_production;
     }
-    return NPH_RESULT_OK;
+    // The pass records this frame's copies: theirs to trace from now on.
+    return compaction_swap(r);
 }
