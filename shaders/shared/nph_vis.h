@@ -197,6 +197,19 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 lod_groups;
     u64 lod_group_clusters;
     u64 lod_makers;
+    // The smallest error of the groups that consume level 0's clusters: an
+    // instance for which even that is surely too coarse needs level 0
+    // everywhere, and the instance cull hands its level-0 meshlets on
+    // directly, without the walk (vis_cull_instances.comp).
+    f32 lod_level0_error;
+    // To 176 bytes: a record's stride stays a multiple of 16, the alignment
+    // every buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF),
+    // which the resolve's VisMeshRef(...)[i] assumes of each record. Not an
+    // array: shaders copy the record, and glslang 14 gives a copy of a struct
+    // with an array member the buffer's array type (docs/build.md "Shaders").
+    u32 lod_pad0;
+    u32 lod_pad1;
+    u32 lod_pad2;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.

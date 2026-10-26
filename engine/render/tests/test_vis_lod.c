@@ -836,6 +836,7 @@ NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
     NphRendererDesc rd;
     test_renderer_desc(&rd, NULL);
     rd.max_lod_nodes = 64U;
+    rd.max_instances = 256U;
     test_render_setup(&fx, &rd);
     if (fx.dev == NULL) {
         NTEST_SKIP("no Vulkan device available");
@@ -845,21 +846,25 @@ NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
         NTEST_SKIP("no production path on this device");
     }
     sky(&fx);
+    // More instances walking their hierarchies than the queue holds roots:
+    // far enough for coarse levels (near ones would draw level 0 without the
+    // walk), all in view.
     LodMesh m;
     lod_torus(&m, 96U, 32U, 1.0F, 0.35F);
     const NphRenderMesh mesh = create_mesh(&fx, &m.desc);
     const NphRenderMaterial mat = grey_material(&fx);
-    for (u32 i = 0; i < 48U; ++i) {
-        const u32 column = i % 8U;
-        const u32 row = i / 8U;
-        (void)instance(&fx, mesh, mat, at(-3.0 + (f64)column, -2.5 + (f64)row, -6.0, 0.4F));
+    for (u32 i = 0; i < 160U; ++i) {
+        const u32 column = i % 16U;
+        const u32 row = i / 16U;
+        (void)instance(&fx, mesh, mat,
+                       at(-11.25 + 1.5 * (f64)column, -5.4 + 1.2 * (f64)row, -15.0, 0.3F));
     }
-    NphRenderView v = production_view(test_camera());
-    // A threshold so small that every level's tree is walked to its leaves.
-    v.lod_error = 0.001F;
+    NphRenderView v = production_view(nph_render_camera_look_at(
+        nph_dvec3(0.0, 0.0, 4.0), nph_dvec3(0.0, 0.0, -15.0), nph_vec3_unit_y(), 1.2F, 0.05F));
     const NphRenderFrameStats s = render_into(&fx, &v, 4U, NULL);
     NTEST_LOG("overflow bits %#x; %u nodes visited", s.vis_overflow, s.vis_lod_nodes);
     NTEST_EXPECT_NE_UINT(s.vis_overflow & (u32)NPH_RENDER_VIS_OVERFLOW_LOD_NODES, 0U);
+    NTEST_EXPECT_GT_UINT(s.vis_lod_nodes, 0U);
     NTEST_EXPECT_LE_UINT(s.vis_lod_nodes, 64U * 2U * 16U);
     lod_mesh_free(&m);
     test_render_teardown(&fx);

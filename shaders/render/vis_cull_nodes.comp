@@ -16,7 +16,7 @@
 //     (vis_lod_node_too_coarse), so that no group it holds is lost;
 //   - a smallest maker error that projects beyond the threshold even from
 //     the sphere's far side: every cluster below would be replaced by a
-//     finer one in turn (vis_lod_makers_too_coarse);
+//     finer one in turn (vis_lod_surely_too_coarse);
 //   - a sphere outside the frustum, or in phase 1 behind this frame's
 //     depth pyramid: nothing below is seen;
 //   - otherwise a grandchild that is a node goes to queue arg1 for the next
@@ -52,7 +52,7 @@ bool take(VisViewRef view, NphVisTransform tr, vec3 t, float scale, VisLodNodesR
     const bool leaf = (ref & NPH_VIS_LOD_LEAF) != 0u;
     bool keep = leaf ? vis_lod_group_too_coarse(view, tr, s, e)
                      : vis_lod_node_too_coarse(view, tr, t, scale, s, e);
-    keep = keep && !vis_lod_makers_too_coarse(view, tr, t, scale, s, tree.n[n].maker_error[lane]);
+    keep = keep && !vis_lod_surely_too_coarse(view, tr, t, scale, s, tree.n[n].maker_error[lane]);
     const vec3 c = vis_transform_vector(tr, s.xyz) + t;
     const float r = s.w * scale;
     keep = keep && vis_sphere_in_frustum(view, c, r);

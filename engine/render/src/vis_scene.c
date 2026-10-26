@@ -35,7 +35,10 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 160U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 176U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) % 16U == 0U,
+                  "a mesh record's stride keeps each record at the 16 bytes buffer references "
+                  "declare (the resolve indexes them as VisMeshRef(...)[i])");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_nodes) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) == 32U,
                   "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
@@ -354,6 +357,12 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
     rec->lod_groups = nph_gpu_buffer_address(r->dev, m->lod_groups);
     rec->lod_group_clusters = nph_gpu_buffer_address(r->dev, m->lod_group_clusters);
     rec->lod_makers = nph_gpu_buffer_address(r->dev, m->lod_makers);
+    // The finest consumer of level 0 (vis_cull_instances.comp's shortcut).
+    rec->lod_level0_error = NPH_F32_MAX;
+    for (u32 i = 0; i < d->lod_level0_meshlets; ++i) {
+        rec->lod_level0_error =
+            nph_f32_min(rec->lod_level0_error, d->lod_groups[d->cluster_lods[i].parent].error);
+    }
     // Without the levels (a view at threshold 0, the shadow map's pages),
     // the mesh draws level 0's meshlets.
     rec->meshlet_count = d->lod_level0_meshlets;

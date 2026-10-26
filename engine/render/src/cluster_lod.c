@@ -26,9 +26,17 @@
 // triangles (the rest cannot be simplified further without breaking a rule:
 // disconnected pieces smaller than any collapse, say).
 //
-// The hierarchy: each level's groups, sorted in Morton order of their
-// spheres' centres, under a tree of NPH_RENDER_LOD_NODE_CHILDREN children a
-// node; the levels' trees and the root group under the root node.
+// The coarsest level's clusters are grouped as any level's, into root
+// groups whose error is the largest float (always too coarse, so their
+// clusters are drawn wherever their makers allow): a level that stops
+// shrinking (foliage, scattered pieces) may leave hundreds of clusters, and
+// groups of about eight keep them culled, skipped, and handed on a few at a
+// time rather than all together.
+//
+// The hierarchy: each level's groups, and the root groups, sorted in Morton
+// order of their spheres' centres, under a tree of
+// NPH_RENDER_LOD_NODE_CHILDREN children a node; the trees under the root
+// node.
 #include <nepheline/core/assert.h>
 #include <nepheline/math/geometry.h>
 #include <nepheline/math/scalar.h>
@@ -81,7 +89,7 @@ f32 nph_render_lod_projected_error(NphVec3 center, f32 radius, f32 error, f32 sc
 // The smallest sphere nph_sphere_union grows over `spheres` (`count`, at
 // least one), its radius then raised until it holds each of them in double
 // precision: the renderer's tests bound a sphere's parts by it
-// (vis_lod_node_too_coarse, vis_lod_makers_too_coarse), and a union taken
+// (vis_lod_node_too_coarse, vis_lod_surely_too_coarse), and a union taken
 // in single precision may fall short of a part by a rounding.
 static NphSphere sphere_hull(const NphSphere *spheres, u32 count)
 {
@@ -1146,6 +1154,89 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
 }
 
 // ---------------------------------------------------------------------------
+// The root groups
+// ---------------------------------------------------------------------------
+
+// The coarsest level's clusters [first, first + n) into root groups,
+// partitioned as a level's are (their error the largest float).
+static NphResult build_roots(Build *b, u32 first, u32 n)
+{
+    NphRenderClusterLods *out = b->out;
+    NphAllocator *a = b->alloc;
+    u32 *group_of = NPH_ALLOC_ARRAY(a, u32, n);
+    u32 *start = NULL;
+    u32 groups = 0U;
+    NphResult r = group_of != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        r = partition(b, first, n, group_of, &groups);
+    }
+    if (r == NPH_RESULT_OK) {
+        start = NPH_ALLOC_ARRAY_ZEROED(a, u32, (u64)groups + 1U);
+        r = start != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    }
+    NPH_ARRAY(NphSphere) parts;
+    NPH_ARRAY_INIT(&parts, a);
+    NphArrayU32 members;
+    NPH_ARRAY_INIT(&members, a);
+    if (r == NPH_RESULT_OK) {
+        r = NPH_ARRAY_RESIZE(&members, n);
+    }
+    if (r == NPH_RESULT_OK) {
+        // Each group's clusters in turn (a counting sort, in cluster order).
+        for (u32 i = 0; i < n; ++i) {
+            start[group_of[i] + 1U] += 1U;
+        }
+        for (u32 g = 0; g < groups; ++g) {
+            start[g + 1U] += start[g];
+        }
+        for (u32 i = 0; i < n; ++i) {
+            const u32 g = group_of[i];
+            members.data[start[g]] = first + i;
+            start[g] += 1U;
+        }
+        // The fill moved each group's start to its end: back by one group.
+        for (u32 g = groups; g > 0U; --g) {
+            start[g] = start[g - 1U];
+        }
+        start[0] = 0U;
+    }
+    for (u32 g = 0; g < groups && r == NPH_RESULT_OK; ++g) {
+        NPH_ARRAY_CLEAR(&parts);
+        for (u32 i = start[g]; i < start[g + 1U] && r == NPH_RESULT_OK; ++i) {
+            r = NPH_ARRAY_PUSH(&parts, b->own_sphere.data[members.data[i]]);
+        }
+        if (r != NPH_RESULT_OK) {
+            break;
+        }
+        const NphSphere sphere = sphere_hull(parts.data, parts.len);
+        NphRenderLodGroup rec;
+        memset(&rec, 0, sizeof rec);
+        rec.center = sphere.center;
+        rec.radius = sphere.radius;
+        rec.error = NPH_F32_MAX;
+        rec.level = out->levels - 1U;
+        rec.cluster_offset = out->group_clusters.len;
+        rec.cluster_count = start[g + 1U] - start[g];
+        for (u32 i = start[g]; i < start[g + 1U]; ++i) {
+            out->lods.data[members.data[i]].parent = out->groups.len;
+        }
+        r = NPH_ARRAY_PUSH(&out->groups, rec);
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH_N(&out->group_clusters, members.data + start[g], rec.cluster_count);
+        }
+    }
+    NPH_ARRAY_FREE(&parts);
+    NPH_ARRAY_FREE(&members);
+    if (start != NULL) {
+        NPH_FREE_ARRAY(a, u32, start, (u64)groups + 1U);
+    }
+    if (group_of != NULL) {
+        NPH_FREE_ARRAY(a, u32, group_of, n);
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // The hierarchy
 // ---------------------------------------------------------------------------
 
@@ -1251,7 +1342,7 @@ static NphResult build_hierarchy(Build *b)
     NphRenderLodNode root;
     memset(&root, 0, sizeof root);
     NPH_TRY(NPH_ARRAY_PUSH(&l->nodes, root));
-    NodeChildArray tops; // each level's tree, then the root group
+    NodeChildArray tops; // each level's tree, then the root groups'
     NPH_ARRAY_INIT(&tops, a);
     NodeChildArray items;
     NPH_ARRAY_INIT(&items, a);
@@ -1262,17 +1353,13 @@ static NphResult build_hierarchy(Build *b)
     NphResult r = NPH_RESULT_OK;
     const u32 groups = l->groups.len;
     for (u32 g = 0; g < groups && r == NPH_RESULT_OK;) {
-        // The run of one level's groups (they come level by level).
+        // The run of one level's groups, or of the root groups (they come
+        // level by level, the root groups last).
+        const bool roots = l->groups.data[g].error == NPH_F32_MAX;
         u32 end = g;
         while (end < groups && l->groups.data[end].level == l->groups.data[g].level &&
-               !(l->groups.data[end].error == NPH_F32_MAX)) {
+               (l->groups.data[end].error == NPH_F32_MAX) == roots) {
             ++end;
-        }
-        if (end == g) {
-            // The root group: a leaf of the root node itself.
-            r = NPH_ARRAY_PUSH(&tops, group_leaf(l, g));
-            g += 1U;
-            continue;
         }
         const u32 n = end - g;
         NPH_ARRAY_CLEAR(&centers);
@@ -1300,7 +1387,7 @@ static NphResult build_hierarchy(Build *b)
         }
         g = end;
     }
-    // The root: the levels' trees and the root group, nested under further
+    // The root: the levels' trees and the root groups', nested under further
     // nodes while there are more than a node holds.
     if (r == NPH_RESULT_OK && tops.len > NPH_RENDER_LOD_NODE_CHILDREN) {
         NodeChild top;
@@ -1495,24 +1582,9 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
             break;
         }
     }
-    // The root group: the coarsest level's clusters.
+    // The root groups: the coarsest level's clusters, grouped.
     if (r == NPH_RESULT_OK && count != 0U) {
-        NphRenderLodGroup rec;
-        memset(&rec, 0, sizeof rec);
-        const NphSphere sphere = sphere_hull(b.own_sphere.data + first, count);
-        for (u32 i = first; i < first + count; ++i) {
-            out->lods.data[i].parent = out->groups.len;
-        }
-        rec.center = sphere.center;
-        rec.radius = sphere.radius;
-        rec.error = NPH_F32_MAX;
-        rec.level = out->levels - 1U;
-        rec.cluster_offset = out->group_clusters.len;
-        rec.cluster_count = count;
-        r = NPH_ARRAY_PUSH(&out->groups, rec);
-        for (u32 i = first; i < first + count && r == NPH_RESULT_OK; ++i) {
-            r = NPH_ARRAY_PUSH(&out->group_clusters, i);
-        }
+        r = build_roots(&b, first, count);
     }
     if (r == NPH_RESULT_OK && out->groups.len != 0U) {
         r = build_hierarchy(&b);
