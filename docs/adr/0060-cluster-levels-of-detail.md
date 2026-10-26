@@ -56,11 +56,12 @@ into, and the result's triangles' centroids and edge midpoints back to level 0),
 and the errors of the groups that made its clusters; its sphere holds theirs. The
 quadric error alone came out 2.5 to 3.3 times under the measured distance on curved
 surfaces, which is why both directions are measured. The levels stop at one cluster,
-or when a level takes off less than a tenth of the triangles. The build is
-deterministic.
+or when a level takes off less than a tenth of the triangles. The coarsest level's
+clusters are grouped as any level's, into root groups whose error is the largest
+float. The build is deterministic.
 
-**The hierarchy.** Each level's groups, in Morton order, lie under a tree of nodes
-of eight children; the levels' trees and the root group lie under node 0. A child
+**The hierarchy.** Each level's groups, and the root groups, in Morton order, lie
+under trees of nodes of eight children, the trees under node 0. A child
 records its sphere, the largest group error below it, and the smallest error of the
 groups that made the clusters below it (0 where level 0 is). Every sphere is the
 union of its parts rounded up in double precision, so it holds them exactly.
@@ -80,7 +81,10 @@ node is entered if any group below may be too coarse, and skipped if every maker
 below is surely too coarse even from its sphere's far side.
 
 **The walk** (`vis_cull_nodes.comp`). The instance cull hands a visible instance of
-a mesh with levels to the walk as its root; the walk's steps are dispatches one
+a mesh with levels to the walk as its root, unless even the finest group that
+consumes level 0 is surely too coarse from the far side of the instance's sphere,
+when the cut is level 0 whole and it hands on level 0's meshlets directly; the
+walk's steps are dispatches one
 after another, each taking two node levels: an (instance, node) work item takes 64
 lanes, one per child and grandchild. A lane that takes a group appends the group's
 clusters to the phase's meshlet list; one that takes a node at the second level
@@ -119,6 +123,11 @@ cleanly is the builder's contract, tested on its own.
   workgroup's producer is running: on an implementation that runs them in turn, a
   wait never ends and the device is lost. Rejected while the stepped walk costs
   0.07 ms.
+- **One root group for the coarsest level** (the first version): a mesh whose
+  levels stop early (Bistro has flat-shaded and foliage meshes of hundreds of
+  coarse clusters) put them all in one group, which one lane handed on cluster by
+  cluster and the walk could neither cull nor skip in part: 0.185 ms in Bistro's
+  street view, 0.035 ms with root groups.
 - **One tree over every level's groups:** shallower, but a node would hold groups
   of many levels, so its largest error would come from the coarse ones and its
   smallest maker error from the fine ones, and neither prune would cut much.
@@ -142,6 +151,11 @@ cleanly is the builder's contract, tested on its own.
   million triangles in 18,300 clusters and takes 3.70 ms, against 4.30 million and
   3.99 ms at level 0; culling and raster take 0.70 ms against 0.99. The walk visits
   4,700 nodes in three steps a phase (0.040 + 0.029 ms).
+- Bistro, cooked with its levels (551 meshes, 1.75 million triangles; most get 3 to
+  8 levels, flat-shaded ones stop early), against itself at level 0, interleaved:
+  street +0.03, walk -0.02, turn 0.00, terrace 0.00, hedge -0.02 ms, within the
+  runs' spread (0.05 to 0.1 ms). Its geometry is near, where level 0 is the cut;
+  the levels' gains are for the landscape, whose far field they bound.
 - The tests: the clusters drawn are the CPU's cut, cluster for cluster, for six
   views that mix levels (`the_clusters_drawn_are_the_cpus_cut`); cuts that mix
   levels leave no hole on a terrain sheet and a torus, on both raster paths and both
