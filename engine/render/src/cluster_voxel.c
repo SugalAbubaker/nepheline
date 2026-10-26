@@ -2,7 +2,7 @@
 // The voxels of a group's triangles (cluster_lod_internal.h lod_voxelize;
 // render/voxel.h; docs/render.md "Voxels"; ADR-0061).
 //
-// Each cell of the grid the triangles overlap (Akenine-MÃ¶ller, "Fast 3D
+// Each cell of the grid the triangles overlap (Akenine-Möller, "Fast 3D
 // Triangle-Box Overlap Testing", JGT 2001) is probed by a jittered grid of
 // NPH_RENDER_VOXEL_RAYS^2 rays along each axis, every ray tested against
 // every triangle of the cell over the cell's own extent: a ray hits where
@@ -108,8 +108,10 @@ static f64 dot3(const f64 *a, const f64 *b)
 }
 
 // Whether the triangle `v` (relative to the box's centre) and the cube of
-// half-extent `half` about the origin are separated along `axis`.
-static bool separated(const f64 v[3][3], const f64 *axis, f64 half)
+// half-extent `half` about the origin are separated along `axis`. (The 3x3
+// arrays the functions below read are not const: C17 does not convert a
+// pointer to an array to one to a const array, C23 does.)
+static bool separated(f64 v[3][3], const f64 *axis, f64 half)
 {
     const f64 p0 = dot3(v[0], axis);
     const f64 p1 = dot3(v[1], axis);
@@ -120,10 +122,10 @@ static bool separated(const f64 v[3][3], const f64 *axis, f64 half)
     return lo > r || hi < -r;
 }
 
-// The separating-axis test of Akenine-MÃ¶ller (2001): the box's three
+// The separating-axis test of Akenine-Möller (2001): the box's three
 // normals, the triangle's normal, and the nine cross products of their
 // edges. A triangle touching the box's boundary overlaps it.
-static bool tri_box_overlap(const f64 center[3], f64 half, const f64 tri[3][3])
+static bool tri_box_overlap(const f64 center[3], f64 half, f64 tri[3][3])
 {
     f64 v[3][3];
     for (u32 k = 0; k < 3U; ++k) {
@@ -177,7 +179,7 @@ static bool source_corners(const LodVoxelInput *in, u32 s, f64 p[3][3])
 
 // The range of cells the source's bounds span, false past the coordinate
 // limit.
-static bool source_cells(const f64 p[3][3], f64 cell, i64 lo[3], i64 hi[3])
+static bool source_cells(f64 p[3][3], f64 cell, i64 lo[3], i64 hi[3])
 {
     for (u32 a = 0; a < 3U; ++a) {
         const f64 mn = nph_f64_min(p[0][a], nph_f64_min(p[1][a], p[2][a]));
@@ -349,7 +351,7 @@ static f64 edge2(f64 ax, f64 ay, f64 bx, f64 by, f64 px, f64 py)
 
 // Source `s`'s hits along axis `a` of the cell. `p` its corners in cell
 // units relative to the cell's lowest corner. Returns whether any ray hit.
-static bool rasterise(CellState *st, u32 s, const f64 p[3][3], u32 a)
+static bool rasterise(CellState *st, u32 s, f64 p[3][3], u32 a)
 {
     const u32 u = (a + 1U) % 3U;
     const u32 w = (a + 2U) % 3U;
@@ -449,8 +451,8 @@ static bool rasterise(CellState *st, u32 s, const f64 p[3][3], u32 a)
 
 // The symmetric 3 x 3 matrix `m`'s eigenvector of the largest eigenvalue,
 // by cyclic Jacobi rotations (Golub & Van Loan, "Matrix Computations",
-// Â§8.5), and that eigenvalue.
-static f64 dominant_eigen(const f64 m_in[3][3], f64 vec[3])
+// §8.5), and that eigenvalue.
+static f64 dominant_eigen(f64 m_in[3][3], f64 vec[3])
 {
     f64 m[3][3];
     f64 v[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
@@ -536,7 +538,7 @@ static void look_add(CellState *st, CellLook *look, u32 s, const f32 b12[2])
     look->occlusion += (f64)sample.occlusion;
     const f64 n[3] = {(f64)sample.normal.x, (f64)sample.normal.y, (f64)sample.normal.z};
     const f64 len2 = dot3(n, n);
-    if (len2 > 0.0 && isfinite(len2)) {
+    if (len2 > 0.0 && nph_f64_is_finite(len2)) {
         const f64 inv = 1.0 / sqrt(len2);
         const f64 u[3] = {n[0] * inv, n[1] * inv, n[2] * inv};
         // A ray along an axis sees a surface in proportion to its normal's

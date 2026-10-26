@@ -64,9 +64,9 @@ static NphVec3 sample_vmf(NphPcg32 *rng, NphVec3 n, f64 kappa)
 // Storage Ray/Triangle Intersection", JGT 1997), in double precision.
 static bool ray_triangle(NphVec3 o, NphVec3 d, NphVec3 a, NphVec3 b, NphVec3 c, f64 *out_t)
 {
-    const f64 e1[3] = {(f64)b.x - a.x, (f64)b.y - a.y, (f64)b.z - a.z};
-    const f64 e2[3] = {(f64)c.x - a.x, (f64)c.y - a.y, (f64)c.z - a.z};
-    const f64 dd[3] = {d.x, d.y, d.z};
+    const f64 e1[3] = {(f64)b.x - (f64)a.x, (f64)b.y - (f64)a.y, (f64)b.z - (f64)a.z};
+    const f64 e2[3] = {(f64)c.x - (f64)a.x, (f64)c.y - (f64)a.y, (f64)c.z - (f64)a.z};
+    const f64 dd[3] = {(f64)d.x, (f64)d.y, (f64)d.z};
     const f64 p[3] = {dd[1] * e2[2] - dd[2] * e2[1], dd[2] * e2[0] - dd[0] * e2[2],
                       dd[0] * e2[1] - dd[1] * e2[0]};
     const f64 det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
@@ -74,7 +74,7 @@ static bool ray_triangle(NphVec3 o, NphVec3 d, NphVec3 a, NphVec3 b, NphVec3 c, 
         return false;
     }
     const f64 inv = 1.0 / det;
-    const f64 s[3] = {(f64)o.x - a.x, (f64)o.y - a.y, (f64)o.z - a.z};
+    const f64 s[3] = {(f64)o.x - (f64)a.x, (f64)o.y - (f64)a.y, (f64)o.z - (f64)a.z};
     const f64 u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
     if (u < 0.0 || u > 1.0) {
         return false;
@@ -359,11 +359,11 @@ static bool capsule_interval(const f64 o[3], const f64 d[3], const f64 a[3], con
 static bool footprint_hit(const NphRenderVoxelBrick *brick, NphRenderVoxel v, u32 bit, NphVec3 o,
                           NphVec3 d, f64 t_min, f64 t_max, f64 *out_t)
 {
-    const f64 h = brick->cell;
+    const f64 h = (f64)brick->cell;
     const u32 c[3] = {bit & 3U, (bit >> 2U) & 3U, bit >> 4U};
-    const f64 org[3] = {o.x, o.y, o.z};
-    const f64 dir[3] = {d.x, d.y, d.z};
-    const f64 base[3] = {brick->origin.x, brick->origin.y, brick->origin.z};
+    const f64 org[3] = {(f64)o.x, (f64)o.y, (f64)o.z};
+    const f64 dir[3] = {(f64)d.x, (f64)d.y, (f64)d.z};
+    const f64 base[3] = {(f64)brick->origin.x, (f64)brick->origin.y, (f64)brick->origin.z};
     f64 lo[3];
     f64 hi[3];
     f64 t0 = t_min;
