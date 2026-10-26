@@ -39,6 +39,7 @@ set(cook_sources
     src/image.c
     src/mesh.c
     src/mesh_lod.c
+    src/mesh_voxel.c
     src/mesh_meshlet.c
     src/mesh_optimize.c
     src/mesh_tangent.c
@@ -106,6 +107,7 @@ nph_add_test(cook
         tests/test_sound.c
         tests/test_specgloss.c
         tests/test_texture.c
+        tests/test_voxel.c
     DEPS
         nph::cook
 )

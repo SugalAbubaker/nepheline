@@ -52,10 +52,79 @@ static NphResult check_type(const NphAsset *asset, u32 type, u32 version)
 // Mesh
 // ---------------------------------------------------------------------------
 
+// Whether meshlet `i` is a voxel cluster (version 3): a record with no
+// vertices above level 0 of a mesh with levels. `lh` NULL: no levels.
+static bool voxel_cluster(const NphAsset *asset, const NphMeshLodHeader *lh, const NphMeshlet *m,
+                          u32 i)
+{
+    return lh != NULL && asset->header.type_version >= 3U && i >= lh->level0_meshlets &&
+           m->vertex_count == 0U;
+}
+
+static u32 popcount32(u32 v)
+{
+    u32 n = 0U;
+    while (v != 0U) {
+        v &= v - 1U;
+        ++n;
+    }
+    return n;
+}
+
+static bool finite_bits(u32 bits)
+{
+    return ((bits >> 23U) & 0xFFU) != 0xFFU;
+}
+
+// A voxel cluster's bricks and their voxels (version 3), checked so far as
+// every index is in range and every field holds a value the renderer's
+// records can (render/voxel.h).
+static NphResult mesh_voxels(const NphMeshLodHeader *lh, const NphMeshlet *m,
+                             const NphMeshVoxelBrick *bricks, const NphMeshVoxel *voxels)
+{
+    if (m->triangle_count == 0U || m->triangle_count > NPH_MESH_VOXEL_CLUSTER_BRICKS ||
+        m->triangle_offset != 0U || m->vertex_offset > lh->brick_count ||
+        m->triangle_count > lh->brick_count - m->vertex_offset) {
+        return NPH_RESULT_CORRUPT;
+    }
+    for (u32 k = 0; k < m->triangle_count; ++k) {
+        const NphMeshVoxelBrick *b = &bricks[m->vertex_offset + k];
+        u32 cell = 0U;
+        memcpy(&cell, &b->cell, sizeof cell);
+        u32 origin[3];
+        memcpy(origin, &b->origin, sizeof origin);
+        // A positive, normal power of two: sign and mantissa clear.
+        const u32 exponent = (cell >> 23U) & 0xFFU;
+        const u32 count = popcount32(b->mask[0]) + popcount32(b->mask[1]);
+        if (b->reserved != 0U || (cell & 0x807FFFFFU) != 0U || exponent == 0U ||
+            exponent == 0xFFU || !finite_bits(origin[0]) || !finite_bits(origin[1]) ||
+            !finite_bits(origin[2]) || count == 0U || b->first_voxel > lh->voxel_count ||
+            count > lh->voxel_count - b->first_voxel) {
+            return NPH_RESULT_CORRUPT;
+        }
+        for (u32 v = b->first_voxel; v < b->first_voxel + count; ++v) {
+            const u32 box = voxels[v].box;
+            const u32 shape = box >> 30U;
+            for (u32 a = 0; a < 3U; ++a) {
+                if (((box >> (15U + 5U * a)) & 31U) < ((box >> (5U * a)) & 31U)) {
+                    return NPH_RESULT_CORRUPT; // a footprint of no extent
+                }
+            }
+            const u32 capsule = voxels[v].material >> 24U;
+            if (shape > 2U || (shape != 2U && capsule != 0U) ||
+                (shape == 2U && (capsule >> 2U) > 56U)) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
 // A mesh's levels of detail (version 2), checked so far as every index the
 // records hold is in range: all NULL in `out` without them.
 static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
-                           const NphSubmesh *submeshes, NphMeshView *out)
+                           const NphSubmesh *submeshes, const NphMeshlet *meshlets,
+                           NphMeshView *out)
 {
     const NphAssetBlob *b = nph_asset_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U);
     if (b == NULL) {
@@ -73,7 +142,9 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U, sizeof(NphMeshLodHeader), 1U, &p));
     const NphMeshLodHeader *lh = (const NphMeshLodHeader *)p;
-    if (lh->reserved[0] != 0U || lh->reserved[1] != 0U || lh->reserved[2] != 0U ||
+    // Before version 3 the voxels' counts were reserved, zero.
+    if (lh->reserved != 0U ||
+        (asset->header.type_version < 3U && (lh->brick_count != 0U || lh->voxel_count != 0U)) ||
         lh->levels == 0U || lh->level0_meshlets == 0U || lh->level0_meshlets > h->meshlet_count ||
         lh->group_count == 0U || lh->node_count == 0U) {
         return NPH_RESULT_CORRUPT;
@@ -90,6 +161,16 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     NPH_TRY(
         typed_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U, sizeof(NphMeshLodNode), lh->node_count, &p));
     const NphMeshLodNode *nodes = (const NphMeshLodNode *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXEL_BRICKS, 0U, sizeof(NphMeshVoxelBrick),
+                       lh->brick_count, &p));
+    const NphMeshVoxelBrick *bricks = (const NphMeshVoxelBrick *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXELS, 0U, sizeof(NphMeshVoxel), lh->voxel_count, &p));
+    const NphMeshVoxel *voxels = (const NphMeshVoxel *)p;
+    for (u32 i = 0; i < h->meshlet_count; ++i) {
+        if (voxel_cluster(asset, lh, &meshlets[i], i)) {
+            NPH_TRY(mesh_voxels(lh, &meshlets[i], bricks, voxels));
+        }
+    }
     // Level 0 holds the submeshes' meshlets.
     for (u32 i = 0; i < h->submesh_count; ++i) {
         if (submeshes[i].meshlet_count > lh->level0_meshlets ||
@@ -131,6 +212,8 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     out->lod_groups = groups;
     out->lod_members = members;
     out->lod_nodes = nodes;
+    out->voxel_bricks = bricks;
+    out->voxels = voxels;
     return NPH_RESULT_OK;
 }
 
@@ -172,6 +255,13 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
             return NPH_RESULT_CORRUPT;
         }
     }
+    // The levels' header now, for which meshlets are voxel clusters (their
+    // ranges are bricks, checked with the levels).
+    const NphMeshLodHeader *lh = NULL;
+    if (nph_asset_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U) != NULL) {
+        NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U, sizeof(NphMeshLodHeader), 1U, &p));
+        lh = (const NphMeshLodHeader *)p;
+    }
     for (u32 i = 0; i < h->submesh_count; ++i) {
         const NphSubmesh *s = &submeshes[i];
         if (s->index_count % 3U != 0U || s->index_offset > h->index_count ||
@@ -183,6 +273,12 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     }
     for (u32 i = 0; i < h->meshlet_count; ++i) {
         const NphMeshlet *m = &meshlets[i];
+        if (voxel_cluster(asset, lh, m, i)) {
+            if (m->submesh >= h->submesh_count) {
+                return NPH_RESULT_CORRUPT;
+            }
+            continue;
+        }
         if (m->vertex_count > NPH_MESHLET_MAX_VERTICES ||
             m->triangle_count > NPH_MESHLET_MAX_TRIANGLES || m->submesh >= h->submesh_count ||
             m->vertex_offset > h->meshlet_vertex_count ||
@@ -209,7 +305,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
             }
         }
     }
-    NPH_TRY(mesh_lods(asset, h, submeshes, out));
+    NPH_TRY(mesh_lods(asset, h, submeshes, meshlets, out));
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;

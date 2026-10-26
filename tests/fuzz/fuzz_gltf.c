@@ -6,7 +6,9 @@
 // read). When it imports, every mesh goes through the whole pipeline and
 // the written asset must pass the runtime's validation and mesh view:
 // whatever the cooker writes from hostile input is something the engine
-// can load. Embedded images are probed (header only).
+// can load. A small mesh's aggregate geometry becomes voxels, sampled from
+// its materials' factors (render/voxel.h; ADR-0061; images are fuzz_image's).
+// Embedded images are probed (header only).
 #include <nepheline/asset/format.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/log.h>
@@ -15,6 +17,7 @@
 
 #include <cook/gltf.h>
 #include <cook/image.h>
+#include <cook/voxel.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -23,8 +26,12 @@
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 // Work per input stays bounded: documents may reference one accessor from
-// many meshes, so the pipeline runs on at most this many vertices in all.
-#define FUZZ_MAX_VERTICES 65536U
+// many meshes, so the pipeline runs on at most this many vertices in all,
+// and voxels on meshes of at most this many triangles with this many
+// material slots.
+#define FUZZ_MAX_VERTICES    65536U
+#define FUZZ_VOXEL_TRIANGLES 4096U
+#define FUZZ_VOXEL_SLOTS     16U
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -50,15 +57,33 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     settings.lz = NPH_LZ_LEVEL_FAST;
     u32 budget = FUZZ_MAX_VERTICES;
     for (u32 m = 0; m < scene.mesh_count; ++m) {
+        const CookGltfMesh *gm = &scene.meshes[m];
         CookMesh *mesh = &scene.meshes[m].mesh;
         if (mesh->vertices.len > budget) {
             break;
         }
         budget -= mesh->vertices.len;
+        // Its slots' materials as the voxelizer reads them (a slot past
+        // them never voxelizes).
+        CookVoxelMaterial slots[FUZZ_VOXEL_SLOTS];
+        const u32 slot_count =
+            gm->material_count < FUZZ_VOXEL_SLOTS ? gm->material_count : FUZZ_VOXEL_SLOTS;
+        for (u32 s = 0; s < slot_count; ++s) {
+            const i32 k = gm->materials[s];
+            NphMaterialHeader h;
+            if (k >= 0 && (u32)k < scene.material_count) {
+                h = scene.materials[k].header;
+            } else {
+                nph_material_header_default(&h);
+            }
+            cook_voxel_material_init(&slots[s], &h);
+        }
+        const CookVoxelMaterials materials = {slots, slot_count};
+        settings.voxels = mesh->indices.len / 3U <= FUZZ_VOXEL_TRIANGLES;
         NphAssetWriter w;
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("fuzz"), 0U);
-        if (cook_mesh_process(mesh, &settings, &w, NULL) == NPH_RESULT_OK) {
+        if (cook_mesh_process(mesh, &settings, &materials, &w, NULL) == NPH_RESULT_OK) {
             fuzz_check_written_mesh(alloc, &w);
         }
         nph_asset_writer_free(&w);

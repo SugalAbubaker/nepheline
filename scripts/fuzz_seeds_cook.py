@@ -15,6 +15,7 @@ Files carry no extension: image and .glb extensions are Git LFS patterns
 
 import base64
 import json
+import math
 import struct
 import zlib
 
@@ -237,6 +238,46 @@ def image_seeds():
 # ---------------------------------------------------------------------------
 
 
+def needles(count):
+    """Foliage: `count` separate closed needles (thin triangular prisms,
+    randomly oriented) in a cube of 2, which the levels cannot simplify, so
+    their coarser levels become voxels, then coarser voxels (ADR-0061).
+    Returns each needle's six corners (two rings of three, rounded to 4
+    decimals) and its faces (the two caps, then three quads), wound outward,
+    with the corners' smooth normals (out from the needle's axis)."""
+    positions = []
+    normals = []
+    faces = []
+    state = [12345]
+
+    def rand():
+        state[0] = (state[0] * 1103515245 + 12345) & 0x7FFFFFFF
+        return state[0] / 0x7FFFFFFF
+
+    for _ in range(count):
+        c = [2.0 * rand() for _ in range(3)]
+        z = 2.0 * rand() - 1.0
+        phi = 2.0 * math.pi * rand()
+        r = math.sqrt(max(1.0 - z * z, 0.0))
+        d = [r * math.cos(phi), r * math.sin(phi), z]
+        up = [0.0, 0.0, 1.0] if abs(d[2]) < 0.9 else [1.0, 0.0, 0.0]
+        t = [up[1] * d[2] - up[2] * d[1], up[2] * d[0] - up[0] * d[2],
+             up[0] * d[1] - up[1] * d[0]]
+        tl = math.sqrt(sum(x * x for x in t))
+        t = [x / tl for x in t]
+        b = [d[1] * t[2] - d[2] * t[1], d[2] * t[0] - d[0] * t[2], d[0] * t[1] - d[1] * t[0]]
+        base = len(positions)
+        for k in range(6):
+            a = 2.0 * math.pi * (k % 3) / 3.0
+            e = -0.2 if k < 3 else 0.2
+            out = [math.cos(a) * t[i] + math.sin(a) * b[i] for i in range(3)]
+            positions.append([round(c[i] + d[i] * e + 0.008 * out[i], 4) for i in range(3)])
+            normals.append(out)
+        for f in [[0, 2, 1], [3, 4, 5], [0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5]]:
+            faces.append([base + i for i in f])
+    return positions, normals, faces
+
+
 def _data_uri(data, mime="application/octet-stream"):
     return "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii"))
 
@@ -416,6 +457,43 @@ def gltf_specgloss_dds():
     }
 
 
+def gltf_foliage():
+    """Foliage with smooth normals under a masked material (needles()):
+    the voxelizer's cut-out test on every hit."""
+    positions, normals, faces = needles(64)
+    tris = []
+    for f in faces:
+        tris += [f[0], f[1], f[2]] if len(f) == 3 else [f[0], f[1], f[2], f[0], f[2], f[3]]
+    pos = b"".join(struct.pack("<3f", *p) for p in positions)
+    nrm = b"".join(struct.pack("<3f", *n) for n in normals)
+    idx = struct.pack("<%dH" % len(tris), *tris)
+    idx += b"\0" * (-len(idx) % 4)
+    buf = pos + nrm + idx
+    lo = [min(p[i] for p in positions) for i in range(3)]
+    hi = [max(p[i] for p in positions) for i in range(3)]
+    return {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.2, 0.5, 0.1, 0.9]},
+                       "alphaMode": "MASK", "alphaCutoff": 0.5}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2,
+                                    "material": 0}]}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": len(positions), "type": "VEC3",
+             "min": lo, "max": hi},
+            {"bufferView": 1, "componentType": 5126, "count": len(normals), "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5123, "count": len(tris), "type": "SCALAR"},
+        ],
+        "bufferViews": [{"buffer": 0, "byteLength": len(pos)},
+                        {"buffer": 0, "byteOffset": len(pos), "byteLength": len(nrm)},
+                        {"buffer": 0, "byteOffset": len(pos) + len(nrm),
+                         "byteLength": 2 * len(tris)}],
+        "buffers": [{"byteLength": len(buf), "uri": _data_uri(buf)}],
+    }
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -424,6 +502,7 @@ def gltf_seeds():
         "strips_sparse": _dump(gltf_strips_and_sparse()),
         "triangle_glb": glb(triangle, triangle_buf),
         "specgloss_dds": _dump(gltf_specgloss_dds()),
+        "foliage_masked": _dump(gltf_foliage()),
     }
 
 
@@ -462,6 +541,11 @@ def nmesh_seeds():
     seeds["regression_degenerate"] = doc(
         [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [0, 1, 0]],
         [{"v": [0, 1, 2, 3]}, {"v": [0, 0, 4]}, {"v": [0, 1, 4, 1]}])
+    # Foliage (needles()), smooth-shaded: flat shading gives each face its
+    # own vertices, which fills a meshlet at a third of the triangles, and
+    # groups that small stay triangles.
+    positions, _, faces = needles(64)
+    seeds["foliage"] = doc(positions, [{"v": f} for f in faces], 180)
     return seeds
 
 

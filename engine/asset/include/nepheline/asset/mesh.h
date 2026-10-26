@@ -30,6 +30,18 @@
 // (`level0_meshlets` of them, the ones the submeshes' meshlet ranges name);
 // the records are the renderer's (render/cluster_lod.h), byte for byte.
 //
+// From version 3, the levels may hold voxel clusters (render/voxel.h;
+// docs/render.md "Voxels"; ADR-0061), which the aggregate geometry's coarse
+// levels are made of:
+//
+//     VOXB  NphMeshVoxelBrick[brick]  4 x 4 x 4 cells of one size and their mask
+//     VOXA  NphMeshVoxel[voxel]       each occupied cell's footprint and look
+//
+// A voxel cluster is a meshlet with no vertices above level 0: its bricks
+// are VOXB[vertex_offset, vertex_offset + triangle_count), at most
+// NPH_MESH_VOXEL_CLUSTER_BRICKS of them, its triangle_offset 0; each brick's
+// voxels are VOXA[first_voxel, first_voxel + its mask's bits).
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -54,9 +66,9 @@
 extern "C" {
 #endif
 
-// 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). Version 1 meshes,
-// which have none, still read.
-#define NPH_MESH_TYPE_VERSION 2U
+// 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
+// in the levels (VOXB, VOXA). Versions 1 and 2, which have none, still read.
+#define NPH_MESH_TYPE_VERSION 3U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -72,6 +84,8 @@ extern "C" {
 #define NPH_MESH_TAG_LOD_GROUPS       NPH_FOURCC('L', 'O', 'D', 'G')
 #define NPH_MESH_TAG_LOD_MEMBERS      NPH_FOURCC('L', 'O', 'D', 'M')
 #define NPH_MESH_TAG_LOD_NODES        NPH_FOURCC('L', 'O', 'D', 'N')
+#define NPH_MESH_TAG_VOXEL_BRICKS     NPH_FOURCC('V', 'O', 'X', 'B')
+#define NPH_MESH_TAG_VOXELS           NPH_FOURCC('V', 'O', 'X', 'A')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -161,7 +175,9 @@ typedef struct NphMeshLodHeader {
     u32 group_count;         // LODG
     u32 group_cluster_count; // LODM
     u32 node_count;          // LODN
-    u32 reserved[3];         // zero
+    u32 brick_count;         // VOXB (version 3; zero before)
+    u32 voxel_count;         // VOXA (version 3; zero before)
+    u32 reserved;            // zero
 } NphMeshLodHeader;
 
 typedef struct NphMeshClusterLod {
@@ -187,7 +203,31 @@ typedef struct NphMeshLodNode {
     u32 child[NPH_MESH_LOD_CHILDREN];       // node, group | LEAF, or NONE
 } NphMeshLodNode;
 
+// Voxels (render/voxel.h's records, byte for byte): a brick of 4 x 4 x 4
+// cells of edge `cell` from `origin`, the occupied ones set in the mask (bit
+// x + 4y + 16z) with their voxels in bit order from `first_voxel`; a voxel's
+// four words (colour, normal, material, footprint: render/voxel.h
+// NphRenderVoxel).
+#define NPH_MESH_VOXEL_CLUSTER_BRICKS 32U
+
+typedef struct NphMeshVoxelBrick {
+    NphVec3 origin; // mesh space: the brick's lowest corner
+    f32 cell;       // a cell's edge (a power of two)
+    u32 mask[2];
+    u32 first_voxel;
+    u32 reserved; // zero
+} NphMeshVoxelBrick;
+
+typedef struct NphMeshVoxel {
+    u32 color;
+    u32 normal;
+    u32 material;
+    u32 box;
+} NphMeshVoxel;
+
 NPH_STATIC_ASSERT(sizeof(NphMeshLodHeader) == 32U, "the levels' header is 32 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == 32U, "a brick is 32 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxel) == 16U, "a voxel is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == 16U, "a cluster's level record is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == 32U, "a group is 32 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == 224U, "a node is 224 bytes");
@@ -208,6 +248,9 @@ typedef struct NphMeshView {
     const NphMeshLodGroup *lod_groups;
     const u32 *lod_members;
     const NphMeshLodNode *lod_nodes;
+    // The voxel clusters' bricks and voxels, NULL without them.
+    const NphMeshVoxelBrick *voxel_bricks;
+    const NphMeshVoxel *voxels;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
@@ -215,7 +258,10 @@ typedef struct NphMeshView {
 // for a newer schema, NPH_RESULT_CORRUPT when a blob is missing, too
 // small, or a range points outside its array: the levels' too (every
 // group, cluster, and child index in range; level 0 covering the
-// submeshes' meshlet ranges). That the hierarchy is a tree and its bounds
+// submeshes' meshlet ranges), and the voxels' (a voxel cluster's bricks,
+// each brick's voxels, a finite power-of-two cell, a non-empty mask, every
+// footprint a box of at least one step on each axis and a known shape,
+// every reserved bit zero). That the hierarchy is a tree and its bounds
 // hold is the renderer's to check (nph_render_mesh_create).
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 

@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 2; version 1 still reads): `HEAD`
+- **Mesh** (`mesh.h`, type version 3; versions 1 and 2 still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -240,6 +240,21 @@ can be handed to the renderer without further checks:
   0's). The records are the renderer's (render/cluster_lod.h), byte for
   byte; the view checks every index they hold and leaves the tree and its
   bounds to the renderer, which checks them when the mesh is created.
+  From version 3, `LODS` also counts bricks and voxels, and a mesh whose
+  coarser levels hold voxels (docs/render.md "Voxels", ADR-0061) adds
+  `VOXB` (bricks: 4 x 4 x 4 cells of one power-of-two edge from an
+  origin, a 64-bit occupancy mask, the first voxel; 32 bytes) and `VOXA`
+  (voxels, one per set bit in bit order: albedo and occlusion, the
+  normals' lobe, roughness, metallic, and the capsule's code, and the
+  footprint's box and shape; 16 bytes), the renderer's records
+  (render/voxel.h) byte for byte. A voxel cluster is a cluster past level
+  0 whose meshlet record has no vertices: its `triangle_count` (1 to 32)
+  bricks from `vertex_offset`, `triangle_offset` zero. The view checks
+  each such cluster's bricks, each brick's cell (finite, positive, normal,
+  a power of two), origin (finite), mask (not empty), and voxels (in
+  range), and each voxel's footprint (a box at least one step across on
+  each axis, a known shape, a capsule's code only on a capsule and at
+  most 56) and reserved fields.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).

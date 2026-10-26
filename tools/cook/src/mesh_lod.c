@@ -7,6 +7,7 @@
 #include <nepheline/render/cluster_lod.h>
 
 #include <cook/mesh.h>
+#include <cook/voxel.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -33,6 +34,22 @@ NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
                           offsetof(NphRenderLodNode, maker_error) &&
                       offsetof(NphMeshLodNode, child) == offsetof(NphRenderLodNode, child),
                   "node layouts agree");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick) &&
+                      offsetof(NphMeshVoxelBrick, origin) ==
+                          offsetof(NphRenderVoxelBrick, origin) &&
+                      offsetof(NphMeshVoxelBrick, cell) == offsetof(NphRenderVoxelBrick, cell) &&
+                      offsetof(NphMeshVoxelBrick, mask) == offsetof(NphRenderVoxelBrick, mask) &&
+                      offsetof(NphMeshVoxelBrick, first_voxel) ==
+                          offsetof(NphRenderVoxelBrick, first_voxel),
+                  "brick layouts agree");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxel) == sizeof(NphRenderVoxel) &&
+                      offsetof(NphMeshVoxel, color) == offsetof(NphRenderVoxel, color) &&
+                      offsetof(NphMeshVoxel, normal) == offsetof(NphRenderVoxel, normal) &&
+                      offsetof(NphMeshVoxel, material) == offsetof(NphRenderVoxel, material) &&
+                      offsetof(NphMeshVoxel, box) == offsetof(NphRenderVoxel, box),
+                  "voxel layouts agree");
+NPH_STATIC_ASSERT(NPH_MESH_VOXEL_CLUSTER_BRICKS == NPH_RENDER_VOXEL_CLUSTER_BRICKS,
+                  "voxel cluster limits agree");
 NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
                       NPH_MESH_LOD_LEAF == NPH_RENDER_LOD_LEAF &&
                       NPH_MESH_LOD_CHILDREN == NPH_RENDER_LOD_NODE_CHILDREN,
@@ -41,11 +58,23 @@ NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
 NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                const NphVec3 *positions, const NphMeshAttrib *attribs,
                                const NphMeshletBounds *bounds, const CookMeshSettings *settings,
-                               NphRenderClusterLods *out)
+                               const struct CookVoxelMaterials *voxels, NphRenderClusterLods *out)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && out != NULL);
     NphAllocator *alloc = mesh->alloc;
     const u32 sn = mesh->submeshes.len;
+    // The voxelizer's materials, a surface per submesh.
+    u8 *surfaces = NULL;
+    CookVoxelSampler cvs;
+    NphRenderVoxelSampler sampler;
+    const bool with_voxels = settings->voxels && voxels != NULL;
+    if (with_voxels) {
+        surfaces = NPH_ALLOC_ARRAY_ZEROED(alloc, u8, nph_max_u32(sn, 1U));
+        if (surfaces == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        cook_voxel_sampler_init(&cvs, mesh, voxels, positions, attribs, surfaces, &sampler);
+    }
     // Level 0 as the builder takes it: the meshlets with the bounds of the
     // dequantised positions.
     NphRenderMeshlets level0;
@@ -89,8 +118,12 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         in.max_vertices = settings->meshlet_vertices;
         in.max_triangles = settings->meshlet_triangles;
         in.cone_weight = settings->meshlet_cone_weight;
+        in.voxels = with_voxels ? &sampler : NULL;
         in.scratch = alloc;
         r = nph_render_cluster_lods_build(&in, out);
+    }
+    if (surfaces != NULL) {
+        NPH_FREE_ARRAY(alloc, u8, surfaces, nph_max_u32(sn, 1U));
     }
     if (ranges != NULL) {
         NPH_FREE_ARRAY(alloc, NphRenderIndexRange, ranges, nph_max_u32(sn, 1U));

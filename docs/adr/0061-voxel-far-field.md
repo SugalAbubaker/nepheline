@@ -298,9 +298,11 @@ stage.
 1. The voxelizer and the voxel levels in the builder, the C twin of the traversal,
    and their tests.
 2. The mesh format (version 3: `VOXB` bricks, `VOXA` voxels), the loader's checks,
-   the cooker's sampler and `--no-voxels`, and fuzzing.
+   the cooker's sampler, and fuzzing. Voxels stay opt-in (`--voxels`) while the
+   renderer refuses voxel clusters.
 3. The renderer: the voxel raster list, raster, and resolve, the radiance cache's
-   surface point, statistics, and the debug views.
+   surface point, statistics, and the debug views; the cooker then makes voxels by
+   default (`--no-voxels`).
 4. The shadow map's voxel casters, on both raster paths.
 5. The landscape cooked with voxels, measured against every §10.4 line.
 6. Voxel bottom levels for rays.

@@ -13,6 +13,7 @@
 #include <cook/gltf.h>
 #include <cook/image.h>
 #include <cook/polymesh.h>
+#include <cook/voxel.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -627,7 +628,7 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
         nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
                               content_hash);
         CookMeshStats st;
-        r = cook_mesh_process(&mesh, &c->mesh, &w, &st);
+        r = cook_mesh_process(&mesh, &c->mesh, NULL, &w, &st);
         if (r == NPH_RESULT_OK) {
             char relative[COOKER_PATH_MAX];
             output_path(c, key, "mesh", "mesh", guid, relative, sizeof relative);
@@ -1184,6 +1185,213 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// Voxel materials (cook/voxel.h; ADR-0061)
+// ---------------------------------------------------------------------------
+
+// The scene's images as the voxelizer reads them, each decoded the first
+// time a mesh that cooks needs it and kept until the scene is done: per
+// image its linear and its sRGB chain, per specular-glossiness material the
+// converted pair, and per material (then the default one) its voxel
+// material.
+typedef struct VoxelImages {
+    Cooker *c;
+    const char *key;
+    const CookGltfScene *scene;
+    NphAllocator *alloc;
+    CookVoxelImage *chains; // per image: linear, then sRGB
+    u8 *tried;              // per image: bit 0 linear tried, bit 1 sRGB
+    CookVoxelImage *sg;     // per material: base, then metallic-roughness
+    u8 *sg_tried;
+    CookVoxelMaterial *materials; // per material, then the default
+    u8 *ready;
+    u32 image_count;
+    u32 material_count;
+} VoxelImages;
+
+static NphResult voxel_images_init(VoxelImages *v, Cooker *c, const char *key,
+                                   const CookGltfScene *scene)
+{
+    memset(v, 0, sizeof *v);
+    v->c = c;
+    v->key = key;
+    v->scene = scene;
+    v->alloc = c->alloc;
+    v->image_count = scene->image_count;
+    v->material_count = scene->material_count;
+    const u32 ni = nph_max_u32(v->image_count, 1U);
+    const u32 nm = v->material_count + 1U;
+    v->chains = NPH_ALLOC_ARRAY_ZEROED(v->alloc, CookVoxelImage, (u64)ni * 2U);
+    v->tried = NPH_ALLOC_ARRAY_ZEROED(v->alloc, u8, ni);
+    v->sg = NPH_ALLOC_ARRAY_ZEROED(v->alloc, CookVoxelImage, (u64)nm * 2U);
+    v->sg_tried = NPH_ALLOC_ARRAY_ZEROED(v->alloc, u8, nm);
+    v->materials = NPH_ALLOC_ARRAY_ZEROED(v->alloc, CookVoxelMaterial, nm);
+    v->ready = NPH_ALLOC_ARRAY_ZEROED(v->alloc, u8, nm);
+    return v->chains != NULL && v->tried != NULL && v->sg != NULL && v->sg_tried != NULL &&
+                   v->materials != NULL && v->ready != NULL
+               ? NPH_RESULT_OK
+               : NPH_RESULT_OUT_OF_MEMORY;
+}
+
+static void voxel_images_free(VoxelImages *v)
+{
+    const u32 ni = nph_max_u32(v->image_count, 1U);
+    const u32 nm = v->material_count + 1U;
+    if (v->chains != NULL) {
+        for (u32 i = 0; i < ni * 2U; ++i) {
+            cook_voxel_image_free(&v->chains[i]);
+        }
+        NPH_FREE_ARRAY(v->alloc, CookVoxelImage, v->chains, (u64)ni * 2U);
+    }
+    if (v->sg != NULL) {
+        for (u32 i = 0; i < nm * 2U; ++i) {
+            cook_voxel_image_free(&v->sg[i]);
+        }
+        NPH_FREE_ARRAY(v->alloc, CookVoxelImage, v->sg, (u64)nm * 2U);
+    }
+    if (v->tried != NULL) {
+        NPH_FREE_ARRAY(v->alloc, u8, v->tried, ni);
+    }
+    if (v->sg_tried != NULL) {
+        NPH_FREE_ARRAY(v->alloc, u8, v->sg_tried, nm);
+    }
+    if (v->materials != NULL) {
+        NPH_FREE_ARRAY(v->alloc, CookVoxelMaterial, v->materials, nm);
+    }
+    if (v->ready != NULL) {
+        NPH_FREE_ARRAY(v->alloc, u8, v->ready, nm);
+    }
+    memset(v, 0, sizeof *v);
+}
+
+// Image `index`'s chain (sRGB-encoded for a base colour), or NULL for none
+// or one that does not decode (then the material samples its factors alone,
+// with a warning).
+static const CookVoxelImage *voxel_image(VoxelImages *v, i32 index, bool srgb)
+{
+    if (index < 0 || (u32)index >= v->image_count) {
+        return NULL;
+    }
+    CookVoxelImage *chain = &v->chains[(u64)index * 2U + (srgb ? 1U : 0U)];
+    const u8 bit = srgb ? 2U : 1U;
+    if ((v->tried[index] & bit) == 0U) {
+        v->tried[index] |= bit;
+        const CookGltfImage *img = &v->scene->images[index];
+        CookImage image;
+        NphResult r = cook_image_decode(v->alloc, img->data, img->size, &image);
+        if (r == NPH_RESULT_OK) {
+            r = cook_voxel_image_init(chain, v->alloc, &image, srgb);
+            cook_image_free(&image);
+        }
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_WARN(&NPH_LOG_COOK, "%s: image %s: not read for voxels (%s): its factors alone",
+                         v->key, img->name, nph_result_string(r));
+        }
+    }
+    return chain->texels != NULL ? chain : NULL;
+}
+
+// A specular-glossiness material's converted pair (cook/specgloss.h), as
+// its textures are made: base colour, then metallic-roughness.
+static void voxel_specgloss(VoxelImages *v, u32 m, const CookGltfMaterial *mat)
+{
+    if (v->sg_tried[m] != 0U) {
+        return;
+    }
+    v->sg_tried[m] = 1U;
+    CookImage images[2];
+    memset(images, 0, sizeof images);
+    NphResult r = NPH_RESULT_OK;
+    for (u32 k = 0; k < 2U && r == NPH_RESULT_OK; ++k) {
+        const i32 index = mat->specgloss_image[k];
+        if (index >= 0 && (u32)index < v->image_count) {
+            const CookGltfImage *img = &v->scene->images[index];
+            r = cook_image_decode(v->alloc, img->data, img->size, &images[k]);
+            if (r == NPH_RESULT_OK && images[k].format != COOK_IMAGE_RGBA8) {
+                r = NPH_RESULT_UNSUPPORTED;
+            }
+        }
+    }
+    CookImage base;
+    CookImage mr;
+    memset(&base, 0, sizeof base);
+    memset(&mr, 0, sizeof mr);
+    if (r == NPH_RESULT_OK) {
+        r = cook_specgloss_textures(v->alloc, images[0].pixels != NULL ? &images[0] : NULL,
+                                    images[1].pixels != NULL ? &images[1] : NULL,
+                                    &mat->specgloss_factors, &base, &mr);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = cook_voxel_image_init(&v->sg[(u64)m * 2U], v->alloc, &base, true);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = cook_voxel_image_init(&v->sg[(u64)m * 2U + 1U], v->alloc, &mr, false);
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&NPH_LOG_COOK,
+                     "%s: material %s: its specular-glossiness images not read for voxels (%s)",
+                     v->key, mat->name, nph_result_string(r));
+    }
+    cook_image_free(&images[0]);
+    cook_image_free(&images[1]);
+    cook_image_free(&base);
+    cook_image_free(&mr);
+}
+
+static CookVoxelSlot voxel_slot(const CookVoxelImage *image, const NphMaterialHeader *h, u32 slot)
+{
+    CookVoxelSlot s;
+    s.image = image;
+    s.wrap_u = h->textures[slot].wrap_u;
+    s.wrap_v = h->textures[slot].wrap_v;
+    return s;
+}
+
+// glTF material `m`'s voxel material (-1: the default material's).
+static const CookVoxelMaterial *voxel_material(VoxelImages *v, i32 m)
+{
+    const u32 at = m >= 0 && (u32)m < v->material_count ? (u32)m : v->material_count;
+    CookVoxelMaterial *out = &v->materials[at];
+    if (v->ready[at] != 0U) {
+        return out;
+    }
+    v->ready[at] = 1U;
+    if (at == v->material_count) {
+        NphMaterialHeader h;
+        nph_material_header_default(&h);
+        cook_voxel_material_init(out, &h);
+        return out;
+    }
+    const CookGltfMaterial *mat = &v->scene->materials[at];
+    const NphMaterialHeader *h = &mat->header;
+    cook_voxel_material_init(out, h);
+    if (out->surface == NPH_RENDER_VOXEL_SURFACE_NONE) {
+        return out; // its images are never read
+    }
+    const i32 *image = mat->image;
+    if (mat->specgloss) {
+        voxel_specgloss(v, at, mat);
+        const CookVoxelImage *base = &v->sg[(u64)at * 2U];
+        const CookVoxelImage *mr = &v->sg[(u64)at * 2U + 1U];
+        out->base_color_image =
+            voxel_slot(base->texels != NULL ? base : NULL, h, NPH_MATERIAL_TEXTURE_BASE_COLOR);
+        out->metallic_roughness_image =
+            voxel_slot(mr->texels != NULL ? mr : NULL, h, NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS);
+    } else {
+        out->base_color_image =
+            voxel_slot(voxel_image(v, image[NPH_MATERIAL_TEXTURE_BASE_COLOR], true), h,
+                       NPH_MATERIAL_TEXTURE_BASE_COLOR);
+        out->metallic_roughness_image =
+            voxel_slot(voxel_image(v, image[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS], false), h,
+                       NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS);
+    }
+    out->normal_image = voxel_slot(voxel_image(v, image[NPH_MATERIAL_TEXTURE_NORMAL], false), h,
+                                   NPH_MATERIAL_TEXTURE_NORMAL);
+    out->occlusion_image = voxel_slot(voxel_image(v, image[NPH_MATERIAL_TEXTURE_OCCLUSION], false),
+                                      h, NPH_MATERIAL_TEXTURE_OCCLUSION);
+    return out;
+}
+
 NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
 {
     NPH_ASSERT(c != NULL && source_path != NULL);
@@ -1250,8 +1458,14 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             r = NPH_ARRAY_PUSH(&scene_deps, default_material);
         }
     }
-    // Meshes.
+    // Meshes, with their materials for voxels where the settings ask.
     const u64 mesh_shash = settings_hash(c, NPH_ASSET_TYPE_MESH);
+    const bool with_voxels = c->mesh.voxels != 0;
+    VoxelImages voxel_images;
+    memset(&voxel_images, 0, sizeof voxel_images);
+    if (r == NPH_RESULT_OK && with_voxels) {
+        r = voxel_images_init(&voxel_images, c, key, &scene);
+    }
     for (u32 m = 0; m < scene.mesh_count && r == NPH_RESULT_OK; ++m) {
         CookGltfMesh *gm = &scene.meshes[m];
         if (gm->mesh.submeshes.len == 0U) {
@@ -1272,15 +1486,38 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, mesh_guids[m],
                               scene.content_hash);
         CookMeshStats st;
-        r = cook_mesh_process(&gm->mesh, &c->mesh, &w, &st);
+        memset(&st, 0, sizeof st);
+        CookVoxelMaterial *slots = NULL;
+        CookVoxelMaterials materials;
+        memset(&materials, 0, sizeof materials);
+        if (with_voxels) {
+            slots = NPH_ALLOC_ARRAY_ZEROED(alloc, CookVoxelMaterial,
+                                           nph_max_u32(gm->material_count, 1U));
+            if (slots == NULL) {
+                r = NPH_RESULT_OUT_OF_MEMORY;
+            }
+            for (u32 s = 0; s < gm->material_count && slots != NULL; ++s) {
+                slots[s] = *voxel_material(&voxel_images, gm->materials[s]);
+            }
+            materials.slots = slots;
+            materials.slot_count = gm->material_count;
+        }
+        if (r == NPH_RESULT_OK) {
+            r = cook_mesh_process(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL, &w, &st);
+        }
+        if (slots != NULL) {
+            NPH_FREE_ARRAY(alloc, CookVoxelMaterial, slots, nph_max_u32(gm->material_count, 1U));
+        }
         if (r == NPH_RESULT_OK) {
             NPH_LOG_INFO(
                 &NPH_LOG_COOK,
                 "mesh %s: %u -> %u vertices, %u -> %u triangles, %u meshlets, %u levels (the "
-                "coarsest %u triangles in %u clusters), ACMR %.2f -> %.2f",
+                "coarsest %u triangles in %u clusters; %u voxels in %u bricks, %u clusters), "
+                "ACMR %.2f -> %.2f",
                 gm->mesh.name, st.source_vertices, st.vertices, st.source_triangles, st.triangles,
                 st.meshlets, st.lod_levels, st.lod_coarsest_triangles, st.lod_coarsest_clusters,
-                (f64)st.acmr_before, (f64)st.acmr_after);
+                st.voxels, st.voxel_bricks, st.voxel_clusters, (f64)st.acmr_before,
+                (f64)st.acmr_after);
             char file[COOK_MESH_NAME_MAX + 32U];
             snprintf(file, sizeof file, "mesh_%u_%s", m, gm->mesh.name);
             char relative[COOKER_PATH_MAX];
@@ -1292,6 +1529,7 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         }
         nph_asset_writer_free(&w);
     }
+    voxel_images_free(&voxel_images);
     // The scene.
     const NphGuid scene_guid = asset_guid(key, "scene");
     if (r == NPH_RESULT_OK) {
