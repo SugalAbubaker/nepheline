@@ -236,6 +236,7 @@ reference scenes arrive:
 | `lights_1k_shadows` | `lights_1k_production` with the moon and every lamp casting shadows |
 | `motion_{turn,strafe,flick}_4k_production` | `field_4k_production` with motion blur (a 180-degree shutter at 240 frames a second) while the camera turns 60 degrees a second, strafes at 5 m/s (parallax), or turns 360 degrees a second, each reversing every quarter second (docs/render.md "Motion blur") |
 | `dof_4k_production`, `dof_slight_4k_production`, `dof_large_4k_production` | `field_4k_production` through a full-frame lens (24.8 mm at the camera's field of view) at f/1.4 focused 5 m away (circles of confusion up to 4 pixels), 2.6 m (up to 7.7: the most the full-resolution gather takes), or 0.6 m (the 32-pixel limit, gathered at half resolution) (docs/render.md "Depth of field") |
+| `lod_4k_production`, `lod_4k_level0` | a rolling terrain 400 m across (131,072 triangles) and 1,024 rocks on it (65,024 each, 67 million in all), both with levels of detail, from head height across the diagonal at 3840×2160; the second at level 0 (`lod_error` 0): what the levels save (docs/render.md "Levels of detail"). The meshes' levels are built at the first run (about 2.7 s) |
 
 `lights_1k_every_light` and `lights_1k_shadows` are comparisons, not
 targets: like the reference renderer's scenes, they carry no budget.
