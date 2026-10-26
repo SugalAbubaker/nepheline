@@ -71,6 +71,7 @@
 #include <nepheline/gpu/render_graph.h>
 #include <nepheline/math/geometry.h>
 #include <nepheline/math/quat.h>
+#include <nepheline/render/cluster_lod.h>
 #include <nepheline/render/meshlet.h>
 
 #ifdef __cplusplus
@@ -154,6 +155,9 @@ typedef struct NphRendererDesc {
     u32 meshlet_index_pool;   // meshlet corners of all meshes for the indirect raster, on
                               // devices without mesh shaders (2^24); a destroyed mesh's
                               // return two frames later
+    u32 max_lod_nodes;        // the levels of detail's hierarchy nodes a step of the
+                              // culling takes, per frame (2^18; at most 524,224, what
+                              // 65,535 workgroups take)
     // Ray-traced shadows, where the device has ray queries (docs/render.md
     // "Shadows"): set to never create them (no acceleration structures,
     // GPU memory, or pipelines for them); lights that cast shadows then draw
@@ -287,6 +291,22 @@ typedef struct NphRenderMeshDesc {
     u32 meshlet_vertex_count;
     const u8 *meshlet_triangles; // meshlet-local corners, three per triangle
     u32 meshlet_triangle_count;
+    // Levels of detail (render/cluster_lod.h; docs/render.md "Levels of
+    // detail"), as nph_render_cluster_lods_build makes them and a cooked mesh
+    // carries them; with `lod_nodes` NULL the mesh has level 0 alone. With
+    // them, `meshlets` are every level's clusters, level 0's first
+    // (`lod_level0_meshlets` of them, which cover the submeshes as above),
+    // and the production path draws the clusters of the level each part of
+    // the mesh needs for the view's threshold (NphRenderView.lod_error); the
+    // reference renderer, shadow rays, and the shadow map's pages draw level 0.
+    const NphRenderClusterLod *cluster_lods; // per meshlet
+    const NphRenderLodGroup *lod_groups;
+    u32 lod_group_count;
+    const u32 *lod_group_clusters;
+    u32 lod_group_cluster_count;
+    const NphRenderLodNode *lod_nodes; // node 0 the root
+    u32 lod_node_count;
+    u32 lod_level0_meshlets;
     const char *name;
 } NphRenderMeshDesc;
 
@@ -633,6 +653,11 @@ typedef struct NphRenderView {
     // indirect debug view when the environment lights the view, and for the
     // occlusion debug view. The reference renderer has none.
     f32 ao_radius;
+    // Levels of detail (the production path; docs/render.md "Levels of
+    // detail"): the most pixels a mesh's coarser levels may lie from its own
+    // surface where they are drawn instead (1 by default). 0 draws every
+    // mesh at level 0.
+    f32 lod_error;
     // Global illumination (the production path where the device has ray
     // queries; docs/render.md "Global illumination"): the diffuse light
     // takes its irradiance from a radiance cache in the world, which a fixed
@@ -697,9 +722,12 @@ typedef struct NphRenderFrameStats {
     u32 vis_meshlets_culled_frustum;
     u32 vis_meshlets_culled_cone;
     u32 vis_meshlets_culled_occlusion;
-    u32 vis_lights;   // lights in view: those that reach every pixel, and the others the
-                      // frustum keeps
-    u32 vis_overflow; // NphRenderVisOverflow bits: lists that dropped work
+    u32 vis_lod_nodes;           // hierarchy nodes of the levels of detail visited
+    u32 vis_lod_clusters_culled; // clusters a finer level stood in for
+    u32 vis_lod_steps;           // this frame's steps down the hierarchies, each phase
+    u32 vis_lights;              // lights in view: those that reach every pixel, and the others the
+                                 // frustum keeps
+    u32 vis_overflow;            // NphRenderVisOverflow bits: lists that dropped work
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the map overflows its capacities and lowers
@@ -748,9 +776,10 @@ typedef enum NphRenderVsmOverflow {
 // The production path's lists that can fill up (NphRenderFrameStats.
 // vis_overflow); each is a capacity in NphRendererDesc.
 typedef enum NphRenderVisOverflow {
-    NPH_RENDER_VIS_OVERFLOW_MESHLETS = 1U << 0U, // max_cull_meshlets
-    NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U, // max_visible_clusters
-    NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U, // max_deferred
+    NPH_RENDER_VIS_OVERFLOW_MESHLETS = 1U << 0U,  // max_cull_meshlets
+    NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U,  // max_visible_clusters
+    NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U,  // max_deferred
+    NPH_RENDER_VIS_OVERFLOW_LOD_NODES = 1U << 3U, // max_lod_nodes
 } NphRenderVisOverflow;
 
 // Whether the renderer has the production path: the device has what it

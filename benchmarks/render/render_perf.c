@@ -136,6 +136,14 @@
 //                         the same lens focused 0.6 m away: circles at the
 //                         32-pixel limit beyond 8 m, gathered at half
 //                         resolution.
+//   lod_4k_production     a rolling terrain 400 m across (131,072
+//                         triangles) and 1,024 rocks on it (65,024 triangles
+//                         each: 67 million in all), both with levels of
+//                         detail (docs/render.md "Levels of detail"), seen
+//                         from head height across the diagonal: each part
+//                         drawn at the level a pixel's error allows.
+//   lod_4k_level0         the same at level 0 (NphRenderView.lod_error 0):
+//                         what the levels save.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -156,6 +164,7 @@
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
+#include <nepheline/render/cluster_lod.h>
 #include <nepheline/render/gpu_profiler.h>
 #include <nepheline/render/primitives.h>
 #include <nepheline/render/renderer.h>
@@ -192,6 +201,7 @@
 typedef enum SceneKind {
     SCENE_GRID = 0,
     SCENE_FIELD,
+    SCENE_LOD, // the terrain and its rocks, with levels of detail
 } SceneKind;
 
 typedef struct SceneDef {
@@ -226,11 +236,12 @@ typedef enum ScenePost {
     POST_MOTION_STRAFE = 1U << 4U, // strafing at 5 m/s
     POST_MOTION_FLICK = 1U << 5U,  // turning 360 degrees a second
     // Depth of field through DOF_APERTURE, focused at DOF_FOCUS[...].
-    POST_DOF = 1U << 6U,        // 5 m away
-    POST_DOF_SLIGHT = 1U << 7U, // 2.6 m
-    POST_DOF_LARGE = 1U << 8U,  // 0.6 m
-    POST_NO_AO = 1U << 9U,      // no ambient occlusion
-    POST_NO_GI = 1U << 10U,     // no global illumination
+    POST_DOF = 1U << 6U,         // 5 m away
+    POST_DOF_SLIGHT = 1U << 7U,  // 2.6 m
+    POST_DOF_LARGE = 1U << 8U,   // 0.6 m
+    POST_NO_AO = 1U << 9U,       // no ambient occlusion
+    POST_NO_GI = 1U << 10U,      // no global illumination
+    POST_LOD_LEVEL0 = 1U << 11U, // every mesh at level 0 (NphRenderView.lod_error 0)
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
@@ -304,6 +315,10 @@ static const SceneDef g_scenes[] = {
      2160U, 0U, SHADOWS_NONE, POST_DOF_SLIGHT},
     {"dof_large_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_NONE, POST_DOF_LARGE},
+    {"lod_4k_production", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_DEFAULT},
+    {"lod_4k_level0", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
+     SHADOWS_NONE, POST_LOD_LEVEL0},
 };
 
 // Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
@@ -376,6 +391,9 @@ typedef struct Ctx {
     NphRenderMesh cube;
     NphRenderMesh sphere;
     NphRenderMesh plane;
+    // The levels-of-detail scene's meshes, made the first time it runs.
+    NphRenderMesh terrain;
+    NphRenderMesh rock;
     NphRenderMaterial materials[4];
     NphRenderLight sun;
     NphRenderLightDesc sun_desc;
@@ -474,6 +492,247 @@ static NphResult upload_mesh(Ctx *ctx, NphResult made, NphRenderMeshData *data, 
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// The levels-of-detail scene's meshes
+// ---------------------------------------------------------------------------
+
+#define TERRAIN_CELLS 256U   // quads a side: 131,072 triangles
+#define TERRAIN_HALF  200.0F // metres from the centre to a side
+#define ROCK_SEGMENTS 256U   // a UV sphere's: 65,024 triangles
+#define ROCK_RINGS    128U
+
+// Gentle hills (a field's, not a valley's walls), so that the rocks are
+// seen far across it rather than hidden behind the nearest rise.
+static f32 terrain_height(f32 x, f32 z)
+{
+    return 1.5F * nph_f32_sin(x / 37.0F) * nph_f32_cos(z / 41.0F) +
+           0.6F * nph_f32_sin(x / 11.0F + z / 13.0F) + 0.25F * nph_f32_sin(x / 3.1F - z / 2.7F);
+}
+
+// A rock's radius along a unit direction: a sphere's, bumped by three
+// octaves of sines.
+static f32 rock_radius(NphVec3 d)
+{
+    f32 r = 0.5F;
+    f32 amp = 0.09F;
+    f32 freq = 2.3F;
+    for (u32 o = 0; o < 3U; ++o) {
+        r += amp * nph_f32_sin(freq * d.x + 1.7F * (f32)o) * nph_f32_sin(freq * d.y + 0.6F) *
+             nph_f32_cos(freq * d.z - 1.1F * (f32)o);
+        amp *= 0.45F;
+        freq *= 2.6F;
+    }
+    return r;
+}
+
+// Area-weighted vertex normals of a triangle list.
+static void smooth_normals(NphRenderVertexInput *v, u32 n, const u32 *idx, u32 k)
+{
+    for (u32 i = 0; i < n; ++i) {
+        v[i].normal = nph_vec3_zero();
+    }
+    for (u32 t = 0; t < k; t += 3U) {
+        const NphVec3 a = v[idx[t]].position;
+        const NphVec3 e1 = nph_vec3_sub(v[idx[t + 1U]].position, a);
+        const NphVec3 e2 = nph_vec3_sub(v[idx[t + 2U]].position, a);
+        const NphVec3 face = nph_vec3_cross(e1, e2);
+        for (u32 c = 0; c < 3U; ++c) {
+            v[idx[t + c]].normal = nph_vec3_add(v[idx[t + c]].normal, face);
+        }
+    }
+    for (u32 i = 0; i < n; ++i) {
+        v[i].normal = nph_vec3_normalize_or(v[i].normal, nph_vec3_unit_y());
+    }
+}
+
+// Uploads a mesh with its meshlets and levels of detail, built here as the
+// cooker builds them.
+static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n, const u32 *idx,
+                                 u32 k, const char *name, NphRenderMesh *out)
+{
+    NphAllocator *a = nph_allocator_system();
+    NphRenderMeshData data;
+    NPH_TRY(nph_render_mesh_data_build(a, v, n, idx, k, &data));
+    NphVec3 *positions = NPH_ALLOC_ARRAY(a, NphVec3, data.vertex_count);
+    NphRenderMeshlets meshlets;
+    nph_render_meshlets_init(&meshlets, a);
+    NphRenderClusterLods lods;
+    nph_render_cluster_lods_init(&lods, a);
+    NphResult r = positions != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    const NphRenderIndexRange range = {0U, data.index_count};
+    if (r == NPH_RESULT_OK) {
+        const f32 q = 1.0F / 65535.0F;
+        for (u32 i = 0; i < data.vertex_count; ++i) {
+            const NphRenderVertexPosition p = data.positions[i];
+            positions[i] = nph_vec3(data.position_offset.x + (f32)p.x * q * data.position_scale.x,
+                                    data.position_offset.y + (f32)p.y * q * data.position_scale.y,
+                                    data.position_offset.z + (f32)p.z * q * data.position_scale.z);
+        }
+        NphRenderMeshletInput in;
+        memset(&in, 0, sizeof in);
+        in.positions = positions;
+        in.vertex_count = data.vertex_count;
+        in.indices = data.indices;
+        in.index_count = data.index_count;
+        in.ranges = &range;
+        in.range_count = 1U;
+        in.cone_weight = 0.25F;
+        in.scratch = a;
+        r = nph_render_meshlets_build(&in, &meshlets);
+    }
+    if (r == NPH_RESULT_OK) {
+        NphRenderClusterLodInput li;
+        memset(&li, 0, sizeof li);
+        li.positions = positions;
+        li.attribs = data.attribs;
+        li.attrib_stride = (u32)sizeof(NphRenderVertexAttrib);
+        li.vertex_count = data.vertex_count;
+        li.indices = data.indices;
+        li.index_count = data.index_count;
+        li.ranges = &range;
+        li.range_count = 1U;
+        li.meshlets = &meshlets;
+        li.cone_weight = 0.25F;
+        li.scratch = a;
+        const u64 t0 = nph_time_now_ns();
+        r = nph_render_cluster_lods_build(&li, &lods);
+        fprintf(stderr, "render_perf: %s: %u triangles, %u clusters in %u levels (%.2f s)\n", name,
+                data.index_count / 3U, lods.clusters.meshlets.len, lods.levels,
+                (f64)(nph_time_now_ns() - t0) / 1.0e9);
+    }
+    if (r == NPH_RESULT_OK) {
+        NphRenderSubmesh sub;
+        NphRenderMeshDesc md;
+        nph_render_mesh_data_desc(&data, name, &sub, &md);
+        const NphRenderMeshlets *c = &lods.clusters;
+        md.meshlets = c->meshlets.data;
+        md.meshlet_bounds = c->bounds.data;
+        md.meshlet_count = c->meshlets.len;
+        md.meshlet_vertices = c->vertices.data;
+        md.meshlet_vertex_count = c->vertices.len;
+        md.meshlet_triangles = c->triangles.data;
+        md.meshlet_triangle_count = c->triangles.len / 3U;
+        md.cluster_lods = lods.lods.data;
+        md.lod_groups = lods.groups.data;
+        md.lod_group_count = lods.groups.len;
+        md.lod_group_clusters = lods.group_clusters.data;
+        md.lod_group_cluster_count = lods.group_clusters.len;
+        md.lod_nodes = lods.nodes.data;
+        md.lod_node_count = lods.nodes.len;
+        md.lod_level0_meshlets = lods.level0_clusters;
+        r = nph_render_mesh_create(ctx->renderer, &md, out);
+    }
+    nph_render_cluster_lods_free(&lods);
+    nph_render_meshlets_free(&meshlets);
+    if (positions != NULL) {
+        NPH_FREE_ARRAY(a, NphVec3, positions, data.vertex_count);
+    }
+    nph_render_mesh_data_free(&data);
+    return r;
+}
+
+static NphResult make_terrain(Ctx *ctx)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u32 side = TERRAIN_CELLS + 1U;
+    const u32 n = side * side;
+    const u32 k = TERRAIN_CELLS * TERRAIN_CELLS * 6U;
+    NphRenderVertexInput *v = NPH_ALLOC_ARRAY(a, NphRenderVertexInput, n);
+    u32 *idx = NPH_ALLOC_ARRAY(a, u32, k);
+    NphResult r = v != NULL && idx != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        const f32 step = 2.0F * TERRAIN_HALF / (f32)TERRAIN_CELLS;
+        for (u32 i = 0; i < side; ++i) {
+            for (u32 j = 0; j < side; ++j) {
+                const f32 x = -TERRAIN_HALF + step * (f32)j;
+                const f32 z = -TERRAIN_HALF + step * (f32)i;
+                NphRenderVertexInput *p = &v[i * side + j];
+                p->position = nph_vec3(x, terrain_height(x, z), z);
+                p->uv = nph_vec2((f32)j / 8.0F, (f32)i / 8.0F);
+                p->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+            }
+        }
+        u32 t = 0U;
+        for (u32 i = 0; i < TERRAIN_CELLS; ++i) {
+            for (u32 j = 0; j < TERRAIN_CELLS; ++j) {
+                const u32 v00 = i * side + j;
+                const u32 v10 = v00 + side;
+                // Counter-clockwise from above.
+                idx[t++] = v00;
+                idx[t++] = v10;
+                idx[t++] = v10 + 1U;
+                idx[t++] = v00;
+                idx[t++] = v10 + 1U;
+                idx[t++] = v00 + 1U;
+            }
+        }
+        smooth_normals(v, n, idx, k);
+        r = upload_lod_mesh(ctx, v, n, idx, k, "lod terrain", &ctx->terrain);
+    }
+    if (v != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
+    }
+    if (idx != NULL) {
+        NPH_FREE_ARRAY(a, u32, idx, k);
+    }
+    return r;
+}
+
+static NphResult make_rock(Ctx *ctx)
+{
+    NphAllocator *a = nph_allocator_system();
+    // (segments + 1) x (rings + 1) vertices: the last column at the first's
+    // positions with u = 1, the poles a row each (seams the levels keep).
+    const u32 cols = ROCK_SEGMENTS + 1U;
+    const u32 n = cols * (ROCK_RINGS + 1U);
+    const u32 k = ROCK_SEGMENTS * (ROCK_RINGS - 1U) * 6U;
+    NphRenderVertexInput *v = NPH_ALLOC_ARRAY(a, NphRenderVertexInput, n);
+    u32 *idx = NPH_ALLOC_ARRAY(a, u32, k);
+    NphResult r = v != NULL && idx != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        for (u32 i = 0; i <= ROCK_RINGS; ++i) {
+            const f32 theta = NPH_PI * (f32)i / (f32)ROCK_RINGS;
+            for (u32 j = 0; j <= ROCK_SEGMENTS; ++j) {
+                const f32 phi = 2.0F * NPH_PI * (f32)(j % ROCK_SEGMENTS) / (f32)ROCK_SEGMENTS;
+                const NphVec3 d =
+                    nph_vec3(nph_f32_sin(theta) * nph_f32_cos(phi), nph_f32_cos(theta),
+                             nph_f32_sin(theta) * nph_f32_sin(phi));
+                NphRenderVertexInput *p = &v[i * cols + j];
+                p->position = nph_vec3_scale(d, rock_radius(d));
+                p->uv = nph_vec2((f32)j / (f32)ROCK_SEGMENTS, (f32)i / (f32)ROCK_RINGS);
+                p->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+            }
+        }
+        u32 t = 0U;
+        for (u32 i = 0; i < ROCK_RINGS; ++i) {
+            for (u32 j = 0; j < ROCK_SEGMENTS; ++j) {
+                const u32 v00 = i * cols + j;
+                const u32 v10 = v00 + cols;
+                // Counter-clockwise from outside; one triangle at each pole.
+                if (i != 0U) {
+                    idx[t++] = v00;
+                    idx[t++] = v00 + 1U;
+                    idx[t++] = v10;
+                }
+                if (i != ROCK_RINGS - 1U) {
+                    idx[t++] = v00 + 1U;
+                    idx[t++] = v10 + 1U;
+                    idx[t++] = v10;
+                }
+            }
+        }
+        smooth_normals(v, n, idx, t);
+        r = upload_lod_mesh(ctx, v, n, idx, t, "lod rock", &ctx->rock);
+    }
+    if (v != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
+    }
+    if (idx != NULL) {
+        NPH_FREE_ARRAY(a, u32, idx, k);
+    }
+    return r;
+}
+
 static NphResult create_content(Ctx *ctx)
 {
     NphAllocator *a = nph_allocator_system();
@@ -553,6 +812,35 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         }
         const f64 height = half / (f64)nph_f32_tan(0.45F) + 2.0; // fov 0.9 rad
         view->camera = nph_render_camera_look_at(nph_dvec3(0.0, height, 0.001), nph_dvec3_zero(),
+                                                 nph_vec3_unit_y(), 0.9F, 0.1F);
+        return NPH_RESULT_OK;
+    }
+    if (s->kind == SCENE_LOD) {
+        if (ctx->terrain.value == 0U) {
+            NPH_TRY(make_terrain(ctx));
+            NPH_TRY(make_rock(ctx));
+        }
+        NPH_TRY(
+            add_instance(ctx, ctx->terrain, 3U, trs(0.0, 0.0, 0.0, nph_vec3_splat(1.0F), 0.0F)));
+        // Rocks on a jittered 10 m grid over the middle 320 m, 0.8 to 3.2 m
+        // across, a third sunk into the ground.
+        for (u32 i = 0; i < s->count; ++i) {
+            const u32 h = hash_u32(i * 7U + 0x51EDU);
+            const u32 column = i % side;
+            const u32 row = i / side;
+            const f64 x = -160.0 + 10.0 * ((f64)column + (f64)(h & 255U) / 255.0);
+            const f64 z = -160.0 + 10.0 * ((f64)row + (f64)((h >> 8U) & 255U) / 255.0);
+            const f32 scale = 0.8F + 2.4F * (f32)((h >> 16U) & 255U) / 255.0F;
+            const f64 y = (f64)terrain_height((f32)x, (f32)z) + 0.15 * (f64)scale;
+            NPH_TRY(add_instance(ctx, ctx->rock, h >> 24U,
+                                 trs(x, y, z, nph_vec3_splat(scale), (f32)(h & 1023U) * 0.01F)));
+        }
+        // Head height at one corner, looking across the diagonal.
+        const f64 eye_x = -165.0;
+        const f64 eye_z = -165.0;
+        const f64 eye_y = (f64)terrain_height((f32)eye_x, (f32)eye_z) + 1.7;
+        view->camera = nph_render_camera_look_at(nph_dvec3(eye_x, eye_y, eye_z),
+                                                 nph_dvec3(0.0, eye_y - 4.0, 0.0),
                                                  nph_vec3_unit_y(), 0.9F, 0.1F);
         return NPH_RESULT_OK;
     }
@@ -816,6 +1104,9 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.bloom = (s->post & (u32)POST_NO_BLOOM) != 0U ? 0.0F : RUNTIME_BLOOM;
     view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
     view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
+    if ((s->post & (u32)POST_LOD_LEVEL0) != 0U) {
+        view.lod_error = 0.0F;
+    }
     view.exposure = (s->post & (u32)POST_AUTO_EXPOSURE) != 0U ? NPH_RENDER_EXPOSURE_AUTO
                                                               : NPH_RENDER_EXPOSURE_MANUAL;
     if (ctx->no_sw_raster) {
@@ -929,6 +1220,11 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                st->shadow_rays ? "; shadow rays" : "", st->motion_blur ? "; motion blur" : "",
                st->dof ? "; depth of field" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
+        if (st->vis_lod_nodes != 0U) {
+            printf("    levels of detail: %u hierarchy nodes visited in %u steps a phase, %u "
+                   "clusters a finer level stood in for\n",
+                   st->vis_lod_nodes, st->vis_lod_steps, st->vis_lod_clusters_culled);
+        }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
                    "caster draws %u%s\n",
@@ -1418,6 +1714,9 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.max_instances = MAX_INSTANCES;
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
+    // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
+    // holds 262,144).
+    rd.max_deferred = 1U << 20U;
     if (sw_pixels >= 0.0) {
         // Zero would pick the default: none goes through the view's flag.
         rd.sw_raster_pixels = (f32)sw_pixels;
@@ -1455,6 +1754,8 @@ static void teardown(Ctx *ctx)
         nph_render_mesh_destroy(ctx->renderer, ctx->plane);
         nph_render_mesh_destroy(ctx->renderer, ctx->sphere);
         nph_render_mesh_destroy(ctx->renderer, ctx->cube);
+        nph_render_mesh_destroy(ctx->renderer, ctx->terrain);
+        nph_render_mesh_destroy(ctx->renderer, ctx->rock);
     }
     nph_renderer_destroy(ctx->renderer);
     nph_render_gpu_profiler_destroy(ctx->profiler);

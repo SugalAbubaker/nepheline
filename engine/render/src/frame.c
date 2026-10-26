@@ -142,6 +142,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->tonemapper = NPH_RENDER_TONEMAPPER_ACES;
     view->background = NPH_RENDER_BACKGROUND_ENV;
     view->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
+    view->lod_error = 1.0F;
 }
 
 // ---------------------------------------------------------------------------
@@ -751,12 +752,12 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         (u32)view->anti_aliasing > (u32)NPH_RENDER_AA_TEMPORAL ||
         (u32)view->exposure > (u32)NPH_RENDER_EXPOSURE_AUTO ||
         !(view->bloom >= 0.0F && view->bloom <= 1.0F) || !(view->exposure_speed >= 0.0F) ||
-        !(view->frame_seconds >= 0.0F) || !(view->shutter >= 0.0F) ||
-        !nph_f32_is_finite(view->shutter) || !(view->aperture >= 0.0F) ||
-        !nph_f32_is_finite(view->aperture) || !(view->sensor_height >= 0.0F) ||
-        !nph_f32_is_finite(view->sensor_height) || !nph_f32_is_finite(view->lens_offset.x) ||
-        !nph_f32_is_finite(view->lens_offset.y) || !(view->ao_radius >= 0.0F) ||
-        !nph_f32_is_finite(view->ao_radius)) {
+        !(view->frame_seconds >= 0.0F) || !(view->shutter >= 0.0F) || !(view->lod_error >= 0.0F) ||
+        !nph_f32_is_finite(view->lod_error) || !nph_f32_is_finite(view->shutter) ||
+        !(view->aperture >= 0.0F) || !nph_f32_is_finite(view->aperture) ||
+        !(view->sensor_height >= 0.0F) || !nph_f32_is_finite(view->sensor_height) ||
+        !nph_f32_is_finite(view->lens_offset.x) || !nph_f32_is_finite(view->lens_offset.y) ||
+        !(view->ao_radius >= 0.0F) || !nph_f32_is_finite(view->ao_radius)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // A lens (an aperture, or a point off its centre) focuses beyond its

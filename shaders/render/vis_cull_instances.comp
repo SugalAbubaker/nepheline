@@ -21,6 +21,11 @@
 // against depth this frame drew, which only holds surfaces really in front,
 // so nothing visible is lost.
 //
+// An instance whose mesh has levels of detail hands its hierarchy's root to
+// the first of the hierarchy's steps instead (vis_cull_nodes.comp), which
+// find the clusters of the level each part of it needs; a view without them
+// (NPH_VIS_VIEW_LOD unset) has it hand on level 0's meshlets as any mesh's.
+//
 // The meshlets go out as (instance, meshlet) work items, one per meshlet,
 // so the meshlet cull runs an invocation per meshlet with every lane busy,
 // whatever the meshes' sizes. The subgroup writes its instances' items
@@ -58,6 +63,7 @@ void main()
     bool culled_frustum = false;
     bool culled_occlusion = false;
     uint meshlets = 0u; // handed to the meshlet cull
+    bool root = false;  // hands its hierarchy's root to the hierarchy's steps
     if (slot != 0xFFFFFFFFu) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
@@ -91,7 +97,11 @@ void main()
                                    vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
             }
             if (!culled_frustum && !defer && !culled_occlusion) {
-                meshlets = mesh.meshlet_count;
+                if (mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u) {
+                    root = true;
+                } else {
+                    meshlets = mesh.meshlet_count;
+                }
             }
         }
     }
@@ -108,6 +118,23 @@ void main()
                 atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_DEFERRED));
             }
         }
+    }
+
+    // The hierarchy's root, into its first queue (each phase starts from an
+    // empty one), and the first step's workgroups raised to take it.
+    uint q;
+    VIS_RESERVE(counters.c.lod_nodes[0], root ? 1u : 0u, q);
+    if (root) {
+        if (q < view.v.max_lod_nodes) {
+            VisUvec2Ref(view.v.lod_queue[0]).v[q] = uvec2(slot, 0u);
+        } else {
+            atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_LOD_NODES));
+        }
+    }
+    const uint roots = subgroupMax(root ? min(q + 1u, view.v.max_lod_nodes) : 0u);
+    if (roots != 0u && subgroupElect()) {
+        atomicMax(VisArgsRef(view.v.args).a.lod_node_args[0][0],
+                  (roots + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
     }
 
     // The subgroup's meshlets as work items (see the file comment).

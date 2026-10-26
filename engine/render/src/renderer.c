@@ -302,6 +302,11 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_material_slots =
         d->max_material_slots != 0U ? d->max_material_slots : 4U * d->max_instances;
     d->meshlet_index_pool = d->meshlet_index_pool != 0U ? d->meshlet_index_pool : 1U << 24U;
+    // A step's workgroups are counted in x alone (vis_cull_nodes.comp), which
+    // every device takes 65,535 of.
+    d->max_lod_nodes =
+        nph_min_u32(round_up_64(d->max_lod_nodes != 0U ? d->max_lod_nodes : 1U << 18U),
+                    (65535U * (u32)NPH_VIS_LOD_ITEMS) & ~63U);
     d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
@@ -749,6 +754,155 @@ static NphResult validate_meshlets(const NphRenderMeshDesc *d)
     return NPH_RESULT_OK;
 }
 
+// The levels of detail given with a mesh are checked so far as the GPU's
+// reads stay inside their streams and its walk down the hierarchy ends: every
+// index; each node reached from the root once (a tree), at most
+// RENDER_LOD_MAX_DEPTH levels deep. And so far as the walk cannot lose a
+// cluster it should draw: a group's numbers in its node are its record's
+// (the hierarchy's steps and the meshlet cull must decide alike from them,
+// vis_lod_group_too_coarse), its maker error the smallest of its clusters'
+// makers', and a node's largest error and smallest maker error bound its
+// children's. That the levels cut cleanly (render/cluster_lod.h) and the
+// spheres nest is the caller's contract. `out_depth`: the node levels (0
+// without the levels).
+// The smallest error of the groups that made a group's clusters (0 for
+// level 0's), group indices already checked.
+static f32 group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodGroup *rg)
+{
+    f32 smallest = rg->cluster_count != 0U ? NPH_F32_MAX : 0.0F;
+    for (u32 i = 0; i < rg->cluster_count; ++i) {
+        const u32 maker = d->cluster_lods[d->lod_group_clusters[rg->cluster_offset + i]].group;
+        smallest =
+            nph_f32_min(smallest, maker == NPH_RENDER_LOD_NONE ? 0.0F : d->lod_groups[maker].error);
+    }
+    return smallest;
+}
+
+// Whether a node's children are bounded by its entry in its parent: no
+// larger error, no smaller maker error.
+static bool node_bounds(const NphRenderLodNode *node, f32 error, f32 maker_error)
+{
+    for (u32 i = 0; i < NPH_RENDER_LOD_NODE_CHILDREN; ++i) {
+        if (node->child[i] != NPH_RENDER_LOD_NONE &&
+            (node->error[i] > error || node->maker_error[i] < maker_error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static NphResult validate_lods(const NphRenderMeshDesc *d, NphAllocator *scratch, u32 *out_depth)
+{
+    *out_depth = 0U;
+    if (d->lod_nodes == NULL) {
+        return d->cluster_lods == NULL && d->lod_groups == NULL && d->lod_group_clusters == NULL &&
+                       d->lod_node_count == 0U && d->lod_group_count == 0U &&
+                       d->lod_group_cluster_count == 0U && d->lod_level0_meshlets == 0U
+                   ? NPH_RESULT_OK
+                   : NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (d->meshlets == NULL || d->cluster_lods == NULL || d->lod_groups == NULL ||
+        d->lod_group_clusters == NULL || d->lod_node_count == 0U || d->lod_group_count == 0U ||
+        d->lod_level0_meshlets == 0U || d->lod_level0_meshlets > d->meshlet_count) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    for (u32 i = 0; i < d->meshlet_count; ++i) {
+        const NphRenderClusterLod *c = &d->cluster_lods[i];
+        const bool level0 = i < d->lod_level0_meshlets;
+        if ((level0 ? c->group != NPH_RENDER_LOD_NONE : c->group >= d->lod_group_count) ||
+            (c->parent != NPH_RENDER_LOD_NONE && c->parent >= d->lod_group_count)) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    for (u32 i = 0; i < d->lod_group_cluster_count; ++i) {
+        if (d->lod_group_clusters[i] >= d->meshlet_count) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    for (u32 g = 0; g < d->lod_group_count; ++g) {
+        const NphRenderLodGroup *rg = &d->lod_groups[g];
+        if (rg->cluster_offset > d->lod_group_cluster_count ||
+            rg->cluster_count > d->lod_group_cluster_count - rg->cluster_offset ||
+            !nph_vec3_is_finite(rg->center) || !(rg->radius >= 0.0F) ||
+            !nph_f32_is_finite(rg->radius) || !(rg->error >= 0.0F) ||
+            !nph_f32_is_finite(rg->error)) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    // The tree, breadth first from the root: each step of the walk takes one
+    // level of it.
+    const u32 n = d->lod_node_count;
+    u32 *queue = NPH_ALLOC_ARRAY(scratch, u32, n);
+    u8 *seen = NPH_ALLOC_ARRAY_ZEROED(scratch, u8, n);
+    NphResult res = queue != NULL && seen != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    u32 head = 0U;
+    u32 tail = 0U;
+    u32 depth = 0U;
+    if (res == NPH_RESULT_OK) {
+        queue[tail++] = 0U;
+        seen[0] = 1U;
+    }
+    while (res == NPH_RESULT_OK && head < tail) {
+        // One level: the nodes queued so far.
+        const u32 level_end = tail;
+        depth += 1U;
+        if (depth > RENDER_LOD_MAX_DEPTH) {
+            res = NPH_RESULT_INVALID_ARGUMENT;
+            break;
+        }
+        for (; head < level_end && res == NPH_RESULT_OK; ++head) {
+            const NphRenderLodNode *node = &d->lod_nodes[queue[head]];
+            for (u32 i = 0; i < NPH_RENDER_LOD_NODE_CHILDREN; ++i) {
+                const u32 child = node->child[i];
+                if (child == NPH_RENDER_LOD_NONE) {
+                    continue;
+                }
+                const NphVec4 s = node->sphere[i];
+                const f32 maker_error = node->maker_error[i];
+                if (!nph_vec4_is_finite(s) || !(s.w >= 0.0F) || !(node->error[i] >= 0.0F) ||
+                    !nph_f32_is_finite(node->error[i]) || !(maker_error >= 0.0F) ||
+                    !nph_f32_is_finite(maker_error)) {
+                    res = NPH_RESULT_INVALID_ARGUMENT;
+                    break;
+                }
+                if ((child & NPH_RENDER_LOD_LEAF) != 0U) {
+                    const u32 g = child & ~NPH_RENDER_LOD_LEAF;
+                    const NphRenderLodGroup *rg = g < d->lod_group_count ? &d->lod_groups[g] : NULL;
+                    if (rg == NULL || nph_f32_to_bits(s.x) != nph_f32_to_bits(rg->center.x) ||
+                        nph_f32_to_bits(s.y) != nph_f32_to_bits(rg->center.y) ||
+                        nph_f32_to_bits(s.z) != nph_f32_to_bits(rg->center.z) ||
+                        nph_f32_to_bits(s.w) != nph_f32_to_bits(rg->radius) ||
+                        nph_f32_to_bits(node->error[i]) != nph_f32_to_bits(rg->error) ||
+                        maker_error > group_maker_error(d, rg)) {
+                        res = NPH_RESULT_INVALID_ARGUMENT;
+                        break;
+                    }
+                } else if (child >= n || seen[child] != 0U ||
+                           !node_bounds(&d->lod_nodes[child], node->error[i], maker_error)) {
+                    res = NPH_RESULT_INVALID_ARGUMENT;
+                    break;
+                } else {
+                    seen[child] = 1U;
+                    queue[tail++] = child;
+                }
+            }
+        }
+    }
+    if (res == NPH_RESULT_OK && tail != n) {
+        res = NPH_RESULT_INVALID_ARGUMENT; // nodes the walk never reaches
+    }
+    if (queue != NULL) {
+        NPH_FREE_ARRAY(scratch, u32, queue, n);
+    }
+    if (seen != NULL) {
+        NPH_FREE_ARRAY(scratch, u8, seen, n);
+    }
+    if (res == NPH_RESULT_OK) {
+        *out_depth = depth;
+    }
+    return res;
+}
+
 static NphResult validate_mesh(const NphRenderMeshDesc *d)
 {
     if (d->vertex_count == 0U || d->index_count == 0U || d->index_count % 3U != 0U ||
@@ -778,6 +932,8 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
     *out = NPH_RENDER_MESH_NULL;
     NPH_TRY(validate_mesh(desc));
+    u32 lod_depth = 0U;
+    NPH_TRY(validate_lods(desc, r->alloc, &lod_depth));
     u32 value = 0U;
     u32 slot = 0U;
     NPH_TRY(alloc_slot(&r->mesh_pool, &value, &slot));
@@ -813,7 +969,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         res = render_rt_mesh_create(r, slot, desc);
     }
     if (res == NPH_RESULT_OK) {
-        res = render_vis_mesh_create(r, slot, desc);
+        res = render_vis_mesh_create(r, slot, desc, lod_depth);
     }
     if (res != NPH_RESULT_OK) {
         nph_gpu_buffer_destroy(r->dev, m->positions);
