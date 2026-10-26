@@ -30,27 +30,115 @@ static NphResult typed_blob(const NphAsset *asset, u32 tag, u32 index, u64 elem_
     return NPH_RESULT_OK;
 }
 
-static NphResult check_type(const NphAsset *asset, u32 type, u32 version)
+// The asset's type, and its version between `oldest` and `version`.
+static NphResult check_versions(const NphAsset *asset, u32 type, u32 oldest, u32 version)
 {
     NPH_ASSERT(asset != NULL);
     if (asset->header.type != type) {
         return NPH_RESULT_TYPE_MISMATCH;
     }
-    if (asset->header.type_version != version) {
+    if (asset->header.type_version < oldest || asset->header.type_version > version) {
         return NPH_RESULT_VERSION_MISMATCH;
     }
     return NPH_RESULT_OK;
+}
+
+static NphResult check_type(const NphAsset *asset, u32 type, u32 version)
+{
+    return check_versions(asset, type, version, version);
 }
 
 // ---------------------------------------------------------------------------
 // Mesh
 // ---------------------------------------------------------------------------
 
+// A mesh's levels of detail (version 2), checked so far as every index the
+// records hold is in range: all NULL in `out` without them.
+static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
+                           const NphSubmesh *submeshes, NphMeshView *out)
+{
+    const NphAssetBlob *b = nph_asset_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U);
+    if (b == NULL) {
+        // No levels: then none of their blobs either.
+        return nph_asset_blob(asset, NPH_MESH_TAG_LOD_CLUSTERS, 0U) == NULL &&
+                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_GROUPS, 0U) == NULL &&
+                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_MEMBERS, 0U) == NULL &&
+                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U) == NULL
+                   ? NPH_RESULT_OK
+                   : NPH_RESULT_CORRUPT;
+    }
+    if (asset->header.type_version < 2U) {
+        return NPH_RESULT_CORRUPT;
+    }
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U, sizeof(NphMeshLodHeader), 1U, &p));
+    const NphMeshLodHeader *lh = (const NphMeshLodHeader *)p;
+    if (lh->reserved[0] != 0U || lh->reserved[1] != 0U || lh->reserved[2] != 0U ||
+        lh->levels == 0U || lh->level0_meshlets == 0U || lh->level0_meshlets > h->meshlet_count ||
+        lh->group_count == 0U || lh->node_count == 0U) {
+        return NPH_RESULT_CORRUPT;
+    }
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_CLUSTERS, 0U, sizeof(NphMeshClusterLod),
+                       h->meshlet_count, &p));
+    const NphMeshClusterLod *clusters = (const NphMeshClusterLod *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_GROUPS, 0U, sizeof(NphMeshLodGroup), lh->group_count,
+                       &p));
+    const NphMeshLodGroup *groups = (const NphMeshLodGroup *)p;
+    NPH_TRY(
+        typed_blob(asset, NPH_MESH_TAG_LOD_MEMBERS, 0U, sizeof(u32), lh->group_cluster_count, &p));
+    const u32 *members = (const u32 *)p;
+    NPH_TRY(
+        typed_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U, sizeof(NphMeshLodNode), lh->node_count, &p));
+    const NphMeshLodNode *nodes = (const NphMeshLodNode *)p;
+    // Level 0 holds the submeshes' meshlets.
+    for (u32 i = 0; i < h->submesh_count; ++i) {
+        if (submeshes[i].meshlet_count > lh->level0_meshlets ||
+            submeshes[i].meshlet_offset > lh->level0_meshlets - submeshes[i].meshlet_count) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    for (u32 i = 0; i < h->meshlet_count; ++i) {
+        const NphMeshClusterLod *c = &clusters[i];
+        const bool level0 = i < lh->level0_meshlets;
+        if ((level0 ? c->group != NPH_MESH_LOD_NONE : c->group >= lh->group_count) ||
+            (c->parent != NPH_MESH_LOD_NONE && c->parent >= lh->group_count)) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    for (u32 i = 0; i < lh->group_cluster_count; ++i) {
+        if (members[i] >= h->meshlet_count) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    for (u32 g = 0; g < lh->group_count; ++g) {
+        if (groups[g].cluster_offset > lh->group_cluster_count ||
+            groups[g].cluster_count > lh->group_cluster_count - groups[g].cluster_offset) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    for (u32 n = 0; n < lh->node_count; ++n) {
+        for (u32 i = 0; i < NPH_MESH_LOD_CHILDREN; ++i) {
+            const u32 child = nodes[n].child[i];
+            if (child != NPH_MESH_LOD_NONE &&
+                ((child & NPH_MESH_LOD_LEAF) != 0U ? (child & ~NPH_MESH_LOD_LEAF) >= lh->group_count
+                                                   : child >= lh->node_count)) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+    }
+    out->lod = lh;
+    out->lod_clusters = clusters;
+    out->lod_groups = groups;
+    out->lod_members = members;
+    out->lod_nodes = nodes;
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
 {
     NPH_ASSERT(out != NULL);
     memset(out, 0, sizeof *out);
-    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION));
+    NPH_TRY(check_versions(asset, NPH_ASSET_TYPE_MESH, 1U, NPH_MESH_TYPE_VERSION));
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_HEADER, 0U, sizeof(NphMeshHeader), 1U, &p));
     const NphMeshHeader *h = (const NphMeshHeader *)p;
@@ -121,6 +209,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
             }
         }
     }
+    NPH_TRY(mesh_lods(asset, h, submeshes, out));
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;

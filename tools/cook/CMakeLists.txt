@@ -38,6 +38,7 @@ set(cook_sources
     src/gltf.c
     src/image.c
     src/mesh.c
+    src/mesh_lod.c
     src/mesh_meshlet.c
     src/mesh_optimize.c
     src/mesh_tangent.c

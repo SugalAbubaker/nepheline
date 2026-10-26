@@ -365,6 +365,7 @@ static u64 settings_hash(const Cooker *c, u32 type)
         t.usage = COOK_TEXTURE_COLOR; // the usage is folded in per texture
         h = nph_hash_combine(h, nph_hash64(&t, sizeof t, 1U));
     } else if (type == NPH_ASSET_TYPE_MESH) {
+        h = nph_hash_combine(h, COOK_MESH_VERSION);
         h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         // The cooker's defaults; a source's own settings are in its content
@@ -1275,9 +1276,10 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         if (r == NPH_RESULT_OK) {
             NPH_LOG_INFO(
                 &NPH_LOG_COOK,
-                "mesh %s: %u -> %u vertices, %u -> %u triangles, %u meshlets, ACMR %.2f -> %.2f",
+                "mesh %s: %u -> %u vertices, %u -> %u triangles, %u meshlets, %u levels, ACMR "
+                "%.2f -> %.2f",
                 gm->mesh.name, st.source_vertices, st.vertices, st.source_triangles, st.triangles,
-                st.meshlets, (f64)st.acmr_before, (f64)st.acmr_after);
+                st.meshlets, st.lod_levels, (f64)st.acmr_before, (f64)st.acmr_after);
             char file[COOK_MESH_NAME_MAX + 32U];
             snprintf(file, sizeof file, "mesh_%u_%s", m, gm->mesh.name);
             char relative[COOKER_PATH_MAX];

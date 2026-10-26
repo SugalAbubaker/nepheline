@@ -17,6 +17,19 @@
 //     MLVX  u32[meshlet vertex]       vertex indices referenced by meshlets
 //     MLTR  u8[3 * meshlet triangle]  meshlet-local triangle corners
 //
+// and, from version 2, a mesh's levels of detail where it has them (CLAUDE.md
+// §8.6 stage 9; render/cluster_lod.h; docs/render.md "Levels of detail"):
+//
+//     LODS  NphMeshLodHeader          the levels' counts
+//     LODC  NphMeshClusterLod[meshlet] each cluster's maker and consumer group
+//     LODG  NphMeshLodGroup[group]    the groups
+//     LODM  u32[group cluster]        each group's clusters in turn
+//     LODN  NphMeshLodNode[node]      the hierarchy, node 0 the root
+//
+// With them the meshlet blobs hold every level's clusters, level 0's first
+// (`level0_meshlets` of them, the ones the submeshes' meshlet ranges name);
+// the records are the renderer's (render/cluster_lod.h), byte for byte.
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -41,7 +54,9 @@
 extern "C" {
 #endif
 
-#define NPH_MESH_TYPE_VERSION 1U
+// 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). Version 1 meshes,
+// which have none, still read.
+#define NPH_MESH_TYPE_VERSION 2U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -52,6 +67,11 @@ extern "C" {
 #define NPH_MESH_TAG_MESHLET_BOUNDS   NPH_FOURCC('M', 'L', 'B', 'D')
 #define NPH_MESH_TAG_MESHLET_VERTICES NPH_FOURCC('M', 'L', 'V', 'X')
 #define NPH_MESH_TAG_MESHLET_TRIS     NPH_FOURCC('M', 'L', 'T', 'R')
+#define NPH_MESH_TAG_LOD_HEADER       NPH_FOURCC('L', 'O', 'D', 'S')
+#define NPH_MESH_TAG_LOD_CLUSTERS     NPH_FOURCC('L', 'O', 'D', 'C')
+#define NPH_MESH_TAG_LOD_GROUPS       NPH_FOURCC('L', 'O', 'D', 'G')
+#define NPH_MESH_TAG_LOD_MEMBERS      NPH_FOURCC('L', 'O', 'D', 'M')
+#define NPH_MESH_TAG_LOD_NODES        NPH_FOURCC('L', 'O', 'D', 'N')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -129,6 +149,49 @@ typedef struct NphMeshletBounds {
 NPH_STATIC_ASSERT(sizeof(NphMeshlet) == 16U, "a meshlet is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshletBounds) == 32U, "meshlet bounds are 32 bytes");
 
+// Levels of detail: no group (a level-0 cluster's maker), the children of a
+// hierarchy node, and a child that is a group rather than a node.
+#define NPH_MESH_LOD_NONE     0xFFFFFFFFU
+#define NPH_MESH_LOD_CHILDREN 8U
+#define NPH_MESH_LOD_LEAF     0x80000000U
+
+typedef struct NphMeshLodHeader {
+    u32 levels;              // levels of clusters (level 0 and the coarser ones)
+    u32 level0_meshlets;     // clusters [0, level0_meshlets) are level 0
+    u32 group_count;         // LODG
+    u32 group_cluster_count; // LODM
+    u32 node_count;          // LODN
+    u32 reserved[3];         // zero
+} NphMeshLodHeader;
+
+typedef struct NphMeshClusterLod {
+    u32 group;  // the group that made it; NPH_MESH_LOD_NONE at level 0
+    u32 parent; // the group that consumes it
+    u32 level;
+    u32 reserved;
+} NphMeshClusterLod;
+
+typedef struct NphMeshLodGroup {
+    NphVec3 center; // its error's sphere, mesh space
+    f32 radius;
+    f32 error;          // mesh units; the root group's the largest float
+    u32 level;          // its clusters' level
+    u32 cluster_offset; // into LODM
+    u32 cluster_count;
+} NphMeshLodGroup;
+
+typedef struct NphMeshLodNode {
+    NphVec4 sphere[NPH_MESH_LOD_CHILDREN];  // xyz centre, w radius, mesh space
+    f32 error[NPH_MESH_LOD_CHILDREN];       // the largest group error below
+    f32 maker_error[NPH_MESH_LOD_CHILDREN]; // the smallest maker error below
+    u32 child[NPH_MESH_LOD_CHILDREN];       // node, group | LEAF, or NONE
+} NphMeshLodNode;
+
+NPH_STATIC_ASSERT(sizeof(NphMeshLodHeader) == 32U, "the levels' header is 32 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == 16U, "a cluster's level record is 16 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == 32U, "a group is 32 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == 224U, "a node is 224 bytes");
+
 typedef struct NphMeshView {
     const NphMeshHeader *header;
     const NphMeshPosition *positions;
@@ -139,12 +202,21 @@ typedef struct NphMeshView {
     const NphMeshletBounds *meshlet_bounds;
     const u32 *meshlet_vertices;
     const u8 *meshlet_triangles;
+    // The levels of detail, all NULL without them.
+    const NphMeshLodHeader *lod;
+    const NphMeshClusterLod *lod_clusters; // [meshlet_count]
+    const NphMeshLodGroup *lod_groups;
+    const u32 *lod_members;
+    const NphMeshLodNode *lod_nodes;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
 // NPH_RESULT_TYPE_MISMATCH for another asset type, NPH_RESULT_VERSION_MISMATCH
 // for a newer schema, NPH_RESULT_CORRUPT when a blob is missing, too
-// small, or a range points outside its array.
+// small, or a range points outside its array: the levels' too (every
+// group, cluster, and child index in range; level 0 covering the
+// submeshes' meshlet ranges). That the hierarchy is a tree and its bounds
+// hold is the renderer's to check (nph_render_mesh_create).
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 
 // The position of vertex `p` in mesh space.

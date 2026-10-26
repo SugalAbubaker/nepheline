@@ -146,6 +146,30 @@ def mesh_blobs():
     ]
 
 
+def mesh_lod_blobs():
+    """The triangle with levels of detail (mesh.h version 2): its one meshlet
+    as level 0 under a root group, the smallest hierarchy there is."""
+    none = 0xFFFFFFFF
+    flt_max = 3.4028234663852886e38
+    lods = struct.pack("<8I", 1, 1, 1, 1, 1, 0, 0, 0)
+    clusters = struct.pack("<4I", none, 0, 0, 0)
+    groups = struct.pack("<5f3I", 0.5, 0.5, 0.0, 0.71, flt_max, 0, 0, 1)
+    members = struct.pack("<I", 0)
+    spheres = struct.pack("<4f", 0.5, 0.5, 0.0, 0.71) + bytes(16 * 7)
+    errors = struct.pack("<8f", flt_max, 0, 0, 0, 0, 0, 0, 0)
+    maker_errors = struct.pack("<8f", *([0.0] * 8))
+    children = struct.pack("<8I", 0x80000000, *([none] * 7))
+    node = spheres + errors + maker_errors + children
+    assert len(node) == 224
+    return mesh_blobs() + [
+        ("LODS", 0, 0, 16, lods, lods),
+        ("LODC", 0, 0, 16, clusters, clusters),
+        ("LODG", 0, 0, 16, groups, groups),
+        ("LODM", 0, 0, 16, members, members),
+        ("LODN", 0, 0, 16, node, node),
+    ]
+
+
 def texture_blobs():
     """A 4x2 RGBA8 texture with two mips, the base mip LZ-compressed."""
     header = struct.pack("<16I", 4, 2, 2, 1, 3, 0, 0, *([0] * 9))
@@ -297,6 +321,7 @@ def main():
           nph_file(fourcc("BLOB"), 1, [("DATA", 0, 1, 16, text, lz_literals(text)),
                                         ("DATA", 1, 0, 64, b"stored", b"stored")]))
     write(os.path.join(CORPUS, "nph", "mesh"), nph_file(fourcc("MESH"), 1, mesh_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_lod"), nph_file(fourcc("MESH"), 2, mesh_lod_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))

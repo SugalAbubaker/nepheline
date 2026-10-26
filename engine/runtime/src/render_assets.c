@@ -17,6 +17,13 @@ NPH_STATIC_ASSERT(sizeof(NphMeshPosition) == sizeof(NphRenderVertexPosition),
                   "cooked positions are render positions");
 NPH_STATIC_ASSERT(sizeof(NphMeshAttrib) == sizeof(NphRenderVertexAttrib),
                   "cooked attributes are render attributes");
+NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
+                      sizeof(NphMeshletBounds) == sizeof(NphRenderMeshletBounds) &&
+                      sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod) &&
+                      sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup) &&
+                      sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode),
+                  "cooked meshlets and levels are the renderer's records (the cooker asserts each "
+                  "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
                   "the wrap modes share their numbering");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_ALPHA_BLEND == (u32)NPH_RENDER_ALPHA_BLEND,
@@ -269,6 +276,40 @@ static NphResult create_texture(RenderAssetCache *c, RenderAsset *a, const NphAs
     return r;
 }
 
+// The cooked meshlets, and the levels of detail where the mesh has them
+// (asset/mesh.h version 2), into `d`: the same records as the renderer's,
+// handed over as they are through untyped pointers.
+static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
+{
+    const NphMeshHeader *h = mv->header;
+    if (h->meshlet_count == 0U) {
+        return;
+    }
+    const void *meshlets = mv->meshlets;
+    const void *bounds = mv->meshlet_bounds;
+    d->meshlets = meshlets;
+    d->meshlet_bounds = bounds;
+    d->meshlet_count = h->meshlet_count;
+    d->meshlet_vertices = mv->meshlet_vertices;
+    d->meshlet_vertex_count = h->meshlet_vertex_count;
+    d->meshlet_triangles = mv->meshlet_triangles;
+    d->meshlet_triangle_count = h->meshlet_triangle_count;
+    if (mv->lod == NULL) {
+        return;
+    }
+    const void *clusters = mv->lod_clusters;
+    const void *groups = mv->lod_groups;
+    const void *nodes = mv->lod_nodes;
+    d->cluster_lods = clusters;
+    d->lod_groups = groups;
+    d->lod_group_count = mv->lod->group_count;
+    d->lod_group_clusters = mv->lod_members;
+    d->lod_group_cluster_count = mv->lod->group_cluster_count;
+    d->lod_nodes = nodes;
+    d->lod_node_count = mv->lod->node_count;
+    d->lod_level0_meshlets = mv->lod->level0_meshlets;
+}
+
 static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset *asset)
 {
     NphMeshView mv;
@@ -299,6 +340,7 @@ static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset
     d.position_offset = h->position_offset;
     d.position_scale = h->position_scale;
     d.bounds = h->bounds;
+    cooked_clusters(&mv, &d);
     d.name = "cooked mesh";
     return nph_render_mesh_create(c->renderer, &d, &a->mesh);
 }
