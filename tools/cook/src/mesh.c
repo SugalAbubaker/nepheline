@@ -330,10 +330,14 @@ static NphAABB bounds_of(const NphVec3 *positions, const u32 *indices, u32 count
     return b;
 }
 
-NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets, NphLzLevel lz,
-                          NphAssetWriter *writer)
+NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
+                          const CookMeshSettings *settings, NphAssetWriter *writer, u32 *levels)
 {
-    NPH_ASSERT(mesh != NULL && meshlets != NULL && writer != NULL);
+    NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && writer != NULL);
+    const NphLzLevel lz = settings->lz;
+    if (levels != NULL) {
+        *levels = 1U;
+    }
     NPH_TRY(cook_mesh_validate(mesh));
     if (meshlets->bounds.len != meshlets->meshlets.len || meshlets->triangles.len % 3U != 0U) {
         return NPH_RESULT_INVALID_ARGUMENT;
@@ -446,6 +450,40 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets, Np
             r = NPH_RESULT_INVALID_ARGUMENT; // meshlets out of submesh order
         }
     }
+    // The levels of detail (step 8): every level's clusters replace level
+    // 0's in the meshlet blobs, level 0's first and unchanged.
+    NphRenderClusterLods lods;
+    nph_render_cluster_lods_init(&lods, alloc);
+    bool with_lods = false;
+    if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
+        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, &lods);
+        with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
+    }
+    // The records written: level 0's, or every level's (the same bytes as
+    // the renderer's records, render/cluster_lod.h).
+    const void *out_meshlets = meshlets->meshlets.data;
+    const void *out_bounds = mbounds;
+    const void *out_vertices = meshlets->vertices.data;
+    const void *out_triangles = meshlets->triangles.data;
+    u64 meshlet_bytes = NPH_ARRAY_BYTES(&meshlets->meshlets);
+    u64 vertex_bytes = NPH_ARRAY_BYTES(&meshlets->vertices);
+    u64 triangle_bytes = NPH_ARRAY_BYTES(&meshlets->triangles);
+    if (with_lods) {
+        const NphRenderMeshlets *c = &lods.clusters;
+        h.meshlet_count = c->meshlets.len;
+        h.meshlet_vertex_count = c->vertices.len;
+        h.meshlet_triangle_count = c->triangles.len / 3U;
+        out_meshlets = c->meshlets.data;
+        out_bounds = c->bounds.data;
+        out_vertices = c->vertices.data;
+        out_triangles = c->triangles.data;
+        meshlet_bytes = NPH_ARRAY_BYTES(&c->meshlets);
+        vertex_bytes = NPH_ARRAY_BYTES(&c->vertices);
+        triangle_bytes = NPH_ARRAY_BYTES(&c->triangles);
+        if (levels != NULL) {
+            *levels = lods.levels;
+        }
+    }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h,
                                       NPH_ASSET_CODEC_NONE, 0U);
@@ -467,23 +505,51 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets, Np
                                       (u64)sn * sizeof *subs, NPH_ASSET_CODEC_NONE, 0U);
     }
     if (r == NPH_RESULT_OK) {
-        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLETS, 0U, meshlets->meshlets.data,
-                                      NPH_ARRAY_BYTES(&meshlets->meshlets), NPH_ASSET_CODEC_LZ, 0U);
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLETS, 0U, out_meshlets,
+                                      meshlet_bytes, NPH_ASSET_CODEC_LZ, 0U);
     }
     if (r == NPH_RESULT_OK) {
-        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, mbounds,
-                                      (u64)mn * sizeof *mbounds, NPH_ASSET_CODEC_LZ, 0U);
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, out_bounds,
+                                      (u64)h.meshlet_count * sizeof *mbounds, NPH_ASSET_CODEC_LZ,
+                                      0U);
     }
     if (r == NPH_RESULT_OK) {
-        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_VERTICES, 0U,
-                                      meshlets->vertices.data, NPH_ARRAY_BYTES(&meshlets->vertices),
-                                      NPH_ASSET_CODEC_LZ, 0U);
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_VERTICES, 0U, out_vertices,
+                                      vertex_bytes, NPH_ASSET_CODEC_LZ, 0U);
     }
     if (r == NPH_RESULT_OK) {
-        r = nph_asset_writer_add_blob(
-            writer, NPH_MESH_TAG_MESHLET_TRIS, 0U, meshlets->triangles.data,
-            NPH_ARRAY_BYTES(&meshlets->triangles), NPH_ASSET_CODEC_LZ, 0U);
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_TRIS, 0U, out_triangles,
+                                      triangle_bytes, NPH_ASSET_CODEC_LZ, 0U);
     }
+    if (r == NPH_RESULT_OK && with_lods) {
+        NphMeshLodHeader lh;
+        memset(&lh, 0, sizeof lh);
+        lh.levels = lods.levels;
+        lh.level0_meshlets = lods.level0_clusters;
+        lh.group_count = lods.groups.len;
+        lh.group_cluster_count = lods.group_clusters.len;
+        lh.node_count = lods.nodes.len;
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh,
+                                      NPH_ASSET_CODEC_NONE, 0U);
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_CLUSTERS, 0U, lods.lods.data,
+                                          NPH_ARRAY_BYTES(&lods.lods), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_GROUPS, 0U, lods.groups.data,
+                                          NPH_ARRAY_BYTES(&lods.groups), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(
+                writer, NPH_MESH_TAG_LOD_MEMBERS, 0U, lods.group_clusters.data,
+                NPH_ARRAY_BYTES(&lods.group_clusters), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, lods.nodes.data,
+                                          NPH_ARRAY_BYTES(&lods.nodes), NPH_ASSET_CODEC_LZ, 0U);
+        }
+    }
+    nph_render_cluster_lods_free(&lods);
     if (positions != NULL) {
         NPH_FREE_ARRAY(alloc, NphVec3, positions, nph_max_u32(vn, 1U));
     }
@@ -540,12 +606,14 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
     NphResult r =
         cook_mesh_build_meshlets(mesh, settings.meshlet_vertices, settings.meshlet_triangles,
                                  settings.meshlet_cone_weight, &meshlets);
+    u32 levels = 1U;
     if (r == NPH_RESULT_OK) {
-        r = cook_mesh_write(mesh, &meshlets, settings.lz, writer);
+        r = cook_mesh_write(mesh, &meshlets, &settings, writer, &levels);
     }
     st.vertices = mesh->vertices.len;
     st.triangles = mesh->indices.len / 3U;
     st.meshlets = meshlets.meshlets.len;
+    st.lod_levels = levels;
     cook_meshlets_free(&meshlets);
     if (stats != NULL) {
         *stats = st;

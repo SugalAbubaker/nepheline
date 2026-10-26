@@ -864,12 +864,128 @@ NTEST(mesh, several_submeshes_and_no_optimize)
     NTEST_ASSERT_EQ_UINT(v.submeshes[1].material_slot, 1U);
     NTEST_ASSERT_EQ_UINT(v.submeshes[1].index_count, 3U);
     NTEST_ASSERT_EQ_UINT(v.submeshes[1].meshlet_count, 1U);
+    // The submeshes' meshlets are level 0's (the rest are coarser levels').
+    NTEST_ASSERT_NOT_NULL(v.lod);
     NTEST_ASSERT_EQ_UINT(v.submeshes[0].meshlet_count + v.submeshes[1].meshlet_count,
-                         v.header->meshlet_count);
+                         v.lod->level0_meshlets);
     NTEST_ASSERT_EQ_UINT(v.meshlets[v.submeshes[1].meshlet_offset].submesh, 1U);
     for (u32 i = 0; i < v.header->meshlet_count; ++i) {
         NTEST_ASSERT_LE_UINT(v.meshlets[i].triangle_count, 8U);
     }
     test_asset_free(&ta);
     cook_mesh_free(&m);
+}
+
+// Cooking `m` (a copy is made) with or without levels; the asset's view in
+// `ta` (freed by the caller).
+static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshStats *st)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    for (u32 sm = 0; sm < src->submeshes.len; ++sm) {
+        const CookSubmesh *cs = &src->submeshes.data[sm];
+        NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, src->vertices.data, src->vertices.len,
+                                                  src->indices.data + cs->index_offset,
+                                                  cs->index_count, cs->material_slot),
+                            NPH_RESULT_OK);
+    }
+    m.flags = src->flags;
+    CookMeshSettings s;
+    cook_mesh_settings_default(&s);
+    s.no_lods = lods ? 0 : 1;
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                          nph_guid_from_cstr("lods"), 1U);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, st), NPH_RESULT_OK);
+    test_asset_from_writer(alloc, &w, ta);
+    nph_asset_writer_free(&w);
+    cook_mesh_free(&m);
+}
+
+// A mesh of many meshlets is cooked with its levels (step 8): level 0's
+// clusters are the meshlets cooked without them, byte for byte, the coarser
+// levels follow, the levels' records are the builder's (a tree under a root
+// group), and the same input gives the same bytes. --no-lods writes level 0
+// alone, and a mesh of one meshlet gets no levels.
+NTEST(mesh, the_pipeline_writes_levels_of_detail)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh src;
+    cook_mesh_init(&src, alloc);
+    make_grid(&src, 48U, 7U); // 4,608 triangles
+    // Smooth normals, the height field's own: flat ones would make every
+    // vertex a seam, which the levels keep (and stop at the first).
+    NPH_ARRAY_FOREACH (CookVertex, gv, &src.vertices) {
+        const f32 x = gv->position.x;
+        const f32 z = gv->position.z;
+        const f32 dx = 0.3F * nph_f32_cos(x * 0.3F) * nph_f32_cos(z * 0.2F);
+        const f32 dz = -0.2F * nph_f32_sin(x * 0.3F) * nph_f32_sin(z * 0.2F);
+        gv->normal = nph_vec3_normalize(nph_vec3(-dx, 1.0F, -dz));
+    }
+    src.flags |= (u32)COOK_MESH_HAS_NORMALS;
+    TestAsset with;
+    TestAsset without;
+    TestAsset again;
+    CookMeshStats st;
+    CookMeshStats st0;
+    cook_with(&src, true, &with, &st);
+    cook_with(&src, false, &without, &st0);
+    cook_with(&src, true, &again, &st);
+    NphMeshView v;
+    NphMeshView v0;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&with.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&without.asset, &v0), NPH_RESULT_OK);
+    NTEST_LOG("%u meshlets at level 0; %u clusters in %u levels, %u groups, %u nodes",
+              v0.header->meshlet_count, v.header->meshlet_count, st.lod_levels,
+              v.lod != NULL ? v.lod->group_count : 0U, v.lod != NULL ? v.lod->node_count : 0U);
+    NTEST_ASSERT_NOT_NULL(v.lod);
+    NTEST_EXPECT_TRUE(v0.lod == NULL);
+    NTEST_EXPECT_EQ_UINT(st0.lod_levels, 1U);
+    NTEST_EXPECT_EQ_UINT(st.lod_levels, v.lod->levels);
+    NTEST_ASSERT_GE_UINT(v.lod->levels, 4U);
+    // Level 0 as cooked without levels.
+    const u32 l0 = v.lod->level0_meshlets;
+    NTEST_ASSERT_EQ_UINT(l0, v0.header->meshlet_count);
+    NTEST_ASSERT_GT_UINT(v.header->meshlet_count, l0);
+    NTEST_EXPECT_EQ_MEM(v.meshlets, v0.meshlets, (u64)l0 * sizeof(NphMeshlet));
+    NTEST_EXPECT_EQ_MEM(v.meshlet_bounds, v0.meshlet_bounds, (u64)l0 * sizeof(NphMeshletBounds));
+    NTEST_EXPECT_EQ_MEM(v.meshlet_vertices, v0.meshlet_vertices,
+                        (u64)v0.header->meshlet_vertex_count * sizeof(u32));
+    NTEST_EXPECT_EQ_MEM(v.meshlet_triangles, v0.meshlet_triangles,
+                        (u64)v0.header->meshlet_triangle_count * 3U);
+    NTEST_EXPECT_EQ_MEM(v.submeshes, v0.submeshes, sizeof(NphSubmesh));
+    // The coarser levels: made by groups, consumed by groups, the coarsest
+    // by root groups (error the largest float), which come last.
+    for (u32 c = 0; c < v.header->meshlet_count; ++c) {
+        const NphMeshClusterLod *cl = &v.lod_clusters[c];
+        NTEST_ASSERT_TRUE(c < l0 ? cl->group == NPH_MESH_LOD_NONE : cl->group < v.lod->group_count);
+        NTEST_ASSERT_LT_UINT(cl->parent, v.lod->group_count);
+    }
+    const NphMeshLodGroup *root = &v.lod_groups[v.lod->group_count - 1U];
+    NTEST_EXPECT_TRUE(root->error == NPH_F32_MAX);
+    for (u32 c = 0; c < v.header->meshlet_count; ++c) {
+        const NphMeshClusterLod *cl = &v.lod_clusters[c];
+        NTEST_EXPECT_TRUE((v.lod_groups[cl->parent].error == NPH_F32_MAX) ==
+                          (cl->level == v.lod->levels - 1U));
+    }
+    // Deterministic, bytes and all.
+    NTEST_ASSERT_EQ_UINT(with.size, again.size);
+    NTEST_EXPECT_EQ_MEM(with.image, again.image, with.size);
+    test_asset_free(&with);
+    test_asset_free(&without);
+    test_asset_free(&again);
+    cook_mesh_free(&src);
+
+    // One meshlet: nothing to make levels of.
+    CookMesh cube;
+    cook_mesh_init(&cube, alloc);
+    make_cube(&cube, true);
+    TestAsset one;
+    cook_with(&cube, true, &one, &st);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&one.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.lod == NULL);
+    NTEST_EXPECT_EQ_UINT(st.lod_levels, 1U);
+    test_asset_free(&one);
+    cook_mesh_free(&cube);
 }

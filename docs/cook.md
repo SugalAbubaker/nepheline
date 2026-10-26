@@ -23,11 +23,11 @@ asset database, and the identity scheme.
 
 | Header | Contents |
 |---|---|
-| `cook.h` | the log category, `COOK_VERSION`, memory blocks for the third-party libraries |
+| `cook.h` | the log category, `COOK_VERSION` and `COOK_MESH_VERSION`, memory blocks for the third-party libraries |
 | `image.h` | source images: decoding, sRGB transfer, exact-area mips, normal renormalisation, 4x4 block fetch |
 | `bc.h` | the BC4, BC5, BC6H, and BC7 encoders and decoders |
 | `texture.h` | an image to a texture asset: usage, mip chain, encoding |
-| `mesh.h` | the mesh pipeline: cleaning, normals, welding, tangents, reordering, meshlets, quantisation |
+| `mesh.h` | the mesh pipeline: cleaning, normals, welding, tangents, reordering, meshlets, quantisation, levels of detail |
 | `gltf.h` | glTF 2.0 import into the cooker's intermediate form |
 | `sound.h` | a WAV file to a sound asset: streaming, the codec, per-source settings |
 | `database.h` | the asset database, `cook.db.json` |
@@ -39,7 +39,7 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--threads N] [--quiet]
+         [--no-optimize] [--no-lods] [--threads N] [--quiet]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -110,8 +110,12 @@ buffer and image; for a texture, its image's bytes alone (editing a
 glTF's materials or nodes re-encodes no texture). The settings hash
 covers the cooker's settings for that type, the asset format and type
 versions, and `COOK_VERSION`, which is bumped whenever the cooker's
-output for an unchanged source changes, so a cooker improvement recooks
-everything on the next run. When a source is cooked again, assets it no
+output for an unchanged source changes in a way the hash does not
+otherwise see, so a cooker improvement recooks everything on the next run.
+Meshes add `COOK_MESH_VERSION`, bumped for a change to the mesh pipeline
+alone (the meshlet and level builders): it recooks the meshes and leaves
+the textures, whose encoding is most of a cook (Bistro's meshes recook in
+about a minute; its textures take some 23). When a source is cooked again, assets it no
 longer produces (a deleted mesh) leave the database and their files are
 removed. `--force` cooks everything.
 
@@ -279,6 +283,18 @@ A closed mesh stays closed.
    views"). Every bound, of the mesh, its submeshes, and its meshlets, is
    computed from the *dequantised* positions, which are the ones the GPU
    culls and rasterises.
+8. **Levels of detail** where the mesh has more than one meshlet
+   (`--no-lods` skips them): the renderer's builder (`render/cluster_lod.h`;
+   docs/render.md "Levels of detail") over the dequantised positions and
+   the quantised attributes, so that vertices at one position whose
+   records differ are a seam the levels keep. Every level's clusters are
+   written in place of level 0's (level 0's first and unchanged), with the
+   levels' blobs. A mesh whose levels stop at once (one meshlet, or nothing
+   to simplify) is written without them. Bistro's 1.75 million triangles in
+   551 meshes take about a minute; most of its meshes get 3 to 8 levels,
+   and flat-shaded ones, whose every vertex is a seam corner, stop early.
+   The runtime's loaders hand the cooked meshlets and levels to the
+   renderer as they are.
 
 Every step is deterministic: the same input gives the same bytes.
 

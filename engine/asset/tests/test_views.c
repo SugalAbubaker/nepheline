@@ -231,6 +231,180 @@ NTEST(views, mesh_view_rejects_bad_ranges)
     image_asset_free(&ia);
 }
 
+// The cube with levels of detail: its one meshlet as level 0 under a root
+// group, the smallest hierarchy there is (render/cluster_lod.h). `blobs`
+// says which of the five to write (all: LOD_ALL).
+enum {
+    LOD_HEADER = 1U << 0U,
+    LOD_CLUSTERS = 1U << 1U,
+    LOD_GROUPS = 1U << 2U,
+    LOD_MEMBERS = 1U << 3U,
+    LOD_NODES = 1U << 4U,
+    LOD_ALL = 31U,
+};
+
+static void add_cube_lods(NphAssetWriter *w, u32 blobs)
+{
+    NphMeshLodHeader lh;
+    memset(&lh, 0, sizeof lh);
+    lh.levels = 1U;
+    lh.level0_meshlets = 1U;
+    lh.group_count = 1U;
+    lh.group_cluster_count = 1U;
+    lh.node_count = 1U;
+    const NphMeshClusterLod cl = {NPH_MESH_LOD_NONE, 0U, 0U, 0U};
+    NphMeshLodGroup g;
+    memset(&g, 0, sizeof g);
+    g.radius = nph_f32_sqrt(3.0F);
+    g.error = NPH_F32_MAX;
+    g.cluster_count = 1U;
+    const u32 member = 0U;
+    NphMeshLodNode n;
+    memset(&n, 0, sizeof n);
+    for (u32 i = 0; i < NPH_MESH_LOD_CHILDREN; ++i) {
+        n.child[i] = NPH_MESH_LOD_NONE;
+    }
+    n.child[0] = 0U | NPH_MESH_LOD_LEAF;
+    n.sphere[0] = nph_vec4(0.0F, 0.0F, 0.0F, g.radius);
+    n.error[0] = g.error;
+    if ((blobs & LOD_HEADER) != 0U) {
+        add(w, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh);
+    }
+    if ((blobs & LOD_CLUSTERS) != 0U) {
+        add(w, NPH_MESH_TAG_LOD_CLUSTERS, 0U, &cl, sizeof cl);
+    }
+    if ((blobs & LOD_GROUPS) != 0U) {
+        add(w, NPH_MESH_TAG_LOD_GROUPS, 0U, &g, sizeof g);
+    }
+    if ((blobs & LOD_MEMBERS) != 0U) {
+        add(w, NPH_MESH_TAG_LOD_MEMBERS, 0U, &member, sizeof member);
+    }
+    if ((blobs & LOD_NODES) != 0U) {
+        add(w, NPH_MESH_TAG_LOD_NODES, 0U, &n, sizeof n);
+    }
+}
+
+// build_cube's blobs, then the levels' (`lod_blobs`).
+static void build_cube_with_lods(ImageAsset *ia, u32 type_version, u32 lod_blobs)
+{
+    // Rebuild the cube into a writer of our own, adding the levels before
+    // it finishes.
+    ImageAsset plain;
+    memset(&plain, 0, sizeof plain);
+    plain.alloc = ia->alloc;
+    build_cube(&plain, type_version);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
+                          nph_guid_from_cstr("cube"), 1U);
+    for (u32 i = 0; i < plain.asset.blob_count; ++i) {
+        const NphAssetBlob *b = &plain.asset.blobs[i];
+        add(&w, b->tag, b->index, b->data, b->size);
+    }
+    image_asset_free(&plain);
+    add_cube_lods(&w, lod_blobs);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, mesh_view_resolves_levels_of_detail)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_cube_with_lods(&ia, NPH_MESH_TYPE_VERSION, LOD_ALL);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.lod);
+    NTEST_EXPECT_EQ_UINT(v.lod->level0_meshlets, 1U);
+    NTEST_EXPECT_EQ_UINT(v.lod_clusters[0].group, NPH_MESH_LOD_NONE);
+    NTEST_EXPECT_TRUE(v.lod_groups[0].error == NPH_F32_MAX);
+    NTEST_EXPECT_EQ_UINT(v.lod_members[0], 0U);
+    NTEST_EXPECT_EQ_UINT(v.lod_nodes[0].child[0], NPH_MESH_LOD_LEAF);
+    image_asset_free(&ia);
+
+    // Without them (version 2 or 1): every pointer NULL.
+    build_cube(&ia, NPH_MESH_TYPE_VERSION);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.lod == NULL && v.lod_clusters == NULL && v.lod_groups == NULL &&
+                      v.lod_members == NULL && v.lod_nodes == NULL);
+    image_asset_free(&ia);
+    build_cube(&ia, 1U);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.lod == NULL);
+    image_asset_free(&ia);
+
+    // Levels in a version-1 mesh, or some of their blobs without the rest.
+    build_cube_with_lods(&ia, 1U, LOD_ALL);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    const u32 partial[3] = {LOD_ALL & ~LOD_HEADER, LOD_ALL & ~LOD_NODES, LOD_HEADER};
+    for (u32 i = 0; i < 3U; ++i) {
+        build_cube_with_lods(&ia, NPH_MESH_TYPE_VERSION, partial[i]);
+        NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+        image_asset_free(&ia);
+    }
+}
+
+NTEST(views, mesh_view_rejects_levels_out_of_range)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_cube_with_lods(&ia, NPH_MESH_TYPE_VERSION, LOD_ALL);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+
+    NphMeshLodHeader *lh = (NphMeshLodHeader *)blob_bytes(&ia, NPH_MESH_TAG_LOD_HEADER, 0U);
+    lh->level0_meshlets = 2U; // more than the meshlets
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    lh->level0_meshlets = 1U;
+    lh->reserved[1] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    lh->reserved[1] = 0U;
+    lh->group_count = 2U; // the groups' blob no longer matches
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    lh->group_count = 1U;
+
+    NphMeshClusterLod *cl = (NphMeshClusterLod *)blob_bytes(&ia, NPH_MESH_TAG_LOD_CLUSTERS, 0U);
+    cl->group = 0U; // a level-0 cluster with a maker
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    cl->group = NPH_MESH_LOD_NONE;
+    cl->parent = 1U; // no such group
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    cl->parent = 0U;
+
+    u32 *member = (u32 *)blob_bytes(&ia, NPH_MESH_TAG_LOD_MEMBERS, 0U);
+    *member = 1U; // no such cluster
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    *member = 0U;
+
+    NphMeshLodGroup *g = (NphMeshLodGroup *)blob_bytes(&ia, NPH_MESH_TAG_LOD_GROUPS, 0U);
+    g->cluster_offset = 1U; // past the members
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    g->cluster_offset = 0U;
+    g->cluster_count = 2U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    g->cluster_count = 1U;
+
+    NphMeshLodNode *n = (NphMeshLodNode *)blob_bytes(&ia, NPH_MESH_TAG_LOD_NODES, 0U);
+    n->child[0] = 1U | NPH_MESH_LOD_LEAF; // no such group
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    n->child[1] = 1U; // no such node
+    n->child[0] = NPH_MESH_LOD_LEAF;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    n->child[1] = NPH_MESH_LOD_NONE;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+
+    // The submesh's meshlets beyond level 0.
+    NphSubmesh *sub = (NphSubmesh *)blob_bytes(&ia, NPH_MESH_TAG_SUBMESHES, 0U);
+    lh->level0_meshlets = 1U;
+    sub->meshlet_offset = 1U;
+    sub->meshlet_count = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK); // empty, at the end
+    sub->meshlet_offset = 0U;
+    sub->meshlet_count = 1U;
+    image_asset_free(&ia);
+}
+
 NTEST(views, mesh_view_takes_a_meshlet_without_triangles)
 {
     // A meshlet may hold no triangles, and a mesh with none needs no triangle
@@ -795,6 +969,7 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
 {
     check_seed_asset("nph/blob", NPH_ASSET_TYPE_BLOB);
     check_seed_asset("nph/mesh", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_lod", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);

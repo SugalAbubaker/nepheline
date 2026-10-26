@@ -221,16 +221,25 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 1): `HEAD` (counts, bounds, sphere,
-  position quantisation), `POSN` (16-bit unorm positions across the
-  bounds, 8 bytes each, separate from the other attributes so the
-  visibility-buffer pass of §8.6.4 reads positions only), `ATTR` (normal
-  as octahedral snorm16, tangent as snorm8 with the handedness in w, half
-  float UV, RGBA8 colour: 16 bytes), `INDX` (u32 triangle list), `SUBM`
-  (index and meshlet ranges per material slot, bounds), `MLET` (meshlets
-  of at most 64 vertices and 124 triangles), `MLBD` (sphere and normal
-  cone per meshlet, after Kapoulkine's meshoptimizer), `MLVX` (meshlet
-  vertex indices), `MLTR` (meshlet-local triangle corners, 3 bytes each).
+- **Mesh** (`mesh.h`, type version 2; version 1 still reads): `HEAD`
+  (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
+  positions across the bounds, 8 bytes each, separate from the other
+  attributes so the visibility-buffer pass of §8.6.4 reads positions
+  only), `ATTR` (normal as octahedral snorm16, tangent as snorm8 with the
+  handedness in w, half float UV, RGBA8 colour: 16 bytes), `INDX` (u32
+  triangle list), `SUBM` (index and meshlet ranges per material slot,
+  bounds), `MLET` (meshlets of at most 64 vertices and 124 triangles),
+  `MLBD` (sphere and normal cone per meshlet, after Kapoulkine's
+  meshoptimizer), `MLVX` (meshlet vertex indices), `MLTR` (meshlet-local
+  triangle corners, 3 bytes each). From version 2, a mesh with levels of
+  detail (docs/render.md "Levels of detail") adds `LODS` (the levels'
+  counts), `LODC` (each cluster's maker group, consumer group, and level),
+  `LODG` (the groups), `LODM` (each group's clusters), and `LODN` (the
+  hierarchy, node 0 the root); its meshlet blobs then hold every level's
+  clusters, level 0's first (the submeshes' meshlet ranges name level
+  0's). The records are the renderer's (render/cluster_lod.h), byte for
+  byte; the view checks every index they hold and leaves the tree and its
+  bounds to the renderer, which checks them when the mesh is created.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
