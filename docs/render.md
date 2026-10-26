@@ -454,6 +454,113 @@ when created (or take the cooked ones), each with a bounding sphere and a
 normal cone. Without mesh shaders the renderer also widens each mesh's
 meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 
+### Levels of detail
+
+A mesh can carry a hierarchy of cluster levels of detail (CLAUDE.md §8.6
+stage 9; ADR-0060; `render/cluster_lod.h`), as
+`nph_render_cluster_lods_build` makes it from the mesh's meshlets (level 0)
+and `NphRenderMeshDesc` takes it. The production path then draws each part
+of the mesh at the coarsest level whose error, projected from the part's
+distance, is within the view's threshold (`NphRenderView.lod_error`, in
+pixels; 1 by default), so that a distant mesh costs a few clusters and a
+large one (a terrain) is fine where the camera is and coarse far from it.
+
+**The levels.** Each level is made from the one before, after Batched Multi
+Triangulation (Cignoni et al., IEEE Visualization 2005) as Nanite does it
+(Karis, Stubbe & Thomas, SIGGRAPH 2021): the level's clusters are grouped
+by eight neighbours (grown from Morton-ordered seeds by the vertices they
+share); the vertices a group shares with another are locked; the group is
+simplified to half its triangles; the result is split into clusters again.
+Because a group's boundary does not move, the clusters a group made can
+stand in for its own wherever its error is small enough, with no crack
+where the levels meet. The simplifier (`cluster_simplify.c`) collapses
+half-edges, each moving a vertex onto a neighbour, ranked by quadric error
+(Garland & Heckbert, SIGGRAPH 1997): every level indexes the mesh's own
+vertices, and no attribute is interpolated. Vertex kinds after
+meshoptimizer's simplifier (Kapoulkine 2017) keep attribute seams and
+material borders in shape: an interior vertex moves onto any neighbour, one
+on an open border or a seam only along it, a corner of seams or a vertex of
+a non-manifold edge never; the link condition keeps the topology, and no
+collapse may turn a triangle over, fold it to a line, or face it away from
+the level-0 normals merged into its corners.
+
+A group's error, in mesh units, is the largest of its collapses' quadric
+error, two measured distances, and the errors of the groups that made its
+clusters: every level-0 point against the level's whole result (through the
+class it merged into; a point by a locked border may lie under the
+neighbour's triangles), and the result's triangles' centroids and edge
+midpoints against level 0 (a chord across a curve lies farther from it than
+any of its points does from the chord). On curved test surfaces the
+quadric alone came out 2.5 to 3.3 times under the measured distance; with
+both, the points of a coarse level's triangles (corners, edge midpoints,
+centroids) lie at most 0.86 to 0.99 of their makers' errors from the true
+surface, past level 0's own chords
+(`a_groups_error_bounds_how_far_its_clusters_stray`). Errors never fall going
+up and each group's sphere holds those of the groups that made its
+clusters, so one threshold cuts the levels in one consistent place. The
+levels stop at one cluster, or when a level takes off less than a tenth of
+the triangles. The build is deterministic and takes about 11 µs a triangle
+on one thread (`cluster_lod_torus_262k`, benchmarks/render).
+
+**The hierarchy.** Each level's groups, in Morton order of their centres,
+lie under a tree of nodes of eight children; the levels' trees and the root
+group lie under node 0. A child (a node or a group) records its sphere,
+the largest group error below it, and the smallest error of the groups that
+made the clusters below it (0 where level 0 is). Every sphere is the union
+of its parts rounded up in double precision, so it holds them exactly.
+
+**The cut.** A cluster is drawn when the group that made it projects an
+error within the threshold and the group that consumes it does not; the
+root group (error the largest float) always does. With `k` the pixels a unit
+spans at a distance of one over the threshold, a group of error `e` and
+sphere (`c`, `r`) under an instance of scale `s` is too coarse when
+`s e k > max(|c| - s r, near)`. One function, `vis_lod_group_too_coarse`,
+decides it for both the walk and the meshlet cull, `precise` throughout and
+without a square root, from numbers the hierarchy must copy exactly from
+the group: the two decide alike for every group, bit for bit, or a part
+would be drawn at two levels or at none.
+
+**The walk.** `vis cull instances` hands a visible instance of a mesh with
+levels to the walk as its hierarchy's root (an (instance, node) work item),
+instead of handing on its meshlets. Each step of `vis cull nodes`
+(`vis_cull_nodes.comp`) takes two of the hierarchy's levels: a work item
+takes 64 lanes, one per child and grandchild of its node. A lane takes a
+child that is too coarse (the walk's test of a node is loosened past the
+rounding between it and the exact test, so it loses no group below), unless
+every maker below is too coarse even from the child's far side (then every
+cluster below would be replaced in turn), inside the frustum and in phase 1
+not behind the depth pyramid. A group it takes appends its clusters to the
+phase's meshlet list, where the meshlet cull drops those whose makers are
+too coarse and tests the rest as any cluster; a node at the second level
+goes into the next queue. The queues are three in turn: a step reads one,
+fills the next and raises the next step's indirect arguments itself, and
+empties the third for the step after the next, so the steps follow one
+another with no pass between. The frame takes as many steps a phase as the
+deepest live hierarchy needs, half its node levels rounded up (`vis_lod_steps`
+in the frame's statistics). Phase 0 walks the instances it found visible;
+phase 1 those phase 0 deferred, against this frame's pyramid.
+
+A threshold of 0 turns the walk off: every mesh draws level 0's meshlets,
+the same image byte for byte as the mesh without levels. The reference
+renderer, the sun's shadow map's pages, and the bottom levels of the shadow
+rays and the radiance cache draw level 0 for now.
+
+**Creation.** `nph_render_mesh_create` checks the levels so far as the
+GPU's reads stay inside their streams and its walk ends (every index; a tree
+from node 0, at most 32 node levels deep), and so far as the walk cannot
+lose a cluster it should draw (a group's numbers in its node are its
+record's, its maker error no larger than its clusters' makers' smallest,
+and a node's bounds hold its children's); `NPH_RESULT_INVALID_ARGUMENT`
+otherwise. That the levels cut cleanly is the builder's contract.
+
+**Cost.** In `lod_4k_production` (render_perf: a terrain 400 m across of
+131,072 triangles and 1,024 rocks of 65,024 each, 67 million in all, from
+head height) the frame draws 1.15 million triangles in 18,300 clusters and
+takes 3.70 ms; at level 0 (`lod_4k_level0`) 4.30 million and 3.99 ms, the
+culling and raster passes 0.70 ms against 0.99. The walk visits 4,700 nodes
+in three steps a phase, 0.040 ms in phase 0 and 0.029 ms in phase 1; an
+empty step costs 2.7 µs. ADR-0060 records how it got there from 0.192 ms.
+
 ### A frame
 
 | Pass | What it does |
@@ -461,12 +568,13 @@ meshlet triangles into a shared pool of 16-bit indices for indirect draws.
 | `vis clear` | clears the counters (and on the vertex path the visibility buffer, which the mesh path's raster clears as its attachment) |
 | `vis scatter` | applies the frame's instance updates |
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
-| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items, the occluded instances wait for phase 1 |
+| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
+| `vis cull nodes 0` | the walk down the hierarchies of levels of detail ("Levels of detail"), a step per two of their node levels: the groups too coarse to draw hand on their clusters as work items |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
 | `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
-| `vis cull instances 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; then the meshlets phase 0 deferred and those of the instances now visible |
+| `vis cull instances 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid (and the walk down the hierarchies of those now visible); then the meshlets phase 0 deferred and those of the instances now visible |
 | `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
@@ -1156,7 +1264,8 @@ The production path's lists have fixed capacities in `NphRendererDesc`:
 meshlet work items), `max_deferred` (262,144: deferred instances, and
 phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
-(2^24, indirect path only); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
+(2^24, indirect path only), and `max_lod_nodes` (2^18 work items a step of
+the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
 `vsm_pages` (2,048), `max_vsm_meshlets` (2^20), and `max_vsm_draws`
 (2^20), whose overflow (`vsm_overflow`) raises its resolution bias
@@ -1166,7 +1275,8 @@ back as the others. The radiance cache has `gi_cells` (2^18) slots, a
 bucket of which, when full, drops the samples of the cells it cannot
 take, and `gi_rays` (65,536) a frame. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
-software, instances and meshlets culled by each test, lights in view),
+software, instances and meshlets culled by each test, the hierarchy's
+nodes visited and the clusters a finer level stood in for, lights in view),
 read back from the frame that completed
 `NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
 `instances` is the live count and `culled` the hidden instances plus
@@ -1559,6 +1669,21 @@ and synchronisation-validation gate:
   read back (every light in every tile and bin its sphere reaches, none
   more than a tile beyond); 300 lights giving the image of every light
   everywhere, and lights moving, changing, and going between frames.
+- **Levels of detail** (`test_cluster_lod.c`, on the CPU; `test_vis_lod.c`):
+  the simplifier's rules (a flat interior collapses to its locked border
+  with no error, a curved surface simplifies within its error and with no
+  triangle turned over); the levels halve down to a root; every cluster
+  has one maker and one consumer; errors never fall and spheres hold their
+  parts exactly; a coarse level stays within its error of the true
+  surface; every cut of a closed mesh is closed; seams and material
+  borders keep their shape; the build is deterministic, and degenerate,
+  scattered, small, and bad input is handled. On the GPU: the clusters
+  drawn are the CPU's cut, cluster for cluster, for views that mix levels;
+  a threshold of 0 draws level 0 as the mesh without levels; distance
+  draws coarser levels; cuts mixing levels leave no hole in a terrain
+  sheet and a torus on both raster paths and both rasters; an instance
+  revealed in phase 1 draws its whole cut; a full queue is reported; and
+  broken levels are refused.
 - **Shadows** (`test_shadows.c`), on both pipelines: every pixel is
   classified from the scene's geometry (rays through the corners of its
   footprint, grown by half a pixel, against the floor, the occluder's box,
@@ -1666,6 +1791,12 @@ pipelines. `scene_demo` draws its thousands of asteroids on the production
 path and logs what the GPU culled.
 
 ## Limitations (future work)
+
+- Levels of detail (ADR-0060): the sun's shadow map's pages, the shadow
+  rays' and radiance cache's bottom levels, and the reference renderer draw
+  level 0; the error is geometric only (normals and texture coordinates
+  inside a coarse level are not measured); the cooker does not yet store
+  the levels, and they are not streamed.
 
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many
