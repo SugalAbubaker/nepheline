@@ -202,7 +202,15 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // everywhere, and the instance cull hands its level-0 meshlets on
     // directly, without the walk (vis_cull_instances.comp).
     f32 lod_level0_error;
-    // To 176 bytes: a record's stride stays a multiple of 16, the alignment
+    // Cuts at uniform thresholds, for views that need one error everywhere
+    // (the sun's shadow map: vsm_cull.comp): cut i holds the clusters of
+    // threshold 2^(lod_cut_exp0 + i) mesh units, i < lod_cut_count, in a
+    // u32 table of lod_cut_count + 1 offsets into itself, then the cuts'
+    // clusters (render/cluster_lod.h nph_render_lod_cuts). 0: none.
+    i32 lod_cut_exp0;
+    u64 lod_cuts;
+    u32 lod_cut_count;
+    // To 192 bytes: a record's stride stays a multiple of 16, the alignment
     // every buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF),
     // which the resolve's VisMeshRef(...)[i] assumes of each record. Not an
     // array: shaders copy the record, and glslang 14 gives a copy of a struct

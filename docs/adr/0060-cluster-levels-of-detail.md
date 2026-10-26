@@ -1,9 +1,9 @@
 # 0060. Virtualized geometry: a hierarchy of cluster levels, walked two levels a step
 
 - **Date:** 2026-10-26
-- **Status:** Accepted (the shadow map's pages and the shadow rays draw level 0 until
-  their own levels arrive later in Phase 13; the cooker stores the levels in the next
-  step of the phase)
+- **Status:** Accepted (the shadow rays and the radiance cache draw level 0 until their
+  own levels arrive later in Phase 13); amended 2026-10-26: the sun's shadow map draws
+  cuts of its own (below)
 
 ## Context
 
@@ -96,9 +96,9 @@ levels, rounded up), in each phase. Phase 0 tests the frustum; phase 1, which wa
 the instances phase 0 deferred, tests this frame's depth pyramid too. A threshold of
 0 turns the walk off and every mesh draws level 0's meshlets as before.
 
-**What draws level 0 for now:** the reference renderer, the sun's virtual shadow
-map's pages, and the shadow rays' and radiance cache's bottom levels. Each gets the
-levels in its own step of the phase.
+**What draws level 0 for now:** the reference renderer, and the shadow rays' and
+radiance cache's bottom levels; the sun's virtual shadow map draws cuts of its own
+(the amendment below). Each gets the levels in its own step of the phase.
 
 **The mesh interface.** `NphRenderMeshDesc` takes the levels as
 `nph_render_cluster_lods_build` makes them: every level's clusters as its meshlets
@@ -177,3 +177,72 @@ cleanly is the builder's contract, tested on its own.
   torus's 258), with the groups and nodes. Then geometry streaming pages the
   clusters by level, and the shadow map and the bottom levels take coarse cuts of
   their own.
+
+## Amendment (2026-10-26): the sun's shadow map draws cuts of its own
+
+**Context.** The sun's virtual shadow map (ADR-0033) drew every caster at level 0: a
+page of a far level, whose texels span metres, rasterised a distant mesh's every
+triangle, and the first game's forest seen across its valley would put millions of
+triangles into texels that resolve none of them. The camera's cut does not serve the
+map: it follows the camera's distance where a page's texels are all one size, it
+changes as the camera moves where the map keeps its pages, and a caster out of view
+has none.
+
+**Decision.** A level's texels all have the level's size, so a caster drawn into it
+needs one error everywhere: the cut at a uniform threshold, which the hierarchy holds
+without a walk. A mesh carries its cuts at the powers of two of its own units
+(`nph_render_lod_cuts`, made when the mesh is created; at most 32, from the largest
+power of two below its smallest error to the first past its largest short of the root
+groups'): cut T holds the clusters whose maker's error is at most T and whose
+consumer's is more, closed as every cut of the hierarchy is; each cluster's cuts are
+a run from its errors' exponents, so making them follows the clusters and the
+entries, and a table that would pass 2^24 entries loses its finest cuts first.
+`vsm cull instances` takes, for each instance and level, the largest threshold within
+half a texel of the level at the instance's scale, from the float's exponent, and
+hands on that cut's entries in the table, or level 0's meshlets where the finest
+threshold is too coarse; `vsm cull meshlets` reads each entry's cluster. Half a texel
+lies within the receiver's offset along its normal (1.5 texels, ADR-0033) with a
+texel to spare. The cut follows the instance's scale and the level alone, so cached
+pages stay right while the camera moves; an instance's change redraws its pages as
+before, and turning the view's levels on or off redraws every page.
+
+**Alternatives considered.**
+
+- **The camera's cut** (the walk's clusters): wrong for the pages of other levels and
+  for casters out of view, and it changes with every camera move, which would make
+  every cached page stale.
+- **The cut's clusters read in the instance cull** (the first version): the
+  expansion that hands an instance's meshlets on read each one's entry, a load the
+  subgroup waited on every round, and shuffled two more values a round: Bistro's
+  street turning paid 14 µs more in `vsm cull instances` (0.030 to 0.044 ms) for no
+  gain there. Handing on the entries, read in the meshlet cull among many loads in
+  flight, took it back (0.031 ms), and the full redraw's instance cull fell from 0.036
+  to 0.026 ms.
+- **A walk of the hierarchy per instance and level:** it would find the same uniform
+  cut, at the cost of the walk's steps in every frame that draws pages; the table
+  replaces it with two reads.
+- **Thresholds closer than powers of two:** cuts nearer the error allowed (the power of
+  two below it can keep a level more than needed, up to about twice the triangles),
+  for a table twice as long or more and a logarithm in the lookup.
+- **A coarser error than half a texel:** fewer triangles still, but the cut would
+  move shadow edges past the receiver's offset, which self-shadowing would show.
+
+**Consequences.**
+
+- With the sun moving every frame (`lod_shadows_sun_4k_production`, render_perf: the
+  terrain and the 1,024 rocks of `lod_4k_production`, all 750 pages drawn again each
+  frame), the caster draws fall from 326,586 to 58,039 and the map's raster from 8.08
+  to 1.54 ms; the frame from 11.95 to 5.37 ms. A sun that moves every frame still
+  redraws every page (ADR-0033's rule), 1.5 ms here against the 0.40 ms shadows line
+  of §10.4: a day-night cycle needs its pages kept across small turns of the sun,
+  which this amendment does not decide.
+- Where pages stay drawn (the camera walking, in that scene and in Bistro's street,
+  cooked with levels), nothing measurable changes: the culls within a microsecond and
+  the frames within the runs' spread, interleaved (-0.011 and +0.008 ms in Bistro).
+- The tables hold about 1.2 entries a cluster (367 u32 for the test torus's 297
+  clusters), made when the mesh is created.
+- `test_vsm.c` (`a_caster_with_levels_shadows_as_its_level_0`): a torus with levels
+  out of view casts its level-0 shadow away from the edges (no pixel of 61,000
+  compared differs, 3,261 of them in the shadow; 25 differ along the edges), from 80
+  (meshlet, page) draws against 162, and turning the levels on redraws every page;
+  with three of the cut's clusters dropped, 15 pixels inside differ.

@@ -17,7 +17,11 @@
 //
 // Casters are drawn from both sides and from every direction: no normal
 // cone culling, since a meshlet facing away from the light shadows all the
-// same.
+// same. A mesh with levels of detail (docs/render.md "Levels of detail")
+// hands on the cut whose error is within VSM_LOD_TEXELS of the level's
+// texel at the instance's scale (NphVisMesh.lod_cuts: the largest power of
+// two threshold at most that), level 0 where none is fine enough: the same
+// for an instance and a level every frame, so a page drawn stays right.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -32,6 +36,26 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 // draw without scanning the bitmask for one (its meshlets are tested).
 #define VSM_SCAN_PAGES 256
 
+// The error a caster's levels of detail may have, in texels of the level it
+// is drawn into: within the receiver's offset along its normal
+// (NphVsmView.texel_bias, 1.5 texels) with a texel to spare.
+#define VSM_LOD_TEXELS 0.5
+
+// A work item is (instance slot, meshlet | level << 24), or, for a mesh
+// drawn at a cut, the cut's entry in the mesh's table in the meshlet's
+// place with VSM_ITEM_CUT set: vsm cull meshlets reads the cluster there,
+// one load of many in flight, where the instance cull's expansion would
+// wait on it round after round (nph_render_lod_cuts keeps the table under
+// 2^24 entries).
+#define VSM_ITEM_CUT 0x80000000u
+
+// floor(log2(x)) of a positive float from its exponent (-127 for 0 and
+// denormals, 128 for infinity).
+int vsm_floor_log2(float x)
+{
+    return int((floatBitsToUint(x) >> 23u) & 0xFFu) - 127;
+}
+
 void cull_instances(VisViewRef view, VsmViewRef r)
 {
     const int level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
@@ -39,6 +63,7 @@ void cull_instances(VisViewRef view, VsmViewRef r)
     const uint slot = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
                       gl_LocalInvocationIndex;
     uint meshlets = 0u;
+    uint cut_first = 0u; // the cut's first entry | VSM_ITEM_CUT (0: the mesh's meshlets)
     if (slot < view.v.instance_count) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
@@ -47,13 +72,27 @@ void cull_instances(VisViewRef view, VsmViewRef r)
                                                     view.v.camera_low.xyz);
             const vec3 c =
                 vsm_light_space(r, vis_transform_vector(inst.transform, mesh.sphere.xyz) + t);
-            const float radius = mesh.sphere.w * vis_max_scale(inst.transform);
+            const float scale = vis_max_scale(inst.transform);
+            const float radius = mesh.sphere.w * scale;
             if (!vsm_beyond(r, level, c, radius)) {
                 const ivec4 rect = vsm_sphere_rect(r, level, c, radius);
                 const int area = (rect.y - rect.x + 1) * (rect.w - rect.z + 1);
                 if (rect.x <= rect.y &&
                     (area > VSM_SCAN_PAGES || vsm_render_any(r, level, rect))) {
                     meshlets = mesh.meshlet_count;
+                    if (mesh.lod_cuts != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u) {
+                        // The error a texel of the level allows, in mesh units.
+                        const float allowed = float(VSM_LOD_TEXELS) * r.v.levels[level].page_size /
+                                              (float(NPH_VSM_PAGE) * scale);
+                        const int e = vsm_floor_log2(allowed) - mesh.lod_cut_exp0;
+                        if (e >= 0) {
+                            const uint cut = min(uint(e), mesh.lod_cut_count - 1u);
+                            VisUintRef table = VisUintRef(mesh.lod_cuts);
+                            const uint begin = table.v[cut];
+                            meshlets = table.v[cut + 1u] - begin;
+                            cut_first = begin | VSM_ITEM_CUT;
+                        }
+                    }
                 }
             }
         }
@@ -82,11 +121,13 @@ void cull_instances(VisViewRef view, VsmViewRef r)
         }
         const uint owner_slot = subgroupShuffle(slot, owner);
         const uint owner_first = subgroupShuffle(first, owner);
+        const uint owner_cut = subgroupShuffle(cut_first, owner);
         if (k < total) {
             const uint index = base + k;
             if (index < r.v.max_meshlets) {
+                // The entry stays under 2^24: no carry into the level.
                 VsmUvec2Ref(r.v.meshlets).v[index] =
-                    uvec2(owner_slot, (k - owner_first) | (uint(level) << 24u));
+                    uvec2(owner_slot, (owner_cut + (k - owner_first)) | (uint(level) << 24u));
             } else {
                 atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
             }
@@ -110,9 +151,12 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         const uvec2 item = VsmUvec2Ref(r.v.meshlets).v[i];
         slot = item.x;
         meshlet = item.y & 0xFFFFFFu;
-        level = int(item.y >> 24u);
+        level = int((item.y >> 24u) & 0x7Fu);
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        if ((item.y & VSM_ITEM_CUT) != 0u) {
+            meshlet = VisUintRef(mesh.lod_cuts).v[meshlet];
+        }
         m = VisMeshletsRef(mesh.meshlets).m[meshlet];
         const uvec4 b0 = VisMeshletBoundsRef(mesh.meshlet_bounds).b[meshlet * 2u];
         const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,

@@ -65,7 +65,7 @@ supersedes it and both link to each other.
 | [0057](0057-sound-assets.md) | Sound assets and their cooking | Accepted |
 | [0058](0058-audio-in-the-engine.md) | Audio in the engine: components, the bridge, one-shots, and occlusion | Accepted |
 | [0059](0059-structure-checkpoint.md) | The structure checkpoint: the frame keeps its passes; the first game | Accepted |
-| [0060](0060-cluster-levels-of-detail.md) | Virtualized geometry: a hierarchy of cluster levels, walked two levels a step | Accepted (the shadow map and bottom levels draw level 0 until their own levels) |
+| [0060](0060-cluster-levels-of-detail.md) | Virtualized geometry: a hierarchy of cluster levels, walked two levels a step | Accepted (the bottom levels draw level 0 until their own); amended 2026-10-26: the sun's shadow map draws cuts of its own |
 
 ## Template
 

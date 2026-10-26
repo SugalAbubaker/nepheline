@@ -8,11 +8,13 @@
 // coarser until they fit (and finer again once there is room); blended
 // surfaces ask for their own pages, a narrow view from afar takes a level
 // that holds it; it agrees with the ray-traced shadow it replaces, and
-// holds far from the origin; the depth pyramid's requests for blocks of
-// pixels are every pixel's own. The fixture's teardown asserts zero
-// validation and synchronisation-validation errors and nothing leaked.
+// holds far from the origin; a caster with levels of detail, drawn at the
+// map's cut, shadows as its level 0 does; the depth pyramid's requests for
+// blocks of pixels are every pixel's own. The fixture's teardown asserts
+// zero validation and synchronisation-validation errors and nothing leaked.
 #include <nepheline/math/random.h>
 
+#include "test_lod_support.h"
 #include "test_shadow_support.h"
 
 #include <nph_vsm.h>
@@ -592,6 +594,122 @@ NTEST_F(Vsm, far_from_the_origin_the_shadow_holds)
     const NphRenderFrameStats st = render_into(f, &v, far_img);
     NTEST_EXPECT_TRUE(st.vsm);
     NTEST_EXPECT_LE_UINT(image_max_diff(near_img, far_img), SAME_TOL);
+}
+
+// ---------------------------------------------------------------------------
+// Casters with levels of detail
+// ---------------------------------------------------------------------------
+
+// The torus's view: 256 x 256 (the fixture's 64 x 64 pixels span 9 cm of
+// the floor, too few across the ring to tell its inside from its edges).
+#define LOD_TARGET 256U
+#define LOD_PIXELS ((u64)LOD_TARGET * LOD_TARGET * 4U)
+// Pixels within this many of the level-0 shadow's edge are not compared:
+// the cut moves an edge by up to half a texel along the light (seven tenths
+// of one on the floor, a texel being one or two pixels), and the map's
+// filter softens it over another, as VSM_GROW allows the analytic checks.
+#define LOD_EDGE 4
+
+// Renders `frames` frames of `v` into `target` and reads the last back into
+// `out` (LOD_PIXELS); returns the last frame's statistics, which report the
+// frame NPH_GPU_FRAMES_IN_FLIGHT before it.
+static NphRenderFrameStats lod_frames(RenderFixture *f, const NphRenderView *v, NphGpuImage target,
+                                      u32 frames, u8 *out)
+{
+    NphRenderFrameStats s;
+    memset(&s, 0, sizeof s);
+    for (u32 i = 0; i < frames; ++i) {
+        s = test_render_frame(f, v, target);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, target, 0U, out, LOD_PIXELS);
+    return s;
+}
+
+static bool lod_dark(const u8 *img, i32 x, i32 y)
+{
+    return channel_max(img + ((u64)y * LOD_TARGET + (u64)x) * 4U) <= DARK_MAX;
+}
+
+// A torus with levels of detail (9,216 triangles at level 0) above the
+// camera's view and to its side: only its shadow is seen, a ring on the
+// floor. The map draws the torus at the cut whose error is within half a
+// texel of each level (vsm_cull.comp): the shadow is its level-0 shadow but
+// along the edges, inside as well as out (a crack in the cut would let light
+// through), from fewer draws. Turning the levels on redraws every page, as
+// turning them off would.
+NTEST_F(Vsm, a_caster_with_levels_shadows_as_its_level_0)
+{
+    REQUIRE_VSM(f);
+    LodMesh torus;
+    lod_torus(&torus, 96U, 48U, 0.8F, 0.25F);
+    NphRenderMesh caster = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &torus.desc, &caster), NPH_RESULT_OK);
+    NTEST_ASSERT_GT_UINT(torus.lods.levels, 3U);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 6.0F));
+    // 4.5 m up, 3.5 m to the left: outside the view from 6 m, its shadow
+    // centred at x = 1 (the sun travels along +X at 45 degrees).
+    const NphRenderInstance inst = instance(f, caster, grey, at(-3.5, 4.5, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(true);
+    (void)make_light(f, &ld);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, LOD_TARGET);
+    static u8 level0[LOD_PIXELS];
+    static u8 cut[LOD_PIXELS];
+    NphRenderView v;
+    vsm_view(&v, top_camera());
+    v.lod_error = 0.0F; // every caster at level 0
+    // The first frame's statistics (every page drawn), then a settled image.
+    const NphRenderFrameStats s0 = lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, level0);
+    log_stats("level 0", &s0);
+    NTEST_EXPECT_TRUE(s0.vsm);
+    NTEST_EXPECT_EQ_UINT(s0.vsm_overflow, 0U);
+    (void)lod_frames(f, &v, target, 2U, level0);
+    v.lod_error = 1.0F;
+    const NphRenderFrameStats s1 = lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, cut);
+    log_stats("levels", &s1);
+    NTEST_EXPECT_EQ_UINT(s1.vsm_overflow, 0U);
+    NTEST_EXPECT_GT_UINT(s1.vsm_drawn, 0U);
+    NTEST_EXPECT_EQ_UINT(s1.vsm_drawn, s0.vsm_drawn); // every page again
+    NTEST_EXPECT_LT_UINT(s1.vsm_draws * 4U, s0.vsm_draws * 3U);
+    (void)lod_frames(f, &v, target, 2U, cut);
+    u32 compared = 0U;
+    u32 deep = 0U; // compared pixels in the shadow
+    u32 wrong = 0U;
+    u32 edge_diffs = 0U;
+    for (i32 y = 0; y < (i32)LOD_TARGET; ++y) {
+        for (i32 x = 0; x < (i32)LOD_TARGET; ++x) {
+            const bool dark = lod_dark(level0, x, y);
+            bool edge = false;
+            for (i32 dy = -LOD_EDGE; dy <= LOD_EDGE && !edge; ++dy) {
+                for (i32 dx = -LOD_EDGE; dx <= LOD_EDGE && !edge; ++dx) {
+                    const i32 qx = x + dx;
+                    const i32 qy = y + dy;
+                    edge = qx >= 0 && qy >= 0 && qx < (i32)LOD_TARGET && qy < (i32)LOD_TARGET &&
+                           lod_dark(level0, qx, qy) != dark;
+                }
+            }
+            const u64 at_px = ((u64)y * LOD_TARGET + (u64)x) * 4U;
+            const bool differs = channel_diff(level0 + at_px, cut + at_px) > SAME_TOL;
+            if (edge) {
+                edge_diffs += differs ? 1U : 0U;
+                continue;
+            }
+            ++compared;
+            deep += dark ? 1U : 0U;
+            wrong += differs ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u pixels compared (%u in the shadow), %u differ; %u differ along the edges",
+              compared, deep, wrong, edge_diffs);
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NTEST_EXPECT_GT_UINT(deep, 2000U);
+    NTEST_EXPECT_GT_UINT(compared - deep, 40000U);
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, caster);
+    nph_gpu_image_destroy(f->dev, target);
+    lod_mesh_free(&torus);
 }
 
 // ---------------------------------------------------------------------------

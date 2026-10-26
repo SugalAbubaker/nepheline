@@ -115,6 +115,134 @@ static NphSphere sphere_hull(const NphSphere *spheres, u32 count)
 }
 
 // ---------------------------------------------------------------------------
+// Cuts at uniform thresholds
+// ---------------------------------------------------------------------------
+
+// floor(log2(x)) for a positive normal float, from its exponent alone.
+static i32 floor_log2(f32 x)
+{
+    return (i32)((nph_f32_to_bits(x) >> 23U) & 0xFFU) - 127;
+}
+
+// 2^e as a float, e within the normal range.
+static f32 pow2(i32 e)
+{
+    return nph_f32_from_bits((u32)(e + 127) << 23U);
+}
+
+// The exponent of the smallest power of two at least x > 0: a subnormal x
+// gives -126, at or below every threshold.
+static i32 ceil_log2(f32 x)
+{
+    const u32 bits = nph_f32_to_bits(x);
+    const i32 e = (i32)((bits >> 23U) & 0xFFU) - 127;
+    if (e < -126) {
+        return -126;
+    }
+    return (bits & 0x7FFFFFU) != 0U ? e + 1 : e;
+}
+
+// The cuts [*i0, *i1) of `count` from 2^exp0 that hold cluster c: its
+// maker's error is at most T = 2^j from j = ceil_log2(made) on, and its
+// consumer's above T for j below ceil_log2(consumed) (T a power of two).
+static void cut_run(const NphRenderClusterLod *lods, const NphRenderLodGroup *groups, u32 c,
+                    i32 exp0, u32 count, u32 *i0, u32 *i1)
+{
+    const u32 maker = lods[c].group;
+    const f32 made = maker == NPH_RENDER_LOD_NONE ? 0.0F : groups[maker].error;
+    const u32 parent = lods[c].parent;
+    i32 lo = 0;
+    if (made > 0.0F) {
+        lo = nph_max_i32(ceil_log2(made) - exp0, 0);
+    }
+    i32 hi = (i32)count;
+    if (parent != NPH_RENDER_LOD_NONE) {
+        const f32 consumed = groups[parent].error;
+        hi = consumed > 0.0F ? nph_min_i32(ceil_log2(consumed) - exp0, (i32)count) : 0;
+    }
+    *i0 = (u32)nph_min_i32(lo, (i32)count);
+    *i1 = (u32)nph_max_i32(hi, (i32)*i0);
+}
+
+NphResult nph_render_lod_cuts(const NphRenderClusterLod *lods, u32 cluster_count,
+                              const NphRenderLodGroup *groups, u32 group_count, u32 max_entries,
+                              i32 *out_exp0, u32 *out_count, NphArrayU32 *table)
+{
+    NPH_ASSERT(out_exp0 != NULL && out_count != NULL && table != NULL);
+    NPH_ARRAY_CLEAR(table);
+    // The errors' range, short of the root groups' and of zero.
+    f32 lo = NPH_F32_MAX;
+    f32 hi = 0.0F;
+    for (u32 g = 0; g < group_count; ++g) {
+        const f32 e = groups[g].error;
+        if (e > 0.0F && e < NPH_F32_MAX) {
+            lo = nph_f32_min(lo, e);
+            hi = nph_f32_max(hi, e);
+        }
+    }
+    i32 exp0 = -126;
+    u32 count = 1U;
+    if (hi > 0.0F) {
+        // Clamped to the normal floats: an error below 2^-126 is level 0's
+        // business, and none reaches 2^127.
+        exp0 = nph_max_i32(floor_log2(nph_f32_max(lo, pow2(-126))), -126);
+        const i32 top = nph_min_i32(floor_log2(hi) + 1, 126);
+        count = (u32)(top - exp0 + 1);
+        if (count > NPH_RENDER_LOD_MAX_CUTS) {
+            exp0 = top - (i32)NPH_RENDER_LOD_MAX_CUTS + 1;
+            count = NPH_RENDER_LOD_MAX_CUTS;
+        }
+    }
+    // Each cut's size, then the finest dropped until the table fits.
+    u32 sizes[NPH_RENDER_LOD_MAX_CUTS];
+    memset(sizes, 0, sizeof sizes);
+    for (u32 c = 0; c < cluster_count; ++c) {
+        u32 i0 = 0U;
+        u32 i1 = 0U;
+        cut_run(lods, groups, c, exp0, count, &i0, &i1);
+        for (u32 i = i0; i < i1; ++i) {
+            sizes[i] += 1U;
+        }
+    }
+    u64 total = (u64)count + 1U;
+    for (u32 i = 0; i < count; ++i) {
+        total += sizes[i];
+    }
+    u32 skip = 0U;
+    while (total > max_entries && skip + 1U < count) {
+        total -= (u64)sizes[skip] + 1U;
+        ++skip;
+    }
+    if (total > max_entries) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    exp0 += (i32)skip;
+    count -= skip;
+    NPH_TRY(NPH_ARRAY_RESIZE(table, (u32)total));
+    // The offsets, then each cut's clusters in index order through a
+    // cursor each.
+    u32 cursor[NPH_RENDER_LOD_MAX_CUTS];
+    u32 at = count + 1U;
+    for (u32 i = 0; i < count; ++i) {
+        table->data[i] = at;
+        cursor[i] = at;
+        at += sizes[skip + i];
+    }
+    table->data[count] = at;
+    for (u32 c = 0; c < cluster_count; ++c) {
+        u32 i0 = 0U;
+        u32 i1 = 0U;
+        cut_run(lods, groups, c, exp0, count, &i0, &i1);
+        for (u32 i = i0; i < i1; ++i) {
+            table->data[cursor[i]++] = c;
+        }
+    }
+    *out_exp0 = exp0;
+    *out_count = count;
+    return NPH_RESULT_OK;
+}
+
+// ---------------------------------------------------------------------------
 // Morton order
 // ---------------------------------------------------------------------------
 

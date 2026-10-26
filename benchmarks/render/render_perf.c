@@ -146,6 +146,16 @@
 //                         drawn at the level a pixel's error allows.
 //   lod_4k_level0         the same at level 0 (NphRenderView.lod_error 0):
 //                         what the levels save.
+//   lod_shadows_walk_4k_production
+//                         lod_4k_production with the sun's virtual shadow
+//                         map and the camera walking (1.4 m/s at 240 frames
+//                         a second): the pages it comes to need are drawn,
+//                         each caster at the map's cut for the page's level.
+//   lod_shadows_sun_4k_production
+//                         lod_4k_production with the sun moving across the
+//                         sky every frame, at a day-night cycle's pace (a
+//                         24-minute day): every page of the map is drawn
+//                         again each frame, each caster at its cut.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -221,10 +231,11 @@ typedef struct SceneDef {
 
 typedef enum SceneShadows {
     SHADOWS_NONE = 0,
-    SHADOWS_SUN,        // the sun (or the moon) casts shadows
-    SHADOWS_SUN_MOVING, // and an instance moves every frame
-    SHADOWS_SUN_WALK,   // and the camera walks
-    SHADOWS_ALL,        // the moon and every lamp cast shadows
+    SHADOWS_SUN,         // the sun (or the moon) casts shadows
+    SHADOWS_SUN_MOVING,  // and an instance moves every frame
+    SHADOWS_SUN_WALK,    // and the camera walks
+    SHADOWS_SUN_TURNING, // and the sun moves every frame (every page drawn again)
+    SHADOWS_ALL,         // the moon and every lamp cast shadows
 } SceneShadows;
 
 // How a scene's post-processing departs from the runtime's defaults.
@@ -321,6 +332,10 @@ static const SceneDef g_scenes[] = {
      SHADOWS_NONE, POST_DEFAULT},
     {"lod_4k_level0", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U,
      SHADOWS_NONE, POST_LOD_LEVEL0},
+    {"lod_shadows_walk_4k_production", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_SUN_WALK, POST_DEFAULT},
+    {"lod_shadows_sun_4k_production", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_SUN_TURNING, POST_DEFAULT},
 };
 
 // Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
@@ -416,6 +431,10 @@ typedef struct Ctx {
     // The camera walking (SHADOWS_SUN_WALK): its step per frame.
     bool walking;
     NphDVec3 walk_step;
+    // The sun moving across the sky (SHADOWS_SUN_TURNING), and the frame
+    // count.
+    bool sun_turning;
+    u32 sun_frame;
     // The camera turning or strafing for motion blur (POST_MOTION_*), or a
     // reference view turning: radians and metres per frame, the frame count,
     // and whether the motions reverse (the synthetic ones, to stay over the
@@ -800,6 +819,29 @@ static u32 hash_u32(u32 x)
     return x ^ (x >> 15U);
 }
 
+// The sun's shadows a daylight scene asks for (s->shadows): the camera
+// walking for SHADOWS_SUN_WALK, along the view, level, at 1.4 m/s and 240
+// frames a second; the sun moving for SHADOWS_SUN_TURNING (advance_motion).
+static NphResult sun_shadows(Ctx *ctx, const SceneDef *s, const NphRenderView *view)
+{
+    if (s->shadows != (u32)SHADOWS_NONE) {
+        NphRenderLightDesc sun = ctx->sun_desc;
+        sun.shadows = 1;
+        NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &sun));
+    }
+    if (s->shadows == (u32)SHADOWS_SUN_TURNING) {
+        ctx->sun_turning = true;
+        ctx->sun_frame = 0U;
+    }
+    if (s->shadows == (u32)SHADOWS_SUN_WALK) {
+        const NphVec3 f = nph_quat_rotate(view->camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
+        const f64 step = 1.4 / 240.0 / nph_f64_sqrt((f64)f.x * (f64)f.x + (f64)f.z * (f64)f.z);
+        ctx->walk_step = nph_dvec3((f64)f.x * step, 0.0, (f64)f.z * step);
+        ctx->walking = true;
+    }
+    return NPH_RESULT_OK;
+}
+
 static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
 {
     const u32 side = (u32)nph_f64_ceil(nph_f64_sqrt((f64)s->count));
@@ -845,7 +887,7 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         view->camera = nph_render_camera_look_at(nph_dvec3(eye_x, eye_y, eye_z),
                                                  nph_dvec3(0.0, eye_y - 4.0, 0.0),
                                                  nph_vec3_unit_y(), 0.9F, 0.1F);
-        return NPH_RESULT_OK;
+        return sun_shadows(ctx, s, view);
     }
     // The field: spheres on a 2.5 m grid, every 64th cell a pillar instead
     // (a 1.5 x 8 x 1.5 m box), on a ground plane 400 m across.
@@ -872,19 +914,7 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         nph_render_camera_look_at(nph_dvec3(-half - 4.0, 1.7, -half - 4.0),
                                   nph_dvec3(half, 0.5, half), nph_vec3_unit_y(), 0.9F, 0.1F);
     if (s->lights == 0U) {
-        if (s->shadows != (u32)SHADOWS_NONE) {
-            NphRenderLightDesc sun = ctx->sun_desc;
-            sun.shadows = 1;
-            NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &sun));
-        }
-        if (s->shadows == (u32)SHADOWS_SUN_WALK) {
-            // Along the view, level, at 1.4 m/s and 240 frames a second.
-            const NphVec3 f =
-                nph_quat_rotate(view->camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
-            const f64 step = 1.4 / 240.0 / nph_f64_sqrt((f64)f.x * (f64)f.x + (f64)f.z * (f64)f.z);
-            ctx->walk_step = nph_dvec3((f64)f.x * step, 0.0, (f64)f.z * step);
-            ctx->walking = true;
-        }
+        NPH_TRY(sun_shadows(ctx, s, view));
         if (s->shadows == (u32)SHADOWS_SUN_MOVING) {
             // One more sphere, in front of the camera.
             ctx->mover_rest = trs(-half + 2.0, 0.5, -half + 2.0, nph_vec3_splat(1.0F), 0.0F);
@@ -940,6 +970,7 @@ static void destroy_scene(Ctx *ctx)
     ctx->light_count = 0U;
     ctx->moving = false;
     ctx->walking = false;
+    ctx->sun_turning = false;
     ctx->turn = 0.0F;
     ctx->strafe = 0.0;
     // The sun as setup made it (a scene may have dimmed it or given it
@@ -977,6 +1008,16 @@ static NphResult advance_motion(Ctx *ctx, NphRenderView *view)
         view->camera.position = nph_dvec3_add(
             view->camera.position,
             nph_dvec3((f64)right.x * along, (f64)right.y * along, (f64)right.z * along));
+    }
+    if (ctx->sun_turning) {
+        // About the east-west axis, a turn in 24 minutes of 240 frames a
+        // second: every frame's direction differs, which drops every page.
+        const f32 angle = 2.0F * NPH_PI / (24.0F * 60.0F * 240.0F) * (f32)(++ctx->sun_frame);
+        NphRenderLightDesc sun = ctx->sun_desc;
+        sun.shadows = 1;
+        sun.direction = nph_quat_rotate(nph_quat_from_axis_angle(nph_vec3_unit_x(), angle),
+                                        ctx->sun_desc.direction);
+        NPH_TRY(nph_render_light_update(ctx->renderer, ctx->sun, &sun));
     }
     if (ctx->moving) {
         // The sphere bobs a centimetre up and down.

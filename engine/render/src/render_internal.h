@@ -160,6 +160,7 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_groups;
     NphGpuBuffer lod_group_clusters;
     NphGpuBuffer lod_makers;
+    NphGpuBuffer lod_cuts; // the shadow map's cuts (NphVisMesh.lod_cuts)
     u32 lod_depth;
 } RenderMesh;
 
@@ -237,6 +238,7 @@ typedef struct RenderVsm {
     b32 initialize;         // the page table and the pages' records still need clearing
     // The clipmap as the pages hold it.
     b32 continuous; // the previous production frame had the map (else everything is dropped)
+    b32 lods;       // its casters were drawn at their cuts (NphRenderView.lod_error > 0)
     NphVec3 direction;
     NphDVec3 anchor;
     f64 depth_reference[NPH_VSM_LEVELS];
