@@ -1204,23 +1204,21 @@ NTEST_F(VoxelBuild, the_same_triangles_give_the_same_voxels)
 typedef struct LodMeshData {
     NPH_ARRAY(NphVec3) positions;
     NphArrayU32 indices;
-    NphRenderIndexRange range;
+    NphRenderIndexRange ranges[2]; // its submeshes
+    u32 range_count;
 } LodMeshData;
 
-// A mesh of foliage: `count` separate needles in a cube of `side`, each a
-// thin closed triangular prism (eight triangles), as needles are modelled:
-// a closed piece collapses no further than a tetrahedron, so the levels
-// stall on them as they do on the landscape's pines.
-static void foliage_mesh(LodMeshData *m, NphAllocator *a, u32 count, f32 side, u64 seed)
+// Foliage: `count` separate needles in the cube of `side` from `corner`,
+// each a thin closed triangular prism (eight triangles), as needles are
+// modelled: a closed piece collapses no further than a tetrahedron, so the
+// levels stall on them as they do on the landscape's pines.
+static void foliage_add(LodMeshData *m, NphPcg32 *rng, u32 count, NphVec3 corner, f32 side)
 {
-    NPH_ARRAY_INIT(&m->positions, a);
-    NPH_ARRAY_INIT(&m->indices, a);
-    NphPcg32 rng;
-    nph_pcg32_seed(&rng, seed, 1U);
     for (u32 i = 0; i < count; ++i) {
-        const NphVec3 c = nph_vec3(side * nph_pcg32_next_f32(&rng), side * nph_pcg32_next_f32(&rng),
-                                   side * nph_pcg32_next_f32(&rng));
-        const NphVec3 d = random_unit(&rng);
+        const NphVec3 c = nph_vec3_add(corner, nph_vec3(side * nph_pcg32_next_f32(rng),
+                                                        side * nph_pcg32_next_f32(rng),
+                                                        side * nph_pcg32_next_f32(rng)));
+        const NphVec3 d = random_unit(rng);
         NphVec3 t;
         NphVec3 b;
         tangents(d, &t, &b);
@@ -1243,8 +1241,19 @@ static void foliage_mesh(LodMeshData *m, NphAllocator *a, u32 count, f32 side, u
                            base + 2U, base,      base + 3U, base + 2U, base + 3U, base + 5U};
         NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m->indices, q, 24U));
     }
-    m->range.index_offset = 0U;
-    m->range.index_count = m->indices.len;
+}
+
+// A mesh of `count` needles in a cube of `side` (foliage_add).
+static void foliage_mesh(LodMeshData *m, NphAllocator *a, u32 count, f32 side, u64 seed)
+{
+    NPH_ARRAY_INIT(&m->positions, a);
+    NPH_ARRAY_INIT(&m->indices, a);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, seed, 1U);
+    foliage_add(m, &rng, count, nph_vec3_zero(), side);
+    m->ranges[0].index_offset = 0U;
+    m->ranges[0].index_count = m->indices.len;
+    m->range_count = 1U;
 }
 
 static void lod_mesh_data_free(LodMeshData *m)
@@ -1265,8 +1274,8 @@ static NphResult build_with(const LodMeshData *m, const NphRenderVoxelSampler *s
     mi.vertex_count = m->positions.len;
     mi.indices = m->indices.data;
     mi.index_count = m->indices.len;
-    mi.ranges = &m->range;
-    mi.range_count = 1U;
+    mi.ranges = m->ranges;
+    mi.range_count = m->range_count;
     mi.cone_weight = 0.25F;
     mi.scratch = a;
     NPH_TRY(nph_render_meshlets_build(&mi, meshlets));
@@ -1276,8 +1285,8 @@ static NphResult build_with(const LodMeshData *m, const NphRenderVoxelSampler *s
     in.vertex_count = m->positions.len;
     in.indices = m->indices.data;
     in.index_count = m->indices.len;
-    in.ranges = &m->range;
-    in.range_count = 1U;
+    in.ranges = m->ranges;
+    in.range_count = m->range_count;
     in.meshlets = meshlets;
     in.cone_weight = 0.25F;
     in.voxels = sampler;
@@ -1399,6 +1408,61 @@ NTEST_F(VoxelBuild, stalled_foliage_becomes_voxels_up_to_a_root)
     lod_mesh_data_free(&m);
 }
 
+// A clump of needles across the mesh's origin (a submesh of its own, so no
+// meshlet joins it to the rest), beside a forest that keeps the levels
+// going: as the clump's voxels coarsen they stop falling below the eight
+// cells they lie across (the grid of every cell size divides each axis at
+// zero), however few voxels its group has, and its group takes that count
+// rather than failing.
+NTEST_F(VoxelBuild, a_few_voxels_across_the_origin_still_coarsen)
+{
+    LodMeshData m;
+    NPH_ARRAY_INIT(&m.positions, f->a);
+    NPH_ARRAY_INIT(&m.indices, f->a);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 5U, 1U);
+    foliage_add(&m, &rng, 2000U, nph_vec3(10.0F, 10.0F, 10.0F), 4.0F);
+    m.ranges[0].index_offset = 0U;
+    m.ranges[0].index_count = m.indices.len;
+    foliage_add(&m, &rng, 40U, nph_vec3(-0.05F, -0.05F, -0.05F), 0.1F);
+    m.ranges[1].index_offset = m.ranges[0].index_count;
+    m.ranges[1].index_count = m.indices.len - m.ranges[0].index_count;
+    m.range_count = 2U;
+    TestLook look;
+    look_init(&look, m.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    NphRenderMeshlets meshlets;
+    NphRenderClusterLods lods;
+    NTEST_ASSERT_EQ_INT(build_with(&m, &sampler, f->a, &meshlets, &lods), NPH_RESULT_OK);
+    u32 voxel_clusters = 0U;
+    check_voxel_levels(&lods, &voxel_clusters);
+    // The clump's coarsest voxel cluster: at most eight voxels, a brick
+    // of them on each side of the origin's planes.
+    u32 fewest = NPH_U32_MAX;
+    u32 straddling = 0U;
+    for (u32 c = 0; c < lods.clusters.meshlets.len; ++c) {
+        const NphRenderMeshlet *mc = &lods.clusters.meshlets.data[c];
+        const NphRenderMeshletBounds *bd = &lods.clusters.bounds.data[c];
+        if (mc->vertex_count != 0U || nph_vec3_length(bd->center) > 1.0F) {
+            continue;
+        }
+        u32 voxels = 0U;
+        for (u32 k = 0; k < mc->triangle_count; ++k) {
+            const NphRenderVoxelBrick *br = &lods.bricks.data[mc->vertex_offset + k];
+            voxels += nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+        }
+        fewest = nph_min_u32(fewest, voxels);
+        straddling += 1U;
+    }
+    NTEST_LOG("%u levels, %u voxel clusters; the clump's %u, the fewest voxels %u", lods.levels,
+              voxel_clusters, straddling, fewest);
+    NTEST_EXPECT_GT_UINT(straddling, 1U);
+    NTEST_EXPECT_LE_UINT(fewest, 8U);
+    nph_render_cluster_lods_free(&lods);
+    nph_render_meshlets_free(&meshlets);
+    lod_mesh_data_free(&m);
+}
+
 NTEST_F(VoxelBuild, a_sampler_is_checked)
 {
     LodMeshData m;
@@ -1452,8 +1516,9 @@ NTEST_F(VoxelBuild, a_surface_that_simplifies_stays_triangles)
             NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m.indices, q, 6U));
         }
     }
-    m.range.index_offset = 0U;
-    m.range.index_count = m.indices.len;
+    m.ranges[0].index_offset = 0U;
+    m.ranges[0].index_count = m.indices.len;
+    m.range_count = 1U;
     TestLook look;
     look_init(&look, m.positions.data);
     const NphRenderVoxelSampler sampler = test_sampler(&look);

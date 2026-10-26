@@ -1136,8 +1136,9 @@ static NphResult count_pieces(Build *b, const u32 *indices, u32 tris, u32 *out_p
 }
 
 // The finest cell the coordinates allow for the sources (their largest
-// magnitude within LOD_VOXEL_COORD_LIMIT / 2 cells), and their area.
-static f64 voxel_floor(const LodVoxelInput *vin, f64 *out_area)
+// magnitude, `*out_reach`, within LOD_VOXEL_COORD_LIMIT / 2 cells), and
+// their area.
+static f64 voxel_floor(const LodVoxelInput *vin, f64 *out_area, f64 *out_reach)
 {
     f64 reach = 0.0;
     f64 area = 0.0;
@@ -1159,6 +1160,7 @@ static f64 voxel_floor(const LodVoxelInput *vin, f64 *out_area)
         area += 0.5 * nph_f64_sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
     }
     *out_area = area;
+    *out_reach = reach;
     return nph_f64_max(reach / (0.5 * (f64)LOD_VOXEL_COORD_LIMIT), 1e-30);
 }
 
@@ -1166,11 +1168,16 @@ static f64 voxel_floor(const LodVoxelInput *vin, f64 *out_area)
 // overlap at most `budget` times. The count only falls as the cell grows
 // (each cell of a size holds eight of the next finer, on one grid), so the
 // search starts near where about `budget` cells cover the sources' area
-// and walks from there.
+// and walks from there. Past the sources' reach it falls no further: a
+// cell then holds them along each axis, or two do where they lie across
+// zero, at which the grid of every cell size divides the axis. A budget
+// below that count (a group of a few voxels across the mesh's origin) takes
+// the first cell past the reach.
 static NphResult voxel_cell(const LodVoxelInput *vin, f64 least, u32 budget, f64 *out_cell)
 {
     f64 area = 0.0;
-    least = nph_f64_max(least, voxel_floor(vin, &area));
+    f64 reach = 0.0;
+    least = nph_f64_max(least, voxel_floor(vin, &area, &reach));
     f64 cell = ldexp(1.0, (int)ceil(log2(least)));
     const f64 guess = nph_f64_sqrt(area / (f64)nph_max_u32(budget, 1U));
     while (cell < guess) {
@@ -1188,11 +1195,8 @@ static NphResult voxel_cell(const LodVoxelInput *vin, f64 least, u32 budget, f64
             cell *= 0.5;
         }
     } else {
-        while (n > budget) {
+        while (n > budget && cell <= reach) {
             cell *= 2.0;
-            if (cell > 1e30) {
-                return NPH_RESULT_OVERFLOW;
-            }
             NPH_TRY(lod_voxel_count(vin, cell, budget, &n));
         }
     }

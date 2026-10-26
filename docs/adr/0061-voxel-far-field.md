@@ -168,7 +168,10 @@ Voxels are made inside ADR-0060's level-by-level build.
     times the count, the pines' first cells come out near 8 mm and voxels take over
     from about 15 m (at 4K and 90°).
   - *Above that*, a voxel group's cell is at least twice its input voxels', and its
-    occupied cells fit half its input primitives.
+    occupied cells fit half its input primitives, or as few as they can be for a
+    group of a few voxels across the mesh's origin: the grid of every cell size
+    divides each axis at zero, so such a group lies in two cells along each axis it
+    crosses however large they grow (a tree's trunk stands there).
   - A level of voxel groups always coarsens, so the rule that stops the levels when
     they stop shrinking does not stop a level in which triangles became voxels (which
     happens once a group at most).
