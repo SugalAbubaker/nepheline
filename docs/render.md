@@ -949,6 +949,15 @@ not worth a pipeline per tonemapper). Writing the swapchain through an
 sRGB view instead of encoding in the shader would save the encode's
 0.03 ms (`VK_KHR_swapchain_mutable_format`), but the hardware's rounding
 may differ from the exact curve by one step in the last bit: parked.
+Nor kept (2026-10-25, the structure checkpoint, ADR-0059): the pass as a
+compute pass taking its neighbourhoods from shared memory, each texel
+turned into YCoCg once and the moments, extremes and Gaussian sum taken
+along rows and then columns (the same images: 0.865 to 0.872 ms in
+Bistro's views against 0.872 to 0.879, and 1.095 in the 4K field against
+0.835); and the pass fused into `vis resolve`, whose decisive costs the
+checkpoint probed: workgroups of 16 × 16 compile the resolve to 48
+registers and 19 KB of spill a workgroup (+0.8 ms), and at its 8 × 8, 44%
+of the pixels border another tile.
 
 ### Motion blur
 
@@ -1084,7 +1093,10 @@ read from the visibility buffer instead of the copy the depth pyramid's
 pass writes (2026-10-21: the pyramid 0.03 ms less, the occlusion 0.065 ms
 more, in Bistro's views); the denoise filtering 2 × 1 pixels an invocation
 (2026-10-21: 48 registers against 64, yet 0.49 ms against 0.44: its texel
-reads, not its occupancy, bound it).
+reads, not its occupancy, bound it); the resolve denoising its own pixel
+as it begins, the pass gone (2026-10-25, ADR-0059: the same images, but
+the resolve grew by 0.58 to 0.64 ms in Bistro's views against the pass's
+0.43, the window's 25 fetches delaying the chain of loads behind them).
 
 ### Global illumination
 

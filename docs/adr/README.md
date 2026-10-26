@@ -64,6 +64,7 @@ supersedes it and both link to each other.
 | [0056](0056-audio-device-streaming.md) | Audio output device and streaming | Accepted |
 | [0057](0057-sound-assets.md) | Sound assets and their cooking | Accepted |
 | [0058](0058-audio-in-the-engine.md) | Audio in the engine: components, the bridge, one-shots, and occlusion | Accepted |
+| [0059](0059-structure-checkpoint.md) | The structure checkpoint: the frame keeps its passes; the first game | Accepted |
 
 ## Template
 

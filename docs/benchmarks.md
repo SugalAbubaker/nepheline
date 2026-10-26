@@ -321,6 +321,20 @@ did, in bursts, with the NVIDIA overlay on or off; since then a still
 view's p99 is within 0.1 to 0.2 ms of its mean. The turning view's wider
 spread is its own: what comes into view changes.
 
+The desktop shares the GPU too. While Claude Code's panel in VS Code and
+the compositor redraw (about ten times a second while a tool runs, 1.4%
+and 1.2% of the 3D engine by the system's GPU counters), each redraw took
+0.3 to 0.8 ms from whatever pass ran then, one frame in fourteen to
+sixteen (2026-10-25): the street measured 6.865 ms mean and 7.608 at the
+99th percentile, and 6.753 and 6.809 with the editor minimized, the clock
+at its power limit either way. So a phase's start and end are measured
+with the user's editor windows minimized for the length of the run
+(ADR-0059), and comparisons from day to day interleave their variants and
+compare means, which the redraws shift alike. Phase 13's start, measured
+so, is `reference_scenes-2026-10-25` (the street 6.771 ms mean, 6.837 at
+the 99th percentile; ADR-0059 has every view) with
+`render_perf-2026-10-25` for the synthetic scenes.
+
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
 light grid hands each pixel 11.8 of them on average, of which 5.0 reach

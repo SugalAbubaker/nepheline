@@ -477,4 +477,4 @@ Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so the
 - Physics solver final choice: soft-step vs TGS/XPBD (Phase 11, based on benchmarks).
 - Dynamic GI technique for the radiance cache (Phase 10).
 - Gameplay scripting: C hot-reload only, or add a scripting language (Phase 9+).
-- First demo/game to showcase the engine (its setting, camera, and world density at the checkpoint that opens Phase 13, so the reference scenes resemble it; the game holds the target in Phase 15: §10.7).
+- First demo/game to showcase the engine (its setting, camera, and world density at the checkpoint that opens Phase 13, so the reference scenes resemble it; the game holds the target in Phase 15: §10.7). Decided at that checkpoint (ADR-0059): first-person exploration of a forested mountain valley with ruins, the eye at 1.7 m, walking and sprinting; modelled vegetation to the horizon; a ruined village lit by lamps and candles at night; a day-night cycle; a world of about 4 × 4 km.
