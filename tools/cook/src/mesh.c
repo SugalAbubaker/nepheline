@@ -331,12 +331,13 @@ static NphAABB bounds_of(const NphVec3 *positions, const u32 *indices, u32 count
 }
 
 NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
-                          const CookMeshSettings *settings, NphAssetWriter *writer, u32 *levels)
+                          const CookMeshSettings *settings, NphAssetWriter *writer,
+                          CookMeshStats *stats)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && writer != NULL);
     const NphLzLevel lz = settings->lz;
-    if (levels != NULL) {
-        *levels = 1U;
+    if (stats != NULL) {
+        stats->lod_levels = 1U;
     }
     NPH_TRY(cook_mesh_validate(mesh));
     if (meshlets->bounds.len != meshlets->meshlets.len || meshlets->triangles.len % 3U != 0U) {
@@ -480,8 +481,16 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         meshlet_bytes = NPH_ARRAY_BYTES(&c->meshlets);
         vertex_bytes = NPH_ARRAY_BYTES(&c->vertices);
         triangle_bytes = NPH_ARRAY_BYTES(&c->triangles);
-        if (levels != NULL) {
-            *levels = lods.levels;
+        if (stats != NULL) {
+            stats->lod_levels = lods.levels;
+            stats->lod_coarsest_triangles = 0U;
+            stats->lod_coarsest_clusters = 0U;
+            for (u32 k = 0; k < lods.lods.len; ++k) {
+                if (lods.lods.data[k].level == lods.levels - 1U) {
+                    stats->lod_coarsest_clusters += 1U;
+                    stats->lod_coarsest_triangles += c->meshlets.data[k].triangle_count;
+                }
+            }
         }
     }
     if (r == NPH_RESULT_OK) {
@@ -606,14 +615,17 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
     NphResult r =
         cook_mesh_build_meshlets(mesh, settings.meshlet_vertices, settings.meshlet_triangles,
                                  settings.meshlet_cone_weight, &meshlets);
-    u32 levels = 1U;
+    st.lod_levels = 1U;
     if (r == NPH_RESULT_OK) {
-        r = cook_mesh_write(mesh, &meshlets, &settings, writer, &levels);
+        r = cook_mesh_write(mesh, &meshlets, &settings, writer, &st);
     }
     st.vertices = mesh->vertices.len;
     st.triangles = mesh->indices.len / 3U;
     st.meshlets = meshlets.meshlets.len;
-    st.lod_levels = levels;
+    if (st.lod_levels == 1U) {
+        st.lod_coarsest_triangles = st.triangles;
+        st.lod_coarsest_clusters = st.meshlets;
+    }
     cook_meshlets_free(&meshlets);
     if (stats != NULL) {
         *stats = st;

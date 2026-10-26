@@ -142,6 +142,7 @@ static bool extension_supported(const char *name)
         "KHR_materials_emissive_strength",
         "KHR_materials_pbrSpecularGlossiness",
         "KHR_mesh_quantization",
+        "KHR_texture_transform",
         "MSFT_texture_dds",
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(supported); ++i) {
@@ -371,9 +372,118 @@ static bool all_finite(const f32 *v, u64 count)
 // degenerate) are derived data the importer can make again: they are
 // dropped and made as for a primitive without them, and `*tangents_redone`
 // is set; any other non-finite attribute makes the document invalid.
+// KHR_texture_transform on TEXCOORD_0 as a 2 x 3 matrix, (u', v') = M (u, v,
+// 1): translation, then rotation (counter-clockwise in the image), then
+// scale applied first, as the extension defines it.
+typedef struct UvTransform {
+    f32 m[6]; // u' = m0 u + m1 v + m2; v' = m3 u + m4 v + m5
+} UvTransform;
+
+static const UvTransform g_uv_identity = {{1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F}};
+
+static UvTransform uv_transform_of(const cgltf_texture_view *view)
+{
+    if (!view->has_transform) {
+        return g_uv_identity;
+    }
+    const cgltf_texture_transform *t = &view->transform;
+    const f32 c = nph_f32_cos(t->rotation);
+    const f32 s = nph_f32_sin(t->rotation);
+    const UvTransform out = {{c * t->scale[0], s * t->scale[1], t->offset[0], -s * t->scale[0],
+                              c * t->scale[1], t->offset[1]}};
+    return out;
+}
+
+static bool uv_transforms_equal(const UvTransform *a, const UvTransform *b)
+{
+    for (u32 i = 0; i < 6U; ++i) {
+        if (a->m[i] != b->m[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The transform a material's textures share, baked into the UVs of the
+// primitives that use it; where they differ (which a baked transform cannot
+// express), its base colour's, with a warning when `warn`.
+static UvTransform material_uv_transform(CookGltfScene *scene, const cgltf_material *m, bool warn)
+{
+    if (m == NULL) {
+        return g_uv_identity;
+    }
+    const cgltf_texture_view *views[] = {
+        m->has_pbr_specular_glossiness ? &m->pbr_specular_glossiness.diffuse_texture
+                                       : &m->pbr_metallic_roughness.base_color_texture,
+        &m->pbr_metallic_roughness.metallic_roughness_texture,
+        &m->pbr_specular_glossiness.specular_glossiness_texture,
+        &m->normal_texture,
+        &m->occlusion_texture,
+        &m->emissive_texture,
+    };
+    // The base colour's, or the first texture's when it has none.
+    u32 first = 0U;
+    while (first < NPH_ARRAY_COUNT(views) && views[first]->texture == NULL) {
+        ++first;
+    }
+    if (first == NPH_ARRAY_COUNT(views)) {
+        return g_uv_identity;
+    }
+    const UvTransform chosen = uv_transform_of(views[first]);
+    bool agree = true;
+    for (u32 i = first + 1U; i < NPH_ARRAY_COUNT(views); ++i) {
+        if (views[i]->texture != NULL) {
+            const UvTransform t = uv_transform_of(views[i]);
+            agree = agree && uv_transforms_equal(&t, &chosen);
+        }
+    }
+    if (!agree && warn) {
+        NPH_LOG_WARN(&NPH_LOG_COOK,
+                     "%s: its textures' KHR_texture_transform differ; the base colour's is "
+                     "baked into the texture coordinates of the meshes that use it",
+                     m->name != NULL ? m->name : "(unnamed material)");
+        scene->warnings += 1U;
+    }
+    return chosen;
+}
+
+// `uv` (count pairs) through `t`; authored tangents (count, 4 floats, the
+// normals beside them) carried along: the tangent follows dP/du' =
+// dP/du du/du' + dP/dv dv/du' (the bitangent B = cross(N, T) w), and a
+// mirroring transform flips the handedness.
+static void apply_uv_transform(const UvTransform *t, u32 count, f32 *uv, f32 *tan, const f32 *nrm)
+{
+    const f32 *m = t->m;
+    for (u32 i = 0; i < count; ++i) {
+        const f32 u = uv[(u64)i * 2U];
+        const f32 v = uv[(u64)i * 2U + 1U];
+        uv[(u64)i * 2U] = m[0] * u + m[1] * v + m[2];
+        uv[(u64)i * 2U + 1U] = m[3] * u + m[4] * v + m[5];
+    }
+    const f32 det = m[0] * m[4] - m[1] * m[3];
+    if (tan == NULL || nrm == NULL || det == 0.0F) {
+        return;
+    }
+    // du/du' and dv/du': the first column of the inverse.
+    const f32 du = m[4] / det;
+    const f32 dv = -m[3] / det;
+    for (u32 i = 0; i < count; ++i) {
+        f32 *tg = &tan[(u64)i * 4U];
+        const NphVec3 n = nph_vec3(nrm[(u64)i * 3U], nrm[(u64)i * 3U + 1U], nrm[(u64)i * 3U + 2U]);
+        const NphVec3 tt = nph_vec3(tg[0], tg[1], tg[2]);
+        const NphVec3 b = nph_vec3_scale(nph_vec3_cross(n, tt), tg[3] < 0.0F ? -1.0F : 1.0F);
+        const NphVec3 t2 =
+            nph_vec3_normalize_or(nph_vec3_add(nph_vec3_scale(tt, du), nph_vec3_scale(b, dv)), tt);
+        tg[0] = t2.x;
+        tg[1] = t2.y;
+        tg[2] = t2.z;
+        tg[3] = (tg[3] < 0.0F) != (det < 0.0F) ? -1.0F : 1.0F;
+    }
+}
+
 static NphResult convert_primitive(NphAllocator *alloc, const cgltf_primitive *prim,
-                                   const PrimitiveAttribs *at, bool want_tangents, CookMesh *out,
-                                   bool *tangents_redone)
+                                   const PrimitiveAttribs *at, const UvTransform *uv_transform,
+                                   bool want_tangents, CookMesh *out, bool *tangents_redone)
 {
     *tangents_redone = false;
     const u32 count = (u32)at->pos->count;
@@ -399,6 +509,9 @@ static NphResult convert_primitive(NphAllocator *alloc, const cgltf_primitive *p
         free_floats(alloc, tan, at->tan, 4U);
         tan = NULL;
         *tangents_redone = true;
+    }
+    if (r == NPH_RESULT_OK && uv != NULL && !uv_transforms_equal(uv_transform, &g_uv_identity)) {
+        apply_uv_transform(uv_transform, count, uv, tan, nrm);
     }
     if (r == NPH_RESULT_OK) {
         for (u32 i = 0; i < count; ++i) {
@@ -545,7 +658,9 @@ static NphResult convert_mesh(CookGltfScene *scene, const cgltf_data *data, cons
         CookMesh piece;
         cook_mesh_init(&piece, alloc);
         bool tangents_redone = false;
-        NphResult r = convert_primitive(alloc, prim, &at, want_tangents, &piece, &tangents_redone);
+        const UvTransform uvt = material_uv_transform(scene, prim->material, false);
+        NphResult r =
+            convert_primitive(alloc, prim, &at, &uvt, want_tangents, &piece, &tangents_redone);
         if (tangents_redone) {
             NPH_LOG_WARN(&NPH_LOG_COOK,
                          "%s: primitive %llu: non-finite TANGENT values; tangents made instead",
@@ -668,9 +783,10 @@ static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, co
                      material, (int)view->texcoord);
         scene->warnings += 1U;
     }
-    if (view->has_transform) {
-        NPH_LOG_WARN(&NPH_LOG_COOK, "%s: KHR_texture_transform is not supported; ignored",
-                     material);
+    if (view->has_transform && view->transform.has_texcoord && view->transform.texcoord != 0) {
+        NPH_LOG_WARN(&NPH_LOG_COOK,
+                     "%s: KHR_texture_transform selects TEXCOORD_%d; TEXCOORD_0 is used instead",
+                     material, (int)view->transform.texcoord);
         scene->warnings += 1U;
     }
     if (view->texture->sampler != NULL) {
@@ -760,6 +876,10 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
     h->alpha_cutoff = src->alpha_cutoff;
     h->flags = (src->double_sided ? (u32)NPH_MATERIAL_FLAG_DOUBLE_SIDED : 0U) |
                (src->unlit ? (u32)NPH_MATERIAL_FLAG_UNLIT : 0U);
+    // Its KHR_texture_transform is baked into the meshes' texture
+    // coordinates (convert_mesh): said here, once, where its textures'
+    // transforms differ.
+    (void)material_uv_transform(scene, src, true);
 }
 
 // ---------------------------------------------------------------------------

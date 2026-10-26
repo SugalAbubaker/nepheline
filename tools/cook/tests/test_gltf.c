@@ -802,6 +802,100 @@ NTEST(gltf, specular_glossiness_materials)
     cook_gltf_free(&scene);
 }
 
+// KHR_texture_transform (required, as Poly Haven's trees require it) is
+// baked into each primitive's TEXCOORD_0 from its material's transform:
+// translation, rotation, scale, as the extension composes them; authored
+// tangents turn with the texture's u axis. A material whose textures'
+// transforms differ bakes its base colour's, with a warning.
+NTEST(gltf, texture_transforms_are_baked_into_the_coordinates)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    u8 rgba[4 * 4 * 4];
+    memset(rgba, 200, sizeof rgba);
+    u8 tga[18 + 64];
+    const u64 tga_size = test_write_tga(rgba, 4U, 4U, tga);
+    char tga64[256];
+    test_base64(tga, tga_size, tga64);
+    struct {
+        f32 pos[9];
+        f32 nrm[9];
+        f32 tan[12];
+        f32 uv[6];
+    } buf = {{0, 0, 0, 1, 0, 0, 0, 1, 0},
+             {0, 0, 1, 0, 0, 1, 0, 0, 1},
+             {1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1},
+             {0.0F, 0.0F, 1.0F, 0.0F, 0.25F, 0.75F}};
+    char buf64[512];
+    test_base64((const u8 *)&buf, sizeof buf, buf64);
+    const char *xf = "\"extensions\":{\"KHR_texture_transform\":{\"offset\":[0.5,0.25],"
+                     "\"rotation\":0.5,\"scale\":[2,3]}}";
+    const char *other = "\"extensions\":{\"KHR_texture_transform\":{\"scale\":[4,4]}}";
+    char doc[4096];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_texture_transform\"],"
+             "\"extensionsRequired\":[\"KHR_texture_transform\"],"
+             "\"textures\":[{\"source\":0}],\"images\":[{\"uri\":\"data:image/tga;base64,%s\"}],"
+             "\"materials\":["
+             "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,%s}},"
+             "\"normalTexture\":{\"index\":0,%s}},"
+             "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,%s}},"
+             "\"normalTexture\":{\"index\":0,%s}}],"
+             "\"meshes\":[{\"primitives\":["
+             "{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TANGENT\":2,\"TEXCOORD_0\":3},"
+             "\"material\":0},"
+             "{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TANGENT\":2,\"TEXCOORD_0\":3},"
+             "\"material\":1}]}],"
+             "\"accessors\":["
+             "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+             "\"min\":[0,0,0],\"max\":[1,1,0]},"
+             "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+             "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+             "{\"bufferView\":3,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"}],"
+             "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,"
+             "\"byteLength\":36},{\"buffer\":0,\"byteOffset\":72,\"byteLength\":48},"
+             "{\"buffer\":0,\"byteOffset\":120,\"byteLength\":24}],"
+             "\"buffers\":[{\"byteLength\":144,"
+             "\"uri\":\"data:application/octet-stream;base64,%s\"}]}",
+             tga64, xf, xf, xf, other, buf64);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 1U); // the second material's textures differ
+    const CookMesh *m = &scene.meshes[0].mesh;
+    NTEST_ASSERT_EQ_UINT(m->submeshes.len, 2U);
+    const f32 c = nph_f32_cos(0.5F);
+    const f32 s = nph_f32_sin(0.5F);
+    for (u32 sub = 0; sub < 2U; ++sub) {
+        for (u32 k = 0; k < 3U; ++k) {
+            const u32 vi = m->indices.data[m->submeshes.data[sub].index_offset + k];
+            const CookVertex *v = &m->vertices.data[vi];
+            // The vertex's source (the submesh's vertices keep their order).
+            u32 src = 0U;
+            while (src < 3U &&
+                   !nph_vec3_near(v->position,
+                                  nph_vec3(buf.pos[(u64)src * 3U], buf.pos[(u64)src * 3U + 1U],
+                                           buf.pos[(u64)src * 3U + 2U]),
+                                  0.0F)) {
+                ++src;
+            }
+            NTEST_ASSERT_LT_UINT(src, 3U);
+            const u64 at = (u64)nph_min_u32(src, 2U) * 2U;
+            const f32 u = buf.uv[at];
+            const f32 w = buf.uv[at + 1U];
+            // Both submeshes bake the shared (first) and the base colour's
+            // (second) transform: the same one.
+            const NphVec2 want =
+                nph_vec2(c * 2.0F * u + s * 3.0F * w + 0.5F, -s * 2.0F * u + c * 3.0F * w + 0.25F);
+            NTEST_EXPECT_TRUE(nph_vec2_near(v->uv0, want, 1e-6F));
+            // u' grows along (du/du', dv/du') = (c / 2, s / 3) in the (T, B)
+            // frame: T = +X, B = +Y.
+            const NphVec3 t = nph_vec3_normalize(nph_vec3(c / 2.0F, s / 3.0F, 0.0F));
+            NTEST_EXPECT_TRUE(nph_vec4_near(v->tangent, nph_vec4_from_vec3(t, 1.0F), 1e-5F));
+        }
+    }
+    cook_gltf_free(&scene);
+}
+
 NTEST(gltf, extensions_required_and_merely_used)
 {
     NphAllocator *alloc = nph_allocator_system();

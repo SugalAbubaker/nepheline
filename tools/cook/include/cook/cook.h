@@ -41,7 +41,8 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 // builders), part of meshes' settings hash: bumped, it recooks the meshes
 // and leaves the textures, whose encoding is most of a cook's time.
 //   1: levels of detail (mesh type version 2), root groups.
-#define COOK_MESH_VERSION 1U
+//   2: KHR_texture_transform baked into the texture coordinates.
+#define COOK_MESH_VERSION 2U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

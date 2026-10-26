@@ -220,25 +220,29 @@ NPH_MUST_USE NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMesh
                                             const CookMeshSettings *settings,
                                             NphRenderClusterLods *out);
 
-// Quantises the mesh and writes the HEAD, POSN, ATTR, INDX, SUBM, MLET,
-// MLBD, MLVX, and MLTR blobs into `writer`, and the levels of detail
-// (step 8) unless `settings` say not to; the meshlet bounds written are
-// recomputed from the dequantised positions. `levels`, where not NULL,
-// receives the levels written (1: level 0 alone).
-NPH_MUST_USE NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
-                                       const CookMeshSettings *settings, NphAssetWriter *writer,
-                                       u32 *levels);
-
 typedef struct CookMeshStats {
     u32 source_vertices;
     u32 source_triangles;
     u32 vertices;
     u32 triangles;
-    u32 meshlets;    // level 0's
-    u32 lod_levels;  // levels of detail written (1: level 0 alone)
+    u32 meshlets;   // level 0's
+    u32 lod_levels; // levels of detail written (1: level 0 alone)
+    // The coarsest level's size: what a distant instance draws at least.
+    u32 lod_coarsest_triangles;
+    u32 lod_coarsest_clusters;
     f32 acmr_before; // average cache miss ratio (32-entry FIFO) per triangle
     f32 acmr_after;
 } CookMeshStats;
+
+// Quantises the mesh and writes the HEAD, POSN, ATTR, INDX, SUBM, MLET,
+// MLBD, MLVX, and MLTR blobs into `writer`, and the levels of detail
+// (step 8) unless `settings` say not to; the meshlet bounds written are
+// recomputed from the dequantised positions. `stats`, where not NULL,
+// receives the levels written (1: level 0 alone) and the coarsest level's
+// triangles and clusters.
+NPH_MUST_USE NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
+                                       const CookMeshSettings *settings, NphAssetWriter *writer,
+                                       CookMeshStats *stats);
 
 // The whole pipeline: validate, clean, complete the attributes, optimise,
 // build meshlets, write. `stats` (may be NULL) receives what happened.
