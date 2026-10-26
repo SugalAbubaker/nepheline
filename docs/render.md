@@ -663,10 +663,14 @@ triangles overlap at most four times their count (a stalled level's error
 is its finest pieces', so halving its primitives would jump the error, and
 every distance between would draw the stalled triangles); coarser voxel
 groups take at least twice their inputs' cell and at most half their
-inputs' primitives. A voxel group's error is its cell. Every voxel level is
-made again from the triangles where they first became voxels, each in one
-cluster of each level (the cluster of the cell holding its centroid), never
-from finer voxels, which would lose the correlation the footprints measure.
+inputs' primitives (a group of a few voxels across the mesh's origin as few
+as it can have: the grid of every cell size divides each axis at zero, so
+it lies in two cells along each axis it crosses however large they grow;
+the pine sapling's trunk stands there). A voxel group's error is its cell.
+Every voxel level is made again from the triangles where they first became
+voxels, each in one cluster of each level (the cluster of the cell holding
+its centroid), never from finer voxels, which would lose the correlation the
+footprints measure.
 
 **A cell's voxel** (`lod_voxelize`). Each cell the triangles overlap
 (Akenine-Möller's triangle-box test) is probed by 16 x 16 jittered rays

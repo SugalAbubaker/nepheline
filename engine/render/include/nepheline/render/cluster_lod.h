@@ -50,7 +50,10 @@
 //     times their count, so that the error steps on from the stalled level's
 //     rather than jumping (a stalled level's error is its finest pieces');
 //   - above that, at least twice the inputs' cell, with at most half the
-//     inputs' primitives (voxels and triangles).
+//     inputs' primitives (voxels and triangles), or for a group of a few
+//     voxels across the mesh's origin as few as it can have: the grid of
+//     every cell size divides each axis at zero, so such a group lies in two
+//     cells along each axis it crosses however large they grow.
 // A group voxelizes the triangles its clusters hold, or for a voxel cluster
 // the triangles it was made from: every level of voxels is made from the
 // triangles where they first became voxels, each in one cluster of each
