@@ -128,12 +128,24 @@ static u32 spread10(u32 x)
     return x;
 }
 
+// A point's cell of 1024 along an axis, from its offset times the axis's
+// reciprocal extent. A subnormal extent's reciprocal is infinite: the
+// lowest point's 0 times it is NaN, which goes to cell 0 with everything
+// not above 0, as the conversion of a NaN to an integer is undefined.
+static u32 morton_cell(f32 offset, f32 inv_extent)
+{
+    const f32 t = offset * inv_extent * 1023.0F;
+    if (!(t > 0.0F)) {
+        return 0U;
+    }
+    return (u32)nph_f32_min(t, 1023.0F);
+}
+
 static u32 morton(NphVec3 p, NphVec3 lo, NphVec3 inv_extent)
 {
-    const NphVec3 t = nph_vec3_mul(nph_vec3_sub(p, lo), inv_extent);
-    const u32 x = (u32)nph_f32_clamp(t.x * 1023.0F, 0.0F, 1023.0F);
-    const u32 y = (u32)nph_f32_clamp(t.y * 1023.0F, 0.0F, 1023.0F);
-    const u32 z = (u32)nph_f32_clamp(t.z * 1023.0F, 0.0F, 1023.0F);
+    const u32 x = morton_cell(p.x - lo.x, inv_extent.x);
+    const u32 y = morton_cell(p.y - lo.y, inv_extent.y);
+    const u32 z = morton_cell(p.z - lo.z, inv_extent.z);
     return spread10(x) | (spread10(y) << 1U) | (spread10(z) << 2U);
 }
 

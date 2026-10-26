@@ -1088,6 +1088,38 @@ NTEST_F(ClusterLod, degenerate_and_non_manifold_triangles_do_not_break_the_level
     NTEST_EXPECT_EQ_UINT(seen_a, l->levels);
 }
 
+// Two quads in submeshes of their own, a cluster each, one at z = 0 and the
+// other a subnormal float above it (the fuzzer's, through the cooker): the
+// clusters' centres span less than a normal float along z, whose reciprocal
+// in their Morton order is infinite (0 times it, the lower centre's offset,
+// is NaN), and the levels still build, every cluster under a root.
+NTEST_F(ClusterLod, centres_a_subnormal_float_apart_still_order)
+{
+    TestMesh *m = &f->mesh;
+    const f32 tiny = nph_f32_from_bits(0x80U); // 1.8e-43
+    for (u32 q = 0; q < 2U; ++q) {
+        const f32 x = 2.0F * (f32)q;
+        const f32 z = q == 0U ? 0.0F : tiny;
+        const u32 first = m->indices.len;
+        const u32 v0 = mesh_vertex(m, nph_vec3(x, 0.0F, z), q);
+        const u32 v1 = mesh_vertex(m, nph_vec3(x + 1.0F, 0.0F, z), q);
+        const u32 v2 = mesh_vertex(m, nph_vec3(x + 1.0F, 1.0F, z), q);
+        const u32 v3 = mesh_vertex(m, nph_vec3(x, 1.0F, z), q);
+        mesh_tri(m, v0, v1, v2);
+        mesh_tri(m, v0, v2, v3);
+        const NphRenderIndexRange r = {first, m->indices.len - first};
+        NTEST_ASSERT_EQ_INT(NPH_ARRAY_PUSH(&m->ranges, r), NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(build_lods(m, f->a, &f->meshlets, &f->lods), NPH_RESULT_OK);
+    const NphRenderClusterLods *l = &f->lods;
+    NTEST_ASSERT_EQ_UINT(l->level0_clusters, 2U);
+    NTEST_EXPECT_NE_UINT(nph_f32_to_bits(l->clusters.bounds.data[0].center.z),
+                         nph_f32_to_bits(l->clusters.bounds.data[1].center.z));
+    for (u32 c = 0; c < l->clusters.meshlets.len; ++c) {
+        NTEST_EXPECT_LT_UINT(l->lods.data[c].parent, l->groups.len);
+    }
+}
+
 NTEST_F(ClusterLod, bad_input_is_refused)
 {
     make_grid(&f->mesh, 8U, 1.0F);
