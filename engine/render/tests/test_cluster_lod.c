@@ -526,6 +526,32 @@ NTEST_F(ClusterLod, a_curved_surface_simplifies_with_its_error_and_without_flips
 // The levels
 // ---------------------------------------------------------------------------
 
+// The triangles of every level of a torus around the y axis of radius 1
+// that do not face away from the tube's core circle (into the tube, or
+// across its surface).
+static u32 torus_inward(const NphRenderClusterLods *l, const TestMesh *mesh)
+{
+    u32 inward = 0U;
+    for (u32 c = 0; c < l->clusters.meshlets.len; ++c) {
+        const NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
+        for (u32 t = 0; t < m->triangle_count; ++t) {
+            NphVec3 p[3];
+            for (u32 k = 0; k < 3U; ++k) {
+                const u8 corner =
+                    l->clusters.triangles.data[((u64)m->triangle_offset + t) * 3U + k];
+                p[k] = mesh->positions.data[l->clusters.vertices.data[m->vertex_offset + corner]];
+            }
+            const NphVec3 cen =
+                nph_vec3_scale(nph_vec3_add(nph_vec3_add(p[0], p[1]), p[2]), 1.0F / 3.0F);
+            const f32 ring = nph_f32_sqrt(cen.x * cen.x + cen.z * cen.z);
+            const NphVec3 core = nph_vec3(cen.x / ring, 0.0F, cen.z / ring);
+            const NphVec3 n = nph_vec3_cross(nph_vec3_sub(p[1], p[0]), nph_vec3_sub(p[2], p[0]));
+            inward += nph_vec3_dot(n, nph_vec3_sub(cen, core)) > 0.0F ? 0U : 1U;
+        }
+    }
+    return inward;
+}
+
 NTEST_F(ClusterLod, the_levels_halve_down_to_a_root)
 {
     make_torus(&f->mesh, 128U, 48U, 1.0F, 0.35F); // 12,288 triangles
@@ -549,25 +575,7 @@ NTEST_F(ClusterLod, the_levels_halve_down_to_a_root)
     NTEST_EXPECT_LE_UINT(cluster_triangles(l, l->levels - 1U),
                          2U * NPH_RENDER_MESHLET_MAX_TRIANGLES);
     // Every level's triangles face away from the tube's core circle.
-    u32 inward = 0U;
-    for (u32 c = 0; c < l->clusters.meshlets.len; ++c) {
-        const NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
-        for (u32 t = 0; t < m->triangle_count; ++t) {
-            NphVec3 p[3];
-            for (u32 k = 0; k < 3U; ++k) {
-                const u8 corner =
-                    l->clusters.triangles.data[((u64)m->triangle_offset + t) * 3U + k];
-                p[k] = f->mesh.positions.data[l->clusters.vertices.data[m->vertex_offset + corner]];
-            }
-            const NphVec3 cen =
-                nph_vec3_scale(nph_vec3_add(nph_vec3_add(p[0], p[1]), p[2]), 1.0F / 3.0F);
-            const f32 ring = nph_f32_sqrt(cen.x * cen.x + cen.z * cen.z);
-            const NphVec3 core = nph_vec3(cen.x / ring, 0.0F, cen.z / ring);
-            const NphVec3 n = nph_vec3_cross(nph_vec3_sub(p[1], p[0]), nph_vec3_sub(p[2], p[0]));
-            inward += nph_vec3_dot(n, nph_vec3_sub(cen, core)) > 0.0F ? 0U : 1U;
-        }
-    }
-    NTEST_EXPECT_EQ_UINT(inward, 0U);
+    NTEST_EXPECT_EQ_UINT(torus_inward(l, &f->mesh), 0U);
 }
 
 NTEST_F(ClusterLod, every_cluster_has_one_maker_and_one_consumer)
@@ -1116,4 +1124,31 @@ NTEST_F(ClusterLod, bad_input_is_refused)
     in.attrib_stride = 0U;
     NTEST_EXPECT_EQ_INT(nph_render_cluster_lods_build(&in, &out), NPH_RESULT_INVALID_ARGUMENT);
     nph_render_cluster_lods_free(&out);
+}
+
+// No triangle of any level turns into the surface or stands across it,
+// however the input rounds: the same torus with its coordinates moved by a
+// few units in the last place, as another C library's sine and cosine move
+// them (glibc's put one triangle inward at level 7 where MSVC's did not,
+// before each corner's normals were checked on their own).
+NTEST_F(ClusterLod, no_level_turns_into_the_surface_however_the_input_rounds)
+{
+    for (u32 seed = 1; seed <= 8U; ++seed) {
+        mesh_free(&f->mesh);
+        mesh_init(&f->mesh, f->a);
+        make_torus(&f->mesh, 128U, 48U, 1.0F, 0.35F);
+        NphPcg32 rng;
+        nph_pcg32_seed(&rng, seed, 7U);
+        for (u32 i = 0; i < f->mesh.positions.len; ++i) {
+            NphVec3 *p = &f->mesh.positions.data[i];
+            p->x *= 1.0F + (f32)((i32)(nph_pcg32_next_u32(&rng) % 5U) - 2) * 1.2e-7F;
+            p->y *= 1.0F + (f32)((i32)(nph_pcg32_next_u32(&rng) % 5U) - 2) * 1.2e-7F;
+            p->z *= 1.0F + (f32)((i32)(nph_pcg32_next_u32(&rng) % 5U) - 2) * 1.2e-7F;
+        }
+        nph_render_cluster_lods_free(&f->lods);
+        nph_render_meshlets_free(&f->meshlets);
+        NTEST_ASSERT_EQ_INT(build_lods(&f->mesh, f->a, &f->meshlets, &f->lods), NPH_RESULT_OK);
+        NTEST_EXPECT_GE_UINT(f->lods.levels, 6U);
+        NTEST_EXPECT_EQ_UINT(torus_inward(&f->lods, &f->mesh), 0U);
+    }
 }

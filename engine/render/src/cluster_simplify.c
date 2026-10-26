@@ -50,6 +50,11 @@
 // up, and a triangle that turns that far is nearly folded over its
 // neighbour anyway.
 #define FLIP_COSINE 0.25F
+// A triangle a collapse leaves must face each of its corners' level-0
+// normals within about 84 degrees (this cosine): it stands for the surface
+// around each, and one that stands across it (a fin) or faces into it does
+// not, however much area the normals it merges have.
+#define REF_COSINE 0.1F
 // How far down the sorted candidates a pass may reach, in multiples of the
 // collapses its target still needs.
 #define PASS_REACH 2U
@@ -825,15 +830,20 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
         if (!(ln > 0.0F) || nph_vec3_dot(n_old, n_new) <= FLIP_COSINE * lo * ln) {
             return false;
         }
-        // The level-0 surface the triangle will stand for: its corners'
-        // normals, `from`'s merged into `to`'s.
+        // The level-0 surface the triangle will stand for, at each of its
+        // corners: the corner's merged normals (`from`'s into `to`'s), each
+        // of which it must face within REF_COSINE. A sum over the corners
+        // would let one corner that has merged much outweigh the others, and
+        // a triangle facing across the surface (a fin) or into it pass.
         const NphVec3 *normals = s->mesh->normals;
-        NphVec3 ref =
-            nph_vec3_add(normals[s->class_mesh.data[from]], normals[s->class_mesh.data[to]]);
-        ref = nph_vec3_add(ref, normals[s->class_mesh.data[others[0]]]);
-        ref = nph_vec3_add(ref, normals[s->class_mesh.data[others[1]]]);
-        if (nph_vec3_dot(ref, n_new) <= 0.0F) {
-            return false;
+        const NphVec3 corner_normals[3] = {
+            nph_vec3_add(normals[s->class_mesh.data[from]], normals[s->class_mesh.data[to]]),
+            normals[s->class_mesh.data[others[0]]], normals[s->class_mesh.data[others[1]]]};
+        for (u32 k = 0; k < 3U; ++k) {
+            const f32 lr = nph_vec3_length(corner_normals[k]);
+            if (lr > 0.0F && nph_vec3_dot(corner_normals[k], n_new) <= REF_COSINE * lr * ln) {
+                return false;
+            }
         }
     }
     LodQuadric q = s->mesh->quadrics[s->class_mesh.data[from]];
