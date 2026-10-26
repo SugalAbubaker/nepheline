@@ -25,10 +25,12 @@ static inline void fuzz_check_written_mesh(NphAllocator *alloc, NphAssetWriter *
     if (nph_asset_file_validate(image, size, &info) != NPH_RESULT_OK) {
         abort(); // the cooker wrote a file its own reader refuses
     }
-    NphAssetBlob blobs[16];
-    void *owned[16];
+    // A mesh writes at most 16 blobs (mesh.h: nine, five of levels, two of
+    // voxels); room to spare.
+    NphAssetBlob blobs[24];
+    void *owned[24];
     u32 count = 0U;
-    for (u32 i = 0; i < info.blob_count && i < 16U; ++i) {
+    for (u32 i = 0; i < info.blob_count && i < 24U; ++i) {
         const NphAssetBlobEntry *e = &info.blobs[i];
         void *raw = NPH_ALLOC(alloc, e->raw_size != 0U ? e->raw_size : 1U, e->alignment);
         if (raw == NULL || nph_asset_file_unpack_blob(image, e, raw) != NPH_RESULT_OK) {

@@ -331,8 +331,8 @@ static NphAABB bounds_of(const NphVec3 *positions, const u32 *indices, u32 count
 }
 
 NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
-                          const CookMeshSettings *settings, NphAssetWriter *writer,
-                          CookMeshStats *stats)
+                          const CookMeshSettings *settings, const struct CookVoxelMaterials *voxels,
+                          NphAssetWriter *writer, CookMeshStats *stats)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && writer != NULL);
     const NphLzLevel lz = settings->lz;
@@ -457,7 +457,7 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     nph_render_cluster_lods_init(&lods, alloc);
     bool with_lods = false;
     if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
-        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, &lods);
+        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, &lods);
         with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
     }
     // The records written: level 0's, or every level's (the same bytes as
@@ -485,12 +485,18 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
             stats->lod_levels = lods.levels;
             stats->lod_coarsest_triangles = 0U;
             stats->lod_coarsest_clusters = 0U;
+            stats->voxel_clusters = 0U;
             for (u32 k = 0; k < lods.lods.len; ++k) {
+                const bool voxel = c->meshlets.data[k].vertex_count == 0U;
+                stats->voxel_clusters += voxel ? 1U : 0U;
                 if (lods.lods.data[k].level == lods.levels - 1U) {
                     stats->lod_coarsest_clusters += 1U;
-                    stats->lod_coarsest_triangles += c->meshlets.data[k].triangle_count;
+                    stats->lod_coarsest_triangles +=
+                        voxel ? 0U : c->meshlets.data[k].triangle_count;
                 }
             }
+            stats->voxel_bricks = lods.bricks.len;
+            stats->voxels = lods.voxels.len;
         }
     }
     if (r == NPH_RESULT_OK) {
@@ -538,6 +544,8 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         lh.group_count = lods.groups.len;
         lh.group_cluster_count = lods.group_clusters.len;
         lh.node_count = lods.nodes.len;
+        lh.brick_count = lods.bricks.len;
+        lh.voxel_count = lods.voxels.len;
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh,
                                       NPH_ASSET_CODEC_NONE, 0U);
         if (r == NPH_RESULT_OK) {
@@ -556,6 +564,14 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         if (r == NPH_RESULT_OK) {
             r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, lods.nodes.data,
                                           NPH_ARRAY_BYTES(&lods.nodes), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK && lods.bricks.len != 0U) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, lods.bricks.data,
+                                          NPH_ARRAY_BYTES(&lods.bricks), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK && lods.voxels.len != 0U) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXELS, 0U, lods.voxels.data,
+                                          NPH_ARRAY_BYTES(&lods.voxels), NPH_ASSET_CODEC_LZ, 0U);
         }
     }
     nph_render_cluster_lods_free(&lods);
@@ -582,7 +598,8 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
 // ---------------------------------------------------------------------------
 
 NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
-                            NphAssetWriter *writer, CookMeshStats *stats)
+                            const struct CookVoxelMaterials *voxels, NphAssetWriter *writer,
+                            CookMeshStats *stats)
 {
     NPH_ASSERT(mesh != NULL && writer != NULL);
     CookMeshSettings settings;
@@ -617,7 +634,7 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
                                  settings.meshlet_cone_weight, &meshlets);
     st.lod_levels = 1U;
     if (r == NPH_RESULT_OK) {
-        r = cook_mesh_write(mesh, &meshlets, &settings, writer, &st);
+        r = cook_mesh_write(mesh, &meshlets, &settings, voxels, writer, &st);
     }
     st.vertices = mesh->vertices.len;
     st.triangles = mesh->indices.len / 3U;

@@ -39,7 +39,7 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--no-lods] [--threads N] [--quiet]
+         [--no-optimize] [--no-lods] [--voxels] [--threads N] [--quiet]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -296,6 +296,24 @@ A closed mesh stays closed.
    and flat-shaded ones, whose every vertex is a seam corner, stop early.
    The runtime's loaders hand the cooked meshlets and levels to the
    renderer as they are.
+
+   With `--voxels`, a glTF mesh's aggregate groups become voxels where
+   their collapses stall (docs/render.md "Voxels", ADR-0061), their look
+   sampled from the mesh's materials (`cook/voxel.h`): the base colour
+   (factor, vertex colour, and texture), metallic-roughness, occlusion,
+   and normal textures at each ray's hit, through the triangle's
+   interpolated attributes; a masked material's alpha against its cutoff
+   decides each hit; blended, emissive, and unlit materials never
+   voxelize. Each image a voxelized mesh needs is decoded once per scene
+   into an RGBA8 mip chain of at most 1,024 texels a side, box-filtered
+   (the base colour in linear light), and a hit reads it trilinearly at
+   the level of the ray spacing's footprint in texture space (the
+   triangle's texel density, as Akenine-Möller et al.'s ray cones do).
+   Voxels are off by default until the renderer draws them (ADR-0061's
+   third stage); editable meshes cook without them. A flat-shaded
+   aggregate stays triangles: each of its faces has vertices of its own,
+   so a meshlet fills at about 28 triangles and its groups stay under the
+   256 a group needs.
 
 Every step is deterministic: the same input gives the same bytes.
 

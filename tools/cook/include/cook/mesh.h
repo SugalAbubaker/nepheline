@@ -45,7 +45,10 @@
 //      positions and the quantised attributes (vertices at one position
 //      whose records differ are a seam the levels keep): every level's
 //      clusters go into the meshlet blobs, level 0's first, with the
-//      levels' records beside them.
+//      levels' records beside them; with `voxels` set and the mesh's
+//      materials given (cook/voxel.h), aggregate geometry's coarser levels
+//      are voxel clusters (render/voxel.h; ADR-0061), their bricks and
+//      voxels in VOXB and VOXA.
 //
 // The tangent convention is glTF's: bitangent = cross(normal, tangent.xyz)
 // * tangent.w points along decreasing v (up in the image), because glTF
@@ -112,6 +115,10 @@ typedef struct CookMeshSettings {
     f32 meshlet_cone_weight; // 0..1: how much normal-cone tightness counts against distance
     NphLzLevel lz;
     b32 no_lods; // level 0 alone: no levels of detail (step 8 skipped)
+    // Voxel levels for aggregate geometry where the mesh's materials are
+    // given (step 8; off by default until the renderer draws them, ADR-0061
+    // stage 3).
+    b32 voxels;
 } CookMeshSettings;
 
 // Defaults: optimised, the format's meshlet limits, cone weight 0.25,
@@ -210,14 +217,18 @@ void cook_meshlet_bounds(const NphVec3 *positions, const u32 *vertices, const u8
 // Writing and the whole pipeline
 // ---------------------------------------------------------------------------
 
+struct CookVoxelMaterials; // cook/voxel.h
+
 // The levels of detail of a quantised mesh (step 8) into `out`
 // (initialised by the caller): its level-0 `meshlets` with `bounds` of the
 // dequantised `positions`, and `attribs` as written, under `settings`'
-// meshlet limits.
+// meshlet limits; voxels for its aggregate geometry where `settings` ask
+// for them and `voxels` (one material per slot; may be NULL) are given.
 NPH_MUST_USE NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                             const NphVec3 *positions, const NphMeshAttrib *attribs,
                                             const NphMeshletBounds *bounds,
                                             const CookMeshSettings *settings,
+                                            const struct CookVoxelMaterials *voxels,
                                             NphRenderClusterLods *out);
 
 typedef struct CookMeshStats {
@@ -230,23 +241,31 @@ typedef struct CookMeshStats {
     // The coarsest level's size: what a distant instance draws at least.
     u32 lod_coarsest_triangles;
     u32 lod_coarsest_clusters;
+    // The voxel clusters, bricks, and voxels written (0 without voxels).
+    u32 voxel_clusters;
+    u32 voxel_bricks;
+    u32 voxels;
     f32 acmr_before; // average cache miss ratio (32-entry FIFO) per triangle
     f32 acmr_after;
 } CookMeshStats;
 
 // Quantises the mesh and writes the HEAD, POSN, ATTR, INDX, SUBM, MLET,
 // MLBD, MLVX, and MLTR blobs into `writer`, and the levels of detail
-// (step 8) unless `settings` say not to; the meshlet bounds written are
+// (step 8) unless `settings` say not to, with their voxels (VOXB, VOXA)
+// where cook_mesh_build_lods makes some; the meshlet bounds written are
 // recomputed from the dequantised positions. `stats`, where not NULL,
-// receives the levels written (1: level 0 alone) and the coarsest level's
-// triangles and clusters.
+// receives the levels written (1: level 0 alone), the coarsest level's
+// triangles and clusters, and the voxels'.
 NPH_MUST_USE NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
-                                       const CookMeshSettings *settings, NphAssetWriter *writer,
-                                       CookMeshStats *stats);
+                                       const CookMeshSettings *settings,
+                                       const struct CookVoxelMaterials *voxels,
+                                       NphAssetWriter *writer, CookMeshStats *stats);
 
 // The whole pipeline: validate, clean, complete the attributes, optimise,
-// build meshlets, write. `stats` (may be NULL) receives what happened.
+// build meshlets, write. `voxels` (may be NULL) are the mesh's materials
+// for voxel levels. `stats` (may be NULL) receives what happened.
 NPH_MUST_USE NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings,
+                                         const struct CookVoxelMaterials *voxels,
                                          NphAssetWriter *writer, CookMeshStats *stats);
 
 // The average cache miss ratio of a triangle list for a FIFO vertex cache

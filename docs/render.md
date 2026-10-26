@@ -637,9 +637,11 @@ landscape's pine sapling stops at 95,716 triangles in 1,539 clusters, and a
 forest of them drawn at that level overflows every list. Given a material
 sampler, the builder makes such groups voxels instead (ADR-0061;
 `render/voxel.h`, `cluster_voxel.c`), as Nanite's foliage does (Epic,
-"Nanite Foliage", UE 5.7). This is the first of ADR-0061's stages: the
+"Nanite Foliage", UE 5.7). ADR-0061's first two stages are in: the
 voxels, their levels, the traversal and the shading model's terms on the
-CPU. The renderer refuses meshes with voxel clusters until it draws them.
+CPU, then the mesh format (docs/asset.md) and the cooker's material sampler
+(docs/cook.md, `--voxels`). The renderer refuses meshes with voxel clusters
+until it draws them, so the cooker makes them only when asked.
 
 **The records.** A voxel cluster is a cluster whose meshlet record has no
 vertices: `triangle_count` bricks from `vertex_offset`, at most 32 bricks

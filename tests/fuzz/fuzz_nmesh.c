@@ -3,12 +3,14 @@
 // CLAUDE.md §8.8 "every parser is fuzzed; malformed input must never
 // crash"). A `.nmesh` document that reads must validate, write back to text
 // that reads again to the same mesh, stay valid when its faces are
-// extruded, and cook into a mesh the runtime can view.
+// extruded, and cook into a mesh the runtime can view, with voxel levels
+// where it is aggregate geometry (render/voxel.h; ADR-0061).
 #include <nepheline/core/log.h>
 
 #include "fuzz_mesh_check.h"
 
 #include <cook/polymesh.h>
+#include <cook/voxel.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -40,6 +42,9 @@ static void round_trip(NphAllocator *alloc, const CookPolyMesh *m)
     nph_sb_free(&text);
 }
 
+// The material slots a document's faces name.
+#define FUZZ_MAX_SLOTS 64U
+
 static void cook(NphAllocator *alloc, const CookPolyMesh *m)
 {
     CookMesh mesh;
@@ -47,10 +52,20 @@ static void cook(NphAllocator *alloc, const CookPolyMesh *m)
         CookMeshSettings settings;
         cook_mesh_settings_default(&settings);
         settings.lz = NPH_LZ_LEVEL_FAST;
+        settings.voxels = 1;
+        // Every slot the default material, opaque and untextured: the
+        // voxelizer runs wherever the mesh is aggregate.
+        CookVoxelMaterial slots[FUZZ_MAX_SLOTS];
+        NphMaterialHeader h;
+        nph_material_header_default(&h);
+        for (u32 i = 0; i < FUZZ_MAX_SLOTS; ++i) {
+            cook_voxel_material_init(&slots[i], &h);
+        }
+        CookVoxelMaterials materials = {slots, FUZZ_MAX_SLOTS};
         NphAssetWriter w;
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("fuzz"), 0U);
-        if (cook_mesh_process(&mesh, &settings, &w, NULL) == NPH_RESULT_OK) {
+        if (cook_mesh_process(&mesh, &settings, &materials, &w, NULL) == NPH_RESULT_OK) {
             fuzz_check_written_mesh(alloc, &w);
         }
         nph_asset_writer_free(&w);

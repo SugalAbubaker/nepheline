@@ -170,6 +170,54 @@ def mesh_lod_blobs():
     ]
 
 
+def mesh_voxel_blobs():
+    """The triangle with a coarser level of voxels (mesh.h version 3): its
+    meshlet at level 0, made by group 0 into a voxel cluster of one brick
+    holding a box and a capsule, under root group 1."""
+    none = 0xFFFFFFFF
+    flt_max = 3.4028234663852886e38
+    base = dict((b[0], b) for b in mesh_blobs())
+    header = bytearray(base["HEAD"][4])
+    struct.pack_into("<I", header, 12, 2)  # meshlet_count
+    header = bytes(header)
+    meshlets = struct.pack("<IIHHI", 0, 0, 3, 1, 0) + struct.pack("<IIHHI", 0, 0, 0, 1, 0)
+    bound = base["MLBD"][4]
+    lods = struct.pack("<8I", 2, 1, 2, 2, 1, 1, 2, 0)
+    clusters = struct.pack("<4I", none, 0, 0, 0) + struct.pack("<4I", 0, 1, 1, 0)
+    groups = struct.pack("<5f3I", 0.5, 0.5, 0.0, 0.71, 0.25, 0, 0, 1) + \
+        struct.pack("<5f3I", 0.5, 0.5, 0.0, 0.71, flt_max, 1, 1, 1)
+    members = struct.pack("<2I", 0, 1)
+    spheres = struct.pack("<4f", 0.5, 0.5, 0.0, 0.71) * 2 + bytes(16 * 6)
+    errors = struct.pack("<8f", 0.25, flt_max, 0, 0, 0, 0, 0, 0)
+    maker_errors = struct.pack("<8f", 0.0, 0.25, 0, 0, 0, 0, 0, 0)
+    children = struct.pack("<8I", 0x80000000, 0x80000001, *([none] * 6))
+    node = spheres + errors + maker_errors + children
+    assert len(node) == 224
+    brick = struct.pack("<4f4I", 0.0, 0.0, -0.125, 0.25, 1, 1 << 31, 0, 0)
+    whole = (31 << 15) | (31 << 20) | (31 << 25)
+    voxels = struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x00104080, whole) + \
+        struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x80104080, whole | (2 << 30))
+    blobs = []
+    for b in mesh_blobs():
+        if b[0] == "HEAD":
+            blobs.append(("HEAD", 0, 0, 16, header, header))
+        elif b[0] == "MLET":
+            blobs.append(("MLET", 0, 0, 16, meshlets, meshlets))
+        elif b[0] == "MLBD":
+            blobs.append(("MLBD", 0, 0, 16, bound * 2, bound * 2))
+        else:
+            blobs.append(b)
+    return blobs + [
+        ("LODS", 0, 0, 16, lods, lods),
+        ("LODC", 0, 0, 16, clusters, clusters),
+        ("LODG", 0, 0, 16, groups, groups),
+        ("LODM", 0, 0, 16, members, members),
+        ("LODN", 0, 0, 16, node, node),
+        ("VOXB", 0, 0, 16, brick, brick),
+        ("VOXA", 0, 1, 16, voxels, lz_literals(voxels)),
+    ]
+
+
 def texture_blobs():
     """A 4x2 RGBA8 texture with two mips, the base mip LZ-compressed."""
     header = struct.pack("<16I", 4, 2, 2, 1, 3, 0, 0, *([0] * 9))
@@ -322,6 +370,7 @@ def main():
                                         ("DATA", 1, 0, 64, b"stored", b"stored")]))
     write(os.path.join(CORPUS, "nph", "mesh"), nph_file(fourcc("MESH"), 1, mesh_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_lod"), nph_file(fourcc("MESH"), 2, mesh_lod_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_voxels"), nph_file(fourcc("MESH"), 3, mesh_voxel_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))

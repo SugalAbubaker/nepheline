@@ -647,7 +647,7 @@ NTEST(mesh, a_mesh_without_triangles_writes_an_empty_asset)
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("empty"), 1U);
     CookMeshStats st;
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, &st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, &st), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_UINT(st.triangles, 0U);
     NTEST_ASSERT_EQ_UINT(st.meshlets, 0U);
     TestAsset ta;
@@ -737,7 +737,7 @@ NTEST(mesh, the_pipeline_writes_a_valid_asset)
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("cube"), 1U);
         CookMeshStats st;
-        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, &st), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, &st), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_UINT(st.source_vertices, 24U);
         NTEST_ASSERT_EQ_UINT(st.source_triangles, 12U);
         NTEST_ASSERT_EQ_UINT(st.triangles, 12U);
@@ -796,7 +796,7 @@ NTEST(mesh, written_bounds_hold_for_the_dequantised_positions)
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("grid"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, NULL), NPH_RESULT_OK);
     TestAsset ta;
     test_asset_from_writer(alloc, &w, &ta);
     nph_asset_writer_free(&w);
@@ -855,7 +855,7 @@ NTEST(mesh, several_submeshes_and_no_optimize)
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("grid"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, NULL), NPH_RESULT_OK);
     TestAsset ta;
     test_asset_from_writer(alloc, &w, &ta);
     nph_asset_writer_free(&w);
@@ -898,7 +898,7 @@ static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshSta
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("lods"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, &w, st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, st), NPH_RESULT_OK);
     test_asset_from_writer(alloc, &w, ta);
     nph_asset_writer_free(&w);
     cook_mesh_free(&m);
