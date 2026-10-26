@@ -8,6 +8,9 @@
 nph_add_module(render
     SOURCES
         src/ao.c
+        src/cluster_lod.c
+        src/cluster_lod_internal.h
+        src/cluster_simplify.c
         src/debug_draw.c
         src/dof.c
         src/frame.c
@@ -45,6 +48,7 @@ nph_add_test(render
     SOURCES
         tests/test_ao.c
         tests/test_boxes.h
+        tests/test_cluster_lod.c
         tests/test_dof.c
         tests/test_frame.c
         tests/test_gi.c
