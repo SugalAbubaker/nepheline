@@ -391,6 +391,40 @@ NTEST_F(GpuFixture, frames_alternate_slots_and_recycle)
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
 }
 
+// A wait for the device between frames recycles every slot, which reads
+// the slot's results; the next frame in the slot recycles it again: the
+// results of the frame that last used it stand (they were lost before:
+// read twice, the second time from a pool reset since).
+NTEST_F(GpuFixture, timestamps_survive_a_wait_between_frames)
+{
+    REQUIRE_DEVICE(f);
+    for (u32 i = 0; i < 2U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+        if (i >= NPH_GPU_FRAMES_IN_FLIGHT) {
+            u64 frame = 0U;
+            const u64 *ticks = NULL;
+            u32 count = 0U;
+            // Checked without returning: the frame must still end.
+            NTEST_EXPECT_TRUE(nph_gpu_frame_timestamps(f->dev, &frame, &ticks, &count));
+            NTEST_EXPECT_EQ_UINT(frame, i - NPH_GPU_FRAMES_IN_FLIGHT);
+            NTEST_EXPECT_EQ_UINT(count, 2U);
+        }
+        NphGpuCmd *cmd = NULL;
+        NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_GRAPHICS, "frame", &cmd),
+                            NPH_RESULT_OK);
+        (void)nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
+        (void)nph_gpu_cmd_write_timestamp(cmd, (u32)NPH_GPU_STAGE_ALL);
+        nph_gpu_cmd_end(cmd);
+        NphGpuSubmitDesc sd;
+        memset(&sd, 0, sizeof sd);
+        sd.cmds = &cmd;
+        sd.cmd_count = 1U;
+        NTEST_ASSERT_EQ_INT(nph_gpu_submit(f->dev, &sd, NULL), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    }
+}
+
 NTEST_F(GpuFixture, frame_misuse_is_asserted)
 {
     REQUIRE_DEVICE(f);

@@ -53,6 +53,9 @@ static void fill_defaults(NphGpuDeviceDesc *d)
     if (d->timestamp_queries_per_frame == 0U) {
         d->timestamp_queries_per_frame = 1024U;
     }
+    if (d->accel_queries_per_frame == 0U) {
+        d->accel_queries_per_frame = 4096U;
+    }
     if (d->bindless_sampled_images == 0U) {
         d->bindless_sampled_images = 65536U;
     }

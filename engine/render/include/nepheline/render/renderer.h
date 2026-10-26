@@ -703,11 +703,16 @@ typedef struct NphRenderFrameStats {
     // bottom-level structures it built (each once, in the first frame that
     // traces after the mesh's creation); and whether it rebuilt the top
     // level over the instances (the reference every frame; the production
-    // path when instances changed, after a frame that traced nothing, or
-    // when the camera moved more than 16 m from where it last built it).
+    // path when instances changed, after a frame that traced nothing, when
+    // the camera moved more than 16 m from where it last built it, or the
+    // frame after compacted bottom levels were swapped in). The bottom
+    // levels are compacted a few frames after their builds: the bytes they
+    // hold now, and how many the frame swapped in compacted.
     b32 shadow_rays;
     u32 shadow_builds;
     b32 shadow_rebuild;
+    u32 shadow_compactions;
+    u64 shadow_blas_bytes;
     // The production path's GPU counters, read back from the frame that
     // completed NPH_GPU_FRAMES_IN_FLIGHT frames ago (vis_frame); zero
     // until one has. On that path `instances` above is the live count,

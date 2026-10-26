@@ -956,6 +956,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     }
     stats.shadow_builds = r->rt.frame_builds;
     stats.shadow_rebuild = rt && r->rt.frame_rebuild ? 1 : 0;
+    stats.shadow_compactions = r->rt.frame_compactions;
+    stats.shadow_blas_bytes = r->rt.blas_bytes;
     // Depth of field over the complete HDR image, whose image with it the
     // rest of the frame reads; then bloom (glowing from the blurred image)
     // and the metering.

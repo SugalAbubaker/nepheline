@@ -220,6 +220,14 @@ typedef struct NphGpuFrameSlot {
     u32 query_result_count;
     b32 query_results_valid;
     u64 query_frame_index;
+    // Compacted sizes of bottom levels (with ray queries), as the timestamps.
+    VkQueryPool accel_pool;
+    NphAtomicU32 accel_next;
+    u32 accel_cap;
+    u64 *accel_results;
+    u32 accel_result_count;
+    b32 accel_results_valid;
+    u64 accel_frame_index;
     u64 staging_bytes; // staging ring bytes the frame's uploads hold until it completes
 } NphGpuFrameSlot;
 

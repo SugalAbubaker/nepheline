@@ -455,6 +455,16 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     return nph_gpu_upload_buffer(r->dev, v->meshes, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
+NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u64 address)
+{
+    if (!r->vis.supported) {
+        return NPH_RESULT_OK;
+    }
+    return nph_gpu_upload_buffer(r->dev, r->vis.meshes,
+                                 (u64)slot * sizeof(NphVisMesh) + offsetof(NphVisMesh, blas),
+                                 &address, sizeof address);
+}
+
 NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d,
                                  u32 lod_depth)
 {
