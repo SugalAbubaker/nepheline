@@ -162,14 +162,17 @@ NphResult nph_wav_parse(const void *data, u64 size, NphWavInfo *out)
         const u64 body = at + 8U;
         const u64 available = size - body;
         if (wav_tag(chunk, "fmt ")) {
-            if (chunk_size > available) {
+            // One format, one data chunk: a second format would describe
+            // the data already measured in another (its frames and size
+            // from the first, its reads at the second's width, past it).
+            if (chunk_size > available || have_fmt) {
                 return NPH_RESULT_PARSE_ERROR;
             }
             NPH_TRY(wav_parse_fmt(p + body, chunk_size, out));
             have_fmt = true;
         } else if (wav_tag(chunk, "data")) {
-            if (!have_fmt) {
-                return NPH_RESULT_PARSE_ERROR; // the format must come first
+            if (!have_fmt || have_data) {
+                return NPH_RESULT_PARSE_ERROR; // the format first, the data once
             }
             const u64 bytes = chunk_size > available ? available : chunk_size;
             out->frames = bytes / out->bytes_per_frame;

@@ -268,6 +268,28 @@ NTEST(audio_wav, what_the_reader_refuses)
     wb_u32(&w, 0U);
     wb_finish(&w);
     NTEST_ASSERT_EQ_INT(nph_wav_parse(w.data, w.size, &info), NPH_RESULT_PARSE_ERROR);
+    // A second format after the data (the fuzzer's: 8-bit data read as
+    // 32-bit frames ran past its end), before it, and a second data chunk.
+    const u8 samples[6] = {0x80U, 0x81U, 0x82U, 0x83U, 0x84U, 0x85U};
+    for (u32 i = 0U; i < 3U; ++i) {
+        wb_riff(&w);
+        wb_fmt(&w, 1U, 1U, 22050U, 8U);
+        if (i == 1U) {
+            wb_fmt(&w, 3U, 6U, 48000U, 32U);
+        }
+        wb_tag(&w, "data");
+        wb_u32(&w, 6U);
+        wb_bytes(&w, samples, 6U);
+        if (i == 0U) {
+            wb_fmt(&w, 3U, 6U, 48000U, 32U);
+        } else if (i == 2U) {
+            wb_tag(&w, "data");
+            wb_u32(&w, 2U);
+            wb_bytes(&w, samples, 2U);
+        }
+        wb_finish(&w);
+        NTEST_ASSERT_EQ_INT(nph_wav_parse(w.data, w.size, &info), NPH_RESULT_PARSE_ERROR);
+    }
 }
 
 NTEST(audio_wav, truncation_never_faults)

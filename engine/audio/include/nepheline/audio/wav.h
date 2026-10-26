@@ -55,7 +55,7 @@ typedef struct NphWavInfo {
 
 // Describes the WAV file image [data, data + size). NPH_RESULT_PARSE_ERROR
 // for a malformed container (sizes beyond the image, no 'fmt ' or 'data',
-// a format chunk too short); NPH_RESULT_UNSUPPORTED for a valid file in a
+// either of them twice, a format chunk too short); NPH_RESULT_UNSUPPORTED for a valid file in a
 // format the reader does not take (compressed, more than eight channels, a
 // rate out of range, bit depths other than those above). A data chunk that
 // claims more bytes than the file holds is truncated to whole frames (a
