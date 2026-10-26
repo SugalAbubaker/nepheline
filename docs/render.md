@@ -499,19 +499,24 @@ surface, past level 0's own chords
 up and each group's sphere holds those of the groups that made its
 clusters, so one threshold cuts the levels in one consistent place. The
 levels stop at one cluster, or when a level takes off less than a tenth of
-the triangles. The build is deterministic and takes about 11 µs a triangle
-on one thread (`cluster_lod_torus_262k`, benchmarks/render).
+the triangles (a flat-shaded mesh, whose every vertex is a seam corner,
+stops at once). The coarsest level's clusters are grouped as any level's,
+into root groups whose error is the largest float: so a mesh that stops
+early with hundreds of coarse clusters (foliage, seams everywhere) has them
+culled and handed on a few at a time. The build is deterministic and takes
+about 11 µs a triangle on one thread (`cluster_lod_torus_262k`,
+benchmarks/render).
 
-**The hierarchy.** Each level's groups, in Morton order of their centres,
-lie under a tree of nodes of eight children; the levels' trees and the root
-group lie under node 0. A child (a node or a group) records its sphere,
+**The hierarchy.** Each level's groups, and the root groups, in Morton
+order of their centres, lie under trees of nodes of eight children, the
+trees under node 0. A child (a node or a group) records its sphere,
 the largest group error below it, and the smallest error of the groups that
 made the clusters below it (0 where level 0 is). Every sphere is the union
 of its parts rounded up in double precision, so it holds them exactly.
 
 **The cut.** A cluster is drawn when the group that made it projects an
-error within the threshold and the group that consumes it does not; the
-root group (error the largest float) always does. With `k` the pixels a unit
+error within the threshold and the group that consumes it does not; a
+root group (error the largest float) never does. With `k` the pixels a unit
 spans at a distance of one over the threshold, a group of error `e` and
 sphere (`c`, `r`) under an instance of scale `s` is too coarse when
 `s e k > max(|c| - s r, near)`. One function, `vis_lod_group_too_coarse`,
@@ -522,7 +527,11 @@ would be drawn at two levels or at none.
 
 **The walk.** `vis cull instances` hands a visible instance of a mesh with
 levels to the walk as its hierarchy's root (an (instance, node) work item),
-instead of handing on its meshlets. Each step of `vis cull nodes`
+instead of handing on its meshlets, unless even the finest group that
+consumes level 0 (`NphVisMesh.lod_level0_error`) is surely too coarse from
+the far side of the instance's sphere: then the cut is level 0 whole, and
+the instance hands on level 0's meshlets as a mesh without levels does
+(near instances, most of Bistro's). Each step of `vis cull nodes`
 (`vis_cull_nodes.comp`) takes two of the hierarchy's levels: a work item
 takes 64 lanes, one per child and grandchild of its node. A lane takes a
 child that is too coarse (the walk's test of a node is loosened past the
@@ -560,6 +569,11 @@ takes 3.70 ms; at level 0 (`lod_4k_level0`) 4.30 million and 3.99 ms, the
 culling and raster passes 0.70 ms against 0.99. The walk visits 4,700 nodes
 in three steps a phase, 0.040 ms in phase 0 and 0.029 ms in phase 1; an
 empty step costs 2.7 µs. ADR-0060 records how it got there from 0.192 ms.
+Bistro cooked with its levels (docs/cook.md, step 8), against itself at
+level 0 (`render_perf --lod-error=0`), interleaved: street +0.03 ms, walk
+-0.02, turn 0.00, terrace 0.00, hedge -0.02, within the runs' spread of
+0.05 to 0.1 ms; the street draws 1.15 million triangles against 1.42, its
+walk 0.03 + 0.02 ms. Its geometry is near, where level 0 is the cut.
 
 ### A frame
 
