@@ -152,6 +152,32 @@ typedef struct NphRenderClusterLodInput {
 NPH_MUST_USE NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
                                                      NphRenderClusterLods *out);
 
+// The most cuts nph_render_lod_cuts makes, and the most entries the
+// renderer's table may hold (the shadow map's work items carry an entry in
+// 24 bits).
+#define NPH_RENDER_LOD_MAX_CUTS        32U
+#define NPH_RENDER_LOD_MAX_CUT_ENTRIES (1U << 24U)
+
+// Cuts of a mesh's levels at thresholds that do not depend on distance (a
+// view whose every point needs one error, as the sun's shadow map needs a
+// texel of a level): for each power of two T = 2^(exp0 + i), i < count, the
+// clusters whose maker's error is at most T and whose consumer's is more,
+// which is a cut as any threshold makes it, watertight. exp0 is the largest
+// below the smallest error above 0 (below 2^exp0 the cut is level 0), and
+// the last cut, from which on it is the coarsest level, holds the largest
+// error short of the root groups'. At most NPH_RENDER_LOD_MAX_CUTS, and at
+// most `max_entries` u32 in the table, the finest cuts dropped first.
+// `table` (cleared first) receives count + 1 offsets into itself, then each
+// cut's clusters in index order: cut i is table[table[i] .. table[i + 1]).
+// A cluster's cuts are a run (from the first threshold at least its maker's
+// error to the last below its consumer's), so the work follows the clusters
+// and the entries. NPH_RESULT_INVALID_ARGUMENT where even the coarsest cut
+// does not fit, NPH_RESULT_OUT_OF_MEMORY on failure.
+NPH_MUST_USE NphResult nph_render_lod_cuts(const NphRenderClusterLod *lods, u32 cluster_count,
+                                           const NphRenderLodGroup *groups, u32 group_count,
+                                           u32 max_entries, i32 *out_exp0, u32 *out_count,
+                                           NphArrayU32 *table);
+
 // The error, in pixels, that a group's sphere and error project to for a
 // camera at `camera` (mesh space, the error and radius scaled by
 // `scale`): error * pixels_per_unit / max(distance to the sphere's nearest

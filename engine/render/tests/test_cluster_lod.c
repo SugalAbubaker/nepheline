@@ -774,6 +774,120 @@ NTEST_F(ClusterLod, every_cut_of_a_closed_mesh_is_closed)
     NPH_ARRAY_FREE(&tris);
 }
 
+// The cuts at uniform thresholds (nph_render_lod_cuts, the shadow map's):
+// each closed on a torus, the first level 0, the last the coarsest level,
+// and fewer triangles as the threshold grows.
+NTEST_F(ClusterLod, cuts_at_uniform_thresholds_are_closed)
+{
+    make_torus(&f->mesh, 128U, 48U, 1.0F, 0.35F);
+    NTEST_ASSERT_EQ_INT(build_lods(&f->mesh, f->a, &f->meshlets, &f->lods), NPH_RESULT_OK);
+    const NphRenderClusterLods *l = &f->lods;
+    NphArrayU32 table;
+    NPH_ARRAY_INIT(&table, f->a);
+    i32 exp0 = 0;
+    u32 count = 0U;
+    NTEST_ASSERT_EQ_INT(nph_render_lod_cuts(l->lods.data, l->lods.len, l->groups.data,
+                                            l->groups.len, NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0,
+                                            &count, &table),
+                        NPH_RESULT_OK);
+    NTEST_LOG("%u cuts from 2^%d, %u entries for %u clusters", count, exp0, table.len, l->lods.len);
+    NTEST_ASSERT_GE_UINT(count, 2U);
+    NTEST_ASSERT_LE_UINT(count, NPH_RENDER_LOD_MAX_CUTS);
+    NTEST_ASSERT_EQ_UINT(table.data[count], table.len);
+    NphArrayU32 tris;
+    NPH_ARRAY_INIT(&tris, f->a);
+    u32 prev = NPH_U32_MAX;
+    for (u32 i = 0; i < count; ++i) {
+        NPH_ARRAY_CLEAR(&tris);
+        u32 levels = 0U;
+        for (u32 k = table.data[i]; k < table.data[i + 1U]; ++k) {
+            const u32 c = table.data[k];
+            levels |= 1U << nph_min_u32(l->lods.data[c].level, 31U);
+            const NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
+            for (u32 t = 0; t < (u32)m->triangle_count * 3U; ++t) {
+                const u8 corner = l->clusters.triangles.data[(u64)m->triangle_offset * 3U + t];
+                NPH_IGNORE_RESULT(
+                    NPH_ARRAY_PUSH(&tris, l->clusters.vertices.data[m->vertex_offset + corner]));
+            }
+        }
+        i32 euler = 0;
+        const bool ok = closed(f->a, f->mesh.positions.data, &tris, &euler);
+        NTEST_LOG("cut %u (2^%d): %u triangles, levels 0x%x, euler %d", i, exp0 + (i32)i,
+                  tris.len / 3U, levels, euler);
+        NTEST_EXPECT_TRUE(ok);
+        NTEST_EXPECT_EQ_INT(euler, 0);
+        NTEST_EXPECT_LE_UINT(tris.len, prev);
+        if (i == 0U) {
+            NTEST_EXPECT_EQ_UINT(levels, 1U); // level 0
+        }
+        if (i == count - 1U) {
+            NTEST_EXPECT_EQ_UINT(levels, 1U << (l->levels - 1U)); // the coarsest
+        }
+        prev = tris.len;
+    }
+    // Every cut is its definition, cluster for cluster in index order: the
+    // clusters whose maker's error is at most T and whose consumer's more.
+    u32 mismatches = 0U;
+    for (u32 i = 0; i < count; ++i) {
+        const f32 t = nph_f32_from_bits((u32)(exp0 + (i32)i + 127) << 23U);
+        u32 k = table.data[i];
+        for (u32 c = 0; c < l->lods.len; ++c) {
+            const NphRenderClusterLod *cl = &l->lods.data[c];
+            const f32 made =
+                cl->group == NPH_RENDER_LOD_NONE ? 0.0F : l->groups.data[cl->group].error;
+            const f32 consumed =
+                cl->parent == NPH_RENDER_LOD_NONE ? NPH_F32_MAX : l->groups.data[cl->parent].error;
+            const bool listed = k < table.data[i + 1U] && table.data[k] == c;
+            mismatches += (made <= t && consumed > t) != listed ? 1U : 0U;
+            k += listed ? 1U : 0U;
+        }
+        mismatches += k != table.data[i + 1U] ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(mismatches, 0U);
+    NPH_ARRAY_FREE(&tris);
+    NPH_ARRAY_FREE(&table);
+}
+
+// A table capped one entry short of its size drops the finest cut and keeps
+// the others as they were; one too small for the coarsest cut alone is
+// refused.
+NTEST_F(ClusterLod, a_full_cut_table_drops_the_finest_cuts_first)
+{
+    make_torus(&f->mesh, 128U, 48U, 1.0F, 0.35F);
+    NTEST_ASSERT_EQ_INT(build_lods(&f->mesh, f->a, &f->meshlets, &f->lods), NPH_RESULT_OK);
+    const NphRenderClusterLods *l = &f->lods;
+    NphArrayU32 full;
+    NPH_ARRAY_INIT(&full, f->a);
+    NphArrayU32 capped;
+    NPH_ARRAY_INIT(&capped, f->a);
+    i32 exp0 = 0;
+    u32 count = 0U;
+    NTEST_ASSERT_EQ_INT(nph_render_lod_cuts(l->lods.data, l->lods.len, l->groups.data,
+                                            l->groups.len, NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0,
+                                            &count, &full),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_GE_UINT(count, 3U);
+    i32 exp1 = 0;
+    u32 count1 = 0U;
+    NTEST_ASSERT_EQ_INT(nph_render_lod_cuts(l->lods.data, l->lods.len, l->groups.data,
+                                            l->groups.len, full.len - 1U, &exp1, &count1, &capped),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(exp1, exp0 + 1);
+    NTEST_EXPECT_EQ_UINT(count1, count - 1U);
+    NTEST_EXPECT_LE_UINT(capped.len, full.len - 1U);
+    for (u32 i = 0; i < count1; ++i) {
+        const u32 n = capped.data[i + 1U] - capped.data[i];
+        NTEST_ASSERT_EQ_UINT(n, full.data[i + 2U] - full.data[i + 1U]);
+        NTEST_EXPECT_EQ_MEM(capped.data + capped.data[i], full.data + full.data[i + 1U],
+                            (u64)n * sizeof(u32));
+    }
+    NTEST_EXPECT_EQ_INT(nph_render_lod_cuts(l->lods.data, l->lods.len, l->groups.data,
+                                            l->groups.len, 2U, &exp1, &count1, &capped),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NPH_ARRAY_FREE(&capped);
+    NPH_ARRAY_FREE(&full);
+}
+
 NTEST_F(ClusterLod, seams_and_material_borders_are_kept)
 {
     make_seamed_torus(&f->mesh, 96U, 32U, 1.0F, 0.35F);

@@ -715,15 +715,17 @@ static NphResult make_buffer(NphRenderer *r, const void *data, u64 size, u32 usa
 }
 
 // Meshlets given with a mesh are checked so far as the GPU's reads stay
-// inside the streams: every range, local corner, and vertex index. That
-// they cover their submeshes' triangles exactly is the caller's contract.
+// inside the streams: every range, local corner, and vertex index; and
+// they number fewer than 2^24, the bits the shadow map's work items give a
+// meshlet beside its level (vsm_cull.comp). That they cover their
+// submeshes' triangles exactly is the caller's contract.
 static NphResult validate_meshlets(const NphRenderMeshDesc *d)
 {
     if (d->meshlets == NULL) {
         return NPH_RESULT_OK;
     }
-    if (d->meshlet_count == 0U || d->meshlet_bounds == NULL || d->meshlet_vertices == NULL ||
-        d->meshlet_triangles == NULL) {
+    if (d->meshlet_count == 0U || d->meshlet_count >= (1U << 24U) || d->meshlet_bounds == NULL ||
+        d->meshlet_vertices == NULL || d->meshlet_triangles == NULL) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < d->meshlet_vertex_count; ++i) {

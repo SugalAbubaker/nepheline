@@ -345,7 +345,11 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     }
     const NphVec3 d = nph_vec3_normalize(r->lights[v->sun_slot].desc.direction);
     const NphDVec3 camera = view->camera.position;
-    bool reset = !v->continuous || nph_f32_to_bits(d.x) != nph_f32_to_bits(v->direction.x) ||
+    // Casters with levels of detail are drawn at their cuts or at level 0
+    // (vsm_cull.comp): pages drawn one way are stale the other.
+    const b32 lods = view->lod_error > 0.0F ? 1 : 0;
+    bool reset = !v->continuous || lods != v->lods ||
+                 nph_f32_to_bits(d.x) != nph_f32_to_bits(v->direction.x) ||
                  nph_f32_to_bits(d.y) != nph_f32_to_bits(v->direction.y) ||
                  nph_f32_to_bits(d.z) != nph_f32_to_bits(v->direction.z);
     const NphDVec3 from_anchor = {camera.x - v->anchor.x, camera.y - v->anchor.y,
@@ -451,6 +455,7 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->max_draws = r->desc.max_vsm_draws;
     vv->reset = reset ? 1U : 0U;
     v->direction = d;
+    v->lods = lods;
     v->continuous = 1;
     v->frame_active = 1;
     v->view_address = r->frame_addresses[r->frame_slot] + r->layout.vsm_view_offset;

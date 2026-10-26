@@ -1704,6 +1704,12 @@ NTEST_F(Vis, meshlets_given_or_built_draw_the_same)
     broken.triangle_count = 125U;
     NTEST_EXPECT_EQ_INT(nph_render_mesh_create(f->renderer, &bad, &none),
                         NPH_RESULT_INVALID_ARGUMENT);
+    // So many meshlets that the shadow map's 24 bits would not index them,
+    // refused before any is read (the arrays hold far fewer).
+    bad = md;
+    bad.meshlet_count = 1U << 24U;
+    NTEST_EXPECT_EQ_INT(nph_render_mesh_create(f->renderer, &bad, &none),
+                        NPH_RESULT_INVALID_ARGUMENT);
 
     md.meshlets = NULL;
     NphRenderMesh built;

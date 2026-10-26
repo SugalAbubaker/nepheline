@@ -316,7 +316,7 @@ something it shows changes.
 | `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
 | `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
-| `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
+| `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets (a mesh with levels of detail: its cut for the level, below): a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
 | `vsm statistics` | the counters, read back two frames later |
@@ -362,6 +362,41 @@ the pages under its bounding sphere, old and new, since a shadow map's
 texel holds the nearest caster along the light; a dirty page is drawn
 again (with every caster in it) when next requested. The sun turning, the
 anchor moving, or a production frame without the map drops every page.
+
+**Levels of detail.** A caster with levels of detail ("Levels of detail"
+below) is drawn into a level's pages at one cut for the whole level, not
+at the camera's: every texel of a level has the level's size, so one error
+suits all of it, half a texel (`VSM_LOD_TEXELS`), which the receiver's
+offset of 1.5 texels along its normal covers with a texel to spare. A mesh
+carries cuts at the powers of two of its own units, made when it is
+created (`nph_render_lod_cuts`): for a threshold T, the clusters whose
+maker's error is at most T and whose consumer's is more, so that each is
+closed as every cut of the hierarchy is; at most 32, from the largest
+power of two below the mesh's smallest error to the first past its
+largest, and at most 2^24 entries (the finest dropped first). `vsm cull
+instances` takes the largest threshold within half a texel at the
+instance's scale, from the float's exponent, and hands on that cut's
+entries in the table in place of the mesh's meshlets (level 0 where even
+the finest is too coarse, the last cut, the coarsest level, past it);
+`vsm cull meshlets` reads each entry's cluster, one load among many in
+flight, where the instance cull's expansion would wait on it round after
+round. The cut follows the instance's scale and the level alone, so a
+page drawn stays right while the camera moves; an instance's change
+redraws its pages as before, and turning the levels on or off (a
+threshold of 0) drops every page.
+
+With the sun moving every frame at a day-night cycle's pace
+(`lod_shadows_sun_4k_production`: the terrain and 1,024 rocks of
+`lod_4k_production`, every one of 750 pages drawn again each frame), the
+cuts take the caster draws from 326,586 to 58,039 and the raster from 8.08
+to 1.54 ms, the frame from 11.95 to 5.37 ms; the instance cull falls from
+0.103 to 0.026 ms (fewer meshlets to hand on), and the meshlet cull, which
+reads the entries, from 0.058 to 0.049 ms. Where pages stay drawn (the
+camera walking in that scene, `lod_shadows_walk_4k_production`, and in
+Bistro's street, cooked with levels) the map draws a page or a few a frame,
+and nothing measurable changes: the culls within a microsecond, the frames
+within the runs' spread (interleaved, -0.011 and +0.008 ms in Bistro). The
+tables hold about 1.2 entries a cluster (367 for the test torus's 297).
 
 **Shading.** The resolve and the blended surfaces look the sun's
 visibility up once per point, before the light loop (inside it, the
@@ -549,10 +584,12 @@ deepest live hierarchy needs, half its node levels rounded up (`vis_lod_steps`
 in the frame's statistics). Phase 0 walks the instances it found visible;
 phase 1 those phase 0 deferred, against this frame's pyramid.
 
-A threshold of 0 turns the walk off: every mesh draws level 0's meshlets,
-the same image byte for byte as the mesh without levels. The reference
-renderer, the sun's shadow map's pages, and the bottom levels of the shadow
-rays and the radiance cache draw level 0 for now.
+A threshold of 0 turns the levels off: every mesh draws level 0's
+meshlets, in the view and in the shadow map's pages, the same image byte
+for byte as the mesh without levels. The sun's shadow map draws cuts of its
+own ("The sun's virtual shadow map", above); the reference renderer and the
+bottom levels of the shadow rays and the radiance cache draw level 0 for
+now.
 
 **Creation.** `nph_render_mesh_create` checks the levels so far as the
 GPU's reads stay inside their streams and its walk ends (every index; a tree
@@ -1721,8 +1758,11 @@ and synchronisation-validation gate:
   pages, and a far one none; a camera move reusing the pages it had; the
   sun turning redrawing everything; a full pool coarsening the levels
   until they fit, and the bias falling once there is room; agreement with
-  the rays it replaces (98 % of pixels within two levels); and the scene
-  10,000 km from the origin.
+  the rays it replaces (98 % of pixels within two levels); the scene
+  10,000 km from the origin; and a torus with levels out of view, whose
+  shadow drawn at the map's cut is its level-0 shadow away from the edges,
+  inside and out, from fewer draws, turning the levels on redrawing every
+  page (with three of the cut's clusters dropped, pixels inside differ).
 - **Bloom and exposure** (`test_post.c`): the metering's mean between its
   percentiles and the EV100 it gives, against the shaders' arithmetic; a
   uniform image kept by bloom on both pipelines and under temporal
@@ -1806,11 +1846,10 @@ path and logs what the GPU culled.
 
 ## Limitations (future work)
 
-- Levels of detail (ADR-0060): the sun's shadow map's pages, the shadow
-  rays' and radiance cache's bottom levels, and the reference renderer draw
-  level 0; the error is geometric only (normals and texture coordinates
-  inside a coarse level are not measured); the cooker does not yet store
-  the levels, and they are not streamed.
+- Levels of detail (ADR-0060): the shadow rays' and radiance cache's
+  bottom levels and the reference renderer draw level 0; the error is
+  geometric only (normals and texture coordinates inside a coarse level are
+  not measured); the levels are not streamed.
 
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many

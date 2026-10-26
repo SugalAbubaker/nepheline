@@ -35,7 +35,8 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 176U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 192U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_cuts) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) % 16U == 0U,
                   "a mesh record's stride keeps each record at the 16 bytes buffer references "
                   "declare (the resolve indexes them as VisMeshRef(...)[i])");
@@ -363,6 +364,22 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
         rec->lod_level0_error =
             nph_f32_min(rec->lod_level0_error, d->lod_groups[d->cluster_lods[i].parent].error);
     }
+    // The cuts at uniform thresholds the sun's shadow map draws (vsm_cull.comp).
+    NphArrayU32 table;
+    NPH_ARRAY_INIT(&table, r->alloc);
+    i32 exp0 = 0;
+    u32 count = 0U;
+    NphResult cuts =
+        nph_render_lod_cuts(d->cluster_lods, d->meshlet_count, d->lod_groups, d->lod_group_count,
+                            NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0, &count, &table);
+    if (cuts == NPH_RESULT_OK) {
+        cuts = upload_stream(r, table.data, NPH_ARRAY_BYTES(&table), "mesh lod cuts", &m->lod_cuts);
+    }
+    NPH_ARRAY_FREE(&table);
+    NPH_TRY(cuts);
+    rec->lod_cut_exp0 = exp0;
+    rec->lod_cut_count = count;
+    rec->lod_cuts = nph_gpu_buffer_address(r->dev, m->lod_cuts);
     // Without the levels (a view at threshold 0, the shadow map's pages),
     // the mesh draws level 0's meshlets.
     rec->meshlet_count = d->lod_level0_meshlets;
@@ -482,6 +499,7 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->lod_groups);
     nph_gpu_buffer_destroy(r->dev, m->lod_group_clusters);
     nph_gpu_buffer_destroy(r->dev, m->lod_makers);
+    nph_gpu_buffer_destroy(r->dev, m->lod_cuts);
     m->meshlets = NPH_GPU_BUFFER_NULL;
     m->meshlet_bounds = NPH_GPU_BUFFER_NULL;
     m->meshlet_vertices = NPH_GPU_BUFFER_NULL;
@@ -491,6 +509,7 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     m->lod_groups = NPH_GPU_BUFFER_NULL;
     m->lod_group_clusters = NPH_GPU_BUFFER_NULL;
     m->lod_makers = NPH_GPU_BUFFER_NULL;
+    m->lod_cuts = NPH_GPU_BUFFER_NULL;
     if (m->lod_depth != 0U) {
         r->vis.lod_depths[m->lod_depth - 1U] -= 1U;
         m->lod_depth = 0U;

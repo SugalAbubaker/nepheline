@@ -297,8 +297,9 @@ typedef struct NphRenderMeshDesc {
     // them, `meshlets` are every level's clusters, level 0's first
     // (`lod_level0_meshlets` of them, which cover the submeshes as above),
     // and the production path draws the clusters of the level each part of
-    // the mesh needs for the view's threshold (NphRenderView.lod_error); the
-    // reference renderer, shadow rays, and the shadow map's pages draw level 0.
+    // the mesh needs for the view's threshold (NphRenderView.lod_error), the
+    // sun's shadow map the cut its levels' texels allow; the reference
+    // renderer and shadow rays draw level 0.
     const NphRenderClusterLod *cluster_lods; // per meshlet
     const NphRenderLodGroup *lod_groups;
     u32 lod_group_count;
@@ -656,7 +657,7 @@ typedef struct NphRenderView {
     // Levels of detail (the production path; docs/render.md "Levels of
     // detail"): the most pixels a mesh's coarser levels may lie from its own
     // surface where they are drawn instead (1 by default). 0 draws every
-    // mesh at level 0.
+    // mesh at level 0, in the shadow map's pages too.
     f32 lod_error;
     // Global illumination (the production path where the device has ray
     // queries; docs/render.md "Global illumination"): the diffuse light
