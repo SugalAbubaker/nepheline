@@ -723,7 +723,7 @@ NBENCH(mesh_process)
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("bench"), 0U);
         nbench_resume_timing(state);
-        check(cook_mesh_process(&m, &settings, NULL, &w, &stats));
+        check(cook_mesh_process(&m, &settings, NULL, NULL, &w, &stats));
         nbench_pause_timing(state);
         nph_asset_writer_free(&w);
         cook_mesh_free(&m);

@@ -646,7 +646,7 @@ NTEST(mesh, a_mesh_without_triangles_writes_an_empty_asset)
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("empty"), 1U);
     CookMeshStats st;
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, &st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, &st), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_UINT(st.triangles, 0U);
     NTEST_ASSERT_EQ_UINT(st.meshlets, 0U);
     TestAsset ta;
@@ -736,7 +736,7 @@ NTEST(mesh, the_pipeline_writes_a_valid_asset)
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("cube"), 1U);
         CookMeshStats st;
-        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, &st), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, &st), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_UINT(st.source_vertices, 24U);
         NTEST_ASSERT_EQ_UINT(st.source_triangles, 12U);
         NTEST_ASSERT_EQ_UINT(st.triangles, 12U);
@@ -795,7 +795,7 @@ NTEST(mesh, written_bounds_hold_for_the_dequantised_positions)
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("grid"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, NULL), NPH_RESULT_OK);
     TestAsset ta;
     test_asset_from_writer(alloc, &w, &ta);
     nph_asset_writer_free(&w);
@@ -854,7 +854,7 @@ NTEST(mesh, several_submeshes_and_no_optimize)
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("grid"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, NULL), NPH_RESULT_OK);
     TestAsset ta;
     test_asset_from_writer(alloc, &w, &ta);
     nph_asset_writer_free(&w);
@@ -876,9 +876,10 @@ NTEST(mesh, several_submeshes_and_no_optimize)
     cook_mesh_free(&m);
 }
 
-// Cooking `m` (a copy is made) with or without levels; the asset's view in
-// `ta` (freed by the caller).
-static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshStats *st)
+// Cooking `m` (a copy is made) with or without levels, on `jobs` (NULL: on
+// this thread); the asset's view in `ta` (freed by the caller).
+static void cook_on(const CookMesh *src, bool lods, NphJobSystem *jobs, TestAsset *ta,
+                    CookMeshStats *st)
 {
     NphAllocator *alloc = nph_allocator_system();
     CookMesh m;
@@ -897,10 +898,15 @@ static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshSta
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("lods"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, &w, st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, jobs, &w, st), NPH_RESULT_OK);
     test_asset_from_writer(alloc, &w, ta);
     nph_asset_writer_free(&w);
     cook_mesh_free(&m);
+}
+
+static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshStats *st)
+{
+    cook_on(src, lods, NULL, ta, st);
 }
 
 // A mesh of many meshlets is cooked with its levels (step 8): level 0's
@@ -976,9 +982,21 @@ NTEST(mesh, the_pipeline_writes_levels_of_detail)
         NTEST_EXPECT_TRUE((v.lod_groups[cl->parent].error == NPH_F32_MAX) ==
                           (cl->level == v.lod->levels - 1U));
     }
-    // Deterministic, bytes and all.
+    // Deterministic, bytes and all, and the same built on jobs.
     NTEST_ASSERT_EQ_UINT(with.size, again.size);
     NTEST_EXPECT_EQ_MEM(with.image, again.image, with.size);
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NphJobSystem *jobs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    TestAsset on_jobs;
+    cook_on(&src, true, jobs, &on_jobs, &st);
+    nph_job_system_destroy(jobs);
+    NTEST_ASSERT_EQ_UINT(on_jobs.size, with.size);
+    NTEST_EXPECT_EQ_MEM(on_jobs.image, with.image, with.size);
+    test_asset_free(&on_jobs);
     test_asset_free(&with);
     test_asset_free(&without);
     test_asset_free(&again);

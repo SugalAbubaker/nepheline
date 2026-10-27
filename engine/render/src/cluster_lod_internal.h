@@ -51,10 +51,6 @@ typedef struct LodMesh {
     u32 *class_vertex;
     u32 *absorbed_next;
     u32 *absorbed_tail;
-    // Scratch, NPH_U32_MAX between uses: each group's simplification sets
-    // and resets only the entries its triangles touch.
-    u32 *local_wedge; // per vertex
-    u32 *local_class; // per class
 } LodMesh;
 
 // Welds the mesh and builds its level-0 quadrics: each triangle's plane,
@@ -70,7 +66,9 @@ void lod_mesh_free(LodMesh *m, NphAllocator *alloc);
 // One group's simplification: its triangles (wedge indices, rewritten in
 // place and compacted to the first `*out_triangles`), each one's submesh,
 // and which classes may not move (`locked`, per class: the classes the
-// group shares with its neighbours).
+// group shares with its neighbours). A group reads and writes the mesh's
+// quadrics, normals and lists for its own classes alone, the locked ones
+// among them, so groups that share no class may be simplified at once.
 typedef struct LodSimplifyInput {
     LodMesh *mesh;
     u32 *indices;
@@ -78,8 +76,8 @@ typedef struct LodSimplifyInput {
     u32 triangle_count;
     const u8 *locked;
     u32 target_triangles;
-    NphArrayU32 *orphans; // NULL, or takes the classes left without a triangle
-    NphAllocator *scratch;
+    NphArrayU32 *orphans;  // NULL, or takes the classes left without a triangle
+    NphAllocator *scratch; // NPH_THREADSAFE where groups are simplified at once
 } LodSimplifyInput;
 
 // Collapses edges, cheapest first, until the group has at most

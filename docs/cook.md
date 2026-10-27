@@ -50,8 +50,11 @@ editable meshes are cooked in sorted order. `--root` is the source root that ide
 output directory receives the cooked files and the database; `--pack`
 then writes every asset the database knows into one archive. The exit
 status is 0 when every source cooked or was current, 1 when one failed,
-and 2 for a usage error. Block encoding runs on the job system
-(`--threads`, default cores - 1).
+and 2 for a usage error. Block encoding and the meshes' levels of detail
+run on the job system (`--threads`, default cores - 1), to the same bytes
+as on one thread. Each mesh's log line is followed by where its time went:
+the cleaning, attributes and welding, the reordering, the meshlets, the
+levels, and the blobs' compression.
 
 The asset_viewer sample cooks its content this way as part of the build
 (`samples/CMakeLists.txt`): a custom command runs the freshly built
@@ -291,9 +294,14 @@ A closed mesh stays closed.
    records differ are a seam the levels keep. Every level's clusters are
    written in place of level 0's (level 0's first and unchanged), with the
    levels' blobs. A mesh whose levels stop at once (one meshlet, or nothing
-   to simplify) is written without them. Bistro's 1.75 million triangles in
-   551 meshes take about a minute; most of its meshes get 3 to 8 levels,
-   and flat-shaded ones, whose every vertex is a seam corner, stop early.
+   to simplify) is written without them. Each level's groups are built as
+   jobs (docs/render.md "The build at once"). Bistro's 1.75 million
+   triangles in 551 meshes take about a minute; most of its meshes get 3 to
+   8 levels, and flat-shaded ones, whose every vertex is a seam corner, stop
+   early. The open landscape (`benchmarks/scenes/landscape.json`, with voxels)
+   cooks in 6 minutes on fifteen workers, against 20 on one thread: its pine's
+   largest mesh (7.0 million triangles) in 58 s, its levels 33 of them, against
+   309.
    The runtime's loaders hand the cooked meshlets and levels to the
    renderer as they are.
 
