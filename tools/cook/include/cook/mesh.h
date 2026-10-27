@@ -247,6 +247,16 @@ typedef struct CookMeshStats {
     u32 voxels;
     f32 acmr_before; // average cache miss ratio (32-entry FIFO) per triangle
     f32 acmr_after;
+    // Where the time went, in nanoseconds: validation, cleaning, the
+    // attributes and welding; the reordering; the meshlets; the levels of
+    // detail; the blobs' compression; and all of it (quantisation and
+    // bounds are the rest).
+    u64 prepare_ns;
+    u64 optimize_ns;
+    u64 meshlets_ns;
+    u64 lods_ns;
+    u64 blobs_ns;
+    u64 total_ns;
 } CookMeshStats;
 
 // Quantises the mesh and writes the HEAD, POSN, ATTR, INDX, SUBM, MLET,
@@ -255,7 +265,7 @@ typedef struct CookMeshStats {
 // where cook_mesh_build_lods makes some; the meshlet bounds written are
 // recomputed from the dequantised positions. `stats`, where not NULL,
 // receives the levels written (1: level 0 alone), the coarsest level's
-// triangles and clusters, and the voxels'.
+// triangles and clusters, the voxels', and the levels' and the blobs' times.
 NPH_MUST_USE NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
                                        const CookMeshSettings *settings,
                                        const struct CookVoxelMaterials *voxels,

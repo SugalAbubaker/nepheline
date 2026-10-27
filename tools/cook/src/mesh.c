@@ -7,6 +7,7 @@
 #include <nepheline/math/geometry.h>
 #include <nepheline/math/pack.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/platform/time.h>
 
 #include <cook/mesh.h>
 #include <string.h>
@@ -338,6 +339,8 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     const NphLzLevel lz = settings->lz;
     if (stats != NULL) {
         stats->lod_levels = 1U;
+        stats->lods_ns = 0U;
+        stats->blobs_ns = 0U;
     }
     NPH_TRY(cook_mesh_validate(mesh));
     if (meshlets->bounds.len != meshlets->meshlets.len || meshlets->triangles.len % 3U != 0U) {
@@ -457,9 +460,14 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     nph_render_cluster_lods_init(&lods, alloc);
     bool with_lods = false;
     if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
+        const u64 lods_start = nph_time_now_ns();
         r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, &lods);
         with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
+        if (stats != NULL) {
+            stats->lods_ns = nph_time_now_ns() - lods_start;
+        }
     }
+    const u64 blobs_start = nph_time_now_ns();
     // The records written: level 0's, or every level's (the same bytes as
     // the renderer's records, render/cluster_lod.h).
     const void *out_meshlets = meshlets->meshlets.data;
@@ -574,6 +582,9 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
                                           NPH_ARRAY_BYTES(&lods.voxels), NPH_ASSET_CODEC_LZ, 0U);
         }
     }
+    if (stats != NULL) {
+        stats->blobs_ns = nph_time_now_ns() - blobs_start;
+    }
     nph_render_cluster_lods_free(&lods);
     if (positions != NULL) {
         NPH_FREE_ARRAY(alloc, NphVec3, positions, nph_max_u32(vn, 1U));
@@ -612,6 +623,7 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
     memset(&st, 0, sizeof st);
     st.source_vertices = mesh->vertices.len;
     st.source_triangles = mesh->indices.len / 3U;
+    const u64 start = nph_time_now_ns();
     NPH_TRY(cook_mesh_validate(mesh));
     NPH_TRY(cook_mesh_remove_degenerate(mesh));
     if ((mesh->flags & (u32)COOK_MESH_HAS_NORMALS) == 0U) {
@@ -623,19 +635,25 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
         NPH_TRY(cook_mesh_generate_tangents(mesh));
     }
     st.acmr_before = cook_mesh_acmr(mesh->indices.data, mesh->indices.len, 32U);
+    const u64 optimize_start = nph_time_now_ns();
     if (!settings.no_optimize) {
         NPH_TRY(cook_mesh_optimize(mesh));
     }
     st.acmr_after = cook_mesh_acmr(mesh->indices.data, mesh->indices.len, 32U);
+    const u64 meshlets_start = nph_time_now_ns();
     CookMeshlets meshlets;
     cook_meshlets_init(&meshlets, mesh->alloc);
     NphResult r =
         cook_mesh_build_meshlets(mesh, settings.meshlet_vertices, settings.meshlet_triangles,
                                  settings.meshlet_cone_weight, &meshlets);
+    st.prepare_ns = optimize_start - start;
+    st.optimize_ns = meshlets_start - optimize_start;
+    st.meshlets_ns = nph_time_now_ns() - meshlets_start;
     st.lod_levels = 1U;
     if (r == NPH_RESULT_OK) {
         r = cook_mesh_write(mesh, &meshlets, &settings, voxels, writer, &st);
     }
+    st.total_ns = nph_time_now_ns() - start;
     st.vertices = mesh->vertices.len;
     st.triangles = mesh->indices.len / 3U;
     st.meshlets = meshlets.meshlets.len;
