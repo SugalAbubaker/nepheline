@@ -63,9 +63,10 @@ A **voxel cluster** is a cluster of the hierarchy whose primitives are bricks. I
 holds at most 32 bricks, all of one cell size, and at most 1,024 voxels. A **brick** is
 4 × 4 × 4 cells of one size: its lowest corner and cell size (mesh space), a 64-bit
 occupancy mask (bit x + 4y + 16z), and the index of its first voxel, its other voxels
-following in bit order. That is 32 bytes. Bricks lie on a grid aligned to four cells
-of their size from the mesh's origin, so neighbouring clusters' bricks of one size
-never overlap.
+following in bit order. That is 32 bytes. A cluster's bricks' voxels follow one
+another in the bricks' order, so the cluster's voxel k is its first brick's first
+voxel plus k. Bricks lie on a grid aligned to four cells of their size from the
+mesh's origin, so neighbouring clusters' bricks of one size never overlap.
 
 A **voxel** (16 bytes) is what the cell's geometry looks like from outside, at the
 cell's scale:
@@ -212,24 +213,42 @@ The meshlet cull hands voxel clusters to a raster list of their own,
 
 ### The raster (`vis_voxel_raster.comp`)
 
-The raster uses one workgroup per voxel cluster.
+The raster uses one workgroup per voxel cluster and splats its voxels, an invocation
+per voxel.
 
 1. **Rays.** A pixel's ray runs from the camera through its point on the near plane.
    The projection is reverse-Z with an infinite far plane, so a hit at parameter t
    along that ray has depth exactly 1/t.
-2. **Bricks to pixels.** Each brick's box is projected to a pixel rectangle. A
-   prefix sum over the rectangles spreads the pixels evenly over the workgroup.
-3. **Traversal.** Each pixel's ray goes into mesh space through the inverse of the
-   instance's linear part. It then walks its brick's cells with Amanatides & Woo's
-   traversal ("A Fast Voxel Traversal Algorithm for Ray Tracing", Eurographics
-   1987), testing each occupied cell's footprint, so at most ten cells per ray.
-4. **Output.** The first hit is written with the atomic maximum, as triangles are.
-   The 7-bit primitive field names the brick.
+2. **Voxels to pixels.** Each voxel projects its footprint's box (a capsule's widened
+   by its radius, within its cell) to the pixel centres it may cover. The box's
+   corners lie on its brick's grid of 32nds of a cell, so its centre and half-extents
+   reach clip space as steps along that grid, which are the same for the whole cluster
+   since its bricks share a cell size. The projection lies within
+   `(r_x + |x_c / w_c| r_w) / (w_c − r_w)` of the centre's in x, and likewise in y,
+   where r_x and r_w are the half-extents' reach in clip x and w; it is widened by a
+   64th of a pixel against rounding. A voxel wholly behind the near plane covers
+   nothing.
+3. **Pairs.** A subgroup pools its voxels' (voxel, pixel) pairs, a prefix sum and a
+   binary search spreading them over its lanes, so the rays' tests fill the lanes
+   whichever voxels cover pixels. At the first voxel levels a cell is about a pixel
+   and a footprint a fraction of its cell, so about one voxel in five covers a pixel's
+   centre.
+4. **The test.** Each pair's ray goes into mesh space through the inverse of the
+   instance's linear part and is tested against that voxel alone: the ray's span
+   through the voxel's cell, from the cell's own planes, then the footprint over
+   that span. Cells are powers of two and their corners small multiples of them, so
+   those planes are exact, and the test depends on nothing but the ray and the
+   voxel.
+5. **Output.** A hit is written with the atomic maximum, as triangles are, so the
+   nearest voxel wins. The 7-bit primitive field names the brick.
 
-The traversal is one `precise` function. The resolve and the radiance cache's update
-call it again for the pixel, find the same voxel, and get the box face it entered as
-the geometric normal. That normal offsets the shadow lookups and keys the radiance
-cache, as a triangle's normal does.
+The test is one `precise` function. The resolve and the radiance cache's update find
+the pixel's voxel again in the brick the visibility buffer names: they test the cell
+holding the ray's point at the stored depth, then the two cells along each axis whose
+centres lie nearest that point (which hold it whatever its rounding), and stop at the
+first whose hit gives the stored depth again, bit for bit. They get the box face the
+ray entered as the geometric normal. That normal offsets the shadow lookups and keys
+the radiance cache, as a triangle's normal does.
 
 ### The shading (`vis_voxel_resolve.comp`)
 
@@ -277,8 +296,8 @@ one draw per (cluster, page) as triangles have:
 
 - The mesh shader, or the vertex shader on the indirect path, emits one quad per brick
   over the brick's bounds in the page.
-- The fragment shader walks the light's ray through the brick with the same
-  traversal, then either writes the hit's depth or discards. The quad lies at the
+- The fragment shader tests the light's ray against the brick's voxels with the same
+  test, then either writes the nearest hit's depth or discards. The quad lies at the
   brick's nearest depth, so the written depth only moves away from the light and the
   depth layout keeps early rejection.
 
@@ -316,15 +335,28 @@ way, against level 0 at the same distances:
   many needles, are nearly isotropic and agree within a few per cent.
 
 - **Cost.** `render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
-  needles, 82 million triangles at level 0, at 4K from head height) draws 146,338 voxel
-  clusters of 3.27 million bricks a frame: 9.6 ms on the RTX 3060 Ti, its voxel raster
-  5.5 ms, against 5.6 ms for the same shrubs' stalled triangle levels
-  (`foliage_4k_triangles`) and 6.6 ms at level 0. At the first voxel levels a cell of a
-  pixel holds about one needle's length of a cell, so the voxels number about what the
-  triangles they replace do (the build allows up to four times as many, to switch
-  early), and each costs a ray's walk through its brick where a triangle costs the
-  raster's few operations. Exact pixel rectangles and the instance's ray hoisted out of
-  the pixel loop took the raster from 10.6 ms to 5.5 ms.
+  needles, 82 million triangles at level 0, at 4K from head height) draws about
+  145,000 voxel clusters of 3.2 million bricks and 24 million voxels a frame: 7.6 ms
+  on the RTX 3060 Ti, its voxel raster 3.4 ms and the voxel resolve 0.069 ms, against
+  5.6 ms for the same shrubs' stalled triangle levels (`foliage_4k_triangles`) and 6.6
+  ms at level 0. A voxel costs the raster about what a triangle does (some 140 ps
+  against 146), but at the first voxel levels a cell of a pixel holds about one
+  needle's length of a cell, the voxels number about twice the triangles of the
+  stalled levels, and four in five of them cover no pixel's centre. The splat is bound
+  by the latency of its dependent loads, not by memory or registers ("Alternatives
+  considered"). Splatting took the raster from 5.5 ms to 3.4 ms; exact pixel
+  rectangles and the instance's ray hoisted out of the pixel loop had taken it from
+  10.6 ms to 5.5 ms before.
+- **The first voxel level's budget.** At four times the triangles they replace (the
+  build's rule), the first voxel levels cover 3.7 to 7.1 % more pixels than level 0 at
+  24 and 40 m and reflect 9.6 to 10 % more light a pixel. At one times, the frame is
+  5.8 ms (the stalled triangles' 5.6), but the voxels start later, and the simplified
+  triangle levels drawn in their place cover 11.6 to 12.5 % fewer pixels than level 0
+  there and reflect 9 % less light a pixel. On light a pixel the two err by about as
+  much, either way; on coverage the voxels are the closer. The triangles' error is the
+  simplifier thinning needles below a pixel, which shows as a canopy that thins and
+  pops, where the voxels' excess of light is the lobe's limit, which the follow-ups
+  below address. The budget stays at four times.
 - **Frames without voxels.** Until the renderer holds a mesh with voxel levels, the
   meshlet cull and the resolve are specialised without the voxels' routing and test
   (`k_voxels`), and the voxel passes and their tile list are left out: `render_perf`'s
@@ -339,12 +371,11 @@ way, against level 0 at the same distances:
 The tests hold the coverage to 8 % and the light to 12 % as they stand. The next work,
 before stage 5 measures the landscape and before the cooker makes voxels by default:
 
-- the raster's cost: voxels splatted to their pixels where a brick's are few (with
-  each cell's span along the ray computed from its coordinates in both twins, so that
-  a splat meets a voxel exactly where the traversal does), bricks tested against the
-  depth pyramid, and the first voxel level's budget measured against the stalled
-  triangles' cost rather than set at four times their count; on denser foliage like
-  the landscape's pines, where a cell aggregates many needles;
+- the raster's cost: each voxel's cell tested against the pixel centres before its
+  record is read (a voxel whose cell covers no centre needs no record), bricks
+  tested against the depth pyramid, and a shorter chain of dependent loads in the
+  prologue; on denser foliage like the landscape's pines, where a cell aggregates
+  many needles;
 - the accuracy: a visibility sharpness per voxel in place of the constant 2.8, fitted
   in the build to the diffuse responses its hits give from each axis (a byte from the
   normal's encoding), and footprints sized against oblique views as well as the axes;
@@ -358,8 +389,9 @@ each measured against level 0 on these needles and on the landscape's own pines.
 2. The mesh format (version 3: `VOXB` bricks, `VOXA` voxels), the loader's checks,
    the cooker's sampler, and fuzzing. Done (PR #113).
 3. The renderer: the voxel raster list, raster, and resolve, the radiance cache's
-   surface point, statistics, and the debug views. Done. Until stage 4 the shadow
-   map's uniform cuts end below the first that holds a voxel cluster. The cooker's
+   surface point, statistics, and the debug views. Done (PR #114; the splat raster,
+   PR #115). Until stage 4 the shadow map's uniform cuts end below the first that
+   holds a voxel cluster. The cooker's
    voxels stay opt-in (`--voxels`): on sparse foliage the raster's first voxel
    levels still cost more than the stalled triangles they replace ("Accuracy"), and
    they become the default once it draws the reference scenes' foliage faster.
@@ -398,6 +430,23 @@ each measured against level 0 on these needles and on the landscape's own pines.
   shadow map's cuts, and switch where the cut does.
 - **Billboards and impostors.** Flat, view-dependent, and alpha-tested; excluded by
   §8.6 for our content.
+- **Each pixel of a brick's rectangle walking the brick's cells** (stage 3's first
+  raster, with Amanatides & Woo's traversal, "A Fast Voxel Traversal Algorithm for Ray
+  Tracing", Eurographics 1987). On `foliage_4k_production` its 14.9 million rays took
+  59.7 million steps and 15.2 million footprint tests for 1.78 million hits, since a
+  brick's rectangle is mostly pixels that no footprint covers: 5.5 ms against the
+  splat's 3.4. A cell's span along a ray also came from the walk's running sums, so
+  only a pass that walked the same way met a voxel at the same t.
+- **The resolve's search over all eight cells nearest the depth's point**, without
+  the point's own cell first and the stop at the stored depth: the voxel resolve took
+  0.104 ms against 0.068.
+- **A faster splat by registers or by queueing**: the workgroup's constants kept in
+  shared memory, which took the raster from 72 registers to 64, and each subgroup's
+  pairs queued in a ring and tested 32 at a time. Neither measured faster per cluster
+  drawn (clusters drawn vary by a few per cent from run to run with the occlusion).
+  With every voxel's record read from the same 64, always cached (an ablation, its
+  pixels wrong), it was no faster either: the splat waits on its loads' latency, not
+  on memory.
 - **One resolve for both primitive kinds.** One pass and no tile list, but the voxel
   shading's live values would join the triangles' at their register limit.
 - **Box footprints for aggregates too** (the first version). A box sized to the axes'
@@ -456,12 +505,13 @@ each measured against level 0 on these needles and on the landscape's own pines.
   cell: 0.89 s for 2,000 closed needles (16,000 triangles) on one thread, about 55 µs
   a triangle against 11 for the triangle levels alone, most of it in the cells' rays.
   The groups are independent and will run as jobs for big content (the pines).
-- Validation: a voxel cluster's bricks, masks, and voxel ranges are checked when a
-  mesh is created and when it is loaded, and the loader's checks are fuzzed.
+- Validation: a voxel cluster's bricks (of one cell size), masks, and voxel ranges
+  (following one another in the bricks' order) are checked when a mesh is created and
+  when it is loaded, and the loader's checks are fuzzed.
 - Tests (stage 1, `test_voxel.c`):
-  - the traversal against a search of every footprint (a capsule's by bisection of
-    the distance from its segment): 25,600 rays at 400 random bricks of every shape
-    agree on every hit;
+  - a ray's first voxel against a search of every footprint in double precision (a
+    capsule's by bisection of the distance from its segment): 25,600 rays at 400
+    random bricks of every shape agree on every hit;
   - the shading terms against Monte Carlo integrals of their definitions;
   - the voxelizer: a sheet across cells and a slanted one stop every ray through
     them; a cloud of 2,000 needles keeps its coverage within 9 % from the axes, the
@@ -474,9 +524,11 @@ each measured against level 0 on these needles and on the landscape's own pines.
     and cover what level 0 covers, within the rays' sampling.
 
 - Tests (stage 3, `test_vis_voxel.c`, on the RTX 3060 Ti and lavapipe): the shaders'
-  traversal against the C one (16,384 rays, every hit, voxel and face alike); the
+  voxel test against the C one (16,384 rays, every hit, voxel and face alike), and the
+  resolve's search from each hit's depth, which meets the hit again exactly; the
   raster against the CPU's rays through the clusters drawn, pixel for pixel; the voxel
   resolve's albedo and its lit pixels against its C twin; the voxel levels' coverage
-  and light against level 0 ("Accuracy").
+  and light against level 0 ("Accuracy"); clusters whose bricks differ in cell size or
+  whose voxels leave the bricks' order refused.
 
   To come with their stages: the shadow casters against level 0's shadow.

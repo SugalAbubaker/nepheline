@@ -39,8 +39,9 @@
 //
 // A voxel cluster is a meshlet with no vertices above level 0: its bricks
 // are VOXB[vertex_offset, vertex_offset + triangle_count), at most
-// NPH_MESH_VOXEL_CLUSTER_BRICKS of them, its triangle_offset 0; each brick's
-// voxels are VOXA[first_voxel, first_voxel + its mask's bits).
+// NPH_MESH_VOXEL_CLUSTER_BRICKS of them, its triangle_offset 0, all of one
+// cell size; each brick's voxels are VOXA[first_voxel, first_voxel + its
+// mask's bits), the next brick's following them.
 //
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
@@ -259,10 +260,11 @@ typedef struct NphMeshView {
 // small, or a range points outside its array: the levels' too (every
 // group, cluster, and child index in range; level 0 covering the
 // submeshes' meshlet ranges), and the voxels' (a voxel cluster's bricks,
-// each brick's voxels, a finite power-of-two cell, a non-empty mask, every
-// footprint a box of at least one step on each axis and a known shape,
-// every reserved bit zero). That the hierarchy is a tree and its bounds
-// hold is the renderer's to check (nph_render_mesh_create).
+// all of one finite power-of-two cell, and each brick's voxels, following
+// the brick before's; a non-empty mask; every footprint a box of at least
+// one step on each axis and a known shape; every reserved bit zero). That
+// the hierarchy is a tree and its bounds hold is the renderer's to check
+// (nph_render_mesh_create).
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 
 // The position of vertex `p` in mesh space.

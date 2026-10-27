@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Voxels in the production path (render/voxel.h; docs/render.md "Voxels";
 // ADR-0061): the bricks and voxels of a mesh's voxel clusters, the pixel's
-// ray in a mesh's space, and the traversal of a brick, the twin of
-// nph_render_voxel_trace (render/src/voxel.c), with the footprints' tests.
+// ray in a mesh's space, and a voxel's test against it (vis_voxel_hit, the
+// twin of render/src/voxel.c's), with the footprints' tests.
 //
-// The raster (vis_voxel_raster.comp), the voxel resolve
-// (vis_voxel_resolve.glsl), and the radiance cache's update (gi_update.comp)
-// each trace a pixel's ray through the brick the visibility buffer names, and
-// must meet the same voxel at the same depth: every value here is `precise`,
-// so that no shader fuses or reorders its arithmetic differently from
-// another's (the C twin rounds as C does, and agrees to within the tests'
-// tolerance).
+// The raster (vis_voxel_raster.comp) tests a pixel's ray against each voxel
+// whose footprint may cover the pixel; the voxel resolve
+// (vis_voxel_resolve.glsl) and the radiance cache's update (gi_update.comp)
+// test it again against the cells next to the depth's point in the brick the
+// visibility buffer names (vis_voxel_find), and must meet the same voxel at
+// the same depth: a voxel's test depends on nothing but the ray and the
+// voxel, and every value here is `precise`, so that no shader fuses or
+// reorders its arithmetic differently from another's (the C twin rounds as
+// C does, and agrees to within the tests' tolerance).
 #ifndef NPH_VIS_VOXEL_GLSL
 #define NPH_VIS_VOXEL_GLSL
 
@@ -28,8 +30,6 @@ NPH_BUFFER_REF(VisVoxelsRef) { uvec4 v[]; };
 #define VIS_VOXEL_SHAPE_CAPSULE   2u
 #define VIS_VOXEL_RADIUS_CODES    57u
 #define VIS_VOXEL_KAPPA_MAX       62756.0
-// A ray crosses at most 4 + 3 + 3 cells of a brick.
-#define VIS_VOXEL_MAX_STEPS 10u
 
 struct VisVoxelHit {
     float t;    // along the ray
@@ -163,8 +163,8 @@ bool vis_voxel_capsule(vec3 p, vec3 d, vec3 a, vec3 b, float r, float s_lo, floa
 // The footprint of a voxel (its box and material words) in the cell of
 // lowest corner `base`, against the ray o + t d (brick space; `inv` the
 // reciprocal of d) for t in [t0, t1]; the ray crosses the cell over [t_cell,
-// t_exit] (voxel.c footprint). On a hit, t0 takes its t and `face` the face
-// it entered.
+// t_exit], from the cell's planes (vis_voxel_hit; voxel.c footprint). On a
+// hit, t0 takes its t and `face` the face it entered.
 bool vis_voxel_footprint(uint box, uint material, vec3 base, float step, vec3 o, vec3 d, vec3 inv,
                          float t_cell, float t_exit, inout float t0, float t1, out uint face)
 {
@@ -259,19 +259,20 @@ bool vis_voxel_footprint(uint box, uint material, vec3 base, float step, vec3 o,
     return true;
 }
 
-// The first voxel of the brick (b0, b1) that the ray origin + t dir (mesh
-// space) meets for t in [t_min, t_max], the footprints tested in the order
-// the ray crosses their cells (Amanatides & Woo, "A Fast Voxel Traversal
-// Algorithm for Ray Tracing", Eurographics 1987); false when it meets none.
-bool vis_voxel_trace(uvec4 b0, uvec4 b1, VisVoxelsRef voxels, vec3 origin, vec3 dir, float t_min,
-                     float t_max, out VisVoxelHit hit)
+// A ray in a brick's space: its origin relative to the brick's lowest
+// corner, its direction (a component smaller than 1e-20 taken as 1e-20 of
+// its sign, as the C twin does), and the direction's reciprocal.
+struct VisVoxelRay {
+    vec3 o;
+    vec3 d;
+    vec3 inv;
+};
+
+// The ray origin + t dir (mesh space) in the space of the brick whose
+// lowest corner is `corner`.
+VisVoxelRay vis_voxel_brick_ray(vec3 corner, vec3 origin, vec3 dir)
 {
-    hit.t = 0.0;
-    hit.voxel = 0u;
-    hit.cell = 0u;
-    hit.face = 0u;
-    precise float h = uintBitsToFloat(b0.w);
-    precise vec3 o = origin - uintBitsToFloat(b0.xyz);
+    precise vec3 o = origin - corner;
     precise vec3 d = dir;
     precise vec3 inv;
     for (uint a = 0u; a < 3u; ++a) {
@@ -280,74 +281,112 @@ bool vis_voxel_trace(uvec4 b0, uvec4 b1, VisVoxelsRef voxels, vec3 origin, vec3 
         }
         inv[a] = 1.0 / d[a];
     }
-    // The brick's box, [0, 4h] on each axis.
-    precise float side = 4.0 * h;
-    precise float t0 = t_min;
-    precise float t1 = t_max;
+    VisVoxelRay r;
+    r.o = o;
+    r.d = d;
+    r.inv = inv;
+    return r;
+}
+
+// The voxel `voxel` of cell `bit` (x + 4y + 16z) of a brick of cell `h`
+// against the brick-space ray `r` for t in [t_min, t_max] (voxel.c
+// voxel_hit): the cell's span along the ray, from the cell's own planes, then
+// its footprint (vis_voxel_footprint). The raster and the searches after it
+// test a voxel apart from its neighbours, each from the same planes, so they
+// meet it at the same t bit for bit. On a hit, `t` and the face entered.
+bool vis_voxel_hit(uvec4 voxel, uint bit, float h, VisVoxelRay r, float t_min, float t_max,
+                   out float t, out uint face)
+{
+    t = 0.0;
+    face = 0u;
+    precise vec3 base = vec3(uvec3(bit & 3u, (bit >> 2u) & 3u, bit >> 4u)) * h;
+    precise float enter = t_min;
+    precise float leave = t_max;
     for (uint a = 0u; a < 3u; ++a) {
-        precise float ta = (0.0 - o[a]) * inv[a];
-        precise float tb = (side - o[a]) * inv[a];
-        t0 = max(t0, min(ta, tb));
-        t1 = min(t1, max(ta, tb));
+        // Cells are powers of two and their corners small multiples of
+        // them, so base + h is exact, as is every footprint plane.
+        precise float ta = (base[a] - r.o[a]) * r.inv[a];
+        precise float tb = (base[a] + h - r.o[a]) * r.inv[a];
+        enter = max(enter, min(ta, tb));
+        leave = min(leave, max(ta, tb));
     }
-    if (!(t0 <= t1)) {
+    if (!(enter <= leave)) {
         return false;
     }
-    // The cell the ray enters by, the t it enters there, and the steps.
-    precise float t_cell = t0;
-    ivec3 c;
-    ivec3 stp;
-    precise vec3 next;
-    precise vec3 delta;
-    for (uint a = 0u; a < 3u; ++a) {
-        precise float pa = o[a] + t0 * d[a];
-        precise float cf = floor(pa / h);
-        c[a] = cf < 0.0 ? 0 : (cf > 3.0 ? 3 : int(cf));
-        stp[a] = d[a] > 0.0 ? 1 : -1;
-        next[a] = (float(c[a] + (stp[a] > 0 ? 1 : 0)) * h - o[a]) * inv[a];
-        delta[a] = h * abs(inv[a]);
+    precise float th = t_min;
+    if (!vis_voxel_footprint(voxel.w, voxel.z, base, h / VIS_VOXEL_BOX_STEPS, r.o, r.d, r.inv,
+                             enter, leave, th, t_max, face)) {
+        return false;
     }
-    precise float step_h = h / VIS_VOXEL_BOX_STEPS;
-    for (uint iter = 0u; iter < VIS_VOXEL_MAX_STEPS; ++iter) {
-        const uint bit = uint(c.x) + 4u * uint(c.y) + 16u * uint(c.z);
+    t = th;
+    return true;
+}
+
+// The rank of the set bit `bit` among a brick mask's (m0, m1): its voxel's
+// index after the brick's first.
+uint vis_voxel_rank(uint m0, uint m1, uint bit)
+{
+    return bit < 32u ? bitCount(m0 & ((1u << bit) - 1u))
+                     : bitCount(m0) + bitCount(m1 & ((1u << (bit - 32u)) - 1u));
+}
+
+// The depth of a voxel hit at parameter t along a pixel's ray (under
+// reverse-Z with an infinite far plane, exactly 1 / t), the same in every
+// shader: the raster writes it, and the searches after it meet it again.
+float vis_voxel_depth(float t)
+{
+    precise float z = 1.0 / t;
+    return z;
+}
+
+// The voxel of brick (b0, b1) that the ray origin + t dir (mesh space, t >=
+// 1) meets first, where the visibility buffer holds `depth` for it: among
+// the occupied cells of the two along each axis whose centres lie nearest
+// the ray's point at that depth, which hold that point whatever its
+// rounding, the point's own cell first. The first whose voxel's hit gives the
+// depth again is the raster's (vis_voxel_hit, bit for bit), else the nearest
+// hit among them is taken. False where it meets none.
+bool vis_voxel_find(uvec4 b0, uvec4 b1, VisVoxelsRef voxels, vec3 origin, vec3 dir, float depth,
+                    out VisVoxelHit hit)
+{
+    hit.t = 0.0;
+    hit.voxel = 0u;
+    hit.cell = 0u;
+    hit.face = 0u;
+    const float h = uintBitsToFloat(b0.w);
+    const VisVoxelRay r = vis_voxel_brick_ray(uintBitsToFloat(b0.xyz), origin, dir);
+    const vec3 p = (r.o + (1.0 / max(depth, 1e-30)) * r.d) / h;
+    const uvec3 own = min(uvec3(clamp(floor(p), vec3(0.0), vec3(3.0))), uvec3(3u));
+    const uvec3 c0 = min(uvec3(floor(clamp(p - 0.5, vec3(0.0), vec3(2.0)))), uvec3(2u));
+    bool found = false;
+    float best = 3.402823466e38;
+    for (uint k = 0u; k < 9u; ++k) {
+        const uint j = k - 1u;
+        const uvec3 c = k == 0u ? own : c0 + uvec3(j & 1u, (j >> 1u) & 1u, j >> 2u);
+        if (k != 0u && all(equal(c, own))) {
+            continue;
+        }
+        const uint bit = c.x + 4u * c.y + 16u * c.z;
         const uint word = bit < 32u ? b1.x : b1.y;
-        if (((word >> (bit & 31u)) & 1u) != 0u) {
-            const uint rank = bit < 32u ? bitCount(b1.x & ((1u << bit) - 1u))
-                                        : bitCount(b1.x) + bitCount(b1.y & ((1u << (bit - 32u)) - 1u));
-            const uint index = b1.z + rank;
-            const uvec4 voxel = voxels.v[index];
-            precise vec3 base = vec3(c) * h;
-            precise float t = t0;
-            uint face = 0u;
-            precise float t_exit = min(min(next.x, next.y), next.z);
-            if (vis_voxel_footprint(voxel.w, voxel.z, base, step_h, o, d, inv, t_cell, t_exit, t, t1,
-                                    face)) {
-                hit.t = t;
-                hit.voxel = index;
-                hit.cell = bit;
-                hit.face = face;
-                return true;
+        if (((word >> (bit & 31u)) & 1u) == 0u) {
+            continue;
+        }
+        const uint index = b1.z + vis_voxel_rank(b1.x, b1.y, bit);
+        float t;
+        uint face;
+        if (vis_voxel_hit(voxels.v[index], bit, h, r, 1.0, 3.402823466e38, t, face) && t < best) {
+            best = t;
+            found = true;
+            hit.t = t;
+            hit.voxel = index;
+            hit.cell = bit;
+            hit.face = face;
+            if (vis_voxel_depth(t) == depth) {
+                break;
             }
         }
-        // The nearest boundary next, the lowest axis on a tie.
-        uint a = 0u;
-        if (next.y < next[a]) {
-            a = 1u;
-        }
-        if (next.z < next[a]) {
-            a = 2u;
-        }
-        if (next[a] > t1) {
-            break;
-        }
-        c[a] += stp[a];
-        if (c[a] < 0 || c[a] > 3) {
-            break;
-        }
-        t_cell = next[a];
-        next[a] += delta[a];
     }
-    return false;
+    return found;
 }
 
 // What the shading and the radiance cache take of a voxel pixel: the
@@ -360,9 +399,10 @@ struct VisVoxelSurface {
     NphVisTransform transform;
 };
 
-// The voxel the visibility buffer's texel `v` shows at `pixel`, retraced
-// through the brick it names exactly as the raster traced it; false where
-// the ray meets none (which the precise arithmetic rules out).
+// The voxel the visibility buffer's texel `v` shows at `pixel`, found again
+// in the brick it names near the texel's depth (vis_voxel_find), the ray
+// rebuilt exactly as the raster built it; false where the ray meets none
+// (which the precise arithmetic rules out).
 bool vis_voxel_surface(VisViewRef view, mat4 inv_view_proj, uint64_t v, ivec2 pixel,
                        out VisVoxelSurface out_s)
 {
@@ -382,10 +422,9 @@ bool vis_voxel_surface(VisViewRef view, mat4 inv_view_proj, uint64_t v, ivec2 pi
     const vec3 d =
         vis_voxel_ray_dir(inv_view_proj, inv, vis_voxel_ndc(pixel, view.v.viewport.zw), world_dir);
     VisVoxelHit hit;
-    const bool found =
-        vis_voxel_trace(b0, b1, VisVoxelsRef(mesh.voxels), o, d, 1.0, 3.402823466e38, hit);
+    const bool found = vis_voxel_find(b0, b1, VisVoxelsRef(mesh.voxels), o, d, vis_depth(v), hit);
     out_s.transform = inst.transform;
-    // Where the trace finds nothing, the depth's point (and the voxel the
+    // Where the search finds nothing, the depth's point (and the voxel the
     // record names first) keep the shading defined.
     const float th = found ? hit.t : 1.0 / max(vis_depth(v), 1e-30);
     out_s.position = world_dir * th;

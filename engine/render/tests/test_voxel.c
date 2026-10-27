@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Voxels (render/voxel.h; docs/render.md "Voxels"; ADR-0061): the records,
-// the traversal against a brute-force search of the footprints, the
+// a ray's first voxel against a brute-force search of the footprints, the
 // shading terms against Monte Carlo integrals of their definitions, the
 // voxelizer's footprints and looks against the geometry they stand for, and
 // the voxel levels the cluster builder makes of foliage. CPU only.
@@ -178,7 +178,7 @@ NTEST(Voxel, the_concentrations_bytes_and_moments_invert)
 }
 
 // ---------------------------------------------------------------------------
-// The traversal
+// A ray's first voxel
 // ---------------------------------------------------------------------------
 
 static NphRenderVoxel box_voxel(u32 lo, u32 hi, u32 shape)
@@ -254,7 +254,9 @@ NTEST(Voxel, a_ray_meets_the_first_footprint_it_crosses)
     // As a capsule of radius 1/16 of the cell from the box's corner (lo, lo,
     // lo) to (hi, hi, hi): a ray down its axis (from the high end, where no
     // other voxel lies) meets its round end a radius past the corner; one
-    // across its middle meets its side.
+    // across its middle, from within its cell, meets its side (from farther
+    // back along that line the ray would touch the whole cell's edge first,
+    // at a point).
     voxels[1] = box_voxel(8U, 24U, NPH_RENDER_VOXEL_SHAPE_CAPSULE);
     voxels[1].material = 0U | (32U << 26U); // diagonal 0, radius 2^(32 / 8 - 8) = 1/16
     const NphVec3 lo = nph_vec3(2.125F, 3.125F, 4.625F);
@@ -266,10 +268,11 @@ NTEST(Voxel, a_ray_meets_the_first_footprint_it_crosses)
     NTEST_EXPECT_EQ_UINT(hit.voxel, 1U);
     NTEST_EXPECT_NEAR_F32(hit.t, 1.0F - nph_vec3_distance(mid, hi) - 0.5F / 16.0F, 1e-5F);
     NphVec3 across = nph_vec3_normalize(nph_vec3(1.0F, -1.0F, 0.0F));
-    NTEST_ASSERT_TRUE(nph_render_voxel_trace(&brick, voxels, nph_vec3_sub(mid, across), across,
-                                             0.0F, 1e30F, &hit));
+    NTEST_ASSERT_TRUE(nph_render_voxel_trace(&brick, voxels,
+                                             nph_vec3_sub(mid, nph_vec3_scale(across, 0.2F)),
+                                             across, 0.0F, 1e30F, &hit));
     NTEST_EXPECT_EQ_UINT(hit.voxel, 1U);
-    NTEST_EXPECT_NEAR_F32(hit.t, 1.0F - 0.5F / 16.0F, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(hit.t, 0.2F - 0.5F / 16.0F, 1e-5F);
     // Beside its side, the ray passes it to the whole cell behind.
     const NphVec3 beside =
         nph_vec3_add(mid, nph_vec3_scale(nph_vec3_normalize(nph_vec3(1.0F, 1.0F, -2.0F)), 0.06F));
@@ -445,7 +448,7 @@ static bool footprint_hit(const NphRenderVoxelBrick *brick, NphRenderVoxel v, u3
     return true;
 }
 
-NTEST(Voxel, the_traversal_meets_the_nearest_footprint_of_random_bricks)
+NTEST(Voxel, the_first_voxel_is_the_nearest_footprint_of_random_bricks)
 {
     NphPcg32 rng;
     nph_pcg32_seed(&rng, 61U, 1U);
@@ -518,8 +521,8 @@ NTEST(Voxel, the_traversal_meets_the_nearest_footprint_of_random_bricks)
             const f64 tol = 1e-4 * (f64)side;
             if (got != (best_voxel != NPH_U32_MAX)) {
                 mismatched += 1U;
-                NTEST_LOG("trial %u ray %u: traversal %s, search %s (voxel %u at %.9g)", trial, k,
-                          got ? "hit" : "missed", best_voxel != NPH_U32_MAX ? "hit" : "missed",
+                NTEST_LOG("trial %u ray %u: the trace %s, the search %s (voxel %u at %.9g)", trial,
+                          k, got ? "hit" : "missed", best_voxel != NPH_U32_MAX ? "hit" : "missed",
                           best_voxel, best);
                 continue;
             }
