@@ -30,7 +30,10 @@
 // A voxel's pixel (render/voxel.h; ADR-0061) is the point and face the voxel
 // resolve finds again, a cell's diagonal off the face as the resolve looks
 // its cell up there (vis_voxel.glsl vis_voxel_surface): the ray leaves clear
-// of the triangles the voxel stands for, which the rays trace.
+// of the triangles the voxel stands for, which the rays trace. The update
+// looks for voxels only where specialised to (k_voxels: the renderer holds a
+// mesh with voxel levels, as for the resolve), so that a frame without them
+// pays nothing for their search.
 //
 // arg0: the visibility buffer's bindless storage index.
 #version 460
@@ -43,6 +46,9 @@
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the visibility buffer may hold voxel clusters' pixels (gi.c).
+layout(constant_id = 0) const bool k_voxels = false;
 
 // The point of the visibility buffer's triangle `v` under the pixel at
 // NDC `q`, camera relative, as the resolve rebuilds it (the same arithmetic,
@@ -210,7 +216,8 @@ void main()
     // The pixel's point and its triangle's normal, or its voxel's.
     vec3 n;
     vec3 x;
-    if ((VisClustersRef(view.v.clusters).c[vis_cluster(v)].flags & NPH_VIS_CLUSTER_VOXELS) != 0u) {
+    if (k_voxels &&
+        (VisClustersRef(view.v.clusters).c[vis_cluster(v)].flags & NPH_VIS_CLUSTER_VOXELS) != 0u) {
         VisVoxelSurface vs;
         vis_voxel_surface(view, rview.v.inv_view_proj, v, p, vs);
         n = vs.face_normal;

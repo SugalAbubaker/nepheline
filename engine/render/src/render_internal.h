@@ -730,6 +730,7 @@ typedef struct RenderGi {
     NphGpuShader update_shader;  // gi_update.comp
     NphGpuShader resolve_shader; // gi_resolve.comp
     NphGpuPipeline update;
+    NphGpuPipeline update_voxels; // the same where voxel pixels may be (RenderVis.frame_voxels)
     NphGpuPipeline resolve;
     b32 frame_active;
     u32 frame_rays_x; // the update's samples across and down the target

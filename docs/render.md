@@ -827,7 +827,10 @@ its lit pixels are its C twin's within 0.1 % on average and 2.3 % at worst
 sixteen instances turned every way: the cut covers 3.7 to 7.1 % more pixels
 at the first voxel levels and 4.9 % fewer at the coarsest, and reflects 7 to
 10 % more light a pixel; ADR-0061 "Accuracy" records why and the work that
-will close it. `render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
+will close it. The radiance cache's update keys the voxel pixels' cells
+where the CPU's rays through the clusters drawn put them (284 cells from 307
+voxel pixels at 30 m, every one of them and nothing else).
+`render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
 needles) draws about 3.2 million bricks of 24 million voxels a frame in 7.6
 ms, its voxel raster 3.4 ms and the voxel resolve 0.069 ms, against 5.6 ms
 for the shrubs' stalled triangle levels (`foliage_4k_triangles`). A voxel
@@ -843,8 +846,9 @@ triangle levels drawn in its place from 24 to 40 m cover 11.6 to 12.5 %
 fewer pixels than level 0 (needles thinned below a pixel), where the
 voxels cover 3.7 to 7.1 % more (ADR-0061 "Cost"). A frame costs the voxels
 nothing until the renderer holds a mesh with voxel levels: the meshlet
-cull and the resolve are specialised without the voxels' routing and test
-(`k_voxels`), and the voxel passes and their tile list are left out. `render_perf`'s 4K field, LOD and shadow
+cull, the resolve and the radiance cache's update are specialised without
+the voxels' routing, test and search (`k_voxels`), and the voxel passes and
+their tile list are left out. `render_perf`'s 4K field, LOD and shadow
 scenes and Bistro's street measure within 0.004 ms of their frames before
 the voxels, the resolve unchanged; compiled in, its test alone, never
 taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
@@ -1522,7 +1526,8 @@ reference renderer has none. The runtime turns it on with `r.gi`.
 - **`gi update`** (`gi_update.comp`): within `gi_rays` (65,536) a frame,
   one ray from a random pixel of each block of the frame (12 × 12 pixels
   at 4K): the surface point rebuilt as the resolve rebuilds it (a voxel
-  pixel's as the voxel resolve finds it, "Voxels"), its cell claimed, one
+  pixel's as the voxel resolve finds it, "Voxels", in a variant
+  specialised for frames that may draw voxels), its cell claimed, one
   cosine-distributed ray traced. A miss adds the
   environment's radiance; a hit its emission and its albedo times the
   irradiance there, the sun's (shadowed by a second ray where it casts
