@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// The voxel traversal, ray by ray, for the render tests
-// (VoxelGpu.the_traversal_matches_its_cpu_twin), which compare every hit with
-// render/voxel.h's nph_render_voxel_trace. Not used by the renderer.
+// The voxels' tests, ray by ray, for the render tests
+// (VoxelGpu.the_voxel_tests_match_their_cpu_twin). Each ray's first voxel in
+// its brick is the nearest of its voxels' hits (vis_voxel_hit), as the
+// raster takes it, compared there with render/voxel.h's
+// nph_render_voxel_trace; and the resolve's search from that hit's depth
+// (vis_voxel_find), which must meet the same voxel at the same t and face
+// bit for bit (face | 512). Not used by the renderer.
 #version 460
 #include "vis_voxel.glsl"
 
@@ -19,14 +23,48 @@ void main()
     }
     const NphVisVoxelCase c = VisVoxelCasesRef(pc.cases).c[i];
     VisBricksRef bricks = VisBricksRef(pc.bricks);
+    VisVoxelsRef voxels = VisVoxelsRef(pc.voxels);
+    const uvec4 b0 = bricks.b[c.brick * 2u];
+    const uvec4 b1 = bricks.b[c.brick * 2u + 1u];
+    const float h = uintBitsToFloat(b0.w);
+    const VisVoxelRay r = vis_voxel_brick_ray(uintBitsToFloat(b0.xyz), c.origin.xyz, c.dir.xyz);
     VisVoxelHit hit;
-    const bool found = vis_voxel_trace(bricks.b[c.brick * 2u], bricks.b[c.brick * 2u + 1u],
-                                       VisVoxelsRef(pc.voxels), c.origin.xyz, c.dir.xyz, c.origin.w,
-                                       c.dir.w, hit);
-    NphVisVoxelResult r;
-    r.t = found ? hit.t : 0.0;
-    r.voxel = found ? hit.voxel : 0u;
-    r.cell = found ? hit.cell : 0u;
-    r.face = found ? (hit.face | 256u) : 0u;
-    VisVoxelResultsRef(pc.results).r[i] = r;
+    hit.t = 0.0;
+    hit.voxel = 0u;
+    hit.cell = 0u;
+    hit.face = 0u;
+    bool found = false;
+    for (uint bit = 0u; bit < 64u; ++bit) {
+        const uint word = bit < 32u ? b1.x : b1.y;
+        if (((word >> (bit & 31u)) & 1u) == 0u) {
+            continue;
+        }
+        const uint index = b1.z + vis_voxel_rank(b1.x, b1.y, bit);
+        float t;
+        uint face;
+        if (vis_voxel_hit(voxels.v[index], bit, h, r, c.origin.w, c.dir.w, t, face) &&
+            (!found || t < hit.t)) {
+            found = true;
+            hit.t = t;
+            hit.voxel = index;
+            hit.cell = bit;
+            hit.face = face;
+        }
+    }
+    NphVisVoxelResult res;
+    res.t = hit.t;
+    res.voxel = hit.voxel;
+    res.cell = hit.cell;
+    res.face = 0u;
+    if (found) {
+        res.face = hit.face | 256u;
+        // The depth the raster writes, and the search from it.
+        const float depth = vis_voxel_depth(hit.t);
+        VisVoxelHit again;
+        if (vis_voxel_find(b0, b1, voxels, c.origin.xyz, c.dir.xyz, depth, again) &&
+            again.t == hit.t && again.voxel == hit.voxel && again.face == hit.face) {
+            res.face |= 512u;
+        }
+    }
+    VisVoxelResultsRef(pc.results).r[i] = res;
 }

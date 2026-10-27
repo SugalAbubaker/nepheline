@@ -719,20 +719,25 @@ submesh's points through the sampler's `covers`):
   the concentration the one whose second moment along its axis is the
   dominant eigenvalue.
 
-**The traversal** (`nph_render_voxel_trace`, and the shaders'
-`vis_voxel_trace` in `vis_voxel.glsl`) walks a brick's cells in the order a
-ray crosses them (Amanatides & Woo,
-Eurographics 1987) and tests each occupied cell's footprint; the round
-shapes' quadratics are taken from where the ray enters the cell, so their
-terms keep their precision however far the ray came, and a capsule's is the
-earliest entry of its body and its ends' spheres within the cell. Against a
-search of every footprint (the capsule as the points within its radius of
-its segment, by bisection), 25,600 rays at 400 random bricks of every shape
-agree on every hit, and on its `t` within 2e-5 of the brick. The shaders'
-twin, every value `precise` so that no shader rounds it differently from
-another, agrees with the C one on 16,384 rays through 256 random bricks
-(2,614 hits): every hit, voxel and face, `t` within 5e-6 of the brick, on
-the RTX 3060 Ti and on lavapipe alike.
+**A voxel's test** (the shaders' `vis_voxel_hit` in `vis_voxel.glsl`, and
+its C twin in `voxel.c`) takes the ray's span through the voxel's cell from
+the cell's own planes, then tests the footprint over that span. A voxel is
+tested apart from its neighbours, so every pass that tests it meets it at
+the same `t`, and the cells' and footprints' planes are exact (cells are
+powers of two, their corners small multiples of them). The round shapes'
+quadratics are taken from where the ray enters the cell, so their terms
+keep their precision however far the ray came, and a capsule's is the
+earliest entry of its body and its ends' spheres within the cell. A ray's
+first voxel in a brick (`nph_render_voxel_trace`) is the nearest of its
+voxels' hits, the lowest cell on a tie. Against a search of every footprint
+in double precision (the capsule as the points within its radius of its
+segment, by bisection), 25,600 rays at 400 random bricks of every shape
+agree on every hit (3,965), and on its `t` within 2e-5 of the brick. The
+shaders' twin, every value `precise` so that no shader rounds it
+differently from another, agrees with the C one on 16,384 rays through 256
+random bricks (2,609 hits): every hit, voxel and face, `t` within 6e-6 of
+the brick, on the RTX 3060 Ti and on lavapipe alike; and the resolve's
+search from each hit's depth (below) meets that hit again, bit for bit.
 
 **The shading model** (`nph_render_voxel_diffuse` and its fellows). For
 the lobe turned toward the viewer, the diffuse response to a light is the
@@ -756,24 +761,39 @@ scaled by `A(kappa)` and `1 - 3 A(kappa) / kappa`).
 raster list of its own (`NPH_VIS_RASTER_VOXEL`, flagged
 `NPH_VIS_CLUSTER_VOXELS`), whatever its material: a voxel is opaque and
 carries the look its mesh's own materials had. `vis voxel raster`
-(`vis_voxel_raster.comp`) takes a workgroup a cluster: each brick projects
-the box of its occupied cells to the pixels whose centres it covers (a 64th
-of a pixel wider each way, against rounding), a prefix sum spreads the
-cluster's pixels over the invocations, and each pixel's ray, from the camera
-through its point on the near plane, goes into the instance's space and
-through its brick. The first voxel it meets takes the atomic max of (depth,
-cluster, brick) as triangles do; under reverse-Z with an infinite far plane
-a hit at `t` along that ray lies at depth `1 / t`. `vis resolve` writes
+(`vis_voxel_raster.comp`) takes a workgroup a cluster and splats its voxels,
+an invocation a voxel. Each voxel projects its footprint's box (a capsule's
+widened by its radius, within its cell) to the pixels whose centres it may
+cover. The box's corners lie on its brick's grid of 32nds of a cell, so its
+centre and half-extents go to clip space as steps along that grid, the same
+for the whole cluster (a cluster's bricks share a cell size). Its projection
+lies within `(r_x + |x_c / w_c| r_w) / (w_c - r_w)` of its centre's in x,
+and likewise in y, where `r_x` and `r_w` are the half-extents' reach in clip
+x and w, widened by a 64th of a pixel against rounding. A subgroup pools its
+voxels' pixels (a prefix sum, then a binary search for each pair's voxel),
+so that the rays' tests fill its lanes whichever voxels cover pixels: at the
+first voxel levels a cell is about a pixel and a foliage footprint a
+fraction of its cell, so about one voxel in five covers a pixel's centre.
+Each pair's ray, from the camera through the pixel's point on the near
+plane, goes into the instance's space and is tested against that voxel
+alone; a hit takes the atomic max of (depth, cluster, brick) as triangles
+do, so the nearest voxel wins. Under reverse-Z with an infinite far plane a
+hit at `t` along that ray lies at depth `1 / t`. `vis resolve` writes
 nothing at a voxel cluster's pixel: the first invocation of a subgroup that
 saw one sets its tile's bit (`NphVisViewData.voxel_tile_bits`, cleared by
 `vis clear`), and the one that set it lists the tile and raises `vis voxel
 resolve`'s workgroups. That pass (`vis_voxel_resolve.glsl`, compiled and
-specialised as the resolve is) traces each of those tiles' voxel pixels
-again through the same brick, bit for bit the raster's, for the voxel, its
-point, and the face of its footprint the ray entered (the geometric normal),
-and shades it with `surface.glsl`'s `nph_surface_shade_voxel`: the lights
-and the light grid, the sun's map, shadow rays, the ambient occlusion and
-the radiance cache as the triangles have them, with the lobe's terms above.
+specialised as the resolve is) finds each of those tiles' voxel pixels'
+voxel again in the brick the visibility buffer names (`vis_voxel_find`): it
+tests the cell holding the ray's point at the stored depth first, then the
+two cells along each axis whose centres lie nearest that point (which hold
+it whatever its rounding), and stops at the first whose hit gives the
+stored depth again, bit for bit the raster's. That gives the voxel, its
+point, and the face of its footprint the ray entered (the geometric
+normal), and the pass shades it with `surface.glsl`'s
+`nph_surface_shade_voxel`: the lights and the light grid, the sun's map,
+shadow rays, the ambient occlusion and the radiance cache as the triangles
+have them, with the lobe's terms above.
 Its point's shadow lookups and rays, and its cell of the radiance cache,
 start a cell's diagonal off that face, clear of the triangles the voxel
 stands for, which the shadow map and the rays still draw; `gi update` takes
@@ -807,17 +827,26 @@ its lit pixels are its C twin's within 0.1 % on average and 2.3 % at worst
 sixteen instances turned every way: the cut covers 3.7 to 7.1 % more pixels
 at the first voxel levels and 4.9 % fewer at the coarsest, and reflects 7 to
 10 % more light a pixel; ADR-0061 "Accuracy" records why and the work that
-will close it. `render_perf`'s `foliage_4k_production` (1,024 shrubs of
-4,000 sparse needles) draws 3.27 million bricks a frame in 9.6 ms, its voxel
-raster 5.5 ms, against 5.6 ms for the shrubs' stalled triangle levels
-(`foliage_4k_triangles`): on sparse foliage the first voxel levels cost more
-than the triangles they replace, which is why the cooker makes voxels only
-when asked for now. A frame costs the voxels nothing until the renderer
-holds a mesh with voxel levels: the meshlet cull and the resolve are
-specialised without the voxels' routing and test (`k_voxels`), and the voxel
-passes and their tile list are left out. `render_perf`'s 4K field, LOD and
-shadow scenes and Bistro's street measure within 0.004 ms of their frames
-before the voxels, the resolve unchanged; compiled in, its test alone, never
+will close it. `render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
+needles) draws about 3.2 million bricks of 24 million voxels a frame in 7.6
+ms, its voxel raster 3.4 ms and the voxel resolve 0.069 ms, against 5.6 ms
+for the shrubs' stalled triangle levels (`foliage_4k_triangles`). A voxel
+costs the raster about what a triangle does (some 140 ps against 146), but
+the first voxel levels hold about twice the triangles they replace, and
+four in five of their voxels cover no pixel's centre: on sparse foliage the
+voxels still cost more than the stalled triangles, which is why the cooker
+makes voxels only when asked for now. Splatting took the voxel raster from
+5.5 ms (each pixel of a brick's rectangle walking its cells: 15 million rays
+taking 60 million steps for 1.8 million hits) to 3.4 ms. The first voxel
+level's budget of four times its triangles stays: at one, the simplified
+triangle levels drawn in its place from 24 to 40 m cover 11.6 to 12.5 %
+fewer pixels than level 0 (needles thinned below a pixel), where the
+voxels cover 3.7 to 7.1 % more (ADR-0061 "Cost"). A frame costs the voxels
+nothing until the renderer holds a mesh with voxel levels: the meshlet
+cull and the resolve are specialised without the voxels' routing and test
+(`k_voxels`), and the voxel passes and their tile list are left out. `render_perf`'s 4K field, LOD and shadow
+scenes and Bistro's street measure within 0.004 ms of their frames before
+the voxels, the resolve unchanged; compiled in, its test alone, never
 taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
 
 ### A frame
@@ -1492,8 +1521,9 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   fingerprint that the slot holds, claimed by compare-and-swap.
 - **`gi update`** (`gi_update.comp`): within `gi_rays` (65,536) a frame,
   one ray from a random pixel of each block of the frame (12 × 12 pixels
-  at 4K): the surface point rebuilt as the resolve rebuilds it, its cell
-  claimed, one cosine-distributed ray traced. A miss adds the
+  at 4K): the surface point rebuilt as the resolve rebuilds it (a voxel
+  pixel's as the voxel resolve finds it, "Voxels"), its cell claimed, one
+  cosine-distributed ray traced. A miss adds the
   environment's radiance; a hit its emission and its albedo times the
   irradiance there, the sun's (shadowed by a second ray where it casts
   shadows) and the cache's own (the environment's where it has none), so

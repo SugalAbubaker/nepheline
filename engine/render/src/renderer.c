@@ -722,11 +722,13 @@ static bool is_voxel_cluster(const NphRenderMeshDesc *d, u32 i)
 }
 
 // A voxel cluster is checked so far as the GPU's reads stay inside the
-// voxels' streams and its traversal's steps are finite: its bricks' range
-// (1 to NPH_RENDER_VOXEL_CLUSTER_BRICKS), and each brick's voxels (one a
-// set bit of its mask, which is not empty), its cell (a positive, normal
-// power of two), and its origin (finite). A footprint's fields are any bits
-// the traversal reads (render/voxel.h).
+// voxels' streams and its tests are finite: its bricks' range (1 to
+// NPH_RENDER_VOXEL_CLUSTER_BRICKS), and each brick's voxels (one a set bit
+// of its mask, which is not empty), its cell (a positive, normal power of
+// two), and its origin (finite). The raster splats a cluster's voxels as
+// one run: its bricks share a cell size and their voxels follow one another
+// in the bricks' order. A footprint's fields are any bits the tests read
+// (render/voxel.h).
 static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRenderMeshlet *m)
 {
     if (m->triangle_count == 0U || m->triangle_count > NPH_RENDER_VOXEL_CLUSTER_BRICKS ||
@@ -735,6 +737,8 @@ static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRen
         m->triangle_count > d->voxel_brick_count - m->vertex_offset) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    const NphRenderVoxelBrick *first = &d->voxel_bricks[m->vertex_offset];
+    u32 next_voxel = first->first_voxel;
     for (u32 k = 0; k < m->triangle_count; ++k) {
         const NphRenderVoxelBrick *b = &d->voxel_bricks[m->vertex_offset + k];
         const u32 bits = nph_f32_to_bits(b->cell);
@@ -742,9 +746,11 @@ static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRen
         const u32 count = nph_popcount_u32(b->mask[0]) + nph_popcount_u32(b->mask[1]);
         if ((bits & 0x807FFFFFU) != 0U || exponent == 0U || exponent == 0xFFU ||
             !nph_vec3_is_finite(b->origin) || count == 0U || b->first_voxel > d->voxel_count ||
-            count > d->voxel_count - b->first_voxel) {
+            count > d->voxel_count - b->first_voxel || bits != nph_f32_to_bits(first->cell) ||
+            b->first_voxel != next_voxel) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
+        next_voxel = b->first_voxel + count;
     }
     return NPH_RESULT_OK;
 }

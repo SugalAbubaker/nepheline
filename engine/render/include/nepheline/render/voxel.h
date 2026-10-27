@@ -41,21 +41,21 @@
 //     lobe (an axis and a concentration kappa) fitted to those hits' second
 //     moment E[n n^T].
 //
-// The traversal (nph_render_voxel_trace) is the C twin of the shaders'
-// (vis_common.glsl vis_voxel_trace): the cells of a brick a ray crosses, in
-// order (Amanatides & Woo, "A Fast Voxel Traversal Algorithm for Ray
-// Tracing", Eurographics 1987), each occupied cell's footprint tested. The
-// shading terms (nph_render_voxel_diffuse and the others) are the twins of
-// the voxel resolve's: the part of the lobe the viewer sees, a spherical
-// Gaussian (Wang et al., "All-Frequency Rendering of Dynamic, Spatially-
-// Varying Reflectance", SIGGRAPH Asia 2009), whose mean clamped cosine
-// toward a light has Hill's fitted closed form (in Pettineo, "SG Series
-// Part 3: Diffuse Lighting From an SG Light Source", 2016); the lobe's
-// variance added to GGX's (Toksvig, "Mipmapping Normal Maps", JGT 2005;
-// Kaplanyan et al., "Filtering Distributions of Normals for Shading
-// Antialiasing", HPG 2016); and its convolution of the environment's
-// spherical harmonics (Han et al., "Frequency Domain Normal Map Filtering",
-// SIGGRAPH 2007).
+// A ray's first voxel in a brick (nph_render_voxel_trace) is the nearest
+// of its voxels' hits, each voxel tested apart from its neighbours, its
+// cell's span along the ray taken from the cell's own planes: the C twin of
+// the shaders' test (vis_voxel.glsl vis_voxel_hit), with which their raster
+// splats each voxel and their resolve finds it again. The shading terms
+// (nph_render_voxel_diffuse and the others) are the twins of the voxel
+// resolve's: the part of the lobe the viewer sees, a spherical Gaussian
+// (Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying
+// Reflectance", SIGGRAPH Asia 2009), whose mean clamped cosine toward a
+// light has Hill's fitted closed form (in Pettineo, "SG Series Part 3:
+// Diffuse Lighting From an SG Light Source", 2016); the lobe's variance
+// added to GGX's (Toksvig, "Mipmapping Normal Maps", JGT 2005; Kaplanyan et
+// al., "Filtering Distributions of Normals for Shading Antialiasing", HPG
+// 2016); and its convolution of the environment's spherical harmonics (Han
+// et al., "Frequency Domain Normal Map Filtering", SIGGRAPH 2007).
 //
 // Thread-safety: the functions are pure (NPH_THREADSAFE).
 
@@ -109,7 +109,10 @@ typedef struct NphRenderVoxel {
 
 // A brick (32 bytes; two uvec4 to the shaders): 4 x 4 x 4 cells of edge
 // `cell` from `origin`, the occupied ones set in the mask (bit x + 4y + 16z),
-// their voxels in bit order from `first_voxel`.
+// their voxels in bit order from `first_voxel`. A voxel cluster's bricks
+// share one cell size, and their voxels follow one another in the bricks'
+// order (as render/cluster_lod.h makes them; the renderer and the mesh
+// loader check it).
 typedef struct NphRenderVoxelBrick {
     NphVec3 origin; // mesh space: the brick's lowest corner
     f32 cell;       // a cell's edge, mesh units (a power of two)
@@ -173,10 +176,10 @@ typedef struct NphRenderVoxelHit {
 } NphRenderVoxelHit;
 
 // The first voxel of `brick` (its voxels in `voxels`) that the ray origin +
-// t dir meets for t in [t_min, t_max], the footprints tested in the order
-// the ray crosses their cells. False when it meets none. A ray that starts
-// inside a footprint meets it at t_min. `dir` need not be unit; a zero
-// component is taken as a tiny one of positive sign, as the shaders do.
+// t dir meets for t in [t_min, t_max]: the nearest of its voxels' hits, the
+// lowest cell on a tie. False when it meets none. A ray that starts inside a
+// footprint meets it at t_min. `dir` need not be unit; a zero component is
+// taken as a tiny one of positive sign, as the shaders do.
 bool nph_render_voxel_trace(const NphRenderVoxelBrick *brick, const NphRenderVoxel *voxels,
                             NphVec3 origin, NphVec3 dir, f32 t_min, f32 t_max,
                             NphRenderVoxelHit *out);

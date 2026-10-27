@@ -78,7 +78,9 @@ static bool finite_bits(u32 bits)
 
 // A voxel cluster's bricks and their voxels (version 3), checked so far as
 // every index is in range and every field holds a value the renderer's
-// records can (render/voxel.h).
+// records can (render/voxel.h), and as the renderer's raster takes them: its
+// bricks of one cell size, their voxels following one another in the
+// bricks' order.
 static NphResult mesh_voxels(const NphMeshLodHeader *lh, const NphMeshlet *m,
                              const NphMeshVoxelBrick *bricks, const NphMeshVoxel *voxels)
 {
@@ -87,6 +89,9 @@ static NphResult mesh_voxels(const NphMeshLodHeader *lh, const NphMeshlet *m,
         m->triangle_count > lh->brick_count - m->vertex_offset) {
         return NPH_RESULT_CORRUPT;
     }
+    u32 cell0 = 0U;
+    memcpy(&cell0, &bricks[m->vertex_offset].cell, sizeof cell0);
+    u32 next_voxel = bricks[m->vertex_offset].first_voxel;
     for (u32 k = 0; k < m->triangle_count; ++k) {
         const NphMeshVoxelBrick *b = &bricks[m->vertex_offset + k];
         u32 cell = 0U;
@@ -99,9 +104,11 @@ static NphResult mesh_voxels(const NphMeshLodHeader *lh, const NphMeshlet *m,
         if (b->reserved != 0U || (cell & 0x807FFFFFU) != 0U || exponent == 0U ||
             exponent == 0xFFU || !finite_bits(origin[0]) || !finite_bits(origin[1]) ||
             !finite_bits(origin[2]) || count == 0U || b->first_voxel > lh->voxel_count ||
-            count > lh->voxel_count - b->first_voxel) {
+            count > lh->voxel_count - b->first_voxel || cell != cell0 ||
+            b->first_voxel != next_voxel) {
             return NPH_RESULT_CORRUPT;
         }
+        next_voxel = b->first_voxel + count;
         for (u32 v = b->first_voxel; v < b->first_voxel + count; ++v) {
             const u32 box = voxels[v].box;
             const u32 shape = box >> 30U;

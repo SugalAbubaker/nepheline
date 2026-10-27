@@ -345,8 +345,9 @@ NTEST(views, mesh_view_resolves_levels_of_detail)
 }
 
 // The cube with a coarser level of voxels (version 3): its meshlet at level
-// 0, made by group 0 into one voxel cluster of one brick holding two voxels
-// (a box and a capsule), under root group 1.
+// 0, made by group 0 into one voxel cluster of two bricks, the first holding
+// two voxels (a box and a capsule) and the second one (a box), under root
+// group 1.
 static void build_cube_with_voxels(ImageAsset *ia, u32 type_version)
 {
     ImageAsset plain;
@@ -367,7 +368,7 @@ static void build_cube_with_voxels(ImageAsset *ia, u32 type_version)
             NphMeshlet ml[2];
             memcpy(&ml[0], b->data, sizeof ml[0]);
             memset(&ml[1], 0, sizeof ml[1]);
-            ml[1].triangle_count = 1U; // one brick from 0
+            ml[1].triangle_count = 2U; // two bricks from 0
             add(&w, b->tag, b->index, ml, sizeof ml);
         } else if (b->tag == NPH_MESH_TAG_MESHLET_BOUNDS) {
             NphMeshletBounds bd[2];
@@ -386,8 +387,8 @@ static void build_cube_with_voxels(ImageAsset *ia, u32 type_version)
     lh.group_count = 2U;
     lh.group_cluster_count = 2U;
     lh.node_count = 1U;
-    lh.brick_count = 1U;
-    lh.voxel_count = 2U;
+    lh.brick_count = 2U;
+    lh.voxel_count = 3U;
     const NphMeshClusterLod cl[2] = {{NPH_MESH_LOD_NONE, 0U, 0U, 0U}, {0U, 1U, 1U, 0U}};
     NphMeshLodGroup g[2];
     memset(g, 0, sizeof g);
@@ -406,24 +407,31 @@ static void build_cube_with_voxels(ImageAsset *ia, u32 type_version)
     }
     n.child[0] = 0U | NPH_MESH_LOD_LEAF;
     n.child[1] = 1U | NPH_MESH_LOD_LEAF;
-    NphMeshVoxelBrick brick;
-    memset(&brick, 0, sizeof brick);
-    brick.origin = nph_vec3(-1.0F, -1.0F, -1.0F);
-    brick.cell = 0.5F;
-    brick.mask[0] = 1U;        // cell (0, 0, 0)
-    brick.mask[1] = 1U << 31U; // cell (3, 3, 3)
-    NphMeshVoxel voxels[2];
+    NphMeshVoxelBrick bricks[2];
+    memset(bricks, 0, sizeof bricks);
+    bricks[0].origin = nph_vec3(-1.0F, -1.0F, -1.0F);
+    bricks[0].cell = 0.5F;
+    bricks[0].mask[0] = 1U;        // cell (0, 0, 0)
+    bricks[0].mask[1] = 1U << 31U; // cell (3, 3, 3)
+    // The next brick along x, its voxel following the first brick's.
+    bricks[1].origin = nph_vec3(1.0F, -1.0F, -1.0F);
+    bricks[1].cell = 0.5F;
+    bricks[1].mask[0] = 1U;
+    bricks[1].first_voxel = 2U;
+    NphMeshVoxel voxels[3];
     memset(voxels, 0, sizeof voxels);
-    // A box over the whole cell, then a capsule (shape 2) of radius code 32.
+    // A box over the whole cell, then a capsule (shape 2) of radius code 32,
+    // then a box again.
     voxels[0].box = (31U << 15U) | (31U << 20U) | (31U << 25U);
     voxels[1].box = voxels[0].box | (2U << 30U);
     voxels[1].material = 32U << 26U;
+    voxels[2].box = voxels[0].box;
     add(&w, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh);
     add(&w, NPH_MESH_TAG_LOD_CLUSTERS, 0U, cl, sizeof cl);
     add(&w, NPH_MESH_TAG_LOD_GROUPS, 0U, g, sizeof g);
     add(&w, NPH_MESH_TAG_LOD_MEMBERS, 0U, members, sizeof members);
     add(&w, NPH_MESH_TAG_LOD_NODES, 0U, &n, sizeof n);
-    add(&w, NPH_MESH_TAG_VOXEL_BRICKS, 0U, &brick, sizeof brick);
+    add(&w, NPH_MESH_TAG_VOXEL_BRICKS, 0U, bricks, sizeof bricks);
     add(&w, NPH_MESH_TAG_VOXELS, 0U, voxels, sizeof voxels);
     image_asset_finish(ia, &w);
 }
@@ -438,8 +446,8 @@ NTEST(views, mesh_view_resolves_and_checks_voxel_clusters)
     NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
     NTEST_ASSERT_NOT_NULL(v.voxel_bricks);
     NTEST_ASSERT_NOT_NULL(v.voxels);
-    NTEST_EXPECT_EQ_UINT(v.lod->brick_count, 1U);
-    NTEST_EXPECT_EQ_UINT(v.lod->voxel_count, 2U);
+    NTEST_EXPECT_EQ_UINT(v.lod->brick_count, 2U);
+    NTEST_EXPECT_EQ_UINT(v.lod->voxel_count, 3U);
     NTEST_EXPECT_EQ_UINT(v.meshlets[1].vertex_count, 0U);
 
     NphMeshlet *ml = (NphMeshlet *)blob_bytes(&ia, NPH_MESH_TAG_MESHLETS, 0U);
@@ -452,7 +460,7 @@ NTEST(views, mesh_view_resolves_and_checks_voxel_clusters)
         ml[1].triangle_count = counts[i];
         NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     }
-    ml[1].triangle_count = 1U;
+    ml[1].triangle_count = 2U;
     ml[1].triangle_offset = 1U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     ml[1].triangle_offset = 0U;
@@ -464,8 +472,8 @@ NTEST(views, mesh_view_resolves_and_checks_voxel_clusters)
     ml[1].submesh = 0U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
 
-    // The brick: an empty mask, a cell not a power of two or not positive,
-    // a non-finite origin, voxels past the array, a reserved word.
+    // The first brick: an empty mask, a cell not a power of two or not
+    // positive, a non-finite origin, voxels past the array, a reserved word.
     b->mask[0] = 0U;
     b->mask[1] = 0U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
@@ -480,12 +488,22 @@ NTEST(views, mesh_view_resolves_and_checks_voxel_clusters)
     b->origin.y = NPH_F32_INFINITY;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     b->origin.y = -1.0F;
-    b->first_voxel = 1U;
+    b->first_voxel = 2U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     b->first_voxel = 0U;
     b->reserved = 1U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     b->reserved = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    // The second: another cell size, or voxels that do not follow the
+    // first's (here its own, in range), as the renderer's raster takes a
+    // cluster's voxels as one run.
+    b[1].cell = 0.25F;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    b[1].cell = 0.5F;
+    b[1].first_voxel = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    b[1].first_voxel = 2U;
     NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
 
     // A voxel: a footprint of no extent, an unknown shape, a capsule's

@@ -144,8 +144,9 @@ typedef struct NphRenderClusterLods {
                                    // largest float) last
     NphArrayU32 group_clusters;    // each group's clusters in turn
     NphRenderLodNodeArray nodes;   // node 0 the root
-    // The voxel clusters' bricks, each cluster's contiguous, and the bricks'
-    // voxels (render/voxel.h); empty without a sampler.
+    // The voxel clusters' bricks, each cluster's contiguous and of one cell
+    // size, and the bricks' voxels in the bricks' order (render/voxel.h);
+    // empty without a sampler.
     NphRenderVoxelBrickArray bricks;
     NphRenderVoxelArray voxels;
     u32 levels;          // levels of clusters (1: level 0 alone)

@@ -310,7 +310,8 @@ typedef struct NphRenderMeshDesc {
     u32 lod_level0_meshlets;
     // The bricks and voxels of the levels' voxel clusters (render/voxel.h;
     // ADR-0061): a meshlet past level 0 without vertices is a voxel cluster,
-    // its `triangle_count` bricks from `vertex_offset`; NULL without.
+    // its `triangle_count` bricks from `vertex_offset`, of one cell size,
+    // their voxels following one another in the bricks' order; NULL without.
     const NphRenderVoxelBrick *voxel_bricks;
     u32 voxel_brick_count;
     const NphRenderVoxel *voxels;
@@ -320,8 +321,9 @@ typedef struct NphRenderMeshDesc {
 
 // Uploads the streams. NPH_RESULT_INVALID_ARGUMENT for empty streams, an
 // index count that is not a multiple of 3, an index or submesh range out
-// of bounds (every index is checked), or too many submeshes;
-// NPH_RESULT_FULL past max_meshes.
+// of bounds (every index is checked), too many submeshes, or a voxel
+// cluster whose bricks differ in cell size or whose voxels do not follow
+// one another in its bricks' order; NPH_RESULT_FULL past max_meshes.
 NPH_MUST_USE NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc,
                                               NphRenderMesh *out);
 // Deferred like textures. Instances of the mesh must be destroyed first

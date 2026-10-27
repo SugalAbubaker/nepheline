@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Voxels in the production path (render/voxel.h; docs/render.md "Voxels";
-// ADR-0061): the shaders' traversal against its C twin, ray by ray; a
-// foliage mesh's voxel clusters drawn where the CPU's rays through the same
-// clusters meet them, pixel for pixel; the coverage of the voxel levels
-// against level 0's from near to far; the voxel resolve's look against the
-// voxels'; the light a voxel level reflects against the triangles it
-// stands for; and the voxel passes, present only with voxel meshes. The
-// fixture's teardown asserts zero validation and synchronisation-validation
-// errors and nothing leaked.
+// ADR-0061): the shaders' voxel tests against their C twin, ray by ray, and
+// the resolve's search for a pixel's voxel against them; a foliage mesh's
+// voxel clusters drawn where the CPU's rays through the same clusters meet
+// them, pixel for pixel; the coverage of the voxel levels against level 0's
+// from near to far; the voxel resolve's look against the voxels'; the light
+// a voxel level reflects against the triangles it stands for; the voxel
+// passes, present only with voxel meshes; and malformed voxel clusters
+// refused. The fixture's teardown asserts zero validation and
+// synchronisation-validation errors and nothing leaked.
 #include <nepheline/gpu/render_graph.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/math/random.h>
@@ -57,13 +58,13 @@ static NphVec3 random_unit(NphPcg32 *rng)
 }
 
 // ---------------------------------------------------------------------------
-// The traversal against its C twin
+// The voxels' tests against their C twin
 // ---------------------------------------------------------------------------
 
 #define TWIN_BRICKS 256U
 #define TWIN_RAYS   64U // a brick
 
-NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
+NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
 {
     NphGpuDevice *dev = test_gpu_create(NULL);
     if (dev == NULL) {
@@ -109,6 +110,9 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
         }
         const f32 side = 4.0F * brick->cell;
         const NphVec3 centre = nph_vec3_add(brick->origin, nph_vec3_splat(0.5F * side));
+        // Directions of a 64th of the brick, so that it lies past t = 1, as
+        // the raster's rays from the near plane meet voxels.
+        const f32 speed = side / 64.0F;
         for (u32 r = 0; r < TWIN_RAYS; ++r) {
             const NphVec3 from =
                 nph_vec3_add(centre, nph_vec3_scale(random_unit(&rng), 3.0F * side));
@@ -125,8 +129,8 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
                 d = nph_vec3(dd[0], dd[1], dd[2]);
             }
             NphVisVoxelCase *c = &cases[k * TWIN_RAYS + r];
-            c->origin = nph_vec4_from_vec3(from, 0.0F);
-            c->dir = nph_vec4_from_vec3(d, 1e30F);
+            c->origin = nph_vec4_from_vec3(from, 1.0F);
+            c->dir = nph_vec4_from_vec3(nph_vec3_scale(d, speed), NPH_F32_MAX);
             c->brick = k;
         }
     }
@@ -170,11 +174,13 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
 
     // The same rays through the C twin: the same hits, at the same t within
     // the rounding of a few operations; a ray that grazes a footprint's edge
-    // within that rounding may hit on one side and miss on the other.
+    // within that rounding may hit on one side and miss on the other. The
+    // resolve's search from each hit's depth meets that hit exactly.
     u32 hits = 0U;
     u32 found_wrong = 0U;
     u32 voxel_wrong = 0U;
     u32 face_wrong = 0U;
+    u32 search_wrong = 0U;
     f64 worst = 0.0;
     for (u32 i = 0; i < cases_n; ++i) {
         const NphVisVoxelCase *c = &cases[i];
@@ -184,6 +190,9 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
             brick, voxels, nph_vec3(c->origin.x, c->origin.y, c->origin.z),
             nph_vec3(c->dir.x, c->dir.y, c->dir.z), c->origin.w, c->dir.w, &hit);
         const bool gpu = (results[i].face & 256U) != 0U;
+        if (gpu && (results[i].face & 512U) == 0U) {
+            search_wrong += 1U;
+        }
         if (got != gpu) {
             found_wrong += 1U;
             continue;
@@ -193,7 +202,8 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
         }
         hits += 1U;
         const f64 side = 4.0 * (f64)brick->cell;
-        worst = nph_f64_max(worst, nph_f64_abs((f64)results[i].t - (f64)hit.t) / side);
+        const f64 speed = (f64)nph_vec3_length(nph_vec3(c->dir.x, c->dir.y, c->dir.z));
+        worst = nph_f64_max(worst, nph_f64_abs((f64)results[i].t - (f64)hit.t) * speed / side);
         if (results[i].voxel != hit.voxel) {
             voxel_wrong += 1U;
         } else if ((results[i].face & 255U) != hit.face) {
@@ -201,13 +211,14 @@ NTEST(VoxelGpu, the_traversal_matches_its_cpu_twin)
         }
     }
     NTEST_LOG("%u rays, %u hits; %u disagree on a hit, %u on the voxel, %u on the face; worst t "
-              "%.3g of a brick",
-              cases_n, hits, found_wrong, voxel_wrong, face_wrong, worst);
+              "%.3g of a brick; the search missed %u",
+              cases_n, hits, found_wrong, voxel_wrong, face_wrong, worst, search_wrong);
     NTEST_EXPECT_GT_UINT(hits, cases_n / 10U);
     NTEST_EXPECT_LE_UINT(found_wrong, cases_n / 2000U);
     NTEST_EXPECT_LE_UINT(voxel_wrong, cases_n / 2000U);
     NTEST_EXPECT_LE_UINT(face_wrong, cases_n / 2000U);
     NTEST_EXPECT_TRUE(worst < 1e-4);
+    NTEST_EXPECT_EQ_UINT(search_wrong, 0U);
 
     nph_gpu_pipeline_destroy(dev, pipeline);
     nph_gpu_shader_destroy(dev, shader);
@@ -726,6 +737,64 @@ NTEST_F(VoxelGpu, the_voxel_passes_come_and_go_with_voxel_meshes)
     nph_render_mesh_destroy(f->renderer, plain_mesh);
     lod_mesh_free(&m);
     lod_mesh_free(&plain);
+}
+
+// A mesh's voxel clusters are checked as the raster splats them, a
+// cluster's voxels one run: its bricks of one cell size, each brick's voxels
+// following the brick before's. And the GPU's reads stay in the streams: a
+// brick's voxels past them, an empty mask, a cell that is no power of two.
+NTEST_F(VoxelGpu, malformed_voxel_clusters_are_refused)
+{
+    REQUIRE_RENDERER(f);
+    LodMesh m;
+    lod_foliage(&m, 1500U, 4.0F, 13U);
+    // A voxel cluster of two bricks or more.
+    const NphRenderMeshlet *cl = m.lods.clusters.meshlets.data;
+    u32 pick = NPH_U32_MAX;
+    for (u32 i = m.lods.level0_clusters; i < m.lods.clusters.meshlets.len; ++i) {
+        if (cl[i].vertex_count == 0U && cl[i].triangle_count >= 2U) {
+            pick = i;
+            break;
+        }
+    }
+    NTEST_ASSERT_NE_UINT(pick, NPH_U32_MAX);
+    NphAllocator *a = nph_allocator_system();
+    const u32 n = m.lods.bricks.len;
+    NphRenderVoxelBrick *bricks = NPH_ALLOC_ARRAY(a, NphRenderVoxelBrick, n);
+    NTEST_ASSERT_NOT_NULL(bricks);
+    NphRenderMeshDesc d = m.desc;
+    d.voxel_bricks = bricks;
+    const NphRenderVoxelBrick *first = &bricks[cl[pick].vertex_offset];
+    NphRenderVoxelBrick *second = &bricks[cl[pick].vertex_offset + 1U];
+#define RESET() memcpy(bricks, m.lods.bricks.data, sizeof *bricks *n)
+#define EXPECT_REFUSED()                                                                           \
+    do {                                                                                           \
+        NphRenderMesh none = NPH_RENDER_MESH_NULL;                                                 \
+        NTEST_EXPECT_EQ_INT(nph_render_mesh_create(f->renderer, &d, &none),                        \
+                            NPH_RESULT_INVALID_ARGUMENT);                                          \
+        RESET();                                                                                   \
+    } while (0)
+    RESET();
+    NphRenderMesh ok = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &d, &ok), NPH_RESULT_OK);
+    nph_render_mesh_destroy(f->renderer, ok);
+    // Another cell size, a power of two still.
+    second->cell *= 2.0F;
+    EXPECT_REFUSED();
+    // Voxels that do not follow the first brick's (its own, in range).
+    second->first_voxel = first->first_voxel;
+    EXPECT_REFUSED();
+    second->first_voxel = d.voxel_count;
+    EXPECT_REFUSED();
+    second->mask[0] = 0U;
+    second->mask[1] = 0U;
+    EXPECT_REFUSED();
+    second->cell = 0.3F;
+    EXPECT_REFUSED();
+#undef EXPECT_REFUSED
+#undef RESET
+    NPH_FREE_ARRAY(a, NphRenderVoxelBrick, bricks, n);
+    lod_mesh_free(&m);
 }
 
 // The image's linear luminance, summed: the light it reflects to the camera.

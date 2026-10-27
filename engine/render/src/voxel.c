@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Voxels (render/voxel.h; ADR-0061): the records' packing, the lobe's
-// concentration, the traversal's C twin, and the shading model's terms.
+// concentration, the C twin of the shaders' voxel tests, and the shading
+// model's terms.
 #include <nepheline/core/assert.h>
 #include <nepheline/math/pack.h>
 #include <nepheline/math/scalar.h>
@@ -151,7 +152,7 @@ f32 nph_render_voxel_kappa_from_moment(f32 m)
 }
 
 // ---------------------------------------------------------------------------
-// The traversal
+// A ray's first voxel
 // ---------------------------------------------------------------------------
 
 static bool brick_bit(const NphRenderVoxelBrick *b, u32 bit)
@@ -258,9 +259,10 @@ static bool capsule_hit(const f32 p[3], const f32 d[3], const f32 a[3], const f3
 // The footprint of a voxel (its `box` and `material` words) in the cell of
 // lowest corner `base`, against the ray o + t d (brick space; inv the
 // reciprocal of d) for t in [*t0, t1]; the ray crosses the cell over
-// [t_cell, t_exit], and the round shapes' tests start from t_cell so that
-// their terms keep their precision however far the ray came. On a hit, *t0
-// takes its t and *face the face it entered.
+// [t_cell, t_exit] (from the cell's planes: voxel_hit), and the round
+// shapes' tests start from t_cell so that their terms keep their precision
+// however far the ray came. On a hit, *t0 takes its t and *face the face it
+// entered.
 static bool footprint(u32 box, u32 material, const f32 base[3], f32 step, const f32 o[3],
                       const f32 d[3], const f32 inv[3], f32 t_cell, f32 t_exit, f32 *t0, f32 t1,
                       u32 *face)
@@ -360,6 +362,36 @@ static bool footprint(u32 box, u32 material, const f32 base[3], f32 step, const 
     return true;
 }
 
+// The voxel `voxel` of cell `bit` (x + 4y + 16z) of a brick of cell `h`
+// against the ray o + t d (brick space; inv the reciprocal of d) for t in
+// [t_min, t_max] (vis_voxel.glsl vis_voxel_hit): the cell's span along the
+// ray from its own planes, then its footprint. Cells are powers of two and
+// their corners small multiples of them, so base + h is exact, as is every
+// footprint plane.
+static bool voxel_hit(const NphRenderVoxel *voxel, u32 bit, f32 h, const f32 o[3], const f32 d[3],
+                      const f32 inv[3], f32 t_min, f32 t_max, f32 *out_t, u32 *out_face)
+{
+    const f32 base[3] = {(f32)(bit & 3U) * h, (f32)((bit >> 2U) & 3U) * h, (f32)(bit >> 4U) * h};
+    f32 enter = t_min;
+    f32 leave = t_max;
+    for (u32 a = 0; a < 3U; ++a) {
+        const f32 ta = (base[a] - o[a]) * inv[a];
+        const f32 tb = (base[a] + h - o[a]) * inv[a];
+        enter = nph_f32_max(enter, nph_f32_min(ta, tb));
+        leave = nph_f32_min(leave, nph_f32_max(ta, tb));
+    }
+    if (!(enter <= leave)) {
+        return false;
+    }
+    f32 t = t_min;
+    if (!footprint(voxel->box, voxel->material, base, h / (f32)NPH_RENDER_VOXEL_BOX_STEPS, o, d,
+                   inv, enter, leave, &t, t_max, out_face)) {
+        return false;
+    }
+    *out_t = t;
+    return true;
+}
+
 bool nph_render_voxel_trace(const NphRenderVoxelBrick *brick, const NphRenderVoxel *voxels,
                             NphVec3 origin, NphVec3 dir, f32 t_min, f32 t_max,
                             NphRenderVoxelHit *out)
@@ -376,72 +408,25 @@ bool nph_render_voxel_trace(const NphRenderVoxelBrick *brick, const NphRenderVox
         }
         inv[a] = 1.0F / d[a];
     }
-    // The brick's box, [0, 4h] on each axis.
-    const f32 side = (f32)NPH_RENDER_VOXEL_BRICK * h;
-    f32 t0 = t_min;
-    f32 t1 = t_max;
-    for (u32 a = 0; a < 3U; ++a) {
-        const f32 ta = (0.0F - o[a]) * inv[a];
-        const f32 tb = (side - o[a]) * inv[a];
-        t0 = nph_f32_max(t0, nph_f32_min(ta, tb));
-        t1 = nph_f32_min(t1, nph_f32_max(ta, tb));
+    // Every voxel apart, the nearest hit kept (the lowest cell on a tie).
+    bool found = false;
+    for (u32 bit = 0; bit < 64U; ++bit) {
+        if (!brick_bit(brick, bit)) {
+            continue;
+        }
+        const u32 index = brick->first_voxel + brick_rank(brick, bit);
+        f32 t = 0.0F;
+        u32 face = 0U;
+        if (voxel_hit(&voxels[index], bit, h, o, d, inv, t_min, t_max, &t, &face) &&
+            (!found || t < out->t)) {
+            found = true;
+            out->t = t;
+            out->voxel = index;
+            out->cell = bit;
+            out->face = face;
+        }
     }
-    if (!(t0 <= t1)) {
-        return false;
-    }
-    // The cell the ray enters by, the t it enters there, and the steps of
-    // the traversal.
-    f32 t_cell = t0;
-    i32 c[3];
-    i32 step[3];
-    f32 next[3];
-    f32 delta[3];
-    for (u32 a = 0; a < 3U; ++a) {
-        const f32 p = o[a] + t0 * d[a];
-        const f32 cf = nph_f32_floor(p / h);
-        c[a] = cf < 0.0F ? 0 : (cf > 3.0F ? 3 : (i32)cf);
-        step[a] = d[a] > 0.0F ? 1 : -1;
-        next[a] = ((f32)(c[a] + (step[a] > 0 ? 1 : 0)) * h - o[a]) * inv[a];
-        delta[a] = h * nph_f32_abs(inv[a]);
-    }
-    const f32 step_h = h / (f32)NPH_RENDER_VOXEL_BOX_STEPS;
-    // A ray crosses at most 4 + 3 + 3 cells of a brick.
-    for (u32 iter = 0; iter < 10U; ++iter) {
-        const u32 bit = (u32)c[0] + 4U * (u32)c[1] + 16U * (u32)c[2];
-        if (brick_bit(brick, bit)) {
-            const u32 index = brick->first_voxel + brick_rank(brick, bit);
-            const f32 base[3] = {(f32)c[0] * h, (f32)c[1] * h, (f32)c[2] * h};
-            f32 t = t0;
-            u32 face = 0U;
-            const f32 t_exit = nph_f32_min(nph_f32_min(next[0], next[1]), next[2]);
-            if (footprint(voxels[index].box, voxels[index].material, base, step_h, o, d, inv,
-                          t_cell, t_exit, &t, t1, &face)) {
-                out->t = t;
-                out->voxel = index;
-                out->cell = bit;
-                out->face = face;
-                return true;
-            }
-        }
-        // The nearest boundary next, the lowest axis on a tie.
-        u32 a = 0U;
-        if (next[1] < next[a]) {
-            a = 1U;
-        }
-        if (next[2] < next[a]) {
-            a = 2U;
-        }
-        if (next[a] > t1) {
-            break;
-        }
-        c[a] += step[a];
-        if (c[a] < 0 || c[a] > 3) {
-            break;
-        }
-        t_cell = next[a];
-        next[a] += delta[a];
-    }
-    return false;
+    return found;
 }
 
 // ---------------------------------------------------------------------------
