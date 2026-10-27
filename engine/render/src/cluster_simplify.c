@@ -331,9 +331,6 @@ void lod_mesh_free(LodMesh *m, NphAllocator *alloc)
     if (m->wedge_of != NULL) {
         NPH_FREE_ARRAY(alloc, u32, m->wedge_of, n);
     }
-    if (m->local_wedge != NULL) {
-        NPH_FREE_ARRAY(alloc, u32, m->local_wedge, n);
-    }
     if (m->quadrics != NULL) {
         NPH_FREE_ARRAY(alloc, LodQuadric, m->quadrics, c);
     }
@@ -349,9 +346,6 @@ void lod_mesh_free(LodMesh *m, NphAllocator *alloc)
     if (m->absorbed_tail != NULL) {
         NPH_FREE_ARRAY(alloc, u32, m->absorbed_tail, c);
     }
-    if (m->local_class != NULL) {
-        NPH_FREE_ARRAY(alloc, u32, m->local_class, c);
-    }
     memset(m, 0, sizeof *m);
 }
 
@@ -365,12 +359,10 @@ NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphVec3 *position
     const u32 n = nph_max_u32(vertex_count, 1U);
     m->class_of = NPH_ALLOC_ARRAY(alloc, u32, n);
     m->wedge_of = NPH_ALLOC_ARRAY(alloc, u32, n);
-    m->local_wedge = NPH_ALLOC_ARRAY(alloc, u32, n);
-    if (m->class_of == NULL || m->wedge_of == NULL || m->local_wedge == NULL) {
+    if (m->class_of == NULL || m->wedge_of == NULL) {
         lod_mesh_free(m, alloc);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
-    memset(m->local_wedge, 0xFF, (size_t)n * sizeof(u32));
     // The centre of the bounds: the quadrics' origin.
     if (vertex_count != 0U) {
         NphVec3 lo = positions[0];
@@ -389,16 +381,14 @@ NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphVec3 *position
         const u32 c = nph_max_u32(m->class_count, 1U);
         m->quadrics = NPH_ALLOC_ARRAY_ZEROED(alloc, LodQuadric, c);
         m->normals = NPH_ALLOC_ARRAY_ZEROED(alloc, NphVec3, c);
-        m->local_class = NPH_ALLOC_ARRAY(alloc, u32, c);
         m->class_vertex = NPH_ALLOC_ARRAY(alloc, u32, c);
         m->absorbed_next = NPH_ALLOC_ARRAY(alloc, u32, c);
         m->absorbed_tail = NPH_ALLOC_ARRAY(alloc, u32, c);
-        r = m->quadrics != NULL && m->normals != NULL && m->local_class != NULL &&
-                    m->class_vertex != NULL && m->absorbed_next != NULL && m->absorbed_tail != NULL
+        r = m->quadrics != NULL && m->normals != NULL && m->class_vertex != NULL &&
+                    m->absorbed_next != NULL && m->absorbed_tail != NULL
                 ? NPH_RESULT_OK
                 : NPH_RESULT_OUT_OF_MEMORY;
         if (r == NPH_RESULT_OK) {
-            memset(m->local_class, 0xFF, (size_t)c * sizeof(u32));
             memset(m->class_vertex, 0xFF, (size_t)c * sizeof(u32));
             memset(m->absorbed_next, 0xFF, (size_t)c * sizeof(u32));
             for (u32 k = 0; k < m->class_count; ++k) {
@@ -946,24 +936,65 @@ static void simp_free(Simp *s)
     NPH_ARRAY_FREE(&s->candidates);
 }
 
-// The group's local wedges and classes; the mesh's scratch maps them.
-static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
+// The group's corners as local wedges, numbered in the order the corners
+// reach them, and their classes likewise (hash maps of the group's own, so
+// that groups may be simplified at once).
+static NphResult simp_number(Simp *s, const LodSimplifyInput *in, NphHashMap *wedges,
+                             NphHashMap *classes)
 {
-    LodMesh *m = in->mesh;
-    for (u32 i = 0; i < in->triangle_count * 3U; ++i) {
+    const LodMesh *m = in->mesh;
+    const u32 corners = in->triangle_count * 3U;
+    // About a wedge a triangle where the surface is closed; more grow.
+    NPH_TRY(nph_hashmap_reserve(wedges, in->triangle_count + 16U));
+    NPH_TRY(nph_hashmap_reserve(classes, in->triangle_count + 16U));
+    for (u32 i = 0; i < corners; ++i) {
         const u32 v = m->wedge_of[in->indices[i]];
-        if (m->local_wedge[v] != NPH_U32_MAX) {
+        const u32 *known = (const u32 *)nph_hashmap_find_u64(wedges, v);
+        if (known != NULL) {
+            s->tri[i] = *known;
             continue;
         }
         const u32 c = m->class_of[v];
-        if (m->local_class[c] == NPH_U32_MAX) {
-            m->local_class[c] = s->class_mesh.len;
+        const u32 *known_class = (const u32 *)nph_hashmap_find_u64(classes, c);
+        u32 local_class = s->class_mesh.len;
+        if (known_class != NULL) {
+            local_class = *known_class;
+        } else {
+            NPH_TRY(nph_hashmap_insert_u64(classes, c, &local_class));
             NPH_TRY(NPH_ARRAY_PUSH(&s->class_mesh, c));
         }
-        m->local_wedge[v] = s->wedge_vertex.len;
+        const u32 local_wedge = s->wedge_vertex.len;
+        NPH_TRY(nph_hashmap_insert_u64(wedges, v, &local_wedge));
         NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_vertex, v));
-        NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, m->local_class[c]));
+        NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, local_class));
+        s->tri[i] = local_wedge;
     }
+    return NPH_RESULT_OK;
+}
+
+// The group's local wedges and classes.
+static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
+{
+    LodMesh *m = in->mesh;
+    // Set first: simp_free sizes the triangle arrays by it.
+    s->tri_count = in->triangle_count;
+    s->tri = NPH_ALLOC_ARRAY(s->alloc, u32, (u64)nph_max_u32(in->triangle_count, 1U) * 3U);
+    if (s->tri == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    NphHashMap wedges;
+    NphHashMap class_map;
+    const NphHashMapDesc desc = nph_hashmap_desc_u64(sizeof(u32));
+    NphResult r = nph_hashmap_init(&wedges, s->alloc, &desc);
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&class_map, s->alloc, &desc);
+        if (r == NPH_RESULT_OK) {
+            r = simp_number(s, in, &wedges, &class_map);
+            nph_hashmap_free(&class_map);
+        }
+        nph_hashmap_free(&wedges);
+    }
+    NPH_TRY(r);
     NPH_ASSERT(in->triangle_count == 0U || s->wedge_class.data != NULL);
     const u32 classes = nph_max_u32(s->class_mesh.len, 1U);
     const u32 tris = nph_max_u32(in->triangle_count, 1U);
@@ -974,15 +1005,13 @@ static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
     s->mark = NPH_ALLOC_ARRAY_ZEROED(s->alloc, u32, classes);
     s->around_start = NPH_ALLOC_ARRAY(s->alloc, u32, (u64)classes + 1U);
     s->edge_start = NPH_ALLOC_ARRAY(s->alloc, u32, (u64)classes + 1U);
-    s->tri = NPH_ALLOC_ARRAY(s->alloc, u32, (u64)tris * 3U);
     s->around = NPH_ALLOC_ARRAY(s->alloc, u32, (u64)tris * 3U);
     s->dead = NPH_ALLOC_ARRAY_ZEROED(s->alloc, u8, tris);
     // An edge run per half-edge at most.
     s->run_kind = NPH_ALLOC_ARRAY(s->alloc, u8, (u64)tris * 3U);
     if (s->class_position == NULL || s->kind == NULL || s->touched == NULL ||
         s->touched_ever == NULL || s->mark == NULL || s->around_start == NULL ||
-        s->edge_start == NULL || s->tri == NULL || s->around == NULL || s->dead == NULL ||
-        s->run_kind == NULL) {
+        s->edge_start == NULL || s->around == NULL || s->dead == NULL || s->run_kind == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     for (u32 c = 0; c < s->class_mesh.len; ++c) {
@@ -991,12 +1020,8 @@ static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
     for (u32 w = 0; w < s->wedge_vertex.len; ++w) {
         s->class_position[s->wedge_class.data[w]] = relative(m, s->wedge_vertex.data[w]);
     }
-    s->tri_count = in->triangle_count;
     s->live = 0U;
     for (u32 t = 0; t < in->triangle_count; ++t) {
-        for (u32 k = 0; k < 3U; ++k) {
-            s->tri[(u64)t * 3U + k] = m->local_wedge[m->wedge_of[in->indices[(u64)t * 3U + k]]];
-        }
         // A triangle with two corners in one class covers nothing.
         const u32 a = tri_class(s, t, 0U);
         const u32 b = tri_class(s, t, 1U);
@@ -1008,17 +1033,6 @@ static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
         }
     }
     return NPH_RESULT_OK;
-}
-
-static void simp_release_scratch(Simp *s)
-{
-    LodMesh *m = s->mesh;
-    for (u32 w = 0; w < s->wedge_vertex.len; ++w) {
-        m->local_wedge[s->wedge_vertex.data[w]] = NPH_U32_MAX;
-    }
-    for (u32 c = 0; c < s->class_mesh.len; ++c) {
-        m->local_class[s->class_mesh.data[c]] = NPH_U32_MAX;
-    }
 }
 
 NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_error)
@@ -1134,7 +1148,6 @@ NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_
         *out_triangles = n;
         *out_error = (f32)nph_f64_sqrt(worst);
     }
-    simp_release_scratch(&s);
     simp_free(&s);
     return r;
 }

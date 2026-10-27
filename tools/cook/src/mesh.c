@@ -333,7 +333,7 @@ static NphAABB bounds_of(const NphVec3 *positions, const u32 *indices, u32 count
 
 NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
                           const CookMeshSettings *settings, const struct CookVoxelMaterials *voxels,
-                          NphAssetWriter *writer, CookMeshStats *stats)
+                          NphJobSystem *jobs, NphAssetWriter *writer, CookMeshStats *stats)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && writer != NULL);
     const NphLzLevel lz = settings->lz;
@@ -461,7 +461,8 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     bool with_lods = false;
     if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
         const u64 lods_start = nph_time_now_ns();
-        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, &lods);
+        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, jobs,
+                                 &lods);
         with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
         if (stats != NULL) {
             stats->lods_ns = nph_time_now_ns() - lods_start;
@@ -609,8 +610,8 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
 // ---------------------------------------------------------------------------
 
 NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
-                            const struct CookVoxelMaterials *voxels, NphAssetWriter *writer,
-                            CookMeshStats *stats)
+                            const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                            NphAssetWriter *writer, CookMeshStats *stats)
 {
     NPH_ASSERT(mesh != NULL && writer != NULL);
     CookMeshSettings settings;
@@ -651,7 +652,7 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
     st.meshlets_ns = nph_time_now_ns() - meshlets_start;
     st.lod_levels = 1U;
     if (r == NPH_RESULT_OK) {
-        r = cook_mesh_write(mesh, &meshlets, &settings, voxels, writer, &st);
+        r = cook_mesh_write(mesh, &meshlets, &settings, voxels, jobs, writer, &st);
     }
     st.total_ns = nph_time_now_ns() - start;
     st.vertices = mesh->vertices.len;

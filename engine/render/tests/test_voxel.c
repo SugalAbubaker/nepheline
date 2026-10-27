@@ -1265,9 +1265,11 @@ static void lod_mesh_data_free(LodMeshData *m)
     NPH_ARRAY_FREE(&m->indices);
 }
 
-static NphResult build_with(const LodMeshData *m, const NphRenderVoxelSampler *sampler,
-                            NphAllocator *a, NphRenderMeshlets *meshlets,
-                            NphRenderClusterLods *lods)
+// The meshlets and levels of `m` (initialised here), built on `jobs`
+// (NULL: on this thread).
+static NphResult build_on(const LodMeshData *m, const NphRenderVoxelSampler *sampler,
+                          NphAllocator *a, NphJobSystem *jobs, NphRenderMeshlets *meshlets,
+                          NphRenderClusterLods *lods)
 {
     nph_render_meshlets_init(meshlets, a);
     nph_render_cluster_lods_init(lods, a);
@@ -1294,7 +1296,15 @@ static NphResult build_with(const LodMeshData *m, const NphRenderVoxelSampler *s
     in.cone_weight = 0.25F;
     in.voxels = sampler;
     in.scratch = a;
+    in.jobs = jobs;
     return nph_render_cluster_lods_build(&in, lods);
+}
+
+static NphResult build_with(const LodMeshData *m, const NphRenderVoxelSampler *sampler,
+                            NphAllocator *a, NphRenderMeshlets *meshlets,
+                            NphRenderClusterLods *lods)
+{
+    return build_on(m, sampler, a, NULL, meshlets, lods);
 }
 
 // Every voxel cluster's bricks and voxels lie in the arrays, one after
@@ -1496,32 +1506,36 @@ NTEST_F(VoxelBuild, a_sampler_is_checked)
     lod_mesh_data_free(&m);
 }
 
-NTEST_F(VoxelBuild, a_surface_that_simplifies_stays_triangles)
+// A wavy sheet of n x n quads, 4 units a side: its levels simplify to the end.
+static void sheet_mesh(LodMeshData *m, NphAllocator *a, u32 n)
 {
-    // A wavy sheet of 64 x 64 quads: its levels simplify to the end.
-    LodMeshData m;
-    NPH_ARRAY_INIT(&m.positions, f->a);
-    NPH_ARRAY_INIT(&m.indices, f->a);
-    const u32 n = 64U;
+    NPH_ARRAY_INIT(&m->positions, a);
+    NPH_ARRAY_INIT(&m->indices, a);
     for (u32 y = 0; y <= n; ++y) {
         for (u32 x = 0; x <= n; ++x) {
             const f32 fx = (f32)x / (f32)n;
             const f32 fy = (f32)y / (f32)n;
             const NphVec3 p = nph_vec3(4.0F * fx, 4.0F * fy,
                                        0.2F * nph_f32_sin(6.0F * fx) * nph_f32_cos(5.0F * fy));
-            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&m.positions, p));
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&m->positions, p));
         }
     }
     for (u32 y = 0; y < n; ++y) {
         for (u32 x = 0; x < n; ++x) {
             const u32 v00 = y * (n + 1U) + x;
             const u32 q[6] = {v00, v00 + 1U, v00 + n + 2U, v00, v00 + n + 2U, v00 + n + 1U};
-            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m.indices, q, 6U));
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m->indices, q, 6U));
         }
     }
-    m.ranges[0].index_offset = 0U;
-    m.ranges[0].index_count = m.indices.len;
-    m.range_count = 1U;
+    m->ranges[0].index_offset = 0U;
+    m->ranges[0].index_count = m->indices.len;
+    m->range_count = 1U;
+}
+
+NTEST_F(VoxelBuild, a_surface_that_simplifies_stays_triangles)
+{
+    LodMeshData m;
+    sheet_mesh(&m, f->a, 64U);
     TestLook look;
     look_init(&look, m.positions.data);
     const NphRenderVoxelSampler sampler = test_sampler(&look);
@@ -1535,6 +1549,75 @@ NTEST_F(VoxelBuild, a_surface_that_simplifies_stays_triangles)
     nph_render_cluster_lods_free(&lods);
     nph_render_meshlets_free(&meshlets);
     lod_mesh_data_free(&m);
+}
+
+// Two builds' levels, byte for byte.
+static void expect_same_levels(const NphRenderClusterLods *x, const NphRenderClusterLods *y)
+{
+    NTEST_EXPECT_EQ_UINT(x->levels, y->levels);
+    NTEST_EXPECT_EQ_UINT(x->level0_clusters, y->level0_clusters);
+#define EXPECT_SAME(field)                                                                         \
+    do {                                                                                           \
+        NTEST_ASSERT_EQ_UINT(x->field.len, y->field.len);                                          \
+        if (x->field.len != 0U) {                                                                  \
+            NTEST_EXPECT_EQ_MEM(x->field.data, y->field.data, NPH_ARRAY_BYTES(&x->field));         \
+        }                                                                                          \
+    } while (0)
+    EXPECT_SAME(clusters.meshlets);
+    EXPECT_SAME(clusters.bounds);
+    EXPECT_SAME(clusters.vertices);
+    EXPECT_SAME(clusters.triangles);
+    EXPECT_SAME(lods);
+    EXPECT_SAME(groups);
+    EXPECT_SAME(group_clusters);
+    EXPECT_SAME(nodes);
+    EXPECT_SAME(bricks);
+    EXPECT_SAME(voxels);
+#undef EXPECT_SAME
+}
+
+// A level's groups built at once, as jobs on four workers, give the levels
+// built on this thread alone, to the byte: foliage whose first levels
+// simplify its triangles and whose later ones are voxels, and a sheet that
+// simplifies to the end (its groups share their borders). Either way the
+// colours of groups run in turn, and a group sees what its neighbours of
+// earlier colours made of the classes they share.
+NTEST_F(VoxelBuild, the_levels_built_on_jobs_are_the_same)
+{
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = f->a;
+    jd.worker_count = 4U;
+    NphJobSystem *jobs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    LodMeshData meshes[2];
+    foliage_mesh(&meshes[0], f->a, 2000U, 4.0F, 31U);
+    sheet_mesh(&meshes[1], f->a, 64U);
+    for (u32 k = 0; k < 2U; ++k) {
+        TestLook look;
+        look_init(&look, meshes[k].positions.data);
+        const NphRenderVoxelSampler sampler = test_sampler(&look);
+        NphRenderMeshlets meshlets[2];
+        NphRenderClusterLods lods[2];
+        NTEST_ASSERT_EQ_INT(build_on(&meshes[k], &sampler, f->a, NULL, &meshlets[0], &lods[0]),
+                            NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(build_on(&meshes[k], &sampler, f->a, jobs, &meshlets[1], &lods[1]),
+                            NPH_RESULT_OK);
+        NTEST_LOG("%s: %u levels, %u groups, %u clusters, %u voxels", k == 0U ? "foliage" : "sheet",
+                  lods[0].levels, lods[0].groups.len, lods[0].clusters.meshlets.len,
+                  lods[0].voxels.len);
+        NTEST_EXPECT_GE_UINT(lods[0].levels, 5U);
+        if (k == 0U) {
+            NTEST_EXPECT_GT_UINT(lods[0].voxels.len, 0U);
+        }
+        expect_same_levels(&lods[0], &lods[1]);
+        for (u32 i = 0; i < 2U; ++i) {
+            nph_render_cluster_lods_free(&lods[i]);
+            nph_render_meshlets_free(&meshlets[i]);
+        }
+        lod_mesh_data_free(&meshes[k]);
+    }
+    nph_job_system_destroy(jobs);
 }
 
 // The renderer's choice, on the CPU: whether the camera at `camera` draws

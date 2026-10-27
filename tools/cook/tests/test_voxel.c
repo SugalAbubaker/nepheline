@@ -181,7 +181,7 @@ static void cook_foliage(bool voxels, const CookVoxelMaterials *materials, TestA
     NphAssetWriter w;
     nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                           nph_guid_from_cstr("foliage"), 1U);
-    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, materials, &w, st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, materials, NULL, &w, st), NPH_RESULT_OK);
     test_asset_from_writer(alloc, &w, ta);
     nph_asset_writer_free(&w);
     cook_mesh_free(&m);

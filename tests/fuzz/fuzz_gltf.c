@@ -83,7 +83,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         NphAssetWriter w;
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
                               nph_guid_from_cstr("fuzz"), 0U);
-        if (cook_mesh_process(mesh, &settings, &materials, &w, NULL) == NPH_RESULT_OK) {
+        if (cook_mesh_process(mesh, &settings, &materials, NULL, &w, NULL) == NPH_RESULT_OK) {
             fuzz_check_written_mesh(alloc, &w);
         }
         nph_asset_writer_free(&w);

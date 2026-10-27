@@ -58,7 +58,8 @@ NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
 NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                const NphVec3 *positions, const NphMeshAttrib *attribs,
                                const NphMeshletBounds *bounds, const CookMeshSettings *settings,
-                               const struct CookVoxelMaterials *voxels, NphRenderClusterLods *out)
+                               const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                               NphRenderClusterLods *out)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && out != NULL);
     NphAllocator *alloc = mesh->alloc;
@@ -120,6 +121,7 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         in.cone_weight = settings->meshlet_cone_weight;
         in.voxels = with_voxels ? &sampler : NULL;
         in.scratch = alloc;
+        in.jobs = jobs;
         r = nph_render_cluster_lods_build(&in, out);
     }
     if (surfaces != NULL) {

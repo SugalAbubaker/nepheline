@@ -65,6 +65,7 @@
 
 #include <nepheline/core/array.h>
 #include <nepheline/core/result.h>
+#include <nepheline/jobs/jobs.h>
 #include <nepheline/math/vec.h>
 #include <nepheline/render/meshlet.h>
 #include <nepheline/render/voxel.h>
@@ -178,6 +179,11 @@ typedef struct NphRenderClusterLodInput {
     // its submesh_surface has range_count entries. NULL: triangles only.
     const NphRenderVoxelSampler *voxels;
     NphAllocator *scratch; // working memory, released before returning
+    // Each level's groups are built, and their errors measured, as jobs on
+    // it (NULL: on the calling thread), with the same result to the byte.
+    // With jobs, `scratch` and the sampler's functions are called from the
+    // workers at once and must be NPH_THREADSAFE.
+    NphJobSystem *jobs;
 } NphRenderClusterLodInput;
 
 // Builds the levels of `in`'s mesh into `out` (initialised by the caller).
@@ -187,6 +193,8 @@ typedef struct NphRenderClusterLodInput {
 // without its functions or surfaces; NPH_RESULT_OUT_OF_MEMORY otherwise. A mesh that
 // cannot be simplified (a single cluster, or none) gets level 0 alone under
 // its root group. On failure `out` may hold a partial result to free.
+// Thread-safety: calls on separate inputs and outputs may run at once; with
+// `jobs` the call waits on them (from a job, its fiber yields).
 NPH_MUST_USE NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
                                                      NphRenderClusterLods *out);
 

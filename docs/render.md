@@ -588,9 +588,24 @@ the triangles (a flat-shaded mesh, whose every vertex is a seam corner,
 stops at once). The coarsest level's clusters are grouped as any level's,
 into root groups whose error is the largest float: so a mesh that stops
 early with hundreds of coarse clusters (foliage, seams everywhere) has them
-culled and handed on a few at a time. The build is deterministic and takes
-about 11 µs a triangle on one thread (`cluster_lod_torus_262k`,
-benchmarks/render).
+culled and handed on a few at a time.
+
+**The build at once.** A level's groups are built at once, as jobs, where
+the input gives a job system (`NphRenderClusterLodInput.jobs`; the cooker
+gives its own). Groups that share a class are coloured apart (greedily, in
+group order); the colours run in turn and a colour's groups at once, each
+reading and writing the quadrics, normals, and lists of its own classes
+alone, so that a group sees what its neighbours of earlier colours made of
+the classes they share, as a group built after its neighbours always has.
+A group numbers its vertices and classes with hash maps of its own and
+builds its clusters, voxels, sources, and orphans into arrays of its own,
+joined to the level's in group order once the level's groups are done. The
+measured error then runs a class at a time and a group at a time, each a
+function of the level's result alone. So the build is deterministic, the
+same to the byte on any number of workers and on none, and takes about
+12.4 µs a triangle on one thread and 2.4 on fifteen (`cluster_lod_torus_262k`,
+`cluster_lod_torus_262k_jobs`, benchmarks/render; ADR-0060's amendment of
+2026-10-27).
 
 **The hierarchy.** Each level's groups, and the root groups, in Morton
 order of their centres, lie under trees of nodes of eight children, the
@@ -2003,8 +2018,9 @@ and synchronisation-validation gate:
   has one maker and one consumer; errors never fall and spheres hold their
   parts exactly; a coarse level stays within its error of the true
   surface; every cut of a closed mesh is closed; seams and material
-  borders keep their shape; the build is deterministic, and degenerate,
-  scattered, small, and bad input is handled. On the GPU: the clusters
+  borders keep their shape; the build is deterministic, the same built on
+  jobs (`test_voxel.c`), and degenerate, scattered, small, and bad input is
+  handled. On the GPU: the clusters
   drawn are the CPU's cut, cluster for cluster, for views that mix levels;
   a threshold of 0 draws level 0 as the mesh without levels; distance
   draws coarser levels; cuts mixing levels leave no hole in a terrain

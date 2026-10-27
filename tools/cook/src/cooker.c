@@ -629,7 +629,7 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
         nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
                               content_hash);
         CookMeshStats st;
-        r = cook_mesh_process(&mesh, &c->mesh, NULL, &w, &st);
+        r = cook_mesh_process(&mesh, &c->mesh, NULL, c->jobs, &w, &st);
         if (r == NPH_RESULT_OK) {
             char relative[COOKER_PATH_MAX];
             output_path(c, key, "mesh", "mesh", guid, relative, sizeof relative);
@@ -1504,7 +1504,8 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             materials.slot_count = gm->material_count;
         }
         if (r == NPH_RESULT_OK) {
-            r = cook_mesh_process(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL, &w, &st);
+            r = cook_mesh_process(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL, c->jobs,
+                                  &w, &st);
         }
         if (slots != NULL) {
             NPH_FREE_ARRAY(alloc, CookVoxelMaterial, slots, nph_max_u32(gm->material_count, 1U));

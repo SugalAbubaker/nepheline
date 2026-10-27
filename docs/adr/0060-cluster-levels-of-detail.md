@@ -246,3 +246,87 @@ before, and turning the view's levels on or off redraws every page.
   compared differs, 3,261 of them in the shadow; 25 differ along the edges), from 80
   (meshlet, page) draws against 162, and turning the levels on redraws every page;
   with three of the cut's clusters dropped, 15 pixels inside differ.
+
+## Amendment (2026-10-27): each level's groups built at once
+
+**Context.** The build ran on one thread, about 12 µs a triangle. The open landscape
+(ADR-0040) took 20 minutes to cook, 13 of them in the three meshes of its pine (4.2 to
+7.0 million triangles, 199 to 309 s each), nearly all of that in the levels: of the
+fir sapling's 4.3 s a mesh the levels took 3.8, and of those the measured error 60 %,
+the simplification 19 %, the voxel cells 16 %, and the partition 1 %. Every part but
+the partition is a group's own work, but the groups of a level were not independent,
+as the Consequences above assumed: a collapse onto a locked class (locked classes do
+not move, but their neighbours may collapse onto them) adds its quadric, normal, and
+list to that class at once, and a group built after a neighbour sees, in the classes
+they share, what the neighbour merged into them. The simplifier also numbered a
+group's vertices and classes through scratch arrays the size of the mesh, which
+every group set and reset.
+
+**Decision.** Groups that share a class are coloured apart, greedily in group order
+(each takes the least colour its neighbours coloured before it lack; Welsh and Powell,
+1967), from the locked classes' groups. The colours run in turn, a colour's groups at
+once: no two of them share a class, so each reads and writes the mesh's quadrics,
+normals, and lists for its own classes alone, the shared ones among them, and a group
+sees what its neighbours of earlier colours merged into the classes they share, as a
+group always saw what its earlier neighbours merged. A group numbers its vertices and
+classes with hash maps of its own (`core/hashmap.h`) and builds into arrays of its own
+(its clusters, bricks, voxels, sources, and orphans, with offsets into them), joined
+to the level's arrays in group order once the level's groups are done. The measured
+error then runs a class at a time (each class's level-0 points against the level's
+whole result) and a group at a time (its classes' distances, its triangles' against
+level 0, its orphans'), each a function of the level's result. With
+`NphRenderClusterLodInput.jobs` the colours' groups and the two measures are jobs
+(`nph_job_parallel_for`); the result is the same to the byte on any number of workers
+and on none. The cooker builds on its job system; `COOK_MESH_VERSION` 3 recooks the
+meshes, whose levels change where the colours order neighbours otherwise than the
+group indices did.
+
+**Alternatives considered.**
+
+- *Every group of a level at once, seeing the shared classes as the level began,* its
+  collapses onto them listed and made after the level, in group order. It is as
+  deterministic and scales better (6.1 against 5.1 times on fifteen workers for the
+  262,144-triangle torus), but no group sees what its neighbours merged into a shared
+  class, and the groups pile collapses onto the same border vertices: on the curved
+  test surface (`a_groups_error_bounds_how_far_its_clusters_stray`) levels 3 to 6 came
+  out up to twice as coarse (level 3's largest error 0.055 against 0.025). Not kept.
+- *The groups at once over the shared quadrics as before:* a data race on the shared
+  classes, and a result that depends on the schedule.
+- *A schedule after the group indices* (a group waits for its neighbours of lower
+  index), which would keep the old result exactly: along a Morton order neighbours'
+  indices mostly rise, so the chains of waits run nearly the length of the level.
+- *A scratch array a worker for the numbering* instead of the hash maps: 8 bytes a
+  vertex a worker, 56 MB a worker for the 7-million-triangle pine and 0.9 GB for
+  sixteen. The maps cost nothing measurable (12.15 against 12.18 µs a triangle on
+  one thread before the colouring, which adds 0.2).
+- *Meshes cooked at once* (parallelism between assets): the pine's largest mesh alone
+  would still take 309 s, and its three meshes at once need three times the memory;
+  it may come later for content of many small meshes.
+
+**Consequences.**
+
+- On fifteen workers (a Ryzen 7 5800X, eight cores): the 262,144-triangle torus at
+  2.4 µs a triangle against 12.4 on one thread (5.1 times; the partition, the
+  colouring, the join, and the colours' barriers take the rest); the fir sapling's
+  levels in 0.5 s against 3.8 a mesh; the pine's largest mesh in 58 s against 309,
+  33 s of it the levels; and the open landscape in 6.0 minutes against 20.2, 3.5 of
+  them its textures' encoding. A big mesh's cleaning, meshlets, and compression, on
+  one thread still, are now 40 % of its time.
+- The levels change with the order: on the curved test surface each level's largest
+  error moves both ways (level 3 0.018 against 0.025, level 5 0.137 against 0.075,
+  level 7 0.155 against 0.191: a largest error is one group's), and the triangles
+  drawn at a threshold come out the same or fewer (camera 3 at 1,000 pixels a unit
+  766 against 1,224, camera 2 4,014 against 4,222, the rest within 0.5 %). Bistro,
+  its meshes cooked by both builders with the same cooker: its five views draw the
+  same clusters and triangles within 0.5 %, and the frames move -0.010 to +0.018 ms,
+  interleaved, within the runs' spread; the synthetic scenes with levels, built at
+  start, -0.021 ms (`lod_4k_production`) and -0.050 (`lod_shadows_sun_4k_production`),
+  the foliage scenes within 0.004. Bistro's 551 meshes cook in 16 s against 57.
+  The open landscape cannot be compared yet: its views overflow the visible-cluster
+  list with either cook (ADR-0061's stage 5).
+- The groups run on job fibers (64 KiB stacks); the largest arrays on that path are the
+  meshlet bounds' points and normals, about 6 KB (124 triangles a meshlet).
+- `test_voxel.c` (`the_levels_built_on_jobs_are_the_same`): foliage that becomes
+  voxels and a sheet that simplifies to the end, built on four workers and on none,
+  give the same arrays, byte for byte; `test_mesh.c` cooks a mesh with levels on two
+  workers to the bytes it cooks to on one thread.

@@ -23,6 +23,8 @@
 
 #include <golden/flip.h>
 #include <golden/png.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define IMAGE 256U
@@ -201,7 +203,31 @@ static void prepare_torus(void)
     g_torus.ready = nph_render_meshlets_build(&mi, &g_torus.meshlets) == NPH_RESULT_OK;
 }
 
-NBENCH(cluster_lod_torus_262k)
+// The job system the levels are built on in cluster_lod_torus_262k_jobs (a
+// worker a core but one), made once and destroyed at exit.
+static NphJobSystem *g_lod_jobs;
+
+static void lod_jobs_destroy(void)
+{
+    nph_job_system_destroy(g_lod_jobs);
+}
+
+static NphJobSystem *lod_jobs(void)
+{
+    if (g_lod_jobs == NULL) {
+        NphJobSystemDesc jd;
+        memset(&jd, 0, sizeof jd);
+        jd.alloc = nph_allocator_system();
+        if (nph_job_system_create(&jd, &g_lod_jobs) != NPH_RESULT_OK) {
+            g_lod_jobs = NULL;
+            return NULL;
+        }
+        atexit(lod_jobs_destroy);
+    }
+    return g_lod_jobs;
+}
+
+static void bench_cluster_lod(NbenchState *state, NphJobSystem *jobs)
 {
     prepare_torus();
     if (!g_torus.ready) {
@@ -220,6 +246,7 @@ NBENCH(cluster_lod_torus_262k)
     in.meshlets = &g_torus.meshlets;
     in.cone_weight = 0.25F;
     in.scratch = a;
+    in.jobs = jobs;
     nbench_set_items_per_iteration(state, g_torus.index_count / 3U);
     while (nbench_keep_running(state)) {
         NphRenderClusterLods l;
@@ -229,4 +256,22 @@ NBENCH(cluster_lod_torus_262k)
         }
         nph_render_cluster_lods_free(&l);
     }
+}
+
+NBENCH(cluster_lod_torus_262k)
+{
+    bench_cluster_lod(state, NULL);
+}
+
+// The same levels, each level's groups and errors as jobs.
+NBENCH(cluster_lod_torus_262k_jobs)
+{
+    static char label[64];
+    NphJobSystem *jobs = lod_jobs();
+    if (jobs == NULL) {
+        return;
+    }
+    bench_cluster_lod(state, jobs);
+    snprintf(label, sizeof label, "%u workers", nph_job_system_worker_count(jobs));
+    nbench_set_label(state, label);
 }
