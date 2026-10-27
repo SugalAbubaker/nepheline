@@ -42,8 +42,8 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 // and leaves the textures, whose encoding is most of a cook's time.
 //   1: levels of detail (mesh type version 2), root groups.
 //   2: KHR_texture_transform baked into the texture coordinates.
-//   3: a level's groups simplified as the level began, their collapses
-//      onto shared classes made after it (built on the job system).
+//   3: a level's groups built in colours (no two of a colour share a
+//      class), a colour's at once on the job system.
 #define COOK_MESH_VERSION 3U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
