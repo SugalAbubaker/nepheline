@@ -4,7 +4,8 @@
 // the resolve's search for a pixel's voxel against them; a foliage mesh's
 // voxel clusters drawn where the CPU's rays through the same clusters meet
 // them, pixel for pixel; the coverage of the voxel levels against level 0's
-// from near to far; the voxel resolve's look against the voxels'; the light
+// from near to far; the voxel resolve's look against the voxels'; the
+// radiance cache's cells of voxel pixels against their CPU twins; the light
 // a voxel level reflects against the triangles it stands for; the voxel
 // passes, present only with voxel meshes; and malformed voxel clusters
 // refused. The fixture's teardown asserts zero validation and
@@ -20,6 +21,7 @@
 #include "test_lod_support.h"
 
 #include <math.h>
+#include <stdlib.h>
 
 typedef RenderFixture VoxelGpu;
 
@@ -668,6 +670,132 @@ NTEST_F(VoxelGpu, the_voxel_resolve_shows_the_voxels_look)
     NTEST_EXPECT_GT_UINT(covered_n, 50U);
     NTEST_EXPECT_EQ_UINT(as_voxels + as_triangles, covered_n);
     NTEST_EXPECT_GT_UINT(as_voxels, covered_n / 2U);
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_material_destroy(f->renderer, mat);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+}
+
+static int compare_u32(const void *a, const void *b)
+{
+    const u32 x = *(const u32 *)a;
+    const u32 y = *(const u32 *)b;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+static bool contains(const u32 *sorted, u32 count, u32 value)
+{
+    return bsearch(&value, sorted, count, sizeof(u32), compare_u32) != NULL;
+}
+
+// The radiance cache's update keys a voxel pixel by its voxel's point and
+// the face its ray entered, a cell's diagonal off that face, as the voxel
+// resolve looks its cell up (vis_voxel.glsl vis_voxel_surface). After a
+// few frames the cache's slots hold the fingerprints of the cells that the
+// CPU's rays through the clusters drawn give (gi.c's twins of the keys):
+// every slot one of them, and nearly every cell a slot (a point on a
+// cell's face may land on either side of it).
+NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->gi.supported) {
+        NTEST_SKIP("no radiance cache on this device (ray queries)");
+    }
+    LodMesh m;
+    lod_foliage(&m, 1500U, 4.0F, 13U);
+    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
+    const NphRenderMaterial mat = grey_material(f);
+    const NphRenderInstance inst = instance(f, mesh, mat);
+    NphVec3 *positions = dequantised(&m);
+    NphVec3 *rays = NPH_ALLOC_ARRAY(nph_allocator_system(), NphVec3, PIXELS);
+    NTEST_ASSERT_NOT_NULL(rays);
+
+    // Far enough that the cut is voxels alone, through a narrower lens for
+    // more of their pixels.
+    const f64 distance = 30.0;
+    NphRenderView v = plain_view(distance, 1.0F);
+    v.camera.yfov = 0.3F;
+    v.gi = 1;
+    const NphRenderFrameStats stats = render_frames(f, &v);
+    NTEST_EXPECT_TRUE(stats.gi);
+    NTEST_EXPECT_GT_UINT(stats.vis_voxel_clusters, 0U);
+    u32 count = 0U;
+    NphVisCluster *list = visible_clusters(f, &count);
+    u32 triangle_clusters = 0U;
+    for (u32 g = 0; g < count; ++g) {
+        triangle_clusters +=
+            m.lods.clusters.meshlets.data[list[g].meshlet].vertex_count != 0U ? 1U : 0U;
+    }
+    NTEST_ASSERT_EQ_UINT(triangle_clusters, 0U);
+    const RenderGi *gi = &f->renderer->gi;
+    static u32 slots[1U << 16U];
+    NTEST_ASSERT_LE_UINT(gi->capacity, (u32)(sizeof slots / sizeof slots[0]));
+    test_read_buffer(f->dev, gi->keys, 0U, (u64)gi->capacity * sizeof(u32), slots);
+
+    // The expected fingerprints, of every voxel pixel's point and face.
+    static NphRenderGiLevel levels[NPH_RENDER_GI_LEVELS];
+    render_gi_levels(v.camera.position, 48.0, levels);
+    pixel_rays(&v, rays);
+    const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)distance);
+    static u32 expected[PIXELS];
+    u32 cells = 0U;
+    for (u32 i = 0; i < PIXELS; ++i) {
+        const u64 texel = expected_texel(&m, positions, list, count, eye, rays[i]);
+        if (texel == 0U) {
+            continue;
+        }
+        const u32 g = (u32)(texel & 0xFFFFFFFFU) >> 7U;
+        const NphRenderMeshlet *ml = &m.lods.clusters.meshlets.data[list[g].meshlet];
+        const NphRenderVoxelBrick *brick =
+            &m.lods.bricks.data[ml->vertex_offset + (u32)(texel & 127U)];
+        NphRenderVoxelHit hit;
+        NTEST_ASSERT_TRUE(nph_render_voxel_trace(brick, m.lods.voxels.data, eye, rays[i], 1.0F,
+                                                 3.402823466e38F, &hit));
+        // The instance is at the origin, unturned: its space is the world's.
+        const NphVec3 p = nph_vec3_scale(rays[i], hit.t);
+        NTEST_ASSERT_LT_UINT(hit.face & 3U, 3U);
+        f32 n[3] = {0.0F, 0.0F, 0.0F};
+        n[hit.face & 3U] = (hit.face & 4U) != 0U ? 1.0F : -1.0F;
+        NphVec3 normal = nph_vec3(n[0], n[1], n[2]);
+        if (nph_vec3_dot(normal, p) > 0.0F) {
+            normal = nph_vec3_neg(normal);
+        }
+        const NphVec3 x = nph_vec3_add(p, nph_vec3_scale(normal, brick->cell * 1.7320508F));
+        const u64 h = render_gi_mix(render_gi_key(levels, x, normal));
+        expected[cells++] = (u32)(h >> 32U) | 1U;
+    }
+    qsort(expected, cells, sizeof(u32), compare_u32);
+    u32 distinct = 0U;
+    for (u32 i = 0; i < cells; ++i) {
+        if (i == 0U || expected[i] != expected[i - 1U]) {
+            expected[distinct++] = expected[i];
+        }
+    }
+    static u32 held[1U << 16U];
+    u32 used = 0U;
+    u32 known = 0U;
+    for (u32 i = 0; i < gi->capacity; ++i) {
+        if (slots[i] != 0U) {
+            held[used++] = slots[i];
+            known += contains(expected, distinct, slots[i]) ? 1U : 0U;
+        }
+    }
+    qsort(held, used, sizeof(u32), compare_u32);
+    u32 found = 0U;
+    for (u32 i = 0; i < distinct; ++i) {
+        found += contains(held, used, expected[i]) ? 1U : 0U;
+    }
+    NTEST_LOG("%u cells from %u voxel pixels (%u voxel clusters); %u slots used, %u of them "
+              "expected; %u cells found",
+              distinct, cells, stats.vis_voxel_clusters, used, known, found);
+    NTEST_ASSERT_GT_UINT(distinct, 50U);
+    NTEST_EXPECT_TRUE((f64)known >= 0.98 * (f64)used);
+    NTEST_EXPECT_TRUE((f64)found >= 0.98 * (f64)distinct);
+
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, rays, PIXELS);
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, positions, m.data.vertex_count);
     nph_render_instance_destroy(f->renderer, inst);
     nph_render_material_destroy(f->renderer, mat);
     nph_render_mesh_destroy(f->renderer, mesh);

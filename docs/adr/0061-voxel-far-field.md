@@ -358,15 +358,20 @@ way, against level 0 at the same distances:
   pops, where the voxels' excess of light is the lobe's limit, which the follow-ups
   below address. The budget stays at four times.
 - **Frames without voxels.** Until the renderer holds a mesh with voxel levels, the
-  meshlet cull and the resolve are specialised without the voxels' routing and test
-  (`k_voxels`), and the voxel passes and their tile list are left out: `render_perf`'s
-  4K field, LOD and shadow scenes and Bistro's street measure within 0.004 ms of their
-  frames before, the resolve unchanged. Compiled in, the resolve's test alone, never
-  taken, cost it 0.5 to 1.7 % on those scenes in every form measured: in the cluster
-  branch (where its early exit also moved the production variant's spills from 1,792
-  to 2,304 bytes), placed before anything of the triangles' path (1.7 %, behind a
-  dependent load of the cluster's flags), as a bare exit there (1.1 %), and on a bit
-  of the visibility key with no load (0.5 to 0.7 %).
+  meshlet cull, the resolve and the radiance cache's update are specialised without
+  the voxels' routing, test and search (`k_voxels`), and the voxel passes and their
+  tile list are left out: `render_perf`'s 4K field, LOD and shadow scenes and Bistro's
+  street measure within 0.004 ms of their frames before, the resolve unchanged.
+  Compiled in, the resolve's test alone, never taken, cost it 0.5 to 1.7 % on those
+  scenes in every form measured: in the cluster branch (where its early exit also
+  moved the production variant's spills from 1,792 to 2,304 bytes), placed before
+  anything of the triangles' path (1.7 %, behind a dependent load of the cluster's
+  flags), as a bare exit there (1.1 %), and on a bit of the visibility key with no
+  load (0.5 to 0.7 %). The update, specialised so, is stage 2's binary exactly, and
+  takes Bistro's street 0.189 ms, as at Phase 13's start. Stage 3's update, with its
+  traversal compiled in, had run 0.010 ms faster there: the driver split its spills
+  as 1,280 bytes of shared and 80 of local memory, against 2,304 bytes of shared
+  without the voxels and 2,816 with their search.
 
 The tests hold the coverage to 8 % and the light to 12 % as they stand. The next work,
 before stage 5 measures the landscape and before the cooker makes voxels by default:
@@ -527,8 +532,9 @@ each measured against level 0 on these needles and on the landscape's own pines.
   voxel test against the C one (16,384 rays, every hit, voxel and face alike), and the
   resolve's search from each hit's depth, which meets the hit again exactly; the
   raster against the CPU's rays through the clusters drawn, pixel for pixel; the voxel
-  resolve's albedo and its lit pixels against its C twin; the voxel levels' coverage
-  and light against level 0 ("Accuracy"); clusters whose bricks differ in cell size or
-  whose voxels leave the bricks' order refused.
+  resolve's albedo and its lit pixels against its C twin; the radiance cache's cells of
+  voxel pixels against their CPU twins; the voxel levels' coverage and light against
+  level 0 ("Accuracy"); clusters whose bricks differ in cell size or whose voxels leave
+  the bricks' order refused.
 
   To come with their stages: the shadow casters against level 0's shadow.

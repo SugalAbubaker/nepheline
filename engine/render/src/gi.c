@@ -86,6 +86,12 @@ NphResult render_gi_create(NphRenderer *r)
     d.name = "gi update";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->update));
     render_log_statistics(r, gi->update, "gi update");
+    // The same with the voxel pixels' search (gi_update.comp k_voxels), for
+    // the frames that may draw voxel clusters.
+    d.specialization[0] = 1U;
+    d.specialization_count = 1U;
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->update_voxels));
+    render_log_statistics(r, gi->update_voxels, "gi update with voxels");
     memset(&d, 0, sizeof d);
     d.shader = gi->resolve_shader;
     d.name = "gi resolve";
@@ -100,6 +106,7 @@ void render_gi_destroy(NphRenderer *r)
 {
     RenderGi *gi = &r->gi;
     nph_gpu_pipeline_destroy(r->dev, gi->resolve);
+    nph_gpu_pipeline_destroy(r->dev, gi->update_voxels);
     nph_gpu_pipeline_destroy(r->dev, gi->update);
     nph_gpu_shader_destroy(r->dev, gi->resolve_shader);
     nph_gpu_shader_destroy(r->dev, gi->update_shader);
@@ -247,7 +254,7 @@ static void update_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     memset(&p, 0, sizeof p);
     p.view = r->vis.frame.view_address;
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_visbuffer), 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, gi->update);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels ? gi->update_voxels : gi->update);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (gi->frame_rays_x + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP,
                          (gi->frame_rays_y + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP, 1U);
