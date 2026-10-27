@@ -944,6 +944,13 @@ NTEST(mesh, the_pipeline_writes_levels_of_detail)
     NTEST_EXPECT_TRUE(v0.lod == NULL);
     NTEST_EXPECT_EQ_UINT(st0.lod_levels, 1U);
     NTEST_EXPECT_EQ_UINT(st.lod_levels, v.lod->levels);
+    // Where the time went: the levels took some, the parts fit in the
+    // whole, and a mesh cooked without levels spent none on them.
+    NTEST_EXPECT_GT_UINT(st.lods_ns, 0U);
+    NTEST_EXPECT_LE_UINT(st.prepare_ns + st.optimize_ns + st.meshlets_ns + st.lods_ns + st.blobs_ns,
+                         st.total_ns);
+    NTEST_EXPECT_EQ_UINT(st0.lods_ns, 0U);
+    NTEST_EXPECT_GT_UINT(st0.total_ns, 0U);
     NTEST_ASSERT_GE_UINT(v.lod->levels, 4U);
     // Level 0 as cooked without levels.
     const u32 l0 = v.lod->level0_meshlets;

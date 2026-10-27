@@ -8,6 +8,7 @@
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/path.h>
 #include <nepheline/platform/platform.h>
+#include <nepheline/platform/time.h>
 
 #include <cook/cooker.h>
 #include <cook/gltf.h>
@@ -1518,6 +1519,14 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
                 st.meshlets, st.lod_levels, st.lod_coarsest_triangles, st.lod_coarsest_clusters,
                 st.voxels, st.voxel_bricks, st.voxel_clusters, (f64)st.acmr_before,
                 (f64)st.acmr_after);
+            // A line of its own: a log message holds NPH_LOG_MESSAGE_MAX bytes.
+            NPH_LOG_INFO(&NPH_LOG_COOK,
+                         "mesh %s: %.2f s (prepare %.2f, reorder %.2f, meshlets %.2f, levels %.2f, "
+                         "compression %.2f)",
+                         gm->mesh.name, nph_time_ns_to_s(st.total_ns),
+                         nph_time_ns_to_s(st.prepare_ns), nph_time_ns_to_s(st.optimize_ns),
+                         nph_time_ns_to_s(st.meshlets_ns), nph_time_ns_to_s(st.lods_ns),
+                         nph_time_ns_to_s(st.blobs_ns));
             char file[COOK_MESH_NAME_MAX + 32U];
             snprintf(file, sizeof file, "mesh_%u_%s", m, gm->mesh.name);
             char relative[COOKER_PATH_MAX];
