@@ -43,7 +43,7 @@
 // renderer then makes the levels coarser until it fits: vsm.c).
 #define NPH_VSM_OVERFLOW_POOL     1 // pages needed past the pool (their pixels are lit)
 #define NPH_VSM_OVERFLOW_MESHLETS 2 // max_vsm_meshlets
-#define NPH_VSM_OVERFLOW_DRAWS    4 // max_vsm_draws
+#define NPH_VSM_OVERFLOW_DRAWS    4 // max_vsm_draws or max_vsm_voxel_draws
 
 // vsm_pages.comp modes (NphVisPush.mode).
 #define NPH_VSM_PAGES_INVALIDATE 0 // the pages this frame's instance updates touch: dirty
@@ -109,9 +109,9 @@ NPH_SHARED_STRUCT(NphVsmCounters)
     u32 overflow;        // NPH_VSM_OVERFLOW_*
     u32 recent_count;    // owned pages needed lately, not this frame (evicted last)
     // Statistics, read back two frames later.
-    u32 requested; // pages this frame's pixels needed
-    u32 evicted;   // pages taken from their owners
-    u32 pad1;
+    u32 requested;        // pages this frame's pixels needed
+    u32 evicted;          // pages taken from their owners
+    u32 voxel_draw_count; // (instance, voxel cluster, entry) draws
     u32 pad2;
     u32 level_render[NPH_VSM_LEVELS]; // pages drawn per level
 };
@@ -125,6 +125,7 @@ NPH_SHARED_STRUCT(NphVsmArgs)
     u32 clear_args[4];          // VkDrawIndirectCommand: a quad (6 vertices) per page drawn
     u32 instance_args[4];       // dispatch: the instance cull, z the levels with pages to draw
     u32 levels[NPH_VSM_LEVELS]; // those levels, in order
+    u32 voxel_draw_args[4];     // dispatch: the voxel casters' splat, a workgroup per voxel draw
 };
 
 // The virtual shadow map's view of a frame.
@@ -168,6 +169,9 @@ NPH_SHARED_STRUCT(NphVsmView)
     u32 max_meshlets;
     u32 max_draws;
     u32 reset; // nonzero: every page is dropped this frame
+    u32 max_voxel_draws;
+    u32 pad0;
+    u64 voxel_draws; // uvec4[max_voxel_draws]: (instance slot, voxel cluster, entry, unused)
 };
 
 // Push constants of vsm_request_test.comp (the render tests): the depth
@@ -178,6 +182,17 @@ NPH_SHARED_STRUCT(NphVsmTestPush)
     u64 depths;    // f32[width * height], row by row (0: the background)
     u64 reference; // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_WORDS]: each pixel's own
     u32 width;
+    u32 height;
+};
+
+// Push constants of vsm_pool_test.comp (the render tests): the pool's
+// depths, texel by texel, into a buffer.
+NPH_SHARED_STRUCT(NphVsmPoolTestPush)
+{
+    u64 dst;           // f32[width * height], row by row
+    u32 pool_index;    // bindless sampled index of the pool
+    u32 sampler_index; // bindless index of a sampler for it
+    u32 width;         // the pool's extent in texels
     u32 height;
 };
 

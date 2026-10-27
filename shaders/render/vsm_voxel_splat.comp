@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: Apache-2.0
+// The virtual shadow map's voxel casters (docs/render.md "Shadows";
+// ADR-0061, stage 4): one workgroup per voxel draw (instance, voxel
+// cluster, page) of the list `vsm cull meshlets` makes.
+//
+// The voxels are splatted, as the visibility buffer's voxel raster splats
+// them (vis_voxel_raster.comp): each projects its footprint's box (a
+// capsule's widened by its radius, within its cell) to the page's texel
+// centres it may cover, from steps along its brick's grid in the level's
+// frame (the same for the whole cluster: its bricks share a cell size), and
+// a subgroup pools its voxels' texels so that the rays' tests fill its
+// lanes whichever voxels cover texels. A texel's ray, the sun's through the
+// texel's centre, is tested against that voxel alone (vis_voxel.glsl
+// vis_voxel_hit), and the hit's depth takes the atomic minimum of the
+// texel in the voxel casters' depths: an R32 image laid out as the pool,
+// whose non-negative floats order as their bits. `vsm voxel merge` then
+// takes them into the pool, whose depth test keeps them or the triangles'
+// nearer depths.
+//
+// A texel's ray starts at its centre's place in the level's frame (exact:
+// an integer and a half texels from its page's corner), at its brick's
+// corner's light-space depth, and goes into the brick's space through the
+// instance's inverse, the CPU's rays' arithmetic but for its single
+// precision. (Offsetting each brick's corner's ray instead, by the texel's
+// place from the corner's in texels, moved some rays by a fraction of a
+// millimetre, enough to change which footprint they graze.)
+//
+// arg0: the voxel casters' depths' storage index.
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "vis_voxel.glsl"
+#include "vsm_raster.glsl"
+
+// Image atomics need a format qualifier (binding 1 is the storage images).
+layout(set = 0, binding = 1, r32ui) uniform uimage2D vsm_voxel_depth_images[];
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+#define BRICKS 32u // NPH_RENDER_VOXEL_CLUSTER_BRICKS
+
+// Shared arrays as arrays of structs of their own (docs/build.md "Shaders").
+// A brick, and its lowest corner in the level's frame (pages, and the
+// stored depth; w: its light-space depth).
+struct VsmVoxelBrickShared {
+    uvec4 b0;
+    uvec4 b1;
+    vec4 corner;
+};
+// A voxel's texels: their rectangle's corner (x | y << 16) and size (w | h
+// << 16), the subgroup's texels before them, and the voxel (its brick |
+// its cell << 5 | its index in the cluster << 11).
+struct VsmVoxelSplat {
+    uvec4 v;
+};
+shared VsmVoxelBrickShared s_brick[BRICKS];
+shared VsmVoxelSplat s_splat[64];
+
+// The position of the set bit of rank n (from 0) in the mask (m0, m1).
+uint nth_bit(uint m0, uint m1, uint n)
+{
+    uint at = 0u;
+    uint m = m0;
+    uint c = bitCount(m0);
+    if (n >= c) {
+        n -= c;
+        m = m1;
+        at = 32u;
+    }
+    for (uint w = 16u; w >= 2u; w >>= 1u) {
+        c = bitCount(m & ((1u << w) - 1u));
+        if (n >= c) {
+            n -= c;
+            m >>= w;
+            at += w;
+        }
+    }
+    return at + (n >= (m & 1u) ? 1u : 0u);
+}
+
+// A mesh-space vector of the instance in the level's frame (pages, and
+// stored depth).
+vec3 level_vector(VsmViewRef r, int level, NphVisTransform transform, vec3 v)
+{
+    const vec3 ls = vsm_light_space(r, vis_transform_vector(transform, v));
+    return vec3(ls.xy * r.v.levels[level].inv_page_size, ls.z * r.v.levels[level].depth_scale);
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
+    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // The same for the whole workgroup, so no invocation misses a barrier.
+    if (wg >= min(VsmCountersRef(r.v.counters).c.voxel_draw_count, r.v.max_voxel_draws)) {
+        return;
+    }
+    const uvec4 item = VsmUvec4Ref(r.v.voxel_draws).v[wg];
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[item.x];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[item.y];
+    const uint brick_count = min(m.z >> 16u, BRICKS);
+    const VsmTarget target = vsm_target(r, item.z);
+    const int level = target.level;
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    VisBricksRef bricks = VisBricksRef(mesh.voxel_bricks);
+    VisVoxelsRef voxels = VisVoxelsRef(mesh.voxels);
+    // The cluster's cell, and a 32nd of it along each axis in the level's
+    // frame.
+    const float h = uintBitsToFloat(bricks.b[m.x * 2u].w);
+    const float step = h / VIS_VOXEL_BOX_STEPS;
+    const vec3 ax = level_vector(r, level, inst.transform, vec3(step, 0.0, 0.0));
+    const vec3 ay = level_vector(r, level, inst.transform, vec3(0.0, step, 0.0));
+    const vec3 az = level_vector(r, level, inst.transform, vec3(0.0, 0.0, step));
+    // The rays in the instance's space: their direction (a unit of
+    // light-space depth).
+    const mat3 inv = vis_voxel_inverse_linear(inst.transform);
+    const float page = r.v.levels[level].page_size;
+    const vec3 dir = inv * r.v.axis_d.xyz;
+    const float depth_scale = r.v.levels[level].depth_scale;
+    const uint i = gl_LocalInvocationIndex;
+    if (i < brick_count) {
+        const uvec4 b0 = bricks.b[(m.x + i) * 2u];
+        s_brick[i].b0 = b0;
+        s_brick[i].b1 = bricks.b[(m.x + i) * 2u + 1u];
+        const vec3 ls = vsm_light_space(
+            r, vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t);
+        s_brick[i].corner = vec4(vsm_level_coords(r, level, ls), ls.z);
+    }
+    barrier();
+    // A cluster's voxels follow one another in its bricks' order (checked
+    // when a mesh is made), so voxel k of the cluster is the mesh's first + k.
+    const uint first = s_brick[0].b1.z;
+    const uvec4 last = s_brick[brick_count - 1u].b1;
+    const uint total = last.z - first + bitCount(last.x) + bitCount(last.y);
+    const uint lane = gl_SubgroupInvocationID;
+    const uint size = gl_SubgroupSize;
+    const uint own = gl_SubgroupID * size; // the subgroup's entries of s_splat
+    const float page_texels = float(NPH_VSM_PAGE);
+    for (uint base = own; base < total; base += 64u) {
+        const uint k = base + lane;
+        uint texels = 0u;
+        uvec4 splat = uvec4(0u);
+        if (k < total) {
+            // The brick holding voxel k: its first voxel at or before k, the
+            // next brick's after.
+            uint lo = 0u;
+            uint hi = brick_count;
+            while (hi - lo > 1u) {
+                const uint mid = (lo + hi) >> 1u;
+                if (s_brick[mid].b1.z - first <= k) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            const uvec4 b1 = s_brick[lo].b1;
+            const uint bit = nth_bit(b1.x, b1.y, first + k - b1.z);
+            const uvec2 words = voxels.v[first + k].zw; // material, box
+            // The footprint's box in 32nds of a cell from the brick's corner.
+            const uvec3 cell = uvec3(bit & 3u, (bit >> 2u) & 3u, bit >> 4u) * 32u;
+            vec3 box_lo;
+            vec3 box_hi;
+            for (uint a = 0u; a < 3u; ++a) {
+                box_lo[a] = float(cell[a] + ((words.y >> (5u * a)) & 31u));
+                box_hi[a] = float(cell[a] + ((words.y >> (15u + 5u * a)) & 31u) + 1u);
+            }
+            if ((words.y >> 30u) == VIS_VOXEL_SHAPE_CAPSULE) {
+                const float reach = vis_voxel_radius((words.x >> 26u) & 63u) * VIS_VOXEL_BOX_STEPS;
+                box_lo = max(box_lo - reach, vec3(cell));
+                box_hi = min(box_hi + reach, vec3(cell + 32u));
+            }
+            const vec3 mid3 = 0.5 * (box_lo + box_hi);
+            const vec3 half3 = 0.5 * (box_hi - box_lo);
+            const vec3 c = s_brick[lo].corner.xyz + mid3.x * ax + mid3.y * ay + mid3.z * az;
+            const vec2 e = half3.x * abs(ax.xy) + half3.y * abs(ay.xy) + half3.z * abs(az.xy);
+            // The centres x + 1/2 within the box's reach, in texels of the
+            // page, a 64th wider each way against rounding, held to the page.
+            const vec2 at = (c.xy - target.rel) * page_texels;
+            const vec2 reach = e * page_texels;
+            const vec2 a =
+                clamp(ceil(at - reach - 0.5 - 1.0 / 64.0), vec2(0.0), vec2(page_texels));
+            const vec2 b =
+                clamp(floor(at + reach - 0.5 + 1.0 / 64.0), vec2(-1.0), vec2(page_texels - 1.0));
+            const ivec2 n = max(ivec2(b) - ivec2(a) + 1, ivec2(0));
+            texels = uint(n.x) * uint(n.y);
+            splat.xy = uvec2(uint(a.x) | (uint(a.y) << 16u), uint(n.x) | (uint(n.y) << 16u));
+            splat.w = lo | (bit << 5u) | (k << 11u);
+        }
+        splat.z = subgroupExclusiveAdd(texels);
+        const uint pairs = subgroupAdd(texels);
+        s_splat[own + lane].v = splat;
+        subgroupBarrier();
+        for (uint j = lane; j < pairs; j += size) {
+            // The voxel whose texels hold pair j: the last with no more
+            // texels before it than j.
+            uint lo = 0u;
+            uint hi = size;
+            while (hi - lo > 1u) {
+                const uint mid = (lo + hi) >> 1u;
+                if (s_splat[own + mid].v.z <= j) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            const uvec4 sp = s_splat[own + lo].v;
+            const uint w = sp.y & 0xFFFFu;
+            const uint local = j - sp.z;
+            const uvec2 tx = uvec2((sp.x & 0xFFFFu) + local % w, (sp.x >> 16u) + local / w);
+            const uint brick = sp.w & 31u;
+            // The texel's centre in the level's frame, its point at the
+            // brick's corner's light-space depth, and the ray from there.
+            const vec2 at = target.rel + (vec2(tx) + 0.5) / page_texels;
+            const vec2 xy = (at - r.v.levels[level].origin.xy) * page;
+            const float from = s_brick[brick].corner.w;
+            const vec3 p = xy.x * r.v.axis_u.xyz + xy.y * r.v.axis_v.xyz + from * r.v.axis_d.xyz;
+            const VisVoxelRay ray =
+                vis_voxel_brick_ray(uintBitsToFloat(s_brick[brick].b0.xyz), inv * (p - t), dir);
+            float th;
+            uint face;
+            if (vis_voxel_hit(voxels.v[first + (sp.w >> 11u)], (sp.w >> 5u) & 63u, h, ray,
+                              -3.402823466e38, 3.402823466e38, th, face)) {
+                // Casters nearer the light than the level's range still
+                // shadow: the depth is clamped, as the triangles' is.
+                const float depth = clamp((from + th) * depth_scale + r.v.levels[level].origin.z,
+                                          0.0, 1.0);
+                imageAtomicMin(vsm_voxel_depth_images[nonuniformEXT(pc.arg0)],
+                               ivec2(target.base) + ivec2(tx), floatBitsToUint(depth));
+            }
+        }
+        subgroupBarrier();
+    }
+}

@@ -34,6 +34,10 @@
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; }; // arg0: INVALIDATE's update count
 
+// Whether the casters may hold voxel clusters (vsm.c), whose splat's
+// arguments the draws' phase then works out too.
+layout(constant_id = 0) const bool k_voxels = false;
+
 NPH_BUFFER_REF(VisUpdatesRef) { NphVisInstanceUpdate u[]; };
 
 // The compute dispatch limit every device meets (maxComputeWorkGroupCount).
@@ -285,6 +289,11 @@ void args(VisViewRef view, VsmViewRef r)
         const uvec4 g = groups(min(counters.c.draw_count, r.v.max_draws), view.v.max_mesh_groups_x);
         a.a.draw_args = uint[4](g.x, g.y, g.z, g.w);
         a.a.clear_args = uint[4](6u, min(counters.c.render_count, r.v.pool_pages), 0u, 0u);
+        if (k_voxels) {
+            const uvec4 gv =
+                groups(min(counters.c.voxel_draw_count, r.v.max_voxel_draws), VSM_MAX_GROUPS_X);
+            a.a.voxel_draw_args = uint[4](gv.x, gv.y, gv.z, gv.w);
+        }
         break;
     }
     }

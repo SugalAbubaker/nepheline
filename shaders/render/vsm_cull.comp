@@ -13,7 +13,9 @@
 //     the level's pages to draw, one draw (instance, meshlet, entry) per
 //     page it spans. Devices without mesh shaders also get the draw as an
 //     indexed indirect command (NphVisDraw) over the index pool, as the
-//     visibility buffer's indirect raster does.
+//     visibility buffer's indirect raster does. A voxel cluster's draws go
+//     to a list of their own (NphVsmView.voxel_draws), which the voxel
+//     casters' splat takes (vsm_voxel_splat.comp; ADR-0061).
 //
 // Casters are drawn from both sides and from every direction: no normal
 // cone culling, since a meshlet facing away from the light shadows all the
@@ -31,6 +33,11 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the casters may hold voxel clusters (vsm.c: while the renderer
+// holds a mesh with voxel levels), so that a frame without them pays
+// nothing for their routing.
+layout(constant_id = 0) const bool k_voxels = false;
 
 // A sphere spanning more pages than this is taken as touching a page to
 // draw without scanning the bitmask for one (its meshlets are tested).
@@ -182,8 +189,14 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
             }
         }
     }
+    // A meshlet record without vertices is a voxel cluster.
+    const bool voxels = k_voxels && (m.z & 0xFFFFu) == 0u;
     uint at;
-    VIS_RESERVE(counters.c.draw_count, draws, at);
+    VIS_RESERVE(counters.c.draw_count, voxels ? 0u : draws, at);
+    uint voxel_at = 0u;
+    if (k_voxels) {
+        VIS_RESERVE(counters.c.voxel_draw_count, voxels ? draws : 0u, voxel_at);
+    }
     if (draws == 0u) {
         return;
     }
@@ -200,11 +213,20 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
                 while (bits != 0u) {
                     const int x = int(w * 32u + uint(findLSB(bits)));
                     bits &= bits - 1u;
+                    const uint entry = vsm_entry(level, ivec2(x, y) + window);
+                    if (voxels) {
+                        if (voxel_at >= r.v.max_voxel_draws) {
+                            atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_DRAWS));
+                            return;
+                        }
+                        VsmUvec4Ref(r.v.voxel_draws).v[voxel_at] = uvec4(slot, meshlet, entry, 0u);
+                        ++voxel_at;
+                        continue;
+                    }
                     if (at >= r.v.max_draws) {
                         atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_DRAWS));
                         return;
                     }
-                    const uint entry = vsm_entry(level, ivec2(x, y) + window);
                     VsmUvec4Ref(r.v.draws).v[at] = uvec4(slot, meshlet, entry, 0u);
                     if (indirect) {
                         NphVisDraw draw;

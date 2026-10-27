@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// The virtual shadow map's pool, read back for the render tests
+// (Vsm.a_voxel_caster_shadows_as_its_level_0): an invocation per texel,
+// through the pool's sampled binding (the pool is not a transfer source,
+// which could cost it the hardware's depth compression). Not used by the
+// renderer.
+#version 460
+#include "vis_common.glsl"
+#include "vsm_common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant, scalar) uniform Push { NphVsmPoolTestPush pc; };
+
+NPH_BUFFER_REF(VsmPoolOutRef) { float d[]; };
+
+void main()
+{
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.width || p.y >= pc.height) {
+        return;
+    }
+    const float depth =
+        texelFetch(sampler2D(nph_textures_2d[pc.pool_index], nph_samplers[pc.sampler_index]), ivec2(p), 0)
+            .r;
+    VsmPoolOutRef(pc.dst).d[p.y * pc.width + p.x] = depth;
+}

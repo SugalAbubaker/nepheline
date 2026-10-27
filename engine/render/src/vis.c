@@ -1912,6 +1912,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vsm_resident = last->vsm_resident;
         stats->vsm_evicted = last->vsm_evicted;
         stats->vsm_draws = last->vsm_draws;
+        stats->vsm_voxel_draws = last->vsm_voxel_draws;
         stats->vsm_overflow = last->vsm_overflow;
     }
     NPH_PROFILE_END();

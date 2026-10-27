@@ -43,8 +43,8 @@ NPH_STATIC_ASSERT(sizeof(NphVsmEntry) == 16U, "NphVsmEntry matches its GLSL layo
 NPH_STATIC_ASSERT(sizeof(NphVsmPhys) == 8U, "NphVsmPhys matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmLevel) == 48U, "NphVsmLevel matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 112U, "NphVsmCounters matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 144U, "NphVsmArgs matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1040U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 160U, "NphVsmArgs matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1056U, "NphVsmView matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_ENTRIES == NPH_VSM_WINDOW * NPH_VSM_WINDOW, "a window's entries");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_WORDS * 32 == NPH_VSM_LEVEL_ENTRIES, "a level's bitmask");
 NPH_STATIC_ASSERT(NPH_VSM_ROW_WORDS * 32 == NPH_VSM_WINDOW, "a row of a level's bitmask");
@@ -150,6 +150,8 @@ static NphResult create_pipelines(NphRenderer *r)
     NPH_TRY(load(r, r->vis.mesh_shaders ? "vsm_raster.mesh" : "vsm_raster.vert", &v->shaders[2]));
     NPH_TRY(load(r, "vsm_clear.vert", &v->shaders[3]));
     NPH_TRY(load(r, "vsm_request.frag", &v->shaders[4]));
+    NPH_TRY(load(r, "vsm_voxel_splat.comp", &v->shaders[5]));
+    NPH_TRY(load(r, "vsm_voxel_merge.frag", &v->shaders[6]));
     NphGpuComputePipelineDesc cd;
     memset(&cd, 0, sizeof cd);
     cd.shader = v->shaders[0];
@@ -158,6 +160,18 @@ static NphResult create_pipelines(NphRenderer *r)
     cd.shader = v->shaders[1];
     cd.name = "vsm cull";
     NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->cull));
+    // With the voxel clusters' routing and arguments (k_voxels).
+    cd.specialization[0] = 1U;
+    cd.specialization_count = 1U;
+    NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->cull_voxels));
+    cd.shader = v->shaders[0];
+    cd.name = "vsm pages";
+    NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->pages_voxels));
+    cd.specialization[0] = 0U;
+    cd.specialization_count = 0U;
+    cd.shader = v->shaders[5];
+    cd.name = "vsm voxel splat";
+    NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->voxel_splat));
     // Depth only, into the pool: casters from both sides, their depth
     // clamped (nearer the light than the near plane still shadows).
     NphGpuGraphicsPipelineDesc gd;
@@ -176,6 +190,20 @@ static NphResult create_pipelines(NphRenderer *r)
     gd.depth.clamp = 1;
     gd.name = "vsm raster";
     NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->raster));
+    // The voxel casters' depths into the pages drawn (ADR-0061): the clear's
+    // quads, each fragment the depth its texel's voxels left, which the depth
+    // test keeps where nearer than the triangles'.
+    memset(&gd, 0, sizeof gd);
+    gd.vertex = v->shaders[3];
+    gd.fragment = v->shaders[6];
+    gd.topology = NPH_GPU_TOPOLOGY_TRIANGLE_LIST;
+    gd.cull_mode = NPH_GPU_CULL_NONE;
+    gd.depth_format = RENDER_DEPTH_FORMAT;
+    gd.depth.test = 1;
+    gd.depth.write = 1;
+    gd.depth.compare = NPH_GPU_COMPARE_LESS;
+    gd.name = "vsm voxel merge";
+    NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->voxel_merge));
     memset(&gd, 0, sizeof gd);
     gd.vertex = v->shaders[3];
     gd.topology = NPH_GPU_TOPOLOGY_TRIANGLE_LIST;
@@ -223,7 +251,10 @@ NphResult render_vsm_create(NphRenderer *r)
     NphGpuBufferDesc bd;
     memset(&bd, 0, sizeof bd);
     bd.memory = NPH_GPU_MEMORY_DEVICE;
-    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    // A transfer source too, for the render tests' reads (a buffer's usage
+    // costs it nothing).
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+               (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
     bd.size = VSM_ENTRIES * sizeof(NphVsmEntry);
     bd.name = "vsm page table";
     NPH_TRY(nph_gpu_buffer_create(dev, &bd, &v->entries));
@@ -259,7 +290,13 @@ void render_vsm_destroy(NphRenderer *r)
     NphGpuDevice *dev = r->dev;
     nph_gpu_pipeline_destroy(dev, v->pages);
     nph_gpu_pipeline_destroy(dev, v->cull);
+    nph_gpu_pipeline_destroy(dev, v->pages_voxels);
+    nph_gpu_pipeline_destroy(dev, v->cull_voxels);
     nph_gpu_pipeline_destroy(dev, v->raster);
+    nph_gpu_pipeline_destroy(dev, v->voxel_splat);
+    nph_gpu_pipeline_destroy(dev, v->voxel_merge);
+    nph_gpu_image_destroy(dev, v->voxel_depths);
+    nph_gpu_buffer_destroy(dev, v->voxel_draws);
     nph_gpu_pipeline_destroy(dev, v->clear);
     nph_gpu_pipeline_destroy(dev, v->request);
     for (u32 i = 0; i < NPH_ARRAY_COUNT(v->shaders); ++i) {
@@ -453,6 +490,7 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->frame = ++v->frames;
     vv->max_meshlets = r->desc.max_vsm_meshlets;
     vv->max_draws = r->desc.max_vsm_draws;
+    vv->max_voxel_draws = r->desc.max_vsm_voxel_draws;
     vv->reset = reset ? 1U : 0U;
     v->direction = d;
     v->lods = lods;
@@ -475,6 +513,7 @@ void render_vsm_read_stats(NphRenderer *r)
         s->vsm_resident = 0U;
         s->vsm_evicted = 0U;
         s->vsm_draws = 0U;
+        s->vsm_voxel_draws = 0U;
         s->vsm_overflow = 0U;
         return;
     }
@@ -487,6 +526,7 @@ void render_vsm_read_stats(NphRenderer *r)
     s->vsm_resident = v->pool_pages - free_pages + nph_min_u32(c->alloc_count, free_pages);
     s->vsm_evicted = c->evicted;
     s->vsm_draws = nph_min_u32(c->draw_count, r->desc.max_vsm_draws);
+    s->vsm_voxel_draws = nph_min_u32(c->voxel_draw_count, r->desc.max_vsm_voxel_draws);
     s->vsm_overflow = c->overflow;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
@@ -495,7 +535,9 @@ void render_vsm_read_stats(NphRenderer *r)
                      "NphRendererDesc (said once each)",
                      r->name, (fresh & (u32)NPH_VSM_OVERFLOW_POOL) != 0U ? " vsm_pages" : "",
                      (fresh & (u32)NPH_VSM_OVERFLOW_MESHLETS) != 0U ? " max_vsm_meshlets" : "",
-                     (fresh & (u32)NPH_VSM_OVERFLOW_DRAWS) != 0U ? " max_vsm_draws" : "");
+                     (fresh & (u32)NPH_VSM_OVERFLOW_DRAWS) != 0U
+                         ? " max_vsm_draws or max_vsm_voxel_draws"
+                         : "");
         v->overflow_logged |= fresh;
     }
     // The resolution bias, from frames that drew with the current one (the
@@ -548,7 +590,7 @@ static void pages_record(NphRenderer *r, NphGpuCmd *cmd, u32 mode, u32 phase, u3
 {
     NphVisPush p = push_of(r, mode, phase);
     p.arg0 = arg0;
-    nph_gpu_cmd_bind_pipeline(cmd, r->vsm.pages);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels ? r->vsm.pages_voxels : r->vsm.pages);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
 }
 
@@ -656,7 +698,7 @@ static void cull_meshlets_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void
     bd.memory_count = 1U;
     nph_gpu_cmd_barrier(cmd, &bd);
     const NphVisPush p = push_of(r, NPH_VSM_CULL_MESHLETS, 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, v->cull);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels ? v->cull_voxels : v->cull);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(meshlet_args));
 }
@@ -701,6 +743,43 @@ static void raster_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
                                                     (u64)offsetof(NphVsmCounters, draw_count),
                                                 r->desc.max_vsm_draws, (u32)sizeof(NphVisDraw));
     }
+}
+
+// The voxel casters' depths cleared to none, once (the merge resets the
+// pages it reads thereafter).
+static void voxel_clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    NphGpuClearValue none;
+    memset(&none, 0, sizeof none);
+    none.color_u32[0] = 0xFFFFFFFFU;
+    nph_gpu_cmd_clear_color_image(cmd, r->vsm.voxel_depths, NPH_GPU_LAYOUT_TRANSFER_DST, &none, 0U,
+                                  1U, 0U, 1U);
+}
+
+static void voxel_splat_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVsm *v = &r->vsm;
+    const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
+    NphVisPush p = push_of(r, 0U, 0U);
+    p.arg0 = nph_gpu_image_storage_index(r->dev, v->voxel_depths, 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, v->voxel_splat);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(voxel_draw_args));
+}
+
+static void voxel_merge_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVsm *v = &r->vsm;
+    const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
+    NphVisPush p = push_of(r, 0U, 0U);
+    p.arg0 = nph_gpu_image_storage_index(r->dev, v->voxel_depths, 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, v->voxel_merge);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_draw_indirect(cmd, work, v->layout.args + ARGS_OFFSET(clear_args), 1U, 16U);
 }
 
 static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -785,11 +864,102 @@ NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *g
     return NPH_RESULT_OK;
 }
 
+// The voxel casters' draws and depths, the depths laid out as the pool
+// (R32_UINT: a texel's least depth as its bits, none as all ones), made the
+// first frame the renderer holds a mesh with voxel levels; frames without
+// them keep the work buffer as it was.
+static NphResult ensure_voxel_casters(NphRenderer *r)
+{
+    RenderVsm *v = &r->vsm;
+    if (!nph_gpu_image_is_null(v->voxel_depths)) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.size = (u64)r->desc.max_vsm_voxel_draws * 16U;
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    bd.memory = NPH_GPU_MEMORY_DEVICE;
+    bd.name = "vsm voxel draws";
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &bd, &v->voxel_draws));
+    const u32 rows = (v->pool_pages + (u32)NPH_VSM_POOL_ROW - 1U) / (u32)NPH_VSM_POOL_ROW;
+    NphGpuImageDesc id;
+    memset(&id, 0, sizeof id);
+    id.type = NPH_GPU_IMAGE_2D;
+    id.format = NPH_GPU_FORMAT_R32_UINT;
+    id.width = (u32)NPH_VSM_POOL_ROW * (u32)NPH_VSM_PAGE;
+    id.height = rows * (u32)NPH_VSM_PAGE;
+    id.mip_count = 1U;
+    id.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    id.name = "vsm voxel depths";
+    NPH_TRY(nph_gpu_image_create(r->dev, &id, &v->voxel_depths));
+    v->voxel_depths_fresh = 1;
+    NPH_LOG_INFO(&NPH_LOG_RENDER,
+                 "%s: virtual shadow map: voxel casters' draws (%.1f MB) and depths (%.1f MB)",
+                 r->name, (f64)bd.size / 1.0e6, (f64)id.width * (f64)id.height * 4.0 / 1.0e6);
+    return NPH_RESULT_OK;
+}
+
+// While the renderer holds a mesh with voxel levels: the voxel clusters'
+// casters splatted into their depths (vsm_voxel_splat.comp), then merged
+// into the pages drawn (vsm_voxel_merge.frag), after the triangles'.
+static NphResult declare_voxel_casters(NphRenderer *r, NphGpuRenderGraph *graph,
+                                       NphGpuRgBuffer instances, NphGpuRgBuffer meshes)
+{
+    RenderVsm *v = &r->vsm;
+    NphGpuRgPass *p = NULL;
+    if (v->voxel_depths_fresh) {
+        p = add_pass(graph, r, "vsm voxel clear", NPH_GPU_RG_PASS_TRANSFER, voxel_clear_execute);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_write_image(p, v->frame.voxel_depths, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
+        v->voxel_depths_fresh = 0;
+    }
+    p = add_pass(graph, r, "vsm voxel splat", NPH_GPU_RG_PASS_COMPUTE, voxel_splat_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, v->frame.work, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, v->frame.work, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, v->frame.voxel_draws, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, v->frame.entries, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_image(p, v->frame.voxel_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    p = add_pass(graph, r, "vsm voxel merge", NPH_GPU_RG_PASS_GRAPHICS, voxel_merge_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    NphGpuRgAttachment a;
+    memset(&a, 0, sizeof a);
+    a.load = NPH_GPU_LOAD_OP_LOAD;
+    a.store = NPH_GPU_STORE_OP_STORE;
+    nph_gpu_rg_depth_attachment(p, v->frame.pool, &a, 0);
+    nph_gpu_rg_read_buffer(p, v->frame.work, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, v->frame.work, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, v->frame.entries, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_image(p, v->frame.voxel_depths, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    return NPH_RESULT_OK;
+}
+
 NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
                                    NphGpuRgBuffer instances, NphGpuRgBuffer meshes)
 {
     RenderVsm *v = &r->vsm;
     NPH_ASSERT(v->frame_active);
+    if (r->vis.frame_voxels) {
+        // The voxel casters' list, which the meshlet cull fills, and its
+        // address in the frame's view (written before anything runs).
+        NPH_TRY(ensure_voxel_casters(r));
+        v->frame.voxel_draws = nph_gpu_rg_import_buffer(graph, v->voxel_draws);
+        v->frame.voxel_depths = nph_gpu_rg_import_image(graph, v->voxel_depths);
+        if (nph_gpu_rg_buffer_is_null(v->frame.voxel_draws) ||
+            nph_gpu_rg_image_is_null(v->frame.voxel_depths)) {
+            return NPH_RESULT_FULL;
+        }
+        NphVsmView *vv = render_frame_at(r, r->layout.vsm_view_offset);
+        vv->voxel_draws = nph_gpu_buffer_address(r->dev, v->voxel_draws);
+    }
     static const struct {
         const char *name;
         NphGpuRgExecuteFn execute;
@@ -814,6 +984,9 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
             nph_gpu_rg_read_buffer(p, instances, NPH_GPU_RG_USE_SHADER_READ);
             nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
         }
+        if (i == 4U && r->vis.frame_voxels) {
+            nph_gpu_rg_write_buffer(p, v->frame.voxel_draws, NPH_GPU_RG_USE_STORAGE_WRITE);
+        }
     }
     NphGpuRgPass *p = add_pass(graph, r, "vsm raster", NPH_GPU_RG_PASS_GRAPHICS, raster_execute);
     if (p == NULL) {
@@ -830,6 +1003,9 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
     nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
     if (!r->vis.mesh_shaders) {
         nph_gpu_rg_read_buffer(p, r->vis.frame.index_pool, NPH_GPU_RG_USE_INDEX);
+    }
+    if (r->vis.frame_voxels) {
+        NPH_TRY(declare_voxel_casters(r, graph, instances, meshes));
     }
     p = add_pass(graph, r, "vsm statistics", NPH_GPU_RG_PASS_TRANSFER, stats_execute);
     if (p == NULL) {

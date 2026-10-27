@@ -165,6 +165,15 @@
 //                         voxels: the stalled triangle levels they drew
 //                         before.
 //   foliage_4k_level0     the same at level 0.
+//   foliage_shadows_walk_4k_production, foliage_shadows_walk_4k_triangles
+//                         foliage_4k_production and foliage_4k_triangles
+//                         with the sun's virtual shadow map and the camera
+//                         walking: the shrubs cast at the map's cuts, their
+//                         voxel clusters through the voxel casters' raster
+//                         (ADR-0061, stage 4), or their stalled triangles.
+//   foliage_shadows_sun_4k_production, foliage_shadows_sun_4k_triangles
+//                         the same with the sun moving every frame: every
+//                         page drawn again each frame.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -354,6 +363,14 @@ static const SceneDef g_scenes[] = {
      0U, SHADOWS_NONE, POST_NO_VOXELS},
     {"foliage_4k_level0", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
      0U, SHADOWS_NONE, POST_LOD_LEVEL0},
+    {"foliage_shadows_walk_4k_production", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION,
+     3840U, 2160U, 0U, SHADOWS_SUN_WALK, POST_DEFAULT},
+    {"foliage_shadows_walk_4k_triangles", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION,
+     3840U, 2160U, 0U, SHADOWS_SUN_WALK, POST_NO_VOXELS},
+    {"foliage_shadows_sun_4k_production", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION,
+     3840U, 2160U, 0U, SHADOWS_SUN_TURNING, POST_DEFAULT},
+    {"foliage_shadows_sun_4k_triangles", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION,
+     3840U, 2160U, 0U, SHADOWS_SUN_TURNING, POST_NO_VOXELS},
 };
 
 // Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
@@ -1453,9 +1470,10 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
         }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
-                   "caster draws %u%s\n",
+                   "caster draws %u (and %u of voxel clusters)%s\n",
                    st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
-                   st->vsm_draws, st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
+                   st->vsm_draws, st->vsm_voxel_draws,
+                   st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
         }
         if (st->shadow_blas_bytes != 0U) {
             printf("    ray tracing: bottom levels %.1f MB (compacted after their builds)\n",

@@ -100,6 +100,8 @@ nph_add_shaders(nph_shaders_render
         render/vsm_cull.comp
         render/vsm_raster.mesh
         render/vsm_raster.vert
+        render/vsm_voxel_splat.comp
+        render/vsm_voxel_merge.frag
         render/vsm_clear.vert
         render/vsm_request.frag
         render/vis_sw_raster.comp
@@ -112,10 +114,12 @@ nph_add_shaders(nph_shaders_render
         render/vis_debug_line.frag
         # The culling math for the render tests (render/reference.h twins).
         render/vis_math_test.comp
-        # The voxel traversal for the render tests (render/voxel.h's twin).
+        # The voxels' tests for the render tests (render/voxel.h's twins).
         render/vis_voxel_test.comp
         # The depth pyramid's block requests against each pixel's (render tests).
         render/vsm_request_test.comp
+        # The shadow map's pool read back (render tests).
+        render/vsm_pool_test.comp
 )
 
 # Shaders of the GPU benchmarks (benchmarks/gpu).

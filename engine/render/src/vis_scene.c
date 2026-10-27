@@ -337,38 +337,6 @@ static NphResult build_meshlets(NphRenderer *r, const NphRenderMeshDesc *d, NphR
     return res;
 }
 
-// Until the sun's shadow map draws voxel casters (ADR-0061, stage 4), its
-// cuts end below the first that holds a voxel cluster: from that threshold on
-// it draws the last cut of triangles alone, the stalled levels it drew before
-// voxels. `table` is rewritten in place (nph_render_lod_cuts's layout) and
-// `*count` lowered; no cut left (voxels right above level 0) leaves the shadow
-// map level 0.
-static void cuts_without_voxels(const NphRenderMeshDesc *d, NphArrayU32 *table, u32 *count)
-{
-    u32 keep = 0U;
-    bool voxels = false;
-    while (keep < *count && !voxels) {
-        for (u32 e = table->data[keep]; e < table->data[keep + 1U] && !voxels; ++e) {
-            voxels = d->meshlets[table->data[e]].vertex_count == 0U;
-        }
-        keep += voxels ? 0U : 1U;
-    }
-    if (keep == *count) {
-        return;
-    }
-    // keep + 1 offsets, then the kept cuts' entries, which end where the
-    // first dropped cut starts.
-    const u32 header = *count + 1U;
-    const u32 shift = header - (keep + 1U);
-    const u32 end = table->data[keep];
-    for (u32 i = 0; i <= keep; ++i) {
-        table->data[i] -= shift;
-    }
-    memmove(&table->data[keep + 1U], &table->data[header], (size_t)(end - header) * sizeof(u32));
-    table->len = end - shift;
-    *count = keep;
-}
-
 // A mesh's levels of detail (NphVisMesh.lod_*): the hierarchy, the groups,
 // their clusters, and each cluster's maker.
 static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d,
@@ -409,9 +377,6 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
     NphResult cuts =
         nph_render_lod_cuts(d->cluster_lods, d->meshlet_count, d->lod_groups, d->lod_group_count,
                             NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0, &count, &table);
-    if (cuts == NPH_RESULT_OK && d->voxel_bricks != NULL) {
-        cuts_without_voxels(d, &table, &count);
-    }
     if (cuts == NPH_RESULT_OK && count != 0U) {
         cuts = upload_stream(r, table.data, NPH_ARRAY_BYTES(&table), "mesh lod cuts", &m->lod_cuts);
     }
