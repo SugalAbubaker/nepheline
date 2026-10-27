@@ -308,6 +308,13 @@ typedef struct NphRenderMeshDesc {
     const NphRenderLodNode *lod_nodes; // node 0 the root
     u32 lod_node_count;
     u32 lod_level0_meshlets;
+    // The bricks and voxels of the levels' voxel clusters (render/voxel.h;
+    // ADR-0061): a meshlet past level 0 without vertices is a voxel cluster,
+    // its `triangle_count` bricks from `vertex_offset`; NULL without.
+    const NphRenderVoxelBrick *voxel_bricks;
+    u32 voxel_brick_count;
+    const NphRenderVoxel *voxels;
+    u32 voxel_count;
     const char *name;
 } NphRenderMeshDesc;
 
@@ -720,9 +727,11 @@ typedef struct NphRenderFrameStats {
     // and `draws`, `blended`, and `triangles` count only the blended
     // surfaces the CPU draws itself; the GPU draws the rest.
     u64 vis_frame;
-    u32 vis_clusters;    // meshlets that survived culling
-    u32 vis_clusters_sw; // of those, rasterised in software
-    u32 vis_triangles;   // in them all
+    u32 vis_clusters;       // meshlets that survived culling
+    u32 vis_clusters_sw;    // of those, rasterised in software
+    u32 vis_triangles;      // in them all
+    u32 vis_voxel_clusters; // of the clusters, voxels (render/voxel.h; ADR-0061)
+    u32 vis_voxel_bricks;   // and their bricks
     u32 vis_instances_culled_frustum;
     u32 vis_instances_culled_occlusion;
     u32 vis_meshlets_culled_frustum;

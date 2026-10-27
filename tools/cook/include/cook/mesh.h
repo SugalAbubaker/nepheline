@@ -116,8 +116,8 @@ typedef struct CookMeshSettings {
     NphLzLevel lz;
     b32 no_lods; // level 0 alone: no levels of detail (step 8 skipped)
     // Voxel levels for aggregate geometry where the mesh's materials are
-    // given (step 8; off by default until the renderer draws them, ADR-0061
-    // stage 3).
+    // given (step 8; ADR-0061): off by default until the voxel raster draws
+    // the reference scenes' foliage faster than their stalled triangles.
     b32 voxels;
 } CookMeshSettings;
 

@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+// The voxel traversal, ray by ray, for the render tests
+// (VoxelGpu.the_traversal_matches_its_cpu_twin), which compare every hit with
+// render/voxel.h's nph_render_voxel_trace. Not used by the renderer.
+#version 460
+#include "vis_voxel.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisVoxelPush pc; };
+
+NPH_BUFFER_REF(VisVoxelCasesRef) { NphVisVoxelCase c[]; };
+NPH_BUFFER_REF(VisVoxelResultsRef) { NphVisVoxelResult r[]; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    const NphVisVoxelCase c = VisVoxelCasesRef(pc.cases).c[i];
+    VisBricksRef bricks = VisBricksRef(pc.bricks);
+    VisVoxelHit hit;
+    const bool found = vis_voxel_trace(bricks.b[c.brick * 2u], bricks.b[c.brick * 2u + 1u],
+                                       VisVoxelsRef(pc.voxels), c.origin.xyz, c.dir.xyz, c.origin.w,
+                                       c.dir.w, hit);
+    NphVisVoxelResult r;
+    r.t = found ? hit.t : 0.0;
+    r.voxel = found ? hit.voxel : 0u;
+    r.cell = found ? hit.cell : 0u;
+    r.face = found ? (hit.face | 256u) : 0u;
+    VisVoxelResultsRef(pc.results).r[i] = r;
+}

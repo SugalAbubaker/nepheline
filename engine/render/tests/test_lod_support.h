@@ -2,9 +2,12 @@
 #pragma once
 
 // Shared by the tests of the levels of detail (test_vis_lod.c, the camera's
-// cut; test_vsm.c, the shadow map's): meshes with the levels
-// nph_render_cluster_lods_build makes, as a cooked mesh brings them.
+// cut; test_vsm.c, the shadow map's; test_vis_voxel.c, voxels): meshes with
+// the levels nph_render_cluster_lods_build makes, as a cooked mesh brings
+// them, with voxel levels where their sampler is given.
 
+#include <nepheline/math/pack.h>
+#include <nepheline/math/random.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/render/cluster_lod.h>
 
@@ -24,8 +27,49 @@ typedef struct LodMesh {
     NphRenderMeshDesc desc;
 } LodMesh;
 
-static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32 n, const u32 *idx,
-                                  u32 k)
+// The voxelizer's material for the tests' meshes: opaque, of one look
+// (LOD_VOXEL_ALBEDO, roughness 0.7, metallic 0), with the normals the
+// triangles shade with (the vertices' interpolated, as the cooker's sampler
+// has them).
+#define LOD_VOXEL_ALBEDO nph_vec3(0.3F, 0.5F, 0.2F)
+
+typedef struct LodVoxelLook {
+    const NphRenderVertexAttrib *attribs;
+    u8 surface[1];
+} LodVoxelLook;
+
+static inline void lod_look_sample(void *user, u32 submesh, const u32 v[3], NphVec3 b,
+                                   f32 footprint, NphRenderVoxelSample *out)
+{
+    (void)submesh;
+    (void)footprint;
+    const NphRenderVertexAttrib *a = ((const LodVoxelLook *)user)->attribs;
+    const NphVec3 n =
+        nph_vec3_add(nph_vec3_add(nph_vec3_scale(nph_oct_decode_snorm16(a[v[0]].normal), b.x),
+                                  nph_vec3_scale(nph_oct_decode_snorm16(a[v[1]].normal), b.y)),
+                     nph_vec3_scale(nph_oct_decode_snorm16(a[v[2]].normal), b.z));
+    out->base_color = LOD_VOXEL_ALBEDO;
+    out->normal = nph_vec3_normalize_or(n, nph_vec3_unit_z());
+    out->roughness = 0.7F;
+    out->metallic = 0.0F;
+    out->occlusion = 1.0F;
+}
+
+static inline bool lod_look_covers(void *user, u32 submesh, const u32 v[3], NphVec3 b,
+                                   f32 footprint)
+{
+    (void)user;
+    (void)submesh;
+    (void)v;
+    (void)b;
+    (void)footprint;
+    return true;
+}
+
+// The mesh of `n` vertices and `k` indices with its levels, voxels among
+// them where `voxels` and the levels' collapses stall on aggregate geometry.
+static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v, u32 n,
+                                       const u32 *idx, u32 k, bool voxels)
 {
     NphAllocator *a = nph_allocator_system();
     memset(m, 0, sizeof *m);
@@ -68,6 +112,16 @@ static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32
     li.meshlets = &m->meshlets;
     li.cone_weight = 0.25F;
     li.scratch = a;
+    LodVoxelLook look;
+    look.attribs = m->data.attribs;
+    look.surface[0] = (u8)NPH_RENDER_VOXEL_SURFACE_OPAQUE;
+    NphRenderVoxelSampler sampler;
+    memset(&sampler, 0, sizeof sampler);
+    sampler.user = &look;
+    sampler.submesh_surface = look.surface;
+    sampler.sample = lod_look_sample;
+    sampler.covers = lod_look_covers;
+    li.voxels = voxels ? &sampler : NULL;
     nph_render_cluster_lods_init(&m->lods, a);
     NTEST_ASSERT_EQ_INT(nph_render_cluster_lods_build(&li, &m->lods), NPH_RESULT_OK);
     NPH_FREE_ARRAY(a, NphVec3, positions, m->data.vertex_count);
@@ -89,6 +143,102 @@ static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32
     m->desc.lod_nodes = m->lods.nodes.data;
     m->desc.lod_node_count = m->lods.nodes.len;
     m->desc.lod_level0_meshlets = m->lods.level0_clusters;
+    if (m->lods.bricks.len != 0U) {
+        m->desc.voxel_bricks = m->lods.bricks.data;
+        m->desc.voxel_brick_count = m->lods.bricks.len;
+        m->desc.voxels = m->lods.voxels.data;
+        m->desc.voxel_count = m->lods.voxels.len;
+    }
+}
+
+static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32 n, const u32 *idx,
+                                  u32 k)
+{
+    lod_mesh_build_with(m, v, n, idx, k, false);
+}
+
+// Foliage: `count` closed thin needles in the cube of `side` centred on the
+// origin, each a smooth-shaded tube of `sides` sides (a curve's bevel, as
+// the landscape's pines are modelled), which the levels cannot simplify, so
+// their coarser levels become voxels (ADR-0061), or stay stalled triangles
+// without `voxels`.
+static inline void lod_foliage_tubes_with(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides,
+                                          bool voxels)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u32 per = 2U * sides;                      // two rings
+    const u32 tris = 2U * sides + 2U * (sides - 2U); // the sides, then the caps
+    const u32 n = count * per;
+    NphRenderVertexInput *v = NPH_ALLOC_ARRAY(a, NphRenderVertexInput, n);
+    u32 *idx = NPH_ALLOC_ARRAY(a, u32, (u64)count * tris * 3U);
+    NTEST_ASSERT_TRUE(v != NULL && idx != NULL);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, seed, 1U);
+    u32 k = 0U;
+    for (u32 i = 0; i < count; ++i) {
+        const NphVec3 c = nph_vec3((nph_pcg32_next_f32(&rng) - 0.5F) * side,
+                                   (nph_pcg32_next_f32(&rng) - 0.5F) * side,
+                                   (nph_pcg32_next_f32(&rng) - 0.5F) * side);
+        const f32 z = 2.0F * nph_pcg32_next_f32(&rng) - 1.0F;
+        const f32 phi = 2.0F * NPH_PI * nph_pcg32_next_f32(&rng);
+        const f32 rr = nph_f32_sqrt(nph_f32_max(1.0F - z * z, 0.0F));
+        const NphVec3 d = nph_vec3(rr * nph_f32_cos(phi), rr * nph_f32_sin(phi), z);
+        const NphVec3 up = nph_f32_abs(d.z) < 0.9F ? nph_vec3_unit_z() : nph_vec3_unit_x();
+        const NphVec3 t = nph_vec3_normalize(nph_vec3_cross(up, d));
+        const NphVec3 b = nph_vec3_cross(d, t);
+        const u32 base = i * per;
+        for (u32 ring = 0; ring < 2U; ++ring) {
+            for (u32 j = 0; j < sides; ++j) {
+                const f32 angle = 2.0F * NPH_PI * (f32)j / (f32)sides;
+                const NphVec3 off = nph_vec3_add(nph_vec3_scale(t, nph_f32_cos(angle)),
+                                                 nph_vec3_scale(b, nph_f32_sin(angle)));
+                const NphVec3 end = nph_vec3_scale(d, (ring == 0U ? -0.05F : 0.05F) * side);
+                NphRenderVertexInput *p = &v[base + ring * sides + j];
+                p->position =
+                    nph_vec3_add(nph_vec3_add(c, end), nph_vec3_scale(off, 0.002F * side));
+                p->normal = off;
+                p->uv = nph_vec2(0.0F, 0.0F);
+                p->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+            }
+        }
+        // The sides, wound outward (counter-clockwise from outside), then the
+        // caps as fans.
+        for (u32 j = 0; j < sides; ++j) {
+            const u32 j1 = (j + 1U) % sides;
+            const u32 a0 = base + j;
+            const u32 a1 = base + j1;
+            const u32 b0 = base + sides + j;
+            const u32 b1 = base + sides + j1;
+            idx[k++] = a0;
+            idx[k++] = a1;
+            idx[k++] = b1;
+            idx[k++] = a0;
+            idx[k++] = b1;
+            idx[k++] = b0;
+        }
+        for (u32 j = 1; j + 1U < sides; ++j) {
+            idx[k++] = base;
+            idx[k++] = base + j + 1U;
+            idx[k++] = base + j;
+            idx[k++] = base + sides;
+            idx[k++] = base + sides + j;
+            idx[k++] = base + sides + j + 1U;
+        }
+    }
+    lod_mesh_build_with(m, v, n, idx, k, voxels);
+    NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
+    NPH_FREE_ARRAY(a, u32, idx, (u64)count * tris * 3U);
+}
+
+static inline void lod_foliage_tubes(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides)
+{
+    lod_foliage_tubes_with(m, count, side, seed, sides, true);
+}
+
+// Foliage of needles of six sides (lod_foliage_tubes).
+static inline void lod_foliage(LodMesh *m, u32 count, f32 side, u64 seed)
+{
+    lod_foliage_tubes(m, count, side, seed, 6U);
 }
 
 // A torus of `rings` x `sides` quads around the y axis, closed and seamless.

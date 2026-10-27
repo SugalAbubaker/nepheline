@@ -234,9 +234,11 @@ cache, as a triangle's normal does.
 ### The shading (`vis_voxel_resolve.comp`)
 
 The triangle resolve's first step reads the cluster record it reads anyway; at a voxel
-cluster's pixel it writes nothing. A workgroup that saw one appends its tile to a list,
-and a separate voxel resolve shades those tiles through an indirect dispatch. The two
-paths compile separately, so the triangles' registers do not change.
+cluster's pixel it writes nothing. The first invocation of a subgroup that saw one sets
+its tile's bit, and the one that set it appends the tile to a list (a subgroup lies in
+one tile, so the resolve gains no barrier), and a separate voxel resolve shades those
+tiles through an indirect dispatch. The two paths compile separately, so the
+triangles' registers do not change.
 
 A voxel is shaded with the surface model of `surface.glsl` (lights, light grid, VSM,
 radiance cache, ambient occlusion), with the distribution of normals integrated
@@ -293,16 +295,74 @@ stage.
 - Per-instance material overrides do not reach voxels: a voxel's appearance is baked
   from the mesh's own materials.
 
+### Accuracy
+
+Measured in stage 3 (`test_vis_voxel.c`, on the RTX 3060 Ti and lavapipe alike) on a
+foliage mesh of 1,500 six-sided smooth-shaded needles, sixteen instances turned every
+way, against level 0 at the same distances:
+
+- **The renderer is exact to its model.** The raster draws every pixel the CPU's rays
+  through the same clusters meet, and the voxel resolve's lit pixels are its C twin's
+  within 0.1 % on average.
+- **Coverage.** The first voxel levels cover 3.7 to 7.1 % more pixels than level 0,
+  the coarsest 4.9 % fewer. The footprints are sized to the needles' coverage along
+  the voxels' own axes; seen obliquely, their projections (the capsules' length, the
+  ellipsoids' and boxes' shadows) drift from the needles'.
+- **Light.** The first voxel levels reflect 7 to 10 % more light a pixel. The visible
+  lobe weighs a normal by the viewer's cosine, as microfacets do; a needle of a few
+  smooth-shaded facets shows its normals spread flatter than that (its visible
+  normals' mean cosine to the viewer is 0.55 to 0.61 against the lobe's 2/3), and
+  the lobe's axis fits a needle's ring of normals poorly. Coarser cells, which hold
+  many needles, are nearly isotropic and agree within a few per cent.
+
+- **Cost.** `render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
+  needles, 82 million triangles at level 0, at 4K from head height) draws 146,338 voxel
+  clusters of 3.27 million bricks a frame: 9.6 ms on the RTX 3060 Ti, its voxel raster
+  5.5 ms, against 5.6 ms for the same shrubs' stalled triangle levels
+  (`foliage_4k_triangles`) and 6.6 ms at level 0. At the first voxel levels a cell of a
+  pixel holds about one needle's length of a cell, so the voxels number about what the
+  triangles they replace do (the build allows up to four times as many, to switch
+  early), and each costs a ray's walk through its brick where a triangle costs the
+  raster's few operations. Exact pixel rectangles and the instance's ray hoisted out of
+  the pixel loop took the raster from 10.6 ms to 5.5 ms.
+- **Frames without voxels.** Until the renderer holds a mesh with voxel levels, the
+  meshlet cull and the resolve are specialised without the voxels' routing and test
+  (`k_voxels`), and the voxel passes and their tile list are left out: `render_perf`'s
+  4K field, LOD and shadow scenes and Bistro's street measure within 0.004 ms of their
+  frames before, the resolve unchanged. Compiled in, the resolve's test alone, never
+  taken, cost it 0.5 to 1.7 % on those scenes in every form measured: in the cluster
+  branch (where its early exit also moved the production variant's spills from 1,792
+  to 2,304 bytes), placed before anything of the triangles' path (1.7 %, behind a
+  dependent load of the cluster's flags), as a bare exit there (1.1 %), and on a bit
+  of the visibility key with no load (0.5 to 0.7 %).
+
+The tests hold the coverage to 8 % and the light to 12 % as they stand. The next work,
+before stage 5 measures the landscape and before the cooker makes voxels by default:
+
+- the raster's cost: voxels splatted to their pixels where a brick's are few (with
+  each cell's span along the ray computed from its coordinates in both twins, so that
+  a splat meets a voxel exactly where the traversal does), bricks tested against the
+  depth pyramid, and the first voxel level's budget measured against the stalled
+  triangles' cost rather than set at four times their count; on denser foliage like
+  the landscape's pines, where a cell aggregates many needles;
+- the accuracy: a visibility sharpness per voxel in place of the constant 2.8, fitted
+  in the build to the diffuse responses its hits give from each axis (a byte from the
+  normal's encoding), and footprints sized against oblique views as well as the axes;
+
+each measured against level 0 on these needles and on the landscape's own pines.
+
 ### Stages
 
 1. The voxelizer and the voxel levels in the builder, the C twin of the traversal,
-   and their tests.
+   and their tests. Done (PR #112).
 2. The mesh format (version 3: `VOXB` bricks, `VOXA` voxels), the loader's checks,
-   the cooker's sampler, and fuzzing. Voxels stay opt-in (`--voxels`) while the
-   renderer refuses voxel clusters.
+   the cooker's sampler, and fuzzing. Done (PR #113).
 3. The renderer: the voxel raster list, raster, and resolve, the radiance cache's
-   surface point, statistics, and the debug views; the cooker then makes voxels by
-   default (`--no-voxels`).
+   surface point, statistics, and the debug views. Done. Until stage 4 the shadow
+   map's uniform cuts end below the first that holds a voxel cluster. The cooker's
+   voxels stay opt-in (`--voxels`): on sparse foliage the raster's first voxel
+   levels still cost more than the stalled triangles they replace ("Accuracy"), and
+   they become the default once it draws the reference scenes' foliage faster.
 4. The shadow map's voxel casters, on both raster paths.
 5. The landscape cooked with voxels, measured against every §10.4 line.
 6. Voxel bottom levels for rays.
@@ -413,7 +473,10 @@ stage.
     makes none; a broken sampler is refused; cuts at 300 m and 1.2 km are all voxels
     and cover what level 0 covers, within the rays' sampling.
 
-  To come with their stages: the raster against the C traversal, pixel for pixel and
-  depth for depth, on both raster paths; a voxelized shrub at the switch distance
-  against its level 0, averaged over TAA's jitter, in coverage and mean colour; the
-  shadow casters against level 0's shadow.
+- Tests (stage 3, `test_vis_voxel.c`, on the RTX 3060 Ti and lavapipe): the shaders'
+  traversal against the C one (16,384 rays, every hit, voxel and face alike); the
+  raster against the CPU's rays through the clusters drawn, pixel for pixel; the voxel
+  resolve's albedo and its lit pixels against its C twin; the voxel levels' coverage
+  and light against level 0 ("Accuracy").
+
+  To come with their stages: the shadow casters against level 0's shadow.

@@ -19,9 +19,11 @@
 // their texture; opaque clusters of small triangles to the software raster
 // (vis_sw_raster.comp): those whose bounding sphere projects into at most
 // NPH_VIS_SW_MAX_PIXELS across, with that box's area shared among the
-// triangles at most sw_raster_pixels across each; the rest to the hardware
-// raster. Blended materials are not drawn into the visibility
-// buffer at all: the transparent pass draws them.
+// triangles at most sw_raster_pixels across each; voxel clusters (a
+// meshlet record without vertices: render/voxel.h; ADR-0061) to the voxel
+// raster (vis_voxel_raster.comp), whatever their material, whose look they
+// carry; the rest to the hardware raster. Blended materials are not drawn
+// into the visibility buffer at all: the transparent pass draws them.
 //
 // A cluster of a mesh's coarser levels of detail came from a group of the
 // hierarchy (vis_cull_nodes.comp) whose own error is too large for the view;
@@ -34,6 +36,11 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether voxel clusters may appear (the renderer holds a mesh with voxel
+// levels): without, their routing compiles out, which costs the cull 0.5 to
+// 0.7 us a phase where compiled in (render_perf's 4K field, 40 us a phase).
+layout(constant_id = 0) const bool k_voxels = false;
 
 void main()
 {
@@ -65,6 +72,8 @@ void main()
     uint material = view.v.default_material;
     uint flags = 0u;
     uint triangles = 0u;
+    uint bricks = 0u; // a voxel cluster's
+    bool voxels = false;
     uint first_index = 0u; // the indirect raster's draw: the meshlet's corners in the index pool
     uint vertex_offset = 0u;
     vec3 c = vec3(0.0); // the meshlet's sphere, camera relative
@@ -74,7 +83,9 @@ void main()
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
         const uvec4 m = VisMeshletsRef(mesh.meshlets).m[meshlet];
-        triangles = m.z >> 16u;
+        voxels = k_voxels && (m.z & 0xFFFFu) == 0u;
+        triangles = voxels ? 0u : m.z >> 16u;
+        bricks = voxels ? m.z >> 16u : 0u;
         first_index = mesh.index_base + m.y * 3u;
         vertex_offset = m.x;
         // The material of the meshlet's submesh, through the instance's map.
@@ -91,11 +102,14 @@ void main()
         const uint material_flags = materials.m[material].flags;
         const uint alpha_mode = materials.m[material].alpha_mode;
         const bool double_sided = (material_flags & NPH_RENDER_MATERIAL_DOUBLE_SIDED) != 0u;
+        // A voxel is opaque, and lit as the voxelizer saw the mesh's own
+        // materials: no alpha test, and no blending.
         flags = ((inst.flags & NPH_VIS_INSTANCE_MIRRORED) != 0u ? uint(NPH_VIS_CLUSTER_MIRRORED) : 0u) |
                 (double_sided ? uint(NPH_VIS_CLUSTER_DOUBLE_SIDED) : 0u) |
-                (alpha_mode == 1u ? uint(NPH_VIS_CLUSTER_MASKED) : 0u) |
-                ((inst.flags & NPH_VIS_INSTANCE_MOVED) != 0u ? uint(NPH_VIS_CLUSTER_MOVED) : 0u);
-        if (alpha_mode != 2u) {
+                (alpha_mode == 1u && !voxels ? uint(NPH_VIS_CLUSTER_MASKED) : 0u) |
+                ((inst.flags & NPH_VIS_INSTANCE_MOVED) != 0u ? uint(NPH_VIS_CLUSTER_MOVED) : 0u) |
+                (voxels ? uint(NPH_VIS_CLUSTER_VOXELS) : 0u);
+        if (alpha_mode != 2u || voxels) {
             VisMeshletBoundsRef bounds = VisMeshletBoundsRef(mesh.meshlet_bounds);
             const uvec4 b0 = bounds.b[meshlet * 2u];
             const uvec4 b1 = bounds.b[meshlet * 2u + 1u];
@@ -122,7 +136,7 @@ void main()
             } else if (!vis_sphere_in_frustum(view, c, r)) {
                 culled_frustum = true;
             } else if ((view.v.flags & NPH_VIS_VIEW_CONE_CULLING) != 0u && !double_sided &&
-                       (inst.flags & NPH_VIS_INSTANCE_SIMILAR) != 0u &&
+                       !voxels && (inst.flags & NPH_VIS_INSTANCE_SIMILAR) != 0u &&
                        vis_cone_culled(vis_transform_vector(inst.transform, uintBitsToFloat(b1.yzw)) + t,
                                        vis_transform_vector(inst.transform, cone.xyz) / scale,
                                        cone.w)) {
@@ -155,7 +169,7 @@ void main()
         // view ray cuts through the instance's box (the mesh's dequantisation
         // box), whose depth is written after its alpha test so that the leaves
         // behind it are rejected before their fragment shader.
-        if (visible && alpha_mode == 1u && (view.v.flags & NPH_VIS_VIEW_SKIN) != 0u) {
+        if (visible && alpha_mode == 1u && !voxels && (view.v.flags & NPH_VIS_VIEW_SKIN) != 0u) {
             const mat3 inv = transpose(vis_normal_matrix(inst.transform));
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
@@ -205,7 +219,7 @@ void main()
     // keeps every vertex in front of the camera, which the software raster
     // relies on.
     bool software = false;
-    if (visible && !masked && (view.v.flags & NPH_VIS_VIEW_SW_RASTER) != 0u) {
+    if (visible && !masked && !voxels && (view.v.flags & NPH_VIS_VIEW_SW_RASTER) != 0u) {
         const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
         vec4 rect;
         float depth;
@@ -221,13 +235,19 @@ void main()
     uint j1;
     uint j2;
     uint j3;
+    uint j4 = 0u;
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_OPAQUE],
-                visible && !masked && !software ? 1u : 0u, j0);
+                visible && !masked && !software && !voxels ? 1u : 0u, j0);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_MASKED],
                 visible && masked && !skin ? 1u : 0u, j1);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SKIN], skin ? 1u : 0u, j3);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SOFTWARE],
                 visible && software ? 1u : 0u, j2);
+    if (k_voxels) {
+        VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_VOXEL],
+                    visible && voxels ? 1u : 0u, j4);
+        VIS_ADD(counters.c.voxel_bricks, visible ? bricks : 0u);
+    }
     VIS_ADD(counters.c.triangles, visible ? triangles : 0u);
     if (!visible) {
         return;
@@ -269,13 +289,14 @@ void main()
     VisClustersRef(view.v.clusters).c[g] = cluster;
     // Every raster list holds at most one entry per cluster, so an index
     // reserved here is below max_clusters.
-    const uint kind = skin       ? uint(NPH_VIS_RASTER_SKIN)
+    const uint kind = voxels     ? uint(NPH_VIS_RASTER_VOXEL)
+                      : skin     ? uint(NPH_VIS_RASTER_SKIN)
                       : masked   ? uint(NPH_VIS_RASTER_MASKED)
                       : software ? uint(NPH_VIS_RASTER_SOFTWARE)
                                  : uint(NPH_VIS_RASTER_OPAQUE);
-    const uint j = skin ? j3 : (masked ? j1 : (software ? j2 : j0));
+    const uint j = voxels ? j4 : (skin ? j3 : (masked ? j1 : (software ? j2 : j0)));
     VisUintRef(view.v.raster_lists[phase][kind]).v[j] = g;
-    if (!software && (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
+    if (!software && !voxels && (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
         NphVisDraw draw;
         draw.index_count = triangles * 3u;
         draw.instance_count = 1u;

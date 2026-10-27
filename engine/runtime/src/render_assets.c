@@ -21,7 +21,9 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshletBounds) == sizeof(NphRenderMeshletBounds) &&
                       sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod) &&
                       sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup) &&
-                      sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode),
+                      sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
+                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick) &&
+                      sizeof(NphMeshVoxel) == sizeof(NphRenderVoxel),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
@@ -277,8 +279,9 @@ static NphResult create_texture(RenderAssetCache *c, RenderAsset *a, const NphAs
 }
 
 // The cooked meshlets, and the levels of detail where the mesh has them
-// (asset/mesh.h version 2), into `d`: the same records as the renderer's,
-// handed over as they are through untyped pointers.
+// (asset/mesh.h version 2) with their voxel clusters' bricks and voxels
+// (version 3), into `d`: the same records as the renderer's, handed over as
+// they are through untyped pointers.
 static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
 {
     const NphMeshHeader *h = mv->header;
@@ -308,6 +311,12 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->lod_nodes = nodes;
     d->lod_node_count = mv->lod->node_count;
     d->lod_level0_meshlets = mv->lod->level0_meshlets;
+    const void *bricks = mv->voxel_bricks;
+    const void *voxels = mv->voxels;
+    d->voxel_bricks = bricks;
+    d->voxel_brick_count = mv->lod->brick_count;
+    d->voxels = voxels;
+    d->voxel_count = mv->lod->voxel_count;
 }
 
 static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset *asset)

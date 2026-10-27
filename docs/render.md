@@ -637,11 +637,15 @@ landscape's pine sapling stops at 95,716 triangles in 1,539 clusters, and a
 forest of them drawn at that level overflows every list. Given a material
 sampler, the builder makes such groups voxels instead (ADR-0061;
 `render/voxel.h`, `cluster_voxel.c`), as Nanite's foliage does (Epic,
-"Nanite Foliage", UE 5.7). ADR-0061's first two stages are in: the
+"Nanite Foliage", UE 5.7). ADR-0061's first three stages are in: the
 voxels, their levels, the traversal and the shading model's terms on the
-CPU, then the mesh format (docs/asset.md) and the cooker's material sampler
-(docs/cook.md, `--voxels`). The renderer refuses meshes with voxel clusters
-until it draws them, so the cooker makes them only when asked.
+CPU; the mesh format (docs/asset.md) and the cooker's material sampler
+(docs/cook.md, `--voxels`); and the production path's voxel raster and
+resolve (below). The cooker makes voxels only when asked until the raster
+draws the reference scenes' foliage faster than their stalled triangles
+("Measured on the GPU"). The sun's shadow map draws voxel casters
+from the fourth stage on: until then its cuts end below the first that holds
+a voxel cluster, and the coarser shadows keep the stalled triangles.
 
 **The records.** A voxel cluster is a cluster whose meshlet record has no
 vertices: `triangle_count` bricks from `vertex_offset`, at most 32 bricks
@@ -715,15 +719,20 @@ submesh's points through the sampler's `covers`):
   the concentration the one whose second moment along its axis is the
   dominant eigenvalue.
 
-**The traversal** (`nph_render_voxel_trace`, the shaders' twin to come)
-walks a brick's cells in the order a ray crosses them (Amanatides & Woo,
+**The traversal** (`nph_render_voxel_trace`, and the shaders'
+`vis_voxel_trace` in `vis_voxel.glsl`) walks a brick's cells in the order a
+ray crosses them (Amanatides & Woo,
 Eurographics 1987) and tests each occupied cell's footprint; the round
 shapes' quadratics are taken from where the ray enters the cell, so their
 terms keep their precision however far the ray came, and a capsule's is the
 earliest entry of its body and its ends' spheres within the cell. Against a
 search of every footprint (the capsule as the points within its radius of
 its segment, by bisection), 25,600 rays at 400 random bricks of every shape
-agree on every hit, and on its `t` within 2e-5 of the brick.
+agree on every hit, and on its `t` within 2e-5 of the brick. The shaders'
+twin, every value `precise` so that no shader rounds it differently from
+another, agrees with the C one on 16,384 rays through 256 random bricks
+(2,614 hits): every hit, voxel and face, `t` within 5e-6 of the brick, on
+the RTX 3060 Ti and on lavapipe alike.
 
 **The shading model** (`nph_render_voxel_diffuse` and its fellows). For
 the lobe turned toward the viewer, the diffuse response to a light is the
@@ -743,6 +752,36 @@ Specular is GGX with the lobe's variance added (`alpha^2 + 2 / kappa`), and
 the environment's harmonics are convolved with the lobe (bands 1 and 2
 scaled by `A(kappa)` and `1 - 3 A(kappa) / kappa`).
 
+**In the production path.** The meshlet cull sends a voxel cluster to a
+raster list of its own (`NPH_VIS_RASTER_VOXEL`, flagged
+`NPH_VIS_CLUSTER_VOXELS`), whatever its material: a voxel is opaque and
+carries the look its mesh's own materials had. `vis voxel raster`
+(`vis_voxel_raster.comp`) takes a workgroup a cluster: each brick projects
+the box of its occupied cells to the pixels whose centres it covers (a 64th
+of a pixel wider each way, against rounding), a prefix sum spreads the
+cluster's pixels over the invocations, and each pixel's ray, from the camera
+through its point on the near plane, goes into the instance's space and
+through its brick. The first voxel it meets takes the atomic max of (depth,
+cluster, brick) as triangles do; under reverse-Z with an infinite far plane
+a hit at `t` along that ray lies at depth `1 / t`. `vis resolve` writes
+nothing at a voxel cluster's pixel: the first invocation of a subgroup that
+saw one sets its tile's bit (`NphVisViewData.voxel_tile_bits`, cleared by
+`vis clear`), and the one that set it lists the tile and raises `vis voxel
+resolve`'s workgroups. That pass (`vis_voxel_resolve.glsl`, compiled and
+specialised as the resolve is) traces each of those tiles' voxel pixels
+again through the same brick, bit for bit the raster's, for the voxel, its
+point, and the face of its footprint the ray entered (the geometric normal),
+and shades it with `surface.glsl`'s `nph_surface_shade_voxel`: the lights
+and the light grid, the sun's map, shadow rays, the ambient occlusion and
+the radiance cache as the triangles have them, with the lobe's terms above.
+Its point's shadow lookups and rays, and its cell of the radiance cache,
+start a cell's diagonal off that face, clear of the triangles the voxel
+stands for, which the shadow map and the rays still draw; `gi update` takes
+a voxel pixel's point and face the same way. The frame's statistics count
+the voxel clusters drawn and their bricks (`vis_voxel_clusters`,
+`vis_voxel_bricks`), and every debug view shows voxels as it shows triangles
+(the triangle view names the brick).
+
 **Measured** (`test_voxel.c`): a sheet across cells and a slanted one leave
 no ray through them unstopped (4,000 and 4,500 rays); a cloud of 2,000
 needles keeps its coverage within 9 % from the axes, the diagonals and a
@@ -757,6 +796,30 @@ build of 2,000 closed
 needles (16,000 triangles) takes 0.89 s on one thread, about 55 µs a
 triangle, most of it in the cells' rays.
 
+**Measured on the GPU** (`test_vis_voxel.c`, the RTX 3060 Ti and lavapipe
+alike): a foliage mesh of 1,500 six-sided needles draws its voxel clusters
+exactly where the CPU's rays through the clusters drawn meet them, every
+pixel of the cluster debug view (0 of 476 and 105 pixels differ at 12 and 24
+m; 7 of 1,298 at 7 m, where triangles mix in, at the hardware raster's
+edges); the voxel resolve shows the voxels' albedo on every voxel pixel, and
+its lit pixels are its C twin's within 0.1 % on average and 2.3 % at worst
+(the HDR target's dithered rounding). Against level 0, over a grid of
+sixteen instances turned every way: the cut covers 3.7 to 7.1 % more pixels
+at the first voxel levels and 4.9 % fewer at the coarsest, and reflects 7 to
+10 % more light a pixel; ADR-0061 "Accuracy" records why and the work that
+will close it. `render_perf`'s `foliage_4k_production` (1,024 shrubs of
+4,000 sparse needles) draws 3.27 million bricks a frame in 9.6 ms, its voxel
+raster 5.5 ms, against 5.6 ms for the shrubs' stalled triangle levels
+(`foliage_4k_triangles`): on sparse foliage the first voxel levels cost more
+than the triangles they replace, which is why the cooker makes voxels only
+when asked for now. A frame costs the voxels nothing until the renderer
+holds a mesh with voxel levels: the meshlet cull and the resolve are
+specialised without the voxels' routing and test (`k_voxels`), and the voxel
+passes and their tile list are left out. `render_perf`'s 4K field, LOD and
+shadow scenes and Bistro's street measure within 0.004 ms of their frames
+before the voxels, the resolve unchanged; compiled in, its test alone, never
+taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
+
 ### A frame
 
 | Pass | What it does |
@@ -766,19 +829,20 @@ triangle, most of it in the cells' rays.
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
 | `vis cull nodes 0` | the walk down the hierarchies of levels of detail ("Levels of detail"), a step per two of their node levels: the groups too coarse to draw hand on their clusters as work items |
-| `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, or software |
-| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, into the visibility buffer |
+| `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, software, or voxel |
+| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0`, `vis voxel raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, then of the voxel clusters ("Voxels"; only while the renderer holds voxel meshes), into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
 | `vis cull instances 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid (and the walk down the hierarchies of those now visible); then the meshlets phase 0 deferred and those of the instances now visible |
-| `vis raster 1`, `vis sw raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
+| `vis raster 1`, `vis sw raster 1`, `vis voxel raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice, and the denoise (below) |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
-| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up) |
+| `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up), and lists the tiles that hold voxel pixels |
+| `vis voxel resolve` | the voxel pixels of the tiles listed, a workgroup a tile through an indirect dispatch ("Voxels"; only while the renderer holds voxel meshes) |
 | `vis statistics` | copies the counters for the frame's statistics |
 | `transparent` | the blended surfaces, forward, with no depth attachment: each fragment tests the visibility buffer's depth itself and is demoted behind it (`forward_frag.glsl` `k_vis_depth`) |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |

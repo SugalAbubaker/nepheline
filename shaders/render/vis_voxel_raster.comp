@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: Apache-2.0
+// The visibility buffer's voxel raster (docs/render.md "Voxels"; ADR-0061):
+// one workgroup per voxel cluster of the phase's voxel list, which the
+// meshlet cull fills.
+//
+// Each of the cluster's bricks (at most NPH_RENDER_VOXEL_CLUSTER_BRICKS)
+// projects the box of its occupied cells to the pixels whose centres it
+// covers, a 64th of a pixel wider each way against rounding: the footprints
+// lie in their cells, a capsule's held to its cell. A prefix sum over the
+// bricks' pixel counts spreads the cluster's pixels evenly over the
+// invocations. Each pixel's ray, from the camera through its point on the
+// near plane, goes into the instance's space and through its brick
+// (vis_voxel.glsl vis_voxel_trace, which the voxel resolve and the radiance
+// cache's update repeat bit for bit), and the first voxel it meets takes the
+// atomic max of (depth, cluster, brick) the triangles' rasters write. Under
+// reverse-Z with an infinite far plane a hit at parameter t along that ray
+// lies at depth exactly 1 / t.
+//
+// A brick with a corner behind the camera takes the whole target (the levels
+// of detail never pick a voxel cluster that close: its cell would cover many
+// pixels; a frozen culling camera can).
+//
+// arg0 is the visibility buffer's storage index.
+#version 460
+#include "vis_voxel.glsl"
+#include "nph_bindless_int64.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+#define BRICKS 32u // NPH_RENDER_VOXEL_CLUSTER_BRICKS
+
+shared uvec4 s_brick[BRICKS * 2u];
+shared uvec2 s_rect[BRICKS]; // x0 | y0 << 16, width | height << 16
+shared uint s_start[BRICKS + 1u];
+
+// The occupied cells' range along each axis of a brick of mask (m0, m1), bit
+// x + 4y + 16z: lowest in `lo`, highest in `hi`. The mask is never empty.
+void occupied(uint m0, uint m1, out uvec3 lo, out uvec3 hi)
+{
+    const uint both = m0 | m1;
+    uint xs = 0u;
+    uint ys = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        xs |= (both & (0x11111111u << k)) != 0u ? (1u << k) : 0u;
+        ys |= (both & (0x000F000Fu << (4u * k))) != 0u ? (1u << k) : 0u;
+    }
+    const uint zs = ((m0 & 0xFFFFu) != 0u ? 1u : 0u) | ((m0 >> 16u) != 0u ? 2u : 0u) |
+                    ((m1 & 0xFFFFu) != 0u ? 4u : 0u) | ((m1 >> 16u) != 0u ? 8u : 0u);
+    lo = uvec3(findLSB(xs), findLSB(ys), findLSB(zs));
+    hi = uvec3(findMSB(xs), findMSB(ys), findMSB(zs));
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    const uint kind = uint(NPH_VIS_RASTER_VOXEL);
+    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // The same for the whole workgroup, so no invocation misses a barrier.
+    if (wg >= VisCountersRef(view.v.counters).c.raster_count[pc.phase][kind]) {
+        return;
+    }
+    const uint g = VisUintRef(view.v.raster_lists[pc.phase][kind]).v[wg];
+    const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const uint brick_count = min(m.z >> 16u, BRICKS);
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    const vec2 viewport = view.v.viewport.xy;
+    const uint i = gl_LocalInvocationIndex;
+    if (i < brick_count) {
+        VisBricksRef bricks = VisBricksRef(mesh.voxel_bricks);
+        const uvec4 b0 = bricks.b[(m.x + i) * 2u];
+        const uvec4 b1 = bricks.b[(m.x + i) * 2u + 1u];
+        s_brick[i * 2u] = b0;
+        s_brick[i * 2u + 1u] = b1;
+        uvec3 c0;
+        uvec3 c1;
+        occupied(b1.x, b1.y, c0, c1);
+        const float h = uintBitsToFloat(b0.w);
+        const vec3 origin = uintBitsToFloat(b0.xyz);
+        const vec3 lo = origin + vec3(c0) * h;
+        const vec3 hi = origin + vec3(c1 + 1u) * h;
+        vec2 pmin = vec2(3.402823466e38);
+        vec2 pmax = vec2(-3.402823466e38);
+        bool behind = false;
+        for (uint k = 0u; k < 8u; ++k) {
+            const vec3 corner = vec3((k & 1u) != 0u ? hi.x : lo.x, (k & 2u) != 0u ? hi.y : lo.y,
+                                     (k & 4u) != 0u ? hi.z : lo.z);
+            const vec4 clip =
+                view.v.view_proj * vec4(vis_transform_vector(inst.transform, corner) + t, 1.0);
+            if (clip.w <= 0.0) {
+                behind = true;
+            } else {
+                const vec2 s = (clip.xy / clip.w * 0.5 + 0.5) * viewport;
+                pmin = min(pmin, s);
+                pmax = max(pmax, s);
+            }
+        }
+        if (behind) {
+            pmin = vec2(0.0);
+            pmax = viewport;
+        }
+        // The centres x + 1/2 within [pmin, pmax] (a 64th of a pixel wider:
+        // the corners' projection and the rays round apart); held to the
+        // target before the conversion, which overflows past it.
+        const vec2 a = clamp(ceil(pmin - 0.5 - 1.0 / 64.0), vec2(0.0), viewport);
+        const vec2 b = clamp(floor(pmax - 0.5 + 1.0 / 64.0), vec2(-1.0), viewport - 1.0);
+        const ivec2 size = max(ivec2(b) - ivec2(a) + 1, ivec2(0));
+        s_rect[i] = uvec2(uint(a.x) | (uint(a.y) << 16u), uint(size.x) | (uint(size.y) << 16u));
+    }
+    barrier();
+    if (i == 0u) {
+        uint sum = 0u;
+        for (uint k = 0u; k < brick_count; ++k) {
+            s_start[k] = sum;
+            sum += (s_rect[k].y & 0xFFFFu) * (s_rect[k].y >> 16u);
+        }
+        s_start[brick_count] = sum;
+    }
+    barrier();
+    const uint total = s_start[brick_count];
+    const mat4 inv_view_proj = ViewRef(view.v.render_view).v.inv_view_proj;
+    const vec2 inv_size = view.v.viewport.zw;
+    VisVoxelsRef voxels = VisVoxelsRef(mesh.voxels);
+    // The instance's part of every pixel's ray, once.
+    const mat3 inv = vis_voxel_inverse_linear(inst.transform);
+    const vec3 o = vis_voxel_ray_origin(inv, t);
+    for (uint k = i; k < total; k += 64u) {
+        // The brick whose run holds k: start[lo] <= k < start[hi].
+        uint lo = 0u;
+        uint hi = brick_count;
+        while (hi - lo > 1u) {
+            const uint mid = (lo + hi) >> 1u;
+            if (s_start[mid] <= k) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        const uvec2 r = s_rect[lo];
+        const uint w = r.y & 0xFFFFu;
+        const uint local = k - s_start[lo];
+        const ivec2 pixel = ivec2((r.x & 0xFFFFu) + local % w, (r.x >> 16u) + local / w);
+        vec3 world_dir;
+        const vec3 d = vis_voxel_ray_dir(inv_view_proj, inv, vis_voxel_ndc(pixel, inv_size), world_dir);
+        VisVoxelHit hit;
+        if (vis_voxel_trace(s_brick[lo * 2u], s_brick[lo * 2u + 1u], voxels, o, d, 1.0,
+                            3.402823466e38, hit)) {
+            imageAtomicMax(nph_u64images_2d[nonuniformEXT(pc.arg0)], pixel,
+                           vis_pack(1.0 / hit.t, g, lo));
+        }
+    }
+}

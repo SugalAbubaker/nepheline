@@ -156,6 +156,15 @@
 //                         sky every frame, at a day-night cycle's pace (a
 //                         24-minute day): every page of the map is drawn
 //                         again each frame, each caster at its cut.
+//   foliage_4k_production the terrain with 1,024 shrubs on it (4,000
+//                         six-sided needles each, 80,000 triangles: 82
+//                         million in all) instead of rocks, their levels'
+//                         stalled groups voxels (docs/render.md "Voxels";
+//                         ADR-0061), from head height across the diagonal.
+//   foliage_4k_triangles  the same shrubs with levels of detail but no
+//                         voxels: the stalled triangle levels they drew
+//                         before.
+//   foliage_4k_level0     the same at level 0.
 //
 // Output and exit codes follow gpu_bench (docs/benchmarks.md): the nbench
 // JSON schema with `metric` and `unit` per entry (`MB declared` for a
@@ -172,6 +181,7 @@
 #include <nepheline/gpu/device.h>
 #include <nepheline/gpu/render_graph.h>
 #include <nepheline/jobs/jobs.h>
+#include <nepheline/math/pack.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
@@ -213,7 +223,8 @@
 typedef enum SceneKind {
     SCENE_GRID = 0,
     SCENE_FIELD,
-    SCENE_LOD, // the terrain and its rocks, with levels of detail
+    SCENE_LOD,     // the terrain and its rocks, with levels of detail
+    SCENE_FOLIAGE, // the terrain and shrubs of needles, with voxel levels
 } SceneKind;
 
 typedef struct SceneDef {
@@ -255,6 +266,7 @@ typedef enum ScenePost {
     POST_NO_AO = 1U << 9U,       // no ambient occlusion
     POST_NO_GI = 1U << 10U,      // no global illumination
     POST_LOD_LEVEL0 = 1U << 11U, // every mesh at level 0 (NphRenderView.lod_error 0)
+    POST_NO_VOXELS = 1U << 12U,  // the foliage's levels without voxels
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
@@ -336,6 +348,12 @@ static const SceneDef g_scenes[] = {
      2160U, 0U, SHADOWS_SUN_WALK, POST_DEFAULT},
     {"lod_shadows_sun_4k_production", SCENE_LOD, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_SUN_TURNING, POST_DEFAULT},
+    {"foliage_4k_production", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_DEFAULT},
+    {"foliage_4k_triangles", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
+     0U, SHADOWS_NONE, POST_NO_VOXELS},
+    {"foliage_4k_level0", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
+     0U, SHADOWS_NONE, POST_LOD_LEVEL0},
 };
 
 // Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
@@ -412,6 +430,8 @@ typedef struct Ctx {
     // The levels-of-detail scene's meshes, made the first time it runs.
     NphRenderMesh terrain;
     NphRenderMesh rock;
+    NphRenderMesh shrub;           // with voxel levels
+    NphRenderMesh shrub_triangles; // without
     NphRenderMaterial materials[4];
     NphRenderLight sun;
     NphRenderLightDesc sun_desc;
@@ -567,10 +587,44 @@ static void smooth_normals(NphRenderVertexInput *v, u32 n, const u32 *idx, u32 k
     }
 }
 
+// The shrubs' material as the voxelizer reads it (render/voxel.h): opaque,
+// a needle's green, the vertices' interpolated normals.
+typedef struct NeedleLook {
+    const NphRenderVertexAttrib *attribs;
+    u8 surface[1];
+} NeedleLook;
+
+static void needle_sample(void *user, u32 submesh, const u32 v[3], NphVec3 b, f32 footprint,
+                          NphRenderVoxelSample *out)
+{
+    (void)submesh;
+    (void)footprint;
+    const NphRenderVertexAttrib *a = ((const NeedleLook *)user)->attribs;
+    const NphVec3 n =
+        nph_vec3_add(nph_vec3_add(nph_vec3_scale(nph_oct_decode_snorm16(a[v[0]].normal), b.x),
+                                  nph_vec3_scale(nph_oct_decode_snorm16(a[v[1]].normal), b.y)),
+                     nph_vec3_scale(nph_oct_decode_snorm16(a[v[2]].normal), b.z));
+    out->base_color = nph_vec3(0.12F, 0.22F, 0.07F);
+    out->normal = nph_vec3_normalize_or(n, nph_vec3_unit_y());
+    out->roughness = 0.8F;
+    out->metallic = 0.0F;
+    out->occlusion = 1.0F;
+}
+
+static bool needle_covers(void *user, u32 submesh, const u32 v[3], NphVec3 b, f32 footprint)
+{
+    (void)user;
+    (void)submesh;
+    (void)v;
+    (void)b;
+    (void)footprint;
+    return true;
+}
+
 // Uploads a mesh with its meshlets and levels of detail, built here as the
-// cooker builds them.
+// cooker builds them: with voxel levels where `voxels`.
 static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n, const u32 *idx,
-                                 u32 k, const char *name, NphRenderMesh *out)
+                                 u32 k, const char *name, bool voxels, NphRenderMesh *out)
 {
     NphAllocator *a = nph_allocator_system();
     NphRenderMeshData data;
@@ -616,11 +670,23 @@ static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n,
         li.meshlets = &meshlets;
         li.cone_weight = 0.25F;
         li.scratch = a;
+        NeedleLook look;
+        look.attribs = data.attribs;
+        look.surface[0] = (u8)NPH_RENDER_VOXEL_SURFACE_OPAQUE;
+        NphRenderVoxelSampler sampler;
+        memset(&sampler, 0, sizeof sampler);
+        sampler.user = &look;
+        sampler.submesh_surface = look.surface;
+        sampler.sample = needle_sample;
+        sampler.covers = needle_covers;
+        li.voxels = voxels ? &sampler : NULL;
         const u64 t0 = nph_time_now_ns();
         r = nph_render_cluster_lods_build(&li, &lods);
-        fprintf(stderr, "render_perf: %s: %u triangles, %u clusters in %u levels (%.2f s)\n", name,
-                data.index_count / 3U, lods.clusters.meshlets.len, lods.levels,
-                (f64)(nph_time_now_ns() - t0) / 1.0e9);
+        fprintf(stderr,
+                "render_perf: %s: %u triangles, %u clusters in %u levels (%u voxels in %u "
+                "bricks; %.2f s)\n",
+                name, data.index_count / 3U, lods.clusters.meshlets.len, lods.levels,
+                lods.voxels.len, lods.bricks.len, (f64)(nph_time_now_ns() - t0) / 1.0e9);
     }
     if (r == NPH_RESULT_OK) {
         NphRenderSubmesh sub;
@@ -642,6 +708,12 @@ static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n,
         md.lod_nodes = lods.nodes.data;
         md.lod_node_count = lods.nodes.len;
         md.lod_level0_meshlets = lods.level0_clusters;
+        if (lods.bricks.len != 0U) {
+            md.voxel_bricks = lods.bricks.data;
+            md.voxel_brick_count = lods.bricks.len;
+            md.voxels = lods.voxels.data;
+            md.voxel_count = lods.voxels.len;
+        }
         r = nph_render_mesh_create(ctx->renderer, &md, out);
     }
     nph_render_cluster_lods_free(&lods);
@@ -689,7 +761,7 @@ static NphResult make_terrain(Ctx *ctx)
             }
         }
         smooth_normals(v, n, idx, k);
-        r = upload_lod_mesh(ctx, v, n, idx, k, "lod terrain", &ctx->terrain);
+        r = upload_lod_mesh(ctx, v, n, idx, k, "lod terrain", false, &ctx->terrain);
     }
     if (v != NULL) {
         NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
@@ -744,7 +816,7 @@ static NphResult make_rock(Ctx *ctx)
             }
         }
         smooth_normals(v, n, idx, t);
-        r = upload_lod_mesh(ctx, v, n, idx, t, "lod rock", &ctx->rock);
+        r = upload_lod_mesh(ctx, v, n, idx, t, "lod rock", false, &ctx->rock);
     }
     if (v != NULL) {
         NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
@@ -819,6 +891,80 @@ static u32 hash_u32(u32 x)
     return x ^ (x >> 15U);
 }
 
+// A shrub: SHRUB_NEEDLES closed needles, each a smooth-shaded tube of six
+// sides 0.4 m long and 16 mm across, in a 3 m box (from its base at the
+// origin): its levels stall on them.
+#define SHRUB_NEEDLES 4000U
+#define SHRUB_SIDES   6U
+
+static NphResult make_shrub(Ctx *ctx, bool voxels, NphRenderMesh *out)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u32 per = 2U * SHRUB_SIDES;
+    const u32 n = SHRUB_NEEDLES * per;
+    const u32 k = SHRUB_NEEDLES * (2U * SHRUB_SIDES + 2U * (SHRUB_SIDES - 2U)) * 3U;
+    NphRenderVertexInput *v = NPH_ALLOC_ARRAY(a, NphRenderVertexInput, n);
+    u32 *idx = NPH_ALLOC_ARRAY(a, u32, k);
+    NphResult r = v != NULL && idx != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        u32 t = 0U;
+        for (u32 i = 0; i < SHRUB_NEEDLES; ++i) {
+            const u32 h0 = hash_u32(i * 3U + 1U);
+            const u32 h1 = hash_u32(i * 3U + 2U);
+            const u32 h2 = hash_u32(i * 3U + 3U);
+            const NphVec3 c = nph_vec3(3.0F * ((f32)(h0 & 0xFFFFU) / 65535.0F - 0.5F),
+                                       3.0F * (f32)(h0 >> 16U) / 65535.0F,
+                                       3.0F * ((f32)(h1 & 0xFFFFU) / 65535.0F - 0.5F));
+            const f32 z = 2.0F * (f32)(h1 >> 16U) / 65535.0F - 1.0F;
+            const f32 phi = 2.0F * NPH_PI * (f32)(h2 & 0xFFFFU) / 65535.0F;
+            const f32 rr = nph_f32_sqrt(nph_f32_max(1.0F - z * z, 0.0F));
+            const NphVec3 d = nph_vec3(rr * nph_f32_cos(phi), rr * nph_f32_sin(phi), z);
+            const NphVec3 up = nph_f32_abs(d.z) < 0.9F ? nph_vec3_unit_z() : nph_vec3_unit_x();
+            const NphVec3 tt = nph_vec3_normalize(nph_vec3_cross(up, d));
+            const NphVec3 bb = nph_vec3_cross(d, tt);
+            const u32 base = i * per;
+            for (u32 ring = 0; ring < 2U; ++ring) {
+                for (u32 j = 0; j < SHRUB_SIDES; ++j) {
+                    const f32 angle = 2.0F * NPH_PI * (f32)j / (f32)SHRUB_SIDES;
+                    const NphVec3 off = nph_vec3_add(nph_vec3_scale(tt, nph_f32_cos(angle)),
+                                                     nph_vec3_scale(bb, nph_f32_sin(angle)));
+                    const NphVec3 end = nph_vec3_scale(d, ring == 0U ? -0.2F : 0.2F);
+                    NphRenderVertexInput *p = &v[base + ring * SHRUB_SIDES + j];
+                    p->position = nph_vec3_add(nph_vec3_add(c, end), nph_vec3_scale(off, 0.008F));
+                    p->normal = off;
+                    p->uv = nph_vec2(0.0F, 0.0F);
+                    p->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+                }
+            }
+            for (u32 j = 0; j < SHRUB_SIDES; ++j) {
+                const u32 j1 = (j + 1U) % SHRUB_SIDES;
+                idx[t++] = base + j;
+                idx[t++] = base + j1;
+                idx[t++] = base + SHRUB_SIDES + j1;
+                idx[t++] = base + j;
+                idx[t++] = base + SHRUB_SIDES + j1;
+                idx[t++] = base + SHRUB_SIDES + j;
+            }
+            for (u32 j = 1; j + 1U < SHRUB_SIDES; ++j) {
+                idx[t++] = base;
+                idx[t++] = base + j + 1U;
+                idx[t++] = base + j;
+                idx[t++] = base + SHRUB_SIDES;
+                idx[t++] = base + SHRUB_SIDES + j;
+                idx[t++] = base + SHRUB_SIDES + j + 1U;
+            }
+        }
+        r = upload_lod_mesh(ctx, v, n, idx, t, voxels ? "shrub (voxels)" : "shrub", voxels, out);
+    }
+    if (v != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
+    }
+    if (idx != NULL) {
+        NPH_FREE_ARRAY(a, u32, idx, k);
+    }
+    return r;
+}
+
 // The sun's shadows a daylight scene asks for (s->shadows): the camera
 // walking for SHADOWS_SUN_WALK, along the view, level, at 1.4 m/s and 240
 // frames a second; the sun moving for SHADOWS_SUN_TURNING (advance_motion).
@@ -859,6 +1005,38 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
         view->camera = nph_render_camera_look_at(nph_dvec3(0.0, height, 0.001), nph_dvec3_zero(),
                                                  nph_vec3_unit_y(), 0.9F, 0.1F);
         return NPH_RESULT_OK;
+    }
+    if (s->kind == SCENE_FOLIAGE) {
+        if (ctx->terrain.value == 0U) {
+            NPH_TRY(make_terrain(ctx));
+        }
+        const bool voxels = (s->post & (u32)POST_NO_VOXELS) == 0U;
+        NphRenderMesh *shrub = voxels ? &ctx->shrub : &ctx->shrub_triangles;
+        if (shrub->value == 0U) {
+            NPH_TRY(make_shrub(ctx, voxels, shrub));
+        }
+        NPH_TRY(
+            add_instance(ctx, ctx->terrain, 3U, trs(0.0, 0.0, 0.0, nph_vec3_splat(1.0F), 0.0F)));
+        // Shrubs on the rocks' jittered 10 m grid, 0.7 to 1.3 times their
+        // size, turned about the vertical.
+        for (u32 i = 0; i < s->count; ++i) {
+            const u32 h = hash_u32(i * 7U + 0x51EDU);
+            const u32 column = i % side;
+            const u32 row = i / side;
+            const f64 x = -160.0 + 10.0 * ((f64)column + (f64)(h & 255U) / 255.0);
+            const f64 z = -160.0 + 10.0 * ((f64)row + (f64)((h >> 8U) & 255U) / 255.0);
+            const f32 scale = 0.7F + 0.6F * (f32)((h >> 16U) & 255U) / 255.0F;
+            const f64 y = (f64)terrain_height((f32)x, (f32)z);
+            NPH_TRY(add_instance(ctx, *shrub, h >> 24U,
+                                 trs(x, y, z, nph_vec3_splat(scale), (f32)(h & 1023U) * 0.01F)));
+        }
+        const f64 eye_x = -165.0;
+        const f64 eye_z = -165.0;
+        const f64 eye_y = (f64)terrain_height((f32)eye_x, (f32)eye_z) + 1.7;
+        view->camera = nph_render_camera_look_at(nph_dvec3(eye_x, eye_y, eye_z),
+                                                 nph_dvec3(0.0, eye_y - 4.0, 0.0),
+                                                 nph_vec3_unit_y(), 0.9F, 0.1F);
+        return sun_shadows(ctx, s, view);
     }
     if (s->kind == SCENE_LOD) {
         if (ctx->terrain.value == 0U) {
@@ -1268,6 +1446,10 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
             printf("    levels of detail: %u hierarchy nodes visited in %u steps a phase, %u "
                    "clusters a finer level stood in for\n",
                    st->vis_lod_nodes, st->vis_lod_steps, st->vis_lod_clusters_culled);
+        }
+        if (st->vis_voxel_clusters != 0U) {
+            printf("    voxels: %u clusters, %u bricks\n", st->vis_voxel_clusters,
+                   st->vis_voxel_bricks);
         }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
@@ -1807,6 +1989,8 @@ static void teardown(Ctx *ctx)
         nph_render_mesh_destroy(ctx->renderer, ctx->cube);
         nph_render_mesh_destroy(ctx->renderer, ctx->terrain);
         nph_render_mesh_destroy(ctx->renderer, ctx->rock);
+        nph_render_mesh_destroy(ctx->renderer, ctx->shrub);
+        nph_render_mesh_destroy(ctx->renderer, ctx->shrub_triangles);
     }
     nph_renderer_destroy(ctx->renderer);
     nph_render_gpu_profiler_destroy(ctx->profiler);

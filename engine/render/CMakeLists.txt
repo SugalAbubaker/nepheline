@@ -65,6 +65,7 @@ nph_add_test(render
         tests/test_taa.c
         tests/test_vis.c
         tests/test_vis_lod.c
+        tests/test_vis_voxel.c
         tests/test_voxel.c
         tests/test_vsm.c
     DEPS

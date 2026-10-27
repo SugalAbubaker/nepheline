@@ -714,11 +714,47 @@ static NphResult make_buffer(NphRenderer *r, const void *data, u64 size, u32 usa
     return nph_gpu_upload_buffer(r->dev, *out, 0U, data, size);
 }
 
+// A meshlet record without vertices past level 0 of a mesh with levels is a
+// voxel cluster (render/voxel.h; ADR-0061).
+static bool is_voxel_cluster(const NphRenderMeshDesc *d, u32 i)
+{
+    return d->lod_nodes != NULL && i >= d->lod_level0_meshlets && d->meshlets[i].vertex_count == 0U;
+}
+
+// A voxel cluster is checked so far as the GPU's reads stay inside the
+// voxels' streams and its traversal's steps are finite: its bricks' range
+// (1 to NPH_RENDER_VOXEL_CLUSTER_BRICKS), and each brick's voxels (one a
+// set bit of its mask, which is not empty), its cell (a positive, normal
+// power of two), and its origin (finite). A footprint's fields are any bits
+// the traversal reads (render/voxel.h).
+static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRenderMeshlet *m)
+{
+    if (m->triangle_count == 0U || m->triangle_count > NPH_RENDER_VOXEL_CLUSTER_BRICKS ||
+        m->triangle_offset != 0U || d->voxel_bricks == NULL || d->voxels == NULL ||
+        m->vertex_offset > d->voxel_brick_count ||
+        m->triangle_count > d->voxel_brick_count - m->vertex_offset) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    for (u32 k = 0; k < m->triangle_count; ++k) {
+        const NphRenderVoxelBrick *b = &d->voxel_bricks[m->vertex_offset + k];
+        const u32 bits = nph_f32_to_bits(b->cell);
+        const u32 exponent = (bits >> 23U) & 0xFFU;
+        const u32 count = nph_popcount_u32(b->mask[0]) + nph_popcount_u32(b->mask[1]);
+        if ((bits & 0x807FFFFFU) != 0U || exponent == 0U || exponent == 0xFFU ||
+            !nph_vec3_is_finite(b->origin) || count == 0U || b->first_voxel > d->voxel_count ||
+            count > d->voxel_count - b->first_voxel) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
 // Meshlets given with a mesh are checked so far as the GPU's reads stay
-// inside the streams: every range, local corner, and vertex index; and
-// they number fewer than 2^24, the bits the shadow map's work items give a
-// meshlet beside its level (vsm_cull.comp). That they cover their
-// submeshes' triangles exactly is the caller's contract.
+// inside the streams: every range, local corner, and vertex index, and a
+// voxel cluster's bricks (validate_voxel_cluster); and they number fewer
+// than 2^24, the bits the shadow map's work items give a meshlet beside its
+// level (vsm_cull.comp). That they cover their submeshes' triangles exactly
+// is the caller's contract.
 static NphResult validate_meshlets(const NphRenderMeshDesc *d)
 {
     if (d->meshlets == NULL) {
@@ -736,6 +772,14 @@ static NphResult validate_meshlets(const NphRenderMeshDesc *d)
     for (u32 i = 0; i < d->meshlet_count; ++i) {
         const NphRenderMeshlet *m = &d->meshlets[i];
         const NphRenderMeshletBounds *b = &d->meshlet_bounds[i];
+        if (is_voxel_cluster(d, i)) {
+            if (m->submesh >= d->submesh_count || !nph_vec3_is_finite(b->center) ||
+                !(b->radius >= 0.0F) || !nph_f32_is_finite(b->radius)) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+            NPH_TRY(validate_voxel_cluster(d, m));
+            continue;
+        }
         if (m->vertex_count == 0U || m->vertex_count > NPH_RENDER_MESHLET_MAX_VERTICES ||
             m->triangle_count == 0U || m->triangle_count > NPH_RENDER_MESHLET_MAX_TRIANGLES ||
             m->submesh >= d->submesh_count || m->vertex_offset > d->meshlet_vertex_count ||

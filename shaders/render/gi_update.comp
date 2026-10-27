@@ -27,10 +27,16 @@
 // far, so nothing is occluded twice and no ray reaches past a wall nearer
 // than that.
 //
+// A voxel's pixel (render/voxel.h; ADR-0061) is the point and face the voxel
+// resolve finds again, a cell's diagonal off the face as the resolve looks
+// its cell up there (vis_voxel.glsl vis_voxel_surface): the ray leaves clear
+// of the triangles the voxel stands for, which the rays trace.
+//
 // arg0: the visibility buffer's bindless storage index.
 #version 460
 #extension GL_EXT_ray_query : require
 #include "vis_common.glsl"
+#include "vis_voxel.glsl"
 #include "nph_bindless_int64.glsl"
 #include "rt_common.glsl"
 #include "gi_common.glsl"
@@ -201,10 +207,18 @@ void main()
         return; // the background
     }
 
-    // The pixel's point and its triangle's normal.
-    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    // The pixel's point and its triangle's normal, or its voxel's.
     vec3 n;
-    const vec3 x = surface_point(view, v, q, n);
+    vec3 x;
+    if ((VisClustersRef(view.v.clusters).c[vis_cluster(v)].flags & NPH_VIS_CLUSTER_VOXELS) != 0u) {
+        VisVoxelSurface vs;
+        vis_voxel_surface(view, rview.v.inv_view_proj, v, p, vs);
+        n = vs.face_normal;
+        x = vs.position + vs.face_normal * vs.offset;
+    } else {
+        const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+        x = surface_point(view, v, q, n);
+    }
     const uint slot = gi_claim(g, gi_key(g, x, n));
     if (slot == GI_NONE) {
         return; // its bucket is full: no sample
