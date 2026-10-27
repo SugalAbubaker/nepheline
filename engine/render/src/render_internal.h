@@ -242,10 +242,26 @@ typedef struct RenderVsm {
     u32 roomy;
     u32 frame_bias; // the bias this frame draws with (lod_bias as it began)
     VsmLayout layout;
-    NphGpuShader shaders[5]; // pages, cull, raster (mesh or vertex), clear, request
+    // pages, cull, raster (mesh or vertex), clear, request, and the voxel
+    // casters' splat and merge
+    NphGpuShader shaders[7];
     NphGpuPipeline pages;
     NphGpuPipeline cull;
+    // The same with the voxel clusters' routing and arguments (k_voxels),
+    // bound while the renderer holds a mesh with voxel levels
+    // (RenderVis.frame_voxels).
+    NphGpuPipeline pages_voxels;
+    NphGpuPipeline cull_voxels;
     NphGpuPipeline raster;
+    NphGpuPipeline voxel_splat; // the voxel clusters' casters (vsm_voxel_splat.comp)
+    NphGpuPipeline voxel_merge; // their depths into the pool (vsm_voxel_merge.frag)
+    // The voxel casters' draws (uvec4[max_vsm_voxel_draws]) and depths
+    // (R32_UINT, laid out as the pool), made the first frame the renderer
+    // holds a mesh with voxel levels (the depths cleared once; the merge
+    // resets the pages it reads).
+    NphGpuBuffer voxel_draws;
+    NphGpuImage voxel_depths;
+    b32 voxel_depths_fresh;
     NphGpuPipeline clear;
     NphGpuPipeline request; // the blended draws' page requests (vsm_request.frag)
     u32 sun_slot;           // the light it shadows, NPH_U32_MAX: none
@@ -266,6 +282,8 @@ typedef struct RenderVsm {
         NphGpuRgBuffer entries;
         NphGpuRgBuffer phys;
         NphGpuRgImage pool;
+        NphGpuRgBuffer voxel_draws;
+        NphGpuRgImage voxel_depths;
         NphGpuRgBuffer stats;
     } frame;
 } RenderVsm;

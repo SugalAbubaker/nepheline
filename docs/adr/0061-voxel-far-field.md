@@ -291,15 +291,17 @@ Textures are not sampled: a voxel's attributes are already filtered at its scale
 
 ### Shadows
 
-**The sun's virtual shadow map.** Voxel clusters cast through a raster of their own,
-one draw per (cluster, page) as triangles have:
+**The sun's virtual shadow map.** Voxel clusters cast through a splat of their own,
+one workgroup per (cluster, page) as triangles have a draw:
 
-- The mesh shader, or the vertex shader on the indirect path, emits one quad per brick
-  over the brick's bounds in the page.
-- The fragment shader tests the light's ray against the brick's voxels with the same
-  test, then either writes the nearest hit's depth or discards. The quad lies at the
-  brick's nearest depth, so the written depth only moves away from the light and the
-  depth layout keeps early rejection.
+- The meshlet cull sends a voxel cluster's draws to a list of their own.
+- Each voxel projects its footprint's box to the page's texel centres it may cover, and
+  a subgroup pools its voxels' texels, as the visibility buffer's raster does.
+- Each texel's ray, the light's through its centre, is tested against that voxel alone,
+  and the hit's depth takes the atomic minimum of its texel in an R32 image laid out as
+  the pool (the pool, a depth attachment, takes no atomics).
+- A pass over the pages drawn takes those depths into the pool, whose depth test keeps
+  them where nearer than the triangles', and resets the image's texels.
 
 **Rays.** The resolve's shadow rays and the radiance cache's rays still trace level 0's
 triangles (ADR-0060's bottom levels). A ray from a voxel starts one cell diagonal off
@@ -333,6 +335,12 @@ way, against level 0 at the same distances:
   normals' mean cosine to the viewer is 0.55 to 0.61 against the lobe's 2/3), and
   the lobe's axis fits a needle's ring of normals poorly. Coarser cells, which hold
   many needles, are nearly isotropic and agree within a few per cent.
+- **Shadows** (stage 4, `test_vsm.c`): the sun's map holds exactly what the CPU's rays
+  through the same cuts' voxel clusters meet (2,325 texels, depths within 0.0005 of a
+  texel). Seen along the sun, over 25 turned meshes at the map's cuts (cells within
+  half a texel), the voxels cover 7.8 % fewer texels than the needles,
+  and the floor loses 6.3 % less light to their shadow than to level 0's; the stalled
+  triangle levels the map drew before lost 10.6 %.
 
 - **Cost.** `render_perf`'s `foliage_4k_production` (1,024 shrubs of 4,000 sparse
   needles, 82 million triangles at level 0, at 4K from head height) draws about
@@ -371,7 +379,17 @@ way, against level 0 at the same distances:
   takes Bistro's street 0.189 ms, as at Phase 13's start. Stage 3's update, with its
   traversal compiled in, had run 0.010 ms faster there: the driver split its spills
   as 1,280 bytes of shared and 80 of local memory, against 2,304 bytes of shared
-  without the voxels and 2,816 with their search.
+  without the voxels and 2,816 with their search. The shadow map's meshlet cull and page
+  passes are specialised the same way, and its voxel draws and depths are buffers of
+  their own, made with the first voxel mesh: sixteen more megabytes in the work buffer
+  had made `shadows_4k_production`'s `vsm update` 4 µs slower, as it was placed.
+- **The shadows' cost.** With the sun moving every frame over the same foliage
+  (`foliage_shadows_sun_4k_production`, about 830 pages drawn again each frame), the
+  map's casters take 12.2 ms (the triangles' raster 7.6, the voxels' splat 4.1 and
+  merge 0.4) where the stalled triangles took 16.9, the frame 20.0 ms where it took
+  24.7; with the camera walking, the map's passes are within a few microseconds of
+  before. That every page is drawn again each frame is the day-night cycle's problem,
+  the same for triangles (ADR-0060), and still open.
 
 The tests hold the coverage to 8 % and the light to 12 % as they stand. The next work,
 before stage 5 measures the landscape and before the cooker makes voxels by default:
@@ -395,12 +413,11 @@ each measured against level 0 on these needles and on the landscape's own pines.
    the cooker's sampler, and fuzzing. Done (PR #113).
 3. The renderer: the voxel raster list, raster, and resolve, the radiance cache's
    surface point, statistics, and the debug views. Done (PR #114; the splat raster,
-   PR #115). Until stage 4 the shadow map's uniform cuts end below the first that
-   holds a voxel cluster. The cooker's
+   PR #115). The cooker's
    voxels stay opt-in (`--voxels`): on sparse foliage the raster's first voxel
    levels still cost more than the stalled triangles they replace ("Accuracy"), and
    they become the default once it draws the reference scenes' foliage faster.
-4. The shadow map's voxel casters, on both raster paths.
+4. The shadow map's voxel casters. Done (PR #116).
 5. The landscape cooked with voxels, measured against every §10.4 line.
 6. Voxel bottom levels for rays.
 
@@ -445,6 +462,23 @@ each measured against level 0 on these needles and on the landscape's own pines.
 - **The resolve's search over all eight cells nearest the depth's point**, without
   the point's own cell first and the stop at the stored depth: the voxel resolve took
   0.104 ms against 0.068.
+- **The shadow map's voxel casters through the hardware raster** (stage 4's first
+  version, as this ADR first had it): a quad a brick at its depth nearest the light,
+  whose fragments test the light's ray against the brick's voxels and write the nearest
+  hit's depth (`depth_greater`, so the early test still rejects). Exact to the CPU's
+  rays once each fragment took its ray from its texel's centre: rays interpolated from
+  the quad's corners, which the raster snaps to its subpixel grid, changed 57 of 2,354
+  texels a thin footprint grazes. But a full redraw of the foliage took 36 ms against
+  the stalled triangles' 17: a brick's quad is a few texels, and a subgroup of its
+  fragments loops over as many voxels as the fullest brick among them has, up to 64,
+  where the mean is 7.6. Walking only the cells each ray crosses brought it to 28.5 ms;
+  a cut of a texel's error rather than half halved the draws but not the time, the
+  bricks covering more texels each. The splat and its merge take 4.5 ms beside the
+  triangles' 7.6.
+- **The splat's rays offset from their brick's corner's**, by the texel's place from
+  the corner's in texels: the same rays in exact arithmetic, but in single precision
+  they met other footprints than the CPU's in 10 of 2,329 texels. From each texel's own
+  centre: none.
 - **A faster splat by registers or by queueing**: the workgroup's constants kept in
   shared memory, which took the raster from 72 registers to 64, and each subgroup's
   pairs queued in a ring and tested 32 at a time. Neither measured faster per cluster
@@ -505,7 +539,9 @@ each measured against level 0 on these needles and on the landscape's own pines.
   - a fibre-like cell shades as a wide lobe.
 - Memory: 16 bytes a voxel and 32 a brick. The first voxel level holds up to four
   times the stalled triangles it stands for, and the coarser levels about a third
-  again (the pines: an estimated 35 MB a tree species, beside their triangles).
+  again (the pines: an estimated 35 MB a tree species, beside their triangles). The
+  shadow map's voxel casters add a depths image the pool's size in R32 (134 MB for
+  its default 2,048 pages) and a list of 16 MB, from the first voxel mesh on.
 - The build voxelizes each stalled triangle once per voxel level, with 3 × 256 rays a
   cell: 0.89 s for 2,000 closed needles (16,000 triangles) on one thread, about 55 µs
   a triangle against 11 for the triangle levels alone, most of it in the cells' rays.
@@ -537,4 +573,8 @@ each measured against level 0 on these needles and on the landscape's own pines.
   level 0 ("Accuracy"); clusters whose bricks differ in cell size or whose voxels leave
   the bricks' order refused.
 
-  To come with their stages: the shadow casters against level 0's shadow.
+- Tests (stage 4, `test_vsm.c`, on the RTX 3060 Ti and lavapipe): over a grid of 25
+  turned foliage meshes, the shadow map's texels against the CPU's rays through the
+  same cuts' voxel clusters (every one of 2,325 texels, its depth within 0.0005 of a
+  texel), read back from the pool through its sampled binding; and the casters'
+  coverage of the map and the floor's shadow against level 0's ("Accuracy").

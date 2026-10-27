@@ -310,6 +310,7 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
+    d->max_vsm_voxel_draws = d->max_vsm_voxel_draws != 0U ? d->max_vsm_voxel_draws : 1U << 20U;
     d->gi_cells = d->gi_cells != 0U ? d->gi_cells : 1U << 18U;
     d->gi_rays = d->gi_rays != 0U ? d->gi_rays : 65536U;
     if (d->max_visible_clusters > (u32)NPH_VIS_MAX_CLUSTERS) {

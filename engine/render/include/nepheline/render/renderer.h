@@ -171,6 +171,7 @@ typedef struct NphRendererDesc {
     u32 vsm_pages;               // physical pages of 128 x 128 depth texels, 64 KB each (2048)
     u32 max_vsm_meshlets;        // caster meshlets tested against the pages drawn in a frame (2^20)
     u32 max_vsm_draws;           // (meshlet, page) draws in a frame (2^20)
+    u32 max_vsm_voxel_draws;     // (voxel cluster, page) draws in a frame (2^20)
     // The production path's radiance cache (docs/render.md "Global
     // illumination"), where the device has ray queries: its cells, a power of
     // two of at least 16 (262144: 9 MB), and the rays its update traces a
@@ -751,7 +752,8 @@ typedef struct NphRenderFrameStats {
     // it again once there is room); then, read back with the counters above
     // (zero when that frame had none), the pages its pixels needed, the
     // pages drawn (new, or changed since), the pages the pool holds, those
-    // taken from others, the caster draws, and NphRenderVsmOverflow bits.
+    // taken from others, the caster draws (voxel clusters' apart), and
+    // NphRenderVsmOverflow bits.
     b32 vsm;
     u32 vsm_lod_bias;
     u32 vsm_requested;
@@ -759,6 +761,7 @@ typedef struct NphRenderFrameStats {
     u32 vsm_resident;
     u32 vsm_evicted;
     u32 vsm_draws;
+    u32 vsm_voxel_draws;
     u32 vsm_overflow;
     // Temporal anti-aliasing: whether the frame was resolved temporally,
     // and whether it blended with history (not on the first such frame, nor
@@ -787,7 +790,7 @@ typedef struct NphRenderFrameStats {
 typedef enum NphRenderVsmOverflow {
     NPH_RENDER_VSM_OVERFLOW_POOL = 1U << 0U,     // vsm_pages
     NPH_RENDER_VSM_OVERFLOW_MESHLETS = 1U << 1U, // max_vsm_meshlets
-    NPH_RENDER_VSM_OVERFLOW_DRAWS = 1U << 2U,    // max_vsm_draws
+    NPH_RENDER_VSM_OVERFLOW_DRAWS = 1U << 2U,    // max_vsm_draws or max_vsm_voxel_draws
 } NphRenderVsmOverflow;
 
 // The production path's lists that can fill up (NphRenderFrameStats.

@@ -9,11 +9,13 @@
 // surfaces ask for their own pages, a narrow view from afar takes a level
 // that holds it; it agrees with the ray-traced shadow it replaces, and
 // holds far from the origin; a caster with levels of detail, drawn at the
-// map's cut, shadows as its level 0 does; the depth pyramid's requests for
+// map's cut, shadows as its level 0 does, and so does one drawn as voxels
+// (in the map itself, texel by texel); the depth pyramid's requests for
 // blocks of pixels are every pixel's own. The fixture's teardown asserts
 // zero validation and synchronisation-validation errors and nothing leaked.
 #include <nepheline/math/random.h>
 
+#include "render_internal.h"
 #include "test_lod_support.h"
 #include "test_shadow_support.h"
 
@@ -711,6 +713,511 @@ NTEST_F(Vsm, a_caster_with_levels_shadows_as_its_level_0)
     nph_gpu_image_destroy(f->dev, target);
     lod_mesh_free(&torus);
 }
+
+// ---------------------------------------------------------------------------
+// Voxel casters
+// ---------------------------------------------------------------------------
+
+// The pool's extent in texels, and its depths read back through its
+// sampled binding (vsm_pool_test.comp) into `out`.
+#define POOL_W 8192U
+NPH_STATIC_ASSERT(POOL_W == NPH_VSM_POOL_ROW * NPH_VSM_PAGE, "the pool's width in texels");
+
+static u32 pool_height(const RenderFixture *f)
+{
+    const u32 rows =
+        (f->renderer->vsm.pool_pages + (u32)NPH_VSM_POOL_ROW - 1U) / (u32)NPH_VSM_POOL_ROW;
+    return rows * (u32)NPH_VSM_PAGE;
+}
+
+static void read_pool(RenderFixture *f, NphGpuPipeline pipeline, f32 *out)
+{
+    NphGpuDevice *dev = f->dev;
+    const RenderVsm *v = &f->renderer->vsm;
+    const u32 height = pool_height(f);
+    const u64 size = (u64)POOL_W * height * sizeof(f32);
+    NphGpuBuffer buf = test_make_buffer(dev, size, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                                        NPH_GPU_MEMORY_READBACK, "pool readback");
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "pool readback", &cmd),
+                        NPH_RESULT_OK);
+    // Depth images are sampled read-only (their bindless descriptors say so).
+    const NphGpuLayout current = nph_gpu_image_layout(dev, v->pool, 0U);
+    if (current != NPH_GPU_LAYOUT_DEPTH_READ_ONLY) {
+        NphGpuImageBarrier b;
+        memset(&b, 0, sizeof b);
+        b.image = v->pool;
+        b.src_stages = (u32)NPH_GPU_STAGE_ALL;
+        b.src_access = (u32)NPH_GPU_ACCESS_MEMORY_WRITE;
+        b.old_layout = current;
+        b.dst_stages = (u32)NPH_GPU_STAGE_COMPUTE;
+        b.dst_access = (u32)NPH_GPU_ACCESS_SHADER_READ;
+        b.new_layout = NPH_GPU_LAYOUT_DEPTH_READ_ONLY;
+        b.mip_count = 1U;
+        b.layer_count = NPH_GPU_ALL_LAYERS;
+        NphGpuBarrierDesc desc;
+        memset(&desc, 0, sizeof desc);
+        desc.images = &b;
+        desc.image_count = 1U;
+        nph_gpu_cmd_barrier(cmd, &desc);
+    }
+    NphVsmPoolTestPush push;
+    memset(&push, 0, sizeof push);
+    push.dst = nph_gpu_buffer_address(dev, buf);
+    push.pool_index = nph_gpu_image_sampled_index(dev, v->pool);
+    push.sampler_index = nph_gpu_sampler_index(dev, f->renderer->clamp_sampler);
+    push.width = POOL_W;
+    push.height = height;
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, (POOL_W + 15U) / 16U, (height + 15U) / 16U, 1U);
+    test_submit_wait(dev, cmd);
+    memcpy(out, nph_gpu_buffer_map(dev, buf), (size_t)size);
+    nph_gpu_buffer_destroy(dev, buf);
+}
+
+// The light a frame's floor loses to shadow: each pixel's shortfall from
+// the brightest, in linear light, summed (in pixels' worth of light).
+static f64 floor_shadow(const u8 *img)
+{
+    const u64 n = (u64)LOD_TARGET * LOD_TARGET;
+    f64 lit = 0.0;
+    for (u64 i = 0; i < n; ++i) {
+        lit = nph_f64_max(lit, (f64)nph_render_ref_srgb_to_linear((f32)img[i * 4U + 1U] / 255.0F));
+    }
+    f64 lost = 0.0;
+    for (u64 i = 0; i < n; ++i) {
+        lost += lit - (f64)nph_render_ref_srgb_to_linear((f32)img[i * 4U + 1U] / 255.0F);
+    }
+    return lit > 0.0 ? lost / lit : 0.0;
+}
+
+// A shadow map's casters, compared texel by texel with another frame's:
+// the pages both hold, their texels where either frame has a caster nearer
+// the light than the floor (VSM_FOLIAGE_GAP or more apart: the foliage
+// hangs metres over it), and the depths where both do.
+#define VSM_FOLIAGE_GAP 0.5
+
+typedef struct CasterCompare {
+    u32 pages;
+    u32 both;  // texels both frames have a caster in
+    u32 only0; // the first frame's alone
+    u32 only1;
+    f64 mean_error; // where both have one: the second's depth from the first's, in texels
+    f64 max_error;
+} CasterCompare;
+
+static CasterCompare compare_casters(const f32 *pool0, const NphVsmEntry *entries0,
+                                     const f32 *pool1, const NphVsmEntry *entries1)
+{
+    CasterCompare c;
+    memset(&c, 0, sizeof c);
+    const u32 held = NPH_VSM_ENTRY_VALID | NPH_VSM_ENTRY_DIRTY;
+    f64 sum = 0.0;
+    for (u32 e = 0; e < (u32)NPH_VSM_LEVELS * (u32)NPH_VSM_LEVEL_ENTRIES; ++e) {
+        const NphVsmEntry *ea = &entries0[e];
+        const NphVsmEntry *eb = &entries1[e];
+        if ((ea->state & held) != NPH_VSM_ENTRY_VALID ||
+            (eb->state & held) != NPH_VSM_ENTRY_VALID || ea->page_x != eb->page_x ||
+            ea->page_y != eb->page_y) {
+            continue;
+        }
+        c.pages += 1U;
+        // A level's depth range is its side (vsm.c): 4 m at level 0,
+        // doubling; its texel that side over its 128 pages of 128 texels.
+        const u32 level = e / (u32)NPH_VSM_LEVEL_ENTRIES;
+        const f64 side = 4.0 * (f64)(1U << level);
+        const f64 texel = side / ((f64)NPH_VSM_WINDOW * (f64)NPH_VSM_PAGE);
+        const u32 pa = ea->state & NPH_VSM_ENTRY_PAGE;
+        const u32 pb = eb->state & NPH_VSM_ENTRY_PAGE;
+        for (u32 y = 0; y < (u32)NPH_VSM_PAGE; ++y) {
+            for (u32 x = 0; x < (u32)NPH_VSM_PAGE; ++x) {
+                const u64 ia = ((u64)(pa / (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + y) * POOL_W +
+                               (u64)(pa % (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + x;
+                const u64 ib = ((u64)(pb / (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + y) * POOL_W +
+                               (u64)(pb % (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + x;
+                const f64 d0 = (f64)pool0[ia];
+                const f64 d1 = (f64)pool1[ib];
+                if (d0 == d1) {
+                    continue; // the same caster in both (the floor), or none
+                }
+                const f64 apart = (d1 - d0) * side; // metres along the light
+                if (nph_f64_abs(apart) < VSM_FOLIAGE_GAP) {
+                    c.both += 1U;
+                    sum += nph_f64_abs(apart) / texel;
+                    c.max_error = nph_f64_max(c.max_error, nph_f64_abs(apart) / texel);
+                } else if (apart > 0.0) {
+                    c.only0 += 1U;
+                } else {
+                    c.only1 += 1U;
+                }
+            }
+        }
+    }
+    c.mean_error = c.both != 0U ? sum / (f64)c.both : 0.0;
+    return c;
+}
+
+// The voxel casters' scene: a grid of foliage (1,500 needles in a cube of
+// 4 m, each turned at random) high over the floor and to the side of a
+// camera looking straight down at it, far enough that a pixel spans four of
+// the foliage's finest voxel cells. The map's pages for the floor then have
+// texels of two to four of those cells, and draw the foliage at its cuts of
+// voxel clusters (within half a texel: vsm_cull.comp), through the voxel
+// casters' raster (ADR-0061, stage 4).
+#define FOLIAGE_GRID  5U
+#define FOLIAGE_COUNT (FOLIAGE_GRID * FOLIAGE_GRID)
+
+typedef struct VoxelShadowScene {
+    LodMesh mesh;
+    f32 cell;   // the finest voxel cell
+    f32 radius; // the mesh's reach from its origin
+    NphRenderMesh caster;
+    NphRenderInstance grid[FOLIAGE_COUNT];
+    NphDVec3 at[FOLIAGE_COUNT];
+    NphQuat turn[FOLIAGE_COUNT];
+    NphRenderLightDesc sun;
+    NphRenderCamera camera;
+    f64 height;
+} VoxelShadowScene;
+
+static void voxel_shadow_scene(RenderFixture *f, VoxelShadowScene *s)
+{
+    memset(s, 0, sizeof *s);
+    lod_foliage(&s->mesh, 1500U, 4.0F, 7U);
+    NTEST_ASSERT_GT_UINT(s->mesh.lods.bricks.len, 0U);
+    s->cell = NPH_F32_MAX;
+    for (u32 i = 0; i < s->mesh.lods.bricks.len; ++i) {
+        s->cell = nph_f32_min(s->cell, s->mesh.lods.bricks.data[i].cell);
+    }
+    const NphRenderMeshlets *cl = &s->mesh.lods.clusters;
+    for (u32 i = 0; i < cl->bounds.len; ++i) {
+        const NphRenderMeshletBounds *b = &cl->bounds.data[i];
+        s->radius = nph_f32_max(s->radius, nph_vec3_length(b->center) + b->radius);
+    }
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &s->mesh.desc, &s->caster),
+                        NPH_RESULT_OK);
+    const f32 fov = 0.5F;
+    const f32 tan_half = tanf(0.5F * fov);
+    s->height = (f64)(4.0F * s->cell * (f32)LOD_TARGET / (2.0F * tan_half));
+    s->camera = nph_render_camera_look_at(nph_dvec3(0.0, s->height, 0.0), nph_dvec3(0.0, 0.0, 0.0),
+                                          nph_vec3(0.0F, 0.0F, -1.0F), fov, 0.05F);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, (f32)(3.0 * s->height * (f64)tan_half)));
+    // Five by five, 6 m apart, beyond the view's edge at their height (the
+    // sun travels along +X at 45 degrees: a shadow lands that height along
+    // X), their shadows around the view's centre.
+    const f64 spacing = 6.0;
+    const f64 reach = 0.5 * spacing * (f64)(FOLIAGE_GRID - 1U) + 2.0;
+    const f64 up = ((f64)tan_half * s->height + reach) / (1.0 + (f64)tan_half) + 4.0;
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 41U, 1U);
+    for (u32 i = 0; i < FOLIAGE_COUNT; ++i) {
+        const f32 z = 2.0F * nph_pcg32_next_f32(&rng) - 1.0F;
+        const f32 phi = 2.0F * NPH_PI * nph_pcg32_next_f32(&rng);
+        const f32 rr = nph_f32_sqrt(nph_f32_max(1.0F - z * z, 0.0F));
+        s->turn[i] =
+            nph_quat_from_axis_angle(nph_vec3(rr * nph_f32_cos(phi), rr * nph_f32_sin(phi), z),
+                                     2.0F * NPH_PI * nph_pcg32_next_f32(&rng));
+        const u32 column = i % FOLIAGE_GRID;
+        const u32 row = i / FOLIAGE_GRID;
+        const f64 gx = spacing * ((f64)column - 0.5 * (f64)(FOLIAGE_GRID - 1U));
+        const f64 gz = spacing * ((f64)row - 0.5 * (f64)(FOLIAGE_GRID - 1U));
+        s->at[i] = nph_dvec3(gx - up, up, gz);
+        s->grid[i] = instance(
+            f, s->caster, grey,
+            nph_render_transform_from_trs(s->at[i], s->turn[i], nph_vec3(1.0F, 1.0F, 1.0F)));
+    }
+    s->sun = sun_desc(true);
+    (void)make_light(f, &s->sun);
+}
+
+static void voxel_shadow_scene_free(RenderFixture *f, VoxelShadowScene *s)
+{
+    for (u32 i = 0; i < FOLIAGE_COUNT; ++i) {
+        nph_render_instance_destroy(f->renderer, s->grid[i]);
+    }
+    nph_render_mesh_destroy(f->renderer, s->caster);
+    lod_mesh_free(&s->mesh);
+}
+
+// The map after a few frames of `v`: the floor's image in `img`, the pool's
+// depths in `pool`, and the page table in `entries`.
+#define VSM_ENTRY_COUNT 262144U
+NPH_STATIC_ASSERT(VSM_ENTRY_COUNT == NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES, "the page table");
+
+static NphRenderFrameStats capture_map(RenderFixture *f, const NphRenderView *v, NphGpuImage target,
+                                       NphGpuPipeline pool_reader, u8 *img, f32 *pool,
+                                       NphVsmEntry *entries)
+{
+    const NphRenderFrameStats s = lod_frames(f, v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, img);
+    (void)lod_frames(f, v, target, 2U, img);
+    read_pool(f, pool_reader, pool);
+    test_read_buffer(f->dev, f->renderer->vsm.entries, 0U,
+                     (u64)VSM_ENTRY_COUNT * sizeof(NphVsmEntry), entries);
+    return s;
+}
+
+static NphGpuPipeline pool_reader(RenderFixture *f, NphGpuShader *shader)
+{
+    *shader = test_load_shader(f->dev, "vsm_pool_test.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = *shader;
+    cd.name = "vsm pool test";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &cd, &pipeline), NPH_RESULT_OK);
+    return pipeline;
+}
+
+// The cut the map draws a caster of scale 1 at in `level` (vsm_cull.comp's
+// VSM_LOD_TEXELS: the largest power-of-two threshold within half the
+// level's texel, in single precision as the shader works it out), or
+// NPH_U32_MAX for level 0.
+static u32 map_cut(u32 level, i32 exp0, u32 count)
+{
+    const f32 page = (f32)(4.0 * (f64)(1U << level) / (f64)NPH_VSM_WINDOW);
+    const f32 allowed = 0.5F * page / (f32)NPH_VSM_PAGE;
+    const i32 e = (i32)((nph_f32_to_bits(allowed) >> 23U) & 0xFFU) - 127 - exp0;
+    return e >= 0 ? nph_min_u32((u32)e, count - 1U) : NPH_U32_MAX;
+}
+
+// The sun's ray from world point `p` along `d` against the cut's clusters
+// (`cut` entries of `table` from `first`) of every instance of the scene,
+// through the C twin of the shaders' voxel tests (nph_render_voxel_trace):
+// the nearest hit's distance along the ray, or NPH_F64_MAX. A cluster of
+// triangles in the cut counts in `*triangles`.
+static f64 sun_ray(const VoxelShadowScene *s, const u32 *cut, u32 count, NphDVec3 p, NphVec3 d,
+                   u32 *triangles)
+{
+    const NphRenderMeshlets *cl = &s->mesh.lods.clusters;
+    f32 best = NPH_F32_MAX;
+    for (u32 i = 0; i < FOLIAGE_COUNT; ++i) {
+        const NphVec3 o = nph_quat_rotate_inverse(
+            s->turn[i],
+            nph_vec3((f32)(p.x - s->at[i].x), (f32)(p.y - s->at[i].y), (f32)(p.z - s->at[i].z)));
+        const NphVec3 dir = nph_quat_rotate_inverse(s->turn[i], d);
+        // The instance's reach, then each cluster's sphere.
+        const f32 along = -nph_vec3_dot(o, dir);
+        if (nph_vec3_length_sq(o) - along * along > s->radius * s->radius) {
+            continue;
+        }
+        for (u32 k = 0; k < count; ++k) {
+            const u32 c = cut[k];
+            const NphRenderMeshlet *ml = &cl->meshlets.data[c];
+            if (ml->vertex_count != 0U) {
+                *triangles += 1U;
+                continue;
+            }
+            const NphVec3 oc = nph_vec3_sub(cl->bounds.data[c].center, o);
+            const f32 tc = nph_vec3_dot(oc, dir);
+            const f32 r = cl->bounds.data[c].radius;
+            if (nph_vec3_length_sq(oc) - tc * tc > r * r) {
+                continue;
+            }
+            for (u32 b = 0; b < ml->triangle_count; ++b) {
+                NphRenderVoxelHit hit;
+                if (nph_render_voxel_trace(&s->mesh.lods.bricks.data[ml->vertex_offset + b],
+                                           s->mesh.lods.voxels.data, o, dir, -NPH_F32_MAX, best,
+                                           &hit)) {
+                    best = nph_f32_min(best, hit.t);
+                }
+            }
+        }
+    }
+    return best == NPH_F32_MAX ? NPH_F64_MAX : (f64)best;
+}
+
+// The voxel casters draw the map's texels where the sun's rays through the
+// clusters drawn meet their voxels, at those hits' depths: every page the
+// map holds, texel by texel, against the CPU's rays through the same cut's
+// voxel clusters (light space and depth as vsm.c sets them up; the rays
+// from each texel's centre). The floor below them is told apart by depth.
+NTEST_F(Vsm, voxel_casters_draw_where_the_suns_rays_meet_them)
+{
+    REQUIRE_VSM(f);
+    static VoxelShadowScene s;
+    voxel_shadow_scene(f, &s);
+    NphGpuShader shader = NPH_GPU_SHADER_NULL;
+    const NphGpuPipeline reader = pool_reader(f, &shader);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, LOD_TARGET);
+    static u8 img[LOD_PIXELS];
+    const u64 texels = (u64)POOL_W * pool_height(f);
+    NphAllocator *a = nph_allocator_system();
+    f32 *pool = NPH_ALLOC_ARRAY(a, f32, texels);
+    NphVsmEntry *entries = NPH_ALLOC_ARRAY(a, NphVsmEntry, VSM_ENTRY_COUNT);
+    NTEST_ASSERT_TRUE(pool != NULL && entries != NULL);
+    NphRenderView v;
+    vsm_view(&v, s.camera);
+    v.lod_error = 1.0F;
+    const NphRenderFrameStats st = capture_map(f, &v, target, reader, img, pool, entries);
+    log_stats("voxels", &st);
+    NTEST_EXPECT_EQ_UINT(st.vsm_overflow, 0U);
+    NTEST_EXPECT_GT_UINT(st.vsm_voxel_draws, 0U);
+
+    // The map's cuts (vis_scene.c upload_lods) and light space (vsm.c).
+    NphArrayU32 table;
+    NPH_ARRAY_INIT(&table, a);
+    i32 exp0 = 0;
+    u32 cuts = 0U;
+    NTEST_ASSERT_EQ_INT(nph_render_lod_cuts(s.mesh.lods.lods.data, s.mesh.lods.lods.len,
+                                            s.mesh.lods.groups.data, s.mesh.lods.groups.len,
+                                            NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0, &cuts, &table),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_GT_UINT(cuts, 0U);
+    const NphVec3 d = nph_vec3_normalize(s.sun.direction);
+    const NphVec3 up =
+        nph_f32_abs(d.y) < 0.99F ? nph_vec3(0.0F, 1.0F, 0.0F) : nph_vec3(1.0F, 0.0F, 0.0F);
+    const NphVec3 u = nph_vec3_normalize(nph_vec3_cross(d, up));
+    const NphVec3 w = nph_vec3_cross(u, d);
+    const NphDVec3 anchor = f->renderer->vsm.anchor;
+    const u32 held = NPH_VSM_ENTRY_VALID | NPH_VSM_ENTRY_DIRTY;
+    u32 pages = 0U;
+    u32 both = 0U;
+    u32 missed = 0U; // the CPU's hits the map lacks
+    u32 extra = 0U;  // the map's voxels the CPU does not meet
+    u32 triangles = 0U;
+    u32 cut_seen = NPH_U32_MAX; // the first page's level's cut, and that level
+    u32 level_seen = 0U;
+    f64 worst = 0.0;
+    f64 sum = 0.0;
+    for (u32 e = 0; e < VSM_ENTRY_COUNT; ++e) {
+        if ((entries[e].state & held) != NPH_VSM_ENTRY_VALID) {
+            continue;
+        }
+        const u32 level = e / (u32)NPH_VSM_LEVEL_ENTRIES;
+        const u32 cut = map_cut(level, exp0, cuts);
+        NTEST_ASSERT_NE_UINT(cut, NPH_U32_MAX);
+        if (pages == 0U) {
+            cut_seen = cut;
+            level_seen = level;
+        }
+        pages += 1U;
+        const u32 *list = table.data + table.data[cut];
+        const u32 count = table.data[cut + 1U] - table.data[cut];
+        const f64 side = 4.0 * (f64)(1U << level);
+        const f64 page = side / (f64)NPH_VSM_WINDOW;
+        const f64 texel = page / (f64)NPH_VSM_PAGE;
+        const f64 reference = f->renderer->vsm.depth_reference[level];
+        const u32 phys = entries[e].state & NPH_VSM_ENTRY_PAGE;
+        for (u32 y = 0; y < (u32)NPH_VSM_PAGE; ++y) {
+            for (u32 x = 0; x < (u32)NPH_VSM_PAGE; ++x) {
+                // The texel's centre in light space from the anchor (pages
+                // count from it), on its depth-0 plane.
+                const f64 lu = ((f64)entries[e].page_x + ((f64)x + 0.5) / NPH_VSM_PAGE) * page;
+                const f64 lv = ((f64)entries[e].page_y + ((f64)y + 0.5) / NPH_VSM_PAGE) * page;
+                const NphDVec3 p = {anchor.x + lu * (f64)u.x + lv * (f64)w.x,
+                                    anchor.y + lu * (f64)u.y + lv * (f64)w.y,
+                                    anchor.z + lu * (f64)u.z + lv * (f64)w.z};
+                const f64 hit = sun_ray(&s, list, count, p, d, &triangles);
+                // The floor's depth along it, and the map's.
+                const f64 floor_at = -p.y / (f64)d.y;
+                const u64 i = ((u64)(phys / (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + y) * POOL_W +
+                              (u64)(phys % (u32)NPH_VSM_POOL_ROW) * NPH_VSM_PAGE + x;
+                const f64 stored = ((f64)pool[i] - 0.5) * side + reference;
+                const bool cpu = hit < floor_at - VSM_FOLIAGE_GAP;
+                const bool gpu = stored < floor_at - VSM_FOLIAGE_GAP;
+                if (cpu && gpu) {
+                    both += 1U;
+                    const f64 err = nph_f64_abs(stored - hit) / texel;
+                    sum += err;
+                    worst = nph_f64_max(worst, err);
+                } else if (cpu) {
+                    missed += 1U;
+                } else if (gpu) {
+                    extra += 1U;
+                }
+            }
+        }
+    }
+    NTEST_LOG("%u pages (the first of level %u, at cut %u of %u); %u texels the voxels cover on "
+              "both, %u the map misses, %u it adds; depth %.5f texels from the CPU's on average, "
+              "%.5f at worst",
+              pages, level_seen, cut_seen, cuts, both, missed, extra,
+              sum / (f64)nph_max_u32(both, 1U), worst);
+    NTEST_EXPECT_EQ_UINT(triangles, 0U); // the cut is voxels alone
+    NTEST_ASSERT_GT_UINT(both, 2000U);
+    // Rays that graze a footprint within the rounding may land either side.
+    NTEST_EXPECT_LE_UINT(missed + extra, both / 100U + 2U);
+    NTEST_EXPECT_TRUE(worst < 0.01);
+
+    NPH_ARRAY_FREE(&table);
+    NPH_FREE_ARRAY(a, f32, pool, texels);
+    NPH_FREE_ARRAY(a, NphVsmEntry, entries, VSM_ENTRY_COUNT);
+    nph_gpu_pipeline_destroy(f->dev, reader);
+    nph_gpu_shader_destroy(f->dev, shader);
+    nph_gpu_image_destroy(f->dev, target);
+    voxel_shadow_scene_free(f, &s);
+}
+
+// Against level 0's triangles in the same scene, texel by texel in the map:
+// the voxels cover about the texels the needles do (their footprints keep
+// the needles' coverage; seen along the sun, obliquely to the voxels' grid,
+// as VoxelGpu.the_voxel_levels_keep_the_coverage sees them from the
+// camera), at about their depth, and the floor loses about as much light.
+NTEST_F(Vsm, a_voxel_caster_shadows_as_its_level_0)
+{
+    REQUIRE_VSM(f);
+    static VoxelShadowScene s;
+    voxel_shadow_scene(f, &s);
+    NphGpuShader shader = NPH_GPU_SHADER_NULL;
+    const NphGpuPipeline reader = pool_reader(f, &shader);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, LOD_TARGET);
+    static u8 level0[LOD_PIXELS];
+    static u8 voxels[LOD_PIXELS];
+    const u64 texels = (u64)POOL_W * pool_height(f);
+    NphAllocator *a = nph_allocator_system();
+    f32 *pool0 = NPH_ALLOC_ARRAY(a, f32, texels);
+    f32 *pool1 = NPH_ALLOC_ARRAY(a, f32, texels);
+    NphVsmEntry *entries0 = NPH_ALLOC_ARRAY(a, NphVsmEntry, VSM_ENTRY_COUNT);
+    NphVsmEntry *entries1 = NPH_ALLOC_ARRAY(a, NphVsmEntry, VSM_ENTRY_COUNT);
+    NTEST_ASSERT_TRUE(pool0 != NULL && pool1 != NULL && entries0 != NULL && entries1 != NULL);
+    NphRenderView v;
+    vsm_view(&v, s.camera);
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE;
+    v.lod_error = 0.0F; // every caster at level 0
+    const NphRenderFrameStats s0 = capture_map(f, &v, target, reader, level0, pool0, entries0);
+    v.lod_error = 1.0F;
+    const NphRenderFrameStats s1 = capture_map(f, &v, target, reader, voxels, pool1, entries1);
+    log_stats("level 0", &s0);
+    log_stats("voxels", &s1);
+    NTEST_LOG("finest voxel cell %.4f m, the camera %.1f m up; voxel draws %u, then %u",
+              (f64)s.cell, s.height, s0.vsm_voxel_draws, s1.vsm_voxel_draws);
+    NTEST_EXPECT_EQ_UINT(s0.vsm_overflow, 0U);
+    NTEST_EXPECT_EQ_UINT(s1.vsm_overflow, 0U);
+    NTEST_EXPECT_EQ_UINT(s0.vsm_voxel_draws, 0U);
+    NTEST_EXPECT_GT_UINT(s1.vsm_voxel_draws, 0U);
+
+    const CasterCompare c = compare_casters(pool0, entries0, pool1, entries1);
+    const u32 n0 = c.both + c.only0;
+    const u32 n1 = c.both + c.only1;
+    NTEST_LOG("%u pages; the needles cover %u texels, the voxels %u (%+.1f %%), %u of them both; "
+              "there the voxels' depth lies %.2f texels from the needles' on average, %.2f at "
+              "worst",
+              c.pages, n0, n1, 100.0 * ((f64)n1 / (f64)nph_max_u32(n0, 1U) - 1.0), c.both,
+              c.mean_error, c.max_error);
+    NTEST_ASSERT_GT_UINT(n0, 2000U);
+    NTEST_EXPECT_TRUE(nph_f64_abs((f64)n1 - (f64)n0) <= 0.08 * (f64)n0);
+    const f64 lost0 = floor_shadow(level0);
+    const f64 lost1 = floor_shadow(voxels);
+    NTEST_LOG("the floor loses %.1f pixels' light to the needles' shadow, %.1f to the voxels' "
+              "(%+.1f %%)",
+              lost0, lost1, 100.0 * (lost1 / nph_f64_max(lost0, 1.0) - 1.0));
+    NTEST_EXPECT_TRUE(lost0 > 500.0);
+    NTEST_EXPECT_TRUE(nph_f64_abs(lost1 - lost0) <= 0.08 * lost0);
+
+    NPH_FREE_ARRAY(a, f32, pool0, texels);
+    NPH_FREE_ARRAY(a, f32, pool1, texels);
+    NPH_FREE_ARRAY(a, NphVsmEntry, entries0, VSM_ENTRY_COUNT);
+    NPH_FREE_ARRAY(a, NphVsmEntry, entries1, VSM_ENTRY_COUNT);
+    nph_gpu_pipeline_destroy(f->dev, reader);
+    nph_gpu_shader_destroy(f->dev, shader);
+    nph_gpu_image_destroy(f->dev, target);
+    voxel_shadow_scene_free(f, &s);
+}
+#undef FOLIAGE_COUNT
+#undef FOLIAGE_GRID
 
 // ---------------------------------------------------------------------------
 // The depth pyramid's requests for blocks of pixels

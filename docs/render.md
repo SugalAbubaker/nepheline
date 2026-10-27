@@ -336,6 +336,7 @@ something it shows changes.
 | `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets (a mesh with levels of detail: its cut for the level, below): a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
+| `vsm voxel splat`, `vsm voxel merge` | while the renderer holds voxel meshes: the voxel clusters' casters splatted into a depth image of their own, a workgroup per (cluster, page), then taken into the pages drawn, whose depth test keeps the nearer of theirs and the triangles' ("Voxel casters", below) |
 | `vsm statistics` | the counters, read back two frames later |
 
 **Requests.** A pixel asks for the level whose texels match its footprint
@@ -414,6 +415,38 @@ Bistro's street, cooked with levels) the map draws a page or a few a frame,
 and nothing measurable changes: the culls within a microsecond, the frames
 within the runs' spread (interleaved, -0.011 and +0.008 ms in Bistro). The
 tables hold about 1.2 entries a cluster (367 for the test torus's 297).
+
+**Voxel casters.** A mesh's cuts hold its voxel clusters too (ADR-0061,
+stage 4), and `vsm cull meshlets` sends their draws to a list of their own
+(`max_vsm_voxel_draws`, in a buffer made with the first voxel mesh, as the
+casters' depths are). `vsm voxel splat` (`vsm_voxel_splat.comp`) takes a
+workgroup a draw, as the visibility buffer's voxel raster takes a cluster:
+each voxel projects its footprint's box to the page's texel centres it may
+cover, from steps along its brick's grid in the level's frame, a subgroup
+pools its voxels' texels, and each texel's ray, the sun's through its
+centre from its brick's corner's light-space depth, is tested against that
+voxel alone (`vis_voxel_hit`). The hit's depth takes the atomic minimum of
+the texel in an R32 image laid out as the pool, which, a depth attachment,
+takes no atomics. `vsm voxel merge` then draws the clear's quad over each
+page drawn: a texel a voxel cast on takes its depth, which the depth test
+keeps where it is nearer than the triangles', and every texel of the page
+is reset for the next time. Each ray starts at its texel's centre in the
+level's frame, exactly (an integer and a half texels from its page's
+corner), so the map holds what the CPU's rays through the same clusters
+meet: over a grid of 25 turned foliage meshes, every one of 2,325 texels,
+its depth within 0.0005 of a texel. Against level 0 the voxels cover 7.8 %
+fewer of the map's texels, and the floor below loses 6.3 % less light to
+their shadow, where the stalled triangle levels the map drew before lost
+10.6 % (`test_vsm.c`). With the sun moving every frame over `render_perf`'s
+foliage (`foliage_shadows_sun_4k_production`, about 830 pages drawn again
+each frame) the casters take 12.2 ms (the triangles' raster 7.6, the
+splat 4.1, the merge 0.4) where the stalled triangles took 16.9, and the
+frame 20.0 ms where it took 24.7; with the camera walking
+(`foliage_shadows_walk_4k_production`) the map's passes are within a few
+microseconds of before. Frames without voxel meshes bind the cull and the
+page passes specialised without the voxels' routing and arguments
+(`k_voxels`), and keep the work buffer as it was. The depths image is the
+pool's size in R32 (134 MB for the default 2,048 pages), the list 16 MB.
 
 **Shading.** The resolve and the blended surfaces look the sun's
 visibility up once per point, before the light loop (inside it, the
@@ -637,15 +670,14 @@ landscape's pine sapling stops at 95,716 triangles in 1,539 clusters, and a
 forest of them drawn at that level overflows every list. Given a material
 sampler, the builder makes such groups voxels instead (ADR-0061;
 `render/voxel.h`, `cluster_voxel.c`), as Nanite's foliage does (Epic,
-"Nanite Foliage", UE 5.7). ADR-0061's first three stages are in: the
-voxels, their levels, the traversal and the shading model's terms on the
-CPU; the mesh format (docs/asset.md) and the cooker's material sampler
-(docs/cook.md, `--voxels`); and the production path's voxel raster and
-resolve (below). The cooker makes voxels only when asked until the raster
-draws the reference scenes' foliage faster than their stalled triangles
-("Measured on the GPU"). The sun's shadow map draws voxel casters
-from the fourth stage on: until then its cuts end below the first that holds
-a voxel cluster, and the coarser shadows keep the stalled triangles.
+"Nanite Foliage", UE 5.7). ADR-0061's first four stages are in: the
+voxels, their levels, the voxels' tests and the shading model's terms on
+the CPU; the mesh format (docs/asset.md) and the cooker's material sampler
+(docs/cook.md, `--voxels`); the production path's voxel raster and resolve
+(below); and the sun's shadow map's voxel casters ("Voxel casters" under
+"The sun's virtual shadow map"). The cooker makes voxels only when asked
+until the raster draws the reference scenes' foliage faster than their
+stalled triangles ("Measured on the GPU").
 
 **The records.** A voxel cluster is a cluster whose meshlet record has no
 vertices: `triangle_count` bricks from `vertex_offset`, at most 32 bricks
