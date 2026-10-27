@@ -71,8 +71,9 @@ nph_add_test(render
     DEPS
         nph::render
     # On lavapipe in Debug with sanitizers every test pays seconds of device
-    # and renderer setup: four CTest entries keep the suite under the timeout.
-    SHARDS 4
+    # and renderer setup: six CTest entries keep the suite under the timeout
+    # (four took 460 to 600 s each once the voxel shadow tests came).
+    SHARDS 6
 )
 if(NPH_BUILD_TESTS)
     # White-box tests read the renderer's internal images; the gpu tests'
