@@ -33,13 +33,17 @@
 #define NPH_VIS_CLUSTER_DOUBLE_SIDED 2
 #define NPH_VIS_CLUSTER_MASKED       4
 #define NPH_VIS_CLUSTER_MOVED        8 // its instance's NPH_VIS_INSTANCE_MOVED
+// A voxel cluster (render/voxel.h; ADR-0061): its meshlet record has no
+// vertices, and its pixels are the voxel resolve's (vis_voxel_resolve.glsl).
+#define NPH_VIS_CLUSTER_VOXELS 16
 
 // The visibility buffer: 64 bits per pixel, the depth's IEEE bits high
 // (reverse-Z, so the largest value is the nearest and atomicMax is the
 // depth test), then the visible cluster's index and the triangle within
-// its meshlet (Burns & Hunt, "The Visibility Buffer", JCGT 2013; the
-// packing of Karis et al., "Nanite: A Deep Dive", SIGGRAPH 2021). Zero is
-// "nothing drawn": the far plane, which no surface reaches.
+// its meshlet, or for a voxel cluster the brick within it (Burns & Hunt,
+// "The Visibility Buffer", JCGT 2013; the packing of Karis et al.,
+// "Nanite: A Deep Dive", SIGGRAPH 2021). Zero is "nothing drawn": the far
+// plane, which no surface reaches.
 #define NPH_VIS_TRIANGLE_BITS 7
 #define NPH_VIS_TRIANGLE_MASK 127
 #define NPH_VIS_MAX_CLUSTERS  33554432 // 2^25
@@ -67,7 +71,12 @@
 #define NPH_VIS_RASTER_MASKED   1 // hardware, alpha tested
 #define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
 #define NPH_VIS_RASTER_SKIN     3 // hardware, alpha tested, the front of its instance (mesh path)
-#define NPH_VIS_RASTER_KINDS    4
+#define NPH_VIS_RASTER_VOXEL    4 // compute (vis_voxel_raster.comp): voxel clusters (ADR-0061)
+#define NPH_VIS_RASTER_KINDS    5
+
+// The resolve's tiles of pixels (vis_resolve.glsl, a workgroup each): a tile
+// that holds a voxel pixel is listed for the voxel resolve.
+#define NPH_VIS_RESOLVE_TILE 8
 
 // The depth pyramid after phase 1 rebuilds only the tiles of this many
 // pixels square that phase 1 drew into (vis_hzb.comp mode 2).
@@ -210,12 +219,17 @@ NPH_SHARED_STRUCT(NphVisMesh)
     i32 lod_cut_exp0;
     u64 lod_cuts;
     u32 lod_cut_count;
-    // To 192 bytes: a record's stride stays a multiple of 16, the alignment
+    u32 lod_pad0;
+    // Its voxel clusters' bricks (NphRenderVoxelBrick[], two uvec4 each) and
+    // voxels (NphRenderVoxel[], a uvec4 each; render/voxel.h), 0 without: a
+    // voxel cluster's record names its first brick and their count.
+    u64 voxel_bricks;
+    u64 voxels;
+    // To 208 bytes: a record's stride stays a multiple of 16, the alignment
     // every buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF),
     // which the resolve's VisMeshRef(...)[i] assumes of each record. Not an
     // array: shaders copy the record, and glslang 14 gives a copy of a struct
     // with an array member the buffer's array type (docs/build.md "Shaders").
-    u32 lod_pad0;
     u32 lod_pad1;
     u32 lod_pad2;
 };
@@ -244,14 +258,18 @@ NPH_SHARED_STRUCT(NphVisDraw)
 // written).
 NPH_SHARED_STRUCT(NphVisArgs)
 {
-    u32 cull_args[2][4];      // meshlet cull per phase: x, y, z, unused
-    u32 instance2_args[4];    // phase 1's cull of the instances phase 0 deferred
-    u32 raster_args[2][4][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or compute groups
-    u32 light_tile_args[4];   // the light masks: tile groups in x and y, light words in z
+    u32 cull_args[2][4];                         // meshlet cull per phase: x, y, z, unused
+    u32 instance2_args[4];                       // phase 1's cull of the instances phase 0 deferred
+    u32 raster_args[2][NPH_VIS_RASTER_KINDS][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or
+                                                 // compute groups
+    u32 light_tile_args[4]; // the light masks: tile groups in x and y, light words in z
     // A hierarchy step from each queue: workgroups in x, raised by whatever
     // fills the queue (the instance cull, the step before), and 1 in y and
     // z (vis clear writes them).
     u32 lod_node_args[NPH_VIS_LOD_QUEUES][4];
+    // The voxel resolve: a workgroup per listed tile in x, raised as the
+    // resolve lists them, and 1 in y and z (vis clear writes them).
+    u32 voxel_resolve_args[4];
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -262,12 +280,12 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 deferred_meshlets;  // phase 1's meshlet candidates: those phase 0 deferred, then the
                             // meshlets of deferred instances phase 1 found visible
     u32 clusters;           // visible clusters, phase 0's first
-    u32 raster_count[2][4]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
-    u32 overflow;           // NPH_VIS_OVERFLOW_*
-    u32 hzb_full;           // nonzero: phase 1 drew something no tile list bounds, so the
-                            // pyramid after it rebuilds every tile
-    u32 lights_global;      // NphRenderLightGrid.counts: lights that reach every pixel
-    u32 lights_local;       // and the others in view
+    u32 raster_count[2][NPH_VIS_RASTER_KINDS]; // [phase][NPH_VIS_RASTER_*]: clusters to rasterise
+    u32 overflow;                              // NPH_VIS_OVERFLOW_*
+    u32 hzb_full;      // nonzero: phase 1 drew something no tile list bounds, so the
+                       // pyramid after it rebuilds every tile
+    u32 lights_global; // NphRenderLightGrid.counts: lights that reach every pixel
+    u32 lights_local;  // and the others in view
     // Statistics, read back two frames later.
     u32 instances_culled_frustum;
     u32 instances_culled_occlusion; // after phase 2
@@ -283,6 +301,10 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // replaced (their maker's error too large).
     u32 lod_nodes_visited;
     u32 lod_clusters_culled;
+    // The resolve's tiles listed for the voxel resolve, and statistics: the
+    // visible voxel clusters' bricks.
+    u32 voxel_tiles;
+    u32 voxel_bricks;
 };
 
 // The production path's view of a frame.
@@ -323,22 +345,22 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 deferred_instances; // u32[]
     u64 deferred_meshlets;  // uvec2[] (instance, meshlet): phase 1's meshlet candidates
     u64 clusters;           // NphVisCluster[]
-    u64 raster_lists[2][4]; // u32[] of cluster indices: [phase][NPH_VIS_RASTER_*]
-    u64 draws[2][2];        // NphVisDraw[]: the hardware kinds, for the indirect raster
-    u64 hzb_dirty;          // u32[]: a bit per NPH_VIS_HZB_TILE tile phase 1 drew into
-    u64 lights;             // NphVisLight[]
-    u64 light_updates;      // NphVisLightUpdate[] of this frame
-    u64 light_grid;         // NphRenderLightGrid: what the shading reads
-    u64 light_histogram;    // u32[NPH_RENDER_ZBINS]: local lights per nearest-distance bin
-    u64 light_visible;      // uvec4[]: per local light in view, its bins (nearest | farthest <<
-                            // 16), then its tiles (x0 | y0 << 16, x1 | y1 << 16)
-    u64 light_staged;       // NphRenderLightData[]: those lights, camera relative, unsorted
-    u64 light_rects;        // uvec2[]: their tiles, sorted like the grid's locals
-    u64 light_depths;       // uvec2[] per light tile, row by row (vis_hzb.comp): x the bits of
-                            // its surfaces' farthest (least) depth, NPH_VIS_NO_SURFACE for
-                            // none; y their nearest's, bit 31 set where the background shows
-                            // (reverse-Z depths are positive, below 2: bit 31 is free)
-    u32 instance_count;     // slots the instance cull walks
+    u64 raster_lists[2][NPH_VIS_RASTER_KINDS]; // u32[] of cluster indices: [phase][kind]
+    u64 draws[2][2];     // NphVisDraw[]: the hardware kinds, for the indirect raster
+    u64 hzb_dirty;       // u32[]: a bit per NPH_VIS_HZB_TILE tile phase 1 drew into
+    u64 lights;          // NphVisLight[]
+    u64 light_updates;   // NphVisLightUpdate[] of this frame
+    u64 light_grid;      // NphRenderLightGrid: what the shading reads
+    u64 light_histogram; // u32[NPH_RENDER_ZBINS]: local lights per nearest-distance bin
+    u64 light_visible;   // uvec4[]: per local light in view, its bins (nearest | farthest <<
+                         // 16), then its tiles (x0 | y0 << 16, x1 | y1 << 16)
+    u64 light_staged;    // NphRenderLightData[]: those lights, camera relative, unsorted
+    u64 light_rects;     // uvec2[]: their tiles, sorted like the grid's locals
+    u64 light_depths;    // uvec2[] per light tile, row by row (vis_hzb.comp): x the bits of
+                         // its surfaces' farthest (least) depth, NPH_VIS_NO_SURFACE for
+                         // none; y their nearest's, bit 31 set where the background shows
+                         // (reverse-Z depths are positive, below 2: bit 31 is free)
+    u32 instance_count;  // slots the instance cull walks
     u32 max_cull_meshlets;
     u32 max_deferred;
     u32 max_clusters;
@@ -362,6 +384,13 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 max_lod_nodes;
     u32 lod_pad0;
     NphVec4 lod;
+    // Voxels: the resolve's tiles that hold voxel pixels (u32[], x | y << 16,
+    // as many as the target has tiles), a bit per tile set as it is listed
+    // (u32[], cleared by vis clear), and the tiles a row.
+    u64 voxel_tiles;
+    u64 voxel_tile_bits;
+    u32 resolve_tiles_x;
+    u32 voxel_pad0;
 };
 
 // Push constants of every production-path shader. The visibility buffer
@@ -467,6 +496,37 @@ NPH_SHARED_STRUCT(NphVisMathPush)
     u64 view;    // NphVisViewData: frustum, viewport, projection, hzb, hzb_index
     u64 cases;   // NphVisMathCase[]
     u64 results; // NphVisMathResult[]
+    u32 count;
+    u32 pad0;
+};
+
+// The voxel traversal against its C twin (render_tests, vis_voxel_test.comp,
+// render/voxel.h nph_render_voxel_trace): one ray per invocation, through
+// one brick.
+NPH_SHARED_STRUCT(NphVisVoxelCase)
+{
+    NphVec4 origin; // xyz, mesh space; w: t_min
+    NphVec4 dir;    // xyz; w: t_max
+    u32 brick;      // index into the bricks
+    u32 pad0;
+    u32 pad1;
+    u32 pad2;
+};
+
+NPH_SHARED_STRUCT(NphVisVoxelResult)
+{
+    f32 t;
+    u32 voxel;
+    u32 cell;
+    u32 face; // the face | 256 when the ray met a voxel
+};
+
+NPH_SHARED_STRUCT(NphVisVoxelPush)
+{
+    u64 cases;   // NphVisVoxelCase[]
+    u64 results; // NphVisVoxelResult[]
+    u64 bricks;  // NphRenderVoxelBrick[]
+    u64 voxels;  // NphRenderVoxel[]
     u32 count;
     u32 pad0;
 };

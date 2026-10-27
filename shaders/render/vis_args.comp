@@ -42,9 +42,10 @@ void main()
         const uint p = pc.mode == NPH_VIS_ARGS_RASTER1 ? 0u : 1u;
         for (uint k = 0u; k < uint(NPH_VIS_RASTER_KINDS); ++k) {
             // A mesh-task workgroup per hardware cluster, a compute
-            // workgroup per software one.
-            const uint max_x =
-                k == uint(NPH_VIS_RASTER_SOFTWARE) ? VIS_MAX_GROUPS_X : max_mesh_x;
+            // workgroup per software or voxel one.
+            const bool compute =
+                k == uint(NPH_VIS_RASTER_SOFTWARE) || k == uint(NPH_VIS_RASTER_VOXEL);
+            const uint max_x = compute ? VIS_MAX_GROUPS_X : max_mesh_x;
             const uvec4 a = groups(counters.c.raster_count[p][k], max_x);
             args.a.raster_args[p][k] = uint[4](a.x, a.y, a.z, a.w);
         }

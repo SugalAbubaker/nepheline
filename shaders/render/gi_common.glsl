@@ -204,4 +204,22 @@ vec3 gi_random(uvec3 seed)
     return vec3(gi_pcg3d(seed) >> 8u) * (1.0 / 16777216.0);
 }
 
+// The cache's cell holding the surface point `p` (camera relative) of
+// geometric normal `face` (either way round: the cells are keyed by the
+// side the camera sees, as the update keys them), at a random point of the
+// cell under temporal anti-aliasing, which averages them (gi_jitter): its
+// irradiance and trust (gi_cell), zero where the cache has none. The
+// resolves look their pixels up with it (vis_resolve.glsl,
+// vis_voxel_resolve.glsl).
+vec4 gi_surface_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
+{
+    const vec3 n = dot(face, p) > 0.0 ? -face : face;
+    vec3 at = p;
+    if (g.g.jitter != 0u) {
+        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
+    }
+    const uint slot = gi_find(g, gi_key(g, at, n));
+    return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
+}
+
 #endif

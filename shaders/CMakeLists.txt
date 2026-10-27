@@ -103,12 +103,17 @@ nph_add_shaders(nph_shaders_render
         render/vsm_clear.vert
         render/vsm_request.frag
         render/vis_sw_raster.comp
+        render/vis_voxel_raster.comp
+        render/vis_voxel_resolve.comp
+        render/vis_voxel_resolve_rt.comp
         render/vis_lights.comp
         render/vis_light_bins.comp
         render/vis_light_tiles.comp
         render/vis_debug_line.frag
         # The culling math for the render tests (render/reference.h twins).
         render/vis_math_test.comp
+        # The voxel traversal for the render tests (render/voxel.h's twin).
+        render/vis_voxel_test.comp
         # The depth pyramid's block requests against each pixel's (render tests).
         render/vsm_request_test.comp
 )

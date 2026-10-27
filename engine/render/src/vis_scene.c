@@ -35,8 +35,13 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 192U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 208U, "NphVisMesh matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_cuts) % 8U == 0U, "addresses are aligned");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, voxel_bricks) % 8U == 0U &&
+                      offsetof(NphVisMesh, voxels) % 8U == 0U,
+                  "addresses are aligned");
+NPH_STATIC_ASSERT(sizeof(NphRenderVoxelBrick) == 32U && sizeof(NphRenderVoxel) == 16U,
+                  "the voxels match vis_voxel.glsl's two uvec4 a brick and one a voxel");
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) % 16U == 0U,
                   "a mesh record's stride keeps each record at the 16 bytes buffer references "
                   "declare (the resolve indexes them as VisMeshRef(...)[i])");
@@ -332,6 +337,38 @@ static NphResult build_meshlets(NphRenderer *r, const NphRenderMeshDesc *d, NphR
     return res;
 }
 
+// Until the sun's shadow map draws voxel casters (ADR-0061, stage 4), its
+// cuts end below the first that holds a voxel cluster: from that threshold on
+// it draws the last cut of triangles alone, the stalled levels it drew before
+// voxels. `table` is rewritten in place (nph_render_lod_cuts's layout) and
+// `*count` lowered; no cut left (voxels right above level 0) leaves the shadow
+// map level 0.
+static void cuts_without_voxels(const NphRenderMeshDesc *d, NphArrayU32 *table, u32 *count)
+{
+    u32 keep = 0U;
+    bool voxels = false;
+    while (keep < *count && !voxels) {
+        for (u32 e = table->data[keep]; e < table->data[keep + 1U] && !voxels; ++e) {
+            voxels = d->meshlets[table->data[e]].vertex_count == 0U;
+        }
+        keep += voxels ? 0U : 1U;
+    }
+    if (keep == *count) {
+        return;
+    }
+    // keep + 1 offsets, then the kept cuts' entries, which end where the
+    // first dropped cut starts.
+    const u32 header = *count + 1U;
+    const u32 shift = header - (keep + 1U);
+    const u32 end = table->data[keep];
+    for (u32 i = 0; i <= keep; ++i) {
+        table->data[i] -= shift;
+    }
+    memmove(&table->data[keep + 1U], &table->data[header], (size_t)(end - header) * sizeof(u32));
+    table->len = end - shift;
+    *count = keep;
+}
+
 // A mesh's levels of detail (NphVisMesh.lod_*): the hierarchy, the groups,
 // their clusters, and each cluster's maker.
 static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d,
@@ -372,14 +409,27 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
     NphResult cuts =
         nph_render_lod_cuts(d->cluster_lods, d->meshlet_count, d->lod_groups, d->lod_group_count,
                             NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0, &count, &table);
-    if (cuts == NPH_RESULT_OK) {
+    if (cuts == NPH_RESULT_OK && d->voxel_bricks != NULL) {
+        cuts_without_voxels(d, &table, &count);
+    }
+    if (cuts == NPH_RESULT_OK && count != 0U) {
         cuts = upload_stream(r, table.data, NPH_ARRAY_BYTES(&table), "mesh lod cuts", &m->lod_cuts);
     }
     NPH_ARRAY_FREE(&table);
     NPH_TRY(cuts);
     rec->lod_cut_exp0 = exp0;
     rec->lod_cut_count = count;
-    rec->lod_cuts = nph_gpu_buffer_address(r->dev, m->lod_cuts);
+    rec->lod_cuts = count != 0U ? nph_gpu_buffer_address(r->dev, m->lod_cuts) : 0U;
+    // The voxel clusters' bricks and voxels (vis_voxel.glsl).
+    if (d->voxel_bricks != NULL && d->voxel_brick_count != 0U) {
+        NPH_TRY(upload_stream(r, d->voxel_bricks,
+                              (u64)d->voxel_brick_count * sizeof(NphRenderVoxelBrick),
+                              "mesh voxel bricks", &m->voxel_bricks));
+        NPH_TRY(upload_stream(r, d->voxels, (u64)d->voxel_count * sizeof(NphRenderVoxel),
+                              "mesh voxels", &m->voxels));
+        rec->voxel_bricks = nph_gpu_buffer_address(r->dev, m->voxel_bricks);
+        rec->voxels = nph_gpu_buffer_address(r->dev, m->voxels);
+    }
     // Without the levels (a view at threshold 0, the shadow map's pages),
     // the mesh draws level 0's meshlets.
     rec->meshlet_count = d->lod_level0_meshlets;
@@ -483,6 +533,10 @@ NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDe
             m->lod_depth = lod_depth;
             r->vis.lod_depths[lod_depth - 1U] += 1U;
         }
+        if (d->voxel_bricks != NULL && d->voxel_brick_count != 0U) {
+            m->voxels_counted = 1;
+            r->vis.voxel_meshes += 1U;
+        }
         return NPH_RESULT_OK;
     }
     NphRenderMeshlets built;
@@ -510,6 +564,8 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->lod_group_clusters);
     nph_gpu_buffer_destroy(r->dev, m->lod_makers);
     nph_gpu_buffer_destroy(r->dev, m->lod_cuts);
+    nph_gpu_buffer_destroy(r->dev, m->voxel_bricks);
+    nph_gpu_buffer_destroy(r->dev, m->voxels);
     m->meshlets = NPH_GPU_BUFFER_NULL;
     m->meshlet_bounds = NPH_GPU_BUFFER_NULL;
     m->meshlet_vertices = NPH_GPU_BUFFER_NULL;
@@ -520,9 +576,15 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     m->lod_group_clusters = NPH_GPU_BUFFER_NULL;
     m->lod_makers = NPH_GPU_BUFFER_NULL;
     m->lod_cuts = NPH_GPU_BUFFER_NULL;
+    m->voxel_bricks = NPH_GPU_BUFFER_NULL;
+    m->voxels = NPH_GPU_BUFFER_NULL;
     if (m->lod_depth != 0U) {
         r->vis.lod_depths[m->lod_depth - 1U] -= 1U;
         m->lod_depth = 0U;
+    }
+    if (m->voxels_counted) {
+        r->vis.voxel_meshes -= 1U;
+        m->voxels_counted = 0;
     }
     if (r->vis.supported) {
         free_later(r, 1U, m->index_range);

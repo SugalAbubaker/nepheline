@@ -171,6 +171,11 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_makers;
     NphGpuBuffer lod_cuts; // the shadow map's cuts (NphVisMesh.lod_cuts)
     u32 lod_depth;
+    // Its voxel clusters' bricks and voxels (NphVisMesh.voxel_bricks, voxels;
+    // null buffers without), and whether RenderVis.voxel_meshes counts it.
+    NphGpuBuffer voxel_bricks;
+    NphGpuBuffer voxels;
+    b32 voxels_counted;
 } RenderMesh;
 
 typedef struct RenderMaterial {
@@ -384,6 +389,9 @@ typedef enum VisShader {
     VIS_SHADER_DEBUG_LINE,
     VIS_SHADER_HZB_MIPS,
     VIS_SHADER_CULL_NODES,
+    VIS_SHADER_VOXEL_RASTER,
+    VIS_SHADER_VOXEL_RESOLVE,
+    VIS_SHADER_VOXEL_RESOLVE_RT, // where the device has ray queries
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -399,7 +407,8 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHTS,
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
-    VIS_COMPUTE_CULL_NODES, // a step down the levels of detail's hierarchies
+    VIS_COMPUTE_CULL_NODES,   // a step down the levels of detail's hierarchies
+    VIS_COMPUTE_VOXEL_RASTER, // voxel clusters (ADR-0061)
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both
@@ -457,6 +466,8 @@ typedef struct VisFrame {
     NphGpuRgBuffer light_tiles;
     NphGpuRgBuffer light_depths;
     NphGpuRgBuffer tlas; // the frame's top level, when it traces shadow rays
+    NphGpuRgBuffer voxel_tiles;
+    NphGpuRgBuffer voxel_tile_bits;
     // The GPU scene's tables in the graph, for the temporal resolve's motion.
     NphGpuRgBuffer instances;
     NphGpuRgBuffer prev_transforms;
@@ -500,6 +511,10 @@ typedef struct RenderVis {
     // levels (lod_depths[d - 1]: those of d): the frame takes as many steps
     // as the deepest needs.
     u32 lod_depths[RENDER_LOD_MAX_DEPTH];
+    // The live meshes with voxel levels (ADR-0061). Without any, a frame
+    // adds none of the voxel passes and resolves with the variants compiled
+    // without the voxel test (frame_voxels, resolve_voxels).
+    u32 voxel_meshes;
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
 
@@ -546,6 +561,14 @@ typedef struct RenderVis {
     u32 hzb_tiles_x;
     u32 hzb_tiles_y;
     b32 hzb_full_rebuild; // tests: rebuild the whole pyramid after phase 1 too
+    // The resolve's tiles that hold voxel pixels, listed for the voxel
+    // resolve (NphVisViewData.voxel_tiles), and a bit per tile, by the
+    // target's resolve tiles: made for the first frame with voxel meshes
+    // (null before), dropped with the HZB when the target's size changes.
+    NphGpuBuffer voxel_tiles;
+    NphGpuBuffer voxel_tile_bits;
+    u32 resolve_tiles_x;
+    u32 resolve_tiles_y;
     // That frame's view, for phase 0's tests against its HZB (and its
     // projection without the jitter, for the temporal resolve's motion).
     NphMat4 prev_view;
@@ -567,7 +590,19 @@ typedef struct RenderVis {
     NphVisResolvePush resolve_push;
     // The resolve's variants for debug views (vis_resolve.glsl k_debug), as
     // compute[]'s: [ray-traced shadows][virtual shadow map][radiance cache].
+    // They test for voxel pixels (k_voxels) whether there are any or not.
     NphGpuPipeline resolve_debug[2][2][2];
+    // compute[]'s resolves with the voxel test (k_voxels), for frames that
+    // may draw voxel clusters: the test alone, never taken, costs the
+    // triangles' path 0.5 to 1.7 % of the resolve where compiled in.
+    NphGpuPipeline resolve_voxels[2][2][2];
+    // compute[VIS_COMPUTE_CULL_MESHLETS] with the voxel clusters' routing
+    // (vis_cull_meshlets.comp k_voxels), for the same frames.
+    NphGpuPipeline cull_meshlets_voxels;
+    b32 frame_voxels; // this frame may draw voxel clusters (voxel_meshes)
+    // The voxel resolve's (vis_voxel_resolve.glsl): [debug views][ray-traced
+    // shadows][virtual shadow map][radiance cache].
+    NphGpuPipeline voxel_resolve[2][2][2][2];
     b32 debug_view; // this frame's view draws a debug view
 } RenderVis;
 

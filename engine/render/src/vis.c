@@ -15,13 +15,15 @@
 //                         the meshes' levels of detail has levels; none
 //                         without them)
 //   vis args, vis cull meshlets 0, vis args, vis raster 0 (hardware), vis sw
-//                         raster 0 (small clusters, in compute)
+//                         raster 0 (small clusters, in compute), vis voxel
+//                         raster 0 (voxel clusters, ADR-0061)
 //   vis hzb 0             this frame's depth so far
 //   vis args, vis cull instances 1, vis args, vis cull nodes 1 (the
 //                         hierarchies of instances now visible), vis args,
 //                         vis cull meshlets 1 (the meshlets phase 0
 //                         deferred, then those of instances now visible),
-//                         vis args, vis raster 1, vis sw raster 1
+//                         vis args, vis raster 1, vis sw raster 1, vis voxel
+//                         raster 1
 //   vis hzb 1             the frame's depth: next frame's phase 0 tests it
 //   vsm ...               the sun's virtual shadow map (vsm.c), its page
 //                         requests made by the vis hzb passes (and, with
@@ -31,7 +33,9 @@
 //                         the ambient occlusion (ao.c), from the depths the
 //                         vis hzb passes took for it
 //   rt ...                shadow rays' top level (rt.c)
-//   vis resolve           shading into the HDR image
+//   vis resolve           shading into the HDR image, listing the tiles that
+//                         hold voxel pixels
+//   vis voxel resolve     those tiles' voxel pixels (an indirect dispatch)
 //   transparent           blended surfaces, forward, testing the visibility
 //                         buffer's depth themselves (only with blended
 //                         surfaces)
@@ -52,7 +56,8 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 920U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 960U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisViewData, voxel_tiles) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, lod_queue) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
 NPH_STATIC_ASSERT(NPH_RENDER_MAX_LIGHTS <= 65535, "light indices fit 16 bits");
@@ -86,6 +91,9 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_debug_line.frag",
     "vis_hzb_mips.comp",
     "vis_cull_nodes.comp",
+    "vis_voxel_raster.comp",
+    "vis_voxel_resolve.comp",
+    "vis_voxel_resolve_rt.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
@@ -95,10 +103,10 @@ static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_RESOLVE,       VIS_SHADER_SW_RASTER,
     VIS_SHADER_LIGHTS,        VIS_SHADER_LIGHT_BINS,
     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_CULL_NODES,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_VOXEL_RASTER,  VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -114,6 +122,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis light bins",
     "vis light tiles",
     "vis cull nodes",
+    "vis voxel raster",
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
@@ -247,8 +256,10 @@ NphResult render_vis_create(NphRenderer *r)
         // Only the raster path in use: a mesh shader cannot even be loaded
         // on a device without the extension, nor the ray-traced resolve on
         // one without ray queries.
+        const bool ray_queries =
+            i == (u32)VIS_SHADER_RESOLVE_RT || i == (u32)VIS_SHADER_VOXEL_RESOLVE_RT;
         if ((mesh_stage && !v->mesh_shaders) || (vertex_stage && v->mesh_shaders) ||
-            (i == (u32)VIS_SHADER_RESOLVE_RT && !r->rt.supported)) {
+            (ray_queries && !r->rt.supported)) {
             continue;
         }
         NPH_TRY(render_load_shader_file(r, k_shader_files[i], &v->shaders[i]));
@@ -275,16 +286,56 @@ NphResult render_vis_create(NphRenderer *r)
             d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
             d.specialization[1] = resolve_vsm ? 1U : 0U;
             d.specialization[2] = resolve_gi ? 1U : 0U;
-            d.specialization_count = 4U;
+            d.specialization_count = 5U;
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         render_log_statistics(r, v->compute[i], k_compute_names[i]);
+        if (i == (u32)VIS_COMPUTE_CULL_MESHLETS) {
+            // With the voxel clusters' routing (vis_cull_meshlets.comp
+            // k_voxels).
+            d.specialization[0] = 1U;
+            d.specialization_count = 1U;
+            NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->cull_meshlets_voxels));
+        }
         if (i == (u32)VIS_COMPUTE_RESOLVE || resolve_rt || resolve_vsm || resolve_gi) {
-            // The same for the debug views (k_debug).
+            // The same with the voxel test (k_voxels), and for the debug
+            // views (k_debug), which always have it.
+            const u32 rt_i = resolve_rt ? 1U : 0U;
+            const u32 vsm_i = resolve_vsm ? 1U : 0U;
+            const u32 gi_i = resolve_gi ? 1U : 0U;
+            d.specialization[4] = 1U;
+            NPH_TRY(
+                nph_gpu_pipeline_create_compute(r->dev, &d, &v->resolve_voxels[rt_i][vsm_i][gi_i]));
+            char name[96];
+            (void)snprintf(name, sizeof name, "%s with the voxel test", k_compute_names[i]);
+            render_log_statistics(r, v->resolve_voxels[rt_i][vsm_i][gi_i], name);
             d.specialization[3] = 1U;
-            NPH_TRY(nph_gpu_pipeline_create_compute(
-                r->dev, &d,
-                &v->resolve_debug[resolve_rt ? 1 : 0][resolve_vsm ? 1 : 0][resolve_gi ? 1 : 0]));
+            NPH_TRY(
+                nph_gpu_pipeline_create_compute(r->dev, &d, &v->resolve_debug[rt_i][vsm_i][gi_i]));
+        }
+    }
+    // The voxel resolve's variants, specialised as the resolve's.
+    for (u32 i = 0; i < 16U; ++i) {
+        const u32 debug = i >> 3U;
+        const u32 rt = (i >> 2U) & 1U;
+        const u32 map = (i >> 1U) & 1U;
+        const u32 gi_on = i & 1U;
+        if ((rt != 0U && !r->rt.supported) || (map != 0U && !vsm) || (gi_on != 0U && !gi)) {
+            continue;
+        }
+        NphGpuComputePipelineDesc d;
+        memset(&d, 0, sizeof d);
+        d.shader = v->shaders[rt != 0U ? VIS_SHADER_VOXEL_RESOLVE_RT : VIS_SHADER_VOXEL_RESOLVE];
+        d.name = "vis voxel resolve";
+        d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
+        d.specialization[1] = map;
+        d.specialization[2] = gi_on;
+        d.specialization[3] = debug;
+        d.specialization_count = 4U;
+        NPH_TRY(
+            nph_gpu_pipeline_create_compute(r->dev, &d, &v->voxel_resolve[debug][rt][map][gi_on]));
+        if (debug == 0U) {
+            render_log_statistics(r, v->voxel_resolve[0][rt][map][gi_on], d.name);
         }
     }
     if (v->mesh_shaders) {
@@ -336,13 +387,21 @@ void render_vis_destroy(NphRenderer *r)
     render_vis_scene_destroy(r);
     nph_gpu_image_destroy(dev, v->hzb);
     nph_gpu_buffer_destroy(dev, v->hzb_dirty);
+    nph_gpu_buffer_destroy(dev, v->voxel_tiles);
+    nph_gpu_buffer_destroy(dev, v->voxel_tile_bits);
     nph_gpu_buffer_destroy(dev, v->light_tiles);
     nph_gpu_buffer_destroy(dev, v->light_depths);
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
     }
+    nph_gpu_pipeline_destroy(dev, v->cull_meshlets_voxels);
     for (u32 i = 0; i < 8U; ++i) {
         nph_gpu_pipeline_destroy(dev, v->resolve_debug[i >> 2U][(i >> 1U) & 1U][i & 1U]);
+        nph_gpu_pipeline_destroy(dev, v->resolve_voxels[i >> 2U][(i >> 1U) & 1U][i & 1U]);
+    }
+    for (u32 i = 0; i < 16U; ++i) {
+        nph_gpu_pipeline_destroy(dev,
+                                 v->voxel_resolve[i >> 3U][(i >> 2U) & 1U][(i >> 1U) & 1U][i & 1U]);
     }
     nph_gpu_pipeline_destroy(dev, v->raster[0]);
     nph_gpu_pipeline_destroy(dev, v->raster[1]);
@@ -409,10 +468,14 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     }
     nph_gpu_image_destroy(r->dev, v->hzb); // deferred past the frames in flight
     nph_gpu_buffer_destroy(r->dev, v->hzb_dirty);
+    nph_gpu_buffer_destroy(r->dev, v->voxel_tiles);
+    nph_gpu_buffer_destroy(r->dev, v->voxel_tile_bits);
     nph_gpu_buffer_destroy(r->dev, v->light_tiles);
     nph_gpu_buffer_destroy(r->dev, v->light_depths);
     v->hzb = NPH_GPU_IMAGE_NULL;
     v->hzb_dirty = NPH_GPU_BUFFER_NULL;
+    v->voxel_tiles = NPH_GPU_BUFFER_NULL;
+    v->voxel_tile_bits = NPH_GPU_BUFFER_NULL;
     v->light_tiles = NPH_GPU_BUFFER_NULL;
     v->light_depths = NPH_GPU_BUFFER_NULL;
     v->hzb_valid = 0;
@@ -461,6 +524,33 @@ static NphResult ensure_hzb(NphRenderer *r, u32 width, u32 height)
     return nph_gpu_buffer_create(r->dev, &bd, &v->hzb_dirty);
 }
 
+// The resolve's tiles that hold voxel pixels (as many as it has tiles) and a
+// bit each, made for the first frame that may draw voxel clusters at this
+// size (ensure_hzb drops them with the size) and kept after.
+static NphResult ensure_voxel_tiles(NphRenderer *r, u32 width, u32 height)
+{
+    RenderVis *v = &r->vis;
+    if (!v->frame_voxels || !nph_gpu_buffer_is_null(v->voxel_tiles)) {
+        return NPH_RESULT_OK;
+    }
+    nph_gpu_buffer_destroy(r->dev, v->voxel_tile_bits);
+    v->voxel_tile_bits = NPH_GPU_BUFFER_NULL;
+    v->resolve_tiles_x = (width + (u32)NPH_VIS_RESOLVE_TILE - 1U) / (u32)NPH_VIS_RESOLVE_TILE;
+    v->resolve_tiles_y = (height + (u32)NPH_VIS_RESOLVE_TILE - 1U) / (u32)NPH_VIS_RESOLVE_TILE;
+    const u64 resolve_tiles = (u64)v->resolve_tiles_x * v->resolve_tiles_y;
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.size = resolve_tiles * sizeof(u32);
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    bd.memory = NPH_GPU_MEMORY_DEVICE;
+    bd.name = "vis voxel tiles";
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &bd, &v->voxel_tiles));
+    bd.size = (resolve_tiles + 31U) / 32U * sizeof(u32);
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    bd.name = "vis voxel tile bits";
+    return nph_gpu_buffer_create(r->dev, &bd, &v->voxel_tile_bits);
+}
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -480,6 +570,9 @@ static void read_stats(NphRenderer *r)
     s->vis_clusters_sw =
         c->raster_count[0][NPH_VIS_RASTER_SOFTWARE] + c->raster_count[1][NPH_VIS_RASTER_SOFTWARE];
     s->vis_triangles = c->triangles;
+    s->vis_voxel_clusters =
+        c->raster_count[0][NPH_VIS_RASTER_VOXEL] + c->raster_count[1][NPH_VIS_RASTER_VOXEL];
+    s->vis_voxel_bricks = c->voxel_bricks;
     s->vis_instances_culled_frustum = c->instances_culled_frustum;
     s->vis_instances_culled_occlusion = c->instances_culled_occlusion;
     s->vis_meshlets_culled_frustum = c->meshlets_culled_frustum;
@@ -605,6 +698,9 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->skin_fraction = d->masked_skin;
     vd->hzb_dirty = nph_gpu_buffer_address(dev, v->hzb_dirty);
     vd->hzb_tiles_x = v->hzb_tiles_x;
+    vd->voxel_tiles = nph_gpu_buffer_address(dev, v->voxel_tiles);
+    vd->voxel_tile_bits = nph_gpu_buffer_address(dev, v->voxel_tile_bits);
+    vd->resolve_tiles_x = v->resolve_tiles_x;
     // The levels of detail (vis_lod_group_too_coarse): the pixels a unit
     // spans at a distance of one, over the threshold. A threshold of 0
     // turns them off (NPH_VIS_VIEW_LOD unset) and leaves the largest float.
@@ -698,6 +794,16 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
                             (u64)offsetof(NphVisArgs, lod_node_args),
                             sizeof(((NphVisArgs *)NULL)->lod_node_args), 1U);
+    // The voxel resolve's: no tile listed yet, and one in y and z.
+    if (r->vis.frame_voxels) {
+        nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                (u64)offsetof(NphVisArgs, voxel_resolve_args), sizeof(u32), 0U);
+        nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                (u64)offsetof(NphVisArgs, voxel_resolve_args) + sizeof(u32),
+                                2U * sizeof(u32), 1U);
+        nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->voxel_tile_bits), 0U,
+                                NPH_GPU_WHOLE_SIZE, 0U);
+    }
     if (!r->vis.mesh_shaders) {
         const NphGpuClearValue zero = nph_gpu_clear_color(0.0F, 0.0F, 0.0F, 0.0F);
         nph_gpu_cmd_clear_color_image(cmd, nph_gpu_rg_image(graph, f->visbuffer),
@@ -819,11 +925,18 @@ CULL_NODES_EXECUTE(cull_nodes10_execute, 1U, 0U)
 CULL_NODES_EXECUTE(cull_nodes11_execute, 1U, 1U)
 CULL_NODES_EXECUTE(cull_nodes12_execute, 1U, 2U)
 
+// The meshlet cull, with the voxel clusters' routing where they may appear.
+static NphGpuPipeline cull_meshlets_pipeline(const NphRenderer *r)
+{
+    return r->vis.frame_voxels ? r->vis.cull_meshlets_voxels
+                               : r->vis.compute[VIS_COMPUTE_CULL_MESHLETS];
+}
+
 static void cull_meshlets0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
     const NphVisPush p = push_of(r, 0U, 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_MESHLETS]);
+    nph_gpu_cmd_bind_pipeline(cmd, cull_meshlets_pipeline(r));
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
                                   ARGS_OFFSET(cull_args));
@@ -843,7 +956,7 @@ static void cull_meshlets1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, voi
 {
     NphRenderer *r = (NphRenderer *)user;
     const NphVisPush p = push_of(r, 1U, 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_MESHLETS]);
+    nph_gpu_cmd_bind_pipeline(cmd, cull_meshlets_pipeline(r));
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
                                   ARGS_OFFSET(cull_args) + 16U);
@@ -913,6 +1026,30 @@ static void sw_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd
         cmd, nph_gpu_rg_buffer(graph, f->args),
         ARGS_OFFSET(raster_args) +
             ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_SOFTWARE) * 16U);
+}
+
+// The voxel raster of a phase: a workgroup per voxel cluster.
+static void voxel_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphVisPush p = push_of(r, phase, 0U);
+    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_VOXEL_RASTER]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(
+        cmd, nph_gpu_rg_buffer(graph, f->args),
+        ARGS_OFFSET(raster_args) +
+            ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_VOXEL) * 16U);
+}
+
+static void voxel_raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    voxel_raster_record((NphRenderer *)user, graph, cmd, 0U);
+}
+
+static void voxel_raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    voxel_raster_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
 static void sw_raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -1036,10 +1173,30 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     const u32 rt = r->rt.frame_shadows ? 1U : 0U;
     const u32 vsm = r->vsm.frame_active ? 1U : 0U;
     const u32 gi = r->gi.frame_active ? 1U : 0U;
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.debug_view ? r->vis.resolve_debug[rt][vsm][gi]
-                                                     : r->vis.compute[k_resolve[rt][vsm][gi]]);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.debug_view     ? r->vis.resolve_debug[rt][vsm][gi]
+                                   : r->vis.frame_voxels ? r->vis.resolve_voxels[rt][vsm][gi]
+                                                         : r->vis.compute[k_resolve[rt][vsm][gi]]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
+}
+
+// The voxel pixels of the tiles the resolve listed: a workgroup a tile.
+static void voxel_resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const VisFrame *f = &r->vis.frame;
+    NphVisResolvePush p = r->vis.resolve_push;
+    p.hdr_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
+    p.vis_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    p.ao_index = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
+    const u32 debug = r->vis.debug_view ? 1U : 0U;
+    const u32 rt = r->rt.frame_shadows ? 1U : 0U;
+    const u32 vsm = r->vsm.frame_active ? 1U : 0U;
+    const u32 gi = r->gi.frame_active ? 1U : 0U;
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.voxel_resolve[debug][rt][vsm][gi]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                  ARGS_OFFSET(voxel_resolve_args));
 }
 
 static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -1185,6 +1342,27 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+
+    // The voxel clusters, in compute, into the same visibility buffer: the
+    // pixel's ray from the camera through its point on the near plane, which
+    // the render view holds the inverse projection for. Without a mesh with
+    // voxel levels the cull lists none, and the pass is left out.
+    if (!r->vis.frame_voxels) {
+        return NPH_RESULT_OK;
+    }
+    p = add_pass(graph, r, phase == 0U ? "vis voxel raster 0" : "vis voxel raster 1",
+                 NPH_GPU_RG_PASS_COMPUTE,
+                 phase == 0U ? voxel_raster0_execute : voxel_raster1_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->lists, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
 
@@ -1302,6 +1480,41 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
         nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
     nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    if (!r->vis.frame_voxels) {
+        return NPH_RESULT_OK;
+    }
+    // The tiles holding voxel pixels, listed for the voxel resolve, its
+    // count, and its workgroups.
+    nph_gpu_rg_write_buffer(p, f->voxel_tiles, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, f->voxel_tile_bits, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_STORAGE_WRITE);
+
+    // The voxel pixels of those tiles, after the triangles' pixels.
+    p = add_pass(graph, r, "vis voxel resolve", NPH_GPU_RG_PASS_COMPUTE, voxel_resolve_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, f->voxel_tiles, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_image(p, env, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
+    nph_gpu_rg_read_image(p, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
+    nph_gpu_rg_read_image(p, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    nph_gpu_rg_read_buffer(p, sh, NPH_GPU_RG_USE_SHADER_READ);
+    read_lights(p, f);
+    if (r->rt.frame_active) {
+        nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    }
+    render_vsm_read(r, p);
+    render_gi_read(r, p);
+    if (r->ao.frame_active) {
+        nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    }
+    nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
 
@@ -1364,6 +1577,9 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_TRANSFER_DST);
+    if (v->frame_voxels) {
+        nph_gpu_rg_write_buffer(p, f->voxel_tile_bits, NPH_GPU_RG_USE_TRANSFER_DST);
+    }
     nph_gpu_rg_write_buffer(p, f->light_grid, NPH_GPU_RG_USE_TRANSFER_DST);
     if (!v->mesh_shaders) {
         nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
@@ -1481,7 +1697,11 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     render_vis_release_pending(r, nph_gpu_frame_index(dev));
     read_stats(r);
     render_vsm_read_stats(r);
+    v->frame_voxels = v->voxel_meshes != 0U ? 1 : 0;
     NphResult res = ensure_hzb(r, width, height);
+    if (res == NPH_RESULT_OK) {
+        res = ensure_voxel_tiles(r, width, height);
+    }
     if (res != NPH_RESULT_OK) {
         NPH_PROFILE_END();
         return res;
@@ -1569,6 +1789,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     }
     f->hzb = nph_gpu_rg_import_image(graph, v->hzb);
     f->hzb_dirty = nph_gpu_rg_import_buffer(graph, v->hzb_dirty);
+    if (v->frame_voxels) {
+        f->voxel_tiles = nph_gpu_rg_import_buffer(graph, v->voxel_tiles);
+        f->voxel_tile_bits = nph_gpu_rg_import_buffer(graph, v->voxel_tile_bits);
+    }
     f->counters = nph_gpu_rg_import_buffer(graph, v->counters);
     f->args = nph_gpu_rg_import_buffer(graph, v->args);
     f->stats = nph_gpu_rg_import_buffer(graph, v->stats[r->frame_slot]);
@@ -1596,7 +1820,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
         nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles) ||
-        nph_gpu_rg_buffer_is_null(f->light_depths)) {
+        nph_gpu_rg_buffer_is_null(f->light_depths) ||
+        (v->frame_voxels && (nph_gpu_rg_buffer_is_null(f->voxel_tiles) ||
+                             nph_gpu_rg_buffer_is_null(f->voxel_tile_bits)))) {
         NPH_PROFILE_END();
         return NPH_RESULT_FULL;
     }
@@ -1669,6 +1895,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_clusters = last->vis_clusters;
         stats->vis_clusters_sw = last->vis_clusters_sw;
         stats->vis_triangles = last->vis_triangles;
+        stats->vis_voxel_clusters = last->vis_voxel_clusters;
+        stats->vis_voxel_bricks = last->vis_voxel_bricks;
         stats->vis_instances_culled_frustum = last->vis_instances_culled_frustum;
         stats->vis_instances_culled_occlusion = last->vis_instances_culled_occlusion;
         stats->vis_meshlets_culled_frustum = last->vis_meshlets_culled_frustum;

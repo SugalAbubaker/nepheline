@@ -26,9 +26,16 @@
 // virtual shadow map (k_vsm) and the radiance cache (k_gi), and on whether
 // it draws the debug views (k_debug): the others compile without their
 // branches.
+//
+// A pixel of a voxel cluster (render/voxel.h; ADR-0061) is the voxel
+// resolve's (vis_voxel_resolve.glsl): the resolve writes nothing there and
+// lists the pixel's tile for it, once a subgroup that saw one. It tests for
+// them only where specialised to (k_voxels: the renderer holds a mesh with
+// voxel levels, or the frame draws a debug view).
 #ifndef NPH_VIS_RESOLVE_GLSL
 #define NPH_VIS_RESOLVE_GLSL
 
+#extension GL_KHR_shader_subgroup_basic : require
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 
@@ -78,28 +85,17 @@ vec4 g_gi_cell; // set in main() where k_gi
 #define NPH_SURFACE_GI_ACTIVE k_gi
 #define NPH_SURFACE_GI        g_gi_cell
 
-// The cache's cell holding the surface point `p` (camera relative) of
-// geometric normal `face` (either way round: the cells are keyed by the
-// side the camera sees, as the update keys them), at a random point of the
-// cell under temporal anti-aliasing, which averages them (gi_jitter): its
-// irradiance and trust (gi_cell), zero where the cache has none.
-vec4 vis_gi_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
-{
-    const vec3 n = dot(face, p) > 0.0 ? -face : face;
-    vec3 at = p;
-    if (g.g.jitter != 0u) {
-        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
-    }
-    const uint slot = gi_find(g, gi_key(g, at, n));
-    return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
-}
-
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
                 (s).uv, (s).uv_dx, (s).uv_dy)
 #define NPH_SURFACE_GRID_LIGHTS
 layout(constant_id = 3) const bool k_debug = false;
 #define NPH_SURFACE_DEBUG_MODE(view) (k_debug ? (view).v.debug_mode : NPH_RENDER_DEBUG_NONE)
+// Whether voxel pixels may appear (RenderVis.resolve_voxels): the test for
+// them, though never taken, costs the triangles' path 0.5 to 1.7 % of the
+// resolve's time where it is compiled in (measured on render_perf's 4K
+// field and LOD scenes), wherever it stands.
+layout(constant_id = 4) const bool k_voxels = false;
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -148,6 +144,24 @@ vec3 background(ViewRef rview, vec2 q)
     return min(color * rview.v.exposure, vec3(NPH_RENDER_HALF_MAX));
 }
 
+// Lists the tile of pixel `p`, a voxel cluster's, for the voxel resolve: the
+// first invocation of the subgroup sets the tile's bit, and the one that
+// set it appends the tile and raises the voxel resolve's workgroups (a
+// subgroup lies in one workgroup, so in one tile).
+void list_voxel_tile(VisViewRef view, ivec2 p)
+{
+    if (subgroupElect()) {
+        const uvec2 tile = uvec2(p) / uint(NPH_VIS_RESOLVE_TILE);
+        const uint index = tile.y * view.v.resolve_tiles_x + tile.x;
+        const uint bit = 1u << (index & 31u);
+        if ((atomicOr(VisUintRef(view.v.voxel_tile_bits).v[index >> 5u], bit) & bit) == 0u) {
+            const uint j = atomicAdd(VisCountersRef(view.v.counters).c.voxel_tiles, 1u);
+            VisUintRef(view.v.voxel_tiles).v[j] = tile.x | (tile.y << 16u);
+            atomicMax(VisArgsRef(view.v.args).a.voxel_resolve_args[0], j + 1u);
+        }
+    }
+}
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -170,6 +184,15 @@ void main()
     const vec2 inv_size = vec2(pc.inv_width, pc.inv_height);
     const vec2 q = (vec2(p) + 0.5) * inv_size * 2.0 - 1.0;
     const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.vis_index)], p).x;
+    // A voxel pixel leaves here, before anything of the triangles' path is
+    // live: tested in the cluster branch below, the early exit also moved
+    // the compiler's spills (the production variant's from 1792 to 2304
+    // bytes). The cluster debug views draw voxels as triangles.
+    if (k_voxels && v != 0ul && debug < NPH_RENDER_DEBUG_CLUSTERS &&
+        (VisClustersRef(pc.clusters).c[vis_cluster(v)].flags & NPH_VIS_CLUSTER_VOXELS) != 0u) {
+        list_voxel_tile(view, p);
+        return;
+    }
     g_depth = uintBitsToFloat(uint(v >> 32ul));
     vec3 color;
     if (v == 0ul) {
@@ -221,7 +244,7 @@ void main()
         if (k_gi) {
             // The point and the triangle's normal as the cache's update
             // keys them (gi_update.comp: the same arithmetic).
-            g_gi_cell = vis_gi_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
+            g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
         }
 
         // Each attribute interpolated as soon as it is unpacked.
