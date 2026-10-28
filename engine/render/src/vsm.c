@@ -16,9 +16,10 @@
 //      this frame's instance updates touch become dirty;
 //   3. the depth pyramid's mip-0 passes request the pages the pixels read
 //      (vis_hzb.comp);
-//   4. `vsm update`, `vsm collect`, `vsm alloc`: the page tables against
-//      the windows and the requests, physical pages for the new ones, the
-//      list of pages to draw;
+//   4. `vsm update`, `vsm collect`, `vsm select`: the page tables against
+//      the windows and the requests, the free and evictable physical pages,
+//      and the pages to draw within the page budget (the coarse levels
+//      first; the rest wait for a later frame), the new ones taking pages;
 //   3b. with blended surfaces, which the visibility buffer does not hold,
 //      `vsm requests (blended)` rasterises them, testing the opaque depth
 //      (the visibility buffer's) in the fragment stage, to request theirs
@@ -42,9 +43,13 @@
 NPH_STATIC_ASSERT(sizeof(NphVsmEntry) == 16U, "NphVsmEntry matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmPhys) == 8U, "NphVsmPhys matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmLevel) == 48U, "NphVsmLevel matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 128U, "NphVsmCounters matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 208U, "NphVsmArgs matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1088U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 528U, "NphVsmCounters matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 224U, "NphVsmArgs matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmBudget) == 256U, "NphVsmBudget matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1096U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(NPH_VSM_WANTED_ENTRY + 1U == NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES &&
+                      (NPH_VSM_WANTED_ENTRY & NPH_VSM_WANTED_ALLOC) == 0U,
+                  "a wanted page's entry and its flag");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_ENTRIES == NPH_VSM_WINDOW * NPH_VSM_WINDOW, "a window's entries");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_WORDS * 32 == NPH_VSM_LEVEL_ENTRIES, "a level's bitmask");
 NPH_STATIC_ASSERT(NPH_VSM_ROW_WORDS * 32 == NPH_VSM_WINDOW, "a row of a level's bitmask");
@@ -69,6 +74,16 @@ NPH_STATIC_ASSERT(NPH_VSM_ROW_WORDS * 32 == NPH_VSM_WINDOW, "a row of a level's 
 #define VSM_MAX_LOD_BIAS 3U
 #define VSM_ROOMY_FRAMES 120U
 
+// The frames in a row whose wanted pages outran the page budget without
+// draining an eighth of them before the resolution bias is raised: a burst
+// (the map dropped once, the bias lowered) drains, however slowly, a
+// budget's pages a frame, while pages wanted faster than the budget draws
+// them do not; and the frames in a row that each dropped every page (the
+// sun turning every frame), whose pages all want drawing again the next
+// frame, so that outrunning the budget there never drains.
+#define VSM_BOUND_FRAMES 32U
+#define VSM_BOUND_RESETS 4U
+
 // How near a page's edge (in texels) a request also takes the next page:
 // the shading's offset along the normal, which moves a point at most that
 // far across the light, and half a texel of slack.
@@ -84,7 +99,8 @@ static u64 align_up(u64 v, u64 a)
 
 // The work buffer: the counters, the three bitmasks and the render rows
 // first (cleared together at the start of a frame), then the arguments,
-// the lists, and the culling's items.
+// the page budget (kept from frame to frame), the lists, and the culling's
+// items.
 static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out)
 {
     memset(out, 0, sizeof *out);
@@ -103,7 +119,9 @@ static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out
     at = align_up(at, 16U);
     out->args = at;
     at += sizeof(NphVsmArgs);
-    out->alloc = at;
+    out->budget = at;
+    at += sizeof(NphVsmBudget);
+    out->wanted = at;
     at += VSM_ENTRIES * sizeof(u32);
     out->free = at;
     at += (u64)d->vsm_pages * sizeof(u32);
@@ -483,7 +501,6 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->dirty = work + lo->dirty;
     vv->render = work + lo->render;
     vv->render_rows = work + lo->render_rows;
-    vv->alloc = work + lo->alloc;
     vv->free = work + lo->free;
     vv->candidate = work + lo->candidate;
     vv->rendered = work + lo->rendered;
@@ -496,6 +513,8 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->vis_draws = work + lo->vis_draws;
     vv->counters = work + lo->counters;
     vv->args = work + lo->args;
+    vv->wanted = work + lo->wanted;
+    vv->budget = work + lo->budget;
     vv->pool_pages = v->pool_pages;
     vv->pool_index = nph_gpu_image_sampled_index(r->dev, v->pool);
     // Clamped to the edge (the samples stay inside their pages anyway).
@@ -505,6 +524,7 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->max_draws = r->desc.max_vsm_draws;
     vv->max_voxel_draws = r->desc.max_vsm_voxel_draws;
     vv->reset = reset ? 1U : 0U;
+    v->frame_reset = reset ? 1 : 0;
     v->direction = d;
     v->lods = lods;
     v->continuous = 1;
@@ -529,6 +549,8 @@ void render_vsm_read_stats(NphRenderer *r)
         s->vsm_voxel_draws = 0U;
         s->vsm_meshlets = 0U;
         s->vsm_nodes = 0U;
+        s->vsm_wanted = 0U;
+        s->vsm_budget = 0U;
         s->vsm_overflow = 0U;
         return;
     }
@@ -544,6 +566,8 @@ void render_vsm_read_stats(NphRenderer *r)
     s->vsm_voxel_draws = nph_min_u32(c->voxel_draw_count, r->desc.max_vsm_voxel_draws);
     s->vsm_meshlets = c->meshlet_count;
     s->vsm_nodes = c->nodes_visited;
+    s->vsm_wanted = c->wanted_count;
+    s->vsm_budget = c->budget;
     s->vsm_overflow = c->overflow;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
@@ -558,19 +582,46 @@ void render_vsm_read_stats(NphRenderer *r)
         v->overflow_logged |= fresh;
     }
     // The resolution bias, from frames that drew with the current one (the
-    // two in flight since a change still show the old one).
+    // two in flight since a change still show the old one). The caster
+    // lists' overflows do not raise it: the page budget shrinks to what the
+    // pages cost them, and a burst of pages is drawn over several frames.
+    // Pages that keep outrunning the budget do: a burst drains, while pages
+    // wanted as fast as the budget draws them do not, and frames that drop
+    // every page (the sun turning each frame) want every page again the next.
     if (v->stats_bias[slot] == v->lod_bias) {
-        if (c->overflow != 0U) {
+        const bool bound = c->wanted_count > c->budget;
+        const b32 reset = v->stats_reset[slot];
+        if (!bound) {
+            v->bound = 0U;
+        } else if (v->bound == 0U || (u64)c->wanted_count * 8U <= (u64)v->bound_wanted * 7U) {
+            // A new run, or the pages wanted drained an eighth since it
+            // began or last drained one.
+            v->bound = 1U;
+            v->bound_wanted = c->wanted_count;
+        } else {
+            ++v->bound;
+        }
+        // Frames that drop every page count once the budget knew what a
+        // page of every level they want costs (not while a cold start
+        // learns it).
+        v->bound_resets = bound && reset && c->informed != 0U ? v->bound_resets + 1U : 0U;
+        const bool pool = (c->overflow & (u32)NPH_VSM_OVERFLOW_POOL) != 0U;
+        if (pool || v->bound >= VSM_BOUND_FRAMES || v->bound_resets >= VSM_BOUND_RESETS) {
             if (v->lod_bias < VSM_MAX_LOD_BIAS) {
                 ++v->lod_bias;
-                NPH_LOG_DEBUG(&NPH_LOG_RENDER,
-                              "%s: the virtual shadow map overflowed; resolution bias %u", r->name,
+                NPH_LOG_DEBUG(&NPH_LOG_RENDER, "%s: the virtual shadow map %s; resolution bias %u",
+                              r->name, pool ? "overflowed its pool" : "outran its page budget",
                               v->lod_bias);
             }
             v->roomy = 0U;
-        } else if (v->lod_bias != 0U && (u64)c->requested * 4U * 4U <= (u64)v->pool_pages * 3U) {
+            v->bound = 0U;
+            v->bound_resets = 0U;
+        } else if (v->lod_bias != 0U && !bound &&
+                   (u64)c->requested * 4U * 4U <= (u64)v->pool_pages * 3U &&
+                   (!reset || (u64)c->wanted_count * 4U <= (u64)c->budget)) {
             // A step finer needs up to four times the pages: within three
-            // quarters of the pool.
+            // quarters of the pool, and where every page is drawn again
+            // each frame, within the budget.
             if (++v->roomy >= VSM_ROOMY_FRAMES) {
                 --v->lod_bias;
                 v->roomy = 0U;
@@ -618,11 +669,14 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, v->frame.work), 0U, v->layout.clear_size,
                             0U);
     if (v->frame_initialize) {
-        // No entry holds a page; no page has an owner.
+        // No entry holds a page; no page has an owner; no page's cost is
+        // known (the float 0.0 is all zero bits).
         nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, v->frame.entries), 0U,
                                 NPH_GPU_WHOLE_SIZE, 0U);
         nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, v->frame.phys), 0U,
                                 NPH_GPU_WHOLE_SIZE, NPH_VSM_NO_OWNER);
+        nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, v->frame.work), v->layout.budget,
+                                sizeof(NphVsmBudget), 0U);
     }
 }
 
@@ -644,22 +698,16 @@ static void update_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_dispatch(cmd, (u32)(VSM_ENTRIES / 64U), 1U, 1U);
 }
 
-static void collect_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    NPH_UNUSED(graph);
-    NphRenderer *r = (NphRenderer *)user;
-    pages_record(r, cmd, NPH_VSM_PAGES_COLLECT, 0U, 0U);
-    dispatch_items(cmd, r->vsm.pool_pages);
-}
-
 #define ARGS_OFFSET(field) ((u64)offsetof(NphVsmArgs, field))
 
-static void alloc_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+// The levels the page budget grants, then an invocation per wanted page,
+// the new ones taking the pages `vsm collect` listed.
+static void select_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
     RenderVsm *v = &r->vsm;
     const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
-    pages_record(r, cmd, NPH_VSM_PAGES_ARGS, NPH_VSM_ARGS_ALLOC, 0U);
+    pages_record(r, cmd, NPH_VSM_PAGES_ARGS, NPH_VSM_ARGS_SELECT, 0U);
     nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
     const NphGpuMemoryBarrier m = {(u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
                                    (u32)NPH_GPU_STAGE_INDIRECT | (u32)NPH_GPU_STAGE_COMPUTE,
@@ -670,8 +718,16 @@ static void alloc_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     bd.memory = &m;
     bd.memory_count = 1U;
     nph_gpu_cmd_barrier(cmd, &bd);
-    pages_record(r, cmd, NPH_VSM_PAGES_ALLOC, 0U, 0U);
-    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(alloc_args));
+    pages_record(r, cmd, NPH_VSM_PAGES_SELECT, 0U, 0U);
+    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(select_args));
+}
+
+static void collect_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    pages_record(r, cmd, NPH_VSM_PAGES_COLLECT, 0U, 0U);
+    dispatch_items(cmd, r->vsm.pool_pages);
 }
 
 static void cull_instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -1021,7 +1077,7 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
     u32 n = 0U;
     passes[n++] = (VsmPass){"vsm update", update_execute, 0, 0, 0};
     passes[n++] = (VsmPass){"vsm collect", collect_execute, 0, 0, 0};
-    passes[n++] = (VsmPass){"vsm alloc", alloc_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm select", select_execute, 0, 0, 0};
     passes[n++] = (VsmPass){"vsm cull instances", cull_instances_execute, 1, 0, 0};
     const u32 steps = v->lods ? render_vis_lod_steps(r) : 0U;
     for (u32 i = 0; i < steps; ++i) {
@@ -1076,6 +1132,7 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
     nph_gpu_rg_write_buffer(p, v->frame.stats, NPH_GPU_RG_USE_TRANSFER_DST);
     v->stats_frame[r->frame_slot] = nph_gpu_frame_index(r->dev) + 1U;
     v->stats_bias[r->frame_slot] = v->frame_bias;
+    v->stats_reset[r->frame_slot] = v->frame_reset;
     return NPH_RESULT_OK;
 }
 

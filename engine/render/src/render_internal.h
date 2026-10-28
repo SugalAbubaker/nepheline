@@ -211,7 +211,8 @@ typedef struct VsmLayout {
     u64 render_rows; // u32[NPH_VSM_LEVELS * NPH_VSM_ROW_WORDS]
     u64 clear_size;  // bytes cleared at the start of a frame
     u64 args;        // NphVsmArgs
-    u64 alloc;       // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
+    u64 budget;      // NphVsmBudget, kept from frame to frame
+    u64 wanted;      // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]
     u64 free;        // u32[vsm_pages]
     u64 candidate;   // u32[vsm_pages]
     u64 rendered;    // u32[vsm_pages]
@@ -239,13 +240,23 @@ typedef struct RenderVsm {
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVsmCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // 1 + the frame copied into stats[i], 0: none
     u32 stats_bias[NPH_GPU_FRAMES_IN_FLIGHT];     // the resolution bias that frame drew with
+    b32 stats_reset[NPH_GPU_FRAMES_IN_FLIGHT];    // that frame dropped every page
     u32 overflow_logged;                          // NphRenderVsmOverflow bits said once
     // The resolution bias (levels coarser than resolution-matched): raised
-    // by each overflow at the current bias, lowered after `roomy` frames
-    // in a row that would have fitted a step finer.
+    // when the pool overflows at the current bias, when the pages wanted
+    // outran the page budget for `bound` frames in a row without draining
+    // an eighth of `bound_wanted`, those wanted when the run began or last
+    // drained that much, or for `bound_resets` frames in a row that each
+    // dropped every page, the budget knowing every wanted level's cost
+    // (VSM_BOUND_*); lowered after `roomy` frames in a row that would have
+    // fitted a step finer.
     u32 lod_bias;
     u32 roomy;
-    u32 frame_bias; // the bias this frame draws with (lod_bias as it began)
+    u32 bound;
+    u32 bound_wanted;
+    u32 bound_resets;
+    u32 frame_bias;  // the bias this frame draws with (lod_bias as it began)
+    b32 frame_reset; // this frame drops every page
     VsmLayout layout;
     // pages, cull, raster (mesh or vertex), clear, request, the voxel
     // casters' splat and merge, and the caster walk

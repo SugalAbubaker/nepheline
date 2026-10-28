@@ -261,3 +261,106 @@ from (`render_perf-2026-10-18`).
   within half a texel of a page's edge is clamped inside it); smoother
   transitions between levels, whose texel size doubles at a distance
   boundary.
+
+## Amendment (2026-10-28): a page budget, the coarse levels first
+
+**Context.** The map drew every page it wanted in the frame that wanted it.
+A burst of pages (the first frames, every page dropped when the sun turns,
+a fall of the resolution bias) could overflow the caster lists in one
+frame; an overflowed frame's pages are not read and are drawn again the
+next frame, so a burst that overflowed did so in every frame, and only the
+bias rising (each step halving the resolution) ended it. In the open
+landscape (ADR-0061's stage 5), with the lists at their defaults, a page of
+the forest hands on 60,000 to 144,000 caster meshlets: every frame
+overflowed even at the largest bias, the same 39 pages were drawn every
+frame (10 ms of the frame) and never read, and the view had no sun
+shadows. With eight times the lists, the bias swung instead: room in the
+pool lowered it, the finer pages overflowed the lists in one frame (a
+65 ms frame), and the overflow raised it again.
+
+**Decision.**
+
+- **The budget.** A frame draws the wanted pages (new, or dirty and
+  requested) of the coarsest levels the caster lists hold, with a quarter
+  of each to spare, at what a page of each level costs them: every wanted
+  page of the levels from the coarsest down while they fit, then as many of
+  the next level's as fit (`vsm select`). The others wait for later frames,
+  their pixels reading a coarser level meanwhile where one holds their
+  point. A frame draws at least one page; the first frame, with no cost
+  known, at most 256.
+- **The costs.** The culls count, for each level, what its pages drawn take
+  of each list: the meshlet items, the caster draws, the voxel casters'
+  draws, and the walk's nodes (as their share of its fullest queue),
+  counted past a list where it overflowed. A level's cost a page is the
+  most a recent frame's pages of it cost on average, decaying by an eighth
+  each frame that draws one; a level never drawn takes the dearest level's.
+- **The resolution bias** rises when the pool overflows, when the wanted
+  pages outrun the budget 32 frames in a row without draining an eighth of
+  them, or 4 frames in a row that each drop every page with every wanted
+  level's cost known (the sun turning every frame). The lists' overflows no
+  longer raise it. It falls after 120 frames in a row that would fit a step
+  finer within three quarters of the pool and within the budget, and, in
+  frames that drop every page, with four times their pages within it.
+- **The selection takes the pages.** `vsm collect` now runs before it, and a
+  granted new page takes a free page, else an evictable one, as `vsm
+  alloc` did: that pass, its arguments and its list are gone.
+
+**Alternatives considered.**
+
+- *A fixed number of pages a frame:* a page of the forest costs a hundred
+  times a page of open ground.
+- *One cost a page for every level*, from the last frame's pages or the
+  dearest recent: coarse pages cost more and are drawn first, so the
+  budget came out too small for a full redraw of `foliage_shadows_sun_4k_production`,
+  whose sun turns every frame, and its bias rose to 1 (half the
+  resolution), where the lists held all 830 of its pages.
+- *A fixed count of frames past the budget before the bias rises:* the
+  forest's first burst, drained at seven pages a frame, outlasted 32 frames
+  and raised the bias, only for it to fall again.
+- *Raising the bias on the lists' overflows (as before):* a burst
+  overflowed in every frame until the resolution halved, and the bias swung
+  back as soon as the pool had room.
+- *Larger lists:* the items grow with the trees a page reaches, not with
+  the pages.
+
+**Consequences.**
+
+- The open landscape with the lists at their defaults (RTX 3060 Ti, 240
+  measured frames a view): every view now settles at bias 0 with every page
+  it requests drawn and held (480 to 554 pages), where every frame
+  overflowed at bias 3 and the shadows were never read. The map's passes
+  fall from 8.8 to 10.1 ms a frame to 0.07 to 0.15 ms where the camera
+  stands or walks, and 1.40 ms where it turns (a few pages a frame, up to
+  14); the frames from 19.7 to 21.4 ms to 11.0 to 12.1 (the turning view's
+  99th percentile 15.7 ms). The forest's first burst (415 pages) drains in
+  about 75 frames at 6 to 15 pages a frame; 5 of its 670 frames overflowed
+  (the first, with no cost known, and pages dearer than their level's
+  recent ones), each drawn again the next frame and never shown.
+- Interleaved against the walk (ADR-0060's amendment of 2026-10-28) on the
+  RTX 3060 Ti, three rounds: the synthetic scenes and Bistro's views within
+  the runs' spread (-0.013 to +0.029 ms, Bistro's turning view the most).
+  In frames that draw no page the page passes take 2.4 µs less (`vsm
+  select` 4.8 to 5.2 µs where `vsm alloc` took 4.6 to 4.8; `vsm update`
+  -1.8, `vsm collect` -1.0); in frames that draw pages they take 5 to 8 µs
+  more (`vsm select` 11.4 to 12.0 µs against 7.2 to 7.4; the culls' counts
+  by level +1.3 to +2.5).
+- DRAM bytes declared: the same in every scene. The wanted list replaces
+  the allocation list in the work buffer (1 MB); the counters grow from 128
+  to 528 bytes and the costs take 256 bytes, kept from frame to frame.
+- `test_vsm.c`: room for eight caster draws where a view wants 45 pages
+  (`a_burst_of_pages_is_drawn_over_frames_within_the_lists`): after the
+  first frame nothing overflows, every frame draws the coarsest levels
+  whole and none below the one the lists run out in, the pages are drawn
+  over ten frames, and the image away from the shadow's edges is the one a
+  list with room for all of them gives. A sun turning every frame past room
+  for 32 draws raises the bias to 2 within 14 frames and never lowers it
+  (`a_sun_turning_past_the_lists_coarsens_the_levels_once`). With every
+  page granted at once, the first fails (every frame overflows); with the
+  bias lowered whenever the pool has room, the second does.
+- New: statistics `vsm_wanted` and `vsm_budget`; `render_perf --vsm-trace`
+  prints every frame's; pass `vsm select` (`vsm alloc` gone).
+- Open: a page of the forest still costs 60,000 to 144,000 meshlet items,
+  so a burst there takes 6 to 15 pages a frame: the far field's casters
+  (HLOD) are what will make those pages cheap. The first frame of a cold
+  start still overflows (no cost known), and a page dearer than its level's
+  recent pages can overflow a frame, which is then drawn again.

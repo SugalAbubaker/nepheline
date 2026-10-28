@@ -27,6 +27,7 @@ NPH_BUFFER_REF(VsmEntriesRef) { NphVsmEntry e[]; };
 NPH_BUFFER_REF(VsmPhysRef) { NphVsmPhys p[]; };
 NPH_BUFFER_REF(VsmCountersRef) { NphVsmCounters c; };
 NPH_BUFFER_REF(VsmArgsRef) { NphVsmArgs a; };
+NPH_BUFFER_REF(VsmBudgetRef) { NphVsmBudget b; };
 NPH_BUFFER_REF(VsmUvec2Ref) { uvec2 v[]; };
 NPH_BUFFER_REF(VsmUvec4Ref) { uvec4 v[]; };
 NPH_BUFFER_REF(VsmBitsRef) { uint w[]; };

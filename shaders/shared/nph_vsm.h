@@ -49,15 +49,35 @@
 #define NPH_VSM_PAGES_INVALIDATE 0 // the pages this frame's instance updates touch: dirty
 #define NPH_VSM_PAGES_UPDATE     1 // the page tables against this frame's windows and requests
 #define NPH_VSM_PAGES_COLLECT    2 // the free and evictable physical pages
-#define NPH_VSM_PAGES_ALLOC      3 // a physical page for each page that needs one
+#define NPH_VSM_PAGES_SELECT     3 // the pages to draw within the page budget; new ones take pages
 #define NPH_VSM_PAGES_FIXUP      4 // pages whose draws did not all fit: drawn again next frame
 #define NPH_VSM_PAGES_ARGS       5 // indirect arguments (NphVisPush.phase: which)
 
 // NPH_VSM_PAGES_ARGS phases.
-#define NPH_VSM_ARGS_ALLOC    0 // the allocation's dispatch
+#define NPH_VSM_ARGS_SELECT   0 // the selection's dispatch, and the levels it grants
 #define NPH_VSM_ARGS_MESHLET  1 // the meshlet cull's dispatch
-#define NPH_VSM_ARGS_DRAW     2 // the page raster's draws and clears
+#define NPH_VSM_ARGS_DRAW     2 // the page raster's draws and clears, and the pages' costs
 #define NPH_VSM_ARGS_INSTANCE 3 // the instance cull's dispatch, and its levels
+
+// A wanted page (NphVsmView.wanted): its entry, and whether it needs a
+// physical page (otherwise it holds one, dirty).
+#define NPH_VSM_WANTED_ALLOC 0x80000000u
+#define NPH_VSM_WANTED_ENTRY 0x0003FFFFu // NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES - 1
+
+// The page budget: the pages a frame draws while no page's cost is known
+// (the first frame), and the least it draws (a page, however much one
+// costs).
+#define NPH_VSM_FIRST_BUDGET 256
+#define NPH_VSM_MIN_BUDGET   1
+
+// The caster lists a page's cost is kept for (NphVsmCounters.level_cost,
+// NphVsmBudget.cost): the items handed on to the meshlet cull, the caster
+// draws, the voxel casters' draws, and the walk's nodes.
+#define NPH_VSM_COST_ITEMS       0
+#define NPH_VSM_COST_DRAWS       1
+#define NPH_VSM_COST_VOXEL_DRAWS 2
+#define NPH_VSM_COST_NODES       3
+#define NPH_VSM_COSTS            4
 
 // The caster walk's queues (vsm_cull_nodes.comp), as the camera's
 // (NPH_VIS_LOD_QUEUES): a step reads one, fills the next, and empties the
@@ -105,7 +125,7 @@ NPH_SHARED_STRUCT(NphVsmLevel)
 // virtual shadow map).
 NPH_SHARED_STRUCT(NphVsmCounters)
 {
-    u32 alloc_count;     // entries needing a physical page
+    u32 alloc_count;     // entries that took (or failed to take) a physical page
     u32 free_count;      // physical pages without an owner
     u32 candidate_count; // owned pages no pixel needed lately (evicted first)
     u32 render_count;    // pages drawn this frame
@@ -123,12 +143,35 @@ NPH_SHARED_STRUCT(NphVsmCounters)
     // nodes it visited (statistics).
     u32 node_count[NPH_VSM_NODE_QUEUES];
     u32 nodes_visited;
+    // The page budget: the pages that needed drawing (new, or dirty and
+    // requested), the walk's fullest queue (what max_lod_nodes must hold,
+    // past it when it overflowed), the pages of the frame's wanted ones the
+    // caster lists could hold (the budget, past the wanted pages where all
+    // fit), and whether the cost of a page of every level wanted was known.
+    u32 wanted_count;
+    u32 node_peak;
+    u32 budget;
+    u32 informed;
+    u32 level_wanted[NPH_VSM_LEVELS];  // the pages wanted per level
+    u32 level_granted[NPH_VSM_LEVELS]; // those of the partial level granted so far
+    // What each level's pages drawn took of each caster list
+    // (NPH_VSM_COST_*), counting what did not fit.
+    u32 level_cost[NPH_VSM_LEVELS][NPH_VSM_COSTS];
+};
+
+// The page budget's costs, kept from frame to frame: what a page of each
+// level costs each caster list (NPH_VSM_COST_*; the walk's nodes as a share
+// of its fullest queue), the most a recent frame's pages of the level cost
+// on average, decaying by an eighth each frame that draws pages of it; 0
+// where no page of the level has been drawn.
+NPH_SHARED_STRUCT(NphVsmBudget)
+{
+    f32 cost[NPH_VSM_LEVELS][NPH_VSM_COSTS];
 };
 
 // Indirect arguments derived from the counters.
 NPH_SHARED_STRUCT(NphVsmArgs)
 {
-    u32 alloc_args[4];          // dispatch: the allocation, an invocation per request
     u32 meshlet_args[4];        // dispatch: the meshlet cull, an invocation per item
     u32 draw_args[4];           // mesh tasks: a workgroup per draw
     u32 clear_args[4];          // VkDrawIndirectCommand: a quad (6 vertices) per page drawn
@@ -138,6 +181,15 @@ NPH_SHARED_STRUCT(NphVsmArgs)
     // dispatch: each step of the caster walk, a workgroup per
     // NPH_VIS_LOD_ITEMS items of its queue (the step before raises it)
     u32 node_args[NPH_VSM_NODE_QUEUES][4];
+    // dispatch: the selection, an invocation per wanted page; the levels it
+    // grants every wanted page of (select_level and coarser), and the level
+    // before it, of which it grants the first select_quota (select_partial,
+    // or NPH_VSM_LEVELS for none)
+    u32 select_args[4];
+    u32 select_level;
+    u32 select_partial;
+    u32 select_quota;
+    u32 pad0;
 };
 
 // The virtual shadow map's view of a frame.
@@ -161,7 +213,6 @@ NPH_SHARED_STRUCT(NphVsmView)
     u64 dirty;       // u32[...]: pages an instance change touched this frame
     u64 render;      // u32[...]: pages drawn this frame
     u64 render_rows; // u32[NPH_VSM_LEVELS * NPH_VSM_ROW_WORDS]: rows of `render` with a page
-    u64 alloc;       // u32[pool_pages]: entries needing a page
     u64 free;        // u32[pool_pages]: pages without an owner
     u64 candidate;   // u32[pool_pages]: evictable pages, the long unused first, the recent from
                      // the end
@@ -188,6 +239,8 @@ NPH_SHARED_STRUCT(NphVsmView)
     u64 node_queue[NPH_VSM_NODE_QUEUES];
     u32 max_nodes;
     u32 pad1;
+    u64 wanted; // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]: pages to draw (NPH_VSM_WANTED_*)
+    u64 budget; // NphVsmBudget
 };
 
 // Push constants of vsm_request_test.comp (the render tests): the depth

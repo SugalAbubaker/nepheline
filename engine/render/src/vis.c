@@ -1916,6 +1916,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vsm_voxel_draws = last->vsm_voxel_draws;
         stats->vsm_meshlets = last->vsm_meshlets;
         stats->vsm_nodes = last->vsm_nodes;
+        stats->vsm_wanted = last->vsm_wanted;
+        stats->vsm_budget = last->vsm_budget;
         stats->vsm_overflow = last->vsm_overflow;
     }
     NPH_PROFILE_END();

@@ -10,18 +10,30 @@
 //   UPDATE (after the pages are requested): each entry of every level
 //     against this frame's window and requests. An entry whose page the
 //     window scrolled past, or of a level reset, gives its physical page
-//     up; a requested entry with a page is kept (and drawn again if
-//     dirty), and one without asks for a page.
+//     up; a requested entry with a page is kept, and is wanted (to be
+//     drawn again) if dirty; one without a page is wanted (to take one and
+//     be drawn). The wanted pages are listed and counted per level.
 //   COLLECT: the physical pages without an owner (free), then those no
 //     pixel needed this frame (evictable): the ones no pixel needed for
 //     NPH_VSM_RECENT frames first, the recently needed after them, a
 //     two-bucket approximation of least recently used.
-//   ALLOC: each request takes a free page, else an evictable one (whose
-//     entry loses it), else none (the pool is full: its pixels are lit,
-//     and the renderer makes the levels coarser until the pages fit).
+//   SELECT: the wanted pages to draw this frame, within the page budget,
+//     the coarse levels first: every wanted page of the levels from the
+//     coarsest down while the caster lists hold them, then the first of
+//     the next level as far as they do. A dirty page granted is drawn; one
+//     without a page takes a free one, else an evictable one (whose entry
+//     loses it), else none (the pool is full: its pixels are lit, and the
+//     renderer makes the levels coarser until the pages fit), and is drawn.
+//     The others wait for a later frame (a dirty page stays dirty, which
+//     the shading does not read, so it falls back to a coarser level; one
+//     without a page has none to read).
 //   FIXUP (after the culling): when draws did not all fit, every page drawn
 //     this frame stays dirty, so the next frame draws it again.
-//   ARGS: the indirect arguments of the dispatches and draws that follow.
+//   ARGS: the indirect arguments of the dispatches and draws that follow;
+//     after the culling, the next frame's page budget too: what each caster
+//     list could hold, at what a page has cost it lately, with a quarter to
+//     spare, so a burst of pages (the map dropped, the resolution bias
+//     lowered) is drawn over several frames within the lists.
 //
 // The pages drawn this frame are listed (`rendered`) and set in the
 // render bitmask and its rows, which the culling tests casters against.
@@ -142,29 +154,26 @@ void update(VsmViewRef r)
         e.state |= NPH_VSM_ENTRY_DIRTY;
     }
     const bool requested = vsm_bit(r.v.requests, bit);
-    bool render = false;
-    bool alloc = false;
+    bool wanted = false;
     if (requested) {
         if (valid) {
             VsmPhysRef(r.v.phys).p[e.state & NPH_VSM_ENTRY_PAGE].last_used = r.v.frame;
-            render = (e.state & NPH_VSM_ENTRY_DIRTY) != 0u;
-            e.state &= ~NPH_VSM_ENTRY_DIRTY;
+            wanted = (e.state & NPH_VSM_ENTRY_DIRTY) != 0u;
         } else {
-            alloc = true;
+            wanted = true;
         }
     }
     if (e.state != before) {
         entries.e[index].state = e.state;
     }
     uint at;
-    VIS_RESERVE(counters.c.render_count, render ? 1u : 0u, at);
-    if (render) {
-        add_render(r, at, index, level, bit);
+    VIS_RESERVE(counters.c.wanted_count, wanted ? 1u : 0u, at);
+    if (wanted) {
+        VisUintRef(r.v.wanted).v[at] = index | (valid ? 0u : NPH_VSM_WANTED_ALLOC);
     }
-    VIS_RESERVE(counters.c.alloc_count, alloc ? 1u : 0u, at);
-    if (alloc) {
-        VisUintRef(r.v.alloc).v[at] = index;
-    }
+    // A workgroup's entries are all of one level (a level's are a multiple
+    // of 64), so its subgroups' are too.
+    VIS_ADD(counters.c.level_wanted[level], wanted ? 1u : 0u);
     VIS_ADD(counters.c.requested, requested ? 1u : 0u);
 }
 
@@ -198,13 +207,12 @@ void collect(VsmViewRef r)
     }
 }
 
-void alloc(VsmViewRef r)
+// A physical page for entry `index` of `level`, the `k`th of the frame's
+// to take one (COLLECT listed them before): a free page, else an evictable
+// one, the long unused first, else none (the pool is full). It is drawn.
+void take_page(VsmViewRef r, uint k, uint index, int level)
 {
-    const uint k = linear_id();
     VsmCountersRef counters = VsmCountersRef(r.v.counters);
-    if (k >= counters.c.alloc_count) {
-        return;
-    }
     VsmEntriesRef entries = VsmEntriesRef(r.v.entries);
     VsmPhysRef phys = VsmPhysRef(r.v.phys);
     const uint free_count = counters.c.free_count;
@@ -225,8 +233,6 @@ void alloc(VsmViewRef r)
         atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_POOL));
         return;
     }
-    const uint index = VisUintRef(r.v.alloc).v[k];
-    const int level = int(index / uint(NPH_VSM_LEVEL_ENTRIES));
     const ivec2 window = vsm_window(r, level);
     const ivec2 abs_page = vsm_slot_page(window, index % uint(NPH_VSM_LEVEL_ENTRIES));
     NphVsmEntry e;
@@ -243,6 +249,43 @@ void alloc(VsmViewRef r)
                vsm_bit_of(level, abs_page - window));
 }
 
+void select_pages(VsmViewRef r)
+{
+    const uint k = linear_id();
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    VsmArgsRef a = VsmArgsRef(r.v.args);
+    const bool valid = k < counters.c.wanted_count;
+    const uint item = valid ? VisUintRef(r.v.wanted).v[k] : 0u;
+    const uint index = item & NPH_VSM_WANTED_ENTRY;
+    const int level = int(index / uint(NPH_VSM_LEVEL_ENTRIES));
+    // The level the budget runs out in takes its pages in the order they
+    // come, up to the quota.
+    const uint partial = a.a.select_partial;
+    const bool in_partial = valid && uint(level) == partial;
+    uint rank = 0u;
+    if (partial < uint(NPH_VSM_LEVELS)) {
+        VIS_RESERVE(counters.c.level_granted[partial], in_partial ? 1u : 0u, rank);
+    }
+    const bool granted =
+        valid && (uint(level) >= a.a.select_level || (in_partial && rank < a.a.select_quota));
+    const bool alloc = granted && (item & NPH_VSM_WANTED_ALLOC) != 0u;
+    const bool render = granted && !alloc;
+    uint at;
+    VIS_RESERVE(counters.c.render_count, render ? 1u : 0u, at);
+    if (render) {
+        // Drawn again this frame: only this invocation touches the entry.
+        VsmEntriesRef entries = VsmEntriesRef(r.v.entries);
+        entries.e[index].state &= ~NPH_VSM_ENTRY_DIRTY;
+        const ivec2 window = vsm_window(r, level);
+        const ivec2 page = vsm_slot_page(window, index % uint(NPH_VSM_LEVEL_ENTRIES));
+        add_render(r, at, index, level, vsm_bit_of(level, page - window));
+    }
+    VIS_RESERVE(counters.c.alloc_count, alloc ? 1u : 0u, at);
+    if (alloc) {
+        take_page(r, at, index, level);
+    }
+}
+
 void fixup(VsmViewRef r)
 {
     const uint i = linear_id();
@@ -255,11 +298,136 @@ void fixup(VsmViewRef r)
              NPH_VSM_ENTRY_DIRTY);
 }
 
+// A page of a level's cost to each caster list (NPH_VSM_COST_*), as kept.
+vec4 kept_cost(VsmBudgetRef b, int level)
+{
+    return vec4(b.b.cost[level][0], b.b.cost[level][1], b.b.cost[level][2], b.b.cost[level][3]);
+}
+
+// The selection's figures for each level, read by a lane each so the one
+// lane that selects does not wait on sixteen loads in turn. (A shared array
+// of a struct of its own: docs/build.md "Shaders".)
+struct SelectLevel {
+    vec4 cost;
+    uint wanted;
+};
+shared SelectLevel s_levels[NPH_VSM_LEVELS];
+
+// The caster lists' capacities, a quarter of each kept to spare: what a
+// frame's pages may take of them.
+vec4 list_room(VsmViewRef r)
+{
+    return 0.75 * vec4(float(r.v.max_meshlets), float(r.v.max_draws),
+                       float(r.v.max_voxel_draws), float(r.v.max_nodes));
+}
+
+// How many of `want` pages at `cost` each fit `room` (the lists a page
+// costs nothing taking no part).
+uint pages_fitting(vec4 room, vec4 cost, uint want)
+{
+    float n = float(want);
+    for (int k = 0; k < NPH_VSM_COSTS; ++k) {
+        if (cost[k] > 0.0) {
+            n = min(n, floor(max(room[k], 0.0) / cost[k]));
+        }
+    }
+    return uint(n);
+}
+
 void args(VisViewRef view, VsmViewRef r)
 {
     VsmCountersRef counters = VsmCountersRef(r.v.counters);
     VsmArgsRef a = VsmArgsRef(r.v.args);
     switch (pc.phase) {
+    case NPH_VSM_ARGS_SELECT: {
+        // The levels from the coarsest down while their wanted pages fit what
+        // remains of every caster list at what a page of the level costs,
+        // and the level the lists run out in. A level no page of which has
+        // been drawn takes the dearest level's cost (pages cost the more the
+        // coarser they are); while no level's cost is known, the first frame
+        // draws NPH_VSM_FIRST_BUDGET pages.
+        if (counters.c.wanted_count == 0u) {
+            // Nothing to draw (most frames of a still view): no dispatch.
+            if (gl_LocalInvocationIndex == 0u) {
+                a.a.select_args = uint[4](0u, 1u, 1u, 0u);
+                counters.c.budget = r.v.pool_pages;
+                counters.c.informed = 1u;
+            }
+            break;
+        }
+        if (gl_LocalInvocationIndex < uint(NPH_VSM_LEVELS)) {
+            const int level = int(gl_LocalInvocationIndex);
+            s_levels[level].cost = kept_cost(VsmBudgetRef(r.v.budget), level);
+            s_levels[level].wanted = counters.c.level_wanted[level];
+        }
+        barrier();
+        if (gl_LocalInvocationIndex == 0u) {
+            vec4 dearest = vec4(0.0);
+            for (int level = 0; level < NPH_VSM_LEVELS; ++level) {
+                dearest = max(dearest, s_levels[level].cost);
+            }
+            const bool known = any(greaterThan(dearest, vec4(0.0)));
+            const vec4 room0 = list_room(r);
+            vec4 room = room0;
+            vec4 need = vec4(0.0); // what every wanted page would take
+            uint left = known ? r.v.pool_pages : min(uint(NPH_VSM_FIRST_BUDGET), r.v.pool_pages);
+            uint granted = 0u;
+            uint full = uint(NPH_VSM_LEVELS);
+            uint partial = uint(NPH_VSM_LEVELS);
+            uint quota = 0u;
+            bool informed = known;
+            for (int level = NPH_VSM_LEVELS - 1; level >= 0; --level) {
+                const uint w = s_levels[level].wanted;
+                const vec4 own = s_levels[level].cost;
+                const bool measured = any(greaterThan(own, vec4(0.0)));
+                const vec4 c = measured ? own : dearest;
+                informed = informed && (w == 0u || measured);
+                need += float(w) * c;
+                if (partial != uint(NPH_VSM_LEVELS)) {
+                    continue; // past the level the lists ran out in
+                }
+                const uint n = min(pages_fitting(room, c, w), left);
+                room -= float(n) * c;
+                left -= n;
+                granted += n;
+                if (n < w) {
+                    partial = uint(level);
+                    quota = n;
+                } else {
+                    full = uint(level);
+                }
+            }
+            // A page a frame however dear: the coarsest wanted level's first.
+            if (granted == 0u && partial != uint(NPH_VSM_LEVELS)) {
+                quota = uint(NPH_VSM_MIN_BUDGET);
+            }
+            a.a.select_level = full;
+            a.a.select_partial = partial;
+            a.a.select_quota = quota;
+            // The budget: the pages of this frame's wanted mix the lists
+            // could hold (past the wanted pages where all of them fit).
+            float ratio = 3.0e38;
+            for (int k = 0; k < NPH_VSM_COSTS; ++k) {
+                if (need[k] > 0.0) {
+                    ratio = min(ratio, room0[k] / need[k]);
+                }
+            }
+            const uint wanted = counters.c.wanted_count;
+            counters.c.budget =
+                !known ? min(uint(NPH_VSM_FIRST_BUDGET), r.v.pool_pages)
+                : wanted == 0u ? r.v.pool_pages
+                               : uint(min(float(wanted) * ratio, float(r.v.pool_pages)));
+            counters.c.informed = informed ? 1u : 0u;
+            // More pages needed than the pool holds: flagged now, though the
+            // budget may keep this frame's allocations within it.
+            if (counters.c.requested > r.v.pool_pages) {
+                atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_POOL));
+            }
+            const uvec4 g = groups((counters.c.wanted_count + 63u) / 64u, VSM_MAX_GROUPS_X);
+            a.a.select_args = uint[4](g.x, g.y, g.z, g.w);
+        }
+        break;
+    }
     case NPH_VSM_ARGS_INSTANCE: {
         // A workgroup per 64 instance slots and level with pages to draw.
         if (gl_LocalInvocationIndex == 0u) {
@@ -279,11 +447,6 @@ void args(VisViewRef view, VsmViewRef r)
         }
         break;
     }
-    case NPH_VSM_ARGS_ALLOC: {
-        const uvec4 g = groups((counters.c.alloc_count + 63u) / 64u, VSM_MAX_GROUPS_X);
-        a.a.alloc_args = uint[4](g.x, g.y, g.z, g.w);
-        break;
-    }
     case NPH_VSM_ARGS_MESHLET: {
         const uint n = min(counters.c.meshlet_count, r.v.max_meshlets);
         const uvec4 g = groups((n + 63u) / 64u, VSM_MAX_GROUPS_X);
@@ -293,11 +456,30 @@ void args(VisViewRef view, VsmViewRef r)
     default: {
         const uvec4 g = groups(min(counters.c.draw_count, r.v.max_draws), view.v.max_mesh_groups_x);
         a.a.draw_args = uint[4](g.x, g.y, g.z, g.w);
-        a.a.clear_args = uint[4](6u, min(counters.c.render_count, r.v.pool_pages), 0u, 0u);
+        const uint drawn = min(counters.c.render_count, r.v.pool_pages);
+        a.a.clear_args = uint[4](6u, drawn, 0u, 0u);
         if (k_voxels) {
             const uvec4 gv =
                 groups(min(counters.c.voxel_draw_count, r.v.max_voxel_draws), VSM_MAX_GROUPS_X);
             a.a.voxel_draw_args = uint[4](gv.x, gv.y, gv.z, gv.w);
+        }
+        // What a page of each level drawn this frame cost each caster list
+        // (counting what did not fit), kept where it is more than the cost
+        // kept from recent frames decayed by an eighth: the budget follows
+        // the dearest recent pages of the level, so pages dearer than the
+        // last frame's seldom overflow it. The walk's nodes count as their
+        // share of its fullest queue. A lane a (level, list): the
+        // workgroup's 64 are NPH_VSM_LEVELS * NPH_VSM_COSTS.
+        const int level = int(gl_LocalInvocationIndex) / NPH_VSM_COSTS;
+        const int k = int(gl_LocalInvocationIndex) % NPH_VSM_COSTS;
+        const uint d = counters.c.level_render[level];
+        if (d != 0u) {
+            float c = float(counters.c.level_cost[level][k]) / float(d);
+            if (k == NPH_VSM_COST_NODES) {
+                c *= float(counters.c.node_peak) / float(max(counters.c.nodes_visited, 1u));
+            }
+            VsmBudgetRef b = VsmBudgetRef(r.v.budget);
+            b.b.cost[level][k] = max(c, b.b.cost[level][k] * 0.875);
         }
         break;
     }
@@ -315,11 +497,11 @@ void main()
     case NPH_VSM_PAGES_UPDATE:
         update(r);
         break;
+    case NPH_VSM_PAGES_SELECT:
+        select_pages(r);
+        break;
     case NPH_VSM_PAGES_COLLECT:
         collect(r);
-        break;
-    case NPH_VSM_PAGES_ALLOC:
-        alloc(r);
         break;
     case NPH_VSM_PAGES_FIXUP:
         fixup(r);

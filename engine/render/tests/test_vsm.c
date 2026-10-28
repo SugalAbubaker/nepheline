@@ -499,6 +499,221 @@ NTEST(vsm, the_resolution_bias_falls_once_there_is_room)
     test_render_teardown(f);
 }
 
+// A fixture with a pool of `pages` and room for `draws` caster draws a
+// frame; false (after skipping) where the device cannot have the map.
+static bool small_lists_setup(RenderFixture *f, u32 pages, u32 draws)
+{
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.vsm_pages = pages;
+    d.max_vsm_draws = draws;
+    test_render_setup(f, &d);
+    return f->dev != NULL && nph_renderer_virtual_shadows_supported(f->renderer);
+}
+
+#define BIG_PIXELS ((u64)BIG_TARGET * BIG_TARGET * 4U)
+
+// Pixels within this many of a shadow's edge are not compared: the map's
+// texel and its filter's (VSM_GROW).
+#define BIG_EDGE 4
+
+static bool big_dark(const u8 *img, i32 x, i32 y)
+{
+    return channel_max(img + ((u64)y * BIG_TARGET + (u64)x) * 4U) <= DARK_MAX;
+}
+
+// From the eye's height near the floor's edge across it: its pixels lie
+// from half a metre to 54 m away, in many levels' pages.
+static void across_view(NphRenderView *v)
+{
+    vsm_view(v, nph_render_camera_look_at(nph_dvec3(0.0, 1.7, 24.0), nph_dvec3(0.0, 0.0, -20.0),
+                                          nph_vec3(0.0F, 1.0F, 0.0F), 0.9F, 0.05F));
+}
+
+// The counters of the frame just rendered (white box: its statistics copy).
+static NphVsmCounters frame_counters(RenderFixture *f)
+{
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    NphVsmCounters c;
+    memcpy(&c, nph_gpu_buffer_map(f->dev, f->renderer->vsm.stats[f->renderer->frame_slot]),
+           sizeof c);
+    return c;
+}
+
+// Room for eight caster draws a frame, about a page's each, where the view
+// wants several times that many pages: the first frame, before any frame
+// has measured what a page costs, overflows the list (its pages are not
+// read, and are drawn again); from then on each frame draws what the list
+// holds at what a page of each level costs, the coarse levels first (every
+// wanted page of the levels above the one the list runs out in, none below
+// it), nothing overflows, the resolution stays, and once the pages are
+// drawn the image is the one a list with room for all of them gives.
+NTEST(vsm, a_burst_of_pages_is_drawn_over_frames_within_the_lists)
+{
+    static RenderFixture fx;
+    RenderFixture *f = &fx;
+    static u8 roomy[BIG_PIXELS];
+    static u8 tight[BIG_PIXELS];
+    if (!small_lists_setup(f, 512U, 65536U)) {
+        SMALL_POOL_SKIP(f);
+    }
+    NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, BIG_TARGET);
+    NphRenderView down;
+    NphRenderView sky;
+    big_scene(f, &down, &sky);
+    NphRenderView across;
+    across_view(&across);
+    const NphRenderFrameStats all = big_frame_stats(f, &across, target);
+    log_stats("room for every draw", &all);
+    NTEST_EXPECT_EQ_UINT(all.vsm_overflow, 0U);
+    NTEST_EXPECT_EQ_UINT(all.vsm_drawn, all.vsm_requested);
+    const u32 pages = all.vsm_drawn;
+    for (u32 i = 0; i < 2U; ++i) {
+        (void)test_render_frame(f, &across, target);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, target, 0U, roomy, BIG_PIXELS);
+    nph_gpu_image_destroy(f->dev, target);
+    test_render_teardown(f);
+
+    if (!small_lists_setup(f, 512U, 8U)) {
+        SMALL_POOL_SKIP(f);
+    }
+    target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, BIG_TARGET);
+    big_scene(f, &down, &sky);
+    NTEST_LOG("the view wants %u pages, about a draw each", pages);
+    NTEST_ASSERT_TRUE(pages >= 24U);
+    u32 frames = 0U;
+    u32 drawn = 0U;
+    u32 bounded = 0U; // frames whose wanted pages outran the budget
+    bool coarse_first = true;
+    for (; frames < 64U; ++frames) {
+        (void)test_render_frame(f, &across, target);
+        const NphVsmCounters c = frame_counters(f);
+        if (frames == 0U) {
+            NTEST_EXPECT_NE_UINT(c.overflow & (u32)NPH_VSM_OVERFLOW_DRAWS, 0U);
+            continue;
+        }
+        NTEST_EXPECT_EQ_UINT(c.overflow, 0U);
+        drawn += c.render_count;
+        if (c.wanted_count == 0U) {
+            break;
+        }
+        if (c.wanted_count > c.budget) {
+            ++bounded;
+            // The level the budget ran out in: those above it drawn whole,
+            // those below it not at all.
+            i32 partial = -1;
+            for (i32 level = NPH_VSM_LEVELS - 1; level >= 0 && partial < 0; --level) {
+                if (c.level_render[level] < c.level_wanted[level]) {
+                    partial = level;
+                }
+            }
+            for (i32 level = 0; level < (i32)NPH_VSM_LEVELS; ++level) {
+                coarse_first = coarse_first &&
+                               (level < partial ? c.level_render[level] == 0U
+                                                : level == partial || c.level_render[level] ==
+                                                                          c.level_wanted[level]);
+            }
+        }
+    }
+    NTEST_LOG("drawn over %u frames after the first (%u past the budget): %u pages", frames,
+              bounded, drawn);
+    NTEST_EXPECT_LT_UINT(frames, 64U);
+    NTEST_EXPECT_GT_UINT(bounded, 2U);
+    NTEST_EXPECT_TRUE(coarse_first);
+    NTEST_EXPECT_EQ_UINT(drawn, pages);
+    const NphRenderFrameStats st = big_frame_stats(f, &across, target);
+    log_stats("room for eight draws, at last", &st);
+    NTEST_EXPECT_EQ_UINT(st.vsm_lod_bias, 0U);
+    NTEST_EXPECT_EQ_UINT(st.vsm_resident, pages);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_image(f->dev, target, 0U, tight, BIG_PIXELS);
+    // Away from the shadows' edges, the same image. The pages sit elsewhere
+    // in the pool (the order they take pages in follows atomics), where a
+    // GPU's raster may round a texel's depth the other way: at an edge, a
+    // pixel may then differ.
+    u32 differ = 0U;
+    u32 edge_differ = 0U;
+    for (i32 y = 0; y < (i32)BIG_TARGET; ++y) {
+        for (i32 x = 0; x < (i32)BIG_TARGET; ++x) {
+            const bool d = big_dark(roomy, x, y);
+            bool edge = false;
+            for (i32 dy = -BIG_EDGE; dy <= BIG_EDGE && !edge; ++dy) {
+                for (i32 dx = -BIG_EDGE; dx <= BIG_EDGE && !edge; ++dx) {
+                    const i32 qx = x + dx;
+                    const i32 qy = y + dy;
+                    edge = qx >= 0 && qy >= 0 && qx < (i32)BIG_TARGET && qy < (i32)BIG_TARGET &&
+                           big_dark(roomy, qx, qy) != d;
+                }
+            }
+            const u64 at_px = ((u64)y * BIG_TARGET + (u64)x) * 4U;
+            const bool differs = channel_diff(roomy + at_px, tight + at_px) > SAME_TOL;
+            differ += !edge && differs ? 1U : 0U;
+            edge_differ += edge && differs ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u pixels differ from the image with room for every draw away from the edges, %u "
+              "along them",
+              differ, edge_differ);
+    NTEST_EXPECT_EQ_UINT(differ, 0U);
+    nph_gpu_image_destroy(f->dev, target);
+    test_render_teardown(f);
+}
+
+// Room for 32 caster draws a frame, the sun turning every frame (which drops
+// every page, so each frame wants every page the view needs): at full
+// resolution the pages outrun the budget frame after frame, as no burst
+// does, so the renderer raises the resolution bias until a frame's pages
+// fit, and does not lower it again while the sun turns, a step finer
+// wanting more pages than the budget holds.
+NTEST(vsm, a_sun_turning_past_the_lists_coarsens_the_levels_once)
+{
+    static RenderFixture fx;
+    RenderFixture *f = &fx;
+    if (!small_lists_setup(f, 512U, 32U)) {
+        SMALL_POOL_SKIP(f);
+    }
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, BIG_TARGET);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 60.0F));
+    (void)instance(f, cube, grey, at(0.0, 1.0, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(true);
+    const NphRenderLight sun = make_light(f, &ld);
+    NphRenderView v;
+    across_view(&v);
+    NphRenderFrameStats st;
+    memset(&st, 0, sizeof st);
+    u32 bias = 0U;
+    u32 changed_at = 0U; // the last frame whose bias differed from the one before
+    bool lowered = false;
+    for (u32 i = 0; i < 200U; ++i) {
+        const f32 a = 0.001F * (f32)i;
+        ld.direction = nph_vec3(nph_f32_cos(a), -1.0F, nph_f32_sin(a));
+        NTEST_ASSERT_EQ_INT(nph_render_light_update(f->renderer, sun, &ld), NPH_RESULT_OK);
+        st = test_render_frame(f, &v, target);
+        if (st.vsm_lod_bias != bias) {
+            lowered = lowered || st.vsm_lod_bias < bias;
+            bias = st.vsm_lod_bias;
+            changed_at = i;
+        }
+    }
+    log_stats("the sun turning, at last", &st);
+    NTEST_LOG("resolution bias %u from frame %u; pages wanted %u, budget %u", bias, changed_at,
+              st.vsm_wanted, st.vsm_budget);
+    NTEST_EXPECT_GT_UINT(bias, 0U);
+    NTEST_EXPECT_FALSE(lowered);
+    NTEST_EXPECT_LT_UINT(changed_at, 60U);
+    NTEST_EXPECT_EQ_UINT(st.vsm_overflow, 0U);
+    NTEST_EXPECT_LE_UINT(st.vsm_wanted, st.vsm_budget);
+    NTEST_EXPECT_EQ_UINT(st.vsm_drawn, st.vsm_wanted); // every page, every frame
+    NTEST_EXPECT_GT_UINT(st.vsm_drawn, 0U);
+    nph_gpu_image_destroy(f->dev, target);
+    test_render_teardown(f);
+}
+
 // The map's shadow against the rays it replaces, in one production view
 // each: they differ only along the shadow's edges.
 NTEST_F(Vsm, ray_traced_and_virtual_shadows_agree)
