@@ -256,9 +256,11 @@ static NphResult build_orrery(NphWorld *w, const Ids *ids, u32 asteroids)
             angle);
         NphEntity rock;
         NPH_TRY(spawn_body(w, ids, "rock", belt, l, MESH_CUBE, 8U, &rock));
-        const DemoSpin spin = {
-            nph_vec3_normalize(nph_vec3_sub(nph_pcg32_next_vec3(&rng), nph_vec3_splat(0.5F))),
-            nph_pcg32_next_range_f32(&rng, 0.5F, 3.0F)};
+        // The axis drawn before the rate (as one initializer's, the draws would
+        // be made in an order C leaves unspecified).
+        const NphVec3 spin_axis =
+            nph_vec3_normalize(nph_vec3_sub(nph_pcg32_next_vec3(&rng), nph_vec3_splat(0.5F)));
+        const DemoSpin spin = {spin_axis, nph_pcg32_next_range_f32(&rng, 0.5F, 3.0F)};
         NPH_TRY(nph_world_add(w, rock, ids->spin, &spin));
     }
     return NPH_RESULT_OK;

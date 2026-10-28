@@ -642,8 +642,8 @@ NTEST(heightfield, validation_rejects_corrupted_blocks)
         RESET();
         const u32 flips = 1U + nph_pcg32_next_bounded(&r, 4U);
         for (u32 k = 0U; k < flips; ++k) {
-            ((u8 *)c)[nph_pcg32_next_bounded(&r, size)] ^=
-                (u8)(1U << nph_pcg32_next_bounded(&r, 8U));
+            const u32 at = nph_pcg32_next_bounded(&r, size);
+            ((u8 *)c)[at] ^= (u8)(1U << nph_pcg32_next_bounded(&r, 8U));
         }
         if (nph_physics_heightfield_validate(c, size)) {
             passed += 1U;

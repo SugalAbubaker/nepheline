@@ -277,8 +277,7 @@ NTEST(quat, euler)
     u64 rng = 19U;
     for (u32 i = 0; i < ITER; ++i) {
         const NphVec3 angles =
-            nph_vec3(tm_rng_range(&rng, -3.1F, 3.1F), tm_rng_range(&rng, -1.4F, 1.4F),
-                     tm_rng_range(&rng, -3.1F, 3.1F));
+            tm_rng_box(&rng, nph_vec3(-3.1F, -1.4F, -3.1F), nph_vec3(3.1F, 1.4F, 3.1F));
         const NphQuat q = nph_quat_from_euler(angles);
         const NphVec3 back = nph_quat_to_euler(q);
         TM_ASSERT_VEC3_NEAR(back, angles, 1e-4F);

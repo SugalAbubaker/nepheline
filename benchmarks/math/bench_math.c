@@ -47,12 +47,17 @@ static void prepare(void)
     NphPcg32 rng;
     nph_pcg32_seed(&rng, 7U, 11U);
     for (u32 i = 0; i < BATCH; ++i) {
-        const NphVec3 c = nph_vec3(nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F),
-                                   nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F),
-                                   nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F));
-        const NphVec3 e = nph_vec3(nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F),
-                                   nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F),
-                                   nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F));
+        // Each draw a statement of its own, so every compiler measures the
+        // same inputs (as one call's arguments, the draws would be made in an
+        // order C leaves unspecified).
+        const f32 cx = nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F);
+        const f32 cy = nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F);
+        const f32 cz = nph_pcg32_next_range_f32(&rng, -100.0F, 100.0F);
+        const NphVec3 c = nph_vec3(cx, cy, cz);
+        const f32 ex = nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F);
+        const f32 ey = nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F);
+        const f32 ez = nph_pcg32_next_range_f32(&rng, 0.1F, 3.0F);
+        const NphVec3 e = nph_vec3(ex, ey, ez);
         g_boxes[i] = nph_aabb_from_center_extents(c, e);
         g_spheres[i] = nph_sphere(c, e.x);
         g_points[i] = c;
