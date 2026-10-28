@@ -68,6 +68,7 @@ supersedes it and both link to each other.
 | [0060](0060-cluster-levels-of-detail.md) | Virtualized geometry: a hierarchy of cluster levels, walked two levels a step | Accepted (the bottom levels draw level 0 until their own); amended 2026-10-26: the sun's shadow map draws cuts of its own |
 | [0061](0061-voxel-far-field.md) | Aggregate geometry's far field: voxel levels in the cluster hierarchy | Accepted (built in stages; the first: the voxels and their levels) |
 | [0062](0062-world-partition-hlod.md) | World partition: cells of static content and their far-field proxies (HLOD) | Accepted (built in stages; the first: the proxies, built by the cooker) |
+| [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
 
 ## Template
 
