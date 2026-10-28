@@ -254,6 +254,51 @@ def sound_blobs(lossless):
     return [("HEAD", 0, 0, 16, header, header), ("DATA", 0, 0, 16, data, data)]
 
 
+def mesh_proxy_blobs():
+    """A mesh of voxels alone (mesh.h version 4, a cell proxy's): no
+    vertices or indices, one submesh of no indices over level 0's one voxel
+    cluster (one brick holding a box), under a root group."""
+    none = 0xFFFFFFFF
+    flt_max = 3.4028234663852886e38
+    header = struct.pack("<8I", 0, 0, 1, 1, 0, 0, 0, 0)
+    header += struct.pack("<4f", 0.0, 0.0, 0.0, 0.0)  # position_offset + pad
+    header += struct.pack("<4f", 1.0, 1.0, 1.0, 0.0)  # position_scale + pad
+    header += struct.pack("<6f", 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)  # bounds
+    header += struct.pack("<2f", 0.0, 0.0)
+    header += struct.pack("<4f", 0.5, 0.5, 0.5, 0.87)  # sphere
+    assert len(header) == 112
+    submesh = struct.pack("<8I", 0, 0, 0, 1, 0, 0, 0, 0) + struct.pack("<8f", 0, 0, 0, 1, 1, 1, 0, 0)
+    meshlet = struct.pack("<IIHHI", 0, 0, 0, 1, 0)
+    bound = struct.pack("<4f", 0.5, 0.5, 0.5, 0.87) + struct.pack("<4b", 0, 0, 0, 127) + \
+        struct.pack("<3f", 0.5, 0.5, 0.5)
+    lods = struct.pack("<8I", 1, 1, 1, 1, 1, 1, 1, 0)
+    clusters = struct.pack("<4I", none, 0, 0, 0)
+    groups = struct.pack("<5f3I", 0.5, 0.5, 0.5, 0.87, flt_max, 0, 0, 1)
+    members = struct.pack("<I", 0)
+    spheres = struct.pack("<4f", 0.5, 0.5, 0.5, 0.87) + bytes(16 * 7)
+    errors = struct.pack("<8f", flt_max, 0, 0, 0, 0, 0, 0, 0)
+    maker_errors = struct.pack("<8f", *([0.0] * 8))
+    children = struct.pack("<8I", 0x80000000, *([none] * 7))
+    node = spheres + errors + maker_errors + children
+    assert len(node) == 224
+    brick = struct.pack("<4f4I", 0.0, 0.0, 0.0, 0.25, 1, 0, 0, 0)
+    whole = (31 << 15) | (31 << 20) | (31 << 25)
+    voxel = struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x00104080, whole)
+    return [
+        ("HEAD", 0, 0, 16, header, header),
+        ("SUBM", 0, 0, 16, submesh, submesh),
+        ("MLET", 0, 0, 16, meshlet, meshlet),
+        ("MLBD", 0, 0, 16, bound, bound),
+        ("LODS", 0, 0, 16, lods, lods),
+        ("LODC", 0, 0, 16, clusters, clusters),
+        ("LODG", 0, 0, 16, groups, groups),
+        ("LODM", 0, 0, 16, members, members),
+        ("LODN", 0, 0, 16, node, node),
+        ("VOXB", 0, 0, 16, brick, brick),
+        ("VOXA", 0, 1, 16, voxel, lz_literals(voxel)),
+    ]
+
+
 def scene_blobs():
     strings = b"root\0child\0"
     header = struct.pack("<16I", 2, 1, 1, 1, 1, len(strings), 0, *([0] * 9))
@@ -276,6 +321,26 @@ def scene_blobs():
         ("LGHT", 0, 0, 16, light, light),
         ("STRS", 0, 0, 16, strings, strings),
     ]
+
+
+def scene_cell_blobs():
+    """The scene with one cell over its instance (scene.h version 2): its
+    bounds, its proxy (a mesh, a material, an origin, a finest cell of 0.25
+    and a distance of 560)."""
+    blobs = []
+    for b in scene_blobs():
+        if b[0] == "HEAD":
+            header = bytearray(b[4])
+            struct.pack_into("<I", header, 28, 1)  # cell_count
+            header = bytes(header)
+            blobs.append(("HEAD", 0, 0, 16, header, header))
+        else:
+            blobs.append(b)
+    cell = struct.pack("<6f", -1.0, 0.0, -1.0, 1.0, 2.0, 1.0) + struct.pack("<2I", 0, 1) + \
+        guid_from_str("proxy") + guid_from_str("material") + \
+        struct.pack("<3f2f3I", 0.0, 0.0, 0.0, 0.25, 560.0, 0, 0, 0)
+    assert len(cell) == 96
+    return blobs + [("CELL", 0, 0, 16, cell, cell)]
 
 
 def pack_file(entries, entry_align=16):
@@ -371,9 +436,11 @@ def main():
     write(os.path.join(CORPUS, "nph", "mesh"), nph_file(fourcc("MESH"), 1, mesh_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_lod"), nph_file(fourcc("MESH"), 2, mesh_lod_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_voxels"), nph_file(fourcc("MESH"), 3, mesh_voxel_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_proxy"), nph_file(fourcc("MESH"), 4, mesh_proxy_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
+    write(os.path.join(CORPUS, "nph", "scene_cells"), nph_file(fourcc("SCEN"), 2, scene_cell_blobs()))
     write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))
     write(os.path.join(CORPUS, "nph", "sound_streamed"),
           nph_file(fourcc("SND "), 1, sound_blobs(True)))

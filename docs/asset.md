@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 3; versions 1 and 2 still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 4; versions 1 to 3 still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -254,7 +254,13 @@ can be handed to the renderer without further checks:
   a power of two), origin (finite), mask (not empty), and voxels (in
   range), and each voxel's footprint (a box at least one step across on
   each axis, a known shape, a capsule's code only on a capsule and at
-  most 56) and reserved fields.
+  most 56) and reserved fields. From version 4, a mesh may be voxels
+  alone (a world partition cell's proxy, docs/render.md "Cell proxies",
+  ADR-0062): no vertices and no indices (`POSN`, `ATTR`, `INDX`, `MLVX`
+  and `MLTR` absent), every cluster a voxel cluster, level 0's too, and
+  one submesh of no indices over level 0's clusters. A record without
+  vertices at level 0 is a voxel cluster's in such a mesh alone: in a mesh
+  with vertices or indices, or before version 4, it is a meshlet's.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
@@ -263,10 +269,21 @@ can be handed to the renderer without further checks:
 - **Material** (`material.h`): one `HEAD` with glTF's metallic-roughness
   parameters, alpha mode and cutoff, flags, and five texture references
   (GUID, UV set, wrap modes, filter, scale).
-- **Scene** (`scene.h`): `HEAD`, `NODE` (parent-before-child hierarchy
-  with local TRS, child and sibling links, names), `INST` (a mesh GUID at
-  a node with a range of material GUIDs in `MTRL`), `CAMS`, `LGHT`, and
-  `STRS` (NUL-terminated names).
+- **Scene** (`scene.h`, type version 2; version 1 still reads): `HEAD`,
+  `NODE` (parent-before-child hierarchy with local TRS, child and sibling
+  links, names), `INST` (a mesh GUID at a node with a range of material
+  GUIDs in `MTRL`), `CAMS`, `LGHT`, and `STRS` (NUL-terminated names).
+  From version 2, a scene the cooker partitioned (`nph_cook --hlod`,
+  docs/cook.md "Cells") adds `CELL`: per cell of the world partition its
+  instances' bounds, their range of `INST` (a cell's instances follow one
+  another, the cells' in turn, the instances in no cell after them), and
+  its proxy: a mesh GUID (none where it is empty), the material its one
+  submesh names, the origin of its space, its finest cell and the
+  distance it stands for its instances from (96 bytes; ADR-0062). The
+  view checks the ranges (in range, in order, apart), the bounds and
+  origins (finite), a proxy's cell (a positive normal power of two) and
+  distance (positive, finite), and the reserved words (zero). A version-1
+  scene has no cells, whatever its header's reserved word holds.
 - **Sound** (`sound.h`): `HEAD` (codec, PCM format, channels, rate,
   frames, the loop, depth, the lossless block size and count, flags:
   `NPH_SOUND_FLAG_STREAM` for one played from storage), `DATA` (the
