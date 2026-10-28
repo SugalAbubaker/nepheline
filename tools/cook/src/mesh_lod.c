@@ -4,8 +4,11 @@
 // sees, so a cooked mesh's levels are the ones the renderer would build. The
 // cooked records (asset/mesh.h) and the renderer's are the same bytes.
 #include <nepheline/core/assert.h>
+#include <nepheline/core/log.h>
+#include <nepheline/math/scalar.h>
 #include <nepheline/render/cluster_lod.h>
 
+#include <cook/cook.h>
 #include <cook/mesh.h>
 #include <cook/voxel.h>
 #include <stddef.h>
@@ -54,6 +57,64 @@ NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
                       NPH_MESH_LOD_LEAF == NPH_RENDER_LOD_LEAF &&
                       NPH_MESH_LOD_CHILDREN == NPH_RENDER_LOD_NODE_CHILDREN,
                   "level constants agree");
+
+// Each level's clusters (voxel ones apart), triangles, voxels and their
+// cells, and the errors of the groups that made them, a debug log line a
+// level (nph_cook --verbose): where a mesh's levels stop shrinking, or jump.
+static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
+{
+    if (!NPH_LOG_ENABLED(&NPH_LOG_COOK, NPH_LOG_LEVEL_DEBUG)) {
+        return;
+    }
+    for (u32 level = 0; level < l->levels; ++level) {
+        u32 clusters = 0U;
+        u32 voxel_clusters = 0U;
+        u64 triangles = 0U;
+        u64 voxels = 0U;
+        f32 cell_lo = NPH_F32_MAX;
+        f32 cell_hi = 0.0F;
+        f32 error_lo = NPH_F32_MAX;
+        f32 error_hi = 0.0F;
+        for (u32 c = 0; c < l->lods.len; ++c) {
+            const NphRenderClusterLod *lod = &l->lods.data[c];
+            if (lod->level != level) {
+                continue;
+            }
+            const NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
+            clusters += 1U;
+            if (m->vertex_count == 0U) {
+                // A voxel cluster: its bricks from its vertex offset.
+                voxel_clusters += 1U;
+                for (u32 k = 0; k < m->triangle_count; ++k) {
+                    const NphRenderVoxelBrick *br = &l->bricks.data[m->vertex_offset + k];
+                    voxels += nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+                    cell_lo = nph_f32_min(cell_lo, br->cell);
+                    cell_hi = nph_f32_max(cell_hi, br->cell);
+                }
+            } else {
+                triangles += m->triangle_count;
+            }
+            if (lod->group != NPH_RENDER_LOD_NONE) {
+                const f32 e = l->groups.data[lod->group].error;
+                error_lo = nph_f32_min(error_lo, e);
+                error_hi = nph_f32_max(error_hi, e);
+            }
+        }
+        if (error_lo > error_hi) {
+            error_lo = 0.0F; // level 0: no maker
+            error_hi = 0.0F;
+        }
+        if (cell_lo > cell_hi) {
+            cell_lo = 0.0F;
+        }
+        NPH_LOG_DEBUG(&NPH_LOG_COOK,
+                      "mesh %s level %u: %u clusters (%u of voxels), %llu triangles, %llu voxels "
+                      "(cells %.4g to %.4g), made at errors %.4g to %.4g",
+                      mesh->name, level, clusters, voxel_clusters, (unsigned long long)triangles,
+                      (unsigned long long)voxels, (f64)cell_lo, (f64)cell_hi, (f64)error_lo,
+                      (f64)error_hi);
+    }
+}
 
 NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                const NphVec3 *positions, const NphMeshAttrib *attribs,
@@ -123,6 +184,9 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         in.scratch = alloc;
         in.jobs = jobs;
         r = nph_render_cluster_lods_build(&in, out);
+        if (r == NPH_RESULT_OK) {
+            log_levels(mesh, out);
+        }
     }
     if (surfaces != NULL) {
         NPH_FREE_ARRAY(alloc, u8, surfaces, nph_max_u32(sn, 1U));

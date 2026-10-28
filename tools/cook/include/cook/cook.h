@@ -44,7 +44,9 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //   2: KHR_texture_transform baked into the texture coordinates.
 //   3: a level's groups built in colours (no two of a colour share a
 //      class), a colour's at once on the job system.
-#define COOK_MESH_VERSION 3U
+//   4: aggregate groups become voxels where those, at most twice as
+//      coarse, cost no more than the triangles kept (ADR-0061).
+#define COOK_MESH_VERSION 4U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

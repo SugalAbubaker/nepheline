@@ -578,3 +578,55 @@ each measured against level 0 on these needles and on the landscape's own pines.
   same cuts' voxel clusters (every one of 2,325 texels, its depth within 0.0005 of a
   texel), read back from the pool through its sampled binding; and the casters'
   coverage of the map and the floor's shadow against level 0's ("Accuracy").
+
+## Amendment (2026-10-28): voxels where they cost no more than the triangles kept
+
+**Context.** Stage 5 cooked the open landscape with voxels and measured it. Its views
+overflowed the visible-cluster list (524,288 clusters at the default) and dropped the
+trees: at eight times every list's capacity the forest view still filled 4.2 million
+clusters with 208 million triangles (113 ms). The cooker's per-level log (nph_cook
+--verbose) shows why. The pines' needles do not stall: their triangles halve a level
+(6.95 million, then 3.48, 1.74, 0.87, 0.43, 0.21 million, 57,000) while the smallest
+errors double (0.6 mm to 6.6 cm over seven levels), so the stall rule made voxels of a
+few groups alone (11 to 372 voxel clusters a level). Halving the triangles of
+aggregate pieces as their error doubles is not enough: their count falls about as the
+error to the power -1.5, a tree's pixels as its square, so triangles a pixel grow with
+distance (three a pixel for a pine at 320 m), and the thousands of trees from 300 m to
+the valley's end dominate the frame. Foliage occludes little (nine instances culled
+by occlusion against 22,778 by the frustum).
+
+**Decision.** A group of aggregate triangles also becomes voxels where the finest
+cell at least the error of the triangles it keeps (`max(error, simplify_error)`)
+whose voxels number no more than those triangles is at most twice that error: voxels
+no more costly and at most as much coarser as a level's step. From there the voxel
+levels quarter a level where the triangles halved. `COOK_MESH_VERSION` 4.
+
+**Consequences.**
+
+- The pine's largest mesh: level 4 holds 24,000 triangles and 123,000 voxels against
+  434,000 triangles; level 5 3,300 and 13,000 against 212,000; every mesh of the
+  landscape's trees and saplings ends in a single voxel cluster.
+- The landscape, its levels cooked both ways and measured with every list eight times
+  its default (`render_perf --lists=8`), which both overflow still (4.2 million
+  clusters): the frame falls from 113.2 to 52.2 ms in the forest view (walk 113.7 to
+  52.4, sprint 112.6 to 52.2, turn 94.4 to 50.0, across 105.0 to 49.3, valley 107.5 to
+  52.8), its triangles from 207 to 33 million (32 to 94 million in all the views) and
+  its software raster from 24.2 to 4.8 ms and the hierarchy walk from 7.9 to 3.5; the
+  voxels' raster rises from 2.8 to 36.5 ms for 3.2 million voxel clusters (34.7
+  million bricks, about a nanosecond each). The shadow map, which redrew all 37 pages
+  it needed every frame (its raster 66.0 ms), keeps them (1.1 ms, none drawn), its
+  resolution bias still 2 to 3 (every 120 frames it falls a step and the full redraw
+  overflows again: the p99 frames near 100 ms). The forest, which the
+  default lists dropped, is drawn.
+- Unchanged where the rule does not apply: the synthetic scenes (`foliage_*`, whose
+  shrubs stall; `lod_*`, smooth) within 0.01 ms, interleaved.
+- What stage 5 leaves open, on this evidence: the far field's count of primitives
+  (millions of voxel clusters from thousands of distant trees, each its own instance)
+  is the world partition's HLOD proxies' to bound, a cell's trees as one voxel
+  hierarchy; the shadow map's casters need culling against the pages they are drawn
+  into (a page by a tree takes the tree's whole cut today); and the hierarchy walk
+  (4 to 8 ms for a million nodes) and the 4.5-minute load are next.
+- Test (`test_voxel.c`, `blobs_that_simplify_become_voxels_where_those_cost_no_more`):
+  400 small closed blobs, whose triangles halve as their error nears their radius,
+  become voxels at level 4, where the triangles alone have not stalled; without the
+  rule they became voxels a level later, at the stall, and the test fails.

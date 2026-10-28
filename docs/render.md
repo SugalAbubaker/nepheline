@@ -709,8 +709,12 @@ pieces average at most 32 triangles (union-find over its vertices'
 positions: an open sheet or a flat-shaded mesh that stalls on its borders or
 seams is one piece or a few, and stays triangles), every submesh opaque or
 masked, becomes voxels where its simplification keeps more than three
-quarters of its triangles, or where its quadric error passes the voxels'.
-A group holding a voxel cluster always does. The first cells are the
+quarters of its triangles, or where its quadric error passes the voxels',
+or where voxels at most twice as coarse as the triangles it keeps number
+no more than those (a level's step, which voxels then continue at a quarter
+a level where aggregate triangles only halve: a pine's needles do not
+stall, but their triangles a pixel grow with distance; ADR-0061's amendment
+of 2026-10-28). A group holding a voxel cluster always does. The first cells are the
 smallest power of two at least twice the error so far whose cells the
 triangles overlap at most four times their count (a stalled level's error
 is its finest pieces', so halving its primitives would jump the error, and

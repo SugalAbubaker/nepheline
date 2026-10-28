@@ -1421,6 +1421,137 @@ NTEST_F(VoxelBuild, stalled_foliage_becomes_voxels_up_to_a_root)
     lod_mesh_data_free(&m);
 }
 
+// Small closed blobs (leaf clumps, berries): `count` of them, each a
+// sphere of `sides` around and `rings` from pole to pole, in a cube of
+// `side`. Their triangles halve a level, the error nearing the blob's own
+// radius as they do, where a few voxels a cell or two across hold a blob.
+static void blob_foliage(LodMeshData *m, NphAllocator *a, u32 count, f32 side, u64 seed, u32 sides,
+                         u32 rings)
+{
+    NPH_ARRAY_INIT(&m->positions, a);
+    NPH_ARRAY_INIT(&m->indices, a);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, seed, 1U);
+    const f32 r = 0.01F * side;
+    for (u32 i = 0; i < count; ++i) {
+        const NphVec3 c = nph_vec3(side * nph_pcg32_next_f32(&rng), side * nph_pcg32_next_f32(&rng),
+                                   side * nph_pcg32_next_f32(&rng));
+        const u32 base = m->positions.len;
+        // The poles, then the rings between them.
+        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&m->positions, nph_vec3_add(c, nph_vec3(0.0F, r, 0.0F))));
+        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&m->positions, nph_vec3_sub(c, nph_vec3(0.0F, r, 0.0F))));
+        for (u32 k = 1U; k < rings; ++k) {
+            const f32 theta = NPH_PI * (f32)k / (f32)rings;
+            for (u32 j = 0; j < sides; ++j) {
+                const f32 phi = 2.0F * NPH_PI * (f32)j / (f32)sides;
+                const NphVec3 off =
+                    nph_vec3(r * nph_f32_sin(theta) * nph_f32_cos(phi), r * nph_f32_cos(theta),
+                             r * nph_f32_sin(theta) * nph_f32_sin(phi));
+                NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&m->positions, nph_vec3_add(c, off)));
+            }
+        }
+        // Ring k's vertex j, wound outward.
+#define BLOB_V(k, j) (base + 2U + ((k) - 1U) * sides + ((j) % sides))
+        for (u32 j = 0; j < sides; ++j) {
+            const u32 top[3] = {base, BLOB_V(1U, j + 1U), BLOB_V(1U, j)};
+            const u32 bottom[3] = {base + 1U, BLOB_V(rings - 1U, j), BLOB_V(rings - 1U, j + 1U)};
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m->indices, top, 3U));
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m->indices, bottom, 3U));
+        }
+        for (u32 k = 1U; k + 1U < rings; ++k) {
+            for (u32 j = 0; j < sides; ++j) {
+                const u32 q[6] = {BLOB_V(k, j), BLOB_V(k, j + 1U),      BLOB_V(k + 1U, j + 1U),
+                                  BLOB_V(k, j), BLOB_V(k + 1U, j + 1U), BLOB_V(k + 1U, j)};
+                NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&m->indices, q, 6U));
+            }
+        }
+#undef BLOB_V
+    }
+    m->ranges[0].index_offset = 0U;
+    m->ranges[0].index_count = m->indices.len;
+    m->range_count = 1U;
+}
+
+// The primitives (triangles and voxels) of each level of `l` into `out`
+// (up to `max` levels).
+static void level_primitives(const NphRenderClusterLods *l, u64 *out, u32 max)
+{
+    memset(out, 0, (size_t)max * sizeof(u64));
+    for (u32 c = 0; c < l->lods.len; ++c) {
+        const u32 level = l->lods.data[c].level;
+        if (level >= max) {
+            continue;
+        }
+        const NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
+        if (m->vertex_count != 0U) {
+            out[level] += m->triangle_count;
+            continue;
+        }
+        for (u32 k = 0; k < m->triangle_count; ++k) {
+            const NphRenderVoxelBrick *br = &l->bricks.data[m->vertex_offset + k];
+            out[level] += nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+        }
+    }
+}
+
+// Small blobs whose triangles simplify (leaf clumps, berries; and the
+// landscape's pines, whose needles' groups simplify until their error nears
+// the needles' reach) become voxels where those, at most twice as coarse as
+// the triangles a group keeps, are no more of them: a level's step, which
+// voxels then continue at a quarter a level where the triangles only halve.
+// That is before the triangles stall, where alone they became voxels
+// before. The levels end in voxels well below the triangles' count.
+NTEST_F(VoxelBuild, blobs_that_simplify_become_voxels_where_those_cost_no_more)
+{
+    LodMeshData m;
+    blob_foliage(&m, f->a, 400U, 4.0F, 53U, 8U, 6U);
+    TestLook look;
+    look_init(&look, m.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    NphRenderMeshlets meshlets;
+    NphRenderClusterLods lods;
+    NTEST_ASSERT_EQ_INT(build_with(&m, &sampler, f->a, &meshlets, &lods), NPH_RESULT_OK);
+    u32 voxel_clusters = 0U;
+    check_voxel_levels(&lods, &voxel_clusters);
+    u64 with[16];
+    level_primitives(&lods, with, 16U);
+    NphRenderMeshlets meshlets_t;
+    NphRenderClusterLods lods_t;
+    NTEST_ASSERT_EQ_INT(build_with(&m, NULL, f->a, &meshlets_t, &lods_t), NPH_RESULT_OK);
+    u64 without[16];
+    level_primitives(&lods_t, without, 16U);
+    for (u32 k = 0; k < nph_min_u32(nph_max_u32(lods.levels, lods_t.levels), 16U); ++k) {
+        NTEST_LOG("level %u: %llu primitives with voxels, %llu triangles without", k,
+                  (unsigned long long)with[k], (unsigned long long)without[k]);
+    }
+    NTEST_EXPECT_GT_UINT(voxel_clusters, 0U);
+    for (u32 k = 1U; k < nph_min_u32(lods.levels, 16U); ++k) {
+        NTEST_EXPECT_LE_UINT(with[k], with[k - 1U]);
+    }
+    // Voxels came in at a level where the triangles alone had not stalled
+    // (at most three quarters of the level before, the stall rule's mark):
+    // the stall rule would not have made them there.
+    u32 first = 0U;
+    for (u32 k = 1U; k < nph_min_u32(nph_min_u32(lods.levels, lods_t.levels), 16U); ++k) {
+        if (with[k] < without[k]) {
+            first = k;
+            break;
+        }
+    }
+    NTEST_LOG("voxels from level %u", first);
+    NTEST_ASSERT_GT_UINT(first, 0U);
+    NTEST_EXPECT_LE_UINT(without[first] * 4U, without[first - 1U] * 3U);
+    // The coarsest level, with voxels, a few primitives; the triangles'
+    // coarsest still holds hundreds.
+    NTEST_EXPECT_LE_UINT(with[nph_min_u32(lods.levels, 16U) - 1U] * 16U,
+                         without[nph_min_u32(lods_t.levels, 16U) - 1U]);
+    nph_render_cluster_lods_free(&lods);
+    nph_render_meshlets_free(&meshlets);
+    nph_render_cluster_lods_free(&lods_t);
+    nph_render_meshlets_free(&meshlets_t);
+    lod_mesh_data_free(&m);
+}
+
 // A clump of needles across the mesh's origin (a submesh of its own, so no
 // meshlet joins it to the rest), beside a forest that keeps the levels
 // going: as the clump's voxels coarsen they stop falling below the eight

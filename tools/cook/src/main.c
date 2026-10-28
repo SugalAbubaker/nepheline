@@ -6,7 +6,7 @@
 //              [--uncompressed] [--no-mips] [--max-extent N]
 //              [--no-optimize] [--no-lods] [--voxels] [--sound-codec auto|pcm|lossless|adpcm]
 //              [--sound-stream auto|always|never] [--stream-seconds S]
-//              [--threads N] [--quiet]
+//              [--threads N] [--quiet] [--verbose]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
 //
 // A source may be a directory: every .gltf, .glb, .nmesh, and .wav under it
@@ -56,8 +56,10 @@ static void usage(FILE *out)
           "  --sound-stream <s>    auto (default: sounds of --stream-seconds or more),\n"
           "                        always, or never\n"
           "  --stream-seconds <s>  auto's threshold (default 8)\n"
-          "  --threads <n>         worker threads for encoding (default: cores - 1)\n"
-          "  --quiet               warnings and errors only\n",
+          "  --threads <n>         worker threads for encoding and levels of detail\n"
+          "                        (default: cores - 1)\n"
+          "  --quiet               warnings and errors only\n"
+          "  --verbose             debug messages too (each mesh's levels of detail)\n",
           out);
 }
 
@@ -78,6 +80,7 @@ int main(int argc, char **argv)
     const char *pack_path = NULL;
     bool pack_only = false;
     bool quiet = false;
+    bool verbose = false;
     u32 threads = 0U;
     CookerDesc desc;
     memset(&desc, 0, sizeof desc);
@@ -198,6 +201,8 @@ int main(int argc, char **argv)
             ++i;
         } else if (strcmp(a, "--quiet") == 0) {
             quiet = true;
+        } else if (strcmp(a, "--verbose") == 0) {
+            verbose = true;
         } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(stdout);
             NPH_FREE_ARRAY(alloc, const char *, sources, (u32)argc + 1U);
@@ -228,7 +233,12 @@ int main(int argc, char **argv)
     console.color = nph_platform_console_enable_vt();
     console.with_location = false;
     NPH_IGNORE_RESULT(nph_log_add_sink(nph_log_console_sink, &console,
-                                       quiet ? NPH_LOG_LEVEL_WARN : NPH_LOG_LEVEL_INFO));
+                                       quiet     ? NPH_LOG_LEVEL_WARN
+                                       : verbose ? NPH_LOG_LEVEL_DEBUG
+                                                 : NPH_LOG_LEVEL_INFO));
+    if (verbose) {
+        nph_log_set_level(&NPH_LOG_COOK, NPH_LOG_LEVEL_DEBUG);
+    }
     NphLogThread log_thread;
     memset(&log_thread, 0, sizeof log_thread);
     NPH_IGNORE_RESULT(nph_log_thread_start(&log_thread, 5U));
