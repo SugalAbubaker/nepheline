@@ -105,15 +105,54 @@ typedef struct LodVoxelSource {
 
 typedef NPH_ARRAY(LodVoxelSource) LodVoxelSourceArray;
 
+// A transform from another mesh's space into the voxelizer's: x' = to x
+// (rows of a 3 x 4 matrix, the translation last), its inverse, and the
+// matrix that takes a normal across (the inverse transpose of to's linear
+// part; its results are normalised).
+typedef struct LodVoxelTransform {
+    f64 to[3][4];
+    f64 from[3][4];
+    f64 normal[3][3];
+} LodVoxelTransform;
+
+// Fills `t`'s inverse and normal matrix from its `to`. False where to's
+// linear part is singular.
+NPH_MUST_USE bool lod_voxel_transform_init(LodVoxelTransform *t);
+
+// A voxel of another mesh standing as a source (a cell proxy's,
+// render/cell_proxy.h): its record, its cell's lowest corner and edge in that
+// mesh's space, the transform from there, and the submesh it votes for.
+typedef struct LodVoxelFootprint {
+    NphRenderVoxel voxel;
+    NphVec3 base;
+    f32 cell;
+    u32 transform;
+    u32 submesh;
+} LodVoxelFootprint;
+
 // What a group voxelizes: its triangles, over the mesh's positions, with the
-// caller's materials.
+// caller's materials; and, for a cell proxy, other meshes' voxels. Where
+// `keep` is set, only the cells it keeps are voxelized.
 typedef struct LodVoxelInput {
     const NphVec3 *positions;
     const LodVoxelSource *sources;
     u32 source_count;
     const NphRenderVoxelSampler *sampler;
     NphAllocator *scratch;
+    const LodVoxelFootprint *footprints;
+    u32 footprint_count;
+    const LodVoxelTransform *transforms;
+    bool (*keep)(void *user, const i32 c[3]);
+    void *keep_user;
 } LodVoxelInput;
+
+// The span of the ray origin + t dir (dir of any length) for t in [t_min,
+// t_max] inside the footprint of `voxel` (render/voxel.h), its cell of
+// lowest corner `base` and edge `h`: its first and last t inside (the C
+// twin's footprint test run forwards, then back from the cell's far side).
+// False where it meets none.
+bool voxel_footprint_span(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
+                          NphVec3 dir, f32 t_min, f32 t_max, f32 *out_enter, f32 *out_leave);
 
 // Cell coordinates are kept within +-2^20 cells of the mesh's origin (21
 // bits each in a 64-bit key).
@@ -130,20 +169,21 @@ typedef struct LodVoxelCell {
 typedef NPH_ARRAY(LodVoxelCell) LodVoxelCellArray;
 
 // The cells of edge `cell` that the sources' triangles overlap (Akenine-
-// Möller's triangle-box test), counted up to `limit`: *out_count is more
-// than `limit` when there are more. NPH_RESULT_OVERFLOW when a cell lies
-// past LOD_VOXEL_COORD_LIMIT.
+// Möller's triangle-box test) and their footprints' bounds do, counted up to
+// `limit`: *out_count is more than `limit` when there are more.
+// NPH_RESULT_OVERFLOW when a cell lies past LOD_VOXEL_COORD_LIMIT.
 NPH_MUST_USE NphResult lod_voxel_count(const LodVoxelInput *in, f64 cell, u32 limit,
                                        u32 *out_count);
 
 // Voxelizes the sources at cells of edge `cell` (render/voxel.h): for each
 // cell they overlap, NPH_RENDER_VOXEL_RAYS^2 jittered rays along each axis
 // against its triangles (a masked submesh's points through the sampler's
-// `covers`), and from the rays that hit, the voxel. `out` (cleared first)
-// takes the cells some ray hit, in order of their coordinates (z, then y,
-// then x); `source_cell` (source_count entries) takes for each source the
-// index in `out` of the cell holding its centroid where some ray hit there,
-// else of the first cell where a ray hit the source itself, else
-// NPH_U32_MAX. Deterministic. NPH_RESULT_OVERFLOW as lod_voxel_count.
+// `covers`) and footprints (whose look is their voxel's), and from the rays
+// that hit, the voxel. `out` (cleared first) takes the cells some ray hit, in
+// order of their coordinates (z, then y, then x); `source_cell`
+// (source_count entries: the triangles) takes for each triangle the index in
+// `out` of the cell holding its centroid where some ray hit there, else of
+// the first cell where a ray hit the source itself, else NPH_U32_MAX.
+// Deterministic. NPH_RESULT_OVERFLOW as lod_voxel_count.
 NPH_MUST_USE NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out,
                                     u32 *source_cell);

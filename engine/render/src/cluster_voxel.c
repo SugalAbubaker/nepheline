@@ -37,6 +37,12 @@
 // shift) and the footprints' places are hashes of the cell, so a regular
 // structure does not alias with the grid, and the result is the same for
 // the same input.
+//
+// A cell proxy (ADR-0062) also voxelizes other meshes' voxels, through the
+// transforms of their instances: a ray meets such a voxel where it crosses
+// its footprint (the C twin's test, in the voxel's own mesh space), first
+// and last, and sees its look there, its lobe as the spread of normals it
+// stands for.
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/math/scalar.h>
@@ -53,6 +59,11 @@
 // The share of rays below which an axis counts as one ray's worth (an
 // edge-on sheet stops none).
 #define MIN_COVERAGE (1.0 / (f64)AXIS_RAYS)
+
+// The shortest span of a ray inside a footprint, in cells, that counts as a
+// hit: far below a footprint's thinnest (a 32nd of its own cell), far above
+// the rounding of the ray's single-precision test.
+#define MIN_SPAN 1e-5F
 
 typedef struct CellRef {
     u64 key;
@@ -195,12 +206,108 @@ static bool source_cells(f64 p[3][3], f64 cell, i64 lo[3], i64 hi[3])
     return true;
 }
 
-// Calls `visit(ctx, key)` for each cell of edge `cell` source `s` overlaps;
-// stops at the first that does not return NPH_RESULT_OK.
+bool lod_voxel_transform_init(LodVoxelTransform *t)
+{
+    NPH_ASSERT(t != NULL);
+    // (Not a pointer to const arrays: C17 does not convert to one.)
+    f64(*m)[4] = t->to;
+    // The linear part's cofactors: its inverse is their transpose over the
+    // determinant, its inverse transpose they themselves over it.
+    f64 cof[3][3];
+    for (u32 r = 0; r < 3U; ++r) {
+        const u32 r1 = (r + 1U) % 3U;
+        const u32 r2 = (r + 2U) % 3U;
+        for (u32 c = 0; c < 3U; ++c) {
+            const u32 c1 = (c + 1U) % 3U;
+            const u32 c2 = (c + 2U) % 3U;
+            cof[r][c] = m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1];
+        }
+    }
+    const f64 det = m[0][0] * cof[0][0] + m[0][1] * cof[0][1] + m[0][2] * cof[0][2];
+    if (!(nph_f64_abs(det) > 0.0) || !nph_f64_is_finite(det)) {
+        return false;
+    }
+    const f64 inv_det = 1.0 / det;
+    for (u32 r = 0; r < 3U; ++r) {
+        for (u32 c = 0; c < 3U; ++c) {
+            t->from[r][c] = cof[c][r] * inv_det;
+            t->normal[r][c] = cof[r][c] * inv_det;
+        }
+    }
+    for (u32 r = 0; r < 3U; ++r) {
+        t->from[r][3] =
+            -(t->from[r][0] * m[0][3] + t->from[r][1] * m[1][3] + t->from[r][2] * m[2][3]);
+    }
+    return true;
+}
+
+// A footprint's box (its voxel's `box` word in its cell; a capsule's reaches
+// past it by its radius, within the cell) taken into the voxelizer's space,
+// the bounds of its corners: the round shapes lie in it.
+static void footprint_bounds(const LodVoxelInput *in, const LodVoxelFootprint *f, f64 lo[3],
+                             f64 hi[3])
+{
+    const LodVoxelTransform *t = &in->transforms[f->transform];
+    const u32 box = f->voxel.box;
+    const f64 h = (f64)f->cell;
+    const f64 step = h / (f64)NPH_RENDER_VOXEL_BOX_STEPS;
+    const f64 base[3] = {(f64)f->base.x, (f64)f->base.y, (f64)f->base.z};
+    const f64 reach =
+        (box >> NPH_RENDER_VOXEL_SHAPE_SHIFT) == NPH_RENDER_VOXEL_SHAPE_CAPSULE
+            ? (f64)nph_render_voxel_radius_decode((f->voxel.material >> 26U) & 63U) * h
+            : 0.0;
+    f64 bl[3];
+    f64 bh[3];
+    for (u32 a = 0; a < 3U; ++a) {
+        bl[a] = nph_f64_max(base[a] + (f64)((box >> (5U * a)) & 31U) * step - reach, base[a]);
+        bh[a] = nph_f64_min(base[a] + (f64)(((box >> (15U + 5U * a)) & 31U) + 1U) * step + reach,
+                            base[a] + h);
+        lo[a] = NPH_F64_MAX;
+        hi[a] = -NPH_F64_MAX;
+    }
+    for (u32 k = 0; k < 8U; ++k) {
+        const f64 q[3] = {(k & 1U) != 0U ? bh[0] : bl[0], (k & 2U) != 0U ? bh[1] : bl[1],
+                          (k & 4U) != 0U ? bh[2] : bl[2]};
+        for (u32 r = 0; r < 3U; ++r) {
+            const f64 x =
+                t->to[r][0] * q[0] + t->to[r][1] * q[1] + t->to[r][2] * q[2] + t->to[r][3];
+            lo[r] = nph_f64_min(lo[r], x);
+            hi[r] = nph_f64_max(hi[r], x);
+        }
+    }
+}
+
+// Calls `visit(ctx, key)` for each cell of edge `cell` source `s` overlaps
+// (a triangle, or past the triangles a footprint, by its bounds); stops at
+// the first that does not return NPH_RESULT_OK.
 typedef NphResult (*CellVisit)(void *ctx, u64 key, u32 source);
 
 static NphResult visit_cells(const LodVoxelInput *in, u32 s, f64 cell, CellVisit visit, void *ctx)
 {
+    if (s >= in->source_count) {
+        f64 lo[3];
+        f64 hi[3];
+        footprint_bounds(in, &in->footprints[s - in->source_count], lo, hi);
+        i64 c0[3];
+        i64 c1[3];
+        for (u32 a = 0; a < 3U; ++a) {
+            const f64 l = floor(lo[a] / cell);
+            const f64 h = floor(hi[a] / cell);
+            if (!(l > -(f64)LOD_VOXEL_COORD_LIMIT) || !(h < (f64)LOD_VOXEL_COORD_LIMIT - 1.0)) {
+                return NPH_RESULT_OVERFLOW;
+            }
+            c0[a] = (i64)l;
+            c1[a] = (i64)h;
+        }
+        for (i64 z = c0[2]; z <= c1[2]; ++z) {
+            for (i64 y = c0[1]; y <= c1[1]; ++y) {
+                for (i64 x = c0[0]; x <= c1[0]; ++x) {
+                    NPH_TRY(visit(ctx, cell_key(x, y, z), s));
+                }
+            }
+        }
+        return NPH_RESULT_OK;
+    }
     f64 p[3][3];
     if (!source_corners(in, s, p)) {
         return NPH_RESULT_OK;
@@ -251,7 +358,8 @@ NphResult lod_voxel_count(const LodVoxelInput *in, f64 cell, u32 limit, u32 *out
     const NphHashMapDesc desc = nph_hashmap_desc_u64(0U);
     NPH_TRY(nph_hashmap_init(&ctx.set, in->scratch, &desc));
     NphResult r = NPH_RESULT_OK;
-    for (u32 s = 0; s < in->source_count && r == NPH_RESULT_OK; ++s) {
+    const u32 total = in->source_count + in->footprint_count;
+    for (u32 s = 0; s < total && r == NPH_RESULT_OK; ++s) {
         r = visit_cells(in, s, cell, count_visit, &ctx);
     }
     *out_count = nph_hashmap_len(&ctx.set);
@@ -449,6 +557,108 @@ static bool rasterise(CellState *st, u32 s, f64 p[3][3], u32 a)
     return any;
 }
 
+// Footprint source `s`'s hits along axis `a` of the cell: each ray of the
+// axis across the cell (its direction the cell's edge long, so that t is in
+// cell units) taken into the footprint's mesh space, where it enters and
+// leaves the footprint within the cell. Returns whether any ray hit.
+static bool rasterise_footprint(CellState *st, u32 s, u32 a)
+{
+    const LodVoxelInput *in = st->in;
+    const LodVoxelFootprint *f = &in->footprints[s - in->source_count];
+    const LodVoxelTransform *t = &in->transforms[f->transform];
+    const u32 u = (a + 1U) % 3U;
+    const u32 w = (a + 2U) % 3U;
+    f64 lo[3];
+    f64 hi[3];
+    footprint_bounds(in, f, lo, hi);
+    for (u32 k = 0; k < 3U; ++k) {
+        lo[k] = (lo[k] - st->lo[k]) / st->cell;
+        hi[k] = (hi[k] - st->lo[k]) / st->cell;
+    }
+    if (hi[u] < 0.0 || lo[u] >= 1.0 || hi[w] < 0.0 || lo[w] >= 1.0 || hi[a] < 0.0 || lo[a] >= 1.0) {
+        return false;
+    }
+    const i32 i0 = (i32)nph_f64_clamp(floor(lo[u] * (f64)RAYS), 0.0, (f64)RAYS - 1.0);
+    const i32 i1 = (i32)nph_f64_clamp(floor(hi[u] * (f64)RAYS), 0.0, (f64)RAYS - 1.0);
+    const i32 j0 = (i32)nph_f64_clamp(floor(lo[w] * (f64)RAYS), 0.0, (f64)RAYS - 1.0);
+    const i32 j1 = (i32)nph_f64_clamp(floor(hi[w] * (f64)RAYS), 0.0, (f64)RAYS - 1.0);
+    const NphVec3 dir = nph_vec3((f32)(t->from[0][a] * st->cell), (f32)(t->from[1][a] * st->cell),
+                                 (f32)(t->from[2][a] * st->cell));
+    const f64 base[3] = {(f64)f->base.x, (f64)f->base.y, (f64)f->base.z};
+    // Just short of the cell's far face: its extent is half open.
+    const f32 last = 1.0F - 1.0F / 16777216.0F;
+    bool any = false;
+    for (i32 j = j0; j <= j1; ++j) {
+        for (i32 i = i0; i <= i1; ++i) {
+            const u32 r = (u32)i + (u32)j * RAYS;
+            const f64 qu = ray_u(st, a, (u32)i, (u32)j);
+            const f64 qw = ray_w(st, a, (u32)i, (u32)j);
+            f64 ot[3];
+            ot[a] = st->lo[a];
+            ot[u] = st->lo[u] + qu * st->cell;
+            ot[w] = st->lo[w] + qw * st->cell;
+            // The origin relative to the footprint's cell, in double precision:
+            // the mesh's own coordinates may be far larger than the cell.
+            f64 om[3];
+            for (u32 k = 0; k < 3U; ++k) {
+                om[k] = t->from[k][0] * ot[0] + t->from[k][1] * ot[1] + t->from[k][2] * ot[2] +
+                        t->from[k][3] - base[k];
+            }
+            f32 enter = 0.0F;
+            f32 leave = 0.0F;
+            // A span of no length is a touch: a footprint against the cell's
+            // face from the next cell, or a graze.
+            if (!voxel_footprint_span(&f->voxel, nph_vec3_zero(), f->cell,
+                                      nph_vec3((f32)om[0], (f32)om[1], (f32)om[2]), dir, 0.0F, 1.0F,
+                                      &enter, &leave) ||
+                !(enter < 1.0F) || !(leave - enter > MIN_SPAN)) {
+                continue;
+            }
+            leave = nph_f32_min(leave, last);
+            any = true;
+            Ray *ray = &st->rays[a * AXIS_RAYS + r];
+            if (ray->stamp != st->stamp) {
+                ray->stamp = st->stamp;
+                ray->near_source = s;
+                ray->far_source = s;
+                ray->near_depth = enter;
+                ray->far_depth = leave;
+                ray->near_b[0] = 0.0F;
+                ray->near_b[1] = 0.0F;
+                ray->far_b[0] = 0.0F;
+                ray->far_b[1] = 0.0F;
+                st->hits[a] += 1U;
+            } else {
+                if (enter < ray->near_depth) {
+                    ray->near_source = s;
+                    ray->near_depth = enter;
+                }
+                if (leave > ray->far_depth) {
+                    ray->far_source = s;
+                    ray->far_depth = leave;
+                }
+            }
+            // Where it enters and leaves: the footprint's surface, both.
+            for (u32 e = 0; e < 2U; ++e) {
+                f64 point[3];
+                point[a] = (f64)(e == 0U ? enter : leave);
+                point[u] = qu;
+                point[w] = qw;
+                st->points += 1.0;
+                for (u32 k = 0; k < 3U; ++k) {
+                    st->point_sum[k] += point[k];
+                    for (u32 q = 0; q < 3U; ++q) {
+                        st->point_products[k][q] += point[k] * point[q];
+                    }
+                    st->bounds_lo[k] = nph_f64_min(st->bounds_lo[k], point[k]);
+                    st->bounds_hi[k] = nph_f64_max(st->bounds_hi[k], point[k]);
+                }
+            }
+        }
+    }
+    return any;
+}
+
 // The symmetric 3 x 3 matrix `m`'s eigenvector of the largest eigenvalue,
 // by cyclic Jacobi rotations (Golub & Van Loan, "Matrix Computations",
 // §8.5), and that eigenvalue.
@@ -521,8 +731,71 @@ typedef struct CellLook {
     u32 submeshes;
 } CellLook;
 
+// A vote for `submesh` among the cell's.
+static void look_vote(CellLook *look, u32 submesh)
+{
+    u32 k = 0U;
+    while (k < look->submeshes && look->submesh[k] != submesh) {
+        ++k;
+    }
+    if (k == look->submeshes && k < 8U) {
+        look->submesh[k] = submesh;
+        look->votes[k] = 0U;
+        look->submeshes += 1U;
+    }
+    if (k < look->submeshes) {
+        look->votes[k] += 1U;
+    }
+}
+
+// A footprint's look: its voxel's, the lobe's axis taken across, the normals'
+// second moment the lobe's own, ((1 - b2) / 3) I + b2 n n^T for its band-2
+// factor b2 (render/voxel.h). It is weighed as look_add weighs a triangle's
+// hit, by the reciprocal of its normals' mean |n_x| + |n_y| + |n_z|: |n|'s
+// sum for a lobe of one normal (b2 1), 3/2 for an isotropic one (b2 0), and
+// between them in proportion.
+static void look_add_footprint(CellState *st, CellLook *look, u32 s)
+{
+    const LodVoxelFootprint *f = &st->in->footprints[s - st->in->source_count];
+    const LodVoxelTransform *t = &st->in->transforms[f->transform];
+    NphRenderVoxelDesc d;
+    nph_render_voxel_unpack(f->voxel, &d);
+    look->color[0] += (f64)d.albedo.x;
+    look->color[1] += (f64)d.albedo.y;
+    look->color[2] += (f64)d.albedo.z;
+    look->roughness += (f64)d.roughness;
+    look->metallic += (f64)d.metallic;
+    look->occlusion += (f64)d.occlusion;
+    const f64 m[3] = {(f64)d.axis.x, (f64)d.axis.y, (f64)d.axis.z};
+    f64 n[3];
+    for (u32 r = 0; r < 3U; ++r) {
+        n[r] = t->normal[r][0] * m[0] + t->normal[r][1] * m[1] + t->normal[r][2] * m[2];
+    }
+    const f64 len2 = dot3(n, n);
+    if (len2 > 0.0 && nph_f64_is_finite(len2)) {
+        const f64 inv = 1.0 / sqrt(len2);
+        const f64 u[3] = {n[0] * inv, n[1] * inv, n[2] * inv};
+        const f64 b2 = (f64)nph_render_voxel_sh_band2(d.kappa);
+        const f64 sum = nph_f64_abs(u[0]) + nph_f64_abs(u[1]) + nph_f64_abs(u[2]);
+        const f64 wgt = 1.0 / (b2 * sum + 1.5 * (1.0 - b2));
+        for (u32 r = 0; r < 3U; ++r) {
+            for (u32 c = 0; c < 3U; ++c) {
+                const f64 iso = r == c ? (1.0 - b2) / 3.0 : 0.0;
+                look->moment[r][c] += wgt * (iso + b2 * u[r] * u[c]);
+            }
+        }
+        look->moment_weight += wgt;
+    }
+    look->count += 1U;
+    look_vote(look, f->submesh);
+}
+
 static void look_add(CellState *st, CellLook *look, u32 s, const f32 b12[2])
 {
+    if (s >= st->in->source_count) {
+        look_add_footprint(st, look, s);
+        return;
+    }
     const LodVoxelSource *src = &st->in->sources[s];
     const NphVec3 b = nph_vec3(1.0F - b12[0] - b12[1], b12[0], b12[1]);
     NphRenderVoxelSample sample;
@@ -553,18 +826,7 @@ static void look_add(CellState *st, CellLook *look, u32 s, const f32 b12[2])
         look->moment_weight += wgt;
     }
     look->count += 1U;
-    u32 k = 0U;
-    while (k < look->submeshes && look->submesh[k] != src->submesh) {
-        ++k;
-    }
-    if (k == look->submeshes && k < 8U) {
-        look->submesh[k] = src->submesh;
-        look->votes[k] = 0U;
-        look->submeshes += 1U;
-    }
-    if (k < look->submeshes) {
-        look->votes[k] += 1U;
-    }
+    look_vote(look, src->submesh);
 }
 
 static void look_rays(CellState *st, CellLook *look, bool every)
@@ -878,8 +1140,9 @@ static u32 find_cell(const LodVoxelCellArray *cells, u64 key)
 
 NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out, u32 *source_cell)
 {
-    NPH_ASSERT(in != NULL && out != NULL && cell > 0.0 && in->sampler != NULL &&
-               in->sampler->sample != NULL);
+    NPH_ASSERT(in != NULL && out != NULL && cell > 0.0);
+    NPH_ASSERT(in->source_count == 0U || (in->sampler != NULL && in->sampler->sample != NULL));
+    NPH_ASSERT(in->footprint_count == 0U || (in->footprints != NULL && in->transforms != NULL));
     NPH_ARRAY_CLEAR(out);
     NphAllocator *a = in->scratch;
     for (u32 s = 0; s < in->source_count; ++s) {
@@ -888,7 +1151,8 @@ NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out
     RefCtx refs;
     NPH_ARRAY_INIT(&refs.refs, a);
     NphResult r = NPH_RESULT_OK;
-    for (u32 s = 0; s < in->source_count && r == NPH_RESULT_OK; ++s) {
+    const u32 total = in->source_count + in->footprint_count;
+    for (u32 s = 0; s < total && r == NPH_RESULT_OK; ++s) {
         r = visit_cells(in, s, cell, ref_visit, &refs);
     }
     if (r == NPH_RESULT_OK && refs.refs.len > 1U) {
@@ -914,9 +1178,13 @@ NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out
             ++j;
         }
         st.key = refs.refs.data[i].key;
-        st.stamp += 1U;
         i32 c[3];
         key_coords(st.key, c);
+        if (in->keep != NULL && !in->keep(in->keep_user, c)) {
+            i = j;
+            continue;
+        }
+        st.stamp += 1U;
         st.points = 0.0;
         for (u32 k = 0; k < 3U; ++k) {
             st.lo[k] = (f64)c[k] * cell;
@@ -935,6 +1203,14 @@ NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out
         bool any = false;
         for (u32 k = i; k < j; ++k) {
             const u32 s = refs.refs.data[k].source;
+            if (s >= in->source_count) {
+                bool hit = false;
+                for (u32 ax = 0; ax < 3U; ++ax) {
+                    hit = rasterise_footprint(&st, s, ax) || hit;
+                }
+                any = any || hit;
+                continue;
+            }
             f64 p[3][3];
             // source_corners was true when the ref was made.
             (void)source_corners(in, s, p);
