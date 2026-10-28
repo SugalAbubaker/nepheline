@@ -748,12 +748,13 @@ typedef struct NphRenderFrameStats {
     u32 vis_overflow;            // NphRenderVisOverflow bits: lists that dropped work
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
-    // renderer raises it while the map overflows its capacities and lowers
-    // it again once there is room); then, read back with the counters above
-    // (zero when that frame had none), the pages its pixels needed, the
-    // pages drawn (new, or changed since), the pages the pool holds, those
-    // taken from others, the caster draws (voxel clusters' apart), the
-    // casters' meshlets and the walk's nodes, and NphRenderVsmOverflow bits.
+    // renderer raises it while the pool overflows, or while the pages
+    // wanted keep outrunning the page budget, and lowers it again once
+    // there is room); then, read back with the counters above (zero when
+    // that frame had none), the pages its pixels needed, the pages drawn
+    // (new, or changed since), the pages the pool holds, those taken from
+    // others, the caster draws (voxel clusters' apart), the casters'
+    // meshlets and the walk's nodes, and NphRenderVsmOverflow bits.
     b32 vsm;
     u32 vsm_lod_bias;
     u32 vsm_requested;
@@ -768,6 +769,15 @@ typedef struct NphRenderFrameStats {
     // visited.
     u32 vsm_meshlets;
     u32 vsm_nodes;
+    // The page budget: the pages that wanted drawing (new, or changed
+    // since), and how many of them the caster lists could hold at what a
+    // page of each level has cost them lately, with a quarter of each to
+    // spare (more than were wanted where all of them fit). The pages drawn
+    // are the wanted ones of the coarsest levels the lists held; the others
+    // are drawn in later frames, their pixels reading a coarser level
+    // meanwhile.
+    u32 vsm_wanted;
+    u32 vsm_budget;
     u32 vsm_overflow;
     // Temporal anti-aliasing: whether the frame was resolved temporally,
     // and whether it blended with history (not on the first such frame, nor
@@ -790,9 +800,11 @@ typedef struct NphRenderFrameStats {
 
 // The virtual shadow map's capacities that can fill up
 // (NphRenderFrameStats.vsm_overflow); each is in NphRendererDesc. Pixels
-// whose pages did not fit in the pool are lit; a page whose draws did not
-// all fit is drawn again the next frame. Either way the renderer raises the
-// resolution bias until the map fits (NphRenderFrameStats.vsm_lod_bias).
+// whose pages did not fit in the pool are lit, and the renderer raises the
+// resolution bias until the pages fit (NphRenderFrameStats.vsm_lod_bias). A
+// page whose draws did not all fit is not read, and is drawn again the next
+// frame, within a page budget set from what the pages cost the lists
+// (NphRenderFrameStats.vsm_budget).
 typedef enum NphRenderVsmOverflow {
     NPH_RENDER_VSM_OVERFLOW_POOL = 1U << 0U,     // vsm_pages
     NPH_RENDER_VSM_OVERFLOW_MESHLETS = 1U << 1U, // max_vsm_meshlets

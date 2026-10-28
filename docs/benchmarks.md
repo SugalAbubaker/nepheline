@@ -245,7 +245,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
-            [--lod-error=PX] [--lists=N]
+            [--lod-error=PX] [--lists=N] [--vsm-trace]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -274,7 +274,11 @@ of the renderer's debug views (base colour, normals, roughness, ...) to
 look at the content, under names no budget matches. `--lists=N` makes
 every list of the production path and the shadow map that can drop work N
 times its default (a power of two up to 16): what a scene that overflows
-them needs, in results no budget compares. Without the packs
+them needs, in results no budget compares. `--vsm-trace` prints the sun's
+shadow map's statistics every frame, warm-up included (each frame's line
+reports the frame two before it): the pages wanted and drawn, the page
+budget, the caster lists' use, the resolution bias and the overflows.
+Without the packs
 those scenes are skipped with a message, so the budgets of a machine
 without them are those of the synthetic scenes alone. The CTest smoke
 run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,

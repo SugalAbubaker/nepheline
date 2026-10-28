@@ -31,6 +31,7 @@
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_vote : require
 #include "vis_common.glsl"
 #include "vsm_common.glsl"
 
@@ -112,7 +113,20 @@ void main()
         }
     }
 
-    VIS_COUNT(counters.c.nodes_visited, counted);
+    // The nodes visited, and what the level's pages cost the walk and the
+    // meshlet list (the page budget): a work item's 64 lanes are of one
+    // level, so a subgroup's are (elsewhere, a lane adds its own).
+    const bool one_level = subgroupAllEqual(level);
+    const uint visited = subgroupBallotBitCount(subgroupBallot(counted));
+    if (visited != 0u && subgroupElect()) {
+        atomicAdd(counters.c.nodes_visited, visited);
+        if (one_level) {
+            atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_NODES], visited);
+        }
+    }
+    if (!one_level && counted) {
+        atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_NODES], 1u);
+    }
 
     // The nodes found, into the next queue, and the next step's workgroups
     // raised to take them.
@@ -127,10 +141,14 @@ void main()
             atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
         }
     }
-    const uint end = subgroupMax(node ? min(nbase + 1u, r.v.max_nodes) : 0u);
-    if (end != 0u && subgroupElect()) {
+    // The queue's fill, past its capacity where it overflowed: the page
+    // budget reads the fullest.
+    const uint need = subgroupMax(node ? nbase + 1u : 0u);
+    if (need != 0u && subgroupElect()) {
+        atomicMax(counters.c.node_peak, need);
         atomicMax(args.a.node_args[qout][0],
-                  (end + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
+                  (min(need, r.v.max_nodes) + uint(NPH_VIS_LOD_ITEMS) - 1u) /
+                      uint(NPH_VIS_LOD_ITEMS));
     }
 
     // The groups' clusters, into the meshlet list, for vsm cull meshlets to
@@ -142,8 +160,20 @@ void main()
         clusters = groups.g[group].cluster_count;
         first = groups.g[group].cluster_offset;
     }
-    uint mbase;
-    VIS_RESERVE(counters.c.meshlet_count, clusters, mbase);
+    // Their slots in the list, a subgroup's together (VIS_RESERVE), the
+    // level's share counted with them.
+    const uint total = subgroupAdd(clusters);
+    uint mfirst = 0u;
+    if (total != 0u && subgroupElect()) {
+        mfirst = atomicAdd(counters.c.meshlet_count, total);
+        if (one_level) {
+            atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], total);
+        }
+    }
+    const uint mbase = subgroupBroadcastFirst(mfirst) + subgroupExclusiveAdd(clusters);
+    if (!one_level && clusters != 0u) {
+        atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], clusters);
+    }
     if (clusters != 0u) {
         VisUintRef members = VisUintRef(members_address);
         for (uint j = 0u; j < clusters; ++j) {

@@ -28,6 +28,7 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
 #include "vis_common.glsl"
 #include "vsm_common.glsl"
 
@@ -76,10 +77,14 @@ void cull_instances(VisViewRef view, VsmViewRef r)
             atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
         }
     }
-    const uint nend = subgroupMax(walk ? min(nbase + 1u, r.v.max_nodes) : 0u);
-    if (nend != 0u && subgroupElect()) {
+    // The queue's fill, past its capacity where it overflowed: the page
+    // budget reads the fullest.
+    const uint need = subgroupMax(walk ? nbase + 1u : 0u);
+    if (need != 0u && subgroupElect()) {
+        atomicMax(counters.c.node_peak, need);
         atomicMax(VsmArgsRef(r.v.args).a.node_args[0][0],
-                  (nend + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
+                  (min(need, r.v.max_nodes) + uint(NPH_VIS_LOD_ITEMS) - 1u) /
+                      uint(NPH_VIS_LOD_ITEMS));
     }
 
     // The subgroup's meshlets as items: one atomic for the total, then an
@@ -91,6 +96,8 @@ void cull_instances(VisViewRef view, VsmViewRef r)
     uint base = 0u;
     if (total != 0u && subgroupElect()) {
         base = atomicAdd(counters.c.meshlet_count, total);
+        // The workgroup's level is the dispatch's z: one for all its lanes.
+        atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], total);
     }
     base = subgroupBroadcastFirst(base);
     const uint rounds = (total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
@@ -173,11 +180,53 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
     }
     // A meshlet record without vertices is a voxel cluster.
     const bool voxels = k_voxels && (m.z & 0xFFFFu) == 0u;
-    uint at;
-    VIS_RESERVE(counters.c.draw_count, voxels ? 0u : draws, at);
-    uint voxel_at = 0u;
-    if (k_voxels) {
-        VIS_RESERVE(counters.c.voxel_draw_count, voxels ? draws : 0u, voxel_at);
+    // The draws' slots in their lists, a subgroup's together (VIS_RESERVE),
+    // and what each level's pages cost the lists (the page budget). The
+    // list mixes levels, though a subgroup's items are mostly of one: then
+    // its totals count for that level; else the subgroup's lanes of each
+    // level add theirs together, a level a round, the first pending one.
+    const bool one_level = subgroupAllEqual(level);
+    const uint triangles = voxels ? 0u : draws;
+    const uint voxel = voxels ? draws : 0u;
+    const uint triangle_total = subgroupAdd(triangles);
+    const uint voxel_total = k_voxels ? subgroupAdd(voxel) : 0u;
+    uint first_at = 0u;
+    uint first_voxel = 0u;
+    if (subgroupElect()) {
+        if (triangle_total != 0u) {
+            first_at = atomicAdd(counters.c.draw_count, triangle_total);
+            if (one_level) {
+                atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_DRAWS], triangle_total);
+            }
+        }
+        if (voxel_total != 0u) {
+            first_voxel = atomicAdd(counters.c.voxel_draw_count, voxel_total);
+            if (one_level) {
+                atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_VOXEL_DRAWS], voxel_total);
+            }
+        }
+    }
+    uint at = subgroupBroadcastFirst(first_at) + subgroupExclusiveAdd(triangles);
+    uint voxel_at =
+        k_voxels ? subgroupBroadcastFirst(first_voxel) + subgroupExclusiveAdd(voxel) : 0u;
+    bool pending = !one_level && draws != 0u;
+    while (subgroupAny(pending)) {
+        if (pending) {
+            const int first = subgroupBroadcastFirst(level);
+            if (level == first) {
+                const uint t = subgroupAdd(triangles);
+                const uint v = subgroupAdd(voxel);
+                if (subgroupElect()) {
+                    if (t != 0u) {
+                        atomicAdd(counters.c.level_cost[first][NPH_VSM_COST_DRAWS], t);
+                    }
+                    if (v != 0u) {
+                        atomicAdd(counters.c.level_cost[first][NPH_VSM_COST_VOXEL_DRAWS], v);
+                    }
+                }
+                pending = false;
+            }
+        }
     }
     if (draws == 0u) {
         return;

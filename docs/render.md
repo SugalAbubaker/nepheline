@@ -331,8 +331,9 @@ something it shows changes.
 | `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in every level (an invocation per update and level), a row of words at a time |
 | `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (the view's rays), and the pages its shading may read set in the requests bitmask, a 2 × 2 block's at once where it can (`vsm_block.glsl`) |
 | `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
-| `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
-| `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
+| `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is wanted, to be drawn again, if dirty), one without is wanted, to take a page; the wanted pages listed and counted per level |
+| `vsm collect` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones) |
+| `vsm select` | the wanted pages to draw this frame within the page budget, the coarse levels first ("Overflow and the page budget", below): a dirty page granted is drawn, a new one takes a free page, else an evictable one, and is drawn; the rest wait for a later frame |
 | `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page; a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
@@ -378,7 +379,8 @@ frame's jitter.
 **Caching.** A drawn page stays drawn. A caster's change dirties exactly
 the pages under its bounding sphere, old and new, since a shadow map's
 texel holds the nearest caster along the light; a dirty page is drawn
-again (with every caster in it) when next requested. The sun turning, the
+again (with every caster in it) when next requested, within the page
+budget ("Overflow and the page budget", below). The sun turning, the
 anchor moving, or a production frame without the map drops every page.
 
 **Levels of detail.** A caster with levels of detail ("Levels of detail"
@@ -469,14 +471,46 @@ page the window left. `surface.glsl` holds the call (`NPH_SURFACE_VSM`);
 the resolve and the blended surfaces have pipeline variants specialised
 on whether the frame has the map, so frames without it keep the registers.
 
-**Overflow.** What does not fit the pool, `max_vsm_meshlets`, or
-`max_vsm_draws` is dropped, flagged in `NphRenderFrameStats.vsm_overflow`,
-and logged once: pixels whose pages did not fit are lit, a page whose
-draws did not all fit is drawn again the next frame. Each overflow at the
-current **resolution bias** raises it (each step halves every level's
-resolution, up to 3), so the pages fit within a few frames; 120 frames in
-a row whose pages would fit a step finer within three quarters of the
-pool lower it again (`vsm_lod_bias`).
+**Overflow and the page budget.** What does not fit the pool,
+`max_vsm_meshlets`, `max_vsm_draws`, `max_vsm_voxel_draws` or the walk's
+queues (`max_lod_nodes`) is dropped, flagged in
+`NphRenderFrameStats.vsm_overflow`, and logged once: pixels whose pages did
+not fit the pool are lit, and a page whose draws did not all fit is not read
+(it stays dirty, so the lookup passes to a coarser level) and is drawn
+again. A frame draws only the pages it wants (new, or dirty and requested:
+`vsm_wanted`) that the caster lists hold, a quarter of each kept to spare,
+at what a page of each level costs them: the **page budget**, the coarse
+levels first (`vsm select`). Every wanted page of the levels from the
+coarsest down is granted while they fit, then as many of the next level's
+as fit; the others wait for later frames, their pixels reading a coarser
+level meanwhile where one holds their point (a dirty page is not read; a
+new one has nothing to read). A frame draws at least one page.
+
+The culls count what each level's pages drawn take of each list: the
+meshlet items, the caster draws, the voxel casters' draws, and the walk's
+nodes (as their share of its fullest queue), counted past a list where it
+overflowed (a subgroup's items are mostly of one level, and count
+together). A level's cost a page is the most a recent frame's pages of it
+cost on average, decaying by an eighth each frame that draws one, so pages
+dearer than the last frame's seldom overflow the lists; a level not yet
+drawn takes the dearest level's, coarse pages costing the more, and the
+first frame, with no cost known, draws at most 256 pages. `vsm_budget`
+reports how many of the frame's wanted pages the lists could hold (more
+than were wanted where all fit). So a burst of pages (the map dropped, the
+resolution bias lowered) is drawn over a few frames within the lists, where
+it used to overflow them in every frame until the bias rose; the lists'
+capacities bound what a frame of such a burst draws.
+
+The **resolution bias** (each step halves every level's resolution, up to 3)
+rises when the pool overflows, and when the pages wanted outrun the budget 32
+frames in a row without draining an eighth of them (a burst drains, however
+slowly; pages wanted as fast as the budget draws them do not) or 4 frames in
+a row that each drop every page (the sun turning every frame: each frame
+wants all its pages again). The lists' overflows do
+not raise it: the budget shrinks to what the pages cost. 120 frames in a row
+whose pages would fit a step finer within three quarters of the pool, within
+the budget, and, in frames that drop every page, with four times their pages
+within the budget, lower it again (`vsm_lod_bias`).
 
 In the 4K field the map holds 946 pages (62 MB) and adds 0.40 ms to a
 still frame: the requests 0.074 ms of the first pyramid's pass, the
@@ -1617,13 +1651,14 @@ phase 1's meshlets), `max_instance_updates` (16,384),
 (2^24, indirect path only), and `max_lod_nodes` (2^18 work items a step of
 the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
-`vsm_pages` (2,048), `max_vsm_meshlets` (2^20), and `max_vsm_draws`
-(2^20), whose overflow (`vsm_overflow`) raises its resolution bias
-("Shadows"); its statistics are `vsm` and `vsm_lod_bias` (this frame) and
-the pages requested, drawn, held, and evicted, the casters' meshlets
-tested (`vsm_meshlets`, what `max_vsm_meshlets` must hold) and the nodes
-their walk visited (`vsm_nodes`), and the caster draws, read back as the
-others. The radiance cache has `gi_cells` (2^18) slots, a
+`vsm_pages` (2,048), `max_vsm_meshlets` (2^20), `max_vsm_draws` (2^20)
+and `max_vsm_voxel_draws` (2^20): the pool's overflow (`vsm_overflow`)
+raises its resolution bias, and the lists set its page budget, which bounds
+what a frame draws ("Shadows"); its statistics are `vsm` and
+`vsm_lod_bias` (this frame) and the pages requested, wanted, drawn, held,
+and evicted, the page budget (`vsm_budget`), the casters' meshlets tested
+(`vsm_meshlets`, what `max_vsm_meshlets` must hold) and the nodes their
+walk visited (`vsm_nodes`), and the caster draws, read back as the others. The radiance cache has `gi_cells` (2^18) slots, a
 bucket of which, when full, drops the samples of the cells it cannot
 take, and `gi_rays` (65,536) a frame. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in

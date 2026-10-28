@@ -32,6 +32,7 @@
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
+//                 [--vsm-trace]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -40,7 +41,10 @@
 // N times its default, for what a scene that overflows them needs (its
 // results then do not compare with the budgets). --lod-error sets the
 // reference scenes' NphRenderView.lod_error (0: every mesh at level 0), for
-// comparing a scene with its levels of detail and without.
+// comparing a scene with its levels of detail and without. --vsm-trace
+// prints the shadow map's statistics every frame, warm-up included (they
+// report the frame NPH_GPU_FRAMES_IN_FLIGHT before): how its page budget
+// draws a burst of pages.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -427,8 +431,10 @@ static const char *const k_debug_views[] = {
 NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT - 1U,
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
-static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
-static u32 g_lists = 1U;        // --lists: the production path's list capacities, times this
+static f32 g_lod_error = -1.0F;  // --lod-error (negative: the view's default)
+static u32 g_lists = 1U;         // --lists: the production path's list capacities, times this
+static bool g_vsm_trace = false; // --vsm-trace: every frame's shadow map statistics
+static u32 g_trace_frame = 0U;
 
 typedef struct Result {
     char name[128];
@@ -1247,6 +1253,17 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
         r = nph_gpu_rg_execute(ctx->graph);
     }
     const NphResult er = nph_gpu_frame_end(ctx->dev);
+    if (g_vsm_trace && r == NPH_RESULT_OK) {
+        // The statistics are a frame NPH_GPU_FRAMES_IN_FLIGHT back.
+        printf("    vsm frame %u: requested %u, wanted %u, drawn %u (budget %u), resident %u, "
+               "evicted %u; meshlets %u, nodes %u, draws %u, voxel draws %u; bias %u, "
+               "overflow %u\n",
+               g_trace_frame, stats->vsm_requested, stats->vsm_wanted, stats->vsm_drawn,
+               stats->vsm_budget, stats->vsm_resident, stats->vsm_evicted, stats->vsm_meshlets,
+               stats->vsm_nodes, stats->vsm_draws, stats->vsm_voxel_draws, stats->vsm_lod_bias,
+               stats->vsm_overflow);
+    }
+    ++g_trace_frame;
     return r != NPH_RESULT_OK ? r : er;
 }
 
@@ -1473,12 +1490,13 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                    st->vis_voxel_bricks);
         }
         if (st->vsm) {
-            printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
-                   "caster meshlets %u (%u hierarchy nodes), draws %u (and %u of voxel clusters); "
-                   "resolution bias %u%s\n",
-                   st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
-                   st->vsm_meshlets, st->vsm_nodes, st->vsm_draws, st->vsm_voxel_draws,
-                   st->vsm_lod_bias, st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
+            printf("    virtual shadow map: pages requested %u, wanted %u, drawn %u (budget %u), "
+                   "resident %u, evicted %u; caster meshlets %u (%u hierarchy nodes), draws %u "
+                   "(and %u of voxel clusters); resolution bias %u%s\n",
+                   st->vsm_requested, st->vsm_wanted, st->vsm_drawn, st->vsm_budget,
+                   st->vsm_resident, st->vsm_evicted, st->vsm_meshlets, st->vsm_nodes,
+                   st->vsm_draws, st->vsm_voxel_draws, st->vsm_lod_bias,
+                   st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
         }
         if (st->shadow_blas_bytes != 0U) {
             printf("    ray tracing: bottom levels %.1f MB (compacted after their builds)\n",
@@ -2039,7 +2057,7 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
-                    "[--lod-error=PX] [--lists=N]\n");
+                    "[--lod-error=PX] [--lists=N] [--vsm-trace]\n");
     return 2;
 }
 
@@ -2076,6 +2094,8 @@ int main(int argc, char **argv)
             if (g_lists == 0U || g_lists > 16U || (g_lists & (g_lists - 1U)) != 0U) {
                 return usage();
             }
+        } else if (strcmp(argv[i], "--vsm-trace") == 0) {
+            g_vsm_trace = true;
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {
