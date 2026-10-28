@@ -8,6 +8,8 @@
 #include <nepheline/render/reference.h>
 #include <nepheline/render/voxel.h>
 
+#include "cluster_lod_internal.h"
+
 #include <math.h>
 
 static u32 unorm8(f32 x)
@@ -427,6 +429,55 @@ bool nph_render_voxel_trace(const NphRenderVoxelBrick *brick, const NphRenderVox
         }
     }
     return found;
+}
+
+bool voxel_footprint_span(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
+                          NphVec3 dir, f32 t_min, f32 t_max, f32 *out_enter, f32 *out_leave)
+{
+    NPH_ASSERT(voxel != NULL && out_enter != NULL && out_leave != NULL && h > 0.0F);
+    // The cell's own space (its corner at the origin), where the footprint's
+    // planes are exact multiples of its step.
+    const f32 o[3] = {origin.x - base.x, origin.y - base.y, origin.z - base.z};
+    f32 d[3] = {dir.x, dir.y, dir.z};
+    f32 inv[3];
+    for (u32 a = 0; a < 3U; ++a) {
+        if (nph_f32_abs(d[a]) < 1e-20F) {
+            d[a] = d[a] < 0.0F ? -1e-20F : 1e-20F;
+        }
+        inv[a] = 1.0F / d[a];
+    }
+    const f32 zero[3] = {0.0F, 0.0F, 0.0F};
+    f32 enter = t_min;
+    f32 leave = t_max;
+    for (u32 a = 0; a < 3U; ++a) {
+        const f32 ta = -o[a] * inv[a];
+        const f32 tb = (h - o[a]) * inv[a];
+        enter = nph_f32_max(enter, nph_f32_min(ta, tb));
+        leave = nph_f32_min(leave, nph_f32_max(ta, tb));
+    }
+    if (!(enter <= leave)) {
+        return false;
+    }
+    const f32 step = h / (f32)NPH_RENDER_VOXEL_BOX_STEPS;
+    u32 face = 0U;
+    f32 t_in = t_min;
+    if (!footprint(voxel->box, voxel->material, zero, step, o, d, inv, enter, leave, &t_in, t_max,
+                   &face)) {
+        return false;
+    }
+    // The last point inside: the first hit of the ray run back from where it
+    // leaves the cell, down to where it entered the footprint.
+    const f32 back_o[3] = {o[0] + leave * d[0], o[1] + leave * d[1], o[2] + leave * d[2]};
+    const f32 back_d[3] = {-d[0], -d[1], -d[2]};
+    const f32 back_inv[3] = {-inv[0], -inv[1], -inv[2]};
+    f32 s_out = 0.0F;
+    if (!footprint(voxel->box, voxel->material, zero, step, back_o, back_d, back_inv, 0.0F,
+                   leave - enter, &s_out, leave - t_in, &face)) {
+        s_out = 0.0F; // a graze: it leaves where it entered
+    }
+    *out_enter = t_in;
+    *out_leave = nph_f32_max(leave - s_out, t_in);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

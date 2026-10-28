@@ -1201,6 +1201,521 @@ NTEST_F(VoxelBuild, the_same_triangles_give_the_same_voxels)
 }
 
 // ---------------------------------------------------------------------------
+// Voxels as sources (a cell proxy's, ADR-0062)
+// ---------------------------------------------------------------------------
+
+// The identity, or a quarter turn about y and a shift: x' = z + s.x,
+// y' = y + s.y, z' = -x + s.z.
+static LodVoxelTransform test_transform(bool turn, NphVec3 shift)
+{
+    LodVoxelTransform t;
+    memset(&t, 0, sizeof t);
+    t.to[1][1] = 1.0;
+    if (turn) {
+        t.to[0][2] = 1.0;
+        t.to[2][0] = -1.0;
+    } else {
+        t.to[0][0] = 1.0;
+        t.to[2][2] = 1.0;
+    }
+    t.to[0][3] = (f64)shift.x;
+    t.to[1][3] = (f64)shift.y;
+    t.to[2][3] = (f64)shift.z;
+    NTEST_EXPECT_TRUE(lod_voxel_transform_init(&t));
+    return t;
+}
+
+static NphVec3 transform_point(const LodVoxelTransform *t, NphVec3 p)
+{
+    f64 out[3];
+    for (u32 r = 0; r < 3U; ++r) {
+        out[r] =
+            t->to[r][0] * (f64)p.x + t->to[r][1] * (f64)p.y + t->to[r][2] * (f64)p.z + t->to[r][3];
+    }
+    return nph_vec3((f32)out[0], (f32)out[1], (f32)out[2]);
+}
+
+// The cells' voxels as footprints through transform 0, each in its own cell
+// of edge `cell`.
+static LodVoxelFootprint *footprints_of(const LodVoxelCellArray *cells, f64 cell, NphAllocator *a)
+{
+    LodVoxelFootprint *fp = NPH_ALLOC_ARRAY_ZEROED(a, LodVoxelFootprint, cells->len);
+    for (u32 i = 0; i < cells->len; ++i) {
+        const LodVoxelCell *c = &cells->data[i];
+        fp[i].voxel = c->voxel;
+        fp[i].base = nph_vec3((f32)((f64)c->c[0] * cell), (f32)((f64)c->c[1] * cell),
+                              (f32)((f64)c->c[2] * cell));
+        fp[i].cell = (f32)cell;
+        fp[i].submesh = c->submesh;
+    }
+    return fp;
+}
+
+static NphResult voxelize_footprints(const LodVoxelFootprint *fp, u32 count,
+                                     const LodVoxelTransform *t, NphAllocator *a, f64 cell,
+                                     LodVoxelCellArray *out)
+{
+    LodVoxelInput in;
+    memset(&in, 0, sizeof in);
+    in.scratch = a;
+    in.footprints = fp;
+    in.footprint_count = count;
+    in.transforms = t;
+    return lod_voxelize(&in, cell, out, NULL);
+}
+
+// The needles of two colours the tests below stand voxels for: 2,000 in a
+// cube of 4 from the origin.
+static void needle_cloud(Geometry *g, u64 seed)
+{
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, seed, 1U);
+    for (u32 i = 0; i < 2000U; ++i) {
+        const NphVec3 c =
+            nph_vec3(0.3F + 3.4F * nph_pcg32_next_f32(&rng), 0.3F + 3.4F * nph_pcg32_next_f32(&rng),
+                     0.3F + 3.4F * nph_pcg32_next_f32(&rng));
+        geo_needle(g, &rng, c, 0.6F, 0.02F, i & 1U);
+    }
+}
+
+static const NphVec3 *cloud_directions(u32 *out_count)
+{
+    static NphVec3 dirs[5];
+    dirs[0] = nph_vec3(1.0F, 0.0F, 0.0F);
+    dirs[1] = nph_vec3(0.0F, 0.0F, -1.0F);
+    dirs[2] = nph_vec3_normalize(nph_vec3(1.0F, 1.0F, 0.0F));
+    dirs[3] = nph_vec3_normalize(nph_vec3(1.0F, 1.0F, 1.0F));
+    dirs[4] = nph_vec3_normalize(nph_vec3(-0.3F, 0.8F, 0.52F));
+    *out_count = 5U;
+    return dirs;
+}
+
+// Where cell `c` of edge `cell` lies in `cells` (sorted as lod_voxelize
+// leaves them), or NPH_U32_MAX.
+static u32 cell_index(const LodVoxelCellArray *cells, const i32 c[3])
+{
+    for (u32 i = 0; i < cells->len; ++i) {
+        const i32 *q = cells->data[i].c;
+        if (q[0] == c[0] && q[1] == c[1] && q[2] == c[2]) {
+            return i;
+        }
+    }
+    return NPH_U32_MAX;
+}
+
+NTEST_F(VoxelBuild, voxels_as_sources_keep_their_cells_look_and_coverage)
+{
+    Geometry g;
+    geo_init(&g, f->a);
+    needle_cloud(&g, 31U);
+    TestLook look;
+    look_init(&look, g.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    LodVoxelCellArray a;
+    LodVoxelCellArray b;
+    NPH_ARRAY_INIT(&a, f->a);
+    NPH_ARRAY_INIT(&b, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize(&g, &sampler, f->a, 0.5, &a), NPH_RESULT_OK);
+    LodVoxelFootprint *fp = footprints_of(&a, 0.5, f->a);
+    const LodVoxelTransform id = test_transform(false, nph_vec3_zero());
+    NTEST_ASSERT_EQ_INT(voxelize_footprints(fp, a.len, &id, f->a, 0.5, &b), NPH_RESULT_OK);
+    // Each voxel alone in its own cell: no cell beyond them (a footprint
+    // against a face is not its neighbour's), and their looks kept.
+    u32 missing = 0U;
+    u32 same_shape = 0U;
+    for (u32 i = 0; i < b.len; ++i) {
+        const u32 k = cell_index(&a, b.data[i].c);
+        NTEST_ASSERT_NE_UINT(k, NPH_U32_MAX);
+        const LodVoxelCell *x = &a.data[k];
+        const LodVoxelCell *y = &b.data[i];
+        NTEST_EXPECT_EQ_UINT(y->submesh, x->submesh);
+        NTEST_EXPECT_EQ_UINT(y->voxel.color, x->voxel.color);
+        NTEST_EXPECT_EQ_UINT(y->voxel.material & 0xFFFFU, x->voxel.material & 0xFFFFU);
+        NphRenderVoxelDesc dx;
+        NphRenderVoxelDesc dy;
+        nph_render_voxel_unpack(x->voxel, &dx);
+        nph_render_voxel_unpack(y->voxel, &dy);
+        NTEST_EXPECT_TRUE(nph_f32_abs(nph_vec3_dot(dx.axis, dy.axis)) > 0.999F);
+        NTEST_EXPECT_NEAR_F32(nph_render_voxel_moment(dy.kappa), nph_render_voxel_moment(dx.kappa),
+                              0.01F);
+        same_shape += dx.shape == dy.shape ? 1U : 0U;
+    }
+    missing = a.len - b.len;
+    NTEST_LOG("%u voxels, %u lost (no ray met them again), %u of the shape they had", a.len,
+              missing, same_shape);
+    NTEST_EXPECT_LE_UINT(missing * 50U, a.len);
+    // Their coverage from every side.
+    u32 n = 0U;
+    const NphVec3 *dirs = cloud_directions(&n);
+    for (u32 i = 0; i < n; ++i) {
+        f64 tris = 0.0;
+        f64 va = 0.0;
+        f64 vb = 0.0;
+        coverage(&g, &a, 0.5, nph_vec3_zero(), 4.0F, dirs[i], 48U, &tris, &va);
+        coverage(&g, &b, 0.5, nph_vec3_zero(), 4.0F, dirs[i], 48U, &tris, &vb);
+        NTEST_LOG("direction (%.2f %.2f %.2f): the needles stop %.3f, their voxels %.3f, those "
+                  "voxels' %.3f",
+                  (f64)dirs[i].x, (f64)dirs[i].y, (f64)dirs[i].z, tris, va, vb);
+        NTEST_EXPECT_NEAR_F64(vb / va, 1.0, 0.05);
+    }
+    NPH_FREE_ARRAY(f->a, LodVoxelFootprint, fp, a.len);
+    NPH_ARRAY_FREE(&a);
+    NPH_ARRAY_FREE(&b);
+    geo_free(&g);
+}
+
+NTEST_F(VoxelBuild, voxels_as_sources_coarsen_to_their_union)
+{
+    Geometry g;
+    geo_init(&g, f->a);
+    needle_cloud(&g, 37U);
+    TestLook look;
+    look_init(&look, g.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    LodVoxelCellArray fine;
+    LodVoxelCellArray coarse;
+    LodVoxelCellArray direct;
+    NPH_ARRAY_INIT(&fine, f->a);
+    NPH_ARRAY_INIT(&coarse, f->a);
+    NPH_ARRAY_INIT(&direct, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize(&g, &sampler, f->a, 0.5, &fine), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(voxelize(&g, &sampler, f->a, 1.0, &direct), NPH_RESULT_OK);
+    LodVoxelFootprint *fp = footprints_of(&fine, 0.5, f->a);
+    const LodVoxelTransform id = test_transform(false, nph_vec3_zero());
+    NTEST_ASSERT_EQ_INT(voxelize_footprints(fp, fine.len, &id, f->a, 1.0, &coarse), NPH_RESULT_OK);
+    // The coarse cells are the fine ones' parents.
+    u32 parents = 0U;
+    for (u32 i = 0; i < coarse.len; ++i) {
+        bool child = false;
+        for (u32 k = 0; k < fine.len && !child; ++k) {
+            const i32 *c = fine.data[k].c;
+            child = (c[0] >> 1) == coarse.data[i].c[0] && (c[1] >> 1) == coarse.data[i].c[1] &&
+                    (c[2] >> 1) == coarse.data[i].c[2];
+        }
+        NTEST_EXPECT_TRUE(child);
+    }
+    for (u32 k = 0; k < fine.len; ++k) {
+        bool first = true;
+        for (u32 q = 0; q < k && first; ++q) {
+            first = (fine.data[q].c[0] >> 1) != (fine.data[k].c[0] >> 1) ||
+                    (fine.data[q].c[1] >> 1) != (fine.data[k].c[1] >> 1) ||
+                    (fine.data[q].c[2] >> 1) != (fine.data[k].c[2] >> 1);
+        }
+        parents += first ? 1U : 0U;
+    }
+    NTEST_LOG("%u fine voxels, %u parents, %u coarse voxels (%u from the triangles)", fine.len,
+              parents, coarse.len, direct.len);
+    NTEST_EXPECT_LE_UINT(coarse.len, parents);
+    NTEST_EXPECT_LE_UINT((parents - coarse.len) * 50U, parents);
+    // What they stop from every side: what the needles' own coarse voxels do
+    // (both lose some along the axes, where a column of four cells' round
+    // footprints overlap more than the needles they stand for).
+    u32 n = 0U;
+    const NphVec3 *dirs = cloud_directions(&n);
+    for (u32 i = 0; i < n; ++i) {
+        f64 tris = 0.0;
+        f64 vf = 0.0;
+        f64 vc = 0.0;
+        f64 vd = 0.0;
+        coverage(&g, &fine, 0.5, nph_vec3_zero(), 4.0F, dirs[i], 48U, &tris, &vf);
+        coverage(&g, &coarse, 1.0, nph_vec3_zero(), 4.0F, dirs[i], 48U, &tris, &vc);
+        coverage(&g, &direct, 1.0, nph_vec3_zero(), 4.0F, dirs[i], 48U, &tris, &vd);
+        NTEST_LOG("direction (%.2f %.2f %.2f): needles %.3f, fine voxels %.3f, coarse from them "
+                  "%.3f, coarse from the needles %.3f",
+                  (f64)dirs[i].x, (f64)dirs[i].y, (f64)dirs[i].z, tris, vf, vc, vd);
+        NTEST_EXPECT_NEAR_F64(vc / vd, 1.0, 0.1);
+    }
+    NPH_FREE_ARRAY(f->a, LodVoxelFootprint, fp, fine.len);
+    NPH_ARRAY_FREE(&fine);
+    NPH_ARRAY_FREE(&coarse);
+    NPH_ARRAY_FREE(&direct);
+    geo_free(&g);
+}
+
+NTEST_F(VoxelBuild, voxels_as_sources_follow_their_transform)
+{
+    Geometry g;
+    geo_init(&g, f->a);
+    needle_cloud(&g, 41U);
+    TestLook look;
+    look_init(&look, g.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    LodVoxelCellArray a;
+    NPH_ARRAY_INIT(&a, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize(&g, &sampler, f->a, 0.5, &a), NPH_RESULT_OK);
+    // A quarter turn and a shift of whole cells: each voxel lands in one.
+    const LodVoxelTransform t = test_transform(true, nph_vec3(1.5F, 0.5F, 4.0F));
+    LodVoxelFootprint *fp = footprints_of(&a, 0.5, f->a);
+    LodVoxelCellArray b;
+    NPH_ARRAY_INIT(&b, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize_footprints(fp, a.len, &t, f->a, 0.5, &b), NPH_RESULT_OK);
+    // The needles turned.
+    Geometry h;
+    geo_init(&h, f->a);
+    for (u32 i = 0; i < g.positions.len; ++i) {
+        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&h.positions, transform_point(&t, g.positions.data[i])));
+    }
+    for (u32 i = 0; i < g.sources.len; ++i) {
+        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&h.sources, g.sources.data[i]));
+    }
+    // Every voxel where its cell turned to, its lobe turned with it.
+    for (u32 i = 0; i < b.len; ++i) {
+        // x = s.z - z', z = x' - s.x.
+        const i32 *c = b.data[i].c;
+        const i32 from[3] = {8 - 1 - c[2], c[1] - 1, c[0] - 3};
+        const u32 k = cell_index(&a, from);
+        NTEST_ASSERT_NE_UINT(k, NPH_U32_MAX);
+        NphRenderVoxelDesc dx;
+        NphRenderVoxelDesc dy;
+        nph_render_voxel_unpack(a.data[k].voxel, &dx);
+        nph_render_voxel_unpack(b.data[i].voxel, &dy);
+        const NphVec3 turned = nph_vec3(dx.axis.z, dx.axis.y, -dx.axis.x);
+        NTEST_EXPECT_TRUE(nph_f32_abs(nph_vec3_dot(turned, dy.axis)) > 0.999F);
+        NTEST_EXPECT_EQ_UINT(b.data[i].voxel.color, a.data[k].voxel.color);
+    }
+    NTEST_LOG("%u voxels, %u through the turn", a.len, b.len);
+    NTEST_EXPECT_LE_UINT((a.len - b.len) * 50U, a.len);
+    // What they stop from every side, turned, against what the voxels stop
+    // before the turn: each over its own needles, on its own grid of rays.
+    u32 n = 0U;
+    const NphVec3 *dirs = cloud_directions(&n);
+    const NphVec3 lo = nph_vec3(1.5F, 0.5F, 0.0F);
+    for (u32 i = 0; i < n; ++i) {
+        const NphVec3 d = dirs[i];
+        const NphVec3 turned = nph_vec3(d.z, d.y, -d.x);
+        f64 tris = 0.0;
+        f64 va = 0.0;
+        f64 tris_turned = 0.0;
+        f64 vb = 0.0;
+        coverage(&g, &a, 0.5, nph_vec3_zero(), 4.0F, d, 64U, &tris, &va);
+        coverage(&h, &b, 0.5, lo, 4.0F, turned, 64U, &tris_turned, &vb);
+        NTEST_LOG("direction (%.2f %.2f %.2f): the needles stop %.3f, their voxels %.3f; turned "
+                  "%.3f and %.3f",
+                  (f64)d.x, (f64)d.y, (f64)d.z, tris, va, tris_turned, vb);
+        NTEST_EXPECT_NEAR_F64((vb / tris_turned) / (va / tris), 1.0, 0.08);
+    }
+    NPH_FREE_ARRAY(f->a, LodVoxelFootprint, fp, a.len);
+    NPH_ARRAY_FREE(&a);
+    NPH_ARRAY_FREE(&b);
+    geo_free(&g);
+    geo_free(&h);
+}
+
+// The share of a grid of n x n rays along axis `a` across cell (0, 0, 0) of
+// edge 1 that meet `c`'s footprint.
+static f64 axis_coverage(const LodVoxelCell *c, u32 a, u32 n)
+{
+    u32 hits = 0U;
+    for (u32 j = 0; j < n; ++j) {
+        for (u32 i = 0; i < n; ++i) {
+            f32 p[3];
+            f32 d[3] = {0.0F, 0.0F, 0.0F};
+            p[a] = -1.0F;
+            p[(a + 1U) % 3U] = ((f32)i + 0.5F) / (f32)n;
+            p[(a + 2U) % 3U] = ((f32)j + 0.5F) / (f32)n;
+            d[a] = 1.0F;
+            f64 t = 0.0;
+            hits += cell_hit(c, 1.0, nph_vec3(p[0], p[1], p[2]), nph_vec3(d[0], d[1], d[2]), &t)
+                        ? 1U
+                        : 0U;
+        }
+    }
+    return (f64)hits / (f64)(n * n);
+}
+
+NTEST_F(VoxelBuild, each_footprint_shape_stands_for_itself_as_a_source)
+{
+    const u32 shapes[3] = {NPH_RENDER_VOXEL_SHAPE_BOX, NPH_RENDER_VOXEL_SHAPE_ELLIPSOID,
+                           NPH_RENDER_VOXEL_SHAPE_CAPSULE};
+    const LodVoxelTransform id = test_transform(false, nph_vec3_zero());
+    for (u32 s = 0; s < 3U; ++s) {
+        NphRenderVoxelDesc d;
+        memset(&d, 0, sizeof d);
+        d.shape = shapes[s];
+        if (d.shape == NPH_RENDER_VOXEL_SHAPE_CAPSULE) {
+            // Short and thick: it reaches well past its box.
+            d.box_lo = nph_vec3_splat(12.0F / 32.0F);
+            d.box_hi = nph_vec3_splat(20.0F / 32.0F);
+            d.diagonal = 1U;
+            d.radius = 0.2F;
+        } else {
+            d.box_lo = nph_vec3(4.0F / 32.0F, 8.0F / 32.0F, 2.0F / 32.0F);
+            d.box_hi = nph_vec3(20.0F / 32.0F, 30.0F / 32.0F, 12.0F / 32.0F);
+        }
+        d.albedo = nph_vec3(0.3F, 0.6F, 0.2F);
+        d.occlusion = 0.8F;
+        d.axis = nph_vec3_normalize(nph_vec3(1.0F, 2.0F, 3.0F));
+        d.kappa = 2.0F;
+        d.roughness = 0.7F;
+        LodVoxelCell src;
+        memset(&src, 0, sizeof src);
+        src.voxel = nph_render_voxel_pack(&d);
+        LodVoxelFootprint fp;
+        memset(&fp, 0, sizeof fp);
+        fp.voxel = src.voxel;
+        fp.base = nph_vec3_zero();
+        fp.cell = 1.0F;
+        LodVoxelCellArray out;
+        NPH_ARRAY_INIT(&out, f->a);
+        NTEST_ASSERT_EQ_INT(voxelize_footprints(&fp, 1U, &id, f->a, 1.0, &out), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(out.len, 1U);
+        NTEST_EXPECT_EQ_UINT(out.data[0].voxel.color, src.voxel.color);
+        NphRenderVoxelDesc e;
+        nph_render_voxel_unpack(out.data[0].voxel, &e);
+        // Its coverage along each axis, what the voxelizer keeps: a lone
+        // voxel's to a step of its footprint's ends, each rounded to the
+        // nearest 32nd (16 by 10 steps may come out 15 by 9, 0.84 of it).
+        for (u32 a = 0; a < 3U; ++a) {
+            const f64 want = axis_coverage(&src, a, 64U);
+            const f64 got = axis_coverage(&out.data[0], a, 64U);
+            NTEST_LOG("shape %u along axis %u: %.3f, as a source %.3f (shape %u)", d.shape, a, want,
+                      got, e.shape);
+            NTEST_EXPECT_NEAR_F64(got / want, 1.0, 0.2);
+        }
+        NPH_ARRAY_FREE(&out);
+    }
+}
+
+static bool keep_even(void *user, const i32 c[3])
+{
+    (void)user;
+    return ((c[0] + c[1] + c[2]) & 1) == 0;
+}
+
+NTEST_F(VoxelBuild, only_the_cells_kept_are_voxelized)
+{
+    Geometry g;
+    geo_init(&g, f->a);
+    needle_cloud(&g, 43U);
+    TestLook look;
+    look_init(&look, g.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    LodVoxelCellArray all;
+    NPH_ARRAY_INIT(&all, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize(&g, &sampler, f->a, 0.5, &all), NPH_RESULT_OK);
+    LodVoxelInput in;
+    memset(&in, 0, sizeof in);
+    in.positions = g.positions.data;
+    in.sources = g.sources.data;
+    in.source_count = g.sources.len;
+    in.sampler = &sampler;
+    in.scratch = f->a;
+    in.keep = keep_even;
+    u32 *home = NPH_ALLOC_ARRAY(f->a, u32, g.sources.len);
+    LodVoxelCellArray kept;
+    NPH_ARRAY_INIT(&kept, f->a);
+    NTEST_ASSERT_EQ_INT(lod_voxelize(&in, 0.5, &kept, home), NPH_RESULT_OK);
+    // The same voxels as without the filter, those it keeps alone.
+    u32 k = 0U;
+    for (u32 i = 0; i < all.len; ++i) {
+        if (!keep_even(NULL, all.data[i].c)) {
+            continue;
+        }
+        NTEST_ASSERT_LT_UINT(k, kept.len);
+        NTEST_EXPECT_EQ_INT(memcmp(&all.data[i], &kept.data[k], sizeof(LodVoxelCell)), 0);
+        k += 1U;
+    }
+    NTEST_EXPECT_EQ_UINT(k, kept.len);
+    NTEST_EXPECT_GT_UINT(k * 3U, all.len);
+    NPH_FREE_ARRAY(f->a, u32, home, g.sources.len);
+    NPH_ARRAY_FREE(&all);
+    NPH_ARRAY_FREE(&kept);
+    geo_free(&g);
+}
+
+NTEST_F(VoxelBuild, a_voxel_and_triangles_in_one_cell_are_seen_together)
+{
+    // A red sheet across the cell at z = 1/4, and a green slab from z = 3/4
+    // to 25/32: once as a voxel's footprint, once as the triangles of its box
+    // but for its sides on the cell's far faces x = 1 and y = 1, which belong
+    // to the next cells (the rays of this one meet the near sides alone, as
+    // they enter the footprint there).
+    Geometry g;
+    geo_init(&g, f->a);
+    geo_quad(&g, nph_vec3(0.0F, 0.0F, 0.25F), nph_vec3(1.0F, 0.0F, 0.0F),
+             nph_vec3(0.0F, 1.0F, 0.0F), 0U);
+    Geometry box;
+    geo_init(&box, f->a);
+    geo_quad(&box, nph_vec3(0.0F, 0.0F, 0.25F), nph_vec3(1.0F, 0.0F, 0.0F),
+             nph_vec3(0.0F, 1.0F, 0.0F), 0U);
+    const f32 z0 = 0.75F;
+    const f32 z1 = 25.0F / 32.0F;
+    const NphVec3 ex = nph_vec3(1.0F, 0.0F, 0.0F);
+    const NphVec3 ey = nph_vec3(0.0F, 1.0F, 0.0F);
+    const NphVec3 ez = nph_vec3(0.0F, 0.0F, z1 - z0);
+    geo_quad(&box, nph_vec3(0.0F, 0.0F, z0), ey, ex, 1U);
+    geo_quad(&box, nph_vec3(0.0F, 0.0F, z1), ex, ey, 1U);
+    geo_quad(&box, nph_vec3(0.0F, 0.0F, z0), ex, ez, 1U);
+    geo_quad(&box, nph_vec3(0.0F, 0.0F, z0), ez, ey, 1U);
+    NphRenderVoxelDesc d;
+    memset(&d, 0, sizeof d);
+    d.box_lo = nph_vec3(0.0F, 0.0F, 24.0F / 32.0F);
+    d.box_hi = nph_vec3(1.0F, 1.0F, 25.0F / 32.0F);
+    d.shape = NPH_RENDER_VOXEL_SHAPE_BOX;
+    d.albedo = nph_vec3(0.1F, 0.8F, 0.1F);
+    d.occlusion = 1.0F;
+    d.axis = nph_vec3_unit_z();
+    d.kappa = NPH_RENDER_VOXEL_KAPPA_MAX;
+    d.roughness = 0.5F;
+    LodVoxelFootprint fp;
+    memset(&fp, 0, sizeof fp);
+    fp.voxel = nph_render_voxel_pack(&d);
+    fp.base = nph_vec3_zero();
+    fp.cell = 1.0F;
+    fp.submesh = 1U;
+    const LodVoxelTransform id = test_transform(false, nph_vec3_zero());
+    TestLook look;
+    look_init(&look, g.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    LodVoxelInput in;
+    memset(&in, 0, sizeof in);
+    in.positions = g.positions.data;
+    in.sources = g.sources.data;
+    in.source_count = g.sources.len;
+    in.sampler = &sampler;
+    in.scratch = f->a;
+    in.footprints = &fp;
+    in.footprint_count = 1U;
+    in.transforms = &id;
+    u32 home[2];
+    LodVoxelCellArray mixed;
+    NPH_ARRAY_INIT(&mixed, f->a);
+    NTEST_ASSERT_EQ_INT(lod_voxelize(&in, 1.0, &mixed, home), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(home[0], 0U);
+    NTEST_EXPECT_EQ_UINT(home[1], 0U);
+    TestLook box_look;
+    look_init(&box_look, box.positions.data);
+    const NphRenderVoxelSampler box_sampler = test_sampler(&box_look);
+    LodVoxelCellArray tris;
+    NPH_ARRAY_INIT(&tris, f->a);
+    NTEST_ASSERT_EQ_INT(voxelize(&box, &box_sampler, f->a, 1.0, &tris), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(mixed.len, 1U);
+    NTEST_ASSERT_EQ_UINT(tris.len, 1U);
+    // Rays along z see red from below and green from above; along x and y
+    // the slab's side alone: the same hits as the box's triangles have.
+    NphRenderVoxelDesc dm;
+    NphRenderVoxelDesc dt;
+    nph_render_voxel_unpack(mixed.data[0].voxel, &dm);
+    nph_render_voxel_unpack(tris.data[0].voxel, &dt);
+    NTEST_LOG("the voxel and the sheet: albedo (%.3f %.3f %.3f), submesh %u; the box's triangles "
+              "and the sheet: (%.3f %.3f %.3f), submesh %u",
+              (f64)dm.albedo.x, (f64)dm.albedo.y, (f64)dm.albedo.z, mixed.data[0].submesh,
+              (f64)dt.albedo.x, (f64)dt.albedo.y, (f64)dt.albedo.z, tris.data[0].submesh);
+    // (The voxel's own albedo is its sRGB bytes'.)
+    NTEST_EXPECT_NEAR_F32(dm.albedo.x, dt.albedo.x, 0.004F);
+    NTEST_EXPECT_NEAR_F32(dm.albedo.y, dt.albedo.y, 0.004F);
+    NTEST_EXPECT_NEAR_F32(dm.albedo.z, dt.albedo.z, 0.004F);
+    NTEST_EXPECT_EQ_UINT(mixed.data[0].submesh, tris.data[0].submesh);
+    NTEST_EXPECT_TRUE(dm.albedo.x > 0.2F && dm.albedo.y > 0.2F);
+    // The box of both sheets.
+    NTEST_EXPECT_TRUE(dm.box_lo.z <= 0.25F && dm.box_hi.z >= z1);
+    NPH_ARRAY_FREE(&mixed);
+    NPH_ARRAY_FREE(&tris);
+    geo_free(&g);
+    geo_free(&box);
+}
+
+// ---------------------------------------------------------------------------
 // The voxel levels
 // ---------------------------------------------------------------------------
 
