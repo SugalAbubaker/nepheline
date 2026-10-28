@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: Apache-2.0
+// A step down the hierarchy of a caster's levels of detail into the sun's
+// virtual shadow map (docs/render.md "Shadows", "Levels of detail";
+// render/cluster_lod.h), two of its levels at once, as vis_cull_nodes.comp
+// takes the camera's: each work item, an (instance, node, map level) from
+// queue arg0, takes 64 lanes, one per child of the node and child of that
+// child. A caster is drawn into a level's pages at one cut for the whole
+// level, its threshold T the largest power of two within VSM_LOD_TEXELS of
+// the level's texel at the instance's scale (vsm_lod_threshold): a cluster
+// is in the cut when its maker's error is at most T and its consumer's more.
+// A lane takes its child, and where that is a node and taken, its
+// grandchild, when
+//
+//   - the largest group error below it is more than T (a group below is
+//     too coarse, so its clusters may be drawn) and the smallest maker
+//     error below it at most T (a cluster below is fine enough); for a
+//     group, its own error and its clusters' smallest maker's;
+//   - its sphere, in the light's space, reaches a page of the level to draw
+//     this frame and does not lie wholly beyond the level's far plane.
+//
+// A grandchild that is a node goes to queue arg1 for the next step; a
+// group's clusters (those it consumes) to the meshlet list as
+// VSM_ITEM_LOD items, of which vsm cull meshlets keeps those whose maker's
+// error is at most T, and tests them against the pages as any caster. So
+// the casters handed on are the cut's clusters near the pages to draw, not
+// the whole cut of every instance whose sphere reaches one: a page by a
+// tree of a million triangles takes the clusters that reach it.
+//
+// The step raises the next step's workgroups to take what it put in queue
+// arg1 and empties queue arg2 for the step after the next to fill.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+#include "vsm_common.glsl"
+
+layout(local_size_x = 512) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the child `lane` of node `n` (a node or a group) is to be taken
+// for map level `level` at threshold `T`.
+bool take(VsmViewRef r, NphVisTransform tr, vec3 t, float scale, VisLodNodesRef tree, uint n,
+          uint lane, int level, float T)
+{
+    // Too coarse (a node: some group below), and not every maker below
+    // too coarse as well (a cluster below fine enough).
+    if (!(tree.n[n].error[lane] > T) || tree.n[n].maker_error[lane] > T) {
+        return false;
+    }
+    const vec4 s = tree.n[n].sphere[lane];
+    return vsm_touches_render(r, level, vsm_light_space(r, vis_transform_vector(tr, s.xyz) + t),
+                              s.w * scale);
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    VsmArgsRef args = VsmArgsRef(r.v.args);
+    const uint qin = pc.arg0;
+    const uint qout = pc.arg1;
+    const uint invocation = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 512u +
+                            gl_LocalInvocationIndex;
+    if (invocation == 0u) {
+        counters.c.node_count[pc.arg2] = 0u;
+        args.a.node_args[pc.arg2][0] = 0u;
+    }
+    const uint id = invocation >> 6u;                // the work item
+    const uint child_lane = (invocation >> 3u) & 7u; // its node's child
+    const uint grand_lane = invocation & 7u;         // and that child's child
+    const bool valid = id < min(counters.c.node_count[qin], r.v.max_nodes);
+    uvec2 item = uvec2(0u);
+    uint found = NPH_VIS_LOD_NONE; // a node for the next step
+    uint group = NPH_VIS_LOD_NONE; // a group whose clusters go to the meshlet cull
+    uint64_t groups_address = 0ul;
+    uint64_t members_address = 0ul;
+    int level = 0;
+    bool counted = false; // a node of the hierarchy this lane counts as visited
+    if (valid) {
+        item = VsmUvec2Ref(r.v.node_queue[qin]).v[id];
+        level = int((item.y >> 24u) & VSM_ITEM_LEVEL_MASK);
+        const uint node = item.y & 0xFFFFFFu;
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[item.x];
+        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        groups_address = mesh.lod_groups;
+        members_address = mesh.lod_group_clusters;
+        VisLodNodesRef tree = VisLodNodesRef(mesh.lod_nodes);
+        const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                view.v.camera_low.xyz);
+        const float scale = vis_max_scale(inst.transform);
+        const float T = vsm_lod_threshold(r, level, scale);
+        counted = child_lane == 0u && grand_lane == 0u;
+        const uint child = tree.n[node].child[child_lane];
+        if (child != NPH_VIS_LOD_NONE &&
+            take(r, inst.transform, t, scale, tree, node, child_lane, level, T)) {
+            if ((child & NPH_VIS_LOD_LEAF) != 0u) {
+                // A group among the node's children: its first lane takes it.
+                group = grand_lane == 0u ? child & ~NPH_VIS_LOD_LEAF : NPH_VIS_LOD_NONE;
+            } else {
+                counted = counted || grand_lane == 0u;
+                const uint grand = tree.n[child].child[grand_lane];
+                if (grand != NPH_VIS_LOD_NONE &&
+                    take(r, inst.transform, t, scale, tree, child, grand_lane, level, T)) {
+                    if ((grand & NPH_VIS_LOD_LEAF) != 0u) {
+                        group = grand & ~NPH_VIS_LOD_LEAF;
+                    } else {
+                        found = grand;
+                    }
+                }
+            }
+        }
+    }
+
+    VIS_COUNT(counters.c.nodes_visited, counted);
+
+    // The nodes found, into the next queue, and the next step's workgroups
+    // raised to take them.
+    const bool node = found != NPH_VIS_LOD_NONE;
+    uint nbase;
+    VIS_RESERVE(counters.c.node_count[qout], node ? 1u : 0u, nbase);
+    if (node) {
+        if (nbase < r.v.max_nodes) {
+            VsmUvec2Ref(r.v.node_queue[qout]).v[nbase] =
+                uvec2(item.x, found | (uint(level) << 24u));
+        } else {
+            atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
+        }
+    }
+    const uint end = subgroupMax(node ? min(nbase + 1u, r.v.max_nodes) : 0u);
+    if (end != 0u && subgroupElect()) {
+        atomicMax(args.a.node_args[qout][0],
+                  (end + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
+    }
+
+    // The groups' clusters, into the meshlet list, for vsm cull meshlets to
+    // keep those whose maker's error is at most T.
+    uint clusters = 0u;
+    uint first = 0u;
+    if (group != NPH_VIS_LOD_NONE) {
+        VisLodGroupsRef groups = VisLodGroupsRef(groups_address);
+        clusters = groups.g[group].cluster_count;
+        first = groups.g[group].cluster_offset;
+    }
+    uint mbase;
+    VIS_RESERVE(counters.c.meshlet_count, clusters, mbase);
+    if (clusters != 0u) {
+        VisUintRef members = VisUintRef(members_address);
+        for (uint j = 0u; j < clusters; ++j) {
+            if (mbase + j < r.v.max_meshlets) {
+                VsmUvec2Ref(r.v.meshlets).v[mbase + j] =
+                    uvec2(item.x, members.v[first + j] | (uint(level) << 24u) | VSM_ITEM_LOD);
+            } else {
+                atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
+            }
+        }
+    }
+}

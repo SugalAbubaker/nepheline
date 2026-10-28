@@ -67,9 +67,10 @@ static NphRenderFrameStats frame_stats(RenderFixture *f, const NphRenderView *v)
 
 static void log_stats(const char *what, const NphRenderFrameStats *s)
 {
-    NTEST_LOG("%s: pages requested %u, drawn %u, resident %u, evicted %u; draws %u; overflow %u",
-              what, s->vsm_requested, s->vsm_drawn, s->vsm_resident, s->vsm_evicted, s->vsm_draws,
-              s->vsm_overflow);
+    NTEST_LOG("%s: pages requested %u, drawn %u, resident %u, evicted %u; caster meshlets %u (%u "
+              "nodes), draws %u; overflow %u",
+              what, s->vsm_requested, s->vsm_drawn, s->vsm_resident, s->vsm_evicted,
+              s->vsm_meshlets, s->vsm_nodes, s->vsm_draws, s->vsm_overflow);
 }
 
 // The sun behind a cube, through the map: the floor the cube hides is dark,
@@ -709,6 +710,82 @@ NTEST_F(Vsm, a_caster_with_levels_shadows_as_its_level_0)
     NTEST_EXPECT_GT_UINT(deep, 2000U);
     NTEST_EXPECT_GT_UINT(compared - deep, 40000U);
     nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, caster);
+    nph_gpu_image_destroy(f->dev, target);
+    lod_mesh_free(&torus);
+}
+
+// A torus sixteen times as large (a ring 26 m across), above the
+// view and to its side, of which the floor the camera sees takes a few
+// pages: the walk down its hierarchy hands on the clusters near those
+// pages, not the whole cut of each level it reaches (which at the finest
+// levels is level 0), so the casters' meshlets tested are fewer than one
+// such cut, and its shadow is still its level 0's.
+NTEST_F(Vsm, a_big_caster_hands_on_only_its_clusters_near_the_pages_drawn)
+{
+    REQUIRE_VSM(f);
+    // Finer than the torus above (65,536 triangles), so that its hierarchy's
+    // groups are pieces of the ring the pages can tell apart.
+    LodMesh torus;
+    lod_torus(&torus, 256U, 128U, 0.8F, 0.25F);
+    NphRenderMesh caster = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &torus.desc, &caster), NPH_RESULT_OK);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    const NphRenderInstance floor0 = instance(f, plane, grey, at(0.0, 0.0, 0.0, 40.0F));
+    // Its ring's shadow (the sun along +X at 45 degrees) crosses the view.
+    const NphRenderInstance inst = instance(f, caster, grey, at(-14.0, 12.0, 6.0, 16.0F));
+    NphRenderLightDesc ld = sun_desc(true);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, LOD_TARGET);
+    static u8 level0[LOD_PIXELS];
+    static u8 cut[LOD_PIXELS];
+    NphRenderView v;
+    vsm_view(&v, top_camera());
+    v.lod_error = 0.0F; // every caster at level 0
+    const NphRenderFrameStats s0 = lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, level0);
+    log_stats("level 0", &s0);
+    (void)lod_frames(f, &v, target, 2U, level0);
+    v.lod_error = 1.0F;
+    const NphRenderFrameStats s1 = lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, cut);
+    log_stats("levels", &s1);
+    (void)lod_frames(f, &v, target, 2U, cut);
+    const u32 level0_clusters = torus.lods.level0_clusters;
+    NTEST_LOG("level 0: %u clusters; the walk handed on %u meshlets from %u nodes", level0_clusters,
+              s1.vsm_meshlets, s1.vsm_nodes);
+    NTEST_EXPECT_EQ_UINT(s1.vsm_overflow, 0U);
+    NTEST_EXPECT_GT_UINT(s1.vsm_drawn, 0U);
+    NTEST_EXPECT_GT_UINT(s1.vsm_nodes, 0U);
+    NTEST_EXPECT_GT_UINT(s1.vsm_meshlets, 0U);
+    // Fewer than two thirds of one level's whole cut (level 0's, which the
+    // finest levels take), where every level reached handed on all of it.
+    NTEST_EXPECT_LE_UINT(s1.vsm_meshlets * 3U, level0_clusters * 2U);
+    // Its shadow, which the floor shows in part, as its level 0's.
+    u32 dark = 0U;
+    u32 differ = 0U;
+    for (i32 y = 0; y < (i32)LOD_TARGET; ++y) {
+        for (i32 x = 0; x < (i32)LOD_TARGET; ++x) {
+            const u64 at_px = ((u64)y * LOD_TARGET + (u64)x) * 4U;
+            dark += lod_dark(level0, x, y) ? 1U : 0U;
+            bool edge = false;
+            for (i32 dy = -LOD_EDGE; dy <= LOD_EDGE && !edge; ++dy) {
+                for (i32 dx = -LOD_EDGE; dx <= LOD_EDGE && !edge; ++dx) {
+                    const i32 qx = x + dx;
+                    const i32 qy = y + dy;
+                    edge = qx >= 0 && qy >= 0 && qx < (i32)LOD_TARGET && qy < (i32)LOD_TARGET &&
+                           lod_dark(level0, qx, qy) != lod_dark(level0, x, y);
+                }
+            }
+            differ += !edge && channel_diff(level0 + at_px, cut + at_px) > SAME_TOL ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u pixels in its shadow, %u differ from level 0's away from its edges", dark,
+              differ);
+    NTEST_EXPECT_GT_UINT(dark, 2000U);
+    NTEST_EXPECT_EQ_UINT(differ, 0U);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_instance_destroy(f->renderer, floor0);
     nph_render_mesh_destroy(f->renderer, caster);
     nph_gpu_image_destroy(f->dev, target);
     lod_mesh_free(&torus);

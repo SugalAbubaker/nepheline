@@ -59,6 +59,11 @@
 #define NPH_VSM_ARGS_DRAW     2 // the page raster's draws and clears
 #define NPH_VSM_ARGS_INSTANCE 3 // the instance cull's dispatch, and its levels
 
+// The caster walk's queues (vsm_cull_nodes.comp), as the camera's
+// (NPH_VIS_LOD_QUEUES): a step reads one, fills the next, and empties the
+// one after.
+#define NPH_VSM_NODE_QUEUES 3
+
 // vsm_cull.comp modes (NphVisPush.mode).
 #define NPH_VSM_CULL_INSTANCES 0 // (instance, level) pairs against the pages to draw (z: level)
 #define NPH_VSM_CULL_MESHLETS  1 // their meshlets against those pages: the draws
@@ -114,6 +119,10 @@ NPH_SHARED_STRUCT(NphVsmCounters)
     u32 voxel_draw_count; // (instance, voxel cluster, entry) draws
     u32 pad2;
     u32 level_render[NPH_VSM_LEVELS]; // pages drawn per level
+    // The caster walk: each queue's items (vsm_cull_nodes.comp), and the
+    // nodes it visited (statistics).
+    u32 node_count[NPH_VSM_NODE_QUEUES];
+    u32 nodes_visited;
 };
 
 // Indirect arguments derived from the counters.
@@ -126,6 +135,9 @@ NPH_SHARED_STRUCT(NphVsmArgs)
     u32 instance_args[4];       // dispatch: the instance cull, z the levels with pages to draw
     u32 levels[NPH_VSM_LEVELS]; // those levels, in order
     u32 voxel_draw_args[4];     // dispatch: the voxel casters' splat, a workgroup per voxel draw
+    // dispatch: each step of the caster walk, a workgroup per
+    // NPH_VIS_LOD_ITEMS items of its queue (the step before raises it)
+    u32 node_args[NPH_VSM_NODE_QUEUES][4];
 };
 
 // The virtual shadow map's view of a frame.
@@ -172,6 +184,10 @@ NPH_SHARED_STRUCT(NphVsmView)
     u32 max_voxel_draws;
     u32 pad0;
     u64 voxel_draws; // uvec4[max_voxel_draws]: (instance slot, voxel cluster, entry, unused)
+    // The caster walk's queues: uvec2[max_nodes] each, (instance slot, node | level << 24).
+    u64 node_queue[NPH_VSM_NODE_QUEUES];
+    u32 max_nodes;
+    u32 pad1;
 };
 
 // Push constants of vsm_request_test.comp (the render tests): the depth

@@ -330,3 +330,57 @@ group indices did.
   voxels and a sheet that simplifies to the end, built on four workers and on none,
   give the same arrays, byte for byte; `test_mesh.c` cooks a mesh with levels on two
   workers to the bytes it cooks to on one thread.
+
+## Amendment (2026-10-28): the shadow map walks its casters' hierarchies against its pages
+
+**Context.** The shadow map's cuts (the amendment of 2026-10-26) were tables of clusters
+made with each mesh, one per power-of-two threshold, and `vsm cull instances` handed an
+(instance, level)'s whole cut on to the meshlet cull wherever the instance's sphere
+reached a page to draw. Near the camera the levels' texels are fractions of a
+millimetre and the cut is level 0. In the open landscape (ADR-0061's stage 5) a pine's
+three meshes hold 289,412 clusters there, so a few trees by the camera overflowed
+`max_vsm_meshlets` (2^20) for pages of a few centimetres. Their pages never completed,
+the overflows raised the resolution bias to its limit, and every page was drawn again
+every frame.
+
+**Decision.** `vsm cull instances` hands a mesh with levels on to a walk of its
+hierarchy (`vsm_cull_nodes.comp`), two node levels a step, as the camera's walk takes
+them, with the cut's threshold of the instance and the level (`vsm_lod_threshold`, the
+same power of two the tables were cut at). A node or group is taken when a group below
+it is too coarse for the threshold, a cluster below it fine enough, and its sphere
+reaches a page of the level to draw. A group's clusters go to the meshlet cull, which
+keeps those whose maker's error is fine enough. The tables are gone, and with them the
+mesh record's cut fields (192 bytes, from 208), their memory (about 1.2 entries a
+cluster), and their build when a mesh is created.
+
+**Alternatives considered.**
+
+- *Larger lists:* the items grow with the size of the meshes near the pages, not with
+  the pages, so no capacity is safe.
+- *Chunks of each table with spheres of their own:* a second level of culling over the
+  same clusters, at a fixed granularity the hierarchy already has at every scale.
+
+**Consequences.**
+
+- Interleaved against the tables on the RTX 3060 Ti (three rounds):
+  `foliage_shadows_sun_4k_production`, every page drawn again each frame, -0.026 ms
+  (the instance cull 0.080 to 0.011 ms, the walk's steps 0.055, the meshlet cull
+  +0.024, the raster -0.035); `lod_shadows_sun_4k_production` +0.005; Bistro's views
+  -0.003 to +0.036 ms, the walk's steps 0.031 ms in the turning view, which draws pages
+  every frame, against the instance cull's -0.020, the others within the runs' spread;
+  the still scenes within 0.012. A step's arguments reach its dispatch through the
+  graph's barrier between the passes (the step reads the work buffer as indirect
+  arguments): with a second barrier of its own the steps cost Bistro's views 0.006 to
+  0.022 ms more, in frames that draw no page as in the others.
+- The landscape, with eight times every list: the forest view 52.8 ms against 52.2.
+- Memory: the walk's three queues in the shadow map's work buffer (`max_lod_nodes` items
+  of 8 bytes each, 6.3 MB at the default), against the tables' 1.2 entries a cluster.
+- The cold start, and every fall of the resolution bias, draws every page at once: in
+  the landscape that still overflows the list even at eight times its default, for the
+  pages are many and each reaches many trees. A budget of pages drawn a frame, the
+  coarse levels first, the bias left alone, is the next step.
+- `test_vsm.c` (`a_big_caster_hands_on_only_its_clusters_near_the_pages_drawn`): a torus
+  sixteen times its size, above the view, of which the floor's few pages reach a part:
+  the walk hands on 375 of its 690 level-0 clusters, where each level reached handed on
+  all of its cut, and its shadow is its level 0's. The shadow map's other tests (its
+  casters at their cuts, the voxel casters against their CPU twin) pass unchanged.

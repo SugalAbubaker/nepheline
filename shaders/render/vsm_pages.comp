@@ -271,6 +271,11 @@ void args(VisViewRef view, VsmViewRef r)
             }
             const uvec4 g = groups((view.v.instance_count + 63u) / 64u, VSM_MAX_GROUPS_X);
             a.a.instance_args = uint[4](n != 0u ? g.x : 0u, g.y, n, 0u);
+            // The caster walk's steps: none until the instance cull and the
+            // steps before raise them.
+            for (uint q = 0u; q < uint(NPH_VSM_NODE_QUEUES); ++q) {
+                a.a.node_args[q] = uint[4](0u, 1u, 1u, 0u);
+            }
         }
         break;
     }

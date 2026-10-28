@@ -1550,19 +1550,20 @@ static NphResult declare_nodes(NphGpuRenderGraph *graph, NphRenderer *r, const V
     return NPH_RESULT_OK;
 }
 
-// The steps down the deepest live hierarchy, when the view walks them: two
-// of its node levels a step (vis_cull_nodes.comp).
-static u32 lod_steps(const NphRenderer *r, u32 flags)
+u32 render_vis_lod_steps(const NphRenderer *r)
 {
-    if ((flags & (u32)NPH_VIS_VIEW_LOD) == 0U) {
-        return 0U;
-    }
     for (u32 d = RENDER_LOD_MAX_DEPTH; d > 0U; --d) {
         if (r->vis.lod_depths[d - 1U] != 0U) {
             return (d + 1U) / 2U;
         }
     }
     return 0U;
+}
+
+// The steps down the deepest live hierarchy, when the view walks them.
+static u32 lod_steps(const NphRenderer *r, u32 flags)
+{
+    return (flags & (u32)NPH_VIS_VIEW_LOD) != 0U ? render_vis_lod_steps(r) : 0U;
 }
 
 static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const VisGraph *g)
@@ -1913,6 +1914,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vsm_evicted = last->vsm_evicted;
         stats->vsm_draws = last->vsm_draws;
         stats->vsm_voxel_draws = last->vsm_voxel_draws;
+        stats->vsm_meshlets = last->vsm_meshlets;
+        stats->vsm_nodes = last->vsm_nodes;
         stats->vsm_overflow = last->vsm_overflow;
     }
     NPH_PROFILE_END();

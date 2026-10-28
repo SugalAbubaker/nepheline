@@ -33,6 +33,46 @@ NPH_BUFFER_REF(VsmBitsRef) { uint w[]; };
 
 #define VSM_NONE 0xFFFFFFFFu
 
+// A caster work item is (instance slot, meshlet | level << 24), the meshlet
+// under 2^24; VSM_ITEM_LOD marks a cluster of a mesh's levels that the walk
+// (vsm_cull_nodes.comp) took from a group too coarse for the level, which
+// vsm cull meshlets keeps only where its maker's error is fine enough.
+#define VSM_ITEM_LOD        0x40000000u
+#define VSM_ITEM_LEVEL_MASK 0x3Fu
+
+// The error a caster's levels of detail may have, in texels of the level it
+// is drawn into: within the receiver's offset along its normal
+// (NphVsmView.texel_bias, 1.5 texels) with a texel to spare.
+#define VSM_LOD_TEXELS 0.5
+
+// floor(log2(x)) of a positive float from its exponent (-127 for 0 and
+// denormals, 128 for infinity).
+int vsm_floor_log2(float x)
+{
+    return int((floatBitsToUint(x) >> 23u) & 0xFFu) - 127;
+}
+
+// The threshold of a caster's cut in a level, in mesh units: the largest
+// power of two within VSM_LOD_TEXELS of the level's texel at the instance's
+// scale. A cluster is drawn into the level's pages when its maker's error
+// is at most this and its consumer's more (render/cluster_lod.h): one cut
+// for the whole level, the same every frame, so a page drawn stays right
+// while the camera moves. Below every error of a mesh it draws level 0,
+// above every one its coarsest level.
+float vsm_lod_threshold(VsmViewRef r, int level, float scale)
+{
+    const float allowed =
+        float(VSM_LOD_TEXELS) * r.v.levels[level].page_size / (float(NPH_VSM_PAGE) * scale);
+    return exp2(float(vsm_floor_log2(allowed)));
+}
+
+// Whether a sphere (light-space centre, radius) spans a page of a level to
+// draw this frame and does not lie wholly beyond the level's far plane. A
+// sphere spanning more pages than VSM_SCAN_PAGES is taken as touching one
+// without scanning the bitmask (its parts are tested).
+#define VSM_SCAN_PAGES 256
+bool vsm_touches_render(VsmViewRef r, int level, vec3 centre, float radius);
+
 // How far below a level's boundary (in log2 of the footprint) the shading
 // already takes the finer level. The requests rebuild a pixel's point from
 // its depth, the shading interpolates it, and the two can differ by a few
@@ -324,6 +364,16 @@ bool vsm_render_any(VsmViewRef r, int level, ivec4 rect)
         }
     }
     return false;
+}
+
+bool vsm_touches_render(VsmViewRef r, int level, vec3 centre, float radius)
+{
+    if (vsm_beyond(r, level, centre, radius)) {
+        return false;
+    }
+    const ivec4 rect = vsm_sphere_rect(r, level, centre, radius);
+    const int area = (rect.y - rect.x + 1) * (rect.w - rect.z + 1);
+    return rect.x <= rect.y && (area > VSM_SCAN_PAGES || vsm_render_any(r, level, rect));
 }
 
 // The physical page's first texel in the pool.
