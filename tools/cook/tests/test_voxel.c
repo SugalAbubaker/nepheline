@@ -133,8 +133,7 @@ static void make_foliage(CookMesh *mesh, u32 count)
     NphPcg32 rng;
     nph_pcg32_seed(&rng, 77U, 1U);
     for (u32 i = 0; i < count; ++i) {
-        const NphVec3 c = nph_vec3(4.0F * nph_pcg32_next_f32(&rng), 4.0F * nph_pcg32_next_f32(&rng),
-                                   4.0F * nph_pcg32_next_f32(&rng));
+        const NphVec3 c = nph_vec3_scale(nph_pcg32_next_vec3(&rng), 4.0F);
         const f32 z = 2.0F * nph_pcg32_next_f32(&rng) - 1.0F;
         const f32 phi = 2.0F * NPH_PI * nph_pcg32_next_f32(&rng);
         const f32 rr = nph_f32_sqrt(nph_f32_max(1.0F - z * z, 0.0F));

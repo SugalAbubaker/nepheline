@@ -185,16 +185,23 @@ the decision's choices made as follows.
 
 Measured (`test_cell_proxy.c`, `test_voxel.c`): a bush inside a double shell is
 left out entirely (403 voxels at level 0); inside an occluders' shell, the proxy is
-empty; four turned trees of sparse needles give a finest level that stops 0 to 10 %
-more rays than the trees' own cut at its cell along the axes, and 6 to 21 % more
-along slants 10 degrees below the horizon between them.
+empty; four turned trees of sparse needles give a finest level that stops more rays
+than the trees' own cut at its cell: over 32 seeds of their needles, 4 to 7 % more on
+average along the axes and 11 to 12 % along slants 10 degrees below the horizon
+between them (a seed's direction from 2 % less to 26 % more), which is 5 to 6 % and
+13 to 15 % more than the needles. The coverage tests' bounds are four standard
+deviations of such a sweep's spread about its mean, per direction and for the mean
+over the directions: one seed's numbers are one realization of the needles and of the
+voxelizer's jittered rays (first measured on one seed, these bounds failed for others).
 
-**Open: voxels made from voxels.** Re-voxelized where their grids agree, voxels keep
-their sources' coverage within 4 %; in a turned grid (an instance turned against the
-proxy's), each cell's footprint is fitted anew to the union of several turned
-footprints, and the result stops 5 to 20 % more rays than its sources (whose own
-excess over the needles is ADR-0061's, 2 to 10 % here). Finer sources do not help (a
-quarter of the cell: 15 to 43 % over the needles, against 9 to 38 % at a half). The
+**Open: voxels made from voxels.** Re-voxelized where their grids agree, voxels stop
+a few percent more rays than their sources (over 32 seeds of a needle cloud: 3 % on
+average, 6 % along the axes; through a quarter turn, 2 %); in a turned grid (an
+instance turned against the proxy's), each cell's footprint is fitted anew to the
+union of several turned footprints, and the result stops more again (the trees above:
+4 to 12 % more than their cut on average, the cut itself 0 to 3 % more than the
+needles, ADR-0061's excess). Finer sources do not help (for one seed, a quarter of
+the cell: 15 to 43 % over the needles, against 9 to 38 % at a half). The
 cause is the fit: three axes' coverages leave a footprint's shadow along slants
 free, and an ellipsoid fitted to a needle's axis coverages shadows more along its
 own direction than the needle does. Stage 2 measures what it does to the image at
