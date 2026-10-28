@@ -864,8 +864,9 @@ NTEST_F(CellProxy, a_grove_cells_proxy_stops_what_its_trees_stop)
         nph_vec3_normalize(nph_vec3(-0.85F, -0.18F, -0.49F)),
         nph_vec3_normalize(nph_vec3(0.49F, -0.18F, -0.85F)),
     };
+    const u32 n = (u32)NPH_ARRAY_COUNT(dirs);
     f64 ratios = 0.0;
-    for (u32 i = 0; i < NPH_ARRAY_COUNT(dirs); ++i) {
+    for (u32 i = 0; i < n; ++i) {
         f64 tris = 0.0;
         f64 vox = 0.0;
         f64 cut = 0.0;
@@ -884,7 +885,7 @@ NTEST_F(CellProxy, a_grove_cells_proxy_stops_what_its_trees_stop)
         }
         ratios += vox / cut;
     }
-    NTEST_EXPECT_NEAR_F64(ratios / (f64)NPH_ARRAY_COUNT(dirs), 1.09, 0.07);
+    NTEST_EXPECT_NEAR_F64(ratios / (f64)n, 1.09, 0.07);
     soup_free(&soup);
     nph_render_cluster_lods_free(&proxy);
     mesh_free(&tree);
