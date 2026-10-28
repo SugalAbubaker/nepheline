@@ -209,6 +209,40 @@ the switch, against the instances' cut there; if it shows, the remedy is the
 voxelizer's (fitting each footprint to its coverage along the four diagonals too),
 which would serve every voxel level.
 
+## Stage 1, the formats and the cooker (2026-10-28)
+
+- **The mesh asset** (version 4) admits a mesh of voxels alone: no vertices and no
+  indices, every cluster a voxel cluster, level 0's too, one submesh of no indices
+  over level 0's clusters. A record without vertices at level 0 is a voxel cluster's
+  in such a mesh alone, so a mesh of triangles keeps its check.
+- **The scene asset** (version 2) gains `CELL` (96 bytes a cell: its instances'
+  bounds and range of `INST`, its proxy's mesh, material, origin, finest cell and
+  distance), its instances written cell by cell, those of no cell after them.
+- **The cooker** (`nph_cook --hlod`, `cook/cells.h`) partitions a glTF scene's
+  instances by their spheres' centres into squares of 64 m; an instance whose mesh
+  does not voxelize (a blended or emissive submesh) or whose sphere passes half a
+  square (the terrain) is in no cell. The meshes' parts the proxies sample are kept
+  as they cook: the clusters consumed above half the finest cell at their most
+  stretched instance, with their vertices renumbered, every other cluster's record
+  emptied. The proxies are built in rounds of 32 cells on the job system, each with
+  the instances of the eight squares round it and of no cell (within its 3 x 3
+  squares) as occluders, and written as meshes of voxels alone.
+
+Measured on the landscape (`nph_cook --hlod`, fifteen workers): 47,863 instances in
+384 cells (the terrain in none). The first 62 cells took 17 to 82 s each, 15 at once;
+their finest levels hold 21,000 to 312,000 voxels (most 100,000 to 250,000), about a
+tenth of what their instances' own cuts at 0.25 m draw (a hundred pines at about
+25,000 voxels each), and their levels down to the coarsest cluster hold a third
+again. **The sweep left out almost nothing**: 45,149 of a cell's 45,150 voxels at the
+visibility level are seen from some direction. A pine's canopy at half a metre is open
+(rays pass between its voxels), and the trees stand apart, so the proxies' saving is
+the instances merged, not what they hide; the sweep stays for what does hide (the
+ruins' interiors). The cook was stopped there by the machine running short of memory
+(the cooker at 4.5 GB and rising, 16 GB in all, other programs holding about half):
+the meshes' geometry, which only their submeshes are read of once they are cooked, is
+now released before the cells are built. The whole landscape is measured again in
+stage 2, before the renderer's switch is.
+
 ## References
 
 - C. Erikson, D. Manocha, W. V. Baxter III. "HLODs for Faster Display of Large Static and

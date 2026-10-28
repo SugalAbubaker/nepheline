@@ -30,6 +30,7 @@ struct Cooker {
     CookTextureSettings texture;
     CookMeshSettings mesh;
     CookSoundSettings sound;
+    CookHlodSettings hlod;
     b32 force;
     CookerStats stats;
     void (*on_cooked)(void *user, NphGuid guid, u32 type);
@@ -250,7 +251,8 @@ NphResult cooker_create(const CookerDesc *desc, Cooker **out)
 {
     NPH_ASSERT(desc != NULL && out != NULL);
     *out = NULL;
-    if (desc->alloc == NULL || desc->out_dir == NULL || desc->out_dir[0] == '\0') {
+    if (desc->alloc == NULL || desc->out_dir == NULL || desc->out_dir[0] == '\0' ||
+        (desc->hlod.enabled && !desc->mesh.voxels)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     Cooker *c = NPH_ALLOC_TYPE(desc->alloc, Cooker);
@@ -264,6 +266,7 @@ NphResult cooker_create(const CookerDesc *desc, Cooker **out)
     c->texture = desc->texture;
     c->mesh = desc->mesh;
     c->sound = desc->sound;
+    c->hlod = desc->hlod;
     c->on_cooked = desc->on_cooked;
     c->on_cooked_user = desc->on_cooked_user;
     NphResult r = cooker_canonical_path(desc->out_dir, c->out_dir, sizeof c->out_dir);
@@ -373,8 +376,22 @@ static u64 settings_hash(const Cooker *c, u32 type)
         // The cooker's defaults; a source's own settings are in its content
         // hash (cooker_cook_sound).
         h = nph_hash_combine(h, nph_hash64(&c->sound, sizeof c->sound, 3U));
+    } else if (type == NPH_ASSET_TYPE_SCENE && c->hlod.enabled) {
+        // Its cells: their settings, and the meshes' their proxies sample.
+        const CookHlodSettings hlod = cook_hlod_resolved(&c->hlod);
+        h = nph_hash_combine(h, nph_hash64(&hlod, sizeof hlod, 4U));
+        h = nph_hash_combine(h, COOK_MESH_VERSION);
+        h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
     }
     return h;
+}
+
+// A cell's proxy's settings hash: a mesh asset the scene makes, of its
+// settings.
+static u64 proxy_settings_hash(const Cooker *c)
+{
+    return nph_hash_combine(settings_hash(c, NPH_ASSET_TYPE_SCENE),
+                            nph_hash_combine(type_version(NPH_ASSET_TYPE_MESH), 5U));
 }
 
 // True when the database holds a current entry whose output exists.
@@ -1060,10 +1077,23 @@ static NphResult cook_material(Cooker *c, const char *key, const char *sub, cons
     return r;
 }
 
+// The cells a scene's asset lists: the partition's order of its instances
+// (NULL: their own), its cells, and their proxies (NPH_GUID_NULL: none).
+typedef struct SceneCells {
+    u32 instance_count; // the partition's
+    const u32 *order;
+    const CookCell *cells;
+    u32 cell_count;
+    const NphGuid *proxies;
+    const NphVec3 *origins;
+    f32 proxy_cell;
+    f32 proxy_distance;
+} SceneCells;
+
 static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScene *scene,
                                   const NphGuid *mesh_guids, const NphGuid *material_guids,
                                   NphGuid default_material, const GuidArray *deps,
-                                  NphGuid scene_guid)
+                                  NphGuid scene_guid, const SceneCells *cells)
 {
     const u64 shash = settings_hash(c, NPH_ASSET_TYPE_SCENE);
     if (is_current(c, key, "scene", scene->content_hash, shash)) {
@@ -1127,6 +1157,41 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
             }
         }
     }
+    // The instances in the partition's order, and the cells over them (each
+    // proxy's material its first instance's first: the voxels carry their
+    // own look).
+    NphSceneMeshInstance *ordered =
+        NPH_ALLOC_ARRAY_ZEROED(alloc, NphSceneMeshInstance, nph_max_u32(inst_count, 1U));
+    const u32 cell_count = cells != NULL ? cells->cell_count : 0U;
+    NphSceneCell *records =
+        NPH_ALLOC_ARRAY_ZEROED(alloc, NphSceneCell, nph_max_u32(cell_count, 1U));
+    if (r == NPH_RESULT_OK && (ordered == NULL || records == NULL)) {
+        r = NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (r == NPH_RESULT_OK && cells != NULL && cells->instance_count != inst_count) {
+        r = NPH_RESULT_INVALID_ARGUMENT; // the partition saw other instances
+    }
+    for (u32 k = 0; k < inst_count && r == NPH_RESULT_OK; ++k) {
+        ordered[k] = inst[cells != NULL && cells->order != NULL ? cells->order[k] : k];
+    }
+    for (u32 k = 0; k < cell_count && r == NPH_RESULT_OK; ++k) {
+        const CookCell *cc = &cells->cells[k];
+        NphSceneCell *rec = &records[k];
+        rec->bounds = cc->bounds;
+        rec->instance_offset = cc->first;
+        rec->instance_count = cc->count;
+        rec->proxy = cells->proxies[k];
+        if (!nph_guid_is_null(rec->proxy)) {
+            const NphSceneMeshInstance *first = &ordered[cc->first];
+            rec->proxy_material =
+                first->material_count != 0U && first->material_offset < guid_list.len
+                    ? guid_list.data[first->material_offset]
+                    : NPH_GUID_NULL;
+            rec->proxy_origin = cells->origins[k];
+            rec->proxy_cell = cells->proxy_cell;
+            rec->proxy_distance = cells->proxy_distance;
+        }
+    }
     NphSceneHeader h;
     memset(&h, 0, sizeof h);
     h.node_count = n;
@@ -1135,6 +1200,7 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
     h.camera_count = scene->camera_count;
     h.light_count = scene->light_count;
     h.string_bytes = (u32)strings.len;
+    h.cell_count = cell_count;
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_HEADER, 0U, &h, sizeof h,
                                       NPH_ASSET_CODEC_NONE, 0U);
@@ -1144,8 +1210,12 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
                                       NPH_ASSET_CODEC_NONE, 0U);
     }
     if (r == NPH_RESULT_OK) {
-        r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_INSTANCES, 0U, inst,
-                                      (u64)inst_count * sizeof *inst, NPH_ASSET_CODEC_NONE, 0U);
+        r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_INSTANCES, 0U, ordered,
+                                      (u64)inst_count * sizeof *ordered, NPH_ASSET_CODEC_NONE, 0U);
+    }
+    if (r == NPH_RESULT_OK && cell_count != 0U) {
+        r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_CELLS, 0U, records,
+                                      (u64)cell_count * sizeof *records, NPH_ASSET_CODEC_NONE, 0U);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_MATERIALS, 0U, guid_list.data,
@@ -1174,6 +1244,12 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
     nph_asset_writer_free(&w);
     NPH_ARRAY_FREE(&guid_list);
     nph_sb_free(&strings);
+    if (ordered != NULL) {
+        NPH_FREE_ARRAY(alloc, NphSceneMeshInstance, ordered, nph_max_u32(inst_count, 1U));
+    }
+    if (records != NULL) {
+        NPH_FREE_ARRAY(alloc, NphSceneCell, records, nph_max_u32(cell_count, 1U));
+    }
     if (nodes != NULL) {
         NPH_FREE_ARRAY(alloc, NphSceneNode, nodes, nph_max_u32(n, 1U));
     }
@@ -1393,6 +1469,463 @@ static const CookVoxelMaterial *voxel_material(VoxelImages *v, i32 m)
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// The world partition's cells (cook/cells.h; ADR-0062)
+// ---------------------------------------------------------------------------
+
+// A glTF scene's cells: its instances as the partition sees them (in the
+// scene asset's order of instances), the partition, each cell's proxy (its
+// asset's sub key and GUID, its origin), and what the proxies sample of the
+// meshes: each mesh's source, kept from the cut at `min_error`, and its
+// materials, which the samplers read until the proxies are built.
+typedef struct HlodMatrix {
+    f64 m[3][4];
+} HlodMatrix;
+
+typedef struct HlodScene {
+    bool active; // cells asked for
+    bool build;  // some proxy is not current: the meshes' sources are kept
+    CookHlodSettings settings;
+    u32 mesh_count;
+    CookCellInstance *instances; // instance_cap of them
+    u32 instance_count;
+    u32 instance_cap;
+    NphArrayU32 order;
+    CookCellArray cells;
+    NphGuid *proxies;
+    NphVec3 *origins;
+    f32 *min_error;            // per mesh
+    CookProxySource *sources;  // per mesh
+    CookVoxelMaterial **slots; // per mesh: its slots' materials
+    u32 *slot_counts;          // per mesh
+} HlodScene;
+
+static void hlod_cell_sub(const CookCell *cell, char *out, u64 cap)
+{
+    snprintf(out, cap, "cell/%d_%d", cell->x, cell->z);
+}
+
+static void hlod_free(HlodScene *hs, NphAllocator *a)
+{
+    const u32 nm = nph_max_u32(hs->mesh_count, 1U);
+    if (hs->sources != NULL) {
+        for (u32 m = 0; m < hs->mesh_count; ++m) {
+            cook_proxy_source_free(&hs->sources[m]);
+        }
+        NPH_FREE_ARRAY(a, CookProxySource, hs->sources, nm);
+    }
+    if (hs->slots != NULL) {
+        for (u32 m = 0; m < hs->mesh_count; ++m) {
+            if (hs->slots[m] != NULL) {
+                NPH_FREE_ARRAY(a, CookVoxelMaterial, hs->slots[m],
+                               nph_max_u32(hs->slot_counts[m], 1U));
+            }
+        }
+        NPH_FREE_ARRAY(a, CookVoxelMaterial *, hs->slots, nm);
+    }
+    if (hs->slot_counts != NULL) {
+        NPH_FREE_ARRAY(a, u32, hs->slot_counts, nm);
+    }
+    if (hs->min_error != NULL) {
+        NPH_FREE_ARRAY(a, f32, hs->min_error, nm);
+    }
+    if (hs->instances != NULL) {
+        NPH_FREE_ARRAY(a, CookCellInstance, hs->instances, hs->instance_cap);
+    }
+    const u32 nc = nph_max_u32(hs->cells.len, 1U);
+    if (hs->proxies != NULL) {
+        NPH_FREE_ARRAY(a, NphGuid, hs->proxies, nc);
+    }
+    if (hs->origins != NULL) {
+        NPH_FREE_ARRAY(a, NphVec3, hs->origins, nc);
+    }
+    NPH_ARRAY_FREE(&hs->order);
+    NPH_ARRAY_FREE(&hs->cells);
+    memset(hs, 0, sizeof *hs);
+}
+
+// The most `m` (rows of a 3 x 4 matrix, in order) stretches a length: its
+// linear part's largest singular value, bounded above as the proxy builder
+// bounds it (cell_proxy.c).
+static f64 hlod_stretch(const f64 *m)
+{
+    f64 bound = 0.0;
+    for (u32 r = 0; r < 3U; ++r) {
+        f64 row = 0.0;
+        for (u32 col = 0; col < 3U; ++col) {
+            f64 ata = 0.0;
+            for (u32 k = 0; k < 3U; ++k) {
+                ata += m[k * 4U + r] * m[k * 4U + col];
+            }
+            row += nph_f64_abs(ata);
+        }
+        bound = nph_f64_max(bound, row);
+    }
+    return sqrt(bound);
+}
+
+// Node `gn`'s local transform (rows of a 3 x 4 matrix): T R S.
+static void hlod_local(const CookGltfNode *gn, f64 out[3][4])
+{
+    const f64 x = (f64)gn->rotation.x;
+    const f64 y = (f64)gn->rotation.y;
+    const f64 z = (f64)gn->rotation.z;
+    const f64 w = (f64)gn->rotation.w;
+    const f64 rot[3][3] = {
+        {1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)},
+        {2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)},
+        {2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)}};
+    const f64 sc[3] = {(f64)gn->scale.x, (f64)gn->scale.y, (f64)gn->scale.z};
+    const f64 t[3] = {(f64)gn->translation.x, (f64)gn->translation.y, (f64)gn->translation.z};
+    for (u32 r = 0; r < 3U; ++r) {
+        for (u32 col = 0; col < 3U; ++col) {
+            out[r][col] = rot[r][col] * sc[col];
+        }
+        out[r][3] = t[r];
+    }
+}
+
+// The partition of a glTF scene's instances and which proxies are current;
+// with `build`, the arrays the meshes' sources and materials go into.
+static NphResult hlod_prepare(Cooker *c, const char *key, const CookGltfScene *scene,
+                              VoxelImages *voxels, u64 content_hash, HlodScene *hs)
+{
+    NphAllocator *a = c->alloc;
+    memset(hs, 0, sizeof *hs);
+    NPH_ARRAY_INIT(&hs->order, a);
+    NPH_ARRAY_INIT(&hs->cells, a);
+    hs->active = true;
+    hs->settings = cook_hlod_resolved(&c->hlod);
+    hs->mesh_count = scene->mesh_count;
+    const u32 n = scene->node_count;
+    const u32 nm = nph_max_u32(scene->mesh_count, 1U);
+    HlodMatrix *world = NPH_ALLOC_ARRAY(a, HlodMatrix, nph_max_u32(n, 1U));
+    NphSphere *spheres = NPH_ALLOC_ARRAY(a, NphSphere, nm);
+    u8 *cellable = NPH_ALLOC_ARRAY_ZEROED(a, u8, nm);
+    f64 *stretch = NPH_ALLOC_ARRAY_ZEROED(a, f64, nm);
+    hs->instance_cap = nph_max_u32(n, 1U);
+    hs->instances = NPH_ALLOC_ARRAY_ZEROED(a, CookCellInstance, hs->instance_cap);
+    hs->min_error = NPH_ALLOC_ARRAY_ZEROED(a, f32, nm);
+    NphResult r = world != NULL && spheres != NULL && cellable != NULL && stretch != NULL &&
+                          hs->instances != NULL && hs->min_error != NULL
+                      ? NPH_RESULT_OK
+                      : NPH_RESULT_OUT_OF_MEMORY;
+    // Each mesh's sphere (round its box) and whether it voxelizes.
+    for (u32 m = 0; m < scene->mesh_count && r == NPH_RESULT_OK; ++m) {
+        const CookGltfMesh *gm = &scene->meshes[m];
+        NphAABB box = nph_aabb_empty();
+        NPH_ARRAY_FOREACH (CookVertex, v, &gm->mesh.vertices) {
+            box = nph_aabb_expand(box, v->position);
+        }
+        spheres[m] =
+            gm->mesh.vertices.len != 0U
+                ? nph_sphere(nph_aabb_center(box), 0.5F * nph_vec3_length(nph_aabb_size(box)))
+                : nph_sphere(nph_vec3_zero(), 0.0F);
+        bool ok = gm->mesh.submeshes.len != 0U;
+        for (u32 k = 0; k < gm->mesh.submeshes.len && ok; ++k) {
+            const u32 slot = gm->mesh.submeshes.data[k].material_slot;
+            const i32 mat = slot < gm->material_count ? gm->materials[slot] : -1;
+            ok = voxel_material(voxels, mat)->surface != NPH_RENDER_VOXEL_SURFACE_NONE;
+        }
+        cellable[m] = ok ? 1U : 0U;
+    }
+    // The nodes' world transforms (parents come first), and the instances in
+    // the scene asset's order (cook_scene_asset's).
+    for (u32 i = 0; i < n && r == NPH_RESULT_OK; ++i) {
+        const CookGltfNode *gn = &scene->nodes[i];
+        f64 local[3][4];
+        hlod_local(gn, local);
+        if (gn->parent == NPH_SCENE_NO_NODE) {
+            memcpy(world[i].m, local, sizeof local);
+        } else {
+            const HlodMatrix *p = &world[gn->parent];
+            for (u32 row = 0; row < 3U; ++row) {
+                for (u32 col = 0; col < 4U; ++col) {
+                    f64 v = col == 3U ? p->m[row][3] : 0.0;
+                    for (u32 k = 0; k < 3U; ++k) {
+                        v += p->m[row][k] * local[k][col];
+                    }
+                    world[i].m[row][col] = v;
+                }
+            }
+        }
+        if (gn->mesh < 0 || (u32)gn->mesh >= scene->mesh_count ||
+            scene->meshes[gn->mesh].mesh.submeshes.len == 0U) {
+            continue;
+        }
+        const u32 m = (u32)gn->mesh;
+        CookCellInstance *ci = &hs->instances[hs->instance_count++];
+        memcpy(ci->transform, world[i].m, sizeof ci->transform);
+        ci->mesh = m;
+        ci->cellable = cellable[m];
+        const f64 st = hlod_stretch(&ci->transform[0][0]);
+        const NphVec3 c0 = spheres[m].center;
+        f64 centre[3];
+        for (u32 row = 0; row < 3U; ++row) {
+            centre[row] = ci->transform[row][0] * (f64)c0.x + ci->transform[row][1] * (f64)c0.y +
+                          ci->transform[row][2] * (f64)c0.z + ci->transform[row][3];
+        }
+        ci->sphere = nph_sphere(nph_vec3((f32)centre[0], (f32)centre[1], (f32)centre[2]),
+                                (f32)((f64)spheres[m].radius * st));
+        stretch[m] = nph_f64_max(stretch[m], st);
+    }
+    // The finest cut a proxy samples of each mesh: half the finest cell at
+    // its most stretched instance (a little finer, against rounding).
+    const f64 finest = (f64)cook_hlod_finest_cell(&hs->settings);
+    for (u32 m = 0; m < scene->mesh_count && r == NPH_RESULT_OK; ++m) {
+        hs->min_error[m] = stretch[m] > 0.0 ? (f32)(0.5 * finest / stretch[m] * 0.99) : NPH_F32_MAX;
+    }
+    if (r == NPH_RESULT_OK) {
+        r = cook_cells_partition(hs->instances, hs->instance_count, hs->settings.cell, &hs->order,
+                                 &hs->cells);
+    }
+    const u32 nc = nph_max_u32(hs->cells.len, 1U);
+    if (r == NPH_RESULT_OK) {
+        hs->proxies = NPH_ALLOC_ARRAY_ZEROED(a, NphGuid, nc);
+        hs->origins = NPH_ALLOC_ARRAY_ZEROED(a, NphVec3, nc);
+        r = hs->proxies != NULL && hs->origins != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    }
+    // The proxies are current with the scene (its settings theirs, and it is
+    // written after them) and each one the database holds (a cell whose
+    // proxy came out empty has none).
+    const u64 shash = proxy_settings_hash(c);
+    hs->build = !is_current(c, key, "scene", content_hash, settings_hash(c, NPH_ASSET_TYPE_SCENE));
+    for (u32 k = 0; k < hs->cells.len && r == NPH_RESULT_OK && !hs->build; ++k) {
+        char sub[64];
+        hlod_cell_sub(&hs->cells.data[k], sub, sizeof sub);
+        if (cook_db_find(&c->db, nph_str_from_cstr(key), nph_str_from_cstr(sub)) != NULL &&
+            !is_current(c, key, sub, content_hash, shash)) {
+            hs->build = true;
+        }
+    }
+    if (r == NPH_RESULT_OK && hs->build) {
+        hs->sources = NPH_ALLOC_ARRAY_ZEROED(a, CookProxySource, nm);
+        hs->slots = NPH_ALLOC_ARRAY_ZEROED(a, CookVoxelMaterial *, nm);
+        hs->slot_counts = NPH_ALLOC_ARRAY_ZEROED(a, u32, nm);
+        r = hs->sources != NULL && hs->slots != NULL && hs->slot_counts != NULL
+                ? NPH_RESULT_OK
+                : NPH_RESULT_OUT_OF_MEMORY;
+        for (u32 m = 0; m < scene->mesh_count && r == NPH_RESULT_OK; ++m) {
+            cook_proxy_source_init(&hs->sources[m], a);
+        }
+    }
+    if (world != NULL) {
+        NPH_FREE_ARRAY(a, HlodMatrix, world, nph_max_u32(n, 1U));
+    }
+    if (spheres != NULL) {
+        NPH_FREE_ARRAY(a, NphSphere, spheres, nm);
+    }
+    if (cellable != NULL) {
+        NPH_FREE_ARRAY(a, u8, cellable, nm);
+    }
+    if (stretch != NULL) {
+        NPH_FREE_ARRAY(a, f64, stretch, nm);
+    }
+    u32 celled = 0U;
+    for (u32 k = 0; k < hs->cells.len; ++k) {
+        celled += hs->cells.data[k].count;
+    }
+    NPH_LOG_INFO(&NPH_LOG_COOK, "%s: %u instances, %u cells of %.0f m (%u instances in none)%s",
+                 key, hs->instance_count, hs->cells.len, (f64)hs->settings.cell,
+                 hs->instance_count - celled, hs->build ? "" : ", their proxies current");
+    return r;
+}
+
+// One round of cells built at once: their proxies, results and times.
+typedef struct HlodRound {
+    const CookCellProxyInput *base;
+    u32 first; // the round's first cell
+    NphRenderClusterLods *proxies;
+    NphVec3 *origins;
+    NphRenderCellProxyStats *stats;
+    NphResult *results;
+    u64 *ns;
+} HlodRound;
+
+static void hlod_round(void *user, u32 begin, u32 end)
+{
+    const HlodRound *hr = (const HlodRound *)user;
+    for (u32 i = begin; i < end; ++i) {
+        CookCellProxyInput in = *hr->base;
+        in.cell = hr->first + i;
+        const u64 start = nph_time_now_ns();
+        hr->results[i] = cook_cell_proxy(&in, &hr->proxies[i], &hr->origins[i], &hr->stats[i]);
+        hr->ns[i] = nph_time_now_ns() - start;
+    }
+}
+
+// The cells per round: their proxies' outputs held at once.
+#define HLOD_ROUND 32U
+
+// Every cell's proxy, built from the meshes' sources in rounds of cells at
+// once on the job system, and written; an empty proxy writes nothing.
+static NphResult hlod_build(Cooker *c, const char *key, const CookGltfScene *scene,
+                            u64 content_hash, HlodScene *hs)
+{
+    NphAllocator *a = c->alloc;
+    const u32 nm = nph_max_u32(scene->mesh_count, 1U);
+    // Each mesh's sampler over its source, and the proxy builder's meshes.
+    CookVoxelSampler *cvs = NPH_ALLOC_ARRAY_ZEROED(a, CookVoxelSampler, nm);
+    NphRenderVoxelSampler *samplers = NPH_ALLOC_ARRAY_ZEROED(a, NphRenderVoxelSampler, nm);
+    u8 **surfaces = NPH_ALLOC_ARRAY_ZEROED(a, u8 *, nm);
+    CookVoxelMaterials *materials = NPH_ALLOC_ARRAY_ZEROED(a, CookVoxelMaterials, nm);
+    NphRenderProxyMesh *meshes = NPH_ALLOC_ARRAY_ZEROED(a, NphRenderProxyMesh, nm);
+    NphResult r =
+        cvs != NULL && samplers != NULL && surfaces != NULL && materials != NULL && meshes != NULL
+            ? NPH_RESULT_OK
+            : NPH_RESULT_OUT_OF_MEMORY;
+    for (u32 m = 0; m < scene->mesh_count && r == NPH_RESULT_OK; ++m) {
+        CookProxySource *src = &hs->sources[m];
+        const u32 sn = src->slots.submeshes.len;
+        meshes[m].lods = &src->lods;
+        meshes[m].positions = src->positions.data;
+        meshes[m].submesh_count = nph_max_u32(sn, 1U);
+        if (src->lods.groups.len == 0U) {
+            // Never cooked (no submeshes): no instance names it, but the
+            // builder takes every mesh it is given; a root group of nothing.
+            NphRenderLodGroup root;
+            memset(&root, 0, sizeof root);
+            root.error = NPH_F32_MAX;
+            r = NPH_ARRAY_PUSH(&src->lods.groups, root);
+            continue;
+        }
+        if (hs->slots[m] == NULL) {
+            continue; // no materials: an occluder's mesh
+        }
+        surfaces[m] = NPH_ALLOC_ARRAY_ZEROED(a, u8, nph_max_u32(sn, 1U));
+        if (surfaces[m] == NULL) {
+            r = NPH_RESULT_OUT_OF_MEMORY;
+            break;
+        }
+        materials[m].slots = hs->slots[m];
+        materials[m].slot_count = hs->slot_counts[m];
+        cook_voxel_sampler_init(&cvs[m], &src->slots, &materials[m], src->positions.data,
+                                src->attribs.data, surfaces[m], &samplers[m]);
+        meshes[m].sampler = &samplers[m];
+    }
+    CookCellProxyInput base;
+    memset(&base, 0, sizeof base);
+    base.instances = hs->instances;
+    base.instance_count = hs->instance_count;
+    base.order = hs->order.data;
+    base.cells = hs->cells.data;
+    base.cell_count = hs->cells.len;
+    base.meshes = meshes;
+    base.mesh_count = scene->mesh_count;
+    base.settings = hs->settings;
+    base.scratch = a;
+    const u64 shash = proxy_settings_hash(c);
+    u64 total_voxels = 0U;
+    u32 written = 0U;
+    const u64 start = nph_time_now_ns();
+    for (u32 first = 0; first < hs->cells.len && r == NPH_RESULT_OK; first += HLOD_ROUND) {
+        const u32 count = nph_min_u32(HLOD_ROUND, hs->cells.len - first);
+        NphRenderClusterLods proxies[HLOD_ROUND];
+        NphVec3 origins[HLOD_ROUND];
+        NphRenderCellProxyStats stats[HLOD_ROUND];
+        NphResult results[HLOD_ROUND];
+        u64 ns[HLOD_ROUND];
+        for (u32 i = 0; i < count; ++i) {
+            nph_render_cluster_lods_init(&proxies[i], a);
+            results[i] = NPH_RESULT_OK;
+        }
+        HlodRound round = {&base, first, proxies, origins, stats, results, ns};
+        bool ran = false;
+        if (c->jobs != NULL && count > 1U) {
+            NphJobCounter counter = NPH_JOB_COUNTER_INIT;
+            if (nph_job_parallel_for(c->jobs, count, 1U, hlod_round, &round,
+                                     NPH_JOB_PRIORITY_NORMAL, &counter) == NPH_RESULT_OK) {
+                nph_job_wait(c->jobs, &counter);
+                ran = true;
+            }
+        }
+        if (!ran) {
+            hlod_round(&round, 0U, count);
+        }
+        for (u32 i = 0; i < count; ++i) {
+            const u32 k = first + i;
+            const CookCell *cell = &hs->cells.data[k];
+            if (r == NPH_RESULT_OK && results[i] != NPH_RESULT_OK) {
+                NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: cell (%d, %d): %s", key, cell->x, cell->z,
+                              nph_result_string(results[i]));
+                r = results[i];
+            }
+            hs->origins[k] = origins[i];
+            if (r == NPH_RESULT_OK && proxies[i].clusters.meshlets.len != 0U) {
+                char sub[64];
+                hlod_cell_sub(cell, sub, sizeof sub);
+                const NphGuid guid = asset_guid(key, sub);
+                NphAssetWriter w;
+                nph_asset_writer_init(&w, a, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
+                                      content_hash);
+                nph_asset_writer_set_lz_level(&w, c->mesh.lz);
+                r = cook_proxy_write(&proxies[i], &w);
+                if (r == NPH_RESULT_OK) {
+                    char file[64];
+                    snprintf(file, sizeof file, "cell_%d_%d", cell->x, cell->z);
+                    char relative[COOKER_PATH_MAX];
+                    output_path(c, key, sub, file, guid, relative, sizeof relative);
+                    r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_MESH, content_hash, shash,
+                             NULL, 0U);
+                }
+                nph_asset_writer_free(&w);
+                if (r == NPH_RESULT_OK) {
+                    hs->proxies[k] = guid;
+                    written += 1U;
+                    total_voxels += proxies[i].voxels.len;
+                }
+            }
+            const NphRenderCellProxyStats *st = &stats[i];
+            NPH_LOG_INFO(&NPH_LOG_COOK,
+                         "%s: cell (%d, %d): %u instances, %u levels, %u voxels (level 0 %u), "
+                         "%u of %u seen (%u occluders'), %.2f s",
+                         key, cell->x, cell->z, cell->count, st->levels, proxies[i].voxels.len,
+                         st->voxels[0], st->visible, st->swept, st->occluders,
+                         nph_time_ns_to_s(ns[i]));
+            nph_render_cluster_lods_free(&proxies[i]);
+        }
+    }
+    NPH_LOG_INFO(&NPH_LOG_COOK, "%s: %u cell proxies, %llu voxels, %.1f s", key, written,
+                 (unsigned long long)total_voxels, nph_time_ns_to_s(nph_time_now_ns() - start));
+    for (u32 m = 0; m < scene->mesh_count; ++m) {
+        if (surfaces != NULL && surfaces[m] != NULL) {
+            NPH_FREE_ARRAY(a, u8, surfaces[m], nph_max_u32(hs->sources[m].slots.submeshes.len, 1U));
+        }
+    }
+    if (surfaces != NULL) {
+        NPH_FREE_ARRAY(a, u8 *, surfaces, nm);
+    }
+    if (cvs != NULL) {
+        NPH_FREE_ARRAY(a, CookVoxelSampler, cvs, nm);
+    }
+    if (samplers != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderVoxelSampler, samplers, nm);
+    }
+    if (materials != NULL) {
+        NPH_FREE_ARRAY(a, CookVoxelMaterials, materials, nm);
+    }
+    if (meshes != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderProxyMesh, meshes, nm);
+    }
+    return r;
+}
+
+// The proxies a current scene stands for: each cell's, found in the
+// database (an empty proxy has no entry).
+static void hlod_current(Cooker *c, const char *key, HlodScene *hs)
+{
+    for (u32 k = 0; k < hs->cells.len; ++k) {
+        char sub[64];
+        hlod_cell_sub(&hs->cells.data[k], sub, sizeof sub);
+        const CookDbEntry *e = cook_db_find(&c->db, nph_str_from_cstr(key), nph_str_from_cstr(sub));
+        hs->proxies[k] = e != NULL ? e->guid : NPH_GUID_NULL;
+        const CookHlodSettings s = hs->settings;
+        const CookCell *cell = &hs->cells.data[k];
+        hs->origins[k] = nph_vec3((f32)cell->x * s.cell, 0.0F, (f32)cell->z * s.cell);
+        c->stats.skipped += e != NULL ? 1U : 0U;
+    }
+}
+
 NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
 {
     NPH_ASSERT(c != NULL && source_path != NULL);
@@ -1467,6 +2000,13 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     if (r == NPH_RESULT_OK && with_voxels) {
         r = voxel_images_init(&voxel_images, c, key, &scene);
     }
+    // The cells: the partition first (which proxies are current), the meshes'
+    // sources kept as they cook where some is not.
+    HlodScene hlod;
+    memset(&hlod, 0, sizeof hlod);
+    if (r == NPH_RESULT_OK && c->hlod.enabled) {
+        r = hlod_prepare(c, key, &scene, &voxel_images, scene.content_hash, &hlod);
+    }
     for (u32 m = 0; m < scene.mesh_count && r == NPH_RESULT_OK; ++m) {
         CookGltfMesh *gm = &scene.meshes[m];
         if (gm->mesh.submeshes.len == 0U) {
@@ -1479,7 +2019,8 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&scene_deps, mesh_guids[m]);
         }
-        if (r != NPH_RESULT_OK || is_current(c, key, sub, scene.content_hash, mesh_shash)) {
+        const bool current = is_current(c, key, sub, scene.content_hash, mesh_shash);
+        if (r != NPH_RESULT_OK || (current && !hlod.build)) {
             c->stats.skipped += r == NPH_RESULT_OK ? 1U : 0U;
             continue;
         }
@@ -1503,11 +2044,18 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             materials.slots = slots;
             materials.slot_count = gm->material_count;
         }
-        if (r == NPH_RESULT_OK) {
+        if (r == NPH_RESULT_OK && hlod.build) {
+            r = cook_mesh_process_proxy(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL,
+                                        c->jobs, &w, &st, hlod.min_error[m], &hlod.sources[m]);
+        } else if (r == NPH_RESULT_OK) {
             r = cook_mesh_process(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL, c->jobs,
                                   &w, &st);
         }
-        if (slots != NULL) {
+        if (slots != NULL && hlod.build) {
+            // The proxies' samplers read them until they are built.
+            hlod.slots[m] = slots;
+            hlod.slot_counts[m] = gm->material_count;
+        } else if (slots != NULL) {
             NPH_FREE_ARRAY(alloc, CookVoxelMaterial, slots, nph_max_u32(gm->material_count, 1U));
         }
         if (r == NPH_RESULT_OK) {
@@ -1532,20 +2080,56 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             snprintf(file, sizeof file, "mesh_%u_%s", m, gm->mesh.name);
             char relative[COOKER_PATH_MAX];
             output_path(c, key, sub, file, mesh_guids[m], relative, sizeof relative);
-            r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_MESH, scene.content_hash, mesh_shash,
-                     NULL, 0U);
+            if (current) {
+                c->stats.skipped += 1U; // cooked for the proxies alone
+            } else {
+                r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_MESH, scene.content_hash,
+                         mesh_shash, NULL, 0U);
+            }
         } else {
             NPH_LOG_ERROR(&NPH_LOG_COOK, "mesh %s: %s", gm->mesh.name, nph_result_string(r));
         }
         nph_asset_writer_free(&w);
     }
+    // The meshes are cooked (and what the proxies sample of them kept): from
+    // here on only their submeshes are read (the scene's instances), so their
+    // geometry goes before the cells are built (gigabytes for a landscape's
+    // trees).
+    for (u32 m = 0; m < scene.mesh_count; ++m) {
+        NPH_ARRAY_FREE(&scene.meshes[m].mesh.vertices);
+        NPH_ARRAY_FREE(&scene.meshes[m].mesh.indices);
+    }
+    // The cells' proxies, then the materials they sampled.
+    if (r == NPH_RESULT_OK && hlod.active && hlod.build) {
+        r = hlod_build(c, key, &scene, scene.content_hash, &hlod);
+    } else if (r == NPH_RESULT_OK && hlod.active) {
+        hlod_current(c, key, &hlod);
+    }
+    for (u32 k = 0; k < hlod.cells.len && r == NPH_RESULT_OK; ++k) {
+        if (!nph_guid_is_null(hlod.proxies[k])) {
+            r = NPH_ARRAY_PUSH(&produced, hlod.proxies[k]);
+        }
+    }
     voxel_images_free(&voxel_images);
     // The scene.
     const NphGuid scene_guid = asset_guid(key, "scene");
+    SceneCells cells;
+    memset(&cells, 0, sizeof cells);
+    if (hlod.active) {
+        cells.instance_count = hlod.instance_count;
+        cells.order = hlod.order.data;
+        cells.cells = hlod.cells.data;
+        cells.cell_count = hlod.cells.len;
+        cells.proxies = hlod.proxies;
+        cells.origins = hlod.origins;
+        cells.proxy_cell = cook_hlod_finest_cell(&hlod.settings);
+        cells.proxy_distance = hlod.settings.distance;
+    }
     if (r == NPH_RESULT_OK) {
         r = cook_scene_asset(c, key, &scene, mesh_guids, material_guids, default_material,
-                             &scene_deps, scene_guid);
+                             &scene_deps, scene_guid, hlod.active ? &cells : NULL);
     }
+    hlod_free(&hlod, alloc);
     if (r == NPH_RESULT_OK) {
         r = NPH_ARRAY_PUSH(&produced, scene_guid);
     }
