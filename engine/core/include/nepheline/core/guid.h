@@ -94,8 +94,9 @@ typedef struct NphGuidGenerator {
     u64 inc;
 } NphGuidGenerator;
 
-// Seeds the generator deterministically: equal seeds give equal streams.
-// asset/guid.h's nph_guid_generator_init seeds it from the clocks instead.
+// Seeds the generator deterministically: equal seeds give equal streams, on
+// every platform and compiler. asset/guid.h's nph_guid_generator_init seeds
+// it from the clocks instead.
 void nph_guid_generator_seed(NphGuidGenerator *g, u64 seed);
 
 // The next random GUID. Never null.
