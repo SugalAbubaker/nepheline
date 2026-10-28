@@ -248,6 +248,90 @@ the meshes' geometry, which only their submeshes are read of once they are cooke
 released before the cells are built, the cooker peaks at 5.0 GB while it loads the
 scene and holds about 2.1 GB through the cells.
 
+## Stage 2, the switch (2026-10-28)
+
+The renderer's cells are in (`nph_render_cell_create`; docs/render.md "Cell proxies",
+"The switch"), with the decision's choices made as follows.
+
+- **A mesh of voxels alone** is a render mesh like any: no vertex or index buffers and
+  no bottom level, every cluster a voxel cluster. The production path draws it; the
+  reference renderer and the rays pass it by.
+- **A cell** is its instances' box (a 64-bit centre), its proxy (a mesh of voxels alone,
+  its materials, a rotation and translation), the proxy's finest error and its
+  distance. The cell owns the proxy's instance; an instance names its cell in its
+  description, and the cell's index, plus one, rides in the upper 24 bits of its
+  record's flags, with a flag for the proxy. A table of the cells' records
+  (`NphVisCell`, 48 bytes: the box's centre split as a translation is, its half
+  extents, the error and the distance) is what the culls read.
+- **The camera's switch** is the instance cull's first question, as decided: is the
+  box's nearest point at least the distance away, and is the finest error fine from
+  there (the levels' own test at that point, scale 1)? A cell's instances and its
+  proxy ask it of the same record and view with the same arithmetic, so the proxy is
+  drawn exactly where they are not, without a pass of its own. Views without levels of
+  detail draw the instances.
+- **The shadow map's** is the same question of each level: is the finest error within
+  the level's threshold? Its answer does not change from frame to frame, so the pages
+  drawn stay right.
+- **The loading:** the cooked-scene bridge makes a scene's cells before its instances,
+  which name them; `render_perf --no-cells` loads a scene without them, for comparing.
+  The runtime's scene import makes no cells yet (its instances are drawn as
+  themselves). The landscape's manifest does not ask the cooker for its cells yet, so
+  the nightly measures it without them until stage 3 streams them: held whole (below),
+  they leave the 16 GB runner 0.7 to 1.3 GB of free memory, and they add 50 minutes to
+  its cook.
+
+Measured (`test_vis_cells.c`): a grove of four trees of needles, triangles alone, and its
+proxy at 0.125 m: near, the trees (8,904 triangles); from where the box is past the
+proxy's distance and its finest error is fine, the proxy alone (110 voxel clusters, no
+triangles, the four trees stood in for), covering 301 pixels where the trees alone cover
+268 (on a target of 1,024 at a threshold of 4 pixels); the trees again in a view without
+levels. A cell declared finer than every level of the shadow map is drawn into every
+level as its proxy (113 voxel caster draws, 4 of triangles: the floor's and an
+occluder's), one coarser than them all as its trees (110 triangle draws, no voxels).
+
+Measured on the landscape (`render_perf --lists=16`, the lists the views need, its six
+views at native 4K on the RTX 3060 Ti, with its cells and with `--no-cells`; a repeat of
+the run without cells lands within 0.1 ms):
+
+| View | Cells drawn as proxies | Instances they stand for | GPU, cells | Without | Change |
+|---|---|---|---|---|---|
+| forest | 138 | 17,118 | 61.21 ms | 64.17 ms | -2.96 ms (-4.6 %) |
+| forest walk | 136 | 16,926 | 61.86 ms | 64.75 ms | -2.89 ms (-4.5 %) |
+| forest sprint | 135 | 16,824 | 62.74 ms | 65.75 ms | -3.01 ms (-4.6 %) |
+| forest turn | 138 | 17,118 | 63.55 ms | 64.73 ms | -1.19 ms (-1.8 %) |
+| across | 117 | 13,586 | 64.04 ms | 64.40 ms | -0.36 ms (-0.6 %) |
+| valley | 208 | 26,331 | 53.10 ms | 57.27 ms | -4.17 ms (-7.3 %) |
+
+The savings are the voxel raster's (its first phase 2.2 ms in the forest views, 3.2 ms in
+the valley: the proxies' bricks are 16 to 23 % fewer than the far trees' own cuts) and the
+walk's (0.4 to 0.6 ms: 436,000 nodes against 571,000 in the forest). The instance cull
+takes 0.5 ms more: it hands a proxy between its distance and about twice it its finest
+level whole, as it does any mesh's level 0 where no coarser cut serves, so the work moves
+out of the walk. The frame stays at 53 to 64 ms: the near and mid field's needles (the
+software and voxel rasters' 44 ms) are not the cells' to save, and are next.
+
+The image, against the run without cells: FLIP 0.014 to 0.029 over the frame (between
+the two runs without cells, 0.0001 to 0.0035). The difference is the far ridges'
+silhouettes against the sky, where the proxies are drawn (up to 0.6 at a pixel): their
+trees in place, a little fuller, as the coverage bias above has them. The near field's
+brightness is unchanged (to 0.03 %), its pixels 0.4 of 255 apart on average: the radiance
+cache's fixed budget of rays falls otherwise once the far field changes, a different
+realization of its noise.
+
+Memory (`render_perf`'s GPU memory line, the valley's view run alone): the proxies are
+2.06 GB decompressed (1.69 GB stored), and the device-local memory in use grows by about
+as much, from 3.96 GB to 5.84 GB with the default lists (from 5.19 GB to 7.18 GB with
+`--lists=16`): within the 7.83 GB the OS budgets the process and, with the default lists,
+within Phase 13's 6.5 GB, though with 0.7 GB to spare. The host holds them twice over:
+the cooked scene keeps every asset it loaded until it unloads, so the proxies stay
+decompressed in the loader's heap and mapped where they were read, and the working set
+grows by as much, from 3.6 GB to 7.2 GB (7.9 GB with `--lists=16`). The private memory
+grows from 7.5 GB to 10.7 GB (from 8.6 GB to 12.7 GB), the machine's free memory falling
+to 1.3 GB (0.7 GB) of its 16. Loading the proxies adds 1 to 3 s to the landscape's 230
+to 274. Stage 3 streams them (the finest levels near, the coarser further), with no
+copy on the host of what the GPU holds; it comes before the game's world, ten times the
+landscape's area.
+
 ## References
 
 - C. Erikson, D. Manocha, W. V. Baxter III. "HLODs for Faster Display of Large Static and
