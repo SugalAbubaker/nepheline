@@ -106,7 +106,7 @@ f32 nph_render_lod_projected_error(NphVec3 center, f32 radius, f32 error, f32 sc
 // precision: the renderer's tests bound a sphere's parts by it
 // (vis_lod_node_too_coarse, vis_lod_surely_too_coarse), and a union taken
 // in single precision may fall short of a part by a rounding.
-static NphSphere sphere_hull(const NphSphere *spheres, u32 count)
+NphSphere lod_sphere_hull(const NphSphere *spheres, u32 count)
 {
     NPH_ASSERT(spheres != NULL && count != 0U);
     NphSphere hull = spheres[0];
@@ -1397,31 +1397,21 @@ static u32 elected(const SubmeshVotes *v)
     return v->submesh.len != 0U ? v->submesh.data[best] : 0U;
 }
 
-// The voxel clusters of group `group` (level `level`) from its cells: bricks
-// of their cells, split into clusters, appended to the output with their
-// bounds and places; each source to the cluster of its home cell (the
-// first cluster where it has none), in `next_sources` cluster by cluster.
-// `*out_voxels` takes the voxels made.
-static NphResult emit_voxels(const Build *b, GroupOut *dst, const LodVoxelCellArray *cells,
-                             f64 cell, u32 group, u32 level, const LodVoxelSource *sources,
-                             const u32 *source_cell, u32 source_count, u32 *out_voxels)
+NphResult lod_voxel_emit(NphRenderClusterLods *out, NphAllocator *a, const LodVoxelCellArray *cells,
+                         f64 cell, u32 group, u32 level, u32 *cell_cluster, u32 *out_made)
 {
-    NphAllocator *a = b->alloc;
-    NphRenderClusterLods *out = &dst->part;
+    NPH_ASSERT(out != NULL && cells != NULL && cell_cluster != NULL && out_made != NULL);
     const u32 n = cells->len;
-    *out_voxels = n;
+    *out_made = 0U;
     CellOrder *order = NPH_ALLOC_ARRAY(a, CellOrder, nph_max_u32(n, 1U));
-    u32 *cell_cluster = NPH_ALLOC_ARRAY(a, u32, nph_max_u32(n, 1U));
     NPH_ARRAY(BrickRun) runs;
     NPH_ARRAY_INIT(&runs, a);
     NphArrayU32 ranges;
     NPH_ARRAY_INIT(&ranges, a);
-    NphArrayU32 counts; // sources per new cluster
-    NPH_ARRAY_INIT(&counts, a);
     SubmeshVotes votes;
     NPH_ARRAY_INIT(&votes.submesh, a);
     NPH_ARRAY_INIT(&votes.votes, a);
-    NphResult r = order != NULL && cell_cluster != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    NphResult r = order != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
     const i64 bias = LOD_VOXEL_COORD_LIMIT;
     for (u32 i = 0; i < n && r == NPH_RESULT_OK; ++i) {
         const LodVoxelCell *c = &cells->data[i];
@@ -1542,15 +1532,46 @@ static NphResult emit_voxels(const Build *b, GroupOut *dst, const LodVoxelCellAr
             const NphRenderClusterLod lod = {group, NPH_RENDER_LOD_NONE, level, 0U};
             r = NPH_ARRAY_PUSH(&out->lods, lod);
         }
-        if (r == NPH_RESULT_OK) {
-            r = NPH_ARRAY_PUSH(&dst->cell_of, (f32)cell);
-        }
+    }
+    *out_made = out->clusters.meshlets.len - first_cluster;
+    NPH_ARRAY_FREE(&votes.submesh);
+    NPH_ARRAY_FREE(&votes.votes);
+    NPH_ARRAY_FREE(&ranges);
+    NPH_ARRAY_FREE(&runs);
+    if (order != NULL) {
+        NPH_FREE_ARRAY(a, CellOrder, order, nph_max_u32(n, 1U));
+    }
+    return r;
+}
+
+// The voxel clusters of group `group` (level `level`) from its cells
+// (lod_voxel_emit), with their cells; each source to the cluster of its home
+// cell (the first cluster where it has none), in `next_sources` cluster by
+// cluster. `*out_voxels` takes the voxels made.
+static NphResult emit_voxels(const Build *b, GroupOut *dst, const LodVoxelCellArray *cells,
+                             f64 cell, u32 group, u32 level, const LodVoxelSource *sources,
+                             const u32 *source_cell, u32 source_count, u32 *out_voxels)
+{
+    NphAllocator *a = b->alloc;
+    NphRenderClusterLods *out = &dst->part;
+    const u32 n = cells->len;
+    *out_voxels = n;
+    u32 *cell_cluster = NPH_ALLOC_ARRAY(a, u32, nph_max_u32(n, 1U));
+    NphArrayU32 counts; // sources per new cluster
+    NPH_ARRAY_INIT(&counts, a);
+    u32 made = 0U;
+    NphResult r = cell_cluster != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        r = lod_voxel_emit(out, a, cells, cell, group, level, cell_cluster, &made);
+    }
+    for (u32 k = 0; k < made && r == NPH_RESULT_OK; ++k) {
+        r = NPH_ARRAY_PUSH(&dst->cell_of, (f32)cell);
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&counts, 0U);
         }
     }
+    const u32 first_cluster = out->clusters.meshlets.len - made;
     // The sources, cluster by cluster (a counting sort, in source order).
-    const u32 made = out->clusters.meshlets.len - first_cluster;
     for (u32 s = 0; s < source_count && r == NPH_RESULT_OK && made != 0U; ++s) {
         const u32 k = source_cell[s] != NPH_U32_MAX ? cell_cluster[source_cell[s]] : 0U;
         counts.data[k] += 1U;
@@ -1572,16 +1593,9 @@ static NphResult emit_voxels(const Build *b, GroupOut *dst, const LodVoxelCellAr
         dst->sources.data[dst->source_start.data[first_cluster + k] + counts.data[k]] = sources[s];
         counts.data[k] += 1U;
     }
-    NPH_ARRAY_FREE(&votes.submesh);
-    NPH_ARRAY_FREE(&votes.votes);
     NPH_ARRAY_FREE(&counts);
-    NPH_ARRAY_FREE(&ranges);
-    NPH_ARRAY_FREE(&runs);
     if (cell_cluster != NULL) {
         NPH_FREE_ARRAY(a, u32, cell_cluster, nph_max_u32(n, 1U));
-    }
-    if (order != NULL) {
-        NPH_FREE_ARRAY(a, CellOrder, order, nph_max_u32(n, 1U));
     }
     return r;
 }
@@ -1632,7 +1646,7 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
         }
     }
     if (r == NPH_RESULT_OK) {
-        o->sphere = sphere_hull(hull_parts.data, hull_parts.len);
+        o->sphere = lod_sphere_hull(hull_parts.data, hull_parts.len);
         r = gather(b, cl, count, &indices, &submeshes);
     }
     const u32 tris = submeshes.len;
@@ -2383,7 +2397,7 @@ static NphResult build_roots(Build *b, u32 first, u32 n)
         if (r != NPH_RESULT_OK) {
             break;
         }
-        const NphSphere sphere = sphere_hull(parts.data, parts.len);
+        const NphSphere sphere = lod_sphere_hull(parts.data, parts.len);
         NphRenderLodGroup rec;
         memset(&rec, 0, sizeof rec);
         rec.center = sphere.center;
@@ -2470,7 +2484,7 @@ static NphResult push_node(NphRenderClusterLods *l, const NodeChild *children, u
             node.child[i] = NPH_RENDER_LOD_NONE;
         }
     }
-    out->sphere = sphere_hull(parts, count);
+    out->sphere = lod_sphere_hull(parts, count);
     out->error = error;
     out->maker_error = maker_error;
     out->ref = l->nodes.len;
@@ -2509,10 +2523,8 @@ static NphResult build_tree(NphRenderClusterLods *l, NphAllocator *a, const Node
     return r;
 }
 
-static NphResult build_hierarchy(Build *b)
+NphResult lod_build_hierarchy(NphRenderClusterLods *l, NphAllocator *a)
 {
-    NphRenderClusterLods *l = b->out;
-    NphAllocator *a = b->alloc;
     // Node 0 is the root, filled in last.
     NphRenderLodNode root;
     memset(&root, 0, sizeof root);
@@ -2808,7 +2820,7 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
         r = build_roots(&b, first, count);
     }
     if (r == NPH_RESULT_OK && out->groups.len != 0U) {
-        r = build_hierarchy(&b);
+        r = lod_build_hierarchy(b.out, b.alloc);
     }
     build_free(&b);
     return r;

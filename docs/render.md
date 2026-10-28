@@ -947,6 +947,72 @@ scenes and Bistro's street measure within 0.004 ms of their frames before
 the voxels, the resolve unchanged; compiled in, its test alone, never
 taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
 
+### Cell proxies
+
+A world partition's cell is drawn from far off as one mesh of voxels, its
+proxy, in place of its instances (ADR-0062; `render/cell_proxy.h`,
+`cell_proxy.c`). Stage 1's builder is in, on the CPU, with its tests; the
+formats, the cooker's cells and the renderer's switch come next.
+
+**What a proxy is.** A mesh of voxel levels alone (ADR-0061's records): its
+level 0 at the proxy's finest cell (0.25 m for the landscape's 560 m), each
+next level twice as coarse, to a level of at most two cluster blocks along
+each axis. Each level's clusters hold a block of 8 x 8 x 8 cells (2 x 2 x 2
+bricks: at most 512 voxels), so the levels are an octree: a group consumes
+the clusters of a block of 16 cells of its level and makes the one cluster of
+the next level there, its error that cluster's cell, its sphere round its
+makers' spheres and the cluster it makes (a coarser cell's footprints may
+reach past the finer ones'); level 0 is made by no group, and one root group
+takes the last level. The records are `render/cluster_lod.h`'s, the hierarchy
+built as a mesh's is, so the renderer walks, culls, draws and shadows a
+proxy as any mesh with voxel levels.
+
+**Sampling.** Each level is voxelized as a mesh's voxel levels are, a
+jittered grid of 16 x 16 rays along each axis of each cell, from each
+instance's own cut at half the level's cell through its transform: its
+triangles, their corners in the proxy's space and their points sampled by
+their mesh's materials (the normal taken across by the inverse transpose),
+and its voxels as footprints, each ray taken into the voxel's mesh space and
+tested as the renderer tests it, forwards and back for where it enters and
+leaves (`voxel_footprint_span`; a span of no length is a touch from the next
+cell, not a hit). A footprint's look is its voxel's and its normals' second
+moment its lobe's, `((1 - b2) / 3) I + b2 n n^T`. A level is voxelized in
+tiles of 64 of its cells along x and z, the sources gathered for each, which
+bounds the memory to a tile's.
+
+**Visibility.** What no camera at the proxy's distance or more sees is left
+out (Gobbetti & Marton's environmental occlusion, "Far Voxels", 2005): the
+cell's voxels at the visibility level (twice the finest cell by default) and
+the occluders' around it (the neighbouring cells' instances and the terrain,
+within given bounds, at twice that cell) are swept from 96 directions over
+the sphere (a Fibonacci lattice), each with a grid of parallel rays half a
+cell apart, the voxels front to back by their cells' centres; each ray stops
+at the first footprint it meets, which is seen, and a footprint smaller than
+the rays' spacing that no ray meets is seen where a ray through its cell is
+still open. Rays, not opacities: a wall's voxels close up, where a per-voxel
+opacity would let half the light through one at a slant. The seen cells'
+neighbours are kept too, against a gap the directions missed. The finer
+levels keep the cells inside seen ones, the coarser the cells holding one.
+
+**Measured** (`test_cell_proxy.c`). A bush inside a closed double shell (an
+outer and an inner box 0.55 to 0.7 m apart): none of its 403 level-0 voxels
+is seen, 1,783 of the 2,907 voxels are, and the neighbours bring back 889.
+One closed surface alone does not hide: where its faces meet in a cell, the
+cell's footprint is fitted to their coverage and may fall a 32nd short of the
+cell's face, a slit the renderer would see through too. Inside an occluders'
+shell nothing is seen, and the proxy is empty. A turned sheet's 81 cells are
+all sheets facing its turned normal, in its material's colour. Four turned
+trees of sparse needles: the proxy's finest level stops 0 to 10 % more rays
+than the trees' own cut at its cell along the axes, and 6 to 21 % more along
+slants 10 degrees below the horizon between them; that cut itself stops 2 %
+more than the needles. Voxels made from voxels keep their sources' coverage
+where their grids agree (within 4 %), but refitted in a turned grid they add
+5 to 20 % to what their sources add over the needles (ADR-0062 "Stage 1,
+measured"). The voxelizer's tests take each footprint shape back as a source
+within the 32nds its ends round to, keep the cells a filter names and those
+alone, and see a voxel and triangles in one cell as the triangles of its box
+are seen.
+
 ### A frame
 
 | Pass | What it does |
@@ -2070,7 +2136,12 @@ and synchronisation-validation gate:
   surface; every cut of a closed mesh is closed; seams and material
   borders keep their shape; the build is deterministic, the same built on
   jobs (`test_voxel.c`), and degenerate, scattered, small, and bad input is
-  handled. On the GPU: the clusters
+  handled. Cell proxies (`test_cell_proxy.c`, on the CPU): a proxy's
+  records are a voxel-only mesh's levels; what it stops is what its
+  instances' cuts stop; what a closed shell or occluders hide is left out,
+  and the seen cells' neighbours added and those alone; a turned sheet faces
+  where it faces; the same cell gives the same bytes; bad input is refused.
+  On the GPU: the clusters
   drawn are the CPU's cut, cluster for cluster, for views that mix levels;
   a threshold of 0 draws level 0 as the mesh without levels; distance
   draws coarser levels; cuts mixing levels leave no hole in a terrain

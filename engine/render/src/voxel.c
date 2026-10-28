@@ -431,6 +431,37 @@ bool nph_render_voxel_trace(const NphRenderVoxelBrick *brick, const NphRenderVox
     return found;
 }
 
+bool voxel_footprint_hit(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
+                         NphVec3 dir, f32 t_min, f32 t_max)
+{
+    NPH_ASSERT(voxel != NULL && h > 0.0F);
+    const f32 o[3] = {origin.x - base.x, origin.y - base.y, origin.z - base.z};
+    f32 d[3] = {dir.x, dir.y, dir.z};
+    f32 inv[3];
+    for (u32 a = 0; a < 3U; ++a) {
+        if (nph_f32_abs(d[a]) < 1e-20F) {
+            d[a] = d[a] < 0.0F ? -1e-20F : 1e-20F;
+        }
+        inv[a] = 1.0F / d[a];
+    }
+    const f32 zero[3] = {0.0F, 0.0F, 0.0F};
+    f32 enter = t_min;
+    f32 leave = t_max;
+    for (u32 a = 0; a < 3U; ++a) {
+        const f32 ta = -o[a] * inv[a];
+        const f32 tb = (h - o[a]) * inv[a];
+        enter = nph_f32_max(enter, nph_f32_min(ta, tb));
+        leave = nph_f32_min(leave, nph_f32_max(ta, tb));
+    }
+    if (!(enter <= leave)) {
+        return false;
+    }
+    u32 face = 0U;
+    f32 t = t_min;
+    return footprint(voxel->box, voxel->material, zero, h / (f32)NPH_RENDER_VOXEL_BOX_STEPS, o, d,
+                     inv, enter, leave, &t, t_max, &face);
+}
+
 bool voxel_footprint_span(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
                           NphVec3 dir, f32 t_min, f32 t_max, f32 *out_enter, f32 *out_leave)
 {
