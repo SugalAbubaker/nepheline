@@ -413,7 +413,9 @@ static void soup_build(Soup *s, NphAllocator *a, const TestMesh *const *meshes,
             NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&s->tris, t));
         }
     }
-    qsort(s->tris.data, s->tris.len, sizeof(SoupTri), compare_soup);
+    if (s->tris.len > 1U) {
+        qsort(s->tris.data, s->tris.len, sizeof(SoupTri), compare_soup);
+    }
     for (u32 k = 0; k < s->tris.len; k += SOUP_CHUNK) {
         NphAABB b;
         b.min = nph_vec3_splat(NPH_F32_MAX);
