@@ -110,8 +110,16 @@ void nph_guid_generator_seed(NphGuidGenerator *g, u64 seed)
 NphGuid nph_guid_generate(NphGuidGenerator *g)
 {
     NPH_ASSERT(g != NULL);
+    // Each draw a statement of its own: as the operands of one expression,
+    // the draws would be made in an order C leaves unspecified, which
+    // compilers differ in (clang targeting Linux left to right, MSVC right to
+    // left), and a seed would not make the same GUIDs with each.
+    const u64 a = generator_next_u32(g);
+    const u64 b = generator_next_u32(g);
+    const u64 c = generator_next_u32(g);
+    const u64 d = generator_next_u32(g);
     NphGuid out;
-    out.lo = ((u64)generator_next_u32(g) << 32U) | generator_next_u32(g);
-    out.hi = ((u64)generator_next_u32(g) << 32U) | generator_next_u32(g);
+    out.lo = (a << 32U) | b;
+    out.hi = (c << 32U) | d;
     return guid_non_null(out);
 }

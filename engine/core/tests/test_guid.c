@@ -82,3 +82,18 @@ NTEST(guid, seeded_generators_are_reproducible)
     nph_guid_generator_seed(&b, 43U);
     NTEST_ASSERT_FALSE(nph_guid_equals(nph_guid_generate(&a), nph_guid_generate(&b)));
 }
+
+// A seed makes the same GUIDs with every compiler: the oracle values are a
+// reference model's (the generator's draws in order, lo's high word first),
+// which a compiler drawing a GUID's words in another order would miss.
+NTEST(guid, seeded_generators_agree_with_the_reference)
+{
+    NphGuidGenerator g;
+    nph_guid_generator_seed(&g, 42U);
+    const NphGuid first = nph_guid_generate(&g);
+    NTEST_ASSERT_EQ_UINT(first.lo, 0x20F87CF50383CDB1ULL);
+    NTEST_ASSERT_EQ_UINT(first.hi, 0xC149BA1C7351A741ULL);
+    const NphGuid second = nph_guid_generate(&g);
+    NTEST_ASSERT_EQ_UINT(second.lo, 0xE07C93DAB31DBA65ULL);
+    NTEST_ASSERT_EQ_UINT(second.hi, 0xD8FA2E58FE86D3FEULL);
+}
