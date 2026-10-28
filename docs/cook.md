@@ -367,6 +367,14 @@ proxy that stands for its instances from afar: a mesh of voxels alone
   and each one's database entry and file are (a cook rebuilds them all
   otherwise, recooking in memory the meshes it needs that are current).
   Cooking a scene without `--hlod` drops its proxies.
+- **Cost.** The landscape (`benchmarks/scenes/landscape.json`) on eight
+  workers: 47,862 of its 47,863 instances in 384 cells (the terrain in
+  none), 35 to 209 a cell. The cook takes 56 minutes, the cells 51 of them
+  (14.5 to 85 s a cell, median 60); the proxies hold 107 million voxels,
+  three quarters at the finest level, in 1.69 GB of mesh assets. The
+  cooker peaks at 5.0 GB while it loads the scene; the meshes' geometry is
+  released before the cells are built, which then hold it at about 2.1 GB
+  (ADR-0062, "Stage 1, the formats and the cooker").
 
 ### Tangent handedness
 

@@ -228,20 +228,25 @@ which would serve every voxel level.
   the instances of the eight squares round it and of no cell (within its 3 x 3
   squares) as occluders, and written as meshes of voxels alone.
 
-Measured on the landscape (`nph_cook --hlod`, fifteen workers): 47,863 instances in
-384 cells (the terrain in none). The first 62 cells took 17 to 82 s each, 15 at once;
-their finest levels hold 21,000 to 312,000 voxels (most 100,000 to 250,000), about a
-tenth of what their instances' own cuts at 0.25 m draw (a hundred pines at about
-25,000 voxels each), and their levels down to the coarsest cluster hold a third
-again. **The sweep left out almost nothing**: 45,149 of a cell's 45,150 voxels at the
-visibility level are seen from some direction. A pine's canopy at half a metre is open
-(rays pass between its voxels), and the trees stand apart, so the proxies' saving is
-the instances merged, not what they hide; the sweep stays for what does hide (the
-ruins' interiors). The cook was stopped there by the machine running short of memory
-(the cooker at 4.5 GB and rising, 16 GB in all, other programs holding about half):
-the meshes' geometry, which only their submeshes are read of once they are cooked, is
-now released before the cells are built. The whole landscape is measured again in
-stage 2, before the renderer's switch is.
+Measured on the landscape (`nph_cook --hlod`, eight workers): 47,862 of its 47,863
+instances in 384 cells (the terrain in none), 35 to 209 a cell (median 123). The cook
+takes 56 minutes, the cells 51 of them: 14.5 to 85 s a cell (median 60), about seven
+at once. The proxies hold 107 million voxels in 5 to 7 levels, 7,300 to 414,000 a cell
+(median 294,000), three quarters of them at the finest level (80.7 million: 5,200 to
+312,000 a cell), about a tenth of what their instances' own cuts at 0.25 m draw (a
+hundred pines at about 25,000 voxels each); written, 1.69 GB of mesh assets.
+**The sweep left out almost nothing**: 20,131,122 of the 20,131,815 voxels swept at
+the visibility level are seen from some direction. A pine's canopy at half a metre is
+open (rays pass between its voxels), and the trees stand apart, so the proxies' saving
+is the instances merged, not what they hide; the sweep stays for what does hide (the
+ruins' interiors). **The proxies are twice the estimate** (above: 0.9 GB for the
+landscape): their finest levels hold a canopy's volume seen through it, not a skin, so
+stage 3's streaming of the finest levels by distance matters the more. A first run, on
+fifteen workers, was stopped at 62 cells by the machine running short of memory (the
+cooker at 4.5 GB and rising, 16 GB in all, other programs holding about half); with
+the meshes' geometry, which only their submeshes are read of once they are cooked,
+released before the cells are built, the cooker peaks at 5.0 GB while it loads the
+scene and holds about 2.1 GB through the cells.
 
 ## References
 
