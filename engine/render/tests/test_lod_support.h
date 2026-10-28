@@ -176,9 +176,8 @@ static inline void lod_foliage_tubes_with(LodMesh *m, u32 count, f32 side, u64 s
     nph_pcg32_seed(&rng, seed, 1U);
     u32 k = 0U;
     for (u32 i = 0; i < count; ++i) {
-        const NphVec3 c = nph_vec3((nph_pcg32_next_f32(&rng) - 0.5F) * side,
-                                   (nph_pcg32_next_f32(&rng) - 0.5F) * side,
-                                   (nph_pcg32_next_f32(&rng) - 0.5F) * side);
+        const NphVec3 c =
+            nph_vec3_scale(nph_vec3_sub(nph_pcg32_next_vec3(&rng), nph_vec3_splat(0.5F)), side);
         const f32 z = 2.0F * nph_pcg32_next_f32(&rng) - 1.0F;
         const f32 phi = 2.0F * NPH_PI * nph_pcg32_next_f32(&rng);
         const f32 rr = nph_f32_sqrt(nph_f32_max(1.0F - z * z, 0.0F));

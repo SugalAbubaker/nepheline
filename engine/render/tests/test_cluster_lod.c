@@ -202,9 +202,7 @@ static void make_quads(TestMesh *m, u32 count, u64 seed)
     NphPcg32 rng;
     nph_pcg32_seed(&rng, seed, 1U);
     for (u32 i = 0; i < count; ++i) {
-        const NphVec3 c =
-            nph_vec3(nph_pcg32_next_f32(&rng) * 10.0F, nph_pcg32_next_f32(&rng) * 10.0F,
-                     nph_pcg32_next_f32(&rng) * 10.0F);
+        const NphVec3 c = nph_vec3_scale(nph_pcg32_next_vec3(&rng), 10.0F);
         const f32 s = 0.05F + 0.05F * nph_pcg32_next_f32(&rng);
         const u32 a = mesh_vertex(m, nph_vec3_add(c, nph_vec3(-s, -s, 0.0F)), 0U);
         const u32 b = mesh_vertex(m, nph_vec3_add(c, nph_vec3(s, -s, 0.0F)), 0U);

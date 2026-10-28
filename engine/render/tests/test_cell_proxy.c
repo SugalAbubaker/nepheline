@@ -112,9 +112,7 @@ static void mesh_needles(TestMesh *m, NphPcg32 *rng, u32 count, NphVec3 corner, 
                          f32 length, f32 radius)
 {
     for (u32 i = 0; i < count; ++i) {
-        const NphVec3 c = nph_vec3_add(corner, nph_vec3(side * nph_pcg32_next_f32(rng),
-                                                        side * nph_pcg32_next_f32(rng),
-                                                        side * nph_pcg32_next_f32(rng)));
+        const NphVec3 c = nph_vec3_add(corner, nph_vec3_scale(nph_pcg32_next_vec3(rng), side));
         const NphVec3 d = random_unit(rng);
         NphVec3 t;
         NphVec3 b;
@@ -841,14 +839,19 @@ NTEST_F(CellProxy, a_grove_cells_proxy_stops_what_its_trees_stop)
     NTEST_ASSERT_EQ_INT(nph_render_cell_proxy_build(&in, &proxy, &stats), NPH_RESULT_OK);
     log_stats(&stats);
     check_proxy(&proxy, 0.25F);
-    NTEST_EXPECT_GE_UINT(proxy.levels, 3U);
+    // Its top is the first level whose voxels lie in 2 x 2 x 2 cluster blocks:
+    // level 1's (4 m) hold the grove's 7 m, or level 2's where a voxel at its
+    // edge falls past them (for 15 of 32 seeds of the needles).
+    NTEST_EXPECT_GE_UINT(proxy.levels, 2U);
     // Its finest level stops, from every side, about what the trees' own cut
     // at its cell does (their voxels, made from their triangles), and some
-    // more: voxels made from voxels keep their sources' coverage along the
-    // axes but fit each cell's footprint anew, which adds to what the sources
-    // themselves add over the needles (ADR-0061: here about 10 %; the proxy
-    // about 10 % more along the axes and up to 20 % along slants between
-    // them, turned sources the most; ADR-0062, "Measured").
+    // more: each cell's footprint is fitted anew to its turned sources', which
+    // adds to what the sources themselves add over the needles (ADR-0061;
+    // ADR-0062, "Stage 1, measured"). Over 32 seeds of the needles: 4 to 7 %
+    // on average along the axes and 11 to 12 % along the slants between them,
+    // a direction's spread over the seeds a standard deviation of 3 % along
+    // the axes and 6 % along the slants, and the mean over the directions'
+    // 1.7 %. The bounds are four of them.
     const TestMesh *mesh_list[1] = {&tree};
     Soup soup;
     soup_build(&soup, f->a, mesh_list, trees, 4U);
@@ -861,6 +864,7 @@ NTEST_F(CellProxy, a_grove_cells_proxy_stops_what_its_trees_stop)
         nph_vec3_normalize(nph_vec3(-0.85F, -0.18F, -0.49F)),
         nph_vec3_normalize(nph_vec3(0.49F, -0.18F, -0.85F)),
     };
+    f64 ratios = 0.0;
     for (u32 i = 0; i < NPH_ARRAY_COUNT(dirs); ++i) {
         f64 tris = 0.0;
         f64 vox = 0.0;
@@ -874,11 +878,13 @@ NTEST_F(CellProxy, a_grove_cells_proxy_stops_what_its_trees_stop)
                   "at the proxy's cell %.3f, the proxy %.3f",
                   (f64)dirs[i].x, (f64)dirs[i].y, (f64)dirs[i].z, tris, cut, vox);
         if (i < 3U) {
-            NTEST_EXPECT_TRUE(vox / cut > 0.95 && vox / cut < 1.15);
+            NTEST_EXPECT_NEAR_F64(vox / cut, 1.04, 0.13);
         } else {
-            NTEST_EXPECT_TRUE(vox / cut > 0.95 && vox / cut < 1.3);
+            NTEST_EXPECT_NEAR_F64(vox / cut, 1.12, 0.25);
         }
+        ratios += vox / cut;
     }
+    NTEST_EXPECT_NEAR_F64(ratios / (f64)NPH_ARRAY_COUNT(dirs), 1.09, 0.07);
     soup_free(&soup);
     nph_render_cluster_lods_free(&proxy);
     mesh_free(&tree);

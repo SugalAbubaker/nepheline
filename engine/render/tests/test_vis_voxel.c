@@ -86,9 +86,8 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
     for (u32 k = 0; k < TWIN_BRICKS; ++k) {
         NphRenderVoxelBrick *brick = &bricks[k];
         brick->cell = ldexpf(1.0F, (int)(nph_pcg32_next_u32(&rng) % 8U) - 4);
-        brick->origin = nph_vec3((nph_pcg32_next_f32(&rng) - 0.5F) * 20.0F,
-                                 (nph_pcg32_next_f32(&rng) - 0.5F) * 20.0F,
-                                 (nph_pcg32_next_f32(&rng) - 0.5F) * 20.0F);
+        brick->origin =
+            nph_vec3_scale(nph_vec3_sub(nph_pcg32_next_vec3(&rng), nph_vec3_splat(0.5F)), 20.0F);
         brick->first_voxel = voxel_count;
         for (u32 bit = 0; bit < 64U; ++bit) {
             if (nph_pcg32_next_f32(&rng) >= 0.5F) {
@@ -105,8 +104,9 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
             const u32 shape = nph_pcg32_next_u32(&rng) % 3U;
             v.box |= shape << NPH_RENDER_VOXEL_SHAPE_SHIFT;
             if (shape == NPH_RENDER_VOXEL_SHAPE_CAPSULE) {
-                v.material = (nph_pcg32_next_u32(&rng) % 4U) |
-                             ((nph_pcg32_next_u32(&rng) % NPH_RENDER_VOXEL_RADIUS_CODES) << 26U);
+                const u32 material = nph_pcg32_next_u32(&rng) % 4U;
+                const u32 radius = nph_pcg32_next_u32(&rng) % NPH_RENDER_VOXEL_RADIUS_CODES;
+                v.material = material | (radius << 26U);
             }
             voxels[voxel_count++] = v;
         }
@@ -119,9 +119,7 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
             const NphVec3 from =
                 nph_vec3_add(centre, nph_vec3_scale(random_unit(&rng), 3.0F * side));
             const NphVec3 to =
-                nph_vec3_add(brick->origin, nph_vec3(nph_pcg32_next_f32(&rng) * side,
-                                                     nph_pcg32_next_f32(&rng) * side,
-                                                     nph_pcg32_next_f32(&rng) * side));
+                nph_vec3_add(brick->origin, nph_vec3_scale(nph_pcg32_next_vec3(&rng), side));
             NphVec3 d = nph_vec3_normalize(nph_vec3_sub(to, from));
             if (r % 8U == 0U) {
                 // Along an axis: zero components.

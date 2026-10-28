@@ -212,14 +212,25 @@ static u32 lit_pixels(const u8 *pixels, const u8 *background)
 static NphVec3 random_unit(NphPcg32 *rng)
 {
     for (;;) {
-        const NphVec3 v = nph_vec3(nph_pcg32_next_range_f32(rng, -1.0F, 1.0F),
-                                   nph_pcg32_next_range_f32(rng, -1.0F, 1.0F),
-                                   nph_pcg32_next_range_f32(rng, -1.0F, 1.0F));
+        const NphVec3 v =
+            nph_vec3_sub(nph_vec3_scale(nph_pcg32_next_vec3(rng), 2.0F), nph_vec3_splat(1.0F));
         const f32 len = nph_vec3_length(v);
         if (len > 0.1F && len <= 1.0F) {
             return nph_vec3_scale(v, 1.0F / len);
         }
     }
+}
+
+// Uniform in the box [lo, hi), the coordinates drawn in order, x first (as
+// one call's arguments, the draws would be made in another order by each
+// compiler).
+static NphVec4 random_vec4(NphPcg32 *rng, NphVec4 lo, NphVec4 hi)
+{
+    const f32 x = nph_pcg32_next_range_f32(rng, lo.x, hi.x);
+    const f32 y = nph_pcg32_next_range_f32(rng, lo.y, hi.y);
+    const f32 z = nph_pcg32_next_range_f32(rng, lo.z, hi.z);
+    const f32 w = nph_pcg32_next_range_f32(rng, lo.w, hi.w);
+    return nph_vec4(x, y, z, w);
 }
 
 // A random case for every test of vis_math_test.comp: spheres in view
@@ -229,19 +240,19 @@ static NphVisMathCase random_case(NphPcg32 *rng, f32 width, f32 height, u32 i)
 {
     NphVisMathCase c;
     memset(&c, 0, sizeof c);
-    c.sphere = nph_vec4(
-        nph_pcg32_next_range_f32(rng, -6.0F, 6.0F), nph_pcg32_next_range_f32(rng, -6.0F, 6.0F),
-        nph_pcg32_next_range_f32(rng, -20.0F, 1.0F), nph_pcg32_next_range_f32(rng, 0.01F, 3.0F));
-    const NphVec3 apex =
-        nph_vec3_scale(random_unit(rng), nph_pcg32_next_range_f32(rng, 0.0F, 6.0F));
+    c.sphere =
+        random_vec4(rng, nph_vec4(-6.0F, -6.0F, -20.0F, 0.01F), nph_vec4(6.0F, 6.0F, 1.0F, 3.0F));
+    const NphVec3 toward = random_unit(rng);
+    const NphVec3 apex = nph_vec3_scale(toward, nph_pcg32_next_range_f32(rng, 0.0F, 6.0F));
     c.cone = nph_vec4_from_vec3(apex, nph_pcg32_next_range_f32(rng, -1.0F, 1.0F));
     c.axis = nph_vec4_from_vec3(random_unit(rng), 0.0F);
     NphVec4 v[3];
     if ((i & 1U) == 0U) {
         for (u32 k = 0; k < 3U; ++k) {
-            v[k] = nph_vec4(nph_pcg32_next_range_f32(rng, -3.0F, 3.0F),
-                            nph_pcg32_next_range_f32(rng, -3.0F, 3.0F), 0.5F,
-                            nph_pcg32_next_range_f32(rng, -0.5F, 3.0F));
+            const f32 x = nph_pcg32_next_range_f32(rng, -3.0F, 3.0F);
+            const f32 y = nph_pcg32_next_range_f32(rng, -3.0F, 3.0F);
+            const f32 w = nph_pcg32_next_range_f32(rng, -0.5F, 3.0F);
+            v[k] = nph_vec4(x, y, 0.5F, w);
         }
     } else {
         // Within a couple of pixels of a random point, in front.
@@ -259,16 +270,17 @@ static NphVisMathCase random_case(NphPcg32 *rng, f32 width, f32 height, u32 i)
     c.c2 = v[2];
     const f32 x0 = nph_pcg32_next_range_f32(rng, -0.1F, 1.0F);
     const f32 y0 = nph_pcg32_next_range_f32(rng, -0.1F, 1.0F);
-    const f32 sx = nph_pcg32_next_range_f32(rng, 0.0F, 0.6F) * nph_pcg32_next_f32(rng);
-    const f32 sy = nph_pcg32_next_range_f32(rng, 0.0F, 0.6F) * nph_pcg32_next_f32(rng);
+    const f32 wx = nph_pcg32_next_range_f32(rng, 0.0F, 0.6F);
+    const f32 sx = wx * nph_pcg32_next_f32(rng);
+    const f32 wy = nph_pcg32_next_range_f32(rng, 0.0F, 0.6F);
+    const f32 sy = wy * nph_pcg32_next_f32(rng);
     c.rect = nph_vec4(x0, y0, x0 + sx, y0 + sy);
     c.depth = nph_pcg32_next_f32(rng);
     c.mirrored = nph_pcg32_next_u32(rng) & 1U;
     // A light of every type, cones narrow to flat, and a view distance
     // from half the near plane to past the last bin.
-    c.light_position = nph_vec4(
-        nph_pcg32_next_range_f32(rng, -10.0F, 10.0F), nph_pcg32_next_range_f32(rng, -10.0F, 10.0F),
-        nph_pcg32_next_range_f32(rng, -10.0F, 10.0F), nph_pcg32_next_range_f32(rng, 0.1F, 20.0F));
+    c.light_position = random_vec4(rng, nph_vec4(-10.0F, -10.0F, -10.0F, 0.1F),
+                                   nph_vec4(10.0F, 10.0F, 10.0F, 20.0F));
     c.light_direction = nph_vec4_from_vec3(random_unit(rng), (f32)(i % 3U));
     const f32 outer = nph_pcg32_next_range_f32(rng, 0.01F, 0.5F * NPH_PI);
     const f32 distance = 0.1F * nph_f32_pow(2.0F, nph_pcg32_next_range_f32(rng, -1.0F, 21.0F));
@@ -364,8 +376,8 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     // Random planes that all keep the origin inside, so spheres near it
     // pass and far ones fail.
     for (u32 i = 0; i < 5U; ++i) {
-        view.frustum[i] =
-            nph_vec4_from_vec3(random_unit(&rng), nph_pcg32_next_range_f32(&rng, 1.0F, 5.0F));
+        const NphVec3 normal = random_unit(&rng);
+        view.frustum[i] = nph_vec4_from_vec3(normal, nph_pcg32_next_range_f32(&rng, 1.0F, 5.0F));
     }
     view.viewport = nph_vec4(width, height, 1.0F / width, 1.0F / height);
     const f32 p11 = -1.0F / nph_f32_tan(0.5F);
@@ -1865,14 +1877,19 @@ static NphRenderLight make_point(RenderFixture *f, NphDVec3 p, f32 range, f32 in
 // and behind the camera.
 static NphRenderLightDesc random_light(NphPcg32 *rng)
 {
-    const NphDVec3 p = nph_dvec3((f64)nph_pcg32_next_range_f32(rng, -6.0F, 6.0F),
-                                 (f64)nph_pcg32_next_range_f32(rng, -0.95F, 2.5F),
-                                 (f64)nph_pcg32_next_range_f32(rng, -4.0F, 7.0F));
-    const NphVec3 color = nph_vec3(nph_pcg32_next_range_f32(rng, 0.2F, 1.0F),
-                                   nph_pcg32_next_range_f32(rng, 0.2F, 1.0F),
-                                   nph_pcg32_next_range_f32(rng, 0.2F, 1.0F));
-    NphRenderLightDesc ld = point_desc(p, nph_pcg32_next_range_f32(rng, 0.3F, 3.0F),
-                                       nph_pcg32_next_range_f32(rng, 20.0F, 400.0F), color);
+    // Each draw a statement of its own: as one call's arguments, they would
+    // be made in another order by each compiler.
+    const f32 px = nph_pcg32_next_range_f32(rng, -6.0F, 6.0F);
+    const f32 py = nph_pcg32_next_range_f32(rng, -0.95F, 2.5F);
+    const f32 pz = nph_pcg32_next_range_f32(rng, -4.0F, 7.0F);
+    const NphDVec3 p = nph_dvec3((f64)px, (f64)py, (f64)pz);
+    const f32 red = nph_pcg32_next_range_f32(rng, 0.2F, 1.0F);
+    const f32 green = nph_pcg32_next_range_f32(rng, 0.2F, 1.0F);
+    const f32 blue = nph_pcg32_next_range_f32(rng, 0.2F, 1.0F);
+    const NphVec3 color = nph_vec3(red, green, blue);
+    const f32 range = nph_pcg32_next_range_f32(rng, 0.3F, 3.0F);
+    const f32 intensity = nph_pcg32_next_range_f32(rng, 20.0F, 400.0F);
+    NphRenderLightDesc ld = point_desc(p, range, intensity, color);
     if (nph_pcg32_next_u32(rng) % 3U == 0U) {
         ld.type = NPH_RENDER_LIGHT_TYPE_SPOT;
         ld.direction =
