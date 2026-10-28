@@ -57,7 +57,10 @@ the cleaning, attributes and welding, the reordering, the meshlets, the
 levels, and the blobs' compression. With `--verbose` each level of each mesh
 gets a debug line too: its clusters (voxel ones apart), triangles, voxels
 and their cells, and the errors of the groups that made it, which show
-where a mesh's levels stop shrinking or switch to voxels.
+where a mesh's levels stop shrinking or switch to voxels. Then each cut at a
+power-of-two error (`nph_render_lod_cuts`) gets one: the clusters,
+triangles, bricks and voxels a view drawing the mesh at that error draws,
+which show how far off it stays costly.
 
 The asset_viewer sample cooks its content this way as part of the build
 (`samples/CMakeLists.txt`): a custom command runs the freshly built

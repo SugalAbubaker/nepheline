@@ -46,7 +46,9 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //      class), a colour's at once on the job system.
 //   4: aggregate groups become voxels where those, at most twice as
 //      coarse, cost no more than the triangles kept (ADR-0061).
-#define COOK_MESH_VERSION 4U
+//   5: a voxel group mixing cell sizes takes at least its coarsest input's
+//      cell and twice its finest's, not twice its coarsest's (ADR-0061).
+#define COOK_MESH_VERSION 5U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

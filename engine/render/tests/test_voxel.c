@@ -1552,6 +1552,96 @@ NTEST_F(VoxelBuild, blobs_that_simplify_become_voxels_where_those_cost_no_more)
     lod_mesh_data_free(&m);
 }
 
+// A cube shared by needles, whose triangles stall at once and so become
+// fine voxels low down, and blobs, whose triangles simplify for some levels
+// before they become coarser voxels: a group taking voxels of both sizes
+// coarsens the fine ones to the coarse ones' cell where that halves its
+// voxels, rather than taking twice the coarse cell, which raised the
+// error of every part to twice the coarsest and kept the fine ones' finer
+// clusters in far cuts. Every voxel group still coarsens each of its parts:
+// its cell is at least its coarsest input's and twice its finest's. (Built
+// on four workers, the same bytes as on one: the mix takes many levels.)
+NTEST_F(VoxelBuild, a_group_of_two_cell_sizes_takes_the_coarser_where_that_halves_it)
+{
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = f->a;
+    jd.worker_count = 4U;
+    NphJobSystem *jobs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    LodMeshData m;
+    blob_foliage(&m, f->a, 1200U, 4.0F, 61U, 8U, 6U);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 67U, 1U);
+    foliage_add(&m, &rng, 6000U, nph_vec3_zero(), 4.0F);
+    m.ranges[0].index_count = m.indices.len;
+    TestLook look;
+    look_init(&look, m.positions.data);
+    const NphRenderVoxelSampler sampler = test_sampler(&look);
+    NphRenderMeshlets meshlets;
+    NphRenderClusterLods lods;
+    NTEST_ASSERT_EQ_INT(build_on(&m, &sampler, f->a, jobs, &meshlets, &lods), NPH_RESULT_OK);
+    u32 voxel_clusters = 0U;
+    check_voxel_levels(&lods, &voxel_clusters);
+    // Each group's input cells (the clusters it consumes) and output cell
+    // (those it makes), where all are voxels.
+    const u32 groups = lods.groups.len;
+    f32 *in_lo = NPH_ALLOC_ARRAY(f->a, f32, nph_max_u32(groups, 1U));
+    f32 *in_hi = NPH_ALLOC_ARRAY(f->a, f32, nph_max_u32(groups, 1U));
+    f32 *out_cell = NPH_ALLOC_ARRAY(f->a, f32, nph_max_u32(groups, 1U));
+    bool *triangles_in = NPH_ALLOC_ARRAY(f->a, bool, nph_max_u32(groups, 1U));
+    NTEST_ASSERT_TRUE(in_lo != NULL && in_hi != NULL && out_cell != NULL && triangles_in != NULL);
+    for (u32 g = 0; g < groups; ++g) {
+        in_lo[g] = NPH_F32_MAX;
+        in_hi[g] = 0.0F;
+        out_cell[g] = 0.0F;
+        triangles_in[g] = false;
+    }
+    for (u32 c = 0; c < lods.lods.len; ++c) {
+        const NphRenderMeshlet *ml = &lods.clusters.meshlets.data[c];
+        const bool voxel = ml->vertex_count == 0U;
+        const f32 cell = voxel ? lods.bricks.data[ml->vertex_offset].cell : 0.0F;
+        const u32 consumer = lods.lods.data[c].parent;
+        if (consumer < groups) {
+            if (voxel) {
+                in_lo[consumer] = nph_f32_min(in_lo[consumer], cell);
+                in_hi[consumer] = nph_f32_max(in_hi[consumer], cell);
+            } else {
+                triangles_in[consumer] = true;
+            }
+        }
+        const u32 maker = lods.lods.data[c].group;
+        if (maker < groups && voxel) {
+            out_cell[maker] = nph_f32_max(out_cell[maker], cell);
+        }
+    }
+    u32 mixed = 0U;
+    u32 short_of_twice = 0U; // mixed groups below twice their coarsest input
+    for (u32 g = 0; g < groups; ++g) {
+        if (triangles_in[g] || in_hi[g] == 0.0F || out_cell[g] == 0.0F) {
+            continue; // not voxels in and out (a root group makes nothing)
+        }
+        NTEST_EXPECT_TRUE(out_cell[g] >= nph_f32_max(2.0F * in_lo[g], in_hi[g]));
+        if (in_lo[g] < in_hi[g]) {
+            mixed += 1U;
+            short_of_twice += out_cell[g] < 2.0F * in_hi[g] ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u levels, %u voxel clusters; %u groups of voxels of two cell sizes or more, %u of "
+              "them below twice the coarser",
+              lods.levels, voxel_clusters, mixed, short_of_twice);
+    NTEST_EXPECT_GT_UINT(mixed, 0U);
+    NTEST_EXPECT_GT_UINT(short_of_twice, 0U);
+    NPH_FREE_ARRAY(f->a, f32, in_lo, nph_max_u32(groups, 1U));
+    NPH_FREE_ARRAY(f->a, f32, in_hi, nph_max_u32(groups, 1U));
+    NPH_FREE_ARRAY(f->a, f32, out_cell, nph_max_u32(groups, 1U));
+    NPH_FREE_ARRAY(f->a, bool, triangles_in, nph_max_u32(groups, 1U));
+    nph_render_cluster_lods_free(&lods);
+    nph_render_meshlets_free(&meshlets);
+    lod_mesh_data_free(&m);
+    nph_job_system_destroy(jobs);
+}
+
 // A clump of needles across the mesh's origin (a submesh of its own, so no
 // meshlet joins it to the rest), beside a forest that keeps the levels
 // going: as the clump's voxels coarsen they stop falling below the eight
