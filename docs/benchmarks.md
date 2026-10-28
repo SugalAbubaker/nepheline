@@ -245,7 +245,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
-            [--lod-error=PX] [--lists=N] [--vsm-trace]
+            [--lod-error=PX] [--lists=N] [--vsm-trace] [--no-cells]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -278,6 +278,12 @@ them needs, in results no budget compares. `--vsm-trace` prints the sun's
 shadow map's statistics every frame, warm-up included (each frame's line
 reports the frame two before it): the pages wanted and drawn, the page
 budget, the caster lists' use, the resolution bias and the overflows.
+`--no-cells` loads the scenes without their world partition's cells
+(ADR-0062, docs/render.md "Cell proxies"): every instance drawn as itself,
+for comparing a scene with its cells and without. After each scene a line
+reports the GPU memory the process holds (`nph_gpu_device_memory_stats`):
+device-local in use against the OS's budget for it, past which allocations
+may fail or slow the frame.
 Without the packs
 those scenes are skipped with a message, so the budgets of a machine
 without them are those of the synthetic scenes alone. The CTest smoke

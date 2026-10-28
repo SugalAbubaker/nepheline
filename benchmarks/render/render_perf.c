@@ -46,7 +46,10 @@
 // report the frame NPH_GPU_FRAMES_IN_FLIGHT before): how its page budget
 // draws a burst of pages. --no-cells loads the reference scenes without
 // their world partition's cells (ADR-0062): every instance drawn as itself,
-// no proxy, for comparing a scene with its cells and without.
+// no proxy, for comparing a scene with its cells and without. After each
+// scene, a line reports the GPU memory the process holds
+// (nph_gpu_device_memory_stats): device-local in use against the OS's
+// budget for it.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -1513,6 +1516,16 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
         printf("    draws %u, triangles %u, culled %u, lights %u%s\n", st->draws, st->triangles,
                st->culled, st->lights, st->shadow_rays ? "; shadow rays" : "");
     }
+    // What the process holds of the GPU's memory once the scene has run, its
+    // transient targets included. Past the device-local budget (the OS's
+    // share for the process, VK_EXT_memory_budget), allocations may fail or
+    // slow the frame: the OS keeps what does not fit in system memory.
+    const NphGpuMemoryStats mem = nph_gpu_device_memory_stats(ctx->dev);
+    printf("    gpu memory: %.2f GB device-local in use (budget %.2f GB), %.2f GB host-visible "
+           "(budget %.2f GB); %u allocations in %.2f GB of blocks\n",
+           (f64)mem.device_local_used / 1.0e9, (f64)mem.device_local_budget / 1.0e9,
+           (f64)mem.host_visible_used / 1.0e9, (f64)mem.host_visible_budget / 1.0e9,
+           mem.allocation_count, (f64)mem.block_bytes / 1.0e9);
     if (shadows && !st->shadow_rays && !st->vsm) {
         fprintf(stderr, "render_perf: %s: the renderer cannot shadow; shadows were not drawn\n",
                 name);
