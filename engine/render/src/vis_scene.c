@@ -49,6 +49,7 @@ NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) 
                   "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisCell) == 48U, "NphVisCell matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
 NPH_STATIC_ASSERT(sizeof(NphVisLight) == 96U, "NphVisLight matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisLightUpdate) == 112U, "NphVisLightUpdate matches its GLSL layout");
@@ -151,6 +152,8 @@ NphResult render_vis_scene_create(NphRenderer *r)
                         NPH_GPU_MEMORY_DEVICE, "vis previous transforms", &v->prev_transforms));
     NPH_TRY(make_buffer(r, (u64)d->max_meshes * sizeof(NphVisMesh), storage, NPH_GPU_MEMORY_DEVICE,
                         "vis meshes", &v->meshes));
+    NPH_TRY(make_buffer(r, (u64)d->max_cells * sizeof(NphVisCell), storage, NPH_GPU_MEMORY_DEVICE,
+                        "vis cells", &v->cells));
     NPH_TRY(make_buffer(r, (u64)d->max_material_slots * sizeof(u32), storage, NPH_GPU_MEMORY_DEVICE,
                         "vis material map", &v->material_map));
     // Ranges for the live instances and as many again for destroyed ones
@@ -224,6 +227,7 @@ void render_vis_scene_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->instances);
     nph_gpu_buffer_destroy(dev, v->prev_transforms);
     nph_gpu_buffer_destroy(dev, v->meshes);
+    nph_gpu_buffer_destroy(dev, v->cells);
     nph_gpu_buffer_destroy(dev, v->material_map);
     nph_gpu_buffer_destroy(dev, v->index_pool);
     nph_gpu_buffer_destroy(dev, v->counters);
@@ -362,11 +366,14 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
     rec->lod_groups = nph_gpu_buffer_address(r->dev, m->lod_groups);
     rec->lod_group_clusters = nph_gpu_buffer_address(r->dev, m->lod_group_clusters);
     rec->lod_makers = nph_gpu_buffer_address(r->dev, m->lod_makers);
-    // The finest consumer of level 0 (vis_cull_instances.comp's shortcut).
+    // The finest consumer of level 0 (vis_cull_instances.comp's shortcut): a
+    // cluster no group consumes (the levels allow it) is fine at any distance.
     rec->lod_level0_error = NPH_F32_MAX;
     for (u32 i = 0; i < d->lod_level0_meshlets; ++i) {
-        rec->lod_level0_error =
-            nph_f32_min(rec->lod_level0_error, d->lod_groups[d->cluster_lods[i].parent].error);
+        const u32 parent = d->cluster_lods[i].parent;
+        if (parent != NPH_RENDER_LOD_NONE) {
+            rec->lod_level0_error = nph_f32_min(rec->lod_level0_error, d->lod_groups[parent].error);
+        }
     }
     // The voxel clusters' bricks and voxels (vis_voxel.glsl).
     if (d->voxel_bricks != NULL && d->voxel_brick_count != 0U) {
@@ -711,7 +718,36 @@ static void instance_record(const NphRenderer *r, u32 slot, bool fresh, NphVisIn
     out->flags = (inst->hidden ? 0U : (u32)NPH_VIS_INSTANCE_VISIBLE) |
                  (nph_mat3_determinant(l) < 0.0F ? (u32)NPH_VIS_INSTANCE_MIRRORED : 0U) |
                  (is_similarity(l) ? (u32)NPH_VIS_INSTANCE_SIMILAR : 0U) |
-                 (fresh ? (u32)NPH_VIS_INSTANCE_FRESH : 0U);
+                 (fresh ? (u32)NPH_VIS_INSTANCE_FRESH : 0U) |
+                 (inst->proxy ? (u32)NPH_VIS_INSTANCE_PROXY : 0U) |
+                 (inst->cell << (u32)NPH_VIS_INSTANCE_CELL_SHIFT);
+}
+
+// ---------------------------------------------------------------------------
+// Cells
+// ---------------------------------------------------------------------------
+
+NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellDesc *desc)
+{
+    if (!r->vis.supported) {
+        return NPH_RESULT_OK;
+    }
+    NphVisCell rec;
+    memset(&rec, 0, sizeof rec);
+    f32 hx = 0.0F;
+    f32 hy = 0.0F;
+    f32 hz = 0.0F;
+    f32 lx = 0.0F;
+    f32 ly = 0.0F;
+    f32 lz = 0.0F;
+    split(desc->center.x, &hx, &lx);
+    split(desc->center.y, &hy, &ly);
+    split(desc->center.z, &hz, &lz);
+    rec.center_high = nph_vec4(hx, hy, hz, desc->distance);
+    rec.center_low = nph_vec4(lx, ly, lz, desc->proxy_error);
+    rec.extent = nph_vec4_from_vec3(desc->extent, 0.0F);
+    r->pending_uploads = 1;
+    return nph_gpu_upload_buffer(r->dev, r->vis.cells, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
 // ---------------------------------------------------------------------------

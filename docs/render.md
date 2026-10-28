@@ -702,6 +702,14 @@ record's, its maker error no larger than its clusters' makers' smallest,
 and a node's bounds hold its children's); `NPH_RESULT_INVALID_ARGUMENT`
 otherwise. That the levels cut cleanly is the builder's contract.
 
+**A mesh of voxels alone** (a cell's proxy, "Cell proxies" below) has no
+vertices and no indices: its submeshes name materials alone, it has no
+meshlet vertices or triangles, and every cluster of every level is a voxel
+cluster, level 0's too, its meshlets and levels given (none can be built
+without triangles). It gets no vertex or index buffers and no bottom level:
+the production path draws it, the reference renderer passes it by (no
+draws), and rays and the reference's top level leave it out.
+
 **Cost.** In `lod_4k_production` (render_perf: a terrain 400 m across of
 131,072 triangles and 1,024 rocks of 65,024 each, 67 million in all, from
 head height) the frame draws 1.15 million triangles in 18,300 clusters and
@@ -733,7 +741,8 @@ until the raster draws the reference scenes' foliage faster than their
 stalled triangles ("Measured on the GPU").
 
 **The records.** A voxel cluster is a cluster whose meshlet record has no
-vertices: `triangle_count` bricks from `vertex_offset`, at most 32 bricks
+vertices, past level 0 (a mesh of voxels alone, below, has them at level 0
+too): `triangle_count` bricks from `vertex_offset`, at most 32 bricks
 and 1,024 voxels. A brick (32 bytes) is 4 x 4 x 4 cells of one power-of-two
 size on the mesh's grid, with a 64-bit occupancy mask and its first voxel;
 a voxel (16 bytes) is its cell's footprint (a box in 32nds of the cell, the
@@ -951,10 +960,10 @@ taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
 
 A world partition's cell is drawn from far off as one mesh of voxels, its
 proxy, in place of its instances (ADR-0062; `render/cell_proxy.h`,
-`cell_proxy.c`). Stage 1 is in: the builder, on the CPU, with its tests; the
+`cell_proxy.c`). Stage 1 made the builder, on the CPU, with its tests; the
 formats (docs/asset.md: a mesh of voxels alone, a scene's cells); and the
-cooker's cells (`nph_cook --hlod`, docs/cook.md "Cells"). The renderer's
-switch comes next.
+cooker's cells (`nph_cook --hlod`, docs/cook.md "Cells"). Stage 2 makes the
+renderer's cells and their switch ("The switch", below).
 
 **What a proxy is.** A mesh of voxel levels alone (ADR-0061's records): its
 level 0 at the proxy's finest cell (0.25 m for the landscape's 560 m), each
@@ -1004,16 +1013,59 @@ cell's footprint is fitted to their coverage and may fall a 32nd short of the
 cell's face, a slit the renderer would see through too. Inside an occluders'
 shell nothing is seen, and the proxy is empty. A turned sheet's 81 cells are
 all sheets facing its turned normal, in its material's colour. Four turned
-trees of sparse needles: the proxy's finest level stops 0 to 10 % more rays
-than the trees' own cut at its cell along the axes, and 6 to 21 % more along
-slants 10 degrees below the horizon between them; that cut itself stops 2 %
-more than the needles. Voxels made from voxels keep their sources' coverage
-where their grids agree (within 4 %), but refitted in a turned grid they add
-5 to 20 % to what their sources add over the needles (ADR-0062 "Stage 1,
-measured"). The voxelizer's tests take each footprint shape back as a source
+trees of sparse needles, over 32 seeds of their needles: the proxy's finest
+level stops 4 to 7 % more rays on average than the trees' own cut at its cell
+along the axes, and 11 to 12 % more along slants 10 degrees below the horizon
+between them (a seed's direction from 2 % less to 26 % more); that cut itself
+stops 0 to 3 % more than the needles. Voxels made from voxels stop 3 % more
+rays than their sources where their grids agree (6 % along the axes; 2 %
+through a quarter turn), and more refitted in a turned grid (ADR-0062 "Stage
+1, measured"). The coverage tests' bounds are four standard deviations of
+such a sweep's spread, per direction and for the mean over the directions:
+one seed is one realization of the needles and of the voxelizer's jittered
+rays. The voxelizer's tests take each footprint shape back as a source
 within the 32nds its ends round to, keep the cells a filter names and those
 alone, and see a voxel and triangles in one cell as the triangles of its box
 are seen.
+
+**The switch** (stage 2). `nph_render_cell_create` makes a cell: the box of
+its instances (a 64-bit centre and half extents), its proxy (a mesh of voxels
+alone, its materials, and a rotation and translation), the proxy's finest
+error (its level 0's cell) and its distance `D`. The cell owns the proxy's
+instance; an instance names its cell in its description, and the cell's
+index, plus one, rides in the upper 24 bits of its record's flags
+(`NPH_VIS_INSTANCE_CELL_SHIFT`), the proxy's with `NPH_VIS_INSTANCE_PROXY`.
+The cells' records (`NphVisCell`: the centre split into high and low floats
+as a translation is, the half extents, the error, and `D`) sit in a table the
+instance culls read.
+
+- *The camera's.* At the start of the instance cull, a cell's instances and
+  its proxy each ask `vis_cell_proxied`: with the levels of detail, is the
+  box's nearest point at least `D` away (what no camera that far sees is not
+  in the proxy), and is the proxy's finest error fine from there (the group
+  test of "Levels of detail" at that point, scale 1: `e k <= max(d,
+  near)`)? Both read the same record and view and do the same arithmetic,
+  so the proxy is drawn exactly where its instances are not, and vice versa;
+  there is no pass of its own. A view without the levels (threshold 0)
+  draws the instances.
+- *The sun's shadow map.* Its instance cull asks, per level,
+  `vsm_cell_proxied`: is the proxy's finest error within the level's
+  threshold (`vsm_lod_threshold` at scale 1)? Then the proxy is drawn into
+  the level's pages, the instances into the others. The answer is the same
+  every frame, so a page drawn stays right; the sun is infinitely far, and
+  the proxy holds what is seen from there.
+- *Rays* (the shadow rays, the radiance cache) trace the instances' bottom
+  levels: a proxy has none, and the top levels leave it out.
+- *The reference renderer* draws the instances; a proxy has no triangles
+  for it.
+
+Statistics: `vis_cells_proxied`, the proxies phase 0 kept for their distance
+(in view or not), and `vis_instances_proxied`, the instances they stood in
+for. The cooked-scene bridge (`samples/common/cooked_scene.c`) makes a render
+cell for each of a scene's cells with a proxy, before the instances, which
+name theirs; `render_perf --no-cells` loads a scene without them. The
+runtime's scene import does not make cells yet: its instances are drawn as
+themselves.
 
 ### A frame
 
@@ -1722,7 +1774,8 @@ meshlet work items), `max_deferred` (262,144: deferred instances, and
 phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
 (2^24, indirect path only), and `max_lod_nodes` (2^18 work items a step of
-the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,096. A list that fills drops work and sets a bit in
+the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,096, and
+`max_cells` (4,096) at most 2^24 - 1 (a record names its cell in 24 bits). A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
 `vsm_pages` (2,048), `max_vsm_meshlets` (2^20), `max_vsm_draws` (2^20)
 and `max_vsm_voxel_draws` (2^20): the pool's overflow (`vsm_overflow`)
@@ -1736,7 +1789,8 @@ bucket of which, when full, drops the samples of the cells it cannot
 take, and `gi_rays` (65,536) a frame. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
 software, instances and meshlets culled by each test, the hierarchy's
-nodes visited and the clusters a finer level stood in for, lights in view),
+nodes visited and the clusters a finer level stood in for, lights in view,
+cells drawn as their proxies and the instances they stood in for),
 read back from the frame that completed
 `NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
 `instances` is the live count and `culled` the hidden instances plus

@@ -390,6 +390,12 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool 
         stats->culled += blend_only ? 0U : 1U;
         return;
     }
+    if (mesh->index_count == 0U) {
+        // A mesh of voxels alone (a cell's proxy; ADR-0062): no triangles for
+        // these draws. The production path draws its voxels; the reference
+        // draws the cell's instances.
+        return;
+    }
     if (!nph_frustum_intersects_aabb(&fc->frustum, nph_aabb_transform(mesh->bounds, model))) {
         stats->culled += 1U;
         return;

@@ -197,10 +197,21 @@ typedef struct RenderInstance {
     u32 material_count;
     NphRenderTransform transform;
     b32 hidden;
+    // Its cell's slot plus one (0: none): the cell whose proxy stands for it,
+    // or, with `proxy` set, the cell whose proxy it is (NphVisInstance.flags).
+    u32 cell;
+    b32 proxy;
     // The production path.
     NphRange material_range; // its entries in the material map
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
 } RenderInstance;
+
+// A cell of a world partition (nph_render_cell_create; ADR-0062).
+typedef struct RenderCell {
+    u32 handle;
+    NphRenderInstance proxy; // the proxy's instance, which the cell owns
+    u32 members;             // live instances that name the cell
+} RenderCell;
 
 // The virtual shadow map's work buffer (vsm.c).
 typedef struct VsmLayout {
@@ -507,6 +518,7 @@ typedef struct VisFrame {
     NphGpuRgBuffer instances;
     NphGpuRgBuffer prev_transforms;
     NphGpuRgBuffer clusters;
+    NphGpuRgBuffer cells; // the world partition's cells, which the instance culls read
 } VisFrame;
 
 typedef struct RenderVis {
@@ -526,6 +538,7 @@ typedef struct RenderVis {
     NphGpuBuffer instances;       // NphVisInstance[max_instances]
     NphGpuBuffer prev_transforms; // NphVisTransform[max_instances]
     NphGpuBuffer meshes;          // NphVisMesh[max_meshes]
+    NphGpuBuffer cells;           // NphVisCell[max_cells]
     NphGpuBuffer material_map;    // u32[max_material_slots]: material handle values
     NphGpuBuffer index_pool;      // u16[meshlet_index_pool] (indirect raster only)
     NphRangeAllocator material_ranges;
@@ -821,11 +834,13 @@ struct NphRenderer {
     NphHandlePool material_pool;
     NphHandlePool instance_pool;
     NphHandlePool light_pool;
+    NphHandlePool cell_pool;
     RenderTexture *textures;
     RenderMesh *meshes;
     RenderMaterial *materials;
     RenderInstance *instances;
     RenderLight *lights;
+    RenderCell *cells;
 
     // Samplers: material samplers by [wrap_u][wrap_v][nearest], and the
     // trilinear clamp sampler of the lighting tables.
@@ -1234,6 +1249,10 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot);
 NphResult render_vis_instance_created(NphRenderer *r, u32 slot);
 void render_vis_instance_changed(NphRenderer *r, u32 slot);
 void render_vis_instance_destroyed(NphRenderer *r, u32 slot);
+// A cell's record (NphVisCell) at its slot, uploaded for the frames after
+// this one: the box (centre and half extents) and the proxy's distance and
+// finest error (nph_render_cell_create's checked description).
+NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellDesc *desc);
 // A material's alpha mode may have changed: the blend list is rebuilt.
 void render_vis_materials_changed(NphRenderer *r);
 // A light was created, changed, or destroyed: its record is sent with the

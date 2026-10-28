@@ -101,12 +101,16 @@ typedef struct NphRenderInstance {
 typedef struct NphRenderLight {
     u32 value;
 } NphRenderLight;
+typedef struct NphRenderCell {
+    u32 value;
+} NphRenderCell;
 
 #define NPH_RENDER_TEXTURE_NULL  ((NphRenderTexture){0U})
 #define NPH_RENDER_MESH_NULL     ((NphRenderMesh){0U})
 #define NPH_RENDER_MATERIAL_NULL ((NphRenderMaterial){0U})
 #define NPH_RENDER_INSTANCE_NULL ((NphRenderInstance){0U})
 #define NPH_RENDER_LIGHT_NULL    ((NphRenderLight){0U})
+#define NPH_RENDER_CELL_NULL     ((NphRenderCell){0U})
 
 // ---------------------------------------------------------------------------
 // Creation
@@ -123,6 +127,7 @@ typedef struct NphRendererDesc {
     u32 max_materials; // (1024)
     u32 max_instances; // (16384)
     u32 max_lights;    // (256), at most NPH_RENDER_MAX_LIGHTS (4096)
+    u32 max_cells;     // a world partition's cells (4096), at most 2^24 - 1
     u32 max_draws;     // visible submeshes per frame (16384); the rest are dropped and logged
     u32 debug_lines;   // per frame, depth-tested and overlay each (32768)
     // Image-based lighting resolution; zero picks the default.
@@ -313,6 +318,14 @@ typedef struct NphRenderMeshDesc {
     // ADR-0061): a meshlet past level 0 without vertices is a voxel cluster,
     // its `triangle_count` bricks from `vertex_offset`, of one cell size,
     // their voxels following one another in the bricks' order; NULL without.
+    //
+    // A mesh of voxels alone (a cell's proxy, render/cell_proxy.h; ADR-0062)
+    // has no vertices and no indices (`vertex_count` and `index_count` 0, the
+    // vertex streams and `indices` ignored), its submeshes no indices, and no
+    // meshlet vertices or triangles: every cluster of every level, level 0's
+    // too, is a voxel cluster, its `meshlets` and levels given. The production
+    // path draws it; the reference renderer and rays, which take triangles,
+    // pass it by (it has no bottom level).
     const NphRenderVoxelBrick *voxel_bricks;
     u32 voxel_brick_count;
     const NphRenderVoxel *voxels;
@@ -320,11 +333,14 @@ typedef struct NphRenderMeshDesc {
     const char *name;
 } NphRenderMeshDesc;
 
-// Uploads the streams. NPH_RESULT_INVALID_ARGUMENT for empty streams, an
-// index count that is not a multiple of 3, an index or submesh range out
-// of bounds (every index is checked), too many submeshes, or a voxel
-// cluster whose bricks differ in cell size or whose voxels do not follow
-// one another in its bricks' order; NPH_RESULT_FULL past max_meshes.
+// Uploads the streams. NPH_RESULT_INVALID_ARGUMENT for empty streams (but
+// for a mesh of voxels alone), an index count that is not a multiple of 3,
+// an index or submesh range out of bounds (every index is checked), too
+// many submeshes, a voxel cluster whose bricks differ in cell size or whose
+// voxels do not follow one another in its bricks' order, or a mesh of voxels
+// alone with a submesh's indices, meshlet vertices or triangles, a cluster
+// that is not a voxel cluster, or without its meshlets, levels, or voxels;
+// NPH_RESULT_FULL past max_meshes.
 NPH_MUST_USE NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc,
                                               NphRenderMesh *out);
 // Deferred like textures. Instances of the mesh must be destroyed first
@@ -419,10 +435,13 @@ typedef struct NphRenderInstanceDesc {
     u32 material_count;
     NphRenderTransform transform;
     b32 hidden;
+    // The cell whose proxy stands for it from afar (nph_render_cell_create;
+    // NPH_RENDER_CELL_NULL: none, always drawn as itself).
+    NphRenderCell cell;
 } NphRenderInstanceDesc;
 
-// NPH_RESULT_INVALID_ARGUMENT for a stale mesh or material handle or a
-// transform with a zero determinant; NPH_RESULT_FULL past max_instances;
+// NPH_RESULT_INVALID_ARGUMENT for a stale mesh, material, or cell handle or
+// a transform with a zero determinant; NPH_RESULT_FULL past max_instances;
 // NPH_RESULT_OUT_OF_MEMORY when the material table cannot be allocated.
 NPH_MUST_USE NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc *desc,
                                                   NphRenderInstance *out);
@@ -436,6 +455,47 @@ NPH_MUST_USE NphResult nph_render_instance_transform(const NphRenderer *r,
 void nph_render_instance_set_hidden(NphRenderer *r, NphRenderInstance instance, bool hidden);
 void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance);
 bool nph_render_instance_is_valid(const NphRenderer *r, NphRenderInstance instance);
+
+// ---------------------------------------------------------------------------
+// Cells (docs/render.md "Cells"; ADR-0062)
+// ---------------------------------------------------------------------------
+
+// A cell of a world partition: instances that, seen from afar, its proxy
+// stands for, a mesh of voxels alone made from them (render/cell_proxy.h).
+// The production path draws the proxy in place of the instances where it is
+// both far enough and fine enough at the box's nearest point: at least
+// `distance` away (what no camera that far can see, the proxy left out), and
+// its finest error within the view's threshold from there (as a level of
+// detail is: NphRenderView.lod_error). The sun's shadow map draws it into the
+// levels whose texels its finest error fits (the threshold of a caster's
+// levels there), the instances into the others. The reference renderer, the
+// views without levels of detail (lod_error 0), and rays draw the instances.
+typedef struct NphRenderCellDesc {
+    // The box of its instances, world space (a 64-bit centre).
+    NphDVec3 center;
+    NphVec3 extent; // half extents, finite, at least 0
+    // The proxy: a mesh of voxels alone, its materials (one per material
+    // slot of its submeshes, as an instance's), and its place.
+    NphRenderMesh proxy;
+    const NphRenderMaterial *proxy_materials;
+    u32 proxy_material_count;
+    NphRenderTransform proxy_transform; // a rotation and a translation alone (scale 1)
+    f32 proxy_error;                    // its finest level's error, world units: its level 0's cell
+    f32 distance;                       // drawn from this far (positive)
+} NphRenderCellDesc;
+
+// Creates the cell and its proxy's instance, which it owns.
+// NPH_RESULT_INVALID_ARGUMENT for a stale mesh or material handle, a proxy
+// that is not a mesh of voxels alone, a transform that is not a rotation and
+// a translation, or a box, error, or distance that is not finite and
+// positive (the box's extent at least 0); NPH_RESULT_FULL past max_cells or
+// max_instances (the proxy's instance takes a slot).
+NPH_MUST_USE NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc,
+                                              NphRenderCell *out);
+// Destroys the cell and its proxy's instance. Instances that name the cell
+// must be destroyed first (asserted; refused with an error logged).
+void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell);
+bool nph_render_cell_is_valid(const NphRenderer *r, NphRenderCell cell);
 
 // ---------------------------------------------------------------------------
 // Lights (KHR_lights_punctual)
@@ -746,6 +806,9 @@ typedef struct NphRenderFrameStats {
     u32 vis_lights;              // lights in view: those that reach every pixel, and the others the
                                  // frustum keeps
     u32 vis_overflow;            // NphRenderVisOverflow bits: lists that dropped work
+    u32 vis_cells_proxied;       // cells drawn as their proxies (far and fine enough; in view
+                                 // or not)
+    u32 vis_instances_proxied;   // the instances those proxies stood in for
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages
