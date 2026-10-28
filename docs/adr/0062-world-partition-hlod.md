@@ -157,6 +157,51 @@ geometry streaming streams clusters. Stage 1 measures what the estimate guesses.
 - Open: the near field's needles (this ADR leaves them); cells' coarser groupings (2 by
   2) if the proxies' own levels prove too many far off; dynamic instances.
 
+## Stage 1, measured (2026-10-28)
+
+The builder is in (`render/cell_proxy.h`; docs/render.md "Cell proxies"), with
+the decision's choices made as follows.
+
+- **Sources.** Each level samples each instance's own cut at half the level's cell:
+  its triangles, through its mesh's materials, and its voxels, which the voxelizer
+  now takes as footprints (a ray taken into the voxel's mesh space and tested as the
+  renderer tests it, the voxel's look and its lobe's second moment as the cell's).
+  Level 0 or a cut at a quarter of the cell would cost more for no gain: sources four
+  times finer measured no closer to the needles (below).
+- **The octree.** A level's clusters hold blocks of 2 x 2 x 2 bricks; a group takes
+  the clusters of a block twice that and makes the next level's one cluster there.
+  A group's sphere holds what it makes as well as its makers' spheres: a coarser
+  cell's footprints may reach past the finer ones'.
+- **Visibility** is swept with rays, each stopping at the first footprint it meets,
+  not with opacities: a wall's footprints close up, where a voxel's opacity along a
+  slant (its footprint's shadow over its cell's) lets half the light through one
+  layer of a wall. Each seen cell's neighbours are kept too (a margin against
+  directions the sweep missed, which added half again to a double shell's voxels);
+  whether it is worth its cost is measured on the landscape.
+- **Slits.** One layer of a closed surface's voxels is not watertight: where its
+  faces meet in a cell, the cell's footprint is fitted to their coverage, and may end
+  a 32nd short of the cell's face. The renderer sees through such a slit as the sweep
+  does, so what lies behind is kept; inside two such layers, nothing is.
+
+Measured (`test_cell_proxy.c`, `test_voxel.c`): a bush inside a double shell is
+left out entirely (403 voxels at level 0); inside an occluders' shell, the proxy is
+empty; four turned trees of sparse needles give a finest level that stops 0 to 10 %
+more rays than the trees' own cut at its cell along the axes, and 6 to 21 % more
+along slants 10 degrees below the horizon between them.
+
+**Open: voxels made from voxels.** Re-voxelized where their grids agree, voxels keep
+their sources' coverage within 4 %; in a turned grid (an instance turned against the
+proxy's), each cell's footprint is fitted anew to the union of several turned
+footprints, and the result stops 5 to 20 % more rays than its sources (whose own
+excess over the needles is ADR-0061's, 2 to 10 % here). Finer sources do not help (a
+quarter of the cell: 15 to 43 % over the needles, against 9 to 38 % at a half). The
+cause is the fit: three axes' coverages leave a footprint's shadow along slants
+free, and an ellipsoid fitted to a needle's axis coverages shadows more along its
+own direction than the needle does. Stage 2 measures what it does to the image at
+the switch, against the instances' cut there; if it shows, the remedy is the
+voxelizer's (fitting each footprint to its coverage along the four diagonals too),
+which would serve every voxel level.
+
 ## References
 
 - C. Erikson, D. Manocha, W. V. Baxter III. "HLODs for Faster Display of Large Static and

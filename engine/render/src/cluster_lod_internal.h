@@ -153,6 +153,9 @@ typedef struct LodVoxelInput {
 // False where it meets none.
 bool voxel_footprint_span(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
                           NphVec3 dir, f32 t_min, f32 t_max, f32 *out_enter, f32 *out_leave);
+// Whether that ray meets the footprint at all (the forward test alone).
+bool voxel_footprint_hit(const NphRenderVoxel *voxel, NphVec3 base, f32 h, NphVec3 origin,
+                         NphVec3 dir, f32 t_min, f32 t_max);
 
 // Cell coordinates are kept within +-2^20 cells of the mesh's origin (21
 // bits each in a 64-bit key).
@@ -187,3 +190,31 @@ NPH_MUST_USE NphResult lod_voxel_count(const LodVoxelInput *in, f64 cell, u32 li
 // Deterministic. NPH_RESULT_OVERFLOW as lod_voxel_count.
 NPH_MUST_USE NphResult lod_voxelize(const LodVoxelInput *in, f64 cell, LodVoxelCellArray *out,
                                     u32 *source_cell);
+
+// ---------------------------------------------------------------------------
+// The levels' records (cluster_lod.c), shared with the cell proxies
+// (cell_proxy.c, ADR-0062)
+// ---------------------------------------------------------------------------
+
+#include <nepheline/math/geometry.h>
+#include <nepheline/render/cluster_lod.h>
+
+// Appends the voxel clusters of `cells` (of edge `cell`, made by group
+// `group` at level `level`) to `out`: the cells' bricks, split at their
+// voxels' median along their longest axis until each fits a voxel cluster,
+// with their bounds and level records (consumer NPH_RENDER_LOD_NONE).
+// `cell_cluster` (cells->len entries) takes each cell's cluster, counted from
+// the first appended; `*out_made` the clusters appended.
+NPH_MUST_USE NphResult lod_voxel_emit(NphRenderClusterLods *out, NphAllocator *a,
+                                      const LodVoxelCellArray *cells, f64 cell, u32 group,
+                                      u32 level, u32 *cell_cluster, u32 *out_made);
+
+// The smallest sphere nph_sphere_union finds round `spheres` (`count`, at
+// least one), its radius raised until it holds each of them in double
+// precision.
+NphSphere lod_sphere_hull(const NphSphere *spheres, u32 count);
+
+// Builds `l`'s hierarchy (its nodes, which must be empty) over its groups,
+// which come level by level, the root groups (error NPH_F32_MAX) last: a
+// tree per level and one for the root groups, under node 0.
+NPH_MUST_USE NphResult lod_build_hierarchy(NphRenderClusterLods *l, NphAllocator *a);
