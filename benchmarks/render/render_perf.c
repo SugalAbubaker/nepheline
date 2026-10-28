@@ -428,7 +428,7 @@ NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT -
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
 static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
-static u32 g_lists = 1U;         // --lists: the production path's list capacities, times this
+static u32 g_lists = 1U;        // --lists: the production path's list capacities, times this
 
 typedef struct Result {
     char name[128];
