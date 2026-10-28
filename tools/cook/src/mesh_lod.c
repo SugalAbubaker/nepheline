@@ -61,6 +61,14 @@ NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
 // Each level's clusters (voxel ones apart), triangles, voxels and their
 // cells, and the errors of the groups that made them, a debug log line a
 // level (nph_cook --verbose): where a mesh's levels stop shrinking, or jump.
+// Shipping compiles DEBUG lines out, and the counting with them.
+#if NPH_CONFIG_SHIPPING
+static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
+{
+    (void)mesh;
+    (void)l;
+}
+#else
 static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
 {
     if (!NPH_LOG_ENABLED(&NPH_LOG_COOK, NPH_LOG_LEVEL_DEBUG)) {
@@ -115,6 +123,7 @@ static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
                       (f64)error_hi);
     }
 }
+#endif
 
 NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                const NphVec3 *positions, const NphMeshAttrib *attribs,
