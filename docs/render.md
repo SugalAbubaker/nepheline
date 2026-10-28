@@ -1980,8 +1980,8 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (138 tests, registered with CTest as the four shards
-`render.0` to `render.3`, docs/ntest.md) run on the RTX 3060 Ti locally
+`render_tests` (registered with CTest as the eight shards `render.0` to
+`render.7`, docs/ntest.md) run on the RTX 3060 Ti locally
 and on the self-hosted runner, and on lavapipe in CI, under the validation
 and synchronisation-validation gate:
 
