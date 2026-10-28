@@ -1067,6 +1067,19 @@ name theirs; `render_perf --no-cells` loads a scene without them. The
 runtime's scene import does not make cells yet: its instances are drawn as
 themselves.
 
+**Measured** on the landscape (ADR-0062 "Stage 2, the switch"; its six views
+at native 4K, the lists at 16 times): 117 to 208 cells drawn as their proxies
+for 13,600 to 26,300 instances, and the frame 0.4 to 4.2 ms faster (the
+valley 57.3 to 53.1 ms): the voxel raster saves 2.2 to 3.2 ms, the walk 0.4
+to 0.6, and the instance cull takes 0.5 ms more, handing proxies their finest
+level whole between their distance and about twice it. The image changes at
+the far ridges' silhouettes alone (FLIP 0.014 to 0.029 over the frame,
+against 0.0001 to 0.0035 between two runs without cells). Held whole, the
+landscape's proxies (2.06 GB decompressed) take the GPU's device-local memory
+from 3.96 GB to 5.84 GB with the default lists, and the host holds them twice
+over (the cooked scene keeps its assets loaded: decompressed, and mapped where
+they were read): they are to be streamed (stage 3).
+
 ### A frame
 
 | Pass | What it does |
