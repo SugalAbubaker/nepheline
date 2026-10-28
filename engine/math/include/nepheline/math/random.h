@@ -73,13 +73,23 @@ NPH_INLINE f32 nph_pcg32_next_range_f32(NphPcg32 *rng, f32 lo, f32 hi)
 {
     return lo + (hi - lo) * nph_pcg32_next_f32(rng);
 }
+// Uniform in [0, 1)^2 and [0, 1)^3, the coordinates drawn in order, x first.
+// The draws are sequenced into locals because C leaves the order of a call's
+// arguments unspecified and compilers differ (clang targeting Linux evaluates
+// them left to right, MSVC right to left): nph_vec3(next, next, next) would
+// make a different point from the same seed on each.
 NPH_INLINE NphVec2 nph_pcg32_next_vec2(NphPcg32 *rng)
 {
-    return nph_vec2(nph_pcg32_next_f32(rng), nph_pcg32_next_f32(rng));
+    const f32 x = nph_pcg32_next_f32(rng);
+    const f32 y = nph_pcg32_next_f32(rng);
+    return nph_vec2(x, y);
 }
 NPH_INLINE NphVec3 nph_pcg32_next_vec3(NphPcg32 *rng)
 {
-    return nph_vec3(nph_pcg32_next_f32(rng), nph_pcg32_next_f32(rng), nph_pcg32_next_f32(rng));
+    const f32 x = nph_pcg32_next_f32(rng);
+    const f32 y = nph_pcg32_next_f32(rng);
+    const f32 z = nph_pcg32_next_f32(rng);
+    return nph_vec3(x, y, z);
 }
 NPH_INLINE bool nph_pcg32_next_bool(NphPcg32 *rng)
 {
