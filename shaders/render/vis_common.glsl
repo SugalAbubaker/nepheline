@@ -15,6 +15,7 @@ NPH_BUFFER_REF(VisViewRef) { NphVisViewData v; };
 NPH_BUFFER_REF(VisInstancesRef) { NphVisInstance i[]; };
 NPH_BUFFER_REF(VisTransformsRef) { NphVisTransform t[]; };
 NPH_BUFFER_REF(VisMeshesRef) { NphVisMesh m[]; };
+NPH_BUFFER_REF(VisCellsRef) { NphVisCell c[]; };
 NPH_BUFFER_REF(VisCountersRef) { NphVisCounters c; };
 NPH_BUFFER_REF(VisArgsRef) { NphVisArgs a; };
 NPH_BUFFER_REF(VisClustersRef) { NphVisCluster c[]; };
@@ -613,6 +614,31 @@ bool vis_lod_surely_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, floa
     const float far = length(c) + sphere.w * scale * (1.0 + 1.0 / 4096.0) +
                       (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
     return e > far && e > view.v.lod.y * (1.0 + 1.0 / 4096.0);
+}
+
+// ---------------------------------------------------------------------------
+// Cells of a world partition (render/renderer.h nph_render_cell_create;
+// ADR-0062)
+// ---------------------------------------------------------------------------
+
+// Whether cell `cell` (its index plus one, from an instance's flags) is drawn
+// as its proxy in the view: with the levels of detail, where its box's
+// nearest point is at least the proxy's distance away (what no camera that
+// far sees is not in the proxy), and the proxy's finest error is fine from
+// there (vis_lod_group_too_coarse's test at the box's nearest point, scale
+// 1: e k <= max(d, near)). A cell's instances and its proxy decide from the
+// same record and view, by the same arithmetic, so the proxy is drawn exactly
+// where they are not.
+bool vis_cell_proxied(VisViewRef view, uint cell)
+{
+    if ((view.v.flags & NPH_VIS_VIEW_LOD) == 0u) {
+        return false;
+    }
+    const NphVisCell c = VisCellsRef(view.v.cells).c[cell - 1u];
+    const vec3 centre =
+        (c.center_high.xyz - view.v.camera_high.xyz) + (c.center_low.xyz - view.v.camera_low.xyz);
+    const float d = length(max(abs(centre) - c.extent.xyz, vec3(0.0)));
+    return d >= c.center_high.w && c.center_low.w * view.v.lod.x <= max(d, view.v.lod.y);
 }
 
 bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)

@@ -27,6 +27,10 @@
 // every part needs level 0, and any in a view without the levels
 // (NPH_VIS_VIEW_LOD unset), hands on level 0's meshlets as any mesh's.
 //
+// The instances of a world partition's cell give way to the cell's proxy
+// where it is drawn, and the proxy to them elsewhere (vis_cell_proxied;
+// ADR-0062): both decide first, from the cell's record and the view alike.
+//
 // The meshlets go out as (instance, meshlet) work items, one per meshlet,
 // so the meshlet cull runs an invocation per meshlet with every lane busy,
 // whatever the meshes' sizes. The subgroup writes its instances' items
@@ -63,11 +67,22 @@ void main()
     bool defer = false;
     bool culled_frustum = false;
     bool culled_occlusion = false;
-    uint meshlets = 0u; // handed to the meshlet cull
-    bool root = false;  // hands its hierarchy's root to the hierarchy's steps
+    bool cell_proxied = false;     // a cell's proxy, drawn for its distance (statistics)
+    bool instance_proxied = false; // an instance its cell's proxy stands in for (statistics)
+    uint meshlets = 0u;            // handed to the meshlet cull
+    bool root = false;             // hands its hierarchy's root to the hierarchy's steps
     if (slot != 0xFFFFFFFFu) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
-        if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
+        bool shown = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u;
+        const uint cell = inst.flags >> NPH_VIS_INSTANCE_CELL_SHIFT;
+        if (shown && cell != 0u) {
+            const bool proxy = (inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u;
+            const bool proxied = vis_cell_proxied(view, cell);
+            shown = proxied == proxy;
+            cell_proxied = phase == 0u && proxy && proxied;
+            instance_proxied = phase == 0u && !proxy && proxied;
+        }
+        if (shown) {
             const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
@@ -113,6 +128,8 @@ void main()
 
     VIS_COUNT(counters.c.instances_culled_frustum, culled_frustum);
     VIS_COUNT(counters.c.instances_culled_occlusion, culled_occlusion);
+    VIS_COUNT(counters.c.cells_proxied, cell_proxied);
+    VIS_COUNT(counters.c.instances_proxied, instance_proxied);
     if (phase == 0u) {
         uint d;
         VIS_RESERVE(counters.c.deferred_instances, defer ? 1u : 0u, d);

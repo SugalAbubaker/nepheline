@@ -32,7 +32,7 @@
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
-//                 [--vsm-trace]
+//                 [--vsm-trace] [--no-cells]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -44,7 +44,9 @@
 // comparing a scene with its levels of detail and without. --vsm-trace
 // prints the shadow map's statistics every frame, warm-up included (they
 // report the frame NPH_GPU_FRAMES_IN_FLIGHT before): how its page budget
-// draws a burst of pages.
+// draws a burst of pages. --no-cells loads the reference scenes without
+// their world partition's cells (ADR-0062): every instance drawn as itself,
+// no proxy, for comparing a scene with its cells and without.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -434,6 +436,7 @@ static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
 static f32 g_lod_error = -1.0F;  // --lod-error (negative: the view's default)
 static u32 g_lists = 1U;         // --lists: the production path's list capacities, times this
 static bool g_vsm_trace = false; // --vsm-trace: every frame's shadow map statistics
+static bool g_no_cells = false;  // --no-cells: the scenes' cells not loaded
 static u32 g_trace_frame = 0U;
 
 typedef struct Result {
@@ -1489,6 +1492,10 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
             printf("    voxels: %u clusters, %u bricks\n", st->vis_voxel_clusters,
                    st->vis_voxel_bricks);
         }
+        if (st->vis_cells_proxied != 0U) {
+            printf("    cells: %u drawn as their proxies, for %u instances\n",
+                   st->vis_cells_proxied, st->vis_instances_proxied);
+        }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, wanted %u, drawn %u (budget %u), "
                    "resident %u, evicted %u; caster meshlets %u (%u hierarchy nodes), draws %u "
@@ -1698,6 +1705,7 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.loader = ctx->loader;
     cd.jobs = ctx->jobs;
     cd.scene = nph_guid_from_cstr(m->scene_key);
+    cd.no_cells = g_no_cells;
     const u64 t0 = nph_time_now_ns();
     const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
     if (r != NPH_RESULT_OK) {
@@ -1717,9 +1725,9 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
             }
         }
     }
-    printf("%s: loaded in %.1f s: %u instances, %u lights, %u materials\n", m->name,
-           (f64)(nph_time_now_ns() - t0) / 1.0e9, ctx->cooked.instance_count,
-           ctx->cooked.light_count, ctx->cooked.render_material_count);
+    printf("%s: loaded in %.1f s: %u instances, %u lights, %u materials, %u cells with proxies\n",
+           m->name, (f64)(nph_time_now_ns() - t0) / 1.0e9, ctx->cooked.instance_count,
+           ctx->cooked.light_count, ctx->cooked.render_material_count, ctx->cooked.proxy_count);
     return NPH_RESULT_OK;
 }
 
@@ -2057,7 +2065,7 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
-                    "[--lod-error=PX] [--lists=N] [--vsm-trace]\n");
+                    "[--lod-error=PX] [--lists=N] [--vsm-trace] [--no-cells]\n");
     return 2;
 }
 
@@ -2096,6 +2104,8 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "--vsm-trace") == 0) {
             g_vsm_trace = true;
+        } else if (strcmp(argv[i], "--no-cells") == 0) {
+            g_no_cells = true;
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {

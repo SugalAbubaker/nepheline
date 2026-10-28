@@ -56,7 +56,8 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 960U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 976U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisViewData, cells) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, voxel_tiles) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, lod_queue) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(NPH_RENDER_ZBINS % 256 == 0, "vis_light_bins.comp gives each thread whole bins");
@@ -582,6 +583,8 @@ static void read_stats(NphRenderer *r)
     s->vis_lod_clusters_culled = c->lod_clusters_culled;
     s->vis_lights = c->lights_global + c->lights_local;
     s->vis_overflow = c->overflow;
+    s->vis_cells_proxied = c->cells_proxied;
+    s->vis_instances_proxied = c->instances_proxied;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
@@ -663,6 +666,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->instances = nph_gpu_buffer_address(dev, v->instances);
     vd->prev_transforms = nph_gpu_buffer_address(dev, v->prev_transforms);
     vd->meshes = nph_gpu_buffer_address(dev, v->meshes);
+    vd->cells = nph_gpu_buffer_address(dev, v->cells);
     vd->material_map = nph_gpu_buffer_address(dev, v->material_map);
     vd->materials = frame + r->layout.materials_offset;
     vd->counters = nph_gpu_buffer_address(dev, v->counters);
@@ -1222,6 +1226,7 @@ typedef struct VisGraph {
     NphGpuRgBuffer instances;
     NphGpuRgBuffer prev_transforms;
     NphGpuRgBuffer meshes;
+    NphGpuRgBuffer cells;
     NphGpuRgBuffer material_map;
     NphGpuRgBuffer cull_meshlets;
     NphGpuRgBuffer deferred;
@@ -1259,6 +1264,7 @@ static void read_scene(NphGpuRgPass *p, const VisGraph *g, NphGpuRgImage hzb)
     nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->prev_transforms, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->cells, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, g->material_map, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_image(p, hzb, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
 }
@@ -1809,6 +1815,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.instances = nph_gpu_rg_import_buffer(graph, v->instances);
     g.prev_transforms = nph_gpu_rg_import_buffer(graph, v->prev_transforms);
     g.meshes = nph_gpu_rg_import_buffer(graph, v->meshes);
+    g.cells = nph_gpu_rg_import_buffer(graph, v->cells);
     g.material_map = nph_gpu_rg_import_buffer(graph, v->material_map);
     g.cull_meshlets = nph_gpu_rg_import_buffer(graph, v->cull_meshlets);
     g.deferred = nph_gpu_rg_import_buffer(graph, v->deferred);
@@ -1818,6 +1825,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->instances = g.instances;
     f->prev_transforms = g.prev_transforms;
     f->clusters = g.clusters;
+    f->cells = g.cells;
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
         nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles) ||
@@ -1908,6 +1916,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_lod_steps = f->lod_steps;
         stats->vis_lights = last->vis_lights;
         stats->vis_overflow = last->vis_overflow;
+        stats->vis_cells_proxied = last->vis_cells_proxied;
+        stats->vis_instances_proxied = last->vis_instances_proxied;
         stats->vsm_requested = last->vsm_requested;
         stats->vsm_drawn = last->vsm_drawn;
         stats->vsm_resident = last->vsm_resident;

@@ -27,6 +27,12 @@
 // Its transform is not the previous frame's (the scatter pass keeps it):
 // motion vectors read both.
 #define NPH_VIS_INSTANCE_MOVED 16
+// A cell's proxy (render/renderer.h nph_render_cell_create; ADR-0062): drawn
+// where its cell's instances are not (vis_cell_proxied).
+#define NPH_VIS_INSTANCE_PROXY 32
+// The instance's cell, its index plus one (0: none), in the flags' upper
+// bits: the proxy's own, or the cell whose proxy stands for the instance.
+#define NPH_VIS_INSTANCE_CELL_SHIFT 8
 
 // Cluster flags (NphVisCluster.flags), from the instance and the material.
 #define NPH_VIS_CLUSTER_MIRRORED     1
@@ -137,6 +143,17 @@ NPH_SHARED_STRUCT(NphVisInstance)
     u32 material_base;  // first entry of its material slots in the material map
     u32 material_count; // entries (material slots)
     u32 flags;          // NPH_VIS_INSTANCE_*
+};
+
+// A cell of a world partition (ADR-0062), at its pool slot: the box of its
+// instances, split like an instance's translation, and when its proxy stands
+// for them (vis_cell_proxied): from `center_high.w` away, where its finest
+// error, `center_low.w`, is fine enough for the view.
+NPH_SHARED_STRUCT(NphVisCell)
+{
+    NphVec4 center_high; // xyz: the box's centre, high floats; w: the proxy's distance
+    NphVec4 center_low;  // xyz: its low floats; w: the proxy's finest error (its level 0's cell)
+    NphVec4 extent;      // xyz: the box's half extents; w: unused
 };
 
 // An instance update the scatter pass applies at the start of a frame:
@@ -297,6 +314,11 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // visible voxel clusters' bricks.
     u32 voxel_tiles;
     u32 voxel_bricks;
+    // Statistics (ADR-0062): the cells drawn as their proxies (the proxies
+    // phase 0's instance cull kept for their distance, whether or not in
+    // view), and the instances such a proxy stood in for.
+    u32 cells_proxied;
+    u32 instances_proxied;
 };
 
 // The production path's view of a frame.
@@ -383,6 +405,8 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 voxel_tile_bits;
     u32 resolve_tiles_x;
     u32 voxel_pad0;
+    u64 cells; // NphVisCell[]: the world partition's cells (ADR-0062)
+    u64 cell_pad0;
 };
 
 // Push constants of every production-path shader. The visibility buffer

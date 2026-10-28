@@ -280,6 +280,7 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_materials = d->max_materials != 0U ? d->max_materials : 1024U;
     d->max_instances = d->max_instances != 0U ? d->max_instances : 16384U;
     d->max_lights = d->max_lights != 0U ? d->max_lights : 256U;
+    d->max_cells = d->max_cells != 0U ? d->max_cells : 4096U;
     d->max_draws = d->max_draws != 0U ? d->max_draws : 16384U;
     d->debug_lines = d->debug_lines != 0U ? d->debug_lines : 32768U;
     d->environment_size = d->environment_size != 0U ? d->environment_size : 256U;
@@ -339,6 +340,11 @@ static NphResult apply_defaults(NphRendererDesc *d)
         d->max_instances > limit || d->max_draws > limit || d->debug_lines > limit) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // An instance's record names its cell, plus one, in the upper 24 bits of
+    // its flags (NPH_VIS_INSTANCE_CELL_SHIFT).
+    if (d->max_cells >= 1U << (32U - (u32)NPH_VIS_INSTANCE_CELL_SHIFT)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
     // The production path's light grid indexes a view's lights in 16 bits
     // and sorts them in one workgroup.
     if (d->max_lights > (u32)NPH_RENDER_MAX_LIGHTS) {
@@ -356,14 +362,16 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(pool_init(&r->material_pool, a, d->max_materials));
     NPH_TRY(pool_init(&r->instance_pool, a, d->max_instances));
     NPH_TRY(pool_init(&r->light_pool, a, d->max_lights));
+    NPH_TRY(pool_init(&r->cell_pool, a, d->max_cells));
     r->textures = NPH_ALLOC_ARRAY_ZEROED(a, RenderTexture, d->max_textures);
     r->meshes = NPH_ALLOC_ARRAY_ZEROED(a, RenderMesh, d->max_meshes);
     r->materials = NPH_ALLOC_ARRAY_ZEROED(a, RenderMaterial, d->max_materials);
     r->instances = NPH_ALLOC_ARRAY_ZEROED(a, RenderInstance, d->max_instances);
     r->lights = NPH_ALLOC_ARRAY_ZEROED(a, RenderLight, d->max_lights);
+    r->cells = NPH_ALLOC_ARRAY_ZEROED(a, RenderCell, d->max_cells);
     r->draw_cmds = NPH_ALLOC_ARRAY_ZEROED(a, RenderDrawCmd, d->max_draws);
     if (r->textures == NULL || r->meshes == NULL || r->materials == NULL || r->instances == NULL ||
-        r->lights == NULL || r->draw_cmds == NULL) {
+        r->lights == NULL || r->cells == NULL || r->draw_cmds == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
 
@@ -509,7 +517,8 @@ void nph_renderer_destroy(NphRenderer *r)
     }
     free_instance_tables(r);
     const u32 live = nph_handle_pool_live(&r->instance_pool) +
-                     nph_handle_pool_live(&r->material_pool) + nph_handle_pool_live(&r->light_pool);
+                     nph_handle_pool_live(&r->material_pool) +
+                     nph_handle_pool_live(&r->light_pool) + nph_handle_pool_live(&r->cell_pool);
     leaked += live;
     if (leaked != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u resources were still alive at destruction", r->name,
@@ -567,12 +576,14 @@ void nph_renderer_destroy(NphRenderer *r)
     NPH_FREE_ARRAY(a, RenderMaterial, r->materials, r->desc.max_materials);
     NPH_FREE_ARRAY(a, RenderInstance, r->instances, r->desc.max_instances);
     NPH_FREE_ARRAY(a, RenderLight, r->lights, r->desc.max_lights);
+    NPH_FREE_ARRAY(a, RenderCell, r->cells, r->desc.max_cells);
     NPH_FREE_ARRAY(a, RenderDrawCmd, r->draw_cmds, r->desc.max_draws);
     nph_handle_pool_free(&r->texture_pool);
     nph_handle_pool_free(&r->mesh_pool);
     nph_handle_pool_free(&r->material_pool);
     nph_handle_pool_free(&r->instance_pool);
     nph_handle_pool_free(&r->light_pool);
+    nph_handle_pool_free(&r->cell_pool);
     NPH_FREE_TYPE(a, NphRenderer, r);
 }
 
@@ -715,11 +726,20 @@ static NphResult make_buffer(NphRenderer *r, const void *data, u64 size, u32 usa
     return nph_gpu_upload_buffer(r->dev, *out, 0U, data, size);
 }
 
+// A mesh of voxels alone (a cell's proxy, render/cell_proxy.h; ADR-0062): no
+// vertices and no indices, every cluster a voxel cluster.
+static bool voxels_alone(const NphRenderMeshDesc *d)
+{
+    return d->vertex_count == 0U && d->index_count == 0U;
+}
+
 // A meshlet record without vertices past level 0 of a mesh with levels is a
-// voxel cluster (render/voxel.h; ADR-0061).
+// voxel cluster (render/voxel.h; ADR-0061), and at level 0 too in a mesh of
+// voxels alone.
 static bool is_voxel_cluster(const NphRenderMeshDesc *d, u32 i)
 {
-    return d->lod_nodes != NULL && i >= d->lod_level0_meshlets && d->meshlets[i].vertex_count == 0U;
+    return d->lod_nodes != NULL && (i >= d->lod_level0_meshlets || voxels_alone(d)) &&
+           d->meshlets[i].vertex_count == 0U;
 }
 
 // A voxel cluster is checked so far as the GPU's reads stay inside the
@@ -761,14 +781,18 @@ static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRen
 // voxel cluster's bricks (validate_voxel_cluster); and they number fewer
 // than 2^24, the bits the shadow map's work items give a meshlet beside its
 // level (vsm_cull.comp). That they cover their submeshes' triangles exactly
-// is the caller's contract.
+// is the caller's contract. A mesh of voxels alone has no meshlet vertices
+// or triangles, so a cluster of it that is not a voxel cluster fails the
+// ranges.
 static NphResult validate_meshlets(const NphRenderMeshDesc *d)
 {
     if (d->meshlets == NULL) {
         return NPH_RESULT_OK;
     }
+    const bool alone = voxels_alone(d);
     if (d->meshlet_count == 0U || d->meshlet_count >= (1U << 24U) || d->meshlet_bounds == NULL ||
-        d->meshlet_vertices == NULL || d->meshlet_triangles == NULL) {
+        (alone ? d->meshlet_vertex_count != 0U || d->meshlet_triangle_count != 0U
+               : d->meshlet_vertices == NULL || d->meshlet_triangles == NULL)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < d->meshlet_vertex_count; ++i) {
@@ -958,10 +982,27 @@ static NphResult validate_lods(const NphRenderMeshDesc *d, NphAllocator *scratch
 
 static NphResult validate_mesh(const NphRenderMeshDesc *d)
 {
+    if (d->submeshes == NULL || d->submesh_count == 0U ||
+        d->submesh_count > NPH_RENDER_MAX_SUBMESHES || !nph_vec3_is_finite(d->position_offset) ||
+        !nph_vec3_is_finite(d->position_scale)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (voxels_alone(d)) {
+        // Its clusters are given (none can be built without triangles), with
+        // their levels and voxels; its submeshes name materials alone.
+        if (d->meshlets == NULL || d->lod_nodes == NULL || d->voxel_bricks == NULL ||
+            d->voxel_brick_count == 0U || d->voxels == NULL || d->voxel_count == 0U) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        for (u32 s = 0; s < d->submesh_count; ++s) {
+            if (d->submeshes[s].index_offset != 0U || d->submeshes[s].index_count != 0U) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+        }
+        return validate_meshlets(d);
+    }
     if (d->vertex_count == 0U || d->index_count == 0U || d->index_count % 3U != 0U ||
-        d->positions == NULL || d->attribs == NULL || d->indices == NULL || d->submeshes == NULL ||
-        d->submesh_count == 0U || d->submesh_count > NPH_RENDER_MAX_SUBMESHES ||
-        !nph_vec3_is_finite(d->position_offset) || !nph_vec3_is_finite(d->position_scale)) {
+        d->positions == NULL || d->attribs == NULL || d->indices == NULL) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < d->index_count; ++i) {
@@ -995,20 +1036,24 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     m->index_range = NPH_RANGE_NULL; // a zero-filled range would name node 0
     m->submeshes = NPH_ALLOC_ARRAY(r->alloc, NphRenderSubmesh, desc->submesh_count);
     NphResult res = m->submeshes != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
-    // Bottom-level builds read the positions and indices (rt.c).
+    // Bottom-level builds read the positions and indices (rt.c). A mesh of
+    // voxels alone has neither: its streams stay null, their addresses 0.
     const u32 accel_input = r->rt.supported ? (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT : 0U;
+    const bool triangles = !voxels_alone(desc);
     if (res == NPH_RESULT_OK) {
         m->submesh_count = desc->submesh_count;
         memcpy(m->submeshes, desc->submeshes, sizeof(NphRenderSubmesh) * desc->submesh_count);
+    }
+    if (res == NPH_RESULT_OK && triangles) {
         res = make_buffer(
             r, desc->positions, (u64)desc->vertex_count * sizeof(NphRenderVertexPosition),
             (u32)NPH_GPU_BUFFER_USAGE_STORAGE | accel_input, "mesh positions", &m->positions);
     }
-    if (res == NPH_RESULT_OK) {
+    if (res == NPH_RESULT_OK && triangles) {
         res = make_buffer(r, desc->attribs, (u64)desc->vertex_count * sizeof(NphRenderVertexAttrib),
                           (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "mesh attributes", &m->attribs);
     }
-    if (res == NPH_RESULT_OK) {
+    if (res == NPH_RESULT_OK && triangles) {
         res =
             make_buffer(r, desc->indices, (u64)desc->index_count * sizeof(u32),
                         (u32)NPH_GPU_BUFFER_USAGE_INDEX | accel_input, "mesh indices", &m->indices);
@@ -1216,10 +1261,11 @@ static bool transform_ok(const NphRenderTransform *t)
            nph_f64_is_finite(t->translation.y) && nph_f64_is_finite(t->translation.z);
 }
 
-NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc *desc,
-                                     NphRenderInstance *out)
+// An instance of `desc` (its cell ignored), in cell `cell` (its slot plus one;
+// 0: none): a member of it, or with `proxy` its proxy (nph_render_cell_create).
+static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *desc, u32 cell,
+                                 bool proxy, NphRenderInstance *out)
 {
-    NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
     *out = NPH_RENDER_INSTANCE_NULL;
     const u32 mesh_slot = render_slot_of(&r->mesh_pool, desc->mesh.value);
     if (mesh_slot == NPH_U32_MAX || !transform_ok(&desc->transform) ||
@@ -1250,6 +1296,8 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
     inst->material_count = desc->material_count;
     inst->transform = desc->transform;
     inst->hidden = desc->hidden;
+    inst->cell = cell;
+    inst->proxy = proxy;
     const NphResult res = render_vis_instance_created(r, slot);
     if (res != NPH_RESULT_OK) {
         if (inst->materials != NULL) {
@@ -1261,8 +1309,27 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
     }
     r->meshes[mesh_slot].instances += 1U;
     r->hidden_count += inst->hidden ? 1U : 0U;
+    if (cell != 0U && !proxy) {
+        r->cells[cell - 1U].members += 1U;
+    }
     out->value = value;
     return NPH_RESULT_OK;
+}
+
+NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc *desc,
+                                     NphRenderInstance *out)
+{
+    NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
+    *out = NPH_RENDER_INSTANCE_NULL;
+    u32 cell = 0U;
+    if (desc->cell.value != 0U) {
+        const u32 slot = render_slot_of(&r->cell_pool, desc->cell.value);
+        if (slot == NPH_U32_MAX) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        cell = slot + 1U;
+    }
+    return create_instance(r, desc, cell, false, out);
 }
 
 NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,
@@ -1319,6 +1386,9 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
         r->meshes[mesh_slot].instances -= 1U;
     }
     r->hidden_count -= inst->hidden ? 1U : 0U;
+    if (inst->cell != 0U && !inst->proxy) {
+        r->cells[inst->cell - 1U].members -= 1U;
+    }
     render_vis_instance_destroyed(r, slot);
     if (inst->materials != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphRenderMaterial, inst->materials, inst->material_count);
@@ -1330,6 +1400,98 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
 bool nph_render_instance_is_valid(const NphRenderer *r, NphRenderInstance instance)
 {
     return render_slot_of(&r->instance_pool, instance.value) != NPH_U32_MAX;
+}
+
+// ---------------------------------------------------------------------------
+// Cells
+// ---------------------------------------------------------------------------
+
+// A rotation and a translation alone: unit columns at right angles, a
+// positive determinant (the proxy's errors are in world units).
+static bool rigid(const NphRenderTransform *t)
+{
+    const NphMat3 l = t->linear;
+    const f32 tol = 1e-4F;
+    return transform_ok(t) && nph_f32_abs(nph_vec3_length(l.c[0]) - 1.0F) <= tol &&
+           nph_f32_abs(nph_vec3_length(l.c[1]) - 1.0F) <= tol &&
+           nph_f32_abs(nph_vec3_length(l.c[2]) - 1.0F) <= tol &&
+           nph_f32_abs(nph_vec3_dot(l.c[0], l.c[1])) <= tol &&
+           nph_f32_abs(nph_vec3_dot(l.c[0], l.c[2])) <= tol &&
+           nph_f32_abs(nph_vec3_dot(l.c[1], l.c[2])) <= tol && nph_mat3_determinant(l) > 0.0F;
+}
+
+static bool cell_desc_ok(const NphRenderer *r, const NphRenderCellDesc *d)
+{
+    const u32 mesh = render_slot_of(&r->mesh_pool, d->proxy.value);
+    return mesh != NPH_U32_MAX && r->meshes[mesh].vertex_count == 0U &&
+           r->meshes[mesh].index_count == 0U && rigid(&d->proxy_transform) &&
+           nph_f64_is_finite(d->center.x) && nph_f64_is_finite(d->center.y) &&
+           nph_f64_is_finite(d->center.z) && nph_vec3_is_finite(d->extent) && d->extent.x >= 0.0F &&
+           d->extent.y >= 0.0F && d->extent.z >= 0.0F && nph_f32_is_finite(d->proxy_error) &&
+           d->proxy_error > 0.0F && nph_f32_is_finite(d->distance) && d->distance > 0.0F;
+}
+
+NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, NphRenderCell *out)
+{
+    NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
+    *out = NPH_RENDER_CELL_NULL;
+    if (!cell_desc_ok(r, desc)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    u32 value = 0U;
+    u32 slot = 0U;
+    NPH_TRY(alloc_slot(&r->cell_pool, &value, &slot));
+    RenderCell *c = &r->cells[slot];
+    memset(c, 0, sizeof *c);
+    NphRenderInstanceDesc proxy;
+    memset(&proxy, 0, sizeof proxy);
+    proxy.mesh = desc->proxy;
+    proxy.materials = desc->proxy_materials;
+    proxy.material_count = desc->proxy_material_count;
+    proxy.transform = desc->proxy_transform;
+    NphResult res = create_instance(r, &proxy, slot + 1U, true, &c->proxy);
+    if (res == NPH_RESULT_OK) {
+        res = render_vis_cell_created(r, slot, desc);
+    }
+    if (res != NPH_RESULT_OK) {
+        nph_render_instance_destroy(r, c->proxy);
+        memset(c, 0, sizeof *c);
+        release_slot(&r->cell_pool, value);
+        return res;
+    }
+    c->handle = value;
+    out->value = value;
+    return NPH_RESULT_OK;
+}
+
+void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell)
+{
+    NPH_ASSERT(r != NULL);
+    if (cell.value == 0U) {
+        return;
+    }
+    const u32 slot = render_slot_of(&r->cell_pool, cell.value);
+    NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale cell handle");
+    if (slot == NPH_U32_MAX) {
+        return;
+    }
+    RenderCell *c = &r->cells[slot];
+    NPH_ASSERT_MSG(c->members == 0U, "destroying a cell that instances still name");
+    if (c->members != 0U) {
+        NPH_LOG_ERROR(&NPH_LOG_RENDER, "%s: a cell named by %u live instances was not destroyed",
+                      r->name, c->members);
+        return;
+    }
+    // Its record stays on the GPU until the slot's next cell: no instance
+    // names the slot meanwhile.
+    nph_render_instance_destroy(r, c->proxy);
+    memset(c, 0, sizeof *c);
+    release_slot(&r->cell_pool, cell.value);
+}
+
+bool nph_render_cell_is_valid(const NphRenderer *r, NphRenderCell cell)
+{
+    return render_slot_of(&r->cell_pool, cell.value) != NPH_U32_MAX;
 }
 
 // ---------------------------------------------------------------------------

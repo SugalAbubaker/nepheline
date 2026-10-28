@@ -290,8 +290,62 @@ static NphRenderTransform at_origin(const NphMat4 *m, NphDVec3 origin)
     return t;
 }
 
+// The world partition's cells (asset/scene.h version 2; ADR-0062), each a
+// render cell with its proxy at the proxy's origin, made before the instances
+// that name them. A cell without a proxy (nothing of its instances voxelized)
+// makes none: its instances are drawn as themselves.
+static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const NphSceneView *sv)
+{
+    for (u32 k = 0; k < s->cell_cap && k < sv->cell_count; ++k) {
+        const NphSceneCell *c = &sv->cells[k];
+        s->cells[k] = NPH_RENDER_CELL_NULL;
+        s->cell_count = k + 1U;
+        const u32 mi = nph_guid_is_null(c->proxy) ? NPH_U32_MAX : find_asset(s, c->proxy);
+        if (mi == NPH_U32_MAX) {
+            continue;
+        }
+        const u32 ma =
+            nph_guid_is_null(c->proxy_material) ? NPH_U32_MAX : find_asset(s, c->proxy_material);
+        const NphRenderMaterial material =
+            ma == NPH_U32_MAX ? NPH_RENDER_MATERIAL_NULL : s->asset_materials[ma];
+        NphRenderCellDesc d;
+        memset(&d, 0, sizeof d);
+        d.center = nph_dvec3_add(nph_dvec3(((f64)c->bounds.min.x + (f64)c->bounds.max.x) * 0.5,
+                                           ((f64)c->bounds.min.y + (f64)c->bounds.max.y) * 0.5,
+                                           ((f64)c->bounds.min.z + (f64)c->bounds.max.z) * 0.5),
+                                 desc->origin);
+        d.extent = nph_vec3_scale(nph_vec3_sub(c->bounds.max, c->bounds.min), 0.5F);
+        d.proxy = s->meshes[mi];
+        d.proxy_materials = &material;
+        d.proxy_material_count = 1U;
+        d.proxy_transform = nph_render_transform_identity();
+        d.proxy_transform.translation =
+            nph_dvec3_add(nph_dvec3_from_vec3(c->proxy_origin), desc->origin);
+        d.proxy_error = c->proxy_cell;
+        d.distance = c->proxy_distance;
+        NPH_TRY(nph_render_cell_create(s->renderer, &d, &s->cells[k]));
+        ++s->proxy_count;
+    }
+    return NPH_RESULT_OK;
+}
+
+// The cell each instance lies in (its index in the scene's cell table), or
+// NPH_U32_MAX: the cells' instance ranges, which the scene view checked.
+static void instance_cells(const NphSceneView *sv, u32 *out)
+{
+    for (u32 i = 0; i < sv->header->instance_count; ++i) {
+        out[i] = NPH_U32_MAX;
+    }
+    for (u32 k = 0; k < sv->cell_count; ++k) {
+        const NphSceneCell *c = &sv->cells[k];
+        for (u32 i = 0; i < c->instance_count; ++i) {
+            out[c->instance_offset + i] = k;
+        }
+    }
+}
+
 static NphResult create_instances(CookedScene *s, const CookedSceneDesc *desc,
-                                  const NphSceneView *sv, const NphMat4 *world)
+                                  const NphSceneView *sv, const NphMat4 *world, const u32 *cells)
 {
     const NphSceneHeader *sh = sv->header;
     NphRenderMaterial table[NPH_RENDER_MAX_SUBMESHES];
@@ -311,6 +365,8 @@ static NphResult create_instances(CookedScene *s, const CookedSceneDesc *desc,
         d.materials = table;
         d.material_count = inst->material_count;
         d.transform = at_origin(&world[inst->node], desc->origin);
+        d.cell =
+            cells != NULL && cells[i] < s->cell_count ? s->cells[cells[i]] : NPH_RENDER_CELL_NULL;
         NPH_TRY(nph_render_instance_create(s->renderer, &d, &s->instances[s->instance_count]));
         ++s->instance_count;
         NphMeshView mv;
@@ -379,9 +435,11 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     NPH_TRY(nph_asset_load_guid(s->loader, desc->scene, &scene_handle));
     NphSceneView sv;
     NphResult r = nph_scene_view(nph_asset_get(s->loader, scene_handle), &sv);
+    const u32 cells = desc->no_cells || r != NPH_RESULT_OK ? 0U : sv.cell_count;
     if (r == NPH_RESULT_OK) {
         const NphSceneHeader *sh = sv.header;
-        const u32 cap = 1U + sh->instance_count + sh->material_count * (1U + NPH_RENDER_SLOT_COUNT);
+        const u32 cap =
+            1U + sh->instance_count + sh->material_count * (1U + NPH_RENDER_SLOT_COUNT) + cells;
         r = alloc_tables(s, cap);
     }
     if (r != NPH_RESULT_OK) {
@@ -397,6 +455,11 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     }
     for (u32 i = 0; i < sh->material_count; ++i) {
         NPH_TRY(request(s, sv.materials[i], &done));
+    }
+    for (u32 k = 0; k < cells; ++k) {
+        if (!nph_guid_is_null(sv.cells[k].proxy)) {
+            NPH_TRY(request(s, sv.cells[k].proxy, &done));
+        }
     }
     NPH_TRY(wait_all(s, desc->jobs, &done));
     for (u32 i = 0; i < sh->material_count; ++i) {
@@ -434,15 +497,21 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     s->material_cap = sh->material_count != 0U ? sh->material_count : 1U;
     s->instance_cap = sh->instance_count != 0U ? sh->instance_count : 1U;
     s->light_cap = sh->light_count != 0U ? sh->light_count : 1U;
+    s->cell_cap = cells != 0U ? cells : 1U;
     s->materials = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderMaterial, s->material_cap);
     s->instances = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderInstance, s->instance_cap);
+    s->cells = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderCell, s->cell_cap);
     s->lights = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderLight, s->light_cap);
     s->light_descs = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderLightDesc, s->light_cap);
     NphMat4 *world = NPH_ALLOC_ARRAY(s->alloc, NphMat4, sh->node_count != 0U ? sh->node_count : 1U);
-    if (s->materials == NULL || s->instances == NULL || s->lights == NULL ||
-        s->light_descs == NULL || world == NULL) {
+    u32 *instance_cell = cells != 0U ? NPH_ALLOC_ARRAY(s->alloc, u32, s->instance_cap) : NULL;
+    if (s->materials == NULL || s->instances == NULL || s->cells == NULL || s->lights == NULL ||
+        s->light_descs == NULL || world == NULL || (cells != 0U && instance_cell == NULL)) {
         if (world != NULL) {
             NPH_FREE_ARRAY(s->alloc, NphMat4, world, sh->node_count != 0U ? sh->node_count : 1U);
+        }
+        if (instance_cell != NULL) {
+            NPH_FREE_ARRAY(s->alloc, u32, instance_cell, s->instance_cap);
         }
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -468,9 +537,17 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
         NPH_LOG_ERROR(&LOG_COOKED_SCENE, "material %u of %u (%u created): %s", s->material_count,
                       sh->material_count, s->render_material_count, nph_result_string(r));
     }
+    if (r == NPH_RESULT_OK && cells != 0U) {
+        r = create_cells(s, desc, &sv);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&LOG_COOKED_SCENE, "cell %u of %u: %s", s->cell_count, cells,
+                          nph_result_string(r));
+        }
+        instance_cells(&sv, instance_cell);
+    }
     if (r == NPH_RESULT_OK) {
         world_matrices(&sv, world);
-        r = create_instances(s, desc, &sv, world);
+        r = create_instances(s, desc, &sv, world, instance_cell);
         if (r != NPH_RESULT_OK) {
             NPH_LOG_ERROR(&LOG_COOKED_SCENE, "instance %u of %u: %s", s->instance_count,
                           sh->instance_count, nph_result_string(r));
@@ -487,6 +564,9 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
         first_camera(s, desc, &sv, world);
     }
     NPH_FREE_ARRAY(s->alloc, NphMat4, world, sh->node_count != 0U ? sh->node_count : 1U);
+    if (instance_cell != NULL) {
+        NPH_FREE_ARRAY(s->alloc, u32, instance_cell, s->instance_cap);
+    }
     return r;
 }
 
@@ -518,6 +598,11 @@ void cooked_scene_unload(CookedScene *s)
     if (s->instances != NULL) {
         for (u32 i = 0; i < s->instance_count; ++i) {
             nph_render_instance_destroy(r, s->instances[i]);
+        }
+    }
+    if (s->cells != NULL) {
+        for (u32 i = 0; i < s->cell_count; ++i) {
+            nph_render_cell_destroy(r, s->cells[i]);
         }
     }
     if (s->lights != NULL) {
@@ -558,6 +643,9 @@ void cooked_scene_unload(CookedScene *s)
     }
     if (s->instances != NULL) {
         NPH_FREE_ARRAY(a, NphRenderInstance, s->instances, s->instance_cap);
+    }
+    if (s->cells != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderCell, s->cells, s->cell_cap);
     }
     if (s->lights != NULL) {
         NPH_FREE_ARRAY(a, NphRenderLight, s->lights, s->light_cap);

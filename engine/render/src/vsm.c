@@ -1100,6 +1100,8 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
         if (passes[i].casters) {
             nph_gpu_rg_read_buffer(p, instances, NPH_GPU_RG_USE_SHADER_READ);
             nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
+            // The cells, whose proxies the instance cull switches (ADR-0062).
+            nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
         }
         if (passes[i].voxel_out && r->vis.frame_voxels) {
             nph_gpu_rg_write_buffer(p, v->frame.voxel_draws, NPH_GPU_RG_USE_STORAGE_WRITE);

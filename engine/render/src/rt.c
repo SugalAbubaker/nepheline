@@ -211,7 +211,9 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
 {
     RenderRt *rt = &r->rt;
     RenderMesh *m = &r->meshes[slot];
-    if (!rt->supported) {
+    // A mesh of voxels alone (a cell's proxy; ADR-0062) has no triangles to
+    // build over: rays trace its cell's instances, and pass it by.
+    if (!rt->supported || desc->vertex_count == 0U) {
         return NPH_RESULT_OK;
     }
     NphGpuDevice *dev = r->dev;
@@ -467,15 +469,17 @@ void render_rt_write_instances(NphRenderer *r)
 {
     const NphDVec3 anchor = r->rt.anchor;
     NphGpuAccelInstance *out = render_frame_at(r, r->layout.rt_instances_offset);
-    // The live, shown instances only, one after another: the top level is
-    // built over as many as there are (see the file comment).
+    // The live, shown instances of meshes with a bottom level only, one
+    // after another: the top level is built over as many as there are (see
+    // the file comment). A mesh of voxels alone has none.
     const u32 slots = r->instance_pool.bump;
     u32 n = 0U;
     for (u32 i = 0; i < slots; ++i) {
         const RenderInstance *inst = &r->instances[i];
         const u32 ms =
             inst->handle != 0U ? render_slot_of(&r->mesh_pool, inst->mesh.value) : NPH_U32_MAX;
-        if (ms == NPH_U32_MAX || inst->hidden) {
+        if (ms == NPH_U32_MAX || inst->hidden ||
+            !nph_gpu_accel_is_valid(r->dev, r->meshes[ms].blas)) {
             continue;
         }
         NphGpuAccelInstance *o = &out[n++];

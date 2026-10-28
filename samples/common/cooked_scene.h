@@ -17,7 +17,11 @@
 //      material asset (the scene's material table names one per instance
 //      slot, so instances share them: Bistro's 2,909 slots name 254), an
 //      instance per mesh instance at its node's world transform, and a
-//      light per KHR_lights_punctual light.
+//      light per KHR_lights_punctual light; where the scene has the world
+//      partition's cells (asset/scene.h version 2), a render cell per cell
+//      with a proxy, first (its proxy a mesh asset of voxels alone, its
+//      material the first instance's first; ADR-0062), which the cell's
+//      instances name.
 //
 // Units: glTF lights are already lux and candela; emissive is
 // emissiveFactor x KHR_materials_emissive_strength x `emissive_scale`,
@@ -38,6 +42,9 @@ typedef struct CookedSceneDesc {
     NphGuid scene;          // the cooked scene's GUID
     NphDVec3 origin;        // added to every node position (large-world tests)
     f32 emissive_scale;     // cd/m^2 per unit of glTF emissive (0: 1)
+    // Without the world partition's cells (asset/scene.h version 2): every
+    // instance drawn as itself, no proxy loaded (an A/B of the cells).
+    b32 no_cells;
 } CookedSceneDesc;
 
 typedef struct CookedScene {
@@ -58,6 +65,13 @@ typedef struct CookedScene {
     NphRenderInstance *instances;
     u32 instance_count;
     u32 instance_cap;
+    // The world partition's cells, per cell of the scene (null where the cell
+    // has no proxy, or without them), made before the instances that name
+    // them (ADR-0062).
+    NphRenderCell *cells;
+    u32 cell_count; // made so far
+    u32 cell_cap;
+    u32 proxy_count; // of them, with a proxy
     NphRenderLight *lights;
     NphRenderLightDesc *light_descs; // as created (for gizmos and tests)
     u32 light_count;

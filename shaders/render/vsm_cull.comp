@@ -10,7 +10,9 @@
 //     on as (instance, meshlet, level) items, a subgroup's together as in
 //     vis_cull_instances.comp; a mesh with levels of detail drawn at its
 //     cut hands its hierarchy's root to the walk (vsm_cull_nodes.comp)
-//     instead, which hands on the cut's clusters near the pages to draw.
+//     instead, which hands on the cut's clusters near the pages to draw. A
+//     world partition's cell is drawn into a level as its proxy or as its
+//     instances (vsm_cell_proxied; ADR-0062).
 //   MESHLETS: an invocation per item: the meshlet's bounding sphere against
 //     the level's pages to draw, one draw (instance, meshlet, entry) per
 //     page it spans. Devices without mesh shaders also get the draw as an
@@ -40,6 +42,17 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 // nothing for their routing.
 layout(constant_id = 0) const bool k_voxels = false;
 
+// Whether cell `cell` (its index plus one, from an instance's flags) is drawn
+// into a level as its proxy (ADR-0062): with the levels of detail, where the
+// proxy's finest error is within the level's threshold at scale 1
+// (vsm_lod_threshold), which holds or fails the same every frame, so a page
+// drawn stays right; its instances are drawn into the other levels. The sun
+// is infinitely far: the proxy holds what is seen from there.
+bool vsm_cell_proxied(VisViewRef view, VsmViewRef r, int level, uint cell)
+{
+    return (view.v.flags & NPH_VIS_VIEW_LOD) != 0u &&
+           VisCellsRef(view.v.cells).c[cell - 1u].center_low.w <= vsm_lod_threshold(r, level, 1.0);
+}
 
 void cull_instances(VisViewRef view, VsmViewRef r)
 {
@@ -51,7 +64,13 @@ void cull_instances(VisViewRef view, VsmViewRef r)
     bool walk = false; // its hierarchy's root to the walk, in place of its meshlets
     if (slot < view.v.instance_count) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
-        if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
+        bool shown = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u;
+        const uint cell = inst.flags >> NPH_VIS_INSTANCE_CELL_SHIFT;
+        if (shown && cell != 0u) {
+            shown = vsm_cell_proxied(view, r, level, cell) ==
+                    ((inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u);
+        }
+        if (shown) {
             const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
