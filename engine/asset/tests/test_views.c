@@ -534,6 +534,134 @@ NTEST(views, mesh_view_resolves_and_checks_voxel_clusters)
     image_asset_free(&ia);
 }
 
+// A mesh of voxels alone (version 4, a cell proxy's): no vertices, no
+// indices, one submesh of no indices over level 0's one voxel cluster (a
+// brick of cell 0.5), which group 0 makes into level 1's (a brick of cell
+// 1), under root group 1. `indices`: three indices and a vertex, which make
+// it a mesh of triangles again.
+static void build_voxels_alone(ImageAsset *ia, u32 type_version, bool indices)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
+                          nph_guid_from_cstr("proxy"), 1U);
+    NphMeshHeader h;
+    memset(&h, 0, sizeof h);
+    h.vertex_count = indices ? 1U : 0U;
+    h.index_count = indices ? 3U : 0U;
+    h.submesh_count = 1U;
+    h.meshlet_count = 2U;
+    h.position_scale = nph_vec3_one();
+    h.bounds.max = nph_vec3(2.0F, 2.0F, 2.0F);
+    h.sphere = nph_sphere(nph_vec3_one(), nph_f32_sqrt(3.0F));
+    add(&w, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h);
+    if (indices) {
+        const NphMeshPosition pos = {0U, 0U, 0U, 0U};
+        NphMeshAttrib attr;
+        memset(&attr, 0, sizeof attr);
+        const u32 idx[3] = {0U, 0U, 0U};
+        add(&w, NPH_MESH_TAG_POSITIONS, 0U, &pos, sizeof pos);
+        add(&w, NPH_MESH_TAG_ATTRIBS, 0U, &attr, sizeof attr);
+        add(&w, NPH_MESH_TAG_INDICES, 0U, idx, sizeof idx);
+    }
+    NphSubmesh sub;
+    memset(&sub, 0, sizeof sub);
+    sub.meshlet_count = 1U;
+    sub.index_count = indices ? 3U : 0U;
+    add(&w, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub);
+    NphMeshlet ml[2];
+    memset(ml, 0, sizeof ml);
+    ml[0].triangle_count = 1U; // brick 0
+    ml[1].vertex_offset = 1U;  // brick 1
+    ml[1].triangle_count = 1U;
+    add(&w, NPH_MESH_TAG_MESHLETS, 0U, ml, sizeof ml);
+    NphMeshletBounds bd[2];
+    memset(bd, 0, sizeof bd);
+    bd[0].center = nph_vec3_splat(0.25F);
+    bd[0].radius = 0.5F;
+    bd[0].cone_cutoff = 127;
+    bd[1] = bd[0];
+    add(&w, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, bd, sizeof bd);
+    NphMeshLodHeader lh;
+    memset(&lh, 0, sizeof lh);
+    lh.levels = 2U;
+    lh.level0_meshlets = 1U;
+    lh.group_count = 2U;
+    lh.group_cluster_count = 2U;
+    lh.node_count = 1U;
+    lh.brick_count = 2U;
+    lh.voxel_count = 2U;
+    const NphMeshClusterLod cl[2] = {{NPH_MESH_LOD_NONE, 0U, 0U, 0U}, {0U, 1U, 1U, 0U}};
+    NphMeshLodGroup g[2];
+    memset(g, 0, sizeof g);
+    g[0].radius = 1.0F;
+    g[0].error = 1.0F;
+    g[0].cluster_count = 1U;
+    g[1] = g[0];
+    g[1].error = NPH_F32_MAX;
+    g[1].level = 1U;
+    g[1].cluster_offset = 1U;
+    const u32 members[2] = {0U, 1U};
+    NphMeshLodNode n;
+    memset(&n, 0, sizeof n);
+    for (u32 i = 0; i < NPH_MESH_LOD_CHILDREN; ++i) {
+        n.child[i] = NPH_MESH_LOD_NONE;
+    }
+    n.child[0] = 0U | NPH_MESH_LOD_LEAF;
+    n.child[1] = 1U | NPH_MESH_LOD_LEAF;
+    NphMeshVoxelBrick bricks[2];
+    memset(bricks, 0, sizeof bricks);
+    bricks[0].cell = 0.5F;
+    bricks[0].mask[0] = 1U;
+    bricks[1].cell = 1.0F;
+    bricks[1].mask[0] = 1U;
+    bricks[1].first_voxel = 1U;
+    NphMeshVoxel voxels[2];
+    memset(voxels, 0, sizeof voxels);
+    voxels[0].box = (31U << 15U) | (31U << 20U) | (31U << 25U);
+    voxels[1].box = voxels[0].box;
+    add(&w, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh);
+    add(&w, NPH_MESH_TAG_LOD_CLUSTERS, 0U, cl, sizeof cl);
+    add(&w, NPH_MESH_TAG_LOD_GROUPS, 0U, g, sizeof g);
+    add(&w, NPH_MESH_TAG_LOD_MEMBERS, 0U, members, sizeof members);
+    add(&w, NPH_MESH_TAG_LOD_NODES, 0U, &n, sizeof n);
+    add(&w, NPH_MESH_TAG_VOXEL_BRICKS, 0U, bricks, sizeof bricks);
+    add(&w, NPH_MESH_TAG_VOXELS, 0U, voxels, sizeof voxels);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, mesh_view_takes_a_mesh_of_voxels_alone)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_voxels_alone(&ia, NPH_MESH_TYPE_VERSION, false);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(v.positions);
+    NTEST_EXPECT_NULL(v.indices);
+    NTEST_EXPECT_NULL(v.meshlet_vertices);
+    NTEST_EXPECT_NULL(v.meshlet_triangles);
+    NTEST_EXPECT_EQ_UINT(v.lod->level0_meshlets, 1U);
+    NTEST_EXPECT_EQ_UINT(v.meshlets[0].vertex_count, 0U);
+    // Its level-0 cluster's bricks are checked as a voxel cluster's.
+    NphMeshVoxelBrick *b = (NphMeshVoxelBrick *)blob_bytes(&ia, NPH_MESH_TAG_VOXEL_BRICKS, 0U);
+    b[0].mask[0] = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    b[0].mask[0] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // Before version 4 a record without vertices at level 0 is a meshlet's
+    // (here of a triangle past the mesh's no triangles).
+    build_voxels_alone(&ia, 3U, false);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    // With a vertex and indices it is a mesh of triangles, and its level 0 a
+    // meshlet's again.
+    build_voxels_alone(&ia, NPH_MESH_TYPE_VERSION, true);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
 NTEST(views, mesh_view_rejects_levels_out_of_range)
 {
     ImageAsset ia;
@@ -869,6 +997,130 @@ NTEST(views, scene_view_resolves_and_validates)
     NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     strings[15] = '\0';
     NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.cell_count, 0U);
+    NTEST_EXPECT_NULL(v.cells);
+    image_asset_free(&ia);
+}
+
+// A scene of `type_version` with two instances and, with `cells`, two cells
+// (version 2): the first holding instance 0 and a proxy, the second instance
+// 1 and none. `cell_word`: what the header's cell count holds.
+static void build_scene_cells(ImageAsset *ia, u32 type_version, bool cells, u32 cell_word)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_SCENE, type_version,
+                          nph_guid_from_cstr("cells"), 1U);
+    static const char strings[] = "root";
+    NphSceneHeader h;
+    memset(&h, 0, sizeof h);
+    h.node_count = 1U;
+    h.instance_count = 2U;
+    h.material_count = 1U;
+    h.string_bytes = sizeof strings;
+    h.cell_count = cell_word;
+    add(&w, NPH_SCENE_TAG_HEADER, 0U, &h, sizeof h);
+    NphSceneNode node;
+    memset(&node, 0, sizeof node);
+    node.rotation = nph_quat_identity();
+    node.scale = nph_vec3_one();
+    node.parent = NPH_SCENE_NO_NODE;
+    node.first_child = NPH_SCENE_NO_NODE;
+    node.next_sibling = NPH_SCENE_NO_NODE;
+    add(&w, NPH_SCENE_TAG_NODES, 0U, &node, sizeof node);
+    NphSceneMeshInstance inst[2];
+    memset(inst, 0, sizeof inst);
+    inst[0].mesh = nph_guid_from_cstr("tree");
+    inst[0].material_count = 1U;
+    inst[1] = inst[0];
+    add(&w, NPH_SCENE_TAG_INSTANCES, 0U, inst, sizeof inst);
+    const NphGuid mat = nph_guid_from_cstr("bark");
+    add(&w, NPH_SCENE_TAG_MATERIALS, 0U, &mat, sizeof mat);
+    add(&w, NPH_SCENE_TAG_STRINGS, 0U, strings, sizeof strings);
+    if (cells) {
+        NphSceneCell c[2];
+        memset(c, 0, sizeof c);
+        c[0].bounds.max = nph_vec3(64.0F, 20.0F, 64.0F);
+        c[0].instance_count = 1U;
+        c[0].proxy = nph_guid_from_cstr("proxy");
+        c[0].proxy_material = mat;
+        c[0].proxy_cell = 0.25F;
+        c[0].proxy_distance = 560.0F;
+        c[1].bounds = c[0].bounds;
+        c[1].instance_offset = 1U;
+        c[1].instance_count = 1U;
+        c[1].proxy_origin = nph_vec3(64.0F, 0.0F, 0.0F);
+        add(&w, NPH_SCENE_TAG_CELLS, 0U, c, sizeof c);
+    }
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, scene_view_resolves_and_checks_cells)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_scene_cells(&ia, NPH_SCENE_TYPE_VERSION, true, 2U);
+    NphSceneView v;
+    NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(v.cell_count, 2U);
+    NTEST_ASSERT_NOT_NULL(v.cells);
+    NTEST_EXPECT_TRUE(nph_guid_equals(v.cells[0].proxy, nph_guid_from_cstr("proxy")));
+    NTEST_EXPECT_EQ_UINT(v.cells[1].instance_offset, 1U);
+    NphSceneCell *c = (NphSceneCell *)blob_bytes(&ia, NPH_SCENE_TAG_CELLS, 0U);
+    // Ranges: overlapping, out of order, past the instances.
+    c[1].instance_offset = 0U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[1].instance_offset = 1U;
+    c[1].instance_count = 2U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[1].instance_count = 1U;
+    c[0].instance_offset = 2U;
+    c[0].instance_count = 0U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[0].instance_offset = 0U;
+    c[0].instance_count = 1U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    // A proxy's cell not a positive power of two, its distance not positive
+    // and finite; bounds or an origin not finite; a reserved word.
+    const f32 bad_cells[3] = {0.3F, -0.25F, 0.0F};
+    for (u32 i = 0; i < 3U; ++i) {
+        c[0].proxy_cell = bad_cells[i];
+        NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    }
+    c[0].proxy_cell = 0.25F;
+    const f32 bad_distances[2] = {0.0F, NPH_F32_INFINITY};
+    for (u32 i = 0; i < 2U; ++i) {
+        c[0].proxy_distance = bad_distances[i];
+        NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    }
+    c[0].proxy_distance = 560.0F;
+    c[0].bounds.min.y = NPH_F32_INFINITY;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[0].bounds.min.y = 0.0F;
+    c[1].proxy_origin.z = NPH_F32_INFINITY;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[1].proxy_origin.z = 0.0F;
+    c[1].reserved[2] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    c[1].reserved[2] = 0U;
+    // A cell without a proxy has no cell or distance to check.
+    c[1].proxy_cell = 0.3F;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+
+    // A count the blob does not hold.
+    build_scene_cells(&ia, NPH_SCENE_TYPE_VERSION, true, 3U);
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    // Version 1: no cells, whatever its reserved word holds; a blob of them
+    // is refused.
+    build_scene_cells(&ia, 1U, false, 7U);
+    NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.cell_count, 0U);
+    NTEST_EXPECT_NULL(v.cells);
+    image_asset_free(&ia);
+    build_scene_cells(&ia, 1U, true, 0U);
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     image_asset_free(&ia);
 }
 
@@ -1134,7 +1386,9 @@ static void check_seed_asset(const char *name, u32 type)
     if (type == NPH_ASSET_TYPE_MESH) {
         NphMeshView v;
         NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
-        NTEST_ASSERT_EQ_UINT(v.header->vertex_count, 3U);
+        // The triangle, or (the proxy's) voxels alone.
+        NTEST_ASSERT_TRUE(v.header->vertex_count == 3U ||
+                          (v.header->vertex_count == 0U && v.voxel_bricks != NULL));
     } else if (type == NPH_ASSET_TYPE_TEXTURE) {
         NphTextureView v;
         NTEST_ASSERT_EQ_INT(nph_texture_view(&ia.asset, &v), NPH_RESULT_OK);
@@ -1146,6 +1400,9 @@ static void check_seed_asset(const char *name, u32 type)
         NphSceneView v;
         NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
         NTEST_ASSERT_TRUE(nph_str_equals(nph_scene_node_name(&v, 1U), NPH_STR("child")));
+        for (u32 k = 0; k < v.cell_count; ++k) {
+            NTEST_ASSERT_NEAR_F32(v.cells[k].proxy_cell, 0.25F, 0.0F);
+        }
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         NphSoundView v;
         NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
@@ -1163,9 +1420,12 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/blob", NPH_ASSET_TYPE_BLOB);
     check_seed_asset("nph/mesh", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_lod", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_voxels", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_proxy", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);
+    check_seed_asset("nph/scene_cells", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);
     check_seed_asset("nph/sound_streamed", NPH_ASSET_TYPE_SOUND);
 

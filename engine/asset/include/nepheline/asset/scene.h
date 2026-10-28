@@ -14,19 +14,29 @@
 //     LGHT  NphSceneLight[light]
 //     STRS  char[string]                NUL-terminated names
 //
+// and, from version 2, the world partition's cells where the cooker made
+// them (ADR-0062):
+//
+//     CELL  NphSceneCell[cell]          a cell's instances, bounds and proxy
+//
 // Nodes are stored parent-before-child (a node's parent index is smaller
-// than its own), so a single forward pass computes world transforms.
+// than its own), so a single forward pass computes world transforms. A
+// cell's instances follow one another in INST, the cells' in turn, the
+// instances in no cell after them.
 //
 // Thread-safety: pure, NPH_THREADSAFE.
 
 #include <nepheline/asset/loader.h>
 #include <nepheline/math/affine.h>
+#include <nepheline/math/geometry.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define NPH_SCENE_TYPE_VERSION 1U
+// 2: the world partition's cells (CELL). Version 1, which has none, still
+// reads.
+#define NPH_SCENE_TYPE_VERSION 2U
 
 #define NPH_SCENE_TAG_HEADER    NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_SCENE_TAG_NODES     NPH_FOURCC('N', 'O', 'D', 'E')
@@ -35,6 +45,7 @@ extern "C" {
 #define NPH_SCENE_TAG_CAMERAS   NPH_FOURCC('C', 'A', 'M', 'S')
 #define NPH_SCENE_TAG_LIGHTS    NPH_FOURCC('L', 'G', 'H', 'T')
 #define NPH_SCENE_TAG_STRINGS   NPH_FOURCC('S', 'T', 'R', 'S')
+#define NPH_SCENE_TAG_CELLS     NPH_FOURCC('C', 'E', 'L', 'L')
 
 #define NPH_SCENE_NO_NODE NPH_U32_MAX
 
@@ -46,7 +57,8 @@ typedef struct NphSceneHeader {
     u32 light_count;
     u32 string_bytes;
     u32 flags;
-    u32 reserved[9];
+    u32 cell_count; // version 2 (reserved, zero, before)
+    u32 reserved[8];
 } NphSceneHeader;
 
 NPH_STATIC_ASSERT(sizeof(NphSceneHeader) == 64U, "the scene header is 64 bytes");
@@ -112,6 +124,27 @@ typedef struct NphSceneLight {
 
 NPH_STATIC_ASSERT(sizeof(NphSceneLight) == 40U, "a light is 40 bytes");
 
+// A cell of the world partition (ADR-0062): a square of the ground plane's
+// static instances, INST[instance_offset, instance_offset + instance_count),
+// their bounds, and the proxy that stands for them from `proxy_distance` out:
+// a mesh asset of voxels alone (render/cell_proxy.h) whose own origin lies
+// at `proxy_origin` (no turn, no scale), its finest level's cell `proxy_cell`;
+// NPH_GUID_NULL where the cell has none. Its one submesh names
+// `proxy_material` (the voxels carry their own look; the instance needs one).
+typedef struct NphSceneCell {
+    NphAABB bounds; // scene space: its instances'
+    u32 instance_offset;
+    u32 instance_count;
+    NphGuid proxy;
+    NphGuid proxy_material;
+    NphVec3 proxy_origin;
+    f32 proxy_cell;
+    f32 proxy_distance;
+    u32 reserved[3]; // zero
+} NphSceneCell;
+
+NPH_STATIC_ASSERT(sizeof(NphSceneCell) == 96U, "a cell is 96 bytes");
+
 typedef struct NphSceneView {
     const NphSceneHeader *header;
     const NphSceneNode *nodes;
@@ -120,11 +153,15 @@ typedef struct NphSceneView {
     const NphSceneCamera *cameras;
     const NphSceneLight *lights;
     const char *strings;
+    const NphSceneCell *cells; // NULL without them
+    u32 cell_count;            // 0 before version 2, whatever its header's word held
 } NphSceneView;
 
 // Resolves and validates a READY scene asset: counts against blobs, node
 // links in range and parents before children, instance and name offsets
-// in range, names terminated.
+// in range, names terminated; the cells' instance ranges in range and in
+// order, none overlapping, their bounds and origins finite, a proxy's cell
+// a positive power of two and its distance positive and finite.
 NPH_MUST_USE NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out);
 
 // The name of node `index`.

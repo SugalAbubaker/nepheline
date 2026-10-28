@@ -52,13 +52,20 @@ static NphResult check_type(const NphAsset *asset, u32 type, u32 version)
 // Mesh
 // ---------------------------------------------------------------------------
 
-// Whether meshlet `i` is a voxel cluster (version 3): a record with no
-// vertices above level 0 of a mesh with levels. `lh` NULL: no levels.
-static bool voxel_cluster(const NphAsset *asset, const NphMeshLodHeader *lh, const NphMeshlet *m,
-                          u32 i)
+// Whether the mesh is voxels alone (version 4): no vertices, no indices.
+static bool voxels_alone(const NphAsset *asset, const NphMeshHeader *h)
 {
-    return lh != NULL && asset->header.type_version >= 3U && i >= lh->level0_meshlets &&
-           m->vertex_count == 0U;
+    return asset->header.type_version >= 4U && h->vertex_count == 0U && h->index_count == 0U;
+}
+
+// Whether meshlet `i` is a voxel cluster (version 3): a record with no
+// vertices above level 0 of a mesh with levels, or at any level of a mesh of
+// voxels alone (version 4). `lh` NULL: no levels.
+static bool voxel_cluster(const NphAsset *asset, const NphMeshHeader *h, const NphMeshLodHeader *lh,
+                          const NphMeshlet *m, u32 i)
+{
+    return lh != NULL && asset->header.type_version >= 3U && m->vertex_count == 0U &&
+           (i >= lh->level0_meshlets || voxels_alone(asset, h));
 }
 
 static u32 popcount32(u32 v)
@@ -174,7 +181,7 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXELS, 0U, sizeof(NphMeshVoxel), lh->voxel_count, &p));
     const NphMeshVoxel *voxels = (const NphMeshVoxel *)p;
     for (u32 i = 0; i < h->meshlet_count; ++i) {
-        if (voxel_cluster(asset, lh, &meshlets[i], i)) {
+        if (voxel_cluster(asset, h, lh, &meshlets[i], i)) {
             NPH_TRY(mesh_voxels(lh, &meshlets[i], bricks, voxels));
         }
     }
@@ -280,7 +287,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     }
     for (u32 i = 0; i < h->meshlet_count; ++i) {
         const NphMeshlet *m = &meshlets[i];
-        if (voxel_cluster(asset, lh, m, i)) {
+        if (voxel_cluster(asset, h, lh, m, i)) {
             if (m->submesh >= h->submesh_count) {
                 return NPH_RESULT_CORRUPT;
             }
@@ -452,11 +459,55 @@ void nph_material_header_default(NphMaterialHeader *out)
 // Scene
 // ---------------------------------------------------------------------------
 
+static bool finite_f32(f32 x)
+{
+    u32 bits = 0U;
+    memcpy(&bits, &x, sizeof bits);
+    return finite_bits(bits);
+}
+
+// The cells (version 2): their instance ranges in range, in order, and
+// apart; their bounds and origins finite; a proxy's cell a positive normal
+// power of two and its distance positive and finite; the reserved words
+// zero.
+static NphResult scene_cells(const NphSceneHeader *h, const NphSceneCell *cells)
+{
+    u32 next = 0U;
+    for (u32 i = 0; i < h->cell_count; ++i) {
+        const NphSceneCell *c = &cells[i];
+        if (c->instance_offset < next || c->instance_offset > h->instance_count ||
+            c->instance_count > h->instance_count - c->instance_offset || c->reserved[0] != 0U ||
+            c->reserved[1] != 0U || c->reserved[2] != 0U) {
+            return NPH_RESULT_CORRUPT;
+        }
+        next = c->instance_offset + c->instance_count;
+        const f32 values[9] = {c->bounds.min.x,   c->bounds.min.y,   c->bounds.min.z,
+                               c->bounds.max.x,   c->bounds.max.y,   c->bounds.max.z,
+                               c->proxy_origin.x, c->proxy_origin.y, c->proxy_origin.z};
+        for (u32 k = 0; k < 9U; ++k) {
+            if (!finite_f32(values[k])) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+        if (nph_guid_is_null(c->proxy)) {
+            continue;
+        }
+        u32 cell = 0U;
+        memcpy(&cell, &c->proxy_cell, sizeof cell);
+        const u32 exponent = (cell >> 23U) & 0xFFU;
+        if ((cell & 0x807FFFFFU) != 0U || exponent == 0U || exponent == 0xFFU ||
+            !finite_f32(c->proxy_distance) || !(c->proxy_distance > 0.0F)) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out)
 {
     NPH_ASSERT(out != NULL);
     memset(out, 0, sizeof *out);
-    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_SCENE, NPH_SCENE_TYPE_VERSION));
+    NPH_TRY(check_versions(asset, NPH_ASSET_TYPE_SCENE, 1U, NPH_SCENE_TYPE_VERSION));
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_SCENE_TAG_HEADER, 0U, sizeof(NphSceneHeader), 1U, &p));
     const NphSceneHeader *h = (const NphSceneHeader *)p;
@@ -504,6 +555,17 @@ NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out)
             return NPH_RESULT_CORRUPT;
         }
     }
+    // The cells, from version 2 (before, their count was reserved and no
+    // blob of theirs was written).
+    const NphSceneCell *cells = NULL;
+    if (asset->header.type_version >= 2U) {
+        NPH_TRY(
+            typed_blob(asset, NPH_SCENE_TAG_CELLS, 0U, sizeof(NphSceneCell), h->cell_count, &p));
+        cells = (const NphSceneCell *)p;
+        NPH_TRY(scene_cells(h, cells));
+    } else if (nph_asset_blob(asset, NPH_SCENE_TAG_CELLS, 0U) != NULL) {
+        return NPH_RESULT_CORRUPT;
+    }
     out->header = h;
     out->nodes = nodes;
     out->instances = instances;
@@ -511,6 +573,8 @@ NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out)
     out->cameras = cameras;
     out->lights = lights;
     out->strings = strings;
+    out->cells = cells;
+    out->cell_count = cells != NULL ? h->cell_count : 0U;
     return NPH_RESULT_OK;
 }
 

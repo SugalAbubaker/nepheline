@@ -43,6 +43,11 @@
 // cell size; each brick's voxels are VOXA[first_voxel, first_voxel + its
 // mask's bits), the next brick's following them.
 //
+// From version 4, a mesh may be voxels alone (a world partition cell's
+// proxy, render/cell_proxy.h; ADR-0062): no vertices and no indices (POSN,
+// ATTR, INDX, MLVX and MLTR empty or absent), every meshlet a voxel cluster,
+// level 0's too, and one submesh of no indices whose meshlets are level 0's.
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -68,8 +73,9 @@ extern "C" {
 #endif
 
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
-// in the levels (VOXB, VOXA). Versions 1 and 2, which have none, still read.
-#define NPH_MESH_TYPE_VERSION 3U
+// in the levels (VOXB, VOXA). 4: meshes of voxels alone. Versions 1 to 3,
+// which have none of what came after them, still read.
+#define NPH_MESH_TYPE_VERSION 4U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
