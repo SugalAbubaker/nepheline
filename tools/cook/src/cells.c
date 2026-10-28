@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // The world partition's cells and their proxies (cook/cells.h; ADR-0062).
-#include <cook/cells.h>
-
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/math/scalar.h>
 
+#include <cook/cells.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,10 +106,10 @@ NphResult cook_cells_partition(const CookCellInstance *instances, u32 count, f32
             c.bounds = nph_aabb_empty();
             for (u32 k = i; k < j; ++k) {
                 const NphSphere sp = instances[placed.data[k].instance].sphere;
-                c.bounds = nph_aabb_expand(c.bounds, nph_vec3_sub(sp.center,
-                                                                  nph_vec3_splat(sp.radius)));
-                c.bounds = nph_aabb_expand(c.bounds, nph_vec3_add(sp.center,
-                                                                  nph_vec3_splat(sp.radius)));
+                c.bounds =
+                    nph_aabb_expand(c.bounds, nph_vec3_sub(sp.center, nph_vec3_splat(sp.radius)));
+                c.bounds =
+                    nph_aabb_expand(c.bounds, nph_vec3_add(sp.center, nph_vec3_splat(sp.radius)));
             }
             r = NPH_ARRAY_PUSH(cells, c);
         }
@@ -187,10 +186,10 @@ NphResult cook_cell_proxy(const CookCellProxyInput *in, NphRenderClusterLods *ou
     // The block of 3 x 3 squares round it, from an edge below its instances
     // to an edge above.
     NphAABB block;
-    block.min = nph_vec3((f32)(cell->x - 1) * edge, cell->bounds.min.y - edge,
-                         (f32)(cell->z - 1) * edge);
-    block.max = nph_vec3((f32)(cell->x + 2) * edge, cell->bounds.max.y + edge,
-                         (f32)(cell->z + 2) * edge);
+    block.min =
+        nph_vec3((f32)(cell->x - 1) * edge, cell->bounds.min.y - edge, (f32)(cell->z - 1) * edge);
+    block.max =
+        nph_vec3((f32)(cell->x + 2) * edge, cell->bounds.max.y + edge, (f32)(cell->z + 2) * edge);
     NPH_ARRAY(NphRenderProxyInstance) own;
     NPH_ARRAY(NphRenderProxyInstance) occluders;
     NPH_ARRAY_INIT(&own, a);
@@ -258,7 +257,8 @@ NPH_STATIC_ASSERT(sizeof(NphMeshletBounds) == sizeof(NphRenderMeshletBounds),
                   "a cluster's bounds are a meshlet's");
 NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod),
                   "a cluster's level record is the renderer's");
-NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup), "a group is the renderer's");
+NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup),
+                  "a group is the renderer's");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode), "a node is the renderer's");
 NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick),
                   "a brick is the renderer's");
@@ -274,8 +274,8 @@ NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *wr
     }
     // The bounds: the clusters' spheres'.
     NphAABB bounds = nph_aabb_empty();
-    NphSphere sphere = nph_sphere(proxy->clusters.bounds.data[0].center,
-                                  proxy->clusters.bounds.data[0].radius);
+    NphSphere sphere =
+        nph_sphere(proxy->clusters.bounds.data[0].center, proxy->clusters.bounds.data[0].radius);
     for (u32 c = 0; c < n; ++c) {
         const NphRenderMeshletBounds *b = &proxy->clusters.bounds.data[c];
         bounds = nph_aabb_expand(bounds, nph_vec3_sub(b->center, nph_vec3_splat(b->radius)));
@@ -306,24 +306,21 @@ NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *wr
                                       NPH_ASSET_CODEC_NONE, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub,
                                       NPH_ASSET_CODEC_NONE, 0U));
-    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLETS, 0U,
-                                      proxy->clusters.meshlets.data,
-                                      NPH_ARRAY_BYTES(&proxy->clusters.meshlets),
-                                      NPH_ASSET_CODEC_LZ, 0U));
-    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLET_BOUNDS, 0U,
-                                      proxy->clusters.bounds.data,
-                                      NPH_ARRAY_BYTES(&proxy->clusters.bounds), NPH_ASSET_CODEC_LZ,
-                                      0U));
+    NPH_TRY(nph_asset_writer_add_blob(
+        writer, NPH_MESH_TAG_MESHLETS, 0U, proxy->clusters.meshlets.data,
+        NPH_ARRAY_BYTES(&proxy->clusters.meshlets), NPH_ASSET_CODEC_LZ, 0U));
+    NPH_TRY(nph_asset_writer_add_blob(
+        writer, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, proxy->clusters.bounds.data,
+        NPH_ARRAY_BYTES(&proxy->clusters.bounds), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh,
                                       NPH_ASSET_CODEC_NONE, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_CLUSTERS, 0U, proxy->lods.data,
                                       NPH_ARRAY_BYTES(&proxy->lods), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_GROUPS, 0U, proxy->groups.data,
                                       NPH_ARRAY_BYTES(&proxy->groups), NPH_ASSET_CODEC_LZ, 0U));
-    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_MEMBERS, 0U,
-                                      proxy->group_clusters.data,
-                                      NPH_ARRAY_BYTES(&proxy->group_clusters), NPH_ASSET_CODEC_LZ,
-                                      0U));
+    NPH_TRY(
+        nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_MEMBERS, 0U, proxy->group_clusters.data,
+                                  NPH_ARRAY_BYTES(&proxy->group_clusters), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, proxy->nodes.data,
                                       NPH_ARRAY_BYTES(&proxy->nodes), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, proxy->bricks.data,

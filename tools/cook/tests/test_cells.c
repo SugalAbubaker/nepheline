@@ -11,7 +11,6 @@
 
 #include <cook/cells.h>
 #include <cook/cooker.h>
-
 #include <math.h>
 
 // ---------------------------------------------------------------------------
@@ -37,12 +36,12 @@ NTEST(cells, the_partition_places_instances_by_their_centres)
 {
     NphAllocator *a = nph_allocator_system();
     const CookCellInstance instances[6] = {
-        placed_at(1.0F, 0.0F, 1.0F, 1.0F, true),   // square (0, 0)
-        placed_at(-1.0F, 0.0F, 1.0F, 1.0F, true),  // (-1, 0)
-        placed_at(9.0F, 5.0F, -3.0F, 2.0F, true),  // (1, -1)
-        placed_at(3.0F, 0.0F, 3.0F, 1.0F, true),   // (0, 0)
-        placed_at(0.0F, 0.0F, 0.0F, 5.0F, true),   // past half the edge: none
-        placed_at(2.0F, 0.0F, 2.0F, 1.0F, false),  // does not voxelize: none
+        placed_at(1.0F, 0.0F, 1.0F, 1.0F, true),  // square (0, 0)
+        placed_at(-1.0F, 0.0F, 1.0F, 1.0F, true), // (-1, 0)
+        placed_at(9.0F, 5.0F, -3.0F, 2.0F, true), // (1, -1)
+        placed_at(3.0F, 0.0F, 3.0F, 1.0F, true),  // (0, 0)
+        placed_at(0.0F, 0.0F, 0.0F, 5.0F, true),  // past half the edge: none
+        placed_at(2.0F, 0.0F, 2.0F, 1.0F, false), // does not voxelize: none
     };
     NphArrayU32 order;
     CookCellArray cells;
@@ -137,12 +136,13 @@ static void write_grove(const char *path)
         const NphVec3 b = nph_vec3_cross(axis, t);
         const u32 base = pos.len / 3U;
         for (u32 end = 0; end < 2U; ++end) {
-            const NphVec3 at =
-                nph_vec3_add(nph_vec3(c[0], c[1], c[2]), nph_vec3_scale(axis, end == 0U ? -0.15F : 0.15F));
+            const NphVec3 at = nph_vec3_add(nph_vec3(c[0], c[1], c[2]),
+                                            nph_vec3_scale(axis, end == 0U ? -0.15F : 0.15F));
             for (u32 k = 0; k < 3U; ++k) {
                 const f32 phi = 2.0F * NPH_PI * (f32)k / 3.0F;
-                const NphVec3 p = nph_vec3_add(at, nph_vec3_add(nph_vec3_scale(t, 0.01F * nph_f32_cos(phi)),
-                                                                nph_vec3_scale(b, 0.01F * nph_f32_sin(phi))));
+                const NphVec3 p =
+                    nph_vec3_add(at, nph_vec3_add(nph_vec3_scale(t, 0.01F * nph_f32_cos(phi)),
+                                                  nph_vec3_scale(b, 0.01F * nph_f32_sin(phi))));
                 NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.x));
                 NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.y));
                 NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.z));
@@ -155,7 +155,7 @@ static void write_grove(const char *path)
         NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&idx, q, 24U));
     }
     // The ground: a quad from -12 to 28 on x and z.
-    const f32 ground[12] = {-12.0F, 0.0F, -12.0F, 28.0F, 0.0F, -12.0F,
+    const f32 ground[12] = {-12.0F, 0.0F, -12.0F, 28.0F,  0.0F, -12.0F,
                             28.0F,  0.0F, 28.0F,  -12.0F, 0.0F, 28.0F};
     const u32 ground_idx[6] = {0U, 2U, 1U, 0U, 3U, 2U};
     const u64 tuft_pos = (u64)pos.len * 4U;
@@ -176,8 +176,8 @@ static void write_grove(const char *path)
         lo[i % 3U] = nph_f32_min(lo[i % 3U], pos.data[i]);
         hi[i % 3U] = nph_f32_max(hi[i % 3U], pos.data[i]);
     }
-    static const f32 at[8][2] = {{2.0F, 2.0F},   {5.0F, 5.0F},   {10.0F, 2.0F}, {13.0F, 6.0F},
-                                 {2.0F, 10.0F},  {6.0F, 13.0F},  {10.0F, 10.0F}, {14.0F, 14.0F}};
+    static const f32 at[8][2] = {{2.0F, 2.0F},  {5.0F, 5.0F},  {10.0F, 2.0F},  {13.0F, 6.0F},
+                                 {2.0F, 10.0F}, {6.0F, 13.0F}, {10.0F, 10.0F}, {14.0F, 14.0F}};
     NphStrBuilder sb;
     nph_sb_init(&sb, a);
     NTEST_ASSERT_EQ_INT(nph_sb_append_cstr(&sb, "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
@@ -185,8 +185,9 @@ static void write_grove(const char *path)
                                                 "\"nodes\":["),
                         NPH_RESULT_OK);
     for (u32 i = 0; i < 8U; ++i) {
-        NTEST_ASSERT_EQ_INT(nph_sb_appendf(&sb, "{\"mesh\":0,\"translation\":[%g,1,%g],\"rotation\":"
-                                                "[0,%g,0,%g]},",
+        NTEST_ASSERT_EQ_INT(nph_sb_appendf(&sb,
+                                           "{\"mesh\":0,\"translation\":[%g,1,%g],\"rotation\":"
+                                           "[0,%g,0,%g]},",
                                            (f64)at[i][0], (f64)at[i][1], sin(0.35 * (f64)i),
                                            cos(0.35 * (f64)i)),
                             NPH_RESULT_OK);
@@ -195,16 +196,19 @@ static void write_grove(const char *path)
         nph_sb_appendf(
             &sb,
             "{\"mesh\":1}],\"meshes\":[{\"name\":\"tuft\",\"primitives\":[{\"attributes\":{"
-            "\"POSITION\":0},\"indices\":1}]},{\"name\":\"ground\",\"primitives\":[{\"attributes\":{"
+            "\"POSITION\":0},\"indices\":1}]},{\"name\":\"ground\",\"primitives\":[{\"attributes\":"
+            "{"
             "\"POSITION\":2},\"indices\":3}]}],\"accessors\":["
-            "{\"bufferView\":0,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\",\"min\":[%g,%g,"
+            "{\"bufferView\":0,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\",\"min\":[%g,%"
+            "g,"
             "%g],\"max\":[%g,%g,%g]},"
             "{\"bufferView\":1,\"componentType\":5125,\"count\":%u,\"type\":\"SCALAR\"},"
             "{\"bufferView\":2,\"componentType\":5126,\"count\":4,\"type\":\"VEC3\",\"min\":[-12,0,"
             "-12],\"max\":[28,0,28]},"
             "{\"bufferView\":3,\"componentType\":5125,\"count\":6,\"type\":\"SCALAR\"}],"
             "\"bufferViews\":[{\"buffer\":0,\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":%llu,"
-            "\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":48},{\"buffer\":0,"
+            "\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":48},{\"buffer\":"
+            "0,"
             "\"byteOffset\":%llu,\"byteLength\":24}],\"buffers\":[{\"byteLength\":%llu,\"uri\":"
             "\"data:application/octet-stream;base64,%s\"}]}",
             pos.len / 3U, (f64)lo[0], (f64)lo[1], (f64)lo[2], (f64)hi[0], (f64)hi[1], (f64)hi[2],
