@@ -159,6 +159,31 @@ NTEST(pcg32, floats_and_helpers)
     }
 }
 
+// A vector's coordinates are the stream's next draws in order, x first, so
+// the same seed makes the same point with every compiler (whatever order it
+// evaluates a call's arguments in).
+NTEST(pcg32, vectors_draw_their_coordinates_in_order)
+{
+    NphPcg32 a;
+    NphPcg32 b;
+    nph_pcg32_seed(&a, 42U, 54U);
+    nph_pcg32_seed(&b, 42U, 54U);
+    for (u32 i = 0; i < 100U; ++i) {
+        const NphVec2 v2 = nph_pcg32_next_vec2(&a);
+        const f32 x2 = nph_pcg32_next_f32(&b);
+        const f32 y2 = nph_pcg32_next_f32(&b);
+        NTEST_ASSERT_ULP_F32(v2.x, x2, 0U);
+        NTEST_ASSERT_ULP_F32(v2.y, y2, 0U);
+        const NphVec3 v3 = nph_pcg32_next_vec3(&a);
+        const f32 x3 = nph_pcg32_next_f32(&b);
+        const f32 y3 = nph_pcg32_next_f32(&b);
+        const f32 z3 = nph_pcg32_next_f32(&b);
+        NTEST_ASSERT_ULP_F32(v3.x, x3, 0U);
+        NTEST_ASSERT_ULP_F32(v3.y, y3, 0U);
+        NTEST_ASSERT_ULP_F32(v3.z, z3, 0U);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Low-discrepancy sequences
 // ---------------------------------------------------------------------------
