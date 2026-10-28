@@ -22,8 +22,10 @@ every file it takes with its md5: `fetch` downloads them into
 DIR/<name>/assets/<asset>/ (a file already there with its md5 is kept, a
 download that does not match is refused), then lays the scene out with the
 manifest's generator (scripts/landscape.py). `cook` runs the cooker on the
-manifest's document, packing what it cooked; a second cook only redoes what
-changed. No names: every manifest.
+manifest's document with the manifest's cooker options (`cook`: `voxels`,
+nph_cook --voxels), packing what it cooked; a second cook only redoes what
+changed (the cooker's settings are in its outputs' hashes). No names: every
+manifest.
 """
 
 import argparse
@@ -138,6 +140,19 @@ def fetch(m, root):
     print(f"{m['name']}: licence: {m.get('license', '(see the manifest)')}")
 
 
+# The cooker options a manifest may ask for (its `cook` object) and the
+# nph_cook flag each turns on.
+COOK_OPTIONS = {"voxels": "--voxels"}
+
+
+def cook_flags(m):
+    options = m.get("cook", {})
+    unknown = sorted(set(options) - set(COOK_OPTIONS))
+    if unknown:
+        sys.exit(f"{m['name']}: unknown cook options {unknown} (known: {sorted(COOK_OPTIONS)})")
+    return [COOK_OPTIONS[k] for k in sorted(options) if options[k]]
+
+
 def cook(m, root, cooker):
     path = os.path.join(root, m["name"])
     document = os.path.join(path, m["source"]["document"])
@@ -145,8 +160,9 @@ def cook(m, root, cooker):
         sys.exit(f"{m['name']}: {document} is missing (run `fetch` first)")
     out = os.path.join(root, "cooked", m["name"])
     pack = os.path.join(root, m["pack"])
-    print(f"{m['name']}: cooking {document} into {pack}")
-    r = subprocess.run([cooker, document, "--root", path, "-o", out, "--pack", pack])
+    flags = cook_flags(m)
+    print(f"{m['name']}: cooking {document} into {pack}" + (f" ({' '.join(flags)})" if flags else ""))
+    r = subprocess.run([cooker, document, "--root", path, "-o", out, "--pack", pack] + flags)
     if r.returncode != 0:
         sys.exit(f"{m['name']}: the cooker failed ({r.returncode})")
 

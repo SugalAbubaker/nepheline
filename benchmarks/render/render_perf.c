@@ -31,13 +31,16 @@
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
-//                 [--debug-view=NAME] [--reference-only] [--lod-error=PX]
+//                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
-// the hybrid raster's split. --lod-error sets the reference scenes'
-// NphRenderView.lod_error (0: every mesh at level 0), for comparing a
-// scene with its levels of detail and without.
+// the hybrid raster's split. --lists=N (a power of two up to 16) makes
+// every list of the production path and the shadow map that can drop work
+// N times its default, for what a scene that overflows them needs (its
+// results then do not compare with the budgets). --lod-error sets the
+// reference scenes' NphRenderView.lod_error (0: every mesh at level 0), for
+// comparing a scene with its levels of detail and without.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -425,6 +428,7 @@ NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT -
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
 static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
+static u32 g_lists = 1U;         // --lists: the production path's list capacities, times this
 
 typedef struct Result {
     char name[128];
@@ -1470,9 +1474,9 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
         }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
-                   "caster draws %u (and %u of voxel clusters)%s\n",
+                   "caster draws %u (and %u of voxel clusters); resolution bias %u%s\n",
                    st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
-                   st->vsm_draws, st->vsm_voxel_draws,
+                   st->vsm_draws, st->vsm_voxel_draws, st->vsm_lod_bias,
                    st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
         }
         if (st->shadow_blas_bytes != 0U) {
@@ -1968,6 +1972,18 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
     // holds 262,144).
     rd.max_deferred = 1U << 20U;
+    if (g_lists > 1U) {
+        // Every list that can drop work, larger (the renderer clamps them to
+        // what its records can address): what a scene that overflows the
+        // defaults needs.
+        rd.max_visible_clusters = 524288U * g_lists;
+        rd.max_cull_meshlets = (1U << 20U) * g_lists;
+        rd.max_deferred = (1U << 20U) * g_lists;
+        rd.max_lod_nodes = (1U << 18U) * g_lists;
+        rd.max_vsm_meshlets = (1U << 20U) * g_lists;
+        rd.max_vsm_draws = (1U << 20U) * g_lists;
+        rd.max_vsm_voxel_draws = (1U << 20U) * g_lists;
+    }
     if (sw_pixels >= 0.0) {
         // Zero would pick the default: none goes through the view's flag.
         rd.sw_raster_pixels = (f32)sw_pixels;
@@ -2022,7 +2038,7 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
-                    "[--lod-error=PX]\n");
+                    "[--lod-error=PX] [--lists=N]\n");
     return 2;
 }
 
@@ -2054,6 +2070,11 @@ int main(int argc, char **argv)
             sw_pixels = strtod(argv[i] + 12, NULL);
         } else if (strncmp(argv[i], "--lod-error=", 12U) == 0) {
             g_lod_error = (f32)strtod(argv[i] + 12, NULL);
+        } else if (strncmp(argv[i], "--lists=", 8U) == 0) {
+            g_lists = (u32)strtoul(argv[i] + 8, NULL, 10);
+            if (g_lists == 0U || g_lists > 16U || (g_lists & (g_lists - 1U)) != 0U) {
+                return usage();
+            }
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {

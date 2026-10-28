@@ -245,13 +245,16 @@ targets: like the reference renderer's scenes, they carry no budget.
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
+            [--lod-error=PX] [--lists=N]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
 are third-party content, kept outside the repository: a manifest in
 `benchmarks/scenes/` pins each one's source (a git repository and commit,
 its document, its licence and attribution), names its cooked pack and
-scene, its exposure (`ev100`), its sky (`sky_intensity`, scaling the
+scene, the cooker's options it needs (`cook`: `voxels` for the voxel levels
+of aggregate geometry, ADR-0061, which the landscape's foliage asks for),
+its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
 own sun), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
 and a game's would), and its views (the scene's own camera, or an eye and
@@ -268,7 +271,10 @@ the production path with the runtime's defaults, lit by the scene's own
 lights (the synthetic scenes' sun is removed). `--capture-dir` writes
 each one's last frame there as a BMP. `--debug-view` renders them as one
 of the renderer's debug views (base colour, normals, roughness, ...) to
-look at the content, under names no budget matches. Without the packs
+look at the content, under names no budget matches. `--lists=N` makes
+every list of the production path and the shadow map that can drop work N
+times its default (a power of two up to 16): what a scene that overflows
+them needs, in results no budget compares. Without the packs
 those scenes are skipped with a message, so the budgets of a machine
 without them are those of the synthetic scenes alone. The CTest smoke
 run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,
@@ -285,8 +291,9 @@ seed: Poisson-disk scatters (Bridson 2007) masked for clearings and kept
 off the trail. The same manifest lays out the same scene. Only modelled,
 opaque assets are used: the collection's fir tree, grass, ferns, and moss
 are alpha-blended or alpha-tested cards, which the first game's forest
-does not have (ADR-0059). The cook takes 20 minutes (the pines' 17
-million triangles most of it) and makes a 1.2 GB pack.
+does not have (ADR-0059). Cooked with voxels, it takes 6 minutes on the
+cooker's job system (3.5 of them the textures' encoding; 20 on one thread)
+and makes a 1.19 GB pack.
 
 The RTX 3060 Ti runner measures them nightly, not on pull requests (the
 user's decision, ADR-0040). `.github/workflows/gpu-perf.yml`, when
