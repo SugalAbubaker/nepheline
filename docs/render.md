@@ -757,9 +757,14 @@ smallest power of two at least twice the error so far whose cells the
 triangles overlap at most four times their count (a stalled level's error
 is its finest pieces', so halving its primitives would jump the error, and
 every distance between would draw the stalled triangles); coarser voxel
-groups take at least twice their inputs' cell and at most half their
-inputs' primitives (a group of a few voxels across the mesh's origin as few
-as it can have: the grid of every cell size divides each axis at zero, so
+groups take at least their coarsest input's cell and twice their finest's,
+and at most half their inputs' primitives: a group of one cell doubles it,
+and one whose parts became voxels at different levels brings the fine ones
+to the coarse ones' cell where that halves them (twice the coarsest cell
+raised every part's error to it, and kept the fine parts' finer clusters in
+cuts out to that error: a pine's cut at a metre held 163 clusters where it
+now holds 38). (A group of a few voxels across the mesh's origin takes as
+few as it can have: the grid of every cell size divides each axis at zero, so
 it lies in two cells along each axis it crosses however large they grow;
 the pine sapling's trunk stands there). A voxel group's error is its cell.
 Every voxel level is made again from the triangles where they first became

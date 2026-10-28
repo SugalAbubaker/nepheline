@@ -1613,12 +1613,13 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
     NPH_ARRAY_INIT(&source_cell, a);
     LodVoxelCellArray cells;
     NPH_ARRAY_INIT(&cells, a);
-    // Its clusters' spheres and errors, and its voxel clusters' cell and
-    // voxels (ADR-0061).
+    // Its clusters' spheres and errors, and its voxel clusters' cells (the
+    // coarsest and the finest) and voxels (ADR-0061).
     NphResult r = NPH_RESULT_OK;
     f32 error = 0.0F;
     bool voxel_in = false;
     f64 cell_in = 0.0;
+    f64 cell_in_fine = NPH_F64_MAX;
     u32 voxels_in = 0U;
     for (u32 i = 0; i < count && r == NPH_RESULT_OK; ++i) {
         r = NPH_ARRAY_PUSH(&hull_parts, b->own_sphere.data[cl[i]]);
@@ -1626,6 +1627,7 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
         if (is_voxel_cluster(&out->clusters.meshlets.data[cl[i]])) {
             voxel_in = true;
             cell_in = nph_f64_max(cell_in, (f64)b->cell_of.data[cl[i]]);
+            cell_in_fine = nph_f64_min(cell_in_fine, (f64)b->cell_of.data[cl[i]]);
             voxels_in += cluster_voxels(b, cl[i]);
         }
     }
@@ -1713,10 +1715,16 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
             }
         }
     } else if (r == NPH_RESULT_OK) {
-        // Coarser voxels: at least twice the inputs' cell, at most half
-        // the inputs' primitives.
+        // Coarser voxels: at least the coarsest input's cell and twice the
+        // finest's, at most half the inputs' primitives. A group of voxels of
+        // one cell doubles it; one mixing sizes (its parts became voxels at
+        // different levels) brings the fine ones to the coarse ones' cell
+        // where that halves them, rather than to twice it, which raised
+        // every part's error to twice the coarsest's and so kept the fine
+        // parts' finer clusters in cuts out to that error (ADR-0061).
         const u64 budget = nph_max_u64(((u64)tris + voxels_in) / 2U, 1U);
-        r = voxel_cell(&vin, 2.0 * cell_in, (u32)nph_min_u64(budget, NPH_U32_MAX), &cell);
+        r = voxel_cell(&vin, nph_f64_max(2.0 * cell_in_fine, cell_in),
+                       (u32)nph_min_u64(budget, NPH_U32_MAX), &cell);
     }
     if (r == NPH_RESULT_OK && voxels) {
         r = NPH_ARRAY_RESIZE(&source_cell, nph_max_u32(group_sources.len, 1U));

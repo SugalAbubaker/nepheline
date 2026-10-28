@@ -630,3 +630,55 @@ levels quarter a level where the triangles halved. `COOK_MESH_VERSION` 4.
   400 small closed blobs, whose triangles halve as their error nears their radius,
   become voxels at level 4, where the triangles alone have not stalled; without the
   rule they became voxels a level later, at the stall, and the test fails.
+
+## Amendment (2026-10-28): a voxel group of two cell sizes coarsens its fine voxels first
+
+**Context.** A voxel group's cell was at least twice its input voxels' coarsest cell.
+Where a group's parts became voxels at different levels (a pine's needles stall at
+once, its twigs a few levels later), the group took twice the coarse part's cell for
+all of them: every part's error rose to that, and the fine part's finer clusters stayed
+in every cut out to it. The cooker's new cut log (`nph_cook --verbose`, each cut at a
+power-of-two error) shows the cost: the pine's largest mesh still drew 163 clusters
+(5,693 voxels and 1,808 triangles) at an error of a metre, a pixel at about 2 km, and
+its single root cluster came only at 32 m.
+
+**Decision.** A voxel group's cell is at least its coarsest input's and twice its
+finest's, and at most half its inputs' primitives, as before: a group of one cell
+doubles it; a group mixing sizes brings the fine voxels to the coarse ones' cell where
+that halves them. A group's error is still the largest of its cell and its makers'
+errors, so errors never fall going up, and every part still coarsens or keeps its
+cell. `COOK_MESH_VERSION` 5.
+
+**Alternatives considered.**
+
+- *Grouping clusters of one cell together* (the partition weighs shared positions and
+  distance alone): it would keep groups from mixing at all, and is the deeper change;
+  the rule above is what the groups that do mix need either way.
+- *A cell of its own for each part of a group:* a group's output would no longer be
+  one level of one cell, which the cut and the raster assume.
+
+**Consequences.**
+
+- The pine's largest mesh, its cuts by error: 2,939 clusters at 12.5 cm become 1,335;
+  945 at 25 cm become 315 (voxels 42,844 to 24,865); 394 at 50 cm become 88; 163 at a
+  metre become 38; its root comes at 4 m (24 voxels) where it came at 32 m (4).
+- The landscape recooked (31 meshes, 210 s) and measured in the forest view with every
+  list sixteen times its default, which neither cook overflows: the frame falls from
+  80.7 to 64.7 ms; its clusters from 7.33 to 5.44 million, voxel clusters from 3.00 to
+  1.60 million, bricks from 34.8 to 24.0 million, triangles from 172.5 to 155.3
+  million. Its image differs by 0.86 of 255 on average (0.45 % of pixels by more than
+  8), as much as two runs' temporal state differs. With the default lists, or eight
+  times them, both cooks overflow the visible-cluster list, so those runs compare
+  nothing.
+- The synthetic scenes, whose shrubs' levels are built at start (interleaved, three
+  rounds): `foliage_shadows_sun_4k_production` -0.113 ms (the voxel casters' splat
+  -0.055), the others within 0.005 ms; their voxel clusters 1 % fewer.
+- Open, on this evidence: the needles' triangles at middle distances (155 million in
+  the forest view) are now the larger cost, ahead of the far field's voxels; groups
+  still mix cells; and the far field's floor of a cluster or more a tree remains the
+  HLOD cells' to lower.
+- Test (`test_voxel.c`, `a_group_of_two_cell_sizes_takes_the_coarser_where_that_halves_it`):
+  needles and blobs sharing a cube, whose parts become voxels at different levels;
+  every voxel group's cell is at least its coarsest input's and twice its finest's,
+  and of the 15 groups that mix cell sizes, 5 stop below twice the coarser. With the
+  old rule none of 13 does, and the test fails.

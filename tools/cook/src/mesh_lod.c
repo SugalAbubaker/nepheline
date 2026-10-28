@@ -61,12 +61,21 @@ NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
 // Each level's clusters (voxel ones apart), triangles, voxels and their
 // cells, and the errors of the groups that made them, a debug log line a
 // level (nph_cook --verbose): where a mesh's levels stop shrinking, or jump.
-// Shipping compiles DEBUG lines out, and the counting with them.
+// Then what a view drawing the mesh at each power-of-two error draws of it
+// (log_cuts): where the far cuts stay large. Shipping compiles DEBUG lines
+// out, and the counting with them.
 #if NPH_CONFIG_SHIPPING
 static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
 {
     (void)mesh;
     (void)l;
+}
+
+static void log_cuts(const CookMesh *mesh, const NphRenderClusterLods *l, NphAllocator *alloc)
+{
+    (void)mesh;
+    (void)l;
+    (void)alloc;
 }
 #else
 static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
@@ -122,6 +131,49 @@ static void log_levels(const CookMesh *mesh, const NphRenderClusterLods *l)
                       (unsigned long long)voxels, (f64)cell_lo, (f64)cell_hi, (f64)error_lo,
                       (f64)error_hi);
     }
+}
+
+static void log_cuts(const CookMesh *mesh, const NphRenderClusterLods *l, NphAllocator *alloc)
+{
+    if (!NPH_LOG_ENABLED(&NPH_LOG_COOK, NPH_LOG_LEVEL_DEBUG)) {
+        return;
+    }
+    NphArrayU32 table;
+    NPH_ARRAY_INIT(&table, alloc);
+    i32 exp0 = 0;
+    u32 count = 0U;
+    if (nph_render_lod_cuts(l->lods.data, l->lods.len, l->groups.data, l->groups.len,
+                            NPH_RENDER_LOD_MAX_CUT_ENTRIES, &exp0, &count,
+                            &table) == NPH_RESULT_OK) {
+        for (u32 i = 0; i < count; ++i) {
+            u32 clusters = 0U;
+            u32 voxel_clusters = 0U;
+            u64 triangles = 0U;
+            u64 bricks = 0U;
+            u64 voxels = 0U;
+            for (u32 e = table.data[i]; e < table.data[i + 1U]; ++e) {
+                const NphRenderMeshlet *m = &l->clusters.meshlets.data[table.data[e]];
+                ++clusters;
+                if (m->vertex_count == 0U) {
+                    ++voxel_clusters;
+                    bricks += m->triangle_count;
+                    for (u32 k = 0; k < m->triangle_count; ++k) {
+                        const NphRenderVoxelBrick *br = &l->bricks.data[m->vertex_offset + k];
+                        voxels += nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+                    }
+                } else {
+                    triangles += m->triangle_count;
+                }
+            }
+            NPH_LOG_DEBUG(&NPH_LOG_COOK,
+                          "mesh %s cut 2^%d: %u clusters (%u of voxels), %llu triangles, %llu "
+                          "bricks, %llu voxels",
+                          mesh->name, exp0 + (i32)i, clusters, voxel_clusters,
+                          (unsigned long long)triangles, (unsigned long long)bricks,
+                          (unsigned long long)voxels);
+        }
+    }
+    NPH_ARRAY_FREE(&table);
 }
 #endif
 
@@ -195,6 +247,7 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         r = nph_render_cluster_lods_build(&in, out);
         if (r == NPH_RESULT_OK) {
             log_levels(mesh, out);
+            log_cuts(mesh, out, alloc);
         }
     }
     if (surfaces != NULL) {
