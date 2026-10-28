@@ -42,9 +42,9 @@
 NPH_STATIC_ASSERT(sizeof(NphVsmEntry) == 16U, "NphVsmEntry matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmPhys) == 8U, "NphVsmPhys matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmLevel) == 48U, "NphVsmLevel matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 112U, "NphVsmCounters matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 160U, "NphVsmArgs matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1056U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 128U, "NphVsmCounters matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 208U, "NphVsmArgs matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1088U, "NphVsmView matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_ENTRIES == NPH_VSM_WINDOW * NPH_VSM_WINDOW, "a window's entries");
 NPH_STATIC_ASSERT(NPH_VSM_LEVEL_WORDS * 32 == NPH_VSM_LEVEL_ENTRIES, "a level's bitmask");
 NPH_STATIC_ASSERT(NPH_VSM_ROW_WORDS * 32 == NPH_VSM_WINDOW, "a row of a level's bitmask");
@@ -115,6 +115,9 @@ static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out
     out->meshlets = at;
     at += (u64)d->max_vsm_meshlets * 8U;
     at = align_up(at, 16U);
+    out->node_queue = at;
+    at += (u64)NPH_VSM_NODE_QUEUES * d->max_lod_nodes * 8U;
+    at = align_up(at, 16U);
     out->draws = at;
     at += (u64)d->max_vsm_draws * 16U;
     out->vis_draws = at;
@@ -152,6 +155,7 @@ static NphResult create_pipelines(NphRenderer *r)
     NPH_TRY(load(r, "vsm_request.frag", &v->shaders[4]));
     NPH_TRY(load(r, "vsm_voxel_splat.comp", &v->shaders[5]));
     NPH_TRY(load(r, "vsm_voxel_merge.frag", &v->shaders[6]));
+    NPH_TRY(load(r, "vsm_cull_nodes.comp", &v->shaders[7]));
     NphGpuComputePipelineDesc cd;
     memset(&cd, 0, sizeof cd);
     cd.shader = v->shaders[0];
@@ -160,6 +164,10 @@ static NphResult create_pipelines(NphRenderer *r)
     cd.shader = v->shaders[1];
     cd.name = "vsm cull";
     NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->cull));
+    cd.shader = v->shaders[7];
+    cd.name = "vsm cull nodes";
+    NPH_TRY(nph_gpu_pipeline_create_compute(dev, &cd, &v->cull_nodes));
+    cd.shader = v->shaders[1];
     // With the voxel clusters' routing and arguments (k_voxels).
     cd.specialization[0] = 1U;
     cd.specialization_count = 1U;
@@ -290,6 +298,7 @@ void render_vsm_destroy(NphRenderer *r)
     NphGpuDevice *dev = r->dev;
     nph_gpu_pipeline_destroy(dev, v->pages);
     nph_gpu_pipeline_destroy(dev, v->cull);
+    nph_gpu_pipeline_destroy(dev, v->cull_nodes);
     nph_gpu_pipeline_destroy(dev, v->pages_voxels);
     nph_gpu_pipeline_destroy(dev, v->cull_voxels);
     nph_gpu_pipeline_destroy(dev, v->raster);
@@ -479,6 +488,10 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->candidate = work + lo->candidate;
     vv->rendered = work + lo->rendered;
     vv->meshlets = work + lo->meshlets;
+    for (u32 q = 0; q < (u32)NPH_VSM_NODE_QUEUES; ++q) {
+        vv->node_queue[q] = work + lo->node_queue + (u64)q * r->desc.max_lod_nodes * 8U;
+    }
+    vv->max_nodes = r->desc.max_lod_nodes;
     vv->draws = work + lo->draws;
     vv->vis_draws = work + lo->vis_draws;
     vv->counters = work + lo->counters;
@@ -514,6 +527,8 @@ void render_vsm_read_stats(NphRenderer *r)
         s->vsm_evicted = 0U;
         s->vsm_draws = 0U;
         s->vsm_voxel_draws = 0U;
+        s->vsm_meshlets = 0U;
+        s->vsm_nodes = 0U;
         s->vsm_overflow = 0U;
         return;
     }
@@ -527,6 +542,8 @@ void render_vsm_read_stats(NphRenderer *r)
     s->vsm_evicted = c->evicted;
     s->vsm_draws = nph_min_u32(c->draw_count, r->desc.max_vsm_draws);
     s->vsm_voxel_draws = nph_min_u32(c->voxel_draw_count, r->desc.max_vsm_voxel_draws);
+    s->vsm_meshlets = c->meshlet_count;
+    s->vsm_nodes = c->nodes_visited;
     s->vsm_overflow = c->overflow;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
@@ -680,6 +697,34 @@ static void cull_instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, voi
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(instance_args));
 }
+
+// A step of the casters' hierarchies (vsm_cull_nodes.comp): from a queue
+// into the next, emptying the one after, dispatched with the workgroups
+// whatever filled the queue raised its arguments to.
+static void cull_nodes_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 queue)
+{
+    RenderVsm *v = &r->vsm;
+    // The arguments the pass before raised reach the dispatch through the
+    // graph's barrier: the pass reads the work buffer as indirect arguments.
+    NphVisPush p = push_of(r, 0U, 0U);
+    p.arg0 = queue;
+    p.arg1 = (queue + 1U) % (u32)NPH_VSM_NODE_QUEUES;
+    p.arg2 = (queue + 2U) % (u32)NPH_VSM_NODE_QUEUES;
+    nph_gpu_cmd_bind_pipeline(cmd, v->cull_nodes);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, v->frame.work),
+                                  v->layout.args + ARGS_OFFSET(node_args) + (u64)queue * 16U);
+}
+
+#define CULL_NODES_EXECUTE(name, queue)                                                            \
+    static void name(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)                         \
+    {                                                                                              \
+        cull_nodes_record((NphRenderer *)user, graph, cmd, (queue));                               \
+    }
+
+CULL_NODES_EXECUTE(cull_nodes0_execute, 0U)
+CULL_NODES_EXECUTE(cull_nodes1_execute, 1U)
+CULL_NODES_EXECUTE(cull_nodes2_execute, 2U)
 
 static void cull_meshlets_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
@@ -960,31 +1005,47 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
         NphVsmView *vv = render_frame_at(r, r->layout.vsm_view_offset);
         vv->voxel_draws = nph_gpu_buffer_address(r->dev, v->voxel_draws);
     }
-    static const struct {
+    // The pages' passes, the casters' culls with the walk's steps between
+    // them (as many as the deepest live hierarchy needs, where the casters
+    // are drawn at their cuts), and the fixup.
+    static const NphGpuRgExecuteFn k_steps[NPH_VSM_NODE_QUEUES] = {
+        cull_nodes0_execute, cull_nodes1_execute, cull_nodes2_execute};
+    typedef struct VsmPass {
         const char *name;
         NphGpuRgExecuteFn execute;
-    } k_compute[] = {
-        {"vsm update", update_execute},
-        {"vsm collect", collect_execute},
-        {"vsm alloc", alloc_execute},
-        {"vsm cull instances", cull_instances_execute},
-        {"vsm cull meshlets", cull_meshlets_execute},
-        {"vsm fixup", fixup_execute},
-    };
-    for (u32 i = 0; i < NPH_ARRAY_COUNT(k_compute); ++i) {
+        b32 casters;   // reads the instances and meshes
+        b32 voxel_out; // writes the voxel casters' list
+        b32 indirect;  // dispatched with arguments the pass before wrote
+    } VsmPass;
+    VsmPass passes[6U + 2U * RENDER_LOD_MAX_DEPTH];
+    u32 n = 0U;
+    passes[n++] = (VsmPass){"vsm update", update_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm collect", collect_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm alloc", alloc_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm cull instances", cull_instances_execute, 1, 0, 0};
+    const u32 steps = v->lods ? render_vis_lod_steps(r) : 0U;
+    for (u32 i = 0; i < steps; ++i) {
+        passes[n++] = (VsmPass){"vsm cull nodes", k_steps[i % (u32)NPH_VSM_NODE_QUEUES], 1, 0, 1};
+    }
+    passes[n++] = (VsmPass){"vsm cull meshlets", cull_meshlets_execute, 1, 1, 0};
+    passes[n++] = (VsmPass){"vsm fixup", fixup_execute, 0, 0, 0};
+    for (u32 i = 0; i < n; ++i) {
         NphGpuRgPass *p =
-            add_pass(graph, r, k_compute[i].name, NPH_GPU_RG_PASS_COMPUTE, k_compute[i].execute);
+            add_pass(graph, r, passes[i].name, NPH_GPU_RG_PASS_COMPUTE, passes[i].execute);
         if (p == NULL) {
             return NPH_RESULT_FULL;
         }
         nph_gpu_rg_write_buffer(p, v->frame.work, NPH_GPU_RG_USE_STORAGE_WRITE);
+        if (passes[i].indirect) {
+            nph_gpu_rg_read_buffer(p, v->frame.work, NPH_GPU_RG_USE_INDIRECT);
+        }
         nph_gpu_rg_write_buffer(p, v->frame.entries, NPH_GPU_RG_USE_STORAGE_WRITE);
         nph_gpu_rg_write_buffer(p, v->frame.phys, NPH_GPU_RG_USE_STORAGE_WRITE);
-        if (i >= 3U) {
+        if (passes[i].casters) {
             nph_gpu_rg_read_buffer(p, instances, NPH_GPU_RG_USE_SHADER_READ);
             nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
         }
-        if (i == 4U && r->vis.frame_voxels) {
+        if (passes[i].voxel_out && r->vis.frame_voxels) {
             nph_gpu_rg_write_buffer(p, v->frame.voxel_draws, NPH_GPU_RG_USE_STORAGE_WRITE);
         }
     }

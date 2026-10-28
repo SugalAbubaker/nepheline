@@ -98,6 +98,7 @@ nph_add_shaders(nph_shaders_render
         render/rt_instances.comp
         render/vsm_pages.comp
         render/vsm_cull.comp
+        render/vsm_cull_nodes.comp
         render/vsm_raster.mesh
         render/vsm_raster.vert
         render/vsm_voxel_splat.comp

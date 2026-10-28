@@ -333,7 +333,7 @@ something it shows changes.
 | `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is drawn again if dirty), one without asks for a page |
 | `vsm collect`, `vsm alloc` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones), handed to the entries that asked |
-| `vsm cull instances`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page, then their meshlets (a mesh with levels of detail: its cut for the level, below): a draw per (meshlet, page), scanning only the rows that hold a page to draw |
+| `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page; a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
 | `vsm voxel splat`, `vsm voxel merge` | while the renderer holds voxel meshes: the voxel clusters' casters splatted into a depth image of their own, a workgroup per (cluster, page), then taken into the pages drawn, whose depth test keeps the nearer of theirs and the triangles' ("Voxel casters", below) |
@@ -385,23 +385,27 @@ anchor moving, or a production frame without the map drops every page.
 below) is drawn into a level's pages at one cut for the whole level, not
 at the camera's: every texel of a level has the level's size, so one error
 suits all of it, half a texel (`VSM_LOD_TEXELS`), which the receiver's
-offset of 1.5 texels along its normal covers with a texel to spare. A mesh
-carries cuts at the powers of two of its own units, made when it is
-created (`nph_render_lod_cuts`): for a threshold T, the clusters whose
-maker's error is at most T and whose consumer's is more, so that each is
-closed as every cut of the hierarchy is; at most 32, from the largest
-power of two below the mesh's smallest error to the first past its
-largest, and at most 2^24 entries (the finest dropped first). `vsm cull
-instances` takes the largest threshold within half a texel at the
-instance's scale, from the float's exponent, and hands on that cut's
-entries in the table in place of the mesh's meshlets (level 0 where even
-the finest is too coarse, the last cut, the coarsest level, past it);
-`vsm cull meshlets` reads each entry's cluster, one load among many in
-flight, where the instance cull's expansion would wait on it round after
-round. The cut follows the instance's scale and the level alone, so a
-page drawn stays right while the camera moves; an instance's change
-redraws its pages as before, and turning the levels on or off (a
-threshold of 0) drops every page.
+offset of 1.5 texels along its normal covers with a texel to spare. The
+cut's threshold is the largest power of two within that error at the
+instance's scale (`vsm_lod_threshold`): a cluster is in it when its
+maker's error is at most the threshold and its consumer's more, level 0
+where even the finest group is too coarse, the coarsest level where even
+the root's are fine. `vsm cull instances` hands such a caster's hierarchy
+to `vsm cull nodes` (`vsm_cull_nodes.comp`), a step down two of its node
+levels at a time as the camera's walk takes them (`vis_cull_nodes.comp`):
+a node or group is taken when a group below it is too coarse for the
+threshold, a cluster below it fine enough, and its sphere reaches a page
+of the level to draw; a group's clusters go to `vsm cull meshlets`, which
+keeps those whose maker's error is fine enough and tests them as any
+caster. So a page takes the cut's clusters near it, not the whole cut of
+every instance whose sphere reaches it: a tree of a million triangles
+beside a small page drawn hands on the clusters that reach the page. The
+cut follows the instance's scale and the level alone, so a page drawn
+stays right while the camera moves; an instance's change redraws its
+pages as before, and turning the levels on or off (a threshold of 0)
+drops every page. (The cuts were tables of clusters made with each mesh,
+`nph_render_lod_cuts`, handed on whole: the landscape's pines, 289,000
+clusters at level 0, overflowed the list with a few trees by the camera.)
 
 With the sun moving every frame at a day-night cycle's pace
 (`lod_shadows_sun_4k_production`: the terrain and 1,024 rocks of
@@ -1616,8 +1620,10 @@ the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,
 `vsm_pages` (2,048), `max_vsm_meshlets` (2^20), and `max_vsm_draws`
 (2^20), whose overflow (`vsm_overflow`) raises its resolution bias
 ("Shadows"); its statistics are `vsm` and `vsm_lod_bias` (this frame) and
-the pages requested, drawn, held, and evicted, and the caster draws, read
-back as the others. The radiance cache has `gi_cells` (2^18) slots, a
+the pages requested, drawn, held, and evicted, the casters' meshlets
+tested (`vsm_meshlets`, what `max_vsm_meshlets` must hold) and the nodes
+their walk visited (`vsm_nodes`), and the caster draws, read back as the
+others. The radiance cache has `gi_cells` (2^18) slots, a
 bucket of which, when full, drops the samples of the cells it cannot
 take, and `gi_rays` (65,536) a frame. The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in

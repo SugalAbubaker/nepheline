@@ -1474,10 +1474,11 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
         }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, drawn %u, resident %u, evicted %u; "
-                   "caster draws %u (and %u of voxel clusters); resolution bias %u%s\n",
+                   "caster meshlets %u (%u hierarchy nodes), draws %u (and %u of voxel clusters); "
+                   "resolution bias %u%s\n",
                    st->vsm_requested, st->vsm_drawn, st->vsm_resident, st->vsm_evicted,
-                   st->vsm_draws, st->vsm_voxel_draws, st->vsm_lod_bias,
-                   st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
+                   st->vsm_meshlets, st->vsm_nodes, st->vsm_draws, st->vsm_voxel_draws,
+                   st->vsm_lod_bias, st->vsm_overflow != 0U ? "; OVERFLOWED" : "");
         }
         if (st->shadow_blas_bytes != 0U) {
             printf("    ray tracing: bottom levels %.1f MB (compacted after their builds)\n",

@@ -169,7 +169,6 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_groups;
     NphGpuBuffer lod_group_clusters;
     NphGpuBuffer lod_makers;
-    NphGpuBuffer lod_cuts; // the shadow map's cuts (NphVisMesh.lod_cuts)
     u32 lod_depth;
     // Its voxel clusters' bricks and voxels (NphVisMesh.voxel_bricks, voxels;
     // null buffers without), and whether RenderVis.voxel_meshes counts it.
@@ -217,6 +216,7 @@ typedef struct VsmLayout {
     u64 candidate;   // u32[vsm_pages]
     u64 rendered;    // u32[vsm_pages]
     u64 meshlets;    // uvec2[max_vsm_meshlets]
+    u64 node_queue;  // uvec2[max_lod_nodes] for each of NPH_VSM_NODE_QUEUES
     u64 draws;       // uvec4[max_vsm_draws]
     u64 vis_draws;   // NphVisDraw[max_vsm_draws] (indirect raster only)
     u64 size;
@@ -224,6 +224,11 @@ typedef struct VsmLayout {
 
 // The production path's virtual shadow map (vsm.c; docs/render.md
 // "Shadows").
+// The steps down the deepest live hierarchy of levels of detail, two of its
+// node levels a step (vis_cull_nodes.comp, and the shadow map's walk,
+// vsm_cull_nodes.comp): 0 without one.
+u32 render_vis_lod_steps(const NphRenderer *r);
+
 typedef struct RenderVsm {
     b32 supported;
     u32 pool_pages;
@@ -242,11 +247,12 @@ typedef struct RenderVsm {
     u32 roomy;
     u32 frame_bias; // the bias this frame draws with (lod_bias as it began)
     VsmLayout layout;
-    // pages, cull, raster (mesh or vertex), clear, request, and the voxel
-    // casters' splat and merge
-    NphGpuShader shaders[7];
+    // pages, cull, raster (mesh or vertex), clear, request, the voxel
+    // casters' splat and merge, and the caster walk
+    NphGpuShader shaders[8];
     NphGpuPipeline pages;
     NphGpuPipeline cull;
+    NphGpuPipeline cull_nodes; // the casters' hierarchies against the pages drawn
     // The same with the voxel clusters' routing and arguments (k_voxels),
     // bound while the renderer holds a mesh with voxel levels
     // (RenderVis.frame_voxels).

@@ -752,8 +752,8 @@ typedef struct NphRenderFrameStats {
     // it again once there is room); then, read back with the counters above
     // (zero when that frame had none), the pages its pixels needed, the
     // pages drawn (new, or changed since), the pages the pool holds, those
-    // taken from others, the caster draws (voxel clusters' apart), and
-    // NphRenderVsmOverflow bits.
+    // taken from others, the caster draws (voxel clusters' apart), the
+    // casters' meshlets and the walk's nodes, and NphRenderVsmOverflow bits.
     b32 vsm;
     u32 vsm_lod_bias;
     u32 vsm_requested;
@@ -762,6 +762,12 @@ typedef struct NphRenderFrameStats {
     u32 vsm_evicted;
     u32 vsm_draws;
     u32 vsm_voxel_draws;
+    // The casters' meshlets tested against the pages drawn (those the
+    // instance cull and the walk handed on: what max_vsm_meshlets must
+    // hold, past it when it overflowed), and the hierarchy nodes the walk
+    // visited.
+    u32 vsm_meshlets;
+    u32 vsm_nodes;
     u32 vsm_overflow;
     // Temporal anti-aliasing: whether the frame was resolved temporally,
     // and whether it blended with history (not on the first such frame, nor
