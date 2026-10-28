@@ -331,9 +331,164 @@ static NphAABB bounds_of(const NphVec3 *positions, const u32 *indices, u32 count
     return b;
 }
 
-NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
-                          const CookMeshSettings *settings, const struct CookVoxelMaterials *voxels,
-                          NphJobSystem *jobs, NphAssetWriter *writer, CookMeshStats *stats)
+// ---------------------------------------------------------------------------
+// The cell proxies' source (cook/cells.h; ADR-0062)
+// ---------------------------------------------------------------------------
+
+void cook_proxy_source_init(CookProxySource *s, NphAllocator *alloc)
+{
+    NPH_ASSERT(s != NULL && alloc != NULL);
+    memset(s, 0, sizeof *s);
+    nph_render_cluster_lods_init(&s->lods, alloc);
+    NPH_ARRAY_INIT(&s->positions, alloc);
+    NPH_ARRAY_INIT(&s->attribs, alloc);
+    cook_mesh_init(&s->slots, alloc);
+}
+
+void cook_proxy_source_free(CookProxySource *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    nph_render_cluster_lods_free(&s->lods);
+    NPH_ARRAY_FREE(&s->positions);
+    NPH_ARRAY_FREE(&s->attribs);
+    cook_mesh_free(&s->slots);
+}
+
+// Keeps what the proxies sample of the mesh in `out`: the levels' records
+// (`lods`, or level 0's `meshlets` under one root group where it has none),
+// the vertices and corners of the clusters consumed above `min_error`,
+// those clusters' vertices renumbered, the submeshes' slots, the sphere.
+static NphResult keep_proxy_source(const CookMesh *mesh, const CookMeshlets *meshlets,
+                                   const NphMeshletBounds *mbounds,
+                                   const NphRenderClusterLods *lods, const NphVec3 *positions,
+                                   const NphMeshAttrib *attr, u32 vn, NphSphere sphere,
+                                   f32 min_error, CookProxySource *out)
+{
+    NphRenderClusterLods *l = &out->lods;
+    NphAllocator *a = mesh->alloc;
+    const u32 *src_vertices = NULL;
+    const u8 *src_triangles = NULL;
+    if (lods != NULL) {
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->clusters.meshlets, lods->clusters.meshlets.data,
+                                 lods->clusters.meshlets.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->clusters.bounds, lods->clusters.bounds.data,
+                                 lods->clusters.bounds.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->lods, lods->lods.data, lods->lods.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->groups, lods->groups.data, lods->groups.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->group_clusters, lods->group_clusters.data,
+                                 lods->group_clusters.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->bricks, lods->bricks.data, lods->bricks.len));
+        NPH_TRY(NPH_ARRAY_PUSH_N(&l->voxels, lods->voxels.data, lods->voxels.len));
+        l->levels = lods->levels;
+        l->level0_clusters = lods->level0_clusters;
+        src_vertices = lods->clusters.vertices.data;
+        src_triangles = lods->clusters.triangles.data;
+    } else {
+        // Level 0 alone, under one root group.
+        const u32 mn = meshlets->meshlets.len;
+        NphSphere hull = sphere;
+        for (u32 m = 0; m < mn; ++m) {
+            const NphMeshlet *ml = &meshlets->meshlets.data[m];
+            NphRenderMeshlet rm;
+            rm.vertex_offset = ml->vertex_offset;
+            rm.triangle_offset = ml->triangle_offset;
+            rm.vertex_count = ml->vertex_count;
+            rm.triangle_count = ml->triangle_count;
+            rm.submesh = ml->submesh;
+            NPH_TRY(NPH_ARRAY_PUSH(&l->clusters.meshlets, rm));
+            NphRenderMeshletBounds rb;
+            memset(&rb, 0, sizeof rb);
+            rb.center = mbounds[m].center;
+            rb.radius = mbounds[m].radius;
+            memcpy(rb.cone_axis, mbounds[m].cone_axis, sizeof rb.cone_axis);
+            rb.cone_cutoff = mbounds[m].cone_cutoff;
+            rb.cone_apex = mbounds[m].cone_apex;
+            NPH_TRY(NPH_ARRAY_PUSH(&l->clusters.bounds, rb));
+            const NphRenderClusterLod cl = {NPH_RENDER_LOD_NONE, 0U, 0U, 0U};
+            NPH_TRY(NPH_ARRAY_PUSH(&l->lods, cl));
+            NPH_TRY(NPH_ARRAY_PUSH(&l->group_clusters, m));
+            hull = nph_sphere_union(hull, nph_sphere(rb.center, rb.radius));
+        }
+        NphRenderLodGroup root;
+        memset(&root, 0, sizeof root);
+        root.center = hull.center;
+        root.radius = hull.radius;
+        root.error = NPH_F32_MAX;
+        root.cluster_count = mn;
+        NPH_TRY(NPH_ARRAY_PUSH(&l->groups, root));
+        l->levels = 1U;
+        l->level0_clusters = mn;
+        src_vertices = meshlets->vertices.data;
+        src_triangles = meshlets->triangles.data;
+    }
+    // The clusters a proxy's cut can hold: their vertices renumbered.
+    u32 *remap = NPH_ALLOC_ARRAY(a, u32, nph_max_u32(vn, 1U));
+    if (remap == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    for (u32 v = 0; v < vn; ++v) {
+        remap[v] = NPH_U32_MAX;
+    }
+    NphResult r = NPH_RESULT_OK;
+    for (u32 c = 0; c < l->clusters.meshlets.len && r == NPH_RESULT_OK; ++c) {
+        NphRenderMeshlet *m = &l->clusters.meshlets.data[c];
+        const u32 parent = l->lods.data[c].parent;
+        const f32 consumed =
+            parent == NPH_RENDER_LOD_NONE ? NPH_F32_MAX : l->groups.data[parent].error;
+        if (!(consumed > min_error)) {
+            m->vertex_offset = 0U;
+            m->triangle_offset = 0U;
+            m->vertex_count = 0U;
+            m->triangle_count = 0U;
+            continue;
+        }
+        if (m->vertex_count == 0U) {
+            continue; // a voxel cluster: its bricks are kept whole
+        }
+        const u32 vertex_offset = l->clusters.vertices.len;
+        for (u32 k = 0; k < m->vertex_count && r == NPH_RESULT_OK; ++k) {
+            const u32 v = src_vertices[m->vertex_offset + k];
+            if (v >= vn) {
+                r = NPH_RESULT_INVALID_ARGUMENT;
+                break;
+            }
+            if (remap[v] == NPH_U32_MAX) {
+                remap[v] = out->positions.len;
+                r = NPH_ARRAY_PUSH(&out->positions, positions[v]);
+                if (r == NPH_RESULT_OK) {
+                    r = NPH_ARRAY_PUSH(&out->attribs, attr[v]);
+                }
+            }
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(&l->clusters.vertices, remap[v]);
+            }
+        }
+        const u32 triangle_offset = l->clusters.triangles.len / 3U;
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH_N(&l->clusters.triangles,
+                                 src_triangles + (u64)m->triangle_offset * 3U,
+                                 (u32)m->triangle_count * 3U);
+        }
+        m->vertex_offset = vertex_offset;
+        m->triangle_offset = triangle_offset;
+    }
+    NPH_FREE_ARRAY(a, u32, remap, nph_max_u32(vn, 1U));
+    for (u32 i = 0; i < mesh->submeshes.len && r == NPH_RESULT_OK; ++i) {
+        r = NPH_ARRAY_PUSH(&out->slots.submeshes, mesh->submeshes.data[i]);
+    }
+    out->slots.flags = mesh->flags;
+    out->sphere = sphere;
+    return r;
+}
+
+// cook_mesh_write, keeping the proxies' source where `proxy` is given.
+static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
+                            const CookMeshSettings *settings,
+                            const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                            NphAssetWriter *writer, CookMeshStats *stats, f32 min_error,
+                            CookProxySource *proxy)
 {
     NPH_ASSERT(mesh != NULL && meshlets != NULL && settings != NULL && writer != NULL);
     const NphLzLevel lz = settings->lz;
@@ -467,6 +622,10 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         if (stats != NULL) {
             stats->lods_ns = nph_time_now_ns() - lods_start;
         }
+    }
+    if (r == NPH_RESULT_OK && proxy != NULL) {
+        r = keep_proxy_source(mesh, meshlets, mbounds, with_lods ? &lods : NULL, positions, attr,
+                              vn, h.sphere, min_error, proxy);
     }
     const u64 blobs_start = nph_time_now_ns();
     // The records written: level 0's, or every level's (the same bytes as
@@ -605,13 +764,21 @@ NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     return r;
 }
 
+NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
+                          const CookMeshSettings *settings, const struct CookVoxelMaterials *voxels,
+                          NphJobSystem *jobs, NphAssetWriter *writer, CookMeshStats *stats)
+{
+    return mesh_write(mesh, meshlets, settings, voxels, jobs, writer, stats, 0.0F, NULL);
+}
+
 // ---------------------------------------------------------------------------
 // The pipeline
 // ---------------------------------------------------------------------------
 
-NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
-                            const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
-                            NphAssetWriter *writer, CookMeshStats *stats)
+static NphResult mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
+                              const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                              NphAssetWriter *writer, CookMeshStats *stats, f32 min_error,
+                              CookProxySource *proxy)
 {
     NPH_ASSERT(mesh != NULL && writer != NULL);
     CookMeshSettings settings;
@@ -652,7 +819,7 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
     st.meshlets_ns = nph_time_now_ns() - meshlets_start;
     st.lod_levels = 1U;
     if (r == NPH_RESULT_OK) {
-        r = cook_mesh_write(mesh, &meshlets, &settings, voxels, jobs, writer, &st);
+        r = mesh_write(mesh, &meshlets, &settings, voxels, jobs, writer, &st, min_error, proxy);
     }
     st.total_ns = nph_time_now_ns() - start;
     st.vertices = mesh->vertices.len;
@@ -667,4 +834,20 @@ NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings_in,
         *stats = st;
     }
     return r;
+}
+
+NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings *settings,
+                            const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                            NphAssetWriter *writer, CookMeshStats *stats)
+{
+    return mesh_process(mesh, settings, voxels, jobs, writer, stats, 0.0F, NULL);
+}
+
+NphResult cook_mesh_process_proxy(CookMesh *mesh, const CookMeshSettings *settings,
+                                  const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
+                                  NphAssetWriter *writer, CookMeshStats *stats, f32 min_error,
+                                  CookProxySource *proxy)
+{
+    NPH_ASSERT(proxy != NULL);
+    return mesh_process(mesh, settings, voxels, jobs, writer, stats, min_error, proxy);
 }

@@ -58,10 +58,11 @@ extern "C" {
 #define NPH_RENDER_PROXY_NO_DILATION 2U
 
 // A mesh the instances draw: its levels (as nph_render_cluster_lods_build
-// made them), the positions they were built over, and the materials its
-// voxels were made with (its sampler's submesh_surface has `submesh_count`
-// entries). An occluder's mesh may have no sampler: its triangles hide what
-// is behind them, opaque.
+// made them, or the part of them a proxy samples, the other clusters
+// emptied), the positions they were built over (NULL where no cluster has
+// vertices), and the materials its voxels were made with (its
+// sampler's submesh_surface has `submesh_count` entries). An occluder's mesh
+// may have no sampler: its triangles hide what is behind them, opaque.
 typedef struct NphRenderProxyMesh {
     const NphRenderClusterLods *lods;
     const NphVec3 *positions;

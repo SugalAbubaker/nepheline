@@ -4,7 +4,8 @@
 //     nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
 //              [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
 //              [--uncompressed] [--no-mips] [--max-extent N]
-//              [--no-optimize] [--no-lods] [--voxels] [--sound-codec auto|pcm|lossless|adpcm]
+//              [--no-optimize] [--no-lods] [--voxels] [--hlod] [--hlod-cell M]
+//              [--hlod-distance M] [--sound-codec auto|pcm|lossless|adpcm]
 //              [--sound-stream auto|always|never] [--stream-seconds S]
 //              [--threads N] [--quiet] [--verbose]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
@@ -51,6 +52,10 @@ static void usage(FILE *out)
           "  --no-optimize         keep the source triangle and vertex order\n"
           "  --no-lods             meshes without levels of detail (level 0 alone)\n"
           "  --voxels              voxel levels for aggregate geometry (glTF meshes)\n"
+          "  --hlod                the world partition's cells and their proxies for\n"
+          "                        glTF scenes (implies --voxels)\n"
+          "  --hlod-cell <m>       the cells' edge (default 64)\n"
+          "  --hlod-distance <m>   the proxies' least distance (default 560)\n"
           "  --sound-codec <c>     auto (default: PCM in memory, lossless streamed),\n"
           "                        pcm, lossless, or adpcm (lossy, in memory only)\n"
           "  --sound-stream <s>    auto (default: sounds of --stream-seconds or more),\n"
@@ -169,6 +174,25 @@ int main(int argc, char **argv)
             desc.mesh.no_lods = 1;
         } else if (strcmp(a, "--voxels") == 0) {
             desc.mesh.voxels = 1;
+        } else if (strcmp(a, "--hlod") == 0) {
+            // The proxies sample the meshes' voxel materials.
+            desc.hlod.enabled = 1;
+            desc.mesh.voxels = 1;
+        } else if ((strcmp(a, "--hlod-cell") == 0 || strcmp(a, "--hlod-distance") == 0) &&
+                   next != NULL) {
+            f64 metres = 0.0;
+            if (!nph_str_parse_f64(nph_str_from_cstr(next), &metres) || !(metres > 0.0) ||
+                metres > 1.0e6) {
+                usage(stderr);
+                NPH_FREE_ARRAY(alloc, const char *, sources, (u32)argc + 1U);
+                return 2;
+            }
+            if (strcmp(a, "--hlod-cell") == 0) {
+                desc.hlod.cell = (f32)metres;
+            } else {
+                desc.hlod.distance = (f32)metres;
+            }
+            ++i;
         } else if ((strcmp(a, "--sound-codec") == 0 || strcmp(a, "--sound-stream") == 0) &&
                    next != NULL) {
             // The per-source settings file's own words (sound.h).

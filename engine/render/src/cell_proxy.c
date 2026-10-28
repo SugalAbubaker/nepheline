@@ -108,11 +108,18 @@ static NphResult validate(const NphRenderCellProxyInput *in)
     }
     for (u32 m = 0; m < in->mesh_count; ++m) {
         const NphRenderProxyMesh *pm = &in->meshes[m];
-        if (pm->lods == NULL || pm->positions == NULL || pm->submesh_count == 0U ||
+        if (pm->lods == NULL || pm->submesh_count == 0U ||
             pm->lods->lods.len != pm->lods->clusters.meshlets.len ||
             pm->lods->clusters.bounds.len != pm->lods->clusters.meshlets.len ||
             pm->lods->groups.len == 0U) {
             return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        // Positions where a cluster has vertices (a mesh kept for its voxels
+        // alone, or for nothing, has none).
+        for (u32 c = 0; c < pm->lods->clusters.meshlets.len && pm->positions == NULL; ++c) {
+            if (pm->lods->clusters.meshlets.data[c].vertex_count != 0U) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
         }
         if (pm->sampler != NULL &&
             (pm->sampler->sample == NULL || pm->sampler->submesh_surface == NULL)) {

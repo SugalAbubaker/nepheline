@@ -31,6 +31,7 @@ set_target_properties(nph_cook_thirdparty PROPERTIES FOLDER "tools")
 set(cook_sources
     src/bc_decode.c
     src/bc_encode.c
+    src/cells.c
     src/cook.c
     src/cooker.c
     src/database.c
@@ -96,6 +97,7 @@ set_target_properties(nph_cook PROPERTIES FOLDER "tools")
 nph_add_test(cook
     SOURCES
         tests/test_bc.c
+        tests/test_cells.c
         tests/test_cook_support.h
         tests/test_cooker.c
         tests/test_database.c

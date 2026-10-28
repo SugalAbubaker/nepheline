@@ -951,8 +951,10 @@ taken, had cost it 0.5 to 1.7 %, wherever in it the test stood.
 
 A world partition's cell is drawn from far off as one mesh of voxels, its
 proxy, in place of its instances (ADR-0062; `render/cell_proxy.h`,
-`cell_proxy.c`). Stage 1's builder is in, on the CPU, with its tests; the
-formats, the cooker's cells and the renderer's switch come next.
+`cell_proxy.c`). Stage 1 is in: the builder, on the CPU, with its tests; the
+formats (docs/asset.md: a mesh of voxels alone, a scene's cells); and the
+cooker's cells (`nph_cook --hlod`, docs/cook.md "Cells"). The renderer's
+switch comes next.
 
 **What a proxy is.** A mesh of voxel levels alone (ADR-0061's records): its
 level 0 at the proxy's finest cell (0.25 m for the landscape's 560 m), each

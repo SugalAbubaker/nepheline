@@ -37,6 +37,7 @@
 #include <nepheline/asset/pack.h>
 #include <nepheline/jobs/jobs.h>
 
+#include <cook/cells.h>
 #include <cook/database.h>
 #include <cook/mesh.h>
 #include <cook/sound.h>
@@ -59,6 +60,10 @@ typedef struct CookerDesc {
     CookTextureSettings texture; // defaults for textures; the usage is set per material slot
     CookMeshSettings mesh;
     CookSoundSettings sound; // defaults for sounds; a source's settings file overrides them
+    // The world partition's cells and their proxies for glTF scenes
+    // (cook/cells.h; ADR-0062): the proxies sample the meshes' voxel
+    // materials, so cells need `mesh.voxels` (INVALID_ARGUMENT otherwise).
+    CookHlodSettings hlod;
     // Optional: told of every asset written (not of those found current), on
     // the cooker's thread, with its GUID and NphAssetType: how the editor
     // knows what to reload.

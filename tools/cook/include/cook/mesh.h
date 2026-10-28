@@ -284,6 +284,33 @@ NPH_MUST_USE NphResult cook_mesh_process(CookMesh *mesh, const CookMeshSettings 
                                          NphJobSystem *jobs, NphAssetWriter *writer,
                                          CookMeshStats *stats);
 
+// What the world partition's cell proxies sample of a mesh (cook/cells.h;
+// ADR-0062), kept past its cook: every cluster's records (with no levels,
+// level 0's under one root group), the vertices and corners of the clusters
+// consumed above `min_error` (mesh units: the finest cut a proxy samples),
+// the others' records emptied (no vertices, triangles or bricks); the
+// vertices those clusters use, dequantised and renumbered; the submeshes'
+// material slots (the materials' sampler reads them, cook/voxel.h); and the
+// mesh's bounding sphere.
+typedef struct CookProxySource {
+    NphRenderClusterLods lods;
+    NPH_ARRAY(NphVec3) positions;
+    NPH_ARRAY(NphMeshAttrib) attribs;
+    CookMesh slots; // its submeshes alone
+    NphSphere sphere;
+} CookProxySource;
+
+void cook_proxy_source_init(CookProxySource *s, NphAllocator *alloc);
+void cook_proxy_source_free(CookProxySource *s);
+
+// cook_mesh_process, keeping in `proxy` (initialised by the caller, empty)
+// what the cell proxies sample of the mesh from its cut at `min_error` up.
+NPH_MUST_USE NphResult cook_mesh_process_proxy(CookMesh *mesh, const CookMeshSettings *settings,
+                                               const struct CookVoxelMaterials *voxels,
+                                               NphJobSystem *jobs, NphAssetWriter *writer,
+                                               CookMeshStats *stats, f32 min_error,
+                                               CookProxySource *proxy);
+
 // The average cache miss ratio of a triangle list for a FIFO vertex cache
 // of `cache_size` entries (at most 64): misses per triangle (3 is worst,
 // 0.5 the ideal for a regular grid).

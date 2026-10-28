@@ -39,7 +39,8 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--no-lods] [--voxels] [--threads N] [--quiet] [--verbose]
+         [--no-optimize] [--no-lods] [--voxels] [--hlod] [--hlod-cell M]
+         [--hlod-distance M] [--threads N] [--quiet] [--verbose]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -330,6 +331,42 @@ A closed mesh stays closed.
    at about 28 triangles and its groups stay under the 256 a group needs.
 
 Every step is deterministic: the same input gives the same bytes.
+
+### Cells
+
+With `--hlod` (which implies `--voxels`), a glTF scene's static instances
+are partitioned into cells of the ground plane, and each cell gets a
+proxy that stands for its instances from afar: a mesh of voxels alone
+(`cook/cells.h`; docs/render.md "Cell proxies"; ADR-0062).
+
+- **The partition** (`cook_cells_partition`): squares of `--hlod-cell`
+  metres (64 by default) on x and z, an instance in the square of its
+  bounding sphere's centre, where every submesh of its mesh voxelizes
+  (opaque or masked) and its sphere's radius is at most half an edge; the
+  others (the terrain, blended or emissive meshes) are in no cell. The
+  scene's `CELL` table lists each cell's instances as a range of `INST`,
+  the cells in order of (z, x), the instances in no cell after them
+  (docs/asset.md).
+- **The proxies** (`cook_cell_proxy`, `nph_render_cell_proxy_build`): each
+  in its square's space (origin at its lowest corner, on the ground
+  plane), its finest cell the largest power of two at most a pixel at
+  `--hlod-distance` metres (560 by default: 0.25 m in the reference views,
+  4.47e-4 m a metre a pixel), sampled from each instance's cut at half a
+  level's cell, with the instances of the eight squares round it and those
+  of no cell that reach its 3 x 3 squares as occluders. The meshes' parts
+  the proxies sample are kept as they cook (`cook_mesh_process_proxy`: the
+  clusters consumed above the finest cut, with their vertices renumbered;
+  every other cluster's record emptied) with their voxel materials, until
+  the proxies are built; the cells are built in rounds of 32 at once on
+  the job system, each logged with its instances, levels, voxels, what
+  its sweep saw, and its time. A proxy is a mesh asset of voxels alone
+  (`cell/<x>_<z>`, version 4) written by `cook_proxy_write`; an empty one
+  writes nothing.
+- **Incremental cooks.** The scene's settings hash folds in the cells'
+  settings and the meshes'; the proxies are current while the scene is
+  and each one's database entry and file are (a cook rebuilds them all
+  otherwise, recooking in memory the meshes it needs that are current).
+  Cooking a scene without `--hlod` drops its proxies.
 
 ### Tangent handedness
 
