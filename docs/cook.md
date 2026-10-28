@@ -39,7 +39,7 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--no-lods] [--voxels] [--threads N] [--quiet]
+         [--no-optimize] [--no-lods] [--voxels] [--threads N] [--quiet] [--verbose]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -54,7 +54,10 @@ and 2 for a usage error. Block encoding and the meshes' levels of detail
 run on the job system (`--threads`, default cores - 1), to the same bytes
 as on one thread. Each mesh's log line is followed by where its time went:
 the cleaning, attributes and welding, the reordering, the meshlets, the
-levels, and the blobs' compression.
+levels, and the blobs' compression. With `--verbose` each level of each mesh
+gets a debug line too: its clusters (voxel ones apart), triangles, voxels
+and their cells, and the errors of the groups that made it, which show
+where a mesh's levels stop shrinking or switch to voxels.
 
 The asset_viewer sample cooks its content this way as part of the build
 (`samples/CMakeLists.txt`): a custom command runs the freshly built

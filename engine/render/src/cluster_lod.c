@@ -1695,6 +1695,22 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
             } else if (rc != NPH_RESULT_OVERFLOW) {
                 r = rc; // past the coordinates' reach the group keeps its triangles
             }
+            // Or voxels where they cost no more than the triangles kept, at
+            // most twice as coarse as those: a level's step, which voxels
+            // continue as aggregate triangles do not (the triangles of
+            // needles halve as their error doubles, and so outnumber the
+            // pixels farther off; voxels of a surface quarter).
+            const f64 at = nph_f64_max((f64)error, (f64)simplify_error);
+            if (r == NPH_RESULT_OK && !voxels && kept != 0U && at > 0.0) {
+                f64 even = 0.0;
+                const NphResult re = voxel_cell(&vin, at, kept, &even);
+                if (re == NPH_RESULT_OK && even <= 2.0 * at) {
+                    voxels = true;
+                    cell = even;
+                } else if (re != NPH_RESULT_OK && re != NPH_RESULT_OVERFLOW) {
+                    r = re;
+                }
+            }
         }
     } else if (r == NPH_RESULT_OK) {
         // Coarser voxels: at least twice the inputs' cell, at most half
