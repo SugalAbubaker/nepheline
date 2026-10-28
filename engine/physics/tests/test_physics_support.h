@@ -43,15 +43,21 @@ static inline f32 test_range(NphPcg32 *r, f32 lo, f32 hi)
     return nph_pcg32_next_range_f32(r, lo, hi);
 }
 
+// Each draw a statement of its own, x first: as one call's arguments, the
+// draws would be made in an order C leaves unspecified and compilers differ
+// in, and each would build other scenes from the same seed.
 static inline NphVec3 test_vec3(NphPcg32 *r, f32 lo, f32 hi)
 {
-    return nph_vec3(test_range(r, lo, hi), test_range(r, lo, hi), test_range(r, lo, hi));
+    const f32 x = test_range(r, lo, hi);
+    const f32 y = test_range(r, lo, hi);
+    const f32 z = test_range(r, lo, hi);
+    return nph_vec3(x, y, z);
 }
 
 // A uniformly distributed unit vector.
 static inline NphVec3 test_unit(NphPcg32 *r)
 {
-    return nph_sample_sphere_uniform(nph_vec2(nph_pcg32_next_f32(r), nph_pcg32_next_f32(r)));
+    return nph_sample_sphere_uniform(nph_pcg32_next_vec2(r));
 }
 
 // A uniformly distributed rotation (Shoemake, "Uniform Random Rotations",

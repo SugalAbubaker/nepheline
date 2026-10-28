@@ -4,7 +4,9 @@
 // Helpers shared by the math tests: deterministic random inputs for the
 // property tests and assertions over vectors, quaternions, and matrices.
 // Every random generator is seeded explicitly so a failing case can be
-// reproduced from the log.
+// reproduced from the log, and draws in order, each draw a statement of its
+// own: as one call's arguments, the draws would be made in an order C leaves
+// unspecified and compilers differ in, and each would test other inputs.
 
 #include <nepheline/core/assert.h>
 #include <nepheline/math/affine.h>
@@ -36,19 +38,35 @@ static inline f32 tm_rng_range(u64 *state, f32 lo, f32 hi)
 
 static inline NphVec2 tm_rng_vec2(u64 *state, f32 lo, f32 hi)
 {
-    return nph_vec2(tm_rng_range(state, lo, hi), tm_rng_range(state, lo, hi));
+    const f32 x = tm_rng_range(state, lo, hi);
+    const f32 y = tm_rng_range(state, lo, hi);
+    return nph_vec2(x, y);
 }
 
 static inline NphVec3 tm_rng_vec3(u64 *state, f32 lo, f32 hi)
 {
-    return nph_vec3(tm_rng_range(state, lo, hi), tm_rng_range(state, lo, hi),
-                    tm_rng_range(state, lo, hi));
+    const f32 x = tm_rng_range(state, lo, hi);
+    const f32 y = tm_rng_range(state, lo, hi);
+    const f32 z = tm_rng_range(state, lo, hi);
+    return nph_vec3(x, y, z);
 }
 
 static inline NphVec4 tm_rng_vec4(u64 *state, f32 lo, f32 hi)
 {
-    return nph_vec4(tm_rng_range(state, lo, hi), tm_rng_range(state, lo, hi),
-                    tm_rng_range(state, lo, hi), tm_rng_range(state, lo, hi));
+    const f32 x = tm_rng_range(state, lo, hi);
+    const f32 y = tm_rng_range(state, lo, hi);
+    const f32 z = tm_rng_range(state, lo, hi);
+    const f32 w = tm_rng_range(state, lo, hi);
+    return nph_vec4(x, y, z, w);
+}
+
+// Uniform in the box [lo, hi).
+static inline NphVec3 tm_rng_box(u64 *state, NphVec3 lo, NphVec3 hi)
+{
+    const f32 x = tm_rng_range(state, lo.x, hi.x);
+    const f32 y = tm_rng_range(state, lo.y, hi.y);
+    const f32 z = tm_rng_range(state, lo.z, hi.z);
+    return nph_vec3(x, y, z);
 }
 
 // Uniformly distributed unit vector (Marsaglia 1972).
@@ -103,9 +121,11 @@ static inline NphMat4 tm_rng_trs_mat4(u64 *state, NphVec3 *out_t, NphQuat *out_r
 static inline NphMat4 tm_rng_general_mat4(u64 *state)
 {
     for (;;) {
-        const NphMat4 m =
-            nph_mat4_from_cols(tm_rng_vec4(state, -1.0F, 1.0F), tm_rng_vec4(state, -1.0F, 1.0F),
-                               tm_rng_vec4(state, -1.0F, 1.0F), tm_rng_vec4(state, -1.0F, 1.0F));
+        const NphVec4 c0 = tm_rng_vec4(state, -1.0F, 1.0F);
+        const NphVec4 c1 = tm_rng_vec4(state, -1.0F, 1.0F);
+        const NphVec4 c2 = tm_rng_vec4(state, -1.0F, 1.0F);
+        const NphVec4 c3 = tm_rng_vec4(state, -1.0F, 1.0F);
+        const NphMat4 m = nph_mat4_from_cols(c0, c1, c2, c3);
         if (nph_f32_abs(nph_mat4_determinant(m)) >= 0.05F) {
             return m;
         }

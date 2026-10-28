@@ -476,11 +476,12 @@ static u32 check_cones(const NphVec3 *positions, const CookMeshlets *ml)
         u64 rng = 100U + i;
         for (u32 s = 0; s < 300U; ++s) {
             const f32 r = (f32)(test_rng_next(&rng) % 1000U) / 1000.0F * 30.0F + 0.5F;
-            const NphVec3 dir =
-                nph_vec3_normalize_or(nph_vec3((f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F,
-                                               (f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F,
-                                               (f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F),
-                                      nph_vec3_unit_y());
+            // Each draw a statement of its own (as one call's arguments, they
+            // would be made in an order each compiler chooses).
+            const f32 dx = (f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F;
+            const f32 dy = (f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F;
+            const f32 dz = (f32)(test_rng_next(&rng) % 2001U) / 1000.0F - 1.0F;
+            const NphVec3 dir = nph_vec3_normalize_or(nph_vec3(dx, dy, dz), nph_vec3_unit_y());
             const NphVec3 camera = nph_vec3_add(b->center, nph_vec3_scale(dir, r));
             const NphVec3 to_apex = nph_vec3_normalize_or_zero(nph_vec3_sub(b->cone_apex, camera));
             if (nph_vec3_dot(to_apex, axis) < cutoff) {

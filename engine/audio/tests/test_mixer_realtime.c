@@ -269,6 +269,16 @@ static void rt_scene_stream(RtScene *s, u32 k)
     }
 }
 
+// A point within `reach` of the origin across the ground, at `height`: x drawn
+// first (as one initializer's, the draws would be made in an order C leaves
+// unspecified and compilers differ in).
+static NphVec3 rt_scene_ground_point(RtScene *s, f32 reach, f32 height)
+{
+    const f32 x = test_rng_signed(&s->rng) * reach;
+    const f32 z = test_rng_signed(&s->rng) * reach;
+    return (NphVec3){x, height, z};
+}
+
 static void rt_scene_play(RtScene *s, u32 i)
 {
     NphAudioPlayDesc d = nph_audio_play_desc_default(s->clips[i % 4U]);
@@ -288,8 +298,7 @@ static void rt_scene_play(RtScene *s, u32 i)
     // A third are in 3D: placed, moving, near and far.
     if ((i % 3U) == 2U) {
         d.spatial = 1;
-        d.position =
-            (NphVec3){test_rng_signed(&s->rng) * 20.0F, 0.0F, test_rng_signed(&s->rng) * 20.0F};
+        d.position = rt_scene_ground_point(s, 20.0F, 0.0F);
         d.velocity = (NphVec3){test_rng_signed(&s->rng) * 10.0F, 0.0F, 0.0F};
         d.size = (i % 5U) == 0U ? 2.0F : 0.0F;
     }
@@ -324,10 +333,9 @@ static void rt_scene_steer(RtScene *s, u32 step)
     case 3U:
         nph_audio_voice_set_filters(s->m, s->voices[i], (step % 2U) != 0U ? 800.0F : 0.0F, 0.0F);
         // And the 3D voices move, behind walls and round corners.
-        nph_audio_voice_set_position(
-            s->m, s->voices[(i + 1U) % 48U],
-            (NphVec3){test_rng_signed(&s->rng) * 30.0F, 1.0F, test_rng_signed(&s->rng) * 30.0F},
-            (NphVec3){test_rng_signed(&s->rng) * 20.0F, 0.0F, test_rng_signed(&s->rng) * 20.0F});
+        const NphVec3 position = rt_scene_ground_point(s, 30.0F, 1.0F);
+        const NphVec3 velocity = rt_scene_ground_point(s, 20.0F, 0.0F);
+        nph_audio_voice_set_position(s->m, s->voices[(i + 1U) % 48U], position, velocity);
         nph_audio_voice_set_occlusion(s->m, s->voices[(i + 2U) % 48U], (f32)(step % 3U) * 0.5F,
                                       (f32)(step % 2U));
         break;

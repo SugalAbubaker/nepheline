@@ -27,9 +27,12 @@ static NphMat4 local_to_mat4(const NphLocalTransform *l)
 static NphLocalTransform random_local(u64 *rng, f32 extent)
 {
     const f32 a = (f32)test_rng_below(rng, 6283U) / 1000.0F;
-    const NphVec3 axis = nph_vec3_normalize(nph_vec3((f32)test_rng_below(rng, 100U) - 49.5F,
-                                                     (f32)test_rng_below(rng, 100U) + 1.0F,
-                                                     (f32)test_rng_below(rng, 100U) - 49.5F));
+    // Each draw a statement of its own (as one call's arguments, they would be
+    // made in an order each compiler chooses).
+    const f32 ax = (f32)test_rng_below(rng, 100U) - 49.5F;
+    const f32 ay = (f32)test_rng_below(rng, 100U) + 1.0F;
+    const f32 az = (f32)test_rng_below(rng, 100U) - 49.5F;
+    const NphVec3 axis = nph_vec3_normalize(nph_vec3(ax, ay, az));
     const f64 x = ((f64)test_rng_below(rng, 2001U) - 1000.0) / 1000.0 * (f64)extent;
     const f64 y = ((f64)test_rng_below(rng, 2001U) - 1000.0) / 1000.0 * (f64)extent;
     const f64 z = ((f64)test_rng_below(rng, 2001U) - 1000.0) / 1000.0 * (f64)extent;

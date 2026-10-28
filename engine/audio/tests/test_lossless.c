@@ -362,7 +362,8 @@ NTEST(audio_lossless, the_decoder_survives_garbage)
         memcpy(copy, enc.stream.data, enc.stream.size);
         const u32 flips = 1U + (u32)(test_rng_next(&rng) % 8U);
         for (u32 f = 0U; f < flips; ++f) {
-            copy[test_rng_next(&rng) % enc.stream.size] ^= (u8)(1U + test_rng_next(&rng) % 255U);
+            const u64 at = test_rng_next(&rng) % enc.stream.size;
+            copy[at] ^= (u8)(1U + test_rng_next(&rng) % 255U);
         }
         if (trial % 4U == 0U) {
             // Random bytes after a plausible header.

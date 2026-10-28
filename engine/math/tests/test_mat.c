@@ -97,8 +97,10 @@ NTEST(mat3, determinant_and_inverse)
     for (u32 i = 0; i < ITER; ++i) {
         NphMat3 m;
         do {
-            m = nph_mat3_from_cols(tm_rng_vec3(&rng, -1.0F, 1.0F), tm_rng_vec3(&rng, -1.0F, 1.0F),
-                                   tm_rng_vec3(&rng, -1.0F, 1.0F));
+            const NphVec3 c0 = tm_rng_vec3(&rng, -1.0F, 1.0F);
+            const NphVec3 c1 = tm_rng_vec3(&rng, -1.0F, 1.0F);
+            const NphVec3 c2 = tm_rng_vec3(&rng, -1.0F, 1.0F);
+            m = nph_mat3_from_cols(c0, c1, c2);
         } while (nph_f32_abs(nph_mat3_determinant(m)) < 0.05F);
         NTEST_ASSERT_TRUE(nph_mat3_inverse(m, &inv));
         TM_ASSERT_MAT3_NEAR(nph_mat3_mul(inv, m), nph_mat3_identity(), 1e-4F);
@@ -151,11 +153,11 @@ NTEST(mat3, orthonormalize)
     for (u32 i = 0; i < ITER; ++i) {
         const NphMat3 r = nph_mat3_from_quat(tm_rng_unit_quat(&rng));
         // Perturb by a few percent, then recover.
+        const NphVec3 c0 = tm_rng_vec3(&rng, -1.0F, 1.0F);
+        const NphVec3 c1 = tm_rng_vec3(&rng, -1.0F, 1.0F);
+        const NphVec3 c2 = tm_rng_vec3(&rng, -1.0F, 1.0F);
         const NphMat3 noisy =
-            nph_mat3_add(r, nph_mat3_scale(nph_mat3_from_cols(tm_rng_vec3(&rng, -1.0F, 1.0F),
-                                                              tm_rng_vec3(&rng, -1.0F, 1.0F),
-                                                              tm_rng_vec3(&rng, -1.0F, 1.0F)),
-                                           0.02F));
+            nph_mat3_add(r, nph_mat3_scale(nph_mat3_from_cols(c0, c1, c2), 0.02F));
         const NphMat3 o = nph_mat3_orthonormalize(noisy);
         TM_ASSERT_MAT3_NEAR(nph_mat3_mul(nph_mat3_transpose(o), o), nph_mat3_identity(), 1e-5F);
         TM_ASSERT_MAT3_NEAR(o, r, 0.1F);

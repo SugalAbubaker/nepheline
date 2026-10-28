@@ -319,9 +319,8 @@ NTEST(hdr, r11g11b10f)
     // Relative error within half an ulp of the 6-bit (red, green) and 5-bit (blue) mantissas.
     u64 rng = 53U;
     for (u32 i = 0; i < 100000U; ++i) {
-        const NphVec3 c = nph_vec3(nph_f32_exp2(tm_rng_range(&rng, -13.0F, 15.5F)),
-                                   nph_f32_exp2(tm_rng_range(&rng, -13.0F, 15.5F)),
-                                   nph_f32_exp2(tm_rng_range(&rng, -13.0F, 15.5F)));
+        const NphVec3 e = tm_rng_vec3(&rng, -13.0F, 15.5F);
+        const NphVec3 c = nph_vec3(nph_f32_exp2(e.x), nph_f32_exp2(e.y), nph_f32_exp2(e.z));
         const NphVec3 d = nph_unpack_r11g11b10f(nph_pack_r11g11b10f(c));
         NTEST_ASSERT_TRUE(nph_f32_abs(d.x - c.x) <= c.x * (1.0F / 128.0F) + 1e-7F);
         NTEST_ASSERT_TRUE(nph_f32_abs(d.y - c.y) <= c.y * (1.0F / 128.0F) + 1e-7F);
@@ -365,9 +364,8 @@ NTEST(hdr, rgb9e5)
     // The absolute error is bounded by half a step of the shared exponent.
     u64 rng = 54U;
     for (u32 i = 0; i < 100000U; ++i) {
-        const NphVec3 c = nph_vec3(nph_f32_exp2(tm_rng_range(&rng, -12.0F, 15.9F)),
-                                   nph_f32_exp2(tm_rng_range(&rng, -12.0F, 15.9F)),
-                                   nph_f32_exp2(tm_rng_range(&rng, -12.0F, 15.9F)));
+        const NphVec3 e = tm_rng_vec3(&rng, -12.0F, 15.9F);
+        const NphVec3 c = nph_vec3(nph_f32_exp2(e.x), nph_f32_exp2(e.y), nph_f32_exp2(e.z));
         const NphVec3 d = nph_unpack_rgb9e5(nph_pack_rgb9e5(c));
         const f32 max_c = nph_vec3_max_component(c);
         const f32 step =

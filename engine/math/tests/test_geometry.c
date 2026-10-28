@@ -152,10 +152,10 @@ NTEST(sphere, queries_and_union)
     TM_ASSERT_VEC3_NEAR(u.center, nph_vec3(2.5F, 0.0F, 0.0F), 1e-6F);
     u64 rng = 41U;
     for (u32 i = 0; i < ITER; ++i) {
-        const NphSphere x =
-            nph_sphere(tm_rng_vec3(&rng, -5.0F, 5.0F), tm_rng_range(&rng, 0.1F, 3.0F));
-        const NphSphere y =
-            nph_sphere(tm_rng_vec3(&rng, -5.0F, 5.0F), tm_rng_range(&rng, 0.1F, 3.0F));
+        const NphVec3 cx = tm_rng_vec3(&rng, -5.0F, 5.0F);
+        const NphSphere x = nph_sphere(cx, tm_rng_range(&rng, 0.1F, 3.0F));
+        const NphVec3 cy = tm_rng_vec3(&rng, -5.0F, 5.0F);
+        const NphSphere y = nph_sphere(cy, tm_rng_range(&rng, 0.1F, 3.0F));
         const NphSphere un = nph_sphere_union(x, y);
         // Contains both: distance between centres plus the inner radius fits.
         NTEST_ASSERT_TRUE(nph_vec3_distance(un.center, x.center) + x.radius <= un.radius + 1e-4F);
@@ -258,9 +258,10 @@ NTEST(plane, transform)
         NphVec3 t;
         NphVec3 b;
         nph_vec3_orthonormal_basis(n, &t, &b);
+        const f32 along_t = tm_rng_range(&rng, -3.0F, 3.0F);
+        const f32 along_b = tm_rng_range(&rng, -3.0F, 3.0F);
         const NphVec3 on =
-            nph_vec3_add(p0, nph_vec3_add(nph_vec3_scale(t, tm_rng_range(&rng, -3.0F, 3.0F)),
-                                          nph_vec3_scale(b, tm_rng_range(&rng, -3.0F, 3.0F))));
+            nph_vec3_add(p0, nph_vec3_add(nph_vec3_scale(t, along_t), nph_vec3_scale(b, along_b)));
         NTEST_ASSERT_NEAR_F32(nph_plane_distance(q, nph_affine_transform_point(m, on)), 0.0F,
                               1e-3F);
         const NphVec3 above = nph_vec3_mul_add(p0, n, 1.0F);
@@ -540,9 +541,7 @@ NTEST(frustum, plane_extraction_matches_clip_space)
     for (u32 k = 0; k < 3U; ++k) {
         u32 inside = 0U;
         for (u32 i = 0; i < 4U * ITER; ++i) {
-            const NphVec3 p =
-                nph_vec3(tm_rng_range(&rng, lo[k].x, hi[k].x), tm_rng_range(&rng, lo[k].y, hi[k].y),
-                         tm_rng_range(&rng, lo[k].z, hi[k].z));
+            const NphVec3 p = tm_rng_box(&rng, lo[k], hi[k]);
             // Skip points within a clip-space margin of a boundary, where
             // rounding in either formulation could flip the answer.
             if (clip_ambiguous(mats[k], p, 1e-3F)) {
@@ -596,8 +595,7 @@ NTEST(frustum, aabb_and_sphere_classification)
     u32 seen_outside = 0U;
     for (u32 i = 0; i < 4U * ITER; ++i) {
         const NphVec3 c =
-            nph_vec3(tm_rng_range(&rng, -40.0F, 40.0F), tm_rng_range(&rng, -40.0F, 40.0F),
-                     tm_rng_range(&rng, -120.0F, 10.0F));
+            tm_rng_box(&rng, nph_vec3(-40.0F, -40.0F, -120.0F), nph_vec3(40.0F, 40.0F, 10.0F));
         const NphAABB b = nph_aabb_from_center_extents(c, tm_rng_vec3(&rng, 0.1F, 6.0F));
         u32 corners_inside = 0U;
         for (u32 k = 0; k < 8U; ++k) {

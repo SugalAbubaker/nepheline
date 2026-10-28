@@ -51,13 +51,16 @@ int main(void)
     NphPcg32 rng;
     nph_pcg32_seed(&rng, 2026U, 10U);
     for (u32 i = 0; i < BOX_COUNT; ++i) {
-        const NphVec3 c = nph_vec3(nph_pcg32_next_range_f32(&rng, -80.0F, 80.0F),
-                                   nph_pcg32_next_range_f32(&rng, -10.0F, 30.0F),
-                                   nph_pcg32_next_range_f32(&rng, -80.0F, 80.0F));
-        const NphVec3 e = nph_vec3(nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F),
-                                   nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F),
-                                   nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F));
-        g_boxes[i] = nph_aabb_from_center_extents(c, e);
+        // Each draw a statement of its own, so every compiler makes the same
+        // field (as one call's arguments, the draws would be made in an
+        // order C leaves unspecified).
+        const f32 cx = nph_pcg32_next_range_f32(&rng, -80.0F, 80.0F);
+        const f32 cy = nph_pcg32_next_range_f32(&rng, -10.0F, 30.0F);
+        const f32 cz = nph_pcg32_next_range_f32(&rng, -80.0F, 80.0F);
+        const f32 ex = nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F);
+        const f32 ey = nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F);
+        const f32 ez = nph_pcg32_next_range_f32(&rng, 0.2F, 3.0F);
+        g_boxes[i] = nph_aabb_from_center_extents(nph_vec3(cx, cy, cz), nph_vec3(ex, ey, ez));
     }
     int status = 0;
     for (int l = 0; l <= (int)level; ++l) {

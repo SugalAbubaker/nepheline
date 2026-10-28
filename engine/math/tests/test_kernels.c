@@ -149,8 +149,7 @@ NTEST(kernels, scalar_cull_agrees_with_geometry_away_from_boundaries)
     u32 checked = 0U;
     for (u32 i = 0; i < 4000U; ++i) {
         const NphVec3 c =
-            nph_vec3(tm_rng_range(&rng, -40.0F, 40.0F), tm_rng_range(&rng, -40.0F, 40.0F),
-                     tm_rng_range(&rng, -70.0F, 5.0F));
+            tm_rng_box(&rng, nph_vec3(-40.0F, -40.0F, -70.0F), nph_vec3(40.0F, 40.0F, 5.0F));
         const NphVec3 e = tm_rng_vec3(&rng, 0.1F, 5.0F);
         const NphAABB b = nph_aabb_from_center_extents(c, e);
         f32 margin = NPH_F32_INFINITY;

@@ -92,15 +92,36 @@ static NphPcg32 bench_rng(u64 seed)
     return r;
 }
 
+// The scenes' draws are each a statement of their own: as one call's
+// arguments (or one initializer's), they would be made in an order C leaves
+// unspecified, which compilers differ in, and each would build another scene
+// from the same seed.
 static NphVec3 rand_vec3(NphPcg32 *r, f32 lo, f32 hi)
 {
-    return nph_vec3(nph_pcg32_next_range_f32(r, lo, hi), nph_pcg32_next_range_f32(r, lo, hi),
-                    nph_pcg32_next_range_f32(r, lo, hi));
+    const f32 x = nph_pcg32_next_range_f32(r, lo, hi);
+    const f32 y = nph_pcg32_next_range_f32(r, lo, hi);
+    const f32 z = nph_pcg32_next_range_f32(r, lo, hi);
+    return nph_vec3(x, y, z);
+}
+
+// (x, y, z) with x and z drawn in [lo, hi).
+static NphVec3 rand_ground(NphPcg32 *r, f32 lo, f32 hi, f32 y)
+{
+    const f32 x = nph_pcg32_next_range_f32(r, lo, hi);
+    const f32 z = nph_pcg32_next_range_f32(r, lo, hi);
+    return nph_vec3(x, y, z);
 }
 
 static NphVec3 rand_unit(NphPcg32 *r)
 {
-    return nph_sample_sphere_uniform(nph_vec2(nph_pcg32_next_f32(r), nph_pcg32_next_f32(r)));
+    return nph_sample_sphere_uniform(nph_pcg32_next_vec2(r));
+}
+
+// A direction, then a length in [lo, hi).
+static NphVec3 rand_offset(NphPcg32 *r, f32 lo, f32 hi)
+{
+    const NphVec3 d = rand_unit(r);
+    return nph_vec3_scale(d, nph_pcg32_next_range_f32(r, lo, hi));
 }
 
 static NphQuat rand_rotation(NphPcg32 *r)
@@ -118,7 +139,7 @@ static NphPhysicsHull *make_hull(NphPcg32 *r, u32 points, u32 budget)
 {
     NphVec3 pts[1000];
     for (u32 i = 0U; i < points; ++i) {
-        pts[i] = nph_vec3_scale(rand_unit(r), nph_pcg32_next_range_f32(r, 0.7F, 1.0F));
+        pts[i] = rand_offset(r, 0.7F, 1.0F);
     }
     NphPhysicsHullDesc desc;
     memset(&desc, 0, sizeof desc);
@@ -137,11 +158,10 @@ static void make_pairs(NphPcg32 *r, f32 lo, f32 hi, NphPhysicsPose a[PAIRS],
                        NphPhysicsPose b[PAIRS])
 {
     for (u32 i = 0U; i < PAIRS; ++i) {
-        a[i] = nph_physics_pose(rand_vec3(r, -0.1F, 0.1F), rand_rotation(r));
-        b[i] = nph_physics_pose(
-            nph_vec3_add(a[i].position,
-                         nph_vec3_scale(rand_unit(r), nph_pcg32_next_range_f32(r, lo, hi))),
-            rand_rotation(r));
+        const NphVec3 pa = rand_vec3(r, -0.1F, 0.1F);
+        a[i] = nph_physics_pose(pa, rand_rotation(r));
+        const NphVec3 pb = nph_vec3_add(a[i].position, rand_offset(r, lo, hi));
+        b[i] = nph_physics_pose(pb, rand_rotation(r));
     }
 }
 
@@ -167,7 +187,7 @@ NBENCH(hull_build_1000_64v)
     NphPcg32 r = bench_rng(1U);
     static NphVec3 pts[1000];
     for (u32 i = 0U; i < 1000U; ++i) {
-        pts[i] = nph_vec3_scale(rand_unit(&r), nph_pcg32_next_range_f32(&r, 0.0F, 1.0F));
+        pts[i] = rand_offset(&r, 0.0F, 1.0F);
     }
     NphPhysicsHullDesc desc;
     memset(&desc, 0, sizeof desc);
@@ -241,10 +261,9 @@ NBENCH(collide_box_box_resting)
     NphPhysicsPose pb[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
         pa[i] = nph_physics_pose_identity();
-        pb[i] =
-            nph_physics_pose(nph_vec3(nph_pcg32_next_range_f32(&r, -0.2F, 0.2F), 0.995F,
-                                      nph_pcg32_next_range_f32(&r, -0.2F, 0.2F)),
-                             nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 1.5F)));
+        const NphVec3 at = rand_ground(&r, -0.2F, 0.2F, 0.995F);
+        pb[i] = nph_physics_pose(
+            at, nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 1.5F)));
     }
     const NphPhysicsGeometry box = nph_physics_geometry_box(nph_vec3(0.5F, 0.5F, 0.5F));
     bench_collide(state, &box, &box, pa, pb, true);
@@ -643,8 +662,7 @@ NBENCH(mesh_raycast_grid_128)
     NphPcg32 r = bench_rng(31U);
     NphVec3 origins[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        origins[i] = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 5.0F,
-                              nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        origins[i] = rand_ground(&r, -30.0F, 30.0F, 5.0F);
     }
     const NphVec3 delta = nph_vec3(0.3F, -10.0F, 0.2F);
     nbench_set_items_per_iteration(state, PAIRS);
@@ -673,8 +691,7 @@ NBENCH(mesh_overlap_grid_128)
     NphPcg32 r = bench_rng(32U);
     NphAABB boxes[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        const NphVec3 c = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
-                                   nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        const NphVec3 c = rand_ground(&r, -30.0F, 30.0F, 0.0F);
         boxes[i] =
             nph_aabb(nph_vec3_sub(c, nph_vec3_splat(0.5F)), nph_vec3_add(c, nph_vec3_splat(0.5F)));
     }
@@ -700,9 +717,9 @@ static void bench_collide_mesh(NbenchState *state, const NphPhysicsGeometry *g, 
     NphPcg32 r = bench_rng(33U);
     NphPhysicsPose poses[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
+        const NphVec3 place = rand_ground(&r, -10.0F, 10.0F, rest - 0.001F);
         poses[i] = nph_physics_pose(
-            nph_vec3(nph_pcg32_next_range_f32(&r, -10.0F, 10.0F), rest - 0.001F,
-                     nph_pcg32_next_range_f32(&r, -10.0F, 10.0F)),
+            place,
             nph_quat_mul(nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)), lie));
     }
     NphPhysicsMeshManifolds mm;
@@ -799,8 +816,8 @@ NBENCH(heightfield_raycast_256)
     NphPcg32 r = bench_rng(31U);
     NphVec3 origins[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        origins[i] = nph_vec3(64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 5.0F,
-                              64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        origins[i] =
+            nph_vec3_add(nph_vec3(64.0F, 0.0F, 64.0F), rand_ground(&r, -30.0F, 30.0F, 5.0F));
     }
     const NphVec3 delta = nph_vec3(0.3F, -10.0F, 0.2F);
     nbench_set_items_per_iteration(state, PAIRS);
@@ -850,8 +867,8 @@ NBENCH(heightfield_overlap_256)
     NphPcg32 r = bench_rng(32U);
     NphAABB boxes[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        const NphVec3 c = nph_vec3(64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
-                                   64.0F + nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
+        const NphVec3 c =
+            nph_vec3_add(nph_vec3(64.0F, 0.0F, 64.0F), rand_ground(&r, -30.0F, 30.0F, 0.0F));
         boxes[i] =
             nph_aabb(nph_vec3_sub(c, nph_vec3_splat(0.5F)), nph_vec3_add(c, nph_vec3_splat(0.5F)));
     }
@@ -878,9 +895,9 @@ static void bench_collide_field(NbenchState *state, const NphPhysicsGeometry *g,
     NphPcg32 r = bench_rng(33U);
     NphPhysicsPose poses[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
+        const NphVec3 place = rand_ground(&r, -10.0F, 10.0F, rest - 0.001F);
         poses[i] = nph_physics_pose(
-            nph_vec3(nph_pcg32_next_range_f32(&r, -10.0F, 10.0F), rest - 0.001F,
-                     nph_pcg32_next_range_f32(&r, -10.0F, 10.0F)),
+            place,
             nph_quat_mul(nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)), lie));
     }
     const NphPhysicsPose at = nph_physics_pose(nph_vec3(-16.0F, 0.0F, -16.0F), nph_quat_identity());
@@ -948,7 +965,7 @@ NBENCH(collide_mesh_hull_32v)
 // From 3 to 6 m out, twice the way to a point within a metre of `center`.
 static void make_motion(NphPcg32 *r, NphVec3 center, NphVec3 *from, NphVec3 *delta)
 {
-    *from = nph_vec3_mul_add(center, rand_unit(r), nph_pcg32_next_range_f32(r, 3.0F, 6.0F));
+    *from = nph_vec3_add(center, rand_offset(r, 3.0F, 6.0F));
     const NphVec3 aim = nph_vec3_add(center, rand_vec3(r, -1.0F, 1.0F));
     *delta = nph_vec3_scale(nph_vec3_sub(aim, *from), 2.0F);
 }
@@ -960,7 +977,8 @@ static void bench_raycast(NbenchState *state, const NphPhysicsGeometry *g)
     NphVec3 origins[PAIRS];
     NphVec3 deltas[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        poses[i] = nph_physics_pose(rand_vec3(&r, -1.0F, 1.0F), rand_rotation(&r));
+        const NphVec3 place = rand_vec3(&r, -1.0F, 1.0F);
+        poses[i] = nph_physics_pose(place, rand_rotation(&r));
         make_motion(&r, poses[i].position, &origins[i], &deltas[i]);
     }
     nbench_set_items_per_iteration(state, PAIRS);
@@ -1011,7 +1029,8 @@ static void bench_shape_cast(NbenchState *state, const NphPhysicsGeometry *a,
     NphPhysicsPose pb[PAIRS];
     NphVec3 deltas[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        pb[i] = nph_physics_pose(rand_vec3(&r, -1.0F, 1.0F), rand_rotation(&r));
+        const NphVec3 place = rand_vec3(&r, -1.0F, 1.0F);
+        pb[i] = nph_physics_pose(place, rand_rotation(&r));
         NphVec3 from;
         make_motion(&r, pb[i].position, &from, &deltas[i]);
         pa[i] = nph_physics_pose(from, rand_rotation(&r));
@@ -1077,10 +1096,9 @@ static void bench_cast_surface(NbenchState *state, const NphPhysicsGeometry *a,
     NphPhysicsPose pa[PAIRS];
     NphVec3 deltas[PAIRS];
     for (u32 i = 0U; i < PAIRS; ++i) {
-        pa[i] =
-            nph_physics_pose(nph_vec3(nph_pcg32_next_range_f32(&r, -14.0F, 14.0F), 1.5F,
-                                      nph_pcg32_next_range_f32(&r, -14.0F, 14.0F)),
-                             nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)));
+        const NphVec3 place = rand_ground(&r, -14.0F, 14.0F, 1.5F);
+        pa[i] = nph_physics_pose(
+            place, nph_quat_from_rotation_y(nph_pcg32_next_range_f32(&r, 0.0F, 6.28F)));
         const NphVec3 side = rand_unit(&r);
         deltas[i] = nph_vec3(side.x, -2.0F, side.z);
     }
@@ -1284,17 +1302,16 @@ static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solv
     }
     NphPcg32 r = bench_rng(17U);
     for (u32 i = 0U; i < 1000U / WORLD_SCALE; ++i) {
-        const NphDVec3 p =
-            nph_dvec3((f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F), 1.0 + 0.05 * (f64)i,
-                      (f64)nph_pcg32_next_range_f32(&r, -4.0F, 4.0F));
+        const NphVec3 xz = rand_ground(&r, -4.0F, 4.0F, 0.0F);
+        const NphDVec3 p = nph_dvec3((f64)xz.x, 1.0 + 0.05 * (f64)i, (f64)xz.z);
         NphPhysicsGeometry g;
         if (i % 3U == 0U) {
             g = nph_physics_geometry_box(rand_vec3(&r, 0.15F, 0.35F));
         } else if (i % 3U == 1U) {
             g = nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.15F, 0.3F));
         } else {
-            g = nph_physics_geometry_capsule(nph_pcg32_next_range_f32(&r, 0.1F, 0.3F),
-                                             nph_pcg32_next_range_f32(&r, 0.1F, 0.2F));
+            const f32 radius = nph_pcg32_next_range_f32(&r, 0.1F, 0.3F);
+            g = nph_physics_geometry_capsule(radius, nph_pcg32_next_range_f32(&r, 0.1F, 0.2F));
         }
         bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, p, rand_rotation(&r), g);
     }
@@ -1716,8 +1733,7 @@ static NphPhysicsWorld *gallery(void)
         const NphPhysicsGeometry g =
             i % 2U == 0U ? nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.05F, 0.1F))
                          : nph_physics_geometry_box(rand_vec3(&r, 0.05F, 0.1F));
-        const NphVec3 v =
-            nph_vec3_scale(rand_unit(&r), nph_pcg32_next_range_f32(&r, 50.0F, 200.0F));
+        const NphVec3 v = rand_offset(&r, 50.0F, 200.0F);
         gallery_body(w, NPH_PHYSICS_BODY_DYNAMIC, nph_dvec3((f64)p.x, (f64)p.y, (f64)p.z),
                      rand_rotation(&r), g, v, i % 3U == 0U);
     }
@@ -1753,8 +1769,8 @@ static NphPhysicsWorld *query_world(void)
         if (i % 3U == 0U) {
             g = nph_physics_geometry_sphere(nph_pcg32_next_range_f32(&r, 0.3F, 1.5F));
         } else if (i % 3U == 1U) {
-            g = nph_physics_geometry_capsule(nph_pcg32_next_range_f32(&r, 0.3F, 1.0F),
-                                             nph_pcg32_next_range_f32(&r, 0.2F, 0.6F));
+            const f32 radius = nph_pcg32_next_range_f32(&r, 0.3F, 1.0F);
+            g = nph_physics_geometry_capsule(radius, nph_pcg32_next_range_f32(&r, 0.2F, 0.6F));
         } else {
             g = nph_physics_geometry_box(rand_vec3(&r, 0.3F, 1.5F));
         }
@@ -1900,9 +1916,9 @@ static bool terrain_begin(Terrain *t)
                nph_physics_geometry_heightfield(t->field));
     NphPcg32 r = bench_rng(53U);
     for (u32 i = 0U; i < 1000U / WORLD_SCALE; ++i) {
-        const NphVec3 p = nph_vec3(nph_pcg32_next_range_f32(&r, -30.0F, 30.0F), 0.0F,
-                                   nph_pcg32_next_range_f32(&r, -30.0F, 30.0F));
-        bench_body(t->w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_from_vec3(p), rand_rotation(&r),
+        const NphVec3 p = rand_ground(&r, -30.0F, 30.0F, 0.0F);
+        const NphQuat turn = rand_rotation(&r);
+        bench_body(t->w, NPH_PHYSICS_BODY_STATIC, nph_dvec3_from_vec3(p), turn,
                    nph_physics_geometry_box(rand_vec3(&r, 0.2F, 0.6F)));
     }
     for (u32 i = 0U; i < PAIRS; ++i) {
