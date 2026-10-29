@@ -162,3 +162,24 @@ bool proxy_stream_displaces(ProxyStreamWorth w, ProxyStreamWorth held);
 // What a level's mesh takes on the GPU, by its counts (render/renderer.h's
 // streams: records, bounds, makers, levels, voxels).
 u64 proxy_stream_level_bytes(const NphMeshView *mv);
+
+// A level an update may load (a cell's next finer) or drop (its finest
+// held), kept in the update's one pass over the cells (ADR-0063 stage 4):
+// its cell's index, in the order the cells were added, the level, and its
+// worth.
+typedef struct ProxyStreamPick {
+    u32 cell;
+    u32 level;
+    ProxyStreamWorth worth;
+} ProxyStreamPick;
+
+// `p` kept among the first `cap` of `picks` (`*count` of them so far, a heap
+// whose root is the last of them, each slot after its children): with
+// `drop`, those worth least go first, else those worth most; between equal
+// worths, the cell added first, as a scan over the cells would pick.
+// O(log cap).
+void proxy_stream_pick_keep(ProxyStreamPick *picks, u32 *count, u32 cap, ProxyStreamPick p,
+                            bool drop);
+
+// The `count` picks kept, in their order (the first to load or drop first).
+void proxy_stream_pick_sort(ProxyStreamPick *picks, u32 count, bool drop);

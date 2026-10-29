@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Proxy streaming's decisions (runtime/proxy_stream.h; ADR-0063 stage 3),
 // pure and apart from a renderer: the level a cell is wanted at, what a
-// level is worth holding, and when one pushes another out past the budget.
+// level is worth holding, when one pushes another out past the budget, and
+// the picks an update keeps of the levels to load and drop (stage 4).
 // The stream itself, over a cooked world, is tests/integration's
 // test_proxy_stream.c.
+#include <nepheline/math/random.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/runtime/proxy_stream.h>
 
@@ -121,4 +123,105 @@ NTEST(proxy_stream, the_view_is_the_renderers_scale)
     NTEST_EXPECT_NEAR_F32(sv.pixels_per_unit, 540.0F / nph_f32_tan(0.3F), 1.0e-2F);
     NTEST_EXPECT_NEAR_F32(sv.lod_error, 1.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(sv.znear, 0.05F, 0.0F);
+}
+
+NTEST(proxy_stream, a_pick_goes_first_by_its_worth_then_by_the_cell_added_first)
+{
+    const ProxyStreamPick spare_large = {0U, 2U, {0, 9.0F}};
+    const ProxyStreamPick needed_small = {1U, 2U, {1, 1.0F}};
+    const ProxyStreamPick needed_large = {2U, 1U, {1, 3.0F}};
+    const ProxyStreamPick needed_large_later = {3U, 0U, {1, 3.0F}};
+    const ProxyStreamPick all[4] = {needed_large_later, spare_large, needed_large, needed_small};
+    // To load, the three worth most: needed before spare, then by error, a
+    // tie to the cell added first.
+    ProxyStreamPick picks[3];
+    u32 count = 0U;
+    for (u32 i = 0; i < 4U; ++i) {
+        proxy_stream_pick_keep(picks, &count, 3U, all[i], false);
+    }
+    NTEST_ASSERT_EQ_UINT(count, 3U);
+    proxy_stream_pick_sort(picks, count, false);
+    NTEST_EXPECT_EQ_UINT(picks[0].cell, 2U);
+    NTEST_EXPECT_EQ_UINT(picks[1].cell, 3U);
+    NTEST_EXPECT_EQ_UINT(picks[2].cell, 1U);
+    NTEST_EXPECT_EQ_UINT(picks[2].level, 2U);
+    // To drop, the three worth least, in that order.
+    count = 0U;
+    for (u32 i = 0; i < 4U; ++i) {
+        proxy_stream_pick_keep(picks, &count, 3U, all[i], true);
+    }
+    proxy_stream_pick_sort(picks, count, true);
+    NTEST_EXPECT_EQ_UINT(picks[0].cell, 0U);
+    NTEST_EXPECT_EQ_UINT(picks[1].cell, 1U);
+    NTEST_EXPECT_EQ_UINT(picks[2].cell, 2U);
+    // No room keeps nothing.
+    count = 0U;
+    proxy_stream_pick_keep(picks, &count, 0U, needed_large, false);
+    NTEST_EXPECT_EQ_UINT(count, 0U);
+}
+
+// The order a scan over the cells picks in: by worth (most first to load,
+// least first to drop), then by the cell added first.
+static bool scan_before(const ProxyStreamPick *a, const ProxyStreamPick *b, bool drop)
+{
+    const bool above = proxy_stream_worth_above(a->worth, b->worth);
+    const bool below = proxy_stream_worth_above(b->worth, a->worth);
+    if (above != below) {
+        return drop ? below : above;
+    }
+    return a->cell < b->cell;
+}
+
+NTEST(proxy_stream, the_picks_are_the_first_of_every_candidate_in_order)
+{
+    // Candidates in random orders, their worths from a few values so that
+    // ties are many: the picks kept are the first `cap` of all of them
+    // sorted, for loads and drops, under the cap and over it.
+    enum {
+        CANDIDATES = 400,
+        CAP = 72
+    };
+    static ProxyStreamPick all[CANDIDATES];
+    static ProxyStreamPick sorted[CANDIDATES];
+    ProxyStreamPick picks[CAP];
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0x9e3779b97f4a7c15ULL, 7U);
+    for (u32 round = 0; round < 200U; ++round) {
+        const u32 n = 1U + nph_pcg32_next_bounded(&rng, CANDIDATES);
+        const u32 cap = 1U + nph_pcg32_next_bounded(&rng, CAP);
+        for (u32 i = 0; i < n; ++i) {
+            all[i].cell = i;
+            all[i].level = nph_pcg32_next_bounded(&rng, 16U);
+            all[i].worth.needed = (b32)nph_pcg32_next_bounded(&rng, 2U);
+            all[i].worth.error = (f32)nph_pcg32_next_bounded(&rng, 6U) * 0.5F;
+        }
+        // Shuffled: the cells are not offered in the order they were added.
+        for (u32 i = n - 1U; i > 0U; --i) {
+            const u32 j = nph_pcg32_next_bounded(&rng, i + 1U);
+            const ProxyStreamPick t = all[i];
+            all[i] = all[j];
+            all[j] = t;
+        }
+        for (u32 d = 0; d < 2U; ++d) {
+            const bool drop = d != 0U;
+            u32 count = 0U;
+            for (u32 i = 0; i < n; ++i) {
+                proxy_stream_pick_keep(picks, &count, cap, all[i], drop);
+            }
+            NTEST_ASSERT_EQ_UINT(count, n < cap ? n : cap);
+            proxy_stream_pick_sort(picks, count, drop);
+            // Every candidate sorted (insertion; the order is total).
+            for (u32 i = 0; i < n; ++i) {
+                u32 j = i;
+                for (; j > 0U && scan_before(&all[i], &sorted[j - 1U], drop); --j) {
+                    sorted[j] = sorted[j - 1U];
+                }
+                sorted[j] = all[i];
+            }
+            for (u32 k = 0; k < count; ++k) {
+                NTEST_ASSERT_EQ_UINT(picks[k].cell, sorted[k].cell);
+                NTEST_EXPECT_EQ_UINT(picks[k].level, sorted[k].level);
+            }
+        }
+    }
 }

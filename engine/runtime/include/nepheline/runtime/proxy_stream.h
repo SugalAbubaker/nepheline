@@ -41,9 +41,13 @@
 // do. A cell whose level fails to load is left as it is, the failure logged
 // and counted.
 //
-// Costs: create allocates the cells' table (`max_cells`) and the builds'
-// (`max_loads`); update allocates nothing of its own, but what the loader
-// and the renderer do for a level.
+// Costs: create allocates the cells' table (`max_cells`), the builds'
+// (`max_loads`) and the picks' (`max_loads` and 72 more); update allocates
+// nothing of its own, but what the loader and the renderer do for a level,
+// and passes over the cells once (ADR-0063 stage 4): each cell's level
+// wanted, its next finer level kept if it is among the best to load, its
+// finest held if among the least worth keeping (bounded heaps), O(cells +
+// the loads and drops it makes).
 // Thread-safety: NPH_MAIN_THREAD_ONLY (it drives the renderer); update
 // between nph_gpu_frame_begin and nph_render_frame, so that a mesh's uploads
 // go with the frame's.
@@ -73,7 +77,7 @@ typedef struct NphProxyStreamDesc {
     // The bytes the held levels past each cell's coarsest may take on the
     // GPU (their meshes' streams; 0: unlimited).
     u64 budget_bytes;
-    u32 max_loads;         // levels loading (or being made) at once (0: 8)
+    u32 max_loads;         // levels loading (or being made) at once (0: 64)
     u64 max_install_bytes; // levels begun a frame, in their bytes (0: 8 MiB; one at least)
 } NphProxyStreamDesc;
 
