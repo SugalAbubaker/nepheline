@@ -32,7 +32,7 @@
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
-//                 [--vsm-trace] [--no-cells]
+//                 [--vsm-trace] [--memory-trace] [--no-cells]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -49,7 +49,8 @@
 // no proxy, for comparing a scene with its cells and without. After each
 // scene, a line reports the GPU memory the process holds
 // (nph_gpu_device_memory_stats): device-local in use against the OS's
-// budget for it.
+// budget for it; --memory-trace reports it every 16th frame, warm-up
+// included, where bottom levels are built.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -436,10 +437,11 @@ static const char *const k_debug_views[] = {
 NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT - 1U,
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
-static f32 g_lod_error = -1.0F;  // --lod-error (negative: the view's default)
-static u32 g_lists = 1U;         // --lists: the production path's list capacities, times this
-static bool g_vsm_trace = false; // --vsm-trace: every frame's shadow map statistics
-static bool g_no_cells = false;  // --no-cells: the scenes' cells not loaded
+static f32 g_lod_error = -1.0F;     // --lod-error (negative: the view's default)
+static u32 g_lists = 1U;            // --lists: the production path's list capacities, times this
+static bool g_vsm_trace = false;    // --vsm-trace: every frame's shadow map statistics
+static bool g_memory_trace = false; // --memory-trace: the GPU memory every 16th frame
+static bool g_no_cells = false;     // --no-cells: the scenes' cells not loaded
 static u32 g_trace_frame = 0U;
 
 typedef struct Result {
@@ -1280,6 +1282,13 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
                stats->vsm_nodes, stats->vsm_draws, stats->vsm_voxel_draws, stats->vsm_lod_bias,
                stats->vsm_overflow);
     }
+    if (g_memory_trace && r == NPH_RESULT_OK && g_trace_frame % 16U == 0U) {
+        const NphGpuMemoryStats m = nph_gpu_device_memory_stats(ctx->dev);
+        printf("    memory frame %u: %.3f GB device-local in use (budget %.3f GB), %.3f GB "
+               "host-visible\n",
+               g_trace_frame, (f64)m.device_local_used / 1.0e9, (f64)m.device_local_budget / 1.0e9,
+               (f64)m.host_visible_used / 1.0e9);
+    }
     ++g_trace_frame;
     return r != NPH_RESULT_OK ? r : er;
 }
@@ -2089,7 +2098,8 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
-                    "[--lod-error=PX] [--lists=N] [--vsm-trace] [--no-cells]\n");
+                    "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] "
+                    "[--no-cells]\n");
     return 2;
 }
 
@@ -2128,6 +2138,8 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "--vsm-trace") == 0) {
             g_vsm_trace = true;
+        } else if (strcmp(argv[i], "--memory-trace") == 0) {
+            g_memory_trace = true;
         } else if (strcmp(argv[i], "--no-cells") == 0) {
             g_no_cells = true;
         } else if (strcmp(argv[i], "--validation") == 0) {
