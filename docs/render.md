@@ -1100,6 +1100,14 @@ arrive (`test_vis_cells.c`: held from level 1 or 2 on, the grove draws that
 level over 1.24 and 1.34 times the pixels level 0 does; without the flag,
 nothing).
 
+**A cell's proxy replaced** (ADR-0063 stage 3). `nph_render_cell_set_proxy`
+gives a cell new proxy meshes (a streamed proxy's held levels, finest first),
+its materials and place unchanged: an instance is kept where its mesh stays,
+made where a mesh comes and destroyed where one goes, and the statistics'
+flag and the clamp's move to the coarsest and the finest (`test_vis_cells.c`:
+held from level 2, then 1, then 0, the grove draws its finest held level, and
+the whole's pixels once it holds them all; nothing leaks).
+
 **Requests** (ADR-0063 stage 3). A cell given its streamed proxy's levels'
 errors (`NphRenderCellDesc.proxy_level_errors`: each level's largest consumer
 error, the head's) holds them in its record (`NphVisCell.level_errors`), and

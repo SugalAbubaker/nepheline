@@ -1471,10 +1471,31 @@ static bool rigid(const NphRenderTransform *t)
            nph_f32_abs(nph_vec3_dot(l.c[1], l.c[2])) <= tol && nph_mat3_determinant(l) > 0.0F;
 }
 
+// Whether `meshes` can be a cell's proxy: 1 to NPH_RENDER_CELL_MAX_LEVELS
+// live meshes of voxels alone, none twice.
+static bool proxy_meshes_ok(const NphRenderer *r, const NphRenderMesh *meshes, u32 count)
+{
+    if (meshes == NULL || count == 0U || count > NPH_RENDER_CELL_MAX_LEVELS) {
+        return false;
+    }
+    for (u32 k = 0; k < count; ++k) {
+        const u32 mesh = render_slot_of(&r->mesh_pool, meshes[k].value);
+        if (mesh == NPH_U32_MAX || r->meshes[mesh].vertex_count != 0U ||
+            r->meshes[mesh].index_count != 0U) {
+            return false;
+        }
+        for (u32 j = 0; j < k; ++j) {
+            if (meshes[j].value == meshes[k].value) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool cell_desc_ok(const NphRenderer *r, const NphRenderCellDesc *d)
 {
-    if (d->proxy_levels == NULL || d->proxy_level_count == 0U ||
-        d->proxy_level_count > NPH_RENDER_CELL_MAX_LEVELS ||
+    if (!proxy_meshes_ok(r, d->proxy_levels, d->proxy_level_count) ||
         d->proxy_level_error_count > NPH_RENDER_CELL_MAX_LEVELS ||
         (d->proxy_level_error_count != 0U && d->proxy_level_errors == NULL)) {
         return false;
@@ -1484,13 +1505,6 @@ static bool cell_desc_ok(const NphRenderer *r, const NphRenderCellDesc *d)
     for (u32 k = 0; k < d->proxy_level_error_count; ++k) {
         const f32 e = d->proxy_level_errors[k];
         if (!nph_f32_is_finite(e) || !(e >= (k == 0U ? 0.0F : d->proxy_level_errors[k - 1U]))) {
-            return false;
-        }
-    }
-    for (u32 k = 0; k < d->proxy_level_count; ++k) {
-        const u32 mesh = render_slot_of(&r->mesh_pool, d->proxy_levels[k].value);
-        if (mesh == NPH_U32_MAX || r->meshes[mesh].vertex_count != 0U ||
-            r->meshes[mesh].index_count != 0U) {
             return false;
         }
     }
@@ -1544,6 +1558,80 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
     }
     c->handle = value;
     out->value = value;
+    return NPH_RESULT_OK;
+}
+
+NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell, const NphRenderMesh *meshes,
+                                    u32 count)
+{
+    NPH_ASSERT(r != NULL);
+    const u32 slot = render_slot_of(&r->cell_pool, cell.value);
+    if (slot == NPH_U32_MAX || !proxy_meshes_ok(r, meshes, count)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    RenderCell *c = &r->cells[slot];
+    // The instances to keep, by the meshes that stay, and those to make, as
+    // the cell's first proxy instance is (its materials and place).
+    const RenderInstance *model =
+        &r->instances[render_slot_of(&r->instance_pool, c->proxy[0].value)];
+    NphRenderInstanceDesc proxy;
+    memset(&proxy, 0, sizeof proxy);
+    proxy.materials = model->materials;
+    proxy.material_count = model->material_count;
+    proxy.transform = model->transform;
+    NphRenderInstance next[NPH_RENDER_CELL_MAX_LEVELS];
+    bool made[NPH_RENDER_CELL_MAX_LEVELS];
+    memset(next, 0, sizeof next);
+    memset(made, 0, sizeof made);
+    NphResult res = NPH_RESULT_OK;
+    for (u32 k = 0; k < count && res == NPH_RESULT_OK; ++k) {
+        for (u32 j = 0; j < c->proxy_count; ++j) {
+            const RenderInstance *inst =
+                &r->instances[render_slot_of(&r->instance_pool, c->proxy[j].value)];
+            if (inst->mesh.value == meshes[k].value) {
+                next[k] = c->proxy[j];
+            }
+        }
+        if (next[k].value == 0U) {
+            const CellRole role = {true, false, false}; // its flags set below
+            proxy.mesh = meshes[k];
+            res = create_instance(r, &proxy, slot + 1U, role, &next[k]);
+            made[k] = res == NPH_RESULT_OK;
+        }
+    }
+    if (res != NPH_RESULT_OK) {
+        for (u32 k = 0; k < count; ++k) {
+            if (made[k]) {
+                nph_render_instance_destroy(r, next[k]);
+            }
+        }
+        return res;
+    }
+    // Those whose mesh goes.
+    for (u32 j = 0; j < c->proxy_count; ++j) {
+        bool kept = false;
+        for (u32 k = 0; k < count; ++k) {
+            kept = kept || next[k].value == c->proxy[j].value;
+        }
+        if (!kept) {
+            nph_render_instance_destroy(r, c->proxy[j]);
+        }
+    }
+    // The statistics' instance and the clamp's, wherever they now fall.
+    for (u32 k = 0; k < count; ++k) {
+        const u32 islot = render_slot_of(&r->instance_pool, next[k].value);
+        RenderInstance *inst = &r->instances[islot];
+        const u32 mesh = render_slot_of(&r->mesh_pool, meshes[k].value);
+        const b32 counted = k + 1U == count;
+        const b32 finest = k == 0U && r->meshes[mesh].level_apart;
+        if (inst->proxy_counted != counted || inst->proxy_finest != finest) {
+            inst->proxy_counted = counted;
+            inst->proxy_finest = finest;
+            render_vis_instance_changed(r, islot);
+        }
+        c->proxy[k] = next[k];
+    }
+    c->proxy_count = count;
     return NPH_RESULT_OK;
 }
 
