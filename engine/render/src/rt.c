@@ -22,7 +22,8 @@
 //     records on the CPU, as it does its draws, and rebuilds every frame
 //     with the anchor at the camera. The production path writes them on the
 //     GPU from its GPU scene (rt_instances.comp), so its frame costs the CPU
-//     nothing per instance, and rebuilds only when its instances changed,
+//     nothing per instance, and rebuilds only when its instances changed
+//     (those it holds: shown, of a mesh with triangles, before or after),
 //     after a frame that did not trace, or when the camera has moved more
 //     than RT_ANCHOR_RADIUS from the anchor (which then moves to it): a
 //     camera moving through a still scene costs no build.
@@ -634,8 +635,9 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
     RenderRt *rt = &r->rt;
     NPH_ASSERT(rt->frame_active);
     // The production path's changed instances reach its table this frame:
-    // the top level follows them.
-    if (rt->frame_production && r->vis.frame_changed != 0U) {
+    // the top level follows those in it, before or after (RenderVis.
+    // frame_traced; an instance of voxels alone is never in it).
+    if (rt->frame_production && r->vis.frame_traced != 0U) {
         rt->frame_rebuild = 1;
     }
     // The bottom levels waiting now are this frame's, and the compactions'

@@ -212,6 +212,10 @@ typedef enum RenderSlotState {
     RENDER_SLOT_DIRTY = 1U << 0U, // its record must reach the GPU
     RENDER_SLOT_FRESH = 1U << 1U, // created since its record last reached the GPU
     RENDER_SLOT_SENT = 1U << 2U,  // sent last frame: its previous transform must catch up
+    // Its record as last sent is in the production path's top level (shown,
+    // of a mesh with triangles: rt_instances.comp takes those with a bottom
+    // level, which a mesh of voxels alone never has).
+    RENDER_SLOT_TRACED = 1U << 3U,
 } RenderSlotState;
 
 typedef struct RenderInstance {
@@ -643,7 +647,11 @@ typedef struct RenderVis {
     u32 sent_count;
     u32 *sent_next;
     u32 sent_next_count;
-    u32 frame_changed; // instances whose records this frame sends (not catch-ups)
+    // Of the instances whose records this frame sends (not catch-ups), those
+    // in the top level before or after (RENDER_SLOT_TRACED): the top level
+    // follows them alone (rt.c), so a streamed cell's levels, of voxels
+    // alone, come and go without rebuilding it (ADR-0063 stage 4).
+    u32 frame_traced;
     // Instances with a blended material: the CPU draws those itself.
     u32 *blend;
     u32 blend_count;
