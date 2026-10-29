@@ -705,7 +705,10 @@ from node 0, at most 32 node levels deep), and so far as the walk cannot
 lose a cluster it should draw (a group's numbers in its node are its
 record's, its maker error no larger than its clusters' makers' smallest,
 and a node's bounds hold its children's); `NPH_RESULT_INVALID_ARGUMENT`
-otherwise. That the levels cut cleanly is the builder's contract.
+otherwise. That the levels cut cleanly is the builder's contract. A level
+apart ("Cell proxies") gives its makers as records (`lod_makers`): its one
+level is its level 0, no cluster names a group as its maker, and each record
+is finite, its radius and error not negative.
 
 **A mesh of voxels alone** (a cell's proxy, "Cell proxies" below) has no
 vertices and no indices: its submeshes name materials alone, it has no
@@ -1053,12 +1056,35 @@ alone, and see a voxel and triangles in one cell as the triangles of its box
 are seen.
 
 **The switch** (stage 2). `nph_render_cell_create` makes a cell: the box of
-its instances (a 64-bit centre and half extents), its proxy (a mesh of voxels
+its instances (a 64-bit centre and half extents), its proxy (meshes of voxels
 alone, its materials, and a rotation and translation), the proxy's finest
-error (its level 0's cell) and its distance `D`. The cell owns the proxy's
-instance; an instance names its cell in its description, and the cell's
-index, plus one, rides in the upper 24 bits of its record's flags
-(`NPH_VIS_INSTANCE_CELL_SHIFT`), the proxy's with `NPH_VIS_INSTANCE_PROXY`.
+error (its level 0's cell) and its distance `D`. The cell owns an instance
+of each of the proxy's meshes; an instance names its cell in its
+description, and the cell's index, plus one, rides in the upper 24 bits of
+its record's flags (`NPH_VIS_INSTANCE_CELL_SHIFT`), the proxy's with
+`NPH_VIS_INSTANCE_PROXY`.
+
+**Levels apart** (ADR-0063 "Stage 2, a level is a mesh"). A proxy is one mesh
+holding all its levels, or its levels apart, up to
+`NPH_RENDER_CELL_MAX_LEVELS` meshes of one level each, which a streamed
+proxy loads and drops one by one. `nph_render_cluster_lods_level`
+(render/cluster_lod.h) makes level `k` of a mesh of voxels alone a mesh of
+its own: its clusters in order, the groups that consume them (the root
+groups at the coarsest) and their clusters, its tree under a node 0 of its
+own (each level has its own tree under the root: the tree's root, or a new
+root over its trees holding their entries in the nodes above), its bricks
+and voxels, every index renumbered from 0; and, since a cluster's maker is a
+group of the finer level, which the level does not hold, each cluster's
+maker as a record (`NphRenderLodMaker`: the sphere and error the culls test
+it by, `NphRenderMeshDesc.lod_makers`, zeros at level 0). Every cluster
+carries its maker on the GPU in any case ("Levels of detail"), so a level
+reads nothing of another, and its cut, the walk's and the culls' tests of
+its own records, is the whole's cut of that level: drawn together, the
+levels apart give the whole's clusters, the same image bit for bit
+(`test_vis_cells.c`, from distances and thresholds whose cuts take one level
+and two, and the sun's shadow map's draws). The statistics count a cell by
+its coarsest mesh's instance (`NPH_VIS_INSTANCE_PROXY_COUNTED`), the one a
+streamed proxy always holds.
 The cells' records (`NphVisCell`: the centre split into high and low floats
 as a translation is, the half extents, the error, and `D`) sit in a table the
 instance culls read.
@@ -1087,8 +1113,11 @@ Statistics: `vis_cells_proxied`, the proxies phase 0 kept for their distance
 (in view or not), and `vis_instances_proxied`, the instances they stood in
 for. The cooked-scene bridge (`samples/common/cooked_scene.c`) makes a render
 cell for each of a scene's cells with a proxy, before the instances, which
-name theirs; `render_perf --no-cells` loads a scene without them. The
-runtime's scene import does not make cells yet: its instances are drawn as
+name theirs; a proxy cooked as its levels apart (asset/mesh.h version 6, a
+head naming its levels' assets) has its levels loaded 256 at a time, a mesh
+made of each and its asset released at once, so the host keeps no copy of
+them. `render_perf --no-cells` loads a scene without them. The runtime's
+scene import does not make cells yet: its instances are drawn as
 themselves.
 
 **Measured** on the landscape (ADR-0062 "Stage 2, the switch"; its six views

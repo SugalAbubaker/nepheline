@@ -6,6 +6,7 @@
 // builder's tests (test_cell_proxy.c) and the cells' (test_vis_cells.c).
 #include <nepheline/core/alloc.h>
 #include <nepheline/render/cluster_lod.h>
+
 #include <ntest/ntest.h>
 
 #include <string.h>
@@ -57,8 +58,8 @@ static inline void levels_check_tree(const NphRenderClusterLods *l, const NphRen
                               levels_same_f32(node->error[i], rg->error));
             f32 smallest = NPH_F32_MAX;
             for (u32 j = 0; j < rg->cluster_count; ++j) {
-                smallest = nph_f32_min(smallest,
-                                       makers[l->group_clusters.data[rg->cluster_offset + j]].error);
+                smallest = nph_f32_min(
+                    smallest, makers[l->group_clusters.data[rg->cluster_offset + j]].error);
             }
             NTEST_EXPECT_TRUE(node->maker_error[i] <= smallest);
         }
@@ -95,8 +96,7 @@ static inline void levels_check_level(const NphRenderClusterLods *w, u32 k,
         NTEST_ASSERT_EQ_UINT(n->triangle_count, m->triangle_count);
         NTEST_EXPECT_EQ_UINT(n->vertex_count, 0U);
         NTEST_EXPECT_EQ_UINT(n->submesh, m->submesh);
-        NTEST_EXPECT_TRUE(levels_same_bits(&l->clusters.bounds.data[i],
-                                           &w->clusters.bounds.data[c],
+        NTEST_EXPECT_TRUE(levels_same_bits(&l->clusters.bounds.data[i], &w->clusters.bounds.data[c],
                                            sizeof(NphRenderMeshletBounds)));
         for (u32 b = 0; b < m->triangle_count; ++b) {
             const NphRenderVoxelBrick *ob = &w->bricks.data[m->vertex_offset + b];

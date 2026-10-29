@@ -198,6 +198,55 @@ typedef struct NphRenderClusterLodInput {
 NPH_MUST_USE NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
                                                      NphRenderClusterLods *out);
 
+// ---------------------------------------------------------------------------
+// Levels apart (ADR-0063 "Stage 2, a level is a mesh")
+// ---------------------------------------------------------------------------
+//
+// A cluster's maker carried with the cluster: the sphere and error of the
+// group that made it (an error of 0 and zeros at level 0), which the culls
+// test it by (vis_lod_group_too_coarse; NphVisMesh.lod_makers), as Nanite's
+// clusters carry their LOD bounds and error. Carried so, a level reads
+// nothing of another, and is a mesh of its own: a streamed mesh's levels
+// are each the renderer's mesh (NphRenderMeshDesc.lod_makers), and a cell's
+// proxy its levels' instances.
+typedef struct NphRenderLodMaker {
+    NphVec3 center;
+    f32 radius;
+    f32 error;
+} NphRenderLodMaker;
+
+NPH_STATIC_ASSERT(sizeof(NphRenderLodMaker) == 20U, "a maker's record is 20 bytes");
+
+typedef NPH_ARRAY(NphRenderLodMaker) NphRenderLodMakerArray;
+
+// The clusters of `level` in `l`: [*out_first, *out_first + *out_count),
+// every level's a run in the levels' order. False for a level `l` does not
+// have or whose clusters do not follow one another.
+bool nph_render_cluster_lods_level_range(const NphRenderClusterLods *l, u32 level, u32 *out_first,
+                                         u32 *out_count);
+
+// Level `level` of a mesh of voxels alone (every cluster a voxel cluster,
+// no meshlet vertices or triangles: a cell's proxy, render/cell_proxy.h) as
+// a mesh of its own, into `out` and `makers` (initialised by the caller,
+// empty): its clusters, in order (nph_render_cluster_lods_level_range), each
+// one's maker NPH_RENDER_LOD_NONE and its sphere and error in `makers`,
+// cluster for cluster, its consumer the group that consumes it there; the
+// groups that consume them (at the coarsest level the root groups too), in
+// order, and their clusters; the hierarchy's trees of the level (each level
+// has its own under the root) under a node 0 of its own (their one root
+// where the level has one tree, else a new root over them, its entries the
+// old root's); and the clusters' bricks and voxels, in order. Every index is
+// the level's own, and `out` is one level (`levels` 1, every cluster at
+// level 0 of it). NPH_RESULT_INVALID_ARGUMENT for a level `l` does not have,
+// a mesh that is not voxels alone, levels whose clusters, groups or trees do
+// not keep to their level, or a level with more than
+// NPH_RENDER_LOD_NODE_CHILDREN trees; NPH_RESULT_OUT_OF_MEMORY. On failure
+// `out` and `makers` may hold a partial result to free. Thread-safety: pure
+// (NPH_THREADSAFE given distinct outputs). Deterministic.
+NPH_MUST_USE NphResult nph_render_cluster_lods_level(const NphRenderClusterLods *l, u32 level,
+                                                     NphRenderClusterLods *out,
+                                                     NphRenderLodMakerArray *makers);
+
 // The most cuts nph_render_lod_cuts makes, and the most entries the
 // renderer's table may hold (the shadow map's work items carry an entry in
 // 24 bits).

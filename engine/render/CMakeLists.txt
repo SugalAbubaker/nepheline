@@ -9,6 +9,7 @@ nph_add_module(render
     SOURCES
         src/ao.c
         src/cell_proxy.c
+        src/cluster_level.c
         src/cluster_lod.c
         src/cluster_lod_internal.h
         src/cluster_simplify.c
@@ -57,6 +58,7 @@ nph_add_test(render
         tests/test_frame.c
         tests/test_gi.c
         tests/test_gpu_profiler.c
+        tests/test_levels_apart.h
         tests/test_motion_blur.c
         tests/test_post.c
         tests/test_primitives.c
