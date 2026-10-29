@@ -245,7 +245,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 ```
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
-            [--lod-error=PX] [--lists=N] [--vsm-trace] [--no-cells]
+            [--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--no-cells]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -283,7 +283,8 @@ budget, the caster lists' use, the resolution bias and the overflows.
 for comparing a scene with its cells and without. After each scene a line
 reports the GPU memory the process holds (`nph_gpu_device_memory_stats`):
 device-local in use against the OS's budget for it, past which allocations
-may fail or slow the frame.
+may fail or slow the frame; `--memory-trace` prints it every 16th frame,
+warm-up included, where the bottom levels' builds take their scratch.
 Without the packs
 those scenes are skipped with a message, so the budgets of a machine
 without them are those of the synthetic scenes alone. The CTest smoke
