@@ -240,7 +240,11 @@
 #define CLOCK_SETTLED 0.01
 #define CLOCK_MAX_NS  (10000ULL * 1000000ULL)
 #define MAX_INSTANCES (102400U + 16384U + 256U + 1U)
-#define MAX_LIGHTS    4000U
+// Meshes: a scene's shared meshes and its cells' proxies, each a mesh a level
+// where its levels are apart (ADR-0063; the landscape's 384 proxies make
+// about 2,400), beside the synthetic scenes'.
+#define MAX_MESHES 16384U
+#define MAX_LIGHTS 4000U
 
 typedef enum SceneKind {
     SCENE_GRID = 0,
@@ -2027,6 +2031,7 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.dev = ctx->dev;
     rd.shader_dir = NPH_SHADER_DIR;
     rd.max_instances = MAX_INSTANCES;
+    rd.max_meshes = MAX_MESHES;
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
