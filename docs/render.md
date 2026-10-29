@@ -334,7 +334,7 @@ something it shows changes.
 | Pass | What it does |
 |---|---|
 | `vsm clear` | the frame's counters and page bitmasks to zero |
-| `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in every level (an invocation per update and level), a row of words at a time |
+| `vsm invalidate` | before the scatter: each instance update marks dirty the pages its old and its new bounding sphere span, in each level the record draws into (an invocation per update and level), a row of words at a time; a cell's proxy's levels coming and going only in the levels below their bound ("Caching", below) |
 | `vis hzb 0`, `vis hzb 1` | the depth pyramid's mip-0 passes **request** pages: each pixel's point rebuilt in light space from its depth (the view's rays), and the pages its shading may read set in the requests bitmask, a 2 × 2 block's at once where it can (`vsm_block.glsl`) |
 | `vsm requests (blended)` | with blended surfaces, which the visibility buffer does not hold: the blended draws with no attachments, each fragment in front of the opaque depth (the visibility buffer's, tested in the shader) setting its pages (`vsm_request.frag`) |
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is wanted, to be drawn again, if dirty), one without is wanted, to take a page; the wanted pages listed and counted per level |
@@ -389,6 +389,20 @@ texel holds the nearest caster along the light; a dirty page is drawn
 again (with every caster in it) when next requested, within the page
 budget ("Overflow and the page budget", below). The sun turning, the
 anchor moving, or a production frame without the map drops every page.
+A change dirties only the levels its records draw into: a world
+partition's cell is drawn into a level as its proxy or as its instances
+(the same every frame), so a proxy's instance changes nothing where the
+cell's instances are drawn, and an instance of a cell nothing where its
+proxy is. A streamed proxy's levels coming and going change only the
+levels whose cut's threshold is below the makers' error of the coarser of
+the two finest levels held (the largest consumer error of the level finer
+than it; `nph_render_cell_set_proxy` gives the change's updates that
+bound, `NphVisInstanceUpdate.vsm_below`): at a coarser threshold the cut
+takes the levels both hold, as before. A level arriving for the far field
+therefore redraws nothing of the coarse levels that draw it: in the
+landscape tiled into a world of the game's size, the turn's shadow raster
+went from 1.57 to 1.16 ms on average and from 9.8 to 4.0 ms at p99, the
+frame's p99 from 78.9 to 67.7 ms (ADR-0063 "Stage 4").
 
 **Levels of detail.** A caster with levels of detail ("Levels of detail"
 below) is drawn into a level's pages at one cut for the whole level, not

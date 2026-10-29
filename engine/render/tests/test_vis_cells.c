@@ -1514,6 +1514,130 @@ NTEST_F(Cells, the_shadow_map_asks_for_a_cells_level_its_pages_drawn_or_kept)
     grove_free(&g);
 }
 
+// Frames until the sun's shadow map draws no page for a few frames running
+// (its statistics come NPH_GPU_FRAMES_IN_FLIGHT frames late), at most 64:
+// the pages drawn on the way.
+static u32 map_settle(RenderFixture *f, const NphRenderView *v)
+{
+    u32 drawn = 0U;
+    u32 quiet = 0U;
+    for (u32 i = 0; i < 64U && quiet <= NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        const NphRenderFrameStats st = test_render_read(f, v);
+        drawn += st.vsm_drawn;
+        quiet = st.vsm_drawn == 0U ? quiet + 1U : 0U;
+    }
+    NTEST_ASSERT_GT_UINT(quiet, NPH_GPU_FRAMES_IN_FLIGHT);
+    return drawn;
+}
+
+// The bound a cell's proxy instances' pending updates hold on the shadow
+// map levels they dirty (NphVisInstanceUpdate.vsm_below; 0: every level),
+// each checked to be `expected`.
+static void expect_proxy_bound(RenderFixture *f, NphRenderCell cell, f32 expected)
+{
+    const RenderVis *vis = &f->renderer->vis;
+    const RenderCell *c = &f->renderer->cells[render_slot_of(&f->renderer->cell_pool, cell.value)];
+    for (u32 k = 0; k < c->proxy_count; ++k) {
+        const u32 slot = render_slot_of(&f->renderer->instance_pool, c->proxy[k].value);
+        const bool all = (vis->slot_state[slot] & (u8)RENDER_SLOT_ALL_LEVELS) != 0U;
+        NTEST_EXPECT_NEAR_F32(all ? 0.0F : vis->vsm_below[slot], expected, 0.0F);
+    }
+}
+
+// A cell's proxy's level coming or going dirties the shadow map's pages only
+// in the map levels whose cut it changes (ADR-0063 stage 4): those whose
+// threshold is below the makers' error of the coarser of the two finest
+// levels held. The map then shows what it shows when drawn afresh with the
+// levels held, and draws fewer pages than when the change dirties every
+// level, as every change did. A change of another kind (another mesh) dirties
+// every level.
+NTEST_F(Cells, a_proxys_level_coming_dirties_only_the_map_levels_it_changes)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!nph_renderer_virtual_shadows_supported(f->renderer)) {
+        NTEST_SKIP("no virtual shadow map on this device");
+    }
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    NTEST_ASSERT_EQ_UINT(gl.count, 3U);
+    Scene floor;
+    scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+    NphRenderLightDesc sun = sun_desc(true);
+    const NphRenderLight light = make_light(f, &sun);
+    static u8 fresh[PIXELS];
+    const f64 distances[2] = {6.0, 60.0};
+    for (u32 d = 0; d < 2U; ++d) {
+        NphRenderView v;
+        const NphRenderCamera cam = nph_render_camera_look_at(
+            nph_dvec3(0.0, distances[d], 0.5 * distances[d]), nph_dvec3(0.0, 0.0, 0.0),
+            nph_vec3(0.0F, 1.0F, 0.0F), 0.9F, 0.05F);
+        shadow_view(&v, cam, 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
+        v.lod_error = 1.0F;
+        // The cell made with levels 1 and 2, drawn into every map level as
+        // its proxy (its finest error fits everywhere) and never by the
+        // camera: the map drawn afresh.
+        GroveScene s;
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 1.0e6F, &gl, 1U);
+        (void)map_settle(f, &v);
+        memcpy(fresh, f->pixels, PIXELS);
+        grove_scene_free(f, &s);
+        // Made with level 2 alone, then given level 1: its updates dirty
+        // the map below level 2's makers' error (level 1's consumers').
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 1.0e6F, &gl, 2U);
+        (void)map_settle(f, &v);
+        NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, s.levels + 1, 2U),
+                            NPH_RESULT_OK);
+        expect_proxy_bound(f, s.cell, s.level_errors[1]);
+        const u32 bounded = map_settle(f, &v);
+        NTEST_EXPECT_LE_UINT(image_max_diff(f->pixels, fresh), SAME_TOL);
+        // Given up again (the same bound), then given back dirtying every
+        // level, as before.
+        NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, s.levels + 2, 1U),
+                            NPH_RESULT_OK);
+        expect_proxy_bound(f, s.cell, s.level_errors[1]);
+        (void)map_settle(f, &v);
+        NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, s.levels + 1, 2U),
+                            NPH_RESULT_OK);
+        const RenderCell *c =
+            &f->renderer->cells[render_slot_of(&f->renderer->cell_pool, s.cell.value)];
+        for (u32 k = 0; k < c->proxy_count; ++k) {
+            const u32 slot = render_slot_of(&f->renderer->instance_pool, c->proxy[k].value);
+            f->renderer->vis.slot_state[slot] |= (u8)RENDER_SLOT_ALL_LEVELS;
+        }
+        const u32 every = map_settle(f, &v);
+        NTEST_EXPECT_LE_UINT(image_max_diff(f->pixels, fresh), SAME_TOL);
+        NTEST_LOG("camera %.0f m up: the levels' errors %.4f %.4f %.4g; level 1's coming drew "
+                  "%u pages, %u dirtying every level",
+                  distances[d], (f64)s.level_errors[0], (f64)s.level_errors[1],
+                  (f64)s.level_errors[2], bounded, every);
+        // Near, the map levels its pixels read take level 1 now: their pages
+        // are drawn again. From afar they take level 2 as before: none.
+        if (d == 0U) {
+            NTEST_EXPECT_GT_UINT(bounded, 0U);
+            NTEST_EXPECT_LE_UINT(bounded, every);
+        } else {
+            NTEST_EXPECT_EQ_UINT(bounded, 0U);
+            NTEST_EXPECT_GT_UINT(every, 0U);
+        }
+        // Another mesh in the finest's place: every level.
+        NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, &s.proxy, 1U),
+                            NPH_RESULT_OK);
+        expect_proxy_bound(f, s.cell, 0.0F);
+        (void)map_settle(f, &v);
+        grove_scene_free(f, &s);
+    }
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_instance_destroy(f->renderer, floor.floor);
+    nph_render_instance_destroy(f->renderer, floor.occluder);
+    nph_render_material_destroy(f->renderer, floor.grey);
+    nph_render_mesh_destroy(f->renderer, floor.cube);
+    nph_render_mesh_destroy(f->renderer, floor.plane);
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
 // A cell's proxy is replaced level by level, as a streamed proxy's arrive and
 // go (ADR-0063 stage 3): held from level 2, then 1, then 0, then from 2
 // again, the cell draws its finest held level near (where the whole draws

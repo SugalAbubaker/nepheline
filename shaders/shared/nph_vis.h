@@ -181,12 +181,16 @@ NPH_SHARED_STRUCT(NphVisCell)
 // `instance` replaces the record at `slot`, whose old transform becomes
 // the previous one. With `copy_previous` set the record is not touched and
 // the previous transform catches up with the current one (an instance
-// that moved last frame and not this one).
+// that moved last frame and not this one). `vsm_below` bounds the sun's
+// shadow map levels whose pages the update dirties (vsm_pages.comp
+// INVALIDATE): those whose cut's threshold at scale 1 is below it, where a
+// cell's proxy gains or loses finer levels below a run of levels it keeps
+// (ADR-0063 stage 4); 0: every level.
 NPH_SHARED_STRUCT(NphVisInstanceUpdate)
 {
     u32 slot;
     u32 copy_previous;
-    u32 pad0;
+    f32 vsm_below;
     u32 pad1;
     NphVisInstance instance;
 };
