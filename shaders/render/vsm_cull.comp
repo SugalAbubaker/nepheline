@@ -167,7 +167,7 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         // A cluster of a group too coarse for the level, from the walk: in
         // the cut where its maker's error is fine enough (level 0's is 0).
         bool lod_out = false;
-        if ((item.y & VSM_ITEM_LOD) != 0u) {
+        if ((item.y & VSM_ITEM_LOD) != 0u && (inst.flags & NPH_VIS_INSTANCE_FINEST) == 0u) {
             lod_out = vis_lod_maker_error(mesh, meshlet) >
                       vsm_lod_threshold(r, level, vis_max_scale(inst.transform));
         }

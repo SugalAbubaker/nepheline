@@ -42,17 +42,19 @@ layout(local_size_x = 512) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 // Whether the child `lane` of node `n` (a node or a group, `ref`) is to be
-// taken: too coarse, not every maker below too coarse, in the frustum, and
-// in phase 1 not behind the depth pyramid.
+// taken: too coarse, not every maker below too coarse (for an instance of
+// its cell's finest level, NPH_VIS_INSTANCE_FINEST, the makers are fine), in
+// the frustum, and in phase 1 not behind the depth pyramid.
 bool take(VisViewRef view, NphVisTransform tr, vec3 t, float scale, VisLodNodesRef tree, uint n,
-          uint lane, uint ref, uint phase)
+          uint lane, uint ref, uint phase, bool finest)
 {
     const vec4 s = tree.n[n].sphere[lane];
     const float e = tree.n[n].error[lane];
     const bool leaf = (ref & NPH_VIS_LOD_LEAF) != 0u;
     bool keep = leaf ? vis_lod_group_too_coarse(view, tr, s, e)
                      : vis_lod_node_too_coarse(view, tr, t, scale, s, e);
-    keep = keep && !vis_lod_surely_too_coarse(view, tr, t, scale, s, tree.n[n].maker_error[lane]);
+    keep = keep && (finest || !vis_lod_surely_too_coarse(view, tr, t, scale, s,
+                                                          tree.n[n].maker_error[lane]));
     const vec3 c = vis_transform_vector(tr, s.xyz) + t;
     const float r = s.w * scale;
     keep = keep && vis_sphere_in_frustum(view, c, r);
@@ -101,17 +103,18 @@ void main()
                                                 view.v.camera_low.xyz);
         const float scale = vis_max_scale(inst.transform);
         counted = child_lane == 0u && grand_lane == 0u;
+        const bool finest = (inst.flags & NPH_VIS_INSTANCE_FINEST) != 0u;
         const uint child = tree.n[item.y].child[child_lane];
         if (child != NPH_VIS_LOD_NONE &&
-            take(view, inst.transform, t, scale, tree, item.y, child_lane, child, phase)) {
+            take(view, inst.transform, t, scale, tree, item.y, child_lane, child, phase, finest)) {
             if ((child & NPH_VIS_LOD_LEAF) != 0u) {
                 // A group among the node's children: its first lane takes it.
                 group = grand_lane == 0u ? child & ~NPH_VIS_LOD_LEAF : NPH_VIS_LOD_NONE;
             } else {
                 counted = counted || grand_lane == 0u;
                 const uint grand = tree.n[child].child[grand_lane];
-                if (grand != NPH_VIS_LOD_NONE &&
-                    take(view, inst.transform, t, scale, tree, child, grand_lane, grand, phase)) {
+                if (grand != NPH_VIS_LOD_NONE && take(view, inst.transform, t, scale, tree, child,
+                                                      grand_lane, grand, phase, finest)) {
                     if ((grand & NPH_VIS_LOD_LEAF) != 0u) {
                         group = grand & ~NPH_VIS_LOD_LEAF;
                     } else {

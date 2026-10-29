@@ -33,6 +33,12 @@
 // The proxy instance its cell's statistics count the cell by (its coarsest
 // mesh's: a cell's proxy may be several, its levels apart; ADR-0063).
 #define NPH_VIS_INSTANCE_PROXY_COUNTED 64
+// Its mesh is a level apart (render/cluster_lod.h) whose finer levels its
+// cell does not hold: the walk and the culls take its clusters' makers as
+// fine, so that its clusters are drawn wherever their consumers are too
+// coarse, as a level 0's are (ADR-0063 "The cut": a DAG cut below a level
+// is a DAG; no hole opens where a finer level is missing).
+#define NPH_VIS_INSTANCE_FINEST 128
 // The instance's cell, its index plus one (0: none), in the flags' upper
 // bits: the proxy's own, or the cell whose proxy stands for the instance.
 #define NPH_VIS_INSTANCE_CELL_SHIFT 8
