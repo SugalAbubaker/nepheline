@@ -53,6 +53,17 @@ typedef struct CookedSceneDesc {
     // (0: unlimited). Without, every level loads with the scene.
     b32 stream;
     u64 stream_budget;
+    u32 stream_loads; // levels loading at once (NphProxyStreamDesc.max_loads; 0: its default)
+    // Tiles of the scene, an open world of the game's size from one scene
+    // (ADR-0063 stage 4): `tiles_x` by `tiles_z` copies side by side,
+    // `tile_pitch` apart on x and z (0: the first tile's instances' extent),
+    // the first at `origin` and the others around it. Each tile's instances
+    // and cells are its own (and so, streamed, its proxies' finer levels);
+    // the meshes, materials and textures, the cells' coarsest levels, and the
+    // lights and camera (the first tile's) are shared. 0 or 1: one.
+    u32 tiles_x;
+    u32 tiles_z;
+    NphDVec3 tile_pitch;
 } CookedSceneDesc;
 
 typedef struct CookedScene {
@@ -65,6 +76,7 @@ typedef struct CookedScene {
     u32 asset_cap;
     NphRenderTexture *textures;         // parallel to `assets` (null for non-textures)
     NphRenderMesh *meshes;              // parallel to `assets`
+    NphAABB *mesh_bounds;               // parallel to `assets`: each mesh's, from its header
     NphRenderMaterial *asset_materials; // parallel to `assets`: the materials, owned
     u32 render_material_count;          // how many of those were created
     NphRenderMaterial *materials;       // per entry of the scene's material table
@@ -76,8 +88,8 @@ typedef struct CookedScene {
     // The world partition's cells, per cell of the scene (null where the cell
     // has no proxy, or without them), made before the instances that name
     // them (ADR-0062).
-    NphRenderCell *cells;
-    u32 cell_count; // made so far
+    NphRenderCell *cells; // the scene's cells, tile after tile
+    u32 cell_count;       // made so far
     u32 cell_cap;
     u32 proxy_count; // of them, with a proxy
     // The proxies' levels apart (asset/mesh.h version 6; ADR-0063), a mesh
@@ -96,7 +108,8 @@ typedef struct CookedScene {
     NphRenderLightDesc *light_descs; // as created (for gizmos and tests)
     u32 light_count;
     u32 light_cap;
-    NphAABB bounds; // world bounds of the instances, relative to `origin`
+    NphAABB bounds; // world bounds of the instances (every tile's), relative to `origin`
+    u32 tiles;      // the tiles made (CookedSceneDesc.tiles_x by tiles_z)
     // The scene's first camera, if any (else has_camera is 0).
     b32 has_camera;
     NphRenderCamera camera;

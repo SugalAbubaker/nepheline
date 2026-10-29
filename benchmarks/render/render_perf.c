@@ -33,7 +33,7 @@
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
-//                 [--stream-trace] [--voxel-pool=MB]
+//                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -53,13 +53,18 @@
 // its finer levels as the views want them, within MB megabytes past the
 // coarsest (no limit without); before a view is measured the stream is let
 // settle (frames until nothing loads, is given or is dropped, at most
-// PRIME_MAX_NS), and each view's report then gives what the
-// stream holds and did, and its main-thread time a frame; --stream-trace
-// prints the stream's work every frame. --voxel-pool sets the renderer's
-// voxel pool (NphRendererDesc.voxel_pool_bytes; 0 none, the default without
-// --stream, 1536 with it), where meshes of voxels alone live a range each
-// and a streamed level is made on the loader's jobs. After each
-// scene, a line reports the GPU memory the process holds
+// PRIME_MAX_NS), and each view's report then gives what the stream holds
+// and did, and its main-thread time a frame; --stream-trace prints the
+// stream's work every frame, and --stream-loads sets its loads at once
+// (NphProxyStreamDesc.max_loads; 0: the stream's 64). --voxel-pool sets
+// the renderer's voxel pool (NphRendererDesc.voxel_pool_bytes; 0 none, the
+// default without --stream, 1536 with it), where meshes of voxels alone
+// live a range each and a streamed level is made on the loader's jobs.
+// --tiles lays each scene out W by H times side by side, its first tile
+// where it was and the others around it (cooked_scene.h
+// CookedSceneDesc.tiles_x), each tile's instances and cells its own: an
+// open world of the game's size from one reference scene (ADR-0063 stage
+// 4). After each scene, a line reports the GPU memory the process holds
 // (nph_gpu_device_memory_stats): device-local in use against the OS's
 // budget for it; --memory-trace reports it every 16th frame, warm-up
 // included, where bottom levels are built.
@@ -257,6 +262,13 @@
 // about 2,400), beside the synthetic scenes'.
 #define MAX_MESHES 16384U
 #define MAX_LIGHTS 4000U
+// Per tile past the first (--tiles), the limits grow by a tile's instances,
+// its cells' levels and its cells, at most (the landscape's 47,863
+// instances, about 2,400 levels and 384 cells, rounded up): the renderer's
+// per-instance buffers are those of the world tiled, not of many more.
+#define TILE_INSTANCES 49152U
+#define TILE_MESHES    4096U
+#define TILE_CELLS     512U
 
 typedef enum SceneKind {
     SCENE_GRID = 0,
@@ -462,6 +474,9 @@ static bool g_stream = false;       // --stream: the cells' proxies streamed
 static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarsest (0: none)
 static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
 static i64 g_voxel_pool_mb = -1;    // --voxel-pool=MB (-1: 1536 with --stream, else 0)
+static u32 g_stream_loads = 0U;     // --stream-loads=N: levels loading at once (0: the stream's)
+static u32 g_tiles_x = 1U;          // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4)
+static u32 g_tiles_z = 1U;
 
 // The most a view waits for the stream to settle before it is measured.
 #define PRIME_MAX_NS (60ULL * 1000000000ULL)
@@ -1829,6 +1844,9 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.no_cells = g_no_cells;
     cd.stream = g_stream;
     cd.stream_budget = g_stream_budget;
+    cd.stream_loads = g_stream_loads;
+    cd.tiles_x = g_tiles_x;
+    cd.tiles_z = g_tiles_z;
     const u64 t0 = nph_time_now_ns();
     const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
     if (r != NPH_RESULT_OK) {
@@ -2122,8 +2140,11 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.alloc = nph_allocator_system();
     rd.dev = ctx->dev;
     rd.shader_dir = NPH_SHADER_DIR;
-    rd.max_instances = MAX_INSTANCES;
-    rd.max_meshes = MAX_MESHES;
+    // A tiled scene's instances, cells and streamed levels are each tile's.
+    const u32 more_tiles = g_tiles_x * g_tiles_z - 1U;
+    rd.max_instances = MAX_INSTANCES + more_tiles * TILE_INSTANCES;
+    rd.max_meshes = MAX_MESHES + more_tiles * TILE_MESHES;
+    rd.max_cells = 4096U + more_tiles * TILE_CELLS;
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
     rd.voxel_pool_bytes =
@@ -2198,7 +2219,8 @@ static int usage(void)
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
-                    "[--stream-trace] [--voxel-pool=MB] [--no-cells]\n");
+                    "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
+                    "[--no-cells]\n");
     return 2;
 }
 
@@ -2250,6 +2272,17 @@ int main(int argc, char **argv)
             g_stream_trace = true;
         } else if (strncmp(argv[i], "--voxel-pool=", 13U) == 0) {
             g_voxel_pool_mb = (i64)strtoll(argv[i] + 13, NULL, 10);
+        } else if (strncmp(argv[i], "--stream-loads=", 15U) == 0) {
+            g_stream_loads = (u32)strtoul(argv[i] + 15, NULL, 10);
+        } else if (strncmp(argv[i], "--tiles=", 8U) == 0) {
+            char *x = NULL;
+            const unsigned long w = strtoul(argv[i] + 8, &x, 10);
+            const unsigned long h = x != NULL && *x == 'x' ? strtoul(x + 1, NULL, 10) : 0UL;
+            if (w == 0UL || h == 0UL || w > 64UL || h > 64UL || w * h > 64UL) {
+                return usage();
+            }
+            g_tiles_x = (u32)w;
+            g_tiles_z = (u32)h;
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {
