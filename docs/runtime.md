@@ -305,6 +305,64 @@ under a named root: one entity per node with its transform and hierarchy,
 a MeshRenderer per mesh instance, a Light per light, and an inactive
 Camera per perspective camera. It is all or nothing.
 
+## Proxy streaming
+
+`proxy_stream.h` streams a world partition's cells' proxies level by level
+(ADR-0063 stage 3; [render.md](render.md) "Cell proxies"). A proxy cooked
+as its levels apart is a head naming each level's mesh asset, finest
+first. The caller makes each cell with its coarsest level alone
+(`nph_proxy_level_mesh_create`, the stream's own way of making a level) and
+its levels' errors, and adds it to a stream; each frame, between
+`nph_gpu_frame_begin` and `nph_render_frame`, `nph_proxy_stream_update`
+gives the cells the levels the views want and takes back what its budget
+cannot hold. The samples' cooked-scene bridge does so with
+`CookedSceneDesc.stream`, and render_perf with `--stream`.
+
+- **Wanted.** A cell is wanted at the level the views ask for
+  (`nph_render_cell_request`: the camera's cut at its box brought a quarter
+  nearer, and the sun's shadow map's), a request standing 30 updates once
+  the views stop asking, so that a cell flickering in and out of view
+  keeps its level. Unasked and past its distance less a quarter, it is
+  wanted one level coarser than its cut from the camera (the requests'
+  test, on the CPU): a turn shows the far field at most a level coarser,
+  briefly. Nearer, its coarsest alone: its instances are drawn.
+- **Worth.** A level is worth the error its cell shows without it, seen
+  from the camera over the view's threshold; a level at or coarser than
+  the one its cell is wanted at (needed) before any finer (spare). A
+  cell's finest held level is its least worth keeping and its next finer
+  its most worth loading, so one ranking orders both loads and drops, and
+  what is held converges on the levels worth most within the budget.
+- **Loads.** The levels worth most load first, at most `max_loads` at
+  once (the loader's I/O thread, decompression on the jobs), each within
+  the budget with the loads under way. Room is made by dropping levels
+  worth enough less (spare ones, or needed ones worth a quarter less, so
+  that cells of nearly the same worth do not trade a level back and
+  forth), and only when the levels so dropped free enough; a level that
+  does not fit is passed over (eight an update) for smaller ones. A
+  level's bytes are known once it has loaded; before, they are its
+  clusters at the bytes a cluster of its depth has taken so far (its
+  voxels' size is the same in every cell), or nothing for a depth not seen
+  yet: it loads, and the budget then drops what it must.
+- **Installs.** A loaded level still needed becomes a mesh and joins its
+  cell's proxy (`nph_render_cell_set_proxy`; the cell's finest held level
+  stands for the finer ones), those worth most first, at most
+  `max_install_bytes` a frame. Past the budget, the levels worth least
+  go.
+- **Failures.** A level that fails to load or to become a mesh leaves its
+  cell as it is, logged and counted (`NphProxyStreamStats.failed`); the
+  cell is not tried again.
+
+Costs: creation allocates the cells' table; an update allocates nothing of
+its own and is linear in the cells (a pass reading their requests, and
+one for each load and drop); the loads and the meshes allocate what the
+loader and the renderer do. On the open landscape (384 cells, 2,639
+levels) an idle update takes 0.014 ms, but installing costs the main
+thread 0.88 ms for each megabyte of levels made (9.1 ms at most, for a
+frame's 8 MiB), past §10.5's 1 ms: the meshes' validation and uploads move
+to the jobs next (ADR-0063 "Stage 3, the stream"). `nph_proxy_stream_stats`
+and `nph_proxy_stream_cell_state` report what the stream holds and does,
+for tools and tests. NPH_MAIN_THREAD_ONLY.
+
 ## Physics
 
 While the world plays, every entity with a LocalTransform and a RigidBody
@@ -619,6 +677,17 @@ largest part, occlusion, is bounded by `audio.occlusion_rays`.
   overflowed event stream; a host hides an instance (across moves and a
   new mesh) and reloads a mesh, a texture through its material, and a
   material, with nothing left behind; the camera and the sky;
+- proxy streaming's decisions (`test_proxy_stream.c`): the requests'
+  scale, the level a cell is wanted at, a level's worth, and when one
+  pushes another out past the budget. The stream itself runs over a
+  cooked world in `tests/integration` (`test_proxy_stream.c`, the cooker's
+  grove of four cells with four levels each): its cells stream in the
+  levels the views ask for, each once, and draw what the cells given every
+  level draw, and the stream gone leaves them their coarsest; within half
+  the bytes, of two groves the nearer holds the finer levels, nothing moves
+  while the camera stays, and turned round they trade levels, each given
+  once; a level that cannot be had (an asset no pack holds, a mesh that is
+  not a level) leaves its cell as it is;
 - the engine: a headless engine leaks nothing (a debug allocator under
   it), configuration precedence and the user config, scenes in both
   formats, console commands, play, pause and steps, the view override, an
@@ -679,6 +748,11 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 
 ## Limitations and future work
 
+- Proxy streaming makes its levels' meshes on the main thread (0.88 ms a
+  megabyte); a pool of voxel meshes with their validation and uploads on
+  the jobs comes next (ADR-0063). An update is linear in the cells: a
+  world of thousands needs its requests read, and its loads and drops
+  picked, in jobs or from heaps.
 - The scene renderer's sync runs serially on the main thread: 10,000
   moving instances cost 0.79 ms (2.6 ms drawn between steps) of the 1 ms
   main-thread budget. Capturing and blending in parallel jobs, or blending

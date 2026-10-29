@@ -32,7 +32,8 @@
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
-//                 [--vsm-trace] [--memory-trace] [--no-cells]
+//                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
+//                 [--stream-trace]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -46,7 +47,15 @@
 // report the frame NPH_GPU_FRAMES_IN_FLIGHT before): how its page budget
 // draws a burst of pages. --no-cells loads the reference scenes without
 // their world partition's cells (ADR-0062): every instance drawn as itself,
-// no proxy, for comparing a scene with its cells and without. After each
+// no proxy, for comparing a scene with its cells and without. --stream
+// streams the cells' proxies cooked as their levels apart (ADR-0063 stage 3;
+// runtime/proxy_stream.h): each cell loaded with its coarsest level alone,
+// its finer levels as the views want them, within MB megabytes past the
+// coarsest (no limit without); before a view is measured the stream is let
+// settle (frames until nothing loads, is given or is dropped, at most
+// PRIME_MAX_NS), and each view's report then gives what the
+// stream holds and did, and its main-thread time a frame; --stream-trace
+// prints the stream's work every frame. After each
 // scene, a line reports the GPU memory the process holds
 // (nph_gpu_device_memory_stats): device-local in use against the OS's
 // budget for it; --memory-trace reports it every 16th frame, warm-up
@@ -446,6 +455,12 @@ static u32 g_lists = 1U;            // --lists: the production path's list capac
 static bool g_vsm_trace = false;    // --vsm-trace: every frame's shadow map statistics
 static bool g_memory_trace = false; // --memory-trace: the GPU memory every 16th frame
 static bool g_no_cells = false;     // --no-cells: the scenes' cells not loaded
+static bool g_stream = false;       // --stream: the cells' proxies streamed
+static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarsest (0: none)
+static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
+
+// The most a view waits for the stream to settle before it is measured.
+#define PRIME_MAX_NS (60ULL * 1000000000ULL)
 static u32 g_trace_frame = 0U;
 
 typedef struct Result {
@@ -510,6 +525,12 @@ typedef struct Ctx {
     NphAssetLoader *loader;
     u32 mount;
     CookedScene cooked;
+    // The stream's main-thread time a frame (--stream), over a view's
+    // measured frames, and the reference view's height it is told.
+    f64 stream_ns_sum;
+    f64 stream_ns_max;
+    u32 stream_frames;
+    u32 view_height;
     u32 loaded_manifest;
     bool sun_removed;
 } Ctx;
@@ -1266,6 +1287,25 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
     NPH_TRY(nph_gpu_frame_begin(ctx->dev));
     NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(ctx->profiler, ctx->graph));
     nph_gpu_rg_begin(ctx->graph);
+    if (ctx->cooked.stream != NULL) {
+        // The cells' levels, after the frame began (a level's uploads go with
+        // it) and before it is drawn.
+        const u64 s0 = nph_time_now_ns();
+        NPH_TRY(cooked_scene_update(&ctx->cooked, view, ctx->view_height));
+        const f64 ns = (f64)(nph_time_now_ns() - s0);
+        ctx->stream_ns_sum += ns;
+        ctx->stream_ns_max = ns > ctx->stream_ns_max ? ns : ctx->stream_ns_max;
+        ctx->stream_frames += 1U;
+        if (g_stream_trace) {
+            NphProxyStreamStats ps;
+            nph_proxy_stream_stats(ctx->cooked.stream, &ps);
+            printf("    stream frame %u: update %.3f ms; installed %u (%.2f MB), dropped %u; "
+                   "loading %u, short %u, asked %u; held %u levels (%.1f MB)\n",
+                   g_trace_frame, ns / 1.0e6, ps.installed, (f64)ps.installed_bytes / 1.0e6,
+                   ps.dropped, ps.loading, ps.short_cells, ps.asked, ps.held_levels,
+                   (f64)ps.held_bytes / 1.0e6);
+        }
+    }
     const u64 t0 = nph_time_now_ns();
     NphResult r = nph_render_frame(ctx->renderer, view, ctx->graph, target, NULL, stats);
     *cpu_ns = (f64)(nph_time_now_ns() - t0);
@@ -1295,6 +1335,32 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
     }
     ++g_trace_frame;
     return r != NPH_RESULT_OK ? r : er;
+}
+
+// Frames of the view as it stands until the stream has settled: nothing
+// loading, given or dropped, a few frames running (its requests are read
+// back NPH_GPU_FRAMES_IN_FLIGHT frames late; cells may stay short of a
+// budget), or PRIME_MAX_NS spent; reported.
+static NphResult prime_stream(Ctx *ctx, NphRenderView *view, NphGpuImage target, FrameRun *run)
+{
+    const u64 start = nph_time_now_ns();
+    f64 cpu = 0.0;
+    u32 frames = 0U;
+    u32 quiet = 0U;
+    while (quiet < 2U * NPH_GPU_FRAMES_IN_FLIGHT + 2U && nph_time_now_ns() - start < PRIME_MAX_NS) {
+        NPH_TRY(render_one(ctx, view, target, false, &cpu, &run->stats));
+        NphProxyStreamStats ps;
+        nph_proxy_stream_stats(ctx->cooked.stream, &ps);
+        quiet = ps.loading == 0U && ps.installed == 0U && ps.dropped == 0U ? quiet + 1U : 0U;
+        ++frames;
+    }
+    NphProxyStreamStats ps;
+    nph_proxy_stream_stats(ctx->cooked.stream, &ps);
+    printf("    stream settled in %u frames, %.1f s%s: %u levels held past their coarsest "
+           "(%.1f MB)\n",
+           frames, (f64)(nph_time_now_ns() - start) / 1.0e9, quiet == 0U ? " (NOT SETTLED)" : "",
+           ps.held_levels, (f64)ps.held_bytes / 1.0e6);
+    return NPH_RESULT_OK;
 }
 
 // The mean GPU time of the frames the profiler holds (its "frame" total), 0
@@ -1523,6 +1589,20 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
             printf("    cells: %u drawn as their proxies, for %u instances\n",
                    st->vis_cells_proxied, st->vis_instances_proxied);
         }
+        if (ctx->cooked.stream != NULL) {
+            NphProxyStreamStats ps;
+            nph_proxy_stream_stats(ctx->cooked.stream, &ps);
+            printf("    stream: %u cells, %u levels held past their coarsest (%.1f MB), %u "
+                   "asked, %u short, %u loading, last frame %u installed (%.1f MB) and %u "
+                   "dropped, %u failed; update %.3f ms mean, %.3f ms max a frame\n",
+                   ps.cells, ps.held_levels, (f64)ps.held_bytes / 1.0e6, ps.asked, ps.short_cells,
+                   ps.loading, ps.installed, (f64)ps.installed_bytes / 1.0e6, ps.dropped, ps.failed,
+                   ctx->stream_frames != 0U ? ctx->stream_ns_sum / ctx->stream_frames / 1.0e6 : 0.0,
+                   ctx->stream_ns_max / 1.0e6);
+            ctx->stream_ns_sum = 0.0;
+            ctx->stream_ns_max = 0.0;
+            ctx->stream_frames = 0U;
+        }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, wanted %u, drawn %u (budget %u), "
                    "resident %u, evicted %u; caster meshlets %u (%u hierarchy nodes), draws %u "
@@ -1743,6 +1823,8 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.jobs = ctx->jobs;
     cd.scene = nph_guid_from_cstr(m->scene_key);
     cd.no_cells = g_no_cells;
+    cd.stream = g_stream;
+    cd.stream_budget = g_stream_budget;
     const u64 t0 = nph_time_now_ns();
     const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
     if (r != NPH_RESULT_OK) {
@@ -1890,7 +1972,12 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         ctx->motion_reverses = false;
     }
     static FrameRun run;
-    NphResult r = run_frames(ctx, &view, target, frames, &run);
+    ctx->view_height = g_ref_height; // the stream's view (--stream)
+    NphResult r =
+        ctx->cooked.stream != NULL ? prime_stream(ctx, &view, target, &run) : NPH_RESULT_OK;
+    if (r == NPH_RESULT_OK) {
+        r = run_frames(ctx, &view, target, frames, &run);
+    }
     ctx->walking = false;
     ctx->turn = 0.0F;
     if (r == NPH_RESULT_OK && capture_dir != NULL) {
@@ -2011,8 +2098,9 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     // The renderer logs its pipelines' registers and spills (stderr).
     dd.shader_statistics = 1;
     // A reference scene unloads between frames in one go: Bistro destroys
-    // some 8,000 GPU objects.
-    dd.deferred_destroy_capacity = 16384U;
+    // some 8,000 GPU objects, a streamed landscape tens of thousands (its
+    // level meshes, a dozen buffers each).
+    dd.deferred_destroy_capacity = 1U << 17U;
     NPH_TRY(nph_gpu_device_create(&dd, &ctx->dev));
     NphGpuRenderGraphDesc gd;
     memset(&gd, 0, sizeof gd);
@@ -2103,7 +2191,7 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
-                    "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] "
+                    "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--no-cells]\n");
     return 2;
 }
@@ -2147,6 +2235,13 @@ int main(int argc, char **argv)
             g_memory_trace = true;
         } else if (strcmp(argv[i], "--no-cells") == 0) {
             g_no_cells = true;
+        } else if (strcmp(argv[i], "--stream") == 0) {
+            g_stream = true;
+        } else if (strncmp(argv[i], "--stream=", 9U) == 0) {
+            g_stream = true;
+            g_stream_budget = (u64)strtoull(argv[i] + 9, NULL, 10) * 1000000ULL;
+        } else if (strcmp(argv[i], "--stream-trace") == 0) {
+            g_stream_trace = true;
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {

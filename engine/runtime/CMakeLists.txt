@@ -16,6 +16,7 @@ nph_add_module(runtime
         src/engine_internal.h
         src/game_host.c
         src/physics_bridge.c
+        src/proxy_stream.c
         src/render_assets.c
         src/runtime_internal.h
         src/scene_import.c
@@ -49,6 +50,7 @@ nph_add_test(runtime
         tests/test_console.c
         tests/test_engine.c
         tests/test_physics_bridge.c
+        tests/test_proxy_stream.c
         tests/test_scene_render.c
         tests/test_sim_input.c
     DEPS
@@ -62,6 +64,7 @@ if(NPH_BUILD_TESTS)
     # device that skips without Vulkan, the validation gate, the leak
     # checker, and a small renderer.
     target_include_directories(runtime_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_SOURCE_DIR}/engine/gpu/tests"
         "${CMAKE_SOURCE_DIR}/engine/render/tests")
     nph_target_use_shaders(runtime_tests nph_shaders_render)

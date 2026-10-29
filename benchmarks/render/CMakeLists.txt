@@ -18,7 +18,8 @@ add_executable(render_perf render_perf.c
     "${CMAKE_SOURCE_DIR}/samples/common/cooked_scene.h"
     "${CMAKE_SOURCE_DIR}/samples/common/capture.c"
     "${CMAKE_SOURCE_DIR}/samples/common/capture.h")
-target_link_libraries(render_perf PRIVATE nph::options nph::render nph::asset nph::jobs)
+target_link_libraries(render_perf PRIVATE nph::options nph::render nph::asset nph::jobs
+                                          nph::runtime)
 target_include_directories(render_perf PRIVATE "${CMAKE_SOURCE_DIR}/samples/common")
 target_compile_definitions(render_perf PRIVATE
     "NPH_SCENE_MANIFEST_DIR=\"${CMAKE_SOURCE_DIR}/benchmarks/scenes\"")

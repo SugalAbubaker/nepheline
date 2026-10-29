@@ -14,6 +14,7 @@ nph_add_test(golden
     DEPS
         nph::render
         nph::asset
+        nph::runtime
         nph::golden
 )
 if(NPH_BUILD_TESTS)

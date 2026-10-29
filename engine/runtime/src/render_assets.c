@@ -324,40 +324,48 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->lod_makers = makers;
 }
 
+NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
+                                  NphRenderMeshDesc *out)
+{
+    const NphMeshHeader *h = mv->header;
+    // A head of levels apart (a cell's proxy, asset/mesh.h version 6) is no
+    // mesh to draw: its levels are (proxy_stream.c).
+    if (h->submesh_count > NPH_RENDER_MAX_SUBMESHES || mv->levels != NULL) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    for (u32 i = 0; i < h->submesh_count; ++i) {
+        subs[i].index_offset = mv->submeshes[i].index_offset;
+        subs[i].index_count = mv->submeshes[i].index_count;
+        subs[i].material_slot = mv->submeshes[i].material_slot;
+    }
+    NphRenderMeshDesc *d = out;
+    memset(d, 0, sizeof *d);
+    d->vertex_count = h->vertex_count;
+    d->index_count = h->index_count;
+    // The same layout (asserted above): the cooked streams are handed over
+    // as they are, through untyped pointers.
+    const void *positions = mv->positions;
+    const void *attribs = mv->attribs;
+    d->positions = positions;
+    d->attribs = attribs;
+    d->indices = mv->indices;
+    d->submeshes = subs;
+    d->submesh_count = h->submesh_count;
+    d->position_offset = h->position_offset;
+    d->position_scale = h->position_scale;
+    d->bounds = h->bounds;
+    cooked_clusters(mv, d);
+    d->name = "cooked mesh";
+    return NPH_RESULT_OK;
+}
+
 static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset *asset)
 {
     NphMeshView mv;
     NPH_TRY(nph_mesh_view(asset, &mv));
-    const NphMeshHeader *h = mv.header;
-    // A head of levels apart (a cell's proxy, asset/mesh.h version 6) is no
-    // mesh to draw: its levels are, and the runtime makes no cells yet.
-    if (h->submesh_count > NPH_RENDER_MAX_SUBMESHES || mv.levels != NULL) {
-        return NPH_RESULT_UNSUPPORTED;
-    }
     NphRenderSubmesh subs[NPH_RENDER_MAX_SUBMESHES];
-    for (u32 i = 0; i < h->submesh_count; ++i) {
-        subs[i].index_offset = mv.submeshes[i].index_offset;
-        subs[i].index_count = mv.submeshes[i].index_count;
-        subs[i].material_slot = mv.submeshes[i].material_slot;
-    }
     NphRenderMeshDesc d;
-    memset(&d, 0, sizeof d);
-    d.vertex_count = h->vertex_count;
-    d.index_count = h->index_count;
-    // The same layout (asserted above): the cooked streams are handed over
-    // as they are, through untyped pointers.
-    const void *positions = mv.positions;
-    const void *attribs = mv.attribs;
-    d.positions = positions;
-    d.attribs = attribs;
-    d.indices = mv.indices;
-    d.submeshes = subs;
-    d.submesh_count = h->submesh_count;
-    d.position_offset = h->position_offset;
-    d.position_scale = h->position_scale;
-    d.bounds = h->bounds;
-    cooked_clusters(&mv, &d);
-    d.name = "cooked mesh";
+    NPH_TRY(render_assets_mesh_desc(&mv, subs, &d));
     return nph_render_mesh_create(c->renderer, &d, &a->mesh);
 }
 

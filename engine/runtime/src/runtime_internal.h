@@ -4,6 +4,7 @@
 // Internal pieces of the runtime module shared between its source files.
 
 #include <nepheline/asset/loader.h>
+#include <nepheline/asset/mesh.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/render/renderer.h>
 
@@ -107,3 +108,57 @@ typedef struct RenderAssetCounts {
 } RenderAssetCounts;
 
 RenderAssetCounts render_assets_counts(const RenderAssetCache *c);
+
+// A mesh asset's view as the renderer's description: its streams handed
+// over as they are (the same records), its submeshes into `subs`
+// (NPH_RENDER_MAX_SUBMESHES of them). NPH_RESULT_UNSUPPORTED for more
+// submeshes than the renderer takes, or a head of levels apart (no mesh of
+// its own). The description points into the view's asset.
+NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
+                                  NphRenderMeshDesc *out);
+
+// ---------------------------------------------------------------------------
+// Proxy streaming's decisions (proxy_stream.c), pure, tested apart
+// ---------------------------------------------------------------------------
+
+// What a cell's errors, world units, are over a view's threshold `lod_error`
+// (pixels) seen from the camera `near` from its box, as the requests see
+// them: from a quarter nearer, and no nearer than `znear`; a level's error
+// times this past 1 is too coarse there. 0 in a view without levels of
+// detail.
+f32 proxy_stream_scale(f32 near, f32 pixels_per_unit, f32 lod_error, f32 znear);
+
+// The level a cell of `level_count` levels (their largest consumer errors
+// `errors`, finest first) is wanted at: `asked` where the views asked
+// (NPH_RENDER_CELL_NO_REQUEST: not), else past `distance` less a quarter
+// (the camera `near` from its box) one level coarser than its cut would use
+// there (the requests' test, at `scale`: proxy_stream_scale), else, or in a
+// view without levels of detail (`scale` 0), its coarsest.
+u32 proxy_stream_wanted(u32 asked, const f32 *errors, u32 level_count, f32 near, f32 distance,
+                        f32 scale);
+
+// What a cell's level is worth holding: needed (at or coarser than the level
+// wanted) before spare, then the error its cell shows without it (the
+// level's own, the error of the next coarser in its place) over the view's
+// threshold. Within a cell a finer level is worth no more than a coarser one
+// (the errors do not fall): a cell's finest held level is its least worth
+// keeping, its next finer level its most worth loading.
+typedef struct ProxyStreamWorth {
+    b32 needed;
+    f32 error;
+} ProxyStreamWorth;
+
+// Level `level` of a cell with `errors`, wanted at `wanted`, at `scale`.
+ProxyStreamWorth proxy_stream_worth(const f32 *errors, u32 level, u32 wanted, f32 scale);
+
+// `a` is worth more than `b`.
+bool proxy_stream_worth_above(ProxyStreamWorth a, ProxyStreamWorth b);
+
+// A level worth `w` pushes one worth `held` out past the budget: needed
+// over spare, else worth a quarter more (hysteresis: two cells of nearly
+// the same worth do not trade a level back and forth as the camera moves).
+bool proxy_stream_displaces(ProxyStreamWorth w, ProxyStreamWorth held);
+
+// What a level's mesh takes on the GPU, by its counts (render/renderer.h's
+// streams: records, bounds, makers, levels, voxels).
+u64 proxy_stream_level_bytes(const NphMeshView *mv);

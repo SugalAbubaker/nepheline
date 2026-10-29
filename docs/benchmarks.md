@@ -246,6 +246,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
             [--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--no-cells]
+            [--stream[=MB]] [--stream-trace]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -280,7 +281,15 @@ reports the frame two before it): the pages wanted and drawn, the page
 budget, the caster lists' use, the resolution bias and the overflows.
 `--no-cells` loads the scenes without their world partition's cells
 (ADR-0062, docs/render.md "Cell proxies"): every instance drawn as itself,
-for comparing a scene with its cells and without. After each scene a line
+for comparing a scene with its cells and without. `--stream[=MB]` streams
+the cells' proxies cooked as their levels apart (ADR-0063 stage 3;
+docs/runtime.md "Proxy streaming"): each cell is loaded with its coarsest
+level alone and its finer levels as the views want them, within MB
+megabytes past the coarsest (no limit without). Before a view is measured
+the stream settles (frames until nothing loads, is given or is dropped, at
+most 60 s), and each view's report gives what the stream holds and did and
+its main-thread time a frame; `--stream-trace` prints its work every frame.
+After each scene a line
 reports the GPU memory the process holds (`nph_gpu_device_memory_stats`):
 device-local in use against the OS's budget for it, past which allocations
 may fail or slow the frame; `--memory-trace` prints it every 16th frame,
