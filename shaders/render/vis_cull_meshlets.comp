@@ -122,14 +122,11 @@ void main()
             r = radius * scale;
             const vec4 cone = unpackSnorm4x8(b1.x);
             if ((view.v.flags & NPH_VIS_VIEW_LOD) != 0u && mesh.lod_makers != 0ul) {
-                const uint maker = VisUintRef(mesh.lod_makers).v[meshlet];
-                if (maker != NPH_VIS_LOD_NONE) {
-                    VisLodGroupsRef groups = VisLodGroupsRef(mesh.lod_groups);
-                    culled_lod = vis_lod_group_too_coarse(
-                        view, inst.transform,
-                        vec4(groups.g[maker].center, groups.g[maker].radius),
-                        groups.g[maker].error);
-                }
+                // The group that made it, tested as the walk tests that
+                // group's own clusters (level 0's error of 0 never is).
+                culled_lod = vis_lod_group_too_coarse(view, inst.transform,
+                                                      vis_lod_maker_sphere(mesh, meshlet),
+                                                      vis_lod_maker_error(mesh, meshlet));
             }
             if (culled_lod) {
                 // A finer level's clusters are drawn instead.
