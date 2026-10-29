@@ -405,6 +405,9 @@ static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const
         pd.loader = s->loader;
         pd.max_cells = nph_max_u32(s->cell_cap, 1U);
         pd.budget_bytes = desc->stream_budget;
+        // The levels made on the loader's jobs where the renderer has a
+        // voxel pool (s->alloc, the system allocator, takes their temporaries).
+        pd.jobs = desc->jobs;
         NPH_TRY(nph_proxy_stream_create(&pd, &s->stream));
     }
     for (u32 k = 0; k < s->cell_cap && k < sv->cell_count; ++k) {

@@ -25,8 +25,11 @@
 // the camera over the view's threshold; a level at or coarser than its
 // cell's wanted one (needed) is worth more than any finer (spare). Each
 // update the stream gives the cells the levels that have loaded, those worth
-// most first, a mesh made of each (at most `max_install_bytes` a frame: the
-// main thread's cost); past `budget_bytes` held, drops the levels worth
+// most first, a mesh made of each (at most `max_install_bytes` begun a
+// frame): with `jobs` and the renderer's voxel pool, on a loading job, which
+// checks the asset, uploads the mesh and releases the asset, the update
+// reserving the mesh and later finishing it (ADR-0063 stage 3c); else on the
+// main thread. Past `budget_bytes` held, it drops the levels worth
 // least (a cell's finest held, never a coarsest); and loads the levels worth
 // most (a cell's next finer, where held coarser than wanted), at most
 // `max_loads` at once (the asset loader's I/O thread and jobs), each within
@@ -38,14 +41,16 @@
 // do. A cell whose level fails to load is left as it is, the failure logged
 // and counted.
 //
-// Costs: create allocates the cells' table (`max_cells`); update allocates
-// nothing of its own, but what the loader and the renderer do for a level.
+// Costs: create allocates the cells' table (`max_cells`) and the builds'
+// (`max_loads`); update allocates nothing of its own, but what the loader
+// and the renderer do for a level.
 // Thread-safety: NPH_MAIN_THREAD_ONLY (it drives the renderer); update
 // between nph_gpu_frame_begin and nph_render_frame, so that a mesh's uploads
 // go with the frame's.
 
 #include <nepheline/asset/loader.h>
 #include <nepheline/asset/mesh.h>
+#include <nepheline/jobs/jobs.h>
 #include <nepheline/render/renderer.h>
 
 #ifdef __cplusplus
@@ -55,15 +60,21 @@ extern "C" {
 typedef struct NphProxyStream NphProxyStream;
 
 typedef struct NphProxyStreamDesc {
-    NphAllocator *alloc;    // required
+    NphAllocator *alloc;    // required; thread-safe with `jobs` (the jobs' temporaries)
     NphRenderer *renderer;  // required
     NphAssetLoader *loader; // required, with a job system (asynchronous loads)
-    u32 max_cells;          // cells it streams (at least 1)
+    // Optional: the levels' meshes made in the renderer's voxel pool
+    // (NphRendererDesc.voxel_pool_bytes), their checks and uploads on these
+    // jobs, the main thread only reserving and finishing them (ADR-0063 stage
+    // 3c). Without (or without a pool, or with no room in it), they are made
+    // on the main thread.
+    NphJobSystem *jobs;
+    u32 max_cells; // cells it streams (at least 1)
     // The bytes the held levels past each cell's coarsest may take on the
     // GPU (their meshes' streams; 0: unlimited).
     u64 budget_bytes;
-    u32 max_loads;         // levels loading at once (0: 8)
-    u64 max_install_bytes; // levels made a frame, in their bytes (0: 8 MiB; one at least)
+    u32 max_loads;         // levels loading (or being made) at once (0: 8)
+    u64 max_install_bytes; // levels begun a frame, in their bytes (0: 8 MiB; one at least)
 } NphProxyStreamDesc;
 
 // A cell to stream, made by the caller with its coarsest level's mesh alone
@@ -127,8 +138,12 @@ typedef struct NphProxyStreamStats {
     u64 held_bytes;  // theirs, on the GPU
     u32 asked;       // cells the views asked levels of (the last update)
     u32 short_cells; // cells held coarser than wanted (the last update)
-    u32 loading;     // levels loading
-    // The last update's work: levels given, and their bytes; levels dropped.
+    u32 loading;     // levels loading, or being made
+    u32 building;    // of those, being made on the jobs
+    // The last update's work: levels begun, and their bytes; levels given,
+    // and their bytes; levels dropped.
+    u32 started;
+    u64 started_bytes;
     u32 installed;
     u64 installed_bytes;
     u32 dropped;

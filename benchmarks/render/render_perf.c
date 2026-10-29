@@ -33,7 +33,7 @@
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
-//                 [--stream-trace]
+//                 [--stream-trace] [--voxel-pool=MB]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -55,7 +55,10 @@
 // settle (frames until nothing loads, is given or is dropped, at most
 // PRIME_MAX_NS), and each view's report then gives what the
 // stream holds and did, and its main-thread time a frame; --stream-trace
-// prints the stream's work every frame. After each
+// prints the stream's work every frame. --voxel-pool sets the renderer's
+// voxel pool (NphRendererDesc.voxel_pool_bytes; 0 none, the default without
+// --stream, 1536 with it), where meshes of voxels alone live a range each
+// and a streamed level is made on the loader's jobs. After each
 // scene, a line reports the GPU memory the process holds
 // (nph_gpu_device_memory_stats): device-local in use against the OS's
 // budget for it; --memory-trace reports it every 16th frame, warm-up
@@ -458,6 +461,7 @@ static bool g_no_cells = false;     // --no-cells: the scenes' cells not loaded
 static bool g_stream = false;       // --stream: the cells' proxies streamed
 static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarsest (0: none)
 static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
+static i64 g_voxel_pool_mb = -1;    // --voxel-pool=MB (-1: 1536 with --stream, else 0)
 
 // The most a view waits for the stream to settle before it is measured.
 #define PRIME_MAX_NS (60ULL * 1000000000ULL)
@@ -2122,6 +2126,8 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.max_meshes = MAX_MESHES;
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
+    rd.voxel_pool_bytes =
+        (u64)(g_voxel_pool_mb >= 0 ? g_voxel_pool_mb : (g_stream ? 1536 : 0)) * 1000000ULL;
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
     // holds 262,144).
     rd.max_deferred = 1U << 20U;
@@ -2192,7 +2198,7 @@ static int usage(void)
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
-                    "[--no-cells]\n");
+                    "[--stream-trace] [--voxel-pool=MB] [--no-cells]\n");
     return 2;
 }
 
@@ -2242,6 +2248,8 @@ int main(int argc, char **argv)
             g_stream_budget = (u64)strtoull(argv[i] + 9, NULL, 10) * 1000000ULL;
         } else if (strcmp(argv[i], "--stream-trace") == 0) {
             g_stream_trace = true;
+        } else if (strncmp(argv[i], "--voxel-pool=", 13U) == 0) {
+            g_voxel_pool_mb = (i64)strtoll(argv[i] + 13, NULL, 10);
         } else if (strcmp(argv[i], "--validation") == 0) {
             validation = true;
         } else if (strncmp(argv[i], "--scenes=", 9U) == 0) {

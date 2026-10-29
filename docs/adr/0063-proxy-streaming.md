@@ -486,6 +486,55 @@ settles; `render_perf --stream[=MB] --stream-trace`):
   shadow raster p99 of 19.9 ms as the levels arrived and redrew their pages:
   `render_perf` lets the stream settle before it measures a view.
 
+## Stage 3c, the pool and the jobs (2026-10-29)
+
+Making a level's mesh cost the main thread 0.12 ms and 0.54 ms a megabyte: past
+§10.5's 1 ms on any frame that installed more than a megabyte or so. Now:
+
+- **The voxel pool** (the renderer's, `NphRendererDesc.voxel_pool_bytes`; docs/render.md
+  "The voxel pool"): one GPU buffer that meshes of voxels alone live in, a range each
+  under the TLSF range allocator, their streams one after another and their record
+  pointing in. Making one allocates nothing on the device: the landscape's 21,060 GPU
+  allocations are 577. Its steps let a job do the work: begin (the main thread: a mesh
+  slot), upload (any thread: the checks, a range under the pool's lock, the uploads),
+  finish or cancel (the main thread, O(1)).
+- **The stream's jobs.** A loaded level's job takes its asset's view (which validates
+  it), describes it, uploads it into the pool and releases the asset; the update that
+  finds the job done finishes the mesh and gives it to its cell. A first version kept
+  the view and the release on the main thread and still took 0.39 ms a megabyte: the
+  view checks every cluster, brick and voxel, and the release frees the decompressed
+  level. Without a job system, or with no room in the pool (logged once), the level is
+  made on the main thread from the asset kept.
+- **The upload path, fixed.** The first run under a budget crashed the driver (an
+  access violation) a few seconds into the landscape; a GPU test with a thread
+  uploading while the main thread begins and ends frames trips
+  VUID-vkResetCommandPool-commandPool-00040. A frame's beginning switched its slot and
+  reset the slot's upload pools without the upload lock, while a job could be recording
+  into one, and a batch a job opened between frames was flushed synchronously or left
+  in the old slot's pool. Now a buffer upload outside a frame is staged and recorded by
+  the next batch (the next frame submits it as it begins), and the frame's beginning
+  and end hold the upload lock (docs/gpu.md "Uploads").
+
+**Measured** on the landscape (its four forest views as in stage 3):
+
+- **The main thread.** Without a budget (a 1.5 GB pool), a frame that installs takes
+  0.071 ms on average and 0.54 ms at most, not more for more bytes (a fit of 0.076 ms
+  and nothing a megabyte), where on the main thread 99 such frames passed 1 ms; the
+  turn's worst frame 0.036 ms where 1.65. Within 400 MB (a 600 MB pool), 0.051 ms on
+  average, 0.30 at most; idle updates 0.006 to 0.03 ms.
+- **What is held**, as before: 1,323 levels (792 MB) without a budget, 1,189 (399 MB)
+  within 400 MB, the frames as before (the forest 61.9 and 60.0 ms), still views moving
+  nothing, the turn trading 93 levels for 132 within the budget.
+- **Memory.** The pool is allocated whole: 6.67 GB device-local in use with the 1.5 GB
+  pool and no budget, where 5.99 with buffers of their own; 5.79 GB with the 600 MB
+  pool and the 400 MB budget, where 5.72. The pool is sized to what is held at once.
+- **Latency.** A level made on a job arrives a frame later: at these 62 ms frames
+  settling took 26.6 s and 368 frames where 17.9 s and 228. At 4 ms frames the extra
+  frame a level is 4 ms.
+
+Stage 4 remains: the update's work linear in the cells (thousands in the 4 x 4 km
+world), and the open world itself.
+
 ## References
 
 - B. Karis, R. Stubbe, G. Wihlidal. "Nanite: A Deep Dive." SIGGRAPH 2021, Advances in
