@@ -587,6 +587,9 @@ typedef struct RenderVis {
     u64 request_frame[NPH_GPU_FRAMES_IN_FLIGHT]; // frame index + 1 each holds (0: none)
     u8 *cell_requested;
     u64 requests_from;
+    // The cell slots made so far (the high-water mark): the shadow map's
+    // requests pass takes as many (vsm.c, vsm_cull.comp CELLS).
+    u32 cell_slots;
 
     // The lights: the persistent table, the grid's work buffer, and the
     // tile masks and depths (sized by the target, with the HZB).

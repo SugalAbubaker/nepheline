@@ -87,6 +87,7 @@
 // vsm_cull.comp modes (NphVisPush.mode).
 #define NPH_VSM_CULL_INSTANCES 0 // (instance, level) pairs against the pages to draw (z: level)
 #define NPH_VSM_CULL_MESHLETS  1 // their meshlets against those pages: the draws
+#define NPH_VSM_CULL_CELLS     2 // (cell, level) pairs against the pages needed: the requests
 
 // One page-table entry (a level's window slot).
 NPH_SHARED_STRUCT(NphVsmEntry)

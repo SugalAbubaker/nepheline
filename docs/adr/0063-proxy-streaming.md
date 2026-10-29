@@ -442,6 +442,18 @@ changed four things in the design above:
   stop asking, so that a cell flickering in and out of view (behind something an
   instant) keeps its finest asked level rather than giving it up and fetching it again.
 
+On the landscape under a budget a fifth change followed, in the renderer: **the shadow
+map asks every frame.** Its requests came from its instance cull, which runs only over
+the pages drawn that frame; a page kept from an earlier frame asked for nothing, though
+it held the level it was drawn with. Under a budget the level, no longer asked for,
+became spare and went; the cell's proxy changing redrew its pages, which asked for the
+level again, and it came back: at 400 MB the forest view, its camera still, installed
+and dropped some 650 levels each in 458 frames, the shadow raster's p99 63 ms and the
+frame's 143 ms. A pass of its own (`vsm cell requests`, 0.007 ms on the landscape) now
+asks, every frame, for each cell slot in each map level that draws the cell as its
+proxy where its box reaches a page the frame's pixels need: drawn or kept. The render
+test that shows a request standing in frames that draw no page fails without it.
+
 Its tests: the decisions apart (`runtime_tests`), and over the grove cooked with its
 cells (four of 8 m, four levels each, proxies from 140 m), on the GPU: every cell
 streams in the levels its views ask for, each once, and the image is, byte for byte,
@@ -451,23 +463,28 @@ times nearer, nothing moves while the camera stays, and turned round the groves 
 four levels, each given once; a level whose asset no pack holds, or that is not a
 level, leaves its cell as it is.
 
-**Measured** on the landscape (384 cells, 2,639 levels; its forest views at native 4K,
-16 times the lists, no budget; before the ranking, which without a budget changes only
-the order levels arrive in):
+**Measured** on the landscape (384 cells, 2,639 levels; its four forest views at
+native 4K on the RTX 3060 Ti, 16 times the lists, 240 frames each after the stream
+settles; `render_perf --stream[=MB] --stream-trace`):
 
-- **What it holds.** Settled 19.2 s and 247 frames after the load, 1,367 levels past the
-  coarsest (820 MB) where every level is 2,255 past them: the GPU's device-local memory
-  5.99 GB where 6.73 with every level held. The walk and the sprint ask for a few levels
-  more (1,372), the turn for 1,395 (861 MB).
-- **The main thread.** An idle update takes 0.011 to 0.014 ms. Installing does not fit
-  §10.5: frames that install take 2.76 ms on average and 9.14 ms at most (a frame's 8
-  MiB), 0.88 ms a megabyte made, 1.06 ms a level; the turn's worst frame 2.0 ms. Making
-  a mesh validates its clusters and voxels and uploads a dozen streams on the main
-  thread: the pool and the jobs come next.
-- **The shadows.** A level arriving redraws the sun's shadow pages its cell covers:
-  measured from a cold start, the first view's shadow raster had a p99 of 19.9 ms;
-  `render_perf` now lets the stream settle before it measures a view. Moving, the shadow
-  map's p99 is unchanged.
+- **No budget.** Settled 17.9 s and 228 frames after the load, holding 1,323 levels past
+  the coarsest (792 MB) where every level is 2,255 past them: the GPU's device-local
+  memory 5.99 GB where 6.73 with every level held. Still, walking and sprinting, nothing
+  is dropped and at most five levels arrive; turning, 19 (831 MB). The frames as with
+  every level held (the forest 61.7 ms, p99 62.2); turning, the shadow raster's p99 4.6
+  ms as levels arrive.
+- **Within 400 MB** (half): settled in 172 frames, 1,189 levels held (399 MB), 134
+  cells a level or more short of their request; device-local memory 5.72 GB. Still,
+  walking and sprinting, nothing comes or goes; turning, 91 levels arrive and 136 go.
+  The forest's frame 60.0 ms (p99 60.3), its coarser far field cheaper to draw.
+- **The main thread.** An idle update takes 0.006 to 0.03 ms. Installing does not fit
+  §10.5: a frame that installs takes 0.12 ms and 0.54 ms a megabyte made (2.0 ms on
+  average while settling, 5.1 ms at most; turning, 2.6 ms at most), an earlier
+  measurement 0.88 ms a megabyte. Making a mesh validates its clusters and voxels and
+  uploads a dozen streams on the main thread: the pool and the jobs come next.
+- **A cold start.** The first view, measured without letting the stream settle, had a
+  shadow raster p99 of 19.9 ms as the levels arrived and redrew their pages:
+  `render_perf` lets the stream settle before it measures a view.
 
 ## References
 

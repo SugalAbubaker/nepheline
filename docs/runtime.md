@@ -356,10 +356,10 @@ Costs: creation allocates the cells' table; an update allocates nothing of
 its own and is linear in the cells (a pass reading their requests, and
 one for each load and drop); the loads and the meshes allocate what the
 loader and the renderer do. On the open landscape (384 cells, 2,639
-levels) an idle update takes 0.014 ms, but installing costs the main
-thread 0.88 ms for each megabyte of levels made (9.1 ms at most, for a
-frame's 8 MiB), past §10.5's 1 ms: the meshes' validation and uploads move
-to the jobs next (ADR-0063 "Stage 3, the stream"). `nph_proxy_stream_stats`
+levels) an idle update takes 0.006 to 0.03 ms, but a frame that installs
+costs the main thread 0.12 ms and 0.54 ms for each megabyte of levels made
+(5.1 ms at most), past §10.5's 1 ms: the meshes' validation and uploads
+move to the jobs next (ADR-0063 "Stage 3, the stream"). `nph_proxy_stream_stats`
 and `nph_proxy_stream_cell_state` report what the stream holds and does,
 for tools and tests. NPH_MAIN_THREAD_ONLY.
 
@@ -748,7 +748,7 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 
 ## Limitations and future work
 
-- Proxy streaming makes its levels' meshes on the main thread (0.88 ms a
+- Proxy streaming makes its levels' meshes on the main thread (0.54 ms a
   megabyte); a pool of voxel meshes with their validation and uploads on
   the jobs comes next (ADR-0063). An update is linear in the cells: a
   world of thousands needs its requests read, and its loads and drops

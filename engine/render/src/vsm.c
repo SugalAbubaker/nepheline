@@ -754,6 +754,22 @@ static void cull_instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, voi
     nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(instance_args));
 }
 
+// The cells' proxies' levels the map asks for (vsm_cull.comp CELLS; ADR-0063
+// stage 3): every cell slot at every level, every frame, against the pages
+// the frame's pixels need.
+static void cell_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    NphVisPush p = push_of(r, NPH_VSM_CULL_CELLS, 0U);
+    p.arg0 = r->vis.cell_slots;
+    nph_gpu_cmd_bind_pipeline(cmd, r->vsm.cull);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    const u32 groups = (r->vis.cell_slots + 63U) / 64U;
+    const u32 x = nph_max_u32(nph_min_u32(groups, 65535U), 1U);
+    nph_gpu_cmd_dispatch(cmd, x, (groups + x - 1U) / x, (u32)NPH_VSM_LEVELS);
+}
+
 // A step of the casters' hierarchies (vsm_cull_nodes.comp): from a queue
 // into the next, emptying the one after, dispatched with the workgroups
 // whatever filled the queue raised its arguments to.
@@ -1073,11 +1089,14 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
         b32 voxel_out; // writes the voxel casters' list
         b32 indirect;  // dispatched with arguments the pass before wrote
     } VsmPass;
-    VsmPass passes[6U + 2U * RENDER_LOD_MAX_DEPTH];
+    VsmPass passes[7U + 2U * RENDER_LOD_MAX_DEPTH];
     u32 n = 0U;
     passes[n++] = (VsmPass){"vsm update", update_execute, 0, 0, 0};
     passes[n++] = (VsmPass){"vsm collect", collect_execute, 0, 0, 0};
     passes[n++] = (VsmPass){"vsm select", select_execute, 0, 0, 0};
+    if (r->vis.cell_slots != 0U) {
+        passes[n++] = (VsmPass){"vsm cell requests", cell_requests_execute, 0, 0, 0};
+    }
     passes[n++] = (VsmPass){"vsm cull instances", cull_instances_execute, 1, 0, 0};
     const u32 steps = v->lods ? render_vis_lod_steps(r) : 0U;
     for (u32 i = 0; i < steps; ++i) {
@@ -1103,8 +1122,9 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
             // The cells, whose proxies the instance cull switches (ADR-0062).
             nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
         }
-        if (passes[i].execute == cull_instances_execute) {
-            // Their proxies' levels asked for (ADR-0063 stage 3).
+        if (passes[i].execute == cell_requests_execute) {
+            // The cells, and their proxies' levels asked for (ADR-0063 stage 3).
+            nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
             nph_gpu_rg_write_buffer(p, r->vis.frame.cell_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
         }
         if (passes[i].voxel_out && r->vis.frame_voxels) {
