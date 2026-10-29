@@ -95,10 +95,15 @@ NTEST_F(Profiler, collects_the_renderer_passes)
     NTEST_EXPECT_EQ_STR(s[n - 1U].name, "span");
     // One queue runs the passes one after another: the span holds them all
     // (and whatever separates them), so it is at least their sum, rounding
-    // aside, and not much more.
+    // aside, and on a GPU not much more. A software device's timestamps are
+    // its threads' clocks, the gaps between its passes the host's scheduling
+    // (on a loaded hosted runner under sanitizers, more than the passes'
+    // sum): there the span is only bounded below.
     NTEST_EXPECT_EQ_UINT(s[n - 1U].samples, s[n - 2U].samples);
     NTEST_EXPECT_TRUE(s[n - 1U].mean_ms >= s[n - 2U].mean_ms * 0.999 - 1e-6);
-    NTEST_EXPECT_TRUE(s[n - 1U].mean_ms <= s[n - 2U].mean_ms * 2.0 + 0.05);
+    if (nph_gpu_device_info(f->dev)->type != NPH_GPU_DEVICE_TYPE_CPU) {
+        NTEST_EXPECT_TRUE(s[n - 1U].mean_ms <= s[n - 2U].mean_ms * 2.0 + 0.05);
+    }
 
     char path[512];
     snprintf(path, sizeof path, "%s/render_profiler_test.json", NPH_SHADER_DIR);
