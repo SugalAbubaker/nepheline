@@ -50,7 +50,9 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //      cell and twice its finest's, not twice its coarsest's (ADR-0061).
 //   6: the voxels compact (mesh type version 5; render/voxel.h "The compact
 //      form"; ADR-0063).
-#define COOK_MESH_VERSION 6U
+//   7: a cell's proxy as its levels apart and a head (mesh type version 6;
+//      ADR-0063 "Stage 2, a level is a mesh").
+#define COOK_MESH_VERSION 7U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

@@ -12,6 +12,7 @@
 // NPH_THREADSAFE where cells are built at once.
 
 #include <nepheline/asset/format.h>
+#include <nepheline/asset/mesh.h>
 #include <nepheline/core/array.h>
 #include <nepheline/math/geometry.h>
 #include <nepheline/render/cell_proxy.h>
@@ -97,11 +98,27 @@ typedef struct CookCellProxyInput {
 NPH_MUST_USE NphResult cook_cell_proxy(const CookCellProxyInput *in, NphRenderClusterLods *out,
                                        NphVec3 *out_origin, NphRenderCellProxyStats *stats);
 
-// Writes a proxy as a mesh asset of voxels alone (asset/mesh.h version 4)
-// into `writer` (a mesh asset's): no vertices or indices, one submesh of
-// material slot 0 over level 0's clusters, the clusters, their levels and
-// their voxels. NPH_RESULT_INVALID_ARGUMENT for a proxy without clusters.
-NPH_MUST_USE NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *writer);
+// A proxy is written as its levels apart (asset/mesh.h version 6;
+// render/cluster_lod.h "Levels apart"; ADR-0063), each a mesh asset of its
+// own that loads alone, and a head that lists them, which the scene's cell
+// names.
+//
+// Level `level` of a proxy as a mesh asset of voxels alone into `writer` (a
+// mesh asset's; NPH_MESH_FLAG_LEVEL): no vertices or indices, one submesh of
+// material slot 0 over its clusters, its clusters, their one level, their
+// makers as records, and their voxels, compact; and its entry in the head
+// into `*out` (its errors and clusters; its `mesh` left for the caller to
+// name). NPH_RESULT_INVALID_ARGUMENT for a level the proxy does not have.
+NPH_MUST_USE NphResult cook_proxy_level_write(const NphRenderClusterLods *proxy, u32 level,
+                                              NphAssetWriter *writer, NphMeshLevel *out);
+
+// A proxy's head into `writer` (NPH_MESH_FLAG_LEVELS): the bounds of all its
+// clusters, one submesh of material slot 0, and its `count` levels.
+// NPH_RESULT_INVALID_ARGUMENT for a proxy without clusters, or no levels or
+// more than NPH_MESH_MAX_LEVELS.
+NPH_MUST_USE NphResult cook_proxy_head_write(const NphRenderClusterLods *proxy,
+                                             const NphMeshLevel *levels, u32 count,
+                                             NphAssetWriter *writer);
 
 #ifdef __cplusplus
 }

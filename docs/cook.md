@@ -359,14 +359,22 @@ proxy that stands for its instances from afar: a mesh of voxels alone
   every other cluster's record emptied) with their voxel materials, until
   the proxies are built; the cells are built in rounds of 32 at once on
   the job system, each logged with its instances, levels, voxels, what
-  its sweep saw, and its time. A proxy is a mesh asset of voxels alone
-  (`cell/<x>_<z>`, version 5, its voxels compact) written by
-  `cook_proxy_write`; an empty one writes nothing.
+  its sweep saw, and its time. A proxy is written as its levels apart
+  (asset/mesh.h version 6; ADR-0063 "Stage 2, a level is a mesh"): each
+  level a mesh asset of voxels alone of its own (`cell/<x>_<z>/level_<k>`,
+  file `cell_<x>_<z>_l<k>`, `cook_proxy_level_write`: the level split from
+  the proxy by `nph_render_cluster_lods_level`, its clusters' makers as
+  records, its voxels compact), then the head that lists them
+  (`cell/<x>_<z>`, file `cell_<x>_<z>`, `cook_proxy_head_write`), which the
+  scene's cell names and whose database entry lists them as its
+  dependencies; an empty proxy writes nothing.
 - **Incremental cooks.** The scene's settings hash folds in the cells'
   settings and the meshes'; the proxies are current while the scene is
   and each one's database entry and file are (a cook rebuilds them all
   otherwise, recooking in memory the meshes it needs that are current).
-  Cooking a scene without `--hlod` drops its proxies.
+  A current head's dependencies are its levels, which the cook keeps as it
+  keeps the head. Cooking a scene without `--hlod` drops its proxies, heads
+  and levels.
 - **Cost.** The landscape (`benchmarks/scenes/landscape.json`) on eight
   workers: 47,862 of its 47,863 instances in 384 cells (the terrain in
   none), 35 to 209 a cell. The cook takes 56 minutes, the cells 51 of them

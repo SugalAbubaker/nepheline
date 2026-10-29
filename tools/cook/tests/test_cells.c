@@ -299,10 +299,7 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
     Cooker *c = make_cooker(f, true);
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
     CookerStats st = cooker_stats(c);
-    // The default material, two meshes, four proxies, the scene.
-    NTEST_EXPECT_EQ_UINT(st.cooked, 8U);
     NTEST_EXPECT_EQ_UINT(st.failed, 0U);
-    NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U);
     // The scene: its tufts in the four cells, two each, the ground after them.
     const CookDbEntry *se = cook_db_find(cooker_db(c), NPH_STR("grove.gltf"), NPH_STR("scene"));
     NTEST_ASSERT_NOT_NULL(se);
@@ -314,6 +311,7 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
     NTEST_ASSERT_EQ_UINT(sv.cell_count, 4U);
     const NphGuid tuft = nph_guid_from_cstr("grove.gltf#mesh/0");
     const NphGuid ground = nph_guid_from_cstr("grove.gltf#mesh/1");
+    u32 levels = 0U; // the proxies' levels apart, an asset each
     for (u32 k = 0; k < 4U; ++k) {
         const NphSceneCell *cell = &sv.cells[k];
         NTEST_EXPECT_EQ_UINT(cell->instance_offset, 2U * k);
@@ -325,7 +323,8 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
         for (u32 i = 0; i < 2U; ++i) {
             NTEST_EXPECT_TRUE(nph_guid_equals(sv.instances[2U * k + i].mesh, tuft));
         }
-        // Its proxy: a mesh of voxels alone, in levels.
+        // Its proxy: a head of no geometry naming its levels apart (asset/
+        // mesh.h version 6; ADR-0063), whose assets depend on it.
         NTEST_ASSERT_FALSE(nph_guid_is_null(cell->proxy));
         const CookDbEntry *pe = cook_db_find_guid(cooker_db(c), cell->proxy);
         NTEST_ASSERT_NOT_NULL(pe);
@@ -334,19 +333,53 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
         NphMeshView mv;
         NTEST_ASSERT_EQ_INT(nph_mesh_view(&proxy.asset, &mv), NPH_RESULT_OK);
         NTEST_EXPECT_EQ_UINT(mv.header->vertex_count, 0U);
-        NTEST_EXPECT_EQ_UINT(mv.header->index_count, 0U);
-        NTEST_ASSERT_NOT_NULL(mv.lod);
-        NTEST_EXPECT_GE_UINT(mv.lod->levels, 2U);
-        // Over a hundred voxels, compact (render/voxel.h).
-        NTEST_EXPECT_GT_UINT(mv.lod->voxel_word_count, 100U * NPH_MESH_VOXEL_WORDS);
-        NTEST_EXPECT_GT_UINT(mv.lod->voxel_cluster_count, 0U);
-        NTEST_EXPECT_EQ_UINT(mv.meshlets[0].vertex_count, 0U);
+        NTEST_EXPECT_EQ_UINT(mv.header->meshlet_count, 0U);
+        NTEST_EXPECT_NULL(mv.lod);
+        NTEST_ASSERT_NOT_NULL(mv.levels);
+        NTEST_ASSERT_GE_UINT(mv.level_count, 2U);
+        NTEST_ASSERT_EQ_UINT(pe->dep_count, mv.level_count);
         // The proxy's space is the square's: its voxels within a tuft's reach
         // of its two tufts (here x and z from about 0.7 to 7.3).
         NTEST_EXPECT_TRUE(mv.header->bounds.min.x > -1.0F && mv.header->bounds.max.x < 9.0F);
         NTEST_EXPECT_TRUE(mv.header->bounds.min.z > -1.0F && mv.header->bounds.max.z < 9.0F);
+        // Each level: a mesh of voxels alone of one level, its makers as
+        // records (none at level 0), over a hundred voxels at level 0,
+        // compact (render/voxel.h), its errors rising from the finer one's.
+        u32 words = 0U;
+        for (u32 i = 0; i < mv.level_count; ++i) {
+            const NphMeshLevel *lv = &mv.levels[i];
+            NTEST_EXPECT_TRUE(nph_guid_equals(pe->deps[i], lv->mesh));
+            const CookDbEntry *le = cook_db_find_guid(cooker_db(c), lv->mesh);
+            NTEST_ASSERT_NOT_NULL(le);
+            TestAsset level;
+            read_asset(f, le->output, &level);
+            NphMeshView lm;
+            NTEST_ASSERT_EQ_INT(nph_mesh_view(&level.asset, &lm), NPH_RESULT_OK);
+            NTEST_EXPECT_EQ_UINT(lm.header->vertex_count, 0U);
+            NTEST_ASSERT_NOT_NULL(lm.lod);
+            NTEST_ASSERT_NOT_NULL(lm.lod_makers);
+            NTEST_EXPECT_EQ_UINT(lm.lod->levels, 1U);
+            NTEST_EXPECT_EQ_UINT(lm.header->meshlet_count, lv->cluster_count);
+            NTEST_EXPECT_GT_UINT(lm.lod->voxel_cluster_count, 0U);
+            NTEST_EXPECT_EQ_UINT(lm.meshlets[0].vertex_count, 0U);
+            f32 smallest = NPH_F32_MAX;
+            for (u32 m = 0; m < lm.header->meshlet_count; ++m) {
+                smallest = nph_f32_min(smallest, lm.lod_makers[m].error);
+            }
+            NTEST_EXPECT_NEAR_F32(lv->maker_error, smallest, 0.0F);
+            NTEST_EXPECT_TRUE(i == 0U ? lv->maker_error == 0.0F
+                                      : lv->maker_error >= mv.levels[i - 1U].maker_error);
+            words += i == 0U ? lm.lod->voxel_word_count : 0U;
+            test_asset_free(&level);
+        }
+        NTEST_EXPECT_GT_UINT(words, 100U * NPH_MESH_VOXEL_WORDS);
+        levels += mv.level_count;
         test_asset_free(&proxy);
     }
+    // The default material, two meshes, four proxies' heads and levels, the
+    // scene.
+    NTEST_EXPECT_EQ_UINT(st.cooked, 8U + levels);
+    NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U + levels);
     NTEST_EXPECT_TRUE(nph_guid_equals(sv.instances[8].mesh, ground));
     test_asset_free(&scene);
     cooker_destroy(c);
@@ -356,15 +389,15 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
     st = cooker_stats(c);
     NTEST_EXPECT_EQ_UINT(st.cooked, 0U);
-    NTEST_EXPECT_EQ_UINT(st.skipped, 8U);
-    NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U);
+    NTEST_EXPECT_EQ_UINT(st.skipped, 8U + levels);
+    NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U + levels);
     cooker_destroy(c);
 
     // Without cells: the scene recooks without them, its proxies are gone.
     c = make_cooker(f, false);
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
     st = cooker_stats(c);
-    NTEST_EXPECT_EQ_UINT(st.removed, 4U);
+    NTEST_EXPECT_EQ_UINT(st.removed, 4U + levels);
     NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 0U);
     se = cook_db_find(cooker_db(c), NPH_STR("grove.gltf"), NPH_STR("scene"));
     NTEST_ASSERT_NOT_NULL(se);
