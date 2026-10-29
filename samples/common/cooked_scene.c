@@ -270,11 +270,10 @@ static NphResult flush_levels(CookedScene *s, const CookedSceneDesc *desc, Level
     for (u32 i = 0; i < b->count; ++i) {
         NphResult ri = nph_asset_wait(s->loader, b->handles[i]);
         if (ri == NPH_RESULT_OK) {
-            ri = create_mesh_of(s, nph_asset_get(s->loader, b->handles[i]),
-                                &s->level_meshes[b->slots[i]]);
-        }
-        if (ri == NPH_RESULT_OK && s->level_meshes[b->slots[i]].value == 0U) {
-            ri = NPH_RESULT_CORRUPT; // a head naming a head
+            // As the stream makes them: a mesh that is not a level apart (a
+            // head naming a head) is refused.
+            ri = nph_proxy_level_mesh_create(s->renderer, nph_asset_get(s->loader, b->handles[i]),
+                                             &s->level_meshes[b->slots[i]]);
         }
         r = r == NPH_RESULT_OK ? ri : r;
         nph_asset_release(s->loader, b->handles[i]);
@@ -284,9 +283,10 @@ static NphResult flush_levels(CookedScene *s, const CookedSceneDesc *desc, Level
 }
 
 // The cells' proxies' levels apart (asset/mesh.h version 6; ADR-0063): each
-// head's levels loaded LEVEL_BATCH at a time, a render mesh made of each and
-// its asset released at once (the GPU holds it, and the levels are the bulk
-// of a large world's proxies), each cell's run of them noted.
+// head's levels (streamed, its coarsest alone) loaded LEVEL_BATCH at a time,
+// a render mesh made of each and its asset released at once (the GPU holds
+// it, and the levels are the bulk of a large world's proxies), each cell's
+// run of them noted.
 static NphResult load_levels(CookedScene *s, const CookedSceneDesc *desc, const NphSceneView *sv,
                              u32 cells)
 {
@@ -317,8 +317,9 @@ static NphResult load_levels(CookedScene *s, const CookedSceneDesc *desc, const 
             continue;
         }
         s->cell_level_first[k] = s->level_mesh_count;
-        s->cell_level_count[k] = mv.level_count;
-        for (u32 i = 0; i < mv.level_count && r == NPH_RESULT_OK; ++i) {
+        const u32 first = desc->stream ? mv.level_count - 1U : 0U;
+        s->cell_level_count[k] = mv.level_count - first;
+        for (u32 i = first; i < mv.level_count && r == NPH_RESULT_OK; ++i) {
             if (b.count == LEVEL_BATCH) {
                 r = flush_levels(s, desc, &b);
             }
@@ -396,6 +397,16 @@ static NphRenderTransform at_origin(const NphMat4 *m, NphDVec3 origin)
 // voxelized) makes none: its instances are drawn as themselves.
 static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const NphSceneView *sv)
 {
+    if (desc->stream) {
+        NphProxyStreamDesc pd;
+        memset(&pd, 0, sizeof pd);
+        pd.alloc = s->alloc;
+        pd.renderer = s->renderer;
+        pd.loader = s->loader;
+        pd.max_cells = nph_max_u32(s->cell_cap, 1U);
+        pd.budget_bytes = desc->stream_budget;
+        NPH_TRY(nph_proxy_stream_create(&pd, &s->stream));
+    }
     for (u32 k = 0; k < s->cell_cap && k < sv->cell_count; ++k) {
         const NphSceneCell *c = &sv->cells[k];
         s->cells[k] = NPH_RENDER_CELL_NULL;
@@ -428,8 +439,36 @@ static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const
             nph_dvec3_add(nph_dvec3_from_vec3(c->proxy_origin), desc->origin);
         d.proxy_error = c->proxy_cell;
         d.distance = c->proxy_distance;
+        // A streamed proxy's levels: their errors, which the views' requests
+        // answer to, and its head's table for the stream.
+        NphMeshView head;
+        memset(&head, 0, sizeof head);
+        f32 errors[NPH_RENDER_CELL_MAX_LEVELS];
+        const bool streamed =
+            s->stream != NULL && apart &&
+            nph_mesh_view(nph_asset_get(s->loader, s->assets[mi]), &head) == NPH_RESULT_OK &&
+            head.levels != NULL;
+        if (streamed) {
+            for (u32 i = 0; i < head.level_count; ++i) {
+                errors[i] = head.levels[i].error;
+            }
+            d.proxy_level_errors = errors;
+            d.proxy_level_error_count = head.level_count;
+        }
         NPH_TRY(nph_render_cell_create(s->renderer, &d, &s->cells[k]));
         ++s->proxy_count;
+        if (streamed) {
+            NphProxyStreamCell pc;
+            memset(&pc, 0, sizeof pc);
+            pc.cell = s->cells[k];
+            pc.coarsest = s->level_meshes[s->cell_level_first[k]];
+            pc.levels = head.levels;
+            pc.level_count = head.level_count;
+            pc.center = d.center;
+            pc.extent = d.extent;
+            pc.distance = d.distance;
+            NPH_TRY(nph_proxy_stream_add(s->stream, &pc));
+        }
     }
     return NPH_RESULT_OK;
 }
@@ -682,6 +721,16 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     return r;
 }
 
+NphResult cooked_scene_update(CookedScene *s, const NphRenderView *view, u32 height)
+{
+    NPH_ASSERT(s != NULL && view != NULL);
+    if (s->stream == NULL) {
+        return NPH_RESULT_OK;
+    }
+    const NphProxyStreamView v = nph_proxy_stream_view(view, height);
+    return nph_proxy_stream_update(s->stream, &v);
+}
+
 NphResult cooked_scene_load(const CookedSceneDesc *desc, CookedScene *out)
 {
     NPH_ASSERT(desc != NULL && out != NULL);
@@ -707,6 +756,10 @@ void cooked_scene_unload(CookedScene *s)
         return;
     }
     NphRenderer *r = s->renderer;
+    // The stream first: it gives the cells back their coarsest levels and
+    // destroys the finer ones it made.
+    nph_proxy_stream_destroy(s->stream);
+    s->stream = NULL;
     if (s->instances != NULL) {
         for (u32 i = 0; i < s->instance_count; ++i) {
             nph_render_instance_destroy(r, s->instances[i]);

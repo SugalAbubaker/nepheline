@@ -1157,7 +1157,10 @@ cell for each of a scene's cells with a proxy, before the instances, which
 name theirs; a proxy cooked as its levels apart (asset/mesh.h version 6, a
 head naming its levels' assets) has its levels loaded 256 at a time, a mesh
 made of each and its asset released at once, so the host keeps no copy of
-them. `render_perf --no-cells` loads a scene without them. The runtime's
+them; streamed (`CookedSceneDesc.stream`, `render_perf --stream`), its
+coarsest level alone, the finer ones given and taken back as the views ask
+for them by the runtime's proxy stream ([runtime.md](runtime.md) "Proxy
+streaming"). `render_perf --no-cells` loads a scene without them. The runtime's
 scene import does not make cells yet: its instances are drawn as
 themselves.
 
@@ -1172,7 +1175,7 @@ against 0.0001 to 0.0035 between two runs without cells). Held whole, the
 landscape's proxies (2.06 GB decompressed) take the GPU's device-local memory
 from 3.96 GB to 5.84 GB with the default lists, and the host holds them twice
 over (the cooked scene keeps its assets loaded: decompressed, and mapped where
-they were read): they are to be streamed (stage 3).
+they were read): hence their streaming (ADR-0063).
 
 ### A frame
 

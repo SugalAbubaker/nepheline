@@ -407,6 +407,68 @@ built:
   4's open world: the frame time's 1 % low and p99, the bytes held, loads and installs
   a frame.
 
+## Stage 3, the stream (2026-10-29)
+
+The manager is the runtime's `NphProxyStream` (runtime/proxy_stream.h; docs/runtime.md
+"Proxy streaming"), which the cooked-scene bridge drives (`CookedSceneDesc.stream`,
+`render_perf --stream[=MB]`). A caller makes each cell with its coarsest level alone
+(`nph_proxy_level_mesh_create`, as the stream makes the others) and its head's errors,
+and calls the stream's update each frame between the frame's start and its drawing.
+Testing it under a budget, over the cooker's grove in a GPU test (tests/integration),
+changed four things in the design above:
+
+- **One ranking.** Loads went to the cells most short of their wanted level, drops to
+  the farthest: under a budget the two disagree, and a far cell short by more levels
+  than the others was loaded first and dropped first, frame after frame. A level is now
+  worth the error its cell shows without it, seen from the camera over the threshold,
+  levels at or coarser than the wanted one (needed) before finer ones (spare): loads
+  take the most worth, drops the least, and since a cell's errors do not fall, its own
+  levels rank in their order (its finest held is the least worth keeping, its next
+  finer the most worth loading). The held set converges on the levels worth most.
+- **Room planned before it is made.** A level that would not fit loads only if levels
+  worth enough less free enough room: spare ones, or needed ones worth a quarter less
+  (hysteresis, so that cells of nearly the same worth do not trade a level back and
+  forth as the camera moves). A first version dropped them one by one and gave up half
+  way: what it had dropped came back as the next loads, and the test counted 2,392
+  drops in 600 frames. A level that cannot fit is passed over, eight an update, for
+  smaller ones worth less that can (else a level 0 that did not fit left two fifths of
+  the budget unused).
+- **Estimates by depth.** Before it has loaded, a level's bytes are its clusters at the
+  bytes a cluster of its depth has taken so far: the grove's level-0 clusters take about
+  540 bytes, its coarser ones about 1,240, so an estimate over all depths made a level 0
+  twice its size, which never fitted. A depth not seen yet counts as nothing: it loads,
+  and the budget drops what it must, once.
+- **Requests stand a moment.** A cell's last request stands 30 updates after the views
+  stop asking, so that a cell flickering in and out of view (behind something an
+  instant) keeps its finest asked level rather than giving it up and fetching it again.
+
+Its tests: the decisions apart (`runtime_tests`), and over the grove cooked with its
+cells (four of 8 m, four levels each, proxies from 140 m), on the GPU: every cell
+streams in the levels its views ask for, each once, and the image is, byte for byte,
+the one of the cells given every level at once; the stream gone, each cell draws its
+coarsest again; within half the bytes the levels go to the nearer of two groves, three
+times nearer, nothing moves while the camera stays, and turned round the groves trade
+four levels, each given once; a level whose asset no pack holds, or that is not a
+level, leaves its cell as it is.
+
+**Measured** on the landscape (384 cells, 2,639 levels; its forest views at native 4K,
+16 times the lists, no budget; before the ranking, which without a budget changes only
+the order levels arrive in):
+
+- **What it holds.** Settled 19.2 s and 247 frames after the load, 1,367 levels past the
+  coarsest (820 MB) where every level is 2,255 past them: the GPU's device-local memory
+  5.99 GB where 6.73 with every level held. The walk and the sprint ask for a few levels
+  more (1,372), the turn for 1,395 (861 MB).
+- **The main thread.** An idle update takes 0.011 to 0.014 ms. Installing does not fit
+  §10.5: frames that install take 2.76 ms on average and 9.14 ms at most (a frame's 8
+  MiB), 0.88 ms a megabyte made, 1.06 ms a level; the turn's worst frame 2.0 ms. Making
+  a mesh validates its clusters and voxels and uploads a dozen streams on the main
+  thread: the pool and the jobs come next.
+- **The shadows.** A level arriving redraws the sun's shadow pages its cell covers:
+  measured from a cold start, the first view's shadow raster had a p99 of 19.9 ms;
+  `render_perf` now lets the stream settle before it measures a view. Moving, the shadow
+  map's p99 is unchanged.
+
 ## References
 
 - B. Karis, R. Stubbe, G. Wihlidal. "Nanite: A Deep Dive." SIGGRAPH 2021, Advances in

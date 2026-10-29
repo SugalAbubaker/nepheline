@@ -33,6 +33,7 @@
 #include <nepheline/asset/loader.h>
 #include <nepheline/core/guid.h>
 #include <nepheline/render/renderer.h>
+#include <nepheline/runtime/proxy_stream.h>
 
 typedef struct CookedSceneDesc {
     NphAllocator *alloc;    // required
@@ -45,6 +46,13 @@ typedef struct CookedSceneDesc {
     // Without the world partition's cells (asset/scene.h version 2): every
     // instance drawn as itself, no proxy loaded (an A/B of the cells).
     b32 no_cells;
+    // Stream the cells' proxies cooked as their levels apart (ADR-0063 stage
+    // 3; runtime/proxy_stream.h): each cell made with its coarsest level
+    // alone, its finer levels loaded as the views want them
+    // (cooked_scene_update), within `stream_budget` bytes past the coarsest
+    // (0: unlimited). Without, every level loads with the scene.
+    b32 stream;
+    u64 stream_budget;
 } CookedSceneDesc;
 
 typedef struct CookedScene {
@@ -81,6 +89,9 @@ typedef struct CookedScene {
     u32 level_mesh_cap;
     u32 *cell_level_first;
     u32 *cell_level_count;
+    // The stream of the cells' finer levels (CookedSceneDesc.stream), NULL
+    // without.
+    NphProxyStream *stream;
     NphRenderLight *lights;
     NphRenderLightDesc *light_descs; // as created (for gizmos and tests)
     u32 light_count;
@@ -90,6 +101,11 @@ typedef struct CookedScene {
     b32 has_camera;
     NphRenderCamera camera;
 } CookedScene;
+
+// One frame's streaming of the cells' proxies (CookedSceneDesc.stream; a
+// no-op without), for `view` drawn `height` pixels tall: between
+// nph_gpu_frame_begin and nph_render_frame.
+NPH_MUST_USE NphResult cooked_scene_update(CookedScene *s, const NphRenderView *view, u32 height);
 
 // Loads the scene and creates its render resources. On failure everything
 // created so far is released and the error returned (logged).

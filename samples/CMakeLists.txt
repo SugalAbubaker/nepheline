@@ -92,7 +92,7 @@ if(TARGET nph_cook)
     nph_add_sample(pbr_viewer
         SOURCES pbr_viewer/main.c common/cooked_scene.c common/cooked_scene.h common/capture.c
                 common/capture.h
-        DEPS nph::render nph::asset
+        DEPS nph::render nph::asset nph::runtime
         ARGS --frames=120 "--capture=${pbr_viewer_out}/capture.bmp"
              "--profile=${pbr_viewer_out}/gpu_profile.json"
         SKIP_RETURN_CODE 77)

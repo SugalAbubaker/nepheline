@@ -113,118 +113,6 @@ NTEST_TEARDOWN(CellsFixture)
     test_temp_dir_remove(&f->dir);
 }
 
-// Writes the grove: a tuft of 200 needles (thin closed prisms, 0.3 m long,
-// in a cube of 1.5 m round its origin), placed twice in each of four squares
-// of 8 m, and a ground of 40 m under them (no cell's: past half an edge).
-static void write_grove(const char *path)
-{
-    NphAllocator *a = nph_allocator_system();
-    NPH_ARRAY(f32) pos;
-    NphArrayU32 idx;
-    NPH_ARRAY_INIT(&pos, a);
-    NPH_ARRAY_INIT(&idx, a);
-    u64 rng = 0x9E3779B97F4A7C15ULL;
-    for (u32 i = 0; i < 200U; ++i) {
-        f32 c[3];
-        f32 d[3];
-        for (u32 k = 0; k < 3U; ++k) {
-            c[k] = (f32)((f64)(test_rng_next(&rng) >> 11U) / 9007199254740992.0 * 1.5 - 0.75);
-            d[k] = (f32)((f64)(test_rng_next(&rng) >> 11U) / 9007199254740992.0 * 2.0 - 1.0);
-        }
-        const NphVec3 axis = nph_vec3_normalize_or(nph_vec3(d[0], d[1], d[2]), nph_vec3_unit_y());
-        const NphVec3 t = nph_vec3_normalize(nph_vec3_perpendicular(axis));
-        const NphVec3 b = nph_vec3_cross(axis, t);
-        const u32 base = pos.len / 3U;
-        for (u32 end = 0; end < 2U; ++end) {
-            const NphVec3 at = nph_vec3_add(nph_vec3(c[0], c[1], c[2]),
-                                            nph_vec3_scale(axis, end == 0U ? -0.15F : 0.15F));
-            for (u32 k = 0; k < 3U; ++k) {
-                const f32 phi = 2.0F * NPH_PI * (f32)k / 3.0F;
-                const NphVec3 p =
-                    nph_vec3_add(at, nph_vec3_add(nph_vec3_scale(t, 0.01F * nph_f32_cos(phi)),
-                                                  nph_vec3_scale(b, 0.01F * nph_f32_sin(phi))));
-                NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.x));
-                NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.y));
-                NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&pos, p.z));
-            }
-        }
-        const u32 q[24] = {base,      base + 2U, base + 1U, base + 3U, base + 4U, base + 5U,
-                           base,      base + 1U, base + 4U, base,      base + 4U, base + 3U,
-                           base + 1U, base + 2U, base + 5U, base + 1U, base + 5U, base + 4U,
-                           base + 2U, base,      base + 3U, base + 2U, base + 3U, base + 5U};
-        NPH_IGNORE_RESULT(NPH_ARRAY_PUSH_N(&idx, q, 24U));
-    }
-    // The ground: a quad from -12 to 28 on x and z.
-    const f32 ground[12] = {-12.0F, 0.0F, -12.0F, 28.0F,  0.0F, -12.0F,
-                            28.0F,  0.0F, 28.0F,  -12.0F, 0.0F, 28.0F};
-    const u32 ground_idx[6] = {0U, 2U, 1U, 0U, 3U, 2U};
-    const u64 tuft_pos = (u64)pos.len * 4U;
-    const u64 tuft_idx = (u64)idx.len * 4U;
-    const u64 total = tuft_pos + tuft_idx + sizeof ground + sizeof ground_idx;
-    u8 *bytes = NPH_ALLOC_ARRAY(a, u8, total);
-    NTEST_ASSERT_NOT_NULL(bytes);
-    memcpy(bytes, pos.data, (size_t)tuft_pos);
-    memcpy(bytes + tuft_pos, idx.data, (size_t)tuft_idx);
-    memcpy(bytes + tuft_pos + tuft_idx, ground, sizeof ground);
-    memcpy(bytes + tuft_pos + tuft_idx + sizeof ground, ground_idx, sizeof ground_idx);
-    char *b64 = NPH_ALLOC_ARRAY(a, char, test_base64_size(total) + 1U);
-    NTEST_ASSERT_NOT_NULL(b64);
-    test_base64(bytes, total, b64);
-    f32 lo[3] = {1e30F, 1e30F, 1e30F};
-    f32 hi[3] = {-1e30F, -1e30F, -1e30F};
-    for (u32 i = 0; i < pos.len; ++i) {
-        lo[i % 3U] = nph_f32_min(lo[i % 3U], pos.data[i]);
-        hi[i % 3U] = nph_f32_max(hi[i % 3U], pos.data[i]);
-    }
-    static const f32 at[8][2] = {{2.0F, 2.0F},  {5.0F, 5.0F},  {10.0F, 2.0F},  {13.0F, 6.0F},
-                                 {2.0F, 10.0F}, {6.0F, 13.0F}, {10.0F, 10.0F}, {14.0F, 14.0F}};
-    NphStrBuilder sb;
-    nph_sb_init(&sb, a);
-    NTEST_ASSERT_EQ_INT(nph_sb_append_cstr(&sb, "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
-                                                "\"scenes\":[{\"nodes\":[0,1,2,3,4,5,6,7,8]}],"
-                                                "\"nodes\":["),
-                        NPH_RESULT_OK);
-    for (u32 i = 0; i < 8U; ++i) {
-        NTEST_ASSERT_EQ_INT(nph_sb_appendf(&sb,
-                                           "{\"mesh\":0,\"translation\":[%g,1,%g],\"rotation\":"
-                                           "[0,%g,0,%g]},",
-                                           (f64)at[i][0], (f64)at[i][1], sin(0.35 * (f64)i),
-                                           cos(0.35 * (f64)i)),
-                            NPH_RESULT_OK);
-    }
-    NTEST_ASSERT_EQ_INT(
-        nph_sb_appendf(
-            &sb,
-            "{\"mesh\":1}],\"meshes\":[{\"name\":\"tuft\",\"primitives\":[{\"attributes\":{"
-            "\"POSITION\":0},\"indices\":1}]},{\"name\":\"ground\",\"primitives\":[{\"attributes\":"
-            "{"
-            "\"POSITION\":2},\"indices\":3}]}],\"accessors\":["
-            "{\"bufferView\":0,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\",\"min\":[%g,%"
-            "g,"
-            "%g],\"max\":[%g,%g,%g]},"
-            "{\"bufferView\":1,\"componentType\":5125,\"count\":%u,\"type\":\"SCALAR\"},"
-            "{\"bufferView\":2,\"componentType\":5126,\"count\":4,\"type\":\"VEC3\",\"min\":[-12,0,"
-            "-12],\"max\":[28,0,28]},"
-            "{\"bufferView\":3,\"componentType\":5125,\"count\":6,\"type\":\"SCALAR\"}],"
-            "\"bufferViews\":[{\"buffer\":0,\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":%llu,"
-            "\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":48},{\"buffer\":"
-            "0,"
-            "\"byteOffset\":%llu,\"byteLength\":24}],\"buffers\":[{\"byteLength\":%llu,\"uri\":"
-            "\"data:application/octet-stream;base64,%s\"}]}",
-            pos.len / 3U, (f64)lo[0], (f64)lo[1], (f64)lo[2], (f64)hi[0], (f64)hi[1], (f64)hi[2],
-            idx.len, (unsigned long long)tuft_pos, (unsigned long long)tuft_pos,
-            (unsigned long long)tuft_idx, (unsigned long long)(tuft_pos + tuft_idx),
-            (unsigned long long)(tuft_pos + tuft_idx + sizeof ground), (unsigned long long)total,
-            b64),
-        NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, sb.data, sb.len), NPH_RESULT_OK);
-    nph_sb_free(&sb);
-    NPH_FREE_ARRAY(a, char, b64, test_base64_size(total) + 1U);
-    NPH_FREE_ARRAY(a, u8, bytes, total);
-    NPH_ARRAY_FREE(&pos);
-    NPH_ARRAY_FREE(&idx);
-}
-
 static Cooker *make_cooker(CellsFixture *f, bool cells)
 {
     CookerDesc desc;
@@ -295,7 +183,7 @@ static u32 count_cells(const CookDb *db)
 
 NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
 {
-    write_grove(f->gltf);
+    test_write_grove(f->gltf);
     Cooker *c = make_cooker(f, true);
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
     CookerStats st = cooker_stats(c);
