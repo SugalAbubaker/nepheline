@@ -623,12 +623,18 @@ NTEST_F(Cells, cells_are_made_and_refused)
         NTEST_EXPECT_EQ_UINT(none.value, 0U);                                                      \
         d = grove_cell_desc(&s, GROVE_CELL, 60.0F);                                                \
     } while (0)
-    // A proxy of triangles, or none: a mesh of triangles or a stale one
-    // among its meshes, no meshes, or more than a cell takes.
+    // A proxy of triangles, or none: a mesh of triangles, a stale one, or one
+    // given twice among its meshes, no meshes, or more than a cell takes.
+    // Two more meshes of voxels alone; past them, the count alone is wrong.
     NphRenderMesh meshes[NPH_RENDER_CELL_MAX_LEVELS + 1U];
     for (u32 k = 0; k < NPH_ARRAY_COUNT(meshes); ++k) {
         meshes[k] = s.proxy;
     }
+    for (u32 k = 1; k < 3U; ++k) {
+        NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g.proxy_desc, &meshes[k]),
+                            NPH_RESULT_OK);
+    }
+    const NphRenderMesh second = meshes[1];
     d.proxy_levels = meshes;
     d.proxy_level_count = 3U;
     NphRenderCell three = NPH_RENDER_CELL_NULL;
@@ -642,7 +648,11 @@ NTEST_F(Cells, cells_are_made_and_refused)
     d.proxy_levels = meshes;
     d.proxy_level_count = 3U;
     EXPECT_REFUSED();
-    meshes[1] = s.proxy;
+    meshes[1] = meshes[2];
+    d.proxy_levels = meshes;
+    d.proxy_level_count = 3U;
+    EXPECT_REFUSED();
+    meshes[1] = second;
     d.proxy_levels = NULL;
     EXPECT_REFUSED();
     d.proxy_level_count = 0U;
@@ -715,6 +725,8 @@ NTEST_F(Cells, cells_are_made_and_refused)
     NTEST_EXPECT_EQ_INT(nph_render_instance_create(f->renderer, &id, &stale),
                         NPH_RESULT_INVALID_ARGUMENT);
     nph_render_cell_destroy(f->renderer, NPH_RENDER_CELL_NULL);
+    nph_render_mesh_destroy(f->renderer, second);
+    nph_render_mesh_destroy(f->renderer, meshes[2]);
     grove_scene_free(f, &s);
     grove_free(&g);
 }
@@ -1144,6 +1156,87 @@ NTEST_F(Cells, a_cell_asks_for_the_level_its_cut_needs)
     // A stale cell asks for nothing.
     grove_scene_free(f, &s);
     NTEST_EXPECT_EQ_UINT(nph_render_cell_request(f->renderer, s.cell), NPH_RENDER_CELL_NO_REQUEST);
+    big_target_free(f, &t);
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
+// A cell's proxy is replaced level by level, as a streamed proxy's arrive and
+// go (ADR-0063 stage 3): held from level 2, then 1, then 0, then from 2
+// again, the cell draws its finest held level near (where the whole draws
+// level 0), the whole's cut once it holds them all, the same pixels as a cell
+// made with them; its instances follow (made, kept, destroyed: nothing
+// leaks), counted once. A stale cell, no meshes, a mesh of triangles or one
+// given twice are refused, and the cell keeps its proxy.
+NTEST_F(Cells, a_cells_proxy_is_replaced_level_by_level)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    NTEST_ASSERT_EQ_UINT(gl.count, 3U);
+    BigTarget t;
+    big_target_init(f, &t);
+    u8 *whole = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, BIG_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(whole);
+    const f32 error = GROVE_CELL / 64.0F;
+    NphRenderView v = grove_view(20.0, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_NORMAL;
+    // The cell made with every level: the image to come back to.
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl, 0U);
+    big_frames(f, &t, &v);
+    memcpy(whole, t.pixels, BIG_PIXELS * 4U);
+    grove_scene_free(f, &s);
+
+    // Made with its coarsest level alone, then given the finer ones.
+    grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl, 2U);
+    big_frames(f, &t, &v);
+    NTEST_EXPECT_EQ_UINT(levels_drawn(f, s.cell), 1U);
+    const u32 instances = nph_handle_pool_live(&f->renderer->instance_pool);
+    for (u32 first = 2U; first-- > 0U;) {
+        NTEST_ASSERT_EQ_INT(
+            nph_render_cell_set_proxy(f->renderer, s.cell, s.levels + first, gl.count - first),
+            NPH_RESULT_OK);
+        const NphRenderFrameStats st = big_frames(f, &t, &v);
+        const u32 drawn = levels_drawn(f, s.cell);
+        NTEST_LOG("held from level %u: levels %#x of those held drawn, %u voxel clusters, %u "
+                  "pixels, %u cells counted",
+                  first, drawn, st.vis_voxel_clusters, covered_pixels(t.pixels, BIG_PIXELS),
+                  st.vis_cells_proxied);
+        NTEST_EXPECT_EQ_UINT(drawn, 1U); // its finest held level
+        NTEST_EXPECT_EQ_UINT(st.vis_cells_proxied, 1U);
+        NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&f->renderer->instance_pool),
+                             instances + (2U - first));
+    }
+    // Holding them all, the whole's image.
+    u32 differ = 0U;
+    for (u64 p = 0; p < BIG_PIXELS; ++p) {
+        differ += memcmp(whole + p * 4U, t.pixels + p * 4U, 4U) != 0 ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(differ, 0U);
+    // Back to the coarsest alone: the finer levels' instances go.
+    NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, s.levels + 2U, 1U),
+                        NPH_RESULT_OK);
+    big_frames(f, &t, &v);
+    NTEST_EXPECT_EQ_UINT(levels_drawn(f, s.cell), 1U);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&f->renderer->instance_pool), instances);
+    // Refused, the proxy kept.
+    const NphRenderMesh twice[2] = {s.levels[1], s.levels[1]};
+    NTEST_EXPECT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, twice, 2U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, &s.tree, 1U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_render_cell_set_proxy(f->renderer, s.cell, s.levels, 0U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_render_cell_set_proxy(f->renderer, NPH_RENDER_CELL_NULL, s.levels, 1U),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&f->renderer->instance_pool), instances);
+    big_frames(f, &t, &v);
+    NTEST_EXPECT_EQ_UINT(levels_drawn(f, s.cell), 1U);
+    grove_scene_free(f, &s);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, whole, BIG_PIXELS * 4U);
     big_target_free(f, &t);
     grove_levels_free(&gl);
     grove_free(&g);

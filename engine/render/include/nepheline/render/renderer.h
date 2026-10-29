@@ -526,6 +526,21 @@ NPH_MUST_USE NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCel
 void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell);
 bool nph_render_cell_is_valid(const NphRenderer *r, NphRenderCell cell);
 
+// Replaces cell `cell`'s proxy with `meshes` (`count` of them, finest
+// first: a streamed proxy's held levels, ADR-0063 stage 3), its materials and
+// place unchanged. The cell's proxy instances follow: one kept where its mesh
+// stays, made where a mesh comes, destroyed where one goes; the statistics
+// count the cell by the coarsest's, and the finest's, where it is a level
+// apart, takes its makers as fine (the cut's clamp). Its members, its record
+// and its switch are untouched. NPH_RESULT_INVALID_ARGUMENT for a stale cell
+// or mesh, no meshes or more than NPH_RENDER_CELL_MAX_LEVELS, a mesh given
+// twice, or one not of voxels alone; NPH_RESULT_FULL past max_instances. On
+// failure the cell keeps its proxy as it was. Costs: an instance made or
+// destroyed a mesh that comes or goes, a record sent a flag that moves.
+// NPH_MAIN_THREAD_ONLY.
+NPH_MUST_USE NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell,
+                                                 const NphRenderMesh *meshes, u32 count);
+
 // No level of a cell's proxy asked for (nph_render_cell_request).
 #define NPH_RENDER_CELL_NO_REQUEST 0xFFU
 
