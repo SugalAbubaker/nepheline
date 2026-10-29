@@ -246,7 +246,7 @@ targets: like the reference renderer's scenes, they carry no budget.
 render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list] [--validation] [--sw-pixels=N]
             [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH] [--debug-view=NAME] [--reference-only]
             [--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--no-cells]
-            [--stream[=MB]] [--stream-trace] [--voxel-pool=MB]
+            [--stream[=MB]] [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
 ```
 
 **Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
@@ -288,10 +288,19 @@ level alone and its finer levels as the views want them, within MB
 megabytes past the coarsest (no limit without). Before a view is measured
 the stream settles (frames until nothing loads, is given or is dropped, at
 most 60 s), and each view's report gives what the stream holds and did and
-its main-thread time a frame; `--stream-trace` prints its work every frame.
+its main-thread time a frame; `--stream-trace` prints its work every frame,
+and `--stream-loads=N` sets its loads at once (`max_loads`; 64 by
+default).
 `--voxel-pool=MB` sizes the renderer's voxel pool (docs/render.md "The
 voxel pool"; 0 none; 1536 by default with `--stream`, none without), where
-the levels live and a streamed level is made on the loader's jobs. After
+the levels live and a streamed level is made on the loader's jobs.
+`--tiles=WxH` lays each reference scene out W by H times side by side
+(ADR-0063 stage 4, "The open world"), each tile its own instances and
+cells and so, streamed, its own proxies' finer levels, the first where
+the scene was and the others around it, sharing the meshes, materials,
+textures, the cells' coarsest levels, the lights and the views: a world
+of the game's size from the landscape (4x3: 4 by 4.5 km), for the costs
+that grow with the world rather than with the pixels it shows. After
 each scene a line
 reports the GPU memory the process holds (`nph_gpu_device_memory_stats`):
 device-local in use against the OS's budget for it, past which allocations
