@@ -179,6 +179,93 @@ NTEST_F(GpuFixture, overlapping_uploads_in_one_batch_land_in_order)
     overlapping_uploads(f->dev, true);
 }
 
+// A loading job's uploads land whenever it makes them (gpu/upload.h: the
+// main thread's and loading jobs'): a thread uploads into its buffer chunk
+// after chunk, every chunk twice, while the main thread begins and ends
+// frames as fast as it can, so that the uploads fall between frames and
+// inside them; every chunk arrives with its last value, under the validation
+// gate. (A frame's beginning once reset the upload pool a job was recording
+// into, and a batch a job opened between frames was left in another slot's
+// pool: a streamed proxy level's upload crashed the driver, ADR-0063.)
+typedef struct UploadThread {
+    NphGpuDevice *dev;
+    NphGpuBuffer buf;
+    u32 chunks;
+    NphResult result;
+    NphAtomicU32 done;
+} UploadThread;
+
+#define THREAD_CHUNK_WORDS 64U
+
+static void upload_thread(void *user)
+{
+    UploadThread *t = (UploadThread *)user;
+    u32 words[THREAD_CHUNK_WORDS];
+    t->result = NPH_RESULT_OK;
+    for (u32 pass = 0; pass < 2U && t->result == NPH_RESULT_OK; ++pass) {
+        for (u32 c = 0; c < t->chunks && t->result == NPH_RESULT_OK; ++c) {
+            fill_pattern(words, THREAD_CHUNK_WORDS, c * 2U + pass);
+            t->result =
+                nph_gpu_upload_buffer(t->dev, t->buf, (u64)c * sizeof words, words, sizeof words);
+            if ((c & 15U) == 15U) {
+                nph_thread_sleep_ns(50000U); // so that frames come and go meanwhile
+            }
+        }
+    }
+    nph_atomic_store_u32(&t->done, 1U, NPH_MEMORY_ORDER_RELEASE);
+}
+
+NTEST_F(GpuFixture, a_threads_uploads_land_between_and_inside_frames)
+{
+    REQUIRE_DEVICE(f);
+    enum {
+        CHUNKS = 2048U
+    };
+    const u64 bytes = (u64)CHUNKS * THREAD_CHUNK_WORDS * sizeof(u32);
+    UploadThread t;
+    memset(&t, 0, sizeof t);
+    t.dev = f->dev;
+    t.chunks = CHUNKS;
+    t.buf = test_make_buffer(f->dev, bytes,
+                             (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+                                 (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                             NPH_GPU_MEMORY_DEVICE, "a thread's uploads");
+    NphThreadDesc td;
+    memset(&td, 0, sizeof td);
+    td.fn = upload_thread;
+    td.user = &t;
+    td.name = "uploads";
+    NphThread thread;
+    NTEST_ASSERT_EQ_INT(nph_thread_create(&thread, &td), NPH_RESULT_OK);
+    u32 frames = 0U;
+    while (nph_atomic_load_u32(&t.done, NPH_MEMORY_ORDER_ACQUIRE) == 0U) {
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);
+        nph_thread_yield(); // uploads inside the frame
+        NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
+        nph_thread_yield(); // and between frames
+        ++frames;
+    }
+    nph_thread_join(&thread);
+    NTEST_ASSERT_EQ_INT(t.result, NPH_RESULT_OK);
+    // What the thread staged after the last frame is submitted by the wait.
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    u32 *out = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, (u64)CHUNKS * THREAD_CHUNK_WORDS);
+    NTEST_ASSERT_NOT_NULL(out);
+    test_read_buffer(f->dev, t.buf, 0U, bytes, out);
+    u32 expect[THREAD_CHUNK_WORDS];
+    u32 wrong = 0U;
+    for (u32 c = 0; c < CHUNKS; ++c) {
+        fill_pattern(expect, THREAD_CHUNK_WORDS, c * 2U + 1U);
+        wrong += memcmp(out + (u64)c * THREAD_CHUNK_WORDS, expect, sizeof expect) != 0 ? 1U : 0U;
+    }
+    NTEST_LOG("%u frames while the thread uploaded %u chunks twice; %u chunks wrong", frames,
+              (u32)CHUNKS, wrong);
+    NTEST_EXPECT_GT_UINT(frames, 16U); // the uploads spread over many frames
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, out, (u64)CHUNKS * THREAD_CHUNK_WORDS);
+    nph_gpu_buffer_destroy(f->dev, t.buf);
+}
+
 NTEST(gpu_upload, overlapping_uploads_on_a_single_queue_land_in_order)
 {
     NphGpuDeviceDesc desc;

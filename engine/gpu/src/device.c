@@ -1731,6 +1731,7 @@ NphResult nph_gpu_device_wait_idle(NphGpuDevice *dev)
         gpu_upload_release_slot(dev, i);
         if (!dev->frame_active || i != dev->frame_slot) {
             gpu_frames_recycle_slot(dev, i);
+            gpu_upload_reset_pools(dev, i);
         }
     }
     return NPH_RESULT_OK;

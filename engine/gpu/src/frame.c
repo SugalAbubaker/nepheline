@@ -503,7 +503,8 @@ static void read_accel_sizes(NphGpuDevice *dev, NphGpuFrameSlot *fs)
 
 void gpu_frames_recycle_slot(NphGpuDevice *dev, u32 slot)
 {
-    for (u32 t = 0; t <= dev->thread_cap; ++t) {
+    // The upload pools are the upload lock's (gpu_upload_reset_pools).
+    for (u32 t = 0; t < UPLOAD_THREAD_SLOT(dev); ++t) {
         for (u32 f = 0; f < dev->family_count; ++f) {
             gpu_cmd_pool_reset(dev, pool_for(dev, t, slot, f));
         }
@@ -530,11 +531,9 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
     if (dev->lost) {
         return NPH_RESULT_DEVICE_LOST;
     }
-    // Uploads queued between frames were recorded into a slot's command
-    // pool that this or the next frame_begin recycles: submit them first
-    // (synchronously, as any flush outside a frame is), so the recycling
-    // cannot reset their command buffer or release their staging memory.
-    NPH_TRY(nph_gpu_upload_flush(dev, NULL));
+    // Buffer uploads between frames are staged for the frame's first batch,
+    // so that loading jobs may upload whenever they run: none has a command
+    // buffer open in a pool recycled here (below, under the upload lock).
     const u64 next = dev->any_frame_begun ? dev->frame_index + 1U : 0U;
     const u32 slot = (u32)(next % NPH_GPU_FRAMES_IN_FLIGHT);
     NphGpuFrameSlot *fs = &dev->frames[slot];
@@ -569,11 +568,24 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
         }
     }
 
+    // The switch to the slot, its staging released and its upload pools
+    // reset, under the upload lock that a job's upload takes. An image's
+    // upload between frames opened a batch in the last slot's pool: it is
+    // submitted first, synchronously, as a flush outside a frame is; the
+    // buffer copies staged since the last frame are submitted with this
+    // one, ahead of its work, from its slot's pool.
+    gpu_upload_lock(dev);
+    NphResult up = dev->upload.cmd != NULL ? gpu_upload_flush_locked(dev) : NPH_RESULT_OK;
     dev->frame_index = next;
     dev->frame_slot = slot;
     dev->frame_active = 1;
     dev->any_frame_begun = 1;
-    gpu_upload_release_slot(dev, slot);
+    gpu_upload_release_slot_locked(dev, slot);
+    gpu_upload_reset_pools_locked(dev, slot);
+    if (up == NPH_RESULT_OK && dev->upload.pending_count != 0U) {
+        up = gpu_upload_flush_locked(dev);
+    }
+    gpu_upload_unlock(dev);
     gpu_run_deferred(dev, slot);
     gpu_frames_recycle_slot(dev, slot);
     fs->frame_index = next;
@@ -581,7 +593,7 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
         fs->queue_values[q] = 0U;
     }
     nph_gpu_alloc_set_frame(dev->vma, (u32)next);
-    return NPH_RESULT_OK;
+    return up;
 }
 
 NphResult nph_gpu_frame_end(NphGpuDevice *dev)
@@ -592,7 +604,11 @@ NphResult nph_gpu_frame_end(NphGpuDevice *dev)
         GPU_LOG_ERROR("nph_gpu_frame_end: no frame is active");
         return NPH_RESULT_INVALID_STATE;
     }
-    NphResult r = nph_gpu_upload_flush(dev, NULL);
+    // The flush and the frame's end at once, under the upload lock: a job's
+    // upload after it is staged for the next frame, and a flush of theirs
+    // waits on this frame's graphics.
+    gpu_upload_lock(dev);
+    NphResult r = gpu_upload_flush_locked(dev);
     NphGpuFrameSlot *fs = &dev->frames[dev->frame_slot];
     for (u32 q = 0; q < dev->queue_count; ++q) {
         fs->queue_values[q] = nph_atomic_load_u64(&dev->queue_storage[q].timeline->submitted,
@@ -601,6 +617,7 @@ NphResult nph_gpu_frame_end(NphGpuDevice *dev)
     gpu_upload_mark_frame_end(dev, dev->frame_slot);
     dev->last_frame_graphics_value = fs->queue_values[0];
     dev->frame_active = 0;
+    gpu_upload_unlock(dev);
     if (dev->lost) {
         r = NPH_RESULT_DEVICE_LOST;
     }

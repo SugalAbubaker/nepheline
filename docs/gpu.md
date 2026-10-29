@@ -189,10 +189,28 @@ pipeline barrier's scopes span submissions on the queue). Synchronisation
 validation on lavapipe found the second one missing.
 Uploaded mips end in SHADER_READ_ONLY (sampled images) or GENERAL. Ring
 space is released when the frame that allocated it completes; outside a
-frame a flush is synchronous. Uploads queued between frames are recorded
-into a frame slot's command pool, so `nph_gpu_frame_begin` and
-`nph_gpu_device_wait_idle`, which recycle those pools, flush them first
-(the renderer's tests found the copies being dropped; ADR-0018).
+frame a flush is synchronous.
+
+Loading jobs upload whenever they run, between frames as well as inside
+them (ADR-0063: a streamed proxy level's job uploads its streams). So that
+none has a command buffer open in a pool a frame's beginning recycles, a
+buffer upload outside a frame is only staged: its copy waits in a list,
+and its ring bytes are counted apart from the open batch's, until the next
+batch records it ahead of everything else. That is the next frame's,
+which `nph_gpu_frame_begin` submits as it begins, ahead of the frame's
+work, or a flush's. `nph_gpu_frame_begin` switches to its slot, releases
+the slot's staging and resets its upload pools under the upload lock that
+every upload takes, and `nph_gpu_frame_end` flushes and ends the frame
+under it too, so no upload falls between the two. An image upload outside
+a frame still records at once (a main-thread tool's), and a frame's
+beginning submits its batch first, synchronously. Before, the pools were
+reset and the slot switched without the lock, and a frame's beginning
+flushed a batch a job had opened between frames synchronously, or left it
+in the old slot's pool. A thread uploading across frames now lands every
+copy under the validation gate, where before it tripped
+VUID-vkResetCommandPool-commandPool-00040 (`test_upload.c`); in the
+landscape the driver crashed. A destination destroyed before its staged
+copy is recorded takes none.
 
 A load between frames streams through the ring. An upload that the ring
 cannot take now, but would take empty, flushes the pending uploads first:
