@@ -1099,6 +1099,25 @@ opens, and the far field shows that level's voxels until the finer ones
 arrive (`test_vis_cells.c`: held from level 1 or 2 on, the grove draws that
 level over 1.24 and 1.34 times the pixels level 0 does; without the flag,
 nothing).
+
+**Requests** (ADR-0063 stage 3). A cell given its streamed proxy's levels'
+errors (`NphRenderCellDesc.proxy_level_errors`: each level's largest consumer
+error, the head's) holds them in its record (`NphVisCell.level_errors`), and
+the views ask which level they need: the instance its statistics count it by
+(its coarsest level's, which a streamed proxy always holds) asks, drawn or
+not, where its sphere is in view (phase 0: in the frustum and not behind the
+previous frame's pyramid; phase 1: a deferred one found visible), for the
+first level whose error is too coarse at the box's nearest point brought a
+quarter nearer (`vis_cell_request`, `NPH_VIS_CELL_PREFETCH`), past its
+distance less a quarter; the sun's shadow map's instance cull asks, in each
+map level that draws the cell as its proxy, at the level's threshold brought
+a quarter finer. The smallest wins (an atomic minimum into
+`NphVisViewData.cell_requests`, cleared by `vis clear`); `vis statistics`
+copies the requests to the frame slot's readback, which the frame reusing the
+slot reads: `nph_render_cell_request` answers with the level of the frame
+`nph_render_cell_requests_frame` names, `NPH_GPU_FRAMES_IN_FLIGHT` frames
+late (`test_vis_cells.c`: at nine distances the request is its C twin's, and
+none nearer, out of view, or without levels of detail).
 The cells' records (`NphVisCell`: the centre split into high and low floats
 as a translation is, the half extents, the error, and `D`) sit in a table the
 instance culls read.

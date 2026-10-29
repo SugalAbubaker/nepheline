@@ -52,7 +52,9 @@ NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) 
                   "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisCell) == 48U, "NphVisCell matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisCell) == 112U, "NphVisCell matches its GLSL layout");
+NPH_STATIC_ASSERT(NPH_RENDER_CELL_MAX_LEVELS == 16U,
+                  "a cell's record holds sixteen levels' errors (NphVisCell.level_errors)");
 NPH_STATIC_ASSERT(sizeof(NphVisDraw) == 20U, "NphVisDraw is VkDrawIndexedIndirectCommand");
 NPH_STATIC_ASSERT(sizeof(NphVisLight) == 96U, "NphVisLight matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisLightUpdate) == 112U, "NphVisLightUpdate matches its GLSL layout");
@@ -197,6 +199,20 @@ NphResult render_vis_scene_create(NphRenderer *r)
         NPH_TRY(make_buffer(r, sizeof(NphVisCounters), (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                             NPH_GPU_MEMORY_READBACK, "vis statistics", &v->stats[i]));
     }
+    // The cells' requests and their readback (ADR-0063 stage 3).
+    const u64 requests = (u64)nph_max_u32(d->max_cells, 1U) * sizeof(u32);
+    NPH_TRY(make_buffer(r, requests, storage | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                        NPH_GPU_MEMORY_DEVICE, "vis cell requests", &v->cell_requests));
+    for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        NPH_TRY(make_buffer(r, requests, (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                            NPH_GPU_MEMORY_READBACK, "vis cell requests read back",
+                            &v->request_readback[i]));
+    }
+    v->cell_requested = NPH_ALLOC_ARRAY(a, u8, nph_max_u32(d->max_cells, 1U));
+    if (v->cell_requested == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    memset(v->cell_requested, (int)NPH_RENDER_CELL_NO_REQUEST, nph_max_u32(d->max_cells, 1U));
     NPH_TRY(make_buffer(r, (u64)d->max_lights * sizeof(NphVisLight), storage, NPH_GPU_MEMORY_DEVICE,
                         "vis lights", &v->lights));
     render_vis_light_layout(d->max_lights, &v->light_layout);
@@ -243,6 +259,11 @@ void render_vis_scene_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(dev, v->lod_queue);
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         nph_gpu_buffer_destroy(dev, v->stats[i]);
+        nph_gpu_buffer_destroy(dev, v->request_readback[i]);
+    }
+    nph_gpu_buffer_destroy(dev, v->cell_requests);
+    if (v->cell_requested != NULL) {
+        NPH_FREE_ARRAY(a, u8, v->cell_requested, nph_max_u32(d->max_cells, 1U));
     }
     nph_gpu_buffer_destroy(dev, v->lights);
     nph_gpu_buffer_destroy(dev, v->light_grid);
@@ -793,6 +814,15 @@ NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellD
     rec.center_high = nph_vec4(hx, hy, hz, desc->distance);
     rec.center_low = nph_vec4(lx, ly, lz, desc->proxy_error);
     rec.extent = nph_vec4_from_vec3(desc->extent, 0.0F);
+    f32 errors[NPH_RENDER_CELL_MAX_LEVELS];
+    memset(errors, 0, sizeof errors);
+    for (u32 k = 0; k < desc->proxy_level_error_count; ++k) {
+        errors[k] = desc->proxy_level_errors[k];
+    }
+    for (u32 q = 0; q < 4U; ++q) {
+        const f32 *e = errors + (u64)q * 4U;
+        rec.level_errors[q] = nph_vec4(e[0], e[1], e[2], e[3]);
+    }
     r->pending_uploads = 1;
     return nph_gpu_upload_buffer(r->dev, r->vis.cells, (u64)slot * sizeof rec, &rec, sizeof rec);
 }

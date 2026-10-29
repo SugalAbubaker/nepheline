@@ -556,6 +556,39 @@ static NphResult ensure_voxel_tiles(NphRenderer *r, u32 width, u32 height)
 // Statistics
 // ---------------------------------------------------------------------------
 
+// The cells' requests of the frame that last completed in this slot
+// (ADR-0063 stage 3), as a level each (NPH_RENDER_CELL_NO_REQUEST: none).
+static void read_requests(NphRenderer *r)
+{
+    RenderVis *v = &r->vis;
+    const u32 slot = r->frame_slot;
+    if (v->request_frame[slot] == 0U) {
+        return;
+    }
+    const u32 *levels = (const u32 *)nph_gpu_buffer_map(r->dev, v->request_readback[slot]);
+    for (u32 c = 0; c < r->desc.max_cells; ++c) {
+        v->cell_requested[c] =
+            levels[c] < NPH_RENDER_CELL_MAX_LEVELS ? (u8)levels[c] : (u8)NPH_RENDER_CELL_NO_REQUEST;
+    }
+    v->requests_from = v->request_frame[slot];
+}
+
+u32 nph_render_cell_request(const NphRenderer *r, NphRenderCell cell)
+{
+    NPH_ASSERT(r != NULL);
+    const u32 slot = render_slot_of(&r->cell_pool, cell.value);
+    if (slot == NPH_U32_MAX || !r->vis.supported || r->vis.requests_from == 0U) {
+        return NPH_RENDER_CELL_NO_REQUEST;
+    }
+    return r->vis.cell_requested[slot];
+}
+
+u64 nph_render_cell_requests_frame(const NphRenderer *r)
+{
+    NPH_ASSERT(r != NULL);
+    return r->vis.supported && r->vis.requests_from != 0U ? r->vis.requests_from - 1U : NPH_U64_MAX;
+}
+
 // The counters of the frame that last completed in this slot.
 static void read_stats(NphRenderer *r)
 {
@@ -667,6 +700,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->prev_transforms = nph_gpu_buffer_address(dev, v->prev_transforms);
     vd->meshes = nph_gpu_buffer_address(dev, v->meshes);
     vd->cells = nph_gpu_buffer_address(dev, v->cells);
+    vd->cell_requests = nph_gpu_buffer_address(dev, v->cell_requests);
     vd->material_map = nph_gpu_buffer_address(dev, v->material_map);
     vd->materials = frame + r->layout.materials_offset;
     vd->counters = nph_gpu_buffer_address(dev, v->counters);
@@ -789,6 +823,8 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     NphRenderer *r = (NphRenderer *)user;
     const VisFrame *f = &r->vis.frame;
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->counters), 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->cell_requests), 0U, NPH_GPU_WHOLE_SIZE,
+                            NPH_VIS_CELL_NO_REQUEST);
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->light_grid),
                             r->vis.light_layout.histogram, (u64)NPH_RENDER_ZBINS * sizeof(u32), 0U);
     nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->hzb_dirty), 0U, NPH_GPU_WHOLE_SIZE,
@@ -1209,6 +1245,10 @@ static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     const NphGpuBufferCopy region = {0U, 0U, sizeof(NphVisCounters)};
     nph_gpu_cmd_copy_buffer(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.counters),
                             nph_gpu_rg_buffer(graph, r->vis.frame.stats), &region, 1U);
+    const NphGpuBufferCopy requests = {0U, 0U,
+                                       (u64)nph_max_u32(r->desc.max_cells, 1U) * sizeof(u32)};
+    nph_gpu_cmd_copy_buffer(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.cell_requests),
+                            nph_gpu_rg_buffer(graph, r->vis.frame.request_readback), &requests, 1U);
 }
 
 u32 render_vis_visbuffer_index(const NphRenderer *r, NphGpuRenderGraph *graph)
@@ -1584,6 +1624,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, f->hzb_dirty, NPH_GPU_RG_USE_TRANSFER_DST);
+    nph_gpu_rg_write_buffer(p, f->cell_requests, NPH_GPU_RG_USE_TRANSFER_DST);
     if (v->frame_voxels) {
         nph_gpu_rg_write_buffer(p, f->voxel_tile_bits, NPH_GPU_RG_USE_TRANSFER_DST);
     }
@@ -1617,6 +1658,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, g->cull_meshlets, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_WRITE);
+    nph_gpu_rg_write_buffer(p, f->cell_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
     if (f->lod_steps != 0U) {
         // The hierarchies' roots, and the first step's workgroups.
         nph_gpu_rg_write_buffer(p, g->lod_queue, NPH_GPU_RG_USE_SHADER_WRITE);
@@ -1660,6 +1702,7 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     // Reads the deferred instances, appends meshlets after the deferred ones.
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, f->cell_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
     if (f->lod_steps != 0U) {
         // The hierarchies' roots, and the first step's workgroups.
         nph_gpu_rg_write_buffer(p, g->lod_queue, NPH_GPU_RG_USE_SHADER_WRITE);
@@ -1703,6 +1746,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     NPH_PROFILE_BEGIN("render.vis");
     render_vis_release_pending(r, nph_gpu_frame_index(dev));
     read_stats(r);
+    read_requests(r);
     render_vsm_read_stats(r);
     v->frame_voxels = v->voxel_meshes != 0U ? 1 : 0;
     NphResult res = ensure_hzb(r, width, height);
@@ -1803,6 +1847,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->counters = nph_gpu_rg_import_buffer(graph, v->counters);
     f->args = nph_gpu_rg_import_buffer(graph, v->args);
     f->stats = nph_gpu_rg_import_buffer(graph, v->stats[r->frame_slot]);
+    f->cell_requests = nph_gpu_rg_import_buffer(graph, v->cell_requests);
+    f->request_readback = nph_gpu_rg_import_buffer(graph, v->request_readback[r->frame_slot]);
     f->lights = nph_gpu_rg_import_buffer(graph, v->lights);
     f->light_grid = nph_gpu_rg_import_buffer(graph, v->light_grid);
     f->light_tiles = nph_gpu_rg_import_buffer(graph, v->light_tiles);
@@ -1886,7 +1932,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if (res == NPH_RESULT_OK) {
         nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_TRANSFER_SRC);
         nph_gpu_rg_write_buffer(p, f->stats, NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_read_buffer(p, f->cell_requests, NPH_GPU_RG_USE_TRANSFER_SRC);
+        nph_gpu_rg_write_buffer(p, f->request_readback, NPH_GPU_RG_USE_TRANSFER_DST);
         v->stats_frame[r->frame_slot] = nph_gpu_frame_index(dev) + 1U;
+        v->request_frame[r->frame_slot] = nph_gpu_frame_index(dev) + 1U;
         // Next frame's phase 0 tests against this frame's HZB, from this
         // frame's view.
         v->prev_view = *view_m;

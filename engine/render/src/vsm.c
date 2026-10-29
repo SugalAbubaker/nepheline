@@ -1103,6 +1103,10 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
             // The cells, whose proxies the instance cull switches (ADR-0062).
             nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
         }
+        if (passes[i].execute == cull_instances_execute) {
+            // Their proxies' levels asked for (ADR-0063 stage 3).
+            nph_gpu_rg_write_buffer(p, r->vis.frame.cell_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
+        }
         if (passes[i].voxel_out && r->vis.frame_voxels) {
             nph_gpu_rg_write_buffer(p, v->frame.voxel_draws, NPH_GPU_RG_USE_STORAGE_WRITE);
         }

@@ -54,6 +54,22 @@ bool vsm_cell_proxied(VisViewRef view, VsmViewRef r, int level, uint cell)
            VisCellsRef(view.v.cells).c[cell - 1u].center_low.w <= vsm_lod_threshold(r, level, 1.0);
 }
 
+// The finest level of cell `cell`'s proxy the map level `level` takes, as
+// it asks for it: the first whose largest consumer error is past the level's
+// threshold at scale 1, brought NPH_VIS_CELL_PREFETCH nearer as the camera's
+// requests are (vis_cell_request).
+uint vsm_cell_request(VisViewRef view, VsmViewRef r, int level, uint cell)
+{
+    VisCellsRef cells = VisCellsRef(view.v.cells);
+    const float T = vsm_lod_threshold(r, level, 1.0) * (1.0 - NPH_VIS_CELL_PREFETCH);
+    for (uint k = 0u; k < 16u; ++k) {
+        if (cells.c[cell - 1u].level_errors[k >> 2u][k & 3u] > T) {
+            return k;
+        }
+    }
+    return NPH_VIS_CELL_NO_REQUEST;
+}
+
 void cull_instances(VisViewRef view, VsmViewRef r)
 {
     const int level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
@@ -81,6 +97,12 @@ void cull_instances(VisViewRef view, VsmViewRef r)
             if (vsm_touches_render(r, level, c, radius)) {
                 walk = mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u;
                 meshlets = walk ? 0u : mesh.meshlet_count; // level 0's without the walk
+                // A cell drawn here as its proxy asks for the level the map
+                // level's threshold takes (ADR-0063 stage 3), by its counted
+                // instance; the camera's margin brings it as much nearer.
+                if (cell != 0u && (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u) {
+                    vis_cell_ask(view, cell, vsm_cell_request(view, r, level, cell));
+                }
             }
         }
     }
