@@ -133,6 +133,13 @@
 #define NPH_VIS_ARGS_PHASE2      2 // before phase 1: instance cull of the deferred instances
 #define NPH_VIS_ARGS_PHASE2_MESH 3 // after phase 1's instance cull: its meshlet cull
 #define NPH_VIS_ARGS_RASTER2     4 // after phase 1's meshlet cull: its rasters
+#define NPH_VIS_ARGS_CELLS                                                                         \
+    5 // after the cell cull's test (ADR-0064): its expansion,
+      // and phase 0's instance cull
+
+// The cell cull's modes (vis_cull_cells.comp; ADR-0064).
+#define NPH_VIS_CELLS_TEST   0 // an invocation per cell slot: the cells to list
+#define NPH_VIS_CELLS_EXPAND 1 // a workgroup per listed cell: its runs into the work list
 
 // A transform: the linear part's rows in xyz, the translation's high
 // float in the rows' w, and its low float in `translation_low`.
@@ -168,6 +175,17 @@ NPH_SHARED_STRUCT(NphVisCell)
     // level a cut can use is the first whose error is too coarse there
     // (vis_cell_request; ADR-0063 stage 3).
     NphVec4 level_errors[4];
+};
+
+// A cell's runs of instance slots in the renderer's member buffer (ADR-0064;
+// engine/render/src/vis_runs.c), at the cell's slot: its members', and its
+// proxy's instances'. The cell culls read a cell's instances from them.
+NPH_SHARED_STRUCT(NphVisCellRun)
+{
+    u32 members; // the first entry of the members' run
+    u32 member_count;
+    u32 proxies; // the first entry of the proxy's instances' run
+    u32 proxy_count;
 };
 
 // The views' requests of the cells' proxies' levels (ADR-0063 stage 3): a
@@ -308,6 +326,11 @@ NPH_SHARED_STRUCT(NphVisArgs)
     // The voxel resolve: a workgroup per listed tile in x, raised as the
     // resolve lists them, and 1 in y and z (vis clear writes them).
     u32 voxel_resolve_args[4];
+    // Where cells are culled first (ADR-0064): the cell cull's expansion, a
+    // workgroup per listed cell, then phase 0's instance cull over its work
+    // and the instances of no cell.
+    u32 cell_expand_args[4];
+    u32 instance0_args[4];
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -348,6 +371,10 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // view), and the instances such a proxy stood in for.
     u32 cells_proxied;
     u32 instances_proxied;
+    // The cell cull's work items, the instances it lists for phase 0, and
+    // the cells it lists them from (ADR-0064).
+    u32 cell_work;
+    u32 cells_listed;
 };
 
 // The production path's view of a frame.
@@ -438,6 +465,24 @@ NPH_SHARED_STRUCT(NphVisViewData)
     // u32[] a cell: the finest level of its proxy the frame's views ask for
     // (NPH_VIS_CELL_NO_REQUEST: none), cleared by vis clear (ADR-0063).
     u64 cell_requests;
+    // Cells first (ADR-0064): the cells' run records (NphVisCellRun[], at
+    // their slots) and their runs' entries (u32[] of instance slots), the
+    // work list the cell cull fills for phase 0's instance cull (u32[] of
+    // instance slots, max_cell_work), and the run of instances of no cell
+    // (entries [loose_first, loose_first + loose_count) of cell_members).
+    // cell_slots: the cell slots the cell cull walks; 0 where the renderer
+    // holds no cell, and phase 0 then walks every instance slot.
+    u64 cell_runs;
+    u64 cell_members;
+    u64 cell_work;
+    // uvec4[cell_slots] a listed cell's runs for the expansion: x its place
+    // in the work list, y its proxy's run's first entry, z its members',
+    // w the proxy's count | the members' << 5.
+    u64 cell_listed;
+    u32 cell_slots;
+    u32 max_cell_work;
+    u32 loose_first;
+    u32 loose_count;
 };
 
 // Push constants of every production-path shader. The visibility buffer

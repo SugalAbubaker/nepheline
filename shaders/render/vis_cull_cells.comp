@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: Apache-2.0
+// The world partition's cells, culled first (ADR-0064; docs/render.md "The
+// production path"), before phase 0's instance cull, which then takes only
+// the instances this lists (NphVisViewData.cell_work) and those of no cell,
+// not every instance slot. Two modes:
+//
+//   NPH_VIS_CELLS_TEST: an invocation per cell slot (cell_slots). A cell
+//     whose box lies outside the frustum lists nothing: its members' bounds
+//     lie in its box (NphRenderCellDesc's contract, which the renderer keeps
+//     by growing a cell's box over a member made outside it), so none of
+//     their clusters is in view. One in view lists its proxy's instances
+//     (the instance cull keeps them where the cell is drawn as its proxy,
+//     and the counted one asks for the cell's levels there as before:
+//     vis_cell_ask), and its members where it is not drawn as its proxy
+//     (vis_cell_proxied: the instance cull's own test, so the two agree). A
+//     listed cell's runs get their place in the work list (a subgroup's
+//     together, one atomic for its total) and a record of them
+//     (cell_listed), which the expansion copies.
+//
+//     The statistics of what it does not list are counted here as the
+//     instance cull counted them: every cell drawn as its proxy, and the
+//     members it stood in for, in view or not; the members of a cell out of
+//     view and drawn as its instances, and the proxy's instances of one out
+//     of view and drawn as its proxy, as culled by the frustum.
+//
+//   NPH_VIS_CELLS_EXPAND: a workgroup per listed cell (the arguments from
+//     the test's count): its runs' slots copied into the work list, an
+//     invocation an entry. Many workgroups at once hide the loads' latency
+//     that a subgroup copying its 32 cells' runs in turn would serialise.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+NPH_BUFFER_REF(VisCellRunsRef) { NphVisCellRun r[]; };
+NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
+
+// Whether a box (camera-relative centre, half extents) is in the frustum: on
+// the inside of each of its planes (vis_sphere_in_frustum's) with the corner
+// furthest along the plane's inward normal.
+bool vis_box_in_frustum(VisViewRef view, vec3 c, vec3 e)
+{
+    for (int i = 0; i < 5; ++i) {
+        const vec4 plane = view.v.frustum[i];
+        if (dot(plane.xyz, c) + dot(abs(plane.xyz), e) + plane.w < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void test(VisViewRef view, VisCountersRef counters)
+{
+    const uint id = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                    gl_LocalInvocationIndex;
+    uint proxies_first = 0u; // the runs this cell lists: its proxy's, then its members'
+    uint proxies = 0u;
+    uint members_first = 0u;
+    uint members = 0u;
+    bool cell_proxied = false; // statistics
+    uint instances_proxied = 0u;
+    uint culled_frustum = 0u;
+    if (id < view.v.cell_slots) {
+        const NphVisCellRun run = VisCellRunsRef(view.v.cell_runs).r[id];
+        // A live cell's proxy has an instance at least; a dead slot's none.
+        if (run.proxy_count != 0u) {
+            VisCellsRef cells = VisCellsRef(view.v.cells);
+            const vec3 centre = (cells.c[id].center_high.xyz - view.v.camera_high.xyz) +
+                                (cells.c[id].center_low.xyz - view.v.camera_low.xyz);
+            const bool proxied = vis_cell_proxied(view, id + 1u);
+            const bool in_view = vis_box_in_frustum(view, centre, cells.c[id].extent.xyz);
+            cell_proxied = proxied;
+            instances_proxied = proxied ? run.member_count : 0u;
+            culled_frustum = in_view ? 0u : (proxied ? run.proxy_count : run.member_count);
+            if (in_view) {
+                proxies_first = run.proxies;
+                proxies = run.proxy_count;
+                members_first = run.members;
+                members = proxied ? 0u : run.member_count;
+            }
+        }
+    }
+
+    VIS_COUNT(counters.c.cells_proxied, cell_proxied);
+    VIS_ADD(counters.c.instances_proxied, instances_proxied);
+    VIS_ADD(counters.c.instances_culled_frustum, culled_frustum);
+
+    // The listed cells' places: in the work list, and their records.
+    const uint items = proxies + members;
+    const bool listed = items != 0u;
+    uint base = 0u;
+    VIS_RESERVE(counters.c.cell_work, items, base);
+    uint record = 0u;
+    VIS_RESERVE(counters.c.cells_listed, listed ? 1u : 0u, record);
+    if (listed && record < view.v.cell_slots) {
+        VisUvec4Ref(view.v.cell_listed).v[record] =
+            uvec4(base, proxies_first, members_first, proxies | (members << 5u));
+    }
+}
+
+void expand(VisViewRef view, VisCountersRef counters)
+{
+    const uint record = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (record >= min(counters.c.cells_listed, view.v.cell_slots)) {
+        return;
+    }
+    const uvec4 l = VisUvec4Ref(view.v.cell_listed).v[record];
+    const uint proxies = l.w & 31u;
+    const uint items = proxies + (l.w >> 5u);
+    VisUintRef entries = VisUintRef(view.v.cell_members);
+    VisUintRef work = VisUintRef(view.v.cell_work);
+    for (uint j = gl_LocalInvocationIndex; j < items; j += 64u) {
+        const uint entry = j < proxies ? l.y + j : l.z + (j - proxies);
+        // Every instance is in one run, listed once a frame: the list holds
+        // them all (max_cell_work, the instance slots).
+        if (l.x + j < view.v.max_cell_work) {
+            work.v[l.x + j] = entries.v[entry];
+        }
+    }
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    if (pc.mode == uint(NPH_VIS_CELLS_EXPAND)) {
+        expand(view, counters);
+    } else {
+        test(view, counters);
+    }
+}

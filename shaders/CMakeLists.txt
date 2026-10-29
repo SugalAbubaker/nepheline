@@ -77,6 +77,7 @@ nph_add_shaders(nph_shaders_render
         render/ibl_sh.comp
         render/brdf_lut.comp
         render/vis_scatter.comp
+        render/vis_cull_cells.comp
         render/vis_cull_instances.comp
         render/vis_cull_meshlets.comp
         render/vis_cull_nodes.comp

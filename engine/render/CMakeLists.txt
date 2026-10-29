@@ -30,6 +30,7 @@ nph_add_module(render
         src/rt.c
         src/taa.c
         src/vis.c
+        src/vis_runs.c
         src/vis_scene.c
         src/voxel.c
         src/vsm.c

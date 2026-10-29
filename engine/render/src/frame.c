@@ -932,6 +932,9 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     r->tonemap_push.tonemapper = (u32)view->tonemapper;
     r->tonemap_push.encode_srgb = format_is_srgb(td->format) ? 0U : 1U;
 
+    // The cells' runs that changed (ADR-0064), with the frame's other
+    // uploads: the cell cull reads them this frame.
+    NPH_TRY(render_vis_runs_upload(r));
     if (r->pending_uploads) {
         NPH_TRY(nph_gpu_upload_flush(dev, NULL));
         r->pending_uploads = 0;

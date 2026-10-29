@@ -56,7 +56,8 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 976U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 1024U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisViewData, cell_runs) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, cells) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, voxel_tiles) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, lod_queue) % 8U == 0U, "addresses are aligned");
@@ -95,6 +96,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_voxel_raster.comp",
     "vis_voxel_resolve.comp",
     "vis_voxel_resolve_rt.comp",
+    "vis_cull_cells.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
@@ -104,10 +106,11 @@ static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_RESOLVE,       VIS_SHADER_SW_RASTER,
     VIS_SHADER_LIGHTS,        VIS_SHADER_LIGHT_BINS,
     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_CULL_NODES,
-    VIS_SHADER_VOXEL_RASTER,  VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_VOXEL_RASTER,  VIS_SHADER_CULL_CELLS,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -124,6 +127,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis light tiles",
     "vis cull nodes",
     "vis voxel raster",
+    "vis cull cells",
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
@@ -701,6 +705,15 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     vd->meshes = nph_gpu_buffer_address(dev, v->meshes);
     vd->cells = nph_gpu_buffer_address(dev, v->cells);
     vd->cell_requests = nph_gpu_buffer_address(dev, v->cell_requests);
+    // Cells first where the renderer holds any (ADR-0064).
+    vd->cell_runs = nph_gpu_buffer_address(dev, v->cell_runs);
+    vd->cell_members = nph_gpu_buffer_address(dev, v->cell_members);
+    vd->cell_work = nph_gpu_buffer_address(dev, v->cell_work);
+    vd->cell_listed = nph_gpu_buffer_address(dev, v->cell_listed);
+    vd->cell_slots = v->cells_first_off ? 0U : v->cell_slots;
+    vd->max_cell_work = d->max_instances;
+    vd->loose_first = v->loose.capacity != 0U ? v->loose.range.offset : 0U;
+    vd->loose_count = v->loose.count;
     vd->material_map = nph_gpu_buffer_address(dev, v->material_map);
     vd->materials = frame + r->layout.materials_offset;
     vd->counters = nph_gpu_buffer_address(dev, v->counters);
@@ -903,14 +916,43 @@ static void light_tiles_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *
                                   (u64)offsetof(NphVisArgs, light_tile_args));
 }
 
-static void cull_instances0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+// The world partition's cells, first (vis_cull_cells.comp; ADR-0064): the
+// cells to list, an invocation a cell slot.
+static void cull_cells_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    const NphVisPush p = push_of(r, 0U, (u32)NPH_VIS_CELLS_TEST);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_CELLS]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    dispatch_items(cmd, nph_max_u32(r->vis.cell_slots, 1U));
+}
+
+// Their runs into the work list, a workgroup a listed cell.
+static void expand_cells_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const NphVisPush p = push_of(r, 0U, (u32)NPH_VIS_CELLS_EXPAND);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_CELLS]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
+                                  (u64)offsetof(NphVisArgs, cell_expand_args));
+}
+
+// Phase 0: the instances the cell cull listed and those of no cell, or,
+// without cells, every instance slot.
+static void cull_instances0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
     NphRenderer *r = (NphRenderer *)user;
     const NphVisPush p = push_of(r, 0U, 0U);
     nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_CULL_INSTANCES]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-    dispatch_items(cmd, nph_max_u32(r->instance_pool.bump, 1U));
+    if (r->vis.frame.cells_first) {
+        nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
+                                      (u64)offsetof(NphVisArgs, instance0_args));
+    } else {
+        dispatch_items(cmd, nph_max_u32(r->instance_pool.bump, 1U));
+    }
 }
 
 static void args_record(NphRenderer *r, NphGpuCmd *cmd, u32 mode)
@@ -928,6 +970,7 @@ static void args_record(NphRenderer *r, NphGpuCmd *cmd, u32 mode)
         args_record((NphRenderer *)user, cmd, (mode));                                             \
     }
 
+ARGS_EXECUTE(args_cells_execute, NPH_VIS_ARGS_CELLS)
 ARGS_EXECUTE(args_phase1_execute, NPH_VIS_ARGS_PHASE1)
 ARGS_EXECUTE(args_raster1_execute, NPH_VIS_ARGS_RASTER1)
 ARGS_EXECUTE(args_phase2_execute, NPH_VIS_ARGS_PHASE2)
@@ -1273,6 +1316,10 @@ typedef struct VisGraph {
     NphGpuRgBuffer clusters;
     NphGpuRgBuffer lists;
     NphGpuRgBuffer lod_queue;
+    NphGpuRgBuffer cell_runs; // cells first (ADR-0064)
+    NphGpuRgBuffer cell_members;
+    NphGpuRgBuffer cell_work;
+    NphGpuRgBuffer cell_listed;
 } VisGraph;
 
 static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
@@ -1648,13 +1695,41 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     NPH_TRY(declare_lights(graph, r));
 
-    // Phase 0.
+    // Phase 0: the cells first where the renderer holds any (ADR-0064),
+    // then the instances they list and those of no cell; else every slot.
+    if (f->cells_first) {
+        p = add_pass(graph, r, "vis cull cells", NPH_GPU_RG_PASS_COMPUTE, cull_cells_execute);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_buffer(p, g->cells, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->cell_runs, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_buffer(p, g->cell_listed, NPH_GPU_RG_USE_SHADER_WRITE);
+        nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
+        if (args_pass(graph, r, "vis args cells", args_cells_execute) == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        p = add_pass(graph, r, "vis expand cells", NPH_GPU_RG_PASS_COMPUTE, expand_cells_execute);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+        nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->cell_listed, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->cell_members, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_buffer(p, g->cell_work, NPH_GPU_RG_USE_SHADER_WRITE);
+    }
     p = add_pass(graph, r, "vis cull instances 0", NPH_GPU_RG_PASS_COMPUTE,
                  cull_instances0_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
     read_scene(p, g, f->hzb);
+    if (f->cells_first) {
+        nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+        nph_gpu_rg_read_buffer(p, g->cell_work, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, g->cell_members, NPH_GPU_RG_USE_SHADER_READ);
+    }
     nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, g->cull_meshlets, NPH_GPU_RG_USE_SHADER_WRITE);
     nph_gpu_rg_write_buffer(p, g->deferred, NPH_GPU_RG_USE_SHADER_WRITE);
@@ -1800,6 +1875,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     v->debug_view = view->debug_view != NPH_RENDER_VIEW_LIT ? 1 : 0;
     memset(f, 0, sizeof *f);
     f->view_address = r->frame_addresses[r->frame_slot] + r->layout.vis_view_offset;
+    f->cells_first = v->cell_slots != 0U && !v->cells_first_off ? 1 : 0;
     f->update_count = render_vis_write_updates(r);
     f->light_update_count = render_vis_write_light_updates(r);
     f->width = width;
@@ -1868,6 +1944,10 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.clusters = nph_gpu_rg_import_buffer(graph, v->clusters);
     g.lists = nph_gpu_rg_import_buffer(graph, v->lists);
     g.lod_queue = nph_gpu_rg_import_buffer(graph, v->lod_queue);
+    g.cell_runs = nph_gpu_rg_import_buffer(graph, v->cell_runs);
+    g.cell_members = nph_gpu_rg_import_buffer(graph, v->cell_members);
+    g.cell_work = nph_gpu_rg_import_buffer(graph, v->cell_work);
+    g.cell_listed = nph_gpu_rg_import_buffer(graph, v->cell_listed);
     f->instances = g.instances;
     f->prev_transforms = g.prev_transforms;
     f->clusters = g.clusters;
