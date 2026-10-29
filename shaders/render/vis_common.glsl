@@ -644,16 +644,58 @@ bool vis_lod_surely_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, floa
 // 1: e k <= max(d, near)). A cell's instances and its proxy decide from the
 // same record and view, by the same arithmetic, so the proxy is drawn exactly
 // where they are not.
+// (The record's fields are read in place: a copy of a buffer's struct with
+// an array member trips glslang 14, docs/build.md "Shaders".)
 bool vis_cell_proxied(VisViewRef view, uint cell)
 {
     if ((view.v.flags & NPH_VIS_VIEW_LOD) == 0u) {
         return false;
     }
-    const NphVisCell c = VisCellsRef(view.v.cells).c[cell - 1u];
+    VisCellsRef cells = VisCellsRef(view.v.cells);
+    const uint i = cell - 1u;
+    const vec4 high = cells.c[i].center_high;
+    const vec4 low = cells.c[i].center_low;
+    const vec3 centre = (high.xyz - view.v.camera_high.xyz) + (low.xyz - view.v.camera_low.xyz);
+    const float d = length(max(abs(centre) - cells.c[i].extent.xyz, vec3(0.0)));
+    return d >= high.w && low.w * view.v.lod.x <= max(d, view.v.lod.y);
+}
+
+// The finest level of cell `cell`'s proxy the view's cut could use, as it
+// asks for it (ADR-0063 stage 3): with the levels of detail, past its
+// distance less the margin, the first level whose largest consumer error is
+// too coarse at the box's nearest point brought NPH_VIS_CELL_PREFETCH nearer
+// (vis_cell_proxied's test, scale 1); NPH_VIS_CELL_NO_REQUEST nearer, where
+// its instances are drawn, or for a proxy that does not stream.
+uint vis_cell_request(VisViewRef view, uint cell)
+{
+    if ((view.v.flags & NPH_VIS_VIEW_LOD) == 0u) {
+        return NPH_VIS_CELL_NO_REQUEST;
+    }
+    VisCellsRef cells = VisCellsRef(view.v.cells);
+    const uint i = cell - 1u;
+    const vec4 high = cells.c[i].center_high;
     const vec3 centre =
-        (c.center_high.xyz - view.v.camera_high.xyz) + (c.center_low.xyz - view.v.camera_low.xyz);
-    const float d = length(max(abs(centre) - c.extent.xyz, vec3(0.0)));
-    return d >= c.center_high.w && c.center_low.w * view.v.lod.x <= max(d, view.v.lod.y);
+        (high.xyz - view.v.camera_high.xyz) + (cells.c[i].center_low.xyz - view.v.camera_low.xyz);
+    const float d = length(max(abs(centre) - cells.c[i].extent.xyz, vec3(0.0)));
+    const float keep = 1.0 - NPH_VIS_CELL_PREFETCH;
+    if (d < high.w * keep) {
+        return NPH_VIS_CELL_NO_REQUEST;
+    }
+    const float reach = max(d * keep, view.v.lod.y);
+    for (uint k = 0u; k < 16u; ++k) {
+        if (cells.c[i].level_errors[k >> 2u][k & 3u] * view.v.lod.x > reach) {
+            return k;
+        }
+    }
+    return NPH_VIS_CELL_NO_REQUEST;
+}
+
+// Lowers cell `cell`'s request to `level` (vis_cell_request).
+void vis_cell_ask(VisViewRef view, uint cell, uint level)
+{
+    if (level != NPH_VIS_CELL_NO_REQUEST) {
+        atomicMin(VisUintRef(view.v.cell_requests).v[cell - 1u], level);
+    }
 }
 
 bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)

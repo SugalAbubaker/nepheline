@@ -502,6 +502,14 @@ typedef struct NphRenderCellDesc {
     NphRenderTransform proxy_transform; // a rotation and a translation alone (scale 1)
     f32 proxy_error;                    // its finest level's error, world units: its level 0's cell
     f32 distance;                       // drawn from this far (positive)
+    // A streamed proxy's levels (ADR-0063 stage 3): each level's largest
+    // consumer error, world units, finest first (a head's, asset/mesh.h
+    // NphMeshLevel.error), `proxy_level_error_count` of them (at most
+    // NPH_RENDER_CELL_MAX_LEVELS, finite or the largest float, not falling;
+    // 0: a proxy that does not stream, of which the views ask nothing):
+    // nph_render_cell_request.
+    const f32 *proxy_level_errors;
+    u32 proxy_level_error_count;
 } NphRenderCellDesc;
 
 // Creates the cell and its proxy's instances, which it owns.
@@ -517,6 +525,28 @@ NPH_MUST_USE NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCel
 // must be destroyed first (asserted; refused with an error logged).
 void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell);
 bool nph_render_cell_is_valid(const NphRenderer *r, NphRenderCell cell);
+
+// No level of a cell's proxy asked for (nph_render_cell_request).
+#define NPH_RENDER_CELL_NO_REQUEST 0xFFU
+
+// The finest level of `cell`'s streamed proxy the views asked for in the
+// frame nph_render_cell_requests_frame names (ADR-0063 stage 3), read back
+// NPH_GPU_FRAMES_IN_FLIGHT frames after it: the smallest of the camera's,
+// where the proxy's sphere is in view (in the frustum and not behind the
+// depth pyramid), the first level whose error (NphRenderCellDesc
+// .proxy_level_errors) is too coarse at the box's nearest point brought a
+// quarter nearer, past its distance less a quarter; and the sun's shadow
+// map's, in each map level that draws the cell as its proxy, at the level's
+// threshold brought a quarter finer. NPH_RENDER_CELL_NO_REQUEST where none
+// asked (out of view, nearer, a view without levels of detail, a proxy that
+// does not stream), for a stale handle, or before a frame has been read
+// back. A cell made in a slot a destroyed one held may read that one's last
+// requests for the frames in flight. NPH_MAIN_THREAD_ONLY.
+u32 nph_render_cell_request(const NphRenderer *r, NphRenderCell cell);
+
+// The frame the requests come from (nph_gpu_frame_index's numbering;
+// NPH_U64_MAX: none read back yet). NPH_MAIN_THREAD_ONLY.
+u64 nph_render_cell_requests_frame(const NphRenderer *r);
 
 // ---------------------------------------------------------------------------
 // Lights (KHR_lights_punctual)

@@ -527,6 +527,10 @@ typedef struct VisFrame {
     NphGpuRgBuffer prev_transforms;
     NphGpuRgBuffer clusters;
     NphGpuRgBuffer cells; // the world partition's cells, which the instance culls read
+    // The cells' requests (ADR-0063 stage 3): cleared, asked by the instance
+    // culls, copied to the slot's readback.
+    NphGpuRgBuffer cell_requests;
+    NphGpuRgBuffer request_readback;
 } VisFrame;
 
 typedef struct RenderVis {
@@ -573,6 +577,16 @@ typedef struct RenderVis {
     u32 voxel_meshes;
     NphGpuBuffer stats[NPH_GPU_FRAMES_IN_FLIGHT]; // NphVisCounters read back
     u64 stats_frame[NPH_GPU_FRAMES_IN_FLIGHT];    // frame index + 1 each holds (0: none)
+    // The views' requests of the cells' proxies' levels (ADR-0063 stage 3):
+    // u32[max_cells] on the GPU (NphVisViewData.cell_requests), each frame
+    // copied to its slot's readback, which the frame that reuses the slot
+    // reads into cell_requested (u8[max_cells], NPH_RENDER_CELL_NO_REQUEST
+    // where none) from the frame requests_from - 1 (0: none yet).
+    NphGpuBuffer cell_requests;
+    NphGpuBuffer request_readback[NPH_GPU_FRAMES_IN_FLIGHT];
+    u64 request_frame[NPH_GPU_FRAMES_IN_FLIGHT]; // frame index + 1 each holds (0: none)
+    u8 *cell_requested;
+    u64 requests_from;
 
     // The lights: the persistent table, the grid's work buffer, and the
     // tile masks and depths (sized by the target, with the HZB).

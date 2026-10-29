@@ -163,7 +163,19 @@ NPH_SHARED_STRUCT(NphVisCell)
     NphVec4 center_high; // xyz: the box's centre, high floats; w: the proxy's distance
     NphVec4 center_low;  // xyz: its low floats; w: the proxy's finest error (its level 0's cell)
     NphVec4 extent;      // xyz: the box's half extents; w: unused
+    // Each of its proxy's levels' largest consumer error, finest first, 0
+    // past its levels (and for a proxy that does not stream): the finest
+    // level a cut can use is the first whose error is too coarse there
+    // (vis_cell_request; ADR-0063 stage 3).
+    NphVec4 level_errors[4];
 };
+
+// The views' requests of the cells' proxies' levels (ADR-0063 stage 3): a
+// cell asks for the level its cut would use with the box's nearest point
+// this fraction nearer, so that the level arrives before it is needed; none
+// (NPH_VIS_CELL_NO_REQUEST) nearer than its distance less as much.
+#define NPH_VIS_CELL_PREFETCH   0.25
+#define NPH_VIS_CELL_NO_REQUEST 0xFFFFFFFFU
 
 // An instance update the scatter pass applies at the start of a frame:
 // `instance` replaces the record at `slot`, whose old transform becomes
@@ -419,7 +431,9 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 resolve_tiles_x;
     u32 voxel_pad0;
     u64 cells; // NphVisCell[]: the world partition's cells (ADR-0062)
-    u64 cell_pad0;
+    // u32[] a cell: the finest level of its proxy the frame's views ask for
+    // (NPH_VIS_CELL_NO_REQUEST: none), cleared by vis clear (ADR-0063).
+    u64 cell_requests;
 };
 
 // Push constants of every production-path shader. The visibility buffer

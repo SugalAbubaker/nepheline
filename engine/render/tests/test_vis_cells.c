@@ -247,6 +247,8 @@ typedef struct GroveScene {
     NphRenderMesh levels[NPH_RENDER_CELL_MAX_LEVELS];
     u32 level_count;
     u32 first_level;
+    // Each level's largest consumer error, whose requests the cell answers.
+    f32 level_errors[NPH_RENDER_CELL_MAX_LEVELS];
     NphRenderMaterial green;
     NphRenderCell cell;
     NphRenderInstance trees[GROVE_TREES];
@@ -265,6 +267,8 @@ static NphRenderCellDesc grove_cell_desc(const GroveScene *s, f32 error, f32 dis
     d.proxy_transform = nph_render_transform_identity();
     d.proxy_error = error;
     d.distance = distance;
+    d.proxy_level_errors = s->level_count != 0U ? s->level_errors : NULL;
+    d.proxy_level_error_count = s->level_count;
     return d;
 }
 
@@ -282,6 +286,11 @@ static void grove_scene_build_with(RenderFixture *f, const Grove *g, GroveScene 
     for (u32 k = 0; levels != NULL && k < levels->count; ++k) {
         NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &levels->desc[k], &s->levels[k]),
                             NPH_RESULT_OK);
+        f32 e = 0.0F;
+        for (u32 gi = 0; gi < levels->lods[k].groups.len; ++gi) {
+            e = nph_f32_max(e, levels->lods[k].groups.data[gi].error);
+        }
+        s->level_errors[k] = e;
         s->level_count += 1U;
     }
     s->green = material(f, nph_vec4(0.3F, 0.5F, 0.2F, 1.0F));
@@ -657,6 +666,34 @@ NTEST_F(Cells, cells_are_made_and_refused)
     d.distance = nph_f32_from_bits(0x7FC00000U);
     EXPECT_REFUSED();
     d.distance = -1.0F;
+    EXPECT_REFUSED();
+    // A streamed proxy's levels' errors: rising (the coarsest a root's, the
+    // largest float) are taken; more than a cell holds, none given with a
+    // count, one not finite, or falling are not.
+    f32 errors[NPH_RENDER_CELL_MAX_LEVELS + 1U];
+    for (u32 k = 0; k < NPH_ARRAY_COUNT(errors); ++k) {
+        errors[k] = 0.25F * (f32)(1U << k);
+    }
+    errors[2] = NPH_F32_MAX;
+    d.proxy_level_errors = errors;
+    d.proxy_level_error_count = 3U;
+    NphRenderCell streamed = NPH_RENDER_CELL_NULL;
+    NTEST_EXPECT_EQ_INT(nph_render_cell_create(f->renderer, &d, &streamed), NPH_RESULT_OK);
+    nph_render_cell_destroy(f->renderer, streamed);
+    errors[2] = 1.0F;
+    d.proxy_level_errors = errors;
+    d.proxy_level_error_count = NPH_RENDER_CELL_MAX_LEVELS + 1U;
+    EXPECT_REFUSED();
+    d.proxy_level_errors = NULL;
+    d.proxy_level_error_count = 2U;
+    EXPECT_REFUSED();
+    errors[1] = nph_f32_from_bits(0x7FC00000U);
+    d.proxy_level_errors = errors;
+    d.proxy_level_error_count = 3U;
+    EXPECT_REFUSED();
+    errors[1] = 0.125F;
+    d.proxy_level_errors = errors;
+    d.proxy_level_error_count = 3U;
     EXPECT_REFUSED();
 #undef EXPECT_REFUSED
     // An instance's cell, live.
@@ -1038,6 +1075,76 @@ NTEST_F(Cells, a_cells_finest_held_level_stands_for_the_finer_ones)
         nph_render_mesh_destroy(f->renderer, floor.cube);
         nph_render_mesh_destroy(f->renderer, floor.plane);
     }
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
+// A cell of a streamed proxy asks for the level its cut needs (ADR-0063
+// stage 3): from each distance, the first level whose largest consumer
+// error is too coarse at the box's nearest point brought a quarter nearer,
+// as its C twin here finds it; nothing nearer than its distance less a
+// quarter, nor with the cell out of view, nor in a view without levels of
+// detail. Drawn or not: from 30 m on the cell is drawn as its proxy, from
+// 22.5 m it asks.
+NTEST_F(Cells, a_cell_asks_for_the_level_its_cut_needs)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    BigTarget t;
+    big_target_init(f, &t);
+    const f32 distance = 30.0F;
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, true, GROVE_CELL / 64.0F, distance, &gl, 0U);
+    NTEST_LOG("the levels' errors: %.3f %.3f %.3g", (f64)s.level_errors[0], (f64)s.level_errors[1],
+              (f64)s.level_errors[2]);
+    // The renderer's pixels a unit at distance one spans (vis.c), at a
+    // pixel's threshold.
+    const f32 per_unit = 0.5F * (f32)BIG_SIZE / nph_f32_tan(0.3F);
+    const f64 distances[] = {10.0, 20.0, 25.0, 40.0, 80.0, 160.0, 320.0, 640.0, 1280.0};
+    u32 asked = 0U;
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(distances); ++i) {
+        const NphRenderView v = grove_view(distances[i], 1.0F);
+        big_frames(f, &t, &v);
+        // The box's nearest point from the camera (grove_view), as the GPU
+        // finds it, and the level the twin asks for.
+        const NphVec3 cam = nph_vec3(0.0F, (f32)(0.3 * distances[i]), (f32)distances[i]);
+        const NphVec3 gap = nph_vec3(nph_f32_max(nph_f32_abs(cam.x) - 2.5F, 0.0F),
+                                     nph_f32_max(nph_f32_abs(cam.y) - 1.0F, 0.0F),
+                                     nph_f32_max(nph_f32_abs(cam.z) - 2.5F, 0.0F));
+        const f32 d = nph_vec3_length(gap);
+        u32 expected = NPH_RENDER_CELL_NO_REQUEST;
+        if (d >= distance * 0.75F) {
+            const f32 reach = nph_f32_max(d * 0.75F, 0.05F);
+            for (u32 k = 0; k < s.level_count && expected == NPH_RENDER_CELL_NO_REQUEST; ++k) {
+                expected = s.level_errors[k] * per_unit > reach ? k : expected;
+            }
+        }
+        const u32 got = nph_render_cell_request(f->renderer, s.cell);
+        NTEST_LOG("from %.0f m (the box %.1f m away): asks for level %u, the twin %u", distances[i],
+                  (f64)d, got, expected);
+        NTEST_EXPECT_EQ_UINT(got, expected);
+        NTEST_EXPECT_NE_UINT(nph_render_cell_requests_frame(f->renderer), NPH_U64_MAX);
+        asked |= got != NPH_RENDER_CELL_NO_REQUEST ? 1U << got : 0U;
+    }
+    // Every level asked for from some distance.
+    NTEST_EXPECT_EQ_UINT(asked, (1U << s.level_count) - 1U);
+    // Out of view (the camera turned away), or without levels of detail:
+    // nothing.
+    NphRenderView away = grove_view(80.0, 1.0F);
+    away.camera = nph_render_camera_look_at(nph_dvec3(0.0, 24.0, 80.0), nph_dvec3(0.0, 24.0, 160.0),
+                                            nph_vec3(0.0F, 1.0F, 0.0F), 0.6F, 0.05F);
+    big_frames(f, &t, &away);
+    NTEST_EXPECT_EQ_UINT(nph_render_cell_request(f->renderer, s.cell), NPH_RENDER_CELL_NO_REQUEST);
+    const NphRenderView flat = grove_view(80.0, 0.0F);
+    big_frames(f, &t, &flat);
+    NTEST_EXPECT_EQ_UINT(nph_render_cell_request(f->renderer, s.cell), NPH_RENDER_CELL_NO_REQUEST);
+    // A stale cell asks for nothing.
+    grove_scene_free(f, &s);
+    NTEST_EXPECT_EQ_UINT(nph_render_cell_request(f->renderer, s.cell), NPH_RENDER_CELL_NO_REQUEST);
+    big_target_free(f, &t);
     grove_levels_free(&gl);
     grove_free(&g);
 }

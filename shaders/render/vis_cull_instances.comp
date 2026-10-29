@@ -30,6 +30,12 @@
 // The instances of a world partition's cell give way to the cell's proxy
 // where it is drawn, and the proxy to them elsewhere (vis_cell_proxied;
 // ADR-0062): both decide first, from the cell's record and the view alike.
+// The instance a cell's statistics count it by (its coarsest held level's,
+// NPH_VIS_INSTANCE_PROXY_COUNTED) asks for its proxy's levels where its
+// sphere is in view, drawn or not, so that a cell asks before it is drawn as
+// its proxy: phase 0 where it is in the frustum and not behind the previous
+// frame's pyramid, phase 1 where a deferred one is found visible
+// (vis_cell_request; ADR-0063 stage 3).
 //
 // The meshlets go out as (instance, meshlet) work items, one per meshlet,
 // so the meshlet cull runs an invocation per meshlet with every lane busy,
@@ -75,6 +81,8 @@ void main()
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         bool shown = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u;
         const uint cell = inst.flags >> NPH_VIS_INSTANCE_CELL_SHIFT;
+        const bool counted =
+            shown && cell != 0u && (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u;
         if (shown && cell != 0u) {
             const bool proxy = (inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u;
             const bool proxied = vis_cell_proxied(view, cell);
@@ -83,16 +91,20 @@ void main()
                            (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u;
             instance_proxied = phase == 0u && !proxy && proxied;
         }
-        if (shown) {
+        if (shown || counted) {
             const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
             const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                                     view.v.camera_low.xyz);
             const vec3 c = vis_transform_vector(inst.transform, mesh.sphere.xyz) + t;
             const float r = mesh.sphere.w * vis_max_scale(inst.transform);
             const bool occlusion = (view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u;
+            // Out of view (phase 0: outside the frustum; phase 1: behind this
+            // frame's pyramid), or in phase 0 behind the previous frame's.
+            bool unseen = false;
+            bool later = false;
             if (phase == 0u) {
                 if (!vis_sphere_in_frustum(view, c, r)) {
-                    culled_frustum = true;
+                    unseen = true;
                 } else if (occlusion && (view.v.flags & NPH_VIS_VIEW_HZB_VALID) != 0u) {
                     // As the previous frame saw it.
                     const NphVisTransform pt = VisTransformsRef(view.v.prev_transforms).t[slot];
@@ -103,17 +115,23 @@ void main()
                     const float pr = mesh.sphere.w * vis_max_scale(pt);
                     vec4 rect;
                     float depth;
-                    defer = vis_project_sphere(pv, pr, view.v.prev_projection, rect, depth) &&
+                    later = vis_project_sphere(pv, pr, view.v.prev_projection, rect, depth) &&
                             vis_hzb_occluded(view, rect + view.v.jitter.zwzw, depth);
                 }
             } else if (occlusion) {
                 const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
                 vec4 rect;
                 float depth;
-                culled_occlusion = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
-                                   vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
+                unseen = vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
+                         vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
             }
-            if (!culled_frustum && !defer && !culled_occlusion) {
+            if (counted && !unseen && !later) {
+                vis_cell_ask(view, cell, vis_cell_request(view, cell));
+            }
+            culled_frustum = shown && phase == 0u && unseen;
+            defer = shown && later;
+            culled_occlusion = shown && phase == 1u && unseen;
+            if (shown && !unseen && !later) {
                 // A mesh with levels walks its hierarchy, unless even the
                 // finest of the groups that consume level 0 is too coarse
                 // from the far side of its sphere: then the cut is level 0

@@ -1474,8 +1474,18 @@ static bool rigid(const NphRenderTransform *t)
 static bool cell_desc_ok(const NphRenderer *r, const NphRenderCellDesc *d)
 {
     if (d->proxy_levels == NULL || d->proxy_level_count == 0U ||
-        d->proxy_level_count > NPH_RENDER_CELL_MAX_LEVELS) {
+        d->proxy_level_count > NPH_RENDER_CELL_MAX_LEVELS ||
+        d->proxy_level_error_count > NPH_RENDER_CELL_MAX_LEVELS ||
+        (d->proxy_level_error_count != 0U && d->proxy_level_errors == NULL)) {
         return false;
+    }
+    // A streamed proxy's levels' errors: finite (the largest float at most)
+    // and not falling, as the cut makes them.
+    for (u32 k = 0; k < d->proxy_level_error_count; ++k) {
+        const f32 e = d->proxy_level_errors[k];
+        if (!nph_f32_is_finite(e) || !(e >= (k == 0U ? 0.0F : d->proxy_level_errors[k - 1U]))) {
+            return false;
+        }
     }
     for (u32 k = 0; k < d->proxy_level_count; ++k) {
         const u32 mesh = render_slot_of(&r->mesh_pool, d->proxy_levels[k].value);
