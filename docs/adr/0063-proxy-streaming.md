@@ -532,8 +532,82 @@ Making a level's mesh cost the main thread 0.12 ms and 0.54 ms a megabyte: past
   settling took 26.6 s and 368 frames where 17.9 s and 228. At 4 ms frames the extra
   frame a level is 4 ms.
 
-Stage 4 remains: the update's work linear in the cells (thousands in the 4 x 4 km
-world), and the open world itself.
+Stage 4 follows.
+
+## Stage 4, the open world (2026-10-29)
+
+`render_perf --tiles=4x3` lays the landscape out as a world of the game's size: 4 by 4.5
+km, 574,356 instances and 4,608 cells. Each tile has its own instances and cells, and so,
+streamed, its own proxies' finer levels; the meshes, materials, textures, coarsest
+levels, lights and views are shared (docs/benchmarks.md). Measuring it found five costs
+that grew with the world rather than with the pixels, all now fixed:
+
+- **The load.** The cooked-scene bridge took each instance's bounds from its mesh's view,
+  which checks the whole asset: 4.8 ms an instance, 230 s of the landscape's load. Taken
+  once a mesh, the landscape loads in 0.8 s and the world in 1.0 s.
+- **The stream's throughput.** With 8 loads at once the world did not settle in 60 s
+  (5,544 levels in 43 MB, 4,458 cells short): the far field wants thousands of levels of a
+  few kilobytes, and a load takes two or three frames whatever its size. `max_loads` now
+  defaults to 64: the world settles in 25 to 27 s within 400 MB (12,225 levels), the
+  landscape in 5.4 s where 22.6 s (these are 60 ms frames; at 4 ms the same frames take a
+  fifteenth of the time).
+- **The stream's scans.** An update passed over the cells once, and again for each load it
+  weighed and each drop (the level worth loading most, the one worth keeping least, the
+  room a load makes): 0.63 ms idle at 4,608 cells under a full budget, 1.5 ms at most. Now
+  one pass keeps the best of each in bounded heaps (`ProxyStreamPick`, runtime.md "Proxy
+  streaming"): 0.17 ms idle.
+- **The top level's rebuilds.** The production path rebuilt it for any changed instance,
+  and a streamed level changes its cell's proxy instances, which are of voxels alone and
+  never in it: the turn rebuilt the world's (574,356 instances traced) in 46 of 240
+  frames, 2.85 ms each and 0.34 ms of records. It now follows only the instances it holds
+  before or after (render.md "Shadows"): none while streaming.
+- **The shadow map's invalidation.** Every instance update dirtied its pages in every map
+  level, so each arrival redrew the coarse levels' pages over its cell, whose casters are
+  everything around it: the turn's shadow raster took 9.8 ms at p99 (18 ms at worst). A
+  proxy's levels coming and going now dirty only the levels whose cut's threshold is
+  below the makers' error of the coarser of the two finest levels held (render.md
+  "Caching"): 4.0 ms at p99 (5.5 at worst).
+
+**Measured** (native 4K, 16 times the lists, within 400 MB, a 600 MB pool; RTX 3060 Ti):
+
+| View | Landscape (ms, mean / p99) | 4 x 3 world (ms) | Stream update, world (ms, mean / max) |
+|---|---|---|---|
+| forest | 59.70 / 60.03 | 59.90 / 60.33 | 0.177 / 0.388 |
+| walk, 1.4 m/s | 60.04 / 60.62 | 60.06 / 61.05 | 0.176 / 0.285 |
+| sprint, 6 m/s | 61.14 / 62.57 | 60.95 / 62.63 | 0.177 / 0.280 |
+| turn, 90 degrees/s | 62.98 / 67.47 | 63.73 / 67.71 | 0.193 / 0.541 |
+
+- **Memory.** 6.04 GB device-local in use (577 allocations), under 6.5 GB, where the
+  landscape alone uses 5.79 GB: the 11 more tiles' instance records and lists. Unbudgeted,
+  the world wants 20,510 levels and 5.3 GB past the coarsest, more than the GPU holds (10.9
+  GB in use, its frames slower): the budget is what keeps it within 6.5 GB.
+- **Streaming without hitches.** No frame waits on a level, and while the views move only
+  the levels they need arrive (the turn about 80, the walk and the sprint a few). Every
+  view's p99 is the landscape's alone within 0.43 ms; the turn's, 67.7 ms, is the shadow
+  map's pages drawn as the view turns, as there (67.5 ms).
+- **The main thread.** The stream's update takes 0.17 to 0.19 ms a frame at 4,608 cells
+  (37 ns a cell, computing rather than reading: putting the fields every update reads first
+  in a cell's record took off 6 %), and 0.4 ms on average, 0.74 at most, while levels
+  install in their dozens. **Measured and dropped:** a cap of 16 levels begun and finished
+  an update. Installing frames cost the same (0.45 ms on average, 1.2 ms at most), because
+  the pass and the jobs' and loads' submissions run slower beside the workers making
+  levels, one on each logical core; and settling took twice as long.
+
+**What still grows with the world**, the work of a later stage or phase:
+
+- The shadow map's instance cull, an invocation per instance slot and map level with pages
+  to draw: 5.7 µs still, 48 walking, 123 sprinting, 426 turning (the landscape: 5.7, 10.6,
+  17.3, 41.4); 0.8 ms at p99 turning, twice the shadow map's whole line of §10.4.
+- The camera's instance cull reads every record: 0.14 ms for 591,189 slots (47 MB), most of
+  §10.4's 0.25 ms for culling and the depth pyramid. Cells culled first, and only the
+  instances of the cells in view and drawn as their instances after them, would take both
+  culls to the cost of what is near (a decision of its own).
+- The top level's build, when the camera passes 16 m from its anchor: 2.85 ms over the
+  world's 574,356 instances traced, as the radiance cache's rays reach the whole world.
+  What rays need of the far field is Phase 14's (ray-traced effects); until then a 3.2 ms
+  build every 16 m of travel, every 2.7 s sprinting.
+- The stream's pass, 37 ns a cell, and the renderer's requests read back, a byte a cell
+  slot.
 
 ## References
 
