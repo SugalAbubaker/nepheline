@@ -321,6 +321,45 @@ shadow raster ran 0.02 to 0.05 ms slower in every round; the errors now follow t
 spheres in one buffer, found from the record's count of clusters, and the record stays
 192 bytes.
 
+### Stage 2, measured (2026-10-29)
+
+The levels apart (`nph_render_cluster_lods_level`, render/cluster_lod.h), the mesh
+asset's version 6 (a head naming its levels' assets, each level's makers as records),
+the cooker writing them, and cells of several meshes. The landscape recooked so (56
+minutes, as before; the same 107,072,903 voxels): 384 heads and 2,639 levels (seven in
+337 cells, six in 45, five in 2); the pack 2.433 GiB where it was 2.416 (the makers'
+records, 20 bytes a cluster, and an asset's header a level). One `render_perf` drew it
+whole (the compact cook) and apart, its six views at native 4K on the RTX 3060 Ti, 16
+times the lists, in the order whole, apart, apart, whole:
+
+- **The image.** In the normal debug view 53 to 77 bytes of a view's 24.9 MB differ
+  between whole and apart, as 44 to 82 do between two runs of the whole: the visibility
+  buffer's ties at equal depths, which the lists' order decides, not the levels apart.
+  The same clusters are drawn (5,293,259 in the forest view) and the same triangles.
+- **The instance cull's first phase:** 0.03 to 0.46 ms faster (0.49 to 0.15 ms in the
+  forest's views, 0.62 to 0.16 in the valley's). A proxy between its distance and about
+  twice it hands its level 0 whole to the meshlet cull (ADR-0062 "Stage 2"), in a loop
+  its subgroup takes 32 entries at a time; the cells' proxy instances lie together in
+  slot order, so a subgroup could hold 32 such proxies and run thousands of rounds.
+  Apart, a cell's levels lie together: four or five level 0s a subgroup.
+- **The meshlet cull:** 0.005 to 0.017 ms slower. A coarse level whose consumers are all
+  too coarse hands its clusters whole to the cull, where the whole proxy's walk pruned
+  them (in the forest view 140,000 more clusters a frame that a finer level stands in
+  for).
+- **Every other pass** within its runs' spread (the voxel and software rasters within
+  0.07 ms of 18 to 27; the radiance cache's update shows stage 1's first-view transient
+  in one run of each).
+- **The frame:** −0.42 to +0.24 ms, within its spread (2.3 ms between the whole's two
+  runs of the forest view, 2.2 of it the transient).
+- **Memory.** The GPU's device-local memory in use is the same, 6.73 GB: the same bytes,
+  in 32,241 allocations where 5,181 (each level mesh's dozen streams their own buffers,
+  which stage 3's pool gathers). The host's working set peaks at 5.1 to 5.2 GB where it
+  peaked at 6.5 to 6.6, its private bytes at 9.3 to 9.9 GB where at 11.5: the cooked-scene
+  bridge releases a level's asset once the GPU holds it (1.4 GB of levels). The load
+  takes the same 262 s.
+
+The cut's clamp (an instance's flag, `NPH_VIS_INSTANCE_FINEST`) begins stage 3.
+
 ## References
 
 - B. Karis, R. Stubbe, G. Wihlidal. "Nanite: A Deep Dive." SIGGRAPH 2021, Advances in
