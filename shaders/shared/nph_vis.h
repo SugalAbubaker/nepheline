@@ -229,18 +229,17 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // directly, without the walk (vis_cull_instances.comp).
     f32 lod_level0_error;
     u32 lod_pad0;
-    // Its voxel clusters' bricks (NphRenderVoxelBrick[], two uvec4 each) and
-    // voxels (NphRenderVoxel[], a uvec4 each; render/voxel.h), 0 without: a
-    // voxel cluster's record names its first brick and their count.
+    // Its voxels, compact (render/voxel.h "The compact form"), 0 without: its
+    // bricks (NphRenderPackedBrick[], a uvec4 each), its voxels' words (u32[],
+    // three a voxel or four), and its voxel clusters' records
+    // (NphRenderVoxelCluster[], a uvec2 each), which a voxel cluster's meshlet
+    // names in its triangle_offset, its first brick in its vertex_offset. The
+    // record's stride stays 192 bytes, a multiple of 16, the alignment every
+    // buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF), which the
+    // resolve's VisMeshRef(...)[i] assumes of each record.
     u64 voxel_bricks;
     u64 voxels;
-    // To 192 bytes: a record's stride stays a multiple of 16, the alignment
-    // every buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF),
-    // which the resolve's VisMeshRef(...)[i] assumes of each record. Not an
-    // array: shaders copy the record, and glslang 14 gives a copy of a struct
-    // with an array member the buffer's array type (docs/build.md "Shaders").
-    u32 lod_pad1;
-    u32 lod_pad2;
+    u64 voxel_clusters;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.
@@ -523,7 +522,7 @@ NPH_SHARED_STRUCT(NphVisVoxelCase)
 {
     NphVec4 origin; // xyz, mesh space; w: t_min
     NphVec4 dir;    // xyz; w: t_max
-    u32 brick;      // index into the bricks
+    u32 brick;      // index into the bricks, and of its voxel cluster (one brick a cluster)
     u32 pad0;
     u32 pad1;
     u32 pad2;
@@ -532,17 +531,18 @@ NPH_SHARED_STRUCT(NphVisVoxelCase)
 NPH_SHARED_STRUCT(NphVisVoxelResult)
 {
     f32 t;
-    u32 voxel;
+    u32 voxel; // its rank in its cluster
     u32 cell;
     u32 face; // the face | 256 when the ray met a voxel
 };
 
 NPH_SHARED_STRUCT(NphVisVoxelPush)
 {
-    u64 cases;   // NphVisVoxelCase[]
-    u64 results; // NphVisVoxelResult[]
-    u64 bricks;  // NphRenderVoxelBrick[]
-    u64 voxels;  // NphRenderVoxel[]
+    u64 cases;    // NphVisVoxelCase[]
+    u64 results;  // NphVisVoxelResult[]
+    u64 clusters; // NphRenderVoxelCluster[] (render/voxel.h "The compact form")
+    u64 bricks;   // NphRenderPackedBrick[]
+    u64 voxels;   // u32[]: the voxels' words
     u32 count;
     u32 pad0;
 };

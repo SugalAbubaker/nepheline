@@ -627,6 +627,16 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         r = keep_proxy_source(mesh, meshlets, mbounds, with_lods ? &lods : NULL, positions, attr,
                               vn, h.sphere, min_error, proxy);
     }
+    // The voxels compact, as the renderer draws them (render/voxel.h "The
+    // compact form"; ADR-0063): each voxel cluster's triangle_offset then
+    // names its record. After the proxy's source took the builders' form.
+    NphRenderPackedVoxels packed;
+    nph_render_packed_voxels_init(&packed, alloc);
+    if (r == NPH_RESULT_OK && with_lods && lods.bricks.len != 0U) {
+        NphRenderMeshlets *c = &lods.clusters;
+        r = nph_render_voxels_pack(c->meshlets.data, c->meshlets.len, lods.bricks.data,
+                                   lods.bricks.len, lods.voxels.data, lods.voxels.len, &packed);
+    }
     const u64 blobs_start = nph_time_now_ns();
     // The records written: level 0's, or every level's (the same bytes as
     // the renderer's records, render/cluster_lod.h).
@@ -712,8 +722,9 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         lh.group_count = lods.groups.len;
         lh.group_cluster_count = lods.group_clusters.len;
         lh.node_count = lods.nodes.len;
-        lh.brick_count = lods.bricks.len;
-        lh.voxel_count = lods.voxels.len;
+        lh.brick_count = packed.bricks.len;
+        lh.voxel_word_count = packed.words.len;
+        lh.voxel_cluster_count = packed.clusters.len;
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh,
                                       NPH_ASSET_CODEC_NONE, 0U);
         if (r == NPH_RESULT_OK) {
@@ -733,18 +744,24 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
             r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, lods.nodes.data,
                                           NPH_ARRAY_BYTES(&lods.nodes), NPH_ASSET_CODEC_LZ, 0U);
         }
-        if (r == NPH_RESULT_OK && lods.bricks.len != 0U) {
-            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, lods.bricks.data,
-                                          NPH_ARRAY_BYTES(&lods.bricks), NPH_ASSET_CODEC_LZ, 0U);
+        if (r == NPH_RESULT_OK && packed.clusters.len != 0U) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_CLUSTERS, 0U,
+                                          packed.clusters.data, NPH_ARRAY_BYTES(&packed.clusters),
+                                          NPH_ASSET_CODEC_LZ, 0U);
         }
-        if (r == NPH_RESULT_OK && lods.voxels.len != 0U) {
-            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXELS, 0U, lods.voxels.data,
-                                          NPH_ARRAY_BYTES(&lods.voxels), NPH_ASSET_CODEC_LZ, 0U);
+        if (r == NPH_RESULT_OK && packed.bricks.len != 0U) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, packed.bricks.data,
+                                          NPH_ARRAY_BYTES(&packed.bricks), NPH_ASSET_CODEC_LZ, 0U);
+        }
+        if (r == NPH_RESULT_OK && packed.words.len != 0U) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXELS, 0U, packed.words.data,
+                                          NPH_ARRAY_BYTES(&packed.words), NPH_ASSET_CODEC_LZ, 0U);
         }
     }
     if (stats != NULL) {
         stats->blobs_ns = nph_time_now_ns() - blobs_start;
     }
+    nph_render_packed_voxels_free(&packed);
     nph_render_cluster_lods_free(&lods);
     if (positions != NULL) {
         NPH_FREE_ARRAY(alloc, NphVec3, positions, nph_max_u32(vn, 1U));

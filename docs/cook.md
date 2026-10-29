@@ -360,8 +360,8 @@ proxy that stands for its instances from afar: a mesh of voxels alone
   the proxies are built; the cells are built in rounds of 32 at once on
   the job system, each logged with its instances, levels, voxels, what
   its sweep saw, and its time. A proxy is a mesh asset of voxels alone
-  (`cell/<x>_<z>`, version 4) written by `cook_proxy_write`; an empty one
-  writes nothing.
+  (`cell/<x>_<z>`, version 5, its voxels compact) written by
+  `cook_proxy_write`; an empty one writes nothing.
 - **Incremental cooks.** The scene's settings hash folds in the cells'
   settings and the meshes'; the proxies are current while the scene is
   and each one's database entry and file are (a cook rebuilds them all

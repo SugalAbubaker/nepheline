@@ -170,8 +170,10 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_group_clusters;
     NphGpuBuffer lod_makers;
     u32 lod_depth;
-    // Its voxel clusters' bricks and voxels (NphVisMesh.voxel_bricks, voxels;
-    // null buffers without), and whether RenderVis.voxel_meshes counts it.
+    // Its voxels, compact: the voxel clusters' records, bricks and voxel words
+    // (NphVisMesh.voxel_clusters, voxel_bricks, voxels; null buffers without),
+    // and whether RenderVis.voxel_meshes counts it.
+    NphGpuBuffer voxel_clusters;
     NphGpuBuffer voxel_bricks;
     NphGpuBuffer voxels;
     b32 voxels_counted;

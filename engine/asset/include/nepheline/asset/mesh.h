@@ -48,6 +48,19 @@
 // ATTR, INDX, MLVX and MLTR empty or absent), every meshlet a voxel cluster,
 // level 0's too, and one submesh of no indices whose meshlets are level 0's.
 //
+// From version 5, the voxels are compact (render/voxel.h "The compact form";
+// ADR-0063), the renderer's records byte for byte:
+//
+//     VOXC  NphMeshVoxelCluster[voxel cluster] its voxels' first word, cell, shared look
+//     VOXB  NphMeshVoxelBrick[brick]  its corner in whole bricks, first voxel's rank, mask
+//     VOXA  u32[word]                 the voxels, three words each (four when wide)
+//
+// A voxel cluster's triangle_offset names its record, its vertex_offset its
+// first brick; its bricks' first voxels' ranks follow one another from 0, at
+// most NPH_MESH_VOXEL_CLUSTER_VOXELS voxels, their words from its record's
+// first. Versions 3 and 4, whose voxels are in the builders' form, no longer
+// read when they hold voxels (NPH_RESULT_VERSION_MISMATCH: cook them again).
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -73,9 +86,9 @@ extern "C" {
 #endif
 
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
-// in the levels (VOXB, VOXA). 4: meshes of voxels alone. Versions 1 to 3,
-// which have none of what came after them, still read.
-#define NPH_MESH_TYPE_VERSION 4U
+// in the levels (VOXB, VOXA). 4: meshes of voxels alone. 5: the voxels
+// compact (VOXC). Earlier versions without voxels still read.
+#define NPH_MESH_TYPE_VERSION 5U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -91,6 +104,7 @@ extern "C" {
 #define NPH_MESH_TAG_LOD_GROUPS       NPH_FOURCC('L', 'O', 'D', 'G')
 #define NPH_MESH_TAG_LOD_MEMBERS      NPH_FOURCC('L', 'O', 'D', 'M')
 #define NPH_MESH_TAG_LOD_NODES        NPH_FOURCC('L', 'O', 'D', 'N')
+#define NPH_MESH_TAG_VOXEL_CLUSTERS   NPH_FOURCC('V', 'O', 'X', 'C')
 #define NPH_MESH_TAG_VOXEL_BRICKS     NPH_FOURCC('V', 'O', 'X', 'B')
 #define NPH_MESH_TAG_VOXELS           NPH_FOURCC('V', 'O', 'X', 'A')
 
@@ -183,8 +197,8 @@ typedef struct NphMeshLodHeader {
     u32 group_cluster_count; // LODM
     u32 node_count;          // LODN
     u32 brick_count;         // VOXB (version 3; zero before)
-    u32 voxel_count;         // VOXA (version 3; zero before)
-    u32 reserved;            // zero
+    u32 voxel_word_count;    // VOXA, in words (version 5; voxels in versions 3 and 4)
+    u32 voxel_cluster_count; // VOXC (version 5; zero before)
 } NphMeshLodHeader;
 
 typedef struct NphMeshClusterLod {
@@ -210,31 +224,37 @@ typedef struct NphMeshLodNode {
     u32 child[NPH_MESH_LOD_CHILDREN];       // node, group | LEAF, or NONE
 } NphMeshLodNode;
 
-// Voxels (render/voxel.h's records, byte for byte): a brick of 4 x 4 x 4
-// cells of edge `cell` from `origin`, the occupied ones set in the mask (bit
-// x + 4y + 16z) with their voxels in bit order from `first_voxel`; a voxel's
-// four words (colour, normal, material, footprint: render/voxel.h
-// NphRenderVoxel).
+// Voxels, compact (render/voxel.h's records, byte for byte): a voxel
+// cluster's record (its voxels' first word in VOXA, its cells' edge 2^cell_log2,
+// the occlusion and metallic its voxels share unless it is wide), and a brick
+// of 4 x 4 x 4 cells of its cluster's edge, its lowest corner `corner` * 4 *
+// cell, the occupied ones set in the mask (bit x + 4y + 16z), their voxels in
+// bit order from rank `first` of its cluster's. A voxel is three words (its
+// footprint's box and shape, its lobe, its look), four in a wide cluster (and
+// its occlusion and metallic): render/voxel.h "The compact form".
 #define NPH_MESH_VOXEL_CLUSTER_BRICKS 32U
+#define NPH_MESH_VOXEL_CLUSTER_VOXELS 1024U
+#define NPH_MESH_VOXEL_CLUSTER_WIDE   1U // NphMeshVoxelCluster.flags
+#define NPH_MESH_VOXEL_WORDS          3U // a narrow cluster's voxel, in words
+#define NPH_MESH_VOXEL_WIDE_WORDS     4U
+
+typedef struct NphMeshVoxelCluster {
+    u32 first_word;
+    i8 cell_log2; // -126 to 127
+    u8 occlusion; // zero in a wide cluster
+    u8 metallic;  // zero in a wide cluster
+    u8 flags;     // NPH_MESH_VOXEL_CLUSTER_WIDE or zero
+} NphMeshVoxelCluster;
 
 typedef struct NphMeshVoxelBrick {
-    NphVec3 origin; // mesh space: the brick's lowest corner
-    f32 cell;       // a cell's edge (a power of two)
+    i16 corner[3]; // in bricks of its cluster's cell
+    u16 first;     // its first voxel's rank in its cluster
     u32 mask[2];
-    u32 first_voxel;
-    u32 reserved; // zero
 } NphMeshVoxelBrick;
 
-typedef struct NphMeshVoxel {
-    u32 color;
-    u32 normal;
-    u32 material;
-    u32 box;
-} NphMeshVoxel;
-
 NPH_STATIC_ASSERT(sizeof(NphMeshLodHeader) == 32U, "the levels' header is 32 bytes");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == 32U, "a brick is 32 bytes");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxel) == 16U, "a voxel is 16 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelCluster) == 8U, "a voxel cluster's record is 8 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == 16U, "a brick is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == 16U, "a cluster's level record is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == 32U, "a group is 32 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == 224U, "a node is 224 bytes");
@@ -255,21 +275,24 @@ typedef struct NphMeshView {
     const NphMeshLodGroup *lod_groups;
     const u32 *lod_members;
     const NphMeshLodNode *lod_nodes;
-    // The voxel clusters' bricks and voxels, NULL without them.
+    // The voxel clusters' records, bricks and voxel words, NULL without them.
+    const NphMeshVoxelCluster *voxel_clusters;
     const NphMeshVoxelBrick *voxel_bricks;
-    const NphMeshVoxel *voxels;
+    const u32 *voxel_words;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
 // NPH_RESULT_TYPE_MISMATCH for another asset type, NPH_RESULT_VERSION_MISMATCH
-// for a newer schema, NPH_RESULT_CORRUPT when a blob is missing, too
-// small, or a range points outside its array: the levels' too (every
-// group, cluster, and child index in range; level 0 covering the
-// submeshes' meshlet ranges), and the voxels' (a voxel cluster's bricks,
-// all of one finite power-of-two cell, and each brick's voxels, following
-// the brick before's; a non-empty mask; every footprint a box of at least
-// one step on each axis and a known shape; every reserved bit zero). That
-// the hierarchy is a tree and its bounds hold is the renderer's to check
+// for a newer schema or a version 3 or 4 mesh with voxels, NPH_RESULT_CORRUPT
+// when a blob is missing, too small, or a range points outside its array: the
+// levels' too (every group, cluster, and child index in range; level 0
+// covering the submeshes' meshlet ranges), and the voxels' (a voxel cluster's
+// record, its cell in range and no flag but WIDE; its bricks, their masks not
+// empty, their first voxels' ranks following one another from 0, at most
+// NPH_MESH_VOXEL_CLUSTER_VOXELS voxels, their words in range; every
+// footprint a box of at least one step on each axis and a known shape, a
+// capsule's radius a known code; every reserved bit zero). That the hierarchy
+// is a tree and its bounds hold is the renderer's to check
 // (nph_render_mesh_create).
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 

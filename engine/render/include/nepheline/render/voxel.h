@@ -59,8 +59,11 @@
 //
 // Thread-safety: the functions are pure (NPH_THREADSAFE).
 
+#include <nepheline/core/array.h>
+#include <nepheline/core/result.h>
 #include <nepheline/core/types.h>
 #include <nepheline/math/vec.h>
+#include <nepheline/render/meshlet.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -209,6 +212,108 @@ f32 nph_render_voxel_alpha2(f32 alpha2, f32 kappa);
 // polynomials P1 and P2 over a vMF lobe).
 f32 nph_render_voxel_sh_band1(f32 kappa);
 f32 nph_render_voxel_sh_band2(f32 kappa);
+
+// ---------------------------------------------------------------------------
+// The compact form: how a mesh's voxels are stored and drawn (ADR-0063)
+// ---------------------------------------------------------------------------
+//
+// The builders make voxels and bricks in the form above, the levels' form. A
+// mesh's voxels are stored and drawn compact (nph_render_voxels_pack), 12
+// bytes a voxel and 16 a brick:
+//
+//   - A voxel cluster's record (NphRenderVoxelCluster, 8 bytes), which its
+//     meshlet names in its triangle_offset: its voxels' first word, its
+//     cells' edge (a power of two), and the occlusion and metallic its voxels
+//     share. A wide cluster's voxels, whose occlusion or metallic differ,
+//     hold their own.
+//   - A brick (NphRenderPackedBrick, 16 bytes): its lowest corner in whole
+//     bricks of its cluster's cell (bricks lie on their cell's grid, so the
+//     corner is exact), its first voxel's rank within its cluster, its mask.
+//   - A voxel: three 32-bit words, four in a wide cluster:
+//       box:   the footprint's box and shape, as NphRenderVoxel's;
+//       lobe:  the axis, octahedral snorm12 x 2 (bits 0..23), or a capsule's,
+//              octahedral snorm8 x 2 (bits 0..15) with the capsule's byte
+//              (NphRenderVoxel.material's top byte) in bits 16..23; then the
+//              concentration's byte (bits 24..31);
+//       look:  the albedo's sRGB8 red, green and blue (bits 0..23), then the
+//              roughness's byte (24..31);
+//       extra: in a wide cluster, occlusion and metallic (unorm8 each, bits
+//              0..15).
+//
+// It is lossless but for the axis: within 0.06 degrees at 12 bits a
+// component, 0.95 at a capsule's 8, whose lobes are broad (ADR-0063 "The
+// encoding and the minimum"). Unpacked (nph_render_voxel_from_packed), a
+// voxel is in the levels' form again, its axis widened back to snorm16 as
+// the shaders widen it (vis_voxel.glsl vis_voxel_load), bit for bit.
+
+#define NPH_RENDER_VOXEL_WORDS      3U // a voxel of a narrow cluster, in 32-bit words
+#define NPH_RENDER_VOXEL_WIDE_WORDS 4U // of a wide one
+// NphRenderVoxelCluster.flags: its voxels hold their own occlusion and
+// metallic (NPH_RENDER_VOXEL_WIDE_WORDS each).
+#define NPH_RENDER_VOXEL_CLUSTER_WIDE 1U
+// The cells' edges a compact record holds: 2^-126 to 2^127 (normal floats).
+#define NPH_RENDER_VOXEL_CELL_LOG2_MIN (-126)
+#define NPH_RENDER_VOXEL_CELL_LOG2_MAX 127
+
+typedef struct NphRenderVoxelCluster {
+    u32 first_word; // its voxels' first word in the mesh's voxel words
+    i8 cell_log2;   // its cells' edge: 2^cell_log2 mesh units
+    u8 occlusion;   // a narrow cluster's voxels' ambient occlusion (unorm8)
+    u8 metallic;    // and metallic (unorm8); both 0 in a wide cluster
+    u8 flags;       // NPH_RENDER_VOXEL_CLUSTER_*
+} NphRenderVoxelCluster;
+
+typedef struct NphRenderPackedBrick {
+    i16 corner[3]; // its lowest corner in bricks of its cluster's cell: corner * 4 * cell
+    u16 first;     // its first voxel's rank among its cluster's voxels
+    u32 mask[2];   // occupancy, bit x + 4y + 16z, as NphRenderVoxelBrick's
+} NphRenderPackedBrick;
+
+NPH_STATIC_ASSERT(sizeof(NphRenderVoxelCluster) == 8U, "a voxel cluster's record is 8 bytes");
+NPH_STATIC_ASSERT(sizeof(NphRenderPackedBrick) == 16U, "a packed brick is 16 bytes");
+
+typedef NPH_ARRAY(NphRenderVoxelCluster) NphRenderVoxelClusterArray;
+typedef NPH_ARRAY(NphRenderPackedBrick) NphRenderPackedBrickArray;
+
+// A mesh's voxels, compact.
+typedef struct NphRenderPackedVoxels {
+    NphRenderVoxelClusterArray clusters; // one a voxel cluster, in its meshlets' order
+    NphRenderPackedBrickArray bricks;    // one a brick of the levels' form, at its index
+    NphArrayU32 words;                   // the voxels
+} NphRenderPackedVoxels;
+
+void nph_render_packed_voxels_init(NphRenderPackedVoxels *p, NphAllocator *a);
+void nph_render_packed_voxels_free(NphRenderPackedVoxels *p);
+
+// The words a voxel of `c` takes, and its cells' edge.
+u32 nph_render_voxel_cluster_stride(NphRenderVoxelCluster c);
+f32 nph_render_voxel_cluster_cell(NphRenderVoxelCluster c);
+
+// Packs the voxel clusters among `meshlets` (the records with no vertices and
+// some bricks: render/cluster_lod.h's voxel clusters) from their bricks and
+// voxels in the levels' form into `out` (initialised, emptied first), and
+// sets each one's triangle_offset to its record's index; its vertex_offset
+// still names its first brick, each packed brick at its brick's index.
+// NPH_RESULT_INVALID_ARGUMENT, with `out` emptied, for a voxel cluster the
+// renderer would refuse (a range out of bounds, more than
+// NPH_RENDER_VOXEL_CLUSTER_BRICKS bricks or NPH_RENDER_VOXEL_CLUSTER_VOXELS
+// voxels, an empty mask, bricks of differing cells, voxels that do not
+// follow one another) or that the compact form cannot hold (a cell that is
+// not a power of two in range, a corner off its grid or past 16 bits);
+// NPH_RESULT_OUT_OF_MEMORY. Allocates through `out`'s allocator.
+// NPH_THREADSAFE for distinct `out`.
+NPH_MUST_USE NphResult nph_render_voxels_pack(NphRenderMeshlet *meshlets, u32 meshlet_count,
+                                              const NphRenderVoxelBrick *bricks, u32 brick_count,
+                                              const NphRenderVoxel *voxels, u32 voxel_count,
+                                              NphRenderPackedVoxels *out);
+
+// A packed brick of cluster `c` in the levels' form, its first voxel's index
+// `first_voxel` (the caller's numbering of the voxels it unpacks).
+NphRenderVoxelBrick nph_render_brick_from_packed(NphRenderPackedBrick b, NphRenderVoxelCluster c,
+                                                 u32 first_voxel);
+// The voxel of rank `rank` among cluster `c`'s, from the mesh's voxel words,
+// in the levels' form (its axis widened to snorm16 as the shaders do).
+NphRenderVoxel nph_render_voxel_from_packed(const u32 *words, NphRenderVoxelCluster c, u32 rank);
 
 // ---------------------------------------------------------------------------
 // The material sampler the level builder voxelizes with

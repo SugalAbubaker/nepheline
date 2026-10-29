@@ -171,18 +171,20 @@ def mesh_lod_blobs():
 
 
 def mesh_voxel_blobs():
-    """The triangle with a coarser level of voxels (mesh.h version 3): its
-    meshlet at level 0, made by group 0 into a voxel cluster of one brick
-    holding a box and a capsule, under root group 1."""
+    """The triangle with a coarser level of voxels (mesh.h version 5, the
+    voxels compact): its meshlet at level 0, made by group 0 into a voxel
+    cluster of one brick holding a box and a capsule, under root group 1."""
     none = 0xFFFFFFFF
     flt_max = 3.4028234663852886e38
     base = dict((b[0], b) for b in mesh_blobs())
     header = bytearray(base["HEAD"][4])
     struct.pack_into("<I", header, 12, 2)  # meshlet_count
     header = bytes(header)
+    # The voxel cluster: brick 0, record 0 (its triangle_offset).
     meshlets = struct.pack("<IIHHI", 0, 0, 3, 1, 0) + struct.pack("<IIHHI", 0, 0, 0, 1, 0)
     bound = base["MLBD"][4]
-    lods = struct.pack("<8I", 2, 1, 2, 2, 1, 1, 2, 0)
+    # One brick, two voxels of three words, one voxel cluster's record.
+    lods = struct.pack("<8I", 2, 1, 2, 2, 1, 1, 6, 1)
     clusters = struct.pack("<4I", none, 0, 0, 0) + struct.pack("<4I", 0, 1, 1, 0)
     groups = struct.pack("<5f3I", 0.5, 0.5, 0.0, 0.71, 0.25, 0, 0, 1) + \
         struct.pack("<5f3I", 0.5, 0.5, 0.0, 0.71, flt_max, 1, 1, 1)
@@ -193,10 +195,12 @@ def mesh_voxel_blobs():
     children = struct.pack("<8I", 0x80000000, 0x80000001, *([none] * 6))
     node = spheres + errors + maker_errors + children
     assert len(node) == 224
-    brick = struct.pack("<4f4I", 0.0, 0.0, -0.125, 0.25, 1, 1 << 31, 0, 0)
+    record, brick, voxels = voxel_cluster_blobs(1 << 31)
     whole = (31 << 15) | (31 << 20) | (31 << 25)
-    voxels = struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x00104080, whole) + \
-        struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x80104080, whole | (2 << 30))
+    # A capsule (shape 2): its axis at 8 bits a component, its byte (radius
+    # code 32) in the lobe's bits 16..23.
+    voxels += struct.pack("<3I", whole | (2 << 30), (0x10 << 24) | (0x80 << 16) | 0x7F7F,
+                          (0x80 << 24) | 0x336699)
     blobs = []
     for b in mesh_blobs():
         if b[0] == "HEAD":
@@ -213,9 +217,24 @@ def mesh_voxel_blobs():
         ("LODG", 0, 0, 16, groups, groups),
         ("LODM", 0, 0, 16, members, members),
         ("LODN", 0, 0, 16, node, node),
+        ("VOXC", 0, 0, 16, record, record),
         ("VOXB", 0, 0, 16, brick, brick),
         ("VOXA", 0, 1, 16, voxels, lz_literals(voxels)),
     ]
+
+
+def voxel_cluster_blobs(mask_high):
+    """A voxel cluster compact (render/voxel.h "The compact form"): its
+    record (its voxels from word 0, cells of 0.25 = 2^-2, occlusion 255 and
+    metallic 64 shared), one brick at the grid's origin (cell 0, and the bits
+    of `mask_high`), and the voxel of cell 0: a box over the whole cell, its
+    axis at 12 bits a component, concentration byte 16, albedo 0x336699 and
+    roughness 128."""
+    record = struct.pack("<IbBBB", 0, -2, 255, 64, 0)
+    brick = struct.pack("<3hH2I", 0, 0, 0, 0, 1, mask_high)
+    whole = (31 << 15) | (31 << 20) | (31 << 25)
+    voxel = struct.pack("<3I", whole, (0x10 << 24) | (2047 << 12) | 2047, (0x80 << 24) | 0x336699)
+    return record, brick, voxel
 
 
 def texture_blobs():
@@ -255,9 +274,9 @@ def sound_blobs(lossless):
 
 
 def mesh_proxy_blobs():
-    """A mesh of voxels alone (mesh.h version 4, a cell proxy's): no
-    vertices or indices, one submesh of no indices over level 0's one voxel
-    cluster (one brick holding a box), under a root group."""
+    """A mesh of voxels alone (mesh.h version 5, a cell proxy's, its voxels
+    compact): no vertices or indices, one submesh of no indices over level
+    0's one voxel cluster (one brick holding a box), under a root group."""
     none = 0xFFFFFFFF
     flt_max = 3.4028234663852886e38
     header = struct.pack("<8I", 0, 0, 1, 1, 0, 0, 0, 0)
@@ -271,7 +290,8 @@ def mesh_proxy_blobs():
     meshlet = struct.pack("<IIHHI", 0, 0, 0, 1, 0)
     bound = struct.pack("<4f", 0.5, 0.5, 0.5, 0.87) + struct.pack("<4b", 0, 0, 0, 127) + \
         struct.pack("<3f", 0.5, 0.5, 0.5)
-    lods = struct.pack("<8I", 1, 1, 1, 1, 1, 1, 1, 0)
+    # One brick, one voxel of three words, one voxel cluster's record.
+    lods = struct.pack("<8I", 1, 1, 1, 1, 1, 1, 3, 1)
     clusters = struct.pack("<4I", none, 0, 0, 0)
     groups = struct.pack("<5f3I", 0.5, 0.5, 0.5, 0.87, flt_max, 0, 0, 1)
     members = struct.pack("<I", 0)
@@ -281,9 +301,7 @@ def mesh_proxy_blobs():
     children = struct.pack("<8I", 0x80000000, *([none] * 7))
     node = spheres + errors + maker_errors + children
     assert len(node) == 224
-    brick = struct.pack("<4f4I", 0.0, 0.0, 0.0, 0.25, 1, 0, 0, 0)
-    whole = (31 << 15) | (31 << 20) | (31 << 25)
-    voxel = struct.pack("<4I", 0xFF336699, 0x7FFF7FFF, 0x00104080, whole)
+    record, brick, voxel = voxel_cluster_blobs(0)
     return [
         ("HEAD", 0, 0, 16, header, header),
         ("SUBM", 0, 0, 16, submesh, submesh),
@@ -294,6 +312,7 @@ def mesh_proxy_blobs():
         ("LODG", 0, 0, 16, groups, groups),
         ("LODM", 0, 0, 16, members, members),
         ("LODN", 0, 0, 16, node, node),
+        ("VOXC", 0, 0, 16, record, record),
         ("VOXB", 0, 0, 16, brick, brick),
         ("VOXA", 0, 1, 16, voxel, lz_literals(voxel)),
     ]
@@ -435,8 +454,8 @@ def main():
                                         ("DATA", 1, 0, 64, b"stored", b"stored")]))
     write(os.path.join(CORPUS, "nph", "mesh"), nph_file(fourcc("MESH"), 1, mesh_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_lod"), nph_file(fourcc("MESH"), 2, mesh_lod_blobs()))
-    write(os.path.join(CORPUS, "nph", "mesh_voxels"), nph_file(fourcc("MESH"), 3, mesh_voxel_blobs()))
-    write(os.path.join(CORPUS, "nph", "mesh_proxy"), nph_file(fourcc("MESH"), 4, mesh_proxy_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_voxels"), nph_file(fourcc("MESH"), 5, mesh_voxel_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_proxy"), nph_file(fourcc("MESH"), 5, mesh_proxy_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))

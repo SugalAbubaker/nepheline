@@ -337,7 +337,9 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
         NTEST_EXPECT_EQ_UINT(mv.header->index_count, 0U);
         NTEST_ASSERT_NOT_NULL(mv.lod);
         NTEST_EXPECT_GE_UINT(mv.lod->levels, 2U);
-        NTEST_EXPECT_GT_UINT(mv.lod->voxel_count, 100U);
+        // Over a hundred voxels, compact (render/voxel.h).
+        NTEST_EXPECT_GT_UINT(mv.lod->voxel_word_count, 100U * NPH_MESH_VOXEL_WORDS);
+        NTEST_EXPECT_GT_UINT(mv.lod->voxel_cluster_count, 0U);
         NTEST_EXPECT_EQ_UINT(mv.meshlets[0].vertex_count, 0U);
         // The proxy's space is the square's: its voxels within a tuft's reach
         // of its two tufts (here x and z from about 0.7 to 7.3).

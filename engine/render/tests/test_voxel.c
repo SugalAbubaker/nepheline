@@ -5,6 +5,7 @@
 // voxelizer's footprints and looks against the geometry they stand for, and
 // the voxel levels the cluster builder makes of foliage. CPU only.
 #include <nepheline/core/alloc_debug.h>
+#include <nepheline/math/pack.h>
 #include <nepheline/math/random.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/render/cluster_lod.h>
@@ -175,6 +176,258 @@ NTEST(Voxel, the_concentrations_bytes_and_moments_invert)
     NTEST_EXPECT_EQ_INT((int)(nph_render_voxel_kappa_from_moment(0.2F) * 1000.0F), 0);
     NTEST_EXPECT_NEAR_F32(nph_render_voxel_kappa_from_moment(1.0F), NPH_RENDER_VOXEL_KAPPA_MAX,
                           0.0F);
+}
+
+// ---------------------------------------------------------------------------
+// The compact form (render/voxel.h; ADR-0063)
+// ---------------------------------------------------------------------------
+
+#define PACK_CLUSTERS 96U
+
+// Random voxel clusters in the levels' form, as the builders make them: a
+// cluster's bricks of one power-of-two cell on its grid, its voxels following
+// one another, every footprint shape, every field random. Clusters with
+// `wide` set (every third) vary their voxels' occlusion and metallic; the
+// others share theirs (two fixed values, also random per cluster).
+typedef struct PackCase {
+    NphRenderMeshlet meshlets[PACK_CLUSTERS + 1U]; // and one of triangles, first
+    NphRenderVoxelBrick bricks[PACK_CLUSTERS * NPH_RENDER_VOXEL_CLUSTER_BRICKS];
+    NphRenderVoxel voxels[PACK_CLUSTERS * NPH_RENDER_VOXEL_CLUSTER_VOXELS];
+    u32 brick_count;
+    u32 voxel_count;
+} PackCase;
+
+static void pack_case_build(PackCase *pc, u64 seed)
+{
+    memset(pc, 0, sizeof *pc);
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, seed, 7U);
+    // A triangle cluster first, which the packing passes by.
+    pc->meshlets[0].vertex_count = 3U;
+    pc->meshlets[0].triangle_count = 1U;
+    pc->meshlets[0].triangle_offset = 5U;
+    for (u32 k = 0; k < PACK_CLUSTERS; ++k) {
+        NphRenderMeshlet *m = &pc->meshlets[1U + k];
+        const u32 bricks = 1U + nph_pcg32_next_u32(&rng) % 8U;
+        const f32 cell = ldexpf(1.0F, (int)(nph_pcg32_next_u32(&rng) % 20U) - 10);
+        const bool wide = k % 3U == 0U;
+        const u32 shared_ao = nph_pcg32_next_u32(&rng) & 0xFFU;
+        const u32 shared_metal = nph_pcg32_next_u32(&rng) & 0xFFU;
+        m->vertex_offset = pc->brick_count;
+        m->triangle_count = (u16)bricks;
+        m->submesh = 0U;
+        for (u32 b = 0; b < bricks; ++b) {
+            NphRenderVoxelBrick *br = &pc->bricks[pc->brick_count++];
+            i32 corner[3];
+            for (u32 a = 0; a < 3U; ++a) {
+                corner[a] = (i32)(nph_pcg32_next_u32(&rng) % 4001U) - 2000;
+            }
+            const f32 edge = 4.0F * cell;
+            br->origin =
+                nph_vec3((f32)corner[0] * edge, (f32)corner[1] * edge, (f32)corner[2] * edge);
+            br->cell = cell;
+            br->first_voxel = pc->voxel_count;
+            // At most 64 voxels a brick, and 1,024 a cluster of 8 bricks.
+            for (u32 bit = 0; bit < 64U; ++bit) {
+                if (nph_pcg32_next_u32(&rng) % 3U != 0U) {
+                    continue;
+                }
+                br->mask[bit >> 5U] |= 1U << (bit & 31U);
+                NphRenderVoxel *v = &pc->voxels[pc->voxel_count++];
+                for (u32 a = 0; a < 3U; ++a) {
+                    const u32 l = nph_pcg32_next_u32(&rng) % 32U;
+                    const u32 h = l + 1U + nph_pcg32_next_u32(&rng) % (32U - l);
+                    v->box |= (l << (5U * a)) | ((h - 1U) << (15U + 5U * a));
+                }
+                const u32 shape = nph_pcg32_next_u32(&rng) % 3U;
+                v->box |= shape << NPH_RENDER_VOXEL_SHAPE_SHIFT;
+                const NphVec3 axis = random_unit(&rng);
+                v->normal = nph_oct_encode_snorm16(axis);
+                const u32 look = nph_pcg32_next_u32(&rng);
+                const u32 ao = wide ? nph_pcg32_next_u32(&rng) & 0xFFU : shared_ao;
+                const u32 metal = wide ? nph_pcg32_next_u32(&rng) & 0xFFU : shared_metal;
+                v->color = (look & 0xFFFFFFU) | (ao << 24U);
+                const u32 kappa = nph_pcg32_next_u32(&rng) & 0xFFU;
+                u32 capsule = 0U;
+                if (shape == NPH_RENDER_VOXEL_SHAPE_CAPSULE) {
+                    const u32 diagonal = nph_pcg32_next_u32(&rng) % 4U;
+                    const u32 radius = nph_pcg32_next_u32(&rng) % NPH_RENDER_VOXEL_RADIUS_CODES;
+                    capsule = diagonal | (radius << 2U);
+                }
+                v->material = (look >> 24U) | (metal << 8U) | (kappa << 16U) | (capsule << 24U);
+            }
+            if (br->mask[0] == 0U && br->mask[1] == 0U) {
+                // Never empty: one voxel at cell 0.
+                br->mask[0] = 1U;
+                NphRenderVoxel *v = &pc->voxels[pc->voxel_count++];
+                memset(v, 0, sizeof *v);
+                v->box = 31U << 15U;
+                v->color = shared_ao << 24U;
+                v->material = shared_metal << 8U;
+            }
+        }
+    }
+}
+
+// The angle in degrees between the axes of two snorm16 octahedral normals.
+static f32 axis_degrees(u32 a, u32 b)
+{
+    const f32 d = nph_vec3_dot(nph_oct_decode_snorm16(a), nph_oct_decode_snorm16(b));
+    return nph_f32_acos(nph_f32_clamp(d, -1.0F, 1.0F)) * (180.0F / NPH_PI);
+}
+
+NTEST(Voxel, the_compact_form_keeps_every_field_but_the_axis_exactly)
+{
+    NphAllocator *a = nph_allocator_system();
+    PackCase *pc = NPH_ALLOC_TYPE(a, PackCase);
+    NTEST_ASSERT_NOT_NULL(pc);
+    pack_case_build(pc, 41U);
+    NphRenderPackedVoxels p;
+    nph_render_packed_voxels_init(&p, a);
+    NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(pc->meshlets, PACK_CLUSTERS + 1U, pc->bricks,
+                                               pc->brick_count, pc->voxels, pc->voxel_count, &p),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(p.clusters.len, PACK_CLUSTERS);
+    NTEST_EXPECT_EQ_UINT(p.bricks.len, pc->brick_count);
+    // The triangle cluster untouched.
+    NTEST_EXPECT_EQ_UINT(pc->meshlets[0].triangle_offset, 5U);
+    u32 words = 0U;
+    u32 wide = 0U;
+    f32 worst = 0.0F;
+    f32 worst_capsule = 0.0F;
+    u32 wrong = 0U;
+    for (u32 k = 0; k < PACK_CLUSTERS; ++k) {
+        const NphRenderMeshlet *m = &pc->meshlets[1U + k];
+        // Records in the clusters' order, each its meshlet's.
+        NTEST_ASSERT_EQ_UINT(m->triangle_offset, k);
+        const NphRenderVoxelCluster c = p.clusters.data[k];
+        NTEST_EXPECT_EQ_UINT(c.first_word, words);
+        const NphRenderVoxelBrick *first = &pc->bricks[m->vertex_offset];
+        NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(nph_render_voxel_cluster_cell(c)),
+                             nph_f32_to_bits(first->cell));
+        wide += (c.flags & NPH_RENDER_VOXEL_CLUSTER_WIDE) != 0U ? 1U : 0U;
+        for (u32 b = 0; b < m->triangle_count; ++b) {
+            const NphRenderVoxelBrick *br = &pc->bricks[m->vertex_offset + b];
+            const NphRenderPackedBrick pb = p.bricks.data[m->vertex_offset + b];
+            // The brick again, exactly, its first voxel its rank's.
+            NTEST_EXPECT_EQ_UINT(br->first_voxel, first->first_voxel + pb.first);
+            // Bit for bit: the origin is a whole number of bricks.
+            const NphRenderVoxelBrick back = nph_render_brick_from_packed(pb, c, br->first_voxel);
+            NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(back.origin.x), nph_f32_to_bits(br->origin.x));
+            NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(back.origin.y), nph_f32_to_bits(br->origin.y));
+            NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(back.origin.z), nph_f32_to_bits(br->origin.z));
+            NTEST_EXPECT_EQ_UINT(nph_f32_to_bits(back.cell), nph_f32_to_bits(br->cell));
+            NTEST_EXPECT_TRUE(back.mask[0] == br->mask[0] && back.mask[1] == br->mask[1]);
+            NTEST_EXPECT_EQ_UINT(back.first_voxel, br->first_voxel);
+            NTEST_EXPECT_EQ_UINT(back.reserved, 0U);
+            const u32 n = nph_popcount_u32(br->mask[0]) + nph_popcount_u32(br->mask[1]);
+            for (u32 j = 0; j < n; ++j) {
+                const NphRenderVoxel *v = &pc->voxels[br->first_voxel + j];
+                const NphRenderVoxel u =
+                    nph_render_voxel_from_packed(p.words.data, c, pb.first + j);
+                wrong +=
+                    u.box != v->box || u.color != v->color || u.material != v->material ? 1U : 0U;
+                const f32 deg = axis_degrees(u.normal, v->normal);
+                if ((v->box >> NPH_RENDER_VOXEL_SHAPE_SHIFT) == NPH_RENDER_VOXEL_SHAPE_CAPSULE) {
+                    worst_capsule = nph_f32_max(worst_capsule, deg);
+                } else {
+                    worst = nph_f32_max(worst, deg);
+                }
+            }
+            words += n * nph_render_voxel_cluster_stride(c);
+        }
+    }
+    NTEST_LOG("%u voxels, %u clusters (%u wide), %u words: the axis within %.4f degrees, a "
+              "capsule's within %.4f",
+              pc->voxel_count, PACK_CLUSTERS, wide, p.words.len, (f64)worst, (f64)worst_capsule);
+    NTEST_EXPECT_EQ_UINT(p.words.len, words);
+    NTEST_EXPECT_EQ_UINT(wide, PACK_CLUSTERS / 3U);
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    // 12 bits a component: within 0.06 degrees of 16's; 8 bits, 0.95
+    // (ADR-0063 "The encoding and the minimum"), with 16's own rounding.
+    NTEST_EXPECT_TRUE(worst < 0.07F);
+    NTEST_EXPECT_TRUE(worst_capsule < 1.05F);
+    nph_render_packed_voxels_free(&p);
+    NPH_FREE_TYPE(a, PackCase, pc);
+}
+
+NTEST(Voxel, the_compact_form_refuses_what_it_cannot_hold)
+{
+    NphAllocator *a = nph_allocator_system();
+    PackCase *pc = NPH_ALLOC_TYPE(a, PackCase);
+    NTEST_ASSERT_NOT_NULL(pc);
+    NphRenderPackedVoxels p;
+    nph_render_packed_voxels_init(&p, a);
+    // The second cluster's (index 2: the first is triangles) bricks.
+#define EXPECT_REFUSED()                                                                           \
+    do {                                                                                           \
+        NTEST_EXPECT_EQ_INT(nph_render_voxels_pack(pc->meshlets, PACK_CLUSTERS + 1U, pc->bricks,   \
+                                                   pc->brick_count, pc->voxels, pc->voxel_count,   \
+                                                   &p),                                            \
+                            NPH_RESULT_INVALID_ARGUMENT);                                          \
+        NTEST_EXPECT_TRUE(p.clusters.len == 0U && p.bricks.len == 0U && p.words.len == 0U);        \
+        pack_case_build(pc, 42U);                                                                  \
+    } while (0)
+    pack_case_build(pc, 42U);
+    NphRenderMeshlet *m = &pc->meshlets[2];
+    NphRenderVoxelBrick *br = &pc->bricks[m->vertex_offset];
+    // An origin off its grid, or past 16 bits of bricks.
+    br->origin.x += br->cell;
+    EXPECT_REFUSED();
+    br->origin.y = 40000.0F * 4.0F * br->cell;
+    EXPECT_REFUSED();
+    // A cell no power of two, or past the exponents.
+    br->cell *= 1.5F;
+    EXPECT_REFUSED();
+    br->cell = 0.0F;
+    EXPECT_REFUSED();
+    // Bricks of two cells; voxels that do not follow; an empty mask.
+    if (m->triangle_count >= 2U) {
+        br[1].cell *= 2.0F;
+        EXPECT_REFUSED();
+        br[1].first_voxel += 1U;
+        EXPECT_REFUSED();
+    }
+    br->mask[0] = 0U;
+    br->mask[1] = 0U;
+    EXPECT_REFUSED();
+    // Too many bricks, bricks past the array, voxels past it.
+    m->triangle_count = NPH_RENDER_VOXEL_CLUSTER_BRICKS + 1U;
+    EXPECT_REFUSED();
+    m->vertex_offset = pc->brick_count;
+    EXPECT_REFUSED();
+    br->first_voxel = pc->voxel_count;
+    EXPECT_REFUSED();
+#undef EXPECT_REFUSED
+    // And it packs again as built.
+    NTEST_EXPECT_EQ_INT(nph_render_voxels_pack(pc->meshlets, PACK_CLUSTERS + 1U, pc->bricks,
+                                               pc->brick_count, pc->voxels, pc->voxel_count, &p),
+                        NPH_RESULT_OK);
+
+    // More voxels than a cluster holds: full bricks along x, their voxels
+    // following one another, 1,024 in 16 of them and past it in 17.
+    const u32 full = NPH_RENDER_VOXEL_CLUSTER_VOXELS / 64U + 1U;
+    memset(pc->bricks, 0, sizeof pc->bricks);
+    memset(pc->voxels, 0, sizeof pc->voxels);
+    for (u32 b = 0; b < full; ++b) {
+        pc->bricks[b].origin = nph_vec3(4.0F * (f32)b, 0.0F, 0.0F);
+        pc->bricks[b].cell = 1.0F;
+        pc->bricks[b].mask[0] = 0xFFFFFFFFU;
+        pc->bricks[b].mask[1] = 0xFFFFFFFFU;
+        pc->bricks[b].first_voxel = 64U * b;
+    }
+    NphRenderMeshlet one;
+    memset(&one, 0, sizeof one);
+    one.triangle_count = (u16)full;
+    NTEST_EXPECT_EQ_INT(
+        nph_render_voxels_pack(&one, 1U, pc->bricks, full, pc->voxels, 64U * full, &p),
+        NPH_RESULT_INVALID_ARGUMENT);
+    one.triangle_count = (u16)(full - 1U);
+    NTEST_EXPECT_EQ_INT(
+        nph_render_voxels_pack(&one, 1U, pc->bricks, full, pc->voxels, 64U * full, &p),
+        NPH_RESULT_OK);
+    nph_render_packed_voxels_free(&p);
+    NPH_FREE_TYPE(a, PackCase, pc);
 }
 
 // ---------------------------------------------------------------------------

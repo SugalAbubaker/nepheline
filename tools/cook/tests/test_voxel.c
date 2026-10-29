@@ -217,35 +217,48 @@ NTEST(CookVoxel, foliage_cooks_into_voxels_coloured_by_its_texture)
               st.voxel_clusters, st.voxel_bricks, st.voxels);
     NTEST_EXPECT_GT_UINT(st.voxel_clusters, 0U);
     NTEST_EXPECT_EQ_UINT(v.lod->brick_count, st.voxel_bricks);
-    NTEST_EXPECT_EQ_UINT(v.lod->voxel_count, st.voxels);
+    NTEST_EXPECT_EQ_UINT(v.lod->voxel_cluster_count, st.voxel_clusters);
     // Each voxel's colour is its side's: red where its cell lies left of
     // x = 1.75, green right of 2.25 (a needle reaches 0.21 from its centre,
-    // so cells nearer the middle may hold both).
+    // so cells nearer the middle may hold both). Read back from the compact
+    // form through the renderer's twins (render/voxel.h).
     u32 left = 0U;
     u32 right = 0U;
     u32 wrong = 0U;
-    for (u32 k = 0; k < v.lod->brick_count; ++k) {
-        const NphMeshVoxelBrick *br = &v.voxel_bricks[k];
-        u32 index = br->first_voxel;
-        for (u32 bit = 0; bit < 64U; ++bit) {
-            if (((br->mask[bit >> 5U] >> (bit & 31U)) & 1U) == 0U) {
-                continue;
-            }
-            NphRenderVoxel rv;
-            memcpy(&rv, &v.voxels[index++], sizeof rv);
-            NphRenderVoxelDesc d;
-            nph_render_voxel_unpack(rv, &d);
-            const f32 lo = br->origin.x + (f32)(bit & 3U) * br->cell;
-            const f32 hi = lo + br->cell;
-            if (hi < 1.75F) {
-                left += 1U;
-                wrong += d.albedo.x > 0.9F && d.albedo.y < 0.05F ? 0U : 1U;
-            } else if (lo > 2.25F) {
-                right += 1U;
-                wrong += d.albedo.y > 0.9F && d.albedo.x < 0.05F ? 0U : 1U;
+    u32 voxels = 0U;
+    for (u32 i = v.lod->level0_meshlets; i < v.header->meshlet_count; ++i) {
+        const NphMeshlet *m = &v.meshlets[i];
+        if (m->vertex_count != 0U) {
+            continue; // triangles
+        }
+        NphRenderVoxelCluster c;
+        memcpy(&c, &v.voxel_clusters[m->triangle_offset], sizeof c);
+        for (u32 k = 0; k < m->triangle_count; ++k) {
+            NphRenderPackedBrick pb;
+            memcpy(&pb, &v.voxel_bricks[m->vertex_offset + k], sizeof pb);
+            const NphRenderVoxelBrick br = nph_render_brick_from_packed(pb, c, 0U);
+            u32 rank = pb.first;
+            for (u32 bit = 0; bit < 64U; ++bit) {
+                if (((br.mask[bit >> 5U] >> (bit & 31U)) & 1U) == 0U) {
+                    continue;
+                }
+                NphRenderVoxelDesc d;
+                nph_render_voxel_unpack(nph_render_voxel_from_packed(v.voxel_words, c, rank), &d);
+                rank += 1U;
+                voxels += 1U;
+                const f32 lo = br.origin.x + (f32)(bit & 3U) * br.cell;
+                const f32 hi = lo + br.cell;
+                if (hi < 1.75F) {
+                    left += 1U;
+                    wrong += d.albedo.x > 0.9F && d.albedo.y < 0.05F ? 0U : 1U;
+                } else if (lo > 2.25F) {
+                    right += 1U;
+                    wrong += d.albedo.y > 0.9F && d.albedo.x < 0.05F ? 0U : 1U;
+                }
             }
         }
     }
+    NTEST_EXPECT_EQ_UINT(voxels, st.voxels);
     NTEST_LOG("%u voxels on the left, %u on the right, %u of the wrong colour", left, right, wrong);
     NTEST_EXPECT_GT_UINT(left, 10U);
     NTEST_EXPECT_GT_UINT(right, 10U);

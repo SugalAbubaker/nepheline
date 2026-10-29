@@ -83,52 +83,53 @@ static bool finite_bits(u32 bits)
     return ((bits >> 23U) & 0xFFU) != 0xFFU;
 }
 
-// A voxel cluster's bricks and their voxels (version 3), checked so far as
-// every index is in range and every field holds a value the renderer's
-// records can (render/voxel.h), and as the renderer's raster takes them: its
-// bricks of one cell size, their voxels following one another in the
-// bricks' order.
+// A voxel cluster's record, bricks and voxels (version 5, compact), checked
+// so far as every index is in range and every field holds a value the
+// renderer's records can (render/voxel.h "The compact form"), and as the
+// renderer's raster takes them: its bricks' voxels' ranks following one
+// another from 0, their words inside VOXA.
 static NphResult mesh_voxels(const NphMeshLodHeader *lh, const NphMeshlet *m,
-                             const NphMeshVoxelBrick *bricks, const NphMeshVoxel *voxels)
+                             const NphMeshVoxelCluster *clusters, const NphMeshVoxelBrick *bricks,
+                             const u32 *words)
 {
     if (m->triangle_count == 0U || m->triangle_count > NPH_MESH_VOXEL_CLUSTER_BRICKS ||
-        m->triangle_offset != 0U || m->vertex_offset > lh->brick_count ||
+        m->triangle_offset >= lh->voxel_cluster_count || m->vertex_offset > lh->brick_count ||
         m->triangle_count > lh->brick_count - m->vertex_offset) {
         return NPH_RESULT_CORRUPT;
     }
-    u32 cell0 = 0U;
-    memcpy(&cell0, &bricks[m->vertex_offset].cell, sizeof cell0);
-    u32 next_voxel = bricks[m->vertex_offset].first_voxel;
+    const NphMeshVoxelCluster *c = &clusters[m->triangle_offset];
+    const bool wide = ((u32)c->flags & NPH_MESH_VOXEL_CLUSTER_WIDE) != 0U;
+    if ((i32)c->cell_log2 < -126 || ((u32)c->flags & ~NPH_MESH_VOXEL_CLUSTER_WIDE) != 0U ||
+        (wide && (c->occlusion != 0U || c->metallic != 0U))) {
+        return NPH_RESULT_CORRUPT;
+    }
+    u32 count = 0U;
     for (u32 k = 0; k < m->triangle_count; ++k) {
         const NphMeshVoxelBrick *b = &bricks[m->vertex_offset + k];
-        u32 cell = 0U;
-        memcpy(&cell, &b->cell, sizeof cell);
-        u32 origin[3];
-        memcpy(origin, &b->origin, sizeof origin);
-        // A positive, normal power of two: sign and mantissa clear.
-        const u32 exponent = (cell >> 23U) & 0xFFU;
-        const u32 count = popcount32(b->mask[0]) + popcount32(b->mask[1]);
-        if (b->reserved != 0U || (cell & 0x807FFFFFU) != 0U || exponent == 0U ||
-            exponent == 0xFFU || !finite_bits(origin[0]) || !finite_bits(origin[1]) ||
-            !finite_bits(origin[2]) || count == 0U || b->first_voxel > lh->voxel_count ||
-            count > lh->voxel_count - b->first_voxel || cell != cell0 ||
-            b->first_voxel != next_voxel) {
+        const u32 n = popcount32(b->mask[0]) + popcount32(b->mask[1]);
+        if (n == 0U || b->first != count) {
             return NPH_RESULT_CORRUPT;
         }
-        next_voxel = b->first_voxel + count;
-        for (u32 v = b->first_voxel; v < b->first_voxel + count; ++v) {
-            const u32 box = voxels[v].box;
-            const u32 shape = box >> 30U;
-            for (u32 a = 0; a < 3U; ++a) {
-                if (((box >> (15U + 5U * a)) & 31U) < ((box >> (5U * a)) & 31U)) {
-                    return NPH_RESULT_CORRUPT; // a footprint of no extent
-                }
+        count += n;
+    }
+    const u32 stride = wide ? NPH_MESH_VOXEL_WIDE_WORDS : NPH_MESH_VOXEL_WORDS;
+    if (count > NPH_MESH_VOXEL_CLUSTER_VOXELS || c->first_word > lh->voxel_word_count ||
+        (u64)count * stride > lh->voxel_word_count - c->first_word) {
+        return NPH_RESULT_CORRUPT;
+    }
+    for (u32 j = 0; j < count; ++j) {
+        const u32 *w = &words[c->first_word + j * stride];
+        const u32 box = w[0];
+        const u32 shape = box >> 30U;
+        for (u32 a = 0; a < 3U; ++a) {
+            if (((box >> (15U + 5U * a)) & 31U) < ((box >> (5U * a)) & 31U)) {
+                return NPH_RESULT_CORRUPT; // a footprint of no extent
             }
-            const u32 capsule = voxels[v].material >> 24U;
-            if (shape > 2U || (shape != 2U && capsule != 0U) ||
-                (shape == 2U && (capsule >> 2U) > 56U)) {
-                return NPH_RESULT_CORRUPT;
-            }
+        }
+        // A capsule's byte (its lobe's bits 16..23): its radius a known code.
+        if (shape > 2U || (shape == 2U && ((w[1] >> 18U) & 63U) > 56U) ||
+            (wide && (w[3] >> 16U) != 0U)) {
+            return NPH_RESULT_CORRUPT;
         }
     }
     return NPH_RESULT_OK;
@@ -156,12 +157,19 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U, sizeof(NphMeshLodHeader), 1U, &p));
     const NphMeshLodHeader *lh = (const NphMeshLodHeader *)p;
-    // Before version 3 the voxels' counts were reserved, zero.
-    if (lh->reserved != 0U ||
-        (asset->header.type_version < 3U && (lh->brick_count != 0U || lh->voxel_count != 0U)) ||
+    // Before version 3 the voxels' counts were reserved, zero, and before
+    // version 5 the voxel clusters' count.
+    const u32 version = asset->header.type_version;
+    if ((version < 5U && lh->voxel_cluster_count != 0U) ||
+        (version < 3U && (lh->brick_count != 0U || lh->voxel_word_count != 0U)) ||
         lh->levels == 0U || lh->level0_meshlets == 0U || lh->level0_meshlets > h->meshlet_count ||
         lh->group_count == 0U || lh->node_count == 0U) {
         return NPH_RESULT_CORRUPT;
+    }
+    // Versions 3 and 4 hold their voxels in the builders' form, which no
+    // longer reads: such a mesh is cooked again.
+    if (version < 5U && (lh->brick_count != 0U || lh->voxel_word_count != 0U)) {
+        return NPH_RESULT_VERSION_MISMATCH;
     }
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_CLUSTERS, 0U, sizeof(NphMeshClusterLod),
                        h->meshlet_count, &p));
@@ -175,14 +183,17 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     NPH_TRY(
         typed_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U, sizeof(NphMeshLodNode), lh->node_count, &p));
     const NphMeshLodNode *nodes = (const NphMeshLodNode *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXEL_CLUSTERS, 0U, sizeof(NphMeshVoxelCluster),
+                       lh->voxel_cluster_count, &p));
+    const NphMeshVoxelCluster *voxel_clusters = (const NphMeshVoxelCluster *)p;
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXEL_BRICKS, 0U, sizeof(NphMeshVoxelBrick),
                        lh->brick_count, &p));
     const NphMeshVoxelBrick *bricks = (const NphMeshVoxelBrick *)p;
-    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXELS, 0U, sizeof(NphMeshVoxel), lh->voxel_count, &p));
-    const NphMeshVoxel *voxels = (const NphMeshVoxel *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_VOXELS, 0U, sizeof(u32), lh->voxel_word_count, &p));
+    const u32 *words = (const u32 *)p;
     for (u32 i = 0; i < h->meshlet_count; ++i) {
         if (voxel_cluster(asset, h, lh, &meshlets[i], i)) {
-            NPH_TRY(mesh_voxels(lh, &meshlets[i], bricks, voxels));
+            NPH_TRY(mesh_voxels(lh, &meshlets[i], voxel_clusters, bricks, words));
         }
     }
     // Level 0 holds the submeshes' meshlets.
@@ -226,8 +237,9 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     out->lod_groups = groups;
     out->lod_members = members;
     out->lod_nodes = nodes;
+    out->voxel_clusters = voxel_clusters;
     out->voxel_bricks = bricks;
-    out->voxels = voxels;
+    out->voxel_words = words;
     return NPH_RESULT_OK;
 }
 

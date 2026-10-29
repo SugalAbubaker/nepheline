@@ -743,13 +743,30 @@ stalled triangles ("Measured on the GPU").
 **The records.** A voxel cluster is a cluster whose meshlet record has no
 vertices, past level 0 (a mesh of voxels alone, below, has them at level 0
 too): `triangle_count` bricks from `vertex_offset`, at most 32 bricks
-and 1,024 voxels. A brick (32 bytes) is 4 x 4 x 4 cells of one power-of-two
-size on the mesh's grid, with a 64-bit occupancy mask and its first voxel;
-a voxel (16 bytes) is its cell's footprint (a box in 32nds of the cell, the
-ellipsoid inscribed in it, or a capsule between two of its opposite corners
-with a radius of `2^(c/8 - 8)` of the cell), albedo and ambient occlusion,
-roughness and metallic, and a two-sided von Mises-Fisher lobe of normals (an
-axis and a concentration, its byte `kappa = 2^(b/16) - 1`).
+and 1,024 voxels. A brick is 4 x 4 x 4 cells of one power-of-two
+size on the mesh's grid, with a 64-bit occupancy mask; a voxel is its cell's
+footprint (a box in 32nds of the cell, the ellipsoid inscribed in it, or a
+capsule between two of its opposite corners with a radius of `2^(c/8 - 8)`
+of the cell), albedo and ambient occlusion, roughness and metallic, and a
+two-sided von Mises-Fisher lobe of normals (an axis and a concentration, its
+byte `kappa = 2^(b/16) - 1`).
+
+The builders make bricks of 32 bytes and voxels of 16 (render/voxel.h); a
+mesh stores and draws them compact (`nph_render_voxels_pack`; ADR-0063 "The
+encoding and the minimum"): a voxel cluster's record (8 bytes, which its
+meshlet names in `triangle_offset`: its voxels' first word, its cell's
+exponent, and the occlusion and metallic its voxels share), a brick of 16
+bytes (its corner in whole bricks, exact on its grid, its first voxel's rank
+in its cluster, its mask), and a voxel of three words: the footprint's box
+and shape, the lobe (its axis octahedral at 12 bits a component, or a
+capsule's at 8 beside its byte, then the concentration), and the albedo and
+roughness. A cluster whose voxels differ in occlusion or metallic is wide,
+its voxels four words with their own. Lossless but for the axis, within 0.06
+degrees (a capsule's, whose lobe is broad, 0.95), the form takes 0.72 times
+the memory: the landscape's proxies from 2.06 GB to 1.48. The shaders read it
+through `vis_voxel_cluster`, `vis_voxel_brick` and `vis_voxel_load`
+(vis_voxel.glsl), which give the tests the levels' layout back bit for bit,
+twins of `nph_render_brick_from_packed` and `nph_render_voxel_from_packed`.
 
 **When a group becomes voxels.** A group of at least 256 triangles whose
 pieces average at most 32 triangles (union-find over its vertices'
