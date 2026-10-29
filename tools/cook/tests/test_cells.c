@@ -393,6 +393,27 @@ NTEST_F(CellsFixture, a_scene_cooks_its_cells_and_their_proxies)
     NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U + levels);
     cooker_destroy(c);
 
+    // A level's file gone, the proxies are not current: they are built
+    // again, the file with them.
+    c = make_cooker(f, true);
+    const CookDbEntry *le = NULL;
+    for (u32 i = 0; i < cook_db_count(cooker_db(c)) && le == NULL; ++i) {
+        const CookDbEntry *e = cook_db_entry(cooker_db(c), i);
+        le = strstr(e->sub, "/level_") != NULL ? e : NULL;
+    }
+    NTEST_ASSERT_NOT_NULL(le);
+    char gone[1400];
+    snprintf(gone, sizeof gone, "%s/%s", f->out_dir, le->output);
+    NTEST_ASSERT_EQ_INT(nph_fs_remove_file(gone), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
+    st = cooker_stats(c);
+    // The heads and levels; the meshes, material and scene current.
+    NTEST_EXPECT_EQ_UINT(st.cooked, 4U + levels);
+    NTEST_EXPECT_EQ_UINT(st.skipped, 4U);
+    NTEST_EXPECT_TRUE(nph_fs_exists(gone));
+    NTEST_EXPECT_EQ_UINT(count_cells(cooker_db(c)), 4U + levels);
+    cooker_destroy(c);
+
     // Without cells: the scene recooks without them, its proxies are gone.
     c = make_cooker(f, false);
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, f->gltf), NPH_RESULT_OK);
