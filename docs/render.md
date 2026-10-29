@@ -2269,8 +2269,8 @@ render graph's zones.
 
 ## Testing
 
-`render_tests` (registered with CTest as the eight shards `render.0` to
-`render.7`, docs/ntest.md) run on the RTX 3060 Ti locally
+`render_tests` (registered with CTest as the fourteen shards `render.0` to
+`render.13`, docs/ntest.md) run on the RTX 3060 Ti locally
 and on the self-hosted runner, and on lavapipe in CI, under the validation
 and synchronisation-validation gate:
 
