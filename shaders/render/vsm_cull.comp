@@ -165,13 +165,11 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
         m = VisMeshletsRef(mesh.meshlets).m[meshlet];
         // A cluster of a group too coarse for the level, from the walk: in
-        // the cut where its maker's error is fine enough (level 0 has none).
+        // the cut where its maker's error is fine enough (level 0's is 0).
         bool lod_out = false;
         if ((item.y & VSM_ITEM_LOD) != 0u) {
-            const uint maker = VisUintRef(mesh.lod_makers).v[meshlet];
-            lod_out = maker != NPH_VIS_LOD_NONE &&
-                      VisLodGroupsRef(mesh.lod_groups).g[maker].error >
-                          vsm_lod_threshold(r, level, vis_max_scale(inst.transform));
+            lod_out = vis_lod_maker_error(mesh, meshlet) >
+                      vsm_lod_threshold(r, level, vis_max_scale(inst.transform));
         }
         const uvec4 b0 = VisMeshletBoundsRef(mesh.meshlet_bounds).b[meshlet * 2u];
         const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,

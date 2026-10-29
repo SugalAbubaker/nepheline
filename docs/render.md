@@ -679,7 +679,12 @@ cluster below would be replaced in turn), inside the frustum and in phase 1
 not behind the depth pyramid. A group it takes appends its clusters to the
 phase's meshlet list, where the meshlet cull drops those whose makers are
 too coarse and tests the rest as any cluster; a node at the second level
-goes into the next queue. The queues are three in turn: a step reads one,
+goes into the next queue. Each cluster carries its maker's sphere and error
+(`NphVisMesh.lod_makers`: every cluster's sphere, then every cluster's error,
+20 bytes a cluster; an error of 0 at level 0), as Nanite's clusters carry
+their LOD bounds and error (Karis et al. 2021): the meshlet cull and the
+shadow map's read them with the cluster, where they read the maker's index
+and then its group's record, and a level of a mesh stands alone (ADR-0063). The queues are three in turn: a step reads one,
 fills the next and raises the next step's indirect arguments itself, and
 empties the third for the step after the next, so the steps follow one
 another with no pass between. The frame takes as many steps a phase as the

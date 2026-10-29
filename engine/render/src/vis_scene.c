@@ -45,7 +45,9 @@ NPH_STATIC_ASSERT(sizeof(NphRenderPackedBrick) == 16U && sizeof(NphRenderVoxelCl
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) % 16U == 0U,
                   "a mesh record's stride keeps each record at the 16 bytes buffer references "
                   "declare (the resolve indexes them as VisMeshRef(...)[i])");
-NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_nodes) % 8U == 0U, "addresses are aligned");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_nodes) % 8U == 0U &&
+                      offsetof(NphVisMesh, lod_makers) % 8U == 0U,
+                  "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) == 32U,
                   "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
@@ -341,6 +343,44 @@ static NphResult build_meshlets(NphRenderer *r, const NphRenderMeshDesc *d, NphR
     return res;
 }
 
+// Each cluster's maker as the culls test it (NphVisMesh.lod_makers): the
+// sphere of the group that made it, then, after every cluster's, its error,
+// its record's bits; at level 0, a sphere of zeros and an error of 0.
+static NphResult upload_makers(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d)
+{
+    const u32 n = d->meshlet_count;
+    NphVec4 *spheres = NPH_ALLOC_ARRAY(r->alloc, NphVec4, n);
+    f32 *errors = NPH_ALLOC_ARRAY(r->alloc, f32, n);
+    NphResult res = spheres != NULL && errors != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    const u64 at = (u64)n * sizeof(NphVec4); // the errors' place
+    if (res == NPH_RESULT_OK) {
+        for (u32 i = 0; i < n; ++i) {
+            const u32 maker = d->cluster_lods[i].group;
+            const NphRenderLodGroup *g =
+                maker != NPH_RENDER_LOD_NONE ? &d->lod_groups[maker] : NULL;
+            spheres[i] = g != NULL ? nph_vec4_from_vec3(g->center, g->radius) : nph_vec4_zero();
+            errors[i] = g != NULL ? g->error : 0.0F;
+        }
+        res =
+            make_buffer(r, at + (u64)n * sizeof(f32),
+                        (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                        NPH_GPU_MEMORY_DEVICE, "mesh lod makers", &m->lod_makers);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = nph_gpu_upload_buffer(r->dev, m->lod_makers, 0U, spheres, at);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = nph_gpu_upload_buffer(r->dev, m->lod_makers, at, errors, (u64)n * sizeof(f32));
+    }
+    if (spheres != NULL) {
+        NPH_FREE_ARRAY(r->alloc, NphVec4, spheres, n);
+    }
+    if (errors != NULL) {
+        NPH_FREE_ARRAY(r->alloc, f32, errors, n);
+    }
+    return res;
+}
+
 // A mesh's levels of detail (NphVisMesh.lod_*): the hierarchy, the groups,
 // their clusters, and each cluster's maker.
 static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d,
@@ -352,21 +392,12 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
                           "mesh lod groups", &m->lod_groups));
     NPH_TRY(upload_stream(r, d->lod_group_clusters, (u64)d->lod_group_cluster_count * sizeof(u32),
                           "mesh lod group clusters", &m->lod_group_clusters));
-    u32 *makers = NPH_ALLOC_ARRAY(r->alloc, u32, d->meshlet_count);
-    if (makers == NULL) {
-        return NPH_RESULT_OUT_OF_MEMORY;
-    }
-    for (u32 i = 0; i < d->meshlet_count; ++i) {
-        makers[i] = d->cluster_lods[i].group;
-    }
-    const NphResult res = upload_stream(r, makers, (u64)d->meshlet_count * sizeof(u32),
-                                        "mesh lod makers", &m->lod_makers);
-    NPH_FREE_ARRAY(r->alloc, u32, makers, d->meshlet_count);
-    NPH_TRY(res);
+    NPH_TRY(upload_makers(r, m, d));
     rec->lod_nodes = nph_gpu_buffer_address(r->dev, m->lod_nodes);
     rec->lod_groups = nph_gpu_buffer_address(r->dev, m->lod_groups);
     rec->lod_group_clusters = nph_gpu_buffer_address(r->dev, m->lod_group_clusters);
     rec->lod_makers = nph_gpu_buffer_address(r->dev, m->lod_makers);
+    rec->lod_clusters = d->meshlet_count;
     // The finest consumer of level 0 (vis_cull_instances.comp's shortcut): a
     // cluster no group consumes (the levels allow it) is fine at any distance.
     rec->lod_level0_error = NPH_F32_MAX;

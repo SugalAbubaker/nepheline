@@ -216,9 +216,14 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 indices;    // u32[]: the triangles' corners, three a triangle, as the mesh has them
     // Its levels of detail (render/cluster_lod.h), 0 without: the hierarchy
     // (NphRenderLodNode[], node 0 the root), the groups (NphRenderLodGroup[]),
-    // each group's clusters (u32[]), and each cluster's maker (u32[], the
-    // group that made it; NPH_VIS_LOD_NONE at level 0). `meshlets` then holds
-    // every level's clusters, and `meshlet_count` level 0's.
+    // each group's clusters (u32[]), and the makers: the sphere (vec4[]: xyz
+    // centre, w radius) of the group that made each cluster, then, after
+    // `lod_clusters` of them, its error (f32[]), which the culls test it by
+    // (vis_lod_maker_error). They are carried with the cluster, as Nanite's
+    // clusters carry their LOD bounds and error (Karis et al., SIGGRAPH
+    // 2021), so that a level stands alone (ADR-0063); at level 0, an error of
+    // 0 (never too coarse) and a sphere of zeros. `meshlets` then holds every
+    // level's clusters (`lod_clusters`), and `meshlet_count` level 0's.
     u64 lod_nodes;
     u64 lod_groups;
     u64 lod_group_clusters;
@@ -228,7 +233,7 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // everywhere, and the instance cull hands its level-0 meshlets on
     // directly, without the walk (vis_cull_instances.comp).
     f32 lod_level0_error;
-    u32 lod_pad0;
+    u32 lod_clusters;
     // Its voxels, compact (render/voxel.h "The compact form"), 0 without: its
     // bricks (NphRenderPackedBrick[], a uvec4 each), its voxels' words (u32[],
     // three a voxel or four), and its voxel clusters' records

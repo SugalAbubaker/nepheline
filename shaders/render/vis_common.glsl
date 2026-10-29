@@ -29,6 +29,8 @@ NPH_BUFFER_REF(VisMeshRef) { NphVisMesh m; };
 NPH_BUFFER_REF(VisDrawsRef) { NphVisDraw d[]; };
 NPH_BUFFER_REF(VisUintRef) { uint v[]; };
 NPH_BUFFER_REF(VisUvec2Ref) { uvec2 v[]; };
+NPH_BUFFER_REF(VisFloatRef) { float v[]; };
+NPH_BUFFER_REF(VisVec4Ref) { vec4 v[]; };
 // NphRenderMeshlet: x vertex_offset, y triangle_offset, z vertex_count |
 // triangle_count << 16, w submesh.
 NPH_BUFFER_REF(VisMeshletsRef) { uvec4 m[]; };
@@ -522,6 +524,19 @@ struct NphVisLodGroup {
 };
 NPH_BUFFER_REF(VisLodNodesRef) { NphVisLodNode n[]; };
 NPH_BUFFER_REF(VisLodGroupsRef) { NphVisLodGroup g[]; };
+
+// The sphere (mesh space: xyz centre, w radius) and the error of the group
+// that made cluster `c` of `mesh` (NphVisMesh.lod_makers: every cluster's
+// sphere, then every cluster's error); at level 0, zeros.
+vec4 vis_lod_maker_sphere(NphVisMesh mesh, uint c)
+{
+    return VisVec4Ref(mesh.lod_makers).v[c];
+}
+
+float vis_lod_maker_error(NphVisMesh mesh, uint c)
+{
+    return VisFloatRef(mesh.lod_makers + 16ul * uint64_t(mesh.lod_clusters)).v[c];
+}
 
 // The root group's error (render/cluster_lod.h: the largest float): always
 // too coarse, whatever the view and the instance's scale.
