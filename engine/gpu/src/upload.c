@@ -26,9 +26,11 @@ NphResult gpu_upload_init(NphGpuDevice *dev)
     }
     up->acquire_cap = 256U;
     up->acquires = NPH_ALLOC_ARRAY(dev->alloc, NphGpuUploadAcquire, up->acquire_cap);
+    up->pending_cap = 256U;
+    up->pending = NPH_ALLOC_ARRAY(dev->alloc, NphGpuUploadPending, up->pending_cap);
     up->cmd_storage =
         NPH_ALLOC_ARRAY_ZEROED(dev->alloc, NphGpuCmd, (u64)2U * NPH_GPU_FRAMES_IN_FLIGHT);
-    if (up->acquires == NULL || up->cmd_storage == NULL) {
+    if (up->acquires == NULL || up->pending == NULL || up->cmd_storage == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     return NPH_RESULT_OK;
@@ -50,6 +52,18 @@ void gpu_upload_shutdown(NphGpuDevice *dev)
         NPH_FREE_ARRAY(dev->alloc, NphGpuUploadAcquire, up->acquires, up->acquire_cap);
         up->acquires = NULL;
     }
+    if (up->pending != NULL) {
+        if (up->pending_count != 0U) {
+            GPU_LOG_WARN("%u uploads staged at device destruction are dropped", up->pending_count);
+        }
+        for (u32 i = 0; i < up->pending_count; ++i) {
+            if (up->pending[i].src.value != up->staging.value) {
+                nph_gpu_buffer_destroy(dev, up->pending[i].src);
+            }
+        }
+        NPH_FREE_ARRAY(dev->alloc, NphGpuUploadPending, up->pending, up->pending_cap);
+        up->pending = NULL;
+    }
     if (up->cmd_storage != NULL) {
         NPH_FREE_ARRAY(dev->alloc, NphGpuCmd, up->cmd_storage, (u64)2U * NPH_GPU_FRAMES_IN_FLIGHT);
         up->cmd_storage = NULL;
@@ -57,11 +71,20 @@ void gpu_upload_shutdown(NphGpuDevice *dev)
     nph_mutex_destroy(&up->lock);
 }
 
-void gpu_upload_release_slot(NphGpuDevice *dev, u32 slot)
+void gpu_upload_lock(NphGpuDevice *dev)
+{
+    nph_mutex_lock(&dev->upload.lock);
+}
+
+void gpu_upload_unlock(NphGpuDevice *dev)
+{
+    nph_mutex_unlock(&dev->upload.lock);
+}
+
+void gpu_upload_release_slot_locked(NphGpuDevice *dev, u32 slot)
 {
     NphGpuUploadState *up = &dev->upload;
     NphGpuFrameSlot *fs = &dev->frames[slot];
-    nph_mutex_lock(&up->lock);
     NPH_ASSERT(fs->staging_bytes <= up->used);
     up->used -= fs->staging_bytes;
     fs->staging_bytes = 0U;
@@ -69,7 +92,29 @@ void gpu_upload_release_slot(NphGpuDevice *dev, u32 slot)
         up->head = 0U;
         up->tail = 0U;
     }
-    nph_mutex_unlock(&up->lock);
+}
+
+void gpu_upload_release_slot(NphGpuDevice *dev, u32 slot)
+{
+    gpu_upload_lock(dev);
+    gpu_upload_release_slot_locked(dev, slot);
+    gpu_upload_unlock(dev);
+}
+
+// The slot's upload pools reset, their command buffers done: under the
+// lock, which every batch begun from them takes.
+void gpu_upload_reset_pools_locked(NphGpuDevice *dev, u32 slot)
+{
+    // A shared queue's two are one; a pool never made is passed by.
+    gpu_cmd_pool_reset(dev, gpu_upload_pool(dev, slot, NPH_GPU_QUEUE_TRANSFER));
+    gpu_cmd_pool_reset(dev, gpu_upload_pool(dev, slot, NPH_GPU_QUEUE_GRAPHICS));
+}
+
+void gpu_upload_reset_pools(NphGpuDevice *dev, u32 slot)
+{
+    gpu_upload_lock(dev);
+    gpu_upload_reset_pools_locked(dev, slot);
+    gpu_upload_unlock(dev);
 }
 
 void gpu_upload_mark_frame_end(NphGpuDevice *dev, u32 slot)
@@ -89,8 +134,9 @@ static bool ring_has_room(const NphGpuUploadState *up, u64 size)
            up->used + (up->staging_size - up->head) + size <= up->staging_size;
 }
 
-// Allocates `size` bytes of ring space; false when the ring is too full.
-static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset)
+// Allocates `size` bytes of ring space, the bytes taken (the wasted tail of
+// a wrap too) into *out_taken; false when the ring is too full.
+static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset, u64 *out_taken)
 {
     size = nph_align_up_u64(size, STAGING_ALIGN);
     if (up->used + size > up->staging_size) {
@@ -100,7 +146,7 @@ static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset)
         *out_offset = up->head;
         up->head += size;
         up->used += size;
-        up->batch_bytes += size;
+        *out_taken = size;
         return true;
     }
     // Wrap: the tail of the ring is wasted until the frame that owns it
@@ -110,7 +156,7 @@ static bool ring_alloc(NphGpuUploadState *up, u64 size, u64 *out_offset)
         return false;
     }
     up->used += waste + size;
-    up->batch_bytes += waste + size;
+    *out_taken = waste + size;
     *out_offset = 0U;
     up->head = size;
     return true;
@@ -143,10 +189,15 @@ static void memory_barrier(NphGpuCmd *cmd, u32 src_stages, u32 src_access, u32 d
     nph_gpu_cmd_barrier(cmd, &desc);
 }
 
+static void record_copy(NphGpuDevice *dev, NphGpuBuffer src, u64 src_offset, NphGpuBuffer dst,
+                        u64 dst_offset, u64 size);
+static void record_pending(NphGpuDevice *dev);
+
 static NphResult ensure_batch(NphGpuDevice *dev)
 {
     NphGpuUploadState *up = &dev->upload;
     if (up->cmd != NULL) {
+        record_pending(dev);
         return NPH_RESULT_OK;
     }
     NphGpuCmdPool *pool = gpu_upload_pool(dev, dev->frame_slot, NPH_GPU_QUEUE_TRANSFER);
@@ -164,13 +215,47 @@ static NphResult ensure_batch(NphGpuDevice *dev)
                        (u32)NPH_GPU_ACCESS_TRANSFER_READ | (u32)NPH_GPU_ACCESS_TRANSFER_WRITE);
     }
     up->cmd = cmd;
-    up->batch_bytes = 0U;
-    up->batch_copies = 0U;
     up->batch_id += 1U;
+    record_pending(dev);
     return NPH_RESULT_OK;
 }
 
+// The copies staged outside a frame recorded into the batch, in their order,
+// ahead of whatever comes next, their staging now the batch's; a
+// destination destroyed since takes none.
+static void record_pending(NphGpuDevice *dev)
+{
+    NphGpuUploadState *up = &dev->upload;
+    for (u32 i = 0; i < up->pending_count; ++i) {
+        const NphGpuUploadPending *p = &up->pending[i];
+        if (nph_gpu_buffer_is_valid(dev, p->dst)) {
+            record_copy(dev, p->src, p->src_offset, p->dst, p->dst_offset, p->size);
+        }
+        if (p->src.value != up->staging.value) {
+            nph_gpu_buffer_destroy(dev, p->src); // after the batch's frame, as in-frame ones
+        }
+    }
+    up->pending_count = 0U;
+    up->batch_bytes += up->pending_bytes;
+    up->pending_bytes = 0U;
+}
+
 static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value);
+
+static NphResult grow_pending(NphGpuDevice *dev)
+{
+    NphGpuUploadState *up = &dev->upload;
+    const u32 new_cap = up->pending_cap * 2U;
+    NphGpuUploadPending *grown = (NphGpuUploadPending *)NPH_REALLOC(
+        dev->alloc, up->pending, (u64)up->pending_cap * sizeof(NphGpuUploadPending),
+        (u64)new_cap * sizeof(NphGpuUploadPending), NPH_ALIGNOF(NphGpuUploadPending));
+    if (grown == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    up->pending = grown;
+    up->pending_cap = new_cap;
+    return NPH_RESULT_OK;
+}
 
 // Between frames nothing waits on the uploads, so when the ring cannot
 // take `size` bytes that it would take empty, the pending uploads are
@@ -182,8 +267,8 @@ static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value);
 static NphResult make_room(NphGpuDevice *dev, u64 size)
 {
     NphGpuUploadState *up = &dev->upload;
-    if (dev->frame_active || up->cmd == NULL || size > up->staging_size ||
-        ring_has_room(up, size)) {
+    if (dev->frame_active || (up->cmd == NULL && up->pending_count == 0U) ||
+        size > up->staging_size || ring_has_room(up, size)) {
         return NPH_RESULT_OK;
     }
     return flush_locked(dev, NULL);
@@ -191,12 +276,18 @@ static NphResult make_room(NphGpuDevice *dev, u64 size)
 
 // Finds staging space for `size` bytes: in the ring, or in a dedicated
 // buffer that dies with the frame. Returns the buffer and offset to copy from.
-static NphResult stage(NphGpuDevice *dev, const void *data, u64 size, NphGpuBuffer *out_buffer,
-                       u64 *out_offset)
+static NphResult stage(NphGpuDevice *dev, const void *data, u64 size, bool pending,
+                       NphGpuBuffer *out_buffer, u64 *out_offset)
 {
     NphGpuUploadState *up = &dev->upload;
     u64 offset = 0U;
-    if (size <= up->staging_size && ring_alloc(up, size, &offset)) {
+    u64 taken = 0U;
+    if (size <= up->staging_size && ring_alloc(up, size, &offset, &taken)) {
+        if (pending) {
+            up->pending_bytes += taken;
+        } else {
+            up->batch_bytes += taken;
+        }
         memcpy(up->staging_mapped + offset, data, size);
         *out_buffer = up->staging;
         *out_offset = offset;
@@ -241,54 +332,76 @@ NphResult nph_gpu_upload_buffer(NphGpuDevice *dev, NphGpuBuffer dst, u64 dst_off
     }
     NphGpuUploadState *up = &dev->upload;
     nph_mutex_lock(&up->lock);
+    // Outside a frame (a loading job's upload between frames, or a tool's)
+    // the copy is staged and recorded into the next batch: the next frame's,
+    // which submits it as the frame begins, or a flush's.
+    const bool pending = !dev->frame_active;
     NphResult r = make_room(dev, size);
-    if (r == NPH_RESULT_OK) {
+    if (r == NPH_RESULT_OK && !pending) {
         r = ensure_batch(dev);
+    }
+    if (r == NPH_RESULT_OK && pending && up->pending_count == up->pending_cap) {
+        r = grow_pending(dev);
     }
     NphGpuBuffer src = NPH_GPU_BUFFER_NULL;
     u64 src_offset = 0U;
     if (r == NPH_RESULT_OK) {
-        r = stage(dev, data, size, &src, &src_offset);
+        r = stage(dev, data, size, pending, &src, &src_offset);
     }
-    if (r == NPH_RESULT_OK) {
-        NphGpuBufferSlot *dst_slot = gpu_buffer(dev, dst);
-        // Copies in one command buffer may run in any order: a copy that
-        // overlaps what this batch already wrote to the buffer (a record
-        // rewritten, a range freed and given out again before the flush)
-        // waits for those copies, so the later upload wins. The envelope
-        // keeps this O(1); disjoint copies inside it pay a barrier they did
-        // not strictly need.
-        const u64 end = dst_offset + size;
-        if (dst_slot->upload_batch == up->batch_id && dst_offset < dst_slot->upload_hi &&
-            dst_slot->upload_lo < end) {
-            nph_gpu_cmd_buffer_barrier(
-                up->cmd, dst, (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_WRITE,
-                (u32)NPH_GPU_STAGE_TRANSFER, (u32)NPH_GPU_ACCESS_TRANSFER_WRITE);
-            dst_slot->upload_lo = dst_offset;
-            dst_slot->upload_hi = end;
-        } else if (dst_slot->upload_batch == up->batch_id) {
-            dst_slot->upload_lo = nph_min_u64(dst_slot->upload_lo, dst_offset);
-            dst_slot->upload_hi = nph_max_u64(dst_slot->upload_hi, end);
-        } else {
-            dst_slot->upload_batch = up->batch_id;
-            dst_slot->upload_lo = dst_offset;
-            dst_slot->upload_hi = end;
-        }
-        NphGpuBufferCopy region;
-        region.src_offset = src_offset;
-        region.dst_offset = dst_offset;
-        region.size = size;
-        nph_gpu_cmd_copy_buffer(up->cmd, src, dst, &region, 1U);
-        ++up->batch_copies;
-        dst_slot->state.stages = (u32)NPH_GPU_STAGE_TRANSFER;
-        dst_slot->state.access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
-        dst_slot->state.queue = (u32)NPH_GPU_QUEUE_TRANSFER;
+    if (r == NPH_RESULT_OK && pending) {
+        NphGpuUploadPending *p = &up->pending[up->pending_count++];
+        p->src = src;
+        p->src_offset = src_offset;
+        p->dst = dst;
+        p->dst_offset = dst_offset;
+        p->size = size;
+    } else if (r == NPH_RESULT_OK) {
+        record_copy(dev, src, src_offset, dst, dst_offset, size);
         if (src.value != up->staging.value) {
             nph_gpu_buffer_destroy(dev, src);
         }
     }
     nph_mutex_unlock(&up->lock);
     return r;
+}
+
+// Records a copy into the batch.
+static void record_copy(NphGpuDevice *dev, NphGpuBuffer src, u64 src_offset, NphGpuBuffer dst,
+                        u64 dst_offset, u64 size)
+{
+    NphGpuUploadState *up = &dev->upload;
+    NphGpuBufferSlot *dst_slot = gpu_buffer(dev, dst);
+    // Copies in one command buffer may run in any order: a copy that
+    // overlaps what this batch already wrote to the buffer (a record
+    // rewritten, a range freed and given out again before the flush)
+    // waits for those copies, so the later upload wins. The envelope
+    // keeps this O(1); disjoint copies inside it pay a barrier they did
+    // not strictly need.
+    const u64 end = dst_offset + size;
+    if (dst_slot->upload_batch == up->batch_id && dst_offset < dst_slot->upload_hi &&
+        dst_slot->upload_lo < end) {
+        nph_gpu_cmd_buffer_barrier(up->cmd, dst, (u32)NPH_GPU_STAGE_TRANSFER,
+                                   (u32)NPH_GPU_ACCESS_TRANSFER_WRITE, (u32)NPH_GPU_STAGE_TRANSFER,
+                                   (u32)NPH_GPU_ACCESS_TRANSFER_WRITE);
+        dst_slot->upload_lo = dst_offset;
+        dst_slot->upload_hi = end;
+    } else if (dst_slot->upload_batch == up->batch_id) {
+        dst_slot->upload_lo = nph_min_u64(dst_slot->upload_lo, dst_offset);
+        dst_slot->upload_hi = nph_max_u64(dst_slot->upload_hi, end);
+    } else {
+        dst_slot->upload_batch = up->batch_id;
+        dst_slot->upload_lo = dst_offset;
+        dst_slot->upload_hi = end;
+    }
+    NphGpuBufferCopy region;
+    region.src_offset = src_offset;
+    region.dst_offset = dst_offset;
+    region.size = size;
+    nph_gpu_cmd_copy_buffer(up->cmd, src, dst, &region, 1U);
+    ++up->batch_copies;
+    dst_slot->state.stages = (u32)NPH_GPU_STAGE_TRANSFER;
+    dst_slot->state.access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
+    dst_slot->state.queue = (u32)NPH_GPU_QUEUE_TRANSFER;
 }
 
 static NphResult push_acquire(NphGpuDevice *dev, const NphGpuUploadAcquire *a)
@@ -412,7 +525,7 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
     NphGpuBuffer src = NPH_GPU_BUFFER_NULL;
     u64 src_offset = 0U;
     if (r == NPH_RESULT_OK) {
-        r = stage(dev, data, size, &src, &src_offset);
+        r = stage(dev, data, size, false, &src, &src_offset);
     }
     if (r == NPH_RESULT_OK) {
         NphGpuCmd *cmd = up->cmd;
@@ -527,6 +640,11 @@ static NphResult record_acquires(NphGpuDevice *dev, NphGpuCmd *cmd)
     return NPH_RESULT_OK;
 }
 
+NphResult gpu_upload_flush_locked(NphGpuDevice *dev)
+{
+    return flush_locked(dev, NULL);
+}
+
 NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
 {
     NPH_ASSERT(dev != NULL);
@@ -544,9 +662,10 @@ NphResult nph_gpu_upload_flush(NphGpuDevice *dev, u64 *out_value)
 static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value)
 {
     NphGpuUploadState *up = &dev->upload;
-    if (up->cmd == NULL) {
+    if (up->cmd == NULL && up->pending_count == 0U) {
         return NPH_RESULT_OK;
     }
+    NPH_TRY(ensure_batch(dev)); // records the copies staged outside a frame
     NphGpuCmd *cmd = up->cmd;
     up->cmd = NULL;
     const bool distinct = !shared_queue(dev);
@@ -636,11 +755,7 @@ static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value)
             // until now). Recycling the pools lets a load between frames
             // flush any number of times; they would otherwise hold
             // max_commands_per_thread flushes until the slot's next frame.
-            gpu_cmd_pool_reset(dev, gpu_upload_pool(dev, dev->frame_slot, NPH_GPU_QUEUE_TRANSFER));
-            if (distinct) {
-                gpu_cmd_pool_reset(dev,
-                                   gpu_upload_pool(dev, dev->frame_slot, NPH_GPU_QUEUE_GRAPHICS));
-            }
+            gpu_upload_reset_pools_locked(dev, dev->frame_slot);
         }
     }
     up->batch_bytes = 0U;

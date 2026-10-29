@@ -243,6 +243,17 @@ typedef struct NphGpuUploadAcquire {
     NphGpuLayout final_layout;
 } NphGpuUploadAcquire;
 
+// A buffer copy staged outside a frame, recorded into the next batch
+// (upload.c): no command buffer is open between frames, whose beginning
+// recycles the pools.
+typedef struct NphGpuUploadPending {
+    NphGpuBuffer src; // the ring, or a dedicated staging buffer the copy owns
+    u64 src_offset;
+    NphGpuBuffer dst;
+    u64 dst_offset;
+    u64 size;
+} NphGpuUploadPending;
+
 typedef struct NphGpuUploadState {
     NphMutex lock;
     NphGpuBuffer staging; // the ring
@@ -262,6 +273,11 @@ typedef struct NphGpuUploadState {
     u64 batch_bytes;
     u32 batch_copies;
     u64 batch_id; // counts batches from 1: tells envelopes of this batch from stale ones
+    // The copies staged outside a frame, and the ring bytes they hold.
+    NphGpuUploadPending *pending;
+    u32 pending_count;
+    u32 pending_cap;
+    u64 pending_bytes;
 } NphGpuUploadState;
 
 // ---------------------------------------------------------------------------
@@ -494,6 +510,14 @@ NphResult gpu_indirect_counts_init(NphGpuDevice *dev);
 void gpu_upload_shutdown(NphGpuDevice *dev);
 // Called by frame_begin when `slot` has completed: releases its staging.
 void gpu_upload_release_slot(NphGpuDevice *dev, u32 slot);
+// The upload lock, and what the frame's switches do under it (frame.c):
+// the slot's staging released, its upload pools reset, a flush.
+void gpu_upload_lock(NphGpuDevice *dev);
+void gpu_upload_unlock(NphGpuDevice *dev);
+void gpu_upload_release_slot_locked(NphGpuDevice *dev, u32 slot);
+void gpu_upload_reset_pools_locked(NphGpuDevice *dev, u32 slot);
+void gpu_upload_reset_pools(NphGpuDevice *dev, u32 slot); // takes the lock
+NphResult gpu_upload_flush_locked(NphGpuDevice *dev);
 void gpu_upload_mark_frame_end(NphGpuDevice *dev, u32 slot);
 
 // Timelines
