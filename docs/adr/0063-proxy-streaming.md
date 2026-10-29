@@ -3,7 +3,8 @@
 - **Date:** 2026-10-28
 - **Status:** Accepted (ADR-0062's stage 3; the user's decisions of 2026-10-28: streaming
   next, and first a cheaper voxel encoding that keeps the far field's detail, else a
-  finer minimum; see "The encoding and the minimum")
+  finer minimum; see "The encoding and the minimum"). Amended 2026-10-29: a level is a
+  mesh of the renderer, with no level table ("Stage 2, a level is a mesh")
 
 ## Context
 
@@ -77,11 +78,11 @@ manager on the CPU, within a pool of fixed size.
 - **Which meshes:** proxies (meshes of voxels alone, ADR-0062). Shared meshes stay
   whole: their size is the assets' variety, which the content budgets hold, and their
   triangles feed the rays' bottom levels.
-- **Addressing.** A streamed mesh's level table on the GPU gives each level's block (its
-  place in the pool, or none) and the first index of each of its arrays; the shaders
-  that read a mesh's records by index (the walk, the culls, the rasters, the resolve)
-  find a level's block through it. The lists between the passes carry the cluster's
-  level, so the lookup is a read, not a search.
+- **Addressing** (amended: "Stage 2, a level is a mesh"). A streamed mesh's level table
+  on the GPU gives each level's block (its place in the pool, or none) and the first
+  index of each of its arrays; the shaders that read a mesh's records by index (the
+  walk, the culls, the rasters, the resolve) find a level's block through it. The lists
+  between the passes carry the cluster's level, so the lookup is a read, not a search.
 - **Requests.** The camera's instance cull (both phases) and the shadow map's, for each
   streamed instance they draw, compute the finest level its cut can use from its
   nearest distance (at a margin nearer, for prefetch) and the level table's errors, and
@@ -204,7 +205,9 @@ everywhere, denser than the game's valley, ruins and meadows.
    the landscape recooked, its views compared with the present encoding (images, frame
    times, memory).
 2. **The formats and the addressing:** levels as blobs, the level table, the shaders'
-   lookups, partial loads; everything still resident, images unchanged.
+   lookups, partial loads; everything still resident, images unchanged. (Amended: each
+   cluster carries its maker; a proxy's levels are meshes, a cell's proxy its levels'
+   instances; partial loads. "Stage 2, a level is a mesh".)
 3. **Streaming:** the requests, the manager, the pool, loading and eviction, the cut's
    clamp, the one-coarser residency out of view; tests (a level withheld is drawn
    coarser without holes; installs and evictions while frames are in flight).
@@ -259,6 +262,64 @@ GB after. The update's rays are the bottom levels' main readers; the likeliest r
 the driver placing what was made near the budget in slower memory until it moves it back
 (which `VK_EXT_memory_budget` does not show), not the encoding (the data are the same,
 and later the same). Stage 3's streaming lowers the peak; the transient is watched for.
+
+## Stage 2, a level is a mesh (2026-10-29)
+
+The addressing decided above (a level table through which every shader that reads a
+streamed mesh's records finds a level's block, and lists that carry each cluster's level)
+reaches into the walk, both culls, the voxel rasters, the resolve and the shadow map's
+splat. Working it out, we found that one read alone crosses from a level to another: a
+cluster's maker, the group of the finer level whose sphere and error the meshlet cull and
+the shadow map's test it by (the walk lists the clusters of a group too coarse; the culls
+keep those whose maker is fine). Everything else a level holds points into the level: its
+tree's nodes to its nodes and groups (each level has a tree of its own under the root,
+render/cluster_lod.h), its groups to its clusters, its clusters to their bricks, records
+and words.
+
+Nanite's clusters carry their maker's sphere and error, the LOD bounds and error of the
+group that made them (Karis et al. 2021), which is how its pages stand alone. Carried so,
+a level of a proxy is a mesh like any other: its clusters, the groups that consume them
+and their tree (node 0 its root), its voxels, every index its own. So we amend the
+addressing: **a streamed mesh's levels are meshes of the renderer, and a cell's proxy is
+its resident levels, each drawn by an instance of the cell's**.
+
+- **Each cluster carries its maker** on the GPU, every mesh's (`NphVisMesh.lod_makers`:
+  the spheres, then the errors; 20 bytes a cluster where its maker's index took 4; an
+  error of 0 at level 0). The culls read it with the cluster where they read the index
+  and then the group's record; the cut is the same, bit for bit.
+- **The formats:** the cooker writes a proxy's levels apart, each level's blobs under its
+  index as a mesh of voxels alone whose clusters' makers are given as records (the mesh
+  asset's version 6). A level is read and decompressed alone; the head (the header, the
+  submesh, the levels' table) loads with the scene.
+- **The cell** takes its proxy as its levels' meshes, each an instance the cell switch
+  draws or not as before (one record and one test for every level of the cell). The
+  walk, the culls, the rasters and the resolve take a level as any mesh: no shader
+  learns of levels, and no list carries one.
+- **The cut's clamp** (stage 3) is an instance's flag: the instance of the finest
+  resident level takes its makers as fine (the walk's prune by maker error and the
+  culls' maker test pass), so its clusters are drawn wherever their consumers are too
+  coarse. A DAG cut off below a level is a DAG: no hole opens.
+- **Requests** (stage 3) are the cell's: its record holds its levels' errors.
+
+Costs: 16 bytes a cluster more (14 MB on the landscape's shared meshes, 26 MB on its
+proxies: 1.7 %), and an instance a level (seven a cell on the landscape where one), each
+an instance cull's test and a root for the walk.
+
+Alternatives: the level table, as decided before (every reading shader changed, the lists
+widened, and a cross-level read left in the culls, whose consistency, a leaf's smallest
+maker error against the finer level's groups, the renderer could not check from one level
+alone); the makers' groups copied into each level (32 bytes a maker, more than the
+records); the records resident and the voxels alone streamed (1.30 GB of records in a
+4 km world, which grows with the world).
+
+Measured (each cluster's maker on the GPU; the synthetic scenes at native 4K on the RTX
+3060 Ti, four interleaved rounds of each build): the meshlet cull 0.8 to 1.0 us faster a
+phase, the shadow map's 0.5 to 1.2 us; every other pass and the frames within noise; the
+images the same (the golden and level-of-detail tests). A first layout with the errors'
+address beside the spheres' grew the mesh record to 208 bytes from 192, and the sun's
+shadow raster ran 0.02 to 0.05 ms slower in every round; the errors now follow the
+spheres in one buffer, found from the record's count of clusters, and the record stays
+192 bytes.
 
 ## References
 
