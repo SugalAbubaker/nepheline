@@ -1191,6 +1191,110 @@ NTEST_F(Cells, culling_the_cells_first_draws_what_every_slot_does)
     grove_free(&g);
 }
 
+// The sun's shadow map drawn afresh (the sun turned and back drops every
+// page) until it settles, each frame's caster draws summed, and the last
+// image kept in `out`.
+typedef struct MapDrawn {
+    u32 pages;
+    u32 draws;
+    u32 voxel_draws;
+} MapDrawn;
+
+static MapDrawn map_afresh(RenderFixture *f, NphRenderLight sun, NphRenderLightDesc *ld,
+                           const NphRenderView *v, u8 *out)
+{
+    const NphVec3 direction = ld->direction;
+    ld->direction = nph_vec3_normalize(nph_vec3_add(direction, nph_vec3(0.0F, 0.0F, 0.2F)));
+    NTEST_ASSERT_EQ_INT(nph_render_light_update(f->renderer, sun, ld), NPH_RESULT_OK);
+    (void)test_render_read(f, v);
+    ld->direction = direction;
+    NTEST_ASSERT_EQ_INT(nph_render_light_update(f->renderer, sun, ld), NPH_RESULT_OK);
+    MapDrawn d;
+    memset(&d, 0, sizeof d);
+    u32 quiet = 0U;
+    for (u32 i = 0; i < 64U && quiet <= NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        const NphRenderFrameStats st = test_render_read(f, v);
+        // The statistics come NPH_GPU_FRAMES_IN_FLIGHT frames late: the
+        // frames before them are the turned sun's.
+        if (i >= NPH_GPU_FRAMES_IN_FLIGHT) {
+            d.pages += st.vsm_drawn;
+            d.draws += st.vsm_draws;
+            d.voxel_draws += st.vsm_voxel_draws;
+        }
+        quiet = i >= NPH_GPU_FRAMES_IN_FLIGHT && st.vsm_drawn == 0U ? quiet + 1U : 0U;
+    }
+    NTEST_ASSERT_GT_UINT(quiet, NPH_GPU_FRAMES_IN_FLIGHT);
+    memcpy(out, f->pixels, PIXELS);
+    return d;
+}
+
+// The sun's shadow map culls the cells first too (ADR-0064): over the field
+// of grove cells, from near (its instances in the fine levels, its proxies
+// in the coarse) and far, the map drawn afresh with the cells first and
+// over every instance slot draws the same casters, pages and image, byte for
+// byte.
+NTEST_F(Cells, the_shadow_map_culls_the_cells_first_as_every_slot)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!nph_renderer_virtual_shadows_supported(f->renderer)) {
+        NTEST_SKIP("no virtual shadow map on this device");
+    }
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    Scene floor;
+    scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+    NphRenderLightDesc sun = sun_desc(true);
+    const NphRenderLight light = make_light(f, &sun);
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, false, GROVE_CELL / 64.0F, 30.0F, &gl, 1U);
+    GroveField field;
+    grove_field_build(f, &s, &field, GROVE_CELL / 64.0F, 30.0F);
+    static u8 every[PIXELS];
+    static u8 cells[PIXELS];
+    const f64 distances[2] = {20.0, 80.0};
+    for (u32 k = 0; k < 2U; ++k) {
+        const NphRenderCamera cam = nph_render_camera_look_at(
+            nph_dvec3(0.0, 0.5 * distances[k], distances[k]), nph_dvec3(0.0, 0.0, 0.0),
+            nph_vec3(0.0F, 1.0F, 0.0F), 0.9F, 0.05F);
+        NphRenderView v;
+        shadow_view(&v, cam, 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
+        v.lod_error = 1.0F;
+        v.anti_aliasing = NPH_RENDER_AA_NONE;
+        v.ao_radius = 0.0F;
+        v.gi = 0;
+        f->renderer->vis.cells_first_off = 1;
+        const MapDrawn b = map_afresh(f, light, &sun, &v, every);
+        f->renderer->vis.cells_first_off = 0;
+        const MapDrawn a = map_afresh(f, light, &sun, &v, cells);
+        u32 differing = 0U;
+        for (u64 i = 0; i < PIXELS; ++i) {
+            differing += cells[i] != every[i] ? 1U : 0U;
+        }
+        NTEST_LOG("from %.0f m: %u pages, %u draws, %u voxel draws drawn afresh (every slot: %u, "
+                  "%u, %u); %u bytes differ",
+                  distances[k], a.pages, a.draws, a.voxel_draws, b.pages, b.draws, b.voxel_draws,
+                  differing);
+        NTEST_EXPECT_GT_UINT(a.pages, 0U);
+        NTEST_EXPECT_GT_UINT(a.draws + a.voxel_draws, 0U);
+        NTEST_EXPECT_EQ_UINT(a.pages, b.pages);
+        NTEST_EXPECT_EQ_UINT(a.draws, b.draws);
+        NTEST_EXPECT_EQ_UINT(a.voxel_draws, b.voxel_draws);
+        NTEST_EXPECT_EQ_UINT(differing, 0U);
+    }
+    grove_field_free(f, &field);
+    grove_scene_free(f, &s);
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_instance_destroy(f->renderer, floor.floor);
+    nph_render_instance_destroy(f->renderer, floor.occluder);
+    nph_render_material_destroy(f->renderer, floor.grey);
+    nph_render_mesh_destroy(f->renderer, floor.cube);
+    nph_render_mesh_destroy(f->renderer, floor.plane);
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
 // ---------------------------------------------------------------------------
 // Cells
 // ---------------------------------------------------------------------------

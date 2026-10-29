@@ -20,6 +20,16 @@
 //     visibility buffer's indirect raster does. A voxel cluster's draws go
 //     to a list of their own (NphVsmView.voxel_draws), which the voxel
 //     casters' splat takes (vsm_voxel_splat.comp; ADR-0061).
+//   CELLS_TEST, CELLS_EXPAND: where cells come first (ADR-0064), before the
+//     instance cull, an invocation per cell slot and level with pages to
+//     draw (z): a cell whose box (its sphere) touches none of the level's
+//     pages to draw lists nothing, its members' bounds lying in its box; one
+//     that does lists its proxy's run where the level draws it as its proxy
+//     (vsm_cell_proxied, the instance cull's own test), else its members',
+//     as a (cell, level) pair with its items' places reserved. Then a
+//     workgroup per listed pair writes its run's slots as (instance, level)
+//     items, which the instance cull takes, and then the instances of no
+//     cell at each level with pages to draw, in place of every slot.
 //   CELLS: an invocation per cell slot (NphVisPush.arg0 of them) and level
 //     (z): a cell drawn into the level as its proxy whose box touches a
 //     page this frame's pixels need asks for the level of its proxy the
@@ -54,13 +64,36 @@ layout(constant_id = 0) const bool k_voxels = false;
 
 void cull_instances(VisViewRef view, VsmViewRef r)
 {
-    const int level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
     VsmCountersRef counters = VsmCountersRef(r.v.counters);
-    const uint slot = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
-                      gl_LocalInvocationIndex;
+    const uint id = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                    gl_LocalInvocationIndex;
+    // Where cells come first, the cells' items, each its instance and level,
+    // then the instances of no cell at each level with pages to draw; else
+    // every instance slot at the level the dispatch's z names.
+    uint slot = 0xFFFFFFFFu;
+    int level = 0;
+    if (view.v.cell_slots != 0u) {
+        const uint listed = min(counters.c.cell_work, r.v.max_cell_work);
+        if (id < listed) {
+            const uint item = VisUintRef(r.v.cell_work).v[id];
+            slot = item & 0x0FFFFFFFu;
+            level = int(item >> 28u);
+        } else if (view.v.loose_count != 0u) {
+            const uint k = id - listed;
+            const uint z = k / view.v.loose_count;
+            if (z < VsmArgsRef(r.v.args).a.cell_test_args[2]) {
+                slot = VisUintRef(view.v.cell_members)
+                           .v[view.v.loose_first + (k - z * view.v.loose_count)];
+                level = int(VsmArgsRef(r.v.args).a.levels[z]);
+            }
+        }
+    } else {
+        level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
+        slot = id < view.v.instance_count ? id : 0xFFFFFFFFu;
+    }
     uint meshlets = 0u;
     bool walk = false; // its hierarchy's root to the walk, in place of its meshlets
-    if (slot < view.v.instance_count) {
+    if (slot != 0xFFFFFFFFu) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         bool shown = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u;
         const uint cell = inst.flags >> NPH_VIS_INSTANCE_CELL_SHIFT;
@@ -113,8 +146,16 @@ void cull_instances(VisViewRef view, VsmViewRef r)
     uint base = 0u;
     if (total != 0u && subgroupElect()) {
         base = atomicAdd(counters.c.meshlet_count, total);
-        // The workgroup's level is the dispatch's z: one for all its lanes.
-        atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], total);
+    }
+    // Each level's items for the page budget: one level for the subgroup
+    // where the dispatch's z names it (or its items share one), else each
+    // lane's own (the cells' items are of any level).
+    if (subgroupAllEqual(level)) {
+        if (total != 0u && subgroupElect()) {
+            atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], total);
+        }
+    } else if (meshlets != 0u) {
+        atomicAdd(counters.c.level_cost[level][NPH_VSM_COST_ITEMS], meshlets);
     }
     base = subgroupBroadcastFirst(base);
     const uint rounds = (total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
@@ -129,12 +170,13 @@ void cull_instances(VisViewRef view, VsmViewRef r)
         }
         const uint owner_slot = subgroupShuffle(slot, owner);
         const uint owner_first = subgroupShuffle(first, owner);
+        const int owner_level = subgroupShuffle(level, owner);
         if (k < total) {
             const uint index = base + k;
             if (index < r.v.max_meshlets) {
                 // The meshlet stays under 2^24: no carry into the level.
                 VsmUvec2Ref(r.v.meshlets).v[index] =
-                    uvec2(owner_slot, (k - owner_first) | (uint(level) << 24u));
+                    uvec2(owner_slot, (k - owner_first) | (uint(owner_level) << 24u));
             } else {
                 atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
             }
@@ -312,6 +354,63 @@ void cull_cells(VisViewRef view, VsmViewRef r)
     }
 }
 
+// Cells first (ADR-0064): the cells to list at a level with pages to draw
+// (see the file comment).
+void cull_cells_test(VisViewRef view, VsmViewRef r)
+{
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    const int level = int(VsmArgsRef(r.v.args).a.levels[gl_WorkGroupID.z]);
+    const uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                   gl_LocalInvocationIndex;
+    uint run_first = 0u;
+    uint count = 0u;
+    if (i < view.v.cell_slots) {
+        const NphVisCellRun run = VisCellRunsRef(view.v.cell_runs).r[i];
+        // A live cell's proxy has an instance at least; a dead slot's none.
+        if (run.proxy_count != 0u) {
+            VisCellsRef cells = VisCellsRef(view.v.cells);
+            const vec3 centre = (cells.c[i].center_high.xyz - view.v.camera_high.xyz) +
+                                (cells.c[i].center_low.xyz - view.v.camera_low.xyz);
+            if (vsm_touches_render(r, level, vsm_light_space(r, centre),
+                                   length(cells.c[i].extent.xyz))) {
+                const bool proxied = vsm_cell_proxied(view, r, level, i + 1u);
+                run_first = proxied ? run.proxies : run.members;
+                count = proxied ? run.proxy_count : run.member_count;
+            }
+        }
+    }
+    uint base = 0u;
+    VIS_RESERVE(counters.c.cell_work, count, base);
+    uint record = 0u;
+    VIS_RESERVE(counters.c.cells_listed, count != 0u ? 1u : 0u, record);
+    if (count != 0u && record < r.v.max_cell_listed) {
+        VsmUvec4Ref(r.v.cell_listed).v[record] = uvec4(base, run_first, count, uint(level));
+    }
+}
+
+// A listed (cell, level) pair's run as (instance, level) items, a workgroup
+// a pair: many at once hide the loads' latency.
+void cull_cells_expand(VisViewRef view, VsmViewRef r)
+{
+    VsmCountersRef counters = VsmCountersRef(r.v.counters);
+    const uint record = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (record >= min(counters.c.cells_listed, r.v.max_cell_listed)) {
+        return;
+    }
+    const uvec4 l = VsmUvec4Ref(r.v.cell_listed).v[record];
+    VisUintRef entries = VisUintRef(view.v.cell_members);
+    VisUintRef work = VisUintRef(r.v.cell_work);
+    for (uint j = gl_LocalInvocationIndex; j < l.z; j += 64u) {
+        if (l.x + j < r.v.max_cell_work) {
+            work.v[l.x + j] = entries.v[l.y + j] | (l.w << 28u);
+        } else {
+            // Past the list: these casters are left out, and the fixup keeps
+            // the frame's pages dirty to be drawn again.
+            atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_MESHLETS));
+        }
+    }
+}
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -320,6 +419,10 @@ void main()
         cull_instances(view, r);
     } else if (pc.mode == NPH_VSM_CULL_CELLS) {
         cull_cells(view, r);
+    } else if (pc.mode == NPH_VSM_CULL_CELLS_TEST) {
+        cull_cells_test(view, r);
+    } else if (pc.mode == NPH_VSM_CULL_CELLS_EXPAND) {
+        cull_cells_expand(view, r);
     } else {
         cull_meshlets(view, r);
     }

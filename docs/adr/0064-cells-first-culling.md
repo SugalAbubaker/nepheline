@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-29
 - **Status:** Accepted (from ADR-0063 stage 4's measurements; built in stages: the runs and
-  the camera's cell cull, measured below; the shadow map's next)
+  the camera's cell cull, then the shadow map's, each measured below)
 
 ## Context
 
@@ -155,3 +155,40 @@ detail, and with a member made 20 m off its cell's box, which the box grows over
 the box sent again, that member is culled and the test fails).
 
 Stage 3 remains: the shadow map's instance cull, 426 µs turning in the 4 x 3 world.
+
+## Stage 3, the shadow map's cells (2026-10-29)
+
+Built as decided, in the same two steps as the camera's: `vsm cull cells` runs an
+invocation per cell slot and level with pages to draw. It tests the cell's box, as a
+sphere in light space, against the level's pages to draw, and lists the proxy's run
+where the level draws the cell as its proxy, else the members': one run, since the
+instance cull would keep only one of them there. The pair's place among the items is
+reserved a subgroup's together. `vsm expand cells` writes each listed pair's run as
+(instance, level) items, a workgroup a pair, and `vsm cull instances` takes them, and
+the instances of no cell at each level with pages to draw.
+
+The items carry their own levels, so the instance cull's meshlet items take their
+owner's level (a shuffle), and each level's cost for the page budget is added per
+subgroup where its items share a level, else per lane. Past the item list (twice the
+instances), casters are left out and the fixup keeps the frame's pages dirty, as for the
+meshlet list.
+
+**Measured** (the shadow map's instance culling: the cells' test, their expansion and the
+instance cull):
+
+| View | 4 x 3 world, before | after | landscape alone, before | after |
+|---|---|---|---|---|
+| still | 5.6 µs | 16.2 µs | 5.6 µs | 16.0 µs |
+| walk | 49 (p99 232) | 20 (p99 31) | 10.5 | 19.9 |
+| sprint | 123 (p99 447) | 24 (p99 34) | 17.0 | 23.5 |
+| turn | 426 (p99 791) | 30 (p99 37) | 41.7 | 28.6 |
+
+The rest of the map's passes are unchanged, and the frames as before within their spread.
+A frame that draws no page pays the three passes' fixed cost (each an argument dispatch
+and a barrier): 16 µs where 6. With the camera's stage, the landscape alone is still
+ahead (phase 0 gained 80 µs). Folding the expansion's arguments into a persistent
+expansion would take one argument pass off; it is not done yet.
+
+In `test_vis_cells.c` the map drawn afresh over the field of cells, from 20 and 80 m,
+draws the same pages, draws, voxel draws and image, byte for byte, as over every slot.
+With the items' levels dropped, the voxel draws fall to none and the image differs.

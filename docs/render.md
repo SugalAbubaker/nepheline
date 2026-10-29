@@ -341,7 +341,8 @@ something it shows changes.
 | `vsm collect` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones) |
 | `vsm select` | the wanted pages to draw this frame within the page budget, the coarse levels first ("Overflow and the page budget", below): a dirty page granted is drawn, a new one takes a free page, else an evictable one, and is drawn; the rest wait for a later frame |
 | `vsm cell requests` | while the renderer holds cells: every cell slot at every level (an invocation each), a cell drawn into the level as its proxy whose box reaches a page this frame's pixels need asks for its proxy's level ("Cell proxies", Requests) |
-| `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page; a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
+| `vsm cull cells`, `vsm expand cells` | while the renderer holds cells ("Cell proxies", Cells first): for each level with pages to draw, each cell slot's box (its sphere) against those pages; a cell touching one lists its proxy's run where the level draws it as its proxy, else its members', and a workgroup a listed (cell, level) pair writes its run as (instance, level) items |
+| `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page (the cells' items and those of no cell at each level, or every slot without cells); a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
 | `vsm voxel splat`, `vsm voxel merge` | while the renderer holds voxel meshes: the voxel clusters' casters splatted into a depth image of their own, a workgroup per (cluster, page), then taken into the pages drawn, whose depth test keeps the nearer of theirs and the triangles' ("Voxel casters", below) |
@@ -1106,7 +1107,16 @@ without levels of detail (`test_vis_cells.c`). In the landscape tiled into a
 world of the game's size (591,189 instance slots, 4,608 cells), phase 0's
 culling takes 43 µs where 137 (the cells' test 7.8, their expansion 7.4, the
 instances 25.5); in the landscape alone 67 µs where 147, with the frame as
-it was in interleaved runs.
+it was in interleaved runs. The sun's shadow map culls the cells first too,
+at each level with pages to draw: `vsm cull cells` tests each cell's box
+against the level's pages to draw and lists its proxy's run where the level
+draws it as its proxy, else its members', `vsm expand cells` writes the
+listed runs as (instance, level) items, and `vsm cull instances` takes them
+and the instances of no cell at each level. Its pages hold the same casters
+(`test_vis_cells.c`: the same draws, voxel draws, pages and image, the map
+drawn afresh). Turning in the 4 x 3 world, its instance culling takes 30 µs
+where 426 (p99 37 where 791); sprinting 24 where 123; but a frame that draws
+no page pays the three passes' fixed cost, 16 µs where 6.
 
 **Levels apart** (ADR-0063 "Stage 2, a level is a mesh"). A proxy is one mesh
 holding all its levels, or its levels apart, up to

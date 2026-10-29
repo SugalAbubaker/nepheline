@@ -35,7 +35,6 @@
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
-NPH_BUFFER_REF(VisCellRunsRef) { NphVisCellRun r[]; };
 NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
 
 // Whether a box (camera-relative centre, half extents) is in the frustum: on

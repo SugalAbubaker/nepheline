@@ -1948,6 +1948,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     g.cell_members = nph_gpu_rg_import_buffer(graph, v->cell_members);
     g.cell_work = nph_gpu_rg_import_buffer(graph, v->cell_work);
     g.cell_listed = nph_gpu_rg_import_buffer(graph, v->cell_listed);
+    f->cell_runs = g.cell_runs;
+    f->cell_members = g.cell_members;
     f->instances = g.instances;
     f->prev_transforms = g.prev_transforms;
     f->clusters = g.clusters;

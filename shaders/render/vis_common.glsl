@@ -28,6 +28,7 @@ NPH_BUFFER_REF(VisInstanceRef) { NphVisInstance i; };
 NPH_BUFFER_REF(VisMeshRef) { NphVisMesh m; };
 NPH_BUFFER_REF(VisDrawsRef) { NphVisDraw d[]; };
 NPH_BUFFER_REF(VisUintRef) { uint v[]; };
+NPH_BUFFER_REF(VisCellRunsRef) { NphVisCellRun r[]; }; // the cells' runs (ADR-0064)
 NPH_BUFFER_REF(VisUvec2Ref) { uvec2 v[]; };
 NPH_BUFFER_REF(VisFloatRef) { float v[]; };
 NPH_BUFFER_REF(VisVec4Ref) { vec4 v[]; };

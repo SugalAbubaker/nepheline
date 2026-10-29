@@ -43,10 +43,11 @@
 NPH_STATIC_ASSERT(sizeof(NphVsmEntry) == 16U, "NphVsmEntry matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmPhys) == 8U, "NphVsmPhys matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmLevel) == 48U, "NphVsmLevel matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 528U, "NphVsmCounters matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 224U, "NphVsmArgs matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmCounters) == 544U, "NphVsmCounters matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmArgs) == 256U, "NphVsmArgs matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVsmBudget) == 256U, "NphVsmBudget matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1096U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVsmView) == 1120U, "NphVsmView matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVsmView, cell_listed) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(NPH_VSM_WANTED_ENTRY + 1U == NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES &&
                       (NPH_VSM_WANTED_ENTRY & NPH_VSM_WANTED_ALLOC) == 0U,
                   "a wanted page's entry and its flag");
@@ -142,6 +143,14 @@ static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out
     if (vis_draws) {
         at += (u64)d->max_vsm_draws * sizeof(NphVisDraw);
     }
+    // Cells first (ADR-0064): a cell can be listed for every level, and the
+    // items are an instance a level, twice the instances in all (more is an
+    // overflow, whose pages are drawn again).
+    at = align_up(at, 16U);
+    out->cell_listed = at;
+    at += (u64)nph_max_u32(d->max_cells, 1U) * NPH_VSM_LEVELS * 16U;
+    out->cell_work = at;
+    at += 2ULL * d->max_instances * sizeof(u32);
     out->size = align_up(at, 16U);
 }
 
@@ -515,6 +524,10 @@ bool render_vsm_frame_begin(NphRenderer *r, const NphRenderView *view, const Nph
     vv->args = work + lo->args;
     vv->wanted = work + lo->wanted;
     vv->budget = work + lo->budget;
+    vv->cell_listed = work + lo->cell_listed;
+    vv->cell_work = work + lo->cell_work;
+    vv->max_cell_work = 2U * r->desc.max_instances;
+    vv->max_cell_listed = nph_max_u32(r->desc.max_cells, 1U) * (u32)NPH_VSM_LEVELS;
     vv->pool_pages = v->pool_pages;
     vv->pool_index = nph_gpu_image_sampled_index(r->dev, v->pool);
     // Clamped to the edge (the samples stay inside their pages anyway).
@@ -728,6 +741,64 @@ static void collect_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphRenderer *r = (NphRenderer *)user;
     pages_record(r, cmd, NPH_VSM_PAGES_COLLECT, 0U, 0U);
     dispatch_items(cmd, r->vsm.pool_pages);
+}
+
+// An argument pass's writes made the dispatches' after it.
+static void args_barrier(NphGpuCmd *cmd)
+{
+    const NphGpuMemoryBarrier m = {(u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
+                                   (u32)NPH_GPU_STAGE_INDIRECT | (u32)NPH_GPU_STAGE_COMPUTE,
+                                   (u32)NPH_GPU_ACCESS_INDIRECT_READ |
+                                       (u32)NPH_GPU_ACCESS_SHADER_READ};
+    NphGpuBarrierDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.memory = &m;
+    bd.memory_count = 1U;
+    nph_gpu_cmd_barrier(cmd, &bd);
+}
+
+// Cells first (ADR-0064): the levels with pages to draw, then the cells'
+// test against them.
+static void cull_cells_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVsm *v = &r->vsm;
+    const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
+    pages_record(r, cmd, NPH_VSM_PAGES_ARGS, NPH_VSM_ARGS_INSTANCE, 0U);
+    nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+    args_barrier(cmd);
+    const NphVisPush p = push_of(r, NPH_VSM_CULL_CELLS_TEST, 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, v->cull);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(cell_test_args));
+}
+
+// The listed (cell, level) pairs' runs as the instance cull's items.
+static void expand_cells_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVsm *v = &r->vsm;
+    const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
+    pages_record(r, cmd, NPH_VSM_PAGES_ARGS, NPH_VSM_ARGS_CELLS, 0U);
+    nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+    args_barrier(cmd);
+    const NphVisPush p = push_of(r, NPH_VSM_CULL_CELLS_EXPAND, 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, v->cull);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(cell_expand_args));
+}
+
+// The instance cull over the cells' items and the instances of no cell
+// (its arguments the expansion's pass wrote).
+static void cull_listed_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVsm *v = &r->vsm;
+    const NphGpuBuffer work = nph_gpu_rg_buffer(graph, v->frame.work);
+    const NphVisPush p = push_of(r, NPH_VSM_CULL_INSTANCES, 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, v->cull);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, work, v->layout.args + ARGS_OFFSET(instance_args));
 }
 
 static void cull_instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -1088,22 +1159,32 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
         b32 casters;   // reads the instances and meshes
         b32 voxel_out; // writes the voxel casters' list
         b32 indirect;  // dispatched with arguments the pass before wrote
+        b32 cells;     // reads the cells' runs (ADR-0064)
     } VsmPass;
-    VsmPass passes[7U + 2U * RENDER_LOD_MAX_DEPTH];
+    VsmPass passes[9U + 2U * RENDER_LOD_MAX_DEPTH];
     u32 n = 0U;
-    passes[n++] = (VsmPass){"vsm update", update_execute, 0, 0, 0};
-    passes[n++] = (VsmPass){"vsm collect", collect_execute, 0, 0, 0};
-    passes[n++] = (VsmPass){"vsm select", select_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm update", update_execute, 0, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm collect", collect_execute, 0, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm select", select_execute, 0, 0, 0, 0};
     if (r->vis.cell_slots != 0U) {
-        passes[n++] = (VsmPass){"vsm cell requests", cell_requests_execute, 0, 0, 0};
+        passes[n++] = (VsmPass){"vsm cell requests", cell_requests_execute, 0, 0, 0, 0};
     }
-    passes[n++] = (VsmPass){"vsm cull instances", cull_instances_execute, 1, 0, 0};
+    if (r->vis.frame.cells_first) {
+        // The cells first (ADR-0064), then the instances they list and those
+        // of no cell.
+        passes[n++] = (VsmPass){"vsm cull cells", cull_cells_execute, 0, 0, 0, 1};
+        passes[n++] = (VsmPass){"vsm expand cells", expand_cells_execute, 0, 0, 1, 1};
+        passes[n++] = (VsmPass){"vsm cull instances", cull_listed_execute, 1, 0, 1, 1};
+    } else {
+        passes[n++] = (VsmPass){"vsm cull instances", cull_instances_execute, 1, 0, 0, 0};
+    }
     const u32 steps = v->lods ? render_vis_lod_steps(r) : 0U;
     for (u32 i = 0; i < steps; ++i) {
-        passes[n++] = (VsmPass){"vsm cull nodes", k_steps[i % (u32)NPH_VSM_NODE_QUEUES], 1, 0, 1};
+        passes[n++] =
+            (VsmPass){"vsm cull nodes", k_steps[i % (u32)NPH_VSM_NODE_QUEUES], 1, 0, 1, 0};
     }
-    passes[n++] = (VsmPass){"vsm cull meshlets", cull_meshlets_execute, 1, 1, 0};
-    passes[n++] = (VsmPass){"vsm fixup", fixup_execute, 0, 0, 0};
+    passes[n++] = (VsmPass){"vsm cull meshlets", cull_meshlets_execute, 1, 1, 0, 0};
+    passes[n++] = (VsmPass){"vsm fixup", fixup_execute, 0, 0, 0, 0};
     for (u32 i = 0; i < n; ++i) {
         NphGpuRgPass *p =
             add_pass(graph, r, passes[i].name, NPH_GPU_RG_PASS_COMPUTE, passes[i].execute);
@@ -1121,6 +1202,11 @@ NphResult render_vsm_declare_pages(NphRenderer *r, NphGpuRenderGraph *graph,
             nph_gpu_rg_read_buffer(p, meshes, NPH_GPU_RG_USE_SHADER_READ);
             // The cells, whose proxies the instance cull switches (ADR-0062).
             nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
+        }
+        if (passes[i].cells) {
+            nph_gpu_rg_read_buffer(p, r->vis.frame.cells, NPH_GPU_RG_USE_SHADER_READ);
+            nph_gpu_rg_read_buffer(p, r->vis.frame.cell_runs, NPH_GPU_RG_USE_SHADER_READ);
+            nph_gpu_rg_read_buffer(p, r->vis.frame.cell_members, NPH_GPU_RG_USE_SHADER_READ);
         }
         if (passes[i].execute == cell_requests_execute) {
             // The cells, and their proxies' levels asked for (ADR-0063 stage 3).
