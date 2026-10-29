@@ -7,6 +7,9 @@
 Each budget is the recorded median GPU time plus the 5 % regression allowance
 of CLAUDE.md §10.7, with a 50 µs floor on the sub-0.2 ms entries so that
 timestamp jitter cannot fail them. timestamp_resolution is not budgeted.
+The sparse binding benchmarks time a driver's queue operation on the host,
+not commands on the GPU: theirs is twice the recorded median
+(docs/adr/0065-virtual-texturing.md).
 Re-baselining (a new driver, a new reference run) is: run gpu_bench on the
 reference machine with --repeats=20 --json, commit the JSON under
 benchmarks/results/, run this script, and record the change in an ADR.
@@ -21,6 +24,9 @@ ALLOWANCE = 0.05
 FLOOR_NS = 50_000
 FLOOR_BELOW_NS = 200_000
 SKIP = {"timestamp_resolution"}
+# Host-timed driver queue operations and their allowance.
+HOST_TIMED = {"sparse_bind_64_pages", "sparse_unbind_64_pages"}
+HOST_ALLOWANCE = 1.0
 
 
 def main() -> int:
@@ -35,6 +41,7 @@ def main() -> int:
         print(f"{args.results}: not a gpu_bench result", file=sys.stderr)
         return 1
 
+    host = []
     lines = [
         "# GPU benchmark budgets: maximum median GPU nanoseconds per run of each",
         "# benchmark in benchmarks/gpu (docs/benchmarks.md \"GPU benchmarks\"),",
@@ -51,14 +58,27 @@ def main() -> int:
         if name in SKIP:
             continue
         median = float(entry["ns_per_op"])
+        if name in HOST_TIMED:
+            budget = median * (1.0 + HOST_ALLOWANCE)
+            host.append(f"{name:<30} {int(math.ceil(budget / 1000.0)) * 1000}")
+            continue
         budget = median * (1.0 + ALLOWANCE)
         if median < FLOOR_BELOW_NS:
             budget = max(budget, median + FLOOR_NS)
         lines.append(f"{name:<30} {int(math.ceil(budget / 1000.0)) * 1000}")
+    count = len(lines) - 9 + len(host)
+    if host:
+        lines += [
+            "",
+            "# Sparse binding (docs/adr/0065): the driver's queue operations, timed on the",
+            "# host from the call until the sparse timeline reaches its value. Twice the",
+            "# recorded median: a driver regression of that size would take the stream's",
+            "# 32 moves a frame past where stage 0 measured no stall.",
+        ] + host
 
     with open(args.output, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"wrote {args.output}: {len(lines) - 9} budgets")
+    print(f"wrote {args.output}: {count} budgets")
     return 0
 
 

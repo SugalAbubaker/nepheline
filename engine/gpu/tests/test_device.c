@@ -99,11 +99,11 @@ NTEST(gpu_device, optional_features_can_be_disabled)
     const NphGpuLimits have_limits = nph_gpu_device_info(full)->limits;
     NTEST_LOG("mesh %d, ray query %d, image atomic64 %d, buffer atomic64 %d, float16 %d, "
               "minmax %d, first instance %d, subgroup vote %d ballot %d arithmetic %d, "
-              "geometry shader %d",
+              "geometry shader %d, sparse residency %d",
               have.mesh_shader, have.ray_query, have.image_atomic_int64, have.buffer_atomic_int64,
               have.shader_float16, have.sampler_filter_minmax, have.draw_indirect_first_instance,
               have.subgroup_vote, have.subgroup_ballot, have.subgroup_arithmetic,
-              have.geometry_shader);
+              have.geometry_shader, have.sparse_residency);
     if (have.mesh_shader) {
         NTEST_EXPECT_GE_UINT(have_limits.max_mesh_output_vertices, 256U);
         NTEST_EXPECT_GE_UINT(have_limits.max_mesh_workgroup_invocations, 128U);
@@ -116,7 +116,8 @@ NTEST(gpu_device, optional_features_can_be_disabled)
     desc.disable_features =
         (u32)NPH_GPU_OPTIONAL_MESH_SHADER | (u32)NPH_GPU_OPTIONAL_RAY_QUERY |
         (u32)NPH_GPU_OPTIONAL_IMAGE_ATOMIC_INT64 | (u32)NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64 |
-        (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16 | (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX;
+        (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16 | (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX |
+        (u32)NPH_GPU_OPTIONAL_SPARSE_RESIDENCY;
     NphGpuDevice *bare = test_gpu_create(&desc);
     NTEST_ASSERT_NOT_NULL(bare);
     const NphGpuDeviceInfo *info = nph_gpu_device_info(bare);
@@ -126,6 +127,7 @@ NTEST(gpu_device, optional_features_can_be_disabled)
     NTEST_EXPECT_FALSE(info->features.buffer_atomic_int64);
     NTEST_EXPECT_FALSE(info->features.shader_float16);
     NTEST_EXPECT_FALSE(info->features.sampler_filter_minmax);
+    NTEST_EXPECT_FALSE(info->features.sparse_residency);
     NTEST_EXPECT_EQ_UINT(info->limits.max_mesh_output_vertices, 0U);
     // What is not optional stays as it was.
     NTEST_EXPECT_EQ_INT(info->features.subgroup_ballot, have.subgroup_ballot);
@@ -257,7 +259,7 @@ NTEST(gpu_device, timeline_pool_is_bounded)
     NphGpuDeviceDesc desc;
     memset(&desc, 0, sizeof desc);
     desc.headless = 1;
-    desc.max_timelines = 4U; // raised to queues + 1 by the device
+    desc.max_timelines = 4U; // raised to the device's own (queues, sparse) + 1
     NphGpuDevice *dev = test_gpu_create(&desc);
     if (dev == NULL) {
         NTEST_SKIP("no Vulkan device available");

@@ -70,6 +70,7 @@ supersedes it and both link to each other.
 | [0062](0062-world-partition-hlod.md) | World partition: cells of static content and their far-field proxies (HLOD) | Accepted (built in stages; the first: the proxies, built by the cooker) |
 | [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
 | [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
+| [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (stage 0 measured; built in stages from the gpu module's sparse images) |
 
 ## Template
 

@@ -23,6 +23,7 @@ raster_fill_4k_r11g11b10_x8    502000
 raster_fill_4k_rgba16f_x8      968000
 visbuffer_write_4k_8bpp        168000
 texture_sample_4k_rgba8        294000
+texture_sample_4k_rgba8_sparse 297000
 tonemap_4k                     211000
 taa_fragment_4k                794000
 taa_fragment_quad_4k           979000
@@ -32,3 +33,11 @@ taa_fragment_4k_rgba16f        820000
 taa_fragment_quad_4k_rgba16f   968000
 taa_fragment_cross_4k_rgba16f  707000
 taa_compute_4k_rgba16f         1066000
+
+# Sparse binding (docs/adr/0065): the driver's queue operations, timed on the
+# host from the call until the sparse timeline reaches its value
+# (2026-10-29: 0.33 to 0.37 ms and 0.47 to 0.49 ms). Twice the recorded
+# median: a driver regression of that size would take the stream's
+# 32 moves a frame past where stage 0 measured no stall.
+sparse_bind_64_pages           740000
+sparse_unbind_64_pages         980000

@@ -55,6 +55,9 @@ VkResult nph_gpu_alloc_bind_image(NphGpuAllocatorHandle allocator, NphGpuAllocat
 VkResult nph_gpu_alloc_bind_buffer(NphGpuAllocatorHandle allocator, NphGpuAllocation block,
                                    u64 offset, VkBuffer buffer);
 void nph_gpu_alloc_free(NphGpuAllocatorHandle allocator, NphGpuAllocation alloc);
+// The device memory an allocation lies in and where (sparse pages bind it).
+void nph_gpu_alloc_memory(NphGpuAllocatorHandle allocator, NphGpuAllocation alloc,
+                          VkDeviceMemory *out_memory, u64 *out_offset);
 
 void nph_gpu_alloc_set_frame(NphGpuAllocatorHandle allocator, u32 frame_index);
 void nph_gpu_alloc_stats(NphGpuAllocatorHandle allocator, NphGpuMemoryStats *out);

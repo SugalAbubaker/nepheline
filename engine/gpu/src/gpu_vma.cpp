@@ -180,6 +180,15 @@ extern "C" VkResult nph_gpu_alloc_bind_buffer(NphGpuAllocatorHandle allocator,
     return vmaBindBufferMemory2(as_vma(allocator), as_vma(block), offset, buffer, nullptr);
 }
 
+extern "C" void nph_gpu_alloc_memory(NphGpuAllocatorHandle allocator, NphGpuAllocation alloc,
+                                     VkDeviceMemory *out_memory, u64 *out_offset)
+{
+    VmaAllocationInfo info{};
+    vmaGetAllocationInfo(as_vma(allocator), as_vma(alloc), &info);
+    *out_memory = info.deviceMemory;
+    *out_offset = info.offset;
+}
+
 extern "C" void nph_gpu_alloc_free(NphGpuAllocatorHandle allocator, NphGpuAllocation alloc)
 {
     vmaFreeMemory(as_vma(allocator), as_vma(alloc));

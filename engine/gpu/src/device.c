@@ -71,8 +71,10 @@ static void fill_defaults(NphGpuDeviceDesc *d)
     if (d->deferred_destroy_capacity == 0U) {
         d->deferred_destroy_capacity = 4096U;
     }
-    if (d->max_timelines < NPH_GPU_MAX_QUEUES + 1U) {
-        d->max_timelines = NPH_GPU_MAX_QUEUES + 1U;
+    // The queues' timelines and the sparse bindings' are the device's own;
+    // one more leaves room for a caller's.
+    if (d->max_timelines < NPH_GPU_MAX_QUEUES + 2U) {
+        d->max_timelines = NPH_GPU_MAX_QUEUES + 2U;
     }
 }
 
@@ -379,6 +381,7 @@ typedef struct Candidate {
     u32 compute_family; // NPH_U32_MAX: none dedicated
     u32 transfer_family;
     u32 family_timestamp_bits[64];
+    b32 family_sparse[64]; // the family's queues bind sparse memory
     u32 family_count;
     i64 score;
     const char *reject;
@@ -486,6 +489,7 @@ static void query_candidate(Candidate *c, NphAllocator *alloc)
     for (u32 i = 0; i < fam_count; ++i) {
         const VkQueueFlags f = fams[i].queueFlags;
         c->family_timestamp_bits[i] = fams[i].timestampValidBits;
+        c->family_sparse[i] = (f & VK_QUEUE_SPARSE_BINDING_BIT) != 0U;
         const bool graphics = (f & VK_QUEUE_GRAPHICS_BIT) != 0U;
         const bool compute = (f & VK_QUEUE_COMPUTE_BIT) != 0U;
         const bool transfer = (f & VK_QUEUE_TRANSFER_BIT) != 0U;
@@ -800,6 +804,19 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     const bool want_buffer_atomic64 = (off & (u32)NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64) == 0U;
     const bool want_float16 = (off & (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16) == 0U;
     const bool want_minmax = (off & (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX) == 0U;
+    // Sparse residency (docs/adr/0065): images bound page by page from a
+    // queue that binds, sampled with a minimum level of detail and with
+    // residency codes, their unbound pages read as zeros.
+    const VkPhysicalDeviceSparseProperties *sp = &c->props.properties.sparseProperties;
+    const bool sparse = (off & (u32)NPH_GPU_OPTIONAL_SPARSE_RESIDENCY) == 0U && hf->sparseBinding &&
+                        hf->sparseResidencyImage2D && hf->shaderResourceMinLod &&
+                        hf->shaderResourceResidency && sp->residencyStandard2DBlockShape &&
+                        sp->residencyNonResidentStrict &&
+                        (c->family_sparse[transfer_family] || c->family_sparse[c->graphics_family]);
+    f2.features.sparseBinding = sparse ? VK_TRUE : VK_FALSE;
+    f2.features.sparseResidencyImage2D = sparse ? VK_TRUE : VK_FALSE;
+    f2.features.shaderResourceMinLod = sparse ? VK_TRUE : VK_FALSE;
+    f2.features.shaderResourceResidency = sparse ? VK_TRUE : VK_FALSE;
     f2.features.multiDrawIndirect = VK_TRUE;
     f2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     f2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
@@ -944,6 +961,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     feat->fill_mode_non_solid = vk_bool(hf->fillModeNonSolid);
     feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);
     feat->sampler_anisotropy = vk_bool(hf->samplerAnisotropy);
+    feat->sparse_residency = sparse;
     feat->pipeline_statistics = vk_bool(hf->pipelineStatisticsQuery);
     feat->async_compute = compute_distinct;
     feat->dedicated_transfer = transfer_distinct;
@@ -1017,6 +1035,11 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         dev->queues[NPH_GPU_QUEUE_TRANSFER] = tq;
     } else {
         dev->queues[NPH_GPU_QUEUE_TRANSFER] = g;
+    }
+    if (sparse) {
+        dev->sparse_queue = c->family_sparse[dev->queues[NPH_GPU_QUEUE_TRANSFER]->family]
+                                ? dev->queues[NPH_GPU_QUEUE_TRANSFER]
+                                : g;
     }
 
     gpu_set_name(dev, VK_OBJECT_TYPE_DEVICE, (u64)(uptr)dev->device, "nph device");
@@ -1542,6 +1565,9 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
         r = gpu_upload_init(dev);
     }
     if (r == NPH_RESULT_OK) {
+        r = gpu_sparse_init(dev);
+    }
+    if (r == NPH_RESULT_OK) {
         r = gpu_indirect_counts_init(dev);
     }
     if (r == NPH_RESULT_OK) {
@@ -1563,12 +1589,13 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                  info->features.dedicated_transfer ? ", dedicated transfer" : "");
     // Two records: a log record keeps 216 bytes.
     GPU_LOG_INFO("features: mesh shader %d, ray query %d, image atomic int64 %d, buffer atomic "
-                 "int64 %d, float16 %d, int64 %d, BC %d, filter minmax %d, first instance %d",
+                 "int64 %d, float16 %d, int64 %d, BC %d, filter minmax %d, first instance %d, "
+                 "sparse residency %d",
                  info->features.mesh_shader, info->features.ray_query,
                  info->features.image_atomic_int64, info->features.buffer_atomic_int64,
                  info->features.shader_float16, info->features.shader_int64,
                  info->features.texture_compression_bc, info->features.sampler_filter_minmax,
-                 info->features.draw_indirect_first_instance);
+                 info->features.draw_indirect_first_instance, info->features.sparse_residency);
     GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d; "
                  "fragment %d); bindless %u sampled / %u storage / %u samplers; push constants "
                  "%u B; timestamps %.3f ns",
@@ -1664,6 +1691,7 @@ static void destroy_partial(NphGpuDevice *dev)
         }
         gpu_frames_shutdown(dev);
         gpu_bindless_shutdown(dev);
+        gpu_sparse_shutdown(dev);
         if (dev->timelines != NULL) {
             for (u32 i = 0; i < dev->timeline_cap; ++i) {
                 gpu_timeline_destroy_internal(dev, &dev->timelines[i], false);
@@ -1788,7 +1816,9 @@ NphGpuLiveCounts nph_gpu_device_live_counts(const NphGpuDevice *dev)
             ++c.timelines;
         }
     }
-    c.timelines = c.timelines >= dev->queue_count ? c.timelines - dev->queue_count : 0U;
+    // The queues' own and the sparse bindings' are the device's.
+    const u32 own = dev->queue_count + (dev->sparse_timeline != NULL ? 1U : 0U);
+    c.timelines = c.timelines >= own ? c.timelines - own : 0U;
     c.pending_destroys = 0U;
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         c.pending_destroys += dev->frames[i].deferred_count;

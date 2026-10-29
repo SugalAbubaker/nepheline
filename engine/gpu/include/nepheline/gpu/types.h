@@ -270,6 +270,17 @@ typedef enum NphGpuImageUsage {
     NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT = 1U << 5U, // depth or depth-stencil target
 } NphGpuImageUsage;
 
+typedef enum NphGpuImageFlags {
+    // Sparse residency (docs/adr/0065): the image is created without memory,
+    // and its pages (the format's standard sparse block, 64 KiB) and its mip
+    // tail are bound to pages of an NphGpuPagePool by nph_gpu_sparse_bind
+    // (sparse.h). 2D, one layer, one sample, and no usage beyond SAMPLED,
+    // TRANSFER_DST and TRANSFER_SRC; NphGpuFeatures.sparse_residency. The
+    // image stays in NPH_GPU_LAYOUT_GENERAL, shared by every queue family,
+    // so a page can be copied while the others are sampled.
+    NPH_GPU_IMAGE_FLAG_SPARSE = 1U << 0U,
+} NphGpuImageFlags;
+
 typedef struct NphGpuImageDesc {
     NphGpuImageType type;
     NphGpuFormat format;
@@ -280,6 +291,7 @@ typedef struct NphGpuImageDesc {
     u32 layer_count; // 0: 1
     u32 samples;     // 0: 1 (MSAA counts are powers of two up to the device limit)
     u32 usage;       // NphGpuImageUsage bits
+    u32 flags;       // NphGpuImageFlags bits
     // UNDEFINED: `format`. Otherwise the format the sampled view and the
     // colour-attachment views read the image as, of the same texel size (a
     // 64-bit image sampled and rendered to as two 32-bit channels, an RGBA8

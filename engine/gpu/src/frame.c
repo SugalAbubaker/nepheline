@@ -321,6 +321,12 @@ void gpu_run_deferred(NphGpuDevice *dev, u32 slot)
         case NPH_GPU_DEFERRED_ALLOCATION:
             nph_gpu_alloc_free(dev->vma, e->alloc);
             break;
+        case NPH_GPU_DEFERRED_SPARSE_PAGE:
+            gpu_sparse_return_page((NphGpuPagePool *)e->handle, e->index);
+            break;
+        case NPH_GPU_DEFERRED_PAGE_POOL:
+            gpu_sparse_destroy_pool(dev, (NphGpuPagePool *)e->handle);
+            break;
         }
     }
 }
@@ -539,9 +545,10 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
     NphGpuFrameSlot *fs = &dev->frames[slot];
 
     // Wait for the frame that last used this slot, or, before the first
-    // frame, for everything submitted outside frames.
-    VkSemaphore sems[NPH_GPU_MAX_QUEUES];
-    u64 values[NPH_GPU_MAX_QUEUES];
+    // frame, for everything submitted outside frames: its queues' work and
+    // the sparse bindings made before its end.
+    VkSemaphore sems[NPH_GPU_MAX_QUEUES + 1U];
+    u64 values[NPH_GPU_MAX_QUEUES + 1U];
     u32 n = 0U;
     for (u32 q = 0; q < dev->queue_count; ++q) {
         NphGpuQueue *queue = &dev->queue_storage[q];
@@ -551,6 +558,16 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
                 : nph_atomic_load_u64(&queue->timeline->submitted, NPH_MEMORY_ORDER_ACQUIRE);
         if (value != 0U) {
             sems[n] = queue->timeline->vk;
+            values[n] = value;
+            ++n;
+        }
+    }
+    if (dev->sparse_timeline != NULL) {
+        const u64 value = fs->frame_index != NPH_U64_MAX
+                              ? fs->sparse_value
+                              : nph_atomic_load_u64(&dev->sparse_value, NPH_MEMORY_ORDER_ACQUIRE);
+        if (value != 0U) {
+            sems[n] = dev->sparse_timeline->vk;
             values[n] = value;
             ++n;
         }
@@ -592,6 +609,7 @@ NphResult nph_gpu_frame_begin(NphGpuDevice *dev)
     for (u32 q = 0; q < NPH_GPU_MAX_QUEUES; ++q) {
         fs->queue_values[q] = 0U;
     }
+    fs->sparse_value = 0U;
     nph_gpu_alloc_set_frame(dev->vma, (u32)next);
     return up;
 }
@@ -614,6 +632,7 @@ NphResult nph_gpu_frame_end(NphGpuDevice *dev)
         fs->queue_values[q] = nph_atomic_load_u64(&dev->queue_storage[q].timeline->submitted,
                                                   NPH_MEMORY_ORDER_ACQUIRE);
     }
+    fs->sparse_value = nph_atomic_load_u64(&dev->sparse_value, NPH_MEMORY_ORDER_ACQUIRE);
     gpu_upload_mark_frame_end(dev, dev->frame_slot);
     dev->last_frame_graphics_value = fs->queue_values[0];
     dev->frame_active = 0;

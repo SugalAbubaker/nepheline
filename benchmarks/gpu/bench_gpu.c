@@ -23,6 +23,7 @@
 // numbers are the hardware's, not the layer's.
 
 #include <nepheline/gpu/commands.h>
+#include <nepheline/gpu/sparse.h>
 #include <nepheline/gpu/upload.h>
 #include <nepheline/gpu/vk.h>
 #include <nepheline/math/pack.h>
@@ -40,6 +41,7 @@
 #define HEIGHT_4K    2160U
 #define MAX_REPEATS  64U
 #define BIG_BYTES    NPH_MIB(256)
+#define BIND_PAGES   64U                    // pages a binding benchmark binds and unbinds at once
 #define WARMUP_NS    (150ULL * 1000000ULL)  // per benchmark, before the measured frames
 #define PREWARM_NS   (1000ULL * 1000000ULL) // once, before the suite
 
@@ -92,6 +94,15 @@ typedef struct Ctx {
     NphGpuImage clear_target;
     NphGpuImage texture;
     NphGpuSampler sampler;
+    // Sparse residency (docs/adr/0065), where the device has it: `texture`
+    // again as a sparse image with every page bound, and an image and pages
+    // that the binding benchmarks bind and unbind.
+    b32 sparse;
+    NphGpuImage sparse_texture;
+    NphGpuPagePool *sparse_pool;
+    NphGpuImage bind_image;
+    NphGpuPagePool *bind_pool;
+    NphGpuPage bind_pages[BIND_PAGES];
     // The temporal resolve's inputs, filled with noise (the worst case for
     // the hardware's colour compression), and its new history.
     NphGpuImage hdr;                     // B10G11R11, the current frame
@@ -102,7 +113,11 @@ typedef struct Ctx {
 } Ctx;
 
 typedef struct Bench Bench;
+typedef struct Result Result;
 typedef void (*BenchRecordFn)(Ctx *ctx, const Bench *b, NphGpuCmd *cmd);
+// A benchmark of work no command buffer records (a queue operation), timed
+// on the host.
+typedef NphResult (*BenchHostFn)(Ctx *ctx, const Bench *b, u32 repeats, Result *out);
 
 struct Bench {
     const char *name;
@@ -110,6 +125,7 @@ struct Bench {
     f64 items;        // bytes, pixels, or FLOPs per iteration
     const char *unit; // "GB/s", "Gpix/s", "TFLOPS", or "ns"
     u32 param;        // benchmark-specific (working-set mask, instance count)
+    BenchHostFn host; // set: run instead of recording
 };
 
 // ---------------------------------------------------------------------------
@@ -197,8 +213,18 @@ static void record_clear(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
                                   0U, 1U);
 }
 
+static void record_raster_texture(Ctx *ctx, NphGpuCmd *cmd, NphGpuImage target,
+                                  NphGpuPipeline pipeline, u32 instances, NphGpuImage texture);
+
 static void record_raster(Ctx *ctx, NphGpuCmd *cmd, NphGpuImage target, NphGpuPipeline pipeline,
                           u32 instances)
+{
+    record_raster_texture(ctx, cmd, target, pipeline, instances, ctx->texture);
+}
+
+// The raster benchmarks' draw, sampling `texture` where the shader samples.
+static void record_raster_texture(Ctx *ctx, NphGpuCmd *cmd, NphGpuImage target,
+                                  NphGpuPipeline pipeline, u32 instances, NphGpuImage texture)
 {
     nph_gpu_cmd_image_barrier(cmd, target, (u32)NPH_GPU_STAGE_COLOR_OUTPUT,
                               (u32)NPH_GPU_ACCESS_COLOR_WRITE, NPH_GPU_LAYOUT_UNDEFINED,
@@ -213,6 +239,7 @@ static void record_raster(Ctx *ctx, NphGpuCmd *cmd, NphGpuImage target, NphGpuPi
     nph_gpu_cmd_begin_rendering(cmd, &rd);
     NphBenchPush p = base_push(ctx);
     p.iterations = instances;
+    p.texture_index = nph_gpu_image_sampled_index(ctx->dev, texture);
     nph_gpu_cmd_bind_pipeline(cmd, pipeline);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_draw(cmd, 3U, instances, 0U, 0U);
@@ -234,6 +261,13 @@ static void record_raster_rgba16f(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 static void record_sample(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 {
     record_raster(ctx, cmd, ctx->target_rgba8, ctx->sample_rgba8, b->param);
+}
+// The same texture, sparse with every page bound: what the hardware's page
+// table costs a sample (docs/adr/0065).
+static void record_sample_sparse(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
+{
+    record_raster_texture(ctx, cmd, ctx->target_rgba8, ctx->sample_rgba8, b->param,
+                          ctx->sparse_texture);
 }
 static void record_visbuffer(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 {
@@ -321,40 +355,50 @@ static void record_nothing(Ctx *ctx, const Bench *b, NphGpuCmd *cmd)
 
 #define PIXELS_4K ((f64)WIDTH_4K * (f64)HEIGHT_4K)
 
+static NphResult run_sparse_binding(Ctx *ctx, const Bench *b, u32 repeats, Result *out);
+
 static const Bench g_benches[] = {
-    {"timestamp_resolution", record_nothing, 1.0, "ns", 0U},
-    {"copy_256mib", record_copy, 2.0 * (f64)BIG_BYTES, "GB/s", 0U},
-    {"write_256mib", record_fill, (f64)BIG_BYTES, "GB/s", 0U},
-    {"read_256mib", record_read, (f64)BIG_BYTES, "GB/s", 0U},
-    {"fma_fp32", record_fma, (f64)FMA_THREADS *FMA_ITERATIONS * 16.0, "TFLOPS", 0U},
+    {"timestamp_resolution", record_nothing, 1.0, "ns", 0U, NULL},
+    {"copy_256mib", record_copy, 2.0 * (f64)BIG_BYTES, "GB/s", 0U, NULL},
+    {"write_256mib", record_fill, (f64)BIG_BYTES, "GB/s", 0U, NULL},
+    {"read_256mib", record_read, (f64)BIG_BYTES, "GB/s", 0U, NULL},
+    {"fma_fp32", record_fma, (f64)FMA_THREADS *FMA_ITERATIONS * 16.0, "TFLOPS", 0U, NULL},
     {"random_read_1mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 16U) - 1U},
+     "GB/s", (1U << 16U) - 1U, NULL},
     {"random_read_2mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 17U) - 1U},
+     "GB/s", (1U << 17U) - 1U, NULL},
     {"random_read_4mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 18U) - 1U},
+     "GB/s", (1U << 18U) - 1U, NULL},
     {"random_read_8mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 19U) - 1U},
+     "GB/s", (1U << 19U) - 1U, NULL},
     {"random_read_16mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 20U) - 1U},
+     "GB/s", (1U << 20U) - 1U, NULL},
     {"random_read_64mib", record_random, (f64)RANDOM_GROUPS * 256.0 * RANDOM_ITERATIONS * 16.0,
-     "GB/s", (1U << 22U) - 1U},
-    {"clear_4k_rgba8", record_clear, PIXELS_4K * 4.0, "GB/s", 0U},
-    {"raster_fill_4k_rgba8_x8", record_raster_rgba8, PIXELS_4K * 8.0, "Gpix/s", 8U},
-    {"raster_fill_4k_r11g11b10_x8", record_raster_r11g11b10, PIXELS_4K * 8.0, "Gpix/s", 8U},
-    {"raster_fill_4k_rgba16f_x8", record_raster_rgba16f, PIXELS_4K * 8.0, "Gpix/s", 8U},
-    {"visbuffer_write_4k_8bpp", record_visbuffer, PIXELS_4K, "Gpix/s", 1U},
-    {"texture_sample_4k_rgba8", record_sample, PIXELS_4K, "Gpix/s", 1U},
+     "GB/s", (1U << 22U) - 1U, NULL},
+    {"clear_4k_rgba8", record_clear, PIXELS_4K * 4.0, "GB/s", 0U, NULL},
+    {"raster_fill_4k_rgba8_x8", record_raster_rgba8, PIXELS_4K * 8.0, "Gpix/s", 8U, NULL},
+    {"raster_fill_4k_r11g11b10_x8", record_raster_r11g11b10, PIXELS_4K * 8.0, "Gpix/s", 8U, NULL},
+    {"raster_fill_4k_rgba16f_x8", record_raster_rgba16f, PIXELS_4K * 8.0, "Gpix/s", 8U, NULL},
+    {"visbuffer_write_4k_8bpp", record_visbuffer, PIXELS_4K, "Gpix/s", 1U, NULL},
+    {"texture_sample_4k_rgba8", record_sample, PIXELS_4K, "Gpix/s", 1U, NULL},
+    {"texture_sample_4k_rgba8_sparse", record_sample_sparse, PIXELS_4K, "Gpix/s", 1U, NULL},
+    // Binding and unbinding sparse pages: the time from the call until the
+    // sparse timeline reaches its value, on the host (docs/adr/0065 stage 0).
+    {"sparse_bind_64_pages", NULL, 1.0, "ns", 0U, run_sparse_binding},
+    {"sparse_unbind_64_pages", NULL, 1.0, "ns", 1U, run_sparse_binding},
     // The temporal resolve and the tonemap (docs/adr/0034-temporal-anti-aliasing.md).
-    {"tonemap_4k", record_tonemap, PIXELS_4K, "Gpix/s", 0U},
-    {"taa_fragment_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 0U)},
-    {"taa_fragment_quad_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 0U)},
-    {"taa_fragment_cross_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 0U)},
-    {"taa_compute_4k", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 0U)},
-    {"taa_fragment_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 1U)},
-    {"taa_fragment_quad_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 1U)},
-    {"taa_fragment_cross_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 1U)},
-    {"taa_compute_4k_rgba16f", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 1U)},
+    {"tonemap_4k", record_tonemap, PIXELS_4K, "Gpix/s", 0U, NULL},
+    {"taa_fragment_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 0U), NULL},
+    {"taa_fragment_quad_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 0U), NULL},
+    {"taa_fragment_cross_4k", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 0U), NULL},
+    {"taa_compute_4k", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 0U), NULL},
+    {"taa_fragment_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(0U, 1U), NULL},
+    {"taa_fragment_quad_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(1U, 1U),
+     NULL},
+    {"taa_fragment_cross_4k_rgba16f", record_taa_fragment, PIXELS_4K, "Gpix/s", TAA_PARAM(2U, 1U),
+     NULL},
+    {"taa_compute_4k_rgba16f", record_taa_compute, PIXELS_4K, "Gpix/s", TAA_PARAM(TAA_COMPUTE, 1U),
+     NULL},
 };
 
 // Whether the device can run `b`: the temporal forms need their history
@@ -362,6 +406,9 @@ static const Bench g_benches[] = {
 // shaders.
 static bool bench_supported(const Ctx *ctx, const Bench *b)
 {
+    if (b->record == record_sample_sparse || b->host == run_sparse_binding) {
+        return ctx->sparse != 0;
+    }
     if (b->record == record_taa_fragment || b->record == record_taa_compute) {
         return ctx->taa_supported[TAA_MODE_OF(b->param)][TAA_FORMAT_OF(b->param)] != 0;
     }
@@ -543,6 +590,106 @@ static NphResult setup_taa(Ctx *ctx)
     return nph_gpu_sampler_create(dev, &smp, &ctx->linear_clamp);
 }
 
+// A sparse image of `w` x `h` RGBA8 texels and its mips.
+static NphResult make_sparse_image(Ctx *ctx, u32 w, u32 h, const char *name, NphGpuImage *out)
+{
+    NphGpuImageDesc d;
+    memset(&d, 0, sizeof d);
+    d.format = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    d.width = w;
+    d.height = h;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    d.flags = (u32)NPH_GPU_IMAGE_FLAG_SPARSE;
+    d.name = name;
+    return nph_gpu_image_create(ctx->dev, &d, out);
+}
+
+// The sparse sampling benchmark's texture: the size of `texture`, every
+// page and its tail bound, every level filled with the noise level 0 has
+// (sampling RGBA8 costs the same whatever the texels). And the binding
+// benchmarks' image and pages.
+static NphResult setup_sparse(Ctx *ctx)
+{
+    NphGpuDevice *dev = ctx->dev;
+    NPH_TRY(make_sparse_image(ctx, 4096U, 4096U, "sparse texture 4k", &ctx->sparse_texture));
+    NphGpuSparseImageInfo info;
+    NPH_TRY(nph_gpu_image_sparse_info(dev, ctx->sparse_texture, &info));
+    const NphGpuImageDesc *d = nph_gpu_image_desc(dev, ctx->sparse_texture);
+    u32 pages = info.tail_pages;
+    for (u32 mip = 0; mip < info.tail_first_mip; ++mip) {
+        u32 px = 0U;
+        u32 py = 0U;
+        nph_gpu_image_sparse_pages(dev, ctx->sparse_texture, mip, &px, &py);
+        pages += px * py;
+    }
+    NphGpuPagePoolDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.max_pages = pages;
+    pd.name = "sparse texture pages";
+    NPH_TRY(nph_gpu_page_pool_create(dev, &pd, &ctx->sparse_pool));
+    NphGpuSparseBind *binds = NPH_ALLOC_ARRAY(nph_allocator_system(), NphGpuSparseBind, pages);
+    if (binds == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    u32 n = 0U;
+    NphResult r = NPH_RESULT_OK;
+    for (u32 mip = 0; mip <= info.tail_first_mip && r == NPH_RESULT_OK; ++mip) {
+        const bool tail = mip == info.tail_first_mip;
+        u32 px = 0U;
+        u32 py = 0U;
+        nph_gpu_image_sparse_pages(dev, ctx->sparse_texture, mip, &px, &py);
+        if (tail) {
+            px = info.tail_pages;
+            py = info.tail_pages != 0U ? 1U : 0U;
+        }
+        for (u32 y = 0; y < py && r == NPH_RESULT_OK; ++y) {
+            for (u32 x = 0; x < px && r == NPH_RESULT_OK; ++x) {
+                NphGpuSparseBind *b = &binds[n++];
+                b->image = ctx->sparse_texture;
+                b->mip = tail ? NPH_GPU_SPARSE_TAIL : mip;
+                b->x = x;
+                b->y = y;
+                b->pool = ctx->sparse_pool;
+                r = nph_gpu_page_alloc(dev, ctx->sparse_pool, &b->page);
+            }
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_gpu_sparse_bind(dev, binds, n, NULL);
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), NphGpuSparseBind, binds, pages);
+    NPH_TRY(r);
+    const u64 top_bytes = (u64)d->width * d->height * 4U;
+    u8 *texels = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, top_bytes);
+    if (texels == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    for (u64 i = 0; i < top_bytes; ++i) {
+        texels[i] = (u8)(i * 2654435761ULL >> 13U);
+    }
+    for (u32 mip = 0; mip < d->mip_count && r == NPH_RESULT_OK; ++mip) {
+        const u64 bytes =
+            (u64)nph_gpu_mip_extent(d->width, mip) * nph_gpu_mip_extent(d->height, mip) * 4U;
+        r = nph_gpu_upload_image(dev, ctx->sparse_texture, mip, 0U, 1U, texels, bytes);
+        if (r == NPH_RESULT_OK) {
+            r = nph_gpu_upload_flush(dev, NULL);
+        }
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, texels, top_bytes);
+    NPH_TRY(r);
+
+    NPH_TRY(make_sparse_image(ctx, 8192U, 8192U, "sparse binding", &ctx->bind_image));
+    memset(&pd, 0, sizeof pd);
+    pd.max_pages = BIND_PAGES;
+    pd.name = "binding pages";
+    NPH_TRY(nph_gpu_page_pool_create(dev, &pd, &ctx->bind_pool));
+    for (u32 i = 0; i < BIND_PAGES; ++i) {
+        NPH_TRY(nph_gpu_page_alloc(dev, ctx->bind_pool, &ctx->bind_pages[i]));
+    }
+    ctx->sparse = 1;
+    return NPH_RESULT_OK;
+}
+
 static NphResult setup(Ctx *ctx)
 {
     NphGpuDevice *dev = ctx->dev;
@@ -653,7 +800,7 @@ static NphResult setup(Ctx *ctx)
     NphGpuSamplerDesc smp;
     nph_gpu_sampler_desc_default(&smp);
     NPH_TRY(nph_gpu_sampler_create(dev, &smp, &ctx->sampler));
-    return NPH_RESULT_OK;
+    return nph_gpu_device_info(dev)->features.sparse_residency ? setup_sparse(ctx) : NPH_RESULT_OK;
 }
 
 static void teardown(Ctx *ctx)
@@ -688,6 +835,24 @@ static void teardown(Ctx *ctx)
     nph_gpu_sampler_destroy(dev, ctx->linear_clamp);
     nph_gpu_sampler_destroy(dev, ctx->sampler);
     nph_gpu_image_destroy(dev, ctx->texture);
+    // Sparse: the images first, then their pages and pools.
+    nph_gpu_image_destroy(dev, ctx->sparse_texture);
+    nph_gpu_image_destroy(dev, ctx->bind_image);
+    if (ctx->bind_pool != NULL) {
+        for (u32 i = 0; i < BIND_PAGES; ++i) {
+            nph_gpu_page_free(dev, ctx->bind_pool, ctx->bind_pages[i]);
+        }
+        nph_gpu_page_pool_destroy(dev, ctx->bind_pool);
+    }
+    if (ctx->sparse_pool != NULL) {
+        // A fresh pool hands its pages out in order.
+        NphGpuPagePoolStats st;
+        nph_gpu_page_pool_stats(ctx->sparse_pool, &st);
+        for (u32 v = 1U; v <= st.pages_used; ++v) {
+            nph_gpu_page_free(dev, ctx->sparse_pool, (NphGpuPage){v});
+        }
+        nph_gpu_page_pool_destroy(dev, ctx->sparse_pool);
+    }
     nph_gpu_image_destroy(dev, ctx->clear_target);
     nph_gpu_image_destroy(dev, ctx->target_r32g32);
     nph_gpu_image_destroy(dev, ctx->target_rgba16f);
@@ -702,14 +867,14 @@ static void teardown(Ctx *ctx)
 // Running
 // ---------------------------------------------------------------------------
 
-typedef struct Result {
+struct Result {
     const Bench *bench;
     u32 repeats;
     f64 median_ns;
     f64 min_ns;
     f64 max_ns;
     f64 metric;
-} Result;
+};
 
 static int compare_f64(const void *a, const void *b)
 {
@@ -746,9 +911,52 @@ static NphResult warm_frames(Ctx *ctx, const Bench *b, u64 min_ns)
 // One benchmark: `repeats` frames, each with the recorded commands between
 // two timestamps, read back two frames later through the device's frame
 // timestamp mechanism.
+// The binding benchmarks: BIND_PAGES pages of the binding image's top level
+// bound in one call and unbound in another, `repeats` times (plus one
+// discarded); param 0 measures the bindings, 1 the unbindings. Nothing on
+// the GPU reads the image.
+static NphResult run_sparse_binding(Ctx *ctx, const Bench *b, u32 repeats, Result *out)
+{
+    NphGpuDevice *dev = ctx->dev;
+    f64 samples[MAX_REPEATS];
+    u32 sample_count = 0U;
+    NphGpuSparseBind binds[BIND_PAGES];
+    for (u32 rep = 0; rep <= repeats; ++rep) {
+        for (u32 phase = 0; phase < 2U; ++phase) {
+            for (u32 i = 0; i < BIND_PAGES; ++i) {
+                binds[i].image = ctx->bind_image;
+                binds[i].mip = 0U;
+                binds[i].x = i;
+                binds[i].y = rep % 32U;
+                binds[i].pool = ctx->bind_pool;
+                binds[i].page = phase == 0U ? ctx->bind_pages[i] : NPH_GPU_PAGE_NULL;
+            }
+            const u64 start = nph_time_now_ns();
+            u64 value = 0U;
+            NPH_TRY(nph_gpu_sparse_bind(dev, binds, BIND_PAGES, &value));
+            NPH_TRY(nph_gpu_sparse_wait(dev, value, NPH_U64_MAX));
+            const u64 end = nph_time_now_ns();
+            if (rep != 0U && phase == b->param) {
+                samples[sample_count++] = (f64)(end - start);
+            }
+        }
+    }
+    qsort(samples, sample_count, sizeof samples[0], compare_f64);
+    out->bench = b;
+    out->repeats = sample_count;
+    out->median_ns = samples[sample_count / 2U];
+    out->min_ns = samples[0];
+    out->max_ns = samples[sample_count - 1U];
+    out->metric = out->median_ns;
+    return NPH_RESULT_OK;
+}
+
 static NphResult run_bench(Ctx *ctx, const Bench *b, u32 repeats, Result *out)
 {
     NphGpuDevice *dev = ctx->dev;
+    if (b->host != NULL) {
+        return b->host(ctx, b, repeats, out);
+    }
     const f64 period = (f64)nph_gpu_device_info(dev)->limits.timestamp_period_ns;
     u32 begin_index[MAX_REPEATS];
     u32 end_index[MAX_REPEATS];
