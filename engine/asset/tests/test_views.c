@@ -777,6 +777,230 @@ NTEST(views, mesh_view_takes_a_meshlet_without_triangles)
 }
 
 // ---------------------------------------------------------------------------
+// Levels apart (version 6; ADR-0063 "Stage 2, a level is a mesh")
+// ---------------------------------------------------------------------------
+
+// A level apart (NPH_MESH_FLAG_LEVEL): a mesh of voxels alone of one level,
+// its two clusters (bricks of one voxel, cells 0.5 and 1) at its level 0,
+// consumed by its root group, their makers (groups of the level below, which
+// the mesh does not hold) as records.
+static void build_level_apart(ImageAsset *ia, u32 type_version)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
+                          nph_guid_from_cstr("level"), 1U);
+    NphMeshHeader h;
+    memset(&h, 0, sizeof h);
+    h.submesh_count = 1U;
+    h.meshlet_count = 2U;
+    h.flags = (u32)NPH_MESH_FLAG_LEVEL;
+    h.position_scale = nph_vec3_one();
+    h.bounds.max = nph_vec3(2.0F, 2.0F, 2.0F);
+    h.sphere = nph_sphere(nph_vec3_one(), nph_f32_sqrt(3.0F));
+    add(&w, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h);
+    NphSubmesh sub;
+    memset(&sub, 0, sizeof sub);
+    sub.meshlet_count = 2U;
+    add(&w, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub);
+    NphMeshlet ml[2];
+    memset(ml, 0, sizeof ml);
+    ml[0].triangle_count = 1U;
+    ml[1].vertex_offset = 1U;
+    ml[1].triangle_offset = 1U;
+    ml[1].triangle_count = 1U;
+    add(&w, NPH_MESH_TAG_MESHLETS, 0U, ml, sizeof ml);
+    NphMeshletBounds bd[2];
+    memset(bd, 0, sizeof bd);
+    bd[0].center = nph_vec3_splat(0.25F);
+    bd[0].radius = 0.5F;
+    bd[0].cone_cutoff = 127;
+    bd[1] = bd[0];
+    add(&w, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, bd, sizeof bd);
+    NphMeshLodHeader lh;
+    memset(&lh, 0, sizeof lh);
+    lh.levels = 1U;
+    lh.level0_meshlets = 2U;
+    lh.group_count = 1U;
+    lh.group_cluster_count = 2U;
+    lh.node_count = 1U;
+    lh.brick_count = 2U;
+    lh.voxel_word_count = 2U * NPH_MESH_VOXEL_WORDS;
+    lh.voxel_cluster_count = 2U;
+    const NphMeshClusterLod cl[2] = {{NPH_MESH_LOD_NONE, 0U, 0U, 0U},
+                                     {NPH_MESH_LOD_NONE, 0U, 0U, 0U}};
+    NphMeshLodGroup g;
+    memset(&g, 0, sizeof g);
+    g.radius = 1.0F;
+    g.error = NPH_F32_MAX;
+    g.cluster_count = 2U;
+    const u32 members[2] = {0U, 1U};
+    NphMeshLodNode n;
+    memset(&n, 0, sizeof n);
+    for (u32 i = 0; i < NPH_MESH_LOD_CHILDREN; ++i) {
+        n.child[i] = NPH_MESH_LOD_NONE;
+    }
+    n.child[0] = 0U | NPH_MESH_LOD_LEAF;
+    NphMeshVoxelCluster vc[2];
+    memset(vc, 0, sizeof vc);
+    vc[0].cell_log2 = -1;
+    vc[1].first_word = NPH_MESH_VOXEL_WORDS;
+    NphMeshVoxelBrick bricks[2];
+    memset(bricks, 0, sizeof bricks);
+    bricks[0].mask[0] = 1U;
+    bricks[1].mask[0] = 1U;
+    u32 words[2U * NPH_MESH_VOXEL_WORDS];
+    memset(words, 0, sizeof words);
+    words[0] = (31U << 15U) | (31U << 20U) | (31U << 25U);
+    words[NPH_MESH_VOXEL_WORDS] = words[0];
+    NphMeshLodMaker makers[2];
+    memset(makers, 0, sizeof makers);
+    makers[0].center = nph_vec3_splat(0.25F);
+    makers[0].radius = 0.75F;
+    makers[0].error = 0.5F;
+    makers[1] = makers[0];
+    add(&w, NPH_MESH_TAG_LOD_HEADER, 0U, &lh, sizeof lh);
+    add(&w, NPH_MESH_TAG_LOD_CLUSTERS, 0U, cl, sizeof cl);
+    add(&w, NPH_MESH_TAG_LOD_GROUPS, 0U, &g, sizeof g);
+    add(&w, NPH_MESH_TAG_LOD_MEMBERS, 0U, members, sizeof members);
+    add(&w, NPH_MESH_TAG_LOD_NODES, 0U, &n, sizeof n);
+    add(&w, NPH_MESH_TAG_VOXEL_CLUSTERS, 0U, vc, sizeof vc);
+    add(&w, NPH_MESH_TAG_VOXEL_BRICKS, 0U, bricks, sizeof bricks);
+    add(&w, NPH_MESH_TAG_VOXELS, 0U, words, sizeof words);
+    add(&w, NPH_MESH_TAG_LOD_MAKERS, 0U, makers, sizeof makers);
+    image_asset_finish(ia, &w);
+}
+
+// A head of levels apart (NPH_MESH_FLAG_LEVELS): no geometry, one submesh,
+// `count` levels (to one past the most a head holds), each naming an asset,
+// their errors rising, the coarsest consumed by a root group.
+static void build_levels_head(ImageAsset *ia, u32 type_version, u32 count)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
+                          nph_guid_from_cstr("head"), 1U);
+    NphMeshHeader h;
+    memset(&h, 0, sizeof h);
+    h.submesh_count = 1U;
+    h.flags = (u32)NPH_MESH_FLAG_LEVELS;
+    h.position_scale = nph_vec3_one();
+    h.bounds.max = nph_vec3(64.0F, 8.0F, 64.0F);
+    h.sphere = nph_sphere(nph_vec3(32.0F, 4.0F, 32.0F), 46.0F);
+    add(&w, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h);
+    NphSubmesh sub;
+    memset(&sub, 0, sizeof sub);
+    add(&w, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub);
+    NphMeshLevel levels[NPH_MESH_MAX_LEVELS + 1U];
+    memset(levels, 0, sizeof levels);
+    for (u32 k = 0; k < count; ++k) {
+        char name[32];
+        snprintf(name, sizeof name, "level %u", k);
+        levels[k].mesh = nph_guid_from_cstr(name);
+        levels[k].maker_error = k == 0U ? 0.0F : 0.25F * (f32)(1U << k) * 0.5F;
+        levels[k].error = k + 1U == count ? NPH_F32_MAX : 0.25F * (f32)(1U << k);
+        levels[k].cluster_count = 1U + (count - k) * 8U;
+    }
+    add(&w, NPH_MESH_TAG_LEVELS, 0U, levels, (u64)count * sizeof(NphMeshLevel));
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, mesh_view_takes_levels_apart)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    NphMeshView v;
+
+    // A level: its makers, no levels of its own to name.
+    build_level_apart(&ia, NPH_MESH_TYPE_VERSION);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.lod_makers);
+    NTEST_EXPECT_NEAR_F32(v.lod_makers[1].error, 0.5F, 0.0F);
+    NTEST_EXPECT_NULL(v.levels);
+    NTEST_EXPECT_EQ_UINT(v.level_count, 0U);
+    NphMeshLodMaker *mk = (NphMeshLodMaker *)blob_bytes(&ia, NPH_MESH_TAG_LOD_MAKERS, 0U);
+    NphMeshHeader *h = (NphMeshHeader *)blob_bytes(&ia, NPH_MESH_TAG_HEADER, 0U);
+    NphMeshLodHeader *lh = (NphMeshLodHeader *)blob_bytes(&ia, NPH_MESH_TAG_LOD_HEADER, 0U);
+    // A maker's error or radius negative, or not finite.
+    mk[1].error = -1.0F;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    mk[1].error = nph_f32_from_bits(0x7F800000U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    mk[1].error = 0.5F;
+    mk[0].radius = nph_f32_from_bits(0x7FC00000U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    mk[0].radius = 0.75F;
+    mk[0].center.y = nph_f32_from_bits(0xFF800000U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    mk[0].center.y = 0.25F;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    // More than one level, or a cluster past its level 0.
+    lh->levels = 2U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    lh->levels = 1U;
+    lh->level0_meshlets = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    lh->level0_meshlets = 2U;
+    // Makers without the flag; the flag with a head's.
+    h->flags = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->flags = (u32)NPH_MESH_FLAG_LEVEL | (u32)NPH_MESH_FLAG_LEVELS;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->flags = (u32)NPH_MESH_FLAG_LEVEL;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // Before version 6 there are no levels apart.
+    build_level_apart(&ia, 5U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+
+    // A head: its levels, no geometry.
+    build_levels_head(&ia, NPH_MESH_TYPE_VERSION, 4U);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.levels);
+    NTEST_EXPECT_EQ_UINT(v.level_count, 4U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(v.levels[2].mesh, nph_guid_from_cstr("level 2")));
+    NTEST_EXPECT_NULL(v.lod);
+    NTEST_EXPECT_NULL(v.meshlets);
+    NphMeshLevel *lv = (NphMeshLevel *)blob_bytes(&ia, NPH_MESH_TAG_LEVELS, 0U);
+    h = (NphMeshHeader *)blob_bytes(&ia, NPH_MESH_TAG_HEADER, 0U);
+#define EXPECT_HEAD_CORRUPT(field, bad)                                                            \
+    do {                                                                                           \
+        const NphMeshLevel keep = lv[1];                                                           \
+        lv[1].field = (bad);                                                                       \
+        NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);                     \
+        lv[1] = keep;                                                                              \
+    } while (0)
+    EXPECT_HEAD_CORRUPT(mesh, NPH_GUID_NULL);
+    EXPECT_HEAD_CORRUPT(cluster_count, 0U);
+    EXPECT_HEAD_CORRUPT(reserved, 1U);
+    EXPECT_HEAD_CORRUPT(maker_error, -1.0F);                          // below the finer level's
+    EXPECT_HEAD_CORRUPT(maker_error, 1.0F);                           // past its error
+    EXPECT_HEAD_CORRUPT(error, nph_f32_from_bits(0x7FC00000U));       // not a number
+    EXPECT_HEAD_CORRUPT(maker_error, nph_f32_from_bits(0x7F800000U)); // infinite
+#undef EXPECT_HEAD_CORRUPT
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    // Levels without the flag, or geometry of its own.
+    h->flags = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->flags = (u32)NPH_MESH_FLAG_LEVELS;
+    h->meshlet_count = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->meshlet_count = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // As many levels as a head holds, not one more; and before version 6.
+    build_levels_head(&ia, NPH_MESH_TYPE_VERSION, NPH_MESH_MAX_LEVELS);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    build_levels_head(&ia, NPH_MESH_TYPE_VERSION, NPH_MESH_MAX_LEVELS + 1U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_levels_head(&ia, 5U, 2U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
+// ---------------------------------------------------------------------------
 // Texture
 // ---------------------------------------------------------------------------
 
@@ -1412,9 +1636,11 @@ static void check_seed_asset(const char *name, u32 type)
     if (type == NPH_ASSET_TYPE_MESH) {
         NphMeshView v;
         NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
-        // The triangle, or (the proxy's) voxels alone.
+        // The triangle, (the proxy's or its level's) voxels alone, or the
+        // head's levels.
         NTEST_ASSERT_TRUE(v.header->vertex_count == 3U ||
-                          (v.header->vertex_count == 0U && v.voxel_bricks != NULL));
+                          (v.header->vertex_count == 0U && v.voxel_bricks != NULL) ||
+                          (v.header->vertex_count == 0U && v.level_count == 2U));
     } else if (type == NPH_ASSET_TYPE_TEXTURE) {
         NphTextureView v;
         NTEST_ASSERT_EQ_INT(nph_texture_view(&ia.asset, &v), NPH_RESULT_OK);
@@ -1448,6 +1674,8 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/mesh_lod", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_voxels", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_proxy", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_level", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_levels_head", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);

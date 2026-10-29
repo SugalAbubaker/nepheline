@@ -318,6 +318,45 @@ def mesh_proxy_blobs():
     ]
 
 
+
+def mesh_level_blobs():
+    """A level apart (mesh.h version 6, NPH_MESH_FLAG_LEVEL; ADR-0063): the
+    proxy above, its one level, its cluster's maker (a group of the level
+    below, which the mesh does not hold) as a record."""
+    blobs = []
+    for b in mesh_proxy_blobs():
+        if b[0] == "HEAD":
+            header = bytearray(b[4])
+            struct.pack_into("<I", header, 24, 1 << 4)  # flags: NPH_MESH_FLAG_LEVEL
+            header = bytes(header)
+            blobs.append(("HEAD", 0, 0, 16, header, header))
+        else:
+            blobs.append(b)
+    maker = struct.pack("<5f", 0.5, 0.5, 0.5, 1.0, 0.25)
+    return blobs + [("LODK", 0, 0, 16, maker, maker)]
+
+
+def mesh_levels_head_blobs():
+    """A head of levels apart (mesh.h version 6, NPH_MESH_FLAG_LEVELS): no
+    geometry, one submesh, two levels naming their assets, their errors
+    rising, the coarser consumed by a root group."""
+    flt_max = 3.4028234663852886e38
+    header = struct.pack("<8I", 0, 0, 1, 0, 0, 0, 1 << 3, 0)
+    header += struct.pack("<4f", 0.0, 0.0, 0.0, 0.0)  # position_offset + pad
+    header += struct.pack("<4f", 1.0, 1.0, 1.0, 0.0)  # position_scale + pad
+    header += struct.pack("<6f", 0.0, 0.0, 0.0, 64.0, 8.0, 64.0)  # bounds
+    header += struct.pack("<2f", 0.0, 0.0)
+    header += struct.pack("<4f", 32.0, 4.0, 32.0, 46.0)  # sphere
+    assert len(header) == 112
+    submesh = struct.pack("<8I", 0, 0, 0, 0, 0, 0, 0, 0) + struct.pack("<8f", 0, 0, 0, 64, 8, 64, 0, 0)
+    levels = guid_from_str("level 0") + struct.pack("<2f2I", 0.0, 0.5, 9, 0) +         guid_from_str("level 1") + struct.pack("<2f2I", 0.5, flt_max, 2, 0)
+    assert len(levels) == 64
+    return [
+        ("HEAD", 0, 0, 16, header, header),
+        ("SUBM", 0, 0, 16, submesh, submesh),
+        ("LVLS", 0, 0, 16, levels, levels),
+    ]
+
 def scene_blobs():
     strings = b"root\0child\0"
     header = struct.pack("<16I", 2, 1, 1, 1, 1, len(strings), 0, *([0] * 9))
@@ -456,6 +495,9 @@ def main():
     write(os.path.join(CORPUS, "nph", "mesh_lod"), nph_file(fourcc("MESH"), 2, mesh_lod_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_voxels"), nph_file(fourcc("MESH"), 5, mesh_voxel_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_proxy"), nph_file(fourcc("MESH"), 5, mesh_proxy_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_level"), nph_file(fourcc("MESH"), 6, mesh_level_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_levels_head"),
+          nph_file(fourcc("MESH"), 6, mesh_levels_head_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
