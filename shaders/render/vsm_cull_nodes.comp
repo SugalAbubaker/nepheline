@@ -41,11 +41,12 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 // Whether the child `lane` of node `n` (a node or a group) is to be taken
 // for map level `level` at threshold `T`.
 bool take(VsmViewRef r, NphVisTransform tr, vec3 t, float scale, VisLodNodesRef tree, uint n,
-          uint lane, int level, float T)
+          uint lane, int level, float T, bool finest)
 {
     // Too coarse (a node: some group below), and not every maker below
-    // too coarse as well (a cluster below fine enough).
-    if (!(tree.n[n].error[lane] > T) || tree.n[n].maker_error[lane] > T) {
+    // too coarse as well (a cluster below fine enough; for an instance of
+    // its cell's finest level the makers are fine: NPH_VIS_INSTANCE_FINEST).
+    if (!(tree.n[n].error[lane] > T) || (!finest && tree.n[n].maker_error[lane] > T)) {
         return false;
     }
     const vec4 s = tree.n[n].sphere[lane];
@@ -91,10 +92,11 @@ void main()
                                                 view.v.camera_low.xyz);
         const float scale = vis_max_scale(inst.transform);
         const float T = vsm_lod_threshold(r, level, scale);
+        const bool finest = (inst.flags & NPH_VIS_INSTANCE_FINEST) != 0u;
         counted = child_lane == 0u && grand_lane == 0u;
         const uint child = tree.n[node].child[child_lane];
         if (child != NPH_VIS_LOD_NONE &&
-            take(r, inst.transform, t, scale, tree, node, child_lane, level, T)) {
+            take(r, inst.transform, t, scale, tree, node, child_lane, level, T, finest)) {
             if ((child & NPH_VIS_LOD_LEAF) != 0u) {
                 // A group among the node's children: its first lane takes it.
                 group = grand_lane == 0u ? child & ~NPH_VIS_LOD_LEAF : NPH_VIS_LOD_NONE;
@@ -102,7 +104,7 @@ void main()
                 counted = counted || grand_lane == 0u;
                 const uint grand = tree.n[child].child[grand_lane];
                 if (grand != NPH_VIS_LOD_NONE &&
-                    take(r, inst.transform, t, scale, tree, child, grand_lane, level, T)) {
+                    take(r, inst.transform, t, scale, tree, child, grand_lane, level, T, finest)) {
                     if ((grand & NPH_VIS_LOD_LEAF) != 0u) {
                         group = grand & ~NPH_VIS_LOD_LEAF;
                     } else {

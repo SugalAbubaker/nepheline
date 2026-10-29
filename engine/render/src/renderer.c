@@ -1122,6 +1122,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     }
     m->handle = value;
     m->index_count = desc->index_count;
+    m->level_apart = desc->lod_makers != NULL;
     m->position_offset = desc->position_offset;
     m->position_scale = desc->position_scale;
     m->bounds = desc->bounds;
@@ -1299,11 +1300,19 @@ static bool transform_ok(const NphRenderTransform *t)
            nph_f64_is_finite(t->translation.y) && nph_f64_is_finite(t->translation.z);
 }
 
+// An instance's part in its cell (nph_render_cell_create): a member (none
+// set), or one of its proxy's, the one its statistics count it by, or its
+// finest level apart's.
+typedef struct CellRole {
+    bool proxy;
+    bool counted;
+    bool finest;
+} CellRole;
+
 // An instance of `desc` (its cell ignored), in cell `cell` (its slot plus one;
-// 0: none): a member of it, or with `proxy` one of its proxy's (with
-// `counted` the one its statistics count it by; nph_render_cell_create).
+// 0: none), in role `role` there.
 static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *desc, u32 cell,
-                                 bool proxy, bool counted, NphRenderInstance *out)
+                                 CellRole role, NphRenderInstance *out)
 {
     *out = NPH_RENDER_INSTANCE_NULL;
     const u32 mesh_slot = render_slot_of(&r->mesh_pool, desc->mesh.value);
@@ -1336,8 +1345,9 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
     inst->transform = desc->transform;
     inst->hidden = desc->hidden;
     inst->cell = cell;
-    inst->proxy = proxy;
-    inst->proxy_counted = counted;
+    inst->proxy = role.proxy;
+    inst->proxy_counted = role.counted;
+    inst->proxy_finest = role.finest;
     const NphResult res = render_vis_instance_created(r, slot);
     if (res != NPH_RESULT_OK) {
         if (inst->materials != NULL) {
@@ -1349,7 +1359,7 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
     }
     r->meshes[mesh_slot].instances += 1U;
     r->hidden_count += inst->hidden ? 1U : 0U;
-    if (cell != 0U && !proxy) {
+    if (cell != 0U && !role.proxy) {
         r->cells[cell - 1U].members += 1U;
     }
     out->value = value;
@@ -1369,7 +1379,8 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
         }
         cell = slot + 1U;
     }
-    return create_instance(r, desc, cell, false, false, out);
+    const CellRole member = {false, false, false};
+    return create_instance(r, desc, cell, member, out);
 }
 
 NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,
@@ -1500,10 +1511,14 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
     NphResult res = NPH_RESULT_OK;
     for (u32 k = 0; k < desc->proxy_level_count && res == NPH_RESULT_OK; ++k) {
         // The statistics count the cell by its coarsest mesh's instance,
-        // the one a streamed proxy always holds (ADR-0063).
+        // the one a streamed proxy always holds; the finest, where it is a
+        // level apart, takes its makers as fine, its finer levels not held
+        // (ADR-0063 "The cut").
         proxy.mesh = desc->proxy_levels[k];
-        res = create_instance(r, &proxy, slot + 1U, true, k + 1U == desc->proxy_level_count,
-                              &c->proxy[k]);
+        const u32 mesh = render_slot_of(&r->mesh_pool, proxy.mesh.value);
+        const CellRole role = {true, k + 1U == desc->proxy_level_count,
+                               k == 0U && r->meshes[mesh].level_apart};
+        res = create_instance(r, &proxy, slot + 1U, role, &c->proxy[k]);
         c->proxy_count += res == NPH_RESULT_OK ? 1U : 0U;
     }
     if (res == NPH_RESULT_OK) {

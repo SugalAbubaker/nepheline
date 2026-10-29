@@ -1085,6 +1085,20 @@ levels apart give the whole's clusters, the same image bit for bit
 and two, and the sun's shadow map's draws). The statistics count a cell by
 its coarsest mesh's instance (`NPH_VIS_INSTANCE_PROXY_COUNTED`), the one a
 streamed proxy always holds.
+
+**The cut's clamp** (ADR-0063 "The cut"). A cell may hold its proxy's
+levels from some level on, the finer ones not there (a streamed proxy's
+before they arrive). The instance of its finest level, where that mesh is
+a level apart, takes its clusters' makers as fine
+(`NPH_VIS_INSTANCE_FINEST`): the walk does not prune by the smallest maker
+error below a node (`vis_cull_nodes.comp`, `vsm_cull_nodes.comp`), and the
+culls do not test a cluster's maker (`vis_cull_meshlets.comp`,
+`vsm_cull.comp`), so its clusters are drawn wherever their consumers are
+too coarse, as a level 0's are. A DAG cut below a level is a DAG: no hole
+opens, and the far field shows that level's voxels until the finer ones
+arrive (`test_vis_cells.c`: held from level 1 or 2 on, the grove draws that
+level over 1.24 and 1.34 times the pixels level 0 does; without the flag,
+nothing).
 The cells' records (`NphVisCell`: the centre split into high and low floats
 as a translation is, the half extents, the error, and `D`) sit in a table the
 instance culls read.

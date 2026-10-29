@@ -766,6 +766,7 @@ static void instance_record(const NphRenderer *r, u32 slot, bool fresh, NphVisIn
                  (fresh ? (u32)NPH_VIS_INSTANCE_FRESH : 0U) |
                  (inst->proxy ? (u32)NPH_VIS_INSTANCE_PROXY : 0U) |
                  (inst->proxy_counted ? (u32)NPH_VIS_INSTANCE_PROXY_COUNTED : 0U) |
+                 (inst->proxy_finest ? (u32)NPH_VIS_INSTANCE_FINEST : 0U) |
                  (inst->cell << (u32)NPH_VIS_INSTANCE_CELL_SHIFT);
 }
 

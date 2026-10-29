@@ -170,6 +170,7 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_group_clusters;
     NphGpuBuffer lod_makers;
     u32 lod_depth;
+    b32 level_apart; // its makers given as records (a level apart, ADR-0063)
     // Its voxels, compact: the voxel clusters' records, bricks and voxel words
     // (NphVisMesh.voxel_clusters, voxel_bricks, voxels; null buffers without),
     // and whether RenderVis.voxel_meshes counts it.
@@ -204,6 +205,7 @@ typedef struct RenderInstance {
     u32 cell;
     b32 proxy;
     b32 proxy_counted; // the proxy instance its cell's statistics count it by
+    b32 proxy_finest;  // of its cell's finest level apart (NPH_VIS_INSTANCE_FINEST)
     // The production path.
     NphRange material_range; // its entries in the material map
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed

@@ -121,7 +121,8 @@ void main()
             c = vis_transform_vector(inst.transform, center) + t;
             r = radius * scale;
             const vec4 cone = unpackSnorm4x8(b1.x);
-            if ((view.v.flags & NPH_VIS_VIEW_LOD) != 0u && mesh.lod_makers != 0ul) {
+            if ((view.v.flags & NPH_VIS_VIEW_LOD) != 0u && mesh.lod_makers != 0ul &&
+                (inst.flags & NPH_VIS_INSTANCE_FINEST) == 0u) {
                 // The group that made it, tested as the walk tests that
                 // group's own clusters (level 0's error of 0 never is).
                 culled_lod = vis_lod_group_too_coarse(view, inst.transform,

@@ -241,9 +241,12 @@ static void grove_levels_free(GroveLevels *gl)
 typedef struct GroveScene {
     NphRenderMesh tree;
     NphRenderMesh proxy;
-    // The cell's proxy: `proxy`, or the levels apart's meshes.
+    // The cell's proxy: `proxy`, or the levels apart's meshes from
+    // `first_level` on (the finer ones not held, as a streamed proxy's
+    // before they arrive).
     NphRenderMesh levels[NPH_RENDER_CELL_MAX_LEVELS];
     u32 level_count;
+    u32 first_level;
     NphRenderMaterial green;
     NphRenderCell cell;
     NphRenderInstance trees[GROVE_TREES];
@@ -255,8 +258,8 @@ static NphRenderCellDesc grove_cell_desc(const GroveScene *s, f32 error, f32 dis
     memset(&d, 0, sizeof d);
     d.center = nph_dvec3(0.0, 0.0, 0.0);
     d.extent = nph_vec3(2.5F, 1.0F, 2.5F); // the trees' 2 m cubes at +-1.5 m
-    d.proxy_levels = s->level_count != 0U ? s->levels : &s->proxy;
-    d.proxy_level_count = nph_max_u32(s->level_count, 1U);
+    d.proxy_levels = s->level_count != 0U ? s->levels + s->first_level : &s->proxy;
+    d.proxy_level_count = s->level_count != 0U ? s->level_count - s->first_level : 1U;
     d.proxy_materials = &s->green;
     d.proxy_material_count = 1U;
     d.proxy_transform = nph_render_transform_identity();
@@ -265,11 +268,13 @@ static NphRenderCellDesc grove_cell_desc(const GroveScene *s, f32 error, f32 dis
     return d;
 }
 
-// With `levels`, the cell's proxy is the levels apart.
+// With `levels`, the cell's proxy is the levels apart from `first_level` on.
 static void grove_scene_build_with(RenderFixture *f, const Grove *g, GroveScene *s, bool cells,
-                                   f32 error, f32 distance, const GroveLevels *levels)
+                                   f32 error, f32 distance, const GroveLevels *levels,
+                                   u32 first_level)
 {
     memset(s, 0, sizeof *s);
+    s->first_level = first_level;
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g->tree.desc, &s->tree),
                         NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g->proxy_desc, &s->proxy),
@@ -301,7 +306,7 @@ static void grove_scene_build_with(RenderFixture *f, const Grove *g, GroveScene 
 static void grove_scene_build(RenderFixture *f, const Grove *g, GroveScene *s, bool cells,
                               f32 error, f32 distance)
 {
-    grove_scene_build_with(f, g, s, cells, error, distance, NULL);
+    grove_scene_build_with(f, g, s, cells, error, distance, NULL, 0U);
 }
 
 static void grove_scene_free(RenderFixture *f, GroveScene *s)
@@ -899,11 +904,11 @@ NTEST_F(Cells, a_proxys_levels_apart_draw_it_as_the_whole)
         NphRenderView v = grove_view(sights[i].distance, sights[i].threshold);
         v.debug_view = NPH_RENDER_VIEW_NORMAL;
         GroveScene s;
-        grove_scene_build_with(f, &g, &s, true, error, 1.0F, NULL);
+        grove_scene_build_with(f, &g, &s, true, error, 1.0F, NULL, 0U);
         const NphRenderFrameStats a = big_frames(f, &t, &v);
         memcpy(whole, t.pixels, BIG_PIXELS * 4U);
         grove_scene_free(f, &s);
-        grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl);
+        grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl, 0U);
         const NphRenderFrameStats b = big_frames(f, &t, &v);
         const u32 drawn = levels_drawn(f, s.cell);
         mixed += nph_popcount_u32(drawn) >= 2U ? 1U : 0U;
@@ -941,16 +946,91 @@ NTEST_F(Cells, a_proxys_levels_apart_draw_it_as_the_whole)
         shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
         v.lod_error = 1.0F;
         GroveScene s;
-        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, NULL);
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, NULL, 0U);
         const NphRenderFrameStats a = first_frame(f, &v);
         grove_scene_free(f, &s);
-        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, &gl);
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, &gl, 0U);
         const NphRenderFrameStats b = first_frame(f, &v);
         grove_scene_free(f, &s);
         NTEST_LOG("the shadow map: the whole %u draws of voxel clusters, its levels apart %u",
                   a.vsm_voxel_draws, b.vsm_voxel_draws);
         NTEST_EXPECT_GT_UINT(a.vsm_voxel_draws, 0U);
         NTEST_EXPECT_EQ_UINT(b.vsm_voxel_draws, a.vsm_voxel_draws);
+        nph_render_light_destroy(f->renderer, sl);
+        nph_render_instance_destroy(f->renderer, floor.floor);
+        nph_render_instance_destroy(f->renderer, floor.occluder);
+        nph_render_material_destroy(f->renderer, floor.grey);
+        nph_render_mesh_destroy(f->renderer, floor.cube);
+        nph_render_mesh_destroy(f->renderer, floor.plane);
+    }
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
+// A cell whose proxy's finer levels it does not hold (a streamed proxy's
+// before they arrive: ADR-0063 "The cut") draws its finest held level
+// wherever a finer one would be: that level's instance takes its makers as
+// fine (NPH_VIS_INSTANCE_FINEST), so the near field shows no hole. From 20 m
+// at a pixel's threshold the whole draws level 0 alone; held from level 1 or
+// 2 on, the cell draws that level alone, over about the pixels level 0 does
+// (its voxels larger, never fewer), and the shadow map draws its voxels too.
+NTEST_F(Cells, a_cells_finest_held_level_stands_for_the_finer_ones)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    NTEST_ASSERT_GE_UINT(gl.count, 3U);
+    const NphRenderLight light = grove_light(f);
+    BigTarget t;
+    big_target_init(f, &t);
+    const f32 error = GROVE_CELL / 64.0F;
+    NphRenderView v = grove_view(20.0, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_NORMAL;
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl, 0U);
+    big_frames(f, &t, &v);
+    const u32 whole = covered_pixels(t.pixels, BIG_PIXELS);
+    NTEST_EXPECT_EQ_UINT(levels_drawn(f, s.cell), 1U);
+    grove_scene_free(f, &s);
+    NTEST_ASSERT_GT_UINT(whole, 0U);
+    for (u32 first = 1U; first < gl.count; ++first) {
+        grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl, first);
+        const NphRenderFrameStats st = big_frames(f, &t, &v);
+        const u32 covered = covered_pixels(t.pixels, BIG_PIXELS);
+        const u32 drawn = levels_drawn(f, s.cell);
+        NTEST_LOG("held from level %u: %u voxel clusters, %u pixels (level 0's %u), levels %#x of "
+                  "those held drawn",
+                  first, st.vis_voxel_clusters, covered, whole, drawn);
+        NTEST_EXPECT_GT_UINT(st.vis_voxel_clusters, 0U);
+        NTEST_EXPECT_EQ_UINT(drawn, 1U);
+        NTEST_EXPECT_GE_UINT(covered * 10U, whole * 9U);
+        grove_scene_free(f, &s);
+    }
+    big_target_free(f, &t);
+    nph_render_light_destroy(f->renderer, light);
+
+    if (nph_renderer_virtual_shadows_supported(f->renderer)) {
+        Scene floor;
+        scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+        NphRenderLightDesc sun = sun_desc(true);
+        const NphRenderLight sl = make_light(f, &sun);
+        NphRenderView sv;
+        shadow_view(&sv, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
+        sv.lod_error = 1.0F;
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, &gl, 0U);
+        const NphRenderFrameStats all = first_frame(f, &sv);
+        grove_scene_free(f, &s);
+        for (u32 first = 1U; first < gl.count; ++first) {
+            grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, &gl, first);
+            const NphRenderFrameStats st = first_frame(f, &sv);
+            grove_scene_free(f, &s);
+            NTEST_LOG("the shadow map, held from level %u: %u draws of voxel clusters (all levels "
+                      "held: %u)",
+                      first, st.vsm_voxel_draws, all.vsm_voxel_draws);
+            NTEST_EXPECT_GT_UINT(st.vsm_voxel_draws, 0U);
+        }
         nph_render_light_destroy(f->renderer, sl);
         nph_render_instance_destroy(f->renderer, floor.floor);
         nph_render_instance_destroy(f->renderer, floor.occluder);
