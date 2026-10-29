@@ -360,6 +360,53 @@ times the lists, in the order whole, apart, apart, whole:
 
 The cut's clamp (an instance's flag, `NPH_VIS_INSTANCE_FINEST`) begins stage 3.
 
+## Stage 3, the design (2026-10-29)
+
+With a proxy's levels as meshes, streaming it is making and dropping meshes and
+handing its cell the run it holds, finest first. The pieces, in the order they are
+built:
+
+- **The clamp** (built): the instance of a cell's finest held level, a level apart,
+  takes its makers as fine (`NPH_VIS_INSTANCE_FINEST`), so a cell holding its levels
+  from some level on draws that level wherever a finer one would be, without holes.
+- **A cell's proxy replaced** (`nph_render_cell_set_proxy`): the cell's instances follow
+  the meshes it is given (the statistics' on the coarsest, the clamp on the finest);
+  its members and its switch are untouched.
+- **Requests.** A cell's record holds its levels' largest consumer errors (the head's
+  `LVLS`). The camera's instance cull, for the instance a cell's statistics count it by
+  (its coarsest level's, which it always holds), where the cell's box is in the frustum
+  (in phase 1, not behind the pyramid either), finds the finest level the cut can use
+  at the box's nearest point brought a margin nearer, so that a level is asked for
+  before it is needed: the smallest whose consumers are too coarse there (the test of
+  "Levels of detail" at scale 1, `vis_cell_proxied`'s); it lowers the cell's request (an
+  atomic minimum). A cell nearer than its distance less the margin asks for nothing:
+  its instances are drawn. The shadow map's instance cull does likewise in each map
+  level where the cell is drawn as its proxy, at the level's threshold. The requests
+  are cleared at a frame's start, copied to host-visible memory at its end, and read
+  `NPH_GPU_FRAMES_IN_FLIGHT` frames later.
+- **The manager** (the runtime's, `NphProxyStream`): each cell's level table, the run it
+  holds and the meshes. Each frame it reads the requests and works out each cell's
+  level by distance from the camera on the CPU (the same test). A cell asked for is
+  wanted at its request; one not asked for, past its distance, at one level coarser
+  than its distance's (a turn shows the far field at most a level coarser, briefly);
+  one nearer, at its coarsest level alone (there is always something to draw). Loads
+  go out in order of how far the wanted level lies below the held one, then of
+  distance, a bounded number in flight (the asset loader's: an I/O thread, decompression
+  on the jobs); a loaded level is installed at a frame's start (a mesh made, the cell's
+  proxy set). Past the byte budget, the finest held levels of the cells wanted least
+  are dropped (the proxy set without them, the mesh destroyed after the frames in
+  flight).
+- **The main thread's cost** (§10.5: at most 1 ms a frame). Making a level-0 mesh
+  validates and uploads megabytes. The first version does it on the main thread,
+  bounded a frame by bytes, and measures; then the meshes of voxels alone move to a
+  pool, one GPU buffer under the TLSF range allocator (core/range_alloc.h, written for
+  these pools), a range a level and no buffers of their own, and their validation and
+  upload move to the jobs (the upload path takes loading jobs), leaving the main thread
+  a range to allocate and a record to write.
+- **Measured** on the landscape's moving views (walking, sprinting, turning) and stage
+  4's open world: the frame time's 1 % low and p99, the bytes held, loads and installs
+  a frame.
+
 ## References
 
 - B. Karis, R. Stubbe, G. Wihlidal. "Nanite: A Deep Dive." SIGGRAPH 2021, Advances in
