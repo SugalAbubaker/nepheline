@@ -328,6 +328,10 @@ static NphResult apply_defaults(NphRendererDesc *d)
     if (d->vsm_pages > 128U * (u32)NPH_VSM_POOL_ROW) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // The voxel pool's ranges count 256-byte units in 32 bits.
+    if (d->voxel_pool_bytes > (u64)NPH_U32_MAX * VOXEL_UNIT) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
     if (!is_power_of_two(d->environment_size) || !is_power_of_two(d->specular_size) ||
         d->specular_mips > log2_floor(d->specular_size) + 1U ||
         d->specular_size > d->environment_size || d->brdf_lut_size < 8U) {
@@ -495,7 +499,7 @@ void nph_renderer_destroy(NphRenderer *r)
     if (r->meshes != NULL) {
         for (u32 i = 0; i < r->desc.max_meshes; ++i) {
             RenderMesh *m = &r->meshes[i];
-            if (m->handle == 0U) {
+            if (m->handle == 0U && m->voxel_state == (u32)RENDER_VOXEL_NONE) {
                 continue;
             }
             ++leaked;
@@ -504,7 +508,10 @@ void nph_renderer_destroy(NphRenderer *r)
             nph_gpu_buffer_destroy(dev, m->indices);
             render_vis_mesh_destroy(r, i);
             render_rt_mesh_destroy(r, i);
-            NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
+            if (m->submeshes != NULL) {
+                NPH_FREE_ARRAY(m->voxel_scratch != NULL ? m->voxel_scratch : r->alloc,
+                               NphRenderSubmesh, m->submeshes, m->submesh_count);
+            }
         }
     }
     if (r->textures != NULL) {
@@ -1063,6 +1070,15 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
 {
     NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
     *out = NPH_RENDER_MESH_NULL;
+    if (voxels_alone(desc) && r->vis.voxel_pool_units != 0U) {
+        // The pool's steps at once; where it has no room, buffers of its own.
+        NphRenderVoxelMesh pooled = NPH_RENDER_VOXEL_MESH_NULL;
+        NPH_TRY(nph_render_voxel_mesh_begin(r, &pooled));
+        if (nph_render_voxel_mesh_upload(r, pooled, desc, r->alloc) != NPH_RESULT_FULL) {
+            return nph_render_voxel_mesh_finish(r, pooled, out);
+        }
+        nph_render_voxel_mesh_cancel(r, pooled);
+    }
     NPH_TRY(validate_mesh(desc));
     u32 lod_depth = 0U;
     NPH_TRY(validate_lods(desc, r->alloc, &lod_depth));
@@ -1072,6 +1088,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     RenderMesh *m = &r->meshes[slot];
     memset(m, 0, sizeof *m);
     m->index_range = NPH_RANGE_NULL; // a zero-filled range would name node 0
+    m->voxel_range = NPH_RANGE_NULL;
     m->submeshes = NPH_ALLOC_ARRAY(r->alloc, NphRenderSubmesh, desc->submesh_count);
     NphResult res = m->submeshes != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
     // Bottom-level builds read the positions and indices (rt.c). A mesh of
@@ -1143,6 +1160,8 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
         return;
     }
     RenderMesh *m = &r->meshes[slot];
+    NPH_ASSERT_MSG(m->voxel_state == (u32)RENDER_VOXEL_NONE,
+                   "destroying a mesh begun in the voxel pool: finish or cancel it");
     NPH_ASSERT_MSG(m->instances == 0U, "destroying a mesh that instances still use");
     if (m->instances != 0U) {
         NPH_LOG_ERROR(&NPH_LOG_RENDER, "%s: a mesh with %u live instances was not destroyed",
@@ -1161,7 +1180,167 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
 
 bool nph_render_mesh_is_valid(const NphRenderer *r, NphRenderMesh mesh)
 {
-    return render_slot_of(&r->mesh_pool, mesh.value) != NPH_U32_MAX;
+    const u32 slot = render_slot_of(&r->mesh_pool, mesh.value);
+    // A mesh begun in the voxel pool is not one until it is finished.
+    return slot != NPH_U32_MAX && r->meshes[slot].handle == mesh.value;
+}
+
+// ---------------------------------------------------------------------------
+// Meshes of voxels alone in the voxel pool (ADR-0063 stage 3c)
+// ---------------------------------------------------------------------------
+
+NphResult nph_render_voxel_mesh_begin(NphRenderer *r, NphRenderVoxelMesh *out)
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    *out = NPH_RENDER_VOXEL_MESH_NULL;
+    if (r->vis.voxel_pool_units == 0U) {
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    u32 value = 0U;
+    u32 slot = 0U;
+    NPH_TRY(alloc_slot(&r->mesh_pool, &value, &slot));
+    RenderMesh *m = &r->meshes[slot];
+    memset(m, 0, sizeof *m);
+    m->index_range = NPH_RANGE_NULL;
+    m->voxel_range = NPH_RANGE_NULL;
+    m->voxel_state = (u32)RENDER_VOXEL_BEGUN;
+    out->value = value;
+    return NPH_RESULT_OK;
+}
+
+// The slot of a mesh begun in the pool (asserted live and in `state`), or
+// NPH_U32_MAX.
+static u32 voxel_slot(const NphRenderer *r, NphRenderVoxelMesh mesh, RenderVoxelState state)
+{
+    const u32 slot = render_slot_of(&r->mesh_pool, mesh.value);
+    NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale pooled mesh");
+    if (slot == NPH_U32_MAX) {
+        return NPH_U32_MAX;
+    }
+    NPH_ASSERT_MSG(r->meshes[slot].voxel_state == (u32)state, "a pooled mesh's step out of turn");
+    return r->meshes[slot].voxel_state == (u32)state ? slot : NPH_U32_MAX;
+}
+
+NphResult nph_render_voxel_mesh_upload(NphRenderer *r, NphRenderVoxelMesh mesh,
+                                       const NphRenderMeshDesc *desc, NphAllocator *scratch)
+{
+    NPH_ASSERT(r != NULL && desc != NULL && scratch != NULL);
+    // Only this mesh's slot is touched, and the renderer's fixed state read:
+    // the validators take the description alone, the uploads their lock.
+    const u32 slot = voxel_slot(r, mesh, RENDER_VOXEL_BEGUN);
+    if (slot == NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    RenderMesh *m = &r->meshes[slot];
+    u32 depth = 0U;
+    NphResult res = voxels_alone(desc) && desc->meshlets != NULL && desc->lod_nodes != NULL &&
+                            desc->voxel_bricks != NULL && desc->voxel_brick_count != 0U
+                        ? NPH_RESULT_OK
+                        : NPH_RESULT_INVALID_ARGUMENT;
+    if (res == NPH_RESULT_OK) {
+        res = validate_mesh(desc);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = validate_lods(desc, scratch, &depth);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = render_vis_voxel_reserve(r, desc, &m->voxel_range, &m->voxel_units);
+    }
+    if (res == NPH_RESULT_OK) {
+        // The submeshes in the scratch until the finish takes them.
+        m->submeshes = NPH_ALLOC_ARRAY(scratch, NphRenderSubmesh, desc->submesh_count);
+        res = m->submeshes != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (res == NPH_RESULT_OK) {
+        m->voxel_scratch = scratch;
+        m->submesh_count = desc->submesh_count;
+        memcpy(m->submeshes, desc->submeshes, sizeof(NphRenderSubmesh) * desc->submesh_count);
+        m->level_apart = desc->lod_makers != NULL;
+        m->position_offset = desc->position_offset;
+        m->position_scale = desc->position_scale;
+        m->bounds = desc->bounds;
+        res = render_vis_voxel_upload(r, slot, desc, scratch);
+    }
+    m->voxel_lod_depth = depth;
+    m->voxel_result = res;
+    m->voxel_state = (u32)RENDER_VOXEL_UPLOADED;
+    return res;
+}
+
+NphResult nph_render_voxel_mesh_finish(NphRenderer *r, NphRenderVoxelMesh mesh, NphRenderMesh *out)
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    *out = NPH_RENDER_MESH_NULL;
+    const u32 slot = voxel_slot(r, mesh, RENDER_VOXEL_UPLOADED);
+    if (slot == NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    RenderMesh *m = &r->meshes[slot];
+    if (m->voxel_result != NPH_RESULT_OK) {
+        const NphResult res = m->voxel_result;
+        nph_render_voxel_mesh_cancel(r, mesh);
+        return res;
+    }
+    // The submeshes into the renderer's memory.
+    NphRenderSubmesh *subs = NPH_ALLOC_ARRAY(r->alloc, NphRenderSubmesh, m->submesh_count);
+    if (subs == NULL) {
+        nph_render_voxel_mesh_cancel(r, mesh);
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    memcpy(subs, m->submeshes, sizeof(NphRenderSubmesh) * m->submesh_count);
+    NPH_FREE_ARRAY(m->voxel_scratch, NphRenderSubmesh, m->submeshes, m->submesh_count);
+    m->submeshes = subs;
+    m->voxel_scratch = NULL;
+    m->voxel_state = (u32)RENDER_VOXEL_NONE;
+    m->handle = mesh.value;
+    if (m->voxel_lod_depth != 0U) {
+        m->lod_depth = m->voxel_lod_depth;
+        r->vis.lod_depths[m->lod_depth - 1U] += 1U;
+    }
+    m->voxels_counted = 1;
+    r->vis.voxel_meshes += 1U;
+    r->pending_uploads = 1;
+    out->value = mesh.value;
+    return NPH_RESULT_OK;
+}
+
+void nph_render_voxel_mesh_cancel(NphRenderer *r, NphRenderVoxelMesh mesh)
+{
+    NPH_ASSERT(r != NULL);
+    if (mesh.value == 0U) {
+        return;
+    }
+    const u32 slot = render_slot_of(&r->mesh_pool, mesh.value);
+    NPH_ASSERT_MSG(slot != NPH_U32_MAX && r->meshes[slot].voxel_state != (u32)RENDER_VOXEL_NONE,
+                   "cancelling what is not a pooled mesh begun");
+    if (slot == NPH_U32_MAX || r->meshes[slot].voxel_state == (u32)RENDER_VOXEL_NONE) {
+        return;
+    }
+    RenderMesh *m = &r->meshes[slot];
+    // Its uploads may still be on their way: the range waits out the frames.
+    render_vis_voxel_release(r, m->voxel_range);
+    if (m->submeshes != NULL) {
+        NPH_FREE_ARRAY(m->voxel_scratch, NphRenderSubmesh, m->submeshes, m->submesh_count);
+    }
+    memset(m, 0, sizeof *m);
+    m->index_range = NPH_RANGE_NULL;
+    m->voxel_range = NPH_RANGE_NULL;
+    release_slot(&r->mesh_pool, mesh.value);
+    r->pending_uploads = 1;
+}
+
+void nph_render_voxel_pool_usage(NphRenderer *r, u64 *used, u64 *size)
+{
+    NPH_ASSERT(r != NULL && used != NULL && size != NULL);
+    RenderVis *v = &r->vis;
+    *size = (u64)v->voxel_pool_units * VOXEL_UNIT;
+    *used = 0U;
+    if (v->voxel_pool_units != 0U) {
+        nph_mutex_lock(&v->voxel_lock);
+        *used =
+            (u64)(v->voxel_pool_units - nph_range_alloc_free_total(&v->voxel_ranges)) * VOXEL_UNIT;
+        nph_mutex_unlock(&v->voxel_lock);
+    }
 }
 
 // ---------------------------------------------------------------------------
