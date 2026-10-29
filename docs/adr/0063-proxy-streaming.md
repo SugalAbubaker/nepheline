@@ -200,7 +200,7 @@ everywhere, denser than the game's valley, ruins and meadows.
 ## Stages
 
 1. **The compact voxels:** the encoding above in the renderer's and the cooker's
-   formats (the mesh asset's version 6), the shaders and their C twins, the builders;
+   formats (the mesh asset's version 5), the shaders and their C twins, the builders;
    the landscape recooked, its views compared with the present encoding (images, frame
    times, memory).
 2. **The formats and the addressing:** levels as blobs, the level table, the shaders'
@@ -211,6 +211,54 @@ everywhere, denser than the game's valley, ruins and meadows.
 4. **The open world:** `render_perf` tiles the landscape into a world of the game's size
    (each tile's proxies its own), measured for VRAM, for frame times while walking,
    sprinting and turning, and for load time.
+
+## Stage 1, the compact voxels, measured (2026-10-28)
+
+Built as decided (render/voxel.h "The compact form", docs/render.md "Voxels"): the
+builders keep their records; `nph_render_voxels_pack` makes a mesh's compact ones, the
+mesh asset's version 5 stores them, and the shaders' loaders hand the footprint tests
+and the resolve the records they read before, bit for bit, but for the axis.
+
+The landscape recooked (55 minutes, as before; the same 107,072,903 voxels, cell by
+cell): its proxies hold 1.54 GB decompressed where they held 2.06 (0.75 times; the model
+above, 0.72, had taken the clusters' records smaller too, which this stage leaves as they
+are) and 1.40 GB stored of 1.69 (the voxels' words compress less than their 16 bytes
+did); the pack is 2.59 GB of 2.88. The GPU's device-local memory in use: 6.73 GB of
+7.18 at 16 times the lists, 5.30 of 5.84 at the default.
+
+The image: in the views' deterministic normal debug view, 99.56 % of the pixels are the
+same bit for bit, 0.44 % within 4 levels of 255 (the axis's rounding), and 119 isolated
+pixels of the far field (0.0014 %) differ more, where the two-sided lobe's side facing
+the viewer flips at a grazing view, as the 16-bit axis flips at others. The lit views
+differ from the previous build by FLIP 0.013 to 0.029, the radiance cache's noise
+realization: 0.4 to 0.6 of 255 apart on average in every band of the image, the near
+field's triangles, which the encoding does not touch, alike.
+
+Frame times (16 times the lists, native 4K, the views' passes against the previous
+build's in a run of each after a first pair in the other order; the previous build's own
+runs agree within 0.1 ms):
+
+| Pass | Change |
+|---|---|
+| voxel raster, first phase | +0.07 to +0.18 ms (0.3 to 0.9 %) |
+| voxel raster, second phase | +0.01 to +0.02 ms |
+| voxel resolve | +0.012 to +0.022 ms (3 to 4 %) |
+| the shadow map's voxel splat | unchanged |
+
+On the synthetic foliage scenes, in interleaved rounds, every voxel pass is within its
+noise (the voxel raster -0.008 to +0.001 ms). A first version of the loaders spilled the
+voxel resolve's registers to shared memory (18 % slower); the searches now take a
+cluster's run of words and its stride, two values where its record was four.
+
+**Open:** the first view after loading, at 16 times the lists, runs the radiance cache's
+update at 2.3 to 2.5 ms a frame for its whole measurement (1.1 ms in the valley's, when
+it comes first) where the previous build's ran at 0.30; the same view measured later
+takes 0.30, as does the first at the default lists. `render_perf --memory-trace` reads
+7.68 GB of the 7.83 GB budget at the first frame, while the bottom levels build, and 6.73
+GB after. The update's rays are the bottom levels' main readers; the likeliest reading is
+the driver placing what was made near the budget in slower memory until it moves it back
+(which `VK_EXT_memory_budget` does not show), not the encoding (the data are the same,
+and later the same). Stage 3's streaming lowers the peak; the transient is watched for.
 
 ## References
 
