@@ -30,6 +30,9 @@
 // A cell's proxy (render/renderer.h nph_render_cell_create; ADR-0062): drawn
 // where its cell's instances are not (vis_cell_proxied).
 #define NPH_VIS_INSTANCE_PROXY 32
+// The proxy instance its cell's statistics count the cell by (its coarsest
+// mesh's: a cell's proxy may be several, its levels apart; ADR-0063).
+#define NPH_VIS_INSTANCE_PROXY_COUNTED 64
 // The instance's cell, its index plus one (0: none), in the flags' upper
 // bits: the proxy's own, or the cell whose proxy stands for the instance.
 #define NPH_VIS_INSTANCE_CELL_SHIFT 8

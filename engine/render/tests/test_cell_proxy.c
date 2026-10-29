@@ -14,6 +14,8 @@
 
 #include <ntest/ntest.h>
 
+#include "test_levels_apart.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,7 +256,7 @@ static bool sphere_holds(NphSphere outer, NphVec3 c, f32 r)
 // below whose error is its cell; each cluster consumed by one group of its
 // level, listed there once, whose sphere holds what the cluster's maker's
 // does (level 0: its bounds); the root group last; every group a leaf of the
-// hierarchy once.
+// hierarchy once; and its levels apart hold its levels (test_levels_apart.h).
 static void check_proxy(const NphRenderClusterLods *l, f32 cell)
 {
     const u32 n = l->clusters.meshlets.len;
@@ -357,6 +359,8 @@ static void check_proxy(const NphRenderClusterLods *l, f32 cell)
     }
     NPH_ARRAY_FREE(&stack);
     NTEST_EXPECT_EQ_UINT(leaves, l->groups.len);
+    // Its levels apart, each a mesh of its own (ADR-0063).
+    levels_check_all(l);
 }
 
 // ---------------------------------------------------------------------------

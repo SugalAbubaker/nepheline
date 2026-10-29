@@ -322,8 +322,8 @@ NphResult nph_render_cluster_lods_level(const NphRenderClusterLods *l, u32 level
     u32 first = 0U;
     u32 count = 0U;
     if (l->clusters.vertices.len != 0U || l->clusters.triangles.len != 0U ||
-        l->clusters.bounds.len != l->clusters.meshlets.len || l->nodes.len == 0U ||
-        level >= 64U || !nph_render_cluster_lods_level_range(l, level, &first, &count)) {
+        l->clusters.bounds.len != l->clusters.meshlets.len || l->nodes.len == 0U || level >= 64U ||
+        !nph_render_cluster_lods_level_range(l, level, &first, &count)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NphAllocator *a = out->nodes.alloc;
@@ -334,10 +334,10 @@ NphResult nph_render_cluster_lods_level(const NphRenderClusterLods *l, u32 level
     u8 *state = NPH_ALLOC_ARRAY(a, u8, nodes);
     u32 *node_map = NPH_ALLOC_ARRAY(a, u32, nodes);
     u32 *group_map = NPH_ALLOC_ARRAY(a, u32, groups);
-    NphResult r = masks != NULL && stack != NULL && state != NULL && node_map != NULL &&
-                          group_map != NULL
-                      ? NPH_RESULT_OK
-                      : NPH_RESULT_OUT_OF_MEMORY;
+    NphResult r =
+        masks != NULL && stack != NULL && state != NULL && node_map != NULL && group_map != NULL
+            ? NPH_RESULT_OK
+            : NPH_RESULT_OUT_OF_MEMORY;
     LevelTop tops[NPH_RENDER_LOD_NODE_CHILDREN];
     u32 top_count = 0U;
     if (r == NPH_RESULT_OK &&

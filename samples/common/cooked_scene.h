@@ -72,6 +72,15 @@ typedef struct CookedScene {
     u32 cell_count; // made so far
     u32 cell_cap;
     u32 proxy_count; // of them, with a proxy
+    // The proxies' levels apart (asset/mesh.h version 6; ADR-0063), a mesh
+    // each, made from assets released once the GPU holds them, and each
+    // cell's run of them (per cell of the scene; a count of 0 where its proxy
+    // is one mesh, or none).
+    NphRenderMesh *level_meshes;
+    u32 level_mesh_count;
+    u32 level_mesh_cap;
+    u32 *cell_level_first;
+    u32 *cell_level_count;
     NphRenderLight *lights;
     NphRenderLightDesc *light_descs; // as created (for gizmos and tests)
     u32 light_count;

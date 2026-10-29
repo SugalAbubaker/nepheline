@@ -345,7 +345,8 @@ static NphResult build_meshlets(NphRenderer *r, const NphRenderMeshDesc *d, NphR
 
 // Each cluster's maker as the culls test it (NphVisMesh.lod_makers): the
 // sphere of the group that made it, then, after every cluster's, its error,
-// its record's bits; at level 0, a sphere of zeros and an error of 0.
+// its record's bits (or the records given, a level apart's); at level 0, a
+// sphere of zeros and an error of 0.
 static NphResult upload_makers(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d)
 {
     const u32 n = d->meshlet_count;
@@ -355,6 +356,12 @@ static NphResult upload_makers(NphRenderer *r, RenderMesh *m, const NphRenderMes
     const u64 at = (u64)n * sizeof(NphVec4); // the errors' place
     if (res == NPH_RESULT_OK) {
         for (u32 i = 0; i < n; ++i) {
+            if (d->lod_makers != NULL) {
+                const NphRenderLodMaker *k = &d->lod_makers[i];
+                spheres[i] = nph_vec4_from_vec3(k->center, k->radius);
+                errors[i] = k->error;
+                continue;
+            }
             const u32 maker = d->cluster_lods[i].group;
             const NphRenderLodGroup *g =
                 maker != NPH_RENDER_LOD_NONE ? &d->lod_groups[maker] : NULL;
@@ -758,6 +765,7 @@ static void instance_record(const NphRenderer *r, u32 slot, bool fresh, NphVisIn
                  (is_similarity(l) ? (u32)NPH_VIS_INSTANCE_SIMILAR : 0U) |
                  (fresh ? (u32)NPH_VIS_INSTANCE_FRESH : 0U) |
                  (inst->proxy ? (u32)NPH_VIS_INSTANCE_PROXY : 0U) |
+                 (inst->proxy_counted ? (u32)NPH_VIS_INSTANCE_PROXY_COUNTED : 0U) |
                  (inst->cell << (u32)NPH_VIS_INSTANCE_CELL_SHIFT);
 }
 

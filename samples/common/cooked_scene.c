@@ -24,7 +24,8 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup) &&
                       sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
                       sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster) &&
-                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick),
+                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick) &&
+                      sizeof(NphMeshLodMaker) == sizeof(NphRenderLodMaker),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
@@ -201,12 +202,19 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->voxel_brick_count = mv->lod->brick_count;
     d->voxel_words = mv->voxel_words;
     d->voxel_word_count = mv->lod->voxel_word_count;
+    const void *makers = mv->lod_makers;
+    d->lod_makers = makers;
 }
 
-static NphResult create_mesh(CookedScene *s, u32 index)
+// The render mesh of a mesh asset (a head of levels apart has none: its
+// levels are meshes of their own, load_levels).
+static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, NphRenderMesh *out)
 {
     NphMeshView mv;
-    NPH_TRY(nph_mesh_view(nph_asset_get(s->loader, s->assets[index]), &mv));
+    NPH_TRY(nph_mesh_view(asset, &mv));
+    if (mv.levels != NULL) {
+        return NPH_RESULT_OK;
+    }
     const NphMeshHeader *h = mv.header;
     if (h->submesh_count > NPH_RENDER_MAX_SUBMESHES) {
         return NPH_RESULT_UNSUPPORTED;
@@ -235,7 +243,96 @@ static NphResult create_mesh(CookedScene *s, u32 index)
     d.bounds = h->bounds;
     cooked_clusters(&mv, &d);
     d.name = "cooked mesh";
-    return nph_render_mesh_create(s->renderer, &d, &s->meshes[index]);
+    return nph_render_mesh_create(s->renderer, &d, out);
+}
+
+static NphResult create_mesh(CookedScene *s, u32 index)
+{
+    return create_mesh_of(s, nph_asset_get(s->loader, s->assets[index]), &s->meshes[index]);
+}
+
+// The levels' loads in flight at once: their assets, decompressed, held
+// until their meshes are made.
+#define LEVEL_BATCH 256U
+
+typedef struct LevelBatch {
+    NphAssetHandle handles[LEVEL_BATCH];
+    u32 slots[LEVEL_BATCH]; // into level_meshes
+    u32 count;
+    NphJobCounter done;
+} LevelBatch;
+
+// The batch's levels: waited for, a mesh made of each, its asset released.
+static NphResult flush_levels(CookedScene *s, const CookedSceneDesc *desc, LevelBatch *b)
+{
+    nph_job_wait(desc->jobs, &b->done);
+    NphResult r = NPH_RESULT_OK;
+    for (u32 i = 0; i < b->count; ++i) {
+        NphResult ri = nph_asset_wait(s->loader, b->handles[i]);
+        if (ri == NPH_RESULT_OK) {
+            ri = create_mesh_of(s, nph_asset_get(s->loader, b->handles[i]),
+                                &s->level_meshes[b->slots[i]]);
+        }
+        if (ri == NPH_RESULT_OK && s->level_meshes[b->slots[i]].value == 0U) {
+            ri = NPH_RESULT_CORRUPT; // a head naming a head
+        }
+        r = r == NPH_RESULT_OK ? ri : r;
+        nph_asset_release(s->loader, b->handles[i]);
+    }
+    b->count = 0U;
+    return r;
+}
+
+// The cells' proxies' levels apart (asset/mesh.h version 6; ADR-0063): each
+// head's levels loaded LEVEL_BATCH at a time, a render mesh made of each and
+// its asset released at once (the GPU holds it, and the levels are the bulk
+// of a large world's proxies), each cell's run of them noted.
+static NphResult load_levels(CookedScene *s, const CookedSceneDesc *desc, const NphSceneView *sv,
+                             u32 cells)
+{
+    u32 total = 0U;
+    for (u32 k = 0; k < cells; ++k) {
+        const NphAsset *head =
+            nph_guid_is_null(sv->cells[k].proxy) ? NULL : asset_of(s, sv->cells[k].proxy);
+        NphMeshView mv;
+        if (head != NULL && nph_mesh_view(head, &mv) == NPH_RESULT_OK) {
+            total += mv.level_count;
+        }
+    }
+    s->cell_level_first = NPH_ALLOC_ARRAY_ZEROED(s->alloc, u32, nph_max_u32(cells, 1U));
+    s->cell_level_count = NPH_ALLOC_ARRAY_ZEROED(s->alloc, u32, nph_max_u32(cells, 1U));
+    s->level_mesh_cap = nph_max_u32(total, 1U);
+    s->level_meshes = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderMesh, s->level_mesh_cap);
+    if (s->cell_level_first == NULL || s->cell_level_count == NULL || s->level_meshes == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    LevelBatch b;
+    memset(&b, 0, sizeof b);
+    NphResult r = NPH_RESULT_OK;
+    for (u32 k = 0; k < cells && r == NPH_RESULT_OK; ++k) {
+        const NphAsset *head =
+            nph_guid_is_null(sv->cells[k].proxy) ? NULL : asset_of(s, sv->cells[k].proxy);
+        NphMeshView mv;
+        if (head == NULL || nph_mesh_view(head, &mv) != NPH_RESULT_OK || mv.levels == NULL) {
+            continue;
+        }
+        s->cell_level_first[k] = s->level_mesh_count;
+        s->cell_level_count[k] = mv.level_count;
+        for (u32 i = 0; i < mv.level_count && r == NPH_RESULT_OK; ++i) {
+            if (b.count == LEVEL_BATCH) {
+                r = flush_levels(s, desc, &b);
+            }
+            if (r == NPH_RESULT_OK) {
+                r = nph_asset_load_guid_async(s->loader, mv.levels[i].mesh, &b.done,
+                                              &b.handles[b.count]);
+            }
+            if (r == NPH_RESULT_OK) {
+                b.slots[b.count++] = s->level_mesh_count++;
+            }
+        }
+    }
+    const NphResult rf = flush_levels(s, desc, &b);
+    return r == NPH_RESULT_OK ? rf : r;
 }
 
 static NphRenderTexture texture_of(const CookedScene *s, NphGuid guid)
@@ -294,8 +391,9 @@ static NphRenderTransform at_origin(const NphMat4 *m, NphDVec3 origin)
 
 // The world partition's cells (asset/scene.h version 2; ADR-0062), each a
 // render cell with its proxy at the proxy's origin, made before the instances
-// that name them. A cell without a proxy (nothing of its instances voxelized)
-// makes none: its instances are drawn as themselves.
+// that name them: its levels apart's meshes (load_levels), or the one mesh
+// of a proxy cooked whole. A cell without a proxy (nothing of its instances
+// voxelized) makes none: its instances are drawn as themselves.
 static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const NphSceneView *sv)
 {
     for (u32 k = 0; k < s->cell_cap && k < sv->cell_count; ++k) {
@@ -317,7 +415,12 @@ static NphResult create_cells(CookedScene *s, const CookedSceneDesc *desc, const
                                            ((f64)c->bounds.min.z + (f64)c->bounds.max.z) * 0.5),
                                  desc->origin);
         d.extent = nph_vec3_scale(nph_vec3_sub(c->bounds.max, c->bounds.min), 0.5F);
-        d.proxy = s->meshes[mi];
+        const bool apart = s->cell_level_count != NULL && s->cell_level_count[k] != 0U;
+        d.proxy_levels = apart ? &s->level_meshes[s->cell_level_first[k]] : &s->meshes[mi];
+        d.proxy_level_count = apart ? s->cell_level_count[k] : 1U;
+        if (!apart && s->meshes[mi].value == 0U) {
+            return NPH_RESULT_CORRUPT; // a head without its levels
+        }
         d.proxy_materials = &material;
         d.proxy_material_count = 1U;
         d.proxy_transform = nph_render_transform_identity();
@@ -540,6 +643,13 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
                       sh->material_count, s->render_material_count, nph_result_string(r));
     }
     if (r == NPH_RESULT_OK && cells != 0U) {
+        r = load_levels(s, desc, &sv, cells);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&LOG_COOKED_SCENE, "the proxies' levels (%u loaded): %s",
+                          s->level_mesh_count, nph_result_string(r));
+        }
+    }
+    if (r == NPH_RESULT_OK && cells != 0U) {
         r = create_cells(s, desc, &sv);
         if (r != NPH_RESULT_OK) {
             NPH_LOG_ERROR(&LOG_COOKED_SCENE, "cell %u of %u: %s", s->cell_count, cells,
@@ -612,6 +722,20 @@ void cooked_scene_unload(CookedScene *s)
             nph_render_light_destroy(r, s->lights[i]);
         }
     }
+    NphAllocator *a = s->alloc;
+    if (s->level_meshes != NULL) {
+        for (u32 i = 0; i < s->level_mesh_count; ++i) {
+            nph_render_mesh_destroy(r, s->level_meshes[i]);
+        }
+        NPH_FREE_ARRAY(a, NphRenderMesh, s->level_meshes, s->level_mesh_cap);
+    }
+    const u32 cells = nph_max_u32(s->cell_cap, 1U);
+    if (s->cell_level_first != NULL) {
+        NPH_FREE_ARRAY(a, u32, s->cell_level_first, cells);
+    }
+    if (s->cell_level_count != NULL) {
+        NPH_FREE_ARRAY(a, u32, s->cell_level_count, cells);
+    }
     for (u32 i = 0; i < s->asset_count; ++i) {
         if (s->asset_materials != NULL) {
             nph_render_material_destroy(r, s->asset_materials[i]);
@@ -624,7 +748,6 @@ void cooked_scene_unload(CookedScene *s)
         }
         nph_asset_release(s->loader, s->assets[i]);
     }
-    NphAllocator *a = s->alloc;
     if (s->assets != NULL) {
         NPH_FREE_ARRAY(a, NphAssetHandle, s->assets, s->asset_cap);
     }

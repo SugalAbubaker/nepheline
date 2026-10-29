@@ -846,17 +846,46 @@ static NphResult validate_meshlets(const NphRenderMeshDesc *d)
 // children's. That the levels cut cleanly (render/cluster_lod.h) and the
 // spheres nest is the caller's contract. `out_depth`: the node levels (0
 // without the levels).
-// The smallest error of the groups that made a group's clusters (0 for
-// level 0's), group indices already checked.
+// The error of the group that made cluster `c`: its record's where the
+// makers are given as records, else its group's (0 at level 0); indices
+// already checked.
+static f32 cluster_maker_error(const NphRenderMeshDesc *d, u32 c)
+{
+    if (d->lod_makers != NULL) {
+        return d->lod_makers[c].error;
+    }
+    const u32 maker = d->cluster_lods[c].group;
+    return maker == NPH_RENDER_LOD_NONE ? 0.0F : d->lod_groups[maker].error;
+}
+
+// The smallest error of the groups that made a group's clusters.
 static f32 group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodGroup *rg)
 {
     f32 smallest = rg->cluster_count != 0U ? NPH_F32_MAX : 0.0F;
     for (u32 i = 0; i < rg->cluster_count; ++i) {
-        const u32 maker = d->cluster_lods[d->lod_group_clusters[rg->cluster_offset + i]].group;
-        smallest =
-            nph_f32_min(smallest, maker == NPH_RENDER_LOD_NONE ? 0.0F : d->lod_groups[maker].error);
+        smallest = nph_f32_min(
+            smallest, cluster_maker_error(d, d->lod_group_clusters[rg->cluster_offset + i]));
     }
     return smallest;
+}
+
+// Makers given as records (a level apart) stand for every cluster's: each
+// cluster is of the mesh's one level, its group NPH_RENDER_LOD_NONE, its
+// record's sphere and error finite and not negative.
+static bool valid_maker_records(const NphRenderMeshDesc *d)
+{
+    if (d->lod_level0_meshlets != d->meshlet_count) {
+        return false;
+    }
+    for (u32 i = 0; i < d->meshlet_count; ++i) {
+        const NphRenderLodMaker *m = &d->lod_makers[i];
+        if (d->cluster_lods[i].group != NPH_RENDER_LOD_NONE || !nph_vec3_is_finite(m->center) ||
+            !(m->radius >= 0.0F) || !nph_f32_is_finite(m->radius) || !(m->error >= 0.0F) ||
+            !nph_f32_is_finite(m->error)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Whether a node's children are bounded by its entry in its parent: no
@@ -877,8 +906,9 @@ static NphResult validate_lods(const NphRenderMeshDesc *d, NphAllocator *scratch
     *out_depth = 0U;
     if (d->lod_nodes == NULL) {
         return d->cluster_lods == NULL && d->lod_groups == NULL && d->lod_group_clusters == NULL &&
-                       d->lod_node_count == 0U && d->lod_group_count == 0U &&
-                       d->lod_group_cluster_count == 0U && d->lod_level0_meshlets == 0U
+                       d->lod_makers == NULL && d->lod_node_count == 0U &&
+                       d->lod_group_count == 0U && d->lod_group_cluster_count == 0U &&
+                       d->lod_level0_meshlets == 0U
                    ? NPH_RESULT_OK
                    : NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -894,6 +924,9 @@ static NphResult validate_lods(const NphRenderMeshDesc *d, NphAllocator *scratch
             (c->parent != NPH_RENDER_LOD_NONE && c->parent >= d->lod_group_count)) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
+    }
+    if (d->lod_makers != NULL && !valid_maker_records(d)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 i = 0; i < d->lod_group_cluster_count; ++i) {
         if (d->lod_group_clusters[i] >= d->meshlet_count) {
@@ -1267,9 +1300,10 @@ static bool transform_ok(const NphRenderTransform *t)
 }
 
 // An instance of `desc` (its cell ignored), in cell `cell` (its slot plus one;
-// 0: none): a member of it, or with `proxy` its proxy (nph_render_cell_create).
+// 0: none): a member of it, or with `proxy` one of its proxy's (with
+// `counted` the one its statistics count it by; nph_render_cell_create).
 static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *desc, u32 cell,
-                                 bool proxy, NphRenderInstance *out)
+                                 bool proxy, bool counted, NphRenderInstance *out)
 {
     *out = NPH_RENDER_INSTANCE_NULL;
     const u32 mesh_slot = render_slot_of(&r->mesh_pool, desc->mesh.value);
@@ -1303,6 +1337,7 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
     inst->hidden = desc->hidden;
     inst->cell = cell;
     inst->proxy = proxy;
+    inst->proxy_counted = counted;
     const NphResult res = render_vis_instance_created(r, slot);
     if (res != NPH_RESULT_OK) {
         if (inst->materials != NULL) {
@@ -1334,7 +1369,7 @@ NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc
         }
         cell = slot + 1U;
     }
-    return create_instance(r, desc, cell, false, out);
+    return create_instance(r, desc, cell, false, false, out);
 }
 
 NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,
@@ -1427,13 +1462,22 @@ static bool rigid(const NphRenderTransform *t)
 
 static bool cell_desc_ok(const NphRenderer *r, const NphRenderCellDesc *d)
 {
-    const u32 mesh = render_slot_of(&r->mesh_pool, d->proxy.value);
-    return mesh != NPH_U32_MAX && r->meshes[mesh].vertex_count == 0U &&
-           r->meshes[mesh].index_count == 0U && rigid(&d->proxy_transform) &&
-           nph_f64_is_finite(d->center.x) && nph_f64_is_finite(d->center.y) &&
-           nph_f64_is_finite(d->center.z) && nph_vec3_is_finite(d->extent) && d->extent.x >= 0.0F &&
-           d->extent.y >= 0.0F && d->extent.z >= 0.0F && nph_f32_is_finite(d->proxy_error) &&
-           d->proxy_error > 0.0F && nph_f32_is_finite(d->distance) && d->distance > 0.0F;
+    if (d->proxy_levels == NULL || d->proxy_level_count == 0U ||
+        d->proxy_level_count > NPH_RENDER_CELL_MAX_LEVELS) {
+        return false;
+    }
+    for (u32 k = 0; k < d->proxy_level_count; ++k) {
+        const u32 mesh = render_slot_of(&r->mesh_pool, d->proxy_levels[k].value);
+        if (mesh == NPH_U32_MAX || r->meshes[mesh].vertex_count != 0U ||
+            r->meshes[mesh].index_count != 0U) {
+            return false;
+        }
+    }
+    return rigid(&d->proxy_transform) && nph_f64_is_finite(d->center.x) &&
+           nph_f64_is_finite(d->center.y) && nph_f64_is_finite(d->center.z) &&
+           nph_vec3_is_finite(d->extent) && d->extent.x >= 0.0F && d->extent.y >= 0.0F &&
+           d->extent.z >= 0.0F && nph_f32_is_finite(d->proxy_error) && d->proxy_error > 0.0F &&
+           nph_f32_is_finite(d->distance) && d->distance > 0.0F;
 }
 
 NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, NphRenderCell *out)
@@ -1450,16 +1494,25 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
     memset(c, 0, sizeof *c);
     NphRenderInstanceDesc proxy;
     memset(&proxy, 0, sizeof proxy);
-    proxy.mesh = desc->proxy;
     proxy.materials = desc->proxy_materials;
     proxy.material_count = desc->proxy_material_count;
     proxy.transform = desc->proxy_transform;
-    NphResult res = create_instance(r, &proxy, slot + 1U, true, &c->proxy);
+    NphResult res = NPH_RESULT_OK;
+    for (u32 k = 0; k < desc->proxy_level_count && res == NPH_RESULT_OK; ++k) {
+        // The statistics count the cell by its coarsest mesh's instance,
+        // the one a streamed proxy always holds (ADR-0063).
+        proxy.mesh = desc->proxy_levels[k];
+        res = create_instance(r, &proxy, slot + 1U, true, k + 1U == desc->proxy_level_count,
+                              &c->proxy[k]);
+        c->proxy_count += res == NPH_RESULT_OK ? 1U : 0U;
+    }
     if (res == NPH_RESULT_OK) {
         res = render_vis_cell_created(r, slot, desc);
     }
     if (res != NPH_RESULT_OK) {
-        nph_render_instance_destroy(r, c->proxy);
+        for (u32 k = 0; k < c->proxy_count; ++k) {
+            nph_render_instance_destroy(r, c->proxy[k]);
+        }
         memset(c, 0, sizeof *c);
         release_slot(&r->cell_pool, value);
         return res;
@@ -1489,7 +1542,9 @@ void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell)
     }
     // Its record stays on the GPU until the slot's next cell: no instance
     // names the slot meanwhile.
-    nph_render_instance_destroy(r, c->proxy);
+    for (u32 k = 0; k < c->proxy_count; ++k) {
+        nph_render_instance_destroy(r, c->proxy[k]);
+    }
     memset(c, 0, sizeof *c);
     release_slot(&r->cell_pool, cell.value);
 }

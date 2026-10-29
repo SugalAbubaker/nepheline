@@ -23,7 +23,8 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup) &&
                       sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
                       sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster) &&
-                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick),
+                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick) &&
+                      sizeof(NphMeshLodMaker) == sizeof(NphRenderLodMaker),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
@@ -319,6 +320,8 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->voxel_brick_count = mv->lod->brick_count;
     d->voxel_words = mv->voxel_words;
     d->voxel_word_count = mv->lod->voxel_word_count;
+    const void *makers = mv->lod_makers;
+    d->lod_makers = makers;
 }
 
 static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset *asset)
@@ -326,7 +329,9 @@ static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset
     NphMeshView mv;
     NPH_TRY(nph_mesh_view(asset, &mv));
     const NphMeshHeader *h = mv.header;
-    if (h->submesh_count > NPH_RENDER_MAX_SUBMESHES) {
+    // A head of levels apart (a cell's proxy, asset/mesh.h version 6) is no
+    // mesh to draw: its levels are, and the runtime makes no cells yet.
+    if (h->submesh_count > NPH_RENDER_MAX_SUBMESHES || mv.levels != NULL) {
         return NPH_RESULT_UNSUPPORTED;
     }
     NphRenderSubmesh subs[NPH_RENDER_MAX_SUBMESHES];

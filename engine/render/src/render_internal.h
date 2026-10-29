@@ -203,6 +203,7 @@ typedef struct RenderInstance {
     // or, with `proxy` set, the cell whose proxy it is (NphVisInstance.flags).
     u32 cell;
     b32 proxy;
+    b32 proxy_counted; // the proxy instance its cell's statistics count it by
     // The production path.
     NphRange material_range; // its entries in the material map
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
@@ -211,8 +212,11 @@ typedef struct RenderInstance {
 // A cell of a world partition (nph_render_cell_create; ADR-0062).
 typedef struct RenderCell {
     u32 handle;
-    NphRenderInstance proxy; // the proxy's instance, which the cell owns
-    u32 members;             // live instances that name the cell
+    // The proxy's instances, a mesh each (its levels apart, or one mesh
+    // holding them), which the cell owns.
+    NphRenderInstance proxy[NPH_RENDER_CELL_MAX_LEVELS];
+    u32 proxy_count;
+    u32 members; // live instances that name the cell
 } RenderCell;
 
 // The virtual shadow map's work buffer (vsm.c).

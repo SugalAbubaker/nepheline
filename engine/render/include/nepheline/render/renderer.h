@@ -314,6 +314,12 @@ typedef struct NphRenderMeshDesc {
     const NphRenderLodNode *lod_nodes; // node 0 the root
     u32 lod_node_count;
     u32 lod_level0_meshlets;
+    // Each meshlet's maker as a record (render/cluster_lod.h "Levels apart":
+    // a level of a streamed mesh, ADR-0063, whose makers lie in the level
+    // below, which the renderer does not hold as this mesh's): the sphere and
+    // error the culls test it by, its `cluster_lods` group then
+    // NPH_RENDER_LOD_NONE. NULL: the groups `cluster_lods` names.
+    const NphRenderLodMaker *lod_makers;
     // The levels' voxel clusters, compact (render/voxel.h "The compact form";
     // ADR-0061, ADR-0063; nph_render_voxels_pack makes them from a builder's
     // levels): a meshlet past level 0 without vertices is a voxel cluster,
@@ -475,13 +481,22 @@ bool nph_render_instance_is_valid(const NphRenderer *r, NphRenderInstance instan
 // levels whose texels its finest error fits (the threshold of a caster's
 // levels there), the instances into the others. The reference renderer, the
 // views without levels of detail (lod_error 0), and rays draw the instances.
+//
+// The proxy is given as meshes, each drawn by an instance the cell owns: one
+// mesh holding every level, or its levels apart, a mesh a level
+// (render/cluster_lod.h "Levels apart"; ADR-0063), whose cuts together are
+// the whole's.
+#define NPH_RENDER_CELL_MAX_LEVELS 16U
+
 typedef struct NphRenderCellDesc {
     // The box of its instances, world space (a 64-bit centre).
     NphDVec3 center;
     NphVec3 extent; // half extents, finite, at least 0
-    // The proxy: a mesh of voxels alone, its materials (one per material
-    // slot of its submeshes, as an instance's), and its place.
-    NphRenderMesh proxy;
+    // The proxy: its meshes, each of voxels alone, the finest level's first
+    // (1 to NPH_RENDER_CELL_MAX_LEVELS of them), its materials (one per
+    // material slot of their submeshes, as an instance's), and its place.
+    const NphRenderMesh *proxy_levels;
+    u32 proxy_level_count;
     const NphRenderMaterial *proxy_materials;
     u32 proxy_material_count;
     NphRenderTransform proxy_transform; // a rotation and a translation alone (scale 1)
@@ -489,15 +504,16 @@ typedef struct NphRenderCellDesc {
     f32 distance;                       // drawn from this far (positive)
 } NphRenderCellDesc;
 
-// Creates the cell and its proxy's instance, which it owns.
-// NPH_RESULT_INVALID_ARGUMENT for a stale mesh or material handle, a proxy
-// that is not a mesh of voxels alone, a transform that is not a rotation and
-// a translation, or a box, error, or distance that is not finite and
-// positive (the box's extent at least 0); NPH_RESULT_FULL past max_cells or
-// max_instances (the proxy's instance takes a slot).
+// Creates the cell and its proxy's instances, which it owns.
+// NPH_RESULT_INVALID_ARGUMENT for a stale mesh or material handle, no proxy
+// mesh or more than NPH_RENDER_CELL_MAX_LEVELS, a proxy mesh that is not of
+// voxels alone, a transform that is not a rotation and a translation, or a
+// box, error, or distance that is not finite and positive (the box's extent
+// at least 0); NPH_RESULT_FULL past max_cells or max_instances (each proxy
+// mesh's instance takes a slot).
 NPH_MUST_USE NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc,
                                               NphRenderCell *out);
-// Destroys the cell and its proxy's instance. Instances that name the cell
+// Destroys the cell and its proxy's instances. Instances that name the cell
 // must be destroyed first (asserted; refused with an error logged).
 void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell);
 bool nph_render_cell_is_valid(const NphRenderer *r, NphRenderCell cell);

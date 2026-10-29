@@ -79,7 +79,8 @@ void main()
             const bool proxy = (inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u;
             const bool proxied = vis_cell_proxied(view, cell);
             shown = proxied == proxy;
-            cell_proxied = phase == 0u && proxy && proxied;
+            cell_proxied = phase == 0u && proxy && proxied &&
+                           (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u;
             instance_proxied = phase == 0u && !proxy && proxied;
         }
         if (shown) {

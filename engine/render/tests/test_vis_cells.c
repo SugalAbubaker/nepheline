@@ -4,14 +4,17 @@
 // voxels alone (a cell's proxy) made, drawn by the production path and
 // passed by the reference renderer and the rays, and refused malformed; a
 // cell made and refused; its proxy drawn in place of its instances from
-// afar, standing for them, and not in views without levels of detail; and
-// the sun's shadow map drawing the proxy or the instances per level. The
+// afar, standing for them, and not in views without levels of detail; the
+// sun's shadow map drawing the proxy or the instances per level; and the
+// proxy's levels apart (ADR-0063), each a mesh, drawing it as the whole. The
 // fixture's teardown asserts zero validation and synchronisation-validation
 // errors and nothing leaked.
 #include <nepheline/math/random.h>
 #include <nepheline/render/cell_proxy.h>
 #include <nepheline/render/cluster_lod.h>
 
+#include "render_internal.h"
+#include "test_levels_apart.h"
 #include "test_lod_support.h"
 #include "test_shadow_support.h"
 
@@ -60,10 +63,49 @@ typedef struct Grove {
     NphRenderVoxelSampler sampler;
     NphRenderProxyInstance placed[GROVE_TREES];
     NphRenderClusterLods proxy;
-    NphRenderPackedVoxels proxy_packed; // its voxels compact, as the cooker stores them
+    NphRenderMeshletArray proxy_meshlets; // its records, naming their voxels compact
+    NphRenderPackedVoxels proxy_packed;   // its voxels compact, as the cooker stores them
     NphRenderSubmesh proxy_sub;
     NphRenderMeshDesc proxy_desc; // a mesh of voxels alone
 } Grove;
+
+// A proxy's record as a cooked one brings it (asset/mesh.h): no vertices,
+// one submesh naming material slot 0, every cluster a voxel cluster, the
+// bounds its clusters' spheres', its voxels compact (`packed`, from `l`).
+static void proxy_desc_of(const NphRenderClusterLods *l, const NphRenderPackedVoxels *packed,
+                          const NphRenderSubmesh *sub, NphRenderMeshDesc *pd)
+{
+    memset(pd, 0, sizeof *pd);
+    pd->submeshes = sub;
+    pd->submesh_count = 1U;
+    pd->position_scale = nph_vec3_one();
+    const NphRenderMeshlets *c = &l->clusters;
+    NphAABB bounds = nph_aabb_empty();
+    for (u32 i = 0; i < c->bounds.len; ++i) {
+        const NphRenderMeshletBounds *b = &c->bounds.data[i];
+        bounds =
+            nph_aabb_union(bounds, nph_aabb(nph_vec3_sub(b->center, nph_vec3_splat(b->radius)),
+                                            nph_vec3_add(b->center, nph_vec3_splat(b->radius))));
+    }
+    pd->bounds = bounds;
+    pd->meshlets = c->meshlets.data;
+    pd->meshlet_bounds = c->bounds.data;
+    pd->meshlet_count = c->meshlets.len;
+    pd->cluster_lods = l->lods.data;
+    pd->lod_groups = l->groups.data;
+    pd->lod_group_count = l->groups.len;
+    pd->lod_group_clusters = l->group_clusters.data;
+    pd->lod_group_cluster_count = l->group_clusters.len;
+    pd->lod_nodes = l->nodes.data;
+    pd->lod_node_count = l->nodes.len;
+    pd->lod_level0_meshlets = l->level0_clusters;
+    pd->voxel_clusters = packed->clusters.data;
+    pd->voxel_cluster_count = packed->clusters.len;
+    pd->voxel_bricks = packed->bricks.data;
+    pd->voxel_brick_count = packed->bricks.len;
+    pd->voxel_words = packed->words.data;
+    pd->voxel_word_count = packed->words.len;
+}
 
 static NphDVec3 grove_place(u32 i)
 {
@@ -120,57 +162,77 @@ static void grove_build(Grove *g)
               g->proxy.clusters.meshlets.len, g->proxy.voxels.len);
     NTEST_ASSERT_GT_UINT(g->proxy.clusters.meshlets.len, 0U);
 
-    // Its record as a cooked one brings it (asset/mesh.h version 4): no
-    // vertices, one submesh naming material slot 0, every cluster a voxel
-    // cluster, the bounds its clusters' spheres'.
-    NphRenderMeshDesc *pd = &g->proxy_desc;
-    memset(pd, 0, sizeof *pd);
-    memset(&g->proxy_sub, 0, sizeof g->proxy_sub);
-    pd->submeshes = &g->proxy_sub;
-    pd->submesh_count = 1U;
-    pd->position_scale = nph_vec3_one();
-    const NphRenderMeshlets *c = &g->proxy.clusters;
-    NphAABB bounds = nph_aabb_empty();
-    for (u32 i = 0; i < c->bounds.len; ++i) {
-        const NphRenderMeshletBounds *b = &c->bounds.data[i];
-        bounds =
-            nph_aabb_union(bounds, nph_aabb(nph_vec3_sub(b->center, nph_vec3_splat(b->radius)),
-                                            nph_vec3_add(b->center, nph_vec3_splat(b->radius))));
-    }
-    pd->bounds = bounds;
-    pd->meshlets = c->meshlets.data;
-    pd->meshlet_bounds = c->bounds.data;
-    pd->meshlet_count = c->meshlets.len;
-    pd->cluster_lods = g->proxy.lods.data;
-    pd->lod_groups = g->proxy.groups.data;
-    pd->lod_group_count = g->proxy.groups.len;
-    pd->lod_group_clusters = g->proxy.group_clusters.data;
-    pd->lod_group_cluster_count = g->proxy.group_clusters.len;
-    pd->lod_nodes = g->proxy.nodes.data;
-    pd->lod_node_count = g->proxy.nodes.len;
-    pd->lod_level0_meshlets = g->proxy.level0_clusters;
+    // Its voxels compact, as the cooker stores them: packed from a copy of
+    // the clusters' records, which then name their own (the builder's form
+    // stays whole for the levels apart below).
     nph_render_packed_voxels_init(&g->proxy_packed, a);
-    NphRenderMeshlets *w = &g->proxy.clusters;
-    NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(w->meshlets.data, w->meshlets.len,
+    NPH_ARRAY_INIT(&g->proxy_meshlets, a);
+    const NphRenderMeshlets *w = &g->proxy.clusters;
+    NTEST_ASSERT_EQ_INT(NPH_ARRAY_PUSH_N(&g->proxy_meshlets, w->meshlets.data, w->meshlets.len),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(g->proxy_meshlets.data, g->proxy_meshlets.len,
                                                g->proxy.bricks.data, g->proxy.bricks.len,
                                                g->proxy.voxels.data, g->proxy.voxels.len,
                                                &g->proxy_packed),
                         NPH_RESULT_OK);
-    pd->voxel_clusters = g->proxy_packed.clusters.data;
-    pd->voxel_cluster_count = g->proxy_packed.clusters.len;
-    pd->voxel_bricks = g->proxy_packed.bricks.data;
-    pd->voxel_brick_count = g->proxy_packed.bricks.len;
-    pd->voxel_words = g->proxy_packed.words.data;
-    pd->voxel_word_count = g->proxy_packed.words.len;
-    pd->name = "grove proxy";
+    memset(&g->proxy_sub, 0, sizeof g->proxy_sub);
+    proxy_desc_of(&g->proxy, &g->proxy_packed, &g->proxy_sub, &g->proxy_desc);
+    g->proxy_desc.meshlets = g->proxy_meshlets.data;
+    g->proxy_desc.name = "grove proxy";
 }
 
 static void grove_free(Grove *g)
 {
+    NPH_ARRAY_FREE(&g->proxy_meshlets);
     nph_render_packed_voxels_free(&g->proxy_packed);
     nph_render_cluster_lods_free(&g->proxy);
     NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, g->positions, g->tree.data.vertex_count);
     lod_mesh_free(&g->tree);
+}
+
+// The grove's proxy as its levels apart (render/cluster_lod.h "Levels
+// apart"; ADR-0063), as the cooker writes them: a mesh a level, its makers
+// as records, its voxels compact.
+typedef struct GroveLevels {
+    u32 count;
+    NphRenderClusterLods lods[NPH_RENDER_CELL_MAX_LEVELS];
+    NphRenderLodMakerArray makers[NPH_RENDER_CELL_MAX_LEVELS];
+    NphRenderPackedVoxels packed[NPH_RENDER_CELL_MAX_LEVELS];
+    NphRenderMeshDesc desc[NPH_RENDER_CELL_MAX_LEVELS];
+} GroveLevels;
+
+static void grove_levels_build(const Grove *g, GroveLevels *gl)
+{
+    NphAllocator *a = nph_allocator_system();
+    memset(gl, 0, sizeof *gl);
+    NTEST_ASSERT_LE_UINT(g->proxy.levels, NPH_RENDER_CELL_MAX_LEVELS);
+    gl->count = g->proxy.levels;
+    for (u32 k = 0; k < gl->count; ++k) {
+        nph_render_cluster_lods_init(&gl->lods[k], a);
+        NPH_ARRAY_INIT(&gl->makers[k], a);
+        nph_render_packed_voxels_init(&gl->packed[k], a);
+        NTEST_ASSERT_EQ_INT(
+            nph_render_cluster_lods_level(&g->proxy, k, &gl->lods[k], &gl->makers[k]),
+            NPH_RESULT_OK);
+        NphRenderMeshlets *w = &gl->lods[k].clusters;
+        NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(w->meshlets.data, w->meshlets.len,
+                                                   gl->lods[k].bricks.data, gl->lods[k].bricks.len,
+                                                   gl->lods[k].voxels.data, gl->lods[k].voxels.len,
+                                                   &gl->packed[k]),
+                            NPH_RESULT_OK);
+        proxy_desc_of(&gl->lods[k], &gl->packed[k], &g->proxy_sub, &gl->desc[k]);
+        gl->desc[k].lod_makers = gl->makers[k].data;
+        gl->desc[k].name = "grove proxy level";
+    }
+}
+
+static void grove_levels_free(GroveLevels *gl)
+{
+    for (u32 k = 0; k < gl->count; ++k) {
+        nph_render_packed_voxels_free(&gl->packed[k]);
+        NPH_ARRAY_FREE(&gl->makers[k]);
+        nph_render_cluster_lods_free(&gl->lods[k]);
+    }
 }
 
 // The grove in the renderer: the trees' mesh, the proxy's, and a cell of
@@ -179,6 +241,9 @@ static void grove_free(Grove *g)
 typedef struct GroveScene {
     NphRenderMesh tree;
     NphRenderMesh proxy;
+    // The cell's proxy: `proxy`, or the levels apart's meshes.
+    NphRenderMesh levels[NPH_RENDER_CELL_MAX_LEVELS];
+    u32 level_count;
     NphRenderMaterial green;
     NphRenderCell cell;
     NphRenderInstance trees[GROVE_TREES];
@@ -190,7 +255,8 @@ static NphRenderCellDesc grove_cell_desc(const GroveScene *s, f32 error, f32 dis
     memset(&d, 0, sizeof d);
     d.center = nph_dvec3(0.0, 0.0, 0.0);
     d.extent = nph_vec3(2.5F, 1.0F, 2.5F); // the trees' 2 m cubes at +-1.5 m
-    d.proxy = s->proxy;
+    d.proxy_levels = s->level_count != 0U ? s->levels : &s->proxy;
+    d.proxy_level_count = nph_max_u32(s->level_count, 1U);
     d.proxy_materials = &s->green;
     d.proxy_material_count = 1U;
     d.proxy_transform = nph_render_transform_identity();
@@ -199,14 +265,20 @@ static NphRenderCellDesc grove_cell_desc(const GroveScene *s, f32 error, f32 dis
     return d;
 }
 
-static void grove_scene_build(RenderFixture *f, const Grove *g, GroveScene *s, bool cells,
-                              f32 error, f32 distance)
+// With `levels`, the cell's proxy is the levels apart.
+static void grove_scene_build_with(RenderFixture *f, const Grove *g, GroveScene *s, bool cells,
+                                   f32 error, f32 distance, const GroveLevels *levels)
 {
     memset(s, 0, sizeof *s);
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g->tree.desc, &s->tree),
                         NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g->proxy_desc, &s->proxy),
                         NPH_RESULT_OK);
+    for (u32 k = 0; levels != NULL && k < levels->count; ++k) {
+        NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &levels->desc[k], &s->levels[k]),
+                            NPH_RESULT_OK);
+        s->level_count += 1U;
+    }
     s->green = material(f, nph_vec4(0.3F, 0.5F, 0.2F, 1.0F));
     if (cells) {
         const NphRenderCellDesc cd = grove_cell_desc(s, error, distance);
@@ -226,6 +298,12 @@ static void grove_scene_build(RenderFixture *f, const Grove *g, GroveScene *s, b
     }
 }
 
+static void grove_scene_build(RenderFixture *f, const Grove *g, GroveScene *s, bool cells,
+                              f32 error, f32 distance)
+{
+    grove_scene_build_with(f, g, s, cells, error, distance, NULL);
+}
+
 static void grove_scene_free(RenderFixture *f, GroveScene *s)
 {
     for (u32 i = 0; i < GROVE_TREES; ++i) {
@@ -233,6 +311,9 @@ static void grove_scene_free(RenderFixture *f, GroveScene *s)
     }
     nph_render_cell_destroy(f->renderer, s->cell);
     nph_render_material_destroy(f->renderer, s->green);
+    for (u32 k = 0; k < s->level_count; ++k) {
+        nph_render_mesh_destroy(f->renderer, s->levels[k]);
+    }
     nph_render_mesh_destroy(f->renderer, s->proxy);
     nph_render_mesh_destroy(f->renderer, s->tree);
 }
@@ -528,10 +609,32 @@ NTEST_F(Cells, cells_are_made_and_refused)
         NTEST_EXPECT_EQ_UINT(none.value, 0U);                                                      \
         d = grove_cell_desc(&s, GROVE_CELL, 60.0F);                                                \
     } while (0)
-    // A proxy of triangles, or none.
-    d.proxy = s.tree;
+    // A proxy of triangles, or none: a mesh of triangles or a stale one
+    // among its meshes, no meshes, or more than a cell takes.
+    NphRenderMesh meshes[NPH_RENDER_CELL_MAX_LEVELS + 1U];
+    for (u32 k = 0; k < NPH_ARRAY_COUNT(meshes); ++k) {
+        meshes[k] = s.proxy;
+    }
+    d.proxy_levels = meshes;
+    d.proxy_level_count = 3U;
+    NphRenderCell three = NPH_RENDER_CELL_NULL;
+    NTEST_EXPECT_EQ_INT(nph_render_cell_create(f->renderer, &d, &three), NPH_RESULT_OK);
+    nph_render_cell_destroy(f->renderer, three);
+    meshes[1] = s.tree;
+    d.proxy_levels = meshes;
+    d.proxy_level_count = 3U;
     EXPECT_REFUSED();
-    d.proxy = NPH_RENDER_MESH_NULL;
+    meshes[1] = NPH_RENDER_MESH_NULL;
+    d.proxy_levels = meshes;
+    d.proxy_level_count = 3U;
+    EXPECT_REFUSED();
+    meshes[1] = s.proxy;
+    d.proxy_levels = NULL;
+    EXPECT_REFUSED();
+    d.proxy_level_count = 0U;
+    EXPECT_REFUSED();
+    d.proxy_levels = meshes;
+    d.proxy_level_count = NPH_RENDER_CELL_MAX_LEVELS + 1U;
     EXPECT_REFUSED();
     // Scaled, or mirrored.
     d.proxy_transform = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0), nph_quat_identity(),
@@ -695,5 +798,166 @@ NTEST_F(Cells, the_shadow_map_draws_a_cell_as_its_proxy_where_its_error_fits)
     nph_render_material_destroy(f->renderer, floor.grey);
     nph_render_mesh_destroy(f->renderer, floor.cube);
     nph_render_mesh_destroy(f->renderer, floor.plane);
+    grove_free(&g);
+}
+
+// ---------------------------------------------------------------------------
+// Levels apart (ADR-0063 "Stage 2, a level is a mesh")
+// ---------------------------------------------------------------------------
+
+// The levels apart of a proxy hold its levels, record for record
+// (test_levels_apart.h levels_check_all): each level's clusters, their
+// makers as records and their consumers renumbered, its groups, a tree from
+// node 0 the renderer takes, and nothing past the levels; a level the mesh
+// does not have, or a mesh of triangles, is refused.
+NTEST(cells, a_proxys_levels_apart_hold_its_levels)
+{
+    Grove g;
+    grove_build(&g);
+    NTEST_ASSERT_GE_UINT(g.proxy.levels, 3U);
+    levels_check_all(&g.proxy);
+    NphRenderClusterLods none;
+    nph_render_cluster_lods_init(&none, nph_allocator_system());
+    NphRenderLodMakerArray makers;
+    NPH_ARRAY_INIT(&makers, nph_allocator_system());
+    NTEST_EXPECT_EQ_INT(nph_render_cluster_lods_level(&g.proxy, g.proxy.levels, &none, &makers),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_render_cluster_lods_level(&g.tree.lods, 0U, &none, &makers),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NPH_ARRAY_FREE(&makers);
+    nph_render_cluster_lods_free(&none);
+    grove_free(&g);
+}
+
+// The levels of cell `cell`'s proxy whose clusters the last frame drew, a
+// bit each: its instances (a level's each, its levels apart) in the visible
+// list.
+static u32 levels_drawn(RenderFixture *f, NphRenderCell cell)
+{
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    const NphRenderer *r = f->renderer;
+    NphVisCounters c;
+    test_read_buffer(f->dev, r->vis.counters, 0U, sizeof c, &c);
+    NTEST_ASSERT_EQ_UINT(c.overflow, 0U);
+    const RenderCell *rc = &r->cells[render_slot_of(&r->cell_pool, cell.value)];
+    u32 slots[NPH_RENDER_CELL_MAX_LEVELS];
+    for (u32 k = 0; k < rc->proxy_count; ++k) {
+        slots[k] = render_slot_of(&r->instance_pool, rc->proxy[k].value);
+    }
+    u32 drawn = 0U;
+    const u32 n = nph_min_u32(c.clusters, r->desc.max_visible_clusters);
+    if (n == 0U) {
+        return 0U;
+    }
+    NphVisCluster *list = NPH_ALLOC_ARRAY(nph_allocator_system(), NphVisCluster, n);
+    NTEST_ASSERT_NOT_NULL(list);
+    test_read_buffer(f->dev, r->vis.clusters, 0U, (u64)n * sizeof *list, list);
+    for (u32 i = 0; i < n; ++i) {
+        for (u32 k = 0; k < rc->proxy_count; ++k) {
+            drawn |= list[i].instance == slots[k] ? 1U << k : 0U;
+        }
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, n);
+    return drawn;
+}
+
+// A cell whose proxy is its levels apart, a mesh each, draws as the cell
+// whose proxy is the whole: the same normals, bit for bit, the same voxel
+// clusters and bricks, from near enough for level 0 to far enough for the
+// coarsest levels alone, and counted as one cell; and the sun's shadow map
+// draws the same voxel clusters into its pages.
+NTEST_F(Cells, a_proxys_levels_apart_draw_it_as_the_whole)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    const NphRenderLight light = grove_light(f);
+    BigTarget t;
+    big_target_init(f, &t);
+    u8 *whole = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, BIG_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(whole);
+    // Finer than the proxy's own cell, so that it is drawn from near too.
+    const f32 error = GROVE_CELL / 64.0F;
+    // At a pixel's threshold the grove's level 0 gives way to level 1 from
+    // 427 m and level 1 to level 2 from 853 m (the consumers' errors, its
+    // cells of 0.25 and 0.5 m); from 409 and 817 m along the view the grove's
+    // near and far sides straddle those, so that a cut takes two levels.
+    typedef struct GroveSight {
+        f64 distance;
+        f32 threshold; // pixels
+    } GroveSight;
+    const GroveSight sights[] = {{20.0, 1.0F},   {80.0, 1.0F},  {300.0, 1.0F}, {400.0, 1.0F},
+                                 {1200.0, 1.0F}, {6.0, 40.0F},  {6.0, 60.0F},  {6.0, 85.0F},
+                                 {6.0, 120.0F},  {6.0, 170.0F}, {6.0, 240.0F}};
+    u32 levels_seen = 0U;
+    u32 mixed = 0U; // views whose cut takes two levels or more
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(sights); ++i) {
+        // The normals: what the voxels hold, without the radiance cache's
+        // noise, which differs from frame to frame.
+        NphRenderView v = grove_view(sights[i].distance, sights[i].threshold);
+        v.debug_view = NPH_RENDER_VIEW_NORMAL;
+        GroveScene s;
+        grove_scene_build_with(f, &g, &s, true, error, 1.0F, NULL);
+        const NphRenderFrameStats a = big_frames(f, &t, &v);
+        memcpy(whole, t.pixels, BIG_PIXELS * 4U);
+        grove_scene_free(f, &s);
+        grove_scene_build_with(f, &g, &s, true, error, 1.0F, &gl);
+        const NphRenderFrameStats b = big_frames(f, &t, &v);
+        const u32 drawn = levels_drawn(f, s.cell);
+        mixed += nph_popcount_u32(drawn) >= 2U ? 1U : 0U;
+        u32 differ = 0U;
+        for (u64 p = 0; p < BIG_PIXELS; ++p) {
+            differ += memcmp(whole + p * 4U, t.pixels + p * 4U, 4U) != 0 ? 1U : 0U;
+        }
+        NTEST_LOG("from %.0f m at %.0f px: the whole %u voxel clusters, %u bricks, %u pixels; its "
+                  "levels apart (levels %#x drawn) %u, %u, %u; %u pixels differ",
+                  sights[i].distance, (f64)sights[i].threshold, a.vis_voxel_clusters,
+                  a.vis_voxel_bricks, covered_pixels(whole, BIG_PIXELS), drawn,
+                  b.vis_voxel_clusters, b.vis_voxel_bricks, covered_pixels(t.pixels, BIG_PIXELS),
+                  differ);
+        NTEST_EXPECT_GT_UINT(a.vis_voxel_clusters, 0U);
+        NTEST_EXPECT_EQ_UINT(b.vis_voxel_clusters, a.vis_voxel_clusters);
+        NTEST_EXPECT_EQ_UINT(b.vis_voxel_bricks, a.vis_voxel_bricks);
+        NTEST_EXPECT_EQ_UINT(a.vis_cells_proxied, 1U);
+        NTEST_EXPECT_EQ_UINT(b.vis_cells_proxied, 1U);
+        NTEST_EXPECT_EQ_UINT(differ, 0U);
+        levels_seen += a.vis_voxel_clusters != 0U ? 1U : 0U;
+        grove_scene_free(f, &s);
+    }
+    NTEST_EXPECT_EQ_UINT(levels_seen, NPH_ARRAY_COUNT(sights));
+    NTEST_EXPECT_GE_UINT(mixed, 2U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, whole, BIG_PIXELS * 4U);
+    big_target_free(f, &t);
+    nph_render_light_destroy(f->renderer, light);
+
+    if (nph_renderer_virtual_shadows_supported(f->renderer)) {
+        Scene floor;
+        scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+        NphRenderLightDesc sun = sun_desc(true);
+        const NphRenderLight sl = make_light(f, &sun);
+        NphRenderView v;
+        shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
+        v.lod_error = 1.0F;
+        GroveScene s;
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, NULL);
+        const NphRenderFrameStats a = first_frame(f, &v);
+        grove_scene_free(f, &s);
+        grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 0.01F, &gl);
+        const NphRenderFrameStats b = first_frame(f, &v);
+        grove_scene_free(f, &s);
+        NTEST_LOG("the shadow map: the whole %u draws of voxel clusters, its levels apart %u",
+                  a.vsm_voxel_draws, b.vsm_voxel_draws);
+        NTEST_EXPECT_GT_UINT(a.vsm_voxel_draws, 0U);
+        NTEST_EXPECT_EQ_UINT(b.vsm_voxel_draws, a.vsm_voxel_draws);
+        nph_render_light_destroy(f->renderer, sl);
+        nph_render_instance_destroy(f->renderer, floor.floor);
+        nph_render_instance_destroy(f->renderer, floor.occluder);
+        nph_render_material_destroy(f->renderer, floor.grey);
+        nph_render_mesh_destroy(f->renderer, floor.cube);
+        nph_render_mesh_destroy(f->renderer, floor.plane);
+    }
+    grove_levels_free(&gl);
     grove_free(&g);
 }
