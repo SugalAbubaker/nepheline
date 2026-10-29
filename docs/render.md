@@ -334,6 +334,7 @@ something it shows changes.
 | `vsm update` | every entry against this frame's windows: an entry whose page the window left gives its physical page up; a requested entry with a page keeps it (and is wanted, to be drawn again, if dirty), one without is wanted, to take a page; the wanted pages listed and counted per level |
 | `vsm collect` | the free physical pages, then the evictable ones (owned, not requested: those unused for 60 frames before the recent ones) |
 | `vsm select` | the wanted pages to draw this frame within the page budget, the coarse levels first ("Overflow and the page budget", below): a dirty page granted is drawn, a new one takes a free page, else an evictable one, and is drawn; the rest wait for a later frame |
+| `vsm cell requests` | while the renderer holds cells: every cell slot at every level (an invocation each), a cell drawn into the level as its proxy whose box reaches a page this frame's pixels need asks for its proxy's level ("Cell proxies", Requests) |
 | `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page; a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
 | `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
@@ -1117,15 +1118,21 @@ not, where its sphere is in view (phase 0: in the frustum and not behind the
 previous frame's pyramid; phase 1: a deferred one found visible), for the
 first level whose error is too coarse at the box's nearest point brought a
 quarter nearer (`vis_cell_request`, `NPH_VIS_CELL_PREFETCH`), past its
-distance less a quarter; the sun's shadow map's instance cull asks, in each
-map level that draws the cell as its proxy, at the level's threshold brought
-a quarter finer. The smallest wins (an atomic minimum into
+distance less a quarter; the sun's shadow map asks, in each map level that
+draws the cell as its proxy and where its box reaches a page the frame's
+pixels need, at the level's threshold brought a quarter finer (`vsm cell
+requests`, every frame: a page kept from an earlier frame still holds the
+level it was drawn with, and requests made only where pages are drawn came
+and went with them, so that a stream gave the level up and redrew the pages,
+which asked for it again). The smallest wins (an atomic minimum into
 `NphVisViewData.cell_requests`, cleared by `vis clear`); `vis statistics`
 copies the requests to the frame slot's readback, which the frame reusing the
 slot reads: `nph_render_cell_request` answers with the level of the frame
 `nph_render_cell_requests_frame` names, `NPH_GPU_FRAMES_IN_FLIGHT` frames
 late (`test_vis_cells.c`: at nine distances the request is its C twin's, and
-none nearer, out of view, or without levels of detail).
+none nearer, out of view, or without levels of detail; the shadow map's
+stands in the frames that draw none of its pages, and none where the cell
+is drawn into no level as its proxy).
 The cells' records (`NphVisCell`: the centre split into high and low floats
 as a translation is, the half extents, the error, and `D`) sit in a table the
 instance culls read.

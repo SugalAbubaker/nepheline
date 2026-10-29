@@ -1161,6 +1161,69 @@ NTEST_F(Cells, a_cell_asks_for_the_level_its_cut_needs)
     grove_free(&g);
 }
 
+// The sun's shadow map asks for a cell's level every frame, its pages drawn
+// or kept (ADR-0063 stage 3): with the camera near enough that its view asks
+// nothing (the cell's instances are drawn there), the request the map makes
+// while it draws its pages stands once it keeps them, frame after frame. (A
+// request made only where pages are drawn would come and go with them, and
+// a stream giving up the level for want of one would redraw the pages that
+// ask for it again.)
+NTEST_F(Cells, the_shadow_map_asks_for_a_cells_level_its_pages_drawn_or_kept)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!nph_renderer_virtual_shadows_supported(f->renderer)) {
+        NTEST_SKIP("no virtual shadow map on this device");
+    }
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    Scene floor;
+    scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+    NphRenderLightDesc sun = sun_desc(true);
+    const NphRenderLight light = make_light(f, &sun);
+    NphRenderView v;
+    shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, 0U);
+    v.lod_error = 1.0F;
+    // Drawn as its proxy from a million metres (the camera never), into the
+    // map's levels where its finest error fits.
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, true, 1.0F / 1024.0F, 1.0e6F, &gl, 0U);
+    u32 asked = NPH_RENDER_CELL_NO_REQUEST;
+    u32 kept = 0U; // frames that drew no page
+    for (u32 i = 0; i < 12U; ++i) {
+        const NphRenderFrameStats st = test_render_read(f, &v);
+        const u32 request = nph_render_cell_request(f->renderer, s.cell);
+        NTEST_LOG("frame %u: %u pages drawn, %u resident; the cell asks for level %u", i,
+                  st.vsm_drawn, st.vsm_resident, request);
+        // The statistics and the requests both come NPH_GPU_FRAMES_IN_FLIGHT
+        // frames late: from the first frame read back on, they match.
+        if (i < NPH_GPU_FRAMES_IN_FLIGHT) {
+            continue;
+        }
+        NTEST_EXPECT_NE_UINT(request, NPH_RENDER_CELL_NO_REQUEST);
+        asked = asked == NPH_RENDER_CELL_NO_REQUEST ? request : asked;
+        NTEST_EXPECT_EQ_UINT(request, asked);
+        kept += st.vsm_drawn == 0U ? 1U : 0U;
+    }
+    NTEST_EXPECT_GT_UINT(kept, 0U);
+    // Its proxy drawn into no level (finer than its finest error everywhere):
+    // nothing.
+    grove_scene_free(f, &s);
+    grove_scene_build_with(f, &g, &s, true, 1024.0F, 1.0e6F, &gl, 0U);
+    first_frame(f, &v);
+    NTEST_EXPECT_EQ_UINT(nph_render_cell_request(f->renderer, s.cell), NPH_RENDER_CELL_NO_REQUEST);
+    grove_scene_free(f, &s);
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_instance_destroy(f->renderer, floor.floor);
+    nph_render_instance_destroy(f->renderer, floor.occluder);
+    nph_render_material_destroy(f->renderer, floor.grey);
+    nph_render_mesh_destroy(f->renderer, floor.cube);
+    nph_render_mesh_destroy(f->renderer, floor.plane);
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
 // A cell's proxy is replaced level by level, as a streamed proxy's arrive and
 // go (ADR-0063 stage 3): held from level 2, then 1, then 0, then from 2
 // again, the cell draws its finest held level near (where the whole draws

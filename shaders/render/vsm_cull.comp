@@ -20,6 +20,14 @@
 //     visibility buffer's indirect raster does. A voxel cluster's draws go
 //     to a list of their own (NphVsmView.voxel_draws), which the voxel
 //     casters' splat takes (vsm_voxel_splat.comp; ADR-0061).
+//   CELLS: an invocation per cell slot (NphVisPush.arg0 of them) and level
+//     (z): a cell drawn into the level as its proxy whose box touches a
+//     page this frame's pixels need asks for the level of its proxy the
+//     map level takes (ADR-0063 stage 3), every frame, whether the page is
+//     drawn or kept: a kept page still holds the level it was drawn with,
+//     and a request only where pages are drawn would come and go with them
+//     (a level given up for want of a request redraws its pages, which ask
+//     for it again).
 //
 // Casters are drawn from both sides and from every direction: no normal
 // cone culling, since a meshlet facing away from the light shadows all the
@@ -97,12 +105,6 @@ void cull_instances(VisViewRef view, VsmViewRef r)
             if (vsm_touches_render(r, level, c, radius)) {
                 walk = mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u;
                 meshlets = walk ? 0u : mesh.meshlet_count; // level 0's without the walk
-                // A cell drawn here as its proxy asks for the level the map
-                // level's threshold takes (ADR-0063 stage 3), by its counted
-                // instance; the camera's margin brings it as much nearer.
-                if (cell != 0u && (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u) {
-                    vis_cell_ask(view, cell, vsm_cell_request(view, r, level, cell));
-                }
             }
         }
     }
@@ -314,12 +316,36 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
     }
 }
 
+void cull_cells(VisViewRef view, VsmViewRef r)
+{
+    const int level = int(gl_WorkGroupID.z);
+    const uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                   gl_LocalInvocationIndex;
+    if (i >= pc.arg0 || !vsm_cell_proxied(view, r, level, i + 1u)) {
+        return;
+    }
+    const uint ask = vsm_cell_request(view, r, level, i + 1u);
+    if (ask == NPH_VIS_CELL_NO_REQUEST) {
+        return;
+    }
+    // The box's bounding sphere (its proxy lies within its instances' box).
+    VisCellsRef cells = VisCellsRef(view.v.cells);
+    const vec3 centre = (cells.c[i].center_high.xyz - view.v.camera_high.xyz) +
+                        (cells.c[i].center_low.xyz - view.v.camera_low.xyz);
+    if (vsm_touches_requested(r, level, vsm_light_space(r, centre),
+                              length(cells.c[i].extent.xyz))) {
+        vis_cell_ask(view, i + 1u, ask);
+    }
+}
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
     VsmViewRef r = VsmViewRef(ViewRef(view.v.render_view).v.vsm);
     if (pc.mode == NPH_VSM_CULL_INSTANCES) {
         cull_instances(view, r);
+    } else if (pc.mode == NPH_VSM_CULL_CELLS) {
+        cull_cells(view, r);
     } else {
         cull_meshlets(view, r);
     }

@@ -800,6 +800,7 @@ NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellD
     if (!r->vis.supported) {
         return NPH_RESULT_OK;
     }
+    r->vis.cell_slots = nph_max_u32(r->vis.cell_slots, slot + 1U);
     NphVisCell rec;
     memset(&rec, 0, sizeof rec);
     f32 hx = 0.0F;

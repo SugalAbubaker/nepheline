@@ -377,6 +377,38 @@ bool vsm_touches_render(VsmViewRef r, int level, vec3 centre, float radius)
     return rect.x <= rect.y && (area > VSM_SCAN_PAGES || vsm_render_any(r, level, rect));
 }
 
+// Whether any page of a window-relative rectangle (x0, x1, y0, y1) of a
+// level is needed by this frame's pixels (its requests), drawn this frame or
+// kept from an earlier one.
+bool vsm_requested_any(VsmViewRef r, int level, ivec4 rect)
+{
+    if (rect.x > rect.y) {
+        return false;
+    }
+    for (int y = rect.z; y <= rect.w; ++y) {
+        for (uint w = uint(rect.x) >> 5u; w <= uint(rect.y) >> 5u; ++w) {
+            if ((vsm_row_word(r.v.requests, level, y, w) & vsm_word_mask(w, rect.x, rect.y)) !=
+                0u) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Whether a light-space sphere touches a page of a level this frame's pixels
+// need (one spanning more than VSM_SCAN_PAGES pages is taken as touching
+// one), and does not lie wholly beyond the level's far plane.
+bool vsm_touches_requested(VsmViewRef r, int level, vec3 centre, float radius)
+{
+    if (vsm_beyond(r, level, centre, radius)) {
+        return false;
+    }
+    const ivec4 rect = vsm_sphere_rect(r, level, centre, radius);
+    const int area = (rect.y - rect.x + 1) * (rect.w - rect.z + 1);
+    return rect.x <= rect.y && (area > VSM_SCAN_PAGES || vsm_requested_any(r, level, rect));
+}
+
 // The physical page's first texel in the pool.
 ivec2 vsm_pool_base(uint page)
 {
