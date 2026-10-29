@@ -346,20 +346,27 @@ cannot hold. The samples' cooked-scene bridge does so with
 - **Installs.** A loaded level still needed becomes a mesh and joins its
   cell's proxy (`nph_render_cell_set_proxy`; the cell's finest held level
   stands for the finer ones), those worth most first, at most
-  `max_install_bytes` a frame. Past the budget, the levels worth least
-  go.
+  `max_install_bytes` begun a frame (by their estimates). Given a job
+  system (`NphProxyStreamDesc.jobs`) and a renderer with a voxel pool
+  ([render.md](render.md) "The voxel pool"), the level is made on a
+  loading job: the update reserves its mesh's slot; the job checks its
+  asset (the mesh view), describes it, uploads it into the pool and
+  releases the asset (its decompressed bytes freed off the main thread);
+  a later update finishes the mesh and gives it to the cell. Without, or
+  where the pool has no room (logged once), it is made on the main
+  thread. Past the budget, the levels worth least go.
 - **Failures.** A level that fails to load or to become a mesh leaves its
   cell as it is, logged and counted (`NphProxyStreamStats.failed`); the
   cell is not tried again.
 
-Costs: creation allocates the cells' table; an update allocates nothing of
-its own and is linear in the cells (a pass reading their requests, and
-one for each load and drop); the loads and the meshes allocate what the
-loader and the renderer do. On the open landscape (384 cells, 2,639
-levels) an idle update takes 0.006 to 0.03 ms, but a frame that installs
-costs the main thread 0.12 ms and 0.54 ms for each megabyte of levels made
-(5.1 ms at most), past §10.5's 1 ms: the meshes' validation and uploads
-move to the jobs next (ADR-0063 "Stage 3, the stream"). `nph_proxy_stream_stats`
+Costs: creation allocates the cells' table and the builds' slots
+(`max_loads`); an update allocates nothing of its own and is linear in the
+cells (a pass reading their requests, and one for each load and drop);
+the loads and the meshes allocate what the loader and the renderer do. On
+the open landscape (384 cells, 2,639 levels) an idle update takes 0.006
+to 0.03 ms, and with the jobs a frame that installs 0.05 to 0.08 ms on
+average and 0.54 ms at most, whatever the levels' bytes (on the main
+thread, 0.12 ms and 0.54 ms for each megabyte: ADR-0063 "Stage 3c"). `nph_proxy_stream_stats`
 and `nph_proxy_stream_cell_state` report what the stream holds and does,
 for tools and tests. NPH_MAIN_THREAD_ONLY.
 
@@ -748,11 +755,11 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 
 ## Limitations and future work
 
-- Proxy streaming makes its levels' meshes on the main thread (0.54 ms a
-  megabyte); a pool of voxel meshes with their validation and uploads on
-  the jobs comes next (ADR-0063). An update is linear in the cells: a
-  world of thousands needs its requests read, and its loads and drops
-  picked, in jobs or from heaps.
+- Proxy streaming's update is linear in the cells: a world of thousands
+  needs its requests read, and its loads and drops picked, in jobs or
+  from heaps (ADR-0063 stage 4). A level made on a job takes a frame
+  more to arrive than one made on the main thread (at the landscape's 62
+  ms frames, settling took 27 s where 18).
 - The scene renderer's sync runs serially on the main thread: 10,000
   moving instances cost 0.79 ms (2.6 ms drawn between steps) of the 1 ms
   main-thread budget. Capturing and blending in parallel jobs, or blending

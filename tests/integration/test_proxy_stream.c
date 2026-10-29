@@ -10,7 +10,8 @@
 // 2. a loader with a job system loads the scene, each cell's head and its
 //    coarsest level; the renderer makes each cell with its coarsest alone
 //    (nph_proxy_level_mesh_create), the grove placed once or twice, and a
-//    stream is given the cells;
+//    stream is given the cells, which makes their levels in the renderer's
+//    voxel pool on the jobs (or on the main thread);
 // 3. frames are drawn, the stream updated before each as a game's loop
 //    does, and what it holds, loads and drops is checked against the
 //    views' requests and its budget, and what is drawn against the cells
@@ -82,7 +83,9 @@ typedef struct StreamWorld {
     NphProxyStream *stream;
 } StreamWorld;
 
-NTEST_SETUP(StreamWorld)
+// A renderer with a voxel pool of `pool` bytes, where the levels are made
+// on the jobs (ADR-0063 stage 3c).
+static void world_setup(StreamWorld *f, u64 pool)
 {
     memset(f, 0, sizeof *f);
     f->alloc = nph_allocator_system();
@@ -92,10 +95,36 @@ NTEST_SETUP(StreamWorld)
     d.max_materials = 4U;
     d.max_instances = 256U;
     d.max_cells = 16U;
+    d.voxel_pool_bytes = pool;
     test_render_setup(&f->rf, &d);
 }
 
+NTEST_SETUP(StreamWorld)
+{
+    world_setup(f, 16U << 20U);
+}
+
+static void world_teardown(StreamWorld *f);
+
 NTEST_TEARDOWN(StreamWorld)
+{
+    world_teardown(f);
+}
+
+// The world with a pool too small for the levels past the coarsest.
+typedef StreamWorld TightPool;
+
+NTEST_SETUP(TightPool)
+{
+    world_setup(f, 64U << 10U);
+}
+
+NTEST_TEARDOWN(TightPool)
+{
+    world_teardown(f);
+}
+
+static void world_teardown(StreamWorld *f)
 {
     NphRenderer *r = f->rf.renderer;
     nph_proxy_stream_destroy(f->stream);
@@ -271,13 +300,16 @@ static void place_grove(StreamWorld *f, f64 dz)
     nph_asset_release(f->loader, sh);
 }
 
-static void stream_make(StreamWorld *f, u64 budget)
+// A stream of the cells, within `budget` bytes (0: none), its levels made on
+// the jobs in the voxel pool, or with `on_main` on the main thread.
+static void stream_make(StreamWorld *f, u64 budget, bool on_main)
 {
     NphProxyStreamDesc d;
     memset(&d, 0, sizeof d);
     d.alloc = f->alloc;
     d.renderer = f->rf.renderer;
     d.loader = f->loader;
+    d.jobs = on_main ? NULL : f->jobs;
     d.max_cells = MAX_CELLS;
     d.budget_bytes = budget;
     NTEST_ASSERT_EQ_INT(nph_proxy_stream_create(&d, &f->stream), NPH_RESULT_OK);
@@ -382,6 +414,7 @@ typedef struct Settled {
     u32 frames;
     u32 installed; // levels given, in all
     u32 dropped;
+    u32 building; // the most being made on the jobs at once
 } Settled;
 
 // Frames until the stream is quiet: nothing loading, given or dropped,
@@ -399,11 +432,13 @@ static Settled settle(StreamWorld *f, const NphRenderView *v)
         nph_proxy_stream_stats(f->stream, &st);
         out.installed += st.installed;
         out.dropped += st.dropped;
+        out.building = nph_max_u32(out.building, st.building);
         quiet = st.loading == 0U && st.installed == 0U && st.dropped == 0U ? quiet + 1U : 0U;
         ++out.frames;
     }
-    NTEST_LOG("settled in %u frames: %u levels given, %u dropped", out.frames, out.installed,
-              out.dropped);
+    NTEST_LOG(
+        "settled in %u frames: %u levels given, %u dropped, at most %u made on the jobs at once",
+        out.frames, out.installed, out.dropped, out.building);
     NTEST_ASSERT_EQ_UINT(quiet, QUIET_FRAMES);
     return out;
 }
@@ -466,9 +501,16 @@ NTEST_F(StreamWorld, cells_stream_in_the_levels_the_views_ask_for)
     memcpy(coarsest, f->pixels, TARGET_PIXELS * 4U);
     NTEST_ASSERT_GT_UINT(covered_pixels(coarsest), 0U);
 
-    // Streamed until settled: every cell holds every level, as asked.
-    stream_make(f, 0U);
+    // Streamed until settled: every cell holds every level, as asked, each
+    // made on the jobs in the voxel pool.
+    u64 pool = 0U;
+    u64 pool_size = 0U;
+    nph_render_voxel_pool_usage(f->rf.renderer, &pool, &pool_size);
+    const u64 coarsest_bytes = pool; // the cells' coarsest levels, made at once
+    NTEST_EXPECT_TRUE(coarsest_bytes != 0U);
+    stream_make(f, 0U, false);
     const Settled s = settle(f, &v);
+    NTEST_EXPECT_GT_UINT(s.building, 0U);
     NphProxyStreamStats st;
     nph_proxy_stream_stats(f->stream, &st);
     u32 levels = 0U;
@@ -495,10 +537,18 @@ NTEST_F(StreamWorld, cells_stream_in_the_levels_the_views_ask_for)
               covered_pixels(coarsest), covered_pixels(streamed));
     NTEST_EXPECT_GT_UINT(differing_pixels(coarsest, streamed), 0U);
 
-    // Gone, the stream leaves every cell its coarsest alone.
+    nph_render_voxel_pool_usage(f->rf.renderer, &pool, &pool_size);
+    NTEST_LOG("the voxel pool: %.1f KB of %.1f MB, the coarsest levels %.1f KB of it",
+              (f64)pool / 1024.0, (f64)pool_size / 1048576.0, (f64)coarsest_bytes / 1024.0);
+    NTEST_EXPECT_TRUE(pool > coarsest_bytes);
+
+    // Gone, the stream leaves every cell its coarsest alone, and the pool
+    // the coarsest levels once the frames in flight are done.
     stream_free(f);
     draw(f, &v);
     NTEST_EXPECT_EQ_UINT(differing_pixels(coarsest, f->pixels), 0U);
+    nph_render_voxel_pool_usage(f->rf.renderer, &pool, &pool_size);
+    NTEST_EXPECT_TRUE(pool == coarsest_bytes);
 
     // The cells given every level at once draw what the stream assembled.
     NphRenderMesh meshes[GROVE_CELLS][NPH_RENDER_CELL_MAX_LEVELS];
@@ -548,7 +598,7 @@ NTEST_F(StreamWorld, within_a_budget_the_levels_worth_most_are_held)
     const NphRenderView back = grove_view(far_eye, grove_centre(-GROVE_APART), WIDE_FOV, threshold);
 
     // Unlimited, the levels the views ask for and their bytes.
-    stream_make(f, 0U);
+    stream_make(f, 0U, false);
     settle(f, &v);
     NphProxyStreamStats all;
     nph_proxy_stream_stats(f->stream, &all);
@@ -568,7 +618,7 @@ NTEST_F(StreamWorld, within_a_budget_the_levels_worth_most_are_held)
 
     // Half of that.
     const u64 budget = all.held_bytes / 2U;
-    stream_make(f, budget);
+    stream_make(f, budget, false);
     settle(f, &v);
     NphProxyStreamStats st;
     nph_proxy_stream_stats(f->stream, &st);
@@ -620,8 +670,9 @@ NTEST_F(StreamWorld, within_a_budget_the_levels_worth_most_are_held)
 
 // A level that cannot be had leaves its cell as it is, logged and counted,
 // and the others stream on: one cell names an asset no pack holds, another
-// a mesh that is not a level apart (its own head). And the stream's
-// arguments are checked.
+// a mesh that is not a level apart (its own head). The levels are made on
+// the main thread here (no jobs given), as without a voxel pool. And the
+// stream's arguments are checked.
 NTEST_F(StreamWorld, a_level_that_fails_leaves_its_cell_as_it_is)
 {
     REQUIRE_PRODUCTION(f);
@@ -674,28 +725,65 @@ NTEST_F(StreamWorld, a_level_that_fails_leaves_its_cell_as_it_is)
     NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &f->stream_cells[3]), NPH_RESULT_FULL);
     nph_proxy_stream_destroy(s);
 
-    // Streamed: the two cells stop short, the others hold every level.
-    stream_make(f, 0U);
-    settle(f, &v);
+    // Streamed, the levels made on the main thread and then on the jobs: the
+    // two cells stop short, the others hold every level.
+    for (u32 pass = 0; pass < 2U; ++pass) {
+        stream_make(f, 0U, pass == 0U);
+        settle(f, &v);
+        NphProxyStreamStats st;
+        nph_proxy_stream_stats(f->stream, &st);
+        NTEST_EXPECT_EQ_UINT(st.failed, 2U);
+        const NphProxyStreamCellState c0 = nph_proxy_stream_cell_state(f->stream, 0U);
+        NTEST_EXPECT_TRUE(c0.failed);
+        NTEST_EXPECT_EQ_UINT(c0.held, 1U); // all but the one nowhere
+        const NphProxyStreamCellState c1 = nph_proxy_stream_cell_state(f->stream, 1U);
+        NTEST_EXPECT_TRUE(c1.failed);
+        NTEST_EXPECT_EQ_UINT(c1.held, next + 1U); // its coarsest alone
+        for (u32 k = 2; k < f->cell_count; ++k) {
+            const NphProxyStreamCellState cs = nph_proxy_stream_cell_state(f->stream, k);
+            NTEST_EXPECT_FALSE(cs.failed);
+            NTEST_EXPECT_EQ_UINT(cs.held, 0U);
+        }
+        // Nothing more is tried.
+        for (u32 i = 0; i < 10U; ++i) {
+            stream_frame(f, &v);
+        }
+        nph_proxy_stream_stats(f->stream, &st);
+        NTEST_EXPECT_EQ_UINT(st.failed, 2U);
+        NTEST_EXPECT_EQ_UINT(st.loading, 0U);
+        stream_free(f);
+    }
+}
+
+// A voxel pool too small for the levels past the coarsest: the jobs find no
+// room, and the levels are made on the main thread with buffers of their own
+// (warned once), so that every cell still holds every level it is asked for;
+// the pool holds what fits.
+NTEST_F(TightPool, a_full_pool_makes_the_levels_on_the_main_thread)
+{
+    REQUIRE_PRODUCTION(f);
+    world_open(f);
+    place_grove(f, 0.0);
+    const NphDVec3 eye = near_eye();
+    const NphRenderView v =
+        grove_view(eye, grove_centre(0.0), NARROW_FOV, fine_threshold(f, eye, NARROW_FOV));
+    stream_make(f, 0U, false);
+    const Settled s = settle(f, &v);
     NphProxyStreamStats st;
     nph_proxy_stream_stats(f->stream, &st);
-    NTEST_EXPECT_EQ_UINT(st.failed, 2U);
-    const NphProxyStreamCellState c0 = nph_proxy_stream_cell_state(f->stream, 0U);
-    NTEST_EXPECT_TRUE(c0.failed);
-    NTEST_EXPECT_EQ_UINT(c0.held, 1U); // all but the one nowhere
-    const NphProxyStreamCellState c1 = nph_proxy_stream_cell_state(f->stream, 1U);
-    NTEST_EXPECT_TRUE(c1.failed);
-    NTEST_EXPECT_EQ_UINT(c1.held, next + 1U); // its coarsest alone
-    for (u32 k = 2; k < f->cell_count; ++k) {
-        const NphProxyStreamCellState cs = nph_proxy_stream_cell_state(f->stream, k);
-        NTEST_EXPECT_FALSE(cs.failed);
-        NTEST_EXPECT_EQ_UINT(cs.held, 0U);
+    u64 pool = 0U;
+    u64 size = 0U;
+    nph_render_voxel_pool_usage(f->rf.renderer, &pool, &size);
+    NTEST_LOG("levels held %u (%.1f KB); the pool %.1f of %.1f KB", st.held_levels,
+              (f64)st.held_bytes / 1024.0, (f64)pool / 1024.0, (f64)size / 1024.0);
+    u32 levels = 0U;
+    for (u32 k = 0; k < f->cell_count; ++k) {
+        NTEST_EXPECT_EQ_UINT(nph_proxy_stream_cell_state(f->stream, k).held, 0U);
+        levels += f->stream_cells[k].level_count - 1U;
     }
-    // Nothing more is tried.
-    for (u32 i = 0; i < 10U; ++i) {
-        stream_frame(f, &v);
-    }
-    nph_proxy_stream_stats(f->stream, &st);
-    NTEST_EXPECT_EQ_UINT(st.failed, 2U);
-    NTEST_EXPECT_EQ_UINT(st.loading, 0U);
+    NTEST_EXPECT_EQ_UINT(st.held_levels, levels);
+    NTEST_EXPECT_EQ_UINT(s.installed, levels);
+    NTEST_EXPECT_EQ_UINT(st.failed, 0U);
+    NTEST_EXPECT_TRUE(st.held_bytes > size); // more than the pool holds
+    NTEST_EXPECT_TRUE(pool <= size);
 }

@@ -51,6 +51,7 @@ typedef struct StreamCell {
     f32 scale;           // its errors over the view's threshold from the camera, this update
     NphAssetHandle load; // the level loading (first - 1), or none
     u64 load_bytes;      // its bytes as estimated when it began
+    u32 build;           // its mesh's build in the making (an index of builds, plus one; 0: none)
     u32 skipped;         // the update that last passed its next level over
     b32 failed;          // a level failed: the cell is left as it is
     NphDVec3 center;
@@ -58,11 +59,33 @@ typedef struct StreamCell {
     f32 distance;
 } StreamCell;
 
+// A level's mesh in the making on a loading job, in the renderer's voxel
+// pool (ADR-0063 stage 3c): begun by an update, its asset checked, described,
+// uploaded and released by the job, finished by a later update. A build
+// counts as its cell's load (whose handle it takes over), so max_loads of
+// them are always enough.
+typedef struct StreamBuild {
+    NphProxyStream *stream;
+    StreamCell *cell; // NULL: free
+    NphAssetHandle asset;
+    b32 kept; // the job kept the asset (the pool had no room)
+    NphRenderVoxelMesh mesh;
+    NphRenderMeshDesc desc;
+    NphRenderSubmesh subs[NPH_RENDER_MAX_SUBMESHES];
+    u64 bytes;
+    u32 clusters;
+    NphResult result; // the job's
+    NphJobCounter done;
+} StreamBuild;
+
 struct NphProxyStream {
     NphProxyStreamDesc desc;
     StreamCell *cells;
     u32 cell_count;
     StreamCell **arrived; // max_loads: the loads an update finds done
+    StreamBuild *builds;  // max_loads
+    u32 building;
+    b32 pool_full_logged;
     u64 held_bytes;
     u64 loading_bytes; // the loads', as estimated
     u32 held_levels;
@@ -180,7 +203,8 @@ NphResult nph_proxy_stream_create(const NphProxyStreamDesc *desc, NphProxyStream
         desc->max_install_bytes != 0U ? desc->max_install_bytes : NPH_MIB(8);
     s->cells = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamCell, desc->max_cells);
     s->arrived = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamCell *, s->desc.max_loads);
-    if (s->cells == NULL || s->arrived == NULL) {
+    s->builds = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamBuild, s->desc.max_loads);
+    if (s->cells == NULL || s->arrived == NULL || s->builds == NULL) {
         nph_proxy_stream_destroy(s);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -225,6 +249,20 @@ void nph_proxy_stream_destroy(NphProxyStream *s)
     if (s == NULL) {
         return;
     }
+    // The builds' jobs done, their meshes given back unmade, their cells'
+    // loads forgotten where the jobs released the assets.
+    for (u32 i = 0; s->builds != NULL && i < s->desc.max_loads; ++i) {
+        StreamBuild *b = &s->builds[i];
+        if (b->cell != NULL) {
+            nph_job_wait(s->desc.jobs, &b->done);
+            nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+            if (!b->kept) {
+                b->cell->load = NPH_ASSET_HANDLE_NULL;
+            }
+            b->cell->build = 0U;
+            b->cell = NULL;
+        }
+    }
     for (u32 i = 0; i < s->cell_count; ++i) {
         StreamCell *c = &s->cells[i];
         if (c->load.value != 0U) {
@@ -240,6 +278,9 @@ void nph_proxy_stream_destroy(NphProxyStream *s)
     }
     if (s->arrived != NULL) {
         NPH_FREE_ARRAY(s->desc.alloc, StreamCell *, s->arrived, s->desc.max_loads);
+    }
+    if (s->builds != NULL) {
+        NPH_FREE_ARRAY(s->desc.alloc, StreamBuild, s->builds, s->desc.max_loads);
     }
     if (s->cells != NULL) {
         NPH_FREE_ARRAY(s->desc.alloc, StreamCell, s->cells, s->desc.max_cells);
@@ -327,12 +368,11 @@ static void log_failure(const StreamCell *c, u32 level, const char *what, NphRes
                   nph_result_string(r));
 }
 
-// Cell `c`'s loaded level made a mesh and given to the cell. A failure is
-// logged and leaves the cell as it was.
-static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv, u64 bytes)
+// Cell `c` given its level `level`'s mesh, made: held and counted, its bytes
+// and clusters teaching the estimates. The mesh destroyed where the cell's
+// proxy refuses it.
+static NphResult adopt(NphProxyStream *s, StreamCell *c, u32 level, u64 bytes, u32 clusters)
 {
-    const u32 level = c->first - 1U;
-    NPH_TRY(level_mesh_create(s->desc.renderer, mv, &c->meshes[level]));
     const NphResult r = set_first(s, c, level);
     if (r != NPH_RESULT_OK) {
         nph_render_mesh_destroy(s->desc.renderer, c->meshes[level]);
@@ -341,7 +381,7 @@ static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv
     }
     if (c->bytes[level] == 0U) {
         s->seen_bytes[level] += bytes;
-        s->seen_clusters[level] += mv->header->meshlet_count;
+        s->seen_clusters[level] += clusters;
     }
     c->bytes[level] = bytes;
     s->held_bytes += bytes;
@@ -349,9 +389,116 @@ static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv
     return NPH_RESULT_OK;
 }
 
-// Cell `c`'s load, done: its level installed while it is still needed and
-// the frame's install bytes allow (false: left for a later frame), else let
-// go; its asset released either way.
+// Cell `c`'s loaded level made a mesh on the main thread from its view, and
+// given to the cell.
+static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv, u64 bytes)
+{
+    const u32 level = c->first - 1U;
+    NPH_TRY(level_mesh_create(s->desc.renderer, mv, &c->meshes[level]));
+    return adopt(s, c, level, bytes, mv->header->meshlet_count);
+}
+
+// A cell's load let go: its bookkeeping (its asset released elsewhere).
+static void forget(NphProxyStream *s, StreamCell *c)
+{
+    c->load = NPH_ASSET_HANDLE_NULL;
+    s->loading -= 1U;
+    s->loading_bytes -= c->load_bytes;
+    c->load_bytes = 0U;
+}
+
+// A cell's load let go, its asset released.
+static void unload(NphProxyStream *s, StreamCell *c)
+{
+    nph_asset_release(s->desc.loader, c->load);
+    forget(s, c);
+}
+
+// A level's work on a loading job (StreamBuild): its asset checked (the view
+// validates it) and described, the mesh's checks and uploads into the voxel
+// pool, and the asset let go (its decompressed bytes freed off the main
+// thread), unless the pool had no room: the update then makes the level on
+// the main thread, from the asset kept.
+static void build_job(void *user)
+{
+    StreamBuild *b = (StreamBuild *)user;
+    const NphProxyStream *s = b->stream;
+    NphMeshView mv;
+    NphResult r = nph_mesh_view(nph_asset_get(s->desc.loader, b->asset), &mv);
+    if (r == NPH_RESULT_OK &&
+        ((mv.header->flags & (u32)NPH_MESH_FLAG_LEVEL) == 0U || mv.lod_makers == NULL)) {
+        r = NPH_RESULT_INVALID_ARGUMENT; // not a level apart
+    }
+    if (r == NPH_RESULT_OK) {
+        r = render_assets_mesh_desc(&mv, b->subs, &b->desc);
+    }
+    if (r == NPH_RESULT_OK) {
+        b->desc.name = "proxy level";
+        b->bytes = proxy_stream_level_bytes(&mv);
+        b->clusters = mv.header->meshlet_count;
+        r = nph_render_voxel_mesh_upload(s->desc.renderer, b->mesh, &b->desc, s->desc.alloc);
+    }
+    b->result = r;
+    b->kept = r == NPH_RESULT_FULL ? 1 : 0;
+    if (!b->kept) {
+        nph_asset_release(s->desc.loader, b->asset);
+    }
+}
+
+// Cell `c`'s loaded level begun as a mesh in the renderer's voxel pool, its
+// work on a loading job (finished by a later update, finish_builds). False
+// without a job system, a pool, a mesh slot or a job's: the caller makes it
+// at once.
+static bool start(NphProxyStream *s, StreamCell *c)
+{
+    if (s->desc.jobs == NULL) {
+        return false;
+    }
+    StreamBuild *b = NULL;
+    for (u32 i = 0; i < s->desc.max_loads && b == NULL; ++i) {
+        b = s->builds[i].cell == NULL ? &s->builds[i] : NULL;
+    }
+    NPH_ASSERT_MSG(b != NULL, "a build for every load");
+    if (b == NULL || nph_render_voxel_mesh_begin(s->desc.renderer, &b->mesh) != NPH_RESULT_OK) {
+        return false;
+    }
+    b->stream = s;
+    b->asset = c->load;
+    b->bytes = 0U;
+    b->clusters = 0U;
+    b->result = NPH_RESULT_OK;
+    b->kept = 0;
+    nph_job_counter_init(&b->done);
+    const NphJobDecl decl = {build_job, b, "proxy level"};
+    if (nph_job_run(s->desc.jobs, &decl, 1U, NPH_JOB_PRIORITY_LOW, &b->done) != NPH_RESULT_OK) {
+        nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+        return false;
+    }
+    b->cell = c;
+    c->build = (u32)(b - s->builds) + 1U;
+    s->building += 1U;
+    return true;
+}
+
+// Cell `c`'s loaded level made a mesh on the main thread (no job, or no
+// room in the voxel pool) while still needed: given to the cell.
+static NphResult make_now(NphProxyStream *s, StreamCell *c, NphProxyStreamStats *st)
+{
+    if (c->first - 1U < c->wanted) {
+        return NPH_RESULT_OK; // no longer needed
+    }
+    NphMeshView mv;
+    NPH_TRY(nph_mesh_view(nph_asset_get(s->desc.loader, c->load), &mv));
+    const u64 bytes = proxy_stream_level_bytes(&mv);
+    NPH_TRY(install(s, c, &mv, bytes));
+    st->installed += 1U;
+    st->installed_bytes += bytes;
+    return NPH_RESULT_OK;
+}
+
+// Cell `c`'s load, done: its level begun on a job, or made at once, while
+// it is still needed and the frame's bytes allow (false: left for a later
+// frame; its bytes are its estimate's, the job's to learn), else let go.
 static bool arrive(NphProxyStream *s, StreamCell *c, NphProxyStreamStats *st)
 {
     const u32 level = c->first - 1U;
@@ -359,32 +506,79 @@ static bool arrive(NphProxyStream *s, StreamCell *c, NphProxyStreamStats *st)
                       ? NPH_RESULT_OK
                       : nph_asset_error(s->desc.loader, c->load);
     if (r == NPH_RESULT_OK && level >= c->wanted) {
-        NphMeshView mv;
-        r = nph_mesh_view(nph_asset_get(s->desc.loader, c->load), &mv);
-        const u64 bytes = r == NPH_RESULT_OK ? proxy_stream_level_bytes(&mv) : 0U;
-        if (r == NPH_RESULT_OK && st->installed != 0U &&
-            st->installed_bytes + bytes > s->desc.max_install_bytes) {
+        if (st->started != 0U && st->started_bytes + c->load_bytes > s->desc.max_install_bytes) {
             return false; // the frame's share is spent: a later frame's
         }
-        if (r == NPH_RESULT_OK) {
-            r = install(s, c, &mv, bytes);
+        st->started += 1U;
+        st->started_bytes += c->load_bytes;
+        if (start(s, c)) {
+            return true; // its build holds the asset
         }
-        if (r == NPH_RESULT_OK) {
-            st->installed += 1U;
-            st->installed_bytes += bytes;
-        }
+        r = make_now(s, c, st);
     }
     if (r != NPH_RESULT_OK) {
         log_failure(c, level, "failed", r);
         c->failed = 1;
         s->failed += 1U;
     }
-    nph_asset_release(s->desc.loader, c->load);
-    c->load = NPH_ASSET_HANDLE_NULL;
-    s->loading -= 1U;
-    s->loading_bytes -= c->load_bytes;
-    c->load_bytes = 0U;
+    unload(s, c);
     return true;
+}
+
+// The builds whose jobs are done: each level made and given to its cell
+// while still needed, else let go (a failure logged and counted). Where the
+// pool had no room, the level is made on the main thread from the asset
+// kept.
+static void finish_builds(NphProxyStream *s, NphProxyStreamStats *st)
+{
+    for (u32 i = 0; i < s->desc.max_loads && s->building != 0U; ++i) {
+        StreamBuild *b = &s->builds[i];
+        if (b->cell == NULL || nph_job_counter_value(&b->done) != 0U) {
+            continue;
+        }
+        nph_job_wait(s->desc.jobs, &b->done); // returns at once: the job's writes seen
+        StreamCell *c = b->cell;
+        const u32 level = c->first - 1U;
+        NphResult r = NPH_RESULT_OK;
+        if (b->kept) {
+            nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+            if (!s->pool_full_logged) {
+                NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                             "proxy stream: the renderer's voxel pool is full: levels get "
+                             "buffers of their own, made on the main thread");
+                s->pool_full_logged = 1;
+            }
+            r = make_now(s, c, st);
+        } else if (b->result != NPH_RESULT_OK) {
+            // Failed before its upload (its asset) or in it: given back.
+            nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+            r = b->result;
+        } else if (level >= c->wanted) {
+            r = nph_render_voxel_mesh_finish(s->desc.renderer, b->mesh, &c->meshes[level]);
+            if (r == NPH_RESULT_OK) {
+                r = adopt(s, c, level, b->bytes, b->clusters);
+            }
+            if (r == NPH_RESULT_OK) {
+                st->installed += 1U;
+                st->installed_bytes += b->bytes;
+            }
+        } else {
+            nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+        }
+        if (r != NPH_RESULT_OK) {
+            log_failure(c, level, "failed", r);
+            c->failed = 1;
+            s->failed += 1U;
+        }
+        c->build = 0U;
+        b->cell = NULL;
+        s->building -= 1U;
+        if (b->kept) {
+            unload(s, c);
+        } else {
+            forget(s, c); // the job released its asset
+        }
+    }
 }
 
 // The held level worth keeping least: the finest held level of a cell not
@@ -506,14 +700,15 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
         const f32 near = box_distance(c, view->camera);
         c->scale = proxy_stream_scale(near, view->pixels_per_unit, view->lod_error, view->znear);
         c->wanted = proxy_stream_wanted(c->asked, c->errors, c->count, near, c->distance, c->scale);
-        if (c->load.value != 0U &&
+        if (c->load.value != 0U && c->build == 0U &&
             nph_asset_state(s->desc.loader, c->load) != NPH_ASSET_STATE_LOADING) {
             NPH_ASSERT(arrived < s->desc.max_loads);
             s->arrived[arrived++] = c;
         }
     }
-    // The loads done, those worth most first (they began so, but the
-    // camera moves), within the frame's install bytes.
+    // The builds done, then the loads done, those worth most first (they
+    // began so, but the camera moves), within the frame's bytes.
+    finish_builds(s, &st);
     for (u32 i = 1; i < arrived; ++i) {
         StreamCell *c = s->arrived[i];
         const ProxyStreamWorth w = worth(c, c->first - 1U);
@@ -593,6 +788,7 @@ void nph_proxy_stream_stats(const NphProxyStream *s, NphProxyStreamStats *out)
     out->held_levels = s->held_levels;
     out->held_bytes = s->held_bytes;
     out->loading = s->loading;
+    out->building = s->building;
     out->failed = s->failed;
 }
 
