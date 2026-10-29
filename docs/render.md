@@ -1109,6 +1109,27 @@ flag and the clamp's move to the coarsest and the finest (`test_vis_cells.c`:
 held from level 2, then 1, then 0, the grove draws its finest held level, and
 the whole's pixels once it holds them all; nothing leaks).
 
+**The voxel pool** (ADR-0063 stage 3c; `NphRendererDesc.voxel_pool_bytes`).
+Meshes of voxels alone (a proxy's levels) live in one GPU buffer, a
+256-byte-aligned range each under the TLSF range allocator
+(core/range_alloc.h), their streams one after another in it and their
+record pointing into it, with no buffers of their own: making one
+allocates nothing on the device (the landscape's GPU allocations, 21,060
+with a buffer a stream, are 577). `nph_render_mesh_create` puts such a
+mesh there where the pool has room, else gives it buffers. A loading job
+can do all of a level's work: `nph_render_voxel_mesh_begin` (main thread)
+reserves the mesh's slot; `nph_render_voxel_mesh_upload` (any thread)
+checks the description as `nph_render_mesh_create` does, reserves its range
+under the pool's lock, and uploads its streams and record (gpu.md
+"Uploads"); `nph_render_voxel_mesh_finish` (main thread) makes the mesh in
+O(its submeshes), or returns the upload's error (NPH_RESULT_FULL where the
+pool had no room); `nph_render_voxel_mesh_cancel` gives a reservation back.
+A destroyed mesh's range returns after the frames in flight
+(`test_vis_cells.c` VoxelPool: the same image, byte for byte, as the mesh
+with buffers of its own, made at once or with its upload on a job; the
+steps refuse and give back what they reserved). The pool is sized to what
+is held at once (a stream's budget past the coarsest levels, and them).
+
 **Requests** (ADR-0063 stage 3). A cell given its streamed proxy's levels'
 errors (`NphRenderCellDesc.proxy_level_errors`: each level's largest consumer
 error, the head's) holds them in its record (`NphVisCell.level_errors`), and

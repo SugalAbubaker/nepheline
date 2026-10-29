@@ -163,6 +163,13 @@ typedef struct NphRendererDesc {
     u32 max_lod_nodes;        // the levels of detail's hierarchy nodes a step of the
                               // culling takes, per frame (2^18; at most 524,224, what
                               // 65,535 workgroups take)
+    // The voxel pool (ADR-0063 stage 3c): one GPU buffer of this many bytes
+    // that meshes of voxels alone live in, a range each (256-byte aligned) and
+    // no buffers of their own, so that making one allocates nothing on the
+    // device and its work can go to a loading job (nph_render_voxel_mesh_*).
+    // 0: none; such meshes then get buffers as others do. A destroyed mesh's
+    // range returns two frames later.
+    u64 voxel_pool_bytes;
     // Ray-traced shadows, where the device has ray queries (docs/render.md
     // "Shadows"): set to never create them (no acceleration structures,
     // GPU memory, or pipelines for them); lights that cast shadows then draw
@@ -343,7 +350,9 @@ typedef struct NphRenderMeshDesc {
     const char *name;
 } NphRenderMeshDesc;
 
-// Uploads the streams. NPH_RESULT_INVALID_ARGUMENT for empty streams (but
+// Uploads the streams: a mesh of voxels alone into the voxel pool where it
+// has room (the steps of nph_render_voxel_mesh_* at once), else into buffers
+// of its own. NPH_RESULT_INVALID_ARGUMENT for empty streams (but
 // for a mesh of voxels alone), an index count that is not a multiple of 3,
 // an index or submesh range out of bounds (every index is checked), too
 // many submeshes, a voxel cluster whose record, bricks or words lie out of
@@ -358,6 +367,49 @@ NPH_MUST_USE NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMes
 // (asserted; refused with an error logged).
 void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh);
 bool nph_render_mesh_is_valid(const NphRenderer *r, NphRenderMesh mesh);
+
+// A mesh of voxels alone made in the voxel pool in steps, so that a loading
+// job does all its work and the main thread only places it (ADR-0063 stage
+// 3c; a streamed proxy's levels, runtime/proxy_stream.h):
+//   - nph_render_voxel_mesh_begin (main thread) reserves the mesh's slot;
+//   - nph_render_voxel_mesh_upload (once for each begun mesh, from any one
+//     thread: NPH_THREADSAFE across meshes) checks the description as
+//     nph_render_mesh_create does, takes it a range of the pool (under the
+//     pool's lock) and uploads its streams and its record there (gpu/upload.h,
+//     a loading job's path); `scratch` (thread-safe) takes its temporaries
+//     and a copy of its submeshes, and must live until the finish or cancel;
+//   - nph_render_voxel_mesh_finish (main thread), after the upload has
+//     returned, makes the mesh of them (O(its submeshes)), or gives the
+//     reservation back and returns the upload's error;
+//   - nph_render_voxel_mesh_cancel (main thread), instead of finishing,
+//     gives the reservation back (the range after the frames in flight).
+// The renderer must not be destroyed with meshes begun and neither finished
+// nor cancelled.
+typedef struct NphRenderVoxelMesh {
+    u32 value;
+} NphRenderVoxelMesh;
+
+#define NPH_RENDER_VOXEL_MESH_NULL ((NphRenderVoxelMesh){0U})
+
+// NPH_RESULT_UNSUPPORTED without a voxel pool; NPH_RESULT_FULL past
+// max_meshes.
+NPH_MUST_USE NphResult nph_render_voxel_mesh_begin(NphRenderer *r, NphRenderVoxelMesh *out);
+// NPH_RESULT_INVALID_ARGUMENT for a mesh not of voxels alone (vertices or
+// indices, or no meshlets, levels or voxels), and the other errors of
+// nph_render_mesh_create's checks; NPH_RESULT_FULL where the pool has no
+// room for it; NPH_RESULT_OUT_OF_MEMORY; the uploads' errors. The same then
+// from nph_render_voxel_mesh_finish.
+NPH_MUST_USE NphResult nph_render_voxel_mesh_upload(NphRenderer *r, NphRenderVoxelMesh mesh,
+                                                    const NphRenderMeshDesc *desc,
+                                                    NphAllocator *scratch);
+NPH_MUST_USE NphResult nph_render_voxel_mesh_finish(NphRenderer *r, NphRenderVoxelMesh mesh,
+                                                    NphRenderMesh *out);
+void nph_render_voxel_mesh_cancel(NphRenderer *r, NphRenderVoxelMesh mesh);
+
+// The voxel pool's bytes in ranges (those waiting out the frames in flight
+// too) and its size; 0 and 0 without one. NPH_THREADSAFE: it takes the
+// pool's lock (hence the renderer not const).
+void nph_render_voxel_pool_usage(NphRenderer *r, u64 *used, u64 *size);
 
 // ---------------------------------------------------------------------------
 // Materials

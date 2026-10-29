@@ -11,6 +11,7 @@
 #include <nepheline/core/handle.h>
 #include <nepheline/core/range_alloc.h>
 #include <nepheline/gpu/accel.h>
+#include <nepheline/platform/thread.h>
 #include <nepheline/render/debug_draw.h>
 #include <nepheline/render/meshlet.h>
 #include <nepheline/render/renderer.h>
@@ -178,7 +179,27 @@ typedef struct RenderMesh {
     NphGpuBuffer voxel_bricks;
     NphGpuBuffer voxels;
     b32 voxels_counted;
+    // A mesh of voxels alone in the voxel pool (ADR-0063 stage 3c): its range
+    // there, in VOXEL_UNIT units (NPH_RANGE_NULL: buffers of its own), and,
+    // between nph_render_voxel_mesh_begin and _finish, its upload's state
+    // (RenderVoxelState), result and hierarchy steps, which the upload writes
+    // and the finish reads.
+    NphRange voxel_range;
+    u32 voxel_units;
+    u32 voxel_state;
+    NphResult voxel_result;
+    u32 voxel_lod_depth;
+    // The upload's allocator, which holds `submeshes` until the finish takes
+    // them into the renderer's (NULL: they are the renderer's).
+    NphAllocator *voxel_scratch;
 } RenderMesh;
+
+// A pooled mesh's steps (RenderMesh.voxel_state).
+typedef enum RenderVoxelState {
+    RENDER_VOXEL_NONE = 0, // made (or not a pooled mesh in the making)
+    RENDER_VOXEL_BEGUN,    // reserved, not uploaded
+    RENDER_VOXEL_UPLOADED, // uploaded (voxel_result says how)
+} RenderVoxelState;
 
 typedef struct RenderMaterial {
     u32 handle;
@@ -491,7 +512,7 @@ typedef struct VisLightLayout {
 typedef struct VisPendingFree {
     u64 frame; // safe from the frame with this index on
     NphRange range;
-    u32 pool; // 0: the material map, 1: the index pool
+    u32 pool; // 0: the material map, 1: the index pool, 2: the voxel pool
 } VisPendingFree;
 
 typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
@@ -556,6 +577,14 @@ typedef struct RenderVis {
     NphRangeAllocator material_ranges;
     NphRangeAllocator index_ranges;
     VisPendingFreeArray pending;
+    // The voxel pool (NphRendererDesc.voxel_pool_bytes; ADR-0063 stage 3c):
+    // meshes of voxels alone, a range each of VOXEL_UNIT-byte units (none: a
+    // null buffer and 0 units).
+    NphGpuBuffer voxel_pool;
+    u64 voxel_pool_address;
+    u32 voxel_pool_units;
+    NphRangeAllocator voxel_ranges;
+    NphMutex voxel_lock; // over voxel_ranges: the uploads reserve on the jobs
 
     // The culling lists: persistent so that their addresses are known when
     // the view is written, imported into the graph every frame.
@@ -1293,5 +1322,20 @@ void render_vis_light_layout(u32 lights, VisLightLayout *out);
 u32 render_vis_write_updates(NphRenderer *r);
 // Frees what frames up to `completed` can no longer read.
 void render_vis_release_pending(NphRenderer *r, u64 current_frame);
+
+// The voxel pool (vis_scene.c; ADR-0063 stage 3c), whose ranges are of
+// VOXEL_UNIT bytes. Reserve (any thread: the pool's lock): a range for a
+// mesh of voxels alone's streams by its counts (NPH_RESULT_FULL: no room),
+// its units into *out_units. Upload (any thread, its slot's own): the
+// streams and the record of the mesh in `slot`, into its range, `scratch`
+// for the temporaries; NPH_RESULT_INVALID_ARGUMENT where the description
+// does not fit the range. Release (main thread): a range back once the
+// frames in flight are done with it.
+#define VOXEL_UNIT 256U
+NphResult render_vis_voxel_reserve(NphRenderer *r, const NphRenderMeshDesc *d, NphRange *out,
+                                   u32 *out_units);
+NphResult render_vis_voxel_upload(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d,
+                                  NphAllocator *scratch);
+void render_vis_voxel_release(NphRenderer *r, NphRange range);
 // The instances the CPU draws itself (blended materials).
 const u32 *render_vis_blend_list(NphRenderer *r, u32 *out_count);

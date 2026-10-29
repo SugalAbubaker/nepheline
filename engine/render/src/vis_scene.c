@@ -75,7 +75,20 @@ static u64 safe_frame(const NphRenderer *r)
 
 static NphRangeAllocator *pool_of(RenderVis *v, u32 pool)
 {
-    return pool == 0U ? &v->material_ranges : &v->index_ranges;
+    return pool == 0U ? &v->material_ranges : (pool == 1U ? &v->index_ranges : &v->voxel_ranges);
+}
+
+// A range freed: the voxel pool's under its lock (its uploads reserve on the
+// jobs).
+static void range_free(RenderVis *v, u32 pool, NphRange range)
+{
+    if (pool == 2U) {
+        nph_mutex_lock(&v->voxel_lock);
+    }
+    nph_range_free(pool_of(v, pool), range);
+    if (pool == 2U) {
+        nph_mutex_unlock(&v->voxel_lock);
+    }
 }
 
 static void free_later(NphRenderer *r, u32 pool, NphRange range)
@@ -90,7 +103,7 @@ static void free_later(NphRenderer *r, u32 pool, NphRange range)
         // wait with: free now. The second only risks a frame in flight
         // reading entries a new owner rewrote, which uploads, ordered after
         // the previous frame's graphics work, already rule out.
-        nph_range_free(pool_of(v, pool), range);
+        range_free(v, pool, range);
     }
 }
 
@@ -99,7 +112,7 @@ void render_vis_release_pending(NphRenderer *r, u64 current_frame)
     RenderVis *v = &r->vis;
     for (u32 i = 0; i < v->pending.len;) {
         if (v->pending.data[i].frame <= current_frame) {
-            nph_range_free(pool_of(v, v->pending.data[i].pool), v->pending.data[i].range);
+            range_free(v, v->pending.data[i].pool, v->pending.data[i].range);
             NPH_ARRAY_REMOVE_SWAP(&v->pending, i);
         } else {
             ++i;
@@ -172,6 +185,16 @@ NphResult render_vis_scene_create(NphRenderer *r)
                             "vis meshlet index pool", &v->index_pool));
         NPH_TRY(
             nph_range_alloc_init(&v->index_ranges, a, d->meshlet_index_pool, 2U * d->max_meshes));
+    }
+    // The voxel pool: a range for each live mesh of voxels alone and as many
+    // again waiting out the frames in flight (free_later), as the meshes'
+    // index ranges.
+    if (d->voxel_pool_bytes != 0U) {
+        v->voxel_pool_units = (u32)((d->voxel_pool_bytes + VOXEL_UNIT - 1U) / VOXEL_UNIT);
+        NPH_TRY(make_buffer(r, (u64)v->voxel_pool_units * VOXEL_UNIT, storage,
+                            NPH_GPU_MEMORY_DEVICE, "vis voxel pool", &v->voxel_pool));
+        v->voxel_pool_address = nph_gpu_buffer_address(r->dev, v->voxel_pool);
+        NPH_TRY(nph_range_alloc_init(&v->voxel_ranges, a, v->voxel_pool_units, 2U * d->max_meshes));
     }
     const u32 indirect = storage | (u32)NPH_GPU_BUFFER_USAGE_INDIRECT;
     NPH_TRY(make_buffer(r, sizeof(NphVisCounters),
@@ -275,6 +298,9 @@ void render_vis_scene_destroy(NphRenderer *r)
     }
     nph_range_alloc_destroy(&v->material_ranges);
     nph_range_alloc_destroy(&v->index_ranges);
+    nph_gpu_buffer_destroy(dev, v->voxel_pool);
+    nph_range_alloc_destroy(&v->voxel_ranges);
+    nph_mutex_destroy(&v->voxel_lock);
     NPH_ARRAY_FREE(&v->pending);
     if (v->slot_state != NULL) {
         NPH_FREE_ARRAY(a, u8, v->slot_state, d->max_instances);
@@ -607,8 +633,199 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     }
     if (r->vis.supported) {
         free_later(r, 1U, m->index_range);
+        free_later(r, 2U, m->voxel_range);
     }
     m->index_range = NPH_RANGE_NULL;
+    m->voxel_range = NPH_RANGE_NULL;
+}
+
+// ---------------------------------------------------------------------------
+// The voxel pool (ADR-0063 stage 3c)
+// ---------------------------------------------------------------------------
+
+// Where a mesh of voxels alone's streams lie in its range: one after another,
+// each 16-byte aligned for the shaders' buffer references.
+typedef struct VoxelLayout {
+    u64 meshlets;
+    u64 bounds;
+    u64 submeshes;
+    u64 lod_nodes;
+    u64 lod_groups;
+    u64 lod_group_clusters;
+    u64 lod_makers; // the spheres, then the errors
+    u64 voxel_clusters;
+    u64 voxel_bricks;
+    u64 voxels;
+    u64 size;
+} VoxelLayout;
+
+static u64 align16(u64 x)
+{
+    return (x + 15U) & ~(u64)15U;
+}
+
+static VoxelLayout voxel_layout(const NphRenderMeshDesc *d)
+{
+    VoxelLayout l;
+    u64 at = 0U;
+    l.meshlets = at;
+    at = align16(at + (u64)d->meshlet_count * sizeof(NphRenderMeshlet));
+    l.bounds = at;
+    at = align16(at + (u64)d->meshlet_count * sizeof(NphRenderMeshletBounds));
+    l.submeshes = at;
+    at = align16(at + (u64)d->submesh_count * 2U * sizeof(u32));
+    l.lod_nodes = at;
+    at = align16(at + (u64)d->lod_node_count * sizeof(NphRenderLodNode));
+    l.lod_groups = at;
+    at = align16(at + (u64)d->lod_group_count * sizeof(NphRenderLodGroup));
+    l.lod_group_clusters = at;
+    at = align16(at + (u64)d->lod_group_cluster_count * sizeof(u32));
+    l.lod_makers = at;
+    at = align16(at + (u64)d->meshlet_count * (sizeof(NphVec4) + sizeof(f32)));
+    l.voxel_clusters = at;
+    at = align16(at + (u64)d->voxel_cluster_count * sizeof(NphRenderVoxelCluster));
+    l.voxel_bricks = at;
+    at = align16(at + (u64)d->voxel_brick_count * sizeof(NphRenderPackedBrick));
+    l.voxels = at;
+    at = align16(at + (u64)d->voxel_word_count * sizeof(u32));
+    l.size = nph_max_u64(at, 16U);
+    return l;
+}
+
+static u64 voxel_units_of(const NphRenderMeshDesc *d)
+{
+    return (voxel_layout(d).size + VOXEL_UNIT - 1U) / VOXEL_UNIT;
+}
+
+NphResult render_vis_voxel_reserve(NphRenderer *r, const NphRenderMeshDesc *d, NphRange *out,
+                                   u32 *out_units)
+{
+    RenderVis *v = &r->vis;
+    *out = NPH_RANGE_NULL;
+    *out_units = 0U;
+    const u64 units = voxel_units_of(d);
+    if (units > v->voxel_pool_units) {
+        return NPH_RESULT_FULL;
+    }
+    nph_mutex_lock(&v->voxel_lock);
+    const NphResult res = nph_range_alloc(&v->voxel_ranges, (u32)units, out);
+    nph_mutex_unlock(&v->voxel_lock);
+    NPH_TRY(res);
+    *out_units = (u32)units;
+    return NPH_RESULT_OK;
+}
+
+void render_vis_voxel_release(NphRenderer *r, NphRange range)
+{
+    free_later(r, 2U, range);
+}
+
+// `size` bytes (a multiple of four: records and words) into the pool at `at`.
+static NphResult voxel_put(NphRenderer *r, u64 at, const void *data, u64 size)
+{
+    if (size == 0U) {
+        return NPH_RESULT_OK;
+    }
+    return nph_gpu_upload_buffer(r->dev, r->vis.voxel_pool, at, data, size);
+}
+
+NphResult render_vis_voxel_upload(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d,
+                                  NphAllocator *scratch)
+{
+    RenderVis *v = &r->vis;
+    RenderMesh *m = &r->meshes[slot];
+    const VoxelLayout l = voxel_layout(d);
+    if (voxel_units_of(d) > m->voxel_units) {
+        return NPH_RESULT_INVALID_ARGUMENT; // not the description reserved for
+    }
+    const u64 base = (u64)m->voxel_range.offset * VOXEL_UNIT;
+    const u32 n = d->meshlet_count;
+    NPH_TRY(voxel_put(r, base + l.meshlets, d->meshlets, (u64)n * sizeof(NphRenderMeshlet)));
+    NPH_TRY(
+        voxel_put(r, base + l.bounds, d->meshlet_bounds, (u64)n * sizeof(NphRenderMeshletBounds)));
+    u32 table[NPH_RENDER_MAX_SUBMESHES][2];
+    for (u32 s = 0; s < d->submesh_count; ++s) {
+        table[s][0] = d->submeshes[s].material_slot;
+        table[s][1] = d->submeshes[s].index_offset;
+    }
+    NPH_TRY(voxel_put(r, base + l.submeshes, table, (u64)d->submesh_count * 2U * sizeof(u32)));
+    NPH_TRY(voxel_put(r, base + l.lod_nodes, d->lod_nodes,
+                      (u64)d->lod_node_count * sizeof(NphRenderLodNode)));
+    NPH_TRY(voxel_put(r, base + l.lod_groups, d->lod_groups,
+                      (u64)d->lod_group_count * sizeof(NphRenderLodGroup)));
+    NPH_TRY(voxel_put(r, base + l.lod_group_clusters, d->lod_group_clusters,
+                      (u64)d->lod_group_cluster_count * sizeof(u32)));
+    // The makers as upload_makers lays them out: the spheres, then the errors.
+    NphVec4 *spheres = NPH_ALLOC_ARRAY(scratch, NphVec4, n);
+    f32 *errors = NPH_ALLOC_ARRAY(scratch, f32, n);
+    NphResult res = spheres != NULL && errors != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (res == NPH_RESULT_OK) {
+        for (u32 i = 0; i < n; ++i) {
+            if (d->lod_makers != NULL) {
+                spheres[i] = nph_vec4_from_vec3(d->lod_makers[i].center, d->lod_makers[i].radius);
+                errors[i] = d->lod_makers[i].error;
+                continue;
+            }
+            const u32 maker = d->cluster_lods[i].group;
+            const NphRenderLodGroup *g =
+                maker != NPH_RENDER_LOD_NONE ? &d->lod_groups[maker] : NULL;
+            spheres[i] = g != NULL ? nph_vec4_from_vec3(g->center, g->radius) : nph_vec4_zero();
+            errors[i] = g != NULL ? g->error : 0.0F;
+        }
+        res = voxel_put(r, base + l.lod_makers, spheres, (u64)n * sizeof(NphVec4));
+    }
+    if (res == NPH_RESULT_OK) {
+        res = voxel_put(r, base + l.lod_makers + (u64)n * sizeof(NphVec4), errors,
+                        (u64)n * sizeof(f32));
+    }
+    if (spheres != NULL) {
+        NPH_FREE_ARRAY(scratch, NphVec4, spheres, n);
+    }
+    if (errors != NULL) {
+        NPH_FREE_ARRAY(scratch, f32, errors, n);
+    }
+    NPH_TRY(res);
+    NPH_TRY(voxel_put(r, base + l.voxel_clusters, d->voxel_clusters,
+                      (u64)d->voxel_cluster_count * sizeof(NphRenderVoxelCluster)));
+    NPH_TRY(voxel_put(r, base + l.voxel_bricks, d->voxel_bricks,
+                      (u64)d->voxel_brick_count * sizeof(NphRenderPackedBrick)));
+    NPH_TRY(voxel_put(r, base + l.voxels, d->voxel_words, (u64)d->voxel_word_count * sizeof(u32)));
+
+    // Its record, as upload_mesh and upload_lods write a mesh's: no vertex
+    // streams (a valid address for those the shaders never read), its
+    // levels, its voxels.
+    m->meshlet_count = n;
+    m->meshlet_triangle_count = 0U;
+    m->sphere = nph_aabb_bounding_sphere(d->bounds);
+    const u64 at = v->voxel_pool_address + base;
+    NphVisMesh rec;
+    memset(&rec, 0, sizeof rec);
+    rec.position_offset = nph_vec4_from_vec3(d->position_offset, 0.0F);
+    rec.position_scale = nph_vec4_from_vec3(d->position_scale, 0.0F);
+    rec.sphere = nph_vec4_from_vec3(m->sphere.center, m->sphere.radius);
+    rec.meshlets = at + l.meshlets;
+    rec.meshlet_bounds = at + l.bounds;
+    rec.meshlet_vertices = at;
+    rec.meshlet_triangles = at;
+    rec.submeshes = at + l.submeshes;
+    rec.lod_nodes = at + l.lod_nodes;
+    rec.lod_groups = at + l.lod_groups;
+    rec.lod_group_clusters = at + l.lod_group_clusters;
+    rec.lod_makers = at + l.lod_makers;
+    rec.lod_clusters = n;
+    rec.lod_level0_error = NPH_F32_MAX;
+    for (u32 i = 0; d->cluster_lods != NULL && d->lod_groups != NULL && i < d->lod_level0_meshlets;
+         ++i) {
+        const u32 parent = d->cluster_lods[i].parent;
+        if (parent != NPH_RENDER_LOD_NONE) {
+            rec.lod_level0_error = nph_f32_min(rec.lod_level0_error, d->lod_groups[parent].error);
+        }
+    }
+    rec.voxel_clusters = at + l.voxel_clusters;
+    rec.voxel_bricks = at + l.voxel_bricks;
+    rec.voxels = at + l.voxels;
+    rec.meshlet_count = d->lod_level0_meshlets;
+    return nph_gpu_upload_buffer(r->dev, v->meshes, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
 // ---------------------------------------------------------------------------

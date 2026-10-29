@@ -9,6 +9,7 @@
 // proxy's levels apart (ADR-0063), each a mesh, drawing it as the whole. The
 // fixture's teardown asserts zero validation and synchronisation-validation
 // errors and nothing leaked.
+#include <nepheline/jobs/jobs.h>
 #include <nepheline/math/random.h>
 #include <nepheline/render/cell_proxy.h>
 #include <nepheline/render/cluster_lod.h>
@@ -544,6 +545,233 @@ NTEST_F(Cells, malformed_meshes_of_voxels_alone_are_refused)
 #undef EXPECT_REFUSED
 #undef RESET
     NPH_FREE_ARRAY(a, NphRenderMeshlet, meshlets, n);
+    grove_free(&g);
+}
+
+// ---------------------------------------------------------------------------
+// The voxel pool (ADR-0063 stage 3c)
+// ---------------------------------------------------------------------------
+
+typedef RenderFixture VoxelPool;
+
+NTEST_SETUP(VoxelPool)
+{
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.max_visible_clusters = 1U << 16U;
+    d.max_cull_meshlets = 1U << 18U;
+    d.max_deferred = 1U << 16U;
+    d.voxel_pool_bytes = 16U << 20U;
+    test_render_setup(f, &d);
+}
+
+NTEST_TEARDOWN(VoxelPool)
+{
+    test_render_teardown(f);
+}
+
+#define POOL_IMAGE ((u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE * 4U)
+
+// The grove's proxy as `mesh` draws it from 20 m, its normals (no light or
+// history to tell two frames apart), into `out`.
+static void pool_image(RenderFixture *f, NphRenderMesh mesh, NphRenderMaterial m, u8 *out)
+{
+    const NphRenderInstance inst = instance(f, mesh, m, nph_render_transform_identity());
+    NphRenderView v = grove_view(20.0, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_NORMAL;
+    grove_frames(f, &v);
+    memcpy(out, f->pixels, POOL_IMAGE);
+    nph_render_instance_destroy(f->renderer, inst);
+}
+
+static NphRange pool_range_of(const RenderFixture *f, NphRenderMesh mesh)
+{
+    return f->renderer->meshes[render_slot_of(&f->renderer->mesh_pool, mesh.value)].voxel_range;
+}
+
+static u64 pool_used(RenderFixture *f)
+{
+    u64 used = 0U;
+    u64 size = 0U;
+    nph_render_voxel_pool_usage(f->renderer, &used, &size);
+    return used;
+}
+
+typedef struct PoolUpload {
+    NphRenderer *renderer;
+    NphRenderVoxelMesh mesh;
+    const NphRenderMeshDesc *desc;
+    NphResult result;
+} PoolUpload;
+
+static void pool_upload_job(void *user)
+{
+    PoolUpload *u = (PoolUpload *)user;
+    u->result = nph_render_voxel_mesh_upload(u->renderer, u->mesh, u->desc, nph_allocator_system());
+}
+
+// A mesh of voxels alone in the voxel pool, made at once
+// (nph_render_mesh_create) or in steps with its upload on a loading job,
+// draws byte for byte as the same mesh with buffers of its own (the pool
+// hidden); it holds a range of the pool, not a buffer, and its range comes
+// back once it is destroyed and the frames in flight are done with it.
+NTEST_F(VoxelPool, a_mesh_in_the_pool_draws_as_one_with_buffers_of_its_own)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    NphRenderer *r = f->renderer;
+    NphAllocator *a = nph_allocator_system();
+    u8 *own = NPH_ALLOC_ARRAY(a, u8, POOL_IMAGE);
+    u8 *pooled = NPH_ALLOC_ARRAY(a, u8, POOL_IMAGE);
+    u8 *stepped = NPH_ALLOC_ARRAY(a, u8, POOL_IMAGE);
+    NTEST_ASSERT_TRUE(own != NULL && pooled != NULL && stepped != NULL);
+    const NphRenderMaterial green = material(f, nph_vec4(0.3F, 0.5F, 0.2F, 1.0F));
+    u64 used = 0U;
+    u64 size = 0U;
+    nph_render_voxel_pool_usage(r, &used, &size);
+    NTEST_EXPECT_EQ_UINT((u32)(size >> 20U), 16U);
+    NTEST_EXPECT_TRUE(used == 0U);
+
+    // Buffers of its own: the pool hidden.
+    const u32 units = r->vis.voxel_pool_units;
+    r->vis.voxel_pool_units = 0U;
+    NphRenderMesh with_buffers = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(r, &g.proxy_desc, &with_buffers), NPH_RESULT_OK);
+    r->vis.voxel_pool_units = units;
+    NTEST_EXPECT_TRUE(nph_range_is_null(pool_range_of(f, with_buffers)));
+    pool_image(f, with_buffers, green, own);
+    NTEST_ASSERT_GT_UINT(covered_pixels(own, (u64)TEST_TARGET_SIZE * TEST_TARGET_SIZE), 0U);
+
+    // At once, in the pool.
+    NphRenderMesh at_once = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(r, &g.proxy_desc, &at_once), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_range_is_null(pool_range_of(f, at_once)));
+    const u64 one = pool_used(f);
+    NTEST_EXPECT_TRUE(one >= (u64)g.proxy_desc.voxel_word_count * sizeof(u32));
+    pool_image(f, at_once, green, pooled);
+
+    // In steps, the upload on a job.
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = a;
+    jd.worker_count = 2U;
+    NphJobSystem *jobs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    NphRenderVoxelMesh begun = NPH_RENDER_VOXEL_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &begun), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_render_mesh_is_valid(r, (NphRenderMesh){begun.value}));
+    PoolUpload upload = {r, begun, &g.proxy_desc, NPH_RESULT_CORRUPT};
+    const NphJobDecl decl = {pool_upload_job, &upload, "voxel mesh upload"};
+    NphJobCounter done = NPH_JOB_COUNTER_INIT;
+    NTEST_ASSERT_EQ_INT(nph_job_run(jobs, &decl, 1U, NPH_JOB_PRIORITY_LOW, &done), NPH_RESULT_OK);
+    nph_job_wait(jobs, &done);
+    NTEST_EXPECT_EQ_INT(upload.result, NPH_RESULT_OK);
+    NphRenderMesh stepped_mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_finish(r, begun, &stepped_mesh), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_render_mesh_is_valid(r, stepped_mesh));
+    NTEST_EXPECT_TRUE(pool_used(f) == 2U * one);
+    pool_image(f, stepped_mesh, green, stepped);
+    nph_job_system_destroy(jobs);
+
+    u32 differ_pooled = 0U;
+    u32 differ_stepped = 0U;
+    for (u64 p = 0; p < POOL_IMAGE; p += 4U) {
+        differ_pooled += memcmp(own + p, pooled + p, 4U) != 0 ? 1U : 0U;
+        differ_stepped += memcmp(own + p, stepped + p, 4U) != 0 ? 1U : 0U;
+    }
+    NTEST_LOG("the pool: %llu bytes a mesh; pixels differing from buffers of its own: %u at once, "
+              "%u in steps",
+              (unsigned long long)one, differ_pooled, differ_stepped);
+    NTEST_EXPECT_EQ_UINT(differ_pooled, 0U);
+    NTEST_EXPECT_EQ_UINT(differ_stepped, 0U);
+
+    // Destroyed, the ranges return once the frames in flight are done.
+    nph_render_mesh_destroy(r, at_once);
+    nph_render_mesh_destroy(r, stepped_mesh);
+    nph_render_mesh_destroy(r, with_buffers);
+    NTEST_EXPECT_TRUE(pool_used(f) == 2U * one);
+    const NphRenderView v = grove_view(20.0, 1.0F);
+    first_frame(f, &v);
+    NTEST_EXPECT_TRUE(pool_used(f) == 0U);
+    nph_render_material_destroy(r, green);
+    NPH_FREE_ARRAY(a, u8, stepped, POOL_IMAGE);
+    NPH_FREE_ARRAY(a, u8, pooled, POOL_IMAGE);
+    NPH_FREE_ARRAY(a, u8, own, POOL_IMAGE);
+    grove_free(&g);
+}
+
+// The pool's steps refuse what they cannot take and give back what they
+// reserved: no pool; an upload of a mesh of triangles, of a mesh whose
+// voxels lie out of bounds, or past the pool's room (where
+// nph_render_mesh_create gives the mesh buffers of its own), which the
+// finish answers with the upload's error; a cancel; and steps out of turn.
+NTEST_F(VoxelPool, the_pools_steps_refuse_and_give_back)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    NphRenderer *r = f->renderer;
+    NphAllocator *a = nph_allocator_system();
+    const u32 live = nph_handle_pool_live(&r->mesh_pool);
+    NphRenderVoxelMesh m = NPH_RENDER_VOXEL_MESH_NULL;
+    NphRenderMesh out = NPH_RENDER_MESH_NULL;
+    const u32 units = r->vis.voxel_pool_units;
+    r->vis.voxel_pool_units = 0U;
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_UNSUPPORTED);
+    NTEST_EXPECT_EQ_UINT(m.value, 0U);
+    r->vis.voxel_pool_units = units;
+    // A mesh of triangles.
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_upload(r, m, &g.tree.desc, a),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_finish(r, m, &out), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_UINT(out.value, 0U);
+    // Past its room.
+    r->vis.voxel_pool_units = 1U;
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_upload(r, m, &g.proxy_desc, a), NPH_RESULT_FULL);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_finish(r, m, &out), NPH_RESULT_FULL);
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(r, &g.proxy_desc, &out), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_range_is_null(pool_range_of(f, out)));
+    nph_render_mesh_destroy(r, out);
+    r->vis.voxel_pool_units = units;
+    NTEST_EXPECT_TRUE(pool_used(f) == 0U);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&r->mesh_pool), live);
+
+    // Voxels out of bounds: refused by the upload, after reserving nothing.
+    NphRenderMeshDesc bad = g.proxy_desc;
+    bad.voxel_word_count = 1U;
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_upload(r, m, &bad, a), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_TRUE(pool_used(f) == 0U);
+    NTEST_EXPECT_EQ_INT(nph_render_voxel_mesh_finish(r, m, &out), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_UINT(out.value, 0U);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&r->mesh_pool), live);
+    // Cancelled before its upload, and after it.
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    nph_render_voxel_mesh_cancel(r, m);
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_upload(r, m, &g.proxy_desc, a), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(pool_used(f) != 0U);
+    nph_render_voxel_mesh_cancel(r, m);
+    nph_render_voxel_mesh_cancel(r, NPH_RENDER_VOXEL_MESH_NULL);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&r->mesh_pool), live);
+    // Out of turn: finished before its upload, uploaded twice.
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_begin(r, &m), NPH_RESULT_OK);
+    NphResult res = NPH_RESULT_OK;
+    NPH_TEST_EXPECT_ASSERT(res = nph_render_voxel_mesh_finish(r, m, &out));
+    NTEST_EXPECT_EQ_INT(res, NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_upload(r, m, &g.proxy_desc, a), NPH_RESULT_OK);
+    NPH_TEST_EXPECT_ASSERT(res = nph_render_voxel_mesh_upload(r, m, &g.proxy_desc, a));
+    NTEST_EXPECT_EQ_INT(res, NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_ASSERT_EQ_INT(nph_render_voxel_mesh_finish(r, m, &out), NPH_RESULT_OK);
+    nph_render_mesh_destroy(r, out);
+    // Every range back once the frames in flight are done.
+    const NphRenderView v = grove_view(20.0, 1.0F);
+    first_frame(f, &v);
+    NTEST_EXPECT_TRUE(pool_used(f) == 0U);
+    NTEST_EXPECT_EQ_UINT(nph_handle_pool_live(&r->mesh_pool), live);
     grove_free(&g);
 }
 
