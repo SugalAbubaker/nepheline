@@ -79,6 +79,7 @@ typedef enum NphGpuOptionalFeature {
     NPH_GPU_OPTIONAL_BUFFER_ATOMIC_INT64 = 1U << 3U,
     NPH_GPU_OPTIONAL_SHADER_FLOAT16 = 1U << 4U,
     NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX = 1U << 5U,
+    NPH_GPU_OPTIONAL_SPARSE_RESIDENCY = 1U << 6U,
 } NphGpuOptionalFeature;
 
 typedef struct NphGpuDeviceDesc {
@@ -123,7 +124,7 @@ typedef struct NphGpuDeviceDesc {
     u32 max_shaders;                 // (4096)
     u32 max_pipelines;               // (4096)
     u32 max_accels;                  // acceleration structures (4096)
-    u32 max_timelines;               // (64)
+    u32 max_timelines;               // (64; at least the device's own + 1)
     u32 max_command_threads;         // threads that may record commands (64)
     u32 max_commands_per_thread;     // command buffers per thread per frame per queue (32)
     u32 timestamp_queries_per_frame; // (1024)
@@ -166,8 +167,13 @@ typedef struct NphGpuFeatures {
     b32 clip_distance;         // gl_ClipDistance (the shadow-page raster confines triangles)
     b32 geometry_shader;       // also what lets a fragment shader read gl_PrimitiveID
     b32 fill_mode_non_solid;   // wireframe debug draw
-    b32 texture_compression_bc;       // BC1-7
-    b32 sampler_anisotropy;           //
+    b32 texture_compression_bc; // BC1-7
+    b32 sampler_anisotropy;     //
+    // Sparse images (NPH_GPU_IMAGE_FLAG_SPARSE, sparse.h; docs/adr/0065): 2D
+    // sparse residency with the standard block shapes, a queue that binds,
+    // shaders that sample with a minimum level of detail and read residency
+    // codes, and unbound pages read as zeros.
+    b32 sparse_residency;
     b32 memory_budget;                // VK_EXT_memory_budget: live heap budgets in the stats
     b32 calibrated_timestamps;        // VK_EXT_calibrated_timestamps (CPU/GPU timeline alignment)
     b32 pipeline_statistics;          // pipeline statistics queries

@@ -14,6 +14,7 @@ nph_add_module(gpu
         src/render_graph.c
         src/resources.c
         src/shader.c
+        src/sparse.c
         src/spirv_reflect.c
         src/swapchain.c
         src/upload.c
@@ -68,6 +69,7 @@ nph_add_test(gpu
         tests/test_pipeline.c
         tests/test_render_graph.c
         tests/test_resources.c
+        tests/test_sparse.c
         tests/test_spirv.c
         tests/test_swapchain.c
         tests/test_upload.c

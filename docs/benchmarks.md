@@ -124,6 +124,8 @@ warm-up existed.
 | `raster_fill_4k_{rgba8,r11g11b10,rgba16f}_x8` | eight full-screen triangles at 4K into each format: raster output rate |
 | `visbuffer_write_4k_8bpp` | one full-screen R32G32_UINT write: the visibility buffer's floor |
 | `texture_sample_4k_rgba8` | one trilinear sample per pixel at 4K from a mipmapped 4096² texture |
+| `texture_sample_4k_rgba8_sparse` | the same from a sparse image with every page bound: what the hardware's page table costs a sample (docs/adr/0065) |
+| `sparse_bind_64_pages`, `sparse_unbind_64_pages` | 64 pages of a sparse image bound in one call, then unbound: the time from the call until the sparse timeline reaches its value, on the host (the driver's queue operation, not commands) |
 | `tonemap_4k` | the tonemap pass alone: per pixel one fetch of a B10G11R11 image, the ACES fit and the sRGB curve, one RGBA8 write |
 | `taa_fragment_4k`, `taa_fragment_quad_4k`, `taa_fragment_cross_4k` | the production path's temporal resolve fused with the tonemap (`shaders/render/taa_common.glsl`), over noise: the neighbourhoods of the HDR colour and of the visibility buffer's depth (nine fetches each; four, shared across each 2 × 2 quad by subgroup quad swaps; or the five of the cross), the history's five Catmull-Rom taps, and two outputs, the display colour and the new history in B10G11R11; `_rgba16f` with the history in RGBA16F |
 | `taa_compute_4k` | the same resolve as a compute pass of 16 × 16 groups reading the neighbourhoods from shared memory, then the tonemap pass; `_rgba16f` likewise |

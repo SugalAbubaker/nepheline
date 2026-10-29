@@ -246,6 +246,79 @@ the editor's Dear ImGui font atlas, which grows glyph by glyph
   owner, and region uploads keep the rest of the mip there too. The
   Linux CI found the font atlas refused.
 
+## Sparse images
+
+Virtual texturing (docs/adr/0065-virtual-texturing.md) pages textures with
+the hardware's own page table: Vulkan sparse residency (`sparse.h`).
+- **The feature:** `NphGpuFeatures.sparse_residency` needs 2D sparse
+  residency with the standard block shapes, a queue whose family binds,
+  `shaderResourceMinLod`, `shaderResourceResidency`, and unbound pages that
+  read as zeros (`residencyNonResidentStrict`).
+  `NPH_GPU_OPTIONAL_SPARSE_RESIDENCY` switches it off.
+  - The RTX 3060 Ti offers it; lavapipe on Windows does not.
+  - At creation the device asks a sparse image of each texture format for
+    its memory types. A page pool's blocks come from those every format
+    allows (a device-local type on the RTX).
+- **The image:** an image with `NPH_GPU_IMAGE_FLAG_SPARSE` has no memory.
+  - Its levels are cut into pages of the format's standard block (64 KiB:
+    256 x 256 texels of a 16-byte BC block, 128 x 128 of RGBA8).
+  - Its levels under a page in either dimension form the mip tail, bound
+    as whole pages of its opaque range.
+  - It is 2D, of one layer and one sample, and sampled and copied only.
+  - It stays in GENERAL, shared by every family. A page can then be copied
+    on the transfer queue while the graphics queue samples the others,
+    which a per-mip layout transition would forbid. Its bindless descriptor
+    says GENERAL.
+- **Page pools:** `nph_gpu_page_alloc` hands out a page of 64 KiB,
+  allocating a block of device memory (64 MiB by default, a dedicated
+  allocation) when every block is full, up to the pool's capacity.
+  - `nph_gpu_page_free` returns a page once the frame being recorded and
+    the bindings made before its end are complete: a deferred entry, like
+    a resource's destruction.
+  - A pool destroyed with pages still on their way back outlives the last
+    return, since a device's wait for idle runs the frame slots' entries in
+    slot order, not in the order they were made.
+- **Binding:** `nph_gpu_sparse_bind` changes the bindings of any number of
+  pages (and tail pages) in one `vkQueueBindSparse`.
+  - It runs on the sparse queue: the transfer queue where its family
+    binds, else the graphics queue.
+  - Consecutive pages of one image share a bind info.
+  - Each binding waits for the one before on the sparse timeline and
+    signals the next value. Bindings then complete in order and the
+    timeline only rises, which binding operations do not promise otherwise.
+  - A frame's beginning waits for the sparse value at the end of the frame
+    its slot last held, as for the queues.
+- **Copies into new pages:** Vulkan does not order a binding against
+  command buffers, even on one queue. So the upload flush after a binding
+  waits for the latest binding's value before its copies run. A sparse
+  image's copy needs no barrier but its level's first transition from
+  UNDEFINED to GENERAL.
+- **Reading pages while they change:** Vulkan forbids other queues to
+  access memory while its binding changes. The module cannot know which
+  pages a shader reads, so that is the caller's to keep. The renderer
+  clears a page's residency before unbinding it, and unbinds only after
+  the frames that could read it complete (ADR-0065).
+
+Stage 0's measurement on the RTX 3060 Ti (driver 610.74, Windows 10)
+decided for sparse images. `gpu_bench` tracks it nightly:
+- `texture_sample_4k_rgba8_sparse` is the sampling benchmark's texture as a
+  sparse image with every page bound. It took 0.280 to 0.283 ms against
+  0.280 to 0.282 ms for the ordinary image.
+- `sparse_bind_64_pages` and `sparse_unbind_64_pages` time 64 pages bound
+  and unbound, from the call until the sparse timeline reaches its value:
+  0.33 to 0.37 ms and 0.47 to 0.49 ms.
+- A call of 256 bindings held a lock in the driver long enough to stall
+  another thread's submit by up to 4 ms. Calls of 64 or fewer did not.
+
+`test_sparse.c` covers:
+- pages and tails for BC7 and for non-power-of-two RGBA8;
+- pages of three levels and the tail bound in one call, holding what is
+  copied into them, while pages never bound read zeros;
+- a page unbound and another bound in the same call;
+- a freed page returning when its frame slot comes round;
+- the capacity, and bindings out of range or of pages not in use refused;
+- the feature switched off.
+
 ## Shaders and pipelines
 
 `nph_gpu_spirv_reflect` is the engine's own SPIR-V parser: two passes over

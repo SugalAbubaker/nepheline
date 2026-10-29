@@ -7,6 +7,7 @@
 #include <nepheline/core/atomic.h>
 #include <nepheline/core/handle.h>
 #include <nepheline/gpu/render_graph.h>
+#include <nepheline/gpu/sparse.h>
 #include <nepheline/gpu/upload.h>
 #include <nepheline/gpu/vk.h>
 #include <nepheline/platform/thread.h>
@@ -88,6 +89,18 @@ typedef struct NphGpuImageSlot {
     b32 external;  // owned by a swapchain: the VkImage is not destroyed here
     b32 transient; // bound into a render-graph block: no allocation of its own
     b32 exclusive; // VK_SHARING_MODE_EXCLUSIVE (ownership transfers apply)
+    // NPH_GPU_IMAGE_FLAG_SPARSE: no memory of its own (sparse.c), shared by
+    // every family and kept in GENERAL. Its pages, from the format's
+    // standard block shape, and its mip tail (from tail_first_mip,
+    // tail_bytes at tail_offset in the image's opaque memory range, bound
+    // as tail_pages pages).
+    b32 sparse;
+    u32 page_width;
+    u32 page_height;
+    u32 tail_first_mip;
+    u32 tail_pages;
+    u64 tail_offset;
+    u64 tail_bytes;
     char name[NPH_GPU_NAME_MAX];
 } NphGpuImageSlot;
 
@@ -155,6 +168,8 @@ typedef enum NphGpuDeferredType {
     NPH_GPU_DEFERRED_BINDLESS_SAMPLER, // index
     NPH_GPU_DEFERRED_ALLOCATION,       // alloc only (render-graph block)
     NPH_GPU_DEFERRED_ACCEL,            // handle = VkAccelerationStructureKHR
+    NPH_GPU_DEFERRED_SPARSE_PAGE,      // handle = NphGpuPagePool, index = the page's index
+    NPH_GPU_DEFERRED_PAGE_POOL,        // handle = NphGpuPagePool (its blocks and itself)
 } NphGpuDeferredType;
 
 typedef struct NphGpuDeferred {
@@ -229,6 +244,7 @@ typedef struct NphGpuFrameSlot {
     b32 accel_results_valid;
     u64 accel_frame_index;
     u64 staging_bytes; // staging ring bytes the frame's uploads hold until it completes
+    u64 sparse_value;  // the sparse timeline's value at the frame's end (sparse.h)
 } NphGpuFrameSlot;
 
 // ---------------------------------------------------------------------------
@@ -278,6 +294,9 @@ typedef struct NphGpuUploadState {
     u32 pending_count;
     u32 pending_cap;
     u64 pending_bytes;
+    // The latest sparse binding the next flush waits for, so its copies into
+    // newly bound pages land in memory (sparse.c).
+    u64 sparse_wait;
 } NphGpuUploadState;
 
 // ---------------------------------------------------------------------------
@@ -367,6 +386,25 @@ struct NphGpuDevice {
     NphGpuCmd *cmds;
 
     NphGpuUploadState upload;
+    // Sparse residency (NphGpuFeatures.sparse_residency; sparse.c): the queue
+    // that binds (the transfer queue where its family binds, else the
+    // graphics queue), the timeline its bindings signal in order, the value
+    // of the latest (under the queue's lock), and the memory types every
+    // sparse image's pages may come from.
+    NphGpuQueue *sparse_queue;
+    NphGpuTimeline *sparse_timeline;
+    NphAtomicU64 sparse_value;
+    u32 sparse_memory_bits;
+    // The bindings' Vulkan structures, room for sparse_scratch_cap of each,
+    // grown as calls need (under the sparse queue's lock), and the pools
+    // alive (reported and released at shutdown if their owner did not).
+    VkSparseImageMemoryBind *sparse_image_binds;
+    VkSparseImageMemoryBindInfo *sparse_image_infos;
+    VkSparseMemoryBind *sparse_opaque_binds;
+    VkSparseImageOpaqueMemoryBindInfo *sparse_opaque_infos;
+    u32 sparse_scratch_cap;
+    NphGpuPagePool *page_pools;
+    NphSpinLock page_pool_lock;
     // NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT: u32[GPU_INDIRECT_COUNTS],
     // entry i holding i, from which the plain indirect draws read their
     // counts (commands.c). Null on other drivers.
@@ -524,6 +562,18 @@ void gpu_upload_mark_frame_end(NphGpuDevice *dev, u32 slot);
 NphResult gpu_timeline_create_internal(NphGpuDevice *dev, u64 initial, const char *name,
                                        NphGpuTimeline **out);
 void gpu_timeline_destroy_internal(NphGpuDevice *dev, NphGpuTimeline *tl, bool deferred);
+
+// Sparse residency (sparse.c). Init creates the sparse timeline and finds
+// the memory types sparse images' pages may use (clearing
+// NphGpuFeatures.sparse_residency where none serves every format); the
+// deferred entries return a freed page and destroy a pool.
+NphResult gpu_sparse_init(NphGpuDevice *dev);
+void gpu_sparse_shutdown(NphGpuDevice *dev);
+void gpu_sparse_return_page(NphGpuPagePool *pool, u32 index);
+void gpu_sparse_destroy_pool(NphGpuDevice *dev, NphGpuPagePool *pool);
+// The memory types a sparse image of `desc` may be bound to (resources.c),
+// creating and destroying one to ask; 0 when the device cannot make it.
+u32 gpu_sparse_memory_bits(NphGpuDevice *dev, const NphGpuImageDesc *in);
 
 // Pipeline cache
 NphResult gpu_pipeline_cache_init(NphGpuDevice *dev);

@@ -291,6 +291,50 @@ static VkFormatFeatureFlags required_format_features(u32 usage)
     return f;
 }
 
+// The device pages `d`'s format with the standard block shape (sparse.h).
+static bool sparse_format_supported(const NphGpuDevice *dev, const NphGpuImageDesc *d)
+{
+    VkSparseImageFormatProperties props[4];
+    u32 n = 4U;
+    vkGetPhysicalDeviceSparseImageFormatProperties(
+        dev->phys, gpu_vk_format(d->format), VK_IMAGE_TYPE_2D, VK_SAMPLE_COUNT_1_BIT,
+        image_usage(d->usage), VK_IMAGE_TILING_OPTIMAL, &n, props);
+    for (u32 i = 0; i < n; ++i) {
+        if ((props[i].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0U) {
+            return (props[i].flags & VK_SPARSE_IMAGE_FORMAT_NONSTANDARD_BLOCK_SIZE_BIT) == 0U;
+        }
+    }
+    return false;
+}
+
+// A sparse image: 2D, one layer and one sample, sampled and copied only, in
+// a format the device pages with the standard block shape.
+static NphResult validate_sparse_desc(NphGpuDevice *dev, const NphGpuImageDesc *d)
+{
+    const char *name = d->name != NULL ? d->name : "";
+    if (!dev->info.features.sparse_residency) {
+        GPU_LOG_ERROR("image '%s': sparse images need NphGpuFeatures.sparse_residency", name);
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    const u32 allowed = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST |
+                        (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC;
+    if (d->type != NPH_GPU_IMAGE_2D || d->layer_count != 1U || d->samples != 1U ||
+        (d->usage & ~allowed) != 0U ||
+        (d->sampled_format != NPH_GPU_FORMAT_UNDEFINED && d->sampled_format != d->format)) {
+        GPU_LOG_ERROR("image '%s': a sparse image is 2D, of one layer and one sample, sampled and "
+                      "copied only, in its own format",
+                      name);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (!sparse_format_supported(dev, d)) {
+        GPU_LOG_ERROR("image '%s': %s cannot be sparse with the standard block shape on this "
+                      "device",
+                      name, nph_gpu_format_name(d->format));
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    return NPH_RESULT_OK;
+}
+
 static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d)
 {
     const char *name = d->name != NULL ? d->name : "";
@@ -376,6 +420,13 @@ static NphResult validate_image_desc(NphGpuDevice *dev, const NphGpuImageDesc *d
                       nph_gpu_format_name(d->format), d->usage);
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    if ((d->flags & ~(u32)NPH_GPU_IMAGE_FLAG_SPARSE) != 0U) {
+        GPU_LOG_ERROR("image '%s': unknown flags 0x%x", name, d->flags);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if ((d->flags & (u32)NPH_GPU_IMAGE_FLAG_SPARSE) != 0U) {
+        return validate_sparse_desc(dev, d);
+    }
     return NPH_RESULT_OK;
 }
 
@@ -410,6 +461,9 @@ static void fill_image_info(const NphGpuDevice *dev, const NphGpuImageDesc *d, b
     ci->initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (d->type == NPH_GPU_IMAGE_CUBE) {
         ci->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
+    if ((d->flags & (u32)NPH_GPU_IMAGE_FLAG_SPARSE) != 0U) {
+        ci->flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT;
     }
     if (d->type == NPH_GPU_IMAGE_3D &&
         (d->usage & (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT) != 0U) {
@@ -503,10 +557,13 @@ static NphResult finish_image(NphGpuDevice *dev, NphGpuImageSlot *slot)
         NPH_TRY(create_view(dev, slot, sampled_view_type(d), format,
                             mutable_view ? VK_IMAGE_USAGE_SAMPLED_BIT : 0U, view_aspect, 0U,
                             d->mip_count, 0U, d->layer_count, "sampled view", &slot->view));
+        // A sparse image is sampled in GENERAL, where its pages are copied
+        // while the others are read (sparse.h).
         slot->sampled_index =
             gpu_bindless_alloc_sampled(dev, slot->view,
-                                       depth ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-                                             : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                       depth          ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+                                       : slot->sparse ? VK_IMAGE_LAYOUT_GENERAL
+                                                      : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         if (slot->sampled_index == NPH_GPU_INVALID_INDEX) {
             GPU_LOG_ERROR("image '%s': the bindless sampled-image array is full", slot->name);
             return NPH_RESULT_FULL;
@@ -613,6 +670,68 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
     slot->alloc = NULL;
 }
 
+// A sparse image's pages and mip tail, from the device's requirements;
+// NPH_RESULT_UNSUPPORTED where its pages could not come from a page pool.
+static NphResult sparse_layout(NphGpuDevice *dev, NphGpuImageSlot *slot)
+{
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(dev->device, slot->vk, &mr);
+    u32 n = 0U;
+    vkGetImageSparseMemoryRequirements(dev->device, slot->vk, &n, NULL);
+    VkSparseImageMemoryRequirements req[4];
+    n = n > 4U ? 4U : n;
+    vkGetImageSparseMemoryRequirements(dev->device, slot->vk, &n, req);
+    const VkSparseImageMemoryRequirements *colour = NULL;
+    for (u32 i = 0; i < n; ++i) {
+        if ((req[i].formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0U) {
+            colour = &req[i];
+        }
+    }
+    if (colour == NULL || (mr.memoryTypeBits & dev->sparse_memory_bits) == 0U ||
+        mr.alignment != NPH_GPU_SPARSE_PAGE_BYTES ||
+        (colour->formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_NONSTANDARD_BLOCK_SIZE_BIT) !=
+            0U) {
+        GPU_LOG_ERROR("image '%s': its pages cannot come from a page pool (memory types 0x%x of "
+                      "0x%x, pages of %llu bytes)",
+                      slot->name, mr.memoryTypeBits, dev->sparse_memory_bits,
+                      (unsigned long long)mr.alignment);
+        return NPH_RESULT_UNSUPPORTED;
+    }
+    slot->sparse = 1;
+    slot->page_width = colour->formatProperties.imageGranularity.width;
+    slot->page_height = colour->formatProperties.imageGranularity.height;
+    const u32 mips = slot->desc.mip_count;
+    slot->tail_first_mip =
+        colour->imageMipTailFirstLod < mips ? colour->imageMipTailFirstLod : mips;
+    slot->tail_offset = colour->imageMipTailOffset;
+    slot->tail_bytes = slot->tail_first_mip < mips ? colour->imageMipTailSize : 0U;
+    slot->tail_pages = slot->tail_first_mip < mips
+                           ? (u32)((colour->imageMipTailSize + NPH_GPU_SPARSE_PAGE_BYTES - 1U) /
+                                   NPH_GPU_SPARSE_PAGE_BYTES)
+                           : 0U;
+    return NPH_RESULT_OK;
+}
+
+u32 gpu_sparse_memory_bits(NphGpuDevice *dev, const NphGpuImageDesc *in)
+{
+    NphGpuImageDesc desc = *in;
+    gpu_image_normalize_desc(&desc);
+    if (!sparse_format_supported(dev, &desc)) {
+        return 0U;
+    }
+    VkImageCreateInfo ci;
+    GpuFormatList list;
+    fill_image_info(dev, &desc, true, &ci, &list);
+    VkImage image = VK_NULL_HANDLE;
+    if (vkCreateImage(dev->device, &ci, NULL, &image) != VK_SUCCESS) {
+        return 0U;
+    }
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(dev->device, image, &mr);
+    vkDestroyImage(dev->device, image, NULL);
+    return mr.alignment == NPH_GPU_SPARSE_PAGE_BYTES ? mr.memoryTypeBits : 0U;
+}
+
 NphResult nph_gpu_image_create(NphGpuDevice *dev, const NphGpuImageDesc *in, NphGpuImage *out)
 {
     NPH_ASSERT(dev != NULL && in != NULL && out != NULL);
@@ -632,13 +751,32 @@ NphResult nph_gpu_image_create(NphGpuDevice *dev, const NphGpuImageDesc *in, Nph
     // families so uploads need no ownership transfer and may touch a
     // subset of layers; attachments stay exclusive for the hardware's
     // framebuffer compression (CLAUDE.md §10.3.5).
-    const bool shared = (desc.usage & (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST) != 0U &&
-                        (desc.usage & ((u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
-                                       (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT)) == 0U;
+    // A sparse image is shared too: its pages are copied on the transfer
+    // queue while the graphics queue samples the others.
+    const bool sparse = (desc.flags & (u32)NPH_GPU_IMAGE_FLAG_SPARSE) != 0U;
+    const bool shared =
+        sparse || ((desc.usage & (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST) != 0U &&
+                   (desc.usage & ((u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT |
+                                  (u32)NPH_GPU_IMAGE_USAGE_DEPTH_ATTACHMENT)) == 0U);
     slot->exclusive = (shared && dev->family_count > 1U) ? 0 : 1;
     VkImageCreateInfo ci;
     GpuFormatList list;
     fill_image_info(dev, &desc, shared, &ci, &list);
+    if (sparse) {
+        const VkResult sr = vkCreateImage(dev->device, &ci, NULL, &slot->vk);
+        NphResult lr =
+            sr == VK_SUCCESS ? sparse_layout(dev, slot) : gpu_vk_fail(dev, sr, "vkCreateImage");
+        if (lr == NPH_RESULT_OK) {
+            lr = finish_image(dev, slot);
+        }
+        if (lr != NPH_RESULT_OK) {
+            release_image_objects(dev, slot, false);
+            gpu_pool_release(&dev->images, handle);
+            return lr;
+        }
+        out->value = handle;
+        return NPH_RESULT_OK;
+    }
     const VkResult r = nph_gpu_alloc_create_image(dev->vma, &ci, &slot->vk, &slot->alloc);
     if (r != VK_SUCCESS) {
         gpu_pool_release(&dev->images, handle);

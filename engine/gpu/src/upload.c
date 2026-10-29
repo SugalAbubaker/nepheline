@@ -527,7 +527,54 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
     if (r == NPH_RESULT_OK) {
         r = stage(dev, data, size, false, &src, &src_offset);
     }
-    if (r == NPH_RESULT_OK) {
+    if (r == NPH_RESULT_OK && slot->sparse) {
+        // A sparse image stays in GENERAL, shared by the families: its page
+        // is copied while the graphics queue samples the others, so nothing
+        // transitions it or changes its owner. A level's first copy takes
+        // it from UNDEFINED. The copy lands in memory bound before the
+        // flush that submits it (sparse.h).
+        NphGpuCmd *cmd = up->cmd;
+        if (slot->state[mip].layout != NPH_GPU_LAYOUT_GENERAL) {
+            NphGpuImageBarrier b;
+            memset(&b, 0, sizeof b);
+            b.image = dst;
+            b.src_stages = (u32)NPH_GPU_STAGE_NONE;
+            b.src_access = (u32)NPH_GPU_ACCESS_NONE;
+            b.old_layout = NPH_GPU_LAYOUT_UNDEFINED;
+            b.dst_stages = (u32)NPH_GPU_STAGE_TRANSFER;
+            b.dst_access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
+            b.new_layout = NPH_GPU_LAYOUT_GENERAL;
+            b.base_mip = mip;
+            b.mip_count = 1U;
+            b.base_layer = 0U;
+            b.layer_count = NPH_GPU_ALL_LAYERS;
+            b.src_queue = NPH_GPU_QUEUE_TRANSFER;
+            b.dst_queue = NPH_GPU_QUEUE_TRANSFER;
+            NphGpuBarrierDesc desc;
+            memset(&desc, 0, sizeof desc);
+            desc.images = &b;
+            desc.image_count = 1U;
+            nph_gpu_cmd_barrier(cmd, &desc);
+        }
+        NphGpuBufferImageCopy region;
+        memset(&region, 0, sizeof region);
+        region.buffer_offset = src_offset;
+        region.mip = mip;
+        region.base_layer = base_layer;
+        region.layer_count = layer_count;
+        if (!rect->whole) {
+            region.x = (i32)rect->x;
+            region.y = (i32)rect->y;
+            region.width = rect->width;
+            region.height = rect->height;
+            region.depth = 1U;
+        }
+        nph_gpu_cmd_copy_buffer_to_image(cmd, src, dst, NPH_GPU_LAYOUT_GENERAL, &region, 1U);
+        ++up->batch_copies;
+        if (src.value != up->staging.value) {
+            nph_gpu_buffer_destroy(dev, src);
+        }
+    } else if (r == NPH_RESULT_OK) {
         NphGpuCmd *cmd = up->cmd;
         // Layouts are tracked per mip, so every layer of the mip makes the
         // round trip even when the copy touches a few. Shared images keep
@@ -679,19 +726,30 @@ static NphResult flush_locked(NphGpuDevice *dev, u64 *out_value)
     // The transfer runs after the previous frame's graphics work, so an
     // upload into a resource that frame read cannot race it (CLAUDE.md
     // §10.6: the CPU is at most one frame ahead, so this costs nothing).
-    NphGpuTimelineOp prev_frame;
-    prev_frame.timeline = dev->queues[NPH_GPU_QUEUE_GRAPHICS]->timeline;
-    prev_frame.value = dev->last_frame_graphics_value;
-    prev_frame.stages = (u32)NPH_GPU_STAGE_ALL;
+    NphGpuTimelineOp waits[2];
+    u32 wait_count = 0U;
+    if (dev->last_frame_graphics_value != 0U && distinct) {
+        waits[wait_count].timeline = dev->queues[NPH_GPU_QUEUE_GRAPHICS]->timeline;
+        waits[wait_count].value = dev->last_frame_graphics_value;
+        waits[wait_count].stages = (u32)NPH_GPU_STAGE_ALL;
+        ++wait_count;
+    }
+    // Copies into sparse pages land in the memory the latest binding gave
+    // them (sparse.h): the binding and the copies are not ordered otherwise,
+    // even on one queue.
+    if (up->sparse_wait != 0U) {
+        waits[wait_count].timeline = dev->sparse_timeline;
+        waits[wait_count].value = up->sparse_wait;
+        waits[wait_count].stages = (u32)NPH_GPU_STAGE_TRANSFER;
+        ++wait_count;
+    }
     NphGpuSubmitDesc submit;
     memset(&submit, 0, sizeof submit);
     submit.queue = NPH_GPU_QUEUE_TRANSFER;
     submit.cmds = &cmd;
     submit.cmd_count = 1U;
-    if (prev_frame.value != 0U && distinct) {
-        submit.waits = &prev_frame;
-        submit.wait_count = 1U;
-    }
+    submit.waits = wait_count != 0U ? waits : NULL;
+    submit.wait_count = wait_count;
     u64 value = 0U;
     NphResult r = nph_gpu_submit(dev, &submit, &value);
     u64 graphics_value = 0U;
