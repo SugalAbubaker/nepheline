@@ -83,6 +83,78 @@ static bool finite_bits(u32 bits)
     return ((bits >> 23U) & 0xFFU) != 0xFFU;
 }
 
+static bool finite32(f32 x)
+{
+    u32 bits = 0U;
+    memcpy(&bits, &x, sizeof bits);
+    return finite_bits(bits);
+}
+
+// A level apart's makers (version 6, NPH_MESH_FLAG_LEVEL), checked: finite,
+// radii and errors not negative.
+static NphResult mesh_makers(const NphAsset *asset, const NphMeshHeader *h,
+                             const NphMeshLodHeader *lh, NphMeshView *out)
+{
+    if ((h->flags & NPH_MESH_FLAG_LEVEL) == 0U) {
+        return nph_asset_blob(asset, NPH_MESH_TAG_LOD_MAKERS, 0U) == NULL ? NPH_RESULT_OK
+                                                                          : NPH_RESULT_CORRUPT;
+    }
+    // Voxels alone, of one level, every cluster at its level 0.
+    if (!voxels_alone(asset, h) || lh->levels != 1U || lh->level0_meshlets != h->meshlet_count) {
+        return NPH_RESULT_CORRUPT;
+    }
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_LOD_MAKERS, 0U, sizeof(NphMeshLodMaker),
+                       h->meshlet_count, &p));
+    const NphMeshLodMaker *makers = (const NphMeshLodMaker *)p;
+    for (u32 i = 0; i < h->meshlet_count; ++i) {
+        const NphMeshLodMaker *m = &makers[i];
+        if (!finite32(m->center.x) || !finite32(m->center.y) || !finite32(m->center.z) ||
+            !finite32(m->radius) || !(m->radius >= 0.0F) || !finite32(m->error) ||
+            !(m->error >= 0.0F)) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    out->lod_makers = makers;
+    return NPH_RESULT_OK;
+}
+
+// A head's levels (version 6, NPH_MESH_FLAG_LEVELS), checked: no geometry
+// of its own, 1 to NPH_MESH_MAX_LEVELS levels, each naming an asset, with
+// clusters, its errors finite and not negative, its maker error at most its
+// error and at least the finer level's.
+static NphResult mesh_levels(const NphAsset *asset, const NphMeshHeader *h, NphMeshView *out)
+{
+    const NphAssetBlob *b = nph_asset_blob(asset, NPH_MESH_TAG_LEVELS, 0U);
+    if ((h->flags & NPH_MESH_FLAG_LEVELS) == 0U) {
+        return b == NULL ? NPH_RESULT_OK : NPH_RESULT_CORRUPT;
+    }
+    if (b == NULL || b->size % sizeof(NphMeshLevel) != 0U || h->vertex_count != 0U ||
+        h->index_count != 0U || h->meshlet_count != 0U || h->meshlet_vertex_count != 0U ||
+        h->meshlet_triangle_count != 0U ||
+        nph_asset_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U) != NULL) {
+        return NPH_RESULT_CORRUPT;
+    }
+    const u64 n = b->size / sizeof(NphMeshLevel);
+    if (n == 0U || n > NPH_MESH_MAX_LEVELS) {
+        return NPH_RESULT_CORRUPT;
+    }
+    const NphMeshLevel *levels = (const NphMeshLevel *)b->data;
+    f32 finer = 0.0F;
+    for (u32 k = 0; k < (u32)n; ++k) {
+        const NphMeshLevel *l = &levels[k];
+        if (nph_guid_is_null(l->mesh) || l->cluster_count == 0U || l->reserved != 0U ||
+            !finite32(l->maker_error) || !(l->maker_error >= finer) || !finite32(l->error) ||
+            !(l->error >= l->maker_error)) {
+            return NPH_RESULT_CORRUPT;
+        }
+        finer = l->maker_error;
+    }
+    out->levels = levels;
+    out->level_count = (u32)n;
+    return NPH_RESULT_OK;
+}
+
 // A voxel cluster's record, bricks and voxels (version 5, compact), checked
 // so far as every index is in range and every field holds a value the
 // renderer's records can (render/voxel.h "The compact form"), and as the
@@ -143,11 +215,13 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
 {
     const NphAssetBlob *b = nph_asset_blob(asset, NPH_MESH_TAG_LOD_HEADER, 0U);
     if (b == NULL) {
-        // No levels: then none of their blobs either.
+        // No levels: then none of their blobs either, and not a level apart.
         return nph_asset_blob(asset, NPH_MESH_TAG_LOD_CLUSTERS, 0U) == NULL &&
                        nph_asset_blob(asset, NPH_MESH_TAG_LOD_GROUPS, 0U) == NULL &&
                        nph_asset_blob(asset, NPH_MESH_TAG_LOD_MEMBERS, 0U) == NULL &&
-                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U) == NULL
+                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_NODES, 0U) == NULL &&
+                       nph_asset_blob(asset, NPH_MESH_TAG_LOD_MAKERS, 0U) == NULL &&
+                       (h->flags & NPH_MESH_FLAG_LEVEL) == 0U
                    ? NPH_RESULT_OK
                    : NPH_RESULT_CORRUPT;
     }
@@ -232,6 +306,7 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
             }
         }
     }
+    NPH_TRY(mesh_makers(asset, h, lh, out));
     out->lod = lh;
     out->lod_clusters = clusters;
     out->lod_groups = groups;
@@ -251,7 +326,11 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_HEADER, 0U, sizeof(NphMeshHeader), 1U, &p));
     const NphMeshHeader *h = (const NphMeshHeader *)p;
-    if (h->index_count % 3U != 0U || h->reserved0 != 0U) {
+    // Levels apart from version 6, a head or a level, never both.
+    const u32 apart = h->flags & ((u32)NPH_MESH_FLAG_LEVELS | (u32)NPH_MESH_FLAG_LEVEL);
+    if (h->index_count % 3U != 0U || h->reserved0 != 0U ||
+        (apart != 0U && (asset->header.type_version < 6U ||
+                         apart == ((u32)NPH_MESH_FLAG_LEVELS | (u32)NPH_MESH_FLAG_LEVEL)))) {
         return NPH_RESULT_CORRUPT;
     }
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_POSITIONS, 0U, sizeof(NphMeshPosition), h->vertex_count,
@@ -332,6 +411,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
         }
     }
     NPH_TRY(mesh_lods(asset, h, submeshes, meshlets, out));
+    NPH_TRY(mesh_levels(asset, h, out));
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;

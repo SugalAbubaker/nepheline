@@ -61,6 +61,20 @@
 // first. Versions 3 and 4, whose voxels are in the builders' form, no longer
 // read when they hold voxels (NPH_RESULT_VERSION_MISMATCH: cook them again).
 //
+// From version 6, a mesh's levels may be apart, each a mesh asset of its own
+// that loads alone (render/cluster_lod.h "Levels apart"; ADR-0063 "Stage 2,
+// a level is a mesh"), as a cell's proxy is cooked. The mesh is then a head
+// (NPH_MESH_FLAG_LEVELS) of no geometry: its header (bounds and submeshes;
+// no vertices, indices or meshlets), its submeshes, and
+//
+//     LVLS  NphMeshLevel[level]       each level's mesh asset and errors, finest first
+//
+// and each level (NPH_MESH_FLAG_LEVEL) a mesh of voxels alone of one level
+// (its LODS `levels` 1, every cluster at its level 0, no group its maker)
+// whose clusters' makers, groups of the level below, are records instead:
+//
+//     LODK  NphMeshLodMaker[meshlet]  the sphere and error of the group that made it
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -87,8 +101,9 @@ extern "C" {
 
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
 // in the levels (VOXB, VOXA). 4: meshes of voxels alone. 5: the voxels
-// compact (VOXC). Earlier versions without voxels still read.
-#define NPH_MESH_TYPE_VERSION 5U
+// compact (VOXC). 6: levels apart (LVLS, LODK). Earlier versions without
+// voxels still read.
+#define NPH_MESH_TYPE_VERSION 6U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -107,6 +122,8 @@ extern "C" {
 #define NPH_MESH_TAG_VOXEL_CLUSTERS   NPH_FOURCC('V', 'O', 'X', 'C')
 #define NPH_MESH_TAG_VOXEL_BRICKS     NPH_FOURCC('V', 'O', 'X', 'B')
 #define NPH_MESH_TAG_VOXELS           NPH_FOURCC('V', 'O', 'X', 'A')
+#define NPH_MESH_TAG_LOD_MAKERS       NPH_FOURCC('L', 'O', 'D', 'K')
+#define NPH_MESH_TAG_LEVELS           NPH_FOURCC('L', 'V', 'L', 'S')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -115,6 +132,10 @@ typedef enum NphMeshFlags {
     NPH_MESH_FLAG_HAS_TANGENTS = 1U << 0U, // tangents were authored or generated
     NPH_MESH_FLAG_HAS_UV0 = 1U << 1U,
     NPH_MESH_FLAG_HAS_COLORS = 1U << 2U,
+    // Version 6: a head whose levels are apart (LVLS), or one of those levels
+    // (LODK); never both.
+    NPH_MESH_FLAG_LEVELS = 1U << 3U,
+    NPH_MESH_FLAG_LEVEL = 1U << 4U,
 } NphMeshFlags;
 
 typedef struct NphMeshHeader {
@@ -252,7 +273,36 @@ typedef struct NphMeshVoxelBrick {
     u32 mask[2];
 } NphMeshVoxelBrick;
 
+// A level apart (version 6): a cluster's maker as a record, the sphere and
+// error of the group that made it (zeros at a mesh's level 0), which the
+// renderer's culls test the cluster by (render/cluster_lod.h
+// NphRenderLodMaker, byte for byte).
+typedef struct NphMeshLodMaker {
+    NphVec3 center;
+    f32 radius;
+    f32 error;
+} NphMeshLodMaker;
+
+// A head's level (version 6): the mesh asset that holds it (NPH_MESH_FLAG_LEVEL),
+// the smallest error of the groups that made its clusters (0 at level 0)
+// and the largest of those that consume them (a root group's, the largest
+// float, at the coarsest level): from where its clusters stand in for finer
+// ones to where coarser ones stand in for them, as a cut decides
+// (render/cluster_lod.h). At most NPH_MESH_MAX_LEVELS, the finest first,
+// their maker errors rising.
+#define NPH_MESH_MAX_LEVELS 16U
+
+typedef struct NphMeshLevel {
+    NphGuid mesh;
+    f32 maker_error;
+    f32 error;
+    u32 cluster_count; // its clusters (at least 1)
+    u32 reserved;      // zero
+} NphMeshLevel;
+
 NPH_STATIC_ASSERT(sizeof(NphMeshLodHeader) == 32U, "the levels' header is 32 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshLodMaker) == 20U, "a maker's record is 20 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshLevel) == 32U, "a level is 32 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshVoxelCluster) == 8U, "a voxel cluster's record is 8 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == 16U, "a brick is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == 16U, "a cluster's level record is 16 bytes");
@@ -279,6 +329,11 @@ typedef struct NphMeshView {
     const NphMeshVoxelCluster *voxel_clusters;
     const NphMeshVoxelBrick *voxel_bricks;
     const u32 *voxel_words;
+    // A level apart's makers ([meshlet_count]), NULL for any other mesh.
+    const NphMeshLodMaker *lod_makers;
+    // A head's levels, finest first, NULL (and 0) for any other mesh.
+    const NphMeshLevel *levels;
+    u32 level_count;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
@@ -291,9 +346,14 @@ typedef struct NphMeshView {
 // empty, their first voxels' ranks following one another from 0, at most
 // NPH_MESH_VOXEL_CLUSTER_VOXELS voxels, their words in range; every
 // footprint a box of at least one step on each axis and a known shape, a
-// capsule's radius a known code; every reserved bit zero). That the hierarchy
-// is a tree and its bounds hold is the renderer's to check
-// (nph_render_mesh_create).
+// capsule's radius a known code; every reserved bit zero); a head's levels
+// (version 6: no geometry of its own, 1 to NPH_MESH_MAX_LEVELS levels, each
+// naming an asset, with clusters, its errors finite, not negative, its maker
+// error at most its error and at least the finer level's) and a level
+// apart's (voxels alone, of one level, its makers' records finite, their
+// radii and errors not negative). That the hierarchy is a tree and its
+// bounds hold is the renderer's to check (nph_render_mesh_create), as that a
+// head's levels are its own: each is a mesh asset of its own, viewed alone.
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 
 // The position of vertex `p` in mesh space.

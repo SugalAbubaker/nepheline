@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 5; earlier versions without voxels still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 6; earlier versions without voxels still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -269,7 +269,23 @@ can be handed to the renderer without further checks:
   `MLVX` and `MLTR` absent), every cluster a voxel cluster, level 0's too, and
   one submesh of no indices over level 0's clusters. A record without
   vertices at level 0 is a voxel cluster's in such a mesh alone: in a mesh
-  with vertices or indices, or before version 4, it is a meshlet's.
+  with vertices or indices, or before version 4, it is a meshlet's. From
+  version 6, a mesh's levels may be apart, each a mesh asset that loads
+  alone (render/cluster_lod.h "Levels apart"; ADR-0063 "Stage 2, a level is a
+  mesh"), as a cell's proxy is cooked: a head (`NPH_MESH_FLAG_LEVELS`) holds
+  no geometry but its bounds and submeshes and `LVLS` (`NphMeshLevel` a
+  level, the finest first: the level's mesh GUID, the smallest error of the
+  groups that made its clusters and the largest of those that consume them,
+  its cluster count), and each level (`NPH_MESH_FLAG_LEVEL`) is a mesh of
+  voxels alone of one level (its `LODS` levels 1, every cluster at its
+  level 0, no group its maker) whose clusters' makers, groups of the level
+  below, are records instead: `LODK` (`NphMeshLodMaker` a cluster: the
+  sphere and error, the renderer's `NphRenderLodMaker` byte for byte). The
+  view checks a head's levels (1 to `NPH_MESH_MAX_LEVELS`, each naming an
+  asset with clusters, their errors finite and rising, a level's maker error
+  at most its error) and a level's makers (finite, radii and errors not
+  negative); that a head's levels are its own is the loader's to find, each
+  a mesh asset viewed alone.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
