@@ -75,7 +75,16 @@ static u64 safe_frame(const NphRenderer *r)
 
 static NphRangeAllocator *pool_of(RenderVis *v, u32 pool)
 {
-    return pool == 0U ? &v->material_ranges : (pool == 1U ? &v->index_ranges : &v->voxel_ranges);
+    switch (pool) {
+    case 0U:
+        return &v->material_ranges;
+    case 1U:
+        return &v->index_ranges;
+    case 2U:
+        return &v->voxel_ranges;
+    default:
+        return &v->member_ranges;
+    }
 }
 
 // A range freed: the voxel pool's under its lock (its uploads reserve on the
@@ -105,6 +114,11 @@ static void free_later(NphRenderer *r, u32 pool, NphRange range)
         // the previous frame's graphics work, already rule out.
         range_free(v, pool, range);
     }
+}
+
+void render_vis_member_range_free_later(NphRenderer *r, NphRange range)
+{
+    free_later(r, 3U, range);
 }
 
 void render_vis_release_pending(NphRenderer *r, u64 current_frame)
@@ -258,7 +272,7 @@ NphResult render_vis_scene_create(NphRenderer *r)
         v->sent_next == NULL || v->blend == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
-    return NPH_RESULT_OK;
+    return render_vis_runs_create(r);
 }
 
 void render_vis_scene_destroy(NphRenderer *r)
@@ -267,6 +281,7 @@ void render_vis_scene_destroy(NphRenderer *r)
     NphGpuDevice *dev = r->dev;
     NphAllocator *a = r->alloc;
     const NphRendererDesc *d = &r->desc;
+    render_vis_runs_destroy(r);
     nph_gpu_buffer_destroy(dev, v->instances);
     nph_gpu_buffer_destroy(dev, v->prev_transforms);
     nph_gpu_buffer_destroy(dev, v->meshes);
@@ -1055,6 +1070,31 @@ NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellD
     }
     r->pending_uploads = 1;
     return nph_gpu_upload_buffer(r->dev, r->vis.cells, (u64)slot * sizeof rec, &rec, sizeof rec);
+}
+
+NphResult render_vis_cell_box_changed(NphRenderer *r, u32 slot)
+{
+    if (!r->vis.supported) {
+        return NPH_RESULT_OK;
+    }
+    const RenderCell *c = &r->cells[slot];
+    f32 hx = 0.0F;
+    f32 hy = 0.0F;
+    f32 hz = 0.0F;
+    f32 lx = 0.0F;
+    f32 ly = 0.0F;
+    f32 lz = 0.0F;
+    split(c->center.x, &hx, &lx);
+    split(c->center.y, &hy, &ly);
+    split(c->center.z, &hz, &lz);
+    // The record's centre and extent, its first three vectors.
+    const NphVec4 box[3] = {nph_vec4(hx, hy, hz, c->distance), nph_vec4(lx, ly, lz, c->proxy_error),
+                            nph_vec4_from_vec3(c->extent, 0.0F)};
+    NPH_STATIC_ASSERT(offsetof(NphVisCell, extent) == 2U * sizeof(NphVec4),
+                      "a cell's box leads its record");
+    r->pending_uploads = 1;
+    return nph_gpu_upload_buffer(r->dev, r->vis.cells, (u64)slot * sizeof(NphVisCell), box,
+                                 sizeof box);
 }
 
 // ---------------------------------------------------------------------------

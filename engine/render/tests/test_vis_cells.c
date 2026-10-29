@@ -6,7 +6,8 @@
 // cell made and refused; its proxy drawn in place of its instances from
 // afar, standing for them, and not in views without levels of detail; the
 // sun's shadow map drawing the proxy or the instances per level; and the
-// proxy's levels apart (ADR-0063), each a mesh, drawing it as the whole. The
+// proxy's levels apart (ADR-0063), each a mesh, drawing it as the whole; and
+// a cell's instances kept as runs of slots for the cell culls (ADR-0064). The
 // fixture's teardown asserts zero validation and synchronisation-validation
 // errors and nothing leaked.
 #include <nepheline/jobs/jobs.h>
@@ -18,6 +19,9 @@
 #include "test_levels_apart.h"
 #include "test_lod_support.h"
 #include "test_shadow_support.h"
+
+#include <stdlib.h>
+#include <string.h>
 
 typedef RenderFixture Cells;
 
@@ -875,6 +879,315 @@ NTEST_F(Cells, an_instance_of_voxels_alone_leaves_the_top_level_as_it_is)
     nph_render_mesh_destroy(f->renderer, floor.cube);
     nph_render_mesh_destroy(f->renderer, floor.plane);
     nph_render_mesh_destroy(f->renderer, proxy);
+    grove_free(&g);
+}
+
+// ---------------------------------------------------------------------------
+// The cells' runs of instance slots (ADR-0064)
+// ---------------------------------------------------------------------------
+
+static int compare_u32(const void *x, const void *y)
+{
+    const u32 a = *(const u32 *)x;
+    const u32 b = *(const u32 *)y;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+// Run `run` holds the slots of `instances` (`count` of them) and nothing else,
+// each slot's place in it its run_entry.
+static void expect_run(RenderFixture *f, const RenderRun *run, const NphRenderInstance *instances,
+                       u32 count)
+{
+    const NphRenderer *r = f->renderer;
+    NTEST_ASSERT_EQ_UINT(run->count, count);
+    NTEST_ASSERT_LE_UINT(run->count, run->capacity);
+    u32 want[64];
+    u32 have[64];
+    NTEST_ASSERT_LE_UINT(count, 64U);
+    for (u32 i = 0; i < count; ++i) {
+        want[i] = render_slot_of(&r->instance_pool, instances[i].value);
+        const u32 slot = r->vis.member_entries[run->range.offset + i];
+        have[i] = slot;
+        NTEST_EXPECT_EQ_UINT(r->instances[slot].run_entry, i);
+    }
+    qsort(want, count, sizeof want[0], compare_u32);
+    qsort(have, count, sizeof have[0], compare_u32);
+    for (u32 i = 0; i < count; ++i) {
+        NTEST_EXPECT_EQ_UINT(have[i], want[i]);
+    }
+}
+
+// The member buffer and the cell's run record on the GPU, after a frame, as
+// the CPU keeps them.
+static void expect_runs_on_gpu(RenderFixture *f, u32 cell_slot)
+{
+    const RenderVis *v = &f->renderer->vis;
+    const RenderCell *c = &f->renderer->cells[cell_slot];
+    NphVisCellRun rec;
+    test_read_buffer(f->dev, v->cell_runs, (u64)cell_slot * sizeof rec, sizeof rec, &rec);
+    NTEST_EXPECT_EQ_UINT(rec.member_count, c->members_run.count);
+    NTEST_EXPECT_EQ_UINT(rec.proxy_count, c->proxies_run.count);
+    const RenderRun *runs[3] = {&c->members_run, &c->proxies_run, &v->loose};
+    const u32 firsts[3] = {rec.members, rec.proxies, v->loose.range.offset};
+    for (u32 k = 0; k < 3U; ++k) {
+        if (runs[k]->count == 0U) {
+            continue;
+        }
+        NTEST_EXPECT_EQ_UINT(firsts[k], runs[k]->range.offset);
+        u32 gpu[64];
+        NTEST_ASSERT_LE_UINT(runs[k]->count, 64U);
+        test_read_buffer(f->dev, v->cell_members, (u64)runs[k]->range.offset * sizeof(u32),
+                         (u64)runs[k]->count * sizeof(u32), gpu);
+        NTEST_EXPECT_EQ_INT(memcmp(gpu, v->member_entries + runs[k]->range.offset,
+                                   (size_t)runs[k]->count * sizeof(u32)),
+                            0);
+    }
+}
+
+// A cell's members, its proxy's instances and the instances of no cell are
+// kept as runs of slots (vis_runs.c): each run holds its instances and
+// nothing else, through growth past a run's first range (16 slots), members
+// leaving from its start, middle and end, and its proxy replaced; the GPU's
+// copies match after a frame; a cell destroyed gives its runs back.
+NTEST_F(Cells, a_cells_instances_are_kept_as_runs_of_slots)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, true, GROVE_CELL / 64.0F, 30.0F, &gl, 1U);
+    Scene floor;
+    scene_build(f, &floor, at(0.0, -5.0, 0.0, 0.01F));
+    NphRenderer *r = f->renderer;
+    const NphRenderView v = grove_view(20.0, 1.0F);
+    const u32 cell_slot = render_slot_of(&r->cell_pool, s.cell.value);
+    const RenderCell *c = &r->cells[cell_slot];
+    // The trees, the proxy's two levels, the floor's two.
+    NphRenderInstance members[48];
+    u32 member_count = 0U;
+    for (u32 i = 0; i < GROVE_TREES; ++i) {
+        members[member_count++] = s.trees[i];
+    }
+    expect_run(f, &c->members_run, members, member_count);
+    expect_run(f, &c->proxies_run, c->proxy, c->proxy_count);
+    NTEST_EXPECT_EQ_UINT(c->proxies_run.count, 2U);
+    const NphRenderInstance loose[2] = {floor.floor, floor.occluder};
+    expect_run(f, &r->vis.loose, loose, 2U);
+    (void)test_render_read(f, &v);
+    expect_runs_on_gpu(f, cell_slot);
+    // Past the first range: 40 more members move the run twice (16, 32, 64).
+    for (u32 i = 0; i < 40U; ++i) {
+        NphRenderInstanceDesc id;
+        memset(&id, 0, sizeof id);
+        id.mesh = s.tree;
+        id.materials = &s.green;
+        id.material_count = 1U;
+        id.transform = nph_render_transform_identity();
+        id.transform.translation = nph_dvec3(0.1 * (f64)i, 0.0, 0.0);
+        id.cell = s.cell;
+        NTEST_ASSERT_EQ_INT(nph_render_instance_create(r, &id, &members[member_count]),
+                            NPH_RESULT_OK);
+        ++member_count;
+    }
+    expect_run(f, &c->members_run, members, member_count);
+    NTEST_EXPECT_EQ_UINT(c->members_run.capacity, 64U);
+    (void)test_render_read(f, &v);
+    expect_runs_on_gpu(f, cell_slot);
+    // Members leave from the run's start (a tree), its middle and its end.
+    const u32 leave[3] = {0U, 20U, member_count - 1U};
+    for (u32 k = 3U; k-- > 0U;) {
+        nph_render_instance_destroy(r, members[leave[k]]);
+        members[leave[k]] = members[--member_count];
+    }
+    expect_run(f, &c->members_run, members, member_count);
+    // The proxy given its finest level too: its run follows.
+    NTEST_ASSERT_EQ_INT(nph_render_cell_set_proxy(r, s.cell, s.levels, s.level_count),
+                        NPH_RESULT_OK);
+    expect_run(f, &c->proxies_run, c->proxy, c->proxy_count);
+    NTEST_EXPECT_EQ_UINT(c->proxies_run.count, s.level_count);
+    (void)test_render_read(f, &v);
+    expect_runs_on_gpu(f, cell_slot);
+    // Every member gone (the trees among them), then the cell: its runs
+    // given back.
+    for (u32 i = 0; i < member_count; ++i) {
+        nph_render_instance_destroy(r, members[i]);
+    }
+    NTEST_EXPECT_EQ_UINT(c->members_run.count, 0U);
+    for (u32 i = 0; i < GROVE_TREES; ++i) {
+        s.trees[i] = NPH_RENDER_INSTANCE_NULL;
+    }
+    grove_scene_free(f, &s);
+    NTEST_EXPECT_EQ_UINT(r->cells[cell_slot].members_run.capacity, 0U);
+    NTEST_EXPECT_EQ_UINT(r->cells[cell_slot].proxies_run.capacity, 0U);
+    expect_run(f, &r->vis.loose, loose, 2U);
+    nph_render_instance_destroy(r, floor.floor);
+    nph_render_instance_destroy(r, floor.occluder);
+    NTEST_EXPECT_EQ_UINT(r->vis.loose.count, 0U);
+    nph_render_material_destroy(r, floor.grey);
+    nph_render_mesh_destroy(r, floor.cube);
+    nph_render_mesh_destroy(r, floor.plane);
+    grove_levels_free(&gl);
+    grove_free(&g);
+}
+
+// A field of grove cells sharing one grove's meshes: GROVE_FIELD x
+// GROVE_FIELD cells GROVE_PITCH metres apart on x and z, centred on the
+// origin, each with its proxy (the levels from `first_level` on) and its
+// trees.
+#define GROVE_FIELD 3U
+#define GROVE_PITCH 12.0
+
+typedef struct GroveField {
+    NphRenderCell cells[GROVE_FIELD * GROVE_FIELD];
+    NphRenderInstance trees[GROVE_FIELD * GROVE_FIELD][GROVE_TREES];
+} GroveField;
+
+static void grove_field_build(RenderFixture *f, const GroveScene *s, GroveField *out, f32 error,
+                              f32 distance)
+{
+    memset(out, 0, sizeof *out);
+    for (u32 k = 0; k < GROVE_FIELD * GROVE_FIELD; ++k) {
+        const u32 column = k % GROVE_FIELD;
+        const u32 row = k / GROVE_FIELD;
+        const NphDVec3 at =
+            nph_dvec3(((f64)column - 1.0) * GROVE_PITCH, 0.0, ((f64)row - 1.0) * GROVE_PITCH);
+        NphRenderCellDesc d = grove_cell_desc(s, error, distance);
+        d.center = at;
+        d.proxy_transform.translation = at;
+        NTEST_ASSERT_EQ_INT(nph_render_cell_create(f->renderer, &d, &out->cells[k]), NPH_RESULT_OK);
+        for (u32 i = 0; i < GROVE_TREES; ++i) {
+            NphRenderInstanceDesc id;
+            memset(&id, 0, sizeof id);
+            id.mesh = s->tree;
+            id.materials = &s->green;
+            id.material_count = 1U;
+            id.transform = nph_render_transform_identity();
+            id.transform.translation = nph_dvec3_add(at, grove_place(i));
+            id.cell = out->cells[k];
+            NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &out->trees[k][i]),
+                                NPH_RESULT_OK);
+        }
+    }
+}
+
+static void grove_field_free(RenderFixture *f, GroveField *field)
+{
+    for (u32 k = 0; k < GROVE_FIELD * GROVE_FIELD; ++k) {
+        for (u32 i = 0; i < GROVE_TREES; ++i) {
+            nph_render_instance_destroy(f->renderer, field->trees[k][i]);
+        }
+        nph_render_cell_destroy(f->renderer, field->cells[k]);
+    }
+}
+
+// View `v` drawn with the cells culled first and over every instance slot
+// (RenderVis.cells_first_off): the same image, byte for byte, and the same
+// cells and instances drawn as proxies, triangles and voxel clusters. The
+// cells-first frame's statistics.
+static NphRenderFrameStats expect_cells_first_same(RenderFixture *f, BigTarget *t,
+                                                   const NphRenderView *v, u8 *every,
+                                                   const char *what)
+{
+    f->renderer->vis.cells_first_off = 1;
+    const NphRenderFrameStats b = big_frames(f, t, v);
+    memcpy(every, t->pixels, BIG_PIXELS * 4U);
+    f->renderer->vis.cells_first_off = 0;
+    const NphRenderFrameStats a = big_frames(f, t, v);
+    u32 differing = 0U;
+    for (u64 i = 0; i < BIG_PIXELS * 4U; ++i) {
+        differing += t->pixels[i] != every[i] ? 1U : 0U;
+    }
+    NTEST_LOG("%s: %u pixels covered; %u cells and %u instances drawn as proxies, %u triangles, "
+              "%u voxel clusters (every slot: %u, %u, %u, %u); %u bytes differ",
+              what, covered_pixels(t->pixels, BIG_PIXELS), a.vis_cells_proxied,
+              a.vis_instances_proxied, a.vis_triangles, a.vis_voxel_clusters, b.vis_cells_proxied,
+              b.vis_instances_proxied, b.vis_triangles, b.vis_voxel_clusters, differing);
+    NTEST_EXPECT_EQ_UINT(differing, 0U);
+    NTEST_EXPECT_EQ_UINT(a.vis_cells_proxied, b.vis_cells_proxied);
+    NTEST_EXPECT_EQ_UINT(a.vis_instances_proxied, b.vis_instances_proxied);
+    NTEST_EXPECT_EQ_UINT(a.vis_triangles, b.vis_triangles);
+    NTEST_EXPECT_EQ_UINT(a.vis_voxel_clusters, b.vis_voxel_clusters);
+    return a;
+}
+
+// Phase 0 culls the cells first where the renderer holds any (ADR-0064): a
+// cell out of view lists nothing, one drawn as its proxy its proxy's
+// instances alone. Over a field of grove cells, near and far, in view and
+// behind the camera, with levels of detail and without, the image and the
+// statistics are those of phase 0 over every instance slot. A member made
+// outside its cell's box grows the box, so it is drawn from where the box
+// it was given is out of view.
+NTEST_F(Cells, culling_the_cells_first_draws_what_every_slot_does)
+{
+    REQUIRE_PRODUCTION(f);
+    Grove g;
+    grove_build(&g);
+    GroveLevels gl;
+    grove_levels_build(&g, &gl);
+    BigTarget t;
+    big_target_init(f, &t);
+    u8 *every = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, BIG_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(every);
+    // The grove's meshes (its own cell too, at the origin, among the field's).
+    GroveScene s;
+    grove_scene_build_with(f, &g, &s, false, GROVE_CELL / 64.0F, 30.0F, &gl, 1U);
+    GroveField field;
+    grove_field_build(f, &s, &field, GROVE_CELL / 64.0F, 30.0F);
+    NphRenderView v = grove_view(40.0, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_NORMAL;
+    // From 40 m: the near row drawn as instances, the rest as proxies.
+    NphRenderFrameStats st = expect_cells_first_same(f, &t, &v, every, "from 40 m");
+    NTEST_EXPECT_GT_UINT(st.vis_cells_proxied, 0U);
+    NTEST_EXPECT_LT_UINT(st.vis_cells_proxied, GROVE_FIELD * GROVE_FIELD);
+    NTEST_EXPECT_GT_UINT(st.vis_triangles, 0U);
+    // From afar: every cell as its proxy.
+    NphRenderView far = grove_view(120.0, 1.0F);
+    far.debug_view = NPH_RENDER_VIEW_NORMAL;
+    st = expect_cells_first_same(f, &t, &far, every, "from 120 m");
+    NTEST_EXPECT_EQ_UINT(st.vis_cells_proxied, GROVE_FIELD * GROVE_FIELD);
+    // Turned away: nothing in view.
+    NphRenderView away = v;
+    away.camera = nph_render_camera_look_at(nph_dvec3(0.0, 12.0, 40.0), nph_dvec3(0.0, 12.0, 80.0),
+                                            nph_vec3(0.0F, 1.0F, 0.0F), 0.6F, 0.05F);
+    (void)expect_cells_first_same(f, &t, &away, every, "turned away");
+    NTEST_EXPECT_EQ_UINT(covered_pixels(t.pixels, BIG_PIXELS), 0U);
+    // Without levels of detail: every tree.
+    NphRenderView flat = grove_view(40.0, 0.0F);
+    flat.debug_view = NPH_RENDER_VIEW_NORMAL;
+    st = expect_cells_first_same(f, &t, &flat, every, "without levels of detail");
+    NTEST_EXPECT_EQ_UINT(st.vis_cells_proxied, 0U);
+    // A member of the far corner's cell made 20 m off its box, seen from
+    // where that box is out of view: the box grew over it, and it is drawn.
+    const u32 corner = GROVE_FIELD * GROVE_FIELD - 1U;
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = s.tree;
+    id.materials = &s.green;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_identity();
+    id.transform.translation = nph_dvec3(GROVE_PITCH + 20.0, 0.0, GROVE_PITCH);
+    id.cell = field.cells[corner];
+    NphRenderInstance stray = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &stray), NPH_RESULT_OK);
+    const RenderCell *c =
+        &f->renderer->cells[render_slot_of(&f->renderer->cell_pool, field.cells[corner].value)];
+    NTEST_EXPECT_TRUE(c->extent.x >= 10.0F);
+    NphRenderView stray_view = flat;
+    // At the member from 8 m on x and z: the box it was given, 20 m on, lies
+    // 30 degrees off the view's axis, outside its 17 degrees.
+    stray_view.camera = nph_render_camera_look_at(
+        nph_dvec3(GROVE_PITCH + 28.0, 3.0, GROVE_PITCH + 8.0),
+        nph_dvec3(GROVE_PITCH + 20.0, 0.0, GROVE_PITCH), nph_vec3(0.0F, 1.0F, 0.0F), 0.6F, 0.05F);
+    (void)expect_cells_first_same(f, &t, &stray_view, every, "a member off its box");
+    NTEST_EXPECT_GT_UINT(covered_pixels(t.pixels, BIG_PIXELS), 0U);
+    nph_render_instance_destroy(f->renderer, stray);
+    grove_field_free(f, &field);
+    grove_scene_free(f, &s);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, every, BIG_PIXELS * 4U);
+    big_target_free(f, &t);
+    grove_levels_free(&gl);
     grove_free(&g);
 }
 

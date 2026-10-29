@@ -62,7 +62,18 @@ void main()
                     gl_LocalInvocationIndex;
 
     uint slot = 0xFFFFFFFFu;
-    if (phase == 0u) {
+    // Where cells come first (ADR-0064), phase 0 takes the instances the
+    // cell cull listed, then those of no cell (vis_cull_cells.comp); else
+    // every instance slot.
+    const bool cells_first = view.v.cell_slots != 0u;
+    if (phase == 0u && cells_first) {
+        const uint listed = min(counters.c.cell_work, view.v.max_cell_work);
+        if (id < listed) {
+            slot = VisUintRef(view.v.cell_work).v[id];
+        } else if (id - listed < view.v.loose_count) {
+            slot = VisUintRef(view.v.cell_members).v[view.v.loose_first + (id - listed)];
+        }
+    } else if (phase == 0u) {
         if (id < view.v.instance_count) {
             slot = id;
         }
@@ -87,7 +98,9 @@ void main()
             const bool proxy = (inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u;
             const bool proxied = vis_cell_proxied(view, cell);
             shown = proxied == proxy;
-            cell_proxied = phase == 0u && proxy && proxied &&
+            // The cell cull counts the cells drawn as their proxies where it
+            // runs, in view or not.
+            cell_proxied = phase == 0u && !cells_first && proxy && proxied &&
                            (inst.flags & NPH_VIS_INSTANCE_PROXY_COUNTED) != 0u;
             instance_proxied = phase == 0u && !proxy && proxied;
         }

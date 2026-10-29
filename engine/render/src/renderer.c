@@ -1488,6 +1488,44 @@ typedef struct CellRole {
     bool finest;
 } CellRole;
 
+// Cell `cell_slot`'s box grown over member `inst`'s bounds (its mesh's box
+// through its transform) where they pass it, and its record's box sent
+// again: the cell cull culls a cell's members by the box (ADR-0064), and the
+// box is theirs by NphRenderCellDesc's contract, kept so whatever a caller
+// gives. A box grown stays so: a member that leaves does not shrink it.
+static NphResult cell_grow(NphRenderer *r, u32 cell_slot, const RenderInstance *inst,
+                           const RenderMesh *m)
+{
+    RenderCell *c = &r->cells[cell_slot];
+    const NphMat3 l = inst->transform.linear;
+    const NphVec3 mc = nph_aabb_center(m->bounds);
+    const NphVec3 me = nph_aabb_extents(m->bounds);
+    // The member's box about the cell's centre: the mesh box's centre
+    // through the transform, and its extents through the linear part's
+    // absolute values.
+    const NphVec3 t = nph_dvec3_relative(inst->transform.translation, c->center);
+    const NphVec3 centre = nph_vec3_add(nph_mat3_mul_vec3(l, mc), t);
+    f32 half[3];
+    for (u32 row = 0; row < 3U; ++row) {
+        const NphVec3 rv = nph_mat3_row(l, row);
+        half[row] = nph_f32_abs(rv.x) * me.x + nph_f32_abs(rv.y) * me.y + nph_f32_abs(rv.z) * me.z;
+    }
+    const NphVec3 lo = nph_vec3_sub(centre, nph_vec3(half[0], half[1], half[2]));
+    const NphVec3 hi = nph_vec3_add(centre, nph_vec3(half[0], half[1], half[2]));
+    const NphVec3 blo = nph_vec3_neg(c->extent);
+    const NphVec3 bhi = c->extent;
+    if (lo.x >= blo.x && lo.y >= blo.y && lo.z >= blo.z && hi.x <= bhi.x && hi.y <= bhi.y &&
+        hi.z <= bhi.z) {
+        return NPH_RESULT_OK;
+    }
+    const NphVec3 nlo = nph_vec3_min(lo, blo);
+    const NphVec3 nhi = nph_vec3_max(hi, bhi);
+    const NphVec3 shift = nph_vec3_scale(nph_vec3_add(nlo, nhi), 0.5F);
+    c->center = nph_dvec3_add(c->center, nph_dvec3_from_vec3(shift));
+    c->extent = nph_vec3_scale(nph_vec3_sub(nhi, nlo), 0.5F);
+    return render_vis_cell_box_changed(r, cell_slot);
+}
+
 // An instance of `desc` (its cell ignored), in cell `cell` (its slot plus one;
 // 0: none), in role `role` there.
 static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *desc, u32 cell,
@@ -1527,7 +1565,14 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
     inst->proxy = role.proxy;
     inst->proxy_counted = role.counted;
     inst->proxy_finest = role.finest;
-    const NphResult res = render_vis_instance_created(r, slot);
+    // Its cell's run (or the run of no cell; ADR-0064), then its record.
+    NphResult res = render_vis_run_add(r, slot);
+    if (res == NPH_RESULT_OK) {
+        res = render_vis_instance_created(r, slot);
+        if (res != NPH_RESULT_OK) {
+            render_vis_run_remove(r, slot);
+        }
+    }
     if (res != NPH_RESULT_OK) {
         if (inst->materials != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderMaterial, inst->materials, inst->material_count);
@@ -1538,10 +1583,16 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
     }
     r->meshes[mesh_slot].instances += 1U;
     r->hidden_count += inst->hidden ? 1U : 0U;
+    out->value = value;
     if (cell != 0U && !role.proxy) {
         r->cells[cell - 1U].members += 1U;
+        res = cell_grow(r, cell - 1U, inst, &r->meshes[mesh_slot]);
+        if (res != NPH_RESULT_OK) {
+            nph_render_instance_destroy(r, *out);
+            *out = NPH_RENDER_INSTANCE_NULL;
+            return res;
+        }
     }
-    out->value = value;
     return NPH_RESULT_OK;
 }
 
@@ -1619,6 +1670,7 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
     if (inst->cell != 0U && !inst->proxy) {
         r->cells[inst->cell - 1U].members -= 1U;
     }
+    render_vis_run_remove(r, slot);
     render_vis_instance_destroyed(r, slot);
     if (inst->materials != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphRenderMaterial, inst->materials, inst->material_count);
@@ -1731,6 +1783,7 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
         for (u32 k = 0; k < c->proxy_count; ++k) {
             nph_render_instance_destroy(r, c->proxy[k]);
         }
+        render_vis_cell_runs_release(r, slot);
         memset(c, 0, sizeof *c);
         release_slot(&r->cell_pool, value);
         return res;
@@ -1739,6 +1792,10 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
     for (u32 k = 0; k < c->level_count; ++k) {
         c->level_errors[k] = desc->proxy_level_errors[k];
     }
+    c->center = desc->center;
+    c->extent = desc->extent;
+    c->distance = desc->distance;
+    c->proxy_error = desc->proxy_error;
     c->handle = value;
     out->value = value;
     return NPH_RESULT_OK;
@@ -1871,6 +1928,7 @@ void nph_render_cell_destroy(NphRenderer *r, NphRenderCell cell)
     for (u32 k = 0; k < c->proxy_count; ++k) {
         nph_render_instance_destroy(r, c->proxy[k]);
     }
+    render_vis_cell_runs_release(r, slot);
     memset(c, 0, sizeof *c);
     release_slot(&r->cell_pool, cell.value);
 }

@@ -62,6 +62,18 @@ void main()
         }
         break;
     }
+    case NPH_VIS_ARGS_CELLS: {
+        // Phase 0's instance cull: the cell cull's list, then the instances
+        // of no cell (ADR-0064).
+        const uint listed = min(counters.c.cells_listed, view.v.cell_slots);
+        const uvec4 e = groups(listed, VIS_MAX_GROUPS_X);
+        args.a.cell_expand_args = uint[4](e.x, e.y, e.z, e.w);
+        const uint instances =
+            min(counters.c.cell_work, view.v.max_cell_work) + view.v.loose_count;
+        const uvec4 a = groups((instances + 63u) / 64u, VIS_MAX_GROUPS_X);
+        args.a.instance0_args = uint[4](a.x, a.y, a.z, a.w);
+        break;
+    }
     case NPH_VIS_ARGS_PHASE2_MESH: {
         const uint meshlets = min(counters.c.deferred_meshlets, view.v.max_deferred);
         const uvec4 a = groups((meshlets + 63u) / 64u, VIS_MAX_GROUPS_X);

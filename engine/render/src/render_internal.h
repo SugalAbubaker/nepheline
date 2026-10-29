@@ -238,7 +238,18 @@ typedef struct RenderInstance {
     // The production path.
     NphRange material_range; // its entries in the material map
     u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
+    u32 run_entry;           // place in its cell's run, or the run of no cell (vis_runs.c)
 } RenderInstance;
+
+// A run of instance slots in the cells' member buffer (ADR-0064;
+// vis_runs.c), in a range of RenderVis.member_ranges (none while `capacity`
+// is 0): a cell's members, its proxy's instances, or the instances of no
+// cell.
+typedef struct RenderRun {
+    NphRange range;
+    u32 count;
+    u32 capacity; // the range's entries
+} RenderRun;
 
 // A cell of a world partition (nph_render_cell_create; ADR-0062).
 typedef struct RenderCell {
@@ -254,6 +265,16 @@ typedef struct RenderCell {
     // (nph_render_cell_set_proxy).
     f32 level_errors[NPH_RENDER_CELL_MAX_LEVELS];
     u32 level_count;
+    // Its members' and its proxy's instances' runs of slots (ADR-0064).
+    RenderRun members_run;
+    RenderRun proxies_run;
+    // Its box, world space, grown over a member made outside it (the cell
+    // cull culls the members by it), and its record's other values, to send
+    // the box again.
+    NphDVec3 center;
+    NphVec3 extent;
+    f32 distance;
+    f32 proxy_error;
 } RenderCell;
 
 // The virtual shadow map's work buffer (vsm.c).
@@ -481,6 +502,7 @@ typedef enum VisShader {
     VIS_SHADER_VOXEL_RASTER,
     VIS_SHADER_VOXEL_RESOLVE,
     VIS_SHADER_VOXEL_RESOLVE_RT, // where the device has ray queries
+    VIS_SHADER_CULL_CELLS,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -498,6 +520,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHT_TILES,
     VIS_COMPUTE_CULL_NODES,   // a step down the levels of detail's hierarchies
     VIS_COMPUTE_VOXEL_RASTER, // voxel clusters (ADR-0061)
+    VIS_COMPUTE_CULL_CELLS,   // a world partition's cells, first (ADR-0064)
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both
@@ -535,6 +558,7 @@ typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
 // pass callbacks.
 typedef struct VisFrame {
     u64 view_address; // NphVisViewData
+    b32 cells_first;  // phase 0 culls the cells first (ADR-0064): the renderer holds cells
     u32 update_count;
     u32 light_update_count;
     u32 width;
@@ -599,6 +623,26 @@ typedef struct RenderVis {
     u32 voxel_pool_units;
     NphRangeAllocator voxel_ranges;
     NphMutex voxel_lock; // over voxel_ranges: the uploads reserve on the jobs
+    // The cells' runs of instance slots (ADR-0064; vis_runs.c): the member
+    // buffer's entries mirrored, its ranges (VisPendingFree pool 3), the
+    // cells' run records, the run of instances of no cell, and the cells
+    // whose runs changed since the last frame (each once; the loose run's by
+    // its flag), uploaded by the next.
+    u32 *member_entries;
+    u32 member_capacity;
+    NphRangeAllocator member_ranges;
+    NphGpuBuffer cell_members; // u32[member_capacity]: instance slots
+    NphGpuBuffer cell_runs;    // NphVisCellRun[max_cells]
+    NphGpuBuffer cell_work;    // u32[max_instances]: the cell cull's list for phase 0
+    NphGpuBuffer cell_listed;  // uvec4[max_cells]: the cells it lists, for its expansion
+    // Tests compare the two ways of phase 0 (white-box): every slot even
+    // where there are cells.
+    b32 cells_first_off;
+    RenderRun loose;
+    u8 *run_dirty;     // per cell slot
+    u32 *runs_changed; // cell slots
+    u32 runs_changed_count;
+    b32 loose_dirty;
 
     // The culling lists: persistent so that their addresses are known when
     // the view is written, imported into the graph every frame.
@@ -1331,6 +1375,24 @@ void render_vis_instance_destroyed(NphRenderer *r, u32 slot);
 // this one: the box (centre and half extents) and the proxy's distance and
 // finest error (nph_render_cell_create's checked description).
 NphResult render_vis_cell_created(NphRenderer *r, u32 slot, const NphRenderCellDesc *desc);
+// Cell `slot`'s record's box sent again, from RenderCell's (grown).
+NphResult render_vis_cell_box_changed(NphRenderer *r, u32 slot);
+
+// The cells' runs of instance slots (ADR-0064; vis_runs.c). Create and
+// destroy go with the vis scene's. An instance made joins its run (its
+// cell's members' or proxy's, or the run of no cell): NPH_RESULT_FULL where
+// the member buffer has no room; one destroyed leaves it. A cell destroyed
+// gives its runs back (they are empty by then). A frame uploads the runs
+// that changed and their cells' records with its other uploads, before its
+// passes (frame.c), so the cell cull reads this frame's runs.
+NphResult render_vis_runs_create(NphRenderer *r);
+void render_vis_runs_destroy(NphRenderer *r);
+NphResult render_vis_run_add(NphRenderer *r, u32 slot);
+void render_vis_run_remove(NphRenderer *r, u32 slot);
+void render_vis_cell_runs_release(NphRenderer *r, u32 cell_slot);
+NphResult render_vis_runs_upload(NphRenderer *r);
+// A member range given back after the frames in flight (vis_scene.c).
+void render_vis_member_range_free_later(NphRenderer *r, NphRange range);
 // A material's alpha mode may have changed: the blend list is rebuilt.
 void render_vis_materials_changed(NphRenderer *r);
 // A light was created, changed, or destroyed: its record is sent with the

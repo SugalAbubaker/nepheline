@@ -69,6 +69,7 @@ supersedes it and both link to each other.
 | [0061](0061-voxel-far-field.md) | Aggregate geometry's far field: voxel levels in the cluster hierarchy | Accepted (built in stages; the first: the voxels and their levels) |
 | [0062](0062-world-partition-hlod.md) | World partition: cells of static content and their far-field proxies (HLOD) | Accepted (built in stages; the first: the proxies, built by the cooker) |
 | [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
+| [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
 
 ## Template
 

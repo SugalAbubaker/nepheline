@@ -1085,6 +1085,29 @@ description, and the cell's index, plus one, rides in the upper 24 bits of
 its record's flags (`NPH_VIS_INSTANCE_CELL_SHIFT`), the proxy's with
 `NPH_VIS_INSTANCE_PROXY`.
 
+**Cells first** (ADR-0064). The renderer keeps each cell's members, and its
+proxy's instances, as runs of instance slots in one GPU buffer, each run a
+range under the TLSF range allocator (`vis_runs.c`), and the instances of no
+cell (the terrain, what moves) in a run of their own: an instance made joins
+its run's end (a full run moves to a range twice the size), one destroyed
+takes the run's last in its place, and a frame uploads the runs that changed
+with its other uploads. Where the renderer holds cells, phase 0 culls them
+first: `vis cull cells` tests each cell slot's box against the frustum and
+the cell's switch (`vis_cell_proxied`, the instance cull's own test); a cell
+out of view lists nothing, one in view its proxy's instances and, where it
+is drawn as its instances, its members, and `vis expand cells` copies the
+listed runs into the work list, a workgroup a cell. `vis cull instances 0`
+then takes the work list and the run of no cell, not every slot. A cell's
+box holds its members by NphRenderCellDesc's contract, and the renderer
+grows it over a member made outside it, so a cell out of view holds nothing
+in view; the statistics count what is not listed as the instance cull did.
+The image is the same byte for byte, from near, far, turned away and
+without levels of detail (`test_vis_cells.c`). In the landscape tiled into a
+world of the game's size (591,189 instance slots, 4,608 cells), phase 0's
+culling takes 43 µs where 137 (the cells' test 7.8, their expansion 7.4, the
+instances 25.5); in the landscape alone 67 µs where 147, with the frame as
+it was in interleaved runs.
+
 **Levels apart** (ADR-0063 "Stage 2, a level is a mesh"). A proxy is one mesh
 holding all its levels, or its levels apart, up to
 `NPH_RENDER_CELL_MAX_LEVELS` meshes of one level each, which a streamed
@@ -1232,7 +1255,8 @@ they were read): hence their streaming (ADR-0063).
 | `vis clear` | clears the counters (and on the vertex path the visibility buffer, which the mesh path's raster clears as its attachment) |
 | `vis scatter` | applies the frame's instance updates |
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
-| `vis cull instances 0` | per instance: frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
+| `vis cull cells`, `vis args cells`, `vis expand cells` | while the renderer holds cells ("Cell proxies", Cells first): per cell slot, its box against the frustum and its proxy's switch; the cells in view list their proxy's instances, and their members where drawn as their instances, a workgroup a listed cell copying its runs of slots into the work list phase 0 takes |
+| `vis cull instances 0` | per instance (the cells' listed ones and those of no cell, or every slot without cells): frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
 | `vis cull nodes 0` | the walk down the hierarchies of levels of detail ("Levels of detail"), a step per two of their node levels: the groups too coarse to draw hand on their clusters as work items |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, software, or voxel |
 | `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0`, `vis voxel raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, then of the voxel clusters ("Voxels"; only while the renderer holds voxel meshes), into the visibility buffer |
