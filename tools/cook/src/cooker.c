@@ -410,6 +410,30 @@ static bool is_current(const Cooker *c, const char *key, const char *sub, u64 co
     return nph_fs_exists(full);
 }
 
+// Whether a cell's proxy is current: its head (is_current) and each level
+// the head depends on (ADR-0063), their entries current and their files
+// there.
+static bool proxy_current(const Cooker *c, const char *key, const char *sub, u64 content_hash,
+                          u64 shash)
+{
+    if (!is_current(c, key, sub, content_hash, shash)) {
+        return false;
+    }
+    const CookDbEntry *head = cook_db_find(&c->db, nph_str_from_cstr(key), nph_str_from_cstr(sub));
+    for (u32 i = 0; i < head->dep_count; ++i) {
+        const CookDbEntry *e = cook_db_find_guid(&c->db, head->deps[i]);
+        if (!cook_db_entry_is_current(e, content_hash, shash)) {
+            return false;
+        }
+        char full[COOKER_PATH_MAX * 2U];
+        snprintf(full, sizeof full, "%s/%s", c->out_dir, e->output);
+        if (!nph_fs_exists(full)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Writes a finished asset to its output path (creating directories) and
 // records it in the database.
 static NphResult emit(Cooker *c, NphAssetWriter *w, const char *key, const char *sub,
@@ -1690,14 +1714,14 @@ static NphResult hlod_prepare(Cooker *c, const char *key, const CookGltfScene *s
     }
     // The proxies are current with the scene (its settings theirs, and it is
     // written after them) and each one the database holds (a cell whose
-    // proxy came out empty has none).
+    // proxy came out empty has none), its head and its levels.
     const u64 shash = proxy_settings_hash(c);
     hs->build = !is_current(c, key, "scene", content_hash, settings_hash(c, NPH_ASSET_TYPE_SCENE));
     for (u32 k = 0; k < hs->cells.len && r == NPH_RESULT_OK && !hs->build; ++k) {
         char sub[64];
         hlod_cell_sub(&hs->cells.data[k], sub, sizeof sub);
         if (cook_db_find(&c->db, nph_str_from_cstr(key), nph_str_from_cstr(sub)) != NULL &&
-            !is_current(c, key, sub, content_hash, shash)) {
+            !proxy_current(c, key, sub, content_hash, shash)) {
             hs->build = true;
         }
     }
