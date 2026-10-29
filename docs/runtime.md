@@ -333,8 +333,11 @@ cannot hold. The samples' cooked-scene bridge does so with
   its most worth loading, so one ranking orders both loads and drops, and
   what is held converges on the levels worth most within the budget.
 - **Loads.** The levels worth most load first, at most `max_loads` at
-  once (the loader's I/O thread, decompression on the jobs), each within
-  the budget with the loads under way. Room is made by dropping levels
+  once (64 by default: the levels range from a few kilobytes to a few
+  megabytes, and a load takes two or three frames whatever its size, so
+  the far field's thousands of small levels need many under way; the
+  loader's I/O thread, decompression on the jobs), each within the budget
+  with the loads under way. Room is made by dropping levels
   worth enough less (spare ones, or needed ones worth a quarter less, so
   that cells of nearly the same worth do not trade a level back and
   forth), and only when the levels so dropped free enough; a level that
@@ -359,14 +362,23 @@ cannot hold. The samples' cooked-scene bridge does so with
   cell as it is, logged and counted (`NphProxyStreamStats.failed`); the
   cell is not tried again.
 
-Costs: creation allocates the cells' table and the builds' slots
-(`max_loads`); an update allocates nothing of its own and is linear in the
-cells (a pass reading their requests, and one for each load and drop);
-the loads and the meshes allocate what the loader and the renderer do. On
-the open landscape (384 cells, 2,639 levels) an idle update takes 0.006
-to 0.03 ms, and with the jobs a frame that installs 0.05 to 0.08 ms on
-average and 0.54 ms at most, whatever the levels' bytes (on the main
-thread, 0.12 ms and 0.54 ms for each megabyte: ADR-0063 "Stage 3c"). `nph_proxy_stream_stats`
+Costs: creation allocates the cells' table, the builds' slots
+(`max_loads`) and the picks'; an update allocates nothing of its own and
+passes over the cells once (ADR-0063 "Stage 4"): each cell's request read
+and its level wanted, its next finer level kept if it is among the
+`max_loads` and eight more worth loading most, and its finest held if
+among the 64 worth keeping least (bounded heaps, ties to the cell added
+first, as a scan's); the loads and drops then take the picks in order,
+passing over a pick whose cell the update has already changed. The loads
+and the meshes allocate what the loader and the renderer do. On the open
+landscape (384 cells, 2,639 levels) an idle update takes 0.006 to 0.03
+ms, and with the jobs a frame that installs 0.05 to 0.08 ms on average
+and 0.54 ms at most, whatever the levels' bytes (on the main thread, 0.12
+ms and 0.54 ms for each megabyte: ADR-0063 "Stage 3c"). Tiled into a
+world of the game's size (4,608 cells), an idle update takes 0.17 ms
+(about 37 ns a cell) and an installing one 0.4 ms on average (about 2.4
+µs a level installed); a pass and a scan for each load and drop, as
+before, took 0.63 ms idle. `nph_proxy_stream_stats`
 and `nph_proxy_stream_cell_state` report what the stream holds and does,
 for tools and tests. NPH_MAIN_THREAD_ONLY.
 

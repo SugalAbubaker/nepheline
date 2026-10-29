@@ -32,17 +32,19 @@
 // The most levels one load may push out past the budget.
 #define STREAM_VICTIMS 16U
 
+// The levels an update may drop: the least worth of the held levels its pass
+// over the cells finds, in order (ADR-0063 stage 4).
+#define STREAM_DROPS 64U
+
+// A cell as the stream holds it: first what every update reads of every
+// cell, together in its first cache lines (the update's pass over the cells
+// is bound by them; ADR-0063 stage 4), then what only a level's coming or
+// going touches.
 typedef struct StreamCell {
+    NphDVec3 center;
+    NphVec3 extent;
+    f32 distance;
     NphRenderCell cell;
-    // Each level's mesh where held (the coarsest's the caller's), its GPU
-    // bytes once it has loaded (kept when it goes: its next load's
-    // estimate; the coarsest's not counted), its asset, its largest consumer
-    // error, and its clusters.
-    NphRenderMesh meshes[NPH_RENDER_CELL_MAX_LEVELS];
-    u64 bytes[NPH_RENDER_CELL_MAX_LEVELS];
-    NphGuid guids[NPH_RENDER_CELL_MAX_LEVELS];
-    f32 errors[NPH_RENDER_CELL_MAX_LEVELS];
-    u32 clusters[NPH_RENDER_CELL_MAX_LEVELS];
     u32 count; // its levels
     u32 first; // held from this level on
     u32 wanted;
@@ -50,13 +52,18 @@ typedef struct StreamCell {
     u32 asked_age;       // updates since
     f32 scale;           // its errors over the view's threshold from the camera, this update
     NphAssetHandle load; // the level loading (first - 1), or none
-    u64 load_bytes;      // its bytes as estimated when it began
     u32 build;           // its mesh's build in the making (an index of builds, plus one; 0: none)
-    u32 skipped;         // the update that last passed its next level over
     b32 failed;          // a level failed: the cell is left as it is
-    NphDVec3 center;
-    NphVec3 extent;
-    f32 distance;
+    // Each level's largest consumer error; its mesh where held (the
+    // coarsest's the caller's), its GPU bytes once it has loaded (kept when
+    // it goes: its next load's estimate; the coarsest's not counted), its
+    // asset, and its clusters.
+    f32 errors[NPH_RENDER_CELL_MAX_LEVELS];
+    u64 load_bytes; // the load's bytes as estimated when it began
+    NphRenderMesh meshes[NPH_RENDER_CELL_MAX_LEVELS];
+    u64 bytes[NPH_RENDER_CELL_MAX_LEVELS];
+    NphGuid guids[NPH_RENDER_CELL_MAX_LEVELS];
+    u32 clusters[NPH_RENDER_CELL_MAX_LEVELS];
 } StreamCell;
 
 // A level's mesh in the making on a loading job, in the renderer's voxel
@@ -84,6 +91,10 @@ struct NphProxyStream {
     u32 cell_count;
     StreamCell **arrived; // max_loads: the loads an update finds done
     StreamBuild *builds;  // max_loads
+    // An update's picks, kept in its pass over the cells: the levels it may
+    // load (max_loads, and the skips past them) and drop (STREAM_DROPS).
+    ProxyStreamPick *loads;
+    ProxyStreamPick *drops;
     u32 building;
     b32 pool_full_logged;
     u64 held_bytes;
@@ -94,7 +105,6 @@ struct NphProxyStream {
     // estimate of a level not loaded yet.
     u64 seen_bytes[NPH_RENDER_CELL_MAX_LEVELS];
     u64 seen_clusters[NPH_RENDER_CELL_MAX_LEVELS];
-    u32 update; // updates so far, from 1
     NphProxyStreamStats last;
     u32 failed;
 };
@@ -198,13 +208,16 @@ NphResult nph_proxy_stream_create(const NphProxyStreamDesc *desc, NphProxyStream
     }
     memset(s, 0, sizeof *s);
     s->desc = *desc;
-    s->desc.max_loads = desc->max_loads != 0U ? desc->max_loads : 8U;
+    s->desc.max_loads = desc->max_loads != 0U ? desc->max_loads : 64U;
     s->desc.max_install_bytes =
         desc->max_install_bytes != 0U ? desc->max_install_bytes : NPH_MIB(8);
     s->cells = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamCell, desc->max_cells);
     s->arrived = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamCell *, s->desc.max_loads);
     s->builds = NPH_ALLOC_ARRAY_ZEROED(desc->alloc, StreamBuild, s->desc.max_loads);
-    if (s->cells == NULL || s->arrived == NULL || s->builds == NULL) {
+    s->loads = NPH_ALLOC_ARRAY(desc->alloc, ProxyStreamPick, s->desc.max_loads + STREAM_SKIPS);
+    s->drops = NPH_ALLOC_ARRAY(desc->alloc, ProxyStreamPick, STREAM_DROPS);
+    if (s->cells == NULL || s->arrived == NULL || s->builds == NULL || s->loads == NULL ||
+        s->drops == NULL) {
         nph_proxy_stream_destroy(s);
         return NPH_RESULT_OUT_OF_MEMORY;
     }
@@ -281,6 +294,12 @@ void nph_proxy_stream_destroy(NphProxyStream *s)
     }
     if (s->builds != NULL) {
         NPH_FREE_ARRAY(s->desc.alloc, StreamBuild, s->builds, s->desc.max_loads);
+    }
+    if (s->loads != NULL) {
+        NPH_FREE_ARRAY(s->desc.alloc, ProxyStreamPick, s->loads, s->desc.max_loads + STREAM_SKIPS);
+    }
+    if (s->drops != NULL) {
+        NPH_FREE_ARRAY(s->desc.alloc, ProxyStreamPick, s->drops, STREAM_DROPS);
     }
     if (s->cells != NULL) {
         NPH_FREE_ARRAY(s->desc.alloc, StreamCell, s->cells, s->desc.max_cells);
@@ -368,10 +387,11 @@ static void log_failure(const StreamCell *c, u32 level, const char *what, NphRes
                   nph_result_string(r));
 }
 
-// Cell `c` given its level `level`'s mesh, made: held and counted, its bytes
-// and clusters teaching the estimates. The mesh destroyed where the cell's
-// proxy refuses it.
-static NphResult adopt(NphProxyStream *s, StreamCell *c, u32 level, u64 bytes, u32 clusters)
+// Cell `c` given its level `level`'s mesh, made: held and counted (no longer
+// short, given the level it is wanted at), its bytes and clusters teaching
+// the estimates. The mesh destroyed where the cell's proxy refuses it.
+static NphResult adopt(NphProxyStream *s, StreamCell *c, u32 level, u64 bytes, u32 clusters,
+                       NphProxyStreamStats *st)
 {
     const NphResult r = set_first(s, c, level);
     if (r != NPH_RESULT_OK) {
@@ -386,16 +406,18 @@ static NphResult adopt(NphProxyStream *s, StreamCell *c, u32 level, u64 bytes, u
     c->bytes[level] = bytes;
     s->held_bytes += bytes;
     s->held_levels += 1U;
+    st->short_cells -= level == c->wanted ? 1U : 0U;
     return NPH_RESULT_OK;
 }
 
 // Cell `c`'s loaded level made a mesh on the main thread from its view, and
 // given to the cell.
-static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv, u64 bytes)
+static NphResult install(NphProxyStream *s, StreamCell *c, const NphMeshView *mv, u64 bytes,
+                         NphProxyStreamStats *st)
 {
     const u32 level = c->first - 1U;
     NPH_TRY(level_mesh_create(s->desc.renderer, mv, &c->meshes[level]));
-    return adopt(s, c, level, bytes, mv->header->meshlet_count);
+    return adopt(s, c, level, bytes, mv->header->meshlet_count, st);
 }
 
 // A cell's load let go: its bookkeeping (its asset released elsewhere).
@@ -490,7 +512,7 @@ static NphResult make_now(NphProxyStream *s, StreamCell *c, NphProxyStreamStats 
     NphMeshView mv;
     NPH_TRY(nph_mesh_view(nph_asset_get(s->desc.loader, c->load), &mv));
     const u64 bytes = proxy_stream_level_bytes(&mv);
-    NPH_TRY(install(s, c, &mv, bytes));
+    NPH_TRY(install(s, c, &mv, bytes, st));
     st->installed += 1U;
     st->installed_bytes += bytes;
     return NPH_RESULT_OK;
@@ -556,7 +578,7 @@ static void finish_builds(NphProxyStream *s, NphProxyStreamStats *st)
         } else if (level >= c->wanted) {
             r = nph_render_voxel_mesh_finish(s->desc.renderer, b->mesh, &c->meshes[level]);
             if (r == NPH_RESULT_OK) {
-                r = adopt(s, c, level, b->bytes, b->clusters);
+                r = adopt(s, c, level, b->bytes, b->clusters, st);
             }
             if (r == NPH_RESULT_OK) {
                 st->installed += 1U;
@@ -581,81 +603,108 @@ static void finish_builds(NphProxyStream *s, NphProxyStreamStats *st)
     }
 }
 
-// The held level worth keeping least: the finest held level of a cell not
-// loading, never a coarsest. NULL: none.
-static StreamCell *least_held(NphProxyStream *s)
+// ---------------------------------------------------------------------------
+// The picks
+// ---------------------------------------------------------------------------
+
+// Pick `a` goes before `b`: worth more (to load) or less (to drop), else
+// from a cell added first.
+static bool pick_before(const ProxyStreamPick *a, const ProxyStreamPick *b, bool drop)
 {
-    StreamCell *best = NULL;
-    ProxyStreamWorth best_worth = {0, 0.0F};
-    for (u32 i = 0; i < s->cell_count; ++i) {
-        StreamCell *c = &s->cells[i];
-        if (c->first + 1U >= c->count || c->load.value != 0U) {
-            continue;
-        }
-        const ProxyStreamWorth w = worth(c, c->first);
-        if (best == NULL || proxy_stream_worth_above(best_worth, w)) {
-            best = c;
-            best_worth = w;
-        }
+    const ProxyStreamWorth x = drop ? b->worth : a->worth;
+    const ProxyStreamWorth y = drop ? a->worth : b->worth;
+    if (proxy_stream_worth_above(x, y)) {
+        return true;
     }
-    return best;
+    if (proxy_stream_worth_above(y, x)) {
+        return false;
+    }
+    return a->cell < b->cell;
 }
 
-// The level worth loading most: the next finer level of a cell held coarser
-// than wanted, neither loading nor failed nor passed over this update. NULL:
-// none.
-static StreamCell *most_short(NphProxyStream *s)
+// `p` placed in the heap `picks[0, n)` from slot `i` down: each slot goes
+// after its children (the root is the heap's last).
+static void pick_sift_down(ProxyStreamPick *picks, u32 n, u32 i, ProxyStreamPick p, bool drop)
 {
-    StreamCell *best = NULL;
-    ProxyStreamWorth best_worth = {0, 0.0F};
-    for (u32 i = 0; i < s->cell_count; ++i) {
-        StreamCell *c = &s->cells[i];
-        if (c->first <= c->wanted || c->load.value != 0U || c->failed || c->skipped == s->update) {
-            continue;
+    for (;;) {
+        const u32 l = 2U * i + 1U;
+        if (l >= n) {
+            break;
         }
-        const ProxyStreamWorth w = worth(c, c->first - 1U);
-        if (best == NULL || proxy_stream_worth_above(w, best_worth)) {
-            best = c;
-            best_worth = w;
+        const u32 later = l + 1U < n && pick_before(&picks[l], &picks[l + 1U], drop) ? l + 1U : l;
+        if (!pick_before(&p, &picks[later], drop)) {
+            break;
         }
+        picks[i] = picks[later];
+        i = later;
     }
-    return best;
+    picks[i] = p;
 }
 
-// The held levels a level worth `w` would push out to free `need` bytes,
-// into `victims` (*count of them): the finest held levels of cells not
-// loading, those worth least first, each worth enough less than it
-// (proxy_stream_displaces), at most STREAM_VICTIMS. False, when they do not
-// free enough: then none goes, rather than some given up for nothing (and
-// fetched again).
-static bool plan_room(NphProxyStream *s, ProxyStreamWorth w, u64 need, StreamCell **victims,
-                      u32 *count)
+void proxy_stream_pick_keep(ProxyStreamPick *picks, u32 *count, u32 cap, ProxyStreamPick p,
+                            bool drop)
 {
-    ProxyStreamWorth worths[STREAM_VICTIMS];
-    u32 n = 0U;
-    for (u32 i = 0; i < s->cell_count; ++i) {
-        StreamCell *c = &s->cells[i];
-        if (c->first + 1U >= c->count || c->load.value != 0U) {
-            continue;
+    if (*count < cap) {
+        u32 i = (*count)++;
+        for (; i > 0U && pick_before(&picks[(i - 1U) / 2U], &p, drop); i = (i - 1U) / 2U) {
+            picks[i] = picks[(i - 1U) / 2U];
         }
-        const ProxyStreamWorth vw = worth(c, c->first);
-        if (!proxy_stream_displaces(w, vw) ||
-            (n == STREAM_VICTIMS && !proxy_stream_worth_above(worths[n - 1U], vw))) {
-            continue;
-        }
-        u32 j = n < STREAM_VICTIMS ? n++ : n - 1U;
-        for (; j > 0U && proxy_stream_worth_above(worths[j - 1U], vw); --j) {
-            worths[j] = worths[j - 1U];
-            victims[j] = victims[j - 1U];
-        }
-        worths[j] = vw;
-        victims[j] = c;
+        picks[i] = p;
+    } else if (cap != 0U && pick_before(&p, &picks[0], drop)) {
+        pick_sift_down(picks, cap, 0U, p, drop); // in the root's place
     }
+}
+
+void proxy_stream_pick_sort(ProxyStreamPick *picks, u32 count, bool drop)
+{
+    // A heap sort: the last of what is left to the end each time.
+    for (u32 n = count; n > 1U; --n) {
+        const ProxyStreamPick last = picks[0];
+        pick_sift_down(picks, n - 1U, 0U, picks[n - 1U], drop);
+        picks[n - 1U] = last;
+    }
+}
+
+// Drop pick `p` still stands: its cell's finest held level, not loading.
+static bool drop_stands(const NphProxyStream *s, const ProxyStreamPick *p)
+{
+    const StreamCell *c = &s->cells[p->cell];
+    return c->load.value == 0U && c->first == p->level;
+}
+
+// The update's drops from `from` on, past those that no longer stand.
+static u32 drops_from(const NphProxyStream *s, u32 drops, u32 from)
+{
+    while (from < drops && !drop_stands(s, &s->drops[from])) {
+        ++from;
+    }
+    return from;
+}
+
+// The held levels that loading `load` would push out to free `need` bytes,
+// into `victims` (*count of them): the update's drops in order from `from`,
+// each standing, of another cell, and worth enough less than it
+// (proxy_stream_displaces; the drops after one that is not are worth no
+// less), at most STREAM_VICTIMS. False, when they do not free enough: then
+// none goes, rather than some given up for nothing (and fetched again).
+static bool plan_room(NphProxyStream *s, u32 drops, u32 from, const ProxyStreamPick *load, u64 need,
+                      StreamCell **victims, u32 *count)
+{
     u64 freed = 0U;
-    for (u32 i = 0; i < n; ++i) {
-        freed += victims[i]->bytes[victims[i]->first];
+    u32 n = 0U;
+    for (u32 i = from; i < drops && n < STREAM_VICTIMS; ++i) {
+        const ProxyStreamPick *d = &s->drops[i];
+        if (!drop_stands(s, d) || d->cell == load->cell) {
+            continue;
+        }
+        if (!proxy_stream_displaces(load->worth, d->worth)) {
+            break;
+        }
+        StreamCell *c = &s->cells[d->cell];
+        victims[n++] = c;
+        freed += c->bytes[c->first];
         if (freed >= need) {
-            *count = i + 1U;
+            *count = n;
             return true;
         }
     }
@@ -663,7 +712,8 @@ static bool plan_room(NphProxyStream *s, ProxyStreamWorth w, u64 need, StreamCel
     return false;
 }
 
-// Cell `c`'s finest held level given up.
+// Cell `c`'s finest held level given up (short, where it was the level the
+// cell is wanted at).
 static NphResult drop(NphProxyStream *s, StreamCell *c, NphProxyStreamStats *st)
 {
     const u32 level = c->first;
@@ -673,6 +723,7 @@ static NphResult drop(NphProxyStream *s, StreamCell *c, NphProxyStreamStats *st)
     s->held_bytes -= c->bytes[level];
     s->held_levels -= 1U;
     st->dropped += 1U;
+    st->short_cells += level == c->wanted ? 1U : 0U;
     return NPH_RESULT_OK;
 }
 
@@ -682,9 +733,12 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
     NphProxyStreamStats st;
     memset(&st, 0, sizeof st);
     const u64 budget = s->desc.budget_bytes != 0U ? s->desc.budget_bytes : NPH_U64_MAX;
-    s->update += 1U;
-    // The levels wanted, and the loads done.
+    // One pass over the cells (ADR-0063 stage 4): the levels wanted, the
+    // loads done, and the picks: each cell not loading offers its next finer
+    // level to load and its finest held to drop, the best of each kept.
     u32 arrived = 0U;
+    u32 loads = 0U;
+    u32 drops = 0U;
     for (u32 i = 0; i < s->cell_count; ++i) {
         StreamCell *c = &s->cells[i];
         const u32 request = nph_render_cell_request(s->desc.renderer, c->cell);
@@ -700,10 +754,22 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
         const f32 near = box_distance(c, view->camera);
         c->scale = proxy_stream_scale(near, view->pixels_per_unit, view->lod_error, view->znear);
         c->wanted = proxy_stream_wanted(c->asked, c->errors, c->count, near, c->distance, c->scale);
-        if (c->load.value != 0U && c->build == 0U &&
-            nph_asset_state(s->desc.loader, c->load) != NPH_ASSET_STATE_LOADING) {
-            NPH_ASSERT(arrived < s->desc.max_loads);
-            s->arrived[arrived++] = c;
+        st.short_cells += c->first > c->wanted ? 1U : 0U;
+        if (c->load.value != 0U) {
+            if (c->build == 0U &&
+                nph_asset_state(s->desc.loader, c->load) != NPH_ASSET_STATE_LOADING) {
+                NPH_ASSERT(arrived < s->desc.max_loads);
+                s->arrived[arrived++] = c;
+            }
+            continue;
+        }
+        if (c->first > c->wanted && !c->failed) {
+            const ProxyStreamPick p = {i, c->first - 1U, worth(c, c->first - 1U)};
+            proxy_stream_pick_keep(s->loads, &loads, s->desc.max_loads + STREAM_SKIPS, p, false);
+        }
+        if (c->first + 1U < c->count) {
+            const ProxyStreamPick p = {i, c->first, worth(c, c->first)};
+            proxy_stream_pick_keep(s->drops, &drops, STREAM_DROPS, p, true);
         }
     }
     // The builds done, then the loads done, those worth most first (they
@@ -725,45 +791,49 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
             break; // the frame's install bytes are spent
         }
     }
+    proxy_stream_pick_sort(s->loads, loads, false);
+    proxy_stream_pick_sort(s->drops, drops, true);
     // Past the budget (a level larger than its estimate), the levels worth
     // keeping least.
+    u32 drop_from = 0U;
     while (s->held_bytes > budget) {
-        StreamCell *c = least_held(s);
-        if (c == NULL) {
+        drop_from = drops_from(s, drops, drop_from);
+        if (drop_from == drops) {
             break;
         }
-        NPH_TRY(drop(s, c, &st));
+        NPH_TRY(drop(s, &s->cells[s->drops[drop_from].cell], &st));
     }
     // The levels worth loading most, while loads are free: each within the
     // budget, making room by dropping levels worth enough less than it, or
-    // passed over (a few an update) for smaller ones that fit.
+    // passed over (a few an update) for smaller ones that fit. A pick whose
+    // cell this update has changed (a level dropped) waits for the next.
     u32 skips = 0U;
-    while (s->loading < s->desc.max_loads) {
-        StreamCell *c = most_short(s);
-        if (c == NULL) {
-            break;
+    for (u32 i = 0; i < loads && s->loading < s->desc.max_loads; ++i) {
+        const ProxyStreamPick *p = &s->loads[i];
+        StreamCell *c = &s->cells[p->cell];
+        if (c->first != p->level + 1U) {
+            continue;
         }
-        const u32 level = c->first - 1U;
-        const u64 bytes = estimate(s, c, level);
+        const u64 bytes = estimate(s, c, p->level);
         const u64 total = s->held_bytes + s->loading_bytes + bytes;
         if (total > budget) {
             StreamCell *victims[STREAM_VICTIMS];
             u32 n = 0U;
-            if (!plan_room(s, worth(c, level), total - budget, victims, &n)) {
-                c->skipped = s->update;
+            drop_from = drops_from(s, drops, drop_from);
+            if (!plan_room(s, drops, drop_from, p, total - budget, victims, &n)) {
                 if (++skips == STREAM_SKIPS) {
                     break;
                 }
                 continue;
             }
-            for (u32 i = 0; i < n; ++i) {
-                NPH_TRY(drop(s, victims[i], &st));
+            for (u32 k = 0; k < n; ++k) {
+                NPH_TRY(drop(s, victims[k], &st));
             }
         }
         const NphResult r =
-            nph_asset_load_guid_async(s->desc.loader, c->guids[level], NULL, &c->load);
+            nph_asset_load_guid_async(s->desc.loader, c->guids[p->level], NULL, &c->load);
         if (r != NPH_RESULT_OK) {
-            log_failure(c, level, "not loaded", r);
+            log_failure(c, p->level, "not loaded", r);
             c->load = NPH_ASSET_HANDLE_NULL;
             c->failed = 1;
             s->failed += 1U;
@@ -772,9 +842,6 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
         c->load_bytes = bytes;
         s->loading += 1U;
         s->loading_bytes += bytes;
-    }
-    for (u32 i = 0; i < s->cell_count; ++i) {
-        st.short_cells += s->cells[i].first > s->cells[i].wanted ? 1U : 0U;
     }
     s->last = st;
     return NPH_RESULT_OK;
