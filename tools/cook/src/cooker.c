@@ -1492,7 +1492,8 @@ typedef struct HlodScene {
     u32 instance_cap;
     NphArrayU32 order;
     CookCellArray cells;
-    NphGuid *proxies;
+    NphGuid *proxies; // each cell's proxy's head
+    GuidArray levels; // every proxy's levels' assets, the heads' dependencies
     NphVec3 *origins;
     f32 *min_error;            // per mesh
     CookProxySource *sources;  // per mesh
@@ -1541,6 +1542,7 @@ static void hlod_free(HlodScene *hs, NphAllocator *a)
     }
     NPH_ARRAY_FREE(&hs->order);
     NPH_ARRAY_FREE(&hs->cells);
+    NPH_ARRAY_FREE(&hs->levels);
     memset(hs, 0, sizeof *hs);
 }
 
@@ -1594,6 +1596,7 @@ static NphResult hlod_prepare(Cooker *c, const char *key, const CookGltfScene *s
     memset(hs, 0, sizeof *hs);
     NPH_ARRAY_INIT(&hs->order, a);
     NPH_ARRAY_INIT(&hs->cells, a);
+    NPH_ARRAY_INIT(&hs->levels, a);
     hs->active = true;
     hs->settings = cook_hlod_resolved(&c->hlod);
     hs->mesh_count = scene->mesh_count;
@@ -1757,6 +1760,69 @@ static void hlod_round(void *user, u32 begin, u32 end)
 // The cells per round: their proxies' outputs held at once.
 #define HLOD_ROUND 32U
 
+// A cell's proxy as its levels apart (ADR-0063 "Stage 2, a level is a
+// mesh"): each level a mesh asset of its own ("<sub>/level_<k>", file
+// "cell_<x>_<z>_l<k>"), then the head that lists them ("<sub>", file
+// "cell_<x>_<z>"), which the scene's cell names and whose dependencies they
+// are; their GUIDs appended to `hs->levels`, the head's into `*out`.
+static NphResult hlod_write_proxy(Cooker *c, const char *key, const CookCell *cell,
+                                  const NphRenderClusterLods *proxy, u64 content_hash, u64 shash,
+                                  HlodScene *hs, NphGuid *out)
+{
+    if (proxy->levels == 0U || proxy->levels > NPH_MESH_MAX_LEVELS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    NphAllocator *a = c->alloc;
+    char sub[64];
+    hlod_cell_sub(cell, sub, sizeof sub);
+    NphMeshLevel levels[NPH_MESH_MAX_LEVELS];
+    NphGuid guids[NPH_MESH_MAX_LEVELS];
+    NphResult r = NPH_RESULT_OK;
+    for (u32 k = 0; k < proxy->levels && r == NPH_RESULT_OK; ++k) {
+        char lsub[96];
+        snprintf(lsub, sizeof lsub, "%s/level_%u", sub, k);
+        guids[k] = asset_guid(key, lsub);
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, a, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guids[k],
+                              content_hash);
+        nph_asset_writer_set_lz_level(&w, c->mesh.lz);
+        r = cook_proxy_level_write(proxy, k, &w, &levels[k]);
+        levels[k].mesh = guids[k];
+        if (r == NPH_RESULT_OK) {
+            char file[64];
+            snprintf(file, sizeof file, "cell_%d_%d_l%u", cell->x, cell->z, k);
+            char relative[COOKER_PATH_MAX];
+            output_path(c, key, lsub, file, guids[k], relative, sizeof relative);
+            r = emit(c, &w, key, lsub, relative, NPH_ASSET_TYPE_MESH, content_hash, shash, NULL,
+                     0U);
+        }
+        nph_asset_writer_free(&w);
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(&hs->levels, guids[k]);
+        }
+    }
+    const NphGuid guid = asset_guid(key, sub);
+    if (r == NPH_RESULT_OK) {
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, a, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
+                              content_hash);
+        r = cook_proxy_head_write(proxy, levels, proxy->levels, &w);
+        if (r == NPH_RESULT_OK) {
+            char file[64];
+            snprintf(file, sizeof file, "cell_%d_%d", cell->x, cell->z);
+            char relative[COOKER_PATH_MAX];
+            output_path(c, key, sub, file, guid, relative, sizeof relative);
+            r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_MESH, content_hash, shash, guids,
+                     proxy->levels);
+        }
+        nph_asset_writer_free(&w);
+    }
+    if (r == NPH_RESULT_OK) {
+        *out = guid;
+    }
+    return r;
+}
+
 // Every cell's proxy, built from the meshes' sources in rounds of cells at
 // once on the job system, and written; an empty proxy writes nothing.
 static NphResult hlod_build(Cooker *c, const char *key, const CookGltfScene *scene,
@@ -1852,25 +1918,9 @@ static NphResult hlod_build(Cooker *c, const char *key, const CookGltfScene *sce
             }
             hs->origins[k] = origins[i];
             if (r == NPH_RESULT_OK && proxies[i].clusters.meshlets.len != 0U) {
-                char sub[64];
-                hlod_cell_sub(cell, sub, sizeof sub);
-                const NphGuid guid = asset_guid(key, sub);
-                NphAssetWriter w;
-                nph_asset_writer_init(&w, a, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
-                                      content_hash);
-                nph_asset_writer_set_lz_level(&w, c->mesh.lz);
-                r = cook_proxy_write(&proxies[i], &w);
+                r = hlod_write_proxy(c, key, cell, &proxies[i], content_hash, shash, hs,
+                                     &hs->proxies[k]);
                 if (r == NPH_RESULT_OK) {
-                    char file[64];
-                    snprintf(file, sizeof file, "cell_%d_%d", cell->x, cell->z);
-                    char relative[COOKER_PATH_MAX];
-                    output_path(c, key, sub, file, guid, relative, sizeof relative);
-                    r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_MESH, content_hash, shash,
-                             NULL, 0U);
-                }
-                nph_asset_writer_free(&w);
-                if (r == NPH_RESULT_OK) {
-                    hs->proxies[k] = guid;
                     written += 1U;
                     total_voxels += proxies[i].voxels.len;
                 }
@@ -1910,9 +1960,10 @@ static NphResult hlod_build(Cooker *c, const char *key, const CookGltfScene *sce
     return r;
 }
 
-// The proxies a current scene stands for: each cell's, found in the
-// database (an empty proxy has no entry).
-static void hlod_current(Cooker *c, const char *key, HlodScene *hs)
+// The proxies a current scene stands for: each cell's head, found in the
+// database (an empty proxy has no entry), and its levels, the head's
+// dependencies.
+static NphResult hlod_current(Cooker *c, const char *key, HlodScene *hs)
 {
     for (u32 k = 0; k < hs->cells.len; ++k) {
         char sub[64];
@@ -1922,8 +1973,12 @@ static void hlod_current(Cooker *c, const char *key, HlodScene *hs)
         const CookHlodSettings s = hs->settings;
         const CookCell *cell = &hs->cells.data[k];
         hs->origins[k] = nph_vec3((f32)cell->x * s.cell, 0.0F, (f32)cell->z * s.cell);
-        c->stats.skipped += e != NULL ? 1U : 0U;
+        if (e != NULL) {
+            NPH_TRY(NPH_ARRAY_PUSH_N(&hs->levels, e->deps, e->dep_count));
+            c->stats.skipped += 1U + e->dep_count;
+        }
     }
+    return NPH_RESULT_OK;
 }
 
 NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
@@ -2103,12 +2158,15 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     if (r == NPH_RESULT_OK && hlod.active && hlod.build) {
         r = hlod_build(c, key, &scene, scene.content_hash, &hlod);
     } else if (r == NPH_RESULT_OK && hlod.active) {
-        hlod_current(c, key, &hlod);
+        r = hlod_current(c, key, &hlod);
     }
     for (u32 k = 0; k < hlod.cells.len && r == NPH_RESULT_OK; ++k) {
         if (!nph_guid_is_null(hlod.proxies[k])) {
             r = NPH_ARRAY_PUSH(&produced, hlod.proxies[k]);
         }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = NPH_ARRAY_PUSH_N(&produced, hlod.levels.data, hlod.levels.len);
     }
     voxel_images_free(&voxel_images);
     // The scene.

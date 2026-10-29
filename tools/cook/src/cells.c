@@ -6,6 +6,7 @@
 
 #include <cook/cells.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -264,27 +265,42 @@ NPH_STATIC_ASSERT(sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster),
                   "a voxel cluster's record is the renderer's");
 NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick),
                   "a brick is the renderer's");
+NPH_STATIC_ASSERT(sizeof(NphMeshLodMaker) == sizeof(NphRenderLodMaker) &&
+                      offsetof(NphMeshLodMaker, error) == offsetof(NphRenderLodMaker, error),
+                  "a maker's record is the renderer's");
 
-// The proxy's blobs, its voxel clusters' records `meshlets` naming theirs in
-// `packed` (render/voxel.h "The compact form").
-static NphResult write_proxy(const NphRenderClusterLods *proxy, const NphRenderMeshlet *meshlets,
-                             const NphRenderPackedVoxels *packed, NphAssetWriter *writer)
+// The bounds of `l`'s clusters: their spheres', a box and a sphere.
+static void clusters_bounds(const NphRenderClusterLods *l, NphAABB *out_box, NphSphere *out_sphere)
 {
-    const u32 n = proxy->clusters.meshlets.len;
-    // The bounds: the clusters' spheres'.
     NphAABB bounds = nph_aabb_empty();
     NphSphere sphere =
-        nph_sphere(proxy->clusters.bounds.data[0].center, proxy->clusters.bounds.data[0].radius);
-    for (u32 c = 0; c < n; ++c) {
-        const NphRenderMeshletBounds *b = &proxy->clusters.bounds.data[c];
+        nph_sphere(l->clusters.bounds.data[0].center, l->clusters.bounds.data[0].radius);
+    for (u32 c = 0; c < l->clusters.bounds.len; ++c) {
+        const NphRenderMeshletBounds *b = &l->clusters.bounds.data[c];
         bounds = nph_aabb_expand(bounds, nph_vec3_sub(b->center, nph_vec3_splat(b->radius)));
         bounds = nph_aabb_expand(bounds, nph_vec3_add(b->center, nph_vec3_splat(b->radius)));
         sphere = nph_sphere_union(sphere, nph_sphere(b->center, b->radius));
     }
+    *out_box = bounds;
+    *out_sphere = sphere;
+}
+
+// A level's blobs, its voxel clusters' records `meshlets` naming theirs in
+// `packed` (render/voxel.h "The compact form"), its clusters' makers
+// `makers`.
+static NphResult write_level(const NphRenderClusterLods *proxy, const NphRenderMeshlet *meshlets,
+                             const NphRenderPackedVoxels *packed, const NphRenderLodMaker *makers,
+                             NphAssetWriter *writer)
+{
+    const u32 n = proxy->clusters.meshlets.len;
+    NphAABB bounds;
+    NphSphere sphere;
+    clusters_bounds(proxy, &bounds, &sphere);
     NphMeshHeader h;
     memset(&h, 0, sizeof h);
     h.submesh_count = 1U;
     h.meshlet_count = n;
+    h.flags = (u32)NPH_MESH_FLAG_LEVEL;
     h.position_scale = nph_vec3_one();
     h.bounds = bounds;
     h.sphere = sphere;
@@ -322,6 +338,8 @@ static NphResult write_proxy(const NphRenderClusterLods *proxy, const NphRenderM
                                   NPH_ARRAY_BYTES(&proxy->group_clusters), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, proxy->nodes.data,
                                       NPH_ARRAY_BYTES(&proxy->nodes), NPH_ASSET_CODEC_LZ, 0U));
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_MAKERS, 0U, makers,
+                                      (u64)n * sizeof(NphRenderLodMaker), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_CLUSTERS, 0U,
                                       packed->clusters.data, NPH_ARRAY_BYTES(&packed->clusters),
                                       NPH_ASSET_CODEC_LZ, 0U));
@@ -331,30 +349,77 @@ static NphResult write_proxy(const NphRenderClusterLods *proxy, const NphRenderM
                                      NPH_ARRAY_BYTES(&packed->words), NPH_ASSET_CODEC_LZ, 0U);
 }
 
-NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *writer)
+NphResult cook_proxy_level_write(const NphRenderClusterLods *proxy, u32 level,
+                                 NphAssetWriter *writer, NphMeshLevel *out)
 {
-    NPH_ASSERT(proxy != NULL && writer != NULL);
-    const u32 n = proxy->clusters.meshlets.len;
-    if (n == 0U || proxy->level0_clusters == 0U || proxy->groups.len == 0U ||
-        proxy->nodes.len == 0U) {
+    NPH_ASSERT(proxy != NULL && writer != NULL && out != NULL);
+    memset(out, 0, sizeof *out);
+    if (proxy->clusters.meshlets.len == 0U || level >= proxy->levels) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    // The voxels compact, packed from a copy of the clusters' records, whose
-    // voxel clusters then name their own (render/voxel.h "The compact form").
+    // The level as a mesh of its own, then its voxels compact, packed from
+    // its clusters' records, which then name their own (render/voxel.h "The
+    // compact form").
     NphAllocator *a = proxy->clusters.meshlets.alloc;
-    NphRenderMeshletArray meshlets;
-    NPH_ARRAY_INIT(&meshlets, a);
+    NphRenderClusterLods lv;
+    nph_render_cluster_lods_init(&lv, a);
+    NphRenderLodMakerArray makers;
+    NPH_ARRAY_INIT(&makers, a);
     NphRenderPackedVoxels packed;
     nph_render_packed_voxels_init(&packed, a);
-    NphResult r = NPH_ARRAY_PUSH_N(&meshlets, proxy->clusters.meshlets.data, n);
+    NphResult r = nph_render_cluster_lods_level(proxy, level, &lv, &makers);
     if (r == NPH_RESULT_OK) {
-        r = nph_render_voxels_pack(meshlets.data, n, proxy->bricks.data, proxy->bricks.len,
-                                   proxy->voxels.data, proxy->voxels.len, &packed);
+        r = nph_render_voxels_pack(lv.clusters.meshlets.data, lv.clusters.meshlets.len,
+                                   lv.bricks.data, lv.bricks.len, lv.voxels.data, lv.voxels.len,
+                                   &packed);
     }
     if (r == NPH_RESULT_OK) {
-        r = write_proxy(proxy, meshlets.data, &packed, writer);
+        r = write_level(&lv, lv.clusters.meshlets.data, &packed, makers.data, writer);
+    }
+    if (r == NPH_RESULT_OK) {
+        // From its makers' smallest error to its consumers' largest.
+        f32 maker = NPH_F32_MAX;
+        for (u32 i = 0; i < makers.len; ++i) {
+            maker = nph_f32_min(maker, makers.data[i].error);
+        }
+        f32 error = 0.0F;
+        for (u32 g = 0; g < lv.groups.len; ++g) {
+            error = nph_f32_max(error, lv.groups.data[g].error);
+        }
+        out->maker_error = maker;
+        out->error = error;
+        out->cluster_count = lv.clusters.meshlets.len;
     }
     nph_render_packed_voxels_free(&packed);
-    NPH_ARRAY_FREE(&meshlets);
+    NPH_ARRAY_FREE(&makers);
+    nph_render_cluster_lods_free(&lv);
     return r;
+}
+
+NphResult cook_proxy_head_write(const NphRenderClusterLods *proxy, const NphMeshLevel *levels,
+                                u32 count, NphAssetWriter *writer)
+{
+    NPH_ASSERT(proxy != NULL && writer != NULL && (levels != NULL || count == 0U));
+    if (proxy->clusters.meshlets.len == 0U || count == 0U || count > NPH_MESH_MAX_LEVELS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    NphAABB bounds;
+    NphSphere sphere;
+    clusters_bounds(proxy, &bounds, &sphere);
+    NphMeshHeader h;
+    memset(&h, 0, sizeof h);
+    h.submesh_count = 1U;
+    h.flags = (u32)NPH_MESH_FLAG_LEVELS;
+    h.position_scale = nph_vec3_one();
+    h.bounds = bounds;
+    h.sphere = sphere;
+    NphSubmesh sub;
+    memset(&sub, 0, sizeof sub);
+    sub.bounds = bounds;
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h,
+                                      NPH_ASSET_CODEC_NONE, 0U));
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub,
+                                      NPH_ASSET_CODEC_NONE, 0U));
+    return nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LEVELS, 0U, levels,
+                                     (u64)count * sizeof(NphMeshLevel), NPH_ASSET_CODEC_NONE, 0U);
 }
