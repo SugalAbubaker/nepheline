@@ -6,7 +6,13 @@
 //     marks dirty the pages its old and its new bounding sphere span (a
 //     shadow map's texel holds the nearest caster along the light, so a
 //     caster changes exactly the texels under it), an invocation per update
-//     and level (the dispatch's y), a row of the rectangle at a time.
+//     and level (the dispatch's y), a row of the rectangle at a time; in
+//     the levels each record draws into (a cell's proxy where the cell is
+//     drawn as its proxy, its instances elsewhere: vsm_cell_proxied), and
+//     only those below the update's bound where a cell's proxy gained or
+//     lost finer levels (NphVisInstanceUpdate.vsm_below; ADR-0063 stage 4:
+//     a streamed level's coming redraws the fine levels' pages it changes,
+//     not the coarse levels', which draw the levels the cell keeps).
 //   UPDATE (after the pages are requested): each entry of every level
 //     against this frame's window and requests. An entry whose page the
 //     window scrolled past, or of a level reset, gives its physical page
@@ -42,6 +48,7 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #include "vis_common.glsl"
 #include "vsm_common.glsl"
+#include "vsm_cells.glsl"
 
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; }; // arg0: INVALIDATE's update count
@@ -96,6 +103,13 @@ void invalidate_instance(VsmViewRef r, VisViewRef view, int level, NphVisInstanc
     if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) == 0u) {
         return;
     }
+    // Not drawn into the level: a cell's proxy where the cell's instances
+    // are drawn, or one of its instances where its proxy is.
+    const uint cell = inst.flags >> NPH_VIS_INSTANCE_CELL_SHIFT;
+    if (cell != 0u && vsm_cell_proxied(view, r, level, cell) !=
+                          ((inst.flags & NPH_VIS_INSTANCE_PROXY) != 0u)) {
+        return;
+    }
     const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
@@ -113,6 +127,11 @@ void invalidate(VisViewRef view, VsmViewRef r)
     }
     const NphVisInstanceUpdate up = VisUpdatesRef(view.v.instance_updates).u[i];
     if (up.copy_previous != 0u) {
+        return;
+    }
+    // A cell's proxy's levels coming and going change only the map levels
+    // whose cut's threshold is below their bound (proxy_change_bound).
+    if (up.vsm_below > 0.0 && vsm_lod_threshold(r, level, 1.0) >= up.vsm_below) {
         return;
     }
     // The record it replaces (the scatter has not run yet), then its own.

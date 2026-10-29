@@ -248,13 +248,14 @@ NphResult render_vis_scene_create(NphRenderer *r)
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     v->slot_state = NPH_ALLOC_ARRAY_ZEROED(a, u8, d->max_instances);
+    v->vsm_below = NPH_ALLOC_ARRAY_ZEROED(a, f32, d->max_instances);
     v->dirty = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->sent = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->sent_next = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->blend = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     NPH_ARRAY_INIT(&v->pending, a);
-    if (v->slot_state == NULL || v->dirty == NULL || v->sent == NULL || v->sent_next == NULL ||
-        v->blend == NULL) {
+    if (v->slot_state == NULL || v->vsm_below == NULL || v->dirty == NULL || v->sent == NULL ||
+        v->sent_next == NULL || v->blend == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     return NPH_RESULT_OK;
@@ -304,6 +305,9 @@ void render_vis_scene_destroy(NphRenderer *r)
     NPH_ARRAY_FREE(&v->pending);
     if (v->slot_state != NULL) {
         NPH_FREE_ARRAY(a, u8, v->slot_state, d->max_instances);
+    }
+    if (v->vsm_below != NULL) {
+        NPH_FREE_ARRAY(a, f32, v->vsm_below, d->max_instances);
     }
     if (v->dirty != NULL) {
         NPH_FREE_ARRAY(a, u32, v->dirty, d->max_instances);
@@ -834,6 +838,14 @@ NphResult render_vis_voxel_upload(NphRenderer *r, u32 slot, const NphRenderMeshD
 
 static void mark_dirty(RenderVis *v, u32 slot)
 {
+    // Made by a cell's proxy's levels coming and going, its update dirties
+    // the shadow map only below their change's bound (the largest such);
+    // made by anything else, at every level.
+    if (v->proxy_bound > 0.0F) {
+        v->vsm_below[slot] = nph_f32_max(v->vsm_below[slot], v->proxy_bound);
+    } else {
+        v->slot_state[slot] |= (u8)RENDER_SLOT_ALL_LEVELS;
+    }
     if ((v->slot_state[slot] & (u8)RENDER_SLOT_DIRTY) == 0U) {
         v->slot_state[slot] |= (u8)RENDER_SLOT_DIRTY;
         v->dirty[v->dirty_count++] = slot;
@@ -1142,9 +1154,12 @@ u32 render_vis_write_updates(NphRenderer *r)
                             u->instance.mesh < r->desc.max_meshes &&
                             r->meshes[u->instance.mesh].vertex_count != 0U;
         traced += in_top || (v->slot_state[slot] & (u8)RENDER_SLOT_TRACED) != 0U ? 1U : 0U;
+        u->vsm_below =
+            (v->slot_state[slot] & (u8)RENDER_SLOT_ALL_LEVELS) != 0U ? 0.0F : v->vsm_below[slot];
+        v->vsm_below[slot] = 0.0F;
         v->slot_state[slot] =
-            (u8)(v->slot_state[slot] &
-                 ~((u32)RENDER_SLOT_DIRTY | (u32)RENDER_SLOT_FRESH | (u32)RENDER_SLOT_TRACED));
+            (u8)(v->slot_state[slot] & ~((u32)RENDER_SLOT_DIRTY | (u32)RENDER_SLOT_FRESH |
+                                         (u32)RENDER_SLOT_TRACED | (u32)RENDER_SLOT_ALL_LEVELS));
         v->slot_state[slot] |=
             (u8)((u32)RENDER_SLOT_SENT | (in_top ? (u32)RENDER_SLOT_TRACED : 0U));
         v->sent_next[v->sent_next_count++] = slot;

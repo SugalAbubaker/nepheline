@@ -1735,9 +1735,39 @@ NphResult nph_render_cell_create(NphRenderer *r, const NphRenderCellDesc *desc, 
         release_slot(&r->cell_pool, value);
         return res;
     }
+    c->level_count = desc->proxy_level_error_count;
+    for (u32 k = 0; k < c->level_count; ++k) {
+        c->level_errors[k] = desc->proxy_level_errors[k];
+    }
     c->handle = value;
     out->value = value;
     return NPH_RESULT_OK;
+}
+
+// What changing cell `c`'s proxy to `meshes` redraws of the sun's shadow map
+// (ADR-0063 stage 4; NphVisInstanceUpdate.vsm_below): where the held levels
+// gain or lose finer ones below a run of levels both hold (a streamed
+// proxy's), only the map levels whose cut's threshold is below the makers'
+// error of the coarser of the two finest levels (the largest consumer error
+// of the level finer than it). At a coarser threshold the cut takes the
+// shared levels as before, the finest's clamp included: its clusters there
+// are those its makers' errors pass. 0 (every level) for any other change.
+static f32 proxy_change_bound(const NphRenderer *r, const RenderCell *c,
+                              const NphRenderMesh *meshes, u32 count)
+{
+    const u32 shared = nph_min_u32(count, c->proxy_count);
+    if (c->level_count == 0U || shared == 0U ||
+        nph_max_u32(count, c->proxy_count) > c->level_count) {
+        return 0.0F;
+    }
+    for (u32 k = 1; k <= shared; ++k) {
+        const u32 islot = render_slot_of(&r->instance_pool, c->proxy[c->proxy_count - k].value);
+        if (r->instances[islot].mesh.value != meshes[count - k].value) {
+            return 0.0F; // not a run of the coarsest levels both hold
+        }
+    }
+    const u32 coarser_finest = c->level_count - shared;
+    return coarser_finest == 0U ? 0.0F : c->level_errors[coarser_finest - 1U];
 }
 
 NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell, const NphRenderMesh *meshes,
@@ -1749,6 +1779,8 @@ NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell, const Np
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     RenderCell *c = &r->cells[slot];
+    // The instances' updates dirty the shadow map below the change's bound.
+    r->vis.proxy_bound = proxy_change_bound(r, c, meshes, count);
     // The instances to keep, by the meshes that stay, and those to make, as
     // the cell's first proxy instance is (its materials and place).
     const RenderInstance *model =
@@ -1784,6 +1816,7 @@ NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell, const Np
                 nph_render_instance_destroy(r, next[k]);
             }
         }
+        r->vis.proxy_bound = 0.0F;
         return res;
     }
     // Those whose mesh goes.
@@ -1811,6 +1844,7 @@ NphResult nph_render_cell_set_proxy(NphRenderer *r, NphRenderCell cell, const Np
         c->proxy[k] = next[k];
     }
     c->proxy_count = count;
+    r->vis.proxy_bound = 0.0F;
     return NPH_RESULT_OK;
 }
 

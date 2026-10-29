@@ -216,6 +216,10 @@ typedef enum RenderSlotState {
     // of a mesh with triangles: rt_instances.comp takes those with a bottom
     // level, which a mesh of voxels alone never has).
     RENDER_SLOT_TRACED = 1U << 3U,
+    // Its pending update dirties the shadow map's pages at every level: a
+    // change other than a cell's proxy's levels coming and going
+    // (RenderVis.vsm_below).
+    RENDER_SLOT_ALL_LEVELS = 1U << 4U,
 } RenderSlotState;
 
 typedef struct RenderInstance {
@@ -244,6 +248,12 @@ typedef struct RenderCell {
     NphRenderInstance proxy[NPH_RENDER_CELL_MAX_LEVELS];
     u32 proxy_count;
     u32 members; // live instances that name the cell
+    // A streamed proxy's levels' largest consumer errors, finest first
+    // (NphRenderCellDesc.proxy_level_errors; none for one that does not
+    // stream): what a change of its held levels redraws of the shadow map
+    // (nph_render_cell_set_proxy).
+    f32 level_errors[NPH_RENDER_CELL_MAX_LEVELS];
+    u32 level_count;
 } RenderCell;
 
 // The virtual shadow map's work buffer (vsm.c).
@@ -641,6 +651,12 @@ typedef struct RenderVis {
 
     // Instances whose records must reach the GPU, and those sent last frame.
     u8 *slot_state; // RenderSlotState bits per instance slot
+    // Per instance slot, its pending update's bound on the shadow map levels
+    // it dirties (NphVisInstanceUpdate.vsm_below), the largest of the
+    // proxy changes that made it, unless RENDER_SLOT_ALL_LEVELS; and while a
+    // cell's proxy changes, that change's bound (0: none under way).
+    f32 *vsm_below;
+    f32 proxy_bound;
     u32 *dirty;
     u32 dirty_count;
     u32 *sent;
