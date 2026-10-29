@@ -58,6 +58,9 @@
 #define NPH_VSM_ARGS_MESHLET  1 // the meshlet cull's dispatch
 #define NPH_VSM_ARGS_DRAW     2 // the page raster's draws and clears, and the pages' costs
 #define NPH_VSM_ARGS_INSTANCE 3 // the instance cull's dispatch, and its levels
+#define NPH_VSM_ARGS_CELLS                                                                         \
+    4 // after the cells' test (ADR-0064): their expansion's dispatch,
+      // and the instance cull's
 
 // A wanted page (NphVsmView.wanted): its entry, and whether it needs a
 // physical page (otherwise it holds one, dirty).
@@ -88,6 +91,11 @@
 #define NPH_VSM_CULL_INSTANCES 0 // (instance, level) pairs against the pages to draw (z: level)
 #define NPH_VSM_CULL_MESHLETS  1 // their meshlets against those pages: the draws
 #define NPH_VSM_CULL_CELLS     2 // (cell, level) pairs against the pages needed: the requests
+// Cells first (ADR-0064): (cell, level) pairs against the pages to draw, the
+// cells whose instances the instance cull takes; then a workgroup per listed
+// pair, its runs as the instance cull's (instance, level) items.
+#define NPH_VSM_CULL_CELLS_TEST   3
+#define NPH_VSM_CULL_CELLS_EXPAND 4
 
 // One page-table entry (a level's window slot).
 NPH_SHARED_STRUCT(NphVsmEntry)
@@ -135,10 +143,10 @@ NPH_SHARED_STRUCT(NphVsmCounters)
     u32 overflow;        // NPH_VSM_OVERFLOW_*
     u32 recent_count;    // owned pages needed lately, not this frame (evicted last)
     // Statistics, read back two frames later.
-    u32 requested;        // pages this frame's pixels needed
-    u32 evicted;          // pages taken from their owners
-    u32 voxel_draw_count; // (instance, voxel cluster, entry) draws
-    u32 pad2;
+    u32 requested;                    // pages this frame's pixels needed
+    u32 evicted;                      // pages taken from their owners
+    u32 voxel_draw_count;             // (instance, voxel cluster, entry) draws
+    u32 cell_work;                    // cells first (ADR-0064): the (instance, level) items listed
     u32 level_render[NPH_VSM_LEVELS]; // pages drawn per level
     // The caster walk: each queue's items (vsm_cull_nodes.comp), and the
     // nodes it visited (statistics).
@@ -155,6 +163,8 @@ NPH_SHARED_STRUCT(NphVsmCounters)
     u32 informed;
     u32 level_wanted[NPH_VSM_LEVELS];  // the pages wanted per level
     u32 level_granted[NPH_VSM_LEVELS]; // those of the partial level granted so far
+    u32 cells_listed;                  // cells first: the (cell, level) pairs listed
+    u32 pad3[3];
     // What each level's pages drawn took of each caster list
     // (NPH_VSM_COST_*), counting what did not fit.
     u32 level_cost[NPH_VSM_LEVELS][NPH_VSM_COSTS];
@@ -191,6 +201,11 @@ NPH_SHARED_STRUCT(NphVsmArgs)
     u32 select_partial;
     u32 select_quota;
     u32 pad0;
+    // Cells first (ADR-0064): the cells' test, an invocation per cell slot
+    // and level with pages to draw (z, as instance_args'), and its listed
+    // pairs' expansion, a workgroup each.
+    u32 cell_test_args[4];
+    u32 cell_expand_args[4];
 };
 
 // The virtual shadow map's view of a frame.
@@ -242,6 +257,15 @@ NPH_SHARED_STRUCT(NphVsmView)
     u32 pad1;
     u64 wanted; // u32[NPH_VSM_LEVELS * NPH_VSM_LEVEL_ENTRIES]: pages to draw (NPH_VSM_WANTED_*)
     u64 budget; // NphVsmBudget
+    // Cells first (ADR-0064): the (cell, level) pairs the cells' test lists
+    // (uvec4[max_cell_listed]: x the pair's first item, y its run's first
+    // entry in the cells' member buffer, its proxy's or its members', z the
+    // run's count, w the level), and the instance cull's items
+    // (u32[max_cell_work]: the instance slot | the level << 28).
+    u64 cell_listed;
+    u64 cell_work;
+    u32 max_cell_work;
+    u32 max_cell_listed;
 };
 
 // Push constants of vsm_request_test.comp (the render tests): the depth

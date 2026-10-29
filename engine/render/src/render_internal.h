@@ -295,6 +295,8 @@ typedef struct VsmLayout {
     u64 node_queue;  // uvec2[max_lod_nodes] for each of NPH_VSM_NODE_QUEUES
     u64 draws;       // uvec4[max_vsm_draws]
     u64 vis_draws;   // NphVisDraw[max_vsm_draws] (indirect raster only)
+    u64 cell_listed; // uvec4[max_cells * NPH_VSM_LEVELS]: cells first's (cell, level) pairs
+    u64 cell_work;   // u32[2 * max_instances]: their (instance, level) items
     u64 size;
 } VsmLayout;
 
@@ -557,8 +559,10 @@ typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
 // One frame's render-graph handles and push-constant inputs, read by the
 // pass callbacks.
 typedef struct VisFrame {
-    u64 view_address; // NphVisViewData
-    b32 cells_first;  // phase 0 culls the cells first (ADR-0064): the renderer holds cells
+    u64 view_address;         // NphVisViewData
+    b32 cells_first;          // phase 0 culls the cells first (ADR-0064): the renderer holds cells
+    NphGpuRgBuffer cell_runs; // their runs (vis_runs.c), for the shadow map's cells too
+    NphGpuRgBuffer cell_members;
     u32 update_count;
     u32 light_update_count;
     u32 width;
