@@ -816,6 +816,68 @@ NTEST_F(Cells, the_reference_renderer_and_rays_pass_a_mesh_of_voxels_alone_by)
     grove_free(&g);
 }
 
+// The production path's top level leaves the instances of meshes of voxels
+// alone out (they have no bottom level), so one made, moved, hidden, shown
+// and destroyed keeps it as it was built, as a streamed cell's levels come
+// and go (ADR-0063 stage 4); an instance of triangles changing rebuilds it.
+NTEST_F(Cells, an_instance_of_voxels_alone_leaves_the_top_level_as_it_is)
+{
+    REQUIRE_RENDERER(f);
+    if (!nph_renderer_ray_tracing_supported(f->renderer) ||
+        !nph_renderer_production_supported(f->renderer)) {
+        NTEST_SKIP("no ray queries or no production path on this device");
+    }
+    Grove g;
+    grove_build(&g);
+    NphRenderMesh proxy = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &g.proxy_desc, &proxy), NPH_RESULT_OK);
+    Scene floor;
+    scene_build(f, &floor, at(0.0, -1.0, 0.0, 0.01F));
+    NphRenderLightDesc sun = sun_desc(true);
+    const NphRenderLight light = make_light(f, &sun);
+    NphRenderView v;
+    shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION,
+                (u32)NPH_RENDER_VIS_RT_SHADOWS);
+    // Built, its bottom levels compacted a few frames on (where the device
+    // saves anything) and rebuilt over the copies: then kept.
+    NTEST_EXPECT_TRUE(test_render_read(f, &v).shadow_rebuild);
+    for (u32 i = 0; i < 12U; ++i) {
+        (void)test_render_read(f, &v);
+    }
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    NphRenderInstance inst = instance(f, proxy, floor.grey, nph_render_transform_identity());
+    NphRenderFrameStats st = test_render_read(f, &v);
+    NTEST_EXPECT_FALSE(st.shadow_rebuild);
+    NTEST_EXPECT_EQ_UINT(st.instances, 3U);
+    NphRenderTransform moved = nph_render_transform_identity();
+    moved.translation = nph_dvec3(0.5, 0.0, 0.25);
+    NTEST_ASSERT_EQ_INT(nph_render_instance_set_transform(f->renderer, inst, &moved),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    nph_render_instance_set_hidden(f->renderer, inst, true);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    nph_render_instance_set_hidden(f->renderer, inst, false);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    nph_render_instance_destroy(f->renderer, inst);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    // The occluder, of triangles, hidden and shown: rebuilt each time, then
+    // kept.
+    nph_render_instance_set_hidden(f->renderer, floor.occluder, true);
+    NTEST_EXPECT_TRUE(test_render_read(f, &v).shadow_rebuild);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    nph_render_instance_set_hidden(f->renderer, floor.occluder, false);
+    NTEST_EXPECT_TRUE(test_render_read(f, &v).shadow_rebuild);
+    NTEST_EXPECT_FALSE(test_render_read(f, &v).shadow_rebuild);
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_instance_destroy(f->renderer, floor.floor);
+    nph_render_instance_destroy(f->renderer, floor.occluder);
+    nph_render_material_destroy(f->renderer, floor.grey);
+    nph_render_mesh_destroy(f->renderer, floor.cube);
+    nph_render_mesh_destroy(f->renderer, floor.plane);
+    nph_render_mesh_destroy(f->renderer, proxy);
+    grove_free(&g);
+}
+
 // ---------------------------------------------------------------------------
 // Cells
 // ---------------------------------------------------------------------------

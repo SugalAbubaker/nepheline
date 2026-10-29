@@ -268,11 +268,17 @@ against.
   - **The production path** writes the records on the GPU from its GPU
     scene (`rt instances`: every slot's record inactive, then the active
     ones appended from the start), so its CPU cost does not depend on the
-    instance count. It rebuilds the top level only when its instances
-    changed, after a frame that traced nothing, when the camera has moved
-    more than 16 m from the anchor, which then moves to the camera, and
-    the frame after a swap of compacted bottom levels. A camera moving
-    through a still scene costs no build.
+    instance count. It rebuilds the top level only when instances it
+    holds changed (shown, of a mesh with triangles, before or after the
+    change: `RENDER_SLOT_TRACED`; an instance of voxels alone, such as a
+    streamed cell's levels, never is), after a frame that traced nothing,
+    when the camera has moved more than 16 m from the anchor, which then
+    moves to the camera, and the frame after a swap of compacted bottom
+    levels. A camera moving through a still scene costs no build, and nor
+    does a cell's proxy streaming its levels: tiled into a world of the
+    game's size (574,356 instances traced), a build takes 2.85 ms, and the
+    landscape's streamed levels rebuilt it in 46 frames of a 240-frame turn
+    (ADR-0063 "Stage 4").
   - **The reference** writes the active records on the CPU into its frame
     records, as it does its draws, and rebuilds every frame over them, with
     the anchor at the camera. `shadow_rebuild` in the frame statistics says
@@ -2351,9 +2357,10 @@ and synchronisation-validation gate:
   light casts nothing); the structures following instances that move,
   hide, and go, and meshes created later; the production path's top level
   kept while the camera moves within 16 m (and the shadows right from
-  there) and rebuilt when it must be; rays traced only while a light casts
-  shadows; and a renderer without ray tracing drawing such lights
-  unshadowed.
+  there) and rebuilt when it must be, and kept while an instance of voxels
+  alone is made, moved, hidden and destroyed (`test_vis_cells.c`); rays
+  traced only while a light casts shadows; and a renderer without ray
+  tracing drawing such lights unshadowed.
 - **The sun's virtual shadow map** (`test_vsm.c`), held to the same
   classification with a margin of its texels: the sun behind a cube, with
   mesh shaders and through the indexed indirect raster lavapipe takes; a

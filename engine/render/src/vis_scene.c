@@ -1122,9 +1122,9 @@ u32 render_vis_write_updates(NphRenderer *r)
         u->copy_previous = 1U;
     }
     // Then the changed instances, as many as fit; the rest wait a frame.
-    const u32 catch_ups = n;
     v->sent_next_count = 0U;
     u32 kept = 0U;
+    u32 traced = 0U;
     for (u32 i = 0; i < v->dirty_count; ++i) {
         const u32 slot = v->dirty[i];
         if (n == cap) {
@@ -1136,9 +1136,17 @@ u32 render_vis_write_updates(NphRenderer *r)
         memset(u, 0, sizeof *u);
         u->slot = slot;
         instance_record(r, slot, fresh, &u->instance);
+        // In the top level as sent now (a destroyed slot's record is not
+        // shown), or as sent before.
+        const bool in_top = (u->instance.flags & (u32)NPH_VIS_INSTANCE_VISIBLE) != 0U &&
+                            u->instance.mesh < r->desc.max_meshes &&
+                            r->meshes[u->instance.mesh].vertex_count != 0U;
+        traced += in_top || (v->slot_state[slot] & (u8)RENDER_SLOT_TRACED) != 0U ? 1U : 0U;
         v->slot_state[slot] =
-            (u8)(v->slot_state[slot] & ~((u32)RENDER_SLOT_DIRTY | (u32)RENDER_SLOT_FRESH));
-        v->slot_state[slot] |= (u8)RENDER_SLOT_SENT;
+            (u8)(v->slot_state[slot] &
+                 ~((u32)RENDER_SLOT_DIRTY | (u32)RENDER_SLOT_FRESH | (u32)RENDER_SLOT_TRACED));
+        v->slot_state[slot] |=
+            (u8)((u32)RENDER_SLOT_SENT | (in_top ? (u32)RENDER_SLOT_TRACED : 0U));
         v->sent_next[v->sent_next_count++] = slot;
     }
     if (kept != 0U && !v->updates_logged) {
@@ -1149,7 +1157,7 @@ u32 render_vis_write_updates(NphRenderer *r)
         v->updates_logged = 1;
     }
     v->dirty_count = kept;
-    v->frame_changed = n - catch_ups;
+    v->frame_traced = traced;
     u32 *swap = v->sent;
     v->sent = v->sent_next;
     v->sent_next = swap;
