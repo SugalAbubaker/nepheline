@@ -60,6 +60,7 @@ typedef struct Grove {
     NphRenderVoxelSampler sampler;
     NphRenderProxyInstance placed[GROVE_TREES];
     NphRenderClusterLods proxy;
+    NphRenderPackedVoxels proxy_packed; // its voxels compact, as the cooker stores them
     NphRenderSubmesh proxy_sub;
     NphRenderMeshDesc proxy_desc; // a mesh of voxels alone
 } Grove;
@@ -148,15 +149,25 @@ static void grove_build(Grove *g)
     pd->lod_nodes = g->proxy.nodes.data;
     pd->lod_node_count = g->proxy.nodes.len;
     pd->lod_level0_meshlets = g->proxy.level0_clusters;
-    pd->voxel_bricks = g->proxy.bricks.data;
-    pd->voxel_brick_count = g->proxy.bricks.len;
-    pd->voxels = g->proxy.voxels.data;
-    pd->voxel_count = g->proxy.voxels.len;
+    nph_render_packed_voxels_init(&g->proxy_packed, a);
+    NphRenderMeshlets *w = &g->proxy.clusters;
+    NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(w->meshlets.data, w->meshlets.len,
+                                               g->proxy.bricks.data, g->proxy.bricks.len,
+                                               g->proxy.voxels.data, g->proxy.voxels.len,
+                                               &g->proxy_packed),
+                        NPH_RESULT_OK);
+    pd->voxel_clusters = g->proxy_packed.clusters.data;
+    pd->voxel_cluster_count = g->proxy_packed.clusters.len;
+    pd->voxel_bricks = g->proxy_packed.bricks.data;
+    pd->voxel_brick_count = g->proxy_packed.bricks.len;
+    pd->voxel_words = g->proxy_packed.words.data;
+    pd->voxel_word_count = g->proxy_packed.words.len;
     pd->name = "grove proxy";
 }
 
 static void grove_free(Grove *g)
 {
+    nph_render_packed_voxels_free(&g->proxy_packed);
     nph_render_cluster_lods_free(&g->proxy);
     NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, g->positions, g->tree.data.vertex_count);
     lod_mesh_free(&g->tree);

@@ -314,10 +314,12 @@ typedef struct NphRenderMeshDesc {
     const NphRenderLodNode *lod_nodes; // node 0 the root
     u32 lod_node_count;
     u32 lod_level0_meshlets;
-    // The bricks and voxels of the levels' voxel clusters (render/voxel.h;
-    // ADR-0061): a meshlet past level 0 without vertices is a voxel cluster,
-    // its `triangle_count` bricks from `vertex_offset`, of one cell size,
-    // their voxels following one another in the bricks' order; NULL without.
+    // The levels' voxel clusters, compact (render/voxel.h "The compact form";
+    // ADR-0061, ADR-0063; nph_render_voxels_pack makes them from a builder's
+    // levels): a meshlet past level 0 without vertices is a voxel cluster,
+    // its `triangle_count` bricks from `vertex_offset`, its record
+    // `voxel_clusters[triangle_offset]`, its voxels its record's run of
+    // `voxel_words`; NULL without.
     //
     // A mesh of voxels alone (a cell's proxy, render/cell_proxy.h; ADR-0062)
     // has no vertices and no indices (`vertex_count` and `index_count` 0, the
@@ -326,18 +328,21 @@ typedef struct NphRenderMeshDesc {
     // too, is a voxel cluster, its `meshlets` and levels given. The production
     // path draws it; the reference renderer and rays, which take triangles,
     // pass it by (it has no bottom level).
-    const NphRenderVoxelBrick *voxel_bricks;
+    const NphRenderVoxelCluster *voxel_clusters;
+    u32 voxel_cluster_count;
+    const NphRenderPackedBrick *voxel_bricks;
     u32 voxel_brick_count;
-    const NphRenderVoxel *voxels;
-    u32 voxel_count;
+    const u32 *voxel_words;
+    u32 voxel_word_count;
     const char *name;
 } NphRenderMeshDesc;
 
 // Uploads the streams. NPH_RESULT_INVALID_ARGUMENT for empty streams (but
 // for a mesh of voxels alone), an index count that is not a multiple of 3,
 // an index or submesh range out of bounds (every index is checked), too
-// many submeshes, a voxel cluster whose bricks differ in cell size or whose
-// voxels do not follow one another in its bricks' order, or a mesh of voxels
+// many submeshes, a voxel cluster whose record, bricks or words lie out of
+// bounds, whose bricks' first voxels do not follow one another, or whose
+// record's cell or flags are not the compact form's, or a mesh of voxels
 // alone with a submesh's indices, meshlet vertices or triangles, a cluster
 // that is not a voxel cluster, or without its meshlets, levels, or voxels;
 // NPH_RESULT_FULL past max_meshes.

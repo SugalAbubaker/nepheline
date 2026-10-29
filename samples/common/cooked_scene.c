@@ -23,8 +23,8 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod) &&
                       sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup) &&
                       sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
-                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick) &&
-                      sizeof(NphMeshVoxel) == sizeof(NphRenderVoxel),
+                      sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster) &&
+                      sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
@@ -193,12 +193,14 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->lod_nodes = nodes;
     d->lod_node_count = mv->lod->node_count;
     d->lod_level0_meshlets = mv->lod->level0_meshlets;
+    const void *voxel_clusters = mv->voxel_clusters;
     const void *bricks = mv->voxel_bricks;
-    const void *voxels = mv->voxels;
+    d->voxel_clusters = voxel_clusters;
+    d->voxel_cluster_count = mv->lod->voxel_cluster_count;
     d->voxel_bricks = bricks;
     d->voxel_brick_count = mv->lod->brick_count;
-    d->voxels = voxels;
-    d->voxel_count = mv->lod->voxel_count;
+    d->voxel_words = mv->voxel_words;
+    d->voxel_word_count = mv->lod->voxel_word_count;
 }
 
 static NphResult create_mesh(CookedScene *s, u32 index)

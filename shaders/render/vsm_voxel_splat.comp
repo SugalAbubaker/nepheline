@@ -105,11 +105,14 @@ void main()
     const int level = target.level;
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
-    VisBricksRef bricks = VisBricksRef(mesh.voxel_bricks);
-    VisVoxelsRef voxels = VisVoxelsRef(mesh.voxels);
+    // A voxel cluster's meshlet: its first brick, its record (render/voxel.h
+    // "The compact form").
+    const VisVoxelCluster vc = vis_voxel_cluster(mesh.voxel_clusters, m.y);
+    VisPackedBricksRef bricks = VisPackedBricksRef(mesh.voxel_bricks);
+    VisVoxelWordsRef run = vis_voxel_run(mesh.voxels, vc);
     // The cluster's cell, and a 32nd of it along each axis in the level's
     // frame.
-    const float h = uintBitsToFloat(bricks.b[m.x * 2u].w);
+    const float h = vc.h;
     const float step = h / VIS_VOXEL_BOX_STEPS;
     const vec3 ax = level_vector(r, level, inst.transform, vec3(step, 0.0, 0.0));
     const vec3 ay = level_vector(r, level, inst.transform, vec3(0.0, step, 0.0));
@@ -122,16 +125,19 @@ void main()
     const float depth_scale = r.v.levels[level].depth_scale;
     const uint i = gl_LocalInvocationIndex;
     if (i < brick_count) {
-        const uvec4 b0 = bricks.b[(m.x + i) * 2u];
+        uvec4 b0;
+        uvec4 b1;
+        vis_voxel_brick(bricks, m.x + i, vc, b0, b1);
         s_brick[i].b0 = b0;
-        s_brick[i].b1 = bricks.b[(m.x + i) * 2u + 1u];
+        s_brick[i].b1 = b1;
         const vec3 ls = vsm_light_space(
             r, vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t);
         s_brick[i].corner = vec4(vsm_level_coords(r, level, ls), ls.z);
     }
     barrier();
-    // A cluster's voxels follow one another in its bricks' order (checked
-    // when a mesh is made), so voxel k of the cluster is the mesh's first + k.
+    // A cluster's voxels follow one another in its bricks' order, their ranks
+    // from the first brick's (checked when a mesh is made: 0), so voxel k of
+    // the cluster is rank first + k.
     const uint first = s_brick[0].b1.z;
     const uvec4 last = s_brick[brick_count - 1u].b1;
     const uint total = last.z - first + bitCount(last.x) + bitCount(last.y);
@@ -158,17 +164,18 @@ void main()
             }
             const uvec4 b1 = s_brick[lo].b1;
             const uint bit = nth_bit(b1.x, b1.y, first + k - b1.z);
-            const uvec2 words = voxels.v[first + k].zw; // material, box
+            // Its material's capsule byte, its box.
+            const uvec2 fp = vis_voxel_load_footprint(run, vc.stride, first + k).zw;
             // The footprint's box in 32nds of a cell from the brick's corner.
             const uvec3 cell = uvec3(bit & 3u, (bit >> 2u) & 3u, bit >> 4u) * 32u;
             vec3 box_lo;
             vec3 box_hi;
             for (uint a = 0u; a < 3u; ++a) {
-                box_lo[a] = float(cell[a] + ((words.y >> (5u * a)) & 31u));
-                box_hi[a] = float(cell[a] + ((words.y >> (15u + 5u * a)) & 31u) + 1u);
+                box_lo[a] = float(cell[a] + ((fp.y >> (5u * a)) & 31u));
+                box_hi[a] = float(cell[a] + ((fp.y >> (15u + 5u * a)) & 31u) + 1u);
             }
-            if ((words.y >> 30u) == VIS_VOXEL_SHAPE_CAPSULE) {
-                const float reach = vis_voxel_radius((words.x >> 26u) & 63u) * VIS_VOXEL_BOX_STEPS;
+            if ((fp.y >> 30u) == VIS_VOXEL_SHAPE_CAPSULE) {
+                const float reach = vis_voxel_radius((fp.x >> 26u) & 63u) * VIS_VOXEL_BOX_STEPS;
                 box_lo = max(box_lo - reach, vec3(cell));
                 box_hi = min(box_hi + reach, vec3(cell + 32u));
             }
@@ -221,8 +228,9 @@ void main()
                 vis_voxel_brick_ray(uintBitsToFloat(s_brick[brick].b0.xyz), inv * (p - t), dir);
             float th;
             uint face;
-            if (vis_voxel_hit(voxels.v[first + (sp.w >> 11u)], (sp.w >> 5u) & 63u, h, ray,
-                              -3.402823466e38, 3.402823466e38, th, face)) {
+            if (vis_voxel_hit(vis_voxel_load_footprint(run, vc.stride, first + (sp.w >> 11u)),
+                              (sp.w >> 5u) & 63u, h, ray, -3.402823466e38, 3.402823466e38, th,
+                              face)) {
                 // Casters nearer the light than the level's range still
                 // shadow: the depth is clamped, as the triangles' is.
                 const float depth = clamp((from + th) * depth_scale + r.v.levels[level].origin.z,

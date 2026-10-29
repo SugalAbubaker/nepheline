@@ -18,11 +18,13 @@
 // ---------------------------------------------------------------------------
 
 // A mesh with its levels of detail as a cooked mesh brings them: `desc`
-// names every level's clusters and the hierarchy.
+// names every level's clusters and the hierarchy, and its voxels compact
+// (`packed`; the levels' form stays in `lods`).
 typedef struct LodMesh {
     NphRenderMeshData data;
     NphRenderMeshlets meshlets; // level 0
     NphRenderClusterLods lods;
+    NphRenderPackedVoxels packed;
     NphRenderSubmesh sub;
     NphRenderMeshDesc desc;
 } LodMesh;
@@ -143,11 +145,20 @@ static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v
     m->desc.lod_nodes = m->lods.nodes.data;
     m->desc.lod_node_count = m->lods.nodes.len;
     m->desc.lod_level0_meshlets = m->lods.level0_clusters;
+    nph_render_packed_voxels_init(&m->packed, a);
     if (m->lods.bricks.len != 0U) {
-        m->desc.voxel_bricks = m->lods.bricks.data;
-        m->desc.voxel_brick_count = m->lods.bricks.len;
-        m->desc.voxels = m->lods.voxels.data;
-        m->desc.voxel_count = m->lods.voxels.len;
+        NphRenderMeshlets *w = &m->lods.clusters;
+        NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(w->meshlets.data, w->meshlets.len,
+                                                   m->lods.bricks.data, m->lods.bricks.len,
+                                                   m->lods.voxels.data, m->lods.voxels.len,
+                                                   &m->packed),
+                            NPH_RESULT_OK);
+        m->desc.voxel_clusters = m->packed.clusters.data;
+        m->desc.voxel_cluster_count = m->packed.clusters.len;
+        m->desc.voxel_bricks = m->packed.bricks.data;
+        m->desc.voxel_brick_count = m->packed.bricks.len;
+        m->desc.voxel_words = m->packed.words.data;
+        m->desc.voxel_word_count = m->packed.words.len;
     }
 }
 
@@ -340,6 +351,7 @@ static inline void lod_terrain(LodMesh *m, u32 cells, f32 half)
 
 static inline void lod_mesh_free(LodMesh *m)
 {
+    nph_render_packed_voxels_free(&m->packed);
     nph_render_cluster_lods_free(&m->lods);
     nph_render_meshlets_free(&m->meshlets);
     nph_render_mesh_data_free(&m->data);

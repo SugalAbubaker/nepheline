@@ -743,35 +743,39 @@ static bool is_voxel_cluster(const NphRenderMeshDesc *d, u32 i)
 }
 
 // A voxel cluster is checked so far as the GPU's reads stay inside the
-// voxels' streams and its tests are finite: its bricks' range (1 to
-// NPH_RENDER_VOXEL_CLUSTER_BRICKS), and each brick's voxels (one a set bit
-// of its mask, which is not empty), its cell (a positive, normal power of
-// two), and its origin (finite). The raster splats a cluster's voxels as
-// one run: its bricks share a cell size and their voxels follow one another
-// in the bricks' order. A footprint's fields are any bits the tests read
-// (render/voxel.h).
+// voxels' streams (render/voxel.h "The compact form"): its record (named by
+// its triangle_offset; its cell's exponent in range, no flag but WIDE), its
+// bricks' range (1 to NPH_RENDER_VOXEL_CLUSTER_BRICKS), and each brick's
+// voxels (one a set bit of its mask, which is not empty), whose ranks follow
+// one another in the bricks' order, at most NPH_RENDER_VOXEL_CLUSTER_VOXELS
+// of them, their words inside `voxel_words`. A brick's corner is any 16 bits
+// (its origin a whole number of bricks: finite), a footprint's fields any
+// bits the tests read.
 static NphResult validate_voxel_cluster(const NphRenderMeshDesc *d, const NphRenderMeshlet *m)
 {
     if (m->triangle_count == 0U || m->triangle_count > NPH_RENDER_VOXEL_CLUSTER_BRICKS ||
-        m->triangle_offset != 0U || d->voxel_bricks == NULL || d->voxels == NULL ||
-        m->vertex_offset > d->voxel_brick_count ||
+        d->voxel_clusters == NULL || d->voxel_bricks == NULL || d->voxel_words == NULL ||
+        m->triangle_offset >= d->voxel_cluster_count || m->vertex_offset > d->voxel_brick_count ||
         m->triangle_count > d->voxel_brick_count - m->vertex_offset) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
-    const NphRenderVoxelBrick *first = &d->voxel_bricks[m->vertex_offset];
-    u32 next_voxel = first->first_voxel;
+    const NphRenderVoxelCluster c = d->voxel_clusters[m->triangle_offset];
+    if ((i32)c.cell_log2 < NPH_RENDER_VOXEL_CELL_LOG2_MIN ||
+        ((u32)c.flags & ~(u32)NPH_RENDER_VOXEL_CLUSTER_WIDE) != 0U) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    u32 count = 0;
     for (u32 k = 0; k < m->triangle_count; ++k) {
-        const NphRenderVoxelBrick *b = &d->voxel_bricks[m->vertex_offset + k];
-        const u32 bits = nph_f32_to_bits(b->cell);
-        const u32 exponent = (bits >> 23U) & 0xFFU;
-        const u32 count = nph_popcount_u32(b->mask[0]) + nph_popcount_u32(b->mask[1]);
-        if ((bits & 0x807FFFFFU) != 0U || exponent == 0U || exponent == 0xFFU ||
-            !nph_vec3_is_finite(b->origin) || count == 0U || b->first_voxel > d->voxel_count ||
-            count > d->voxel_count - b->first_voxel || bits != nph_f32_to_bits(first->cell) ||
-            b->first_voxel != next_voxel) {
+        const NphRenderPackedBrick *b = &d->voxel_bricks[m->vertex_offset + k];
+        const u32 n = nph_popcount_u32(b->mask[0]) + nph_popcount_u32(b->mask[1]);
+        if (n == 0U || b->first != count) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
-        next_voxel = b->first_voxel + count;
+        count += n;
+    }
+    const u64 end = (u64)c.first_word + (u64)count * nph_render_voxel_cluster_stride(c);
+    if (count > NPH_RENDER_VOXEL_CLUSTER_VOXELS || end > d->voxel_word_count) {
+        return NPH_RESULT_INVALID_ARGUMENT;
     }
     return NPH_RESULT_OK;
 }
@@ -990,8 +994,9 @@ static NphResult validate_mesh(const NphRenderMeshDesc *d)
     if (voxels_alone(d)) {
         // Its clusters are given (none can be built without triangles), with
         // their levels and voxels; its submeshes name materials alone.
-        if (d->meshlets == NULL || d->lod_nodes == NULL || d->voxel_bricks == NULL ||
-            d->voxel_brick_count == 0U || d->voxels == NULL || d->voxel_count == 0U) {
+        if (d->meshlets == NULL || d->lod_nodes == NULL || d->voxel_clusters == NULL ||
+            d->voxel_cluster_count == 0U || d->voxel_bricks == NULL || d->voxel_brick_count == 0U ||
+            d->voxel_words == NULL || d->voxel_word_count == 0U) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
         for (u32 s = 0; s < d->submesh_count; ++s) {

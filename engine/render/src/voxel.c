@@ -108,6 +108,228 @@ f32 nph_render_voxel_kappa_decode(u32 b)
     return nph_f32_exp2((f32)nph_min_u32(b, 255U) / 16.0F) - 1.0F;
 }
 
+// ---------------------------------------------------------------------------
+// The compact form (render/voxel.h; ADR-0063)
+// ---------------------------------------------------------------------------
+
+void nph_render_packed_voxels_init(NphRenderPackedVoxels *p, NphAllocator *a)
+{
+    NPH_ASSERT(p != NULL && a != NULL);
+    NPH_ARRAY_INIT(&p->clusters, a);
+    NPH_ARRAY_INIT(&p->bricks, a);
+    NPH_ARRAY_INIT(&p->words, a);
+}
+
+void nph_render_packed_voxels_free(NphRenderPackedVoxels *p)
+{
+    if (p == NULL) {
+        return;
+    }
+    NPH_ARRAY_FREE(&p->clusters);
+    NPH_ARRAY_FREE(&p->bricks);
+    NPH_ARRAY_FREE(&p->words);
+}
+
+u32 nph_render_voxel_cluster_stride(NphRenderVoxelCluster c)
+{
+    return (c.flags & NPH_RENDER_VOXEL_CLUSTER_WIDE) != 0U ? NPH_RENDER_VOXEL_WIDE_WORDS
+                                                           : NPH_RENDER_VOXEL_WORDS;
+}
+
+f32 nph_render_voxel_cluster_cell(NphRenderVoxelCluster c)
+{
+    // 2^e from its bits: exact, as vis_voxel.glsl vis_voxel_cluster builds it.
+    const i32 e = nph_clamp_i32((i32)c.cell_log2, NPH_RENDER_VOXEL_CELL_LOG2_MIN,
+                                NPH_RENDER_VOXEL_CELL_LOG2_MAX);
+    return nph_f32_from_bits((u32)(127 + e) << 23U);
+}
+
+// The two's complement value of the low `bits` bits of `v`.
+static i32 signed_bits(u32 v, u32 bits)
+{
+    const i32 s = (i32)(v & ((1U << bits) - 1U));
+    return s >= (1 << (bits - 1U)) ? s - (1 << bits) : s;
+}
+
+// A snorm16 component (its 16 bits) at `bits` bits: the nearest of the grid
+// -m..m, m = 2^(bits - 1) - 1, as `bits` bits of two's complement.
+static u32 snorm_narrow(u32 v16, u32 bits)
+{
+    const i32 m = (1 << (bits - 1U)) - 1;
+    const f32 f = nph_f32_max((f32)signed_bits(v16, 16U) / 32767.0F, -1.0F);
+    const i32 q = (i32)nph_f32_round(f * (f32)m);
+    return (u32)q & ((1U << bits) - 1U);
+}
+
+// A `bits`-bit snorm component (two's complement) widened back to snorm16's
+// 16 bits, round(|v| 32767 / m) with its sign, in integers: what
+// vis_voxel.glsl vis_voxel_snorm16 computes, bit for bit.
+static u32 snorm_widen(u32 v, u32 bits)
+{
+    const i32 s = signed_bits(v, bits);
+    const i32 m = (1 << (bits - 1U)) - 1;
+    const i32 a = s < 0 ? -s : s;
+    const i32 q = nph_min_i32((a * 32767 + m / 2) / m, 32767);
+    return (u32)(s < 0 ? -q : q) & 0xFFFFU;
+}
+
+static bool is_capsule(u32 box)
+{
+    return (box >> NPH_RENDER_VOXEL_SHAPE_SHIFT) == NPH_RENDER_VOXEL_SHAPE_CAPSULE;
+}
+
+// A voxel's words (render/voxel.h "The compact form"); `out[3]` only when wide.
+static void pack_voxel(const NphRenderVoxel *v, bool wide, u32 out[4])
+{
+    const u32 nx = v->normal & 0xFFFFU;
+    const u32 ny = v->normal >> 16U;
+    const u32 lobe = is_capsule(v->box) ? snorm_narrow(nx, 8U) | (snorm_narrow(ny, 8U) << 8U) |
+                                              ((v->material >> 24U) << 16U)
+                                        : snorm_narrow(nx, 12U) | (snorm_narrow(ny, 12U) << 12U);
+    out[0] = v->box;
+    out[1] = lobe | (((v->material >> 16U) & 0xFFU) << 24U);
+    out[2] = (v->color & 0xFFFFFFU) | ((v->material & 0xFFU) << 24U);
+    out[3] = wide ? (v->color >> 24U) | (((v->material >> 8U) & 0xFFU) << 8U) : 0U;
+}
+
+NphRenderVoxel nph_render_voxel_from_packed(const u32 *words, NphRenderVoxelCluster c, u32 rank)
+{
+    NPH_ASSERT(words != NULL);
+    const bool wide = (c.flags & NPH_RENDER_VOXEL_CLUSTER_WIDE) != 0U;
+    const u32 *w = words + c.first_word + (u64)rank * nph_render_voxel_cluster_stride(c);
+    const u32 extra = wide ? w[3] : (u32)c.occlusion | ((u32)c.metallic << 8U);
+    const u32 lobe = w[1];
+    const bool capsule = is_capsule(w[0]);
+    NphRenderVoxel v;
+    v.box = w[0];
+    v.normal = capsule ? snorm_widen(lobe, 8U) | (snorm_widen(lobe >> 8U, 8U) << 16U)
+                       : snorm_widen(lobe, 12U) | (snorm_widen(lobe >> 12U, 12U) << 16U);
+    v.color = (w[2] & 0xFFFFFFU) | ((extra & 0xFFU) << 24U);
+    v.material = (w[2] >> 24U) | (((extra >> 8U) & 0xFFU) << 8U) | ((lobe >> 24U) << 16U) |
+                 ((capsule ? (lobe >> 16U) & 0xFFU : 0U) << 24U);
+    return v;
+}
+
+NphRenderVoxelBrick nph_render_brick_from_packed(NphRenderPackedBrick b, NphRenderVoxelCluster c,
+                                                 u32 first_voxel)
+{
+    // A whole number of bricks times a power of two: exact.
+    const f32 cell = nph_render_voxel_cluster_cell(c);
+    const f32 edge = 4.0F * cell;
+    NphRenderVoxelBrick out;
+    out.origin =
+        nph_vec3((f32)b.corner[0] * edge, (f32)b.corner[1] * edge, (f32)b.corner[2] * edge);
+    out.cell = cell;
+    out.mask[0] = b.mask[0];
+    out.mask[1] = b.mask[1];
+    out.first_voxel = first_voxel;
+    out.reserved = 0U;
+    return out;
+}
+
+// One voxel cluster's record, bricks and words (nph_render_voxels_pack).
+static NphResult pack_cluster(NphRenderMeshlet *m, const NphRenderVoxelBrick *bricks,
+                              u32 brick_count, const NphRenderVoxel *voxels, u32 voxel_count,
+                              NphRenderPackedVoxels *out)
+{
+    if (bricks == NULL || voxels == NULL || m->triangle_count > NPH_RENDER_VOXEL_CLUSTER_BRICKS ||
+        m->vertex_offset > brick_count || m->triangle_count > brick_count - m->vertex_offset) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const NphRenderVoxelBrick *first = &bricks[m->vertex_offset];
+    // Its cell, a power of two the record's exponent holds: no sign, no
+    // mantissa, an exponent in range (zero, subnormals, infinities and NaN
+    // have none).
+    const u32 cell_bits = nph_f32_to_bits(first->cell);
+    const i32 e = (i32)(cell_bits >> 23U) - 127;
+    if ((cell_bits & 0x807FFFFFU) != 0U || e < NPH_RENDER_VOXEL_CELL_LOG2_MIN ||
+        e > NPH_RENDER_VOXEL_CELL_LOG2_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const f32 edge = 4.0F * first->cell;
+    const u32 voxel0 = first->first_voxel;
+    u32 count = 0;
+    for (u32 k = 0; k < m->triangle_count; ++k) {
+        const NphRenderVoxelBrick *b = &bricks[m->vertex_offset + k];
+        const u32 n = nph_popcount_u32(b->mask[0]) + nph_popcount_u32(b->mask[1]);
+        if (n == 0U || nph_f32_to_bits(b->cell) != cell_bits || b->first_voxel != voxel0 + count ||
+            b->first_voxel > voxel_count || n > voxel_count - b->first_voxel ||
+            count + n > NPH_RENDER_VOXEL_CLUSTER_VOXELS) {
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        NphRenderPackedBrick p;
+        const f32 origin[3] = {b->origin.x, b->origin.y, b->origin.z};
+        for (u32 a = 0; a < 3U; ++a) {
+            // Dividing by a power of two is exact: the corner is whole, in
+            // 16 bits, and gives the origin back, or the brick is off its grid.
+            const f32 q = origin[a] / edge;
+            if (!(q == nph_f32_floor(q)) || q < -32768.0F || q > 32767.0F ||
+                q * edge != origin[a]) {
+                return NPH_RESULT_INVALID_ARGUMENT;
+            }
+            p.corner[a] = (i16)q;
+        }
+        p.first = (u16)count;
+        p.mask[0] = b->mask[0];
+        p.mask[1] = b->mask[1];
+        out->bricks.data[m->vertex_offset + k] = p;
+        count += n;
+    }
+    // Narrow when its voxels share their occlusion and metallic.
+    const NphRenderVoxel *v = &voxels[voxel0];
+    const u32 shared = (v->color >> 24U) | (v->material & 0xFF00U);
+    bool wide = false;
+    for (u32 j = 1; j < count && !wide; ++j) {
+        wide = ((v[j].color >> 24U) | (v[j].material & 0xFF00U)) != shared;
+    }
+    const u32 stride = wide ? NPH_RENDER_VOXEL_WIDE_WORDS : NPH_RENDER_VOXEL_WORDS;
+    if ((u64)out->words.len + (u64)count * stride > NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    NphRenderVoxelCluster rec;
+    rec.first_word = out->words.len;
+    rec.cell_log2 = (i8)e;
+    rec.occlusion = (u8)(wide ? 0U : shared & 0xFFU);
+    rec.metallic = (u8)(wide ? 0U : shared >> 8U);
+    rec.flags = (u8)(wide ? NPH_RENDER_VOXEL_CLUSTER_WIDE : 0U);
+    const u32 at = out->words.len;
+    NPH_TRY(NPH_ARRAY_RESIZE(&out->words, at + count * stride));
+    for (u32 j = 0; j < count; ++j) {
+        u32 w[4];
+        pack_voxel(&v[j], wide, w);
+        for (u32 k = 0; k < stride; ++k) {
+            out->words.data[at + j * stride + k] = w[k];
+        }
+    }
+    m->triangle_offset = out->clusters.len;
+    return NPH_ARRAY_PUSH(&out->clusters, rec);
+}
+
+NphResult nph_render_voxels_pack(NphRenderMeshlet *meshlets, u32 meshlet_count,
+                                 const NphRenderVoxelBrick *bricks, u32 brick_count,
+                                 const NphRenderVoxel *voxels, u32 voxel_count,
+                                 NphRenderPackedVoxels *out)
+{
+    NPH_ASSERT(out != NULL && (meshlets != NULL || meshlet_count == 0U));
+    NPH_ARRAY_CLEAR(&out->clusters);
+    NPH_ARRAY_CLEAR(&out->words);
+    NPH_ARRAY_CLEAR(&out->bricks);
+    // One packed brick a brick, at its index (zero for any no cluster names).
+    NphResult r = NPH_ARRAY_RESIZE(&out->bricks, brick_count);
+    for (u32 i = 0; i < meshlet_count && r == NPH_RESULT_OK; ++i) {
+        NphRenderMeshlet *m = &meshlets[i];
+        if (m->vertex_count == 0U && m->triangle_count != 0U) {
+            r = pack_cluster(m, bricks, brick_count, voxels, voxel_count, out);
+        }
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_ARRAY_CLEAR(&out->clusters);
+        NPH_ARRAY_CLEAR(&out->bricks);
+        NPH_ARRAY_CLEAR(&out->words);
+    }
+    return r;
+}
+
 // A(kappa) = coth(kappa) - 1/kappa, the mean cosine of a vMF lobe about its
 // axis, in double precision: its series near 0, where the difference cancels.
 static f64 vmf_mean_cosine(f64 kappa)

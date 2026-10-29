@@ -22,10 +22,12 @@ void main()
         return;
     }
     const NphVisVoxelCase c = VisVoxelCasesRef(pc.cases).c[i];
-    VisBricksRef bricks = VisBricksRef(pc.bricks);
-    VisVoxelsRef voxels = VisVoxelsRef(pc.voxels);
-    const uvec4 b0 = bricks.b[c.brick * 2u];
-    const uvec4 b1 = bricks.b[c.brick * 2u + 1u];
+    // One brick a voxel cluster: the case's brick names its cluster too.
+    const VisVoxelCluster vc = vis_voxel_cluster(pc.clusters, c.brick);
+    VisVoxelWordsRef run = vis_voxel_run(pc.voxels, vc);
+    uvec4 b0;
+    uvec4 b1;
+    vis_voxel_brick(VisPackedBricksRef(pc.bricks), c.brick, vc, b0, b1);
     const float h = uintBitsToFloat(b0.w);
     const VisVoxelRay r = vis_voxel_brick_ray(uintBitsToFloat(b0.xyz), c.origin.xyz, c.dir.xyz);
     VisVoxelHit hit;
@@ -42,7 +44,8 @@ void main()
         const uint index = b1.z + vis_voxel_rank(b1.x, b1.y, bit);
         float t;
         uint face;
-        if (vis_voxel_hit(voxels.v[index], bit, h, r, c.origin.w, c.dir.w, t, face) &&
+        if (vis_voxel_hit(vis_voxel_load(run, vc.stride, vc.cluster_look, index), bit, h, r,
+                          c.origin.w, c.dir.w, t, face) &&
             (!found || t < hit.t)) {
             found = true;
             hit.t = t;
@@ -61,7 +64,7 @@ void main()
         // The depth the raster writes, and the search from it.
         const float depth = vis_voxel_depth(hit.t);
         VisVoxelHit again;
-        if (vis_voxel_find(b0, b1, voxels, c.origin.xyz, c.dir.xyz, depth, again) &&
+        if (vis_voxel_find(b0, b1, run, vc.stride, c.origin.xyz, c.dir.xyz, depth, again) &&
             again.t == hit.t && again.voxel == hit.voxel && again.face == hit.face) {
             res.face |= 512u;
         }

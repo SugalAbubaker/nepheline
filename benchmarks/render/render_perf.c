@@ -721,6 +721,14 @@ static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n,
                 name, data.index_count / 3U, lods.clusters.meshlets.len, lods.levels,
                 lods.voxels.len, lods.bricks.len, (f64)(nph_time_now_ns() - t0) / 1.0e9);
     }
+    NphRenderPackedVoxels packed;
+    nph_render_packed_voxels_init(&packed, a);
+    if (r == NPH_RESULT_OK && lods.bricks.len != 0U) {
+        // The voxels compact, as the cooker stores them (render/voxel.h).
+        NphRenderMeshlets *c = &lods.clusters;
+        r = nph_render_voxels_pack(c->meshlets.data, c->meshlets.len, lods.bricks.data,
+                                   lods.bricks.len, lods.voxels.data, lods.voxels.len, &packed);
+    }
     if (r == NPH_RESULT_OK) {
         NphRenderSubmesh sub;
         NphRenderMeshDesc md;
@@ -742,13 +750,16 @@ static NphResult upload_lod_mesh(Ctx *ctx, const NphRenderVertexInput *v, u32 n,
         md.lod_node_count = lods.nodes.len;
         md.lod_level0_meshlets = lods.level0_clusters;
         if (lods.bricks.len != 0U) {
-            md.voxel_bricks = lods.bricks.data;
-            md.voxel_brick_count = lods.bricks.len;
-            md.voxels = lods.voxels.data;
-            md.voxel_count = lods.voxels.len;
+            md.voxel_clusters = packed.clusters.data;
+            md.voxel_cluster_count = packed.clusters.len;
+            md.voxel_bricks = packed.bricks.data;
+            md.voxel_brick_count = packed.bricks.len;
+            md.voxel_words = packed.words.data;
+            md.voxel_word_count = packed.words.len;
         }
         r = nph_render_mesh_create(ctx->renderer, &md, out);
     }
+    nph_render_packed_voxels_free(&packed);
     nph_render_cluster_lods_free(&lods);
     nph_render_meshlets_free(&meshlets);
     if (positions != NULL) {

@@ -37,21 +37,26 @@ NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode) &&
                           offsetof(NphRenderLodNode, maker_error) &&
                       offsetof(NphMeshLodNode, child) == offsetof(NphRenderLodNode, child),
                   "node layouts agree");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick) &&
-                      offsetof(NphMeshVoxelBrick, origin) ==
-                          offsetof(NphRenderVoxelBrick, origin) &&
-                      offsetof(NphMeshVoxelBrick, cell) == offsetof(NphRenderVoxelBrick, cell) &&
-                      offsetof(NphMeshVoxelBrick, mask) == offsetof(NphRenderVoxelBrick, mask) &&
-                      offsetof(NphMeshVoxelBrick, first_voxel) ==
-                          offsetof(NphRenderVoxelBrick, first_voxel),
+// The voxels compact (render/voxel.h "The compact form").
+NPH_STATIC_ASSERT(
+    sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster) &&
+        offsetof(NphMeshVoxelCluster, first_word) == offsetof(NphRenderVoxelCluster, first_word) &&
+        offsetof(NphMeshVoxelCluster, cell_log2) == offsetof(NphRenderVoxelCluster, cell_log2) &&
+        offsetof(NphMeshVoxelCluster, occlusion) == offsetof(NphRenderVoxelCluster, occlusion) &&
+        offsetof(NphMeshVoxelCluster, metallic) == offsetof(NphRenderVoxelCluster, metallic) &&
+        offsetof(NphMeshVoxelCluster, flags) == offsetof(NphRenderVoxelCluster, flags),
+    "voxel cluster layouts agree");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick) &&
+                      offsetof(NphMeshVoxelBrick, corner) ==
+                          offsetof(NphRenderPackedBrick, corner) &&
+                      offsetof(NphMeshVoxelBrick, first) == offsetof(NphRenderPackedBrick, first) &&
+                      offsetof(NphMeshVoxelBrick, mask) == offsetof(NphRenderPackedBrick, mask),
                   "brick layouts agree");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxel) == sizeof(NphRenderVoxel) &&
-                      offsetof(NphMeshVoxel, color) == offsetof(NphRenderVoxel, color) &&
-                      offsetof(NphMeshVoxel, normal) == offsetof(NphRenderVoxel, normal) &&
-                      offsetof(NphMeshVoxel, material) == offsetof(NphRenderVoxel, material) &&
-                      offsetof(NphMeshVoxel, box) == offsetof(NphRenderVoxel, box),
-                  "voxel layouts agree");
-NPH_STATIC_ASSERT(NPH_MESH_VOXEL_CLUSTER_BRICKS == NPH_RENDER_VOXEL_CLUSTER_BRICKS,
+NPH_STATIC_ASSERT(NPH_MESH_VOXEL_CLUSTER_BRICKS == NPH_RENDER_VOXEL_CLUSTER_BRICKS &&
+                      NPH_MESH_VOXEL_CLUSTER_VOXELS == NPH_RENDER_VOXEL_CLUSTER_VOXELS &&
+                      NPH_MESH_VOXEL_CLUSTER_WIDE == NPH_RENDER_VOXEL_CLUSTER_WIDE &&
+                      NPH_MESH_VOXEL_WORDS == NPH_RENDER_VOXEL_WORDS &&
+                      NPH_MESH_VOXEL_WIDE_WORDS == NPH_RENDER_VOXEL_WIDE_WORDS,
                   "voxel cluster limits agree");
 NPH_STATIC_ASSERT(NPH_MESH_LOD_NONE == NPH_RENDER_LOD_NONE &&
                       NPH_MESH_LOD_LEAF == NPH_RENDER_LOD_LEAF &&

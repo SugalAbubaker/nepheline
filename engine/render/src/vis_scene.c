@@ -37,10 +37,11 @@ NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 192U, "NphVisMesh matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, voxel_bricks) % 8U == 0U &&
-                      offsetof(NphVisMesh, voxels) % 8U == 0U,
+                      offsetof(NphVisMesh, voxels) % 8U == 0U &&
+                      offsetof(NphVisMesh, voxel_clusters) % 8U == 0U,
                   "addresses are aligned");
-NPH_STATIC_ASSERT(sizeof(NphRenderVoxelBrick) == 32U && sizeof(NphRenderVoxel) == 16U,
-                  "the voxels match vis_voxel.glsl's two uvec4 a brick and one a voxel");
+NPH_STATIC_ASSERT(sizeof(NphRenderPackedBrick) == 16U && sizeof(NphRenderVoxelCluster) == 8U,
+                  "the compact voxels match vis_voxel.glsl's uvec4 a brick and uvec2 a cluster");
 NPH_STATIC_ASSERT(sizeof(NphVisMesh) % 16U == 0U,
                   "a mesh record's stride keeps each record at the 16 bytes buffer references "
                   "declare (the resolve indexes them as VisMeshRef(...)[i])");
@@ -375,13 +376,17 @@ static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshD
             rec->lod_level0_error = nph_f32_min(rec->lod_level0_error, d->lod_groups[parent].error);
         }
     }
-    // The voxel clusters' bricks and voxels (vis_voxel.glsl).
+    // The voxel clusters' records, bricks and voxels, compact (vis_voxel.glsl).
     if (d->voxel_bricks != NULL && d->voxel_brick_count != 0U) {
+        NPH_TRY(upload_stream(r, d->voxel_clusters,
+                              (u64)d->voxel_cluster_count * sizeof(NphRenderVoxelCluster),
+                              "mesh voxel clusters", &m->voxel_clusters));
         NPH_TRY(upload_stream(r, d->voxel_bricks,
-                              (u64)d->voxel_brick_count * sizeof(NphRenderVoxelBrick),
+                              (u64)d->voxel_brick_count * sizeof(NphRenderPackedBrick),
                               "mesh voxel bricks", &m->voxel_bricks));
-        NPH_TRY(upload_stream(r, d->voxels, (u64)d->voxel_count * sizeof(NphRenderVoxel),
+        NPH_TRY(upload_stream(r, d->voxel_words, (u64)d->voxel_word_count * sizeof(u32),
                               "mesh voxels", &m->voxels));
+        rec->voxel_clusters = nph_gpu_buffer_address(r->dev, m->voxel_clusters);
         rec->voxel_bricks = nph_gpu_buffer_address(r->dev, m->voxel_bricks);
         rec->voxels = nph_gpu_buffer_address(r->dev, m->voxels);
     }
@@ -518,6 +523,7 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->lod_groups);
     nph_gpu_buffer_destroy(r->dev, m->lod_group_clusters);
     nph_gpu_buffer_destroy(r->dev, m->lod_makers);
+    nph_gpu_buffer_destroy(r->dev, m->voxel_clusters);
     nph_gpu_buffer_destroy(r->dev, m->voxel_bricks);
     nph_gpu_buffer_destroy(r->dev, m->voxels);
     m->meshlets = NPH_GPU_BUFFER_NULL;
@@ -529,6 +535,7 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     m->lod_groups = NPH_GPU_BUFFER_NULL;
     m->lod_group_clusters = NPH_GPU_BUFFER_NULL;
     m->lod_makers = NPH_GPU_BUFFER_NULL;
+    m->voxel_clusters = NPH_GPU_BUFFER_NULL;
     m->voxel_bricks = NPH_GPU_BUFFER_NULL;
     m->voxels = NPH_GPU_BUFFER_NULL;
     if (m->lod_depth != 0U) {

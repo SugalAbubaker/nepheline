@@ -18,10 +18,105 @@
 
 #include "vis_common.glsl"
 
-// A brick: two uvec4, (origin.xyz, cell) as float bits, then (mask low, mask
-// high, first voxel, 0). A voxel: (colour, normal, material, box).
-NPH_BUFFER_REF(VisBricksRef) { uvec4 b[]; };
-NPH_BUFFER_REF(VisVoxelsRef) { uvec4 v[]; };
+// A mesh's voxels are compact (render/voxel.h "The compact form"; ADR-0063):
+// a voxel cluster's record (a uvec2: its first word; its cell's exponent,
+// occlusion, metallic and flags, a byte each), its bricks (a uvec4 each: the
+// corner's 16-bit coordinates, its first voxel's rank in its cluster, its
+// mask), and its voxels' words (three a voxel, four in a wide cluster). The
+// loaders below give them back in the levels' layout the tests take: a brick
+// as two uvec4, (origin.xyz, cell) as float bits, then (mask low, mask high,
+// its first voxel's rank, 0); a voxel as (colour, normal, material, box).
+NPH_BUFFER_REF(VisVoxelClustersRef) { uvec2 c[]; };
+NPH_BUFFER_REF(VisPackedBricksRef) { uvec4 b[]; };
+NPH_BUFFER_REF(VisVoxelWordsRef) { uint w[]; };
+
+// A voxel cluster's record, as the shaders take it.
+struct VisVoxelCluster {
+    uint first_word; // its voxels' first word
+    float h;         // its cells' edge, 2^e exactly
+    uint stride;       // the words a voxel takes: 3, or 4 when wide
+    uint cluster_look; // a narrow cluster's occlusion (bits 0..7) and metallic (8..15)
+};
+
+VisVoxelCluster vis_voxel_cluster(uint64_t clusters, uint index)
+{
+    const uvec2 r = VisVoxelClustersRef(clusters).c[index];
+    VisVoxelCluster c;
+    c.first_word = r.x;
+    // voxel.c nph_render_voxel_cluster_cell: 2^e from its bits.
+    const int e = clamp(bitfieldExtract(int(r.y), 0, 8), -126, 127);
+    c.h = uintBitsToFloat(uint(127 + e) << 23u);
+    c.stride = (r.y & (1u << 24u)) != 0u ? 4u : 3u;
+    c.cluster_look = (r.y >> 8u) & 0xFFFFu;
+    return c;
+}
+
+// Brick `brick` of cluster `c` in the levels' layout (voxel.c
+// nph_render_brick_from_packed): a whole number of bricks times a power of
+// two, so the origin is exactly the levels' own.
+void vis_voxel_brick(VisPackedBricksRef bricks, uint brick, VisVoxelCluster c, out uvec4 b0,
+                     out uvec4 b1)
+{
+    const uvec4 p = bricks.b[brick];
+    const vec3 corner = vec3(bitfieldExtract(int(p.x), 0, 16), bitfieldExtract(int(p.x), 16, 16),
+                             bitfieldExtract(int(p.y), 0, 16));
+    precise vec3 origin = corner * (4.0 * c.h);
+    b0 = uvec4(floatBitsToUint(origin), floatBitsToUint(c.h));
+    b1 = uvec4(p.z, p.w, p.y >> 16u, 0u);
+}
+
+// A `bits`-bit snorm component (two's complement) widened to snorm16's 16
+// bits: round(|v| 32767 / m) with its sign, m = 2^(bits - 1) - 1 (voxel.c
+// snorm_widen, bit for bit).
+uint vis_voxel_snorm16(uint v, uint bits)
+{
+    const int s = bitfieldExtract(int(v), 0, int(bits));
+    const int m = (1 << (int(bits) - 1)) - 1;
+    const int a = abs(s);
+    const int q = min((a * 32767 + m / 2) / m, 32767);
+    return uint(s < 0 ? -q : q) & 0xFFFFu;
+}
+
+// A voxel cluster's voxels' words, from its first: the mesh's words
+// (`mesh_words`, NphVisMesh.voxels) at its record's first word. The searches
+// take it and the cluster's stride, two values live where the record is four.
+VisVoxelWordsRef vis_voxel_run(uint64_t mesh_words, VisVoxelCluster c)
+{
+    return VisVoxelWordsRef(mesh_words + 4ul * uint64_t(c.first_word));
+}
+
+// The voxel of rank `rank` in a cluster's run of words (`stride` a voxel,
+// `cluster_look` its narrow voxels' occlusion and metallic), in the levels'
+// layout (voxel.c nph_render_voxel_from_packed, bit for bit).
+uvec4 vis_voxel_load(VisVoxelWordsRef run, uint stride, uint cluster_look, uint rank)
+{
+    const uint at = rank * stride;
+    const uint box = run.w[at];
+    const uint lobe = run.w[at + 1u];
+    const uint look = run.w[at + 2u];
+    const uint extra = stride == 4u ? run.w[at + 3u] : cluster_look;
+    const bool capsule = (box >> 30u) == 2u;
+    const uint normal = capsule ? vis_voxel_snorm16(lobe, 8u) |
+                                      (vis_voxel_snorm16(lobe >> 8u, 8u) << 16u)
+                                : vis_voxel_snorm16(lobe, 12u) |
+                                      (vis_voxel_snorm16(lobe >> 12u, 12u) << 16u);
+    const uint color = (look & 0xFFFFFFu) | ((extra & 0xFFu) << 24u);
+    const uint material = (look >> 24u) | (((extra >> 8u) & 0xFFu) << 8u) |
+                          ((lobe >> 24u) << 16u) | ((capsule ? (lobe >> 16u) & 0xFFu : 0u) << 24u);
+    return uvec4(color, normal, material, box);
+}
+
+// What a voxel's footprint takes of it (vis_voxel_hit): its box, and its
+// material's capsule byte (the rest zero), for the rasters and the searches,
+// which read no more. Both words load whatever the shape: no branch to wait on.
+uvec4 vis_voxel_load_footprint(VisVoxelWordsRef run, uint stride, uint rank)
+{
+    const uint at = rank * stride;
+    const uint box = run.w[at];
+    const uint lobe = run.w[at + 1u];
+    const uint capsule = (box >> 30u) == 2u ? (lobe >> 16u) & 0xFFu : 0u;
+    return uvec4(0u, 0u, capsule << 24u, box);
+}
 
 // render/voxel.h's constants.
 #define VIS_VOXEL_BOX_STEPS       32.0
@@ -339,15 +434,17 @@ float vis_voxel_depth(float t)
     return z;
 }
 
-// The voxel of brick (b0, b1) that the ray origin + t dir (mesh space, t >=
-// 1) meets first, where the visibility buffer holds `depth` for it: among
-// the occupied cells of the two along each axis whose centres lie nearest
-// the ray's point at that depth, which hold that point whatever its
-// rounding, the point's own cell first. The first whose voxel's hit gives the
-// depth again is the raster's (vis_voxel_hit, bit for bit), else the nearest
-// hit among them is taken. False where it meets none.
-bool vis_voxel_find(uvec4 b0, uvec4 b1, VisVoxelsRef voxels, vec3 origin, vec3 dir, float depth,
-                    out VisVoxelHit hit)
+// The voxel of brick (b0, b1) of cluster `vc` that the ray origin + t dir
+// (mesh space, t >= 1) meets first, where the visibility buffer holds `depth`
+// for it: among the occupied cells of the two along each axis whose centres
+// lie nearest the ray's point at that depth, which hold that point whatever
+// its rounding, the point's own cell first. The first whose voxel's hit gives
+// the depth again is the raster's (vis_voxel_hit, bit for bit), else the
+// nearest hit among them is taken. False where it meets none; `hit.voxel` is
+// the voxel's rank in its cluster, whose run of words (vis_voxel_run, `stride`
+// a voxel) the search reads.
+bool vis_voxel_find(uvec4 b0, uvec4 b1, VisVoxelWordsRef run, uint stride, vec3 origin, vec3 dir,
+                    float depth, out VisVoxelHit hit)
 {
     hit.t = 0.0;
     hit.voxel = 0u;
@@ -374,7 +471,9 @@ bool vis_voxel_find(uvec4 b0, uvec4 b1, VisVoxelsRef voxels, vec3 origin, vec3 d
         const uint index = b1.z + vis_voxel_rank(b1.x, b1.y, bit);
         float t;
         uint face;
-        if (vis_voxel_hit(voxels.v[index], bit, h, r, 1.0, 3.402823466e38, t, face) && t < best) {
+        if (vis_voxel_hit(vis_voxel_load_footprint(run, stride, index), bit, h, r, 1.0,
+                          3.402823466e38, t, face) &&
+            t < best) {
             best = t;
             found = true;
             hit.t = t;
@@ -410,10 +509,12 @@ bool vis_voxel_surface(VisViewRef view, mat4 inv_view_proj, uint64_t v, ivec2 pi
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
     const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
     const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
-    const uint brick = m.x + vis_triangle(v);
-    VisBricksRef bricks = VisBricksRef(mesh.voxel_bricks);
-    const uvec4 b0 = bricks.b[brick * 2u];
-    const uvec4 b1 = bricks.b[brick * 2u + 1u];
+    // A voxel cluster's meshlet: its first brick, its record (render/voxel.h).
+    const VisVoxelCluster vc = vis_voxel_cluster(mesh.voxel_clusters, m.y);
+    uvec4 b0;
+    uvec4 b1;
+    vis_voxel_brick(VisPackedBricksRef(mesh.voxel_bricks), m.x + vis_triangle(v), vc, b0, b1);
+    VisVoxelWordsRef run = vis_voxel_run(mesh.voxels, vc);
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
     const mat3 inv = vis_voxel_inverse_linear(inst.transform);
@@ -422,13 +523,13 @@ bool vis_voxel_surface(VisViewRef view, mat4 inv_view_proj, uint64_t v, ivec2 pi
     const vec3 d =
         vis_voxel_ray_dir(inv_view_proj, inv, vis_voxel_ndc(pixel, view.v.viewport.zw), world_dir);
     VisVoxelHit hit;
-    const bool found = vis_voxel_find(b0, b1, VisVoxelsRef(mesh.voxels), o, d, vis_depth(v), hit);
+    const bool found = vis_voxel_find(b0, b1, run, vc.stride, o, d, vis_depth(v), hit);
     out_s.transform = inst.transform;
     // Where the search finds nothing, the depth's point (and the voxel the
     // record names first) keep the shading defined.
     const float th = found ? hit.t : 1.0 / max(vis_depth(v), 1e-30);
     out_s.position = world_dir * th;
-    out_s.voxel = VisVoxelsRef(mesh.voxels).v[found ? hit.voxel : b1.z];
+    out_s.voxel = vis_voxel_load(run, vc.stride, vc.cluster_look, found ? hit.voxel : b1.z);
     const uint axis = hit.face & 3u;
     vec3 n = vec3(0.0);
     n[axis] = (hit.face & 4u) != 0u ? 1.0 : -1.0;

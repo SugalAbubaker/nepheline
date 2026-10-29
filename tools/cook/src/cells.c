@@ -260,18 +260,17 @@ NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod),
 NPH_STATIC_ASSERT(sizeof(NphMeshLodGroup) == sizeof(NphRenderLodGroup),
                   "a group is the renderer's");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodNode) == sizeof(NphRenderLodNode), "a node is the renderer's");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderVoxelBrick),
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelCluster) == sizeof(NphRenderVoxelCluster),
+                  "a voxel cluster's record is the renderer's");
+NPH_STATIC_ASSERT(sizeof(NphMeshVoxelBrick) == sizeof(NphRenderPackedBrick),
                   "a brick is the renderer's");
-NPH_STATIC_ASSERT(sizeof(NphMeshVoxel) == sizeof(NphRenderVoxel), "a voxel is the renderer's");
 
-NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *writer)
+// The proxy's blobs, its voxel clusters' records `meshlets` naming theirs in
+// `packed` (render/voxel.h "The compact form").
+static NphResult write_proxy(const NphRenderClusterLods *proxy, const NphRenderMeshlet *meshlets,
+                             const NphRenderPackedVoxels *packed, NphAssetWriter *writer)
 {
-    NPH_ASSERT(proxy != NULL && writer != NULL);
     const u32 n = proxy->clusters.meshlets.len;
-    if (n == 0U || proxy->level0_clusters == 0U || proxy->groups.len == 0U ||
-        proxy->nodes.len == 0U) {
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
     // The bounds: the clusters' spheres'.
     NphAABB bounds = nph_aabb_empty();
     NphSphere sphere =
@@ -300,15 +299,15 @@ NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *wr
     lh.group_count = proxy->groups.len;
     lh.group_cluster_count = proxy->group_clusters.len;
     lh.node_count = proxy->nodes.len;
-    lh.brick_count = proxy->bricks.len;
-    lh.voxel_count = proxy->voxels.len;
+    lh.brick_count = packed->bricks.len;
+    lh.voxel_word_count = packed->words.len;
+    lh.voxel_cluster_count = packed->clusters.len;
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_HEADER, 0U, &h, sizeof h,
                                       NPH_ASSET_CODEC_NONE, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_SUBMESHES, 0U, &sub, sizeof sub,
                                       NPH_ASSET_CODEC_NONE, 0U));
-    NPH_TRY(nph_asset_writer_add_blob(
-        writer, NPH_MESH_TAG_MESHLETS, 0U, proxy->clusters.meshlets.data,
-        NPH_ARRAY_BYTES(&proxy->clusters.meshlets), NPH_ASSET_CODEC_LZ, 0U));
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_MESHLETS, 0U, meshlets,
+                                      (u64)n * sizeof(NphRenderMeshlet), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(
         writer, NPH_MESH_TAG_MESHLET_BOUNDS, 0U, proxy->clusters.bounds.data,
         NPH_ARRAY_BYTES(&proxy->clusters.bounds), NPH_ASSET_CODEC_LZ, 0U));
@@ -323,8 +322,39 @@ NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *wr
                                   NPH_ARRAY_BYTES(&proxy->group_clusters), NPH_ASSET_CODEC_LZ, 0U));
     NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_LOD_NODES, 0U, proxy->nodes.data,
                                       NPH_ARRAY_BYTES(&proxy->nodes), NPH_ASSET_CODEC_LZ, 0U));
-    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, proxy->bricks.data,
-                                      NPH_ARRAY_BYTES(&proxy->bricks), NPH_ASSET_CODEC_LZ, 0U));
-    return nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXELS, 0U, proxy->voxels.data,
-                                     NPH_ARRAY_BYTES(&proxy->voxels), NPH_ASSET_CODEC_LZ, 0U);
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_CLUSTERS, 0U,
+                                      packed->clusters.data, NPH_ARRAY_BYTES(&packed->clusters),
+                                      NPH_ASSET_CODEC_LZ, 0U));
+    NPH_TRY(nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXEL_BRICKS, 0U, packed->bricks.data,
+                                      NPH_ARRAY_BYTES(&packed->bricks), NPH_ASSET_CODEC_LZ, 0U));
+    return nph_asset_writer_add_blob(writer, NPH_MESH_TAG_VOXELS, 0U, packed->words.data,
+                                     NPH_ARRAY_BYTES(&packed->words), NPH_ASSET_CODEC_LZ, 0U);
+}
+
+NphResult cook_proxy_write(const NphRenderClusterLods *proxy, NphAssetWriter *writer)
+{
+    NPH_ASSERT(proxy != NULL && writer != NULL);
+    const u32 n = proxy->clusters.meshlets.len;
+    if (n == 0U || proxy->level0_clusters == 0U || proxy->groups.len == 0U ||
+        proxy->nodes.len == 0U) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // The voxels compact, packed from a copy of the clusters' records, whose
+    // voxel clusters then name their own (render/voxel.h "The compact form").
+    NphAllocator *a = proxy->clusters.meshlets.alloc;
+    NphRenderMeshletArray meshlets;
+    NPH_ARRAY_INIT(&meshlets, a);
+    NphRenderPackedVoxels packed;
+    nph_render_packed_voxels_init(&packed, a);
+    NphResult r = NPH_ARRAY_PUSH_N(&meshlets, proxy->clusters.meshlets.data, n);
+    if (r == NPH_RESULT_OK) {
+        r = nph_render_voxels_pack(meshlets.data, n, proxy->bricks.data, proxy->bricks.len,
+                                   proxy->voxels.data, proxy->voxels.len, &packed);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = write_proxy(proxy, meshlets.data, &packed, writer);
+    }
+    nph_render_packed_voxels_free(&packed);
+    NPH_ARRAY_FREE(&meshlets);
+    return r;
 }

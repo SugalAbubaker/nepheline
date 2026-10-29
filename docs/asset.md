@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 4; versions 1 to 3 still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 5; earlier versions without voxels still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -242,22 +242,31 @@ can be handed to the renderer without further checks:
   bounds to the renderer, which checks them when the mesh is created.
   From version 3, `LODS` also counts bricks and voxels, and a mesh whose
   coarser levels hold voxels (docs/render.md "Voxels", ADR-0061) adds
-  `VOXB` (bricks: 4 x 4 x 4 cells of one power-of-two edge from an
-  origin, a 64-bit occupancy mask, the first voxel; 32 bytes) and `VOXA`
-  (voxels, one per set bit in bit order: albedo and occlusion, the
-  normals' lobe, roughness, metallic, and the capsule's code, and the
-  footprint's box and shape; 16 bytes), the renderer's records
-  (render/voxel.h) byte for byte. A voxel cluster is a cluster past level
-  0 whose meshlet record has no vertices: its `triangle_count` (1 to 32)
-  bricks from `vertex_offset`, `triangle_offset` zero. The view checks
-  each such cluster's bricks, each brick's cell (finite, positive, normal,
-  a power of two), origin (finite), mask (not empty), and voxels (in
-  range), and each voxel's footprint (a box at least one step across on
-  each axis, a known shape, a capsule's code only on a capsule and at
-  most 56) and reserved fields. From version 4, a mesh may be voxels
-  alone (a world partition cell's proxy, docs/render.md "Cell proxies",
-  ADR-0062): no vertices and no indices (`POSN`, `ATTR`, `INDX`, `MLVX`
-  and `MLTR` absent), every cluster a voxel cluster, level 0's too, and
+  them; from version 5 compact (render/voxel.h "The compact form",
+  ADR-0063), the renderer's records byte for byte: `VOXC` (a voxel
+  cluster's record: its voxels' first word, its cells' edge as a power of
+  two's exponent, the occlusion and metallic its voxels share, a flag when
+  they hold their own; 8 bytes), `VOXB` (bricks: 4 x 4 x 4 cells of their
+  cluster's edge, the corner in whole bricks, the first voxel's rank in its
+  cluster, a 64-bit occupancy mask; 16 bytes) and `VOXA` (the voxels' words,
+  one voxel per set bit in bit order: the footprint's box and shape; the
+  normals' lobe, its axis at 12 bits a component or a capsule's at 8 with
+  the capsule's code; the albedo and roughness; and in a wide cluster the
+  occlusion and metallic: three words, or four). `LODS` counts the records,
+  bricks and words. A voxel cluster is a cluster past level 0 whose meshlet
+  record has no vertices: its `triangle_count` (1 to 32) bricks from
+  `vertex_offset`, its record `VOXC[triangle_offset]`. The view checks each
+  such cluster's record (in range, its exponent a normal float's, no flag
+  but the wide one, a wide record's shared fields zero), its bricks (masks
+  not empty, their first ranks following one another from 0, at most 1,024
+  voxels, their words in range), and each voxel's footprint (a box at least
+  one step across on each axis, a known shape, a capsule's code at most 56)
+  and reserved bits. Versions 3 and 4 kept the builders' records (bricks of
+  32 bytes, voxels of 16); such a mesh no longer reads
+  (`NPH_RESULT_VERSION_MISMATCH`: cook it again). From version 4, a mesh
+  may be voxels alone (a world partition cell's proxy, docs/render.md "Cell
+  proxies", ADR-0062): no vertices and no indices (`POSN`, `ATTR`, `INDX`,
+  `MLVX` and `MLTR` absent), every cluster a voxel cluster, level 0's too, and
   one submesh of no indices over level 0's clusters. A record without
   vertices at level 0 is a voxel cluster's in such a mesh alone: in a mesh
   with vertices or indices, or before version 4, it is a meshlet's.

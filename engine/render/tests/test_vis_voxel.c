@@ -86,8 +86,14 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
     for (u32 k = 0; k < TWIN_BRICKS; ++k) {
         NphRenderVoxelBrick *brick = &bricks[k];
         brick->cell = ldexpf(1.0F, (int)(nph_pcg32_next_u32(&rng) % 8U) - 4);
-        brick->origin =
+        // On its cell's grid of bricks, as the builders place them (the compact
+        // form holds a corner in whole bricks).
+        const f32 edge = 4.0F * brick->cell;
+        const NphVec3 at =
             nph_vec3_scale(nph_vec3_sub(nph_pcg32_next_vec3(&rng), nph_vec3_splat(0.5F)), 20.0F);
+        brick->origin =
+            nph_vec3(nph_f32_floor(at.x / edge) * edge, nph_f32_floor(at.y / edge) * edge,
+                     nph_f32_floor(at.z / edge) * edge);
         brick->first_voxel = voxel_count;
         for (u32 bit = 0; bit < 64U; ++bit) {
             if (nph_pcg32_next_f32(&rng) >= 0.5F) {
@@ -104,9 +110,11 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
             const u32 shape = nph_pcg32_next_u32(&rng) % 3U;
             v.box |= shape << NPH_RENDER_VOXEL_SHAPE_SHIFT;
             if (shape == NPH_RENDER_VOXEL_SHAPE_CAPSULE) {
-                const u32 material = nph_pcg32_next_u32(&rng) % 4U;
+                // The capsule's byte: its diagonal (bits 24, 25), its radius's
+                // code (26..31).
+                const u32 diagonal = nph_pcg32_next_u32(&rng) % 4U;
                 const u32 radius = nph_pcg32_next_u32(&rng) % NPH_RENDER_VOXEL_RADIUS_CODES;
-                v.material = material | (radius << 26U);
+                v.material = (diagonal << 24U) | (radius << 26U);
             }
             voxels[voxel_count++] = v;
         }
@@ -135,17 +143,40 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
         }
     }
 
+    // The GPU's copy compact, as a mesh's (render/voxel.h): a voxel cluster a
+    // brick, so that a case's brick names its cluster too.
+    NphRenderMeshlet *clusters = NPH_ALLOC_ARRAY_ZEROED(a, NphRenderMeshlet, TWIN_BRICKS);
+    NTEST_ASSERT_NOT_NULL(clusters);
+    for (u32 k = 0; k < TWIN_BRICKS; ++k) {
+        clusters[k].vertex_offset = k;
+        clusters[k].triangle_count = 1U;
+    }
+    NphRenderPackedVoxels packed;
+    nph_render_packed_voxels_init(&packed, a);
+    NTEST_ASSERT_EQ_INT(nph_render_voxels_pack(clusters, TWIN_BRICKS, bricks, TWIN_BRICKS, voxels,
+                                               voxel_count, &packed),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(packed.clusters.len, TWIN_BRICKS);
+
     const u32 storage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
-    NphGpuBuffer brick_buf = test_make_buffer(dev, (u64)TWIN_BRICKS * sizeof(NphRenderVoxelBrick),
+    NphGpuBuffer cluster_buf =
+        test_make_buffer(dev, (u64)TWIN_BRICKS * sizeof(NphRenderVoxelCluster), storage,
+                         NPH_GPU_MEMORY_UPLOAD, "twin voxel clusters");
+    NphGpuBuffer brick_buf = test_make_buffer(dev, (u64)TWIN_BRICKS * sizeof(NphRenderPackedBrick),
                                               storage, NPH_GPU_MEMORY_UPLOAD, "twin bricks");
-    NphGpuBuffer voxel_buf = test_make_buffer(dev, (u64)nph_max_u32(voxel_count, 1U) * 16U, storage,
-                                              NPH_GPU_MEMORY_UPLOAD, "twin voxels");
+    NphGpuBuffer voxel_buf =
+        test_make_buffer(dev, (u64)nph_max_u32(packed.words.len, 1U) * sizeof(u32), storage,
+                         NPH_GPU_MEMORY_UPLOAD, "twin voxels");
     NphGpuBuffer case_buf = test_make_buffer(dev, (u64)cases_n * sizeof(NphVisVoxelCase), storage,
                                              NPH_GPU_MEMORY_UPLOAD, "twin cases");
     NphGpuBuffer result_buf = test_make_buffer(dev, (u64)cases_n * sizeof(NphVisVoxelResult),
                                                storage, NPH_GPU_MEMORY_READBACK, "twin results");
-    memcpy(nph_gpu_buffer_map(dev, brick_buf), bricks, (u64)TWIN_BRICKS * sizeof *bricks);
-    memcpy(nph_gpu_buffer_map(dev, voxel_buf), voxels, (u64)voxel_count * sizeof *voxels);
+    memcpy(nph_gpu_buffer_map(dev, cluster_buf), packed.clusters.data,
+           (u64)TWIN_BRICKS * sizeof(NphRenderVoxelCluster));
+    memcpy(nph_gpu_buffer_map(dev, brick_buf), packed.bricks.data,
+           (u64)TWIN_BRICKS * sizeof(NphRenderPackedBrick));
+    memcpy(nph_gpu_buffer_map(dev, voxel_buf), packed.words.data,
+           (u64)packed.words.len * sizeof(u32));
     memcpy(nph_gpu_buffer_map(dev, case_buf), cases, (u64)cases_n * sizeof *cases);
 
     NphGpuShader shader = test_load_shader(dev, "vis_voxel_test.comp");
@@ -162,6 +193,7 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
     memset(&push, 0, sizeof push);
     push.cases = nph_gpu_buffer_address(dev, case_buf);
     push.results = nph_gpu_buffer_address(dev, result_buf);
+    push.clusters = nph_gpu_buffer_address(dev, cluster_buf);
     push.bricks = nph_gpu_buffer_address(dev, brick_buf);
     push.voxels = nph_gpu_buffer_address(dev, voxel_buf);
     push.count = cases_n;
@@ -204,7 +236,8 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
         const f64 side = 4.0 * (f64)brick->cell;
         const f64 speed = (f64)nph_vec3_length(nph_vec3(c->dir.x, c->dir.y, c->dir.z));
         worst = nph_f64_max(worst, nph_f64_abs((f64)results[i].t - (f64)hit.t) * speed / side);
-        if (results[i].voxel != hit.voxel) {
+        // The GPU names a voxel by its rank in its cluster (its brick's here).
+        if (brick->first_voxel + results[i].voxel != hit.voxel) {
             voxel_wrong += 1U;
         } else if ((results[i].face & 255U) != hit.face) {
             face_wrong += 1U;
@@ -222,10 +255,13 @@ NTEST(VoxelGpu, the_voxel_tests_match_their_cpu_twin)
 
     nph_gpu_pipeline_destroy(dev, pipeline);
     nph_gpu_shader_destroy(dev, shader);
+    nph_gpu_buffer_destroy(dev, cluster_buf);
     nph_gpu_buffer_destroy(dev, brick_buf);
     nph_gpu_buffer_destroy(dev, voxel_buf);
     nph_gpu_buffer_destroy(dev, case_buf);
     nph_gpu_buffer_destroy(dev, result_buf);
+    nph_render_packed_voxels_free(&packed);
+    NPH_FREE_ARRAY(a, NphRenderMeshlet, clusters, TWIN_BRICKS);
     NPH_FREE_ARRAY(a, NphRenderVoxelBrick, bricks, TWIN_BRICKS);
     NPH_FREE_ARRAY(a, NphRenderVoxel, voxels, voxels_n);
     NPH_FREE_ARRAY(a, NphVisVoxelCase, cases, cases_n);
@@ -866,9 +902,11 @@ NTEST_F(VoxelGpu, the_voxel_passes_come_and_go_with_voxel_meshes)
 }
 
 // A mesh's voxel clusters are checked as the raster splats them, a
-// cluster's voxels one run: its bricks of one cell size, each brick's voxels
-// following the brick before's. And the GPU's reads stay in the streams: a
-// brick's voxels past them, an empty mask, a cell that is no power of two.
+// cluster's voxels one run: each brick's first voxel's rank following the
+// brick before's voxels (render/voxel.h "The compact form"). And the GPU's
+// reads stay in the streams: a record past the records, its voxels' words
+// past them, an empty mask, a cell's exponent past a float's, a flag the form
+// has not.
 NTEST_F(VoxelGpu, malformed_voxel_clusters_are_refused)
 {
     REQUIRE_RENDERER(f);
@@ -876,8 +914,9 @@ NTEST_F(VoxelGpu, malformed_voxel_clusters_are_refused)
     lod_foliage(&m, 1500U, 4.0F, 13U);
     // A voxel cluster of two bricks or more.
     const NphRenderMeshlet *cl = m.lods.clusters.meshlets.data;
+    const u32 nm = m.lods.clusters.meshlets.len;
     u32 pick = NPH_U32_MAX;
-    for (u32 i = m.lods.level0_clusters; i < m.lods.clusters.meshlets.len; ++i) {
+    for (u32 i = m.lods.level0_clusters; i < nm; ++i) {
         if (cl[i].vertex_count == 0U && cl[i].triangle_count >= 2U) {
             pick = i;
             break;
@@ -885,14 +924,24 @@ NTEST_F(VoxelGpu, malformed_voxel_clusters_are_refused)
     }
     NTEST_ASSERT_NE_UINT(pick, NPH_U32_MAX);
     NphAllocator *a = nph_allocator_system();
-    const u32 n = m.lods.bricks.len;
-    NphRenderVoxelBrick *bricks = NPH_ALLOC_ARRAY(a, NphRenderVoxelBrick, n);
-    NTEST_ASSERT_NOT_NULL(bricks);
+    const u32 n = m.packed.bricks.len;
+    const u32 nc = m.packed.clusters.len;
+    NphRenderPackedBrick *bricks = NPH_ALLOC_ARRAY(a, NphRenderPackedBrick, n);
+    NphRenderVoxelCluster *records = NPH_ALLOC_ARRAY(a, NphRenderVoxelCluster, nc);
+    NphRenderMeshlet *meshlets = NPH_ALLOC_ARRAY(a, NphRenderMeshlet, nm);
+    NTEST_ASSERT_TRUE(bricks != NULL && records != NULL && meshlets != NULL);
     NphRenderMeshDesc d = m.desc;
     d.voxel_bricks = bricks;
-    const NphRenderVoxelBrick *first = &bricks[cl[pick].vertex_offset];
-    NphRenderVoxelBrick *second = &bricks[cl[pick].vertex_offset + 1U];
-#define RESET() memcpy(bricks, m.lods.bricks.data, sizeof *bricks *n)
+    d.voxel_clusters = records;
+    d.meshlets = meshlets;
+    NphRenderPackedBrick *second = &bricks[cl[pick].vertex_offset + 1U];
+    NphRenderVoxelCluster *record = &records[cl[pick].triangle_offset];
+#define RESET()                                                                                    \
+    do {                                                                                           \
+        memcpy(bricks, m.packed.bricks.data, sizeof *bricks *n);                                   \
+        memcpy(records, m.packed.clusters.data, sizeof *records *nc);                              \
+        memcpy(meshlets, cl, sizeof *meshlets *nm);                                                \
+    } while (0)
 #define EXPECT_REFUSED()                                                                           \
     do {                                                                                           \
         NphRenderMesh none = NPH_RENDER_MESH_NULL;                                                 \
@@ -904,22 +953,27 @@ NTEST_F(VoxelGpu, malformed_voxel_clusters_are_refused)
     NphRenderMesh ok = NPH_RENDER_MESH_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &d, &ok), NPH_RESULT_OK);
     nph_render_mesh_destroy(f->renderer, ok);
-    // Another cell size, a power of two still.
-    second->cell *= 2.0F;
-    EXPECT_REFUSED();
-    // Voxels that do not follow the first brick's (its own, in range).
-    second->first_voxel = first->first_voxel;
-    EXPECT_REFUSED();
-    second->first_voxel = d.voxel_count;
+    // Voxels whose ranks do not follow the first brick's; an empty mask.
+    second->first = (u16)(second->first + 1U);
     EXPECT_REFUSED();
     second->mask[0] = 0U;
     second->mask[1] = 0U;
     EXPECT_REFUSED();
-    second->cell = 0.3F;
+    // Its record: a cell past a float's exponents, an unknown flag, its
+    // voxels' words past them, the record past the records.
+    record->cell_log2 = -127;
+    EXPECT_REFUSED();
+    record->flags = 2U;
+    EXPECT_REFUSED();
+    record->first_word = d.voxel_word_count;
+    EXPECT_REFUSED();
+    meshlets[pick].triangle_offset = nc;
     EXPECT_REFUSED();
 #undef EXPECT_REFUSED
 #undef RESET
-    NPH_FREE_ARRAY(a, NphRenderVoxelBrick, bricks, n);
+    NPH_FREE_ARRAY(a, NphRenderMeshlet, meshlets, nm);
+    NPH_FREE_ARRAY(a, NphRenderVoxelCluster, records, nc);
+    NPH_FREE_ARRAY(a, NphRenderPackedBrick, bricks, n);
     lod_mesh_free(&m);
 }
 
