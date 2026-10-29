@@ -762,8 +762,10 @@ and shape, the lobe (its axis octahedral at 12 bits a component, or a
 capsule's at 8 beside its byte, then the concentration), and the albedo and
 roughness. A cluster whose voxels differ in occlusion or metallic is wide,
 its voxels four words with their own. Lossless but for the axis, within 0.06
-degrees (a capsule's, whose lobe is broad, 0.95), the form takes 0.72 times
-the memory: the landscape's proxies from 2.06 GB to 1.48. The shaders read it
+degrees (a capsule's, whose lobe is broad, 0.95), the form takes 0.75 times
+the memory: the landscape's proxies from 2.06 GB to 1.54 (ADR-0063 "Stage 1,
+the compact voxels, measured"), at the voxel passes' cost within 1 % but the
+resolve's 3 to 4 %. The shaders read it
 through `vis_voxel_cluster`, `vis_voxel_brick` and `vis_voxel_load`
 (vis_voxel.glsl), which give the tests the levels' layout back bit for bit,
 twins of `nph_render_brick_from_packed` and `nph_render_voxel_from_packed`.
