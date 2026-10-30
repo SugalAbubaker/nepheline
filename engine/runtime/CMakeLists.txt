@@ -22,6 +22,7 @@ nph_add_module(runtime
         src/scene_import.c
         src/scene_render.c
         src/sim_input.c
+        src/texture_stream.c
     PUBLIC_DEPS nph::render nph::asset nph::scene nph::physics nph::audio nph::profile
 )
 if(MSVC)
@@ -53,6 +54,7 @@ nph_add_test(runtime
         tests/test_proxy_stream.c
         tests/test_scene_render.c
         tests/test_sim_input.c
+        tests/test_texture_stream.c
     DEPS
         nph::runtime
 )

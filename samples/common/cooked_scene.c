@@ -163,9 +163,17 @@ static NphResult create_texture(CookedScene *s, u32 index)
         return NPH_RESULT_OK;
     }
     NPH_TRY(r);
-    // Paged: every page to install, level by level.
     NphRenderTexturePages pages;
     NPH_TRY(nph_render_texture_pages(s->renderer, s->textures[index], &pages));
+    // Paged, with a budget: the stream's.
+    if (pages.paged && s->texture_stream != NULL) {
+        NphTextureStreamTexture st;
+        memset(&st, 0, sizeof st);
+        st.texture = s->textures[index];
+        st.mips = tv.mips;
+        return nph_texture_stream_add(s->texture_stream, &st);
+    }
+    // Paged: every page to install, level by level.
     for (u32 m = 0; m < pages.tail_first_mip; ++m) {
         for (u32 y = 0; y < pages.pages_y[m]; ++y) {
             for (u32 x = 0; x < pages.pages_x[m]; ++x) {
@@ -673,6 +681,17 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     s->guids[0] = desc->scene;
     s->assets[0] = scene_handle;
     s->asset_count = 1U;
+    // Paged textures within a budget: their levels streamed.
+    if (s->paged_textures && s->texture_budget != 0U &&
+        nph_renderer_texture_paging_supported(s->renderer)) {
+        NphTextureStreamDesc td;
+        memset(&td, 0, sizeof td);
+        td.alloc = s->alloc;
+        td.renderer = s->renderer;
+        td.max_textures = s->asset_cap;
+        td.budget_bytes = s->texture_budget;
+        NPH_TRY(nph_texture_stream_create(&td, &s->texture_stream));
+    }
     const NphSceneHeader *sh = sv.header;
     for (u32 i = 0; i < sh->instance_count; ++i) {
         NPH_TRY(request(s, sv.instances[i].mesh, &done));
@@ -832,6 +851,9 @@ NphResult cooked_scene_update(CookedScene *s, const NphRenderView *view, u32 hei
 {
     NPH_ASSERT(s != NULL && view != NULL);
     NPH_TRY(install_pages(s));
+    if (s->texture_stream != NULL) {
+        NPH_TRY(nph_texture_stream_update(s->texture_stream));
+    }
     if (s->stream == NULL) {
         return NPH_RESULT_OK;
     }
@@ -851,6 +873,7 @@ NphResult cooked_scene_load(const CookedSceneDesc *desc, CookedScene *out)
     out->renderer = desc->renderer;
     out->loader = desc->loader;
     out->paged_textures = desc->paged_textures;
+    out->texture_budget = desc->texture_budget;
     const NphResult r = load(out, desc);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_COOKED_SCENE, "loading the scene failed: %s", nph_result_string(r));
@@ -865,10 +888,13 @@ void cooked_scene_unload(CookedScene *s)
         return;
     }
     NphRenderer *r = s->renderer;
-    // The stream first: it gives the cells back their coarsest levels and
-    // destroys the finer ones it made.
+    // The streams first: the proxies' gives the cells back their coarsest
+    // levels and destroys the finer ones it made; the textures' evicts the
+    // levels it installed.
     nph_proxy_stream_destroy(s->stream);
     s->stream = NULL;
+    nph_texture_stream_destroy(s->texture_stream);
+    s->texture_stream = NULL;
     if (s->instances != NULL) {
         for (u32 i = 0; i < s->instance_count; ++i) {
             nph_render_instance_destroy(r, s->instances[i]);

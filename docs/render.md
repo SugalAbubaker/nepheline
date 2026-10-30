@@ -192,7 +192,12 @@ sampler addresses (repeat, clamp, mirror).
 
 The renderer clears the request words before the passes that ask and reads
 them back after them; `nph_render_texture_page_requested` gives the frame a
-page was last asked for, `NPH_GPU_FRAMES_IN_FLIGHT` frames late.
+page was last asked for, `NPH_GPU_FRAMES_IN_FLIGHT` frames late, and
+`nph_render_texture_levels_requested` the frame each level was. With
+`nph_render_texture_first_resident_mip` and `nph_render_texture_page_room`
+(the page memory's pages free and returning, and the staging's slots
+free), they are what the texture stream works from ([runtime.md](runtime.md)
+"Texture streaming").
 
 **Tests** (`test_texture_paging.c`, on devices with sparse residency):
 - Every page resident: the same images byte for byte as the texture

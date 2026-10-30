@@ -111,6 +111,9 @@ static u32 install_pages(RenderFixture *f, NphRenderTexture t, const Levels *l, 
     NphRenderTexturePages pages;
     NTEST_ASSERT_EQ_INT(nph_render_texture_pages(f->renderer, t, &pages), NPH_RESULT_OK);
     NTEST_ASSERT_TRUE(pages.paged);
+    NTEST_EXPECT_EQ_INT(pages.format, NPH_GPU_FORMAT_R8G8B8A8_UNORM);
+    NTEST_EXPECT_EQ_UINT(pages.width, TEX);
+    NTEST_EXPECT_EQ_UINT(pages.height, TEX);
     u32 n = 0U;
     for (u32 m = 0; m < pages.tail_first_mip; ++m) {
         const u32 w = nph_gpu_mip_extent(TEX, m);
@@ -566,6 +569,12 @@ NTEST_F(Paging, an_evicted_page_returns_its_memory_after_the_frames_in_flight)
     NphRenderFrameStats st = test_render_read(f, &v);
     const u32 before = st.pages_resident;
     NTEST_EXPECT_GE_UINT(before, 85U);
+    NphRenderPageRoom room0;
+    nph_render_texture_page_room(f->renderer, &room0);
+    NTEST_EXPECT_GT_UINT(room0.pages, before);
+    NTEST_EXPECT_LE_UINT(room0.pages_free + before, room0.pages);
+    NTEST_EXPECT_EQ_UINT(room0.pages_returning, 0U);
+    NTEST_EXPECT_GT_UINT(room0.staging_free, 0U);
     for (u32 y = 0; y < 8U; ++y) {
         for (u32 x = 0; x < 8U; ++x) {
             nph_render_texture_page_evict(f->renderer, paged, 0U, x, y);
@@ -573,6 +582,11 @@ NTEST_F(Paging, an_evicted_page_returns_its_memory_after_the_frames_in_flight)
     }
     NTEST_EXPECT_EQ_INT(nph_render_texture_page_state(f->renderer, paged, 0U, 3U, 3U),
                         NPH_RENDER_PAGE_EVICTING);
+    // Returning, their memory not yet free.
+    NphRenderPageRoom room;
+    nph_render_texture_page_room(f->renderer, &room);
+    NTEST_EXPECT_EQ_UINT(room.pages_returning, 64U);
+    NTEST_EXPECT_EQ_UINT(room.pages_free, room0.pages_free);
     // Drawn at once from level 1 (the colour is the same), never from the
     // pages leaving.
     st = test_render_read(f, &v);
@@ -592,6 +606,9 @@ NTEST_F(Paging, an_evicted_page_returns_its_memory_after_the_frames_in_flight)
     NTEST_LOG("pages resident: %u before, %u after", before, st.pages_resident);
     NTEST_EXPECT_EQ_UINT(st.pages_resident, before - 64U);
     NTEST_EXPECT_EQ_UINT(bytes_differing(img, f->pixels), 0U);
+    nph_render_texture_page_room(f->renderer, &room);
+    NTEST_EXPECT_EQ_UINT(room.pages_returning, 0U);
+    NTEST_EXPECT_EQ_UINT(room.pages_free, room0.pages_free + 64U);
     // A page evicting is resident again at once when installed.
     nph_render_texture_page_evict(f->renderer, paged, 1U, 0U, 0U);
     NTEST_EXPECT_EQ_INT(nph_render_texture_page_state(f->renderer, paged, 1U, 0U, 0U),
@@ -630,6 +647,16 @@ NTEST(Paging_off, a_paged_texture_is_resident_whole_without_paging)
     NTEST_EXPECT_EQ_INT(
         nph_render_texture_page_install(f->renderer, paged, 0U, 0U, 0U, l.data[0], 0U),
         NPH_RESULT_INVALID_ARGUMENT);
+    // Resident whole: no levels to ask for, every level resident, no room.
+    u64 asked[NPH_GPU_MAX_MIPS];
+    NTEST_EXPECT_EQ_INT(nph_render_texture_levels_requested(f->renderer, paged, asked),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(asked[0], NPH_U64_MAX);
+    NTEST_EXPECT_EQ_UINT(nph_render_texture_first_resident_mip(f->renderer, paged), 0U);
+    NphRenderPageRoom room;
+    nph_render_texture_page_room(f->renderer, &room);
+    NTEST_EXPECT_EQ_UINT(room.pages + room.pages_free + room.pages_returning + room.staging_free,
+                         0U);
     Scene s;
     scene_make(f, &s, whole);
     static u8 a[PIXELS];
@@ -642,6 +669,10 @@ NTEST(Paging_off, a_paged_texture_is_resident_whole_without_paging)
     scene_free(f, &s);
     nph_render_texture_destroy(f->renderer, paged);
     nph_render_texture_destroy(f->renderer, whole);
+    // Stale handles.
+    NTEST_EXPECT_EQ_INT(nph_render_texture_levels_requested(f->renderer, paged, asked),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_UINT(nph_render_texture_first_resident_mip(f->renderer, paged), 0U);
     levels_free(&l);
     test_render_teardown(f);
 }

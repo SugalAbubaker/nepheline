@@ -6,7 +6,9 @@
 #include <nepheline/asset/loader.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/hashmap.h>
+#include <nepheline/gpu/types.h>
 #include <nepheline/render/renderer.h>
+#include <nepheline/runtime/texture_stream.h>
 
 NPH_LOG_CATEGORY_DECLARE(NPH_LOG_RUNTIME);
 
@@ -183,3 +185,56 @@ void proxy_stream_pick_keep(ProxyStreamPick *picks, u32 *count, u32 cap, ProxySt
 
 // The `count` picks kept, in their order (the first to load or drop first).
 void proxy_stream_pick_sort(ProxyStreamPick *picks, u32 count, bool drop);
+
+// ---------------------------------------------------------------------------
+// Texture streaming's decisions (texture_stream.c), pure, tested apart
+// ---------------------------------------------------------------------------
+
+// The level a paged texture with small levels from `fixed` is wanted at, by
+// the frame each level was last asked for (`asked`, NPH_U64_MAX: never):
+// the finest asked within `hold` frames of `frame`, else `fixed` (its small
+// levels alone).
+u32 texture_stream_wanted(const u64 *asked, u32 fixed, u64 frame, u32 hold);
+
+// The frame any of its levels was last asked for (NPH_U64_MAX: never).
+u64 texture_stream_last_asked(const u64 *asked, u32 fixed);
+
+// A texture's place among those to install: `short` levels coarser than
+// wanted, last asked `asked` (NPH_U64_MAX: never).
+typedef struct TextureStreamNeed {
+    u32 short_levels;
+    u64 asked;
+} TextureStreamNeed;
+
+// `a` installs before `b`: the further from its wanted level first, then
+// the more recently asked (never asked: last).
+bool texture_stream_installs_before(TextureStreamNeed a, TextureStreamNeed b);
+
+// `a`'s spare level is evicted before `b`'s: the less recently asked first
+// (never asked: first).
+bool texture_stream_evicts_before(u64 a_asked, u64 b_asked);
+
+// The texels of page (x, y) of level `mip` in a level's tightly packed rows
+// (`level`), and the level's row pitch, for a texture of `width` texels in
+// `fi`'s blocks, its pages `page_width` x `page_height` texels.
+const u8 *texture_stream_page_texels(const u8 *level, const NphGpuFormatInfo *fi, u32 width,
+                                     u32 mip, u32 page_width, u32 page_height, u32 x, u32 y,
+                                     u64 *out_pitch);
+
+// The renderer's paging, as the stream uses it: the renderer's own
+// (nph_texture_stream_create), or a stand-in the tests drive.
+typedef struct TextureStreamPaging {
+    void *user;
+    NphResult (*pages)(void *user, NphRenderTexture texture, NphRenderTexturePages *out);
+    NphResult (*levels_requested)(void *user, NphRenderTexture texture, u64 *out);
+    NphResult (*install)(void *user, NphRenderTexture texture, u32 mip, u32 x, u32 y,
+                         const void *texels, u64 row_pitch);
+    void (*evict)(void *user, NphRenderTexture texture, u32 mip, u32 x, u32 y);
+    void (*room)(void *user, NphRenderPageRoom *out);
+    u64 (*frame)(void *user); // the requests' clock
+} TextureStreamPaging;
+
+// nph_texture_stream_create over `paging` (copied); desc->renderer is not
+// used.
+NphResult texture_stream_create_with(const NphTextureStreamDesc *desc,
+                                     const TextureStreamPaging *paging, NphTextureStream **out);

@@ -166,6 +166,7 @@ typedef struct RenderPagedTexture {
     u32 pages_x[NPH_GPU_MAX_MIPS];
     u32 pages_y[NPH_GPU_MAX_MIPS];
     u32 resident[NPH_GPU_MAX_MIPS]; // pages resident per level
+    u64 asked[NPH_GPU_MAX_MIPS];    // the frame each level was last asked for (NPH_U64_MAX: never)
     u32 fixed_pages;
     NphGpuPage fixed[RENDER_FIXED_PAGES]; // the memory of the levels from fixed_mip
     RenderPage *pages;                    // [page_count]
@@ -184,6 +185,7 @@ typedef struct RenderPaging {
     b32 supported;   // the device has sparse residency and the description pages textures
     NphMutex lock;   // installs and evictions come from any thread
     NphGpuPagePool *pool;
+    u32 pool_pages;               // its capacity
     RenderPagedTexture *textures; // [max_textures], by texture slot
     u32 paged_count;              // textures paged now
     // Per texture slot, its paged texture's first resident level this frame
