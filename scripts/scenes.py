@@ -21,11 +21,13 @@ alone. A Poly Haven source (CC0 assets in a layout of ours) instead names
 every file it takes with its md5: `fetch` downloads them into
 DIR/<name>/assets/<asset>/ (a file already there with its md5 is kept, a
 download that does not match is refused), then lays the scene out with the
-manifest's generator (scripts/landscape.py). `cook` runs the cooker on the
-manifest's document with the manifest's cooker options (`cook`: `voxels`,
-nph_cook --voxels), packing what it cooked; a second cook only redoes what
-changed (the cooker's settings are in its outputs' hashes). No names: every
-manifest.
+manifest's generator (scripts/landscape.py). A zip source names one archive
+with its md5: `fetch` downloads it into DIR/<name>/, extracts it there once,
+and runs the manifest's generator (scripts/city.py). `cook` runs the cooker on
+the manifest's document with the manifest's cooker options (`cook`: `voxels`,
+`hlod` and `normal_y_down`, each nph_cook's flag of that name), packing what it
+cooked; a second cook only redoes what changed (the cooker's settings are in
+its outputs' hashes). No names: every manifest.
 """
 
 import argparse
@@ -36,6 +38,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+import zipfile
 
 # Poly Haven asks its API's and downloads' clients to name themselves.
 AGENT = {"User-Agent": "nepheline-scenes/1.0 (+https://github.com/SugalAbubaker/nepheline)"}
@@ -111,7 +114,11 @@ def fetch_polyhaven(m, root):
             else:
                 kept += 1
     print(f"{m['name']}: {fetched} files fetched, {kept} kept")
-    generator = os.path.join(ROOT, m["layout"].get("generator", "scripts/landscape.py"))
+    run_generator(m, root, "scripts/landscape.py")
+
+
+def run_generator(m, root, default):
+    generator = os.path.join(ROOT, m["layout"].get("generator", default))
     manifest = os.path.join(MANIFESTS, m["name"] + ".json")
     r = subprocess.run([sys.executable, generator, manifest, root])
     if r.returncode != 0:
@@ -119,10 +126,34 @@ def fetch_polyhaven(m, root):
     print(f"{m['name']}: licence: {m.get('license', '(see the manifest)')}")
 
 
+def fetch_zip(m, root):
+    src = m["source"]["zip"]
+    path = os.path.join(root, m["name"])
+    archive = os.path.join(path, src["file"])
+    if download(src["url"], archive, src["md5"]):
+        print(f"{m['name']}: {src['file']} ({src['size'] / 1e6:.1f} MB)", flush=True)
+    # The stamp is the last thing written, so an interrupted extraction runs again.
+    stamp = archive + ".extracted"
+    done = ""
+    if os.path.isfile(stamp):
+        with open(stamp, encoding="utf-8") as f:
+            done = f.read()
+    if done != src["md5"]:
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(path)
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write(src["md5"])
+        print(f"{m['name']}: extracted into {path}", flush=True)
+    run_generator(m, root, "scripts/city.py")
+
+
 def fetch(m, root):
     src = m["source"]
     if "polyhaven" in src:
         fetch_polyhaven(m, root)
+        return
+    if "zip" in src:
+        fetch_zip(m, root)
         return
     path = os.path.join(root, m["name"])
     if os.path.isdir(os.path.join(path, ".git")) and head_commit(path) == src["commit"]:
@@ -142,7 +173,7 @@ def fetch(m, root):
 
 # The cooker options a manifest may ask for (its `cook` object) and the
 # nph_cook flag each turns on.
-COOK_OPTIONS = {"voxels": "--voxels"}
+COOK_OPTIONS = {"voxels": "--voxels", "hlod": "--hlod", "normal_y_down": "--normal-y-down"}
 
 
 def cook_flags(m):

@@ -256,8 +256,9 @@ are third-party content, kept outside the repository: a manifest in
 `benchmarks/scenes/` pins each one's source (a git repository and commit,
 its document, its licence and attribution), names its cooked pack and
 scene, the cooker's options it needs (`cook`: `voxels` for the voxel levels
-of aggregate geometry, ADR-0061, which the landscape's foliage asks for),
-its exposure (`ev100`), its sky (`sky_intensity`, scaling the
+of aggregate geometry, ADR-0061, which the landscape's foliage asks for;
+`hlod` for the cells and their proxies; `normal_y_down` for DirectX's normal
+maps), its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
 own sun), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
 and a game's would), and its views (the scene's own camera, or an eye and
@@ -277,7 +278,10 @@ of the renderer's debug views (base colour, normals, roughness, ...) to
 look at the content, under names no budget matches. `--lists=N` makes
 every list of the production path and the shadow map that can drop work N
 times its default (a power of two up to 16): what a scene that overflows
-them needs, in results no budget compares. `--vsm-trace` prints the sun's
+them needs, in results no budget compares. A manifest's `lists` says what its
+own views need, and the renderer takes the most that any scene the filter
+matches says; a scene that says so fails where they overflow all the same,
+since dropped work would flatter its frame past a gate it does not hold. `--vsm-trace` prints the sun's
 shadow map's statistics every frame, warm-up included (each frame's line
 reports the frame two before it): the pages wanted and drawn, the page
 budget, the caster lists' use, the resolution bias and the overflows.
@@ -296,7 +300,10 @@ default).
 `--voxel-pool=MB` sizes the renderer's voxel pool (docs/render.md "The
 voxel pool"; 0 none; 1536 by default with `--stream`, none without), where
 the levels live and a streamed level is made on the loader's jobs.
-`--tiles=WxH` lays each reference scene out W by H times side by side
+A manifest's `tiles` lays its scene out by itself (`count`, `pitch` in
+metres, and what a tile asks of the renderer's sizes: `instances`, `meshes`,
+`cells`), and the renderer's sizes follow the largest world the filter takes.
+`--tiles=WxH` lays each reference scene out W by H times side by side instead
 (ADR-0063 stage 4, "The open world"), each tile its own instances and
 cells and so, streamed, its own proxies' finer levels, the first where
 the scene was and the others around it, sharing the meshes, materials,
@@ -340,8 +347,10 @@ or where proxies are still arriving. A windowed run shares the GPU with the
 desktop and swaps through the compositor, so it reads slower than
 render_perf's headless numbers: the budgets stay render_perf's.
 
-A manifest's source is a git repository at a commit (Bistro) or, for the
-landscape, Poly Haven files each pinned by URL and md5: `fetch` downloads
+A manifest's source is a git repository at a commit (Bistro), an archive
+pinned by URL and md5 (the city: `fetch` downloads it, extracts it once, and
+runs the manifest's generator, which converts its FBX to glTF, ADR-0068) or,
+for the landscape, Poly Haven files each pinned by URL and md5: `fetch` downloads
 them (1.4 GB; a file already there with its md5 is kept, a changed one
 refused), then runs the manifest's generator, which merges the assets'
 documents into one (their buffers and images referenced where they are),
@@ -369,6 +378,7 @@ results like the synthetic budgets.
 |---|---|---|
 | `bistro` | Amazon Lumberyard Bistro, exterior (CC BY 4.0; NVIDIA's glTF conversion, MIT, as `zeux/niagara_bistro` edits it) | a street at dusk: 2,909 instances of 551 meshes, 254 materials (234 specular-glossiness) using 338 BC7 DDS textures, the sun at 6,830 lux and 96 street lamps |
 | `landscape` | Poly Haven's pine-forest assets (CC0; Rob Tuytel and Rico Cilliers), laid out by `scripts/landscape.py` (Phase 13; ADR-0040, ADR-0059) | a forested valley 1 × 1.5 km at midday: a terrain of 750,000 triangles under 47,862 instances of 30 modelled meshes (9,729 pines of 4.2 to 7.0 million triangles, 8,786 pine saplings of 1.5 to 2.7 million, 16,057 fir saplings, rocks, stumps, roots, branches), the sun at 30,000 lux; views at 1.7 m along a trail: still, walking, sprinting, turning, across the valley, and along it from its side |
+| `city` | NVIDIA Emerald Square (CC BY-NC-SA 3.0; Open Research Content Archive; used only to test the engine, ADR-0067), converted and tiled by `scripts/city.py` (Phase 14; ADR-0068) | a city of 16 by 16 tiles, 2.46 km square, at midday: each tile four blocks in 153.5 m, 883 instances of 151 meshes (8.6 million triangles, 2.6 million of them unique), 110 materials using 333 BC1, BC3 and BC5 DDS textures, the sun at 30,000 lux; views at 1.7 m: a street still, walking, sprinting and turning, a crossing's long sightline, the park's grass and trees, and from 112 m over the rooftops |
 
 Measured on the RTX 3060 Ti (Profile, 240 frames, 2026-10-22), against
 the 4.17 ms frame of §10.1:

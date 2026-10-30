@@ -39,5 +39,9 @@ find_package(Python3 QUIET COMPONENTS Interpreter)
 if(NPH_BUILD_TESTS AND Python3_Interpreter_FOUND)
     add_test(NAME scripts.landscape
              COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/scripts/landscape.py" --self-test)
-    set_tests_properties(scripts.landscape PROPERTIES LABELS "integration")
+    # The city's conversion from its FBX (scripts/city.py): an FBX written byte
+    # by byte, read, placed, and written as glTF the same way twice.
+    add_test(NAME scripts.city
+             COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/scripts/city.py" --self-test)
+    set_tests_properties(scripts.landscape scripts.city PROPERTIES LABELS "integration")
 endif()

@@ -13,7 +13,8 @@
 //     scene_viewer --pack=FILE --scene=KEY [--ev100=X] [--sky=X] [--sun-shadows]
 //
 //     and either: [--size=WxH] [--window=WxH] [--vsync] [--lists=N] [--voxel-pool=MB]
-//                 [--proxy-budget=MB] [--texture-budget=MB] [--walk=M/S] [--frames=N]
+//                 [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] [--walk=M/S]
+//                 [--frames=N]
 //
 // --size is the image drawn (3840x2160, the CLAUDE.md §10 target) and --window
 // the window (1920x1080, a clean half of it). --lists multiplies the lists that
@@ -22,6 +23,7 @@
 // voxels alone, and with it streams the proxies within --proxy-budget (1200 MB
 // and 1100 MB for a manifest that cooks voxels, else none). --texture-budget
 // streams the textures' levels within that many MB (none: resident whole).
+// --tiles lays the scene out W by H times (a manifest's own `tiles` by default).
 // --walk moves the camera along its view by itself, and --frames ends the run.
 //
 // Keys: W/A/S/D move, Q/E down and up, Shift four times as fast, the mouse wheel
@@ -66,6 +68,11 @@ NPH_LOG_CATEGORY_DEFINE(LOG_SAMPLE, "scene_viewer", NPH_LOG_LEVEL_INFO);
 #define MAX_MESHES    16384U
 #define MAX_CELLS     4096U
 #define MAX_LIGHTS    4001U
+// Per tile past the first, where the manifest does not say: as render_perf's
+// (a tile of the landscape, rounded up).
+#define TILE_INSTANCES 49152U
+#define TILE_MESHES    4096U
+#define TILE_CELLS     512U
 
 #define MAX_VIEWS     16U
 #define VOXEL_POOL_MB 1200 // ADR-0066: what the landscape's views hold
@@ -98,6 +105,12 @@ typedef struct SceneDef {
     f32 sky;
     bool sun_shadows;
     bool voxels;
+    u32 tiles_x;
+    u32 tiles_z;
+    NphDVec3 tile_pitch; // 0: the first tile's instances' extent
+    u32 tile_instances;  // 0: TILE_INSTANCES past the first, and so the others
+    u32 tile_meshes;
+    u32 tile_cells;
     ViewDef views[MAX_VIEWS];
     u32 view_count;
 } SceneDef;
@@ -120,6 +133,8 @@ typedef struct Options {
     i64 voxel_pool_mb;   // -1: by the scene (VOXEL_POOL_MB where it cooks voxels)
     i64 proxy_budget_mb; // -1: the pool less PROXY_SLACK
     u64 texture_budget_mb;
+    u32 tiles_x; // 0: as the manifest says
+    u32 tiles_z;
     f32 walk;
     u64 max_frames;
 } Options;
@@ -185,8 +200,8 @@ static int usage(void)
                     "[--sun-shadows]\n"
                     "       and either: [--size=WxH] [--window=WxH] [--vsync] [--lists=N] "
                     "[--voxel-pool=MB]\n"
-                    "                   [--proxy-budget=MB] [--texture-budget=MB] [--walk=M/S] "
-                    "[--frames=N]\n");
+                    "                   [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] "
+                    "[--walk=M/S] [--frames=N]\n");
     return EXIT_BAD_ARGS;
 }
 
@@ -263,6 +278,10 @@ static bool parse(int argc, char **argv, Options *o)
             o->proxy_budget_mb = (i64)strtoll(v, NULL, 10);
         } else if ((v = value_of(a, "--texture-budget=")) != NULL) {
             o->texture_budget_mb = strtoull(v, NULL, 10);
+        } else if ((v = value_of(a, "--tiles=")) != NULL) {
+            if (!parse_size(v, &o->tiles_x, &o->tiles_z)) {
+                return false;
+            }
         } else if ((v = value_of(a, "--walk=")) != NULL) {
             o->walk = strtof(v, NULL);
         } else if ((v = value_of(a, "--frames=")) != NULL) {
@@ -286,6 +305,20 @@ static bool json_vec3(const NphJsonValue *object, const char *key, NphDVec3 *out
         }
     }
     *out = nph_dvec3(v[0], v[1], v[2]);
+    return true;
+}
+
+// A two-element array as x and z.
+static bool json_vec2(const NphJsonValue *object, const char *key, NphDVec3 *out)
+{
+    const NphJsonValue *a = nph_json_object_get(object, nph_str_from_cstr(key));
+    f64 v[2];
+    for (u32 i = 0; i < 2U; ++i) {
+        if (nph_json_as_f64(nph_json_array_at(a, i), &v[i]) != NPH_RESULT_OK) {
+            return false;
+        }
+    }
+    *out = nph_dvec3(v[0], 0.0, v[1]);
     return true;
 }
 
@@ -333,6 +366,16 @@ static bool parse_manifest(const App *app, SceneDef *def)
         def->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
         const NphJsonValue *cook = nph_json_object_get(root, NPH_STR("cook"));
         def->voxels = cook != NULL && nph_json_get_bool(cook, NPH_STR("voxels"), false);
+        const NphJsonValue *tiles = nph_json_object_get(root, NPH_STR("tiles"));
+        if (tiles != NULL) {
+            NphDVec3 count = nph_dvec3(1.0, 0.0, 1.0);
+            ok = json_vec2(tiles, "count", &count) && json_vec2(tiles, "pitch", &def->tile_pitch);
+            def->tiles_x = ok ? (u32)count.x : 0U;
+            def->tiles_z = ok ? (u32)count.z : 0U;
+            def->tile_instances = (u32)nph_json_get_f64(tiles, NPH_STR("instances"), 0.0);
+            def->tile_meshes = (u32)nph_json_get_f64(tiles, NPH_STR("meshes"), 0.0);
+            def->tile_cells = (u32)nph_json_get_f64(tiles, NPH_STR("cells"), 0.0);
+        }
         const NphJsonValue *views = nph_json_object_get(root, NPH_STR("views"));
         for (u32 i = 0; i < MAX_VIEWS && ok; ++i) {
             const NphJsonValue *v = nph_json_array_at(views, i);
@@ -367,6 +410,8 @@ static bool define_scene(App *app)
     def->ev100 = app->opt.ev100;
     def->sky = app->opt.sky;
     def->sun_shadows = app->opt.sun_shadows;
+    def->tiles_x = app->opt.tiles_x;
+    def->tiles_z = app->opt.tiles_z;
     (void)snprintf(def->views[0].name, sizeof def->views[0].name, "the scene's camera");
     def->views[0].scene_camera = true;
     def->view_count = 1U;
@@ -670,6 +715,20 @@ static NphResult create_image(App *app)
     return nph_gpu_image_create(app->dev, &td, &app->image);
 }
 
+// The tiles asked for: --tiles over the manifest's, one where neither says.
+static u32 tile_count(const App *app, u32 *out_x, u32 *out_z)
+{
+    const u32 x = app->opt.tiles_x != 0U ? app->opt.tiles_x : nph_max_u32(app->def.tiles_x, 1U);
+    const u32 z = app->opt.tiles_z != 0U ? app->opt.tiles_z : nph_max_u32(app->def.tiles_z, 1U);
+    if (out_x != NULL) {
+        *out_x = x;
+    }
+    if (out_z != NULL) {
+        *out_z = z;
+    }
+    return x * z;
+}
+
 // As render_perf's reference scenes: every list that can drop work --lists
 // times its default (the renderer clamps them to what its records can
 // address).
@@ -682,9 +741,18 @@ static NphResult create_renderer(App *app, u64 voxel_pool_bytes)
     rd.dev = app->dev;
     rd.shader_dir = NPH_SHADER_DIR;
     rd.name = "scene_viewer";
-    rd.max_instances = MAX_INSTANCES;
-    rd.max_meshes = MAX_MESHES;
-    rd.max_cells = MAX_CELLS;
+    // A tile's instances, cells and streamed levels are its own.
+    const SceneDef *def = &app->def;
+    const u32 tiles = tile_count(app, NULL, NULL);
+    if (def->tile_instances != 0U) {
+        rd.max_instances = nph_max_u32(MAX_INSTANCES, tiles * def->tile_instances);
+        rd.max_meshes = MAX_MESHES + tiles * def->tile_meshes;
+        rd.max_cells = MAX_CELLS + tiles * def->tile_cells;
+    } else {
+        rd.max_instances = MAX_INSTANCES + (tiles - 1U) * TILE_INSTANCES;
+        rd.max_meshes = MAX_MESHES + (tiles - 1U) * TILE_MESHES;
+        rd.max_cells = MAX_CELLS + (tiles - 1U) * TILE_CELLS;
+    }
     rd.max_draws = MAX_INSTANCES;
     rd.max_lights = MAX_LIGHTS;
     rd.voxel_pool_bytes = voxel_pool_bytes;
@@ -732,6 +800,8 @@ static NphResult load_scene(App *app, u64 voxel_pool_bytes)
     cd.loader = app->loader;
     cd.jobs = app->jobs;
     cd.scene = nph_guid_from_cstr(def->scene);
+    (void)tile_count(app, &cd.tiles_x, &cd.tiles_z);
+    cd.tile_pitch = def->tile_pitch;
     cd.stream = voxel_pool_bytes != 0U ? 1 : 0;
     if (app->opt.proxy_budget_mb > 0) {
         cd.stream_budget = (u64)app->opt.proxy_budget_mb * 1000000ULL;
