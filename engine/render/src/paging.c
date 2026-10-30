@@ -94,9 +94,12 @@ static u32 log2_u32(u32 v)
 bool render_paging_device_supported(const NphRenderer *r)
 {
     // The clamp is the samplers' minimum level of detail, which every device
-    // has: sparse residency is all paging needs.
-    return !r->desc.disable_texture_paging &&
-           nph_gpu_device_info(r->dev)->features.sparse_residency;
+    // has: sparse residency is all paging needs, where a sparse image samples
+    // as the same ordinary image does (a paged texture must draw as the
+    // texture whole: NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES).
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
+    return !r->desc.disable_texture_paging && info->features.sparse_residency &&
+           (info->quirks & (u32)NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES) == 0U;
 }
 
 NphResult render_paging_init(NphRenderer *r)
