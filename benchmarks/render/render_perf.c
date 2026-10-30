@@ -444,6 +444,18 @@ typedef struct RefManifest {
     f32 ev100;
     f32 sky_intensity; // the default sky's (daylight next to a 30,000 lux sun) scale
     bool sun_shadows;  // the scene's first directional light casts shadows
+    // `lists`: what its views need of every list that can drop work (--lists'
+    // multiple). A scene that says so fails where they overflow: dropped work
+    // flatters a frame, so it would pass a gate it does not hold. 0: unsaid.
+    u32 lists;
+    // Its world (`tiles`, docs/benchmarks.md): count tiles side by side, unless
+    // --tiles says otherwise, and what a tile asks of the renderer's sizes.
+    u32 tiles_x;
+    u32 tiles_z;
+    NphDVec3 tile_pitch; // 0: the first tile's instances' extent
+    u32 tile_instances;
+    u32 tile_meshes;
+    u32 tile_cells;
     RefView views[MAX_REF_VIEWS];
     u32 view_count;
 } RefManifest;
@@ -485,8 +497,8 @@ static bool g_paged_textures = false;
 static u64 g_texture_budget = 0U;
 static i64 g_voxel_pool_mb = -1; // --voxel-pool=MB (-1: 1536 with --stream, else 0)
 static u32 g_stream_loads = 0U;  // --stream-loads=N: levels loading at once (0: the stream's)
-static u32 g_tiles_x = 1U;       // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4)
-static u32 g_tiles_z = 1U;
+static u32 g_tiles_x = 0U;       // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4;
+static u32 g_tiles_z = 0U;       // 0: as each manifest says)
 
 // The most a view waits for the stream to settle before it is measured.
 #define PRIME_MAX_NS (60ULL * 1000000000ULL)
@@ -1753,6 +1765,20 @@ static void json_string(const NphJsonValue *object, const char *key, char *out, 
 
 // Reads manifest `path` into `m` (its pack under `scenes`); false, with a
 // message, when it does not describe a scene with views.
+// A two-element array as x and z.
+static bool json_vec2(const NphJsonValue *object, const char *key, NphDVec3 *out)
+{
+    const NphJsonValue *a = nph_json_object_get(object, nph_str_from_cstr(key));
+    f64 v[2];
+    for (u32 i = 0; i < 2U; ++i) {
+        if (nph_json_as_f64(nph_json_array_at(a, i), &v[i]) != NPH_RESULT_OK) {
+            return false;
+        }
+    }
+    *out = nph_dvec3(v[0], 0.0, v[1]);
+    return true;
+}
+
 static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
 {
     NphAllocator *a = nph_allocator_system();
@@ -1776,6 +1802,22 @@ static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
         m->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
         m->sky_intensity = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
         m->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
+        m->lists = (u32)nph_json_get_f64(root, NPH_STR("lists"), 0.0);
+        m->tiles_x = 1U;
+        m->tiles_z = 1U;
+        const NphJsonValue *tiles = nph_json_object_get(root, NPH_STR("tiles"));
+        if (tiles != NULL) {
+            NphDVec3 count = nph_dvec3(1.0, 0.0, 1.0);
+            NphDVec3 pitch = nph_dvec3(0.0, 0.0, 0.0);
+            ok = json_vec2(tiles, "count", &count) && json_vec2(tiles, "pitch", &pitch);
+            m->tiles_x = ok ? (u32)count.x : 1U;
+            m->tiles_z = ok ? (u32)count.z : 1U;
+            m->tile_pitch = pitch;
+            m->tile_instances = (u32)nph_json_get_f64(tiles, NPH_STR("instances"), 0.0);
+            m->tile_meshes = (u32)nph_json_get_f64(tiles, NPH_STR("meshes"), 0.0);
+            m->tile_cells = (u32)nph_json_get_f64(tiles, NPH_STR("cells"), 0.0);
+            ok = ok && m->tiles_x != 0U && m->tiles_z != 0U && m->tile_instances != 0U;
+        }
         const NphJsonValue *views = nph_json_object_get(root, NPH_STR("views"));
         for (u32 i = 0; i < MAX_REF_VIEWS; ++i) {
             const NphJsonValue *v = nph_json_array_at(views, i);
@@ -1913,8 +1955,9 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.stream = g_stream;
     cd.stream_budget = g_stream_budget;
     cd.stream_loads = g_stream_loads;
-    cd.tiles_x = g_tiles_x;
-    cd.tiles_z = g_tiles_z;
+    cd.tiles_x = g_tiles_x != 0U ? g_tiles_x : m->tiles_x;
+    cd.tiles_z = g_tiles_z != 0U ? g_tiles_z : m->tiles_z;
+    cd.tile_pitch = m->tile_pitch;
     cd.paged_textures = g_paged_textures;
     cd.texture_budget = g_texture_budget;
     const u64 t0 = nph_time_now_ns();
@@ -2083,8 +2126,16 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(ctx->dev));
     nph_gpu_image_destroy(ctx->dev, target);
     NPH_TRY(r);
-    return report(ctx, rs->name, g_ref_width, g_ref_height, NPH_RENDER_PIPELINE_PRODUCTION, false,
-                  &run);
+    NPH_TRY(report(ctx, rs->name, g_ref_width, g_ref_height, NPH_RENDER_PIPELINE_PRODUCTION, false,
+                   &run));
+    if (m->lists != 0U && (run.stats.vis_overflow != 0U || run.stats.vsm_overflow != 0U)) {
+        fprintf(stderr,
+                "render_perf: %s: lists overflowed at the manifest's size (%u): the "
+                "frame dropped work\n",
+                rs->name, g_lists > 1U ? g_lists : m->lists);
+        return NPH_RESULT_FULL;
+    }
+    return NPH_RESULT_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -2182,7 +2233,7 @@ static int check_budgets(const char *path, const Ctx *ctx)
 // Setup
 // ---------------------------------------------------------------------------
 
-static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
+static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *filter)
 {
     NphGpuDeviceDesc dd;
     memset(&dd, 0, sizeof dd);
@@ -2213,11 +2264,22 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     rd.alloc = nph_allocator_system();
     rd.dev = ctx->dev;
     rd.shader_dir = NPH_SHADER_DIR;
-    // A tiled scene's instances, cells and streamed levels are each tile's.
-    const u32 more_tiles = g_tiles_x * g_tiles_z - 1U;
+    // A tiled scene's instances, cells and streamed levels are each tile's:
+    // room for the largest world of the manifests the filter takes, or for
+    // --tiles of the largest scene.
+    const u32 more_tiles = g_tiles_x != 0U ? g_tiles_x * g_tiles_z - 1U : 0U;
     rd.max_instances = MAX_INSTANCES + more_tiles * TILE_INSTANCES;
     rd.max_meshes = MAX_MESHES + more_tiles * TILE_MESHES;
     rd.max_cells = 4096U + more_tiles * TILE_CELLS;
+    for (u32 i = 0; i < g_ref_count && g_tiles_x == 0U; ++i) {
+        const RefManifest *m = &g_manifests[g_ref_scenes[i].manifest];
+        const u32 tiles = m->tiles_x * m->tiles_z;
+        if (tiles > 1U && glob_match(filter, g_ref_scenes[i].name)) {
+            rd.max_instances = nph_max_u32(rd.max_instances, tiles * m->tile_instances);
+            rd.max_meshes = nph_max_u32(rd.max_meshes, MAX_MESHES + tiles * m->tile_meshes);
+            rd.max_cells = nph_max_u32(rd.max_cells, 4096U + tiles * m->tile_cells);
+        }
+    }
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
     rd.voxel_pool_bytes =
@@ -2237,17 +2299,24 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
         // each).
         rd.texture_page_bytes = g_texture_budget + NPH_MIB(512);
     }
-    if (g_lists > 1U) {
+    // --lists, or the most a manifest the filter takes says its views need.
+    u32 lists = g_lists;
+    for (u32 i = 0; i < g_ref_count; ++i) {
+        if (glob_match(filter, g_ref_scenes[i].name)) {
+            lists = nph_max_u32(lists, g_manifests[g_ref_scenes[i].manifest].lists);
+        }
+    }
+    if (lists > 1U) {
         // Every list that can drop work, larger (the renderer clamps them to
         // what its records can address): what a scene that overflows the
         // defaults needs.
-        rd.max_visible_clusters = 524288U * g_lists;
-        rd.max_cull_meshlets = (1U << 20U) * g_lists;
-        rd.max_deferred = (1U << 20U) * g_lists;
-        rd.max_lod_nodes = (1U << 18U) * g_lists;
-        rd.max_vsm_meshlets = (1U << 20U) * g_lists;
-        rd.max_vsm_draws = (1U << 20U) * g_lists;
-        rd.max_vsm_voxel_draws = (1U << 20U) * g_lists;
+        rd.max_visible_clusters = 524288U * lists;
+        rd.max_cull_meshlets = (1U << 20U) * lists;
+        rd.max_deferred = (1U << 20U) * lists;
+        rd.max_lod_nodes = (1U << 18U) * lists;
+        rd.max_vsm_meshlets = (1U << 20U) * lists;
+        rd.max_vsm_draws = (1U << 20U) * lists;
+        rd.max_vsm_voxel_draws = (1U << 20U) * lists;
     }
     if (sw_pixels >= 0.0) {
         // Zero would pick the default: none goes through the view's flag.
@@ -2437,7 +2506,7 @@ int main(int argc, char **argv)
 
     static Ctx ctx;
     ctx.loaded_manifest = NPH_U32_MAX;
-    const NphResult sr = setup(&ctx, validation, sw_pixels);
+    const NphResult sr = setup(&ctx, validation, sw_pixels, filter);
     if (sr == NPH_RESULT_UNSUPPORTED && ctx.dev == NULL) {
         fprintf(stderr, "render_perf: no Vulkan device; skipping\n");
         return EXIT_SKIPPED;

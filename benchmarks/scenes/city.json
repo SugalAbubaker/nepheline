@@ -1,0 +1,40 @@
+{
+  "name": "city",
+  "title": "NVIDIA Emerald Square, tiled: city blocks, streets, and a park",
+  "license": "CC BY-NC-SA 3.0: Emerald Square (NVIDIA; Open Research Content Archive; foliage by SpeedTree). Used only to test the engine, never shipped or redistributed (ADR-0067). The conversion and layout are this repository's (scripts/city.py), Apache-2.0",
+  "attribution": "NVIDIA Emerald Square, Open Research Content Archive (ORCA), Nicholas Hull, Kate Anderson and Nir Benty (2017), https://developer.nvidia.com/orca/nvidia-emerald-square, CC BY-NC-SA 3.0",
+  "source": {
+    "zip": {
+      "url": "https://developer.nvidia.com/downloads/emerald-square",
+      "file": "EmeraldSquare_v4_1.zip",
+      "md5": "672c79f0cbcb3f4fc6290aff301f17b2",
+      "size": 617345248
+    },
+    "document": "city.gltf"
+  },
+  "pack": "city.npk",
+  "cook": {"normal_y_down": true},
+  "scene": "city.gltf#scene",
+  "ev100": 13.0,
+  "sky_intensity": 1.0,
+  "sun_shadows": true,
+  "lists": 4,
+  "tiles": {"count": [16, 16], "pitch": [153.5, 153.5], "instances": 883, "meshes": 0, "cells": 0},
+  "layout": {
+    "generator": "scripts/city.py",
+    "fbx": "EmeraldSquare_v4_1/EmeraldSquare_Day.fbx",
+    "textures": "EmeraldSquare_v4_1/Textures",
+    "tile": 153.5,
+    "leave_out": ["EndCap"],
+    "sun": {"model": "Day", "intensity": 30000.0}
+  },
+  "views": [
+    {"name": "street", "eye": [-8.0, 1.7, -60.0], "target": [-8.0, 1.7, 60.0]},
+    {"name": "street_walk", "eye": [-8.0, 1.7, -60.0], "target": [-8.0, 1.7, 60.0], "walk": 1.4},
+    {"name": "street_sprint", "eye": [-8.0, 1.7, -60.0], "target": [-8.0, 1.7, 60.0], "walk": 6.0},
+    {"name": "street_turn", "eye": [-8.0, 1.7, -60.0], "target": [-8.0, 1.7, 60.0], "turn": 90.0},
+    {"name": "crossing", "eye": [0.0, 1.7, 0.0], "target": [76.0, 1.7, 0.0]},
+    {"name": "park", "eye": [-38.4, 1.7, 75.7], "target": [-38.4, 1.7, 0.0]},
+    {"name": "rooftop", "eye": [5.0, 112.0, -5.0], "target": [-600.0, 0.0, 600.0]}
+  ]
+}

@@ -73,6 +73,7 @@ supersedes it and both link to each other.
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
 | [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md)) |
 | [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions) |
+| [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 
 ## Template
 
