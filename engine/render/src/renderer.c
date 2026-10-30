@@ -543,7 +543,11 @@ void nph_renderer_destroy(NphRenderer *r)
         for (u32 i = 0; i < r->desc.max_textures; ++i) {
             if (r->textures[i].handle != 0U) {
                 ++leaked;
-                render_paging_texture_destroy(r, i);
+                // Paged state only where paged (none at all on a renderer
+                // that pages no textures).
+                if (r->textures[i].paged) {
+                    render_paging_texture_destroy(r, i);
+                }
                 nph_gpu_image_destroy(dev, r->textures[i].image);
             }
         }

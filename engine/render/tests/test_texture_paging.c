@@ -645,3 +645,25 @@ NTEST(Paging_off, a_paged_texture_is_resident_whole_without_paging)
     levels_free(&l);
     test_render_teardown(f);
 }
+
+// Textures still alive when a renderer that pages none is destroyed go with
+// it (it has no paged textures' state to look in: a lavapipe crash in CI,
+// where a test left a texture alive).
+NTEST(Paging_off, textures_alive_at_destruction_go_with_the_renderer)
+{
+    RenderFixture fx;
+    RenderFixture *f = &fx;
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.disable_texture_paging = 1;
+    test_render_setup(f, &d);
+    if (f->dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    Levels l;
+    levels_make(&l, false);
+    (void)make_texture(f, &l, false);
+    (void)make_texture(f, &l, true);
+    levels_free(&l);
+    test_render_teardown(f); // destroys them, logging that they were alive
+}
