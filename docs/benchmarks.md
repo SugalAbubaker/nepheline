@@ -374,7 +374,10 @@ variable is unset. The cook is incremental, so Bistro's 23-minute cook
 recurs only when the cooker's output changes. The job then runs
 `render_perf --reference-only` against `benchmarks/reference_budgets.txt`,
 which `scripts/render_budgets.py --output` generates from the reference
-results like the synthetic budgets.
+results like the synthetic budgets, a process a scene: a manifest's `lists`
+and `tiles` size the renderer for every scene a run takes, and the city's
+lists let the landscape's forest draw all that its own drop, past the driver's
+timeout (the device is lost).
 
 | Scene | Source | What it is |
 |---|---|---|

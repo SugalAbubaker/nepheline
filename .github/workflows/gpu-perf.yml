@@ -131,9 +131,19 @@ jobs:
           python scripts/scenes.py fetch --dir $scenes
           python scripts/scenes.py cook --dir $scenes --cook build\win-msvc\bin\Profile\nph_cook.exe
 
+      # A process a scene: a manifest's `lists` and `tiles` size the renderer for
+      # every scene the run takes, and the city's lists would let the landscape's
+      # forest draw all that its own drop, past the driver's timeout.
       - name: Reference scenes (Profile)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: .\build\win-msvc\bin\Profile\render_perf.exe --scenes=$env:NPH_SCENES --reference-only --frames=240 --json=bench-results\reference_scenes.json --budgets=benchmarks\reference_budgets.txt
+        run: |
+          $failed = @()
+          foreach ($manifest in Get-ChildItem benchmarks\scenes\*.json) {
+              $scene = $manifest.BaseName
+              .\build\win-msvc\bin\Profile\render_perf.exe "--scenes=$env:NPH_SCENES" --reference-only "--filter=${scene}_*_production" --frames=240 "--json=bench-results\reference_$scene.json" --budgets=benchmarks\reference_budgets.txt
+              if ($LASTEXITCODE -ne 0) { $failed += $scene }
+          }
+          if ($failed.Count -ne 0) { Write-Error "reference scenes failed: $failed"; exit 1 }
 
       - name: Upload results
         if: always()
