@@ -34,6 +34,7 @@
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
+//                 [--paged-textures]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -67,7 +68,10 @@
 // 4). After each scene, a line reports the GPU memory the process holds
 // (nph_gpu_device_memory_stats): device-local in use against the OS's
 // budget for it; --memory-trace reports it every 16th frame, warm-up
-// included, where bottom levels are built.
+// included, where bottom levels are built. --paged-textures pages the
+// scenes' textures (ADR-0065; CookedSceneDesc.paged_textures) and lets every
+// page be installed before a view is measured: what the clamped samples and
+// the requests cost where every page is resident.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -473,9 +477,12 @@ static bool g_no_cells = false;     // --no-cells: the scenes' cells not loaded
 static bool g_stream = false;       // --stream: the cells' proxies streamed
 static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarsest (0: none)
 static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
-static i64 g_voxel_pool_mb = -1;    // --voxel-pool=MB (-1: 1536 with --stream, else 0)
-static u32 g_stream_loads = 0U;     // --stream-loads=N: levels loading at once (0: the stream's)
-static u32 g_tiles_x = 1U;          // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4)
+// --paged-textures: textures paged (ADR-0065), every page installed before a
+// view is measured: what the clamped samples and the requests cost.
+static bool g_paged_textures = false;
+static i64 g_voxel_pool_mb = -1; // --voxel-pool=MB (-1: 1536 with --stream, else 0)
+static u32 g_stream_loads = 0U;  // --stream-loads=N: levels loading at once (0: the stream's)
+static u32 g_tiles_x = 1U;       // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4)
 static u32 g_tiles_z = 1U;
 
 // The most a view waits for the stream to settle before it is measured.
@@ -1306,9 +1313,9 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
     NPH_TRY(nph_gpu_frame_begin(ctx->dev));
     NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(ctx->profiler, ctx->graph));
     nph_gpu_rg_begin(ctx->graph);
-    if (ctx->cooked.stream != NULL) {
+    if (ctx->cooked.stream != NULL || cooked_scene_installing(&ctx->cooked)) {
         // The cells' levels, after the frame began (a level's uploads go with
-        // it) and before it is drawn.
+        // it) and before it is drawn; and paged textures' pages.
         const u64 s0 = nph_time_now_ns();
         NPH_TRY(cooked_scene_update(&ctx->cooked, view, ctx->view_height));
         const f64 ns = (f64)(nph_time_now_ns() - s0);
@@ -1379,6 +1386,27 @@ static NphResult prime_stream(Ctx *ctx, NphRenderView *view, NphGpuImage target,
            "(%.1f MB)\n",
            frames, (f64)(nph_time_now_ns() - start) / 1.0e9, quiet == 0U ? " (NOT SETTLED)" : "",
            ps.held_levels, (f64)ps.held_bytes / 1.0e6);
+    return NPH_RESULT_OK;
+}
+
+// Frames until every page of the paged textures is resident: the scene's
+// installs done and none landing for a few frames.
+static NphResult prime_pages(Ctx *ctx, NphRenderView *view, NphGpuImage target, FrameRun *run)
+{
+    const u64 start = nph_time_now_ns();
+    f64 cpu = 0.0;
+    u32 frames = 0U;
+    u32 quiet = 0U;
+    while (quiet < 2U * NPH_GPU_FRAMES_IN_FLIGHT + 2U && nph_time_now_ns() - start < PRIME_MAX_NS) {
+        NPH_TRY(render_one(ctx, view, target, false, &cpu, &run->stats));
+        quiet = !cooked_scene_installing(&ctx->cooked) && run->stats.pages_installed == 0U
+                    ? quiet + 1U
+                    : 0U;
+        ++frames;
+    }
+    printf("    pages resident in %u frames, %.1f s%s: %u pages (%.1f MB)\n", frames,
+           (f64)(nph_time_now_ns() - start) / 1.0e9, quiet == 0U ? " (NOT SETTLED)" : "",
+           run->stats.pages_resident, (f64)run->stats.pages_resident * 65536.0 / 1.0e6);
     return NPH_RESULT_OK;
 }
 
@@ -1847,6 +1875,7 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.stream_loads = g_stream_loads;
     cd.tiles_x = g_tiles_x;
     cd.tiles_z = g_tiles_z;
+    cd.paged_textures = g_paged_textures;
     const u64 t0 = nph_time_now_ns();
     const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
     if (r != NPH_RESULT_OK) {
@@ -1997,6 +2026,9 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     ctx->view_height = g_ref_height; // the stream's view (--stream)
     NphResult r =
         ctx->cooked.stream != NULL ? prime_stream(ctx, &view, target, &run) : NPH_RESULT_OK;
+    if (r == NPH_RESULT_OK && g_paged_textures) {
+        r = prime_pages(ctx, &view, target, &run);
+    }
     if (r == NPH_RESULT_OK) {
         r = run_frames(ctx, &view, target, frames, &run);
     }
@@ -2152,6 +2184,13 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
     // holds 262,144).
     rd.max_deferred = 1U << 20U;
+    if (g_paged_textures) {
+        // Every page at once, before measuring: a large binding and staging
+        // (the stream's 32 moves a frame would take Bistro 1,600 frames).
+        rd.max_page_moves = 1024U;
+        rd.page_staging_slots = 4096U;
+        rd.texture_page_bytes = NPH_GIB(4);
+    }
     if (g_lists > 1U) {
         // Every list that can drop work, larger (the renderer clamps them to
         // what its records can address): what a scene that overflows the
@@ -2220,7 +2259,7 @@ static int usage(void)
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
-                    "[--no-cells]\n");
+                    "[--no-cells] [--paged-textures]\n");
     return 2;
 }
 
@@ -2270,6 +2309,8 @@ int main(int argc, char **argv)
             g_stream_budget = (u64)strtoull(argv[i] + 9, NULL, 10) * 1000000ULL;
         } else if (strcmp(argv[i], "--stream-trace") == 0) {
             g_stream_trace = true;
+        } else if (strcmp(argv[i], "--paged-textures") == 0) {
+            g_paged_textures = true;
         } else if (strncmp(argv[i], "--voxel-pool=", 13U) == 0) {
             g_voxel_pool_mb = (i64)strtoll(argv[i] + 13, NULL, 10);
         } else if (strncmp(argv[i], "--stream-loads=", 15U) == 0) {

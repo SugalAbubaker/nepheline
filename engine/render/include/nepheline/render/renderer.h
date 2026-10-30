@@ -170,6 +170,22 @@ typedef struct NphRendererDesc {
     // 0: none; such meshes then get buffers as others do. A destroyed mesh's
     // range returns two frames later.
     u64 voxel_pool_bytes;
+    // Paged textures (docs/adr/0065-virtual-texturing.md; docs/render.md
+    // "Virtual textures"), where the device has sparse residency: the
+    // device memory their resident pages may take (1 GiB), and the pages
+    // every paged texture may have, resident or not (2^20; Bistro's
+    // textures would have 52,000). disable_texture_paging makes textures
+    // created PAGED resident whole, as on a device without sparse residency.
+    u64 texture_page_bytes;
+    u32 max_texture_pages;
+    b32 disable_texture_paging;
+    // Pages bound, and pages unbound, per frame at most (32): one binding a
+    // frame of at most twice this, where stage 0 of ADR-0065 measured no
+    // stall of the rendering thread's submits. The rest wait.
+    u32 max_page_moves;
+    // Installed pages' texels waiting for their copies, a page each of host-
+    // visible memory (4 * max_page_moves, at least 64).
+    u32 page_staging_slots;
     // Ray-traced shadows, where the device has ray queries (docs/render.md
     // "Shadows"): set to never create them (no acceleration structures,
     // GPU memory, or pipelines for them); lights that cast shadows then draw
@@ -221,6 +237,15 @@ typedef enum NphRenderTextureKind {
 typedef enum NphRenderTextureFlags {
     // Two-channel tangent-space normals (BC5, RG8): z is reconstructed.
     NPH_RENDER_TEXTURE_FLAG_NORMAL_TWO_CHANNEL = 1U << 0U,
+    // Paged (docs/adr/0065), where the renderer pages textures
+    // (nph_renderer_texture_paging_supported) and the 2D texture's top level
+    // spans more than a page: its levels above the mip tail come page by
+    // page, from nph_render_texture_page_install, and only its tail is
+    // uploaded now. Its samples take the finest level from which every
+    // level is resident whole, the tail at worst: a level is sampled once
+    // its every page is resident. `mips` still holds every level: elsewhere
+    // the texture is resident whole.
+    NPH_RENDER_TEXTURE_FLAG_PAGED = 1U << 1U,
 } NphRenderTextureFlags;
 
 typedef struct NphRenderTextureDesc {
@@ -249,6 +274,69 @@ NPH_MUST_USE NphResult nph_render_texture_create(NphRenderer *r, const NphRender
 // name the texture draw without it (logged once). Null handles are ignored.
 void nph_render_texture_destroy(NphRenderer *r, NphRenderTexture texture);
 bool nph_render_texture_is_valid(const NphRenderer *r, NphRenderTexture texture);
+
+// ---------------------------------------------------------------------------
+// Paged textures (docs/adr/0065-virtual-texturing.md)
+// ---------------------------------------------------------------------------
+
+// Whether textures created PAGED are paged: the device has sparse residency
+// (NphGpuFeatures.sparse_residency) and the description does not disable it.
+bool nph_renderer_texture_paging_supported(const NphRenderer *r);
+
+typedef struct NphRenderTexturePages {
+    b32 paged;      // false: resident whole (and the rest is zero)
+    u32 page_width; // texels of a page
+    u32 page_height;
+    // Levels from here are resident from creation: from the first under a
+    // page in either dimension (the device's mip tail, or those levels' own
+    // pages on a device that keeps none).
+    u32 tail_first_mip;
+    u32 pages_x[NPH_GPU_MAX_MIPS]; // pages of each level below tail_first_mip
+    u32 pages_y[NPH_GPU_MAX_MIPS];
+} NphRenderTexturePages;
+
+// NPH_RESULT_INVALID_ARGUMENT for a stale handle.
+NPH_MUST_USE NphResult nph_render_texture_pages(const NphRenderer *r, NphRenderTexture texture,
+                                                NphRenderTexturePages *out);
+
+typedef enum NphRenderPageState {
+    NPH_RENDER_PAGE_ABSENT = 0,
+    NPH_RENDER_PAGE_INSTALLING, // bound at the next frame, copied in the one after
+    NPH_RENDER_PAGE_RESIDENT,
+    NPH_RENDER_PAGE_EVICTING, // its level no longer sampled; its memory returns after the frames
+                              // in flight
+} NphRenderPageState;
+
+// Installs page (x, y) of level `mip` (below the tail): its texels are the
+// page's rectangle (which ends with the level at its right and bottom
+// edges), rows `row_pitch` bytes apart (0: tightly packed), copied during
+// the call. The page is bound with the next frame and resident from the
+// frame after, sampled once its level is (NPH_RENDER_TEXTURE_FLAG_PAGED).
+// A page installing or resident is left as it is; one
+// evicting is resident again at once (its memory still holds it).
+// NPH_RESULT_FULL while the page budget or the staging holds no more (evict,
+// or try after the frames in flight). Thread-safety: NPH_THREADSAFE while
+// the texture lives.
+NPH_MUST_USE NphResult nph_render_texture_page_install(NphRenderer *r, NphRenderTexture texture,
+                                                       u32 mip, u32 x, u32 y, const void *texels,
+                                                       u64 row_pitch);
+
+// Evicts a page: from the next frame its level is no longer sampled (the
+// texture's samples take the next level from which every level is
+// resident whole), and its memory returns once no frame in flight can read
+// it. A page installing is cancelled. Thread-safety: NPH_THREADSAFE while
+// the texture lives.
+void nph_render_texture_page_evict(NphRenderer *r, NphRenderTexture texture, u32 mip, u32 x, u32 y);
+
+NphRenderPageState nph_render_texture_page_state(NphRenderer *r, NphRenderTexture texture, u32 mip,
+                                                 u32 x, u32 y);
+
+// The frame whose pixels last asked for the page: those sampling it at the
+// level the hardware wants, whether it was resident or not, a pixel in 16
+// a frame (NPH_U64_MAX: none yet). Requests are read back
+// NPH_GPU_FRAMES_IN_FLIGHT frames late.
+u64 nph_render_texture_page_requested(NphRenderer *r, NphRenderTexture texture, u32 mip, u32 x,
+                                      u32 y);
 
 // ---------------------------------------------------------------------------
 // Meshes
@@ -977,6 +1065,11 @@ typedef struct NphRenderFrameStats {
     b32 dof;
     b32 ao;
     b32 gi;
+    // Paged textures (ADR-0065): their pages resident this frame, and those
+    // whose copies this frame recorded and whose unbinding it issued.
+    u32 pages_resident;
+    u32 pages_installed;
+    u32 pages_evicted;
 } NphRenderFrameStats;
 
 // The virtual shadow map's capacities that can fill up

@@ -152,6 +152,9 @@ static NphResult create_texture(CookedScene *s, u32 index)
                   ? (u32)NPH_RENDER_TEXTURE_FLAG_NORMAL_TWO_CHANNEL
                   : 0U;
     d.name = "cooked texture";
+    if (s->paged_textures) {
+        d.flags |= (u32)NPH_RENDER_TEXTURE_FLAG_PAGED;
+    }
     const NphResult r = nph_render_texture_create(s->renderer, &d, &s->textures[index]);
     if (r == NPH_RESULT_UNSUPPORTED) {
         // A device without BC textures draws the material untextured.
@@ -159,7 +162,56 @@ static NphResult create_texture(CookedScene *s, u32 index)
                      nph_texture_format_info(h->format)->name);
         return NPH_RESULT_OK;
     }
-    return r;
+    NPH_TRY(r);
+    // Paged: every page to install, level by level.
+    NphRenderTexturePages pages;
+    NPH_TRY(nph_render_texture_pages(s->renderer, s->textures[index], &pages));
+    for (u32 m = 0; m < pages.tail_first_mip; ++m) {
+        for (u32 y = 0; y < pages.pages_y[m]; ++y) {
+            for (u32 x = 0; x < pages.pages_x[m]; ++x) {
+                if (s->page_count == s->page_cap) {
+                    const u32 cap = s->page_cap == 0U ? 1024U : s->page_cap * 2U;
+                    CookedPage *grown = (CookedPage *)NPH_REALLOC(
+                        s->alloc, s->pages, (u64)s->page_cap * sizeof(CookedPage),
+                        (u64)cap * sizeof(CookedPage), NPH_ALIGNOF(CookedPage));
+                    if (grown == NULL) {
+                        return NPH_RESULT_OUT_OF_MEMORY;
+                    }
+                    s->pages = grown;
+                    s->page_cap = cap;
+                }
+                s->pages[s->page_count++] = (CookedPage){index, m, x, y};
+            }
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+// Installs pages of paged textures until the renderer's staging is full.
+static NphResult install_pages(CookedScene *s)
+{
+    while (s->page_next < s->page_count) {
+        const CookedPage *pg = &s->pages[s->page_next];
+        NphTextureView tv;
+        NPH_TRY(nph_texture_view(nph_asset_get(s->loader, s->assets[pg->asset]), &tv));
+        const NphGpuFormatInfo *fi = nph_gpu_format_info(gpu_format(tv.header->format));
+        NphRenderTexturePages pages;
+        NPH_TRY(nph_render_texture_pages(s->renderer, s->textures[pg->asset], &pages));
+        const u32 w = nph_gpu_mip_extent(tv.header->width, pg->mip);
+        const u64 blocks_x = (w + fi->block_width - 1U) / fi->block_width;
+        const u64 pitch = blocks_x * fi->bytes_per_block;
+        const u64 row = (u64)pg->y * (pages.page_height / fi->block_height);
+        const u64 col = (u64)pg->x * (pages.page_width / fi->block_width);
+        const u8 *at = (const u8 *)tv.mips[pg->mip] + row * pitch + col * fi->bytes_per_block;
+        const NphResult r = nph_render_texture_page_install(s->renderer, s->textures[pg->asset],
+                                                            pg->mip, pg->x, pg->y, at, pitch);
+        if (r == NPH_RESULT_FULL) {
+            return NPH_RESULT_OK; // the rest next frame
+        }
+        NPH_TRY(r);
+        ++s->page_next;
+    }
+    return NPH_RESULT_OK;
 }
 
 // The cooked meshlets, and the levels of detail where the mesh has them
@@ -779,6 +831,7 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
 NphResult cooked_scene_update(CookedScene *s, const NphRenderView *view, u32 height)
 {
     NPH_ASSERT(s != NULL && view != NULL);
+    NPH_TRY(install_pages(s));
     if (s->stream == NULL) {
         return NPH_RESULT_OK;
     }
@@ -797,6 +850,7 @@ NphResult cooked_scene_load(const CookedSceneDesc *desc, CookedScene *out)
     out->alloc = desc->alloc;
     out->renderer = desc->renderer;
     out->loader = desc->loader;
+    out->paged_textures = desc->paged_textures;
     const NphResult r = load(out, desc);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_COOKED_SCENE, "loading the scene failed: %s", nph_result_string(r));
@@ -864,6 +918,8 @@ void cooked_scene_unload(CookedScene *s)
     }
     if (s->textures != NULL) {
         NPH_FREE_ARRAY(a, NphRenderTexture, s->textures, s->asset_cap);
+        NPH_FREE_ARRAY(a, CookedPage, s->pages, s->page_cap);
+        s->pages = NULL;
     }
     if (s->meshes != NULL) {
         NPH_FREE_ARRAY(a, NphRenderMesh, s->meshes, s->asset_cap);

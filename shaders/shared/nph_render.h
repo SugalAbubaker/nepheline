@@ -117,6 +117,9 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     // without temporal anti-aliasing), which what is drawn over the temporal
     // resolve's output takes off again; zw: unused.
     NphVec4 jitter;
+    // The frame's paged textures (NphRenderPagingView; 0: none paged).
+    u64 paging;
+    u64 pad_paging;
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -152,9 +155,48 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     u32 alpha_mode;  // 0 opaque, 1 mask, 2 blend
     u32 handle;      // the material's handle value (0: the default material, or a free slot)
     u32 textures[5]; // bindless sampled-image indices (NPH_RENDER_NO_TEXTURE: none)
-    u32 samplers[5]; // bindless sampler indices
-    u32 pad1;
+    // Bindless sampler indices: a paged texture's clamps the level of detail
+    // to its first resident level this frame (texture_paging.glsl).
+    u32 samplers[5];
+    // How each slot's sampler addresses: bits 4s..4s+1 its u, 4s+2..4s+3 its
+    // v (NPH_RENDER_WRAP_*), which paged textures' requests follow.
+    u32 wrap;
     u32 pad2;
+};
+
+// Paged textures (docs/adr/0065-virtual-texturing.md; texture_paging.glsl):
+// the levels above a texture's mip tail made resident whole. A paged
+// texture's record, indexed by its bindless sampled-image index, says
+// where its request words start and how its pages are cut; a record of
+// zero is a texture resident whole.
+NPH_SHARED_STRUCT(NphRenderTexturePaging)
+{
+    // Its request words: the first its own, the others a bit per page,
+    // level by level, row by row.
+    u32 first_word;
+    u32 extent; // level 0's width | height << 16
+    // log2 of the page width | log2 of its height << 4 | the first level
+    // resident from creation << 8 (levels from there are always resident:
+    // the mip tail, or the levels under a page); 0: not paged.
+    u32 shape;
+    u32 pad;
+    // The first bit of each paged level among the texture's bits (after its
+    // first word), two levels a field: level 2i in the low half, 2i + 1 in
+    // the high. Fields, not an array: shaders copy the record
+    // (docs/build.md "Shaders").
+    u32 levels01;
+    u32 levels23;
+    u32 levels45;
+    u32 levels67;
+};
+
+// The frame's paged textures (NphRenderViewData.paging).
+NPH_SHARED_STRUCT(NphRenderPagingView)
+{
+    u64 records;        // NphRenderTexturePaging[], indexed by bindless sampled-image index
+    u64 requests;       // u32 words: the pages this frame's pixels asked for
+    f32 max_anisotropy; // the material samplers'
+    u32 feedback_phase; // the pixel of each 8 x 8 tile that asks this frame: x | y << 3
 };
 
 // A punctual light (KHR_lights_punctual), camera relative.

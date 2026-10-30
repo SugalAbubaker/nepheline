@@ -11,6 +11,7 @@
 #include <nepheline/core/handle.h>
 #include <nepheline/core/range_alloc.h>
 #include <nepheline/gpu/accel.h>
+#include <nepheline/gpu/sparse.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/render/debug_draw.h>
 #include <nepheline/render/meshlet.h>
@@ -120,7 +121,119 @@ typedef struct RenderTexture {
     u32 flags;
     u32 width;
     u32 mip_count;
+    b32 paged; // its levels above the mip tail are paged (paging.c; ADR-0065)
 } RenderTexture;
+
+// ---------------------------------------------------------------------------
+// Paged textures (paging.c; docs/adr/0065-virtual-texturing.md)
+// ---------------------------------------------------------------------------
+
+// A page of a paged texture. ABSENT pages hold nothing; INSTALLING ones wait
+// for their binding (`frame` NOT_BOUND) or, bound in `frame`, for their
+// copy; RESIDENT ones count towards their level being resident whole (and
+// sampled); EVICTING ones no longer count, and wait for the frames that
+// could still read them.
+typedef struct RenderPage {
+    u8 state; // NphRenderPageState
+    u8 pad0;
+    u16 pad;
+    u32 staging; // INSTALLING: its texels' slot in the staging ring
+    NphGpuPage memory;
+    u32 pad1;
+    u64 frame;     // INSTALLING: the frame it was bound in; EVICTING: the frame it left in
+    u64 requested; // the frame whose pixels last asked for it (NPH_U64_MAX: never)
+} RenderPage;
+
+// A paged texture's first resident level is below this: the levels
+// resident from creation start at level 8 at most, and hold at most
+// RENDER_FIXED_PAGES pages (render_paging_texture_create).
+#define RENDER_PAGED_LEVELS 9U
+#define RENDER_FIXED_PAGES  16U
+
+// A paged texture's pages: its levels of at least a page cut into pages of
+// the sparse image's block shape, a bit each among the request words.
+typedef struct RenderPagedTexture {
+    NphRange words; // its request words: [offset] its own, then a bit per page
+    u32 page_count; // of all its paged levels
+    // Levels from here are resident from creation: from the first under a
+    // page in either dimension (the device's mip tail, and on a device
+    // without one, as lavapipe, those levels' pages).
+    u32 fixed_mip;
+    u32 page_width;
+    u32 page_height;
+    u32 full_level; // the first from which every level is resident (fixed_mip: none)
+    u32 level_first[NPH_GPU_MAX_MIPS]; // each paged level's first page among its pages
+    u32 pages_x[NPH_GPU_MAX_MIPS];
+    u32 pages_y[NPH_GPU_MAX_MIPS];
+    u32 resident[NPH_GPU_MAX_MIPS]; // pages resident per level
+    u32 fixed_pages;
+    NphGpuPage fixed[RENDER_FIXED_PAGES]; // the memory of the levels from fixed_mip
+    RenderPage *pages;                    // [page_count]
+} RenderPagedTexture;
+
+// A page in a queue: its texture (slot and live handle) and its index.
+typedef struct RenderPageRef {
+    u32 texture; // the texture's slot
+    u32 handle;  // its handle's value then: a texture destroyed since is skipped
+    u32 page;
+    u32 pad;
+} RenderPageRef;
+
+typedef struct RenderPaging {
+    b32 initialized; // render_paging_init ran: the lock exists
+    b32 supported;   // the device has sparse residency and the description pages textures
+    NphMutex lock;   // installs and evictions come from any thread
+    NphGpuPagePool *pool;
+    RenderPagedTexture *textures; // [max_textures], by texture slot
+    u32 paged_count;              // textures paged now
+    // Per texture slot, its paged texture's first resident level this frame
+    // (a copy of full_level taken under the lock as the frame begins, which
+    // the materials' levels read), and whether any changed since: the
+    // materials are then written again.
+    u8 *frame_level;
+    b32 level_changed;
+    // The request words: each texture's range, and which texture owns each
+    // word (slot + 1; 0: none).
+    NphRangeAllocator word_alloc;
+    u32 *word_owner;
+    u32 word_capacity;
+    u32 words_used; // the highest word in use + 1
+    // The pages' records, by bindless sampled-image index (device memory).
+    NphGpuBuffer records;
+    u32 record_capacity;
+    // The pages the frame's pixels ask for (device memory), cleared before
+    // and copied after the passes that ask; read back per frame slot.
+    NphGpuBuffer requests;
+    NphGpuBuffer request_readback[NPH_GPU_FRAMES_IN_FLIGHT];
+    u64 request_frame[NPH_GPU_FRAMES_IN_FLIGHT]; // frame + 1 whose requests the slot holds
+    u32 request_words[NPH_GPU_FRAMES_IN_FLIGHT]; // how many words it copied
+    NphGpuRgBuffer frame_requests;               // this frame's, imported (null: none)
+    NphGpuRgBuffer frame_readback;               // and the slot's readback
+    // Installed texels wait here (page-sized slots of host-visible memory)
+    // until their copy is recorded; a slot is free again once the frame that
+    // copied from it completes.
+    NphGpuBuffer staging;
+    u8 *staging_map;
+    u32 staging_slots;
+    u32 *staging_free; // a stack
+    u32 staging_free_count;
+    u32 *staging_done[NPH_GPU_FRAMES_IN_FLIGHT]; // freed when the slot's frame completes
+    u32 staging_done_count[NPH_GPU_FRAMES_IN_FLIGHT];
+    // Pages to install (to bind, then to copy) and to unbind, oldest first.
+    RenderPageRef *installs;
+    u32 install_count;
+    u32 install_cap;
+    RenderPageRef *evictions;
+    u32 eviction_count;
+    u32 eviction_cap;
+    NphGpuSparseBind *binds; // this frame's binding, at most max_page_moves * 2
+    // This frame's.
+    u64 frame_index;
+    u32 installed;
+    u32 evicted;
+    u32 resident_pages;
+    b32 frame_active; // a paged texture exists: the view carries the paging record
+} RenderPaging;
 
 typedef struct RenderMesh {
     u32 handle;
@@ -465,6 +578,7 @@ typedef struct RenderFrameLayout {
     u64 rt_instances_offset;      // NphGpuAccelInstance[max_instances]: the reference's
     u64 vsm_view_offset;          // NphVsmView (production path)
     u64 gi_view_offset;           // NphRenderGiView (production path)
+    u64 paging_view_offset;       // NphRenderPagingView (paging.c)
     u64 size;
 } RenderFrameLayout;
 
@@ -505,6 +619,9 @@ typedef enum VisShader {
     VIS_SHADER_VOXEL_RESOLVE,
     VIS_SHADER_VOXEL_RESOLVE_RT, // where the device has ray queries
     VIS_SHADER_CULL_CELLS,
+    // Where textures are paged (paging.c; ADR-0065): the pass that asks for
+    // the pages the opaque pixels sample.
+    VIS_SHADER_PAGE_REQUESTS,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -777,6 +894,10 @@ typedef struct RenderVis {
     // The voxel resolve's (vis_voxel_resolve.glsl): [debug views][ray-traced
     // shadows][virtual shadow map][radiance cache].
     NphGpuPipeline voxel_resolve[2][2][2][2];
+    // The pass that asks for the pages the opaque pixels sample
+    // (vis_page_requests.comp; ADR-0065), made with the first paged texture.
+    NphGpuPipeline page_requests;
+    b32 paged_ready;
     b32 debug_view; // this frame's view draws a debug view
 } RenderVis;
 
@@ -968,9 +1089,13 @@ struct NphRenderer {
     RenderLight *lights;
     RenderCell *cells;
 
-    // Samplers: material samplers by [wrap_u][wrap_v][nearest], and the
-    // trilinear clamp sampler of the lighting tables.
+    // Samplers: material samplers by [wrap_u][wrap_v][nearest]; where
+    // textures are paged, the same with their minimum levels of detail at
+    // levels 1 to RENDER_PAGED_LEVELS - 1, a paged texture's first resident
+    // level (paging.c); and the trilinear clamp sampler of the lighting
+    // tables.
     NphGpuSampler material_samplers[3][3][2];
+    NphGpuSampler paged_samplers[3][3][2][RENDER_PAGED_LEVELS - 1];
     NphGpuSampler clamp_sampler;
 
     NphGpuShader shaders[RENDER_SHADER_COUNT];
@@ -1046,6 +1171,9 @@ struct NphRenderer {
     // The production path's radiance cache.
     RenderGi gi;
 
+    // Paged textures (paging.c; ADR-0065).
+    RenderPaging paging;
+
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
     NphRenderTonemapPush tonemap_push;
@@ -1076,6 +1204,10 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);
+// The binding's sampler with its minimum level of detail at `level` (a
+// paged texture's first resident level, below RENDER_PAGED_LEVELS).
+u32 render_material_sampler_level(const NphRenderer *r, const NphRenderTextureBinding *binding,
+                                  u32 level);
 // The pool slot of a live handle, or NPH_U32_MAX for null and stale ones.
 u32 render_slot_of(const NphHandlePool *pool, u32 value);
 
@@ -1276,6 +1408,34 @@ void render_gi_light_changed(NphRenderer *r, u32 slot);
 // irradiance debug views), on a renderer that has it. The top level must be
 // built for it (render_rt_frame_begin).
 bool render_gi_frame_wanted(const NphRenderer *r, const NphRenderView *view, bool production);
+
+// Paged textures (paging.c; docs/adr/0065-virtual-texturing.md).
+// Whether the renderer pages textures: the device's sparse residency and
+// the description. Known before the samplers are made.
+bool render_paging_device_supported(const NphRenderer *r);
+// Textures made PAGED become sparse images, the others write an empty
+// record. The request pass (vis.c), made once, before a texture is paged.
+NphResult render_vis_paged_pipelines(NphRenderer *r);
+NphResult render_paging_init(NphRenderer *r);
+void render_paging_shutdown(NphRenderer *r);
+NphResult render_paging_texture_create(NphRenderer *r, u32 slot, const NphRenderTextureDesc *desc,
+                                       u32 layers);
+void render_paging_texture_destroy(NphRenderer *r, u32 slot);
+// A texture resident whole: an empty record at its bindless index.
+NphResult render_paging_texture_whole(NphRenderer *r, NphGpuImage image);
+// Before the frame's upload flush: the requests read back, the copies of
+// pages bound last frame, the textures' first resident levels for the
+// frame's materials, and the frame's record. After it: one binding for this
+// frame's installs and unbinds.
+void render_paging_frame_begin(NphRenderer *r);
+NphResult render_paging_frame_bind(NphRenderer *r);
+// The requests cleared before the passes that ask (declared first) and
+// read back after them (declared last); passes that ask write
+// r->paging.frame_requests while it is not null.
+NphResult render_paging_declare_clear(NphRenderer *r, NphGpuRenderGraph *graph);
+NphResult render_paging_declare_readback(NphRenderer *r, NphGpuRenderGraph *graph);
+// The frame's NphRenderPagingView (0: nothing is paged).
+u64 render_paging_view_address(const NphRenderer *r);
 // Whether this frame has it; if so writes its NphRenderGiView into the
 // frame's records (render_gi_view_address) for a `width` x `height` target,
 // after the ambient occlusion's and the temporal resolve's frame begins.

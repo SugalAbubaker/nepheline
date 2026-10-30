@@ -64,6 +64,11 @@ typedef struct CookedSceneDesc {
     u32 tiles_x;
     u32 tiles_z;
     NphDVec3 tile_pitch;
+    // Textures paged (ADR-0065; NPH_RENDER_TEXTURE_FLAG_PAGED) where the
+    // renderer pages them, every page installed over the first frames
+    // (cooked_scene_update), as fast as the renderer's staging takes them:
+    // what paging costs where every page is resident.
+    b32 paged_textures;
 } CookedSceneDesc;
 
 typedef struct CookedScene {
@@ -113,10 +118,32 @@ typedef struct CookedScene {
     // The scene's first camera, if any (else has_camera is 0).
     b32 has_camera;
     NphRenderCamera camera;
+    // The pages of paged textures still to install (CookedSceneDesc
+    // .paged_textures), from `page_next` on.
+    b32 paged_textures;
+    struct CookedPage *pages;
+    u32 page_count;
+    u32 page_cap;
+    u32 page_next;
 } CookedScene;
 
+// A page of a paged texture: the texture's asset index, the level, the page.
+typedef struct CookedPage {
+    u32 asset;
+    u32 mip;
+    u32 x;
+    u32 y;
+} CookedPage;
+
+// Whether pages of paged textures remain to be installed.
+NPH_INLINE bool cooked_scene_installing(const CookedScene *s)
+{
+    return s->page_next < s->page_count;
+}
+
 // One frame's streaming of the cells' proxies (CookedSceneDesc.stream; a
-// no-op without), for `view` drawn `height` pixels tall: between
+// no-op without), for `view` drawn `height` pixels tall, and the installs of
+// paged textures' pages that the renderer's staging takes: between
 // nph_gpu_frame_begin and nph_render_frame.
 NPH_MUST_USE NphResult cooked_scene_update(CookedScene *s, const NphRenderView *view, u32 height);
 

@@ -97,6 +97,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_voxel_resolve.comp",
     "vis_voxel_resolve_rt.comp",
     "vis_cull_cells.comp",
+    "vis_page_requests.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
@@ -263,8 +264,10 @@ NphResult render_vis_create(NphRenderer *r)
         // one without ray queries.
         const bool ray_queries =
             i == (u32)VIS_SHADER_RESOLVE_RT || i == (u32)VIS_SHADER_VOXEL_RESOLVE_RT;
+        // The page requests only where textures are paged.
+        const bool paging_only = i == (u32)VIS_SHADER_PAGE_REQUESTS;
         if ((mesh_stage && !v->mesh_shaders) || (vertex_stage && v->mesh_shaders) ||
-            (ray_queries && !r->rt.supported)) {
+            (ray_queries && !r->rt.supported) || (paging_only && !r->paging.supported)) {
             continue;
         }
         NPH_TRY(render_load_shader_file(r, k_shader_files[i], &v->shaders[i]));
@@ -404,6 +407,7 @@ void render_vis_destroy(NphRenderer *r)
         nph_gpu_pipeline_destroy(dev, v->resolve_debug[i >> 2U][(i >> 1U) & 1U][i & 1U]);
         nph_gpu_pipeline_destroy(dev, v->resolve_voxels[i >> 2U][(i >> 1U) & 1U][i & 1U]);
     }
+    nph_gpu_pipeline_destroy(dev, v->page_requests);
     for (u32 i = 0; i < 16U; ++i) {
         nph_gpu_pipeline_destroy(dev,
                                  v->voxel_resolve[i >> 3U][(i >> 2U) & 1U][(i >> 1U) & 1U][i & 1U]);
@@ -1239,6 +1243,37 @@ static void hzb1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     hzb_record((NphRenderer *)user, graph, cmd, 1U);
 }
 
+NphResult render_vis_paged_pipelines(NphRenderer *r)
+{
+    RenderVis *v = &r->vis;
+    if (!v->supported || v->paged_ready) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuComputePipelineDesc d;
+    memset(&d, 0, sizeof d);
+    d.shader = v->shaders[VIS_SHADER_PAGE_REQUESTS];
+    d.name = "vis page requests";
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->page_requests));
+    render_log_statistics(r, v->page_requests, d.name);
+    v->paged_ready = 1;
+    return NPH_RESULT_OK;
+}
+
+// One invocation for each of the target's 8 x 8 tiles, 64 a workgroup
+// (vis_page_requests.comp).
+static void page_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const VisFrame *f = &r->vis.frame;
+    NphVisResolvePush p = r->vis.resolve_push;
+    p.vis_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.page_requests);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    const u32 tiles_x = (f->width + 7U) / 8U;
+    const u32 tiles_y = (f->height + 7U) / 8U;
+    nph_gpu_cmd_dispatch(cmd, (tiles_x + 7U) / 8U, (tiles_y + 7U) / 8U, 1U);
+}
+
 static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
@@ -1256,9 +1291,10 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     const u32 rt = r->rt.frame_shadows ? 1U : 0U;
     const u32 vsm = r->vsm.frame_active ? 1U : 0U;
     const u32 gi = r->gi.frame_active ? 1U : 0U;
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.debug_view     ? r->vis.resolve_debug[rt][vsm][gi]
-                                   : r->vis.frame_voxels ? r->vis.resolve_voxels[rt][vsm][gi]
-                                                         : r->vis.compute[k_resolve[rt][vsm][gi]]);
+    const u32 kind = r->vis.debug_view ? 2U : r->vis.frame_voxels ? 1U : 0U;
+    nph_gpu_cmd_bind_pipeline(cmd, kind == 2U   ? r->vis.resolve_debug[rt][vsm][gi]
+                                   : kind == 1U ? r->vis.resolve_voxels[rt][vsm][gi]
+                                                : r->vis.compute[k_resolve[rt][vsm][gi]]);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
@@ -1573,6 +1609,20 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
         nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
     nph_gpu_rg_write_image(p, f->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    // The pages the opaque pixels ask for, in a pass of their own
+    // (vis_page_requests.comp; ADR-0065).
+    if (!nph_gpu_rg_buffer_is_null(r->paging.frame_requests)) {
+        NphGpuRgPass *q =
+            add_pass(graph, r, "vis page requests", NPH_GPU_RG_PASS_COMPUTE, page_requests_execute);
+        if (q == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_image(q, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        nph_gpu_rg_read_buffer(q, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(q, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(q, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_buffer(q, r->paging.frame_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
     if (!r->vis.frame_voxels) {
         return NPH_RESULT_OK;
     }
@@ -2088,6 +2138,9 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
     nph_gpu_rg_read_image(p, specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_read_image(p, lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(p, sh, NPH_GPU_RG_USE_SHADER_READ);
+    if (!nph_gpu_rg_buffer_is_null(r->paging.frame_requests)) {
+        nph_gpu_rg_write_buffer(p, r->paging.frame_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
     read_lights(p, f);
     if (r->rt.frame_active) {
         nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);

@@ -143,6 +143,18 @@ typedef struct NphGpuSparseBind {
 NPH_MUST_USE NphResult nph_gpu_sparse_bind(NphGpuDevice *dev, const NphGpuSparseBind *binds,
                                            u32 count, u64 *out_value);
 
+// Records, in the open upload batch, the copy of a page's texels from `src`
+// at `src_offset` into page (x, y) of the paged level `mip` (a tail is
+// uploaded whole, by nph_gpu_upload_image). The texels are tightly packed:
+// the page's rectangle, which ends with the level at its right and bottom
+// edges. Like every copy into a sparse image, it lands after the latest
+// binding. `src` needs TRANSFER_SRC usage and must hold the bytes until the
+// batch completes: the frame recording now, or the flush's return outside
+// a frame. NPH_RESULT_INVALID_ARGUMENT for a page out of range or a source
+// too small. Thread-safety: the upload lock (upload.h).
+NPH_MUST_USE NphResult nph_gpu_upload_sparse_page(NphGpuDevice *dev, NphGpuImage dst, u32 mip,
+                                                  u32 x, u32 y, NphGpuBuffer src, u64 src_offset);
+
 // The sparse timeline: the value of the latest binding made, and the value
 // the GPU has completed (it polls).
 u64 nph_gpu_sparse_submitted(const NphGpuDevice *dev);
