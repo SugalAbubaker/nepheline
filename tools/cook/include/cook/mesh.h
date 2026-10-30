@@ -119,6 +119,10 @@ typedef struct CookMeshSettings {
     // given (step 8; ADR-0061): off by default until the voxel raster draws
     // the reference scenes' foliage faster than their stalled triangles.
     b32 voxels;
+    // The mesh's normal maps have green growing downwards (DirectX's
+    // convention, not glTF's): its tangents' w is negated (docs/cook.md
+    // "Tangent handedness").
+    b32 normal_y_down;
 } CookMeshSettings;
 
 // Defaults: optimised, the format's meshlet limits, cone weight 0.25,

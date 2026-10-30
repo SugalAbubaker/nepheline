@@ -39,8 +39,8 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--no-lods] [--voxels] [--hlod] [--hlod-cell M]
-         [--hlod-distance M] [--threads N] [--quiet] [--verbose]
+         [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--hlod]
+         [--hlod-cell M] [--hlod-distance M] [--threads N] [--quiet] [--verbose]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -394,6 +394,13 @@ triangle's UVs wind clockwise in (u, v): MikkTSpace's sign negated
 either way, and authored glTF tangents, which follow the same rule, are
 kept as they are. A renderer reconstructs the bitangent as
 `cross(n, t.xyz) * t.w` and samples normal maps without flipping green.
+
+`--normal-y-down` is for sources whose normal maps have green growing
+downwards, DirectX's convention, as Emerald Square's are. It negates w on
+every mesh it cooks, generated or authored, which negates the bitangent
+and so reads green the other way. No texel changes, so nothing has to be
+decoded and encoded for it. It applies to a whole cook, so a document
+mixing both conventions has to be fixed in its source.
 
 ### The meshlet normal cone
 

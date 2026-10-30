@@ -819,6 +819,11 @@ static NphResult mesh_process(CookMesh *mesh, const CookMeshSettings *settings_i
         (mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) == 0U) {
         NPH_TRY(cook_mesh_generate_tangents(mesh));
     }
+    if (settings.normal_y_down && (mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) != 0U) {
+        for (u32 i = 0; i < mesh->vertices.len; ++i) {
+            mesh->vertices.data[i].tangent.w = -mesh->vertices.data[i].tangent.w;
+        }
+    }
     st.acmr_before = cook_mesh_acmr(mesh->indices.data, mesh->indices.len, 32U);
     const u64 optimize_start = nph_time_now_ns();
     if (!settings.no_optimize) {
