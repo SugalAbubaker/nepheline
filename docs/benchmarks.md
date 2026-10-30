@@ -395,7 +395,11 @@ the 99th percentile; ADR-0059 has every view) with
 `reference_scenes-2026-10-30b` (the landscape): against the start, built
 again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
 more, the walk down its meshes' level hierarchies, which Phase 14 wins
-back first (ADR-0066).
+back first (ADR-0066). `benchmarks/reference_budgets.txt` is generated
+from `reference_scenes-2026-10-30`, so it allows that cost until then, and
+Phase 14 lowers the lines with the win. The landscape has no rows there:
+the nightly runs it at the default lists, where every view overflows and
+drops work, so its numbers are not its full-quality frame (ADR-0066).
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
