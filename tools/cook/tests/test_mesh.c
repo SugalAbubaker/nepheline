@@ -782,6 +782,46 @@ NTEST(mesh, the_pipeline_writes_a_valid_asset)
     }
 }
 
+// A normal map with green growing downwards reads right with the bitangent
+// negated, which is w and nothing else: the tangents' directions, the normals
+// and the rest of the asset's vertices stand.
+NTEST(mesh, normal_y_down_negates_the_tangents_handedness_alone)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    NphVec4 tangents[2][24];
+    NphVec3 normals[2][24];
+    for (u32 variant = 0; variant < 2U; ++variant) {
+        CookMesh m;
+        cook_mesh_init(&m, alloc);
+        make_cube(&m, true);
+        CookMeshSettings s;
+        cook_mesh_settings_default(&s);
+        s.normal_y_down = variant != 0U ? 1 : 0;
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                              nph_guid_from_cstr("cube"), 1U);
+        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, NULL), NPH_RESULT_OK);
+        TestAsset ta;
+        test_asset_from_writer(alloc, &w, &ta);
+        nph_asset_writer_free(&w);
+        NphMeshView v;
+        NTEST_ASSERT_EQ_INT(nph_mesh_view(&ta.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.header->vertex_count, 24U);
+        for (u32 i = 0; i < 24U; ++i) {
+            tangents[variant][i] = nph_unpack_snorm8x4(v.attribs[i].tangent);
+            normals[variant][i] = nph_oct_decode_snorm16(v.attribs[i].normal);
+        }
+        test_asset_free(&ta);
+        cook_mesh_free(&m);
+    }
+    for (u32 i = 0; i < 24U; ++i) {
+        NTEST_ASSERT_NEAR_F32(tangents[1][i].w, -tangents[0][i].w, 0.0F);
+        NTEST_ASSERT_TRUE(
+            nph_vec3_near(nph_vec4_xyz(tangents[1][i]), nph_vec4_xyz(tangents[0][i]), 1e-6F));
+        NTEST_ASSERT_TRUE(nph_vec3_near(normals[1][i], normals[0][i], 1e-6F));
+    }
+}
+
 NTEST(mesh, written_bounds_hold_for_the_dequantised_positions)
 {
     // The bounds the renderer culls with must contain the positions it

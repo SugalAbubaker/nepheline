@@ -4,8 +4,8 @@
 //     nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
 //              [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
 //              [--uncompressed] [--no-mips] [--max-extent N]
-//              [--no-optimize] [--no-lods] [--voxels] [--hlod] [--hlod-cell M]
-//              [--hlod-distance M] [--sound-codec auto|pcm|lossless|adpcm]
+//              [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--hlod]
+//              [--hlod-cell M] [--hlod-distance M] [--sound-codec auto|pcm|lossless|adpcm]
 //              [--sound-stream auto|always|never] [--stream-seconds S]
 //              [--threads N] [--quiet] [--verbose]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
@@ -51,6 +51,8 @@ static void usage(FILE *out)
           "  --max-extent <n>      downsample textures larger than n texels a side\n"
           "  --no-optimize         keep the source triangle and vertex order\n"
           "  --no-lods             meshes without levels of detail (level 0 alone)\n"
+          "  --normal-y-down       the sources' normal maps have green growing downwards\n"
+          "                        (DirectX's convention, not glTF's)\n"
           "  --voxels              voxel levels for aggregate geometry (glTF meshes)\n"
           "  --hlod                the world partition's cells and their proxies for\n"
           "                        glTF scenes (implies --voxels)\n"
@@ -172,6 +174,8 @@ int main(int argc, char **argv)
             desc.mesh.no_optimize = 1;
         } else if (strcmp(a, "--no-lods") == 0) {
             desc.mesh.no_lods = 1;
+        } else if (strcmp(a, "--normal-y-down") == 0) {
+            desc.mesh.normal_y_down = 1;
         } else if (strcmp(a, "--voxels") == 0) {
             desc.mesh.voxels = 1;
         } else if (strcmp(a, "--hlod") == 0) {
