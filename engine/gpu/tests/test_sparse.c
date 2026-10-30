@@ -2,7 +2,9 @@
 // Sparse images (sparse.h; docs/adr/0065): their pages and mip tails, the
 // page pools, binding and unbinding, and copies into pages just bound.
 // Devices without NphGpuFeatures.sparse_residency (lavapipe on Windows)
-// skip all but the test of the feature switched off.
+// skip all but the test of the feature switched off. A device may keep no
+// mip tail (lavapipe on Linux: its tail starts past the last level), its
+// small levels then pages of their own.
 #include <nepheline/gpu/sparse.h>
 
 #include "test_gpu_support.h"
@@ -143,11 +145,19 @@ static NphGpuSparseBind page_bind(NphGpuImage image, u32 mip, u32 x, u32 y, NphG
     return b;
 }
 
+// Whether the device keeps a mip tail for `image`: the levels from the
+// first under a page bound together (the tail), or, past the last level,
+// none (lavapipe on Linux).
+static bool has_tail(NphGpuDevice *dev, NphGpuImage image, const NphGpuSparseImageInfo *info)
+{
+    return info->tail_first_mip < nph_gpu_image_desc(dev, image)->mip_count;
+}
+
 NTEST_F(GpuFixture, a_sparse_image_reports_its_pages_and_its_tail)
 {
     REQUIRE_SPARSE(f);
     // BC7: 256 x 256 texel pages; 2048 -> 1024 -> 512 -> 256 paged, 128 and
-    // below in the tail.
+    // below in the tail, or pages of their own where the device keeps none.
     if (nph_gpu_device_info(f->dev)->features.texture_compression_bc) {
         const NphGpuImage bc7 =
             make_sparse(f->dev, 2048U, 2048U, NPH_GPU_FORMAT_BC7_SRGB, 0U, "bc7");
@@ -157,8 +167,13 @@ NTEST_F(GpuFixture, a_sparse_image_reports_its_pages_and_its_tail)
                   info.page_height, info.tail_first_mip, info.tail_pages);
         NTEST_EXPECT_EQ_UINT(info.page_width, 256U);
         NTEST_EXPECT_EQ_UINT(info.page_height, 256U);
-        NTEST_EXPECT_EQ_UINT(info.tail_first_mip, 4U);
-        NTEST_EXPECT_GE_UINT(info.tail_pages, 1U);
+        const bool tail = has_tail(f->dev, bc7, &info);
+        NTEST_EXPECT_EQ_UINT(info.tail_first_mip, tail ? 4U : 12U);
+        if (tail) {
+            NTEST_EXPECT_GE_UINT(info.tail_pages, 1U);
+        } else {
+            NTEST_EXPECT_EQ_UINT(info.tail_pages, 0U);
+        }
         u32 px = 0U;
         u32 py = 0U;
         nph_gpu_image_sparse_pages(f->dev, bc7, 0U, &px, &py);
@@ -168,11 +183,12 @@ NTEST_F(GpuFixture, a_sparse_image_reports_its_pages_and_its_tail)
         NTEST_EXPECT_EQ_UINT(px, 1U);
         NTEST_EXPECT_EQ_UINT(py, 1U);
         nph_gpu_image_sparse_pages(f->dev, bc7, 4U, &px, &py);
-        NTEST_EXPECT_EQ_UINT(px, 0U);
+        NTEST_EXPECT_EQ_UINT(px, tail ? 0U : 1U);
         nph_gpu_image_destroy(f->dev, bc7);
     }
     // RGBA8: 128 x 128 pages. 1000 x 600 -> 500 x 300 -> 250 x 150 paged
-    // (partial pages at the edges), 125 x 75 the first level in the tail.
+    // (partial pages at the edges), 125 x 75 the first level in the tail
+    // where the device keeps one.
     const NphGpuImage rgba =
         make_sparse(f->dev, 1000U, 600U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 0U, "rgba");
     NphGpuSparseImageInfo info;
@@ -181,7 +197,7 @@ NTEST_F(GpuFixture, a_sparse_image_reports_its_pages_and_its_tail)
               info.page_height, info.tail_first_mip, info.tail_pages);
     NTEST_EXPECT_EQ_UINT(info.page_width, 128U);
     NTEST_EXPECT_EQ_UINT(info.page_height, 128U);
-    NTEST_EXPECT_EQ_UINT(info.tail_first_mip, 3U);
+    NTEST_EXPECT_EQ_UINT(info.tail_first_mip, has_tail(f->dev, rgba, &info) ? 3U : 10U);
     u32 px = 0U;
     u32 py = 0U;
     nph_gpu_image_sparse_pages(f->dev, rgba, 0U, &px, &py);
@@ -222,26 +238,30 @@ NTEST_F(GpuFixture, a_sparse_image_is_2d_sampled_and_copied_only)
     NTEST_EXPECT_TRUE(nph_gpu_image_is_null(image));
 }
 
-// Pages bound in one call (pages of three levels and the tail) hold what is
-// copied into them; pages never bound read as zeros; a page unbound and
-// another bound in its place hold the new page's texels.
+// Pages bound in one call (pages of three levels and the small levels: the
+// tail, or a page each where the device keeps none) hold what is copied
+// into them; pages never bound read as zeros where the device says so; a
+// page unbound and another bound in its place hold the new page's texels.
 NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
 {
     REQUIRE_SPARSE(f);
-    // 512 x 512 RGBA8: 4 x 4 pages at mip 0, 2 x 2 at mip 1, 1 at mip 2, the
-    // tail from mip 3. Blocks of 3 pages, so the pool grows block by block.
+    // 512 x 512 RGBA8: 4 x 4 pages at mip 0, 2 x 2 at mip 1, 1 at mip 2, and
+    // from mip 3 (64 x 64) the small levels: the tail, or a page each. Blocks
+    // of 3 pages, so the pool grows block by block.
     const NphGpuImage image =
         make_sparse(f->dev, 512U, 512U, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 0U, "paged");
     NphGpuSparseImageInfo info;
     NTEST_ASSERT_EQ_INT(nph_gpu_image_sparse_info(f->dev, image, &info), NPH_RESULT_OK);
-    NTEST_ASSERT_EQ_UINT(info.tail_first_mip, 3U);
+    const u32 small = 3U;
+    const u32 mips = nph_gpu_image_desc(f->dev, image)->mip_count;
+    NTEST_ASSERT_TRUE(info.tail_first_mip == small || info.tail_first_mip == mips);
     NphGpuPagePool *pool = make_pool(f->dev, 16U, 3U);
     typedef struct Where {
         u32 mip, x, y;
     } Where;
     const Where where[5] = {{0U, 0U, 0U}, {0U, 3U, 1U}, {0U, 2U, 3U}, {1U, 1U, 1U}, {2U, 0U, 0U}};
-    NphGpuSparseBind binds[8];
-    NphGpuPage pages[8];
+    NphGpuSparseBind binds[14];
+    NphGpuPage pages[14];
     u32 n = 0U;
     for (u32 i = 0; i < 5U; ++i) {
         NTEST_ASSERT_EQ_INT(nph_gpu_page_alloc(f->dev, pool, &pages[n]), NPH_RESULT_OK);
@@ -249,9 +269,15 @@ NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
         ++n;
     }
     for (u32 t = 0; t < info.tail_pages; ++t) {
-        NTEST_ASSERT_LT_UINT(n, 8U);
+        NTEST_ASSERT_LT_UINT(n, 14U);
         NTEST_ASSERT_EQ_INT(nph_gpu_page_alloc(f->dev, pool, &pages[n]), NPH_RESULT_OK);
         binds[n] = page_bind(image, NPH_GPU_SPARSE_TAIL, t, 0U, pool, pages[n]);
+        ++n;
+    }
+    for (u32 mip = small; mip < info.tail_first_mip; ++mip) {
+        NTEST_ASSERT_LT_UINT(n, 14U);
+        NTEST_ASSERT_EQ_INT(nph_gpu_page_alloc(f->dev, pool, &pages[n]), NPH_RESULT_OK);
+        binds[n] = page_bind(image, mip, 0U, 0U, pool, pages[n]);
         ++n;
     }
     u64 value = 0U;
@@ -264,8 +290,8 @@ NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
     for (u32 i = 0; i < 5U; ++i) {
         upload_page(f->dev, image, where[i].mip, where[i].x, where[i].y);
     }
-    // The tail's levels, whole.
-    for (u32 mip = info.tail_first_mip; mip < nph_gpu_image_desc(f->dev, image)->mip_count; ++mip) {
+    // The small levels, whole.
+    for (u32 mip = small; mip < mips; ++mip) {
         upload_page(f->dev, image, mip, 0U, 0U);
     }
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
@@ -273,7 +299,8 @@ NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
         NTEST_EXPECT_EQ_UINT(
             page_mismatches(f->dev, image, where[i].mip, where[i].x, where[i].y, false), 0U);
     }
-    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, info.tail_first_mip, 0U, 0U, false), 0U);
+    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, small, 0U, 0U, false), 0U);
+    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, mips - 1U, 0U, 0U, false), 0U);
     // Never bound: zeros where the device says so (residencyNonResidentStrict).
     const bool strict = nph_gpu_device_info(f->dev)->features.sparse_residency_strict != 0;
     if (strict) {
