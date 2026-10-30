@@ -34,7 +34,7 @@
 //                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
-//                 [--paged-textures]
+//                 [--paged-textures] [--texture-budget=MB]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -479,7 +479,10 @@ static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarse
 static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
 // --paged-textures: textures paged (ADR-0065), every page installed before a
 // view is measured: what the clamped samples and the requests cost.
+// --texture-budget=MB: paged, their levels streamed within the budget
+// (runtime/texture_stream.h) until the stream settles.
 static bool g_paged_textures = false;
+static u64 g_texture_budget = 0U;
 static i64 g_voxel_pool_mb = -1; // --voxel-pool=MB (-1: 1536 with --stream, else 0)
 static u32 g_stream_loads = 0U;  // --stream-loads=N: levels loading at once (0: the stream's)
 static u32 g_tiles_x = 1U;       // --tiles=WxH: the scenes laid out W by H (ADR-0063 stage 4)
@@ -1313,16 +1316,25 @@ static NphResult render_one(Ctx *ctx, NphRenderView *view, NphGpuImage target, b
     NPH_TRY(nph_gpu_frame_begin(ctx->dev));
     NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(ctx->profiler, ctx->graph));
     nph_gpu_rg_begin(ctx->graph);
-    if (ctx->cooked.stream != NULL || cooked_scene_installing(&ctx->cooked)) {
+    if (ctx->cooked.stream != NULL || ctx->cooked.texture_stream != NULL ||
+        cooked_scene_installing(&ctx->cooked)) {
         // The cells' levels, after the frame began (a level's uploads go with
-        // it) and before it is drawn; and paged textures' pages.
+        // it) and before it is drawn; and paged textures' pages or levels.
         const u64 s0 = nph_time_now_ns();
         NPH_TRY(cooked_scene_update(&ctx->cooked, view, ctx->view_height));
         const f64 ns = (f64)(nph_time_now_ns() - s0);
         ctx->stream_ns_sum += ns;
         ctx->stream_ns_max = ns > ctx->stream_ns_max ? ns : ctx->stream_ns_max;
         ctx->stream_frames += 1U;
-        if (g_stream_trace) {
+        if (g_stream_trace && ctx->cooked.texture_stream != NULL) {
+            NphTextureStreamStats ts;
+            nph_texture_stream_stats(ctx->cooked.texture_stream, &ts);
+            printf("    texture stream frame %u: update %.3f ms; installed %u, evicted %u; "
+                   "loading %u, short %u, asked %u; held %u levels (%.1f MB)\n",
+                   g_trace_frame, ns / 1.0e6, ts.installed, ts.evicted, ts.loading,
+                   ts.short_textures, ts.asked, ts.held_levels, (f64)ts.held_bytes / 1.0e6);
+        }
+        if (g_stream_trace && ctx->cooked.stream != NULL) {
             NphProxyStreamStats ps;
             nph_proxy_stream_stats(ctx->cooked.stream, &ps);
             printf("    stream frame %u: update %.3f ms; installed %u (%.2f MB), dropped %u; "
@@ -1389,24 +1401,37 @@ static NphResult prime_stream(Ctx *ctx, NphRenderView *view, NphGpuImage target,
     return NPH_RESULT_OK;
 }
 
-// Frames until every page of the paged textures is resident: the scene's
-// installs done and none landing for a few frames.
+// Frames until the paged textures settle: every page resident, or, with
+// --texture-budget, the stream's levels (the pixels asking for them a frame
+// or two late): the installs done and none landing for a few frames.
 static NphResult prime_pages(Ctx *ctx, NphRenderView *view, NphGpuImage target, FrameRun *run)
 {
     const u64 start = nph_time_now_ns();
     f64 cpu = 0.0;
     u32 frames = 0U;
     u32 quiet = 0U;
+    NphTextureStreamStats ts;
+    memset(&ts, 0, sizeof ts);
     while (quiet < 2U * NPH_GPU_FRAMES_IN_FLIGHT + 2U && nph_time_now_ns() - start < PRIME_MAX_NS) {
         NPH_TRY(render_one(ctx, view, target, false, &cpu, &run->stats));
-        quiet = !cooked_scene_installing(&ctx->cooked) && run->stats.pages_installed == 0U
-                    ? quiet + 1U
-                    : 0U;
+        bool still = cooked_scene_installing(&ctx->cooked) || run->stats.pages_installed != 0U;
+        if (ctx->cooked.texture_stream != NULL) {
+            nph_texture_stream_stats(ctx->cooked.texture_stream, &ts);
+            still = still || ts.installed != 0U || ts.evicted != 0U || ts.loading != 0U ||
+                    run->stats.pages_evicted != 0U;
+        }
+        quiet = still ? 0U : quiet + 1U;
         ++frames;
     }
     printf("    pages resident in %u frames, %.1f s%s: %u pages (%.1f MB)\n", frames,
            (f64)(nph_time_now_ns() - start) / 1.0e9, quiet == 0U ? " (NOT SETTLED)" : "",
            run->stats.pages_resident, (f64)run->stats.pages_resident * 65536.0 / 1.0e6);
+    if (ctx->cooked.texture_stream != NULL) {
+        printf("    textures streamed: %u of %u asked for, %u levels held (%.1f MB of %.1f), %u "
+               "short of what they want\n",
+               ts.asked, ts.textures, ts.held_levels, (f64)ts.held_bytes / 1.0e6,
+               (f64)g_texture_budget / 1.0e6, ts.short_textures);
+    }
     return NPH_RESULT_OK;
 }
 
@@ -1461,6 +1486,9 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
         NPH_TRY(render_one(ctx, view, target, true, &cpu, &run->stats));
     }
     run->cpu_count = 0U;
+    ctx->stream_ns_sum = 0.0;
+    ctx->stream_ns_max = 0.0;
+    ctx->stream_frames = 0U;
     for (u32 i = 0; i < frames + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         if (i == NPH_GPU_FRAMES_IN_FLIGHT) {
             nph_render_gpu_profiler_reset(ctx->profiler);
@@ -1646,9 +1674,21 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                    ps.loading, ps.installed, (f64)ps.installed_bytes / 1.0e6, ps.dropped, ps.failed,
                    ctx->stream_frames != 0U ? ctx->stream_ns_sum / ctx->stream_frames / 1.0e6 : 0.0,
                    ctx->stream_ns_max / 1.0e6);
-            ctx->stream_ns_sum = 0.0;
-            ctx->stream_ns_max = 0.0;
-            ctx->stream_frames = 0U;
+        }
+        if (ctx->cooked.texture_stream != NULL) {
+            NphTextureStreamStats ts;
+            nph_texture_stream_stats(ctx->cooked.texture_stream, &ts);
+            printf("    textures: %u streamed, %u asked, %u levels held past their small ones "
+                   "(%.1f MB), %u short, %u loading; last frame %u pages installed, %u evicted",
+                   ts.textures, ts.asked, ts.held_levels, (f64)ts.held_bytes / 1.0e6,
+                   ts.short_textures, ts.loading, ts.installed, ts.evicted);
+            if (ctx->cooked.stream == NULL) {
+                printf("; update %.3f ms mean, %.3f ms max a frame",
+                       ctx->stream_frames != 0U ? ctx->stream_ns_sum / ctx->stream_frames / 1.0e6
+                                                : 0.0,
+                       ctx->stream_ns_max / 1.0e6);
+            }
+            printf("\n");
         }
         if (st->vsm) {
             printf("    virtual shadow map: pages requested %u, wanted %u, drawn %u (budget %u), "
@@ -1876,6 +1916,7 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.tiles_x = g_tiles_x;
     cd.tiles_z = g_tiles_z;
     cd.paged_textures = g_paged_textures;
+    cd.texture_budget = g_texture_budget;
     const u64 t0 = nph_time_now_ns();
     const NphResult r = cooked_scene_load(&cd, &ctx->cooked);
     if (r != NPH_RESULT_OK) {
@@ -2184,12 +2225,17 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels)
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default
     // holds 262,144).
     rd.max_deferred = 1U << 20U;
-    if (g_paged_textures) {
+    if (g_paged_textures && g_texture_budget == 0U) {
         // Every page at once, before measuring: a large binding and staging
         // (the stream's 32 moves a frame would take Bistro 1,600 frames).
         rd.max_page_moves = 1024U;
         rd.page_staging_slots = 4096U;
         rd.texture_page_bytes = NPH_GIB(4);
+    } else if (g_paged_textures) {
+        // Streamed: the renderer's own moves a frame and staging; the pool
+        // holds the budget and the textures' small levels (a page or a few
+        // each).
+        rd.texture_page_bytes = g_texture_budget + NPH_MIB(512);
     }
     if (g_lists > 1U) {
         // Every list that can drop work, larger (the renderer clamps them to
@@ -2259,7 +2305,7 @@ static int usage(void)
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
-                    "[--no-cells] [--paged-textures]\n");
+                    "[--no-cells] [--paged-textures] [--texture-budget=MB]\n");
     return 2;
 }
 
@@ -2311,6 +2357,9 @@ int main(int argc, char **argv)
             g_stream_trace = true;
         } else if (strcmp(argv[i], "--paged-textures") == 0) {
             g_paged_textures = true;
+        } else if (strncmp(argv[i], "--texture-budget=", 17U) == 0) {
+            g_paged_textures = true;
+            g_texture_budget = (u64)strtoull(argv[i] + 17, NULL, 10) * 1000000ULL;
         } else if (strncmp(argv[i], "--voxel-pool=", 13U) == 0) {
             g_voxel_pool_mb = (i64)strtoll(argv[i] + 13, NULL, 10);
         } else if (strncmp(argv[i], "--stream-loads=", 15U) == 0) {

@@ -382,6 +382,75 @@ before, took 0.63 ms idle. `nph_proxy_stream_stats`
 and `nph_proxy_stream_cell_state` report what the stream holds and does,
 for tools and tests. NPH_MAIN_THREAD_ONLY.
 
+## Texture streaming
+
+`texture_stream.h` streams paged textures' levels (ADR-0065 stage 3;
+[render.md](render.md) "Virtual textures"). A paged texture holds its
+levels resident whole: its small levels from creation, and above them the
+levels from its first resident one, which its samples clamp to. The caller
+adds each paged texture with its levels' texels (the cooked texture's,
+which it keeps) and removes it when it goes; each frame, between
+`nph_gpu_frame_begin` and `nph_render_frame`, `nph_texture_stream_update`
+installs the levels the pixels ask for and evicts what the budget cannot
+hold. The samples' cooked-scene bridge does so with
+`CookedSceneDesc.texture_budget`, and render_perf with
+`--texture-budget=MB`.
+
+- **Wanted.** A texture is wanted at the finest level its pixels asked for
+  within `hold_frames` (240: a second at 240 Hz;
+  `nph_render_texture_levels_requested`, the frame each level was last
+  asked for), so that a texture glimpsed keeps its levels a while.
+  Unasked so long, it wants its small levels alone.
+- **Installs.** Each update the textures held coarser than wanted install
+  their next finer level, a level at a time from the coarsest missing (a
+  level is sampled only once whole), the textures furthest from their
+  wanted level first, then the most recently asked: a level step each per
+  update, so that a turn sharpens every texture it reveals a level before
+  any texture two. At most `max_pages` pages an update (32, the renderer's
+  moves a frame); a page waits where the renderer's staging or page memory
+  is full. A level being installed that its texture stops wanting is
+  evicted with what of it arrived.
+- **Budget.** The levels held above the small ones, and those being
+  installed whole, take at most `budget_bytes`. Before installing, it
+  evicts the levels its textures do not want (finer than wanted, or of a
+  texture unasked), the least recently asked first, the finest of each
+  first. It evicts no wanted level, so that textures that want the same do
+  not trade levels back and forth: where the wanted levels fill the
+  budget, the rest stay coarser than wanted
+  (`NphTextureStreamStats.short_textures`).
+- **The page memory.** The renderer's page memory
+  (`NphRendererDesc.texture_page_bytes`) must hold the budget beside the
+  textures' small levels and the pages evicted within the frames in
+  flight. Where it does not, the renderer refuses installs, and the stream
+  reads why (`nph_render_texture_page_room`): pages returning, or the
+  staging full, mean waiting; a page memory full of pages none of which
+  are returning means the budget is too large for it, and the stream
+  evicts what no texture wants as it would past the budget, a level an
+  update (logged once), so that it never waits on itself.
+
+A texture destroyed while the stream holds it is let go at the next
+update; its pages went with it. Its texels come from the caller's levels,
+a page's rows within the level's (`texture_stream_page_texels`, by the
+format and size the renderer reports in `NphRenderTexturePages`), copied
+as the page is installed: at most `max_pages` x 64 KiB an update on the
+calling thread. An update asks the renderer for each texture's requests
+(a lock each) and sorts those that want more, O(n log n).
+`nph_texture_stream_stats` and `nph_texture_stream_texture_state` report
+what the stream holds and does, for tools and tests. NPH_MAIN_THREAD_ONLY.
+
+Measured on Bistro (ADR-0065 stage 3): its street wants 866 MB of levels
+where its textures whole take 3.2 GiB (device-local 1.97 GB against 4.46),
+settles from the small levels in 3.0 s at 32 pages a frame, and at 512 MB
+leaves 189 of its 282 textures short with 0.24% more of its pixels changed
+by more than 8 levels. The update costs 0.01 to 0.06 ms a frame, and
+0.23 ms in frames that copy 32 pages.
+
+The stream reaches the renderer's paging through a table of its calls
+(`TextureStreamPaging`, internal): its tests drive the stream over a
+stand-in, a page memory and staging and the frames each level was asked
+for, so that its decisions run on every device, lavapipe's included
+(which pages no textures); the GPU tests over a drawn plane skip there.
+
 ## Physics
 
 While the world plays, every entity with a LocalTransform and a RigidBody

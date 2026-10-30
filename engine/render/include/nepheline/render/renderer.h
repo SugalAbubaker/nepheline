@@ -284,7 +284,12 @@ bool nph_render_texture_is_valid(const NphRenderer *r, NphRenderTexture texture)
 bool nph_renderer_texture_paging_supported(const NphRenderer *r);
 
 typedef struct NphRenderTexturePages {
-    b32 paged;      // false: resident whole (and the rest is zero)
+    b32 paged; // false: resident whole (and the rest is zero)
+    // The texture's format and level 0's size, which place a page's texels
+    // in its level's rows.
+    NphGpuFormat format;
+    u32 width;
+    u32 height;
     u32 page_width; // texels of a page
     u32 page_height;
     // Levels from here are resident from creation: from the first under a
@@ -330,6 +335,39 @@ void nph_render_texture_page_evict(NphRenderer *r, NphRenderTexture texture, u32
 
 NphRenderPageState nph_render_texture_page_state(NphRenderer *r, NphRenderTexture texture, u32 mip,
                                                  u32 x, u32 y);
+
+// The frame each of a paged texture's levels below its tail_first_mip was
+// last asked for by the pixels (NPH_U64_MAX: never; the other entries
+// too), NPH_GPU_FRAMES_IN_FLIGHT frames late, as a page's
+// (nph_render_texture_page_requested): the finest level asked lately is the
+// one its pixels want. A texture resident whole writes NPH_U64_MAX
+// throughout; NPH_RESULT_INVALID_ARGUMENT for a stale handle.
+// Thread-safety: NPH_THREADSAFE while the texture lives.
+NPH_MUST_USE NphResult nph_render_texture_levels_requested(NphRenderer *r, NphRenderTexture texture,
+                                                           u64 out[NPH_GPU_MAX_MIPS]);
+
+// The first level from which every level of a paged texture is resident,
+// the finest its samples take from the next frame (its tail_first_mip when
+// none is); 0 for a texture resident whole or a stale handle.
+// Thread-safety: NPH_THREADSAFE while the texture lives.
+u32 nph_render_texture_first_resident_mip(NphRenderer *r, NphRenderTexture texture);
+
+// The room installs have (nph_render_texture_page_install is
+// NPH_RESULT_FULL without it), in pages: the page memory's
+// (NphRendererDesc.texture_page_bytes) and those free, those returning
+// (evicted, free once the frames in flight are done with them; an upper
+// bound, as a page installed again while it returns leaves the count with
+// the next frame), and the staging slots free. Zero throughout without
+// texture paging.
+typedef struct NphRenderPageRoom {
+    u32 pages;
+    u32 pages_free;
+    u32 pages_returning;
+    u32 staging_free;
+} NphRenderPageRoom;
+
+// Thread-safety: NPH_THREADSAFE.
+void nph_render_texture_page_room(NphRenderer *r, NphRenderPageRoom *out);
 
 // The frame whose pixels last asked for the page: those sampling it at the
 // level the hardware wants, whether it was resident or not, a pixel in 16

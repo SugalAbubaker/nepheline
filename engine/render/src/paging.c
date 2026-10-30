@@ -149,6 +149,7 @@ NphResult render_paging_init(NphRenderer *r)
     pd.max_pages = (u32)nph_min_u64(d->texture_page_bytes / PAGE_BYTES, NPH_U32_MAX);
     pd.name = "texture pages";
     NPH_TRY(nph_gpu_page_pool_create(dev, &pd, &p->pool));
+    p->pool_pages = pd.max_pages;
 
     p->record_capacity = info->limits.bindless_sampled_images;
     NphGpuBufferDesc bd;
@@ -348,6 +349,9 @@ NphResult render_paging_texture_create(NphRenderer *r, u32 slot, const NphRender
         pt->pages[i].staging = NO_STAGING;
         pt->pages[i].frame = NOT_BOUND;
         pt->pages[i].requested = NPH_U64_MAX;
+    }
+    for (u32 m = 0; m < NPH_GPU_MAX_MIPS; ++m) {
+        pt->asked[m] = NPH_U64_MAX;
     }
     const u32 word_count = 1U + (pages + 31U) / 32U;
     for (u32 w = 0; w < word_count; ++w) {
@@ -604,6 +608,61 @@ u64 nph_render_texture_page_requested(NphRenderer *r, NphRenderTexture texture, 
     return f;
 }
 
+NphResult nph_render_texture_levels_requested(NphRenderer *r, NphRenderTexture texture,
+                                              u64 out[NPH_GPU_MAX_MIPS])
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    for (u32 m = 0; m < NPH_GPU_MAX_MIPS; ++m) {
+        out[m] = NPH_U64_MAX;
+    }
+    const u32 slot = render_slot_of(&r->texture_pool, texture.value);
+    if (slot == NPH_U32_MAX) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (!r->textures[slot].paged) {
+        return NPH_RESULT_OK;
+    }
+    nph_mutex_lock(&r->paging.lock);
+    const RenderPagedTexture *pt = &r->paging.textures[slot];
+    for (u32 m = 0; m < pt->fixed_mip; ++m) {
+        out[m] = pt->asked[m];
+    }
+    nph_mutex_unlock(&r->paging.lock);
+    return NPH_RESULT_OK;
+}
+
+u32 nph_render_texture_first_resident_mip(NphRenderer *r, NphRenderTexture texture)
+{
+    NPH_ASSERT(r != NULL);
+    const u32 slot = render_slot_of(&r->texture_pool, texture.value);
+    if (slot == NPH_U32_MAX || !r->textures[slot].paged) {
+        return 0U;
+    }
+    nph_mutex_lock(&r->paging.lock);
+    const u32 full = r->paging.textures[slot].full_level;
+    nph_mutex_unlock(&r->paging.lock);
+    return full;
+}
+
+void nph_render_texture_page_room(NphRenderer *r, NphRenderPageRoom *out)
+{
+    NPH_ASSERT(r != NULL && out != NULL);
+    memset(out, 0, sizeof *out);
+    RenderPaging *p = &r->paging;
+    if (!p->supported) {
+        return;
+    }
+    nph_mutex_lock(&p->lock);
+    NphGpuPagePoolStats ps;
+    nph_gpu_page_pool_stats(p->pool, &ps);
+    out->pages = p->pool_pages;
+    out->pages_free = p->pool_pages - nph_min_u32(ps.pages_used + ps.pages_pending, p->pool_pages);
+    // The evictions waiting to be unbound hold their memory still.
+    out->pages_returning = ps.pages_pending + p->eviction_count;
+    out->staging_free = p->staging_free_count;
+    nph_mutex_unlock(&p->lock);
+}
+
 bool nph_renderer_texture_paging_supported(const NphRenderer *r)
 {
     NPH_ASSERT(r != NULL);
@@ -623,7 +682,11 @@ NphResult nph_render_texture_pages(const NphRenderer *r, NphRenderTexture textur
         return NPH_RESULT_OK;
     }
     const RenderPagedTexture *pt = &r->paging.textures[slot];
+    const NphGpuImageDesc *id = nph_gpu_image_desc(r->dev, r->textures[slot].image);
     out->paged = 1;
+    out->format = id->format;
+    out->width = id->width;
+    out->height = id->height;
     out->page_width = pt->page_width;
     out->page_height = pt->page_height;
     out->tail_first_mip = pt->fixed_mip;
@@ -696,6 +759,9 @@ static void read_requests(NphRenderer *r)
             const u32 page = (at - 1U) * 32U + bit;
             if (page < pt->page_count) {
                 pt->pages[page].requested = frame;
+                u32 x = 0U;
+                u32 y = 0U;
+                pt->asked[page_level(pt, page, &x, &y)] = frame;
             }
         }
     }

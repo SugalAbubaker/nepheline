@@ -183,7 +183,9 @@ Stages:
    - the residency counter at zero and validation clean.
    Measured: the resolve's added instructions and time, the feedback's bytes.
 3. **asset, cook, runtime**: texture version 2 (laid out from the cooked blocks), the
-   stream and its budget, and `render_perf` with a texture budget. Measured on Bistro and
+   stream and its budget, and `render_perf` with a texture budget. *With stage 2's whole
+   levels, no version 2: a level is contiguous in today's layout, and the stream installs
+   its pages from it with the level's row pitch.* Measured on Bistro and
    the landscape: textures' VRAM against today's, frames' p99 walking and turning, the
    time to settle, and images after settling against whole textures.
 
@@ -293,6 +295,92 @@ Point 7, the development builds' residency codes, is dropped: with whole
 levels a read of a page not resident would be a missed level, which the
 tests' byte-for-byte images catch. Nothing samples with the MinLod operand
 or residency codes, as stage 1's review had made the device's requirement.
+
+### Stage 3, the stream (2026-10-29)
+
+Built (docs/runtime.md "Texture streaming"): `runtime/texture_stream.h`, fed
+by the renderer's requests per level (`nph_render_texture_levels_requested`,
+the frame each level was last asked for, kept as the request bits are read
+back) and its first resident level
+(`nph_render_texture_first_resident_mip`):
+- A texture is wanted at the finest level asked within 240 frames.
+- Each update installs, a level at a time from the coarsest missing, the
+  next finer level of the textures held coarser than wanted (furthest from
+  wanted first, then the most recently asked), at most 32 pages: a level
+  step a texture an update, breadth first, so that a turn sharpens every
+  texture it reveals before any texture twice.
+- Past the budget it evicts levels no texture wants (finer than wanted, or
+  of a texture unasked), the least recently asked first, and never a
+  wanted one: a full budget leaves textures short rather than trading
+  levels back and forth.
+- The budget is required, and the renderer's page memory must hold it
+  beside the small levels and the pages returning. Where it does not, the
+  stream asks the renderer why an install was refused
+  (`nph_render_texture_page_room`: pages free, returning, staging free):
+  it waits on pages returning or on the staging, and only a page memory
+  full of pages none of which return makes it evict what no texture
+  wants, a level an update, so that a budget too large never deadlocks it
+  and never makes it evict more than its installs need.
+- A page's texels are cut from the cooked level by the format and size the
+  renderer reports (`NphRenderTexturePages`), not by the caller's.
+- Its decisions reach the renderer through a table of calls, so its tests
+  run over a stand-in on every device: lavapipe pages no textures
+  (`NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES`), and the runtime module's
+  coverage gate would otherwise see none of it.
+- `CookedSceneDesc.texture_budget` and `render_perf --texture-budget=MB`
+  use it, with the renderer's own 32 moves a frame.
+
+MEASURED (2026-10-30; Bistro at native 4K on the RTX 3060 Ti, render_perf
+`--texture-budget`, the views in their manifest's order, so each starts
+from the last one's levels; the GPU frame's mean, and the device-local
+memory in use at the view's end):
+
+| Textures | street | walk | turn (p99) | terrace | hedge | device-local |
+|---|---|---|---|---|---|---|
+| whole | 6.859 ms | 6.870 | 7.090 (7.634) | 7.384 | 7.056 | 4.46 GB |
+| streamed, no budget | 6.935 | 7.006 | 7.203 (7.792) | 7.518 | 7.137 | 1.97 to 2.58 GB |
+| within 1024 MB | 6.959 | 7.013 | 7.211 (7.720) | 7.522 | 7.131 | 1.97 to 2.11 GB |
+| within 512 MB | 6.947 | 6.998 | 7.192 (7.711) | 7.523 | 7.152 | 1.64 GB |
+
+- **GPU:** +0.08 to +0.14 ms a view, stage 2's cost of paging (the request
+  pass 0.050 to 0.055 ms, and sampling sparse images); the turn's p99
+  within +0.16 ms, while it installs 32 pages a frame.
+- **Memory:** the street wants 787 levels of 282 of its 538 textures, 866 MB
+  of them, where the textures whole take 3.2 GiB: 1.97 GB device-local in
+  all, against 4.46. With no budget the views' levels add up to 1,450 MB;
+  1024 MB holds the street and the walk, and leaves 79 textures short at
+  the turn's end.
+- **Settling:** the street from its textures' small levels alone in 423
+  frames, 3.0 s (13,752 pages at 32 a frame); the walk and the turn take
+  their levels as they come (none loading at their ends); the terrace and
+  the hedge from the views before in 6 to 37 frames.
+- **Short textures cost little to look at:** within 512 MB the street leaves
+  189 of its 282 textures short of what they want, yet its image differs
+  from the textures' whole in 2.30% of its pixels by more than 8 levels,
+  against 2.06% with no budget and 1.80% between two runs of whole textures
+  (the temporal filter's and the radiance cache's histories differ run to
+  run). The level a budget keeps out is a texture's finest, three quarters
+  of its bytes, which few pixels ask for. The walk's and the turn's last
+  frames do not compare: the warm-up is timed, so the camera ends
+  elsewhere each run; the GPU tests compare the stream's images with the
+  whole texture's byte for byte.
+- **Main thread:** the stream's update takes 0.014 to 0.031 ms a frame
+  settled or walking, 0.026 to 0.059 ms within a budget it fills, and 0.225 ms
+  through a turn that installs 32 pages a frame (their texels, 2 MiB,
+  copied into the staging); at most 0.87 ms in one frame. The renderer's
+  frame takes 0.04 ms, and 0.36 ms in frames that bind and copy 32 pages:
+  the upload flush's two submits (the copies, and the graphics queue's
+  acquire) 0.26 ms of it, the binding 0.08 ms.
+- **Fixed on the way, measured:** the renderer wrote its material table
+  whole whenever a paged texture's level changed (0.18 ms a frame on
+  Bistro's 254 materials; now the samplers of the materials that sample a
+  changed level alone), and each texture short of room scanned every
+  texture for a level to evict (0.09 ms an update with 189 short; now one
+  scan an update finds there is none).
+- **Follow-ups** (§10.5 gives render submission 0.3 ms, which streaming
+  frames exceed): the flush's acquire submit folded into the frame's
+  graphics submit where a batch holds only sparse pages, which need no
+  queue ownership transfer; and the page copies on the job system.
 
 ## Alternatives considered
 

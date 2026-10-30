@@ -34,6 +34,7 @@
 #include <nepheline/core/guid.h>
 #include <nepheline/render/renderer.h>
 #include <nepheline/runtime/proxy_stream.h>
+#include <nepheline/runtime/texture_stream.h>
 
 typedef struct CookedSceneDesc {
     NphAllocator *alloc;    // required
@@ -67,8 +68,12 @@ typedef struct CookedSceneDesc {
     // Textures paged (ADR-0065; NPH_RENDER_TEXTURE_FLAG_PAGED) where the
     // renderer pages them, every page installed over the first frames
     // (cooked_scene_update), as fast as the renderer's staging takes them:
-    // what paging costs where every page is resident.
+    // what paging costs where every page is resident. With a
+    // `texture_budget`, their levels are streamed instead
+    // (runtime/texture_stream.h), within that many bytes past their small
+    // levels.
     b32 paged_textures;
+    u64 texture_budget;
 } CookedSceneDesc;
 
 typedef struct CookedScene {
@@ -119,8 +124,11 @@ typedef struct CookedScene {
     b32 has_camera;
     NphRenderCamera camera;
     // The pages of paged textures still to install (CookedSceneDesc
-    // .paged_textures), from `page_next` on.
+    // .paged_textures), from `page_next` on; or, with a texture budget, the
+    // stream of their levels.
     b32 paged_textures;
+    u64 texture_budget;
+    NphTextureStream *texture_stream;
     struct CookedPage *pages;
     u32 page_count;
     u32 page_cap;
