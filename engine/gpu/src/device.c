@@ -805,18 +805,16 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     const bool want_float16 = (off & (u32)NPH_GPU_OPTIONAL_SHADER_FLOAT16) == 0U;
     const bool want_minmax = (off & (u32)NPH_GPU_OPTIONAL_SAMPLER_FILTER_MINMAX) == 0U;
     // Sparse residency (docs/adr/0065): images bound page by page from a
-    // queue that binds, sampled with a minimum level of detail and with
-    // residency codes, their unbound pages read as zeros.
+    // queue that binds, in the standard block shapes. Shaders need no
+    // feature of their own, nor unbound pages that read as zeros: what reads
+    // a sparse image reads only pages bound (residencyNonResidentStrict is
+    // reported, for tests, as sparse_residency_strict).
     const VkPhysicalDeviceSparseProperties *sp = &c->props.properties.sparseProperties;
     const bool sparse = (off & (u32)NPH_GPU_OPTIONAL_SPARSE_RESIDENCY) == 0U && hf->sparseBinding &&
-                        hf->sparseResidencyImage2D && hf->shaderResourceMinLod &&
-                        hf->shaderResourceResidency && sp->residencyStandard2DBlockShape &&
-                        sp->residencyNonResidentStrict &&
+                        hf->sparseResidencyImage2D && sp->residencyStandard2DBlockShape &&
                         (c->family_sparse[transfer_family] || c->family_sparse[c->graphics_family]);
     f2.features.sparseBinding = sparse ? VK_TRUE : VK_FALSE;
     f2.features.sparseResidencyImage2D = sparse ? VK_TRUE : VK_FALSE;
-    f2.features.shaderResourceMinLod = sparse ? VK_TRUE : VK_FALSE;
-    f2.features.shaderResourceResidency = sparse ? VK_TRUE : VK_FALSE;
     f2.features.multiDrawIndirect = VK_TRUE;
     f2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     f2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
@@ -962,6 +960,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     feat->texture_compression_bc = vk_bool(hf->textureCompressionBC);
     feat->sampler_anisotropy = vk_bool(hf->samplerAnisotropy);
     feat->sparse_residency = sparse;
+    feat->sparse_residency_strict = sparse && vk_bool(sp->residencyNonResidentStrict);
     feat->pipeline_statistics = vk_bool(hf->pipelineStatisticsQuery);
     feat->async_compute = compute_distinct;
     feat->dedicated_transfer = transfer_distinct;
@@ -1590,12 +1589,13 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
     // Two records: a log record keeps 216 bytes.
     GPU_LOG_INFO("features: mesh shader %d, ray query %d, image atomic int64 %d, buffer atomic "
                  "int64 %d, float16 %d, int64 %d, BC %d, filter minmax %d, first instance %d, "
-                 "sparse residency %d",
+                 "sparse residency %d (strict %d)",
                  info->features.mesh_shader, info->features.ray_query,
                  info->features.image_atomic_int64, info->features.buffer_atomic_int64,
                  info->features.shader_float16, info->features.shader_int64,
                  info->features.texture_compression_bc, info->features.sampler_filter_minmax,
-                 info->features.draw_indirect_first_instance, info->features.sparse_residency);
+                 info->features.draw_indirect_first_instance, info->features.sparse_residency,
+                 info->features.sparse_residency_strict);
     GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d; "
                  "fragment %d); bindless %u sampled / %u storage / %u samplers; push constants "
                  "%u B; timestamps %.3f ns",

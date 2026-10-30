@@ -170,10 +170,11 @@ typedef struct NphGpuFeatures {
     b32 texture_compression_bc; // BC1-7
     b32 sampler_anisotropy;     //
     // Sparse images (NPH_GPU_IMAGE_FLAG_SPARSE, sparse.h; docs/adr/0065): 2D
-    // sparse residency with the standard block shapes, a queue that binds,
-    // shaders that sample with a minimum level of detail and read residency
-    // codes, and unbound pages read as zeros.
+    // sparse residency with the standard block shapes and a queue that
+    // binds. With sparse_residency_strict, unbound pages also read as zeros
+    // (residencyNonResidentStrict), which only tests rely on.
     b32 sparse_residency;
+    b32 sparse_residency_strict;
     b32 memory_budget;                // VK_EXT_memory_budget: live heap budgets in the stats
     b32 calibrated_timestamps;        // VK_EXT_calibrated_timestamps (CPU/GPU timeline alignment)
     b32 pipeline_statistics;          // pipeline statistics queries

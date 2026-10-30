@@ -251,11 +251,13 @@ the editor's Dear ImGui font atlas, which grows glyph by glyph
 Virtual texturing (docs/adr/0065-virtual-texturing.md) pages textures with
 the hardware's own page table: Vulkan sparse residency (`sparse.h`).
 - **The feature:** `NphGpuFeatures.sparse_residency` needs 2D sparse
-  residency with the standard block shapes, a queue whose family binds,
-  `shaderResourceMinLod`, `shaderResourceResidency`, and unbound pages that
-  read as zeros (`residencyNonResidentStrict`).
+  residency with the standard block shapes and a queue whose family binds.
+  What reads a sparse image reads only the pages bound, so unbound pages
+  need not read as zeros: `sparse_residency_strict` says whether they do
+  (`residencyNonResidentStrict`), for tests.
   `NPH_GPU_OPTIONAL_SPARSE_RESIDENCY` switches it off.
-  - The RTX 3060 Ti offers it; lavapipe on Windows does not.
+  - The RTX 3060 Ti offers it (strict); lavapipe offers it on Linux (not
+    strict), not on Windows.
   - At creation the device asks a sparse image of each texture format for
     its memory types. A page pool's blocks come from those every format
     allows (a device-local type on the RTX).
