@@ -188,10 +188,15 @@ typedef struct RenderPaging {
     u32 paged_count;              // textures paged now
     // Per texture slot, its paged texture's first resident level this frame
     // (a copy of full_level taken under the lock as the frame begins, which
-    // the materials' levels read), and whether any changed since: the
-    // materials are then written again.
+    // the materials' levels read), and whether any changed since. The
+    // frames whose copy changed a level are counted (level_count), each
+    // texture slot keeping the count of its last change (level_changed_at):
+    // the material table rewrites the samplers of those changed since it
+    // was written.
     u8 *frame_level;
     b32 level_changed;
+    u64 level_count;
+    u64 *level_changed_at;
     // The request words: each texture's range, and which texture owns each
     // word (slot + 1; 0: none).
     NphRangeAllocator word_alloc;
@@ -317,6 +322,11 @@ typedef enum RenderVoxelState {
 typedef struct RenderMaterial {
     u32 handle;
     NphRenderMaterialDesc desc; // name cleared; handles resolved per frame
+    // Its slots that sample a paged texture (a bit each) and those textures'
+    // slots, as the table's last whole write found them: a change of their
+    // first resident level rewrites those slots' samplers alone (frame.c).
+    u32 paged_slots;
+    u32 paged_texture[NPH_RENDER_SLOT_COUNT];
 } RenderMaterial;
 
 // RenderVis.slot_state bits, per instance slot (they outlive an instance:
@@ -1113,6 +1123,7 @@ struct NphRenderer {
     RenderFrameLayout layout;
     u64 material_version;                            // bumped by every material change
     u64 material_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // the version each slot holds (0: none)
+    u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT];   // and the paged levels' count (paging)
     RenderDrawCmd *draw_cmds;                        // max_draws, rebuilt every frame
     u32 hidden_count;                                // live instances with `hidden` set
     u32 opaque_count;     // draw_cmds[0, opaque_count): opaque and masked

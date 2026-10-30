@@ -136,7 +136,10 @@ shader samples it as it samples any texture:
   levels come.
 
 Every level from there is resident whole, so no sample reads a page that is
-not, whatever its footprint, anisotropy or addressing. A level counts from
+not, whatever its footprint, anisotropy or addressing. A level's change
+rewrites the samplers of the materials that sample the texture, not the
+material table (a level changes most frames while textures stream; the
+whole table took 0.18 ms on Bistro). A level counts from
 the frame its last page's copy is recorded and stops from the frame one of
 its pages leaves; each frame's materials take the levels as the frame
 begins (`frame_level`), so a frame in flight keeps the levels it was
