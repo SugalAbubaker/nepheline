@@ -698,8 +698,10 @@ are logged with everything outside printable ASCII replaced.
 `benchmarks/cook/bench_cook.c`, run with the default `--min-time=0.2
 --repeats=5` in the Profile configuration on the development machine
 (Ryzen 7 5800X, Windows 10, MSVC 14.44, 2026-10-14). Full JSON:
-`benchmarks/results/cook-2026-10-14-win-msvc-profile-ryzen7-5800x.json`.
-Budgets: `benchmarks/budgets.txt`. The inputs are generated: a 128 x 128
+`benchmarks/results/cook-2026-10-14-win-msvc-profile-ryzen7-5800x.json`;
+`mesh_process`, which holds the levels of detail since Phase 13, from
+`benchmarks/results/cook-2026-10-30-win-msvc-profile-ryzen7-5800x.json`
+(`--min-time=0.5 --repeats=7`). Budgets: `benchmarks/budgets.txt`. The inputs are generated: a 128 x 128
 photograph-like image (smooth shading, hard-edged discs, noise), a normal
 map, a mask, an HDR image, a 256 x 256-quad height-field grid (131072
 triangles), and an 8-mesh, 7.1 MiB GLB.
@@ -723,7 +725,7 @@ triangles), and an 8-mesh, 7.1 MiB GLB.
 | mesh_tangents | 422 | triangle | MikkTSpace, no splits on a grid |
 | mesh_optimize | 254 | triangle | ACMR 3.00 to 0.76 (32-entry FIFO) |
 | mesh_meshlets | 552 | triangle | 1368 meshlets, 95.8 triangles each |
-| mesh_process | 2104 | triangle | the whole pipeline, LZ HIGH: 2.1 s per million triangles |
+| mesh_process | 14357 | triangle | the whole pipeline, LZ HIGH, on one thread: 14 s per million triangles, 12 of them the levels of detail (2293 with `no_lods`) |
 | gltf_import_glb | 2534 | KiB | 400 MB/s |
 
 What the numbers say:
@@ -746,10 +748,13 @@ What the numbers say:
 - **The texture cook parallelises 7.2x on 15 workers** at 256²; the
   serial parts are linearisation, the mip filter, and LZ compression of
   each level.
-- **Meshes are cheap**: a million-triangle mesh goes through the whole
-  pipeline in about two seconds on one thread, with the vertex cache at
-  0.76 misses per triangle (0.5 is the limit for a regular grid) and
-  meshlets 77 % full on average.
+- **Meshes are cheap, their levels of detail less so**: a million-triangle
+  mesh goes through the pipeline without them in about two seconds on one
+  thread, with the vertex cache at 0.76 misses per triangle (0.5 is the
+  limit for a regular grid) and meshlets 77 % full on average. The levels
+  of detail (step 8) add about 12 seconds on one thread, where the
+  benchmark runs them; the cooker runs them on the job system, about 2.4
+  seconds on fifteen workers (ADR-0060).
 
 ## Limitations (future work)
 
