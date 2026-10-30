@@ -84,7 +84,13 @@ global illumination).
 and with `--scenes=DIR` the third-party reference scenes that `scripts/scenes.py`
 fetches and cooks from their pinned manifests in `benchmarks/scenes/`
 ([`docs/benchmarks.md`](docs/benchmarks.md)); the self-hosted RTX 3060 Ti
-runner enforces their budgets.
+runner enforces their budgets. `samples/scene_viewer` lets you walk through
+those scenes yourself, with the frame rate and the GPU memory in the window's
+title:
+
+```powershell
+.\build\win-msvc\bin\Profile\scene_viewer.exe --manifest=benchmarks\scenes\landscape.json --scenes=S:\my-scenes
+```
 
 Games are C shared libraries that `nph_player` (and the editor) run, and
 swap in again when they are rebuilt ([`docs/runtime.md`](docs/runtime.md)):
@@ -153,7 +159,7 @@ tools/golden/   the golden-image toolkit: our PNG codec, LDR-FLIP, and the nph_f
 editor/         nph_editor: the shell, Dear ImGui backends on the window and the RHI, panels, scene editing, import, mesh editing, tests
 benchmarks/     nbench harness, CPU benchmarks per module, GPU microbenchmarks, render_perf, the reference scenes' manifests, recorded results, budgets
 shaders/        GLSL sources and the C/GLSL shared headers, compiled with glslc at build time
-samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo) and the game modules game_sandbox, game_physics, and game_audio; samples/sounds/ synthesizes the samples' sounds; samples/common/ holds the cooked-scene bridge and BMP capture they share
+samples/        one small executable per feature (core_hello, math_demo, platform_window, jobs_demo, gpu_triangle, gpu_mesh, asset_viewer, pbr_viewer, scene_demo, scene_viewer) and the game modules game_sandbox, game_physics, and game_audio; samples/sounds/ synthesizes the samples' sounds; samples/common/ holds the cooked-scene bridge and BMP capture they share
 tests/fuzz/     libFuzzer targets, their corpus-replay smoke driver, and seed corpora for every parser (scripts/fuzz_seeds.py writes them)
 tests/integration/  tests across modules and tools: the cooker against the runtime and the GPU
 tests/golden/   golden-image tests of the renderer: scenes, and the approved baselines (Git LFS)

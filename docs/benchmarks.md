@@ -315,6 +315,31 @@ run of the path (`bench.render_perf_reference`) cooks pbr_viewer's scene,
 reads its manifest from `benchmarks/render/test_scenes` (`--manifests`),
 and renders it at 320 × 180 (`--ref-size`) for four frames.
 
+`samples/scene_viewer` draws the same scenes for a person to walk through,
+which render_perf's scripted cameras cannot show. It takes a manifest and
+the scenes' directory, as render_perf does:
+
+```
+scene_viewer --manifest=benchmarks/scenes/landscape.json --scenes=DIR [--view=NAME]
+scene_viewer --pack=FILE --scene=KEY [--ev100=X] [--sky=X] [--sun-shadows]
+```
+
+It has render_perf's renderer sizes and view, streams the cells' proxies
+with `samples/common`'s bridge, and defaults to the landscape's needs:
+visible-cluster lists at 16 times the renderer's (`--lists`), and for a
+manifest that cooks voxels a 1,200 MB voxel pool and a 1,100 MB proxy
+budget (ADR-0066). It draws an image of `--size`, 3840 × 2160 by default,
+and scales it into a window of `--window`, 1920 × 1080 by default, so a
+smaller display still draws the target's pixels and the title's numbers are
+the 4K frame's. W, A, S, D, Q and E move, Shift is four times as fast, the
+wheel changes the speed, the right mouse button looks around, 1 to 9 jump
+to the manifest's views, and G logs each pass's GPU time. The title gives
+the frame rate, the frame time, the worst frame, and the GPU memory, and it
+says so where the lists overflow, since dropped work flatters the numbers,
+or where proxies are still arriving. A windowed run shares the GPU with the
+desktop and swaps through the compositor, so it reads slower than
+render_perf's headless numbers: the budgets stay render_perf's.
+
 A manifest's source is a git repository at a commit (Bistro) or, for the
 landscape, Poly Haven files each pinned by URL and md5: `fetch` downloads
 them (1.4 GB; a file already there with its md5 is kept, a changed one
