@@ -205,6 +205,16 @@ driver. In `test_sparse.c`, pages of three levels and the tail are bound in
 one call and hold what is copied into them, and pages never bound read
 zeros, under validation and synchronisation validation with no message.
 
+Revised in review: the device's sparse residency now needs only
+`sparseResidencyImage2D`, the standard block shapes and a queue that binds.
+The shaders' features (`shaderResourceMinLod`, `shaderResourceResidency`)
+are for the stage that samples with them to ask for. Unbound pages need not
+read as zeros: nothing reads a page not bound, and `sparse_residency_strict`
+reports it for the tests that check them. lavapipe on Linux (Mesa 25.2)
+offers sparse residency without `residencyNonResidentStrict`, so requiring
+it had left the sparse code untested in CI (the gpu module's coverage at
+79.85% against its 80%).
+
 ## Alternatives considered
 
 - **A page table of our own** (above): rejected for the filter it cannot reproduce at

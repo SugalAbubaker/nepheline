@@ -274,9 +274,12 @@ NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
             page_mismatches(f->dev, image, where[i].mip, where[i].x, where[i].y, false), 0U);
     }
     NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, info.tail_first_mip, 0U, 0U, false), 0U);
-    // Never bound: zeros (residencyNonResidentStrict).
-    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 1U, 0U, true), 0U);
-    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 1U, 0U, 1U, true), 0U);
+    // Never bound: zeros where the device says so (residencyNonResidentStrict).
+    const bool strict = nph_gpu_device_info(f->dev)->features.sparse_residency_strict != 0;
+    if (strict) {
+        NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 1U, 0U, true), 0U);
+        NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 1U, 0U, 1U, true), 0U);
+    }
 
     // Page (3, 1) leaves; page (1, 2) comes, to a page of its own. Nothing
     // reads either while their bindings change (no frame is in flight).
@@ -290,7 +293,9 @@ NTEST_F(GpuFixture, pages_hold_what_is_copied_into_them)
     upload_page(f->dev, image, 0U, 1U, 2U);
     NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 1U, 2U, false), 0U);
-    NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 3U, 1U, true), 0U);
+    if (strict) {
+        NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 3U, 1U, true), 0U);
+    }
     NTEST_EXPECT_EQ_UINT(page_mismatches(f->dev, image, 0U, 0U, 0U, false), 0U);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     NTEST_EXPECT_GE_UINT(nph_gpu_sparse_completed(f->dev), 2U);
