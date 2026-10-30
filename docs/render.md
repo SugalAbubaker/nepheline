@@ -1602,11 +1602,17 @@ page requests (about 0.14 ms) as much as the read; the block requests
 
 **The resolve** decodes each pixel's cluster and triangle, fetches the
 three vertices, and rebuilds the attributes from perspective-correct
-barycentrics. Texture filtering needs derivatives a compute shader does
-not have, so it also computes the barycentrics one pixel right and one
-down, as the rasteriser's quad would (Schied & Dachsbacher, "Deferred
-Attribute Interpolation for Memory-Efficient Deferred Shading", HPG
-2015). Facing comes from the sign of the homogeneous determinant of the
+barycentrics. In clip space's (x, y, w) the camera is the origin and the
+pixel a ray, so these are where the ray meets the triangle (Moller &
+Trumbore, JGT 1997), with no division by a vertex's w: dividing by it, as
+the resolve first did from the projected vertices, is wrong across the
+whole triangle once a vertex comes within about a millimetre of the camera's
+plane, which a person walking over a road's large triangles does
+(`Vis.barycentrics_hold_around_the_cameras_plane`). Texture filtering needs
+derivatives a compute shader does not have, so it also computes the
+barycentrics one pixel right and one down, as the rasteriser's quad would
+(Schied & Dachsbacher, "Deferred Attribute Interpolation for
+Memory-Efficient Deferred Shading", HPG 2015). Facing comes from the sign of the homogeneous determinant of the
 clip-space vertices (Olano & Greer, "Triangle Scan Conversion using 2D
 Homogeneous Coordinates", 1997), right even with a vertex behind the
 camera. Shading is `surface.glsl`, as above; the images match the

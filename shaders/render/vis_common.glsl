@@ -95,9 +95,14 @@ vec3 vis_position(NphVisMesh mesh, uint vertex)
 // Perspective-correct barycentrics of a pixel at NDC `q` and their change
 // one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
 // of a pixel in NDC (2 / width, 2 / height; Vulkan's NDC y grows down like
-// pixel rows). The screen-space barycentrics b_i are affine in q, so b_i /
-// w_i and their sum are too; their ratio is the perspective-correct
-// weight, exact for neighbours as well.
+// pixel rows). In clip space's (x, y, w) the camera is the origin and the
+// pixel the ray (q, 1), so the weights are where that ray meets the triangle
+// (Moller & Trumbore, "Fast, Minimum Storage Ray/Triangle Intersection", JGT
+// 1997). Nothing divides by a vertex's w: dividing by it fails across the
+// whole triangle where a vertex comes within a millimetre of the camera's
+// plane, as one under the eye does when it walks through that plane
+// (docs/render.md "The resolve"). The numerators and the denominator are
+// linear in q, so a neighbour's are one gradient away.
 struct VisBarycentrics {
     vec3 b;
     vec3 ddx;
@@ -106,26 +111,24 @@ struct VisBarycentrics {
 
 VisBarycentrics vis_barycentrics(vec4 c0, vec4 c1, vec4 c2, vec2 q, vec2 step)
 {
-    const vec3 inv_w = 1.0 / vec3(c0.w, c1.w, c2.w);
-    const vec2 n0 = c0.xy * inv_w.x;
-    const vec2 e1 = c1.xy * inv_w.y - n0;
-    const vec2 e2 = c2.xy * inv_w.z - n0;
-    const float inv_area = 1.0 / (e1.x * e2.y - e1.y * e2.x);
-    const vec2 d = q - n0;
-    const float b1 = (d.x * e2.y - d.y * e2.x) * inv_area;
-    const float b2 = (e1.x * d.y - e1.y * d.x) * inv_area;
-    // Gradients of b1 and b2 in NDC; b0's is minus their sum.
-    const vec2 g1 = vec2(e2.y, -e2.x) * inv_area;
-    const vec2 g2 = vec2(-e1.y, e1.x) * inv_area;
-    const vec2 g0 = -(g1 + g2);
-    const vec3 f = vec3(1.0 - b1 - b2, b1, b2) * inv_w;
-    const vec3 fx = vec3(g0.x, g1.x, g2.x) * inv_w * step.x;
-    const vec3 fy = vec3(g0.y, g1.y, g2.y) * inv_w * step.y;
-    const float s = f.x + f.y + f.z;
+    const vec3 v0 = c0.xyw;
+    const vec3 e1 = c1.xyw - v0;
+    const vec3 e2 = c2.xyw - v0;
+    const vec3 ray = vec3(q, 1.0);
+    const vec3 t = cross(v0, ray);
+    const vec3 n = cross(e1, e2);
+    const float b1 = dot(e2, t);
+    const float b2 = -dot(e1, t);
+    const float s = dot(n, ray);
+    // The gradients of b1, of b2, and of the rest in q; the denominator's is n.xy.
+    const vec2 g1 = vec2(e2.y * v0.z - e2.z * v0.y, e2.z * v0.x - e2.x * v0.z);
+    const vec2 g2 = vec2(v0.y * e1.z - v0.z * e1.y, v0.z * e1.x - v0.x * e1.z);
+    const vec2 g0 = n.xy - g1 - g2;
+    const vec3 f = vec3(s - b1 - b2, b1, b2);
     VisBarycentrics r;
     r.b = f / s;
-    r.ddx = (f + fx) / (s + fx.x + fx.y + fx.z) - r.b;
-    r.ddy = (f + fy) / (s + fy.x + fy.y + fy.z) - r.b;
+    r.ddx = (f + vec3(g0.x, g1.x, g2.x) * step.x) / (s + n.x * step.x) - r.b;
+    r.ddy = (f + vec3(g0.y, g1.y, g2.y) * step.y) / (s + n.y * step.y) - r.b;
     return r;
 }
 
