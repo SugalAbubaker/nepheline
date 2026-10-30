@@ -76,7 +76,7 @@ detected and refused rather than dereferenced.
 
 | Resource | Lives | Notes |
 |---|---|---|
-| texture | GPU, immutable | levels uploaded at creation through the staging ring; any sampled format, BC included; 2D or cube |
+| texture | GPU, immutable | levels uploaded at creation through the staging ring; any sampled format, BC included; 2D or cube; or paged, its pages installed and evicted (Virtual textures) |
 | mesh | GPU, immutable | the cooked streams as they are: unorm16 positions in the bounds, octahedral normals, snorm8 tangents, half UVs, RGBA8 colours; up to 256 submeshes; with ray tracing, a bottom-level acceleration structure over the positions |
 | material | CPU record | metallic-roughness glTF material with five texture bindings, each with its own wrap and filter |
 | instance | CPU record | a mesh, a material per material slot, a 64-bit transform, hidden flag |
@@ -94,6 +94,118 @@ bridge: it loads a cooked scene and its dependencies through the asset
 loader and creates the render resources. The samples and the golden tests
 share it, and the runtime module takes it over in Phase 9.
 
+## Virtual textures
+
+A texture created with `NPH_RENDER_TEXTURE_FLAG_PAGED` is paged
+(docs/adr/0065-virtual-texturing.md; `paging.c`, `texture_paging.glsl`). The
+renderer pages it where the device has sparse residency
+(`nph_renderer_texture_paging_supported`; gpu/sparse.h) and its top level
+spans more than a page:
+- **Its levels.** It is a sparse image whose levels of at least a page
+  are pages of the image's block shape (64 KiB: 128 x 128 texels of RGBA8,
+  256 x 256 of BC7).
+- **Its small levels** (from the first under a page in either dimension)
+  are bound and uploaded at creation and never leave, so every pixel has a
+  level to sample: the device's mip tail, or, on a device that keeps none
+  (lavapipe), a page each of their own.
+- **Its pages** come one by one from `nph_render_texture_page_install`, and
+  leave with `nph_render_texture_page_evict`. Elsewhere the texture is
+  resident whole, as every texture without the flag is.
+
+**A page's life.**
+
+| Step | When | What |
+|---|---|---|
+| install | any thread | a page of the pool (`texture_page_bytes`) and a staging slot; its texels copied into the slot |
+| bind | frame N, after its upload flush | one `vkQueueBindSparse` for the frame's binds and unbinds, at most `max_page_moves` (32) of each |
+| copy | frame N + 1, before its flush | its copy recorded from the slot, in the batch that frame's graphics waits for; the binding is a frame old, so the batch does not wait on it. Resident from this frame |
+| evict | any thread | not resident from the next frame E |
+| unbind | frame E + `NPH_GPU_FRAMES_IN_FLIGHT` | no frame in flight could sample it; unbound, its memory returned once that frame completes |
+
+**Sampling: whole levels.** A paged texture's first resident level is the
+first from which every level's pages are resident (the tail's first when
+none is). Its material slots sample it with a sampler whose minimum level
+of detail is that level (`render_material_sampler_level`: each material
+sampler made again for levels 1 to 8 where textures are paged), so every
+shader samples it as it samples any texture:
+- where the hardware's λ is at that level or above, the sample is the whole
+  texture's, byte for byte;
+- below, it takes the level itself: a blurrier texture while the finer
+  levels come.
+
+Every level from there is resident whole, so no sample reads a page that is
+not, whatever its footprint, anisotropy or addressing. A level counts from
+the frame its last page's copy is recorded and stops from the frame one of
+its pages leaves; each frame's materials take the levels as the frame
+begins (`frame_level`), so a frame in flight keeps the levels it was
+recorded with, and no frame reads a page while its binding changes
+(Vulkan's rule). A page installed in a level not yet whole waits unsampled.
+
+Measured against the texture resident whole, with every one of Bistro's
+51,605 pages resident (ADR-0065, stage 2; native 4K on the RTX 3060 Ti):
+
+| View | Frame | Resolve | Page requests |
+|---|---|---|---|
+| street | +0.09 to +0.15 ms | +0.06 to +0.09 ms | 0.055 ms |
+| hedge | +0.01 to +0.04 ms | 0.00 ms | 0.051 ms |
+| terrace | +0.13 ms | +0.05 to +0.08 ms | 0.055 to 0.058 ms |
+
+The resolve's samples of sparse images cost about 0.04 ms (64 KiB pages
+walk the page table more often, as stage 0 measured: up to +0.9%); the
+rest is the request pass running beside it. Tested before, and measured
+out (Bistro's street, its resolve 2.77 ms with the textures whole):
+- each sample's footprint tested against the pages' residency bits, its
+  gradients scaled to the first resident window: 3.49 ms;
+- a map of each 32 x 32 texels' finest resident level, one lookup a
+  texture or one a pixel: 3.01 to 3.50 ms; with the lookup placed before
+  the surface's rebuild, no spills, still 3.03 (a dependent load more in a
+  pass bound by them);
+- the levels as the samples' MinLod operand: 2.82 to 2.93 ms (the operand
+  alone 0.09 ms).
+
+The per-page map would keep 2.3 to 3 times less memory resident than whole
+levels on Bistro's views (street 376 MB of pages against 864 MB of levels,
+of its 3,346 MB), and stays the measured alternative for textures too
+large to keep a level whole.
+
+**Requests.** One pixel of each 8 x 8 tile a frame asks (the view's
+`feedback_phase`: the tile's pixels in the order of an 8 x 8 Bayer
+matrix), so every pixel asks once in 64 frames and anything that comes
+into view asks from its first frame. It sets the request bits of the pages
+its footprint covers at floor(λ), the level the hardware wants, resident
+or not: λ as the sampler computes it, with anisotropy (λ = log2(ρmax / N));
+the footprint the centre ± half the gradients, ± a texel, addressed as the
+sampler addresses (repeat, clamp, mirror).
+- The production path's opaque pixels ask in a pass of their own, `vis page
+  requests`, after the visibility buffer: their surfaces rebuilt as the
+  resolve rebuilds them. In the resolve, the request's code cost it 0.25 ms
+  though it never ran.
+- The forward pass's fragments (the reference, and the production path's
+  blended surfaces) ask as they shade.
+- A bit already set is left alone, and a subgroup whose lanes ask for one
+  word sets it together: the atomics were most of the pass.
+
+The renderer clears the request words before the passes that ask and reads
+them back after them; `nph_render_texture_page_requested` gives the frame a
+page was last asked for, `NPH_GPU_FRAMES_IN_FLIGHT` frames late.
+
+**Tests** (`test_texture_paging.c`, on devices with sparse residency):
+- Every page resident: the same images byte for byte as the texture
+  resident whole, in both paths, lit and unlit, from near, from farther,
+  and at a grazing angle with 8x anisotropy.
+- A texture of one colour with pages missing (a checkerboard of them,
+  levels from 2 only, none), opaque and alpha-tested, in both paths: the
+  same images as resident whole. A read of a page not resident would be
+  zeros.
+- With no level-0 or level-1 page, the near view shows level 2's tint, not
+  level 0's and not black.
+- With one level-0 page missing, one a close view does not show, the view
+  is byte for byte that of the texture without level 0; with it installed,
+  that of the texture resident whole.
+- The near view asks for its four central level-0 pages, not a corner's.
+- Evicted pages return their memory after the frames in flight; a page
+  evicting is resident again at once when installed.
+- With paging off, a texture made PAGED is resident whole.
 ## A frame
 
 `nph_render_frame(renderer, view, graph, target, &rg_target, &stats)` is

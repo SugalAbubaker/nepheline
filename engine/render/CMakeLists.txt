@@ -22,6 +22,7 @@ nph_add_module(render
         src/ibl.c
         src/meshlet.c
         src/motion_blur.c
+        src/paging.c
         src/post.c
         src/primitives.c
         src/reference.c
@@ -68,6 +69,7 @@ nph_add_test(render
         tests/test_renderer.c
         tests/test_shadows.c
         tests/test_taa.c
+        tests/test_texture_paging.c
         tests/test_vis.c
         tests/test_vis_cells.c
         tests/test_vis_lod.c

@@ -505,6 +505,99 @@ NphResult nph_gpu_upload_image_region(NphGpuDevice *dev, NphGpuImage dst, u32 mi
     return upload_image(dev, dst, mip, layer, 1U, &rect, data, size);
 }
 
+// A copy into a sparse image, under the upload lock in the open batch. A
+// sparse image stays in GENERAL, shared by the families: its page is copied
+// while the graphics queue samples the others, so nothing transitions it or
+// changes its owner. A level's first copy takes it from UNDEFINED. The copy
+// lands in memory bound before the flush that submits it (sparse.h).
+static void record_sparse_copy(NphGpuDevice *dev, NphGpuImageSlot *slot, NphGpuImage dst, u32 mip,
+                               u32 base_layer, u32 layer_count, const UploadRect *rect,
+                               NphGpuBuffer src, u64 src_offset)
+{
+    NphGpuUploadState *up = &dev->upload;
+    NphGpuCmd *cmd = up->cmd;
+    if (slot->state[mip].layout != NPH_GPU_LAYOUT_GENERAL) {
+        NphGpuImageBarrier b;
+        memset(&b, 0, sizeof b);
+        b.image = dst;
+        b.src_stages = (u32)NPH_GPU_STAGE_NONE;
+        b.src_access = (u32)NPH_GPU_ACCESS_NONE;
+        b.old_layout = NPH_GPU_LAYOUT_UNDEFINED;
+        b.dst_stages = (u32)NPH_GPU_STAGE_TRANSFER;
+        b.dst_access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
+        b.new_layout = NPH_GPU_LAYOUT_GENERAL;
+        b.base_mip = mip;
+        b.mip_count = 1U;
+        b.base_layer = 0U;
+        b.layer_count = NPH_GPU_ALL_LAYERS;
+        b.src_queue = NPH_GPU_QUEUE_TRANSFER;
+        b.dst_queue = NPH_GPU_QUEUE_TRANSFER;
+        NphGpuBarrierDesc desc;
+        memset(&desc, 0, sizeof desc);
+        desc.images = &b;
+        desc.image_count = 1U;
+        nph_gpu_cmd_barrier(cmd, &desc);
+    }
+    NphGpuBufferImageCopy region;
+    memset(&region, 0, sizeof region);
+    region.buffer_offset = src_offset;
+    region.mip = mip;
+    region.base_layer = base_layer;
+    region.layer_count = layer_count;
+    if (!rect->whole) {
+        region.x = (i32)rect->x;
+        region.y = (i32)rect->y;
+        region.width = rect->width;
+        region.height = rect->height;
+        region.depth = 1U;
+    }
+    nph_gpu_cmd_copy_buffer_to_image(cmd, src, dst, NPH_GPU_LAYOUT_GENERAL, &region, 1U);
+    ++up->batch_copies;
+}
+
+NphResult nph_gpu_upload_sparse_page(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 x, u32 y,
+                                     NphGpuBuffer src, u64 src_offset)
+{
+    NPH_ASSERT(dev != NULL);
+    NphGpuImageSlot *slot = gpu_image(dev, dst);
+    const NphGpuBufferSlot *b = gpu_buffer(dev, src);
+    if (slot == NULL || !slot->sparse || b == NULL || mip >= slot->tail_first_mip) {
+        GPU_LOG_ERROR("sparse page upload: not a sparse image's paged level, or no source");
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const u32 w = nph_gpu_mip_extent(slot->desc.width, mip);
+    const u32 h = nph_gpu_mip_extent(slot->desc.height, mip);
+    const u32 pages_x = (w + slot->page_width - 1U) / slot->page_width;
+    const u32 pages_y = (h + slot->page_height - 1U) / slot->page_height;
+    if (x >= pages_x || y >= pages_y) {
+        GPU_LOG_ERROR("sparse page upload: image '%s' mip %u has %ux%u pages, not page %u,%u",
+                      slot->name, mip, pages_x, pages_y, x, y);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    UploadRect rect;
+    rect.whole = false;
+    rect.x = x * slot->page_width;
+    rect.y = y * slot->page_height;
+    rect.width = nph_min_u32(slot->page_width, w - rect.x);
+    rect.height = nph_min_u32(slot->page_height, h - rect.y);
+    const u64 bytes = nph_gpu_format_level_bytes(slot->desc.format, rect.width, rect.height, 1U);
+    if ((b->desc.usage & (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC) == 0U ||
+        src_offset + bytes > b->desc.size) {
+        GPU_LOG_ERROR("sparse page upload: buffer '%s' lacks TRANSFER_SRC usage or %llu bytes at "
+                      "%llu",
+                      b->name, (unsigned long long)bytes, (unsigned long long)src_offset);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    NphGpuUploadState *up = &dev->upload;
+    nph_mutex_lock(&up->lock);
+    const NphResult r = ensure_batch(dev);
+    if (r == NPH_RESULT_OK) {
+        record_sparse_copy(dev, slot, dst, mip, 0U, 1U, &rect, src, src_offset);
+    }
+    nph_mutex_unlock(&up->lock);
+    return r;
+}
+
 static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 base_layer,
                               u32 layer_count, const UploadRect *rect, const void *data, u64 size)
 {
@@ -528,49 +621,7 @@ static NphResult upload_image(NphGpuDevice *dev, NphGpuImage dst, u32 mip, u32 b
         r = stage(dev, data, size, false, &src, &src_offset);
     }
     if (r == NPH_RESULT_OK && slot->sparse) {
-        // A sparse image stays in GENERAL, shared by the families: its page
-        // is copied while the graphics queue samples the others, so nothing
-        // transitions it or changes its owner. A level's first copy takes
-        // it from UNDEFINED. The copy lands in memory bound before the
-        // flush that submits it (sparse.h).
-        NphGpuCmd *cmd = up->cmd;
-        if (slot->state[mip].layout != NPH_GPU_LAYOUT_GENERAL) {
-            NphGpuImageBarrier b;
-            memset(&b, 0, sizeof b);
-            b.image = dst;
-            b.src_stages = (u32)NPH_GPU_STAGE_NONE;
-            b.src_access = (u32)NPH_GPU_ACCESS_NONE;
-            b.old_layout = NPH_GPU_LAYOUT_UNDEFINED;
-            b.dst_stages = (u32)NPH_GPU_STAGE_TRANSFER;
-            b.dst_access = (u32)NPH_GPU_ACCESS_TRANSFER_WRITE;
-            b.new_layout = NPH_GPU_LAYOUT_GENERAL;
-            b.base_mip = mip;
-            b.mip_count = 1U;
-            b.base_layer = 0U;
-            b.layer_count = NPH_GPU_ALL_LAYERS;
-            b.src_queue = NPH_GPU_QUEUE_TRANSFER;
-            b.dst_queue = NPH_GPU_QUEUE_TRANSFER;
-            NphGpuBarrierDesc desc;
-            memset(&desc, 0, sizeof desc);
-            desc.images = &b;
-            desc.image_count = 1U;
-            nph_gpu_cmd_barrier(cmd, &desc);
-        }
-        NphGpuBufferImageCopy region;
-        memset(&region, 0, sizeof region);
-        region.buffer_offset = src_offset;
-        region.mip = mip;
-        region.base_layer = base_layer;
-        region.layer_count = layer_count;
-        if (!rect->whole) {
-            region.x = (i32)rect->x;
-            region.y = (i32)rect->y;
-            region.width = rect->width;
-            region.height = rect->height;
-            region.depth = 1U;
-        }
-        nph_gpu_cmd_copy_buffer_to_image(cmd, src, dst, NPH_GPU_LAYOUT_GENERAL, &region, 1U);
-        ++up->batch_copies;
+        record_sparse_copy(dev, slot, dst, mip, base_layer, layer_count, rect, src, src_offset);
         if (src.value != up->staging.value) {
             nph_gpu_buffer_destroy(dev, src);
         }

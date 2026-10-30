@@ -14,6 +14,9 @@
 #endif
 
 #define NPH_SURFACE_SAMPLE(tex, smp, s) nph_sample_2d((tex), (smp), (s).uv)
+// Paged textures' fragments ask for their pages (texture_paging.glsl;
+// ADR-0065).
+#include "texture_paging.glsl"
 // With the production path's light grid, the surfaces drawn here lie in
 // front of the visibility buffer's (or of the background): the grid's
 // masks for blended surfaces.
@@ -97,6 +100,17 @@ void main()
     s.face_normal = dot(face, face) > 1e-30 ? normalize(face) : normalize(in_normal);
     s.pixel = gl_FragCoord.xy;
     s.depth = gl_FragCoord.z;
+    // Where the view pages textures, a fragment of each 8 x 8 tile a frame
+    // asks for the pages its footprint covers (its derivatives taken above,
+    // with the quad's).
+    if (view.v.paging != 0ul &&
+        paging_asks(uvec2(gl_FragCoord.xy), PagingViewRef(view.v.paging).v.feedback_phase)) {
+        PagingViewRef paging = PagingViewRef(view.v.paging);
+        for (int slot = 0; slot < NPH_RENDER_TEX_COUNT; ++slot) {
+            paging_request(paging, m.textures[slot], (m.wrap >> (4 * slot)) & 15u, s.uv, s.uv_dx,
+                           s.uv_dy);
+        }
+    }
 
     const vec4 base = nph_surface_base_color(m, s);
 #if NPH_FORWARD_ALPHA_MODE == 1

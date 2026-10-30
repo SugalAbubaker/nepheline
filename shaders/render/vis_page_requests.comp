@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: Apache-2.0
+// The pages the production path's opaque pixels ask for (texture_paging.glsl
+// "Feedback"; ADR-0065), in a pass of its own: in the resolve, the request's
+// code cost the pass 0.25 ms though it never ran. One invocation an 8 x 8
+// tile, for the frame's pixel of it (the paging view's feedback_phase), so
+// that every pixel asks once in 64 frames. Its surface is rebuilt as the
+// resolve rebuilds it (vis_resolve.glsl: the same arithmetic, as far as its
+// texture coordinates and their derivatives), and
+// each paged texture of its material asks for the pages its footprint
+// covers, a subgroup whose lanes ask for one word sending one atomic.
+// Voxel pixels sample no texture; the forward pass's fragments ask as they
+// shade.
+#version 460
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+#define PAGING_COMBINE
+#include "texture_paging.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisResolvePush pc; };
+
+void main()
+{
+    ViewRef rview = ViewRef(pc.render_view);
+    PagingViewRef paging = PagingViewRef(rview.v.paging);
+    const uint phase = paging.v.feedback_phase;
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 8 + ivec2(phase & 7u, phase >> 3u);
+    const vec2 size = vec2(float(pc.size & 0xFFFFu), float(pc.size >> 16u));
+    if (p.x >= int(size.x) || p.y >= int(size.y)) {
+        return;
+    }
+    const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.vis_index)], p).x;
+    if (v == 0ul) {
+        return;
+    }
+    const NphVisCluster cluster = VisClusterRef(pc.clusters)[vis_cluster(v)].c;
+    if ((cluster.flags & NPH_VIS_CLUSTER_VOXELS) != 0u) {
+        return;
+    }
+    VisViewRef view = VisViewRef(pc.view);
+    const NphVisInstance inst = VisInstanceRef(pc.instances)[cluster.instance].i;
+    const NphVisMesh mesh = VisMeshRef(pc.meshes)[inst.mesh].m;
+    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
+    VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
+    const uvec3 vtx =
+        uvec3(mlvx.v[m.x + corners.x], mlvx.v[m.x + corners.y], mlvx.v[m.x + corners.z]);
+
+    // The vertices as the raster saw them, and the pixel's barycentrics.
+    const vec3 t =
+        vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
+    const vec3 w0 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.x)) + t;
+    const vec3 w1 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.y)) + t;
+    const vec3 w2 = vis_transform_vector(inst.transform, vis_position(mesh, vtx.z)) + t;
+    const vec4 c0 = pc.view_proj * vec4(w0, 1.0);
+    const vec4 c1 = pc.view_proj * vec4(w1, 1.0);
+    const vec4 c2 = pc.view_proj * vec4(w2, 1.0);
+    const vec2 inv_size = vec2(pc.inv_width, pc.inv_height);
+    const vec2 q = (vec2(p) + 0.5) * inv_size * 2.0 - 1.0;
+    const VisBarycentrics bary = vis_barycentrics(c0, c1, c2, q, 2.0 * inv_size);
+
+    AttribsRef attribs = AttribsRef(mesh.attribs);
+    const mat3x2 uvs = mat3x2(unpackHalf2x16(attribs.a[vtx.x].z), unpackHalf2x16(attribs.a[vtx.y].z),
+                              unpackHalf2x16(attribs.a[vtx.z].z));
+    const vec2 uv = uvs * bary.b;
+    const vec2 uv_dx = uvs * bary.ddx;
+    const vec2 uv_dy = uvs * bary.ddy;
+    // Field by field, not a copy of the record (docs/build.md "Shaders").
+    MaterialRef material = MaterialRef(view.v.materials)[cluster.material];
+    const uint wrap = material.m.wrap;
+    for (uint slot = 0u; slot < uint(NPH_RENDER_TEX_COUNT); ++slot) {
+        paging_request(paging, material.m.textures[slot], (wrap >> (4u * slot)) & 15u, uv, uv_dx,
+                       uv_dy);
+    }
+}

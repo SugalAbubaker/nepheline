@@ -96,6 +96,8 @@ nph_add_shaders(nph_shaders_render
         render/vis_hzb_mips.comp
         render/vis_resolve.comp
         render/vis_resolve_rt.comp
+        # Where textures are paged (texture_paging.glsl; ADR-0065).
+        render/vis_page_requests.comp
         render/rt_instances.comp
         render/vsm_pages.comp
         render/vsm_cull.comp

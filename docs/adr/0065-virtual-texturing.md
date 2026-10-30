@@ -107,9 +107,12 @@ Windows) offers no sparse binding or residency at all.
    (the levels smaller than a page in either dimension: the first at level 7 of a 16384²
    BC7 image, 4 of a 2048²) is bound and uploaded at creation and never leaves, so every
    texture always has a level to fall back to. Smaller textures and devices without
-   `sparseResidencyImage2D`, `shaderResourceMinLod` and the standard shapes keep the
-   images they have today, resident whole, and the same shaders.
-2. **A page is tested where it is sampled.** One GPU buffer holds a bit per page of every
+   `sparseResidencyImage2D` and the standard shapes keep the images they have today,
+   resident whole, and the same shaders. (Stage 1's review dropped `shaderResourceMinLod`
+   from the requirement: see there.)
+2. **A page is tested where it is sampled.** *Replaced in stage 2: a paged texture's
+   levels are resident whole, and its samples clamp to the first with the sampler's
+   minimum level of detail ("Stage 2").* One GPU buffer holds a bit per page of every
    level of every sparse texture: set only once the page is bound and its texels uploaded,
    cleared before it is unbound. Every shader that samples a material texture (the
    resolve, the forward reference, the raster passes' alpha tests, the radiance cache's
@@ -136,14 +139,16 @@ Windows) offers no sparse binding or residency at all.
      is clear, so no frame reads it.
    - A coarser page goes resident before any finer page under it, and leaves after them,
      so the levels tested always end at a resident one.
-4. **Feedback where the pixels sample.** Each frame, one pixel in 16 (a pattern that covers
-   every pixel in 16 frames) records the pages its footprint touches at the level the
-   hardware wants, unclamped. It writes them as `atomicOr` into a request bitmap laid out
+4. **Feedback where the pixels sample.** *In stage 2, one pixel of each 8 x 8 tile a
+   frame, the opaque pixels in a pass of their own.* Each frame, one pixel in 16 (a
+   pattern that covers every pixel in 16 frames) records the pages its footprint touches
+   at the level the hardware wants, unclamped. It writes them as `atomicOr` into a request bitmap laid out
    like the residency bits, one atomic a subgroup per distinct page. The bitmap is read
    back `NPH_GPU_FRAMES_IN_FLIGHT` frames late, as the cells' level requests are
    (ADR-0063). Bistro's pages are about 52,000 bits, 6.5 KiB a frame.
 5. **A stream with a budget, in the runtime**, like the proxies' (`NphProxyStream`,
-   ADR-0063):
+   ADR-0063). *With stage 2's whole levels, it loads a texture's levels whole, down to
+   the finest its pixels ask for, and evicts them finest first.*
    - It holds each page's last request and loads what is asked and missing, coarser levels
      first (a finer page waits for its parent).
    - Over its budget, it evicts the least recently requested pages, never one with a
@@ -160,10 +165,10 @@ Windows) offers no sparse binding or residency at all.
    tail's levels are stored as today. The cooker lays out the blocks it already encoded,
    with no new encoding and no change to a texel. A device that pages nothing copies the
    same layout into a whole image, page by page.
-7. **Checked in development builds.** The development and debug builds sample with
-   `OpImageSparseSampleExplicitLod` and count samples that read a page not resident
-   (`residencyNonResidentStrict` makes such reads zeros). The tests require the count to be
-   zero. Shipping samples without the residency code.
+7. **Checked in development builds.** *Dropped in stage 2 ("Stage 2").* The development
+   and debug builds sample with `OpImageSparseSampleExplicitLod` and count samples that
+   read a page not resident (`residencyNonResidentStrict` makes such reads zeros). The
+   tests require the count to be zero. Shipping samples without the residency code.
 
 Stages:
 
@@ -214,6 +219,74 @@ reports it for the tests that check them. lavapipe on Linux (Mesa 25.2)
 offers sparse residency without `residencyNonResidentStrict`, so requiring
 it had left the sparse code untested in CI (the gpu module's coverage at
 79.85% against its 80%).
+
+### Stage 2, the renderer's paged textures: whole levels (2026-10-29)
+
+Built (docs/render.md "Virtual textures"):
+- **`paging.c`:** installs and evictions from any thread, one binding a frame
+  after its upload flush, the copies in the frame after, the unbinding
+  `NPH_GPU_FRAMES_IN_FLIGHT` frames after a page leaves; requests cleared
+  and read back.
+- **The levels resident from creation** are those from the first under a
+  page in either dimension: the device's mip tail, and on a device that
+  keeps none (lavapipe on Linux, whose tail starts past the last level),
+  those levels' own pages, a page each.
+- **`vis page requests`** and the forward pass: the feedback.
+- **`cooked_scene`'s `paged_textures`** and `render_perf --paged-textures`:
+  every page of every texture installed before a view is measured.
+
+Point 2 as decided, a page tested where it is sampled, cost the resolve too
+much, and was replaced: **a paged texture's levels are resident whole**, and
+its samples clamp to its first resident level with the sampler's minimum
+level of detail (each material sampler made again for levels 1 to 8).
+Every shader samples it as it samples any texture, so the clamp costs no
+register and no instruction, and every level from it is resident whole, so
+no sample reads a page that is not, whatever its footprint, anisotropy or
+addressing. Requests come from one pixel of each 8 x 8 tile a frame, in a
+pass of their own for the production path's opaque pixels.
+
+What was measured first, Bistro's street with every one of its 51,605 pages
+resident (3,382 MB; RTX 3060 Ti, native 4K; its resolve 2.77 ms with the
+textures whole):
+
+| Sampling | Resolve | |
+|---|---|---|
+| each footprint's pages tested against residency bits, the gradients scaled (point 2) | 3.49 ms | 72 registers and 160 to 176 bytes of local memory where the variant had 80 and none; the test compiled out, 2.86 |
+| the tests hoisted before the shading, slot by slot, scales packed | 3.50 ms | |
+| one test in a loop over the slots | 3.72 ms | |
+| a map of each 32 x 32 texels' finest resident level (kept on the CPU), a lookup a texture, MinLod | 3.50 ms | requests in the resolve: 0.45 ms of it |
+| the same without the requests | 3.01 ms | |
+| one lookup a pixel before the surface's rebuild | 3.03 ms (hedge 2.62 against 2.42) | no spill: a dependent load more in a pass bound by its chains of them |
+| the same with the requests beside it, never run | 3.26 to 3.30 ms | |
+| each texture's first whole level as MinLod, from the material | 2.82 to 2.93 ms | the operand alone 0.09 ms, the masked index 0.05 |
+| **the level as the sampler's minimum level of detail** | **2.82 to 2.88 ms** | the samples of sparse images about 0.04 ms, the request pass beside it the rest |
+
+With the requests in their own pass (one pixel of each 8 x 8 tile a frame,
+0.051 to 0.058 ms), whole levels cost the frame +0.09 to +0.15 ms in the
+street, +0.01 to +0.04 at the hedge, +0.13 on the terrace. In the request
+pass, the atomics on words many pixels share were most of its time (0.11
+to 0.18 ms with every pixel of one tile in 16 asking).
+
+What whole levels give up, from the pages Bistro's views asked for (of its
+3,346 MB of paged levels):
+
+| View | Pages asked for | Whole levels from the finest asked |
+|---|---|---|
+| street | 376 MB | 864 MB |
+| terrace | 350 MB | 1,032 MB |
+| hedge | 185 MB | 450 MB |
+| street, walking | 434 MB | 914 MB |
+| street, turning | 603 MB | 1,391 MB |
+
+So whole levels keep 2.3 to 3 times what pages would, and 59 to 87% less
+than every texture whole. The per-page map (a lookup a pixel, about +0.26
+ms) stays the alternative for textures too large to keep a level whole,
+taken up if a scene's measured working set needs it.
+
+Point 7, the development builds' residency codes, is dropped: with whole
+levels a read of a page not resident would be a missed level, which the
+tests' byte-for-byte images catch. Nothing samples with the MinLod operand
+or residency codes, as stage 1's review had made the device's requirement.
 
 ## Alternatives considered
 

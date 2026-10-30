@@ -36,7 +36,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 448U, "NphRenderViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderViewData) == 464U, "NphRenderViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderTexturePaging) == 32U,
+                  "NphRenderTexturePaging matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderPagingView) == 24U,
+                  "NphRenderPagingView matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
                   "NphRenderMaterialData matches its GLSL layout");
@@ -98,6 +102,8 @@ void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFr
     at = align_up(at + sizeof(NphVsmView), FRAME_ALIGN);
     out->gi_view_offset = at;
     at = align_up(at + sizeof(NphRenderGiView), FRAME_ALIGN);
+    out->paging_view_offset = at;
+    at = align_up(at + sizeof(NphRenderPagingView), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -255,7 +261,16 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
         out->samplers[s] = 0U;
         if (t != NULL && t->kind == NPH_RENDER_TEXTURE_2D) {
             out->textures[s] = nph_gpu_image_sampled_index(r->dev, t->image);
-            out->samplers[s] = render_material_sampler(r, b);
+            // A paged texture's sampler clamps its samples to its first
+            // resident level this frame (paging.c; ADR-0065).
+            const u32 level =
+                t->paged ? r->paging.frame_level[render_slot_of(&r->texture_pool, b->texture.value)]
+                         : 0U;
+            out->samplers[s] = render_material_sampler_level(r, b, level);
+            // Paged textures ask for the pages their sampler reaches.
+            const u32 wrap_u = (u32)b->wrap_u < 3U ? (u32)b->wrap_u : 0U;
+            const u32 wrap_v = (u32)b->wrap_v < 3U ? (u32)b->wrap_v : 0U;
+            out->wrap |= (wrap_u | (wrap_v << 2U)) << (4U * s);
             if (s == (u32)NPH_RENDER_SLOT_NORMAL &&
                 (t->flags & (u32)NPH_RENDER_TEXTURE_FLAG_NORMAL_TWO_CHANNEL) != 0U) {
                 out->flags |= (u32)NPH_RENDER_MATERIAL_NORMAL_TWO_CHANNEL;
@@ -729,6 +744,10 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     if (r->rt.frame_active) {
         nph_gpu_rg_read_buffer(fwd, tlas, NPH_GPU_RG_USE_ACCEL_READ);
     }
+    // The pages its fragments ask for (paging.c; ADR-0065).
+    if (!nph_gpu_rg_buffer_is_null(r->paging.frame_requests)) {
+        nph_gpu_rg_write_buffer(fwd, r->paging.frame_requests, NPH_GPU_RG_USE_STORAGE_WRITE);
+    }
     return NPH_RESULT_OK;
 }
 
@@ -808,6 +827,13 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     r->last_frame_index = nph_gpu_frame_index(dev);
     r->frame_slot = nph_gpu_frame_slot(dev);
     r->frame_production = production ? 1 : 0;
+    // Paged textures (ADR-0065): the requests read back, the copies of pages
+    // bound last frame, and the textures' first resident levels for the
+    // frame's materials, before the frame's uploads are flushed.
+    render_paging_frame_begin(r);
+    if (r->paging.installed != 0U) {
+        r->pending_uploads = 1;
+    }
     const u64 address = r->frame_addresses[r->frame_slot];
     const u32 width = td->width;
     const u32 height = td->height;
@@ -922,6 +948,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->tlas_offset = nph_vec4_from_vec3(r->rt.tlas_offset, 0.0F);
     vd->vsm = vsm ? r->vsm.view_address : 0U;
     vd->gi = stats.gi ? render_gi_view_address(r) : 0U;
+    vd->paging = render_paging_view_address(r);
     vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
@@ -939,8 +966,16 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         NPH_TRY(nph_gpu_upload_flush(dev, NULL));
         r->pending_uploads = 0;
     }
+    // The frame's one binding of texture pages, after its flush: the copies
+    // into the pages it binds are next frame's, so no flush waits on it.
+    NPH_TRY(render_paging_frame_bind(r));
+    stats.pages_resident = r->paging.resident_pages;
+    stats.pages_installed = r->paging.installed;
+    stats.pages_evicted = r->paging.evicted;
 
-    // Passes.
+    // Passes. The pages' requests first cleared, then asked for by the
+    // shading passes, then read back.
+    NPH_TRY(render_paging_declare_clear(r, graph));
     NphGpuRgImage env;
     NphGpuRgImage specular;
     NphGpuRgImage lut;
@@ -963,6 +998,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     } else {
         NPH_TRY(declare_reference(r, graph, width, height, dof, env, specular, lut, sh, &depth));
     }
+    NPH_TRY(render_paging_declare_readback(r, graph));
     stats.shadow_builds = r->rt.frame_builds;
     stats.shadow_rebuild = rt && r->rt.frame_rebuild ? 1 : 0;
     stats.shadow_compactions = r->rt.frame_compactions;

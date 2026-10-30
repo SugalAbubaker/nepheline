@@ -215,22 +215,33 @@ static NphGpuAddressMode address_mode(u32 wrap)
 
 static NphResult create_samplers(NphRenderer *r)
 {
+    // Where textures are paged, each also with its minimum level of detail
+    // at every level a paged texture's first resident level can be: the
+    // level clamps the samples, as the MinLod operand would without the
+    // operand's cost (texture_paging.glsl).
+    const u32 levels = render_paging_device_supported(r) ? RENDER_PAGED_LEVELS : 1U;
     for (u32 u = 0; u < 3U; ++u) {
         for (u32 v = 0; v < 3U; ++v) {
             for (u32 nearest = 0; nearest < 2U; ++nearest) {
-                NphGpuSamplerDesc d;
-                nph_gpu_sampler_desc_default(&d);
-                d.address_u = address_mode(u);
-                d.address_v = address_mode(v);
-                if (nearest != 0U) {
-                    d.min_filter = NPH_GPU_FILTER_NEAREST;
-                    d.mag_filter = NPH_GPU_FILTER_NEAREST;
-                    d.mip_filter = NPH_GPU_FILTER_NEAREST;
-                } else {
-                    d.max_anisotropy = r->desc.max_anisotropy;
+                for (u32 level = 0; level < levels; ++level) {
+                    NphGpuSamplerDesc d;
+                    nph_gpu_sampler_desc_default(&d);
+                    d.address_u = address_mode(u);
+                    d.address_v = address_mode(v);
+                    if (nearest != 0U) {
+                        d.min_filter = NPH_GPU_FILTER_NEAREST;
+                        d.mag_filter = NPH_GPU_FILTER_NEAREST;
+                        d.mip_filter = NPH_GPU_FILTER_NEAREST;
+                    } else {
+                        d.max_anisotropy = r->desc.max_anisotropy;
+                    }
+                    d.min_lod = (f32)level;
+                    d.name = level == 0U ? "material sampler" : "material sampler (paged level)";
+                    NPH_TRY(nph_gpu_sampler_create(
+                        r->dev, &d,
+                        level == 0U ? &r->material_samplers[u][v][nearest]
+                                    : &r->paged_samplers[u][v][nearest][level - 1U]));
                 }
-                d.name = "material sampler";
-                NPH_TRY(nph_gpu_sampler_create(r->dev, &d, &r->material_samplers[u][v][nearest]));
             }
         }
     }
@@ -245,9 +256,18 @@ static NphResult create_samplers(NphRenderer *r)
 
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding)
 {
+    return render_material_sampler_level(r, binding, 0U);
+}
+
+u32 render_material_sampler_level(const NphRenderer *r, const NphRenderTextureBinding *binding,
+                                  u32 level)
+{
     const u32 u = (u32)binding->wrap_u < 3U ? (u32)binding->wrap_u : 0U;
     const u32 v = (u32)binding->wrap_v < 3U ? (u32)binding->wrap_v : 0U;
-    return nph_gpu_sampler_index(r->dev, r->material_samplers[u][v][binding->nearest ? 1 : 0]);
+    const u32 n = binding->nearest ? 1U : 0U;
+    NPH_ASSERT(level < RENDER_PAGED_LEVELS && (level == 0U || r->paging.supported));
+    return nph_gpu_sampler_index(r->dev, level == 0U ? r->material_samplers[u][v][n]
+                                                     : r->paged_samplers[u][v][n][level - 1U]);
 }
 
 static NphResult create_frame_buffers(NphRenderer *r)
@@ -289,6 +309,9 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->specular_samples = d->specular_samples != 0U ? d->specular_samples : 256U;
     d->brdf_lut_size = d->brdf_lut_size != 0U ? d->brdf_lut_size : 128U;
     d->max_anisotropy = d->max_anisotropy == 0.0F ? 8.0F : d->max_anisotropy;
+    d->texture_page_bytes = d->texture_page_bytes != 0U ? d->texture_page_bytes : NPH_GIB(1);
+    d->max_texture_pages = d->max_texture_pages != 0U ? d->max_texture_pages : 1U << 20U;
+    d->max_page_moves = d->max_page_moves != 0U ? d->max_page_moves : 32U;
     // The production path's lists; their GPU regions sit back to back, so
     // the capacities are rounded up to 64 entries to keep every region
     // 16-byte aligned for the shaders' buffer references.
@@ -402,6 +425,8 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(create_forward_pipelines(r));
     NPH_TRY(create_compute_pipelines(r));
     NPH_TRY(create_samplers(r));
+    // Whether textures are paged, before the frame records hold their words.
+    NPH_TRY(render_paging_init(r));
     NPH_TRY(create_frame_buffers(r));
     NPH_TRY(render_ibl_create(r));
     NPH_TRY(render_debug_create(r));
@@ -518,6 +543,7 @@ void nph_renderer_destroy(NphRenderer *r)
         for (u32 i = 0; i < r->desc.max_textures; ++i) {
             if (r->textures[i].handle != 0U) {
                 ++leaked;
+                render_paging_texture_destroy(r, i);
                 nph_gpu_image_destroy(dev, r->textures[i].image);
             }
         }
@@ -532,6 +558,7 @@ void nph_renderer_destroy(NphRenderer *r)
                      leaked);
     }
     render_debug_destroy(r);
+    render_paging_shutdown(r);
     render_ibl_destroy(r);
     render_gi_destroy(r);
     render_vsm_destroy(r);
@@ -573,6 +600,9 @@ void nph_renderer_destroy(NphRenderer *r)
         for (u32 v = 0; v < 3U; ++v) {
             for (u32 n = 0; n < 2U; ++n) {
                 nph_gpu_sampler_destroy(dev, r->material_samplers[u][v][n]);
+                for (u32 level = 1; level < RENDER_PAGED_LEVELS; ++level) {
+                    nph_gpu_sampler_destroy(dev, r->paged_samplers[u][v][n][level - 1U]);
+                }
             }
         }
     }
@@ -662,6 +692,13 @@ NphResult nph_render_texture_create(NphRenderer *r, const NphRenderTextureDesc *
     NPH_TRY(alloc_slot(&r->texture_pool, &value, &slot));
     RenderTexture *t = &r->textures[slot];
     memset(t, 0, sizeof *t);
+    // Paged where it can be (ADR-0065); otherwise, and for every other
+    // texture, resident whole.
+    const NphResult paged = render_paging_texture_create(r, slot, desc, layers);
+    if (paged != NPH_RESULT_OK && paged != NPH_RESULT_UNSUPPORTED) {
+        release_slot(&r->texture_pool, value);
+        return paged;
+    }
     NphGpuImageDesc id;
     memset(&id, 0, sizeof id);
     id.type = cube ? NPH_GPU_IMAGE_CUBE : NPH_GPU_IMAGE_2D;
@@ -672,10 +709,16 @@ NphResult nph_render_texture_create(NphRenderer *r, const NphRenderTextureDesc *
     id.layer_count = layers;
     id.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
     id.name = desc->name != NULL ? desc->name : "render texture";
-    NphResult res = nph_gpu_image_create(r->dev, &id, &t->image);
-    for (u32 m = 0; m < desc->mip_count && res == NPH_RESULT_OK; ++m) {
-        res = nph_gpu_upload_image(r->dev, t->image, m, 0U, layers, desc->mips[m],
-                                   desc->mip_sizes[m]);
+    NphResult res = NPH_RESULT_OK;
+    if (paged != NPH_RESULT_OK) {
+        res = nph_gpu_image_create(r->dev, &id, &t->image);
+        for (u32 m = 0; m < desc->mip_count && res == NPH_RESULT_OK; ++m) {
+            res = nph_gpu_upload_image(r->dev, t->image, m, 0U, layers, desc->mips[m],
+                                       desc->mip_sizes[m]);
+        }
+        if (res == NPH_RESULT_OK) {
+            res = render_paging_texture_whole(r, t->image);
+        }
     }
     if (res != NPH_RESULT_OK) {
         nph_gpu_image_destroy(r->dev, t->image);
@@ -706,6 +749,9 @@ void nph_render_texture_destroy(NphRenderer *r, NphRenderTexture texture)
         return;
     }
     RenderTexture *t = &r->textures[slot];
+    if (t->paged) {
+        render_paging_texture_destroy(r, slot);
+    }
     nph_gpu_image_destroy(r->dev, t->image);
     memset(t, 0, sizeof *t);
     release_slot(&r->texture_pool, texture.value);
