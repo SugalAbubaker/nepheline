@@ -251,7 +251,8 @@ render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE] [--list]
             [--stream[=MB]] [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
 ```
 
-**Reference scenes** (CLAUDE.md §10.7: the targets are measured on them)
+**Reference scenes** (CLAUDE.md §10.7: the targets are measured on them,
+and ADR-0067 says which gate)
 are third-party content, kept outside the repository: a manifest in
 `benchmarks/scenes/` pins each one's source (a git repository and commit,
 its document, its licence and attribution), names its cooked pack and
@@ -324,8 +325,9 @@ adds the terrain and the sun, and places every instance from the layout's
 seed: Poisson-disk scatters (Bridson 2007) masked for clearings and kept
 off the trail. The same manifest lays out the same scene. Only modelled,
 opaque assets are used: the collection's fir tree, grass, ferns, and moss
-are alpha-blended or alpha-tested cards, which the first game's forest
-does not have (ADR-0059). Cooked with voxels, it takes 6 minutes on the
+are alpha-blended or alpha-tested cards, which the forest the landscape
+was built for does not have (ADR-0059; ADR-0067 made the game a city and
+took this scene out of the gates). Cooked with voxels, it takes 6 minutes on the
 cooker's job system (3.5 of them the textures' encoding; 20 on one thread)
 and makes a 1.19 GB pack.
 

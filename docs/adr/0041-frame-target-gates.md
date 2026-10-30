@@ -3,7 +3,8 @@
 - **Date:** 2026-10-22
 - **Status:** Accepted (the user's decision of 2026-10-22; CLAUDE.md
   §10.1, §10.7, §12 and §13 amended; contact shadows placed at Phase
-  10's review, at the end)
+  10's review, at the end; decision 6's gates superseded by
+  [ADR-0067](0067-the-game-is-a-city.md))
 
 ## Context
 

@@ -45,8 +45,8 @@ supersedes it and both link to each other.
 | [0037](0037-depth-of-field.md) | Depth of field through a thin lens: slight blur gathered at full resolution, large at half | Accepted (adds to ADR-0034's open §10.4 line) |
 | [0038](0038-ambient-occlusion.md) | Ground-truth ambient occlusion at half resolution, from the depth pyramid's reads | Accepted; amended 2026-10-20: full resolution (past §10.4's indirect-light line: [0041](0041-frame-target-gates.md)) |
 | [0039](0039-radiance-cache.md) | A hashed world-space radiance cache, kept by a fixed ray budget | Accepted (0.20 to 0.41 ms; with ADR-0038 past §10.4's indirect-light line in the sky-lit field; patent review before release) |
-| [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.86 ms against the 4.17 ms frame; gated at Phase 14's exit by [0041](0041-frame-target-gates.md)) |
-| [0041](0041-frame-target-gates.md) | The frame target's gate: Phase 14's exit for the reference scenes, Phase 15 for the game | Accepted (contact shadows placed at Phase 10's review) |
+| [0040](0040-reference-scenes.md) | Reference scenes: third-party content outside the repository, pinned by manifest | Accepted (Bistro measures 7.86 ms against the 4.17 ms frame; gated at Phase 14's exit by [0041](0041-frame-target-gates.md); scenes and gate changed by [0067](0067-the-game-is-a-city.md)) |
+| [0041](0041-frame-target-gates.md) | The frame target's gate: Phase 14's exit for the reference scenes, Phase 15 for the game | Accepted (contact shadows placed at Phase 10's review; the gates superseded by [0067](0067-the-game-is-a-city.md)) |
 | [0042](0042-physics-collision.md) | Physics: module boundaries, 64-bit bodies, and the collision layer | Accepted |
 | [0043](0043-physics-world.md) | Physics: the world, the soft-step solver, and its threads | Accepted (the solver provisional until the §13 comparison) |
 | [0044](0044-physics-joints.md) | Physics: joints in the soft step | Accepted |
@@ -64,14 +64,15 @@ supersedes it and both link to each other.
 | [0056](0056-audio-device-streaming.md) | Audio output device and streaming | Accepted |
 | [0057](0057-sound-assets.md) | Sound assets and their cooking | Accepted |
 | [0058](0058-audio-in-the-engine.md) | Audio in the engine: components, the bridge, one-shots, and occlusion | Accepted |
-| [0059](0059-structure-checkpoint.md) | The structure checkpoint: the frame keeps its passes; the first game | Accepted |
+| [0059](0059-structure-checkpoint.md) | The structure checkpoint: the frame keeps its passes; the first game | Accepted (the game and its scenes superseded by [0067](0067-the-game-is-a-city.md)) |
 | [0060](0060-cluster-levels-of-detail.md) | Virtualized geometry: a hierarchy of cluster levels, walked two levels a step | Accepted (the bottom levels draw level 0 until their own); amended 2026-10-26: the sun's shadow map draws cuts of its own |
 | [0061](0061-voxel-far-field.md) | Aggregate geometry's far field: voxel levels in the cluster hierarchy | Accepted (built in stages; the first: the voxels and their levels) |
 | [0062](0062-world-partition-hlod.md) | World partition: cells of static content and their far-field proxies (HLOD) | Accepted (built in stages; the first: the proxies, built by the cooker) |
 | [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
 | [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
-| [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision) |
+| [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md)) |
+| [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions) |
 
 ## Template
 

@@ -4,7 +4,8 @@
 - **Status:** Accepted (Bistro measures 7.86 ms against the 4.17 ms frame:
   see Consequences; the review's decisions of 2026-10-20 at the end; the
   frame's gate moved to Phase 14's exit by
-  [ADR-0041](0041-frame-target-gates.md))
+  [ADR-0041](0041-frame-target-gates.md), the scenes and the gate changed by
+  [ADR-0067](0067-the-game-is-a-city.md))
 
 ## Context
 

@@ -378,7 +378,8 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
   - TAA at native resolution.
   - Caching of slowly changing lighting (GI radiance cache, cached shadow-map pages).
   - Reuse of the previous frame's depth for occlusion culling.
-- **Measured as 1%-low frame time ≤ 4.17 ms** in the reference scenes and the first game, not average FPS. §10.7 sets when each must hold it.
+- **Measured as 1%-low frame time ≤ 4.17 ms** in the first game, not average FPS, which it holds during its development, after Phase 15.
+- **Until then, the reference scenes gate at 144 FPS:** 1%-low ≤ 6.94 ms, native as above (§10.7, ADR-0067).
 
 ### 10.2 The physics of the problem
 | Resource | RTX 3060 Ti | Per 4.17 ms frame |
@@ -419,7 +420,7 @@ The §10.4 DRAM budget (≤ 900 MB) is deliberately held at ~60% of the achievab
 | Headroom | 0.57 ms | 50 MB |
 | **Total** | **4.17 ms** | **≤ 900 MB** |
 
-These are design estimates. Phase 5 validates them with microbenchmarks that measure achievable bandwidth and throughput on the reference GPU. The table is then updated via ADR and becomes CI-enforced. If any budget proves physically unreachable, we report it with measurements; we never quietly lower resolution or quality.
+These are design estimates. Phase 5 validates them with microbenchmarks that measure achievable bandwidth and throughput on the reference GPU. The table is then updated via ADR and becomes CI-enforced. If any budget proves physically unreachable, we report it with measurements; we never quietly lower resolution or quality. The table is the plan for the 240 FPS target: until the first game's development gates it, each phase's exit reports every line against it (§10.7).
 
 ### 10.5 CPU frame budget (4.17 ms, 6 cores)
 - Main thread ≤ 1.0 ms (input, scheduling, late-latched camera).
@@ -437,9 +438,9 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 ### 10.7 Enforcement
 - A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
 - GPU timestamps per pass are compared to the §10.4 table. A regression of more than 5% fails CI.
-- Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) in Phase 14, whose many-light sampling it needs.
-- The target gates at Phase 14's exit, the renderer's last phase, where every reference scene must hold it with every pass inside its §10.4 budget, and in Phase 15, where the first game must (ADR-0041). Until then the target and the table stand unchanged, and no phase from 11 to 14 may end with a reference scene slower than when it began, unless an ADR shows where the added cost will be won back.
-- Phase 13 opens with a structure checkpoint (ADR-0041): measured prototypes of TAA and post fused into the shading pass, and of full-resolution GTAO in a form that fits its share of the indirect-light line, so that Phases 13 and 14 build on a frame that can reach the target at full quality. The game's setting, camera, and world density are decided there, and the reference scenes are checked against them.
+- Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) and the big city (NVIDIA Emerald Square, tiled) in Phase 14, for the many-light sampling and the first game's world (ADR-0067). The landscape stays measured, but the first game is a city, so it does not gate.
+- **The gates (ADR-0067).** At Phase 14's exit, the renderer's last phase, Bistro, the city, and the interior each hold 144 FPS: 1%-low ≤ 6.94 ms at native 4K on the RTX 3060 Ti with the phase's features on, each §10.4 line reported against its budget. At Phase 15's exit they hold it in shipping builds. During the first game's development, after Phase 15, the game holds the target: 1%-low ≤ 4.17 ms (240 FPS), inside the §10.4 and §10.5 budgets. Until then the target and the table stand unchanged, and no phase from 11 to 15 may end with a reference scene slower than when it began, unless an ADR shows where the added cost will be won back.
+- Phase 13 opens with a structure checkpoint (ADR-0041): measured prototypes of TAA and post fused into the shading pass, and of full-resolution GTAO in a form that fits its share of the indirect-light line, so that Phases 13 and 14 build on a frame that can reach the target at full quality. The game's setting, camera, and world density are decided there, and the reference scenes are checked against them (ADR-0059; the game was decided again by ADR-0067).
 - Every renderer PR must state its cost in both milliseconds and DRAM bytes.
 
 ## 11. Documentation
@@ -461,12 +462,14 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 | **7. Renderer v1** | forward PBR reference renderer, IBL, HDR/tonemap, debug draw, GPU profiler (§8.6 stages 1–2) | Golden-image tests pass for the PBR test scenes |
 | **8. Scene/ECS** | archetype ECS, parallel scheduler, reflection, transforms, scene serialization | 1M-entity benchmarks recorded. Scenes round-trip |
 | **9. Runtime + Editor v1** | engine loop, game hot reload, editor panels, gizmos, undo/redo, import, primitives | A scene can be built, saved, reloaded, and played in the editor |
-| **10. Renderer v2** | GPU-driven culling, visibility buffer + hybrid raster, fused tile shading, virtual shadow maps, radiance cache GI, native TAA + fused post (§8.6 stages 3–8); define the reference scenes | Constant CPU cost vs object count. Bistro measured at native 4K on the RTX 3060 Ti against every §10.4 line, each overrun's path recorded in an ADR (ADR-0041); the 4.17 ms gate is Phase 14's (§10.7) |
+| **10. Renderer v2** | GPU-driven culling, visibility buffer + hybrid raster, fused tile shading, virtual shadow maps, radiance cache GI, native TAA + fused post (§8.6 stages 3–8); define the reference scenes | Constant CPU cost vs object count. Bistro measured at native 4K on the RTX 3060 Ti against every §10.4 line, each overrun's path recorded in an ADR (ADR-0041); the frame's gates are §10.7's |
 | **11. Physics** | broadphase, narrowphase, solver, joints, CCD, queries, character controller | Stacking, ragdoll, and determinism tests pass. Benchmarks recorded |
 | **12. Audio** | device, mixer, voices, DSP, 3D, streaming | Offline mix tests pass. No audio-thread allocations (verified) |
 | **13. Streaming & scale** | the structure checkpoint first (§10.7); virtual texturing, geometry streaming, virtualized geometry DAG LOD, world partition + HLOD, 64-bit world coordinates (§8.6 stage 9); the open-landscape reference scene (§10.7) | The checkpoint's prototypes measured and recorded in an ADR. Open-world test scene streams without hitches and stays under 6.5 GB VRAM. The landscape measured against every §10.4 line, and no reference scene slower than at the phase's start (§10.7) |
-| **14. Ray-traced effects** | ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the local lights' shadows and screen-space contact shadows (§8.6 stage 6, ADR-0041); the many-light interior reference scene (§10.7); every reference scene brought inside the §10.4 budget | Golden tests pass. Every reference scene (Bistro, the landscape, the interior) holds 1%-low ≤ 4.17 ms at native 4K on the RTX 3060 Ti, with every pass inside its §10.4 budget |
-| **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2; the first game's performance pass (§10.7) | The first game holds 1%-low ≤ 4.17 ms at native 4K on the reference hardware, inside the §10.4 and §10.5 budgets. Release candidate `v1.0.0` |
+| **14. The city & ray-traced effects** | the level hierarchies' walk made cheaper (ADR-0066); the big-city reference scene (§10.7), and the world partition's cells and streams in the engine's runtime; the landscape's raster optimized; ray-query reflections, ReSTIR many-light sampling, high-end quality tiers (§8.6 stage 10); the local lights' shadows and screen-space contact shadows (§8.6 stage 6, ADR-0041); the many-light interior reference scene (§10.7); Bistro, the city, and the interior brought to 144 FPS (ADR-0067) | Golden tests pass. Bistro, the city, and the interior each hold 1%-low ≤ 6.94 ms at native 4K on the RTX 3060 Ti with the phase's features on, each §10.4 line reported. The landscape no slower than at the phase's start (§10.7) |
+| **15. Production hardening** | shipping builds, packaging, crash reporting, soak tests, docs completion, editor modeling tools v2 | Bistro, the city, and the interior hold 1%-low ≤ 6.94 ms at native 4K on the reference hardware in shipping builds (§10.7). Engine release candidate `v1.0.0` |
+
+**After Phase 15: the first game (§13, ADR-0067).** The game is built on the engine, and what it needs is built as it needs it, each as tested engine work with its own ADR: skeletal animation and compute skinning (§8.6), navigation, NPC AI and crowds, and a crowd reference scene. The engine is optimized throughout against the game's requirements until the game holds 1%-low ≤ 4.17 ms (240 FPS) at native 4K on the reference hardware, inside the §10.4 and §10.5 budgets.
 
 Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so they may run in parallel with phase 10 if more people join.
 
@@ -477,4 +480,5 @@ Phases 11 (physics) and 12 (audio) depend only on phases 1–4, 8, and 9, so the
 - Physics solver final choice: soft-step vs TGS/XPBD (Phase 11, based on benchmarks).
 - Dynamic GI technique for the radiance cache (Phase 10).
 - Gameplay scripting: C hot-reload only, or add a scripting language (Phase 9+).
-- First demo/game to showcase the engine (its setting, camera, and world density at the checkpoint that opens Phase 13, so the reference scenes resemble it; the game holds the target in Phase 15: §10.7). Decided at that checkpoint (ADR-0059): first-person exploration of a forested mountain valley with ruins, the eye at 1.7 m, walking and sprinting; modelled vegetation to the horizon; a ruined village lit by lamps and candles at night; a day-night cycle; a world of about 4 × 4 km.
+- First game to showcase the engine. Decided (ADR-0067, replacing ADR-0059's forest valley): a first-person shooter with elements of roleplay, like GTA V, in a big city with many streets and buildings, large indoor facilities with many lights, and many interactible NPCs. It is built after Phase 15 and holds the 240 FPS target during its development (§10.7).
+- Whether the first game has vehicles: they would add vehicle physics and streaming at car speed (when its development reaches them).

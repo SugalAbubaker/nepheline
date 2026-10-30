@@ -2,7 +2,8 @@
 
 - **Date:** 2026-10-30
 - **Status:** Accepted (the user's decision of 2026-10-30: record the cost
-  and win it back as Phase 14's first task)
+  and win it back as Phase 14's first task; the gate it names moved by
+  [ADR-0067](0067-the-game-is-a-city.md))
 
 ## Context
 

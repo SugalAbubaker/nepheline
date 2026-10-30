@@ -3,7 +3,8 @@
 - **Date:** 2026-10-25
 - **Status:** Accepted (the user's decisions of 2026-10-25: the first game,
   the measurement method, and the two §10.4 lines this checkpoint could not
-  meet)
+  meet; decisions 3 and 4, the game and its scenes, superseded by
+  [ADR-0067](0067-the-game-is-a-city.md))
 
 ## Context
 
