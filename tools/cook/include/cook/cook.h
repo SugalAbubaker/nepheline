@@ -52,7 +52,10 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //      form"; ADR-0063).
 //   7: a cell's proxy as its levels apart and a head (mesh type version 6;
 //      ADR-0063 "Stage 2, a level is a mesh").
-#define COOK_MESH_VERSION 7U
+//   8: corners of seams collapse by adding vertices, which the asset holds after
+//      the mesh's own; a moved border and a changed shading normal count in a collapse's
+//      cost; a level's collapses go no further than an error of its own (ADR-0069).
+#define COOK_MESH_VERSION 8U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

@@ -2141,12 +2141,12 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             NPH_LOG_INFO(
                 &NPH_LOG_COOK,
                 "mesh %s: %u -> %u vertices, %u -> %u triangles, %u meshlets, %u levels (the "
-                "coarsest %u triangles in %u clusters; %u voxels in %u bricks, %u clusters), "
-                "ACMR %.2f -> %.2f",
+                "coarsest %u triangles in %u clusters, %u vertices added; %u voxels in %u bricks, "
+                "%u clusters), ACMR %.2f -> %.2f",
                 gm->mesh.name, st.source_vertices, st.vertices, st.source_triangles, st.triangles,
                 st.meshlets, st.lod_levels, st.lod_coarsest_triangles, st.lod_coarsest_clusters,
-                st.voxels, st.voxel_bricks, st.voxel_clusters, (f64)st.acmr_before,
-                (f64)st.acmr_after);
+                st.lod_added_vertices, st.voxels, st.voxel_bricks, st.voxel_clusters,
+                (f64)st.acmr_before, (f64)st.acmr_after);
             // A line of its own: a log message holds NPH_LOG_MESSAGE_MAX bytes.
             NPH_LOG_INFO(&NPH_LOG_COOK,
                          "mesh %s: %.2f s (prepare %.2f, reorder %.2f, meshlets %.2f, levels %.2f, "

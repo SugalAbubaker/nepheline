@@ -5,6 +5,7 @@
 // cooked records (asset/mesh.h) and the renderer's are the same bytes.
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
+#include <nepheline/math/pack.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/render/cluster_lod.h>
 
@@ -208,7 +209,17 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
     NphRenderMeshlets level0;
     nph_render_meshlets_init(&level0, alloc);
     NphRenderIndexRange *ranges = NPH_ALLOC_ARRAY(alloc, NphRenderIndexRange, nph_max_u32(sn, 1U));
-    NphResult r = ranges != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    // The texture coordinates as the GPU reads them: a level's added vertices
+    // carry them on from there.
+    const u32 vn = mesh->vertices.len;
+    NphVec2 *uvs = NPH_ALLOC_ARRAY(alloc, NphVec2, nph_max_u32(vn, 1U));
+    NphVec3 *normals = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(vn, 1U));
+    NphResult r =
+        ranges != NULL && uvs != NULL && normals != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    for (u32 v = 0; v < vn && r == NPH_RESULT_OK; ++v) {
+        uvs[v] = nph_unpack_f16x2(attribs[v].uv0);
+        normals[v] = nph_oct_decode_snorm16(attribs[v].normal);
+    }
     const u32 mn = meshlets->meshlets.len;
     if (r == NPH_RESULT_OK) {
         r = NPH_ARRAY_RESIZE(&level0.meshlets, mn);
@@ -237,6 +248,8 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         // Seams where vertices at one position differ in what the GPU reads.
         in.attribs = attribs;
         in.attrib_stride = (u32)sizeof(NphMeshAttrib);
+        in.uvs = uvs;
+        in.normals = normals;
         in.vertex_count = mesh->vertices.len;
         in.indices = mesh->indices.data;
         in.index_count = mesh->indices.len;
@@ -260,6 +273,12 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
     }
     if (ranges != NULL) {
         NPH_FREE_ARRAY(alloc, NphRenderIndexRange, ranges, nph_max_u32(sn, 1U));
+    }
+    if (uvs != NULL) {
+        NPH_FREE_ARRAY(alloc, NphVec2, uvs, nph_max_u32(vn, 1U));
+    }
+    if (normals != NULL) {
+        NPH_FREE_ARRAY(alloc, NphVec3, normals, nph_max_u32(vn, 1U));
     }
     nph_render_meshlets_free(&level0);
     return r;

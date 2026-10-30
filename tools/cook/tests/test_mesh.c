@@ -950,6 +950,159 @@ static void cook_with(const CookMesh *src, bool lods, TestAsset *ta, CookMeshSta
     cook_on(src, lods, NULL, ta, st);
 }
 
+// A flat-shaded staircase cooks to levels that add vertices (ADR-0069): the
+// asset holds them after the mesh's own, standing where other vertices stand with
+// flat normals, each triangle of every level on one face (hard edges stay hard),
+// and the same input gives the same bytes on jobs or without.
+typedef struct StepsMesh {
+    NPH_ARRAY(CookVertex) vertices;
+    NphArrayU32 indices;
+} StepsMesh;
+
+static void steps_quad(StepsMesh *m, NphVec3 n, NphVec3 a, NphVec3 b, NphVec3 c, NphVec3 d)
+{
+    const NphVec3 p[4] = {a, b, c, d};
+    CookVertex v[4];
+    for (u32 i = 0; i < 4U; ++i) {
+        memset(&v[i], 0, sizeof v[i]);
+        v[i].position = p[i];
+        v[i].normal = n;
+        // A plane's texture coordinates: which two axes by the face's normal.
+        v[i].uv0 = n.y != 0.0F
+                       ? nph_vec2(p[i].x, p[i].z)
+                       : (n.x != 0.0F ? nph_vec2(p[i].z, p[i].y) : nph_vec2(p[i].x, p[i].y));
+        v[i].color = nph_vec4_one();
+    }
+    const u32 base = m->vertices.len;
+    const u32 idx[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+    NTEST_ASSERT_EQ_INT(NPH_ARRAY_PUSH_N(&m->vertices, v, 4U), NPH_RESULT_OK);
+    for (u32 i = 0; i < 6U; ++i) {
+        NTEST_ASSERT_EQ_INT(NPH_ARRAY_PUSH(&m->indices, base + idx[i]), NPH_RESULT_OK);
+    }
+}
+
+// One material: a material border between every two quads would be seams alone.
+static void make_steps(CookMesh *out, u32 n)
+{
+    StepsMesh built;
+    NPH_ARRAY_INIT(&built.vertices, nph_allocator_system());
+    NPH_ARRAY_INIT(&built.indices, nph_allocator_system());
+    StepsMesh *m = &built;
+    const NphVec3 up = nph_vec3_unit_y();
+    const NphVec3 down = nph_vec3(0.0F, -1.0F, 0.0F);
+    const NphVec3 neg_x = nph_vec3(-1.0F, 0.0F, 0.0F);
+    const NphVec3 neg_z = nph_vec3(0.0F, 0.0F, -1.0F);
+    const f32 size = (f32)n;
+    for (u32 i = 0; i < n; ++i) {
+        for (u32 j = 0; j < n; ++j) {
+            const f32 x0 = (f32)i;
+            const f32 x1 = x0 + 1.0F;
+            const f32 z0 = (f32)j;
+            const f32 z1 = z0 + 1.0F;
+            const f32 h = (f32)(i + j + 1U) * 0.25F;
+            const f32 low = h - 0.25F;
+            steps_quad(m, up, nph_vec3(x0, h, z0), nph_vec3(x0, h, z1), nph_vec3(x1, h, z1),
+                       nph_vec3(x1, h, z0));
+            steps_quad(m, down, nph_vec3(x0, 0.0F, z0), nph_vec3(x1, 0.0F, z0),
+                       nph_vec3(x1, 0.0F, z1), nph_vec3(x0, 0.0F, z1));
+            if (i != 0U) {
+                steps_quad(m, neg_x, nph_vec3(x0, low, z0), nph_vec3(x0, low, z1),
+                           nph_vec3(x0, h, z1), nph_vec3(x0, h, z0));
+            }
+            if (j != 0U) {
+                steps_quad(m, neg_z, nph_vec3(x0, low, z0), nph_vec3(x0, h, z0),
+                           nph_vec3(x1, h, z0), nph_vec3(x1, low, z0));
+            }
+            const u32 steps = i + j + 1U;
+            for (u32 k = 0; k < steps; ++k) {
+                const f32 y0 = (f32)k * 0.25F;
+                const f32 y1 = y0 + 0.25F;
+                if (i == 0U) {
+                    steps_quad(m, neg_x, nph_vec3(0.0F, y0, z0), nph_vec3(0.0F, y0, z1),
+                               nph_vec3(0.0F, y1, z1), nph_vec3(0.0F, y1, z0));
+                }
+                if (i == n - 1U) {
+                    steps_quad(m, nph_vec3_unit_x(), nph_vec3(size, y0, z0), nph_vec3(size, y1, z0),
+                               nph_vec3(size, y1, z1), nph_vec3(size, y0, z1));
+                }
+                if (j == 0U) {
+                    steps_quad(m, neg_z, nph_vec3(x0, y0, 0.0F), nph_vec3(x0, y1, 0.0F),
+                               nph_vec3(x1, y1, 0.0F), nph_vec3(x1, y0, 0.0F));
+                }
+                if (j == n - 1U) {
+                    steps_quad(m, nph_vec3_unit_z(), nph_vec3(x0, y0, size), nph_vec3(x1, y0, size),
+                               nph_vec3(x1, y1, size), nph_vec3(x0, y1, size));
+                }
+            }
+        }
+    }
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(out, built.vertices.data, built.vertices.len,
+                                              built.indices.data, built.indices.len, 0U),
+                        NPH_RESULT_OK);
+    NPH_ARRAY_FREE(&built.vertices);
+    NPH_ARRAY_FREE(&built.indices);
+    out->flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_UV0;
+    strcpy(out->name, "steps");
+}
+
+NTEST(mesh, flat_shaded_corners_add_vertices_to_the_asset)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh src;
+    cook_mesh_init(&src, alloc);
+    make_steps(&src, 16U);
+    TestAsset cooked;
+    CookMeshStats st;
+    cook_with(&src, true, &cooked, &st);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&cooked.asset, &v), NPH_RESULT_OK);
+    NTEST_LOG(
+        "%u triangles, %u vertices and %u added; the coarsest level %u triangles of %u levels",
+        st.triangles, st.vertices, st.lod_added_vertices, st.lod_coarsest_triangles, st.lod_levels);
+    NTEST_ASSERT_GT_UINT(st.lod_added_vertices, 0U);
+    NTEST_EXPECT_EQ_UINT(v.header->vertex_count, st.vertices + st.lod_added_vertices);
+    NTEST_EXPECT_LT_UINT(st.lod_coarsest_triangles * 16U, st.triangles);
+    // The vertices the levels added are flat too, and each triangle lies on one face.
+    const u32 count = v.header->vertex_count;
+    u32 outside = 0U;
+    u32 creased = 0U;
+    for (u32 c = 0; c < v.header->meshlet_count; ++c) {
+        const NphMeshlet *ml = &v.meshlets[c];
+        for (u32 t = 0; t < ml->triangle_count; ++t) {
+            const u8 *corner = &v.meshlet_triangles[((u64)ml->triangle_offset + t) * 3U];
+            const u32 a = v.meshlet_vertices[ml->vertex_offset + corner[0]];
+            const u32 b = v.meshlet_vertices[ml->vertex_offset + corner[1]];
+            const u32 d = v.meshlet_vertices[ml->vertex_offset + corner[2]];
+            if (a >= count || b >= count || d >= count) {
+                outside += 1U;
+                continue;
+            }
+            creased += v.attribs[a].normal != v.attribs[b].normal ||
+                               v.attribs[b].normal != v.attribs[d].normal
+                           ? 1U
+                           : 0U;
+        }
+    }
+    NTEST_EXPECT_EQ_UINT(outside, 0U);
+    NTEST_EXPECT_EQ_UINT(creased, 0U);
+    // The same bytes on jobs.
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NphJobSystem *jobs = NULL;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    TestAsset on_jobs;
+    CookMeshStats st_jobs;
+    cook_on(&src, true, jobs, &on_jobs, &st_jobs);
+    nph_job_system_destroy(jobs);
+    NTEST_ASSERT_EQ_UINT(on_jobs.size, cooked.size);
+    NTEST_EXPECT_EQ_MEM(on_jobs.image, cooked.image, cooked.size);
+    test_asset_free(&on_jobs);
+    test_asset_free(&cooked);
+    cook_mesh_free(&src);
+}
+
 // A mesh of many meshlets is cooked with its levels (step 8): level 0's
 // clusters are the meshlets cooked without them, byte for byte, the coarser
 // levels follow, the levels' records are the builder's (a tree under a root

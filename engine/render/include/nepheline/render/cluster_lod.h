@@ -29,9 +29,11 @@
 // vertex onto one of its neighbours, so every level's clusters index the
 // mesh's own vertices and no attribute is ever interpolated; vertices on
 // attribute seams and material borders move only along them, after the
-// vertex classes of meshoptimizer's simplifier (Kapoulkine, 2017). The
-// quadrics accumulate from level 0, so a level's error is measured against
-// the mesh itself rather than the level before.
+// vertex classes of meshoptimizer's simplifier (Kapoulkine, 2017). Given
+// texture coordinates, corners of more seams than that move too, a surface
+// that has no vertex at the neighbour taking one added there (`uvs`, `added`;
+// ADR-0069). The quadrics accumulate from level 0, so a level's error is
+// measured against the mesh itself rather than the level before.
 //
 // Aggregate geometry (foliage, twigs, debris: many small disconnected
 // pieces) stalls those collapses, which cannot take a piece away. Given a
@@ -138,6 +140,18 @@ typedef NPH_ARRAY(NphRenderVoxel) NphRenderVoxelArray;
 // A mesh's levels: every level's clusters, level 0 first (the input's
 // meshlets, unchanged and in their order), then each coarser level's, with
 // their places, the groups, and the hierarchy.
+// A vertex the levels added (NphRenderClusterLodInput.uvs): a surface's corner
+// moved onto a position where that surface had no vertex. Added vertex i is
+// vertex `vertex_count + i` of the mesh, which the clusters of coarser levels
+// name, and it needs appending to the mesh's vertices in order.
+typedef struct NphRenderLodAddedVertex {
+    u32 source;   // its attributes are this vertex's, but for the texture coordinates
+    u32 position; // it stands where this vertex stands
+    NphVec2 uv;   // its texture coordinates
+} NphRenderLodAddedVertex;
+
+typedef NPH_ARRAY(NphRenderLodAddedVertex) NphRenderLodAddedVertexArray;
+
 typedef struct NphRenderClusterLods {
     NphRenderMeshlets clusters; // records, bounds, vertices (the mesh's), corners
     NphRenderClusterLodArray lods;
@@ -152,6 +166,8 @@ typedef struct NphRenderClusterLods {
     NphRenderVoxelArray voxels;
     u32 levels;          // levels of clusters (1: level 0 alone)
     u32 level0_clusters; // the input's meshlets: clusters [0, level0_clusters)
+    // The vertices the levels added, in order (none without input `uvs`).
+    NphRenderLodAddedVertexArray added;
 } NphRenderClusterLods;
 
 void nph_render_cluster_lods_init(NphRenderClusterLods *l, NphAllocator *alloc);
@@ -164,6 +180,19 @@ typedef struct NphRenderClusterLodInput {
     // NULL: every vertex at a shared position is a seam vertex of its own.
     const void *attribs;
     u32 attrib_stride;
+    // Each vertex's texture coordinates. With them, a corner where more than two
+    // seams or open edges meet may collapse too (flat-shaded architecture is
+    // mostly such corners): a surface there that does not reach the corner's
+    // neighbour takes a vertex added at the neighbour, its attributes its own and
+    // its texture coordinates carried along its plane, so that hard edges stay
+    // hard and textures do not smear (ADR-0069; `added` in the output). NULL: such
+    // corners never move, and no vertex is added.
+    const NphVec2 *uvs;
+    // Each vertex's shading normal (unit), or NULL: a collapse then counts what it does to
+    // the surface's shading, which positions alone do not show (ADR-0069). With `voxels`,
+    // neither these nor `uvs` are read: such a mesh keeps the simplifier its voxels were
+    // measured with.
+    const NphVec3 *normals;
     u32 vertex_count;
     const u32 *indices; // triangle list
     u32 index_count;

@@ -247,6 +247,7 @@ typedef struct CookMeshStats {
     // The coarsest level's size: what a distant instance draws at least.
     u32 lod_coarsest_triangles;
     u32 lod_coarsest_clusters;
+    u32 lod_added_vertices; // the vertices the levels added (ADR-0069)
     // The voxel clusters, bricks, and voxels written (0 without voxels).
     u32 voxel_clusters;
     u32 voxel_bricks;

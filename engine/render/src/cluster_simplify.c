@@ -5,7 +5,8 @@
 // Quadric Error Metrics", SIGGRAPH 1997).
 //
 // Every collapse moves one vertex onto a neighbour (a half-edge collapse),
-// so the result indexes the mesh's own vertices and no attribute is ever
+// so the result indexes the mesh's own vertices (and those added at complex
+// classes) and no attribute but those added's texture coordinates is ever
 // interpolated. Vertices are welded by position into classes for topology;
 // the vertices of a class with one set of attributes are a wedge. Each class
 // is of a kind, after the vertex kinds of meshoptimizer's simplifier
@@ -16,7 +17,14 @@
 //   seam      on an attribute seam or a material border (two such edges,
 //             one wedge each side): along the seam, each side's wedge onto
 //             the neighbour's wedge on the same side
-//   complex   anything else (corners of seams, non-manifold edges): never
+//   complex   anything else (corners of seams and open edges): along any
+//             edge where the caller gives texture coordinates, else never.
+//             A surface there the edge's triangles do not reach has no wedge
+//             at the neighbour, so it takes one added there, its own
+//             attributes at the neighbour's position and its texture
+//             coordinates carried along its plane: hard edges stay hard and
+//             textures do not smear (ADR-0069)
+//   tangled   on a non-manifold edge: never
 //   locked    shared with another group: never, so groups keep their
 //             common boundary and the levels stay watertight
 //
@@ -32,9 +40,22 @@
 // collapse the target still needs; then the next pass. The quadrics
 // accumulate from level 0 across every level, so an error is a distance
 // from the mesh's own surface.
+//
+// A surface's quadrics do not see the border between two surfaces that look
+// different move where they lie in one plane (a window in a wall, whose corner
+// going turns its rectangle into a triangle), so a collapse also costs how far it
+// moves the seams and open edges of the class that goes, those steps added up over
+// the collapses that walk a corner along its edge. Nor do they see shading: where the
+// caller gives normals, a collapse also costs what its triangles now show where the
+// vertex stood, against the normal it had (after Hoppe, "New Quadric Metric for Simplifying
+// Meshes with Appearance Attributes", IEEE Visualization 1999, whose attributes count in
+// the error too). A normal that varies evenly across a surface comes back from the
+// interpolation, so a true curve pays little for it, and a wrinkle in flat cloth pays its
+// full size (ADR-0069).
 #include <nepheline/core/array.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hashmap.h>
+#include <nepheline/math/geometry.h>
 #include <nepheline/math/scalar.h>
 
 #include "cluster_lod_internal.h"
@@ -58,6 +79,18 @@
 // How far down the sorted candidates a pass may reach, in multiples of the
 // collapses its target still needs.
 #define PASS_REACH 2U
+// What a change of shading counts for, against a distance: the change of normal where a
+// vertex stood (a chord), times the size of the triangle that now shows it, times this. A
+// quarter is the least that left Bistro's images nearer level 0 than before, in every view,
+// with fewer triangles (ADR-0069).
+#define NORMAL_WEIGHT 0.25F
+// Shading normals closer than this (a chord; about 0.06 degrees) are one normal: what
+// their quantisation and the rounding of an interpolation leave.
+#define NORMAL_EPSILON 1e-3F
+// Texture coordinates are carried along a surface's plane from its largest
+// triangle at the corner, and not from one so thin that the neighbour's position
+// lies past this many of its edges.
+#define UV_REACH 16.0F
 
 // ---------------------------------------------------------------------------
 // Quadrics
@@ -321,9 +354,39 @@ static NphResult build_quadrics(LodMesh *m, NphAllocator *alloc, const u32 *indi
     return r;
 }
 
+NphResult lod_mesh_add_vertex(LodMesh *m, NphAllocator *alloc, u32 mesh_class)
+{
+    if (m->vertex_count == m->vertex_capacity) {
+        const u32 capacity = m->vertex_capacity * 2U;
+        u32 *class_of = NPH_ALLOC_ARRAY(alloc, u32, capacity);
+        u32 *wedge_of = NPH_ALLOC_ARRAY(alloc, u32, capacity);
+        if (class_of == NULL || wedge_of == NULL) {
+            if (class_of != NULL) {
+                NPH_FREE_ARRAY(alloc, u32, class_of, capacity);
+            }
+            if (wedge_of != NULL) {
+                NPH_FREE_ARRAY(alloc, u32, wedge_of, capacity);
+            }
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        memcpy(class_of, m->class_of, (size_t)m->vertex_count * sizeof(u32));
+        memcpy(wedge_of, m->wedge_of, (size_t)m->vertex_count * sizeof(u32));
+        NPH_FREE_ARRAY(alloc, u32, m->class_of, m->vertex_capacity);
+        NPH_FREE_ARRAY(alloc, u32, m->wedge_of, m->vertex_capacity);
+        m->class_of = class_of;
+        m->wedge_of = wedge_of;
+        m->vertex_capacity = capacity;
+    }
+    const u32 v = m->vertex_count;
+    m->class_of[v] = mesh_class;
+    m->wedge_of[v] = v;
+    m->vertex_count = v + 1U;
+    return NPH_RESULT_OK;
+}
+
 void lod_mesh_free(LodMesh *m, NphAllocator *alloc)
 {
-    const u32 n = nph_max_u32(m->vertex_count, 1U);
+    const u32 n = nph_max_u32(m->vertex_capacity, 1U);
     const u32 c = nph_max_u32(m->class_count, 1U);
     if (m->class_of != NULL) {
         NPH_FREE_ARRAY(alloc, u32, m->class_of, n);
@@ -346,6 +409,9 @@ void lod_mesh_free(LodMesh *m, NphAllocator *alloc)
     if (m->absorbed_tail != NULL) {
         NPH_FREE_ARRAY(alloc, u32, m->absorbed_tail, c);
     }
+    if (m->moved != NULL) {
+        NPH_FREE_ARRAY(alloc, f32, m->moved, c);
+    }
     memset(m, 0, sizeof *m);
 }
 
@@ -357,6 +423,7 @@ NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphVec3 *position
     m->positions = positions;
     m->vertex_count = vertex_count;
     const u32 n = nph_max_u32(vertex_count, 1U);
+    m->vertex_capacity = n;
     m->class_of = NPH_ALLOC_ARRAY(alloc, u32, n);
     m->wedge_of = NPH_ALLOC_ARRAY(alloc, u32, n);
     if (m->class_of == NULL || m->wedge_of == NULL) {
@@ -384,8 +451,9 @@ NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphVec3 *position
         m->class_vertex = NPH_ALLOC_ARRAY(alloc, u32, c);
         m->absorbed_next = NPH_ALLOC_ARRAY(alloc, u32, c);
         m->absorbed_tail = NPH_ALLOC_ARRAY(alloc, u32, c);
+        m->moved = NPH_ALLOC_ARRAY_ZEROED(alloc, f32, c);
         r = m->quadrics != NULL && m->normals != NULL && m->class_vertex != NULL &&
-                    m->absorbed_next != NULL && m->absorbed_tail != NULL
+                    m->absorbed_next != NULL && m->absorbed_tail != NULL && m->moved != NULL
                 ? NPH_RESULT_OK
                 : NPH_RESULT_OUT_OF_MEMORY;
         if (r == NPH_RESULT_OK) {
@@ -420,6 +488,7 @@ typedef enum ClassKind {
     KIND_SEAM = 2,
     KIND_COMPLEX = 3,
     KIND_LOCKED = 4,
+    KIND_TANGLED = 5,
 } ClassKind;
 
 typedef enum EdgeKind {
@@ -437,12 +506,14 @@ typedef struct HalfEdge {
 } HalfEdge;
 
 // A collapse of class `from` onto class `to`: which wedge of `to` each
-// (wedge of `from`, submesh) takes.
-#define MAX_REMAP 4U
+// (wedge of `from`, submesh) takes, or one added there (REMAP_ADD).
+#define MAX_REMAP 8U
+#define REMAP_ADD 0xFFFFFFFFU
 typedef struct Collapse {
     f64 cost;
     u32 from;
     u32 to;
+    f32 moved; // how far the borders `to` takes on have come, this collapse included
     u32 remap_count;
     u32 remap_wedge[MAX_REMAP];
     u32 remap_submesh[MAX_REMAP];
@@ -456,9 +527,15 @@ typedef struct Simp {
     NphAllocator *alloc;
     LodMesh *mesh;
     const u8 *locked;
-    // Local wedges (their first vertex) and classes (their mesh class).
+    const NphVec2 *uvs;     // per vertex of the mesh (NULL: no vertex is added)
+    const NphVec3 *normals; // per vertex of the mesh, or NULL
+    b32 borders;
+    // Local wedges (their first vertex, or LOD_ADDED_BASE and their place in
+    // `added`) and classes (their mesh class).
     NphArrayU32 wedge_vertex;
     NphArrayU32 wedge_class; // local class
+    NPH_ARRAY(NphVec2) wedge_uv;
+    NphRenderLodAddedVertexArray added;
     NphArrayU32 class_mesh;  // mesh class
     NphVec3 *class_position; // relative to the mesh's origin
     u8 *kind;
@@ -658,8 +735,9 @@ static NphResult build_topology(Simp *s)
                 wedges += 1U;
             }
         }
-        ClassKind kind = KIND_COMPLEX;
+        ClassKind kind = KIND_TANGLED;
         if (complex == 0U) {
+            kind = KIND_COMPLEX;
             if (open == 0U && seam == 0U && wedges == 1U) {
                 kind = KIND_MANIFOLD;
             } else if (open == 2U && seam == 0U && wedges == 1U) {
@@ -686,6 +764,42 @@ static bool tri_has_class(const Simp *s, u32 t, u32 c)
     return tri_class(s, t, 0U) == c || tri_class(s, t, 1U) == c || tri_class(s, t, 2U) == c;
 }
 
+// The shading normal of local wedge `w`: an added vertex keeps its source's.
+static NphVec3 wedge_normal(const Simp *s, u32 w)
+{
+    const u32 v = s->wedge_vertex.data[w];
+    return s->normals[v >= LOD_ADDED_BASE ? s->added.data[v - LOD_ADDED_BASE].source : v];
+}
+
+// What a triangle of corners `q`, its normals `n`, shows at its point `at`, against `was`,
+// over the triangle's size: a change of shading in the units of the mesh.
+static f32 shown_change(const NphVec3 q[3], const NphVec3 n[3], NphVec3 at, NphVec3 was)
+{
+    const NphVec3 e0 = nph_vec3_sub(q[1], q[0]);
+    const NphVec3 e1 = nph_vec3_sub(q[2], q[0]);
+    const NphVec3 e2 = nph_vec3_sub(at, q[0]);
+    const f32 d00 = nph_vec3_dot(e0, e0);
+    const f32 d01 = nph_vec3_dot(e0, e1);
+    const f32 d11 = nph_vec3_dot(e1, e1);
+    const f32 d20 = nph_vec3_dot(e2, e0);
+    const f32 d21 = nph_vec3_dot(e2, e1);
+    const f32 denom = d00 * d11 - d01 * d01;
+    if (!(denom > 0.0F)) {
+        return 0.0F;
+    }
+    const f32 b1 = (d11 * d20 - d01 * d21) / denom;
+    const f32 b2 = (d00 * d21 - d01 * d20) / denom;
+    const f32 b0 = 1.0F - b1 - b2;
+    const NphVec3 mixed = nph_vec3_add(
+        nph_vec3_add(nph_vec3_scale(n[0], b0), nph_vec3_scale(n[1], b1)), nph_vec3_scale(n[2], b2));
+    const f32 chord = nph_vec3_distance(nph_vec3_normalize_or_zero(mixed), was);
+    if (chord < NORMAL_EPSILON) {
+        return 0.0F;
+    }
+    const f32 d22 = nph_vec3_length_sq(nph_vec3_sub(q[2], q[1]));
+    return chord * nph_f32_sqrt(nph_f32_max(nph_f32_max(d00, d11), d22));
+}
+
 // Whether `from` may collapse onto `to` (their edge run `r`), its cost, and
 // the wedges' remap. False where the collapse breaks a rule.
 static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
@@ -693,10 +807,12 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
     // Compared as the bytes they are stored in (a ClassKind and an EdgeKind).
     const u32 kind = s->kind[from];
     const u32 edge = s->run_kind[r];
+    const bool adding = kind == (u32)KIND_COMPLEX && s->uvs != NULL;
     if ((kind == (u32)KIND_MANIFOLD && edge != (u32)EDGE_SMOOTH) ||
         (kind == (u32)KIND_BORDER && edge != (u32)EDGE_OPEN) ||
-        (kind == (u32)KIND_SEAM && edge != (u32)EDGE_SEAM) || kind == (u32)KIND_COMPLEX ||
-        kind == (u32)KIND_LOCKED) {
+        (kind == (u32)KIND_SEAM && edge != (u32)EDGE_SEAM) ||
+        (kind == (u32)KIND_COMPLEX && (!adding || edge == (u32)EDGE_COMPLEX)) ||
+        kind == (u32)KIND_LOCKED || kind == (u32)KIND_TANGLED) {
         return false;
     }
     memset(out, 0, sizeof *out);
@@ -728,7 +844,11 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
         for (u32 m = 0; m < out->remap_count; ++m) {
             if (out->remap_wedge[m] == wf && out->remap_submesh[m] == s->sub[t]) {
                 if (out->remap_to[m] != wt) {
-                    return false; // one region of `from` meeting two of `to`
+                    // One region of `from` meeting two of `to`.
+                    if (!adding) {
+                        return false;
+                    }
+                    out->remap_to[m] = REMAP_ADD;
                 }
                 known = true;
             }
@@ -771,6 +891,14 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
     // turns over, and none becomes one the edge's opposite corners already
     // close (a tetrahedron's collapse).
     const NphVec3 p_to = class_pos(s, to);
+    const NphVec3 p_from = class_pos(s, from);
+    // Per surface of `from`: what its nearest triangle shows where `from` stood.
+    f32 shown_distance[MAX_REMAP];
+    f32 shown[MAX_REMAP];
+    for (u32 m = 0; m < MAX_REMAP; ++m) {
+        shown_distance[m] = NPH_F32_MAX;
+        shown[m] = 0.0F;
+    }
     for (u32 i = s->around_start[from]; i < s->around_start[from + 1U]; ++i) {
         const u32 t = s->around[i];
         if (tri_has_class(s, t, to)) {
@@ -794,7 +922,14 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
             mapped = mapped || (out->remap_wedge[m] == wf && out->remap_submesh[m] == s->sub[t]);
         }
         if (!mapped) {
-            return false;
+            // A surface the edge's triangles do not reach.
+            if (!adding || out->remap_count == MAX_REMAP) {
+                return false;
+            }
+            out->remap_wedge[out->remap_count] = wf;
+            out->remap_submesh[out->remap_count] = s->sub[t];
+            out->remap_to[out->remap_count] = REMAP_ADD;
+            out->remap_count += 1U;
         }
         if (opposites == 2U && ((others[0] == opposite[0] && others[1] == opposite[1]) ||
                                 (others[0] == opposite[1] && others[1] == opposite[0]))) {
@@ -835,17 +970,125 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
                 return false;
             }
         }
+        if (s->normals != NULL) {
+            const NphVec3 at = nph_closest_point_on_triangle(q0, q1, q2, p_from);
+            const f32 distance = nph_vec3_distance(at, p_from);
+            for (u32 m = 0; m < out->remap_count; ++m) {
+                if (out->remap_wedge[m] == wf && out->remap_submesh[m] == s->sub[t] &&
+                    distance < shown_distance[m]) {
+                    const NphVec3 was = wedge_normal(s, wf);
+                    const NphVec3 corners[3] = {q0, q1, q2};
+                    NphVec3 n[3];
+                    for (u32 k = 0; k < 3U; ++k) {
+                        n[k] = k != corner ? wedge_normal(s, s->tri[(u64)t * 3U + k])
+                               : out->remap_to[m] != REMAP_ADD ? wedge_normal(s, out->remap_to[m])
+                                                               : was;
+                    }
+                    shown_distance[m] = distance;
+                    shown[m] = shown_change(corners, n, at, was);
+                }
+            }
+        }
     }
     LodQuadric q = s->mesh->quadrics[s->class_mesh.data[from]];
     lod_quadric_add(&q, &s->mesh->quadrics[s->class_mesh.data[to]]);
-    out->cost = lod_quadric_error(&q, p_to);
+    // Each seam or open edge of `from` comes to run from `to`: `from` stood this far
+    // from where it now runs (the file's comment).
+    f32 step = 0.0F;
+    bool bordered = false;
+    for (u32 i = s->edge_start[from]; i < s->edge_start[from + 1U] && s->borders != 0; ++i) {
+        const u32 run = s->class_edges.data[i];
+        const u32 other = run_other(s, run, from);
+        if ((s->run_kind[run] == (u8)EDGE_SEAM || s->run_kind[run] == (u8)EDGE_OPEN) &&
+            other != to) {
+            const NphVec3 at =
+                nph_closest_point_on_segment(p_to, class_pos(s, other), p_from, NULL);
+            step = nph_f32_max(step, nph_vec3_distance(p_from, at));
+            bordered = true;
+        }
+    }
+    for (u32 m = 0; m < out->remap_count; ++m) {
+        step = nph_f32_max(step, NORMAL_WEIGHT * shown[m]);
+    }
+    out->moved = bordered || step > 0.0F ? s->mesh->moved[s->class_mesh.data[from]] + step : 0.0F;
+    out->cost = nph_f64_max(lod_quadric_error(&q, p_to), (f64)out->moved * (f64)out->moved);
     return true;
 }
 
-// Makes collapse `c`: the edge's triangles go, the others take `to`'s
-// wedges, and `to`'s class takes `from`'s quadric.
-static void apply(Simp *s, const Collapse *c)
+// The texture coordinates a surface of class `from` (its wedge, in its submesh)
+// has where class `to` stands: its largest triangle there, carried along its
+// plane. The wedge's own where no triangle holds them.
+static NphVec2 carried_uv(const Simp *s, u32 from, u32 to, u32 wedge, u32 submesh)
 {
+    const NphVec3 q = class_pos(s, to);
+    NphVec2 out = s->wedge_uv.data[wedge];
+    f32 largest = 0.0F;
+    for (u32 i = s->around_start[from]; i < s->around_start[from + 1U]; ++i) {
+        const u32 t = s->around[i];
+        if (s->dead[t] != 0U || s->sub[t] != submesh || tri_has_class(s, t, to)) {
+            continue;
+        }
+        for (u32 k = 0; k < 3U; ++k) {
+            if (s->tri[(u64)t * 3U + k] != wedge) {
+                continue;
+            }
+            const u32 wb = s->tri[(u64)t * 3U + (k + 1U) % 3U];
+            const u32 wc = s->tri[(u64)t * 3U + (k + 2U) % 3U];
+            const NphVec3 pa = class_pos(s, s->wedge_class.data[wedge]);
+            const NphVec3 e1 = nph_vec3_sub(class_pos(s, s->wedge_class.data[wb]), pa);
+            const NphVec3 e2 = nph_vec3_sub(class_pos(s, s->wedge_class.data[wc]), pa);
+            const NphVec3 n = nph_vec3_cross(e1, e2);
+            const f32 area = nph_vec3_dot(n, n);
+            if (!(area > largest)) {
+                break;
+            }
+            const NphVec3 d = nph_vec3_sub(q, pa);
+            const f32 a = nph_vec3_dot(nph_vec3_cross(d, e2), n) / area;
+            const f32 b = nph_vec3_dot(nph_vec3_cross(e1, d), n) / area;
+            if (nph_f32_abs(a) <= UV_REACH && nph_f32_abs(b) <= UV_REACH) {
+                const NphVec2 own = s->wedge_uv.data[wedge];
+                const NphVec2 ub = s->wedge_uv.data[wb];
+                const NphVec2 uc = s->wedge_uv.data[wc];
+                out = nph_vec2(own.x + a * (ub.x - own.x) + b * (uc.x - own.x),
+                               own.y + a * (ub.y - own.y) + b * (uc.y - own.y));
+                largest = area;
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+// A wedge added to class `to` for a surface of `from`.
+static NphResult add_wedge(Simp *s, u32 from, u32 to, u32 wedge, u32 submesh, u32 *out)
+{
+    const NphVec2 uv = carried_uv(s, from, to, wedge, submesh);
+    const u32 v = s->wedge_vertex.data[wedge];
+    NphRenderLodAddedVertex a;
+    a.source = v >= LOD_ADDED_BASE ? s->added.data[v - LOD_ADDED_BASE].source : v;
+    a.position = s->mesh->class_vertex[s->class_mesh.data[to]];
+    a.uv = uv;
+    const u32 k = s->added.len;
+    NPH_TRY(NPH_ARRAY_PUSH(&s->added, a));
+    *out = s->wedge_vertex.len;
+    const u32 added_vertex = LOD_ADDED_BASE + k;
+    NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_vertex, added_vertex));
+    NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, to));
+    return NPH_ARRAY_PUSH(&s->wedge_uv, uv);
+}
+
+// Makes collapse `in`: the edge's triangles go, the others take `to`'s
+// wedges, and `to`'s class takes `from`'s quadric.
+static NphResult apply(Simp *s, const Collapse *in)
+{
+    Collapse resolved = *in;
+    const Collapse *c = &resolved;
+    for (u32 m = 0; m < resolved.remap_count; ++m) {
+        if (resolved.remap_to[m] == REMAP_ADD) {
+            NPH_TRY(add_wedge(s, resolved.from, resolved.to, resolved.remap_wedge[m],
+                              resolved.remap_submesh[m], &resolved.remap_to[m]));
+        }
+    }
     for (u32 i = s->around_start[c->from]; i < s->around_start[c->from + 1U]; ++i) {
         const u32 t = s->around[i];
         if (s->dead[t] != 0U) {
@@ -873,6 +1116,8 @@ static void apply(Simp *s, const Collapse *c)
                     &s->mesh->quadrics[s->class_mesh.data[c->from]]);
     s->mesh->normals[s->class_mesh.data[c->to]] = nph_vec3_add(
         s->mesh->normals[s->class_mesh.data[c->to]], s->mesh->normals[s->class_mesh.data[c->from]]);
+    s->mesh->moved[s->class_mesh.data[c->to]] =
+        nph_f32_max(s->mesh->moved[s->class_mesh.data[c->to]], c->moved);
     // `from`'s list after `to`'s.
     LodMesh *m = s->mesh;
     const u32 gt = s->class_mesh.data[c->to];
@@ -887,6 +1132,7 @@ static void apply(Simp *s, const Collapse *c)
     for (u32 i = s->edge_start[c->from]; i < s->edge_start[c->from + 1U]; ++i) {
         s->touched[run_other(s, s->class_edges.data[i], c->from)] = 1U;
     }
+    return NPH_RESULT_OK;
 }
 
 static void simp_free(Simp *s)
@@ -929,6 +1175,8 @@ static void simp_free(Simp *s)
     }
     NPH_ARRAY_FREE(&s->wedge_vertex);
     NPH_ARRAY_FREE(&s->wedge_class);
+    NPH_ARRAY_FREE(&s->wedge_uv);
+    NPH_ARRAY_FREE(&s->added);
     NPH_ARRAY_FREE(&s->class_mesh);
     NPH_ARRAY_FREE(&s->edges);
     NPH_ARRAY_FREE(&s->class_edges);
@@ -967,6 +1215,8 @@ static NphResult simp_number(Simp *s, const LodSimplifyInput *in, NphHashMap *we
         NPH_TRY(nph_hashmap_insert_u64(wedges, v, &local_wedge));
         NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_vertex, v));
         NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, local_class));
+        const NphVec2 uv = s->uvs != NULL ? s->uvs[v] : nph_vec2(0.0F, 0.0F);
+        NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_uv, uv));
         s->tri[i] = local_wedge;
     }
     return NPH_RESULT_OK;
@@ -1035,25 +1285,69 @@ static NphResult simp_init(Simp *s, const LodSimplifyInput *in)
     return NPH_RESULT_OK;
 }
 
+static NphResult simp_begin(Simp *s, const LodSimplifyInput *in, const NphVec2 *uvs)
+{
+    memset(s, 0, sizeof *s);
+    s->alloc = in->scratch;
+    s->mesh = in->mesh;
+    s->locked = in->locked;
+    s->uvs = uvs;
+    s->normals = in->normals;
+    s->borders = in->borders;
+    s->sub = in->submeshes;
+    NPH_ARRAY_INIT(&s->wedge_vertex, s->alloc);
+    NPH_ARRAY_INIT(&s->wedge_class, s->alloc);
+    NPH_ARRAY_INIT(&s->wedge_uv, s->alloc);
+    NPH_ARRAY_INIT(&s->added, s->alloc);
+    NPH_ARRAY_INIT(&s->class_mesh, s->alloc);
+    NPH_ARRAY_INIT(&s->edges, s->alloc);
+    NPH_ARRAY_INIT(&s->class_edges, s->alloc);
+    NPH_ARRAY_INIT(&s->run_start, s->alloc);
+    NPH_ARRAY_INIT(&s->candidates, s->alloc);
+    return simp_init(s, in);
+}
+
+// Class `c`'s cheapest valid collapse, where it has one.
+static bool cheapest_collapse(Simp *s, u32 c, Collapse *best)
+{
+    bool found = false;
+    for (u32 i = s->edge_start[c]; i < s->edge_start[c + 1U]; ++i) {
+        const u32 run = s->class_edges.data[i];
+        Collapse cand;
+        if (evaluate(s, c, run_other(s, run, c), run, &cand) &&
+            (!found || cand.cost < best->cost || (cand.cost == best->cost && cand.to < best->to))) {
+            *best = cand;
+            found = true;
+        }
+    }
+    return found;
+}
+
+NphResult lod_simplify_costs(const LodSimplifyInput *in, LodCostArray *costs)
+{
+    NPH_ASSERT(in != NULL && in->mesh != NULL && costs != NULL);
+    Simp s;
+    NphResult r = simp_begin(&s, in, in->uvs);
+    if (r == NPH_RESULT_OK) {
+        r = build_topology(&s);
+    }
+    for (u32 c = 0; c < s.class_mesh.len && r == NPH_RESULT_OK; ++c) {
+        Collapse best;
+        if (s.around_start[c] != s.around_start[c + 1U] && cheapest_collapse(&s, c, &best)) {
+            r = NPH_ARRAY_PUSH(costs, best.cost);
+        }
+    }
+    simp_free(&s);
+    return r;
+}
+
 NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_error)
 {
     NPH_ASSERT(in != NULL && in->mesh != NULL && out_triangles != NULL && out_error != NULL);
     *out_triangles = in->triangle_count;
     *out_error = 0.0F;
     Simp s;
-    memset(&s, 0, sizeof s);
-    s.alloc = in->scratch;
-    s.mesh = in->mesh;
-    s.locked = in->locked;
-    s.sub = in->submeshes;
-    NPH_ARRAY_INIT(&s.wedge_vertex, s.alloc);
-    NPH_ARRAY_INIT(&s.wedge_class, s.alloc);
-    NPH_ARRAY_INIT(&s.class_mesh, s.alloc);
-    NPH_ARRAY_INIT(&s.edges, s.alloc);
-    NPH_ARRAY_INIT(&s.class_edges, s.alloc);
-    NPH_ARRAY_INIT(&s.run_start, s.alloc);
-    NPH_ARRAY_INIT(&s.candidates, s.alloc);
-    NphResult r = simp_init(&s, in);
+    NphResult r = simp_begin(&s, in, in->added != NULL ? in->uvs : NULL);
     f64 worst = 0.0;
     u32 collapses = 0U;
     while (r == NPH_RESULT_OK && s.live > in->target_triangles) {
@@ -1068,19 +1362,7 @@ NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_
                 continue; // no live triangle: collapsed or isolated
             }
             Collapse best;
-            memset(&best, 0, sizeof best);
-            bool found = false;
-            for (u32 i = s.edge_start[c]; i < s.edge_start[c + 1U]; ++i) {
-                const u32 run = s.class_edges.data[i];
-                Collapse cand;
-                if (evaluate(&s, c, run_other(&s, run, c), run, &cand) &&
-                    (!found || cand.cost < best.cost ||
-                     (cand.cost == best.cost && cand.to < best.to))) {
-                    best = cand;
-                    found = true;
-                }
-            }
-            if (found) {
+            if (cheapest_collapse(&s, c, &best)) {
                 r = NPH_ARRAY_PUSH(&s.candidates, best);
             }
         }
@@ -1094,8 +1376,9 @@ NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_
         // neighbour's collapse, and the limit keeps a pass from spending an
         // expensive collapse that a later pass would find cheaper.
         const u32 needed = nph_max_u32((s.live - in->target_triangles + 1U) / 2U, 1U);
-        const f64 limit =
-            s.candidates.data[nph_min_u32(needed * PASS_REACH, s.candidates.len) - 1U].cost;
+        const f64 limit = nph_f64_min(
+            s.candidates.data[nph_min_u32(needed * PASS_REACH, s.candidates.len) - 1U].cost,
+            in->cost_limit);
         memset(s.touched, 0, (size_t)s.class_mesh.len);
         u32 made = 0U;
         for (u32 i = 0; i < s.candidates.len && s.live > in->target_triangles; ++i) {
@@ -1106,11 +1389,14 @@ NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_
             if (s.touched[c->from] != 0U || s.touched[c->to] != 0U) {
                 continue;
             }
-            apply(&s, c);
+            r = apply(&s, c);
+            if (r != NPH_RESULT_OK) {
+                break;
+            }
             worst = nph_f64_max(worst, c->cost);
             made += 1U;
         }
-        if (made == 0U) {
+        if (r != NPH_RESULT_OK || made == 0U) {
             break;
         }
         collapses += made;
@@ -1132,21 +1418,44 @@ NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_
             }
         }
     }
+    // The added vertices the live triangles still use, in the order they use them.
+    u32 *added_place = NULL;
+    if (r == NPH_RESULT_OK && s.added.len != 0U) {
+        added_place = NPH_ALLOC_ARRAY(s.alloc, u32, s.added.len);
+        r = added_place != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+        if (r == NPH_RESULT_OK) {
+            memset(added_place, 0xFF, (size_t)s.added.len * sizeof(u32));
+        }
+    }
     if (r == NPH_RESULT_OK) {
         // The live triangles, back in the mesh's vertices.
         u32 n = 0U;
-        for (u32 t = 0; t < s.tri_count; ++t) {
+        for (u32 t = 0; t < s.tri_count && r == NPH_RESULT_OK; ++t) {
             if (s.dead[t] != 0U) {
                 continue;
             }
-            for (u32 k = 0; k < 3U; ++k) {
-                in->indices[(u64)n * 3U + k] = s.wedge_vertex.data[s.tri[(u64)t * 3U + k]];
+            for (u32 k = 0; k < 3U && r == NPH_RESULT_OK; ++k) {
+                u32 v = s.wedge_vertex.data[s.tri[(u64)t * 3U + k]];
+                if (v >= LOD_ADDED_BASE) {
+                    // A vertex added means the table was made (the analyzer cannot tell).
+                    NPH_ASSERT(added_place != NULL);
+                    const u32 at = v - LOD_ADDED_BASE;
+                    if (added_place[at] == NPH_U32_MAX) {
+                        added_place[at] = in->added->len;
+                        r = NPH_ARRAY_PUSH(in->added, s.added.data[at]);
+                    }
+                    v = LOD_ADDED_BASE + added_place[at];
+                }
+                in->indices[(u64)n * 3U + k] = v;
             }
             in->submeshes[n] = in->submeshes[t];
             n += 1U;
         }
         *out_triangles = n;
         *out_error = (f32)nph_f64_sqrt(worst);
+    }
+    if (added_place != NULL) {
+        NPH_FREE_ARRAY(s.alloc, u32, added_place, s.added.len);
     }
     simp_free(&s);
     return r;

@@ -300,12 +300,13 @@ A closed mesh stays closed.
    the quantised attributes, so that vertices at one position whose
    records differ are a seam the levels keep. Every level's clusters are
    written in place of level 0's (level 0's first and unchanged), with the
-   levels' blobs. A mesh whose levels stop at once (one meshlet, or nothing
-   to simplify) is written without them. Each level's groups are built as
-   jobs (docs/render.md "The build at once"). Bistro's 1.75 million
-   triangles in 551 meshes take about a minute; most of its meshes get 3 to
-   8 levels, and flat-shaded ones, whose every vertex is a seam corner, stop
-   early. The open landscape (`benchmarks/scenes/landscape.json`, with voxels)
+   levels' blobs. The vertices the levels add at corners of seams (ADR-0069)
+   are written after the mesh's own: each stands where a vertex stands, with
+   a vertex's attributes and texture coordinates of its own. A mesh whose
+   levels stop at once (one meshlet, or nothing to simplify) is written
+   without them. Each level's groups are built as jobs (docs/render.md "The
+   build at once"). Bistro's 1.75 million triangles in 551 meshes take about a
+   minute; most of its meshes get 3 to 8 levels. The open landscape (`benchmarks/scenes/landscape.json`, with voxels)
    cooks in 6 minutes on fifteen workers, against 20 on one thread: its pine's
    largest mesh (7.0 million triangles) in 58 s, its levels 33 of them, against
    309.

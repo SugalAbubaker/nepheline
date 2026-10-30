@@ -8,6 +8,7 @@
 #include <nepheline/core/array.h>
 #include <nepheline/core/result.h>
 #include <nepheline/math/vec.h>
+#include <nepheline/render/cluster_lod.h>
 
 // A symmetric 4 x 4 quadric (Garland & Heckbert 1997) in double precision,
 // its upper triangle row by row (a00 a01 a02 a03 a11 a12 a13 a22 a23 a33),
@@ -35,6 +36,7 @@ f64 lod_quadric_error(const LodQuadric *q, NphVec3 p);
 typedef struct LodMesh {
     const NphVec3 *positions;
     u32 vertex_count;
+    u32 vertex_capacity; // of class_of and wedge_of: vertices may be added
     u32 class_count;
     NphVec3 origin;
     u32 *class_of;        // per vertex: its class (0 .. class_count - 1)
@@ -51,6 +53,9 @@ typedef struct LodMesh {
     u32 *class_vertex;
     u32 *absorbed_next;
     u32 *absorbed_tail;
+    // Per class: how far collapses have moved the borders it holds (seams, open
+    // edges), added up over them.
+    f32 *moved;
 } LodMesh;
 
 // Welds the mesh and builds its level-0 quadrics: each triangle's plane,
@@ -62,6 +67,14 @@ NPH_MUST_USE NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphV
                                      const void *attribs, u32 attrib_stride, u32 vertex_count,
                                      const u32 *indices, u32 index_count);
 void lod_mesh_free(LodMesh *m, NphAllocator *alloc);
+// A vertex added to class `mesh_class`, a wedge of its own. The caller keeps
+// `positions` in step.
+NPH_MUST_USE NphResult lod_mesh_add_vertex(LodMesh *m, NphAllocator *alloc, u32 mesh_class);
+
+// A group's added vertices, while its groups are built at once: its results'
+// indices name them from here up, in the order of LodSimplifyInput.added, until
+// the group joins the level's results (cluster_lod.c) and they get their places.
+#define LOD_ADDED_BASE 0x80000000U
 
 // One group's simplification: its triangles (wedge indices, rewritten in
 // place and compacted to the first `*out_triangles`), each one's submesh,
@@ -76,8 +89,19 @@ typedef struct LodSimplifyInput {
     u32 triangle_count;
     const u8 *locked;
     u32 target_triangles;
+    // Texture coordinates per vertex (NULL: corners of more than two seams or
+    // open edges never move) and what takes the vertices added at the classes
+    // such corners collapse onto (NphRenderClusterLods.added; their indices
+    // LOD_ADDED_BASE up).
+    const NphVec2 *uvs;
+    const NphVec3 *normals; // per vertex of the mesh, or NULL (NphRenderClusterLodInput's)
+    NphRenderLodAddedVertexArray *added;
     NphArrayU32 *orphans;  // NULL, or takes the classes left without a triangle
     NphAllocator *scratch; // NPH_THREADSAFE where groups are simplified at once
+    // No collapse costs more (a squared error): a group whose others cost more stops
+    // short of its target. NPH_F64_MAX: none.
+    f64 cost_limit;
+    b32 borders; // a collapse costs how far it moves the seams and open edges it moves
 } LodSimplifyInput;
 
 // Collapses edges, cheapest first, until the group has at most
@@ -90,6 +114,12 @@ typedef struct LodSimplifyInput {
 // in them) are appended to `orphans`. The quadrics, normals and lists of the
 // classes collapsed are added to those they collapsed into.
 NPH_MUST_USE NphResult lod_simplify(const LodSimplifyInput *in, u32 *out_triangles, f32 *out_error);
+
+typedef NPH_ARRAY(f64) LodCostArray;
+
+// What each class's cheapest collapse would cost as the group stands, onto `costs`
+// (a squared error each). `in` is lod_simplify's, read alone: nothing is simplified.
+NPH_MUST_USE NphResult lod_simplify_costs(const LodSimplifyInput *in, LodCostArray *costs);
 
 // ---------------------------------------------------------------------------
 // Voxels (cluster_voxel.c; render/voxel.h; ADR-0061)

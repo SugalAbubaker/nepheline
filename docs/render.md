@@ -737,22 +737,71 @@ Triangulation (Cignoni et al., IEEE Visualization 2005) as Nanite does it
 (Karis, Stubbe & Thomas, SIGGRAPH 2021): the level's clusters are grouped
 by eight neighbours (grown from Morton-ordered seeds by the vertices they
 share); the vertices a group shares with another are locked; the group is
-simplified to half its triangles; the result is split into clusters again.
+simplified to half its triangles, as far as the level's error allows (below);
+the result is split into clusters again.
 Because a group's boundary does not move, the clusters a group made can
 stand in for its own wherever its error is small enough, with no crack
 where the levels meet. The simplifier (`cluster_simplify.c`) collapses
 half-edges, each moving a vertex onto a neighbour, ranked by quadric error
 (Garland & Heckbert, SIGGRAPH 1997): every level indexes the mesh's own
-vertices, and no attribute is interpolated. Vertex kinds after
-meshoptimizer's simplifier (Kapoulkine 2017) keep attribute seams and
-material borders in shape: an interior vertex moves onto any neighbour, one
-on an open border or a seam only along it, a corner of seams or a vertex of
-a non-manifold edge never; the link condition keeps the topology, and no
-collapse may turn a triangle over, fold it to a line, or face it away from
-the level-0 normals merged into its corners.
+vertices and those it adds (below), and nothing else is interpolated. Vertex
+kinds after meshoptimizer's simplifier (Kapoulkine 2017) keep attribute seams
+and material borders in shape: an interior vertex moves onto any neighbour, one
+on an open border or a seam only along it, a vertex of a non-manifold edge
+never; the link condition keeps the topology, and no collapse may turn a
+triangle over, fold it to a line, or face it away from the level-0 normals
+merged into its corners.
 
-A group's error, in mesh units, is the largest of its collapses' quadric
-error, two measured distances, and the errors of the groups that made its
+**Corners** of more than two seams or open edges are most of a flat-shaded
+building's vertices (69% of `Building_Generic`'s in the city), and at first they
+never moved, so such a mesh stalled within a level or two. With the input's
+texture coordinates (`NphRenderClusterLodInput.uvs`; the cooker gives them) a
+corner collapses along any edge. Its surfaces the edge's triangles reach go to
+their wedges at the neighbour, as a seam's do. A surface they do not reach has
+no vertex at the neighbour, so it takes one added there
+(`NphRenderClusterLods.added`, the mesh's vertices continuing): the surface's own
+attributes, so that its normal and with it the hard edge stay as they were, and
+its texture coordinates carried from its largest triangle at the corner along
+that triangle's plane, so that its texture does not smear (ADR-0069).
+
+**Borders.** A collapse also costs how far it moves the borders of the class that
+goes: each of its seams and open edges comes to run from the neighbour, and the
+class stood some way from where that edge now runs. The quadrics do not see this
+where two surfaces that look different lie in one plane (a window in a wall: a
+corner that goes turns its rectangle into a triangle), and the measured distances
+below do not either, since a point's nearest surface may be the other one. The
+steps add up per class (`LodMesh.moved`), because a corner can walk along its edge
+in steps that each cost little. Without this the city's facades tore while its frame
+times looked well (ADR-0069).
+
+**Shading.** Positions alone take wrinkled cloth for a flat sheet. With the input's
+normals (`NphRenderClusterLodInput.normals`; the cooker gives them) a collapse also
+costs what its triangles now show where the vertex stood: the normal the nearest
+staying triangle interpolates there, against the vertex's own, times that triangle's
+longest edge and a quarter (Hoppe, IEEE Visualization 1999, counts attributes in the
+error likewise). A normal that varies evenly across a surface comes back from the
+interpolation, so a true curve pays little and a wrinkle its full size. Against
+Bistro's level 0, pixels off by more than 32 of 255 went from 0.25 to 0.04% in the
+street view and from 0.44 to 0.05% on the terrace, with fewer triangles (ADR-0069).
+
+**A level's error.** A group's error is its worst collapse's, and all its clusters
+draw until the view allows that error, so a collapse much dearer than the others,
+made to reach the group's target, keeps its cheap ones from being drawn for a long
+way: a tree's bark, whose groups hold its big cards, stayed at 80% of its triangles
+out to half a metre of error. So a level's collapses go no further than twice the error of
+the median collapse its groups could make as they stand, and no less far than the
+level before's (`level_error_limit`, reading the costs group by group, at once where
+there are jobs). A group this stops keeps more than half its triangles, and a later
+level, whose error is larger, goes on with them. With the corners and the costs above,
+the city's views draw 3 to 18% fewer triangles than before, and each is faster.
+
+A mesh that may voxelize (`NphRenderClusterLodInput.voxels`) has none of the corners,
+borders, shading, or level error: a group's collapses stalling, and their error against
+the voxels', is what makes it voxels (ADR-0061), so what is measured against that stays
+as it was, to be taken up when the landscape's raster is (ADR-0069).
+
+A group's error, in mesh units, is the largest of its collapses' costs, two
+measured distances, and the errors of the groups that made its
 clusters: every level-0 point against the level's whole result (through the
 class it merged into; a point by a locked border may lie under the
 neighbour's triangles), and the result's triangles' centroids and edge
@@ -766,10 +815,9 @@ surface, past level 0's own chords
 up and each group's sphere holds those of the groups that made its
 clusters, so one threshold cuts the levels in one consistent place. The
 levels stop at one cluster, or when a level takes off less than a tenth of
-the triangles (a flat-shaded mesh, whose every vertex is a seam corner,
-stops at once). The coarsest level's clusters are grouped as any level's,
+the triangles. The coarsest level's clusters are grouped as any level's,
 into root groups whose error is the largest float: so a mesh that stops
-early with hundreds of coarse clusters (foliage, seams everywhere) has them
+early with hundreds of coarse clusters (foliage, non-manifold sheets) has them
 culled and handed on a few at a time.
 
 **The build at once.** A level's groups are built at once, as jobs, where
@@ -2510,7 +2558,11 @@ and synchronisation-validation gate:
   has one maker and one consumer; errors never fall and spheres hold their
   parts exactly; a coarse level stays within its error of the true
   surface; every cut of a closed mesh is closed; seams and material
-  borders keep their shape; the build is deterministic, the same built on
+  borders keep their shape; a window in a wall stands within each level's
+  error of where it stood, a corner's steps along its edge add up, a wrinkle in
+  flat cloth counts and a true curve's normals hardly do, and a
+  level leaves collapses far dearer than the rest to later levels; the build
+  is deterministic, the same built on
   jobs (`test_voxel.c`), and degenerate, scattered, small, and bad input is
   handled. Cell proxies (`test_cell_proxy.c`, on the CPU): a proxy's
   records are a voxel-only mesh's levels; what it stops is what its

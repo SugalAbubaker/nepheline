@@ -360,6 +360,51 @@ void cook_proxy_source_free(CookProxySource *s)
 // (`lods`, or level 0's `meshlets` under one root group where it has none),
 // the vertices and corners of the clusters consumed above `min_error`,
 // those clusters' vertices renumbered, the submeshes' slots, the sphere.
+// The vertices the levels added, after the mesh's in the three arrays, which
+// grow: each stands where another stands and has another's attributes, but for
+// its texture coordinates. Level 0's bounds hold them: they stand where vertices
+// already do.
+static NphResult append_added_vertices(NphAllocator *alloc, const NphRenderClusterLods *lods,
+                                       NphVec3 **positions, NphMeshPosition **posn,
+                                       NphMeshAttrib **attr, u32 *vertices_held)
+{
+    const u32 old_count = *vertices_held;
+    const u32 count = old_count + lods->added.len;
+    NphVec3 *new_positions = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(count, 1U));
+    NphMeshPosition *new_posn = NPH_ALLOC_ARRAY(alloc, NphMeshPosition, nph_max_u32(count, 1U));
+    NphMeshAttrib *new_attr = NPH_ALLOC_ARRAY(alloc, NphMeshAttrib, nph_max_u32(count, 1U));
+    if (new_positions == NULL || new_posn == NULL || new_attr == NULL) {
+        if (new_positions != NULL) {
+            NPH_FREE_ARRAY(alloc, NphVec3, new_positions, nph_max_u32(count, 1U));
+        }
+        if (new_posn != NULL) {
+            NPH_FREE_ARRAY(alloc, NphMeshPosition, new_posn, nph_max_u32(count, 1U));
+        }
+        if (new_attr != NULL) {
+            NPH_FREE_ARRAY(alloc, NphMeshAttrib, new_attr, nph_max_u32(count, 1U));
+        }
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    memcpy(new_positions, *positions, (size_t)old_count * sizeof *new_positions);
+    memcpy(new_posn, *posn, (size_t)old_count * sizeof *new_posn);
+    memcpy(new_attr, *attr, (size_t)old_count * sizeof *new_attr);
+    for (u32 i = 0; i < lods->added.len; ++i) {
+        const NphRenderLodAddedVertex *a = &lods->added.data[i];
+        new_positions[old_count + i] = new_positions[a->position];
+        new_posn[old_count + i] = new_posn[a->position];
+        new_attr[old_count + i] = new_attr[a->source];
+        new_attr[old_count + i].uv0 = nph_pack_f16x2(a->uv);
+    }
+    NPH_FREE_ARRAY(alloc, NphVec3, *positions, nph_max_u32(old_count, 1U));
+    NPH_FREE_ARRAY(alloc, NphMeshPosition, *posn, nph_max_u32(old_count, 1U));
+    NPH_FREE_ARRAY(alloc, NphMeshAttrib, *attr, nph_max_u32(old_count, 1U));
+    *positions = new_positions;
+    *posn = new_posn;
+    *attr = new_attr;
+    *vertices_held = count;
+    return NPH_RESULT_OK;
+}
+
 static NphResult keep_proxy_source(const CookMesh *mesh, const CookMeshlets *meshlets,
                                    const NphMeshletBounds *mbounds,
                                    const NphRenderClusterLods *lods, const NphVec3 *positions,
@@ -614,18 +659,25 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     NphRenderClusterLods lods;
     nph_render_cluster_lods_init(&lods, alloc);
     bool with_lods = false;
+    // The vertices the arrays hold: the mesh's, then those its levels added.
+    u32 vertices_held = vn;
     if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
         const u64 lods_start = nph_time_now_ns();
         r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, jobs,
                                  &lods);
         with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
+        if (r == NPH_RESULT_OK && lods.added.len != 0U) {
+            r = append_added_vertices(alloc, &lods, &positions, &posn, &attr, &vertices_held);
+            h.vertex_count = vertices_held;
+        }
         if (stats != NULL) {
             stats->lods_ns = nph_time_now_ns() - lods_start;
+            stats->lod_added_vertices = lods.added.len;
         }
     }
     if (r == NPH_RESULT_OK && proxy != NULL) {
         r = keep_proxy_source(mesh, meshlets, mbounds, with_lods ? &lods : NULL, positions, attr,
-                              vn, h.sphere, min_error, proxy);
+                              vertices_held, h.sphere, min_error, proxy);
     }
     // The voxels compact, as the renderer draws them (render/voxel.h "The
     // compact form"; ADR-0063): each voxel cluster's triangle_offset then
@@ -683,11 +735,11 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_POSITIONS, 0U, posn,
-                                      (u64)vn * sizeof *posn, NPH_ASSET_CODEC_LZ, 0U);
+                                      (u64)vertices_held * sizeof *posn, NPH_ASSET_CODEC_LZ, 0U);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_ATTRIBS, 0U, attr,
-                                      (u64)vn * sizeof *attr, NPH_ASSET_CODEC_LZ, 0U);
+                                      (u64)vertices_held * sizeof *attr, NPH_ASSET_CODEC_LZ, 0U);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_INDICES, 0U, mesh->indices.data,
@@ -764,13 +816,13 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     nph_render_packed_voxels_free(&packed);
     nph_render_cluster_lods_free(&lods);
     if (positions != NULL) {
-        NPH_FREE_ARRAY(alloc, NphVec3, positions, nph_max_u32(vn, 1U));
+        NPH_FREE_ARRAY(alloc, NphVec3, positions, nph_max_u32(vertices_held, 1U));
     }
     if (posn != NULL) {
-        NPH_FREE_ARRAY(alloc, NphMeshPosition, posn, nph_max_u32(vn, 1U));
+        NPH_FREE_ARRAY(alloc, NphMeshPosition, posn, nph_max_u32(vertices_held, 1U));
     }
     if (attr != NULL) {
-        NPH_FREE_ARRAY(alloc, NphMeshAttrib, attr, nph_max_u32(vn, 1U));
+        NPH_FREE_ARRAY(alloc, NphMeshAttrib, attr, nph_max_u32(vertices_held, 1U));
     }
     if (subs != NULL) {
         NPH_FREE_ARRAY(alloc, NphSubmesh, subs, nph_max_u32(sn, 1U));

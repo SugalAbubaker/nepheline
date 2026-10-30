@@ -78,6 +78,7 @@ void nph_render_cluster_lods_init(NphRenderClusterLods *l, NphAllocator *alloc)
     NPH_ARRAY_INIT(&l->nodes, alloc);
     NPH_ARRAY_INIT(&l->bricks, alloc);
     NPH_ARRAY_INIT(&l->voxels, alloc);
+    NPH_ARRAY_INIT(&l->added, alloc);
 }
 
 void nph_render_cluster_lods_free(NphRenderClusterLods *l)
@@ -92,6 +93,7 @@ void nph_render_cluster_lods_free(NphRenderClusterLods *l)
     NPH_ARRAY_FREE(&l->nodes);
     NPH_ARRAY_FREE(&l->bricks);
     NPH_ARRAY_FREE(&l->voxels);
+    NPH_ARRAY_FREE(&l->added);
 }
 
 f32 nph_render_lod_projected_error(NphVec3 center, f32 radius, f32 error, f32 scale, NphVec3 camera,
@@ -367,6 +369,8 @@ typedef struct Build {
     // and that error (its maker's; level 0: its bounds, 0).
     NPH_ARRAY(NphSphere) own_sphere;
     NphArrayF32 own_error;
+    f64 level_cost_limit; // the level's error, squared: no collapse costs more
+    f64 level_error;      // the error before it, which errors do not fall below
     // Per class: the group of the level that last took it, and whether two
     // groups share it (scratch, NPH_U32_MAX / 0 between levels).
     u32 *class_group;
@@ -384,6 +388,14 @@ typedef struct Build {
     NphArrayU32 source_count;
     LodVoxelSourceArray sources;
     LodVoxelSourceArray next_sources;
+    // With the input's texture coordinates: the vertices' positions and texture
+    // coordinates, the added ones after the input's. `mesh.positions` and `uvs`
+    // read them, and stay put while a level's groups are built.
+    NPH_ARRAY(NphVec3) grown_positions;
+    NPH_ARRAY(NphVec2) grown_uvs;
+    NPH_ARRAY(NphVec3) grown_normals;
+    const NphVec3 *normals; // per vertex, those added too, or NULL
+    const NphVec2 *uvs;
 } Build;
 
 // What one group of a level makes, in arrays of its own (offsets into
@@ -398,9 +410,10 @@ typedef struct GroupOut {
     NphArrayF32 cell_of;       // per voxel cluster made: its cell
     NphArrayU32 source_start;  // per voxel cluster made: its run of `sources`
     NphArrayU32 source_count;
-    LodVoxelSourceArray sources; // the triangles its voxel clusters were made from
-    NphArrayU32 orphans;         // the classes its simplification left without a triangle
-    u64 before;                  // the primitives (triangles and voxels) it took and made
+    LodVoxelSourceArray sources;        // the triangles its voxel clusters were made from
+    NphArrayU32 orphans;                // the classes its simplification left without a triangle
+    NphRenderLodAddedVertexArray added; // its added vertices (LOD_ADDED_BASE up, in `part`)
+    u64 before;                         // the primitives (triangles and voxels) it took and made
     u64 after;
     bool voxels;  // it made voxels: its error is its cell's, not measured
     bool changed; // its triangles became voxels
@@ -416,6 +429,7 @@ static void group_out_init(GroupOut *o, NphAllocator *a)
     NPH_ARRAY_INIT(&o->source_count, a);
     NPH_ARRAY_INIT(&o->sources, a);
     NPH_ARRAY_INIT(&o->orphans, a);
+    NPH_ARRAY_INIT(&o->added, a);
 }
 
 static void group_out_free(GroupOut *o)
@@ -426,6 +440,7 @@ static void group_out_free(GroupOut *o)
     NPH_ARRAY_FREE(&o->source_count);
     NPH_ARRAY_FREE(&o->sources);
     NPH_ARRAY_FREE(&o->orphans);
+    NPH_ARRAY_FREE(&o->added);
 }
 
 // fn over [0, count) in pieces of `batch`, as jobs on `jobs` where given
@@ -720,6 +735,12 @@ static int compare_subtri(const void *x, const void *y)
 
 // Splits `tris` triangles (mesh vertices, a submesh each) into clusters of
 // level `level` made by group `group`, appended to the output.
+// Where a vertex of a group's results stands.
+static NphVec3 group_vertex_position(const Build *b, const GroupOut *o, u32 v)
+{
+    return b->mesh.positions[v >= LOD_ADDED_BASE ? o->added.data[v - LOD_ADDED_BASE].position : v];
+}
+
 static NphResult recluster(const Build *b, GroupOut *o, const u32 *indices, const u32 *submeshes,
                            u32 tris, u32 group, u32 level)
 {
@@ -784,7 +805,8 @@ static NphResult recluster(const Build *b, GroupOut *o, const u32 *indices, cons
                     r = NPH_ARRAY_PUSH(&vertices, v);
                 }
                 if (r == NPH_RESULT_OK) {
-                    r = NPH_ARRAY_PUSH(&positions, b->in->positions[v]);
+                    const NphVec3 at = group_vertex_position(b, o, v);
+                    r = NPH_ARRAY_PUSH(&positions, at);
                 }
             }
             local_indices[(u64)i * 3U + k] = number;
@@ -1007,7 +1029,7 @@ static NphResult grid_build(Build *b, LevelGrid *g, u32 first, u32 end)
             NPH_TRY(NPH_ARRAY_PUSH(&g->owned, c->vertices.data[m->vertex_offset + corner]));
         }
     }
-    g->positions = b->in->positions;
+    g->positions = b->mesh.positions;
     g->tris = g->owned.data;
     g->tri_count = g->owned.len / 3U;
     return grid_index(g, b->alloc);
@@ -1102,10 +1124,10 @@ static f32 class_distance(const Build *b, const LevelGrid *g, u32 c, const u32 *
                           bool orphan)
 {
     const LodMesh *m = &b->mesh;
-    const NphVec3 at = b->in->positions[m->class_vertex[c]];
+    const NphVec3 at = m->positions[m->class_vertex[c]];
     f32 worst = 0.0F;
     for (u32 p = c; p != NPH_U32_MAX; p = m->absorbed_next[p]) {
-        const NphVec3 q = b->in->positions[m->class_vertex[p]];
+        const NphVec3 q = m->positions[m->class_vertex[p]];
         f32 seed = orphan ? nph_vec3_distance(q, at) : NPH_F32_MAX;
         for (u32 i = 0; i < count; ++i) {
             seed = nph_f32_min(seed, grid_triangle(g, tris[i], q));
@@ -1678,7 +1700,7 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
     }
     LodVoxelInput vin;
     memset(&vin, 0, sizeof vin);
-    vin.positions = b->in->positions;
+    vin.positions = b->mesh.positions;
     vin.sources = group_sources.data;
     vin.source_count = group_sources.len;
     vin.sampler = b->in->voxels;
@@ -1696,8 +1718,13 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
         si.triangle_count = tris;
         si.locked = b->locked;
         si.target_triangles = (tris + 1U) / 2U;
+        si.uvs = b->uvs;
+        si.normals = b->normals;
+        si.added = &o->added;
         si.orphans = &o->orphans;
         si.scratch = a;
+        si.cost_limit = b->level_cost_limit;
+        si.borders = b->in->voxels == NULL ? 1 : 0;
         r = lod_simplify(&si, &kept, &simplify_error);
         if (r == NPH_RESULT_OK && may_voxelize && tris != 0U) {
             // Voxels where the collapses stall, or where their error
@@ -1761,6 +1788,7 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
         o->voxels = voxels;
         if (voxels) {
             u32 made_voxels = 0U;
+            NPH_ARRAY_CLEAR(&o->added); // for triangles it does not keep
             r = emit_voxels(b, o, &cells, cell, group, level + 1U, group_sources.data,
                             source_cell.data, group_sources.len, &made_voxels);
             o->after = made_voxels;
@@ -1825,6 +1853,30 @@ static NphResult group_join(Build *b, const u32 *cl, u32 count, const GroupOut *
     }
     NPH_TRY(NPH_ARRAY_PUSH_N(&out->clusters.vertices, made->vertices.data, made->vertices.len));
     NPH_TRY(NPH_ARRAY_PUSH_N(&out->clusters.triangles, made->triangles.data, made->triangles.len));
+    // Its added vertices get their places after the mesh's, in group order.
+    const u32 added_first = b->mesh.vertex_count;
+    for (u32 k = vertex_base; k < out->clusters.vertices.len; ++k) {
+        const u32 v = out->clusters.vertices.data[k];
+        if (v >= LOD_ADDED_BASE) {
+            out->clusters.vertices.data[k] = added_first + (v - LOD_ADDED_BASE);
+        }
+    }
+    for (u32 k = 0; k < o->added.len; ++k) {
+        const NphRenderLodAddedVertex a = o->added.data[k];
+        const NphVec3 at = b->mesh.positions[a.position];
+        NPH_TRY(lod_mesh_add_vertex(&b->mesh, b->alloc, b->mesh.class_of[a.position]));
+        NPH_TRY(NPH_ARRAY_PUSH(&b->grown_positions, at));
+        NPH_TRY(NPH_ARRAY_PUSH(&b->grown_uvs, a.uv));
+        if (b->normals != NULL) {
+            // Read first: the array may move as it grows.
+            const NphVec3 normal = b->grown_normals.data[a.source];
+            NPH_TRY(NPH_ARRAY_PUSH(&b->grown_normals, normal));
+            b->normals = b->grown_normals.data;
+        }
+        b->mesh.positions = b->grown_positions.data;
+        b->uvs = b->grown_uvs.data;
+        NPH_TRY(NPH_ARRAY_PUSH(&out->added, a));
+    }
     for (u32 k = 0; k < o->part.bricks.len; ++k) {
         NphRenderVoxelBrick br = o->part.bricks.data[k];
         br.first_voxel += voxel_base;
@@ -2071,7 +2123,7 @@ static void measure_groups(void *user, u32 begin, u32 end)
                     const u8 corner =
                         out->clusters.triangles.data[((u64)ml->triangle_offset + t) * 3U + k];
                     p[k] =
-                        b->in->positions[out->clusters.vertices.data[ml->vertex_offset + corner]];
+                        b->mesh.positions[out->clusters.vertices.data[ml->vertex_offset + corner]];
                 }
                 const NphVec3 samples[4] = {
                     nph_vec3_scale(nph_vec3_add(p[0], p[1]), 0.5F),
@@ -2090,6 +2142,113 @@ static void measure_groups(void *user, u32 begin, u32 end)
         }
         w->measured[g] = measured;
     }
+}
+
+// A level's error: the groups' collapses go no further than this many times the error
+// of the median collapse they could make as they stand. A group's error is its worst
+// collapse's, and all its clusters draw until the screen allows it, so one collapse
+// a group makes to reach its target, far dearer than the others, keeps its cheap ones
+// from being drawn for a long way (a tree's bark, whose groups hold its cards: ADR-0069).
+// A group stopped by it makes do with less, and the next level, whose error is larger,
+// takes it on. Twice the median lets a surface halve: its collapses' errors double as
+// its triangles halve, and those it has yet to make cost a little more than the median.
+#define LEVEL_ERROR_FACTOR 2.0
+
+typedef struct LevelCostWork {
+    Build *b;
+    const u32 *members;
+    const u32 *start;
+    LodCostArray *costs; // per group
+    NphResult *results;  // per group
+} LevelCostWork;
+
+static void level_costs(void *user, u32 begin, u32 end)
+{
+    const LevelCostWork *w = (const LevelCostWork *)user;
+    Build *b = w->b;
+    NphArrayU32 indices;
+    NPH_ARRAY_INIT(&indices, b->alloc);
+    NphArrayU32 submeshes;
+    NPH_ARRAY_INIT(&submeshes, b->alloc);
+    for (u32 g = begin; g < end; ++g) {
+        NphResult r = gather(b, w->members + w->start[g], w->start[g + 1U] - w->start[g], &indices,
+                             &submeshes);
+        if (r == NPH_RESULT_OK && submeshes.len != 0U) {
+            LodSimplifyInput si;
+            memset(&si, 0, sizeof si);
+            si.mesh = &b->mesh;
+            si.indices = indices.data;
+            si.submeshes = submeshes.data;
+            si.triangle_count = submeshes.len;
+            si.locked = b->locked;
+            si.uvs = b->uvs;
+            si.normals = b->normals;
+            si.scratch = b->alloc;
+            si.borders = 1;
+            r = lod_simplify_costs(&si, &w->costs[g]);
+        }
+        w->results[g] = r;
+    }
+    NPH_ARRAY_FREE(&indices);
+    NPH_ARRAY_FREE(&submeshes);
+}
+
+static int compare_costs(const void *x, const void *y)
+{
+    const f64 a = *(const f64 *)x;
+    const f64 b = *(const f64 *)y;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+// The error of the level whose groups are `start` and `members`. A mesh that may
+// voxelize has none (the build's comment on `voxels`).
+static NphResult level_error_limit(Build *b, const u32 *members, const u32 *start, u32 groups)
+{
+    b->level_cost_limit = NPH_F64_MAX;
+    if (b->in->voxels != NULL || groups == 0U) {
+        return NPH_RESULT_OK;
+    }
+    NphAllocator *a = b->alloc;
+    LodCostArray *costs = NPH_ALLOC_ARRAY(a, LodCostArray, groups);
+    NphResult *results = NPH_ALLOC_ARRAY(a, NphResult, groups);
+    LodCostArray all;
+    NPH_ARRAY_INIT(&all, a);
+    NphResult r = costs != NULL && results != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        for (u32 g = 0; g < groups; ++g) {
+            NPH_ARRAY_INIT(&costs[g], a);
+        }
+        LevelCostWork work;
+        work.b = b;
+        work.members = members;
+        work.start = start;
+        work.costs = costs;
+        work.results = results;
+        run_range(b->in->jobs, groups, 1U, level_costs, &work);
+        for (u32 g = 0; g < groups && r == NPH_RESULT_OK; ++g) {
+            r = results[g];
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH_N(&all, costs[g].data, costs[g].len);
+            }
+        }
+    }
+    if (r == NPH_RESULT_OK && all.len != 0U) {
+        qsort(all.data, all.len, sizeof(f64), compare_costs);
+        const f64 median = nph_f64_sqrt(all.data[all.len / 2U]);
+        b->level_error = nph_f64_max(b->level_error, LEVEL_ERROR_FACTOR * median);
+        b->level_cost_limit = b->level_error * b->level_error;
+    }
+    if (costs != NULL) {
+        for (u32 g = 0; g < groups; ++g) {
+            NPH_ARRAY_FREE(&costs[g]);
+        }
+        NPH_FREE_ARRAY(a, LodCostArray, costs, groups);
+    }
+    if (results != NULL) {
+        NPH_FREE_ARRAY(a, NphResult, results, groups);
+    }
+    NPH_ARRAY_FREE(&all);
+    return r;
 }
 
 // The groups of the level [first, first + n), simplified into the next.
@@ -2170,6 +2329,9 @@ static NphResult build_level(Build *b, u32 level, u32 first, u32 n, u32 *out_mad
                 b->locked[c] = 1U;
             }
         }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = level_error_limit(b, members.data, start.data, groups);
     }
     // The groups by colour (no two of a colour share a class), the colours
     // in turn, a colour's groups at once where there are jobs; then each
@@ -2698,6 +2860,9 @@ static void build_free(Build *b)
     NPH_ARRAY_FREE(&b->source_count);
     NPH_ARRAY_FREE(&b->sources);
     NPH_ARRAY_FREE(&b->next_sources);
+    NPH_ARRAY_FREE(&b->grown_positions);
+    NPH_ARRAY_FREE(&b->grown_uvs);
+    NPH_ARRAY_FREE(&b->grown_normals);
     grid_free(a, &b->ground);
     lod_mesh_free(&b->mesh, a);
 }
@@ -2724,6 +2889,9 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
     NPH_ARRAY_INIT(&b.source_count, b.alloc);
     NPH_ARRAY_INIT(&b.sources, b.alloc);
     NPH_ARRAY_INIT(&b.next_sources, b.alloc);
+    NPH_ARRAY_INIT(&b.grown_positions, b.alloc);
+    NPH_ARRAY_INIT(&b.grown_uvs, b.alloc);
+    NPH_ARRAY_INIT(&b.grown_normals, b.alloc);
     NPH_ARRAY_INIT(&b.ground.items, b.alloc);
     NPH_ARRAY_INIT(&b.ground.owned, b.alloc);
     NphResult r = lod_mesh_init(&b.mesh, b.alloc, in->positions, in->attribs, in->attrib_stride,
@@ -2745,6 +2913,24 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
                 b.class_dist[i] = -1.0F;
             }
         }
+    }
+    // A mesh that may voxelize keeps the simplifier its voxels were measured with (ADR-0061):
+    // a group's collapses stalling, and their error against the voxels', is what makes it
+    // voxels, so what is measured against that stays as it was (ADR-0069).
+    if (r == NPH_RESULT_OK && in->uvs != NULL && in->voxels == NULL && in->vertex_count != 0U) {
+        // Copies that can grow by the vertices the levels add.
+        r = NPH_ARRAY_PUSH_N(&b.grown_positions, in->positions, in->vertex_count);
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH_N(&b.grown_uvs, in->uvs, in->vertex_count);
+        }
+        if (r == NPH_RESULT_OK) {
+            b.mesh.positions = b.grown_positions.data;
+            b.uvs = b.grown_uvs.data;
+        }
+    }
+    if (r == NPH_RESULT_OK && in->normals != NULL && in->voxels == NULL && in->vertex_count != 0U) {
+        r = NPH_ARRAY_PUSH_N(&b.grown_normals, in->normals, in->vertex_count);
+        b.normals = b.grown_normals.data;
     }
     if (r == NPH_RESULT_OK) {
         b.ground.positions = in->positions;
