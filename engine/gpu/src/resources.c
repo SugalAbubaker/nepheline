@@ -670,6 +670,42 @@ static void release_image_objects(NphGpuDevice *dev, NphGpuImageSlot *slot, bool
     slot->alloc = NULL;
 }
 
+// The standard sparse image block shape of a format (Vulkan, "Standard
+// Sparse Image Block Shapes", single sample, 2D), in texels: by the bits of
+// a texel, or of a compressed format's block, its blocks then the shape's
+// unit (a 64 KiB page either way).
+static void standard_page(const NphGpuFormatInfo *fi, u32 *out_w, u32 *out_h)
+{
+    u32 w = 0U;
+    u32 h = 0U;
+    switch (fi->bytes_per_block) {
+    case 1U:
+        w = 256U;
+        h = 256U;
+        break;
+    case 2U:
+        w = 256U;
+        h = 128U;
+        break;
+    case 4U:
+        w = 128U;
+        h = 128U;
+        break;
+    case 8U:
+        w = 128U;
+        h = 64U;
+        break;
+    case 16U:
+        w = 64U;
+        h = 64U;
+        break;
+    default:
+        break;
+    }
+    *out_w = w * fi->block_width;
+    *out_h = h * fi->block_height;
+}
+
 // A sparse image's pages and mip tail, from the device's requirements;
 // NPH_RESULT_UNSUPPORTED where its pages could not come from a page pool.
 static NphResult sparse_layout(NphGpuDevice *dev, NphGpuImageSlot *slot)
@@ -697,9 +733,27 @@ static NphResult sparse_layout(NphGpuDevice *dev, NphGpuImageSlot *slot)
                       (unsigned long long)mr.alignment);
         return NPH_RESULT_UNSUPPORTED;
     }
+    // The standard shape (the device's residencyStandard2DBlockShape) as the
+    // device reports it: in texels, as the bindings' offsets are, or for a
+    // compressed format in its blocks (lavapipe, Mesa 25.2.8, whose binding
+    // takes the pages in texels all the same).
+    const NphGpuFormatInfo *fi = nph_gpu_format_info(slot->desc.format);
+    u32 page_w = 0U;
+    u32 page_h = 0U;
+    standard_page(fi, &page_w, &page_h);
+    const VkExtent3D g = colour->formatProperties.imageGranularity;
+    const bool in_texels = g.width == page_w && g.height == page_h;
+    const bool in_blocks = fi->compressed && g.width * fi->block_width == page_w &&
+                           g.height * fi->block_height == page_h;
+    if (page_w == 0U || (!in_texels && !in_blocks)) {
+        GPU_LOG_ERROR("image '%s': the device's pages of %s are %ux%u, not the standard %ux%u "
+                      "texels",
+                      slot->name, fi->name, g.width, g.height, page_w, page_h);
+        return NPH_RESULT_UNSUPPORTED;
+    }
     slot->sparse = 1;
-    slot->page_width = colour->formatProperties.imageGranularity.width;
-    slot->page_height = colour->formatProperties.imageGranularity.height;
+    slot->page_width = page_w;
+    slot->page_height = page_h;
     const u32 mips = slot->desc.mip_count;
     slot->tail_first_mip =
         colour->imageMipTailFirstLod < mips ? colour->imageMipTailFirstLod : mips;
