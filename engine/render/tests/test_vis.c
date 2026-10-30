@@ -1563,10 +1563,10 @@ NTEST_F(Vis, blended_surfaces_behind_opaque_ones_match_the_reference)
 // holds whatever the w's) and its opaque fragment stage no longer discards,
 // for its early depth test: a facing it got wrong would draw a ceiling's
 // back, or drop a floor. Plain and mirrored, against the reference, whose
-// rasteriser clips and culls them.
-NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
+// rasteriser clips and culls them. `depth` is the planes' centre on z, where a
+// row of their vertices stands (the camera is at z = 4).
+static void check_faces_around_the_camera(RenderFixture *f, f64 depth)
 {
-    REQUIRE_PRODUCTION(f);
     const NphRenderMesh plane = mesh_of(f, make_plane);
     const NphRenderMaterial m = material(f, nph_vec4(0.8F, 0.6F, 0.4F, 1.0F), 0.0F, 0.6F);
     // Planes face +Y: a floor below the camera shows it its front, a ceiling
@@ -1577,9 +1577,10 @@ NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
         const NphVec3 scale = nph_vec3(side == 0U ? 12.0F : -12.0F, 1.0F, 24.0F);
         instance(
             f, plane, m,
-            nph_render_transform_from_trs(nph_dvec3(x, -0.5, 5.0), nph_quat_identity(), scale));
-        instance(f, plane, m,
-                 nph_render_transform_from_trs(nph_dvec3(x, 0.5, 5.0), nph_quat_identity(), scale));
+            nph_render_transform_from_trs(nph_dvec3(x, -0.5, depth), nph_quat_identity(), scale));
+        instance(
+            f, plane, m,
+            nph_render_transform_from_trs(nph_dvec3(x, 0.5, depth), nph_quat_identity(), scale));
     }
     NphRenderLightDesc ld;
     memset(&ld, 0, sizeof ld);
@@ -1603,7 +1604,7 @@ NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
     v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
     render_into(f, &v, 1U, vis);
     const ImageDiff d = image_diff(ref, vis, 3U);
-    NTEST_LOG("faces behind the camera: %.2f %% within 3 levels, mean %.3f, max %u",
+    NTEST_LOG("faces around the camera: %.2f %% within 3 levels, mean %.3f, max %u",
               (f64)d.within * 100.0, (f64)d.mean, d.max);
     NTEST_EXPECT_TRUE(d.within >= 0.98F);
     NTEST_EXPECT_TRUE(d.mean <= 1.0F);
@@ -1616,6 +1617,180 @@ NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
         NTEST_EXPECT_TRUE(bottom[0] > 0U);
     }
     nph_render_light_destroy(f->renderer, light);
+}
+
+NTEST_F(Vis, faces_reaching_behind_the_camera_match_the_reference)
+{
+    REQUIRE_PRODUCTION(f);
+    check_faces_around_the_camera(f, 5.0);
+}
+
+// A row of vertices in the camera's plane, as under an eye that stands over the
+// corner of a road: the image, which barycentrics_hold_around_the_cameras_plane
+// checks number by number (a plain floor under a sun shows little of them).
+NTEST_F(Vis, a_vertex_in_the_cameras_plane_matches_the_reference)
+{
+    REQUIRE_PRODUCTION(f);
+    check_faces_around_the_camera(f, 4.0);
+}
+
+// The weights a pixel gets, in double precision, from the triangle's (x, y, w):
+// the adjugate's rows are the numerators, whatever the w's are.
+static void exact_barycentrics(const f64 v[3][3], f64 qx, f64 qy, f64 out[3])
+{
+    f64 sum = 0.0;
+    for (u32 i = 0; i < 3U; ++i) {
+        const f64 *a = v[(i + 1U) % 3U];
+        const f64 *b = v[(i + 2U) % 3U];
+        out[i] = (a[1] * b[2] - a[2] * b[1]) * qx + (a[2] * b[0] - a[0] * b[2]) * qy +
+                 (a[0] * b[1] - a[1] * b[0]);
+        sum += out[i];
+    }
+    for (u32 i = 0; i < 3U; ++i) {
+        out[i] /= sum;
+    }
+}
+
+// Counts an error past what single precision leaves, NaN among them, and keeps
+// the worst of the others.
+static void bary_tally(f64 got, f64 exact, u32 *wrong, f64 *worst)
+{
+    const f64 e = got < exact ? exact - got : got - exact;
+    if (!(e < 2e-3)) {
+        *wrong += 1U;
+    } else if (e > *worst) {
+        *worst = e;
+    }
+}
+
+// Three values weighted, in double precision.
+static f64 bary_mix(f32 a, f32 b, f32 c, f32 la, f32 lb, f32 lc)
+{
+    return (f64)la * (f64)a + (f64)lb * (f64)b + (f64)lc * (f64)c;
+}
+
+static f64 bary_change(const f64 a[3], const f64 b[3])
+{
+    f64 most = 0.0;
+    for (u32 k = 0; k < 3U; ++k) {
+        const f64 d = a[k] < b[k] ? b[k] - a[k] : a[k] - b[k];
+        most = d > most ? d : most;
+    }
+    return most;
+}
+
+// Large triangles around the camera, as a road's are under a person standing on
+// it, one vertex's w a given distance from the camera's plane, down to exactly
+// in it, or behind it. The pixels are on screen and in front of the camera, of
+// triangles at least two pixels across: on a sliver seen edge-on the weights
+// swing by more than a pixel holds, in any arithmetic. An inverse of a vertex's
+// w would fail here over the whole triangle, and it did (the city's crossing).
+NTEST_F(Vis, barycentrics_hold_around_the_cameras_plane)
+{
+    REQUIRE_PRODUCTION(f);
+    enum {
+        CASES = 4096U
+    };
+    static const f32 k_w0[] = {4.0F,  1e-1F, 1e-2F,  1e-3F,  1e-4F, 1e-5F,
+                               1e-6F, 0.0F,  -1e-6F, -1e-3F, -2.0F};
+    NphGpuDevice *dev = f->dev;
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0xBA2CE27ULL, 3U);
+    const u32 storage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    NphGpuBuffer case_buf = test_make_buffer(dev, (u64)CASES * sizeof(NphVisBaryCase), storage,
+                                             NPH_GPU_MEMORY_UPLOAD, "bary cases");
+    NphGpuBuffer result_buf = test_make_buffer(dev, (u64)CASES * sizeof(NphVisBaryResult), storage,
+                                               NPH_GPU_MEMORY_READBACK, "bary results");
+    NphVisBaryCase *cases = (NphVisBaryCase *)nph_gpu_buffer_map(dev, case_buf);
+    const f32 step_x = 2.0F / 3840.0F;
+    const f32 step_y = 2.0F / 2160.0F;
+    for (u32 i = 0; i < CASES; ++i) {
+        NphVisBaryCase *c = &cases[i];
+        NphVec4 *v[3] = {&c->c0, &c->c1, &c->c2};
+        f32 qx = 0.0F;
+        f32 qy = 0.0F;
+        for (;;) {
+            for (u32 k = 0; k < 3U; ++k) {
+                const f32 x = nph_pcg32_next_range_f32(&rng, -40.0F, 40.0F);
+                const f32 y = nph_pcg32_next_range_f32(&rng, -8.0F, 8.0F);
+                const f32 w = nph_pcg32_next_range_f32(&rng, 2.0F, 40.0F);
+                *v[k] = nph_vec4(x, y, 0.5F, w);
+            }
+            c->c0.w = k_w0[i % NPH_ARRAY_COUNT(k_w0)];
+            // A pixel of the triangle, on screen and in front of the camera.
+            const f32 l1 = nph_pcg32_next_f32(&rng);
+            const f32 l2 = nph_pcg32_next_range_f32(&rng, 0.0F, 1.0F - l1);
+            const f32 l0 = 1.0F - l1 - l2;
+            const f64 w = bary_mix(c->c0.w, c->c1.w, c->c2.w, l0, l1, l2);
+            const f64 x = bary_mix(c->c0.x, c->c1.x, c->c2.x, l0, l1, l2);
+            const f64 y = bary_mix(c->c0.y, c->c1.y, c->c2.y, l0, l1, l2);
+            if (w > 0.1 && x / w > -1.0 && x / w < 1.0 && y / w > -1.0 && y / w < 1.0) {
+                qx = (f32)(x / w);
+                qy = (f32)(y / w);
+                break;
+            }
+        }
+        c->pixel = nph_vec4(qx, qy, step_x, step_y);
+    }
+    NphGpuShader shader = test_load_shader(dev, "vis_bary_test.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    cd.name = "vis bary test";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(dev, &cd, &pipeline), NPH_RESULT_OK);
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, "vis bary", &cmd),
+                        NPH_RESULT_OK);
+    NphVisBaryPush push;
+    memset(&push, 0, sizeof push);
+    push.cases = nph_gpu_buffer_address(dev, case_buf);
+    push.results = nph_gpu_buffer_address(dev, result_buf);
+    push.count = CASES;
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, (CASES + 63U) / 64U, 1U, 1U);
+    test_submit_wait(dev, cmd);
+    const NphVisBaryResult *results = (const NphVisBaryResult *)nph_gpu_buffer_map(dev, result_buf);
+    u32 compared = 0U;
+    u32 wrong = 0U;
+    f64 worst = 0.0;
+    f64 worst_gradient = 0.0;
+    for (u32 i = 0; i < CASES; ++i) {
+        const NphVisBaryCase *c = &cases[i];
+        const f64 v[3][3] = {{(f64)c->c0.x, (f64)c->c0.y, (f64)c->c0.w},
+                             {(f64)c->c1.x, (f64)c->c1.y, (f64)c->c1.w},
+                             {(f64)c->c2.x, (f64)c->c2.y, (f64)c->c2.w}};
+        f64 b[3];
+        f64 bx[3];
+        f64 by[3];
+        const f64 qx = (f64)c->pixel.x;
+        const f64 qy = (f64)c->pixel.y;
+        exact_barycentrics(v, qx, qy, b);
+        exact_barycentrics(v, qx + (f64)c->pixel.z, qy, bx);
+        exact_barycentrics(v, qx, qy + (f64)c->pixel.w, by);
+        if (bary_change(b, bx) > 0.5 || bary_change(b, by) > 0.5) {
+            continue;
+        }
+        ++compared;
+        const NphVisBaryResult *r = &results[i];
+        const f32 got[3] = {r->b.x, r->b.y, r->b.z};
+        const f32 dx[3] = {r->ddx.x, r->ddx.y, r->ddx.z};
+        const f32 dy[3] = {r->ddy.x, r->ddy.y, r->ddy.z};
+        for (u32 k = 0; k < 3U; ++k) {
+            bary_tally((f64)got[k], b[k], &wrong, &worst);
+            bary_tally((f64)dx[k], bx[k] - b[k], &wrong, &worst_gradient);
+            bary_tally((f64)dy[k], by[k] - b[k], &wrong, &worst_gradient);
+        }
+    }
+    NTEST_LOG("%u of %u wrong; the worst weight off by %.2e, the worst pixel's change by %.2e",
+              wrong, compared, worst, worst_gradient);
+    NTEST_EXPECT_GT_UINT(compared, (u32)CASES * 9U / 10U);
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    nph_gpu_pipeline_destroy(dev, pipeline);
+    nph_gpu_shader_destroy(dev, shader);
+    nph_gpu_buffer_destroy(dev, result_buf);
+    nph_gpu_buffer_destroy(dev, case_buf);
 }
 
 NTEST_F(Vis, debug_views_show_clusters_triangles_and_instances)
@@ -2294,7 +2469,9 @@ NTEST(vis, the_light_grid_never_changes_the_image)
     const ImageDiff d = light_diff(all, grid, 0U);
     NTEST_LOG("every light vs the grid: %.2f %% identical, mean %.4f, max %u",
               (f64)d.within * 100.0, (f64)d.mean, d.max);
-    NTEST_EXPECT_LE_UINT(d.max, 1U);
+    // The sums' order can tip a value over the rounding of the shading's target,
+    // whose blue channel has 5 bits of mantissa: one step of it is two levels here.
+    NTEST_EXPECT_LE_UINT(d.max, 2U);
     NTEST_EXPECT_TRUE(d.within >= 0.99F);
     const ImageDiff dr = light_diff(ref, grid, 3U);
     NTEST_LOG("reference vs the grid: %.2f %% within 3 levels, mean %.3f, max %u",

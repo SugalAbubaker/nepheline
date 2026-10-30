@@ -592,6 +592,31 @@ NPH_SHARED_STRUCT(NphVisMathPush)
     u32 pad0;
 };
 
+// The barycentrics against exact ones (render_tests, vis_bary_test.comp): one
+// triangle and pixel per invocation.
+NPH_SHARED_STRUCT(NphVisBaryCase)
+{
+    NphVec4 c0; // the clip-space vertices
+    NphVec4 c1;
+    NphVec4 c2;
+    NphVec4 pixel; // xy: its NDC; zw: the size of a pixel in NDC
+};
+
+NPH_SHARED_STRUCT(NphVisBaryResult)
+{
+    NphVec4 b; // xyz
+    NphVec4 ddx;
+    NphVec4 ddy;
+};
+
+NPH_SHARED_STRUCT(NphVisBaryPush)
+{
+    u64 cases;   // NphVisBaryCase[]
+    u64 results; // NphVisBaryResult[]
+    u32 count;
+    u32 pad0;
+};
+
 // The voxel traversal against its C twin (render_tests, vis_voxel_test.comp,
 // render/voxel.h nph_render_voxel_trace): one ray per invocation, through
 // one brick.

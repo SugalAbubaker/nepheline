@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// The resolve's barycentrics, case by case, for the render tests
+// (Vis.barycentrics_hold_around_the_cameras_plane), which compare every result
+// with exact ones. Not used by the renderer.
+#version 460
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisBaryPush pc; };
+
+NPH_BUFFER_REF(VisBaryCasesRef) { NphVisBaryCase c[]; };
+NPH_BUFFER_REF(VisBaryResultsRef) { NphVisBaryResult r[]; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    const NphVisBaryCase c = VisBaryCasesRef(pc.cases).c[i];
+    const VisBarycentrics b = vis_barycentrics(c.c0, c.c1, c.c2, c.pixel.xy, c.pixel.zw);
+    NphVisBaryResult r;
+    r.b = vec4(b.b, 0.0);
+    r.ddx = vec4(b.ddx, 0.0);
+    r.ddy = vec4(b.ddy, 0.0);
+    VisBaryResultsRef(pc.results).r[i] = r;
+}
