@@ -103,6 +103,21 @@ if(TARGET nph_cook)
             "NPH_SAMPLE_PACK=\"${pbr_viewer_out}/pbr_scene.npk\"")
         nph_target_use_shaders(pbr_viewer nph_shaders_render)
     endif()
+
+    # A cooked scene to walk through, the reference scenes included: the frame
+    # rate in the window's title (docs/benchmarks.md "Reference scenes"). The
+    # CTest run walks pbr_viewer's scene along its view.
+    nph_add_sample(scene_viewer
+        SOURCES scene_viewer/main.c common/cooked_scene.c common/cooked_scene.h
+        DEPS nph::render nph::asset nph::runtime
+        ARGS --frames=60 --size=320x180 --window=320x180 --lists=1 --walk=1
+             "--pack=${pbr_viewer_out}/pbr_scene.npk" "--scene=pbr_scene.gltf#scene"
+        SKIP_RETURN_CODE 77)
+    if(TARGET scene_viewer)
+        add_dependencies(scene_viewer pbr_viewer_content)
+        target_include_directories(scene_viewer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/common")
+        nph_target_use_shaders(scene_viewer nph_shaders_render)
+    endif()
 endif()
 
 # The Phase 8 sample (CLAUDE.md §12, "Scene/ECS"): an orrery built as an ECS

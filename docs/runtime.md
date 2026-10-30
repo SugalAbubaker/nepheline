@@ -660,7 +660,11 @@ nph_player --game=... --headless --frames=600 sim.rate=120
 window's title, measured twice a second (`r.vsync=false` uncaps them from
 the display's refresh). The sandbox sample flies a camera through any cooked
 scene: `sandbox.scene=bistro.gltf#scene` with Bistro's pack mounted, lit by
-its manifest's values (the sample's header gives the command).
+its manifest's values (the sample's header gives the command). It runs inside
+the engine's renderer capacities, and the engine's runtime has no cells,
+proxies or streams yet, so a scene past those capacities, the landscape's
+47,862 instances among them, fails to load: `scene_viewer`
+(docs/benchmarks.md "Reference scenes") walks through those.
 
 It exits with 0, 1 on a failure (validation errors included), 2 for a bad
 command line, and 77 without a window system or a device, which CTest
