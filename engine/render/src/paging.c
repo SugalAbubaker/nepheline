@@ -53,7 +53,7 @@ static u32 page_level(const RenderPagedTexture *pt, u32 page, u32 *out_x, u32 *o
 }
 
 // The texture's first resident level: the first from which every level's
-// pages are resident (fixed_mip when none is). Its materials are
+// pages are resident (fixed_mip when none is). Its materials' samplers are
 // written again where it changes.
 static void update_full_level(RenderPaging *p, RenderPagedTexture *pt)
 {
@@ -121,6 +121,7 @@ NphResult render_paging_init(NphRenderer *r)
     p->word_owner = NPH_ALLOC_ARRAY_ZEROED(a, u32, p->word_capacity);
     p->textures = NPH_ALLOC_ARRAY_ZEROED(a, RenderPagedTexture, d->max_textures);
     p->frame_level = NPH_ALLOC_ARRAY_ZEROED(a, u8, d->max_textures);
+    p->level_changed_at = NPH_ALLOC_ARRAY_ZEROED(a, u64, d->max_textures);
     p->staging_slots = d->page_staging_slots != 0U ? d->page_staging_slots
                                                    : nph_max_u32(4U * d->max_page_moves, 64U);
     p->staging_free = NPH_ALLOC_ARRAY(a, u32, p->staging_slots);
@@ -129,7 +130,7 @@ NphResult render_paging_init(NphRenderer *r)
     }
     p->binds = NPH_ALLOC_ARRAY(a, NphGpuSparseBind, 2ULL * d->max_page_moves);
     if (p->word_owner == NULL || p->textures == NULL || p->frame_level == NULL ||
-        p->staging_free == NULL || p->binds == NULL) {
+        p->level_changed_at == NULL || p->staging_free == NULL || p->binds == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
@@ -208,6 +209,7 @@ void render_paging_shutdown(NphRenderer *r)
     NPH_FREE_ARRAY(a, u32, p->word_owner, p->word_capacity);
     NPH_FREE_ARRAY(a, RenderPagedTexture, p->textures, r->desc.max_textures);
     NPH_FREE_ARRAY(a, u8, p->frame_level, r->desc.max_textures);
+    NPH_FREE_ARRAY(a, u64, p->level_changed_at, r->desc.max_textures);
     NPH_FREE_ARRAY(a, u32, p->staging_free, p->staging_slots);
     NPH_FREE_ARRAY(a, NphGpuSparseBind, p->binds, 2ULL * r->desc.max_page_moves);
     NPH_FREE_ARRAY(a, RenderPageRef, p->installs, p->install_cap);
@@ -753,15 +755,21 @@ void render_paging_frame_begin(NphRenderer *r)
         ++p->installed;
     }
     p->install_count = kept;
-    // The paged textures' first resident levels this frame; the materials
-    // are written again where one changed.
+    // The paged textures' first resident levels this frame; the samplers of
+    // the materials that sample one that changed are written again
+    // (frame.c write_materials), not the whole table: while textures stream
+    // a level changes most frames.
     if (p->level_changed) {
+        const u64 count = p->level_count + 1U;
         for (u32 i = 0; i < r->desc.max_textures; ++i) {
-            p->frame_level[i] =
-                p->textures[i].pages != NULL ? (u8)p->textures[i].full_level : (u8)0U;
+            const u8 level = p->textures[i].pages != NULL ? (u8)p->textures[i].full_level : (u8)0U;
+            if (level != p->frame_level[i]) {
+                p->frame_level[i] = level;
+                p->level_changed_at[i] = count;
+            }
         }
         p->level_changed = 0;
-        r->material_version += 1U;
+        p->level_count = count;
     }
     NphGpuPagePoolStats st;
     nph_gpu_page_pool_stats(p->pool, &st);

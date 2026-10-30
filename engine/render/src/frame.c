@@ -239,9 +239,13 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
 // Records
 // ---------------------------------------------------------------------------
 
+// A material's record; its slots that sample a paged texture, and those
+// textures' slots, into `paged_slots` and `paged_texture` (write_materials).
 static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, u32 handle,
-                          NphRenderMaterialData *out)
+                          NphRenderMaterialData *out, u32 *paged_slots,
+                          u32 paged_texture[NPH_RENDER_SLOT_COUNT])
 {
+    *paged_slots = 0U;
     memset(out, 0, sizeof *out);
     out->base_color = d->base_color;
     out->emissive = nph_vec4_from_vec3(d->emissive, 0.0F);
@@ -263,9 +267,13 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
             out->textures[s] = nph_gpu_image_sampled_index(r->dev, t->image);
             // A paged texture's sampler clamps its samples to its first
             // resident level this frame (paging.c; ADR-0065).
-            const u32 level =
-                t->paged ? r->paging.frame_level[render_slot_of(&r->texture_pool, b->texture.value)]
-                         : 0U;
+            u32 level = 0U;
+            if (t->paged) {
+                const u32 slot = render_slot_of(&r->texture_pool, b->texture.value);
+                level = r->paging.frame_level[slot];
+                *paged_slots |= 1U << s;
+                paged_texture[s] = slot;
+            }
             out->samplers[s] = render_material_sampler_level(r, b, level);
             // Paged textures ask for the pages their sampler reaches.
             const u32 wrap_u = (u32)b->wrap_u < 3U ? (u32)b->wrap_u : 0U;
@@ -282,24 +290,52 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
 // The material table: one record per pool slot, then the default
 // material at index max_materials. Free slots are written as zero: the
 // production path checks a record's handle against the material map's,
-// so a destroyed material's record must stop matching.
+// so a destroyed material's record must stop matching. Written whole after
+// a change of materials or textures; after paged textures' levels alone
+// changed (paging.c), only the samplers of the slots that sample one that
+// changed since the frame slot's table was written: while textures stream
+// a level changes most frames, and the whole table cost 0.18 ms on
+// Bistro's 254 materials (ADR-0065 stage 3).
 static void write_materials(NphRenderer *r)
 {
-    if (r->material_uploaded[r->frame_slot] == r->material_version) {
+    const u32 fs = r->frame_slot;
+    NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
+    if (r->material_uploaded[fs] != r->material_version) {
+        for (u32 i = 0; i < r->desc.max_materials; ++i) {
+            RenderMaterial *m = &r->materials[i];
+            if (m->handle != 0U) {
+                fill_material(r, &m->desc, m->handle, &table[i], &m->paged_slots, m->paged_texture);
+            } else {
+                memset(&table[i], 0, sizeof table[i]);
+            }
+        }
+        NphRenderMaterialDesc def;
+        nph_render_material_desc_default(&def);
+        u32 def_slots = 0U;
+        u32 def_textures[NPH_RENDER_SLOT_COUNT];
+        fill_material(r, &def, 0U, &table[r->desc.max_materials], &def_slots, def_textures);
+        r->material_uploaded[fs] = r->material_version;
+        r->levels_uploaded[fs] = r->paging.level_count;
         return;
     }
-    NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
+    const u64 since = r->levels_uploaded[fs];
+    if (since == r->paging.level_count) {
+        return;
+    }
     for (u32 i = 0; i < r->desc.max_materials; ++i) {
-        if (r->materials[i].handle != 0U) {
-            fill_material(r, &r->materials[i].desc, r->materials[i].handle, &table[i]);
-        } else {
-            memset(&table[i], 0, sizeof table[i]);
+        const RenderMaterial *m = &r->materials[i];
+        u32 slots = m->handle != 0U ? m->paged_slots : 0U;
+        while (slots != 0U) {
+            const u32 s = nph_ctz_u32(slots);
+            slots &= slots - 1U;
+            const u32 t = m->paged_texture[s];
+            if (r->paging.level_changed_at[t] > since) {
+                table[i].samplers[s] = render_material_sampler_level(r, &m->desc.textures[s],
+                                                                     r->paging.frame_level[t]);
+            }
         }
     }
-    NphRenderMaterialDesc def;
-    nph_render_material_desc_default(&def);
-    fill_material(r, &def, 0U, &table[r->desc.max_materials]);
-    r->material_uploaded[r->frame_slot] = r->material_version;
+    r->levels_uploaded[fs] = r->paging.level_count;
 }
 
 void render_light_data(const NphRenderLightDesc *d, NphVec3 position, NphRenderLightData *out)
