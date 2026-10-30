@@ -1111,6 +1111,9 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         // gpu_tests' an_indirect_draw_after_a_count_draw_draws (Mesa 25.2.8:
         // lvp_execute.c's handle_draw_indirect keeps indirect_draw_count).
         info->quirks |= (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT;
+        // Found by the renderer's paging tests on the CI's lavapipe (Mesa
+        // 25.2.8), the first with sparse residency there.
+        info->quirks |= (u32)NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES;
     }
     info->device_local_bytes = device_local_bytes(&c->memory);
     info->host_visible_bytes = host_visible_bytes(&c->memory);
@@ -1616,12 +1619,15 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
             info->limits.max_mesh_workgroup_count[2], info->limits.max_mesh_workgroup_total_count);
     }
     if (info->quirks != 0U) {
-        GPU_LOG_INFO("driver quirks worked around: 0x%x%s%s", info->quirks,
+        GPU_LOG_INFO("driver quirks worked around: 0x%x%s%s%s", info->quirks,
                      (info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U
                          ? " (mesh pipelines' fragment shaders read no push constants)"
                          : "",
                      (info->quirks & (u32)NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT) != 0U
                          ? " (indirect draws read a stale count: drawn with counts)"
+                         : "",
+                     (info->quirks & (u32)NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES) != 0U
+                         ? " (sparse images' gradient samples differ: no paged textures)"
                          : "");
     }
     *out = dev;

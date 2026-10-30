@@ -231,6 +231,12 @@ Built (docs/render.md "Virtual textures"):
   page in either dimension: the device's mip tail, and on a device that
   keeps none (lavapipe on Linux, whose tail starts past the last level),
   those levels' own pages, a page each.
+- **lavapipe on Linux pages no textures:** with every page bound, its
+  explicit-gradient samples of a sparse image differ from the same ordinary
+  image's (the resolve's images 765 to 2,822 bytes of 16,384 off; the
+  forward pass's, with implicit derivatives, the same):
+  `NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES`. Its sparse images still run the
+  gpu module's tests.
 - **`vis page requests`** and the forward pass: the feedback.
 - **`cooked_scene`'s `paged_textures`** and `render_perf --paged-textures`:
   every page of every texture installed before a view is measured.

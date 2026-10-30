@@ -4,8 +4,9 @@
 // same texture resident whole, byte for byte; one with pages missing never
 // samples them, nor a level until it is resident whole; pixels ask for the
 // pages they sample; evicted pages stop being sampled and return their
-// memory. Devices without sparse residency (lavapipe on Windows) skip all
-// but the test of paging switched off.
+// memory. Devices that page no textures (lavapipe: without sparse
+// residency on Windows, with sparse images that sample unlike ordinary ones
+// on Linux) skip all but the test of paging switched off.
 #include "test_render_support.h"
 
 #include <stdlib.h>

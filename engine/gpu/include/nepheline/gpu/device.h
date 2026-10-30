@@ -249,6 +249,13 @@ typedef enum NphGpuQuirk {
     // whose count it reads from a table of its own (commands.h), so callers
     // need do nothing.
     NPH_GPU_QUIRK_INDIRECT_DRAW_STALE_COUNT = 1U << 1U,
+    // Samples of a sparse image with explicit gradients (textureGrad) are
+    // not those of the same ordinary image, every page bound; samples with
+    // the implicit derivatives are. Lavapipe (Mesa 25.2.8 on Linux), found
+    // by the renderer's paging tests (its resolve's images 765 to 2,822
+    // bytes of 16,384 off). Sparse images are made all the same; the
+    // renderer pages no textures on such a device (render/paging.c).
+    NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES = 1U << 2U,
 } NphGpuQuirk;
 
 typedef struct NphGpuDeviceInfo {

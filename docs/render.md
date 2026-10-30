@@ -99,8 +99,10 @@ share it, and the runtime module takes it over in Phase 9.
 A texture created with `NPH_RENDER_TEXTURE_FLAG_PAGED` is paged
 (docs/adr/0065-virtual-texturing.md; `paging.c`, `texture_paging.glsl`). The
 renderer pages it where the device has sparse residency
-(`nph_renderer_texture_paging_supported`; gpu/sparse.h) and its top level
-spans more than a page:
+(`nph_renderer_texture_paging_supported`; gpu/sparse.h), unless its sparse
+images sample unlike ordinary ones (`NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES`:
+lavapipe on Linux, whose resolve's samples of them differ), and its top
+level spans more than a page:
 - **Its levels.** It is a sparse image whose levels of at least a page
   are pages of the image's block shape (64 KiB: 128 x 128 texels of RGBA8,
   256 x 256 of BC7).
