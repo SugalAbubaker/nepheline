@@ -390,7 +390,12 @@ with the user's editor windows minimized for the length of the run
 compare means, which the redraws shift alike. Phase 13's start, measured
 so, is `reference_scenes-2026-10-25` (the street 6.771 ms mean, 6.837 at
 the 99th percentile; ADR-0059 has every view) with
-`render_perf-2026-10-25` for the synthetic scenes.
+`render_perf-2026-10-25` for the synthetic scenes. Its end is
+`reference_scenes-2026-10-30` (Bistro as Phase 13 cooks it) and
+`reference_scenes-2026-10-30b` (the landscape): against the start, built
+again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
+more, the walk down its meshes' level hierarchies, which Phase 14 wins
+back first (ADR-0066).
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
