@@ -331,6 +331,9 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_lod_nodes =
         nph_min_u32(round_up_64(d->max_lod_nodes != 0U ? d->max_lod_nodes : 1U << 18U),
                     (65535U * (u32)NPH_VIS_LOD_ITEMS) & ~63U);
+    d->max_lod_groups = nph_min_u32(
+        round_up_64(d->max_lod_groups != 0U ? d->max_lod_groups : 1U << 18U), 65535U * 64U);
+    d->max_lod_flat_groups = d->max_lod_flat_groups != 0U ? d->max_lod_flat_groups : 1U << 14U;
     d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
@@ -915,8 +918,7 @@ static f32 cluster_maker_error(const NphRenderMeshDesc *d, u32 c)
     return maker == NPH_RENDER_LOD_NONE ? 0.0F : d->lod_groups[maker].error;
 }
 
-// The smallest error of the groups that made a group's clusters.
-static f32 group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodGroup *rg)
+f32 render_lod_group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodGroup *rg)
 {
     f32 smallest = rg->cluster_count != 0U ? NPH_F32_MAX : 0.0F;
     for (u32 i = 0; i < rg->cluster_count; ++i) {
@@ -1044,7 +1046,7 @@ static NphResult validate_lods(const NphRenderMeshDesc *d, NphAllocator *scratch
                         nph_f32_to_bits(s.z) != nph_f32_to_bits(rg->center.z) ||
                         nph_f32_to_bits(s.w) != nph_f32_to_bits(rg->radius) ||
                         nph_f32_to_bits(node->error[i]) != nph_f32_to_bits(rg->error) ||
-                        maker_error > group_maker_error(d, rg)) {
+                        maker_error > render_lod_group_maker_error(d, rg)) {
                         res = NPH_RESULT_INVALID_ARGUMENT;
                         break;
                     }
@@ -1346,6 +1348,9 @@ NphResult nph_render_voxel_mesh_finish(NphRenderer *r, NphRenderVoxelMesh mesh, 
     if (m->voxel_lod_depth != 0U) {
         m->lod_depth = m->voxel_lod_depth;
         r->vis.lod_depths[m->lod_depth - 1U] += 1U;
+        // A level apart has no table of its levels: it is walked.
+        m->lod_walk_depth = m->lod_depth;
+        r->vis.lod_walk_depths[m->lod_depth - 1U] += 1U;
     }
     m->voxels_counted = 1;
     r->vis.voxel_meshes += 1U;

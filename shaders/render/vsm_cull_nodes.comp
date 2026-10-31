@@ -27,7 +27,8 @@
 // tree of a million triangles takes the clusters that reach it.
 //
 // The step raises the next step's workgroups to take what it put in queue
-// arg1 and empties queue arg2 for the step after the next to fill.
+// arg1, zeroes its own, and empties queue arg2 for the step after the next to
+// fill, as vis_cull_nodes.comp.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -66,7 +67,7 @@ void main()
                             gl_LocalInvocationIndex;
     if (invocation == 0u) {
         counters.c.node_count[pc.arg2] = 0u;
-        args.a.node_args[pc.arg2][0] = 0u;
+        args.a.node_args[qin][0] = 0u;
     }
     const uint id = invocation >> 6u;                // the work item
     const uint child_lane = (invocation >> 3u) & 7u; // its node's child

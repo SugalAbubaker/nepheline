@@ -81,6 +81,7 @@ nph_add_shaders(nph_shaders_render
         render/vis_cull_instances.comp
         render/vis_cull_meshlets.comp
         render/vis_cull_nodes.comp
+        render/vis_cull_groups.comp
         render/vis_args.comp
         render/vis_raster_opaque.mesh
         render/vis_raster_masked.mesh

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // The production path's levels of detail (render/cluster_lod.h;
 // docs/render.md "Levels of detail"): meshes with the levels
-// nph_render_cluster_lods_build makes, drawn through the hierarchy's steps
-// (vis_cull_nodes.comp) and the meshlet cull's cut. The clusters drawn are
-// checked against the cut the CPU computes for the same view; a threshold of
-// zero against the mesh without levels; a cut that mixes levels for holes;
-// an instance revealed in phase 1 for its whole cut; and the queues' overflow
-// and the validation of broken levels. The fixture's teardown asserts zero
-// validation and synchronisation-validation errors and nothing leaked.
+// nph_render_cluster_lods_build makes, drawn through the flat cull
+// (vis_cull_groups.comp) or the hierarchy's steps (vis_cull_nodes.comp), and
+// the meshlet cull's cut. The clusters drawn are checked against the cut the
+// CPU computes for the same view, on both paths; a threshold of zero against
+// the mesh without levels; a cut that mixes levels for holes; an instance or a
+// group revealed in phase 1 for its whole cut; and the lists' overflow, the
+// table of a mesh's levels, and the validation of broken levels. The fixture's
+// teardown asserts zero validation and synchronisation-validation errors and
+// nothing leaked.
 #include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/render/cluster_lod.h>
@@ -219,15 +221,56 @@ static u32 bit_count(u32 v)
     return n;
 }
 
-// The clusters drawn are the CPU's cut, cluster for cluster, for cameras
-// that see the torus near on one side and far on the other (a cut mixing
-// levels), at several thresholds, and for a rotated and scaled instance;
-// the whole torus in view and the other culling off, so that the cut is all
-// that decides. Clusters whose groups project within a thousandth of the
-// threshold are left out (the GPU's rounding may take them either way).
-NTEST_F(VisLod, the_clusters_drawn_are_the_cpus_cut)
+typedef struct CutCase {
+    NphDVec3 eye;
+    NphDVec3 target;
+    NphVec3 up;
+    f32 fov;
+    f32 threshold;
+    f32 angle; // the instance's turn about (1, 1, 0)
+    f32 scale;
+} CutCase;
+
+// The cut a view of a new instance of `mesh` draws, against the CPU's; the other
+// culling off, so that the cut is all that decides.
+static CutCompare cut_of(RenderFixture *f, const LodMesh *m, NphRenderMesh mesh,
+                         NphRenderMaterial mat, u32 *counts, const CutCase *k,
+                         NphRenderFrameStats *out_stats)
 {
-    REQUIRE_PRODUCTION(f);
+    NphRenderTransform t = at(0.0, 0.0, 0.0, k->scale);
+    const NphMat3 rotation = nph_mat3_from_quat(
+        nph_quat_from_axis_angle(nph_vec3_normalize(nph_vec3(1.0F, 1.0F, 0.0F)), k->angle));
+    t.linear = nph_mat3_mul(rotation, t.linear);
+    const NphRenderInstance inst = instance(f, mesh, mat, t);
+    const NphRenderCamera cam = nph_render_camera_look_at(k->eye, k->target, k->up, k->fov, 0.05F);
+    NphRenderView v = production_view(cam);
+    v.lod_error = k->threshold;
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_OCCLUSION | (u32)NPH_RENDER_VIS_NO_CONE;
+    // Four frames: the stats arrive two frames late.
+    *out_stats = render_into(f, &v, 4U, NULL);
+    const u32 slot = render_slot_of(&f->renderer->instance_pool, inst.value);
+    drawn_clusters(f, slot, m->lods.clusters.meshlets.len, counts);
+    nph_render_instance_destroy(f->renderer, inst);
+    CpuCut cc;
+    cc.lods = &m->lods;
+    cc.position = nph_dvec3_zero();
+    cc.rotation = rotation;
+    cc.scale = k->scale;
+    cc.eye = k->eye;
+    cc.pixels_per_unit = 0.5F * (f32)TEST_TARGET_SIZE / nph_f32_tan(0.5F * k->fov);
+    cc.znear = 0.05F;
+    cc.threshold = k->threshold;
+    return compare_cut(&cc, counts);
+}
+
+// The clusters drawn are the CPU's cut, cluster for cluster, for cameras that
+// see the torus near on one side and far on the other (a cut mixing levels),
+// from within the sphere that holds it, from so far that one level is the cut,
+// at several thresholds, and for a rotated and scaled instance; the whole torus
+// in view. Clusters whose groups project within a thousandth of the threshold
+// are left out (the GPU's rounding may take them either way).
+static void check_cuts(RenderFixture *f, bool walked)
+{
     sky(f);
     LodMesh m;
     lod_torus(&m, 192U, 64U, 1.0F, 0.35F);
@@ -240,67 +283,272 @@ NTEST_F(VisLod, the_clusters_drawn_are_the_cpus_cut)
     u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, m.lods.clusters.meshlets.len);
     NTEST_ASSERT_NOT_NULL(counts);
 
-    typedef struct Case {
-        NphDVec3 eye;
-        NphDVec3 target;
-        f32 threshold;
-        f32 angle; // the instance's turn about (1, 1, 0)
-        f32 scale;
-    } Case;
     // Thresholds no group's projected error ties (within the comparison's
     // 0.1 %), which the levels decide: a tie leaves its clusters unchecked.
-    const Case cases[] = {
-        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, 1.0F, 0.0F, 1.0F},
-        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, 0.26F, 0.0F, 1.0F},
-        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, 0.05F, 0.0F, 1.0F},
-        {{2.2, 1.6, 1.4}, {0.0, -0.1, 0.0}, 0.5F, 0.0F, 1.0F},
-        {{0.0, 1.1, 4.6}, {0.0, 0.0, 0.0}, 0.3F, 0.7F, 1.7F},
-        {{0.0, 6.0, 0.4}, {0.0, 0.0, 0.0}, 0.15F, 0.0F, 1.0F},
+    const NphVec3 y = nph_vec3_unit_y();
+    const CutCase cases[] = {
+        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, y, 1.2F, 1.0F, 0.0F, 1.0F},
+        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, y, 1.2F, 0.26F, 0.0F, 1.0F},
+        {{0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, y, 1.2F, 0.05F, 0.0F, 1.0F},
+        {{2.2, 1.6, 1.4}, {0.0, -0.1, 0.0}, y, 1.2F, 0.5F, 0.0F, 1.0F},
+        {{0.0, 1.1, 4.6}, {0.0, 0.0, 0.0}, y, 1.2F, 0.3F, 0.7F, 1.7F},
+        {{0.0, 6.0, 0.4}, {0.0, 0.0, 0.0}, y, 1.2F, 0.15F, 0.0F, 1.0F},
+        // Within the sphere that holds it, so that no level is ruled out by
+        // the near side, looking down through its hole.
+        {{0.0, 0.6, 0.0}, {0.0, 0.0, 0.0}, nph_vec3_unit_z(), 2.8F, 0.1F, 0.0F, 1.0F},
+        {{0.0, 0.6, 0.0}, {0.0, 0.0, 0.0}, nph_vec3_unit_z(), 2.8F, 0.013F, 0.0F, 1.0F},
+        // So far that the coarsest levels are the cut.
+        {{0.0, 8.0, 30.0}, {0.0, 0.0, 0.0}, y, 0.2F, 2.0F, 0.0F, 1.0F},
+        {{0.0, 60.0, 200.0}, {0.0, 0.0, 0.0}, y, 0.2F, 0.5F, 0.0F, 1.0F},
     };
     u32 mixed = 0U;
     for (u32 ci = 0; ci < NPH_ARRAY_COUNT(cases); ++ci) {
-        const Case *k = &cases[ci];
-        NphRenderTransform t = at(0.0, 0.0, 0.0, k->scale);
-        const NphMat3 rotation = nph_mat3_from_quat(
-            nph_quat_from_axis_angle(nph_vec3_normalize(nph_vec3(1.0F, 1.0F, 0.0F)), k->angle));
-        t.linear = nph_mat3_mul(rotation, t.linear);
-        const NphRenderInstance inst = instance(f, mesh, mat, t);
-        const NphRenderCamera cam =
-            nph_render_camera_look_at(k->eye, k->target, nph_vec3_unit_y(), 1.2F, 0.05F);
-        NphRenderView v = production_view(cam);
-        v.lod_error = k->threshold;
-        v.vis_flags = (u32)NPH_RENDER_VIS_NO_OCCLUSION | (u32)NPH_RENDER_VIS_NO_CONE;
-        // Four frames: the stats arrive two frames late.
-        const NphRenderFrameStats s = render_into(f, &v, 4U, NULL);
-        const u32 slot = render_slot_of(&f->renderer->instance_pool, inst.value);
-        drawn_clusters(f, slot, m.lods.clusters.meshlets.len, counts);
-        CpuCut cc;
-        cc.lods = &m.lods;
-        cc.position = nph_dvec3_zero();
-        cc.rotation = rotation;
-        cc.scale = k->scale;
-        cc.eye = k->eye;
-        cc.pixels_per_unit = 0.5F * (f32)TEST_TARGET_SIZE / nph_f32_tan(0.5F * 1.2F);
-        cc.znear = 0.05F;
-        cc.threshold = k->threshold;
-        const CutCompare r = compare_cut(&cc, counts);
-        NTEST_LOG("case %u (threshold %.2f px): %u of %u clusters drawn (%u triangles, levels "
-                  "%#x), %u missing, %u extra, %u twice, %u ambiguous; %u nodes visited, %u "
-                  "clusters a finer level stood in for, %u culled by the frustum",
+        const CutCase *k = &cases[ci];
+        NphRenderFrameStats s;
+        const CutCompare r = cut_of(f, &m, mesh, mat, counts, k, &s);
+        NTEST_LOG("case %u (threshold %.3f px): %u of %u clusters drawn (%u triangles, levels "
+                  "%#x), %u missing, %u extra, %u twice, %u ambiguous; %u groups tested, %u nodes "
+                  "visited, %u clusters a finer level stood in for, %u culled by the frustum",
                   ci, (f64)k->threshold, r.drawn, r.expected, r.triangles, r.levels, r.missing,
-                  r.extra, r.twice, r.ambiguous, s.vis_lod_nodes, s.vis_lod_clusters_culled,
-                  s.vis_meshlets_culled_frustum);
+                  r.extra, r.twice, r.ambiguous, s.vis_lod_groups, s.vis_lod_nodes,
+                  s.vis_lod_clusters_culled, s.vis_meshlets_culled_frustum);
         NTEST_EXPECT_EQ_UINT(s.vis_meshlets_culled_frustum, 0U);
         NTEST_EXPECT_EQ_UINT(r.missing, 0U);
         NTEST_EXPECT_EQ_UINT(r.extra, 0U);
         NTEST_EXPECT_EQ_UINT(r.twice, 0U);
         NTEST_EXPECT_LE_UINT(r.ambiguous * 50U, r.expected);
-        NTEST_EXPECT_GT_UINT(s.vis_lod_nodes, 0U);
+        if (walked) {
+            NTEST_EXPECT_GT_UINT(s.vis_lod_nodes + s.vis_lod_groups, 0U);
+        } else {
+            NTEST_EXPECT_GT_UINT(s.vis_lod_groups, 0U);
+            NTEST_EXPECT_EQ_UINT(s.vis_lod_nodes, 0U);
+        }
         mixed += bit_count(r.levels) >= 2U ? 1U : 0U;
-        nph_render_instance_destroy(f->renderer, inst);
     }
     // Most of the views cut through several levels at once.
     NTEST_EXPECT_GE_UINT(mixed, 4U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, m.lods.clusters.meshlets.len);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+}
+
+NTEST_F(VisLod, the_flat_cull_draws_the_cpus_cut)
+{
+    REQUIRE_PRODUCTION(f);
+    check_cuts(f, false);
+}
+
+// A renderer that hands an instance's run of more than one group to the walk.
+static void walking_fixture(RenderFixture *fx)
+{
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.max_lod_flat_groups = 1U;
+    test_render_setup(fx, &rd);
+}
+
+NTEST(vis_lod, the_walk_draws_the_cpus_cut)
+{
+    RenderFixture fx;
+    walking_fixture(&fx);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    check_cuts(&fx, true);
+    test_render_teardown(&fx);
+}
+
+// A run longer than a workgroup goes to the flat cull in chunks: a big mesh, its
+// finest levels in view, drawn as the CPU's cut, nothing dropped, and no step of
+// the walk taken.
+NTEST_F(VisLod, a_long_run_of_groups_goes_in_chunks)
+{
+    REQUIRE_PRODUCTION(f);
+    sky(f);
+    LodMesh m;
+    lod_torus(&m, 512U, 128U, 1.0F, 0.35F);
+    const NphRenderMesh mesh = create_mesh(f, &m.desc);
+    const NphRenderMaterial mat = grey_material(f);
+    u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, m.lods.clusters.meshlets.len);
+    NTEST_ASSERT_NOT_NULL(counts);
+    const CutCase k = {
+        {0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, nph_vec3_unit_y(), 1.2F, 0.02F, 0.0F, 1.0F};
+    NphRenderFrameStats s;
+    const CutCompare r = cut_of(f, &m, mesh, mat, counts, &k, &s);
+    NTEST_LOG("%u groups in all: %u tested, %u of %u clusters drawn, %u missing, %u extra, %u "
+              "twice, %u ambiguous",
+              m.lods.groups.len, s.vis_lod_groups, r.drawn, r.expected, r.missing, r.extra, r.twice,
+              r.ambiguous);
+    NTEST_EXPECT_GT_UINT(s.vis_lod_groups, 64U);
+    NTEST_EXPECT_EQ_UINT(s.vis_lod_nodes, 0U);
+    NTEST_EXPECT_EQ_UINT(s.vis_overflow, 0U);
+    NTEST_EXPECT_EQ_UINT(r.missing, 0U);
+    NTEST_EXPECT_EQ_UINT(r.extra, 0U);
+    NTEST_EXPECT_EQ_UINT(r.twice, 0U);
+    NTEST_EXPECT_LE_UINT(r.ambiguous * 50U, r.expected);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, m.lods.clusters.meshlets.len);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+}
+
+// Instances side by side, a subgroup's together in the instance cull, take each
+// its own run of groups: at different distances, each draws its own cut.
+NTEST_F(VisLod, instances_side_by_side_each_draw_their_own_cut)
+{
+    REQUIRE_PRODUCTION(f);
+    sky(f);
+    LodMesh m;
+    lod_torus(&m, 96U, 32U, 1.0F, 0.35F);
+    const NphRenderMesh mesh = create_mesh(f, &m.desc);
+    const NphRenderMaterial mat = grey_material(f);
+    enum {
+        COUNT = 12
+    };
+    NphRenderInstance insts[COUNT];
+    NphDVec3 places[COUNT];
+    for (u32 i = 0; i < COUNT; ++i) {
+        // In a row that widens with distance, all in view.
+        const f64 depth = 7.0 + 3.0 * (f64)i;
+        places[i] = nph_dvec3((-0.45 + 0.9 * (f64)i / (f64)(COUNT - 1)) * depth, 0.0, 7.0 - depth);
+        insts[i] = instance(f, mesh, mat,
+                            nph_render_transform_from_trs(places[i], nph_quat_identity(),
+                                                          nph_vec3(0.4F, 0.4F, 0.4F)));
+    }
+    const NphDVec3 eye = nph_dvec3(0.0, 2.0, 7.0);
+    const NphRenderCamera cam =
+        nph_render_camera_look_at(eye, nph_dvec3(0.0, 0.0, -14.0), nph_vec3_unit_y(), 1.2F, 0.05F);
+    NphRenderView v = production_view(cam);
+    v.lod_error = 0.05F;
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_OCCLUSION | (u32)NPH_RENDER_VIS_NO_CONE;
+    const NphRenderFrameStats s = render_into(f, &v, 4U, NULL);
+    NTEST_EXPECT_EQ_UINT(s.vis_meshlets_culled_frustum, 0U);
+    NTEST_EXPECT_GT_UINT(s.vis_lod_groups, (u32)COUNT);
+    NTEST_EXPECT_EQ_UINT(s.vis_lod_nodes, 0U);
+    u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, m.lods.clusters.meshlets.len);
+    NTEST_ASSERT_NOT_NULL(counts);
+    u32 cuts = 0U; // the distinct numbers of clusters drawn: the instances' cuts differ
+    u32 last = NPH_U32_MAX;
+    for (u32 i = 0; i < COUNT; ++i) {
+        drawn_clusters(f, render_slot_of(&f->renderer->instance_pool, insts[i].value),
+                       m.lods.clusters.meshlets.len, counts);
+        CpuCut cc;
+        cc.lods = &m.lods;
+        cc.position = places[i];
+        cc.rotation = nph_mat3_identity();
+        cc.scale = 0.4F;
+        cc.eye = eye;
+        cc.pixels_per_unit = 0.5F * (f32)TEST_TARGET_SIZE / nph_f32_tan(0.5F * 1.2F);
+        cc.znear = 0.05F;
+        cc.threshold = v.lod_error;
+        const CutCompare r = compare_cut(&cc, counts);
+        NTEST_LOG("instance %u: %u of %u clusters drawn, %u missing, %u extra, %u twice, %u "
+                  "ambiguous",
+                  i, r.drawn, r.expected, r.missing, r.extra, r.twice, r.ambiguous);
+        NTEST_EXPECT_GT_UINT(r.drawn, 0U);
+        NTEST_EXPECT_EQ_UINT(r.missing, 0U);
+        NTEST_EXPECT_EQ_UINT(r.extra, 0U);
+        NTEST_EXPECT_EQ_UINT(r.twice, 0U);
+        cuts += r.drawn != last ? 1U : 0U;
+        last = r.drawn;
+    }
+    NTEST_EXPECT_GE_UINT(cuts, 3U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, m.lods.clusters.meshlets.len);
+    lod_mesh_free(&m);
+}
+
+// A mesh's table holds its levels: a run of its groups each, together all of
+// them; errors that never fall, the last the root groups'; makers no larger than
+// any of a level's clusters'; and a radius that holds every group's sphere.
+NTEST(vis_lod, a_meshs_table_holds_its_levels)
+{
+    LodMesh m;
+    lod_torus(&m, 192U, 64U, 1.0F, 0.35F);
+    const NphSphere sphere = nph_aabb_bounding_sphere(m.desc.bounds);
+    NphVisLodLevel table[RENDER_LOD_MAX_LEVELS];
+    u32 count = 0U;
+    f32 reach = 0.0F;
+    NTEST_ASSERT_TRUE(render_vis_lod_level_table(&m.desc, sphere, table, &count, &reach));
+    NTEST_EXPECT_EQ_UINT(count, m.lods.levels);
+    NTEST_EXPECT_TRUE(reach >= sphere.radius);
+    u32 next = 0U;
+    for (u32 l = 0; l < count; ++l) {
+        const NphVisLodLevel *t = &table[l];
+        NTEST_EXPECT_EQ_UINT(t->first_group, next);
+        NTEST_ASSERT_GT_UINT(t->group_count, 0U);
+        next += t->group_count;
+        if (l != 0U) {
+            NTEST_EXPECT_TRUE(t->error >= table[l - 1U].error);
+        }
+        for (u32 g = t->first_group; g < next; ++g) {
+            const NphRenderLodGroup *rg = &m.lods.groups.data[g];
+            NTEST_EXPECT_EQ_UINT(rg->level, l);
+            NTEST_EXPECT_TRUE(rg->error <= t->error);
+            NTEST_EXPECT_TRUE(
+                nph_vec3_length(nph_vec3_sub(rg->center, sphere.center)) + rg->radius <= reach);
+            for (u32 c = 0; c < rg->cluster_count; ++c) {
+                const u32 cluster = m.lods.group_clusters.data[rg->cluster_offset + c];
+                const u32 maker = m.lods.lods.data[cluster].group;
+                const f32 e = maker != NPH_RENDER_LOD_NONE ? m.lods.groups.data[maker].error : 0.0F;
+                NTEST_EXPECT_TRUE(t->maker_error <= e);
+            }
+        }
+    }
+    NTEST_EXPECT_EQ_UINT(next, m.lods.groups.len);
+    NTEST_EXPECT_TRUE(table[count - 1U].error == NPH_F32_MAX);
+    lod_mesh_free(&m);
+}
+
+// Groups that do not keep to their levels' order leave a mesh no table: its
+// hierarchy is walked, whatever its size, and its cut is the CPU's.
+NTEST_F(VisLod, groups_out_of_their_levels_order_walk_their_hierarchy)
+{
+    REQUIRE_PRODUCTION(f);
+    sky(f);
+    LodMesh m;
+    lod_torus(&m, 192U, 64U, 1.0F, 0.35F);
+    // The first group of level 1 changes places with the first of level 0.
+    NphRenderClusterLods *l = &m.lods;
+    u32 b = 0U;
+    while (l->groups.data[b].level == 0U) {
+        ++b;
+    }
+    const NphRenderLodGroup swap = l->groups.data[0];
+    l->groups.data[0] = l->groups.data[b];
+    l->groups.data[b] = swap;
+    for (u32 i = 0; i < l->lods.len; ++i) {
+        NphRenderClusterLod *c = &l->lods.data[i];
+        c->group = c->group == 0U ? b : (c->group == b ? 0U : c->group);
+        c->parent = c->parent == 0U ? b : (c->parent == b ? 0U : c->parent);
+    }
+    for (u32 n = 0; n < l->nodes.len; ++n) {
+        for (u32 i = 0; i < NPH_RENDER_LOD_NODE_CHILDREN; ++i) {
+            u32 *child = &l->nodes.data[n].child[i];
+            if (*child == (NPH_RENDER_LOD_LEAF | 0U)) {
+                *child = NPH_RENDER_LOD_LEAF | b;
+            } else if (*child == (NPH_RENDER_LOD_LEAF | b)) {
+                *child = NPH_RENDER_LOD_LEAF | 0U;
+            }
+        }
+    }
+    const NphRenderMesh mesh = create_mesh(f, &m.desc);
+    const u32 slot = render_slot_of(&f->renderer->mesh_pool, mesh.value);
+    NTEST_EXPECT_NE_UINT(f->renderer->meshes[slot].lod_walk_depth, 0U);
+    const NphRenderMaterial mat = grey_material(f);
+    u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, m.lods.clusters.meshlets.len);
+    NTEST_ASSERT_NOT_NULL(counts);
+    const CutCase k = {
+        {0.0, 0.7, 2.9}, {0.0, 0.0, 0.0}, nph_vec3_unit_y(), 1.2F, 0.26F, 0.0F, 1.0F};
+    NphRenderFrameStats s;
+    const CutCompare r = cut_of(f, &m, mesh, mat, counts, &k, &s);
+    NTEST_EXPECT_GT_UINT(s.vis_lod_nodes, 0U);
+    NTEST_EXPECT_EQ_UINT(s.vis_lod_groups, 0U);
+    NTEST_EXPECT_EQ_UINT(r.missing, 0U);
+    NTEST_EXPECT_EQ_UINT(r.extra, 0U);
+    NTEST_EXPECT_EQ_UINT(r.twice, 0U);
     NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, m.lods.clusters.meshlets.len);
     nph_render_mesh_destroy(f->renderer, mesh);
     lod_mesh_free(&m);
@@ -312,8 +560,7 @@ NTEST_F(VisLod, the_clusters_drawn_are_the_cpus_cut)
 
 // A threshold of zero draws level 0 through the meshes' own meshlets, as a
 // mesh without levels: the same image, byte for byte, and no hierarchy
-// walked. The frame takes as many steps as the deepest live hierarchy has
-// levels, and none once the mesh is gone.
+// walked. A mesh the flat cull takes adds no step to the frame.
 NTEST_F(VisLod, a_threshold_of_zero_draws_level_0)
 {
     REQUIRE_PRODUCTION(f);
@@ -338,6 +585,7 @@ NTEST_F(VisLod, a_threshold_of_zero_draws_level_0)
     NphRenderInstance i = instance(f, with, mat, at(0.0, 0.0, 0.0, 1.0F));
     const NphRenderFrameStats sa = render_into(f, &v, 3U, a);
     NTEST_EXPECT_EQ_UINT(f->renderer->vis.frame.lod_steps, 0U);
+    NTEST_EXPECT_FALSE(f->renderer->vis.frame.lod_flat);
     nph_render_instance_destroy(f->renderer, i);
     i = instance(f, without, mat, at(0.0, 0.0, 0.0, 1.0F));
     const NphRenderFrameStats sb = render_into(f, &v, 3U, b);
@@ -347,16 +595,50 @@ NTEST_F(VisLod, a_threshold_of_zero_draws_level_0)
     NTEST_EXPECT_EQ_UINT(sa.vis_lod_clusters_culled, 0U);
     NTEST_EXPECT_EQ_UINT(sa.vis_triangles, sb.vis_triangles);
     NTEST_EXPECT_EQ_UINT(sa.vis_triangles, m.data.index_count / 3U);
-    // A threshold above zero walks the hierarchy, a step per two node levels.
+    // A threshold above zero takes the flat cull, and none of its passes once
+    // the mesh is gone.
     v.lod_error = 1.0F;
     (void)render_into(f, &v, 1U, NULL);
-    NTEST_EXPECT_EQ_UINT(f->renderer->vis.frame.lod_steps, (depth + 1U) / 2U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->vis.frame.lod_steps, 0U);
+    NTEST_EXPECT_TRUE(f->renderer->vis.frame.lod_flat);
     nph_render_mesh_destroy(f->renderer, with);
     NTEST_EXPECT_EQ_UINT(f->renderer->vis.lod_depths[depth - 1U], 0U);
     (void)render_into(f, &v, 1U, NULL);
     NTEST_EXPECT_EQ_UINT(f->renderer->vis.frame.lod_steps, 0U);
+    NTEST_EXPECT_FALSE(f->renderer->vis.frame.lod_flat);
     nph_render_mesh_destroy(f->renderer, without);
     lod_mesh_free(&m);
+}
+
+// A mesh the camera may walk takes a step per two node levels, and none once it
+// is gone.
+NTEST(vis_lod, the_deepest_walkable_hierarchy_sets_the_frames_steps)
+{
+    RenderFixture fx;
+    walking_fixture(&fx);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    sky(&fx);
+    LodMesh m;
+    lod_torus(&m, 96U, 32U, 1.0F, 0.35F);
+    const NphRenderMesh mesh = create_mesh(&fx, &m.desc);
+    const u32 slot = render_slot_of(&fx.renderer->mesh_pool, mesh.value);
+    const u32 depth = fx.renderer->meshes[slot].lod_depth;
+    NTEST_EXPECT_EQ_UINT(fx.renderer->meshes[slot].lod_walk_depth, depth);
+    NphRenderView v = production_view(test_camera());
+    (void)render_into(&fx, &v, 1U, NULL);
+    NTEST_EXPECT_EQ_UINT(fx.renderer->vis.frame.lod_steps, (depth + 1U) / 2U);
+    nph_render_mesh_destroy(fx.renderer, mesh);
+    NTEST_EXPECT_EQ_UINT(fx.renderer->vis.lod_walk_depths[depth - 1U], 0U);
+    (void)render_into(&fx, &v, 1U, NULL);
+    NTEST_EXPECT_EQ_UINT(fx.renderer->vis.frame.lod_steps, 0U);
+    lod_mesh_free(&m);
+    test_render_teardown(&fx);
 }
 
 // Farther away, coarser levels: the triangles drawn fall with distance, to
@@ -585,9 +867,9 @@ NTEST(vis_lod, a_mixed_cut_leaves_no_holes)
 // Phase 1
 // ---------------------------------------------------------------------------
 
-// An instance phase 0 defers (last frame's depth hid it) walks its hierarchy
-// in phase 1, against this frame's depth: the first frame after the wall in
-// front of it moves away draws it whole, as the frames after do.
+// An instance phase 0 defers (last frame's depth hid it) takes its groups in
+// phase 1, against this frame's depth: the first frame after the wall in front
+// of it moves away draws it whole, as the frames after do.
 NTEST_F(VisLod, an_instance_revealed_in_phase_1_draws_its_whole_cut)
 {
     REQUIRE_PRODUCTION(f);
@@ -616,27 +898,142 @@ NTEST_F(VisLod, an_instance_revealed_in_phase_1_draws_its_whole_cut)
     NphVisCounters c;
     test_read_buffer(f->dev, f->renderer->vis.counters, 0U, sizeof c, &c);
     const NphRenderFrameStats s = render_into(f, &v, 3U, later);
-    NTEST_LOG("the frame after the reveal: %u instances deferred, %u nodes visited",
-              c.deferred_instances, c.lod_nodes_visited);
+    NTEST_LOG("the frame after the reveal: %u instances deferred, %u groups tested",
+              c.deferred_instances, c.lod_groups_tested);
     NTEST_EXPECT_GE_UINT(c.deferred_instances, 1U);
-    NTEST_EXPECT_GT_UINT(c.lod_nodes_visited, 0U);
+    NTEST_EXPECT_GT_UINT(c.lod_groups_tested, 0U);
     NTEST_EXPECT_GT_UINT(s.vis_triangles, 0U);
     NTEST_EXPECT_EQ_MEM(first, later, PIXELS);
     lod_mesh_free(&m);
+}
+
+// A group last frame's depth hid waits, whole, for this frame's: a wall hides
+// half of an instance that is seen, so its instance is not deferred but some of
+// its groups are; and the first frame after the wall moves away draws them all,
+// as the frames after do.
+NTEST_F(VisLod, a_group_hidden_last_frame_waits_for_this_frames_depth)
+{
+    REQUIRE_PRODUCTION(f);
+    sky(f);
+    LodMesh m;
+    lod_torus(&m, 192U, 64U, 1.0F, 0.35F);
+    const NphRenderMesh mesh = create_mesh(f, &m.desc);
+    NphRenderMeshData cube_data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_cube(nph_allocator_system(), 1.0F, &cube_data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh cube = test_upload_mesh(f->renderer, &cube_data);
+    nph_render_mesh_data_free(&cube_data);
+    const NphRenderMaterial mat = grey_material(f);
+    NphRenderTransform wall = at(3.0, 0.0, 2.0, 1.0F);
+    wall.linear = nph_mat3_from_scale(nph_vec3(6.0F, 6.0F, 0.2F));
+    const NphRenderInstance w = instance(f, cube, mat, wall);
+    (void)instance(f, mesh, mat, at(0.0, 0.0, -1.0, 1.0F));
+    NphRenderView v = production_view(test_camera());
+    v.debug_view = NPH_RENDER_VIEW_INSTANCES;
+    // Fine enough for groups smaller than what the wall hides.
+    v.lod_error = 0.02F;
+    static u8 first[PIXELS];
+    static u8 later[PIXELS];
+    (void)render_into(f, &v, 3U, NULL);
+    NphVisCounters behind;
+    test_read_buffer(f->dev, f->renderer->vis.counters, 0U, sizeof behind, &behind);
+    NTEST_LOG("behind the wall: %u instances deferred, %u of the %u groups tested for phase 1",
+              behind.deferred_instances, behind.lod_group_items[1], behind.lod_groups_tested);
+    NTEST_EXPECT_GT_UINT(behind.lod_group_items[1], 0U);
+    NTEST_EXPECT_EQ_UINT(behind.deferred_instances, 0U);
+    const NphRenderTransform aside = at(60.0, 0.0, 2.0, 1.0F);
+    NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(f->renderer, w, &aside), NPH_RESULT_OK);
+    (void)render_into(f, &v, 1U, first);
+    NphVisCounters revealed;
+    test_read_buffer(f->dev, f->renderer->vis.counters, 0U, sizeof revealed, &revealed);
+    NTEST_EXPECT_GT_UINT(revealed.lod_group_items[1], 0U);
+    (void)render_into(f, &v, 3U, later);
+    NTEST_EXPECT_EQ_MEM(first, later, PIXELS);
+    lod_mesh_free(&m);
+}
+
+// A step with nothing to take runs no workgroup, so it empties nothing: what its
+// queue's neighbours held must not come round again. An instance of a shallow
+// hierarchy is revealed in phase 1, whose first step finds no node, beside a
+// live hierarchy deep enough for the phase to take four steps, the last from
+// the first's queue: each of its clusters is drawn once.
+NTEST(vis_lod, a_step_with_nothing_to_take_lets_no_queue_come_round_again)
+{
+    RenderFixture fx;
+    walking_fixture(&fx);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    sky(&fx);
+    LodMesh shallow;
+    lod_torus(&shallow, 48U, 16U, 1.0F, 0.35F);
+    LodMesh deep;
+    lod_torus(&deep, 24U, 8U, 1.0F, 0.35F);
+    lod_mesh_deepen(&deep, 8U);
+    const NphRenderMesh shallow_mesh = create_mesh(&fx, &shallow.desc);
+    const NphRenderMesh deep_mesh = create_mesh(&fx, &deep.desc);
+    const u32 shallow_slot = render_slot_of(&fx.renderer->mesh_pool, shallow_mesh.value);
+    const u32 deep_slot = render_slot_of(&fx.renderer->mesh_pool, deep_mesh.value);
+    NTEST_ASSERT_LE_UINT(fx.renderer->meshes[shallow_slot].lod_depth, 2U);
+    NTEST_ASSERT_GE_UINT(fx.renderer->meshes[deep_slot].lod_depth, 7U);
+    NphRenderMeshData cube_data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_cube(nph_allocator_system(), 1.0F, &cube_data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh cube = test_upload_mesh(fx.renderer, &cube_data);
+    nph_render_mesh_data_free(&cube_data);
+    const NphRenderMaterial mat = grey_material(&fx);
+    NphRenderTransform wall = at(0.0, 0.0, 2.0, 1.0F);
+    wall.linear = nph_mat3_from_scale(nph_vec3(6.0F, 6.0F, 0.2F));
+    const NphRenderInstance w = instance(&fx, cube, mat, wall);
+    const NphRenderInstance inst = instance(&fx, shallow_mesh, mat, at(0.0, 0.0, -1.0, 1.0F));
+    NphRenderView v = production_view(test_camera());
+    (void)render_into(&fx, &v, 3U, NULL);
+    NTEST_EXPECT_GE_UINT(fx.renderer->vis.frame.lod_steps, 4U);
+    const NphRenderTransform aside = at(60.0, 0.0, 2.0, 1.0F);
+    NTEST_EXPECT_EQ_INT(nph_render_instance_set_transform(fx.renderer, w, &aside), NPH_RESULT_OK);
+    (void)render_into(&fx, &v, 1U, NULL);
+    NphVisCounters c;
+    test_read_buffer(fx.dev, fx.renderer->vis.counters, 0U, sizeof c, &c);
+    NTEST_LOG("the frame after the reveal: %u instances deferred, %u nodes visited, %u clusters",
+              c.deferred_instances, c.lod_nodes_visited, c.clusters);
+    NTEST_EXPECT_GE_UINT(c.deferred_instances, 1U);
+    NTEST_EXPECT_GT_UINT(c.lod_nodes_visited, 0U);
+    u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, shallow.lods.clusters.meshlets.len);
+    NTEST_ASSERT_NOT_NULL(counts);
+    drawn_clusters(&fx, render_slot_of(&fx.renderer->instance_pool, inst.value),
+                   shallow.lods.clusters.meshlets.len, counts);
+    u32 drawn = 0U;
+    u32 twice = 0U;
+    for (u32 i = 0; i < shallow.lods.clusters.meshlets.len; ++i) {
+        drawn += counts[i] != 0U ? 1U : 0U;
+        twice += counts[i] > 1U ? 1U : 0U;
+    }
+    NTEST_EXPECT_GT_UINT(drawn, 0U);
+    NTEST_EXPECT_EQ_UINT(twice, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, shallow.lods.clusters.meshlets.len);
+    lod_mesh_free(&shallow);
+    lod_mesh_free(&deep);
+    test_render_teardown(&fx);
 }
 
 // ---------------------------------------------------------------------------
 // Limits and validation
 // ---------------------------------------------------------------------------
 
-// More hierarchy work than max_lod_nodes holds: the work past it is dropped
-// and the overflow reported, with no error.
-NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
+// More work of the levels than max_lod_nodes and max_lod_groups hold: the work
+// past them is dropped and the overflow reported, with no error.
+static void check_full_list(u32 flat_groups)
 {
     RenderFixture fx;
     NphRendererDesc rd;
     test_renderer_desc(&rd, NULL);
     rd.max_lod_nodes = 64U;
+    rd.max_lod_groups = 64U;
+    rd.max_lod_flat_groups = flat_groups;
     rd.max_instances = 256U;
     test_render_setup(&fx, &rd);
     if (fx.dev == NULL) {
@@ -647,9 +1044,7 @@ NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
         NTEST_SKIP("no production path on this device");
     }
     sky(&fx);
-    // More instances walking their hierarchies than the queue holds roots:
-    // far enough for coarse levels (near ones would draw level 0 without the
-    // walk), all in view.
+    // More instances than the lists hold, all in view.
     LodMesh m;
     lod_torus(&m, 96U, 32U, 1.0F, 0.35F);
     const NphRenderMesh mesh = create_mesh(&fx, &m.desc);
@@ -662,11 +1057,65 @@ NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
     }
     NphRenderView v = production_view(nph_render_camera_look_at(
         nph_dvec3(0.0, 0.0, 4.0), nph_dvec3(0.0, 0.0, -15.0), nph_vec3_unit_y(), 1.2F, 0.05F));
+    // Fine enough that no instance's run is one group alone, which the flat cull
+    // takes whatever its limit.
+    v.lod_error = 0.02F;
     const NphRenderFrameStats s = render_into(&fx, &v, 4U, NULL);
-    NTEST_LOG("overflow bits %#x; %u nodes visited", s.vis_overflow, s.vis_lod_nodes);
+    NTEST_LOG("overflow bits %#x; %u groups tested, %u nodes visited", s.vis_overflow,
+              s.vis_lod_groups, s.vis_lod_nodes);
     NTEST_EXPECT_NE_UINT(s.vis_overflow & (u32)NPH_RENDER_VIS_OVERFLOW_LOD_NODES, 0U);
-    NTEST_EXPECT_GT_UINT(s.vis_lod_nodes, 0U);
+    NTEST_EXPECT_LE_UINT(s.vis_lod_groups, 64U * 2U);
     NTEST_EXPECT_LE_UINT(s.vis_lod_nodes, 64U * 2U * 16U);
+    if (flat_groups == 1U) {
+        NTEST_EXPECT_GT_UINT(s.vis_lod_nodes, 0U);
+    } else {
+        NTEST_EXPECT_GT_UINT(s.vis_lod_groups, 0U);
+    }
+    lod_mesh_free(&m);
+    test_render_teardown(&fx);
+}
+
+NTEST(vis_lod, a_full_list_of_groups_is_reported)
+{
+    check_full_list(0U);
+}
+
+NTEST(vis_lod, a_full_hierarchy_queue_is_reported)
+{
+    check_full_list(1U);
+}
+
+// More chunks of long runs than the list holds: reported too, and those it holds
+// are tested.
+NTEST(vis_lod, a_full_list_of_chunks_is_reported)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.max_lod_groups = 64U;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    sky(&fx);
+    LodMesh m;
+    lod_torus(&m, 512U, 128U, 1.0F, 0.35F);
+    const NphRenderMesh mesh = create_mesh(&fx, &m.desc);
+    const NphRenderMaterial mat = grey_material(&fx);
+    (void)instance(&fx, mesh, mat, at(0.0, 0.0, 0.0, 1.0F));
+    NphRenderView v = production_view(nph_render_camera_look_at(
+        nph_dvec3(0.0, 0.7, 2.9), nph_dvec3_zero(), nph_vec3_unit_y(), 1.2F, 0.05F));
+    v.lod_error = 0.02F;
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_OCCLUSION | (u32)NPH_RENDER_VIS_NO_CONE;
+    const NphRenderFrameStats s = render_into(&fx, &v, 4U, NULL);
+    NTEST_LOG("overflow bits %#x; %u groups tested", s.vis_overflow, s.vis_lod_groups);
+    NTEST_EXPECT_NE_UINT(s.vis_overflow & (u32)NPH_RENDER_VIS_OVERFLOW_LOD_NODES, 0U);
+    NTEST_EXPECT_GT_UINT(s.vis_lod_groups, 0U);
+    NTEST_EXPECT_LE_UINT(s.vis_lod_groups, 2U * 64U);
     lod_mesh_free(&m);
     test_render_teardown(&fx);
 }

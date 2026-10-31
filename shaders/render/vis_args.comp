@@ -55,7 +55,9 @@ void main()
         const uint instances = min(counters.c.deferred_instances, view.v.max_deferred);
         const uvec4 a = groups((instances + 63u) / 64u, VIS_MAX_GROUPS_X);
         args.a.instance2_args = uint[4](a.x, a.y, a.z, a.w);
-        // Phase 1's hierarchies start from empty queues.
+        // Phase 1's flat cull takes chunks of its own (its work items follow
+        // those phase 0 deferred), and its hierarchies start from empty queues.
+        counters.c.lod_group_chunks = 0u;
         for (uint q = 0u; q < uint(NPH_VIS_LOD_QUEUES); ++q) {
             counters.c.lod_nodes[q] = 0u;
             args.a.lod_node_args[q][0] = 0u;

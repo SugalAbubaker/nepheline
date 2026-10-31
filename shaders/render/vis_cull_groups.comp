@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: Apache-2.0
+// The flat cull of a mesh's levels of detail (docs/render.md "Levels of
+// detail"; ADR-0070). The instance cull lists the groups of the levels an
+// instance's distance may take (vis_lod_span): this pass tests each once, a
+// lane a group, in one dispatch a phase, with nothing to wait for, as a step
+// of the hierarchy tests a child that is a group (vis_cull_nodes.comp):
+//
+//   - an error that projects within the view's threshold: the clusters it
+//     would lead to are not wanted, their coarser stand-ins are drawn from
+//     elsewhere (vis_lod_group_too_coarse, as the meshlet cull tests the group
+//     that made a cluster);
+//   - a smallest maker error that projects beyond the threshold even from the
+//     sphere's far side: every cluster it holds would be replaced by a finer
+//     one in turn (vis_lod_surely_too_coarse);
+//   - a sphere outside the frustum: nothing of it is seen;
+//   - otherwise, its clusters go to the phase's meshlet list.
+//
+// And occlusion, in the two phases of Karis et al., "Nanite: A Deep Dive"
+// (SIGGRAPH 2021): phase 0 tests the previous frame's depth, seen from the
+// previous camera, and a group hidden there waits, whole, for phase 1, which
+// tests this frame's. A group's sphere holds every triangle of its clusters,
+// so a group hidden from a view has every cluster hidden too. Tested here, a
+// hidden group costs a lane a phase, where its clusters would cost the meshlet
+// cull a lane each in both phases: most of what a street's instances hold is
+// behind something.
+//
+// pc.arg0 selects the work: 0, the phase's work items, (instance, group), 64
+// to a workgroup; 1, the chunks of its long runs, a workgroup each (see
+// vis_cull_instances.comp).
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    const uint phase = pc.phase;
+    uvec2 item = uvec2(0u);
+    bool valid = false;
+    if (pc.arg0 == 0u) {
+        const uint i = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+        valid = i < min(counters.c.lod_group_items[phase], view.v.max_lod_groups);
+        if (valid) {
+            item = VisUvec2Ref(view.v.lod_group_list[phase]).v[i];
+        }
+    } else {
+        const uvec2 chunk = VisUvec2Ref(view.v.lod_chunk_list).v[gl_WorkGroupID.x];
+        valid = gl_LocalInvocationIndex <= (chunk.y >> NPH_VIS_LOD_CHUNK_SHIFT);
+        item = uvec2(chunk.x, (chunk.y & ((1u << NPH_VIS_LOD_CHUNK_SHIFT) - 1u)) +
+                                  gl_LocalInvocationIndex);
+    }
+    bool later = false; // hidden from the previous frame's view: for phase 1
+    uint clusters = 0u;
+    uint first = 0u;
+    uint64_t members_address = 0ul;
+    if (valid) {
+        const NphVisInstance inst = VisInstancesRef(view.v.instances).i[item.x];
+        const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+        const NphVisLodGroup g = VisLodGroupsRef(mesh.lod_groups).g[item.y];
+        const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                view.v.camera_low.xyz);
+        const float scale = vis_max_scale(inst.transform);
+        const bool finest = (inst.flags & NPH_VIS_INSTANCE_FINEST) != 0u;
+        bool keep = vis_lod_group_too_coarse(view, inst.transform, g.sphere, g.error);
+        keep = keep && (finest || !vis_lod_surely_too_coarse(view, inst.transform, t, scale,
+                                                              g.sphere, g.maker_error));
+        if (keep) {
+            const vec3 c = vis_transform_vector(inst.transform, g.sphere.xyz) + t;
+            const float r = g.sphere.w * scale;
+            keep = vis_sphere_in_frustum(view, c, r);
+            if (keep && (view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u) {
+                vec4 rect;
+                float depth;
+                if (phase == 1u) {
+                    const vec3 cv = (view.v.view * vec4(c, 1.0)).xyz;
+                    keep = !(vis_project_sphere(cv, r, view.v.projection, rect, depth) &&
+                             vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth));
+                } else if ((view.v.flags & NPH_VIS_VIEW_HZB_VALID) != 0u) {
+                    // As the previous frame saw it.
+                    const NphVisTransform pt = VisTransformsRef(view.v.prev_transforms).t[item.x];
+                    const vec3 ptr = vis_relative_translation(pt, view.v.prev_camera_high.xyz,
+                                                              view.v.prev_camera_low.xyz);
+                    const vec3 pw = vis_transform_vector(pt, g.sphere.xyz) + ptr;
+                    const vec3 pv = (view.v.prev_view * vec4(pw, 1.0)).xyz;
+                    later = vis_project_sphere(pv, g.sphere.w * vis_max_scale(pt),
+                                               view.v.prev_projection, rect, depth) &&
+                            vis_hzb_occluded(view, rect + view.v.jitter.zwzw, depth);
+                    keep = !later;
+                }
+            }
+        }
+        if (keep) {
+            clusters = g.cluster_count;
+            first = g.cluster_offset;
+            members_address = mesh.lod_group_clusters;
+        }
+    }
+    VIS_COUNT(counters.c.lod_groups_tested, valid);
+
+    // A group for phase 1 joins its work items, and its workgroups are raised
+    // to take it.
+    if (phase == 0u) {
+        uint d;
+        VIS_RESERVE(counters.c.lod_group_items[1], later ? 1u : 0u, d);
+        if (later) {
+            if (d < view.v.max_lod_groups) {
+                VisUvec2Ref(view.v.lod_group_list[1]).v[d] = item;
+            } else {
+                atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_LOD_NODES));
+            }
+        }
+        const uint end = subgroupMax(later ? min(d + 1u, view.v.max_lod_groups) : 0u);
+        if (end != 0u && subgroupElect()) {
+            atomicMax(VisArgsRef(view.v.args).a.lod_group_args[1][0], (end + 63u) / 64u);
+        }
+    }
+
+    // Its clusters, into the phase's meshlet list.
+    uint mbase;
+    if (phase == 0u) {
+        VIS_RESERVE(counters.c.cull_meshlets, clusters, mbase);
+    } else {
+        VIS_RESERVE(counters.c.deferred_meshlets, clusters, mbase);
+    }
+    if (clusters != 0u) {
+        VisUintRef members = VisUintRef(members_address);
+        const uint capacity = phase == 0u ? view.v.max_cull_meshlets : view.v.max_deferred;
+        VisUvec2Ref list = VisUvec2Ref(phase == 0u ? view.v.cull_meshlets : view.v.deferred_meshlets);
+        for (uint j = 0u; j < clusters; ++j) {
+            if (mbase + j < capacity) {
+                list.v[mbase + j] = uvec2(item.x, members.v[first + j]);
+            } else {
+                atomicOr(counters.c.overflow, phase == 0u ? uint(NPH_VIS_OVERFLOW_MESHLETS)
+                                                          : uint(NPH_VIS_OVERFLOW_DEFERRED));
+            }
+        }
+    }
+}

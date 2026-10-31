@@ -35,7 +35,15 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 192U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 208U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisLodLevel) == 16U, "NphVisLodLevel matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisLodGroup) == sizeof(NphRenderLodGroup),
+                  "NphVisLodGroup is its NphRenderLodGroup, a field different");
+NPH_STATIC_ASSERT(offsetof(NphVisLodGroup, cluster_offset) ==
+                          offsetof(NphRenderLodGroup, cluster_offset) &&
+                      offsetof(NphVisLodGroup, cluster_count) ==
+                          offsetof(NphRenderLodGroup, cluster_count),
+                  "the walk reads a group's clusters from either record");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, voxel_bricks) % 8U == 0U &&
                       offsetof(NphVisMesh, voxels) % 8U == 0U &&
                       offsetof(NphVisMesh, voxel_clusters) % 8U == 0U,
@@ -230,8 +238,11 @@ NphResult render_vis_scene_create(NphRenderer *r)
         NPH_TRY(make_buffer(r, 4U * (u64)d->max_visible_clusters * sizeof(NphVisDraw), indirect,
                             NPH_GPU_MEMORY_DEVICE, "vis draws", &v->draws));
     }
-    NPH_TRY(make_buffer(r, (u64)NPH_VIS_LOD_QUEUES * d->max_lod_nodes * 2U * sizeof(u32), storage,
-                        NPH_GPU_MEMORY_DEVICE, "vis hierarchy queues", &v->lod_queue));
+    NPH_TRY(make_buffer(r,
+                        ((u64)NPH_VIS_LOD_QUEUES * d->max_lod_nodes + 2ULL * d->max_lod_groups +
+                         RENDER_LOD_CHUNKS(d->max_lod_groups)) *
+                            2U * sizeof(u32),
+                        storage, NPH_GPU_MEMORY_DEVICE, "vis levels' work", &v->lod_queue));
     for (u32 i = 0; i < NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
         NPH_TRY(make_buffer(r, sizeof(NphVisCounters), (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
                             NPH_GPU_MEMORY_READBACK, "vis statistics", &v->stats[i]));
@@ -454,15 +465,84 @@ static NphResult upload_makers(NphRenderer *r, RenderMesh *m, const NphRenderMes
     return res;
 }
 
+bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, NphVisLodLevel *table,
+                                u32 *out_count, f32 *out_reach)
+{
+    if (d->lod_makers != NULL || d->voxel_brick_count != 0U ||
+        d->lod_group_count >= 1U << NPH_VIS_LOD_CHUNK_SHIFT) {
+        return false;
+    }
+    u32 count = 0U;
+    u32 level = 0U;
+    f64 reach = (f64)sphere.radius;
+    for (u32 g = 0; g < d->lod_group_count; ++g) {
+        const NphRenderLodGroup *rg = &d->lod_groups[g];
+        if (g == 0U || rg->level != level) {
+            if ((g != 0U && rg->level < level) || count == RENDER_LOD_MAX_LEVELS) {
+                return false;
+            }
+            level = rg->level;
+            table[count] = (NphVisLodLevel){0.0F, NPH_F32_MAX, g, 0U};
+            count += 1U;
+        }
+        NphVisLodLevel *t = &table[count - 1U];
+        t->error = nph_f32_max(t->error, rg->error);
+        t->maker_error = nph_f32_min(t->maker_error, render_lod_group_maker_error(d, rg));
+        t->group_count += 1U;
+        const f64 x = (f64)rg->center.x - (f64)sphere.center.x;
+        const f64 y = (f64)rg->center.y - (f64)sphere.center.y;
+        const f64 z = (f64)rg->center.z - (f64)sphere.center.z;
+        const f64 far = nph_f64_sqrt(x * x + y * y + z * z) + (f64)rg->radius;
+        reach = far > reach ? far : reach;
+    }
+    for (u32 i = 1U; i < count; ++i) {
+        table[i].error = nph_f32_max(table[i].error, table[i - 1U].error);
+    }
+    *out_count = count;
+    *out_reach = (f32)(reach * (1.0 + 1e-6));
+    return count != 0U;
+}
+
+// A mesh's groups as the GPU reads them (NphVisLodGroup), each with its makers'
+// smallest error.
+static NphResult upload_groups(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d)
+{
+    NphVisLodGroup *groups = NPH_ALLOC_ARRAY(r->alloc, NphVisLodGroup, d->lod_group_count);
+    if (groups == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    for (u32 g = 0; g < d->lod_group_count; ++g) {
+        const NphRenderLodGroup *rg = &d->lod_groups[g];
+        groups[g].sphere = nph_vec4_from_vec3(rg->center, rg->radius);
+        groups[g].error = rg->error;
+        groups[g].maker_error = render_lod_group_maker_error(d, rg);
+        groups[g].cluster_offset = rg->cluster_offset;
+        groups[g].cluster_count = rg->cluster_count;
+    }
+    const NphResult res = upload_stream(r, groups, (u64)d->lod_group_count * sizeof *groups,
+                                        "mesh lod groups", &m->lod_groups);
+    NPH_FREE_ARRAY(r->alloc, NphVisLodGroup, groups, d->lod_group_count);
+    return res;
+}
+
 // A mesh's levels of detail (NphVisMesh.lod_*): the hierarchy, the groups,
-// their clusters, and each cluster's maker.
+// their clusters, the table of its levels, and each cluster's maker.
 static NphResult upload_lods(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *d,
                              NphVisMesh *rec)
 {
     NPH_TRY(upload_stream(r, d->lod_nodes, (u64)d->lod_node_count * sizeof(NphRenderLodNode),
                           "mesh lod nodes", &m->lod_nodes));
-    NPH_TRY(upload_stream(r, d->lod_groups, (u64)d->lod_group_count * sizeof(NphRenderLodGroup),
-                          "mesh lod groups", &m->lod_groups));
+    NPH_TRY(upload_groups(r, m, d));
+    NphVisLodLevel table[RENDER_LOD_MAX_LEVELS];
+    u32 levels = 0U;
+    f32 reach = 0.0F;
+    if (render_vis_lod_level_table(d, m->sphere, table, &levels, &reach)) {
+        NPH_TRY(upload_stream(r, table, (u64)levels * sizeof table[0], "mesh lod levels",
+                              &m->lod_levels));
+        rec->lod_levels = nph_gpu_buffer_address(r->dev, m->lod_levels);
+        rec->lod_level_count = levels;
+        rec->lod_reach = reach;
+    }
     NPH_TRY(upload_stream(r, d->lod_group_clusters, (u64)d->lod_group_cluster_count * sizeof(u32),
                           "mesh lod group clusters", &m->lod_group_clusters));
     NPH_TRY(upload_makers(r, m, d));
@@ -596,6 +676,12 @@ NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDe
             // has nothing to take back.
             m->lod_depth = lod_depth;
             r->vis.lod_depths[lod_depth - 1U] += 1U;
+            const bool flat = nph_gpu_buffer_is_valid(r->dev, m->lod_levels);
+            r->vis.lod_flat_meshes += flat ? 1U : 0U;
+            if (!flat || d->lod_group_count > r->desc.max_lod_flat_groups) {
+                m->lod_walk_depth = lod_depth;
+                r->vis.lod_walk_depths[lod_depth - 1U] += 1U;
+            }
         }
         if (d->voxel_bricks != NULL && d->voxel_brick_count != 0U) {
             m->voxels_counted = 1;
@@ -627,6 +713,10 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_buffer_destroy(r->dev, m->lod_groups);
     nph_gpu_buffer_destroy(r->dev, m->lod_group_clusters);
     nph_gpu_buffer_destroy(r->dev, m->lod_makers);
+    if (nph_gpu_buffer_is_valid(r->dev, m->lod_levels) && m->lod_depth != 0U) {
+        r->vis.lod_flat_meshes -= 1U;
+    }
+    nph_gpu_buffer_destroy(r->dev, m->lod_levels);
     nph_gpu_buffer_destroy(r->dev, m->voxel_clusters);
     nph_gpu_buffer_destroy(r->dev, m->voxel_bricks);
     nph_gpu_buffer_destroy(r->dev, m->voxels);
@@ -639,9 +729,14 @@ void render_vis_mesh_destroy(NphRenderer *r, u32 slot)
     m->lod_groups = NPH_GPU_BUFFER_NULL;
     m->lod_group_clusters = NPH_GPU_BUFFER_NULL;
     m->lod_makers = NPH_GPU_BUFFER_NULL;
+    m->lod_levels = NPH_GPU_BUFFER_NULL;
     m->voxel_clusters = NPH_GPU_BUFFER_NULL;
     m->voxel_bricks = NPH_GPU_BUFFER_NULL;
     m->voxels = NPH_GPU_BUFFER_NULL;
+    if (m->lod_walk_depth != 0U) {
+        r->vis.lod_walk_depths[m->lod_walk_depth - 1U] -= 1U;
+        m->lod_walk_depth = 0U;
+    }
     if (m->lod_depth != 0U) {
         r->vis.lod_depths[m->lod_depth - 1U] -= 1U;
         m->lod_depth = 0U;

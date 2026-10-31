@@ -25,8 +25,11 @@
 //     through (vis_cull_meshlets.comp) and tests them as any cluster.
 //
 // The step raises the next step's workgroups to take what it put in queue
-// arg1, and empties queue arg2 (the step before read it) for the step after
-// the next to fill: the steps follow one another without a pass between.
+// arg1, zeroes its own (it has taken them, and a queue's are not read again
+// until they are raised), and empties queue arg2 (the step before read it) for
+// the step after the next to fill: the steps follow one another without a pass
+// between, and a step with nothing to do takes no workgroups, so an empty queue
+// leaves the others as they are.
 //
 // Phase 0 does not test occlusion: the previous frame's depth could hide a
 // part that is visible now, and the clusters' own two-phase test catches
@@ -80,7 +83,7 @@ void main()
                             gl_LocalInvocationIndex;
     if (invocation == 0u) {
         counters.c.lod_nodes[pc.arg2] = 0u;
-        args.a.lod_node_args[pc.arg2][0] = 0u;
+        args.a.lod_node_args[qin][0] = 0u;
     }
     const uint id = invocation >> 6u;                // the work item
     const uint child_lane = (invocation >> 3u) & 7u; // its node's child

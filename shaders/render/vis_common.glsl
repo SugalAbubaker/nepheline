@@ -518,16 +518,9 @@ struct NphVisLodNode {
     float maker_error[NPH_VIS_LOD_CHILDREN]; // the smallest maker error below
     uint child[NPH_VIS_LOD_CHILDREN];        // node, group | NPH_VIS_LOD_LEAF, or NPH_VIS_LOD_NONE
 };
-struct NphVisLodGroup {
-    vec3 center;
-    float radius;
-    float error;
-    uint level;
-    uint cluster_offset;
-    uint cluster_count;
-};
 NPH_BUFFER_REF(VisLodNodesRef) { NphVisLodNode n[]; };
 NPH_BUFFER_REF(VisLodGroupsRef) { NphVisLodGroup g[]; };
+NPH_BUFFER_REF(VisLodLevelsRef) { NphVisLodLevel l[]; };
 
 // The sphere (mesh space: xyz centre, w radius) and the error of the group
 // that made cluster `c` of `mesh` (NphVisMesh.lod_makers: every cluster's
@@ -633,6 +626,42 @@ bool vis_lod_surely_too_coarse(VisViewRef view, NphVisTransform tr, vec3 t, floa
     const float far = length(c) + sphere.w * scale * (1.0 + 1.0 / 4096.0) +
                       (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
     return e > far && e > view.v.lod.y * (1.0 + 1.0 / 4096.0);
+}
+
+// The groups of the levels the view may take of an instance's mesh, as a run
+// of its groups: from the coarsest level down, past those whose every maker is
+// surely too coarse even from the far side of the sphere that holds them all
+// (NphVisMesh.lod_reach; an instance of its cell's finest level has fine
+// makers), then on while a level's largest error may be too coarse from its
+// near side. These are the tests of vis_lod_surely_too_coarse and
+// vis_lod_node_too_coarse, written for one sphere and many errors, and as loose:
+// a level they leave out holds no group the exact test takes. A level's error
+// is no less than a finer one's, so the first that is fine ends the run.
+void vis_lod_span(VisViewRef view, NphVisMesh mesh, NphVisTransform tr, vec3 t, float scale,
+                  bool finest, out uint first, out uint count)
+{
+    const vec3 m = vis_transform_vector(tr, mesh.sphere.xyz);
+    const vec3 magnitude = abs(m) + abs(t);
+    const float slack = (magnitude.x + magnitude.y + magnitude.z) * (1.0 / 65536.0);
+    const float d = length(m + t);
+    const float loose = 1.0 + 1.0 / 4096.0;
+    const float reach = mesh.lod_reach * scale * loose;
+    const float k = view.v.lod.x * scale;
+    const float near_side = max(view.v.lod.y, d - reach - slack);
+    const float far_side = max(view.v.lod.y * loose, d + reach + slack);
+    VisLodLevelsRef levels = VisLodLevelsRef(mesh.lod_levels);
+    uint b = mesh.lod_level_count - 1u;
+    if (!finest) {
+        while (b > 0u && levels.l[b].maker_error * k * (1.0 - 1.0 / 4096.0) > far_side) {
+            --b;
+        }
+    }
+    uint a = b;
+    while (a > 0u && levels.l[a - 1u].error * k * loose > near_side) {
+        --a;
+    }
+    first = levels.l[a].first_group;
+    count = levels.l[b].first_group + levels.l[b].group_count - first;
 }
 
 // ---------------------------------------------------------------------------

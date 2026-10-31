@@ -349,6 +349,34 @@ static inline void lod_terrain(LodMesh *m, u32 cells, f32 half)
     NPH_FREE_ARRAY(a, u32, idx, (u64)cells * cells * 6U);
 }
 
+// Deepens a mesh's hierarchy by `extra` node levels above its root, a node of
+// one child each over what the old root held, as if it had many levels.
+static inline void lod_mesh_deepen(LodMesh *m, u32 extra)
+{
+    for (u32 i = 0; i < extra; ++i) {
+        const NphRenderLodNode old = m->lods.nodes.data[0];
+        NphRenderLodNode top;
+        memset(&top, 0, sizeof top);
+        f32 error = 0.0F;
+        f32 makers = NPH_F32_MAX;
+        for (u32 c = 0; c < NPH_RENDER_LOD_NODE_CHILDREN; ++c) {
+            top.child[c] = NPH_RENDER_LOD_NONE;
+            if (old.child[c] != NPH_RENDER_LOD_NONE) {
+                error = nph_f32_max(error, old.error[c]);
+                makers = nph_f32_min(makers, old.maker_error[c]);
+            }
+        }
+        top.child[0] = m->lods.nodes.len;
+        top.sphere[0] = nph_vec4(0.0F, 0.0F, 0.0F, 1000.0F);
+        top.error[0] = error;
+        top.maker_error[0] = makers;
+        NTEST_ASSERT_EQ_INT(NPH_ARRAY_PUSH(&m->lods.nodes, old), NPH_RESULT_OK);
+        m->lods.nodes.data[0] = top;
+    }
+    m->desc.lod_nodes = m->lods.nodes.data;
+    m->desc.lod_node_count = m->lods.nodes.len;
+}
+
 static inline void lod_mesh_free(LodMesh *m)
 {
     nph_render_packed_voxels_free(&m->packed);

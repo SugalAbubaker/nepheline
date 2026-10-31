@@ -761,6 +761,9 @@ static NphResult create_renderer(App *app, u64 voxel_pool_bytes)
         rd.max_visible_clusters = 524288U * lists;
         rd.max_cull_meshlets = (1U << 20U) * lists;
         rd.max_lod_nodes = (1U << 18U) * lists;
+        // The flat cull's want no more than the city's: voxel meshes, the landscape's,
+        // whose lists these scale for, walk their hierarchies.
+        rd.max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
         rd.max_vsm_meshlets = (1U << 20U) * lists;
         rd.max_vsm_draws = (1U << 20U) * lists;
         rd.max_vsm_voxel_draws = (1U << 20U) * lists;

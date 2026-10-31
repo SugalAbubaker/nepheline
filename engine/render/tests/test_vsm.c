@@ -930,6 +930,57 @@ NTEST_F(Vsm, a_caster_with_levels_shadows_as_its_level_0)
     lod_mesh_free(&torus);
 }
 
+// A step of the shadow map's walk with nothing to take runs no workgroup, so it
+// empties nothing: what its queue's neighbours held must not come round again.
+// A shallow caster, whose first step finds no node, hands on the same meshlets
+// beside a live hierarchy deep enough for the walk to take four steps, the last
+// from the first's queue.
+NTEST_F(Vsm, a_caster_beside_a_deeper_hierarchy_is_walked_once)
+{
+    REQUIRE_VSM(f);
+    LodMesh torus;
+    lod_torus(&torus, 48U, 16U, 0.8F, 0.25F);
+    LodMesh deep;
+    lod_torus(&deep, 24U, 8U, 0.8F, 0.25F);
+    lod_mesh_deepen(&deep, 8U);
+    NphRenderMesh caster = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &torus.desc, &caster), NPH_RESULT_OK);
+    const u32 slot = render_slot_of(&f->renderer->mesh_pool, caster.value);
+    NTEST_ASSERT_LE_UINT(f->renderer->meshes[slot].lod_depth, 2U);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    const NphRenderInstance floor0 = instance(f, plane, grey, at(0.0, 0.0, 0.0, 40.0F));
+    NphRenderLightDesc ld = sun_desc(true);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, LOD_TARGET);
+    static u8 pixels[LOD_PIXELS];
+    NphRenderView v;
+    vsm_view(&v, top_camera());
+    NphRenderInstance inst = instance(f, caster, grey, at(0.0, 1.5, 0.0, 1.0F));
+    const NphRenderFrameStats alone =
+        lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, pixels);
+    log_stats("alone", &alone);
+    nph_render_instance_destroy(f->renderer, inst);
+    (void)lod_frames(f, &v, target, 2U + NPH_GPU_FRAMES_IN_FLIGHT, pixels);
+    NphRenderMesh deeper = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &deep.desc, &deeper), NPH_RESULT_OK);
+    inst = instance(f, caster, grey, at(0.0, 1.5, 0.0, 1.0F));
+    const NphRenderFrameStats beside =
+        lod_frames(f, &v, target, 1U + NPH_GPU_FRAMES_IN_FLIGHT, pixels);
+    log_stats("beside", &beside);
+    NTEST_EXPECT_GE_UINT(render_vis_lod_steps(f->renderer), 4U);
+    NTEST_EXPECT_GT_UINT(alone.vsm_meshlets, 0U);
+    NTEST_EXPECT_EQ_UINT(beside.vsm_meshlets, alone.vsm_meshlets);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_instance_destroy(f->renderer, floor0);
+    nph_render_mesh_destroy(f->renderer, deeper);
+    nph_render_mesh_destroy(f->renderer, caster);
+    nph_gpu_image_destroy(f->dev, target);
+    lod_mesh_free(&deep);
+    lod_mesh_free(&torus);
+}
+
 // A torus sixteen times as large (a ring 26 m across), above the
 // view and to its side, of which the floor the camera sees takes a few
 // pages: the walk down its hierarchy hands on the clusters near those

@@ -163,6 +163,11 @@ typedef struct NphRendererDesc {
     u32 max_lod_nodes;        // the levels of detail's hierarchy nodes a step of the
                               // culling takes, per frame (2^18; at most 524,224, what
                               // 65,535 workgroups take)
+    u32 max_lod_groups;       // the groups of the levels of detail the flat cull takes a
+                              // phase, per frame (2^18; at most 4,194,240, what 65,535
+                              // workgroups take)
+    u32 max_lod_flat_groups;  // the most groups one instance hands the flat cull, past
+                              // which it walks its hierarchy instead (2^14: ADR-0070)
     // The voxel pool (ADR-0063 stage 3c): one GPU buffer of this many bytes
     // that meshes of voxels alone live in, a range each (256-byte aligned) and
     // no buffers of their own, so that making one allocates nothing on the
@@ -1044,6 +1049,7 @@ typedef struct NphRenderFrameStats {
     u32 vis_meshlets_culled_frustum;
     u32 vis_meshlets_culled_cone;
     u32 vis_meshlets_culled_occlusion;
+    u32 vis_lod_groups;          // groups of the levels of detail the flat cull tested
     u32 vis_lod_nodes;           // hierarchy nodes of the levels of detail visited
     u32 vis_lod_clusters_culled; // clusters a finer level stood in for
     u32 vis_lod_steps;           // this frame's steps down the hierarchies, each phase
@@ -1129,7 +1135,7 @@ typedef enum NphRenderVisOverflow {
     NPH_RENDER_VIS_OVERFLOW_MESHLETS = 1U << 0U,  // max_cull_meshlets
     NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U,  // max_visible_clusters
     NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U,  // max_deferred
-    NPH_RENDER_VIS_OVERFLOW_LOD_NODES = 1U << 3U, // max_lod_nodes
+    NPH_RENDER_VIS_OVERFLOW_LOD_NODES = 1U << 3U, // max_lod_nodes, max_lod_groups
 } NphRenderVisOverflow;
 
 // Whether the renderer has the production path: the device has what it

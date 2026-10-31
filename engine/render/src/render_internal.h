@@ -290,8 +290,10 @@ typedef struct RenderMesh {
     NphGpuBuffer lod_groups;
     NphGpuBuffer lod_group_clusters;
     NphGpuBuffer lod_makers;
+    NphGpuBuffer lod_levels; // its table of levels (null without: NphVisMesh.lod_levels)
     u32 lod_depth;
-    b32 level_apart; // its makers given as records (a level apart, ADR-0063)
+    u32 lod_walk_depth; // lod_depth where the camera may walk it (RenderVis.lod_walk_depths)
+    b32 level_apart;    // its makers given as records (a level apart, ADR-0063)
     // Its voxels, compact: the voxel clusters' records, bricks and voxel words
     // (NphVisMesh.voxel_clusters, voxel_bricks, voxels; null buffers without),
     // and whether RenderVis.voxel_meshes counts it.
@@ -601,6 +603,13 @@ typedef struct RenderFrameLayout {
 // The most node levels a mesh's hierarchy of levels of detail may have
 // (NphRenderMeshDesc.lod_nodes): eight children a node, ample for any mesh.
 #define RENDER_LOD_MAX_DEPTH 32U
+// The levels of a mesh's table (NphVisMesh.lod_levels): more, and it walks.
+#define RENDER_LOD_MAX_LEVELS 64U
+// The chunks of the flat cull a phase holds: a chunk comes of a run longer than
+// a workgroup, so holds at least 32 groups on average, and this many take what a
+// list of work items would. A workgroup each, of the 65,535 every device takes.
+#define RENDER_LOD_CHUNKS(max_lod_groups)                                                          \
+    nph_min_u32(nph_max_u32((max_lod_groups) / 32U, 1U), 65535U)
 
 typedef enum VisShader {
     VIS_SHADER_SCATTER = 0,
@@ -627,6 +636,7 @@ typedef enum VisShader {
     VIS_SHADER_DEBUG_LINE,
     VIS_SHADER_HZB_MIPS,
     VIS_SHADER_CULL_NODES,
+    VIS_SHADER_CULL_GROUPS,
     VIS_SHADER_VOXEL_RASTER,
     VIS_SHADER_VOXEL_RESOLVE,
     VIS_SHADER_VOXEL_RESOLVE_RT, // where the device has ray queries
@@ -650,6 +660,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
     VIS_COMPUTE_CULL_NODES,   // a step down the levels of detail's hierarchies
+    VIS_COMPUTE_CULL_GROUPS,  // the flat cull of the groups of an instance's levels
     VIS_COMPUTE_VOXEL_RASTER, // voxel clusters (ADR-0061)
     VIS_COMPUTE_CULL_CELLS,   // a world partition's cells, first (ADR-0064)
     VIS_COMPUTE_RESOLVE_RT,
@@ -697,6 +708,7 @@ typedef struct VisFrame {
     u32 width;
     u32 height;
     u32 lod_steps; // the steps down the levels of detail's hierarchies, each phase
+    b32 lod_flat;  // the flat cull of the levels' groups, each phase
     NphGpuRgImage visbuffer;
     NphGpuRgImage hdr;
     NphGpuRgImage raster_depth; // the hardware raster's early depth test (mesh path; else null)
@@ -786,11 +798,19 @@ typedef struct RenderVis {
     NphGpuBuffer clusters;      // NphVisCluster[max_visible_clusters]
     NphGpuBuffer lists;         // u32[2][NPH_VIS_RASTER_KINDS][max_visible_clusters]
     NphGpuBuffer draws;         // NphVisDraw[2][2][max_visible_clusters] (indirect raster only)
-    NphGpuBuffer lod_queue;     // uvec2[3][max_lod_nodes]: the hierarchies' work, three in turn
+    NphGpuBuffer lod_queue;     // the levels' work: uvec2[3][max_lod_nodes], the hierarchies',
+                                // three in turn; uvec2[2][max_lod_groups], the flat cull's items
+                                // a phase; uvec2[RENDER_LOD_CHUNKS(max_lod_groups)], its chunks
     // The live meshes with levels of detail, by their hierarchies' node
-    // levels (lod_depths[d - 1]: those of d): the frame takes as many steps
-    // as the deepest needs.
+    // levels (lod_depths[d - 1]: those of d): the shadow map's walk takes as
+    // many steps as the deepest needs.
     u32 lod_depths[RENDER_LOD_MAX_DEPTH];
+    // Those the camera may walk, whose steps the frame takes: a mesh without
+    // a table of its levels, or with more groups than an instance hands the
+    // flat cull. And those that may go to the flat cull, without which a frame
+    // adds none of its passes.
+    u32 lod_walk_depths[RENDER_LOD_MAX_DEPTH];
+    u32 lod_flat_meshes;
     // The live meshes with voxel levels (ADR-0061). Without any, a frame
     // adds none of the voxel passes and resolves with the variants compiled
     // without the voxel test (frame_voxels, resolve_voxels).
@@ -1533,6 +1553,23 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
 NphResult render_vis_scene_create(NphRenderer *r);
 void render_vis_scene_destroy(NphRenderer *r);
 // Uploads a mesh's meshlet streams and writes its table record.
+// The smallest error of the groups that made a group's clusters; indices
+// already checked.
+f32 render_lod_group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodGroup *rg);
+
+// A mesh's table of its levels (NphVisMesh.lod_levels), into RENDER_LOD_MAX_LEVELS
+// entries: a run of its groups a level, in order, each level's error raised to
+// the finer levels' (a group's error is at least its makers', but a level's
+// largest need not be, across its groups), and a radius about the mesh's sphere's
+// centre that holds every group's sphere, rounded up. False for a mesh that
+// walks its hierarchy instead: one whose groups do not keep to their levels'
+// order, or with too many levels; a level apart, whose makers the table cannot
+// hold (ADR-0063); and one with voxel levels, whose simplifier (ADR-0069) leaves
+// so wide a range of errors in a level that its distance picks too many groups.
+// Indices already checked.
+bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, NphVisLodLevel *table,
+                                u32 *out_count, f32 *out_reach);
+
 // `lod_depth`: the node levels of the mesh's hierarchy of levels of detail
 // (0 without one), as validation found them.
 // The mesh's bottom-level address in its GPU scene record, after rt.c

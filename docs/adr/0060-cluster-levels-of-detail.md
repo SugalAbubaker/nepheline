@@ -384,3 +384,10 @@ cluster), and their build when a mesh is created.
   the walk hands on 375 of its 690 level-0 clusters, where each level reached handed on
   all of its cut, and its shadow is its level 0's. The shadow map's other tests (its
   casters at their cuts, the voxel casters against their CPU twin) pass unchanged.
+
+## Amendment (2026-10-31): most meshes no longer walk
+
+[ADR-0070](0070-a-flat-cull-of-the-levels.md): an instance's distance picks a run of its mesh's
+groups from a table of its levels, and one flat dispatch a phase tests them. The camera's walk stays
+for levels apart, voxel meshes, and very long runs, and takes no step without them. The shadow map's
+walk stays as this ADR's amendment has it.

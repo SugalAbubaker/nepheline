@@ -434,10 +434,11 @@ the 99th percentile; ADR-0059 has every view) with
 `reference_scenes-2026-10-30` (Bistro as Phase 13 cooks it) and
 `reference_scenes-2026-10-30b` (the landscape): against the start, built
 again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
-more, the walk down its meshes' level hierarchies, which Phase 14 wins
-back first (ADR-0066). `benchmarks/reference_budgets.txt` is generated
-from `reference_scenes-2026-10-30`, so it allows that cost until then, and
-Phase 14 lowers the lines with the win. The landscape has no rows there:
+more, the walk down its meshes' level hierarchies, which Phase 14 won
+back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
+spread). `benchmarks/reference_budgets.txt` is generated from
+`reference_scenes-2026-10-31b`, Bistro and the city, a process a scene as
+the nightly runs them. The landscape has no rows there:
 the nightly runs it at the default lists, where every view overflows and
 drops work, so its numbers are not its full-quality frame (ADR-0066).
 

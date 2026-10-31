@@ -67,19 +67,24 @@
 #define NPH_VIS_OVERFLOW_MESHLETS  1 // phase 0's meshlet candidates (max_cull_meshlets)
 #define NPH_VIS_OVERFLOW_CLUSTERS  2
 #define NPH_VIS_OVERFLOW_DEFERRED  4
-#define NPH_VIS_OVERFLOW_LOD_NODES 8 // the hierarchy's work items (max_lod_nodes)
+#define NPH_VIS_OVERFLOW_LOD_NODES 8 // the levels' lists (max_lod_nodes, max_lod_groups)
 
 // Levels of detail (render/cluster_lod.h; docs/render.md "Levels of
 // detail"): a hierarchy node's children, a child that is a group, and none;
 // the hierarchy's work queues, three in turn (a step reads one, fills the
 // next, and empties the one after for the step after it), and the work
 // items a workgroup of vis_cull_nodes.comp takes (64 lanes an item: a step
-// takes two of the hierarchy's levels).
-#define NPH_VIS_LOD_CHILDREN 8
-#define NPH_VIS_LOD_LEAF     0x80000000u
-#define NPH_VIS_LOD_NONE     0xFFFFFFFFu
-#define NPH_VIS_LOD_QUEUES   3
-#define NPH_VIS_LOD_ITEMS    8 // per workgroup of 512 invocations
+// takes two of the hierarchy's levels). A chunk of the flat cull
+// (vis_cull_groups.comp) is its first group and its count less one above this
+// bit.
+#define NPH_VIS_LOD_CHUNK_SHIFT 26
+// The most meshlets a level 0 whole hands on directly (vis_cull_instances.comp).
+#define NPH_VIS_LOD_WHOLE_MESHLETS 4096
+#define NPH_VIS_LOD_CHILDREN       8
+#define NPH_VIS_LOD_LEAF           0x80000000u
+#define NPH_VIS_LOD_NONE           0xFFFFFFFFu
+#define NPH_VIS_LOD_QUEUES         3
+#define NPH_VIS_LOD_ITEMS          8 // per workgroup of 512 invocations
 
 // Raster lists, per phase: how each visible cluster is rasterised.
 #define NPH_VIS_RASTER_OPAQUE   0 // hardware
@@ -236,6 +241,31 @@ NPH_SHARED_STRUCT(NphVisLightUpdate)
     NphVisLight light;
 };
 
+// A group of a mesh's levels of detail as the GPU reads it: its
+// NphRenderLodGroup, whose level no shader reads, with the smallest error of
+// the groups that made its clusters in that place (where the mesh has a table
+// of its levels, NphVisMesh.lod_levels).
+NPH_SHARED_STRUCT(NphVisLodGroup)
+{
+    NphVec4 sphere; // xyz centre, w radius, in mesh space
+    f32 error;
+    f32 maker_error;
+    u32 cluster_offset;
+    u32 cluster_count;
+};
+
+// A level of a mesh's levels of detail, as the instance cull reads it
+// (vis_lod_span): the largest error of its groups, no less than any finer
+// level's; the smallest error of the groups that made their clusters; and the
+// run of its groups in NphVisMesh.lod_groups.
+NPH_SHARED_STRUCT(NphVisLodLevel)
+{
+    f32 error;
+    f32 maker_error;
+    u32 first_group;
+    u32 group_count;
+};
+
 // One mesh, at its pool slot: dequantisation, bounds, and its streams.
 NPH_SHARED_STRUCT(NphVisMesh)
 {
@@ -273,8 +303,8 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 lod_makers;
     // The smallest error of the groups that consume level 0's clusters: an
     // instance for which even that is surely too coarse needs level 0
-    // everywhere, and the instance cull hands its level-0 meshlets on
-    // directly, without the walk (vis_cull_instances.comp).
+    // everywhere, and the instance cull hands its level-0 meshlets on directly
+    // (vis_cull_instances.comp).
     f32 lod_level0_error;
     u32 lod_clusters;
     // Its voxels, compact (render/voxel.h "The compact form"), 0 without: its
@@ -282,12 +312,19 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // three a voxel or four), and its voxel clusters' records
     // (NphRenderVoxelCluster[], a uvec2 each), which a voxel cluster's meshlet
     // names in its triangle_offset, its first brick in its vertex_offset. The
-    // record's stride stays 192 bytes, a multiple of 16, the alignment every
+    // record's stride stays a multiple of 16 (208 bytes), the alignment every
     // buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF), which the
     // resolve's VisMeshRef(...)[i] assumes of each record.
     u64 voxel_bricks;
     u64 voxels;
     u64 voxel_clusters;
+    // A table of its levels (NphVisLodLevel[lod_level_count]), which an
+    // instance's distance picks from for the flat cull (ADR-0070), and a
+    // radius about `sphere`'s centre that holds every group's sphere. 0
+    // without one (a level apart, ADR-0063), which walks its hierarchy.
+    u64 lod_levels;
+    u32 lod_level_count;
+    f32 lod_reach;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling.
@@ -331,6 +368,11 @@ NPH_SHARED_STRUCT(NphVisArgs)
     // and the instances of no cell.
     u32 cell_expand_args[4];
     u32 instance0_args[4];
+    // The flat cull a phase: its work items' workgroups in x, and its chunks',
+    // raised by whatever lists them (the instance cull; phase 0's flat cull
+    // for phase 1), and 1 in y and z (vis clear writes them).
+    u32 lod_group_args[2][4];
+    u32 lod_chunk_args[2][4];
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -362,6 +404,12 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // replaced (their maker's error too large).
     u32 lod_nodes_visited;
     u32 lod_clusters_culled;
+    // The flat cull: its work items a phase (phase 1's are the groups phase 0
+    // deferred, then those of the instances it finds visible) and the chunks of
+    // the phase running, and a statistic, the groups it tested this frame.
+    u32 lod_group_items[2];
+    u32 lod_group_chunks;
+    u32 lod_groups_tested;
     // The resolve's tiles listed for the voxel resolve, and statistics: the
     // visible voxel clusters' bricks.
     u32 voxel_tiles;
@@ -452,7 +500,7 @@ NPH_SHARED_STRUCT(NphVisViewData)
     // the near plane, which bounds the distances.
     u64 lod_queue[NPH_VIS_LOD_QUEUES];
     u32 max_lod_nodes;
-    u32 lod_pad0;
+    u32 max_lod_flat_groups; // NphRendererDesc.max_lod_flat_groups
     NphVec4 lod;
     // Voxels: the resolve's tiles that hold voxel pixels (u32[], x | y << 16,
     // as many as the target has tiles), a bit per tile set as it is listed
@@ -483,6 +531,13 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u32 max_cell_work;
     u32 loose_first;
     u32 loose_count;
+    // The flat cull's lists (ADR-0070): its work items a phase (uvec2[
+    // max_lod_groups]: instance slot, group) and the chunks of long runs
+    // (uvec2[max_lod_chunks]: instance slot, group and count).
+    u64 lod_group_list[2];
+    u64 lod_chunk_list;
+    u32 max_lod_groups;
+    u32 max_lod_chunks;
 };
 
 // Push constants of every production-path shader. The visibility buffer

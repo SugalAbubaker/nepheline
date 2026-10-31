@@ -21,11 +21,20 @@
 // against depth this frame drew, which only holds surfaces really in front,
 // so nothing visible is lost.
 //
-// An instance whose mesh has levels of detail hands its hierarchy's root to
-// the first of the hierarchy's steps instead (vis_cull_nodes.comp), which
-// find the clusters of the level each part of it needs; one so near that
-// every part needs level 0, and any in a view without the levels
-// (NPH_VIS_VIEW_LOD unset), hands on level 0's meshlets as any mesh's.
+// An instance of a mesh with levels of detail so near that every part needs
+// level 0 hands on level 0's meshlets as any mesh's, as does any in a view
+// without the levels (NPH_VIS_VIEW_LOD unset): in their own order, which rasters
+// faster than a group's at a time (Bistro's 0.02 ms). Otherwise, where its mesh
+// has a table of its levels, it hands the flat cull (vis_cull_groups.comp) the
+// groups of the levels its distance may take (vis_lod_span; ADR-0070): a run of
+// up to a workgroup's as work items, the subgroup's together, as its meshlets
+// below; a longer one as chunks, a workgroup each, whose few records no subgroup
+// spends long on. A dispatch ends with its slowest subgroup, and a near instance
+// of a big mesh may hold thousands: past NPH_VIS_LOD_WHOLE_MESHLETS, even level 0
+// whole goes this way. One whose run is more than
+// NphRendererDesc.max_lod_flat_groups, or whose mesh has no table, hands its
+// hierarchy's root to the first of the hierarchy's steps (vis_cull_nodes.comp),
+// which walk down to the clusters of the level each part of it needs.
 //
 // The instances of a world partition's cell give way to the cell's proxy
 // where it is drawn, and the proxy to them elsewhere (vis_cell_proxied;
@@ -52,6 +61,21 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// The first invocation of the subgroup whose inclusive prefix sum passes `k`,
+// the owner of the subgroup's item k. Every invocation takes part in each
+// shuffle (the loop's bounds are the subgroup's), as shuffles require.
+uint subgroup_owner(uint inclusive, uint k)
+{
+    uint owner = 0u;
+    for (uint step = gl_SubgroupSize >> 1u; step != 0u; step >>= 1u) {
+        const uint v = subgroupShuffle(inclusive, owner + step - 1u);
+        if (v <= k) {
+            owner += step;
+        }
+    }
+    return owner;
+}
 
 void main()
 {
@@ -88,6 +112,8 @@ void main()
     bool instance_proxied = false; // an instance its cell's proxy stands in for (statistics)
     uint meshlets = 0u;            // handed to the meshlet cull
     bool root = false;             // hands its hierarchy's root to the hierarchy's steps
+    uint group_first = 0u;         // hands this run of its mesh's groups to the flat cull
+    uint group_count = 0u;
     if (slot != 0xFFFFFFFFu) {
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         bool shown = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u;
@@ -145,15 +171,27 @@ void main()
             defer = shown && later;
             culled_occlusion = shown && phase == 1u && unseen;
             if (shown && !unseen && !later) {
-                // A mesh with levels walks its hierarchy, unless even the
-                // finest of the groups that consume level 0 is too coarse
-                // from the far side of its sphere: then the cut is level 0
-                // whole, as the mesh's own meshlets.
-                root = mesh.lod_nodes != 0ul && (view.v.flags & NPH_VIS_VIEW_LOD) != 0u &&
-                       !vis_lod_surely_too_coarse(view, inst.transform, t,
-                                                  vis_max_scale(inst.transform), mesh.sphere,
-                                                  mesh.lod_level0_error);
-                meshlets = root ? 0u : mesh.meshlet_count;
+                const float scale = vis_max_scale(inst.transform);
+                const bool table = mesh.lod_level_count != 0u;
+                // Level 0 whole, where even the finest of the groups that
+                // consume it is too coarse from the far side of its sphere (see
+                // the file comment).
+                const bool whole =
+                    (view.v.flags & NPH_VIS_VIEW_LOD) == 0u || mesh.lod_nodes == 0ul ||
+                    ((!table || mesh.meshlet_count <= NPH_VIS_LOD_WHOLE_MESHLETS) &&
+                     vis_lod_surely_too_coarse(view, inst.transform, t, scale, mesh.sphere,
+                                               mesh.lod_level0_error));
+                if (whole) {
+                    meshlets = mesh.meshlet_count;
+                } else if (table) {
+                    vis_lod_span(view, mesh, inst.transform, t, scale,
+                                 (inst.flags & NPH_VIS_INSTANCE_FINEST) != 0u, group_first,
+                                 group_count);
+                    root = group_count > view.v.max_lod_flat_groups;
+                    group_count = root ? 0u : group_count;
+                } else {
+                    root = true;
+                }
             }
         }
     }
@@ -191,6 +229,75 @@ void main()
                   (roots + uint(NPH_VIS_LOD_ITEMS) - 1u) / uint(NPH_VIS_LOD_ITEMS));
     }
 
+    // The subgroup's short runs of groups as the flat cull's work items, and
+    // its long ones as chunks (see the file comment). Most subgroups have none.
+    VisArgsRef args = VisArgsRef(view.v.args);
+    const bool chunked = group_count > 64u;
+    const uint group_items = chunked ? 0u : group_count;
+    const uint chunks = chunked ? (group_count + 63u) / 64u : 0u;
+    const uint items_inclusive = subgroupInclusiveAdd(group_items);
+    const uint items_total = subgroupAdd(group_items);
+    if (items_total != 0u) {
+        const uint items_first = items_inclusive - group_items;
+        uint items_base = 0u;
+        if (subgroupElect()) {
+            items_base = atomicAdd(counters.c.lod_group_items[phase], items_total);
+            atomicMax(args.a.lod_group_args[phase][0],
+                      (min(items_base + items_total, view.v.max_lod_groups) + 63u) / 64u);
+        }
+        items_base = subgroupBroadcastFirst(items_base);
+        VisUvec2Ref list = VisUvec2Ref(view.v.lod_group_list[phase]);
+        const uint rounds = (items_total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        for (uint round = 0u; round < rounds; ++round) {
+            const uint k = round * gl_SubgroupSize + gl_SubgroupInvocationID;
+            const uint owner = subgroup_owner(items_inclusive, k);
+            const uint owner_slot = subgroupShuffle(slot, owner);
+            const uint owner_at = subgroupShuffle(items_first, owner);
+            const uint owner_group = subgroupShuffle(group_first, owner);
+            if (k < items_total) {
+                const uint index = items_base + k;
+                if (index < view.v.max_lod_groups) {
+                    list.v[index] = uvec2(owner_slot, owner_group + k - owner_at);
+                } else {
+                    atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_LOD_NODES));
+                }
+            }
+        }
+    }
+    const uint chunks_inclusive = subgroupInclusiveAdd(chunks);
+    const uint chunks_total = subgroupAdd(chunks);
+    if (chunks_total != 0u) {
+        const uint chunks_first = chunks_inclusive - chunks;
+        uint chunks_base = 0u;
+        if (subgroupElect()) {
+            chunks_base = atomicAdd(counters.c.lod_group_chunks, chunks_total);
+            atomicMax(args.a.lod_chunk_args[phase][0],
+                      min(chunks_base + chunks_total, view.v.max_lod_chunks));
+        }
+        chunks_base = subgroupBroadcastFirst(chunks_base);
+        VisUvec2Ref list = VisUvec2Ref(view.v.lod_chunk_list);
+        const uint rounds = (chunks_total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        for (uint round = 0u; round < rounds; ++round) {
+            const uint k = round * gl_SubgroupSize + gl_SubgroupInvocationID;
+            const uint owner = subgroup_owner(chunks_inclusive, k);
+            const uint owner_slot = subgroupShuffle(slot, owner);
+            const uint owner_at = subgroupShuffle(chunks_first, owner);
+            const uint owner_group = subgroupShuffle(group_first, owner);
+            const uint owner_count = subgroupShuffle(group_count, owner);
+            if (k < chunks_total) {
+                const uint index = chunks_base + k;
+                if (index < view.v.max_lod_chunks) {
+                    const uint at = (k - owner_at) * 64u;
+                    const uint held = min(owner_count - at, 64u);
+                    list.v[index] = uvec2(owner_slot, (owner_group + at) |
+                                                          ((held - 1u) << NPH_VIS_LOD_CHUNK_SHIFT));
+                } else {
+                    atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_LOD_NODES));
+                }
+            }
+        }
+    }
+
     // The subgroup's meshlets as work items (see the file comment).
     const uint inclusive = subgroupInclusiveAdd(meshlets);
     const uint first = inclusive - meshlets;
@@ -209,16 +316,7 @@ void main()
     const uint rounds = (total + gl_SubgroupSize - 1u) / gl_SubgroupSize;
     for (uint round = 0u; round < rounds; ++round) {
         const uint k = round * gl_SubgroupSize + gl_SubgroupInvocationID;
-        // The owner is the first invocation whose inclusive prefix passes k.
-        // Every invocation takes part in each shuffle (the loops' bounds
-        // are the subgroup's), as shuffles require.
-        uint owner = 0u;
-        for (uint step = gl_SubgroupSize >> 1u; step != 0u; step >>= 1u) {
-            const uint v = subgroupShuffle(inclusive, owner + step - 1u);
-            if (v <= k) {
-                owner += step;
-            }
-        }
+        const uint owner = subgroup_owner(inclusive, k);
         const uint owner_slot = subgroupShuffle(slot, owner);
         const uint owner_first = subgroupShuffle(first, owner);
         if (k < total) {

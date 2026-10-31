@@ -1663,10 +1663,11 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                st->shadow_rays ? "; shadow rays" : "", st->motion_blur ? "; motion blur" : "",
                st->dof ? "; depth of field" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
-        if (st->vis_lod_nodes != 0U) {
-            printf("    levels of detail: %u hierarchy nodes visited in %u steps a phase, %u "
-                   "clusters a finer level stood in for\n",
-                   st->vis_lod_nodes, st->vis_lod_steps, st->vis_lod_clusters_culled);
+        if (st->vis_lod_groups != 0U || st->vis_lod_nodes != 0U) {
+            printf("    levels of detail: %u groups tested, %u hierarchy nodes visited in %u steps "
+                   "a phase, %u clusters a finer level stood in for\n",
+                   st->vis_lod_groups, st->vis_lod_nodes, st->vis_lod_steps,
+                   st->vis_lod_clusters_culled);
         }
         if (st->vis_voxel_clusters != 0U) {
             printf("    voxels: %u clusters, %u bricks\n", st->vis_voxel_clusters,
@@ -2314,6 +2315,9 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *fil
         rd.max_cull_meshlets = (1U << 20U) * lists;
         rd.max_deferred = (1U << 20U) * lists;
         rd.max_lod_nodes = (1U << 18U) * lists;
+        // The flat cull's want no more than the city's: voxel meshes, the landscape's,
+        // whose lists these scale for, walk their hierarchies.
+        rd.max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
         rd.max_vsm_meshlets = (1U << 20U) * lists;
         rd.max_vsm_draws = (1U << 20U) * lists;
         rd.max_vsm_voxel_draws = (1U << 20U) * lists;

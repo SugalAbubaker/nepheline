@@ -850,39 +850,70 @@ root group (error the largest float) never does. With `k` the pixels a unit
 spans at a distance of one over the threshold, a group of error `e` and
 sphere (`c`, `r`) under an instance of scale `s` is too coarse when
 `s e k > max(|c| - s r, near)`. One function, `vis_lod_group_too_coarse`,
-decides it for both the walk and the meshlet cull, `precise` throughout and
+decides it for the flat cull, the walk and the meshlet cull, `precise` throughout and
 without a square root, from numbers the hierarchy must copy exactly from
 the group: the two decide alike for every group, bit for bit, or a part
 would be drawn at two levels or at none.
 
-**The walk.** `vis cull instances` hands a visible instance of a mesh with
-levels to the walk as its hierarchy's root (an (instance, node) work item),
-instead of handing on its meshlets, unless even the finest group that
-consumes level 0 (`NphVisMesh.lod_level0_error`) is surely too coarse from
-the far side of the instance's sphere: then the cut is level 0 whole, and
-the instance hands on level 0's meshlets as a mesh without levels does
-(near instances, most of Bistro's). Each step of `vis cull nodes`
-(`vis_cull_nodes.comp`) takes two of the hierarchy's levels: a work item
-takes 64 lanes, one per child and grandchild of its node. A lane takes a
-child that is too coarse (the walk's test of a node is loosened past the
-rounding between it and the exact test, so it loses no group below), unless
-every maker below is too coarse even from the child's far side (then every
-cluster below would be replaced in turn), inside the frustum and in phase 1
-not behind the depth pyramid. A group it takes appends its clusters to the
-phase's meshlet list, where the meshlet cull drops those whose makers are
-too coarse and tests the rest as any cluster; a node at the second level
-goes into the next queue. Each cluster carries its maker's sphere and error
-(`NphVisMesh.lod_makers`: every cluster's sphere, then every cluster's error,
-20 bytes a cluster; an error of 0 at level 0), as Nanite's clusters carry
-their LOD bounds and error (Karis et al. 2021): the meshlet cull and the
-shadow map's read them with the cluster, where they read the maker's index
-and then its group's record, and a level of a mesh stands alone (ADR-0063). The queues are three in turn: a step reads one,
-fills the next and raises the next step's indirect arguments itself, and
-empties the third for the step after the next, so the steps follow one
-another with no pass between. The frame takes as many steps a phase as the
-deepest live hierarchy needs, half its node levels rounded up (`vis_lod_steps`
-in the frame's statistics). Phase 0 walks the instances it found visible;
-phase 1 those phase 0 deferred, against this frame's pyramid.
+**Level 0 whole.** An instance so near that even the finest group that
+consumes level 0 (`NphVisMesh.lod_level0_error`) is surely too coarse from the
+far side of its sphere has level 0 as its cut. It hands on level 0's meshlets
+as a mesh without levels does (near instances, most of Bistro's), in their own
+order, which rasters 0.01 to 0.04 ms faster on Bistro than a group's at a time.
+Past 4,096 of them (`NPH_VIS_LOD_WHOLE_MESHLETS`) those writes would hold their
+subgroup too long, and it takes the flat cull.
+
+**The flat cull** (ADR-0070). Every other instance reads its mesh's table of its
+levels (`NphVisMesh.lod_levels`, 16 bytes a level, made at creation: each level's
+largest group error, never less than a finer level's; the smallest error of the
+groups that made its clusters; and the run of its groups). From the sphere about
+the mesh's centre that holds every group's (`lod_reach`), `vis_lod_span` goes
+down from the coarsest level, past those whose every maker is surely too coarse
+from the far side, and on while a level's largest error may be too coarse from
+the near side: the walk's two prunes, written for one sphere and many errors, so
+that a level left out holds no group the exact test takes. `vis cull groups`
+(`vis_cull_groups.comp`), one dispatch a phase, tests the run's groups a lane each,
+with nothing to wait for: too coarse, not every maker too coarse
+(`NphVisLodGroup.maker_error`), and in the frustum. Then occlusion, in two phases:
+phase 0 tests the previous frame's depth from the previous camera, and a group
+hidden there waits, whole, for phase 1, which tests this frame's. A group's sphere
+holds every triangle of its clusters, so a hidden group's clusters are hidden; it
+costs a lane a phase, where they would cost the meshlet cull a lane each in both.
+A group it keeps appends its clusters to the phase's meshlet list, where the meshlet
+cull drops those whose makers are too coarse and tests the rest as any cluster.
+
+A dispatch ends with its slowest subgroup, so a run is not written out where it is
+long. Up to a workgroup's groups go as (instance, group) work items, the subgroup's
+together, as meshlets do. A longer run goes as chunks (`NPH_VIS_LOD_CHUNK_SHIFT`), a
+record and a workgroup per 64 groups: 11,557 groups written out from one subgroup
+cost a street 0.045 ms. Each cluster carries its maker's sphere and error
+(`NphVisMesh.lod_makers`: every cluster's sphere, then every cluster's error, 20 bytes
+a cluster; an error of 0 at level 0), as Nanite's clusters carry their LOD bounds and
+error (Karis et al. 2021): the meshlet cull and the shadow map's read them with the
+cluster, where they read the maker's index and then its group's record, and a level of a
+mesh stands alone (ADR-0063).
+
+**The walk.** A mesh without a table, or an instance whose run is more than
+`max_lod_flat_groups` (2^14), hands `vis cull nodes` its hierarchy's root (an
+(instance, node) work item) instead. A mesh has no table where it is a level apart
+(ADR-0063), whose makers the table cannot hold; where it has voxel levels, whose
+simplifier (ADR-0069) leaves so wide a range of errors in a level that its distance picks
+too many groups (the landscape wants over 4 million a frame, for which the tree's
+spatial pruning earns its keep); and where its groups do not keep to their levels' order.
+Each step of `vis cull nodes` (`vis_cull_nodes.comp`) takes two of the hierarchy's levels:
+a work item takes 64 lanes, one per child and grandchild of its node. A lane takes a
+child that is too coarse (the walk's test of a node is loosened past the rounding between
+it and the exact test, so it loses no group below), unless every maker below is too coarse
+even from the child's far side (then every cluster below would be replaced in turn), inside
+the frustum and in phase 1 not behind the depth pyramid. A group it takes appends its
+clusters to the phase's meshlet list; a node at the second level goes into the next queue.
+The queues are three in turn: a step reads one, fills the next, raises the next step's
+indirect arguments and zeroes its own, and empties the third for the step after the next,
+so the steps follow one another with no pass between, and a step with nothing to take runs
+no workgroup. The frame takes as many steps a phase as the deepest hierarchy the camera may
+walk needs, half its node levels rounded up (`vis_lod_steps` in the frame's statistics;
+none in Bistro and the city). Phase 0 walks the instances it found visible; phase 1 those
+phase 0 deferred, against this frame's pyramid.
 
 A threshold of 0 turns the levels off: every mesh draws level 0's
 meshlets, in the view and in the shadow map's pages, the same image byte
@@ -913,15 +944,17 @@ draws), and rays and the reference's top level leave it out.
 **Cost.** In `lod_4k_production` (render_perf: a terrain 400 m across of
 131,072 triangles and 1,024 rocks of 65,024 each, 67 million in all, from
 head height) the frame draws 1.15 million triangles in 18,300 clusters and
-takes 3.70 ms; at level 0 (`lod_4k_level0`) 4.30 million and 3.99 ms, the
-culling and raster passes 0.70 ms against 0.99. The walk visits 4,700 nodes
-in three steps a phase, 0.040 ms in phase 0 and 0.029 ms in phase 1; an
-empty step costs 2.7 µs. ADR-0060 records how it got there from 0.192 ms.
-Bistro cooked with its levels (docs/cook.md, step 8), against itself at
-level 0 (`render_perf --lod-error=0`), interleaved: street +0.03 ms, walk
--0.02, turn 0.00, terrace 0.00, hedge -0.02, within the runs' spread of
-0.05 to 0.1 ms; the street draws 1.15 million triangles against 1.42, its
-walk 0.03 + 0.02 ms. Its geometry is near, where level 0 is the cut.
+takes 3.69 ms; at level 0 (`lod_4k_level0`) 4.30 million and 4.04 ms. The flat
+cull tests 8,900 groups, 0.011 ms in phase 0 and 0.009 ms in phase 1, where the
+walk took 0.040 + 0.029 ms. In the city, a street's flat cull takes 0.039 ms and
+its meshlet cull 0.084 ms where the walk took 0.135 ms and that cull 0.147 ms; the
+rooftop's 0.109 and 0.470 ms where they took 0.386 and 0.566 ms. In Bistro each
+dispatch's floor is most of it, about 10 µs however little it holds (ADR-0070): a
+step with no workgroups takes 2.7 µs. Bistro cooked with its levels (docs/cook.md,
+step 8), against itself at level 0 (`render_perf --lod-error=0`), interleaved: street
++0.03 ms, walk -0.02, turn 0.00, terrace 0.00, hedge -0.02, within the runs' spread of
+0.05 to 0.1 ms; the street draws 1.15 million triangles against 1.42. Its geometry is
+near, where level 0 is the cut.
 
 ### Voxels
 
@@ -1437,12 +1470,13 @@ they were read): hence their streaming (ADR-0063).
 | `vis light updates`, `vis lights`, `vis light bins` | the light grid's lights and distance bins (below), from the light table; nothing here reads the visibility buffer |
 | `vis cull cells`, `vis args cells`, `vis expand cells` | while the renderer holds cells ("Cell proxies", Cells first): per cell slot, its box against the frustum and its proxy's switch; the cells in view list their proxy's instances, and their members where drawn as their instances, a workgroup a listed cell copying its runs of slots into the work list phase 0 takes |
 | `vis cull instances 0` | per instance (the cells' listed ones and those of no cell, or every slot without cells): frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
-| `vis cull nodes 0` | the walk down the hierarchies of levels of detail ("Levels of detail"), a step per two of their node levels: the groups too coarse to draw hand on their clusters as work items |
+| `vis cull groups 0` | the flat cull of levels of detail ("Levels of detail"): the groups of the levels each instance's distance may take, a lane each; those too coarse to draw and in view hand on their clusters as work items, and those last frame's depth hid wait for phase 1 |
+| `vis cull nodes 0` | the walk down the hierarchies of those without a table of their levels, or with too many groups, a step per two of their node levels (no steps where no mesh may walk) |
 | `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, software, or voxel |
 | `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0`, `vis voxel raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, then of the voxel clusters ("Voxels"; only while the renderer holds voxel meshes), into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
-| `vis cull instances 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid (and the walk down the hierarchies of those now visible); then the meshlets phase 0 deferred and those of the instances now visible |
+| `vis cull instances 1`, `vis cull groups 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; the groups phase 0 deferred and those of the instances now visible (and the walk down the hierarchies of those that walk); then the meshlets phase 0 deferred and those of the instances now visible |
 | `vis raster 1`, `vis sw raster 1`, `vis voxel raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
@@ -2141,8 +2175,9 @@ The production path's lists have fixed capacities in `NphRendererDesc`:
 meshlet work items), `max_deferred` (262,144: deferred instances, and
 phase 1's meshlets), `max_instance_updates` (16,384),
 `max_material_slots` (4 × `max_instances`), and `meshlet_index_pool`
-(2^24, indirect path only), and `max_lod_nodes` (2^18 work items a step of
-the walk down the levels of detail, at most 524,224); `max_lights` is at most 4,096, and
+(2^24, indirect path only), `max_lod_nodes` (2^18 work items a step of
+the walk down the levels of detail, at most 524,224), and `max_lod_groups` (2^18 groups a
+phase of the flat cull, at most 4,194,240); `max_lights` is at most 4,096, and
 `max_cells` (4,096) at most 2^24 - 1 (a record names its cell in 24 bits). A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
 `vsm_pages` (2,048), `max_vsm_meshlets` (2^20), `max_vsm_draws` (2^20)

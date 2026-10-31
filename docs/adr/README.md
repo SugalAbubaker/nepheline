@@ -75,6 +75,7 @@ supersedes it and both link to each other.
 | [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions) |
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted |
+| [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted |
 
 ## Template
 
