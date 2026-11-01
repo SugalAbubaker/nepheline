@@ -226,6 +226,13 @@ typedef struct NphRendererDesc {
 // read; NPH_RESULT_OUT_OF_MEMORY otherwise. `*out` is NULL on failure.
 NPH_MUST_USE NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out);
 
+// Every list of the production path that can drop work, in `desc`, at `lists`
+// times its default (the renderer clamps each to what its records can address):
+// what a scene that overflows the defaults needs. The flat cull's groups go to
+// four times at most: voxel meshes, the only ones to want more, walk their
+// hierarchies instead (ADR-0070). Nothing for `lists` of 0 or 1.
+void nph_renderer_desc_scale_lists(NphRendererDesc *desc, u32 lists);
+
 // Waits for the device to go idle and releases every resource the
 // renderer created, including any the caller did not destroy (reported at
 // warning level). Safe on NULL.

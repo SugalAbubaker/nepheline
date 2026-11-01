@@ -45,7 +45,7 @@ typedef struct StreamCell {
     NphVec3 extent;
     f32 distance;
     NphRenderCell cell;
-    u32 count; // its levels
+    u32 count; // its levels (0: a free slot, next_free the next)
     u32 first; // held from this level on
     u32 wanted;
     u32 asked;           // its last request (NPH_RENDER_CELL_NO_REQUEST: none standing)
@@ -54,6 +54,7 @@ typedef struct StreamCell {
     NphAssetHandle load; // the level loading (first - 1), or none
     u32 build;           // its mesh's build in the making (an index of builds, plus one; 0: none)
     b32 failed;          // a level failed: the cell is left as it is
+    u32 next_free;       // a free slot's
     // Each level's largest consumer error; its mesh where held (the
     // coarsest's the caller's), its GPU bytes once it has loaded (kept when
     // it goes: its next load's estimate; the coarsest's not counted), its
@@ -88,7 +89,9 @@ typedef struct StreamBuild {
 struct NphProxyStream {
     NphProxyStreamDesc desc;
     StreamCell *cells;
-    u32 cell_count;
+    u32 cell_count; // slots ever used
+    u32 live_cells;
+    u32 free_head;        // a slot removed, or NPH_U32_MAX
     StreamCell **arrived; // max_loads: the loads an update finds done
     StreamBuild *builds;  // max_loads
     // An update's picks, kept in its pass over the cells: the levels it may
@@ -208,6 +211,7 @@ NphResult nph_proxy_stream_create(const NphProxyStreamDesc *desc, NphProxyStream
     }
     memset(s, 0, sizeof *s);
     s->desc = *desc;
+    s->free_head = NPH_U32_MAX;
     s->desc.max_loads = desc->max_loads != 0U ? desc->max_loads : 64U;
     s->desc.max_install_bytes =
         desc->max_install_bytes != 0U ? desc->max_install_bytes : NPH_MIB(8);
@@ -278,6 +282,9 @@ void nph_proxy_stream_destroy(NphProxyStream *s)
     }
     for (u32 i = 0; i < s->cell_count; ++i) {
         StreamCell *c = &s->cells[i];
+        if (c->count == 0U) {
+            continue;
+        }
         if (c->load.value != 0U) {
             NPH_IGNORE_RESULT(nph_asset_wait(s->desc.loader, c->load));
             nph_asset_release(s->desc.loader, c->load);
@@ -307,7 +314,7 @@ void nph_proxy_stream_destroy(NphProxyStream *s)
     NPH_FREE_TYPE(s->desc.alloc, NphProxyStream, s);
 }
 
-NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell)
+NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell, u32 *out_index)
 {
     NPH_ASSERT(s != NULL && cell != NULL);
     if (cell->levels == NULL || cell->level_count == 0U ||
@@ -324,10 +331,19 @@ NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell
             return NPH_RESULT_INVALID_ARGUMENT;
         }
     }
-    if (s->cell_count == s->desc.max_cells) {
+    u32 index = s->free_head;
+    if (index != NPH_U32_MAX) {
+        s->free_head = s->cells[index].next_free;
+    } else if (s->cell_count < s->desc.max_cells) {
+        index = s->cell_count++;
+    } else {
         return NPH_RESULT_FULL;
     }
-    StreamCell *c = &s->cells[s->cell_count++];
+    s->live_cells += 1U;
+    if (out_index != NULL) {
+        *out_index = index;
+    }
+    StreamCell *c = &s->cells[index];
     memset(c, 0, sizeof *c);
     c->cell = cell->cell;
     c->count = cell->level_count;
@@ -350,6 +366,51 @@ NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell
 // ---------------------------------------------------------------------------
 // A frame
 // ---------------------------------------------------------------------------
+
+// Declared here: removal lets go of loads as an update does.
+static void forget(NphProxyStream *s, StreamCell *c);
+static void unload(NphProxyStream *s, StreamCell *c);
+
+void nph_proxy_stream_remove(NphProxyStream *s, u32 index)
+{
+    NPH_ASSERT(s != NULL);
+    NPH_ASSERT_MSG(index < s->cell_count && s->cells[index].count != 0U, "no such cell");
+    if (index >= s->cell_count || s->cells[index].count == 0U) {
+        return;
+    }
+    StreamCell *c = &s->cells[index];
+    if (c->build != 0U) {
+        // Its level's job reads the asset and writes the mesh: done first, then
+        // the mesh given back unmade.
+        StreamBuild *b = &s->builds[c->build - 1U];
+        nph_job_wait(s->desc.jobs, &b->done);
+        nph_render_voxel_mesh_cancel(s->desc.renderer, b->mesh);
+        b->cell = NULL;
+        s->building -= 1U;
+        c->build = 0U;
+        if (b->kept) {
+            unload(s, c);
+        } else {
+            forget(s, c); // the job released its asset
+        }
+    } else if (c->load.value != 0U) {
+        unload(s, c); // loading: it unloads when it lands
+    }
+    if (c->first + 1U < c->count && set_first(s, c, c->count - 1U) != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "proxy stream: a cell kept levels it is losing");
+    }
+    for (u32 k = 0; k + 1U < c->count; ++k) {
+        if (c->meshes[k].value != 0U) {
+            s->held_bytes -= c->bytes[k];
+            s->held_levels -= 1U;
+            nph_render_mesh_destroy(s->desc.renderer, c->meshes[k]);
+        }
+    }
+    memset(c, 0, sizeof *c);
+    c->next_free = s->free_head;
+    s->free_head = index;
+    s->live_cells -= 1U;
+}
 
 // The camera's distance from cell `c`'s box.
 static f32 box_distance(const StreamCell *c, NphDVec3 camera)
@@ -741,6 +802,9 @@ NphResult nph_proxy_stream_update(NphProxyStream *s, const NphProxyStreamView *v
     u32 drops = 0U;
     for (u32 i = 0; i < s->cell_count; ++i) {
         StreamCell *c = &s->cells[i];
+        if (c->count == 0U) {
+            continue;
+        }
         const u32 request = nph_render_cell_request(s->desc.renderer, c->cell);
         if (request != NPH_RENDER_CELL_NO_REQUEST) {
             c->asked = request;
@@ -851,7 +915,7 @@ void nph_proxy_stream_stats(const NphProxyStream *s, NphProxyStreamStats *out)
 {
     NPH_ASSERT(s != NULL && out != NULL);
     *out = s->last;
-    out->cells = s->cell_count;
+    out->cells = s->live_cells;
     out->held_levels = s->held_levels;
     out->held_bytes = s->held_bytes;
     out->loading = s->loading;
@@ -864,7 +928,7 @@ NphProxyStreamCellState nph_proxy_stream_cell_state(const NphProxyStream *s, u32
     NPH_ASSERT(s != NULL);
     NphProxyStreamCellState out;
     memset(&out, 0, sizeof out);
-    NPH_ASSERT_MSG(index < s->cell_count, "no such cell");
+    NPH_ASSERT_MSG(index < s->cell_count && s->cells[index].count != 0U, "no such cell");
     if (index < s->cell_count) {
         const StreamCell *c = &s->cells[index];
         out.held = c->first;

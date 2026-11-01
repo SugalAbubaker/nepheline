@@ -20,6 +20,7 @@ nph_add_module(runtime
         src/render_assets.c
         src/runtime_internal.h
         src/scene_import.c
+        src/scene_cells.c
         src/scene_render.c
         src/sim_input.c
         src/texture_stream.c

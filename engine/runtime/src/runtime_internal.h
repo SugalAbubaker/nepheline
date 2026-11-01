@@ -5,10 +5,14 @@
 
 #include <nepheline/asset/loader.h>
 #include <nepheline/asset/mesh.h>
+#include <nepheline/core/array.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/gpu/types.h>
 #include <nepheline/render/renderer.h>
+#include <nepheline/runtime/components.h>
+#include <nepheline/runtime/proxy_stream.h>
 #include <nepheline/runtime/texture_stream.h>
+#include <nepheline/scene/transform.h>
 
 NPH_LOG_CATEGORY_DECLARE(NPH_LOG_RUNTIME);
 
@@ -54,6 +58,7 @@ typedef struct RenderAssetCache {
     NphAllocator *alloc;
     NphRenderer *renderer;
     NphAssetLoader *loader;
+    NphTextureStream *textures; // NULL: textures are resident whole
     f32 emissive_scale;
     RenderAsset *items;
     u32 cap;
@@ -118,6 +123,84 @@ RenderAssetCounts render_assets_counts(const RenderAssetCache *c);
 // its own). The description points into the view's asset.
 NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
                                   NphRenderMeshDesc *out);
+
+// ---------------------------------------------------------------------------
+// The scene renderer's world partition (scene_cells.c): each WorldCell a
+// render cell, with its proxy's coarsest level, and the rest of its levels
+// from a stream. A cell goes in two steps, marked and then released, so that
+// the instances that name it can go between (the render cell refuses to go
+// first).
+// ---------------------------------------------------------------------------
+
+#define SCENE_CELL_NONE NPH_U32_MAX
+
+typedef enum SceneCellState {
+    SCENE_CELL_FREE = 0,
+    SCENE_CELL_BARE, // no render cell: no proxy, or one that failed; instances draw as themselves
+    SCENE_CELL_LOADING, // its proxy is loading: its instances wait
+    SCENE_CELL_READY,
+} SceneCellState;
+
+typedef struct SceneCell {
+    NphEntity entity;
+    u32 id;
+    u32 state; // SceneCellState
+    b32 going; // marked: released at the next scene_cells_finish_going
+    b32 plain; // its entity's world transform only moves it
+    NphWorldCell source;
+    NphDVec3 source_translation;
+    NphGuid proxy;
+    NphAssetHandle head;  // its proxy's asset while it loads
+    NphAssetHandle level; // its coarsest level's asset while it loads
+    NphRenderMesh mesh;   // its coarsest level (or the mesh cooked whole)
+    NphRenderCell cell;
+    u32 material;    // asset cache index
+    u32 stream_slot; // in the stream, or SCENE_CELL_NONE
+    u32 next_free;
+} SceneCell;
+
+typedef struct SceneCells {
+    NphAllocator *alloc;
+    NphRenderer *renderer;
+    NphAssetLoader *loader;
+    RenderAssetCache *assets;
+    NphJobSystem *jobs;     // may be NULL: levels are then made on the main thread
+    NphProxyStream *stream; // made with the first cell that streams
+    u32 max_cells;
+    u64 budget_bytes;
+    SceneCell *items;
+    u32 cap;
+    u32 high;
+    u32 free_head;
+    u32 going;        // cells marked
+    u32 ready;        // cells with a render cell
+    NphHashMap by_id; // u32 id -> index
+    NphArrayU32 loading;
+} SceneCells;
+
+NphResult scene_cells_init(SceneCells *c, NphAllocator *alloc, NphRenderer *renderer,
+                           NphAssetLoader *loader, RenderAssetCache *assets, NphJobSystem *jobs,
+                           u32 max_cells, u64 budget_bytes);
+// Everything goes, the stream too. The instances that name the cells have gone.
+void scene_cells_free(SceneCells *c);
+// A cell for a WorldCell, its proxy's load begun. `*out_index` is its slot
+// (SCENE_CELL_NONE where it could not be held at all).
+NphResult scene_cells_add(SceneCells *c, NphEntity entity, const NphWorldCell *w,
+                          const NphWorldTransform *wt, u32 *out_index);
+// Cell `index` is what `w` at `wt` says.
+bool scene_cells_same(const SceneCells *c, u32 index, const NphWorldCell *w,
+                      const NphWorldTransform *wt);
+void scene_cells_mark_going(SceneCells *c, u32 index);
+// The marked cells released (the instances that name them have gone); their
+// material references kept in `retired` where given.
+void scene_cells_finish_going(SceneCells *c, NphArrayU32 *retired);
+// The cell named `id`, or SCENE_CELL_NONE.
+u32 scene_cells_find(const SceneCells *c, u32 id);
+// Advances the cells loading. The first failure that is not the content's
+// (FULL, OUT_OF_MEMORY); the content's are logged, and those cells go bare.
+NphResult scene_cells_poll(SceneCells *c);
+// Blocks on the assets the cells are loading; false when none was.
+bool scene_cells_wait(SceneCells *c);
 
 // ---------------------------------------------------------------------------
 // Proxy streaming's decisions (proxy_stream.c), pure, tested apart

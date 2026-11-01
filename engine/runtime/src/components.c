@@ -7,8 +7,9 @@
 
 NPH_LOG_CATEGORY_DEFINE(NPH_LOG_RUNTIME, "runtime", NPH_LOG_LEVEL_INFO);
 
-static const NphMeshRenderer g_mesh_renderer_defaults = {
-    {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U}, 0};
+static const NphMeshRenderer g_mesh_renderer_defaults = {{0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U},
+                                                         {0U, 0U}, {0U, 0U}, {0U, 0U}, {0U, 0U},
+                                                         {0U, 0U}, 0,        0U};
 NPH_COMPONENT_DEFINE(NphMeshRenderer, NPH_MESH_RENDERER_FIELDS, "MeshRenderer", 0U,
                      &g_mesh_renderer_defaults)
 
@@ -94,6 +95,13 @@ static const NphAudioListener g_audio_listener_defaults = {1};
 NPH_COMPONENT_DEFINE(NphAudioListener, NPH_AUDIO_LISTENER_FIELDS, "AudioListener", 0U,
                      &g_audio_listener_defaults)
 
+NPH_COMPONENT_DEFINE(NphMeshMaterials, NPH_MESH_MATERIALS_FIELDS, "MeshMaterials", 0U, NULL)
+
+// No id (nothing can name it), an empty box, and no proxy.
+static const NphWorldCell g_world_cell_defaults = {
+    0U, {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, {0U, 0U}, {0U, 0U}, {0.0F, 0.0F, 0.0F}, 1.0F, 1.0F};
+NPH_COMPONENT_DEFINE(NphWorldCell, NPH_WORLD_CELL_FIELDS, "WorldCell", 0U, &g_world_cell_defaults)
+
 static f32 size_of(f32 v)
 {
     return nph_f32_is_finite(v) && v > 0.0F ? v : 0.0F;
@@ -144,5 +152,8 @@ NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents 
     NPH_TRY(nph_world_register_component(world, NphRigidBody_component(), &out->rigid_body));
     NPH_TRY(nph_world_register_component(world, NphCollider_component(), &out->collider));
     NPH_TRY(nph_world_register_component(world, NphAudioSource_component(), &out->audio_source));
-    return nph_world_register_component(world, NphAudioListener_component(), &out->audio_listener);
+    NPH_TRY(
+        nph_world_register_component(world, NphAudioListener_component(), &out->audio_listener));
+    NPH_TRY(nph_world_register_component(world, NphWorldCell_component(), &out->world_cell));
+    return nph_world_register_component(world, NphMeshMaterials_component(), &out->mesh_materials);
 }

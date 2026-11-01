@@ -22,6 +22,25 @@
 //
 // The camera then starts where the scene's own camera is.
 //
+// A larger world takes the renderer's capacities (the r.* cvars of docs/runtime.md
+// "World partition"), and sandbox.tiles brings in as many tiles of the scene along
+// each side, sandbox.tile_pitch apart: the city (benchmarks/scenes/city.json) is
+//
+//     nph_player --game=<build>/bin/Profile/game_sandbox.dll
+//                --pack=<scenes>/city.npk sandbox.scene=city.gltf#scene
+//                sandbox.tiles=16 sandbox.tile_pitch=153.5 sandbox.ev100=13
+//                sandbox.sun_shadows=true rt.max_entities=300000 r.max_instances=240000
+//                r.max_meshes=2048 r.lists=4 player.title_fps=true r.vsync=false
+//
+// and the landscape, with its cells' proxies and its textures streamed,
+//
+//     nph_player --game=<build>/bin/Profile/game_sandbox.dll
+//                --pack=<scenes>/landscape.npk sandbox.scene=landscape.gltf#scene
+//                sandbox.ev100=13 sandbox.sun_shadows=true rt.max_entities=100000
+//                r.max_instances=60000 r.max_meshes=8192 r.max_cells=4096 r.lists=16
+//                r.voxel_pool_mb=1200 r.texture_budget_mb=128
+//                player.title_fps=true r.vsync=false
+//
 // Everything the game keeps lives in the world or in its state block, so a
 // rebuild of this file is picked up by the running game (game.hot_reload):
 // change SPIN_SPEED below, rebuild the target, and the torus turns at the
@@ -50,6 +69,10 @@ static NPH_CVAR_FLOAT(g_sky, "sandbox.sky", 1.0, 0.0, 16.0,
 static NPH_CVAR_BOOL(g_sun_shadows, "sandbox.sun_shadows", false,
                      "the scene's directional lights cast shadows (glTF has no such flag)",
                      NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_INT(g_tiles, "sandbox.tiles", 1, 1, 64,
+                    "tiles of the scene along each side of the world", NPH_CVAR_FLAG_NONE);
+static NPH_CVAR_FLOAT(g_tile_pitch, "sandbox.tile_pitch", 0.0, 0.0, 100000.0,
+                      "metres between the tiles' origins", NPH_CVAR_FLAG_NONE);
 
 // ---------------------------------------------------------------------------
 // Components
@@ -190,8 +213,8 @@ static NphResult load(NphGame *game, const NphGameLoadInfo *info)
 {
     NPH_LOG_INFO(&LOG_SANDBOX, "sandbox %s%s", info->reloaded ? "reloaded" : "loaded",
                  info->world_migrated ? " (components changed)" : "");
-    NphCvar *const cvars[4] = {&g_scene, &g_ev100, &g_sky, &g_sun_shadows};
-    for (u32 i = 0; i < 4U; ++i) {
+    NphCvar *const cvars[] = {&g_scene, &g_ev100, &g_sky, &g_sun_shadows, &g_tiles, &g_tile_pitch};
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(cvars); ++i) {
         NPH_TRY(nph_game_register_cvar(game, cvars[i]));
     }
     return bind_actions(game);
@@ -295,7 +318,21 @@ static void bring_in_scene(NphGame *game)
     d.scene = nph_guid_from_str(key);
     d.root_transform = nph_local_transform_identity();
     d.name = "scene";
-    const NphResult r = nph_scene_import_cooked(&d, NULL, NULL);
+    NphResult r = nph_scene_import_cooked(&d, NULL, NULL);
+    // The other tiles round the first, which is at the origin, as render_perf
+    // lays out a manifest's: the first's lights are the world's.
+    const i64 tiles = nph_cvar_get_int(&g_tiles);
+    const f64 pitch = nph_cvar_get_float(&g_tile_pitch);
+    const i64 low = -(tiles - 1) / 2;
+    d.instances_only = 1;
+    for (i64 z = low; z < low + tiles && r == NPH_RESULT_OK; ++z) {
+        for (i64 x = low; x < low + tiles && r == NPH_RESULT_OK; ++x) {
+            if (x != 0 || z != 0) {
+                d.root_transform.translation = nph_dvec3((f64)x * pitch, 0.0, (f64)z * pitch);
+                r = nph_scene_import_cooked(&d, NULL, NULL);
+            }
+        }
+    }
     if (r != NPH_RESULT_OK) {
         NPH_LOG_WARN(&LOG_SANDBOX, "no %.*s to play with (%s): mount its pack with --pack",
                      (int)key.len, key.data, nph_result_string(r));

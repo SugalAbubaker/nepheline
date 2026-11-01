@@ -25,6 +25,7 @@ typedef enum RecordFlags {
     REC_HOST_HIDDEN = 1U << 5U, // the host hides it (nph_scene_renderer_set_hidden)
     REC_RELOAD = 1U << 6U,      // acquire the assets again (nph_scene_renderer_reload)
     REC_SEEN = 1U << 7U,        // `seen` holds its world transform as last mirrored
+    REC_CELL = 1U << 8U,        // mirrors a WorldCell
 } RecordFlags;
 
 #define MOVING_NONE NPH_U32_MAX
@@ -39,9 +40,12 @@ typedef struct EntityRecord {
     u64 source;
     u32 mesh; // asset cache index, RENDER_ASSET_NONE
     u32 materials[NPH_MESH_RENDERER_MATERIALS];
+    u32 *more_materials; // NPH_MESH_MATERIALS_EXTRA of them, for a mesh of many (or NULL)
     NphRenderInstance instance;
     NphRenderLight light;
-    u32 moving; // its entry in `moving`, or MOVING_NONE
+    u32 cell;     // the cell its instance belongs to (SceneCells), or SCENE_CELL_NONE
+    u32 own_cell; // the cell it is, or SCENE_CELL_NONE
+    u32 moving;   // its entry in `moving`, or MOVING_NONE
     u32 next_free;
 } EntityRecord;
 
@@ -74,6 +78,8 @@ struct NphSceneRenderer {
     NphWorld *world;
     NphRuntimeComponents ids;
     RenderAssetCache assets;
+    SceneCells cells;
+    NphTextureStream *textures;
     EntityRecord *records;
     u32 record_cap;
     u32 record_high;
@@ -91,6 +97,7 @@ struct NphSceneRenderer {
     NphQuery *light_query;  // Light, WorldTransform (both change-filtered)
     NphQuery *camera_query; // Camera, WorldTransform
     NphQuery *env_query;    // Environment
+    NphQuery *cell_query;   // WorldCell, WorldTransform (both change-filtered)
     u32 last_tick;
     b32 full_pass; // the next sync looks at every chunk
     // Interpolation (scene_render.h): every record's world transform as last
@@ -206,6 +213,8 @@ static NphResult record_for(NphSceneRenderer *sr, NphEntity e, EntityRecord **ou
     memset(r, 0, sizeof *r);
     r->entity = e;
     r->moving = MOVING_NONE;
+    r->cell = SCENE_CELL_NONE;
+    r->own_cell = SCENE_CELL_NONE;
     r->mesh = RENDER_ASSET_NONE;
     for (u32 m = 0; m < NPH_MESH_RENDERER_MATERIALS; ++m) {
         r->materials[m] = RENDER_ASSET_NONE;
@@ -222,6 +231,7 @@ static void drop_instance(NphSceneRenderer *sr, EntityRecord *r)
     }
     nph_render_instance_destroy(sr->renderer, r->instance);
     r->instance = NPH_RENDER_INSTANCE_NULL;
+    r->cell = SCENE_CELL_NONE;
     sr->instances -= 1U;
     sr->stats.destroyed += 1U;
 }
@@ -235,6 +245,13 @@ static void release_mesh(NphSceneRenderer *sr, EntityRecord *r)
     for (u32 m = 0; m < NPH_MESH_RENDERER_MATERIALS; ++m) {
         render_assets_release(&sr->assets, r->materials[m]);
         r->materials[m] = RENDER_ASSET_NONE;
+    }
+    if (r->more_materials != NULL) {
+        for (u32 m = 0; m < NPH_MESH_MATERIALS_EXTRA; ++m) {
+            render_assets_release(&sr->assets, r->more_materials[m]);
+        }
+        NPH_FREE_ARRAY(sr->alloc, u32, r->more_materials, NPH_MESH_MATERIALS_EXTRA);
+        r->more_materials = NULL;
     }
     if ((r->flags & (u32)REC_FAILED) != 0U) {
         sr->failed -= 1U;
@@ -252,6 +269,17 @@ static void release_light(NphSceneRenderer *sr, EntityRecord *r)
     r->flags &= ~(u32)REC_LIGHT;
 }
 
+// Forgets the record's WorldCell: the cell is marked, and goes once the
+// instances that name it have (finish_going_cells).
+static void release_cell(NphSceneRenderer *sr, EntityRecord *r)
+{
+    if (r->own_cell != SCENE_CELL_NONE) {
+        scene_cells_mark_going(&sr->cells, r->own_cell);
+        r->own_cell = SCENE_CELL_NONE;
+    }
+    r->flags &= ~(u32)REC_CELL;
+}
+
 static void moving_remove(NphSceneRenderer *sr, u32 i)
 {
     NPH_ASSERT(i < sr->moving_count);
@@ -267,7 +295,7 @@ static void moving_remove(NphSceneRenderer *sr, u32 i)
 static void free_record_if_empty(NphSceneRenderer *sr, u32 index)
 {
     EntityRecord *r = &sr->records[index];
-    if ((r->flags & (u32)(REC_MESH | REC_LIGHT)) != 0U) {
+    if ((r->flags & (u32)(REC_MESH | REC_LIGHT | REC_CELL)) != 0U) {
         return;
     }
     if (r->moving != MOVING_NONE) {
@@ -289,6 +317,7 @@ static void release_record(NphSceneRenderer *sr, u32 index)
     EntityRecord *r = &sr->records[index];
     release_mesh(sr, r);
     release_light(sr, r);
+    release_cell(sr, r);
     free_record_if_empty(sr, index);
 }
 
@@ -300,6 +329,7 @@ static void release_all(NphSceneRenderer *sr)
         }
     }
     NPH_ARRAY_CLEAR(&sr->pending);
+    scene_cells_finish_going(&sr->cells, NULL); // their instances have gone
 }
 
 static void release_retired(NphSceneRenderer *sr)
@@ -333,9 +363,15 @@ static void retire_all(NphSceneRenderer *sr)
         for (u32 m = 0; m < NPH_MESH_RENDERER_MATERIALS; ++m) {
             retire_ref(sr, &r->materials[m]);
         }
+        if (r->more_materials != NULL) {
+            for (u32 m = 0; m < NPH_MESH_MATERIALS_EXTRA; ++m) {
+                retire_ref(sr, &r->more_materials[m]);
+            }
+        }
         release_record(sr, i);
     }
     NPH_ARRAY_CLEAR(&sr->pending);
+    scene_cells_finish_going(&sr->cells, &sr->retired); // their instances have gone
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +384,8 @@ static void destroy_queries(NphSceneRenderer *sr)
     nph_query_destroy(sr->light_query);
     nph_query_destroy(sr->camera_query);
     nph_query_destroy(sr->env_query);
+    nph_query_destroy(sr->cell_query);
+    sr->cell_query = NULL;
     sr->mesh_query = NULL;
     sr->light_query = NULL;
     sr->camera_query = NULL;
@@ -367,8 +405,11 @@ static NphResult bind_world(NphSceneRenderer *sr, NphWorld *world)
     ids.environment = nph_world_find_component(world, NPH_STR("Environment"));
     ids.rigid_body = nph_world_find_component(world, NPH_STR("RigidBody"));
     ids.collider = nph_world_find_component(world, NPH_STR("Collider"));
+    ids.world_cell = nph_world_find_component(world, NPH_STR("WorldCell"));
+    ids.mesh_materials = nph_world_find_component(world, NPH_STR("MeshMaterials"));
     if (ids.mesh_renderer == NPH_COMPONENT_NONE || ids.light == NPH_COMPONENT_NONE ||
-        ids.camera == NPH_COMPONENT_NONE || ids.environment == NPH_COMPONENT_NONE) {
+        ids.camera == NPH_COMPONENT_NONE || ids.environment == NPH_COMPONENT_NONE ||
+        ids.world_cell == NPH_COMPONENT_NONE || ids.mesh_materials == NPH_COMPONENT_NONE) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "the world lacks the runtime's components");
         return NPH_RESULT_INVALID_ARGUMENT;
     }
@@ -408,10 +449,14 @@ static NphResult bind_world(NphSceneRenderer *sr, NphWorld *world)
     const NphQueryTerm camera_terms[2] = {nph_term_read(ids.camera),
                                           nph_term_read(NPH_COMPONENT_ID_WORLD_TRANSFORM)};
     const NphQueryTerm env_terms[1] = {nph_term_read(ids.environment)};
+    const NphQueryTerm cell_terms[2] = {
+        nph_term_changed(nph_term_read(ids.world_cell)),
+        nph_term_changed(nph_term_read(NPH_COMPONENT_ID_WORLD_TRANSFORM))};
     const NphQueryDesc mq = {mesh_terms, 2U};
     const NphQueryDesc lq = {light_terms, 2U};
     const NphQueryDesc cq = {camera_terms, 2U};
     const NphQueryDesc eq = {env_terms, 1U};
+    const NphQueryDesc wq = {cell_terms, 2U};
     NphResult r = nph_query_create(world, &mq, &sr->mesh_query);
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(world, &lq, &sr->light_query);
@@ -421,6 +466,9 @@ static NphResult bind_world(NphSceneRenderer *sr, NphWorld *world)
     }
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(world, &eq, &sr->env_query);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_query_create(world, &wq, &sr->cell_query);
     }
     if (r != NPH_RESULT_OK) {
         destroy_queries(sr);
@@ -456,9 +504,25 @@ NphResult nph_scene_renderer_create(const NphSceneRendererDesc *desc, NphSceneRe
     NPH_ARRAY_INIT(&sr->pending, desc->alloc);
     NPH_ARRAY_INIT(&sr->retired, desc->alloc);
     NPH_ARRAY_INIT(&sr->walk, desc->alloc);
+    const u32 max_assets = desc->max_assets != 0U ? desc->max_assets : DEFAULT_MAX_ASSETS;
     NphResult r = render_assets_init(&sr->assets, desc->alloc, desc->renderer, desc->loader,
-                                     desc->max_assets != 0U ? desc->max_assets : DEFAULT_MAX_ASSETS,
-                                     desc->emissive_scale);
+                                     max_assets, desc->emissive_scale);
+    if (r == NPH_RESULT_OK) {
+        r = scene_cells_init(&sr->cells, desc->alloc, desc->renderer, desc->loader, &sr->assets,
+                             desc->jobs, desc->max_cells != 0U ? desc->max_cells : 4096U,
+                             desc->proxy_budget_bytes);
+    }
+    if (r == NPH_RESULT_OK && desc->texture_budget_bytes != 0U &&
+        nph_renderer_texture_paging_supported(desc->renderer)) {
+        NphTextureStreamDesc td;
+        memset(&td, 0, sizeof td);
+        td.alloc = desc->alloc;
+        td.renderer = desc->renderer;
+        td.max_textures = max_assets;
+        td.budget_bytes = desc->texture_budget_bytes;
+        r = nph_texture_stream_create(&td, &sr->textures);
+        sr->assets.textures = sr->textures;
+    }
     if (r == NPH_RESULT_OK) {
         r = bind_world(sr, desc->world);
     }
@@ -483,7 +547,9 @@ void nph_scene_renderer_destroy(NphSceneRenderer *sr)
         release_retired(sr);
     }
     destroy_queries(sr);
+    scene_cells_free(&sr->cells);
     render_assets_free(&sr->assets);
+    nph_texture_stream_destroy(sr->textures); // what the textures held went with them
     if (sr->slot_record != NULL) {
         NPH_FREE_ARRAY(sr->alloc, u32, sr->slot_record, sr->slot_cap);
     }
@@ -544,14 +610,17 @@ static NphResult mark_pending(NphSceneRenderer *sr, EntityRecord *r)
     return NPH_ARRAY_PUSH(&sr->pending, (u32)(r - sr->records));
 }
 
-static u64 mesh_source(const NphMeshRenderer *m)
+static u64 mesh_source(const NphMeshRenderer *m, const NphMeshMaterials *more)
 {
     u64 h = nph_hash64(&m->mesh, sizeof m->mesh, 0U);
     for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS; ++s) {
         const NphGuid g = nph_mesh_renderer_material(m, s);
         h = nph_hash_combine(h, nph_hash64(&g, sizeof g, 0U));
     }
-    return h;
+    if (more != NULL) {
+        h = nph_hash_combine(h, nph_hash64(more, sizeof *more, 0U));
+    }
+    return nph_hash_combine(h, (u64)m->cell);
 }
 
 static bool hidden_now(const EntityRecord *r, const NphMeshRenderer *m, const NphWorldTransform *wt)
@@ -584,7 +653,9 @@ static NphResult apply_visibility(NphSceneRenderer *sr, EntityRecord *r, const N
 static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMeshRenderer *m,
                              const NphWorldTransform *wt, bool place)
 {
-    const u64 source = mesh_source(m);
+    const NphMeshMaterials *more =
+        (const NphMeshMaterials *)nph_world_get(sr->world, r->entity, sr->ids.mesh_materials);
+    const u64 source = mesh_source(m, more);
     if ((r->flags & (u32)(REC_MESH | REC_RELOAD)) != (u32)REC_MESH || source != r->source) {
         // The new references first, then the old ones go: an asset named
         // before and after is neither unloaded nor reloaded.
@@ -594,11 +665,23 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
             materials[s] = render_assets_acquire(&sr->assets, nph_mesh_renderer_material(m, s),
                                                  RENDER_ASSET_MATERIAL);
         }
+        u32 *more_refs = NULL;
+        if (more != NULL) {
+            more_refs = NPH_ALLOC_ARRAY(sr->alloc, u32, NPH_MESH_MATERIALS_EXTRA);
+            if (more_refs == NULL) {
+                return NPH_RESULT_OUT_OF_MEMORY;
+            }
+            for (u32 s = 0; s < NPH_MESH_MATERIALS_EXTRA; ++s) {
+                more_refs[s] = render_assets_acquire(&sr->assets, nph_mesh_materials_get(more, s),
+                                                     RENDER_ASSET_MATERIAL);
+            }
+        }
         release_mesh(sr, r);
         r->flags |= (u32)REC_MESH;
         r->source = source;
         r->mesh = mesh;
         memcpy(r->materials, materials, sizeof materials);
+        r->more_materials = more_refs;
         return mark_pending(sr, r);
     }
     if (!nph_render_instance_is_valid(sr->renderer, r->instance)) {
@@ -641,6 +724,14 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
         for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS && settled; ++s) {
             settled = render_asset_settled(&sr->assets, r->materials[s]);
         }
+        for (u32 s = 0; s < NPH_MESH_MATERIALS_EXTRA && settled && r->more_materials != NULL; ++s) {
+            settled = render_asset_settled(&sr->assets, r->more_materials[s]);
+        }
+        // Its cell's proxy first: an instance's cell is for its life. A cell
+        // that is no more, or has no proxy, leaves it drawn as itself.
+        const u32 cell = scene_cells_find(&sr->cells, m->cell);
+        const SceneCell *in_cell = cell != SCENE_CELL_NONE ? &sr->cells.items[cell] : NULL;
+        settled = settled && (in_cell == NULL || in_cell->state != SCENE_CELL_LOADING);
         if (!settled || !drawable(wt) || first != NPH_RESULT_OK) {
             sr->pending.data[kept++] = index;
             continue;
@@ -648,10 +739,16 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
         // The table up to the last material named: the slots past it draw
         // with the default material as null ones would, without taking the
         // renderer's material slots (4 per instance by default).
-        NphRenderMaterial table[NPH_MESH_RENDERER_MATERIALS];
+        NphRenderMaterial table[NPH_MESH_RENDERER_MATERIALS + NPH_MESH_MATERIALS_EXTRA];
         u32 used = 0U;
-        for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS; ++s) {
-            const RenderAsset *mat = render_asset(&sr->assets, r->materials[s]);
+        const u32 slots = r->more_materials != NULL
+                              ? NPH_MESH_RENDERER_MATERIALS + NPH_MESH_MATERIALS_EXTRA
+                              : NPH_MESH_RENDERER_MATERIALS;
+        for (u32 s = 0; s < slots; ++s) {
+            const u32 ref = s < NPH_MESH_RENDERER_MATERIALS
+                                ? r->materials[s]
+                                : r->more_materials[s - NPH_MESH_RENDERER_MATERIALS];
+            const RenderAsset *mat = render_asset(&sr->assets, ref);
             table[s] = mat != NULL && mat->state == RENDER_ASSET_READY ? mat->material
                                                                        : NPH_RENDER_MATERIAL_NULL;
             used = table[s].value != 0U ? s + 1U : used;
@@ -663,6 +760,8 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
         d.material_count = used;
         d.transform = render_transform(wt);
         d.hidden = hidden_now(r, m, wt) ? 1 : 0;
+        const bool celled = in_cell != NULL && in_cell->state == SCENE_CELL_READY;
+        d.cell = celled ? in_cell->cell : NPH_RENDER_CELL_NULL;
         const NphResult cr = nph_render_instance_create(sr->renderer, &d, &r->instance);
         if (cr != NPH_RESULT_OK) {
             first = cr;
@@ -671,11 +770,71 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
         }
         r->flags &= ~(u32)(REC_PENDING | REC_HIDDEN);
         r->flags |= d.hidden != 0 ? (u32)REC_HIDDEN : 0U;
+        r->cell = celled ? cell : SCENE_CELL_NONE;
         sr->instances += 1U;
         sr->stats.created += 1U;
     }
     sr->pending.len = kept;
     return first;
+}
+
+// The marked cells go: the instances that name them first (those entities wait
+// to be made again, drawn as themselves if no cell of that id stands by then).
+static NphResult finish_going_cells(NphSceneRenderer *sr)
+{
+    if (sr->cells.going == 0U) {
+        return NPH_RESULT_OK;
+    }
+    NphResult first = NPH_RESULT_OK;
+    for (u32 i = 0; i < sr->record_high; ++i) {
+        EntityRecord *r = &sr->records[i];
+        if (r->cell == SCENE_CELL_NONE || nph_entity_is_null(r->entity) ||
+            !sr->cells.items[r->cell].going) {
+            continue;
+        }
+        drop_instance(sr, r);
+        const NphResult pr = mark_pending(sr, r);
+        first = first != NPH_RESULT_OK ? first : pr;
+    }
+    scene_cells_finish_going(&sr->cells, NULL);
+    return first;
+}
+
+static void start_iter(const NphSceneRenderer *sr, const NphQuery *q, u32 now, NphQueryIter *it);
+
+// The WorldCells that changed: those whose place or proxy did go first, with
+// their instances, then those that are new are made (their ids taken by then).
+static NphResult sync_cells(NphSceneRenderer *sr, u32 now)
+{
+    NphQueryIter it;
+    start_iter(sr, sr->cell_query, now, &it);
+    NphChunkView v;
+    while (nph_query_next(&it, &v)) {
+        const NphWorldCell *w = NPH_CHUNK_COLUMN(&v, 0, NphWorldCell);
+        const NphWorldTransform *wt = NPH_CHUNK_COLUMN(&v, 1, NphWorldTransform);
+        for (u32 i = 0; i < v.count; ++i) {
+            EntityRecord *r = find_record(sr, v.entities[i], NULL);
+            if (r != NULL && r->own_cell != SCENE_CELL_NONE &&
+                !scene_cells_same(&sr->cells, r->own_cell, &w[i], &wt[i])) {
+                release_cell(sr, r);
+            }
+        }
+    }
+    NPH_TRY(finish_going_cells(sr));
+    start_iter(sr, sr->cell_query, now, &it);
+    while (nph_query_next(&it, &v)) {
+        const NphWorldCell *w = NPH_CHUNK_COLUMN(&v, 0, NphWorldCell);
+        const NphWorldTransform *wt = NPH_CHUNK_COLUMN(&v, 1, NphWorldTransform);
+        for (u32 i = 0; i < v.count; ++i) {
+            EntityRecord *r = NULL;
+            NPH_TRY(record_for(sr, v.entities[i], &r));
+            r->flags |= (u32)REC_CELL;
+            if (r->own_cell == SCENE_CELL_NONE) {
+                NPH_TRY(scene_cells_add(&sr->cells, v.entities[i], &w[i], &wt[i], &r->own_cell));
+            }
+        }
+    }
+    return NPH_RESULT_OK;
 }
 
 static NphRenderLightType light_type(u32 type)
@@ -1172,6 +1331,10 @@ static void apply_events(NphSceneRenderer *sr)
             if (e->component == sr->ids.light || e->component == NPH_COMPONENT_ID_WORLD_TRANSFORM) {
                 release_light(sr, r);
             }
+            if (e->component == sr->ids.world_cell ||
+                e->component == NPH_COMPONENT_ID_WORLD_TRANSFORM) {
+                release_cell(sr, r);
+            }
             free_record_if_empty(sr, index);
         }
     }
@@ -1195,6 +1358,9 @@ static void apply_events(NphSceneRenderer *sr)
         }
         if (!placed || !nph_world_has(sr->world, r->entity, sr->ids.light)) {
             release_light(sr, r);
+        }
+        if (!placed || !nph_world_has(sr->world, r->entity, sr->ids.world_cell)) {
+            release_cell(sr, r);
         }
         free_record_if_empty(sr, i);
     }
@@ -1221,7 +1387,11 @@ NphResult nph_scene_renderer_sync_at(NphSceneRenderer *sr, f32 fraction, NphScen
     // sync's tick are this sync's (scene/world.h "Change ticks").
     nph_world_clamp_ticks(sr->world, &sr->last_tick, 1U);
     const u32 now = nph_world_advance_tick(sr->world);
-    NphResult step = sync_meshes(sr, now);
+    NphResult step = sync_cells(sr, now);
+    r = r != NPH_RESULT_OK ? r : step;
+    step = scene_cells_poll(&sr->cells);
+    r = r != NPH_RESULT_OK ? r : step;
+    step = sync_meshes(sr, now);
     r = r != NPH_RESULT_OK ? r : step;
     step = resolve_pending(sr);
     r = r != NPH_RESULT_OK ? r : step;
@@ -1246,6 +1416,8 @@ NphResult nph_scene_renderer_sync_at(NphSceneRenderer *sr, f32 fraction, NphScen
     sr->stats.assets_loading = counts.loading;
     sr->stats.assets_ready = counts.ready;
     sr->stats.assets_failed = counts.failed;
+    sr->stats.cells = sr->cells.ready;
+    sr->stats.cells_loading = sr->cells.loading.len;
     if (out != NULL) {
         *out = sr->stats;
     }
@@ -1253,10 +1425,57 @@ NphResult nph_scene_renderer_sync_at(NphSceneRenderer *sr, f32 fraction, NphScen
     return r;
 }
 
+NphResult nph_scene_renderer_stream(NphSceneRenderer *sr, const NphRenderView *view, u32 height)
+{
+    NPH_ASSERT(sr != NULL && view != NULL);
+    if (sr->cells.stream != NULL) {
+        const NphProxyStreamView v = nph_proxy_stream_view(view, height);
+        NPH_TRY(nph_proxy_stream_update(sr->cells.stream, &v));
+        NphProxyStreamStats st;
+        nph_proxy_stream_stats(sr->cells.stream, &st);
+        sr->stats.proxy_levels = st.held_levels;
+        sr->stats.proxy_bytes = st.held_bytes;
+    }
+    if (sr->textures != NULL) {
+        NPH_TRY(nph_texture_stream_update(sr->textures));
+        NphTextureStreamStats st;
+        nph_texture_stream_stats(sr->textures, &st);
+        sr->stats.texture_levels = st.held_levels;
+        sr->stats.texture_bytes = st.held_bytes;
+    }
+    return NPH_RESULT_OK;
+}
+
+const NphProxyStream *nph_scene_renderer_proxy_stream(const NphSceneRenderer *sr)
+{
+    NPH_ASSERT(sr != NULL);
+    return sr->cells.stream;
+}
+
+const NphTextureStream *nph_scene_renderer_texture_stream(const NphSceneRenderer *sr)
+{
+    NPH_ASSERT(sr != NULL);
+    return sr->textures;
+}
+
+NphRenderCell nph_scene_renderer_cell(const NphSceneRenderer *sr, u32 id)
+{
+    NPH_ASSERT(sr != NULL);
+    const u32 index = scene_cells_find(&sr->cells, id);
+    return index != SCENE_CELL_NONE ? sr->cells.items[index].cell : NPH_RENDER_CELL_NULL;
+}
+
 void nph_scene_renderer_wait(NphSceneRenderer *sr)
 {
     NPH_ASSERT(sr != NULL);
-    (void)render_assets_wait(&sr->assets);
+    for (;;) {
+        (void)render_assets_wait(&sr->assets);
+        // A cell's coarsest level starts to load once its head has: looped.
+        (void)scene_cells_poll(&sr->cells);
+        if (!scene_cells_wait(&sr->cells)) {
+            return;
+        }
+    }
 }
 
 bool nph_scene_renderer_view(const NphSceneRenderer *sr, NphRenderView *view)
@@ -1379,6 +1598,9 @@ u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid)
         bool uses = forgotten(c, r->mesh);
         for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS && !uses; ++s) {
             uses = forgotten(c, r->materials[s]);
+        }
+        for (u32 s = 0; s < NPH_MESH_MATERIALS_EXTRA && !uses && r->more_materials != NULL; ++s) {
+            uses = forgotten(c, r->more_materials[s]);
         }
         if (uses) {
             r->flags |= (u32)REC_RELOAD;

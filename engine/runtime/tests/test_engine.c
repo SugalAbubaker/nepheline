@@ -563,6 +563,121 @@ static u8 *draw_showcase(u32 pipeline, u64 bytes)
     return scene;
 }
 
+// The showcase imported into an offscreen engine of the given settings; frames
+// run until its assets are in. NULL engine where the device or window system is
+// missing (the test skips).
+static NphResult start_showcase(EngineFixture *f, const char *setting, const char *second)
+{
+    prepare(f);
+    f->config.headless = 0;
+    f->config.packs[0] = NPH_TEST_PACK;
+    f->config.pack_count = 1U;
+    f->config.assignments[0] = "r.taa=false";
+    f->config.assignments[1] = setting;
+    f->config.assignments[2] = second;
+    f->config.assignment_count = 3U;
+    const NphResult started = start(f, NPH_ENGINE_MODE_OFFSCREEN);
+    if (started != NPH_RESULT_OK) {
+        return started;
+    }
+    NphEngine *e = f->engine;
+    NphSceneImportDesc d;
+    memset(&d, 0, sizeof d);
+    d.world = nph_engine_edit_world(e);
+    d.loader = nph_engine_loader(e);
+    d.scene = nph_guid_from_cstr("showcase.gltf#scene");
+    d.root_transform = nph_local_transform_identity();
+    return nph_scene_import_cooked(&d, NULL, NULL);
+}
+
+// The renderer's capacities are the engine's cvars: the showcase's two instances
+// fit two and do not fit one, and a frame that finds it full says so.
+NTEST(Engine, the_renderers_capacities_come_from_its_cvars)
+{
+    static EngineFixture fx;
+    NphResult r = start_showcase(&fx, "r.max_instances=1", "r.lists=2");
+    if (r == NPH_RESULT_UNSUPPORTED) {
+        finish(&fx);
+        NTEST_SKIP("no window system or GPU");
+    }
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cvar_int(fx.engine, "r.max_instances"), 1);
+    NTEST_EXPECT_EQ_INT(cvar_int(fx.engine, "r.lists"), 2);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(fx.engine), NPH_RESULT_OK);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    NTEST_EXPECT_EQ_INT(nph_engine_frame(fx.engine), NPH_RESULT_FULL);
+    finish(&fx);
+
+    r = start_showcase(&fx, "r.max_instances=2", "r.max_cells=8");
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(fx.engine), NPH_RESULT_OK);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(fx.engine), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_frame_stats(fx.engine)->scene.cells, 0U);
+    finish(&fx);
+}
+
+// The showcase after `frames` frames, as RGBA8 from the heap.
+static u8 *showcase_after(EngineFixture *f, u32 frames, u64 bytes)
+{
+    NphEngine *e = f->engine;
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    nph_scene_renderer_wait(nph_engine_scene_renderer(e));
+    for (u32 i = 0; i < frames; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    }
+    return read_target(e, bytes);
+}
+
+// A texture budget, through the engine: where the device pages, the stream is
+// there, and the world draws what it draws without one (the showcase's texture is
+// too small to have pages of its own: tests/integration's plate streams one).
+// Elsewhere textures stay whole, and no stream exists.
+NTEST(Engine, a_texture_budget_makes_a_stream_and_draws_the_same)
+{
+    static EngineFixture fx;
+    const u64 bytes = 96ULL * 64ULL * 4ULL;
+    NphResult r = start_showcase(&fx, "r.pipeline=1", "r.occlusion=true");
+    if (r == NPH_RESULT_UNSUPPORTED) {
+        finish(&fx);
+        NTEST_SKIP("no window system or GPU");
+    }
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(nph_scene_renderer_texture_stream(nph_engine_scene_renderer(fx.engine)));
+    u8 *whole = showcase_after(&fx, 64U, bytes);
+    finish(&fx);
+
+    r = start_showcase(&fx, "r.pipeline=1", "r.texture_budget_mb=64");
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+    u8 *streamed = showcase_after(&fx, 64U, bytes);
+    const NphTextureStream *ts =
+        nph_scene_renderer_texture_stream(nph_engine_scene_renderer(fx.engine));
+    if (ts != NULL) {
+        NphTextureStreamStats st;
+        nph_texture_stream_stats(ts, &st);
+        NTEST_LOG("textures %u, levels %u, %llu bytes, loading %u", st.textures, st.held_levels,
+                  (unsigned long long)st.held_bytes, st.loading);
+        NTEST_EXPECT_EQ_UINT(st.short_textures, 0U);
+        NTEST_EXPECT_EQ_UINT(st.loading, 0U);
+    }
+    u32 worst = 0U;
+    u32 off = 0U;
+    for (u64 i = 0; i < bytes; ++i) {
+        const u32 d =
+            whole[i] > streamed[i] ? (u32)(whole[i] - streamed[i]) : (u32)(streamed[i] - whole[i]);
+        worst = nph_max_u32(worst, d);
+        off += d > 3U ? 1U : 0U;
+    }
+    NTEST_LOG("whole vs streamed: %u channels off by more than 3 levels, at most %u", off, worst);
+    NTEST_EXPECT_LE_UINT(off, (u32)(bytes / 100ULL));
+    const NphGpuValidationStats vs = nph_gpu_device_validation_stats(nph_engine_device(fx.engine));
+    NTEST_EXPECT_EQ_UINT(vs.errors, 0U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, whole, bytes);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, streamed, bytes);
+    finish(&fx);
+}
+
 // The showcase through both pipelines: each draws it, and the images agree
 // (the production path's own tests hold it to the reference much tighter).
 NTEST(Engine, an_offscreen_engine_draws_the_world)

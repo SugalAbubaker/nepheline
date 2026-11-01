@@ -21,13 +21,20 @@
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/vfs.h>
+#include <nepheline/core/alloc_debug.h>
+#include <nepheline/platform/file.h>
 #include <nepheline/platform/time.h>
+#include <nepheline/runtime/engine.h>
 #include <nepheline/runtime/proxy_stream.h>
+#include <nepheline/runtime/scene_render.h>
+#include <nepheline/scene/transform.h>
 
 #include "test_cook_support.h"
 #include "test_render_support.h"
 
 #include <cook/cooker.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #define GROVE_CELLS 4U
@@ -85,18 +92,23 @@ typedef struct StreamWorld {
 
 // A renderer with a voxel pool of `pool` bytes, where the levels are made
 // on the jobs (ADR-0063 stage 3c).
-static void world_setup(StreamWorld *f, u64 pool)
+static void world_setup_materials(StreamWorld *f, u64 pool, u32 max_materials)
 {
     memset(f, 0, sizeof *f);
     f->alloc = nph_allocator_system();
     NphRendererDesc d;
     test_renderer_desc(&d, NULL);
     d.max_meshes = 128U;
-    d.max_materials = 4U;
+    d.max_materials = max_materials;
     d.max_instances = 256U;
     d.max_cells = 16U;
     d.voxel_pool_bytes = pool;
     test_render_setup(&f->rf, &d);
+}
+
+static void world_setup(StreamWorld *f, u64 pool)
+{
+    world_setup_materials(f, pool, 4U);
 }
 
 NTEST_SETUP(StreamWorld)
@@ -314,7 +326,8 @@ static void stream_make(StreamWorld *f, u64 budget, bool on_main)
     d.budget_bytes = budget;
     NTEST_ASSERT_EQ_INT(nph_proxy_stream_create(&d, &f->stream), NPH_RESULT_OK);
     for (u32 k = 0; k < f->cell_count; ++k) {
-        NTEST_ASSERT_EQ_INT(nph_proxy_stream_add(f->stream, &f->stream_cells[k]), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_proxy_stream_add(f->stream, &f->stream_cells[k], NULL),
+                            NPH_RESULT_OK);
     }
 }
 
@@ -703,26 +716,26 @@ NTEST_F(StreamWorld, a_level_that_fails_leaves_its_cell_as_it_is)
     NTEST_ASSERT_EQ_INT(nph_proxy_stream_create(&d, &s), NPH_RESULT_OK);
     NphProxyStreamCell bad = f->stream_cells[2];
     bad.level_count = 0U;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
     bad.level_count = NPH_RENDER_CELL_MAX_LEVELS + 1U;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
     bad = f->stream_cells[2];
     bad.cell = NPH_RENDER_CELL_NULL;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
     bad = f->stream_cells[2];
     bad.coarsest = NPH_RENDER_MESH_NULL;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
     bad = f->stream_cells[2];
     bad.distance = NPH_F32_INFINITY;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
     NphMeshLevel nameless[NPH_RENDER_CELL_MAX_LEVELS];
     memcpy(nameless, f->levels[2], sizeof nameless);
     nameless[0].mesh = NPH_GUID_NULL;
     bad = f->stream_cells[2];
     bad.levels = nameless;
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad), NPH_RESULT_INVALID_ARGUMENT);
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &f->stream_cells[2]), NPH_RESULT_OK);
-    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &f->stream_cells[3]), NPH_RESULT_FULL);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &bad, NULL), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &f->stream_cells[2], NULL), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_proxy_stream_add(s, &f->stream_cells[3], NULL), NPH_RESULT_FULL);
     nph_proxy_stream_destroy(s);
 
     // Streamed, the levels made on the main thread and then on the jobs: the
@@ -786,4 +799,1037 @@ NTEST_F(TightPool, a_full_pool_makes_the_levels_on_the_main_thread)
     NTEST_EXPECT_EQ_UINT(st.failed, 0U);
     NTEST_EXPECT_TRUE(st.held_bytes > size); // more than the pool holds
     NTEST_EXPECT_TRUE(pool <= size);
+}
+
+// ---------------------------------------------------------------------------
+// The runtime's own path (ADR-0072): the grove imported into a world, its
+// WorldCells mirrored by a scene renderer, which makes the render cells and
+// streams their levels, a frame at a time as the engine does.
+// ---------------------------------------------------------------------------
+
+typedef struct GroveScene {
+    NphWorld *world;
+    NphRuntimeComponents ids;
+    NphTransformSystem *transforms;
+    NphSceneRenderer *sr;
+} GroveScene;
+
+static void grove_scene_world(GroveScene *s, NphAllocator *alloc)
+{
+    NphWorldDesc wd;
+    memset(&wd, 0, sizeof wd);
+    wd.alloc = alloc;
+    wd.max_entities = 4096U;
+    wd.event_capacity = 1024U;
+    NTEST_ASSERT_EQ_INT(nph_world_create(&wd, &s->world), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_runtime_register_components(s->world, &s->ids), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_transform_system_create(s->world, alloc, &s->transforms),
+                        NPH_RESULT_OK);
+}
+
+static void grove_scene_make(StreamWorld *f, GroveScene *s, u64 budget)
+{
+    memset(s, 0, sizeof *s);
+    grove_scene_world(s, f->alloc);
+    NphSceneRendererDesc d;
+    memset(&d, 0, sizeof d);
+    d.alloc = f->alloc;
+    d.renderer = f->rf.renderer;
+    d.loader = f->loader;
+    d.world = s->world;
+    d.jobs = f->jobs;
+    d.max_cells = MAX_CELLS;
+    d.proxy_budget_bytes = budget;
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_create(&d, &s->sr), NPH_RESULT_OK);
+}
+
+static void grove_scene_free(GroveScene *s)
+{
+    nph_scene_renderer_destroy(s->sr);
+    nph_transform_system_destroy(s->transforms);
+    nph_world_destroy(s->world);
+}
+
+// The grove under a new root at `dz`.
+static NphEntity grove_import(StreamWorld *f, GroveScene *s, f64 dz, bool instances_only,
+                              u32 *count)
+{
+    NphSceneImportDesc d;
+    memset(&d, 0, sizeof d);
+    d.world = s->world;
+    d.loader = f->loader;
+    d.scene = nph_guid_from_cstr("grove.gltf#scene");
+    d.root_transform = nph_local_transform_identity();
+    d.root_transform.translation = nph_dvec3(0.0, 0.0, dz);
+    d.name = "grove";
+    d.instances_only = instances_only ? 1 : 0;
+    NphEntity root = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&d, &root, count), NPH_RESULT_OK);
+    return root;
+}
+
+// The world's cells' ids: how many there are, and the lowest and highest; and
+// its mesh instances: how many there are, and how many name a cell.
+typedef struct GroveCounts {
+    u32 cells;
+    u32 lowest_id;
+    u32 highest_id;
+    u32 instances;
+    u32 instances_in_cells;
+} GroveCounts;
+
+static GroveCounts grove_counts(const GroveScene *s)
+{
+    GroveCounts out;
+    memset(&out, 0, sizeof out);
+    out.lowest_id = NPH_U32_MAX;
+    for (u32 i = 0; i < nph_world_entity_slot_count(s->world); ++i) {
+        const NphEntity e = nph_world_entity_at(s->world, i);
+        if (nph_entity_is_null(e)) {
+            continue;
+        }
+        const NphWorldCell *w = (const NphWorldCell *)nph_world_get(s->world, e, s->ids.world_cell);
+        if (w != NULL) {
+            out.cells += 1U;
+            out.lowest_id = nph_min_u32(out.lowest_id, w->id);
+            out.highest_id = nph_max_u32(out.highest_id, w->id);
+        }
+        const NphMeshRenderer *m =
+            (const NphMeshRenderer *)nph_world_get(s->world, e, s->ids.mesh_renderer);
+        if (m != NULL) {
+            out.instances += 1U;
+            out.instances_in_cells += m->cell != 0U ? 1U : 0U;
+        }
+    }
+    return out;
+}
+
+// One frame as the engine runs it: the world's transforms, the sync, the
+// streams, and the draw.
+static NphRenderFrameStats grove_frame(StreamWorld *f, GroveScene *s, const NphRenderView *v,
+                                       NphSceneRenderStats *out_scene)
+{
+    RenderFixture *rf = &f->rf;
+    NphRenderFrameStats stats;
+    memset(&stats, 0, sizeof stats);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(rf->dev), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_transform_system_update(s->transforms, f->jobs), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_sync(s->sr, out_scene), NPH_RESULT_OK);
+    nph_world_clear_events(s->world);
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_stream(s->sr, v, TARGET_SIZE), NPH_RESULT_OK);
+    nph_gpu_rg_begin(rf->graph);
+    NTEST_ASSERT_EQ_INT(nph_render_frame(rf->renderer, v, rf->graph, f->target, NULL, &stats),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_compile(rf->graph), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(rf->graph), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(rf->dev), NPH_RESULT_OK);
+    return stats;
+}
+
+// Frames until the cells are made, every instance is, and the stream is quiet.
+static NphRenderFrameStats grove_settle(StreamWorld *f, GroveScene *s, const NphRenderView *v,
+                                        NphSceneRenderStats *out_scene)
+{
+    NphRenderFrameStats stats;
+    memset(&stats, 0, sizeof stats);
+    const u64 start = nph_time_now_ns();
+    u32 quiet = 0U;
+    u32 frames = 0U;
+    while (quiet < QUIET_FRAMES && frames < SETTLE_FRAMES &&
+           nph_time_now_ns() - start < SETTLE_NS) {
+        stats = grove_frame(f, s, v, out_scene);
+        const NphProxyStream *ps = nph_scene_renderer_proxy_stream(s->sr);
+        NphProxyStreamStats st;
+        memset(&st, 0, sizeof st);
+        if (ps != NULL) {
+            nph_proxy_stream_stats(ps, &st);
+        }
+        const bool still = st.loading == 0U && st.installed == 0U && st.dropped == 0U &&
+                           out_scene->pending == 0U && out_scene->cells_loading == 0U &&
+                           out_scene->assets_loading == 0U;
+        quiet = still ? quiet + 1U : 0U;
+        ++frames;
+    }
+    NTEST_ASSERT_EQ_UINT(quiet, QUIET_FRAMES);
+    return stats;
+}
+
+// The world imported, the scene renderer makes each cell with its coarsest
+// level, holds its instances until then, and streams the levels the views ask
+// for: the image is the one the harness's own cells and stream draw. Nearer than
+// their distance the instances are drawn instead. A tile more makes four cells
+// more, of ids of their own.
+NTEST_F(StreamWorld, a_worlds_cells_come_from_the_scene_renderer_as_the_harness_makes_them)
+{
+    REQUIRE_PRODUCTION(f);
+    world_open(f);
+    u8 *direct = NPH_ALLOC_ARRAY(f->alloc, u8, TARGET_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(direct);
+    place_grove(f, 0.0);
+    const NphDVec3 eye = near_eye();
+    const NphRenderView v =
+        grove_view(eye, grove_centre(0.0), NARROW_FOV, fine_threshold(f, eye, NARROW_FOV));
+    stream_make(f, 0U, false);
+    (void)settle(f, &v);
+    draw(f, &v);
+    memcpy(direct, f->pixels, TARGET_PIXELS * 4U);
+    u32 levels = 0U;
+    for (u32 k = 0; k < f->cell_count; ++k) {
+        levels += f->stream_cells[k].level_count - 1U;
+    }
+    // The harness's cells go: the renderer's capacity is the test's.
+    stream_free(f);
+    for (u32 k = 0; k < f->cell_count; ++k) {
+        nph_render_cell_destroy(f->rf.renderer, f->cells[k]);
+        nph_render_mesh_destroy(f->rf.renderer, f->coarsest[k]);
+    }
+    f->cell_count = 0U;
+
+    GroveScene s;
+    grove_scene_make(f, &s, 0U);
+    u32 entities = 0U;
+    const NphEntity root = grove_import(f, &s, 0.0, false, &entities);
+    NTEST_EXPECT_FALSE(nph_entity_is_null(root));
+    const GroveCounts counts = grove_counts(&s);
+    NTEST_LOG("%u entities: %u cells, ids %u to %u; %u mesh instances, %u in cells", entities,
+              counts.cells, counts.lowest_id, counts.highest_id, counts.instances,
+              counts.instances_in_cells);
+    NTEST_EXPECT_EQ_UINT(counts.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(counts.lowest_id, 1U);
+    NTEST_EXPECT_EQ_UINT(counts.highest_id, GROVE_CELLS);
+    NTEST_EXPECT_GT_UINT(counts.instances, 0U);
+    // All but the ground, which voxelizes to nothing and so stands in no cell.
+    NTEST_EXPECT_EQ_UINT(counts.instances_in_cells, counts.instances - 1U);
+    // The harness drew the cells alone: the ground is hidden here too.
+    for (u32 i = 0; i < nph_world_entity_slot_count(s.world); ++i) {
+        const NphEntity e = nph_world_entity_at(s.world, i);
+        NphMeshRenderer *m =
+            nph_entity_is_null(e)
+                ? NULL
+                : NPH_WORLD_GET_MUT(s.world, e, s.ids.mesh_renderer, NphMeshRenderer);
+        if (m != NULL && m->cell == 0U) {
+            m->hidden = 1;
+        }
+    }
+
+    NphSceneRenderStats scene;
+    NphRenderFrameStats stats = grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.cells_loading, 0U);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+    NTEST_EXPECT_EQ_UINT(scene.failed, 0U);
+    NTEST_EXPECT_EQ_UINT(scene.proxy_levels, levels);
+    NTEST_EXPECT_GT_UINT(stats.vis_cells_proxied, 0U);
+    for (u32 id = 1U; id <= GROVE_CELLS; ++id) {
+        NTEST_EXPECT_TRUE(
+            nph_render_cell_is_valid(f->rf.renderer, nph_scene_renderer_cell(s.sr, id)));
+    }
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_cell(s.sr, GROVE_CELLS + 1U).value, 0U);
+    for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        (void)grove_frame(f, &s, &v, &scene);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    test_read_image(f->rf.dev, f->target, 0U, f->pixels, TARGET_PIXELS * 4U);
+    const u32 differ = differing_pixels(direct, f->pixels);
+    NTEST_LOG("the harness's image and the scene renderer's: %u of %llu pixels differ, %u covered",
+              differ, (unsigned long long)TARGET_PIXELS, covered_pixels(f->pixels));
+    NTEST_EXPECT_GT_UINT(covered_pixels(f->pixels), 0U);
+    NTEST_EXPECT_EQ_UINT(differ, 0U);
+
+    // Near, inside their distance: the instances themselves.
+    const NphDVec3 close_eye = nph_dvec3(8.0, 20.0, 40.0);
+    const NphRenderView near_view = grove_view(close_eye, grove_centre(0.0), 0.4F, 1.0F);
+    (void)grove_frame(f, &s, &near_view, &scene);
+    for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        stats = grove_frame(f, &s, &near_view, &scene);
+    }
+    NTEST_EXPECT_EQ_UINT(stats.vis_cells_proxied, 0U);
+    NTEST_EXPECT_GT_UINT(stats.vis_clusters, 0U);
+
+    // A second tile, its cells and instances its own.
+    (void)grove_import(f, &s, -GROVE_APART, true, NULL);
+    const GroveCounts two = grove_counts(&s);
+    NTEST_EXPECT_EQ_UINT(two.cells, 2U * GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(two.highest_id, 2U * GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(two.instances, 2U * counts.instances);
+    (void)grove_settle(f, &s, &near_view, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, 2U * GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.instances, two.instances);
+
+    // Its proxies stand where it does: seen from as far as the first was, the
+    // same view moved with it, they cover what the first's covered. (Its ground is
+    // hidden too, and the first tile is behind that eye.)
+    for (u32 i = 0; i < nph_world_entity_slot_count(s.world); ++i) {
+        const NphEntity e = nph_world_entity_at(s.world, i);
+        NphMeshRenderer *m =
+            nph_entity_is_null(e)
+                ? NULL
+                : NPH_WORLD_GET_MUT(s.world, e, s.ids.mesh_renderer, NphMeshRenderer);
+        if (m != NULL && m->cell == 0U) {
+            m->hidden = 1;
+        }
+    }
+    const NphDVec3 moved_eye = nph_dvec3(eye.x, eye.y, eye.z - GROVE_APART);
+    const NphRenderView moved =
+        grove_view(moved_eye, grove_centre(-GROVE_APART), NARROW_FOV, v.lod_error);
+    stats = grove_settle(f, &s, &moved, &scene);
+    NTEST_EXPECT_GT_UINT(stats.vis_cells_proxied, 0U);
+    for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        (void)grove_frame(f, &s, &moved, &scene);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    test_read_image(f->rf.dev, f->target, 0U, f->pixels, TARGET_PIXELS * 4U);
+    const u32 first_covers = covered_pixels(direct);
+    const u32 second_covers = covered_pixels(f->pixels);
+    NTEST_LOG("the first tile's proxies cover %u pixels, the second's %u", first_covers,
+              second_covers);
+    NTEST_EXPECT_GT_UINT(second_covers, first_covers - first_covers / 50U);
+    NTEST_EXPECT_LT_UINT(second_covers, first_covers + first_covers / 50U);
+    grove_scene_free(&s);
+    NPH_FREE_ARRAY(f->alloc, u8, direct, TARGET_PIXELS * 4U);
+}
+
+// A cell's entity gone takes its render cell and proxy with it, while its
+// instances live on, drawn as themselves; its root gone takes everything. A new
+// world to mirror starts afresh, a cell's proxy that does not load leaves its
+// instances drawn as themselves, and a cell turned with its parent cannot follow.
+NTEST_F(StreamWorld, cells_go_with_their_entities_and_leave_their_instances)
+{
+    REQUIRE_PRODUCTION(f);
+    world_open(f);
+    GroveScene s;
+    grove_scene_make(f, &s, 0U);
+    const NphEntity root = grove_import(f, &s, 0.0, false, NULL);
+    const GroveCounts counts = grove_counts(&s);
+    const NphDVec3 eye = near_eye();
+    const NphRenderView v = grove_view(eye, grove_centre(0.0), NARROW_FOV, 1.0F);
+    NphSceneRenderStats scene;
+    (void)grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+
+    // The first cell's entity: its proxy goes, its instances are made anew.
+    NphEntity first = NPH_ENTITY_NULL;
+    for (u32 i = 0; i < nph_world_entity_slot_count(s.world) && nph_entity_is_null(first); ++i) {
+        const NphEntity e = nph_world_entity_at(s.world, i);
+        const NphWorldCell *w =
+            nph_entity_is_null(e)
+                ? NULL
+                : (const NphWorldCell *)nph_world_get(s.world, e, s.ids.world_cell);
+        first = w != NULL && w->id == 1U ? e : first;
+    }
+    NTEST_ASSERT_FALSE(nph_entity_is_null(first));
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(s.world, first), NPH_RESULT_OK);
+    const NphRenderFrameStats stats = grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS - 1U);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_cell(s.sr, 1U).value, 0U);
+    NTEST_LOG("one cell gone: %u cells proxied, %u clusters", stats.vis_cells_proxied,
+              stats.vis_clusters);
+
+    // Its cell's id taken by a new cell (changed in place, it goes and comes).
+    NphEntity second = NPH_ENTITY_NULL;
+    for (u32 i = 0; i < nph_world_entity_slot_count(s.world) && nph_entity_is_null(second); ++i) {
+        const NphEntity e = nph_world_entity_at(s.world, i);
+        const NphWorldCell *w =
+            nph_entity_is_null(e)
+                ? NULL
+                : (const NphWorldCell *)nph_world_get(s.world, e, s.ids.world_cell);
+        second = w != NULL && w->id == 2U ? e : second;
+    }
+    NTEST_ASSERT_FALSE(nph_entity_is_null(second));
+    const NphRenderCell before_change = nph_scene_renderer_cell(s.sr, 2U);
+    NTEST_EXPECT_TRUE(nph_render_cell_is_valid(f->rf.renderer, before_change));
+    NphWorldCell *changing = NPH_WORLD_GET_MUT(s.world, second, s.ids.world_cell, NphWorldCell);
+    NTEST_ASSERT_NOT_NULL(changing);
+    changing->proxy_distance *= 2.0F;
+    (void)grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS - 1U);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+    const NphRenderCell after_change = nph_scene_renderer_cell(s.sr, 2U);
+    NTEST_EXPECT_TRUE(nph_render_cell_is_valid(f->rf.renderer, after_change));
+    NTEST_EXPECT_FALSE(nph_render_cell_is_valid(f->rf.renderer, before_change));
+    NTEST_EXPECT_NE_UINT(after_change.value, before_change.value);
+
+    // The rest go with the root, at once.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn_recursive(s.world, root), NPH_RESULT_OK);
+    (void)grove_frame(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, 0U);
+    NTEST_EXPECT_EQ_UINT(scene.instances, 0U);
+    NphProxyStreamStats st;
+    nph_proxy_stream_stats(nph_scene_renderer_proxy_stream(s.sr), &st);
+    NTEST_EXPECT_EQ_UINT(st.cells, 0U);
+    NTEST_EXPECT_EQ_UINT(st.held_levels, 0U);
+    NTEST_EXPECT_TRUE(st.held_bytes == 0U);
+
+    // Imported again: the stream takes them in the slots they left.
+    (void)grove_import(f, &s, 0.0, false, NULL);
+    (void)grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+
+    // Another world: the scene renderer's cells go, and that world's come.
+    GroveScene other;
+    memset(&other, 0, sizeof other);
+    grove_scene_world(&other, f->alloc);
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_set_world(s.sr, other.world), NPH_RESULT_OK);
+    NphSceneRenderer *held = s.sr;
+    other.sr = held;
+    s.sr = NULL;
+    (void)grove_import(f, &other, 0.0, false, NULL);
+    (void)grove_settle(f, &other, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.instances, counts.instances);
+
+    // A root that turns its scene takes no cells.
+    NphSceneImportDesc d;
+    memset(&d, 0, sizeof d);
+    d.world = other.world;
+    d.loader = f->loader;
+    d.scene = nph_guid_from_cstr("grove.gltf#scene");
+    d.root_transform = nph_local_transform_identity();
+    d.root_transform.rotation = nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.5F);
+    d.instances_only = 1;
+    NphEntity turned = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&d, &turned, NULL), NPH_RESULT_OK);
+    const GroveCounts after = grove_counts(&other);
+    NTEST_EXPECT_EQ_UINT(after.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(after.instances, 2U * counts.instances);
+    NTEST_EXPECT_EQ_UINT(after.instances_in_cells, counts.instances_in_cells);
+
+    // A cell whose proxy names nothing: its instances wait for nothing.
+    NphEntity orphan;
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_NAME, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM};
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(other.world, comps, 3U, &orphan), NPH_RESULT_OK);
+    NphWorldCell w;
+    nph_component_init_default(NphWorldCell_component(), &w);
+    w.id = 999U;
+    w.bounds_max = nph_vec3(1.0F, 1.0F, 1.0F);
+    w.proxy = nph_guid_from_cstr("no such proxy");
+    NTEST_ASSERT_EQ_INT(nph_world_add(other.world, orphan, other.ids.world_cell, &w),
+                        NPH_RESULT_OK);
+    NphEntity member;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(other.world, comps, 3U, &member), NPH_RESULT_OK);
+    NphMeshRenderer m;
+    memset(&m, 0, sizeof m);
+    bool sampled = false;
+    for (u32 i = 0; i < nph_world_entity_slot_count(other.world) && !sampled; ++i) {
+        const NphEntity e = nph_world_entity_at(other.world, i);
+        const NphMeshRenderer *sample =
+            nph_entity_is_null(e)
+                ? NULL
+                : (const NphMeshRenderer *)nph_world_get(other.world, e, other.ids.mesh_renderer);
+        if (sample != NULL) {
+            m = *sample;
+            sampled = true;
+        }
+    }
+    NTEST_ASSERT_TRUE(sampled);
+    m.cell = 999U;
+    NTEST_ASSERT_EQ_INT(nph_world_add(other.world, member, other.ids.mesh_renderer, &m),
+                        NPH_RESULT_OK);
+    (void)grove_settle(f, &other, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(scene.instances, 2U * counts.instances + 1U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_cell(other.sr, 999U).value, 0U);
+
+    // A cell that is turned (a scene file's, or a game's), whose proxy would load:
+    // its box cannot follow, so it makes no render cell.
+    NphWorldCell real;
+    memset(&real, 0, sizeof real);
+    bool found_cell = false;
+    for (u32 i = 0; i < nph_world_entity_slot_count(other.world) && !found_cell; ++i) {
+        const NphEntity e = nph_world_entity_at(other.world, i);
+        const NphWorldCell *c =
+            nph_entity_is_null(e)
+                ? NULL
+                : (const NphWorldCell *)nph_world_get(other.world, e, other.ids.world_cell);
+        if (c != NULL && !nph_guid_is_null(c->proxy)) {
+            real = *c;
+            found_cell = true;
+        }
+    }
+    NTEST_ASSERT_TRUE(found_cell);
+    real.id = 998U;
+    NphEntity turned_cell;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(other.world, comps, 3U, &turned_cell), NPH_RESULT_OK);
+    NphLocalTransform *turned_at = NPH_WORLD_GET_MUT(
+        other.world, turned_cell, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    NTEST_ASSERT_NOT_NULL(turned_at);
+    turned_at->rotation = nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.5F);
+    NTEST_ASSERT_EQ_INT(nph_world_add(other.world, turned_cell, other.ids.world_cell, &real),
+                        NPH_RESULT_OK);
+    (void)grove_settle(f, &other, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_cell(other.sr, 998U).value, 0U);
+
+    grove_scene_free(&other);
+    if (s.sr != NULL) {
+        nph_scene_renderer_destroy(s.sr);
+    }
+    nph_transform_system_destroy(s.transforms);
+    nph_world_destroy(s.world);
+}
+
+// The budget holds through the scene renderer as through the stream itself.
+NTEST_F(StreamWorld, the_scene_renderers_stream_keeps_its_budget)
+{
+    REQUIRE_PRODUCTION(f);
+    world_open(f);
+    GroveScene s;
+    grove_scene_make(f, &s, 32U << 10U);
+    (void)grove_import(f, &s, 0.0, false, NULL);
+    const NphDVec3 eye = near_eye();
+    const NphRenderView v = grove_view(eye, grove_centre(0.0), NARROW_FOV, 0.01F);
+    NphSceneRenderStats scene;
+    (void)grove_settle(f, &s, &v, &scene);
+    (void)grove_frame(f, &s, &v, &scene);
+    NTEST_LOG("within 32 KiB: %u levels, %llu bytes", scene.proxy_levels,
+              (unsigned long long)scene.proxy_bytes);
+    NTEST_EXPECT_EQ_UINT(scene.cells, GROVE_CELLS);
+    NTEST_EXPECT_TRUE(scene.proxy_bytes <= (32U << 10U));
+    grove_scene_free(&s);
+}
+
+// ---------------------------------------------------------------------------
+// The texture stream through the scene renderer (ADR-0072)
+// ---------------------------------------------------------------------------
+
+#define PLATE_TEXTURE 512U
+
+// A quad of 4 m at the origin facing +z, with a checker of its own at every
+// texel's level: a cooked texture large enough to have pages.
+static void write_plate(const TempDir *dir)
+{
+    static u8 rgba[PLATE_TEXTURE * PLATE_TEXTURE * 4U];
+    for (u32 y = 0; y < PLATE_TEXTURE; ++y) {
+        for (u32 x = 0; x < PLATE_TEXTURE; ++x) {
+            u8 *t = &rgba[((u64)y * PLATE_TEXTURE + x) * 4U];
+            const bool on = ((x >> 3U) + (y >> 3U)) % 2U == 0U;
+            t[0] = (u8)(x >> 1U);
+            t[1] = (u8)(y >> 1U);
+            t[2] = on ? 220U : 30U;
+            t[3] = 255U;
+        }
+    }
+    static u8 tga[18U + PLATE_TEXTURE * PLATE_TEXTURE * 4U];
+    const u64 tga_len = test_write_tga(rgba, PLATE_TEXTURE, PLATE_TEXTURE, tga);
+    char path[1200];
+    test_path_in(dir, "plate.tga", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, tga, tga_len), NPH_RESULT_OK);
+    const f32 positions[12] = {-2.0F, -2.0F, 0.0F, 2.0F,  -2.0F, 0.0F,
+                               2.0F,  2.0F,  0.0F, -2.0F, 2.0F,  0.0F};
+    const f32 normals[12] = {0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F,
+                             0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F};
+    const f32 uvs[8] = {0.0F, 1.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F};
+    const u16 indices[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+    u8 buffer[sizeof positions + sizeof normals + sizeof uvs + sizeof indices];
+    memcpy(buffer, positions, sizeof positions);
+    memcpy(buffer + 48U, normals, sizeof normals);
+    memcpy(buffer + 96U, uvs, sizeof uvs);
+    memcpy(buffer + 128U, indices, sizeof indices);
+    test_path_in(dir, "plate.bin", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, buffer, sizeof buffer), NPH_RESULT_OK);
+    static const char document[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+        "\"nodes\":[{\"name\":\"plate\",\"mesh\":0}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,"
+        "\"TEXCOORD_0\":2},\"indices\":3,\"material\":0}]}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}}}],"
+        "\"textures\":[{\"source\":0}],\"images\":[{\"uri\":\"plate.tga\"}],"
+        "\"buffers\":[{\"uri\":\"plate.bin\",\"byteLength\":140}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":48},"
+        "{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
+        "{\"buffer\":0,\"byteOffset\":96,\"byteLength\":32},"
+        "{\"buffer\":0,\"byteOffset\":128,\"byteLength\":12}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":4,\"type\":\"VEC3\","
+        "\"min\":[-2,-2,0],\"max\":[2,2,0]},"
+        "{\"bufferView\":1,\"componentType\":5126,\"count\":4,\"type\":\"VEC3\"},"
+        "{\"bufferView\":2,\"componentType\":5126,\"count\":4,\"type\":\"VEC2\"},"
+        "{\"bufferView\":3,\"componentType\":5123,\"count\":6,\"type\":\"SCALAR\"}]}";
+    test_path_in(dir, "plate.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, document, sizeof document - 1U), NPH_RESULT_OK);
+}
+
+// Cooks `name` from `dir` into a pack beside it, its path in `pack`.
+static void cook_pack(const TempDir *dir, const char *name, NphJobSystem *jobs, char *pack, u64 cap)
+{
+    char gltf[1200];
+    char out_dir[1200];
+    test_path_in(dir, name, gltf, sizeof gltf);
+    test_path_in(dir, "cooked", out_dir, sizeof out_dir);
+    test_path_in(dir, "scene.npk", pack, cap);
+    CookerDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.alloc = nph_allocator_system();
+    cd.out_dir = out_dir;
+    cd.source_root = dir->dir;
+    cd.jobs = jobs;
+    cook_texture_settings_default(&cd.texture);
+    cd.texture.uncompressed = 1; // quick to cook, whatever the configuration
+    cook_mesh_settings_default(&cd.mesh);
+    Cooker *cooker = NULL;
+    NTEST_ASSERT_EQ_INT(cooker_create(&cd, &cooker), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(cooker, gltf), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(cooker_stats(cooker).failed, 0U);
+    NTEST_ASSERT_EQ_INT(cooker_pack(cooker, pack), NPH_RESULT_OK);
+    cooker_destroy(cooker);
+}
+
+// Cooks `name` from `dir` into a pack, and gives the fixture jobs, a file system and
+// a loader for it.
+static void cook_and_mount(StreamWorld *f, const TempDir *dir, const char *name)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &f->jobs), NPH_RESULT_OK);
+    char pack[1200];
+    cook_pack(dir, name, f->jobs, pack, sizeof pack);
+    NTEST_ASSERT_EQ_INT(nph_vfs_create(alloc, &f->vfs), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_vfs_mount_pack(f->vfs, NPH_STR("content"), pack, NULL), NPH_RESULT_OK);
+    NphAssetLoaderDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.alloc = alloc;
+    ld.vfs = f->vfs;
+    ld.jobs = f->jobs;
+    NTEST_ASSERT_EQ_INT(nph_asset_loader_create(&ld, &f->loader), NPH_RESULT_OK);
+}
+
+// With a budget the scene renderer's textures are paged and streamed: the plate's
+// settles holding the levels it is seen at, and draws what its texture whole draws.
+NTEST(WorldPartition, a_texture_budget_streams_a_worlds_textures_as_the_view_asks)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    StreamWorld *f = NPH_ALLOC_TYPE(alloc, StreamWorld);
+    NTEST_ASSERT_NOT_NULL(f);
+    world_setup(f, 0U);
+    if (f->rf.dev == NULL || !nph_renderer_production_supported(f->rf.renderer) ||
+        !nph_renderer_texture_paging_supported(f->rf.renderer)) {
+        world_teardown(f);
+        NPH_FREE_TYPE(alloc, StreamWorld, f);
+        NTEST_SKIP("no paged textures on this device");
+    }
+    TempDir dir;
+    test_temp_dir_make(&dir, "world_textures");
+    write_plate(&dir);
+    cook_and_mount(f, &dir, "plate.gltf");
+    f->target = test_make_target(f->rf.dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, TARGET_SIZE);
+    f->pixels = NPH_ALLOC_ARRAY(alloc, u8, TARGET_PIXELS * 4U);
+    u8 *whole = NPH_ALLOC_ARRAY(alloc, u8, TARGET_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(f->pixels);
+    NTEST_ASSERT_NOT_NULL(whole);
+    NphRenderView v = grove_view(nph_dvec3(0.0, 0.0, 6.0), nph_dvec3_zero(), 0.7F, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_BASE_COLOR;
+
+    // Twice: its texture whole, then streamed.
+    for (u32 round = 0; round < 2U; ++round) {
+        GroveScene s;
+        memset(&s, 0, sizeof s);
+        grove_scene_world(&s, alloc);
+        NphSceneRendererDesc d;
+        memset(&d, 0, sizeof d);
+        d.alloc = alloc;
+        d.renderer = f->rf.renderer;
+        d.loader = f->loader;
+        d.world = s.world;
+        d.jobs = f->jobs;
+        d.max_cells = MAX_CELLS;
+        d.texture_budget_bytes = round == 1U ? (64ULL << 20U) : 0ULL;
+        NTEST_ASSERT_EQ_INT(nph_scene_renderer_create(&d, &s.sr), NPH_RESULT_OK);
+        NphSceneImportDesc id;
+        memset(&id, 0, sizeof id);
+        id.world = s.world;
+        id.loader = f->loader;
+        id.scene = nph_guid_from_cstr("plate.gltf#scene");
+        id.root_transform = nph_local_transform_identity();
+        NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&id, NULL, NULL), NPH_RESULT_OK);
+        NphSceneRenderStats scene;
+        (void)grove_settle(f, &s, &v, &scene);
+        NTEST_EXPECT_EQ_UINT(scene.instances, 1U);
+        const NphTextureStream *ts = nph_scene_renderer_texture_stream(s.sr);
+        if (round == 1U) {
+            NTEST_ASSERT_NOT_NULL(ts);
+            NphTextureStreamStats st;
+            for (u32 frame = 0; frame < SETTLE_FRAMES; ++frame) {
+                (void)grove_frame(f, &s, &v, &scene);
+                nph_texture_stream_stats(ts, &st);
+                if (st.asked != 0U && st.loading == 0U && st.short_textures == 0U && frame > 8U) {
+                    break;
+                }
+            }
+            NTEST_LOG("the stream: %u textures, %u levels, %llu bytes", st.textures, st.held_levels,
+                      (unsigned long long)st.held_bytes);
+            NTEST_EXPECT_EQ_UINT(st.textures, 1U);
+            NTEST_EXPECT_GT_UINT(st.held_levels, 0U);
+            NTEST_EXPECT_EQ_UINT(st.short_textures, 0U);
+            NTEST_EXPECT_EQ_UINT(scene.texture_levels, st.held_levels);
+            NTEST_EXPECT_TRUE(scene.texture_bytes == st.held_bytes);
+        } else {
+            NTEST_EXPECT_NULL(ts);
+        }
+        for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+            (void)grove_frame(f, &s, &v, &scene);
+        }
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+        test_read_image(f->rf.dev, f->target, 0U, f->pixels, TARGET_PIXELS * 4U);
+        if (round == 0U) {
+            memcpy(whole, f->pixels, TARGET_PIXELS * 4U);
+        } else {
+            NTEST_EXPECT_GT_UINT(covered_pixels(whole), (u32)(TARGET_PIXELS / 8U));
+            NTEST_EXPECT_EQ_UINT(differing_pixels(whole, f->pixels), 0U);
+        }
+        grove_scene_free(&s);
+        // A renderer's frames in flight still hold the texture: waited out.
+        NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    }
+    NPH_FREE_ARRAY(alloc, u8, whole, TARGET_PIXELS * 4U);
+    world_teardown(f);
+    NPH_FREE_TYPE(alloc, StreamWorld, f);
+    test_temp_dir_remove(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// A mesh of many materials
+// ---------------------------------------------------------------------------
+
+#define STRIP_QUADS 12U
+#define STRIP_EYE   20.0
+
+// One mesh of a row of 1 m quads along x, one primitive and one material each,
+// their base colours rising in red: past a MeshRenderer's eight slots.
+static void write_strip(const TempDir *dir)
+{
+    static f32 positions[STRIP_QUADS * 12U];
+    static f32 normals[STRIP_QUADS * 12U];
+    for (u32 q = 0; q < STRIP_QUADS; ++q) {
+        const f32 x0 = (f32)q - (f32)STRIP_QUADS * 0.5F;
+        const f32 corners[12] = {x0,        -0.5F, 0.0F, x0 + 1.0F, -0.5F, 0.0F,
+                                 x0 + 1.0F, 0.5F,  0.0F, x0,        0.5F,  0.0F};
+        memcpy(&positions[(u64)q * 12U], corners, sizeof corners);
+        for (u32 v = 0; v < 4U; ++v) {
+            normals[(u64)q * 12U + (u64)v * 3U + 2U] = 1.0F;
+        }
+    }
+    const u16 indices[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+    static u8 buffer[sizeof positions + sizeof normals + sizeof indices];
+    memcpy(buffer, positions, sizeof positions);
+    memcpy(buffer + sizeof positions, normals, sizeof normals);
+    memcpy(buffer + sizeof positions + sizeof normals, indices, sizeof indices);
+    char path[1200];
+    test_path_in(dir, "strip.bin", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, buffer, sizeof buffer), NPH_RESULT_OK);
+
+    static char doc[16384];
+    u64 n = 0U;
+#define APPEND(...) n += (u64)snprintf(doc + n, sizeof doc - n, __VA_ARGS__)
+    APPEND("{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+           "\"nodes\":[{\"name\":\"strip\",\"mesh\":0}],\"meshes\":[{\"primitives\":[");
+    for (u32 q = 0; q < STRIP_QUADS; ++q) {
+        APPEND("%s{\"attributes\":{\"POSITION\":%u,\"NORMAL\":%u},\"indices\":%u,\"material\":%u}",
+               q != 0U ? "," : "", q * 2U, q * 2U + 1U, STRIP_QUADS * 2U, q);
+    }
+    APPEND("]}],\"materials\":[");
+    for (u32 q = 0; q < STRIP_QUADS; ++q) {
+        APPEND("%s{\"pbrMetallicRoughness\":{\"baseColorFactor\":[%.4f,0.25,0.5,1]}}",
+               q != 0U ? "," : "", (f64)(q + 1U) / (f64)(STRIP_QUADS + 1U) * 0.8);
+    }
+    APPEND("],\"buffers\":[{\"uri\":\"strip.bin\",\"byteLength\":%u}],\"bufferViews\":["
+           "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u},"
+           "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
+           "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":12}],\"accessors\":[",
+           (u32)sizeof buffer, (u32)sizeof positions, (u32)sizeof positions, (u32)sizeof normals,
+           (u32)(sizeof positions + sizeof normals));
+    for (u32 q = 0; q < STRIP_QUADS; ++q) {
+        const i32 x0 = (i32)q - (i32)(STRIP_QUADS / 2U);
+        APPEND("{\"bufferView\":0,\"byteOffset\":%u,\"componentType\":5126,\"count\":4,"
+               "\"type\":\"VEC3\",\"min\":[%d,-0.5,0],\"max\":[%d,0.5,0]},"
+               "{\"bufferView\":1,\"byteOffset\":%u,\"componentType\":5126,\"count\":4,"
+               "\"type\":\"VEC3\"},",
+               q * 48U, x0, x0 + 1, q * 48U);
+    }
+    APPEND("{\"bufferView\":2,\"componentType\":5123,\"count\":6,\"type\":\"SCALAR\"}]}");
+#undef APPEND
+    NTEST_ASSERT_TRUE(n < sizeof doc);
+    test_path_in(dir, "strip.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, doc, n), NPH_RESULT_OK);
+}
+
+// The column of quad `q`'s middle, the view `half_width` metres each way at the strip.
+static u32 strip_column(u32 q, f64 half_width)
+{
+    const f64 x = (f64)q + 0.5 - (f64)STRIP_QUADS * 0.5;
+    return (u32)((f64)TARGET_SIZE * 0.5 * (1.0 + x / half_width));
+}
+
+// The importer gives the slots past the MeshRenderer's eight a MeshMaterials, and
+// the scene renderer draws them: every quad its own colour, none the default's.
+NTEST(WorldPartition, a_mesh_of_many_materials_draws_each)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    StreamWorld *f = NPH_ALLOC_TYPE(alloc, StreamWorld);
+    NTEST_ASSERT_NOT_NULL(f);
+    world_setup_materials(f, 0U, STRIP_QUADS);
+    if (f->rf.dev == NULL || !nph_renderer_production_supported(f->rf.renderer)) {
+        world_teardown(f);
+        NPH_FREE_TYPE(alloc, StreamWorld, f);
+        NTEST_SKIP("no production path on this device");
+    }
+    TempDir dir;
+    test_temp_dir_make(&dir, "many_materials");
+    write_strip(&dir);
+    cook_and_mount(f, &dir, "strip.gltf");
+    f->target = test_make_target(f->rf.dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, TARGET_SIZE);
+    f->pixels = NPH_ALLOC_ARRAY(alloc, u8, TARGET_PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(f->pixels);
+
+    GroveScene s;
+    memset(&s, 0, sizeof s);
+    grove_scene_world(&s, alloc);
+    NphSceneRendererDesc d;
+    memset(&d, 0, sizeof d);
+    d.alloc = alloc;
+    d.renderer = f->rf.renderer;
+    d.loader = f->loader;
+    d.world = s.world;
+    d.jobs = f->jobs;
+    NTEST_ASSERT_EQ_INT(nph_scene_renderer_create(&d, &s.sr), NPH_RESULT_OK);
+    NphSceneImportDesc id;
+    memset(&id, 0, sizeof id);
+    id.world = s.world;
+    id.loader = f->loader;
+    id.scene = nph_guid_from_cstr("strip.gltf#scene");
+    id.root_transform = nph_local_transform_identity();
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&id, NULL, NULL), NPH_RESULT_OK);
+
+    const f32 yfov = 0.7F;
+    NphRenderView v = grove_view(nph_dvec3(0.0, 0.0, STRIP_EYE), nph_dvec3_zero(), yfov, 1.0F);
+    v.debug_view = NPH_RENDER_VIEW_BASE_COLOR;
+    NphSceneRenderStats scene;
+    memset(&scene, 0, sizeof scene);
+    (void)grove_settle(f, &s, &v, &scene);
+    NTEST_EXPECT_EQ_UINT(scene.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(scene.failed, 0U);
+    for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        (void)grove_frame(f, &s, &v, &scene);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    test_read_image(f->rf.dev, f->target, 0U, f->pixels, TARGET_PIXELS * 4U);
+
+    // Each quad's middle, red rising from one to the next, and the blue that says it
+    // is the quad's material and not the default's white.
+    const f64 half_width = tan((f64)yfov * 0.5) * STRIP_EYE;
+    u32 last_red = 0U;
+    for (u32 q = 0; q < STRIP_QUADS; ++q) {
+        const u32 column = strip_column(q, half_width);
+        const u8 *p = &f->pixels[((u64)(TARGET_SIZE / 2U) * TARGET_SIZE + column) * 4U];
+        NTEST_LOG("quad %2u at column %3u: %3u %3u %3u", q, column, p[0], p[1], p[2]);
+        NTEST_EXPECT_GT_UINT((u32)p[0], last_red);
+        NTEST_EXPECT_TRUE(p[1] < p[2]);
+        last_red = p[0];
+    }
+
+    // A slot past the eighth changed, and the MeshRenderer touched: the last quad
+    // takes the first's material.
+    NphEntity strip = NPH_ENTITY_NULL;
+    for (u32 i = 0; i < nph_world_entity_slot_count(s.world) && nph_entity_is_null(strip); ++i) {
+        const NphEntity e = nph_world_entity_at(s.world, i);
+        strip = !nph_entity_is_null(e) && nph_world_get(s.world, e, s.ids.mesh_materials) != NULL
+                    ? e
+                    : strip;
+    }
+    NTEST_ASSERT_FALSE(nph_entity_is_null(strip));
+    NphMeshRenderer *m = NPH_WORLD_GET_MUT(s.world, strip, s.ids.mesh_renderer, NphMeshRenderer);
+    NphMeshMaterials *more =
+        NPH_WORLD_GET_MUT(s.world, strip, s.ids.mesh_materials, NphMeshMaterials);
+    NTEST_ASSERT_NOT_NULL(m);
+    NTEST_ASSERT_NOT_NULL(more);
+    nph_mesh_materials_set(more, STRIP_QUADS - NPH_MESH_RENDERER_MATERIALS - 1U, m->material0);
+    (void)grove_settle(f, &s, &v, &scene);
+    for (u32 i = 0; i < 1U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        (void)grove_frame(f, &s, &v, &scene);
+    }
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    test_read_image(f->rf.dev, f->target, 0U, f->pixels, TARGET_PIXELS * 4U);
+    const u8 *first_quad =
+        &f->pixels[((u64)(TARGET_SIZE / 2U) * TARGET_SIZE + strip_column(0U, half_width)) * 4U];
+    const u8 *last_quad = &f->pixels[((u64)(TARGET_SIZE / 2U) * TARGET_SIZE +
+                                      strip_column(STRIP_QUADS - 1U, half_width)) *
+                                     4U];
+    NTEST_LOG("the first quad %u, the last now %u", first_quad[0], last_quad[0]);
+    NTEST_EXPECT_LE_UINT((u32)nph_i32_abs((i32)first_quad[0] - (i32)last_quad[0]), 2U);
+
+    grove_scene_free(&s);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->rf.dev), NPH_RESULT_OK);
+    world_teardown(f);
+    NPH_FREE_TYPE(alloc, StreamWorld, f);
+    test_temp_dir_remove(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The streams, through the engine
+// ---------------------------------------------------------------------------
+
+typedef struct EngineWorld {
+    NphDebugAllocator da;
+    NphEngineConfig config;
+    NphEngine *engine;
+} EngineWorld;
+
+// An engine over `pack`, offscreen, with the production path and its cvars, and a
+// camera at `eye` looking along -z with a vertical field of `yfov`. NULL where there
+// is no device for it.
+static NphEngine *engine_open(EngineWorld *w, const char *pack, const char *const *settings,
+                              u32 setting_count, NphDVec3 eye, f32 yfov, const char *scene)
+{
+    memset(w, 0, sizeof *w);
+    nph_debug_allocator_init(&w->da, nph_allocator_system());
+    w->config.packs[0] = pack;
+    w->config.pack_count = 1U;
+    NTEST_ASSERT_LE_UINT(setting_count, (u32)NPH_ENGINE_CONFIG_MAX_ASSIGNMENTS);
+    for (u32 i = 0; i < setting_count; ++i) {
+        w->config.assignments[i] = settings[i];
+    }
+    w->config.assignment_count = setting_count;
+    NphEngineDesc d;
+    memset(&d, 0, sizeof d);
+    d.alloc = nph_debug_allocator_allocator(&w->da);
+    d.config = &w->config;
+    d.mode = NPH_ENGINE_MODE_OFFSCREEN;
+    d.app_name = "world partition tests";
+    d.offscreen_width = TARGET_SIZE;
+    d.offscreen_height = TARGET_SIZE;
+    const NphResult r = nph_engine_create(&d, &w->engine);
+    if (r == NPH_RESULT_UNSUPPORTED) {
+        return NULL;
+    }
+    NTEST_ASSERT_EQ_INT(r, NPH_RESULT_OK);
+    NphEngine *e = w->engine;
+    NphWorld *world = nph_engine_edit_world(e);
+    NphSceneImportDesc id;
+    memset(&id, 0, sizeof id);
+    id.world = world;
+    id.loader = nph_engine_loader(e);
+    id.scene = nph_guid_from_cstr(scene);
+    id.root_transform = nph_local_transform_identity();
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&id, NULL, NULL), NPH_RESULT_OK);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->camera};
+    NphEntity camera;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(world, comps, 3U, &camera), NPH_RESULT_OK);
+    NPH_WORLD_GET_MUT(world, camera, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+        ->translation = eye;
+    NphCamera *lens = NPH_WORLD_GET_MUT(world, camera, ids->camera, NphCamera);
+    lens->active = 1;
+    lens->yfov = yfov;
+    return e;
+}
+
+static void engine_close(EngineWorld *w)
+{
+    nph_engine_destroy(w->engine);
+    w->engine = NULL;
+    NTEST_EXPECT_EQ_UINT(nph_debug_allocator_destroy(&w->da, NULL, NULL), 0U);
+}
+
+// `at_least` of the engine's frames, the first waiting for what it asks to load.
+static const NphEngineFrameStats *engine_frames(NphEngine *e, u32 at_least)
+{
+    for (u32 i = 0; i < at_least; ++i) {
+        NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+        if (i == 0U) {
+            nph_scene_renderer_wait(nph_engine_scene_renderer(e));
+        }
+    }
+    return nph_engine_frame_stats(e);
+}
+
+// r.texture_budget_mb makes the stream, and the engine's frames run it: the view's
+// levels are read in. Without the budget, there is no stream.
+NTEST(WorldPartition, the_engine_runs_the_texture_stream_its_budget_asks_for)
+{
+    TempDir dir;
+    test_temp_dir_make(&dir, "engine_textures");
+    write_plate(&dir);
+    NphAllocator *alloc = nph_allocator_system();
+    NphJobSystem *jobs = NULL;
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    char pack[1200];
+    cook_pack(&dir, "plate.gltf", jobs, pack, sizeof pack);
+    nph_job_system_destroy(jobs);
+
+    EngineWorld w;
+    const char *const budget[3] = {"r.pipeline=1", "r.taa=false", "r.texture_budget_mb=64"};
+    NphEngine *e =
+        engine_open(&w, pack, budget, 3U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene");
+    if (e == NULL) {
+        NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
+        test_temp_dir_remove(&dir);
+        NTEST_SKIP("no GPU");
+    }
+    if (nph_renderer_texture_paging_supported(nph_engine_renderer(e))) {
+        const NphEngineFrameStats *st = engine_frames(e, 64U);
+        NTEST_ASSERT_NOT_NULL(nph_scene_renderer_texture_stream(nph_engine_scene_renderer(e)));
+        NTEST_LOG("through the engine: %u texture levels, %llu bytes", st->scene.texture_levels,
+                  (unsigned long long)st->scene.texture_bytes);
+        NTEST_EXPECT_EQ_UINT(st->scene.instances, 1U);
+        NTEST_EXPECT_GT_UINT(st->scene.texture_levels, 0U);
+    }
+    engine_close(&w);
+
+    const char *const none[2] = {"r.pipeline=1", "r.taa=false"};
+    e = engine_open(&w, pack, none, 2U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene");
+    NTEST_ASSERT_NOT_NULL(e);
+    (void)engine_frames(e, 4U);
+    NTEST_EXPECT_NULL(nph_scene_renderer_texture_stream(nph_engine_scene_renderer(e)));
+    engine_close(&w);
+    test_temp_dir_remove(&dir);
+}
+
+// A world's cells through the engine: its capacities and budgets from the cvars, and
+// its frames streaming their proxies' levels.
+NTEST(WorldPartition, the_engine_runs_the_cells_and_their_stream)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    NphJobSystem *jobs = NULL;
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    grove_cook(alloc, jobs);
+    nph_job_system_destroy(jobs);
+
+    EngineWorld w;
+    const char *const settings[6] = {"r.pipeline=1",       "r.taa=false",
+                                     "r.max_cells=16",     "r.max_meshes=128",
+                                     "r.voxel_pool_mb=16", "r.proxy_budget_mb=1"};
+    NphEngine *e =
+        engine_open(&w, g_grove_pack, settings, 6U, nph_dvec3(8.0, 1.0, 8.0 + GROVE_VIEW),
+                    NARROW_FOV, "grove.gltf#scene");
+    if (e == NULL) {
+        NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
+        NTEST_SKIP("no GPU");
+    }
+    if (nph_renderer_production_supported(nph_engine_renderer(e))) {
+        const NphEngineFrameStats *st = engine_frames(e, 64U);
+        NTEST_LOG("through the engine: %u cells, %u proxy levels, %llu bytes, %u cells proxied",
+                  st->scene.cells, st->scene.proxy_levels,
+                  (unsigned long long)st->scene.proxy_bytes, st->render.vis_cells_proxied);
+        NTEST_EXPECT_EQ_UINT(st->scene.cells, GROVE_CELLS);
+        NTEST_EXPECT_EQ_UINT(st->scene.cells_loading, 0U);
+        NTEST_EXPECT_GT_UINT(st->scene.proxy_levels, 0U);
+        NTEST_EXPECT_TRUE(st->scene.proxy_bytes <= 1000000U);
+        NTEST_EXPECT_GT_UINT(st->render.vis_cells_proxied, 0U);
+        NTEST_EXPECT_EQ_UINT(nph_gpu_device_validation_stats(nph_engine_device(e)).errors, 0U);
+    }
+    engine_close(&w);
 }

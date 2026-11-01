@@ -452,6 +452,22 @@ static NphResult create_contents(NphRenderer *r)
     return NPH_RESULT_OK;
 }
 
+void nph_renderer_desc_scale_lists(NphRendererDesc *desc, u32 lists)
+{
+    NPH_ASSERT(desc != NULL);
+    if (lists <= 1U) {
+        return;
+    }
+    desc->max_visible_clusters = 524288U * lists;
+    desc->max_cull_meshlets = (1U << 20U) * lists;
+    desc->max_deferred = (1U << 20U) * lists;
+    desc->max_lod_nodes = (1U << 18U) * lists;
+    desc->max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
+    desc->max_vsm_meshlets = (1U << 20U) * lists;
+    desc->max_vsm_draws = (1U << 20U) * lists;
+    desc->max_vsm_voxel_draws = (1U << 20U) * lists;
+}
+
 NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
 {
     NPH_ASSERT(desc != NULL && out != NULL);

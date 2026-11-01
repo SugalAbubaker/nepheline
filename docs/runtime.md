@@ -21,7 +21,7 @@ drawing between steps), and [ADR-0058](adr/0058-audio-in-the-engine.md)
 | `console.h` | commands and cvars behind one command line |
 | `clock.h` | the fixed-step clock, and where frames draw between its steps |
 | `sim_input.h` | input snapshots for simulation steps |
-| `components.h` | MeshRenderer, Light, Camera, Environment, RigidBody, Collider, AudioSource, AudioListener |
+| `components.h` | MeshRenderer, MeshMaterials, Light, Camera, Environment, RigidBody, Collider, AudioSource, AudioListener, WorldCell |
 | `audio.h` | the audio output's modes, one-shots, and the audio statistics |
 | `scene_render.h` | the scene renderer (world to renderer, between steps) and the cooked-scene importer |
 
@@ -154,6 +154,12 @@ Settings are cvars. The engine's:
 | `audio.reverb` | true | sources send to the room's reverberation (their next voices) |
 | `audio.occlusion_rays` | 72 | occlusion rays a frame, up to nine a source ("Audio"; 0: none) |
 | `r.vsync`, `r.width`, `r.height` | true, 1280, 720 | saved, latched |
+| `r.max_instances`, `r.max_meshes`, `r.max_materials`, `r.max_textures`, `r.max_lights`, `r.max_cells` | 0 | the renderer's capacities (0: its defaults; latched; "World partition") |
+| `r.max_assets` | 0 | meshes, materials and textures the scene renderer caches at once (0: 4096; latched) |
+| `r.deferred_destroys` | 0 | GPU objects a frame may destroy before its queue has to grow (0: 4096; latched) |
+| `r.lists` | 1 | the production path's lists that can drop work, times their defaults (latched) |
+| `r.voxel_pool_mb` | 0 | the pool the cells' proxy levels live in, so that they are made on the jobs (0: none; latched) |
+| `r.proxy_budget_mb`, `r.texture_budget_mb` | 0, 0 | the cells' finer levels' memory (0: unlimited), and the textures' streamed levels' (0: textures resident whole; latched) |
 | `r.pipeline` | 1 | 0: the forward reference renderer, 1: the GPU-driven production one (saved) |
 | `r.occlusion`, `r.cone_culling` | true, true | the production path's culling stages |
 | `r.sw_raster` | true | the production path's compute rasteriser for small triangles |
@@ -286,7 +292,10 @@ named before and after is neither unloaded nor reloaded (play-in-editor
 starts without a hitch). A mesh that fails to load leaves its entity
 undrawn (counted, logged once), a material that fails draws with the
 default material, and a MeshRenderer that names no mesh draws nothing and
-is no failure. A frame never waits for a load (§10.5).
+is no failure. A frame never waits for a load (§10.5). A MeshRenderer holds
+eight material slots; a mesh of more also carries a MeshMaterials, with 24 more
+(ADR-0072), read whenever the MeshRenderer is: after changing one alone, touch
+the MeshRenderer.
 
 Two calls are for a host, such as the editor:
 - `nph_scene_renderer_reload` loads an asset again after its cooked file
@@ -305,6 +314,39 @@ under a named root: one entity per node with its transform and hierarchy,
 a MeshRenderer per mesh instance, a Light per light, and an inactive
 Camera per perspective camera. It is all or nothing.
 
+## World partition
+
+A world large enough to need it has cells (ADR-0062), which a cooked scene carries
+(asset/scene.h version 2). `nph_scene_import_cooked` makes each a child of the root
+with a `WorldCell` of a new id, and the mesh instances in it name that id in
+`MeshRenderer.cell`. A scene imported again, a further tile of a world, has cells of
+its own, and with `instances_only` no lights or cameras of its own. A root that turns
+or scales its scene takes no cells: an axis-aligned box could not follow it.
+
+The scene renderer mirrors a `WorldCell` as it does instances and lights:
+
+- It becomes a render cell once its proxy has loaded: a head of levels apart with its
+  coarsest level (the stream brings the rest), or a mesh cooked whole, and its material.
+  The instances that name it wait until then, so a cell's first frame holds them all;
+  an instance's cell is fixed when it is made, so a game makes the cell first.
+- A cell without a proxy, or whose proxy fails, makes no render cell, and its instances
+  draw as themselves. The failure is logged.
+- A despawned or removed `WorldCell` goes, and its instances are made anew, drawn as
+  themselves unless another cell of that id stands. A change to its place or its proxy
+  is one going and one coming. What goes is marked, and released in one pass over the
+  records, so a whole world going is linear.
+
+`nph_scene_renderer_stream` runs the streams for the frame's view, between
+`nph_gpu_frame_begin` and `nph_render_frame`, and the engine calls it. It is nothing
+until there is a cell that streams or a texture budget. `NphSceneRenderStats` counts
+the render cells, those loading, and what the streams hold.
+
+The renderer's capacities are cvars (`r.max_instances` and the rest, above), since a
+game knows its worlds and the renderer is made before they load. A world past them
+fails as it always did (FULL on the frame it arrives). `samples/game_sandbox/game.c`
+gives the commands for the city and the landscape, with `sandbox.tiles`, the way a game
+would lay out one scene over and over.
+
 ## Proxy streaming
 
 `proxy_stream.h` streams a world partition's cells' proxies level by level
@@ -316,7 +358,9 @@ its levels' errors, and adds it to a stream; each frame, between
 `nph_gpu_frame_begin` and `nph_render_frame`, `nph_proxy_stream_update`
 gives the cells the levels the views want and takes back what its budget
 cannot hold. The samples' cooked-scene bridge does so with
-`CookedSceneDesc.stream`, and render_perf with `--stream`.
+`CookedSceneDesc.stream`, and render_perf with `--stream`. In a game, the scene
+renderer does ("World partition"). A cell leaves the stream by
+`nph_proxy_stream_remove` with the index its `add` gave, its levels going with it.
 
 - **Wanted.** A cell is wanted at the level the views ask for
   (`nph_render_cell_request`: the camera's cut at its box brought a quarter
@@ -660,11 +704,10 @@ nph_player --game=... --headless --frames=600 sim.rate=120
 window's title, measured twice a second (`r.vsync=false` uncaps them from
 the display's refresh). The sandbox sample flies a camera through any cooked
 scene: `sandbox.scene=bistro.gltf#scene` with Bistro's pack mounted, lit by
-its manifest's values (the sample's header gives the command). It runs inside
-the engine's renderer capacities, and the engine's runtime has no cells,
-proxies or streams yet, so a scene past those capacities, the landscape's
-47,862 instances among them, fails to load: `scene_viewer`
-(docs/benchmarks.md "Reference scenes") walks through those.
+its manifest's values, and the city and the landscape with the renderer's
+capacities set and their tiles, cells and streams on (the sample's header gives
+the commands). `scene_viewer` (docs/benchmarks.md "Reference scenes") walks
+through the same scenes on the benchmark's own path.
 
 It exits with 0, 1 on a failure (validation errors included), 2 for a bad
 command line, and 77 without a window system or a device, which CTest
@@ -862,8 +905,8 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 - A reload that changes components while a play copy runs stops play
   instead of migrating both worlds.
 - Audio: sounds stay loaded until play ends (unloading a region's sounds
-  as it streams out comes with the world partition in the runtime, Phase
-  14); a playing
+  comes with unloading a region: the world partition streams proxies and
+  textures today, not whole cells); a playing
   voice keeps its fall-off, size, Doppler, looping, and bus from its start;
   one listener; occlusion is the share of five points hidden, with no
   obstruction from it (a game sets that through the mixer) and no
