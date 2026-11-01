@@ -200,7 +200,7 @@ Files under `tests/`, `tools/`, `benchmarks/`, and `samples/` are excluded.
 ```sh
 cmake --preset linux-clang-tidy -DCMAKE_BUILD_TYPE=Debug -DNPH_COVERAGE=ON       -DNPH_ASAN=OFF -DNPH_UBSAN=OFF -DNPH_BUILD_BENCHMARKS=OFF
 cmake --build build/linux-clang-tidy
-LLVM_PROFILE_FILE=build/linux-clang-tidy/profiles/%p-%m.profraw       ctest --test-dir build/linux-clang-tidy -L unit
+LLVM_PROFILE_FILE=build/linux-clang-tidy/profiles/%p-%m.profraw       ctest --test-dir build/linux-clang-tidy -L "unit|integration"
 llvm-profdata merge -sparse build/linux-clang-tidy/profiles/*.profraw       -o build/linux-clang-tidy/coverage.profdata
 llvm-cov report build/linux-clang-tidy/bin/core_tests       -instr-profile=build/linux-clang-tidy/coverage.profdata       -ignore-filename-regex='/(tests|tools|benchmarks|samples|third_party)/'       engine/core/ | tee core.txt
 python scripts/coverage_check.py --module core core.txt
