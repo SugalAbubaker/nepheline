@@ -1451,6 +1451,57 @@ NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_ras
     NTEST_EXPECT_TRUE(d.within >= 0.998F);
 }
 
+// Too few small masked clusters to pay for their dispatch draw in hardware: the
+// same clusters, the image the hardware raster alone draws, and none counted in
+// software on the mesh path.
+NTEST(vis, few_small_masked_clusters_stay_in_hardware)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.sw_masked_clusters = 1U << 20U;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    const NphRenderMesh sphere = mesh_of(&fx, make_sphere);
+    const NphRenderMaterial leaves = levelled_mask(&fx, 3U, false);
+    for (u32 i = 0; i < 48U; ++i) {
+        const f64 x = -3.5 + (f64)(i % 8U);
+        const f64 z = -5.0 - 2.0 * (f64)(i >> 3U);
+        (void)instance(&fx, sphere, leaves, at(x, 0.0, z, 0.8F));
+    }
+    masked_test_light(&fx);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 1.5, 2.0),
+                                                          nph_dvec3(0.0, 0.0, -8.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.05F));
+    v.ev100 = 12.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 hardware[PIXELS];
+    static u8 few[PIXELS];
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    const NphRenderFrameStats hw = render_into(&fx, &v, 4U, hardware);
+    v.vis_flags = 0U;
+    const NphRenderFrameStats st = render_into(&fx, &v, 4U, few);
+    const ImageDiff d = image_diff(hardware, few, 0U);
+    NTEST_LOG("%u of %u clusters in software; hardware vs few: %.3f %% identical, max %u",
+              st.vis_clusters_sw, st.vis_clusters, (f64)d.within * 100.0, d.max);
+    NTEST_EXPECT_EQ_UINT(st.vis_clusters, hw.vis_clusters);
+    if (fx.renderer->vis.mesh_shaders) {
+        NTEST_EXPECT_EQ_UINT(st.vis_clusters_sw, 0U);
+        NTEST_EXPECT_EQ_UINT(d.max, 0U);
+    } else {
+        // The indirect path has no mesh tasks to give them.
+        NTEST_EXPECT_EQ_UINT(st.vis_clusters_sw, st.vis_clusters);
+    }
+    test_render_teardown(&fx);
+}
+
 // A slanted sheet, its triangles a few pixels across and its texels about a
 // pixel, its holes different at each level: every pixel's alpha depends on the
 // UV and the level it took, the near ones the finest, the far ones past it. The

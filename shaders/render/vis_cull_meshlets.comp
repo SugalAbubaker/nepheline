@@ -15,11 +15,12 @@
 //
 // A meshlet that survives becomes a visible cluster (instance, meshlet,
 // resolved material, flags) and joins one of its phase's raster lists:
-// clusters of small triangles to the software raster (vis_sw_raster.comp):
-// those whose bounding sphere projects into at most NPH_VIS_SW_MAX_PIXELS
-// across, with that box's area shared among the triangles at most
-// sw_raster_pixels across each; the other masked materials (alpha tested) to
-// the hardware raster, which samples their texture; voxel clusters (a
+// clusters of small triangles to the software raster (vis_sw_raster.glsl), a
+// list for the opaque ones and one for the masked: those whose bounding sphere
+// projects into at most NPH_VIS_SW_MAX_PIXELS across, with that box's area
+// shared among the triangles at most sw_raster_pixels across each; the other
+// masked materials (alpha tested) to the hardware raster, which samples their
+// texture; voxel clusters (a
 // meshlet record without vertices: render/voxel.h; ADR-0061) to the voxel
 // raster (vis_voxel_raster.comp), whatever their material, whose look they
 // carry; the rest to the hardware raster. Blended materials are not drawn
@@ -234,13 +235,16 @@ void main()
     uint j2;
     uint j3;
     uint j4 = 0u;
+    uint j5;
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_OPAQUE],
                 visible && !masked && !software && !voxels ? 1u : 0u, j0);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_MASKED],
                 visible && masked && !skin && !software ? 1u : 0u, j1);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SKIN], skin ? 1u : 0u, j3);
     VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SOFTWARE],
-                visible && software ? 1u : 0u, j2);
+                visible && software && !masked ? 1u : 0u, j2);
+    VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_SOFTWARE_MASKED],
+                visible && software && masked ? 1u : 0u, j5);
     if (k_voxels) {
         VIS_RESERVE(counters.c.raster_count[phase][NPH_VIS_RASTER_VOXEL],
                     visible && voxels ? 1u : 0u, j4);
@@ -289,10 +293,12 @@ void main()
     // reserved here is below max_clusters.
     const uint kind = voxels     ? uint(NPH_VIS_RASTER_VOXEL)
                       : skin     ? uint(NPH_VIS_RASTER_SKIN)
-                      : software ? uint(NPH_VIS_RASTER_SOFTWARE)
+                      : software ? (masked ? uint(NPH_VIS_RASTER_SOFTWARE_MASKED)
+                                           : uint(NPH_VIS_RASTER_SOFTWARE))
                       : masked   ? uint(NPH_VIS_RASTER_MASKED)
                                  : uint(NPH_VIS_RASTER_OPAQUE);
-    const uint j = voxels ? j4 : (skin ? j3 : (software ? j2 : (masked ? j1 : j0)));
+    const uint j =
+        voxels ? j4 : (skin ? j3 : (software ? (masked ? j5 : j2) : (masked ? j1 : j0)));
     VisUintRef(view.v.raster_lists[phase][kind]).v[j] = g;
     if (!software && !voxels && (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) == 0u) {
         NphVisDraw draw;

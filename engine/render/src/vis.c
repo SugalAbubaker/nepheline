@@ -58,7 +58,7 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 1056U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 1072U, "NphVisViewData matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, cell_runs) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, cells) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, voxel_tiles) % 8U == 0U, "addresses are aligned");
@@ -101,6 +101,7 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_voxel_resolve_rt.comp",
     "vis_cull_cells.comp",
     "vis_page_requests.comp",
+    "vis_sw_raster_masked.comp",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
@@ -111,10 +112,11 @@ static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_LIGHTS,        VIS_SHADER_LIGHT_BINS,
     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_CULL_NODES,
     VIS_SHADER_CULL_GROUPS,   VIS_SHADER_VOXEL_RASTER,
-    VIS_SHADER_CULL_CELLS,    VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
-    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_CULL_CELLS,    VIS_SHADER_SW_RASTER_MASKED,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
+    VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -133,6 +135,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis cull groups",
     "vis voxel raster",
     "vis cull cells",
+    "vis sw raster (masked)",
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
@@ -615,6 +618,11 @@ static void read_stats(NphRenderer *r)
     s->vis_clusters = nph_min_u32(c->clusters, r->desc.max_visible_clusters);
     s->vis_clusters_sw =
         c->raster_count[0][NPH_VIS_RASTER_SOFTWARE] + c->raster_count[1][NPH_VIS_RASTER_SOFTWARE];
+    // The small masked clusters a phase, where they went to compute (vis_args.comp).
+    for (u32 p = 0; p < 2U; ++p) {
+        const u32 small = c->raster_count[p][NPH_VIS_RASTER_SOFTWARE_MASKED];
+        s->vis_clusters_sw += !v->mesh_shaders || small >= r->desc.sw_masked_clusters ? small : 0U;
+    }
     s->vis_triangles = c->triangles;
     s->vis_voxel_clusters =
         c->raster_count[0][NPH_VIS_RASTER_VOXEL] + c->raster_count[1][NPH_VIS_RASTER_VOXEL];
@@ -756,6 +764,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
         nph_max_u32(nph_min_u32(lim->max_mesh_workgroup_count[0], 1U << 22U), 1U);
     vd->sw_raster_pixels = d->sw_raster_pixels;
     vd->skin_fraction = d->masked_skin;
+    vd->sw_masked_min = d->sw_masked_clusters;
     vd->hzb_dirty = nph_gpu_buffer_address(dev, v->hzb_dirty);
     vd->hzb_tiles_x = v->hzb_tiles_x;
     vd->voxel_tiles = nph_gpu_buffer_address(dev, v->voxel_tiles);
@@ -1124,15 +1133,18 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
                                       NPH_GPU_INDEX_U16);
     }
     // The hardware kinds: opaque, then the masked skin (writing depth), then
-    // the other masked clusters.
-    static const u32 k_order[3] = {NPH_VIS_RASTER_OPAQUE, NPH_VIS_RASTER_SKIN,
-                                   NPH_VIS_RASTER_MASKED};
-    for (u32 o = 0; o < 3U; ++o) {
+    // the other masked clusters, and the small ones where they are too few for
+    // their dispatch (vis_args.comp, whose arguments draw none otherwise).
+    static const u32 k_order[4] = {NPH_VIS_RASTER_OPAQUE, NPH_VIS_RASTER_SKIN,
+                                   NPH_VIS_RASTER_MASKED, NPH_VIS_RASTER_SOFTWARE_MASKED};
+    for (u32 o = 0; o < 4U; ++o) {
         const u32 k = k_order[o];
         if ((kinds & (1U << k)) == 0U) {
             continue;
         }
+        const bool small = k == NPH_VIS_RASTER_SOFTWARE_MASKED;
         nph_gpu_cmd_bind_pipeline(cmd, k == NPH_VIS_RASTER_SKIN ? v->raster_skin
+                                       : small                  ? v->raster[1]
                                        : rop && k == 0U         ? v->raster_rop
                                                                 : v->raster[k]);
         p.mode = k;
@@ -1140,7 +1152,10 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
         const u64 kind = (u64)phase * (u64)NPH_VIS_RASTER_KINDS + k;
         if (v->mesh_shaders) {
             nph_gpu_cmd_draw_mesh_tasks_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
-                                                 ARGS_OFFSET(raster_args) + kind * 16U, 1U, 16U);
+                                                 small ? ARGS_OFFSET(sw_masked_hw_args) +
+                                                             (u64)phase * 16U
+                                                       : ARGS_OFFSET(raster_args) + kind * 16U,
+                                                 1U, 16U);
         } else {
             const u64 list = (u64)r->desc.max_visible_clusters * sizeof(NphVisDraw);
             nph_gpu_cmd_draw_indexed_indirect_count(
@@ -1155,7 +1170,31 @@ static void raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *c
     }
 }
 
-// The software raster of a phase: a workgroup per small cluster.
+// The small masked clusters of a phase, in a pass of their own.
+static void sw_masked_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphVisPush p = push_of(r, phase, 0U);
+    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_SW_RASTER_MASKED]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(
+        cmd, nph_gpu_rg_buffer(graph, f->args),
+        ARGS_OFFSET(raster_args) +
+            ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_SOFTWARE_MASKED) * 16U);
+}
+
+static void sw_masked0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    sw_masked_record((NphRenderer *)user, graph, cmd, 0U);
+}
+
+static void sw_masked1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    sw_masked_record((NphRenderer *)user, graph, cmd, 1U);
+}
+
+// The software raster of a phase: a workgroup per small opaque cluster.
 static void sw_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
 {
     const VisFrame *f = &r->vis.frame;
@@ -1214,13 +1253,20 @@ static void raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
 static void raster0_masked_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     raster_record((NphRenderer *)user, graph, cmd, 0U,
-                  (1U << NPH_VIS_RASTER_MASKED) | (1U << NPH_VIS_RASTER_SKIN), false);
+                  (1U << NPH_VIS_RASTER_MASKED) | (1U << NPH_VIS_RASTER_SKIN) |
+                      (1U << NPH_VIS_RASTER_SOFTWARE_MASKED),
+                  false);
 }
 
 static void raster1_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
-    raster_record(r, graph, cmd, 1U, r->vis.mesh_shaders ? 11U : 3U, false);
+    raster_record(r, graph, cmd, 1U,
+                  r->vis.mesh_shaders
+                      ? (1U << NPH_VIS_RASTER_OPAQUE) | (1U << NPH_VIS_RASTER_MASKED) |
+                            (1U << NPH_VIS_RASTER_SKIN) | (1U << NPH_VIS_RASTER_SOFTWARE_MASKED)
+                      : 3U,
+                  false);
 }
 
 // The pyramid: mip 0 from the visibility buffer's depth (vis_hzb.comp),
@@ -1515,6 +1561,20 @@ static NphResult declare_raster(NphGpuRenderGraph *graph, NphRenderer *r, const 
     // The small clusters, in compute, into the same visibility buffer.
     p = add_pass(graph, r, phase == 0U ? "vis sw raster 0" : "vis sw raster 1",
                  NPH_GPU_RG_PASS_COMPUTE, phase == 0U ? sw_raster0_execute : sw_raster1_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->lists, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->clusters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+
+    // The small masked clusters, likewise.
+    p = add_pass(graph, r, phase == 0U ? "vis sw raster 0 masked" : "vis sw raster 1 masked",
+                 NPH_GPU_RG_PASS_COMPUTE, phase == 0U ? sw_masked0_execute : sw_masked1_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }

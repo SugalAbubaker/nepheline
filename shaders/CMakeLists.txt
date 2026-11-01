@@ -110,6 +110,7 @@ nph_add_shaders(nph_shaders_render
         render/vsm_clear.vert
         render/vsm_request.frag
         render/vis_sw_raster.comp
+        render/vis_sw_raster_masked.comp
         render/vis_voxel_raster.comp
         render/vis_voxel_resolve.comp
         render/vis_voxel_resolve_rt.comp

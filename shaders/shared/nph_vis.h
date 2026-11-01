@@ -89,10 +89,12 @@
 // Raster lists, per phase: how each visible cluster is rasterised.
 #define NPH_VIS_RASTER_OPAQUE   0 // hardware
 #define NPH_VIS_RASTER_MASKED   1 // hardware, alpha tested
-#define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small clusters, masked or not
+#define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
 #define NPH_VIS_RASTER_SKIN     3 // hardware, alpha tested, the front of its instance (mesh path)
 #define NPH_VIS_RASTER_VOXEL    4 // compute (vis_voxel_raster.comp): voxel clusters (ADR-0061)
-#define NPH_VIS_RASTER_KINDS    5
+#define NPH_VIS_RASTER_SOFTWARE_MASKED                                                             \
+    5 // compute (vis_sw_raster_masked.comp): small masked clusters
+#define NPH_VIS_RASTER_KINDS 6
 
 // The resolve's tiles of pixels (vis_resolve.glsl, a workgroup each): a tile
 // that holds a voxel pixel is listed for the voxel resolve.
@@ -355,6 +357,9 @@ NPH_SHARED_STRUCT(NphVisArgs)
     u32 instance2_args[4];                       // phase 1's cull of the instances phase 0 deferred
     u32 raster_args[2][NPH_VIS_RASTER_KINDS][4]; // [phase][NPH_VIS_RASTER_*]: mesh-task or
                                                  // compute groups
+    // The small masked clusters' mesh tasks a phase, where they are too few to
+    // pay for their compute dispatch (vis_args.comp).
+    u32 sw_masked_hw_args[2][4];
     u32 light_tile_args[4]; // the light masks: tile groups in x and y, light words in z
     // A hierarchy step from each queue: workgroups in x, raised by whatever
     // fills the queue (the instance cull, the step before), and 1 in y and
@@ -508,8 +513,8 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 voxel_tiles;
     u64 voxel_tile_bits;
     u32 resolve_tiles_x;
-    u32 voxel_pad0;
-    u64 cells; // NphVisCell[]: the world partition's cells (ADR-0062)
+    u32 sw_masked_min; // NphRendererDesc.sw_masked_clusters: fewer draw in hardware (vis_args.comp)
+    u64 cells;         // NphVisCell[]: the world partition's cells (ADR-0062)
     // u32[] a cell: the finest level of its proxy the frame's views ask for
     // (NPH_VIS_CELL_NO_REQUEST: none), cleared by vis clear (ADR-0063).
     u64 cell_requests;

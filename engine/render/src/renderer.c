@@ -321,6 +321,7 @@ static NphResult apply_defaults(NphRendererDesc *d)
         round_up_64(d->max_cull_meshlets != 0U ? d->max_cull_meshlets : 1U << 20U);
     d->max_deferred = round_up_64(d->max_deferred != 0U ? d->max_deferred : 262144U);
     d->sw_raster_pixels = d->sw_raster_pixels > 0.0F ? d->sw_raster_pixels : 3.0F;
+    d->sw_masked_clusters = d->sw_masked_clusters != 0U ? d->sw_masked_clusters : 8192U;
     d->masked_skin = d->masked_skin > 0.0F ? d->masked_skin : 0.35F;
     d->max_instance_updates = d->max_instance_updates != 0U ? d->max_instance_updates : 16384U;
     d->max_material_slots =
