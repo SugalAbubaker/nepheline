@@ -134,6 +134,16 @@ mistake shows up only on Linux CI, or when shaders are built with glslang 14.0's
 GL_GOOGLE_include_directive : require"` and checked with the SDK's `spirv-val
 --target-env vulkan1.3 --scalar-block-layout`.
 
+A loop whose index runs out of range on leaving tests at its end, not its top,
+when it reads `shared` memory or a buffer with that index: a descending loop as
+`do { --i; ... } while (i > 0);`. llvmpipe goes on through a loop's body with an
+empty mask once the last lane has left, and takes an index it knows every lane
+agrees on from lane 0, with no test of the mask, so `for (int i = n - 1; i >= 0;
+--i)` loads element -1. Linux never showed it. On Windows, whose allocator can
+start a thread's shared memory near a page's start, it crashed lavapipe in
+`vsm_pages.comp`'s selection, in 2 runs of 3 of some tests, a read 4 bytes before
+the page. Every other GPU is unaffected, as nothing runs under an empty mask.
+
 ### Warnings
 
 `cmake/NphWarnings.cmake`: MSVC `/W4 /WX /permissive- /Zc:preprocessor
