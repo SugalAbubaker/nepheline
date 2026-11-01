@@ -782,6 +782,6 @@ What the numbers say:
 - DDS sources are decoded and encoded again even where their blocks
   already are what the runtime would store (a BC7 colour texture), which
   costs the BC7 encoder's time.
-- The cooker is single-threaded outside block encoding: sources and
-  meshes cook one after another.
-- No LOD generation yet: the cluster DAG of §8.6.9 is Phase 13.
+- Sources and meshes cook one after another: the job system works inside
+  each (block encoding, a mesh's levels of detail) and across the cells'
+  proxies, not across sources or meshes.

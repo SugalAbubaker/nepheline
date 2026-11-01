@@ -3,8 +3,9 @@
 - **Date:** 2026-10-30
 - **Status:** Accepted (the user's decision of 2026-10-30: record the cost
   and win it back as Phase 14's first task; the gate it names moved by
-  [ADR-0067](0067-the-game-is-a-city.md); its first task done by
-  [ADR-0070](0070-a-flat-cull-of-the-levels.md))
+  [ADR-0067](0067-the-game-is-a-city.md); its first task's target met on Bistro,
+  to what can be measured, by [ADR-0070](0070-a-flat-cull-of-the-levels.md), and
+  not met on the landscape); amended 2026-10-31: what the phase left (below)
 
 ## Context
 
@@ -126,3 +127,24 @@ with the textures whole (272 MiB). The streams' main-thread updates took
   (Bistro, the end's first round) and `reference_scenes-2026-10-30b`
   (the landscape, as in the table), beside the start's
   `reference_scenes-2026-10-25`.
+
+## Amendment (2026-10-31): what the phase left
+
+Every criterion above stays closed. Going back through the phase's records found
+three things it set out to do that were not done, and not recorded above. They are
+Phase 14's, with decision 4's:
+
+- **The landscape's walk** (decision 2's second target) is not cut. Its voxel meshes
+  keep the walk (ADR-0070). Measured as in the table, the forest view's walk is 1.77 ms
+  at the phase's end and 1.76 ms at a5872ff (one run, the editor not minimized). It
+  goes with the landscape's raster.
+- **The rays' levels.** ADR-0060 planned levels of their own for the shadow rays and
+  the radiance cache later in this phase, and ADR-0061 voxel bottom levels (its stage
+  6). Neither was built. Rays trace level 0, and proxies of voxels alone are not in the
+  top level. ADR-0063 gave what rays need of the far field to Phase 14's ray-traced
+  effects, until then a 3.2 ms top-level build every 16 m of travel in a world of the
+  game's size.
+- **The voxels' accuracy** (ADR-0061 "Accuracy"). On its test's needles, the first
+  voxel levels reflect 7 to 10 % more light a pixel than level 0 and cover 3.7 to 7.1 %
+  more pixels, inside the tests' bounds of 12 % and 8 %. The visibility sharpness per
+  voxel it proposes was not built: `NPH_RENDER_VOXEL_VIEW_SHARPNESS` is one constant.

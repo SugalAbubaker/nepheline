@@ -862,7 +862,8 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 - A reload that changes components while a play copy runs stops play
   instead of migrating both worlds.
 - Audio: sounds stay loaded until play ends (unloading a region's sounds
-  as it streams out comes with world partition, Phase 13); a playing
+  as it streams out comes with the world partition in the runtime, Phase
+  14); a playing
   voice keeps its fall-off, size, Doppler, looping, and bus from its start;
   one listener; occlusion is the share of five points hidden, with no
   obstruction from it (a game sets that through the mixer) and no

@@ -418,8 +418,10 @@ each measured against level 0 on these needles and on the landscape's own pines.
    levels still cost more than the stalled triangles they replace ("Accuracy"), and
    they become the default once it draws the reference scenes' foliage faster.
 4. The shadow map's voxel casters. Done (PR #116).
-5. The landscape cooked with voxels, measured against every §10.4 line.
-6. Voxel bottom levels for rays.
+5. The landscape cooked with voxels, measured against every §10.4 line. Done (the
+   amendments below; ADR-0066 has the lines).
+6. Voxel bottom levels for rays. Not built: ADR-0063 gave what rays need of the far
+   field to Phase 14 (ADR-0066's amendment).
 
 ## Alternatives considered
 

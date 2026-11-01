@@ -7,8 +7,9 @@
 // an offset into it, and its bookkeeping lives out of band in a node array
 // sized at creation, so nothing is ever written into the space itself.
 // The renderer uses it to sub-allocate GPU buffers: the meshlet-index pool
-// of the indirect-draw path and the per-instance material tables
-// (docs/render.md), and the streaming pools of Phase 13 will too.
+// of the indirect-draw path, the per-instance material tables, the voxel
+// pool, the cells' member runs and the paged textures' request words
+// (docs/render.md).
 //
 // The algorithm is Two-Level Segregated Fit (Masmano, Ripoll, Crespo &
 // Real, "TLSF: a New Dynamic Memory Allocator for Real-Time Systems",

@@ -1,9 +1,9 @@
 # 0060. Virtualized geometry: a hierarchy of cluster levels, walked two levels a step
 
 - **Date:** 2026-10-26
-- **Status:** Accepted (the shadow rays and the radiance cache draw level 0 until their
-  own levels arrive later in Phase 13); amended 2026-10-26: the sun's shadow map draws
-  cuts of its own (below)
+- **Status:** Accepted (the shadow rays and the radiance cache draw level 0: their own
+  levels, planned for later in Phase 13, were not built, ADR-0066's amendment); amended
+  2026-10-26: the sun's shadow map draws cuts of its own (below)
 
 ## Context
 

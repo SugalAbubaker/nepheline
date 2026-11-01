@@ -2724,9 +2724,9 @@ path and logs what the GPU culled.
 ## Limitations (future work)
 
 - Levels of detail (ADR-0060): the shadow rays' and radiance cache's
-  bottom levels and the reference renderer draw level 0; the error is
-  geometric only (normals and texture coordinates inside a coarse level are
-  not measured); the levels are not streamed.
+  bottom levels and the reference renderer draw level 0; the error does
+  not yet see texture coordinates' change across a collapse where they are
+  not affine (ADR-0069); a shared mesh's levels are not streamed (ADR-0063).
 
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many

@@ -71,7 +71,7 @@ supersedes it and both link to each other.
 | [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
 | [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
-| [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md)) |
+| [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md); amended 2026-10-31: what the phase left) |
 | [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions; amended 2026-10-31: the landscape leaves the nightly) |
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted |

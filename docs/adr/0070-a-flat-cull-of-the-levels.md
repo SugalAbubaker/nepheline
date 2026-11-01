@@ -113,9 +113,9 @@ ADR-0066 recorded +0.04 to +0.08 ms. This is +0.01 to +0.02 ms, inside each roun
 0.13 ms and drawing 9 to 24% fewer triangles, so its target is met to what can be measured, and not
 strictly: what remains is `vis cull groups`' two floors and the shadow map's empty steps.
 
-**The landscape** (lists at 16 times, its levels' voxels on the walk) draws the same to within a few
-clusters of 5.5 million, no slower: means -0.05 to -0.18 ms in one round, its 1%-lows within 0.22 ms,
-and 6.39 GB as before.
+**The landscape** (lists at 16 times, its levels' voxels on the walk, cooked without its cells) draws the
+same to within a few clusters of 5.5 million, no slower: means -0.05 to -0.18 ms in one round, its 1%-lows
+within 0.22 ms, and 6.39 GB as before.
 
 **The images** of every still view, in the normals and instances debug views, are the same to the bit
 as before, in both scenes. Lit images differ only as two runs of the same build do (the warm-up's TAA
@@ -155,6 +155,8 @@ Each measured on the way.
   over 6.94 ms, as are all of Bistro's 1%-lows (6.99 to 7.70). The largest lever left in the culling is
   the floors: about 10 µs each for six dispatches a frame, even where they have little to do. Masked
   raster comes next (ADR-0067).
+- ADR-0066's second target, the landscape's walk cut, is not met: its voxel meshes keep the walk, 1.77 ms
+  at Phase 13's end and 1.76 ms now in the forest view, with its cells streamed as ADR-0066 measured it.
 - A list of groups that fills drops work, as the other lists do. `max_lod_groups` (2^18) scales with a
   manifest's `lists`; the rooftop tests 430,000 groups of its 2^20. `render_perf` and `scene_viewer` hold
   it at four times its default, since what would want more walks.
