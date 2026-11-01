@@ -496,12 +496,14 @@
   },
   "pack": "landscape.npk",
   "cook": {
-    "voxels": true
+    "voxels": true,
+    "hlod": true
   },
   "scene": "landscape.gltf#scene",
   "ev100": 13.0,
   "sky_intensity": 1.0,
   "sun_shadows": true,
+  "lists": 16,
   "layout": {
     "seed": 1,
     "terrain": {

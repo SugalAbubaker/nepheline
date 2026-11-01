@@ -72,7 +72,7 @@ supersedes it and both link to each other.
 | [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
 | [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md)) |
-| [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions) |
+| [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions; amended 2026-10-31: the landscape leaves the nightly) |
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted |
 | [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted |

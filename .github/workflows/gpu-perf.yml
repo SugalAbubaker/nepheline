@@ -6,7 +6,8 @@
 # microbenchmarks against benchmarks/gpu_budgets.txt, and the renderer's
 # scenes against benchmarks/render_budgets.txt (a regression of more than
 # 5 % over the recorded reference fails the job), and nightly the
-# third-party reference scenes against benchmarks/reference_budgets.txt.
+# third-party reference scenes, all but the landscape (ADR-0067's amendment),
+# against benchmarks/reference_budgets.txt.
 # Runs nightly, on pushes to main, and on pull requests that touch the GPU
 # or renderer code; the
 # job is skipped when the runner is offline only in the sense that it
@@ -97,7 +98,9 @@ jobs:
       # (the repository variable NPH_SCENES_DIR, else the runner's tool cache),
       # cooked there by this build's cooker (incrementally: Bistro's 23
       # minutes recur only when the cooker's output changes), then measured
-      # against benchmarks/reference_budgets.txt.
+      # against benchmarks/reference_budgets.txt. All but the landscape, which
+      # is measured by hand at a phase's start and end (ADR-0067's amendment;
+      # docs/benchmarks.md).
       #
       # The job's user (nph-runner, a standard user: ADR-0028) has no Python,
       # and setup-python's installer needs administrator rights on Windows
@@ -127,19 +130,19 @@ jobs:
         run: |
           $scenes = $env:SCENES_DIR
           if (-not $scenes) { $scenes = Join-Path $env:RUNNER_TOOL_CACHE 'nepheline-scenes' }
-          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "NPH_SCENES=$scenes`n", (New-Object System.Text.UTF8Encoding $false))
-          python scripts/scenes.py fetch --dir $scenes
-          python scripts/scenes.py cook --dir $scenes --cook build\win-msvc\bin\Profile\nph_cook.exe
+          $names = @(Get-ChildItem benchmarks\scenes\*.json | ForEach-Object { $_.BaseName } | Where-Object { $_ -ne 'landscape' })
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "NPH_SCENES=$scenes`nNPH_SCENE_NAMES=$($names -join ',')`n", (New-Object System.Text.UTF8Encoding $false))
+          python scripts/scenes.py fetch $names --dir $scenes
+          python scripts/scenes.py cook $names --dir $scenes --cook build\win-msvc\bin\Profile\nph_cook.exe
 
       # A process a scene: a manifest's `lists` and `tiles` size the renderer for
-      # every scene the run takes, and the city's lists would let the landscape's
-      # forest draw all that its own drop, past the driver's timeout.
+      # every scene the run takes, so each is measured at its own, and a scene
+      # that fails does not stop the others.
       - name: Reference scenes (Profile)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           $failed = @()
-          foreach ($manifest in Get-ChildItem benchmarks\scenes\*.json) {
-              $scene = $manifest.BaseName
+          foreach ($scene in $env:NPH_SCENE_NAMES -split ',') {
               .\build\win-msvc\bin\Profile\render_perf.exe "--scenes=$env:NPH_SCENES" --reference-only "--filter=${scene}_*_production" --frames=240 "--json=bench-results\reference_$scene.json" --budgets=benchmarks\reference_budgets.txt
               if ($LASTEXITCODE -ne 0) { $failed += $scene }
           }

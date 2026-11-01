@@ -361,23 +361,36 @@ off the trail. The same manifest lays out the same scene. Only modelled,
 opaque assets are used: the collection's fir tree, grass, ferns, and moss
 are alpha-blended or alpha-tested cards, which the forest the landscape
 was built for does not have (ADR-0059; ADR-0067 made the game a city and
-took this scene out of the gates). Cooked with voxels, it takes 6 minutes on the
-cooker's job system (3.5 of them the textures' encoding; 20 on one thread)
-and makes a 1.19 GB pack.
+took this scene out of the gates). Cooked with voxels alone, it takes 6 minutes on
+the cooker's job system (3.5 of them the textures' encoding; 20 on one thread)
+and makes a 1.19 GB pack; its manifest also asks for its cells, about 50 minutes
+more (ADR-0062) and a 2.6 GB pack.
 
 The RTX 3060 Ti runner measures them nightly, not on pull requests (the
-user's decision, ADR-0040). `.github/workflows/gpu-perf.yml`, when
-scheduled or dispatched, fetches and cooks every manifest's scene into a
-directory that persists between its jobs. That directory is the
-repository variable `NPH_SCENES_DIR`, or the runner's tool cache when the
-variable is unset. The cook is incremental, so Bistro's 23-minute cook
-recurs only when the cooker's output changes. The job then runs
-`render_perf --reference-only` against `benchmarks/reference_budgets.txt`,
-which `scripts/render_budgets.py --output` generates from the reference
-results like the synthetic budgets, a process a scene: a manifest's `lists`
-and `tiles` size the renderer for every scene a run takes, and the city's
-lists let the landscape's forest draw all that its own drop, past the driver's
-timeout (the device is lost).
+user's decision, ADR-0040), all but the landscape.
+`.github/workflows/gpu-perf.yml`, when scheduled or dispatched, fetches and
+cooks the other manifests' scenes into a directory that persists between its
+jobs. That directory is the repository variable `NPH_SCENES_DIR`, or the
+runner's tool cache when the variable is unset. The cook is incremental, so
+Bistro's 23-minute cook recurs only when the cooker's output changes. The job
+then runs `render_perf --reference-only` against
+`benchmarks/reference_budgets.txt`, which `scripts/render_budgets.py --output`
+generates from the reference results like the synthetic budgets, a process a
+scene: a manifest's `lists` and `tiles` size the renderer for every scene a run
+takes.
+
+The landscape is measured by hand, at a phase's start and end, with the user's
+editor windows minimized (ADR-0067's amendment). Its frame takes its cells'
+proxies and its textures streamed, the lists its manifest says, and a voxel pool
+sized to the proxies, which keeps it under 6.5 GB (ADR-0066):
+
+```
+python scripts/scenes.py fetch landscape --dir DIR
+python scripts/scenes.py cook landscape --dir DIR --cook PATH/TO/nph_cook
+render_perf --scenes=DIR --reference-only --filter=landscape_*_production --frames=240 --stream --voxel-pool=1200 --texture-budget=128 --json=FILE
+```
+
+Phase 13's end, to compare it with, is `reference_scenes-2026-10-30b`.
 
 | Scene | Source | What it is |
 |---|---|---|
@@ -438,9 +451,8 @@ more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
 spread). `benchmarks/reference_budgets.txt` is generated from
 `reference_scenes-2026-10-31b`, Bistro and the city, a process a scene as
-the nightly runs them. The landscape has no rows there:
-the nightly runs it at the default lists, where every view overflows and
-drops work, so its numbers are not its full-quality frame (ADR-0066).
+the nightly runs them. The landscape has no rows there: the nightly does not
+run it.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the

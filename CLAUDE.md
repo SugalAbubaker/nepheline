@@ -126,7 +126,7 @@ A module may only depend on modules to its left. `core` depends only on the C st
   - Matrix of Windows (MSVC, clang-cl) × Linux (GCC, Clang) × Debug/Development.
   - Steps: build, unit tests, sanitizer runs, clang-tidy, format check, and GPU tests on Linux using lavapipe (software Vulkan).
   - Benchmarks run nightly.
-  - **A self-hosted performance runner** with the RTX 3060 Ti runs the synthetic performance scenes on every renderer PR, and the third-party reference scenes nightly, cooking them there (ADR-0040). They enforce the §10 budgets, since lavapipe cannot measure GPU performance.
+  - **A self-hosted performance runner** with the RTX 3060 Ti runs the synthetic performance scenes on every renderer PR, and the third-party reference scenes that gate nightly, cooking them there (ADR-0040, ADR-0067). They enforce the §10 budgets, since lavapipe cannot measure GPU performance.
 
 ## 7. Git & GitHub Workflow
 - Initialize the git repo in Phase 0 with `.gitignore` (build dirs, IDE files), `.gitattributes` (LF normalization; binary assets via Git LFS), and a README.
@@ -436,9 +436,9 @@ These are design estimates. Phase 5 validates them with microbenchmarks that mea
 - Vendor low-latency extensions are used where available (`VK_NV_low_latency2`, `VK_AMD_anti_lag`).
 
 ### 10.7 Enforcement
-- A self-hosted runner with the RTX 3060 Ti runs the reference scenes at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
+- A self-hosted runner with the RTX 3060 Ti runs the reference scenes that gate at native 4K nightly, and the synthetic scenes on every renderer PR (§6).
 - GPU timestamps per pass are compared to the §10.4 table. A regression of more than 5% fails CI.
-- Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) and the big city (NVIDIA Emerald Square, tiled) in Phase 14, for the many-light sampling and the first game's world (ADR-0067). The landscape stays measured, but the first game is a city, so it does not gate.
+- Reference scenes join with the feature each stresses (ADR-0040): dense urban (Amazon Lumberyard Bistro) in Phase 10; the open landscape with foliage in Phase 13, whose virtualized geometry its foliage needs; the interior with many lights (Intel's Sponza and its 10,000 candles) and the big city (NVIDIA Emerald Square, tiled) in Phase 14, for the many-light sampling and the first game's world (ADR-0067). The landscape stays measured, by hand at each phase's start and end, but the first game is a city, so it does not gate.
 - **The gates (ADR-0067).** At Phase 14's exit, the renderer's last phase, Bistro, the city, and the interior each hold 144 FPS: 1%-low ≤ 6.94 ms at native 4K on the RTX 3060 Ti with the phase's features on, each §10.4 line reported against its budget. At Phase 15's exit they hold it in shipping builds. During the first game's development, after Phase 15, the game holds the target: 1%-low ≤ 4.17 ms (240 FPS), inside the §10.4 and §10.5 budgets. Until then the target and the table stand unchanged, and no phase from 11 to 15 may end with a reference scene slower than when it began, unless an ADR shows where the added cost will be won back.
 - Phase 13 opens with a structure checkpoint (ADR-0041): measured prototypes of TAA and post fused into the shading pass, and of full-resolution GTAO in a form that fits its share of the indirect-light line, so that Phases 13 and 14 build on a frame that can reach the target at full quality. The game's setting, camera, and world density are decided there, and the reference scenes are checked against them (ADR-0059; the game was decided again by ADR-0067).
 - Every renderer PR must state its cost in both milliseconds and DRAM bytes.

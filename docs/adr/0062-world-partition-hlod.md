@@ -278,7 +278,8 @@ The renderer's cells are in (`nph_render_cell_create`; docs/render.md "Cell prox
   themselves). The landscape's manifest does not ask the cooker for its cells yet, so
   the nightly measures it without them until stage 3 streams them: held whole (below),
   they leave the 16 GB runner 0.7 to 1.3 GB of free memory, and they add 50 minutes to
-  its cook.
+  its cook. (Amended 2026-10-31: the manifest asks for them now, and the nightly leaves
+  the landscape out, ADR-0067.)
 
 Measured (`test_vis_cells.c`): a grove of four trees of needles, triangles alone, and its
 proxy at 0.125 m: near, the trees (8,904 triangles); from where the box is past the

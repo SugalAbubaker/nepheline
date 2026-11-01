@@ -4,7 +4,8 @@
 - **Status:** Accepted (the user's decisions of 2026-10-30; supersedes
   [ADR-0059](0059-structure-checkpoint.md)'s decisions 3 and 4 and
   [ADR-0041](0041-frame-target-gates.md)'s decision 6; CLAUDE.md §10.1, §10.4,
-  §10.7, §12 and §13 amended)
+  §10.7, §12 and §13 amended); amended 2026-10-31: the landscape leaves the
+  nightly (below)
 
 ## Context
 
@@ -79,8 +80,9 @@ The second was answered at the checkpoint, where the frame kept its passes
    | The interior: Intel's Sponza and its 10,000 candles | Indoor facilities' many lights | Yes |
    | The landscape | Nothing in the game: a stress test of geometry | No |
 
-   The landscape stays measured nightly, is still optimized in Phase 14 (the
-   user's words: it "definitely needs to be optimized"), and is held by the
+   The landscape stays measured (nightly, until the amendment below), is still
+   optimized in Phase 14 (the user's words: it "definitely needs to be
+   optimized"), and is held by the
    guard rail, no slower at a phase's end than at its start. It does not hold up
    an exit. Sponza's interior tests the lighting of a facility, not its size:
    the one search for a free large facility found none, and the game's own
@@ -158,3 +160,40 @@ The second was answered at the checkpoint, where the frame kept its passes
   §10.4 lines at Phase 14's end, is replaced by the gates above.
 - Emerald Square is FBX and the cooker reads glTF, so its manifest needs a
   conversion, which its own pull request records.
+
+## Amendment (2026-10-31): the landscape leaves the nightly
+
+**Context.** The nightly ran the landscape as its manifest then cooked it, without
+its cells, at the default lists, where every view overflows and drops work: 15.2 to
+16.6 ms on a5872ff, whose forest with its cells, its streams and its lists takes
+61.7 ms. It had no budget rows, since a budget on dropped work holds nothing, so it
+could fail only by crashing. Since Phase 13 landed, the one fault it found was the
+nightly's own: the device lost when the city's lists sized its renderer (90c106d).
+
+**Decision** (the user's). The nightly leaves it out, and fetches, cooks and measures
+every other manifest's scene. The guard rail above stands, measured by hand at a
+phase's start and end as ADR-0066's table was (docs/benchmarks.md has the commands).
+With no nightly cook to pay for them, the manifest now asks for what that frame
+needs: its cells (`cook.hlod`) and its lists (`lists`: 16), so that a run that drops
+work fails.
+
+**Alternatives considered.**
+
+- *The full frame in the nightly*, which ADR-0062 expected once the cells streamed:
+  about 50 minutes more whenever the cooker's output changes, and some 4 minutes a
+  night, for a scene that does not gate.
+- *The run as it was, for a smoke test:* it would say that the landscape still cooks
+  without its cells, loads, and draws what its lists hold, and go on printing numbers
+  that are not its frame.
+
+**Consequences.**
+
+- Between a phase's start and end nothing automatic says that the landscape got
+  slower or stopped cooking or loading. What it stresses keeps its tests and synthetic
+  scenes on every renderer pull request (`test_voxel.c`, `test_vis_voxel.c`,
+  `test_vis_cells.c`, `test_proxy_stream.c`, `foliage_*` and `lod_*`).
+- The commands checked on a5872ff with the cells of an earlier cook, the forest view,
+  the editor not minimized: 61.65 ms mean, 62.88 ms at the 99th percentile, 6.24 GB,
+  no list overflowed (ADR-0066: 61.84, 62.33, 6.23 GB).
+- The nightly is about a minute shorter, and about 6 minutes more so when the cooker's
+  output changes.
