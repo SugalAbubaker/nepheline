@@ -147,8 +147,8 @@ typedef struct NphRendererDesc {
     u32 max_deferred;         // instances phase 0 defers, and phase 1's meshlets: those
                               // phase 0 deferred plus those of deferred instances now
                               // visible (262144)
-    f32 sw_raster_pixels;     // clusters whose triangles average at most this many pixels
-                              // across (and that fit in 64) rasterise in software (3)
+    f32 sw_raster_pixels;     // clusters, masked or not, whose triangles average at most this
+                              // many pixels across (and that fit in 64) rasterise in software (3)
     f32 masked_skin;          // the masked clusters at the front of their instance, within
                               // this share of the chord their view ray cuts through its box,
                               // draw first writing their depth, so the leaves behind them are

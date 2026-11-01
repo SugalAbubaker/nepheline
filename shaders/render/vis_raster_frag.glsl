@@ -13,8 +13,9 @@
 // is rejected before the shader and its atomic run (the atomic still
 // decides, the test passes equal depths). Its opaque variant never
 // discards and writes depth. Its masked variant runs the material's alpha
-// test, the base colour's alpha (factor, vertex colour, texture) against
-// the cutoff as the reference renderer's MASK does, so it writes no depth
+// test (small masked clusters take it in the software raster instead,
+// vis_sw_raster.comp), the base colour's alpha (factor, vertex colour, texture)
+// against the cutoff as the reference renderer's MASK does, so it writes no depth
 // (an early write would let a discarded fragment occlude): it is tested
 // against the opaque surfaces drawn before it, and its texture is not
 // sampled behind them. The mesh stage hands it the material's alpha test

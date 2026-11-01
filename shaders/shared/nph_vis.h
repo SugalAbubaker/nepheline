@@ -89,7 +89,7 @@
 // Raster lists, per phase: how each visible cluster is rasterised.
 #define NPH_VIS_RASTER_OPAQUE   0 // hardware
 #define NPH_VIS_RASTER_MASKED   1 // hardware, alpha tested
-#define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small opaque clusters
+#define NPH_VIS_RASTER_SOFTWARE 2 // compute (vis_sw_raster.comp): small clusters, masked or not
 #define NPH_VIS_RASTER_SKIN     3 // hardware, alpha tested, the front of its instance (mesh path)
 #define NPH_VIS_RASTER_VOXEL    4 // compute (vis_voxel_raster.comp): voxel clusters (ADR-0061)
 #define NPH_VIS_RASTER_KINDS    5

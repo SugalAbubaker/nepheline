@@ -1,7 +1,8 @@
 # 0030. The hybrid raster: a compute rasteriser for small triangles, meshlet work lists, and a partial second pyramid
 
 - **Date:** 2026-10-17
-- **Status:** Accepted
+- **Status:** Accepted (small masked clusters joined the software raster by
+  [ADR-0071](0071-small-masked-clusters-in-software.md))
 
 ## Context
 

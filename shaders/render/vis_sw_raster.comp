@@ -3,8 +3,7 @@
 // path"; CLAUDE.md §8.6.4, "micro-triangles use a compute software
 // rasterizer with 64-bit image atomics"; Karis et al., "Nanite: A Deep
 // Dive", SIGGRAPH 2021): one workgroup per cluster of the phase's software
-// list, which the meshlet cull fills with opaque clusters of small
-// triangles.
+// list, which the meshlet cull fills with clusters of small triangles.
 //
 // The cluster's vertices go to screen space once, into shared memory,
 // snapped to 1/256 pixel as the hardware snaps them (Vulkan's
@@ -24,8 +23,16 @@
 // projects in front of the near plane into at most NPH_VIS_SW_MAX_PIXELS
 // across and its triangles average at most sw_raster_pixels across: every
 // vertex has w > 0 (nothing to clip), every triangle's box is small, and a
-// thread's walk over it is short. Masked materials stay in hardware, which
-// samples their alpha.
+// thread's walk over it is short.
+//
+// A masked cluster takes the material's alpha test at each covered pixel, read
+// once a cluster as the mesh stage reads it (vis_raster_mesh.glsl), with the
+// derivatives of its triangle's UV plane where the hardware path takes them
+// across a quad: 2 x 2 quads of fragments and the helpers' fetches are most of
+// what a triangle of a pixel costs there. Its UV is interpolated in screen
+// space: the cull's bound keeps a cluster's w within about 2% of its middle, so
+// that perspective moves it by less than 2% of a small triangle's UV span, and
+// the correction costs 2% of the pass (ADR-0071).
 //
 // arg0 is the visibility buffer's storage index.
 #version 460
@@ -40,6 +47,7 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 shared ivec2 s_xy[64]; // screen position in 1/256 pixel
 shared float s_z[64];  // depth, z / w
+shared vec3 s_uv_alpha[64]; // a masked cluster's: UV, vertex-colour alpha
 
 // The edge function of the edge u -> v at p, in 1/256-pixel units squared:
 // positive on the side the triangle's inside is on once the triangle is
@@ -79,6 +87,17 @@ void main()
     const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
     const uint vertex_count = m.z & 0xFFFFu;
     const uint triangle_count = m.z >> 16u;
+    const bool masked = (cluster.flags & NPH_VIS_CLUSTER_MASKED) != 0u;
+    uvec2 alpha_texture = uvec2(0u);
+    vec2 alpha_test = vec2(0.0);
+    if (masked) {
+        // Field by field, not a copy of the record (docs/build.md "Shaders").
+        MaterialsRef materials = MaterialsRef(view.v.materials);
+        alpha_texture = uvec2(materials.m[cluster.material].textures[NPH_RENDER_TEX_BASE_COLOR],
+                              materials.m[cluster.material].samplers[NPH_RENDER_TEX_BASE_COLOR]);
+        alpha_test =
+            vec2(materials.m[cluster.material].base_color.a, materials.m[cluster.material].alpha_cutoff);
+    }
 
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
@@ -91,6 +110,10 @@ void main()
         const vec2 screen = (clip.xy / clip.w * 0.5 + 0.5) * view.v.viewport.xy;
         s_xy[i] = ivec2(roundEven(screen * 256.0));
         s_z[i] = clip.z / clip.w;
+        if (masked) {
+            const uvec4 attrib = AttribsRef(mesh.attribs).a[vertex];
+            s_uv_alpha[i] = vec3(unpackHalf2x16(attrib.z), unpackUnorm4x8(attrib.w).a);
+        }
     }
     barrier();
 
@@ -114,6 +137,14 @@ void main()
         const float za = s_z[corner.x];
         float zb = s_z[corner.y];
         float zc = s_z[corner.z];
+        vec3 ua = vec3(0.0);
+        vec3 ub = vec3(0.0);
+        vec3 uc = vec3(0.0);
+        if (masked) {
+            ua = s_uv_alpha[corner.x];
+            ub = s_uv_alpha[corner.y];
+            uc = s_uv_alpha[corner.z];
+        }
         int area = edge(ra, rb, rc);
         if (area == 0) {
             continue;
@@ -132,12 +163,29 @@ void main()
             const float tz = zb;
             zb = zc;
             zc = tz;
+            const vec3 tu = ub;
+            ub = uc;
+            uc = tu;
             area = -area;
         }
         const int bias_a = bias(rb, rc);
         const int bias_b = bias(rc, ra);
         const int bias_c = bias(ra, rb);
         const float inv_area = 1.0 / float(area);
+        // The UV's plane through the three vertices, per pixel: the
+        // derivatives the hardware takes across a quad, which perspective
+        // hardly moves across a triangle this small.
+        vec2 ddx_uv = vec2(0.0);
+        vec2 ddy_uv = vec2(0.0);
+        if (masked) {
+            const vec2 e1 = vec2(rb - ra);
+            const vec2 e2 = vec2(rc - ra);
+            const vec2 d1 = ub.xy - ua.xy;
+            const vec2 d2 = uc.xy - ua.xy;
+            const float per_pixel = 256.0 * inv_area;
+            ddx_uv = (d1 * e2.y - d2 * e1.y) * per_pixel;
+            ddy_uv = (d2 * e1.x - d1 * e2.x) * per_pixel;
+        }
         // The edge functions at the first centre, and their steps per pixel.
         const ivec2 start = p0 * 256 + 128 - lo;
         int row_a = edge(rb, rc, start);
@@ -158,10 +206,23 @@ void main()
                 if (((ea + bias_a) | (eb + bias_b) | (ec + bias_c)) >= 0) {
                     // Barycentrics: each edge function over the area weighs
                     // the vertex opposite the edge.
-                    const float depth =
-                        (float(ea) * za + float(eb) * zb + float(ec) * zc) * inv_area;
-                    imageAtomicMax(nph_u64images_2d[nonuniformEXT(pc.arg0)], ivec2(x, y),
-                                   vis_pack(depth, g, tri));
+                    const vec3 weights = vec3(float(ea), float(eb), float(ec)) * inv_area;
+                    bool keep = true;
+                    if (masked) {
+                        const vec3 uva = weights.x * ua + weights.y * ub + weights.z * uc;
+                        float alpha = alpha_test.x * uva.z;
+                        if (alpha_texture.x != NPH_RENDER_NO_TEXTURE) {
+                            alpha *= nph_sample_2d_grad(alpha_texture.x, alpha_texture.y, uva.xy,
+                                                        ddx_uv, ddy_uv)
+                                         .a;
+                        }
+                        keep = !(alpha < alpha_test.y);
+                    }
+                    if (keep) {
+                        const float depth = dot(weights, vec3(za, zb, zc));
+                        imageAtomicMax(nph_u64images_2d[nonuniformEXT(pc.arg0)], ivec2(x, y),
+                                       vis_pack(depth, g, tri));
+                    }
                 }
                 ea += dx_a;
                 eb += dx_b;
