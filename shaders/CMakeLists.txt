@@ -121,6 +121,8 @@ nph_add_shaders(nph_shaders_render
         # The culling math for the render tests (render/reference.h twins).
         render/vis_math_test.comp
         render/vis_bary_test.comp
+        # The many lights' walk for the render tests (render/light_tree.h's twin).
+        render/many_light_test.comp
         # The voxels' tests for the render tests (render/voxel.h's twins).
         render/vis_voxel_test.comp
         # The depth pyramid's block requests against each pixel's (render tests).

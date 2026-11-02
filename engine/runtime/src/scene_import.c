@@ -203,6 +203,7 @@ static NphResult import(Importer *im, const NphSceneImportDesc *d, NphEntity *ou
         l.range = src->range;
         l.inner_cone = src->inner_cone;
         l.outer_cone = src->outer_cone;
+        l.near_range = l.type == (u32)NPH_LIGHT_POINT ? d->light_near_range : 0.0F;
         NphEntity e;
         NPH_TRY(holder(im, src->node, USED_LIGHT, "light", &e));
         NPH_TRY(nph_world_add(im->world, e, im->ids.light, &l));

@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+// The walk down the many lights' tree for the render tests (test_many_lights.c):
+// many_lights.glsl's nph_many_sample, one invocation a case, against its CPU twin.
+#version 460
+#include "render_common.glsl"
+#include "many_lights.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push
+{
+    uint64_t view;
+    uint64_t cases;   // vec4[count]: xyz the point, w the uniform number
+    uint64_t results; // (uint the light, float its probability)[count]
+    uint count;
+    uint pad;
+}
+pc;
+
+NPH_BUFFER_REF(WalkCasesRef) { vec4 c[]; };
+NPH_BUFFER_REF(WalkResultsRef) { uvec2 r[]; };
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    const vec4 c = WalkCasesRef(pc.cases).c[i];
+    float pdf;
+    const uint light = nph_many_sample(ManyViewRef(pc.view).m, c.xyz, c.w, pdf);
+    WalkResultsRef(pc.results).r[i] = uvec2(light, floatBitsToUint(pdf));
+}

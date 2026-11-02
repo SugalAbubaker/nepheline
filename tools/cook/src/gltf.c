@@ -581,6 +581,29 @@ static NphResult convert_primitive(NphAllocator *alloc, const cgltf_primitive *p
     return r;
 }
 
+// Whether a mesh's extras say {"no_rays": true} (docs/cook.md "Rays"). cgltf keeps a
+// mesh's extras as offsets into the document alone, unlike other objects' (their
+// `data`), so they are copied out through its function, however long, cut short.
+static bool extras_no_rays(const cgltf_data *data, const cgltf_extras *extras)
+{
+    char text[256];
+    cgltf_size size = sizeof text;
+    if (extras->end_offset <= extras->start_offset ||
+        cgltf_copy_extras_json(data, extras, text, &size) != cgltf_result_success) {
+        return false;
+    }
+    static const char k_key[] = "\"no_rays\"";
+    const char *at = strstr(text, k_key);
+    if (at == NULL) {
+        return false;
+    }
+    at += sizeof k_key - 1U;
+    while (*at == ' ' || *at == '\t' || *at == '\n' || *at == '\r' || *at == ':') {
+        ++at;
+    }
+    return strncmp(at, "true", 4U) == 0;
+}
+
 static NphResult convert_mesh(CookGltfScene *scene, const cgltf_data *data, const cgltf_mesh *src,
                               CookGltfMesh *out)
 {
@@ -692,6 +715,7 @@ static NphResult convert_mesh(CookGltfScene *scene, const cgltf_data *data, cons
         }
     }
     out->mesh.flags = out->mesh.submeshes.len != 0U ? flags : 0U;
+    out->mesh.flags |= extras_no_rays(data, &src->extras) ? (u32)COOK_MESH_NO_RAYS : 0U;
     return NPH_RESULT_OK;
 }
 

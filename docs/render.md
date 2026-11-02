@@ -2354,6 +2354,51 @@ Measured and not kept:
 `NPH_RENDER_VIEW_CLUSTERS`, `_TRIANGLES`, and `_INSTANCES` colour each
 pixel by a hash of what drew it.
 
+### Many lights
+
+`NphRenderManyLight` (ADR-0073) is for point lights by the thousand, whose cost must
+follow neither their number nor how many are in view: the interior's 10,000 candles, of
+which a pixel at a metre from any is reached by hundreds. The light grid above cannot
+hold them (a view's 4,096 lights, a bit per light and tile), and a ray per light per
+pixel is out of reach: at the update's 3.2 ns a ray, 8.3 million rays are 27 ms.
+
+Each light's reach is split at its near range by a smooth partition of unity, the window
+a range gives (Karis 2013):
+
+    near(d) = (1 - (d / near_range)^4)^2,  far(d) = 1 - near(d)
+
+| Part | Who evaluates it | How it finds the lights |
+|---|---|---|
+| `near(d)` of the light | each pixel, in the resolve (`nph_lit_many`, surface.glsl), with its BRDF, without shadows | a hash of the world cell the point is in, twice the near range across, to the list of lights that reach that cell |
+| `far(d)` of the light | the radiance cache's update, a sample at a time (`many_far_sample`, gi_update.comp), diffuse, with a shadow ray | a tree over the lights, walked in proportion to what each may deliver |
+
+A sample of the far fields takes one light from the tree with probability `p`, and adds
+`I far(d) cos / d^2 / p` to its cell's irradiance. The tree (`render/light_tree.h`; Conty
+Estevez & Kulla, "Importance Sampling of Many Lights with Adaptive Tree Splitting", HPG
+2018; Yuksel, "Stochastic Lightcuts", HPG 2019) is four children a node, a light's power
+over its squared distance from the point, no nearer than its node's radius or than the
+near range, within which there is no far field to gather. Every light with power has a
+positive probability from everywhere, so the estimate is unbiased however poorly a node's
+sphere stands for its lights. The cells hold irradiance already, a cell takes several
+samples a frame, and what they hold bounces through the cache as the rest does.
+
+The set is rebuilt whole in the first frame after a light changes, on the main thread, into
+new buffers: the frames in flight keep reading the old ones, which go when they are done.
+`NphRenderFrameStats.many_lights_rebuilt` says when. So these lights are for what rarely
+changes.
+
+The specular their far fields give is what the cell gathered, taken as arriving evenly
+from everywhere (the diffuse gives up that energy already): metals are lit, and a far
+candle has no highlight of its own, which is what reflections' rays are for.
+
+A mesh of many small things (the candles' 19.5 million triangles) stays out of the rays
+with `NphRenderMeshDesc.no_rays`, which a cooked mesh takes from its glTF extras
+(docs/cook.md "Rays"): its flames carry no light of their own into the cache that the
+lights do not, and it casts no shadows in the far fields.
+
+The reference renderer does not draw them, and blended surfaces do not take the near
+fields. Without a radiance cache only the near fields are lit, which is logged once.
+
 ## Image-based lighting
 
 Everything is computed on the GPU in render-graph compute passes, once per

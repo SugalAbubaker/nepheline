@@ -225,6 +225,7 @@ reference scenes arrive:
 |---|---|
 | `grid_{1k,10k,100k}_{reference,production}` | that many cubes on a flat grid under a top-down camera, every one on screen, at 512×512: the CPU cost against the object count, per pipeline |
 | `field_4k_{reference,production}` | 16,384 spheres (960 triangles each) and pillars on a ground plane at 3840×2160 from head height: the nearer rows hide most of the field |
+| `many_lights_{1k,10k}_production` | the same field at night, its lights many lights (`NphRenderManyLight`; ADR-0073): the same total power, ten times as many, among which the frame should not move |
 | `field_4k_no_taa` | `field_4k_production` without temporal anti-aliasing: the tonemap pass where the other has the temporal resolve |
 | `field_4k_no_bloom` | `field_4k_production` without bloom: what the chain and its composite cost |
 | `field_4k_no_ao` | `field_4k_production` without ambient occlusion: what the occlusion costs |

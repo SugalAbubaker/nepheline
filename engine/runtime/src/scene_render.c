@@ -40,7 +40,8 @@ typedef struct EntityRecord {
     u64 source;
     u32 mesh; // asset cache index, RENDER_ASSET_NONE
     u32 materials[NPH_MESH_RENDERER_MATERIALS];
-    u32 *more_materials; // NPH_MESH_MATERIALS_EXTRA of them, for a mesh of many (or NULL)
+    u32 *more_materials;           // NPH_MESH_MATERIALS_EXTRA of them, for a mesh of many (or NULL)
+    NphRenderManyLight many_light; // for a Light of a near range, instead of `light`
     NphRenderInstance instance;
     NphRenderLight light;
     u32 cell;     // the cell its instance belongs to (SceneCells), or SCENE_CELL_NONE
@@ -266,6 +267,11 @@ static void release_light(NphSceneRenderer *sr, EntityRecord *r)
         sr->lights -= 1U;
     }
     r->light = NPH_RENDER_LIGHT_NULL;
+    if (nph_render_many_light_is_valid(sr->renderer, r->many_light)) {
+        nph_render_many_light_destroy(sr->renderer, r->many_light);
+        sr->lights -= 1U;
+    }
+    r->many_light = NPH_RENDER_MANY_LIGHT_NULL;
     r->flags &= ~(u32)REC_LIGHT;
 }
 
@@ -867,10 +873,58 @@ static void light_desc(const NphLight *l, const NphWorldTransform *wt, NphRender
     d->shadows = l->shadows != 0 ? 1 : 0;
 }
 
+static void many_light_desc(const NphLight *l, const NphWorldTransform *wt,
+                            NphRenderManyLightDesc *d)
+{
+    memset(d, 0, sizeof *d);
+    d->position = wt->translation;
+    d->color = l->color;
+    d->intensity = l->intensity > 0.0F && nph_f32_is_finite(l->intensity) ? l->intensity : 0.0F;
+    d->near_range = l->near_range;
+    // A range below the near range would be refused: the near range is then its reach.
+    d->range = l->range > 0.0F && nph_f32_is_finite(l->range) ? nph_f32_max(l->range, l->near_range)
+                                                              : 0.0F;
+}
+
+static bool same_many_light(const NphRenderManyLightDesc *a, const NphRenderManyLightDesc *b)
+{
+    return a->position.x == b->position.x && a->position.y == b->position.y &&
+           a->position.z == b->position.z && a->color.x == b->color.x && a->color.y == b->color.y &&
+           a->color.z == b->color.z && a->intensity == b->intensity &&
+           a->near_range == b->near_range && a->range == b->range;
+}
+
 static NphResult mirror_light(NphSceneRenderer *sr, EntityRecord *r, const NphLight *l,
                               const NphWorldTransform *wt)
 {
     r->flags |= (u32)REC_LIGHT;
+    if (l->near_range > 0.0F && nph_f32_is_finite(l->near_range) &&
+        l->type == (u32)NPH_LIGHT_POINT) {
+        // One of the many: not drawn between its states, since a change rebuilds them all.
+        if (nph_render_light_is_valid(sr->renderer, r->light)) {
+            nph_render_light_destroy(sr->renderer, r->light);
+            r->light = NPH_RENDER_LIGHT_NULL;
+            sr->lights -= 1U;
+        }
+        NphRenderManyLightDesc md;
+        many_light_desc(l, wt, &md);
+        if (nph_render_many_light_is_valid(sr->renderer, r->many_light)) {
+            NphRenderManyLightDesc was;
+            NPH_TRY(nph_render_many_light_desc(sr->renderer, r->many_light, &was));
+            // A chunk's other entities' changes come here too, and rebuilding is dear.
+            return same_many_light(&was, &md)
+                       ? NPH_RESULT_OK
+                       : nph_render_many_light_update(sr->renderer, r->many_light, &md);
+        }
+        NPH_TRY(nph_render_many_light_create(sr->renderer, &md, &r->many_light));
+        sr->lights += 1U;
+        return NPH_RESULT_OK;
+    }
+    if (nph_render_many_light_is_valid(sr->renderer, r->many_light)) {
+        nph_render_many_light_destroy(sr->renderer, r->many_light);
+        r->many_light = NPH_RENDER_MANY_LIGHT_NULL;
+        sr->lights -= 1U;
+    }
     if (r->moving != MOVING_NONE && nph_render_light_is_valid(sr->renderer, r->light)) {
         return NPH_RESULT_OK; // drawn between its states once the sync has mirrored the rest
     }

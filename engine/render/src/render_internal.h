@@ -555,6 +555,31 @@ typedef struct RenderLight {
     NphRenderLightDesc desc;
 } RenderLight;
 
+// The many lights (many_lights.c; docs/adr/0073-many-lights.md): their descriptions,
+// and the set as last built, in buffers that a rebuild replaces.
+typedef struct RenderManyLight {
+    b32 live;
+    NphRenderManyLightDesc desc;
+} RenderManyLight;
+
+typedef struct RenderMany {
+    NphHandlePool pool;
+    RenderManyLight *lights;
+    NphGpuBuffer records; // NphRenderManyLightData[count]
+    NphGpuBuffer nodes;   // the tree's
+    NphGpuBuffer table;   // u32[table_mask + 1]
+    NphGpuBuffer indices; // u32[]
+    NphDVec3 origin;      // what the records and nodes are about
+    f32 near_range;       // the greatest
+    f32 cells_per_metre;  // of the table's cells
+    u32 count;
+    u32 table_mask;
+    u64 bytes;
+    b32 dirty;        // a light changed since the set was built
+    b32 frame_active; // this frame draws them
+    b32 no_gi_logged;
+} RenderMany;
+
 // One draw call of the forward pass, sorted by key.
 typedef struct RenderDrawCmd {
     u64 key;    // opaque: pipeline, then mesh; blended: farthest first
@@ -593,6 +618,7 @@ typedef struct RenderFrameLayout {
     u64 vsm_view_offset;          // NphVsmView (production path)
     u64 gi_view_offset;           // NphRenderGiView (production path)
     u64 paging_view_offset;       // NphRenderPagingView (paging.c)
+    u64 many_view_offset;         // NphRenderManyView (many_lights.c)
     u64 size;
 } RenderFrameLayout;
 
@@ -917,6 +943,10 @@ typedef struct RenderVis {
     // compute[]'s: [ray-traced shadows][virtual shadow map][radiance cache].
     // They test for voxel pixels (k_voxels) whether there are any or not.
     NphGpuPipeline resolve_debug[2][2][2];
+    // The same three kinds (triangles alone, with the voxel test, the debug views)
+    // with the many lights' near fields, where the renderer has them: [kind][ray-traced
+    // shadows][virtual shadow map][radiance cache].
+    NphGpuPipeline resolve_many[3][2][2][2];
     // compute[]'s resolves with the voxel test (k_voxels), for frames that
     // may draw voxel clusters: the test alone, never taken, costs the
     // triangles' path 0.5 to 1.7 % of the resolve where compiled in.
@@ -1059,6 +1089,8 @@ typedef struct RenderGi {
     NphGpuShader update_shader;  // gi_update.comp
     NphGpuShader resolve_shader; // gi_resolve.comp
     NphGpuPipeline update;
+    NphGpuPipeline update_many;        // with the many lights' far fields (RenderMany.frame_active)
+    NphGpuPipeline update_voxels_many; // and voxel pixels
     NphGpuPipeline update_voxels; // the same where voxel pixels may be (RenderVis.frame_voxels)
     NphGpuPipeline resolve;
     b32 frame_active;
@@ -1208,6 +1240,9 @@ struct NphRenderer {
 
     // Paged textures (paging.c; ADR-0065).
     RenderPaging paging;
+
+    // The many lights (many_lights.c; ADR-0073).
+    RenderMany many;
 
     // The frame being recorded (read by the pass callbacks).
     NphRenderPush push;
@@ -1443,6 +1478,15 @@ void render_gi_light_changed(NphRenderer *r, u32 slot);
 // irradiance debug views), on a renderer that has it. The top level must be
 // built for it (render_rt_frame_begin).
 bool render_gi_frame_wanted(const NphRenderer *r, const NphRenderView *view, bool production);
+
+// The many lights (many_lights.c; docs/adr/0073-many-lights.md).
+NphResult render_many_create(NphRenderer *r);
+void render_many_destroy(NphRenderer *r);
+// Rebuilds the set if a light changed, and writes this frame's view if it draws them.
+NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, bool production);
+u64 render_many_view_address(const NphRenderer *r); // 0 where it does not
+// The table's entry of a cell (the shaders' twin), for the tests.
+u32 render_many_table_entry(i32 x, i32 y, i32 z, u32 mask);
 
 // Paged textures (paging.c; docs/adr/0065-virtual-texturing.md).
 // Whether the renderer pages textures: the device's sparse residency and

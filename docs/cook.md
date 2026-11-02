@@ -189,6 +189,13 @@ with a scheme, an absolute path, or one above the document's directory is
 refused, since a copy could not keep it beside the document. The editor's
 import copies a dropped `.gltf` with these files.
 
+## Rays
+
+A glTF mesh's extras can say `{"no_rays": true}`: the cooked mesh is flagged
+(`NPH_MESH_FLAG_NO_RAYS`) and the renderer gives it no bottom level, so rays pass it by
+(`NphRenderMeshDesc.no_rays`). It is for many small things that rays could not afford and
+would learn little from, as the interior's candles (scripts/interior.py).
+
 ## Editable meshes (`polymesh.h`)
 
 The editor's own meshes (CLAUDE.md §8.13 "primitives ... and basic mesh

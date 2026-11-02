@@ -18,6 +18,8 @@ nph_add_module(render
         src/dof.c
         src/frame.c
         src/gi.c
+        src/light_tree.c
+        src/many_lights.c
         src/gpu_profiler.c
         src/ibl.c
         src/meshlet.c
@@ -59,6 +61,8 @@ nph_add_test(render
         tests/test_dof.c
         tests/test_frame.c
         tests/test_gi.c
+        tests/test_light_tree.c
+        tests/test_many_lights.c
         tests/test_gpu_profiler.c
         tests/test_levels_apart.h
         tests/test_motion_blur.c

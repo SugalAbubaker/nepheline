@@ -490,6 +490,81 @@ NTEST(SceneRender, instances_take_only_the_material_slots_they_name)
     scene_teardown(&fx);
 }
 
+// A Light of a near range is one of the many: created, changed only when it changes,
+// and an ordinary light again when its near range goes (ADR-0073).
+NTEST(SceneRender, a_light_of_a_near_range_is_one_of_the_many)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, false, 256U);
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.max_many_lights = 4U;
+    test_render_setup(&fx.rf, &rd);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    if (!nph_renderer_production_supported(fx.rf.renderer)) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    NphRenderView view = test_view();
+    view.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, fx.ids.light};
+    NphEntity e;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(fx.world, comps, 3U, &e), NPH_RESULT_OK);
+    NphLight *l = NPH_WORLD_GET_MUT(fx.world, e, fx.ids.light, NphLight);
+    NTEST_ASSERT_NOT_NULL(l);
+    l->near_range = 0.5F;
+    NphSceneRenderStats st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.lights, 1U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_light(fx.sr, e).value, 0U);
+    NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.many_lights, 1U);
+    NTEST_EXPECT_EQ_UINT(fs.lights, 0U);
+    NTEST_EXPECT_TRUE(fs.many_lights_rebuilt);
+
+    // A sync that changed nothing about it leaves the set as built, though its chunk
+    // was written.
+    NPH_WORLD_GET_MUT(fx.world, e, fx.ids.light, NphLight)->intensity = l->intensity;
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.lights, 1U);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_FALSE(fs.many_lights_rebuilt);
+    // A change does make it rebuild.
+    local(&fx, e)->translation.x += 1.0;
+    (void)sync(&fx);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.many_lights, 1U);
+    NTEST_EXPECT_TRUE(fs.many_lights_rebuilt);
+
+    // Its near range goes: an ordinary light.
+    NPH_WORLD_GET_MUT(fx.world, e, fx.ids.light, NphLight)->near_range = 0.0F;
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.lights, 1U);
+    NTEST_EXPECT_TRUE(
+        nph_render_light_is_valid(fx.rf.renderer, nph_scene_renderer_light(fx.sr, e)));
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.many_lights, 0U);
+    NTEST_EXPECT_EQ_UINT(fs.lights, 1U);
+    // And back; then it goes.
+    NPH_WORLD_GET_MUT(fx.world, e, fx.ids.light, NphLight)->near_range = 0.5F;
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.lights, 1U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_light(fx.sr, e).value, 0U);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.many_lights, 1U);
+    NTEST_EXPECT_EQ_UINT(fs.lights, 0U);
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, e), NPH_RESULT_OK);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.lights, 0U);
+    fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.many_lights, 0U);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, the_camera_and_the_environment)
 {
     static SceneFixture fx;

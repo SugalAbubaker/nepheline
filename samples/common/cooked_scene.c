@@ -305,6 +305,7 @@ static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, NphRender
     d.position_offset = h->position_offset;
     d.position_scale = h->position_scale;
     d.bounds = h->bounds;
+    d.no_rays = (h->flags & (u32)NPH_MESH_FLAG_NO_RAYS) != 0U ? 1 : 0;
     cooked_clusters(&mv, &d);
     d.name = "cooked mesh";
     return nph_render_mesh_create(s->renderer, &d, out);
@@ -615,6 +616,20 @@ static NphResult create_lights(CookedScene *s, const CookedSceneDesc *desc, cons
 {
     for (u32 i = 0; i < sv->header->light_count; ++i) {
         const NphSceneLight *l = &sv->lights[i];
+        if (desc->light_near_range > 0.0F && l->type == NPH_SCENE_LIGHT_POINT) {
+            NphRenderManyLightDesc md;
+            memset(&md, 0, sizeof md);
+            md.position =
+                nph_dvec3_add(nph_dvec3_from_vec3(nph_vec4_xyz(world[l->node].c[3])), desc->origin);
+            md.color = l->color;
+            md.intensity = l->intensity;
+            md.near_range = desc->light_near_range;
+            md.range = l->range;
+            NPH_TRY(nph_render_many_light_create(s->renderer, &md,
+                                                 &s->many_lights[s->many_light_count]));
+            ++s->many_light_count;
+            continue;
+        }
         NphRenderLightDesc d;
         memset(&d, 0, sizeof d);
         d.type = l->type == NPH_SCENE_LIGHT_POINT  ? NPH_RENDER_LIGHT_TYPE_POINT
@@ -750,10 +765,12 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     s->cells = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderCell, s->cell_cap);
     s->lights = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderLight, s->light_cap);
     s->light_descs = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderLightDesc, s->light_cap);
+    s->many_lights = NPH_ALLOC_ARRAY_ZEROED(s->alloc, NphRenderManyLight, s->light_cap);
     NphMat4 *world = NPH_ALLOC_ARRAY(s->alloc, NphMat4, sh->node_count != 0U ? sh->node_count : 1U);
     u32 *instance_cell = cells != 0U ? NPH_ALLOC_ARRAY(s->alloc, u32, scene_instances) : NULL;
     if (s->materials == NULL || s->instances == NULL || s->cells == NULL || s->lights == NULL ||
-        s->light_descs == NULL || world == NULL || (cells != 0U && instance_cell == NULL)) {
+        s->light_descs == NULL || s->many_lights == NULL || world == NULL ||
+        (cells != 0U && instance_cell == NULL)) {
         if (world != NULL) {
             NPH_FREE_ARRAY(s->alloc, NphMat4, world, sh->node_count != 0U ? sh->node_count : 1U);
         }
@@ -910,6 +927,11 @@ void cooked_scene_unload(CookedScene *s)
             nph_render_light_destroy(r, s->lights[i]);
         }
     }
+    if (s->many_lights != NULL) {
+        for (u32 i = 0; i < s->many_light_count; ++i) {
+            nph_render_many_light_destroy(r, s->many_lights[i]);
+        }
+    }
     NphAllocator *a = s->alloc;
     if (s->level_meshes != NULL) {
         for (u32 i = 0; i < s->level_mesh_count; ++i) {
@@ -970,6 +992,9 @@ void cooked_scene_unload(CookedScene *s)
     }
     if (s->light_descs != NULL) {
         NPH_FREE_ARRAY(a, NphRenderLightDesc, s->light_descs, s->light_cap);
+    }
+    if (s->many_lights != NULL) {
+        NPH_FREE_ARRAY(a, NphRenderManyLight, s->many_lights, s->light_cap);
     }
     memset(s, 0, sizeof *s);
 }

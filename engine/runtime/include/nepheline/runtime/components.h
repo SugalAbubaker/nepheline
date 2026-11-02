@@ -150,7 +150,9 @@ typedef enum NphLightType {
 // KHR_lights_punctual's model (render/renderer.h NphRenderLightDesc): the
 // light sits at the entity and points along the entity's -Z axis.
 // `shadows`: it casts ray-traced shadows where the renderer has ray tracing
-// (docs/render.md "Shadows").
+// (docs/render.md "Shadows"). `near_range`: above 0, a point light is one of the
+// many lights (render/renderer.h NphRenderManyLight): per pixel within it, through
+// the radiance cache beyond, and `shadows` does not apply.
 #define NPH_LIGHT_FIELDS(F)                                                                        \
     F(U32, type, NPH_FIELD_RANGE(0.0F, 2.0F))                                                      \
     F(VEC3, color, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_COLOR))                                          \
@@ -160,7 +162,8 @@ typedef enum NphLightType {
       NPH_FIELD_HINTS(NPH_FIELD_FLAG_ANGLE | NPH_FIELD_FLAG_RANGE, 0.0F, 1.5707F))                 \
     F(F32, outer_cone,                                                                             \
       NPH_FIELD_HINTS(NPH_FIELD_FLAG_ANGLE | NPH_FIELD_FLAG_RANGE, 0.0F, 1.5708F))                 \
-    F(BOOL, shadows, NPH_FIELD_NO_HINTS)
+    F(BOOL, shadows, NPH_FIELD_NO_HINTS)                                                           \
+    F(F32, near_range, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphLight, NPH_LIGHT_FIELDS);
 NPH_COMPONENT_DECLARE(NphLight);
 

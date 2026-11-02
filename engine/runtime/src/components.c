@@ -16,7 +16,7 @@ NPH_COMPONENT_DEFINE(NphMeshRenderer, NPH_MESH_RENDERER_FIELDS, "MeshRenderer", 
 // A 1000 cd white point light: a bright bulb at a few metres, casting no
 // shadows.
 static const NphLight g_light_defaults = {
-    (u32)NPH_LIGHT_POINT, {1.0F, 1.0F, 1.0F}, 1000.0F, 0.0F, 0.4F, 0.6F, 0};
+    (u32)NPH_LIGHT_POINT, {1.0F, 1.0F, 1.0F}, 1000.0F, 0.0F, 0.4F, 0.6F, 0, 0.0F};
 NPH_COMPONENT_DEFINE(NphLight, NPH_LIGHT_FIELDS, "Light", 0U, &g_light_defaults)
 
 // About 52 degrees of vertical field, a 10 cm near plane, sunny-day

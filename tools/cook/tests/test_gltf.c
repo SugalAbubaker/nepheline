@@ -411,6 +411,35 @@ NTEST(gltf, triangulates_strips_and_fans)
     cook_gltf_free(&scene);
 }
 
+// A mesh's extras can take it out of the rays (docs/cook.md "Rays"), whatever else
+// they hold and however they are spaced.
+NTEST(gltf, a_meshs_extras_take_it_out_of_the_rays)
+{
+    const f32 pos[3 * 3] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const char *extras[5] = {"", ",\"extras\":{\"no_rays\":true}",
+                             ",\"extras\":{\"other\":1,\"no_rays\" :  true}",
+                             ",\"extras\":{\"no_rays\":false}", ",\"extras\":{\"other\":true}"};
+    const bool expected[5] = {false, true, true, false, false};
+    for (u32 i = 0; i < 5U; ++i) {
+        char doc[1024];
+        (void)snprintf(
+            doc, sizeof doc,
+            "{\"asset\":{\"version\":\"2.0\"},"
+            "\"meshes\":[{\"name\":\"s\",\"primitives\":[{\"attributes\":{\"POSITION\":0}}]%s}],"
+            "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+            "\"min\":[0,0,0],\"max\":[1,1,0]}],"
+            "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+            "\"buffers\":[{\"byteLength\":36,\"uri\":\"%%s\"}]}",
+            extras[i]);
+        CookGltfScene scene;
+        NTEST_ASSERT_EQ_INT(load_doc(doc, pos, sizeof pos, &scene), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(scene.mesh_count, 1U);
+        NTEST_EXPECT_EQ_INT((scene.meshes[0].mesh.flags & (u32)COOK_MESH_NO_RAYS) != 0U ? 1 : 0,
+                            expected[i] ? 1 : 0);
+        cook_gltf_free(&scene);
+    }
+}
+
 NTEST(gltf, primitives_keep_their_own_attributes)
 {
     // Two primitives of one mesh: the first with UVs, colours, and
