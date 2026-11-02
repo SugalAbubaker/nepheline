@@ -104,9 +104,11 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // ---------------------------------------------------------------------------
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, bool vis_depth, NphGpuPipeline *out)
+                                  bool ray_query, bool vsm, bool vis_depth, u32 gi,
+                                  NphGpuPipeline *out)
 {
     NPH_ASSERT(!vis_depth || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
+    NPH_ASSERT(gi == 0U || vis_depth);
     static const RenderShader frags[2][3] = {
         {RENDER_SHADER_FORWARD_OPAQUE, RENDER_SHADER_FORWARD_MASK, RENDER_SHADER_FORWARD_BLEND},
         {RENDER_SHADER_FORWARD_OPAQUE_RT, RENDER_SHADER_FORWARD_MASK_RT,
@@ -147,10 +149,12 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
         d.depth.write = 1;
     }
     d.name = names[alpha][cull];
-    // forward_frag.glsl's k_vsm and k_vis_depth.
+    // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2).
     d.specialization[0] = vsm ? 1U : 0U;
     d.specialization[1] = vis_depth ? 1U : 0U;
-    d.specialization_count = vis_depth ? 2U : (vsm ? 1U : 0U);
+    d.specialization[2] = gi != 0U ? 1U : 0U;
+    d.specialization[3] = gi == 2U ? 1U : 0U;
+    d.specialization_count = vis_depth ? 4U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -160,10 +164,10 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false, false,
-                                            &r->forward[alpha][cull]));
+                                            0U, &r->forward[alpha][cull]));
             if (rt) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, &r->forward_rt[alpha][cull]));
+                                                false, 0U, &r->forward_rt[alpha][cull]));
             }
         }
     }

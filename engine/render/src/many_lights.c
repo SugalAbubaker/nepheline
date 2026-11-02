@@ -698,6 +698,7 @@ NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, boo
     v->table_mask = m->table_mask;
     v->count = m->count;
     v->near2 = m->near_range * m->near_range;
+    v->no_grid = nph_handle_pool_live(&r->light_pool) == 0U ? 1U : 0U;
     m->frame_active = 1;
     return NPH_RESULT_OK;
 }

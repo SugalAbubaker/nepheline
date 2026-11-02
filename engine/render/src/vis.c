@@ -394,9 +394,13 @@ NphResult render_vis_create(NphRenderer *r)
                 continue;
             }
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
-                NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c, v->hdr_format,
-                                                rt != 0U, map != 0U, true,
-                                                &v->blend_pipelines[rt][map][c]));
+                for (u32 g = 0; g < 3U; ++g) {
+                    if (g == 0U || r->gi.supported) {
+                        NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c,
+                                                        v->hdr_format, rt != 0U, map != 0U, true, g,
+                                                        &v->blend_pipelines[g][rt][map][c]));
+                    }
+                }
             }
         }
     }
@@ -446,7 +450,9 @@ void render_vis_destroy(NphRenderer *r)
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
-                nph_gpu_pipeline_destroy(dev, v->blend_pipelines[rt][map][c]);
+                for (u32 g = 0; g < 3U; ++g) {
+                    nph_gpu_pipeline_destroy(dev, v->blend_pipelines[g][rt][map][c]);
+                }
             }
         }
     }
@@ -2343,5 +2349,6 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
         nph_gpu_rg_read_buffer(p, f->tlas, NPH_GPU_RG_USE_ACCEL_READ);
     }
     render_vsm_read(r, p);
+    render_gi_read(r, p);
     return NPH_RESULT_OK;
 }
