@@ -94,21 +94,22 @@ def accessor_view(doc, buffer, accessor_index, typecode, per_element):
 
 
 def split_candles(doc, buffer, chunk_metres, candle_count, out_uri):
-    """Bytes of a new buffer, and `doc` rewritten to one mesh per cube of `chunk_metres`."""
+    """Bytes of a new buffer, and `doc` rewritten to one mesh per cube of `chunk_metres`.
+
+    Each primitive holds a run of indices per candle, all of a length (the vertices'
+    runs are not: the file's exporter merged what it could). A run's vertices move with
+    it, from the lowest it names to the highest.
+    """
     if len(doc.get("meshes", [])) != 1:
         fail(f"{len(doc.get('meshes', []))} candle meshes, the pinned file has one")
-    prims = doc["meshes"][0]["primitives"]
     streams = []
-    for prim in prims:
+    for prim in doc["meshes"][0]["primitives"]:
         attrs = prim["attributes"]
-        vertices = doc["accessors"][attrs["POSITION"]]["count"]
         indices = doc["accessors"][prim["indices"]]["count"]
-        if vertices % candle_count != 0 or indices % candle_count != 0:
-            fail(f"a primitive of {vertices} vertices and {indices} indices is not "
-                 f"{candle_count} candles alike")
+        if indices % candle_count != 0:
+            fail(f"a primitive of {indices} indices is not {candle_count} candles alike")
         streams.append({
             "material": prim["material"],
-            "vertices": vertices // candle_count,
             "indices": indices // candle_count,
             "position": accessor_view(doc, buffer, attrs["POSITION"], "f", 3),
             "normal": accessor_view(doc, buffer, attrs["NORMAL"], "f", 3),
@@ -116,15 +117,16 @@ def split_candles(doc, buffer, chunk_metres, candle_count, out_uri):
             "index": accessor_view(doc, buffer, prim["indices"], "I", 1),
         })
 
-    # Each candle's cube, by the first vertex of its first primitive.
-    first = streams[0]
-    position = first["position"]
-    low = [min(position[a::3]) for a in range(3)]
+    # Each run's cube, by its first index's vertex: the cubes hold (cube, stream) runs.
+    low = [min(min(st["position"][a::3]) for st in streams) for a in range(3)]
     chunks = {}
-    for k in range(candle_count):
-        at = k * first["vertices"] * 3
-        cube = tuple(int((position[at + a] - low[a]) / chunk_metres) for a in range(3))
-        chunks.setdefault(cube, []).append(k)
+    for which, st in enumerate(streams):
+        n = st["indices"]
+        position = st["position"]
+        for k in range(candle_count):
+            at = st["index"][k * n] * 3
+            cube = tuple(int((position[at + a] - low[a]) / chunk_metres) for a in range(3))
+            chunks.setdefault(cube, {}).setdefault(which, []).append(k)
 
     out = bytearray()
     views = []
@@ -146,26 +148,24 @@ def split_candles(doc, buffer, chunk_metres, candle_count, out_uri):
 
     meshes = []
     for cube in sorted(chunks):
-        members = chunks[cube]
         primitives = []
-        for s in streams:
-            v = s["vertices"]
-            n = s["indices"]
+        for which in sorted(chunks[cube]):
+            st = streams[which]
+            n = st["indices"]
             pos = array.array("f")
             nor = array.array("f")
             uvs = array.array("f")
             idx = array.array("I")
-            for place, k in enumerate(members):
-                pos.extend(s["position"][k * v * 3:(k + 1) * v * 3])
-                nor.extend(s["normal"][k * v * 3:(k + 1) * v * 3])
-                uvs.extend(s["uv"][k * v * 2:(k + 1) * v * 2])
-                run = s["index"][k * n:(k + 1) * n]
-                # A candle's indices name its own run of vertices, or they could not
-                # move without its neighbours'.
-                if min(run) < k * v or max(run) >= (k + 1) * v:
-                    fail(f"candle {k} names vertices outside its own")
-                shift = (k - place) * v
-                idx.extend(array.array("I", (i - shift for i in run)))
+            placed = 0
+            for k in chunks[cube][which]:
+                run = st["index"][k * n:(k + 1) * n]
+                first = min(run)
+                last = max(run)
+                pos.extend(st["position"][first * 3:(last + 1) * 3])
+                nor.extend(st["normal"][first * 3:(last + 1) * 3])
+                uvs.extend(st["uv"][first * 2:(last + 1) * 2])
+                idx.extend(array.array("I", (i - first + placed for i in run)))
+                placed += last + 1 - first
             lo = [min(pos[a::3]) for a in range(3)]
             hi = [max(pos[a::3]) for a in range(3)]
             primitives.append({
@@ -173,7 +173,7 @@ def split_candles(doc, buffer, chunk_metres, candle_count, out_uri):
                                "NORMAL": add(nor, 5126, "VEC3"),
                                "TEXCOORD_0": add(uvs, 5126, "VEC2")},
                 "indices": add(idx, 5125, "SCALAR"),
-                "material": s["material"],
+                "material": st["material"],
             })
         name = f"{doc['meshes'][0].get('name', 'candles')}_{cube[0]}_{cube[1]}_{cube[2]}"
         meshes.append({"name": name, "primitives": primitives})
@@ -192,9 +192,21 @@ def split_candles(doc, buffer, chunk_metres, candle_count, out_uri):
     return bytes(out)
 
 
+def decals_out_of_the_rays(doc):
+    """A mesh wholly of blended materials blocks no ray: the palace's dirt, sheets a hair in
+    front of its walls, would otherwise put the walls behind them in shadow."""
+    materials = doc.get("materials", [])
+    for mesh in doc.get("meshes", []):
+        prims = mesh["primitives"]
+        if prims and all(materials[p["material"]].get("alphaMode") == "BLEND" for p in prims
+                         if "material" in p) and all("material" in p for p in prims):
+            mesh["extras"] = {"no_rays": True}
+
+
 def join(palace, candles, palace_dir, candles_dir, flame_luminance):
     """The candles' document into the palace's, whose indices it shifts. Both are changed."""
     strip_lights(palace)
+    decals_out_of_the_rays(palace)
     prefix_uris(palace, palace_dir)
     prefix_uris(candles, candles_dir)
     first_buffer = append(palace, candles, "buffers")
@@ -271,29 +283,42 @@ def main_layout(manifest, root):
 
 
 def split_self_test():
-    """Four candles of two vertices and one triangle each, two cubes: nothing lost."""
+    """Four candles, two with a third vertex, in two cubes: the same triangles in the same places."""
     positions = array.array("f")
-    for x, _z in ((0.5, 0), (3.5, 0), (0.6, 0), (3.6, 0)):
-        positions.extend([x, 0.0, 0.0, x, 1.0, 0.0])
-    normals = array.array("f", [0.0, 0.0, 1.0] * 8)
-    uvs = array.array("f", [0.25, 0.75] * 8)
     index = array.array("I")
-    for k in range(4):
-        index.extend([2 * k, 2 * k + 1, 2 * k])
+    corners = []
+    base = 0
+    for k, (x, extra) in enumerate(((0.5, 1), (3.5, 0), (0.6, 0), (3.6, 1))):
+        vertices = [(x, 0.0), (x, 1.0)] + ([(x, 2.0)] if extra else [])
+        for vx, vy in vertices:
+            positions.extend([vx, vy, 0.0])
+        # A triangle's worth of indices a candle, naming its last vertex.
+        run = [base, base + 1, base + len(vertices) - 1]
+        index.extend(run)
+        corners.extend((round(positions[i * 3], 3), positions[i * 3 + 1]) for i in run)
+        base += len(vertices)
+    count = base
+    normals = array.array("f", [0.0, 0.0, 1.0] * count)
+    uvs = array.array("f", [0.25, 0.75] * count)
     buffer = positions.tobytes() + normals.tobytes() + uvs.tobytes() + index.tobytes()
     lengths = [len(positions.tobytes()), len(normals.tobytes()), len(uvs.tobytes()),
                len(index.tobytes())]
     offsets = [0, lengths[0], lengths[0] + lengths[1], lengths[0] + lengths[1] + lengths[2]]
-    doc = {
-        "nodes": [{"name": "holder", "mesh": 0, "translation": [1.0, 2.0, 3.0]}],
-        "meshes": [{"name": "c", "primitives": [
-            {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 7}]}],
-        "accessors": [{"bufferView": 0, "count": 8}, {"bufferView": 1, "count": 8},
-                      {"bufferView": 2, "count": 8}, {"bufferView": 3, "count": 12}],
-        "bufferViews": [{"buffer": 0, "byteOffset": o, "byteLength": n}
-                        for o, n in zip(offsets, lengths)],
-        "buffers": [{"uri": "c.bin"}],
-    }
+
+    def document():
+        return {
+            "nodes": [{"name": "holder", "mesh": 0, "translation": [1.0, 2.0, 3.0]}],
+            "meshes": [{"name": "c", "primitives": [
+                {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3,
+                 "material": 7}]}],
+            "accessors": [{"bufferView": 0, "count": count}, {"bufferView": 1, "count": count},
+                          {"bufferView": 2, "count": count}, {"bufferView": 3, "count": 12}],
+            "bufferViews": [{"buffer": 0, "byteOffset": o, "byteLength": n}
+                            for o, n in zip(offsets, lengths)],
+            "buffers": [{"uri": "c.bin"}],
+        }
+
+    doc = document()
     out = split_candles(doc, buffer, 2.0, 4, "split.bin")
     assert len(doc["meshes"]) == 2
     assert doc["buffers"] == [{"uri": "split.bin", "byteLength": len(out)}]
@@ -307,35 +332,20 @@ def split_self_test():
         assert prim["material"] == 7
         pos = accessor_view(doc, out, prim["attributes"]["POSITION"], "f", 3)
         idx = accessor_view(doc, out, prim["indices"], "I", 1)
-        assert len(pos) == 12 and len(idx) == 6, "each cube has two candles"
-        assert max(idx) == 3, "indices start again in each mesh"
+        assert len(idx) == 6, "each cube has two candles"
+        assert max(idx) < len(pos) // 3, "indices start again in each mesh"
         accessor = doc["accessors"][prim["attributes"]["POSITION"]]
-        assert accessor["min"][1] == 0.0 and accessor["max"][1] == 1.0
+        assert accessor["min"][1] == 0.0
         for i in idx:
             seen.append((round(pos[i * 3], 3), pos[i * 3 + 1]))
-        assert doc["accessors"][prim["indices"]]["componentType"] == 5125
-    # The same triangles: each candle's corners, by where they are.
-    assert sorted(seen) == sorted((x, y) for x in (0.5, 3.5, 0.6, 3.6)
-                                  for y in (0.0, 1.0, 0.0))
-    # A candle that names another's vertices cannot be moved.
-    index[0] = 7
-    bad = positions.tobytes() + normals.tobytes() + uvs.tobytes() + index.tobytes()
-    doc2 = {
-        "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": [
-            {"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 0}]}],
-        "accessors": [{"bufferView": 0, "count": 8}, {"bufferView": 1, "count": 8},
-                      {"bufferView": 2, "count": 8}, {"bufferView": 3, "count": 12}],
-        "bufferViews": [{"buffer": 0, "byteOffset": o, "byteLength": n}
-                        for o, n in zip(offsets, lengths)],
-        "buffers": [{"uri": "c.bin"}],
-    }
+    assert sorted(seen) == sorted(corners), "the same triangles in the same places"
+    # What is not a run per candle is refused.
     try:
-        split_candles(doc2, bad, 2.0, 4, "split.bin")
+        split_candles(document(), buffer, 2.0, 5, "split.bin")
     except SystemExit as e:
-        assert "outside its own" in str(e)
+        assert "not 5 candles alike" in str(e)
     else:
-        raise AssertionError("a candle naming another's vertices was moved")
+        raise AssertionError("twelve indices split among five candles")
 
 
 def self_test():
@@ -377,6 +387,16 @@ def self_test():
     prim = j["meshes"][1]["primitives"][0]
     assert j["meshes"][1]["extras"] == {"no_rays": True}, "the candles' mesh is out of the rays"
     assert "extras" not in j["meshes"][0], "the palace's meshes are in them"
+    blended = {
+        "materials": [{"alphaMode": "BLEND"}, {}],
+        "meshes": [{"primitives": [{"material": 0}, {"material": 0}]},
+                   {"primitives": [{"material": 0}, {"material": 1}]},
+                   {"primitives": [{}]}],
+    }
+    decals_out_of_the_rays(blended)
+    assert blended["meshes"][0]["extras"] == {"no_rays": True}, "a mesh wholly blended is out"
+    assert "extras" not in blended["meshes"][1], "a mesh partly blended is in"
+    assert "extras" not in blended["meshes"][2], "a mesh of no material is in"
     assert prim["attributes"]["POSITION"] == 2 and prim["indices"] == 3 and prim["material"] == 2
     assert j["nodes"][1].get("extensions") is None, "the palace's light is gone"
     assert j["nodes"][2]["extensions"]["KHR_lights_punctual"]["light"] == 0

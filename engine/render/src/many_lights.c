@@ -457,6 +457,7 @@ NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, boo
     }
     if (m->dirty) {
         NPH_TRY(rebuild(r));
+        r->pending_uploads = 1; // for this frame's passes, not the next's
     }
     if (!production || m->count == 0U || view->disable_many_lights) {
         return NPH_RESULT_OK;

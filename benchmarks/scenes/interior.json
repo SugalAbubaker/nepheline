@@ -22,7 +22,7 @@
     },
     "pack": "interior.npk",
     "scene": "interior.gltf#scene",
-    "ev100": 7.0,
+    "ev100": 4.5,
     "sky_intensity": 0.001,
     "sun_shadows": false,
   "light_near_range": 0.5,

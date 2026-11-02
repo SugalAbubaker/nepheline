@@ -13,13 +13,12 @@ path the engine has can hold them.
 
 - **The light grid** (`docs/render.md` "Lights") takes a view's 4,096 lights, a bit per light and tile: 10,000 would take
   81 MB of masks written every frame, and unlimited lights go to the list every pixel walks.
-- **A ray per light per pixel, or per pixel:** the radiance cache's update traces 57,600 rays in 0.18 ms, 3.2 ns each, so
-  a ray a pixel at 4K is 27 ms against a frame of 6.94. MegaLights, Unreal's answer, takes 5.51 ms on a PS5 at 1080p
-  (Narkowicz & Costa, SIGGRAPH 2025).
+- **A ray per light per pixel:** a shadow ray a pixel at 4K is itself 0.88 ms on the city's street and 3.31 ms on Bistro's
+  (the sun's, measured in the resolve), and a pixel here is reached by hundreds of lights. MegaLights, Unreal's answer,
+  takes 5.51 ms on a PS5 at 1080p (Narkowicz & Costa, SIGGRAPH 2025).
 
-CLAUDE.md §8.6 stage 10 names ReSTIR (Bitterli et al., SIGGRAPH 2020) for many-light sampling, "enabled on the reference
-hardware only within the §10 budget". Its per-pixel shadow ray does not fit that budget, which leaves it to the high-end
-tiers.
+CLAUDE.md §8.6 stage 10 names ReSTIR (Bitterli et al., SIGGRAPH 2020) for many-light sampling. This record gives the lights
+their place in the engine and their smooth light. ADR-0074 adds per-pixel reservoirs on top of it.
 
 ## Decision
 
@@ -44,7 +43,9 @@ tiers.
    candles' 19.5 million triangles would take over a gigabyte of bottom level, and their flames, shells around the lights,
    would stop every shadow ray and count the lights' energy twice.
 7. **The interior's candles are written as one mesh per 4 m cube** (`scripts/interior.py`): the same triangles in the same
-   places, because one mesh of 19.5 million triangles takes the cooker more memory than a 16 GB machine has.
+   places, because one mesh of 19.5 million triangles takes the cooker more memory than a 16 GB machine has. As 56 meshes it
+   cooks in 19 minutes at 4.2 GB. The palace's dirt decals, sheets a hair in front of its walls, stay out of the rays too:
+   as blockers they put the walls behind them in shadow, in hard-edged patches.
 
 ## What it does
 
@@ -77,8 +78,8 @@ the same ones, and a light's record. At 65,536 samples a frame that is at most 4
 
 ## Alternatives
 
-- **ReSTIR DI on the reference hardware:** a shadow ray a pixel, without which its reservoirs carry visibility from nowhere:
-  27 ms at the update's rate. It remains for the high-end tiers, where rays are cheaper.
+- **Per-pixel reservoirs alone, for all of the lights' light:** one light a pixel without a denoiser leaves far diffuse noisy
+  where the cache's is smooth. ADR-0074 measures this, and gives the reservoirs what the cache cannot hold.
 - **ReGIR (Boksansky et al., Ray Tracing Gems II, 2021), a reservoir of lights per world cell, sampled per pixel:** no ray a
   pixel if the cell also holds visibility, but it evaluates a few lights per pixel with a cell's guess at their visibility,
   and is noisy where this is smooth: a far field is smooth, which is what lets a cache hold it.
@@ -92,8 +93,8 @@ the same ones, and a light's record. At 65,536 samples a frame that is at most 4
 
 ## Consequences
 
-- Beyond its near range a many light has no highlight of its own, and takes the cache's few frames to arrive. A flame in a
-  mirror is for the reflections' rays.
+- Beyond its near range a many light has no highlight of its own here, and takes the cache's few frames to arrive. ADR-0074
+  gives it its highlight. A flame in a mirror is for the reflections' rays.
 - Near fields cast no shadows. Within half a metre the contact shadows are what can show them.
 - Blended surfaces do not take the near fields, and the reference renderer draws no many lights: golden images of them
   come from the production path, against the truths above.

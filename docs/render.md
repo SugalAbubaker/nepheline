@@ -2360,7 +2360,7 @@ pixel by a hash of what drew it.
 follow neither their number nor how many are in view: the interior's 10,000 candles, of
 which a pixel at a metre from any is reached by hundreds. The light grid above cannot
 hold them (a view's 4,096 lights, a bit per light and tile), and a ray per light per
-pixel is out of reach: at the update's 3.2 ns a ray, 8.3 million rays are 27 ms.
+pixel is out of reach: a shadow ray a pixel at 4K is itself about 1 to 3 ms.
 
 Each light's reach is split at its near range by a smooth partition of unity, the window
 a range gives (Karis 2013):
