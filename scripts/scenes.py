@@ -22,8 +22,9 @@ every file it takes with its md5: `fetch` downloads them into
 DIR/<name>/assets/<asset>/ (a file already there with its md5 is kept, a
 download that does not match is refused), then lays the scene out with the
 manifest's generator (scripts/landscape.py). A zip source names one archive
-with its md5: `fetch` downloads it into DIR/<name>/, extracts it there once,
-and runs the manifest's generator (scripts/city.py). `cook` runs the cooker on
+with its md5, and a zips source several: `fetch` downloads them into DIR/<name>/,
+extracts each there once, and runs the manifest's generator (scripts/city.py,
+scripts/interior.py). `cook` runs the cooker on
 the manifest's document with the manifest's cooker options (`cook`: `voxels`,
 `hlod` and `normal_y_down`, each nph_cook's flag of that name), packing what it
 cooked; a second cook only redoes what changed (the cooker's settings are in
@@ -127,23 +128,24 @@ def run_generator(m, root, default):
 
 
 def fetch_zip(m, root):
-    src = m["source"]["zip"]
+    source = m["source"]
     path = os.path.join(root, m["name"])
-    archive = os.path.join(path, src["file"])
-    if download(src["url"], archive, src["md5"]):
-        print(f"{m['name']}: {src['file']} ({src['size'] / 1e6:.1f} MB)", flush=True)
-    # The stamp is the last thing written, so an interrupted extraction runs again.
-    stamp = archive + ".extracted"
-    done = ""
-    if os.path.isfile(stamp):
-        with open(stamp, encoding="utf-8") as f:
-            done = f.read()
-    if done != src["md5"]:
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(path)
-        with open(stamp, "w", encoding="utf-8") as f:
-            f.write(src["md5"])
-        print(f"{m['name']}: extracted into {path}", flush=True)
+    for src in source["zips"] if "zips" in source else [source["zip"]]:
+        archive = os.path.join(path, src["file"])
+        if download(src["url"], archive, src["md5"]):
+            print(f"{m['name']}: {src['file']} ({src['size'] / 1e6:.1f} MB)", flush=True)
+        # The stamp is the last thing written, so an interrupted extraction runs again.
+        stamp = archive + ".extracted"
+        done = ""
+        if os.path.isfile(stamp):
+            with open(stamp, encoding="utf-8") as f:
+                done = f.read()
+        if done != src["md5"]:
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(path)
+            with open(stamp, "w", encoding="utf-8") as f:
+                f.write(src["md5"])
+            print(f"{m['name']}: extracted into {path}", flush=True)
     run_generator(m, root, "scripts/city.py")
 
 
@@ -152,7 +154,7 @@ def fetch(m, root):
     if "polyhaven" in src:
         fetch_polyhaven(m, root)
         return
-    if "zip" in src:
+    if "zip" in src or "zips" in src:
         fetch_zip(m, root)
         return
     path = os.path.join(root, m["name"])

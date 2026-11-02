@@ -43,5 +43,9 @@ if(NPH_BUILD_TESTS AND Python3_Interpreter_FOUND)
     # by byte, read, placed, and written as glTF the same way twice.
     add_test(NAME scripts.city
              COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/scripts/city.py" --self-test)
-    set_tests_properties(scripts.landscape scripts.city PROPERTIES LABELS "integration")
+    # The interior's two documents joined (scripts/interior.py): two small ones,
+    # every index shifted, the same bytes twice.
+    add_test(NAME scripts.interior
+             COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/scripts/interior.py" --self-test)
+    set_tests_properties(scripts.landscape scripts.city scripts.interior PROPERTIES LABELS "integration")
 endif()
