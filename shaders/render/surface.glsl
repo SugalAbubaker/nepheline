@@ -854,6 +854,13 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
             radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
         }
 #endif
+#ifdef NPH_SURFACE_GI_FAR_SPECULAR
+        // So with a blended surface, which no reservoir holds for.
+        if (gi && view.v.many != 0ul) {
+            const vec4 far_cell = NPH_SURFACE_GI;
+            radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
+        }
+#endif
         // Fdez-Agüera 2019: single- and multiple-scattering specular, and
         // the diffuse energy that remains.
         const vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
@@ -929,7 +936,10 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
 #endif
 #ifdef NPH_SURFACE_GRID_LIGHTS
 #ifdef NPH_SURFACE_MANY_ACTIVE
-    vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+    vec3 direct = vec3(0.0);
+    if (!NPH_SURFACE_MANY_ACTIVE || ManyViewRef(view.v.many).m.no_grid == 0u) {
+        direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+    }
     if (NPH_SURFACE_MANY_ACTIVE) {
         direct += nph_lit_many(lp, ManyViewRef(view.v.many));
         if (ManyViewRef(view.v.many).m.restir != uint(NPH_RENDER_MANY_RESTIR_OFF)) {

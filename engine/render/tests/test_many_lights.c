@@ -369,6 +369,131 @@ NTEST_F(Many, the_far_fields_arrive_shadowed_through_the_cache)
     test_box_release(f, target);
 }
 
+// A blended surface takes the cache's light as the resolve's surfaces do. A sheet half covering a
+// black ground, in a scene lit only by the far fields, shows half of what it would show solid: with
+// no light of its own otherwise it would draw black (a palace's dirt did).
+static void blended_far_fields(RenderFixture *f, bool other_light)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->gi.supported) {
+        NTEST_SKIP("no radiance cache on this device (ray queries)");
+    }
+    // A light of no account makes the frame's light more than the cache's, which takes the
+    // full shading.
+    NphRenderLight light = NPH_RENDER_LIGHT_NULL;
+    if (other_light) {
+        NphRenderLightDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+        ld.color = nph_vec3(1.0F, 1.0F, 1.0F);
+        ld.intensity = 1e-6F;
+        ld.range = 1.0F;
+        ld.position = nph_dvec3(0.0, 50.0, 0.0);
+        NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    }
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMesh cube = test_cube_mesh(f);
+    test_box_ground(f, &scene, cube, test_grey(f, 0.0F));
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(1.0F, 1.0F, 1.0F, 0.5F);
+    md.roughness = 1.0F;
+    // A rough metal, as the palace's dirt is by glTF's default, all of whose light is its specular:
+    // what the cell gives it as if arriving evenly. The cache-only shading takes a white diffuse
+    // surface, which comes to the same.
+    md.metallic = other_light ? 1.0F : 0.0F;
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    NphRenderMaterial sheet = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &sheet), NPH_RESULT_OK);
+    // A hair above the ground, as the palace's decals are in front of its walls: the cells it
+    // reads are the ground's, which the rays find, and no ray stops at it.
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_cube(nph_allocator_system(), 1.0F, &data),
+                        NPH_RESULT_OK);
+    NphRenderSubmesh sub;
+    NphRenderMeshDesc mesh_desc;
+    nph_render_mesh_data_desc(&data, "the sheet", &sub, &mesh_desc);
+    mesh_desc.no_rays = 1;
+    NphRenderMesh sheet_mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &mesh_desc, &sheet_mesh),
+                        NPH_RESULT_OK);
+    nph_render_mesh_data_free(&data);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = sheet_mesh;
+    id.materials = &sheet;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(nph_dvec3(0.0, 0.002, 0.0), nph_quat_identity(),
+                                                 nph_vec3(30.0F, 0.002F, 30.0F));
+    NphRenderInstance sheet_instance = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &sheet_instance),
+                        NPH_RESULT_OK);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 7.0F, 7.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static NphVec3 at[FAR_LIGHTS];
+    scatter(at, FAR_LIGHTS, nph_vec3(-5.0F, 3.0F, -5.0F), nph_vec3(5.0F, 6.0F, 5.0F));
+    static NphRenderManyLight many[FAR_LIGHTS];
+    for (u32 i = 0; i < FAR_LIGHTS; ++i) {
+        const NphRenderManyLightDesc d = many_light(at[i], FAR_INTENSITY, FAR_NEAR);
+        NTEST_ASSERT_EQ_INT(nph_render_many_light_create(f->renderer, &d, &many[i]), NPH_RESULT_OK);
+    }
+    NphRenderView v;
+    lit_view(&v, camera);
+    v.gi = 1;
+    for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    static u8 image[PIXELS];
+    (void)test_box_render(f, &v, target, image);
+    // The diffuse light of a white surface, E / pi, its share of what scatters and the single
+    // scattering's lobe aside (a few per cent at this roughness), under an alpha of a half.
+    f64 got = 0.0;
+    f64 want = 0.0;
+    u32 compared = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = test_box_pixel_ray(&scene, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(&scene, scene.eye, d, 0.0F, &t, &n) != 0) {
+            continue;
+        }
+        const NphVec3 x = nph_vec3_add(scene.eye, nph_vec3_scale(d, t));
+        const f32 truth = far_irradiance(&scene, at, FAR_LIGHTS, FAR_INTENSITY, FAR_NEAR, x, n) *
+                          (1.0F / 3.14159265F) * EXPOSURE * 0.5F;
+        if (truth >= 0.01F) {
+            got += (f64)test_box_linear(image, i);
+            want += (f64)truth;
+            compared += 1U;
+        }
+    }
+    NTEST_LOG("%u pixels, %s: drew %.1f %% of what the far fields give half covered", compared,
+              other_light ? "the full shading" : "the cache alone", 100.0 * got / want);
+    NTEST_EXPECT_EQ_INT(f->renderer->many.frame_no_other_light ? 1 : 0, other_light ? 0 : 1);
+    NTEST_ASSERT_GT_UINT(compared, SIZE * SIZE / 4U);
+    NTEST_EXPECT_TRUE(got > 0.85 * want);
+    NTEST_EXPECT_TRUE(got < 1.15 * want);
+    nph_render_instance_destroy(f->renderer, sheet_instance);
+    for (u32 i = 0; i < FAR_LIGHTS; ++i) {
+        nph_render_many_light_destroy(f->renderer, many[i]);
+    }
+    test_box_release(f, target);
+    if (other_light) {
+        nph_render_light_destroy(f->renderer, light);
+    }
+}
+
+NTEST_F(Many, a_blended_surface_takes_the_far_fields)
+{
+    blended_far_fields(f, false);
+}
+
+NTEST_F(Many, a_blended_surface_takes_them_with_other_light_too)
+{
+    blended_far_fields(f, true);
+}
+
 // The partition of unity: near and far fields together are the light. Lights low over a
 // rough ground, so that much of what a pixel gets is from within their near ranges and
 // much from beyond, against the same lights as ordinary ones of unlimited range. Nothing

@@ -84,12 +84,14 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
 {
     RenderAo *a = &r->ao;
     a->frame_active = 0;
-    // It darkens only the environment's light: what shades with that light
-    // shows it where there is any, and the occlusion debug view always.
-    const bool environment = !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE;
+    // It darkens only the indirect light, the environment's and the radiance
+    // cache's: what shades with that light shows it where there is any, and the
+    // occlusion debug view always.
+    const bool indirect = (!view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE) ||
+                          render_gi_frame_wanted(r, view, production);
     const bool shown = view->debug_view == NPH_RENDER_VIEW_OCCLUSION ||
-                       (environment && (view->debug_view == NPH_RENDER_VIEW_LIT ||
-                                        view->debug_view == NPH_RENDER_VIEW_INDIRECT));
+                       (indirect && (view->debug_view == NPH_RENDER_VIEW_LIT ||
+                                     view->debug_view == NPH_RENDER_VIEW_INDIRECT));
     if (!production || !(view->ao_radius > 0.0F) || !shown) {
         return false;
     }

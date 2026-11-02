@@ -2042,13 +2042,14 @@ frame: 4.26), a turning camera 0.59 (4.34), a box moving behind a still one
 ### Ambient occlusion
 
 A production view with `NphRenderView.ao_radius` above zero darkens the
-environment's light by ground-truth ambient occlusion: the cosine-weighted
+indirect light, the environment's and the radiance cache's, by ground-truth
+ambient occlusion: the cosine-weighted
 share of each pixel's hemisphere that no surface within the radius covers
 (Jimenez, Wu, Pesce & Jarabo, "Practical Realtime Strategies for Accurate
 Indirect Occlusion", ATVI-TR-16-01, 2016;
 [ADR-0038](adr/0038-ambient-occlusion.md)). The occlusion is made for lit
-views and the indirect debug view while the environment lights the view
-(not with `disable_ibl` or no environment), and for the occlusion debug
+views and the indirect debug view while the environment or the cache lights
+the view (ADR-0075), and for the occlusion debug
 view (the statistic `ao`); the reference renderer has none. The runtime
 sets the radius from `r.ao` (0.5 m).
 
@@ -2434,7 +2435,10 @@ with `NphRenderMeshDesc.no_rays`, which a cooked mesh takes from its glTF extras
 lights do not, and it casts no shadows in the far fields.
 
 The reference renderer does not draw them, and blended surfaces do not take the near
-fields. Without a radiance cache only the near fields are lit, which is logged once.
+fields. They take the far fields from the cache, as a frame's blended surfaces do its other
+indirect light (`forward_frag.glsl` `k_gi`), and where the cache is a frame's only light, by a
+pipeline that shades from it alone (`k_cache_only`; ADR-0075). Without a radiance cache only
+the near fields are lit, which is logged once.
 
 ## Image-based lighting
 

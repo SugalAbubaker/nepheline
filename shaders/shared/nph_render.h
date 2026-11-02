@@ -299,7 +299,7 @@ NPH_SHARED_STRUCT(NphRenderManyView)
     u32 width;
     u32 frame;
     u32 tiles_x;
-    u32 pad;
+    u32 no_grid; // the frame has no other light: nothing in the light grid to walk
     // The tile lists: uvec2[NPH_RENDER_MANY_TILE_LIGHTS][tiles]: a light and its probability.
     u64 tiles;
     NphMat4 reproject; // NphVisViewData.reproject

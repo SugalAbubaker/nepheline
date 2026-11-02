@@ -80,6 +80,7 @@ supersedes it and both link to each other.
 | [0072](0072-world-partition-in-the-runtime.md) | The world partition in the engine's runtime | Accepted |
 | [0073](0073-many-lights.md) | Many lights, near and far | Accepted |
 | [0074](0074-restir.md) | Per-pixel reservoirs for the many lights' far fields | Accepted |
+| [0075](0075-light-only-from-the-cache.md) | Light only from the cache: occlusion, blended surfaces, and a night's sky | Accepted |
 
 ## Template
 

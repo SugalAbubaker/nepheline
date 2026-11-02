@@ -585,6 +585,7 @@ typedef struct RenderMany {
     u32 reservoir_at; // this frame's of the two
     b32 reservoirs_clear;
     b32 frame_restir;
+    b32 frame_no_other_light;        // this frame has no sun, no sky and no other light
     NphGpuRgBuffer frame_buffers[2]; // this frame's, the last's
     NphGpuBuffer tiles;
     u32 tiles_x;
@@ -790,7 +791,8 @@ typedef struct RenderVis {
     NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
     // Blended forward pipelines into hdr_format (null when it is
     // RENDER_HDR_FORMAT): [ray-traced shadows][the virtual shadow map][cull].
-    NphGpuPipeline blend_pipelines[2][2][RENDER_CULL_COUNT];
+    // [gi: 0 none, 1 the cache's too, 2 the cache's only][rt][vsm][cull]
+    NphGpuPipeline blend_pipelines[3][2][2][RENDER_CULL_COUNT];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2];   // [opaque, masked]: mesh or vertex pipelines
@@ -1289,7 +1291,8 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // the fragment stage testing the visibility buffer's depth itself
 // (forward_frag.glsl k_vis_depth).
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, bool vis_depth, NphGpuPipeline *out);
+                                  bool ray_query, bool vsm, bool vis_depth, u32 gi,
+                                  NphGpuPipeline *out);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);

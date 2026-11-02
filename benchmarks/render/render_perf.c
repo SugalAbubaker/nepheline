@@ -465,6 +465,7 @@ typedef struct RefManifest {
     f32 sky_intensity; // the default sky's (daylight next to a 30,000 lux sun) scale
     bool sun_shadows;  // the scene's first directional light casts shadows
     // Its point lights as many lights (ADR-0073), this near range, room for so many.
+    bool no_ibl; // "ibl": false: its sky is only a background, as a night scene's is
     f32 light_near_range;
     u32 many_lights;
     // `lists`: what its views need of every list that can drop work (--lists'
@@ -1884,6 +1885,7 @@ static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
         (void)snprintf(m->pack, sizeof m->pack, "%s/%s", scenes, pack);
         m->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
         m->sky_intensity = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
+        m->no_ibl = !nph_json_get_bool(root, NPH_STR("ibl"), true);
         m->light_near_range = (f32)nph_json_get_f64(root, NPH_STR("light_near_range"), 0.0);
         m->many_lights = (u32)nph_json_get_f64(root, NPH_STR("many_lights"), 0.0);
         m->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
@@ -2292,6 +2294,7 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         view.ev100 += g_truth_ev;
     }
     view.many_restir = g_restir;
+    view.disable_ibl = m->no_ibl ? 1 : 0;
     if (rv->walk != 0.0F) {
         // Along the view, level, as the synthetic walk.
         const NphVec3 f = nph_quat_rotate(camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));

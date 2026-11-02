@@ -568,11 +568,14 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count, N
     const bool production = r->frame_production != 0;
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
+    // Blended surfaces where the frame's only light is the cache's (the debug views want the rest).
+    const bool cache_only = r->many.frame_no_other_light && !r->vis.debug_view;
+    const u32 gi = r->gi.frame_active != 0 ? (cache_only ? 2U : 1U) : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
         const NphGpuPipeline p = only.value != 0U ? only
                                  : production && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
-                                     ? r->vis.blend_pipelines[rt][vsm][c->cull]
+                                     ? r->vis.blend_pipelines[gi][rt][vsm][c->cull]
                                      : (rt != 0U ? r->forward_rt[c->alpha_mode][c->cull]
                                                  : r->forward[c->alpha_mode][c->cull]);
         if (p.value != bound->value) {
@@ -1006,6 +1009,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
+    r->many.frame_no_other_light = r->many.frame_active && stats.gi && vd->flags == 0U &&
+                                   nph_handle_pool_live(&r->light_pool) == 0U;
 
     memset(&r->push, 0, sizeof r->push);
     r->push.view_address = address + r->layout.view_offset;

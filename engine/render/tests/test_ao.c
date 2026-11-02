@@ -246,9 +246,10 @@ NTEST_F(Ao, the_diffuse_light_takes_back_what_the_occluders_reflect)
     nph_render_texture_destroy(f->renderer, env);
 }
 
-// It darkens only the environment's light: lit by a sun alone, a view
-// makes no occlusion and shows the frame it shows without; lit by the
-// environment too, it is nowhere brighter and darker along the box's foot.
+// It darkens only the indirect light (here the environment's): lit by a sun
+// alone, a view makes no occlusion and shows the frame it shows without; lit
+// by the environment too, it is nowhere brighter and darker along the box's
+// foot.
 NTEST_F(Ao, it_darkens_only_the_environments_light)
 {
     REQUIRE_PRODUCTION(f);
@@ -297,6 +298,25 @@ NTEST_F(Ao, it_darkens_only_the_environments_light)
 // ---------------------------------------------------------------------------
 // Which frames have it
 // ---------------------------------------------------------------------------
+
+// The radiance cache's light is indirect light too: with no environment at all, a view that has
+// the cache has the occlusion.
+NTEST_F(Ao, a_view_with_the_radiance_cache_has_it)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->gi.supported) {
+        NTEST_SKIP("no radiance cache on this device (ray queries)");
+    }
+    NphRenderView v;
+    ao_view(&v, test_camera(), NPH_RENDER_VIEW_LIT, RADIUS);
+    v.disable_ibl = 1;
+    v.gi = 0;
+    NTEST_EXPECT_FALSE(test_render_frame(f, &v, f->target).ao);
+    v.gi = 1;
+    NTEST_EXPECT_TRUE(test_render_frame(f, &v, f->target).ao);
+    v.debug_view = NPH_RENDER_VIEW_NORMAL;
+    NTEST_EXPECT_FALSE(test_render_frame(f, &v, f->target).ao);
+}
 
 // The production path makes the occlusion for the views that show the
 // environment's light, while there is an environment, and for its own

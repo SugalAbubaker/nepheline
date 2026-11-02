@@ -262,7 +262,8 @@ of aggregate geometry, ADR-0061, which the landscape's foliage asks for;
 `hlod` for the cells and their proxies; `normal_y_down` for DirectX's normal
 maps), its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
-own sun), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
+own sun; `"ibl": false` makes it a background only, as a night's is,
+ADR-0075), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
 and a game's would), and its views (the scene's own camera, or an eye and
 a target with a field of view; still, or moving: `walk` metres a second
 along the view, level, and `turn` degrees a second about the world's up
