@@ -79,8 +79,8 @@ void render_ao_destroy(NphRenderer *r)
     memset(a, 0, sizeof *a);
 }
 
-bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *proj,
-                           u32 width, u32 height, bool production)
+bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *view_m,
+                           const NphMat4 *proj, u32 width, u32 height, bool production)
 {
     RenderAo *a = &r->ao;
     a->frame_active = 0;
@@ -118,6 +118,23 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
     p->point_sampler = nph_gpu_sampler_index(
         r->dev, r->material_samplers[NPH_RENDER_WRAP_CLAMP][NPH_RENDER_WRAP_CLAMP][1]);
     p->linear_sampler = nph_gpu_sampler_index(r->dev, r->clamp_sampler);
+    // The contact shadows march towards the sun of the shadow map they refine (ADR-0076).
+    if (r->vsm.frame_active && view->contact_shadow > 0.0F) {
+        const NphVec3 d = nph_vec3_normalize(r->lights[r->vsm.sun_slot].desc.direction);
+        const NphVec3 c0 = nph_vec3(view_m->c[0].x, view_m->c[0].y, view_m->c[0].z);
+        const NphVec3 c1 = nph_vec3(view_m->c[1].x, view_m->c[1].y, view_m->c[1].z);
+        const NphVec3 c2 = nph_vec3(view_m->c[2].x, view_m->c[2].y, view_m->c[2].z);
+        const NphVec3 to_sun =
+            nph_vec3_add(nph_vec3_add(nph_vec3_scale(c0, -d.x), nph_vec3_scale(c1, -d.y)),
+                         nph_vec3_scale(c2, -d.z));
+        // A pixel at a distance of one metre is unproject.y across, as the map's texels are
+        // matched to. Half a point's distance is as far as a march may go: it stays in front of
+        // the camera, by which ao.comp need not ask.
+        p->sun = nph_vec4(to_sun.x, to_sun.y, to_sun.z,
+                          nph_f32_min(view->contact_shadow * nph_f32_abs(p->unproject.y), 0.5F));
+        p->sun_screen = nph_vec2((to_sun.x + p->unproject.z * to_sun.z) * p->project.x,
+                                 (to_sun.y + p->unproject.w * to_sun.z) * p->project.y);
+    }
     a->frame_active = 1;
     return true;
 }

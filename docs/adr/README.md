@@ -81,6 +81,7 @@ supersedes it and both link to each other.
 | [0073](0073-many-lights.md) | Many lights, near and far | Accepted |
 | [0074](0074-restir.md) | Per-pixel reservoirs for the many lights' far fields | Accepted |
 | [0075](0075-light-only-from-the-cache.md) | Light only from the cache: occlusion, blended surfaces, and a night's sky | Accepted |
+| [0076](0076-contact-shadows.md) | Contact shadows: a march in the occlusion's pass, its answer in a sign | Accepted |
 
 ## Template
 

@@ -551,6 +551,11 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
     u32 noise;          // the slices' rotation this frame (0 to 5)
     u32 point_sampler;  // nearest, clamped to the edge
     u32 linear_sampler; // bilinear, clamped to the edge
+    // The contact shadows' march: towards the sun in view space, and its length per metre of a
+    // point's view distance (w 0, and xyz 0: none); and what a step does on screen (ao.comp
+    // sun_blocked).
+    NphVec4 sun;
+    NphVec2 sun_screen;
 };
 
 // ---------------------------------------------------------------------------

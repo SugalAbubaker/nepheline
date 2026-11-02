@@ -50,7 +50,8 @@ shared AoTexel s_texels[AO_SPAN * AO_SPAN];
 vec3 texel_at(ivec2 local)
 {
     const uint w = s_texels[(local.y + AO_APRON) * AO_SPAN + local.x + AO_APRON].packed;
-    return vec3(float(w & 0xFFu), float((w >> 8u) & 0xFFu), unpackHalf2x16(w).y);
+    // The distance's sign is the march's (ao.comp), which the sums have no use for.
+    return vec3(float(w & 0xFFu), float((w >> 8u) & 0xFFu), abs(unpackHalf2x16(w).y));
 }
 
 // A tap's weight in the window: the outer rows and columns count half.
@@ -163,6 +164,12 @@ void main()
         // the surface along its normal.)
         const float ao =
             open_sky[k] ? 1.0 : (open[k] > 0.0 ? clamp(visible[k] / open[k], 0.0, 1.0) : 1.0);
-        imageStore(nph_images_2d[pc.out_index], t, vec4(ao, 0.0, 0.0, 0.0));
+        // The march's answer, unfiltered: the temporal resolve averages its jitter. It carries
+        // over in the occlusion's sign, of an occlusion that is never quite 0.
+        const ivec2 l = block + ivec2(k & 1, k >> 1);
+        const bool blocked =
+            (s_texels[(l.y + AO_APRON) * AO_SPAN + l.x + AO_APRON].packed & 0x80000000u) != 0u;
+        imageStore(nph_images_2d[pc.out_index], t,
+                   vec4(blocked ? -max(ao, 1.0 / 1024.0) : ao, 0.0, 0.0, 0.0));
     }
 }

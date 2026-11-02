@@ -172,6 +172,7 @@ Settings are cvars. The engine's:
 | `r.motion_blur` | true | motion blur over the camera's shutter time (its `shutter`, 0 by default; saved) |
 | `r.dof` | true | depth of field through the camera's lens (its `aperture`, 0 by default: a pinhole; saved) |
 | `r.ao` | 0.5 | the production path's ambient occlusion: the radius in metres within which surfaces occlude the environment's light, 0 to 8 (0: none; saved) |
+| `r.contact_shadow` | 24 | the production path's contact shadows: how far a pixel looks towards the sun through the depths, in pixels' widths at its distance, 0 to 256 (0: not at all; render.md "Contact shadows"; saved) |
 | `r.gi` | true | the production path's global illumination: the diffuse light from the radiance cache, where the device has ray queries (saved) |
 | `r.many_restir` | 1 | what of the many lights' far fields per-pixel reservoirs take (render.md "Many lights"): 0 none, 1 the highlights, 2 all; where the device has ray queries (saved) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |

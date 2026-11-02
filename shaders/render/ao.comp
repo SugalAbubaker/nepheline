@@ -28,6 +28,12 @@
 // directions; each pixel gives it with the share it found, and the denoise
 // divides the one's sum by the other's, so that an open surface comes out
 // open even where a window lacks some directions (an edge).
+//
+// Where the frame has the sun's shadow map, the same pass marches each pixel a short way
+// towards the sun through the depths (docs/render.md "Contact shadows"; ADR-0076): what the map's
+// texels are too coarse for, or its bias lifts off the surface. It has the point, its normal and
+// the depths in hand, and the answer goes in the sign of the pixel's distance, then of the
+// occlusion the denoise writes, a bit that the resolve reads with it: no memory and no fetch.
 #version 460
 #include "ao_common.glsl"
 
@@ -42,6 +48,13 @@ layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
 // twice as far mip 2, and so on: a far step's texel is an eighth of its
 // length, as at half resolution, and the nearer steps read the frame's own.
 #define AO_MIP_SHIFT 4
+// Samples a pixel's march takes towards the sun, closer together near it.
+#define AO_CONTACT_STEPS 4
+// A surface counts as blocking the sun only within this share of the march's length in front of
+// the marched point: one further off is something else in front of it, not its occluder.
+#define AO_CONTACT_THICKNESS 0.6
+// What a depth must exceed the marched point's by, as a share of it, past a float's rounding.
+#define AO_CONTACT_SLACK 1.0001
 
 // The 4 x 4 ordered dither (Bayer) at (x, y) mod 4, so that neighbours
 // take far-apart directions:
@@ -106,12 +119,55 @@ float fast_acos(float x)
 
 // For the denoise (ao_denoise.comp): the slice's share of the hemisphere
 // left visible and its share when open, each in [0, 2) as 8 bits, and the
-// distance as a half float.
-void store(ivec2 t, float visible, float open, float dist)
+// distance as a half float, negative where the march found the sun blocked.
+void store(ivec2 t, float visible, float open, float dist, bool blocked)
 {
     const uint shares = packUnorm4x8(vec4(0.5 * visible, 0.5 * open, 0.0, 0.0)) & 0xFFFFu;
     const uint distance = packHalf2x16(vec2(0.0, min(dist, NPH_AO_HALF_MAX))) & 0xFFFF0000u;
-    imageStore(nph_uimages_2d[pc.raw_index], t, uvec4(shares | distance, 0u, 0u, 0u));
+    const uint sign_bit = blocked ? 0x80000000u : 0u;
+    imageStore(nph_uimages_2d[pc.raw_index], t, uvec4(shares | distance | sign_bit, 0u, 0u, 0u));
+}
+
+// Whether a surface the depths show stands between the point under screen position `c`, of
+// reverse-Z depth `depth`, and the sun, within the march's length. `gradient` is the point's
+// plane's depth a pixel along each axis (ao_gradient), `jitter` in [0, 1).
+//
+// The march's length is w times the point's distance D (NphRenderAoPush.sun), so a step of u times
+// D towards the sun L takes the point from D (r, -1) (ao_position) to D (r + u L.xy, -1 + u L.z):
+// a = 1 - u L.z times as far along the view (at least a half: render_ao_frame_begin bounds it), at
+// screen position (c + u sun_screen) / a, with sun_screen = (L.xy + unproject.zw L.z) project, and
+// depth / a, which past the near plane no depth exceeds. None of it needs D.
+//
+// A point marched off a plane towards the sun lies on the camera's side of it, so the plane's own
+// depth under it is behind it, exactly; a sample reads the plane at a pixel's centre instead, up
+// to half a pixel off on each axis, which at a grazing angle is a long way in metres but in depth,
+// which is affine across a plane, is exactly `rounding`.
+bool sun_blocked(vec2 c, float depth, vec2 gradient, float jitter)
+{
+    const uvec2 size = uvec2(pc.width, pc.height);
+    const float rounding = 0.5 * (abs(gradient.x) + abs(gradient.y));
+    const float marched = depth * AO_CONTACT_SLACK;
+    const float thickness = AO_CONTACT_THICKNESS * pc.sun.w;
+    for (int i = 1; i <= AO_CONTACT_STEPS; ++i) {
+        // (A first step shorter than a pixel would read the point's own texel: it starts further.)
+        const float f = (float(i) + jitter) / float(AO_CONTACT_STEPS + 1);
+        const float u = pc.sun.w * f * f;
+        const float a = 1.0 - u * pc.sun.z;
+        const float inv = 1.0 / a;
+        // (Truncating only moves what lies under a pixel off the image onto its edge.)
+        const uvec2 at = uvec2(ivec2((c + u * pc.sun_screen) * inv));
+        // Off the image nothing is known.
+        if (any(greaterThanEqual(at, size))) {
+            return false;
+        }
+        const float d = texelFetch(nph_textures_2d[pc.depths_index], ivec2(at), 0).r;
+        // In front of the marched point, by more than the rounding and by no more than the
+        // thickness: a D - thickness D < znear / d, and znear / D is the point's depth.
+        if (d > marched * inv + rounding && (a - thickness) * d < depth) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void main()
@@ -132,7 +188,7 @@ void main()
     // A point whose radius covers under a pixel sees nothing occlude it.
     const float radius_px = min(pc.radius_pixels / dist, pc.max_radius);
     if (dist >= NPH_RENDER_AO_SKY || radius_px < 1.0) {
-        store(t, 1.0, 1.0, dist);
+        store(t, 1.0, 1.0, dist, false);
         return;
     }
     // The point is dist times its ray rc (ao_position); v, the view vector.
@@ -140,10 +196,9 @@ void main()
     const vec3 rc = vec3(pc.unproject.xy * c + pc.unproject.zw, -1.0);
     const float inv_rc_length = inversesqrt(dot(rc, rc));
     const vec3 v = -rc * inv_rc_length;
-    const vec3 n = -normalize(ao_plane(
-        t, depth,
-        ao_gradient(t, depth, depth_at(l - ivec2(1, 0)), depth_at(l + ivec2(1, 0)),
-                    depth_at(l - ivec2(0, 1)), depth_at(l + ivec2(0, 1)))));
+    const vec2 gradient = ao_gradient(t, depth, depth_at(l - ivec2(1, 0)), depth_at(l + ivec2(1, 0)),
+                                      depth_at(l - ivec2(0, 1)), depth_at(l + ivec2(0, 1)));
+    const vec3 n = -normalize(ao_plane(t, depth, gradient));
 
     // The slice: a direction at angle phi around the view vector, the angles
     // spread evenly as Eq. 8 integrates over them (even screen angles would
@@ -235,5 +290,7 @@ void main()
     const float th1 = g + min(fast_acos(clamp(h1, -1.0, 1.0)) - g, 0.5 * NPH_PI);
     const float arc = 0.25 * (-cos(2.0 * th0 - g) + cos_g + 2.0 * th0 * sin_g) +
                       0.25 * (-cos(2.0 * th1 - g) + cos_g + 2.0 * th1 * sin_g);
-    store(t, max(np_length * arc, 0.0), np_length * (cos_g + g * sin_g), dist);
+    // Facing away the sun does not reach it anyway; with no sun, this is 0.
+    const bool blocked = dot(n, pc.sun.xyz) > 0.0 && sun_blocked(c, depth, gradient, jitter);
+    store(t, max(np_length * arc, 0.0), np_length * (cos_g + g * sin_g), dist, blocked);
 }

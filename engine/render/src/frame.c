@@ -152,6 +152,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
     view->lod_error = 1.0F;
     view->many_restir = NPH_RENDER_RESTIR_SPECULAR;
+    view->contact_shadow = 24.0F;
 }
 
 // ---------------------------------------------------------------------------
@@ -824,7 +825,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         !(view->aperture >= 0.0F) || !nph_f32_is_finite(view->aperture) ||
         !(view->sensor_height >= 0.0F) || !nph_f32_is_finite(view->sensor_height) ||
         !nph_f32_is_finite(view->lens_offset.x) || !nph_f32_is_finite(view->lens_offset.y) ||
-        !(view->ao_radius >= 0.0F) || !nph_f32_is_finite(view->ao_radius)) {
+        !(view->ao_radius >= 0.0F) || !nph_f32_is_finite(view->ao_radius) ||
+        !(view->contact_shadow >= 0.0F) || !nph_f32_is_finite(view->contact_shadow)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // A lens (an aperture, or a point off its centre) focuses beyond its
@@ -939,7 +941,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     stats.dof = dof ? 1 : 0;
     // Ambient occlusion on the production path (ao.c), through this
     // frame's projection.
-    stats.ao = render_ao_frame_begin(r, view, &proj, width, height, production) ? 1 : 0;
+    stats.ao = render_ao_frame_begin(r, view, &view_m, &proj, width, height, production) ? 1 : 0;
     // Global illumination on the production path (gi.c), whose rays leave
     // the ambient occlusion's range to it.
     stats.gi = render_gi_frame_begin(r, view, width, height, production) ? 1 : 0;
