@@ -368,10 +368,14 @@ static NphResult upload_stream(NphRenderer *r, const void *data, u64 size, const
     if (padded == size) {
         return nph_gpu_upload_buffer(r->dev, *out, 0U, data, size);
     }
-    NPH_TRY(nph_gpu_upload_buffer(r->dev, *out, 0U, data, size - size % 4U));
+    // Under four bytes (a mesh of one triangle) there are no whole words to send first.
+    const u64 whole = size - size % 4U;
+    if (whole != 0U) {
+        NPH_TRY(nph_gpu_upload_buffer(r->dev, *out, 0U, data, whole));
+    }
     u8 tail[4] = {0U, 0U, 0U, 0U};
-    memcpy(tail, (const u8 *)data + (size - size % 4U), (size_t)(size % 4U));
-    return nph_gpu_upload_buffer(r->dev, *out, size - size % 4U, tail, 4U);
+    memcpy(tail, (const u8 *)data + whole, (size_t)(size % 4U));
+    return nph_gpu_upload_buffer(r->dev, *out, whole, tail, 4U);
 }
 
 // The positions the GPU sees: dequantised exactly as vis_position does.

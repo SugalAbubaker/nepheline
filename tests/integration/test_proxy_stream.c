@@ -1683,7 +1683,8 @@ typedef struct EngineWorld {
 // camera at `eye` looking along -z with a vertical field of `yfov`. NULL where there
 // is no device for it.
 static NphEngine *engine_open(EngineWorld *w, const char *pack, const char *const *settings,
-                              u32 setting_count, NphDVec3 eye, f32 yfov, const char *scene)
+                              u32 setting_count, NphDVec3 eye, f32 yfov, const char *scene,
+                              f32 light_near_range)
 {
     memset(w, 0, sizeof *w);
     nph_debug_allocator_init(&w->da, nph_allocator_system());
@@ -1715,6 +1716,7 @@ static NphEngine *engine_open(EngineWorld *w, const char *pack, const char *cons
     id.loader = nph_engine_loader(e);
     id.scene = nph_guid_from_cstr(scene);
     id.root_transform = nph_local_transform_identity();
+    id.light_near_range = light_near_range;
     NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&id, NULL, NULL), NPH_RESULT_OK);
     const NphRuntimeComponents *ids = nph_engine_components(e);
     const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
@@ -1769,7 +1771,7 @@ NTEST(WorldPartition, the_engine_runs_the_texture_stream_its_budget_asks_for)
     EngineWorld w;
     const char *const budget[3] = {"r.pipeline=1", "r.taa=false", "r.texture_budget_mb=64"};
     NphEngine *e =
-        engine_open(&w, pack, budget, 3U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene");
+        engine_open(&w, pack, budget, 3U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene", 0.0F);
     if (e == NULL) {
         NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
         test_temp_dir_remove(&dir);
@@ -1786,10 +1788,92 @@ NTEST(WorldPartition, the_engine_runs_the_texture_stream_its_budget_asks_for)
     engine_close(&w);
 
     const char *const none[2] = {"r.pipeline=1", "r.taa=false"};
-    e = engine_open(&w, pack, none, 2U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene");
+    e = engine_open(&w, pack, none, 2U, nph_dvec3(0.0, 0.0, 6.0), 0.7F, "plate.gltf#scene", 0.0F);
     NTEST_ASSERT_NOT_NULL(e);
     (void)engine_frames(e, 4U);
     NTEST_EXPECT_NULL(nph_scene_renderer_texture_stream(nph_engine_scene_renderer(e)));
+    engine_close(&w);
+    test_temp_dir_remove(&dir);
+}
+
+// A scene's point lights and a mesh that rays pass by, from its glTF to the frame.
+static void write_candle(const TempDir *dir)
+{
+    const f32 positions[9] = {-1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
+    char path[1200];
+    test_path_in(dir, "candle.bin", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, positions, sizeof positions), NPH_RESULT_OK);
+    static const char document[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0,1,2]}],"
+        "\"extensionsUsed\":[\"KHR_lights_punctual\"],"
+        "\"extensions\":{\"KHR_lights_punctual\":{\"lights\":[{\"type\":\"point\",\"intensity\":1},"
+        "{\"type\":\"directional\",\"intensity\":1}]}},"
+        "\"nodes\":[{\"name\":\"candle\",\"mesh\":0},"
+        "{\"translation\":[0,1,1],\"extensions\":{\"KHR_lights_punctual\":{\"light\":0}}},"
+        "{\"extensions\":{\"KHR_lights_punctual\":{\"light\":1}}}],"
+        "\"meshes\":[{\"extras\":{\"no_rays\":true},\"primitives\":[{\"attributes\":{\"POSITION\":"
+        "0}}]}],"
+        "\"buffers\":[{\"uri\":\"candle.bin\",\"byteLength\":36}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+        "\"min\":[-1,0,0],\"max\":[1,1,0]}]}";
+    test_path_in(dir, "candle.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, document, sizeof document - 1U), NPH_RESULT_OK);
+}
+
+NTEST(WorldPartition, a_scenes_point_lights_can_be_many_and_its_mesh_out_of_the_rays)
+{
+    TempDir dir;
+    test_temp_dir_make(&dir, "candle");
+    write_candle(&dir);
+    NphAllocator *alloc = nph_allocator_system();
+    NphJobSystem *jobs = NULL;
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    char pack[1200];
+    cook_pack(&dir, "candle.gltf", jobs, pack, sizeof pack);
+    nph_job_system_destroy(jobs);
+
+    EngineWorld w;
+    const char *const settings[3] = {"r.pipeline=1", "r.taa=false", "r.max_many_lights=4"};
+    NphEngine *e = engine_open(&w, pack, settings, 3U, nph_dvec3(0.0, 0.5, 4.0), 0.7F,
+                               "candle.gltf#scene", 0.5F);
+    if (e == NULL) {
+        NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
+        test_temp_dir_remove(&dir);
+        NTEST_SKIP("no GPU");
+    }
+    // The point light takes the near range, and the sun does not.
+    const NphWorld *world = nph_engine_edit_world(e);
+    const NphComponentId light_id = nph_engine_components(e)->light;
+    u32 near_lights = 0U;
+    u32 far_suns = 0U;
+    for (u32 i = 0; i < nph_world_entity_slot_count(world); ++i) {
+        const NphEntity entity = nph_world_entity_at(world, i);
+        const NphLight *l = nph_entity_is_null(entity)
+                                ? NULL
+                                : (const NphLight *)nph_world_get(world, entity, light_id);
+        if (l != NULL && l->type == (u32)NPH_LIGHT_POINT) {
+            near_lights += l->near_range == 0.5F ? 1U : 0U;
+        } else if (l != NULL) {
+            far_suns += l->near_range == 0.0F ? 1U : 0U;
+        }
+    }
+    NTEST_EXPECT_EQ_UINT(near_lights, 1U);
+    NTEST_EXPECT_EQ_UINT(far_suns, 1U);
+    if (nph_renderer_production_supported(nph_engine_renderer(e))) {
+        const NphEngineFrameStats *st = engine_frames(e, 8U);
+        NTEST_EXPECT_EQ_UINT(st->scene.instances, 1U);
+        NTEST_EXPECT_EQ_UINT(st->scene.lights, 2U);
+        NTEST_EXPECT_EQ_UINT(st->render.many_lights, 1U); // the point light; the sun is not
+        NTEST_EXPECT_EQ_UINT(st->render.lights, 1U);
+        NTEST_EXPECT_EQ_UINT(nph_gpu_device_validation_stats(nph_engine_device(e)).errors, 0U);
+        // The flag came through: the mesh has no bottom level, so the rays have nothing.
+        NTEST_EXPECT_TRUE(st->render.shadow_blas_bytes == 0U);
+    }
     engine_close(&w);
     test_temp_dir_remove(&dir);
 }
@@ -1814,7 +1898,7 @@ NTEST(WorldPartition, the_engine_runs_the_cells_and_their_stream)
                                      "r.voxel_pool_mb=16", "r.proxy_budget_mb=1"};
     NphEngine *e =
         engine_open(&w, g_grove_pack, settings, 6U, nph_dvec3(8.0, 1.0, 8.0 + GROVE_VIEW),
-                    NARROW_FOV, "grove.gltf#scene");
+                    NARROW_FOV, "grove.gltf#scene", 0.0F);
     if (e == NULL) {
         NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
         NTEST_SKIP("no GPU");

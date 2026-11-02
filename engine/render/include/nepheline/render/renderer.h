@@ -127,9 +127,11 @@ typedef struct NphRendererDesc {
     u32 max_materials; // (1024)
     u32 max_instances; // (16384)
     u32 max_lights;    // (256), at most NPH_RENDER_MAX_LIGHTS (4096)
-    u32 max_cells;     // a world partition's cells (4096), at most 2^24 - 1
-    u32 max_draws;     // visible submeshes per frame (16384); the rest are dropped and logged
-    u32 debug_lines;   // per frame, depth-tested and overlay each (32768)
+    // NphRenderManyLight (0, the default: none, and nothing is paid for them).
+    u32 max_many_lights;
+    u32 max_cells;   // a world partition's cells (4096), at most 2^24 - 1
+    u32 max_draws;   // visible submeshes per frame (16384); the rest are dropped and logged
+    u32 debug_lines; // per frame, depth-tested and overlay each (32768)
     // Image-based lighting resolution; zero picks the default.
     u32 environment_size; // level-0 face extent of the environment cube (256), a power of two
     u32 specular_size;    // level-0 face extent of the prefiltered cube (128), a power of two
@@ -488,6 +490,10 @@ typedef struct NphRenderMeshDesc {
     u32 voxel_brick_count;
     const u32 *voxel_words;
     u32 voxel_word_count;
+    // Rays pass the mesh by, and it has no bottom level: for what is many small
+    // things that rays could not afford and would learn little from (the flames of
+    // 10,000 candles, 19.5 million triangles, whose light NphRenderManyLight carries).
+    b32 no_rays;
     const char *name;
 } NphRenderMeshDesc;
 
@@ -793,6 +799,49 @@ NPH_MUST_USE NphResult nph_render_light_desc(const NphRenderer *r, NphRenderLigh
 void nph_render_light_destroy(NphRenderer *r, NphRenderLight light);
 bool nph_render_light_is_valid(const NphRenderer *r, NphRenderLight light);
 
+// Many lights (docs/render.md "Many lights"; ADR-0073): point lights by the
+// thousand, whose cost on the production path follows neither their number nor
+// how many are in view. Each is split at its near range by a smooth partition of
+// unity: inside it pixels evaluate the light themselves (without shadows), and
+// beyond it the radiance cache gathers its light, shadowed, by sampling the lights
+// through a tree, a ray at a time. So beyond the near range its light is diffuse,
+// has no highlight of its own, and takes the cache's few frames to arrive.
+//
+// They suit what rarely changes: the whole set is rebuilt on the main thread in the
+// first frame after any of them does (3.35 ms for 10,000 lights, with its upload). The reference
+// renderer does not draw them, and the near field does not reach blended surfaces. They need the
+// radiance cache for what lies beyond the near range (NphRendererDesc.disable_gi, or a device
+// without ray queries, leaves only the near field, logged once).
+//
+// Thread-safety: NPH_RENDER_THREAD_ONLY, as the lights'.
+typedef struct NphRenderManyLight {
+    u32 value;
+} NphRenderManyLight;
+
+#define NPH_RENDER_MANY_LIGHT_NULL ((NphRenderManyLight){0U})
+
+typedef struct NphRenderManyLightDesc {
+    NphDVec3 position;
+    NphVec3 color;  // linear
+    f32 intensity;  // candela
+    f32 near_range; // metres, > 0: within it pixels evaluate the light themselves
+    f32 range;      // 0 is unlimited; else at least near_range
+} NphRenderManyLightDesc;
+
+// NPH_RESULT_INVALID_ARGUMENT for a value that is not finite, or negative, a
+// near range of zero, or a range below the near range; NPH_RESULT_FULL past
+// max_many_lights.
+NPH_MUST_USE NphResult nph_render_many_light_create(NphRenderer *r,
+                                                    const NphRenderManyLightDesc *desc,
+                                                    NphRenderManyLight *out);
+NPH_MUST_USE NphResult nph_render_many_light_update(NphRenderer *r, NphRenderManyLight light,
+                                                    const NphRenderManyLightDesc *desc);
+// The light's description as last set. NPH_RESULT_INVALID_ARGUMENT for a stale handle.
+NPH_MUST_USE NphResult nph_render_many_light_desc(const NphRenderer *r, NphRenderManyLight light,
+                                                  NphRenderManyLightDesc *out);
+void nph_render_many_light_destroy(NphRenderer *r, NphRenderManyLight light);
+bool nph_render_many_light_is_valid(const NphRenderer *r, NphRenderManyLight light);
+
 // ---------------------------------------------------------------------------
 // Environment (image-based lighting)
 // ---------------------------------------------------------------------------
@@ -934,6 +983,7 @@ typedef struct NphRenderView {
     NphVec3 background_color; // radiance, cd/m^2
     NphRenderDebugView debug_view;
     b32 disable_ibl;
+    b32 disable_many_lights; // this view draws without NphRenderManyLight
     // The pipeline that draws the view. PRODUCTION falls back to REFERENCE
     // (logged once) on a renderer without the production path.
     NphRenderPipeline pipeline;
@@ -1017,13 +1067,15 @@ f32 nph_render_view_focal_length(const NphRenderView *view);
 f32 nph_render_exposure_from_ev100(f32 ev100);
 
 typedef struct NphRenderFrameStats {
-    u32 instances; // live instances
-    u32 culled;    // of those, outside the frustum or hidden
-    u32 draws;     // submesh draws issued (opaque + masked + blended)
-    u32 blended;   // of those, blended
-    u32 dropped;   // visible draws past max_draws
-    u32 triangles; // drawn
-    u32 lights;    // live lights (the reference evaluates each for every pixel)
+    u32 instances;           // live instances
+    u32 culled;              // of those, outside the frustum or hidden
+    u32 draws;               // submesh draws issued (opaque + masked + blended)
+    u32 blended;             // of those, blended
+    u32 dropped;             // visible draws past max_draws
+    u32 triangles;           // drawn
+    u32 lights;              // live lights (the reference evaluates each for every pixel)
+    u32 many_lights;         // of NphRenderManyLight, drawn this frame
+    b32 many_lights_rebuilt; // a change had this frame rebuild them, on the main thread
     u32 debug_lines;
     b32 environment_updated;    // this frame declared the IBL passes
     NphRenderPipeline pipeline; // the pipeline that drew the frame

@@ -105,6 +105,8 @@ typedef struct SceneDef {
     f32 sky;
     bool sun_shadows;
     bool voxels;
+    f32 light_near_range; // its point lights as many lights (ADR-0073)
+    u32 many_lights;
     u32 tiles_x;
     u32 tiles_z;
     NphDVec3 tile_pitch; // 0: the first tile's instances' extent
@@ -364,6 +366,8 @@ static bool parse_manifest(const App *app, SceneDef *def)
         def->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
         def->sky = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
         def->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
+        def->light_near_range = (f32)nph_json_get_f64(root, NPH_STR("light_near_range"), 0.0);
+        def->many_lights = (u32)nph_json_get_f64(root, NPH_STR("many_lights"), 0.0);
         const NphJsonValue *cook = nph_json_object_get(root, NPH_STR("cook"));
         def->voxels = cook != NULL && nph_json_get_bool(cook, NPH_STR("voxels"), false);
         const NphJsonValue *tiles = nph_json_object_get(root, NPH_STR("tiles"));
@@ -755,6 +759,7 @@ static NphResult create_renderer(App *app, u64 voxel_pool_bytes)
     }
     rd.max_draws = MAX_INSTANCES;
     rd.max_lights = MAX_LIGHTS;
+    rd.max_many_lights = def->many_lights;
     rd.voxel_pool_bytes = voxel_pool_bytes;
     rd.max_deferred = (1U << 20U) * lists;
     nph_renderer_desc_scale_lists(&rd, lists);
@@ -793,6 +798,7 @@ static NphResult load_scene(App *app, u64 voxel_pool_bytes)
     cd.loader = app->loader;
     cd.jobs = app->jobs;
     cd.scene = nph_guid_from_cstr(def->scene);
+    cd.light_near_range = def->light_near_range;
     (void)tile_count(app, &cd.tiles_x, &cd.tiles_z);
     cd.tile_pitch = def->tile_pitch;
     cd.stream = voxel_pool_bytes != 0U ? 1 : 0;

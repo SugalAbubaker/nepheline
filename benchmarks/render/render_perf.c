@@ -266,6 +266,9 @@
 // about 2,400), beside the synthetic scenes'.
 #define MAX_MESHES 16384U
 #define MAX_LIGHTS 4000U
+// The many lights' scenes': their near range, and how many at most.
+#define MANY_NEAR_RANGE 0.5F
+#define MAX_MANY_LIGHTS 10000U
 // Per tile past the first (--tiles), the limits grow by a tile's instances,
 // its cells' levels and its cells, at most (the landscape's 47,863
 // instances, about 2,400 levels and 384 cells, rounded up): the renderer's
@@ -314,13 +317,14 @@ typedef enum ScenePost {
     POST_MOTION_STRAFE = 1U << 4U, // strafing at 5 m/s
     POST_MOTION_FLICK = 1U << 5U,  // turning 360 degrees a second
     // Depth of field through DOF_APERTURE, focused at DOF_FOCUS[...].
-    POST_DOF = 1U << 6U,         // 5 m away
-    POST_DOF_SLIGHT = 1U << 7U,  // 2.6 m
-    POST_DOF_LARGE = 1U << 8U,   // 0.6 m
-    POST_NO_AO = 1U << 9U,       // no ambient occlusion
-    POST_NO_GI = 1U << 10U,      // no global illumination
-    POST_LOD_LEVEL0 = 1U << 11U, // every mesh at level 0 (NphRenderView.lod_error 0)
-    POST_NO_VOXELS = 1U << 12U,  // the foliage's levels without voxels
+    POST_DOF = 1U << 6U,          // 5 m away
+    POST_DOF_SLIGHT = 1U << 7U,   // 2.6 m
+    POST_DOF_LARGE = 1U << 8U,    // 0.6 m
+    POST_NO_AO = 1U << 9U,        // no ambient occlusion
+    POST_NO_GI = 1U << 10U,       // no global illumination
+    POST_LOD_LEVEL0 = 1U << 11U,  // every mesh at level 0 (NphRenderView.lod_error 0)
+    POST_NO_VOXELS = 1U << 12U,   // the foliage's levels without voxels
+    POST_MANY_LIGHTS = 1U << 13U, // its lights are many lights (NphRenderManyLight; ADR-0073)
 } ScenePost;
 
 #define RUNTIME_BLOOM 0.04F // r.bloom's default
@@ -368,6 +372,12 @@ static const SceneDef g_scenes[] = {
      2160U, (u32)NPH_RENDER_VIS_NO_LIGHT_GRID, SHADOWS_NONE, 0},
     {"lights_4k_production", SCENE_FIELD, 16384U, MAX_LIGHTS, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
      2160U, 0U, SHADOWS_NONE, 0},
+    // Ten times as many lights in the same place cost the near fields ten times as many
+    // lights a pixel, and the cache's update nothing (ADR-0073).
+    {"many_lights_1k_production", SCENE_FIELD, 16384U, 1000U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U,
+     2160U, 0U, SHADOWS_NONE, POST_MANY_LIGHTS},
+    {"many_lights_10k_production", SCENE_FIELD, 16384U, MAX_MANY_LIGHTS,
+     NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U, 0U, SHADOWS_NONE, POST_MANY_LIGHTS},
     {"shadows_4k_reference", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 3840U, 2160U,
      0U, SHADOWS_SUN, 0},
     {"shadows_4k_production", SCENE_FIELD, 16384U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 3840U, 2160U,
@@ -444,6 +454,9 @@ typedef struct RefManifest {
     f32 ev100;
     f32 sky_intensity; // the default sky's (daylight next to a 30,000 lux sun) scale
     bool sun_shadows;  // the scene's first directional light casts shadows
+    // Its point lights as many lights (ADR-0073), this near range, room for so many.
+    f32 light_near_range;
+    u32 many_lights;
     // `lists`: what its views need of every list that can drop work (--lists'
     // multiple). A scene that says so fails where they overflow: dropped work
     // flatters a frame, so it would pass a gate it does not hold. 0: unsaid.
@@ -532,6 +545,8 @@ typedef struct Ctx {
     NphRenderLightDesc sun_desc;
     NphRenderLight lights[MAX_LIGHTS];
     u32 light_count;
+    NphRenderManyLight many_lights[MAX_MANY_LIGHTS];
+    u32 many_light_count;
     NphRenderInstance *instances;
     u32 instance_count;
     Result results[MAX_RESULTS];
@@ -1229,6 +1244,21 @@ static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
     for (u32 i = 0; i < s->lights; ++i) {
         const u32 h = hash_u32(i * 3U + 0x9E37U);
         const u32 g = hash_u32(h);
+        if ((s->post & (u32)POST_MANY_LIGHTS) != 0U) {
+            NphRenderManyLightDesc md;
+            memset(&md, 0, sizeof md);
+            md.position = nph_dvec3(-half + 80.0 * (f64)(h & 0xFFFFU) / 65535.0,
+                                    0.5 + 2.5 * (f64)(g >> 24U) / 255.0,
+                                    -half + 80.0 * (f64)(h >> 16U) / 65535.0);
+            md.intensity = (1.0F + 4.0F * (f32)((g >> 16U) & 255U) / 255.0F) *
+                           (f32)MAX_MANY_LIGHTS / (f32)s->lights;
+            md.color = nph_vec3(1.0F, 0.6F + 0.4F * (f32)(g & 255U) / 255.0F, 0.5F);
+            md.near_range = MANY_NEAR_RANGE;
+            NPH_TRY(nph_render_many_light_create(ctx->renderer, &md,
+                                                 &ctx->many_lights[ctx->many_light_count]));
+            ++ctx->many_light_count;
+            continue;
+        }
         NphRenderLightDesc ld;
         memset(&ld, 0, sizeof ld);
         ld.type = (g & 3U) == 0U ? NPH_RENDER_LIGHT_TYPE_SPOT : NPH_RENDER_LIGHT_TYPE_POINT;
@@ -1258,6 +1288,10 @@ static void destroy_scene(Ctx *ctx)
         nph_render_light_destroy(ctx->renderer, ctx->lights[i]);
     }
     ctx->light_count = 0U;
+    for (u32 i = 0; i < ctx->many_light_count; ++i) {
+        nph_render_many_light_destroy(ctx->renderer, ctx->many_lights[i]);
+    }
+    ctx->many_light_count = 0U;
     ctx->moving = false;
     ctx->walking = false;
     ctx->sun_turning = false;
@@ -1802,6 +1836,8 @@ static bool parse_manifest(const char *path, const char *scenes, RefManifest *m)
         (void)snprintf(m->pack, sizeof m->pack, "%s/%s", scenes, pack);
         m->ev100 = (f32)nph_json_get_f64(root, NPH_STR("ev100"), 12.0);
         m->sky_intensity = (f32)nph_json_get_f64(root, NPH_STR("sky_intensity"), 1.0);
+        m->light_near_range = (f32)nph_json_get_f64(root, NPH_STR("light_near_range"), 0.0);
+        m->many_lights = (u32)nph_json_get_f64(root, NPH_STR("many_lights"), 0.0);
         m->sun_shadows = nph_json_get_bool(root, NPH_STR("sun_shadows"), false);
         m->lists = (u32)nph_json_get_f64(root, NPH_STR("lists"), 0.0);
         m->tiles_x = 1U;
@@ -1952,6 +1988,7 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.loader = ctx->loader;
     cd.jobs = ctx->jobs;
     cd.scene = nph_guid_from_cstr(m->scene_key);
+    cd.light_near_range = m->light_near_range;
     cd.no_cells = g_no_cells;
     cd.stream = g_stream;
     cd.stream_budget = g_stream_budget;
@@ -2275,6 +2312,9 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *fil
     for (u32 i = 0; i < g_ref_count && g_tiles_x == 0U; ++i) {
         const RefManifest *m = &g_manifests[g_ref_scenes[i].manifest];
         const u32 tiles = m->tiles_x * m->tiles_z;
+        if (glob_match(filter, g_ref_scenes[i].name)) {
+            rd.max_many_lights = nph_max_u32(rd.max_many_lights, m->many_lights);
+        }
         if (tiles > 1U && glob_match(filter, g_ref_scenes[i].name)) {
             rd.max_instances = nph_max_u32(rd.max_instances, tiles * m->tile_instances);
             rd.max_meshes = nph_max_u32(rd.max_meshes, MAX_MESHES + tiles * m->tile_meshes);
@@ -2283,6 +2323,13 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *fil
     }
     rd.max_draws = MAX_INSTANCES;    // the reference path draws every grid cube
     rd.max_lights = MAX_LIGHTS + 1U; // and the sun
+    // Only where a scene that runs has them: they add pipelines to make.
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(g_scenes); ++i) {
+        if ((g_scenes[i].post & (u32)POST_MANY_LIGHTS) != 0U &&
+            glob_match(filter, g_scenes[i].name)) {
+            rd.max_many_lights = nph_max_u32(rd.max_many_lights, MAX_MANY_LIGHTS);
+        }
+    }
     rd.voxel_pool_bytes =
         (u64)(g_voxel_pool_mb >= 0 ? g_voxel_pool_mb : (g_stream ? 1536 : 0)) * 1000000ULL;
     // lod_4k_level0 defers some 400,000 clusters to phase 1 (the default

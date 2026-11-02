@@ -119,7 +119,8 @@ NPH_SHARED_STRUCT(NphRenderViewData)
     NphVec4 jitter;
     // The frame's paged textures (NphRenderPagingView; 0: none paged).
     u64 paging;
-    u64 pad_paging;
+    // The many lights this frame (NphRenderManyView; 0: none).
+    u64 many;
 };
 
 // One draw: a submesh of an instance. The transform is camera relative.
@@ -237,6 +238,36 @@ NPH_SHARED_STRUCT(NphRenderLightGrid)
     f32 zbin_scale;    // bins per doubling of the view distance
     u32 tiles_x;       // tiles per row (NPH_RENDER_LIGHT_TILE pixels square)
     u32 tile_count;    // tiles in all: the stride from one word of a tile to its next
+};
+
+// One of the many lights (docs/render.md "Many lights"; many_lights.c), in world
+// space about its set's origin.
+NPH_SHARED_STRUCT(NphRenderManyLightData)
+{
+    NphVec4 position; // xyz: about NphRenderManyView's origin; w: 1 / near_range^2
+    NphVec4 color;    // rgb: colour * intensity (candela); w: 1 / range^2 (0: unlimited)
+};
+
+// A table entry: a world cell's lights, the first in `indices` and how many. Cells
+// hash to their entries, and two cells may share one: a pixel tests each light's
+// distance anyway.
+#define NPH_RENDER_MANY_COUNT_SHIFT   22
+#define NPH_RENDER_MANY_FIRST_MASK    0x3FFFFF
+#define NPH_RENDER_MANY_HASH(x, y, z) (((x) * 73856093u) ^ ((y) * 19349663u) ^ ((z) * 83492791u))
+
+// The many lights of a frame.
+NPH_SHARED_STRUCT(NphRenderManyView)
+{
+    u64 records; // NphRenderManyLightData[count]
+    u64 nodes;   // the light tree's nodes, six NphVec4s each (render/light_tree.h)
+    u64 table;   // u32[table_mask + 1]: first | count << NPH_RENDER_MANY_COUNT_SHIFT
+    u64 indices; // u32[]: the entries' lists, indices into `records`
+    // xyz: what takes a camera-relative point about the set's origin; w: cells a metre.
+    NphVec4 to_origin;
+    u32 table_mask;
+    u32 count;
+    f32 near2; // the greatest near range, squared
+    u32 pad;
 };
 
 // A debug line end point.

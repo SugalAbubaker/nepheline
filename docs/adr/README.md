@@ -78,6 +78,7 @@ supersedes it and both link to each other.
 | [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted |
 | [0071](0071-small-masked-clusters-in-software.md) | Small masked clusters in the software raster | Accepted |
 | [0072](0072-world-partition-in-the-runtime.md) | The world partition in the engine's runtime | Accepted |
+| [0073](0073-many-lights.md) | Many lights, near and far | Accepted |
 
 ## Template
 

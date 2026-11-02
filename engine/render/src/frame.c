@@ -104,6 +104,8 @@ void render_frame_layout(const NphRendererDesc *desc, bool ray_tracing, RenderFr
     at = align_up(at + sizeof(NphRenderGiView), FRAME_ALIGN);
     out->paging_view_offset = at;
     at = align_up(at + sizeof(NphRenderPagingView), FRAME_ALIGN);
+    out->many_view_offset = at;
+    at = align_up(at + sizeof(NphRenderManyView), FRAME_ALIGN);
     out->size = at;
 }
 
@@ -932,6 +934,17 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // Global illumination on the production path (gi.c), whose rays leave
     // the ambient occlusion's range to it.
     stats.gi = render_gi_frame_begin(r, view, width, height, production) ? 1 : 0;
+    // The many lights (many_lights.c), whose far fields the cache's update gathers.
+    stats.many_lights_rebuilt = r->many.dirty;
+    NPH_TRY(render_many_frame_begin(r, view, production));
+    stats.many_lights = r->many.frame_active ? r->many.count : 0U;
+    if (r->many.frame_active && !stats.gi && !r->many.no_gi_logged) {
+        NPH_LOG_WARN(&NPH_LOG_RENDER,
+                     "%s: no radiance cache this frame: the many lights light only their near "
+                     "ranges (said once)",
+                     r->name);
+        r->many.no_gi_logged = 1;
+    }
 
     write_materials(r);
     // The production path lights from its GPU table (render_vis_frame).
@@ -985,6 +998,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->vsm = vsm ? r->vsm.view_address : 0U;
     vd->gi = stats.gi ? render_gi_view_address(r) : 0U;
     vd->paging = render_paging_view_address(r);
+    vd->many = render_many_view_address(r);
     vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;

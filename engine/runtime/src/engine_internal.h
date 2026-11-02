@@ -154,6 +154,7 @@ typedef struct EngineCvars {
     NphCvar max_materials;         // r.max_materials
     NphCvar max_textures;          // r.max_textures
     NphCvar max_lights;            // r.max_lights
+    NphCvar max_many_lights;       // r.max_many_lights
     NphCvar max_cells;             // r.max_cells
     NphCvar max_assets;            // r.max_assets
     NphCvar deferred_destroys;     // r.deferred_destroys

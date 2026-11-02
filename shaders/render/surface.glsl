@@ -425,6 +425,46 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
     return direct;
 }
 
+#ifdef NPH_SURFACE_MANY_ACTIVE
+// The many lights' near fields at the point (docs/render.md "Many lights"): the lights
+// its world cell lists, each by the share of its light within its near range (a
+// range's window, nph_light_attenuation), without shadows.
+vec3 nph_lit_many(NphLitPoint p, ManyViewRef view)
+{
+    const NphRenderManyView m = view.m;
+    const vec3 x = p.position + m.to_origin.xyz;
+    const uvec3 c = uvec3(ivec3(floor(x * m.to_origin.w)));
+    const uint entry = WordsRef(m.table).w[NPH_RENDER_MANY_HASH(c.x, c.y, c.z) & m.table_mask];
+    const uint first = entry & uint(NPH_RENDER_MANY_FIRST_MASK);
+    const uint end = first + (entry >> uint(NPH_RENDER_MANY_COUNT_SHIFT));
+    WordsRef indices = WordsRef(m.indices);
+    vec3 direct = vec3(0.0);
+    for (uint i = first; i < end; ++i) {
+        ManyLightRef light = ManyLightRef(m.records)[indices.w[i]];
+        const vec4 at = light.l.position;
+        const vec3 to_light = at.xyz - x;
+        const float d2_raw = dot(to_light, to_light);
+        const float k = d2_raw * at.w;
+        if (k < 1.0) {
+            const float d2 = max(d2_raw, 1e-8);
+            const float inv_d = inversesqrt(d2);
+            const vec3 l = to_light * inv_d;
+            const float nol = dot(p.n, l);
+            if (nol > 0.0) {
+                const vec4 color = light.l.color;
+                const float near_window = 1.0 - k * k;
+                const float y = d2 * color.w;
+                const float range_window = clamp(1.0 - y * y, 0.0, 1.0);
+                const float attenuation = min(inv_d * inv_d, 1e4) * (near_window * near_window) *
+                                          (range_window * range_window);
+                direct += nph_lit_reflect(p, l, nol, color.rgb * attenuation);
+            }
+        }
+    }
+    return direct;
+}
+#endif
+
 // The irradiance debug view (NPH_RENDER_DEBUG_IRRADIANCE): the diffuse
 // irradiance at the surface's interpolated normal (facing the viewer, as
 // the shading's) over pi, pre-exposed, before any occlusion: the
@@ -544,13 +584,22 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         }
 #endif
         const vec3 r = reflect(-v, n);
-        const vec3 radiance =
+        vec3 radiance =
             ibl ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
                                          nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
                              r, roughness * view.v.specular_max_lod)
                           .rgb *
                       view.v.ibl_intensity
                 : vec3(0.0);
+#ifdef NPH_SURFACE_MANY_ACTIVE
+        // The many lights' far fields have no highlights of their own: what the cell
+        // gathered, as if arriving evenly from everywhere, gives the specular its
+        // energy, which the diffuse below gives up.
+        if (NPH_SURFACE_MANY_ACTIVE && gi) {
+            const vec4 far_cell = NPH_SURFACE_GI;
+            radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
+        }
+#endif
         // Fdez-Agüera 2019: single- and multiple-scattering specular, and
         // the diffuse energy that remains.
         const vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
@@ -620,7 +669,14 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.sun_visibility = NPH_SURFACE_VSM_ACTIVE ? NPH_SURFACE_VSM(lp) : 1.0;
 #endif
 #ifdef NPH_SURFACE_GRID_LIGHTS
+#ifdef NPH_SURFACE_MANY_ACTIVE
+    vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+    if (NPH_SURFACE_MANY_ACTIVE) {
+        direct += nph_lit_many(lp, ManyViewRef(view.v.many));
+    }
+#else
     const vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
+#endif
 #else
     vec3 direct = vec3(0.0);
     if (view.v.light_grid != 0ul) {

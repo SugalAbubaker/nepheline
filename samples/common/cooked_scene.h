@@ -44,6 +44,9 @@ typedef struct CookedSceneDesc {
     NphGuid scene;          // the cooked scene's GUID
     NphDVec3 origin;        // added to every node position (large-world tests)
     f32 emissive_scale;     // cd/m^2 per unit of glTF emissive (0: 1)
+    // Above 0: the scene's point lights are many lights of this near range
+    // (NphRenderManyLight), and the renderer must have room for them.
+    f32 light_near_range;
     // Without the world partition's cells (asset/scene.h version 2): every
     // instance drawn as itself, no proxy loaded (an A/B of the cells).
     b32 no_cells;
@@ -115,6 +118,8 @@ typedef struct CookedScene {
     // without.
     NphProxyStream *stream;
     NphRenderLight *lights;
+    NphRenderManyLight *many_lights; // light_cap of them
+    u32 many_light_count;
     NphRenderLightDesc *light_descs; // as created (for gizmos and tests)
     u32 light_count;
     u32 light_cap;

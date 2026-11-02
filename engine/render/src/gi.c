@@ -92,6 +92,15 @@ NphResult render_gi_create(NphRenderer *r)
     d.specialization_count = 1U;
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->update_voxels));
     render_log_statistics(r, gi->update_voxels, "gi update with voxels");
+    if (r->desc.max_many_lights != 0U) {
+        // The same two gathering the many lights' far fields (k_many).
+        d.specialization[1] = 1U;
+        d.specialization_count = 2U;
+        NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->update_voxels_many));
+        d.specialization[0] = 0U;
+        NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->update_many));
+        render_log_statistics(r, gi->update_many, "gi update with many lights");
+    }
     memset(&d, 0, sizeof d);
     d.shader = gi->resolve_shader;
     d.name = "gi resolve";
@@ -107,6 +116,8 @@ void render_gi_destroy(NphRenderer *r)
     RenderGi *gi = &r->gi;
     nph_gpu_pipeline_destroy(r->dev, gi->resolve);
     nph_gpu_pipeline_destroy(r->dev, gi->update_voxels);
+    nph_gpu_pipeline_destroy(r->dev, gi->update_voxels_many);
+    nph_gpu_pipeline_destroy(r->dev, gi->update_many);
     nph_gpu_pipeline_destroy(r->dev, gi->update);
     nph_gpu_shader_destroy(r->dev, gi->resolve_shader);
     nph_gpu_shader_destroy(r->dev, gi->update_shader);
@@ -254,7 +265,10 @@ static void update_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     memset(&p, 0, sizeof p);
     p.view = r->vis.frame.view_address;
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_visbuffer), 0U);
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels ? gi->update_voxels : gi->update);
+    const bool many = r->many.frame_active != 0;
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels
+                                       ? (many ? gi->update_voxels_many : gi->update_voxels)
+                                       : (many ? gi->update_many : gi->update));
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (gi->frame_rays_x + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP,
                          (gi->frame_rays_y + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP, 1U);

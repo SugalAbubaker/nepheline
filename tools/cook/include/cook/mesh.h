@@ -92,6 +92,7 @@ typedef enum CookMeshFlags {
     COOK_MESH_HAS_TANGENTS = 1U << 1U,
     COOK_MESH_HAS_UV0 = 1U << 2U,
     COOK_MESH_HAS_COLORS = 1U << 3U,
+    COOK_MESH_NO_RAYS = 1U << 4U, // NPH_MESH_FLAG_NO_RAYS
 } CookMeshFlags;
 
 typedef NPH_ARRAY(CookVertex) CookVertexArray;

@@ -35,6 +35,12 @@
 // mesh with voxel levels, as for the resolve), so that a frame without them
 // pays nothing for their search.
 //
+// Where the renderer has many lights (k_many; many_lights.c), each sample also takes
+// one light from their tree, in proportion to what it may deliver here, and a shadow
+// ray to it: its light beyond its near range, over the probability of choosing it,
+// is an estimate of all their far fields' irradiance, which is added to the cell's
+// with the ray's (two independent estimates of two terms, so their means add).
+//
 // arg0: the visibility buffer's bindless storage index.
 #version 460
 #extension GL_EXT_ray_query : require
@@ -43,12 +49,15 @@
 #include "nph_bindless_int64.glsl"
 #include "rt_common.glsl"
 #include "gi_common.glsl"
+#include "many_lights.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 // Whether the visibility buffer may hold voxel clusters' pixels (gi.c).
 layout(constant_id = 0) const bool k_voxels = false;
+// Whether this frame has many lights (many_lights.c).
+layout(constant_id = 1) const bool k_many = false;
 
 // The point of the visibility buffer's triangle `v` under the pixel at
 // NDC `q`, camera relative, as the resolve rebuilds it (the same arithmetic,
@@ -195,6 +204,32 @@ vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
     return emissive + albedo * NPH_INV_PI * irradiance;
 }
 
+// One sample of the many lights' far fields' irradiance at the camera-relative `x`,
+// facing `n`, for `u` uniform in [0, 1): the chosen light's over its probability.
+vec3 many_far_sample(ViewRef rview, vec3 x, vec3 n, float u)
+{
+    const NphRenderManyView m = ManyViewRef(rview.v.many).m;
+    const vec3 at = x + m.to_origin.xyz;
+    float pdf;
+    const uint i = nph_many_sample(m, at, u, pdf);
+    if (pdf <= 0.0) {
+        return vec3(0.0);
+    }
+    const NphRenderManyLightData light = ManyLightsRef(m.records).l[i];
+    const vec3 to_light = light.position.xyz - at;
+    const float d2 = max(dot(to_light, to_light), 1e-8);
+    const float share = nph_many_far_share(d2, light.position.w, light.color.w);
+    const float inv_d = inversesqrt(d2);
+    const vec3 l = to_light * inv_d;
+    const float nol = dot(n, l);
+    if (share <= 0.0 || nol <= 0.0) {
+        return vec3(0.0);
+    }
+    const float distance = 1.0 / inv_d;
+    const float lit = nph_shadow_ray(rview.v.tlas, x + rview.v.tlas_offset.xyz, n, l, distance);
+    return light.color.rgb * (share * nol * lit * inv_d * inv_d / pdf);
+}
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -259,8 +294,14 @@ void main()
         radiance = hit_radiance(view, rview, g, rq, w);
     }
 
+    vec3 irradiance = radiance * NPH_PI;
+    if (k_many) {
+        const float u2 = gi_random(uvec3(block, g.g.frame ^ 0x7F4A7C15u)).x;
+        irradiance += many_far_sample(rview, x, n, u2);
+    }
+
     // The estimate, pre-exposed, in fixed point.
-    const vec3 e = min(radiance * (NPH_PI * rview.v.exposure), vec3(NPH_RENDER_GI_SAMPLE_MAX));
+    const vec3 e = min(irradiance * rview.v.exposure, vec3(NPH_RENDER_GI_SAMPLE_MAX));
     const uvec3 fixed_e = uvec3(e * g.g.sum_scale + 0.5);
     GiSumsRef sums = GiSumsRef(g.g.sums);
     if (fixed_e.x != 0u) {

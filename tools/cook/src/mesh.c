@@ -574,6 +574,7 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     h.flags =
         ((mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) != 0U ? (u32)NPH_MESH_FLAG_HAS_TANGENTS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_UV0) != 0U ? (u32)NPH_MESH_FLAG_HAS_UV0 : 0U) |
+        ((mesh->flags & (u32)COOK_MESH_NO_RAYS) != 0U ? (u32)NPH_MESH_FLAG_NO_RAYS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_COLORS) != 0U ? (u32)NPH_MESH_FLAG_HAS_COLORS : 0U);
     h.position_offset = box.min;
     h.position_scale = extent;

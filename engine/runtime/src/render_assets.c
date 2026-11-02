@@ -375,6 +375,7 @@ NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
     d->position_offset = h->position_offset;
     d->position_scale = h->position_scale;
     d->bounds = h->bounds;
+    d->no_rays = (h->flags & (u32)NPH_MESH_FLAG_NO_RAYS) != 0U ? 1 : 0;
     cooked_clusters(mv, d);
     d->name = "cooked mesh";
     return NPH_RESULT_OK;

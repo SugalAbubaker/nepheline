@@ -68,6 +68,8 @@ static const NPH_CVAR_INT(k_max_textures, "r.max_textures", 0, 0, 1 << 20,
                           "render textures (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_max_lights, "r.max_lights", 0, 0, 4096,
                           "render lights (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_many_lights, "r.max_many_lights", 0, 0, 1 << 19,
+                          "many lights (0: none)", NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_max_cells, "r.max_cells", 0, 0, (1 << 24) - 1,
                           "a world partition's render cells (0: the renderer's default)",
                           NPH_CVAR_FLAG_LATCHED);
@@ -259,6 +261,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->max_materials,
         &cv->max_textures,
         &cv->max_lights,
+        &cv->max_many_lights,
         &cv->max_cells,
         &cv->max_assets,
         &cv->deferred_destroys,
@@ -325,6 +328,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_max_materials,
         &k_max_textures,
         &k_max_lights,
+        &k_max_many_lights,
         &k_max_cells,
         &k_max_assets,
         &k_deferred_destroys,
@@ -1463,6 +1467,7 @@ static NphResult start_gpu(NphEngine *e)
     rd.max_materials = (u32)nph_cvar_get_int(&e->cv.max_materials);
     rd.max_textures = (u32)nph_cvar_get_int(&e->cv.max_textures);
     rd.max_lights = (u32)nph_cvar_get_int(&e->cv.max_lights);
+    rd.max_many_lights = (u32)nph_cvar_get_int(&e->cv.max_many_lights);
     rd.max_cells = (u32)nph_cvar_get_int(&e->cv.max_cells);
     rd.voxel_pool_bytes = (u64)nph_cvar_get_int(&e->cv.voxel_pool_mb) * 1000000ULL;
     const u64 texture_budget = (u64)nph_cvar_get_int(&e->cv.texture_budget_mb) * 1000000ULL;

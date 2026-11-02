@@ -214,7 +214,7 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
     RenderMesh *m = &r->meshes[slot];
     // A mesh of voxels alone (a cell's proxy; ADR-0062) has no triangles to
     // build over: rays trace its cell's instances, and pass it by.
-    if (!rt->supported || desc->vertex_count == 0U) {
+    if (!rt->supported || desc->vertex_count == 0U || desc->no_rays) {
         return NPH_RESULT_OK;
     }
     NphGpuDevice *dev = r->dev;

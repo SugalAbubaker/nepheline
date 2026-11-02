@@ -381,6 +381,11 @@ static NphResult apply_defaults(NphRendererDesc *d)
     if (d->max_lights > (u32)NPH_RENDER_MAX_LIGHTS) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
+    // A light lies in up to eight of the table's lists, whose entries have 22 bits
+    // for where they start.
+    if (d->max_many_lights > 1U << 19U) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
     return NPH_RESULT_OK;
 }
 
@@ -393,6 +398,10 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(pool_init(&r->material_pool, a, d->max_materials));
     NPH_TRY(pool_init(&r->instance_pool, a, d->max_instances));
     NPH_TRY(pool_init(&r->light_pool, a, d->max_lights));
+    if (d->max_many_lights != 0U) {
+        NPH_TRY(pool_init(&r->many.pool, a, d->max_many_lights));
+    }
+    NPH_TRY(render_many_create(r));
     NPH_TRY(pool_init(&r->cell_pool, a, d->max_cells));
     r->textures = NPH_ALLOC_ARRAY_ZEROED(a, RenderTexture, d->max_textures);
     r->meshes = NPH_ALLOC_ARRAY_ZEROED(a, RenderMesh, d->max_meshes);
@@ -585,6 +594,7 @@ void nph_renderer_destroy(NphRenderer *r)
     render_paging_shutdown(r);
     render_ibl_destroy(r);
     render_gi_destroy(r);
+    render_many_destroy(r);
     render_vsm_destroy(r);
     render_vis_destroy(r);
     render_motion_destroy(r);
@@ -644,6 +654,9 @@ void nph_renderer_destroy(NphRenderer *r)
     nph_handle_pool_free(&r->material_pool);
     nph_handle_pool_free(&r->instance_pool);
     nph_handle_pool_free(&r->light_pool);
+    if (r->desc.max_many_lights != 0U) {
+        nph_handle_pool_free(&r->many.pool);
+    }
     nph_handle_pool_free(&r->cell_pool);
     NPH_FREE_TYPE(a, NphRenderer, r);
 }

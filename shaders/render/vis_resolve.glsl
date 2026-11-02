@@ -96,6 +96,11 @@ layout(constant_id = 3) const bool k_debug = false;
 // resolve's time where it is compiled in (measured on render_perf's 4K
 // field and LOD scenes), wherever it stands.
 layout(constant_id = 4) const bool k_voxels = false;
+// Whether the renderer has many lights this frame (many_lights.c): their near fields,
+// and the specular their far fields give, which others do not pay for.
+layout(constant_id = 5) const bool k_many = false;
+#include "many_lights.glsl"
+#define NPH_SURFACE_MANY_ACTIVE k_many
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;

@@ -136,6 +136,9 @@ typedef enum NphMeshFlags {
     // (LODK); never both.
     NPH_MESH_FLAG_LEVELS = 1U << 3U,
     NPH_MESH_FLAG_LEVEL = 1U << 4U,
+    // Rays pass it by (render/renderer.h NphRenderMeshDesc.no_rays); the source says
+    // so in its glTF mesh's extras, {"no_rays": true}.
+    NPH_MESH_FLAG_NO_RAYS = 1U << 5U,
 } NphMeshFlags;
 
 typedef struct NphMeshHeader {

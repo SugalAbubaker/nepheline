@@ -155,6 +155,7 @@ Settings are cvars. The engine's:
 | `audio.occlusion_rays` | 72 | occlusion rays a frame, up to nine a source ("Audio"; 0: none) |
 | `r.vsync`, `r.width`, `r.height` | true, 1280, 720 | saved, latched |
 | `r.max_instances`, `r.max_meshes`, `r.max_materials`, `r.max_textures`, `r.max_lights`, `r.max_cells` | 0 | the renderer's capacities (0: its defaults; latched; "World partition") |
+| `r.max_many_lights` | 0 | a Light with a near range is one of the many lights (render.md "Many lights"), of which the renderer has room for this many (0: none, and such a Light fails; latched) |
 | `r.max_assets` | 0 | meshes, materials and textures the scene renderer caches at once (0: 4096; latched) |
 | `r.deferred_destroys` | 0 | GPU objects a frame may destroy before its queue has to grow (0: 4096; latched) |
 | `r.lists` | 1 | the production path's lists that can drop work, times their defaults (latched) |

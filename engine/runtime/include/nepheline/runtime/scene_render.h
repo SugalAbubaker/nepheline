@@ -254,6 +254,9 @@ typedef struct NphSceneImportDesc {
     // Its nodes and mesh instances alone: no lights or cameras (a further tile
     // of a world made of one scene over and over, whose sun is the first's).
     b32 instances_only;
+    // Above 0: the scene's point lights take this near range, so that the scene
+    // renderer draws them as many lights (components.h NphLight.near_range).
+    f32 light_near_range;
 } NphSceneImportDesc;
 
 // Spawns a cooked scene into the world: one root entity named `name`, and
