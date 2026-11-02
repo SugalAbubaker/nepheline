@@ -255,6 +255,31 @@ NPH_SHARED_STRUCT(NphRenderManyLightData)
 #define NPH_RENDER_MANY_FIRST_MASK    0x3FFFFF
 #define NPH_RENDER_MANY_HASH(x, y, z) (((x) * 73856093u) ^ ((y) * 19349663u) ^ ((z) * 83492791u))
 
+// What the per-pixel reservoirs take of the far fields (NphRenderView.many_restir).
+#define NPH_RENDER_MANY_RESTIR_OFF      0 // none: the far fields' light is the cache's alone
+#define NPH_RENDER_MANY_RESTIR_SPECULAR 1 // the far fields' highlights
+#define NPH_RENDER_MANY_RESTIR_ALL      2 // all their light, which the cache then does not gather
+
+// A reservoir's first word: its light, how many candidates it has weighed, and which way its
+// surface faces (two bits an axis of the geometric normal, for its neighbours' turns). The count
+// is its memory: noise falls with its root, and a light that has come into view takes that many
+// candidates to count in full (ADR-0074).
+#define NPH_RENDER_RESTIR_NO_LIGHT 0x3FFFF
+#define NPH_RENDER_RESTIR_M_SHIFT  18
+#define NPH_RENDER_RESTIR_M_MASK   0xFF
+#define NPH_RENDER_RESTIR_M_CAP    255
+// A tile's reservoirs take a turn once in 2^FULL_BITS frames, those that have weighed fewer than
+// FEW once in 2^FEW_BITS (no more than FULL_BITS), so that what is new settles fast. A turn weighs
+// this many candidates from the tile lists, or this many neighbours' reservoirs.
+#define NPH_RENDER_RESTIR_FULL_BITS  5
+#define NPH_RENDER_RESTIR_FEW_BITS   3
+#define NPH_RENDER_RESTIR_FEW        16
+#define NPH_RENDER_RESTIR_CANDIDATES 4
+#define NPH_RENDER_RESTIR_NEIGHBOURS 2
+
+// A light tile's list of lights the reservoirs of its pixels take candidates from.
+#define NPH_RENDER_MANY_TILE_LIGHTS 8
+
 // The many lights of a frame.
 NPH_SHARED_STRUCT(NphRenderManyView)
 {
@@ -266,8 +291,18 @@ NPH_SHARED_STRUCT(NphRenderManyView)
     NphVec4 to_origin;
     u32 table_mask;
     u32 count;
-    f32 near2; // the greatest near range, squared
+    f32 near2;  // the greatest near range, squared
+    u32 restir; // NPH_RENDER_MANY_RESTIR_*
+    // Per-pixel reservoirs (ADR-0074): uvec2[width * height], this frame's and the last's.
+    u64 reservoirs;
+    u64 prev_reservoirs;
+    u32 width;
+    u32 frame;
+    u32 tiles_x;
     u32 pad;
+    // The tile lists: uvec2[NPH_RENDER_MANY_TILE_LIGHTS][tiles]: a light and its probability.
+    u64 tiles;
+    NphMat4 reproject; // NphVisViewData.reproject
 };
 
 // A debug line end point.

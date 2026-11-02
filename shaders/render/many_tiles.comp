@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// The many lights' tile lists (many_lights.c; docs/adr/0074-restir.md): for each light
+// tile, a short list of lights the reservoirs of its pixels take their candidates from,
+// so that a tile's pixels read a few lights' records, which stay in the cache, where
+// each pixel's own walk down the tree would read a light of its own. A tile's list takes
+// a light or two a frame, from the tree, for the point of a random pixel of the tile.
+//
+// arg0: the visibility buffer's bindless storage index. arg1: slots to fill this frame.
+#version 460
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+#include "gi_common.glsl"
+#include "many_lights.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    ManyViewRef many = ManyViewRef(rview.v.many);
+    const uvec2 tile = gl_GlobalInvocationID.xy;
+    const uint tiles_x = many.m.tiles_x;
+    const ivec2 size = ivec2(view.v.viewport.xy);
+    if (tile.x >= tiles_x || int(tile.y * uint(NPH_RENDER_LIGHT_TILE)) >= size.y) {
+        return;
+    }
+    const uint frame = many.m.frame;
+    const vec3 u = gi_random(uvec3(tile, frame ^ 0x51ED270Bu));
+    const ivec2 p = min(ivec2(tile * uint(NPH_RENDER_LIGHT_TILE)) +
+                            ivec2(u.xy * float(NPH_RENDER_LIGHT_TILE)),
+                        size - 1);
+    const uint64_t v = imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x;
+    if (v == 0ul) {
+        return; // the background: nothing here to light
+    }
+    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    const vec4 h = rview.v.inv_view_proj * vec4(q, vis_depth(v), 1.0);
+    const vec3 at = h.xyz / h.w + many.m.to_origin.xyz;
+    const NphRenderManyView m = many.m;
+    ManyReservoirsRef tiles = ManyReservoirsRef(m.tiles);
+    const uint first = (tile.y * tiles_x + tile.x) * uint(NPH_RENDER_MANY_TILE_LIGHTS);
+    float r = u.z;
+    for (uint slot = 0u; slot < pc.arg1; ++slot) {
+        float pdf;
+        const uint light = nph_many_sample(m, at, r, pdf);
+        if (pdf > 0.0) {
+            const uint place = (frame + slot) & (uint(NPH_RENDER_MANY_TILE_LIGHTS) - 1u);
+            tiles.r[first + place] = uvec2(light, floatBitsToUint(pdf));
+        }
+        r = fract(r + 0.61803398875);
+    }
+}

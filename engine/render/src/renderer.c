@@ -454,6 +454,7 @@ static NphResult create_contents(NphRenderer *r)
         NPH_TRY(render_ao_create(r));
         NPH_TRY(render_vsm_create(r));
         NPH_TRY(render_gi_create(r));
+        NPH_TRY(render_many_create_passes(r));
     } else {
         r->vsm.sun_slot = NPH_U32_MAX;
         r->gi.sun_slot = NPH_U32_MAX;

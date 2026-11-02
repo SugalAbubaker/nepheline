@@ -151,6 +151,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->background = NPH_RENDER_BACKGROUND_ENV;
     view->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
     view->lod_error = 1.0F;
+    view->many_restir = NPH_RENDER_RESTIR_SPECULAR;
 }
 
 // ---------------------------------------------------------------------------
@@ -910,8 +911,13 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // The sun's virtual shadow map (the production path), then shadow rays
     // for the lights that cast shadows it does not take.
     const bool vsm = render_vsm_frame_begin(r, view, &proj, &inv_view_proj, height, production);
+    // The many lights (many_lights.c): their reservoirs' rays want the top level.
+    stats.many_lights_rebuilt = r->many.dirty;
+    NPH_TRY(render_many_frame_begin(r, view, production));
     const bool rt = render_rt_frame_begin(r, production, view->camera.position, vsm ? 1U : 0U,
-                                          render_gi_frame_wanted(r, view, production));
+                                          render_gi_frame_wanted(r, view, production) ||
+                                              render_many_frame_wants_rays(r, view));
+    NPH_TRY(render_many_restir_begin(r, view, width, height));
     stats.shadow_rays = r->rt.frame_shadows;
     stats.vsm = vsm ? 1 : 0;
     stats.vsm_lod_bias = vsm ? r->vsm.frame_bias : 0U;
@@ -935,8 +941,6 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // the ambient occlusion's range to it.
     stats.gi = render_gi_frame_begin(r, view, width, height, production) ? 1 : 0;
     // The many lights (many_lights.c), whose far fields the cache's update gathers.
-    stats.many_lights_rebuilt = r->many.dirty;
-    NPH_TRY(render_many_frame_begin(r, view, production));
     stats.many_lights = r->many.frame_active ? r->many.count : 0U;
     if (r->many.frame_active && !stats.gi && !r->many.no_gi_logged) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,

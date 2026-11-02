@@ -15,6 +15,7 @@ NPH_BUFFER_REF(ManyLightRef) { NphRenderManyLightData l; };
 // children themselves.
 NPH_BUFFER_REF(ManyNodesRef) { vec4 v[]; };
 NPH_BUFFER_REF(ManyChildrenRef) { uvec4 v[]; };
+NPH_BUFFER_REF(ManyReservoirsRef) { uvec2 r[]; };
 
 #define NPH_MANY_NODE_SIZE 6u
 #define NPH_MANY_LEAF      0x80000000u
@@ -64,6 +65,22 @@ uint nph_many_sample(NphRenderManyView m, vec3 x, float u, out float pdf)
     }
     pdf = 0.0;
     return 0u;
+}
+
+// Where a pixel's reservoir lies: tiled by 8 x 8, as the resolve's workgroups are, so that
+// a workgroup's reservoirs share a few cache lines.
+uint nph_many_tiled(uvec2 pixel, uint tiles_wide)
+{
+    return ((pixel.y >> 3u) * tiles_wide + (pixel.x >> 3u)) * 64u + (pixel.y & 7u) * 8u + (pixel.x & 7u);
+}
+
+// A reservoir's beat: its turn comes when the low bits are 0 (NPH_RENDER_RESTIR_FULL_BITS, for
+// one that has weighed few FEW_BITS), and the next bits say what the turn does. By the 8 x 8
+// tile, not the pixel: a lane at work costs its subgroup's every lane the work's time, so a
+// tile's reservoirs work together, and the others not at all.
+uint nph_many_beat(uvec2 pixel, uint frame)
+{
+    return (pixel.x >> 3u) + (pixel.y >> 3u) * 3u + frame;
 }
 
 // The share of a light's light beyond its near range at squared distance `d2`,

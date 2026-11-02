@@ -31,10 +31,12 @@
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
-//                 [--debug-view=NAME] [--reference-only] [--lod-error=PX] [--lists=N]
+//                 [--debug-view=NAME] [--reference-only] [--rt-shadows] [--lod-error=PX]
+//                 [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
-//                 [--paged-textures] [--texture-budget=MB]
+//                 [--paged-textures] [--texture-budget=MB] [--restir=N] [--accumulate=N]
+//                 [--truth] [--truth-ev=STOPS]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
 // size the software raster takes (0: every cluster in hardware), for tuning
@@ -71,7 +73,15 @@
 // included, where bottom levels are built. --paged-textures pages the
 // scenes' textures (ADR-0065; CookedSceneDesc.paged_textures) and lets every
 // page be installed before a view is measured: what the clamped samples and
-// the requests cost where every page is resident.
+// the requests cost where every page is resident. --restir sets
+// NphRenderView.many_restir (0 none, 1 the highlights, the default, 2 all;
+// ADR-0074). --rt-shadows takes the reference scenes' sun by a shadow ray a
+// pixel: what a ray costs there. For comparing estimators of light against
+// what they converge on: --truth draws without anti-aliasing, tonemapper,
+// bloom or occlusion, --truth-ev=STOPS stops down so that highlights stay in
+// range (2 by default), and --accumulate=N, with --capture-dir, averages N
+// more frames of each view in linear light into <view>.mean.bmp, and prints
+// how much a pixel varies among them.
 //
 // Reference scenes (§10.7: the targets are measured on them): with
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
@@ -494,7 +504,18 @@ static const char *const k_debug_views[] = {
 NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(k_debug_views) == (u32)NPH_RENDER_VIEW_COUNT - 1U,
                   "a name per debug view");
 static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
-static f32 g_lod_error = -1.0F;     // --lod-error (negative: the view's default)
+static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
+// --rt-shadows: the reference scenes' sun by a shadow ray a pixel, what a ray costs there.
+static bool g_rt_shadows = false;
+// --restir=N: the many lights' reservoirs (NphRenderRestir: 0 off, 1 specular, 2 all).
+static NphRenderRestir g_restir = NPH_RENDER_RESTIR_SPECULAR;
+// --accumulate=N, with --capture-dir: N more frames of each reference view averaged in
+// linear light into <view>.mean.bmp, with how much a pixel varies from frame to frame.
+static u32 g_accumulate = 0U;
+// --truth: no anti-aliasing, tonemapper, bloom or occlusion, and --truth-ev stops down: what
+// an average of many frames converges on, for comparing the lights' estimators.
+static bool g_truth = false;
+static f32 g_truth_ev = 2.0F;
 static u32 g_lists = 1U;            // --lists: the production path's list capacities, times this
 static bool g_vsm_trace = false;    // --vsm-trace: every frame's shadow map statistics
 static bool g_memory_trace = false; // --memory-trace: the GPU memory every 16th frame
@@ -1554,6 +1575,12 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
 static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                         NphRenderPipeline pipeline, bool shadows, FrameRun *run);
 
+static const char *g_capture_dir = NULL; // --capture-dir, for the synthetic scenes too
+static NphResult capture(Ctx *ctx, NphGpuImage target, u32 width, u32 height, const char *path);
+static NphResult accumulate(Ctx *ctx, NphRenderView *view, NphGpuImage target, u32 width,
+                            u32 height, u32 frames, const char *path, const char *name,
+                            FrameRun *run);
+
 static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
 {
     NphGpuImageDesc td;
@@ -1581,6 +1608,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.bloom = (s->post & (u32)POST_NO_BLOOM) != 0U ? 0.0F : RUNTIME_BLOOM;
     view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
     view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
+    view.many_restir = g_restir;
     if ((s->post & (u32)POST_LOD_LEVEL0) != 0U) {
         view.lod_error = 0.0F;
     }
@@ -1610,9 +1638,26 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
                               : dof == (u32)POST_DOF_SLIGHT ? 2.6F
                                                             : 0.6F;
     }
+    if (g_truth) {
+        view.anti_aliasing = NPH_RENDER_AA_NONE;
+        view.tonemapper = NPH_RENDER_TONEMAPPER_NONE;
+        view.bloom = 0.0F;
+        view.ao_radius = 0.0F;
+        view.ev100 += g_truth_ev;
+    }
     static FrameRun run;
     if (r == NPH_RESULT_OK) {
         r = run_frames(ctx, &view, target, frames, &run);
+    }
+    if (r == NPH_RESULT_OK && g_capture_dir != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof path, "%s/%s.bmp", g_capture_dir, s->name);
+        r = capture(ctx, target, s->width, s->height, path);
+        if (r == NPH_RESULT_OK && g_accumulate != 0U) {
+            (void)snprintf(path, sizeof path, "%s/%s.mean.bmp", g_capture_dir, s->name);
+            r = accumulate(ctx, &view, target, s->width, s->height, g_accumulate, path, s->name,
+                           &run);
+        }
     }
     destroy_scene(ctx);
     nph_gpu_image_destroy(ctx->dev, target);
@@ -1697,6 +1742,9 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                st->shadow_rays ? "; shadow rays" : "", st->motion_blur ? "; motion blur" : "",
                st->dof ? "; depth of field" : "",
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
+        if (st->vis_many_rays != 0U) {
+            printf("    many lights: %u rays asked for\n", st->vis_many_rays);
+        }
         if (st->vis_lod_groups != 0U || st->vis_lod_nodes != 0U) {
             printf("    levels of detail: %u groups tested, %u hierarchy nodes visited in %u steps "
                    "a phase, %u clusters a finer level stood in for\n",
@@ -2024,17 +2072,8 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
 }
 
 // Writes `target` (RGBA8) to `path` as a BMP.
-static NphResult capture(Ctx *ctx, NphGpuImage target, u32 width, u32 height, const char *path)
+static NphResult capture_read(Ctx *ctx, NphGpuImage target, NphGpuBuffer rb)
 {
-    const u64 size = (u64)width * height * 4U;
-    NphGpuBufferDesc bd;
-    memset(&bd, 0, sizeof bd);
-    bd.size = size;
-    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
-    bd.memory = NPH_GPU_MEMORY_READBACK;
-    bd.name = "render_perf capture";
-    NphGpuBuffer rb = NPH_GPU_BUFFER_NULL;
-    NPH_TRY(nph_gpu_buffer_create(ctx->dev, &bd, &rb));
     NphGpuCmd *cmd = NULL;
     NphResult r = nph_gpu_cmd_begin(ctx->dev, NPH_GPU_QUEUE_GRAPHICS, "capture", &cmd);
     if (r == NPH_RESULT_OK) {
@@ -2074,11 +2113,123 @@ static NphResult capture(Ctx *ctx, NphGpuImage target, u32 width, u32 height, co
                                       NPH_U64_MAX);
         }
     }
+    return r;
+}
+
+static NphResult capture_buffer(Ctx *ctx, u32 width, u32 height, NphGpuBuffer *out)
+{
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.size = (u64)width * height * 4U;
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    bd.memory = NPH_GPU_MEMORY_READBACK;
+    bd.name = "render_perf capture";
+    return nph_gpu_buffer_create(ctx->dev, &bd, out);
+}
+
+static NphResult capture(Ctx *ctx, NphGpuImage target, u32 width, u32 height, const char *path)
+{
+    NphGpuBuffer rb = NPH_GPU_BUFFER_NULL;
+    NPH_TRY(capture_buffer(ctx, width, height, &rb));
+    NphResult r = capture_read(ctx, target, rb);
     if (r == NPH_RESULT_OK) {
         r = capture_write_bmp(path, (const u8 *)nph_gpu_buffer_map(ctx->dev, rb), width, height,
                               false);
     }
     nph_gpu_buffer_destroy(ctx->dev, rb);
+    return r;
+}
+
+static f32 srgb_to_linear(f32 c)
+{
+    return c <= 0.04045F ? c / 12.92F : powf((c + 0.055F) / 1.055F, 2.4F);
+}
+
+static f32 linear_to_srgb(f32 c)
+{
+    return c <= 0.0031308F ? c * 12.92F : 1.055F * powf(c, 1.0F / 2.4F) - 0.055F;
+}
+
+// N frames averaged in linear light, and how much a pixel's value varies among them.
+static NphResult accumulate(Ctx *ctx, NphRenderView *view, NphGpuImage target, u32 width,
+                            u32 height, u32 frames, const char *path, const char *name,
+                            FrameRun *run)
+{
+    const u64 pixels = (u64)width * height;
+    NphAllocator *a = nph_allocator_system();
+    f32 *sum = NPH_ALLOC_ARRAY_ZEROED(a, f32, pixels * 3U);
+    f32 *square = NPH_ALLOC_ARRAY_ZEROED(a, f32, pixels);
+    u8 *mean = NPH_ALLOC_ARRAY(a, u8, pixels * 4U);
+    NphGpuBuffer rb = NPH_GPU_BUFFER_NULL;
+    NphResult r = capture_buffer(ctx, width, height, &rb);
+    if (sum == NULL || square == NULL || mean == NULL) {
+        r = NPH_RESULT_OUT_OF_MEMORY;
+    }
+    static f32 lut[256];
+    for (u32 i = 0; i < 256U; ++i) {
+        lut[i] = srgb_to_linear((f32)i / 255.0F);
+    }
+    f64 cpu = 0.0;
+    for (u32 f = 0; f < frames && r == NPH_RESULT_OK; ++f) {
+        r = render_one(ctx, view, target, true, &cpu, &run->stats);
+        if (r == NPH_RESULT_OK) {
+            r = nph_gpu_device_wait_idle(ctx->dev);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = capture_read(ctx, target, rb);
+        }
+        if (r == NPH_RESULT_OK) {
+            const u8 *src = (const u8 *)nph_gpu_buffer_map(ctx->dev, rb);
+            for (u64 i = 0; i < pixels; ++i) {
+                const f32 cr = lut[src[i * 4U]];
+                const f32 cg = lut[src[i * 4U + 1U]];
+                const f32 cb = lut[src[i * 4U + 2U]];
+                sum[i * 3U] += cr;
+                sum[i * 3U + 1U] += cg;
+                sum[i * 3U + 2U] += cb;
+                const f32 y = 0.2126F * cr + 0.7152F * cg + 0.0722F * cb;
+                square[i] += y * y;
+            }
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        const f32 k = 1.0F / (f32)frames;
+        f64 noise = 0.0;
+        u64 counted = 0U;
+        u64 noisy = 0U;
+        for (u64 i = 0; i < pixels; ++i) {
+            const f32 cr = sum[i * 3U] * k;
+            const f32 cg = sum[i * 3U + 1U] * k;
+            const f32 cb = sum[i * 3U + 2U] * k;
+            mean[i * 4U] = (u8)(linear_to_srgb(cr) * 255.0F + 0.5F);
+            mean[i * 4U + 1U] = (u8)(linear_to_srgb(cg) * 255.0F + 0.5F);
+            mean[i * 4U + 2U] = (u8)(linear_to_srgb(cb) * 255.0F + 0.5F);
+            mean[i * 4U + 3U] = 255U;
+            const f32 y = 0.2126F * cr + 0.7152F * cg + 0.0722F * cb;
+            if (y > 0.01F) {
+                const f32 var = nph_f32_max(square[i] * k - y * y, 0.0F);
+                const f32 rel = nph_f32_sqrt(var) / y;
+                noise += (f64)rel;
+                ++counted;
+                noisy += rel > 0.1F ? 1U : 0U;
+            }
+        }
+        printf("%s: %u frames averaged: a pixel varies by %.2f %% of its value on average, %.2f %% "
+               "of pixels by over 10 %%\n",
+               name, frames, 100.0 * noise / (f64)(counted != 0U ? counted : 1U),
+               100.0 * (f64)noisy / (f64)(counted != 0U ? counted : 1U));
+        r = capture_write_bmp(path, mean, width, height, false);
+    }
+    nph_gpu_buffer_destroy(ctx->dev, rb);
+    if (mean != NULL) {
+        NPH_FREE_ARRAY(a, u8, mean, pixels * 4U);
+    }
+    if (square != NULL) {
+        NPH_FREE_ARRAY(a, f32, square, pixels);
+    }
+    if (sum != NULL) {
+        NPH_FREE_ARRAY(a, f32, sum, pixels * 3U);
+    }
     return r;
 }
 
@@ -2130,6 +2281,17 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     if (ctx->no_sw_raster) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_NO_SW_RASTER;
     }
+    if (g_rt_shadows) {
+        view.vis_flags |= (u32)NPH_RENDER_VIS_RT_SHADOWS;
+    }
+    if (g_truth) {
+        view.anti_aliasing = NPH_RENDER_AA_NONE;
+        view.tonemapper = NPH_RENDER_TONEMAPPER_NONE;
+        view.bloom = 0.0F;
+        view.ao_radius = 0.0F;
+        view.ev100 += g_truth_ev;
+    }
+    view.many_restir = g_restir;
     if (rv->walk != 0.0F) {
         // Along the view, level, as the synthetic walk.
         const NphVec3 f = nph_quat_rotate(camera.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
@@ -2160,6 +2322,12 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         char path[1024];
         (void)snprintf(path, sizeof path, "%s/%s.bmp", capture_dir, rs->name);
         r = capture(ctx, target, g_ref_width, g_ref_height, path);
+    }
+    if (r == NPH_RESULT_OK && capture_dir != NULL && g_accumulate != 0U) {
+        char path[1024];
+        (void)snprintf(path, sizeof path, "%s/%s.mean.bmp", capture_dir, rs->name);
+        r = accumulate(ctx, &view, target, g_ref_width, g_ref_height, g_accumulate, path, rs->name,
+                       &run);
     }
     NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(ctx->dev));
     nph_gpu_image_destroy(ctx->dev, target);
@@ -2408,10 +2576,11 @@ static int usage(void)
     fprintf(stderr, "usage: render_perf [--filter=GLOB] [--frames=N] [--json=FILE] "
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
-                    "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] "
+                    "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] [--rt-shadows] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
-                    "[--no-cells] [--paged-textures] [--texture-budget=MB]\n");
+                    "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
+                    "[--accumulate=N] [--truth] [--truth-ev=STOPS]\n");
     return 2;
 }
 
@@ -2485,6 +2654,17 @@ int main(int argc, char **argv)
             scenes = argv[i] + 9;
         } else if (strncmp(argv[i], "--capture-dir=", 14U) == 0) {
             capture_dir = argv[i] + 14;
+            g_capture_dir = capture_dir;
+        } else if (strcmp(argv[i], "--rt-shadows") == 0) {
+            g_rt_shadows = true;
+        } else if (strncmp(argv[i], "--restir=", 9U) == 0) {
+            g_restir = (NphRenderRestir)strtoul(argv[i] + 9, NULL, 10);
+        } else if (strncmp(argv[i], "--accumulate=", 13U) == 0) {
+            g_accumulate = (u32)strtoul(argv[i] + 13, NULL, 10);
+        } else if (strcmp(argv[i], "--truth") == 0) {
+            g_truth = true;
+        } else if (strncmp(argv[i], "--truth-ev=", 11U) == 0) {
+            g_truth_ev = (f32)strtod(argv[i] + 11, NULL);
         } else if (strncmp(argv[i], "--manifests=", 12U) == 0) {
             manifest_dir = argv[i] + 12;
         } else if (strncmp(argv[i], "--ref-size=", 11U) == 0) {

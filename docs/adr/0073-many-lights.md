@@ -38,7 +38,7 @@ their place in the engine and their smooth light. ADR-0074 adds per-pixel reserv
    (`max_many_lights` 0, the default) pays nothing: the shaders are specialised on them, and their pipelines are not made.
    `NphLight.near_range` makes a Light one, and `NphSceneImportDesc.light_near_range` a scene's point lights.
 5. **Their far fields' specular** is what the cell gathered, taken as arriving evenly from everywhere. Without it the diffuse
-   gives up energy that the specular never gets, and metals go black.
+   gives up energy that the specular never gets, and metals go black. ADR-0074's reservoirs take this over by default.
 6. **A mesh may stay out of the rays** (`NphRenderMeshDesc.no_rays`, from a glTF mesh's extras, `{"no_rays": true}`). The
    candles' 19.5 million triangles would take over a gigabyte of bottom level, and their flames, shells around the lights,
    would stop every shadow ray and count the lights' energy twice.

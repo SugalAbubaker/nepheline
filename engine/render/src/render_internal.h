@@ -578,6 +578,25 @@ typedef struct RenderMany {
     b32 dirty;        // a light changed since the set was built
     b32 frame_active; // this frame draws them
     b32 no_gi_logged;
+    // Per-pixel reservoirs (ADR-0074).
+    NphGpuBuffer reservoirs[2];
+    u32 reservoir_width;
+    u32 reservoir_height;
+    u32 reservoir_at; // this frame's of the two
+    b32 reservoirs_clear;
+    b32 frame_restir;
+    NphGpuRgBuffer frame_buffers[2]; // this frame's, the last's
+    NphGpuBuffer tiles;
+    u32 tiles_x;
+    u32 tiles_y;
+    NphGpuShader tiles_shader;
+    NphGpuPipeline tiles_pipeline;
+    NphGpuRgImage frame_visbuffer;
+    NphGpuRgBuffer frame_tiles;
+    u32 frame_slots;
+    u32 frame_mode; // this frame's NPH_RENDER_MANY_RESTIR_*
+    NphGpuShader turns_shader;
+    NphGpuPipeline turns_pipeline;
 } RenderMany;
 
 // One draw call of the forward pass, sorted by key.
@@ -1481,9 +1500,28 @@ bool render_gi_frame_wanted(const NphRenderer *r, const NphRenderView *view, boo
 
 // The many lights (many_lights.c; docs/adr/0073-many-lights.md).
 NphResult render_many_create(NphRenderer *r);
+NphResult render_many_create_passes(NphRenderer *r);
 void render_many_destroy(NphRenderer *r);
 // Rebuilds the set if a light changed, and writes this frame's view if it draws them.
 NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, bool production);
+// Its reservoirs (ADR-0074): whether they want this frame's rays, then, once the top level's
+// frame has begun, their part of the frame's view.
+bool render_many_frame_wants_rays(const NphRenderer *r, const NphRenderView *view);
+NphResult render_many_restir_begin(NphRenderer *r, const NphRenderView *view, u32 width,
+                                   u32 height);
+void render_many_set_reproject(const NphRenderer *r, const NphMat4 *reproject);
+NphResult render_many_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage visbuffer);
+void render_many_read(const NphRenderer *r, NphGpuRgPass *pass);
+// What a reservoir's turn reads of the frame: as the resolve does.
+typedef struct RenderManyTurnsInput {
+    NphGpuRgImage lut;
+    NphGpuRgBuffer clusters;
+    NphGpuRgBuffer instances;
+    NphGpuRgBuffer meshes;
+    NphGpuRgBuffer tlas;
+} RenderManyTurnsInput;
+NphResult render_many_declare_turns(NphRenderer *r, NphGpuRenderGraph *graph,
+                                    const RenderManyTurnsInput *in);
 u64 render_many_view_address(const NphRenderer *r); // 0 where it does not
 // The table's entry of a cell (the shaders' twin), for the tests.
 u32 render_many_table_entry(i32 x, i32 y, i32 z, u32 mask);

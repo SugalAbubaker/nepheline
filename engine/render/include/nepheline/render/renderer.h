@@ -972,6 +972,14 @@ typedef enum NphRenderAntiAliasing {
     NPH_RENDER_AA_TEMPORAL = 1,
 } NphRenderAntiAliasing;
 
+// What of the many lights' far fields per-pixel reservoirs take (NphRenderView.many_restir;
+// ADR-0074): beyond a light's near range its light comes otherwise from the radiance cache.
+typedef enum NphRenderRestir {
+    NPH_RENDER_RESTIR_OFF = 0, // none: all of it the cache's, its highlights only as an average
+    NPH_RENDER_RESTIR_SPECULAR = 1, // the highlights, the shadows of their lights ray traced
+    NPH_RENDER_RESTIR_ALL = 2,      // all of it, the diffuse light noisier than the cache's
+} NphRenderRestir;
+
 typedef struct NphRenderView {
     NphRenderCamera camera;
     // Exposure as EV100 (Lagarde & de Rousiers, "Moving Frostbite to PBR",
@@ -984,6 +992,9 @@ typedef struct NphRenderView {
     NphRenderDebugView debug_view;
     b32 disable_ibl;
     b32 disable_many_lights; // this view draws without NphRenderManyLight
+    // What of the many lights' far fields per-pixel reservoirs take. nph_render_view_default:
+    // SPECULAR. They need ray queries: a device without them draws as with OFF.
+    NphRenderRestir many_restir;
     // The pipeline that draws the view. PRODUCTION falls back to REFERENCE
     // (logged once) on a renderer without the production path.
     NphRenderPipeline pipeline;
@@ -1121,6 +1132,7 @@ typedef struct NphRenderFrameStats {
     u32 vis_cells_proxied;       // cells drawn as their proxies (far and fine enough; in view
                                  // or not)
     u32 vis_instances_proxied;   // the instances those proxies stood in for
+    u32 vis_many_rays;           // the rays the many lights' reservoirs asked for (ADR-0074)
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages

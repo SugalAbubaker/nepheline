@@ -431,16 +431,17 @@ vec3 nph_lit_grid(NphLitPoint p, NphRenderLightGrid g, vec2 pixel, float depth)
 // range's window, nph_light_attenuation), without shadows.
 vec3 nph_lit_many(NphLitPoint p, ManyViewRef view)
 {
-    const NphRenderManyView m = view.m;
-    const vec3 x = p.position + m.to_origin.xyz;
-    const uvec3 c = uvec3(ivec3(floor(x * m.to_origin.w)));
-    const uint entry = WordsRef(m.table).w[NPH_RENDER_MANY_HASH(c.x, c.y, c.z) & m.table_mask];
+    const vec4 to_origin = view.m.to_origin;
+    const vec3 x = p.position + to_origin.xyz;
+    const uvec3 c = uvec3(ivec3(floor(x * to_origin.w)));
+    const uint entry = WordsRef(view.m.table).w[NPH_RENDER_MANY_HASH(c.x, c.y, c.z) & view.m.table_mask];
     const uint first = entry & uint(NPH_RENDER_MANY_FIRST_MASK);
     const uint end = first + (entry >> uint(NPH_RENDER_MANY_COUNT_SHIFT));
-    WordsRef indices = WordsRef(m.indices);
+    WordsRef indices = WordsRef(view.m.indices);
+    const uint64_t records = view.m.records;
     vec3 direct = vec3(0.0);
     for (uint i = first; i < end; ++i) {
-        ManyLightRef light = ManyLightRef(m.records)[indices.w[i]];
+        ManyLightRef light = ManyLightRef(records)[indices.w[i]];
         const vec4 at = light.l.position;
         const vec3 to_light = at.xyz - x;
         const float d2_raw = dot(to_light, to_light);
@@ -463,6 +464,254 @@ vec3 nph_lit_many(NphLitPoint p, ManyViewRef view)
     }
     return direct;
 }
+#endif
+
+#ifdef NPH_SURFACE_MANY_ACTIVE
+// nph_lit_reflect's specular lobe alone.
+vec3 nph_lit_specular(NphLitPoint p, vec3 l, float nol, vec3 e)
+{
+    const float vol = dot(p.v, l);
+    const float inv_h = inversesqrt(max(2.0 + 2.0 * vol, 1e-12));
+    const float noh = clamp((p.nov_raw + nol) * inv_h, 0.0, 1.0);
+    const float voh = clamp((1.0 + vol) * inv_h, 0.0, 1.0);
+    const float a2 = p.a2;
+    const float d = (noh * a2 - noh) * noh + 1.0;
+    const float gv = nol * p.smith_v;
+    const float gl = p.nov * sqrt(nol * nol * (1.0 - a2) + a2);
+    const float dv = 0.5 * a2 / (NPH_PI * d * d * max(gv + gl, 1e-8));
+    const float x = 1.0 - voh;
+    const float x2 = x * x;
+    return dv * (p.spec_base + p.spec_grazing * (x2 * x2 * x)) * e * nol;
+}
+
+// A light's far field at the point, as the reservoirs take it: its radiance before
+// visibility (nothing where the surface faces away or the near field has it all), its
+// direction and how far. ADR-0074.
+vec3 nph_many_far_eval(NphLitPoint p, uint64_t records, uint restir, vec3 x, uint i, out vec3 l,
+                       out float d)
+{
+    ManyLightRef light = ManyLightRef(records)[i];
+    const vec4 at = light.l.position;
+    const vec3 to_light = at.xyz - x;
+    const float d2 = max(dot(to_light, to_light), 1e-8);
+    const float inv_d = inversesqrt(d2);
+    l = to_light * inv_d;
+    d = 1.0 / inv_d;
+    const float nol = dot(p.n, l);
+    if (nol <= 0.0) {
+        return vec3(0.0);
+    }
+    const vec4 color = light.l.color;
+    const float share = nph_many_far_share(d2, at.w, color.w);
+    if (share <= 0.0) {
+        return vec3(0.0);
+    }
+    const vec3 e = color.rgb * (share * inv_d * inv_d);
+    if (restir == uint(NPH_RENDER_MANY_RESTIR_SPECULAR)) {
+        // The highlight's single scattering: what scatters more than once is in what the cache
+        // gathers, as the indirect light gives it (nph_surface_shade), and the two terms add up
+        // to the energy term the light has otherwise (spec_base + spec_grazing).
+        return nph_lit_specular(p, l, nol, e) / (p.spec_base + p.spec_grazing);
+    }
+    return nph_lit_reflect(p, l, nol, e);
+}
+
+float nph_many_luminance(vec3 c)
+{
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// The many lights' far fields by a reservoir a pixel (Bitterli et al., "Spatiotemporal
+// Reservoir Resampling for Real-Time Ray Tracing with Dynamic Direct Lighting", SIGGRAPH
+// 2020). A reservoir holds a light known to be seen, how many candidates it has weighed, and a
+// weight W such that W times what the light delivers here is the mean of the candidates'
+// weights: an estimate of all the lights' light that this one light stands for.
+//
+// Every pixel does this: finds the reservoir where its point was in the frame before, shades
+// with it, and carries it to this frame's. What a reservoir learns it learns on its turn, in
+// a pass of its own over a few tiles a frame (nph_many_turn): fused here, that work cost the
+// resolve 0.5 ms for the few pixels that did it, in registers and in lanes kept waiting.
+vec3 nph_lit_many_restir(NphLitPoint p, ManyViewRef view, uvec2 pixel, float depth, float limit)
+{
+    const uint tiles_wide = (view.m.width + 7u) >> 3u;
+    uint light = uint(NPH_RENDER_RESTIR_NO_LIGHT);
+    uint m = 0u;
+    float w = 0.0;
+    vec3 f = vec3(0.0);
+    const vec2 q = (vec2(pixel) + 0.5) * NPH_SURFACE_MANY_INV_SIZE * 2.0 - 1.0;
+    const vec4 was = view.m.reproject * vec4(q, depth, 1.0);
+    if (was.w > 0.0) {
+        const ivec2 at = ivec2(floor(((was.xy / was.w) * 0.5 + 0.5) / NPH_SURFACE_MANY_INV_SIZE));
+        if (all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, ivec2(1.0 / NPH_SURFACE_MANY_INV_SIZE)))) {
+            const uvec2 r = ManyReservoirsRef(view.m.prev_reservoirs).r[nph_many_tiled(uvec2(at), tiles_wide)];
+            const float was_depth = was.z / was.w;
+            // Within 1.5 % of the depth it had: the same surface.
+            if (abs(unpackHalf2x16(r.y >> 16u).x - was_depth) <= 0.015 * was_depth) {
+                m = (r.x >> uint(NPH_RENDER_RESTIR_M_SHIFT)) & uint(NPH_RENDER_RESTIR_M_MASK);
+                light = r.x & uint(NPH_RENDER_RESTIR_NO_LIGHT);
+                if (light < uint(NPH_RENDER_RESTIR_NO_LIGHT)) {
+                    vec3 l;
+                    float d;
+                    f = nph_many_far_eval(p, view.m.records, view.m.restir, p.position + view.m.to_origin.xyz, light, l, d);
+                    w = unpackHalf2x16(r.y & 0xFFFFu).x * 64.0;
+                }
+            }
+        }
+    }
+    const uvec3 facing = uvec3((p.face_normal * 0.5 + 0.5) * 3.999);
+    ManyReservoirsRef(view.m.reservoirs).r[nph_many_tiled(pixel, tiles_wide)] =
+        uvec2(light | (m << uint(NPH_RENDER_RESTIR_M_SHIFT)) | (facing.x << 26u) | (facing.y << 28u) | (facing.z << 30u),
+              packHalf2x16(vec2(min(w, 4.0e6) * (1.0 / 64.0), depth)));
+    // What it shows is limited, what it remembers is not: a bright candidate early in a
+    // reservoir's life is a fair sample, and clipping it there would stay dark for the
+    // reservoir's long memory.
+    const float shown = nph_many_luminance(f) * w;
+    return shown > limit ? f * (w * limit / shown) : f * w;
+}
+
+#ifdef NPH_SURFACE_MANY_TURNS
+// A reservoir's turn. What a reservoir estimates is what reaches the pixel, so a candidate's
+// weight counts only if the candidate is seen. A turn weighs a few candidates, which cost
+// little, and one chosen by weight stands for all with one ray, which costs more (resampled
+// importance sampling; Talbot et al., EGSR 2005); or it weighs what a neighbour's reservoir
+// holds, as seen from here, which is what brings a light rarely drawn to the pixels around
+// (Bitterli et al.'s spatial reuse). What a turn weighs next to the reservoir's mean may be
+// so little that it plays Russian roulette for its ray and, surviving, weighs that much more:
+// the same on average, and a specular lobe's many small candidates cost no ray. Every fourth
+// turn of a full reservoir looks for its own light again instead, so that what has moved
+// shows: no longer seen, the reservoir starts again.
+void nph_many_turn(NphLitPoint p, ManyViewRef view, uvec2 pixel)
+{
+    const uint restir = view.m.restir;
+    const uint64_t records = view.m.records;
+    const uint frame = view.m.frame;
+    const vec3 x = p.position + view.m.to_origin.xyz;
+    const ivec2 bound = ivec2(1.0 / NPH_SURFACE_MANY_INV_SIZE);
+    const uint here = nph_many_tiled(pixel, (view.m.width + 7u) >> 3u);
+    const uvec2 r = ManyReservoirsRef(view.m.reservoirs).r[here];
+    const uint light = r.x & uint(NPH_RENDER_RESTIR_NO_LIGHT);
+    const uint m = (r.x >> uint(NPH_RENDER_RESTIR_M_SHIFT)) & uint(NPH_RENDER_RESTIR_M_MASK);
+    const uint facing = r.x & 0xFC000000u;
+    const float depth = unpackHalf2x16(r.y >> 16u).x;
+    float w_light = 0.0;
+    float phat = 0.0;
+    vec3 l_light = vec3(0.0);
+    float d_light = 0.0;
+    if (light < uint(NPH_RENDER_RESTIR_NO_LIGHT)) {
+        phat = nph_many_luminance(nph_many_far_eval(p, records, restir, x, light, l_light, d_light));
+        w_light = unpackHalf2x16(r.y & 0xFFFFu).x * 64.0;
+    }
+    const float mass = phat * w_light;
+    const uint turn = nph_many_beat(pixel, frame) >> uint(NPH_RENDER_RESTIR_FULL_BITS);
+    uvec3 u = gi_pcg3d(uvec3(pixel, frame));
+    if (m >= uint(NPH_RENDER_RESTIR_FEW) && (turn & 3u) == 3u && w_light > 0.0) {
+        atomicAdd(NPH_SURFACE_MANY_RAYS, 1u);
+        if (NPH_SURFACE_SHADOW(p, l_light, d_light) < 0.5) {
+            ManyReservoirsRef(view.m.reservoirs).r[here] =
+                uvec2(uint(NPH_RENDER_RESTIR_NO_LIGHT) | facing, r.y & 0xFFFF0000u);
+        }
+        return;
+    }
+
+    // What the turn weighs, how many candidates that counts for, and the one that stands for it.
+    uint c = uint(NPH_RENDER_RESTIR_NO_LIGHT);
+    float phat_c = 0.0;
+    vec3 l_c = vec3(0.0);
+    float d_c = 0.0;
+    float sum_w = 0.0;
+    uint inc = 0u;
+    if (m < uint(NPH_RENDER_RESTIR_CANDIDATES) || (turn & 1u) != 0u) {
+        // Neighbours within 16 pixels at 2160 lines.
+        const int reach = max(bound.y >> 7, 1);
+        for (uint i = 0u; i < uint(NPH_RENDER_RESTIR_NEIGHBOURS); ++i) {
+            const ivec2 near_at = clamp(ivec2(pixel) + ivec2(uvec2(((u.x >> 16u) * uint(2 * reach + 1)) >> 16u,
+                                                                  ((u.y >> 16u) * uint(2 * reach + 1)) >> 16u)) - ivec2(reach),
+                                        ivec2(0), bound - 1);
+            const uvec2 near = ManyReservoirsRef(view.m.prev_reservoirs).r[nph_many_tiled(uvec2(near_at), (view.m.width + 7u) >> 3u)];
+            const uint m_near = (near.x >> uint(NPH_RENDER_RESTIR_M_SHIFT)) & uint(NPH_RENDER_RESTIR_M_MASK);
+            const uint light_near = near.x & uint(NPH_RENDER_RESTIR_NO_LIGHT);
+            const float w_near = unpackHalf2x16(near.y & 0xFFFFu).x * 64.0;
+            if (m_near != 0u && (near.x & 0xFC000000u) == facing &&
+                abs(unpackHalf2x16(near.y >> 16u).x - depth) <= 0.05 * depth) {
+                // One that has found no light counts too: what it weighed came to nothing, and
+                // to leave it out would be to average the lucky ones.
+                inc += m_near;
+                if (light_near < uint(NPH_RENDER_RESTIR_NO_LIGHT) && w_near > 0.0) {
+                    vec3 l_i;
+                    float d_i;
+                    const float phat_i = nph_many_luminance(nph_many_far_eval(p, records, restir, x, light_near, l_i, d_i));
+                    const float w_i = phat_i * w_near * float(m_near);
+                    sum_w += w_i;
+                    if (w_i > 0.0 && float(u.z >> 8u) * (1.0 / 16777216.0) * sum_w < w_i) {
+                        c = light_near;
+                        phat_c = phat_i;
+                        l_c = l_i;
+                        d_c = d_i;
+                    }
+                }
+            }
+            u = gi_pcg3d(u);
+        }
+    }
+    if (inc == 0u) {
+        // Candidates from lists near this tile: which lists do not show the tiles.
+        for (uint i = 0u; i < uint(NPH_RENDER_RESTIR_CANDIDATES); ++i) {
+            const ivec2 jittered = clamp(ivec2(pixel) + ivec2(uvec2((u.x >> 8u) & 31u, u.z & 31u)) - ivec2(16), ivec2(0), bound - 1);
+            const uvec2 tile = uvec2(jittered) / uint(NPH_RENDER_LIGHT_TILE);
+            const uint place = (tile.y * view.m.tiles_x + tile.x) * uint(NPH_RENDER_MANY_TILE_LIGHTS) + (u.x >> 29u);
+            const uvec2 entry = ManyReservoirsRef(view.m.tiles).r[place];
+            if (entry.x < view.m.count) {
+                vec3 l_i;
+                float d_i;
+                const float phat_i = nph_many_luminance(nph_many_far_eval(p, records, restir, x, entry.x, l_i, d_i));
+                const float w_i = phat_i / uintBitsToFloat(entry.y);
+                sum_w += w_i;
+                inc += 1u;
+                if (w_i > 0.0 && float(u.y >> 8u) * (1.0 / 16777216.0) * sum_w < w_i) {
+                    c = entry.x;
+                    phat_c = phat_i;
+                    l_c = l_i;
+                    d_c = d_i;
+                }
+            }
+            u = gi_pcg3d(u);
+        }
+    }
+    if (inc == 0u) {
+        return;
+    }
+
+    const uint n = m + inc;
+    uint out_light = light;
+    float out_w = w_light * float(m) / float(n);
+    if (sum_w > 0.0) {
+        if (c == light && w_light > 0.0) {
+            // Its own light, known to be seen: no ray.
+            out_w += sum_w / (float(n) * phat);
+        } else {
+            const float least = mass * float(inc);
+            if (sum_w < least) {
+                sum_w = float(u.z >> 8u) * (1.0 / 16777216.0) * least < sum_w ? least : 0.0;
+            }
+            if (sum_w > 0.0) {
+                atomicAdd(NPH_SURFACE_MANY_RAYS, 1u);
+                if (NPH_SURFACE_SHADOW(p, l_c, d_c) > 0.5) {
+                    const float total = mass * float(m) + sum_w;
+                    const bool takes = mass <= 0.0 || float(u.y >> 8u) * (1.0 / 16777216.0) * total < sum_w;
+                    const float phat_seen = takes ? phat_c : phat;
+                    out_w = total / (float(n) * phat_seen);
+                    if (takes) {
+                        out_light = c;
+                    }
+                }
+            }
+        }
+    }
+    ManyReservoirsRef(view.m.reservoirs).r[here] =
+        uvec2(out_light | (min(n, uint(NPH_RENDER_RESTIR_M_CAP)) << uint(NPH_RENDER_RESTIR_M_SHIFT)) | facing,
+              (r.y & 0xFFFF0000u) | (packHalf2x16(vec2(min(out_w, 4.0e6) * (1.0 / 64.0), 0.0)) & 0xFFFFu));
+}
+#endif
 #endif
 
 // The irradiance debug view (NPH_RENDER_DEBUG_IRRADIANCE): the diffuse
@@ -565,7 +814,11 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     // the environment's: it holds the environment's light too, occluded by
     // the scene, and the light the scene reflects (with no environment, the
     // sun's alone).
+#ifdef NPH_SURFACE_MANY_TURNS
+    const bool ibl = false;
+#else
     const bool ibl = (view.v.flags & NPH_RENDER_VIEW_IBL) != 0u;
+#endif
 #ifdef NPH_SURFACE_GI
     const bool gi = NPH_SURFACE_GI_ACTIVE;
 #else
@@ -595,7 +848,8 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         // The many lights' far fields have no highlights of their own: what the cell
         // gathered, as if arriving evenly from everywhere, gives the specular its
         // energy, which the diffuse below gives up.
-        if (NPH_SURFACE_MANY_ACTIVE && gi) {
+        if (NPH_SURFACE_MANY_ACTIVE && gi &&
+            ManyViewRef(view.v.many).m.restir == uint(NPH_RENDER_MANY_RESTIR_OFF)) {
             const vec4 far_cell = NPH_SURFACE_GI;
             radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
         }
@@ -665,6 +919,11 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     lp.spec_base = energy * f0;
     lp.spec_grazing = energy - lp.spec_base;
     lp.face_normal = s.face_normal;
+#ifdef NPH_SURFACE_MANY_TURNS
+    // The reservoir's turn.
+    nph_many_turn(lp, ManyViewRef(view.v.many), uvec2(s.pixel));
+    return vec3(0.0);
+#else
 #ifdef NPH_SURFACE_VSM
     lp.sun_visibility = NPH_SURFACE_VSM_ACTIVE ? NPH_SURFACE_VSM(lp) : 1.0;
 #endif
@@ -673,6 +932,11 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
     if (NPH_SURFACE_MANY_ACTIVE) {
         direct += nph_lit_many(lp, ManyViewRef(view.v.many));
+        if (ManyViewRef(view.v.many).m.restir != uint(NPH_RENDER_MANY_RESTIR_OFF)) {
+            // Pre-exposed, at most this many times the display's white.
+            direct += nph_lit_many_restir(lp, ManyViewRef(view.v.many), uvec2(s.pixel), s.depth,
+                                          4.0 / view.v.exposure);
+        }
     }
 #else
     const vec3 direct = nph_lit_grid(lp, LightGridRef(view.v.light_grid).g, s.pixel, s.depth);
@@ -692,6 +956,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         return min(direct * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
     }
     return min((direct + rest) * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
+#endif
 }
 
 #ifdef NPH_SURFACE_VOXEL

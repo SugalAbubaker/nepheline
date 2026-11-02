@@ -2387,9 +2387,46 @@ new buffers: the frames in flight keep reading the old ones, which go when they 
 `NphRenderFrameStats.many_lights_rebuilt` says when. So these lights are for what rarely
 changes.
 
-The specular their far fields give is what the cell gathered, taken as arriving evenly
-from everywhere (the diffuse gives up that energy already): metals are lit, and a far
-candle has no highlight of its own, which is what reflections' rays are for.
+The specular their far fields give is by default the reservoirs' (below). Without them
+(`NPH_RENDER_RESTIR_OFF`, or no ray queries) it is what the cell gathered, taken as arriving
+evenly from everywhere (the diffuse gives up that energy already): metals are lit, and a far
+candle has no highlight of its own.
+
+#### Reservoirs
+
+Per-pixel reservoirs (ADR-0074; Bitterli et al., SIGGRAPH 2020) give the far fields their
+highlights, each light's shadow ray traced. A reservoir is 8 bytes a pixel: a light, how many
+candidates it has weighed, which way its surface faces, a weight W and a depth. W times what
+the light delivers at the pixel is the mean of the candidates' weights, an estimate of all
+the lights' light that this one light stands for.
+
+| Pass | Runs over | What it does |
+|---|---|---|
+| `many tiles` (`many_tiles.comp`) | each 16-pixel tile | replaces one of the 8 lights of its list, from the tree at a random point of the tile |
+| `vis resolve` (`nph_lit_many_restir`, surface.glsl) | every pixel | finds the reservoir where the pixel's point was (reprojected, its depth within 1.5 %), shades with its one light, and carries it to this frame's buffer |
+| `many turns` (`many_turns.comp`, `nph_many_turn`) | the tiles whose turn it is | decodes the pixel as the resolve does, weighs candidates, and traces the one ray that stands for them |
+
+A tile's reservoirs take a turn once in 32 frames, once in 8 while they have weighed fewer
+than 16, all together: a lane at work costs its subgroup's every lane the work's time, so
+turns scattered by pixel cost the frame as if every tile took them. The turns cycle: 4
+candidates from the tile lists, then 2 neighbours' reservoirs (within 16 pixels at 2160
+lines, of a depth and facing that agree), then candidates, then the reservoir's own light
+looked for again, starting over if it is no longer seen.
+
+A candidate's weight counts only if the candidate is seen. A turn's candidates share one ray:
+one, chosen by weight, stands for all (resampled importance sampling). What a turn weighs
+next to the reservoir's mean may be so little that it plays Russian roulette for the ray and,
+surviving, weighs that much more, the same on average.
+
+`NphRenderView.many_restir` says what they take: `NPH_RENDER_RESTIR_SPECULAR`, the default, the
+highlights' single scattering, with the diffuse light and what scatters more than once left
+to the cache, which has no noise; `NPH_RENDER_RESTIR_ALL`, all of it, which is noisier and is
+for comparing with the truth; `NPH_RENDER_RESTIR_OFF`, none. They start again when the set of
+lights is rebuilt, when the mode changes, and at a new size. `NphRenderFrameStats.vis_many_rays`
+counts the rays they asked for.
+
+What they cost and what they do not do yet (a light that comes into view takes many seconds to
+count in full, and a pixel's colour is one light's at a time) are in ADR-0074.
 
 A mesh of many small things (the candles' 19.5 million triangles) stays out of the rays
 with `NphRenderMeshDesc.no_rays`, which a cooked mesh takes from its glTF extras
