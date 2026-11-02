@@ -149,6 +149,18 @@ typedef struct EngineCvars {
     NphCvar audio_real_voices;     // audio.real_voices
     NphCvar audio_streams;         // audio.streams
     NphCvar audio_stream_seconds;  // audio.stream_seconds
+    NphCvar max_instances;         // r.max_instances
+    NphCvar max_meshes;            // r.max_meshes
+    NphCvar max_materials;         // r.max_materials
+    NphCvar max_textures;          // r.max_textures
+    NphCvar max_lights;            // r.max_lights
+    NphCvar max_cells;             // r.max_cells
+    NphCvar max_assets;            // r.max_assets
+    NphCvar deferred_destroys;     // r.deferred_destroys
+    NphCvar lists;                 // r.lists
+    NphCvar voxel_pool_mb;         // r.voxel_pool_mb
+    NphCvar proxy_budget_mb;       // r.proxy_budget_mb
+    NphCvar texture_budget_mb;     // r.texture_budget_mb
     NphCvar audio_volume;          // audio.volume: the master's
     NphCvar audio_volume_effects;  // audio.volume_effects
     NphCvar audio_volume_music;    // audio.volume_music

@@ -757,17 +757,7 @@ static NphResult create_renderer(App *app, u64 voxel_pool_bytes)
     rd.max_lights = MAX_LIGHTS;
     rd.voxel_pool_bytes = voxel_pool_bytes;
     rd.max_deferred = (1U << 20U) * lists;
-    if (lists > 1U) {
-        rd.max_visible_clusters = 524288U * lists;
-        rd.max_cull_meshlets = (1U << 20U) * lists;
-        rd.max_lod_nodes = (1U << 18U) * lists;
-        // The flat cull's want no more than the city's: voxel meshes, the landscape's,
-        // whose lists these scale for, walk their hierarchies.
-        rd.max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
-        rd.max_vsm_meshlets = (1U << 20U) * lists;
-        rd.max_vsm_draws = (1U << 20U) * lists;
-        rd.max_vsm_voxel_draws = (1U << 20U) * lists;
-    }
+    nph_renderer_desc_scale_lists(&rd, lists);
     if (app->opt.texture_budget_mb != 0U) {
         // The pool holds the budget and the textures' small levels.
         rd.texture_page_bytes = app->opt.texture_budget_mb * 1000000ULL + NPH_MIB(512);

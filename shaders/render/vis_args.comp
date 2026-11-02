@@ -43,12 +43,23 @@ void main()
         for (uint k = 0u; k < uint(NPH_VIS_RASTER_KINDS); ++k) {
             // A mesh-task workgroup per hardware cluster, a compute
             // workgroup per software or voxel one.
-            const bool compute =
-                k == uint(NPH_VIS_RASTER_SOFTWARE) || k == uint(NPH_VIS_RASTER_VOXEL);
+            const bool compute = k == uint(NPH_VIS_RASTER_SOFTWARE) ||
+                                 k == uint(NPH_VIS_RASTER_SOFTWARE_MASKED) ||
+                                 k == uint(NPH_VIS_RASTER_VOXEL);
             const uint max_x = compute ? VIS_MAX_GROUPS_X : max_mesh_x;
             const uvec4 a = groups(counters.c.raster_count[p][k], max_x);
             args.a.raster_args[p][k] = uint[4](a.x, a.y, a.z, a.w);
         }
+        // The small masked clusters: in compute, unless on the mesh path they
+        // are too few to pay for a dispatch's floor and its barrier (ADR-0071),
+        // when the masked pass draws them. Either raster draws them alike.
+        const uint small = counters.c.raster_count[p][NPH_VIS_RASTER_SOFTWARE_MASKED];
+        const bool hardware = (view.v.flags & NPH_VIS_VIEW_MESH_SHADERS) != 0u &&
+                              small < view.v.sw_masked_min;
+        const uvec4 c = groups(hardware ? 0u : small, VIS_MAX_GROUPS_X);
+        args.a.raster_args[p][NPH_VIS_RASTER_SOFTWARE_MASKED] = uint[4](c.x, c.y, c.z, c.w);
+        const uvec4 m = groups(hardware ? small : 0u, max_mesh_x);
+        args.a.sw_masked_hw_args[p] = uint[4](m.x, m.y, m.z, m.w);
         break;
     }
     case NPH_VIS_ARGS_PHASE2: {

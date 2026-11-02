@@ -644,6 +644,7 @@ typedef enum VisShader {
     // Where textures are paged (paging.c; ADR-0065): the pass that asks for
     // the pages the opaque pixels sample.
     VIS_SHADER_PAGE_REQUESTS,
+    VIS_SHADER_SW_RASTER_MASKED,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -659,10 +660,11 @@ typedef enum VisCompute {
     VIS_COMPUTE_LIGHTS,
     VIS_COMPUTE_LIGHT_BINS,
     VIS_COMPUTE_LIGHT_TILES,
-    VIS_COMPUTE_CULL_NODES,   // a step down the levels of detail's hierarchies
-    VIS_COMPUTE_CULL_GROUPS,  // the flat cull of the groups of an instance's levels
-    VIS_COMPUTE_VOXEL_RASTER, // voxel clusters (ADR-0061)
-    VIS_COMPUTE_CULL_CELLS,   // a world partition's cells, first (ADR-0064)
+    VIS_COMPUTE_CULL_NODES,       // a step down the levels of detail's hierarchies
+    VIS_COMPUTE_CULL_GROUPS,      // the flat cull of the groups of an instance's levels
+    VIS_COMPUTE_VOXEL_RASTER,     // voxel clusters (ADR-0061)
+    VIS_COMPUTE_CULL_CELLS,       // a world partition's cells, first (ADR-0064)
+    VIS_COMPUTE_SW_RASTER_MASKED, // small masked clusters (ADR-0071)
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both

@@ -76,6 +76,8 @@ supersedes it and both link to each other.
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted |
 | [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted |
+| [0071](0071-small-masked-clusters-in-software.md) | Small masked clusters in the software raster | Accepted |
+| [0072](0072-world-partition-in-the-runtime.md) | The world partition in the engine's runtime | Accepted |
 
 ## Template
 

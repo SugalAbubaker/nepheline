@@ -395,7 +395,12 @@ void args(VisViewRef view, VsmViewRef r)
             uint partial = uint(NPH_VSM_LEVELS);
             uint quota = 0u;
             bool informed = known;
-            for (int level = NPH_VSM_LEVELS - 1; level >= 0; --level) {
+            // A loop that tests at its end: llvmpipe goes on through a body with an empty
+            // mask once the last lane has left, taking an index it thinks uniform from lane 0,
+            // so a test at the top would load s_levels[-1] (docs/build.md "Shaders").
+            int level = NPH_VSM_LEVELS;
+            do {
+                --level;
                 const uint w = s_levels[level].wanted;
                 const vec4 own = s_levels[level].cost;
                 const bool measured = any(greaterThan(own, vec4(0.0)));
@@ -415,7 +420,7 @@ void args(VisViewRef view, VsmViewRef r)
                 } else {
                     full = uint(level);
                 }
-            }
+            } while (level > 0);
             // A page a frame however dear: the coarsest wanted level's first.
             if (granted == 0u && partial != uint(NPH_VSM_LEVELS)) {
                 quota = uint(NPH_VSM_MIN_BUDGET);

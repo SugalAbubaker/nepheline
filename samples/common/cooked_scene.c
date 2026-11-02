@@ -541,7 +541,7 @@ static NphResult create_cells(CookedScene *s, const NphSceneView *sv, NphDVec3 o
             pc.center = d.center;
             pc.extent = d.extent;
             pc.distance = d.distance;
-            NPH_TRY(nph_proxy_stream_add(s->stream, &pc));
+            NPH_TRY(nph_proxy_stream_add(s->stream, &pc, NULL));
         }
     }
     return NPH_RESULT_OK;

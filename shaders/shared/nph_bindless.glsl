@@ -48,6 +48,11 @@ vec4 nph_sample_2d_lod(uint tex, uint smp, vec2 uv, float lod)
     return textureLod(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), uv, lod);
 }
 
+vec4 nph_sample_2d_grad(uint tex, uint smp, vec2 uv, vec2 ddx_uv, vec2 ddy_uv)
+{
+    return textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), uv, ddx_uv, ddy_uv);
+}
+
 vec4 nph_fetch_2d(uint tex, ivec2 texel, int lod)
 {
     return texelFetch(nph_textures_2d[nonuniformEXT(tex)], texel, lod);

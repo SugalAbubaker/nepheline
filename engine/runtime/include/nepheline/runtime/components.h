@@ -7,6 +7,8 @@
 //   MeshRenderer  a cooked mesh and the material of each of its slots,
 //                 by GUID (scene files keep the references; the scene
 //                 renderer, scene_render.h, loads and draws them)
+//   MeshMaterials the material slots past a MeshRenderer's eight, for the
+//                 rare mesh with more
 //   Light         a punctual light at the entity, shining along its -Z
 //   Camera        a perspective camera at the entity, looking along -Z;
 //                 the first active one is the game's view
@@ -16,6 +18,8 @@
 //                 own
 //   AudioSource   a sound the entity plays while the world plays
 //   AudioListener where spatial sounds are heard from
+//   WorldCell     a cell of a world partition: the mesh instances that name
+//                 it, and the proxy that stands for them from afar
 //
 // Every world the engine creates registers them right after the built-in
 // components (scene/world.h), in this order, so their ids are the same in
@@ -38,8 +42,10 @@ extern "C" {
 
 #define NPH_MESH_RENDERER_MATERIALS 8U
 
-// Material slot i of the mesh draws with material<i>; a null GUID, or a
-// slot past the eighth, draws with the default material.
+// Material slot i of the mesh draws with material<i>; a null GUID draws with the
+// default material, and so does a slot past the eighth, unless the entity has a
+// MeshMaterials for it. `cell`: the id of the WorldCell it belongs to (0: none),
+// whose proxy stands for it from afar.
 #define NPH_MESH_RENDERER_FIELDS(F)                                                                \
     F(GUID, mesh, NPH_FIELD_NO_HINTS)                                                              \
     F(GUID, material0, NPH_FIELD_NO_HINTS)                                                         \
@@ -50,7 +56,8 @@ extern "C" {
     F(GUID, material5, NPH_FIELD_NO_HINTS)                                                         \
     F(GUID, material6, NPH_FIELD_NO_HINTS)                                                         \
     F(GUID, material7, NPH_FIELD_NO_HINTS)                                                         \
-    F(BOOL, hidden, NPH_FIELD_NO_HINTS)
+    F(BOOL, hidden, NPH_FIELD_NO_HINTS)                                                            \
+    F(U32, cell, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphMeshRenderer, NPH_MESH_RENDERER_FIELDS);
 NPH_COMPONENT_DECLARE(NphMeshRenderer);
 
@@ -80,6 +87,59 @@ NPH_STATIC_ASSERT(sizeof(NphMeshRenderer) == 152U, "MeshRenderer is 152 bytes");
 NPH_STATIC_ASSERT(offsetof(NphMeshRenderer, material7) ==
                       offsetof(NphMeshRenderer, material0) + 7U * sizeof(NphGuid),
                   "the material GUIDs are consecutive");
+
+// The slots from the ninth on, for a mesh of many materials: most have one or
+// two, and every entity of a large world carries a MeshRenderer. Read when the
+// MeshRenderer's mesh or materials are (a change here alone goes unseen: touch
+// the MeshRenderer too).
+#define NPH_MESH_MATERIALS_EXTRA 24U
+#define NPH_MESH_MATERIALS_FIELDS(F)                                                               \
+    F(GUID, material8, NPH_FIELD_NO_HINTS)                                                         \
+    F(GUID, material9, NPH_FIELD_NO_HINTS)                                                         \
+    F(GUID, material10, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material11, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material12, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material13, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material14, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material15, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material16, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material17, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material18, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material19, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material20, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material21, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material22, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material23, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material24, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material25, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material26, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material27, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material28, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material29, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material30, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, material31, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphMeshMaterials, NPH_MESH_MATERIALS_FIELDS);
+NPH_COMPONENT_DECLARE(NphMeshMaterials);
+
+NPH_STATIC_ASSERT(sizeof(NphMeshMaterials) == NPH_MESH_MATERIALS_EXTRA * sizeof(NphGuid),
+                  "the extra material GUIDs are consecutive");
+
+// The GUID of slot `slot` from its first extra slot on (NPH_GUID_NULL past the last).
+NPH_INLINE NphGuid nph_mesh_materials_get(const NphMeshMaterials *m, u32 slot)
+{
+    NphGuid g = NPH_GUID_NULL;
+    if (slot < NPH_MESH_MATERIALS_EXTRA) {
+        memcpy(&g, (const u8 *)m + (u64)slot * sizeof(NphGuid), sizeof g);
+    }
+    return g;
+}
+
+NPH_INLINE void nph_mesh_materials_set(NphMeshMaterials *m, u32 slot, NphGuid material)
+{
+    if (slot < NPH_MESH_MATERIALS_EXTRA) {
+        memcpy((u8 *)m + (u64)slot * sizeof(NphGuid), &material, sizeof material);
+    }
+}
 
 typedef enum NphLightType {
     NPH_LIGHT_DIRECTIONAL = 0, // intensity in lux
@@ -302,6 +362,25 @@ bool nph_collider_shape(const NphCollider *collider, NphVec3 scale,
                         NphPhysicsGeometry *out_geometry, NphPhysicsPose *out_pose);
 
 // The ids of the runtime's components in a world.
+// A cell of a world partition (ADR-0062, ADR-0072; docs/runtime.md "World
+// partition"). `id`, nonzero and unique in its world, is what MeshRenderers
+// name it by. Its box and its proxy's place are relative to the entity, whose
+// world transform may only move them. `proxy` is its proxy's mesh, a head of
+// levels apart that the scene renderer streams, or a mesh cooked whole (null:
+// no proxy, and its instances draw as themselves), drawn with `proxy_material`
+// from `proxy_distance` on; `proxy_cell` is the error of its finest level.
+#define NPH_WORLD_CELL_FIELDS(F)                                                                   \
+    F(U32, id, NPH_FIELD_NO_HINTS)                                                                 \
+    F(VEC3, bounds_min, NPH_FIELD_NO_HINTS)                                                        \
+    F(VEC3, bounds_max, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, proxy, NPH_FIELD_NO_HINTS)                                                             \
+    F(GUID, proxy_material, NPH_FIELD_NO_HINTS)                                                    \
+    F(VEC3, proxy_origin, NPH_FIELD_NO_HINTS)                                                      \
+    F(F32, proxy_cell, NPH_FIELD_NO_HINTS)                                                         \
+    F(F32, proxy_distance, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphWorldCell, NPH_WORLD_CELL_FIELDS);
+NPH_COMPONENT_DECLARE(NphWorldCell);
+
 typedef struct NphRuntimeComponents {
     NphComponentId mesh_renderer;
     NphComponentId light;
@@ -311,9 +390,11 @@ typedef struct NphRuntimeComponents {
     NphComponentId collider;
     NphComponentId audio_source;
     NphComponentId audio_listener;
+    NphComponentId world_cell;
+    NphComponentId mesh_materials;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 8U
+#define NPH_RUNTIME_COMPONENT_COUNT 10U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

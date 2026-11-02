@@ -450,7 +450,7 @@ again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
 more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
 spread). `benchmarks/reference_budgets.txt` is generated from
-`reference_scenes-2026-10-31b`, Bistro and the city, a process a scene as
+`reference_scenes-2026-11-01`, Bistro and the city, a process a scene as
 the nightly runs them. The landscape has no rows there: the nightly does not
 run it.
 

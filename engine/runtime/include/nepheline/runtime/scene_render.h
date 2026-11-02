@@ -61,6 +61,13 @@
 // discontinuous move (a teleport, a respawn): drawn where it lands, not on
 // the way there.
 //
+// A world partition (ADR-0072; docs/runtime.md "World partition"): a WorldCell
+// becomes a render cell, made with its proxy's coarsest level once that has
+// loaded, the mesh instances that name it waiting until then, and they then
+// belong to it. Each frame, between nph_gpu_frame_begin and nph_render_frame,
+// nph_scene_renderer_stream streams the cells' finer levels and, with a texture
+// budget, the textures' levels.
+//
 // Costs (§1.4): create allocates the asset cache and an entity table the
 // size of the world's capacity; render resources, asset loads, the pending
 // list, every mirrored entity's last world transform (64 bytes), and the
@@ -72,6 +79,8 @@
 #include <nepheline/asset/loader.h>
 #include <nepheline/render/renderer.h>
 #include <nepheline/runtime/components.h>
+#include <nepheline/runtime/proxy_stream.h>
+#include <nepheline/runtime/texture_stream.h>
 #include <nepheline/scene/transform.h>
 
 #ifdef __cplusplus
@@ -87,6 +96,17 @@ typedef struct NphSceneRendererDesc {
     NphWorld *world;        // required: the world to mirror
     u32 max_assets;         // meshes, materials, and textures cached at once (0: 4096)
     f32 emissive_scale;     // cd/m^2 per unit of glTF emissive (0: 1)
+    // A world partition's cells (0: 4096): as NphRendererDesc.max_cells.
+    u32 max_cells;
+    // The bytes the cells' finer proxy levels may take on the GPU (0: unlimited),
+    // made on these jobs in the renderer's voxel pool where there is one (NULL: on
+    // the main thread; `alloc` must then be thread-safe; proxy_stream.h).
+    u64 proxy_budget_bytes;
+    NphJobSystem *jobs;
+    // The bytes paged textures' levels may take on the GPU, above their small
+    // levels (0: textures are resident whole; texture_stream.h). Needs the
+    // renderer's page memory to hold it (NphRendererDesc.texture_page_bytes).
+    u64 texture_budget_bytes;
 } NphSceneRendererDesc;
 
 typedef struct NphSceneRenderStats {
@@ -102,6 +122,13 @@ typedef struct NphSceneRenderStats {
     u32 destroyed;     // instances destroyed by the last sync
     u32 moved;         // instances whose transform the last sync wrote
     u32 interpolating; // entities the last sync drew between two simulated states
+    u32 cells;         // render cells alive
+    u32 cells_loading; // WorldCells whose proxy is loading (their instances wait)
+    // What the streams hold, as of their last update (nph_scene_renderer_stream).
+    u32 proxy_levels; // past the cells' coarsest
+    u64 proxy_bytes;
+    u32 texture_levels; // above the textures' small levels
+    u64 texture_bytes;
 } NphSceneRenderStats;
 
 // NPH_RESULT_INVALID_ARGUMENT for a missing field, a world without the
@@ -154,6 +181,24 @@ NPH_MUST_USE NphResult nph_scene_renderer_capture(NphSceneRenderer *sr);
 // capture and the sync. Nothing for a dead entity.
 void nph_scene_renderer_snap(NphSceneRenderer *sr, NphEntity entity);
 
+// One frame's streaming for `view`, drawn `height` pixels tall: the cells' finer
+// proxy levels and the textures' levels (proxy_stream.h, texture_stream.h; both
+// are given the camera or the views' requests, and take their budgets). Between
+// nph_gpu_frame_begin and nph_render_frame. Nothing to do where there is no cell
+// or texture stream. Fails only where the renderer refuses them.
+NPH_MUST_USE NphResult nph_scene_renderer_stream(NphSceneRenderer *sr, const NphRenderView *view,
+                                                 u32 height);
+
+// The proxy stream and the texture stream, for tools and tests (NULL: none yet;
+// a proxy stream comes with the first cell that streams, a texture stream with a
+// budget, on a device that pages).
+const NphProxyStream *nph_scene_renderer_proxy_stream(const NphSceneRenderer *sr);
+const NphTextureStream *nph_scene_renderer_texture_stream(const NphSceneRenderer *sr);
+
+// The render cell of a WorldCell's id, or a null handle while it has none (it is
+// loading, it has no proxy, or there is no such cell).
+NphRenderCell nph_scene_renderer_cell(const NphSceneRenderer *sr, u32 id);
+
 // Blocks until every asset in flight has loaded or failed (tests, loading
 // screens). The next sync then creates whatever was waiting.
 void nph_scene_renderer_wait(NphSceneRenderer *sr);
@@ -205,6 +250,10 @@ typedef struct NphSceneImportDesc {
     NphLocalTransform root_transform; // the new root's local transform
     const char *name;                 // the new root's Name (NULL: "scene")
     NphAllocator *scratch;            // temporary tables (NULL: the system allocator)
+    b32 no_cells;                     // its instances in no WorldCell, whatever it holds
+    // Its nodes and mesh instances alone: no lights or cameras (a further tile
+    // of a world made of one scene over and over, whose sun is the first's).
+    b32 instances_only;
 } NphSceneImportDesc;
 
 // Spawns a cooked scene into the world: one root entity named `name`, and
@@ -213,7 +262,11 @@ typedef struct NphSceneImportDesc {
 // instance (the mesh and its materials by GUID), a Light for each light,
 // and a Camera for each perspective camera (inactive: the importer does
 // not take the view). A node holding more than one instance, light, or
-// camera gets one child entity per extra one. Loads the scene asset
+// camera gets one child entity per extra one. A scene with a world partition's
+// cells (asset/scene.h version 2) also gets a child of the root per cell with a
+// WorldCell of a new id, which its instances' MeshRenderers name; but where the
+// root's transform turns or scales it, whose cells could not follow, its
+// instances are in no cell (logged). Loads the scene asset
 // synchronously (it blocks) and releases it before returning; the meshes
 // and materials load when a scene renderer draws them. `out_root` and
 // `out_count` (entities created, the root included) may be NULL.

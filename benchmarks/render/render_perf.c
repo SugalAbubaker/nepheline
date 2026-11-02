@@ -2307,21 +2307,7 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *fil
             lists = nph_max_u32(lists, g_manifests[g_ref_scenes[i].manifest].lists);
         }
     }
-    if (lists > 1U) {
-        // Every list that can drop work, larger (the renderer clamps them to
-        // what its records can address): what a scene that overflows the
-        // defaults needs.
-        rd.max_visible_clusters = 524288U * lists;
-        rd.max_cull_meshlets = (1U << 20U) * lists;
-        rd.max_deferred = (1U << 20U) * lists;
-        rd.max_lod_nodes = (1U << 18U) * lists;
-        // The flat cull's want no more than the city's: voxel meshes, the landscape's,
-        // whose lists these scale for, walk their hierarchies.
-        rd.max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
-        rd.max_vsm_meshlets = (1U << 20U) * lists;
-        rd.max_vsm_draws = (1U << 20U) * lists;
-        rd.max_vsm_voxel_draws = (1U << 20U) * lists;
-    }
+    nph_renderer_desc_scale_lists(&rd, lists);
     if (sw_pixels >= 0.0) {
         // Zero would pick the default: none goes through the view's flag.
         rd.sw_raster_pixels = (f32)sw_pixels;

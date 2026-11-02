@@ -296,10 +296,13 @@ jobs:
           -DNPH_BUILD_BENCHMARKS=OFF -DNPH_GPU_REQUIRE_VALIDATION=ON
       - name: Build
         run: cmake --build build/linux-clang-tidy
-      - name: Run unit tests with profiling
+      # The integration tests count: the world partition's cells and proxy stream
+      # (engine/runtime) are tested through what the cooker makes, which a module's
+      # unit tests cannot link.
+      - name: Run the unit and integration tests with profiling
         env:
           LLVM_PROFILE_FILE: ${{ github.workspace }}/build/linux-clang-tidy/profiles/%p-%m.profraw
-        run: xvfb-run -a ctest --test-dir build/linux-clang-tidy -L unit --output-on-failure
+        run: xvfb-run -a ctest --test-dir build/linux-clang-tidy -L "unit|integration" --output-on-failure
       - name: Report
         shell: bash
         run: |

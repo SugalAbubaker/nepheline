@@ -56,6 +56,40 @@ static const NPH_CVAR_BOOL(k_vsync, "r.vsync", 1, "wait for the display's refres
 static const NPH_CVAR_INT(k_width, "r.width", 1280, 320, 16384, "window width", CVAR_SAVED_LATCHED);
 static const NPH_CVAR_INT(k_height, "r.height", 720, 240, 16384, "window height",
                           CVAR_SAVED_LATCHED);
+// The renderer's capacities, for worlds past its defaults (docs/runtime.md
+// "World partition"); 0 picks the default (render/renderer.h NphRendererDesc).
+static const NPH_CVAR_INT(k_max_instances, "r.max_instances", 0, 0, 1 << 24,
+                          "render instances (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_meshes, "r.max_meshes", 0, 0, 1 << 20,
+                          "render meshes (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_materials, "r.max_materials", 0, 0, 1 << 20,
+                          "render materials (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_textures, "r.max_textures", 0, 0, 1 << 20,
+                          "render textures (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_lights, "r.max_lights", 0, 0, 4096,
+                          "render lights (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_cells, "r.max_cells", 0, 0, (1 << 24) - 1,
+                          "a world partition's render cells (0: the renderer's default)",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_max_assets, "r.max_assets", 0, 0, 1 << 22,
+                          "meshes, materials and textures cached at once (0: 4096)",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_deferred_destroys, "r.deferred_destroys", 0, 0, 1 << 24,
+                          "GPU objects a frame may destroy before its queue grows (0: 4096)",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_lists, "r.lists", 1, 1, 64,
+                          "the production path's droppable lists, times their defaults",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_voxel_pool_mb, "r.voxel_pool_mb", 0, 0, 1 << 16,
+                          "the pool the cells' proxy levels live in, in MB (0: none, levels get "
+                          "buffers of their own, made on the main thread)",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_proxy_budget_mb, "r.proxy_budget_mb", 0, 0, 1 << 16,
+                          "the cells' finer proxy levels' memory, in MB (0: unlimited)",
+                          NPH_CVAR_FLAG_LATCHED);
+static const NPH_CVAR_INT(k_texture_budget_mb, "r.texture_budget_mb", 0, 0, 1 << 16,
+                          "the textures' streamed levels' memory, in MB (0: textures whole)",
+                          NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_pipeline, "r.pipeline", 1, 0, 1,
                           "0: the forward reference renderer, 1: the GPU-driven production one",
                           NPH_CVAR_FLAG_SAVED);
@@ -220,6 +254,18 @@ static NphResult register_cvars(NphEngine *e)
         &cv->audio_volume_ambience,
         &cv->audio_volume_ui,
         &cv->audio_reverb,
+        &cv->max_instances,
+        &cv->max_meshes,
+        &cv->max_materials,
+        &cv->max_textures,
+        &cv->max_lights,
+        &cv->max_cells,
+        &cv->max_assets,
+        &cv->deferred_destroys,
+        &cv->lists,
+        &cv->voxel_pool_mb,
+        &cv->proxy_budget_mb,
+        &cv->texture_budget_mb,
         &cv->audio_occlusion_rays,
     };
     const NphCvar *const templates[] = {
@@ -274,6 +320,18 @@ static NphResult register_cvars(NphEngine *e)
         &k_audio_volume_ambience,
         &k_audio_volume_ui,
         &k_audio_reverb,
+        &k_max_instances,
+        &k_max_meshes,
+        &k_max_materials,
+        &k_max_textures,
+        &k_max_lights,
+        &k_max_cells,
+        &k_max_assets,
+        &k_deferred_destroys,
+        &k_lists,
+        &k_voxel_pool_mb,
+        &k_proxy_budget_mb,
+        &k_texture_budget_mb,
         &k_audio_occlusion_rays,
     };
     NPH_STATIC_ASSERT(NPH_ARRAY_COUNT(slots) == NPH_ARRAY_COUNT(templates),
@@ -925,6 +983,11 @@ static NphResult render(NphEngine *e)
     if (e->hooks.scene_target != NULL && e->hooks.scene_target(e, &custom, e->hooks.user)) {
         scene = custom;
     }
+    if (r == NPH_RESULT_OK && e->scene_renderer != NULL) {
+        // The streams, for the view this frame draws (their uploads go with it).
+        r = nph_scene_renderer_stream(e->scene_renderer, &e->view,
+                                      nph_gpu_image_desc(e->dev, scene)->height);
+    }
     if (r == NPH_RESULT_OK) {
         NPH_IGNORE_RESULT(nph_render_gpu_profiler_update(e->gpu_profiler, e->graph));
         nph_gpu_rg_begin(e->graph);
@@ -1354,6 +1417,7 @@ static NphResult start_gpu(NphEngine *e)
     dd.alloc = alloc;
     dd.app_name = e->app_name;
     dd.headless = e->mode == NPH_ENGINE_MODE_OFFSCREEN;
+    dd.deferred_destroy_capacity = (u32)nph_cvar_get_int(&e->cv.deferred_destroys);
     NphResult r = nph_gpu_device_create(&dd, &e->dev);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "no Vulkan device (%s)", nph_result_string(r));
@@ -1394,6 +1458,19 @@ static NphResult start_gpu(NphEngine *e)
     rd.dev = e->dev;
     rd.shader_dir = e->shader_dir;
     rd.name = e->app_name;
+    rd.max_instances = (u32)nph_cvar_get_int(&e->cv.max_instances);
+    rd.max_meshes = (u32)nph_cvar_get_int(&e->cv.max_meshes);
+    rd.max_materials = (u32)nph_cvar_get_int(&e->cv.max_materials);
+    rd.max_textures = (u32)nph_cvar_get_int(&e->cv.max_textures);
+    rd.max_lights = (u32)nph_cvar_get_int(&e->cv.max_lights);
+    rd.max_cells = (u32)nph_cvar_get_int(&e->cv.max_cells);
+    rd.voxel_pool_bytes = (u64)nph_cvar_get_int(&e->cv.voxel_pool_mb) * 1000000ULL;
+    const u64 texture_budget = (u64)nph_cvar_get_int(&e->cv.texture_budget_mb) * 1000000ULL;
+    if (texture_budget != 0U) {
+        // The pages hold the budget and the textures' small levels.
+        rd.texture_page_bytes = texture_budget + NPH_MIB(512);
+    }
+    nph_renderer_desc_scale_lists(&rd, (u32)nph_cvar_get_int(&e->cv.lists));
     NPH_TRY(nph_renderer_create(&rd, &e->renderer));
     NphRenderGpuProfilerDesc pd;
     memset(&pd, 0, sizeof pd);
@@ -1421,6 +1498,11 @@ static NphResult start_world(NphEngine *e)
         sd.renderer = e->renderer;
         sd.loader = e->loader;
         sd.world = e->world;
+        sd.max_assets = (u32)nph_cvar_get_int(&e->cv.max_assets);
+        sd.max_cells = (u32)nph_cvar_get_int(&e->cv.max_cells);
+        sd.jobs = e->jobs;
+        sd.proxy_budget_bytes = (u64)nph_cvar_get_int(&e->cv.proxy_budget_mb) * 1000000ULL;
+        sd.texture_budget_bytes = (u64)nph_cvar_get_int(&e->cv.texture_budget_mb) * 1000000ULL;
         NPH_TRY(nph_scene_renderer_create(&sd, &e->scene_renderer));
     }
     nph_fixed_clock_init(&e->clock, (u32)nph_cvar_get_int(&e->cv.sim_rate),

@@ -37,6 +37,7 @@ static inline void test_renderer_desc(NphRendererDesc *d, NphGpuDevice *dev)
     d->max_instances = 64U;
     d->max_lights = 8U;
     d->max_draws = 64U;
+    d->sw_masked_clusters = 1U; // what a small target's scenes hold takes the software raster
     d->debug_lines = 64U;
     d->environment_size = 64U;
     d->specular_size = 32U;

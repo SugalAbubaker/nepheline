@@ -1332,6 +1332,230 @@ static u32 skin_clusters(RenderFixture *f)
     return c.raster_count[0][NPH_VIS_RASTER_SKIN] + c.raster_count[1][NPH_VIS_RASTER_SKIN];
 }
 
+// A masked material over a texture whose levels hold different holes: the
+// finest a checker, the next stripes, the next a checker of its own again, those
+// past it wholly solid. A pixel's alpha therefore says which level it sampled,
+// so the wrong coordinates or the wrong derivatives show. `side_log2` at most 8.
+static NphRenderMaterial levelled_mask(RenderFixture *f, u32 side_log2, bool nearest)
+{
+    enum {
+        MAX_LEVELS = 9
+    };
+    static u8 texels[MAX_LEVELS][256U * 256U * 4U];
+    const u32 levels = side_log2 + 1U;
+    const void *mips[MAX_LEVELS];
+    u64 sizes[MAX_LEVELS];
+    for (u32 m = 0; m < levels; ++m) {
+        const u32 side = (1U << side_log2) >> m;
+        for (u32 i = 0; i < side * side; ++i) {
+            const u32 x = i % side;
+            const u32 y = i / side;
+            const bool hole = m == 0U   ? ((x >> 1U) + (y >> 1U)) % 2U == 0U
+                              : m == 1U ? (x >> 1U) % 2U == 0U
+                              : m == 2U ? (x + y) % 2U == 0U
+                                        : false;
+            texels[m][i * 4U + 0U] = (u8)(80U + 30U * nph_min_u32(m, 5U));
+            texels[m][i * 4U + 1U] = 200U;
+            texels[m][i * 4U + 2U] = 90U;
+            texels[m][i * 4U + 3U] = hole ? 0U : 255U;
+        }
+        mips[m] = texels[m];
+        sizes[m] = (u64)side * side * 4U;
+    }
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 1U << side_log2;
+    td.height = 1U << side_log2;
+    td.mip_count = levels;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    md.double_sided = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = nearest ? 1 : 0;
+    NphRenderMaterial m;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &m), NPH_RESULT_OK);
+    return m;
+}
+
+// The light the masked tests draw under.
+static void masked_test_light(RenderFixture *f)
+{
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 10000.0F;
+    ld.direction = nph_vec3(0.3F, -0.5F, -1.0F);
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+}
+
+// The pixels of an image a surface covers: anything lighter than the view's
+// black background.
+static u32 covered_pixels(const u8 *image)
+{
+    u32 n = 0U;
+    for (u32 i = 0; i < TEST_TARGET_SIZE * TEST_TARGET_SIZE; ++i) {
+        const u8 *px = &image[(u64)i * 4U];
+        n += px[0] > 30U || px[1] > 30U || px[2] > 30U ? 1U : 0U;
+    }
+    return n;
+}
+
+// Small masked clusters rasterise in software, with the material's alpha test
+// at each pixel: the image is the one the hardware raster alone draws. A
+// field of double-sided spheres seen through their holes, which the hardware
+// raster's skin would otherwise take in part.
+NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_raster_does)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh sphere = mesh_of(f, make_sphere);
+    const NphRenderMaterial leaves = levelled_mask(f, 3U, false);
+    const NphRenderMaterial crisp = levelled_mask(f, 3U, true);
+    for (u32 i = 0; i < 48U; ++i) {
+        const f64 x = -3.5 + (f64)(i % 8U);
+        const f64 z = -5.0 - 2.0 * (f64)(i >> 3U);
+        (void)instance(f, sphere, i % 2U == 0U ? leaves : crisp, at(x, 0.0, z, 0.8F));
+    }
+    masked_test_light(f);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 1.5, 2.0),
+                                                          nph_dvec3(0.0, 0.0, -8.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.05F));
+    v.ev100 = 12.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 hardware[PIXELS];
+    static u8 hybrid[PIXELS];
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    const NphRenderFrameStats hw = render_into(f, &v, 4U, hardware);
+    v.vis_flags = 0U;
+    const NphRenderFrameStats sw = render_into(f, &v, 4U, hybrid);
+    const u32 skins = skin_clusters(f);
+    NTEST_EXPECT_EQ_UINT(hw.vis_clusters_sw, 0U);
+    NTEST_EXPECT_GT_UINT(sw.vis_clusters_sw, sw.vis_clusters / 2U);
+    NTEST_EXPECT_EQ_UINT(sw.vis_clusters, hw.vis_clusters);
+    NTEST_EXPECT_LE_UINT(skins, sw.vis_clusters - sw.vis_clusters_sw);
+    const u32 covered = covered_pixels(hardware);
+    const ImageDiff d = image_diff(hardware, hybrid, 3U);
+    NTEST_LOG("%u of %u clusters in software, %u skin; %u pixels covered; hardware vs hybrid: "
+              "%.3f %% within 3 levels, mean %.3f, max %u",
+              sw.vis_clusters_sw, sw.vis_clusters, skins, covered, (f64)d.within * 100.0,
+              (f64)d.mean, d.max);
+    NTEST_EXPECT_GT_UINT(covered, TEST_TARGET_SIZE * TEST_TARGET_SIZE / 16U);
+    NTEST_EXPECT_TRUE(d.within >= 0.998F);
+}
+
+// Too few small masked clusters to pay for their dispatch draw in hardware: the
+// same clusters, the image the hardware raster alone draws, and none counted in
+// software on the mesh path.
+NTEST(vis, few_small_masked_clusters_stay_in_hardware)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.sw_masked_clusters = 1U << 20U;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    const NphRenderMesh sphere = mesh_of(&fx, make_sphere);
+    const NphRenderMaterial leaves = levelled_mask(&fx, 3U, false);
+    for (u32 i = 0; i < 48U; ++i) {
+        const f64 x = -3.5 + (f64)(i % 8U);
+        const f64 z = -5.0 - 2.0 * (f64)(i >> 3U);
+        (void)instance(&fx, sphere, leaves, at(x, 0.0, z, 0.8F));
+    }
+    masked_test_light(&fx);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 1.5, 2.0),
+                                                          nph_dvec3(0.0, 0.0, -8.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.05F));
+    v.ev100 = 12.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 hardware[PIXELS];
+    static u8 few[PIXELS];
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    const NphRenderFrameStats hw = render_into(&fx, &v, 4U, hardware);
+    v.vis_flags = 0U;
+    const NphRenderFrameStats st = render_into(&fx, &v, 4U, few);
+    const ImageDiff d = image_diff(hardware, few, 0U);
+    NTEST_LOG("%u of %u clusters in software; hardware vs few: %.3f %% identical, max %u",
+              st.vis_clusters_sw, st.vis_clusters, (f64)d.within * 100.0, d.max);
+    NTEST_EXPECT_EQ_UINT(st.vis_clusters, hw.vis_clusters);
+    if (fx.renderer->vis.mesh_shaders) {
+        NTEST_EXPECT_EQ_UINT(st.vis_clusters_sw, 0U);
+        NTEST_EXPECT_EQ_UINT(d.max, 0U);
+    } else {
+        // The indirect path has no mesh tasks to give them.
+        NTEST_EXPECT_EQ_UINT(st.vis_clusters_sw, st.vis_clusters);
+    }
+    test_render_teardown(&fx);
+}
+
+// A slanted sheet, its triangles a few pixels across and its texels about a
+// pixel, its holes different at each level: every pixel's alpha depends on the
+// UV and the level it took, the near ones the finest, the far ones past it. The
+// software raster (this renderer sends it any cluster that fits in 64 pixels)
+// takes the coordinates and the derivatives the hardware raster does.
+NTEST(vis, the_software_raster_samples_a_masked_material_as_the_hardware_raster_does)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.sw_raster_pixels = 64.0F;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 48U, 1.0F, &data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh plane = test_upload_mesh(fx.renderer, &data);
+    nph_render_mesh_data_free(&data);
+    const NphRenderMaterial sheet = levelled_mask(&fx, 8U, false);
+    NphRenderTransform t = at(0.0, 0.0, 0.0, 40.0F);
+    t.linear = nph_mat3_mul(nph_mat3_from_quat(nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.37F)),
+                            t.linear);
+    (void)instance(&fx, plane, sheet, t);
+    masked_test_light(&fx);
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 5.0, 12.0),
+                                                          nph_dvec3(0.0, 0.0, -6.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.05F));
+    v.ev100 = 12.0F;
+    v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+    static u8 hardware[PIXELS];
+    static u8 hybrid[PIXELS];
+    const NphRenderFrameStats sw = render_into(&fx, &v, 4U, hybrid);
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER;
+    const NphRenderFrameStats hw = render_into(&fx, &v, 4U, hardware);
+    NTEST_EXPECT_EQ_UINT(hw.vis_clusters_sw, 0U);
+    NTEST_EXPECT_GT_UINT(sw.vis_clusters_sw, sw.vis_clusters / 2U);
+    const u32 covered = covered_pixels(hardware);
+    const ImageDiff d = image_diff(hardware, hybrid, 3U);
+    NTEST_LOG("%u of %u clusters in software; %u pixels covered; hardware vs software: %.3f %% "
+              "within 3 levels, mean %.3f, max %u",
+              sw.vis_clusters_sw, sw.vis_clusters, covered, (f64)d.within * 100.0, (f64)d.mean,
+              d.max);
+    NTEST_EXPECT_GT_UINT(covered, TEST_TARGET_SIZE * TEST_TARGET_SIZE / 4U);
+    NTEST_EXPECT_TRUE(d.within >= 0.98F);
+    test_render_teardown(&fx);
+}
+
 // The masked clusters at the front of their instance (the skin) draw first
 // and write their depth after the alpha test, so that the masked fragments
 // behind a leaf they drew are rejected before their shader: the image is

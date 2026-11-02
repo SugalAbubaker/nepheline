@@ -105,6 +105,14 @@ static int run(const NphEngineConfig *config)
     const NphEngineFrameStats *s = nph_engine_frame_stats(engine);
     NPH_LOG_INFO(&LOG_PLAYER, "%llu frames, %llu simulation steps", (unsigned long long)s->frame,
                  (unsigned long long)s->total_steps);
+    NPH_LOG_INFO(
+        &LOG_PLAYER,
+        "the last frame: %.2f ms; %u instances (%u waiting, %u failed), %u lights, %u cells "
+        "(%u loading); proxy levels %u, %.1f MB; texture levels %u, %.1f MB",
+        s->frame_ms, s->scene.instances, s->scene.pending, s->scene.failed, s->scene.lights,
+        s->scene.cells, s->scene.cells_loading, s->scene.proxy_levels,
+        (f64)s->scene.proxy_bytes / 1.0e6, s->scene.texture_levels,
+        (f64)s->scene.texture_bytes / 1.0e6);
     nph_engine_destroy(engine);
     return status;
 }

@@ -90,6 +90,9 @@ static void destroy_resource(RenderAssetCache *c, RenderAsset *a)
 {
     nph_render_mesh_destroy(c->renderer, a->mesh);
     nph_render_material_destroy(c->renderer, a->material);
+    if (c->textures != NULL && a->texture.value != 0U) {
+        nph_texture_stream_remove(c->textures, a->texture);
+    }
     nph_render_texture_destroy(c->renderer, a->texture);
     a->mesh = NPH_RENDER_MESH_NULL;
     a->material = NPH_RENDER_MATERIAL_NULL;
@@ -268,6 +271,9 @@ static NphResult create_texture(RenderAssetCache *c, RenderAsset *a, const NphAs
                   ? (u32)NPH_RENDER_TEXTURE_FLAG_NORMAL_TWO_CHANNEL
                   : 0U;
     d.name = "cooked texture";
+    if (c->textures != NULL) {
+        d.flags |= (u32)NPH_RENDER_TEXTURE_FLAG_PAGED;
+    }
     const NphResult r = nph_render_texture_create(c->renderer, &d, &a->texture);
     if (r == NPH_RESULT_UNSUPPORTED) {
         // A device without BC textures draws the materials untextured.
@@ -276,7 +282,22 @@ static NphResult create_texture(RenderAssetCache *c, RenderAsset *a, const NphAs
         a->texture = NPH_RENDER_TEXTURE_NULL;
         return NPH_RESULT_OK;
     }
-    return r;
+    NPH_TRY(r);
+    if (c->textures == NULL) {
+        return NPH_RESULT_OK;
+    }
+    // Paged: its levels come from the stream, the texels from the asset, which
+    // the entry holds for as long as the texture lives.
+    NphRenderTexturePages pages;
+    NPH_TRY(nph_render_texture_pages(c->renderer, a->texture, &pages));
+    if (!pages.paged) {
+        return NPH_RESULT_OK; // too small to have pages, say: resident whole
+    }
+    NphTextureStreamTexture st;
+    memset(&st, 0, sizeof st);
+    st.texture = a->texture;
+    st.mips = tv.mips;
+    return nph_texture_stream_add(c->textures, &st);
 }
 
 // The cooked meshlets, and the levels of detail where the mesh has them

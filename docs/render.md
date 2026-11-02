@@ -1472,12 +1472,12 @@ they were read): hence their streaming (ADR-0063).
 | `vis cull instances 0` | per instance (the cells' listed ones and those of no cell, or every slot without cells): frustum, then occlusion against **last** frame's depth pyramid with last frame's transform and camera; survivors' meshlets go out as (instance, meshlet) work items (a mesh with levels of detail hands its hierarchy's root to the walk instead), the occluded instances wait for phase 1 |
 | `vis cull groups 0` | the flat cull of levels of detail ("Levels of detail"): the groups of the levels each instance's distance may take, a lane each; those too coarse to draw and in view hand on their clusters as work items, and those last frame's depth hid wait for phase 1 |
 | `vis cull nodes 0` | the walk down the hierarchies of those without a table of their levels, or with too many groups, a step per two of their node levels (no steps where no mesh may walk) |
-| `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, software, or voxel |
-| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0`, `vis voxel raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small ones, then of the voxel clusters ("Voxels"; only while the renderer holds voxel meshes), into the visibility buffer |
+| `vis cull meshlets 0` | per work item: frustum, normal cone (similarity transforms only), occlusion; survivors are appended to the cluster list and to a raster list: opaque, masked, software, software masked, or voxel |
+| `vis raster 0`, `vis raster 0 masked`, `vis sw raster 0`, `vis sw raster 0 masked`, `vis voxel raster 0` | the hardware raster of the opaque clusters (on the mesh path through the ROP), then of the masked ones (their skin first, below), then the compute raster of the small opaque ones and of the small masked ones, then of the voxel clusters ("Voxels"; only while the renderer holds voxel meshes), into the visibility buffer |
 | `vsm clear`, `vsm invalidate` | while the sun has its virtual shadow map ("Shadows"): its counters and bitmasks cleared, and the pages this frame's instance updates touch marked dirty, before the scatter replaces their records |
 | `vis hzb 0` | the depth pyramid of what phase 0 drew (and the sun's map's page requests, the ambient occlusion's depths, and the light tiles' depth bounds) |
 | `vis cull instances 1`, `vis cull groups 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; the groups phase 0 deferred and those of the instances now visible (and the walk down the hierarchies of those that walk); then the meshlets phase 0 deferred and those of the instances now visible |
-| `vis raster 1`, `vis sw raster 1`, `vis voxel raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
+| `vis raster 1`, `vis sw raster 1`, `vis sw raster 1 masked`, `vis voxel raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
@@ -1621,8 +1621,8 @@ fragment stage that discards and writes depth loses the early test on
 this GPU, even with no other side effects.
 
 **The software raster** (`vis_sw_raster.comp`; Karis et al. 2021) takes
-the opaque clusters whose bounding sphere projects in front of the near
-plane into at most 64 pixels across and whose triangles average at most
+the clusters whose bounding sphere projects in front of the near plane into
+at most 64 pixels across and whose triangles average at most
 `sw_raster_pixels` (3) across. A 32-thread workgroup per cluster snaps
 the vertices to 1/256 pixel, as the hardware does, culls back faces, and
 walks each triangle's pixel centres with exact 32-bit edge functions
@@ -1633,6 +1633,17 @@ raster's image to the bit. It is faster on micro-triangles (102,400
 cubes 1.6 pixels across: 0.38 ms against 0.43) and slower on clusters of a
 few larger triangles, which the triangle-size test keeps in hardware.
 `NPH_RENDER_VIS_NO_SW_RASTER` (the `r.sw_raster` cvar) turns it off ([ADR-0030](adr/0030-hybrid-raster-and-meshlet-work-lists.md)).
+
+Small masked clusters have a list, a pipeline and a pass of their own (the
+same source, `VIS_SW_MASKED`, so the opaque path is untouched). Each runs the
+material's alpha test at each pixel it covers, with the derivatives of the
+triangle's UV plane in a `textureGrad` where the hardware takes them across a
+quad, and skips the atomic if the test fails: no quads, no helper fragments and
+no vertex outputs, which are most of what a far leaf's triangle costs in
+hardware. The rest of the masked clusters stay there, since the compute path
+pays for its texture work per covered pixel on larger triangles. Fewer than
+`NphRendererDesc.sw_masked_clusters` (8,192) a phase stay there too, for the
+dispatch's cost: `vis args` gives them to the masked pass as mesh tasks ([ADR-0071](adr/0071-small-masked-clusters-in-software.md)).
 
 **The depth pyramid** holds the farthest depth (the smallest, reverse-Z)
 under each texel. Mip 0 is half the target rounded up, each later mip

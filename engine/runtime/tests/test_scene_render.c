@@ -258,6 +258,38 @@ NTEST(SceneImport, a_cooked_scene_becomes_entities)
     scene_teardown(&fx);
 }
 
+// A further tile of a world brings its meshes, not another sun or camera.
+NTEST(SceneImport, instances_only_leaves_the_lights_and_cameras)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, false, 256U);
+    (void)import_showcase(&fx, NULL);
+    NphSceneImportDesc d;
+    memset(&d, 0, sizeof d);
+    d.world = fx.world;
+    d.loader = fx.loader;
+    d.scene = nph_guid_from_cstr(SCENE_KEY);
+    d.root_transform = nph_local_transform_identity();
+    d.instances_only = 1;
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&d, NULL, NULL), NPH_RESULT_OK);
+    u32 meshes = 0U;
+    u32 lights = 0U;
+    u32 cameras = 0U;
+    for (u32 i = 0; i < nph_world_entity_slot_count(fx.world); ++i) {
+        const NphEntity e = nph_world_entity_at(fx.world, i);
+        if (nph_entity_is_null(e)) {
+            continue;
+        }
+        meshes += nph_world_get(fx.world, e, fx.ids.mesh_renderer) != NULL ? 1U : 0U;
+        lights += nph_world_get(fx.world, e, fx.ids.light) != NULL ? 1U : 0U;
+        cameras += nph_world_get(fx.world, e, fx.ids.camera) != NULL ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(meshes, 4U); // twice the torus and the ground
+    NTEST_EXPECT_EQ_UINT(lights, 1U); // the first's sun alone
+    NTEST_EXPECT_EQ_UINT(cameras, 0U);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, entities_become_instances_and_lights)
 {
     static SceneFixture fx;

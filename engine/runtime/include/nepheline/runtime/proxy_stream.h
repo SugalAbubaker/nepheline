@@ -103,10 +103,20 @@ NPH_MUST_USE NphResult nph_proxy_stream_create(const NphProxyStreamDesc *desc,
 // coarsest meshes, are the caller's. Safe on NULL.
 void nph_proxy_stream_destroy(NphProxyStream *s);
 
-// Adds a cell. NPH_RESULT_INVALID_ARGUMENT for a stale cell or mesh, no
-// levels or more than NPH_RENDER_CELL_MAX_LEVELS, a level naming no asset, or
-// a box or distance that is not finite; NPH_RESULT_FULL past max_cells.
-NPH_MUST_USE NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell);
+// Adds a cell, `out_index` (may be NULL) its index for nph_proxy_stream_remove
+// and nph_proxy_stream_cell_state: the count of cells added so far, unless one
+// was removed, whose index it may take. NPH_RESULT_INVALID_ARGUMENT for a stale
+// cell or mesh, no levels or more than NPH_RENDER_CELL_MAX_LEVELS, a level
+// naming no asset, or a box or distance that is not finite; NPH_RESULT_FULL
+// past max_cells (those removed do not count).
+NPH_MUST_USE NphResult nph_proxy_stream_add(NphProxyStream *s, const NphProxyStreamCell *cell,
+                                            u32 *out_index);
+
+// Stops streaming cell `index`: its load let go (waiting for a level being made
+// on the jobs), its coarsest level alone given back, the meshes the stream made
+// destroyed. The cell and its coarsest mesh are the caller's. O(1) but for that
+// wait. Asserted for an index with no cell.
+void nph_proxy_stream_remove(NphProxyStream *s, u32 index);
 
 // What the stream sees of the frame's view: where the camera is, and the
 // cut's scale (as the renderer's: pixels a unit spans at distance one,
@@ -165,7 +175,7 @@ typedef struct NphProxyStreamCellState {
     b32 failed;  // a level of it failed: it is left as it is
 } NphProxyStreamCellState;
 
-// The cell added `index`-th (from 0; asserted below the cells added).
+// The cell of `index` (asserted to hold one).
 NphProxyStreamCellState nph_proxy_stream_cell_state(const NphProxyStream *s, u32 index);
 
 #ifdef __cplusplus

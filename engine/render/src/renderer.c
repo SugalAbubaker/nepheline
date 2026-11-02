@@ -321,6 +321,7 @@ static NphResult apply_defaults(NphRendererDesc *d)
         round_up_64(d->max_cull_meshlets != 0U ? d->max_cull_meshlets : 1U << 20U);
     d->max_deferred = round_up_64(d->max_deferred != 0U ? d->max_deferred : 262144U);
     d->sw_raster_pixels = d->sw_raster_pixels > 0.0F ? d->sw_raster_pixels : 3.0F;
+    d->sw_masked_clusters = d->sw_masked_clusters != 0U ? d->sw_masked_clusters : 8192U;
     d->masked_skin = d->masked_skin > 0.0F ? d->masked_skin : 0.35F;
     d->max_instance_updates = d->max_instance_updates != 0U ? d->max_instance_updates : 16384U;
     d->max_material_slots =
@@ -449,6 +450,22 @@ static NphResult create_contents(NphRenderer *r)
         r->gi.sun_slot = NPH_U32_MAX;
     }
     return NPH_RESULT_OK;
+}
+
+void nph_renderer_desc_scale_lists(NphRendererDesc *desc, u32 lists)
+{
+    NPH_ASSERT(desc != NULL);
+    if (lists <= 1U) {
+        return;
+    }
+    desc->max_visible_clusters = 524288U * lists;
+    desc->max_cull_meshlets = (1U << 20U) * lists;
+    desc->max_deferred = (1U << 20U) * lists;
+    desc->max_lod_nodes = (1U << 18U) * lists;
+    desc->max_lod_groups = (1U << 18U) * nph_min_u32(lists, 4U);
+    desc->max_vsm_meshlets = (1U << 20U) * lists;
+    desc->max_vsm_draws = (1U << 20U) * lists;
+    desc->max_vsm_voxel_draws = (1U << 20U) * lists;
 }
 
 NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)

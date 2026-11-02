@@ -149,6 +149,9 @@ typedef struct NphRendererDesc {
                               // visible (262144)
     f32 sw_raster_pixels;     // clusters whose triangles average at most this many pixels
                               // across (and that fit in 64) rasterise in software (3)
+    u32 sw_masked_clusters;   // small masked clusters a phase from which they rasterise in
+                              // software, fewer staying in hardware, for the dispatch's cost
+                              // (the mesh path; 8192; 1: always)
     f32 masked_skin;          // the masked clusters at the front of their instance, within
                               // this share of the chord their view ray cuts through its box,
                               // draw first writing their depth, so the leaves behind them are
@@ -222,6 +225,13 @@ typedef struct NphRendererDesc {
 // NPH_RESULT_NOT_FOUND or NPH_RESULT_IO_ERROR when a shader cannot be
 // read; NPH_RESULT_OUT_OF_MEMORY otherwise. `*out` is NULL on failure.
 NPH_MUST_USE NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out);
+
+// Every list of the production path that can drop work, in `desc`, at `lists`
+// times its default (the renderer clamps each to what its records can address):
+// what a scene that overflows the defaults needs. The flat cull's groups go to
+// four times at most: voxel meshes, the only ones to want more, walk their
+// hierarchies instead (ADR-0070). Nothing for `lists` of 0 or 1.
+void nph_renderer_desc_scale_lists(NphRendererDesc *desc, u32 lists);
 
 // Waits for the device to go idle and releases every resource the
 // renderer created, including any the caller did not destroy (reported at

@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// The visibility buffer's software raster, masked materials (vis_sw_raster.glsl).
+#version 460
+#define VIS_SW_MASKED 1
+#include "vis_sw_raster.glsl"
