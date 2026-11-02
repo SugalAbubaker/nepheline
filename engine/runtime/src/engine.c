@@ -68,7 +68,7 @@ static const NPH_CVAR_INT(k_max_textures, "r.max_textures", 0, 0, 1 << 20,
                           "render textures (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_max_lights, "r.max_lights", 0, 0, 4096,
                           "render lights (0: the renderer's default)", NPH_CVAR_FLAG_LATCHED);
-static const NPH_CVAR_INT(k_max_many_lights, "r.max_many_lights", 0, 0, 1 << 19,
+static const NPH_CVAR_INT(k_max_many_lights, "r.max_many_lights", 0, 0, (1 << 18) - 2,
                           "many lights (0: none)", NPH_CVAR_FLAG_LATCHED);
 static const NPH_CVAR_INT(k_max_cells, "r.max_cells", 0, 0, (1 << 24) - 1,
                           "a world partition's render cells (0: the renderer's default)",
@@ -135,6 +135,11 @@ static const NPH_CVAR_BOOL(k_gi, "r.gi", 1,
                            "global illumination from the radiance cache (production; ray "
                            "queries)",
                            NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_INT(k_many_restir, "r.many_restir", NPH_RENDER_RESTIR_SPECULAR,
+                          NPH_RENDER_RESTIR_OFF, NPH_RENDER_RESTIR_ALL,
+                          "what of the many lights' far fields per-pixel reservoirs take: 0 none, "
+                          "1 the highlights, 2 all (production; ray queries)",
+                          NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -236,6 +241,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->dof,
         &cv->ao,
         &cv->gi,
+        &cv->many_restir,
         &cv->sim_interpolate,
         &cv->phys_solver,
         &cv->phys_substeps,
@@ -303,6 +309,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_dof,
         &k_ao,
         &k_gi,
+        &k_many_restir,
         &k_sim_interpolate,
         &k_phys_solver,
         &k_phys_substeps,
@@ -873,6 +880,7 @@ static void choose_view(NphEngine *e, f64 dt)
     }
     e->view.ao_radius = (f32)nph_cvar_get_float(&e->cv.ao);
     e->view.gi = nph_cvar_get_bool(&e->cv.gi) ? 1 : 0;
+    e->view.many_restir = (NphRenderRestir)nph_cvar_get_int(&e->cv.many_restir);
     // In lockstep a frame lasts one step whatever the clock says, so a
     // run's exposure is the same every time.
     const f64 seconds =

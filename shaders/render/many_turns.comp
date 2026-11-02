@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// The many lights' reservoirs' turns (surface.glsl nph_many_turn; many_lights.c;
+// docs/adr/0074-restir.md): the visibility-buffer resolve's decode and the point's terms over a
+// few tiles a frame, with the ray a turn's candidate needs. Workgroups by the tiles whose turn
+// may come this frame (vis_resolve.glsl).
+#version 460
+#extension GL_EXT_ray_query : require
+#define NPH_RAY_QUERY
+#define NPH_MANY_TURNS
+#include "vis_resolve.glsl"

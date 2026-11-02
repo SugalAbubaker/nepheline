@@ -84,6 +84,9 @@ static void lit_view(NphRenderView *v, NphRenderCamera camera)
 {
     test_box_view(v, camera, NPH_RENDER_VIEW_LIT);
     v->disable_ibl = 1;
+    // The near fields and the cache's far fields: the reservoirs have their own tests
+    // (test_many_restir.c).
+    v->many_restir = NPH_RENDER_RESTIR_OFF;
 }
 
 // ---------------------------------------------------------------------------

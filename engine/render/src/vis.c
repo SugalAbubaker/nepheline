@@ -659,6 +659,7 @@ static void read_stats(NphRenderer *r)
     s->vis_overflow = c->overflow;
     s->vis_cells_proxied = c->cells_proxied;
     s->vis_instances_proxied = c->instances_proxied;
+    s->vis_many_rays = c->many_rays;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
@@ -723,6 +724,7 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     const NphVec3 moved = nph_dvec3_relative(view->camera.position, v->prev_camera);
     vd->reproject =
         nph_mat4_mul(v->prev_view_proj, nph_mat4_mul(nph_mat4_from_translation(moved), inv));
+    render_many_set_reproject(r, &vd->reproject);
     const NphFrustum f = nph_frustum_from_matrix(&vd->view_proj);
     for (u32 i = 0; i < 5U; ++i) {
         vd->frustum[i] = nph_vec4_from_vec3(f.planes[i].normal, f.planes[i].d);
@@ -1743,6 +1745,7 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     render_vsm_read(r, p);
     render_gi_read(r, p);
+    render_many_read(r, p);
     if (r->ao.frame_active) {
         nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
@@ -2233,7 +2236,20 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         res = render_gi_declare(r, graph, &in);
     }
     if (res == NPH_RESULT_OK) {
+        res = render_many_declare(r, graph, f->visbuffer);
+    }
+    if (res == NPH_RESULT_OK) {
         res = declare_resolve(graph, r, &g, env, specular, lut, sh);
+    }
+    if (res == NPH_RESULT_OK) {
+        RenderManyTurnsInput in;
+        memset(&in, 0, sizeof in);
+        in.lut = lut;
+        in.clusters = g.clusters;
+        in.instances = g.instances;
+        in.meshes = g.meshes;
+        in.tlas = f->tlas;
+        res = render_many_declare_turns(r, graph, &in);
     }
     NphGpuRgPass *p = NULL;
     if (res == NPH_RESULT_OK) {
@@ -2279,6 +2295,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_overflow = last->vis_overflow;
         stats->vis_cells_proxied = last->vis_cells_proxied;
         stats->vis_instances_proxied = last->vis_instances_proxied;
+        stats->vis_many_rays = last->vis_many_rays;
         stats->vsm_requested = last->vsm_requested;
         stats->vsm_drawn = last->vsm_drawn;
         stats->vsm_resident = last->vsm_resident;

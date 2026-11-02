@@ -428,6 +428,8 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // the cells it lists them from (ADR-0064).
     u32 cell_work;
     u32 cells_listed;
+    // Statistics: the rays the many lights' reservoirs asked for (many_rays.comp).
+    u32 many_rays;
 };
 
 // The production path's view of a frame.

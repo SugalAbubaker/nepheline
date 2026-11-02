@@ -63,6 +63,7 @@ nph_add_test(render
         tests/test_gi.c
         tests/test_light_tree.c
         tests/test_many_lights.c
+        tests/test_many_restir.c
         tests/test_gpu_profiler.c
         tests/test_levels_apart.h
         tests/test_motion_blur.c
@@ -84,14 +85,14 @@ nph_add_test(render
         nph::render
     # On lavapipe in Debug with sanitizers every test pays seconds of device
     # and renderer setup, and a hosted runner can run 1.9 times slower than
-    # usual: fourteen CTest entries keep each well under the timeout there
+    # usual: eighteen CTest entries keep each well under the timeout there
     # (about 240 s each on such a runner, the heaviest test 150 s). Every
     # test added moves those after it to the next entry, so the round robin
     # needs that headroom: with eight, one more test put the voxel resolve
     # (150 s), a voxel build (71 s), the pyramid (66 s) and a level build
     # (50 s) on one entry, which passed 600 s; with six, two of the four
     # voxel GPU tests went on each of two.
-    SHARDS 14
+    SHARDS 18
 )
 if(NPH_BUILD_TESTS)
     # White-box tests read the renderer's internal images; the gpu tests'

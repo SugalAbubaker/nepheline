@@ -25,7 +25,14 @@
 
 NPH_STATIC_ASSERT(sizeof(NphRenderManyLightData) == 32U,
                   "NphRenderManyLightData matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphRenderManyView) == 64U, "NphRenderManyView matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderManyView) == 168U, "NphRenderManyView matches its GLSL layout");
+NPH_STATIC_ASSERT(NPH_RENDER_RESTIR_FEW_BITS <= NPH_RENDER_RESTIR_FULL_BITS,
+                  "the turns' workgroups are by the more frequent");
+NPH_STATIC_ASSERT((u32)NPH_RENDER_RESTIR_OFF == NPH_RENDER_MANY_RESTIR_OFF &&
+                      (u32)NPH_RENDER_RESTIR_SPECULAR == NPH_RENDER_MANY_RESTIR_SPECULAR &&
+                      (u32)NPH_RENDER_RESTIR_ALL == NPH_RENDER_MANY_RESTIR_ALL,
+                  "the shaders' modes are the view's");
+
 NPH_STATIC_ASSERT(sizeof(NphRenderLightTreeNode) == 6U * sizeof(NphVec4),
                   "a tree node is the six vectors many_lights.glsl reads");
 
@@ -43,9 +50,41 @@ NphResult render_many_create(NphRenderer *r)
     if (cap == 0U) {
         return NPH_RESULT_OK;
     }
+    if (cap >= (u32)NPH_RENDER_RESTIR_NO_LIGHT) {
+        NPH_LOG_ERROR(&NPH_LOG_RENDER, "%s: %u many lights: a reservoir can name %u", r->name, cap,
+                      (u32)NPH_RENDER_RESTIR_NO_LIGHT - 1U);
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
     m->lights = NPH_ALLOC_ARRAY_ZEROED(r->alloc, RenderManyLight, cap);
     if (m->lights == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    return NPH_RESULT_OK;
+}
+
+// The reservoirs' passes, on the production path, once it is known whether rays are.
+NphResult render_many_create_passes(NphRenderer *r)
+{
+    RenderMany *m = &r->many;
+    if (r->desc.max_many_lights == 0U) {
+        return NPH_RESULT_OK;
+    }
+    NPH_TRY(render_load_shader_file(r, "many_tiles.comp", &m->tiles_shader));
+    NphGpuComputePipelineDesc d;
+    memset(&d, 0, sizeof d);
+    d.shader = m->tiles_shader;
+    d.name = "many tiles";
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &m->tiles_pipeline));
+    if (r->rt.supported) {
+        NPH_TRY(render_load_shader_file(r, "many_turns.comp", &m->turns_shader));
+        memset(&d, 0, sizeof d);
+        d.shader = m->turns_shader;
+        d.name = "many turns";
+        // The resolve's constants: only the many lights (k_many; vis_resolve.glsl).
+        d.specialization_count = 6U;
+        d.specialization[5] = 1U;
+        NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &m->turns_pipeline));
+        render_log_statistics(r, m->turns_pipeline, "many turns");
     }
     return NPH_RESULT_OK;
 }
@@ -63,6 +102,19 @@ static void destroy_buffers(NphRenderer *r)
     m->indices = NPH_GPU_BUFFER_NULL;
 }
 
+static void destroy_reservoirs(NphRenderer *r)
+{
+    RenderMany *m = &r->many;
+    nph_gpu_buffer_destroy(r->dev, m->reservoirs[0]);
+    nph_gpu_buffer_destroy(r->dev, m->reservoirs[1]);
+    nph_gpu_buffer_destroy(r->dev, m->tiles);
+    m->reservoirs[0] = NPH_GPU_BUFFER_NULL;
+    m->reservoirs[1] = NPH_GPU_BUFFER_NULL;
+    m->tiles = NPH_GPU_BUFFER_NULL;
+    m->reservoir_width = 0U;
+    m->reservoir_height = 0U;
+}
+
 void render_many_destroy(NphRenderer *r)
 {
     RenderMany *m = &r->many;
@@ -70,6 +122,11 @@ void render_many_destroy(NphRenderer *r)
         return;
     }
     destroy_buffers(r);
+    destroy_reservoirs(r);
+    nph_gpu_pipeline_destroy(r->dev, m->tiles_pipeline);
+    nph_gpu_shader_destroy(r->dev, m->tiles_shader);
+    nph_gpu_pipeline_destroy(r->dev, m->turns_pipeline);
+    nph_gpu_shader_destroy(r->dev, m->turns_shader);
     if (m->lights != NULL) {
         NPH_FREE_ARRAY(r->alloc, RenderManyLight, m->lights, r->desc.max_many_lights);
     }
@@ -328,6 +385,8 @@ static NphResult rebuild(NphRenderer *r)
     RenderMany *m = &r->many;
     const u64 began = nph_time_now_ns();
     m->dirty = 0;
+    // What the reservoirs and the tiles' lists hold are the old set's indices.
+    m->reservoirs_clear = 1;
     destroy_buffers(r);
     m->count = 0U;
     ManyBuild b;
@@ -448,10 +507,176 @@ static NphResult rebuild(NphRenderer *r)
 // A frame
 // ---------------------------------------------------------------------------
 
+static NphResult make_reservoirs(NphRenderer *r, u32 width, u32 height)
+{
+    RenderMany *m = &r->many;
+    if (m->reservoir_width == width && m->reservoir_height == height) {
+        return NPH_RESULT_OK;
+    }
+    destroy_reservoirs(r);
+    NphGpuBufferDesc d;
+    memset(&d, 0, sizeof d);
+    d.size = (u64)((width + 7U) / 8U) * ((height + 7U) / 8U) * 64U * 8U;
+    // Transfer source: for the tests, at no cost.
+    d.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST |
+              (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
+    d.memory = NPH_GPU_MEMORY_DEVICE;
+    d.name = "many light reservoirs";
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &d, &m->reservoirs[0]));
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &d, &m->reservoirs[1]));
+    m->tiles_x = (width + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
+    m->tiles_y = (height + (u32)NPH_RENDER_LIGHT_TILE - 1U) / (u32)NPH_RENDER_LIGHT_TILE;
+    d.size = (u64)m->tiles_x * m->tiles_y * (u64)NPH_RENDER_MANY_TILE_LIGHTS * 8U;
+    d.name = "many light tiles";
+    NPH_TRY(nph_gpu_buffer_create(r->dev, &d, &m->tiles));
+    m->reservoir_width = width;
+    m->reservoir_height = height;
+    m->reservoirs_clear = 1;
+    return NPH_RESULT_OK;
+}
+
+void render_many_set_reproject(const NphRenderer *r, const NphMat4 *reproject)
+{
+    if (r->many.frame_active) {
+        NphRenderManyView *v = render_frame_at(r, r->layout.many_view_offset);
+        v->reproject = *reproject;
+    }
+}
+
+static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    const RenderMany *m = &((NphRenderer *)user)->many;
+    nph_gpu_cmd_fill_buffer(cmd, m->reservoirs[0], 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, m->reservoirs[1], 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    // No light yet: all ones, past any light's index.
+    nph_gpu_cmd_fill_buffer(cmd, m->tiles, 0U, NPH_GPU_WHOLE_SIZE, 0xFFFFFFFFU);
+}
+
+static void turns_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderMany *m = &r->many;
+    NphVisResolvePush p = r->vis.resolve_push;
+    p.vis_index =
+        nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, m->frame_visbuffer), 0U);
+    p.ao_index = NPH_VIS_NO_AO;
+    nph_gpu_cmd_bind_pipeline(cmd, m->turns_pipeline);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    const u32 step = 1U << (u32)NPH_RENDER_RESTIR_FEW_BITS;
+    nph_gpu_cmd_dispatch(cmd, ((m->reservoir_width + 7U) / 8U + step - 1U) / step,
+                         (m->reservoir_height + 7U) / 8U, 1U);
+}
+
+static void tiles_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    RenderMany *m = &r->many;
+    NphVisPush p;
+    memset(&p, 0, sizeof p);
+    p.view = r->vis.frame.view_address;
+    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, m->frame_visbuffer), 0U);
+    p.arg1 = m->frame_slots;
+    nph_gpu_cmd_bind_pipeline(cmd, m->tiles_pipeline);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch(cmd, (m->tiles_x + 7U) / 8U, (m->tiles_y + 7U) / 8U, 1U);
+}
+
+NphResult render_many_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgImage visbuffer)
+{
+    RenderMany *m = &r->many;
+    if (!m->frame_restir) {
+        return NPH_RESULT_OK;
+    }
+    m->frame_visbuffer = visbuffer;
+    m->frame_tiles = nph_gpu_rg_import_buffer(graph, m->tiles);
+    if (nph_gpu_rg_buffer_is_null(m->frame_tiles)) {
+        return NPH_RESULT_FULL;
+    }
+    // A list empty of lights fills whole; after that a light a frame.
+    m->frame_slots = m->reservoirs_clear ? (u32)NPH_RENDER_MANY_TILE_LIGHTS : 1U;
+    m->frame_buffers[0] = nph_gpu_rg_import_buffer(graph, m->reservoirs[m->reservoir_at]);
+    m->frame_buffers[1] = nph_gpu_rg_import_buffer(graph, m->reservoirs[m->reservoir_at ^ 1U]);
+    if (nph_gpu_rg_buffer_is_null(m->frame_buffers[0]) ||
+        nph_gpu_rg_buffer_is_null(m->frame_buffers[1])) {
+        return NPH_RESULT_FULL;
+    }
+    if (m->reservoirs_clear) {
+        NphGpuRgPassDesc pd;
+        memset(&pd, 0, sizeof pd);
+        pd.name = "many clear";
+        pd.type = NPH_GPU_RG_PASS_TRANSFER;
+        pd.execute = clear_execute;
+        pd.user = r;
+        NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_write_buffer(p, m->frame_buffers[0], NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, m->frame_buffers[1], NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, m->frame_tiles, NPH_GPU_RG_USE_TRANSFER_DST);
+        m->reservoirs_clear = 0;
+    }
+    NphGpuRgPassDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.name = "many tiles";
+    pd.type = NPH_GPU_RG_PASS_COMPUTE;
+    pd.execute = tiles_execute;
+    pd.user = r;
+    NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_image(p, visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    nph_gpu_rg_write_buffer(p, m->frame_tiles, NPH_GPU_RG_USE_STORAGE_WRITE);
+    return NPH_RESULT_OK;
+}
+
+// After the resolve: the reservoirs whose turn it is.
+NphResult render_many_declare_turns(NphRenderer *r, NphGpuRenderGraph *graph,
+                                    const RenderManyTurnsInput *in)
+{
+    RenderMany *m = &r->many;
+    if (!m->frame_restir) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuRgPassDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.name = "many turns";
+    pd.type = NPH_GPU_RG_PASS_COMPUTE;
+    pd.execute = turns_execute;
+    pd.user = r;
+    NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_image(p, m->frame_visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    nph_gpu_rg_read_image(p, in->lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+    nph_gpu_rg_read_buffer(p, in->clusters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, in->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, in->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, in->tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    nph_gpu_rg_read_buffer(p, m->frame_tiles, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, m->frame_buffers[1], NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_buffer(p, m->frame_buffers[0], NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, r->vis.frame.counters, NPH_GPU_RG_USE_STORAGE_WRITE);
+    return NPH_RESULT_OK;
+}
+
+void render_many_read(const NphRenderer *r, NphGpuRgPass *pass)
+{
+    const RenderMany *m = &r->many;
+    if (m->frame_restir) {
+        nph_gpu_rg_write_buffer(pass, m->frame_buffers[0], NPH_GPU_RG_USE_STORAGE_WRITE);
+        nph_gpu_rg_read_buffer(pass, m->frame_buffers[1], NPH_GPU_RG_USE_SHADER_READ);
+    }
+}
+
 NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, bool production)
 {
     RenderMany *m = &r->many;
     m->frame_active = 0;
+    m->frame_restir = 0;
     if (r->desc.max_many_lights == 0U) {
         return NPH_RESULT_OK;
     }
@@ -474,6 +699,44 @@ NphResult render_many_frame_begin(NphRenderer *r, const NphRenderView *view, boo
     v->count = m->count;
     v->near2 = m->near_range * m->near_range;
     m->frame_active = 1;
+    return NPH_RESULT_OK;
+}
+
+// Whether the view's reservoirs want the rays of this frame: a view that shows no light has
+// no use for them, and a device without ray queries none to give.
+bool render_many_frame_wants_rays(const NphRenderer *r, const NphRenderView *view)
+{
+    const RenderMany *m = &r->many;
+    const bool shown = view->debug_view == NPH_RENDER_VIEW_LIT ||
+                       view->debug_view == NPH_RENDER_VIEW_DIRECT ||
+                       view->debug_view == NPH_RENDER_VIEW_INDIRECT;
+    return m->frame_active && m->turns_pipeline.value != 0U && shown &&
+           view->many_restir != NPH_RENDER_RESTIR_OFF;
+}
+
+NphResult render_many_restir_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height)
+{
+    RenderMany *m = &r->many;
+    const bool on = render_many_frame_wants_rays(r, view) && r->rt.frame_active;
+    // A reservoir's weight is for what it estimates: another mode's, or from before a gap in
+    // which nothing carried the reservoirs along, is no use.
+    const u32 mode = on ? (u32)view->many_restir : (u32)NPH_RENDER_RESTIR_OFF;
+    m->reservoirs_clear = m->reservoirs_clear || mode != m->frame_mode;
+    m->frame_mode = mode;
+    if (!on) {
+        return NPH_RESULT_OK;
+    }
+    NPH_TRY(make_reservoirs(r, width, height));
+    NphRenderManyView *v = render_frame_at(r, r->layout.many_view_offset);
+    m->reservoir_at ^= 1U;
+    v->restir = mode;
+    v->reservoirs = nph_gpu_buffer_address(r->dev, m->reservoirs[m->reservoir_at]);
+    v->prev_reservoirs = nph_gpu_buffer_address(r->dev, m->reservoirs[m->reservoir_at ^ 1U]);
+    v->width = width;
+    v->frame = (u32)nph_gpu_frame_index(r->dev);
+    v->tiles = nph_gpu_buffer_address(r->dev, m->tiles);
+    v->tiles_x = m->tiles_x;
+    m->frame_restir = 1;
     return NPH_RESULT_OK;
 }
 
