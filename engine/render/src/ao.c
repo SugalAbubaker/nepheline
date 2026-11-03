@@ -59,7 +59,7 @@ NphResult render_ao_create(NphRenderer *r)
     d.name = "ao";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->ao));
     render_log_statistics(r, a->ao, "ao");
-    // The same with the contact shadows' march (ao.comp k_contact), for the frames with the sun's map.
+    // The same with the contact shadows' march (ao.comp k_contact), for frames with the sun's map.
     d.specialization[0] = 1U;
     d.specialization_count = 1U;
     d.name = "ao with contact shadows";
