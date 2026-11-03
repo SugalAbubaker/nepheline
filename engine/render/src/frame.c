@@ -153,6 +153,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->lod_error = 1.0F;
     view->many_restir = NPH_RENDER_RESTIR_SPECULAR;
     view->contact_shadow = 24.0F;
+    view->reflections = NPH_RENDER_REFLECTIONS_CACHE;
 }
 
 // ---------------------------------------------------------------------------
@@ -826,7 +827,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
         !(view->sensor_height >= 0.0F) || !nph_f32_is_finite(view->sensor_height) ||
         !nph_f32_is_finite(view->lens_offset.x) || !nph_f32_is_finite(view->lens_offset.y) ||
         !(view->ao_radius >= 0.0F) || !nph_f32_is_finite(view->ao_radius) ||
-        !(view->contact_shadow >= 0.0F) || !nph_f32_is_finite(view->contact_shadow)) {
+        !(view->contact_shadow >= 0.0F) || !nph_f32_is_finite(view->contact_shadow) ||
+        (u32)view->reflections > (u32)NPH_RENDER_REFLECTIONS_RAYS) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // A lens (an aperture, or a point off its centre) focuses beyond its
@@ -1011,7 +1013,12 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     vd->jitter = nph_vec4(jitter_ndc.x, jitter_ndc.y, 0.0F, 0.0F);
     vd->flags =
         !view->disable_ibl && r->env.source != NPH_RENDER_ENV_NONE ? (u32)NPH_RENDER_VIEW_IBL : 0U;
-    r->many.frame_no_other_light = r->many.frame_active && stats.gi && vd->flags == 0U &&
+    if (stats.gi && r->gi.frame_reflect) {
+        vd->flags |=
+            r->gi.frame_rays ? (u32)NPH_RENDER_VIEW_REFLECT_RAYS : (u32)NPH_RENDER_VIEW_REFLECT;
+    }
+    r->many.frame_no_other_light = r->many.frame_active && stats.gi &&
+                                   (vd->flags & (u32)NPH_RENDER_VIEW_IBL) == 0U &&
                                    nph_handle_pool_live(&r->light_pool) == 0U;
 
     memset(&r->push, 0, sizeof r->push);

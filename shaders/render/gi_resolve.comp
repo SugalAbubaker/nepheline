@@ -9,7 +9,8 @@
 // sight give their slots back. The sums are pre-exposed fixed point; the
 // irradiance is kept in lux, whatever the exposure does.
 //
-// arg0: the slot count.
+// arg0: the slot count. arg1: nonzero for the reflection cells' table (ADR-0077), which keeps a
+// cell for fewer frames.
 #version 460
 #include "vis_common.glsl"
 #include "gi_common.glsl"
@@ -26,12 +27,13 @@ void main()
     VisViewRef view = VisViewRef(pc.view);
     ViewRef rview = ViewRef(view.v.render_view);
     GiViewRef g = GiViewRef(rview.v.gi);
-    GiKeysRef keys = GiKeysRef(g.g.keys);
+    const bool reflections = pc.arg1 != 0u;
+    GiKeysRef keys = GiKeysRef(reflections ? g.g.reflect_keys : g.g.keys);
     if (keys.k[i] == 0u) {
         return;
     }
-    GiSumsRef sums = GiSumsRef(g.g.sums);
-    GiCellsRef cells = GiCellsRef(g.g.cells);
+    GiSumsRef sums = GiSumsRef(reflections ? g.g.reflect_sums : g.g.sums);
+    GiCellsRef cells = GiCellsRef(reflections ? g.g.reflect_cells : g.g.cells);
     const uvec4 s = sums.s[i];
     uvec4 c = cells.c[i];
     uint count = c.w & 0xFFFFu;
@@ -45,7 +47,7 @@ void main()
         count = min(count + s.w, uint(NPH_RENDER_GI_HISTORY));
         age = 0u;
         sums.s[i] = uvec4(0u);
-    } else if (age >= uint(NPH_RENDER_GI_MAX_AGE)) {
+    } else if (age >= (reflections ? uint(NPH_RENDER_REFLECT_MAX_AGE) : uint(NPH_RENDER_GI_MAX_AGE))) {
         keys.k[i] = 0u;
         cells.c[i] = uvec4(0u);
         return;

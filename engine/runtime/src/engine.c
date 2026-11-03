@@ -131,6 +131,12 @@ static const NPH_CVAR_BOOL(k_dof, "r.dof", 1, "depth of field through the camera
 static const NPH_CVAR_FLOAT(k_ao, "r.ao", 0.5, 0.0, 8.0,
                             "the ambient occlusion's radius in metres (0: none; production)",
                             NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_INT(k_reflections, "r.reflections", NPH_RENDER_REFLECTIONS_CACHE,
+                          NPH_RENDER_REFLECTIONS_OFF, NPH_RENDER_REFLECTIONS_RAYS,
+                          "what surfaces reflect: 0 the sky as if nothing hid it, 1 what the "
+                          "radiance cache gathers, 2 smooth ones by a ray a pixel (production; ray "
+                          "queries)",
+                          NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_FLOAT(k_contact_shadow, "r.contact_shadow", 24.0, 0.0, 256.0,
                             "how far a pixel looks towards the sun through the depths, in pixels' "
                             "widths (0: not at all; production, with the occlusion and the sun's "
@@ -246,6 +252,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->dof,
         &cv->ao,
         &cv->contact_shadow,
+        &cv->reflections,
         &cv->gi,
         &cv->many_restir,
         &cv->sim_interpolate,
@@ -315,6 +322,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_dof,
         &k_ao,
         &k_contact_shadow,
+        &k_reflections,
         &k_gi,
         &k_many_restir,
         &k_sim_interpolate,
@@ -887,6 +895,7 @@ static void choose_view(NphEngine *e, f64 dt)
     }
     e->view.ao_radius = (f32)nph_cvar_get_float(&e->cv.ao);
     e->view.contact_shadow = (f32)nph_cvar_get_float(&e->cv.contact_shadow);
+    e->view.reflections = (NphRenderReflections)nph_cvar_get_int(&e->cv.reflections);
     e->view.gi = nph_cvar_get_bool(&e->cv.gi) ? 1 : 0;
     e->view.many_restir = (NphRenderRestir)nph_cvar_get_int(&e->cv.many_restir);
     // In lockstep a frame lasts one step whatever the clock says, so a

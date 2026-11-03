@@ -59,7 +59,9 @@
 #define NPH_RENDER_TONEMAP_COUNT 3
 
 // View flags (NphRenderViewData.flags).
-#define NPH_RENDER_VIEW_IBL 1 // the environment lights the scene
+#define NPH_RENDER_VIEW_IBL          1 // the environment lights the scene
+#define NPH_RENDER_VIEW_REFLECT      2 // smooth surfaces take reflection cells (ADR-0077)
+#define NPH_RENDER_VIEW_REFLECT_RAYS 4 // smooth surfaces by a ray a pixel every frame (ADR-0077)
 
 // Background modes (NphRenderViewData.background.w).
 #define NPH_RENDER_BACKGROUND_ENVIRONMENT 0
@@ -574,6 +576,17 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
 #define NPH_RENDER_GI_HISTORY 128
 // A cell no sample has reached for this many frames is freed.
 #define NPH_RENDER_GI_MAX_AGE 240
+// Reflections (ADR-0077): surfaces smoother than this take what they reflect from cells of the
+// cache that hold it by direction, each of them 2^NPH_RENDER_REFLECT_LEVEL_SHIFT times finer than
+// the irradiance's, in an octahedral map of NPH_RENDER_REFLECT_BINS bins a side for the smoothest.
+// Each frame 1 tile in 2^NPH_RENDER_REFLECT_TURN_BITS of those with such a surface traces them.
+#define NPH_RENDER_REFLECT_MAX_ROUGHNESS 0.25
+#define NPH_RENDER_REFLECT_LEVEL_SHIFT   2
+#define NPH_RENDER_REFLECT_BINS          128
+#define NPH_RENDER_REFLECT_TURN_BITS     5
+// A reflection cell no sample has reached for this many frames is freed: a moving camera leaves
+// many behind, and its table is small.
+#define NPH_RENDER_REFLECT_MAX_AGE 60
 // The most a sample may add, in pre-exposed irradiance: brighter ones are
 // clamped (fireflies; the sums are fixed point).
 #define NPH_RENDER_GI_SAMPLE_MAX 4096.0
@@ -595,17 +608,30 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u64 sums;  // uvec4[capacity]: this frame's samples (rgb in 1 / sum_scale, and their count)
     u64 cells; // uvec4[capacity]: irradiance (rgb, lux, as a float's bits); w: the sample
                // count in bits 0-15 and the frames since one arrived in bits 16-31
-    u32 bucket_mask; // capacity / NPH_RENDER_GI_BUCKET - 1
-    f32 scale;       // a cell is 1 / (2 scale) to 1 / scale of its distance across
-    f32 sum_scale;   // fixed-point units of a pre-exposed sample
-    f32 near;        // update rays that hit nearer count nothing (the ambient occlusion's)
-    u32 frame;       // this frame's number, for the random numbers
-    u32 jitter;      // nonzero: a lookup takes a random point of its cell (temporal
-                     // anti-aliasing averages them)
-    u32 rays_x;      // the update's samples across the target
-    u32 stride;      // a sample a stride x stride block of pixels
-    u32 pad0;
-    u32 pad1;
+    // The reflection cells' table (ADR-0077), as the three above.
+    u64 reflect_keys;
+    u64 reflect_sums;
+    u64 reflect_cells;
+    // The tiles holding a smooth pixel, for reflect.comp (ADR-0077): each listed (x | y << 16),
+    // a bit a tile, and the pass's workgroups (x, y, z).
+    u64 reflect_tiles;
+    u64 reflect_bits;
+    u64 reflect_args;
+    u32 bucket_mask;         // capacity / NPH_RENDER_GI_BUCKET - 1
+    f32 scale;               // a cell is 1 / (2 scale) to 1 / scale of its distance across
+    f32 sum_scale;           // fixed-point units of a pre-exposed sample
+    f32 near;                // update rays that hit nearer count nothing (the ambient occlusion's)
+    u32 frame;               // this frame's number, for the random numbers
+    u32 jitter;              // nonzero: a lookup takes a random point of its cell (temporal
+                             // anti-aliasing averages them)
+    u32 rays_x;              // the update's samples across the target
+    u32 stride;              // a sample a stride x stride block of pixels
+    u32 reflect_rays;        // nonzero: each listed tile's turn every frame, rays to the image
+    u32 reflect_image;       // bindless storage: what a smooth pixel leaves for reflect.comp
+    u32 reflect_width;       // the target's width, rounded up to tiles of 8
+    u32 reflect_turn_bits;   // 1 listed tile in 2^this traces its rays each frame
+    u32 reflect_bucket_mask; // its table's capacity / NPH_RENDER_GI_BUCKET - 1
+    u32 pad_reflect;
     // xyz: the direction the sun's light travels; w: 1 when it casts
     // shadows, 0 when it does not, -1 when there is no sun
     NphVec4 sun_direction;

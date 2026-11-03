@@ -371,8 +371,10 @@ NTEST_F(Many, the_far_fields_arrive_shadowed_through_the_cache)
 
 // A blended surface takes the cache's light as the resolve's surfaces do. A sheet half covering a
 // black ground, in a scene lit only by the far fields, shows half of what it would show solid: with
-// no light of its own otherwise it would draw black (a palace's dirt did).
-static void blended_far_fields(RenderFixture *f, bool other_light)
+// no light of its own otherwise it would draw black (a palace's dirt did). Once, whichever the
+// reflections' mode (ADR-0077): a rough surface's specular takes the cell, which holds them
+// already.
+static void blended_far_fields(RenderFixture *f, bool other_light, NphRenderReflections reflections)
 {
     REQUIRE_PRODUCTION(f);
     if (!f->renderer->gi.supported) {
@@ -442,6 +444,7 @@ static void blended_far_fields(RenderFixture *f, bool other_light)
     NphRenderView v;
     lit_view(&v, camera);
     v.gi = 1;
+    v.reflections = reflections;
     for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
         (void)test_render_frame(f, &v, target);
     }
@@ -486,12 +489,22 @@ static void blended_far_fields(RenderFixture *f, bool other_light)
 
 NTEST_F(Many, a_blended_surface_takes_the_far_fields)
 {
-    blended_far_fields(f, false);
+    blended_far_fields(f, false, NPH_RENDER_REFLECTIONS_CACHE);
 }
 
 NTEST_F(Many, a_blended_surface_takes_them_with_other_light_too)
 {
-    blended_far_fields(f, true);
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_CACHE);
+}
+
+NTEST_F(Many, a_blended_surface_takes_them_once_with_reflections_by_rays)
+{
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_RAYS);
+}
+
+NTEST_F(Many, a_blended_surface_takes_them_without_reflections)
+{
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_OFF);
 }
 
 // The partition of unity: near and far fields together are the light. Lights low over a

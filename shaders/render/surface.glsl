@@ -826,24 +826,63 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
 #endif
     vec3 indirect = vec3(0.0);
     if (ibl || gi) {
-        vec3 irradiance = vec3(0.0);
-        if (ibl) {
-            irradiance = nph_sh9_irradiance(ShRef(view.v.sh_address), n) * view.v.ibl_intensity;
-        }
-#ifdef NPH_SURFACE_GI
-        if (gi) {
-            const vec4 cell = NPH_SURFACE_GI;
-            irradiance = mix(irradiance, cell.rgb, cell.w);
-        }
+        // Where a frame has reflections (ADR-0077): smooth surfaces take cells that hold what
+        // they reflect, by a pass after this one; others the light their irradiance cell has
+        // gathered, as arriving evenly, which is what the sky's specular stands for only where
+        // nothing hides the sky. Where a cell is trusted, nothing of the sky is fetched.
+        const bool cells_reflect = gi && (view.v.flags & NPH_RENDER_VIEW_REFLECT) != 0u;
+        const bool rays_reflect = gi && (view.v.flags & NPH_RENDER_VIEW_REFLECT_RAYS) != 0u;
+        const bool smooth_surface = roughness < NPH_RENDER_REFLECT_MAX_ROUGHNESS;
+#ifdef NPH_SURFACE_REFLECT
+        const bool reflecting = (cells_reflect || rays_reflect) && smooth_surface;
+        const bool sky_wanted = !cells_reflect && !rays_reflect;
+#else
+        const bool reflecting = false;
+        const bool sky_wanted = (!cells_reflect && !rays_reflect) || smooth_surface;
 #endif
-        const vec3 r = reflect(-v, n);
-        vec3 radiance =
-            ibl ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
-                                         nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
-                             r, roughness * view.v.specular_max_lod)
-                          .rgb *
-                      view.v.ibl_intensity
-                : vec3(0.0);
+#ifdef NPH_SURFACE_GI
+        const vec4 cell = gi ? NPH_SURFACE_GI : vec4(0.0);
+#else
+        const vec4 cell = vec4(0.0);
+#endif
+        vec3 irradiance = vec3(0.0);
+        vec3 radiance = vec3(0.0);
+        if (ibl && (cell.w < 1.0 || sky_wanted)) {
+            irradiance = nph_sh9_irradiance(ShRef(view.v.sh_address), n) * view.v.ibl_intensity;
+            if (!reflecting) {
+                radiance = textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
+                                                  nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
+                                      reflect(-v, n), roughness * view.v.specular_max_lod)
+                               .rgb *
+                           view.v.ibl_intensity;
+            }
+        }
+        irradiance = mix(irradiance, cell.rgb, cell.w);
+#ifdef NPH_SURFACE_MANY_ACTIVE
+        const bool many_gathered = NPH_SURFACE_MANY_ACTIVE;
+#else
+        const bool many_gathered = false;
+#endif
+        if ((cells_reflect || rays_reflect) && !reflecting) {
+            const vec3 gathered = irradiance * NPH_INV_PI;
+#ifndef NPH_SURFACE_REFLECT
+            // (The resolve's smooth surfaces are reflecting: this is a blended one's.)
+            if (smooth_surface) {
+                // No cell for a blended surface's reflection, for no ray starts from it: what
+                // reflect.comp falls back on, the sky along its direction, no brighter than what
+                // is gathered here, or with no sky what is gathered.
+                const float bright = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+                const float scene = dot(gathered, vec3(0.2126, 0.7152, 0.0722));
+                const float held = bright > scene ? mix(1.0, scene / bright, cell.w) : 1.0;
+                radiance = ibl ? radiance * held : gathered;
+            } else
+#endif
+            if (!many_gathered) {
+                // (With many lights the cell holds their far fields' direct light, whose
+                // specular their reservoirs give, and the sky's specular has no use.)
+                radiance = mix(radiance, gathered, cell.w);
+            }
+        }
 #ifdef NPH_SURFACE_MANY_ACTIVE
         // The many lights' far fields have no highlights of their own: what the cell
         // gathered, as if arriving evenly from everywhere, gives the specular its
@@ -855,8 +894,9 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         }
 #endif
 #ifdef NPH_SURFACE_GI_FAR_SPECULAR
-        // So with a blended surface, which no reservoir holds for.
-        if (gi && view.v.many != 0ul) {
+        // So with a blended surface, which no reservoir holds for, where reflections do not
+        // already take what the cell gathered.
+        if (gi && !cells_reflect && !rays_reflect && view.v.many != 0ul) {
             const vec4 far_cell = NPH_SURFACE_GI;
             radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
         }
@@ -965,6 +1005,17 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
     if (NPH_SURFACE_DEBUG_MODE(view) == NPH_RENDER_DEBUG_DIRECT) {
         return min(direct * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
     }
+#ifdef NPH_SURFACE_REFLECT
+    // What a smooth pixel needs for what a pass after this one adds (ADR-0077): what the lights kept
+    // live, handed to main(), which does the rest once the colour has gone out. This shader runs at
+    // its register limit, and anything read here from the view, which the shader has read before and
+    // so has to keep, or stored here, spills up to 11 registers a pixel, whichever pixels it is for:
+    // 0.27 ms from all of them.
+    if (lp.a2 < NPH_RENDER_REFLECT_MAX_ROUGHNESS * NPH_RENDER_REFLECT_MAX_ROUGHNESS *
+                    NPH_RENDER_REFLECT_MAX_ROUGHNESS * NPH_RENDER_REFLECT_MAX_ROUGHNESS) {
+        NPH_SURFACE_REFLECT(lp);
+    }
+#endif
     return min((direct + rest) * view.v.exposure, vec3(NPH_RENDER_HALF_MAX));
 #endif
 }
@@ -1049,30 +1100,37 @@ vec3 nph_surface_shade_voxel(ViewRef view, vec3 albedo, float roughness_in, floa
 #else
     const bool gi = false;
 #endif
+    // As a triangle's, far from smooth, in either mode (nph_surface_shade; ADR-0077).
+    const bool reflections =
+        gi && (view.v.flags & uint(NPH_RENDER_VIEW_REFLECT | NPH_RENDER_VIEW_REFLECT_RAYS)) != 0u;
+#ifdef NPH_SURFACE_GI
+    const vec4 cell = gi ? NPH_SURFACE_GI : vec4(0.0);
+#else
+    const vec4 cell = vec4(0.0);
+#endif
+    const bool sky_fetched = ibl && (cell.w < 1.0 || !reflections);
     vec3 irradiance = vec3(0.0);
-    if (ibl) {
+    if (sky_fetched) {
         irradiance = nph_voxel_sh_irradiance(ShRef(view.v.sh_address), n, kappa) *
                      view.v.ibl_intensity;
     }
-#ifdef NPH_SURFACE_GI
-    if (gi) {
-        const vec4 cell = NPH_SURFACE_GI;
-        irradiance = mix(irradiance, cell.rgb, cell.w);
-    }
-#endif
+    irradiance = mix(irradiance, cell.rgb, cell.w);
     if (irradiance_view) {
         return min(irradiance * (NPH_INV_PI * view.v.exposure), vec3(NPH_RENDER_HALF_MAX));
     }
     vec3 indirect = vec3(0.0);
     if (ibl || gi) {
         const vec3 r = reflect(-v, n);
-        const vec3 radiance =
-            ibl ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
-                                         nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
-                             r, roughness * view.v.specular_max_lod)
-                          .rgb *
-                      view.v.ibl_intensity
-                : vec3(0.0);
+        vec3 radiance =
+            sky_fetched ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(view.v.specular_index)],
+                                                 nph_samplers[nonuniformEXT(view.v.clamp_sampler)]),
+                                     r, roughness * view.v.specular_max_lod)
+                                  .rgb *
+                              view.v.ibl_intensity
+                        : vec3(0.0);
+        if (reflections) {
+            radiance = mix(radiance, irradiance * NPH_INV_PI, cell.w);
+        }
         const vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
         const vec3 k_s = f0 + fr * pow(1.0 - nov, 5.0);
         const vec3 fss_ess = k_s * dfg.x + dfg.y;

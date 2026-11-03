@@ -36,7 +36,7 @@
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
 //                 [--paged-textures] [--texture-budget=MB] [--restir=N] [--contact-shadow=N]
-//                 [--accumulate=N]
+//                 [--reflections=N] [--accumulate=N]
 //                 [--truth] [--truth-ev=STOPS]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
@@ -511,6 +511,8 @@ static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
 static bool g_rt_shadows = false;
 // --restir=N: the many lights' reservoirs (NphRenderRestir: 0 off, 1 specular, 2 all).
 static NphRenderRestir g_restir = NPH_RENDER_RESTIR_SPECULAR;
+// --reflections=N: NphRenderView.reflections (NphRenderReflections).
+static NphRenderReflections g_reflections = NPH_RENDER_REFLECTIONS_CACHE;
 // --contact-shadow=N: NphRenderView.contact_shadow, the march's pixels (negative: the default).
 static f32 g_contact_shadow = -1.0F;
 // --accumulate=N, with --capture-dir: N more frames of each reference view averaged in
@@ -1335,6 +1337,10 @@ typedef struct FrameRun {
     f64 cpu_ns[MAX_FRAMES];
     u32 cpu_count;
     NphRenderFrameStats stats; // the last frame's
+    // Over the measured frames: the reflections' rays that full buckets dropped, and the most in
+    // a frame (the reflection cells' table, ADR-0077).
+    u64 reflect_dropped;
+    u32 reflect_dropped_max;
 } FrameRun;
 
 // The scene's motion takes a frame's step: the camera walking or turning,
@@ -1557,6 +1563,8 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
         NPH_TRY(render_one(ctx, view, target, true, &cpu, &run->stats));
     }
     run->cpu_count = 0U;
+    run->reflect_dropped = 0U;
+    run->reflect_dropped_max = 0U;
     ctx->stream_ns_sum = 0.0;
     ctx->stream_ns_max = 0.0;
     ctx->stream_frames = 0U;
@@ -1567,6 +1575,12 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
         NPH_TRY(render_one(ctx, view, target, true, &cpu, &run->stats));
         if (i < frames) {
             run->cpu_ns[run->cpu_count++] = cpu;
+        }
+        // (The statistics are of the frame that completed NPH_GPU_FRAMES_IN_FLIGHT frames earlier.)
+        if (i >= NPH_GPU_FRAMES_IN_FLIGHT) {
+            run->reflect_dropped += run->stats.vis_reflect_dropped;
+            run->reflect_dropped_max =
+                nph_max_u32(run->reflect_dropped_max, run->stats.vis_reflect_dropped);
         }
     }
     // The last measured frame's timestamps.
@@ -1613,6 +1627,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
     view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
     view.many_restir = g_restir;
+    view.reflections = g_reflections;
     if (g_contact_shadow >= 0.0F) {
         view.contact_shadow = g_contact_shadow;
     }
@@ -1751,6 +1766,11 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                st->vis_overflow != 0U ? "; LISTS OVERFLOWED" : "");
         if (st->vis_many_rays != 0U) {
             printf("    many lights: %u rays asked for\n", st->vis_many_rays);
+        }
+        if (g_reflections != NPH_RENDER_REFLECTIONS_OFF) {
+            printf("    reflections: %llu rays dropped by full buckets over the measured frames, "
+                   "%u at most in one\n",
+                   (unsigned long long)run->reflect_dropped, run->reflect_dropped_max);
         }
         if (st->vis_lod_groups != 0U || st->vis_lod_nodes != 0U) {
             printf("    levels of detail: %u groups tested, %u hierarchy nodes visited in %u steps "
@@ -2300,6 +2320,7 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         view.ev100 += g_truth_ev;
     }
     view.many_restir = g_restir;
+    view.reflections = g_reflections;
     if (g_contact_shadow >= 0.0F) {
         view.contact_shadow = g_contact_shadow;
     }
@@ -2592,7 +2613,7 @@ static int usage(void)
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
                     "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
-                    "[--contact-shadow=N] "
+                    "[--contact-shadow=N] [--reflections=N] "
                     "[--accumulate=N] [--truth] [--truth-ev=STOPS]\n");
     return 2;
 }
@@ -2672,6 +2693,8 @@ int main(int argc, char **argv)
             g_rt_shadows = true;
         } else if (strncmp(argv[i], "--restir=", 9U) == 0) {
             g_restir = (NphRenderRestir)strtoul(argv[i] + 9, NULL, 10);
+        } else if (strncmp(argv[i], "--reflections=", 14U) == 0) {
+            g_reflections = (NphRenderReflections)strtoul(argv[i] + 14, NULL, 10);
         } else if (strncmp(argv[i], "--contact-shadow=", 17U) == 0) {
             g_contact_shadow = (f32)strtod(argv[i] + 17, NULL);
         } else if (strncmp(argv[i], "--accumulate=", 13U) == 0) {

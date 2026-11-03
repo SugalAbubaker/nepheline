@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// The rays of what smooth surfaces reflect (docs/adr/0077-reflections.md): over one tile in
+// 2^reflect_turn_bits a frame of those the resolve listed for holding a smooth pixel, from what its pixels
+// left (gi_common.glsl gi_reflect_pack), so with no decode of its own and nothing to do where
+// nothing is smooth: one ray from the point along a sample of its lobe, what it finds added to the
+// cell of the point and its mirror direction. A ray's worth is what the reflection shows: a
+// dielectric facing the camera, a twentieth of what arrives, plays Russian roulette for it (the
+// cell's mean is the same; only how soon it fills differs).
+//
+// Where every smooth pixel takes a ray every frame (reflect_rays nonzero), every listed tile has
+// its turn, what the ray finds goes straight to the image, and what the pixels left is cleared.
+//
+// mode: the target's width | height << 16; arg0: the visibility buffer's bindless storage index;
+// arg1: the HDR image's; arg2: what the pixels left; arg3, arg4: the address of the tiles' list.
+// A workgroup a tile.
+#version 460
+#extension GL_EXT_ray_query : require
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+#include "rt_common.glsl"
+#include "gi_common.glsl"
+#include "gi_hit.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    GiViewRef g = GiViewRef(rview.v.gi);
+    const bool rays = g.g.reflect_rays != 0u;
+    const uint listed = GiKeysRef(uint64_t(pc.arg3) | (uint64_t(pc.arg4) << 32ul)).k[gl_WorkGroupID.x];
+    const uvec2 tile = uvec2(listed & 0xFFFFu, listed >> 16u);
+    // Its turn by where it is, so that each has one every 2^reflect_turn_bits frames: the list's
+    // order is the order the resolve's subgroups ran in, which is not the same from frame to frame.
+    if (((tile.x + tile.y * 11u + g.g.frame) & ((1u << g.g.reflect_turn_bits) - 1u)) != 0u) {
+        return;
+    }
+    const ivec2 p = ivec2(tile * 8u + gl_LocalInvocationID.xy);
+    if (p.x >= int(pc.mode & 0xFFFFu) || p.y >= int(pc.mode >> 16u)) {
+        return;
+    }
+    const uvec2 w = imageLoad(nph_uimages_2d[pc.arg2], p).xy;
+    if (w.y == 0u) {
+        return;
+    }
+    const vec3 base = gi_reflect_specular(w.y);
+    const vec3 u = gi_random(uvec3(uvec2(p), g.g.frame ^ 0x5BD1E995u));
+    if (rays) {
+        imageStore(nph_uimages_2d[pc.arg2], p, uvec4(0u));
+    } else if (u.z * 0.25 >= max(max(base.r, base.g), base.b) + 0.03) {
+        return;
+    }
+    const uint rough = (w.x >> 24u) & 15u;
+    const uvec2 d = uvec2(w.x & 0xFFFu, (w.x >> 12u) & 0xFFFu);
+    const float depth = vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
+    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    const vec4 h = rview.v.inv_view_proj * vec4(q, depth, 1.0);
+    const vec3 x = h.xyz / h.w;
+    const vec3 r = normalize(gi_reflect_direction(w.x));
+    const vec3 n = normalize(r + normalize(-x));
+    const float roughness = float(rough) * (NPH_RENDER_REFLECT_MAX_ROUGHNESS / 15.0);
+    const float a = roughness * roughness;
+    // A sample of GGX's half vectors (Walter et al., EGSR 2007).
+    const float cos_t = sqrt((1.0 - u.y) / (1.0 + (a * a - 1.0) * u.y));
+    const float sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+    const float phi = 2.0 * NPH_PI * u.x;
+    const float s = n.z >= 0.0 ? 1.0 : -1.0;
+    const float e = -1.0 / (s + n.z);
+    const float b = n.x * n.y * e;
+    const vec3 tangent = vec3(1.0 + s * n.x * n.x * e, s * b, -s * n.x);
+    const vec3 bitangent = vec3(b, s + n.y * n.y * e, -n.y);
+    const vec3 half_v = normalize(tangent * (sin_t * cos(phi)) + bitangent * (sin_t * sin(phi)) + n * cos_t);
+    vec3 dir = reflect(-normalize(-x), half_v);
+    if (dot(dir, n) <= 0.0) {
+        dir = reflect(dir, n);
+    }
+    uint slot = GI_NONE;
+    if (!rays) {
+        slot = gi_claim_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, x, d, rough));
+        if (slot == GI_NONE) {
+            atomicAdd(VisCountersRef(view.v.counters).c.reflect_dropped, 1u);
+            return;
+        }
+    }
+    // The point from its depth lies on its surface to about a thousandth of its distance.
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsOpaqueEXT, 0xFFu,
+                          x + rview.v.tlas_offset.xyz + n * (1e-3 * length(x)), 0.0, dir, 1e30);
+    while (rayQueryProceedEXT(rq)) {
+    }
+    vec3 radiance;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        radiance = (rview.v.flags & NPH_RENDER_VIEW_IBL) != 0u
+                       ? textureLod(samplerCube(nph_textures_cube[nonuniformEXT(rview.v.specular_index)],
+                                                nph_samplers[nonuniformEXT(rview.v.clamp_sampler)]),
+                                    dir, roughness * rview.v.specular_max_lod)
+                                 .rgb *
+                             rview.v.ibl_intensity
+                       : vec3(0.0);
+    } else {
+        radiance = hit_radiance(view, rview, g, rq, dir);
+    }
+    const vec3 sample_e = min(radiance * rview.v.exposure, vec3(NPH_RENDER_GI_SAMPLE_MAX));
+    if (rays) {
+        const float nov = clamp(dot(r, n), 1e-4, 1.0);
+        const vec2 dfg = textureLod(sampler2D(nph_textures_2d[nonuniformEXT(rview.v.brdf_lut_index)],
+                                              nph_samplers[nonuniformEXT(rview.v.clamp_sampler)]),
+                                    vec2(nov, roughness), 0.0).xy;
+        const vec3 tint = base * dfg.x + (vec3(1.0) - base) * dfg.y;
+        imageStore(nph_images_2d[nonuniformEXT(pc.arg1)], p,
+                   imageLoad(nph_images_2d[nonuniformEXT(pc.arg1)], p) + vec4(tint * sample_e, 0.0));
+        return;
+    }
+    const uvec3 fixed_e = uvec3(sample_e * g.g.sum_scale + 0.5);
+    GiSumsRef sums = GiSumsRef(g.g.reflect_sums);
+    if (fixed_e.x != 0u) {
+        atomicAdd(sums.s[slot].x, fixed_e.x);
+    }
+    if (fixed_e.y != 0u) {
+        atomicAdd(sums.s[slot].y, fixed_e.y);
+    }
+    if (fixed_e.z != 0u) {
+        atomicAdd(sums.s[slot].z, fixed_e.z);
+    }
+    atomicAdd(sums.s[slot].w, 1u);
+}

@@ -1512,6 +1512,7 @@ they were read): hence their streaming (ADR-0063).
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice and its march towards the sun ("Contact shadows"), and the denoise (below) |
+| `reflect clear`, `reflect rays`, `reflect` | on a lit view with reflections and the radiance cache, around the resolve: the tiles' list emptied, then after it the listed tiles' rays and their pixels' lookups ("Reflections") |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up), and lists the tiles that hold voxel pixels |
@@ -2211,6 +2212,53 @@ light onto the ground within a seventh of the truth (`test_gi.c`). At 4K
 it adds 0.20 to 0.27 ms under the sky or the sun, and 0.36 to 0.41 ms at
 night among many lamps (ADR-0039).
 
+### Reflections
+
+With the radiance cache, a production view's surfaces no longer reflect the sky as if nothing hid
+it (`NphRenderView.reflections`, `r.reflections`; [ADR-0077](adr/0077-reflections.md)). What the
+split-sum's specular multiplies is, by the surface's roughness:
+
+- **Rough** (0.25 and up): the light its irradiance cell has gathered, over pi, as if arriving
+  evenly. Nothing more is traced or stored. Where the cell is trusted, nothing of the sky is fetched
+  at all, its harmonics or its cube, which pays for what the smooth surfaces' store costs the
+  resolve. With many lights the cell also holds their far fields' direct light, whose specular their
+  reservoirs give ("Many lights"), so there it stays out.
+- **Smooth** (under 0.25): a reflection cell, of a table of its own (`gi_cells` slots too, freed
+  after 60 frames unseen): the same grid four times finer, for each direction of an octahedral map
+  whose bins are as wide as the surface's lobe, 1.6 degrees for the smoothest, and so what lies along
+  the surface's mirror direction, in the world, whatever the camera does.
+
+The resolve runs at its register limit: a store anywhere before its colour's, or a read of the view
+after the lights (which the compiler takes from an earlier read and keeps across the light loop),
+spills 9 to 11 registers a pixel, whichever pixels it is for. So the shading hands two words to the
+end of `main()`, packed from what the lights kept live: the mirror direction (24 bits of an
+octahedral map), the roughness (4) and the specular colour (30). After the colour, `main()` stores
+them in an image (`NPH_GPU_FORMAT_R32G32_UINT`, 66 MB at 4K, touched only at smooth pixels) and lists
+the pixel's tile, as for the voxel resolve. Then, over the tiles listed:
+
+- **`reflect rays`** (`reflect_rays.comp`): each listed tile has its turn once in 32 frames, by where
+  it is, and traces from what its pixels left, so with no decode of its own: one ray along a sample of
+  the lobe (Walter et al., EGSR 2007) from each pixel, what it finds (shaded as the radiance cache's
+  rays shade it, `gi_hit.glsl`) added to its reflection cell. A ray's worth is what the reflection
+  shows: a dielectric facing the camera, showing a twentieth of what arrives, plays Russian roulette
+  for it.
+- **`reflect`** (`reflect.comp`): each pixel looks up its cell from those same bits, at a neighbouring
+  direction now and then under temporal anti-aliasing so that the bins' edges blend over frames, takes
+  the energy (the split-sum's table) and the screen's occlusion itself, adds what it finds to the HDR
+  image, and clears what it left, so the image is empty wherever a pixel leaves nothing, at no cost to
+  those pixels. Where its cell gives out (one sample is enough to trust for the smoothest, four at the
+  end), it takes the sky along its direction, no brighter than what its irradiance cell has gathered,
+  or with no sky what that cell has gathered.
+  `gi resolve` keeps both tables.
+
+A blended surface starts no ray: smooth, it takes that same fallback in forward shading.
+
+`NPH_RENDER_REFLECTIONS_RAYS` gives smooth surfaces a ray a pixel every frame in place of their cells:
+sharp, noisy until the temporal resolve averages it, at many times the cost. With the roughness limit
+raised in a build of its own it gives every surface's, which averaged over frames (render_perf
+`--reflections=2 --accumulate=N`) is the truth the cache was measured against
+([ADR-0077](adr/0077-reflections.md)).
+
 ### Capacities and statistics
 
 The production path's lists have fixed capacities in `NphRendererDesc`:
@@ -2232,7 +2280,8 @@ and evicted, the page budget (`vsm_budget`), the casters' meshlets tested
 (`vsm_meshlets`, what `max_vsm_meshlets` must hold) and the nodes their
 walk visited (`vsm_nodes`), and the caster draws, read back as the others. The radiance cache has `gi_cells` (2^18) slots, a
 bucket of which, when full, drops the samples of the cells it cannot
-take, and `gi_rays` (65,536) a frame. The frame statistics
+take, and `gi_rays` (65,536) a frame; its reflection cells as many, whose rays a
+full bucket drops are counted (`vis_reflect_dropped`; render_perf reports them a view). The frame statistics
 carry the GPU's counters (clusters and triangles drawn, clusters drawn in
 software, instances and meshlets culled by each test, the hierarchy's
 nodes visited and the clusters a finer level stood in for, lights in view,
