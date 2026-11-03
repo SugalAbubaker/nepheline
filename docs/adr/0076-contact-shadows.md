@@ -21,7 +21,8 @@ fixed length in metres.
    (`r.contact_shadow`; 0 for none), as the map's texels are. It is bounded at half the point's distance, which keeps
    it in front of the camera.
 2. **It runs in the ambient occlusion's pass** (`ao.comp` `sun_blocked`), which has the pixel's depth, plane and jitter
-   in hand, while the frame has both the sun's map and the occlusion. 4 steps, closer together near the pixel, jittered
+   in hand, while the frame has both the sun's map and the occlusion, in a variant of the pass compiled with it (frames
+   without the map take one without its code). 4 steps, closer together near the pixel, jittered
    as the occlusion's steps are, so the temporal resolve averages them. A first step under a pixel, which would read the
    point's own texel, is left out: the image is the same to the byte without it.
 3. **Nothing in a step needs the point's distance.** The length being proportional to the distance, a step's screen
@@ -53,18 +54,27 @@ percentage point from run to run, so the gain is clear of it and the rise in wha
 is left is the map's own on surfaces the sun grazes, which the march does not reach ("Consequences"). Where it shows most,
 Bistro's window bars have their shadows, close to the rays', where the map alone left the glass lit.
 
-Cost in the frame, with and without the march:
+Cost in the frame, without the march and with it (frame in ms, mean; interleaved, two rounds of 240 frames, a scene a
+process; 2026-11-03):
 
 | View | Without | With | `ao` |
 |---|---|---|---|
-| Bistro `street` (interleaved, three rounds of 120 frames) | 6.88 ms | 7.02 ms | 0.875 to 1.01 ms |
-| Bistro `terrace` (one run of 60 frames) | 7.34 ms | 7.53 ms | about 1.0 ms with it |
-| Bistro `hedge` (one run of 60 frames) | 7.01 ms | 7.21 ms | about 1.0 ms with it |
-| The city | not measured yet: the run was stopped for lack of memory, with only its side without the march done | | |
-| The interior | no sun: no march | | |
+| Bistro `street` | 6.86 | **7.00** | 0.87 to 1.01 |
+| Bistro `street_walk` | 6.94 | **7.06** | 0.88 to 1.00 |
+| Bistro `street_turn` | 7.13 | **7.25** | 0.87 to 1.00 |
+| Bistro `terrace` | 7.44 | **7.56** | 0.88 to 1.01 |
+| Bistro `hedge` | 7.06 | **7.18** | 0.87 to 1.01 |
+| City `street` | 6.34 | **6.43** | 0.88 to 0.97 |
+| City `street_walk` | 6.40 | **6.49** | 0.88 to 0.96 |
+| City `street_sprint` | 6.55 | **6.64** | 0.88 to 0.96 |
+| City `street_turn` | 6.34 | **6.48** | 0.88 to 1.01 |
+| City `crossing` | 6.40 | **6.51** | 0.85 to 0.96 |
+| City `park` | 7.50 | **7.62** | 0.89 to 1.02 |
+| City `rooftop` | 9.47 | **9.53** | 0.64 to 0.69 |
 
-The code alone, with no march (a compare and the sign), takes the pass from 0.855 to 0.873 ms: 0.02 ms that the interior
-pays for nothing.
+The pass is compiled twice, with the march and without it (`ao.comp` `k_contact`), and a frame without the sun's map takes
+the second: the interior, which has no sun, pays nothing in the pass (0.842 against 0.844 ms, interleaved against the build
+before), and 0.01 to 0.02 ms in its resolve for the occlusion's sign.
 
 **DRAM:** no new memory. The march reads the depths the pass reads already, within a few cache lines of them; the pass's
 declared reads stay 44.6 MB. Its share of the §10.4 "Shadows" line takes that line from about 0.40 ms (the map in the

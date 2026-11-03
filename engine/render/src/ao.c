@@ -59,6 +59,12 @@ NphResult render_ao_create(NphRenderer *r)
     d.name = "ao";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->ao));
     render_log_statistics(r, a->ao, "ao");
+    // The same with the contact shadows' march (ao.comp k_contact), for the frames with the sun's map.
+    d.specialization[0] = 1U;
+    d.specialization_count = 1U;
+    d.name = "ao with contact shadows";
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->ao_contact));
+    render_log_statistics(r, a->ao_contact, "ao with contact shadows");
     memset(&d, 0, sizeof d);
     d.shader = a->denoise_shader;
     d.name = "ao denoise";
@@ -71,6 +77,7 @@ void render_ao_destroy(NphRenderer *r)
 {
     RenderAo *a = &r->ao;
     nph_gpu_pipeline_destroy(r->dev, a->denoise);
+    nph_gpu_pipeline_destroy(r->dev, a->ao_contact);
     nph_gpu_pipeline_destroy(r->dev, a->ao);
     nph_gpu_pipeline_destroy(r->dev, a->depth);
     nph_gpu_shader_destroy(r->dev, a->denoise_shader);
@@ -176,7 +183,7 @@ static void ao_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     NphRenderAoPush p = a->frame_push;
     p.depths_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, a->frame_depths));
     p.raw_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, a->frame_raw), 0U);
-    dispatch(cmd, a->ao, &p, AO_GROUP);
+    dispatch(cmd, p.sun.w > 0.0F ? a->ao_contact : a->ao, &p, AO_GROUP);
 }
 
 static void denoise_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)

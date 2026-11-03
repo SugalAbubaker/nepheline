@@ -40,6 +40,10 @@
 #define AO_GROUP 16
 layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
 
+// Whether the frame has the sun's map, and so the march (ao.c): a frame without it pays nothing for
+// the march's code (0.035 ms of the pass in the interior when it was one pipeline).
+layout(constant_id = 0) const bool k_contact = false;
+
 // Samples on either side of a slice.
 #define AO_STEPS 4
 // An occluder's weight falls from 1 to 0 over this last part of the radius.
@@ -291,6 +295,6 @@ void main()
     const float arc = 0.25 * (-cos(2.0 * th0 - g) + cos_g + 2.0 * th0 * sin_g) +
                       0.25 * (-cos(2.0 * th1 - g) + cos_g + 2.0 * th1 * sin_g);
     // Facing away the sun does not reach it anyway; with no sun, this is 0.
-    const bool blocked = dot(n, pc.sun.xyz) > 0.0 && sun_blocked(c, depth, gradient, jitter);
+    const bool blocked = k_contact && dot(n, pc.sun.xyz) > 0.0 && sun_blocked(c, depth, gradient, jitter);
     store(t, max(np_length * arc, 0.0), np_length * (cos_g + g * sin_g), dist, blocked);
 }

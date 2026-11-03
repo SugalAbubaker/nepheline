@@ -1087,6 +1087,7 @@ typedef struct RenderAo {
     NphGpuShader denoise_shader; // ao_denoise.comp
     NphGpuPipeline depth;
     NphGpuPipeline ao;
+    NphGpuPipeline ao_contact; // with the contact shadows' march (ao.comp k_contact)
     NphGpuPipeline denoise;
     // This frame, at half resolution.
     b32 frame_active;

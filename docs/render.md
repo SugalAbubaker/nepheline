@@ -673,7 +673,8 @@ texels do, so the march covers the same few of them everywhere.
 
 - **The march** (`ao.comp` `sun_blocked`) runs in the ambient occlusion's pass,
   which has the pixel's depth, plane and jitter in hand, while the frame has the
-  sun's map and the occlusion: 4 steps, closer together near the pixel, jittered
+  sun's map and the occlusion, in a variant of the pass compiled with it (`k_contact`;
+  a frame without the map takes the other and pays nothing): 4 steps, closer together near the pixel, jittered
   as the occlusion's steps are, so the temporal resolve averages them. Since the
   length is proportional to the distance, a step's screen position and depth
   follow from the pixel's without the distance.

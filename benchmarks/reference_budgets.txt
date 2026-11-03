@@ -9,6 +9,9 @@
 # (interior_*: added 2026-11-02 from a run of those scenes alone (ADR-0074))
 # reference_scenes-2026-11-02-interior-win-msvc-profile-rtx3060ti.json
 # (interior_*: again 2026-11-02 (ADR-0075), from a run of those scenes alone)
+# (bistro_*.gpu.ao and city_*.gpu.ao alone: again 2026-11-03, with the contact shadows' march
+# (ADR-0076), the mean of two rounds a scene from
+# reference_scenes-2026-11-03-contact-win-msvc-profile-rtx3060ti.json and its second round)
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         56000
@@ -47,7 +50,7 @@ bistro_street_production.gpu.vsm_fixup         54000
 bistro_street_production.gpu.vsm_raster        65000
 bistro_street_production.gpu.vsm_statistics    53000
 bistro_street_production.gpu.ao_depth          83000
-bistro_street_production.gpu.ao                893000
+bistro_street_production.gpu.ao                1056000
 bistro_street_production.gpu.ao_denoise        450000
 bistro_street_production.gpu.gi_update         243000
 bistro_street_production.gpu.gi_resolve        64000
@@ -105,7 +108,7 @@ bistro_street_walk_production.gpu.vsm_fixup    54000
 bistro_street_walk_production.gpu.vsm_raster   69000
 bistro_street_walk_production.gpu.vsm_statistics 53000
 bistro_street_walk_production.gpu.ao_depth     83000
-bistro_street_walk_production.gpu.ao           895000
+bistro_street_walk_production.gpu.ao           1055000
 bistro_street_walk_production.gpu.ao_denoise   451000
 bistro_street_walk_production.gpu.gi_update    243000
 bistro_street_walk_production.gpu.gi_resolve   65000
@@ -163,7 +166,7 @@ bistro_street_turn_production.gpu.vsm_fixup    55000
 bistro_street_turn_production.gpu.vsm_raster   85000
 bistro_street_turn_production.gpu.vsm_statistics 53000
 bistro_street_turn_production.gpu.ao_depth     83000
-bistro_street_turn_production.gpu.ao           889000
+bistro_street_turn_production.gpu.ao           1052000
 bistro_street_turn_production.gpu.ao_denoise   451000
 bistro_street_turn_production.gpu.gi_update    231000
 bistro_street_turn_production.gpu.gi_resolve   68000
@@ -221,7 +224,7 @@ bistro_terrace_production.gpu.vsm_fixup        54000
 bistro_terrace_production.gpu.vsm_raster       65000
 bistro_terrace_production.gpu.vsm_statistics   53000
 bistro_terrace_production.gpu.ao_depth         84000
-bistro_terrace_production.gpu.ao               897000
+bistro_terrace_production.gpu.ao               1061000
 bistro_terrace_production.gpu.ao_denoise       452000
 bistro_terrace_production.gpu.gi_update        247000
 bistro_terrace_production.gpu.gi_resolve       65000
@@ -278,7 +281,7 @@ bistro_hedge_production.gpu.vsm_fixup          54000
 bistro_hedge_production.gpu.vsm_raster         65000
 bistro_hedge_production.gpu.vsm_statistics     53000
 bistro_hedge_production.gpu.ao_depth           83000
-bistro_hedge_production.gpu.ao                 892000
+bistro_hedge_production.gpu.ao                 1057000
 bistro_hedge_production.gpu.ao_denoise         452000
 bistro_hedge_production.gpu.gi_update          217000
 bistro_hedge_production.gpu.gi_resolve         64000
@@ -334,7 +337,7 @@ city_street_production.gpu.vsm_fixup           54000
 city_street_production.gpu.vsm_raster          65000
 city_street_production.gpu.vsm_statistics      53000
 city_street_production.gpu.ao_depth            83000
-city_street_production.gpu.ao                  893000
+city_street_production.gpu.ao                  1015000
 city_street_production.gpu.ao_denoise          447000
 city_street_production.gpu.gi_update           240000
 city_street_production.gpu.gi_resolve          64000
@@ -390,7 +393,7 @@ city_street_walk_production.gpu.vsm_fixup      55000
 city_street_walk_production.gpu.vsm_raster     69000
 city_street_walk_production.gpu.vsm_statistics 53000
 city_street_walk_production.gpu.ao_depth       83000
-city_street_walk_production.gpu.ao             892000
+city_street_walk_production.gpu.ao             1010000
 city_street_walk_production.gpu.ao_denoise     447000
 city_street_walk_production.gpu.gi_update      241000
 city_street_walk_production.gpu.gi_resolve     66000
@@ -446,7 +449,7 @@ city_street_sprint_production.gpu.vsm_fixup    56000
 city_street_sprint_production.gpu.vsm_raster   80000
 city_street_sprint_production.gpu.vsm_statistics 53000
 city_street_sprint_production.gpu.ao_depth     84000
-city_street_sprint_production.gpu.ao           893000
+city_street_sprint_production.gpu.ao           1010000
 city_street_sprint_production.gpu.ao_denoise   447000
 city_street_sprint_production.gpu.gi_update    241000
 city_street_sprint_production.gpu.gi_resolve   71000
@@ -502,7 +505,7 @@ city_street_turn_production.gpu.vsm_fixup      55000
 city_street_turn_production.gpu.vsm_raster     84000
 city_street_turn_production.gpu.vsm_statistics 53000
 city_street_turn_production.gpu.ao_depth       82000
-city_street_turn_production.gpu.ao             894000
+city_street_turn_production.gpu.ao             1060000
 city_street_turn_production.gpu.ao_denoise     443000
 city_street_turn_production.gpu.gi_update      237000
 city_street_turn_production.gpu.gi_resolve     68000
@@ -558,7 +561,7 @@ city_crossing_production.gpu.vsm_fixup         54000
 city_crossing_production.gpu.vsm_raster        65000
 city_crossing_production.gpu.vsm_statistics    53000
 city_crossing_production.gpu.ao_depth          83000
-city_crossing_production.gpu.ao                869000
+city_crossing_production.gpu.ao                1013000
 city_crossing_production.gpu.ao_denoise        436000
 city_crossing_production.gpu.gi_update         241000
 city_crossing_production.gpu.gi_resolve        66000
@@ -614,7 +617,7 @@ city_park_production.gpu.vsm_fixup             54000
 city_park_production.gpu.vsm_raster            65000
 city_park_production.gpu.vsm_statistics        53000
 city_park_production.gpu.ao_depth              82000
-city_park_production.gpu.ao                    910000
+city_park_production.gpu.ao                    1066000
 city_park_production.gpu.ao_denoise            430000
 city_park_production.gpu.gi_update             322000
 city_park_production.gpu.gi_resolve            69000
@@ -670,7 +673,7 @@ city_rooftop_production.gpu.vsm_fixup          54000
 city_rooftop_production.gpu.vsm_raster         64000
 city_rooftop_production.gpu.vsm_statistics     53000
 city_rooftop_production.gpu.ao_depth           80000
-city_rooftop_production.gpu.ao                 654000
+city_rooftop_production.gpu.ao                 726000
 city_rooftop_production.gpu.ao_denoise         340000
 city_rooftop_production.gpu.gi_update          236000
 city_rooftop_production.gpu.gi_resolve         66000
