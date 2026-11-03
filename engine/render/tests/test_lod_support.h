@@ -30,13 +30,14 @@ typedef struct LodMesh {
 } LodMesh;
 
 // The voxelizer's material for the tests' meshes: opaque, of one look
-// (LOD_VOXEL_ALBEDO, roughness 0.7, metallic 0), with the normals the
-// triangles shade with (the vertices' interpolated, as the cooker's sampler
-// has them).
+// (LOD_VOXEL_ALBEDO, roughness 0.7, metallic 0 but where a builder is given
+// another), with the normals the triangles shade with (the vertices'
+// interpolated, as the cooker's sampler has them).
 #define LOD_VOXEL_ALBEDO nph_vec3(0.3F, 0.5F, 0.2F)
 
 typedef struct LodVoxelLook {
     const NphRenderVertexAttrib *attribs;
+    f32 metallic;
     u8 surface[1];
 } LodVoxelLook;
 
@@ -45,7 +46,8 @@ static inline void lod_look_sample(void *user, u32 submesh, const u32 v[3], NphV
 {
     (void)submesh;
     (void)footprint;
-    const NphRenderVertexAttrib *a = ((const LodVoxelLook *)user)->attribs;
+    const LodVoxelLook *look = (const LodVoxelLook *)user;
+    const NphRenderVertexAttrib *a = look->attribs;
     const NphVec3 n =
         nph_vec3_add(nph_vec3_add(nph_vec3_scale(nph_oct_decode_snorm16(a[v[0]].normal), b.x),
                                   nph_vec3_scale(nph_oct_decode_snorm16(a[v[1]].normal), b.y)),
@@ -53,7 +55,7 @@ static inline void lod_look_sample(void *user, u32 submesh, const u32 v[3], NphV
     out->base_color = LOD_VOXEL_ALBEDO;
     out->normal = nph_vec3_normalize_or(n, nph_vec3_unit_z());
     out->roughness = 0.7F;
-    out->metallic = 0.0F;
+    out->metallic = look->metallic;
     out->occlusion = 1.0F;
 }
 
@@ -69,9 +71,10 @@ static inline bool lod_look_covers(void *user, u32 submesh, const u32 v[3], NphV
 }
 
 // The mesh of `n` vertices and `k` indices with its levels, voxels among
-// them where `voxels` and the levels' collapses stall on aggregate geometry.
-static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v, u32 n,
-                                       const u32 *idx, u32 k, bool voxels)
+// them where `voxels` and the levels' collapses stall on aggregate geometry,
+// of the metalness `metallic`.
+static inline void lod_mesh_build_look(LodMesh *m, const NphRenderVertexInput *v, u32 n,
+                                       const u32 *idx, u32 k, bool voxels, f32 metallic)
 {
     NphAllocator *a = nph_allocator_system();
     memset(m, 0, sizeof *m);
@@ -116,6 +119,7 @@ static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v
     li.scratch = a;
     LodVoxelLook look;
     look.attribs = m->data.attribs;
+    look.metallic = metallic;
     look.surface[0] = (u8)NPH_RENDER_VOXEL_SURFACE_OPAQUE;
     NphRenderVoxelSampler sampler;
     memset(&sampler, 0, sizeof sampler);
@@ -162,6 +166,12 @@ static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v
     }
 }
 
+static inline void lod_mesh_build_with(LodMesh *m, const NphRenderVertexInput *v, u32 n,
+                                       const u32 *idx, u32 k, bool voxels)
+{
+    lod_mesh_build_look(m, v, n, idx, k, voxels, 0.0F);
+}
+
 static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32 n, const u32 *idx,
                                   u32 k)
 {
@@ -172,9 +182,9 @@ static inline void lod_mesh_build(LodMesh *m, const NphRenderVertexInput *v, u32
 // origin, each a smooth-shaded tube of `sides` sides (a curve's bevel, as
 // the landscape's pines are modelled), which the levels cannot simplify, so
 // their coarser levels become voxels (ADR-0061), or stay stalled triangles
-// without `voxels`.
-static inline void lod_foliage_tubes_with(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides,
-                                          bool voxels)
+// without `voxels`; of the metalness `metallic`.
+static inline void lod_foliage_tubes_look(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides,
+                                          bool voxels, f32 metallic)
 {
     NphAllocator *a = nph_allocator_system();
     const u32 per = 2U * sides;                      // two rings
@@ -235,9 +245,15 @@ static inline void lod_foliage_tubes_with(LodMesh *m, u32 count, f32 side, u64 s
             idx[k++] = base + sides + j + 1U;
         }
     }
-    lod_mesh_build_with(m, v, n, idx, k, voxels);
+    lod_mesh_build_look(m, v, n, idx, k, voxels, metallic);
     NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
     NPH_FREE_ARRAY(a, u32, idx, (u64)count * tris * 3U);
+}
+
+static inline void lod_foliage_tubes_with(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides,
+                                          bool voxels)
+{
+    lod_foliage_tubes_look(m, count, side, seed, sides, voxels, 0.0F);
 }
 
 static inline void lod_foliage_tubes(LodMesh *m, u32 count, f32 side, u64 seed, u32 sides)
@@ -249,6 +265,12 @@ static inline void lod_foliage_tubes(LodMesh *m, u32 count, f32 side, u64 seed, 
 static inline void lod_foliage(LodMesh *m, u32 count, f32 side, u64 seed)
 {
     lod_foliage_tubes(m, count, side, seed, 6U);
+}
+
+// The same of metal voxels (test_reflections.c: a metal's light is its specular).
+static inline void lod_foliage_metal(LodMesh *m, u32 count, f32 side, u64 seed)
+{
+    lod_foliage_tubes_look(m, count, side, seed, 6U, true, 1.0F);
 }
 
 // A torus of `rings` x `sides` quads around the y axis, closed and seamless.

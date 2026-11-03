@@ -102,14 +102,14 @@ uint gi_fingerprint(uint64_t h)
     return uint(h >> 32ul) | 1u;
 }
 
-// The slot holding `key`, GI_NONE if none does. Slots freed by the resolve
-// leave gaps in a bucket, so the whole bucket is read (64 bytes).
-uint gi_find(GiViewRef g, uint64_t key)
+// The slot holding `key` in the table of fingerprints at `keys_at`, GI_NONE if none does. Slots
+// freed by the resolve leave gaps in a bucket, so the whole bucket is read (64 bytes).
+uint gi_find_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
 {
     const uint64_t h = gi_mix(key);
-    const uint base = gi_bucket(g, h);
+    const uint base = (uint(h) & bucket_mask) * uint(NPH_RENDER_GI_BUCKET);
     const uint fp = gi_fingerprint(h);
-    GiKeys4Ref keys = GiKeys4Ref(g.g.keys);
+    GiKeys4Ref keys = GiKeys4Ref(keys_at);
     for (uint i = 0u; i < uint(NPH_RENDER_GI_BUCKET) / 4u; ++i) {
         const bvec4 hit = equal(keys.k[base / 4u + i], uvec4(fp));
         if (any(hit)) {
@@ -119,24 +119,29 @@ uint gi_find(GiViewRef g, uint64_t key)
     return GI_NONE;
 }
 
+uint gi_find(GiViewRef g, uint64_t key)
+{
+    return gi_find_in(g.g.keys, g.g.bucket_mask, key);
+}
+
 // The slot of `key`, claimed if no slot holds it yet: its bucket's first
 // free one, by compare-and-swap in order, so that two invocations claiming
 // the same new key meet in the same slot. GI_NONE when the bucket is full
 // (the sample is dropped). Only the update claims slots, and only the
 // resolve frees them, so during the update a bucket only fills.
-uint gi_claim(GiViewRef g, uint64_t key)
+uint gi_claim_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
 {
     const uint64_t h = gi_mix(key);
-    const uint base = gi_bucket(g, h);
+    const uint base = (uint(h) & bucket_mask) * uint(NPH_RENDER_GI_BUCKET);
     const uint fp = gi_fingerprint(h);
-    GiKeys4Ref keys4 = GiKeys4Ref(g.g.keys);
+    GiKeys4Ref keys4 = GiKeys4Ref(keys_at);
     for (uint i = 0u; i < uint(NPH_RENDER_GI_BUCKET) / 4u; ++i) {
         const bvec4 hit = equal(keys4.k[base / 4u + i], uvec4(fp));
         if (any(hit)) {
             return base + i * 4u + (hit.x ? 0u : (hit.y ? 1u : (hit.z ? 2u : 3u)));
         }
     }
-    GiKeysRef keys = GiKeysRef(g.g.keys);
+    GiKeysRef keys = GiKeysRef(keys_at);
     for (uint i = 0u; i < uint(NPH_RENDER_GI_BUCKET); ++i) {
         const uint prev = atomicCompSwap(keys.k[base + i], 0u, fp);
         if (prev == 0u || prev == fp) {
@@ -144,6 +149,11 @@ uint gi_claim(GiViewRef g, uint64_t key)
         }
     }
     return GI_NONE;
+}
+
+uint gi_claim(GiViewRef g, uint64_t key)
+{
+    return gi_claim_in(g.g.keys, g.g.bucket_mask, key);
 }
 
 // A cell's irradiance (lux, rgb) and how far it can be trusted (w: 0 for
@@ -184,6 +194,69 @@ vec3 gi_jitter(GiViewRef g, vec3 p, vec3 n, vec2 u)
     return p + size * ((u.x - 0.5) * t + (u.y - 0.5) * bt);
 }
 
+// A direction on an octahedral map, 12 bits an axis.
+uvec2 gi_reflect_oct(vec3 r)
+{
+    vec2 o = r.xy / (abs(r.x) + abs(r.y) + abs(r.z));
+    if (r.z < 0.0) {
+        o = (1.0 - abs(o.yx)) * vec2(o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return uvec2((o * 0.5 + 0.5) * 4095.0 + 0.5);
+}
+
+// A roughness in 4 bits, up to where reflection cells end.
+uint gi_reflect_rough(float roughness)
+{
+    return uint(clamp(roughness / NPH_RENDER_REFLECT_MAX_ROUGHNESS, 0.0, 1.0) * 15.0 + 0.5);
+}
+
+// The key of the reflection cell of the camera-relative point `p`, whose mirror direction is `d`
+// (gi_reflect_oct), of roughness `rough` (gi_reflect_rough), ADR-0077: cells of the same grid,
+// finer, for each direction of bins as wide as the surface's lobe, 128 a side for the smoothest.
+uint64_t gi_reflect_key(GiViewRef g, vec3 p, uvec2 d, uint rough)
+{
+    const int level = max(gi_level(length(p)) - NPH_RENDER_REFLECT_LEVEL_SHIFT, 0);
+    const vec4 origin = g.g.levels[level].origin;
+    const ivec3 camera = ivec3(uvec3(g.g.levels[level].cell[0], g.g.levels[level].cell[1],
+                                     g.g.levels[level].cell[2]));
+    const ivec3 c = camera + ivec3(floor((p + origin.xyz) / origin.w));
+    const uint m = 0x3FFFu;
+    const uint coarse = rough >> 2u;
+    const uvec2 bin = d >> (5u + coarse);
+    return uint64_t(uint(c.x) & m) | (uint64_t(uint(c.y) & m) << 14ul) |
+           (uint64_t(uint(c.z) & m) << 28ul) | (uint64_t(level) << 42ul) | (uint64_t(bin.x) << 47ul) |
+           (uint64_t(bin.y) << 54ul) | (uint64_t(coarse) << 61ul) | (1ul << 63ul);
+}
+
+// What a smooth pixel leaves for the reflection's passes (ADR-0077): its mirror direction, 12 bits
+// an axis of an octahedral map; its roughness, 4 bits; its specular colour, 10 bits a channel of its
+// square root. The top bit is what tells a pixel with one from one without.
+uvec2 gi_reflect_pack(vec3 r, float roughness, vec3 specular)
+{
+    const uvec2 d = gi_reflect_oct(r);
+    const uvec3 t = uvec3(sqrt(clamp(specular, vec3(0.0), vec3(1.0))) * 1023.0 + 0.5);
+    return uvec2(d.x | (d.y << 12u) | (gi_reflect_rough(roughness) << 24u),
+                 t.x | (t.y << 10u) | (t.z << 20u) | 0x80000000u);
+}
+
+// The specular colour that a pack holds.
+vec3 gi_reflect_specular(uint w)
+{
+    const vec3 t = vec3(float(w & 0x3FFu), float((w >> 10u) & 0x3FFu), float((w >> 20u) & 0x3FFu)) * (1.0 / 1023.0);
+    return t * t;
+}
+
+// The direction that a pack holds.
+vec3 gi_reflect_direction(uint w)
+{
+    const vec2 o = vec2(float(w & 0xFFFu), float((w >> 12u) & 0xFFFu)) * (2.0 / 4095.0) - 1.0;
+    vec3 r = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+    if (r.z < 0.0) {
+        r.xy = (1.0 - abs(r.yx)) * vec2(r.x >= 0.0 ? 1.0 : -1.0, r.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return r;
+}
+
 // Uniform random numbers from a 3D integer hash (Jarzynski & Olano, "Hash
 // Functions for GPU Rendering", JCGT 2020: pcg3d).
 uvec3 gi_pcg3d(uvec3 v)
@@ -220,6 +293,24 @@ vec4 gi_surface_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
     }
     const uint slot = gi_find(g, gi_key(g, at, n));
     return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
+}
+
+// What the point `p` (camera relative) reflects along the direction `d`: the radiance of its
+// reflection cell and how far it can be trusted, zero where there is none. `u`, uniform in [0, 1),
+// takes a neighbouring direction now and then: temporal anti-aliasing averages them, where a
+// fixed direction would show the bins' edges.
+vec4 gi_reflect_cell(GiViewRef g, vec3 p, uvec2 d, uint rough, vec2 u)
+{
+    const uint coarse = rough >> 2u;
+    const float width = float(32u << coarse);
+    const uvec2 near_d = uvec2(clamp(vec2(d) + (u - 0.5) * width, vec2(0.0), vec2(4095.0)));
+    const uint slot = gi_find_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, p, near_d, rough));
+    if (slot == GI_NONE) {
+        return vec4(0.0);
+    }
+    const uvec4 c = GiCellsRef(g.g.reflect_cells).c[slot];
+    // A narrow lobe's samples hardly differ: one is enough for the smoothest, four at the end.
+    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFFFu) / float(1u + coarse), 1.0));
 }
 
 #endif

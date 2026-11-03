@@ -113,6 +113,12 @@ vec2 g_inv_size; // 1 / the target's size, set first thing in main() where k_man
 uint64_t g_counters; // set first thing in main()
 #define NPH_SURFACE_MANY_RAYS VisCountersRef(g_counters).c.many_rays
 #endif
+#ifndef NPH_MANY_TURNS
+// What a smooth pixel needs for what it reflects (ADR-0077): two words from the shading's end to
+// main()'s, which leaves them for reflect.comp and lists the pixel's tile.
+uvec2 g_reflect = uvec2(0u);
+#define NPH_SURFACE_REFLECT(p) g_reflect = gi_reflect_pack(reflect(-(p).v, (p).n), sqrt(sqrt((p).a2)), (p).spec_base)
+#endif
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -334,6 +340,25 @@ void main()
     }
 #ifndef NPH_MANY_TURNS
     store(p, color, dither);
+    // Here, as the last thing it does. The tile's listed by the subgroup's first such pixel, as for
+    // the voxel resolve (a subgroup lies in one workgroup, so in one tile).
+    if (g_reflect.y != 0u &&
+        (rview.v.flags & uint(NPH_RENDER_VIEW_REFLECT | NPH_RENDER_VIEW_REFLECT_RAYS)) != 0u) {
+        GiViewRef g = GiViewRef(rview.v.gi);
+        imageStore(nph_uimages_2d[g.g.reflect_image], p, uvec4(g_reflect, 0u, 0u));
+        if (subgroupElect()) {
+            const uvec2 tile = uvec2(p) >> 3u;
+            const uint index = tile.y * (g.g.reflect_width >> 3u) + tile.x;
+            const uint bit = 1u << (index & 31u);
+            // (Most subgroups find it set by the tile's other: a load costs less than an atomic.)
+            if ((GiKeysRef(g.g.reflect_bits).k[index >> 5u] & bit) == 0u &&
+                (atomicOr(GiKeysRef(g.g.reflect_bits).k[index >> 5u], bit) & bit) == 0u) {
+                const uint j = atomicAdd(GiKeysRef(g.g.reflect_args).k[3], 1u);
+                GiKeysRef(g.g.reflect_tiles).k[j] = tile.x | (tile.y << 16u);
+                atomicMax(GiKeysRef(g.g.reflect_args).k[0], j + 1u);
+            }
+        }
+    }
 #endif
 }
 

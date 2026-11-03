@@ -1115,7 +1115,34 @@ typedef struct RenderGi {
     NphGpuPipeline update_voxels_many; // and voxel pixels
     NphGpuPipeline update_voxels; // the same where voxel pixels may be (RenderVis.frame_voxels)
     NphGpuPipeline resolve;
+    NphGpuShader reflect_shader; // reflect_turns.comp (ADR-0077)
+    NphGpuPipeline reflect;
+    NphGpuShader apply_shader; // reflect.comp
+    NphGpuPipeline apply;
+    NphGpuImage reflect_image;  // what smooth pixels leave for reflect.comp
+    NphGpuBuffer reflect_tiles; // the tiles holding such a pixel
+    NphGpuBuffer reflect_bits;
+    NphGpuBuffer reflect_args;
+    u32 reflect_capacity; // the reflection cells' table: slots
+    NphGpuBuffer reflect_keys;
+    NphGpuBuffer reflect_sums;
+    NphGpuBuffer reflect_cells;
+    NphGpuRgBuffer frame_reflect_keys;
+    NphGpuRgBuffer frame_reflect_sums;
+    NphGpuRgBuffer frame_reflect_cells;
+    NphGpuRgBuffer frame_reflect_tiles;
+    NphGpuRgBuffer frame_reflect_bits;
+    NphGpuRgBuffer frame_reflect_args;
+    u32 reflect_width;
+    u32 reflect_height;
+    b32 reflect_clear;
+    NphGpuRgImage frame_reflect_image;
+    NphGpuRgImage frame_hdr;
     b32 frame_active;
+    b32 frame_reflect; // the frame's smooth surfaces take reflection cells
+    b32 frame_rays;    // or smooth surfaces a ray a pixel every frame
+    u32 frame_width;
+    u32 frame_height;
     u32 frame_rays_x; // the update's samples across and down the target
     u32 frame_rays_y;
     NphGpuRgImage frame_visbuffer;
@@ -1566,6 +1593,22 @@ u64 render_gi_view_address(const NphRenderer *r);
 // Declares the update and the resolve (and, the first time, the slots'
 // clear) once the frame's top level and visibility buffer are declared.
 NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const RenderGiInputs *in);
+// After the resolve: the reflections' turns, if the frame has them (ADR-0077).
+typedef struct RenderGiReflectInputs {
+    NphGpuRgImage lut;
+    NphGpuRgImage specular;
+    NphGpuRgImage hdr;
+    NphGpuRgBuffer sh;
+    NphGpuRgBuffer clusters;
+    NphGpuRgBuffer instances;
+    NphGpuRgBuffer meshes;
+    NphGpuRgBuffer tlas;
+    NphGpuRgBuffer counters; // the frame's statistics: the rays a full bucket dropped
+} RenderGiReflectInputs;
+NphResult render_gi_declare_reflect(NphRenderer *r, NphGpuRenderGraph *graph,
+                                    const RenderGiReflectInputs *in);
+NphResult render_gi_declare_reflect_image(NphRenderer *r, NphGpuRenderGraph *graph);
+void render_gi_write_reflect_image(const NphRenderer *r, NphGpuRgPass *pass);
 // Declares `pass`'s reads of the cells (the resolve's shading), if the frame
 // has them.
 void render_gi_read(const NphRenderer *r, NphGpuRgPass *pass);

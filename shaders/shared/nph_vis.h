@@ -430,6 +430,9 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 cells_listed;
     // Statistics: the rays the many lights' reservoirs asked for (many_rays.comp).
     u32 many_rays;
+    // Statistics (ADR-0077): the reflections' rays whose cell found its bucket full, which went
+    // nowhere (reflect_rays.comp).
+    u32 reflect_dropped;
 };
 
 // The production path's view of a frame.

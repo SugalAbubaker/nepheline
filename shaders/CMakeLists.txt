@@ -125,6 +125,8 @@ nph_add_shaders(nph_shaders_render
         render/many_light_test.comp
         render/many_tiles.comp
         render/many_turns.comp
+        render/reflect_rays.comp
+        render/reflect.comp
         # The voxels' tests for the render tests (render/voxel.h's twins).
         render/vis_voxel_test.comp
         # The depth pyramid's block requests against each pixel's (render tests).

@@ -666,6 +666,7 @@ static void read_stats(NphRenderer *r)
     s->vis_cells_proxied = c->cells_proxied;
     s->vis_instances_proxied = c->instances_proxied;
     s->vis_many_rays = c->many_rays;
+    s->vis_reflect_dropped = c->reflect_dropped;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
@@ -1751,6 +1752,7 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
     }
     render_vsm_read(r, p);
     render_gi_read(r, p);
+    render_gi_write_reflect_image(r, p);
     render_many_read(r, p);
     if (r->ao.frame_active) {
         nph_gpu_rg_read_image(p, r->ao.frame_out, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
@@ -2245,6 +2247,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         res = render_many_declare(r, graph, f->visbuffer);
     }
     if (res == NPH_RESULT_OK) {
+        res = render_gi_declare_reflect_image(r, graph);
+    }
+    if (res == NPH_RESULT_OK) {
         res = declare_resolve(graph, r, &g, env, specular, lut, sh);
     }
     if (res == NPH_RESULT_OK) {
@@ -2256,6 +2261,20 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         in.meshes = g.meshes;
         in.tlas = f->tlas;
         res = render_many_declare_turns(r, graph, &in);
+    }
+    if (res == NPH_RESULT_OK) {
+        RenderGiReflectInputs in;
+        memset(&in, 0, sizeof in);
+        in.lut = lut;
+        in.specular = specular;
+        in.hdr = f->hdr;
+        in.sh = sh;
+        in.clusters = g.clusters;
+        in.instances = g.instances;
+        in.meshes = g.meshes;
+        in.tlas = f->tlas;
+        in.counters = f->counters;
+        res = render_gi_declare_reflect(r, graph, &in);
     }
     NphGpuRgPass *p = NULL;
     if (res == NPH_RESULT_OK) {
@@ -2302,6 +2321,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_cells_proxied = last->vis_cells_proxied;
         stats->vis_instances_proxied = last->vis_instances_proxied;
         stats->vis_many_rays = last->vis_many_rays;
+        stats->vis_reflect_dropped = last->vis_reflect_dropped;
         stats->vsm_requested = last->vsm_requested;
         stats->vsm_drawn = last->vsm_drawn;
         stats->vsm_resident = last->vsm_resident;

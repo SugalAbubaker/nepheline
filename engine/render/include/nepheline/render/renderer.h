@@ -974,6 +974,18 @@ typedef enum NphRenderAntiAliasing {
 
 // What of the many lights' far fields per-pixel reservoirs take (NphRenderView.many_restir;
 // ADR-0074): beyond a light's near range its light comes otherwise from the radiance cache.
+// What surfaces reflect on the production path, where it has the radiance cache (ADR-0077).
+typedef enum NphRenderReflections {
+    // The environment's light as if nothing hid the sky.
+    NPH_RENDER_REFLECTIONS_OFF = 0,
+    // Smooth surfaces take cells that hold what they reflect by direction, filled by rays; others
+    // the light their irradiance cell has gathered.
+    NPH_RENDER_REFLECTIONS_CACHE,
+    // Smooth surfaces by a ray a pixel, every frame, sharp and with their noise for the temporal
+    // resolve to average, at many times the cost: for GPUs with rays to spare.
+    NPH_RENDER_REFLECTIONS_RAYS,
+} NphRenderReflections;
+
 typedef enum NphRenderRestir {
     NPH_RENDER_RESTIR_OFF = 0, // none: all of it the cache's, its highlights only as an average
     NPH_RENDER_RESTIR_SPECULAR = 1, // the highlights, the shadows of their lights ray traced
@@ -992,6 +1004,8 @@ typedef struct NphRenderView {
     NphRenderDebugView debug_view;
     b32 disable_ibl;
     b32 disable_many_lights; // this view draws without NphRenderManyLight
+    // What surfaces reflect (ADR-0077). nph_render_view_default: NPH_RENDER_REFLECTIONS_CACHE.
+    NphRenderReflections reflections;
     // How far a pixel looks towards the sun through the depths for what its shadow map is too
     // coarse to show, in pixels' widths at its distance, as the map's texels are (0: not at all;
     // ADR-0076). It runs with the ambient occlusion and the sun's virtual shadow map.
@@ -1138,6 +1152,7 @@ typedef struct NphRenderFrameStats {
                                  // or not)
     u32 vis_instances_proxied;   // the instances those proxies stood in for
     u32 vis_many_rays;           // the rays the many lights' reservoirs asked for (ADR-0074)
+    u32 vis_reflect_dropped;     // reflections' rays whose cell's bucket was full (ADR-0077)
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages
