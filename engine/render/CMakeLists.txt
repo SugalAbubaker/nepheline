@@ -55,6 +55,7 @@ endif()
 nph_add_test(render
     SOURCES
         tests/test_ao.c
+        tests/test_contact_shadow.c
         tests/test_boxes.h
         tests/test_cell_proxy.c
         tests/test_cluster_lod.c

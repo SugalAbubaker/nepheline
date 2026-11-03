@@ -662,6 +662,36 @@ lookup 0.27 ms of the resolve, its own passes 0.05 ms. A sphere moving
 every frame redraws 20 pages and adds 0.44 ms; the sun's rays add
 0.42 ms still and 0.79 ms with motion (ADR-0033).
 
+### Contact shadows
+
+What the map's receiver offset lifts a surface above, the thin shadows under
+window bars, along a kerb, beside a leaf, a pixel finds by looking towards the
+sun through the depths ([ADR-0076](adr/0076-contact-shadows.md)):
+`NphRenderView.contact_shadow`, 24 pixels' widths at the pixel's distance by
+default (`r.contact_shadow`). The length follows the distance as the map's
+texels do, so the march covers the same few of them everywhere.
+
+- **The march** (`ao.comp` `sun_blocked`) runs in the ambient occlusion's pass,
+  which has the pixel's depth, plane and jitter in hand, while the frame has the
+  sun's map and the occlusion, in a variant of the pass compiled with it (`k_contact`;
+  a frame without the map takes the other and pays nothing): 4 steps, closer together near the pixel, jittered
+  as the occlusion's steps are, so the temporal resolve averages them. Since the
+  length is proportional to the distance, a step's screen position and depth
+  follow from the pixel's without the distance.
+- **What blocks.** A depth in front of the marched point, by more than half a
+  pixel's change in the pixel's own plane (which at a grazing angle is a long way
+  in metres, and exactly that in reverse-Z depth, which is affine across a plane),
+  and by no more than 0.6 of the march's length: one further off is something else
+  standing in front, not what blocks the sun.
+- **The answer** is a bit: the sign of the pixel's distance in the raw occlusion,
+  then of the denoised occlusion, a half float that is otherwise never negative.
+  The resolves take it with the value they fetch anyway, and it multiplies the
+  sun's visibility. No memory, no fetch, no descriptor. It is not filtered: the
+  sun's penumbra over these lengths is under a pixel.
+
+Against the rays (`--rt-shadows`, the truth of what the sun reaches) and at
+what cost: [ADR-0076](adr/0076-contact-shadows.md).
+
 ## The production path
 
 `view.pipeline = NPH_RENDER_PIPELINE_PRODUCTION` draws the frame with the
@@ -1481,7 +1511,7 @@ they were read): hence their streaming (ADR-0063).
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
-| `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice, and the denoise (below) |
+| `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice and its march towards the sun ("Contact shadows"), and the denoise (below) |
 | `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up), and lists the tiles that hold voxel pixels |
@@ -2102,7 +2132,8 @@ sets the radius from `r.ao` (0.5 m).
   material's occlusion times the screen's, and its diffuse light the
   screen's through Eq. 10 of the paper, which adds back what occluders of
   the surface's albedo reflect (`nph_render_ref_ao_bounce`); direct light
-  is untouched.
+  is untouched, but for the contact shadows' answer that travels in the
+  value's sign ("Contact shadows").
 
 Against a ground truth cast by rays, a box on the ground is occluded
 within a sixth of how much the truth is (a fifth at half resolution), the
@@ -2828,8 +2859,13 @@ path and logs what the GPU culled.
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many
   shadow-casting local lights do not fit the budget as rays (1.35 ms for
-  1,024 lamps): their shadows, and screen-space contact shadows, come in
-  Phase 14 with many-light sampling (ADR-0033, ADR-0041).
+  1,024 lamps): their shadows come in Phase 14 with many-light sampling
+  (ADR-0033, ADR-0041).
+- Contact shadows (ADR-0076) are the sun's alone, and come with the ambient
+  occlusion. What the depths do not show cannot block; a low occluder's shadow
+  fades towards its far end, where a step must land within its height; and where
+  the sun grazes a wall the map's texels stretch across it, whose stairs the march
+  only smooths near the contact.
 - The sun's map: a moving caster redraws its pages with every caster in
   them (static and dynamic pages are not kept apart); filtering is clamped
   half a texel inside a page at its edges; a level's texels double at its

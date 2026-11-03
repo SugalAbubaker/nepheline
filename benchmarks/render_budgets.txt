@@ -11,6 +11,9 @@
 # render_perf-2026-11-02-many-lights-win-msvc-profile-rtx3060ti.json
 # (many_lights_*: again 2026-11-02, with the occlusion the cache's light has (ADR-0075), from a run of those scenes alone)
 # (lights_*: again 2026-11-02, as many_lights_*)
+# (shadows_*.gpu.ao alone: again 2026-11-02, with their contact shadows (ADR-0076), from
+# render_perf-2026-11-02-contact-shadows-win-msvc-profile-rtx3060ti.json. That run has no grids,
+# whose slots raise rt accel in a full run: its other entries are no budgets.)
 
 grid_1k_production.cpu                         50000
 grid_1k_production.gpu.bloom_down_0            62000
@@ -213,7 +216,7 @@ shadows_4k_production.gpu.vis_sw_raster_1      67000
 shadows_4k_production.gpu.vis_hzb_1            99000
 shadows_4k_production.gpu.vis_light_tiles      51000
 shadows_4k_production.gpu.ao_depth             79000
-shadows_4k_production.gpu.ao                   611000
+shadows_4k_production.gpu.ao                   676000
 shadows_4k_production.gpu.ao_denoise           351000
 shadows_4k_production.gpu.gi_update            86000
 shadows_4k_production.gpu.gi_resolve           62000
@@ -307,7 +310,7 @@ shadows_moving_4k_production.gpu.vis_sw_raster_1 67000
 shadows_moving_4k_production.gpu.vis_hzb_1     98000
 shadows_moving_4k_production.gpu.vis_light_tiles 51000
 shadows_moving_4k_production.gpu.ao_depth      79000
-shadows_moving_4k_production.gpu.ao            601000
+shadows_moving_4k_production.gpu.ao            669000
 shadows_moving_4k_production.gpu.ao_denoise    346000
 shadows_moving_4k_production.gpu.rt_instances  106000
 shadows_moving_4k_production.gpu.rt_accel      344000
@@ -361,7 +364,7 @@ shadows_walk_4k_production.gpu.vis_sw_raster_1 66000
 shadows_walk_4k_production.gpu.vis_hzb_1       99000
 shadows_walk_4k_production.gpu.vis_light_tiles 51000
 shadows_walk_4k_production.gpu.ao_depth        80000
-shadows_walk_4k_production.gpu.ao              615000
+shadows_walk_4k_production.gpu.ao              679000
 shadows_walk_4k_production.gpu.ao_denoise      353000
 shadows_walk_4k_production.gpu.gi_update       87000
 shadows_walk_4k_production.gpu.gi_resolve      63000

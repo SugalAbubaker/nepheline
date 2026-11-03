@@ -1087,6 +1087,7 @@ typedef struct RenderAo {
     NphGpuShader denoise_shader; // ao_denoise.comp
     NphGpuPipeline depth;
     NphGpuPipeline ao;
+    NphGpuPipeline ao_contact; // with the contact shadows' march (ao.comp k_contact)
     NphGpuPipeline denoise;
     // This frame, at half resolution.
     b32 frame_active;
@@ -1473,8 +1474,8 @@ void render_ao_destroy(NphRenderer *r);
 // indirect debug view) or shows the occlusion (its debug view). If so sets
 // RenderAo.frame_* from `proj`, the frame's projection (jitter included),
 // for a `width` x `height` target.
-bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *proj,
-                           u32 width, u32 height, bool production);
+bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphMat4 *view_m,
+                           const NphMat4 *proj, u32 width, u32 height, bool production);
 // The depths (RenderAo.frame_depths), before the depth pyramid's passes,
 // which write their mip 0 (vis_hzb.comp).
 NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph);

@@ -992,6 +992,11 @@ typedef struct NphRenderView {
     NphRenderDebugView debug_view;
     b32 disable_ibl;
     b32 disable_many_lights; // this view draws without NphRenderManyLight
+    // How far a pixel looks towards the sun through the depths for what its shadow map is too
+    // coarse to show, in pixels' widths at its distance, as the map's texels are (0: not at all;
+    // ADR-0076). It runs with the ambient occlusion and the sun's virtual shadow map.
+    // nph_render_view_default: 24.
+    f32 contact_shadow;
     // What of the many lights' far fields per-pixel reservoirs take. nph_render_view_default:
     // SPECULAR. They need ray queries: a device without them draws as with OFF.
     NphRenderRestir many_restir;

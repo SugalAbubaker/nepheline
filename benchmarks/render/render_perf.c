@@ -35,7 +35,8 @@
 //                 [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
-//                 [--paged-textures] [--texture-budget=MB] [--restir=N] [--accumulate=N]
+//                 [--paged-textures] [--texture-budget=MB] [--restir=N] [--contact-shadow=N]
+//                 [--accumulate=N]
 //                 [--truth] [--truth-ev=STOPS]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
@@ -510,6 +511,8 @@ static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
 static bool g_rt_shadows = false;
 // --restir=N: the many lights' reservoirs (NphRenderRestir: 0 off, 1 specular, 2 all).
 static NphRenderRestir g_restir = NPH_RENDER_RESTIR_SPECULAR;
+// --contact-shadow=N: NphRenderView.contact_shadow, the march's pixels (negative: the default).
+static f32 g_contact_shadow = -1.0F;
 // --accumulate=N, with --capture-dir: N more frames of each reference view averaged in
 // linear light into <view>.mean.bmp, with how much a pixel varies from frame to frame.
 static u32 g_accumulate = 0U;
@@ -1610,6 +1613,9 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.ao_radius = (s->post & (u32)POST_NO_AO) != 0U ? 0.0F : RUNTIME_AO;
     view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
     view.many_restir = g_restir;
+    if (g_contact_shadow >= 0.0F) {
+        view.contact_shadow = g_contact_shadow;
+    }
     if ((s->post & (u32)POST_LOD_LEVEL0) != 0U) {
         view.lod_error = 0.0F;
     }
@@ -2294,6 +2300,9 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
         view.ev100 += g_truth_ev;
     }
     view.many_restir = g_restir;
+    if (g_contact_shadow >= 0.0F) {
+        view.contact_shadow = g_contact_shadow;
+    }
     view.disable_ibl = m->no_ibl ? 1 : 0;
     if (rv->walk != 0.0F) {
         // Along the view, level, as the synthetic walk.
@@ -2583,6 +2592,7 @@ static int usage(void)
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
                     "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
+                    "[--contact-shadow=N] "
                     "[--accumulate=N] [--truth] [--truth-ev=STOPS]\n");
     return 2;
 }
@@ -2662,6 +2672,8 @@ int main(int argc, char **argv)
             g_rt_shadows = true;
         } else if (strncmp(argv[i], "--restir=", 9U) == 0) {
             g_restir = (NphRenderRestir)strtoul(argv[i] + 9, NULL, 10);
+        } else if (strncmp(argv[i], "--contact-shadow=", 17U) == 0) {
+            g_contact_shadow = (f32)strtod(argv[i] + 17, NULL);
         } else if (strncmp(argv[i], "--accumulate=", 13U) == 0) {
             g_accumulate = (u32)strtoul(argv[i] + 13, NULL, 10);
         } else if (strcmp(argv[i], "--truth") == 0) {
