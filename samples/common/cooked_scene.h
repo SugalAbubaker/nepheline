@@ -47,6 +47,12 @@ typedef struct CookedSceneDesc {
     // Above 0: the scene's point lights are many lights of this near range
     // (NphRenderManyLight), and the renderer must have room for them.
     f32 light_near_range;
+    // Without the scene's directional lights: what its local lights do,
+    // alone (their shadows; whether fixtures stop the rays toward them).
+    b32 no_sun;
+    // The scene's point and spot lights that stay ordinary lights cast
+    // shadows (NphRenderLightDesc.shadows: a shadow ray a pixel and light).
+    b32 local_shadows;
     // Without the world partition's cells (asset/scene.h version 2): every
     // instance drawn as itself, no proxy loaded (an A/B of the cells).
     b32 no_cells;

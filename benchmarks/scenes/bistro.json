@@ -13,6 +13,8 @@
   "ev100": 10.0,
   "sky_intensity": 0.25,
   "sun_shadows": true,
+  "light_near_range": 0.25,
+  "many_lights": 128,
   "views": [
     {"name": "street", "scene_camera": true},
     {"name": "street_walk", "scene_camera": true, "walk": 1.4},

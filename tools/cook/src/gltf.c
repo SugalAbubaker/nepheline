@@ -7,6 +7,7 @@
 #include <nepheline/core/hash.h>
 #include <nepheline/core/json.h>
 #include <nepheline/math/affine.h>
+#include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/path.h>
@@ -141,6 +142,7 @@ static bool extension_supported(const char *name)
         "KHR_materials_unlit",
         "KHR_materials_emissive_strength",
         "KHR_materials_pbrSpecularGlossiness",
+        "KHR_materials_transmission", // for rays only: glass stays out of them ("Rays")
         "KHR_mesh_quantization",
         "KHR_texture_transform",
         "MSFT_texture_dds",
@@ -1188,6 +1190,130 @@ static NphResult convert_nodes(CookGltfScene *scene, const cgltf_data *data)
 // The document
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Meshes the rays pass by (docs/cook.md "Rays"; ADR-0078)
+// ---------------------------------------------------------------------------
+
+// The share of light a material must let through (KHR_materials_transmission) for the rays to
+// take it as glass and pass through it.
+#define GLTF_RAYS_TRANSMISSION 0.5F
+
+static bool material_transmits(const cgltf_data *data, i32 material)
+{
+    if (material < 0 || (cgltf_size)material >= data->materials_count) {
+        return false;
+    }
+    const cgltf_material *m = &data->materials[material];
+    return m->has_transmission != 0 &&
+           m->transmission.transmission_factor >= GLTF_RAYS_TRANSMISSION;
+}
+
+static bool material_glows(const CookGltfScene *scene, i32 material)
+{
+    if (material < 0 || (u32)material >= scene->material_count) {
+        return false;
+    }
+    const NphMaterialHeader *h = &scene->materials[material].header;
+    const NphVec3 e = h->emissive_factor;
+    return nph_f32_max(e.x, nph_f32_max(e.y, e.z)) * h->emissive_strength > 0.0F;
+}
+
+// Whether every material of the mesh's primitives passes `test` (and it has one).
+static bool all_materials(const CookGltfScene *scene, const cgltf_data *data, const CookGltfMesh *m,
+                          bool glows)
+{
+    if (m->material_count == 0U) {
+        return false;
+    }
+    for (u32 s = 0; s < m->material_count; ++s) {
+        if (!(glows ? material_glows(scene, m->materials[s])
+                    : material_transmits(data, m->materials[s]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Glass, every material of which lets most light through, and a light's shell, every material
+// of which glows and an instance of whose box holds a point or spot light, are flagged out of
+// the rays: in them glass would stop what passes through it, and a shell would stop its own
+// light and count its energy twice, once as the light and once as the glow the rays see.
+static NphResult mark_ray_free_meshes(CookGltfScene *scene, const cgltf_data *data)
+{
+    u32 glass = 0U;
+    for (u32 i = 0; i < scene->mesh_count; ++i) {
+        CookGltfMesh *m = &scene->meshes[i];
+        if ((m->mesh.flags & (u32)COOK_MESH_NO_RAYS) == 0U &&
+            all_materials(scene, data, m, false)) {
+            m->mesh.flags |= (u32)COOK_MESH_NO_RAYS;
+            glass += 1U;
+        }
+    }
+    u32 shells = 0U;
+    if (scene->light_count != 0U && scene->node_count != 0U) {
+        // The nodes' world transforms: a parent comes before its children (append_tree).
+        NphMat4 *world = NPH_ALLOC_ARRAY(scene->alloc, NphMat4, scene->node_count);
+        if (world == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        for (u32 n = 0; n < scene->node_count; ++n) {
+            const CookGltfNode *node = &scene->nodes[n];
+            const NphMat4 local = nph_mat4_from_trs(node->translation, node->rotation, node->scale);
+            world[n] = node->parent != NPH_SCENE_NO_NODE && node->parent < n
+                           ? nph_mat4_mul(world[node->parent], local)
+                           : local;
+        }
+        for (u32 n = 0; n < scene->node_count; ++n) {
+            const i32 mi = scene->nodes[n].mesh;
+            if (mi < 0 || (u32)mi >= scene->mesh_count) {
+                continue;
+            }
+            CookGltfMesh *m = &scene->meshes[mi];
+            if ((m->mesh.flags & (u32)COOK_MESH_NO_RAYS) != 0U || m->mesh.vertices.len == 0U ||
+                !all_materials(scene, data, m, true)) {
+                continue;
+            }
+            // The instance's box in the world, from its mesh's box's corners.
+            NphVec3 lo = m->mesh.vertices.data[0].position;
+            NphVec3 hi = lo;
+            for (u64 v = 1; v < m->mesh.vertices.len; ++v) {
+                lo = nph_vec3_min(lo, m->mesh.vertices.data[v].position);
+                hi = nph_vec3_max(hi, m->mesh.vertices.data[v].position);
+            }
+            NphVec3 wlo = nph_vec3_splat(NPH_F32_MAX);
+            NphVec3 whi = nph_vec3_splat(-NPH_F32_MAX);
+            for (u32 c = 0; c < 8U; ++c) {
+                const NphVec3 corner =
+                    nph_vec3((c & 1U) != 0U ? hi.x : lo.x, (c & 2U) != 0U ? hi.y : lo.y,
+                             (c & 4U) != 0U ? hi.z : lo.z);
+                const NphVec3 w = nph_mat4_transform_point(world[n], corner);
+                wlo = nph_vec3_min(wlo, w);
+                whi = nph_vec3_max(whi, w);
+            }
+            for (u32 l = 0; l < scene->light_count; ++l) {
+                const NphSceneLight *light = &scene->lights[l];
+                if (light->type == (u32)NPH_SCENE_LIGHT_DIRECTIONAL ||
+                    light->node >= scene->node_count) {
+                    continue;
+                }
+                const NphVec3 p = nph_mat4_transform_point(world[light->node], nph_vec3_zero());
+                if (p.x >= wlo.x && p.x <= whi.x && p.y >= wlo.y && p.y <= whi.y && p.z >= wlo.z &&
+                    p.z <= whi.z) {
+                    m->mesh.flags |= (u32)COOK_MESH_NO_RAYS;
+                    shells += 1U;
+                    break;
+                }
+            }
+        }
+        NPH_FREE_ARRAY(scene->alloc, NphMat4, world, scene->node_count);
+    }
+    if (glass + shells != 0U) {
+        NPH_LOG_INFO(&NPH_LOG_COOK, "%u meshes out of the rays: %u of glass, %u lights' shells",
+                     glass + shells, glass, shells);
+    }
+    return NPH_RESULT_OK;
+}
+
 static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgltf_data *data,
                          const char *base_dir, const void *document, u64 document_size)
 {
@@ -1259,6 +1385,7 @@ static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgl
         scene->warnings += 1U;
     }
     NPH_TRY(convert_nodes(scene, data));
+    NPH_TRY(mark_ray_free_meshes(scene, data));
     // What the cooked assets depend on: the document, every buffer it
     // loaded (external .bin files included), and every image read.
     u64 h =

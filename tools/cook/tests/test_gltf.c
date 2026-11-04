@@ -440,6 +440,81 @@ NTEST(gltf, a_meshs_extras_take_it_out_of_the_rays)
     }
 }
 
+// Glass stays out of the rays (docs/cook.md "Rays"): a mesh every material of which lets most
+// light through (KHR_materials_transmission), and not one that lets less through or that has
+// another material too.
+NTEST(gltf, glass_stays_out_of_the_rays)
+{
+    const f32 pos[3 * 3] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const char *doc =
+        "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_materials_transmission\"],"
+        "\"materials\":["
+        "{\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.9}}},"
+        "{\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.3}}},{}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]},"
+        "{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":1}]},"
+        "{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0},"
+        "{\"attributes\":{\"POSITION\":0},\"material\":2}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+        "\"min\":[0,0,0],\"max\":[1,1,0]}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+        "\"buffers\":[{\"byteLength\":36,\"uri\":\"%s\"}]}";
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(load_doc(doc, pos, sizeof pos, &scene), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.mesh_count, 3U);
+    const bool expected[3] = {true, false, false};
+    for (u32 i = 0; i < 3U; ++i) {
+        NTEST_EXPECT_EQ_INT((scene.meshes[i].mesh.flags & (u32)COOK_MESH_NO_RAYS) != 0U ? 1 : 0,
+                            expected[i] ? 1 : 0);
+    }
+    cook_gltf_free(&scene);
+}
+
+// A light's shell stays out of the rays: a mesh every material of which glows, with an instance
+// whose box in the world holds a point or spot light. Not when the light is outside that box
+// (the parent's move counts), not a mesh that does not glow (a housing stops light), and not for
+// a directional light.
+NTEST(gltf, a_lights_shell_stays_out_of_the_rays)
+{
+    const f32 pos[3 * 3] = {-1, -1, -1, 1, -1, 1, 0, 1, 0}; // a box from -1 to 1 on each axis
+    static const struct {
+        const char *type;
+        f32 parent_x;
+        f32 light_x;
+        f32 glow;
+        bool expected;
+    } k_cases[] = {
+        {"point", 0.0F, 0.0F, 1.0F, true},  {"point", 0.0F, 5.0F, 1.0F, false},
+        {"point", 0.0F, 0.0F, 0.0F, false}, {"point", 5.0F, 5.0F, 1.0F, true},
+        {"point", 5.0F, 0.0F, 1.0F, false}, {"directional", 0.0F, 0.0F, 1.0F, false},
+    };
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(k_cases); ++i) {
+        char doc[2048];
+        (void)snprintf(
+            doc, sizeof doc,
+            "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_lights_punctual\"],"
+            "\"extensions\":{\"KHR_lights_punctual\":{\"lights\":[{\"type\":\"%s\","
+            "\"intensity\":10}]}},"
+            "\"scene\":0,\"scenes\":[{\"nodes\":[0,2]}],"
+            "\"nodes\":[{\"translation\":[%g,0,0],\"children\":[1]},{\"mesh\":0},"
+            "{\"translation\":[%g,0,0],\"extensions\":{\"KHR_lights_punctual\":{\"light\":0}}}],"
+            "\"materials\":[{\"emissiveFactor\":[%g,%g,%g]}],"
+            "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]}],"
+            "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+            "\"min\":[-1,-1,-1],\"max\":[1,1,1]}],"
+            "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+            "\"buffers\":[{\"byteLength\":36,\"uri\":\"%%s\"}]}",
+            k_cases[i].type, (f64)k_cases[i].parent_x, (f64)k_cases[i].light_x,
+            (f64)k_cases[i].glow, (f64)k_cases[i].glow, (f64)k_cases[i].glow);
+        CookGltfScene scene;
+        NTEST_ASSERT_EQ_INT(load_doc(doc, pos, sizeof pos, &scene), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(scene.mesh_count, 1U);
+        NTEST_EXPECT_EQ_INT((scene.meshes[0].mesh.flags & (u32)COOK_MESH_NO_RAYS) != 0U ? 1 : 0,
+                            k_cases[i].expected ? 1 : 0);
+        cook_gltf_free(&scene);
+    }
+}
+
 NTEST(gltf, primitives_keep_their_own_attributes)
 {
     // Two primitives of one mesh: the first with UVs, colours, and

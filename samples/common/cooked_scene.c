@@ -616,6 +616,9 @@ static NphResult create_lights(CookedScene *s, const CookedSceneDesc *desc, cons
 {
     for (u32 i = 0; i < sv->header->light_count; ++i) {
         const NphSceneLight *l = &sv->lights[i];
+        if (desc->no_sun && l->type == NPH_SCENE_LIGHT_DIRECTIONAL) {
+            continue;
+        }
         if (desc->light_near_range > 0.0F && l->type == NPH_SCENE_LIGHT_POINT) {
             NphRenderManyLightDesc md;
             memset(&md, 0, sizeof md);
@@ -640,6 +643,7 @@ static NphResult create_lights(CookedScene *s, const CookedSceneDesc *desc, cons
         d.range = l->range;
         d.inner_cone = l->inner_cone;
         d.outer_cone = l->outer_cone;
+        d.shadows = desc->local_shadows && l->type != NPH_SCENE_LIGHT_DIRECTIONAL ? 1 : 0;
         const NphMat4 *m = &world[l->node];
         d.position = nph_dvec3_add(nph_dvec3_from_vec3(nph_vec4_xyz(m->c[3])), desc->origin);
         // glTF lights shine along their node's -Z.

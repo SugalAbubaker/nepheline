@@ -645,6 +645,77 @@ NTEST_F(Many, a_metal_is_lit_by_the_far_fields)
     test_box_release(f, target);
 }
 
+// Where a sky lights a scene with many lights in it too, a rough metal keeps the sky's light that
+// its cell gathered: the reservoirs give only the many lights' highlights, so only the cell's share
+// of their far fields is theirs (ADR-0078). A far, faint set of them changes next to nothing.
+NTEST_F(Many, a_rough_metal_keeps_the_skys_light_among_many_lights)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->gi.supported) {
+        NTEST_SKIP("no radiance cache on this device (ray queries)");
+    }
+    const NphRenderTexture env = test_uniform_environment(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.9F, 0.9F, 0.9F, 1.0F);
+    md.metallic = 1.0F;
+    md.roughness = 0.6F;
+    NphRenderMaterial metal = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &metal), NPH_RESULT_OK);
+    test_box_ground(f, &scene, test_cube_mesh(f), metal);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 7.0F, 7.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    NphRenderView v;
+    test_box_view(&v, camera, NPH_RENDER_VIEW_LIT);
+    v.gi = 1; // and the defaults: reflections from the cells, reservoirs for the highlights
+    static u8 alone[PIXELS];
+    for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    (void)test_box_render(f, &v, target, alone);
+    static NphRenderManyLight many[4];
+    for (u32 i = 0; i < 4U; ++i) {
+        const NphRenderManyLightDesc d = many_light(
+            nph_vec3(40.0F * (f32)(i & 1U) - 20.0F, 30.0F, 40.0F * (f32)(i >> 1U) - 20.0F), 1e-3F,
+            0.25F);
+        NTEST_ASSERT_EQ_INT(nph_render_many_light_create(f->renderer, &d, &many[i]), NPH_RESULT_OK);
+    }
+    static u8 with[PIXELS];
+    for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    (void)test_box_render(f, &v, target, with);
+    NTEST_EXPECT_TRUE(f->renderer->many.frame_active);
+    f64 sum_alone = 0.0;
+    f64 sum_with = 0.0;
+    u32 count = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(&scene, scene.eye, test_box_pixel_ray(&scene, i), 0.0F, &t, &n) < 0) {
+            continue;
+        }
+        sum_alone += (f64)test_box_linear(alone, i);
+        sum_with += (f64)test_box_linear(with, i);
+        ++count;
+    }
+    NTEST_ASSERT_GT_UINT(count, SIZE * SIZE / 2U);
+    const f64 m_alone = sum_alone / (f64)count;
+    const f64 m_with = sum_with / (f64)count;
+    NTEST_LOG("a rough metal under the sky: %.4f alone, %.4f among many lights", m_alone, m_with);
+    NTEST_EXPECT_TRUE(m_alone > 0.1);
+    NTEST_EXPECT_TRUE(m_with > m_alone * 0.95);
+    NTEST_EXPECT_TRUE(m_with < m_alone * 1.05);
+    for (u32 i = 0; i < 4U; ++i) {
+        nph_render_many_light_destroy(f->renderer, many[i]);
+    }
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // A mesh of no rays stays drawn and casts nothing: the ground beside it gets what it
 // would without it, and with rays it does not.
 NTEST_F(Many, a_mesh_without_rays_is_drawn_and_casts_nothing)

@@ -196,6 +196,22 @@ A glTF mesh's extras can say `{"no_rays": true}`: the cooked mesh is flagged
 (`NphRenderMeshDesc.no_rays`). It is for many small things that rays could not afford and
 would learn little from, as the interior's candles (scripts/interior.py).
 
+The cooker also flags, of itself, two kinds of mesh that rays should pass through
+([ADR-0078](adr/0078-local-lights-shadows.md)):
+
+- **Glass:** every material of its primitives lets at least half the light through
+  (`KHR_materials_transmission`, read for this alone: the raster draws such a material as
+  it would without). In rays it would stop the light that passes through it: a lamp's panes
+  would leave the street dark.
+- **A light's shell:** every material glows (an emissive factor above zero), and the box of
+  one of its instances in the world holds a point or spot light: the bulb or flame the light
+  stands for. In rays it would stop its own light, and count that light twice, once as the
+  light and once as the glow the rays see.
+
+A mesh of glass and other materials together stays in the rays: split it in the source. The
+cook log counts what each rule took (`meshes out of the rays: ... of glass, ... lights'
+shells`); Bistro's are 42 and 35, around 95 of its 96 lamps.
+
 ## Editable meshes (`polymesh.h`)
 
 The editor's own meshes (CLAUDE.md §8.13 "primitives ... and basic mesh

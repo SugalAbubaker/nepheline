@@ -264,7 +264,9 @@ maps), its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
 own sun; `"ibl": false` makes it a background only, as a night's is,
 ADR-0075), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
-and a game's would), and its views (the scene's own camera, or an eye and
+and a game's would), whether its point lights are many lights (`light_near_range`, their near
+range, and `many_lights`, the room they take: the interior's candles, ADR-0073, and Bistro's lamps,
+whose shadows they give, ADR-0078), and its views (the scene's own camera, or an eye and
 a target with a field of view; still, or moving: `walk` metres a second
 along the view, level, and `turn` degrees a second about the world's up
 axis, one step a frame as at 240 frames a second, the warm-up included so
@@ -290,7 +292,10 @@ reports the frame two before it): the pages wanted and drawn, the page
 budget, the caster lists' use, the resolution bias and the overflows.
 `--no-cells` loads the scenes without their world partition's cells
 (ADR-0062, docs/render.md "Cell proxies"): every instance drawn as itself,
-for comparing a scene with its cells and without. `--stream[=MB]` streams
+for comparing a scene with its cells and without. `--no-sun` leaves their
+directional lights out, so that their local lights show alone, and
+`--local-shadows` gives those that stay ordinary lights a shadow ray a pixel
+each, the truth that many lights' shadows are measured against (ADR-0078). `--stream[=MB]` streams
 the cells' proxies cooked as their levels apart (ADR-0063 stage 3;
 docs/runtime.md "Proxy streaming"): each cell is loaded with its coarsest
 level alone and its finer levels as the views want them, within MB

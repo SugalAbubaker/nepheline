@@ -16,6 +16,10 @@
 # or more to within 3 % of them against #150's build, and their own passes', the mean of two
 # interleaved rounds a scene from reference_scenes-2026-11-03-reflections-win-msvc-profile-rtx3060ti.json
 # and its second round)
+# (local lights' shadows (ADR-0078), 2026-11-04: Bistro's entries they moved by 1.5 % or more
+# to within 3 % of their budgets against #151's build, and the many lights' passes, Bistro's lamps
+# being many lights now, the mean of two interleaved rounds a scene from
+# reference_scenes-2026-11-04-local-shadows-win-msvc-profile-rtx3060ti.json and its second round)
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         56000
@@ -76,6 +80,8 @@ bistro_street_production.gpu.taa               916000
 bistro_street_production.gpu.reflect_clear     54000
 bistro_street_production.gpu.reflect_rays      155000
 bistro_street_production.gpu.reflect           242000
+bistro_street_production.gpu.many_tiles        67000
+bistro_street_production.gpu.many_turns        258000
 bistro_street_production.gpu                   7755000
 bistro_street_production.gpu.span              7763000
 bistro_street_walk_production.cpu              50000
@@ -137,6 +143,8 @@ bistro_street_walk_production.gpu.taa          918000
 bistro_street_walk_production.gpu.reflect_clear 54000
 bistro_street_walk_production.gpu.reflect_rays 160000
 bistro_street_walk_production.gpu.reflect      254000
+bistro_street_walk_production.gpu.many_tiles   67000
+bistro_street_walk_production.gpu.many_turns   288000
 bistro_street_walk_production.gpu              7852000
 bistro_street_walk_production.gpu.span         7860000
 bistro_street_turn_production.cpu              50000
@@ -180,7 +188,7 @@ bistro_street_turn_production.gpu.ao           1052000
 bistro_street_turn_production.gpu.ao_denoise   451000
 bistro_street_turn_production.gpu.gi_update    231000
 bistro_street_turn_production.gpu.gi_resolve   68000
-bistro_street_turn_production.gpu.vis_resolve  2719000
+bistro_street_turn_production.gpu.vis_resolve  2805000
 bistro_street_turn_production.gpu.vis_statistics 54000
 bistro_street_turn_production.gpu.transparent  159000
 bistro_street_turn_production.gpu.bloom_down_0 189000
@@ -198,8 +206,10 @@ bistro_street_turn_production.gpu.taa          914000
 bistro_street_turn_production.gpu.reflect_clear 54000
 bistro_street_turn_production.gpu.reflect_rays 143000
 bistro_street_turn_production.gpu.reflect      213000
-bistro_street_turn_production.gpu              8034000
-bistro_street_turn_production.gpu.span         8042000
+bistro_street_turn_production.gpu.many_tiles   67000
+bistro_street_turn_production.gpu.many_turns   361000
+bistro_street_turn_production.gpu              8376000
+bistro_street_turn_production.gpu.span         8384000
 bistro_terrace_production.cpu                  50000
 bistro_terrace_production.gpu.vis_clear        56000
 bistro_terrace_production.gpu.vsm_clear        55000
@@ -259,8 +269,10 @@ bistro_terrace_production.gpu.taa              919000
 bistro_terrace_production.gpu.reflect_clear    54000
 bistro_terrace_production.gpu.reflect_rays     152000
 bistro_terrace_production.gpu.reflect          240000
-bistro_terrace_production.gpu                  8370000
-bistro_terrace_production.gpu.span             8378000
+bistro_terrace_production.gpu.many_tiles       67000
+bistro_terrace_production.gpu.many_turns       261000
+bistro_terrace_production.gpu                  8537000
+bistro_terrace_production.gpu.span             8545000
 bistro_hedge_production.cpu                    50000
 bistro_hedge_production.gpu.vis_clear          56000
 bistro_hedge_production.gpu.vsm_clear          55000
@@ -301,7 +313,7 @@ bistro_hedge_production.gpu.ao                 1057000
 bistro_hedge_production.gpu.ao_denoise         452000
 bistro_hedge_production.gpu.gi_update          217000
 bistro_hedge_production.gpu.gi_resolve         64000
-bistro_hedge_production.gpu.vis_resolve        2570000
+bistro_hedge_production.gpu.vis_resolve        2628000
 bistro_hedge_production.gpu.vis_statistics     54000
 bistro_hedge_production.gpu.bloom_down_0       191000
 bistro_hedge_production.gpu.bloom_down_1       87000
@@ -318,8 +330,10 @@ bistro_hedge_production.gpu.taa                918000
 bistro_hedge_production.gpu.reflect_clear      54000
 bistro_hedge_production.gpu.reflect_rays       122000
 bistro_hedge_production.gpu.reflect            187000
-bistro_hedge_production.gpu                    7811000
-bistro_hedge_production.gpu.span               7819000
+bistro_hedge_production.gpu.many_tiles         67000
+bistro_hedge_production.gpu.many_turns         243000
+bistro_hedge_production.gpu                    8098000
+bistro_hedge_production.gpu.span               8106000
 city_street_production.cpu                     50000
 city_street_production.gpu.vis_clear           56000
 city_street_production.gpu.vsm_clear           55000

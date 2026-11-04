@@ -86,8 +86,12 @@ float vis_ambient_occlusion()
 #include "gi_common.glsl"
 layout(constant_id = 2) const bool k_gi = false;
 vec4 g_gi_cell; // set in main() where k_gi
+// Where k_many: the cell's share of the many lights' far fields (gi_cell_far), which the
+// shading's specular leaves to their reservoirs (ADR-0078).
+float g_gi_far;
 #define NPH_SURFACE_GI_ACTIVE k_gi
 #define NPH_SURFACE_GI        g_gi_cell
+#define NPH_SURFACE_GI_FAR    g_gi_far
 
 #define NPH_SURFACE_SAMPLE(tex, smp, s)                                                            \
     textureGrad(sampler2D(nph_textures_2d[nonuniformEXT(tex)], nph_samplers[nonuniformEXT(smp)]), \
@@ -299,7 +303,13 @@ void main()
         if (k_gi) {
             // The point and the triangle's normal as the cache's update
             // keys them (gi_update.comp: the same arithmetic).
-            g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
+            g_gi_far = 0.0;
+            if (k_many) {
+                g_gi_cell = gi_surface_cell_far(GiViewRef(rview.v.gi), p, s.position,
+                                                s.face_normal, g_gi_far);
+            } else {
+                g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
+            }
         }
 
         // Each attribute interpolated as soon as it is unpacked.
