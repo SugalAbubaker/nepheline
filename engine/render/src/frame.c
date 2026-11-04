@@ -156,6 +156,23 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->reflections = NPH_RENDER_REFLECTIONS_CACHE;
 }
 
+// The tiers' fields (ADR-0079). The reference tier's are nph_render_view_default's.
+void nph_render_view_quality(NphRenderView *view, NphRenderQuality quality)
+{
+    NPH_ASSERT(view != NULL);
+    view->reflections = NPH_RENDER_REFLECTIONS_CACHE;
+    view->vis_flags &= ~(u32)NPH_RENDER_VIS_RT_SHADOWS;
+    view->gi_rays = 0U;
+    if (quality == NPH_RENDER_QUALITY_REFERENCE) {
+        return;
+    }
+    // The sun's shadows by rays (ADR-0032), smooth surfaces' reflections by a ray a pixel
+    // (ADR-0077), and four times the cache's rays.
+    view->reflections = NPH_RENDER_REFLECTIONS_RAYS;
+    view->vis_flags |= (u32)NPH_RENDER_VIS_RT_SHADOWS;
+    view->gi_rays = 4U * 65536U;
+}
+
 // ---------------------------------------------------------------------------
 // Target pipelines
 // ---------------------------------------------------------------------------
@@ -947,6 +964,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     // Global illumination on the production path (gi.c), whose rays leave
     // the ambient occlusion's range to it.
     stats.gi = render_gi_frame_begin(r, view, width, height, production) ? 1 : 0;
+    stats.gi_rays = stats.gi ? r->gi.frame_rays_x * r->gi.frame_rays_y : 0U;
     // The many lights (many_lights.c), whose far fields the cache's update gathers.
     stats.many_lights = r->many.frame_active ? r->many.count : 0U;
     if (r->many.frame_active && !stats.gi && !r->many.no_gi_logged) {

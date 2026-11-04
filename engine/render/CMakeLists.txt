@@ -71,6 +71,7 @@ nph_add_test(render
         tests/test_motion_blur.c
         tests/test_post.c
         tests/test_primitives.c
+        tests/test_quality.c
         tests/test_reference.c
         tests/test_render_support.h
         tests/test_renderer.c

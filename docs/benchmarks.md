@@ -295,7 +295,10 @@ budget, the caster lists' use, the resolution bias and the overflows.
 for comparing a scene with its cells and without. `--no-sun` leaves their
 directional lights out, so that their local lights show alone, and
 `--local-shadows` gives those that stay ordinary lights a shadow ray a pixel
-each, the truth that many lights' shadows are measured against (ADR-0078). `--stream[=MB]` streams
+each, the truth that many lights' shadows are measured against (ADR-0078). `--quality=N` draws
+the views in a quality tier (`NphRenderQuality`, ADR-0079: 0 the reference, 1 high), as the
+options `--rt-shadows`, `--reflections` and `--gi-rays` (the radiance cache's rays a frame) would
+set them; those options after it change them again. `--stream[=MB]` streams
 the cells' proxies cooked as their levels apart (ADR-0063 stage 3;
 docs/runtime.md "Proxy streaming"): each cell is loaded with its coarsest
 level alone and its finer levels as the views want them, within MB

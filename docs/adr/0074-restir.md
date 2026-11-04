@@ -40,7 +40,8 @@ MegaLights at 5.51 ms at 1080p on a PS5 (Narkowicz & Costa, SIGGRAPH 2025). But 
    list does not show the tiles. A pixel's own walk down the tree reads lights nobody else reads: 1.41 ms.
 6. **By default they take the far fields' highlights** (`NPH_RENDER_RESTIR_SPECULAR`, `NphRenderView.many_restir`): the lobe's
    single scattering. The diffuse light, and what scatters more than once, stay the cache's, which has no noise.
-   `NPH_RENDER_RESTIR_ALL` takes all of it, at more noise; `NPH_RENDER_RESTIR_OFF` none. A device without ray queries draws as
+   `NPH_RENDER_RESTIR_ALL` takes all of it, at more noise (the direct light; the cache keeps their bounces, ADR-0079);
+   `NPH_RENDER_RESTIR_OFF` none. A device without ray queries draws as
    with OFF.
 7. **They start again** when the set of lights is rebuilt (their indices are the old set's), when the mode changes, and at a
    new size. A surface uncovered starts again by its depth; a reservoir whose own light is no longer seen, by its turn.

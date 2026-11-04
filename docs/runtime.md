@@ -176,6 +176,7 @@ Settings are cvars. The engine's:
 | `r.reflections` | 1 | what the production path's surfaces reflect (render.md "Reflections"): 0 the sky as if nothing hid it, 1 what the radiance cache gathers, 2 a ray a pixel; where the device has ray queries (saved) |
 | `r.gi` | true | the production path's global illumination: the diffuse light from the radiance cache, where the device has ray queries (saved) |
 | `r.many_restir` | 1 | what of the many lights' far fields per-pixel reservoirs take (render.md "Many lights"): 0 none, 1 the highlights, 2 all; where the device has ray queries (saved) |
+| `r.gi_rays` | 0 | the rays the radiance cache's update traces a frame, up to 2^22 (0: the renderer's, 65,536; render.md "Global illumination"; saved) |
 | `game.hot_reload`, `game.reload_poll_ms` | on in development, 250 | |
 | `prof.enabled`, `prof.history` | on in development, 240 | latched |
 
@@ -184,8 +185,15 @@ Values come, in rising precedence, from the defaults, the user config
 files in order, and `name=value` arguments. Unknown names wait for a
 registration (a game's cvars). The console (`console.h`) sets and prints
 cvars and runs the engine's commands: `quit`, `play`, `stop`, `pause`,
-`step`, `reload`, `scene.load`, `scene.save`, `trace`, `stats`, plus
+`step`, `reload`, `scene.load`, `scene.save`, `trace`, `stats`, `quality`, plus
 `help`, `cvars`, `echo`.
+
+**Quality tiers** (render.md "Quality tiers", ADR-0079). `quality <reference|high>`
+(`nph_engine_set_quality`) sets the cvars a tier decides, `r.reflections`, `r.virtual_shadows`
+and `r.gi_rays`, as `nph_render_view_quality` sets a view's fields; alone, it
+says which tier they match, or `custom` when one was changed after (`nph_engine_quality`). It is a
+command and not a cvar of its own: those cvars are saved as they are, so a configuration never
+holds a tier and different values beside it.
 
 ## Game modules
 

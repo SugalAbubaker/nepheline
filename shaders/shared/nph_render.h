@@ -260,7 +260,7 @@ NPH_SHARED_STRUCT(NphRenderManyLightData)
 // What the per-pixel reservoirs take of the far fields (NphRenderView.many_restir).
 #define NPH_RENDER_MANY_RESTIR_OFF      0 // none: the far fields' light is the cache's alone
 #define NPH_RENDER_MANY_RESTIR_SPECULAR 1 // the far fields' highlights
-#define NPH_RENDER_MANY_RESTIR_ALL      2 // all their light, which the cache then does not gather
+#define NPH_RENDER_MANY_RESTIR_ALL      2 // all their direct light, the cell's share of it set aside
 
 // A reservoir's first word: its light, how many candidates it has weighed, and which way its
 // surface faces (two bits an axis of the geometric normal, for its neighbours' turns). The count

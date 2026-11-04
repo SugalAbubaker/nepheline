@@ -481,6 +481,59 @@ NTEST(Engine, views_are_anti_aliased_and_a_camera_switch_cuts)
     finish(&fx);
 }
 
+// A quality tier sets the cvars it decides, which the next frame's view takes; a cvar changed
+// after leaves the cvars matching no tier (ADR-0079).
+NTEST(Engine, a_quality_tier_sets_its_cvars_and_the_view_takes_them)
+{
+    static EngineFixture fx;
+    prepare(&fx);
+    NTEST_ASSERT_EQ_INT(start(&fx, NPH_ENGINE_MODE_HEADLESS), NPH_RESULT_OK);
+    NphEngine *e = fx.engine;
+    NTEST_EXPECT_EQ_INT((int)nph_engine_quality(e), (int)NPH_RENDER_QUALITY_REFERENCE);
+    NphConsole *c = nph_engine_console(e);
+    NTEST_ASSERT_EQ_INT(nph_console_execute(c, NPH_STR("quality high")), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT((int)nph_engine_quality(e), (int)NPH_RENDER_QUALITY_HIGH);
+    NphRenderCamera camera;
+    memset(&camera, 0, sizeof camera);
+    NphRenderView high;
+    nph_render_view_default(&high, camera);
+    nph_render_view_quality(&high, NPH_RENDER_QUALITY_HIGH);
+    NTEST_EXPECT_EQ_INT(cvar_int(e, "r.reflections"), (i64)high.reflections);
+    NTEST_EXPECT_EQ_INT(cvar_int(e, "r.virtual_shadows"),
+                        (high.vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS) != 0U ? 0 : 1);
+    NTEST_EXPECT_EQ_INT(cvar_int(e, "r.gi_rays"), (i64)high.gi_rays);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    const NphRenderView *v = nph_engine_view(e);
+    NTEST_EXPECT_EQ_INT((int)v->reflections, (int)high.reflections);
+    NTEST_EXPECT_EQ_UINT(v->gi_rays, high.gi_rays);
+    NTEST_EXPECT_EQ_UINT(v->vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS,
+                         high.vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS);
+    // Changed after: no tier's.
+    NphCvar *reflections = nph_cvar_find(nph_engine_cvars(e), NPH_STR("r.reflections"));
+    NTEST_ASSERT_NOT_NULL(reflections);
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_int(nph_engine_cvars(e), reflections, (i64)NPH_RENDER_REFLECTIONS_OFF),
+        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT((int)nph_engine_quality(e), (int)NPH_RENDER_QUALITY_COUNT);
+    NTEST_ASSERT_EQ_INT(nph_console_execute(c, NPH_STR("quality")), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_console_execute(c, NPH_STR("quality ultra")),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    NTEST_EXPECT_EQ_INT(nph_engine_set_quality(e, (NphRenderQuality)NPH_RENDER_QUALITY_COUNT),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    // Back to the reference tier: the view a default one.
+    NTEST_ASSERT_EQ_INT(nph_engine_set_quality(e, NPH_RENDER_QUALITY_REFERENCE), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT((int)nph_engine_quality(e), (int)NPH_RENDER_QUALITY_REFERENCE);
+    NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
+    NphRenderView reference;
+    nph_render_view_default(&reference, camera);
+    v = nph_engine_view(e);
+    NTEST_EXPECT_EQ_INT((int)v->reflections, (int)reference.reflections);
+    NTEST_EXPECT_EQ_UINT(v->gi_rays, reference.gi_rays);
+    NTEST_EXPECT_EQ_UINT(v->vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS, 0U);
+    finish(&fx);
+}
+
 static u8 *read_target(NphEngine *e, u64 bytes)
 {
     NphGpuDevice *dev = nph_engine_device(e);

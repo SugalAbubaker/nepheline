@@ -373,8 +373,10 @@ NTEST_F(Many, the_far_fields_arrive_shadowed_through_the_cache)
 // black ground, in a scene lit only by the far fields, shows half of what it would show solid: with
 // no light of its own otherwise it would draw black (a palace's dirt did). Once, whichever the
 // reflections' mode (ADR-0077): a rough surface's specular takes the cell, which holds them
-// already.
-static void blended_far_fields(RenderFixture *f, bool other_light, NphRenderReflections reflections)
+// already. And where reservoirs take all the far fields' direct light, which no reservoir holds for
+// a blended surface: the cache still gathers them (ADR-0079).
+static void blended_far_fields(RenderFixture *f, bool other_light, NphRenderReflections reflections,
+                               NphRenderRestir restir)
 {
     REQUIRE_PRODUCTION(f);
     if (!f->renderer->gi.supported) {
@@ -445,6 +447,7 @@ static void blended_far_fields(RenderFixture *f, bool other_light, NphRenderRefl
     lit_view(&v, camera);
     v.gi = 1;
     v.reflections = reflections;
+    v.many_restir = restir;
     for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
         (void)test_render_frame(f, &v, target);
     }
@@ -489,22 +492,27 @@ static void blended_far_fields(RenderFixture *f, bool other_light, NphRenderRefl
 
 NTEST_F(Many, a_blended_surface_takes_the_far_fields)
 {
-    blended_far_fields(f, false, NPH_RENDER_REFLECTIONS_CACHE);
+    blended_far_fields(f, false, NPH_RENDER_REFLECTIONS_CACHE, NPH_RENDER_RESTIR_OFF);
 }
 
 NTEST_F(Many, a_blended_surface_takes_them_with_other_light_too)
 {
-    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_CACHE);
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_CACHE, NPH_RENDER_RESTIR_OFF);
 }
 
 NTEST_F(Many, a_blended_surface_takes_them_once_with_reflections_by_rays)
 {
-    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_RAYS);
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_RAYS, NPH_RENDER_RESTIR_OFF);
 }
 
 NTEST_F(Many, a_blended_surface_takes_them_without_reflections)
 {
-    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_OFF);
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_OFF, NPH_RENDER_RESTIR_OFF);
+}
+
+NTEST_F(Many, a_blended_surface_takes_them_with_reservoirs_for_all_the_light)
+{
+    blended_far_fields(f, true, NPH_RENDER_REFLECTIONS_CACHE, NPH_RENDER_RESTIR_ALL);
 }
 
 // The partition of unity: near and far fields together are the light. Lights low over a
@@ -709,6 +717,94 @@ NTEST_F(Many, a_rough_metal_keeps_the_skys_light_among_many_lights)
     NTEST_EXPECT_TRUE(m_alone > 0.1);
     NTEST_EXPECT_TRUE(m_with > m_alone * 0.95);
     NTEST_EXPECT_TRUE(m_with < m_alone * 1.05);
+    for (u32 i = 0; i < 4U; ++i) {
+        nph_render_many_light_destroy(f->renderer, many[i]);
+    }
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// The mean of the ground's pixels in `image` (the boxes' scene's).
+static f64 ground_mean(const TestBoxScene *scene, const u8 *image)
+{
+    f64 sum = 0.0;
+    u32 count = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(scene, scene->eye, test_box_pixel_ray(scene, i), 0.0F, &t, &n) < 0) {
+            continue;
+        }
+        sum += (f64)test_box_linear(image, i);
+        ++count;
+    }
+    NTEST_ASSERT_GT_UINT(count, SIZE * SIZE / 2U);
+    return sum / (f64)count;
+}
+
+// Where the reservoirs take all the many lights' direct light, a pixel takes the rest of its cell,
+// the cell's share of their far fields set aside once (ADR-0079). Moved far away, the lights' set
+// is rebuilt and the reservoirs start again from nothing, while a cell still holds what the lights
+// gave it, and its share of them: a rough metal under a sky then shows the sky's light alone, as
+// before there were lights, however much of theirs its cell still holds.
+NTEST_F(Many, a_pixel_takes_the_rest_of_its_cell_with_reservoirs_for_all)
+{
+    REQUIRE_PRODUCTION(f);
+    if (!f->renderer->gi.supported || !f->renderer->rt.supported) {
+        NTEST_SKIP("no radiance cache or reservoirs on this device (ray queries)");
+    }
+    const NphRenderTexture env = test_uniform_environment(f, 0.25F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.9F, 0.9F, 0.9F, 1.0F);
+    md.metallic = 1.0F;
+    md.roughness = 0.6F;
+    NphRenderMaterial metal = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &metal), NPH_RESULT_OK);
+    test_box_ground(f, &scene, test_cube_mesh(f), metal);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 7.0F, 7.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    NphRenderView v;
+    test_box_view(&v, camera, NPH_RENDER_VIEW_LIT);
+    v.gi = 1;
+    v.many_restir = NPH_RENDER_RESTIR_ALL;
+    static u8 image[PIXELS];
+    for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    (void)test_box_render(f, &v, target, image);
+    const f64 m_sky = ground_mean(&scene, image);
+    // Four lights about as bright on the ground as the sky: a third of the cells' light.
+    static NphRenderManyLight many[4];
+    for (u32 i = 0; i < 4U; ++i) {
+        const NphRenderManyLightDesc d = many_light(
+            nph_vec3(4.0F * (f32)(i & 1U) - 2.0F, 3.0F, 4.0F * (f32)(i >> 1U) - 2.0F), 4.0F, 0.25F);
+        NTEST_ASSERT_EQ_INT(nph_render_many_light_create(f->renderer, &d, &many[i]), NPH_RESULT_OK);
+    }
+    for (u32 i = 0; i + 1U < FAR_FRAMES; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    (void)test_box_render(f, &v, target, image);
+    const f64 m_lit = ground_mean(&scene, image);
+    for (u32 i = 0; i < 4U; ++i) {
+        const NphRenderManyLightDesc d =
+            many_light(nph_vec3(4.0F * (f32)(i & 1U) + 998.0F, 3.0F, 4.0F * (f32)(i >> 1U) - 2.0F),
+                       4.0F, 0.25F);
+        NTEST_ASSERT_EQ_INT(nph_render_many_light_update(f->renderer, many[i], &d), NPH_RESULT_OK);
+    }
+    (void)test_render_frame(f, &v, target);
+    (void)test_box_render(f, &v, target, image);
+    const f64 m_after = ground_mean(&scene, image);
+    NTEST_EXPECT_TRUE(f->renderer->many.frame_active);
+    NTEST_LOG("a rough metal: %.4f under the sky, %.4f with the lights, %.4f once they have gone",
+              m_sky, m_lit, m_after);
+    NTEST_EXPECT_TRUE(m_sky > 0.05);
+    NTEST_EXPECT_TRUE(m_lit > 1.25 * m_sky);
+    NTEST_EXPECT_TRUE(m_after > 0.95 * m_sky);
+    NTEST_EXPECT_TRUE(m_after < 1.05 * m_sky);
     for (u32 i = 0; i < 4U; ++i) {
         nph_render_many_light_destroy(f->renderer, many[i]);
     }
