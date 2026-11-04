@@ -181,9 +181,11 @@ void main()
     }
 
     vec3 irradiance = radiance * NPH_PI;
+    vec3 far = vec3(0.0);
     if (k_many && ManyViewRef(rview.v.many).m.restir != uint(NPH_RENDER_MANY_RESTIR_ALL)) {
         const float u2 = gi_random(uvec3(block, g.g.frame ^ 0x7F4A7C15u)).x;
-        irradiance += many_far_sample(rview, x, n, u2);
+        far = many_far_sample(rview, x, n, u2);
+        irradiance += far;
     }
 
     // The estimate, pre-exposed, in fixed point.
@@ -200,4 +202,13 @@ void main()
         atomicAdd(sums.s[slot].z, fixed_e.z);
     }
     atomicAdd(sums.s[slot].w, 1u);
+    // The far fields' alone (their luminance), for the cell's share of them (ADR-0078).
+    if (k_many) {
+        const float far_e = min(dot(far, vec3(0.2126, 0.7152, 0.0722)) * rview.v.exposure,
+                                NPH_RENDER_GI_SAMPLE_MAX);
+        const uint fixed_far = uint(far_e * g.g.sum_scale + 0.5);
+        if (fixed_far != 0u) {
+            atomicAdd(GiKeysRef(g.g.far_sums).k[slot], fixed_far);
+        }
+    }
 }

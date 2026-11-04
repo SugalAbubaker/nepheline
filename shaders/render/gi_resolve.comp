@@ -7,7 +7,9 @@
 // change), and its sums are cleared for the next frame; a cell none reached
 // ages, and is freed after NPH_RENDER_GI_MAX_AGE frames, so cells out of
 // sight give their slots back. The sums are pre-exposed fixed point; the
-// irradiance is kept in lux, whatever the exposure does.
+// irradiance is kept in lux, whatever the exposure does. The irradiance's
+// share that is the many lights' far fields (ADR-0078), whose samples the
+// update also sums apart, follows it the same way.
 //
 // arg0: the slot count. arg1: nonzero for the reflection cells' table (ADR-0077), which keeps a
 // cell for fewer frames.
@@ -36,14 +38,30 @@ void main()
     GiCellsRef cells = GiCellsRef(reflections ? g.g.reflect_cells : g.g.cells);
     const uvec4 s = sums.s[i];
     uvec4 c = cells.c[i];
-    uint count = c.w & 0xFFFFu;
-    uint age = c.w >> 16u;
+    uint count = c.w & 0xFFu;
+    uint age = (c.w >> 8u) & 0xFFu;
+    uint far = c.w >> 16u;
     if (s.w != 0u) {
         const vec3 mean = vec3(s.xyz) / (g.g.sum_scale * float(s.w) * rview.v.exposure);
         const float history = float(min(count, uint(NPH_RENDER_GI_HISTORY)));
-        const vec3 e = (uintBitsToFloat(c.xyz) * history + mean * float(s.w)) /
-                       (history + float(s.w));
+        const vec3 was = uintBitsToFloat(c.xyz);
+        const vec3 e = (was * history + mean * float(s.w)) / (history + float(s.w));
         c.xyz = floatBitsToUint(e);
+        if (!reflections && g.g.far_sums != 0ul) {
+            // The far fields' luminance, blended as the irradiance is, over the irradiance's.
+            const uint far_sum = GiKeysRef(g.g.far_sums).k[i];
+            const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
+            const float far_was = float(far) * (1.0 / 65535.0) * dot(was, lum);
+            const float far_mean = float(far_sum) / (g.g.sum_scale * float(s.w) * rview.v.exposure);
+            const float far_e = (far_was * history + far_mean * float(s.w)) / (history + float(s.w));
+            const float total = dot(e, lum);
+            far = total > 0.0 ? uint(clamp(far_e / total, 0.0, 1.0) * 65535.0 + 0.5) : 0u;
+            if (far_sum != 0u) {
+                GiKeysRef(g.g.far_sums).k[i] = 0u;
+            }
+        } else {
+            far = 0u; // a frame without many lights: none of the light is theirs
+        }
         count = min(count + s.w, uint(NPH_RENDER_GI_HISTORY));
         age = 0u;
         sums.s[i] = uvec4(0u);
@@ -54,6 +72,6 @@ void main()
     } else {
         ++age;
     }
-    c.w = count | (age << 16u);
+    c.w = count | (age << 8u) | (far << 16u);
     cells.c[i] = c;
 }

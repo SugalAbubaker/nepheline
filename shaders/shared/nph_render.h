@@ -607,7 +607,8 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u64 keys;  // u32[capacity]: each slot's key fingerprint (0: free)
     u64 sums;  // uvec4[capacity]: this frame's samples (rgb in 1 / sum_scale, and their count)
     u64 cells; // uvec4[capacity]: irradiance (rgb, lux, as a float's bits); w: the sample
-               // count in bits 0-15 and the frames since one arrived in bits 16-31
+               // count in bits 0-7, the frames since one arrived in bits 8-15, and the many
+               // lights' far fields' share of the irradiance, a 16-bit fraction, in bits 16-31
     // The reflection cells' table (ADR-0077), as the three above.
     u64 reflect_keys;
     u64 reflect_sums;
@@ -617,6 +618,9 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u64 reflect_tiles;
     u64 reflect_bits;
     u64 reflect_args;
+    // u32[capacity]: this frame's samples of the many lights' far fields alone, their luminance
+    // in 1 / sum_scale, for the cells' share of them (ADR-0078).
+    u64 far_sums;
     u32 bucket_mask;         // capacity / NPH_RENDER_GI_BUCKET - 1
     f32 scale;               // a cell is 1 / (2 scale) to 1 / scale of its distance across
     f32 sum_scale;           // fixed-point units of a pre-exposed sample
@@ -632,6 +636,7 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u32 reflect_turn_bits;   // 1 listed tile in 2^this traces its rays each frame
     u32 reflect_bucket_mask; // its table's capacity / NPH_RENDER_GI_BUCKET - 1
     u32 pad_reflect;
+    u32 pad_far[2];
     // xyz: the direction the sun's light travels; w: 1 when it casts
     // shadows, 0 when it does not, -1 when there is no sun
     NphVec4 sun_direction;

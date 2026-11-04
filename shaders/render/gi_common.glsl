@@ -161,7 +161,13 @@ uint gi_claim(GiViewRef g, uint64_t key)
 vec4 gi_cell(GiViewRef g, uint slot)
 {
     const uvec4 c = GiCellsRef(g.g.cells).c[slot];
-    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFFFu) * (1.0 / 16.0), 1.0));
+    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) * (1.0 / 16.0), 1.0));
+}
+
+// The share of a cell's irradiance that is the many lights' far fields' (ADR-0078).
+float gi_cell_far(GiViewRef g, uint slot)
+{
+    return float(GiCellsRef(g.g.cells).c[slot].w >> 16u) * (1.0 / 65535.0);
 }
 
 // The cache's irradiance at the camera-relative point `p` (geometric normal
@@ -295,6 +301,25 @@ vec4 gi_surface_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
     return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
 }
 
+// The same, and the cell's share of the many lights' far fields in `far` (gi_cell_far; 0 where
+// there is no cell).
+vec4 gi_surface_cell_far(GiViewRef g, ivec2 pixel, vec3 p, vec3 face, out float far)
+{
+    const vec3 n = dot(face, p) > 0.0 ? -face : face;
+    vec3 at = p;
+    if (g.g.jitter != 0u) {
+        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
+    }
+    const uint slot = gi_find(g, gi_key(g, at, n));
+    if (slot == GI_NONE) {
+        far = 0.0;
+        return vec4(0.0);
+    }
+    const uvec4 c = GiCellsRef(g.g.cells).c[slot]; // gi_cell and gi_cell_far, from one load
+    far = float(c.w >> 16u) * (1.0 / 65535.0);
+    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) * (1.0 / 16.0), 1.0));
+}
+
 // What the point `p` (camera relative) reflects along the direction `d`: the radiance of its
 // reflection cell and how far it can be trusted, zero where there is none. `u`, uniform in [0, 1),
 // takes a neighbouring direction now and then: temporal anti-aliasing averages them, where a
@@ -310,7 +335,7 @@ vec4 gi_reflect_cell(GiViewRef g, vec3 p, uvec2 d, uint rough, vec2 u)
     }
     const uvec4 c = GiCellsRef(g.g.reflect_cells).c[slot];
     // A narrow lobe's samples hardly differ: one is enough for the smoothest, four at the end.
-    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFFFu) / float(1u + coarse), 1.0));
+    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) / float(1u + coarse), 1.0));
 }
 
 #endif

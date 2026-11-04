@@ -36,7 +36,7 @@
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
 //                 [--paged-textures] [--texture-budget=MB] [--restir=N] [--contact-shadow=N]
-//                 [--reflections=N] [--accumulate=N]
+//                 [--reflections=N] [--accumulate=N] [--no-sun] [--local-shadows]
 //                 [--truth] [--truth-ev=STOPS]
 //
 // --sw-pixels sets NphRendererDesc.sw_raster_pixels, the average triangle
@@ -51,7 +51,11 @@
 // report the frame NPH_GPU_FRAMES_IN_FLIGHT before): how its page budget
 // draws a burst of pages. --no-cells loads the reference scenes without
 // their world partition's cells (ADR-0062): every instance drawn as itself,
-// no proxy, for comparing a scene with its cells and without. --stream
+// no proxy, for comparing a scene with its cells and without. --no-sun
+// leaves their directional lights out, so that their local lights show
+// alone (their shadows; whether fixtures stop the rays toward them), and
+// --local-shadows gives their other lights shadows by a ray a pixel and
+// light, the truth those of the many lights are measured against. --stream
 // streams the cells' proxies cooked as their levels apart (ADR-0063 stage 3;
 // runtime/proxy_stream.h): each cell loaded with its coarsest level alone,
 // its finer levels as the views want them, within MB megabytes past the
@@ -522,13 +526,15 @@ static u32 g_accumulate = 0U;
 // an average of many frames converges on, for comparing the lights' estimators.
 static bool g_truth = false;
 static f32 g_truth_ev = 2.0F;
-static u32 g_lists = 1U;            // --lists: the production path's list capacities, times this
-static bool g_vsm_trace = false;    // --vsm-trace: every frame's shadow map statistics
-static bool g_memory_trace = false; // --memory-trace: the GPU memory every 16th frame
-static bool g_no_cells = false;     // --no-cells: the scenes' cells not loaded
-static bool g_stream = false;       // --stream: the cells' proxies streamed
-static u64 g_stream_budget = 0U;    // --stream=MB: their budget past the coarsest (0: none)
-static bool g_stream_trace = false; // --stream-trace: the stream's work every frame
+static u32 g_lists = 1U;             // --lists: the production path's list capacities, times this
+static bool g_vsm_trace = false;     // --vsm-trace: every frame's shadow map statistics
+static bool g_memory_trace = false;  // --memory-trace: the GPU memory every 16th frame
+static bool g_no_cells = false;      // --no-cells: the scenes' cells not loaded
+static bool g_no_sun = false;        // --no-sun: the reference scenes' directional lights left out
+static bool g_local_shadows = false; // --local-shadows: their other lights cast shadows by rays
+static bool g_stream = false;        // --stream: the cells' proxies streamed
+static u64 g_stream_budget = 0U;     // --stream=MB: their budget past the coarsest (0: none)
+static bool g_stream_trace = false;  // --stream-trace: the stream's work every frame
 // --paged-textures: textures paged (ADR-0065), every page installed before a
 // view is measured: what the clamped samples and the requests cost.
 // --texture-budget=MB: paged, their levels streamed within the budget
@@ -2066,6 +2072,8 @@ static NphResult load_reference(Ctx *ctx, u32 manifest)
     cd.scene = nph_guid_from_cstr(m->scene_key);
     cd.light_near_range = m->light_near_range;
     cd.no_cells = g_no_cells;
+    cd.no_sun = g_no_sun;
+    cd.local_shadows = g_local_shadows;
     cd.stream = g_stream;
     cd.stream_budget = g_stream_budget;
     cd.stream_loads = g_stream_loads;
@@ -2614,7 +2622,8 @@ static int usage(void)
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
                     "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
                     "[--contact-shadow=N] [--reflections=N] "
-                    "[--accumulate=N] [--truth] [--truth-ev=STOPS]\n");
+                    "[--accumulate=N] [--no-sun] [--local-shadows] [--truth] "
+                    "[--truth-ev=STOPS]\n");
     return 2;
 }
 
@@ -2657,6 +2666,10 @@ int main(int argc, char **argv)
             g_memory_trace = true;
         } else if (strcmp(argv[i], "--no-cells") == 0) {
             g_no_cells = true;
+        } else if (strcmp(argv[i], "--no-sun") == 0) {
+            g_no_sun = true;
+        } else if (strcmp(argv[i], "--local-shadows") == 0) {
+            g_local_shadows = true;
         } else if (strcmp(argv[i], "--stream") == 0) {
             g_stream = true;
         } else if (strncmp(argv[i], "--stream=", 9U) == 0) {

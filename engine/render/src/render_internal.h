@@ -1127,6 +1127,8 @@ typedef struct RenderGi {
     NphGpuBuffer reflect_keys;
     NphGpuBuffer reflect_sums;
     NphGpuBuffer reflect_cells;
+    // The many lights' far fields' luminance alone, a frame's (ADR-0078).
+    NphGpuBuffer far_sums;
     NphGpuRgBuffer frame_reflect_keys;
     NphGpuRgBuffer frame_reflect_sums;
     NphGpuRgBuffer frame_reflect_cells;
@@ -1149,6 +1151,7 @@ typedef struct RenderGi {
     NphGpuRgBuffer frame_keys;
     NphGpuRgBuffer frame_sums;
     NphGpuRgBuffer frame_cells;
+    NphGpuRgBuffer frame_far_sums;
 } RenderGi;
 
 // What the radiance cache's update reads of the frame (vis.c).

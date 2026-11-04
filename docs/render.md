@@ -2222,7 +2222,8 @@ split-sum's specular multiplies is, by the surface's roughness:
   evenly. Nothing more is traced or stored. Where the cell is trusted, nothing of the sky is fetched
   at all, its harmonics or its cube, which pays for what the smooth surfaces' store costs the
   resolve. With many lights the cell also holds their far fields' direct light, whose specular their
-  reservoirs give ("Many lights"), so there it stays out.
+  reservoirs give ("Many lights"): that share of the cell stays out, and the rest is taken
+  ([ADR-0078](adr/0078-local-lights-shadows.md)).
 - **Smooth** (under 0.25): a reflection cell, of a table of its own (`gi_cells` slots too, freed
   after 60 frames unseen): the same grid four times finer, for each direction of an octahedral map
   whose bins are as wide as the surface's lobe, 1.6 degrees for the smoothest, and so what lies along
@@ -2471,7 +2472,14 @@ changes.
 The specular their far fields give is by default the reservoirs' (below). Without them
 (`NPH_RENDER_RESTIR_OFF`, or no ray queries) it is what the cell gathered, taken as arriving
 evenly from everywhere (the diffuse gives up that energy already): metals are lit, and a far
-candle has no highlight of its own.
+candle has no highlight of its own. The update sums its samples of the far fields apart too,
+and a cell keeps their share of its irradiance (16 bits of its last word, beside its count and
+age): where the reservoirs give the far fields' highlights, rough surfaces' specular takes the
+rest of the cell, the sky's and the bounces' light ([ADR-0078](adr/0078-local-lights-shadows.md)).
+
+A scene's lamps take their shadows this way: Bistro's 96 are many lights
+(`light_near_range` 0.25 in its manifest), and its glass and the bulbs around its lamps stay out
+of the rays (docs/cook.md "Rays"), which would otherwise stop the light of all but one.
 
 #### Reservoirs
 

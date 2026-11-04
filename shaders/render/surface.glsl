@@ -858,10 +858,15 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
             }
         }
         irradiance = mix(irradiance, cell.rgb, cell.w);
-#ifdef NPH_SURFACE_MANY_ACTIVE
-        const bool many_gathered = NPH_SURFACE_MANY_ACTIVE;
+        // With many lights whose reservoirs give their far fields' highlights, the cell's share
+        // of those far fields is theirs (ADR-0078); without reservoirs the cell gives it all.
+#if defined(NPH_SURFACE_MANY_ACTIVE) && defined(NPH_SURFACE_GI_FAR)
+        const bool many_reserved =
+            NPH_SURFACE_MANY_ACTIVE &&
+            ManyViewRef(view.v.many).m.restir != uint(NPH_RENDER_MANY_RESTIR_OFF);
+        const float spec_share = many_reserved ? 1.0 - NPH_SURFACE_GI_FAR : 1.0;
 #else
-        const bool many_gathered = false;
+        const float spec_share = 1.0;
 #endif
         if ((cells_reflect || rays_reflect) && !reflecting) {
             const vec3 gathered = irradiance * NPH_INV_PI;
@@ -877,17 +882,15 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
                 radiance = ibl ? radiance * held : gathered;
             } else
 #endif
-            if (!many_gathered) {
-                // (With many lights the cell holds their far fields' direct light, whose
-                // specular their reservoirs give, and the sky's specular has no use.)
-                radiance = mix(radiance, gathered, cell.w);
+            {
+                radiance = mix(radiance, gathered * spec_share, cell.w);
             }
         }
 #ifdef NPH_SURFACE_MANY_ACTIVE
         // The many lights' far fields have no highlights of their own: what the cell
         // gathered, as if arriving evenly from everywhere, gives the specular its
         // energy, which the diffuse below gives up.
-        if (NPH_SURFACE_MANY_ACTIVE && gi &&
+        if (NPH_SURFACE_MANY_ACTIVE && gi && !cells_reflect && !rays_reflect &&
             ManyViewRef(view.v.many).m.restir == uint(NPH_RENDER_MANY_RESTIR_OFF)) {
             const vec4 far_cell = NPH_SURFACE_GI;
             radiance += far_cell.rgb * (NPH_INV_PI * far_cell.w);
