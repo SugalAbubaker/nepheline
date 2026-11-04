@@ -151,6 +151,10 @@ static const NPH_CVAR_INT(k_many_restir, "r.many_restir", NPH_RENDER_RESTIR_SPEC
                           "what of the many lights' far fields per-pixel reservoirs take: 0 none, "
                           "1 the highlights, 2 all (production; ray queries)",
                           NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_INT(k_gi_rays, "r.gi_rays", 0, 0, 1 << 22,
+                          "the rays the radiance cache's update traces a frame (0: the renderer's, "
+                          "65536; production; ray queries)",
+                          NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_hot_reload, "game.hot_reload", DEV_DEFAULT,
                            "swap in new builds of the game module", NPH_CVAR_FLAG_NONE);
 static const NPH_CVAR_INT(k_reload_poll_ms, "game.reload_poll_ms", 250, 10, 10000,
@@ -255,6 +259,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->reflections,
         &cv->gi,
         &cv->many_restir,
+        &cv->gi_rays,
         &cv->sim_interpolate,
         &cv->phys_solver,
         &cv->phys_substeps,
@@ -325,6 +330,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_reflections,
         &k_gi,
         &k_many_restir,
+        &k_gi_rays,
         &k_sim_interpolate,
         &k_phys_solver,
         &k_phys_substeps,
@@ -898,6 +904,7 @@ static void choose_view(NphEngine *e, f64 dt)
     e->view.reflections = (NphRenderReflections)nph_cvar_get_int(&e->cv.reflections);
     e->view.gi = nph_cvar_get_bool(&e->cv.gi) ? 1 : 0;
     e->view.many_restir = (NphRenderRestir)nph_cvar_get_int(&e->cv.many_restir);
+    e->view.gi_rays = (u32)nph_cvar_get_int(&e->cv.gi_rays);
     // In lockstep a frame lasts one step whatever the clock says, so a
     // run's exposure is the same every time.
     const f64 seconds =
@@ -1318,6 +1325,26 @@ static NphResult cmd_trace(NphConsole *c, void *user, const NphStr *args, u32 co
                                           path);
 }
 
+static const char *const g_quality_names[NPH_RENDER_QUALITY_COUNT] = {"reference", "high"};
+
+static NphResult cmd_quality(NphConsole *c, void *user, const NphStr *args, u32 count)
+{
+    NphEngine *e = (NphEngine *)user;
+    if (count == 1U) {
+        const NphRenderQuality q = nph_engine_quality(e);
+        nph_console_printf(c, "%s",
+                           (u32)q < NPH_RENDER_QUALITY_COUNT ? g_quality_names[q] : "custom");
+        return NPH_RESULT_OK;
+    }
+    for (u32 q = 0; count == 2U && q < NPH_RENDER_QUALITY_COUNT; ++q) {
+        if (nph_str_equals_ignore_case(args[1], nph_str_from_cstr(g_quality_names[q]))) {
+            return nph_engine_set_quality(e, (NphRenderQuality)q);
+        }
+    }
+    nph_console_printf(c, "usage: %.*s [reference|high]", NPH_STR_ARG(args[0]));
+    return NPH_RESULT_INVALID_ARGUMENT;
+}
+
 static NphResult cmd_stats(NphConsole *c, void *user, const NphStr *args, u32 count)
 {
     NPH_UNUSED(args);
@@ -1350,6 +1377,10 @@ static const EngineCommand g_commands[] = {
     {"scene.save", "save the world as a text scene: scene.save <path>", cmd_scene_save},
     {"trace", "write a Chrome trace of the recent frames: trace <path>", cmd_trace},
     {"stats", "print the last frame's statistics", cmd_stats},
+    {"quality",
+     "the renderer's tier: quality <reference|high> sets the cvars it decides; alone, says which "
+     "they match",
+     cmd_quality},
 };
 
 // ---------------------------------------------------------------------------
@@ -1786,6 +1817,48 @@ const NphRenderView *nph_engine_view(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);
     return &e->view;
+}
+
+// A tier's fields of a view (nph_render_view_quality), on any camera.
+static NphRenderView quality_view(const NphEngine *e, NphRenderQuality quality)
+{
+    NphRenderView v;
+    nph_render_view_default(&v, e->view.camera);
+    nph_render_view_quality(&v, quality);
+    return v;
+}
+
+static bool rt_shadows(const NphRenderView *v)
+{
+    return (v->vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS) != 0U;
+}
+
+NphResult nph_engine_set_quality(NphEngine *e, NphRenderQuality quality)
+{
+    NPH_ASSERT(e != NULL);
+    if ((u32)quality >= NPH_RENDER_QUALITY_COUNT) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const NphRenderView v = quality_view(e, quality);
+    NPH_TRY(nph_cvar_set_int(&e->cvars, &e->cv.reflections, (i64)v.reflections));
+    NPH_TRY(nph_cvar_set_bool(&e->cvars, &e->cv.virtual_shadows, rt_shadows(&v) ? 0 : 1));
+    NPH_TRY(nph_cvar_set_int(&e->cvars, &e->cv.gi_rays, (i64)v.gi_rays));
+    return NPH_RESULT_OK;
+}
+
+NphRenderQuality nph_engine_quality(const NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    for (u32 q = 0; q < NPH_RENDER_QUALITY_COUNT; ++q) {
+        const NphRenderView v = quality_view(e, (NphRenderQuality)q);
+        if (nph_cvar_get_int(&e->cv.reflections) == (i64)v.reflections &&
+            (nph_cvar_get_bool(&e->cv.virtual_shadows) != 0) == !rt_shadows(&v) &&
+            nph_cvar_get_int(&e->cv.gi_rays) == (i64)v.gi_rays) {
+            return (NphRenderQuality)q;
+        }
+    }
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange): none of them, as documented
+    return (NphRenderQuality)NPH_RENDER_QUALITY_COUNT;
 }
 
 NphWorld *nph_engine_world(NphEngine *e)

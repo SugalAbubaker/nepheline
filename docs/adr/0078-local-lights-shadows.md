@@ -32,7 +32,7 @@ Their bulbs, glowing shells around the light, and their lanterns' panes, glass t
 3. **The cache counts each cell's share of the many lights' far fields,** in the cell's last word beside its count and age
    (8 bits each now: they are at most 128 and 240), from the update's samples of the far fields summed apart. Rough
    surfaces' specular takes the rest of the cell where reservoirs give the far fields' highlights, and all of it where they
-   do not (`NPH_RENDER_RESTIR_OFF`, or `ALL`, whose far fields the cache never holds). This mends what reflections
+   do not (`NPH_RENDER_RESTIR_OFF`; with `ALL` its diffuse light gives up the share too, ADR-0079). This mends what reflections
    (ADR-0077) had broken: in a frame with many lights, rough surfaces took none of the cell, and fetched no sky. With
    Bistro's lamps as many lights, its day went 6.7 levels darker on average for that alone.
 

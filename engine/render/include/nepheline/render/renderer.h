@@ -989,8 +989,22 @@ typedef enum NphRenderReflections {
 typedef enum NphRenderRestir {
     NPH_RENDER_RESTIR_OFF = 0, // none: all of it the cache's, its highlights only as an average
     NPH_RENDER_RESTIR_SPECULAR = 1, // the highlights, the shadows of their lights ray traced
-    NPH_RENDER_RESTIR_ALL = 2,      // all of it, the diffuse light noisier than the cache's
+    NPH_RENDER_RESTIR_ALL = 2,      // all their direct light; the cache keeps what they bounce
 } NphRenderRestir;
+
+// The quality tiers (ADR-0079; docs/render.md "Quality tiers"): what a view takes beyond the frame
+// the reference hardware holds. A tier sets some of NphRenderView's fields
+// (nph_render_view_quality); a view may change any of them after.
+typedef enum NphRenderQuality {
+    // The frame the RTX 3060 Ti holds at 144 FPS at native 4K (ADR-0067): nph_render_view_default's
+    // fields.
+    NPH_RENDER_QUALITY_REFERENCE = 0,
+    // For GPUs with rays to spare: the sun's shadows by a ray a pixel (the truth its map is
+    // measured against), smooth surfaces' reflections by a ray a pixel every frame, and four times
+    // the radiance cache's rays. On the reference hardware, 0.3 to 7 ms more a frame at 4K.
+    NPH_RENDER_QUALITY_HIGH = 1,
+} NphRenderQuality;
+#define NPH_RENDER_QUALITY_COUNT 2U
 
 typedef struct NphRenderView {
     NphRenderCamera camera;
@@ -1078,6 +1092,9 @@ typedef struct NphRenderView {
     // instead. Made for lit views and the indirect and irradiance debug
     // views; the reference renderer has none.
     b32 gi;
+    // The rays the radiance cache's update traces this frame, a budget whatever the resolution (0:
+    // NphRendererDesc.gi_rays). More follow a change of the light sooner and leave less noise.
+    u32 gi_rays;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), ACES, the environment as
@@ -1087,6 +1104,12 @@ typedef struct NphRenderView {
 // r.taa, r.bloom, r.ao, and r.gi, and gives the camera's shutter and lens,
 // r.motion_blur and r.dof).
 void nph_render_view_default(NphRenderView *view, NphRenderCamera camera);
+
+// Sets the fields of `view` that `quality` decides (NphRenderQuality: `reflections`, `gi_rays`
+// and the NPH_RENDER_VIS_RT_SHADOWS bit of `vis_flags`), and
+// leaves the others as they are; NPH_RENDER_QUALITY_REFERENCE sets them as
+// nph_render_view_default does. A quality past the last tier is taken as the last. NPH_THREADSAFE.
+void nph_render_view_quality(NphRenderView *view, NphRenderQuality quality);
 
 // The focal length in metres of the view's lens: its sensor's height (0:
 // 0.024) over 2 tan(yfov / 2). A view with an aperture or a lens offset must
@@ -1198,11 +1221,13 @@ typedef struct NphRenderFrameStats {
     f32 metered_ev100;
     b32 bloom;
     // Whether the frame was motion blurred, whether it had depth of field,
-    // whether ambient occlusion, and whether global illumination.
+    // whether ambient occlusion, and whether global illumination, and the rays the radiance
+    // cache's update traced (the view's budget, as a lattice over the target).
     b32 motion_blur;
     b32 dof;
     b32 ao;
     b32 gi;
+    u32 gi_rays;
     // Paged textures (ADR-0065): their pages resident this frame, and those
     // whose copies this frame recorded and whose unbinding it issued.
     u32 pages_resident;

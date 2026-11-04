@@ -2475,7 +2475,9 @@ evenly from everywhere (the diffuse gives up that energy already): metals are li
 candle has no highlight of its own. The update sums its samples of the far fields apart too,
 and a cell keeps their share of its irradiance (16 bits of its last word, beside its count and
 age): where the reservoirs give the far fields' highlights, rough surfaces' specular takes the
-rest of the cell, the sky's and the bounces' light ([ADR-0078](adr/0078-local-lights-shadows.md)).
+rest of the cell, the sky's and the bounces' light ([ADR-0078](adr/0078-local-lights-shadows.md)),
+and where they give all their direct light, the diffuse light takes the rest too
+([ADR-0079](adr/0079-quality-tiers.md)).
 
 A scene's lamps take their shadows this way: Bistro's 96 are many lights
 (`light_near_range` 0.25 in its manifest), and its glass and the bulbs around its lamps stay out
@@ -2509,8 +2511,10 @@ surviving, weighs that much more, the same on average.
 
 `NphRenderView.many_restir` says what they take: `NPH_RENDER_RESTIR_SPECULAR`, the default, the
 highlights' single scattering, with the diffuse light and what scatters more than once left
-to the cache, which has no noise; `NPH_RENDER_RESTIR_ALL`, all of it, which is noisier and is
-for comparing with the truth; `NPH_RENDER_RESTIR_OFF`, none. They start again when the set of
+to the cache, which has no noise; `NPH_RENDER_RESTIR_ALL`, all their direct light, the diffuse
+too, with shadows sharp to the pixel where the cache's are a cell wide, the cache keeping what
+they bounce and lighting blended surfaces (the high quality tier's, ADR-0079);
+`NPH_RENDER_RESTIR_OFF`, none. They start again when the set of
 lights is rebuilt, when the mode changes, and at a new size. `NphRenderFrameStats.vis_many_rays`
 counts the rays they asked for.
 
@@ -2527,6 +2531,26 @@ fields. They take the far fields from the cache, as a frame's blended surfaces d
 indirect light (`forward_frag.glsl` `k_gi`), and where the cache is a frame's only light, by a
 pipeline that shades from it alone (`k_cache_only`; ADR-0075). Without a radiance cache only
 the near fields are lit, which is logged once.
+
+### Quality tiers
+
+`NphRenderQuality` names what a view takes beyond the frame the reference hardware holds
+([ADR-0079](adr/0079-quality-tiers.md)). `nph_render_view_quality` sets the fields a tier
+decides and leaves the others; a view may change any of them after. The runtime's `quality`
+command sets the cvars that stand for them (runtime.md "Quality tiers").
+
+| | `NPH_RENDER_QUALITY_REFERENCE` (the default) | `NPH_RENDER_QUALITY_HIGH` |
+|---|---|---|
+| The sun's shadows (`vis_flags`' `RT_SHADOWS`) | its virtual shadow map, with contact shadows | a ray a pixel: the truth the map is measured against |
+| `reflections` | `CACHE`: smooth surfaces take reflection cells | `RAYS`: a ray a smooth pixel every frame |
+| `gi_rays` | 0, the renderer's 65,536 | 262,144: new cells fill four times sooner |
+
+The reference tier is what the RTX 3060 Ti holds at 144 FPS at native 4K (ADR-0067), and what
+the reference scenes' gates measure. The high tier is for GPUs with rays to spare: on the
+reference hardware it costs 4.6 to 6.9 ms more a frame on Bistro, 1.0 to 1.9 in the city and
+0.3 to 0.5 in the interior, at native 4K. The many lights' reservoirs stay as they are in
+both: for all the light (`NPH_RENDER_RESTIR_ALL`) they are sharper and steadier, but darker
+than the truth in Bistro (ADR-0079).
 
 ## Image-based lighting
 

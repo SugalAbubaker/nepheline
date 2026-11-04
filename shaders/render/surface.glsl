@@ -857,17 +857,23 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
                            view.v.ibl_intensity;
             }
         }
-        irradiance = mix(irradiance, cell.rgb, cell.w);
         // With many lights whose reservoirs give their far fields' highlights, the cell's share
-        // of those far fields is theirs (ADR-0078); without reservoirs the cell gives it all.
+        // of those far fields is theirs (ADR-0078); where they give all their direct light, the
+        // diffuse light's share too, and the cell gives the rest, the light they bounce
+        // (ADR-0079); without reservoirs the cell gives it all.
 #if defined(NPH_SURFACE_MANY_ACTIVE) && defined(NPH_SURFACE_GI_FAR)
-        const bool many_reserved =
-            NPH_SURFACE_MANY_ACTIVE &&
-            ManyViewRef(view.v.many).m.restir != uint(NPH_RENDER_MANY_RESTIR_OFF);
-        const float spec_share = many_reserved ? 1.0 - NPH_SURFACE_GI_FAR : 1.0;
+        const uint restir = NPH_SURFACE_MANY_ACTIVE ? ManyViewRef(view.v.many).m.restir
+                                                    : uint(NPH_RENDER_MANY_RESTIR_OFF);
+        const bool restir_all = restir == uint(NPH_RENDER_MANY_RESTIR_ALL);
+        const float far_share =
+            restir != uint(NPH_RENDER_MANY_RESTIR_OFF) ? NPH_SURFACE_GI_FAR : 0.0;
+        const float diffuse_share = restir_all ? 1.0 - far_share : 1.0;
+        const float spec_share = restir_all ? 1.0 : 1.0 - far_share; // ALL: the irradiance's
 #else
+        const float diffuse_share = 1.0;
         const float spec_share = 1.0;
 #endif
+        irradiance = mix(irradiance, cell.rgb * diffuse_share, cell.w);
         if ((cells_reflect || rays_reflect) && !reflecting) {
             const vec3 gathered = irradiance * NPH_INV_PI;
 #ifndef NPH_SURFACE_REFLECT

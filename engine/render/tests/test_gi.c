@@ -423,3 +423,32 @@ NTEST_F(Gi, views_that_show_it_take_it)
     v.pipeline = NPH_RENDER_PIPELINE_REFERENCE;
     NTEST_EXPECT_FALSE(test_render_frame(f, &v, f->target).gi);
 }
+
+// A view's own budget of the cache's rays (NphRenderView.gi_rays; ADR-0079): none takes the
+// renderer's, any other the lattice it makes over the target, at most that many. On the tests'
+// 64-pixel target the renderer's 65,536 is every pixel, so the views ask for fewer.
+NTEST_F(Gi, a_view_takes_its_own_budget_of_rays)
+{
+    REQUIRE_GI(f);
+    NphRenderView v;
+    test_box_view(&v, test_camera(), NPH_RENDER_VIEW_LIT);
+    v.gi = 1;
+    const u32 budgets[3] = {0U, 256U, 1024U};
+    u32 traced[3] = {0U, 0U, 0U};
+    for (u32 b = 0; b < 3U; ++b) {
+        v.gi_rays = budgets[b];
+        const u32 asked = budgets[b] != 0U ? budgets[b] : f->renderer->desc.gi_rays;
+        const u32 stride = render_gi_stride(TEST_TARGET_SIZE, TEST_TARGET_SIZE, asked);
+        const u32 across = (TEST_TARGET_SIZE + stride - 1U) / stride;
+        const NphRenderFrameStats s = test_render_frame(f, &v, f->target);
+        NTEST_EXPECT_TRUE(s.gi);
+        NTEST_EXPECT_EQ_UINT(s.gi_rays, across * across);
+        NTEST_EXPECT_LE_UINT(s.gi_rays, asked);
+        traced[b] = s.gi_rays;
+    }
+    NTEST_EXPECT_EQ_UINT(traced[0], TEST_TARGET_SIZE * TEST_TARGET_SIZE);
+    NTEST_EXPECT_LT_UINT(traced[1], traced[2]);
+    NTEST_EXPECT_LT_UINT(traced[2], traced[0]);
+    v.gi = 0;
+    NTEST_EXPECT_EQ_UINT(test_render_frame(f, &v, f->target).gi_rays, 0U);
+}

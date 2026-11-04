@@ -307,7 +307,8 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
     g->near = r->ao.frame_active ? GI_NEAR * r->ao.frame_push.radius : 0.0F;
     g->frame = (u32)nph_gpu_frame_index(r->dev);
     g->jitter = r->taa.frame_active ? 1U : 0U;
-    g->stride = render_gi_stride(width, height, r->desc.gi_rays);
+    g->stride =
+        render_gi_stride(width, height, view->gi_rays != 0U ? view->gi_rays : r->desc.gi_rays);
     g->rays_x = (width + g->stride - 1U) / g->stride;
     gi->frame_rays_y = (height + g->stride - 1U) / g->stride;
     gi->frame_rays_x = g->rays_x;

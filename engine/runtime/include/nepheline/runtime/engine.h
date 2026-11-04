@@ -253,9 +253,11 @@ u32 nph_engine_game_reloads(const NphEngine *engine);
 // `view` instead of the world's active Camera. NULL returns to the world's.
 // The r.pipeline, r.occlusion, r.cone_culling, r.sw_raster,
 // r.virtual_shadows, r.taa, r.bloom, r.auto_exposure,
-// r.exposure_compensation, r.exposure_speed, r.ao, and r.gi cvars replace
-// the view's `pipeline`, `vis_flags`, `anti_aliasing`, `bloom`, `exposure`,
-// `exposure_compensation`, `exposure_speed`, `ao_radius`, and `gi` either way
+// r.exposure_compensation, r.exposure_speed, r.ao, r.contact_shadow,
+// r.reflections, r.gi, r.many_restir, and r.gi_rays cvars replace the view's
+// `pipeline`, `vis_flags`, `anti_aliasing`, `bloom`, `exposure`,
+// `exposure_compensation`, `exposure_speed`, `ao_radius`, `contact_shadow`,
+// `reflections`, `gi`, `many_restir`, and `gi_rays` either way
 // (r.motion_blur and r.dof turn its `shutter` and `aperture` off), and the
 // engine sets `frame_seconds` (one simulation step per frame under
 // rt.lockstep); an automatic exposure starts from the view's `ev100`. The
@@ -266,6 +268,16 @@ void nph_engine_set_view(NphEngine *engine, const NphRenderView *view);
 
 // The view the last frame rendered.
 const NphRenderView *nph_engine_view(const NphEngine *engine);
+
+// Sets the cvars a quality tier decides (nph_render_view_quality; ADR-0079): r.reflections,
+// r.virtual_shadows and r.gi_rays, which the next frame's view takes, and which a
+// saved configuration keeps as they are; any of them may be changed after. The console's
+// `quality <reference|high>` calls it. NPH_RESULT_INVALID_ARGUMENT past the last tier.
+NPH_MUST_USE NphResult nph_engine_set_quality(NphEngine *engine, NphRenderQuality quality);
+
+// The tier those cvars match, or NPH_RENDER_QUALITY_COUNT when they match none (some changed
+// after a tier set them).
+NphRenderQuality nph_engine_quality(const NphEngine *engine);
 
 // ---------------------------------------------------------------------------
 // Subsystems

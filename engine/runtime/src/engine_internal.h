@@ -139,6 +139,7 @@ typedef struct EngineCvars {
     NphCvar reflections;           // r.reflections
     NphCvar gi;                    // r.gi
     NphCvar many_restir;           // r.many_restir
+    NphCvar gi_rays;               // r.gi_rays
     NphCvar sim_interpolate;       // sim.interpolate
     NphCvar phys_solver;           // phys.solver: NphPhysicsSolver
     NphCvar phys_substeps;         // phys.substeps

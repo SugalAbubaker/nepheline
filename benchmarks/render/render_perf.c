@@ -519,6 +519,8 @@ static NphRenderRestir g_restir = NPH_RENDER_RESTIR_SPECULAR;
 static NphRenderReflections g_reflections = NPH_RENDER_REFLECTIONS_CACHE;
 // --contact-shadow=N: NphRenderView.contact_shadow, the march's pixels (negative: the default).
 static f32 g_contact_shadow = -1.0F;
+// --gi-rays=N: NphRenderView.gi_rays, the radiance cache's rays a frame (0: the renderer's).
+static u32 g_gi_rays = 0U;
 // --accumulate=N, with --capture-dir: N more frames of each reference view averaged in
 // linear light into <view>.mean.bmp, with how much a pixel varies from frame to frame.
 static u32 g_accumulate = 0U;
@@ -1634,6 +1636,7 @@ static NphResult run_scene(Ctx *ctx, const SceneDef *s, u32 frames)
     view.gi = (s->post & (u32)POST_NO_GI) != 0U ? 0 : 1; // r.gi's default
     view.many_restir = g_restir;
     view.reflections = g_reflections;
+    view.gi_rays = g_gi_rays;
     if (g_contact_shadow >= 0.0F) {
         view.contact_shadow = g_contact_shadow;
     }
@@ -2329,6 +2332,7 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     }
     view.many_restir = g_restir;
     view.reflections = g_reflections;
+    view.gi_rays = g_gi_rays;
     if (g_contact_shadow >= 0.0F) {
         view.contact_shadow = g_contact_shadow;
     }
@@ -2621,7 +2625,7 @@ static int usage(void)
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
                     "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
-                    "[--contact-shadow=N] [--reflections=N] "
+                    "[--contact-shadow=N] [--reflections=N] [--gi-rays=N] [--quality=N] "
                     "[--accumulate=N] [--no-sun] [--local-shadows] [--truth] "
                     "[--truth-ev=STOPS]\n");
     return 2;
@@ -2710,6 +2714,19 @@ int main(int argc, char **argv)
             g_reflections = (NphRenderReflections)strtoul(argv[i] + 14, NULL, 10);
         } else if (strncmp(argv[i], "--contact-shadow=", 17U) == 0) {
             g_contact_shadow = (f32)strtod(argv[i] + 17, NULL);
+        } else if (strncmp(argv[i], "--gi-rays=", 10U) == 0) {
+            g_gi_rays = (u32)strtoul(argv[i] + 10, NULL, 10);
+        } else if (strncmp(argv[i], "--quality=", 10U) == 0) {
+            // A tier's fields (nph_render_view_quality), as the options above would set them:
+            // the options after it change them again.
+            NphRenderCamera camera;
+            memset(&camera, 0, sizeof camera);
+            NphRenderView q;
+            nph_render_view_default(&q, camera);
+            nph_render_view_quality(&q, (NphRenderQuality)strtoul(argv[i] + 10, NULL, 10));
+            g_reflections = q.reflections;
+            g_rt_shadows = (q.vis_flags & (u32)NPH_RENDER_VIS_RT_SHADOWS) != 0U;
+            g_gi_rays = q.gi_rays;
         } else if (strncmp(argv[i], "--accumulate=", 13U) == 0) {
             g_accumulate = (u32)strtoul(argv[i] + 13, NULL, 10);
         } else if (strcmp(argv[i], "--truth") == 0) {
