@@ -164,3 +164,35 @@ Each measured on the way.
   but for the stale queue. It could take a flat cull of its own, its threshold being one number a level:
   8 to 44 µs are there, less than the floors it would add.
 - The reference budgets are re-baselined (`reference_scenes-2026-10-31b`).
+
+## Amendment (2026-11-05): voxel meshes of few groups take the flat cull
+
+**Context.** Decision 7 kept every mesh with voxel levels on the walk, for the landscape's forest
+meshes. The city's trees cooked with voxels (`nph_cook --voxels`, ADR-0061) then walked alone: on the
+rooftop `vis cull nodes` took 0.251 ms in phase 0 and 0.029 ms in phase 1, four steps each, where the
+triangle city takes none. The meshes differ. The city's voxel meshes have 7 to 456 groups but for
+one of 1,185. The landscape's forest meshes have 6,907 to 32,118, and a level's makers' errors run
+from 0.001 to 0.125 m within one level, so that one distance takes about 3,600 of one mesh's 6,907
+groups; its small plants have 142 to 944. Every voxel mesh on the flat cull overflowed the
+landscape's lists, and the frame dropped work.
+
+**Decision.** A mesh with voxel levels and at most 2,048 groups (`RENDER_LOD_FLAT_VOXEL_GROUPS`) gets
+its table of levels and takes the flat cull; one with more walks. An instance hands the flat cull no
+more than its mesh's groups, 32 chunks at most. At 1,024 the city's mesh of 1,185 groups kept the
+walk alone, 0.05 to 0.07 ms in each view's phase 0 and 0.02 in phase 1: at 2,048 the street, park
+and crossing views were 0.05 to 0.10 ms faster again and the rooftop within its noise (+0.02 ms).
+No landscape mesh lies between the two.
+
+**Measured** (the city cooked with `--voxels`; the landscape as at Phase 13's end, both raster
+changes of ADR-0061's amendment of this date in each build):
+
+- The city: no view takes a step. The rooftop's walk (0.251 + 0.029 ms) is gone and its flat cull
+  takes about 0.08 + 0.01 ms where it took 0.024 + 0.011.
+- The landscape, two builds interleaved over two rounds: within the noise. The walk 0.02 to 0.05 ms
+  faster in every view, the flat cull 0.004 to 0.010 ms slower (50,600 groups tested in the forest
+  view where 9,600 were), the frames from 0.04 ms faster to 0.15 ms slower, and no list overflows.
+
+**Tests.** `vis_lod.a_voxel_mesh_has_a_table_up_to_its_group_limit` (either side of the limit, with
+voxels and without) and `VisLod.a_voxel_meshs_flat_cull_draws_the_cpus_cut` (a foliage mesh of 138
+groups from six views, one mixing triangles and voxels: the clusters drawn are the CPU's cut, and no
+node is visited).

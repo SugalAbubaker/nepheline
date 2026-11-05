@@ -2110,6 +2110,9 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if (view->lod_error > 0.0F) {
         flags |= (u32)NPH_VIS_VIEW_LOD;
     }
+    if ((view->vis_flags & (u32)NPH_RENDER_VIS_NO_VOXEL_SKIP) == 0U) {
+        flags |= (u32)NPH_VIS_VIEW_VOXEL_SKIP;
+    }
     write_view(r, view, width, height, view_m, proj, flags);
     v->debug_view = view->debug_view != NPH_RENDER_VIEW_LIT ? 1 : 0;
     memset(f, 0, sizeof *f);

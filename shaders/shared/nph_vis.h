@@ -129,6 +129,9 @@
 #define NPH_VIS_VIEW_LOD                                                                           \
     256 // meshes with levels of detail draw the levels the view needs (else
         // level 0: NphRenderView.lod_error 0)
+#define NPH_VIS_VIEW_VOXEL_SKIP                                                                    \
+    512 // the voxel raster skips the pixels drawn over a voxel's box
+        // (vis_voxel_raster.comp)
 
 // vis_lights.comp modes (NphVisPush.mode).
 #define NPH_VIS_LIGHTS_UPDATE 0 // apply the frame's light updates

@@ -651,6 +651,13 @@ typedef struct RenderFrameLayout {
 #define RENDER_LOD_MAX_DEPTH 32U
 // The levels of a mesh's table (NphVisMesh.lod_levels): more, and it walks.
 #define RENDER_LOD_MAX_LEVELS 64U
+// The most groups a mesh with voxel levels may have and take the flat cull
+// (ADR-0070's amendment): an instance hands it no more than its mesh's groups,
+// and past this its simplifier's spread of errors in a level makes one
+// distance take thousands of them (the landscape's forest meshes, 6,907 to
+// 32,118 groups), where the walk's pruning earns its keep. The city's voxel
+// meshes have 7 to 1,185.
+#define RENDER_LOD_FLAT_VOXEL_GROUPS 2048U
 // The chunks of the flat cull a phase holds: a chunk comes of a run longer than
 // a workgroup, so holds at least 32 groups on average, and this many take what a
 // list of work items would. A workgroup each, of the 65,535 every device takes.
@@ -1698,8 +1705,9 @@ f32 render_lod_group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodG
 // centre that holds every group's sphere, rounded up. False for a mesh that
 // walks its hierarchy instead: one whose groups do not keep to their levels'
 // order, or with too many levels; a level apart, whose makers the table cannot
-// hold (ADR-0063); and one with voxel levels, whose simplifier (ADR-0069) leaves
-// so wide a range of errors in a level that its distance picks too many groups.
+// hold (ADR-0063); and one with voxel levels and more than
+// RENDER_LOD_FLAT_VOXEL_GROUPS groups, whose simplifier (ADR-0069) leaves so wide
+// a range of errors in a level that its distance picks too many groups.
 // Indices already checked.
 bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, NphVisLodLevel *table,
                                 u32 *out_count, f32 *out_reach);

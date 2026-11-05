@@ -932,10 +932,13 @@ mesh stands alone (ADR-0063).
 **The walk.** A mesh without a table, or an instance whose run is more than
 `max_lod_flat_groups` (2^14), hands `vis cull nodes` its hierarchy's root (an
 (instance, node) work item) instead. A mesh has no table where it is a level apart
-(ADR-0063), whose makers the table cannot hold; where it has voxel levels, whose
-simplifier (ADR-0069) leaves so wide a range of errors in a level that its distance picks
-too many groups (the landscape wants over 4 million a frame, for which the tree's
-spatial pruning earns its keep); and where its groups do not keep to their levels' order.
+(ADR-0063), whose makers the table cannot hold; where it has voxel levels and more than
+2,048 groups (`RENDER_LOD_FLAT_VOXEL_GROUPS`), whose simplifier (ADR-0069) leaves so wide a
+range of errors in a level that one distance picks thousands of them (the landscape's
+forest meshes, 6,907 to 32,118 groups: on the flat cull it wants over 4 million a frame,
+and there the tree's spatial pruning earns its keep); and where its groups do not keep
+to their levels' order. The city's voxel meshes, 7 to 1,185 groups, take the flat cull,
+and the city takes no step.
 Each step of `vis cull nodes` (`vis_cull_nodes.comp`) takes two of the hierarchy's levels:
 a work item takes 64 lanes, one per child and grandchild of its node. A lane takes a
 child that is too coarse (the walk's test of a node is loosened past the rounding between
@@ -1160,16 +1163,28 @@ centre and half-extents go to clip space as steps along that grid, the same
 for the whole cluster (a cluster's bricks share a cell size). Its projection
 lies within `(r_x + |x_c / w_c| r_w) / (w_c - r_w)` of its centre's in x,
 and likewise in y, where `r_x` and `r_w` are the half-extents' reach in clip
-x and w, widened by a 64th of a pixel against rounding. A subgroup pools its
-voxels' pixels (a prefix sum, then a binary search for each pair's voxel),
-so that the rays' tests fill its lanes whichever voxels cover pixels: at the
-first voxel levels a cell is about a pixel and a foliage footprint a
-fraction of its cell, so about one voxel in five covers a pixel's centre.
-Each pair's ray, from the camera through the pixel's point on the near
-plane, goes into the instance's space and is tested against that voxel
-alone; a hit takes the atomic max of (depth, cluster, brick) as triangles
-do, so the nearest voxel wins. Under reverse-Z with an infinite far plane a
-hit at `t` along that ray lies at depth `1 / t`. `vis resolve` writes
+x and w, widened by a 64th of a pixel against rounding. At the first voxel
+levels a cell is about a pixel and a foliage footprint a fraction of its
+cell, so few voxels cover a pixel's centre (on the city's rooftop 28 %, with
+1.16 pixels each), and a batch of a subgroup's voxels has pixels for about a
+third of its lanes. So a subgroup queues the voxels of its batches that
+cover pixels (room for two batches) and tests their pixels' rays when
+another batch might not fit and at the end, a prefix sum and a binary
+search spreading the pixels over its lanes (both of its searches, a voxel's
+brick and a pixel's voxel, in a fixed number of halvings, which unroll).
+Each pair's ray, from the
+camera through the pixel's point on the near plane, goes into the
+instance's space and is tested against that voxel alone; a hit takes the
+atomic max of (depth, cluster, brick) as triangles do, so the nearest voxel
+wins. Under reverse-Z with an infinite far plane a hit at `t` along that
+ray lies at depth `1 / t`. The triangles' rasters run first and depths only
+rise, so a voxel whose box lies wholly behind what a pixel holds already
+(its nearest depth, `near / w` at the box's least clip w, raised by a
+4096th against rounding) cannot take it: that pixel's test is skipped, and
+a voxel of one pixel joins no queue. A read older than another workgroup's
+latest write holds less, so it only skips less. The skips change only the
+work: `NPH_RENDER_VIS_NO_VOXEL_SKIP` turns them off, and a test draws a
+plane through dense foliage both ways. `vis resolve` writes
 nothing at a voxel cluster's pixel: the first invocation of a subgroup that
 saw one sets its tile's bit (`NphVisViewData.voxel_tile_bits`, cleared by
 `vis clear`), and the one that set it lists the tile and raises `vis voxel

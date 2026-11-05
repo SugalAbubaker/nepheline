@@ -338,6 +338,61 @@ NTEST_F(VisLod, the_flat_cull_draws_the_cpus_cut)
     check_cuts(f, false);
 }
 
+// A mesh with voxel levels and few groups takes the flat cull (ADR-0070's
+// amendment), and the clusters it draws, voxel clusters among them, are the
+// CPU's cut: near, where triangles and voxels mix, farther, where voxels are
+// most of it, and turned and scaled; the whole mesh in view.
+NTEST_F(VisLod, a_voxel_meshs_flat_cull_draws_the_cpus_cut)
+{
+    REQUIRE_PRODUCTION(f);
+    sky(f);
+    LodMesh m;
+    lod_foliage(&m, 1500U, 4.0F, 7U);
+    NTEST_LOG("foliage: %u clusters in %u levels, %u groups, %u bricks",
+              m.lods.clusters.meshlets.len, m.lods.levels, m.lods.groups.len, m.lods.bricks.len);
+    NTEST_ASSERT_GT_UINT(m.lods.bricks.len, 0U);
+    NTEST_ASSERT_LE_UINT(m.lods.groups.len, RENDER_LOD_FLAT_VOXEL_GROUPS);
+    const NphRenderMesh mesh = create_mesh(f, &m.desc);
+    const u32 slot = render_slot_of(&f->renderer->mesh_pool, mesh.value);
+    NTEST_EXPECT_EQ_UINT(f->renderer->meshes[slot].lod_walk_depth, 0U);
+    const NphRenderMaterial mat = grey_material(f);
+    u32 *counts = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, m.lods.clusters.meshlets.len);
+    NTEST_ASSERT_NOT_NULL(counts);
+    const NphVec3 y = nph_vec3_unit_y();
+    const CutCase cases[] = {
+        {{0.0, 0.0, 6.0}, {0.0, 0.0, 0.0}, y, 1.2F, 0.1F, 0.0F, 1.0F},
+        {{0.0, 0.0, 8.0}, {0.0, 0.0, 0.0}, y, 1.2F, 0.25F, 0.0F, 1.0F},
+        {{0.0, 0.0, 8.0}, {0.0, 0.0, 0.0}, y, 1.2F, 1.0F, 0.0F, 1.0F},
+        {{0.0, 1.0, 16.0}, {0.0, 0.0, 0.0}, y, 1.2F, 1.0F, 0.0F, 1.0F},
+        {{0.0, 0.0, 40.0}, {0.0, 0.0, 0.0}, y, 1.2F, 0.5F, 0.0F, 1.0F},
+        {{3.0, 2.0, 14.0}, {0.0, 0.0, 0.0}, y, 1.2F, 0.7F, 0.7F, 1.3F},
+    };
+    u32 voxel_clusters = 0U;
+    u32 mixed = 0U;
+    for (u32 ci = 0; ci < NPH_ARRAY_COUNT(cases); ++ci) {
+        NphRenderFrameStats st;
+        const CutCompare r = cut_of(f, &m, mesh, mat, counts, &cases[ci], &st);
+        NTEST_LOG("case %u: %u of %u clusters drawn (%u voxel clusters, levels %#x), %u missing, "
+                  "%u extra, %u twice, %u ambiguous; %u groups tested, %u nodes visited",
+                  ci, r.drawn, r.expected, st.vis_voxel_clusters, r.levels, r.missing, r.extra,
+                  r.twice, r.ambiguous, st.vis_lod_groups, st.vis_lod_nodes);
+        NTEST_EXPECT_EQ_UINT(st.vis_meshlets_culled_frustum, 0U);
+        NTEST_EXPECT_EQ_UINT(r.missing, 0U);
+        NTEST_EXPECT_EQ_UINT(r.extra, 0U);
+        NTEST_EXPECT_EQ_UINT(r.twice, 0U);
+        NTEST_EXPECT_LE_UINT(r.ambiguous * 50U, r.expected);
+        NTEST_EXPECT_GT_UINT(st.vis_lod_groups, 0U);
+        NTEST_EXPECT_EQ_UINT(st.vis_lod_nodes, 0U);
+        voxel_clusters += st.vis_voxel_clusters;
+        mixed += st.vis_voxel_clusters != 0U && st.vis_voxel_clusters < r.drawn ? 1U : 0U;
+    }
+    NTEST_EXPECT_GT_UINT(voxel_clusters, 0U);
+    NTEST_EXPECT_GE_UINT(mixed, 1U);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, counts, m.lods.clusters.meshlets.len);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+}
+
 // A renderer that hands an instance's run of more than one group to the walk.
 static void walking_fixture(RenderFixture *fx)
 {
@@ -500,6 +555,41 @@ NTEST(vis_lod, a_meshs_table_holds_its_levels)
     NTEST_EXPECT_EQ_UINT(next, m.lods.groups.len);
     NTEST_EXPECT_TRUE(table[count - 1U].error == NPH_F32_MAX);
     lod_mesh_free(&m);
+}
+
+// A mesh with voxel levels has a table up to RENDER_LOD_FLAT_VOXEL_GROUPS
+// groups and walks past them (ADR-0070's amendment); without voxels the limit
+// does not apply. One level of groups, then the root's.
+NTEST(vis_lod, a_voxel_mesh_has_a_table_up_to_its_group_limit)
+{
+    const u32 n = RENDER_LOD_FLAT_VOXEL_GROUPS + 1U;
+    NphRenderLodGroup *groups = NPH_ALLOC_ARRAY(nph_allocator_system(), NphRenderLodGroup, n);
+    NTEST_ASSERT_NOT_NULL(groups);
+    memset(groups, 0, (size_t)n * sizeof *groups);
+    NphRenderMeshDesc d;
+    memset(&d, 0, sizeof d);
+    d.lod_groups = groups;
+    const NphSphere sphere = {nph_vec3_zero(), 1.0F};
+    NphVisLodLevel table[RENDER_LOD_MAX_LEVELS];
+    u32 count = 0U;
+    f32 reach = 0.0F;
+    for (u32 total = n - 1U; total <= n; ++total) {
+        for (u32 g = 0; g < total; ++g) {
+            const bool root = g == total - 1U;
+            groups[g].center = nph_vec3(0.5F, 0.0F, 0.0F);
+            groups[g].radius = 0.25F;
+            groups[g].error = root ? NPH_F32_MAX : 0.01F;
+            groups[g].level = root ? 1U : 0U;
+        }
+        d.lod_group_count = total;
+        d.voxel_brick_count = 0U;
+        NTEST_EXPECT_TRUE(render_vis_lod_level_table(&d, sphere, table, &count, &reach));
+        NTEST_EXPECT_EQ_UINT(count, 2U);
+        d.voxel_brick_count = 1U;
+        NTEST_EXPECT_EQ_INT(render_vis_lod_level_table(&d, sphere, table, &count, &reach),
+                            total <= RENDER_LOD_FLAT_VOXEL_GROUPS);
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), NphRenderLodGroup, groups, n);
 }
 
 // Groups that do not keep to their levels' order leave a mesh no table: its

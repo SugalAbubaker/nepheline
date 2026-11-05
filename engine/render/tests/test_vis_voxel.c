@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Voxels in the production path (render/voxel.h; docs/render.md "Voxels";
 // ADR-0061): the shaders' voxel tests against their C twin, ray by ray, and
-// the resolve's search for a pixel's voxel against them; a foliage mesh's
+// the resolve's search for a pixel's voxel against them; foliage meshes'
 // voxel clusters drawn where the CPU's rays through the same clusters meet
-// them, pixel for pixel; the coverage of the voxel levels against level 0's
+// them, pixel for pixel, sparse and dense (whose clusters fill the raster's
+// queues), and the same with the raster's skips as without; the coverage of
+// the voxel levels against level 0's
 // from near to far; the voxel resolve's look against the voxels'; the
 // radiance cache's cells of voxel pixels against their CPU twins; the light
 // a voxel level reflects against the triangles it stands for; the voxel
@@ -552,70 +554,157 @@ static void pixel_rays(const NphRenderView *v, NphVec3 *out)
     }
 }
 
+// The visibility buffer from `distance` with `lod_error` against the CPU's
+// traversal of the clusters it drew (expected_texel), pixel for pixel; the
+// pixels voxels cover.
+static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, const NphVec3 *positions,
+                              NphVec3 *rays, f64 distance, f32 lod_error)
+{
+    NphRenderView v = plain_view(distance, lod_error);
+    v.debug_view = NPH_RENDER_VIEW_TRIANGLES;
+    const NphRenderFrameStats stats = render_frames(f, &v);
+    u32 count = 0U;
+    NphVisCluster *list = visible_clusters(f, &count);
+    pixel_rays(&v, rays);
+    const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)distance);
+    u32 wrong = 0U;
+    u32 hits = 0U;
+    u32 voxels_seen = 0U;
+    for (u32 i = 0; i < PIXELS; ++i) {
+        const u64 texel = expected_texel(m, positions, list, count, eye, rays[i]);
+        const u8 *p = f->pixels + (u64)i * 4U;
+        u32 want[3] = {0U, 0U, 0U};
+        if (texel != 0U) {
+            hits += 1U;
+            const u32 g = (u32)(texel & 0xFFFFFFFFU) >> 7U;
+            const NphRenderMeshlet *ml = &m->lods.clusters.meshlets.data[list[g].meshlet];
+            voxels_seen += ml->vertex_count == 0U ? 1U : 0U;
+            debug_color((u32)(texel & 0xFFFFFFFFU), want);
+        }
+        // The HDR target's rounding (B10G11R11's blue keeps five bits of
+        // mantissa), which debug views pass through: two keys' colours lie
+        // that close on all three channels about once in 2^15.
+        bool same = true;
+        for (u32 ch = 0; ch < 3U; ++ch) {
+            const u32 d = p[ch] > want[ch] ? p[ch] - want[ch] : want[ch] - p[ch];
+            same = same && d <= 4U;
+        }
+        wrong += same ? 0U : 1U;
+    }
+    NTEST_LOG("at %.1f m, error %.0f px: %u clusters (%u voxel clusters, %u bricks); %u pixels "
+              "covered, %u by voxels; %u differ from the CPU's",
+              distance, (f64)lod_error, count, stats.vis_voxel_clusters, stats.vis_voxel_bricks,
+              hits, voxels_seen, wrong);
+    // Rays that graze a footprint or a triangle's edge within the rounding
+    // may land on either side.
+    NTEST_EXPECT_LE_UINT(wrong, hits / 50U + 2U);
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
+    return voxels_seen;
+}
+
 NTEST_F(VoxelGpu, voxel_clusters_draw_where_their_rays_meet_them)
 {
     REQUIRE_PRODUCTION(f);
+    // Sparse foliage (needles over 4 m) near, where triangles and voxels mix
+    // in the cut, and far, where the voxels are coarser; then dense foliage
+    // (over 1.5 m) near with coarse errors, whose voxel clusters cover pixels
+    // enough to fill the raster's queues before they end, as the city's trees
+    // do (vis_voxel_raster.comp).
+    typedef struct VoxelView {
+        f64 distance;
+        f32 lod_error;
+    } VoxelView;
+    static const f32 k_sides[2] = {4.0F, 1.5F};
+    static const VoxelView k_views[2][3] = {{{7.0, 1.0F}, {12.0, 1.0F}, {24.0, 1.0F}},
+                                            {{3.0, 8.0F}, {3.0, 16.0F}, {0.0, 0.0F}}};
+    NphVec3 *rays = NPH_ALLOC_ARRAY(nph_allocator_system(), NphVec3, PIXELS);
+    NTEST_ASSERT_NOT_NULL(rays);
+    const NphRenderMaterial mat = grey_material(f);
+    for (u32 mi = 0; mi < 2U; ++mi) {
+        LodMesh m;
+        lod_foliage(&m, 1500U, k_sides[mi], 7U);
+        NTEST_ASSERT_GT_UINT(m.lods.bricks.len, 0U);
+        NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+        NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
+        const NphRenderInstance inst = instance(f, mesh, mat);
+        NphVec3 *positions = dequantised(&m);
+        u32 voxel_pixels = 0U;
+        for (u32 k = 0; k < 3U && k_views[mi][k].distance > 0.0; ++k) {
+            voxel_pixels += voxels_against_cpu(f, &m, positions, rays, k_views[mi][k].distance,
+                                               k_views[mi][k].lod_error);
+        }
+        NTEST_EXPECT_GT_UINT(voxel_pixels, 200U);
+        NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, positions, m.data.vertex_count);
+        nph_render_instance_destroy(f->renderer, inst);
+        nph_render_mesh_destroy(f->renderer, mesh);
+        lod_mesh_free(&m);
+    }
+    nph_render_material_destroy(f->renderer, mat);
+    NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, rays, PIXELS);
+}
+
+// A view of the skips' test: its distance and threshold.
+typedef struct VoxelSkipView {
+    f64 distance;
+    f32 lod_error;
+} VoxelSkipView;
+// The voxels' skips change only the work: a plane of triangles through dense
+// foliage, which the triangles' raster draws first, so that many voxels'
+// boxes reach across the depth its pixels hold, shows the same surfaces with
+// the skips as without (NPH_RENDER_VIS_NO_VOXEL_SKIP), near and farther,
+// pixel for pixel. The normals' debug view tells one voxel from another and
+// from the plane, and depends on no frame's order of clusters (the cluster
+// views' colours do).
+NTEST_F(VoxelGpu, the_voxels_skips_change_only_the_work)
+{
+    REQUIRE_PRODUCTION(f);
     LodMesh m;
-    lod_foliage(&m, 1500U, 4.0F, 7U);
-    NTEST_ASSERT_GT_UINT(m.lods.bricks.len, 0U);
+    lod_foliage(&m, 1500U, 1.5F, 7U);
     NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
     const NphRenderMaterial mat = grey_material(f);
     const NphRenderInstance inst = instance(f, mesh, mat);
-    NphVec3 *positions = dequantised(&m);
-    NphVec3 *rays = NPH_ALLOC_ARRAY(nph_allocator_system(), NphVec3, PIXELS);
-    NTEST_ASSERT_NOT_NULL(rays);
-
-    // Near, where triangles and voxels mix in the cut, and far, where the
-    // voxels are coarser.
-    static const f64 k_distances[3] = {7.0, 12.0, 24.0};
-    u32 voxel_pixels = 0U;
-    for (u32 di = 0; di < 3U; ++di) {
-        NphRenderView v = plain_view(k_distances[di], 1.0F);
-        v.debug_view = NPH_RENDER_VIEW_TRIANGLES;
+    // The plane faces the camera through the foliage's middle (z = 0).
+    NphRenderMeshData pd;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 4U, 1.0F, &pd),
+                        NPH_RESULT_OK);
+    const NphRenderMesh plane = test_upload_mesh(f->renderer, &pd);
+    nph_render_mesh_data_free(&pd);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = plane;
+    id.materials = &mat;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(
+        nph_dvec3(0.0, 0.0, 0.0), nph_quat_from_axis_angle(nph_vec3_unit_x(), 0.5F * NPH_PI),
+        nph_vec3(1.2F, 1.2F, 1.2F));
+    NphRenderInstance plane_inst = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &plane_inst), NPH_RESULT_OK);
+    u8 *with = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, PIXELS * 4U);
+    NTEST_ASSERT_NOT_NULL(with);
+    static const VoxelSkipView k_views[3] = {{3.0, 8.0F}, {3.0, 16.0F}, {7.0, 1.0F}};
+    for (u32 k = 0; k < 3U; ++k) {
+        NphRenderView v = plain_view(k_views[k].distance, k_views[k].lod_error);
+        v.debug_view = NPH_RENDER_VIEW_NORMAL;
         const NphRenderFrameStats stats = render_frames(f, &v);
-        u32 count = 0U;
-        NphVisCluster *list = visible_clusters(f, &count);
-        pixel_rays(&v, rays);
-        const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)k_distances[di]);
-        u32 wrong = 0U;
-        u32 hits = 0U;
-        u32 voxels_seen = 0U;
-        for (u32 i = 0; i < PIXELS; ++i) {
-            const u64 texel = expected_texel(&m, positions, list, count, eye, rays[i]);
-            const u8 *p = f->pixels + (u64)i * 4U;
-            u32 want[3] = {0U, 0U, 0U};
-            if (texel != 0U) {
-                hits += 1U;
-                const u32 g = (u32)(texel & 0xFFFFFFFFU) >> 7U;
-                const NphRenderMeshlet *ml = &m.lods.clusters.meshlets.data[list[g].meshlet];
-                voxels_seen += ml->vertex_count == 0U ? 1U : 0U;
-                debug_color((u32)(texel & 0xFFFFFFFFU), want);
-            }
-            // The HDR target's rounding (B10G11R11's blue keeps five bits of
-            // mantissa), which debug views pass through: two keys' colours
-            // lie that close on all three channels about once in 2^15.
-            bool same = true;
-            for (u32 ch = 0; ch < 3U; ++ch) {
-                const u32 d = p[ch] > want[ch] ? p[ch] - want[ch] : want[ch] - p[ch];
-                same = same && d <= 4U;
-            }
-            wrong += same ? 0U : 1U;
+        memcpy(with, f->pixels, PIXELS * 4U);
+        v.vis_flags |= (u32)NPH_RENDER_VIS_NO_VOXEL_SKIP;
+        (void)render_frames(f, &v);
+        u32 differ = 0U;
+        u32 covered_pixels = 0U;
+        for (u64 i = 0; i < PIXELS; ++i) {
+            differ += memcmp(with + i * 4U, f->pixels + i * 4U, 3U) != 0 ? 1U : 0U;
+            covered_pixels += covered(f->pixels + i * 4U) ? 1U : 0U;
         }
-        NTEST_LOG("at %.0f m: %u clusters (%u voxel clusters, %u bricks); %u pixels covered, %u "
-                  "by voxels; %u differ from the CPU's",
-                  k_distances[di], count, stats.vis_voxel_clusters, stats.vis_voxel_bricks, hits,
-                  voxels_seen, wrong);
-        // Rays that graze a footprint or a triangle's edge within the
-        // rounding may land on either side.
-        NTEST_EXPECT_LE_UINT(wrong, hits / 50U + 2U);
-        voxel_pixels += voxels_seen;
-        NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
+        NTEST_LOG("at %.0f m, error %.0f px: %u voxel clusters, %u pixels covered, %u differ",
+                  k_views[k].distance, (f64)k_views[k].lod_error, stats.vis_voxel_clusters,
+                  covered_pixels, differ);
+        NTEST_EXPECT_GT_UINT(stats.vis_voxel_clusters, 0U);
+        NTEST_EXPECT_EQ_UINT(differ, 0U);
     }
-    NTEST_EXPECT_GT_UINT(voxel_pixels, 200U);
-
-    NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, rays, PIXELS);
-    NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, positions, m.data.vertex_count);
+    NPH_FREE_ARRAY(nph_allocator_system(), u8, with, PIXELS * 4U);
+    nph_render_instance_destroy(f->renderer, plane_inst);
+    nph_render_mesh_destroy(f->renderer, plane);
     nph_render_instance_destroy(f->renderer, inst);
     nph_render_material_destroy(f->renderer, mat);
     nph_render_mesh_destroy(f->renderer, mesh);
