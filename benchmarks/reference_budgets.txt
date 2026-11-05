@@ -20,6 +20,10 @@
 # to within 3 % of their budgets against #151's build, and the many lights' passes, Bistro's lamps
 # being many lights now, the mean of two interleaved rounds a scene from
 # reference_scenes-2026-11-04-local-shadows-win-msvc-profile-rtx3060ti.json and its second round)
+# (the sun's map at its slope's level (ADR-0080), 2026-11-04: the entries it moved by 1.5 % or
+# more to within 3 % of their budgets against the quality tiers' build, the mean of two
+# interleaved rounds a scene from
+# reference_scenes-2026-11-04-vsm-slope-win-msvc-profile-rtx3060ti.json and its second round)
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         56000
@@ -188,7 +192,7 @@ bistro_street_turn_production.gpu.ao           1052000
 bistro_street_turn_production.gpu.ao_denoise   451000
 bistro_street_turn_production.gpu.gi_update    231000
 bistro_street_turn_production.gpu.gi_resolve   68000
-bistro_street_turn_production.gpu.vis_resolve  2805000
+bistro_street_turn_production.gpu.vis_resolve  2883000
 bistro_street_turn_production.gpu.vis_statistics 54000
 bistro_street_turn_production.gpu.transparent  159000
 bistro_street_turn_production.gpu.bloom_down_0 189000
@@ -251,7 +255,7 @@ bistro_terrace_production.gpu.ao               1061000
 bistro_terrace_production.gpu.ao_denoise       452000
 bistro_terrace_production.gpu.gi_update        247000
 bistro_terrace_production.gpu.gi_resolve       65000
-bistro_terrace_production.gpu.vis_resolve      2892000
+bistro_terrace_production.gpu.vis_resolve      3028000
 bistro_terrace_production.gpu.vis_statistics   54000
 bistro_terrace_production.gpu.transparent      194000
 bistro_terrace_production.gpu.bloom_down_0     189000
@@ -313,7 +317,7 @@ bistro_hedge_production.gpu.ao                 1057000
 bistro_hedge_production.gpu.ao_denoise         452000
 bistro_hedge_production.gpu.gi_update          217000
 bistro_hedge_production.gpu.gi_resolve         64000
-bistro_hedge_production.gpu.vis_resolve        2628000
+bistro_hedge_production.gpu.vis_resolve        2699000
 bistro_hedge_production.gpu.vis_statistics     54000
 bistro_hedge_production.gpu.bloom_down_0       191000
 bistro_hedge_production.gpu.bloom_down_1       87000
@@ -643,7 +647,7 @@ city_park_production.gpu.vis_raster_0          417000
 city_park_production.gpu.vis_raster_0_masked   1272000
 city_park_production.gpu.vis_sw_raster_0       92000
 city_park_production.gpu.vis_sw_raster_0_masked 231000
-city_park_production.gpu.vis_hzb_0             337000
+city_park_production.gpu.vis_hzb_0             350000
 city_park_production.gpu.vis_args_1            54000
 city_park_production.gpu.vis_cull_instances_1  76000
 city_park_production.gpu.vis_cull_groups_1     64000
@@ -669,7 +673,7 @@ city_park_production.gpu.ao                    1066000
 city_park_production.gpu.ao_denoise            430000
 city_park_production.gpu.gi_update             322000
 city_park_production.gpu.gi_resolve            69000
-city_park_production.gpu.vis_resolve           2175000
+city_park_production.gpu.vis_resolve           2254000
 city_park_production.gpu.vis_statistics        54000
 city_park_production.gpu.bloom_down_0          189000
 city_park_production.gpu.bloom_down_1          87000

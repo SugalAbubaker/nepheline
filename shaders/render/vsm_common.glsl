@@ -101,6 +101,22 @@ ivec2 vsm_window(VsmViewRef r, int level)
     return ivec2(r.v.levels[level].window_x, r.v.levels[level].window_y);
 }
 
+// The sun's slope on a receiver against the view's, as a share of the
+// footprint's area, for a unit light-space normal `n` at light-space point
+// `ls` (camera relative): where the sun grazes a surface a texel lies
+// stretched across it by 1 / N.L, where the view grazes it a pixel by
+// 1 / N.V, and a level N.L / N.V times finer in area keeps a texel's area on
+// the surface to a pixel's (ADR-0080). A surface seen as aslant as it is lit
+// (the ground under a low sun) keeps the distance's level; never coarser,
+// and at most two levels finer: from 1/16 down it stays.
+#define VSM_MIN_SLOPE (1.0 / 4.0)
+float vsm_slope(vec3 n, vec3 ls)
+{
+    const float nol = abs(n.z);
+    const float nov = abs(dot(n, ls)) * inversesqrt(max(dot(ls, ls), 1e-12));
+    return clamp(nol / max(nov, 1e-3), VSM_MIN_SLOPE, 1.0);
+}
+
 // The level whose texels match a pixel's footprint `distance` metres from
 // the camera: resolution-matched shadow maps (Lefohn, Sengupta & Owens,
 // ACM TOG 2007), the footprint doubling with each level. `slack` moves the
@@ -236,12 +252,12 @@ uint vsm_pack_request(int level, ivec2 lo, ivec2 hi)
 // the point's distance whose window holds it with a margin, and there its
 // page with any other within the margin (r.v.margin pages: the shading's
 // offset along the normal, and slack), so at most 2 x 2. `ls` is the point
-// in light space.
-uint vsm_request(VsmViewRef r, vec3 ls)
+// in light space, `slope` the sun's on its surface (vsm_slope; 1 for none).
+uint vsm_request(VsmViewRef r, vec3 ls, float slope)
 {
     const float m = r.v.margin;
     const float last = float(NPH_VSM_WINDOW) - m;
-    for (int level = vsm_level_of_q(vsm_q(r, ls)); level < NPH_VSM_LEVELS; ++level) {
+    for (int level = vsm_level_of_q(vsm_q(r, ls) * slope); level < NPH_VSM_LEVELS; ++level) {
         const vec2 c = vsm_level_xy(r, level, ls.xy);
         if (all(greaterThanEqual(c, vec2(m))) && all(lessThan(c, vec2(last)))) {
             return vsm_pack_request(level, ivec2(floor(c - m)), ivec2(floor(c + m)));
@@ -436,14 +452,19 @@ float vsm_shadow_light_space(VsmViewRef r, vec3 ls, float distance, vec3 nl)
     const float page = 1.0 / float(NPH_VSM_PAGE);
     const vec3 offset =
         nl * (r.v.texel_bias * vec3(page, page, page / float(NPH_VSM_WINDOW)));
+    // From the level of the sun's slope on the surface (vsm_slope), as the requests take it; where
+    // a request took a coarser one (its block was not flat, a blended surface's), the pages there
+    // are not and the next levels are tried. The tries count from the distance's level, as before
+    // the slope: the finer ones are over.
+    const int base = vsm_level_of(r, distance, VSM_LEVEL_SLACK);
     int tries = 0;
-    for (int level = vsm_level_of(r, distance, VSM_LEVEL_SLACK);
+    for (int level = vsm_level_of(r, distance * sqrt(vsm_slope(nl, ls)), VSM_LEVEL_SLACK);
          level < NPH_VSM_LEVELS && tries < 3; ++level) {
         const vec3 c = vsm_level_coords(r, level, ls) + offset;
         if (!vsm_inside(c.xy)) {
             continue;
         }
-        ++tries;
+        tries += level >= base ? 1 : 0;
         // The state alone: `vsm update` has dropped every entry whose page
         // the window left, so a valid one holds this frame's page.
         const ivec2 rel = ivec2(floor(c.xy));

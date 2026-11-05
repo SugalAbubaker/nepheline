@@ -148,9 +148,10 @@ static Against against_truth(const TestBoxScene *s, NphVec3 to_sun, const u8 *im
     return a;
 }
 
-// A bar 2.5 cm tall on the ground, three pixels' widths here, too low for the map: the receiver's
-// offset along its normal, of 1.5 of its texels, lifts the ground to about the bar's top. The march
-// sees what the map cannot, and darkens nothing else.
+// A bar 1.5 cm tall on the ground, about two pixels' widths here, too low for the map: the
+// receiver's offset along its normal, of 1.5 of its texels, lifts the ground to about the bar's
+// top, at the level the sun's slope on the ground gives (ADR-0080). The march sees what the map
+// cannot, and darkens nothing else.
 NTEST_F(Contact, it_shows_what_the_map_lifts_the_ground_above)
 {
     REQUIRE_CONTACT(f);
@@ -160,8 +161,8 @@ NTEST_F(Contact, it_shows_what_the_map_lifts_the_ground_above)
     static TestBoxScene scene;
     memset(&scene, 0, sizeof scene);
     test_box_ground(f, &scene, mesh, grey);
-    test_box_add(f, &scene, mesh, grey, nph_vec3(-0.25F, 0.0F, -0.15F),
-                 nph_vec3(0.25F, 0.025F, 0.15F));
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-0.35F, 0.0F, -0.2F),
+                 nph_vec3(0.35F, 0.015F, 0.2F));
     const NphRenderCamera camera =
         test_box_camera(&scene, nph_vec3(-0.3F, 0.9F, -0.8F), nph_vec3(-0.1F, 0.0F, -0.1F), 0.8F);
     const NphRenderLightDesc ld = low_sun();
@@ -291,15 +292,99 @@ NTEST_F(Contact, what_stands_far_in_front_does_not_shadow)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// Where the sun grazes a wall the camera faces, the map's texels lie stretched across it, and a
+// ledge's shadow down the wall steps along its edge: the map takes a level finer there, as fine in
+// area on the wall as a pixel (ADR-0080). The map alone, against rays the test casts: few pixels
+// lit that the ledge hides, or dark that the sun reaches.
+NTEST_F(Contact, a_wall_the_sun_grazes_takes_a_finer_map)
+{
+    REQUIRE_CONTACT(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.02F);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, mesh, grey);
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-3.0F, 0.0F, -0.3F), nph_vec3(3.0F, 3.0F, 0.0F));
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-1.5F, 2.0F, 0.0F), nph_vec3(1.5F, 2.08F, 0.25F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 1.5F, 0.0F), 0.8F);
+    // Travelling along the wall and down it: 0.15 of the sun's light on the wall.
+    NphRenderLightDesc ld = low_sun();
+    ld.direction = nph_vec3_normalize(nph_vec3(0.85F, -0.5F, -0.15F));
+    const NphRenderLight sun = make_sun(f, &ld);
+    const NphVec3 to_sun = nph_vec3_neg(ld.direction);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    contact_view(&v, camera, NPH_RENDER_VIEW_LIT, 0.0F);
+    const NphRenderFrameStats s = settled(f, &v, target, image);
+    NTEST_EXPECT_TRUE(s.vsm);
+    // The sun's share of a lit wall pixel: the level half way down to the shadow.
+    const f32 wall = test_box_linear(image, (SIZE / 4U) * SIZE + SIZE / 2U);
+    const Against a = against_truth(&scene, to_sun, image, LIT_SHARE * wall);
+    NTEST_LOG("wall %.3f: %u lit (%u dark), %u hidden (%u lit)", (f64)wall, a.lit, a.darkened,
+              a.hidden, a.missed);
+    NTEST_ASSERT_GT_UINT(a.hidden, 200U);
+    NTEST_ASSERT_GT_UINT(a.lit, 2000U);
+    // The distance's level alone missed 13.7 % of the hidden pixels and darkened 29 lit ones; the
+    // slope's, 6.0 % and none.
+    NTEST_EXPECT_TRUE(a.missed * 100U < a.hidden * 9U);
+    NTEST_EXPECT_TRUE(a.darkened <= a.lit / 1000U);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// A surface seen as aslant as the sun lights it keeps the distance's level: a pixel lies stretched
+// across it as much as a texel does (ADR-0080). The ground, seen from a little above it under a sun
+// a little higher, asks for no more pages than its distances alone would.
+NTEST_F(Contact, the_ground_seen_as_aslant_as_lit_keeps_its_level)
+{
+    REQUIRE_CONTACT(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.02F);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, mesh, grey);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 0.6F, 6.0F), nph_vec3(0.0F, 0.0F, -4.0F), 0.8F);
+    NphRenderLightDesc ld = low_sun();
+    ld.direction = nph_vec3_normalize(nph_vec3(0.2F, -0.27F, -1.0F)); // 15 degrees up
+    const NphRenderLight sun = make_sun(f, &ld);
+    // Pages at the tests' 128 pixels are a few; at 512, enough to count.
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, 512U);
+    NphRenderView v;
+    contact_view(&v, camera, NPH_RENDER_VIEW_LIT, 0.0F);
+    for (u32 i = 0; i < 4U; ++i) {
+        (void)test_render_frame(f, &v, target);
+    }
+    const NphRenderFrameStats s = test_render_frame(f, &v, target);
+    NTEST_EXPECT_TRUE(s.vsm);
+    NTEST_LOG("%u pages asked for", s.vsm_requested);
+    // 37 on the RTX 3060 Ti: the near ground, seen more steeply than lit, takes a level finer, as
+    // it should. Without the view's slope all of it did, 77; the distance's level alone asked
+    // for 27.
+    NTEST_EXPECT_GT_UINT(s.vsm_requested, 0U);
+    NTEST_EXPECT_LE_UINT(s.vsm_requested, 50U);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // The march's answer travels in the signs of the occlusion's values: what the occlusion shows, and
-// shades the indirect light by, is the same with it, though the march finds something.
+// shades the indirect light by, is the same with it, though the march finds something: a bar beside
+// the box too low for the map (as in it_shows_what_the_map_lifts_the_ground_above).
 NTEST_F(Contact, the_occlusion_is_the_same_with_it)
 {
     REQUIRE_CONTACT(f);
     const NphRenderTexture env = test_uniform_environment(f, 0.02F);
     static TestBoxScene scene;
     const NphRenderMaterial grey = test_grey(f, 0.5F);
-    const NphRenderCamera camera = test_box_on_ground(f, &scene, test_cube_mesh(f), grey, grey);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderCamera camera = test_box_on_ground(f, &scene, mesh, grey, grey);
+    test_box_add(f, &scene, mesh, grey, nph_vec3(0.8F, 0.0F, 0.6F), nph_vec3(1.5F, 0.015F, 1.0F));
     const NphRenderLightDesc ld = low_sun();
     const NphRenderLight sun = make_sun(f, &ld);
     const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);

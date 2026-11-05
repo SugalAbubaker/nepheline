@@ -206,7 +206,7 @@ typedef struct NphRendererDesc {
     // where the device has depth clamping and clip distances. Zero picks
     // the default in parentheses.
     b32 disable_virtual_shadows; // never create it: the sun's shadows are then ray traced
-    u32 vsm_pages;               // physical pages of 128 x 128 depth texels, 64 KB each (2048)
+    u32 vsm_pages;               // physical pages of 128 x 128 depth texels, 64 KB each (4096)
     u32 max_vsm_meshlets;        // caster meshlets tested against the pages drawn in a frame (2^20)
     u32 max_vsm_draws;           // (meshlet, page) draws in a frame (2^20)
     u32 max_vsm_voxel_draws;     // (voxel cluster, page) draws in a frame (2^20)

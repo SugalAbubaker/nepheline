@@ -84,6 +84,25 @@ void vsm_gather_requests(VsmViewRef r, uint value, inout uint mine, inout uint r
 // Each distinct request is then set once per subgroup: gathered to an
 // invocation of its own (vsm_gather_requests), and set by every invocation
 // at the end, their atomics together.
+// The sun's slope on a block's plane (vsm_slope), from its four light-space points (p0 its first,
+// p1 the next across, p2 the next down, p3 the last) and their depths: where all four are surfaces
+// on one plane within a quarter of the block's extent. A block across an edge, or with background
+// in it, keeps the distance's level (1).
+float vsm_block_slope(vec3 p0, vec3 p1, vec3 p2, vec3 p3, vec4 depth)
+{
+    if (!all(greaterThan(depth, vec4(0.0)))) {
+        return 1.0;
+    }
+    const vec3 e1 = p1 - p0;
+    const vec3 e2 = p2 - p0;
+    const vec3 fn = cross(e1, e2);
+    const vec3 bend = p3 - p1 - p2 + p0;
+    const float span = max(dot(e1, e1), dot(e2, e2));
+    return dot(fn, fn) > 0.0 && dot(bend, bend) <= 0.0625 * span
+               ? vsm_slope(fn * inversesqrt(dot(fn, fn)), p0 + p3)
+               : 1.0;
+}
+
 void vsm_request_block(VsmViewRef r, ivec2 lo, ivec2 last, vec2 scale, vec4 depth)
 {
     const ivec2 hi = min(lo + 1, last);
@@ -97,7 +116,8 @@ void vsm_request_block(VsmViewRef r, ivec2 lo, ivec2 last, vec2 scale, vec4 dept
     const vec3 p3 = vsm_ray_point(r, n1, depth.w);
     const vec2 pmin = min(min(p0.xy, p1.xy), min(p2.xy, p3.xy));
     const vec2 pmax = max(max(p0.xy, p1.xy), max(p2.xy, p3.xy));
-    const vec4 q = vec4(vsm_q(r, p0), vsm_q(r, p1), vsm_q(r, p2), vsm_q(r, p3));
+    const float slope = vsm_block_slope(p0, p1, p2, p3, depth);
+    const vec4 q = vec4(vsm_q(r, p0), vsm_q(r, p1), vsm_q(r, p2), vsm_q(r, p3)) * slope;
     const int level = vsm_level_of_q(max(max(q.x, q.y), max(q.z, q.w)));
     // The nearest at the farthest's level too: above the boundary below it.
     const bool one_level = level == 0 || min(min(q.x, q.y), min(q.z, q.w)) >
@@ -127,11 +147,12 @@ void vsm_request_block(VsmViewRef r, ivec2 lo, ivec2 last, vec2 scale, vec4 dept
         const vec4 d = vec4(subgroupShuffle(depth.x, from), subgroupShuffle(depth.y, from),
                             subgroupShuffle(depth.z, from), subgroupShuffle(depth.w, from));
         const ivec2 o = ivec2(subgroupShuffle(lo.x, from), subgroupShuffle(lo.y, from));
+        const float s = subgroupShuffle(slope, from);
         const float z = k == 0u ? d.x : k == 1u ? d.y : k == 2u ? d.z : d.w;
         uint point = VSM_NONE;
         if (item < points && z > 0.0) {
             const ivec2 pixel = min(o + ivec2(int(k & 1u), int(k >> 1u)), last);
-            point = vsm_request(r, vsm_ray_point(r, vsm_ndc(pixel, scale), z));
+            point = vsm_request(r, vsm_ray_point(r, vsm_ndc(pixel, scale), z), s);
         }
         vsm_gather_requests(r, point, mine, round);
     }

@@ -29,7 +29,8 @@ void main()
         return;
     }
     VsmViewRef r = VsmViewRef(ViewRef(pc.view_address).v.vsm);
-    const uint request = vsm_request(r, vsm_light_space(r, in_position));
+    // No slope: a blended surface's shading falls back to the distance's level (vsm_shadow).
+    const uint request = vsm_request(r, vsm_light_space(r, in_position), 1.0);
     for (uint k = 0u; k < 4u; ++k) {
         vsm_set_bit(r.v.requests, vsm_request_bit(request, k));
     }

@@ -449,7 +449,7 @@ something it shows changes.
   holds absolute page (x, y), so a page keeps its entry while the window
   scrolls over it.
 - **The pool**: the pages that hold depth, in one D32 image of 64 pages a
-  row (`vsm_pages`, 2,048 by default: 134 MB).
+  row (`vsm_pages`, 4,096 by default: 268 MB; ADR-0080).
 
 **A frame** (the production path, while it has a sun):
 
@@ -471,7 +471,11 @@ something it shows changes.
 | `vsm statistics` | the counters, read back two frames later |
 
 **Requests.** A pixel asks for the level whose texels match its footprint
-(the texel at most twice the footprint) or, where that level's window
+(the texel at most twice the footprint), its area made finer by the sun's
+slope on its surface against the view's, N.L / N.V down to a quarter, so
+that a texel's area on the surface is a pixel's where the sun grazes what
+the camera faces (ADR-0080; the slope from its 2 x 2 block's plane, where
+the four lie on one), or, where that level's window
 does not hold its point with a margin, the next that does (a narrow view
 from afar), and there the page that holds the point and any other within
 2 texels of it (the shading's offset along the normal, and slack): at
@@ -596,14 +600,16 @@ frame 20.0 ms where it took 24.7; with the camera walking
 microseconds of before. Frames without voxel meshes bind the cull and the
 page passes specialised without the voxels' routing and arguments
 (`k_voxels`), and keep the work buffer as it was. The depths image is the
-pool's size in R32 (134 MB for the default 2,048 pages), the list 16 MB.
+pool's size in R32 (268 MB for the default 4,096 pages), the list 16 MB.
 
 **Shading.** The resolve and the blended surfaces look the sun's
 visibility up once per point, before the light loop (inside it, the
 lookup's registers would add to the loop's): the resolution-matched level,
-biased by 0.001 octaves to the finer side, so that it reads the level the
-request took or the one finer and passes to the next; up to three levels
-whose windows hold the point, until one holds its page (lit past those).
+made finer by the sun's slope on its geometric normal as the requests make
+it (ADR-0080), and biased by 0.001 octaves to the finer side, so that it
+reads the level the request took or the one finer and passes to the next;
+up to three levels from the distance's whose windows hold the point, until
+one holds its page (lit past those), the finer ones before them over.
 The point moves off its surface along its geometric normal, turned to the
 light, by 1.5 of the level's texels (normal-offset shadows; Holbert, GDC
 2011), and one gather of the four depths around it, each compared and
@@ -2272,7 +2278,7 @@ the walk down the levels of detail, at most 524,224), and `max_lod_groups` (2^18
 phase of the flat cull, at most 4,194,240); `max_lights` is at most 4,096, and
 `max_cells` (4,096) at most 2^24 - 1 (a record names its cell in 24 bits). A list that fills drops work and sets a bit in
 `NphRenderFrameStats.vis_overflow`, logged once. The sun's map has
-`vsm_pages` (2,048), `max_vsm_meshlets` (2^20), `max_vsm_draws` (2^20)
+`vsm_pages` (4,096), `max_vsm_meshlets` (2^20), `max_vsm_draws` (2^20)
 and `max_vsm_voxel_draws` (2^20): the pool's overflow (`vsm_overflow`)
 raises its resolution bias, and the lists set its page budget, which bounds
 what a frame draws ("Shadows"); its statistics are `vsm` and
