@@ -39,10 +39,29 @@ void main()
     const vec2 scale = 2.0 / vec2(size);
     VsmViewRef r = VsmViewRef(pc.view);
     vsm_request_block(r, lo, last, scale, depth);
+    // Each pixel's own at its block's slope, the rule stated here again rather than taken from
+    // vsm_block_slope: the plane's only where the four are surfaces on one plane (within a quarter
+    // of the block's extent), else none.
+    const ivec2 hi = min(lo + 1, last);
+    const vec2 n0 = vsm_ndc(lo, scale);
+    const vec2 n1 = vsm_ndc(hi, scale);
+    float slope = 1.0;
+    if (all(greaterThan(depth, vec4(0.0)))) {
+        const vec3 p0 = vsm_ray_point(r, n0, depth.x);
+        const vec3 p1 = vsm_ray_point(r, vec2(n1.x, n0.y), depth.y);
+        const vec3 p2 = vsm_ray_point(r, vec2(n0.x, n1.y), depth.z);
+        const vec3 p3 = vsm_ray_point(r, n1, depth.w);
+        const vec3 bend = p3 - p1 - p2 + p0;
+        const float span = max(dot(p1 - p0, p1 - p0), dot(p2 - p0, p2 - p0));
+        if (dot(bend, bend) <= 0.0625 * span) {
+            slope = vsm_block_slope(p0, p1, p2, p3, depth);
+        }
+    }
     for (int k = 0; k < 4; ++k) {
         if (depth[k] > 0.0) {
             const ivec2 q = min(lo + ivec2(k & 1, k >> 1), last);
-            const uint request = vsm_request(r, vsm_ray_point(r, vsm_ndc(q, scale), depth[k]));
+            const uint request =
+                vsm_request(r, vsm_ray_point(r, vsm_ndc(q, scale), depth[k]), slope);
             if (request != VSM_NONE) {
                 vsm_set_request(pc.reference, request);
             }

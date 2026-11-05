@@ -339,7 +339,7 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_lod_groups = nph_min_u32(
         round_up_64(d->max_lod_groups != 0U ? d->max_lod_groups : 1U << 18U), 65535U * 64U);
     d->max_lod_flat_groups = d->max_lod_flat_groups != 0U ? d->max_lod_flat_groups : 1U << 14U;
-    d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 2048U;
+    d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 4096U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
     d->max_vsm_voxel_draws = d->max_vsm_voxel_draws != 0U ? d->max_vsm_voxel_draws : 1U << 20U;
