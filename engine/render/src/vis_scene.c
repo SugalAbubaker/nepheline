@@ -129,6 +129,13 @@ void render_vis_member_range_free_later(NphRenderer *r, NphRange range)
     free_later(r, 3U, range);
 }
 
+void render_vis_member_range_free(NphRenderer *r, NphRange range)
+{
+    if (!nph_range_is_null(range)) {
+        range_free(&r->vis, 3U, range);
+    }
+}
+
 void render_vis_release_pending(NphRenderer *r, u64 current_frame)
 {
     RenderVis *v = &r->vis;

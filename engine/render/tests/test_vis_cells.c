@@ -1032,6 +1032,133 @@ NTEST_F(Cells, a_cells_instances_are_kept_as_runs_of_slots)
     grove_free(&g);
 }
 
+// The member pool's ranges a frame waits on (pool 3 of the pending frees).
+static u32 member_frees_pending(const NphRenderer *r)
+{
+    u32 n = 0U;
+    for (u32 i = 0; i < r->vis.pending.len; ++i) {
+        n += r->vis.pending.data[i].pool == 3U ? 1U : 0U;
+    }
+    return n;
+}
+
+// A run's range that no frame has been shown goes back at once when the run
+// moves, one a frame was shown after the frames in flight: a scene loaded
+// within one frame's flight holds no run's earlier ranges, which other runs
+// then reuse (vis_runs.c). After a frame, eight cells of 130 members each
+// move their runs from 16 entries to 256 in a pool of 2,815: held, each cell's
+// ranges would take 512 with its proxy's run, 4,128 in all. Then a run the
+// frame saw moves twice: the range it saw waits, the next goes back at once.
+NTEST(vis_cells, runs_moved_before_a_frame_saw_them_give_their_ranges_back_at_once)
+{
+    RenderFixture fx;
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, NULL);
+    rd.max_instances = 1100U;
+    rd.max_cells = 9U;
+    test_render_setup(&fx, &rd);
+    if (fx.dev == NULL) {
+        NTEST_SKIP("no Vulkan device available");
+    }
+    if (!nph_renderer_production_supported(fx.renderer)) {
+        test_render_teardown(&fx);
+        NTEST_SKIP("no production path on this device");
+    }
+    NphRenderer *r = fx.renderer;
+    NTEST_EXPECT_EQ_UINT(r->vis.member_capacity, 2815U);
+    Grove g;
+    grove_build(&g);
+    GroveScene s;
+    grove_scene_build(&fx, &g, &s, true, GROVE_CELL / 64.0F, 30.0F);
+    const NphRenderView v = grove_view(20.0, 1.0F);
+    (void)test_render_read(&fx, &v);
+    const RenderCell *first = &r->cells[render_slot_of(&r->cell_pool, s.cell.value)];
+    NTEST_EXPECT_TRUE(first->members_run.shown);
+    NTEST_EXPECT_EQ_UINT(member_frees_pending(r), 0U);
+    enum {
+        CELLS = 8,
+        MEMBERS = 130
+    };
+    NphRenderCell cells[CELLS];
+    NphRenderInstance *members =
+        NPH_ALLOC_ARRAY(nph_allocator_system(), NphRenderInstance, (u64)CELLS * (u64)MEMBERS);
+    NTEST_ASSERT_NOT_NULL(members);
+    for (u32 c = 0; c < (u32)CELLS; ++c) {
+        NphRenderCellDesc d = grove_cell_desc(&s, GROVE_CELL / 64.0F, 30.0F);
+        d.center = nph_dvec3(12.0 * (f64)(c + 1U), 0.0, 0.0);
+        d.proxy_transform.translation = d.center;
+        cells[c] = NPH_RENDER_CELL_NULL;
+        NTEST_ASSERT_EQ_INT(nph_render_cell_create(r, &d, &cells[c]), NPH_RESULT_OK);
+        for (u32 m = 0; m < (u32)MEMBERS; ++m) {
+            NphRenderInstanceDesc id;
+            memset(&id, 0, sizeof id);
+            id.mesh = s.tree;
+            id.materials = &s.green;
+            id.material_count = 1U;
+            id.transform = nph_render_transform_identity();
+            id.transform.translation = d.center;
+            id.cell = cells[c];
+            NphRenderInstance *out = &members[c * (u32)MEMBERS + m];
+            *out = NPH_RENDER_INSTANCE_NULL;
+            NTEST_ASSERT_EQ_INT(nph_render_instance_create(r, &id, out), NPH_RESULT_OK);
+        }
+        const RenderCell *rc = &r->cells[render_slot_of(&r->cell_pool, cells[c].value)];
+        NTEST_EXPECT_EQ_UINT(rc->members_run.count, (u32)MEMBERS);
+        NTEST_EXPECT_EQ_UINT(rc->members_run.capacity, 256U);
+        NTEST_EXPECT_FALSE(rc->members_run.shown);
+    }
+    // No frame saw the moved runs' ranges: none waits.
+    NTEST_EXPECT_EQ_UINT(member_frees_pending(r), 0U);
+    enum {
+        GROWN = 40
+    };
+    NphRenderInstance grown[GROWN];
+    for (u32 m = 0; m < (u32)GROWN; ++m) {
+        NphRenderInstanceDesc id;
+        memset(&id, 0, sizeof id);
+        id.mesh = s.tree;
+        id.materials = &s.green;
+        id.material_count = 1U;
+        id.transform = nph_render_transform_identity();
+        id.transform.translation = grove_place(m % GROVE_TREES);
+        id.cell = s.cell;
+        grown[m] = NPH_RENDER_INSTANCE_NULL;
+        NTEST_ASSERT_EQ_INT(nph_render_instance_create(r, &id, &grown[m]), NPH_RESULT_OK);
+    }
+    NTEST_EXPECT_EQ_UINT(first->members_run.capacity, 64U);
+    NTEST_EXPECT_FALSE(first->members_run.shown);
+    NTEST_EXPECT_EQ_UINT(member_frees_pending(r), 1U);
+    // A frame shows the runs as the CPU keeps them.
+    (void)test_render_read(&fx, &v);
+    u32 gpu[MEMBERS];
+    for (u32 c = 0; c < (u32)CELLS; ++c) {
+        const u32 slot = render_slot_of(&r->cell_pool, cells[c].value);
+        const RenderCell *rc = &r->cells[slot];
+        NTEST_EXPECT_TRUE(rc->members_run.shown);
+        NphVisCellRun rec;
+        test_read_buffer(fx.dev, r->vis.cell_runs, (u64)slot * sizeof rec, sizeof rec, &rec);
+        NTEST_EXPECT_EQ_UINT(rec.members, rc->members_run.range.offset);
+        NTEST_EXPECT_EQ_UINT(rec.member_count, (u32)MEMBERS);
+        test_read_buffer(fx.dev, r->vis.cell_members,
+                         (u64)rc->members_run.range.offset * sizeof(u32), sizeof gpu, gpu);
+        NTEST_EXPECT_EQ_INT(
+            memcmp(gpu, r->vis.member_entries + rc->members_run.range.offset, sizeof gpu), 0);
+    }
+    for (u32 m = 0; m < (u32)GROWN; ++m) {
+        nph_render_instance_destroy(r, grown[m]);
+    }
+    for (u32 i = 0; i < (u32)CELLS * (u32)MEMBERS; ++i) {
+        nph_render_instance_destroy(r, members[i]);
+    }
+    NPH_FREE_ARRAY(nph_allocator_system(), NphRenderInstance, members, (u64)CELLS * (u64)MEMBERS);
+    for (u32 c = 0; c < (u32)CELLS; ++c) {
+        nph_render_cell_destroy(r, cells[c]);
+    }
+    grove_scene_free(&fx, &s);
+    grove_free(&g);
+    test_render_teardown(&fx);
+}
+
 // A field of grove cells sharing one grove's meshes: GROVE_FIELD x
 // GROVE_FIELD cells GROVE_PITCH metres apart on x and z, centred on the
 // origin, each with its proxy (the levels from `first_level` on) and its

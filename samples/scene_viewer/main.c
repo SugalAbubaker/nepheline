@@ -749,7 +749,10 @@ static NphResult create_renderer(App *app, u64 voxel_pool_bytes)
     const SceneDef *def = &app->def;
     const u32 tiles = tile_count(app, NULL, NULL);
     if (def->tile_instances != 0U) {
-        rd.max_instances = nph_max_u32(MAX_INSTANCES, tiles * def->tile_instances);
+        // A cell's proxy takes an instance a level.
+        rd.max_instances =
+            nph_max_u32(MAX_INSTANCES, tiles * (def->tile_instances +
+                                                def->tile_cells * NPH_RENDER_CELL_MAX_LEVELS));
         rd.max_meshes = MAX_MESHES + tiles * def->tile_meshes;
         rd.max_cells = MAX_CELLS + tiles * def->tile_cells;
     } else {

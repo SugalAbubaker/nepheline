@@ -313,7 +313,8 @@ voxel pool"; 0 none; 1536 by default with `--stream`, none without), where
 the levels live and a streamed level is made on the loader's jobs.
 A manifest's `tiles` lays its scene out by itself (`count`, `pitch` in
 metres, and what a tile asks of the renderer's sizes: `instances`, `meshes`,
-`cells`), and the renderer's sizes follow the largest world the filter takes.
+`cells`, whose proxies take an instance a level, sixteen at most), and the
+renderer's sizes follow the largest world the filter takes.
 `--tiles=WxH` lays each reference scene out W by H times side by side instead
 (ADR-0063 stage 4, "The open world"), each tile its own instances and
 cells and so, streamed, its own proxies' finer levels, the first where

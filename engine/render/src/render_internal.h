@@ -376,6 +376,10 @@ typedef struct RenderRun {
     NphRange range;
     u32 count;
     u32 capacity; // the range's entries
+    // The range uploaded for a frame, which a frame in flight may read: when
+    // the run moves, a range never shown goes back at once, one shown after
+    // the frames in flight.
+    b32 shown;
 } RenderRun;
 
 // A cell of a world partition (nph_render_cell_create; ADR-0062).
@@ -746,7 +750,7 @@ typedef struct VisLightLayout {
 typedef struct VisPendingFree {
     u64 frame; // safe from the frame with this index on
     NphRange range;
-    u32 pool; // 0: the material map, 1: the index pool, 2: the voxel pool
+    u32 pool; // 0: the material map, 1: the index pool, 2: the voxel pool, 3: the member pool
 } VisPendingFree;
 
 typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
@@ -1747,8 +1751,10 @@ NphResult render_vis_run_add(NphRenderer *r, u32 slot);
 void render_vis_run_remove(NphRenderer *r, u32 slot);
 void render_vis_cell_runs_release(NphRenderer *r, u32 cell_slot);
 NphResult render_vis_runs_upload(NphRenderer *r);
-// A member range given back after the frames in flight (vis_scene.c).
+// A member range given back after the frames in flight, or now, which no
+// frame can read (vis_scene.c).
 void render_vis_member_range_free_later(NphRenderer *r, NphRange range);
+void render_vis_member_range_free(NphRenderer *r, NphRange range);
 // A material's alpha mode may have changed: the blend list is rebuilt.
 void render_vis_materials_changed(NphRenderer *r);
 // A light was created, changed, or destroyed: its record is sent with the

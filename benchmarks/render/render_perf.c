@@ -2529,7 +2529,10 @@ static NphResult setup(Ctx *ctx, bool validation, f64 sw_pixels, const char *fil
             rd.max_many_lights = nph_max_u32(rd.max_many_lights, m->many_lights);
         }
         if (tiles > 1U && glob_match(filter, g_ref_scenes[i].name)) {
-            rd.max_instances = nph_max_u32(rd.max_instances, tiles * m->tile_instances);
+            // A cell's proxy takes an instance a level.
+            rd.max_instances =
+                nph_max_u32(rd.max_instances, tiles * (m->tile_instances +
+                                                       m->tile_cells * NPH_RENDER_CELL_MAX_LEVELS));
             rd.max_meshes = nph_max_u32(rd.max_meshes, MAX_MESHES + tiles * m->tile_meshes);
             rd.max_cells = nph_max_u32(rd.max_cells, 4096U + tiles * m->tile_cells);
         }

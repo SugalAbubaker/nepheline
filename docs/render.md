@@ -1346,7 +1346,10 @@ range under the TLSF range allocator (`vis_runs.c`), and the instances of no
 cell (the terrain, what moves) in a run of their own: an instance made joins
 its run's end (a full run moves to a range twice the size), one destroyed
 takes the run's last in its place, and a frame uploads the runs that changed
-with its other uploads. Where the renderer holds cells, phase 0 culls them
+with its other uploads. A moved run's old range goes back after the frames in
+flight if a frame was shown it, at once if not: a scene loaded within one
+frame's flight would otherwise hold every run's earlier ranges as well, as
+much again as their last. Where the renderer holds cells, phase 0 culls them
 first: `vis cull cells` tests each cell slot's box against the frustum and
 the cell's switch (`vis_cell_proxied`, the instance cull's own test); a cell
 out of view lists nothing, one in view its proxy's instances and, where it
