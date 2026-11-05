@@ -585,7 +585,9 @@ static NphResult create_instances(CookedScene *s, const NphSceneView *sv, const 
         d.materials = table;
         d.material_count = inst->material_count;
         d.transform = at_origin(&world[inst->node], origin);
-        d.cell = cells != NULL && cell_base + cells[i] < s->cell_count
+        // An instance of no cell is marked NPH_U32_MAX, which added to a later
+        // tile's first cell would wrap to the tile before's last.
+        d.cell = cells != NULL && cells[i] != NPH_U32_MAX && cell_base + cells[i] < s->cell_count
                      ? s->cells[cell_base + cells[i]]
                      : NPH_RENDER_CELL_NULL;
         NPH_TRY(nph_render_instance_create(s->renderer, &d, &s->instances[s->instance_count]));

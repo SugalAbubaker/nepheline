@@ -10,6 +10,8 @@ nph_add_test(integration
         test_bc_gpu.c
         test_cook_load.c
         test_proxy_stream.c
+        "${CMAKE_SOURCE_DIR}/samples/common/cooked_scene.c"
+        "${CMAKE_SOURCE_DIR}/samples/common/cooked_scene.h"
     DEPS
         nph::cook
         nph::gpu
@@ -20,7 +22,8 @@ if(NPH_BUILD_TESTS)
     target_include_directories(integration_tests PRIVATE
         "${CMAKE_SOURCE_DIR}/engine/gpu/tests"
         "${CMAKE_SOURCE_DIR}/engine/render/tests"
-        "${CMAKE_SOURCE_DIR}/tools/cook/tests")
+        "${CMAKE_SOURCE_DIR}/tools/cook/tests"
+        "${CMAKE_SOURCE_DIR}/samples/common")
     nph_target_use_shaders(integration_tests nph_shaders_test nph_shaders_render)
     if(MSVC)
         target_compile_definitions(integration_tests PRIVATE _CRT_SECURE_NO_WARNINGS)

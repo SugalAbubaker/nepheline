@@ -29,6 +29,7 @@
 #include <nepheline/runtime/scene_render.h>
 #include <nepheline/scene/transform.h>
 
+#include "cooked_scene.h"
 #include "test_cook_support.h"
 #include "test_render_support.h"
 
@@ -1401,6 +1402,51 @@ static void cook_and_mount(StreamWorld *f, const TempDir *dir, const char *name)
 
 // With a budget the scene renderer's textures are paged and streamed: the plate's
 // settles holding the levels it is seen at, and draws what its texture whole draws.
+// A world laid out in tiles by the samples' loader (cooked_scene.h's
+// tiles_x) keeps each tile's instances of no cell out of every cell: the
+// grove's ground, past half a cell's edge, is in none. Marked by an index past
+// any cell, a later tile's ground once wrapped to the tile before's last cell
+// and went with its proxy, as the city's towers did. From afar, where every
+// cell is drawn as its proxy, the proxies stand for the tufts alone.
+NTEST(WorldPartition, a_tiled_worlds_instances_of_no_cell_stay_in_none)
+{
+    StreamWorld w;
+    world_setup_materials(&w, 16U << 20U, 16U);
+    StreamWorld *f = &w;
+    if (f->rf.dev == NULL || !nph_renderer_production_supported(f->rf.renderer)) {
+        world_teardown(f);
+        NTEST_SKIP("no production path on this device");
+    }
+    world_open(f);
+    CookedSceneDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.alloc = f->alloc;
+    cd.renderer = f->rf.renderer;
+    cd.loader = f->loader;
+    cd.jobs = f->jobs;
+    cd.scene = nph_guid_from_cstr("grove.gltf#scene");
+    cd.tiles_x = 2U;
+    cd.tiles_z = 1U;
+    CookedScene scene;
+    NTEST_ASSERT_EQ_INT(cooked_scene_load(&cd, &scene), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(scene.cell_count, 2U * GROVE_CELLS);
+    // Past the proxies' distance, both tiles in view (the second beside the
+    // first on +x, the ground's extent apart).
+    const NphRenderView v = grove_view(nph_dvec3(28.0, 40.0, 8.0 + GROVE_VIEW),
+                                       nph_dvec3(28.0, 1.0, 8.0), WIDE_FOV, 1.0F);
+    NphRenderFrameStats st;
+    memset(&st, 0, sizeof st);
+    for (u32 i = 0; i < 2U + NPH_GPU_FRAMES_IN_FLIGHT; ++i) {
+        st = stream_frame(f, &v);
+    }
+    NTEST_LOG("%u cells drawn as their proxies, for %u instances", st.vis_cells_proxied,
+              st.vis_instances_proxied);
+    NTEST_EXPECT_EQ_UINT(st.vis_cells_proxied, 2U * GROVE_CELLS);
+    NTEST_EXPECT_EQ_UINT(st.vis_instances_proxied, 2U * 8U);
+    cooked_scene_unload(&scene);
+    world_teardown(f);
+}
+
 NTEST(WorldPartition, a_texture_budget_streams_a_worlds_textures_as_the_view_asks)
 {
     NphAllocator *alloc = nph_allocator_system();
