@@ -192,3 +192,23 @@ expansion would take one argument pass off; it is not done yet.
 In `test_vis_cells.c` the map drawn afresh over the field of cells, from 20 and 80 m,
 draws the same pages, draws, voxel draws and image, byte for byte, as over every slot.
 With the items' levels dropped, the voxel draws fall to none and the image differs.
+
+## Amendment (2026-11-05): a range no frame has seen goes back at once
+
+A run that fills moves to a range twice the size and gives its old range back after the frames in
+flight. A scene loaded within one frame's flight held every run's earlier ranges as well, as much
+again as their last, where the member pool is sized for twice the members. A run now notes whether a
+frame was shown its range (its entries uploaded for one), and a moved run's range that no frame saw
+goes back at once, for other runs to take.
+
+This was found looking into the city cooked with its cells' proxies (`nph_cook --hlod`, sixteen cells
+a tile), which failed to load tiled at instance 207,013. That failure was the instance slots:
+`render_perf` and `scene_viewer` sized them from a tile's instances alone, and a cell's proxy takes
+an instance a level (about five here: 20,736 in all). They now count `NPH_RENDER_CELL_MAX_LEVELS` a
+cell of the manifest's `tiles.cells`, and the city loads with its 4,096 cells.
+
+Test: `vis_cells.runs_moved_before_a_frame_saw_them_give_their_ranges_back_at_once`. After a frame,
+eight cells of 130 members each move their runs from 16 entries to 256 in a pool of 2,815, which
+their ranges held would overflow (512 a cell with its proxy's run); then a run the frame saw moves
+twice, and only the range it saw waits. Three ways of breaking the rule (every range waiting, no run
+ever marked shown, a moved run keeping its mark) fail it.

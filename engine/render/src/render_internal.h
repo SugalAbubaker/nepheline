@@ -376,6 +376,10 @@ typedef struct RenderRun {
     NphRange range;
     u32 count;
     u32 capacity; // the range's entries
+    // The range uploaded for a frame, which a frame in flight may read: when
+    // the run moves, a range never shown goes back at once, one shown after
+    // the frames in flight.
+    b32 shown;
 } RenderRun;
 
 // A cell of a world partition (nph_render_cell_create; ADR-0062).
@@ -651,6 +655,13 @@ typedef struct RenderFrameLayout {
 #define RENDER_LOD_MAX_DEPTH 32U
 // The levels of a mesh's table (NphVisMesh.lod_levels): more, and it walks.
 #define RENDER_LOD_MAX_LEVELS 64U
+// The most groups a mesh with voxel levels may have and take the flat cull
+// (ADR-0070's amendment): an instance hands it no more than its mesh's groups,
+// and past this its simplifier's spread of errors in a level makes one
+// distance take thousands of them (the landscape's forest meshes, 6,907 to
+// 32,118 groups), where the walk's pruning earns its keep. The city's voxel
+// meshes have 7 to 1,185.
+#define RENDER_LOD_FLAT_VOXEL_GROUPS 2048U
 // The chunks of the flat cull a phase holds: a chunk comes of a run longer than
 // a workgroup, so holds at least 32 groups on average, and this many take what a
 // list of work items would. A workgroup each, of the 65,535 every device takes.
@@ -739,7 +750,7 @@ typedef struct VisLightLayout {
 typedef struct VisPendingFree {
     u64 frame; // safe from the frame with this index on
     NphRange range;
-    u32 pool; // 0: the material map, 1: the index pool, 2: the voxel pool
+    u32 pool; // 0: the material map, 1: the index pool, 2: the voxel pool, 3: the member pool
 } VisPendingFree;
 
 typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
@@ -1698,8 +1709,9 @@ f32 render_lod_group_maker_error(const NphRenderMeshDesc *d, const NphRenderLodG
 // centre that holds every group's sphere, rounded up. False for a mesh that
 // walks its hierarchy instead: one whose groups do not keep to their levels'
 // order, or with too many levels; a level apart, whose makers the table cannot
-// hold (ADR-0063); and one with voxel levels, whose simplifier (ADR-0069) leaves
-// so wide a range of errors in a level that its distance picks too many groups.
+// hold (ADR-0063); and one with voxel levels and more than
+// RENDER_LOD_FLAT_VOXEL_GROUPS groups, whose simplifier (ADR-0069) leaves so wide
+// a range of errors in a level that its distance picks too many groups.
 // Indices already checked.
 bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, NphVisLodLevel *table,
                                 u32 *out_count, f32 *out_reach);
@@ -1739,8 +1751,10 @@ NphResult render_vis_run_add(NphRenderer *r, u32 slot);
 void render_vis_run_remove(NphRenderer *r, u32 slot);
 void render_vis_cell_runs_release(NphRenderer *r, u32 cell_slot);
 NphResult render_vis_runs_upload(NphRenderer *r);
-// A member range given back after the frames in flight (vis_scene.c).
+// A member range given back after the frames in flight, or now, which no
+// frame can read (vis_scene.c).
 void render_vis_member_range_free_later(NphRenderer *r, NphRange range);
+void render_vis_member_range_free(NphRenderer *r, NphRange range);
 // A material's alpha mode may have changed: the blend list is rebuilt.
 void render_vis_materials_changed(NphRenderer *r);
 // A light was created, changed, or destroyed: its record is sent with the

@@ -129,6 +129,13 @@ void render_vis_member_range_free_later(NphRenderer *r, NphRange range)
     free_later(r, 3U, range);
 }
 
+void render_vis_member_range_free(NphRenderer *r, NphRange range)
+{
+    if (!nph_range_is_null(range)) {
+        range_free(&r->vis, 3U, range);
+    }
+}
+
 void render_vis_release_pending(NphRenderer *r, u64 current_frame)
 {
     RenderVis *v = &r->vis;
@@ -472,8 +479,8 @@ static NphResult upload_makers(NphRenderer *r, RenderMesh *m, const NphRenderMes
 bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, NphVisLodLevel *table,
                                 u32 *out_count, f32 *out_reach)
 {
-    if (d->lod_makers != NULL || d->voxel_brick_count != 0U ||
-        d->lod_group_count >= 1U << NPH_VIS_LOD_CHUNK_SHIFT) {
+    if (d->lod_makers != NULL || d->lod_group_count >= 1U << NPH_VIS_LOD_CHUNK_SHIFT ||
+        (d->voxel_brick_count != 0U && d->lod_group_count > RENDER_LOD_FLAT_VOXEL_GROUPS)) {
         return false;
     }
     u32 count = 0U;

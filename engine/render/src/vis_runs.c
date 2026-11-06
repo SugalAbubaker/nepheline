@@ -11,7 +11,9 @@
 // moved slot's place (RenderInstance.run_entry) following. A frame uploads
 // the runs that changed, whole, and their cells' records (NphVisCellRun):
 // each change is O(1) amortized, and a scene loaded cell by cell fills each
-// run once.
+// run once. A range no frame has been shown goes back at once when its run
+// moves: a scene loaded within one frame's flight would otherwise hold each
+// run's earlier ranges too, as much again as its last.
 #include <nepheline/core/assert.h>
 #include <nepheline/gpu/upload.h>
 
@@ -59,10 +61,15 @@ static NphResult run_room(NphRenderer *r, RenderRun *run)
     if (run->capacity != 0U) {
         memcpy(v->member_entries + range.offset, v->member_entries + run->range.offset,
                (size_t)run->count * sizeof(u32));
-        render_vis_member_range_free_later(r, run->range);
+        if (run->shown) {
+            render_vis_member_range_free_later(r, run->range);
+        } else {
+            render_vis_member_range_free(r, run->range);
+        }
     }
     run->range = range;
     run->capacity = capacity;
+    run->shown = 0;
     return NPH_RESULT_OK;
 }
 
@@ -121,13 +128,14 @@ void render_vis_cell_runs_release(NphRenderer *r, u32 cell_slot)
     }
 }
 
-// Run `run`'s entries to the member buffer.
-static NphResult run_upload(NphRenderer *r, const RenderRun *run)
+// Run `run`'s entries to the member buffer, for the frame being recorded.
+static NphResult run_upload(NphRenderer *r, RenderRun *run)
 {
     RenderVis *v = &r->vis;
     if (run->count == 0U) {
         return NPH_RESULT_OK;
     }
+    run->shown = 1;
     return nph_gpu_upload_buffer(r->dev, v->cell_members, (u64)run->range.offset * sizeof(u32),
                                  v->member_entries + run->range.offset,
                                  (u64)run->count * sizeof(u32));
@@ -143,7 +151,7 @@ NphResult render_vis_runs_upload(NphRenderer *r)
     const bool any = v->runs_changed_count != 0U || v->loose_dirty;
     for (u32 i = 0; i < v->runs_changed_count && res == NPH_RESULT_OK; ++i) {
         const u32 cell_slot = v->runs_changed[i];
-        const RenderCell *c = &r->cells[cell_slot];
+        RenderCell *c = &r->cells[cell_slot];
         res = run_upload(r, &c->members_run);
         if (res == NPH_RESULT_OK) {
             res = run_upload(r, &c->proxies_run);

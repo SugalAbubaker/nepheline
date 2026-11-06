@@ -948,6 +948,8 @@ typedef enum NphRenderVisFlags {
     NPH_RENDER_VIS_NO_LIGHT_GRID = 1U << 3U, // every light for every pixel, as the reference
     NPH_RENDER_VIS_RT_SHADOWS = 1U << 4U,    // no virtual shadow map: the sun's shadows ray traced
     NPH_RENDER_VIS_NO_SKIN = 1U << 5U,       // no masked cluster draws first writing depth
+    NPH_RENDER_VIS_NO_VOXEL_SKIP = 1U << 6U, // every pixel a voxel's box may cover tested, none
+                                             // skipped as drawn over (vis_voxel_raster.comp)
 } NphRenderVisFlags;
 
 // How a view's exposure is set.

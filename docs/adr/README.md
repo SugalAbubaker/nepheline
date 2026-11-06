@@ -66,16 +66,16 @@ supersedes it and both link to each other.
 | [0058](0058-audio-in-the-engine.md) | Audio in the engine: components, the bridge, one-shots, and occlusion | Accepted |
 | [0059](0059-structure-checkpoint.md) | The structure checkpoint: the frame keeps its passes; the first game | Accepted (the game and its scenes superseded by [0067](0067-the-game-is-a-city.md)) |
 | [0060](0060-cluster-levels-of-detail.md) | Virtualized geometry: a hierarchy of cluster levels, walked two levels a step | Accepted (the bottom levels draw level 0 until their own); amended 2026-10-26: the sun's shadow map draws cuts of its own |
-| [0061](0061-voxel-far-field.md) | Aggregate geometry's far field: voxel levels in the cluster hierarchy | Accepted (built in stages; the first: the voxels and their levels) |
+| [0061](0061-voxel-far-field.md) | Aggregate geometry's far field: voxel levels in the cluster hierarchy | Accepted (built in stages; the first: the voxels and their levels); amended 2026-11-05: the raster fills its lanes and skips what is drawn over it |
 | [0062](0062-world-partition-hlod.md) | World partition: cells of static content and their far-field proxies (HLOD) | Accepted (built in stages; the first: the proxies, built by the cooker) |
 | [0063](0063-proxy-streaming.md) | Streaming: the cells' proxies, level by level, as the culls ask for them | Accepted (ADR-0062's stage 3, built in stages; the first: the compact voxels) |
-| [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's) |
+| [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's); amended 2026-11-05: a range no frame has seen goes back at once |
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
 | [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md); amended 2026-10-31: what the phase left) |
 | [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions; amended 2026-10-31: the landscape leaves the nightly) |
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted |
-| [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted |
+| [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted; amended 2026-11-05: voxel meshes of few groups take the flat cull |
 | [0071](0071-small-masked-clusters-in-software.md) | Small masked clusters in the software raster | Accepted |
 | [0072](0072-world-partition-in-the-runtime.md) | The world partition in the engine's runtime | Accepted |
 | [0073](0073-many-lights.md) | Many lights, near and far | Accepted |

@@ -684,3 +684,82 @@ cell. `COOK_MESH_VERSION` 5.
   every voxel group's cell is at least its coarsest input's and twice its finest's,
   and of the 15 groups that mix cell sizes, 5 stop below twice the coarser. With the
   old rule none of 13 does, and the test fails.
+
+## Amendment (2026-11-05): the raster fills its lanes, and skips what is drawn over it
+
+**Context.** ADR-0067 made the city a gate, and on its rooftop half of the 20 million triangles are
+the maples' stalled leaf-card levels. Cooked with voxels (`nph_cook --voxels`), every city view was
+slower than with those triangles: the rooftop 9.93 to 11.40 ms, the park and the streets by 0.25 to
+0.33 ms, and the rooftop's `vis voxel raster 0` took 1.81 ms. A GPU trace found the raster bound by
+its issue (67.5 % of the peak, 61.5 % of its lanes active), not by memory (DRAM 6.4 % of the peak).
+Counters in the shader gave a rooftop frame: 15.4 million voxels in 67,700 clusters, of which 4.34
+million (28 %) cover a pixel centre, with 1.16 pixels each: 5.02 million (voxel, pixel) pairs and
+2.21 million hits. A batch of a subgroup's 32 voxels held about 10 pixels, so the rays' tests ran at
+a third of the lanes: 500,000 subgroup iterations for 5 million pairs.
+
+**Decision.**
+
+1. *A queue a subgroup.* A subgroup keeps the voxels of its batches that cover pixels, with room for
+   two batches, and tests their pixels when another batch might not fit and at the end of the
+   cluster. The pixels before each voxel in the queue are counted as it joins (the prefix sum and
+   the binary search of before, over the queue).
+2. *What is drawn over is skipped.* The triangles' rasters run first and depths only rise, so a
+   voxel whose box lies wholly behind what a pixel holds cannot take it. The box's nearest depth
+   (near / w at its least clip w, raised by a 4096th against the rounding of w and of a hit's 1 / t)
+   goes into the queue beside the voxel; a pixel that holds more is not tested, and a voxel of one
+   pixel (most of those that cover any) is compared before it joins. A read may be older than
+   another workgroup's latest write, never larger, so it only skips less. The skips change only the
+   work, and `NPH_RENDER_VIS_NO_VOXEL_SKIP` turns them off for a test to compare against.
+3. *The searches unroll.* A voxel's brick (32 at most) and a queued pixel's voxel (128 at most) are
+   found in a fixed number of halvings.
+4. *The other follow-ups.* Testing a voxel's cell before its record: at these levels a cell is about
+   a pixel, and 77 % of the cells (11.9 of 15.4 million) cover a pixel centre, so few records go
+   unread, and a lane that skips its record still waits for its subgroup. Not built. Bricks against
+   the depth pyramid: in phase 0 the pyramid is the previous frame's, and a brick it hides may be in
+   view now, which the meshlets' two phases handle and bricks would need a list of their own for;
+   the pixels' own depths as drawn decide within the frame, and the pyramid was not tried. The
+   prologue's chain of seven dependent loads is unchanged (below).
+
+**Measured.** Two builds, the stack's top against this, interleaved over
+two rounds, each pack a process, the editor's windows minimised; the city cooked with `--voxels`,
+the landscape as at Phase 13's end (means, ms):
+
+| Scene | Before | After | Voxel raster, phases 0 + 1 |
+|---|---|---|---|
+| City rooftop (voxel trees) | 11.43 | 10.51 | 1.811 + 0.169 to 1.185 + 0.104 |
+| City park | 8.19 | 8.03 | |
+| City crossing and streets (5 views) | 6.89 to 7.18 | 6.76 to 7.07 | (frames -0.11 to -0.15) |
+| Landscape forest | 65.83 | 58.51 | 24.15 + 2.55 to 17.44 + 1.76 |
+| Landscape (5 other views) | 57.99 to 68.59 | 50.87 to 62.43 | (-5.7 to -6.9 in phase 0) |
+| `foliage_4k_production` | 7.75 | 6.50 | 2.85 + 0.58 to 1.80 + 0.35 |
+| `foliage_shadows_sun_4k_production`, `_walk_` | 24.82, 8.18 | 23.46, 6.95 | |
+
+The city's frames include ADR-0070's amendment of this date (the walk's 0.254 + 0.029 ms on the
+rooftop gone, the flat cull 0.065 ms more); the triangle city and the synthetic scenes without
+voxels are within 0.04 ms. The rooftop's phase 0 by step, single runs: 1.805 ms, then the queue
+1.465, the pairs' skip 1.298, the voxels' 1.234, the searches 1.165. A trace of it: 1,319 to 799
+instructions a pixel, 61.5 to 86.2 % of the lanes active, its issue from 67.5 to 56.9 % of the peak
+(now more bound by latency), DRAM from 52 to 39 MB a frame (reads 40.8 to 35.8, writes 11.4 to 3.0:
+the depth reads mostly find the lines the atomics touch, and a skipped pixel writes nothing).
+
+**Tests.** `VoxelGpu.voxel_clusters_draw_where_their_rays_meet_them` (test_vis_voxel.c) also draws
+dense foliage from 3 m at errors of 8 and 16 pixels, whose voxel clusters fill the queues before they
+end (38 and 31 flushes of 170 and 51 before a cluster's end; a queue held at most 54 of its 64
+voxels). `VoxelGpu.the_voxels_skips_change_only_the_work` draws a plane through that foliage, which
+the triangles' raster draws first so that voxels' boxes reach across its depth, with the skips and
+without, and finds the same surfaces at every pixel (the normals' debug view, which tells voxels
+apart and depends on no order of clusters). Twelve broken variants: the queue overflowing, a flush
+of one lane set, the prefix not offset, the queue not reset, either search one short, either skip
+inverted, and the bound taken at the box's far side fail the tests; no pair skip and no voxel skip
+pass them, as changes only of the work should. Lavapipe (subgroups of 8) passes the voxel tests.
+
+**What is left.** Ablated with occlusion culling off, so that every variant draws the same clusters
+(before the depth tests; 1,914 instructions a pixel in all): the prologue 401 (each of a workgroup's
+two subgroups loads the cluster's records and computes its transforms), the batches' loop and queue
+371, a voxel's brick and bit 468, its footprint and projection 174, and the rays' tests 500. The
+city's voxel trees still cost more than its triangle trees, on the same build: the rooftop 10.51
+against 10.11 ms, its other views 0.07 to 0.11 ms. Open:
+one subgroup a cluster, so that the prologue is not done twice and the last flush is shared (it
+needs a subgroup size of 32, or the work items' arguments to know it); a shorter chain of loads (the
+meshlet cull holds the cluster's instance and meshlet when it lists it); and a voxel's brick and bit
+from a table each cluster fills once.
