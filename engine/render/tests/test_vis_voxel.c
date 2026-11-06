@@ -493,19 +493,97 @@ static NphVec3 *dequantised(const LodMesh *m)
     return p;
 }
 
+// A visible cluster's box in mesh space, which a pixel's ray must meet before
+// the CPU's twin looks at the cluster's primitives: its triangles' corners, or
+// its bricks' cells, a voxel's hit lying in its cell (voxel.c voxel_hit), and
+// a cell wider each way for the rounding. Without it the twin traced every
+// primitive of every visible cluster at each pixel: two thirds of the sparse
+// foliage test's time in Debug, which CI runs with sanitizers on lavapipe.
+typedef struct TwinBox {
+    f64 lo[3];
+    f64 hi[3];
+} TwinBox;
+
+static TwinBox *twin_boxes(const LodMesh *m, const NphVec3 *positions, const NphVisCluster *list,
+                           u32 count)
+{
+    const NphRenderMeshlets *c = &m->lods.clusters;
+    TwinBox *boxes = NPH_ALLOC_ARRAY(nph_allocator_system(), TwinBox, nph_max_u32(count, 1U));
+    NTEST_ASSERT_NOT_NULL(boxes);
+    for (u32 g = 0; g < count; ++g) {
+        const NphRenderMeshlet *ml = &c->meshlets.data[list[g].meshlet];
+        TwinBox b = {{1e300, 1e300, 1e300}, {-1e300, -1e300, -1e300}};
+        if (ml->vertex_count == 0U) {
+            for (u32 k = 0; k < ml->triangle_count; ++k) {
+                const NphRenderVoxelBrick *br = &m->lods.bricks.data[ml->vertex_offset + k];
+                const f64 o[3] = {(f64)br->origin.x, (f64)br->origin.y, (f64)br->origin.z};
+                const f64 h = (f64)br->cell;
+                for (u32 a = 0; a < 3U; ++a) {
+                    b.lo[a] = nph_f64_min(b.lo[a], o[a] - h);
+                    b.hi[a] = nph_f64_max(b.hi[a], o[a] + ((f64)NPH_RENDER_VOXEL_BRICK + 1.0) * h);
+                }
+            }
+        } else {
+            const u32 *vx = &c->vertices.data[ml->vertex_offset];
+            for (u32 i = 0; i < ml->vertex_count; ++i) {
+                const NphVec3 p = positions[vx[i]];
+                const f64 q[3] = {(f64)p.x, (f64)p.y, (f64)p.z};
+                for (u32 a = 0; a < 3U; ++a) {
+                    b.lo[a] = nph_f64_min(b.lo[a], q[a]);
+                    b.hi[a] = nph_f64_max(b.hi[a], q[a]);
+                }
+            }
+            // Far above a float's rounding at the foliage's scale.
+            for (u32 a = 0; a < 3U; ++a) {
+                b.lo[a] -= 1e-3;
+                b.hi[a] += 1e-3;
+            }
+        }
+        boxes[g] = b;
+    }
+    return boxes;
+}
+
+// Whether the ray o + t d, t >= 0, meets box `b` (slabs).
+static bool twin_ray_meets(const f64 o[3], const f64 d[3], const TwinBox *b)
+{
+    f64 t0 = 0.0;
+    f64 t1 = 1e300;
+    for (u32 a = 0; a < 3U; ++a) {
+        if (nph_f64_abs(d[a]) < 1e-300) {
+            if (o[a] < b->lo[a] || o[a] > b->hi[a]) {
+                return false;
+            }
+            continue;
+        }
+        const f64 ta = (b->lo[a] - o[a]) / d[a];
+        const f64 tb = (b->hi[a] - o[a]) / d[a];
+        t0 = nph_f64_max(t0, nph_f64_min(ta, tb));
+        t1 = nph_f64_min(t1, nph_f64_max(ta, tb));
+        if (t0 > t1) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The visibility buffer's value the CPU expects at a pixel: the nearest of
 // the visible clusters' primitives along the pixel's ray from the camera
 // at `eye` (mesh space, the instance at the origin) in direction `d` (to the
 // pixel's point on the near plane: a hit at t lies at depth 1 / t), as the
 // atomic max of (depth bits, cluster << 7 | primitive) keeps it; 0 for none.
+// `boxes` are the clusters' (twin_boxes).
 static u64 expected_texel(const LodMesh *m, const NphVec3 *positions, const NphVisCluster *list,
-                          u32 count, NphVec3 eye, NphVec3 d)
+                          const TwinBox *boxes, u32 count, NphVec3 eye, NphVec3 d)
 {
     const NphRenderMeshlets *c = &m->lods.clusters;
     const f64 o[3] = {(f64)eye.x, (f64)eye.y, (f64)eye.z};
     const f64 dd[3] = {(f64)d.x, (f64)d.y, (f64)d.z};
     u64 best = 0U;
     for (u32 g = 0; g < count; ++g) {
+        if (!twin_ray_meets(o, dd, &boxes[g])) {
+            continue;
+        }
         const NphRenderMeshlet *ml = &c->meshlets.data[list[g].meshlet];
         if (ml->vertex_count == 0U) {
             for (u32 k = 0; k < ml->triangle_count; ++k) {
@@ -565,13 +643,14 @@ static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, const NphVec3 
     const NphRenderFrameStats stats = render_frames(f, &v);
     u32 count = 0U;
     NphVisCluster *list = visible_clusters(f, &count);
+    TwinBox *boxes = twin_boxes(m, positions, list, count);
     pixel_rays(&v, rays);
     const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)distance);
     u32 wrong = 0U;
     u32 hits = 0U;
     u32 voxels_seen = 0U;
     for (u32 i = 0; i < PIXELS; ++i) {
-        const u64 texel = expected_texel(m, positions, list, count, eye, rays[i]);
+        const u64 texel = expected_texel(m, positions, list, boxes, count, eye, rays[i]);
         const u8 *p = f->pixels + (u64)i * 4U;
         u32 want[3] = {0U, 0U, 0U};
         if (texel != 0U) {
@@ -598,6 +677,7 @@ static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, const NphVec3 
     // Rays that graze a footprint or a triangle's edge within the rounding
     // may land on either side.
     NTEST_EXPECT_LE_UINT(wrong, hits / 50U + 2U);
+    NPH_FREE_ARRAY(nph_allocator_system(), TwinBox, boxes, nph_max_u32(count, 1U));
     NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
     return voxels_seen;
 }
@@ -845,6 +925,7 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
     NTEST_EXPECT_GT_UINT(stats.vis_voxel_clusters, 0U);
     u32 count = 0U;
     NphVisCluster *list = visible_clusters(f, &count);
+    TwinBox *boxes = twin_boxes(&m, positions, list, count);
     u32 triangle_clusters = 0U;
     for (u32 g = 0; g < count; ++g) {
         triangle_clusters +=
@@ -864,7 +945,7 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
     static u32 expected[PIXELS];
     u32 cells = 0U;
     for (u32 i = 0; i < PIXELS; ++i) {
-        const u64 texel = expected_texel(&m, positions, list, count, eye, rays[i]);
+        const u64 texel = expected_texel(&m, positions, list, boxes, count, eye, rays[i]);
         if (texel == 0U) {
             continue;
         }
@@ -916,6 +997,7 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
     NTEST_EXPECT_TRUE((f64)known >= 0.98 * (f64)used);
     NTEST_EXPECT_TRUE((f64)found >= 0.98 * (f64)distinct);
 
+    NPH_FREE_ARRAY(nph_allocator_system(), TwinBox, boxes, nph_max_u32(count, 1U));
     NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
     NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, rays, PIXELS);
     NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, positions, m.data.vertex_count);
@@ -1220,6 +1302,7 @@ NTEST_F(VoxelGpu, the_voxel_resolve_shades_as_its_cpu_twin)
         render_frames(f, &v);
         u32 count = 0U;
         NphVisCluster *list = visible_clusters(f, &count);
+        TwinBox *boxes = twin_boxes(&m, positions, list, count);
         v.debug_view = NPH_RENDER_VIEW_LIT;
         render_frames(f, &v);
         pixel_rays(&v, rays);
@@ -1230,7 +1313,7 @@ NTEST_F(VoxelGpu, the_voxel_resolve_shades_as_its_cpu_twin)
         f64 worst = 0.0;
         u32 n = 0U;
         for (u32 i = 0; i < PIXELS; ++i) {
-            const u64 texel = expected_texel(&m, positions, list, count, eye, rays[i]);
+            const u64 texel = expected_texel(&m, positions, list, boxes, count, eye, rays[i]);
             if (texel == 0U) {
                 continue;
             }
@@ -1269,6 +1352,7 @@ NTEST_F(VoxelGpu, the_voxel_resolve_shades_as_its_cpu_twin)
         NTEST_EXPECT_TRUE(n > 50U && nph_f64_abs(sum_gpu / sum_cpu - 1.0) <= 0.01);
         NTEST_EXPECT_TRUE(worst <= 0.08);
         compared += n;
+        NPH_FREE_ARRAY(nph_allocator_system(), TwinBox, boxes, nph_max_u32(count, 1U));
         NPH_FREE_ARRAY(nph_allocator_system(), NphVisCluster, list, nph_max_u32(count, 1U));
     }
     NTEST_EXPECT_GT_UINT(compared, 100U);
