@@ -249,7 +249,8 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         in.attribs = attribs;
         in.attrib_stride = (u32)sizeof(NphMeshAttrib);
         in.uvs = uvs;
-        in.normals = normals;
+        // A voxel cook's surfaces count their normals only where asked (CookMeshSettings).
+        in.normals = with_voxels && settings->voxel_normals == 0 ? NULL : normals;
         in.vertex_count = mesh->vertices.len;
         in.indices = mesh->indices.data;
         in.index_count = mesh->indices.len;

@@ -4,8 +4,9 @@
 //     nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
 //              [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
 //              [--uncompressed] [--no-mips] [--max-extent N]
-//              [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--hlod]
-//              [--hlod-cell M] [--hlod-distance M] [--sound-codec auto|pcm|lossless|adpcm]
+//              [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--voxel-normals]
+//              [--hlod] [--hlod-cell M] [--hlod-distance M]
+//              [--sound-codec auto|pcm|lossless|adpcm]
 //              [--sound-stream auto|always|never] [--stream-seconds S]
 //              [--threads N] [--quiet] [--verbose]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
@@ -54,6 +55,8 @@ static void usage(FILE *out)
           "  --normal-y-down       the sources' normal maps have green growing downwards\n"
           "                        (DirectX's convention, not glTF's)\n"
           "  --voxels              voxel levels for aggregate geometry (glTF meshes)\n"
+          "  --voxel-normals       with voxels, the meshes' surfaces count their normals in\n"
+          "                        the levels' collapses, as without voxels\n"
           "  --hlod                the world partition's cells and their proxies for\n"
           "                        glTF scenes (implies --voxels)\n"
           "  --hlod-cell <m>       the cells' edge (default 64)\n"
@@ -178,6 +181,8 @@ int main(int argc, char **argv)
             desc.mesh.normal_y_down = 1;
         } else if (strcmp(a, "--voxels") == 0) {
             desc.mesh.voxels = 1;
+        } else if (strcmp(a, "--voxel-normals") == 0) {
+            desc.mesh.voxel_normals = 1;
         } else if (strcmp(a, "--hlod") == 0) {
             // The proxies sample the meshes' voxel materials.
             desc.hlod.enabled = 1;

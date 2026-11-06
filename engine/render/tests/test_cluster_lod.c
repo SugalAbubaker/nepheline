@@ -1883,14 +1883,15 @@ NTEST_F(ClusterLod, a_cost_limit_stops_a_group_short_of_its_target)
     NPH_ARRAY_FREE(&kept_indices);
 }
 
-// A flat sheet whose shading normals ripple across it (cloth, a wrinkled awning): its positions
-// alone would let every interior vertex go at no error at all, and the shading with them. With
-// the normals the build gives, a collapse counts what it does to them: only those along a ripple
-// are free, so a level at no error still holds the ripples' strips. A sheet whose normals agree
-// costs nothing.
-NTEST_F(ClusterLod, a_shading_normal_that_changes_counts_in_the_error)
+// A flat sheet whose shading normals ripple across it (cloth, a wrinkled awning), built three
+// times with `voxels` (NULL: triangles only): without normals, with normals that agree, and with
+// the ripples'. For each, the triangles of the coarsest level at no error, and the largest error
+// of any level.
+static void rippled_sheet_levels(LodFixture *f, const NphRenderVoxelSampler *voxels,
+                                 u32 free_triangles[3], f32 worst[3])
 {
     make_grid(&f->mesh, 64U, 4.0F);
+    NTEST_ASSERT_EQ_UINT(f->mesh.ranges.len, 1U); // the samplers' surfaces are one
     const u32 vertices = f->mesh.positions.len;
     NphVec3 *rippled = NPH_ALLOC_ARRAY(f->a, NphVec3, vertices);
     NphVec3 *flat = NPH_ALLOC_ARRAY(f->a, NphVec3, vertices);
@@ -1900,9 +1901,9 @@ NTEST_F(ClusterLod, a_shading_normal_that_changes_counts_in_the_error)
         flat[v] = nph_vec3(0.0F, 0.0F, 1.0F);
     }
     const NphVec3 *const given[3] = {NULL, flat, rippled};
-    u32 free_triangles[3] = {0U, 0U, 0U};
-    f32 worst[3] = {0.0F, 0.0F, 0.0F};
     for (u32 run = 0; run < 3U; ++run) {
+        free_triangles[run] = 0U;
+        worst[run] = 0.0F;
         NphRenderMeshlets meshlets;
         NphRenderClusterLods lods;
         nph_render_meshlets_init(&meshlets, f->a);
@@ -1924,6 +1925,7 @@ NTEST_F(ClusterLod, a_shading_normal_that_changes_counts_in_the_error)
         in.attribs = f->mesh.attribs.data;
         in.attrib_stride = (u32)sizeof(TestAttrib);
         in.normals = given[run];
+        in.voxels = voxels;
         in.vertex_count = vertices;
         in.indices = f->mesh.indices.data;
         in.index_count = f->mesh.indices.len;
@@ -1951,12 +1953,23 @@ NTEST_F(ClusterLod, a_shading_normal_that_changes_counts_in_the_error)
         nph_render_cluster_lods_free(&lods);
         nph_render_meshlets_free(&meshlets);
     }
+    NPH_FREE_ARRAY(f->a, NphVec3, rippled, vertices);
+    NPH_FREE_ARRAY(f->a, NphVec3, flat, vertices);
+}
+
+// The sheet's positions alone would let every interior vertex go at no error at all, and the
+// shading with them. With the normals the build gives, a collapse counts what it does to them:
+// only those along a ripple are free, so a level at no error still holds the ripples' strips. A
+// sheet whose normals agree costs nothing.
+NTEST_F(ClusterLod, a_shading_normal_that_changes_counts_in_the_error)
+{
+    u32 free_triangles[3];
+    f32 worst[3];
+    rippled_sheet_levels(f, NULL, free_triangles, worst);
     NTEST_EXPECT_TRUE(worst[0] < 1e-5F);
     NTEST_EXPECT_TRUE(worst[1] < 1e-5F);
     NTEST_EXPECT_TRUE(worst[2] > 1e-3F);
     NTEST_EXPECT_LT_UINT(free_triangles[1] * 4U, free_triangles[2]);
-    NPH_FREE_ARRAY(f->a, NphVec3, rippled, vertices);
-    NPH_FREE_ARRAY(f->a, NphVec3, flat, vertices);
 }
 
 // A true curve's normals vary evenly across it, and come back from the interpolation: giving
@@ -2044,8 +2057,9 @@ static bool never_covers(void *user, u32 submesh, const u32 v[3], NphVec3 b, f32
     return false;
 }
 
-// A mesh that may voxelize keeps the simplifier its voxels were measured with: given texture
-// coordinates and normals, it adds no vertex and its levels are those it has without them.
+// A mesh that may voxelize keeps the simplifier its voxels were measured with, but for its
+// normals' cost: given texture coordinates and normals that agree, it adds no vertex and its
+// levels are those it has without them.
 NTEST_F(ClusterLod, a_mesh_that_may_voxelize_keeps_its_simplifier)
 {
     make_steps(&f->mesh, 8U);
@@ -2107,6 +2121,28 @@ NTEST_F(ClusterLod, a_mesh_that_may_voxelize_keeps_its_simplifier)
     NTEST_EXPECT_EQ_UINT(levels[1], levels[0]);
     NPH_FREE_ARRAY(f->a, NphVec3, normals, vertices);
     NPH_ARRAY_FREE(&uvs);
+}
+
+// A mesh that may voxelize, given its normals, counts what a collapse does to its shading as one
+// without voxels does: the rippled sheet built with a sampler keeps its ripples' strips at no
+// error as it does without one. Without the normals' cost a cloth's coarse level took one
+// wrinkle's normal for the whole sheet: the city's banners, black where it faced away from the
+// sun (ADR-0069's amendment).
+NTEST_F(ClusterLod, a_mesh_that_may_voxelize_counts_its_shading_normals)
+{
+    const u8 surfaces[1] = {NPH_RENDER_VOXEL_SURFACE_NONE};
+    NphRenderVoxelSampler sampler;
+    memset(&sampler, 0, sizeof sampler);
+    sampler.submesh_surface = surfaces;
+    sampler.sample = never_sampled;
+    sampler.covers = never_covers;
+    u32 free_triangles[3];
+    f32 worst[3];
+    rippled_sheet_levels(f, &sampler, free_triangles, worst);
+    NTEST_EXPECT_TRUE(worst[0] < 1e-5F);
+    NTEST_EXPECT_TRUE(worst[1] < 1e-5F);
+    NTEST_EXPECT_TRUE(worst[2] > 1e-3F);
+    NTEST_EXPECT_LT_UINT(free_triangles[1] * 4U, free_triangles[2]);
 }
 
 // A big bent card, of its own material, where the surface around it costs little to

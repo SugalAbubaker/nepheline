@@ -190,8 +190,9 @@ typedef struct NphRenderClusterLodInput {
     const NphVec2 *uvs;
     // Each vertex's shading normal (unit), or NULL: a collapse then counts what it does to
     // the surface's shading, which positions alone do not show (ADR-0069). With `voxels`,
-    // neither these nor `uvs` are read: such a mesh keeps the simplifier its voxels were
-    // measured with.
+    // `uvs` are not read and corners never move: such a mesh keeps the rest of the simplifier
+    // its voxels were measured with, and counts these where they are given (ADR-0069's
+    // amendment).
     const NphVec3 *normals;
     u32 vertex_count;
     const u32 *indices; // triangle list

@@ -832,9 +832,14 @@ level, whose error is larger, goes on with them. With the corners and the costs 
 the city's views draw 3 to 18% fewer triangles than before, and each is faster.
 
 A mesh that may voxelize (`NphRenderClusterLodInput.voxels`) has none of the corners,
-borders, shading, or level error: a group's collapses stalling, and their error against
-the voxels', is what makes it voxels (ADR-0061), so what is measured against that stays
-as it was, to be taken up when the landscape's raster is (ADR-0069).
+borders, or level error: a group's collapses stalling, and their error against the
+voxels', is what makes it voxels (ADR-0061), so what is measured against that stays as it
+was, to be taken up when the landscape's raster is (ADR-0069). It counts the shading's
+cost where the cooker gives it its normals, which a scene asks for (`nph_cook
+--voxel-normals`): without them the city's cloth banners, cooked with voxels, took one
+wrinkle's normal for a whole sheet at their coarse levels and went black where that faced
+away from the sun; with them the landscape's frame took 13 to 24 % more (ADR-0069's
+amendment).
 
 A group's error, in mesh units, is the largest of its collapses' costs, two
 measured distances, and the errors of the groups that made its
