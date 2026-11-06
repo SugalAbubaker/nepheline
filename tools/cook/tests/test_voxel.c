@@ -3,6 +3,7 @@
 // chains and lookups, the materials' surfaces, and a foliage mesh cooked
 // with voxel levels whose voxels take their colour from its texture.
 #include <nepheline/asset/mesh.h>
+#include <nepheline/core/hash.h>
 #include <nepheline/math/geometry.h>
 #include <nepheline/math/pack.h>
 #include <nepheline/math/random.h>
@@ -276,4 +277,101 @@ NTEST(CookVoxel, foliage_cooks_into_voxels_coloured_by_its_texture)
     test_asset_free(&ta);
     cook_voxel_image_free(&chain);
     cook_image_free(&img);
+}
+
+// A cloth's sheet, 4 m square, of 64 x 64 quads, one submesh: its shading normals ripple across it,
+// or face it alone where `rippled` is false.
+static void make_cloth(CookMesh *mesh, bool rippled)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    const u32 n = 64U;
+    const u32 vn = (n + 1U) * (n + 1U);
+    CookVertex *v = NPH_ALLOC_ARRAY(alloc, CookVertex, vn);
+    u32 *idx = NPH_ALLOC_ARRAY(alloc, u32, (u64)n * n * 6U);
+    NTEST_ASSERT_TRUE(v != NULL && idx != NULL);
+    for (u32 y = 0; y <= n; ++y) {
+        for (u32 x = 0; x <= n; ++x) {
+            CookVertex *c = &v[y * (n + 1U) + x];
+            memset(c, 0, sizeof *c);
+            const f32 px = 4.0F * (f32)x / (f32)n;
+            const f32 a = rippled ? 0.4F * nph_f32_sin(px * 12.0F) : 0.0F;
+            c->position = nph_vec3(px, 4.0F * (f32)y / (f32)n, 0.0F);
+            c->normal = nph_vec3(nph_f32_sin(a), 0.0F, nph_f32_cos(a));
+            c->tangent = nph_vec4(nph_f32_cos(a), 0.0F, -nph_f32_sin(a), 1.0F);
+            c->uv0 = nph_vec2((f32)x / (f32)n, (f32)y / (f32)n);
+            c->color = nph_vec4_one();
+        }
+    }
+    u32 k = 0U;
+    for (u32 y = 0; y < n; ++y) {
+        for (u32 x = 0; x < n; ++x) {
+            const u32 a = y * (n + 1U) + x;
+            idx[k++] = a;
+            idx[k++] = a + 1U;
+            idx[k++] = a + n + 2U;
+            idx[k++] = a;
+            idx[k++] = a + n + 2U;
+            idx[k++] = a + n + 1U;
+        }
+    }
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(mesh, v, vn, idx, n * n * 6U, 0U), NPH_RESULT_OK);
+    NPH_FREE_ARRAY(alloc, CookVertex, v, vn);
+    NPH_FREE_ARRAY(alloc, u32, idx, (u64)n * n * 6U);
+    mesh->flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_UV0 | (u32)COOK_MESH_HAS_TANGENTS;
+    strcpy(mesh->name, "cloth");
+}
+
+// The cloth cooked with voxels, its surface's normals counted where `voxel_normals`; its levels'
+// fingerprint: the clusters, their triangles, and the groups (their spheres and errors).
+static u64 cook_cloth_levels(bool rippled, bool voxel_normals, const CookVoxelMaterials *materials)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    make_cloth(&m, rippled);
+    CookMeshSettings s;
+    cook_mesh_settings_default(&s);
+    s.voxels = 1;
+    s.voxel_normals = voxel_normals ? 1 : 0;
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                          nph_guid_from_cstr("cloth"), 1U);
+    CookMeshStats st;
+    memset(&st, 0, sizeof st);
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, materials, NULL, &w, &st), NPH_RESULT_OK);
+    TestAsset ta;
+    test_asset_from_writer(alloc, &w, &ta);
+    nph_asset_writer_free(&w);
+    cook_mesh_free(&m);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ta.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.lod);
+    NTEST_EXPECT_GT_UINT(v.lod->levels, 2U);
+    u64 h = nph_hash64(v.meshlets, (u64)v.header->meshlet_count * sizeof *v.meshlets, 1U);
+    h = nph_hash64(v.meshlet_triangles, (u64)v.header->meshlet_triangle_count * 3U, h);
+    h = nph_hash64(v.lod_groups, (u64)v.lod->group_count * sizeof *v.lod_groups, h);
+    NTEST_LOG("rippled %d, voxel normals %d: %u clusters in %u levels, the coarsest %u triangles",
+              rippled ? 1 : 0, voxel_normals ? 1 : 0, v.header->meshlet_count, v.lod->levels,
+              st.lod_coarsest_triangles);
+    test_asset_free(&ta);
+    return h;
+}
+
+// A voxel cook leaves its meshes' shading normals out of the levels' collapses unless asked
+// (--voxel-normals; ADR-0069's amendment): a rippled cloth cooks to the levels of a flat one
+// without the setting, and to its own with it, its surface counting what a collapse does to its
+// shading as a cook without voxels does.
+NTEST(CookVoxel, a_voxel_cook_counts_a_surfaces_normals_where_asked)
+{
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    CookVoxelMaterial mat;
+    cook_voxel_material_init(&mat, &h);
+    NTEST_ASSERT_EQ_UINT(mat.surface, NPH_RENDER_VOXEL_SURFACE_OPAQUE);
+    const CookVoxelMaterials materials = {&mat, 1U};
+    const u64 flat = cook_cloth_levels(false, false, &materials);
+    const u64 rippled = cook_cloth_levels(true, false, &materials);
+    const u64 asked = cook_cloth_levels(true, true, &materials);
+    NTEST_EXPECT_TRUE(rippled == flat);
+    NTEST_EXPECT_TRUE(asked != rippled);
 }

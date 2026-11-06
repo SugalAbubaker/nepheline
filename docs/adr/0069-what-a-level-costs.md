@@ -1,7 +1,7 @@
 # 0069. Levels of detail: what a collapse costs, what a level may spend, and corners that collapse
 
 - **Date:** 2026-10-31
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-11-06: a voxel cook counts its normals where a scene asks
 
 ## Context
 
@@ -162,3 +162,68 @@ Each measured on the way, and the order matters: each of these looked like the a
   affine. Bistro's base colour differs little (0.08 to 0.11% of pixels), so nothing is added for it.
 - A level's error reads each group's costs before its colours run, one more pass of each group's
   first candidates, which is parallel and costs a few seconds in a cook.
+
+## Amendment (2026-11-06): a voxel cook counts its normals where a scene asks
+
+**Context.** Decision 5 kept every mesh a cook may voxelize (`nph_cook --voxels`) on the simplifier
+as it was, the normals' cost included, so that what makes a group voxels stayed what ADR-0061
+measured. In such a cook that is every mesh, not only the trees. The city cooked with voxels and its
+cells' proxies (ADR-0068's amendment) drew the park's two cloth banners with black bands. Their
+coarse level, two triangles a banner, took one wrinkle's sideways normal for the whole sheet, and
+part of it faced away from the sun: the case decision 3 was made for. Probes ruled out the voxel
+resolve's lookups, the voxels in the sun's map and the contact shadows; it was these triangles.
+Against level 0 (`render_perf --truth --accumulate=64`; the root mean square of each pixel's
+luminance error, relative to its own), the park was 7.3 % off, the triangle cook's 5.2 %.
+
+**Decision** (the user's).
+
+1. Given normals, a mesh that may voxelize counts what a collapse does to its shading as one without
+   voxels does (decision 3). Decisions 1, 2 and 4 stay off for it.
+2. The cooker gives a voxel cook's meshes their normals only where asked:
+   `nph_cook --voxel-normals`, a manifest's `cook.voxel_normals`. The city asks. The landscape does
+   not, and its pack is the same to the byte; decision 5 is to be taken up for it with its raster,
+   as it said.
+
+**Measured** on the RTX 3060 Ti at native 4K, two interleaved rounds, the same build. The city
+cooked with voxels and its cells, without and with the option, the error as above:
+
+| View | Error without | Error with | Triangle cook's error | Frame without (ms) | Frame with (ms) |
+|---|---|---|---|---|---|
+| park | 7.3 % | 4.5 % | 5.2 % | 8.11 | 8.16 |
+| street | 4.3 % | 4.1 % | 6.3 % | 6.84 | 6.88 |
+| rooftop | 9.9 % | 9.3 % | 14.1 % | 10.02 | 10.21 |
+
+The other street views take 0.05 to 0.06 ms more. The banners keep their triangles until their
+coarsest level, one cluster of 12 voxels (before, their voxels were 1,137 in five clusters).
+
+The landscape, cooked with voxels alone and given its normals, took 7.7 to 12.2 ms more in every
+view (13 to 24 %; the forest 57.7 to 69.4 ms): its voxel raster, software raster and culls all grew,
+and its fir saplings took up to 2.5 times their voxels, a needle's normal's change times its length
+raising its groups' errors past the voxels' cells.
+
+**Alternatives considered.**
+
+- *Normals in every voxel cook*: the landscape as above, against its guard rail (ADR-0067).
+- *A voxel cook's surfaces alone*, aggregate geometry (pieces of 32 triangles or fewer on average)
+  simplified by its positions as ADR-0061 measured: the landscape took 9.0 to 19.0 ms more (15 to
+  38 %, 4.3 to 6.5 ms of it in the software raster), and the city's park came out further from level
+  0 than the triangle cook's (6.1 % against 5.2 %), for a rooftop nearer it (8.6 %). A first form of
+  it, which took aggregate groups under 256 triangles for surfaces, raised every group's error above
+  them.
+- *The borders' cost as well*: the city's voxels tripled (436,104 to 1,159,644), and its rooftop
+  took 0.56 ms more.
+- *Two-sided surfaces alone*, the banners being two-sided cloth: a guess at which surfaces need it,
+  and the voxelizer's sampler has no such flag to read.
+
+**Consequences.**
+
+- A per-scene option, until the landscape's raster work settles decision 5 for its voxels.
+- `CookMeshSettings` grows by the option, so every cook's meshes are cooked again once, their
+  settings' hash having changed; without the option they come out as they were.
+
+**Tests.** `ClusterLod.a_mesh_that_may_voxelize_counts_its_shading_normals`: the rippled sheet of
+`a_shading_normal_that_changes_counts_in_the_error`, built with a sampler, keeps its ripples at no
+error as it does without one. `CookVoxel.a_voxel_cook_counts_a_surfaces_normals_where_asked`: a
+rippled cloth cooked with voxels comes out with the flat cloth's levels without the option and with
+levels of its own with it. A build that drops a voxel mesh's normals, and a cooker that always or
+never gives them, each fail one of them.

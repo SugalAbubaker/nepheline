@@ -26,7 +26,7 @@ with its md5, and a zips source several: `fetch` downloads them into DIR/<name>/
 extracts each there once, and runs the manifest's generator (scripts/city.py,
 scripts/interior.py). `cook` runs the cooker on
 the manifest's document with the manifest's cooker options (`cook`: `voxels`,
-`hlod` and `normal_y_down`, each nph_cook's flag of that name), packing what it
+`voxel_normals`, `hlod` and `normal_y_down`, each nph_cook's flag of that name), packing what it
 cooked; a second cook only redoes what changed (the cooker's settings are in
 its outputs' hashes). No names: every manifest.
 """
@@ -175,7 +175,8 @@ def fetch(m, root):
 
 # The cooker options a manifest may ask for (its `cook` object) and the
 # nph_cook flag each turns on.
-COOK_OPTIONS = {"voxels": "--voxels", "hlod": "--hlod", "normal_y_down": "--normal-y-down"}
+COOK_OPTIONS = {"voxels": "--voxels", "voxel_normals": "--voxel-normals", "hlod": "--hlod",
+                "normal_y_down": "--normal-y-down"}
 
 
 def cook_flags(m):

@@ -2914,9 +2914,12 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
             }
         }
     }
-    // A mesh that may voxelize keeps the simplifier its voxels were measured with (ADR-0061):
-    // a group's collapses stalling, and their error against the voxels', is what makes it
-    // voxels, so what is measured against that stays as it was (ADR-0069).
+    // A mesh that may voxelize keeps most of the simplifier its voxels were measured with
+    // (ADR-0061): a group's collapses stalling, and their error against the voxels', is what
+    // makes it voxels, so its corners stay put (no vertex is added), its borders cost nothing
+    // and its levels have no error of their own (ADR-0069). Given normals, it counts what a
+    // collapse does to its shading as a mesh without voxels does (the cooker gives them where
+    // a scene asks, ADR-0069's amendment).
     if (r == NPH_RESULT_OK && in->uvs != NULL && in->voxels == NULL && in->vertex_count != 0U) {
         // Copies that can grow by the vertices the levels add.
         r = NPH_ARRAY_PUSH_N(&b.grown_positions, in->positions, in->vertex_count);
@@ -2928,7 +2931,7 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
             b.uvs = b.grown_uvs.data;
         }
     }
-    if (r == NPH_RESULT_OK && in->normals != NULL && in->voxels == NULL && in->vertex_count != 0U) {
+    if (r == NPH_RESULT_OK && in->normals != NULL && in->vertex_count != 0U) {
         r = NPH_ARRAY_PUSH_N(&b.grown_normals, in->normals, in->vertex_count);
         b.normals = b.grown_normals.data;
     }

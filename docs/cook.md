@@ -39,8 +39,8 @@ asset database, and the identity scheme.
 nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
          [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
          [--uncompressed] [--no-mips] [--max-extent N]
-         [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--hlod]
-         [--hlod-cell M] [--hlod-distance M] [--threads N] [--quiet] [--verbose]
+         [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--voxel-normals]
+         [--hlod] [--hlod-cell M] [--hlod-distance M] [--threads N] [--quiet] [--verbose]
 nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
@@ -353,6 +353,10 @@ A closed mesh stays closed.
    "Voxels"); editable meshes cook without them. A flat-shaded aggregate stays
    triangles: each of its faces has vertices of its own, so a meshlet fills
    at about 28 triangles and its groups stay under the 256 a group needs.
+   A voxel cook's levels leave the meshes' shading normals out of their
+   collapses' cost unless `--voxel-normals` asks for them (ADR-0069's
+   amendment): the city asks, for its cloth banners; the landscape's frame
+   took 13 to 24 % more with them.
 
 Every step is deterministic: the same input gives the same bytes.
 

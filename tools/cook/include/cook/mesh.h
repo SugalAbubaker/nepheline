@@ -120,6 +120,11 @@ typedef struct CookMeshSettings {
     // given (step 8; ADR-0061): off by default until the voxel raster draws
     // the reference scenes' foliage faster than their stalled triangles.
     b32 voxels;
+    // With voxels, the meshes count what a collapse does to their shading
+    // normals, as without voxels (ADR-0069's amendment). Off, a voxel cook
+    // keeps the simplifier its voxels were measured with: the city's cloth
+    // banners need it, and it made the landscape's frame 13 to 24 % slower.
+    b32 voxel_normals;
     // The mesh's normal maps have green growing downwards (DirectX's
     // convention, not glTF's): its tangents' w is negated (docs/cook.md
     // "Tangent handedness").

@@ -259,8 +259,9 @@ are third-party content, kept outside the repository: a manifest in
 its document, its licence and attribution), names its cooked pack and
 scene, the cooker's options it needs (`cook`: `voxels` for the voxel levels
 of aggregate geometry, ADR-0061, which the landscape's foliage asks for;
-`hlod` for the cells and their proxies; `normal_y_down` for DirectX's normal
-maps), its exposure (`ev100`), its sky (`sky_intensity`, scaling the
+`voxel_normals` for a voxel cook's surfaces to count their shading normals,
+ADR-0069's amendment; `hlod` for the cells and their proxies; `normal_y_down`
+for DirectX's normal maps), its exposure (`ev100`), its sky (`sky_intensity`, scaling the
 default daylight sky, which pairs with a 30,000 lux sun, to the scene's
 own sun; `"ibl": false` makes it a background only, as a night's is,
 ADR-0075), whether its sun casts shadows (`sun_shadows`: glTF cannot say,
