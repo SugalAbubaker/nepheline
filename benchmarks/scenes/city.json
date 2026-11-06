@@ -13,13 +13,13 @@
     "document": "city.gltf"
   },
   "pack": "city.npk",
-  "cook": {"normal_y_down": true},
+  "cook": {"normal_y_down": true, "voxels": true, "voxel_normals": true, "hlod": true},
   "scene": "city.gltf#scene",
   "ev100": 13.0,
   "sky_intensity": 1.0,
   "sun_shadows": true,
   "lists": 4,
-  "tiles": {"count": [16, 16], "pitch": [153.5, 153.5], "instances": 883, "meshes": 0, "cells": 0},
+  "tiles": {"count": [16, 16], "pitch": [153.5, 153.5], "instances": 883, "meshes": 0, "cells": 16},
   "layout": {
     "generator": "scripts/city.py",
     "fbx": "EmeraldSquare_v4_1/EmeraldSquare_Day.fbx",

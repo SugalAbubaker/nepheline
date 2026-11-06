@@ -1,7 +1,7 @@
 # 0068. The city reference scene: Emerald Square, converted and tiled
 
 - **Date:** 2026-10-30
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-11-06: voxels and the cells' proxies after all
 
 ## Context
 
@@ -139,3 +139,60 @@ simplify: the forest's problem (ADR-0060) on a smaller scale.
   place to spend time.
 - The gate's frame holds no moving objects, no characters, and few lights: the sun,
   and emissive surfaces that light nothing yet.
+
+## Amendment (2026-11-06): voxels and the cells' proxies after all
+
+**Context.** Decision 6 cooked the city with levels of detail alone, for two reasons that no longer
+hold. The cells' proxies seemed to lose the far towers, but the loader had dropped them:
+`samples/common/cooked_scene.c` put a tile's instances of no cell into the previous tile's last
+cell, so each tile's loose instances, its 108 m tower among them, went with that cell's proxy. And
+voxel levels made the rooftop slower, until the voxel raster filled its lanes and skipped what is
+drawn over it, and voxel meshes of few groups took the flat cull (ADR-0061's and ADR-0070's
+amendments). Cooked with voxels, the city's triangle levels also counted no shading normals, which
+drew the park's cloth banners with black bands; a scene now asks for them (ADR-0069's amendment).
+
+**Decision** (the user's, 2026-11-05 and 2026-11-06). The city's manifest cooks voxels, its voxel
+meshes' normals and its cells (sixteen of 64 m a tile, 4,096 in the city): `cook` adds `voxels`,
+`voxel_normals` and `hlod`, and `tiles.cells` is 16. Its reference budgets are re-based on that pack
+(`reference_scenes-2026-11-06-city-voxels`).
+
+**Measured** on the RTX 3060 Ti at native 4K, Profile, two interleaved rounds on the same build, the
+editor's windows minimised:
+
+| View | Triangle cook (ms) | Voxels and cells (ms) | 1%-low (ms) |
+|---|---|---|---|
+| street | 6.61 | 6.82 | 6.74 to 6.93 |
+| street_walk | 6.72 | 6.86 | 6.96 to 7.05 |
+| street_sprint | 6.93 | 6.97 | 7.22 to 7.32 |
+| street_turn | 6.86 | 6.99 | 7.57 to 7.74 |
+| crossing | 6.77 | 6.91 | 7.00 to 7.15 |
+| park | 7.89 | 8.08 | 8.04 to 8.28 |
+| rooftop | 10.01 | 10.11 | 10.06 to 10.18 |
+
+Against level 0 (`render_perf --truth --accumulate=64`, `--lod-error=0` for level 0; the root mean
+square of each pixel's luminance error, relative to its own, and the share of pixels under half
+their truth):
+
+| View | Triangle cook | Voxels and cells | Pixels under half their truth |
+|---|---|---|---|
+| park | 5.2 % | 4.5 % | 0.10 % to 0.10 % |
+| street | 6.3 % | 4.1 % | 0.13 % to 0.09 % |
+| rooftop | 14.1 % | 9.3 % | 1.95 % to 0.37 % |
+
+Device-local memory goes from 3.37 to 3.72 GB. DRAM (GPU Trace, over the passes the cook changes:
+the culls, the rasters, the voxel and cell passes, the resolve and the depth pyramids): the street's
+frame reads and writes 455 MB there against 459, the rooftop's 829 against 822, its voxel passes
+130 MB more and the others 122 MB less. The cook adds the voxel levels to the city's 151 meshes and
+its cells' proxies (1.09 million voxels): about 3 minutes from a cache of the triangle cook, and a
+pack of 0.70 GB against 0.69.
+
+**Consequences.**
+
+- The image is nearer level 0 in every view measured: the far trees keep their coverage where the
+  triangle cook's coarsest levels lost leaves (on the rooftop, 0.37 % of pixels under half their
+  truth against 1.95 %).
+- The streets take 0.04 to 0.21 ms more, the park 0.20 and the rooftop 0.11. The cells' passes and
+  culls, the voxel passes' floors and the resolve's voxel variant cost that in every view;
+  ADR-0061's amendment lists what is left to win back. The street's 1%-low comes to the gate:
+  6.93 ms in these rounds, 7.01 in an earlier session's.
+- ADR-0067's doubt about voxels on buildings is answered for the city: its towers' proxies hold.

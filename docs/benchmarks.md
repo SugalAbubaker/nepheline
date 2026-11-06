@@ -408,7 +408,7 @@ Phase 13's end, to compare it with, is `reference_scenes-2026-10-30b`.
 |---|---|---|
 | `bistro` | Amazon Lumberyard Bistro, exterior (CC BY 4.0; NVIDIA's glTF conversion, MIT, as `zeux/niagara_bistro` edits it) | a street at dusk: 2,909 instances of 551 meshes, 254 materials (234 specular-glossiness) using 338 BC7 DDS textures, the sun at 6,830 lux and 96 street lamps |
 | `landscape` | Poly Haven's pine-forest assets (CC0; Rob Tuytel and Rico Cilliers), laid out by `scripts/landscape.py` (Phase 13; ADR-0040, ADR-0059) | a forested valley 1 × 1.5 km at midday: a terrain of 750,000 triangles under 47,862 instances of 30 modelled meshes (9,729 pines of 4.2 to 7.0 million triangles, 8,786 pine saplings of 1.5 to 2.7 million, 16,057 fir saplings, rocks, stumps, roots, branches), the sun at 30,000 lux; views at 1.7 m along a trail: still, walking, sprinting, turning, across the valley, and along it from its side |
-| `city` | NVIDIA Emerald Square (CC BY-NC-SA 3.0; Open Research Content Archive; used only to test the engine, ADR-0067), converted and tiled by `scripts/city.py` (Phase 14; ADR-0068) | a city of 16 by 16 tiles, 2.46 km square, at midday: each tile four blocks in 153.5 m, 883 instances of 151 meshes (8.6 million triangles, 2.6 million of them unique), 110 materials using 333 BC1, BC3 and BC5 DDS textures, the sun at 30,000 lux; views at 1.7 m: a street still, walking, sprinting and turning, a crossing's long sightline, the park's grass and trees, and from 112 m over the rooftops |
+| `city` | NVIDIA Emerald Square (CC BY-NC-SA 3.0; Open Research Content Archive; used only to test the engine, ADR-0067), converted and tiled by `scripts/city.py` (Phase 14; ADR-0068) | a city of 16 by 16 tiles, 2.46 km square, at midday: each tile four blocks in 153.5 m, 883 instances of 151 meshes (8.6 million triangles, 2.6 million of them unique), 110 materials using 333 BC1, BC3 and BC5 DDS textures, the sun at 30,000 lux; cooked with voxel levels, its voxel meshes' normals and its cells' proxies (sixteen cells of 64 m a tile, ADR-0068's amendment); views at 1.7 m: a street still, walking, sprinting and turning, a crossing's long sightline, the park's grass and trees, and from 112 m over the rooftops |
 
 Measured on the RTX 3060 Ti (Profile, 240 frames, 2026-10-22), against
 the 4.17 ms frame of §10.1:
@@ -463,7 +463,9 @@ more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
 spread). `benchmarks/reference_budgets.txt` is generated from
 `reference_scenes-2026-11-01`, Bistro and the city, a process a scene as
-the nightly runs them. The landscape has no rows there: the nightly does not
+the nightly runs them, and the city's rows again from
+`reference_scenes-2026-11-06-city-voxels` since it cooks voxels and cells
+(ADR-0068's amendment). The landscape has no rows there: the nightly does not
 run it.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
