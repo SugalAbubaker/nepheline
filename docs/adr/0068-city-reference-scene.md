@@ -179,12 +179,12 @@ their truth):
 | street | 6.3 % | 4.1 % | 0.13 % to 0.09 % |
 | rooftop | 14.1 % | 9.3 % | 1.95 % to 0.37 % |
 
-Device-local memory goes from 3.37 to 3.72 GB. DRAM, traced on the same cook without its meshes'
-normals (GPU Trace, the passes it changes): the street's frame reads and writes 1 MB less, the
-rooftop's 7 to 11 MB less, its voxel passes 127 MB more and its triangles' rasters and culls 138 MB
-less. With the normals the rooftop's software raster draws more triangles (0.67 to 0.75 ms), not yet
-traced. The cook adds the voxel levels to the city's 151 meshes and its cells' proxies (1.09 million
-voxels): about 3 minutes from a cache of the triangle cook, and a pack of 0.70 GB against 0.69.
+Device-local memory goes from 3.37 to 3.72 GB. DRAM (GPU Trace, over the passes the cook changes:
+the culls, the rasters, the voxel and cell passes, the resolve and the depth pyramids): the street's
+frame reads and writes 455 MB there against 459, the rooftop's 829 against 822, its voxel passes
+130 MB more and the others 122 MB less. The cook adds the voxel levels to the city's 151 meshes and
+its cells' proxies (1.09 million voxels): about 3 minutes from a cache of the triangle cook, and a
+pack of 0.70 GB against 0.69.
 
 **Consequences.**
 
