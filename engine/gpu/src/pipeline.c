@@ -316,9 +316,10 @@ static NphResult build_compute(NphGpuDevice *dev, const NphGpuComputePipelineDes
                           name, d->subgroup_size, lim->subgroup_size_min, lim->subgroup_size_max);
             return NPH_RESULT_INVALID_ARGUMENT;
         }
+        // The stage's chain starts here: stage_info leaves it empty.
+        NPH_ASSERT(ci.stage.pNext == NULL);
         memset(&sized, 0, sizeof sized);
         sized.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
-        sized.pNext = (void *)ci.stage.pNext;
         sized.requiredSubgroupSize = d->subgroup_size;
         ci.stage.pNext = &sized;
         ci.stage.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;

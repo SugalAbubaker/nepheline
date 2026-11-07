@@ -164,7 +164,7 @@ NTEST_F(GpuFixture, compute_pipelines_take_the_subgroup_size_asked)
         u32 in_subgroup[2] = {0U, 0U};
         u64 lanes_seen[2][4] = {{0U, 0U, 0U, 0U}, {0U, 0U, 0U, 0U}}; // 256 bits each
         for (u32 i = 0; i < 2U * size; ++i) {
-            const u32 *w = &out[4U * i];
+            const u32 *w = &out[(u64)i * 4U];
             NTEST_ASSERT_EQ_UINT(w[0], size);
             NTEST_ASSERT_EQ_UINT(w[1], 2U);
             NTEST_ASSERT_TRUE(w[2] < 2U && w[3] < size);
