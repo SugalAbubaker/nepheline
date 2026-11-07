@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // The visibility buffer's voxel raster (docs/render.md "Voxels"; ADR-0061):
-// one workgroup per voxel cluster of the phase's voxel list, which the
-// meshlet cull fills.
+// a subgroup per voxel cluster of the phase's voxel list, which the meshlet
+// cull fills, two subgroups of k_lanes a workgroup (one where k_pairs is off:
+// a device with NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP). The
+// pipeline asks its subgroups' size, all full
+// (NphGpuComputePipelineDesc.subgroup_size; vis.c takes the device's nearest
+// 32), so each subgroup takes its cluster from its records to its last flush
+// and waits for no other: most clusters are small (the city's cells' proxies
+// average 85 voxels, a third of them 32 or fewer), and a cluster shared by a
+// workgroup's subgroups left one of them a batch or none after loading the
+// cluster's records and computing its transforms as the other did.
 //
 // The voxels are splatted: each projects its footprint's box (a capsule's
 // widened by its radius, within its cell) to the pixels whose centres it may
@@ -53,7 +61,16 @@
 #include "vis_voxel.glsl"
 #include "nph_bindless_int64.glsl"
 
-layout(local_size_x = 64) in;
+// Two subgroups of k_lanes, or one without k_pairs: vis.c sets them, the
+// local size k_lanes times the subgroups. A phase of few clusters leaves most
+// of the GPU idle, and a cluster is drawn sooner by both of a workgroup's
+// subgroups, each with its own copy of the bricks, in alternate batches: the
+// pipeline with k_share takes those phases, a cluster a workgroup, and
+// vis_args.comp gives it or the other the phase's workgroups.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint k_lanes = 32u;
+layout(constant_id = 2) const bool k_pairs = true;
+layout(constant_id = 3) const bool k_share = false;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 #define BRICKS 32u // NPH_RENDER_VOXEL_CLUSTER_BRICKS
@@ -75,10 +92,11 @@ struct VisVoxelSplat {
 struct VisVoxelNear {
     uint depth;
 };
-shared VisVoxelBrickShared s_brick[BRICKS];
+// Each subgroup's cluster's bricks, from gl_SubgroupID * BRICKS.
+shared VisVoxelBrickShared s_brick[2u * BRICKS];
 // The subgroups' queues, room for two batches of a subgroup's voxels each.
-shared VisVoxelSplat s_splat[128];
-shared VisVoxelNear s_near[128];
+shared VisVoxelSplat s_splat[4u * k_lanes];
+shared VisVoxelNear s_near[4u * k_lanes];
 
 // The depth a pixel of the visibility buffer holds, as bits (positive
 // floats order as their bits).
@@ -110,15 +128,15 @@ uint nth_bit(uint m0, uint m1, uint n)
 }
 
 // Voxel k of the cluster (its rank first + k), whose bricks are s_brick's
-// first `brick_count`: the pixels whose centres its box may cover, their
-// count (none for a voxel of one pixel behind what that pixel holds, where
-// `skip`), and in `splat` their rectangle and the voxel (VisVoxelSplat,
+// `brick_count` from `bricks0`: the pixels whose centres its box may cover,
+// their count (none for a voxel of one pixel behind what that pixel holds,
+// where `skip`), and in `splat` their rectangle and the voxel (VisVoxelSplat,
 // without the pixels before them). `ax`, `ay`, `az` are a 32nd of the
 // cluster's cell along each axis in clip space. `near_depth` is the depth of
 // the box's nearest point, the most any of its hits can have, as bits.
-uint voxel_splat(uint k, uint first, uint brick_count, VisVoxelWordsRef run, uint stride, vec4 ax,
-                 vec4 ay, vec4 az, float near, vec2 viewport, bool skip, out uvec4 splat,
-                 out uint near_depth)
+uint voxel_splat(uint k, uint first, uint bricks0, uint brick_count, VisVoxelWordsRef run,
+                 uint stride, vec4 ax, vec4 ay, vec4 az, float near, vec2 viewport, bool skip,
+                 out uvec4 splat, out uint near_depth)
 {
     splat = uvec4(0u);
     near_depth = 0x7F800000u; // +inf
@@ -127,11 +145,11 @@ uint voxel_splat(uint k, uint first, uint brick_count, VisVoxelWordsRef run, uin
     uint lo = 0u;
     for (uint step = BRICKS / 2u; step > 0u; step >>= 1u) {
         const uint mid = lo + step;
-        if (mid < brick_count && s_brick[mid].b1.z - first <= k) {
+        if (mid < brick_count && s_brick[bricks0 + mid].b1.z - first <= k) {
             lo = mid;
         }
     }
-    const uvec4 b1 = s_brick[lo].b1;
+    const uvec4 b1 = s_brick[bricks0 + lo].b1;
     const uint bit = nth_bit(b1.x, b1.y, first + k - b1.z);
     splat.w = lo | (bit << 5u) | (k << 11u);
     // Its material's capsule byte, its box.
@@ -151,7 +169,7 @@ uint voxel_splat(uint k, uint first, uint brick_count, VisVoxelWordsRef run, uin
     }
     const vec3 mid3 = 0.5 * (box_lo + box_hi);
     const vec3 half3 = 0.5 * (box_hi - box_lo);
-    const vec4 c = s_brick[lo].clip + mid3.x * ax + mid3.y * ay + mid3.z * az;
+    const vec4 c = s_brick[bricks0 + lo].clip + mid3.x * ax + mid3.y * ay + mid3.z * az;
     const vec4 e = half3.x * abs(ax) + half3.y * abs(ay) + half3.z * abs(az);
     // Rays start on the near plane, where clip w is its distance.
     if (c.w + e.w < 0.999 * near) {
@@ -180,16 +198,15 @@ uint voxel_splat(uint k, uint first, uint brick_count, VisVoxelWordsRef run, uin
     return uint(n.x) * uint(n.y);
 }
 
-void main()
+// Cluster g of the phase's voxel list, by the calling subgroup, alone or as
+// the `place`th of `sharing` that take its batches in turn: its bricks in
+// s_brick from gl_SubgroupID * BRICKS, its queue in s_splat and s_near from
+// gl_SubgroupID * 2 * k_lanes.
+void raster_cluster(VisViewRef view, uint g, uint place, uint sharing)
 {
-    VisViewRef view = VisViewRef(pc.view);
-    const uint kind = uint(NPH_VIS_RASTER_VOXEL);
-    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
-    // The same for the whole workgroup, so no invocation misses a barrier.
-    if (wg >= VisCountersRef(view.v.counters).c.raster_count[pc.phase][kind]) {
-        return;
-    }
-    const uint g = VisUintRef(view.v.raster_lists[pc.phase][kind]).v[wg];
+    const uint lane = gl_SubgroupInvocationID;
+    const uint bricks0 = gl_SubgroupID * BRICKS;
+    const uint queue = gl_SubgroupID * 2u * k_lanes;
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
     const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
@@ -199,7 +216,6 @@ void main()
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
     const vec2 viewport = view.v.viewport.xy;
     const mat4 vp = view.v.view_proj;
-    const uint i = gl_LocalInvocationIndex;
     // A voxel cluster's meshlet: its first brick, its record (render/voxel.h
     // "The compact form").
     const VisVoxelCluster vc = vis_voxel_cluster(mesh.voxel_clusters, m.y);
@@ -211,21 +227,21 @@ void main()
     const vec4 ax = vp * vec4(vis_transform_vector(inst.transform, vec3(step, 0.0, 0.0)), 0.0);
     const vec4 ay = vp * vec4(vis_transform_vector(inst.transform, vec3(0.0, step, 0.0)), 0.0);
     const vec4 az = vp * vec4(vis_transform_vector(inst.transform, vec3(0.0, 0.0, step)), 0.0);
-    if (i < brick_count) {
+    for (uint b = lane; b < brick_count; b += k_lanes) {
         uvec4 b0;
         uvec4 b1;
-        vis_voxel_brick(bricks, m.x + i, vc, b0, b1);
-        s_brick[i].b0 = b0;
-        s_brick[i].b1 = b1;
-        s_brick[i].clip =
+        vis_voxel_brick(bricks, m.x + b, vc, b0, b1);
+        s_brick[bricks0 + b].b0 = b0;
+        s_brick[bricks0 + b].b1 = b1;
+        s_brick[bricks0 + b].clip =
             vp * vec4(vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t, 1.0);
     }
-    barrier();
+    subgroupBarrier(); // the subgroup's bricks, for its lanes alone
     // A cluster's voxels follow one another in its bricks' order, their ranks
     // from the first brick's (checked when a mesh is made: 0), so voxel k of
     // the cluster is rank first + k.
-    const uint first = s_brick[0].b1.z;
-    const uvec4 last = s_brick[brick_count - 1u].b1;
+    const uint first = s_brick[bricks0].b1.z;
+    const uvec4 last = s_brick[bricks0 + brick_count - 1u].b1;
     const uint total = last.z - first + bitCount(last.x) + bitCount(last.y);
     const float near = view.v.projection.z;
     const bool skip = (view.v.flags & uint(NPH_VIS_VIEW_VOXEL_SKIP)) != 0u;
@@ -234,24 +250,18 @@ void main()
     // The instance's part of every pixel's ray, once.
     const mat3 inv = vis_voxel_inverse_linear(inst.transform);
     const vec3 o = vis_voxel_ray_origin(inv, t);
-    const uint lane = gl_SubgroupInvocationID;
-    // A subgroup's lanes (its invocations, though its size be larger than the
-    // workgroup), its share of the workgroup's batch of voxels, and its
-    // queue's entries of s_splat.
-    const uint lanes = 64u / gl_NumSubgroups;
-    const uint queue = gl_SubgroupID * 2u * lanes;
     uint queued = 0u;  // the queue's voxels, the same in the whole subgroup
     uint pending = 0u; // and their pixels
-    for (uint base = gl_SubgroupID * lanes;; base += 64u) {
+    for (uint base = place * k_lanes;; base += sharing * k_lanes) {
         const bool more = base < total;
         if (more) {
             const uint k = base + lane;
             uvec4 splat = uvec4(0u);
             uint near_depth = 0u;
-            const uint pixels = k < total ? voxel_splat(k, first, brick_count, run, vc.stride, ax,
-                                                        ay, az, near, viewport, skip, splat,
-                                                        near_depth)
-                                          : 0u;
+            const uint pixels =
+                k < total ? voxel_splat(k, first, bricks0, brick_count, run, vc.stride, ax, ay,
+                                        az, near, viewport, skip, splat, near_depth)
+                          : 0u;
             // The voxels with pixels join the queue.
             const uvec4 ballot = subgroupBallot(pixels != 0u);
             const uint before = subgroupExclusiveAdd(pixels);
@@ -263,17 +273,17 @@ void main()
             }
             queued += subgroupBallotBitCount(ballot);
             pending += subgroupAdd(pixels);
-            if (queued <= lanes) {
+            if (queued <= k_lanes) {
                 continue; // another batch fits
             }
         }
         subgroupBarrier();
-        for (uint j = lane; j < pending; j += lanes) {
+        for (uint j = lane; j < pending; j += k_lanes) {
             // The voxel whose pixels hold pixel j of the queue's: the last
-            // with no more pixels before it than j, in seven halvings (a
-            // queue holds 128 at most).
+            // with no more pixels before it than j, in halvings from k_lanes
+            // (a queue holds two batches, 2 * k_lanes voxels at most).
             uint lo = 0u;
-            for (uint step = 64u; step > 0u; step >>= 1u) {
+            for (uint step = k_lanes; step > 0u; step >>= 1u) {
                 const uint mid = lo + step;
                 if (mid < queued && s_splat[queue + mid].v.z <= j) {
                     lo = mid;
@@ -290,7 +300,8 @@ void main()
             vec3 world_dir;
             const vec3 d =
                 vis_voxel_ray_dir(inv_view_proj, inv, vis_voxel_ndc(pixel, inv_size), world_dir);
-            const VisVoxelRay r = vis_voxel_brick_ray(uintBitsToFloat(s_brick[brick].b0.xyz), o, d);
+            const VisVoxelRay r =
+                vis_voxel_brick_ray(uintBitsToFloat(s_brick[bricks0 + brick].b0.xyz), o, d);
             float th;
             uint face;
             if (vis_voxel_hit(vis_voxel_load_footprint(run, vc.stride, first + (sp.w >> 11u)),
@@ -306,4 +317,19 @@ void main()
         queued = 0u;
         pending = 0u;
     }
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    const uint kind = uint(NPH_VIS_RASTER_VOXEL);
+    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // The workgroup's two clusters, a subgroup each (the second of the last
+    // workgroup, of an odd count, has none), or its one, shared with k_share.
+    const uint c = k_pairs && !k_share ? 2u * wg + gl_SubgroupID : wg;
+    if (c >= VisCountersRef(view.v.counters).c.raster_count[pc.phase][kind]) {
+        return;
+    }
+    raster_cluster(view, VisUintRef(view.v.raster_lists[pc.phase][kind]).v[c],
+                   k_share ? gl_SubgroupID : 0u, k_share ? 2u : 1u);
 }

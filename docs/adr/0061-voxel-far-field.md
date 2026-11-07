@@ -763,3 +763,80 @@ one subgroup a cluster, so that the prologue is not done twice and the last flus
 needs a subgroup size of 32, or the work items' arguments to know it); a shorter chain of loads (the
 meshlet cull holds the cluster's instance and meshlet when it lists it); and a voxel's brick and bit
 from a table each cluster fills once.
+
+## Amendment (2026-11-07): a cluster a subgroup
+
+**Context.** The city adopted its cells' voxel proxies (ADR-0068's amendment of 2026-11-06), and on its
+rooftop `vis voxel raster` took 1.42 + 0.19 ms, the largest pass after the resolve. The proxies' clusters
+are small: 12,899 of them, 4.1 bricks and 85 voxels each on average, 35 % with 32 voxels or fewer and
+57 % with 64 or fewer. A workgroup of 64 invocations took one cluster, and on the RTX 3060 Ti its two
+subgroups of 32 each loaded the cluster's records and computed its transforms (the prologue, 401 of the
+pass's 1,914 instructions a pixel), then took alternate batches of 32 voxels: a cluster of 32 voxels or
+fewer left the second subgroup nothing but an empty flush.
+
+**Decision.**
+
+1. *A cluster a subgroup.* The pipeline asks its subgroups' size (`NphGpuComputePipelineDesc.subgroup_size`,
+   new to the RHI: Vulkan 1.3's subgroup size control with full subgroups, which the device now
+   requires): 32 where the device lets it, else the nearest. A workgroup is two of them, each with its own
+   copy of its cluster's bricks and its own queue, so that it takes its cluster from its records to its
+   last flush and waits for no other: a subgroup barrier where the workgroup's was, and none between the
+   two. `vis args` dispatches a workgroup per two clusters.
+2. *A phase of few clusters shares them.* Below `NphRendererDesc.voxel_share_clusters` (1,024) a phase
+   leaves most of the GPU idle, and a cluster is drawn sooner by two subgroups than by one: there a second
+   pipeline (`k_share`) gives a workgroup one cluster, both its subgroups taking alternate batches with a
+   copy of the bricks each. `vis args` gives one of the two dispatches the phase's workgroups and the
+   other none, so that neither pipeline carries the other's code.
+3. *Lavapipe's subgroup barriers.* There (Mesa 25.2.8) a subgroup barrier waits for the workgroup's other
+   subgroups: where one has returned, a subgroup that passes barriers in a loop does not go on, and what
+   it would write after is lost (gpu_tests' `a_subgroup_barrier_waits_for_its_subgroup_alone`: eight
+   lanes wrote before the loop, none after). `NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP` marks the
+   driver, and there a workgroup is one subgroup (and the shared clusters' pipeline is not made).
+
+**Measured and not kept.**
+- *A voxel's brick and cell from a table each cluster fills once* (two 16-bit entries a word in shared
+  memory, zeroed, then filled with `atomicOr` by an invocation a half of a brick's mask): the rooftop's
+  phase 0 1.416 to 1.607 ms. It replaced the five-step search and the rank's select with a read, but the
+  fill (a zeroing pass, two barriers, an atomic a voxel) is paid whatever the cluster's size, and the
+  compiler took 80 registers for it (12 workgroups an SM against 14).
+- *Two clusters a workgroup by halves of its subgroups* (any subgroup size: a half's subgroups sharing its
+  cluster, one subgroup as wide as the workgroup taking both in turn): the view's matrices loaded before
+  the halves' loop, 96 registers and phase 0 1.476 ms; loaded in its body, 80 and 1.318; the body a
+  function called once or twice, 72 and 1.242. Lavapipe failed it: its halves of four subgroups waited at
+  their subgroup barriers for the other half (decision 3).
+- *The shared clusters in the same pipeline*, chosen by the phase's count: a runtime stride cost the
+  rooftop's phase 0 0.022 ms, and a call for each mode (37,760 bytes of code against 19,072) 0.031.
+
+**Measured.** Two builds, main (eb53e34) against this, interleaved, the city three rounds and the landscape
+(as at Phase 13's end) and the synthetic scenes two, each pack a process, the editor's windows minimised
+(means, ms):
+
+| Scene | Before | After | Voxel raster, phases 0 + 1 |
+|---|---|---|---|
+| City rooftop | 10.143 | 9.977 | 1.426 + 0.196 to 1.284 + 0.182 |
+| City crossing | 6.923 | 6.915 | 0.115 + 0.016 to 0.107 + 0.016 |
+| City park and streets (5 views) | 6.827 to 8.096 | 6.836 to 8.097 | unchanged (frames -0.007 to +0.009) |
+| Landscape forest | 58.10 | 55.26 | 17.29 + 1.75 to 14.74 + 1.54 |
+| Landscape (5 other views) | 50.56 to 62.10 | 47.83 to 59.74 | (-1.95 to -2.56 in phase 0) |
+| `foliage_4k_production` | 6.443 | 6.223 | 1.786 + 0.348 to 1.613 + 0.322 |
+| `foliage_shadows_walk_4k_production`, `_sun_` | 6.881, 23.422 | 6.668, 23.235 | (-0.168 and -0.160 in phase 0) |
+
+The pass took 80 registers and spilled nothing, where it took 72 and spilled 2,304 bytes to shared
+memory. The city's and the landscape's views drawn as their instances (`--debug-view=instances`, which
+depends on no order of clusters) are those of before pixel for pixel: the crossing's 401 pixels that
+differ between the builds differ as much between two runs of the old one. The sun-turning synthetic
+scene's shadow map settles at its resolution bias 0 or 1 by a run's history (23.4 or 15.6 ms, either
+build; the two builds' maps are the same frame by frame given the same frames): both biases are stable
+there, at 1 the pages never leave room enough to lower it and at 0 they never outrun its budget, which is
+the shadow map's to settle. The pass reads and writes what it did (its declared footprint unchanged,
+161.0 MB read and 66.4 MB written a phase); its DRAM was not traced.
+
+**Tests.** `VoxelAloneGpu.voxel_clusters_draw_where_their_rays_meet_them` draws the rays test's views
+with every phase's clusters a subgroup each (`voxel_share_clusters` 1), where `VoxelGpu`'s share them
+(the tests' phases hold 10 to 368 clusters); both pass against the CPU twin on the RTX 3060 Ti and on
+lavapipe (subgroups of 8, a workgroup each), with the rest of the voxel suite; the renderer's 345 tests
+pass on the RTX 3060 Ti.
+
+**What is left.** A shorter chain of loads (the meshlet cull holds the cluster's instance and meshlet
+when it lists it), and a voxel's brick and bit (the five-step search over the bricks and a rank's select,
+468 of the 1,914 instructions a pixel) for less than a table the cluster fills.

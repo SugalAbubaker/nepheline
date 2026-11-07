@@ -158,6 +158,10 @@ typedef struct NphRendererDesc {
                               // this share of the chord their view ray cuts through its box,
                               // draw first writing their depth, so the leaves behind them are
                               // rejected early (the mesh path; 0.35)
+    u32 voxel_share_clusters; // phases of fewer voxel clusters than this give each one a
+                              // workgroup, both its subgroups taking it in turn, where more
+                              // give each its own subgroup: few leave the GPU idle, and two
+                              // draw a cluster sooner (vis_voxel_raster.comp; 1024; 1: never)
     u32 max_instance_updates; // instance records sent to the GPU per frame (16384); the
                               // rest wait for the next frame
     u32 max_material_slots;   // material slots across all instances (4 * max_instances);

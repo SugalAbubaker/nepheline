@@ -43,6 +43,27 @@ NTEST_TEARDOWN(VoxelGpu)
     test_render_teardown(f);
 }
 
+// The same with every phase's voxel clusters a subgroup each, where the
+// tests' few would otherwise share a workgroup each
+// (NphRendererDesc.voxel_share_clusters).
+typedef RenderFixture VoxelAloneGpu;
+
+NTEST_SETUP(VoxelAloneGpu)
+{
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.max_visible_clusters = 1U << 16U;
+    d.max_cull_meshlets = 1U << 18U;
+    d.max_deferred = 1U << 16U;
+    d.voxel_share_clusters = 1U;
+    test_render_setup(f, &d);
+}
+
+NTEST_TEARDOWN(VoxelAloneGpu)
+{
+    test_render_teardown(f);
+}
+
 #define REQUIRE_PRODUCTION(f)                                                                      \
     do {                                                                                           \
         REQUIRE_RENDERER(f);                                                                       \
@@ -682,7 +703,7 @@ static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, const NphVec3 
     return voxels_seen;
 }
 
-NTEST_F(VoxelGpu, voxel_clusters_draw_where_their_rays_meet_them)
+static void voxels_meet_their_rays(RenderFixture *f)
 {
     REQUIRE_PRODUCTION(f);
     // Sparse foliage (needles over 4 m) near, where triangles and voxels mix
@@ -721,6 +742,16 @@ NTEST_F(VoxelGpu, voxel_clusters_draw_where_their_rays_meet_them)
     }
     nph_render_material_destroy(f->renderer, mat);
     NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, rays, PIXELS);
+}
+
+NTEST_F(VoxelGpu, voxel_clusters_draw_where_their_rays_meet_them)
+{
+    voxels_meet_their_rays(f);
+}
+
+NTEST_F(VoxelAloneGpu, voxel_clusters_draw_where_their_rays_meet_them)
+{
+    voxels_meet_their_rays(f);
 }
 
 // A view of the skips' test: its distance and threshold.

@@ -381,6 +381,10 @@ NPH_SHARED_STRUCT(NphVisArgs)
     // for phase 1), and 1 in y and z (vis clear writes them).
     u32 lod_group_args[2][4];
     u32 lod_chunk_args[2][4];
+    // The voxel raster's shared clusters a phase (vis_voxel_raster.comp
+    // k_share): a workgroup per cluster where the phase has few, when
+    // raster_args' voxel entry has none (vis_args.comp).
+    u32 voxel_share_args[2][4];
 };
 
 // The frame's counters (cleared at the start of every frame).

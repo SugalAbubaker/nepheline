@@ -1160,8 +1160,21 @@ scaled by `A(kappa)` and `1 - 3 A(kappa) / kappa`).
 raster list of its own (`NPH_VIS_RASTER_VOXEL`, flagged
 `NPH_VIS_CLUSTER_VOXELS`), whatever its material: a voxel is opaque and
 carries the look its mesh's own materials had. `vis voxel raster`
-(`vis_voxel_raster.comp`) takes a workgroup a cluster and splats its voxels,
-an invocation a voxel. Each voxel projects its footprint's box (a capsule's
+(`vis_voxel_raster.comp`) takes a cluster a subgroup and splats its voxels,
+an invocation a voxel. Its pipeline asks its subgroups' size
+(`NphGpuComputePipelineDesc.subgroup_size`: 32 where the device lets it, else
+the nearest), two a workgroup, so that each subgroup takes its cluster from
+its records to its last flush and waits for no other: most clusters are
+small (the city's cells' proxies average 85 voxels, a third of them 32 or
+fewer), and a cluster shared by a workgroup's two subgroups left one of them
+a batch or none after loading the cluster's records as the other did. A
+phase of fewer than `NphRendererDesc.voxel_share_clusters` (1,024) leaves
+most of the GPU idle, and there a second pipeline takes a cluster a
+workgroup, both its subgroups in alternate batches with a copy of the bricks
+each; `vis args` gives one of the two dispatches the phase's workgroups and
+the other none. On a device with
+`NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP` (lavapipe) a workgroup
+is one subgroup. Each voxel projects its footprint's box (a capsule's
 widened by its radius, within its cell) to the pixels whose centres it may
 cover. The box's corners lie on its brick's grid of 32nds of a cell, so its
 centre and half-extents go to clip space as steps along that grid, the same

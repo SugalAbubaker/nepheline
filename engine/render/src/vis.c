@@ -279,6 +279,16 @@ NphResult render_vis_create(NphRenderer *r)
         }
         NPH_TRY(render_load_shader_file(r, k_shader_files[i], &v->shaders[i]));
     }
+    // The voxel raster's subgroups, one a cluster (vis_voxel_raster.comp):
+    // every one of one size, 32 where the device lets a pipeline ask for it,
+    // else the nearest size it does; two a workgroup, but one where a
+    // subgroup barrier would wait for the other.
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
+    const u32 voxel_lanes = nph_min_u32(nph_max_u32(32U, info->limits.subgroup_size_min),
+                                        info->limits.subgroup_size_max);
+    const bool voxel_pairs =
+        (info->quirks & (u32)NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP) == 0U;
+    const u32 voxel_share_below = r->desc.voxel_share_clusters;
     for (u32 i = 0; i < (u32)VIS_COMPUTE_COUNT; ++i) {
         const bool resolve_rt =
             i == (u32)VIS_COMPUTE_RESOLVE_RT || i == (u32)VIS_COMPUTE_RESOLVE_RT_VSM ||
@@ -294,6 +304,21 @@ NphResult render_vis_create(NphRenderer *r)
         memset(&d, 0, sizeof d);
         d.shader = v->shaders[k_compute_shaders[i]];
         d.name = k_compute_names[i];
+        if (i == (u32)VIS_COMPUTE_VOXEL_RASTER) {
+            d.subgroup_size = voxel_lanes;
+            d.specialization[0] = (voxel_pairs ? 2U : 1U) * voxel_lanes; // the local size
+            d.specialization[1] = voxel_lanes;
+            d.specialization[2] = voxel_pairs ? 1U : 0U;
+            d.specialization[3] = 0U; // k_share
+            d.specialization_count = 4U;
+        }
+        if (i == (u32)VIS_COMPUTE_ARGS) {
+            // The voxel raster's workgroups (vis_args.comp k_voxel_pairs,
+            // k_voxel_share_below).
+            d.specialization[0] = voxel_pairs ? 1U : 0U;
+            d.specialization[1] = voxel_share_below;
+            d.specialization_count = 2U;
+        }
         if (i == (u32)VIS_COMPUTE_RESOLVE || resolve_rt || resolve_vsm || resolve_gi) {
             // Whether the resolve dithers to the HDR target's precision,
             // whether it reads the sun's virtual shadow map, and whether
@@ -305,6 +330,13 @@ NphResult render_vis_create(NphRenderer *r)
         }
         NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->compute[i]));
         render_log_statistics(r, v->compute[i], k_compute_names[i]);
+        if (i == (u32)VIS_COMPUTE_VOXEL_RASTER && voxel_pairs) {
+            // The same for the phases of few clusters (k_share).
+            d.specialization[3] = 1U;
+            d.name = "vis voxel raster (shared clusters)";
+            NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &v->voxel_raster_share));
+            render_log_statistics(r, v->voxel_raster_share, d.name);
+        }
         if (i == (u32)VIS_COMPUTE_CULL_MESHLETS) {
             // With the voxel clusters' routing (vis_cull_meshlets.comp
             // k_voxels).
@@ -406,13 +438,15 @@ NphResult render_vis_create(NphRenderer *r)
     }
     NPH_TRY(render_vis_scene_create(r));
     v->supported = 1;
-    const NphGpuDeviceInfo *info = nph_gpu_device_info(r->dev);
-    NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: production path rasterises with %s; HDR in %s", r->name,
+    NPH_LOG_INFO(&NPH_LOG_RENDER,
+                 "%s: production path rasterises with %s; HDR in %s; voxels a cluster a subgroup "
+                 "of %u, %u a workgroup",
+                 r->name,
                  v->mesh_shaders               ? "mesh shaders"
                  : !info->features.mesh_shader ? "indirect draws (no mesh shaders)"
                                                : "indirect draws (the driver's mesh shaders are "
                                                  "unusable here)",
-                 nph_gpu_format_info(v->hdr_format)->name);
+                 nph_gpu_format_info(v->hdr_format)->name, voxel_lanes, voxel_pairs ? 2U : 1U);
     return NPH_RESULT_OK;
 }
 
@@ -431,6 +465,7 @@ void render_vis_destroy(NphRenderer *r)
         nph_gpu_pipeline_destroy(dev, v->compute[i]);
     }
     nph_gpu_pipeline_destroy(dev, v->cull_meshlets_voxels);
+    nph_gpu_pipeline_destroy(dev, v->voxel_raster_share);
     for (u32 i = 0; i < 8U; ++i) {
         nph_gpu_pipeline_destroy(dev, v->resolve_debug[i >> 2U][(i >> 1U) & 1U][i & 1U]);
         nph_gpu_pipeline_destroy(dev, v->resolve_voxels[i >> 2U][(i >> 1U) & 1U][i & 1U]);
@@ -1237,7 +1272,10 @@ static void sw_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd
             ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_SOFTWARE) * 16U);
 }
 
-// The voxel raster of a phase: a workgroup per voxel cluster.
+// The voxel raster of a phase: a subgroup per voxel cluster, two a
+// workgroup, or where the phase has few, a workgroup per cluster that both
+// its subgroups take; vis args gives one of the two dispatches the phase's
+// workgroups and the other none (vis_voxel_raster.comp).
 static void voxel_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd, u32 phase)
 {
     const VisFrame *f = &r->vis.frame;
@@ -1249,6 +1287,12 @@ static void voxel_raster_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpu
         cmd, nph_gpu_rg_buffer(graph, f->args),
         ARGS_OFFSET(raster_args) +
             ((u64)phase * (u64)NPH_VIS_RASTER_KINDS + (u64)NPH_VIS_RASTER_VOXEL) * 16U);
+    if (nph_gpu_pipeline_is_valid(r->dev, r->vis.voxel_raster_share)) {
+        nph_gpu_cmd_bind_pipeline(cmd, r->vis.voxel_raster_share);
+        nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+        nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                      ARGS_OFFSET(voxel_share_args) + (u64)phase * 16U);
+    }
 }
 
 static void voxel_raster0_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)

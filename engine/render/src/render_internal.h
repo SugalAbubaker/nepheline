@@ -986,6 +986,10 @@ typedef struct RenderVis {
     // compute[VIS_COMPUTE_CULL_MESHLETS] with the voxel clusters' routing
     // (vis_cull_meshlets.comp k_voxels), for the same frames.
     NphGpuPipeline cull_meshlets_voxels;
+    // compute[VIS_COMPUTE_VOXEL_RASTER] for phases of few clusters, a cluster
+    // a workgroup that both its subgroups take (vis_voxel_raster.comp
+    // k_share); null where a workgroup is one subgroup.
+    NphGpuPipeline voxel_raster_share;
     b32 frame_voxels; // this frame may draw voxel clusters (voxel_meshes)
     // The voxel resolve's (vis_voxel_resolve.glsl): [debug views][ray-traced
     // shadows][virtual shadow map][radiance cache].
