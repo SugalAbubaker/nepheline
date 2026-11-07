@@ -30,8 +30,9 @@ translation unit, `src/gpu_vma.cpp`, behind the C interface
 The device requires Vulkan 1.3 with dynamic rendering, synchronization2,
 timeline semaphores, buffer device address, descriptor indexing with
 update-after-bind and partially bound descriptors, draw indirect count,
-host query reset, scalar block layout, format-less storage images, and 128
-bytes of push constants. Optional capabilities are detected and enabled
+host query reset, scalar block layout, format-less storage images, subgroup
+size control for compute with full subgroups (all of which Vulkan 1.3 makes
+every device have), and 128 bytes of push constants. Optional capabilities are detected and enabled
 when present and reported in `NphGpuFeatures`: mesh shaders (with their
 limits in `NphGpuLimits`), ray queries, 64-bit image and buffer atomics
 (the visibility buffer and the software rasteriser of §8.6.4), min/max
@@ -58,7 +59,14 @@ virtual shadow map's page clears drew nothing after the visibility
 buffer's raster. There the RHI records them as indirect-count draws whose
 count it reads from a table of its own (`u32[256]`, entry n holding n),
 so callers need do nothing; `an_indirect_draw_after_a_count_draw_draws`
-pins it on every device.
+pins it on every device. `NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP`
+marks it too: its subgroups are coroutines of a workgroup's thread, and a
+subgroup barrier waits for the workgroup's other subgroups, so that where
+one has returned, a subgroup passing barriers in a loop does not go on past
+it and what it would write after is lost. Users give such a device
+workgroups of one subgroup (the renderer's voxel raster does);
+`a_subgroup_barrier_waits_for_its_subgroup_alone` checks the barrier on
+every other device and logs what it did there.
 
 Physical devices are scored (discrete > integrated > virtual > CPU, then
 device-local memory, then optional features) and every candidate is logged
@@ -350,7 +358,13 @@ A compute pipeline can set up to eight specialization constants
 to n − 1, 32 bits each), so one module gives several pipelines, each
 compiled with its dead branches removed and its registers allocated for
 what remains; the renderer's resolve is specialised for its HDR target's
-format this way.
+format this way. One can also ask its subgroups' size
+(`NphGpuComputePipelineDesc.subgroup_size`, a power of two from
+`NphGpuLimits.subgroup_size_min` to `subgroup_size_max`, the local size in
+x a multiple of it): every subgroup is then that size and full, so that a
+workgroup is a known number of them (`compute_pipelines_take_the_subgroup_size_asked`
+checks sizes, counts and lanes at the device's least and greatest size and
+at 32).
 
 With `NphGpuDeviceDesc.shader_statistics` set, pipelines are created with
 `VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR` where the driver has

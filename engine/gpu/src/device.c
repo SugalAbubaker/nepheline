@@ -526,6 +526,14 @@ static void check_baseline(Candidate *c, bool headless)
         c->reject = "dynamic rendering or synchronization2 missing";
         return;
     }
+    // Compute pipelines that ask their subgroups' size (pipeline.h
+    // NphGpuComputePipelineDesc.subgroup_size), which Vulkan 1.3 requires of
+    // every device.
+    if (!c->f13.subgroupSizeControl || !c->f13.computeFullSubgroups ||
+        (c->p13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0U) {
+        c->reject = "compute subgroup size control missing";
+        return;
+    }
     if (!c->f12.timelineSemaphore || !c->f12.bufferDeviceAddress || !c->f12.hostQueryReset ||
         !c->f12.drawIndirectCount || !c->f12.scalarBlockLayout) {
         c->reject = "timeline semaphores, buffer device address, host query reset, draw "
@@ -869,8 +877,8 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
     f13.maintenance4 = c->f13.maintenance4;
-    f13.subgroupSizeControl = c->f13.subgroupSizeControl;
-    f13.computeFullSubgroups = c->f13.computeFullSubgroups;
+    f13.subgroupSizeControl = VK_TRUE;
+    f13.computeFullSubgroups = VK_TRUE;
     f13.shaderDemoteToHelperInvocation = c->f13.shaderDemoteToHelperInvocation;
 
     const char *exts[16];
@@ -1114,6 +1122,10 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         // Found by the renderer's paging tests on the CI's lavapipe (Mesa
         // 25.2.8), the first with sparse residency there.
         info->quirks |= (u32)NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES;
+        // Found by the voxel raster's tests (Mesa 25.2.8 on Windows, a
+        // subgroup a cluster) and pinned by gpu_tests'
+        // a_subgroup_barrier_waits_for_its_subgroup_alone.
+        info->quirks |= (u32)NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP;
     }
     info->device_local_bytes = device_local_bytes(&c->memory);
     info->host_visible_bytes = host_visible_bytes(&c->memory);
@@ -1132,6 +1144,8 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
         lim->max_compute_workgroup_count[i] = p->limits.maxComputeWorkGroupCount[i];
     }
     lim->subgroup_size = c->p11.subgroupSize;
+    lim->subgroup_size_min = c->p13.minSubgroupSize;
+    lim->subgroup_size_max = c->p13.maxSubgroupSize;
     const VkSampleCountFlags sc =
         p->limits.framebufferColorSampleCounts & p->limits.framebufferDepthSampleCounts;
     lim->max_sample_count = 1U;
@@ -1599,10 +1613,11 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                  info->features.texture_compression_bc, info->features.sampler_filter_minmax,
                  info->features.draw_indirect_first_instance, info->features.sparse_residency,
                  info->features.sparse_residency_strict);
-    GPU_LOG_INFO("subgroups of %u (vote %d, ballot %d, arithmetic %d, shuffle %d, quad %d; "
-                 "fragment %d); bindless %u sampled / %u storage / %u samplers; push constants "
-                 "%u B; timestamps %.3f ns",
-                 info->limits.subgroup_size, info->features.subgroup_vote,
+    GPU_LOG_INFO("subgroups of %u, %u to %u when asked (vote %d, ballot %d, arithmetic %d, "
+                 "shuffle %d, quad %d; fragment %d); bindless %u sampled / %u storage / %u "
+                 "samplers; push constants %u B; timestamps %.3f ns",
+                 info->limits.subgroup_size, info->limits.subgroup_size_min,
+                 info->limits.subgroup_size_max, info->features.subgroup_vote,
                  info->features.subgroup_ballot, info->features.subgroup_arithmetic,
                  info->features.subgroup_shuffle, info->features.subgroup_quad,
                  info->features.subgroup_fragment, info->limits.bindless_sampled_images,
@@ -1619,7 +1634,7 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
             info->limits.max_mesh_workgroup_count[2], info->limits.max_mesh_workgroup_total_count);
     }
     if (info->quirks != 0U) {
-        GPU_LOG_INFO("driver quirks worked around: 0x%x%s%s%s", info->quirks,
+        GPU_LOG_INFO("driver quirks worked around: 0x%x%s%s%s%s", info->quirks,
                      (info->quirks & (u32)NPH_GPU_QUIRK_MESH_FRAGMENT_PUSH_CONSTANTS) != 0U
                          ? " (mesh pipelines' fragment shaders read no push constants)"
                          : "",
@@ -1628,6 +1643,9 @@ NphResult nph_gpu_device_create(const NphGpuDeviceDesc *desc, NphGpuDevice **out
                          : "",
                      (info->quirks & (u32)NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES) != 0U
                          ? " (sparse images' gradient samples differ: no paged textures)"
+                         : "",
+                     (info->quirks & (u32)NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP) != 0U
+                         ? " (subgroup barriers wait for the workgroup: one subgroup a workgroup)"
                          : "");
     }
     *out = dev;

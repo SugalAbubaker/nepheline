@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// One workgroup of two subgroups (the pipeline asks their size): the second
+// returns at once, and the first writes its lanes' indices before a loop of
+// subgroup barriers and its sum after (each barrier waits for its own
+// subgroup alone; GpuFixture.a_subgroup_barrier_waits_for_its_subgroup_alone).
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x_id = 0) in;
+
+NPH_BUFFER_REF(OutBuffer) { uint data[]; };
+
+layout(push_constant, scalar) uniform Push { NphTestPush pc; };
+
+shared uint s_word[128];
+
+void main()
+{
+    if (gl_SubgroupID != 0u) {
+        return;
+    }
+    OutBuffer out_buffer = OutBuffer(pc.buffer_address);
+    const uint lane = gl_SubgroupInvocationID;
+    out_buffer.data[lane] = lane + 1u;
+    // Four rounds: each lane writes a word, and after the barrier adds its
+    // neighbour's, so every round needs the barrier.
+    uint sum = 0u;
+    for (uint round = 0u; round < 4u; ++round) {
+        s_word[lane] = lane + round;
+        subgroupBarrier();
+        sum += s_word[(lane + 1u) % gl_SubgroupSize];
+        subgroupBarrier();
+    }
+    out_buffer.data[gl_SubgroupSize + lane] = sum;
+}

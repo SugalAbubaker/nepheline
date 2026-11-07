@@ -149,12 +149,21 @@ typedef struct NphGpuComputePipelineDesc {
     // for what remains.
     u32 specialization[NPH_GPU_MAX_SPECIALIZATION];
     u32 specialization_count;
+    // The size of every subgroup of the pipeline's workgroups, all of them
+    // full (subgroup size control, core in Vulkan 1.3 and required by the
+    // device): 0 leaves it to the driver, which may choose differently from
+    // one pipeline to another; otherwise a power of two from the device's
+    // subgroup_size_min to its subgroup_size_max (NphGpuLimits), and the
+    // shader's local size in x a multiple of it, so that a workgroup is a
+    // whole number of subgroups of exactly this size.
+    u32 subgroup_size;
     const char *name;
 } NphGpuComputePipelineDesc;
 
 // NPH_RESULT_INVALID_ARGUMENT for a stage mismatch (a non-vertex shader in
 // `vertex`, both vertex and mesh set, no stage at all), more than
-// NPH_GPU_MAX_SPECIALIZATION constants, or an unsupported state (line
+// NPH_GPU_MAX_SPECIALIZATION constants, a compute subgroup size that is not
+// a power of two in the device's range, or an unsupported state (line
 // polygons without the feature); NPH_RESULT_FULL past
 // max_pipelines; NPH_RESULT_UNKNOWN when the driver rejects the pipeline
 // (logged).

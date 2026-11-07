@@ -302,6 +302,27 @@ static NphResult build_compute(NphGpuDevice *dev, const NphGpuComputePipelineDes
         specialization_info(d->specialization, d->specialization_count, entries, &spec);
         ci.stage.pSpecializationInfo = &spec;
     }
+    // Subgroups of one size, all full: the device requires subgroup size
+    // control, full compute subgroups and compute among the stages a size
+    // can be asked of (check_baseline), as Vulkan 1.3 does.
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo sized;
+    if (d->subgroup_size != 0U) {
+        const NphGpuLimits *lim = &dev->info.limits;
+        if ((d->subgroup_size & (d->subgroup_size - 1U)) != 0U ||
+            d->subgroup_size < lim->subgroup_size_min ||
+            d->subgroup_size > lim->subgroup_size_max) {
+            GPU_LOG_ERROR("pipeline '%s': subgroups of %u, the device's are a power of two from "
+                          "%u to %u",
+                          name, d->subgroup_size, lim->subgroup_size_min, lim->subgroup_size_max);
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
+        memset(&sized, 0, sizeof sized);
+        sized.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+        sized.pNext = (void *)ci.stage.pNext;
+        sized.requiredSubgroupSize = d->subgroup_size;
+        ci.stage.pNext = &sized;
+        ci.stage.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+    }
     ci.layout = dev->bindless.pipeline_layout;
     if (dev->info.features.shader_statistics) {
         ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;

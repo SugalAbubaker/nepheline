@@ -112,6 +112,166 @@ NTEST_F(GpuFixture, specialization_constants_pick_the_variant)
     nph_gpu_shader_destroy(f->dev, shader);
 }
 
+// A workgroup of two subgroups of each size the device lets a pipeline ask
+// for (its least, its greatest, and 32 where it lies between): every
+// invocation's subgroup has that size, the workgroup has two of them, and
+// each holds `size` invocations numbered 0 to size - 1; sizes outside the
+// range or not a power of two are refused.
+NTEST_F(GpuFixture, compute_pipelines_take_the_subgroup_size_asked)
+{
+    REQUIRE_DEVICE(f);
+    const NphGpuLimits *lim = &nph_gpu_device_info(f->dev)->limits;
+    NTEST_ASSERT_TRUE(lim->subgroup_size_min >= 1U &&
+                      lim->subgroup_size_min <= lim->subgroup_size &&
+                      lim->subgroup_size <= lim->subgroup_size_max);
+    NphGpuShader shader = test_load_shader(f->dev, "test_subgroups.comp");
+    const u32 sizes[3] = {lim->subgroup_size_min, lim->subgroup_size_max, 32U};
+    for (u32 s = 0; s < 3U; ++s) {
+        const u32 size = sizes[s];
+        if (size < lim->subgroup_size_min || size > lim->subgroup_size_max) {
+            continue;
+        }
+        NphGpuComputePipelineDesc desc;
+        memset(&desc, 0, sizeof desc);
+        desc.shader = shader;
+        desc.specialization[0] = 2U * size; // the local size
+        desc.specialization_count = 1U;
+        desc.subgroup_size = size;
+        desc.name = "sized subgroups";
+        NphGpuPipeline p = NPH_GPU_PIPELINE_NULL;
+        NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &p), NPH_RESULT_OK);
+        const u64 bytes = 4ULL * 2ULL * size * 4ULL;
+        NphGpuBuffer buf = test_make_buffer(f->dev, bytes,
+                                            (u32)NPH_GPU_BUFFER_USAGE_STORAGE |
+                                                (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC,
+                                            NPH_GPU_MEMORY_DEVICE, "subgroups");
+        NphTestPush push;
+        memset(&push, 0, sizeof push);
+        push.buffer_address = nph_gpu_buffer_address(f->dev, buf);
+        NphGpuCmd *cmd = NULL;
+        NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_COMPUTE, "subgroups", &cmd),
+                            NPH_RESULT_OK);
+        nph_gpu_cmd_bind_pipeline(cmd, p);
+        nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+        nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+        nph_gpu_cmd_buffer_barrier(cmd, buf, (u32)NPH_GPU_STAGE_COMPUTE,
+                                   (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_TRANSFER,
+                                   (u32)NPH_GPU_ACCESS_TRANSFER_READ);
+        test_submit_wait(f->dev, cmd);
+        static u32 out[4U * 256U];
+        NTEST_ASSERT_TRUE(2U * size <= 256U);
+        test_read_buffer(f->dev, buf, 0U, bytes, out);
+        u32 in_subgroup[2] = {0U, 0U};
+        u64 lanes_seen[2][4] = {{0U, 0U, 0U, 0U}, {0U, 0U, 0U, 0U}}; // 256 bits each
+        for (u32 i = 0; i < 2U * size; ++i) {
+            const u32 *w = &out[4U * i];
+            NTEST_ASSERT_EQ_UINT(w[0], size);
+            NTEST_ASSERT_EQ_UINT(w[1], 2U);
+            NTEST_ASSERT_TRUE(w[2] < 2U && w[3] < size);
+            in_subgroup[w[2]] += 1U;
+            lanes_seen[w[2]][w[3] >> 6U] |= 1ULL << (w[3] & 63U);
+        }
+        for (u32 g = 0; g < 2U; ++g) {
+            NTEST_EXPECT_EQ_UINT(in_subgroup[g], size);
+            u32 distinct = 0U;
+            for (u32 q = 0; q < 4U; ++q) {
+                distinct += nph_popcount_u64(lanes_seen[g][q]);
+            }
+            NTEST_EXPECT_EQ_UINT(distinct, size); // each of 0 to size - 1 once
+        }
+        NTEST_LOG("subgroups of %u: a workgroup of %u holds two", size, 2U * size);
+        nph_gpu_buffer_destroy(f->dev, buf);
+        nph_gpu_pipeline_destroy(f->dev, p);
+    }
+    NphGpuComputePipelineDesc bad;
+    memset(&bad, 0, sizeof bad);
+    bad.shader = shader;
+    bad.specialization[0] = 64U;
+    bad.specialization_count = 1U;
+    bad.name = "unsized subgroups";
+    const u32 refused[3] = {lim->subgroup_size_max * 2U, lim->subgroup_size_min / 2U, 3U};
+    for (u32 s = 0; s < 3U; ++s) {
+        if (refused[s] == 0U) {
+            continue; // the least size is 1: half of it is no size at all
+        }
+        bad.subgroup_size = refused[s];
+        NphGpuPipeline p = NPH_GPU_PIPELINE_NULL;
+        NTEST_EXPECT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &bad, &p),
+                            NPH_RESULT_INVALID_ARGUMENT);
+        NTEST_EXPECT_FALSE(nph_gpu_pipeline_is_valid(f->dev, p));
+    }
+    nph_gpu_shader_destroy(f->dev, shader);
+}
+
+// Two subgroups of 32 (or the device's nearest size), the second returning at
+// once: the first's lanes pass a loop of subgroup barriers, exchanging words
+// in shared memory, and write after it, since each barrier waits for their
+// own subgroup alone; drivers with
+// NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP log what they did.
+NTEST_F(GpuFixture, a_subgroup_barrier_waits_for_its_subgroup_alone)
+{
+    REQUIRE_DEVICE(f);
+    const NphGpuLimits *lim = &nph_gpu_device_info(f->dev)->limits;
+    const u32 size = nph_min_u32(nph_max_u32(32U, lim->subgroup_size_min), lim->subgroup_size_max);
+    NphGpuShader shader = test_load_shader(f->dev, "test_subgroup_barrier.comp");
+    NphGpuComputePipelineDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.shader = shader;
+    desc.specialization[0] = 2U * size; // the local size
+    desc.specialization_count = 1U;
+    desc.subgroup_size = size;
+    desc.name = "subgroup barrier";
+    NphGpuPipeline p = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(f->dev, &desc, &p), NPH_RESULT_OK);
+    const u64 bytes = 2ULL * size * 4ULL;
+    NphGpuBuffer buf = test_make_buffer(f->dev, bytes,
+                                        (u32)NPH_GPU_BUFFER_USAGE_STORAGE |
+                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC |
+                                            (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST,
+                                        NPH_GPU_MEMORY_DEVICE, "subgroup barrier");
+    NphTestPush push;
+    memset(&push, 0, sizeof push);
+    push.buffer_address = nph_gpu_buffer_address(f->dev, buf);
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_COMPUTE, "subgroup barrier", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_fill_buffer(cmd, buf, 0U, bytes, 0U);
+    nph_gpu_cmd_buffer_barrier(cmd, buf, (u32)NPH_GPU_STAGE_TRANSFER,
+                               (u32)NPH_GPU_ACCESS_TRANSFER_WRITE, (u32)NPH_GPU_STAGE_COMPUTE,
+                               (u32)NPH_GPU_ACCESS_SHADER_WRITE);
+    nph_gpu_cmd_bind_pipeline(cmd, p);
+    nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+    nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+    nph_gpu_cmd_buffer_barrier(cmd, buf, (u32)NPH_GPU_STAGE_COMPUTE,
+                               (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_TRANSFER,
+                               (u32)NPH_GPU_ACCESS_TRANSFER_READ);
+    test_submit_wait(f->dev, cmd);
+    static u32 out[2U * 128U];
+    NTEST_ASSERT_TRUE(size <= 128U);
+    test_read_buffer(f->dev, buf, 0U, bytes, out);
+    u32 before = 0U;
+    u32 after = 0U;
+    for (u32 i = 0; i < size; ++i) {
+        // Its neighbour's word, round by round: (i + 1) % size + 0 + 1 + 2 + 3.
+        before += out[i] == i + 1U ? 1U : 0U;
+        after += out[size + i] == 4U * ((i + 1U) % size) + 6U ? 1U : 0U;
+    }
+    NTEST_LOG("subgroups of %u: %u lanes wrote before the barriers, %u after", size, before, after);
+    NTEST_EXPECT_EQ_UINT(before, size);
+    // The quirk's driver loses the writes after the loop (lavapipe, Mesa
+    // 25.2.8: none of them); a release that fixes it shows here.
+    const NphGpuDeviceInfo *info = nph_gpu_device_info(f->dev);
+    if ((info->quirks & (u32)NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP) == 0U) {
+        NTEST_EXPECT_EQ_UINT(after, size);
+    } else {
+        NTEST_LOG("%s (%s) has NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP", info->name,
+                  info->driver_info);
+    }
+    nph_gpu_buffer_destroy(f->dev, buf);
+    nph_gpu_pipeline_destroy(f->dev, p);
+    nph_gpu_shader_destroy(f->dev, shader);
+}
+
 // With shader statistics asked for, a compiled pipeline reports what the
 // driver knows of it (registers, instructions); without, nothing.
 NTEST(gpu_pipeline, statistics_describe_the_compiled_shader)

@@ -208,6 +208,10 @@ typedef struct NphGpuLimits {
     u32 max_compute_workgroup_size[3];
     u32 max_compute_workgroup_count[3];
     u32 subgroup_size;
+    // The sizes a compute pipeline may ask its subgroups to be, powers of two
+    // (NphGpuComputePipelineDesc.subgroup_size); subgroup_size lies between.
+    u32 subgroup_size_min;
+    u32 subgroup_size_max;
     u32 max_sample_count; // largest supported colour + depth sample count
     f32 max_anisotropy;
     f32 timestamp_period_ns; // nanoseconds per timestamp tick
@@ -256,6 +260,13 @@ typedef enum NphGpuQuirk {
     // bytes of 16,384 off). Sparse images are made all the same; the
     // renderer pages no textures on such a device (render/paging.c).
     NPH_GPU_QUIRK_SPARSE_GRADIENT_SAMPLES = 1U << 2U,
+    // Subgroup barriers (subgroupBarrier) wait for the workgroup's other
+    // subgroups: where another has returned, a subgroup that passes them in
+    // a loop does not go on past it, and what it would write after is lost.
+    // Lavapipe (Mesa 25.2.8, whose subgroups are coroutines of a workgroup's
+    // thread). Users give such a device workgroups of one subgroup, which
+    // then has no other to wait for.
+    NPH_GPU_QUIRK_SUBGROUP_BARRIER_WAITS_FOR_WORKGROUP = 1U << 3U,
 } NphGpuQuirk;
 
 typedef struct NphGpuDeviceInfo {

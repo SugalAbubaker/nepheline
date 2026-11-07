@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// Writes, for each invocation of one workgroup of k_invocations (its local
+// size), the size of its subgroup, the workgroup's number of subgroups, its
+// subgroup's index and its own index in that subgroup, four words an
+// invocation: a pipeline that asks its subgroups' size has them that size
+// and full (GpuFixture.compute_pipelines_take_the_subgroup_size_asked).
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#include "nph_bindless.glsl"
+#include "nph_shared.h"
+
+layout(local_size_x_id = 0) in;
+
+NPH_BUFFER_REF(OutBuffer) { uint data[]; };
+
+layout(push_constant, scalar) uniform Push { NphTestPush pc; };
+
+void main()
+{
+    const uint i = gl_LocalInvocationIndex;
+    OutBuffer out_buffer = OutBuffer(pc.buffer_address);
+    out_buffer.data[4u * i] = gl_SubgroupSize;
+    out_buffer.data[4u * i + 1u] = gl_NumSubgroups;
+    out_buffer.data[4u * i + 2u] = gl_SubgroupID;
+    out_buffer.data[4u * i + 3u] = gl_SubgroupInvocationID;
+}
