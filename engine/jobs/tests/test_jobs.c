@@ -296,9 +296,18 @@ static void run_tree(NphJobSystem *js, u32 depth, Tree *t, TreeNode *root)
     nph_job_wait(js, &done);
 }
 
+// Every internal node of the tree may be parked at once: a wait holds its
+// fiber while thieves start other subtrees, and a worker the system preempts
+// lets them start many. A fiber for each of the tree's 1,023 internal nodes
+// and one running on each worker rules out an inline wait on any schedule;
+// the default 128 did not on a busy hosted runner (288 inline waits).
 NTEST(jobs, fork_join_tree_waits_on_fibers)
 {
-    NphJobSystem *js = test_jobs_create(test_jobs_worker_count(8U));
+    NphJobSystemDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.worker_count = test_jobs_worker_count(8U);
+    desc.fiber_count = 1023U + desc.worker_count;
+    NphJobSystem *js = test_jobs_create_desc(&desc);
     Tree t;
     TreeNode root;
     run_tree(js, 10U, &t, &root);
@@ -314,7 +323,7 @@ NTEST(jobs, fork_join_tree_waits_on_fibers)
               nph_atomic_load_u32(&t.migrations, NPH_MEMORY_ORDER_RELAXED));
     NTEST_ASSERT_EQ_UINT(stats.jobs_executed, 2047U);
     NTEST_ASSERT_GT_UINT(stats.waits_switched, 0U);
-    NTEST_ASSERT_EQ_UINT(stats.waits_inline, 0U); // 128 fibers suffice for depth 10
+    NTEST_ASSERT_EQ_UINT(stats.waits_inline, 0U); // a fiber for every wait the tree can hold
     if (nph_job_system_worker_count(js) > 1U) {
         NTEST_ASSERT_GT_UINT(stats.jobs_stolen, 0U);
     }
