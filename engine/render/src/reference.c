@@ -557,6 +557,38 @@ bool nph_render_ref_vis_hzb_occluded(const NphRenderRefHzb *hzb, NphVec4 rect, f
     const f32 *texels = hzb->mips[mip];
     const f32 d = nph_f32_min(nph_f32_min(texels[(u64)y0 * w + x0], texels[(u64)y0 * w + x1]),
                               nph_f32_min(texels[(u64)y1 * w + x0], texels[(u64)y1 * w + x1]));
-    *margin = nph_f64_min(m, fabs((f64)depth - (f64)d));
-    return depth < d;
+    m = nph_f64_min(m, fabs((f64)depth - (f64)d));
+    if (depth < d || mip == 0U || wanted >= hzb->mip_count) {
+        *margin = m;
+        return depth < d;
+    }
+    // Two mips finer, the texels the rectangle covers, the first that does not
+    // hide it ending the test.
+    const u32 fine = mip >= 2U ? mip - 2U : 0U;
+    const f64 fine_x = vw * 0.5 / (f64)(1U << fine);
+    const f64 fine_y = vh * 0.5 / (f64)(1U << fine);
+    const f64 g[4] = {r[0] * fine_x, r[1] * fine_y, r[2] * fine_x, r[3] * fine_y};
+    m = nph_f64_min(m, r[0] > 0.0 ? to_integer(g[0]) : HUGE_VAL);
+    m = nph_f64_min(m, r[1] > 0.0 ? to_integer(g[1]) : HUGE_VAL);
+    m = nph_f64_min(m, r[2] < 1.0 ? to_integer(g[2]) : HUGE_VAL);
+    m = nph_f64_min(m, r[3] < 1.0 ? to_integer(g[3]) : HUGE_VAL);
+    const u32 fw = nph_max_u32(hzb->width >> fine, 1U);
+    const u32 fh = nph_max_u32(hzb->height >> fine, 1U);
+    const u32 fx0 = nph_min_u32((u32)floor(g[0]), fw - 1U);
+    const u32 fy0 = nph_min_u32((u32)floor(g[1]), fh - 1U);
+    const u32 fx1 = nph_min_u32((u32)floor(g[2]), fw - 1U);
+    const u32 fy1 = nph_min_u32((u32)floor(g[3]), fh - 1U);
+    const f32 *fine_texels = hzb->mips[fine];
+    for (u32 y = fy0; y <= fy1; ++y) {
+        for (u32 x = fx0; x <= fx1; ++x) {
+            const f32 t = fine_texels[(u64)y * fw + x];
+            m = nph_f64_min(m, fabs((f64)depth - (f64)t));
+            if (!(depth < t)) {
+                *margin = m;
+                return false;
+            }
+        }
+    }
+    *margin = m;
+    return true;
 }

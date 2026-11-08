@@ -357,7 +357,13 @@ bool vis_tile_meets_sphere(vec4 slopes, vec2 dist, vec4 sphere)
 // pixels; mip-m texel t covers mip-0 texels [t 2^m, (t + 1) 2^m), the last
 // one reaching the edge (vis_hzb.comp), so clamping to the last texel stays
 // conservative. The mip is chosen so the rectangle spans at most one
-// texel, so a 2 x 2 footprint covers it.
+// texel, so a 2 x 2 footprint covers it. That footprint reaches up to a
+// texel past the rectangle on each side, so where it does not hide the
+// rectangle, the texels the rectangle itself covers two mips finer (at most
+// 5 x 5) are tested too, the first that does not hide it ending the test:
+// on the city's rooftop the 2 x 2 test kept 380,000 clusters, of which 93,000
+// lie behind every texel they cover two mips finer. A rectangle wider than
+// the chain's last mip is not refined.
 bool vis_hzb_occluded(VisViewRef view, vec4 rect, float depth)
 {
     const vec2 viewport = view.v.viewport.xy;
@@ -366,7 +372,8 @@ bool vis_hzb_occluded(VisViewRef view, vec4 rect, float depth)
     const vec2 size = vec2(r.z - r.x, r.w - r.y) * viewport * 0.5; // in mip-0 texels
     const float extent = max(max(size.x, size.y), 1.0);
     const int mip_count = int(hzb_size.z);
-    const int mip = min(int(ceil(log2(extent))), mip_count - 1);
+    const int wanted = int(ceil(log2(extent)));
+    const int mip = min(wanted, mip_count - 1);
     const vec2 texel_scale = viewport * 0.5 / float(1u << uint(mip));
     const ivec2 lo = ivec2(floor(r.xy * texel_scale));
     // Vulkan's extents: each mip the one above halved, rounded down.
@@ -377,7 +384,25 @@ bool vis_hzb_occluded(VisViewRef view, vec4 rect, float depth)
     const uint hzb = view.v.hzb_index;
     const float d = min(min(nph_fetch_2d(hzb, p0, mip).x, nph_fetch_2d(hzb, ivec2(p1.x, p0.y), mip).x),
                         min(nph_fetch_2d(hzb, ivec2(p0.x, p1.y), mip).x, nph_fetch_2d(hzb, p1, mip).x));
-    return depth < d;
+    if (depth < d) {
+        return true;
+    }
+    if (mip == 0 || wanted >= mip_count) {
+        return false;
+    }
+    const int fine = max(mip - 2, 0);
+    const vec2 fine_scale = viewport * 0.5 / float(1u << uint(fine));
+    const ivec2 fine_last = max(ivec2(hzb_size.xy) >> fine, ivec2(1)) - 1;
+    const ivec2 f0 = min(ivec2(floor(r.xy * fine_scale)), fine_last);
+    const ivec2 f1 = min(ivec2(floor(r.zw * fine_scale)), fine_last);
+    for (int y = f0.y; y <= f1.y; ++y) {
+        for (int x = f0.x; x <= f1.x; ++x) {
+            if (!(depth < nph_fetch_2d(hzb, ivec2(x, y), fine).x)) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // Whether a triangle seen from the camera is front facing, from its

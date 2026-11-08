@@ -1738,7 +1738,24 @@ and its page requests (0.11 ms of its 0.31), stayed as it was. An
 occlusion test projects the bounding sphere to a
 screen rectangle and nearest depth (Mara & McGuire, "2D Polyhedral Bounds
 of a Clipped, Perspective-Projected 3D Sphere", JCGT 2013), picks the mip
-at which the rectangle spans one texel, and reads a 2 × 2 footprint. The
+at which the rectangle spans one texel, and reads a 2 × 2 footprint. That
+footprint reaches up to a texel past the rectangle on each side, so where
+it does not hide the rectangle, the texels the rectangle covers two mips
+finer (at most 5 × 5) are read too, the first that does not hide it ending
+the test; a rectangle wider than the chain's last mip is not refined. Every
+cull takes it (instances, nodes, groups, meshlets). On the city's rooftop
+the 2 × 2 test kept 380,000 clusters, a quarter of whose rasters' work was
+for 93,000 that lie behind every texel they cover two mips finer: the
+frame went from 9.89 to 9.15 ms (the voxel raster 1.28 to 0.89), the
+city's other views by 0.07 to 0.23 ms; Bistro's and the interior's views
+moved by -0.05 to +0.03 ms, their culls a few microseconds dearer each
+(two rounds interleaved, 2026-11-08). Refining only the meshlet cull kept
+the rooftop's gain but not the streets' (0.01 to 0.04 ms against 0.07 to
+0.14), whose instances behind buildings the instance cull then drops whole.
+One mip finer (at most 3 × 3) would have dropped 66,000 of the rooftop's
+clusters rather than 93,000. The image is the 2 × 2 test's: the rooftop's
+instances view is identical pixel for pixel, Bistro's street differs in 8
+pixels of equal depths, as two runs of either build do (4 to 37). The
 frustum, cone, projection, facing, small-triangle, and pyramid tests have
 C twins in `reference.h`; a test runs the shaders on thousands of random
 cases and compares, and another reads the built pyramid back and checks

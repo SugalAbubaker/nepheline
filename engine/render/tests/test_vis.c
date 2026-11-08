@@ -586,6 +586,63 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     nph_gpu_image_destroy(dev, hzb_image);
 }
 
+// A 128 x 128 view's pyramid (mip 0 64 x 64), every texel at depth 0.9 but
+// for one column of mip 0 at 0.1 (far, reverse-Z), each coarser mip the
+// minimum of the texels it covers, as vis_hzb_mips.comp builds it.
+static void column_pyramid(f32 *levels[7], u32 far_column)
+{
+    for (u32 m = 0; m < 7U; ++m) {
+        const u32 n = 64U >> m;
+        for (u32 y = 0; y < n; ++y) {
+            for (u32 x = 0; x < n; ++x) {
+                f32 d = 0.9F;
+                if (m == 0U) {
+                    d = x == far_column ? 0.1F : 0.9F;
+                } else {
+                    const f32 *b = levels[m - 1U];
+                    const u32 bn = n * 2U;
+                    d = nph_f32_min(
+                        nph_f32_min(b[(2U * y) * bn + 2U * x], b[(2U * y) * bn + 2U * x + 1U]),
+                        nph_f32_min(b[(2U * y + 1U) * bn + 2U * x],
+                                    b[(2U * y + 1U) * bn + 2U * x + 1U]));
+                }
+                levels[m][y * n + x] = d;
+            }
+        }
+    }
+}
+
+// The occlusion test's 2 x 2 footprint reaches up to a texel past the
+// rectangle each way; where that alone does not hide it, the texels the
+// rectangle covers two mips finer decide (vis_hzb_occluded). A rectangle over
+// mip-0 texels 16.19 to 19.84 tests mip 2's texels 4 and 5 (mip-0 texels 16
+// to 23), then mip 0's 16 to 19.
+NTEST(vis, the_occlusion_test_refines_where_its_footprint_reaches_past_the_rectangle)
+{
+    f32 *levels[7];
+    for (u32 m = 0; m < 7U; ++m) {
+        levels[m] = NPH_ALLOC_ARRAY(nph_allocator_system(), f32, (u64)(64U >> m) * (64U >> m));
+    }
+    const NphRenderRefHzb hzb = {(const f32 *const *)levels, 64U, 64U, 7U,
+                                 nph_vec2(128.0F, 128.0F)};
+    const NphVec4 rect = nph_vec4(0.253F, 0.253F, 0.31F, 0.31F);
+    f64 margin = 0.0;
+    // The far column in the footprint, past the rectangle: hidden all the same.
+    column_pyramid(levels, 22U);
+    NTEST_EXPECT_TRUE(nph_render_ref_vis_hzb_occluded(&hzb, rect, 0.5F, &margin));
+    NTEST_EXPECT_TRUE(margin > 1e-2); // far from every rounding boundary
+    // In the rectangle: seen there.
+    column_pyramid(levels, 18U);
+    NTEST_EXPECT_FALSE(nph_render_ref_vis_hzb_occluded(&hzb, rect, 0.5F, &margin));
+    // Nowhere near: hidden by the 2 x 2 test alone; and nearer than every texel, seen.
+    column_pyramid(levels, 40U);
+    NTEST_EXPECT_TRUE(nph_render_ref_vis_hzb_occluded(&hzb, rect, 0.5F, &margin));
+    NTEST_EXPECT_FALSE(nph_render_ref_vis_hzb_occluded(&hzb, rect, 0.95F, &margin));
+    for (u32 m = 0; m < 7U; ++m) {
+        NPH_FREE_ARRAY(nph_allocator_system(), f32, levels[m], (u64)(64U >> m) * (64U >> m));
+    }
+}
+
 // The texels of a depth pyramid past mip 0 (every mip back to back in
 // `texels`, mip 0 `w` x `h`, `mips` mips) that are not exactly the minimum of
 // the texels they cover, the last texel of a row or column reaching the edge
