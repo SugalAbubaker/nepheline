@@ -503,10 +503,9 @@ static int load_budgets(const char *path, NbenchBudget **out)
         const char *rest = strstr(line, b.name) + strlen(b.name);
         char *end = NULL;
         const double value = strtod(rest, &end);
+        const bool number = end != NULL && end != rest && value > 0.0;
         const char *error = NULL;
-        if (end == NULL || end == rest || !(value > 0.0)) {
-            error = "expected `name max_ns` or `name <k>x base`";
-        } else if (*end == 'x') {
+        if (number && *end == 'x') {
             const char *base = skip_space(end + 1);
             if (base == end + 1 || sscanf(base, "%127s", b.base) != 1 ||
                 *skip_space(base + strlen(b.base)) != '\0') {
@@ -516,10 +515,10 @@ static int load_budgets(const char *path, NbenchBudget **out)
             }
             b.relative = true;
             b.factor = value;
-        } else if (*skip_space(end) != '\0') {
-            error = "expected `name max_ns` or `name <k>x base`";
-        } else {
+        } else if (number && *skip_space(end) == '\0') {
             b.max_ns = value;
+        } else {
+            error = "expected `name max_ns` or `name <k>x base`";
         }
         if (error != NULL) {
             fprintf(stderr, "nbench: %s:%d: %s\n", path, line_number, error);
