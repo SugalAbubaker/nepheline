@@ -59,7 +59,11 @@ nbench_cli_test(malformed_self EXIT 4 BUDGETS malformed_self.txt ARGS --filter=s
     EXPECT "malformed_self.txt:1: a budget relative to itself")
 
 # The machine's unit runs in every nbench executable, and can carry budgets.
+# It runs first and again after the rest, and the faster counts; alone, once.
 nbench_cli_test(locked_add EXIT 0 BUDGETS locked_add.txt ARGS --filter=nbench.*
-    EXPECT "nbench.locked_add" "budgets: all 1 benchmarks within budget")
+    EXPECT "nbench.locked_add" "budgets: all 1 benchmarks within budget"
+    EXPECT_NOT "(again)")
+nbench_cli_test(locked_add_twice EXIT 0 BUDGETS locked_add.txt
+    EXPECT "nbench.locked_add (again)" "budgets: all 3 benchmarks within budget")
 nbench_cli_test(locked_add_listed EXIT 0 ARGS --list
     EXPECT "nbench.locked_add" "self_work_1" "self_work_8")

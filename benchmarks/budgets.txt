@@ -7,7 +7,10 @@
 # budget in the machine's unit instead, `<k>x nbench.locked_add`: one
 # uncontended atomic add, which every nbench executable measures, and which
 # costs up to five times as much on some hosted runners' CPUs as on others
-# (ADR-0081). The unit's own budget follows the slowest runner.
+# (1.5 ns on the reference machine, 1.9 to 2.4 on the hosted runners' AMD
+# EPYCs, 6.1 to 9.2 on their Intel Xeons; ADR-0081). k is about one and a
+# half times the largest ratio measured. The unit's own budget follows the
+# slowest runner.
 nbench.locked_add              15
 
 # core_alloc_bench
@@ -117,16 +120,17 @@ blue_noise_32x32               4000000
 # and async I/O, virtual memory) get 5x: hosted runners vary the most there.
 # The uncontended locks are locked instructions and nothing else of ours, so
 # their budgets are in the machine's unit (above): the spin lock is one
-# exchange and a store, the semaphore's post and wait two locked
-# instructions, the mutex the OS's own (an SRW lock; glibc's, dearer on AMD's
-# Zen 3 and 4 than on newer cores). The round trip waits on the interconnect
-# between two cores the OS picks, for which a run has no unit: its budget
-# follows the slowest runner (335 ns on an Intel Xeon 6973P-C).
+# exchange and a store (0.86 to 1.49 units measured), the semaphore's post
+# and wait two locked instructions (1.78 to 3.16), the mutex the OS's own
+# (0.91 to 4.32: glibc's costs 4 units on an AMD EPYC 7763, 1 on an Intel
+# Xeon). The round trip waits on the interconnect between two cores the OS
+# picks, for which a run has no unit (on one Xeon 6973P-C, 109 ns under
+# Windows and 335 under Linux): its budget follows the slowest runner.
 fiber_switch                   40
 mutex_lock_unlock              7x nbench.locked_add
 spin_lock_acquire_release      2.5x nbench.locked_add
-semaphore_post_wait            4.5x nbench.locked_add
-semaphore_round_trip           450
+semaphore_post_wait            5x nbench.locked_add
+semaphore_round_trip           500
 thread_create_join             300000
 time_now_ns                    100
 time_cycles                    25
@@ -140,8 +144,8 @@ async_read_4k_threads_32       20000
 # jobs_bench (docs/jobs.md). Entries that wake a sleeping thread
 # (run_wait_1_main, io_run_wait_1) get 5x. counter_signal is two locked
 # instructions and nothing else (a counter's add and its signal), so its
-# budget is in the machine's unit (above): it took 16.2 ns on an Intel Xeon
-# Platinum 8573C, 11.0 on an AMD EPYC 9V45 and 5.9 on an EPYC 7763, against
+# budget is in the machine's unit (above): 1.77 to 3.09 units measured, from
+# 4.6 ns on an AMD EPYC 9V74 to 20.3 on an Intel Xeon Platinum 8573C, against
 # the reference's 3.9. parallel_for_1M depends on
 # the core count, so its budget assumes a two-core runner; the scaling_w*
 # series is machine-specific and has no budget (its ratios are the

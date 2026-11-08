@@ -673,6 +673,15 @@ int nbench_main(int argc, char **argv)
         }
     }
     qsort((void *)cases, n, sizeof *cases, compare_cases);
+    // The machine's unit first, whatever the files' order, and again after
+    // the rest (below).
+    for (size_t i = 0; i < n; ++i) {
+        if (cases[i] == &g_locked_add_case) {
+            memmove((void *)(cases + 1), (const void *)cases, i * sizeof *cases);
+            cases[0] = &g_locked_add_case;
+            break;
+        }
+    }
 
     if (list) {
         for (size_t i = 0; i < n; ++i) {
@@ -697,6 +706,21 @@ int nbench_main(int argc, char **argv)
         printf("%-44s %14.2f %14.2f %14.2f %12" PRIu64 "\n", r->bc->name, r->ns_per_op_median,
                r->ns_per_op_min, r->ns_per_op_max, r->iterations * r->items_per_iteration);
         fflush(stdout);
+    }
+    // The unit again, after the executable's own benchmarks. A neighbour busy
+    // on a hosted runner's shared core can only slow it, and a slow spell when
+    // it first ran would loosen every budget stated in it: one hosted job's
+    // platform_bench measured it at twice what that job's other executables
+    // did. The faster of the two counts.
+    if (n > 1 && cases[0] == &g_locked_add_case) {
+        NbenchResult again;
+        run_case(cases[0], min_time_s, repeats, &again);
+        printf("%-44s %14.2f %14.2f %14.2f %12" PRIu64 "\n", "nbench.locked_add (again)",
+               again.ns_per_op_median, again.ns_per_op_min, again.ns_per_op_max,
+               again.iterations * again.items_per_iteration);
+        if (again.ns_per_op_median < results[0].ns_per_op_median) {
+            results[0] = again;
+        }
     }
 
     int status = 0;

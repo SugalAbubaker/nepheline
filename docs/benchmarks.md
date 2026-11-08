@@ -69,32 +69,59 @@ are only useful relative to each other.
 
 ## Budgets
 
-`benchmarks/budgets.txt` lists a maximum median ns/op per benchmark, one
-`name max_ns` pair per line (`#` comments). `--budgets=FILE` compares every
-benchmark that ran against it after the run and exits with status 4 when
-any exceeds its budget, which fails the nightly workflow (§9). The file is
-plain text rather than JSON so that nbench stays free of engine
-dependencies, like ntest.
+`benchmarks/budgets.txt` lists budgets for the median ns/op, one a line
+(`#` comments), of two kinds:
 
-Budgets are set at roughly three times the recorded reference-machine
-number: hosted runners are slower and noisier, and the budget exists to
-catch regressions of integer factors, not percentage drift. A benchmark
-that blows through its budget on one hosted CPU model only usually has a
-microarchitectural cause worth fixing rather than a budget to raise:
-`lz_decompress_zeros` ran 4.5x slower on some runners because each copy
-step waited on store-to-load forwarding (docs/asset.md). The workflow
-prints each runner's CPU model before the run for this reason. When the
-cause is the hardware's own cost of what the code cannot do without, the
-budget follows the slowest runner instead: `counter_signal` is two
-uncontended locked instructions (a counter's add and its signal), and on
-the Intel Xeon Platinum 8573C some Windows runners have it took 16.2 ns,
-4.1x the reference's and 2.75x an AMD EPYC 7763's, while that runner
-matched the EPYC elsewhere (a median ratio of 0.91 over 95 benchmarks;
-the job system's other atomic-bound rows were 1.7 to 2.8x slower, within
-their budgets). An AMD EPYC 9V45 took 11.0 ns. Its budget is 5x, as for
-the entries that wake threads. The GPU
-budgets are the tight kind: measured on the reference machine and enforced
-there, within 5 % (below).
+- `name max_ns`: an absolute budget;
+- `name <k>x base`: k times the median of benchmark `base` in the same run,
+  for a cost the machine itself sets (below).
+
+A benchmark may have several lines and must be within each. `--budgets=FILE`
+compares every benchmark that ran against them after the run and exits with
+status 4 when one is exceeded, or when a relative budget names a benchmark
+the executable does not have, which fails the nightly workflow (§9). A base
+that `--filter` left out of the run skips its relative budgets, with a line
+saying so. The file is plain text rather than JSON so that nbench stays free
+of engine dependencies, like ntest; the `nbench.cli.*` tests
+(`benchmarks/nbench/tests`) check its parsing and both kinds of budget.
+
+Absolute budgets are set at roughly three times the recorded
+reference-machine number: hosted runners are slower and noisier, and the
+budget exists to catch regressions of integer factors, not percentage drift.
+A benchmark that blows through its budget on one hosted CPU model only
+usually has a microarchitectural cause worth fixing rather than a budget to
+raise: `lz_decompress_zeros` ran 4.5x slower on some runners because each
+copy step waited on store-to-load forwarding (docs/asset.md). The workflow
+prints each runner's CPU model before the run for this reason.
+
+When the cause is the hardware's own cost of what the code cannot do
+without, no absolute budget holds every runner without letting through
+regressions on the others, so the budget is in **the machine's unit**
+([ADR-0081](adr/0081-budgets-in-the-machines-unit.md)). Every nbench
+executable measures `nbench.locked_add`: one uncontended atomic add (a locked
+add on x86, the compiler's intrinsic) to a cache line no other thread
+touches, first and again after its own benchmarks, the faster counting (a
+neighbour busy on a hosted runner's shared core can only slow it). It costs
+1.5 ns on the reference machine, 1.9 to 2.4 on the hosted runners' AMD
+EPYCs (7763, 9V74) and 6.1 to 9.2 on their Intel Xeons (Platinum 8370C and
+8573C, 6973P-C). The benchmarks that are locked instructions and nothing else
+of ours are budgeted in it, k about one and a half times the largest ratio
+measured on nine hosted jobs and the reference machine:
+
+| Benchmark | What it pays | Ratio to the unit | Budget |
+|---|---|---|---|
+| `spin_lock_acquire_release` | an exchange and a store | 0.86 to 1.49 | 2.5x |
+| `semaphore_post_wait` | a locked add and a compare-exchange | 1.78 to 3.16 | 5x |
+| `mutex_lock_unlock` | the OS's: an SRW lock, glibc's mutex | 0.91 to 4.32 | 7x |
+| `counter_signal` (jobs) | a counter's add and its signal | 1.77 to 3.09 | 5x |
+
+glibc's mutex costs about 4 units on the EPYC 7763 and 1 on the Xeons, the
+widest spread. The unit's own budget (15 ns) follows the slowest runner, and
+so does `semaphore_round_trip`'s (500 ns): it hands a permit to another core
+and back, waiting on the interconnect between the two cores the OS picked,
+which no single-core unit measures (on one Xeon 6973P-C it took 109 ns under
+Windows and 335 under Linux). The GPU budgets are the tight kind: measured on
+the reference machine and enforced there, within 5 % (below).
 
 ## GPU benchmarks
 
