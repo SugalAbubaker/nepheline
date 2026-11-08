@@ -36,27 +36,42 @@ float filter_weight(int i)
     return i < 4 ? pc.weights0[i] : (i < 8 ? pc.weights1[i - 4] : pc.weight8);
 }
 
+// A neighbour of the pixel at `uv`, its texel's centre: the point sampler
+// clamps to the edge, so a neighbour past it reads the edge's texel, as a
+// clamp of the texel's coordinates would, and the offsets are the
+// instruction's immediates (constant expressions, hence a macro).
+#define TAA_NEIGHBOUR(n, uv, x, y)                                                                 \
+    taa_neighbourhood_add(                                                                         \
+        n,                                                                                         \
+        textureLodOffset(sampler2D(nph_textures_2d[pc.hdr_index], nph_samplers[pc.point_sampler]), \
+                         uv, 0.0, ivec2(x, y))                                                     \
+            .rgb,                                                                                  \
+        filter_weight(((y) + 1) * 3 + (x) + 1))
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
     const ivec2 pixel = ivec2(gl_FragCoord.xy);
     const ivec2 last = ivec2(view.v.viewport.xy) - 1;
-    // The neighbourhood's colour.
+    // The neighbourhood's colour, row by row.
+    const vec2 centre = gl_FragCoord.xy * view.v.viewport.zw;
     TaaNeighbourhood n = taa_neighbourhood_begin();
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            const ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), last);
-            const vec3 c = texelFetch(nph_textures_2d[pc.hdr_index], q, 0).rgb;
-            taa_neighbourhood_add(n, c, filter_weight((y + 1) * 3 + x + 1));
-        }
-    }
+    TAA_NEIGHBOUR(n, centre, -1, -1);
+    TAA_NEIGHBOUR(n, centre, 0, -1);
+    TAA_NEIGHBOUR(n, centre, 1, -1);
+    TAA_NEIGHBOUR(n, centre, -1, 0);
+    TAA_NEIGHBOUR(n, centre, 0, 0);
+    TAA_NEIGHBOUR(n, centre, 1, 0);
+    TAA_NEIGHBOUR(n, centre, -1, 1);
+    TAA_NEIGHBOUR(n, centre, 0, 1);
+    TAA_NEIGHBOUR(n, centre, 1, 1);
     // The bloom (bloom.comp), mixed into the current frame before the
     // history meets it, so the history carries it and steadies it too; it
     // varies slowly, so the pixel's own serves its neighbours.
     if (pc.bloom > 0.0) {
         const vec3 glare =
             textureLod(sampler2D(nph_textures_2d[pc.bloom_index], nph_samplers[pc.sampler_index]),
-                       (vec2(pixel) + 0.5) * pc.bloom_uv, 0.0)
+                       gl_FragCoord.xy * pc.bloom_uv, 0.0)
                 .rgb *
             pc.bloom_scale;
         taa_neighbourhood_mix(n, taa_rgb_to_ycocg(glare), pc.bloom);
@@ -64,29 +79,39 @@ void main()
     // Its nearest surface: the visibility buffer's depths (its high words,
     // reverse-Z, so the largest is the nearest and the sky's 0 the
     // farthest; the bits of non-negative floats order as the floats do) by
-    // four gathers of 2 x 2 texels, each at the corner its block shares,
-    // then the nearest texel's whole record.
+    // four gathers of 2 x 2 texels, each at the corner its block shares
+    // (offsets from the pixel's own corner, the instruction's immediates),
+    // then the nearest texel's whole record. A gather's order: (x0, y1),
+    // (x1, y1), (x1, y0), (x0, y0); of the 16 texels, the 9 around the pixel
+    // are tested, in the order of the blocks, the first of equal depths kept.
+    // The nearest is kept as its offset from the pixel, (dx + 1) + 4 (dy + 1).
+    const vec2 corner = vec2(pixel) * view.v.viewport.zw;
     uint nearest_depth = 0u;
-    ivec2 nearest_at = pixel;
-    for (int by = 0; by < 2; ++by) {
-        for (int bx = 0; bx < 2; ++bx) {
-            const ivec2 corner = pixel + ivec2(2 * bx, 2 * by);
-            const uvec4 d =
-                textureGather(usampler2D(nph_utextures_2d[pc.visbuffer_index],
-                                         nph_samplers[pc.point_sampler]),
-                              vec2(corner) * view.v.viewport.zw, 1);
-            // A gather's order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
-            const ivec2 at[4] = ivec2[4](corner + ivec2(-1, 0), corner, corner + ivec2(0, -1),
-                                         corner - 1);
-            for (int i = 0; i < 4; ++i) {
-                if (all(lessThanEqual(abs(at[i] - pixel), ivec2(1))) && d[i] > nearest_depth) {
-                    nearest_depth = d[i];
-                    nearest_at = at[i];
-                }
-            }
-        }
+    int nearest_offset = 1 + 4 * 1;
+#define TAA_GATHER(x, y)                                                                           \
+    textureGatherOffset(usampler2D(nph_utextures_2d[pc.visbuffer_index],                           \
+                                   nph_samplers[pc.point_sampler]),                                \
+                        corner, ivec2(x, y), 1)
+#define TAA_NEAREST(depth, dx, dy)                                                                 \
+    if ((depth) > nearest_depth) {                                                                 \
+        nearest_depth = (depth);                                                                   \
+        nearest_offset = ((dx) + 1) + 4 * ((dy) + 1);                                              \
     }
-    nearest_at = clamp(nearest_at, ivec2(0), last);
+    const uvec4 d00 = TAA_GATHER(0, 0);
+    TAA_NEAREST(d00.x, -1, 0)
+    TAA_NEAREST(d00.y, 0, 0)
+    TAA_NEAREST(d00.z, 0, -1)
+    TAA_NEAREST(d00.w, -1, -1)
+    const uvec4 d10 = TAA_GATHER(2, 0);
+    TAA_NEAREST(d10.x, 1, 0)
+    TAA_NEAREST(d10.w, 1, -1)
+    const uvec4 d01 = TAA_GATHER(0, 2);
+    TAA_NEAREST(d01.z, 0, 1)
+    TAA_NEAREST(d01.w, -1, 1)
+    const uvec4 d11 = TAA_GATHER(2, 2);
+    TAA_NEAREST(d11.w, 1, 1)
+    const ivec2 nearest_at =
+        clamp(pixel + ivec2(nearest_offset & 3, nearest_offset >> 2) - 1, ivec2(0), last);
     const uint64_t nearest =
         packUint2x32(texelFetch(nph_utextures_2d[pc.visbuffer_index], nearest_at, 0).xy);
     // The weights sum to 1.
