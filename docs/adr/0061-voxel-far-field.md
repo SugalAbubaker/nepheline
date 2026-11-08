@@ -828,8 +828,11 @@ differ between the builds differ as much between two runs of the old one. The su
 scene's shadow map settles at its resolution bias 0 or 1 by a run's history (23.4 or 15.6 ms, either
 build; the two builds' maps are the same frame by frame given the same frames): both biases are stable
 there, at 1 the pages never leave room enough to lower it and at 0 they never outrun its budget, which is
-the shadow map's to settle. The pass reads and writes what it did (its declared footprint unchanged,
-161.0 MB read and 66.4 MB written a phase); its DRAM was not traced.
+the shadow map's to settle. The pass reads and writes the data it did, and as much of it: GPU traces of
+the two builds (each pass's throughput times its time, four frames each) give the rooftop's voxel raster
+87.5 + 18.5 MB a frame before and 92.4 + 19.0 after, the landscape forest's 1,118.4 + 64.8 and
+1,126.5 + 56.0, the street's 1.2 and 1.9 (phase 0), and the frames' totals within the traces' spread
+(the rooftop's 2,369 and 2,365 MB, its other passes differing by up to 10 MB from trace to trace).
 
 **Tests.** `VoxelAloneGpu.voxel_clusters_draw_where_their_rays_meet_them` draws the rays test's views
 with every phase's clusters a subgroup each (`voxel_share_clusters` 1), where `VoxelGpu`'s share them
