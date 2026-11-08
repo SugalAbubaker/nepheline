@@ -82,6 +82,11 @@ supersedes it and both link to each other.
 | [0074](0074-restir.md) | Per-pixel reservoirs for the many lights' far fields | Accepted |
 | [0075](0075-light-only-from-the-cache.md) | Light only from the cache: occlusion, blended surfaces, and a night's sky | Accepted |
 | [0076](0076-contact-shadows.md) | Contact shadows: a march in the occlusion's pass, its answer in a sign | Accepted |
+| [0077](0077-reflections.md) | Reflections: what surfaces reflect, from the radiance cache's cells | Accepted |
+| [0078](0078-local-lights-shadows.md) | Local lights' shadows: lamps as many lights, glass and their shells out of the rays | Accepted |
+| [0079](0079-quality-tiers.md) | Quality tiers: the reference hardware's frame, and a high tier of rays | Accepted |
+| [0080](0080-shadow-map-slope.md) | The sun's map at the level of its slope on a surface, and a pool twice as large | Accepted |
+| [0081](0081-budgets-in-the-machines-unit.md) | Benchmark budgets in the machine's own unit | Accepted |
 
 ## Template
 
