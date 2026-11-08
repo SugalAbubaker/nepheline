@@ -2,6 +2,13 @@
 # Roughly 3x the Profile numbers recorded on the reference machine
 # (benchmarks/results/), so hosted runners only fail on integer-factor
 # regressions. Benchmarks of the platform allocator get 5x.
+#
+# A benchmark whose cost is the hardware's own locked instructions has its
+# budget in the machine's unit instead, `<k>x nbench.locked_add`: one
+# uncontended atomic add, which every nbench executable measures, and which
+# costs up to five times as much on some hosted runners' CPUs as on others
+# (ADR-0081). The unit's own budget follows the slowest runner.
+nbench.locked_add              15
 
 # core_alloc_bench
 alloc_free_64_system           180
@@ -108,11 +115,18 @@ blue_noise_32x32               4000000
 
 # platform_bench (docs/platform.md). OS-bound entries (thread creation, file
 # and async I/O, virtual memory) get 5x: hosted runners vary the most there.
+# The uncontended locks are locked instructions and nothing else of ours, so
+# their budgets are in the machine's unit (above): the spin lock is one
+# exchange and a store, the semaphore's post and wait two locked
+# instructions, the mutex the OS's own (an SRW lock; glibc's, dearer on AMD's
+# Zen 3 and 4 than on newer cores). The round trip waits on the interconnect
+# between two cores the OS picks, for which a run has no unit: its budget
+# follows the slowest runner (335 ns on an Intel Xeon 6973P-C).
 fiber_switch                   40
-mutex_lock_unlock              15
-spin_lock_acquire_release      8
-semaphore_post_wait            15
-semaphore_round_trip           250
+mutex_lock_unlock              7x nbench.locked_add
+spin_lock_acquire_release      2.5x nbench.locked_add
+semaphore_post_wait            4.5x nbench.locked_add
+semaphore_round_trip           450
 thread_create_join             300000
 time_now_ns                    100
 time_cycles                    25
@@ -124,15 +138,15 @@ async_read_4k_depth_32         40000
 async_read_4k_threads_32       20000
 
 # jobs_bench (docs/jobs.md). Entries that wake a sleeping thread
-# (run_wait_1_main, io_run_wait_1) get 5x, and so does counter_signal,
-# which is two locked instructions and nothing else, whose cost varies
-# between runners' CPUs (docs/benchmarks.md): 16.2 ns on an Intel Xeon
-# Platinum 8573C, 11.0 on an AMD EPYC 9V45, 5.9 on an EPYC 7763, against
+# (run_wait_1_main, io_run_wait_1) get 5x. counter_signal is two locked
+# instructions and nothing else (a counter's add and its signal), so its
+# budget is in the machine's unit (above): it took 16.2 ns on an Intel Xeon
+# Platinum 8573C, 11.0 on an AMD EPYC 9V45 and 5.9 on an EPYC 7763, against
 # the reference's 3.9. parallel_for_1M depends on
 # the core count, so its budget assumes a two-core runner; the scaling_w*
 # series is machine-specific and has no budget (its ratios are the
 # Phase 4 exit criterion, judged on the reference machine).
-counter_signal                 20
+counter_signal                 5x nbench.locked_add
 run_wait_1_main                3000
 run_wait_1_worker              1300
 run_wait_batch_256             700
