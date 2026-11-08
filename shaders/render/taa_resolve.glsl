@@ -130,7 +130,7 @@ void main()
                                                          view.v.viewport.xy, inv_size) *
                                  pc.history_scale);
             const vec2 pixels = abs(motion * view.v.viewport.xy);
-            resolved = taa_blend(n.filtered, taa_clip(n, history),
+            resolved = taa_blend(n.filtered, taa_clip_mixed(n, history),
                                  taa_current_weight(max(pixels.x, pixels.y)));
         }
     }

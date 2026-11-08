@@ -47,13 +47,10 @@
 // YCoCg (Malvar & Sullivan, "YCoCg-R: A Color Space with RGB Reversibility
 // and Low Dynamic Range", 2003): luma and two chroma axes, in which the
 // neighbourhood's box fits the colours more tightly than in RGB.
-// (The same weights, with the sum and the difference of red and blue shared:
-// six operations rather than eight, and the neighbourhood converts nine.)
 vec3 taa_rgb_to_ycocg(vec3 c)
 {
-    const float s = c.r + c.b;
-    const float h = 0.5 * c.g;
-    return vec3(0.25 * s + h, 0.5 * (c.r - c.b), h - 0.25 * s);
+    return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)),
+                dot(c, vec3(-0.25, 0.5, -0.25)));
 }
 
 vec3 taa_ycocg_to_rgb(vec3 c)
@@ -64,7 +61,7 @@ vec3 taa_ycocg_to_rgb(vec3 c)
 // The neighbourhood of a pixel in the current frame, in YCoCg: the first
 // and second moments and the extremes for the clipping box, and the
 // filtered colour; and a mix every sample takes, c' = scale c + shift, which
-// taa_clip applies to the box the samples span (taa_neighbourhood_mix).
+// taa_clip_mixed applies to the box the samples span (taa_neighbourhood_mix).
 struct TaaNeighbourhood {
     vec3 m1;
     vec3 m2;
@@ -121,7 +118,7 @@ void taa_neighbourhood_add(inout TaaNeighbourhood n, vec3 rgb, float w)
 
 // The neighbourhood with `g` (YCoCg) mixed into every sample by `b`, as
 // if each had been c' = (1 - b) c + b g (the bloom, bloom.comp). The same g
-// for all, so the samples' box follows from the plain samples' (taa_clip):
+// for all, so the samples' box follows from the plain samples' (taa_clip_mixed):
 // their mean and extremes take the mix too (1 - b >= 0 keeps the extremes'
 // order), their deviation only its scale, and none of the moments need
 // touching here. The filtered colour takes it now: the weights sum to 1,
@@ -175,18 +172,14 @@ vec3 taa_history_catmull_rom(uint texture_index, uint sampler_index, vec2 uv, ve
     return max(sum / (a + b + c + d + e), vec3(0.0));
 }
 
-// `history` (YCoCg) clipped to the neighbourhood: toward the centre of the
-// box of mean +- TAA_VARIANCE_GAMMA standard deviations within the
-// neighbourhood's extremes, stopping where the segment leaves the box
+// `history` (YCoCg) clipped to the samples' box: toward the centre of the
+// box of `mean` +- TAA_VARIANCE_GAMMA standard deviations within their
+// extremes [`lo`, `hi`], stopping where the segment leaves the box
 // (Pedersen 2016's clip rather than a clamp, which would shift the hue).
-vec3 taa_clip(TaaNeighbourhood n, vec3 history)
+vec3 taa_clip_box(vec3 mean, vec3 sigma, vec3 extreme_lo, vec3 extreme_hi, vec3 history)
 {
-    // The plain samples' statistics, then the mix they all take.
-    const vec3 plain = n.m1 / n.count;
-    const vec3 sigma = n.scale * sqrt(max(n.m2 / n.count - plain * plain, vec3(0.0)));
-    const vec3 mean = n.scale * plain + n.shift;
-    const vec3 lo = max(n.scale * n.lo + n.shift, mean - TAA_VARIANCE_GAMMA * sigma);
-    const vec3 hi = min(n.scale * n.hi + n.shift, mean + TAA_VARIANCE_GAMMA * sigma);
+    const vec3 lo = max(extreme_lo, mean - TAA_VARIANCE_GAMMA * sigma);
+    const vec3 hi = min(extreme_hi, mean + TAA_VARIANCE_GAMMA * sigma);
     const vec3 centre = 0.5 * (lo + hi);
     // At least the history's own rounding: B10G11R11 keeps 5 bits of blue
     // mantissa, so a grey history carries chroma up to 1/32 of its luma,
@@ -197,6 +190,25 @@ vec3 taa_clip(TaaNeighbourhood n, vec3 history)
     const vec3 a = abs(v) / extent;
     const float m = max(max(a.x, a.y), a.z);
     return m > 1.0 ? centre + v / m : history;
+}
+
+// `history` clipped to the neighbourhood's box (taa_clip_box).
+vec3 taa_clip(TaaNeighbourhood n, vec3 history)
+{
+    const vec3 mean = n.m1 / n.count;
+    const vec3 sigma = sqrt(max(n.m2 / n.count - mean * mean, vec3(0.0)));
+    return taa_clip_box(mean, sigma, n.lo, n.hi, history);
+}
+
+// taa_clip for a neighbourhood taa_neighbourhood_mix may have mixed: the
+// plain samples' statistics, then the mix they all take (its scale and shift
+// are the identity's where none did, at the cost of the arithmetic).
+vec3 taa_clip_mixed(TaaNeighbourhood n, vec3 history)
+{
+    const vec3 plain = n.m1 / n.count;
+    const vec3 sigma = n.scale * sqrt(max(n.m2 / n.count - plain * plain, vec3(0.0)));
+    return taa_clip_box(n.scale * plain + n.shift, sigma, n.scale * n.lo + n.shift,
+                        n.scale * n.hi + n.shift, history);
 }
 
 // The current frame's weight for a pixel whose history moved `speed`

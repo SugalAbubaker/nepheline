@@ -2066,17 +2066,20 @@ image's edge as the clamp of each tap's coordinates did, at the
 instruction's immediate offsets everywhere (unlike 10-21's, no branch for
 the subgroups at the border); the nearest-depth gathers at immediate
 offsets from the pixel's own corner, the nearest kept as one packed offset
-(the same nine candidates in the same order); the bloom mixed into the clip
-box rather than into the moments (every sample takes c' = (1 - b) c + b g,
-so the samples' mean and extremes take the mix and their deviation only its
-scale: `TaaNeighbourhood.scale` and `shift`); and YCoCg in six operations
-rather than eight. The pass went from 0.865-0.872 ms to 0.817-0.826 in
-Bistro's and the interior's views and from 0.822-0.858 to 0.777-0.810 in
-the city's, 0.045 to 0.050 ms less in every view, the frames 0.019 to
-0.048 less. The images: the city street's last frame differs between two
-runs of one build by 0.39 or by 1.56 levels on average (the radiance
-cache's state), and between the builds by the same two amounts; Bistro's
-street by 0.006 levels.
+(the same nine candidates in the same order); and the bloom mixed into the
+clip box rather than into the moments (every sample takes c' = (1 - b) c +
+b g, so the samples' mean and extremes take the mix and their deviation
+only its scale: `TaaNeighbourhood.scale` and `shift`, `taa_clip_mixed`; the
+microbenchmark, which mixes nothing, keeps `taa_clip`). The pass went from
+0.863-0.873 ms to 0.830-0.839 in Bistro's and the interior's views and from
+0.821-0.858 to 0.789-0.824 in the city's, 0.032 to 0.035 ms less in every
+view. The images: the city street's last frame differs between two runs of
+one build by 0.39 or by 1.56 levels on average (the radiance cache's state),
+and between the builds by the same two amounts; Bistro's street by 0.006
+levels. Not kept: YCoCg in six operations rather than three dot products'
+eight (the sum and difference of red and blue shared), 0.013 ms less in the
+pass but 0.014 to 0.028 ms more in the fragment microbenchmarks, whose
+compiled order it changed.
 
 ### Motion blur
 
