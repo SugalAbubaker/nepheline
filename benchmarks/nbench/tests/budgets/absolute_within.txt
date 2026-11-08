@@ -1,0 +1,3 @@
+# Far above anything a machine measures.
+self_work_1    1e12
+self_work_8    1e12

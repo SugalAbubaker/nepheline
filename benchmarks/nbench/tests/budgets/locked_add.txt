@@ -1,0 +1,2 @@
+# Far above anything a machine measures.
+nbench.locked_add    1e6

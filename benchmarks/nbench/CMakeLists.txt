@@ -18,3 +18,7 @@ add_library(nbench_main STATIC src/nbench_main.c)
 add_library(nbench::main ALIAS nbench_main)
 target_link_libraries(nbench_main PUBLIC nbench::nbench)
 set_target_properties(nbench_main PROPERTIES FOLDER "benchmarks")
+
+if(NPH_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

@@ -1,0 +1,3 @@
+# self_work_1 cannot run in a thousandth of a nanosecond.
+self_work_1    0.001
+self_work_8    1e12

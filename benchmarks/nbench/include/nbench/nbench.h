@@ -20,6 +20,9 @@
 //
 // Results go to the console and, with --json=FILE, to a JSON document that
 // CI archives and compares over time (CLAUDE.md §9 "Performance regression").
+// Every executable also measures nbench.locked_add, one uncontended atomic
+// add: the machine's own unit, in which --budgets can state the budget of a
+// benchmark the hardware's atomics bound (docs/benchmarks.md "Budgets").
 //
 // Like ntest, nbench depends only on the C library and the OS.
 

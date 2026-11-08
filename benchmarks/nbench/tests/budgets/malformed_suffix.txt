@@ -1,0 +1,2 @@
+self_work_1    1e12
+self_work_8    3y self_work_1

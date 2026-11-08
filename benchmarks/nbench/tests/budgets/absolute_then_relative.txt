@@ -1,0 +1,3 @@
+# The absolute budget holds; the relative one after it must still be checked.
+self_work_8    1e12
+self_work_8    2x self_work_1

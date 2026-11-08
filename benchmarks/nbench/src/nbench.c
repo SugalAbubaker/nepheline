@@ -18,6 +18,9 @@
 #define NOMINMAX
 #include <windows.h>
 #endif
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -95,6 +98,52 @@ void nbench_register(NbenchCase *bc)
     g_registry = bc;
     ++g_registry_count;
 }
+
+static const NbenchCase *find_case(const char *name)
+{
+    for (const NbenchCase *bc = g_registry; bc != NULL; bc = bc->next) {
+        if (strcmp(bc->name, name) == 0) {
+            return bc;
+        }
+    }
+    return NULL;
+}
+
+// ---------------------------------------------------------------------------
+// The machine's unit: nbench.locked_add
+// ---------------------------------------------------------------------------
+
+// One uncontended atomic add to a cache line no other thread touches: on x86
+// a locked add, the hardware's cost of the read-modify-write that every lock,
+// semaphore and counter pays. That cost differs by up to 5x between the CPUs
+// hosted runners have (docs/benchmarks.md "Budgets"), so every nbench
+// executable measures it, and a budget of `<k>x nbench.locked_add` holds an
+// atomic-bound benchmark to a multiple of the machine's own cost. It is the
+// compiler's intrinsic rather than the engine's wrapper, so a regression in
+// the wrapper shows in the benchmarks it is the unit of.
+static struct {
+    char before[64];
+#if defined(_MSC_VER) && !defined(__clang__)
+    volatile long word;
+#else
+    uint32_t word;
+#endif
+    char after[64];
+} g_locked;
+
+static void locked_add_body(NbenchState *state)
+{
+    while (nbench_keep_running(state)) {
+#if defined(_MSC_VER) && !defined(__clang__)
+        (void)_InterlockedExchangeAdd(&g_locked.word, 1);
+#else
+        (void)__atomic_fetch_add(&g_locked.word, 1U, __ATOMIC_SEQ_CST);
+#endif
+    }
+}
+
+static NbenchCase g_locked_add_case = {"nbench.locked_add", __FILE__, __LINE__, locked_add_body,
+                                       NULL};
 
 static int compare_cases(const void *a, const void *b)
 {
@@ -390,7 +439,9 @@ static void print_usage(FILE *out, const char *exe)
             "  --repeats=N        Measured runs per benchmark (default 5, max 64)\n"
             "  --json=FILE        Write results as JSON\n"
             "  --budgets=FILE     Exit 4 if any median ns/op exceeds its budget\n"
-            "                     (lines of `name max_ns`; '#' starts a comment)\n"
+            "                     (lines of `name max_ns`, or `name <k>x base` for k\n"
+            "                     times the median of benchmark `base` in the same run;\n"
+            "                     '#' starts a comment)\n"
             "  --help             Show this help\n",
             exe);
 }
@@ -399,12 +450,29 @@ static void print_usage(FILE *out, const char *exe)
 // Budgets
 // ---------------------------------------------------------------------------
 
+// A budget is absolute (`name max_ns`) or relative (`name <k>x base`): k times
+// the median of benchmark `base` in the same run, for a cost the hardware
+// sets and the run can measure, such as nbench.locked_add. One benchmark may
+// have several budgets; it must be within each.
 typedef struct NbenchBudget {
     char name[128];
-    double max_ns;
+    bool relative;
+    double max_ns; // absolute
+    double factor; // relative: k
+    char base[128];
+    int line;
 } NbenchBudget;
 
-// Reads `name max_ns` lines. Returns the count, or -1 on a malformed file.
+static const char *skip_space(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        ++p;
+    }
+    return p;
+}
+
+// Reads `name max_ns` and `name <k>x base` lines. Returns the count, or -1 on
+// a malformed file.
 static int load_budgets(const char *path, NbenchBudget **out)
 {
     FILE *f = fopen(path, "rb");
@@ -424,24 +492,41 @@ static int load_budgets(const char *path, NbenchBudget **out)
             *hash = '\0';
         }
         NbenchBudget b;
+        memset(&b, 0, sizeof b);
+        b.line = line_number;
         const int fields = sscanf(line, "%127s", b.name);
         if (fields <= 0) {
             continue; // blank or comment-only line
         }
-        // The number follows the name; strtod reports where it stopped.
+        // The number follows the name; strtod reports where it stopped. An
+        // `x` right after it makes the budget relative, to the name after.
         const char *rest = strstr(line, b.name) + strlen(b.name);
         char *end = NULL;
-        const double max_ns = strtod(rest, &end);
-        while (end != NULL && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
-            ++end;
+        const double value = strtod(rest, &end);
+        const char *error = NULL;
+        if (end == NULL || end == rest || !(value > 0.0)) {
+            error = "expected `name max_ns` or `name <k>x base`";
+        } else if (*end == 'x') {
+            const char *base = skip_space(end + 1);
+            if (base == end + 1 || sscanf(base, "%127s", b.base) != 1 ||
+                *skip_space(base + strlen(b.base)) != '\0') {
+                error = "expected `name <k>x base`";
+            } else if (strcmp(b.base, b.name) == 0) {
+                error = "a budget relative to itself";
+            }
+            b.relative = true;
+            b.factor = value;
+        } else if (*skip_space(end) != '\0') {
+            error = "expected `name max_ns` or `name <k>x base`";
+        } else {
+            b.max_ns = value;
         }
-        if (end == rest || end == NULL || *end != '\0' || !(max_ns > 0.0)) {
-            fprintf(stderr, "nbench: %s:%d: expected `name max_ns`\n", path, line_number);
+        if (error != NULL) {
+            fprintf(stderr, "nbench: %s:%d: %s\n", path, line_number, error);
             free(budgets);
             fclose(f);
             return -1;
         }
-        b.max_ns = max_ns;
         if (count == capacity) {
             capacity = capacity == 0 ? 32 : capacity * 2;
             NbenchBudget *grown =
@@ -459,7 +544,19 @@ static int load_budgets(const char *path, NbenchBudget **out)
     return count;
 }
 
-// Compares every result with its budget. Returns false if any exceeded.
+static const NbenchResult *find_result(const NbenchResult *results, size_t n, const char *name)
+{
+    for (size_t i = 0; i < n; ++i) {
+        if (strcmp(results[i].bc->name, name) == 0) {
+            return &results[i];
+        }
+    }
+    return NULL;
+}
+
+// Compares every result with each of its budgets. Returns false if any was
+// exceeded, or if a relative budget names a benchmark this executable lacks.
+// One whose base exists but was filtered out of the run is skipped, and says so.
 static bool check_budgets(const char *path, const NbenchResult *results, size_t n)
 {
     NbenchBudget *budgets = NULL;
@@ -471,15 +568,37 @@ static bool check_budgets(const char *path, const NbenchResult *results, size_t 
     for (size_t i = 0; i < n; ++i) {
         const NbenchResult *r = &results[i];
         for (int b = 0; b < count; ++b) {
-            if (strcmp(budgets[b].name, r->bc->name) != 0) {
+            const NbenchBudget *budget = &budgets[b];
+            if (strcmp(budget->name, r->bc->name) != 0) {
                 continue;
             }
-            if (r->ns_per_op_median > budgets[b].max_ns) {
-                printf("BUDGET EXCEEDED  %-40s %.2f ns/op > %.2f\n", r->bc->name,
-                       r->ns_per_op_median, budgets[b].max_ns);
+            if (!budget->relative) {
+                if (r->ns_per_op_median > budget->max_ns) {
+                    printf("BUDGET EXCEEDED  %-40s %.2f ns/op > %.2f\n", r->bc->name,
+                           r->ns_per_op_median, budget->max_ns);
+                    ok = false;
+                }
+                continue;
+            }
+            const NbenchResult *base = find_result(results, n, budget->base);
+            if (base == NULL) {
+                if (find_case(budget->base) == NULL) {
+                    printf("budgets: %s:%d: unknown base '%s' for %s\n", path, budget->line,
+                           budget->base, r->bc->name);
+                    ok = false;
+                } else {
+                    printf("budgets: %s's %gx %s skipped: %s did not run\n", r->bc->name,
+                           budget->factor, budget->base, budget->base);
+                }
+                continue;
+            }
+            const double limit = budget->factor * base->ns_per_op_median;
+            if (r->ns_per_op_median > limit) {
+                printf("BUDGET EXCEEDED  %-40s %.2f ns/op > %.2fx %s (%.2f ns/op) = %.2f\n",
+                       r->bc->name, r->ns_per_op_median, budget->factor, budget->base,
+                       base->ns_per_op_median, limit);
                 ok = false;
             }
-            break;
         }
     }
     printf(ok ? "budgets: all %zu benchmarks within budget (%s)\n"
@@ -537,6 +656,10 @@ int nbench_main(int argc, char **argv)
     if (g_registry_count == 0) {
         fprintf(stderr, "nbench: no benchmarks are registered in %s\n", exe);
         return 3;
+    }
+    // The machine's unit, measured by every executable that has benchmarks.
+    if (find_case(g_locked_add_case.name) == NULL) {
+        nbench_register(&g_locked_add_case);
     }
     const NbenchCase **cases = (const NbenchCase **)malloc(g_registry_count * sizeof *cases);
     NbenchResult *results = (NbenchResult *)calloc(g_registry_count, sizeof *results);
