@@ -2060,6 +2060,24 @@ checkpoint probed: workgroups of 16 × 16 compile the resolve to 48
 registers and 19 KB of spill a workgroup (+0.8 ms), and at its 8 × 8, 44%
 of the pixels border another tile.
 
+Kept (2026-11-08, all 18 reference views, two rounds interleaved against
+main): the neighbourhood through the point sampler, which clamps to the
+image's edge as the clamp of each tap's coordinates did, at the
+instruction's immediate offsets everywhere (unlike 10-21's, no branch for
+the subgroups at the border); the nearest-depth gathers at immediate
+offsets from the pixel's own corner, the nearest kept as one packed offset
+(the same nine candidates in the same order); the bloom mixed into the clip
+box rather than into the moments (every sample takes c' = (1 - b) c + b g,
+so the samples' mean and extremes take the mix and their deviation only its
+scale: `TaaNeighbourhood.scale` and `shift`); and YCoCg in six operations
+rather than eight. The pass went from 0.865-0.872 ms to 0.817-0.826 in
+Bistro's and the interior's views and from 0.822-0.858 to 0.777-0.810 in
+the city's, 0.045 to 0.050 ms less in every view, the frames 0.019 to
+0.048 less. The images: the city street's last frame differs between two
+runs of one build by 0.39 or by 1.56 levels on average (the radiance
+cache's state), and between the builds by the same two amounts; Bistro's
+street by 0.006 levels.
+
 ### Motion blur
 
 A production view with `NphRenderView.shutter` above zero blurs each pixel
