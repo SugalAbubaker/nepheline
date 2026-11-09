@@ -36,9 +36,16 @@
 // voxel of one pixel (most of those that cover any) joins no queue. The box's
 // nearest depth is near / w at its least clip w, raised by a 4096th against
 // the rounding of w and of a hit's 1 / t. A read may be older than another
-// workgroup's latest write, never larger, so it only skips less. The skips
-// change only the work: NPH_RENDER_VIS_NO_VOXEL_SKIP turns them off, which a
-// test compares against.
+// workgroup's latest write, never larger, so it only skips less. So too a
+// brick, before its voxels are taken (brick_hidden): where what the pixels
+// hold lies in front of its box's nearest depth at every centre the box's
+// projection may hold, or that holds none, the brick keeps none of its
+// voxels, and the subgroup takes those of the bricks kept, each brick's
+// first from a prefix sum of their counts (on the city's rooftop it drops
+// 35 % of phase 0's voxels and 95 % of phase 1's). Not in a cluster two
+// subgroups share: each would read the buffer at its own time, and the two
+// must take the same voxels in turn. The skips change only the work:
+// NPH_RENDER_VIS_NO_VOXEL_SKIP turns them off, which a test compares against.
 //
 // A pixel's ray runs from the camera through its point on the near plane,
 // in the instance's space. Under reverse-Z with an infinite far plane a hit
@@ -76,11 +83,14 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 #define BRICKS 32u // NPH_RENDER_VOXEL_CLUSTER_BRICKS
 
 // Shared arrays as arrays of structs of their own (docs/build.md "Shaders").
-// A brick, and its lowest corner in clip space.
+// A brick, its lowest corner in clip space, and of the voxels the subgroup
+// takes the first that is its and how many are (none where it is hidden:
+// brick_hidden).
 struct VisVoxelBrickShared {
     uvec4 b0;
     uvec4 b1;
     vec4 clip;
+    uvec2 kept;
 };
 // A voxel's pixels: their rectangle's corner (x | y << 16) and size (w | h
 // << 16), the pixels before them in its subgroup's queue, and the voxel (its
@@ -105,6 +115,69 @@ uint held_depth(ivec2 pixel)
     return uint(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], pixel).x >> 32ul);
 }
 
+// Whether no voxel of a brick could take a pixel: its lowest corner is
+// `corner` in clip space, `ax`, `ay`, `az` a 32nd of a cell along each axis.
+// Its box is its 4 x 4 x 4 cells, which hold every voxel's footprint, and a
+// pixel's ray meets the footprint only where the box's projection (the hull
+// of its corners', all in front of the camera) holds the pixel's centre, as
+// does the rectangle about it. So the brick is hidden where that rectangle
+// holds no centre, or where the visibility buffer holds more than the box's
+// nearest depth at each it holds: the triangles' rasters have run (and in
+// phase 1 all of phase 0), and depths only rise. A rectangle of more than
+// BRICK_TEST_PIXELS centres, or a box reaching behind the camera, is not
+// tested.
+#define BRICK_TEST_PIXELS 64
+bool brick_hidden(vec4 corner, vec4 ax, vec4 ay, vec4 az, float near, vec2 viewport)
+{
+    vec2 lo = vec2(3.402823466e38);
+    vec2 hi = vec2(-3.402823466e38);
+    float w_min = 3.402823466e38;
+    for (uint i = 0u; i < 8u; ++i) {
+        const vec4 q = corner + float(i & 1u) * 128.0 * ax + float((i >> 1u) & 1u) * 128.0 * ay +
+                       float(i >> 2u) * 128.0 * az;
+        if (!(q.w > 0.0)) {
+            return false;
+        }
+        const vec2 s = (q.xy / q.w * 0.5 + 0.5) * viewport;
+        lo = min(lo, s);
+        hi = max(hi, s);
+        w_min = min(w_min, q.w);
+    }
+    // The centres x + 1/2 within the hull's rectangle, widened by a 64th of a
+    // pixel and held to the target as a voxel's are (voxel_splat).
+    const ivec2 p0 = ivec2(clamp(ceil(lo - 0.5 - 1.0 / 64.0), vec2(0.0), viewport));
+    const ivec2 p1 = ivec2(clamp(floor(hi - 0.5 + 1.0 / 64.0), vec2(-1.0), viewport - 1.0));
+    if (any(greaterThan(p0, p1))) {
+        return true; // off the target, or between centres
+    }
+    if ((p1.x - p0.x + 1) * (p1.y - p0.y + 1) > BRICK_TEST_PIXELS) {
+        return false;
+    }
+    // As a voxel's bound (voxel_splat): near / w at the least w, raised by a
+    // 4096th against the rounding of w and of a hit's 1 / t.
+    const uint near_depth = floatBitsToUint(near / w_min * (1.0 + 1.0 / 4096.0));
+    // The centres four at a time, their loads issued together (the last
+    // repeated past the rectangle's end), until one holds less. Centre i is
+    // (i % w, i / w) from the corner: i / w as floor((i + 1/2) / w), whose
+    // fraction lies at least 1 / (2 w) from a whole number, far beyond the
+    // rounding.
+    const uint w = uint(p1.x - p0.x + 1);
+    const uint last = w * uint(p1.y - p0.y + 1) - 1u;
+    const float inv_w = 1.0 / float(w);
+    for (uint i = 0u; i <= last; i += 4u) {
+        uint least = 0xFFFFFFFFu;
+        for (uint j = 0u; j < 4u; ++j) {
+            const uint c = min(i + j, last);
+            const uint y = uint((float(c) + 0.5) * inv_w);
+            least = min(least, held_depth(p0 + ivec2(c - y * w, y)));
+        }
+        if (!(near_depth < least)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The position of the set bit of rank n (from 0) in the mask (m0, m1).
 uint nth_bit(uint m0, uint m1, uint n)
 {
@@ -127,33 +200,40 @@ uint nth_bit(uint m0, uint m1, uint n)
     return at + (n >= (m & 1u) ? 1u : 0u);
 }
 
-// Voxel k of the cluster (its rank first + k), whose bricks are s_brick's
-// `brick_count` from `bricks0`: the pixels whose centres its box may cover,
-// their count (none for a voxel of one pixel behind what that pixel holds,
-// where `skip`), and in `splat` their rectangle and the voxel (VisVoxelSplat,
-// without the pixels before them). `ax`, `ay`, `az` are a 32nd of the
-// cluster's cell along each axis in clip space. `near_depth` is the depth of
-// the box's nearest point, the most any of its hits can have, as bits.
+// Kept voxel k of the cluster, whose bricks are s_brick's `brick_count` from
+// `bricks0` (the kept voxels: those of the bricks not hidden, in order, from
+// each brick's kept.x): the pixels whose centres its box may cover, their
+// count (none for a voxel of one pixel behind what that pixel holds, where
+// `skip`), and in `splat` their rectangle and the voxel (VisVoxelSplat,
+// without the pixels before them). The voxel's rank is first plus its index
+// in the cluster. `ax`, `ay`, `az` are a 32nd of the cluster's cell along each
+// axis in clip space. `near_depth` is the depth of the box's nearest point,
+// the most any of its hits can have, as bits.
 uint voxel_splat(uint k, uint first, uint bricks0, uint brick_count, VisVoxelWordsRef run,
                  uint stride, vec4 ax, vec4 ay, vec4 az, float near, vec2 viewport, bool skip,
                  out uvec4 splat, out uint near_depth)
 {
     splat = uvec4(0u);
     near_depth = 0x7F800000u; // +inf
-    // The brick holding voxel k: the last whose first voxel is at or before
-    // k, in five halvings (BRICKS at most), so that the search unrolls.
+    // The brick holding kept voxel k: the last whose first kept voxel is at
+    // or before k, in five halvings (BRICKS at most), so that the search
+    // unrolls. A hidden brick keeps none, and starts where the next does,
+    // which the search takes instead.
     uint lo = 0u;
     for (uint step = BRICKS / 2u; step > 0u; step >>= 1u) {
         const uint mid = lo + step;
-        if (mid < brick_count && s_brick[bricks0 + mid].b1.z - first <= k) {
+        if (mid < brick_count && s_brick[bricks0 + mid].kept.x <= k) {
             lo = mid;
         }
     }
     const uvec4 b1 = s_brick[bricks0 + lo].b1;
-    const uint bit = nth_bit(b1.x, b1.y, first + k - b1.z);
-    splat.w = lo | (bit << 5u) | (k << 11u);
+    const uint in_brick = k - s_brick[bricks0 + lo].kept.x;
+    const uint bit = nth_bit(b1.x, b1.y, in_brick);
+    // Its index in the cluster: its rank from the first.
+    const uint index = b1.z - first + in_brick;
+    splat.w = lo | (bit << 5u) | (index << 11u);
     // Its material's capsule byte, its box.
-    const uvec2 fp = vis_voxel_load_footprint(run, stride, first + k).zw;
+    const uvec2 fp = vis_voxel_load_footprint(run, stride, first + index).zw;
     // The footprint's box in 32nds of a cell from the brick's corner.
     const uvec3 cell = uvec3(bit & 3u, (bit >> 2u) & 3u, bit >> 4u) * 32u;
     vec3 box_lo;
@@ -227,24 +307,45 @@ void raster_cluster(VisViewRef view, uint g, uint place, uint sharing)
     const vec4 ax = vp * vec4(vis_transform_vector(inst.transform, vec3(step, 0.0, 0.0)), 0.0);
     const vec4 ay = vp * vec4(vis_transform_vector(inst.transform, vec3(0.0, step, 0.0)), 0.0);
     const vec4 az = vp * vec4(vis_transform_vector(inst.transform, vec3(0.0, 0.0, step)), 0.0);
+    const float near = view.v.projection.z;
+    const bool skip = (view.v.flags & uint(NPH_VIS_VIEW_VOXEL_SKIP)) != 0u;
+    // A brick hidden behind what the visibility buffer holds keeps none of
+    // its voxels. Not where two subgroups share the cluster: each would read
+    // the buffer at its own time, and the two must take the same voxels in
+    // turn.
+    const bool cull = skip && sharing == 1u;
+    uint hidden = 0u; // the lane's bricks found hidden
     for (uint b = lane; b < brick_count; b += k_lanes) {
         uvec4 b0;
         uvec4 b1;
         vis_voxel_brick(bricks, m.x + b, vc, b0, b1);
+        const vec4 clip =
+            vp * vec4(vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t, 1.0);
         s_brick[bricks0 + b].b0 = b0;
         s_brick[bricks0 + b].b1 = b1;
-        s_brick[bricks0 + b].clip =
-            vp * vec4(vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t, 1.0);
+        s_brick[bricks0 + b].clip = clip;
+        const bool gone = cull && brick_hidden(clip, ax, ay, az, near, viewport);
+        s_brick[bricks0 + b].kept.y = gone ? 0u : bitCount(b1.x) + bitCount(b1.y);
+        hidden += gone ? 1u : 0u;
+    }
+    VIS_ADD(VisCountersRef(view.v.counters).c.voxel_bricks_hidden, hidden);
+    // Each brick's first kept voxel, a chunk of the subgroup's lanes at a
+    // time (a lane reads the counts it wrote).
+    uint total = 0u;
+    for (uint c0 = 0u; c0 < brick_count; c0 += k_lanes) {
+        const uint b = c0 + lane;
+        const uint n = b < brick_count ? s_brick[bricks0 + b].kept.y : 0u;
+        const uint before = subgroupExclusiveAdd(n);
+        if (b < brick_count) {
+            s_brick[bricks0 + b].kept.x = total + before;
+        }
+        total += subgroupAdd(n);
     }
     subgroupBarrier(); // the subgroup's bricks, for its lanes alone
     // A cluster's voxels follow one another in its bricks' order, their ranks
-    // from the first brick's (checked when a mesh is made: 0), so voxel k of
-    // the cluster is rank first + k.
+    // from the first brick's (checked when a mesh is made: 0), so voxel i of
+    // the cluster is rank first + i.
     const uint first = s_brick[bricks0].b1.z;
-    const uvec4 last = s_brick[bricks0 + brick_count - 1u].b1;
-    const uint total = last.z - first + bitCount(last.x) + bitCount(last.y);
-    const float near = view.v.projection.z;
-    const bool skip = (view.v.flags & uint(NPH_VIS_VIEW_VOXEL_SKIP)) != 0u;
     const mat4 inv_view_proj = ViewRef(view.v.render_view).v.inv_view_proj;
     const vec2 inv_size = view.v.viewport.zw;
     // The instance's part of every pixel's ray, once.

@@ -1165,6 +1165,9 @@ typedef struct NphRenderFrameStats {
     u32 vis_triangles;      // in them all
     u32 vis_voxel_clusters; // of the clusters, voxels (render/voxel.h; ADR-0061)
     u32 vis_voxel_bricks;   // and their bricks
+    // Of those, the bricks the voxel raster found hidden behind what the
+    // visibility buffer held, whose voxels it took no further.
+    u32 vis_voxel_bricks_hidden;
     u32 vis_instances_culled_frustum;
     u32 vis_instances_culled_occlusion;
     u32 vis_meshlets_culled_frustum;

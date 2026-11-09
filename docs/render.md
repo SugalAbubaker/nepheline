@@ -1200,9 +1200,23 @@ rise, so a voxel whose box lies wholly behind what a pixel holds already
 (its nearest depth, `near / w` at the box's least clip w, raised by a
 4096th against rounding) cannot take it: that pixel's test is skipped, and
 a voxel of one pixel joins no queue. A read older than another workgroup's
-latest write holds less, so it only skips less. The skips change only the
-work: `NPH_RENDER_VIS_NO_VOXEL_SKIP` turns them off, and a test draws a
-plane through dense foliage both ways. `vis resolve` writes
+latest write holds less, so it only skips less. So too a brick, before its
+voxels are taken: its box (its 4 × 4 × 4 cells, which hold every footprint)
+projects within the rectangle of its eight corners' projections, and where
+that rectangle holds no pixel centre, or every centre it holds holds more
+than the box's nearest depth, no voxel of the brick could take a pixel. Such
+a brick keeps none of its voxels, and the voxels a subgroup takes are those
+of the bricks kept, each brick's first from a prefix sum of their counts. A
+lane reads its brick's centres four at a time, the loads issued together,
+until one holds less; a rectangle of more than 64 centres, or a box reaching
+behind the camera, is not tested, and nor is a cluster two subgroups share
+(each would read the buffer at its own time, and the two must take the same
+voxels in turn). On the city's rooftop the test drops 39 % of phase 0's
+bricks (35 % of its voxels) and 96 % of phase 1's, and the raster went from
+0.896 + 0.164 to 0.800 + 0.083 ms (ADR-0061's amendment of 2026-11-08). The
+skips change only the work: `NPH_RENDER_VIS_NO_VOXEL_SKIP` turns them off,
+and a test draws a plane through dense and sparse foliage both ways, its
+clusters shared and alone. `vis resolve` writes
 nothing at a voxel cluster's pixel: the first invocation of a subgroup that
 saw one sets its tile's bit (`NphVisViewData.voxel_tile_bits`, cleared by
 `vis clear`), and the one that set it lists the tile and raises `vis voxel
@@ -1222,8 +1236,9 @@ Its point's shadow lookups and rays, and its cell of the radiance cache,
 start a cell's diagonal off that face, clear of the triangles the voxel
 stands for, which the shadow map and the rays still draw; `gi update` takes
 a voxel pixel's point and face the same way. The frame's statistics count
-the voxel clusters drawn and their bricks (`vis_voxel_clusters`,
-`vis_voxel_bricks`), and every debug view shows voxels as it shows triangles
+the voxel clusters drawn, their bricks, and those the raster found hidden
+(`vis_voxel_clusters`, `vis_voxel_bricks`, `vis_voxel_bricks_hidden`), and
+every debug view shows voxels as it shows triangles
 (the triangle view names the brick).
 
 **Measured** (`test_voxel.c`): a sheet across cells and a slanted one leave

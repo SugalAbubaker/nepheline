@@ -759,23 +759,33 @@ typedef struct VoxelSkipView {
     f64 distance;
     f32 lod_error;
 } VoxelSkipView;
-// The voxels' skips change only the work: a plane of triangles through dense
-// foliage, which the triangles' raster draws first, so that many voxels'
-// boxes reach across the depth its pixels hold, shows the same surfaces with
-// the skips as without (NPH_RENDER_VIS_NO_VOXEL_SKIP), near and farther,
-// pixel for pixel. The normals' debug view tells one voxel from another and
-// from the plane, and depends on no frame's order of clusters (the cluster
-// views' colours do).
-NTEST_F(VoxelGpu, the_voxels_skips_change_only_the_work)
+// A foliage of the skips' test: the side its needles fill, and its views.
+typedef struct VoxelSkipFoliage {
+    f32 side;
+    u32 view_count;
+    VoxelSkipView views[3];
+} VoxelSkipFoliage;
+// The voxels' skips change only the work: a plane of triangles through
+// foliage, which the triangles' raster draws first, shows the same surfaces
+// with the skips as without (NPH_RENDER_VIS_NO_VOXEL_SKIP), near and farther,
+// pixel for pixel. Through dense foliage many voxels' boxes reach across the
+// depth the plane's pixels hold, and sparse foliage's clusters hold more
+// bricks; in both, bricks straddle the plane and some show voxels in front of
+// it, which a brick's bound taken at its far side would lose (a few pixels in
+// each). The normals' debug view tells one voxel
+// from another and from the plane, and depends on no frame's order of
+// clusters (the cluster views' colours do). With every cluster a subgroup's
+// (`alone`), the raster tests each brick against what the visibility buffer
+// holds, and some are found hidden; a cluster that two subgroups share is not
+// tested (where the device has no such pipeline, every cluster is a
+// subgroup's), nor is any brick without the skips.
+static void voxels_skips_change_only_the_work(RenderFixture *f, bool alone)
 {
     REQUIRE_PRODUCTION(f);
-    LodMesh m;
-    lod_foliage(&m, 1500U, 1.5F, 7U);
-    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
-    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
     const NphRenderMaterial mat = grey_material(f);
-    const NphRenderInstance inst = instance(f, mesh, mat);
-    // The plane faces the camera through the foliage's middle (z = 0).
+    // The plane faces the camera between the foliage's middle and its front,
+    // off the bricks' faces: cells are powers of two, so a plane at z = 0
+    // would lie on bricks' faces, and no brick would straddle it.
     NphRenderMeshData pd;
     NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 4U, 1.0F, &pd),
                         NPH_RESULT_OK);
@@ -787,39 +797,75 @@ NTEST_F(VoxelGpu, the_voxels_skips_change_only_the_work)
     id.materials = &mat;
     id.material_count = 1U;
     id.transform = nph_render_transform_from_trs(
-        nph_dvec3(0.0, 0.0, 0.0), nph_quat_from_axis_angle(nph_vec3_unit_x(), 0.5F * NPH_PI),
+        nph_dvec3(0.0, 0.0, 0.35), nph_quat_from_axis_angle(nph_vec3_unit_x(), 0.5F * NPH_PI),
         nph_vec3(1.2F, 1.2F, 1.2F));
     NphRenderInstance plane_inst = NPH_RENDER_INSTANCE_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &plane_inst), NPH_RESULT_OK);
     u8 *with = NPH_ALLOC_ARRAY(nph_allocator_system(), u8, PIXELS * 4U);
     NTEST_ASSERT_NOT_NULL(with);
-    static const VoxelSkipView k_views[3] = {{3.0, 8.0F}, {3.0, 16.0F}, {7.0, 1.0F}};
-    for (u32 k = 0; k < 3U; ++k) {
-        NphRenderView v = plain_view(k_views[k].distance, k_views[k].lod_error);
-        v.debug_view = NPH_RENDER_VIEW_NORMAL;
-        const NphRenderFrameStats stats = render_frames(f, &v);
-        memcpy(with, f->pixels, PIXELS * 4U);
-        v.vis_flags |= (u32)NPH_RENDER_VIS_NO_VOXEL_SKIP;
-        (void)render_frames(f, &v);
-        u32 differ = 0U;
-        u32 covered_pixels = 0U;
-        for (u64 i = 0; i < PIXELS; ++i) {
-            differ += memcmp(with + i * 4U, f->pixels + i * 4U, 3U) != 0 ? 1U : 0U;
-            covered_pixels += covered(f->pixels + i * 4U) ? 1U : 0U;
+    static const VoxelSkipFoliage k_foliage[2] = {
+        {1.5F, 3U, {{3.0, 8.0F}, {3.0, 16.0F}, {7.0, 1.0F}}},
+        {4.0F, 2U, {{7.0, 1.0F}, {12.0, 1.0F}, {0.0, 0.0F}}},
+    };
+    const bool shared = nph_gpu_pipeline_is_valid(f->dev, f->renderer->vis.voxel_raster_share);
+    u32 hidden = 0U;
+    for (u32 fi = 0; fi < 2U; ++fi) {
+        const VoxelSkipFoliage *fo = &k_foliage[fi];
+        LodMesh m;
+        lod_foliage(&m, 1500U, fo->side, 7U);
+        NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+        NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
+        const NphRenderInstance inst = instance(f, mesh, mat);
+        for (u32 k = 0; k < fo->view_count; ++k) {
+            NphRenderView v = plain_view(fo->views[k].distance, fo->views[k].lod_error);
+            v.debug_view = NPH_RENDER_VIEW_NORMAL;
+            const NphRenderFrameStats stats = render_frames(f, &v);
+            memcpy(with, f->pixels, PIXELS * 4U);
+            v.vis_flags |= (u32)NPH_RENDER_VIS_NO_VOXEL_SKIP;
+            const NphRenderFrameStats without = render_frames(f, &v);
+            u32 differ = 0U;
+            u32 covered_pixels = 0U;
+            for (u64 i = 0; i < PIXELS; ++i) {
+                differ += memcmp(with + i * 4U, f->pixels + i * 4U, 3U) != 0 ? 1U : 0U;
+                covered_pixels += covered(f->pixels + i * 4U) ? 1U : 0U;
+            }
+            NTEST_LOG("needles over %.1f m, at %.0f m, error %.0f px: %u voxel clusters, %u bricks "
+                      "(%u found hidden), %u pixels covered, %u differ",
+                      (f64)fo->side, fo->views[k].distance, (f64)fo->views[k].lod_error,
+                      stats.vis_voxel_clusters, stats.vis_voxel_bricks,
+                      stats.vis_voxel_bricks_hidden, covered_pixels, differ);
+            NTEST_EXPECT_GT_UINT(stats.vis_voxel_clusters, 0U);
+            NTEST_EXPECT_EQ_UINT(differ, 0U);
+            NTEST_EXPECT_LE_UINT(stats.vis_voxel_bricks_hidden, stats.vis_voxel_bricks);
+            NTEST_EXPECT_EQ_UINT(without.vis_voxel_bricks_hidden, 0U);
+            // Fewer clusters than voxel_share_clusters in all: where the device
+            // made the shared clusters' pipeline, every phase took it.
+            if (shared && stats.vis_voxel_clusters < f->renderer->desc.voxel_share_clusters) {
+                NTEST_EXPECT_EQ_UINT(stats.vis_voxel_bricks_hidden, 0U);
+            }
+            hidden += stats.vis_voxel_bricks_hidden;
         }
-        NTEST_LOG("at %.0f m, error %.0f px: %u voxel clusters, %u pixels covered, %u differ",
-                  k_views[k].distance, (f64)k_views[k].lod_error, stats.vis_voxel_clusters,
-                  covered_pixels, differ);
-        NTEST_EXPECT_GT_UINT(stats.vis_voxel_clusters, 0U);
-        NTEST_EXPECT_EQ_UINT(differ, 0U);
+        nph_render_instance_destroy(f->renderer, inst);
+        nph_render_mesh_destroy(f->renderer, mesh);
+        lod_mesh_free(&m);
+    }
+    if (alone) {
+        NTEST_EXPECT_GT_UINT(hidden, 0U);
     }
     NPH_FREE_ARRAY(nph_allocator_system(), u8, with, PIXELS * 4U);
     nph_render_instance_destroy(f->renderer, plane_inst);
     nph_render_mesh_destroy(f->renderer, plane);
-    nph_render_instance_destroy(f->renderer, inst);
     nph_render_material_destroy(f->renderer, mat);
-    nph_render_mesh_destroy(f->renderer, mesh);
-    lod_mesh_free(&m);
+}
+
+NTEST_F(VoxelGpu, the_voxels_skips_change_only_the_work)
+{
+    voxels_skips_change_only_the_work(f, false);
+}
+
+NTEST_F(VoxelAloneGpu, the_voxels_skips_change_only_the_work)
+{
+    voxels_skips_change_only_the_work(f, true);
 }
 
 NTEST_F(VoxelGpu, the_voxel_levels_keep_the_coverage)

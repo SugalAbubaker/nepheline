@@ -843,3 +843,109 @@ pass on the RTX 3060 Ti.
 **What is left.** A shorter chain of loads (the meshlet cull holds the cluster's instance and meshlet
 when it lists it), and a voxel's brick and bit (the five-step search over the bricks and a rank's select,
 468 of the 1,914 instructions a pixel) for less than a table the cluster fills.
+
+## Amendment (2026-11-08): a brick hidden behind what is drawn keeps none of its voxels
+
+**Context.** With the occlusion test refined (docs/render.md "The depth pyramid", 2026-11-08), the
+city's rooftop drew 71,788 voxel clusters a frame, 61,359 in phase 0 and 10,429 in phase 1, with
+706,680 bricks, and its `vis voxel raster` took 0.896 + 0.164 ms of a 9.25 ms frame. A GPU trace found
+phase 0 bound by its issue (538 instructions a pixel, 53.8 % of the peak), not by memory. The amendment
+of 2026-11-05 left the bricks to the pixels' own depths ("the pixels' own depths as drawn decide within
+the frame"), and the raster still took every voxel of every cluster drawn: counters in the shader found
+35 % of phase 0's 8.36 million voxels in bricks behind what the visibility buffer held at every pixel
+centre their box may cover when the raster reached them, and 95 % of phase 1's 1.38 million.
+
+**Decision.**
+
+1. *A brick is tested whole before its voxels are taken* (`brick_hidden`). Its box, its 4 × 4 × 4 cells,
+   holds every voxel's footprint, and a pixel's ray meets a footprint only where the box's projection
+   holds the pixel's centre; the projection lies within the rectangle of the eight corners'
+   projections, all in front of the camera. Where that rectangle holds no centre, or every centre it
+   holds holds more than the box's nearest depth (near / w at its least clip w, raised by a 4096th as a
+   voxel's is), no voxel of the brick could take a pixel, and the brick keeps none of its voxels. The
+   rectangle's centres are widened by a 64th of a pixel and held to the target as a voxel's are. A read
+   older than another workgroup's latest write holds less, so it only keeps more.
+2. *The voxels taken are those kept.* A prefix sum of the bricks' kept counts (a chunk of the
+   subgroup's lanes at a time) gives each brick's first kept voxel; a batch's lanes take kept voxels,
+   whose brick the five halvings find among those firsts (a hidden brick starts where the next does,
+   which the search takes instead), and a voxel's index in the cluster is its brick's first voxel's
+   plus its rank in the brick.
+3. *Up to 64 centres, four at a time.* A lane tests its own brick, reading its rectangle's centres four
+   at a time, their loads issued together (the last repeated past the end), until one holds less. A
+   rectangle of more centres, or a box reaching behind the camera, is kept untested (80 of phase 0's
+   626,522 bricks on the rooftop).
+4. *Not where two subgroups share a cluster* (`k_share`, the phases of fewer than 1,024 clusters): each
+   subgroup would test at its own time, and a read later than the other's can hide a brick the other
+   kept, so the two would number the cluster's voxels differently and take some twice and others not at
+   all.
+5. *A statistic.* `NphRenderFrameStats.vis_voxel_bricks_hidden` counts the bricks found hidden, and
+   `render_perf` prints it beside the voxel clusters' bricks.
+
+**Measured.** Two builds, #163's top (f429ca7) against this, a warm-up run and then interleaved rounds
+(the city four, the park alone six, the rest two), each pack a process (means, ms):
+
+| Scene | Before | After | Voxel raster, phases 0 + 1 |
+|---|---|---|---|
+| City rooftop | 9.247 | 9.083 | 0.896 + 0.164 to 0.800 + 0.083 |
+| City crossing, park, streets (6 views) | 6.727 to 7.879 | 6.732 to 7.893 | +0.001 to +0.002 (shared phases) |
+| Landscape forest | 51.19 | 48.29 | 11.35 + 2.65 to 9.76 + 1.24 |
+| Landscape (5 other views) | 44.29 to 55.55 | 41.91 to 53.49 | (-1.26 to -1.67 in phase 0, -0.63 to -1.44 in phase 1) |
+| `foliage_4k_production` | 5.740 | 5.196 | 1.000 + 0.392 to 0.673 + 0.133 |
+| `foliage_shadows_sun_4k_production`, `_walk_` | 22.88, 6.163 | 22.33, 5.627 | (-0.32 and -0.34 in phase 0) |
+| Bistro (5 views), interior (6) | 6.26 to 8.27 | (-0.026 to +0.009) | no voxels |
+
+The city's other views moved by -0.008 to +0.014 ms in the four rounds, within their spread: the park
+alone over six rounds by +0.002 ± 0.005, and without each build's first round the streets by -0.003
+to +0.004. Their phases hold few voxel clusters, which share their workgroups and are not tested;
+their raster is 0.001 to 0.002 ms dearer (its prefix sum). The city's instances view is identical
+pixel for pixel in its four still views, and its three moving views differ from run to run of either
+build (by up to 5.3 % of their pixels, by the streams' timing), between the builds within that. GPU
+traces of the rooftop (five frames each): the voxel raster's DRAM 52.3 + 16.8 MB a frame to 46.5 +
+4.9, the frame's 2,156 to 2,130 MB (the other passes within 2 MB); phase 0 538 to 532 instructions a
+pixel (the test costs about what it saves of them), its issue 53.8 to 56.9 % of the peak, 947.5 to
+885.1 µs; phase 1 85 to 44 instructions a pixel, 175.2 to 93.6 µs. On the rooftop the test hides 39 %
+of phase 0's bricks (35 % of its voxels); the voxels kept made 190,105 batches for 61,359 clusters,
+and of those 5.40 million 58 % cover no pixel centre, and 1.73 million of their pixels' rays are
+tested for 0.75 million hits. Phase 1 keeps 4.2 % of its bricks.
+
+The test's steps, shader variants of one build on the rooftop (two or three rounds, phases 0 and 1
+against no test): centres one at a time over rectangles of at most 16, 36, 64, and 144 centres
+-0.040 and -0.037, -0.055 and -0.052, -0.059 and -0.059, -0.059 and -0.059; at most 64, two at a
+time -0.076 and -0.072, four -0.090 and -0.082, eight -0.071 and -0.081, and four at most 144 as at
+64. One at a time with its verdict dropped, the test alone costs +0.084 and +0.035.
+
+**Measured and not kept.**
+- *The rectangle from the box's centre and reach* in clip space, as a voxel's (voxel_splat), rather
+  than its corners: cheaper to compute, but the city's instances turn, and the bound pairs a reach in
+  x with one in w that no corner has together: its rectangles held 42 % more centres (22.5 a tested
+  brick against 15.8) and it hid 8 % fewer bricks, phase 0 0.859 against 0.815 ms (both a centre at a
+  time).
+- *A brick at a time over the subgroup's lanes* (each lane its brick's rectangle's middle first, then
+  each brick still hidden in rounds of a centre a lane until one shows): phase 0 0.955 against 0.869
+  ms with no test; without the middle first 1.081. Of the tested bricks 88 % hold 5 to 36 centres, and
+  a round for each brick costs more than a lane's few loads.
+
+**Tests.** `VoxelAloneGpu.the_voxels_skips_change_only_the_work` draws the skips' plane through dense
+foliage and through sparse with every cluster a subgroup's, the bricks tested: it finds 514 of 1,440,
+16 of 224, and 1,825 of 4,675 bricks hidden in the dense foliage's three views and 791 of 7,688 and 469
+of 7,088 in the sparse's two, none without the skips, and the same surfaces at every pixel as without
+them. `VoxelGpu`'s, whose clusters share their workgroups, finds none hidden where the device made the
+shared clusters' pipeline (lavapipe makes none, and tests them all). The plane lies off the bricks'
+faces: at z = 0, where it lay, no brick straddles it (cells are powers of two), and a bound taken at a
+box's far side hid only bricks wholly behind it; off them, some straddling bricks show voxels in front
+of it. Ten broken variants: the depth test inverted, the bound at the box's far side (three pixels in a
+view of the dense foliage, one in the sparse), the search over the bricks' ranks rather than what they
+keep, a kept voxel's index from the next brick's first, the statistic counting the bricks kept, the
+shared clusters tested, and the rectangle shrunk by a quarter pixel fail the tests on the RTX 3060 Ti;
+a rectangle with no centre kept passes them, as a change only of the work should, and so does a
+rectangle's last centre skipped (a brick that shows there alone, which these scenes do not hold); the
+chunks' prefix not carried, which needs more bricks than lanes, passes them there and fails 8 of the 12
+on lavapipe, whose subgroups are of 8. Lavapipe passes the voxel tests (its clusters tested in both
+fixtures: 16 to 1,892 bricks hidden a view), and the renderer's 347 tests pass on the RTX 3060 Ti.
+
+**What is left.** Phase 0's test costs about the instructions it saves; its gain is in the frame's
+issue and memory. The shared phases are not tested: one subgroup's verdicts for both, behind a
+workgroup barrier, would let them be (the city's views that take them spend 0.02 to 0.08 ms in the
+raster). Phase 1 could test against the pyramid phase 0 left first (four texels against some 15
+centres; 96 % of its bricks are hidden). And 58 % of the voxels kept cover no pixel centre, which only
+a voxel's own box shows.

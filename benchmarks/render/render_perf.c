@@ -1788,8 +1788,8 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
                    st->vis_lod_clusters_culled);
         }
         if (st->vis_voxel_clusters != 0U) {
-            printf("    voxels: %u clusters, %u bricks\n", st->vis_voxel_clusters,
-                   st->vis_voxel_bricks);
+            printf("    voxels: %u clusters, %u bricks (%u found hidden by the raster)\n",
+                   st->vis_voxel_clusters, st->vis_voxel_bricks, st->vis_voxel_bricks_hidden);
         }
         if (st->vis_cells_proxied != 0U) {
             printf("    cells: %u drawn as their proxies, for %u instances\n",

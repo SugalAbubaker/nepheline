@@ -688,6 +688,7 @@ static void read_stats(NphRenderer *r)
     s->vis_voxel_clusters =
         c->raster_count[0][NPH_VIS_RASTER_VOXEL] + c->raster_count[1][NPH_VIS_RASTER_VOXEL];
     s->vis_voxel_bricks = c->voxel_bricks;
+    s->vis_voxel_bricks_hidden = c->voxel_bricks_hidden;
     s->vis_instances_culled_frustum = c->instances_culled_frustum;
     s->vis_instances_culled_occlusion = c->instances_culled_occlusion;
     s->vis_meshlets_culled_frustum = c->meshlets_culled_frustum;
@@ -2354,6 +2355,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_triangles = last->vis_triangles;
         stats->vis_voxel_clusters = last->vis_voxel_clusters;
         stats->vis_voxel_bricks = last->vis_voxel_bricks;
+        stats->vis_voxel_bricks_hidden = last->vis_voxel_bricks_hidden;
         stats->vis_instances_culled_frustum = last->vis_instances_culled_frustum;
         stats->vis_instances_culled_occlusion = last->vis_instances_culled_occlusion;
         stats->vis_meshlets_culled_frustum = last->vis_meshlets_culled_frustum;

@@ -423,9 +423,11 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 lod_group_chunks;
     u32 lod_groups_tested;
     // The resolve's tiles listed for the voxel resolve, and statistics: the
-    // visible voxel clusters' bricks.
+    // visible voxel clusters' bricks, and those of them the voxel raster
+    // found hidden (vis_voxel_raster.comp brick_hidden).
     u32 voxel_tiles;
     u32 voxel_bricks;
+    u32 voxel_bricks_hidden;
     // Statistics (ADR-0062): the cells drawn as their proxies (the proxies
     // phase 0's instance cull kept for their distance, whether or not in
     // view), and the instances such a proxy stood in for.
