@@ -7,6 +7,10 @@
 // part of the radius as the shader's do. And how it shades: the
 // environment's light only, the diffuse part with what the occluders
 // reflect back (render/reference.h nph_render_ref_ao_bounce).
+#include <nepheline/math/pack.h>
+#include <nepheline/math/random.h>
+#include <nepheline/math/scalar.h>
+
 #include "render_internal.h"
 #include "test_boxes.h"
 
@@ -371,4 +375,171 @@ NTEST_F(Ao, the_radius_must_be_finite_and_not_negative)
         NTEST_ASSERT_EQ_INT(nph_gpu_rg_execute(f->graph), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_INT(nph_gpu_frame_end(f->dev), NPH_RESULT_OK);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The denoise against its C twin
+// ---------------------------------------------------------------------------
+
+// The image the twin test denoises: no multiple of the denoise's 32-pixel
+// tiles, so that it has tiles inside and at every edge.
+#define TWIN_W    100
+#define TWIN_H    70
+#define TWIN_EDGE 0.05F // ao_denoise.comp's AO_EDGE
+
+// A texel as ao.comp packs it (its shares, its distance, the march's sign),
+// unpacked as ao_denoise.comp's texel_at: the shares, the distance.
+static NphVec3 twin_texel(const u32 *raw, i32 x, i32 y)
+{
+    const i32 cx = x < 0 ? 0 : (x >= TWIN_W ? TWIN_W - 1 : x);
+    const i32 cy = y < 0 ? 0 : (y >= TWIN_H ? TWIN_H - 1 : y);
+    const u32 w = raw[cy * TWIN_W + cx];
+    return nph_vec3((f32)(w & 0xFFU), (f32)((w >> 8U) & 0xFFU),
+                    nph_f32_abs(nph_f16_to_f32((u16)(w >> 16U))));
+}
+
+static f32 twin_tent(i32 x)
+{
+    return x == 2 || x == -2 ? 0.5F : 1.0F;
+}
+
+// The occlusion ao_denoise.comp writes at pixel (x, y) of `raw`, through the
+// view's `unproject` (ao_common.glsl ao_gradient, ao_plane): the 5 x 5 tent of
+// the texels on the pixel's tangent plane, a tap beyond the image taking the
+// pixel 4 inside, the visible shares over the open ones, the march's sign.
+static f32 twin_denoise(const u32 *raw, NphVec4 unproject, i32 x, i32 y)
+{
+    const f32 dist = twin_texel(raw, x, y).z;
+    const bool open_sky = !(dist < 65504.0F);
+    const f32 q = 1.0F / dist;
+    const f32 left = 1.0F / twin_texel(raw, x - 1, y).z;
+    const f32 right = 1.0F / twin_texel(raw, x + 1, y).z;
+    const f32 up = 1.0F / twin_texel(raw, x, y - 1).z;
+    const f32 down = 1.0F / twin_texel(raw, x, y + 1).z;
+    const bool use_right =
+        x == 0 || (x < TWIN_W - 1 && nph_f32_abs(right - q) < nph_f32_abs(left - q));
+    const bool use_down = y == 0 || (y < TWIN_H - 1 && nph_f32_abs(down - q) < nph_f32_abs(up - q));
+    const f32 gx = use_right ? right - q : q - left;
+    const f32 gy = use_down ? down - q : q - up;
+    const f32 mx = gx / unproject.x;
+    const f32 my = gy / unproject.y;
+    const f32 mz = mx * (unproject.x * ((f32)x + 0.5F) + unproject.z) +
+                   my * (unproject.y * ((f32)y + 0.5F) + unproject.w) - q;
+    const f32 edge = q / (TWIN_EDGE * nph_f32_sqrt(mx * mx + my * my + mz * mz));
+    f32 visible = 0.0F;
+    f32 open = 0.0F;
+    for (i32 ty = -2; ty <= 2; ++ty) {
+        for (i32 tx = -2; tx <= 2; ++tx) {
+            const i32 ox = tx + (x + tx < 0 ? 4 : 0) - (x + tx >= TWIN_W ? 4 : 0);
+            const i32 oy = ty + (y + ty < 0 ? 4 : 0) - (y + ty >= TWIN_H ? 4 : 0);
+            const NphVec3 s = twin_texel(raw, x + ox, y + oy);
+            const f32 window = twin_tent(tx) * twin_tent(ty);
+            const f32 off = (q + (f32)ox * gx + (f32)oy * gy) * s.z - 1.0F;
+            const f32 plane = nph_f32_clamp(1.0F - edge * nph_f32_abs(off), 0.0F, 1.0F);
+            visible += s.x * window * plane;
+            open += s.y * window * plane;
+        }
+    }
+    const f32 ao =
+        open_sky ? 1.0F : (open > 0.0F ? nph_f32_clamp(visible / open, 0.0F, 1.0F) : 1.0F);
+    const bool blocked = (raw[y * TWIN_W + x] & 0x80000000U) != 0U;
+    return blocked ? -nph_f32_max(ao, 1.0F / 1024.0F) : ao;
+}
+
+// The denoise (ao_denoise.comp, the renderer's pipeline) of random slices'
+// shares over three planes, each texel a little off its plane, and the sky,
+// the march's sign on a quarter of the texels, against its C twin at every
+// pixel, within the half float's rounding of the result. A texel read one
+// off, or two of a gather's swapped, moves a pixel's window off its twin's.
+NTEST_F(Ao, the_denoise_matches_its_cpu_twin)
+{
+    REQUIRE_PRODUCTION(f);
+    NphRenderer *r = f->renderer;
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 38U, 7U);
+    // The view: a pixel's ray (unproject.xy c + unproject.zw, -1), through the
+    // image's centre along -z.
+    const NphVec4 unproject = nph_vec4(0.01F, -0.01F, -0.005F * (f32)TWIN_W, 0.005F * (f32)TWIN_H);
+    static u32 raw[TWIN_W * TWIN_H];
+    for (i32 y = 0; y < TWIN_H; ++y) {
+        for (i32 x = 0; x < TWIN_W; ++x) {
+            // The inverse distance, affine across each plane (ao_plane).
+            const i32 region = x < 35 ? 0 : (x < 70 ? 1 : 2);
+            const f32 qs[3][3] = {
+                {0.10F, 0.0010F, 0.0005F}, {0.25F, -0.0012F, 0.0010F}, {0.05F, 0.0003F, -0.0002F}};
+            const f32 qv = qs[region][0] + qs[region][1] * (f32)x + qs[region][2] * (f32)y;
+            const bool sky = y < 6 && x >= 20 && x < 60;
+            // Off the plane by up to 6 %, about the plane test's 5 %, so
+            // that many taps count in part.
+            const f32 off = 0.12F * (nph_pcg32_next_f32(&rng) - 0.5F);
+            const f32 dist = sky ? 65504.0F : (1.0F + off) / qv;
+            const u32 open = 1U + nph_pcg32_next_u32(&rng) % 255U;
+            const u32 visible = nph_pcg32_next_u32(&rng) % (open + 1U);
+            const bool blocked = !sky && nph_pcg32_next_u32(&rng) % 4U == 0U;
+            raw[y * TWIN_W + x] = visible | (open << 8U) |
+                                  ((u32)(nph_f32_to_f16(dist) & 0x7FFFU) << 16U) |
+                                  (blocked ? 0x80000000U : 0U);
+        }
+    }
+    NphGpuImageDesc d;
+    memset(&d, 0, sizeof d);
+    d.width = TWIN_W;
+    d.height = TWIN_H;
+    d.mip_count = 1U;
+    d.format = NPH_GPU_FORMAT_R32_UINT;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_SAMPLED | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_DST;
+    d.name = "twin ao raw";
+    NphGpuImage raw_image = NPH_GPU_IMAGE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &d, &raw_image), NPH_RESULT_OK);
+    d.format = NPH_GPU_FORMAT_R16_SFLOAT;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE | (u32)NPH_GPU_IMAGE_USAGE_TRANSFER_SRC;
+    d.name = "twin ao out";
+    NphGpuImage out_image = NPH_GPU_IMAGE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_image_create(f->dev, &d, &out_image), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_image(f->dev, raw_image, 0U, 0U, 1U, raw, sizeof raw),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_gpu_upload_flush(f->dev, NULL), NPH_RESULT_OK);
+
+    NphRenderAoPush p;
+    memset(&p, 0, sizeof p);
+    p.unproject = unproject;
+    p.project = nph_vec2(1.0F / unproject.x, 1.0F / unproject.y);
+    p.raw_index = nph_gpu_image_sampled_index(f->dev, raw_image);
+    p.out_index = nph_gpu_image_storage_index(f->dev, out_image, 0U);
+    p.width = TWIN_W;
+    p.height = TWIN_H;
+    p.point_sampler = nph_gpu_sampler_index(
+        r->dev, r->material_samplers[NPH_RENDER_WRAP_CLAMP][NPH_RENDER_WRAP_CLAMP][1]);
+    NphGpuCmd *cmd = NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_cmd_begin(f->dev, NPH_GPU_QUEUE_GRAPHICS, "twin ao denoise", &cmd),
+                        NPH_RESULT_OK);
+    nph_gpu_cmd_image_barrier(cmd, out_image, (u32)NPH_GPU_STAGE_NONE, (u32)NPH_GPU_ACCESS_NONE,
+                              NPH_GPU_LAYOUT_UNDEFINED, (u32)NPH_GPU_STAGE_COMPUTE,
+                              (u32)NPH_GPU_ACCESS_SHADER_WRITE, NPH_GPU_LAYOUT_GENERAL);
+    nph_gpu_cmd_bind_pipeline(cmd, r->ao.denoise);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch(cmd, (TWIN_W + 31U) / 32U, (TWIN_H + 31U) / 32U, 1U);
+    test_submit_wait(f->dev, cmd);
+    static u16 out[TWIN_W * TWIN_H];
+    test_read_image(f->dev, out_image, 0U, out, sizeof out);
+
+    f32 worst = 0.0F;
+    u32 wrong = 0U;
+    u32 blocked = 0U;
+    for (i32 y = 0; y < TWIN_H; ++y) {
+        for (i32 x = 0; x < TWIN_W; ++x) {
+            const f32 want = twin_denoise(raw, unproject, x, y);
+            const f32 got = nph_f16_to_f32(out[y * TWIN_W + x]);
+            const f32 e = nph_f32_abs(got - want);
+            worst = nph_f32_max(worst, e);
+            wrong += e > 2e-3F || (got < 0.0F) != (want < 0.0F) ? 1U : 0U;
+            blocked += want < 0.0F ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u x %u pixels (%u with the march's sign): %u off their twin's, the worst by %.5f",
+              (u32)TWIN_W, (u32)TWIN_H, blocked, wrong, (f64)worst);
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NTEST_EXPECT_GT_UINT(blocked, 0U);
+    nph_gpu_image_destroy(f->dev, out_image);
+    nph_gpu_image_destroy(f->dev, raw_image);
 }

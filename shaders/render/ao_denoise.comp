@@ -32,6 +32,9 @@
 #define AO_TILE  32 // pixels a side: a 2 x 2 block an invocation
 #define AO_APRON 3  // a tap 2 out, or one 4 back in from beyond the edge
 #define AO_SPAN  (AO_TILE + 2 * AO_APRON)
+#if (AO_SPAN % 2) != 0
+#error "the span's gathers take 2 x 2 texels"
+#endif
 // A neighbour this far off the tangent plane, relative to the distance,
 // counts nothing.
 #define AO_EDGE 0.05
@@ -65,11 +68,21 @@ void main()
     const ivec2 size = ivec2(pc.width, pc.height);
     const ivec2 tile = ivec2(gl_WorkGroupID.xy) * AO_TILE;
     const ivec2 origin = tile - AO_APRON;
-    for (uint i = gl_LocalInvocationIndex; i < uint(AO_SPAN * AO_SPAN);
+    // The span as 19 x 19 gathers of 2 x 2 texels, each at the corner its
+    // four share, in the gather's order (x0, y1), (x1, y1), (x1, y0), (x0,
+    // y0): a quarter of the fetches that one at a time took. The image is the
+    // frame's size, so the sampler's clamp to its edge is the frame's.
+    const vec2 texel = 1.0 / vec2(size);
+    for (uint i = gl_LocalInvocationIndex; i < uint((AO_SPAN / 2) * (AO_SPAN / 2));
          i += uint(AO_GROUP * AO_GROUP)) {
-        const ivec2 q =
-            clamp(origin + ivec2(int(i) % AO_SPAN, int(i) / AO_SPAN), ivec2(0), size - 1);
-        s_texels[i].packed = texelFetch(nph_utextures_2d[pc.raw_index], q, 0).r;
+        const ivec2 b = 2 * ivec2(int(i % uint(AO_SPAN / 2)), int(i / uint(AO_SPAN / 2)));
+        const uvec4 g = textureGather(
+            usampler2D(nph_utextures_2d[pc.raw_index], nph_samplers[pc.point_sampler]),
+            vec2(origin + b + 1) * texel, 0);
+        s_texels[(b.y + 1) * AO_SPAN + b.x].packed = g.x;
+        s_texels[(b.y + 1) * AO_SPAN + b.x + 1].packed = g.y;
+        s_texels[b.y * AO_SPAN + b.x + 1].packed = g.z;
+        s_texels[b.y * AO_SPAN + b.x].packed = g.w;
     }
     barrier();
 

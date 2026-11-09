@@ -2207,7 +2207,10 @@ sets the radius from `r.ao` (0.5 m).
   (deinterleaved, as Bavoil, "Deinterleaved Texturing for Cache-Efficient
   Interleaved Sampling", NVIDIA 2014, but over the frame's own depths);
   and every sample is fetched within the image, one beyond the reach
-  counting nothing, so the fetches never wait on a branch.
+  counting nothing, so the fetches never wait on a branch. The group's
+  depths and a texel around them, for the normals, come into shared memory
+  as 9 × 9 gathers of 2 × 2 texels, a quarter of the fetches one at a time
+  took.
 - **The denoise** (`ao_denoise.comp`): a 5 × 5 tent of pixels, which holds
   each of the 16 directions equally, counting the neighbours on the
   pixel's tangent plane (5 % of the distance off it counts nothing); the
@@ -2221,7 +2224,8 @@ sets the radius from `r.ao` (0.5 m).
   (q + o_y step_y, once a row) plus o_x step_x, one fused multiply-add a
   tap where q + o · step took more: in Bistro's street 315 instructions a
   pixel against 331 and 0.413 ms against 0.439 (GPU traces, two each,
-  interleaved), the weights differing only in rounding. The occlusion goes
+  interleaved), the weights differing only in rounding. A tile's texels
+  come into shared memory as 19 × 19 gathers of 2 × 2. The occlusion goes
   out as a half float.
 - **Shading.** The resolve reads the occlusion at its pixel. The
   environment's specular light takes specular occlusion from the
@@ -2237,7 +2241,14 @@ ground nothing occludes stays within 0.003 of open with no pixel off by
 over 0.03 (0.5 % at half resolution), and the ground alone within 0.009
 out to its horizon (`test_ao.c`). At 4K with the runtime's radius it adds
 1.06 ms to a frame the sky lights, and its passes take 1.31 ms in
-Bistro's street (ADR-0038). Measured and not kept: the denoise unpacking its texels into
+Bistro's street (ADR-0038). Gathering the two passes' shared texels
+(2026-11-09) took the occlusion from 0.95 to 0.91 ms and the denoise from
+0.42 to 0.35 in the city's street, and 0.10 to 0.11 ms off each of the
+city's seven views (the rooftop 9.02 to 8.92; four rounds interleaved),
+the images the same pixel for pixel; a test runs the denoise on random
+shares and distances against its C twin, every pixel within a half
+float's rounding. Measured and not kept: the slices' cosines and sines
+from a table each group fills once (+0.001 to +0.007 ms); the denoise unpacking its texels into
 vectors in shared memory (0.76 ms against 0.59, the reads three times the
 bytes); unpacking the shares with float bit tricks instead of conversions
 (0.47 ms against 0.44); workgroups of 32 × 16 pixels whose subgroups each
