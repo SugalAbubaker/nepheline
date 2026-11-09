@@ -1468,7 +1468,11 @@ static u32 covered_pixels(const u8 *image)
 // Small masked clusters rasterise in software, with the material's alpha test
 // at each pixel: the image is the one the hardware raster alone draws. A
 // field of double-sided spheres seen through their holes, which the hardware
-// raster's skin would otherwise take in part.
+// raster's skin would otherwise take in part. The two rasters leave a few
+// masked edges' depths apart, and the occlusion test reads the pyramid fine
+// enough that a hidden cluster may be culled after one and not the other
+// (lavapipe: one of 336); without the test both draw the same clusters, and
+// each draws the image it draws with it.
 NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_raster_does)
 {
     REQUIRE_PRODUCTION(f);
@@ -1494,16 +1498,25 @@ NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_ras
     v.vis_flags = 0U;
     const NphRenderFrameStats sw = render_into(f, &v, 4U, hybrid);
     const u32 skins = skin_clusters(f);
+    static u8 hardware_unculled[PIXELS];
+    static u8 hybrid_unculled[PIXELS];
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_SW_RASTER | (u32)NPH_RENDER_VIS_NO_OCCLUSION;
+    const NphRenderFrameStats hw_unculled = render_into(f, &v, 4U, hardware_unculled);
+    v.vis_flags = (u32)NPH_RENDER_VIS_NO_OCCLUSION;
+    const NphRenderFrameStats sw_unculled = render_into(f, &v, 4U, hybrid_unculled);
     NTEST_EXPECT_EQ_UINT(hw.vis_clusters_sw, 0U);
     NTEST_EXPECT_GT_UINT(sw.vis_clusters_sw, sw.vis_clusters / 2U);
-    NTEST_EXPECT_EQ_UINT(sw.vis_clusters, hw.vis_clusters);
+    NTEST_EXPECT_EQ_UINT(sw_unculled.vis_clusters, hw_unculled.vis_clusters);
+    NTEST_EXPECT_EQ_MEM(hardware, hardware_unculled, PIXELS);
+    NTEST_EXPECT_EQ_MEM(hybrid, hybrid_unculled, PIXELS);
     NTEST_EXPECT_LE_UINT(skins, sw.vis_clusters - sw.vis_clusters_sw);
     const u32 covered = covered_pixels(hardware);
     const ImageDiff d = image_diff(hardware, hybrid, 3U);
-    NTEST_LOG("%u of %u clusters in software, %u skin; %u pixels covered; hardware vs hybrid: "
-              "%.3f %% within 3 levels, mean %.3f, max %u",
-              sw.vis_clusters_sw, sw.vis_clusters, skins, covered, (f64)d.within * 100.0,
-              (f64)d.mean, d.max);
+    NTEST_LOG("%u of %u clusters in software (the hardware raster alone %u, both %u without the "
+              "occlusion test), %u skin; %u pixels covered; hardware vs hybrid: %.3f %% within 3 "
+              "levels, mean %.3f, max %u",
+              sw.vis_clusters_sw, sw.vis_clusters, hw.vis_clusters, hw_unculled.vis_clusters, skins,
+              covered, (f64)d.within * 100.0, (f64)d.mean, d.max);
     NTEST_EXPECT_GT_UINT(covered, TEST_TARGET_SIZE * TEST_TARGET_SIZE / 16U);
     NTEST_EXPECT_TRUE(d.within >= 0.998F);
 }
