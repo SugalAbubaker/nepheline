@@ -1103,7 +1103,7 @@ typedef struct NphRenderView {
     u32 gi_rays;
 } NphRenderView;
 
-// A view of `camera`: EV100 15 (manual), ACES, the environment as
+// A view of `camera`: EV100 15 (manual), AgX (ADR-0083), the environment as
 // background, no anti-aliasing, no bloom, no motion blur, a pinhole, no
 // ambient occlusion, no global illumination (the runtime turns temporal
 // anti-aliasing, bloom, ambient occlusion, and global illumination on,

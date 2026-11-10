@@ -9,7 +9,7 @@
 // over it and the GPU profiler's per-pass times in the log.
 //
 //     pbr_viewer [--frames=N] [--capture=FILE.bmp] [--profile=FILE.json]
-//                [--pack=FILE] [--tonemapper=aces|agx|none]
+//                [--pack=FILE] [--tonemapper=agx|aces|none]   (agx, the renderer's default)
 //                [--view=lit|base|normal|roughness|metallic|occlusion|direct|indirect|
 //                        irradiance|clusters|triangles|instances]
 //                [--pipeline=production|reference] [--ev100=X] [--vsync] [--no-debug]
@@ -86,7 +86,7 @@ static bool parse(int argc, char **argv, Options *o)
 {
     memset(o, 0, sizeof *o);
     o->pack = NPH_SAMPLE_PACK;
-    o->tonemapper = NPH_RENDER_TONEMAPPER_ACES;
+    o->tonemapper = NPH_RENDER_TONEMAPPER_AGX; // the renderer's default (ADR-0083)
     o->view = NPH_RENDER_VIEW_LIT;
     o->pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
     o->ev100 = 10.75F; // a low sun (about 9000 lux on the ground) under a dusk sky

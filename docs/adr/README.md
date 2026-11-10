@@ -88,6 +88,7 @@ supersedes it and both link to each other.
 | [0080](0080-shadow-map-slope.md) | The sun's map at the level of its slope on a surface, and a pool twice as large | Accepted |
 | [0081](0081-budgets-in-the-machines-unit.md) | Benchmark budgets in the machine's own unit | Accepted |
 | [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision) |
+| [0083](0083-agx-default.md) | AgX is the default tonemapper | Accepted (the user's decision) |
 
 ## Template
 

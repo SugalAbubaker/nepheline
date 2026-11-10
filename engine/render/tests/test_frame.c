@@ -180,11 +180,17 @@ NTEST_F(Frame, tonemappers_match_the_reference)
     REQUIRE_RENDERER(f);
     static const NphRenderTonemapper ops[3] = {
         NPH_RENDER_TONEMAPPER_NONE, NPH_RENDER_TONEMAPPER_ACES, NPH_RENDER_TONEMAPPER_AGX};
-    // Distinct channels catch a transposed matrix.
-    static const f32 colors[4][3] = {
-        {0.05F, 0.10F, 0.20F}, {0.18F, 0.18F, 0.18F}, {0.9F, 0.4F, 0.1F}, {6.0F, 2.5F, 0.7F}};
+    // Distinct channels catch a transposed matrix. The first is the city's
+    // shade (ADR-0083): AgX ends its red and green on the sRGB curve's
+    // linear segment and its blue above it, where the ACES fit leaves 0 to
+    // 4 of 255.
+    static const f32 colors[5][3] = {{0.003F, 0.006F, 0.012F},
+                                     {0.05F, 0.10F, 0.20F},
+                                     {0.18F, 0.18F, 0.18F},
+                                     {0.9F, 0.4F, 0.1F},
+                                     {6.0F, 2.5F, 0.7F}};
     for (u32 o = 0; o < 3U; ++o) {
-        for (u32 c = 0; c < 4U; ++c) {
+        for (u32 c = 0; c < 5U; ++c) {
             check_tonemap(f, f->target, ops[o], nph_vec3(colors[c][0], colors[c][1], colors[c][2]));
         }
     }
@@ -197,6 +203,8 @@ NTEST_F(Frame, srgb_targets_are_encoded_by_the_hardware)
         test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_SRGB, TEST_TARGET_SIZE);
     check_tonemap(f, srgb, NPH_RENDER_TONEMAPPER_ACES, nph_vec3(0.3F, 0.6F, 1.2F));
     check_tonemap(f, srgb, NPH_RENDER_TONEMAPPER_NONE, nph_vec3(0.02F, 0.5F, 0.9F));
+    // AgX's output decoded to the linear light the store encodes.
+    check_tonemap(f, srgb, NPH_RENDER_TONEMAPPER_AGX, nph_vec3(0.003F, 0.05F, 1.2F));
     nph_gpu_image_destroy(f->dev, srgb);
 }
 

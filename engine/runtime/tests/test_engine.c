@@ -547,8 +547,9 @@ static u8 *read_target(NphEngine *e, u64 bytes)
 // An offscreen engine with r.pipeline=`pipeline` draws the cooked
 // showcase: imported into the world, mirrored into the renderer once its
 // assets are in, and rendered into the engine's target under the
-// validation gate. Returns the pixels (the caller frees them), or NULL
-// without a Vulkan device.
+// validation gate, from the engine's own view tonemapped with the ACES fit.
+// Returns the pixels (the caller frees them), or NULL without a Vulkan
+// device.
 static u8 *draw_showcase(u32 pipeline, u64 bytes)
 {
     static EngineFixture fx;
@@ -573,6 +574,16 @@ static u8 *draw_showcase(u32 pipeline, u64 bytes)
     NTEST_EXPECT_NULL(nph_engine_window(e));
     NTEST_EXPECT_NULL(nph_engine_swapchain(e));
     NTEST_ASSERT_NOT_NULL(nph_engine_renderer(e));
+    // The engine's own view, through the ACES fit, which the comparison's
+    // tolerance was set with. AgX, the default (ADR-0083), lifts the shade
+    // the fit renders near black, and with it the differences there between
+    // what the production path draws and what the reference renderer does
+    // (the torus's inner rim and silhouette, the floor beneath it): 98.54 %
+    // of channels within 3 levels where the fit gives 99.36 %, at the same
+    // pixels. The test compares the pipelines, not the curve.
+    NphRenderView view = *nph_engine_view(e);
+    view.tonemapper = NPH_RENDER_TONEMAPPER_ACES;
+    nph_engine_set_view(e, &view);
     // The sky alone first.
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(nph_engine_frame(e), NPH_RESULT_OK);

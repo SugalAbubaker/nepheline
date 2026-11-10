@@ -147,7 +147,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     memset(view, 0, sizeof *view);
     view->camera = camera;
     view->ev100 = 15.0F;
-    view->tonemapper = NPH_RENDER_TONEMAPPER_ACES;
+    view->tonemapper = NPH_RENDER_TONEMAPPER_AGX; // ADR-0083
     view->background = NPH_RENDER_BACKGROUND_ENV;
     view->pipeline = NPH_RENDER_PIPELINE_REFERENCE;
     view->lod_error = 1.0F;
