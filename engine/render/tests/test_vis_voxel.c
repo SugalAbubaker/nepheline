@@ -655,24 +655,16 @@ static void pixel_rays(const NphRenderView *v, NphVec3 *out)
 
 // Each visible cluster's record carries what the culling read of its
 // instance's mesh and of its meshlet's record, which the rasters and the
-// resolve take from there instead of reading those records (NphVisCluster).
-static void expect_cluster_records(RenderFixture *f, const LodMesh *m, const NphVisCluster *list,
-                                   u32 count)
+// resolve take from there instead of reading those records (NphVisCluster):
+// here every cluster is of the one instance, whose mesh has table slot `mesh`.
+static void expect_cluster_records(const LodMesh *m, u32 mesh, const NphVisCluster *list, u32 count)
 {
-    const RenderVis *v = &f->renderer->vis;
-    u32 slot = UINT32_MAX;
-    NphVisInstance inst;
-    memset(&inst, 0, sizeof inst);
     u32 wrong = 0U;
     for (u32 i = 0; i < count; ++i) {
-        if (list[i].instance != slot) {
-            slot = list[i].instance;
-            test_read_buffer(f->dev, v->instances, (u64)slot * sizeof inst, sizeof inst, &inst);
-        }
         NTEST_ASSERT_LT_UINT(list[i].meshlet, m->lods.clusters.meshlets.len);
         const NphRenderMeshlet *ml = &m->lods.clusters.meshlets.data[list[i].meshlet];
         const u32 counts = (u32)ml->vertex_count | ((u32)ml->triangle_count << 16U);
-        wrong += list[i].mesh != inst.mesh || list[i].vertex_offset != ml->vertex_offset ||
+        wrong += list[i].mesh != mesh || list[i].vertex_offset != ml->vertex_offset ||
                          list[i].triangle_offset != ml->triangle_offset || list[i].counts != counts
                      ? 1U
                      : 0U;
@@ -682,16 +674,16 @@ static void expect_cluster_records(RenderFixture *f, const LodMesh *m, const Nph
 
 // The visibility buffer from `distance` with `lod_error` against the CPU's
 // traversal of the clusters it drew (expected_texel), pixel for pixel; the
-// pixels voxels cover.
-static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, const NphVec3 *positions,
-                              NphVec3 *rays, f64 distance, f32 lod_error)
+// pixels voxels cover. `mesh` is the drawn mesh's table slot.
+static u32 voxels_against_cpu(RenderFixture *f, const LodMesh *m, u32 mesh,
+                              const NphVec3 *positions, NphVec3 *rays, f64 distance, f32 lod_error)
 {
     NphRenderView v = plain_view(distance, lod_error);
     v.debug_view = NPH_RENDER_VIEW_TRIANGLES;
     const NphRenderFrameStats stats = render_frames(f, &v);
     u32 count = 0U;
     NphVisCluster *list = visible_clusters(f, &count);
-    expect_cluster_records(f, m, list, count);
+    expect_cluster_records(m, mesh, list, count);
     TwinBox *boxes = twin_boxes(m, positions, list, count);
     pixel_rays(&v, rays);
     const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)distance);
@@ -760,11 +752,12 @@ static void voxels_meet_their_rays(RenderFixture *f)
         NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
         NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
         const NphRenderInstance inst = instance(f, mesh, mat);
+        const u32 mesh_slot = render_slot_of(&f->renderer->mesh_pool, mesh.value);
         NphVec3 *positions = dequantised(&m);
         u32 voxel_pixels = 0U;
         for (u32 k = 0; k < 3U && k_views[mi][k].distance > 0.0; ++k) {
-            voxel_pixels += voxels_against_cpu(f, &m, positions, rays, k_views[mi][k].distance,
-                                               k_views[mi][k].lod_error);
+            voxel_pixels += voxels_against_cpu(f, &m, mesh_slot, positions, rays,
+                                               k_views[mi][k].distance, k_views[mi][k].lod_error);
         }
         NTEST_EXPECT_GT_UINT(voxel_pixels, 200U);
         NPH_FREE_ARRAY(nph_allocator_system(), NphVec3, positions, m.data.vertex_count);
