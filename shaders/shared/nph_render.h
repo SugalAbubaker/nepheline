@@ -572,8 +572,26 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
 #define NPH_RENDER_GI_LEVEL_BIAS 8
 // The slots a key may take: the NPH_RENDER_GI_BUCKET of its bucket.
 #define NPH_RENDER_GI_BUCKET 16
-// A cell's history holds at most this many samples (its window).
-#define NPH_RENDER_GI_HISTORY 128
+// An irradiance cell's history holds at most NPH_RENDER_GI_HISTORY samples (its window): under a
+// light that holds still its estimate wanders by about 1 / sqrt(2 NPH_RENDER_GI_HISTORY) of its
+// samples' spread, however many arrive a frame (ADR-0084). Where the light's mean over its last
+// NPH_RENDER_GI_HISTORY_MIN or so samples (NphRenderGiView.moments) lies further from the
+// cell's than NPH_RENDER_GI_CHANGE times that recent mean's deviation and
+// NPH_RENDER_GI_CHANGE_FLOOR of the cell's luminance, the light changed: each such frame
+// quarters the history, down to NPH_RENDER_GI_HISTORY_MIN. A reflection cell's history (ADR-0077)
+// holds NPH_RENDER_REFLECT_HISTORY.
+#define NPH_RENDER_GI_HISTORY      1024
+#define NPH_RENDER_GI_HISTORY_MIN  32
+#define NPH_RENDER_GI_CHANGE       4.0
+#define NPH_RENDER_GI_CHANGE_FLOOR 0.02
+// The frames a cell's variance is averaged over (and has seen before the test trusts it).
+#define NPH_RENDER_GI_VARIANCE_FRAMES 16
+#define NPH_RENDER_REFLECT_HISTORY    128
+// A cell's word (NphRenderGiView.cells' w): its sample count, to its history, in the low
+// NPH_RENDER_GI_COUNT_BITS bits; the frames since a sample arrived in the next 8; the many lights'
+// far fields' share of its irradiance (ADR-0078), a fraction of NPH_RENDER_GI_FAR_BITS, above.
+#define NPH_RENDER_GI_COUNT_BITS 11
+#define NPH_RENDER_GI_FAR_BITS   13
 // A cell no sample has reached for this many frames is freed.
 #define NPH_RENDER_GI_MAX_AGE 240
 // Reflections (ADR-0077): surfaces smoother than this take what they reflect from cells of the
@@ -606,9 +624,9 @@ NPH_SHARED_STRUCT(NphRenderGiView)
 {
     u64 keys;  // u32[capacity]: each slot's key fingerprint (0: free)
     u64 sums;  // uvec4[capacity]: this frame's samples (rgb in 1 / sum_scale, and their count)
-    u64 cells; // uvec4[capacity]: irradiance (rgb, lux, as a float's bits); w: the sample
-               // count in bits 0-7, the frames since one arrived in bits 8-15, and the many
-               // lights' far fields' share of the irradiance, a 16-bit fraction, in bits 16-31
+    u64 cells; // uvec4[capacity]: irradiance (rgb, lux, as a float's bits); w: the cell's word
+               // (NPH_RENDER_GI_COUNT_BITS: its sample count, the frames since one arrived, and
+               // the many lights' far fields' share of the irradiance)
     // The reflection cells' table (ADR-0077), as the three above.
     u64 reflect_keys;
     u64 reflect_sums;
@@ -621,6 +639,11 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     // u32[capacity]: this frame's samples of the many lights' far fields alone, their luminance
     // in 1 / sum_scale, for the cells' share of them (ADR-0078).
     u64 far_sums;
+    // uvec4[capacity]: each irradiance cell's variance of one sample's luminance (lux^2) and its
+    // luminance's recent mean, over about NPH_RENDER_GI_HISTORY_MIN samples (lux), as floats'
+    // bits, and the frames that variance has seen (to NPH_RENDER_GI_VARIANCE_FRAMES), by which a
+    // change of its light shows (ADR-0084); w: unused.
+    u64 moments;
     u32 bucket_mask;         // capacity / NPH_RENDER_GI_BUCKET - 1
     f32 scale;               // a cell is 1 / (2 scale) to 1 / scale of its distance across
     f32 sum_scale;           // fixed-point units of a pre-exposed sample
@@ -636,7 +659,6 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u32 reflect_turn_bits;   // 1 listed tile in 2^this traces its rays each frame
     u32 reflect_bucket_mask; // its table's capacity / NPH_RENDER_GI_BUCKET - 1
     u32 pad_reflect;
-    u32 pad_far[2];
     // xyz: the direction the sun's light travels; w: 1 when it casts
     // shadows, 0 when it does not, -1 when there is no sun
     NphVec4 sun_direction;

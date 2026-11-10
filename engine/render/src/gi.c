@@ -3,9 +3,11 @@
 // docs/render.md "Global illumination"; docs/adr/0039-radiance-cache.md).
 //
 // A hash grid of irradiance cells in the world (gi_common.glsl), kept across
-// frames in three buffers of NphRendererDesc.gi_cells slots: the keys'
-// fingerprints, this frame's sums, and the cells' irradiance with their
-// sample counts and ages. Each frame that has it:
+// frames in buffers of NphRendererDesc.gi_cells slots: the keys'
+// fingerprints, this frame's sums, the cells' irradiance with their
+// sample counts and ages, and the cells' moments, by which the resolve
+// tells a change of a cell's light from its noise (ADR-0084).
+// Each frame that has it:
 //
 //   gi update   within a fixed budget of rays (NphRendererDesc.gi_rays),
 //               a sample from a random pixel of each block of the frame:
@@ -33,6 +35,11 @@
 NPH_STATIC_ASSERT(sizeof(NphRenderGiLevel) == 32U, "NphRenderGiLevel matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderGiView) == 176U + 32U * NPH_RENDER_GI_LEVELS,
                   "NphRenderGiView matches its GLSL layout");
+NPH_STATIC_ASSERT(NPH_RENDER_GI_COUNT_BITS + 8 + NPH_RENDER_GI_FAR_BITS == 32,
+                  "a cell's word is 32 bits");
+NPH_STATIC_ASSERT(NPH_RENDER_GI_HISTORY < (1 << NPH_RENDER_GI_COUNT_BITS) &&
+                      NPH_RENDER_REFLECT_HISTORY < (1 << NPH_RENDER_GI_COUNT_BITS),
+                  "a cell's word counts its whole history");
 
 // Fixed-point units of one pre-exposed sample (gi_update.comp): a sample is
 // clamped to NPH_RENDER_GI_SAMPLE_MAX, 2^23 units, so a cell's sums hold 512
@@ -79,6 +86,7 @@ NphResult render_gi_create(NphRenderer *r)
     NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi sums", &gi->sums));
     NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi cells", &gi->cells));
     NPH_TRY(make_buffer(r, (u64)cells * sizeof(u32), "gi far sums", &gi->far_sums));
+    NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi moments", &gi->moments));
     // As many for the reflection cells (ADR-0077): with a quarter as many, Bistro's street at 4K,
     // whose cobbles' normals scatter their mirror directions, dropped about 4,000 rays a frame
     // walking (vis_reflect_dropped), and about 230 with as many.
@@ -129,8 +137,9 @@ NphResult render_gi_create(NphRenderer *r)
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->apply));
     render_log_statistics(r, gi->apply, "reflect");
     gi->capacity = cells;
+    // A cell's key, sums, irradiance, far fields' sum and moments.
     NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: radiance cache: %u cells (%.1f MB), %u rays a frame",
-                 r->name, cells, (f64)cells * 36.0 / (1024.0 * 1024.0), r->desc.gi_rays);
+                 r->name, cells, (f64)cells * 56.0 / (1024.0 * 1024.0), r->desc.gi_rays);
     return NPH_RESULT_OK;
 }
 
@@ -158,6 +167,7 @@ void render_gi_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(r->dev, gi->cells);
     nph_gpu_buffer_destroy(r->dev, gi->sums);
     nph_gpu_buffer_destroy(r->dev, gi->far_sums);
+    nph_gpu_buffer_destroy(r->dev, gi->moments);
     nph_gpu_buffer_destroy(r->dev, gi->keys);
     memset(gi, 0, sizeof *gi);
     gi->sun_slot = NPH_U32_MAX;
@@ -296,6 +306,7 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
     // has run): without, the resolve leaves every cell's share at none.
     g->far_sums = r->many.frame_active ? nph_gpu_buffer_address(r->dev, gi->far_sums) : 0U;
     g->cells = nph_gpu_buffer_address(r->dev, gi->cells);
+    g->moments = nph_gpu_buffer_address(r->dev, gi->moments);
     g->bucket_mask = gi->capacity / (u32)NPH_RENDER_GI_BUCKET - 1U;
     g->reflect_keys = nph_gpu_buffer_address(r->dev, gi->reflect_keys);
     g->reflect_sums = nph_gpu_buffer_address(r->dev, gi->reflect_sums);
@@ -360,6 +371,7 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_fill_buffer(cmd, gi->sums, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->far_sums, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->cells, 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, gi->moments, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_keys, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_sums, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_cells, 0U, NPH_GPU_WHOLE_SIZE, 0U);
@@ -423,12 +435,14 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
     gi->frame_sums = nph_gpu_rg_import_buffer(graph, gi->sums);
     gi->frame_far_sums = nph_gpu_rg_import_buffer(graph, gi->far_sums);
     gi->frame_cells = nph_gpu_rg_import_buffer(graph, gi->cells);
+    gi->frame_moments = nph_gpu_rg_import_buffer(graph, gi->moments);
     gi->frame_reflect_keys = nph_gpu_rg_import_buffer(graph, gi->reflect_keys);
     gi->frame_reflect_sums = nph_gpu_rg_import_buffer(graph, gi->reflect_sums);
     gi->frame_reflect_cells = nph_gpu_rg_import_buffer(graph, gi->reflect_cells);
     if (nph_gpu_rg_buffer_is_null(gi->frame_keys) || nph_gpu_rg_buffer_is_null(gi->frame_sums) ||
         nph_gpu_rg_buffer_is_null(gi->frame_far_sums) ||
         nph_gpu_rg_buffer_is_null(gi->frame_cells) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_moments) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_keys) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_sums) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_cells)) {
@@ -445,6 +459,7 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
         nph_gpu_rg_write_buffer(p, gi->frame_sums, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_far_sums, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_keys, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_sums, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_TRANSFER_DST);
@@ -474,6 +489,7 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
     nph_gpu_rg_write_buffer(p, gi->frame_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_far_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_STORAGE_WRITE);

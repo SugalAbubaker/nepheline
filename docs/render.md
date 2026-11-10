@@ -2324,7 +2324,7 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   Each level's camera cell is worked out in double precision and the
   shaders add the camera-relative point to it, so cells stay put in the
   world at any distance from the origin.
-- **The table:** `gi_cells` slots (2^18: 9 MB) in buckets of 16; a cell's
+- **The table:** `gi_cells` slots (2^18: 14 MB) in buckets of 16; a cell's
   key (its coordinates, level, and octant) hashes to a bucket and a 32-bit
   fingerprint that the slot holds, claimed by compare-and-swap.
 - **`gi update`** (`gi_update.comp`): within `gi_rays` (65,536) a frame,
@@ -2339,8 +2339,19 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   each frame adds a bounce. Hits within 0.95 of the ambient occlusion's
   radius count nothing: that range is the occlusion's.
 - **`gi resolve`** (`gi_resolve.comp`): every slot blends its frame's
-  samples into its irradiance over a history of at most 128 samples, or
-  ages, and is freed after 240 frames without any.
+  samples into its irradiance over its history, or ages, and is freed after
+  240 frames without any. A cell's history holds up to 1,024 samples, over
+  which a light that holds still is averaged: the estimate's wander, which
+  shows as the indirect light's noise, is about 1 / sqrt(2 h) of the
+  samples' spread for a history of h, whatever the rays a frame
+  ([ADR-0084](adr/0084-cache-history.md)). A light that changes is told
+  from that noise by the cell's moments: its light's recent mean, over
+  about 32 samples, and a sample's variance, from the frames' means. Where
+  the recent mean leaves the cell's by more than 4 of its own deviations
+  (and 2 % of the cell's luminance), each frame quarters the history, to
+  no fewer than 32 samples, so the cell follows within a few frames. The
+  test waits for the variance to have seen 16 frames; until then a young
+  cell's history is its samples. A reflection cell's (below) holds 128.
 - **The lookup:** the resolve, specialised on the cache, finds the
   pixel's cell as soon as it has the pixel's point (under temporal
   anti-aliasing at a random point of the cell in the surface's plane, so
@@ -2352,7 +2363,10 @@ reference renderer has none. The runtime turns it on with `r.gi`.
 Against ground truths cast by rays, an open ground under a uniform sky
 gets the sky's irradiance exactly, a box on the ground occludes the sky
 within a tenth of how much the truth does, and a sunlit wall reflects
-light onto the ground within a seventh of the truth (`test_gi.c`). At 4K
+light onto the ground within a seventh of the truth (`test_gi.c`). A
+half-shaded cell's estimate wanders by a quarter of what the 128-sample
+history's did, and a doubled sky is followed 73 % of the way in 4 frames
+and 97 % in 16 (the 128-sample history's: 47 % and 88 %). At 4K
 it adds 0.20 to 0.27 ms under the sky or the sun, and 0.36 to 0.41 ms at
 night among many lamps (ADR-0039).
 

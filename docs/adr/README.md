@@ -89,6 +89,7 @@ supersedes it and both link to each other.
 | [0081](0081-budgets-in-the-machines-unit.md) | Benchmark budgets in the machine's own unit | Accepted |
 | [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision) |
 | [0083](0083-agx-default.md) | AgX is the default tonemapper | Accepted (the user's decision) |
+| [0084](0084-cache-history.md) | The radiance cache's history follows its light | Accepted |
 
 ## Template
 
