@@ -332,13 +332,25 @@ NPH_SHARED_STRUCT(NphVisMesh)
     f32 lod_reach;
 };
 
-// A visible cluster: one meshlet of one instance that survived culling.
+// A visible cluster: one meshlet of one instance that survived culling. It
+// also carries what the rasters and the resolve need of its instance's mesh
+// and its meshlet records, which the culling has loaded: the mesh's record
+// then loads beside the instance's, not after it, and the meshlet's is not
+// read (two dependent loads fewer before the vertices).
 NPH_SHARED_STRUCT(NphVisCluster)
 {
     u32 instance;
     u32 meshlet;
     u32 material; // material table index (the default material when the slot names none)
     u32 flags;    // NPH_VIS_CLUSTER_*
+    u32 mesh;     // the instance's mesh (NphVisInstance.mesh)
+    // The meshlet's record (NphRenderMeshlet): its first meshlet vertex and
+    // triangle, and its vertex count | triangle count << 16 (a voxel
+    // cluster's: its first brick, its voxel cluster record, and 0 | brick
+    // count << 16; render/voxel.h).
+    u32 vertex_offset;
+    u32 triangle_offset;
+    u32 counts;
 };
 
 // VkDrawIndexedIndirectCommand: one meshlet of the indirect raster.

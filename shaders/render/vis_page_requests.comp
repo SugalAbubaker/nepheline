@@ -41,8 +41,8 @@ void main()
     }
     VisViewRef view = VisViewRef(pc.view);
     const NphVisInstance inst = VisInstanceRef(pc.instances)[cluster.instance].i;
-    const NphVisMesh mesh = VisMeshRef(pc.meshes)[inst.mesh].m;
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const NphVisMesh mesh = VisMeshRef(pc.meshes)[cluster.mesh].m;
+    const uvec4 m = uvec4(cluster.vertex_offset, cluster.triangle_offset, cluster.counts, 0u);
     const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
     VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
     const uvec3 vtx =

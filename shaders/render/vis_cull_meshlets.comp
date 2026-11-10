@@ -77,6 +77,9 @@ void main()
     bool voxels = false;
     uint first_index = 0u; // the indirect raster's draw: the meshlet's corners in the index pool
     uint vertex_offset = 0u;
+    uint mesh_index = 0u;      // the visible cluster's record (NphVisCluster)
+    uint triangle_offset = 0u;
+    uint counts = 0u;
     vec3 c = vec3(0.0); // the meshlet's sphere, camera relative
     float r = 0.0;
     bool skin = false; // a masked cluster at the front of its instance (below)
@@ -89,6 +92,9 @@ void main()
         bricks = voxels ? m.z >> 16u : 0u;
         first_index = mesh.index_base + m.y * 3u;
         vertex_offset = m.x;
+        mesh_index = inst.mesh;
+        triangle_offset = m.y;
+        counts = m.z;
         // The material of the meshlet's submesh, through the instance's map.
         const uint mslot = VisUvec2Ref(mesh.submeshes).v[m.w].x;
         const uint handle =
@@ -288,6 +294,10 @@ void main()
     cluster.meshlet = meshlet;
     cluster.material = material;
     cluster.flags = flags;
+    cluster.mesh = mesh_index;
+    cluster.vertex_offset = vertex_offset;
+    cluster.triangle_offset = triangle_offset;
+    cluster.counts = counts;
     VisClustersRef(view.v.clusters).c[g] = cluster;
     // Every raster list holds at most one entry per cluster, so an index
     // reserved here is below max_clusters.

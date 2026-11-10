@@ -289,8 +289,8 @@ void raster_cluster(VisViewRef view, uint g, uint place, uint sharing)
     const uint queue = gl_SubgroupID * 2u * k_lanes;
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
+    const uvec4 m = uvec4(cluster.vertex_offset, cluster.triangle_offset, cluster.counts, 0u);
     const uint brick_count = min(m.z >> 16u, BRICKS);
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);

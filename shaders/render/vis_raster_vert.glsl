@@ -28,7 +28,7 @@ void main()
     const uint g = VisUintRef(view.v.raster_lists[pc.phase][kind]).v[gl_DrawID];
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
     const uint vertex = VisUintRef(mesh.meshlet_vertices).v[gl_VertexIndex];
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);

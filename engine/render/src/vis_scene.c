@@ -59,7 +59,7 @@ NPH_STATIC_ASSERT(offsetof(NphVisMesh, lod_nodes) % 8U == 0U &&
 NPH_STATIC_ASSERT(sizeof(NphRenderLodNode) == 224U && sizeof(NphRenderLodGroup) == 32U,
                   "the levels of detail match vis_common.glsl's NphVisLodNode and NphVisLodGroup");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas) % 8U == 0U, "addresses are aligned");
-NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 16U, "NphVisCluster matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisCluster) == 32U, "NphVisCluster matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisCell) == 112U, "NphVisCell matches its GLSL layout");
 NPH_STATIC_ASSERT(NPH_RENDER_CELL_MAX_LEVELS == 16U,
                   "a cell's record holds sixteen levels' errors (NphVisCell.level_errors)");

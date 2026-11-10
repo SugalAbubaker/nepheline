@@ -87,10 +87,9 @@ void main()
     const uint g = VisUintRef(view.v.raster_lists[pc.phase][kind]).v[wg];
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
-    const uint vertex_count = m.z & 0xFFFFu;
-    const uint triangle_count = m.z >> 16u;
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
+    const uint vertex_count = cluster.counts & 0xFFFFu;
+    const uint triangle_count = cluster.counts >> 16u;
 #if VIS_SW_MASKED
     // Field by field, not a copy of the record (docs/build.md "Shaders").
     MaterialsRef materials = MaterialsRef(view.v.materials);
@@ -103,7 +102,7 @@ void main()
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
     for (uint i = gl_LocalInvocationIndex; i < vertex_count; i += 32u) {
-        const uint vertex = VisUintRef(mesh.meshlet_vertices).v[m.x + i];
+        const uint vertex = VisUintRef(mesh.meshlet_vertices).v[cluster.vertex_offset + i];
         const vec3 p = vis_transform_vector(inst.transform, vis_position(mesh, vertex)) + t;
         const vec4 clip = view.v.view_proj * vec4(p, 1.0);
         // The viewport transform of Vulkan ("Coordinate Transformations"),
@@ -122,7 +121,7 @@ void main()
     const bool mirrored = (cluster.flags & NPH_VIS_CLUSTER_MIRRORED) != 0u;
     const ivec2 last = ivec2(view.v.viewport.xy) - 1;
     for (uint tri = gl_LocalInvocationIndex; tri < triangle_count; tri += 32u) {
-        const uvec3 corner = vis_triangle_corners(mesh, m.y, tri);
+        const uvec3 corner = vis_triangle_corners(mesh, cluster.triangle_offset, tri);
         const ivec2 a = s_xy[corner.x];
         const ivec2 b = s_xy[corner.y];
         const ivec2 c = s_xy[corner.z];

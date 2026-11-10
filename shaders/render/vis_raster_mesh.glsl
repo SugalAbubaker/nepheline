@@ -49,10 +49,9 @@ void main()
     const uint g = VisUintRef(view.v.raster_lists[pc.phase][kind]).v[wg];
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[g];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
-    const uint vertex_count = m.z & 0xFFFFu;
-    const uint triangle_count = m.z >> 16u;
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
+    const uint vertex_count = cluster.counts & 0xFFFFu;
+    const uint triangle_count = cluster.counts >> 16u;
     SetMeshOutputsEXT(vertex_count, triangle_count);
 
 #if VIS_MASKED
@@ -66,7 +65,7 @@ void main()
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);
     for (uint i = gl_LocalInvocationIndex; i < vertex_count; i += 32u) {
-        const uint vertex = VisUintRef(mesh.meshlet_vertices).v[m.x + i];
+        const uint vertex = VisUintRef(mesh.meshlet_vertices).v[cluster.vertex_offset + i];
         const vec3 p = vis_transform_vector(inst.transform, vis_position(mesh, vertex)) + t;
         const vec4 clip = view.v.view_proj * vec4(p, 1.0);
         gl_MeshVerticesEXT[i].gl_Position = clip;
@@ -83,7 +82,7 @@ void main()
     const bool cull_back = (cluster.flags & NPH_VIS_CLUSTER_DOUBLE_SIDED) == 0u;
     const bool mirrored = (cluster.flags & NPH_VIS_CLUSTER_MIRRORED) != 0u;
     for (uint i = gl_LocalInvocationIndex; i < triangle_count; i += 32u) {
-        const uvec3 c = vis_triangle_corners(mesh, m.y, i);
+        const uvec3 c = vis_triangle_corners(mesh, cluster.triangle_offset, i);
         gl_PrimitiveTriangleIndicesEXT[i] = c;
         gl_MeshPrimitivesEXT[i].gl_PrimitiveID = int((g << NPH_VIS_TRIANGLE_BITS) | i);
         gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT =

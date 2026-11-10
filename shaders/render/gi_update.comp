@@ -69,8 +69,8 @@ vec3 surface_point(VisViewRef view, uint64_t v, vec2 q, out vec3 n)
 {
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[vis_cluster(v)];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
+    const uvec4 m = uvec4(cluster.vertex_offset, cluster.triangle_offset, cluster.counts, 0u);
     const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
     VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
     const vec3 t =

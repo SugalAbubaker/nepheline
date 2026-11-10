@@ -1616,6 +1616,36 @@ shaders but loses push constants in their fragment stage
 the indirect path; the RTX runner covers the mesh-shader path. Masked
 materials have their own pipeline, which samples the alpha.
 
+**The cluster's record.** A raster's workgroup starts from its cluster's
+record (`NphVisCluster`, 32 bytes), as do the resolve's invocations and
+the other passes that rebuild a pixel's triangle. The culling copies into
+it what they need of the records it has loaded: the instance's mesh, and
+the meshlet's first vertex, first triangle and counts. The mesh's record
+then loads beside the instance's rather than after it, and the meshlet's
+is not read: five dependent loads before a vertex's position, where there
+were seven. The rasters wait on that chain: two more dependent loads in it
+slowed the city rooftop's hardware rasters by 0.05 ms and its software
+ones by 0.07 (2026-11-10), where one more in the voxel raster's cost
+nothing (2026-11-08). The record's 16 more bytes cost the culling at most
+0.002 ms, and hold 8 MB more at the default capacity (524,288 visible
+clusters), 32 MB more in the city's (four lists) and 128 MB more in the
+landscape's (sixteen: 5.72 GB of device-local memory in use, against
+5.59). Against the 16-byte record, on the RTX 3060 Ti at native 4K
+(interleaved runs, two rounds):
+
+| Views | Frame (ms) | Rasters | Resolve |
+|---|---|---|---|
+| City rooftop | 8.883 → 8.800 | hardware −0.021, software −0.035, voxel −0.008 | −0.013 |
+| City, the other six | −0.027 to −0.037 | −0.002 to −0.014 | −0.020 to −0.024 |
+| Bistro, five | −0.037 to −0.079 | −0.007 to +0.002 | −0.034 to −0.069 |
+| Interior, six | −0.037 to −0.075 | −0.004 to −0.019 | −0.023 to −0.039 |
+
+Every pass reads the values it read before, from a nearer record. The
+debug views' captures differ between the builds no more than between two
+runs of one (the normals: 0 to 792 pixels of 8.3 million, against 0 to
+1,009), but for the crossing's 401 pixels of equal depth, whose instance
+the clusters' order picks.
+
 **Early depth.** The mesh path also gives the hardware raster a D32 depth
 attachment (transient, cleared to 0 by phase 0 and kept for phase 1,
 `GREATER_OR_EQUAL`), tested before the fragment stage
@@ -1866,7 +1896,9 @@ street, the hedge view and the 4K field:
   the meshlet record is not read (eight dependent loads down to five): the
   resolve 0.03 to 0.05 ms faster, the raster 0.04 slower, 17 MB more held.
   Those records are shared by every lane of a warp and mostly hit the
-  caches already;
+  caches already. The rasters still walked from the instance to the
+  meshlet there; the 32-byte record ("The cluster's record", above)
+  shortens their walk and the resolve's alike;
 - each invocation shading 4 or 16 pixels of a 16- or 32-pixel square in
   turn, so that its later pixels find the records and texels in the L1:
   0.35 to 0.47 ms slower;

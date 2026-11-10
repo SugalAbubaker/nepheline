@@ -507,13 +507,13 @@ bool vis_voxel_surface(VisViewRef view, mat4 inv_view_proj, uint64_t v, ivec2 pi
 {
     const NphVisCluster cluster = VisClustersRef(view.v.clusters).c[vis_cluster(v)];
     const NphVisInstance inst = VisInstancesRef(view.v.instances).i[cluster.instance];
-    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-    const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[cluster.mesh];
     // A voxel cluster's meshlet: its first brick, its record (render/voxel.h).
-    const VisVoxelCluster vc = vis_voxel_cluster(mesh.voxel_clusters, m.y);
+    const VisVoxelCluster vc = vis_voxel_cluster(mesh.voxel_clusters, cluster.triangle_offset);
     uvec4 b0;
     uvec4 b1;
-    vis_voxel_brick(VisPackedBricksRef(mesh.voxel_bricks), m.x + vis_triangle(v), vc, b0, b1);
+    vis_voxel_brick(VisPackedBricksRef(mesh.voxel_bricks), cluster.vertex_offset + vis_triangle(v), vc, b0,
+                    b1);
     VisVoxelWordsRef run = vis_voxel_run(mesh.voxels, vc);
     const vec3 t =
         vis_relative_translation(inst.transform, view.v.camera_high.xyz, view.v.camera_low.xyz);

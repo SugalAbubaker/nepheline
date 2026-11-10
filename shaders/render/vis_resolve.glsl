@@ -266,12 +266,12 @@ void main()
     } else {
         const NphVisCluster cluster = VisClusterRef(pc.clusters)[vis_cluster(v)].c;
         const NphVisInstance inst = VisInstanceRef(pc.instances)[cluster.instance].i;
-        const NphVisMesh mesh = VisMeshRef(pc.meshes)[inst.mesh].m;
-        const uvec4 m = VisMeshletsRef(mesh.meshlets).m[cluster.meshlet];
-        const uvec3 corners = vis_triangle_corners(mesh, m.y, vis_triangle(v));
+        const NphVisMesh mesh = VisMeshRef(pc.meshes)[cluster.mesh].m;
+        const uvec3 corners = vis_triangle_corners(mesh, cluster.triangle_offset, vis_triangle(v));
         VisUintRef mlvx = VisUintRef(mesh.meshlet_vertices);
-        const uvec3 vtx = uvec3(mlvx.v[m.x + corners.x], mlvx.v[m.x + corners.y],
-                                mlvx.v[m.x + corners.z]);
+        const uint first = cluster.vertex_offset;
+        const uvec3 vtx = uvec3(mlvx.v[first + corners.x], mlvx.v[first + corners.y],
+                                mlvx.v[first + corners.z]);
 
         // The vertices as the raster saw them (the same arithmetic).
         const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
