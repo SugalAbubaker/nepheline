@@ -18,6 +18,10 @@
 # build and to within 3 % of their budgets, and their own passes', from
 # render_perf-2026-11-03-reflections-win-msvc-profile-rtx3060ti.json with two interleaved
 # rounds of grid_1k, grid_10k and lights_1k)
+# (the passes that tonemap, 2026-11-10, with AgX the default tonemapper (ADR-0083): gpu.taa,
+# and motion_*'s gpu.motion_blur where their TAA does not tonemap, from the mean of
+# render_perf-2026-11-10-agx-win-msvc-profile-rtx3060ti.json and its second round, interleaved
+# with the ACES build's; no other entry moved past its noise)
 
 grid_1k_production.cpu                         50000
 grid_1k_production.gpu.bloom_down_0            62000
@@ -193,7 +197,7 @@ field_4k_production.gpu.gi_update              84000
 field_4k_production.gpu.gi_resolve             62000
 field_4k_production.gpu.vis_resolve            1099000
 field_4k_production.gpu.vis_statistics         53000
-field_4k_production.gpu.taa                    882000
+field_4k_production.gpu.taa                    892000
 field_4k_production.gpu.reflect_clear          54000
 field_4k_production.gpu.reflect_rays           53000
 field_4k_production.gpu.reflect                51000
@@ -238,7 +242,7 @@ shadows_4k_production.gpu.gi_update            86000
 shadows_4k_production.gpu.gi_resolve           62000
 shadows_4k_production.gpu.vis_resolve          1232000
 shadows_4k_production.gpu.vis_statistics       53000
-shadows_4k_production.gpu.taa                  889000
+shadows_4k_production.gpu.taa                  898000
 shadows_4k_production.gpu.vsm_clear            54000
 shadows_4k_production.gpu.vsm_update           67000
 shadows_4k_production.gpu.vsm_collect          58000
@@ -292,7 +296,7 @@ shadows_rt_4k_production.gpu.gi_update         85000
 shadows_rt_4k_production.gpu.gi_resolve        62000
 shadows_rt_4k_production.gpu.vis_resolve       1502000
 shadows_rt_4k_production.gpu.vis_statistics    53000
-shadows_rt_4k_production.gpu.taa               883000
+shadows_rt_4k_production.gpu.taa               891000
 shadows_rt_4k_production.gpu.reflect_clear     54000
 shadows_rt_4k_production.gpu.reflect_rays      53000
 shadows_rt_4k_production.gpu.reflect           51000
@@ -340,7 +344,7 @@ shadows_moving_4k_production.gpu.gi_update     86000
 shadows_moving_4k_production.gpu.gi_resolve    62000
 shadows_moving_4k_production.gpu.vis_resolve   1213000
 shadows_moving_4k_production.gpu.vis_statistics 53000
-shadows_moving_4k_production.gpu.taa           875000
+shadows_moving_4k_production.gpu.taa           884000
 shadows_moving_4k_production.gpu.vsm_clear     54000
 shadows_moving_4k_production.gpu.vsm_invalidate 60000
 shadows_moving_4k_production.gpu.vsm_update    67000
@@ -395,7 +399,7 @@ shadows_walk_4k_production.gpu.gi_update       87000
 shadows_walk_4k_production.gpu.gi_resolve      63000
 shadows_walk_4k_production.gpu.vis_resolve     1234000
 shadows_walk_4k_production.gpu.vis_statistics  53000
-shadows_walk_4k_production.gpu.taa             889000
+shadows_walk_4k_production.gpu.taa             899000
 shadows_walk_4k_production.gpu.vsm_clear       54000
 shadows_walk_4k_production.gpu.vsm_update      67000
 shadows_walk_4k_production.gpu.vsm_collect     57000
@@ -452,7 +456,7 @@ motion_turn_4k_production.gpu.vis_statistics   53000
 motion_turn_4k_production.gpu.taa              814000
 motion_turn_4k_production.gpu.motion           242000
 motion_turn_4k_production.gpu.motion_tiles     55000
-motion_turn_4k_production.gpu.motion_blur      452000
+motion_turn_4k_production.gpu.motion_blur      478000
 motion_turn_4k_production.gpu.reflect_clear    54000
 motion_turn_4k_production.gpu.reflect_rays     53000
 motion_turn_4k_production.gpu.reflect          51000
@@ -500,7 +504,7 @@ motion_strafe_4k_production.gpu.vis_statistics 53000
 motion_strafe_4k_production.gpu.taa            810000
 motion_strafe_4k_production.gpu.motion         241000
 motion_strafe_4k_production.gpu.motion_tiles   55000
-motion_strafe_4k_production.gpu.motion_blur    411000
+motion_strafe_4k_production.gpu.motion_blur    461000
 motion_strafe_4k_production.gpu.reflect_clear  54000
 motion_strafe_4k_production.gpu.reflect_rays   53000
 motion_strafe_4k_production.gpu.reflect        51000
@@ -548,7 +552,7 @@ motion_flick_4k_production.gpu.vis_statistics  53000
 motion_flick_4k_production.gpu.taa             814000
 motion_flick_4k_production.gpu.motion          242000
 motion_flick_4k_production.gpu.motion_tiles    55000
-motion_flick_4k_production.gpu.motion_blur     614000
+motion_flick_4k_production.gpu.motion_blur     645000
 motion_flick_4k_production.gpu.reflect_clear   54000
 motion_flick_4k_production.gpu.reflect_rays    53000
 motion_flick_4k_production.gpu.reflect         51000
@@ -593,7 +597,7 @@ dof_4k_production.gpu.gi_update                84000
 dof_4k_production.gpu.gi_resolve               62000
 dof_4k_production.gpu.vis_resolve              1106000
 dof_4k_production.gpu.vis_statistics           53000
-dof_4k_production.gpu.taa                      889000
+dof_4k_production.gpu.taa                      898000
 dof_4k_production.gpu.dof_setup                202000
 dof_4k_production.gpu.dof_tiles                55000
 dof_4k_production.gpu.dof_gather               74000
@@ -642,7 +646,7 @@ dof_slight_4k_production.gpu.gi_update         84000
 dof_slight_4k_production.gpu.gi_resolve        62000
 dof_slight_4k_production.gpu.vis_resolve       1102000
 dof_slight_4k_production.gpu.vis_statistics    53000
-dof_slight_4k_production.gpu.taa               885000
+dof_slight_4k_production.gpu.taa               894000
 dof_slight_4k_production.gpu.dof_setup         201000
 dof_slight_4k_production.gpu.dof_tiles         55000
 dof_slight_4k_production.gpu.dof_gather        74000
@@ -691,7 +695,7 @@ dof_large_4k_production.gpu.gi_update          84000
 dof_large_4k_production.gpu.gi_resolve         62000
 dof_large_4k_production.gpu.vis_resolve        1105000
 dof_large_4k_production.gpu.vis_statistics     53000
-dof_large_4k_production.gpu.taa                889000
+dof_large_4k_production.gpu.taa                898000
 dof_large_4k_production.gpu.dof_setup          201000
 dof_large_4k_production.gpu.dof_tiles          55000
 dof_large_4k_production.gpu.dof_gather         818000
@@ -742,7 +746,7 @@ many_lights_1k_production.gpu.bloom_up_3       54000
 many_lights_1k_production.gpu.bloom_up_2       56000
 many_lights_1k_production.gpu.bloom_up_1       65000
 many_lights_1k_production.gpu.bloom_up_0       108000
-many_lights_1k_production.gpu.taa              886000
+many_lights_1k_production.gpu.taa              900000
 many_lights_1k_production.gpu.many_tiles       65000
 many_lights_1k_production.gpu.many_turns       153000
 many_lights_1k_production.gpu.reflect_clear    54000
@@ -791,7 +795,7 @@ many_lights_10k_production.gpu.bloom_up_3      54000
 many_lights_10k_production.gpu.bloom_up_2      56000
 many_lights_10k_production.gpu.bloom_up_1      65000
 many_lights_10k_production.gpu.bloom_up_0      108000
-many_lights_10k_production.gpu.taa             885000
+many_lights_10k_production.gpu.taa             900000
 many_lights_10k_production.gpu.many_tiles      68000
 many_lights_10k_production.gpu.many_turns      157000
 many_lights_10k_production.gpu.reflect_clear   54000
@@ -840,7 +844,7 @@ lights_1k_production.gpu.bloom_up_3            54000
 lights_1k_production.gpu.bloom_up_2            56000
 lights_1k_production.gpu.bloom_up_1            65000
 lights_1k_production.gpu.bloom_up_0            107000
-lights_1k_production.gpu.taa                   872000
+lights_1k_production.gpu.taa                   892000
 lights_1k_production.gpu.reflect_clear         54000
 lights_1k_production.gpu.reflect_rays          53000
 lights_1k_production.gpu.reflect               51000
@@ -887,7 +891,7 @@ lights_4k_production.gpu.bloom_up_3            54000
 lights_4k_production.gpu.bloom_up_2            56000
 lights_4k_production.gpu.bloom_up_1            65000
 lights_4k_production.gpu.bloom_up_0            107000
-lights_4k_production.gpu.taa                   871000
+lights_4k_production.gpu.taa                   883000
 lights_4k_production.gpu.reflect_clear         54000
 lights_4k_production.gpu.reflect_rays          53000
 lights_4k_production.gpu.reflect               51000

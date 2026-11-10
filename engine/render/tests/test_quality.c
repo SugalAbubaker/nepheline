@@ -60,6 +60,15 @@ static bool same_view(const NphRenderView *a, const NphRenderView *b)
            a->gi_rays == b->gi_rays;
 }
 
+// The default view tonemaps with AgX, whose curve keeps the light of the
+// shade that the ACES fit clips to black (ADR-0083).
+NTEST(quality, the_default_view_tonemaps_with_agx)
+{
+    NphRenderView v;
+    nph_render_view_default(&v, any_camera());
+    NTEST_EXPECT_EQ_UINT((u32)v.tonemapper, (u32)NPH_RENDER_TONEMAPPER_AGX);
+}
+
 NTEST(quality, the_reference_tier_is_the_default_view)
 {
     NphRenderView a;

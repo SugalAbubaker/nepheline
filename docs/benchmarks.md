@@ -494,11 +494,11 @@ again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
 more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
 spread). `benchmarks/reference_budgets.txt` is generated from
-`reference_scenes-2026-11-01`, Bistro and the city, a process a scene as
-the nightly runs them, and the city's rows again from
-`reference_scenes-2026-11-06-city-voxels` since it cooks voxels and cells
-(ADR-0068's amendment). The landscape has no rows there: the nightly does not
-run it.
+`reference_scenes-2026-11-10-1440p`, Bistro, the city and the interior at the
+size they gate at (ADR-0082), a process a scene as the nightly runs them, and
+the temporal resolve's rows again from `reference_scenes-2026-11-10-agx`, with
+AgX the default tonemapper (ADR-0083). The landscape has no rows there: the
+nightly does not run it.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the

@@ -2730,12 +2730,23 @@ directional light anyway.
 `tonemap.glsl` maps pre-exposed colour to the display, in the tonemap pass
 (`tonemap.frag`) and in the production path's temporal resolve:
 
+- **AgX** (the default): Troy Sobotka's AgX with the base contrast look:
+  Blender's inset/outset matrices and Benjamin Wrensch's sixth-order
+  polynomial fit of the sigmoid (2023).
 - **ACES:** Stephen Hill's fit of the ACES 1.0 RRT and sRGB ODT
   (BakingLab, 2016), with the input and output matrices.
-- **AgX:** Troy Sobotka's AgX with the base contrast look: Blender's
-  inset/outset matrices and Benjamin Wrensch's sixth-order polynomial fit
-  of the sigmoid (2023).
 - **None:** a clamp.
+
+AgX is the default view's and new cameras' ([ADR-0083](adr/0083-agx-default.md)).
+The ACES fit renders shade near black: its numerator is negative below a
+pre-exposed 0.0033, where it is clamped, and it keeps everything up to
+about 0.05 within its lowest 31 levels, so the city's street at EV 13 left
+60 % of its pixels below 8 of 255, against 37 % with AgX. Smoothing the
+fit's clip alone changed nothing visible: ACES puts light 5.5 stops under
+mid-grey near black by design. The golden images still pin ACES. AgX takes
+six more transcendental operations a pixel than the fit, a logarithm and a
+power a channel where the fit divides: on the RTX 3060 Ti about 17 µs of
+the pass that tonemaps at 2560 × 1440, and 46 µs at 3840 × 2160.
 
 On UNORM targets the shader applies the exact sRGB curve; sRGB targets are
 encoded by the hardware. Tests compare both against the C reference, texel

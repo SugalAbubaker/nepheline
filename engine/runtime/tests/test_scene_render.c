@@ -401,6 +401,18 @@ NTEST(SceneRender, entities_become_instances_and_lights)
     scene_teardown(&fx);
 }
 
+// A new camera tonemaps as the renderer's default view does (AgX, ADR-0083).
+NTEST(SceneRender, a_new_camera_tonemaps_as_the_default_view)
+{
+    const NphCamera c = *(const NphCamera *)NphCamera_component()->defaults;
+    NphRenderView v;
+    nph_render_view_default(&v, nph_render_camera_look_at(nph_dvec3(0.0, 0.0, 5.0),
+                                                          nph_dvec3(0.0, 0.0, 0.0),
+                                                          nph_vec3_unit_y(), 0.9F, 0.1F));
+    NTEST_EXPECT_EQ_UINT(c.tonemapper, (u32)v.tonemapper);
+    NTEST_EXPECT_EQ_UINT(c.tonemapper, (u32)NPH_RENDER_TONEMAPPER_AGX);
+}
+
 NTEST(SceneRender, a_missing_mesh_fails_and_a_missing_material_defaults)
 {
     static SceneFixture fx;

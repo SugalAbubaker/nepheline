@@ -1335,7 +1335,7 @@ static void sync_camera(NphSceneRenderer *sr, f32 fraction)
                                     : 0.0F;
             sr->tonemapper = c[i].tonemapper <= (u32)NPH_RENDER_TONEMAPPER_AGX
                                  ? c[i].tonemapper
-                                 : (u32)NPH_RENDER_TONEMAPPER_ACES;
+                                 : (u32)NPH_RENDER_TONEMAPPER_AGX;
             sr->has_view = 1;
         }
     }
