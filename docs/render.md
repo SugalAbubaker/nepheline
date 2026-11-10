@@ -2743,14 +2743,18 @@ pre-exposed 0.0033, where it is clamped, and it keeps everything up to
 about 0.05 within its lowest 31 levels, so the city's street at EV 13 left
 60 % of its pixels below 8 of 255, against 37 % with AgX. Smoothing the
 fit's clip alone changed nothing visible: ACES puts light 5.5 stops under
-mid-grey near black by design. The golden images still pin ACES. AgX takes
-six more transcendental operations a pixel than the fit, a logarithm and a
-power a channel where the fit divides: on the RTX 3060 Ti about 17 µs of
-the pass that tonemaps at 2560 × 1440, and 46 µs at 3840 × 2160.
+mid-grey near black by design. The golden images still pin ACES. AgX's
+curve is longer arithmetic than the fit's (a logarithm, a sixth-order
+polynomial and a power a channel): on the RTX 3060 Ti about 17 µs of the
+pass that tonemaps at 2560 × 1440, and 46 µs at 3840 × 2160, an
+instruction-bound pass's share, not the transcendentals' (folding the
+power into the sRGB curve's measured the same).
 
-On UNORM targets the shader applies the exact sRGB curve; sRGB targets are
-encoded by the hardware. Tests compare both against the C reference, texel
-by texel, within one 8-bit step.
+On UNORM targets, which the runtime's and the viewers' swapchains are, the
+shader applies the exact sRGB curve; sRGB targets are encoded by the
+hardware. Tests compare both against the C reference, texel by texel,
+within one 8-bit step, AgX's on each side of the sRGB curve's linear
+segment.
 
 ## Depth of field
 

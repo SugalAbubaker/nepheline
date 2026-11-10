@@ -73,11 +73,11 @@ those previews.
   to frame by 14.9 % of their level, against 9.0 % under ACES, so the
   radiance cache's noise (the cells' per-pixel jitter, the reflection cells)
   is the next thing to fix.
-- **The cost.** AgX takes six more transcendental operations a pixel than
-  the ACES fit (a logarithm a channel in and a power, a logarithm and an
-  exponential, a channel out: nine, where the fit's three divisions take
-  three), in the pass that ends in the display colour: TAA's resolve, or
-  the motion blur where a camera's shutter is open. On the
+- **The cost.** AgX's curve is longer arithmetic than the fit's (a
+  logarithm, a sixth-order polynomial and a power a channel, where the fit
+  takes a ratio of two quadratics), in the pass that ends in the display
+  colour: TAA's resolve, or the motion blur where a camera's shutter is
+  open, passes bound by the instructions they issue. On the
   RTX 3060 Ti, two interleaved rounds a build (`render_perf`, 240 frames a
   view, ACES f5f9fef against AgX on it):
   - at 2560 × 1440, the reference scenes' 18 views: TAA +16.2 to +18.5 µs
@@ -91,11 +91,13 @@ those previews.
     within the rounds' spread (the ACES build's two rounds of a scene differ
     by up to 0.11 ms).
 
-  The sRGB swapchains the runtime and the viewers present to pay the same
-  six: AgX's power turns the curve's display-encoded output into the linear
-  light the hardware's sRGB store encodes, which ACES's output already is;
-  on `render_perf`'s UNORM target both curves also pay the shader's sRGB
-  encode.
+  The runtime and the viewers present to UNORM swapchains, as `render_perf`
+  draws into a UNORM target, so the shader applies the sRGB curve after
+  either tonemapper and these are what a player's frame pays. Folding
+  AgX's 2.2 power into that sRGB curve, one power a channel where there
+  are two, measured the same (TAA +17.5 to +19.5 µs in the 18 views, two
+  interleaved rounds), so it was not kept: the transcendentals are not
+  where the cost is.
 - The budgets of the passes that tonemap are re-based on AgX's means, as
   `scripts/render_budgets.py` computes them: `reference_budgets.txt`'s 18
   `gpu.taa` entries (they came to 100 to 101 % of their ACES budgets), and
