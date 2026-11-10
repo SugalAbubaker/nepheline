@@ -86,10 +86,9 @@ void main()
     }
     // The point from its depth lies on its surface to about a thousandth of its distance.
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsOpaqueEXT, 0xFFu,
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsNoneEXT, 0xFFu,
                           x + rview.v.tlas_offset.xyz + n * (1e-3 * length(x)), 0.0, dir, 1e30);
-    while (rayQueryProceedEXT(rq)) {
-    }
+    NPH_RT_PROCEED(rq, pc.view)
     vec3 radiance;
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
         radiance = (rview.v.flags & NPH_RENDER_VIEW_IBL) != 0u

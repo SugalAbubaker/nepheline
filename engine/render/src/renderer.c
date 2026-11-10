@@ -1503,6 +1503,9 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NPH_TRY(validate_material(r, desc));
+    if (r->materials[slot].desc.alpha_mode != desc->alpha_mode) {
+        r->rt.materials_changed = 1; // the rays' alpha test (rt.c)
+    }
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     r->material_version += 1U;
@@ -1520,6 +1523,9 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     NPH_ASSERT_MSG(slot != NPH_U32_MAX, "stale material handle");
     if (slot == NPH_U32_MAX) {
         return;
+    }
+    if (r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK) {
+        r->rt.materials_changed = 1; // its instances take the default material (rt.c)
     }
     memset(&r->materials[slot], 0, sizeof r->materials[slot]);
     release_slot(&r->material_pool, material.value);

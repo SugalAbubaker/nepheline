@@ -67,7 +67,7 @@ VsmViewRef g_vsm; // set first thing in main()
 uint64_t g_tlas;     // the view's top-level structure, set first thing in main(),
 vec3 g_tlas_offset; // and the camera's place in it
 #define NPH_SURFACE_SHADOW(p, l, distance)                                                         \
-    nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
+    nph_shadow_ray(g_tlas, 0ul, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
 #endif
 
 #include "surface.glsl"

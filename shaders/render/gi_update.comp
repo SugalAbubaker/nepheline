@@ -92,7 +92,7 @@ vec3 surface_point(VisViewRef view, uint64_t v, vec2 q, out vec3 n)
 
 // One sample of the many lights' far fields' irradiance at the camera-relative `x`,
 // facing `n`, for `u` uniform in [0, 1): the chosen light's over its probability.
-vec3 many_far_sample(ViewRef rview, vec3 x, vec3 n, float u)
+vec3 many_far_sample(VisViewRef view, ViewRef rview, vec3 x, vec3 n, float u)
 {
     const NphRenderManyView m = ManyViewRef(rview.v.many).m;
     const vec3 at = x + m.to_origin.xyz;
@@ -112,7 +112,8 @@ vec3 many_far_sample(ViewRef rview, vec3 x, vec3 n, float u)
         return vec3(0.0);
     }
     const float distance = 1.0 / inv_d;
-    const float lit = nph_shadow_ray(rview.v.tlas, x + rview.v.tlas_offset.xyz, n, l, distance);
+    const float lit =
+        nph_shadow_ray(rview.v.tlas, uint64_t(view), x + rview.v.tlas_offset.xyz, n, l, distance);
     return light.color.rgb * (share * nol * lit * inv_d * inv_d / pdf);
 }
 
@@ -166,10 +167,9 @@ void main()
                              sqrt(max(1.0 - u1.x, 0.0)) * n);
 
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsOpaqueEXT, 0xFFu,
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsNoneEXT, 0xFFu,
                           nph_offset_ray(x + rview.v.tlas_offset.xyz, n), 0.0, w, 1e30);
-    while (rayQueryProceedEXT(rq)) {
-    }
+    NPH_RT_PROCEED(rq, pc.view)
     vec3 radiance;
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
         radiance = environment(rview, w);
@@ -184,7 +184,7 @@ void main()
     vec3 far = vec3(0.0);
     if (k_many) {
         const float u2 = gi_random(uvec3(block, g.g.frame ^ 0x7F4A7C15u)).x;
-        far = many_far_sample(rview, x, n, u2);
+        far = many_far_sample(view, rview, x, n, u2);
         irradiance += far;
     }
 

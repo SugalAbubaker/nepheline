@@ -45,8 +45,9 @@
 // thing in main(): the shadow test runs deep in the light loop.
 uint64_t g_tlas;
 vec3 g_tlas_offset;
+uint64_t g_scene; // the GPU scene's view record: the rays' alpha test (rt_common.glsl)
 #define NPH_SURFACE_SHADOW(p, l, distance)                                                         \
-    nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
+    nph_shadow_ray(g_tlas, g_scene, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
 #endif
 
 // The sun's virtual shadow map where the view has one (vsm_common.glsl):
@@ -225,6 +226,7 @@ void main()
 #ifdef NPH_RAY_QUERY
     g_tlas = rview.v.tlas;
     g_tlas_offset = rview.v.tlas_offset.xyz;
+    g_scene = pc.view;
 #endif
     g_vsm = VsmViewRef(rview.v.vsm);
     g_pixel = p;

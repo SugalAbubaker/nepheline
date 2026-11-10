@@ -462,6 +462,12 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
         rt->frame_rebuild = 1;
         rt->rebuild_owed = 0;
     }
+    // A material's alpha mode changed: which instances reach the alpha test
+    // with it (RenderRt.materials_changed).
+    if (rt->materials_changed) {
+        rt->frame_rebuild = 1;
+        rt->materials_changed = 0;
+    }
     rt->tlas_offset = nph_dvec3_relative(camera, rt->anchor);
     return true;
 }

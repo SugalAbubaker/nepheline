@@ -38,6 +38,11 @@ NPH_BUFFER_REF(AccelInstancesRef) { AccelInstance a[]; };
 // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR, in the flags'
 // byte: shadows come from both sides.
 #define RT_INSTANCE_NO_FACE_CULL (1u << 24u)
+// VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR: an instance with an
+// alpha-tested material, whose triangles reach the ray queries' alpha test
+// (rt_common.glsl nph_rt_candidate_stops) as candidates; the bottom levels'
+// are opaque, so every other instance's pass straight through traversal.
+#define RT_INSTANCE_NO_OPAQUE (8u << 24u)
 
 void main()
 {
@@ -82,8 +87,12 @@ void main()
     o.row0 = vec4(inst.transform.row0.xyz * s, dot(inst.transform.row0.xyz, off) + t.x);
     o.row1 = vec4(inst.transform.row1.xyz * s, dot(inst.transform.row1.xyz, off) + t.y);
     o.row2 = vec4(inst.transform.row2.xyz * s, dot(inst.transform.row2.xyz, off) + t.z);
+    bool masked = false;
+    for (uint k = 0u; k < inst.material_count && !masked; ++k) {
+        masked = MaterialsRef(view.v.materials).m[vis_instance_material(view, inst, k)].alpha_mode == 1u;
+    }
     o.index_and_mask = i | (0xFFu << 24u);
-    o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL;
+    o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL | (masked ? RT_INSTANCE_NO_OPAQUE : 0u);
     o.blas = mesh.blas;
     out_ref.a[at] = o;
 }

@@ -108,7 +108,8 @@ vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
         const float nol = dot(n, l);
         if (nol > 0.0 && dot(face, l) > 0.0) {
             const float lit =
-                sun.w > 0.0 ? nph_shadow_ray(rview.v.tlas, x + rview.v.tlas_offset.xyz, face, l, 1e30)
+                sun.w > 0.0 ? nph_shadow_ray(rview.v.tlas, uint64_t(view), x + rview.v.tlas_offset.xyz,
+                                             face, l, 1e30)
                             : 1.0;
             irradiance += g.g.sun_color.rgb * (nol * lit);
         }

@@ -551,7 +551,11 @@ typedef struct RenderRt {
     u32 frame_copy_count;
     u32 frame_compactions; // swapped in this frame
     b32 rebuild_owed;      // a swap's new address reaches the GPU scene next frame
-    u64 blas_bytes;        // every bottom level's size now
+    // A material's alpha mode changed (or a masked one went): the production
+    // path's records say which instances' triangles reach the rays' alpha
+    // test (rt_instances.comp), so its top level is rebuilt.
+    b32 materials_changed;
+    u64 blas_bytes; // every bottom level's size now
 } RenderRt;
 
 typedef struct RenderLight {
