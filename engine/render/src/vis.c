@@ -1365,8 +1365,13 @@ static void hzb_record(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd,
 
     nph_gpu_cmd_bind_pipeline(cmd, v->compute[VIS_COMPUTE_HZB]);
     NphVisPush p = push_of(r, phase, phase == 0U ? 0U : 2U);
-    p.arg0 = nph_gpu_image_storage_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer), 0U);
+    // The visibility buffer sampled as two words, whose depths a block's
+    // gather takes at once (vis_hzb.comp), with the sampler clamped to its
+    // edge.
+    p.arg0 = nph_gpu_image_sampled_index(dev, nph_gpu_rg_image(graph, v->frame.visbuffer));
     p.arg1 = nph_gpu_image_storage_index(dev, hzb, 0U);
+    p.arg3 = nph_gpu_sampler_index(
+        dev, r->material_samplers[NPH_RENDER_WRAP_CLAMP][NPH_RENDER_WRAP_CLAMP][1]);
     p.arg4 = NPH_VIS_NO_AO;
     if (r->ao.frame_active) {
         // The occlusion's depths' mips 0 and 1 (vis_hzb.comp).
@@ -1695,7 +1700,7 @@ static NphResult declare_hzb(NphGpuRenderGraph *graph, NphRenderer *r, u32 phase
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
-    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+    nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     // The counters: the local lights' count (the light tiles' depths), and
     // in phase 1 the full rebuild's flag.
     nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);

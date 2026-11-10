@@ -1749,7 +1749,13 @@ every footprint lies in one tile. At 4K that is two dispatches where a
 dispatch and a barrier a mip took eleven; after phase 1, a tile phase 1 did
 not draw into keeps phase 0's mips. Bistro's second pyramid went from 0.134
 to 0.109 ms; the first, bound by its full read of the visibility buffer
-and its page requests (0.11 ms of its 0.31), stayed as it was. An
+and its page requests (0.11 ms of its 0.31), stayed as it was. Each mip-0
+texel's 2 × 2 block comes from one gather of the depths' word of the
+visibility buffer sampled as two words (the buffer is the frame's size, so
+the sampler's clamp to its edge is the last row's and column's), where four
+loads of the 64 bits took it (2026-11-09: the first pyramid 0.03 to 0.04 ms
+less in the city's views, 0.02 to 0.03 in Bistro's, 0.01 to 0.03 in the
+interior's; the culling the same, cluster for cluster). An
 occlusion test projects the bounding sphere to a
 screen rectangle and nearest depth (Mara & McGuire, "2D Polyhedral Bounds
 of a Clipped, Perspective-Projected 3D Sphere", JCGT 2013), picks the mip

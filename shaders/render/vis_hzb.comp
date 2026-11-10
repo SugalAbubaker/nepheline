@@ -23,8 +23,9 @@
 // pyramid after phase 1 differs from the one after phase 0 only there,
 // and phase 1 usually draws little, so this skips most of a full read of
 // the visibility buffer (the cull pass marks the tiles; a cluster it cannot
-// bound marks them all). arg0 is the visibility buffer's bindless storage
-// index, arg1 mip 0's.
+// bound marks them all). arg0 is the visibility buffer's bindless sampled
+// index (two words: the depth's the second), arg3 a nearest sampler clamped
+// to the edge, arg1 mip 0's storage index.
 //
 // Modes 0 and 2 also request the virtual shadow map's pages where the view
 // has one (vsm_block.glsl): each pixel the pages its shading will read,
@@ -77,9 +78,10 @@ struct TileDepths {
 shared TileDepths s_tiles[4];
 shared uint s_background;
 
+// The depth of pixel `p`: its 64 bits' high word.
 float source_depth(ivec2 p)
 {
-    return vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
+    return uintBitsToFloat(texelFetch(nph_utextures_2d[pc.arg0], p, 0).y);
 }
 
 void main()
@@ -109,12 +111,17 @@ void main()
     const ivec2 last = src - 1;
     const ivec2 lo = min(p * 2, last);
     const bool inside = all(lessThan(p, dst));
-    // The 2 x 2 block (clamped at the last row and column), row by row.
+    // The 2 x 2 block (clamped at the last row and column), row by row: one
+    // gather of the depths' word at the corner the four share, in the
+    // gather's order (x0, y1), (x1, y1), (x1, y0), (x0, y0). The visibility
+    // buffer is the frame's size, so the sampler's clamp to its edge is the
+    // last row's and column's.
     vec4 block = vec4(0.0);
     if (inside) {
-        for (int k = 0; k < 4; ++k) {
-            block[k] = source_depth(min(lo + ivec2(k & 1, k >> 1), last));
-        }
+        const uvec4 g =
+            textureGather(usampler2D(nph_utextures_2d[pc.arg0], nph_samplers[pc.arg3]),
+                          vec2(lo + 1) / vec2(src), 1);
+        block = uintBitsToFloat(uvec4(g.w, g.z, g.x, g.y));
     }
     {
         // Every invocation of the subgroup takes part in the requests.
