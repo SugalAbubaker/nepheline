@@ -92,7 +92,8 @@
 // --scenes=DIR, or the NPH_SCENES environment variable, every manifest in
 // benchmarks/scenes whose cooked pack DIR holds (scripts/scenes.py fetches
 // and cooks them) adds a scene per view, `<scene>_<view>_production`, run
-// after the synthetic scenes at 3840 x 2160 through the production path
+// after the synthetic scenes at 2560 x 1440, the size their gate holds at
+// (ADR-0082; the synthetic scenes keep 3840 x 2160), through the production path
 // with the runtime's defaults, lit by the scene's own lights (the
 // synthetic scenes' sun is removed first) and seen from its own camera or
 // the manifest's, still or moving as the view says (walking along it, level,
@@ -101,7 +102,8 @@
 // in their steady state). --capture-dir writes each one's last frame there as a
 // BMP, to look at what was measured. --manifests reads the manifests from
 // another directory and --ref-size renders them at another size (the
-// CTest smoke run of a small cooked scene; budgets hold at 3840 x 2160).
+// CTest smoke run of a small cooked scene; 3840 x 2160 for §10.4's lines,
+// which are 4K's; budgets hold at 2560 x 1440).
 // --debug-view renders them as one of the renderer's debug views
 // (base_color, normal, roughness, metallic, occlusion, direct, indirect,
 // irradiance, clusters, triangles, instances) for looking at the content;
@@ -447,8 +449,8 @@ static const SceneDef g_scenes[] = {
 // views, and one measured scene per view.
 #define MAX_REF_MANIFESTS 8U
 #define MAX_REF_VIEWS     8U
-#define REF_WIDTH         3840U
-#define REF_HEIGHT        2160U
+#define REF_WIDTH         2560U // the reference scenes' gate (ADR-0082)
+#define REF_HEIGHT        1440U
 
 typedef struct RefView {
     char name[32];

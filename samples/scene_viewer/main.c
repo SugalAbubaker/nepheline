@@ -16,8 +16,9 @@
 //                 [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] [--walk=M/S]
 //                 [--frames=N]
 //
-// --size is the image drawn (3840x2160, the CLAUDE.md §10 target) and --window
-// the window (1920x1080, a clean half of it). --lists multiplies the lists that
+// --size is the image drawn (2560x1440, the size the reference scenes gate at:
+// ADR-0082; 3840x2160 is CLAUDE.md §10.1's target) and --window the window
+// (1280x720, a clean half of it). --lists multiplies the lists that
 // can drop work (16, as ADR-0066 measured the landscape, which overflows the
 // defaults; 1: the renderer's own). --voxel-pool sizes the pool of meshes of
 // voxels alone, and with it streams the proxies within --proxy-budget (1200 MB
@@ -28,7 +29,10 @@
 //
 // Keys: W/A/S/D move, Q/E down and up, Shift four times as fast, the mouse wheel
 // changes the speed, the right mouse button held looks around, 1 to 9 jump to the
-// manifest's views, G logs each pass's GPU time, Escape quits. The title gives the
+// manifest's views, G logs each pass's GPU time, F11 switches between the window
+// and exclusive fullscreen on the monitor that holds it, at the monitor's own
+// mode (a 2560x1440 display then shows the default --size pixel for pixel),
+// Escape quits. The title gives the
 // frame rate, the frame time and the worst frame's over the last half second, and
 // the GPU memory in use; it says so where the lists overflow (work is dropped, so
 // the numbers flatter the frame) or where proxies are still arriving.
@@ -236,10 +240,10 @@ static bool parse(int argc, char **argv, Options *o)
     memset(o, 0, sizeof *o);
     o->ev100 = 12.0F;
     o->sky = 1.0F;
-    o->width = 3840U;
-    o->height = 2160U;
-    o->window_width = 1920U;
-    o->window_height = 1080U;
+    o->width = 2560U;
+    o->height = 1440U;
+    o->window_width = 1280U;
+    o->window_height = 720U;
     o->lists = 16U;
     o->voxel_pool_mb = -1;
     o->proxy_budget_mb = -1;
@@ -505,6 +509,49 @@ static void set_looking(App *app, bool looking)
                                looking ? NPH_CURSOR_MODE_DISABLED : NPH_CURSOR_MODE_NORMAL);
 }
 
+// The monitor that holds the window's centre; the first where none does.
+static u32 window_monitor(const NphWindow *w)
+{
+    i32 x = 0;
+    i32 y = 0;
+    u32 width = 0U;
+    u32 height = 0U;
+    nph_window_get_position(w, &x, &y);
+    nph_window_get_size(w, &width, &height);
+    const i64 cx = (i64)x + (i64)(width / 2U);
+    const i64 cy = (i64)y + (i64)(height / 2U);
+    const u32 count = nph_monitor_count();
+    for (u32 i = 0; i < count; ++i) {
+        NphMonitorInfo m;
+        if (nph_monitor_get_info(i, &m) == NPH_RESULT_OK && cx >= (i64)m.x &&
+            cx < (i64)m.x + (i64)m.width && cy >= (i64)m.y && cy < (i64)m.y + (i64)m.height) {
+            return i;
+        }
+    }
+    return 0U;
+}
+
+// F11: exclusive fullscreen on the window's monitor at its own mode, or back to
+// the window where it was. The swapchain follows the new size when it is next
+// acquired, and the image keeps --size.
+static void toggle_fullscreen(App *app)
+{
+    const bool on = !nph_window_is_fullscreen(app->window);
+    const u32 monitor = window_monitor(app->window);
+    const NphResult r = nph_window_set_fullscreen(app->window, on, monitor);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&LOG_SAMPLE, "fullscreen: %s", nph_result_string(r));
+        return;
+    }
+    NphMonitorInfo m;
+    if (on && nph_monitor_get_info(monitor, &m) == NPH_RESULT_OK) {
+        NPH_LOG_INFO(&LOG_SAMPLE, "fullscreen on %s, %ux%u at %u Hz; drawn at %ux%u", m.name,
+                     m.width, m.height, m.refresh_rate_hz, app->opt.width, app->opt.height);
+    } else {
+        NPH_LOG_INFO(&LOG_SAMPLE, "windowed");
+    }
+}
+
 static void key_event(App *app, u32 key, u32 action)
 {
     Fly *f = &app->fly;
@@ -540,6 +587,11 @@ static void key_event(App *app, u32 key, u32 action)
     case NPH_KEY_G:
         if (down) {
             nph_render_gpu_profiler_log(app->profiler);
+        }
+        break;
+    case NPH_KEY_F11:
+        if (down) {
+            toggle_fullscreen(app);
         }
         break;
     default:
@@ -1006,7 +1058,7 @@ int main(int argc, char **argv)
             NPH_LOG_INFO(&LOG_SAMPLE,
                          "keys: W/A/S/D move, Q/E down and up, Shift faster, the wheel changes "
                          "the speed, hold the right mouse button to look, 1 to %u the views, "
-                         "G the passes' GPU times, Escape quits",
+                         "G the passes' GPU times, F11 fullscreen, Escape quits",
                          app.def.view_count);
             run(&app, &status);
         } else {

@@ -72,7 +72,7 @@ supersedes it and both link to each other.
 | [0064](0064-cells-first-culling.md) | Culling by cells first: a world's instances read only where their cells are | Accepted (built in stages: the runs and the camera's cells, then the shadow map's); amended 2026-11-05: a range no frame has seen goes back at once |
 | [0065](0065-virtual-texturing.md) | Virtual texturing: sparse images, a page's residency tested where it is sampled | Accepted (built in stages: sparse images, then whole levels clamped by the samplers, then the stream within a budget) |
 | [0066](0066-phase-13-exit.md) | Phase 13's exit: Bistro's cost of its level hierarchies, won back in Phase 14 | Accepted (the user's decision; the gate it names moved by [0067](0067-the-game-is-a-city.md); amended 2026-10-31: what the phase left) |
-| [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions; amended 2026-10-31: the landscape leaves the nightly) |
+| [0067](0067-the-game-is-a-city.md) | The game is a city: its reference scenes, and 144 FPS until it is built | Accepted (the user's decisions; amended 2026-10-31: the landscape leaves the nightly; its gate's size amended by ADR-0082) |
 | [0068](0068-city-reference-scene.md) | The city reference scene: Emerald Square, converted and tiled | Accepted; amended 2026-11-06: voxels and the cells' proxies after all |
 | [0069](0069-what-a-level-costs.md) | Levels of detail: what a collapse costs, what a level may spend, and corners that collapse | Accepted; amended 2026-11-06: a voxel cook counts its normals where a scene asks |
 | [0070](0070-a-flat-cull-of-the-levels.md) | Levels of detail: a flat cull of the levels an instance's distance may take | Accepted; amended 2026-11-05: voxel meshes of few groups take the flat cull |
@@ -87,6 +87,7 @@ supersedes it and both link to each other.
 | [0079](0079-quality-tiers.md) | Quality tiers: the reference hardware's frame, and a high tier of rays | Accepted |
 | [0080](0080-shadow-map-slope.md) | The sun's map at the level of its slope on a surface, and a pool twice as large | Accepted |
 | [0081](0081-budgets-in-the-machines-unit.md) | Benchmark budgets in the machine's own unit | Accepted |
+| [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision) |
 
 ## Template
 

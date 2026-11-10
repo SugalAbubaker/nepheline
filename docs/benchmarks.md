@@ -303,7 +303,9 @@ source out at its commit under a directory of the machine's choosing and
 `scripts/scenes.py cook` cooks it there (`nph_cook`, incremental); with
 `--scenes=DIR` (or the `NPH_SCENES` environment variable) render_perf adds
 a scene per view of every manifest whose pack DIR holds,
-`<scene>_<view>_production`, after the synthetic ones: 3840 × 2160 through
+`<scene>_<view>_production`, after the synthetic ones: 2560 × 1440, the
+size their gate holds at (ADR-0082; `--ref-size=3840x2160` for §10.4's lines,
+which are 4K's, and for the 240 FPS target), through
 the production path with the runtime's defaults, lit by the scene's own
 lights (the synthetic scenes' sun is removed). `--capture-dir` writes
 each one's last frame there as a BMP. `--debug-view` renders them as one
@@ -375,12 +377,15 @@ It has render_perf's renderer sizes and view, streams the cells' proxies
 with `samples/common`'s bridge, and defaults to the landscape's needs:
 visible-cluster lists at 16 times the renderer's (`--lists`), and for a
 manifest that cooks voxels a 1,200 MB voxel pool and a 1,100 MB proxy
-budget (ADR-0066). It draws an image of `--size`, 3840 × 2160 by default,
-and scales it into a window of `--window`, 1920 × 1080 by default, so a
-smaller display still draws the target's pixels and the title's numbers are
-the 4K frame's. W, A, S, D, Q and E move, Shift is four times as fast, the
-wheel changes the speed, the right mouse button looks around, 1 to 9 jump
-to the manifest's views, and G logs each pass's GPU time. The title gives
+budget (ADR-0066). It draws an image of `--size`, 2560 × 1440 by default
+(the size the reference scenes gate at, ADR-0082), and scales it into a
+window of `--window`, 1280 × 720 by default, so a smaller display still
+draws the gate's pixels and the title's numbers are its frame's. W, A, S, D,
+Q and E move, Shift is four times as fast, the wheel changes the speed, the
+right mouse button looks around, 1 to 9 jump to the manifest's views, G logs
+each pass's GPU time, and F11 switches to exclusive fullscreen on the
+window's monitor at that monitor's own mode and back: a 2560 × 1440 display
+then shows the image pixel for pixel. The title gives
 the frame rate, the frame time, the worst frame, and the GPU memory, and it
 says so where the lists overflow, since dropped work flatters the numbers,
 or where proxies are still arriving. A windowed run shares the GPU with the

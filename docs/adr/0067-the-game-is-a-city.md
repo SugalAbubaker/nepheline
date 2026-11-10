@@ -5,7 +5,8 @@
   [ADR-0059](0059-structure-checkpoint.md)'s decisions 3 and 4 and
   [ADR-0041](0041-frame-target-gates.md)'s decision 6; CLAUDE.md §10.1, §10.4,
   §10.7, §12 and §13 amended); amended 2026-10-31: the landscape leaves the
-  nightly (below)
+  nightly (below); amended 2026-11-10 by [ADR-0082](0082-gate-at-1440p.md):
+  Phases 14's and 15's gates hold at native 2560 × 1440, the first game's at 4K
 
 ## Context
 
