@@ -33,8 +33,38 @@ NPH_BUFFER_REF(GiKeysRef) { uint k[]; };
 NPH_BUFFER_REF(GiKeys4Ref) { uvec4 k[]; };
 NPH_BUFFER_REF(GiSumsRef) { uvec4 s[]; };
 NPH_BUFFER_REF(GiCellsRef) { uvec4 c[]; };
+NPH_BUFFER_REF(GiMomentsRef) { uvec4 m[]; };
 
 #define GI_NONE 0xFFFFFFFFu
+
+// A cell's word (NPH_RENDER_GI_COUNT_BITS): its sample count, the frames since a sample arrived,
+// and the many lights' far fields' share of its irradiance (as bits, and as a fraction).
+uint gi_word_count(uint w)
+{
+    return w & ((1u << NPH_RENDER_GI_COUNT_BITS) - 1u);
+}
+
+uint gi_word_age(uint w)
+{
+    return (w >> NPH_RENDER_GI_COUNT_BITS) & 0xFFu;
+}
+
+uint gi_word_far(uint w)
+{
+    return w >> (NPH_RENDER_GI_COUNT_BITS + 8);
+}
+
+#define GI_FAR_ONE float((1u << NPH_RENDER_GI_FAR_BITS) - 1u)
+
+float gi_word_far_share(uint w)
+{
+    return float(gi_word_far(w)) * (1.0 / GI_FAR_ONE);
+}
+
+uint gi_word(uint count, uint age, uint far)
+{
+    return count | (age << NPH_RENDER_GI_COUNT_BITS) | (far << (NPH_RENDER_GI_COUNT_BITS + 8));
+}
 
 // The level of a point `dist` metres from the camera: floor(log2(dist)),
 // the float's exponent, biased and clamped.
@@ -161,13 +191,13 @@ uint gi_claim(GiViewRef g, uint64_t key)
 vec4 gi_cell(GiViewRef g, uint slot)
 {
     const uvec4 c = GiCellsRef(g.g.cells).c[slot];
-    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) * (1.0 / 16.0), 1.0));
+    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) * (1.0 / 16.0), 1.0));
 }
 
 // The share of a cell's irradiance that is the many lights' far fields' (ADR-0078).
 float gi_cell_far(GiViewRef g, uint slot)
 {
-    return float(GiCellsRef(g.g.cells).c[slot].w >> 16u) * (1.0 / 65535.0);
+    return gi_word_far_share(GiCellsRef(g.g.cells).c[slot].w);
 }
 
 // The cache's irradiance at the camera-relative point `p` (geometric normal
@@ -316,8 +346,8 @@ vec4 gi_surface_cell_far(GiViewRef g, ivec2 pixel, vec3 p, vec3 face, out float 
         return vec4(0.0);
     }
     const uvec4 c = GiCellsRef(g.g.cells).c[slot]; // gi_cell and gi_cell_far, from one load
-    far = float(c.w >> 16u) * (1.0 / 65535.0);
-    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) * (1.0 / 16.0), 1.0));
+    far = gi_word_far_share(c.w);
+    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) * (1.0 / 16.0), 1.0));
 }
 
 // What the point `p` (camera relative) reflects along the direction `d`: the radiance of its
@@ -335,7 +365,7 @@ vec4 gi_reflect_cell(GiViewRef g, vec3 p, uvec2 d, uint rough, vec2 u)
     }
     const uvec4 c = GiCellsRef(g.g.reflect_cells).c[slot];
     // A narrow lobe's samples hardly differ: one is enough for the smoothest, four at the end.
-    return vec4(uintBitsToFloat(c.xyz), min(float(c.w & 0xFFu) / float(1u + coarse), 1.0));
+    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) / float(1u + coarse), 1.0));
 }
 
 #endif

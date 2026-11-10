@@ -261,6 +261,201 @@ NTEST_F(Gi, the_suns_light_bounces_off_a_wall)
 }
 
 // ---------------------------------------------------------------------------
+// The history (ADR-0084)
+// ---------------------------------------------------------------------------
+
+#define SLOTS (1U << 16U) // test_renderer_desc's gi_cells
+
+// Each slot's sample count after the frames so far, from its cell's word.
+static void read_counts(RenderFixture *f, u32 *counts)
+{
+    static u32 words[SLOTS * 4U];
+    NTEST_ASSERT_EQ_UINT(f->renderer->gi.capacity, SLOTS);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, f->renderer->gi.cells, 0U, sizeof words, words);
+    for (u32 i = 0; i < SLOTS; ++i) {
+        counts[i] = words[i * 4U + 3U] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+    }
+}
+
+// The most samples any cell holds, and how many hold more than their history allows (none
+// should).
+static u32 most_samples(RenderFixture *f, u32 *over)
+{
+    static u32 counts[SLOTS];
+    read_counts(f, counts);
+    u32 most = 0U;
+    *over = 0U;
+    for (u32 i = 0; i < SLOTS; ++i) {
+        most = nph_max_u32(most, counts[i]);
+        *over += counts[i] > (u32)NPH_RENDER_GI_HISTORY ? 1U : 0U;
+    }
+    return most;
+}
+
+// The mean of the pixels' linear values where the scene has a surface.
+static f64 surface_mean(const TestBoxScene *s, const u8 *image)
+{
+    f64 sum = 0.0;
+    u32 n = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 nrm;
+        if (pixel_point(s, i, &x, &nrm) >= 0) {
+            sum += (f64)test_box_linear(image, i);
+            ++n;
+        }
+    }
+    NTEST_ASSERT_GT_UINT(n, SIZE * SIZE / 2U);
+    return sum / (f64)n;
+}
+
+// An open ground under an environment of one radiance, which then doubles. Its cells have filled
+// their histories, over which they would take dozens of frames to follow (some 20 samples a frame
+// reach each here: 1,024 samples' history leaves 92 % of the change after 4 frames, and the old
+// 128 samples' 53 %); but their light's recent mean now leaves their estimates by far more than
+// its spread allows, so the cells cut their histories down: past half the change in 4 frames, and
+// within 3 % of the new light in 16.
+NTEST_F(Gi, a_cell_follows_a_change_of_its_light)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture dim = test_uniform_environment(f, 0.25F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, test_cube_mesh(f), test_grey(f, 0.5F));
+    // A narrow view: each cell is some pixels across and takes dozens of samples a frame.
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, -2.0F), 0.2F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, image, 64U);
+    u32 over = 0U;
+    const u32 most = most_samples(f, &over);
+    const f64 before = surface_mean(&scene, image);
+    const NphRenderTexture bright = test_uniform_environment(f, 0.5F);
+    render_frames(f, &v, target, image, 4U);
+    const f64 soon = surface_mean(&scene, image);
+    render_frames(f, &v, target, image, 12U);
+    const f64 after = surface_mean(&scene, image);
+    const f64 dim_level = 0.25 * (f64)EXPOSURE;
+    const f64 bright_level = 0.5 * (f64)EXPOSURE;
+    const f64 change = bright_level - dim_level;
+    NTEST_LOG("histories of up to %u samples; the ground at %.4f under the first sky (%.4f); "
+              "under the second (%.4f), %.4f after 4 frames (%.0f %% of the change) and %.4f "
+              "after 16",
+              most, before, dim_level, bright_level, soon, 100.0 * (soon - before) / change, after);
+    NTEST_EXPECT_EQ_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
+    NTEST_EXPECT_EQ_UINT(over, 0U);
+    NTEST_EXPECT_NEAR_F64(before, dim_level, 0.02 * dim_level);
+    NTEST_EXPECT_TRUE(soon - before > 0.6 * change);
+    NTEST_EXPECT_NEAR_F64(after, bright_level, 0.03 * bright_level);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, bright);
+    nph_render_texture_destroy(f->renderer, dim);
+}
+
+// A box on a black ground under an environment of one radiance L, close up where it shades the
+// ground: a sample there is pi L or nothing, as its ray leaves or meets the box, so a cell that
+// sees a share p of its sky open has samples spread by L sqrt(p (1 - p)) about its mean, in the
+// irradiance view's units. A history of h samples leaves its estimate wandering by about
+// 1 / sqrt(2 h - 1) of that: a 128-sample window's level is the bound the history's whole
+// NPH_RENDER_GI_HISTORY samples come well under (0.35 of it in theory; measured over 64 frames,
+// whose correlation hides some of a long history's wander, 0.2, where 128 samples' measure 0.8).
+NTEST_F(Gi, a_still_light_is_averaged_over_the_whole_history)
+{
+    REQUIRE_GI(f);
+    const f32 radiance = 0.6F;
+    const NphRenderTexture env = test_uniform_environment(f, radiance);
+    static TestBoxScene scene;
+    const NphRenderMaterial black = test_grey(f, 0.0F);
+    (void)test_box_on_ground(f, &scene, test_cube_mesh(f), black, black);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(2.2F, 2.0F, 3.2F), nph_vec3(0.6F, 0.0F, 0.6F), 0.3F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, image, 96U);
+    static f64 sum[SIZE * SIZE];
+    static f64 sum2[SIZE * SIZE];
+    memset(sum, 0, sizeof sum);
+    memset(sum2, 0, sizeof sum2);
+    const u32 frames = 64U;
+    for (u32 k = 0; k < frames; ++k) {
+        NTEST_EXPECT_TRUE(test_box_render(f, &v, target, image).gi);
+        for (u32 i = 0; i < SIZE * SIZE; ++i) {
+            const f64 x = (f64)test_box_linear(image, i);
+            sum[i] += x;
+            sum2[i] += x * x;
+        }
+    }
+    const f64 open = (f64)(radiance * EXPOSURE);
+    f64 wander = 0.0;
+    f64 window = 0.0;
+    u32 shaded = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const f64 mean = sum[i] / (f64)frames;
+        const f64 p = mean / open;
+        if (p < 0.2 || p > 0.8) {
+            continue; // open or shut: little spread to average
+        }
+        wander += sqrt(nph_f64_max(sum2[i] / (f64)frames - mean * mean, 0.0));
+        window += open * sqrt(p * (1.0 - p)) / sqrt(2.0 * 128.0 - 1.0);
+        ++shaded;
+    }
+    u32 over = 0U;
+    const u32 most = most_samples(f, &over);
+    NTEST_LOG("%u half-shaded pixels: they wander by %.3f of a 128-sample window's level; "
+              "histories of up to %u samples",
+              shaded, wander / window, most);
+    NTEST_ASSERT_GT_UINT(shaded, 1000U);
+    NTEST_EXPECT_TRUE(wander < 0.6 * window);
+    NTEST_EXPECT_EQ_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
+    NTEST_EXPECT_EQ_UINT(over, 0U);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// The same half-shaded cells while they are young: until a cell's variance has seen
+// NPH_RENDER_GI_VARIANCE_FRAMES frames the test of its light cannot trust it, so it never cuts the
+// history, which is the cell's samples as young cells' always were. A frame later, no cell holds
+// fewer samples than before (where a test of an unsettled variance cuts noisy cells' histories, and
+// leaves young cells, which a walking camera keeps making, noisier than they were).
+NTEST_F(Gi, a_young_cell_keeps_all_its_samples)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.6F);
+    static TestBoxScene scene;
+    const NphRenderMaterial black = test_grey(f, 0.0F);
+    (void)test_box_on_ground(f, &scene, test_cube_mesh(f), black, black);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(2.2F, 2.0F, 3.2F), nph_vec3(0.6F, 0.0F, 0.6F), 0.3F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, image, 8U);
+    static u32 before[SLOTS];
+    static u32 after[SLOTS];
+    read_counts(f, before);
+    NTEST_EXPECT_TRUE(test_box_render(f, &v, target, image).gi);
+    read_counts(f, after);
+    u32 grew = 0U;
+    u32 fell = 0U;
+    for (u32 i = 0; i < SLOTS; ++i) {
+        grew += after[i] > before[i] ? 1U : 0U;
+        fell += after[i] < before[i] ? 1U : 0U;
+    }
+    NTEST_LOG("a ninth frame: %u cells took samples, %u lost some", grew, fell);
+    NTEST_ASSERT_GT_UINT(grew, 500U);
+    NTEST_EXPECT_EQ_UINT(fell, 0U);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// ---------------------------------------------------------------------------
 // The keys
 // ---------------------------------------------------------------------------
 

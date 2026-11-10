@@ -1122,7 +1122,8 @@ typedef struct RenderGi {
     u32 sun_slot;                // the light whose bounce the update traces (NPH_U32_MAX: none)
     NphGpuBuffer keys;           // u32 fingerprints
     NphGpuBuffer sums;           // uvec4: this frame's samples
-    NphGpuBuffer cells;          // uvec4: irradiance, count, age
+    NphGpuBuffer cells;          // uvec4: irradiance, and its word (NPH_RENDER_GI_COUNT_BITS)
+    NphGpuBuffer moments;        // uvec4: a sample's luminance's variance, its recent mean
     NphGpuShader update_shader;  // gi_update.comp
     NphGpuShader resolve_shader; // gi_resolve.comp
     NphGpuPipeline update;
@@ -1166,6 +1167,7 @@ typedef struct RenderGi {
     NphGpuRgBuffer frame_keys;
     NphGpuRgBuffer frame_sums;
     NphGpuRgBuffer frame_cells;
+    NphGpuRgBuffer frame_moments;
     NphGpuRgBuffer frame_far_sums;
 } RenderGi;
 
