@@ -649,8 +649,8 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     f32 sum_scale;           // fixed-point units of a pre-exposed sample
     f32 near;                // update rays that hit nearer count nothing (the ambient occlusion's)
     u32 frame;               // this frame's number, for the random numbers
-    u32 jitter;              // nonzero: a lookup takes a random point of its cell (temporal
-                             // anti-aliasing averages them)
+    u32 jitter;              // nonzero (temporal anti-aliasing): a reflection cell's lookup takes
+                             // a neighbouring direction now and then, which it averages
     u32 rays_x;              // the update's samples across the target
     u32 stride;              // a sample a stride x stride block of pixels
     u32 reflect_rays;        // nonzero: each listed tile's turn every frame, rays to the image

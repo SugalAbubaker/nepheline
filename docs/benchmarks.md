@@ -497,8 +497,10 @@ spread). `benchmarks/reference_budgets.txt` is generated from
 `reference_scenes-2026-11-10-1440p`, Bistro, the city and the interior at the
 size they gate at (ADR-0082), a process a scene as the nightly runs them, and
 the temporal resolve's rows again from `reference_scenes-2026-11-10-agx`, with
-AgX the default tonemapper (ADR-0083). The landscape has no rows there: the
-nightly does not run it.
+AgX the default tonemapper (ADR-0083), and the resolve's, the transparent
+pass's and the frames' from `reference_scenes-2026-11-11-gi-blend`, with the
+radiance cache's blended lookup (ADR-0085). The landscape has no rows there:
+the nightly does not run it.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the

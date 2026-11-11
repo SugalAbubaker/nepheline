@@ -305,10 +305,10 @@ void main()
             // keys them (gi_update.comp: the same arithmetic).
             g_gi_far = 0.0;
             if (k_many) {
-                g_gi_cell = gi_surface_cell_far(GiViewRef(rview.v.gi), p, s.position,
+                g_gi_cell = gi_surface_cell_far(GiViewRef(rview.v.gi), s.position,
                                                 s.face_normal, g_gi_far);
             } else {
-                g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), p, s.position, s.face_normal);
+                g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), s.position, s.face_normal);
             }
         }
 

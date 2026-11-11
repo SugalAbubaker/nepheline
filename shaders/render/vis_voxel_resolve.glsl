@@ -108,7 +108,7 @@ void main()
     // Where its rays and lookups start: a cell's diagonal off the face.
     const vec3 lit = s.position + s.face_normal * s.offset;
     if (k_gi) {
-        g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), p, lit, s.face_normal);
+        g_gi_cell = gi_surface_cell(GiViewRef(rview.v.gi), lit, s.face_normal);
     }
     const uvec4 voxel = s.voxel;
     const vec3 albedo = nph_srgb_to_linear(unpackUnorm4x8(voxel.x).rgb);

@@ -151,8 +151,7 @@ void main()
             discard;
         }
         if (k_gi) {
-            g_gi_cell = gi_surface_cell(GiViewRef(view.v.gi), ivec2(gl_FragCoord.xy), in_position,
-                                        s.face_normal);
+            g_gi_cell = gi_surface_cell(GiViewRef(view.v.gi), in_position, s.face_normal);
         }
     }
 #endif
