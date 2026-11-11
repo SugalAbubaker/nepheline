@@ -14,7 +14,7 @@
 //
 //     and either: [--size=WxH] [--window=WxH] [--vsync] [--lists=N] [--voxel-pool=MB]
 //                 [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] [--walk=M/S]
-//                 [--frames=N]
+//                 [--frames=N] [--record=FILE]
 //
 // --size is the image drawn (2560x1440, the size the reference scenes gate at:
 // ADR-0082; 3840x2160 is CLAUDE.md §10.1's target) and --window the window
@@ -26,10 +26,14 @@
 // streams the textures' levels within that many MB (none: resident whole).
 // --tiles lays the scene out W by H times (a manifest's own `tiles` by default).
 // --walk moves the camera along its view by itself, and --frames ends the run.
+// --record writes the camera's pose to FILE each frame, a line of "x y z yaw pitch"
+// (metres and radians): the path walked, to play back where a fault was seen.
 //
 // Keys: W/A/S/D move, Q/E down and up, Shift four times as fast, the mouse wheel
 // changes the speed, the right mouse button held looks around, 1 to 9 jump to the
-// manifest's views, G logs each pass's GPU time, F11 switches between the window
+// manifest's views, G logs each pass's GPU time, X switches between the scene's
+// own exposure and one metered from the frame and adapted over time, as an eye's
+// going indoors (NPH_RENDER_EXPOSURE_AUTO), F11 switches between the window
 // and exclusive fullscreen on the monitor that holds it, at the monitor's own
 // mode (a 2560x1440 display then shows the default --size pixel for pixel),
 // Escape quits. The title gives the
@@ -143,6 +147,7 @@ typedef struct Options {
     u32 tiles_z;
     f32 walk;
     u64 max_frames;
+    const char *record; // --record: the camera's poses, a line a frame
 } Options;
 
 // The camera the keys and the mouse move.
@@ -193,6 +198,7 @@ typedef struct App {
     Fly fly;
     TitleClock title;
     NphRenderFrameStats stats;
+    bool auto_exposure; // X: metered and adapted, in place of the scene's own
 } App;
 
 // ---------------------------------------------------------------------------
@@ -207,7 +213,7 @@ static int usage(void)
                     "       and either: [--size=WxH] [--window=WxH] [--vsync] [--lists=N] "
                     "[--voxel-pool=MB]\n"
                     "                   [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] "
-                    "[--walk=M/S] [--frames=N]\n");
+                    "[--walk=M/S] [--frames=N] [--record=FILE]\n");
     return EXIT_BAD_ARGS;
 }
 
@@ -292,6 +298,8 @@ static bool parse(int argc, char **argv, Options *o)
             o->walk = strtof(v, NULL);
         } else if ((v = value_of(a, "--frames=")) != NULL) {
             o->max_frames = strtoull(v, NULL, 10);
+        } else if ((v = value_of(a, "--record=")) != NULL) {
+            o->record = v;
         } else {
             return false;
         }
@@ -587,6 +595,17 @@ static void key_event(App *app, u32 key, u32 action)
     case NPH_KEY_G:
         if (down) {
             nph_render_gpu_profiler_log(app->profiler);
+        }
+        break;
+    case NPH_KEY_X:
+        if (down) {
+            app->auto_exposure = !app->auto_exposure;
+            if (app->auto_exposure) {
+                NPH_LOG_INFO(&LOG_SAMPLE, "exposure: metered from the frame, adapting as an eye");
+            } else {
+                NPH_LOG_INFO(&LOG_SAMPLE, "exposure: the scene's own, EV100 %.1f",
+                             (f64)app->def.ev100);
+            }
         }
         break;
     case NPH_KEY_F11:
@@ -997,6 +1016,10 @@ static void run(App *app, int *status)
     const u64 start_ns = nph_time_now_ns();
     u64 last_ns = start_ns;
     u64 index = 0U;
+    FILE *record = app->opt.record != NULL ? fopen(app->opt.record, "w") : NULL;
+    if (app->opt.record != NULL && record == NULL) {
+        NPH_LOG_WARN(&LOG_SAMPLE, "cannot write %s: nothing is recorded", app->opt.record);
+    }
     while (!nph_window_should_close(app->window) && (max == 0U || index < max)) {
         handle_input(app);
         const u64 now = nph_time_now_ns();
@@ -1004,11 +1027,23 @@ static void run(App *app, int *status)
         last_ns = now;
         fly_step(&app->fly, app->opt.walk, dt);
         view.camera = fly_camera(&app->fly);
+        view.exposure = app->auto_exposure ? NPH_RENDER_EXPOSURE_AUTO : NPH_RENDER_EXPOSURE_MANUAL;
+        view.frame_seconds = dt; // the adaptation's pace
+        if (record != NULL) {
+            (void)fprintf(record, "%.6f %.6f %.6f %.7f %.7f\n", app->fly.position.x,
+                          app->fly.position.y, app->fly.position.z, (f64)app->fly.yaw,
+                          (f64)app->fly.pitch);
+        }
         if (!frame(app, &view, index, status)) {
-            return;
+            break;
         }
         title_frame(app);
         ++index;
+    }
+    if (record != NULL) {
+        (void)fclose(record);
+        NPH_LOG_INFO(&LOG_SAMPLE, "recorded %llu poses to %s", (unsigned long long)index,
+                     app->opt.record);
     }
     const f64 seconds = (f64)(nph_time_now_ns() - start_ns) / 1.0e9;
     NPH_LOG_INFO(&LOG_SAMPLE,
@@ -1058,7 +1093,8 @@ int main(int argc, char **argv)
             NPH_LOG_INFO(&LOG_SAMPLE,
                          "keys: W/A/S/D move, Q/E down and up, Shift faster, the wheel changes "
                          "the speed, hold the right mouse button to look, 1 to %u the views, "
-                         "G the passes' GPU times, F11 fullscreen, Escape quits",
+                         "G the passes' GPU times, X automatic exposure, F11 fullscreen, Escape "
+                         "quits",
                          app.def.view_count);
             run(&app, &status);
         } else {
