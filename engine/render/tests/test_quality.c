@@ -111,8 +111,8 @@ NTEST(quality, a_tier_sets_its_fields_and_leaves_the_others)
 
 // The high tier draws the boxes as the reference tier does: under a low sun and an even sky, with a
 // smooth metal box, the lit pixels' mean within 4 %. Its sun's shadows are rays where the
-// reference's are its map's, its smooth surfaces' reflections a ray a pixel, and the cache traces
-// four times the rays.
+// reference's are its map's, and the cache traces four times the rays (smooth surfaces'
+// reflections are a ray a pixel in both: ADR-0089).
 NTEST_F(Quality, the_high_tier_draws_what_the_reference_does)
 {
     REQUIRE_PRODUCTION(f);

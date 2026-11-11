@@ -169,6 +169,224 @@ NTEST_F(Reflect, a_mirror_shows_what_its_rays_meet)
     nph_render_light_destroy(f->renderer, sun);
 }
 
+// ---------------------------------------------------------------------------
+// A ray a pixel (ADR-0089)
+// ---------------------------------------------------------------------------
+
+// The mirror's scene again, its ground of the given roughness: the ground, a red wall standing on
+// it in the sun, a black sky. Returns the sun.
+static NphRenderLight wall_scene(RenderFixture *f, TestBoxScene *scene, f32 ground_roughness)
+{
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    memset(scene, 0, sizeof *scene);
+    test_box_ground(f, scene, mesh,
+                    surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, ground_roughness));
+    test_box_add(f, scene, mesh, surface(f, nph_vec3(1.0F, 0.05F, 0.05F), 0.0F, 1.0F),
+                 nph_vec3(-3.0F, 0.0F, -2.0F), nph_vec3(3.0F, 3.0F, -1.5F));
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F)); // onto the wall's face
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    return sun;
+}
+
+// A mirror takes its own ray alone: its lobe smears what it shows by less than a pixel, so the
+// pixels around it have nothing to add but a blur (reflect_gather.comp). The wall's edge in the
+// mirror is then a pixel wide: of the mirror's pixels, few are between the wall's red and the
+// sky's black: none here, where gathered two pixels out a sixth of those by the edge are.
+NTEST_F(Reflect, a_mirror_by_a_ray_a_pixel_stays_sharp)
+{
+    REQUIRE_REFLECTIONS(f);
+    static TestBoxScene scene;
+    const NphRenderLight sun = wall_scene(f, &scene, 0.05F);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_RAYS);
+    (void)settled(f, &v, target, image, 4U);
+    // The mirror's pixels whose mirror rays pass within a third of a metre of the wall's top edge
+    // (y = 3 on the plane z = -1.5), and what the wall's red is in the mirror: the mean of those
+    // whose rays meet the wall well below it.
+    static f32 near_edge[SIZE * SIZE];
+    static f32 reds[SIZE * SIZE];
+    u32 near_count = 0U;
+    u32 red_count = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = test_box_pixel_ray(&scene, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(&scene, scene.eye, d, 0.0F, &t, &n) != 0) {
+            continue;
+        }
+        const NphVec3 x = nph_vec3_add(scene.eye, nph_vec3_scale(d, t));
+        const NphVec3 r = nph_vec3_sub(d, nph_vec3_scale(n, 2.0F * nph_vec3_dot(d, n)));
+        if (r.z >= -1e-4F) {
+            continue;
+        }
+        const f32 s = (-1.5F - x.z) / r.z;
+        const f32 height = x.y + s * r.y;
+        if (s <= 0.0F || nph_f32_abs(x.x + s * r.x) > 2.5F) {
+            continue;
+        }
+        if (height > 2.65F && height < 3.35F) {
+            near_edge[near_count++] = test_box_linear(image, i);
+        } else if (height > 1.5F && height < 2.5F) {
+            reds[red_count++] = test_box_linear(image, i);
+        }
+    }
+    NTEST_ASSERT_GT_UINT(near_count, 300U);
+    NTEST_ASSERT_GT_UINT(red_count, 300U);
+    f64 red_sum = 0.0;
+    for (u32 i = 0; i < red_count; ++i) {
+        red_sum += (f64)reds[i];
+    }
+    const f32 red = (f32)(red_sum / (f64)red_count);
+    u32 between = 0U;
+    for (u32 i = 0; i < near_count; ++i) {
+        between += near_edge[i] > 0.2F * red && near_edge[i] < 0.8F * red ? 1U : 0U;
+    }
+    NTEST_LOG("the wall in the mirror %.4f; of %u pixels whose rays pass by its top edge, %u lie "
+              "between it and the sky",
+              (f64)red, near_count, between);
+    NTEST_EXPECT_TRUE(red > 0.02F);
+    NTEST_EXPECT_TRUE(between * 12U <= near_count);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
+// A ground just smooth enough for rays, whose lobe smears the wall's edge over several pixels: one
+// ray a pixel is then one sample of that smear, another each frame, and a pixel's own would differ
+// from frame to frame by most of the edge's contrast. Gathered with its neighbours' on the same
+// surface (reflect_gather.comp), two frames differ by a fraction of that.
+NTEST_F(Reflect, a_ray_a_pixel_is_gathered_with_its_neighbours)
+{
+    REQUIRE_REFLECTIONS(f);
+    static TestBoxScene scene;
+    const NphRenderLight sun = wall_scene(f, &scene, 0.22F);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 one[PIXELS];
+    static u8 next[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_RAYS);
+    (void)settled(f, &v, target, one, 8U);
+    (void)test_box_render(f, &v, target, next);
+    f64 level = 0.0;
+    f64 differ = 0.0;
+    u32 ground = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(&scene, scene.eye, test_box_pixel_ray(&scene, i), 0.0F, &t, &n) != 0) {
+            continue;
+        }
+        const f64 a = (f64)test_box_linear(one, i);
+        const f64 b = (f64)test_box_linear(next, i);
+        level += 0.5 * (a + b);
+        differ += nph_f64_abs(a - b);
+        ++ground;
+    }
+    NTEST_LOG("%u ground pixels: mean %.5f, two frames differ by %.5f a pixel (%.1f %% of it)",
+              ground, level / (f64)ground, differ / (f64)ground, 100.0 * differ / level);
+    NTEST_ASSERT_GT_UINT(ground, 4000U);
+    NTEST_EXPECT_TRUE(level > 0.0);
+    NTEST_EXPECT_TRUE(differ < 0.09 * level);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
+// A plate over the ground, both just smooth enough for rays: the plate's top shows the black sky,
+// the ground seen beside it the red wall. The plate's pixels along its outline have the ground's
+// two pixels away on the screen, but not on their plane, and take none of their light: they are as
+// dark as the plate's middle. (Taken, the wall's red would come over the outline.)
+NTEST_F(Reflect, a_ray_a_pixel_gathers_on_its_own_surface)
+{
+    REQUIRE_REFLECTIONS(f);
+    static TestBoxScene scene;
+    const NphRenderLight sun = wall_scene(f, &scene, 0.22F);
+    test_box_add(f, &scene, test_cube_mesh(f),
+                 surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, 0.22F),
+                 nph_vec3(-0.6F, 0.45F, 2.5F), nph_vec3(0.6F, 0.5F, 2.75F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_RAYS);
+    (void)settled(f, &v, target, image, 8U);
+    // Each pixel's surface: 0 the ground, 2 the plate's top, 3 anything else.
+    static u8 what[SIZE * SIZE];
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        f32 t = 0.0F;
+        NphVec3 n;
+        const i32 hit =
+            test_box_hit(&scene, scene.eye, test_box_pixel_ray(&scene, i), 0.0F, &t, &n);
+        what[i] = hit == 0 ? 0U : (hit == 2 && n.y > 0.5F ? 2U : 3U);
+    }
+    // The plate's pixels with the plate two above and two below them (the far and near edges show
+    // other parts of the scene): those with the ground within two pixels beside them, those with
+    // the plate all around, and the ground's beside the plate.
+    f64 edge = 0.0;
+    f64 middle = 0.0;
+    f64 beside = 0.0;
+    u32 edges = 0U;
+    u32 middles = 0U;
+    u32 besides = 0U;
+    for (u32 y = 2U; y + 2U < SIZE; ++y) {
+        for (u32 x = 2U; x + 2U < SIZE; ++x) {
+            const u32 i = y * SIZE + x;
+            bool column = true; // the same surface two above and below
+            for (i32 dy = -2; dy <= 2; ++dy) {
+                column = column && what[(u32)((i32)y + dy) * SIZE + x] == what[i];
+            }
+            u32 plate = 0U;
+            u32 ground = 0U;
+            for (i32 dx = -2; dx <= 2; ++dx) {
+                const u8 w = what[y * SIZE + (u32)((i32)x + dx)];
+                plate += w == 2U ? 1U : 0U;
+                ground += w == 0U ? 1U : 0U;
+            }
+            const f64 value = (f64)test_box_linear(image, i);
+            if (!column || plate + ground != 5U) {
+                continue;
+            }
+            if (what[i] == 2U && plate == 5U) {
+                middle += value;
+                ++middles;
+            } else if (what[i] == 2U) {
+                edge += value;
+                ++edges;
+            } else if (plate != 0U) {
+                beside += value;
+                ++besides;
+            }
+        }
+    }
+    NTEST_LOG(
+        "the plate: %u pixels at its sides %.5f, %u in its middle %.5f; the ground beside it, "
+        "%u pixels, %.5f",
+        edges, edges != 0U ? edge / (f64)edges : 0.0, middles,
+        middles != 0U ? middle / (f64)middles : 0.0, besides,
+        besides != 0U ? beside / (f64)besides : 0.0);
+    NTEST_ASSERT_GT_UINT(edges, 12U);
+    NTEST_ASSERT_GT_UINT(middles, 60U);
+    NTEST_ASSERT_GT_UINT(besides, 12U);
+    // The ground beside the plate shows the wall, the plate much less, and its sides no more than
+    // its middle by a twentieth of the difference.
+    const f64 contrast = beside / (f64)besides - middle / (f64)middles;
+    NTEST_EXPECT_TRUE(contrast > 0.2);
+    NTEST_EXPECT_TRUE(edge / (f64)edges < middle / (f64)middles + 0.05 * contrast);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
 // The slots of a table of `capacity` fingerprints that are taken.
 static u32 slots_taken(RenderFixture *f, NphGpuBuffer keys, u32 capacity)
 {
@@ -1101,7 +1319,7 @@ NTEST_F(Reflect, the_mode_must_be_known)
     REQUIRE_RENDERER(f);
     NphRenderView v;
     nph_render_view_default(&v, test_camera());
-    NTEST_EXPECT_EQ_INT((int)v.reflections, (int)NPH_RENDER_REFLECTIONS_CACHE);
+    NTEST_EXPECT_EQ_INT((int)v.reflections, (int)NPH_RENDER_REFLECTIONS_RAYS);
     // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     v.reflections = (NphRenderReflections)3;
     NTEST_ASSERT_EQ_INT(nph_gpu_frame_begin(f->dev), NPH_RESULT_OK);

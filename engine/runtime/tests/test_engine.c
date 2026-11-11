@@ -381,7 +381,7 @@ NTEST(Engine, views_have_bloom_and_a_manual_exposure_by_default)
     NTEST_EXPECT_NEAR_F32(view->exposure_speed, 1.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->ao_radius, 0.5F, 0.0F);
     NTEST_EXPECT_NEAR_F32(view->contact_shadow, 24.0F, 0.0F);
-    NTEST_EXPECT_EQ_INT((int)view->reflections, (int)NPH_RENDER_REFLECTIONS_CACHE);
+    NTEST_EXPECT_EQ_INT((int)view->reflections, (int)NPH_RENDER_REFLECTIONS_RAYS);
     NTEST_EXPECT_TRUE(view->gi);
     NTEST_EXPECT_TRUE(view->frame_seconds > 0.0F);
     finish(&fx);

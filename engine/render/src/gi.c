@@ -141,6 +141,11 @@ NphResult render_gi_create(NphRenderer *r)
     d.specialization_count = 1U;
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->apply));
     render_log_statistics(r, gi->apply, "reflect");
+    // And where smooth pixels take a ray a frame: their rays' light gathered (ADR-0089).
+    NPH_TRY(render_load_shader_file(r, "reflect_gather.comp", &gi->gather_shader));
+    d.shader = gi->gather_shader;
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->gather));
+    render_log_statistics(r, gi->gather, "reflect (a ray a pixel)");
     gi->capacity = cells;
     // A cell's key, sums, irradiance, far fields' sum and moments.
     NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: radiance cache: %u cells (%.1f MB), %u rays a frame",
@@ -155,7 +160,10 @@ void render_gi_destroy(NphRenderer *r)
     nph_gpu_shader_destroy(r->dev, gi->reflect_shader);
     nph_gpu_pipeline_destroy(r->dev, gi->apply);
     nph_gpu_shader_destroy(r->dev, gi->apply_shader);
+    nph_gpu_pipeline_destroy(r->dev, gi->gather);
+    nph_gpu_shader_destroy(r->dev, gi->gather_shader);
     nph_gpu_image_destroy(r->dev, gi->reflect_image);
+    nph_gpu_image_destroy(r->dev, gi->reflect_light);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_tiles);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_bits);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_want);
@@ -299,6 +307,32 @@ static NphResult ensure_reflect_image(NphRenderer *r, u32 width, u32 height)
     return NPH_RESULT_OK;
 }
 
+// What the smooth pixels' rays leave for reflect_gather.comp (ADR-0089), at the target's size: two
+// words a pixel (gi_reflect_light_pack). Never cleared: the rays write every pixel of each tile
+// they visit, and the gather reads only those tiles'.
+static NphResult ensure_reflect_light(NphRenderer *r, u32 width, u32 height)
+{
+    RenderGi *gi = &r->gi;
+    if (!nph_gpu_image_is_null(gi->reflect_light) && gi->reflect_light_width == width &&
+        gi->reflect_light_height == height) {
+        return NPH_RESULT_OK;
+    }
+    nph_gpu_image_destroy(r->dev, gi->reflect_light); // deferred past the frames in flight
+    gi->reflect_light = NPH_GPU_IMAGE_NULL;
+    NphGpuImageDesc d;
+    memset(&d, 0, sizeof d);
+    d.format = NPH_GPU_FORMAT_R32G32_UINT;
+    d.width = width;
+    d.height = height;
+    d.mip_count = 1U;
+    d.usage = (u32)NPH_GPU_IMAGE_USAGE_STORAGE;
+    d.name = "reflect light";
+    NPH_TRY(nph_gpu_image_create(r->dev, &d, &gi->reflect_light));
+    gi->reflect_light_width = width;
+    gi->reflect_light_height = height;
+    return NPH_RESULT_OK;
+}
+
 bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
                            bool production)
 {
@@ -348,8 +382,11 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
     g->reflect_rays = gi->frame_rays ? 1U : 0U;
     g->reflect_turn_bits = gi->frame_rays ? 0U : (u32)NPH_RENDER_REFLECT_TURN_BITS;
     if (gi->frame_reflect) {
-        if (ensure_reflect_image(r, width, height) != NPH_RESULT_OK) {
+        if (ensure_reflect_image(r, width, height) != NPH_RESULT_OK ||
+            (gi->frame_rays && ensure_reflect_light(r, width, height) != NPH_RESULT_OK)) {
             gi->frame_reflect = 0;
+            gi->frame_rays = 0;
+            g->reflect_rays = 0U;
         } else {
             g->reflect_image = nph_gpu_image_storage_index(r->dev, gi->reflect_image, 0U);
             g->reflect_width = (width + 7U) & ~7U;
@@ -515,9 +552,8 @@ static void reflect_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_visbuffer), 0U);
     p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_hdr), 0U);
     p.arg2 = nph_gpu_image_storage_index(r->dev, gi->reflect_image, 0U);
-    const u64 tiles = nph_gpu_buffer_address(r->dev, gi->reflect_tiles);
-    p.arg3 = (u32)tiles;
-    p.arg4 = (u32)(tiles >> 32U);
+    // (The tiles' list is the view's, NphRenderGiView.reflect_tiles.)
+    p.arg3 = gi->frame_rays ? nph_gpu_image_storage_index(r->dev, gi->reflect_light, 0U) : 0U;
     p.mode = gi->frame_width | (gi->frame_height << 16U);
     nph_gpu_cmd_bind_pipeline(cmd, gi->reflect);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
@@ -560,6 +596,24 @@ static void apply_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     p.mode = gi->frame_width | (gi->frame_height << 16U);
     p.phase = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
     nph_gpu_cmd_bind_pipeline(cmd, gi->apply);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, gi->frame_reflect_args), 0U);
+}
+
+// The rays' light gathered, where smooth pixels take a ray a frame (reflect_gather.comp).
+static void gather_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const RenderGi *gi = &r->gi;
+    NphVisPush p;
+    memset(&p, 0, sizeof p);
+    p.view = r->vis.frame.view_address;
+    p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_visbuffer), 0U);
+    p.arg1 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_hdr), 0U);
+    p.arg2 = nph_gpu_image_storage_index(r->dev, gi->reflect_image, 0U);
+    p.arg3 = nph_gpu_image_storage_index(r->dev, gi->reflect_light, 0U);
+    p.mode = gi->frame_width | (gi->frame_height << 16U);
+    nph_gpu_cmd_bind_pipeline(cmd, gi->gather);
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, gi->frame_reflect_args), 0U);
 }
@@ -640,7 +694,25 @@ NphResult render_gi_declare_reflect(NphRenderer *r, NphGpuRenderGraph *graph,
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_want, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, in->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     if (gi->frame_rays) {
-        nph_gpu_rg_write_image(p, in->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+        // A ray a smooth pixel: what each met, then every pixel's and its neighbours' gathered
+        // (ADR-0089).
+        gi->frame_reflect_light = nph_gpu_rg_import_image(graph, gi->reflect_light);
+        if (nph_gpu_rg_image_is_null(gi->frame_reflect_light)) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_write_image(p, gi->frame_reflect_light, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+        NphGpuRgPass *t = add_pass(graph, r, "reflect", NPH_GPU_RG_PASS_COMPUTE, gather_execute);
+        if (t == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_image(t, in->lut, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+        nph_gpu_rg_read_image(t, gi->frame_reflect_light, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        nph_gpu_rg_write_image(t, gi->frame_reflect_image, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+        nph_gpu_rg_read_buffer(t, gi->frame_reflect_tiles, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(t, gi->frame_reflect_bits, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(t, gi->frame_reflect_args, NPH_GPU_RG_USE_INDIRECT);
+        nph_gpu_rg_read_image(t, gi->frame_visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        nph_gpu_rg_write_image(t, in->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
         return NPH_RESULT_OK;
     }
     NphGpuRgPass *a = add_pass(graph, r, "reflect", NPH_GPU_RG_PASS_COMPUTE, apply_execute);

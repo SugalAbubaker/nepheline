@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: Apache-2.0
+// What smooth surfaces reflect where each of their pixels takes a ray a frame
+// (docs/adr/0089-reflections-a-ray-a-pixel.md): after reflect_rays.comp, which left each smooth
+// pixel's ray's light, how far the ray went and how far the pixel is (gi_reflect_light_pack), each
+// pixel takes the mean of its own and of those around it on its surface, as far out as its lobe
+// smears what it reflects on the screen, and adds that, tinted by its own surface, to the HDR image.
+//
+// One ray is one sample of the lobe, and a pixel's alone is grain wherever the lobe is wider than
+// a pixel of what it shows. The pixels around it on the same surface sampled the same lobe from
+// beside it: their light is the same reflection moved by their distance, so their mean is that of
+// more samples at the price of a blur as wide as they reach. The reach is therefore half the
+// lobe's own blur on the screen, 2 a d / ((v + d) pixel) for a roughness of a = roughness^2, a ray
+// that went d and a pixel v away, and at most REACH pixels: a mirror (a of 0) takes its own ray
+// alone and stays sharp, and so does what touches the surface (d near 0), which the lobe does not
+// blur either.
+//
+// The tile's light and a border of REACH texels come into shared memory once. A texel of another
+// tile counts only where that tile is listed this frame (its light is this frame's: a tile not
+// listed may hold what it left frames ago), and only on the pixel's plane.
+//
+// mode: the target's width | height << 16; arg0: the visibility buffer's bindless storage index;
+// arg1: the HDR image's; arg2: what the pixels left; arg3: the rays' light. A workgroup a tile.
+#version 460
+#include "vis_common.glsl"
+#include "nph_bindless_int64.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// Whether the HDR target is B10G11R11, whose coarse steps are dithered.
+layout(constant_id = 0) const bool k_dither = false;
+
+#define REACH 2
+#define SIDE  (8 + 2 * REACH)
+
+shared uint s_light[SIDE * SIDE]; // the rays' light (gi_reflect_light_pack's first word)
+shared uint s_where[SIDE * SIDE]; // and the second: 0 where no ray's light counts
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    GiViewRef g = GiViewRef(rview.v.gi);
+    const uint listed = GiKeysRef(g.g.reflect_tiles).k[gl_WorkGroupID.x];
+    const ivec2 tile = ivec2(listed & 0xFFFFu, listed >> 16u);
+    const ivec2 size = ivec2(pc.mode & 0xFFFFu, pc.mode >> 16u);
+    const ivec2 origin = tile * 8 - REACH;
+    for (uint k = gl_LocalInvocationIndex; k < uint(SIDE * SIDE); k += 64u) {
+        const ivec2 t = origin + ivec2(k % uint(SIDE), k / uint(SIDE));
+        uvec2 v = uvec2(0u);
+        if (all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, size))) {
+            const ivec2 its = t >> 3;
+            bool fresh = its == tile;
+            if (!fresh) {
+                const uint index = uint(its.y) * (g.g.reflect_width >> 3u) + uint(its.x);
+                fresh = (GiKeysRef(g.g.reflect_bits).k[index >> 5u] & (1u << (index & 31u))) != 0u;
+            }
+            if (fresh) {
+                v = imageLoad(nph_uimages_2d[pc.arg3], t).xy;
+            }
+        }
+        s_light[k] = v.x;
+        s_where[k] = v.y;
+    }
+    barrier();
+
+    const ivec2 p = tile * 8 + ivec2(gl_LocalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) {
+        return;
+    }
+    const uvec2 w = imageLoad(nph_uimages_2d[pc.arg2], p).xy;
+    if (w.y == 0u) {
+        return;
+    }
+    imageStore(nph_uimages_2d[pc.arg2], p, uvec4(0u));
+    const int centre = (int(gl_LocalInvocationID.y) + REACH) * SIDE + int(gl_LocalInvocationID.x) + REACH;
+    const vec2 own = unpackHalf2x16(s_where[centre]); // how far its ray went, how far it is
+    if (own.y <= 0.0) {
+        return; // no ray of its own this frame
+    }
+    // The point and its plane, as reflect_rays.comp had them.
+    const float depth = vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
+    const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
+    const vec4 h = rview.v.inv_view_proj * vec4(q, depth, 1.0);
+    const vec3 x = h.xyz / h.w;
+    const vec3 mirror_d = normalize(gi_reflect_direction(w.x));
+    const vec3 n = normalize(mirror_d + normalize(-x));
+    // The rays through the pixel and the ones beside and below it: a tap's is the pixel's moved by
+    // their differences.
+    const vec4 hx = rview.v.inv_view_proj * vec4(q + vec2(2.0 * view.v.viewport.z, 0.0), depth, 1.0);
+    const vec4 hy = rview.v.inv_view_proj * vec4(q + vec2(0.0, 2.0 * view.v.viewport.w), depth, 1.0);
+    const vec3 d0 = normalize(x);
+    const vec3 dx = normalize(hx.xyz / hx.w) - d0;
+    const vec3 dy = normalize(hy.xyz / hy.w) - d0;
+    const uint rough = (w.x >> 24u) & 15u;
+    const float roughness = float(rough) * (NPH_RENDER_REFLECT_MAX_ROUGHNESS / 15.0);
+    const float a = roughness * roughness;
+    // How far the lobe smears what the ray met, in pixels, and half of it the taps' reach.
+    const float smear = 2.0 * a * own.x / max((own.y + own.x) * length(dx), 1e-12);
+    const float reach = min(0.5 * smear, float(REACH));
+    vec3 sum = gi_reflect_light(s_light[centre]);
+    float total = 1.0;
+    if (reach >= 0.5) {
+        const float falloff = 1.0 / (2.0 * 0.36 * reach * reach); // a Gaussian of 0.6 of the reach
+        const float plane = dot(n, x);
+        const int taps = reach > 1.0 ? 2 : 1;
+        for (int j = -taps; j <= taps; ++j) {
+            for (int i = -taps; i <= taps; ++i) {
+                const int at = centre + j * SIDE + i;
+                const vec2 its = unpackHalf2x16(s_where[at]);
+                if ((i == 0 && j == 0) || its.y <= 0.0) {
+                    continue;
+                }
+                // On the pixel's plane: where the tap's ray meets it, against where its surface is.
+                const vec3 dq = normalize(d0 + dx * float(i) + dy * float(j));
+                const float facing = dot(n, dq);
+                if (abs(facing) < 1e-4 || abs(plane / facing - its.y) > 0.01 * its.y) {
+                    continue;
+                }
+                const float weight = exp(-float(i * i + j * j) * falloff);
+                sum += gi_reflect_light(s_light[at]) * weight;
+                total += weight;
+            }
+        }
+    }
+    // What it shows of that: its energy from the lookup table, as reflect_rays.comp tinted its ray.
+    const float nov = clamp(dot(mirror_d, n), 1e-4, 1.0);
+    const vec2 dfg = textureLod(sampler2D(nph_textures_2d[nonuniformEXT(rview.v.brdf_lut_index)],
+                                          nph_samplers[nonuniformEXT(rview.v.clamp_sampler)]),
+                                vec2(nov, roughness), 0.0).xy;
+    const vec3 base = gi_reflect_specular(w.y);
+    const vec3 tint = base * dfg.x + (vec3(1.0) - base) * dfg.y;
+    vec3 color = imageLoad(nph_images_2d[nonuniformEXT(pc.arg1)], p).rgb + tint * (sum / total);
+    color = min(color, vec3(NPH_RENDER_HALF_MAX));
+    if (k_dither) {
+        color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));
+    }
+    imageStore(nph_images_2d[nonuniformEXT(pc.arg1)], p, vec4(color, 1.0));
+}

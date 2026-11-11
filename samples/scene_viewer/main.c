@@ -33,7 +33,8 @@
 // changes the speed, the right mouse button held looks around, 1 to 9 jump to the
 // manifest's views, G logs each pass's GPU time, X switches between the scene's
 // own exposure and one metered from the frame and adapted over time, as an eye's
-// going indoors (NPH_RENDER_EXPOSURE_AUTO), F11 switches between the window
+// going indoors (NPH_RENDER_EXPOSURE_AUTO), R switches smooth surfaces' reflections
+// between a ray a pixel, the default, and their cells (ADR-0089), F11 switches between the window
 // and exclusive fullscreen on the monitor that holds it, at the monitor's own
 // mode (a 2560x1440 display then shows the default --size pixel for pixel),
 // Escape quits. The title gives the
@@ -199,6 +200,7 @@ typedef struct App {
     TitleClock title;
     NphRenderFrameStats stats;
     bool auto_exposure; // X: metered and adapted, in place of the scene's own
+    bool reflect_cells; // R: smooth surfaces take their cells, in place of a ray a pixel
 } App;
 
 // ---------------------------------------------------------------------------
@@ -606,6 +608,13 @@ static void key_event(App *app, u32 key, u32 action)
                 NPH_LOG_INFO(&LOG_SAMPLE, "exposure: the scene's own, EV100 %.1f",
                              (f64)app->def.ev100);
             }
+        }
+        break;
+    case NPH_KEY_R:
+        if (down) {
+            app->reflect_cells = !app->reflect_cells;
+            NPH_LOG_INFO(&LOG_SAMPLE, "reflections: %s",
+                         app->reflect_cells ? "the reflection cells" : "a ray a smooth pixel");
         }
         break;
     case NPH_KEY_F11:
@@ -1029,6 +1038,8 @@ static void run(App *app, int *status)
         view.camera = fly_camera(&app->fly);
         view.exposure = app->auto_exposure ? NPH_RENDER_EXPOSURE_AUTO : NPH_RENDER_EXPOSURE_MANUAL;
         view.frame_seconds = dt; // the adaptation's pace
+        view.reflections =
+            app->reflect_cells ? NPH_RENDER_REFLECTIONS_CACHE : NPH_RENDER_REFLECTIONS_RAYS;
         if (record != NULL) {
             (void)fprintf(record, "%.6f %.6f %.6f %.7f %.7f\n", app->fly.position.x,
                           app->fly.position.y, app->fly.position.z, (f64)app->fly.yaw,
@@ -1093,7 +1104,8 @@ int main(int argc, char **argv)
             NPH_LOG_INFO(&LOG_SAMPLE,
                          "keys: W/A/S/D move, Q/E down and up, Shift faster, the wheel changes "
                          "the speed, hold the right mouse button to look, 1 to %u the views, "
-                         "G the passes' GPU times, X automatic exposure, F11 fullscreen, Escape "
+                         "G the passes' GPU times, X automatic exposure, R reflections from cells, "
+                         "F11 fullscreen, Escape "
                          "quits",
                          app.def.view_count);
             run(&app, &status);

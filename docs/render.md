@@ -2462,7 +2462,9 @@ split-sum's specular multiplies is, by the surface's roughness:
   resolve. With many lights the cell also holds their far fields' direct light, whose specular their
   reservoirs give ("Many lights"): that share of the cell stays out, and the rest is taken
   ([ADR-0078](adr/0078-local-lights-shadows.md)).
-- **Smooth** (under 0.25): a reflection cell, of a table of its own (`gi_cells` slots too, freed
+- **Smooth** (under 0.25): by default a ray a pixel every frame, gathered with its neighbours'
+  ("A ray a pixel", below; [ADR-0089](adr/0089-reflections-a-ray-a-pixel.md)). Or, with
+  `NPH_RENDER_REFLECTIONS_CACHE`, a reflection cell, of a table of its own (`gi_cells` slots too, freed
   16 frames after a pixel last looked it up, ADR-0087): the same grid four times finer, for each direction of an octahedral map
   whose bins are as wide as the surface's lobe, 1.6 degrees for the smoothest, and so what lies along
   the surface's mirror direction, in the world, whatever the camera does. A pixel's cell is the same
@@ -2502,8 +2504,29 @@ the pixel's tile, as for the voxel resolve. Then, over the tiles listed:
 
 A blended surface starts no ray: smooth, it takes that same fallback in forward shading.
 
-`NPH_RENDER_REFLECTIONS_RAYS` gives smooth surfaces a ray a pixel every frame in place of their cells:
-sharp, noisy until the temporal resolve averages it, at many times the cost. With the roughness limit
+**A ray a pixel** (`NPH_RENDER_REFLECTIONS_RAYS`, the default; [ADR-0089](adr/0089-reflections-a-ray-a-pixel.md)).
+A cell is a dozen pixels across and a direction's, so what glass shows from cells is a mosaic of them, which
+every step of the camera rearranges; and a table of them fills while it moves. A ray from every smooth pixel
+every frame has neither fault:
+
+- **`reflect rays`** then gives every listed tile its turn every frame. Each smooth pixel's ray takes a sample
+  of its lobe from interleaved gradient noise moved each frame (Jimenez 2014), and leaves its light, how far
+  it went and how far the pixel is in an image of its own (`gi_reflect_light_pack`, 8 bytes a pixel); a pixel
+  of the tile without a ray leaves a zero. What the ray meets is textured at the width the ray stands for
+  there (`hit_radiance`'s `footprint`), not at a cell's.
+- **`reflect`** is then `reflect_gather.comp`: each smooth pixel takes the mean of its own ray's light and of
+  those around it on its surface, Gaussian weighted, and adds it tinted by its own surface. The pixels around
+  it sampled the same lobe from beside it, so their light is more samples at the price of a blur as wide as
+  they reach: the reach is half the lobe's own blur on the screen, `2 a d / ((v + d) pixel)` for a roughness
+  squared of `a`, a ray that went `d` and a pixel `v` away, and at most 2 pixels. A mirror takes its own ray
+  alone and is sharp to the pixel. A neighbour counts only on the pixel's plane (an object's reflection does
+  not cross its outline) and only in a tile listed this frame. The tile's light and a border of 2 texels come
+  into shared memory once.
+
+Two still frames of a ground of roughness 0.22 mirroring a wall's edge differ by 24.7 % of the ground's mean a
+pixel with each pixel's own ray, and by 4.5 % gathered. Against the cells it costs 0.5 to 1.9 ms a frame at
+2560 x 1440 where the view is smooth (the city's street 3.98 -> 4.52 ms, its rooftop 6.08 -> 7.92, Bistro's
+terrace 4.79 -> 6.14), and nothing in the interior. With the roughness limit
 raised in a build of its own it gives every surface's, which averaged over frames (render_perf
 `--reflections=2 --accumulate=N`) is the truth the cache was measured against
 ([ADR-0077](adr/0077-reflections.md)).
@@ -2790,13 +2813,14 @@ command sets the cvars that stand for them (runtime.md "Quality tiers").
 | | `NPH_RENDER_QUALITY_REFERENCE` (the default) | `NPH_RENDER_QUALITY_HIGH` |
 |---|---|---|
 | The sun's shadows (`vis_flags`' `RT_SHADOWS`) | its virtual shadow map, with contact shadows | a ray a pixel: the truth the map is measured against |
-| `reflections` | `CACHE`: smooth surfaces take reflection cells | `RAYS`: a ray a smooth pixel every frame |
+| `reflections` | `RAYS`: a ray a smooth pixel every frame, gathered (ADR-0089) | the same |
 | `gi_rays` | 0, the renderer's 65,536 | 262,144: new cells fill four times sooner |
 
 The reference tier is what the RTX 3060 Ti holds at 144 FPS at native 4K (ADR-0067), and what
 the reference scenes' gates measure. The high tier is for GPUs with rays to spare: on the
-reference hardware it costs 4.6 to 6.9 ms more a frame on Bistro, 1.0 to 1.9 in the city and
-0.3 to 0.5 in the interior, at native 4K. The many lights' reservoirs stay as they are in
+reference hardware it cost 4.6 to 6.9 ms more a frame on Bistro, 1.0 to 1.9 in the city and
+0.3 to 0.5 in the interior, at native 4K, while its reflections were not yet the reference
+tier's too (ADR-0089), which is some of that. The many lights' reservoirs stay as they are in
 both: for all the light (`NPH_RENDER_RESTIR_ALL`) they are sharper and steadier, but darker
 than the truth in Bistro (ADR-0079).
 

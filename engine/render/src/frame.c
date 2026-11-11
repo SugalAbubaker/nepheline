@@ -153,22 +153,21 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->lod_error = 1.0F;
     view->many_restir = NPH_RENDER_RESTIR_SPECULAR;
     view->contact_shadow = 24.0F;
-    view->reflections = NPH_RENDER_REFLECTIONS_CACHE;
+    view->reflections = NPH_RENDER_REFLECTIONS_RAYS; // ADR-0089
 }
 
 // The tiers' fields (ADR-0079). The reference tier's are nph_render_view_default's.
 void nph_render_view_quality(NphRenderView *view, NphRenderQuality quality)
 {
     NPH_ASSERT(view != NULL);
-    view->reflections = NPH_RENDER_REFLECTIONS_CACHE;
+    // Smooth surfaces' reflections by a ray a pixel in both (ADR-0089).
+    view->reflections = NPH_RENDER_REFLECTIONS_RAYS;
     view->vis_flags &= ~(u32)NPH_RENDER_VIS_RT_SHADOWS;
     view->gi_rays = 0U;
     if (quality == NPH_RENDER_QUALITY_REFERENCE) {
         return;
     }
-    // The sun's shadows by rays (ADR-0032), smooth surfaces' reflections by a ray a pixel
-    // (ADR-0077), and four times the cache's rays.
-    view->reflections = NPH_RENDER_REFLECTIONS_RAYS;
+    // The sun's shadows by rays (ADR-0032), and four times the cache's rays.
     view->vis_flags |= (u32)NPH_RENDER_VIS_RT_SHADOWS;
     view->gi_rays = 4U * 65536U;
 }

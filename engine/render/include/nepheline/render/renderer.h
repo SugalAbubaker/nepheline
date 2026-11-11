@@ -985,10 +985,13 @@ typedef enum NphRenderReflections {
     // The environment's light as if nothing hid the sky.
     NPH_RENDER_REFLECTIONS_OFF = 0,
     // Smooth surfaces take cells that hold what they reflect by direction, filled by rays; others
-    // the light their irradiance cell has gathered.
+    // the light their irradiance cell has gathered. A cell is a dozen pixels across and a
+    // direction's: what it shows is a mosaic of them, which a moving camera rearranges (ADR-0089).
     NPH_RENDER_REFLECTIONS_CACHE,
-    // Smooth surfaces by a ray a pixel, every frame, sharp and with their noise for the temporal
-    // resolve to average, at many times the cost: for GPUs with rays to spare.
+    // Smooth surfaces by a ray a pixel, every frame, each pixel's gathered with its neighbours'
+    // on its surface as far as its lobe smears what it shows (ADR-0089): the default. A mirror is
+    // sharp to the pixel. It costs 0.5 to 1.9 ms more a frame than the cells at 2560 x 1440 on the
+    // reference hardware, the more the more of the view is smooth.
     NPH_RENDER_REFLECTIONS_RAYS,
 } NphRenderReflections;
 
@@ -1006,8 +1009,8 @@ typedef enum NphRenderQuality {
     // fields.
     NPH_RENDER_QUALITY_REFERENCE = 0,
     // For GPUs with rays to spare: the sun's shadows by a ray a pixel (the truth its map is
-    // measured against), smooth surfaces' reflections by a ray a pixel every frame, and four times
-    // the radiance cache's rays. On the reference hardware, 0.3 to 7 ms more a frame at 4K.
+    // measured against) and four times the radiance cache's rays. (Smooth surfaces' reflections
+    // are a ray a pixel in both tiers: ADR-0089.)
     NPH_RENDER_QUALITY_HIGH = 1,
 } NphRenderQuality;
 #define NPH_RENDER_QUALITY_COUNT 2U
@@ -1024,7 +1027,8 @@ typedef struct NphRenderView {
     NphRenderDebugView debug_view;
     b32 disable_ibl;
     b32 disable_many_lights; // this view draws without NphRenderManyLight
-    // What surfaces reflect (ADR-0077). nph_render_view_default: NPH_RENDER_REFLECTIONS_CACHE.
+    // What surfaces reflect (ADR-0077). nph_render_view_default: NPH_RENDER_REFLECTIONS_RAYS
+    // (ADR-0089).
     NphRenderReflections reflections;
     // How far a pixel looks towards the sun through the depths for what its shadow map is too
     // coarse to show, in pixels' widths at its distance, as the map's texels are (0: not at all;

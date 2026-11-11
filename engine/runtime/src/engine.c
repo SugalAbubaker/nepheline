@@ -131,7 +131,7 @@ static const NPH_CVAR_BOOL(k_dof, "r.dof", 1, "depth of field through the camera
 static const NPH_CVAR_FLOAT(k_ao, "r.ao", 0.5, 0.0, 8.0,
                             "the ambient occlusion's radius in metres (0: none; production)",
                             NPH_CVAR_FLAG_SAVED);
-static const NPH_CVAR_INT(k_reflections, "r.reflections", NPH_RENDER_REFLECTIONS_CACHE,
+static const NPH_CVAR_INT(k_reflections, "r.reflections", NPH_RENDER_REFLECTIONS_RAYS,
                           NPH_RENDER_REFLECTIONS_OFF, NPH_RENDER_REFLECTIONS_RAYS,
                           "what surfaces reflect: 0 the sky as if nothing hid it, 1 what the "
                           "radiance cache gathers, 2 smooth ones by a ray a pixel (production; ray "

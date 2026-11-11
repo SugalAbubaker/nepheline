@@ -38,8 +38,10 @@ vec4 material_texel(uint tex, uint smp, vec2 uv, float lod)
                       uv, lod + 0.5 * log2(dim.x * dim.y));
 }
 
-// The radiance leaving the ray query's committed hit back along `w`.
-vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, vec3 w)
+// The radiance leaving the ray query's committed hit back along `w`. Its textures are read at the
+// level whose texels are `footprint` wide there, the width the ray stands for (ADR-0089); 0: the
+// size of the hit's cell, for a ray that fills one.
+vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, vec3 w, float footprint)
 {
     // The hit's triangle: the instance its record names (the custom index
     // is the slot), the submesh its geometry is, the triangle in that.
@@ -83,7 +85,7 @@ vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
     // "Shaders"), textures at the level the hit's cell resolves.
     const uint mi = vis_instance_material(view, inst, sub.x);
     MaterialsRef materials = MaterialsRef(view.v.materials);
-    const float cell = gi_cell_size(g, gi_level(length(x)));
+    const float cell = footprint > 0.0 ? footprint : gi_cell_size(g, gi_level(length(x)));
     const vec2 duv1 = uvs[1] - uvs[0];
     const vec2 duv2 = uvs[2] - uvs[0];
     const float uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x);

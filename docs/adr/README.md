@@ -94,6 +94,7 @@ supersedes it and both link to each other.
 | [0086](0086-reflection-cells-own-direction.md) | A smooth pixel's reflection cell is the same every frame | Accepted |
 | [0087](0087-motion.md) | The radiance cache in motion: new cells start from their neighbours, and reflections are refilled | Accepted |
 | [0088](0088-alpha-tested-casters.md) | Alpha-tested surfaces cast, and stop rays, as they are drawn | Accepted |
+| [0089](0089-reflections-a-ray-a-pixel.md) | Smooth surfaces reflect by a ray a pixel, gathered with their neighbours' | Accepted |
 
 ## Template
 

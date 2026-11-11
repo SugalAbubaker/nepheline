@@ -1139,7 +1139,14 @@ typedef struct RenderGi {
     NphGpuPipeline reflect;
     NphGpuShader apply_shader; // reflect.comp
     NphGpuPipeline apply;
-    NphGpuImage reflect_image;  // what smooth pixels leave for reflect.comp
+    NphGpuShader gather_shader; // reflect_gather.comp (ADR-0089)
+    NphGpuPipeline gather;
+    NphGpuImage reflect_image; // what smooth pixels leave for reflect.comp
+    // What each smooth pixel's ray met, where they take a ray a frame (ADR-0089): made with the
+    // first such frame at the target's size.
+    NphGpuImage reflect_light;
+    u32 reflect_light_width;
+    u32 reflect_light_height;
     NphGpuBuffer reflect_tiles; // the tiles holding such a pixel
     NphGpuBuffer reflect_bits;
     NphGpuBuffer reflect_args;
@@ -1162,6 +1169,7 @@ typedef struct RenderGi {
     u32 reflect_height;
     b32 reflect_clear;
     NphGpuRgImage frame_reflect_image;
+    NphGpuRgImage frame_reflect_light;
     NphGpuRgImage frame_hdr;
     b32 frame_active;
     b32 frame_reflect; // the frame's smooth surfaces take reflection cells

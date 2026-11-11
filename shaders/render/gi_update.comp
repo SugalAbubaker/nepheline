@@ -182,7 +182,7 @@ void main()
         if (rayQueryGetIntersectionTEXT(rq, true) < g.g.near) {
             return; // the ambient occlusion's range
         }
-        radiance = hit_radiance(view, rview, g, rq, w);
+        radiance = hit_radiance(view, rview, g, rq, w, 0.0);
     }
 
     vec3 irradiance = radiance * NPH_PI;

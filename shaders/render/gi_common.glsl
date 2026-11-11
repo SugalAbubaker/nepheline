@@ -366,6 +366,32 @@ vec3 gi_reflect_direction(uint w)
     return r;
 }
 
+// What a smooth pixel's ray leaves for reflect_gather.comp (ADR-0089): the light it met, pre-exposed,
+// as three 9-bit mantissas under one 5-bit exponent (the layout of
+// VK_FORMAT_E5B9G9R9_UFLOAT_PACK32), and as two half floats how far the ray went and how far the
+// pixel is from the camera, the second above zero: a word of zero is a pixel with no ray.
+uvec2 gi_reflect_light_pack(vec3 light, float ray, float distance)
+{
+    const vec3 c = clamp(light, vec3(0.0), vec3(65408.0));
+    const float top = max(max(c.r, c.g), max(c.b, 1e-12));
+    int e = max(-16, int(floor(log2(top)))) + 16;
+    float unit = exp2(float(e - 24));
+    if (uint(top / unit + 0.5) == 512u) {
+        unit *= 2.0;
+        e += 1;
+    }
+    const uvec3 m = uvec3(c / unit + 0.5);
+    return uvec2((uint(e) << 27u) | (m.b << 18u) | (m.g << 9u) | m.r,
+                 packHalf2x16(vec2(min(ray, 60000.0), clamp(distance, 1e-3, 60000.0))));
+}
+
+// The light that a pack holds.
+vec3 gi_reflect_light(uint w)
+{
+    return vec3(float(w & 0x1FFu), float((w >> 9u) & 0x1FFu), float((w >> 18u) & 0x1FFu)) *
+           exp2(float(int(w >> 27u) - 24));
+}
+
 // The cache's light at the surface point `p` (camera relative) whose geometric normal `n` faces the
 // camera (ADR-0085): the four cells nearest it across the axis the surface faces most, weighted
 // bilinearly by where `p` lies between their centres, each taken in the layer of cells the
