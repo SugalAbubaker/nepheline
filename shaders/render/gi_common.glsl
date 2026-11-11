@@ -88,36 +88,67 @@ uint gi_octant(vec3 n)
     return (n.x > -1e-3 ? 1u : 0u) | (n.y > -1e-3 ? 2u : 0u) | (n.z > -1e-3 ? 4u : 0u);
 }
 
+// The key of the cell at `c` (in the world: the level's camera cell added) of level `level`, for
+// the surfaces in it that face octant `octant`.
+uint64_t gi_cell_key(ivec3 c, int level, uint octant)
+{
+    const uint m = 0x1FFFFu;
+    return uint64_t(uint(c.x) & m) | (uint64_t(uint(c.y) & m) << 17ul) |
+           (uint64_t(uint(c.z) & m) << 34ul) | (uint64_t(level) << 51ul) |
+           (uint64_t(octant) << 56ul);
+}
+
+// The camera's cell at `level`.
+ivec3 gi_camera_cell(GiViewRef g, int level)
+{
+    // Read field by field: a level holds an array (docs/build.md "Shaders").
+    return ivec3(uvec3(g.g.levels[level].cell[0], g.g.levels[level].cell[1],
+                       g.g.levels[level].cell[2]));
+}
+
 // The key of the cell holding the camera-relative point `p` on a surface
 // whose geometric normal is `n`. The point is taken half a cell out along
 // the normal: a surface on a cell's face (a floor at y = 0, which the
 // cells' powers of two align with) would otherwise fall either side of it
-// as its points' rounding goes, and lookups (jittered, or another frame's
+// as its points' rounding goes, and lookups (blended, or another frame's
 // pixels) would miss the cells the update filled.
 uint64_t gi_key(GiViewRef g, vec3 p, vec3 n)
 {
     const int level = gi_level(length(p));
-    // Read field by field: a level holds an array (docs/build.md "Shaders").
     const vec4 origin = g.g.levels[level].origin;
-    const ivec3 camera = ivec3(uvec3(g.g.levels[level].cell[0], g.g.levels[level].cell[1],
-                                     g.g.levels[level].cell[2]));
-    const ivec3 c = camera + ivec3(floor((p + 0.5 * origin.w * n + origin.xyz) / origin.w));
-    const uint m = 0x1FFFFu;
-    return uint64_t(uint(c.x) & m) | (uint64_t(uint(c.y) & m) << 17ul) |
-           (uint64_t(uint(c.z) & m) << 34ul) | (uint64_t(level) << 51ul) |
-           (uint64_t(gi_octant(n)) << 56ul);
+    const ivec3 c =
+        gi_camera_cell(g, level) + ivec3(floor((p + 0.5 * origin.w * n + origin.xyz) / origin.w));
+    return gi_cell_key(c, level, gi_octant(n));
 }
 
-// MurmurHash3's 64-bit finaliser (Appleby): every bit of the key moves
-// every bit of the hash.
+// Uniform random numbers from a 3D integer hash (Jarzynski & Olano, "Hash
+// Functions for GPU Rendering", JCGT 2020: pcg3d).
+uvec3 gi_pcg3d(uvec3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+vec3 gi_random(uvec3 seed)
+{
+    return vec3(gi_pcg3d(seed) >> 8u) * (1.0 / 16777216.0);
+}
+
+// A key's hash: its two words, and a constant, through pcg3d, whose first two words make the
+// bucket (low) and the fingerprint (high). Every bit of the key moves every bit of the hash, with
+// 32-bit multiplies; MurmurHash3's 64-bit finaliser, which this replaced (ADR-0085), took 64-bit
+// ones, which a GPU makes of several 32-bit ones, and the blended lookup hashes four keys a pixel.
 uint64_t gi_mix(uint64_t k)
 {
-    k ^= k >> 33ul;
-    k *= 0xff51afd7ed558ccdul;
-    k ^= k >> 33ul;
-    k *= 0xc4ceb9fe1a85ec53ul;
-    k ^= k >> 33ul;
-    return k;
+    const uvec3 h = gi_pcg3d(uvec3(uint(k), uint(k >> 32ul), 0x9E3779B9u));
+    return uint64_t(h.x) | (uint64_t(h.y) << 32ul);
 }
 
 // The first slot of a key's bucket, and the fingerprint its slot holds
@@ -213,23 +244,6 @@ vec3 gi_irradiance(GiViewRef g, vec3 p, vec3 n, vec3 fallback)
     return mix(fallback, c.rgb, c.w);
 }
 
-// A random point of the cell around `p` in the plane of normal `n` (u: two
-// uniform numbers): looked up there instead of at p, a cell's irradiance
-// blends into its neighbours' over frames (Binder et al.'s jittered
-// hashing), where a fixed point would show the cells' edges.
-vec3 gi_jitter(GiViewRef g, vec3 p, vec3 n, vec2 u)
-{
-    const float size = gi_cell_size(g, gi_level(length(p)));
-    // A frame around n (Duff et al., "Building an Orthonormal Basis,
-    // Revisited", JCGT 2017).
-    const float s = n.z >= 0.0 ? 1.0 : -1.0;
-    const float a = -1.0 / (s + n.z);
-    const float b = n.x * n.y * a;
-    const vec3 t = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
-    const vec3 bt = vec3(b, s + n.y * n.y * a, -n.y);
-    return p + size * ((u.x - 0.5) * t + (u.y - 0.5) * bt);
-}
-
 // A direction on an octahedral map, 12 bits an axis.
 uvec2 gi_reflect_oct(vec3 r)
 {
@@ -293,61 +307,83 @@ vec3 gi_reflect_direction(uint w)
     return r;
 }
 
-// Uniform random numbers from a 3D integer hash (Jarzynski & Olano, "Hash
-// Functions for GPU Rendering", JCGT 2020: pcg3d).
-uvec3 gi_pcg3d(uvec3 v)
+// The cache's light at the surface point `p` (camera relative) whose geometric normal `n` faces the
+// camera (ADR-0085): the four cells nearest it across the axis the surface faces most, weighted
+// bilinearly by where `p` lies between their centres, each taken in the layer of cells the
+// surface's plane crosses at its centre (so a wall or a floor blends its cells exactly, and a slope
+// near enough), and weighted by how far it is trusted. A cell the cache does not hold (past the
+// surface's edge, say) drops out, its weight shared among the others, so an edge does not fade to
+// the sky. `w` is the trust the cells found have between them (0: none found); `far` the share of
+// the light that is the many lights' far fields (ADR-0078). Where a fixed point would show the
+// cells' edges, and a random point of the cell each frame (Binder et al.'s jittered hashing, which
+// this replaced) the cells' differences as noise that temporal anti-aliasing must average, the
+// blend is smooth and the same every frame. (One loop, inline: split into helpers, or its lookups
+// shared across the subgroup, the resolve that calls it took more registers and ran slower.)
+vec4 gi_surface_blend(GiViewRef g, vec3 p, vec3 n, out float far)
 {
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * v.z;
-    v.y += v.z * v.x;
-    v.z += v.x * v.y;
-    v ^= v >> 16u;
-    v.x += v.y * v.z;
-    v.y += v.z * v.x;
-    v.z += v.x * v.y;
-    return v;
+    const int level = gi_level(length(p));
+    const vec4 origin = g.g.levels[level].origin;
+    const ivec3 camera = gi_camera_cell(g, level);
+    // The point in the level's cells, half a cell out along the normal, as the keys take it.
+    const vec3 x = (p + 0.5 * origin.w * n + origin.xyz) / origin.w;
+    // Turned so that z is the axis the surface faces most and x and y the two across it (as
+    // swizzles: a vector indexed at run time goes to local memory).
+    const vec3 an = abs(n);
+    const uint k = an.x >= an.y ? (an.x >= an.z ? 0u : 2u) : (an.y >= an.z ? 1u : 2u);
+    const vec3 xt = k == 0u ? x.yzx : (k == 1u ? x.zxy : x);
+    const vec3 nt = k == 0u ? n.yzx : (k == 1u ? n.zxy : n);
+    const vec2 across = xt.xy - 0.5;
+    const vec2 base = floor(across);
+    const vec2 t = across - base;
+    const uint octant = gi_octant(n);
+    const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
+    vec3 sum = vec3(0.0);
+    float trusted = 0.0;
+    float found = 0.0;
+    float far_sum = 0.0;
+    float lum_sum = 0.0;
+    for (int c = 0; c < 4; ++c) {
+        const vec2 o = vec2(float(c & 1), float(c >> 1));
+        // Along the axis the surface faces, its plane at this cell's centre (|nt.z| >= 1 / sqrt 3).
+        const vec2 centre = base + o + 0.5;
+        const float along = xt.z - dot(nt.xy, centre - xt.xy) / nt.z;
+        const ivec3 turned = ivec3(ivec2(base + o), int(floor(along)));
+        const ivec3 cell = k == 0u ? turned.zxy : (k == 1u ? turned.yzx : turned);
+        const uint slot = gi_find(g, gi_cell_key(camera + cell, level, octant));
+        if (slot != GI_NONE) {
+            const uvec4 cw = GiCellsRef(g.g.cells).c[slot];
+            const vec3 e = uintBitsToFloat(cw.xyz);
+            const float weight = (c & 1) != 0 ? t.x : 1.0 - t.x;
+            const float bilinear = weight * ((c >> 1) != 0 ? t.y : 1.0 - t.y);
+            const float wt = bilinear * min(float(gi_word_count(cw.w)) * (1.0 / 16.0), 1.0);
+            sum += e * wt;
+            trusted += wt;
+            found += bilinear;
+            const float l = dot(e, lum) * wt;
+            far_sum += gi_word_far_share(cw.w) * l;
+            lum_sum += l;
+        }
+    }
+    far = lum_sum > 0.0 ? far_sum / lum_sum : 0.0;
+    return trusted > 0.0 ? vec4(sum / trusted, trusted / found) : vec4(0.0);
 }
 
-vec3 gi_random(uvec3 seed)
+// The cache's light at the surface point `p` (camera relative) of geometric normal `face` (either
+// way round: the cells are keyed by the side the camera sees, as the update keys them), blended
+// from the cells around it (gi_surface_blend): irradiance and trust, zero where the cache has
+// none. The resolves look their pixels up with it (vis_resolve.glsl, vis_voxel_resolve.glsl), and
+// the forward pass its blended surfaces' (forward_frag.glsl).
+vec4 gi_surface_cell(GiViewRef g, vec3 p, vec3 face)
 {
-    return vec3(gi_pcg3d(seed) >> 8u) * (1.0 / 16777216.0);
+    float far;
+    return gi_surface_blend(g, p, dot(face, p) > 0.0 ? -face : face, far);
 }
 
-// The cache's cell holding the surface point `p` (camera relative) of
-// geometric normal `face` (either way round: the cells are keyed by the
-// side the camera sees, as the update keys them), at a random point of the
-// cell under temporal anti-aliasing, which averages them (gi_jitter): its
-// irradiance and trust (gi_cell), zero where the cache has none. The
-// resolves look their pixels up with it (vis_resolve.glsl,
-// vis_voxel_resolve.glsl).
-vec4 gi_surface_cell(GiViewRef g, ivec2 pixel, vec3 p, vec3 face)
+// The same, and the light's share that is the many lights' far fields in `far` (0 where the cache
+// has none).
+vec4 gi_surface_cell_far(GiViewRef g, vec3 p, vec3 face, out float far)
 {
-    const vec3 n = dot(face, p) > 0.0 ? -face : face;
-    vec3 at = p;
-    if (g.g.jitter != 0u) {
-        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
-    }
-    const uint slot = gi_find(g, gi_key(g, at, n));
-    return slot == GI_NONE ? vec4(0.0) : gi_cell(g, slot);
-}
-
-// The same, and the cell's share of the many lights' far fields in `far` (gi_cell_far; 0 where
-// there is no cell).
-vec4 gi_surface_cell_far(GiViewRef g, ivec2 pixel, vec3 p, vec3 face, out float far)
-{
-    const vec3 n = dot(face, p) > 0.0 ? -face : face;
-    vec3 at = p;
-    if (g.g.jitter != 0u) {
-        at = gi_jitter(g, p, n, gi_random(uvec3(uvec2(pixel), g.g.frame)).xy);
-    }
-    const uint slot = gi_find(g, gi_key(g, at, n));
-    if (slot == GI_NONE) {
-        far = 0.0;
-        return vec4(0.0);
-    }
-    const uvec4 c = GiCellsRef(g.g.cells).c[slot]; // gi_cell and gi_cell_far, from one load
-    far = gi_word_far_share(c.w);
-    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) * (1.0 / 16.0), 1.0));
+    return gi_surface_blend(g, p, dot(face, p) > 0.0 ? -face : face, far);
 }
 
 // What the point `p` (camera relative) reflects along the direction `d`: the radiance of its

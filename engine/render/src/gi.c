@@ -690,10 +690,98 @@ u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n)
 
 u64 render_gi_mix(u64 k)
 {
-    k ^= k >> 33U;
-    k *= 0xff51afd7ed558ccdULL;
-    k ^= k >> 33U;
-    k *= 0xc4ceb9fe1a85ec53ULL;
-    k ^= k >> 33U;
-    return k;
+    // pcg3d (Jarzynski & Olano, JCGT 2020) of the key's two words and a constant, as
+    // gi_common.glsl's gi_mix: unsigned arithmetic wraps as the shader's does.
+    u32 v[3] = {(u32)k, (u32)(k >> 32U), 0x9E3779B9U};
+    for (u32 i = 0; i < 3U; ++i) {
+        v[i] = v[i] * 1664525U + 1013904223U;
+    }
+    v[0] += v[1] * v[2];
+    v[1] += v[2] * v[0];
+    v[2] += v[0] * v[1];
+    for (u32 i = 0; i < 3U; ++i) {
+        v[i] ^= v[i] >> 16U;
+    }
+    v[0] += v[1] * v[2];
+    v[1] += v[2] * v[0];
+    v[2] += v[0] * v[1];
+    return (u64)v[0] | ((u64)v[1] << 32U);
+}
+
+// The slot of `key` in a copy of the table's fingerprints (gi_common.glsl gi_find_in), or
+// NPH_U32_MAX.
+static u32 find_slot(const u32 *keys, u32 capacity, u64 key)
+{
+    const u64 h = render_gi_mix(key);
+    const u32 bucket_mask = capacity / (u32)NPH_RENDER_GI_BUCKET - 1U;
+    const u32 base = ((u32)h & bucket_mask) * (u32)NPH_RENDER_GI_BUCKET;
+    const u32 fingerprint = (u32)(h >> 32U) | 1U;
+    for (u32 s = 0; s < (u32)NPH_RENDER_GI_BUCKET; ++s) {
+        if (keys[base + s] == fingerprint) {
+            return base + s;
+        }
+    }
+    return NPH_U32_MAX;
+}
+
+NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u32 *cells,
+                        u32 capacity, NphVec3 p, NphVec3 n)
+{
+    const i32 level = render_gi_level(nph_vec3_length(p));
+    const NphRenderGiLevel *l = &levels[level];
+    const f32 size = l->origin.w;
+    const f32 nn[3] = {n.x, n.y, n.z};
+    const f32 x[3] = {(p.x + 0.5F * size * n.x + l->origin.x) / size,
+                      (p.y + 0.5F * size * n.y + l->origin.y) / size,
+                      (p.z + 0.5F * size * n.z + l->origin.z) / size};
+    const f32 ax = nph_f32_abs(n.x);
+    const f32 ay = nph_f32_abs(n.y);
+    const f32 az = nph_f32_abs(n.z);
+    const u32 k = ax >= ay ? (ax >= az ? 0U : 2U) : (ay >= az ? 1U : 2U);
+    const u32 i = k == 0U ? 1U : 0U;
+    const u32 j = k == 2U ? 1U : 2U;
+    const f32 across[2] = {x[i] - 0.5F, x[j] - 0.5F};
+    const f32 base[2] = {floorf(across[0]), floorf(across[1])};
+    const f32 t[2] = {across[0] - base[0], across[1] - base[1]};
+    const u32 octant =
+        (n.x > -1e-3F ? 1U : 0U) | (n.y > -1e-3F ? 2U : 0U) | (n.z > -1e-3F ? 4U : 0U);
+    NphVec3 sum = nph_vec3_zero();
+    f32 trusted = 0.0F;
+    f32 found = 0.0F;
+    for (u32 c = 0; c < 4U; ++c) {
+        const f32 o[2] = {(f32)(c & 1U), (f32)(c >> 1U)};
+        const f32 centre[2] = {base[0] + o[0] + 0.5F, base[1] + o[1] + 0.5F};
+        const f32 along = x[k] - (nn[i] * (centre[0] - x[i]) + nn[j] * (centre[1] - x[j])) / nn[k];
+        i32 cell[3];
+        cell[i] = (i32)(base[0] + o[0]);
+        cell[j] = (i32)(base[1] + o[1]);
+        cell[k] = (i32)floorf(along);
+        u64 key = 0U;
+        for (u32 a = 0; a < 3U; ++a) {
+            // Unsigned arithmetic wraps as the shader's two's complement does.
+            key |= (u64)((l->cell[a] + (u32)cell[a]) & 0x1FFFFU) << (17U * a);
+        }
+        key |= ((u64)(u32)level << 51U) | ((u64)octant << 56U);
+        const u32 slot = find_slot(keys, capacity, key);
+        if (slot == NPH_U32_MAX) {
+            continue;
+        }
+        const u32 *cw = &cells[(u64)slot * 4U];
+        NphVec3 e;
+        memcpy(&e.x, &cw[0], sizeof(f32));
+        memcpy(&e.y, &cw[1], sizeof(f32));
+        memcpy(&e.z, &cw[2], sizeof(f32));
+        const f32 bilinear =
+            ((c & 1U) != 0U ? t[0] : 1.0F - t[0]) * ((c >> 1U) != 0U ? t[1] : 1.0F - t[1]);
+        const u32 count = cw[3] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+        const f32 wt = bilinear * nph_f32_min((f32)count * (1.0F / 16.0F), 1.0F);
+        sum = nph_vec3_add(sum, nph_vec3_scale(e, wt));
+        trusted += wt;
+        found += bilinear;
+    }
+    if (trusted <= 0.0F) {
+        return nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);
+    }
+    const NphVec3 e = nph_vec3_scale(sum, 1.0F / trusted);
+    return nph_vec4(e.x, e.y, e.z, trusted / found);
 }

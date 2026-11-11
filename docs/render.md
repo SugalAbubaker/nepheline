@@ -2352,21 +2352,30 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   no fewer than 32 samples, so the cell follows within a few frames. The
   test waits for the variance to have seen 16 frames; until then a young
   cell's history is its samples. A reflection cell's (below) holds 128.
-- **The lookup:** the resolve, specialised on the cache, finds the
-  pixel's cell as soon as it has the pixel's point (under temporal
-  anti-aliasing at a random point of the cell in the surface's plane, so
-  that the cells' edges blend over frames) and the shading takes the
-  cell's irradiance, the environment's making up for what a cell does not
-  trust yet. Within the ambient occlusion's radius the occlusion darkens
-  it as it darkens the environment's.
+- **The lookup:** the resolve, specialised on the cache, blends the four
+  cells around the pixel's point as soon as it has it
+  ([ADR-0085](adr/0085-cache-blend.md)): across the axis the surface
+  faces most, bilinearly by where the point lies between the cells'
+  centres, each cell in the layer the surface's plane crosses at its
+  centre, and each weighted by its trust; a cell the cache does not hold
+  (past the surface's edge) drops out and leaves its weight to the others.
+  The light is then smooth across the cells' edges and the same every
+  frame, where a random point of the cell each frame (until ADR-0085)
+  made the cells' differences a noise for temporal anti-aliasing to
+  average. The shading takes the blend's irradiance, the environment's
+  making up for what the cells do not trust yet. Within the ambient
+  occlusion's radius the occlusion darkens it as it darkens the
+  environment's.
 
 Against ground truths cast by rays, an open ground under a uniform sky
 gets the sky's irradiance exactly, a box on the ground occludes the sky
-within a tenth of how much the truth does, and a sunlit wall reflects
-light onto the ground within a seventh of the truth (`test_gi.c`). A
-half-shaded cell's estimate wanders by a quarter of what the 128-sample
-history's did, and a doubled sky is followed 73 % of the way in 4 frames
-and 97 % in 16 (the 128-sample history's: 47 % and 88 %). At 4K
+within a thirteenth of how much the truth does, and a sunlit wall reflects
+light onto the ground within a ninth of the truth (`test_gi.c`). A
+half-shaded pixel's light wanders by a fifth of what it did with the
+128-sample history and the jitter, and a doubled sky is followed 73 % of the way in 4 frames
+and 97 % in 16 (the 128-sample history's: 47 % and 88 %). Blending four
+cells costs the resolve 21 to 42 % more than one did, 0.20 to 0.55 ms a
+frame at 2560 × 1440 (ADR-0085; Bistro's small surfaces the most). At 4K
 it adds 0.20 to 0.27 ms under the sky or the sun, and 0.36 to 0.41 ms at
 night among many lamps (ADR-0039).
 

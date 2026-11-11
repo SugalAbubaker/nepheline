@@ -455,6 +455,87 @@ NTEST_F(Gi, a_young_cell_keeps_all_its_samples)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// After a still light has filled the cells, each pixel of the irradiance view is the four cells
+// around its point blended (gi_common.glsl gi_surface_blend, ADR-0085) as gi.c's CPU twin blends
+// them from the table's own fingerprints and cells: within a level of 8-bit rounding (the GPU
+// rebuilds its point from the visibility buffer where the test casts a ray, and the blend is
+// continuous, so the two points' gap moves the light little). A lookup of the one cell that holds
+// the point strays from it by the cells' differences across the half-shaded ground.
+NTEST_F(Gi, a_pixel_blends_the_cells_around_its_point)
+{
+    REQUIRE_GI(f);
+    const f32 radiance = 0.6F;
+    const NphRenderTexture env = test_uniform_environment(f, radiance);
+    static TestBoxScene scene;
+    const NphRenderMaterial black = test_grey(f, 0.0F);
+    (void)test_box_on_ground(f, &scene, test_cube_mesh(f), black, black);
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(2.2F, 2.0F, 3.2F), nph_vec3(0.6F, 0.0F, 0.6F), 0.3F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, image, 48U);
+    // The table as the last frame's shading read it.
+    const RenderGi *gi = &f->renderer->gi;
+    static u32 keys[SLOTS];
+    static u32 cells[SLOTS * 4U];
+    NTEST_ASSERT_EQ_UINT(gi->capacity, SLOTS);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, gi->keys, 0U, sizeof keys, keys);
+    test_read_buffer(f->dev, gi->cells, 0U, sizeof cells, cells);
+    static NphRenderGiLevel levels[NPH_RENDER_GI_LEVELS];
+    render_gi_levels(camera.position, 48.0, levels);
+    u32 compared = 0U;
+    u32 within = 0U;
+    u32 worst = 0U;
+    f64 spread = 0.0;
+    for (u32 row = 1; row + 1U < SIZE; ++row) {
+        for (u32 col = 1; col + 1U < SIZE; ++col) {
+            const u32 i = row * SIZE + col;
+            NphVec3 x;
+            NphVec3 n;
+            const i32 hit = pixel_point(&scene, i, &x, &n);
+            if (hit < 0) {
+                continue;
+            }
+            // Away from the surfaces' edges: the pixel's neighbours see the same face.
+            bool inside = true;
+            for (u32 d = 0; d < 9U && inside; ++d) {
+                NphVec3 xd;
+                NphVec3 nd;
+                const u32 id = (row + d / 3U - 1U) * SIZE + (col + d % 3U - 1U);
+                inside = pixel_point(&scene, id, &xd, &nd) == hit && nph_vec3_dot(nd, n) > 0.999F;
+            }
+            if (!inside) {
+                continue;
+            }
+            const NphVec3 p = nph_vec3_sub(x, scene.eye);
+            const NphVec3 facing = nph_vec3_dot(n, p) > 0.0F ? nph_vec3_scale(n, -1.0F) : n;
+            const NphVec4 e = render_gi_blend(levels, keys, cells, SLOTS, p, facing);
+            if (e.w < 1.0F) {
+                continue; // the environment's irradiance makes up the rest
+            }
+            const f32 linear = e.x * (NPH_INV_PI * EXPOSURE);
+            const u32 want = (u32)(255.0F * nph_render_ref_linear_to_srgb(linear) + 0.5F);
+            const u32 got = image[(u64)i * 4U];
+            const u32 d = want > got ? want - got : got - want;
+            worst = nph_max_u32(worst, d);
+            within += d <= 1U ? 1U : 0U;
+            spread += (f64)linear;
+            ++compared;
+        }
+    }
+    NTEST_LOG("%u pixels against the CPU's blend: %u within a level, the worst %u levels off "
+              "(the light %.3f on average)",
+              compared, within, worst, spread / (f64)nph_max_u32(compared, 1U));
+    NTEST_ASSERT_GT_UINT(compared, 4000U);
+    NTEST_EXPECT_TRUE((f64)within >= 0.99 * (f64)compared);
+    NTEST_EXPECT_LE_UINT(worst, 3U);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // ---------------------------------------------------------------------------
 // The keys
 // ---------------------------------------------------------------------------

@@ -90,6 +90,7 @@ supersedes it and both link to each other.
 | [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision) |
 | [0083](0083-agx-default.md) | AgX is the default tonemapper | Accepted (the user's decision) |
 | [0084](0084-cache-history.md) | The radiance cache's history follows its light | Accepted |
+| [0085](0085-cache-blend.md) | The radiance cache's lookup blends the cells around a point | Accepted |
 
 ## Template
 

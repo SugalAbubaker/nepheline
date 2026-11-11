@@ -1639,6 +1639,12 @@ void render_gi_levels(NphDVec3 camera, f64 scale, NphRenderGiLevel *levels);
 i32 render_gi_level(f32 dist);
 u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n);
 u64 render_gi_mix(u64 k);
+// The cache's light at the camera-relative point `p` on a surface whose normal `n` faces the
+// camera, blended from the four cells around it as gi_common.glsl's gi_surface_blend does
+// (ADR-0085), from copies of the table's fingerprints (`keys`, `capacity` slots) and cells
+// (`cells`, four words a slot): irradiance in xyz, trust in w (0: no cell found).
+NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u32 *cells,
+                        u32 capacity, NphVec3 p, NphVec3 n);
 // The update's block: the smallest square of pixels that keeps a
 // `width` x `height` frame's samples within `rays`.
 u32 render_gi_stride(u32 width, u32 height, u32 rays);
