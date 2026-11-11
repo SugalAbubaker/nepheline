@@ -107,18 +107,23 @@ ivec3 gi_camera_cell(GiViewRef g, int level)
 }
 
 // The key of the cell holding the camera-relative point `p` on a surface
-// whose geometric normal is `n`. The point is taken half a cell out along
+// whose geometric normal is `n`, at the level its distance gives (gi_key) or
+// at `level` (gi_key_at). The point is taken half a cell out along
 // the normal: a surface on a cell's face (a floor at y = 0, which the
 // cells' powers of two align with) would otherwise fall either side of it
 // as its points' rounding goes, and lookups (blended, or another frame's
 // pixels) would miss the cells the update filled.
-uint64_t gi_key(GiViewRef g, vec3 p, vec3 n)
+uint64_t gi_key_at(GiViewRef g, vec3 p, vec3 n, int level)
 {
-    const int level = gi_level(length(p));
     const vec4 origin = g.g.levels[level].origin;
     const ivec3 c =
         gi_camera_cell(g, level) + ivec3(floor((p + 0.5 * origin.w * n + origin.xyz) / origin.w));
     return gi_cell_key(c, level, gi_octant(n));
+}
+
+uint64_t gi_key(GiViewRef g, vec3 p, vec3 n)
+{
+    return gi_key_at(g, p, n, gi_level(length(p)));
 }
 
 // Uniform random numbers from a 3D integer hash (Jarzynski & Olano, "Hash
@@ -190,8 +195,11 @@ uint gi_find(GiViewRef g, uint64_t key)
 // the same new key meet in the same slot. GI_NONE when the bucket is full
 // (the sample is dropped). Only the update claims slots, and only the
 // resolve frees them, so during the update a bucket only fills.
-uint gi_claim_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
+// `created` tells whether this invocation took a free slot for the key: of invocations claiming
+// the same new key in a frame, one does.
+uint gi_claim_new_in(uint64_t keys_at, uint bucket_mask, uint64_t key, out bool created)
 {
+    created = false;
     const uint64_t h = gi_mix(key);
     const uint base = (uint(h) & bucket_mask) * uint(NPH_RENDER_GI_BUCKET);
     const uint fp = gi_fingerprint(h);
@@ -206,10 +214,17 @@ uint gi_claim_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
     for (uint i = 0u; i < uint(NPH_RENDER_GI_BUCKET); ++i) {
         const uint prev = atomicCompSwap(keys.k[base + i], 0u, fp);
         if (prev == 0u || prev == fp) {
+            created = prev == 0u;
             return base + i;
         }
     }
     return GI_NONE;
+}
+
+uint gi_claim_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
+{
+    bool created;
+    return gi_claim_new_in(keys_at, bucket_mask, key, created);
 }
 
 uint gi_claim(GiViewRef g, uint64_t key)
@@ -217,18 +232,58 @@ uint gi_claim(GiViewRef g, uint64_t key)
     return gi_claim_in(g.g.keys, g.g.bucket_mask, key);
 }
 
-// A cell's irradiance (lux, rgb) and how far it can be trusted (w: 0 for
-// none to 1 from 16 samples on).
+uint gi_claim_new(GiViewRef g, uint64_t key, out bool created)
+{
+    return gi_claim_new_in(g.g.keys, g.g.bucket_mask, key, created);
+}
+
+// A cell's irradiance (lux, rgb) and whether it can be trusted (w: 1 from its first sample on, 0
+// with none). A young cell's few samples are noisy, but no worse a guess than the environment's
+// irradiance, which a trust ramp up to 16 samples once mixed in: many times what arrives in shade,
+// it lit every new cell's surface while the camera moved (ADR-0087).
 vec4 gi_cell(GiViewRef g, uint slot)
 {
     const uvec4 c = GiCellsRef(g.g.cells).c[slot];
-    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) * (1.0 / 16.0), 1.0));
+    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)), 1.0));
 }
 
 // The share of a cell's irradiance that is the many lights' far fields' (ADR-0078).
 float gi_cell_far(GiViewRef g, uint slot)
 {
     return gi_word_far_share(GiCellsRef(g.g.cells).c[slot].w);
+}
+
+// A new irradiance cell's first light (ADR-0087), in the slot the update has just taken for the
+// camera-relative point `p` on a surface of geometric normal `n`: that of the cell around the same
+// point a level up (twice its size) or a level down (half), whichever holds more samples, counted
+// as up to NPH_RENDER_GI_SEED of them, so trusted at once. As the camera moves, a surface's
+// distance from it crosses into the next level, whose cells there have no samples yet: trusted
+// little, they had the environment's light make up the rest, many times what arrives in shade, and
+// rings of light followed the camera across shaded ground while leaves glowed. The neighbouring
+// level's cell held the surface's light a moment ago. The new cell's moments start afresh
+// (ADR-0084).
+void gi_seed(GiViewRef g, uint slot, vec3 p, vec3 n)
+{
+    const int level = gi_level(length(p));
+    uvec4 best = uvec4(0u);
+    for (int i = 0; i < 2; ++i) {
+        const int l = level + 1 - 2 * i;
+        if (l >= 0 && l < NPH_RENDER_GI_LEVELS) {
+            const uint s = gi_find(g, gi_key_at(g, p, n, l));
+            if (s != GI_NONE) {
+                const uvec4 c = GiCellsRef(g.g.cells).c[s];
+                if (gi_word_count(c.w) > gi_word_count(best.w)) {
+                    best = c;
+                }
+            }
+        }
+    }
+    const uint count = min(gi_word_count(best.w), uint(NPH_RENDER_GI_SEED));
+    if (count != 0u) {
+        GiCellsRef(g.g.cells).c[slot] = uvec4(best.xyz, gi_word(count, 0u, gi_word_far(best.w)));
+        const float lum = dot(uintBitsToFloat(best.xyz), vec3(0.2126, 0.7152, 0.0722));
+        GiMomentsRef(g.g.moments).m[slot] = uvec4(0u, floatBitsToUint(lum), 0u, 0u);
+    }
 }
 
 // The cache's irradiance at the camera-relative point `p` (geometric normal
@@ -317,7 +372,7 @@ vec3 gi_reflect_direction(uint w)
 // surface's plane crosses at its centre (so a wall or a floor blends its cells exactly, and a slope
 // near enough), and weighted by how far it is trusted. A cell the cache does not hold (past the
 // surface's edge, say) drops out, its weight shared among the others, so an edge does not fade to
-// the sky. `w` is the trust the cells found have between them (0: none found); `far` the share of
+// the sky. `w` is 1 where a cell found holds a sample, 0 where none does (gi_cell); `far` the share of
 // the light that is the many lights' far fields (ADR-0078). Where a fixed point would show the
 // cells' edges, and a random point of the cell each frame (Binder et al.'s jittered hashing, which
 // this replaced) the cells' differences as noise that temporal anti-aliasing must average, the
@@ -343,7 +398,6 @@ vec4 gi_surface_blend(GiViewRef g, vec3 p, vec3 n, out float far)
     const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
     vec3 sum = vec3(0.0);
     float trusted = 0.0;
-    float found = 0.0;
     float far_sum = 0.0;
     float lum_sum = 0.0;
     for (int c = 0; c < 4; ++c) {
@@ -362,14 +416,16 @@ vec4 gi_surface_blend(GiViewRef g, vec3 p, vec3 n, out float far)
             const float wt = bilinear * min(float(gi_word_count(cw.w)) * (1.0 / 16.0), 1.0);
             sum += e * wt;
             trusted += wt;
-            found += bilinear;
             const float l = dot(e, lum) * wt;
             far_sum += gi_word_far_share(cw.w) * l;
             lum_sum += l;
         }
     }
     far = lum_sum > 0.0 ? far_sum / lum_sum : 0.0;
-    return trusted > 0.0 ? vec4(sum / trusted, trusted / found) : vec4(0.0);
+    // Trusted wholly where any cell has a sample (ADR-0087): its weight among the four is its own
+    // trust, so a young cell counts for little beside settled neighbours, but alone it gives the
+    // light, not the environment's (gi_cell).
+    return trusted > 0.0 ? vec4(sum / trusted, 1.0) : vec4(0.0);
 }
 
 // The cache's light at the surface point `p` (camera relative) of geometric normal `face` (either
@@ -388,27 +444,6 @@ vec4 gi_surface_cell(GiViewRef g, vec3 p, vec3 face)
 vec4 gi_surface_cell_far(GiViewRef g, vec3 p, vec3 face, out float far)
 {
     return gi_surface_blend(g, p, dot(face, p) > 0.0 ? -face : face, far);
-}
-
-// What the point `p` (camera relative) on a surface facing `n` reflects along the direction `d`:
-// the radiance of its reflection cell and how far it can be trusted, zero where there is none. The
-// point, the facing and the direction are those that key the pixel's cell whatever the frame's
-// jitter (reflect_common.glsl reflect_key), and the cell that of the pixel's own direction, every
-// frame (ADR-0086): its rays filled it, from this pixel and those near it. A neighbouring
-// direction's cell, which a random pick under temporal anti-aliasing once took now and then, is one
-// that a flat surface's rays seldom fill, so the pick fell back on the sky about half the time:
-// blocks of a sky the rays never see, flickering.
-vec4 gi_reflect_cell(GiViewRef g, vec3 p, vec3 n, uvec2 d, uint rough)
-{
-    const uint coarse = rough >> 2u;
-    const uint slot =
-        gi_find_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, p, n, d, rough));
-    if (slot == GI_NONE) {
-        return vec4(0.0);
-    }
-    const uvec4 c = GiCellsRef(g.g.reflect_cells).c[slot];
-    // A narrow lobe's samples hardly differ: one is enough for the smoothest, four at the end.
-    return vec4(uintBitsToFloat(c.xyz), min(float(gi_word_count(c.w)) / float(1u + coarse), 1.0));
 }
 
 #endif

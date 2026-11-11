@@ -92,6 +92,7 @@ supersedes it and both link to each other.
 | [0084](0084-cache-history.md) | The radiance cache's history follows its light | Accepted |
 | [0085](0085-cache-blend.md) | The radiance cache's lookup blends the cells around a point | Accepted |
 | [0086](0086-reflection-cells-own-direction.md) | A smooth pixel's reflection cell is the same every frame | Accepted |
+| [0087](0087-motion.md) | The radiance cache in motion: new cells start from their neighbours, and reflections are refilled | Accepted |
 
 ## Template
 

@@ -2337,7 +2337,12 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   irradiance there, the sun's (shadowed by a second ray where it casts
   shadows) and the cache's own (the environment's where it has none), so
   each frame adds a bounce. Hits within 0.95 of the ambient occlusion's
-  radius count nothing: that range is the occlusion's.
+  radius count nothing: that range is the occlusion's. A cell the update
+  makes starts with the light of the cell around the same point a level up
+  or down, whichever holds more samples, counted as up to 16 of them
+  ([ADR-0087](adr/0087-motion.md); `gi_seed`): as the camera moves, a
+  surface crosses into the next level of cells, which hold nothing there
+  yet, and the level it leaves held its light a moment ago.
 - **`gi resolve`** (`gi_resolve.comp`): every slot blends its frame's
   samples into its irradiance over its history, or ages, and is freed after
   240 frames without any. A cell's history holds up to 1,024 samples, over
@@ -2362,8 +2367,11 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   The light is then smooth across the cells' edges and the same every
   frame, where a random point of the cell each frame (until ADR-0085)
   made the cells' differences a noise for temporal anti-aliasing to
-  average. The shading takes the blend's irradiance, the environment's
-  making up for what the cells do not trust yet. Within the ambient
+  average. The shading takes the blend's irradiance wherever a cell around
+  the point holds a sample, the environment's only where none does
+  (ADR-0087: a trust that grew with a cell's samples to 16 had the
+  environment's light make up the rest, many times what arrives in shade,
+  so new cells glowed while the camera moved). Within the ambient
   occlusion's radius the occlusion darkens it as it darkens the
   environment's.
 
@@ -2392,7 +2400,7 @@ split-sum's specular multiplies is, by the surface's roughness:
   reservoirs give ("Many lights"): that share of the cell stays out, and the rest is taken
   ([ADR-0078](adr/0078-local-lights-shadows.md)).
 - **Smooth** (under 0.25): a reflection cell, of a table of its own (`gi_cells` slots too, freed
-  after 60 frames unseen): the same grid four times finer, for each direction of an octahedral map
+  16 frames after a pixel last looked it up, ADR-0087): the same grid four times finer, for each direction of an octahedral map
   whose bins are as wide as the surface's lobe, 1.6 degrees for the smoothest, and so what lies along
   the surface's mirror direction, in the world, whatever the camera does. A pixel's cell is the same
   every frame, whatever the temporal jitter ([ADR-0086](adr/0086-reflection-cells-own-direction.md);
@@ -2415,12 +2423,16 @@ the pixel's tile, as for the voxel resolve. Then, over the tiles listed:
   the lobe (Walter et al., EGSR 2007) from each pixel, what it finds (shaded as the radiance cache's
   rays shade it, `gi_hit.glsl`) added to its reflection cell. A ray's worth is what the reflection
   shows: a dielectric facing the camera, showing a twentieth of what arrives, plays Russian roulette
-  for it.
+  for it. A tile whose pixels found no cell of their own the frame before has rays too
+  ([ADR-0087](adr/0087-motion.md); `reflect_want`, a bit a tile): one for each cell missing, its
+  creator's, with no roulette, where the pixel's key holds from frame to frame. A camera's move gives
+  pixels new directions and cells faster than turns a 32nd of the tiles a frame fill them.
 - **`reflect`** (`reflect.comp`): each pixel looks up its cell from those same bits, the cell of its
   own direction every frame ([ADR-0086](adr/0086-reflection-cells-own-direction.md)), takes
   the energy (the split-sum's table) and the screen's occlusion itself, adds what it finds to the HDR
   image, and clears what it left, so the image is empty wherever a pixel leaves nothing, at no cost to
-  those pixels. Where its cell gives out (one sample is enough to trust for the smoothest, four at the
+  those pixels. It sets the age of each cell it looks up back to 0, so a cell lives while it is seen,
+  and marks a tile whose pixel found no cell for the next frame's rays. Where its cell gives out (one sample is enough to trust for the smoothest, four at the
   end), it takes the sky along its direction, no brighter than what its irradiance cell has gathered,
   or with no sky what that cell has gathered.
   `gi resolve` keeps both tables.

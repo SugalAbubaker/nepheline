@@ -19,6 +19,10 @@
 # build and to within 3 % of their budgets, from the mean of two rounds interleaved with that
 # build's, a process a scene: reference_scenes-2026-11-11-gi-blend-win-msvc-profile-rtx3060ti.json
 # and its second round)
+# (bistro_street_walk's gpu.reflect_rays, 2026-11-11, with the rays a moving camera's new
+# reflection cells ask for (ADR-0087), past its budget against the reflection keys' build
+# (ADR-0086), from the mean of two rounds interleaved with that build's, a process a scene:
+# reference_scenes-2026-11-11-motion-win-msvc-profile-rtx3060ti.json and its second round)
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         55000
@@ -128,7 +132,7 @@ bistro_street_walk_production.gpu.many_tiles   62000
 bistro_street_walk_production.gpu.reflect_clear 54000
 bistro_street_walk_production.gpu.vis_resolve  1828000
 bistro_street_walk_production.gpu.many_turns   198000
-bistro_street_walk_production.gpu.reflect_rays 122000
+bistro_street_walk_production.gpu.reflect_rays 179000
 bistro_street_walk_production.gpu.reflect      175000
 bistro_street_walk_production.gpu.vis_statistics 54000
 bistro_street_walk_production.gpu.transparent  98000

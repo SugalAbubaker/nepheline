@@ -12,6 +12,7 @@ struct ReflectKey {
     vec3 p;
     vec3 n;
     uvec2 d;
+    bool stable; // from the surface's plane, so the same whatever the jitter
 };
 
 // The depth of the visibility buffer `visbuffer` (bindless storage) at `p`, or -1 off the image.
@@ -64,6 +65,7 @@ ReflectKey reflect_key(VisViewRef view, ViewRef rview, uint visbuffer, ivec2 p, 
     ReflectKey k;
     k.p = x;
     k.n = n;
+    k.stable = false;
     if (ok) {
         // The jitter in pixels: the centre's ray lies at q + jitter in this frame's NDC.
         const vec2 shift = rview.v.jitter.xy * 0.5 * view.v.viewport.xy;
@@ -76,10 +78,52 @@ ReflectKey reflect_key(VisViewRef view, ViewRef rview, uint visbuffer, ivec2 p, 
         if (dot(face, face) > 0.0) {
             k.p = c.xyz / c.w;
             k.n = normalize(dot(face, x) > 0.0 ? -face : face);
+            k.stable = true;
         }
     }
     k.d = gi_reflect_oct(reflect(normalize(k.p), n));
     return k;
+}
+
+// What a smooth pixel reflects: the radiance of its reflection cell (keyed by `key`) and how far it
+// can be trusted, zero where there is none. The cell is that of the pixel's own direction, every
+// frame (ADR-0086): its rays filled it, from this pixel and those near it. (A neighbouring
+// direction's cell, which a random pick under temporal anti-aliasing once took now and then, is
+// one that a flat surface's rays seldom fill: the pick fell back on the sky about half the time,
+// blocks of a sky the rays never see, flickering.) Its age is set back to 0 where `touch`
+// (reflect.comp, ADR-0087): a cell is kept while pixels look it up (NPH_RENDER_REFLECT_MAX_AGE),
+// however long its tile waits for its turn. `missing` tells that the cell holds no sample and the
+// key holds from frame to frame, for which the pixel's tile asks the next frame's rays
+// (reflect_want). (Neighbouring direction bins'
+// and levels' cells, blended to stand in until then, moved the city's moving views' error by no
+// more than its noise: a camera's step gives a pixel new spatial cells as often as new
+// directions.)
+vec4 reflect_lookup(GiViewRef g, ReflectKey key, uint rough, bool touch, out bool missing)
+{
+    const uint slot = gi_find_in(g.g.reflect_keys, g.g.reflect_bucket_mask,
+                                 gi_reflect_key(g, key.p, key.n, key.d, rough));
+    vec4 own = vec4(0.0);
+    if (slot != GI_NONE) {
+        const uvec4 c = GiCellsRef(g.g.reflect_cells).c[slot];
+        // A narrow lobe's samples hardly differ: one is enough for the smoothest, four at the end.
+        own = vec4(uintBitsToFloat(c.xyz),
+                   min(float(gi_word_count(c.w)) / float(1u + (rough >> 2u)), 1.0));
+        if (touch && gi_word_age(c.w) != 0u) {
+            atomicAnd(GiKeysRef(g.g.reflect_cells).k[slot * 4u + 3u],
+                      ~(0xFFu << uint(NPH_RENDER_GI_COUNT_BITS)));
+        }
+    }
+    // Asked for only where the key holds from frame to frame: an edge's or a leaf's follows the
+    // jitter, and a cell made for it would be made anew every frame and never found again.
+    missing = own.w <= 0.0 && key.stable;
+    return own;
+}
+
+// The word and bit of tile `tile` (x, y) in the tiles' bits (NphRenderGiView.reflect_want).
+uvec2 reflect_tile_bit(GiViewRef g, uvec2 tile)
+{
+    const uint index = tile.y * (g.g.reflect_width >> 3u) + tile.x;
+    return uvec2(index >> 5u, 1u << (index & 31u));
 }
 
 #endif

@@ -561,9 +561,14 @@ static u8 *draw_showcase(u32 pipeline, u64 bytes)
     (void)snprintf(assignment, sizeof assignment, "r.pipeline=%u", pipeline);
     fx.config.assignments[0] = assignment;
     // The pipelines are compared pixel for pixel: one sample per pixel
-    // (render_tests hold the temporal resolve to its own reference).
+    // (render_tests hold the temporal resolve to its own reference), and
+    // the environment's light alone, as the reference renderer takes it
+    // (render_tests hold the radiance cache to rays the tests cast; this
+    // test once took it on too, a few frames young, while young cells still
+    // leaned on the environment's light, ADR-0087).
     fx.config.assignments[1] = "r.taa=false";
-    fx.config.assignment_count = 2U;
+    fx.config.assignments[2] = "r.gi=false";
+    fx.config.assignment_count = 3U;
     const NphResult started = start(&fx, NPH_ENGINE_MODE_OFFSCREEN);
     if (started == NPH_RESULT_UNSUPPORTED) {
         finish(&fx);

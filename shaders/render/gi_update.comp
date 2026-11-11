@@ -147,9 +147,13 @@ void main()
         const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
         x = surface_point(view, v, q, n);
     }
-    const uint slot = gi_claim(g, gi_key(g, x, n));
+    bool created;
+    const uint slot = gi_claim_new(g, gi_key(g, x, n), created);
     if (slot == GI_NONE) {
         return; // its bucket is full: no sample
+    }
+    if (created) {
+        gi_seed(g, slot, x, n); // its neighbouring level's light (ADR-0087)
     }
 
     // A cosine-distributed direction about n: a uniform point of the unit

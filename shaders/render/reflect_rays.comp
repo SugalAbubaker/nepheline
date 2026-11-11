@@ -25,6 +25,8 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
+shared uint s_wanted; // the tile's bit in reflect_want, read and cleared once
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -35,7 +37,20 @@ void main()
     const uvec2 tile = uvec2(listed & 0xFFFFu, listed >> 16u);
     // Its turn by where it is, so that each has one every 2^reflect_turn_bits frames: the list's
     // order is the order the resolve's subgroups ran in, which is not the same from frame to frame.
-    if (((tile.x + tile.y * 11u + g.g.frame) & ((1u << g.g.reflect_turn_bits) - 1u)) != 0u) {
+    const bool turn = ((tile.x + tile.y * 11u + g.g.frame) & ((1u << g.g.reflect_turn_bits) - 1u)) == 0u;
+    // And a tile whose pixels found no cell of their own last frame (reflect.comp) has rays for
+    // those cells (ADR-0087), one a cell, its creator's: a camera's move gives a pixel new
+    // directions and levels of cells faster than turns a 32nd of the tiles a frame fill them.
+    if (gl_LocalInvocationIndex == 0u) {
+        s_wanted = 0u;
+        if (!rays) {
+            const uvec2 bit = reflect_tile_bit(g, tile);
+            s_wanted = atomicAnd(GiKeysRef(g.g.reflect_want).k[bit.x], ~bit.y) & bit.y;
+        }
+    }
+    barrier();
+    const bool refill = !turn && s_wanted != 0u;
+    if (!turn && !refill) {
         return;
     }
     const ivec2 p = ivec2(tile * 8u + gl_LocalInvocationID.xy);
@@ -50,7 +65,7 @@ void main()
     const vec3 u = gi_random(uvec3(uvec2(p), g.g.frame ^ 0x5BD1E995u));
     if (rays) {
         imageStore(nph_uimages_2d[pc.arg2], p, uvec4(0u));
-    } else if (u.z * 0.25 >= max(max(base.r, base.g), base.b) + 0.03) {
+    } else if (!refill && u.z * 0.25 >= max(max(base.r, base.g), base.b) + 0.03) {
         return;
     }
     const uint rough = (w.x >> 24u) & 15u;
@@ -80,11 +95,25 @@ void main()
     if (!rays) {
         // The cell it fills, as reflect.comp looks it up whatever the frame's jitter (reflect_key).
         const ReflectKey key = reflect_key(view, rview, pc.arg0, p, q, depth, x, n);
-        slot = gi_claim_in(g.g.reflect_keys, g.g.reflect_bucket_mask,
-                           gi_reflect_key(g, key.p, key.n, key.d, rough));
+        if (refill) {
+            // A cell only where nothing near stands in for it, as reflect.comp asked (one where its
+            // tile asked, a new cell each pixel of a surface whose directions scatter overfilled the
+            // table).
+            bool missing;
+            const vec4 stand_in = reflect_lookup(g, key, rough, false, missing);
+            if (!missing) {
+                return;
+            }
+        }
+        bool created;
+        slot = gi_claim_new_in(g.g.reflect_keys, g.g.reflect_bucket_mask,
+                               gi_reflect_key(g, key.p, key.n, key.d, rough), created);
         if (slot == GI_NONE) {
             atomicAdd(VisCountersRef(view.v.counters).c.reflect_dropped, 1u);
             return;
+        }
+        if (refill && !created) {
+            return; // a cell some ray fills already: its turn will come
         }
     }
     // The point from its depth lies on its surface to about a thousandth of its distance.

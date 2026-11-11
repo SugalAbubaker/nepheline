@@ -281,6 +281,90 @@ NTEST_F(Reflect, a_mirror_under_temporal_anti_aliasing_shows_its_own_cells)
     nph_render_light_destroy(f->renderer, sun);
 }
 
+// The mean red of a mirror's pixels whose rays around their own all meet the wall (as above), and
+// how many there are, in `image` of the scene's camera.
+static f64 wall_red(const TestBoxScene *scene, const u8 *image, u32 *count)
+{
+    static bool on_wall[SIZE * SIZE];
+    memset(on_wall, 0, sizeof on_wall);
+    u32 seen = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = test_box_pixel_ray(scene, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(scene, scene->eye, d, 0.0F, &t, &n) != 0) {
+            continue;
+        }
+        const NphVec3 x = nph_vec3_add(scene->eye, nph_vec3_scale(d, t));
+        const NphVec3 o = nph_vec3_add(x, nph_vec3_scale(n, 1e-4F));
+        const NphVec3 r = nph_vec3_sub(d, nph_vec3_scale(n, 2.0F * nph_vec3_dot(d, n)));
+        u32 met = 0U;
+        for (i32 a = -1; a <= 1; ++a) {
+            for (i32 b = -1; b <= 1; ++b) {
+                const NphVec3 w = nph_vec3_normalize(
+                    nph_vec3_add(r, nph_vec3((f32)a * 0.05F, (f32)b * 0.05F, 0.0F)));
+                f32 hit = 0.0F;
+                NphVec3 hn;
+                met += test_box_hit(scene, o, w, 0.0F, &hit, &hn) == 1 ? 1U : 0U;
+            }
+        }
+        if (met == 9U) {
+            on_wall[i] = true;
+            ++seen;
+        }
+    }
+    *count = seen;
+    return mean_of(image, on_wall);
+}
+
+// A camera's move gives a mirror's pixels new directions and new cells, which a tile's turn, one
+// frame in 32, would leave unfilled for as long (ADR-0087). The mirror and red wall above, settled,
+// then the camera a step aside, which gives every pixel new directions and cells: four frames
+// after it, the tiles' rays have filled them (reflect_want), against the same view settled.
+NTEST_F(Reflect, a_mirror_shows_its_wall_soon_after_the_camera_moves)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMaterial mirror = surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, 0.05F);
+    const NphRenderMaterial red = surface(f, nph_vec3(1.0F, 0.05F, 0.05F), 0.0F, 1.0F);
+    test_box_ground(f, &scene, mesh, mirror);
+    test_box_add(f, &scene, mesh, red, nph_vec3(-3.0F, 0.0F, -2.0F), nph_vec3(3.0F, 3.0F, -1.5F));
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F));
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 soon[PIXELS];
+    static u8 later[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3_zero(), 0.8F),
+                 NPH_RENDER_REFLECTIONS_CACHE);
+    (void)settled(f, &v, target, later, SETTLE);
+
+    reflect_view(&v,
+                 test_box_camera(&scene, nph_vec3(0.6F, 1.5F, 3.8F), nph_vec3(0.1F, 0.0F, 0.0F), 0.8F),
+                 NPH_RENDER_REFLECTIONS_CACHE);
+    (void)settled(f, &v, target, soon, 4U);
+    u32 seen = 0U;
+    const f64 m_soon = wall_red(&scene, soon, &seen);
+    (void)settled(f, &v, target, later, SETTLE);
+    const f64 m_later = wall_red(&scene, later, &seen);
+    NTEST_LOG("%u pixels of the wall's reflection: red %.4f four frames after the move, %.4f "
+              "settled",
+              seen, m_soon, m_later);
+    NTEST_ASSERT_GT_UINT(seen, 300U);
+    NTEST_EXPECT_TRUE(m_later > 0.3);
+    NTEST_EXPECT_TRUE(nph_f64_abs(m_soon / m_later - 1.0) < 0.1);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
 // Under a sky of the same light everywhere, with nothing to hide it, the cells gather what the
 // sky's specular gives: the three modes agree, smooth or rough, metal or not.
 NTEST_F(Reflect, an_open_surface_under_an_even_sky_loses_nothing)

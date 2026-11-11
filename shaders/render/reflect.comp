@@ -8,6 +8,8 @@
 // (NPH_VIS_NO_AO: none); arg0: the visibility buffer's bindless storage index; arg1: the HDR image's;
 // arg2: what the pixels left; arg3, arg4: the address of the tiles' list. A workgroup a tile.
 #version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_vote : require
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 #include "gi_common.glsl"
@@ -46,7 +48,13 @@ void main()
     const vec3 n = normalize(mirror_d + v);
     const ReflectKey key = reflect_key(view, rview, pc.arg0, p, q, depth, x, n);
     const uint rough = (w.x >> 24u) & 15u;
-    const vec4 cell = gi_reflect_cell(g, key.p, key.n, key.d, rough);
+    bool missing;
+    const vec4 cell = reflect_lookup(g, key, rough, true, missing);
+    // A cell no ray has filled asks the next frame's rays for its tile (reflect_rays.comp).
+    if (subgroupAny(missing) && subgroupElect()) {
+        const uvec2 bit = reflect_tile_bit(g, uvec2(listed & 0xFFFFu, listed >> 16u));
+        atomicOr(GiKeysRef(g.g.reflect_want).k[bit.x], bit.y);
+    }
     const float weight = cell.w * clamp(float(15u - rough) * 0.25, 0.0, 1.0);
     // Where its cell gives out, the sky along its direction, no brighter than what the irradiance
     // cell around it has gathered; and that where only the roughness fades it, of a pixel near

@@ -586,6 +586,9 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
 #define NPH_RENDER_GI_CHANGE_FLOOR 0.02
 // The frames a cell's variance is averaged over (and has seen before the test trusts it).
 #define NPH_RENDER_GI_VARIANCE_FRAMES 16
+// A new irradiance cell starts with its neighbouring level's light, counted as at most this many
+// samples (ADR-0087): as many as a cell needs to be trusted wholly.
+#define NPH_RENDER_GI_SEED 16
 #define NPH_RENDER_REFLECT_HISTORY    128
 // A cell's word (NphRenderGiView.cells' w): its sample count, to its history, in the low
 // NPH_RENDER_GI_COUNT_BITS bits; the frames since a sample arrived in the next 8; the many lights'
@@ -602,9 +605,10 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
 #define NPH_RENDER_REFLECT_LEVEL_SHIFT   2
 #define NPH_RENDER_REFLECT_BINS          128
 #define NPH_RENDER_REFLECT_TURN_BITS     5
-// A reflection cell no sample has reached for this many frames is freed: a moving camera leaves
-// many behind, and its table is small.
-#define NPH_RENDER_REFLECT_MAX_AGE 60
+// A reflection cell no pixel has looked up for this many frames is freed (reflect.comp sets its
+// age back to 0 each frame it is looked up, ADR-0087): a moving camera leaves many behind, and its
+// table is small.
+#define NPH_RENDER_REFLECT_MAX_AGE 16
 // The most a sample may add, in pre-exposed irradiance: brighter ones are
 // clamped (fireflies; the sums are fixed point).
 #define NPH_RENDER_GI_SAMPLE_MAX 4096.0
@@ -656,9 +660,11 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u32 reflect_width;       // the target's width, rounded up to tiles of 8
     u32 reflect_turn_bits;   // 1 listed tile in 2^this traces its rays each frame
     u32 reflect_bucket_mask; // its table's capacity / NPH_RENDER_GI_BUCKET - 1
-    // So that the vectors after start on 16 bytes, as 128-bit loads want (8 bytes fewer and the
-    // resolve, which reads the levels in each lookup of its blend, ran 1 to 3 % slower).
-    u32 pad_reflect[2];
+    // u32[tiles / 32 + 1]: a bit a tile (y * reflect_width / 8 + x) that a pixel of it found no
+    // reflection cell of its own (reflect.comp), kept for the next frame's rays (ADR-0087). Here,
+    // where it keeps the vectors after it on 16 bytes, as 128-bit loads want (8 bytes fewer and
+    // the resolve, which reads the levels in each lookup of its blend, ran 1 to 3 % slower).
+    u64 reflect_want;
     // xyz: the direction the sun's light travels; w: 1 when it casts
     // shadows, 0 when it does not, -1 when there is no sun
     NphVec4 sun_direction;

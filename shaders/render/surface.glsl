@@ -43,9 +43,9 @@
 // The diffuse indirect light takes the environment's irradiance, or, where
 // the includer defines NPH_SURFACE_GI while NPH_SURFACE_GI_ACTIVE, the
 // production path's radiance cache's: NPH_SURFACE_GI is the cache's cell
-// at the surface (gi_common.glsl gi_cell: its irradiance, and how far it is
-// trusted, 0 to 1), and the environment's irradiance makes up what it does
-// not trust yet.
+// at the surface (gi_common.glsl gi_surface_blend: its irradiance, and its
+// trust, 1 where a cell holds a sample, 0 where none does; ADR-0087), and the
+// environment's irradiance makes up what it does not trust.
 //
 // The environment and the emission are evaluated before the punctual
 // lights, so that across the light loop, where a shader's registers peak,

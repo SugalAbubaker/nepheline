@@ -158,6 +158,7 @@ void render_gi_destroy(NphRenderer *r)
     nph_gpu_image_destroy(r->dev, gi->reflect_image);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_tiles);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_bits);
+    nph_gpu_buffer_destroy(r->dev, gi->reflect_want);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_args);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_keys);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_sums);
@@ -274,11 +275,14 @@ static NphResult ensure_reflect_image(NphRenderer *r, u32 width, u32 height)
     NPH_TRY(nph_gpu_image_create(r->dev, &d, &gi->reflect_image));
     nph_gpu_buffer_destroy(r->dev, gi->reflect_tiles);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_bits);
+    nph_gpu_buffer_destroy(r->dev, gi->reflect_want);
     gi->reflect_tiles = NPH_GPU_BUFFER_NULL;
     gi->reflect_bits = NPH_GPU_BUFFER_NULL;
+    gi->reflect_want = NPH_GPU_BUFFER_NULL;
     const u64 tiles = (u64)((width + 7U) / 8U) * (u64)((height + 7U) / 8U);
     NPH_TRY(make_buffer(r, tiles * sizeof(u32), "reflect tiles", &gi->reflect_tiles));
     NPH_TRY(make_buffer(r, (tiles / 8U + 4U) & ~(u64)3U, "reflect bits", &gi->reflect_bits));
+    NPH_TRY(make_buffer(r, (tiles / 8U + 4U) & ~(u64)3U, "reflect want", &gi->reflect_want));
     if (nph_gpu_buffer_is_null(gi->reflect_args)) {
         NphGpuBufferDesc bd;
         memset(&bd, 0, sizeof bd);
@@ -351,6 +355,7 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
             g->reflect_width = (width + 7U) & ~7U;
             g->reflect_tiles = nph_gpu_buffer_address(r->dev, gi->reflect_tiles);
             g->reflect_bits = nph_gpu_buffer_address(r->dev, gi->reflect_bits);
+            g->reflect_want = nph_gpu_buffer_address(r->dev, gi->reflect_want);
             g->reflect_args = nph_gpu_buffer_address(r->dev, gi->reflect_args);
         }
     }
@@ -528,6 +533,8 @@ static void reflect_clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void
         memset(&zero, 0, sizeof zero);
         nph_gpu_cmd_clear_color_image(cmd, gi->reflect_image, NPH_GPU_LAYOUT_TRANSFER_DST, &zero,
                                       0U, 1U, 0U, 1U);
+        // The tiles that want rays carry across frames: none yet.
+        nph_gpu_cmd_fill_buffer(cmd, gi->reflect_want, 0U, NPH_GPU_WHOLE_SIZE, 0U);
         gi->reflect_clear = 0;
     }
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_bits, 0U, NPH_GPU_WHOLE_SIZE, 0U);
@@ -569,10 +576,12 @@ NphResult render_gi_declare_reflect_image(NphRenderer *r, NphGpuRenderGraph *gra
     gi->frame_reflect_tiles = nph_gpu_rg_import_buffer(graph, gi->reflect_tiles);
     gi->frame_reflect_bits = nph_gpu_rg_import_buffer(graph, gi->reflect_bits);
     gi->frame_reflect_args = nph_gpu_rg_import_buffer(graph, gi->reflect_args);
+    gi->frame_reflect_want = nph_gpu_rg_import_buffer(graph, gi->reflect_want);
     if (nph_gpu_rg_image_is_null(gi->frame_reflect_image) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_tiles) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_bits) ||
-        nph_gpu_rg_buffer_is_null(gi->frame_reflect_args)) {
+        nph_gpu_rg_buffer_is_null(gi->frame_reflect_args) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_reflect_want)) {
         return NPH_RESULT_FULL;
     }
     NphGpuRgPass *p =
@@ -582,6 +591,7 @@ NphResult render_gi_declare_reflect_image(NphRenderer *r, NphGpuRenderGraph *gra
     }
     if (gi->reflect_clear) {
         nph_gpu_rg_write_image(p, gi->frame_reflect_image, NPH_GPU_RG_USE_TRANSFER_DST, 0U, 1U);
+        nph_gpu_rg_write_buffer(p, gi->frame_reflect_want, NPH_GPU_RG_USE_TRANSFER_DST);
     }
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_bits, NPH_GPU_RG_USE_TRANSFER_DST);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_args, NPH_GPU_RG_USE_TRANSFER_DST);
@@ -625,7 +635,9 @@ NphResult render_gi_declare_reflect(NphRenderer *r, NphGpuRenderGraph *graph,
     nph_gpu_rg_read_buffer(p, gi->frame_keys, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_read_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_read_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_SHADER_READ);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_reflect_want, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, in->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
     if (gi->frame_rays) {
         nph_gpu_rg_write_image(p, in->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
@@ -645,7 +657,9 @@ NphResult render_gi_declare_reflect(NphRenderer *r, NphGpuRenderGraph *graph,
     nph_gpu_rg_read_image(a, gi->frame_visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
     nph_gpu_rg_read_image(a, in->specular, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_read_buffer(a, gi->frame_reflect_keys, NPH_GPU_RG_USE_SHADER_READ);
-    nph_gpu_rg_read_buffer(a, gi->frame_reflect_cells, NPH_GPU_RG_USE_SHADER_READ);
+    // (Written too: a cell looked up has its age set back to 0.)
+    nph_gpu_rg_write_buffer(a, gi->frame_reflect_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(a, gi->frame_reflect_want, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_image(a, in->hdr, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
     return NPH_RESULT_OK;
 }
@@ -751,7 +765,6 @@ NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u
         (n.x > -1e-3F ? 1U : 0U) | (n.y > -1e-3F ? 2U : 0U) | (n.z > -1e-3F ? 4U : 0U);
     NphVec3 sum = nph_vec3_zero();
     f32 trusted = 0.0F;
-    f32 found = 0.0F;
     for (u32 c = 0; c < 4U; ++c) {
         const f32 o[2] = {(f32)(c & 1U), (f32)(c >> 1U)};
         const f32 centre[2] = {base[0] + o[0] + 0.5F, base[1] + o[1] + 0.5F};
@@ -781,11 +794,10 @@ NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u
         const f32 wt = bilinear * nph_f32_min((f32)count * (1.0F / 16.0F), 1.0F);
         sum = nph_vec3_add(sum, nph_vec3_scale(e, wt));
         trusted += wt;
-        found += bilinear;
     }
     if (trusted <= 0.0F) {
         return nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);
     }
     const NphVec3 e = nph_vec3_scale(sum, 1.0F / trusted);
-    return nph_vec4(e.x, e.y, e.z, trusted / found);
+    return nph_vec4(e.x, e.y, e.z, 1.0F);
 }

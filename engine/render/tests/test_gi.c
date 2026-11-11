@@ -455,6 +455,110 @@ NTEST_F(Gi, a_young_cell_keeps_all_its_samples)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// The cells' size follows the distance from the camera, so a camera walking toward a surface
+// brings it into a finer level of cells, which hold no samples there yet (ADR-0087). Shaded
+// ground under a roof, settled from 2 m further back, the camera then moved and a frame drawn.
+// The cells of the finer level the ground's near half has come into hold their neighbouring
+// level's light as NPH_RENDER_GI_SEED samples from the frame that made them (gi_seed), and the
+// ground keeps its light against the same view settled: any cell with a sample is trusted.
+// Otherwise the environment's light, which the roof hides, made up what new cells lacked: rings
+// of light followed the camera across shaded ground.
+NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.6F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    test_box_ground(f, &scene, mesh, grey);
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-3.0F, 1.0F, -7.0F), nph_vec3(3.0F, 1.2F, -2.0F));
+    const NphVec3 target_at = nph_vec3(0.0F, 0.0F, -4.0F);
+    const NphVec3 far_eye = nph_vec3(0.0F, 0.6F, 2.5F);
+    NphRenderCamera camera = test_box_camera(&scene, far_eye, target_at, 0.6F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 early[PIXELS];
+    static u8 settled[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, settled, FRAMES);
+    // 2 m nearer: the shade's near half, 4 to 6 m away, now 2 to 4 m away.
+    camera = test_box_camera(&scene, nph_vec3(0.0F, 0.6F, 0.5F), target_at, 0.6F);
+    gi_view(&v, camera);
+    render_frames(f, &v, target, early, 1U);
+
+    // The new level's cells, as the frame left them: those of the shaded ground's points whose
+    // level is finer now than from the first camera, found by gi.c's twins of the keys.
+    const RenderGi *gi = &f->renderer->gi;
+    static u32 keys[SLOTS];
+    static u32 cells[SLOTS * 4U];
+    NTEST_ASSERT_LE_UINT(gi->capacity, (u32)SLOTS);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, gi->keys, 0U, (u64)gi->capacity * sizeof(u32), keys);
+    test_read_buffer(f->dev, gi->cells, 0U, (u64)gi->capacity * 16U, cells);
+    static NphRenderGiLevel levels[NPH_RENDER_GI_LEVELS];
+    render_gi_levels(camera.position, 48.0, levels);
+    u32 newcomers = 0U;
+    u32 seeded = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 n;
+        if (pixel_point(&scene, i, &x, &n) != 0 || n.y < 0.5F || nph_f32_abs(x.x) > 2.0F ||
+            x.z > -2.5F || x.z < -6.5F) {
+            continue;
+        }
+        const NphVec3 p = nph_vec3_sub(x, scene.eye);
+        if (render_gi_level(nph_vec3_length(p)) >= render_gi_level(nph_vec3_distance(x, far_eye))) {
+            continue;
+        }
+        const u64 h = render_gi_mix(render_gi_key(levels, p, n));
+        const u32 base = ((u32)h & (gi->capacity / (u32)NPH_RENDER_GI_BUCKET - 1U)) *
+                         (u32)NPH_RENDER_GI_BUCKET;
+        const u32 fp = (u32)(h >> 32U) | 1U;
+        for (u32 s = base; s < base + (u32)NPH_RENDER_GI_BUCKET; ++s) {
+            if (keys[s] == fp) {
+                ++newcomers;
+                const u32 count = cells[(u64)s * 4U + 3U] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+                seeded += count >= (u32)NPH_RENDER_GI_SEED ? 1U : 0U;
+                break;
+            }
+        }
+    }
+    render_frames(f, &v, target, settled, FRAMES);
+
+    // The ground under the roof, away from its edges.
+    f64 sum_early = 0.0;
+    f64 sum_settled = 0.0;
+    u32 shaded = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 n;
+        if (pixel_point(&scene, i, &x, &n) != 0 || n.y < 0.5F || nph_f32_abs(x.x) > 2.0F ||
+            x.z > -2.5F || x.z < -6.5F) {
+            continue;
+        }
+        sum_early += (f64)test_box_linear(early, i);
+        sum_settled += (f64)test_box_linear(settled, i);
+        ++shaded;
+    }
+    NTEST_ASSERT_GT_UINT(shaded, 1000U);
+    const f64 mean_early = sum_early / (f64)shaded;
+    const f64 mean_settled = sum_settled / (f64)shaded;
+    const f64 open = 0.6 * (f64)EXPOSURE;
+    NTEST_LOG("%u shaded pixels: %.4f the frame after the move, %.4f settled (the open sky's "
+              "%.4f); %u of their pixels in the finer level's cells, %u of those cells holding "
+              "a seed's samples",
+              shaded, mean_early, mean_settled, open, newcomers, seeded);
+    NTEST_EXPECT_TRUE(mean_settled < 0.7 * open); // the roof shades it
+    NTEST_EXPECT_NEAR_F64(mean_early, mean_settled, 0.08 * mean_settled);
+    NTEST_ASSERT_GT_UINT(newcomers, 300U);
+    // (Not all: seen at a grazing angle, a pixel of the ground covers several cells along it, and
+    // the coarser level's cells a pixel's point did not fall in hold nothing to give.)
+    NTEST_EXPECT_TRUE((f64)seeded >= 0.3 * (f64)newcomers);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // After a still light has filled the cells, each pixel of the irradiance view is the four cells
 // around its point blended (gi_common.glsl gi_surface_blend, ADR-0085) as gi.c's CPU twin blends
 // them from the table's own fingerprints and cells: within a level of 8-bit rounding (the GPU

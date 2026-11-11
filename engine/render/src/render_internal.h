@@ -1139,6 +1139,8 @@ typedef struct RenderGi {
     NphGpuBuffer reflect_tiles; // the tiles holding such a pixel
     NphGpuBuffer reflect_bits;
     NphGpuBuffer reflect_args;
+    // A bit a tile whose pixels found no cell of their own, for the next frame's rays (ADR-0087).
+    NphGpuBuffer reflect_want;
     u32 reflect_capacity; // the reflection cells' table: slots
     NphGpuBuffer reflect_keys;
     NphGpuBuffer reflect_sums;
@@ -1151,6 +1153,7 @@ typedef struct RenderGi {
     NphGpuRgBuffer frame_reflect_tiles;
     NphGpuRgBuffer frame_reflect_bits;
     NphGpuRgBuffer frame_reflect_args;
+    NphGpuRgBuffer frame_reflect_want;
     u32 reflect_width;
     u32 reflect_height;
     b32 reflect_clear;
@@ -1642,7 +1645,8 @@ u64 render_gi_mix(u64 k);
 // The cache's light at the camera-relative point `p` on a surface whose normal `n` faces the
 // camera, blended from the four cells around it as gi_common.glsl's gi_surface_blend does
 // (ADR-0085), from copies of the table's fingerprints (`keys`, `capacity` slots) and cells
-// (`cells`, four words a slot): irradiance in xyz, trust in w (0: no cell found).
+// (`cells`, four words a slot): irradiance in xyz, trust in w (1 where a cell found holds a sample,
+// 0 where none does; ADR-0087).
 NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u32 *cells,
                         u32 capacity, NphVec3 p, NphVec3 n);
 // The update's block: the smallest square of pixels that keeps a
