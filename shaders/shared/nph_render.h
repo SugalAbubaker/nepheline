@@ -649,8 +649,6 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     f32 sum_scale;           // fixed-point units of a pre-exposed sample
     f32 near;                // update rays that hit nearer count nothing (the ambient occlusion's)
     u32 frame;               // this frame's number, for the random numbers
-    u32 jitter;              // nonzero (temporal anti-aliasing): a reflection cell's lookup takes
-                             // a neighbouring direction now and then, which it averages
     u32 rays_x;              // the update's samples across the target
     u32 stride;              // a sample a stride x stride block of pixels
     u32 reflect_rays;        // nonzero: each listed tile's turn every frame, rays to the image
@@ -658,7 +656,9 @@ NPH_SHARED_STRUCT(NphRenderGiView)
     u32 reflect_width;       // the target's width, rounded up to tiles of 8
     u32 reflect_turn_bits;   // 1 listed tile in 2^this traces its rays each frame
     u32 reflect_bucket_mask; // its table's capacity / NPH_RENDER_GI_BUCKET - 1
-    u32 pad_reflect;
+    // So that the vectors after start on 16 bytes, as 128-bit loads want (8 bytes fewer and the
+    // resolve, which reads the levels in each lookup of its blend, ran 1 to 3 % slower).
+    u32 pad_reflect[2];
     // xyz: the direction the sun's light travels; w: 1 when it casts
     // shadows, 0 when it does not, -1 when there is no sun
     NphVec4 sun_direction;

@@ -30,11 +30,16 @@
 #include "render_internal.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 NPH_STATIC_ASSERT(sizeof(NphRenderGiLevel) == 32U, "NphRenderGiLevel matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderGiView) == 176U + 32U * NPH_RENDER_GI_LEVELS,
                   "NphRenderGiView matches its GLSL layout");
+// The shaders load the levels' vectors 16 bytes at a time where they lie on 16 bytes (ADR-0086).
+NPH_STATIC_ASSERT(offsetof(NphRenderGiView, sun_direction) % 16U == 0U &&
+                      offsetof(NphRenderGiView, levels) % 16U == 0U,
+                  "the vectors lie on 16 bytes");
 NPH_STATIC_ASSERT(NPH_RENDER_GI_COUNT_BITS + 8 + NPH_RENDER_GI_FAR_BITS == 32,
                   "a cell's word is 32 bits");
 NPH_STATIC_ASSERT(NPH_RENDER_GI_HISTORY < (1 << NPH_RENDER_GI_COUNT_BITS) &&
@@ -317,7 +322,6 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
     // Leave to the ambient occlusion what it darkens (ao.c).
     g->near = r->ao.frame_active ? GI_NEAR * r->ao.frame_push.radius : 0.0F;
     g->frame = (u32)nph_gpu_frame_index(r->dev);
-    g->jitter = r->taa.frame_active ? 1U : 0U;
     g->stride =
         render_gi_stride(width, height, view->gi_rays != 0U ? view->gi_rays : r->desc.gi_rays);
     g->rays_x = (width + g->stride - 1U) / g->stride;

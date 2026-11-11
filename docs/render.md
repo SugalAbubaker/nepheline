@@ -2394,7 +2394,13 @@ split-sum's specular multiplies is, by the surface's roughness:
 - **Smooth** (under 0.25): a reflection cell, of a table of its own (`gi_cells` slots too, freed
   after 60 frames unseen): the same grid four times finer, for each direction of an octahedral map
   whose bins are as wide as the surface's lobe, 1.6 degrees for the smoothest, and so what lies along
-  the surface's mirror direction, in the world, whatever the camera does.
+  the surface's mirror direction, in the world, whatever the camera does. A pixel's cell is the same
+  every frame, whatever the temporal jitter ([ADR-0086](adr/0086-reflection-cells-own-direction.md);
+  `reflect_common.glsl` `reflect_key`): the point where the ray through the pixel's centre, without
+  the jitter, meets the surface's plane (from the neighbours' depths, which are affine across a
+  plane), half a cell out along the plane's normal (a floor on the cells' faces would otherwise fall
+  either side of them as its points' rounding goes), and that ray's mirror direction. Where the
+  plane cannot be told (an edge, foliage), the pixel's own point and its shading normal.
 
 The resolve runs at its register limit: a store anywhere before its colour's, or a read of the view
 after the lights (which the compiler takes from an earlier read and keeps across the light loop),
@@ -2410,8 +2416,8 @@ the pixel's tile, as for the voxel resolve. Then, over the tiles listed:
   rays shade it, `gi_hit.glsl`) added to its reflection cell. A ray's worth is what the reflection
   shows: a dielectric facing the camera, showing a twentieth of what arrives, plays Russian roulette
   for it.
-- **`reflect`** (`reflect.comp`): each pixel looks up its cell from those same bits, at a neighbouring
-  direction now and then under temporal anti-aliasing so that the bins' edges blend over frames, takes
+- **`reflect`** (`reflect.comp`): each pixel looks up its cell from those same bits, the cell of its
+  own direction every frame ([ADR-0086](adr/0086-reflection-cells-own-direction.md)), takes
   the energy (the split-sum's table) and the screen's occlusion itself, adds what it finds to the HDR
   image, and clears what it left, so the image is empty wherever a pixel leaves nothing, at no cost to
   those pixels. Where its cell gives out (one sample is enough to trust for the smoothest, four at the

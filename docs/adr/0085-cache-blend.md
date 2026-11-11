@@ -36,7 +36,8 @@ average, barely helped (the street's noise 9.3 → 8.9 %).
 3. The many lights' far fields' share is blended too, weighted by each
    cell's light.
 4. Every pixel takes it, under temporal anti-aliasing or not; the frame's
-   `jitter` flag remains the reflection cells' (ADR-0077).
+   `jitter` flag remains the reflection cells' (ADR-0077), until ADR-0086
+   takes it out: their lookups miss too.
 5. The blend has a CPU twin, `render_gi_blend`, as the keys have.
 
 ## Alternatives considered

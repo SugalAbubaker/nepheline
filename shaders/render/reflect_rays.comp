@@ -20,6 +20,7 @@
 #include "rt_common.glsl"
 #include "gi_common.glsl"
 #include "gi_hit.glsl"
+#include "reflect_common.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
@@ -53,7 +54,6 @@ void main()
         return;
     }
     const uint rough = (w.x >> 24u) & 15u;
-    const uvec2 d = uvec2(w.x & 0xFFFu, (w.x >> 12u) & 0xFFFu);
     const float depth = vis_depth(imageLoad(nph_u64images_2d[nonuniformEXT(pc.arg0)], p).x);
     const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
     const vec4 h = rview.v.inv_view_proj * vec4(q, depth, 1.0);
@@ -78,7 +78,10 @@ void main()
     }
     uint slot = GI_NONE;
     if (!rays) {
-        slot = gi_claim_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, x, d, rough));
+        // The cell it fills, as reflect.comp looks it up whatever the frame's jitter (reflect_key).
+        const ReflectKey key = reflect_key(view, rview, pc.arg0, p, q, depth, x, n);
+        slot = gi_claim_in(g.g.reflect_keys, g.g.reflect_bucket_mask,
+                           gi_reflect_key(g, key.p, key.n, key.d, rough));
         if (slot == GI_NONE) {
             atomicAdd(VisCountersRef(view.v.counters).c.reflect_dropped, 1u);
             return;

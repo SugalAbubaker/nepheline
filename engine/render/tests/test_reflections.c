@@ -169,6 +169,118 @@ NTEST_F(Reflect, a_mirror_shows_what_its_rays_meet)
     nph_render_light_destroy(f->renderer, sun);
 }
 
+// The slots of a table of `capacity` fingerprints that are taken.
+static u32 slots_taken(RenderFixture *f, NphGpuBuffer keys, u32 capacity)
+{
+    NphAllocator *a = nph_allocator_system();
+    u32 *slots = NPH_ALLOC_ARRAY(a, u32, capacity);
+    NTEST_ASSERT_NOT_NULL(slots);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, keys, 0U, (u64)capacity * sizeof(u32), slots);
+    u32 taken = 0U;
+    for (u32 i = 0; i < capacity; ++i) {
+        taken += slots[i] != 0U ? 1U : 0U;
+    }
+    NPH_FREE_ARRAY(a, u32, slots, capacity);
+    return taken;
+}
+
+// Under temporal anti-aliasing a mirror shows its own cells, every frame (ADR-0086): the mirror and
+// the red wall above, settled through the temporal resolve, against the same view without it. At
+// the tests' 128 pixels a reflection cell is smaller than a pixel, and the mirror lies on the
+// cells' faces (y = 0), so its cells are what the frame's jitter would most easily move: keyed by
+// the jittered point, they fill in one jitter offset of the eight (a tile's turn, one frame in 32,
+// comes at the same one), and a point on a face rounds to either side of it as each frame's
+// jitter goes. Nor may a lookup take a neighbouring direction now and then (as a random pick once
+// did): the flat mirror's rays seldom fill one. Each falls back on the dimmer light the irradiance
+// cell has gathered: the wall's reflection dims and flickers, and the frames without the jitter
+// fill cells of their own.
+NTEST_F(Reflect, a_mirror_under_temporal_anti_aliasing_shows_its_own_cells)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMaterial mirror = surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, 0.05F);
+    const NphRenderMaterial red = surface(f, nph_vec3(1.0F, 0.05F, 0.05F), 0.0F, 1.0F);
+    test_box_ground(f, &scene, mesh, mirror);
+    test_box_add(f, &scene, mesh, red, nph_vec3(-3.0F, 0.0F, -2.0F), nph_vec3(3.0F, 3.0F, -1.5F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F));
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 temporal[PIXELS];
+    static u8 next[PIXELS];
+    static u8 still[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_CACHE);
+    v.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
+    (void)settled(f, &v, target, temporal, SETTLE);
+    (void)settled(f, &v, target, next, 1U);
+    const RenderGi *gi = &f->renderer->gi;
+    const u32 cells_jittered = slots_taken(f, gi->reflect_keys, gi->reflect_capacity);
+    v.anti_aliasing = NPH_RENDER_AA_NONE;
+    (void)settled(f, &v, target, still, 4U);
+    const u32 cells_still = slots_taken(f, gi->reflect_keys, gi->reflect_capacity);
+
+    // The mirror's pixels whose rays around their own all meet the wall (as above), away from its
+    // outline, where the temporal resolve's own filtering moves nothing.
+    static bool on_wall[SIZE * SIZE];
+    memset(on_wall, 0, sizeof on_wall);
+    u32 seen = 0U;
+    f64 moved = 0.0;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = test_box_pixel_ray(&scene, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(&scene, scene.eye, d, 0.0F, &t, &n) != 0) {
+            continue;
+        }
+        const NphVec3 x = nph_vec3_add(scene.eye, nph_vec3_scale(d, t));
+        const NphVec3 o = nph_vec3_add(x, nph_vec3_scale(n, 1e-4F));
+        const NphVec3 r = nph_vec3_sub(d, nph_vec3_scale(n, 2.0F * nph_vec3_dot(d, n)));
+        u32 met = 0U;
+        for (i32 a = -1; a <= 1; ++a) {
+            for (i32 b = -1; b <= 1; ++b) {
+                const NphVec3 w = nph_vec3_normalize(
+                    nph_vec3_add(r, nph_vec3((f32)a * 0.05F, (f32)b * 0.05F, 0.0F)));
+                f32 hit = 0.0F;
+                NphVec3 hn;
+                met += test_box_hit(&scene, o, w, 0.0F, &hit, &hn) == 1 ? 1U : 0U;
+            }
+        }
+        if (met == 9U) {
+            on_wall[i] = true;
+            ++seen;
+            const i32 a = temporal[(u64)i * 4U];
+            const i32 b = next[(u64)i * 4U];
+            moved += (f64)(a > b ? a - b : b - a);
+        }
+    }
+    const f64 m_temporal = mean_of(temporal, on_wall);
+    const f64 m_still = mean_of(still, on_wall);
+    moved /= (f64)nph_max_u32(seen, 1U);
+    NTEST_LOG(
+        "%u pixels of the wall's reflection: red %.4f with the temporal resolve, %.4f without; "
+        "%.2f levels from a frame to the next; reflection cells %u, then %u without the jitter",
+        seen, m_temporal, m_still, moved, cells_jittered, cells_still);
+    NTEST_ASSERT_GT_UINT(seen, 300U);
+    NTEST_EXPECT_TRUE(m_still > 0.3);
+    NTEST_EXPECT_TRUE(nph_f64_abs(m_temporal / m_still - 1.0) < 0.05);
+    NTEST_EXPECT_TRUE(moved < 1.0);
+    // The frames without the jitter find the cells the jittered ones filled.
+    NTEST_EXPECT_TRUE(cells_still <= cells_jittered + cells_jittered / 100U);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
 // Under a sky of the same light everywhere, with nothing to hide it, the cells gather what the
 // sky's specular gives: the three modes agree, smooth or rough, metal or not.
 NTEST_F(Reflect, an_open_surface_under_an_even_sky_loses_nothing)
@@ -488,22 +600,6 @@ NTEST_F(Reflect, a_new_cell_does_not_show_a_hidden_sky)
     test_box_release(f, target);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
     nph_render_texture_destroy(f->renderer, env);
-}
-
-// The slots of a table of `capacity` fingerprints that are taken.
-static u32 slots_taken(RenderFixture *f, NphGpuBuffer keys, u32 capacity)
-{
-    NphAllocator *a = nph_allocator_system();
-    u32 *slots = NPH_ALLOC_ARRAY(a, u32, capacity);
-    NTEST_ASSERT_NOT_NULL(slots);
-    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
-    test_read_buffer(f->dev, keys, 0U, (u64)capacity * sizeof(u32), slots);
-    u32 taken = 0U;
-    for (u32 i = 0; i < capacity; ++i) {
-        taken += slots[i] != 0U ? 1U : 0U;
-    }
-    NPH_FREE_ARRAY(a, u32, slots, capacity);
-    return taken;
 }
 
 // A moving camera leaves new directions behind it every frame, and their cells a table of their

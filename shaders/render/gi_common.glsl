@@ -260,16 +260,20 @@ uint gi_reflect_rough(float roughness)
     return uint(clamp(roughness / NPH_RENDER_REFLECT_MAX_ROUGHNESS, 0.0, 1.0) * 15.0 + 0.5);
 }
 
-// The key of the reflection cell of the camera-relative point `p`, whose mirror direction is `d`
-// (gi_reflect_oct), of roughness `rough` (gi_reflect_rough), ADR-0077: cells of the same grid,
-// finer, for each direction of bins as wide as the surface's lobe, 128 a side for the smoothest.
-uint64_t gi_reflect_key(GiViewRef g, vec3 p, uvec2 d, uint rough)
+// The key of the reflection cell of the camera-relative point `p` on a surface facing `n` (towards
+// the camera), whose mirror direction is `d` (gi_reflect_oct), of roughness `rough`
+// (gi_reflect_rough), ADR-0077: cells of the same grid, finer, for each direction of bins as wide
+// as the surface's lobe, 128 a side for the smoothest. The point is taken half a cell out along the
+// normal, as the irradiance's keys take theirs (gi_key; ADR-0086): a surface on a cell's face (a
+// floor at y = 0) would otherwise fall either side of it as its points' rounding goes, and each
+// frame's jitter rounds them anew.
+uint64_t gi_reflect_key(GiViewRef g, vec3 p, vec3 n, uvec2 d, uint rough)
 {
     const int level = max(gi_level(length(p)) - NPH_RENDER_REFLECT_LEVEL_SHIFT, 0);
     const vec4 origin = g.g.levels[level].origin;
     const ivec3 camera = ivec3(uvec3(g.g.levels[level].cell[0], g.g.levels[level].cell[1],
                                      g.g.levels[level].cell[2]));
-    const ivec3 c = camera + ivec3(floor((p + origin.xyz) / origin.w));
+    const ivec3 c = camera + ivec3(floor((p + 0.5 * origin.w * n + origin.xyz) / origin.w));
     const uint m = 0x3FFFu;
     const uint coarse = rough >> 2u;
     const uvec2 bin = d >> (5u + coarse);
@@ -386,16 +390,19 @@ vec4 gi_surface_cell_far(GiViewRef g, vec3 p, vec3 face, out float far)
     return gi_surface_blend(g, p, dot(face, p) > 0.0 ? -face : face, far);
 }
 
-// What the point `p` (camera relative) reflects along the direction `d`: the radiance of its
-// reflection cell and how far it can be trusted, zero where there is none. `u`, uniform in [0, 1),
-// takes a neighbouring direction now and then: temporal anti-aliasing averages them, where a
-// fixed direction would show the bins' edges.
-vec4 gi_reflect_cell(GiViewRef g, vec3 p, uvec2 d, uint rough, vec2 u)
+// What the point `p` (camera relative) on a surface facing `n` reflects along the direction `d`:
+// the radiance of its reflection cell and how far it can be trusted, zero where there is none. The
+// point, the facing and the direction are those that key the pixel's cell whatever the frame's
+// jitter (reflect_common.glsl reflect_key), and the cell that of the pixel's own direction, every
+// frame (ADR-0086): its rays filled it, from this pixel and those near it. A neighbouring
+// direction's cell, which a random pick under temporal anti-aliasing once took now and then, is one
+// that a flat surface's rays seldom fill, so the pick fell back on the sky about half the time:
+// blocks of a sky the rays never see, flickering.
+vec4 gi_reflect_cell(GiViewRef g, vec3 p, vec3 n, uvec2 d, uint rough)
 {
     const uint coarse = rough >> 2u;
-    const float width = float(32u << coarse);
-    const uvec2 near_d = uvec2(clamp(vec2(d) + (u - 0.5) * width, vec2(0.0), vec2(4095.0)));
-    const uint slot = gi_find_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, p, near_d, rough));
+    const uint slot =
+        gi_find_in(g.g.reflect_keys, g.g.reflect_bucket_mask, gi_reflect_key(g, p, n, d, rough));
     if (slot == GI_NONE) {
         return vec4(0.0);
     }
