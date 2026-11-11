@@ -491,7 +491,12 @@ void render_rt_write_instances(NphRenderer *r)
         const NphVec3 t = nph_dvec3_relative(inst->transform.translation, anchor);
         const NphVec3 lo = nph_mat3_mul_vec3(l, m->position_offset);
         const f32 tr[3] = {t.x + lo.x, t.y + lo.y, t.z + lo.z};
-        const f32 sc[3] = {m->position_scale.x, m->position_scale.y, m->position_scale.z};
+        // A flat mesh's scale is 0 along the axis it has no extent on, and its
+        // quantised coordinate 0 there: any scale gives the same points, and 1
+        // a transform that can be inverted, which a ray needs to reach it.
+        const f32 sc[3] = {m->position_scale.x != 0.0F ? m->position_scale.x : 1.0F,
+                           m->position_scale.y != 0.0F ? m->position_scale.y : 1.0F,
+                           m->position_scale.z != 0.0F ? m->position_scale.z : 1.0F};
         for (u32 row = 0; row < 3U; ++row) {
             const NphVec3 rv = nph_mat3_row(l, row);
             const f32 rr[3] = {rv.x, rv.y, rv.z};

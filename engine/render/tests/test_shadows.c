@@ -75,6 +75,29 @@ NTEST_F(Shadows, an_occluder_darkens_exactly_what_it_hides)
     }
 }
 
+// The sun through a card whose material's alpha test cuts two opposite
+// quarters of it away (test_shadow_support.h "An alpha-tested caster"): the
+// production path's rays pass there, as its raster discards the fragments,
+// so the card's shadow is a checker, black under the quarters that are there
+// and lit as without shadows under those that are not. Opaque, the same card
+// shadows all four, and alpha tested again two: the top level's marks follow
+// the material (rt_instances.comp). The card is flat, which a ray could not
+// meet at all while a flat mesh's top-level transform had a zero for its
+// thickness (rt.c). The reference renderer's rays still take every triangle
+// for opaque (docs/render.md "Shadow rays").
+NTEST_F(Shadows, a_ray_passes_where_an_alpha_tested_caster_is_cut_away)
+{
+    REQUIRE_RAY_TRACING(f);
+    if (!nph_renderer_production_supported(f->renderer)) {
+        NTEST_SKIP("no production path on this device");
+    }
+    CheckerScene s;
+    checker_scene_build(f, &s);
+    NphRenderView v;
+    shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, RT_FLAGS);
+    checker_expect(f, &s, &v, 0.25F, "rays");
+}
+
 // A caster whose record follows a hidden instance's and a destroyed one's
 // still casts, on both pipelines. Vulkan allows inactive instance records
 // anywhere, but lavapipe drops an active one that follows them, so the

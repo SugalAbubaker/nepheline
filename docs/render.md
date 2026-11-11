@@ -341,8 +341,11 @@ toward it:
 
 - A directional light's ray is unbounded; a point or spot light's ends at
   the light, so what lies beyond the light casts nothing.
-- The first hit ends the query, and every triangle is opaque. A point is
-  either lit or not, so the shadows are hard: punctual lights have no area.
+- The first hit ends the query. A point is either lit or not, so the
+  shadows are hard: punctual lights have no area.
+- A surface whose material is alpha tested stops a ray only where the test
+  leaves it ("Rays and alpha-tested surfaces", below): on the production
+  path. The reference renderer's rays still take every triangle for opaque.
 - The ray leaves from the side of the triangle's geometric normal that
   faces the light. Its origin is pushed off the surface by 256 units in the
   last place of each coordinate (Wächter & Binder, *Ray Tracing Gems*,
@@ -412,6 +415,43 @@ against.
   top level's build follows in the same pass (`rt accel`), after a barrier
   that also makes the bottom levels visible to the shaders that trace.
 
+**Rays and alpha-tested surfaces** ([ADR-0088](adr/0088-alpha-tested-casters.md);
+`shaders/render/rt_mask.glsl`). A leaf is a card with its outline in its
+texture's alpha, and a ray that takes the card for the leaf finds a canopy
+solid: no sky between its leaves, no sun through it, a blob in a mirror.
+
+- **The top level marks** each instance that has a MASK material on any of
+  its slots as not opaque (`rt_instances.comp`: the instance flag
+  `VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR`), read from the materials
+  as the records are written; a material that becomes alpha tested or stops
+  being writes them again (`nph_render_material_update`). The bottom
+  levels' geometries stay opaque, so every other instance is decided in the
+  traversal as before and costs what it did.
+- **A candidate** is what a query hands back for each triangle of a marked
+  instance its ray meets. `nph_ray_candidate_covers` puts it to its
+  material's alpha test as the raster does (`vis_raster_frag.glsl`): the
+  base colour's alpha, its factor times the vertex colour's times the
+  texture's, against the cutoff; a submesh of the instance whose material
+  is not alpha tested stops the ray at once. The texture is read at the
+  finest level its sampler allows, a point and not a footprint: a ray is one
+  sample, and the mean of many is the coverage the raster's pixels see,
+  which a filtered alpha against the cutoff is not.
+- **Who traces so**: the radiance cache's rays and the sun's shadow at what
+  they find (`gi_update.comp`, `gi_hit.glsl`), the many lights' far
+  samples, the reflections' rays (`reflect_rays.comp`), and the resolves'
+  shadow rays (`NPH_SURFACE_SHADOW`: the sun's under
+  `NPH_RENDER_VIS_RT_SHADOWS`, and the other lights'), through
+  `NPH_RAY_TRAVERSE` and `nph_shadow_ray_masked`. The reference renderer's
+  top level has no GPU scene to read a candidate's material from: its rays
+  keep `gl_RayFlagsOpaqueEXT` ("Limitations").
+
+**A flat mesh.** A mesh with no extent along an axis (a card, a ground
+plane, a wall of one quad) has a dequantisation scale of 0 there, and every
+quantised coordinate 0. Folded into the top level's transform as it is,
+that 0 makes the transform singular, and no ray reaches the instance: the
+records take 1 for it, which gives the same points (`rt.c`,
+`rt_instances.comp`; found by the alpha-tested card's test, ADR-0088).
+
 The top level for 119,041 slots (`render_perf`) takes 20.7 MB, its records
 7.6 MB (and, for the reference, 7.6 MB more in each frame's upload
 buffer), and the scratch 9.8 MB. Compacted, Bistro's 554 bottom levels (1.76 million triangles) hold
@@ -466,7 +506,7 @@ something it shows changes.
 | `vsm cull cells`, `vsm expand cells` | while the renderer holds cells ("Cell proxies", Cells first): for each level with pages to draw, each cell slot's box (its sphere) against those pages; a cell touching one lists its proxy's run where the level draws it as its proxy, else its members', and a workgroup a listed (cell, level) pair writes its run as (instance, level) items |
 | `vsm cull instances`, `vsm cull nodes`, `vsm cull meshlets` | for each level with pages to draw (an indirect dispatch: none in a frame that keeps every page), the instances whose bounding spheres reach such a page (the cells' items and those of no cell at each level, or every slot without cells); a mesh with levels of detail walks its hierarchy against those pages, two node levels a step (below); then the meshlets: a draw per (meshlet, page), scanning only the rows that hold a page to draw |
 | `vsm fixup` | where the draws did not all fit, the pages drawn are kept dirty, to be drawn again |
-| `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws |
+| `vsm raster` | the pages to draw cleared (a quad each), then the casters drawn into them, both faces, depth clamped, four clip distances confining each draw to its page; mesh shaders, or indexed indirect draws; then, while the renderer holds an alpha-tested material, the casters that have one, with the test in a fragment stage ("Alpha-tested casters", below) |
 | `vsm voxel splat`, `vsm voxel merge` | while the renderer holds voxel meshes: the voxel clusters' casters splatted into a depth image of their own, a workgroup per (cluster, page), then taken into the pages drawn, whose depth test keeps the nearer of theirs and the triangles' ("Voxel casters", below) |
 | `vsm statistics` | the counters, read back two frames later |
 
@@ -569,6 +609,29 @@ Bistro's street, cooked with levels) the map draws a page or a few a frame,
 and nothing measurable changes: the culls within a microsecond, the frames
 within the runs' spread (interleaved, -0.011 and +0.008 ms in Bistro). The
 tables hold about 1.2 entries a cluster (367 for the test torus's 297).
+
+**Alpha-tested casters** ([ADR-0088](adr/0088-alpha-tested-casters.md)). A
+caster whose material is alpha tested casts what the test leaves of it: a
+tree's shadow is its leaves', with the sun between them, where its cards'
+quads cast one solid shape with straight edges. `vsm cull meshlets` reads
+the material of each triangle meshlet's submesh and writes its index, plus
+one, as the draw's fourth word (0: not alpha tested). The page raster is
+two pipelines over the one list of draws, each passing the other's by: the
+first as before, with no fragment stage; the second (`vsm_raster_masked.*`,
+from `vsm_raster_mesh.glsl` and `vsm_raster_vert.glsl` with `VSM_MASKED`)
+hands the UV, the vertex colour's alpha and the material's test on to
+`vsm_raster_masked.frag`, which discards as the visibility buffer's masked
+raster does (`vis_raster_frag.glsl`), at the level of the texture a texel
+of the map spans. On the indirect path each raster has commands of its own
+over the list, the other's with no indices, the second's after the first
+`max_vsm_draws`. The second raster is drawn only while the renderer holds
+an alpha-tested material (`masked_materials`); a material that becomes
+alpha tested or stops being drops every page (`nph_render_material_update`).
+A voxel cluster's coverage is in its voxels, made from the same test
+(`covers`), so the levels that draw voxels were right already. A checker of
+alpha on a card casts a checker, on both rasters, and opaque a square
+(`test_vsm.c`). In the city's street by the park the two rasters together
+take 0.011 ms a frame walking, as the one did (pages are kept).
 
 **Voxel casters.** A mesh's cuts hold its voxel clusters too (ADR-0061,
 stage 4), and `vsm cull meshlets` sends their draws to a list of their own
@@ -3152,6 +3215,13 @@ path and logs what the GPU culled.
   half a texel inside a page at its edges; a level's texels double at its
   distance boundary, with no blend between levels; and its lookup costs
   the resolve 0.27 ms, most of it registers.
+- Alpha-tested surfaces (ADR-0088): the reference renderer's rays take every
+  triangle for opaque, so its shadows of alpha-tested casters are solid and
+  it is no ground truth for them (its top level has no GPU scene to read a
+  candidate's material from). A ray's candidates on such surfaces cost the
+  radiance cache's update 0.2 to 0.6 ms a frame among foliage, which opacity
+  micromaps would settle in the traversal. Leaves are opaque to light: none
+  passes through a leaf lit from behind.
 - Shadow rays do not handle the shadow terminator: on a coarse mesh, an
   interpolated normal can face a light that the triangle's plane does not,
   and the triangle's neighbours then shadow it (Hanika, "Hacking the

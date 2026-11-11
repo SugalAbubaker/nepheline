@@ -107,6 +107,9 @@ nph_add_shaders(nph_shaders_render
         render/vsm_cull_nodes.comp
         render/vsm_raster.mesh
         render/vsm_raster.vert
+        render/vsm_raster_masked.mesh
+        render/vsm_raster_masked.vert
+        render/vsm_raster_masked.frag
         render/vsm_voxel_splat.comp
         render/vsm_voxel_merge.frag
         render/vsm_clear.vert

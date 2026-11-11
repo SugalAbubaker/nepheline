@@ -588,8 +588,8 @@ NPH_SHARED_STRUCT(NphRenderAoPush)
 #define NPH_RENDER_GI_VARIANCE_FRAMES 16
 // A new irradiance cell starts with its neighbouring level's light, counted as at most this many
 // samples (ADR-0087): as many as a cell needs to be trusted wholly.
-#define NPH_RENDER_GI_SEED 16
-#define NPH_RENDER_REFLECT_HISTORY    128
+#define NPH_RENDER_GI_SEED         16
+#define NPH_RENDER_REFLECT_HISTORY 128
 // A cell's word (NphRenderGiView.cells' w): its sample count, to its history, in the low
 // NPH_RENDER_GI_COUNT_BITS bits; the frames since a sample arrived in the next 8; the many lights'
 // far fields' share of its irradiance (ADR-0078), a fraction of NPH_RENDER_GI_FAR_BITS, above.

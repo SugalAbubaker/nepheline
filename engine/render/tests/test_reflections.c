@@ -347,9 +347,9 @@ NTEST_F(Reflect, a_mirror_shows_its_wall_soon_after_the_camera_moves)
                  NPH_RENDER_REFLECTIONS_CACHE);
     (void)settled(f, &v, target, later, SETTLE);
 
-    reflect_view(&v,
-                 test_box_camera(&scene, nph_vec3(0.6F, 1.5F, 3.8F), nph_vec3(0.1F, 0.0F, 0.0F), 0.8F),
-                 NPH_RENDER_REFLECTIONS_CACHE);
+    reflect_view(
+        &v, test_box_camera(&scene, nph_vec3(0.6F, 1.5F, 3.8F), nph_vec3(0.1F, 0.0F, 0.0F), 0.8F),
+        NPH_RENDER_REFLECTIONS_CACHE);
     (void)settled(f, &v, target, soon, 4U);
     u32 seen = 0U;
     const f64 m_soon = wall_red(&scene, soon, &seen);
@@ -414,6 +414,85 @@ NTEST_F(Reflect, an_open_surface_under_an_even_sky_loses_nothing)
     }
     test_box_release(f, target);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// A smooth metal ground under an even sky, and a black card over it, beyond the camera's view. Its
+// material alpha tested with an alpha under the cutoff, the card is cut away everywhere: the
+// reflections' rays pass it (rt_mask.glsl), and the ground shows the sky as with the card hidden,
+// from cells filled while the card was there and from a ray a pixel. Opaque, the card is what the
+// ground mirrors. (The rays a pixel hold nothing from one frame to the next, so each of theirs is
+// what its own frame's rays met; the cells keep what they gathered, so theirs comes first.)
+NTEST_F(Reflect, a_cut_away_surface_is_not_reflected)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.5F);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, mesh, surface(f, nph_vec3(0.8F, 0.8F, 0.8F), 1.0F, 0.05F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 3.0F, 3.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    static bool ground[SIZE * SIZE];
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        f32 t = 0.0F;
+        NphVec3 n;
+        ground[i] =
+            test_box_hit(&scene, scene.eye, test_box_pixel_ray(&scene, i), 0.0F, &t, &n) >= 0;
+    }
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 4U, 1.0F, &data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh plane = test_upload_mesh(f->renderer, &data);
+    nph_render_mesh_data_free(&data);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    md.double_sided = 1;
+    NphRenderMaterial black = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &black), NPH_RESULT_OK);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = plane;
+    id.materials = &black;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(nph_dvec3(0.0, 6.0, -6.0), nph_quat_identity(),
+                                                 nph_vec3(80.0F, 80.0F, 80.0F));
+    NphRenderInstance card = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &card), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 cells[PIXELS];
+    static u8 through[PIXELS];
+    static u8 open[PIXELS];
+    static u8 under[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_CACHE);
+    (void)settled(f, &v, target, cells, SETTLE);
+    v.reflections = NPH_RENDER_REFLECTIONS_RAYS;
+    (void)settled(f, &v, target, through, 4U);
+    nph_render_instance_set_hidden(f->renderer, card, true);
+    (void)settled(f, &v, target, open, 4U);
+    nph_render_instance_set_hidden(f->renderer, card, false);
+    md.alpha_mode = NPH_RENDER_ALPHA_OPAQUE;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, black, &md), NPH_RESULT_OK);
+    (void)settled(f, &v, target, under, 4U);
+    const f64 m_cells = mean_of(cells, ground);
+    const f64 m_through = mean_of(through, ground);
+    const f64 m_open = mean_of(open, ground);
+    const f64 m_under = mean_of(under, ground);
+    NTEST_LOG("the mirror with the card cut away: cells %.4f, rays %.4f; no card: rays %.4f; under "
+              "the opaque card: rays %.4f",
+              m_cells, m_through, m_open, m_under);
+    NTEST_EXPECT_TRUE(m_open > 0.05);
+    NTEST_EXPECT_TRUE(nph_f64_abs(m_cells / m_open - 1.0) < 0.06);
+    NTEST_EXPECT_TRUE(nph_f64_abs(m_through / m_open - 1.0) < 0.06);
+    NTEST_EXPECT_TRUE(m_under < 0.4 * m_open);
+    nph_render_instance_destroy(f->renderer, card);
+    test_box_release(f, target);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    nph_render_material_destroy(f->renderer, black);
+    nph_render_mesh_destroy(f->renderer, plane);
     nph_render_texture_destroy(f->renderer, env);
 }
 

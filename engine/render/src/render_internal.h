@@ -467,8 +467,9 @@ typedef struct RenderVsm {
     b32 frame_reset; // this frame drops every page
     VsmLayout layout;
     // pages, cull, raster (mesh or vertex), clear, request, the voxel
-    // casters' splat and merge, and the caster walk
-    NphGpuShader shaders[8];
+    // casters' splat and merge, the caster walk, and the alpha-tested
+    // casters' raster (mesh or vertex) and its fragment stage
+    NphGpuShader shaders[10];
     NphGpuPipeline pages;
     NphGpuPipeline cull;
     NphGpuPipeline cull_nodes; // the casters' hierarchies against the pages drawn
@@ -478,6 +479,9 @@ typedef struct RenderVsm {
     NphGpuPipeline pages_voxels;
     NphGpuPipeline cull_voxels;
     NphGpuPipeline raster;
+    // The casters whose material is alpha tested, drawn after the others
+    // while the renderer holds such a material (masked_materials).
+    NphGpuPipeline raster_masked;
     NphGpuPipeline voxel_splat; // the voxel clusters' casters (vsm_voxel_splat.comp)
     NphGpuPipeline voxel_merge; // their depths into the pool (vsm_voxel_merge.frag)
     // The voxel casters' draws (uvec4[max_vsm_voxel_draws]) and depths
@@ -1250,6 +1254,7 @@ struct NphRenderer {
     u64 frame_addresses[NPH_GPU_FRAMES_IN_FLIGHT];
     RenderFrameLayout layout;
     u64 material_version;                            // bumped by every material change
+    u32 masked_materials;                            // live materials that are alpha tested
     u64 material_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // the version each slot holds (0: none)
     u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT];   // and the paged levels' count (paging)
     RenderDrawCmd *draw_cmds;                        // max_draws, rebuilt every frame

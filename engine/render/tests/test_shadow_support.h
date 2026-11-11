@@ -388,3 +388,139 @@ static inline void log_check(const char *what, const char *pipeline, const Shado
     NTEST_LOG("%s (%s): %u lit, %u shadowed, %u occluder pixels checked; %u wrong", what, pipeline,
               c->lit, c->shadow, c->occluder, c->wrong);
 }
+
+// ---------------------------------------------------------------------------
+// An alpha-tested caster
+// ---------------------------------------------------------------------------
+
+// A 2 x 2 checker of alpha, sampled nearest: the alpha test cuts two opposite
+// quarters of a surface away.
+static inline NphRenderMaterialDesc checker_mask_desc(RenderFixture *f)
+{
+    static const u8 texels[2U * 2U * 4U] = {
+        255U, 255U, 255U, 0U, 255U, 255U, 255U, 255U, 255U, 255U, 255U, 255U, 255U, 255U, 255U, 0U,
+    };
+    const void *mips[1] = {texels};
+    u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 2U;
+    td.height = 2U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    md.double_sided = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+    return md;
+}
+
+// The pixels of top_camera()'s image whose floor points lie in [x0, x1] x
+// [z0, z1]: how many are black in `on`, how many as in `off`, and the rest.
+typedef struct Quarter {
+    u32 dark;
+    u32 lit;
+    u32 other;
+} Quarter;
+
+static inline Quarter quarter_of(const u8 *on, const u8 *off, f32 x0, f32 x1, f32 z0, f32 z1)
+{
+    const f32 half = 6.0F * 0.48305507F; // the floor's half width in view: 6 m below, tan(0.45)
+    Quarter q = {0U, 0U, 0U};
+    for (u32 py = 0; py < TEST_TARGET_SIZE; ++py) {
+        for (u32 px = 0; px < TEST_TARGET_SIZE; ++px) {
+            const f32 x = (((f32)px + 0.5F) / (f32)TEST_TARGET_SIZE * 2.0F - 1.0F) * half;
+            const f32 z = (((f32)py + 0.5F) / (f32)TEST_TARGET_SIZE * 2.0F - 1.0F) * half;
+            if (x < x0 || x > x1 || z < z0 || z > z1) {
+                continue;
+            }
+            const u8 *a = &on[((u64)py * TEST_TARGET_SIZE + px) * 4U];
+            const u8 *b = &off[((u64)py * TEST_TARGET_SIZE + px) * 4U];
+            const bool dark = a[0] <= DARK_MAX && a[1] <= DARK_MAX && a[2] <= DARK_MAX;
+            bool same = true;
+            for (u32 c = 0; c < 3U; ++c) {
+                const u32 d = a[c] > b[c] ? (u32)(a[c] - b[c]) : (u32)(b[c] - a[c]);
+                same = same && d <= SAME_TOL;
+            }
+            q.dark += dark ? 1U : 0U;
+            q.lit += !dark && same ? 1U : 0U;
+            q.other += !dark && !same ? 1U : 0U;
+        }
+    }
+    return q;
+}
+
+// The floor, and 3 m above it a card 4 m square whose material's alpha test
+// cuts two opposite quarters of it away, beyond top_camera()'s view: the
+// sun, 45 degrees up along +X, lays the card's shadow 3 m further along, on
+// x in [-2.5, 1.5] and z in [-2, 2].
+typedef struct CheckerScene {
+    NphRenderMaterialDesc md;
+    NphRenderMaterial mask;
+    NphRenderLightDesc ld;
+    NphRenderLight sun;
+} CheckerScene;
+
+static inline void checker_scene_build(RenderFixture *f, CheckerScene *s)
+{
+    memset(s, 0, sizeof *s);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 6.0F));
+    s->md = checker_mask_desc(f);
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &s->md, &s->mask), NPH_RESULT_OK);
+    (void)instance(f, plane, s->mask, at(-3.5, 3.0, 0.0, 4.0F));
+    s->ld = sun_desc(false);
+    s->sun = make_light(f, &s->ld);
+}
+
+// Renders `v` without shadows, then with them and the card alpha tested,
+// opaque, and alpha tested again, and expects of the shadow's quarters,
+// `margin` metres inside each: alpha tested, one diagonal's black and the
+// other's lit as without shadows; opaque, all four black.
+static inline void checker_expect(RenderFixture *f, CheckerScene *s, const NphRenderView *v,
+                                  f32 margin, const char *what)
+{
+    static u8 off[PIXELS];
+    static u8 on[PIXELS];
+    set_shadows(f, s->sun, &s->ld, false);
+    render_into(f, v, off);
+    set_shadows(f, s->sun, &s->ld, true);
+    const f32 xs[3] = {-2.5F, -0.5F, 1.5F};
+    const f32 zs[3] = {-2.0F, 0.0F, 2.0F};
+    for (u32 pass = 0; pass < 3U; ++pass) {
+        const bool opaque = pass == 1U;
+        s->md.alpha_mode = opaque ? NPH_RENDER_ALPHA_OPAQUE : NPH_RENDER_ALPHA_MASK;
+        NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, s->mask, &s->md),
+                            NPH_RESULT_OK);
+        render_into(f, v, on);
+        Quarter q[2][2];
+        for (u32 i = 0; i < 2U; ++i) {
+            for (u32 j = 0; j < 2U; ++j) {
+                q[i][j] = quarter_of(on, off, xs[i] + margin, xs[i + 1U] - margin, zs[j] + margin,
+                                     zs[j + 1U] - margin);
+                NTEST_LOG("%s, %s card, quarter %u %u: %u black, %u lit, %u neither", what,
+                          opaque ? "opaque" : "alpha-tested", i, j, q[i][j].dark, q[i][j].lit,
+                          q[i][j].other);
+                NTEST_EXPECT_GT_UINT(q[i][j].dark + q[i][j].lit, 100U);
+                NTEST_EXPECT_EQ_UINT(q[i][j].other, 0U);
+            }
+        }
+        if (opaque) {
+            NTEST_EXPECT_EQ_UINT(q[0][0].lit + q[0][1].lit + q[1][0].lit + q[1][1].lit, 0U);
+        } else {
+            // One diagonal's quarters black, the other's lit.
+            const bool first_dark = q[0][0].dark != 0U;
+            NTEST_EXPECT_EQ_UINT(
+                first_dark ? q[0][0].lit + q[1][1].lit : q[0][0].dark + q[1][1].dark, 0U);
+            NTEST_EXPECT_EQ_UINT(
+                first_dark ? q[0][1].dark + q[1][0].dark : q[0][1].lit + q[1][0].lit, 0U);
+        }
+    }
+}

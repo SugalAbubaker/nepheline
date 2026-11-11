@@ -28,10 +28,13 @@
 
 #ifdef NPH_RAY_QUERY
 #include "rt_common.glsl"
+#include "rt_mask.glsl"
 uint64_t g_tlas;
 vec3 g_tlas_offset;
+VisViewRef g_rt_view; // the GPU scene's records, for the rays' alpha tests (rt_mask.glsl)
 #define NPH_SURFACE_SHADOW(p, l, distance)                                                         \
-    nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
+    nph_shadow_ray_masked(g_rt_view, g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l),   \
+                          (distance))
 #endif
 
 #define NPH_VSM_SAMPLING
@@ -96,6 +99,7 @@ void main()
 #ifdef NPH_RAY_QUERY
     g_tlas = rview.v.tlas;
     g_tlas_offset = rview.v.tlas_offset.xyz;
+    g_rt_view = view;
 #endif
     g_vsm = VsmViewRef(rview.v.vsm);
     g_pixel = p;

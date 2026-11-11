@@ -1490,6 +1490,7 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     m->desc = *desc;
     m->desc.name = NULL;
     r->material_version += 1U;
+    r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1503,6 +1504,20 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NPH_TRY(validate_material(r, desc));
+    // The rays' top level marks the instances that have an alpha-tested
+    // material (rt_instances.comp): one coming or going writes them again.
+    // And the sun's shadow map's pages hold what the material's casters cast
+    // as it was: every page is drawn again (vsm.c).
+    if ((r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK) !=
+        (desc->alpha_mode == NPH_RENDER_ALPHA_MASK)) {
+        r->rt.rebuild_owed = 1;
+        r->vsm.continuous = 0;
+        if (desc->alpha_mode == NPH_RENDER_ALPHA_MASK) {
+            r->masked_materials += 1U;
+        } else {
+            r->masked_materials -= 1U;
+        }
+    }
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     r->material_version += 1U;
@@ -1521,6 +1536,7 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     if (slot == NPH_U32_MAX) {
         return;
     }
+    r->masked_materials -= r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     memset(&r->materials[slot], 0, sizeof r->materials[slot]);
     release_slot(&r->material_pool, material.value);
     r->material_version += 1U;

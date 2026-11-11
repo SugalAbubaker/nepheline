@@ -93,6 +93,7 @@ supersedes it and both link to each other.
 | [0085](0085-cache-blend.md) | The radiance cache's lookup blends the cells around a point | Accepted |
 | [0086](0086-reflection-cells-own-direction.md) | A smooth pixel's reflection cell is the same every frame | Accepted |
 | [0087](0087-motion.md) | The radiance cache in motion: new cells start from their neighbours, and reflections are refilled | Accepted |
+| [0088](0088-alpha-tested-casters.md) | Alpha-tested surfaces cast, and stop rays, as they are drawn | Accepted |
 
 ## Template
 

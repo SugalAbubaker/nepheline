@@ -196,6 +196,10 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
     ivec4 rect = ivec4(1, 0, 0, 0);
     NphVisMesh mesh;
     uvec4 m = uvec4(0u);
+    // The meshlet's material where it is alpha tested, its index plus one:
+    // its draws take the masked raster, which casts what the test leaves
+    // (vsm_raster_mesh.glsl). A voxel cluster's material is in its voxels.
+    uint masked = 0u;
     if (i < min(counters.c.meshlet_count, r.v.max_meshlets)) {
         const uvec2 item = VsmUvec2Ref(r.v.meshlets).v[i];
         slot = item.x;
@@ -204,6 +208,13 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         const NphVisInstance inst = VisInstancesRef(view.v.instances).i[slot];
         mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
         m = VisMeshletsRef(mesh.meshlets).m[meshlet];
+        if ((m.z & 0xFFFFu) != 0u) {
+            const uint material =
+                vis_instance_material(view, inst, VisUvec2Ref(mesh.submeshes).v[m.w].x);
+            if (MaterialsRef(view.v.materials).m[material].alpha_mode == 1u) {
+                masked = material + 1u;
+            }
+        }
         // A cluster of a group too coarse for the level, from the walk: in
         // the cut where its maker's error is fine enough (level 0's is 0).
         bool lod_out = false;
@@ -315,15 +326,20 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
                         atomicOr(counters.c.overflow, uint(NPH_VSM_OVERFLOW_DRAWS));
                         return;
                     }
-                    VsmUvec4Ref(r.v.draws).v[at] = uvec4(slot, meshlet, entry, 0u);
+                    VsmUvec4Ref(r.v.draws).v[at] = uvec4(slot, meshlet, entry, masked);
                     if (indirect) {
+                        // A command for each raster, the other's with no
+                        // indices: the masked raster's follow the first
+                        // max_draws.
                         NphVisDraw draw;
-                        draw.index_count = (m.z >> 16u) * 3u;
+                        draw.index_count = masked == 0u ? (m.z >> 16u) * 3u : 0u;
                         draw.instance_count = 1u;
                         draw.first_index = mesh.index_base + m.y * 3u;
                         draw.vertex_offset = int(m.x);
                         draw.first_instance = 0u;
                         VisDrawsRef(r.v.vis_draws).d[at] = draw;
+                        draw.index_count = masked != 0u ? (m.z >> 16u) * 3u : 0u;
+                        VisDrawsRef(r.v.vis_draws).d[r.v.max_draws + at] = draw;
                     }
                     ++at;
                 }

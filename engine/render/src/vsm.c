@@ -139,9 +139,11 @@ static void layout_work(const NphRendererDesc *d, bool vis_draws, VsmLayout *out
     at = align_up(at, 16U);
     out->draws = at;
     at += (u64)d->max_vsm_draws * 16U;
+    // A command a draw for each raster: the alpha-tested casters' follow the
+    // others' (vsm_cull.comp).
     out->vis_draws = at;
     if (vis_draws) {
-        at += (u64)d->max_vsm_draws * sizeof(NphVisDraw);
+        at += 2ULL * d->max_vsm_draws * sizeof(NphVisDraw);
     }
     // Cells first (ADR-0064): a cell can be listed for every level, and the
     // items are an instance a level, twice the instances in all (more is an
@@ -183,6 +185,9 @@ static NphResult create_pipelines(NphRenderer *r)
     NPH_TRY(load(r, "vsm_voxel_splat.comp", &v->shaders[5]));
     NPH_TRY(load(r, "vsm_voxel_merge.frag", &v->shaders[6]));
     NPH_TRY(load(r, "vsm_cull_nodes.comp", &v->shaders[7]));
+    NPH_TRY(load(r, r->vis.mesh_shaders ? "vsm_raster_masked.mesh" : "vsm_raster_masked.vert",
+                 &v->shaders[8]));
+    NPH_TRY(load(r, "vsm_raster_masked.frag", &v->shaders[9]));
     NphGpuComputePipelineDesc cd;
     memset(&cd, 0, sizeof cd);
     cd.shader = v->shaders[0];
@@ -225,6 +230,17 @@ static NphResult create_pipelines(NphRenderer *r)
     gd.depth.clamp = 1;
     gd.name = "vsm raster";
     NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->raster));
+    // The same for the casters whose material is alpha tested, with the test
+    // in a fragment stage (vsm_raster_masked.frag): its depth is written
+    // after it.
+    if (r->vis.mesh_shaders) {
+        gd.mesh = v->shaders[8];
+    } else {
+        gd.vertex = v->shaders[8];
+    }
+    gd.fragment = v->shaders[9];
+    gd.name = "vsm raster (masked)";
+    NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->raster_masked));
     // The voxel casters' depths into the pages drawn (ADR-0061): the clear's
     // quads, each fragment the depth its texel's voxels left, which the depth
     // test keeps where nearer than the triangles'.
@@ -329,6 +345,7 @@ void render_vsm_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, v->pages_voxels);
     nph_gpu_pipeline_destroy(dev, v->cull_voxels);
     nph_gpu_pipeline_destroy(dev, v->raster);
+    nph_gpu_pipeline_destroy(dev, v->raster_masked);
     nph_gpu_pipeline_destroy(dev, v->voxel_splat);
     nph_gpu_pipeline_destroy(dev, v->voxel_merge);
     nph_gpu_image_destroy(dev, v->voxel_depths);
@@ -930,6 +947,22 @@ static void raster_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
                                                 v->layout.counters +
                                                     (u64)offsetof(NphVsmCounters, draw_count),
                                                 r->desc.max_vsm_draws, (u32)sizeof(NphVisDraw));
+    }
+    // The casters whose material is alpha tested, from the same list (each
+    // raster passes the other's draws by): a leaf's card casts its leaf.
+    if (r->masked_materials == 0U) {
+        return;
+    }
+    nph_gpu_cmd_bind_pipeline(cmd, v->raster_masked);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    if (r->vis.mesh_shaders) {
+        nph_gpu_cmd_draw_mesh_tasks_indirect(cmd, work, v->layout.args + ARGS_OFFSET(draw_args), 1U,
+                                             16U);
+    } else {
+        nph_gpu_cmd_draw_indexed_indirect_count(
+            cmd, work, v->layout.vis_draws + (u64)r->desc.max_vsm_draws * sizeof(NphVisDraw), work,
+            v->layout.counters + (u64)offsetof(NphVsmCounters, draw_count), r->desc.max_vsm_draws,
+            (u32)sizeof(NphVisDraw));
     }
 }
 

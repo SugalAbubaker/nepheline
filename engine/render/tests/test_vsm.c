@@ -104,10 +104,10 @@ NTEST_F(Vsm, the_sun_shadows_what_the_geometry_says)
 
 // The same on a device whose mesh shaders are switched off: the pages are
 // drawn with indexed indirect draws, as on lavapipe-class devices.
-NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
+// A fixture on a device whose mesh shaders are switched off; false where
+// there is no device, or no virtual shadow map on it (then torn down).
+static bool indirect_fixture(RenderFixture *f)
 {
-    static RenderFixture fx;
-    RenderFixture *f = &fx;
     memset(f, 0, sizeof *f);
     NphGpuDeviceDesc dd;
     memset(&dd, 0, sizeof dd);
@@ -116,7 +116,7 @@ NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
     dd.disable_features = (u32)NPH_GPU_OPTIONAL_MESH_SHADER;
     f->dev = test_gpu_create(&dd);
     if (f->dev == NULL) {
-        NTEST_SKIP("no Vulkan device available");
+        return false;
     }
     NphRendererDesc rd;
     test_renderer_desc(&rd, f->dev);
@@ -129,7 +129,17 @@ NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
     f->pixels = NPH_ALLOC_ARRAY_ZEROED(nph_allocator_system(), u8, PIXELS);
     if (!nph_renderer_virtual_shadows_supported(f->renderer)) {
         test_render_teardown(f);
-        NTEST_SKIP("no virtual shadow map on this device");
+        return false;
+    }
+    return true;
+}
+
+NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
+{
+    static RenderFixture fx;
+    RenderFixture *f = &fx;
+    if (!indirect_fixture(f)) {
+        NTEST_SKIP("no Vulkan device with a virtual shadow map available");
     }
     Scene s;
     scene_build(f, &s, at(0.0, 1.0, 0.0, 1.0F));
@@ -151,6 +161,41 @@ NTEST(vsm, the_indirect_raster_shadows_what_the_geometry_says)
     NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
     NTEST_EXPECT_GT_UINT(c.shadow, 8U);
     NTEST_EXPECT_GT_UINT(c.lit, 2000U);
+    test_render_teardown(f);
+}
+
+// The sun through a card whose material's alpha test cuts two opposite
+// quarters of it away (test_shadow_support.h "An alpha-tested caster"): the
+// map's masked raster runs the test on the card's fragments
+// (vsm_raster_masked.frag), so the card's shadow is a checker, black under
+// the quarters that are there and lit as without shadows under those that
+// are not. Opaque, the same card shadows all four, and alpha tested again
+// two: a material that becomes alpha tested, or stops being, has every page
+// drawn again.
+NTEST_F(Vsm, a_caster_casts_what_its_alpha_test_leaves)
+{
+    REQUIRE_VSM(f);
+    CheckerScene s;
+    checker_scene_build(f, &s);
+    NphRenderView v;
+    vsm_view(&v, top_camera());
+    checker_expect(f, &s, &v, 0.4F, "virtual shadow map");
+}
+
+// The same with indexed indirect draws, whose masked raster has commands of
+// its own over the one list of draws (vsm_cull.comp).
+NTEST(vsm, the_indirect_raster_casts_what_an_alpha_test_leaves)
+{
+    static RenderFixture fx;
+    RenderFixture *f = &fx;
+    if (!indirect_fixture(f)) {
+        NTEST_SKIP("no Vulkan device with a virtual shadow map available");
+    }
+    CheckerScene s;
+    checker_scene_build(f, &s);
+    NphRenderView v;
+    vsm_view(&v, top_camera());
+    checker_expect(f, &s, &v, 0.4F, "virtual shadow map, indirect raster");
     test_render_teardown(f);
 }
 

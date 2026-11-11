@@ -171,6 +171,83 @@ NTEST_F(Gi, the_boxes_occlude_the_sky)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// A card over the whole ground, above the camera, under an environment of
+// one radiance. Opaque, it hides nearly all the sky from the ground. Its
+// material alpha tested with an alpha under the cutoff, it is cut away
+// everywhere: the cache's rays pass it (rt_mask.glsl), and the ground's
+// irradiance comes back to what it is with the card hidden. The card is
+// flat, which no ray met while a flat mesh's place in the top level had a
+// zero for its thickness (rt.c).
+NTEST_F(Gi, a_cut_away_surface_hides_no_sky)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, test_cube_mesh(f), test_grey(f, 0.5F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, -2.0F), 0.8F);
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 4U, 1.0F, &data),
+                        NPH_RESULT_OK);
+    const NphRenderMesh plane = test_upload_mesh(f->renderer, &data);
+    nph_render_mesh_data_free(&data);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);
+    md.double_sided = 1;
+    NphRenderMaterial black = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &black), NPH_RESULT_OK);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = plane;
+    id.materials = &black;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(nph_dvec3(0.0, 3.0, 0.0), nph_quat_identity(),
+                                                 nph_vec3(60.0F, 60.0F, 60.0F));
+    NphRenderInstance card = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &card), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 under[PIXELS];
+    static u8 through[PIXELS];
+    static u8 open[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    // Opaque first, so that the light the cells then hold has to come through
+    // the card once it is cut away.
+    render_frames(f, &v, target, under, 2U * FRAMES);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, black, &md), NPH_RESULT_OK);
+    render_frames(f, &v, target, through, 2U * FRAMES);
+    nph_render_instance_set_hidden(f->renderer, card, true);
+    render_frames(f, &v, target, open, 2U * FRAMES);
+    f64 sum[3] = {0.0, 0.0, 0.0};
+    u32 ground = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 n;
+        if (pixel_point(&scene, i, &x, &n) >= 0) {
+            sum[0] += (f64)test_box_linear(under, i);
+            sum[1] += (f64)test_box_linear(through, i);
+            sum[2] += (f64)test_box_linear(open, i);
+            ++ground;
+        }
+    }
+    NTEST_LOG("%u ground pixels: irradiance under the opaque card %.4f, the card cut away %.4f, "
+              "no card %.4f",
+              ground, sum[0] / (f64)ground, sum[1] / (f64)ground, sum[2] / (f64)ground);
+    NTEST_ASSERT_GT_UINT(ground, SIZE * SIZE / 2U);
+    NTEST_EXPECT_TRUE(sum[2] > 0.0);
+    NTEST_EXPECT_TRUE(sum[0] < 0.25 * sum[2]);
+    NTEST_EXPECT_TRUE(nph_f64_abs(sum[1] / sum[2] - 1.0) < 0.03);
+    nph_render_instance_destroy(f->renderer, card);
+    test_box_release(f, target);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    nph_render_material_destroy(f->renderer, black);
+    nph_render_mesh_destroy(f->renderer, plane);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // ---------------------------------------------------------------------------
 // The sun's light, reflected
 // ---------------------------------------------------------------------------
@@ -512,8 +589,8 @@ NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
             continue;
         }
         const u64 h = render_gi_mix(render_gi_key(levels, p, n));
-        const u32 base = ((u32)h & (gi->capacity / (u32)NPH_RENDER_GI_BUCKET - 1U)) *
-                         (u32)NPH_RENDER_GI_BUCKET;
+        const u32 base =
+            ((u32)h & (gi->capacity / (u32)NPH_RENDER_GI_BUCKET - 1U)) * (u32)NPH_RENDER_GI_BUCKET;
         const u32 fp = (u32)(h >> 32U) | 1U;
         for (u32 s = base; s < base + (u32)NPH_RENDER_GI_BUCKET; ++s) {
             if (keys[s] == fp) {

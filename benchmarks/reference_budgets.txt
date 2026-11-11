@@ -23,6 +23,12 @@
 # reflection cells ask for (ADR-0087), past its budget against the reflection keys' build
 # (ADR-0086), from the mean of two rounds interleaved with that build's, a process a scene:
 # reference_scenes-2026-11-11-motion-win-msvc-profile-rtx3060ti.json and its second round)
+# (the passes whose rays now put alpha-tested surfaces to their materials' test (ADR-0088),
+# 2026-11-11, on the user's word: gpu.gi_update in every view, gpu.reflect_rays in the city's and
+# Bistro's, gpu.many_turns in three of Bistro's, and the frame (gpu, gpu.span) in the city's seven
+# views, three of Bistro's and two of the interior's: the 57 entries the mean of two rounds moved
+# 1.5 % or more and to within 3 % of their budgets, a process a scene, from
+# reference_scenes-2026-11-11-alpha-tested-win-msvc-profile-rtx3060ti.json and its second round)
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         55000
@@ -63,13 +69,13 @@ bistro_street_production.gpu.vsm_statistics    53000
 bistro_street_production.gpu.ao_depth          69000
 bistro_street_production.gpu.ao                452000
 bistro_street_production.gpu.ao_denoise        215000
-bistro_street_production.gpu.gi_update         244000
+bistro_street_production.gpu.gi_update         402000
 bistro_street_production.gpu.gi_resolve        81000
 bistro_street_production.gpu.many_tiles        62000
 bistro_street_production.gpu.reflect_clear     54000
 bistro_street_production.gpu.vis_resolve       1821000
 bistro_street_production.gpu.many_turns        177000
-bistro_street_production.gpu.reflect_rays      119000
+bistro_street_production.gpu.reflect_rays      193000
 bistro_street_production.gpu.reflect           167000
 bistro_street_production.gpu.vis_statistics    54000
 bistro_street_production.gpu.transparent       96000
@@ -126,13 +132,13 @@ bistro_street_walk_production.gpu.vsm_statistics 53000
 bistro_street_walk_production.gpu.ao_depth     69000
 bistro_street_walk_production.gpu.ao           451000
 bistro_street_walk_production.gpu.ao_denoise   214000
-bistro_street_walk_production.gpu.gi_update    247000
+bistro_street_walk_production.gpu.gi_update    399000
 bistro_street_walk_production.gpu.gi_resolve   85000
 bistro_street_walk_production.gpu.many_tiles   62000
 bistro_street_walk_production.gpu.reflect_clear 54000
 bistro_street_walk_production.gpu.vis_resolve  1828000
 bistro_street_walk_production.gpu.many_turns   198000
-bistro_street_walk_production.gpu.reflect_rays 179000
+bistro_street_walk_production.gpu.reflect_rays 244000
 bistro_street_walk_production.gpu.reflect      175000
 bistro_street_walk_production.gpu.vis_statistics 54000
 bistro_street_walk_production.gpu.transparent  98000
@@ -189,13 +195,13 @@ bistro_street_turn_production.gpu.vsm_statistics 53000
 bistro_street_turn_production.gpu.ao_depth     70000
 bistro_street_turn_production.gpu.ao           446000
 bistro_street_turn_production.gpu.ao_denoise   213000
-bistro_street_turn_production.gpu.gi_update    223000
+bistro_street_turn_production.gpu.gi_update    465000
 bistro_street_turn_production.gpu.gi_resolve   82000
 bistro_street_turn_production.gpu.many_tiles   62000
 bistro_street_turn_production.gpu.reflect_clear 54000
 bistro_street_turn_production.gpu.vis_resolve  1775000
-bistro_street_turn_production.gpu.many_turns   203000
-bistro_street_turn_production.gpu.reflect_rays 107000
+bistro_street_turn_production.gpu.many_turns   277000
+bistro_street_turn_production.gpu.reflect_rays 216000
 bistro_street_turn_production.gpu.reflect      127000
 bistro_street_turn_production.gpu.vis_statistics 54000
 bistro_street_turn_production.gpu.transparent  90000
@@ -211,8 +217,8 @@ bistro_street_turn_production.gpu.bloom_up_2   54000
 bistro_street_turn_production.gpu.bloom_up_1   58000
 bistro_street_turn_production.gpu.bloom_up_0   76000
 bistro_street_turn_production.gpu.taa          405000
-bistro_street_turn_production.gpu              4624000
-bistro_street_turn_production.gpu.span         4631000
+bistro_street_turn_production.gpu              4860000
+bistro_street_turn_production.gpu.span         4868000
 bistro_terrace_production.cpu                  50000
 bistro_terrace_production.gpu.vis_clear        56000
 bistro_terrace_production.gpu.vsm_clear        54000
@@ -252,13 +258,13 @@ bistro_terrace_production.gpu.vsm_statistics   53000
 bistro_terrace_production.gpu.ao_depth         69000
 bistro_terrace_production.gpu.ao               452000
 bistro_terrace_production.gpu.ao_denoise       214000
-bistro_terrace_production.gpu.gi_update        243000
+bistro_terrace_production.gpu.gi_update        476000
 bistro_terrace_production.gpu.gi_resolve       80000
 bistro_terrace_production.gpu.many_tiles       62000
 bistro_terrace_production.gpu.reflect_clear    55000
 bistro_terrace_production.gpu.vis_resolve      1896000
-bistro_terrace_production.gpu.many_turns       179000
-bistro_terrace_production.gpu.reflect_rays     116000
+bistro_terrace_production.gpu.many_turns       248000
+bistro_terrace_production.gpu.reflect_rays     248000
 bistro_terrace_production.gpu.reflect          163000
 bistro_terrace_production.gpu.vis_statistics   54000
 bistro_terrace_production.gpu.transparent      113000
@@ -274,8 +280,8 @@ bistro_terrace_production.gpu.bloom_up_2       54000
 bistro_terrace_production.gpu.bloom_up_1       58000
 bistro_terrace_production.gpu.bloom_up_0       76000
 bistro_terrace_production.gpu.taa              406000
-bistro_terrace_production.gpu                  4833000
-bistro_terrace_production.gpu.span             4840000
+bistro_terrace_production.gpu                  5033000
+bistro_terrace_production.gpu.span             5040000
 bistro_hedge_production.cpu                    50000
 bistro_hedge_production.gpu.vis_clear          55000
 bistro_hedge_production.gpu.vsm_clear          54000
@@ -314,13 +320,13 @@ bistro_hedge_production.gpu.vsm_statistics     53000
 bistro_hedge_production.gpu.ao_depth           70000
 bistro_hedge_production.gpu.ao                 454000
 bistro_hedge_production.gpu.ao_denoise         216000
-bistro_hedge_production.gpu.gi_update          221000
+bistro_hedge_production.gpu.gi_update          470000
 bistro_hedge_production.gpu.gi_resolve         76000
 bistro_hedge_production.gpu.many_tiles         62000
 bistro_hedge_production.gpu.reflect_clear      54000
 bistro_hedge_production.gpu.vis_resolve        1727000
-bistro_hedge_production.gpu.many_turns         167000
-bistro_hedge_production.gpu.reflect_rays       106000
+bistro_hedge_production.gpu.many_turns         251000
+bistro_hedge_production.gpu.reflect_rays       196000
 bistro_hedge_production.gpu.reflect            119000
 bistro_hedge_production.gpu.vis_statistics     54000
 bistro_hedge_production.gpu.bloom_down_0       115000
@@ -335,8 +341,8 @@ bistro_hedge_production.gpu.bloom_up_2         54000
 bistro_hedge_production.gpu.bloom_up_1         58000
 bistro_hedge_production.gpu.bloom_up_0         76000
 bistro_hedge_production.gpu.taa                409000
-bistro_hedge_production.gpu                    4515000
-bistro_hedge_production.gpu.span               4522000
+bistro_hedge_production.gpu                    4770000
+bistro_hedge_production.gpu.span               4778000
 city_street_production.cpu                     50000
 city_street_production.gpu.vis_clear           57000
 city_street_production.gpu.vsm_clear           55000
@@ -387,12 +393,12 @@ city_street_production.gpu.vsm_statistics      53000
 city_street_production.gpu.ao_depth            69000
 city_street_production.gpu.ao                  424000
 city_street_production.gpu.ao_denoise          212000
-city_street_production.gpu.gi_update           234000
+city_street_production.gpu.gi_update           494000
 city_street_production.gpu.gi_resolve          73000
 city_street_production.gpu.reflect_clear       54000
 city_street_production.gpu.vis_resolve         1180000
 city_street_production.gpu.vis_voxel_resolve   65000
-city_street_production.gpu.reflect_rays        88000
+city_street_production.gpu.reflect_rays        229000
 city_street_production.gpu.reflect             114000
 city_street_production.gpu.vis_statistics      54000
 city_street_production.gpu.bloom_down_0        114000
@@ -407,8 +413,8 @@ city_street_production.gpu.bloom_up_2          54000
 city_street_production.gpu.bloom_up_1          58000
 city_street_production.gpu.bloom_up_0          76000
 city_street_production.gpu.taa                 396000
-city_street_production.gpu                     3799000
-city_street_production.gpu.span                3808000
+city_street_production.gpu                     4178000
+city_street_production.gpu.span                4187000
 city_street_walk_production.cpu                50000
 city_street_walk_production.gpu.vis_clear      57000
 city_street_walk_production.gpu.vsm_clear      55000
@@ -459,12 +465,12 @@ city_street_walk_production.gpu.vsm_statistics 53000
 city_street_walk_production.gpu.ao_depth       69000
 city_street_walk_production.gpu.ao             422000
 city_street_walk_production.gpu.ao_denoise     212000
-city_street_walk_production.gpu.gi_update      235000
+city_street_walk_production.gpu.gi_update      503000
 city_street_walk_production.gpu.gi_resolve     76000
 city_street_walk_production.gpu.reflect_clear  54000
 city_street_walk_production.gpu.vis_resolve    1181000
 city_street_walk_production.gpu.vis_voxel_resolve 65000
-city_street_walk_production.gpu.reflect_rays   86000
+city_street_walk_production.gpu.reflect_rays   228000
 city_street_walk_production.gpu.reflect        124000
 city_street_walk_production.gpu.vis_statistics 54000
 city_street_walk_production.gpu.bloom_down_0   115000
@@ -479,8 +485,8 @@ city_street_walk_production.gpu.bloom_up_2     54000
 city_street_walk_production.gpu.bloom_up_1     58000
 city_street_walk_production.gpu.bloom_up_0     76000
 city_street_walk_production.gpu.taa            396000
-city_street_walk_production.gpu                3859000
-city_street_walk_production.gpu.span           3868000
+city_street_walk_production.gpu                4251000
+city_street_walk_production.gpu.span           4261000
 city_street_sprint_production.cpu              50000
 city_street_sprint_production.gpu.vis_clear    57000
 city_street_sprint_production.gpu.vsm_clear    55000
@@ -531,12 +537,12 @@ city_street_sprint_production.gpu.vsm_statistics 53000
 city_street_sprint_production.gpu.ao_depth     69000
 city_street_sprint_production.gpu.ao           420000
 city_street_sprint_production.gpu.ao_denoise   210000
-city_street_sprint_production.gpu.gi_update    231000
+city_street_sprint_production.gpu.gi_update    529000
 city_street_sprint_production.gpu.gi_resolve   83000
 city_street_sprint_production.gpu.reflect_clear 54000
 city_street_sprint_production.gpu.vis_resolve  1229000
 city_street_sprint_production.gpu.vis_voxel_resolve 65000
-city_street_sprint_production.gpu.reflect_rays 90000
+city_street_sprint_production.gpu.reflect_rays 227000
 city_street_sprint_production.gpu.reflect      118000
 city_street_sprint_production.gpu.vis_statistics 54000
 city_street_sprint_production.gpu.bloom_down_0 114000
@@ -551,8 +557,8 @@ city_street_sprint_production.gpu.bloom_up_2   54000
 city_street_sprint_production.gpu.bloom_up_1   58000
 city_street_sprint_production.gpu.bloom_up_0   77000
 city_street_sprint_production.gpu.taa          396000
-city_street_sprint_production.gpu              3901000
-city_street_sprint_production.gpu.span         3910000
+city_street_sprint_production.gpu              4326000
+city_street_sprint_production.gpu.span         4335000
 city_street_turn_production.cpu                50000
 city_street_turn_production.gpu.vis_clear      57000
 city_street_turn_production.gpu.vsm_clear      55000
@@ -603,12 +609,12 @@ city_street_turn_production.gpu.vsm_statistics 53000
 city_street_turn_production.gpu.ao_depth       68000
 city_street_turn_production.gpu.ao             441000
 city_street_turn_production.gpu.ao_denoise     207000
-city_street_turn_production.gpu.gi_update      229000
+city_street_turn_production.gpu.gi_update      474000
 city_street_turn_production.gpu.gi_resolve     77000
 city_street_turn_production.gpu.reflect_clear  54000
 city_street_turn_production.gpu.vis_resolve    1201000
 city_street_turn_production.gpu.vis_voxel_resolve 63000
-city_street_turn_production.gpu.reflect_rays   105000
+city_street_turn_production.gpu.reflect_rays   222000
 city_street_turn_production.gpu.reflect        158000
 city_street_turn_production.gpu.vis_statistics 54000
 city_street_turn_production.gpu.bloom_down_0   114000
@@ -623,8 +629,8 @@ city_street_turn_production.gpu.bloom_up_2     54000
 city_street_turn_production.gpu.bloom_up_1     58000
 city_street_turn_production.gpu.bloom_up_0     76000
 city_street_turn_production.gpu.taa            394000
-city_street_turn_production.gpu                3834000
-city_street_turn_production.gpu.span           3844000
+city_street_turn_production.gpu                4168000
+city_street_turn_production.gpu.span           4178000
 city_crossing_production.cpu                   50000
 city_crossing_production.gpu.vis_clear         58000
 city_crossing_production.gpu.vsm_clear         55000
@@ -675,12 +681,12 @@ city_crossing_production.gpu.vsm_statistics    53000
 city_crossing_production.gpu.ao_depth          68000
 city_crossing_production.gpu.ao                425000
 city_crossing_production.gpu.ao_denoise        206000
-city_crossing_production.gpu.gi_update         231000
+city_crossing_production.gpu.gi_update         454000
 city_crossing_production.gpu.gi_resolve        75000
 city_crossing_production.gpu.reflect_clear     54000
 city_crossing_production.gpu.vis_resolve       1224000
 city_crossing_production.gpu.vis_voxel_resolve 67000
-city_crossing_production.gpu.reflect_rays      95000
+city_crossing_production.gpu.reflect_rays      242000
 city_crossing_production.gpu.reflect           134000
 city_crossing_production.gpu.vis_statistics    54000
 city_crossing_production.gpu.bloom_down_0      114000
@@ -695,8 +701,8 @@ city_crossing_production.gpu.bloom_up_2        54000
 city_crossing_production.gpu.bloom_up_1        58000
 city_crossing_production.gpu.bloom_up_0        76000
 city_crossing_production.gpu.taa               396000
-city_crossing_production.gpu                   3930000
-city_crossing_production.gpu.span              3939000
+city_crossing_production.gpu                   4293000
+city_crossing_production.gpu.span              4302000
 city_park_production.cpu                       50000
 city_park_production.gpu.vis_clear             57000
 city_park_production.gpu.vsm_clear             55000
@@ -747,12 +753,12 @@ city_park_production.gpu.vsm_statistics        53000
 city_park_production.gpu.ao_depth              68000
 city_park_production.gpu.ao                    445000
 city_park_production.gpu.ao_denoise            204000
-city_park_production.gpu.gi_update             312000
+city_park_production.gpu.gi_update             945000
 city_park_production.gpu.gi_resolve            77000
 city_park_production.gpu.reflect_clear         54000
 city_park_production.gpu.vis_resolve           1301000
 city_park_production.gpu.vis_voxel_resolve     67000
-city_park_production.gpu.reflect_rays          96000
+city_park_production.gpu.reflect_rays          218000
 city_park_production.gpu.reflect               116000
 city_park_production.gpu.vis_statistics        54000
 city_park_production.gpu.bloom_down_0          114000
@@ -767,8 +773,8 @@ city_park_production.gpu.bloom_up_2            54000
 city_park_production.gpu.bloom_up_1            58000
 city_park_production.gpu.bloom_up_0            77000
 city_park_production.gpu.taa                   397000
-city_park_production.gpu                       4689000
-city_park_production.gpu.span                  4698000
+city_park_production.gpu                       5350000
+city_park_production.gpu.span                  5359000
 city_rooftop_production.cpu                    50000
 city_rooftop_production.gpu.vis_clear          57000
 city_rooftop_production.gpu.vsm_clear          55000
@@ -819,12 +825,12 @@ city_rooftop_production.gpu.vsm_statistics     53000
 city_rooftop_production.gpu.ao_depth           67000
 city_rooftop_production.gpu.ao                 290000
 city_rooftop_production.gpu.ao_denoise         170000
-city_rooftop_production.gpu.gi_update          232000
+city_rooftop_production.gpu.gi_update          534000
 city_rooftop_production.gpu.gi_resolve         74000
 city_rooftop_production.gpu.reflect_clear      54000
 city_rooftop_production.gpu.vis_resolve        880000
 city_rooftop_production.gpu.vis_voxel_resolve  221000
-city_rooftop_production.gpu.reflect_rays       205000
+city_rooftop_production.gpu.reflect_rays       359000
 city_rooftop_production.gpu.reflect            169000
 city_rooftop_production.gpu.vis_statistics     54000
 city_rooftop_production.gpu.bloom_down_0       113000
@@ -839,8 +845,8 @@ city_rooftop_production.gpu.bloom_up_2         54000
 city_rooftop_production.gpu.bloom_up_1         58000
 city_rooftop_production.gpu.bloom_up_0         76000
 city_rooftop_production.gpu.taa                383000
-city_rooftop_production.gpu                    5895000
-city_rooftop_production.gpu.span               5904000
+city_rooftop_production.gpu                    6380000
+city_rooftop_production.gpu.span               6389000
 interior_floor_production.cpu                  50000
 interior_floor_production.gpu.vis_clear        55000
 interior_floor_production.gpu.vis_lights       57000
@@ -869,7 +875,7 @@ interior_floor_production.gpu.vis_light_tiles  51000
 interior_floor_production.gpu.ao_depth         68000
 interior_floor_production.gpu.ao               381000
 interior_floor_production.gpu.ao_denoise       214000
-interior_floor_production.gpu.gi_update        219000
+interior_floor_production.gpu.gi_update        237000
 interior_floor_production.gpu.gi_resolve       74000
 interior_floor_production.gpu.many_tiles       66000
 interior_floor_production.gpu.reflect_clear    54000
@@ -921,7 +927,7 @@ interior_floor_walk_production.gpu.vis_light_tiles 51000
 interior_floor_walk_production.gpu.ao_depth    68000
 interior_floor_walk_production.gpu.ao          380000
 interior_floor_walk_production.gpu.ao_denoise  216000
-interior_floor_walk_production.gpu.gi_update   220000
+interior_floor_walk_production.gpu.gi_update   241000
 interior_floor_walk_production.gpu.gi_resolve  77000
 interior_floor_walk_production.gpu.many_tiles  66000
 interior_floor_walk_production.gpu.reflect_clear 55000
@@ -943,8 +949,8 @@ interior_floor_walk_production.gpu.bloom_up_2  54000
 interior_floor_walk_production.gpu.bloom_up_1  58000
 interior_floor_walk_production.gpu.bloom_up_0  77000
 interior_floor_walk_production.gpu.taa         408000
-interior_floor_walk_production.gpu             4096000
-interior_floor_walk_production.gpu.span        4103000
+interior_floor_walk_production.gpu             4173000
+interior_floor_walk_production.gpu.span        4179000
 interior_floor_turn_production.cpu             50000
 interior_floor_turn_production.gpu.vis_clear   56000
 interior_floor_turn_production.gpu.vis_lights  57000
@@ -973,7 +979,7 @@ interior_floor_turn_production.gpu.vis_light_tiles 51000
 interior_floor_turn_production.gpu.ao_depth    68000
 interior_floor_turn_production.gpu.ao          369000
 interior_floor_turn_production.gpu.ao_denoise  214000
-interior_floor_turn_production.gpu.gi_update   191000
+interior_floor_turn_production.gpu.gi_update   248000
 interior_floor_turn_production.gpu.gi_resolve  78000
 interior_floor_turn_production.gpu.many_tiles  67000
 interior_floor_turn_production.gpu.reflect_clear 54000
@@ -1025,7 +1031,7 @@ interior_gallery_production.gpu.vis_light_tiles 51000
 interior_gallery_production.gpu.ao_depth       68000
 interior_gallery_production.gpu.ao             374000
 interior_gallery_production.gpu.ao_denoise     214000
-interior_gallery_production.gpu.gi_update      193000
+interior_gallery_production.gpu.gi_update      247000
 interior_gallery_production.gpu.gi_resolve     76000
 interior_gallery_production.gpu.many_tiles     66000
 interior_gallery_production.gpu.reflect_clear  54000
@@ -1077,7 +1083,7 @@ interior_among_production.gpu.vis_light_tiles  51000
 interior_among_production.gpu.ao_depth         69000
 interior_among_production.gpu.ao               380000
 interior_among_production.gpu.ao_denoise       215000
-interior_among_production.gpu.gi_update        221000
+interior_among_production.gpu.gi_update        249000
 interior_among_production.gpu.gi_resolve       75000
 interior_among_production.gpu.many_tiles       66000
 interior_among_production.gpu.reflect_clear    54000
@@ -1099,8 +1105,8 @@ interior_among_production.gpu.bloom_up_2       54000
 interior_among_production.gpu.bloom_up_1       58000
 interior_among_production.gpu.bloom_up_0       78000
 interior_among_production.gpu.taa              409000
-interior_among_production.gpu                  4131000
-interior_among_production.gpu.span             4138000
+interior_among_production.gpu                  4216000
+interior_among_production.gpu.span             4223000
 interior_upward_production.cpu                 50000
 interior_upward_production.gpu.vis_clear       55000
 interior_upward_production.gpu.vis_lights      57000
@@ -1129,7 +1135,7 @@ interior_upward_production.gpu.vis_light_tiles 51000
 interior_upward_production.gpu.ao_depth        66000
 interior_upward_production.gpu.ao              338000
 interior_upward_production.gpu.ao_denoise      206000
-interior_upward_production.gpu.gi_update       188000
+interior_upward_production.gpu.gi_update       238000
 interior_upward_production.gpu.gi_resolve      76000
 interior_upward_production.gpu.many_tiles      65000
 interior_upward_production.gpu.reflect_clear   54000
