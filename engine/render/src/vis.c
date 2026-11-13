@@ -703,6 +703,7 @@ static void read_stats(NphRenderer *r)
     s->vis_instances_proxied = c->instances_proxied;
     s->vis_many_rays = c->many_rays;
     s->vis_reflect_dropped = c->reflect_dropped;
+    s->vis_gi_dropped = c->gi_dropped;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
@@ -2274,14 +2275,17 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         // pyramid's passes asked for them.
         res = render_vsm_declare_pages(r, graph, g.instances, g.meshes);
     }
-    if (res == NPH_RESULT_OK && r->ao.frame_active) {
-        // The ambient occlusion, which the resolve reads.
-        res = render_ao_declare(r, graph);
-    }
     if (res == NPH_RESULT_OK && r->rt.frame_active) {
         // Rays: the instance records from the GPU scene, then the builds,
-        // before the radiance cache and the resolve trace.
+        // before the occlusion, the radiance cache and the resolve trace.
         res = render_rt_declare(r, graph, g.instances, g.meshes, f->counters, &f->tlas);
+    }
+    if (res == NPH_RESULT_OK && r->ao.frame_active) {
+        // The ambient occlusion, which the resolve reads; where the sun grazes a surface its
+        // pass traces the sun (RenderAo.frame_grazed).
+        const RenderAoRays rays = {f->visbuffer, g.clusters,     g.instances,
+                                   g.meshes,     g.material_map, f->tlas};
+        res = render_ao_declare(r, graph, r->ao.frame_grazed ? &rays : NULL);
     }
     if (res == NPH_RESULT_OK && r->gi.frame_active) {
         // The radiance cache, whose cells the resolve reads.
@@ -2294,6 +2298,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         in.tlas = f->tlas;
         in.env = env;
         in.sh = sh;
+        in.counters = f->counters;
         res = render_gi_declare(r, graph, &in);
     }
     if (res == NPH_RESULT_OK) {
@@ -2376,6 +2381,7 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_instances_proxied = last->vis_instances_proxied;
         stats->vis_many_rays = last->vis_many_rays;
         stats->vis_reflect_dropped = last->vis_reflect_dropped;
+        stats->vis_gi_dropped = last->vis_gi_dropped;
         stats->vsm_requested = last->vsm_requested;
         stats->vsm_drawn = last->vsm_drawn;
         stats->vsm_resident = last->vsm_resident;

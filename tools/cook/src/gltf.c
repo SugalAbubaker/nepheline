@@ -823,6 +823,10 @@ static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, co
     }
 }
 
+// The share of light a material must let through (KHR_materials_transmission) to be glass: a
+// blended material the eye and the light pass through (convert_material).
+#define GLTF_GLASS_TRANSMISSION 0.5F
+
 static void convert_material(CookGltfScene *scene, const cgltf_data *data, const i32 *tex_images,
                              const cgltf_material *src, CookGltfMaterial *out)
 {
@@ -902,6 +906,20 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
     h->alpha_cutoff = src->alpha_cutoff;
     h->flags = (src->double_sided ? (u32)NPH_MATERIAL_FLAG_DOUBLE_SIDED : 0U) |
                (src->unlit ? (u32)NPH_MATERIAL_FLAG_UNLIT : 0U);
+    // Glass (KHR_materials_transmission, most of the light let through): a thin sheet seen
+    // through, a blended material whose alpha is the share its body keeps, its colour scaled by
+    // it; drawn opaque, as the extension's fallback has it, a window was a white wall that
+    // lit nothing behind it and shadowed what it stood before (docs/cook.md "Glass").
+    if (src->has_transmission != 0 &&
+        src->transmission.transmission_factor >= GLTF_GLASS_TRANSMISSION &&
+        h->alpha_mode == (u32)NPH_MATERIAL_ALPHA_OPAQUE) {
+        const f32 keep = 1.0F - nph_f32_min(src->transmission.transmission_factor, 1.0F);
+        h->base_color_factor =
+            nph_vec4(h->base_color_factor.x * keep, h->base_color_factor.y * keep,
+                     h->base_color_factor.z * keep, h->base_color_factor.w * keep);
+        h->alpha_mode = (u32)NPH_MATERIAL_ALPHA_BLEND;
+        h->flags |= (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE;
+    }
     // Its KHR_texture_transform is baked into the meshes' texture
     // coordinates (convert_mesh): said here, once, where its textures'
     // transforms differ.
@@ -1194,9 +1212,9 @@ static NphResult convert_nodes(CookGltfScene *scene, const cgltf_data *data)
 // Meshes the rays pass by (docs/cook.md "Rays"; ADR-0078)
 // ---------------------------------------------------------------------------
 
-// The share of light a material must let through (KHR_materials_transmission) for the rays to
-// take it as glass and pass through it.
-#define GLTF_RAYS_TRANSMISSION 0.5F
+// The rays take a material as glass, and pass through it, from the share of light the cook
+// takes it as glass from.
+#define GLTF_RAYS_TRANSMISSION GLTF_GLASS_TRANSMISSION
 
 static bool material_transmits(const cgltf_data *data, i32 material)
 {

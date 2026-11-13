@@ -127,13 +127,30 @@ void vsm_request_block(VsmViewRef r, ivec2 lo, ivec2 last, vec2 scale, vec4 dept
     const float m = r.v.margin;
     const ivec2 a = ivec2(floor(cmin - m));
     const ivec2 b = ivec2(floor(cmax + m));
+    // The level's band, where the shading blends with the next level
+    // (vsm_blends_q): the four in it take that level's pages too, as one
+    // request by the same rule; a block across the band's edge, or whose
+    // pages there are not one or two, requests pixel by pixel.
+    const bool blend = vsm_blends_q(min(min(q.x, q.y), min(q.z, q.w)));
+    const bool blend_any = vsm_blends_q(max(max(q.x, q.y), max(q.z, q.w)));
+    const int next = min(level + 1, NPH_VSM_LEVELS - 1);
+    const vec2 dmin = vsm_level_xy(r, next, pmin);
+    const vec2 dmax = vsm_level_xy(r, next, pmax);
+    const ivec2 a1 = ivec2(floor(dmin - m));
+    const ivec2 b1 = ivec2(floor(dmax + m));
+    const bool next_fits = all(greaterThanEqual(dmin, vec2(m))) &&
+                           all(lessThan(dmax, vec2(float(NPH_VSM_WINDOW) - m))) &&
+                           (b1.x - a1.x) + (b1.y - a1.y) <= 1;
     const bool block = all(greaterThan(depth, vec4(0.0))) && one_level &&
                        all(greaterThanEqual(cmin, vec2(m))) &&
                        all(lessThan(cmax, vec2(float(NPH_VSM_WINDOW) - m))) &&
-                       (b.x - a.x) + (b.y - a.y) <= 1;
+                       (b.x - a.x) + (b.y - a.y) <= 1 && blend == blend_any &&
+                       (!blend || next_fits);
     uint mine = VSM_NONE;
     uint round = 0u;
     vsm_gather_requests(r, block ? vsm_pack_request(level, a, b) : VSM_NONE, mine, round);
+    vsm_gather_requests(r, block && blend ? vsm_pack_request(next, a1, b1) : VSM_NONE, mine,
+                        round);
 
     const bool own = !block && any(greaterThan(depth, vec4(0.0)));
     const uvec4 owners = subgroupBallot(own);
@@ -150,11 +167,15 @@ void vsm_request_block(VsmViewRef r, ivec2 lo, ivec2 last, vec2 scale, vec4 dept
         const float s = subgroupShuffle(slope, from);
         const float z = k == 0u ? d.x : k == 1u ? d.y : k == 2u ? d.z : d.w;
         uint point = VSM_NONE;
+        uint coarser = VSM_NONE;
         if (item < points && z > 0.0) {
             const ivec2 pixel = min(o + ivec2(int(k & 1u), int(k >> 1u)), last);
-            point = vsm_request(r, vsm_ray_point(r, vsm_ndc(pixel, scale), z), s);
+            const vec3 ls = vsm_ray_point(r, vsm_ndc(pixel, scale), z);
+            point = vsm_request(r, ls, s);
+            coarser = vsm_request_coarser(r, ls, s);
         }
         vsm_gather_requests(r, point, mine, round);
+        vsm_gather_requests(r, coarser, mine, round);
     }
     if (mine != VSM_NONE) {
         vsm_set_request(r.v.requests, mine);

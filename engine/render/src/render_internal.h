@@ -1019,6 +1019,12 @@ typedef struct RenderTaa {
     NphGpuPipeline history_only;
     NphGpuSampler sampler; // bilinear, clamped to the edge: the history's taps
     NphGpuImage history[2];
+    // Each history's state (R8G8B8A8): in zw its pixels' surfaces' keys (taa_depth_key), by
+    // which the next frame knows a pixel's history for its own surface's; in y the frames each
+    // pixel's history holds (taa_count_after); in x its
+    // unrest (taa_common.glsl taa_unrest): how far a still pixel's frames
+    // have lain from its history lately, written with it.
+    NphGpuImage unrest[2];
     NphGpuFormat format; // the history's: RenderVis.hdr_format
     u32 width;
     u32 height;
@@ -1103,33 +1109,52 @@ typedef struct RenderDof {
 typedef struct RenderAo {
     NphGpuShader depth_shader;   // ao_depth.comp
     NphGpuShader ao_shader;      // ao.comp
+    NphGpuShader rt_shader;      // ao_rt.comp, on a renderer with ray queries
     NphGpuShader denoise_shader; // ao_denoise.comp
     NphGpuPipeline depth;
     NphGpuPipeline ao;
     NphGpuPipeline ao_contact; // with the contact shadows' march (ao.comp k_contact)
+    // The same with the rays' scene: a pixel the sun grazes traces it (ao_rt.comp).
+    NphGpuPipeline ao_grazed;
     NphGpuPipeline denoise;
+    NphGpuPipeline denoise_sun; // gathering the sun's rays too (ao_denoise.comp k_sun)
     // This frame, at half resolution.
     b32 frame_active;
-    NphRenderAoPush frame_push; // all but the images' indices
-    NphGpuRgImage frame_depths; // reverse-Z depths, NPH_RENDER_AO_MIPS mips
-    NphGpuRgImage frame_raw;    // each texel's slice's occlusion and the distance
-    NphGpuRgImage frame_out;    // the denoised occlusion and the depth
+    b32 frame_grazed;              // its pass is ao_grazed: the frame marches and has the top level
+    NphRenderAoPush frame_push;    // all but the images' indices
+    NphGpuRgImage frame_depths;    // reverse-Z depths, NPH_RENDER_AO_MIPS mips
+    NphGpuRgImage frame_raw;       // each texel's slice's occlusion and the distance
+    NphGpuRgImage frame_out;       // the denoised occlusion and the depth
+    NphGpuRgImage frame_visbuffer; // what each pixel shows, where the pass traces the sun
 } RenderAo;
 
 // The production path's radiance cache (gi.c): its slots persist across
 // frames; the frame's fields are set by render_gi_frame_begin and
 // render_gi_declare.
 typedef struct RenderGi {
-    b32 supported;               // render_gi_device_supported, set with the production path
-    b32 cleared;                 // its slots have been zeroed (the first frame that has it)
-    u32 capacity;                // slots (NphRendererDesc.gi_cells)
-    u32 sun_slot;                // the light whose bounce the update traces (NPH_U32_MAX: none)
-    NphGpuBuffer keys;           // u32 fingerprints
-    NphGpuBuffer sums;           // uvec4: this frame's samples
-    NphGpuBuffer cells;          // uvec4: irradiance, and its word (NPH_RENDER_GI_COUNT_BITS)
+    b32 supported;     // render_gi_device_supported, set with the production path
+    b32 cleared;       // its slots have been zeroed (the first frame that has it)
+    u32 capacity;      // slots (NphRendererDesc.gi_cells)
+    u32 sun_slot;      // the light whose bounce the update traces (NPH_U32_MAX: none)
+    NphGpuBuffer keys; // u32 fingerprints
+    NphGpuBuffer sums; // uvec4: this frame's samples
+    // uvec4: irradiance, and its word (NPH_RENDER_GI_COUNT_BITS). `cells` is what the frame looks
+    // up, as the filter left it (ADR-0090); `raw_cells` each cell's own mean, the resolve's.
+    NphGpuBuffer cells;
+    NphGpuBuffer raw_cells;
+    // uvec4, two a slot: its whole key, for the filter, and the spread and the light around its
+    // cell, which the filter leaves for the resolve; and its parents' light as the filter last
+    // looked it up (ADR-0091).
+    NphGpuBuffer cell_keys;
+    // vec4: the light the filter holds a cell to have, last frame's and this frame's by turns
+    // (`held_at`: this frame's).
+    NphGpuBuffer held[2];
+    u32 held_at;
     NphGpuBuffer moments;        // uvec4: a sample's luminance's variance, its recent mean
     NphGpuShader update_shader;  // gi_update.comp
     NphGpuShader resolve_shader; // gi_resolve.comp
+    NphGpuShader filter_shader;  // gi_filter.comp
+    NphGpuPipeline filter;
     NphGpuPipeline update;
     NphGpuPipeline update_many;        // with the many lights' far fields (RenderMany.frame_active)
     NphGpuPipeline update_voxels_many; // and voxel pixels
@@ -1174,6 +1199,7 @@ typedef struct RenderGi {
     b32 frame_active;
     b32 frame_reflect; // the frame's smooth surfaces take reflection cells
     b32 frame_rays;    // or smooth surfaces a ray a pixel every frame
+    b32 frame_smooth;  // the filter smooths the cells (NphRenderView.gi_smooth)
     u32 frame_width;
     u32 frame_height;
     u32 frame_rays_x; // the update's samples across and down the target
@@ -1182,6 +1208,9 @@ typedef struct RenderGi {
     NphGpuRgBuffer frame_keys;
     NphGpuRgBuffer frame_sums;
     NphGpuRgBuffer frame_cells;
+    NphGpuRgBuffer frame_raw_cells;
+    NphGpuRgBuffer frame_cell_keys;
+    NphGpuRgBuffer frame_held[2];
     NphGpuRgBuffer frame_moments;
     NphGpuRgBuffer frame_far_sums;
 } RenderGi;
@@ -1196,6 +1225,7 @@ typedef struct RenderGiInputs {
     NphGpuRgBuffer tlas;
     NphGpuRgImage env;
     NphGpuRgBuffer sh;
+    NphGpuRgBuffer counters; // the frame's statistics: the samples a full bucket dropped
 } RenderGiInputs;
 
 // The production path's motion blur (motion_blur.c): the motion image and
@@ -1544,7 +1574,17 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
 NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph);
 // Once the pyramid's passes have: the depths' mips, the occlusion, and its
 // denoise into RenderAo.frame_out, which the resolve upsamples.
-NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph);
+// `rays`: the frame's top level and the GPU scene's records, where the pass traces the sun
+// (RenderAo.frame_grazed; NULL otherwise). Declared after them.
+typedef struct RenderAoRays {
+    NphGpuRgImage visbuffer; // and what each pixel shows (NPH_VIS_CLUSTER_COARSE)
+    NphGpuRgBuffer clusters;
+    NphGpuRgBuffer instances;
+    NphGpuRgBuffer meshes;
+    NphGpuRgBuffer material_map;
+    NphGpuRgBuffer tlas;
+} RenderAoRays;
+NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph, const RenderAoRays *rays);
 // RenderAo.frame_out's sampled bindless index (a pass's callback).
 u32 render_ao_index(const NphRenderer *r, NphGpuRenderGraph *graph);
 
@@ -1626,8 +1666,8 @@ u64 render_paging_view_address(const NphRenderer *r);
 bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width, u32 height,
                            bool production);
 u64 render_gi_view_address(const NphRenderer *r);
-// Declares the update and the resolve (and, the first time, the slots'
-// clear) once the frame's top level and visibility buffer are declared.
+// Declares the update, the resolve and the filter (and, the first time, the
+// slots' clear) once the frame's top level and visibility buffer are declared.
 NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const RenderGiInputs *in);
 // After the resolve: the reflections' turns, if the frame has them (ADR-0077).
 typedef struct RenderGiReflectInputs {
@@ -1650,10 +1690,12 @@ void render_gi_write_reflect_image(const NphRenderer *r, NphGpuRgPass *pass);
 void render_gi_read(const NphRenderer *r, NphGpuRgPass *pass);
 // The keys on the CPU, gi_common.glsl's twins: a camera's level table for
 // cells 1 / (2 scale) to 1 / scale of their distance across, a point's
-// level and key, and the mix that makes a key's bucket and fingerprint.
+// level and key (and its key at another level: the next is its cell's parent's, ADR-0090), and
+// the mix that makes a key's bucket and fingerprint.
 void render_gi_levels(NphDVec3 camera, f64 scale, NphRenderGiLevel *levels);
 i32 render_gi_level(f32 dist);
 u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n);
+u64 render_gi_key_at(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n, i32 level);
 u64 render_gi_mix(u64 k);
 // The cache's light at the camera-relative point `p` on a surface whose normal `n` faces the
 // camera, blended from the four cells around it as gi_common.glsl's gi_surface_blend does

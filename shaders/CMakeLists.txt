@@ -66,8 +66,10 @@ nph_add_shaders(nph_shaders_render
         render/dof_resolve.comp
         render/ao_depth.comp
         render/ao.comp
+        render/ao_rt.comp
         render/ao_denoise.comp
         render/gi_update.comp
+        render/gi_filter.comp
         render/gi_resolve.comp
         render/debug_line.vert
         render/debug_line.frag

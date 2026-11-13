@@ -242,6 +242,58 @@ NTEST_F(Vsm, a_blended_surface_is_shadowed)
     NTEST_EXPECT_GT_UINT(c.lit, 1000U);
 }
 
+// A blended cube between the sun and the floor, out of the camera's view where an opaque one's
+// shadow falls across the middle (the test above's): the floor is lit as with no shadows at all,
+// through the map and through the sun's rays. A blended surface is glass or a decal: light
+// passes it as the eye does. Cast as any other, a dirt decal a hair before Bistro's wall
+// shadowed the wall under it wherever the map's texel was finer than the hair, from near and
+// not from far.
+NTEST_F(Vsm, a_blended_surface_casts_no_shadow)
+{
+    REQUIRE_VSM(f);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.5F, 0.5F, 0.5F, 0.75F);
+    md.metallic = 0.0F;
+    md.roughness = 0.9F;
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    NphRenderMaterial sheet = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &sheet), NPH_RESULT_OK);
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 6.0F));
+    (void)instance(f, cube, sheet, at(-3.0, 3.0, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(false);
+    const NphRenderLight sun = make_light(f, &ld);
+    const NphRenderCamera cam = top_camera();
+    static u8 off[PIXELS];
+    static u8 on[PIXELS];
+    for (u32 rays = 0; rays < 2U; ++rays) {
+        if (rays != 0U && !nph_renderer_ray_tracing_supported(f->renderer)) {
+            break;
+        }
+        NphRenderView v;
+        shadow_view(&v, cam, 13.0F, NPH_RENDER_PIPELINE_PRODUCTION,
+                    rays != 0U ? (u32)NPH_RENDER_VIS_RT_SHADOWS : 0U);
+        set_shadows(f, sun, &ld, false);
+        render_into(f, &v, off);
+        set_shadows(f, sun, &ld, true);
+        const NphRenderFrameStats st = render_into(f, &v, on);
+        NTEST_EXPECT_TRUE(rays != 0U ? st.shadow_rays : st.vsm);
+        u32 darker = 0U;
+        u32 lit = 0U;
+        for (u32 i = 0; i < TEST_TARGET_SIZE * TEST_TARGET_SIZE; ++i) {
+            darker += (u32)on[(u64)i * 4U] + 8U < (u32)off[(u64)i * 4U] ? 1U : 0U;
+            lit += off[(u64)i * 4U] > 64U ? 1U : 0U;
+        }
+        NTEST_LOG("%s: %u lit pixels, %u darker with the sun's shadows on",
+                  rays != 0U ? "rays" : "the map", lit, darker);
+        NTEST_EXPECT_GT_UINT(lit, 2000U);
+        NTEST_EXPECT_EQ_UINT(darker, 0U);
+    }
+}
+
 // The sun is the live directional light that casts shadows in the lowest
 // slot: another such light is ray traced, and the map passes to it when
 // the sun goes or stops casting, and back to a new one ahead of it.
@@ -828,6 +880,67 @@ NTEST_F(Vsm, a_narrow_view_from_afar_takes_a_level_that_holds_the_scene)
     NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
     NTEST_EXPECT_GT_UINT(c.shadow, 8U);
     NTEST_EXPECT_GT_UINT(c.lit, 500U);
+}
+
+// The pixels of two images (their red) more than 40 levels apart.
+static u32 pixels_apart(const u8 *a, const u8 *b)
+{
+    u32 n = 0U;
+    for (u32 i = 0; i < TEST_TARGET_SIZE * TEST_TARGET_SIZE; ++i) {
+        n += nph_i32_abs((i32)a[(u64)i * 4U] - (i32)b[(u64)i * 4U]) > 40 ? 1U : 0U;
+    }
+    return n;
+}
+
+// A low sun (11 degrees up) throws a cube's shadow 5 m along a floor seen from straight above,
+// 8 m of it across the view, a texel of the level its pixels take lying 5 times as long down the
+// shadow as across it. From 200 m the pixels' footprint is at the boundary between two levels: a
+// little nearer they read the finer, a little farther the coarser, whose texels are twice as
+// long. The two views, 0.8 % apart, show the same shadow: the finer level's light is blended
+// with the coarser's up to the boundary (VSM_BLEND_BAND), wholly the coarser's there. Unblended,
+// the shadow's end and sides stepped between the two views by up to a texel of the coarser
+// level, 5 pixels: a shadow that popped as the camera walked across the boundary (Bistro's
+// fronts under a grazing sun). Two views as far apart inside one level differ as little.
+NTEST_F(Vsm, a_shadow_holds_where_its_level_hands_over)
+{
+    REQUIRE_VSM(f);
+    const NphRenderMesh cube = mesh_of(f, make_cube);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    const NphRenderMaterial grey = material(f, nph_vec4(0.5F, 0.5F, 0.5F, 1.0F));
+    (void)instance(f, plane, grey, at(0.0, 0.0, 0.0, 60.0F));
+    (void)instance(f, cube, grey, at(0.0, 0.5, 0.0, 1.0F));
+    NphRenderLightDesc ld = sun_desc(true);
+    ld.direction = nph_vec3(1.0F, -0.2F, 0.0F);
+    (void)make_light(f, &ld);
+    // 8 m across the 64 pixels from `boundary`: 12.5 cm a pixel, 512 texels of level 0, and at
+    // the slope's most (a level finer) 256, level 8's texel.
+    const f64 boundary = 200.0;
+    const f32 fov = 2.0F * (f32)nph_f64_atan2(4.0, boundary);
+    const f64 heights[4] = {0.996 * boundary, 1.004 * boundary, 0.600 * boundary,
+                            0.6048 * boundary};
+    static u8 images[4][PIXELS];
+    for (u32 i = 0; i < 4U; ++i) {
+        const NphRenderCamera cam =
+            nph_render_camera_look_at(nph_dvec3(2.5, heights[i], 0.0), nph_dvec3(2.5, 0.0, 0.0),
+                                      nph_vec3(0.0F, 0.0F, -1.0F), fov, 1.0F);
+        NphRenderView v;
+        vsm_view(&v, cam);
+        (void)render_into(f, &v, images[i]);
+        const NphRenderFrameStats st = render_into(f, &v, images[i]);
+        NTEST_EXPECT_TRUE(st.vsm);
+    }
+    // The shadow is there: darker pixels than the lit floor's, a good many.
+    u32 dark = 0U;
+    const u32 lit = images[0][0];
+    for (u32 i = 0; i < TEST_TARGET_SIZE * TEST_TARGET_SIZE; ++i) {
+        dark += (u32)images[0][(u64)i * 4U] + 40U < lit ? 1U : 0U;
+    }
+    const u32 across = pixels_apart(images[0], images[1]);
+    const u32 within = pixels_apart(images[2], images[3]);
+    NTEST_LOG("%u pixels in shadow; across the boundary %u pixels differ, within a level %u", dark,
+              across, within);
+    NTEST_EXPECT_GT_UINT(dark, 150U);
+    NTEST_EXPECT_LE_UINT(across, within + 6U);
 }
 
 // The same scene and view 10,000 km from the origin give the same image:

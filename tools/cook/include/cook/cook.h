@@ -56,7 +56,14 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //      the mesh's own; a moved border and a changed shading normal count in a collapse's
 //      cost; a level's collapses go no further than an error of its own (ADR-0069).
 //   9: glass and lights' shells are flagged out of the rays (ADR-0078).
-#define COOK_MESH_VERSION 9U
+//  10: an edge whose other triangles fold back on it keeps its place as an open
+//      edge does: a sheet of two faces back to back keeps its outline.
+#define COOK_MESH_VERSION 10U
+
+// The same for materials, part of their settings hash: bumped, it recooks them alone.
+//   1: glass (KHR_materials_transmission, most light let through) is a blended, transmissive
+//      material (NPH_MATERIAL_FLAG_TRANSMISSIVE).
+#define COOK_MATERIAL_VERSION 1U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

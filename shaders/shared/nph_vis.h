@@ -51,6 +51,12 @@
 // A voxel cluster (render/voxel.h; ADR-0061): its meshlet record has no
 // vertices, and its pixels are the voxel resolve's (vis_voxel_resolve.glsl).
 #define NPH_VIS_CLUSTER_VOXELS 16
+// Drawn in place of finer geometry: a cluster of a coarser level of its
+// mesh (the group that made it has an error; render/cluster_lod.h), a voxel
+// cluster, or a cell's proxy's. Its pixels show a surface within the view's
+// error of the mesh the rays' scene holds, not the mesh's own, which a ray
+// from such a pixel must find first (ao_pass.glsl; ADR-0094).
+#define NPH_VIS_CLUSTER_COARSE 32
 
 // The visibility buffer: 64 bits per pixel, the depth's IEEE bits high
 // (reverse-Z, so the largest value is the nearest and atomicMax is the
@@ -454,6 +460,9 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // Statistics (ADR-0077): the reflections' rays whose cell found its bucket full, which went
     // nowhere (reflect_rays.comp).
     u32 reflect_dropped;
+    // Statistics (ADR-0091): the radiance cache's samples whose cell found its bucket full
+    // (gi_update.comp).
+    u32 gi_dropped;
 };
 
 // The production path's view of a frame.

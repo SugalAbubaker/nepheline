@@ -66,6 +66,12 @@
 // Open edges keep their shape through a perpendicular plane weighted by
 // the edge's squared length times this (meshoptimizer weighs them alike).
 #define BORDER_WEIGHT 10.0
+// Another triangle on a triangle's edge folds back on it where the two lie
+// within about 10 degrees of each other on one side of the edge (this
+// cosine, of the angle between their directions across it): a sheet's other
+// face, or a blade's. An edge whose every other triangle does is where the
+// sheet ends, as an open edge is.
+#define FOLD_COSINE 0.985F
 // A collapse may turn no triangle's normal by more than about 75 degrees
 // (this cosine): a bound on each step, since steps of a pass after pass add
 // up, and a triangle that turns that far is nearly folded over its
@@ -263,8 +269,23 @@ static NphResult weld_wedges(LodMesh *m, NphAllocator *alloc, const void *attrib
     return NPH_RESULT_OK;
 }
 
+// The unit direction from the line through `pa` along `edge` to `p`, across
+// the edge: zero for a point on the line.
+static NphVec3 across_edge(NphVec3 pa, NphVec3 edge, NphVec3 p)
+{
+    const NphVec3 d = nph_vec3_sub(p, pa);
+    const f32 along = nph_vec3_dot(d, edge) / nph_vec3_dot(edge, edge);
+    return nph_vec3_normalize_or_zero(nph_vec3_sub(d, nph_vec3_scale(edge, along)));
+}
+
 // The level-0 quadrics: triangle planes, then the perpendicular planes of
-// open edges (an edge between two classes that one triangle alone has).
+// the edges where a surface ends: open edges (an edge between two classes
+// that one triangle alone has), and those whose other triangles all fold
+// back on the triangle (FOLD_COSINE). A sheet modelled as two faces back to
+// back has no open edge, and its faces' one plane does not see its outline
+// move: without the planes its corners collapsed along its edges at no
+// error, and the sheet was gone a level later (a banner of the city's, at
+// 30 m).
 static NphResult build_quadrics(LodMesh *m, NphAllocator *alloc, const u32 *indices,
                                 u32 index_count)
 {
@@ -319,21 +340,36 @@ static NphResult build_quadrics(LodMesh *m, NphAllocator *alloc, const u32 *indi
                 if (ca == cb) {
                     continue;
                 }
-                // The triangles around ca that also have cb.
-                u32 sharing = 0U;
-                const u32 first = ca == 0U ? 0U : start[ca - 1U];
-                for (u32 i = first; i < start[ca]; ++i) {
-                    const u32 *o = &indices[(u64)around[i] * 3U];
-                    if (m->class_of[o[0]] == cb || m->class_of[o[1]] == cb ||
-                        m->class_of[o[2]] == cb) {
-                        sharing += 1U;
-                    }
-                }
-                if (sharing != 1U) {
-                    continue;
-                }
                 const NphVec3 pa = relative(m, tri[k]);
                 const NphVec3 edge = nph_vec3_sub(relative(m, tri[(k + 1U) % 3U]), pa);
+                const NphVec3 mine = across_edge(pa, edge, relative(m, tri[(k + 2U) % 3U]));
+                // The other triangles around ca that also have cb: whether
+                // any carries the surface on across the edge. One whose
+                // corners are the edge's alone (two at one position) is no
+                // surface.
+                bool carried = false;
+                const u32 first = ca == 0U ? 0U : start[ca - 1U];
+                for (u32 i = first; i < start[ca] && !carried; ++i) {
+                    if (around[i] == t) {
+                        continue;
+                    }
+                    const u32 *o = &indices[(u64)around[i] * 3U];
+                    u32 on_cb = 0U;
+                    u32 third = NPH_U32_MAX;
+                    for (u32 j = 0; j < 3U; ++j) {
+                        const u32 cj = m->class_of[o[j]];
+                        on_cb += cj == cb ? 1U : 0U;
+                        third = cj != ca && cj != cb ? o[j] : third;
+                    }
+                    if (on_cb == 0U || third == NPH_U32_MAX) {
+                        continue;
+                    }
+                    carried =
+                        nph_vec3_dot(across_edge(pa, edge, relative(m, third)), mine) < FOLD_COSINE;
+                }
+                if (carried) {
+                    continue;
+                }
                 const NphVec3 side = nph_vec3_normalize_or_zero(nph_vec3_cross(edge, n));
                 if (nph_vec3_dot(side, side) == 0.0F) {
                     continue;

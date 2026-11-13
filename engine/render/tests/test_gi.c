@@ -5,6 +5,8 @@
 // the irradiance each pixel's surface receives, read through the irradiance
 // debug view once the radiance cache has had frames to fill. And the cache's
 // keys against their CPU twins.
+#include <nepheline/math/random.h>
+
 #include "render_internal.h"
 #include "test_boxes.h"
 
@@ -218,9 +220,11 @@ NTEST_F(Gi, a_cut_away_surface_hides_no_sky)
     render_frames(f, &v, target, under, 2U * FRAMES);
     md.alpha_mode = NPH_RENDER_ALPHA_MASK;
     NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, black, &md), NPH_RESULT_OK);
-    render_frames(f, &v, target, through, 2U * FRAMES);
+    // (Long enough for the cells to leave their dark behind: where light arrived by few paths,
+    // as under the card's edges, the cells are slow to take a change for one, ADR-0090.)
+    render_frames(f, &v, target, through, 6U * FRAMES);
     nph_render_instance_set_hidden(f->renderer, card, true);
-    render_frames(f, &v, target, open, 2U * FRAMES);
+    render_frames(f, &v, target, open, 6U * FRAMES);
     f64 sum[3] = {0.0, 0.0, 0.0};
     u32 ground = 0U;
     for (u32 i = 0; i < SIZE * SIZE; ++i) {
@@ -257,15 +261,13 @@ NTEST_F(Gi, a_cut_away_surface_hides_no_sky)
 // of radiance (1 / pi) E cos, wherever the sun reaches it; rays find it, and
 // shadow rays the sun, here as in the cache's update. The irradiance view
 // shows the reflected light's irradiance over pi.
-NTEST_F(Gi, the_suns_light_bounces_off_a_wall)
+static void sun_bounces_off(RenderFixture *f, NphRenderMaterial wall)
 {
-    REQUIRE_GI(f);
     static TestBoxScene scene;
     memset(&scene, 0, sizeof scene);
     const NphRenderMesh mesh = test_cube_mesh(f);
     test_box_ground(f, &scene, mesh, test_grey(f, 0.0F));
-    test_box_add(f, &scene, mesh, test_grey(f, 1.0F), nph_vec3(-1.0F, 0.0F, -0.2F),
-                 nph_vec3(1.0F, 1.5F, 0.2F));
+    test_box_add(f, &scene, mesh, wall, nph_vec3(-1.0F, 0.0F, -0.2F), nph_vec3(1.0F, 1.5F, 0.2F));
     const NphRenderCamera camera =
         test_box_camera(&scene, nph_vec3(0.3F, 1.6F, 3.0F), nph_vec3(0.0F, 0.2F, 0.0F), 0.8F);
     const NphVec3 sun_direction = nph_vec3_normalize(nph_vec3(0.3F, -0.6F, -0.74F));
@@ -337,27 +339,58 @@ NTEST_F(Gi, the_suns_light_bounces_off_a_wall)
     nph_render_light_destroy(f->renderer, sun);
 }
 
+NTEST_F(Gi, the_suns_light_bounces_off_a_wall)
+{
+    REQUIRE_GI(f);
+    sun_bounces_off(f, test_grey(f, 1.0F));
+}
+
+// The same wall a rough metal: it reflects by its base colour as the white wall does, in a lobe
+// where that one reflects evenly, and what a ray's hit sends on of the light it receives is its
+// base colour's share whichever it is (gi_hit.glsl, ADR-0092): the ground before it has the
+// white wall's light. Counted as reflecting nothing, as metals were, every surface of a scene
+// whose materials keep their metalness in a texture (a factor of 1, the texture's value unread)
+// bounced no light at all: a city's shade was lit by its sky alone.
+NTEST_F(Gi, a_metal_wall_passes_the_suns_light_on)
+{
+    REQUIRE_GI(f);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+    md.metallic = 1.0F;
+    md.roughness = 1.0F;
+    NphRenderMaterial metal = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &metal), NPH_RESULT_OK);
+    sun_bounces_off(f, metal);
+}
+
 // ---------------------------------------------------------------------------
 // The history (ADR-0084)
 // ---------------------------------------------------------------------------
 
 #define SLOTS (1U << 16U) // test_renderer_desc's gi_cells
 
-// Each slot's sample count after the frames so far, from its cell's word.
+// Each slot's sample count after the frames so far: its cell's whole count, beside its moments
+// (the cell's word stops at its bits, ADR-0091).
 static void read_counts(RenderFixture *f, u32 *counts)
 {
     static u32 words[SLOTS * 4U];
     NTEST_ASSERT_EQ_UINT(f->renderer->gi.capacity, SLOTS);
     NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
-    test_read_buffer(f->dev, f->renderer->gi.cells, 0U, sizeof words, words);
+    test_read_buffer(f->dev, f->renderer->gi.moments, 0U, sizeof words, words);
     for (u32 i = 0; i < SLOTS; ++i) {
-        counts[i] = words[i * 4U + 3U] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+        counts[i] = words[i * 4U + 2U] >> 8U;
     }
 }
 
+// The frames a view is drawn before `early_counts` reads what its cells take a frame.
+#define EARLY_FRAMES 8U
+
 // The most samples any cell holds, and how many hold more than their history allows (none
-// should).
-static u32 most_samples(RenderFixture *f, u32 *over)
+// should): NPH_RENDER_GI_HISTORY samples, or NPH_RENDER_GI_HISTORY_FRAMES frames' where that is
+// more, a frame's being what the cell took over the view's first EARLY_FRAMES (`early`: their
+// counts then), and four deviations and a few samples for what a frame's count varies by.
+static u32 most_samples(RenderFixture *f, const u32 *early, u32 *over)
 {
     static u32 counts[SLOTS];
     read_counts(f, counts);
@@ -365,7 +398,11 @@ static u32 most_samples(RenderFixture *f, u32 *over)
     *over = 0U;
     for (u32 i = 0; i < SLOTS; ++i) {
         most = nph_max_u32(most, counts[i]);
-        *over += counts[i] > (u32)NPH_RENDER_GI_HISTORY ? 1U : 0U;
+        const f64 a_frame = (f64)early[i] / (f64)EARLY_FRAMES;
+        const f64 allowed =
+            nph_f64_max((f64)NPH_RENDER_GI_HISTORY,
+                        (f64)NPH_RENDER_GI_HISTORY_FRAMES * (a_frame + 4.0 * sqrt(a_frame) + 4.0));
+        *over += (f64)counts[i] > allowed ? 1U : 0U;
     }
     return most;
 }
@@ -390,9 +427,13 @@ static f64 surface_mean(const TestBoxScene *s, const u8 *image)
 // An open ground under an environment of one radiance, which then doubles. Its cells have filled
 // their histories, over which they would take dozens of frames to follow (some 20 samples a frame
 // reach each here: 1,024 samples' history leaves 92 % of the change after 4 frames, and the old
-// 128 samples' 53 %); but their light's recent mean now leaves their estimates by far more than
-// its spread allows, so the cells cut their histories down: past half the change in 4 frames, and
-// within 3 % of the new light in 16.
+// 128 samples' 53 %; and the history is NPH_RENDER_GI_HISTORY_FRAMES frames' samples where
+// those are more, ADR-0091: the view is drawn for more frames than that, so that a history
+// that grew without bound would show); but their light's recent mean now leaves their
+// estimates by far more than its spread allows, so the cells cut their histories down: past
+// half the change in 4 frames, and within 4 % of the new light in 16 (the cells' means are
+// 97 % of the way then, the cut histories having grown again from NPH_RENDER_GI_HISTORY_MIN
+// samples; what the cells are held to be goes with them, gi_resolve.comp).
 NTEST_F(Gi, a_cell_follows_a_change_of_its_light)
 {
     REQUIRE_GI(f);
@@ -407,9 +448,12 @@ NTEST_F(Gi, a_cell_follows_a_change_of_its_light)
     static u8 image[PIXELS];
     NphRenderView v;
     gi_view(&v, camera);
-    render_frames(f, &v, target, image, 64U);
+    render_frames(f, &v, target, image, EARLY_FRAMES);
+    static u32 early[SLOTS];
+    read_counts(f, early);
+    render_frames(f, &v, target, image, 160U - EARLY_FRAMES);
     u32 over = 0U;
-    const u32 most = most_samples(f, &over);
+    const u32 most = most_samples(f, early, &over);
     const f64 before = surface_mean(&scene, image);
     const NphRenderTexture bright = test_uniform_environment(f, 0.5F);
     render_frames(f, &v, target, image, 4U);
@@ -423,11 +467,11 @@ NTEST_F(Gi, a_cell_follows_a_change_of_its_light)
               "under the second (%.4f), %.4f after 4 frames (%.0f %% of the change) and %.4f "
               "after 16",
               most, before, dim_level, bright_level, soon, 100.0 * (soon - before) / change, after);
-    NTEST_EXPECT_EQ_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
+    NTEST_EXPECT_GE_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
     NTEST_EXPECT_EQ_UINT(over, 0U);
     NTEST_EXPECT_NEAR_F64(before, dim_level, 0.02 * dim_level);
     NTEST_EXPECT_TRUE(soon - before > 0.6 * change);
-    NTEST_EXPECT_NEAR_F64(after, bright_level, 0.03 * bright_level);
+    NTEST_EXPECT_NEAR_F64(after, bright_level, 0.04 * bright_level);
     test_box_release(f, target);
     nph_render_texture_destroy(f->renderer, bright);
     nph_render_texture_destroy(f->renderer, dim);
@@ -454,7 +498,10 @@ NTEST_F(Gi, a_still_light_is_averaged_over_the_whole_history)
     static u8 image[PIXELS];
     NphRenderView v;
     gi_view(&v, camera);
-    render_frames(f, &v, target, image, 96U);
+    render_frames(f, &v, target, image, EARLY_FRAMES);
+    static u32 early[SLOTS];
+    read_counts(f, early);
+    render_frames(f, &v, target, image, 96U - EARLY_FRAMES);
     static f64 sum[SIZE * SIZE];
     static f64 sum2[SIZE * SIZE];
     memset(sum, 0, sizeof sum);
@@ -483,13 +530,13 @@ NTEST_F(Gi, a_still_light_is_averaged_over_the_whole_history)
         ++shaded;
     }
     u32 over = 0U;
-    const u32 most = most_samples(f, &over);
+    const u32 most = most_samples(f, early, &over);
     NTEST_LOG("%u half-shaded pixels: they wander by %.3f of a 128-sample window's level; "
               "histories of up to %u samples",
               shaded, wander / window, most);
     NTEST_ASSERT_GT_UINT(shaded, 1000U);
     NTEST_EXPECT_TRUE(wander < 0.6 * window);
-    NTEST_EXPECT_EQ_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
+    NTEST_EXPECT_GE_UINT(most, (u32)NPH_RENDER_GI_HISTORY);
     NTEST_EXPECT_EQ_UINT(over, 0U);
     test_box_release(f, target);
     nph_render_texture_destroy(f->renderer, env);
@@ -535,11 +582,11 @@ NTEST_F(Gi, a_young_cell_keeps_all_its_samples)
 // The cells' size follows the distance from the camera, so a camera walking toward a surface
 // brings it into a finer level of cells, which hold no samples there yet (ADR-0087). Shaded
 // ground under a roof, settled from 2 m further back, the camera then moved and a frame drawn.
-// The cells of the finer level the ground's near half has come into hold their neighbouring
-// level's light as NPH_RENDER_GI_SEED samples from the frame that made them (gi_seed), and the
-// ground keeps its light against the same view settled: any cell with a sample is trusted.
-// Otherwise the environment's light, which the roof hides, made up what new cells lacked: rings
-// of light followed the camera across shaded ground.
+// The cells of the finer level the ground's near half has come into take their parents' light
+// from the frame that made them, the coarser level's cells that were the ground's own until now
+// (gi_filter.comp, ADR-0090), and are trusted as those are; the ground keeps its light against
+// the same view settled. Otherwise the environment's light, which the roof hides, made up what
+// new cells lacked: rings of light followed the camera across shaded ground.
 NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
 {
     REQUIRE_GI(f);
@@ -549,7 +596,11 @@ NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
     const NphRenderMesh mesh = test_cube_mesh(f);
     const NphRenderMaterial grey = test_grey(f, 0.5F);
     test_box_ground(f, &scene, mesh, grey);
-    test_box_add(f, &scene, mesh, grey, nph_vec3(-3.0F, 1.0F, -7.0F), nph_vec3(3.0F, 1.2F, -2.0F));
+    // (A black roof: what the ground's rays meet on its underside reflects nothing. A grey one's
+    // light would be what the cache takes an unseen surface to receive, ADR-0090, which the two
+    // cameras here see differently.)
+    test_box_add(f, &scene, mesh, test_grey(f, 0.0F), nph_vec3(-3.0F, 1.0F, -7.0F),
+                 nph_vec3(3.0F, 1.2F, -2.0F));
     const NphVec3 target_at = nph_vec3(0.0F, 0.0F, -4.0F);
     const NphVec3 far_eye = nph_vec3(0.0F, 0.6F, 2.5F);
     NphRenderCamera camera = test_box_camera(&scene, far_eye, target_at, 0.6F);
@@ -596,7 +647,7 @@ NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
             if (keys[s] == fp) {
                 ++newcomers;
                 const u32 count = cells[(u64)s * 4U + 3U] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
-                seeded += count >= (u32)NPH_RENDER_GI_SEED ? 1U : 0U;
+                seeded += count >= (u32)NPH_RENDER_GI_TRUSTED ? 1U : 0U;
                 break;
             }
         }
@@ -623,8 +674,8 @@ NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
     const f64 mean_settled = sum_settled / (f64)shaded;
     const f64 open = 0.6 * (f64)EXPOSURE;
     NTEST_LOG("%u shaded pixels: %.4f the frame after the move, %.4f settled (the open sky's "
-              "%.4f); %u of their pixels in the finer level's cells, %u of those cells holding "
-              "a seed's samples",
+              "%.4f); %u of their pixels in the finer level's cells, %u of those cells lent "
+              "their parents' light",
               shaded, mean_early, mean_settled, open, newcomers, seeded);
     NTEST_EXPECT_TRUE(mean_settled < 0.7 * open); // the roof shades it
     NTEST_EXPECT_NEAR_F64(mean_early, mean_settled, 0.08 * mean_settled);
@@ -632,6 +683,176 @@ NTEST_F(Gi, a_surface_entering_a_finer_level_keeps_its_light)
     // (Not all: seen at a grazing angle, a pixel of the ground covers several cells along it, and
     // the coarser level's cells a pixel's point did not fall in hold nothing to give.)
     NTEST_EXPECT_TRUE((f64)seeded >= 0.3 * (f64)newcomers);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// The roof of the tests below, and whether pixel `i` of the view shows the ground under it, away
+// from its edges.
+static void roofed_ground(RenderFixture *f, TestBoxScene *scene)
+{
+    memset(scene, 0, sizeof *scene);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    test_box_ground(f, scene, mesh, test_grey(f, 0.5F));
+    // (Black: what the ground's rays meet on its underside reflects nothing.)
+    test_box_add(f, scene, mesh, test_grey(f, 0.0F), nph_vec3(-3.0F, 1.0F, -7.0F),
+                 nph_vec3(3.0F, 1.2F, -2.0F));
+}
+
+static bool roof_shades(const TestBoxScene *scene, u32 i)
+{
+    NphVec3 x;
+    NphVec3 n;
+    return pixel_point(scene, i, &x, &n) == 0 && n.y >= 0.5F && nph_f32_abs(x.x) <= 2.0F &&
+           x.z <= -2.5F && x.z >= -6.5F;
+}
+
+// A view the frames have never seen: none of its cells is there, and the frame that comes to it
+// gives each a ray or none. Its cells begin with the light of the cells above them, which the
+// same rays filled, the first level of them whose cells know their light by their samples
+// (gi_filter.comp, ADR-0091): the shade under a roof is lit as the settled view from its first
+// frame, a pixel a fifth of the light out (the view here has a ray a pixel and sees the ground
+// at so low an angle that most of its cells have none). Begun with their own samples' means, a
+// ray or two's, the cells are each the sky's light or none, some 250 % of the shade's out a
+// pixel, and the next frames' samples move them by as much: the flicker of a view at a run.
+NTEST_F(Gi, a_new_view_is_lit_from_its_first_frame)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.6F);
+    static TestBoxScene scene;
+    roofed_ground(f, &scene);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 first[PIXELS];
+    static u8 settled[PIXELS];
+    NphRenderView v;
+    // The open ground behind, for a while; then the roof.
+    const NphVec3 eye = nph_vec3(0.0F, 0.6F, 2.5F);
+    gi_view(&v, test_box_camera(&scene, eye, nph_vec3(0.0F, 0.0F, 9.0F), 0.6F));
+    render_frames(f, &v, target, first, FRAMES);
+    gi_view(&v, test_box_camera(&scene, eye, nph_vec3(0.0F, 0.0F, -4.0F), 0.6F));
+    render_frames(f, &v, target, first, 1U);
+    render_frames(f, &v, target, settled, 2U * FRAMES);
+    f64 sum_first = 0.0;
+    f64 sum_settled = 0.0;
+    f64 apart = 0.0;
+    u32 shaded = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        if (!roof_shades(&scene, i)) {
+            continue;
+        }
+        const f64 a = (f64)test_box_linear(first, i);
+        const f64 b = (f64)test_box_linear(settled, i);
+        sum_first += a;
+        sum_settled += b;
+        apart += nph_f64_abs(a - b);
+        ++shaded;
+    }
+    NTEST_ASSERT_GT_UINT(shaded, 500U);
+    const f64 open = 0.6 * (f64)EXPOSURE;
+    NTEST_LOG("%u shaded pixels: %.4f in the view's first frame, %.4f settled (the open sky's "
+              "%.4f); a pixel %.1f %% of the settled light out",
+              shaded, sum_first / (f64)shaded, sum_settled / (f64)shaded, open,
+              100.0 * apart / sum_settled);
+    NTEST_EXPECT_TRUE(sum_settled / (f64)shaded < 0.5 * open); // the roof shades it
+    NTEST_EXPECT_NEAR_F64(sum_first, sum_settled, 0.1 * sum_settled);
+    NTEST_EXPECT_TRUE(apart < 0.3 * sum_settled);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// A camera at a run, with the rays a cell has in a real view (a ray to 16 pixels, a handful a
+// cell a frame): every cell near it is new, or has a few frames' samples. Two frames drawn at
+// the last pose differ by what the frame's samples moved the light: little, the cells being
+// held to what their samples, their neighbours' and their parents' make out together, of which
+// one frame's samples are a small share (gi_filter.comp, ADR-0091): 1.3 % of the light a
+// pixel here. Where what a cell is held to be goes with its mean every frame, 4 %; and in a
+// view at a run, whose cells near the camera are a frame or two old, the shade flickered by a
+// fifth from one frame to the next.
+NTEST_F(Gi, a_moving_cameras_frames_hold_their_light)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.6F);
+    static TestBoxScene scene;
+    roofed_ground(f, &scene);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 one[PIXELS];
+    static u8 other[PIXELS];
+    NphRenderView v;
+    // Sideways past the roof's open end, 0.2 m a frame, looking under it.
+    NphVec3 eye = nph_vec3(-2.4F, 0.6F, 2.5F);
+    for (u32 k = 0; k < 24U; ++k) {
+        eye.x += 0.2F;
+        gi_view(&v, test_box_camera(&scene, eye, nph_vec3(eye.x, 0.0F, -4.0F), 0.6F));
+        v.gi_rays = SIZE * SIZE / 16U;
+        NTEST_EXPECT_TRUE(test_render_frame(f, &v, target).gi);
+    }
+    render_frames(f, &v, target, one, 1U);
+    render_frames(f, &v, target, other, 1U);
+    f64 sum = 0.0;
+    f64 apart = 0.0;
+    u32 shaded = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        if (!roof_shades(&scene, i)) {
+            continue;
+        }
+        const f64 a = (f64)test_box_linear(one, i);
+        const f64 b = (f64)test_box_linear(other, i);
+        sum += 0.5 * (a + b);
+        apart += nph_f64_abs(a - b);
+        ++shaded;
+    }
+    NTEST_ASSERT_GT_UINT(shaded, 500U);
+    NTEST_LOG("%u shaded pixels at %.4f: two frames at one pose, after 24 moving, differ by "
+              "%.2f %% of it a pixel",
+              shaded, sum / (f64)shaded, 100.0 * apart / sum);
+    NTEST_EXPECT_TRUE(apart < 0.025 * sum);
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// A run past more cells than the table holds: a camera low over open ground, a metre on each
+// frame, makes thousands of new cells a frame, and those behind it keep their slots for
+// NPH_RENDER_GI_MAX_AGE frames. When their buckets fill, the cells the samples no longer reach
+// give their slots up, the oldest first (gi_common.glsl gi_claim_cell_within, ADR-0091), and
+// the frame's samples all find their cells. Without, a table once full dropped a quarter of a
+// frame's samples in a run past a wall, and the wall's pixels found no cell: they took the
+// sky's light, or none.
+NTEST_F(Gi, a_full_table_makes_room_for_the_frames_cells)
+{
+    REQUIRE_GI(f);
+    const NphRenderTexture env = test_uniform_environment(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, test_cube_mesh(f), test_grey(f, 0.5F));
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    NphRenderView v;
+    NphVec3 eye = nph_vec3(-60.0F, 1.5F, 0.0F);
+    u32 dropped = 0U;
+    u32 rays = 0U;
+    const u32 frames = 120U;
+    for (u32 k = 0; k < frames; ++k) {
+        eye.x += 1.0F;
+        gi_view(&v, test_box_camera(&scene, eye, nph_vec3(eye.x, 0.0F, -4.0F), 0.6F));
+        const NphRenderFrameStats st = test_render_frame(f, &v, target);
+        NTEST_EXPECT_TRUE(st.gi);
+        dropped += st.vis_gi_dropped;
+        rays += st.gi_rays;
+    }
+    const RenderGi *gi = &f->renderer->gi;
+    static u32 slots[SLOTS];
+    NTEST_ASSERT_EQ_UINT(gi->capacity, SLOTS);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, gi->keys, 0U, sizeof slots, slots);
+    u32 used = 0U;
+    for (u32 i = 0; i < SLOTS; ++i) {
+        used += slots[i] != 0U ? 1U : 0U;
+    }
+    NTEST_LOG("%u frames, a metre on each: %u of %u slots hold a cell; %u of %u samples found "
+              "no slot",
+              frames, used, (u32)SLOTS, dropped, rays);
+    // (The table did fill: the frames made several times its cells.)
+    NTEST_EXPECT_TRUE((f64)used > 0.9 * (f64)SLOTS);
+    NTEST_EXPECT_TRUE((f64)dropped < 0.002 * (f64)rays);
     test_box_release(f, target);
     nph_render_texture_destroy(f->renderer, env);
 }
@@ -718,6 +939,210 @@ NTEST_F(Gi, a_pixel_blends_the_cells_around_its_point)
 }
 
 // ---------------------------------------------------------------------------
+// The filter (ADR-0090)
+// ---------------------------------------------------------------------------
+
+// Black ground under a wide black roof a metre up, under an environment of one radiance: what
+// reaches the ground is the strip of sky under the roof's edges, a few hundredths of its
+// hemisphere, so a sample is pi L or, nearly always, nothing, and a cell's own mean after a
+// thousand of them is still a tenth or more out, each cell its own way. The cells' own means
+// (NphRenderView.gi_smooth off) against the filter's, both against the truth stratified rays
+// measure: the filter leaves a fraction of the mottling, and the shade as bright as its samples
+// make it (weights that follow each cell's own variance left it half as bright: the cells a
+// path of light had reached counted for less).
+typedef struct RoofResult {
+    u32 shaded;
+    f64 truth;    // the open share of the sky, the shaded pixels' mean
+    f64 own;      // the cells' own means there
+    f64 own_err;  // and their mean distance from the truth a pixel, over the truth
+    f64 filtered; // the same of the filter's
+    f64 filtered_err;
+    f64 cells_own;      // the cells' own means' luminance, summed by their samples' counts
+    f64 cells_filtered; // and the filter's
+    u32 cells;
+    u32 cut; // cells whose history is under the whole
+} RoofResult;
+
+// The light arriving at `x` on a surface facing `n`, over the open sky's: `strata` x `strata`
+// paths that leave in cosine-weighted directions and bounce off the boxes, which reflect `albedo`
+// of what they receive evenly, until they leave for the sky (or 16 bounces have left under 1 % of
+// a path's light). With black boxes, the share of the sky open to the point.
+static f64 roof_truth(const TestBoxScene *s, NphVec3 x, NphVec3 n, f32 albedo, u32 strata,
+                      NphPcg32 *rng)
+{
+    f64 sum = 0.0;
+    for (u32 a = 0; a < strata; ++a) {
+        for (u32 b = 0; b < strata; ++b) {
+            NphVec3 o = nph_vec3_add(x, nph_vec3_scale(n, 1e-4F));
+            NphVec3 d = test_cosine_direction(n, a, b, strata);
+            f64 weight = 1.0;
+            for (u32 bounce = 0; bounce < 16U; ++bounce) {
+                f32 t = 0.0F;
+                NphVec3 hn;
+                if (test_box_hit(s, o, d, 0.0F, &t, &hn) < 0) {
+                    sum += weight;
+                    break;
+                }
+                weight *= (f64)albedo;
+                if (weight <= 0.0) {
+                    break;
+                }
+                o = nph_vec3_add(nph_vec3_add(o, nph_vec3_scale(d, t)), nph_vec3_scale(hn, 1e-4F));
+                // (Two statements: the order of two draws in one expression is the compiler's.)
+                const u32 u = nph_pcg32_next_u32(rng) & 1023U;
+                const u32 v = nph_pcg32_next_u32(rng) & 1023U;
+                d = test_cosine_direction(hn, u, v, 1024U);
+            }
+        }
+    }
+    return sum / (f64)(strata * strata);
+}
+
+static void under_a_roof(RenderFixture *f, bool walled, f32 albedo, RoofResult *out)
+{
+    const f32 height = 1.0F;
+    const f32 radiance = 0.6F;
+    const NphRenderTexture env = test_uniform_environment(f, radiance);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderMaterial black = test_grey(f, albedo);
+    test_box_ground(f, &scene, mesh, black);
+    test_box_add(f, &scene, mesh, black, nph_vec3(-3.0F, height, -7.0F),
+                 nph_vec3(3.0F, height + 0.2F, -2.0F));
+    if (walled) {
+        // Walls on three sides: the sky shows through the side the camera looks in by alone.
+        test_box_add(f, &scene, mesh, black, nph_vec3(-3.2F, 0.0F, -7.0F),
+                     nph_vec3(-3.0F, height, -2.0F));
+        test_box_add(f, &scene, mesh, black, nph_vec3(3.0F, 0.0F, -7.0F),
+                     nph_vec3(3.2F, height, -2.0F));
+        test_box_add(f, &scene, mesh, black, nph_vec3(-3.2F, 0.0F, -7.2F),
+                     nph_vec3(3.2F, height, -7.0F));
+        // And a curtain over the upper part of that side, which the camera looks in under.
+        test_box_add(f, &scene, mesh, black, nph_vec3(-3.2F, 0.4F, -2.0F),
+                     nph_vec3(3.2F, height, -1.9F));
+    }
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 0.6F, 2.5F), nph_vec3(0.0F, 0.0F, -4.0F), 0.6F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 own[PIXELS];
+    static u8 filtered[PIXELS];
+    NphRenderView v;
+    gi_view(&v, camera);
+    // (Surfaces that reflect pass light between them, a bounce a frame, through histories of a
+    // thousand samples: they take many times longer to settle.)
+    const u32 settle = albedo > 0.0F ? 8U : 1U;
+    v.gi_smooth = 0;
+    render_frames(f, &v, target, own, settle * 4U * FRAMES);
+    v.gi_smooth = 1;
+    render_frames(f, &v, target, filtered, settle * 2U * FRAMES);
+    memset(out, 0, sizeof *out);
+    f64 own_err = 0.0;
+    f64 filtered_err = 0.0;
+    NphPcg32 rng;
+    nph_pcg32_seed(&rng, 0x5EEDULL, 1ULL);
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 n;
+        if (pixel_point(&scene, i, &x, &n) != 0 || n.y < 0.5F || nph_f32_abs(x.x) > 2.0F ||
+            x.z > -2.5F || x.z < -6.5F) {
+            continue;
+        }
+        // (Fewer paths where they bounce: each is many rays, and the bounces spread them.)
+        const f64 truth =
+            roof_truth(&scene, x, n, albedo, albedo > 0.0F ? 2U * STRATA : 6U * STRATA, &rng);
+        const f64 a = (f64)test_box_linear(own, i) / (f64)(radiance * EXPOSURE);
+        const f64 b = (f64)test_box_linear(filtered, i) / (f64)(radiance * EXPOSURE);
+        out->truth += truth;
+        out->own += a;
+        out->filtered += b;
+        own_err += fabs(a - truth);
+        filtered_err += fabs(b - truth);
+        ++out->shaded;
+    }
+    NTEST_EXPECT_GT_UINT(out->shaded, 1000U);
+    out->own_err = own_err / out->truth;
+    out->filtered_err = filtered_err / out->truth;
+    out->truth /= (f64)out->shaded;
+    out->own /= (f64)out->shaded;
+    out->filtered /= (f64)out->shaded;
+    // The cells themselves: the filter moves light between them and makes none.
+    const RenderGi *gi = &f->renderer->gi;
+    static u32 keys[SLOTS];
+    static u32 raw[SLOTS * 4U];
+    static u32 cells[SLOTS * 4U];
+    NTEST_ASSERT_EQ_UINT(gi->capacity, SLOTS);
+    NTEST_ASSERT_EQ_INT(nph_gpu_device_wait_idle(f->dev), NPH_RESULT_OK);
+    test_read_buffer(f->dev, gi->keys, 0U, sizeof keys, keys);
+    test_read_buffer(f->dev, gi->raw_cells, 0U, sizeof raw, raw);
+    test_read_buffer(f->dev, gi->cells, 0U, sizeof cells, cells);
+    for (u32 i = 0; i < SLOTS; ++i) {
+        const u32 word = raw[(u64)i * 4U + 3U];
+        const u32 count = word & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+        const u32 age = (word >> NPH_RENDER_GI_COUNT_BITS) & 0xFFU;
+        if (keys[i] == 0U || count == 0U || age != 0U) {
+            continue;
+        }
+        f32 e[3];
+        f32 s[3];
+        memcpy(e, &raw[(u64)i * 4U], sizeof e);
+        memcpy(s, &cells[(u64)i * 4U], sizeof s);
+        out->cells_own += (f64)count * (f64)(0.2126F * e[0] + 0.7152F * e[1] + 0.0722F * e[2]);
+        out->cells_filtered += (f64)count * (f64)(0.2126F * s[0] + 0.7152F * s[1] + 0.0722F * s[2]);
+        ++out->cells;
+        out->cut += count < (u32)NPH_RENDER_GI_HISTORY ? 1U : 0U;
+    }
+    test_box_release(f, target);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+static void log_roof(const char *what, const RoofResult *r)
+{
+    NTEST_LOG("%s: %u shaded pixels, %.4f of the sky open to them: the cells' own means %.4f (off "
+              "by %.1f %% of it a pixel), filtered %.4f (%.1f %%); %u cells' light by their "
+              "samples: filtered %.4f of their own; %u under a whole history",
+              what, r->shaded, r->truth, r->own, 100.0 * r->own_err, r->filtered,
+              100.0 * r->filtered_err, r->cells, r->cells_filtered / r->cells_own, r->cut);
+}
+
+NTEST_F(Gi, the_filter_keeps_the_light)
+{
+    REQUIRE_GI(f);
+    RoofResult r;
+    under_a_roof(f, false, 0.0F, &r);
+    log_roof("a roof a metre up", &r);
+    NTEST_EXPECT_TRUE(r.truth < 0.2);
+    NTEST_EXPECT_TRUE(r.own_err > 0.04);
+    NTEST_EXPECT_TRUE(r.filtered_err < 0.7 * r.own_err);
+    NTEST_EXPECT_NEAR_F64(r.filtered, r.truth, 0.02 * r.truth);
+    NTEST_EXPECT_NEAR_F64(r.cells_filtered, r.cells_own, 0.01 * r.cells_own);
+}
+
+NTEST_F(Gi, the_filter_keeps_the_light_of_few_paths)
+{
+    REQUIRE_GI(f);
+    RoofResult r;
+    under_a_roof(f, true, 0.0F, &r);
+    log_roof("the roof walled on three sides", &r);
+    NTEST_EXPECT_TRUE(r.truth < 0.03);
+    NTEST_EXPECT_NEAR_F64(r.own, r.truth, 0.06 * r.truth);
+    NTEST_EXPECT_TRUE(r.own_err < 0.27);
+    NTEST_EXPECT_NEAR_F64(r.filtered, r.truth, 0.05 * r.truth);
+    NTEST_EXPECT_TRUE(r.filtered_err < 0.6 * r.own_err);
+    NTEST_EXPECT_NEAR_F64(r.cells_filtered, r.cells_own, 0.01 * r.cells_own);
+}
+
+NTEST_F(Gi, the_filter_keeps_the_light_of_many_bounces)
+{
+    REQUIRE_GI(f);
+    RoofResult r;
+    under_a_roof(f, true, 0.7F, &r);
+    log_roof("the walled roof, its surfaces reflecting 0.7", &r);
+    NTEST_EXPECT_NEAR_F64(r.own, r.truth, 0.12 * r.truth);
+    NTEST_EXPECT_NEAR_F64(r.filtered, r.truth, 0.12 * r.truth);
+}
+
+// ---------------------------------------------------------------------------
 // The keys
 // ---------------------------------------------------------------------------
 
@@ -758,7 +1183,7 @@ NTEST_F(Gi, the_cache_holds_the_cells_the_view_sees)
     // The expected fingerprints, of every pixel's point.
     static NphRenderGiLevel levels[NPH_RENDER_GI_LEVELS];
     render_gi_levels(camera.position, 48.0, levels);
-    static u32 expected[SIZE * SIZE];
+    static u32 expected[(1U + NPH_RENDER_GI_ABOVE) * SIZE * SIZE];
     u32 cells = 0U;
     for (u32 i = 0; i < SIZE * SIZE; ++i) {
         NphVec3 x;
@@ -769,6 +1194,13 @@ NTEST_F(Gi, the_cache_holds_the_cells_the_view_sees)
         const NphVec3 p = nph_vec3_sub(x, scene.eye);
         const u64 h = render_gi_mix(render_gi_key(levels, p, n));
         expected[cells++] = (u32)(h >> 32U) | 1U;
+        // And the cells of the levels above around it, its parents, which take its samples
+        // too (ADR-0090, ADR-0091).
+        const i32 level = render_gi_level(nph_vec3_length(p));
+        for (i32 up = 1; up <= NPH_RENDER_GI_ABOVE && level + up < NPH_RENDER_GI_LEVELS; ++up) {
+            const u64 hp = render_gi_mix(render_gi_key_at(levels, p, n, level + up));
+            expected[cells++] = (u32)(hp >> 32U) | 1U;
+        }
     }
     qsort(expected, cells, sizeof(u32), compare_u32);
     u32 distinct = 0U;
@@ -794,7 +1226,9 @@ NTEST_F(Gi, the_cache_holds_the_cells_the_view_sees)
     NTEST_LOG("%u cells from %u pixels; %u slots used, %u of them expected; %u cells found",
               distinct, cells, used, known, found);
     NTEST_ASSERT_GT_UINT(distinct, 1000U);
-    NTEST_EXPECT_TRUE((f64)known >= 0.98 * (f64)used);
+    // (The rest are the cells of what the update's rays met where the cache held none,
+    // ADR-0090: the box's and the ground's points that no pixel's point fell in.)
+    NTEST_EXPECT_TRUE((f64)known >= 0.9 * (f64)used);
     NTEST_EXPECT_TRUE((f64)found >= 0.98 * (f64)distinct);
     test_box_release(f, target);
     nph_render_texture_destroy(f->renderer, env);
@@ -822,13 +1256,16 @@ NTEST(gi, levels_and_keys)
             }
         }
     }
-    // Level 8 holds 1 to 2 m, its cells 1/48 m across (1/48 to 1/96 of
-    // that).
-    NTEST_EXPECT_EQ_INT(render_gi_level(1.0F), 8);
-    NTEST_EXPECT_EQ_INT(render_gi_level(1.99F), 8);
+    // Level 9 holds 2 to 4 m, its cells 1/24 m across (1/48 to 1/96 of that), and all that is
+    // nearer: no cell is finer (NPH_RENDER_GI_LEVEL_MIN, ADR-0091).
+    NTEST_EXPECT_EQ_INT(NPH_RENDER_GI_LEVEL_MIN, 9);
+    NTEST_EXPECT_NEAR_F64((f64)levels[NPH_RENDER_GI_LEVEL_MIN].origin.w, 1.0 / 24.0, 1e-6);
     NTEST_EXPECT_EQ_INT(render_gi_level(2.0F), 9);
-    NTEST_EXPECT_EQ_INT(render_gi_level(0.5F), 7);
-    NTEST_EXPECT_EQ_INT(render_gi_level(1e-9F), 0);
+    NTEST_EXPECT_EQ_INT(render_gi_level(3.99F), 9);
+    NTEST_EXPECT_EQ_INT(render_gi_level(4.0F), 10);
+    NTEST_EXPECT_EQ_INT(render_gi_level(1.0F), 9);
+    NTEST_EXPECT_EQ_INT(render_gi_level(0.5F), 9);
+    NTEST_EXPECT_EQ_INT(render_gi_level(1e-9F), 9);
     NTEST_EXPECT_EQ_INT(render_gi_level(1e30F), NPH_RENDER_GI_LEVELS - 1);
     // Two points of one cell share a key; across its face, or facing
     // another octant, they do not.

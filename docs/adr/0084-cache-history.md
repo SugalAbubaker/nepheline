@@ -1,7 +1,9 @@
 # 0084. The radiance cache's history follows its light
 
 - **Date:** 2026-11-10
-- **Status:** Accepted (the user's go-ahead of 2026-11-10: "go ahead with step 1")
+- **Status:** Accepted (the user's go-ahead of 2026-11-10: "go ahead with step 1"); the test's variance and its
+  threshold for a rise are amended by ADR-0090 (proposed 2026-11-11): where light arrives by few paths the test
+  took the paths for changes
 
 ## Context
 

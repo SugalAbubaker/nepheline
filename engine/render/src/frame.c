@@ -154,6 +154,7 @@ void nph_render_view_default(NphRenderView *view, NphRenderCamera camera)
     view->many_restir = NPH_RENDER_RESTIR_SPECULAR;
     view->contact_shadow = 24.0F;
     view->reflections = NPH_RENDER_REFLECTIONS_RAYS; // ADR-0089
+    view->gi_smooth = 1;                             // ADR-0090
 }
 
 // The tiers' fields (ADR-0079). The reference tier's are nph_render_view_default's.
@@ -278,7 +279,8 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     out->alpha_mode = (u32)d->alpha_mode;
     out->handle = handle;
     out->flags = (d->double_sided ? (u32)NPH_RENDER_MATERIAL_DOUBLE_SIDED : 0U) |
-                 (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U);
+                 (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U) |
+                 (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U);
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
         const NphRenderTextureBinding *b = &d->textures[s];
         const RenderTexture *t = render_texture_get(r, b->texture);

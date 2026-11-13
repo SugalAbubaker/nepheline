@@ -200,17 +200,29 @@ The cooker also flags, of itself, two kinds of mesh that rays should pass throug
 ([ADR-0078](adr/0078-local-lights-shadows.md)):
 
 - **Glass:** every material of its primitives lets at least half the light through
-  (`KHR_materials_transmission`, read for this alone: the raster draws such a material as
-  it would without). In rays it would stop the light that passes through it: a lamp's panes
-  would leave the street dark.
+  (`KHR_materials_transmission`; "Glass" below). In rays it would stop the light that passes
+  through it: a lamp's panes would leave the street dark.
 - **A light's shell:** every material glows (an emissive factor above zero), and the box of
   one of its instances in the world holds a point or spot light: the bulb or flame the light
   stands for. In rays it would stop its own light, and count that light twice, once as the
   light and once as the glow the rays see.
 
-A mesh of glass and other materials together stays in the rays: split it in the source. The
-cook log counts what each rule took (`meshes out of the rays: ... of glass, ... lights'
-shells`); Bistro's are 42 and 35, around 95 of its 96 lamps.
+A mesh of glass and other materials together keeps its bottom level, and the rays pass its
+glass by its material (a blended one stops none: docs/render.md "Shadow rays"). The cook log
+counts what each rule took (`meshes out of the rays: ... of glass, ... lights' shells`);
+Bistro's are 42 and 35, around 95 of its 96 lamps.
+
+## Glass
+
+A material that lets half the light through or more (`KHR_materials_transmission`'s factor;
+`GLTF_GLASS_TRANSMISSION`) is cooked as a blended one, flagged
+`NPH_MATERIAL_FLAG_TRANSMISSIVE`: its base colour and its alpha scaled by the share it keeps,
+1 - the factor ([ADR-0094](adr/0094-glass-blended-casters-and-the-grazing-sun.md)). The
+renderer draws it over what is behind it, adds what it reflects whole, and lets the sun and
+the rays through it. Drawn opaque, as the extension's fallback has it, Bistro's windows were
+white walls. A material that lets less through, or whose alpha mode is not OPAQUE, stays as
+written. Materials have a cook version of their own (`COOK_MATERIAL_VERSION`), so a change
+here recooks them alone.
 
 ## Editable meshes (`polymesh.h`)
 

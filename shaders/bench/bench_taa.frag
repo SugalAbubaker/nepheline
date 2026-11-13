@@ -3,7 +3,7 @@
 // pattern of reads, arithmetic, and writes (shaders/render/taa_common.glsl;
 // docs/benchmarks.md "GPU benchmarks"): per pixel, the 3 x 3 neighbourhoods
 // of the current HDR colour and of the visibility buffer's depth, the
-// history's five Catmull-Rom taps where a constant motion takes them, and
+// history's five cubic taps where a constant motion takes them, and
 // two outputs, the display colour and the new history. k_mode chooses how
 // the neighbourhoods are read:
 //   0: nine fetches each;
@@ -107,7 +107,7 @@ void main()
     const vec2 inv_size = 1.0 / size;
     const vec2 uv = (vec2(pixel) + 0.5 - motion) * inv_size;
     const vec3 history = taa_rgb_to_ycocg(
-        taa_history_catmull_rom(pc.texture3_index, pc.sampler_index, uv, size, inv_size));
+        taa_history_cubic(pc.texture3_index, pc.sampler_index, uv, size, inv_size));
     const vec3 current = n.filtered / n.weight;
     const vec3 resolved = taa_ycocg_to_rgb(
         taa_blend(current, taa_clip(n, history), taa_current_weight(length(motion))));

@@ -216,8 +216,11 @@ typedef struct NphRendererDesc {
     u32 max_vsm_voxel_draws;     // (voxel cluster, page) draws in a frame (2^20)
     // The production path's radiance cache (docs/render.md "Global
     // illumination"), where the device has ray queries: its cells, a power of
-    // two of at least 16 (262144: 9 MB), and the rays its update traces a
-    // frame, a budget whatever the resolution (65536). Zero picks the default.
+    // two of at least 16 (262144: 34 MB, and 9 MB for the reflections' cells), and the rays its
+    // update traces a frame, a budget whatever the resolution (65536). Zero picks the default.
+    // A view that moves faster than the cells' age frees them fills the table: new cells then
+    // take the slots of those the samples no longer reach (ADR-0091), and
+    // NphRenderFrameStats.vis_gi_dropped counts the samples that found none.
     b32 disable_gi; // never create it
     u32 gi_cells;
     u32 gi_rays;
@@ -606,6 +609,11 @@ typedef struct NphRenderMaterialDesc {
     NphRenderAlphaMode alpha_mode;
     b32 double_sided;
     b32 unlit; // KHR_materials_unlit
+    // Glass, with NPH_RENDER_ALPHA_BLEND: the base colour's alpha is the share of the light
+    // behind it that its body stops, and its colour is already scaled by it. What it reflects
+    // is added whole, and what is behind it shows less by that too (Schlick's share of a
+    // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
+    b32 transmissive;
     NphRenderTextureBinding textures[NPH_RENDER_SLOT_COUNT];
     const char *name;
 } NphRenderMaterialDesc;
@@ -1035,6 +1043,13 @@ typedef struct NphRenderView {
     // ADR-0076). It runs with the ambient occlusion and the sun's virtual shadow map.
     // nph_render_view_default: 24.
     f32 contact_shadow;
+    // The sun's shadows by a ray a pixel, traced in the ambient occlusion's pass in place of
+    // the march, where the frame has the rays' scene (the radiance cache's, or a light's that
+    // casts by rays) and the march is on (ADR-0094): right where the map is not (a wall the sun
+    // grazes, what stands a few centimetres off a surface), 1.3 to 4.2 ms a frame at 1440p on
+    // the reference scenes. Otherwise the sun's virtual shadow map and the march.
+    // nph_render_view_default: 0.
+    b32 sun_rays;
     // What of the many lights' far fields per-pixel reservoirs take. nph_render_view_default:
     // SPECULAR. They need ray queries: a device without them draws as with OFF.
     NphRenderRestir many_restir;
@@ -1105,6 +1120,11 @@ typedef struct NphRenderView {
     // The rays the radiance cache's update traces this frame, a budget whatever the resolution (0:
     // NphRendererDesc.gi_rays). More follow a change of the light sooner and leave less noise.
     u32 gi_rays;
+    // Whether the radiance cache's cells are smoothed against their neighbours in the world
+    // before the frame looks them up (ADR-0090; nph_render_view_default: yes). Without, each
+    // cell shows its own samples' mean, whose noise is the mottling of shaded surfaces: for
+    // comparisons, and for the tests of the cells' own means.
+    b32 gi_smooth;
 } NphRenderView;
 
 // A view of `camera`: EV100 15 (manual), AgX (ADR-0083), the environment as
@@ -1189,6 +1209,8 @@ typedef struct NphRenderFrameStats {
     u32 vis_instances_proxied;   // the instances those proxies stood in for
     u32 vis_many_rays;           // the rays the many lights' reservoirs asked for (ADR-0074)
     u32 vis_reflect_dropped;     // reflections' rays whose cell's bucket was full (ADR-0077)
+    u32 vis_gi_dropped;          // the radiance cache's samples whose cell's bucket was full
+                                 // (ADR-0091)
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages

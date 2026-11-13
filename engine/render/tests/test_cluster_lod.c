@@ -2145,6 +2145,97 @@ NTEST_F(ClusterLod, a_mesh_that_may_voxelize_counts_its_shading_normals)
     NTEST_EXPECT_LT_UINT(free_triangles[1] * 4U, free_triangles[2]);
 }
 
+// A sheet modelled as two faces back to back (four corners, a quad each way round, each face
+// its own vertices) beside a torus, in a mesh that may voxelize, whose borders' moves cost
+// nothing: a view that draws the mesh to within a quarter of the sheet's short side, or
+// finer, draws both faces whole. No edge of the sheet is open (each has its two faces'
+// triangles), and the faces' one plane does not see a corner go along an edge: the corners
+// collapsed at no error, so every view past the first level's distance drew no sheet, as with
+// one of the two banners on the city's posts from 30 m.
+NTEST_F(ClusterLod, a_sheet_of_two_faces_keeps_its_outline)
+{
+    make_torus(&f->mesh, 128U, 48U, 1.0F, 0.35F);
+    const f32 x = 3.0F;
+    const NphVec3 corners[4] = {nph_vec3(x, 0.0F, 0.0F), nph_vec3(x, 0.0F, 0.5F),
+                                nph_vec3(x, 1.0F, 0.5F), nph_vec3(x, 1.0F, 0.0F)};
+    u32 front[4];
+    u32 back[4];
+    for (u32 k = 0; k < 4U; ++k) {
+        front[k] = mesh_vertex(&f->mesh, corners[k], 1U);
+        back[k] = mesh_vertex(&f->mesh, corners[k], 2U);
+    }
+    mesh_tri(&f->mesh, front[0], front[1], front[2]);
+    mesh_tri(&f->mesh, front[0], front[2], front[3]);
+    mesh_tri(&f->mesh, back[0], back[2], back[1]);
+    mesh_tri(&f->mesh, back[0], back[3], back[2]);
+    f->mesh.ranges.data[0].index_count = f->mesh.indices.len;
+    const u8 surfaces[1] = {NPH_RENDER_VOXEL_SURFACE_NONE};
+    NphRenderVoxelSampler sampler;
+    memset(&sampler, 0, sizeof sampler);
+    sampler.submesh_surface = surfaces;
+    sampler.sample = never_sampled;
+    sampler.covers = never_covers;
+    nph_render_meshlets_init(&f->meshlets, f->a);
+    nph_render_cluster_lods_init(&f->lods, f->a);
+    NphRenderMeshletInput mi;
+    memset(&mi, 0, sizeof mi);
+    mi.positions = f->mesh.positions.data;
+    mi.vertex_count = f->mesh.positions.len;
+    mi.indices = f->mesh.indices.data;
+    mi.index_count = f->mesh.indices.len;
+    mi.ranges = f->mesh.ranges.data;
+    mi.range_count = f->mesh.ranges.len;
+    mi.cone_weight = 0.25F;
+    mi.scratch = f->a;
+    NTEST_ASSERT_EQ_INT(nph_render_meshlets_build(&mi, &f->meshlets), NPH_RESULT_OK);
+    NphRenderClusterLodInput in;
+    memset(&in, 0, sizeof in);
+    in.positions = f->mesh.positions.data;
+    in.attribs = f->mesh.attribs.data;
+    in.attrib_stride = (u32)sizeof(TestAttrib);
+    in.voxels = &sampler;
+    in.vertex_count = f->mesh.positions.len;
+    in.indices = f->mesh.indices.data;
+    in.index_count = f->mesh.indices.len;
+    in.ranges = f->mesh.ranges.data;
+    in.range_count = f->mesh.ranges.len;
+    in.meshlets = &f->meshlets;
+    in.cone_weight = 0.25F;
+    in.scratch = f->a;
+    NTEST_ASSERT_EQ_INT(nph_render_cluster_lods_build(&in, &f->lods), NPH_RESULT_OK);
+    const NphRenderClusterLods *l = &f->lods;
+    NTEST_ASSERT_GE_UINT(l->levels, 4U);
+    // From far enough that every group is as far as any other: a cut is the
+    // clusters made within `tolerance` whose groups' own errors pass it.
+    const f32 distance = 1000.0F;
+    const NphVec3 camera = nph_vec3(distance, 0.5F, 0.25F);
+    const f32 tolerances[5] = {0.0001F, 0.002F, 0.008F, 0.03F, 0.125F};
+    NphArrayU32 cut;
+    NPH_ARRAY_INIT(&cut, f->a);
+    u32 coarse_cuts = 0U;
+    for (u32 i = 0; i < 5U; ++i) {
+        u32 levels_seen = 0U;
+        cut_triangles(l, camera, distance / tolerances[i], 1.0F, &cut, &levels_seen);
+        f32 area = 0.0F;
+        for (u32 t = 0; t < cut.len / 3U; ++t) {
+            const NphVec3 q0 = f->mesh.positions.data[cut.data[(u64)t * 3U]];
+            const NphVec3 q1 = f->mesh.positions.data[cut.data[(u64)t * 3U + 1U]];
+            const NphVec3 q2 = f->mesh.positions.data[cut.data[(u64)t * 3U + 2U]];
+            if (q0.x == x && q1.x == x && q2.x == x) {
+                area += 0.5F *
+                        nph_vec3_length(nph_vec3_cross(nph_vec3_sub(q1, q0), nph_vec3_sub(q2, q0)));
+            }
+        }
+        NTEST_LOG("a cut within %.4f: %u triangles of levels 0x%x, the sheet's faces %.3f of 1",
+                  (f64)tolerances[i], cut.len / 3U, levels_seen, (f64)area);
+        NTEST_EXPECT_NEAR_F32(area, 1.0F, 1e-4F);
+        coarse_cuts += (levels_seen & ~1U) != 0U ? 1U : 0U;
+    }
+    // The cuts reach past level 0: the torus simplifies within them.
+    NTEST_EXPECT_GE_UINT(coarse_cuts, 3U);
+    NPH_ARRAY_FREE(&cut);
+}
+
 // A big bent card, of its own material, where the surface around it costs little to
 // simplify: 8 triangles about a raised centre.
 static void make_card(TestMesh *m, NphVec3 c, f32 s, f32 raise)

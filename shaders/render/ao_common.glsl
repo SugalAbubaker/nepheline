@@ -13,6 +13,10 @@
 
 layout(push_constant, scalar) uniform Push { NphRenderAoPush pc; };
 
+// In a pixel's packed occlusion (ao_pass.glsl store): its answer about the sun is a ray's, not
+// the march's. The distance's last bit, which the denoise's weights do not miss.
+#define NPH_AO_TRACED 0x00010000u
+
 // The largest half float: ao.comp stores the distances beyond it (the
 // sky's) as it.
 #define NPH_AO_HALF_MAX 65504.0

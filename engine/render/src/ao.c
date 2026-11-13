@@ -27,7 +27,7 @@ NPH_STATIC_ASSERT(sizeof(NphRenderAoPush) <= NPH_GPU_PUSH_CONSTANT_BYTES, "push 
 // word; the denoised occlusion, a half float.
 #define AO_DEPTH_FORMAT  NPH_GPU_FORMAT_R32_SFLOAT
 #define AO_PACKED_FORMAT NPH_GPU_FORMAT_R32_UINT
-#define AO_OUT_FORMAT    NPH_GPU_FORMAT_R16_SFLOAT
+#define AO_OUT_FORMAT    NPH_GPU_FORMAT_R8G8_UNORM
 // The slices' rotations, which the temporal resolve averages.
 #define AO_ROTATIONS 6U
 // The passes' workgroups (ao_depth.comp, ao.comp, ao_denoise.comp).
@@ -65,22 +65,39 @@ NphResult render_ao_create(NphRenderer *r)
     d.name = "ao with contact shadows";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->ao_contact));
     render_log_statistics(r, a->ao_contact, "ao with contact shadows");
+    if (nph_renderer_ray_tracing_supported(r)) {
+        // And with the rays' scene, for the surfaces the sun grazes (ao_rt.comp; ADR-0094).
+        NPH_TRY(render_load_shader_file(r, "ao_rt.comp", &a->rt_shader));
+        d.shader = a->rt_shader;
+        d.name = "ao with contact shadows and the sun's rays";
+        NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->ao_grazed));
+        render_log_statistics(r, a->ao_grazed, "ao with contact shadows and the sun's rays");
+    }
     memset(&d, 0, sizeof d);
     d.shader = a->denoise_shader;
     d.name = "ao denoise";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->denoise));
     render_log_statistics(r, a->denoise, "ao denoise");
+    // The same gathering the sun's rays about each pixel (ao_denoise.comp k_sun), for frames
+    // whose pass traces them.
+    d.specialization[0] = 1U;
+    d.specialization_count = 1U;
+    d.name = "ao denoise with the sun's rays";
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &a->denoise_sun));
     return NPH_RESULT_OK;
 }
 
 void render_ao_destroy(NphRenderer *r)
 {
     RenderAo *a = &r->ao;
+    nph_gpu_pipeline_destroy(r->dev, a->denoise_sun);
     nph_gpu_pipeline_destroy(r->dev, a->denoise);
+    nph_gpu_pipeline_destroy(r->dev, a->ao_grazed);
     nph_gpu_pipeline_destroy(r->dev, a->ao_contact);
     nph_gpu_pipeline_destroy(r->dev, a->ao);
     nph_gpu_pipeline_destroy(r->dev, a->depth);
     nph_gpu_shader_destroy(r->dev, a->denoise_shader);
+    nph_gpu_shader_destroy(r->dev, a->rt_shader);
     nph_gpu_shader_destroy(r->dev, a->ao_shader);
     nph_gpu_shader_destroy(r->dev, a->depth_shader);
     memset(a, 0, sizeof *a);
@@ -91,6 +108,7 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
 {
     RenderAo *a = &r->ao;
     a->frame_active = 0;
+    a->frame_grazed = 0;
     // It darkens only the indirect light, the environment's and the radiance
     // cache's: what shades with that light shows it where there is any, and the
     // occlusion debug view always.
@@ -139,8 +157,13 @@ bool render_ao_frame_begin(NphRenderer *r, const NphRenderView *view, const NphM
         // the camera, by which ao.comp need not ask.
         p->sun = nph_vec4(to_sun.x, to_sun.y, to_sun.z,
                           nph_f32_min(view->contact_shadow * nph_f32_abs(p->unproject.y), 0.5F));
-        p->sun_screen = nph_vec2((to_sun.x + p->unproject.z * to_sun.z) * p->project.x,
-                                 (to_sun.y + p->unproject.w * to_sun.z) * p->project.y);
+        // Where the view asks for the sun's rays (NphRenderView.sun_rays) and the frame has
+        // the rays' scene of the GPU scene (the radiance cache's rays, or lights that cast by
+        // them), a pixel the sun faces traces the sun (ao_rt.comp).
+        a->frame_grazed = view->sun_rays && !nph_gpu_pipeline_is_null(a->ao_grazed) &&
+                                  r->rt.frame_active && r->rt.frame_production
+                              ? 1
+                              : 0;
     }
     a->frame_active = 1;
     return true;
@@ -183,7 +206,17 @@ static void ao_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     NphRenderAoPush p = a->frame_push;
     p.depths_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, a->frame_depths));
     p.raw_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, a->frame_raw), 0U);
-    dispatch(cmd, p.sun.w > 0.0F ? a->ao_contact : a->ao, &p, AO_GROUP);
+    if (a->frame_grazed) {
+        // The rays' scene, and what each pixel shows (ao_pass.glsl AO_VISIBILITY).
+        p.view = r->vis.frame.view_address;
+        p.out_index =
+            nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, a->frame_visbuffer), 0U);
+    }
+    dispatch(cmd,
+             a->frame_grazed  ? a->ao_grazed
+             : p.sun.w > 0.0F ? a->ao_contact
+                              : a->ao,
+             &p, AO_GROUP);
 }
 
 static void denoise_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -194,7 +227,7 @@ static void denoise_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     p.raw_index = nph_gpu_image_sampled_index(r->dev, nph_gpu_rg_image(graph, a->frame_raw));
     p.out_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, a->frame_out), 0U);
     // A 2 x 2 block an invocation (ao_denoise.comp).
-    dispatch(cmd, a->denoise, &p, 2U * AO_GROUP);
+    dispatch(cmd, a->frame_grazed ? a->denoise_sun : a->denoise, &p, 2U * AO_GROUP);
 }
 
 static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
@@ -224,7 +257,7 @@ NphResult render_ao_declare_depths(NphRenderer *r, NphGpuRenderGraph *graph)
     return nph_gpu_rg_image_is_null(a->frame_depths) ? NPH_RESULT_FULL : NPH_RESULT_OK;
 }
 
-NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph)
+NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph, const RenderAoRays *rays)
 {
     RenderAo *a = &r->ao;
     NphGpuImageDesc id;
@@ -255,6 +288,18 @@ NphResult render_ao_declare(NphRenderer *r, NphGpuRenderGraph *graph)
     }
     nph_gpu_rg_read_image(p, a->frame_depths, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
     nph_gpu_rg_write_image(p, a->frame_raw, NPH_GPU_RG_USE_STORAGE_WRITE, 0U, 1U);
+    if (a->frame_grazed) {
+        // The rays' scene, the records their alpha tests read (rt_mask.glsl), and what each
+        // pixel shows: a pixel of a coarser level finds its mesh before its ray leaves.
+        NPH_ASSERT(rays != NULL);
+        a->frame_visbuffer = rays->visbuffer;
+        nph_gpu_rg_read_image(p, rays->visbuffer, NPH_GPU_RG_USE_STORAGE_READ, 0U, 1U);
+        nph_gpu_rg_read_buffer(p, rays->clusters, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, rays->instances, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, rays->meshes, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, rays->material_map, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_read_buffer(p, rays->tlas, NPH_GPU_RG_USE_ACCEL_READ);
+    }
     p = add_pass(graph, r, "ao denoise", denoise_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;

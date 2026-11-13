@@ -31,7 +31,8 @@
 //     render_perf [--filter=GLOB] [--frames=N] [--json=FILE] [--budgets=FILE]
 //                 [--list] [--validation] [--sw-pixels=N] [--scenes=DIR]
 //                 [--capture-dir=DIR] [--manifests=DIR] [--ref-size=WxH]
-//                 [--debug-view=NAME] [--reference-only] [--rt-shadows] [--lod-error=PX]
+//                 [--debug-view=NAME] [--reference-only] [--rt-shadows] [--sun-rays]
+//                 [--lod-error=PX]
 //                 [--lists=N]
 //                 [--vsm-trace] [--memory-trace] [--no-cells] [--stream[=MB]]
 //                 [--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH]
@@ -81,7 +82,9 @@
 // the requests cost where every page is resident. --restir sets
 // NphRenderView.many_restir (0 none, 1 the highlights, the default, 2 all;
 // ADR-0074). --rt-shadows takes the reference scenes' sun by a shadow ray a
-// pixel: what a ray costs there. For comparing estimators of light against
+// pixel: what a ray costs there; --sun-rays traces it in the occlusion's pass
+// in place of the contact march, the map unread (NphRenderView.sun_rays;
+// ADR-0094): what those rays cost. For comparing estimators of light against
 // what they converge on: --truth draws without anti-aliasing, tonemapper,
 // bloom or occlusion, --truth-ev=STOPS stops down so that highlights stay in
 // range (2 by default), and --accumulate=N, with --capture-dir, averages N
@@ -515,6 +518,8 @@ static NphRenderDebugView g_debug_view = NPH_RENDER_VIEW_LIT;
 static f32 g_lod_error = -1.0F; // --lod-error (negative: the view's default)
 // --rt-shadows: the reference scenes' sun by a shadow ray a pixel, what a ray costs there.
 static bool g_rt_shadows = false;
+// --sun-rays: the sun's shadows by a ray a pixel in the occlusion's pass (NphRenderView.sun_rays).
+static bool g_sun_rays = false;
 // --restir=N: the many lights' reservoirs (NphRenderRestir: 0 off, 1 specular, 2 all).
 static NphRenderRestir g_restir = NPH_RENDER_RESTIR_SPECULAR;
 // --reflections=N: NphRenderView.reflections (NphRenderReflections).
@@ -1351,6 +1356,8 @@ typedef struct FrameRun {
     // a frame (the reflection cells' table, ADR-0077).
     u64 reflect_dropped;
     u32 reflect_dropped_max;
+    u64 gi_dropped;
+    u32 gi_dropped_max;
 } FrameRun;
 
 // The scene's motion takes a frame's step: the camera walking or turning,
@@ -1575,6 +1582,8 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
     run->cpu_count = 0U;
     run->reflect_dropped = 0U;
     run->reflect_dropped_max = 0U;
+    run->gi_dropped = 0U;
+    run->gi_dropped_max = 0U;
     ctx->stream_ns_sum = 0.0;
     ctx->stream_ns_max = 0.0;
     ctx->stream_frames = 0U;
@@ -1591,6 +1600,8 @@ static NphResult run_frames(Ctx *ctx, NphRenderView *view, NphGpuImage target, u
             run->reflect_dropped += run->stats.vis_reflect_dropped;
             run->reflect_dropped_max =
                 nph_max_u32(run->reflect_dropped_max, run->stats.vis_reflect_dropped);
+            run->gi_dropped += run->stats.vis_gi_dropped;
+            run->gi_dropped_max = nph_max_u32(run->gi_dropped_max, run->stats.vis_gi_dropped);
         }
     }
     // The last measured frame's timestamps.
@@ -1782,6 +1793,11 @@ static NphResult report(Ctx *ctx, const char *name, u32 width, u32 height,
             printf("    reflections: %llu rays dropped by full buckets over the measured frames, "
                    "%u at most in one\n",
                    (unsigned long long)run->reflect_dropped, run->reflect_dropped_max);
+        }
+        if (st->gi) {
+            printf("    radiance cache: %llu samples dropped by full buckets over the measured "
+                   "frames, %u at most in one\n",
+                   (unsigned long long)run->gi_dropped, run->gi_dropped_max);
         }
         if (st->vis_lod_groups != 0U || st->vis_lod_nodes != 0U) {
             printf("    levels of detail: %u groups tested, %u hierarchy nodes visited in %u steps "
@@ -2325,6 +2341,7 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     if (g_rt_shadows) {
         view.vis_flags |= (u32)NPH_RENDER_VIS_RT_SHADOWS;
     }
+    view.sun_rays = g_sun_rays ? 1 : 0;
     if (g_truth) {
         view.anti_aliasing = NPH_RENDER_AA_NONE;
         view.tonemapper = NPH_RENDER_TONEMAPPER_NONE;
@@ -2627,6 +2644,7 @@ static int usage(void)
                     "[--budgets=FILE] [--list] [--validation] [--sw-pixels=N]\n"
                     "                   [--scenes=DIR] [--capture-dir=DIR] [--manifests=DIR] "
                     "[--ref-size=WxH] [--debug-view=NAME] [--reference-only] [--rt-shadows] "
+                    "[--sun-rays] "
                     "[--lod-error=PX] [--lists=N] [--vsm-trace] [--memory-trace] [--stream[=MB]] "
                     "[--stream-trace] [--stream-loads=N] [--voxel-pool=MB] [--tiles=WxH] "
                     "[--no-cells] [--paged-textures] [--texture-budget=MB] [--restir=N] "
@@ -2713,6 +2731,8 @@ int main(int argc, char **argv)
             g_capture_dir = capture_dir;
         } else if (strcmp(argv[i], "--rt-shadows") == 0) {
             g_rt_shadows = true;
+        } else if (strcmp(argv[i], "--sun-rays") == 0) {
+            g_sun_rays = true;
         } else if (strncmp(argv[i], "--restir=", 9U) == 0) {
             g_restir = (NphRenderRestir)strtoul(argv[i] + 9, NULL, 10);
         } else if (strncmp(argv[i], "--reflections=", 14U) == 0) {

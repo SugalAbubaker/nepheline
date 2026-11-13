@@ -122,7 +122,9 @@ static void render_into(RenderFixture *f, const NphRenderView *v, u32 frames, u8
 // The bloom of a uniform image is the image: every filter sums to one, and
 // the chain's sum is scaled back to one blur. On both pipelines, and on the
 // production path under temporal anti-aliasing (whose history's and the
-// chain's random rounding move a level or two).
+// chain's random rounding move a level or two, once the history holds the
+// frames it keeps: its first frames are their mean, and a mean of four
+// roundings lies further from a mean of eight than that).
 NTEST_F(Post, bloom_keeps_a_uniform_image)
 {
     REQUIRE_RENDERER(f);
@@ -137,9 +139,10 @@ NTEST_F(Post, bloom_keeps_a_uniform_image)
         post_view(&v, production ? NPH_RENDER_PIPELINE_PRODUCTION : NPH_RENDER_PIPELINE_REFERENCE,
                   0.3F);
         v.anti_aliasing = i == 2U ? NPH_RENDER_AA_TEMPORAL : NPH_RENDER_AA_NONE;
-        render_into(f, &v, 4U, plain);
+        const u32 frames = i == 2U ? 48U : 4U;
+        render_into(f, &v, frames, plain);
         v.bloom = 0.5F;
-        render_into(f, &v, 4U, bloomed);
+        render_into(f, &v, frames, bloomed);
         u32 worst = 0U;
         for (u64 p = 0; p < PIXELS; ++p) {
             const i32 d = (i32)plain[p] - (i32)bloomed[p];

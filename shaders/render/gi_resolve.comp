@@ -8,7 +8,9 @@
 // pre-exposed fixed point; the irradiance is kept in lux, whatever the
 // exposure does. The irradiance's share that is the many lights' far fields
 // (ADR-0078), whose samples the update also sums apart, follows it the same
-// way.
+// way. An irradiance cell's mean is its own (NphRenderGiView.raw_cells):
+// what the frame looks up is what the filter then makes of it and its
+// neighbours' (gi_filter.comp, ADR-0090).
 //
 // The history (ADR-0084): an irradiance cell's holds up to
 // NPH_RENDER_GI_HISTORY samples, over which a light that holds still is
@@ -50,7 +52,7 @@ void main()
         return;
     }
     GiSumsRef sums = GiSumsRef(reflections ? g.g.reflect_sums : g.g.sums);
-    GiCellsRef cells = GiCellsRef(reflections ? g.g.reflect_cells : g.g.cells);
+    GiCellsRef cells = GiCellsRef(reflections ? g.g.reflect_cells : g.g.raw_cells);
     const uvec4 s = sums.s[i];
     uvec4 c = cells.c[i];
     uint count = gi_word_count(c.w);
@@ -61,20 +63,37 @@ void main()
         const vec3 mean = vec3(s.xyz) / (g.g.sum_scale * k * rview.v.exposure);
         const vec3 was = uintBitsToFloat(c.xyz);
         const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
-        const uint most = reflections ? uint(NPH_RENDER_REFLECT_HISTORY) : uint(NPH_RENDER_GI_HISTORY);
-        uint history = min(count, most);
+        uint most = uint(NPH_RENDER_REFLECT_HISTORY);
+        uvec4 m = uvec4(0u);
         if (!reflections) {
-            GiMomentsRef moments = GiMomentsRef(g.g.moments);
-            const uvec4 m = moments.m[i];
-            float variance = uintBitsToFloat(m.x);
-            float recent = uintBitsToFloat(m.y);
-            uint frames = m.z;
+            // An irradiance cell's whole count is beside its moments (its word's stops at its
+            // bits). Its history: NPH_RENDER_GI_HISTORY samples, or
+            // NPH_RENDER_GI_HISTORY_FRAMES frames' where that is more (ADR-0091): the cells of
+            // the levels above a surface's own take hundreds a frame, a thousand samples' window
+            // would be a frame or two of them, and each frame's would move their light by as
+            // much as a frame's samples are out.
+            m = GiMomentsRef(g.g.moments).m[i];
+            count = gi_moments_history(m.z);
+            most = max(uint(NPH_RENDER_GI_HISTORY),
+                       min(s.w * uint(NPH_RENDER_GI_HISTORY_FRAMES), GI_HISTORY_MOST));
+        }
+        uint history = min(count, most);
+        // Whether the cell's light changed (the test below).
+        bool changed = false;
+        float variance = uintBitsToFloat(m.x);
+        float recent = uintBitsToFloat(m.y);
+        uint frames = gi_moments_frames(m.z);
+        uint follow = gi_moments_follow(m.z);
+        float long_variance = uintBitsToFloat(m.w);
+        if (!reflections) {
             const float l_mean = dot(mean, lum);
             if (count == 0u) {
                 // A new cell: its recent mean is its first frame's, and its variance is to come.
                 variance = 0.0;
                 recent = l_mean;
                 frames = 0u;
+                follow = 0u;
+                long_variance = 0.0;
             } else {
                 // The recent mean takes the frame's k samples as an average over about
                 // NPH_RENDER_GI_HISTORY_MIN would (weight a), which leaves it a / (2 - a) of a
@@ -85,11 +104,34 @@ void main()
                 const float apart = now - l_was;
                 const float floor_ = NPH_RENDER_GI_CHANGE_FLOOR * l_was;
                 const bool settled = frames >= uint(NPH_RENDER_GI_VARIANCE_FRAMES);
+                // Where light arrives by few paths (ADR-0090) the test above took the paths
+                // themselves for changes: a cell's recent variance, which also holds each
+                // frame's share down, falls away over the dark frames between two paths, and the
+                // next one caught is then many deviations out; the cell cut its history, the
+                // path counted four times over, and shade came out a sixth too bright and half
+                // again as noisy as its samples leave it. So the variance is the largest of the
+                // recent one, the one over the mean's own history, and the one the cell's
+                // parents' samples measure (the filter's, NphRenderGiView.cell_keys), which
+                // knows of the paths before the cell has caught one. And a rise must be further
+                // out the fewer the paths: a mean of few large samples is skewed, more of it
+                // lying far above than a normal one's would (by about its deviation over the
+                // light, 1 / sqrt of the paths in it), so the test asks for that much more.
+                const vec2 around = uintBitsToFloat(GiCellKeysRef(g.g.cell_keys).k[2u * i].zw);
+                const float spread = max(max(variance, long_variance), around.x);
+                const float deviation2 = (a / (2.0 - a)) * spread / k;
+                float change = NPH_RENDER_GI_CHANGE;
+                if (apart > 0.0 && deviation2 > 0.0) {
+                    change *= min(1.0 + sqrt(deviation2) / max(max(around.y, l_was), 1e-30),
+                                  NPH_RENDER_GI_CHANGE_SKEW);
+                }
                 if (settled && count >= uint(NPH_RENDER_GI_HISTORY_MIN) &&
-                    apart * apart > NPH_RENDER_GI_CHANGE * NPH_RENDER_GI_CHANGE * (a / (2.0 - a)) * variance / k +
-                                        floor_ * floor_) {
-                    history = max(min(history, uint(NPH_RENDER_GI_HISTORY_MIN)), history / 4u);
+                    apart * apart > change * change * deviation2 + floor_ * floor_) {
+                    // (A quarter of NPH_RENDER_GI_HISTORY at most: a history of many frames'
+                    // samples, ADR-0091, would take as many more frames to cut.)
+                    history = max(min(history, uint(NPH_RENDER_GI_HISTORY_MIN)),
+                                  min(history, uint(NPH_RENDER_GI_HISTORY)) / 4u);
                     count = history;
+                    changed = true;
                 }
                 // A sample's variance: k times the frame's squared deviation from the recent mean,
                 // less the recent mean's own share of it (a / (2 - a) of the frame's, so 2 / (2 - a)
@@ -98,6 +140,31 @@ void main()
                 // (which the recent mean follows within a few frames) does not blind the test.
                 const float d = l_mean - recent;
                 float estimate = k * d * d * (1.0 - 0.5 * a);
+                // The same over the history the mean is of (after any cut), for the filter
+                // (ADR-0090): where little light arrives by few paths, the frames that happen to
+                // catch one are what the variance is, and a mean that remembers a thousand samples
+                // beside a variance that remembers 16 frames looks surer than it is. A frame's
+                // share of it is held to what the light's noise could give, so that a change of
+                // the light, whose every frame is far out, does not pass for noise and blind the
+                // test: NPH_RENDER_GI_CHANGE deviations of the variance v it knows of, and as many
+                // of one path's worth (of light L around, a path carries v / L, and a frame that
+                // catches one estimates v^2 / (k L^2): some carry several times that).
+                {
+                    const float known = max(long_variance, around.x);
+                    const float light = max(around.y, l_was);
+                    float share = estimate;
+                    // (And the floor's, as the recent variance's below: from none at all it
+                    // grows slowly, and a light that never varied is followed at once. A young
+                    // cell that nothing around it has measured takes its frames as they come.)
+                    if (settled || known > 0.0) {
+                        share = min(share,
+                                    NPH_RENDER_GI_CHANGE * NPH_RENDER_GI_CHANGE * known *
+                                            (1.0 + known / (k * max(light * light, 1e-30))) +
+                                        0.25 * k * floor_ * floor_);
+                    }
+                    long_variance = mix(long_variance, share,
+                                        max(k / (float(history) + k), 1.0 / float(frames + 1u)));
+                }
                 if (settled) {
                     estimate = min(estimate, 4.0 * variance + k * floor_ * floor_);
                 }
@@ -105,11 +172,11 @@ void main()
                 frames = min(frames + 1u, uint(NPH_RENDER_GI_VARIANCE_FRAMES));
                 recent = now;
             }
-            moments.m[i] = uvec4(floatBitsToUint(variance), floatBitsToUint(recent), frames, 0u);
         }
         const float h = float(history);
         const vec3 e = (was * h + mean * k) / (h + k);
         c.xyz = floatBitsToUint(e);
+        float far_step = 0.0;
         if (!reflections && g.g.far_sums != 0ul) {
             // The far fields' luminance, blended as the irradiance is, over the irradiance's.
             const uint far_sum = GiKeysRef(g.g.far_sums).k[i];
@@ -118,6 +185,7 @@ void main()
             const float far_e = (far_was * h + far_mean * k) / (h + k);
             const float total = dot(e, lum);
             far = total > 0.0 ? uint(clamp(far_e / total, 0.0, 1.0) * GI_FAR_ONE + 0.5) : 0u;
+            far_step = far_e - far_was;
             if (far_sum != 0u) {
                 GiKeysRef(g.g.far_sums).k[i] = 0u;
             }
@@ -125,11 +193,39 @@ void main()
             far = 0u; // a frame without many lights: none of the light is theirs
         }
         count = min(count + s.w, most);
+        if (!reflections) {
+            // The light changed: what the cell is held to be (gi_filter.comp) goes with its
+            // mean, this frame and the NPH_RENDER_GI_FOLLOW_FRAMES after, while the mean comes
+            // the rest of the way. Any other frame the mean's step is its samples' noise as
+            // much as anything, and what the cell is held to be takes of it what the filter's
+            // step gives a cell's own samples (ADR-0091).
+            if (changed) {
+                follow = uint(NPH_RENDER_GI_FOLLOW_FRAMES) + 1u;
+            }
+            if (follow != 0u) {
+                --follow;
+                GiHeldRef held = GiHeldRef(g.g.held_before);
+                const vec4 f = held.h[i];
+                if (any(notEqual(f, vec4(0.0)))) {
+                    held.h[i] = max(f + vec4(e - was, far_step), vec4(0.0));
+                }
+            }
+            GiMomentsRef(g.g.moments).m[i] =
+                uvec4(floatBitsToUint(variance), floatBitsToUint(recent),
+                      gi_moments_z(frames, follow, count), floatBitsToUint(long_variance));
+        }
         age = 0u;
         sums.s[i] = uvec4(0u);
     } else if (age >= (reflections ? uint(NPH_RENDER_REFLECT_MAX_AGE) : uint(NPH_RENDER_GI_MAX_AGE))) {
         keys.k[i] = 0u;
         cells.c[i] = uvec4(0u);
+        if (!reflections) {
+            // And all the filter keeps of it, for the slot's next cell.
+            GiCellsRef(g.g.cells).c[i] = uvec4(0u);
+            GiMomentsRef(g.g.moments).m[i] = uvec4(0u);
+            GiHeldRef(g.g.held_before).h[i] = vec4(0.0);
+            GiHeldRef(g.g.held).h[i] = vec4(0.0);
+        }
         return;
     } else {
         ++age;

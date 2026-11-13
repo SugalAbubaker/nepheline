@@ -54,7 +54,7 @@ void main()
     const vec2 inv_size = 1.0 / fsize;
     const vec2 uv = (vec2(pixel) + 0.5 - motion) * inv_size;
     const vec3 history = taa_rgb_to_ycocg(
-        taa_history_catmull_rom(pc.texture3_index, pc.sampler_index, uv, fsize, inv_size));
+        taa_history_cubic(pc.texture3_index, pc.sampler_index, uv, fsize, inv_size));
     const vec3 current = n.filtered / n.weight;
     const vec3 resolved = taa_ycocg_to_rgb(
         taa_blend(current, taa_clip(n, history), taa_current_weight(length(motion))));

@@ -60,10 +60,15 @@ void main()
     for (int k = 0; k < 4; ++k) {
         if (depth[k] > 0.0) {
             const ivec2 q = min(lo + ivec2(k & 1, k >> 1), last);
-            const uint request =
-                vsm_request(r, vsm_ray_point(r, vsm_ndc(q, scale), depth[k]), slope);
+            const vec3 ls = vsm_ray_point(r, vsm_ndc(q, scale), depth[k]);
+            const uint request = vsm_request(r, ls, slope);
             if (request != VSM_NONE) {
                 vsm_set_request(pc.reference, request);
+            }
+            // And the next level's where its own level's band blends with it.
+            const uint coarser = vsm_request_coarser(r, ls, slope);
+            if (coarser != VSM_NONE) {
+                vsm_set_request(pc.reference, coarser);
             }
         }
     }

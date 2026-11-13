@@ -34,6 +34,8 @@ NPH_BUFFER_REF(GiKeys4Ref) { uvec4 k[]; };
 NPH_BUFFER_REF(GiSumsRef) { uvec4 s[]; };
 NPH_BUFFER_REF(GiCellsRef) { uvec4 c[]; };
 NPH_BUFFER_REF(GiMomentsRef) { uvec4 m[]; };
+NPH_BUFFER_REF(GiCellKeysRef) { uvec4 k[]; };
+NPH_BUFFER_REF(GiHeldRef) { vec4 h[]; };
 
 #define GI_NONE 0xFFFFFFFFu
 
@@ -63,15 +65,48 @@ float gi_word_far_share(uint w)
 
 uint gi_word(uint count, uint age, uint far)
 {
-    return count | (age << NPH_RENDER_GI_COUNT_BITS) | (far << (NPH_RENDER_GI_COUNT_BITS + 8));
+    return min(count, (1u << NPH_RENDER_GI_COUNT_BITS) - 1u) | (age << NPH_RENDER_GI_COUNT_BITS) |
+           (far << (NPH_RENDER_GI_COUNT_BITS + 8));
+}
+
+// An irradiance cell's moments' z (NphRenderGiView.moments): the frames its variance has seen
+// (5 bits), the frames what it is held to be still follows its mean after its light changed (3
+// bits: NPH_RENDER_GI_FOLLOW_FRAMES at most), and its sample count to its history, which may
+// be more than its word counts (ADR-0091).
+uint gi_moments_frames(uint z)
+{
+    return z & 0x1Fu;
+}
+
+uint gi_moments_follow(uint z)
+{
+    return (z >> 5u) & 7u;
+}
+
+uint gi_moments_history(uint z)
+{
+    return z >> 8u;
+}
+
+#define GI_HISTORY_MOST 0xFFFFFFu
+
+uint gi_moments_z(uint frames, uint follow, uint history)
+{
+    return frames | (follow << 5u) | (min(history, GI_HISTORY_MOST) << 8u);
 }
 
 // The level of a point `dist` metres from the camera: floor(log2(dist)),
-// the float's exponent, biased and clamped.
-int gi_level(float dist)
+// the float's exponent, biased and clamped, to `lowest` at least.
+int gi_level_from(float dist, int lowest)
 {
     const int e = (floatBitsToInt(max(dist, 1e-30)) >> 23) - 127;
-    return clamp(e + NPH_RENDER_GI_LEVEL_BIAS, 0, NPH_RENDER_GI_LEVELS - 1);
+    return clamp(e + NPH_RENDER_GI_LEVEL_BIAS, lowest, NPH_RENDER_GI_LEVELS - 1);
+}
+
+// An irradiance cell's level for a point `dist` metres from the camera.
+int gi_level(float dist)
+{
+    return gi_level_from(dist, NPH_RENDER_GI_LEVEL_MIN);
 }
 
 // The size of a cell at level `level` (metres).
@@ -82,7 +117,11 @@ float gi_cell_size(GiViewRef g, int level)
 
 // The octant a normal faces, its components' signs (one a thousandth below
 // zero still counts as zero, so a face whose normal lies in a plane of the
-// axes does not flicker between octants).
+// axes does not flicker between octants). (The axis it faces most was tried
+// as a part of the key too, ADR-0090, to keep a floor's light out of the cells
+// of the walls that share its octant: a wall that stands at 45 degrees to two
+// axes, as a street's may, then broke into its bricks, each triangle's cells
+// its own.)
 uint gi_octant(vec3 n)
 {
     return (n.x > -1e-3 ? 1u : 0u) | (n.y > -1e-3 ? 2u : 0u) | (n.z > -1e-3 ? 4u : 0u);
@@ -196,8 +235,9 @@ uint gi_find(GiViewRef g, uint64_t key)
 // (the sample is dropped). Only the update claims slots, and only the
 // resolve frees them, so during the update a bucket only fills.
 // `created` tells whether this invocation took a free slot for the key: of invocations claiming
-// the same new key in a frame, one does.
-uint gi_claim_new_in(uint64_t keys_at, uint bucket_mask, uint64_t key, out bool created)
+// the same new key in a frame, one does. A new key takes a free slot among the bucket's first
+// `within` only.
+uint gi_claim_within_in(uint64_t keys_at, uint bucket_mask, uint64_t key, uint within, out bool created)
 {
     created = false;
     const uint64_t h = gi_mix(key);
@@ -211,7 +251,7 @@ uint gi_claim_new_in(uint64_t keys_at, uint bucket_mask, uint64_t key, out bool 
         }
     }
     GiKeysRef keys = GiKeysRef(keys_at);
-    for (uint i = 0u; i < uint(NPH_RENDER_GI_BUCKET); ++i) {
+    for (uint i = 0u; i < within; ++i) {
         const uint prev = atomicCompSwap(keys.k[base + i], 0u, fp);
         if (prev == 0u || prev == fp) {
             created = prev == 0u;
@@ -219,6 +259,11 @@ uint gi_claim_new_in(uint64_t keys_at, uint bucket_mask, uint64_t key, out bool 
         }
     }
     return GI_NONE;
+}
+
+uint gi_claim_new_in(uint64_t keys_at, uint bucket_mask, uint64_t key, out bool created)
+{
+    return gi_claim_within_in(keys_at, bucket_mask, key, uint(NPH_RENDER_GI_BUCKET), created);
 }
 
 uint gi_claim_in(uint64_t keys_at, uint bucket_mask, uint64_t key)
@@ -237,6 +282,86 @@ uint gi_claim_new(GiViewRef g, uint64_t key, out bool created)
     return gi_claim_new_in(g.g.keys, g.g.bucket_mask, key, created);
 }
 
+// The slot of an irradiance cell's `key` for a sample to be added to (GI_NONE: its bucket is
+// full), its whole key left with the slot by whoever takes it, for the filter (ADR-0090), and
+// nothing yet of what the filter keeps beside it. A new cell takes a free slot among its
+// bucket's first `within`.
+//
+// Where none of those is free, the one no sample has reached for longest gives its slot up
+// (ADR-0091), from NPH_RENDER_GI_EVICT_AGE frames on: a camera at a run leaves cells behind
+// faster than their age frees them, and a table full of what the frames have left had no slot
+// for what they see. Whoever swaps the old cell's word for none has the slot. The others,
+// whose swaps find the word changed, look again: several of a frame's rays land in a new cell,
+// and all but the first find it made (or take the next oldest: where two make the same cell
+// at once, the frame's samples are split between two slots, and the one the lookups do not
+// find ages away). A cell with a sample this frame keeps its slot. An invocation that found
+// the old cell before the swap may still add its sample to the new one: one sample of another
+// place, in a cell whose first samples count for little (gi_filter.comp).
+uint gi_claim_cell_within(GiViewRef g, uint64_t key, uint within)
+{
+    bool created;
+    uint slot = gi_claim_within_in(g.g.keys, g.g.bucket_mask, key, within, created);
+    // (Only for a cell that may take any slot of its bucket, the frame's own: the cells the
+    // rays make where they land, which keep to a part of it, take no cell's slot.)
+    if (slot == GI_NONE && within == uint(NPH_RENDER_GI_BUCKET)) {
+        const uint64_t h = gi_mix(key);
+        const uint base = gi_bucket(g, h);
+        GiCellsRef raw = GiCellsRef(g.g.raw_cells);
+        uint kept = 0u; // the slots whose cells have a sample this frame, a bit each
+        for (uint attempt = 0u; attempt < 4u && slot == GI_NONE; ++attempt) {
+            if (attempt != 0u) {
+                slot = gi_find(g, key);
+                if (slot != GI_NONE) {
+                    break; // made meanwhile
+                }
+            }
+            uint oldest = GI_NONE;
+            uint oldest_word = 0u;
+            uint oldest_age = uint(NPH_RENDER_GI_EVICT_AGE) - 1u;
+            for (uint i = 0u; i < within; ++i) {
+                const uint word = raw.c[base + i].w;
+                const uint age = gi_word_age(word);
+                if (age > oldest_age && (kept >> i & 1u) == 0u) {
+                    oldest = base + i;
+                    oldest_word = word;
+                    oldest_age = age;
+                }
+            }
+            if (oldest == GI_NONE) {
+                return GI_NONE;
+            }
+            if (GiSumsRef(g.g.sums).s[oldest].w != 0u) {
+                kept |= 1u << (oldest - base);
+                continue;
+            }
+            if (atomicCompSwap(raw.c[oldest].w, oldest_word, 0u) != oldest_word) {
+                continue;
+            }
+            GiKeysRef(g.g.keys).k[oldest] = gi_fingerprint(h);
+            raw.c[oldest].xyz = uvec3(0u);
+            GiMomentsRef(g.g.moments).m[oldest] = uvec4(0u);
+            GiHeldRef(g.g.held_before).h[oldest] = vec4(0.0);
+            GiCellsRef(g.g.cells).c[oldest] = uvec4(0u);
+            slot = oldest;
+            created = true;
+        }
+        if (slot == GI_NONE) {
+            return GI_NONE;
+        }
+    }
+    if (created) {
+        GiCellKeysRef records = GiCellKeysRef(g.g.cell_keys);
+        records.k[2u * slot] = uvec4(uint(key), uint(key >> 32ul), 0u, 0u);
+        records.k[2u * slot + 1u] = uvec4(0u);
+    }
+    return slot;
+}
+
+uint gi_claim_cell(GiViewRef g, uint64_t key)
+{
+    return gi_claim_cell_within(g, key, uint(NPH_RENDER_GI_BUCKET));
+}
+
 // A cell's irradiance (lux, rgb) and whether it can be trusted (w: 1 from its first sample on, 0
 // with none). A young cell's few samples are noisy, but no worse a guess than the environment's
 // irradiance, which a trust ramp up to 16 samples once mixed in: many times what arrives in shade,
@@ -251,39 +376,6 @@ vec4 gi_cell(GiViewRef g, uint slot)
 float gi_cell_far(GiViewRef g, uint slot)
 {
     return gi_word_far_share(GiCellsRef(g.g.cells).c[slot].w);
-}
-
-// A new irradiance cell's first light (ADR-0087), in the slot the update has just taken for the
-// camera-relative point `p` on a surface of geometric normal `n`: that of the cell around the same
-// point a level up (twice its size) or a level down (half), whichever holds more samples, counted
-// as up to NPH_RENDER_GI_SEED of them, so trusted at once. As the camera moves, a surface's
-// distance from it crosses into the next level, whose cells there have no samples yet: trusted
-// little, they had the environment's light make up the rest, many times what arrives in shade, and
-// rings of light followed the camera across shaded ground while leaves glowed. The neighbouring
-// level's cell held the surface's light a moment ago. The new cell's moments start afresh
-// (ADR-0084).
-void gi_seed(GiViewRef g, uint slot, vec3 p, vec3 n)
-{
-    const int level = gi_level(length(p));
-    uvec4 best = uvec4(0u);
-    for (int i = 0; i < 2; ++i) {
-        const int l = level + 1 - 2 * i;
-        if (l >= 0 && l < NPH_RENDER_GI_LEVELS) {
-            const uint s = gi_find(g, gi_key_at(g, p, n, l));
-            if (s != GI_NONE) {
-                const uvec4 c = GiCellsRef(g.g.cells).c[s];
-                if (gi_word_count(c.w) > gi_word_count(best.w)) {
-                    best = c;
-                }
-            }
-        }
-    }
-    const uint count = min(gi_word_count(best.w), uint(NPH_RENDER_GI_SEED));
-    if (count != 0u) {
-        GiCellsRef(g.g.cells).c[slot] = uvec4(best.xyz, gi_word(count, 0u, gi_word_far(best.w)));
-        const float lum = dot(uintBitsToFloat(best.xyz), vec3(0.2126, 0.7152, 0.0722));
-        GiMomentsRef(g.g.moments).m[slot] = uvec4(0u, floatBitsToUint(lum), 0u, 0u);
-    }
 }
 
 // The cache's irradiance at the camera-relative point `p` (geometric normal
@@ -315,6 +407,18 @@ uint gi_reflect_rough(float roughness)
     return uint(clamp(roughness / NPH_RENDER_REFLECT_MAX_ROUGHNESS, 0.0, 1.0) * 15.0 + 0.5);
 }
 
+// The share of what a smooth pixel reflects that its ray gives, where each takes a ray a frame
+// (ADR-0092), by its roughness as gi_reflect_rough keeps it: all of it up to
+// NPH_RENDER_REFLECT_RAY_ROUGHNESS, none at NPH_RENDER_REFLECT_MAX_ROUGHNESS, where the surfaces
+// that take no ray begin. The rest is what its irradiance cell has gathered, as theirs is.
+float gi_reflect_ray_share(uint rough)
+{
+    const float roughness = float(rough) * (NPH_RENDER_REFLECT_MAX_ROUGHNESS / 15.0);
+    return clamp((NPH_RENDER_REFLECT_MAX_ROUGHNESS - roughness) /
+                     (NPH_RENDER_REFLECT_MAX_ROUGHNESS - NPH_RENDER_REFLECT_RAY_ROUGHNESS),
+                 0.0, 1.0);
+}
+
 // The key of the reflection cell of the camera-relative point `p` on a surface facing `n` (towards
 // the camera), whose mirror direction is `d` (gi_reflect_oct), of roughness `rough`
 // (gi_reflect_rough), ADR-0077: cells of the same grid, finer, for each direction of bins as wide
@@ -324,7 +428,7 @@ uint gi_reflect_rough(float roughness)
 // frame's jitter rounds them anew.
 uint64_t gi_reflect_key(GiViewRef g, vec3 p, vec3 n, uvec2 d, uint rough)
 {
-    const int level = max(gi_level(length(p)) - NPH_RENDER_REFLECT_LEVEL_SHIFT, 0);
+    const int level = max(gi_level_from(length(p), 0) - NPH_RENDER_REFLECT_LEVEL_SHIFT, 0);
     const vec4 origin = g.g.levels[level].origin;
     const ivec3 camera = ivec3(uvec3(g.g.levels[level].cell[0], g.g.levels[level].cell[1],
                                      g.g.levels[level].cell[2]));
@@ -406,45 +510,57 @@ vec3 gi_reflect_light(uint w)
 // shared across the subgroup, the resolve that calls it took more registers and ran slower.)
 vec4 gi_surface_blend(GiViewRef g, vec3 p, vec3 n, out float far)
 {
-    const int level = gi_level(length(p));
-    const vec4 origin = g.g.levels[level].origin;
-    const ivec3 camera = gi_camera_cell(g, level);
-    // The point in the level's cells, half a cell out along the normal, as the keys take it.
-    const vec3 x = (p + 0.5 * origin.w * n + origin.xyz) / origin.w;
+    const int own_level = gi_level(length(p));
     // Turned so that z is the axis the surface faces most and x and y the two across it (as
     // swizzles: a vector indexed at run time goes to local memory).
     const vec3 an = abs(n);
     const uint k = an.x >= an.y ? (an.x >= an.z ? 0u : 2u) : (an.y >= an.z ? 1u : 2u);
-    const vec3 xt = k == 0u ? x.yzx : (k == 1u ? x.zxy : x);
     const vec3 nt = k == 0u ? n.yzx : (k == 1u ? n.zxy : n);
-    const vec2 across = xt.xy - 0.5;
-    const vec2 base = floor(across);
-    const vec2 t = across - base;
     const uint octant = gi_octant(n);
     const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
     vec3 sum = vec3(0.0);
     float trusted = 0.0;
     float far_sum = 0.0;
     float lum_sum = 0.0;
-    for (int c = 0; c < 4; ++c) {
-        const vec2 o = vec2(float(c & 1), float(c >> 1));
-        // Along the axis the surface faces, its plane at this cell's centre (|nt.z| >= 1 / sqrt 3).
-        const vec2 centre = base + o + 0.5;
-        const float along = xt.z - dot(nt.xy, centre - xt.xy) / nt.z;
-        const ivec3 turned = ivec3(ivec2(base + o), int(floor(along)));
-        const ivec3 cell = k == 0u ? turned.zxy : (k == 1u ? turned.yzx : turned);
-        const uint slot = gi_find(g, gi_cell_key(camera + cell, level, octant));
-        if (slot != GI_NONE) {
-            const uvec4 cw = GiCellsRef(g.g.cells).c[slot];
-            const vec3 e = uintBitsToFloat(cw.xyz);
-            const float weight = (c & 1) != 0 ? t.x : 1.0 - t.x;
-            const float bilinear = weight * ((c >> 1) != 0 ? t.y : 1.0 - t.y);
-            const float wt = bilinear * min(float(gi_word_count(cw.w)) * (1.0 / 16.0), 1.0);
-            sum += e * wt;
-            trusted += wt;
-            const float l = dot(e, lum) * wt;
-            far_sum += gi_word_far_share(cw.w) * l;
-            lum_sum += l;
+    // The point's own level's cells; and where none of the four is held to be anything yet (a
+    // surface the frames have just come to, or one seen at so low an angle that few of its cells
+    // have had a ray), the next level's, those cells' parents, and theirs, which the same
+    // samples and the rays that met the surface before have filled (ADR-0090, ADR-0091). Where
+    // those hold nothing either the caller takes the environment's light, which indoors is many
+    // times the room's: white patches wherever a view turned to something new. (The parents'
+    // four, not the point's one parent: that one is as often not there yet.)
+    for (int up = 0; up <= NPH_RENDER_GI_ABOVE && trusted <= 0.0; ++up) {
+        const int level = min(own_level + up, NPH_RENDER_GI_LEVELS - 1);
+        const vec4 origin = g.g.levels[level].origin;
+        const ivec3 camera = gi_camera_cell(g, level);
+        // The point in the level's cells, half a cell out along the normal, as the keys take it.
+        const vec3 x = (p + 0.5 * origin.w * n + origin.xyz) / origin.w;
+        const vec3 xt = k == 0u ? x.yzx : (k == 1u ? x.zxy : x);
+        const vec2 across = xt.xy - 0.5;
+        const vec2 base = floor(across);
+        const vec2 t = across - base;
+        for (int c = 0; c < 4; ++c) {
+            const vec2 o = vec2(float(c & 1), float(c >> 1));
+            // Along the axis the surface faces, its plane at this cell's centre (|nt.z| >= 1 / sqrt 3).
+            const vec2 centre = base + o + 0.5;
+            const float along = xt.z - dot(nt.xy, centre - xt.xy) / nt.z;
+            const ivec3 turned = ivec3(ivec2(base + o), int(floor(along)));
+            const ivec3 cell = k == 0u ? turned.zxy : (k == 1u ? turned.yzx : turned);
+            const uint slot = gi_find(g, gi_cell_key(camera + cell, level, octant));
+            if (slot != GI_NONE) {
+                const uvec4 cw = GiCellsRef(g.g.cells).c[slot];
+                const vec3 e = uintBitsToFloat(cw.xyz);
+                const float weight = (c & 1) != 0 ? t.x : 1.0 - t.x;
+                const float bilinear = weight * ((c >> 1) != 0 ? t.y : 1.0 - t.y);
+                const float wt = bilinear * min(float(gi_word_count(cw.w)) *
+                                                    (1.0 / float(NPH_RENDER_GI_TRUSTED)),
+                                                1.0);
+                sum += e * wt;
+                trusted += wt;
+                const float l = dot(e, lum) * wt;
+                far_sum += gi_word_far_share(cw.w) * l;
+                lum_sum += l;
+            }
         }
     }
     far = lum_sum > 0.0 ? far_sum / lum_sum : 0.0;

@@ -61,9 +61,12 @@ VisViewRef g_rt_view;
 layout(constant_id = 1) const bool k_vsm = false;
 VsmViewRef g_vsm; // set first thing in main()
 #define NPH_SURFACE_VSM_ACTIVE k_vsm
-// With what the occlusion's march found of what blocks the sun (ao.comp): in its sign.
-float g_contact = 1.0;
-#define NPH_SURFACE_VSM(p)     (vsm_shadow(g_vsm, (p).position, (p).face_normal, (p).n) * g_contact)
+// The sun's light at the pixel where the occlusion's pass has it (ao_denoise.comp: the rays'
+// where the sun grazes the surface, none where its march found the sun blocked); negative: it
+// has none, and the map is asked.
+float g_sun = -1.0;
+#define NPH_SURFACE_VSM(p)                                                                         \
+    (g_sun >= 0.0 ? g_sun : vsm_shadow(g_vsm, (p).position, (p).face_normal, (p).n))
 
 // The ambient occlusion where the frame has it (ao.c), at the pixel the
 // invocation shades, of reverse-Z depth g_depth; set first thing in main().
@@ -74,9 +77,10 @@ uint g_ao; // the occlusion, one a pixel (ao_denoise.comp); NPH_VIS_NO_AO: none
 // The occlusion at the pixel.
 float vis_ambient_occlusion()
 {
-    const float a = texelFetch(nph_textures_2d[g_ao], g_pixel, 0).r;
-    g_contact = a < 0.0 ? 0.0 : 1.0;
-    return abs(a);
+    const vec2 a = texelFetch(nph_textures_2d[g_ao], g_pixel, 0).rg;
+    const float steps = float(NPH_RENDER_AO_SUN_STEPS);
+    g_sun = a.g * 255.0 > steps + 0.5 ? -1.0 : a.g * (255.0 / steps);
+    return a.r;
 }
 #define NPH_SURFACE_AO (g_ao != NPH_VIS_NO_AO ? vis_ambient_occlusion() : 1.0)
 

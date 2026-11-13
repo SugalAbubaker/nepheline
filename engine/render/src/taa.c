@@ -37,6 +37,11 @@ static f32 halton(u32 i, u32 base)
     return r;
 }
 
+// What a history pixel keeps beside its colour: its unrest (taa_common.glsl taa_unrest), a share
+// of its light, 0 to 1; the frames it holds (taa_count_after), over 255; and its surface's key
+// (taa_depth_key), 16 bits in two halves.
+#define TAA_UNREST_FORMAT NPH_GPU_FORMAT_R8G8B8A8_UNORM
+
 NphVec2 render_taa_jitter(u64 sequence)
 {
     // Points 1 to RENDER_TAA_PHASES: point 0 is the origin.
@@ -70,7 +75,8 @@ NphResult render_taa_create(NphRenderer *r)
     d.vertex = r->shaders[RENDER_SHADER_FULLSCREEN_VERT];
     d.fragment = t->history_shader;
     d.color_formats[0] = r->vis.hdr_format;
-    d.color_count = 1U;
+    d.color_formats[1] = TAA_UNREST_FORMAT;
+    d.color_count = 2U;
     d.specialization[0] = r->vis.hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
     d.specialization_count = 1U;
     d.name = "taa (history only)";
@@ -92,6 +98,8 @@ static void destroy_history(NphRenderer *r)
     for (u32 i = 0; i < 2U; ++i) {
         nph_gpu_image_destroy(r->dev, t->history[i]); // deferred past the frames in flight
         t->history[i] = NPH_GPU_IMAGE_NULL;
+        nph_gpu_image_destroy(r->dev, t->unrest[i]);
+        t->unrest[i] = NPH_GPU_IMAGE_NULL;
     }
     t->width = 0U;
     t->height = 0U;
@@ -117,7 +125,8 @@ NphResult render_taa_target_pipeline(NphRenderer *r, RenderTargetPipelines *t, N
     d.fragment = r->taa.shader;
     d.color_formats[0] = format;
     d.color_formats[1] = r->vis.hdr_format;
-    d.color_count = 2U;
+    d.color_formats[2] = TAA_UNREST_FORMAT;
+    d.color_count = 3U;
     // Whether the history is B10G11R11 and dithered (taa.frag k_dither).
     d.specialization[0] = r->vis.hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
     d.specialization_count = 1U;
@@ -143,8 +152,14 @@ static NphResult ensure_history(NphRenderer *r, u32 width, u32 height)
     d.mip_count = 1U;
     d.usage = (u32)NPH_GPU_IMAGE_USAGE_COLOR_ATTACHMENT | (u32)NPH_GPU_IMAGE_USAGE_SAMPLED;
     d.name = "taa history";
+    NphGpuImageDesc u = d;
+    u.format = TAA_UNREST_FORMAT;
+    u.name = "taa unrest";
     for (u32 i = 0; i < 2U; ++i) {
-        const NphResult res = nph_gpu_image_create(r->dev, &d, &t->history[i]);
+        NphResult res = nph_gpu_image_create(r->dev, &d, &t->history[i]);
+        if (res == NPH_RESULT_OK) {
+            res = nph_gpu_image_create(r->dev, &u, &t->unrest[i]);
+        }
         if (res != NPH_RESULT_OK) {
             destroy_history(r);
             return res;
@@ -209,6 +224,10 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     const NphGpuRgImage next = nph_gpu_rg_import_image(graph, t->history[t->write]);
     const NphGpuRgImage prev =
         t->frame_history ? nph_gpu_rg_import_image(graph, last) : NPH_GPU_RG_IMAGE_NULL;
+    const NphGpuImage last_unrest = t->unrest[t->write ^ 1U];
+    const NphGpuRgImage next_unrest = nph_gpu_rg_import_image(graph, t->unrest[t->write]);
+    const NphGpuRgImage prev_unrest =
+        t->frame_history ? nph_gpu_rg_import_image(graph, last_unrest) : NPH_GPU_RG_IMAGE_NULL;
     NphGpuRgPassDesc pd;
     memset(&pd, 0, sizeof pd);
     pd.name = "taa";
@@ -216,8 +235,9 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     pd.execute = taa_execute;
     pd.user = r;
     NphGpuRgPass *p = nph_gpu_rg_add_pass(graph, &pd);
-    if (p == NULL || nph_gpu_rg_image_is_null(next) ||
-        (t->frame_history && nph_gpu_rg_image_is_null(prev))) {
+    if (p == NULL || nph_gpu_rg_image_is_null(next) || nph_gpu_rg_image_is_null(next_unrest) ||
+        (t->frame_history &&
+         (nph_gpu_rg_image_is_null(prev) || nph_gpu_rg_image_is_null(prev_unrest)))) {
         return NPH_RESULT_FULL;
     }
     *out_history = next;
@@ -230,6 +250,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
         nph_gpu_rg_color_attachment(p, out, &a);
     }
     nph_gpu_rg_color_attachment(p, next, &a);
+    nph_gpu_rg_color_attachment(p, next_unrest, &a);
     nph_gpu_rg_read_image(p, r->hdr_rg, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_image(p, f->visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_read_buffer(p, f->clusters, NPH_GPU_RG_USE_SHADER_READ);
@@ -237,6 +258,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     nph_gpu_rg_read_buffer(p, f->prev_transforms, NPH_GPU_RG_USE_SHADER_READ);
     if (t->frame_history) {
         nph_gpu_rg_read_image(p, prev, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
+        nph_gpu_rg_read_image(p, prev_unrest, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     }
     render_post_read(r, p);
 
@@ -252,6 +274,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     push->history_scale = t->frame_history ? exposure / t->exposure : 0.0F;
     push->jitter = nph_vec2(t->frame_jitter.x / (f32)t->width, t->frame_jitter.y / (f32)t->height);
     push->history_index = nph_gpu_image_sampled_index(dev, last);
+    push->unrest_index = nph_gpu_image_sampled_index(dev, last_unrest);
     push->sampler_index = nph_gpu_sampler_index(dev, t->sampler);
     push->point_sampler = nph_gpu_sampler_index(
         dev, r->material_samplers[NPH_RENDER_WRAP_CLAMP][NPH_RENDER_WRAP_CLAMP][1]);

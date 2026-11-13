@@ -173,6 +173,7 @@ Settings are cvars. The engine's:
 | `r.dof` | true | depth of field through the camera's lens (its `aperture`, 0 by default: a pinhole; saved) |
 | `r.ao` | 0.5 | the production path's ambient occlusion: the radius in metres within which surfaces occlude the environment's light, 0 to 8 (0: none; saved) |
 | `r.contact_shadow` | 24 | the production path's contact shadows: how far a pixel looks towards the sun through the depths, in pixels' widths at its distance, 0 to 256 (0: not at all; render.md "Contact shadows"; saved) |
+| `r.sun_rays` | false | the production path's sun shadows by a ray a pixel in place of its shadow map's, where the frame traces and the device has ray queries: right on walls the sun grazes and for what stands close to a surface, some 1 to 4 ms a frame at 1440p (render.md "Contact shadows"; saved) |
 | `r.reflections` | 2 | what the production path's surfaces reflect (render.md "Reflections"): 0 the sky as if nothing hid it, 1 what the radiance cache gathers, 2 a ray a pixel (the default, ADR-0089); where the device has ray queries (saved) |
 | `r.gi` | true | the production path's global illumination: the diffuse light from the radiance cache, where the device has ray queries (saved) |
 | `r.many_restir` | 1 | what of the many lights' far fields per-pixel reservoirs take (render.md "Many lights"): 0 none, 1 the highlights, 2 all; where the device has ray queries (saved) |

@@ -336,6 +336,334 @@ NTEST_F(Contact, a_wall_the_sun_grazes_takes_a_finer_map)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// Where the sun grazes the wall harder still (4.6 degrees: 0.08 of its light), a texel of the
+// map lies six pixels long down the wall even a level finer, and the ledge's shadow is a row of
+// steps with light between them that every level steps elsewhere. In a frame that has the rays'
+// scene (here for a lamp too dim to see, whose shadows are rays') the occlusion's pass traces
+// the sun for such a pixel and the resolve leaves the map unread there (ao_rt.comp; ADR-0094):
+// against rays the test casts, next to nothing lit that the ledge hides or dark that the sun
+// reaches, where the map alone, in the same view without the lamp, leaves many times as much.
+NTEST_F(Contact, a_wall_the_sun_grazes_hard_takes_the_suns_rays)
+{
+    REQUIRE_CONTACT(f);
+    if (!nph_renderer_ray_tracing_supported(f->renderer)) {
+        NTEST_SKIP("no ray queries on this device");
+    }
+    const NphRenderTexture env = test_uniform_environment(f, 0.02F);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    test_box_ground(f, &scene, mesh, grey);
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-3.0F, 0.0F, -0.3F), nph_vec3(3.0F, 3.0F, 0.0F));
+    test_box_add(f, &scene, mesh, grey, nph_vec3(-1.5F, 2.0F, 0.0F), nph_vec3(1.5F, 2.08F, 0.25F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 1.5F, 0.0F), 0.8F);
+    NphRenderLightDesc ld = low_sun();
+    ld.direction = nph_vec3_normalize(nph_vec3(0.85F, -0.5F, -0.08F));
+    const NphRenderLight sun = make_sun(f, &ld);
+    const NphVec3 to_sun = nph_vec3_neg(ld.direction);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    // (And a third time with the rays' scene but the view not asking for the sun's rays,
+    // as views do by default: the map alone again.)
+    Against found[3];
+    NphRenderLight lamp = NPH_RENDER_LIGHT_NULL;
+    for (u32 rays = 0; rays < 3U; ++rays) {
+        if (rays == 1U) {
+            NphRenderLightDesc pd;
+            memset(&pd, 0, sizeof pd);
+            pd.type = NPH_RENDER_LIGHT_TYPE_POINT;
+            pd.color = nph_vec3_one();
+            pd.intensity = 1e-4F;
+            pd.position = nph_dvec3(0.0, 2.5, 3.0);
+            pd.shadows = 1;
+            NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &pd, &lamp), NPH_RESULT_OK);
+        }
+        NphRenderView v;
+        contact_view(&v, camera, NPH_RENDER_VIEW_LIT, MARCH);
+        v.sun_rays = rays == 1U ? 1 : 0;
+        const NphRenderFrameStats s = settled(f, &v, target, image);
+        NTEST_EXPECT_TRUE(s.vsm);
+        NTEST_EXPECT_EQ_INT(s.shadow_rays ? 1 : 0, rays != 0U ? 1 : 0);
+        const f32 wall = test_box_linear(image, (SIZE / 4U) * SIZE + SIZE / 2U);
+        found[rays] = against_truth(&scene, to_sun, image, LIT_SHARE * wall);
+        NTEST_LOG("%s, wall %.3f: %u lit (%u dark), %u hidden (%u lit)",
+                  rays == 0U   ? "the map alone"
+                  : rays == 1U ? "with the rays' scene and the sun's rays asked for"
+                               : "with the rays' scene, the sun left to its map",
+                  (f64)wall, found[rays].lit, found[rays].darkened, found[rays].hidden,
+                  found[rays].missed);
+        NTEST_ASSERT_GT_UINT(found[rays].hidden, 200U);
+        NTEST_ASSERT_GT_UINT(found[rays].lit, 2000U);
+    }
+    NTEST_EXPECT_TRUE(found[1].missed * 100U <= found[1].hidden * 2U);
+    NTEST_EXPECT_TRUE(found[1].darkened * 200U <= found[1].lit);
+    NTEST_EXPECT_TRUE((found[1].missed + found[1].darkened) * 3U <
+                      found[0].missed + found[0].darkened);
+    // Left to its map, the sun's shadows are the map's again (the lamp's own light is nothing).
+    NTEST_EXPECT_EQ_UINT(found[2].missed, found[0].missed);
+    NTEST_EXPECT_EQ_UINT(found[2].darkened, found[0].darkened);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, lamp);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// A cloth in folds five centimetres deep, `cells` x `cells` quads across [-half, half] in x and
+// z, with its levels of detail: the coarser ones smooth the folds away.
+static void folded_cloth(LodMesh *m, u32 cells, f32 half)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u32 side = cells + 1U;
+    const u32 n = side * side;
+    NphRenderVertexInput *v = NPH_ALLOC_ARRAY(a, NphRenderVertexInput, n);
+    u32 *idx = NPH_ALLOC_ARRAY(a, u32, (u64)cells * cells * 6U);
+    NTEST_ASSERT_TRUE(v != NULL && idx != NULL);
+    const f32 step = 2.0F * half / (f32)cells;
+    const f32 depth = 0.05F;
+    const f32 turn = 2.0F * NPH_PI / 0.6F; // a fold every 60 cm
+    for (u32 i = 0; i < side; ++i) {
+        for (u32 j = 0; j < side; ++j) {
+            const f32 x = -half + step * (f32)j;
+            const f32 z = -half + step * (f32)i;
+            NphRenderVertexInput *q = &v[i * side + j];
+            q->position = nph_vec3(x, depth * nph_f32_sin(turn * x), z);
+            q->normal =
+                nph_vec3_normalize(nph_vec3(-depth * turn * nph_f32_cos(turn * x), 1.0F, 0.0F));
+            q->uv = nph_vec2((f32)j / (f32)cells, (f32)i / (f32)cells);
+            q->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+        }
+    }
+    u32 k = 0U;
+    for (u32 i = 0; i < cells; ++i) {
+        for (u32 j = 0; j < cells; ++j) {
+            const u32 v00 = i * side + j;
+            // Counter-clockwise seen from above (+y).
+            idx[k++] = v00;
+            idx[k++] = v00 + side;
+            idx[k++] = v00 + side + 1U;
+            idx[k++] = v00;
+            idx[k++] = v00 + side + 1U;
+            idx[k++] = v00 + 1U;
+        }
+    }
+    lod_mesh_build(m, v, n, idx, k);
+    NPH_FREE_ARRAY(a, NphRenderVertexInput, v, n);
+    NPH_FREE_ARRAY(a, u32, idx, (u64)cells * cells * 6U);
+}
+
+// A view far enough off draws a coarser level of a mesh, smoother than the mesh, and the rays'
+// scene holds the mesh itself. A ray that left the level's surface where the mesh lies above it
+// met the mesh: on Bistro's awnings, patches of shadow under folds the level had smoothed away,
+// which came and went as the level changed with the camera's distance. A pixel that shows a
+// coarser level (NPH_VIS_CLUSTER_COARSE) finds the mesh along its own ray first, and its ray to
+// the sun starts there (ao_pass.glsl; ADR-0094): a cloth in folds, under a sun high enough to
+// reach all of every fold, is lit at a coarser level wherever it is at its own.
+NTEST_F(Contact, a_coarser_level_takes_no_shadow_of_its_own_mesh)
+{
+    REQUIRE_CONTACT(f);
+    if (!nph_renderer_ray_tracing_supported(f->renderer)) {
+        NTEST_SKIP("no ray queries on this device");
+    }
+    const NphRenderTexture env = test_uniform_environment(f, 0.02F);
+    LodMesh m;
+    folded_cloth(&m, 96U, 2.0F);
+    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &m.desc, &mesh), NPH_RESULT_OK);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = mesh;
+    id.materials = &grey;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0), nph_quat_identity(),
+                                                 nph_vec3(1.0F, 1.0F, 1.0F));
+    NphRenderInstance instance = NPH_RENDER_INSTANCE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, &instance), NPH_RESULT_OK);
+    // The sun 17 degrees off the cloth's normal, its folds' slopes at most 28: no fold shades
+    // another. The rays' scene is in the frame for a lamp too dim to see.
+    NphRenderLightDesc ld = low_sun();
+    ld.direction = nph_vec3_normalize(nph_vec3(0.25F, -1.0F, 0.15F));
+    const NphRenderLight sun = make_sun(f, &ld);
+    NphRenderLightDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    pd.color = nph_vec3_one();
+    pd.intensity = 1e-4F;
+    pd.position = nph_dvec3(0.0, 2.5, 3.0);
+    pd.shadows = 1;
+    NphRenderLight lamp = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &pd, &lamp), NPH_RESULT_OK);
+    const NphRenderCamera camera = nph_render_camera_look_at(
+        nph_dvec3(0.0, 3.5, 4.5), nph_dvec3(0.0, 0.0, 0.0), nph_vec3_unit_y(), 0.8F, 0.05F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 fine[PIXELS];
+    static u8 coarse[PIXELS];
+    NphRenderView v;
+    contact_view(&v, camera, NPH_RENDER_VIEW_LIT, MARCH);
+    v.sun_rays = 1;
+    v.lod_error = 0.0F;
+    const NphRenderFrameStats s0 = settled(f, &v, target, fine);
+    // Six pixels' error: 20 cm here, four times the folds' depth.
+    v.lod_error = 6.0F;
+    const NphRenderFrameStats s1 = settled(f, &v, target, coarse);
+    NTEST_EXPECT_TRUE(s0.shadow_rays);
+    NTEST_EXPECT_TRUE(s1.shadow_rays);
+    NTEST_EXPECT_EQ_UINT(s0.vis_triangles, m.data.index_count / 3U);
+    NTEST_EXPECT_LT_UINT(s1.vis_triangles * 4U, s0.vis_triangles);
+    // The cloth's pixels, by the light its own level shows, and those of them a coarser level
+    // shows much darker.
+    const f32 centre = test_box_linear(fine, (SIZE / 2U) * SIZE + SIZE / 2U);
+    u32 cloth = 0U;
+    u32 darker = 0U;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const f32 own = test_box_linear(fine, i);
+        if (own > 0.5F * centre) {
+            ++cloth;
+            darker += test_box_linear(coarse, i) < 0.6F * own ? 1U : 0U;
+        }
+    }
+    NTEST_LOG("%u triangles of %u drawn; of the cloth's %u lit pixels, %u much darker at the "
+              "coarser level",
+              s1.vis_triangles, s0.vis_triangles, cloth, darker);
+    NTEST_ASSERT_GT_UINT(cloth, 4000U);
+    NTEST_EXPECT_LE_UINT(darker * 100U, cloth);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, lamp);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_instance_destroy(f->renderer, instance);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
+// Level ground 40 m across with its top at y = 0, as test_box_ground's, of a mesh whose own space
+// lies far from where its instance stands: its vertices `far` metres out on every axis, and the
+// instance as far back (a city's tile, modelled where it lies in its city).
+static void far_ground(RenderFixture *f, LodMesh *m, f32 far, NphRenderMaterial mat,
+                       NphRenderMesh *mesh, NphRenderInstance *instance)
+{
+    enum {
+        CELLS = 8,
+        SIDE = CELLS + 1
+    };
+    static NphRenderVertexInput v[SIDE * SIDE];
+    static u32 idx[CELLS * CELLS * 6];
+    for (u32 i = 0; i < (u32)SIDE; ++i) {
+        for (u32 j = 0; j < (u32)SIDE; ++j) {
+            NphRenderVertexInput *q = &v[i * (u32)SIDE + j];
+            q->position = nph_vec3(far - 20.0F + 40.0F * (f32)j / (f32)CELLS, far,
+                                   far - 20.0F + 40.0F * (f32)i / (f32)CELLS);
+            q->normal = nph_vec3_unit_y();
+            q->uv = nph_vec2((f32)j / (f32)CELLS, (f32)i / (f32)CELLS);
+            q->color = nph_vec4(1.0F, 1.0F, 1.0F, 1.0F);
+        }
+    }
+    u32 k = 0U;
+    for (u32 i = 0; i < (u32)CELLS; ++i) {
+        for (u32 j = 0; j < (u32)CELLS; ++j) {
+            const u32 v00 = i * (u32)SIDE + j;
+            // Counter-clockwise seen from above (+y).
+            idx[k++] = v00;
+            idx[k++] = v00 + (u32)SIDE;
+            idx[k++] = v00 + (u32)SIDE + 1U;
+            idx[k++] = v00;
+            idx[k++] = v00 + (u32)SIDE + 1U;
+            idx[k++] = v00 + 1U;
+        }
+    }
+    lod_mesh_build(m, v, (u32)(SIDE * SIDE), idx, k);
+    const NphRenderMeshDesc d = level0_desc(m);
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &d, mesh), NPH_RESULT_OK);
+    NphRenderInstanceDesc id;
+    memset(&id, 0, sizeof id);
+    id.mesh = *mesh;
+    id.materials = &mat;
+    id.material_count = 1U;
+    id.transform = nph_render_transform_from_trs(nph_dvec3(-(f64)far, -(f64)far, -(f64)far),
+                                                 nph_quat_identity(), nph_vec3(1.0F, 1.0F, 1.0F));
+    NTEST_ASSERT_EQ_INT(nph_render_instance_create(f->renderer, &id, instance), NPH_RESULT_OK);
+}
+
+// The rays' scene keeps its origin, the anchor, where the camera was when it was built, and a
+// ray's own offset off its surface counts units in the last place of the point's coordinates
+// there (rt_common.glsl nph_offset_ray): next to nothing for ground level with the anchor, while
+// a pixel's point comes from its depth, only as exact as a float tens of metres from the camera
+// is. The city's road, 30 to 50 m off with the anchor 16 m behind the camera, shadowed itself
+// in patches that changed every frame; the pass now starts its rays off the surface by a share of
+// the point's distance (ao_pass.glsl AO_RAY_SLACK). Here, the sun's rays from a camera that has
+// left the anchor, over ground level with it, of a mesh modelled far from its own origin: open
+// ground is lit, all of it, evenly. (This scene is too small to shadow itself without the slack;
+// that is measured in the city, docs/adr/0094. A ray that left from the wrong place, the
+// anchor's offset lost or turned, would start under this ground.)
+NTEST_F(Contact, ground_level_with_the_rays_anchor_does_not_shadow_itself)
+{
+    REQUIRE_CONTACT(f);
+    if (!nph_renderer_ray_tracing_supported(f->renderer)) {
+        NTEST_SKIP("no ray queries on this device");
+    }
+    const NphRenderTexture env = test_uniform_environment(f, 0.02F);
+    const NphRenderMaterial grey = test_grey(f, 0.5F);
+    LodMesh m;
+    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+    NphRenderInstance instance = NPH_RENDER_INSTANCE_NULL;
+    far_ground(f, &m, 2000.0F, grey, &mesh, &instance);
+    // The ground truth's ground: the same slab's top.
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    scene.boxes[0].lo = nph_vec3(-20.0F, -1.0F, -20.0F);
+    scene.boxes[0].hi = nph_vec3(20.0F, 0.0F, 20.0F);
+    scene.count = 1U;
+    const NphRenderLightDesc ld = low_sun();
+    const NphRenderLight sun = make_sun(f, &ld);
+    const NphVec3 to_sun = nph_vec3_neg(ld.direction);
+    NphRenderLightDesc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    pd.color = nph_vec3_one();
+    pd.intensity = 1e-4F;
+    pd.position = nph_dvec3(0.0, 2.5, 3.0);
+    pd.shadows = 1;
+    NphRenderLight lamp = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &pd, &lamp), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 image[PIXELS];
+    // The first frames that trace anchor the rays' scene at their camera: 4 cm above the ground.
+    NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 0.04F, 15.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    NphRenderView v;
+    contact_view(&v, camera, NPH_RENDER_VIEW_LIT, MARCH);
+    v.sun_rays = 1;
+    NphRenderFrameStats s = settled(f, &v, target, image);
+    NTEST_EXPECT_TRUE(s.shadow_rays);
+    // Then the ground 15 to 35 m off, from 7 m away from the anchor: the scene is not rebuilt.
+    camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 6.0F, 12.0F), nph_vec3(0.0F, 0.0F, -15.0F), 0.8F);
+    contact_view(&v, camera, NPH_RENDER_VIEW_LIT, MARCH);
+    v.sun_rays = 1;
+    s = settled(f, &v, target, image);
+    NTEST_EXPECT_TRUE(s.shadow_rays);
+    f32 brightest = 0.0F;
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        brightest = nph_f32_max(brightest, test_box_linear(image, i));
+    }
+    // Open ground under one sun is of one light: a pixel some of whose window's rays met the
+    // ground itself shows less of it.
+    const Against found = against_truth(&scene, to_sun, image, 0.9F * brightest);
+    NTEST_LOG("ground at %.3f: %u lit pixels, %u of them under nine tenths of it", (f64)brightest,
+              found.lit, found.darkened);
+    NTEST_ASSERT_GT_UINT(found.lit, 4000U);
+    NTEST_EXPECT_EQ_UINT(found.darkened, 0U);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, lamp);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_instance_destroy(f->renderer, instance);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    lod_mesh_free(&m);
+    nph_render_texture_destroy(f->renderer, env);
+}
+
 // A surface seen as aslant as the sun lights it keeps the distance's level: a pixel lies stretched
 // across it as much as a texel does (ADR-0080). The ground, seen from a little above it under a sun
 // a little higher, asks for no more pages than its distances alone would.

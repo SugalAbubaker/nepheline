@@ -116,6 +116,11 @@ void main()
                 (alpha_mode == 1u && !voxels ? uint(NPH_VIS_CLUSTER_MASKED) : 0u) |
                 ((inst.flags & NPH_VIS_INSTANCE_MOVED) != 0u ? uint(NPH_VIS_CLUSTER_MOVED) : 0u) |
                 (voxels ? uint(NPH_VIS_CLUSTER_VOXELS) : 0u);
+        // What stands in for finer geometry (a level 0's maker has no error).
+        if (voxels || (inst.flags & (NPH_VIS_INSTANCE_PROXY | NPH_VIS_INSTANCE_FINEST)) != 0u ||
+            (mesh.lod_makers != 0ul && vis_lod_maker_error(mesh, meshlet) > 0.0)) {
+            flags |= uint(NPH_VIS_CLUSTER_COARSE);
+        }
         if (alpha_mode != 2u || voxels) {
             VisMeshletBoundsRef bounds = VisMeshletBoundsRef(mesh.meshlet_bounds);
             const uvec4 b0 = bounds.b[meshlet * 2u];

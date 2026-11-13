@@ -1,0 +1,494 @@
+// SPDX-License-Identifier: Apache-2.0
+// The radiance cache's filter (docs/render.md "Global illumination";
+// ADR-0090, ADR-0091; gi_common.glsl): one invocation a slot, after the
+// resolve. A cell's own mean is of the samples that reached it, and where
+// little light arrives by few paths (shade lit by a sunlit wall across the
+// street) a thousand samples leave it a tenth or more out, each cell its own
+// way: shown as it is, the shade is mottled, and the mottling changes as the
+// means wander. What the frame looks up is therefore each cell's light as
+// its samples, its neighbours' and its parents' make it out together.
+//
+// The light a cell is held to have is the f that agrees best with its own
+// mean m, by its samples' count n, with its six face neighbours' f, and with
+// its parents' means P where its own samples are few:
+//
+//     f = (a m + b P + sum of g_j f_j) / (a + b + sum of g_j),   a = n / N
+//
+// the minimum of the cells' a (f - m)^2 plus the pairs' g (f - f_j)^2 (a
+// Gaussian Markov random field's posterior mean; Rue & Held, "Gaussian
+// Markov Random Fields", 2005), reached by one damped Jacobi step a frame
+// (NPH_RENDER_GI_RELAX: the damping keeps the two halves of the lattice from
+// swapping). The step's reach is 1 / sqrt(a + b) cells, over whose cells the
+// samples' noise averages: N is the count that leaves the light
+// NPH_RENDER_GI_SMOOTH_NOISE out, given how a sample spreads about the
+// light (the variance guides the filter as in Schied et al.,
+// "Spatiotemporal Variance-Guided Filtering", HPG 2017). So a cell whose
+// samples agree keeps its own light and its detail, and one whose light
+// arrives by few paths takes its neighbourhood's: from
+// NPH_RENDER_GI_SMOOTH_REACH cells away at most (a + b is held to that). A
+// cell that reaches further takes its light from where the light is another.
+//
+// The steps go from what each cell was held to be last frame
+// (NphRenderGiView.held_before), not from its mean (ADR-0091). A mean of few
+// samples moves by a tenth or more with each frame's, and a light that is
+// held to be the mean plus what the filter added (as ADR-0090 first had it,
+// to follow a change of the light within frames) moves with it, as do its
+// neighbours'. While the camera stood still the means were of a thousand
+// samples and the light held; at a run every cell near the camera is new,
+// and the shade flickered by a fifth from one frame to the next. A cell's
+// samples now move what it is held to be by a / (a + b + sum of g) a frame,
+// their share of what is known of its light. Where the light itself changes
+// the resolve sees it (ADR-0084) and moves what the cell is held to be with
+// its mean, for those frames (gi_resolve.comp).
+//
+// Two things keep the filter from changing how bright the cells are
+// together. A sample's spread is not the cell's own: where few paths carry
+// the light a cell's variance follows its luck as its mean does, weights
+// from it favour the cells no path has reached, and the shade came out half
+// as bright as its samples' mean. It is the spread of the cell's parents'
+// samples, pooled (below), the same for the cells around. And g is the same
+// from either side of a pair.
+//
+// g is 1 unless the two cells' means differ by more than
+// NPH_RENDER_GI_EDGE of their difference's deviation and
+// NPH_RENDER_GI_EDGE_FLOOR of the brighter: then the difference is the
+// light's own (the floor indoors against the ground outside a wall thinner
+// than a cell) and the pair is cut loose. The deviation is the two cells'
+// samples' pooled, from the variance the resolve keeps over the mean's own
+// history (NphRenderGiView.moments' w).
+//
+// The parents (ADR-0091). Every sample is also added to the cells of the
+// next NPH_RENDER_GI_ABOVE levels around its point (gi_update.comp): cells
+// twice, four, eight and sixteen times as wide, which take four, sixteen, 64
+// and 256 times the samples a frame, and whose histories are as many frames
+// long (gi_resolve.comp). They give a cell three things:
+//   - the nearest level's samples' spread and their light, pooled, which is
+//     N's measure above and which the resolve tests a change of the cell's
+//     light against (NphRenderGiView.cell_keys' z and w; a cell without
+//     parents takes its own and its neighbours');
+//   - P, their own means at the cell's centre, while the cell has fewer
+//     than NPH_RENDER_GI_SETTLED samples: b is what it lacks of them, of
+//     NPH_RENDER_GI_PARENT neighbours. Each level gives its means as far as
+//     its cells' samples tell their light (NPH_RENDER_GI_PARENT_KNOWS of
+//     them) and leaves the rest to the level above it. So a surface the
+//     frame has just come to is lit at once, by the cells wide enough to
+//     have had samples enough in a frame, smoothly and (their cells reaching
+//     over what lies beside the surface) a tenth or so out; within frames
+//     the levels nearer it know their light and take over, and then the
+//     cell's own samples. Their means, not what the filter holds them to be:
+//     a mean takes each frame's samples for what they are worth beside those
+//     it has, where what is held moves slowly by design, and cells that
+//     leant on it kept the light they began with for a second, a third too
+//     bright. A cell cut loose from its parents as from a neighbour (their
+//     light is another's) leans on them that much less;
+//   - and through the last of its level's distances (from
+//     NPH_RENDER_GI_BAND) what the frame looks up of the cell goes over from
+//     its own light to what the nearest level's cells are held to be, to be
+//     theirs where the level ends: the next level's cells begin there with
+//     the same light, where the two levels' own estimates met at an edge
+//     that followed the camera as a ring. (Over the whole level, as a
+//     texture's levels are blended, the wider cells' light stayed in the
+//     nearer ones for good: shade beside lit ground came out 3 to 15 % too
+//     bright.)
+// The parents are looked up in a cell's first frame and one frame in
+// NPH_RENDER_GI_AROUND_FRAMES after (every frame while it is going over to
+// them), and kept between (cell_keys' second vector).
+//
+// A cell in its first frame is held to be nothing yet: it begins with what
+// its samples, its parents and its neighbours make it. Nothing counts for
+// more than NPH_RENDER_GI_OUTLIER times the light around (one sample that
+// met a lamp is a thousand times it). A cell no sample has reached for two
+// frames steps one frame in NPH_RENDER_GI_AROUND_FRAMES, a workgroup's slots
+// together, and from NPH_RENDER_GI_FILTER_AGE frames on keeps what it holds.
+//
+// arg0: the slot count. arg1: 0 leaves each cell its own mean (NphRenderView.gi_smooth).
+#version 460
+#include "vis_common.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+const vec3 k_lum = vec3(0.2126, 0.7152, 0.0722);
+const ivec3 k_face[6] = ivec3[6](ivec3(-1, 0, 0), ivec3(1, 0, 0), ivec3(0, -1, 0), ivec3(0, 1, 0),
+                                 ivec3(0, 0, -1), ivec3(0, 0, 1));
+
+// The weight of a pair of cells whose means' luminances are `la` and `lb`, of `na` and `nb`
+// samples whose variances are `va` and `vb`: 1 while the means lie within NPH_RENDER_GI_EDGE of
+// their difference's deviation, falling away past it. The same from either side.
+float pair_weight(float la, float na, float va, float lb, float nb, float vb)
+{
+    const float top = max(la, lb);
+    const float pooled = max((na * va + nb * vb) / (na + nb),
+                             NPH_RENDER_GI_SPREAD * NPH_RENDER_GI_SPREAD * top * top);
+    const float floor_ = NPH_RENDER_GI_EDGE_FLOOR * top;
+    const float d = la - lb;
+    const float z2 = d * d / (pooled * (1.0 / na + 1.0 / nb) + floor_ * floor_ + 1e-30);
+    const float edge2 = NPH_RENDER_GI_EDGE * NPH_RENDER_GI_EDGE;
+    return z2 <= edge2 ? 1.0 : exp(1.0 - z2 / edge2);
+}
+
+// `light` (irradiance, and the far fields' luminance of it) held to at most `most` of luminance (no
+// bound where `most` is 0).
+vec4 at_most(vec4 light, float most)
+{
+    const float l = dot(light.rgb, k_lum);
+    return most > 0.0 && l > most ? light * (most / l) : light;
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.arg0) {
+        return;
+    }
+    VisViewRef view = VisViewRef(pc.view);
+    ViewRef rview = ViewRef(view.v.render_view);
+    GiViewRef g = GiViewRef(rview.v.gi);
+    if (GiKeysRef(g.g.keys).k[i] == 0u) {
+        return; // free: the resolve left its entries zero
+    }
+    GiCellsRef raw_cells = GiCellsRef(g.g.raw_cells);
+    GiHeldRef before = GiHeldRef(g.g.held_before);
+    const uvec4 raw = raw_cells.c[i];
+    const vec4 was = before.h[i];
+    const bool smooth_ = pc.arg1 != 0u;
+    const uint count = gi_word_count(raw.w);
+    const uint age = gi_word_age(raw.w);
+    // A workgroup's slots take a turn together one frame in NPH_RENDER_GI_AROUND_FRAMES (cells
+    // that skip a turn in step skip the work with them).
+    const bool turn = (((i >> 6u) + g.g.frame) & uint(NPH_RENDER_GI_AROUND_FRAMES - 1)) == 0u;
+    if (age >= uint(NPH_RENDER_GI_FILTER_AGE) || (age >= 2u && !turn)) {
+        // No sample has reached it for a while: it keeps what it was held to be, stepping with
+        // its neighbours on its turns only while it is within the frame's sight.
+        if (smooth_) {
+            GiHeldRef(g.g.held).h[i] = was;
+        } else {
+            GiCellsRef(g.g.cells).c[i] = raw;
+            GiHeldRef(g.g.held).h[i] = vec4(0.0);
+        }
+        return;
+    }
+    GiMomentsRef moments = GiMomentsRef(g.g.moments);
+    const uvec4 mo = moments.m[i];
+    const vec3 mean = uintBitsToFloat(raw.xyz);
+    const float lum = dot(mean, k_lum);
+    const float variance = uintBitsToFloat(mo.w);
+    // Whether its samples have measured their variance: until they have, no difference is an edge.
+    const bool measured = gi_moments_frames(mo.z) != 0u;
+    // Its samples, as far as its history holds them (the word's count stops at its bits).
+    const float history = float(gi_moments_history(mo.z));
+    // Its light as the filter carries it: irradiance, and the far fields' luminance of it.
+    const vec4 own = vec4(mean, gi_word_far_share(raw.w) * lum);
+    // Held to be nothing yet: its first frame (or its light is none).
+    const bool first = all(equal(was, vec4(0.0)));
+    const bool known = count != 0u || !first;
+
+    // The cell: its key's coordinates, level and octant (gi_cell_key), and what the filter keeps
+    // beside it.
+    GiCellKeysRef records = GiCellKeysRef(g.g.cell_keys);
+    const uvec4 record = records.k[2u * i];
+    const uvec4 kept = records.k[2u * i + 1u];
+    const uvec2 kw = record.xy;
+    const uint m17 = 0x1FFFFu;
+    const ivec3 c = ivec3(uvec3(kw.x, (kw.x >> 17u) | (kw.y << 15u), kw.y >> 2u) & m17);
+    const int level = int((kw.y >> 19u) & 31u);
+    const uint octant = (kw.y >> 24u) & 7u;
+
+    // Its parents: the eight cells of the next level around its centre. Their own means there
+    // (`parent`, and how far it counts: `lean`), what they are held to be (`band`, for a cell
+    // going over to it), and their samples pooled (`around`): looked up for a young cell, for
+    // one going over, and for every cell one frame in NPH_RENDER_GI_AROUND_FRAMES, and kept
+    // between (eight of the pass's fourteen lookups a cell).
+    vec4 parent = vec4(0.0);
+    vec4 band = vec4(0.0);
+    float lean = 0.0;
+    float going = 0.0;
+    vec2 around = uintBitsToFloat(record.zw);
+    if (level + 1 < NPH_RENDER_GI_LEVELS) {
+        // The cell from the camera's (the key keeps 17 bits), and in the world's low 32 bits.
+        const ivec3 camera = gi_camera_cell(g, level);
+        const ivec3 rel = ((c - camera) << 15) >> 15;
+        // How far through its level's distances the cell is: 0 where the level begins, 1 where
+        // the next does.
+        const vec4 origin = g.g.levels[level].origin;
+        const float through = length((vec3(rel) + 0.5) * origin.w - origin.xyz) *
+                                  exp2(float(NPH_RENDER_GI_LEVEL_BIAS - level)) -
+                              1.0;
+        going = clamp((through - NPH_RENDER_GI_BAND) / (1.0 - NPH_RENDER_GI_BAND), 0.0, 1.0);
+        if (turn || first || kept.w == 0u || going > 0.0) {
+            // The cell's centre in half cells: in the cells of the level `up` above, it lies
+            // (2 full + 1) / 2^(up + 1) along each axis.
+            const ivec3 centre = 2 * (camera + rel) + 1;
+            float pool_n = 0.0;
+            float pool_nv = 0.0;
+            float pool_nl = 0.0;
+            float parent_n = 0.0;
+            float parent_v = 0.0;
+            vec4 band_sum = vec4(0.0);
+            float band_w = 0.0;
+            // Each level above gives its cells' own means as far as their samples tell their
+            // light (NPH_RENDER_GI_PARENT_KNOWS of them), and leaves the rest to the level above
+            // it: where the surface is new to the frame its parents are as new as it is, and a
+            // surface seen at a low angle has few samples in the nearest of them for long. The
+            // nearer the level the less its cells reach over what is not the surface's (the
+            // fourth level's, sixteen cells wide, held shade beside open ground a quarter too
+            // bright), and the fewer their samples: so each as far as it knows. (A cell that
+            // knows its own light leans on none: the nearest are enough, for their pooled
+            // samples and for the cell going over to them.)
+            vec4 gathered = vec4(0.0);
+            float gathered_w = 0.0;
+            float left = 1.0;
+            float nearest = 0.0;
+            const int top = history >= float(NPH_RENDER_GI_SETTLED)
+                                ? 1
+                                : min(NPH_RENDER_GI_ABOVE, NPH_RENDER_GI_LEVELS - 1 - level);
+            for (int up = 1; up <= top; ++up) {
+                const ivec3 v = centre - (1 << up);
+                const ivec3 base = v >> (up + 1);
+                const vec3 t = vec3(v & ((2 << up) - 1)) * (1.0 / float(2 << up));
+                vec4 sum = vec4(0.0);
+                float sum_w = 0.0;
+                float sum_n = 0.0;
+                float sum_v = 0.0;
+                float there = 0.0;
+                for (int q = 0; q < 8; ++q) {
+                    const ivec3 o = ivec3(q & 1, (q >> 1) & 1, q >> 2);
+                    const uint s = gi_find(g, gi_cell_key(base + o, level + up, octant));
+                    if (s == GI_NONE) {
+                        continue;
+                    }
+                    const uvec4 r = raw_cells.c[s];
+                    const vec4 h = before.h[s];
+                    const bool sampled = gi_word_count(r.w) != 0u;
+                    const bool stepped = any(notEqual(h, vec4(0.0)));
+                    if (!sampled && !stepped) {
+                        continue;
+                    }
+                    const vec3 w3 = mix(1.0 - t, t, vec3(o));
+                    const float cover = w3.x * w3.y * w3.z;
+                    const vec3 e = uintBitsToFloat(r.xyz);
+                    const float l = dot(e, k_lum);
+                    const vec4 mean_ = vec4(e, gi_word_far_share(r.w) * l);
+                    // Its samples, and how they spread: the nearest level's from their moments;
+                    // the levels' above from their words, which count as far as matters here
+                    // (and no spread: a cell is cut loose from none of those).
+                    float samples = float(gi_word_count(r.w));
+                    float spread = 0.0;
+                    bool measures = false;
+                    if (up == 1) {
+                        const uvec4 m = moments.m[s];
+                        samples = float(gi_moments_history(m.z));
+                        spread = uintBitsToFloat(m.w);
+                        measures = gi_moments_frames(m.z) != 0u;
+                    }
+                    const float knows =
+                        max(min(samples * (1.0 / float(NPH_RENDER_GI_PARENT_KNOWS)), 1.0), 1e-3);
+                    if (sampled) {
+                        sum += cover * knows * mean_;
+                        sum_w += cover * knows;
+                        sum_n += cover * knows * samples;
+                        sum_v += cover * knows * spread;
+                        there += cover;
+                    }
+                    if (up == 1) {
+                        // What it is held to be, or its own mean where the filter has not
+                        // stepped it yet.
+                        const float w = cover * (stepped ? 1.0 : knows);
+                        band_sum += w * (stepped ? h : mean_);
+                        band_w += w;
+                        if (measures) {
+                            pool_n += samples;
+                            pool_nv += samples * spread;
+                            pool_nl += samples * l;
+                        }
+                    }
+                }
+                // How far the cells that are there know their light, however many of the eight
+                // they are: a surface seen at a low angle has had rays in few of its cells, and
+                // one of them a cell's width away knows the surface's light better than all
+                // eight of a level above.
+                const float sure = there > 0.0 ? min(sum_w / there, 1.0) : 0.0;
+                if (sum_w > 0.0) {
+                    const float share = left * sure;
+                    gathered += share * (sum / sum_w);
+                    gathered_w += share;
+                    left *= 1.0 - sure;
+                    if (up == 1) {
+                        nearest = share;
+                        parent_n = sum_n / sum_w;
+                        parent_v = sum_v / sum_w;
+                    }
+                }
+                if (up == 1) {
+                    // A sample's variance and the light around the cell, for the resolve's test
+                    // of its light too (0, 0 while its parents have measured none).
+                    around = pool_n > 0.0 ? vec2(pool_nv, pool_nl) / pool_n : vec2(0.0);
+                    band = band_w > 0.0 ? band_sum / band_w : vec4(0.0);
+                }
+                if (left < 0.05) {
+                    break;
+                }
+            }
+            if (gathered_w > 0.0) {
+                parent = gathered / gathered_w;
+                lean = min(gathered_w, 1.0);
+            }
+            // Cut loose from them as from a neighbour, where its own samples say its light is
+            // another (told against the nearest level's, where the light is mostly theirs).
+            if (nearest >= 0.5 * gathered_w && measured && count != 0u && parent_n > 0.0 &&
+                parent_v > 0.0) {
+                lean *= pair_weight(lum, history, variance, dot(parent.rgb, k_lum), parent_n,
+                                    parent_v);
+            }
+            // What the steps between find: the parents' light, the far fields' share of it and
+            // how far it counts (12 bits each), over a mark that it was looked up.
+            const float pl = dot(parent.rgb, k_lum);
+            const uint share = pl > 0.0 ? uint(clamp(parent.w / pl, 0.0, 1.0) * 4095.0 + 0.5) : 0u;
+            records.k[2u * i] = uvec4(kw, floatBitsToUint(around));
+            records.k[2u * i + 1u] = uvec4(floatBitsToUint(parent.rgb),
+                                           (share << 20u) | (uint(lean * 4095.0 + 0.5) << 8u) | 1u);
+        } else {
+            parent.rgb = uintBitsToFloat(kept.xyz);
+            parent.w = float(kept.w >> 20u) * (1.0 / 4095.0) * dot(parent.rgb, k_lum);
+            lean = float((kept.w >> 8u) & 0xFFFu) * (1.0 / 4095.0);
+        }
+    }
+    if (!smooth_) {
+        GiCellsRef(g.g.cells).c[i] = raw;
+        GiHeldRef(g.g.held).h[i] = vec4(0.0);
+        return;
+    }
+    const bool has_parent = any(notEqual(parent.rgb, vec3(0.0)));
+
+    // What a cell's samples leave it with may be one path's light, a thousand times the light
+    // around (a lamp met once): nothing here counts for more than NPH_RENDER_GI_OUTLIER times the
+    // light around the cell, its parents' samples' pooled. (The cell's mean itself is kept: if
+    // the light is the place's own, its neighbours' samples and its parents' come to say so.)
+    // (Where the parents have measured none, the light around is the neighbours' as they are
+    // held: below.)
+    float most = NPH_RENDER_GI_OUTLIER * around.y;
+    vec4 sum = vec4(0.0);
+    float weight = 0.0;
+    float beside_n = 0.0;
+    float beside_nv = 0.0;
+    float beside_nl = 0.0;
+    for (int k = 0; k < 6; ++k) {
+        const uint s = gi_find(g, gi_cell_key(c + k_face[k], level, octant));
+        if (s == GI_NONE) {
+            continue;
+        }
+        const uvec4 r = raw_cells.c[s];
+        const vec4 h = before.h[s];
+        const uint n = gi_word_count(r.w);
+        const bool stepped = any(notEqual(h, vec4(0.0)));
+        if (n == 0u && !stepped) {
+            continue; // nothing known of it yet
+        }
+        const vec3 e = uintBitsToFloat(r.xyz);
+        const float l = dot(e, k_lum);
+        float w = 1.0;
+        if (n != 0u && (measured || around.y <= 0.0)) {
+            const uvec4 m = moments.m[s];
+            if (gi_moments_frames(m.z) != 0u) {
+                const float samples = float(gi_moments_history(m.z));
+                if (measured) {
+                    w = pair_weight(lum, history, variance, l, samples, uintBitsToFloat(m.w));
+                }
+                beside_n += samples;
+                beside_nv += samples * uintBitsToFloat(m.w);
+                beside_nl += samples * l;
+            }
+        }
+        // (A neighbour in its first frame, which the filter has given nothing yet, knows what
+        // its few samples do, and counts by them.)
+        if (!stepped) {
+            w *= min(float(n) * (1.0 / float(NPH_RENDER_GI_PARENT_SAMPLES)), 1.0);
+        }
+        sum += w * at_most(stepped ? h : vec4(e, gi_word_far_share(r.w) * l), most);
+        weight += w;
+    }
+    if (around.y <= 0.0) {
+        // A cell without parents that have measured their samples: its own and its neighbours',
+        // pooled.
+        if (measured) {
+            beside_n += history;
+            beside_nv += history * variance;
+            beside_nl += history * lum;
+        }
+        if (beside_n > 0.0) {
+            around = vec2(beside_nv, beside_nl) / beside_n;
+            records.k[2u * i] = uvec4(kw, floatBitsToUint(around));
+        }
+    }
+    if (most <= 0.0 && weight > 0.0) {
+        most = NPH_RENDER_GI_OUTLIER * dot(sum.rgb, k_lum) / weight;
+    }
+
+    // How many samples its own mean counts as one neighbour for: as many as would leave the
+    // light NPH_RENDER_GI_SMOOTH_NOISE out once the filter has spread them.
+    float enough = NPH_RENDER_GI_SMOOTH_MOST;
+    if (around.y > 0.0) {
+        enough = clamp(around.x / (around.y * around.y) *
+                           (1.0 / (4.0 * NPH_PI * NPH_RENDER_GI_SMOOTH_NOISE *
+                                   NPH_RENDER_GI_SMOOTH_NOISE)),
+                       NPH_RENDER_GI_SMOOTH_LEAST, NPH_RENDER_GI_SMOOTH_MOST);
+    }
+    // Its own mean by its samples; and its parents' for what its samples lack of
+    // NPH_RENDER_GI_SETTLED, as NPH_RENDER_GI_PARENT neighbours at most and as far as they
+    // count. Without parents its own mean never counts for less than leaves the step a reach of
+    // NPH_RENDER_GI_SMOOTH_REACH cells, however its samples spread: a cell that takes its
+    // light from further takes it from where the light is another. (Less while its samples
+    // are a handful, one of which may be a path a thousand times the light: counted as a
+    // settled cell's, it stood out as a white square.)
+    const float by_samples = history / enough;
+    const float b =
+        has_parent ? lean * max(NPH_RENDER_GI_PARENT -
+                                    history * (1.0 / float(NPH_RENDER_GI_SETTLED)),
+                                0.0)
+                   : 0.0;
+    const float a =
+        count == 0u
+            ? 0.0
+            : max(by_samples,
+                  min(float(count) * (1.0 / float(NPH_RENDER_GI_PARENT_SAMPLES)), 1.0) /
+                          (NPH_RENDER_GI_SMOOTH_REACH * NPH_RENDER_GI_SMOOTH_REACH) -
+                      b);
+    const float lent = weight + b;
+    sum += a * at_most(own, most) + b * parent;
+    weight += a + b;
+
+    vec4 f = at_most(was, most);
+    bool lit = known; // whether the cell is held to be anything
+    if (weight > 1e-6) {
+        const vec4 stepped = sum / weight;
+        if (!first) {
+            f = mix(f, stepped, NPH_RENDER_GI_RELAX);
+        } else if (count != 0u || lent >= 0.25) {
+            // Its first frame: what its samples, its parents and its neighbours make it. One
+            // without a sample begins when a quarter of a neighbour's worth of them is there,
+            // and is nothing until then (the pixels around it take the cells that are).
+            f = stepped;
+            lit = true;
+        }
+    }
+    // What the frame looks up: through the last of its level's distances the cell goes over
+    // from what it is held to be to what its parents are, and is theirs where the level ends
+    // and the next level's cells begin, with that light. (What it is held to be stays its own
+    // level's: its neighbours' steps take that.)
+    vec4 shown = f;
+    bool shows = lit;
+    if (going > 0.0 && any(notEqual(band.rgb, vec3(0.0)))) {
+        shown = lit ? mix(f, band, going) : band;
+        shows = true;
+    }
+    // Trusted as its neighbours are where they lent it light (gi_surface_blend).
+    const uint trusted =
+        !shows ? 0u
+               : (lent > 0.0 || going > 0.0 || count == 0u ? max(count, uint(NPH_RENDER_GI_TRUSTED))
+                                                           : count);
+    const float l = dot(shown.rgb, k_lum);
+    const uint far = l > 0.0 ? uint(clamp(shown.w / l, 0.0, 1.0) * GI_FAR_ONE + 0.5) : 0u;
+    GiCellsRef(g.g.cells).c[i] = uvec4(floatBitsToUint(shown.rgb), gi_word(trusted, age, far));
+    GiHeldRef(g.g.held).h[i] = lit ? f : vec4(0.0);
+}

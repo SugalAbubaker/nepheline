@@ -4,17 +4,23 @@
 //
 // A hash grid of irradiance cells in the world (gi_common.glsl), kept across
 // frames in buffers of NphRendererDesc.gi_cells slots: the keys'
-// fingerprints, this frame's sums, the cells' irradiance with their
-// sample counts and ages, and the cells' moments, by which the resolve
-// tells a change of a cell's light from its noise (ADR-0084).
-// Each frame that has it:
+// fingerprints and the keys themselves, this frame's sums, the cells' own
+// means with their sample counts and ages, the cells' moments, by which the
+// resolve tells a change of a cell's light from its noise (ADR-0084), and
+// the cells as the filter leaves them, which is what the frame looks up
+// (ADR-0090, ADR-0091). Each frame that has it:
 //
 //   gi update   within a fixed budget of rays (NphRendererDesc.gi_rays),
 //               a sample from a random pixel of each block of the frame:
 //               one ray from its surface, what arrives along it added to the
-//               surface's cell (gi_update.comp);
-//   gi resolve  every slot: a cell blends its sums into its irradiance, or
+//               surface's cell and to the cells of the levels above around
+//               it, its parents; a new cell whose bucket is full takes the
+//               slot of the cell no sample has reached for longest
+//               (gi_update.comp);
+//   gi resolve  every slot: a cell blends its sums into its mean, or
 //               ages and is freed (gi_resolve.comp);
+//   gi filter   every slot: a cell's light as its own mean, its neighbours'
+//               and its parents' make it out together (gi_filter.comp);
 //
 // after which the resolve's shading takes the cells' irradiance for the
 // diffuse indirect light (vis_resolve.glsl). The cells are keyed in the
@@ -34,7 +40,7 @@
 #include <string.h>
 
 NPH_STATIC_ASSERT(sizeof(NphRenderGiLevel) == 32U, "NphRenderGiLevel matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphRenderGiView) == 176U + 32U * NPH_RENDER_GI_LEVELS,
+NPH_STATIC_ASSERT(sizeof(NphRenderGiView) == 208U + 32U * NPH_RENDER_GI_LEVELS,
                   "NphRenderGiView matches its GLSL layout");
 // The shaders load the levels' vectors 16 bytes at a time where they lie on 16 bytes (ADR-0086).
 NPH_STATIC_ASSERT(offsetof(NphRenderGiView, sun_direction) % 16U == 0U &&
@@ -45,10 +51,15 @@ NPH_STATIC_ASSERT(NPH_RENDER_GI_COUNT_BITS + 8 + NPH_RENDER_GI_FAR_BITS == 32,
 NPH_STATIC_ASSERT(NPH_RENDER_GI_HISTORY < (1 << NPH_RENDER_GI_COUNT_BITS) &&
                       NPH_RENDER_REFLECT_HISTORY < (1 << NPH_RENDER_GI_COUNT_BITS),
                   "a cell's word counts its whole history");
+NPH_STATIC_ASSERT(NPH_RENDER_GI_VARIANCE_FRAMES < 32 && NPH_RENDER_GI_FOLLOW_FRAMES < 7,
+                  "the moments' z holds them in 5 and 3 bits");
+// gi_filter.comp takes a key's level from 5 bits.
+NPH_STATIC_ASSERT(NPH_RENDER_GI_LEVELS <= 32, "a key's level is 5 bits");
 
 // Fixed-point units of one pre-exposed sample (gi_update.comp): a sample is
 // clamped to NPH_RENDER_GI_SAMPLE_MAX, 2^23 units, so a cell's sums hold 512
-// samples a frame.
+// samples a frame of the brightest (NPH_RENDER_GI_ABOVE_SAMPLES: what the
+// cells of the levels above, which take hundreds a frame, are held to).
 #define GI_SUM_SCALE 2048.0F
 // A cell is 1 / (2 GI_SCALE) to 1 / GI_SCALE of its distance from the
 // camera across (23 to 47 pixels at 3840 x 2160 and a 0.9 rad field of
@@ -92,6 +103,11 @@ NphResult render_gi_create(NphRenderer *r)
     NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi cells", &gi->cells));
     NPH_TRY(make_buffer(r, (u64)cells * sizeof(u32), "gi far sums", &gi->far_sums));
     NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi moments", &gi->moments));
+    // The filter's (ADR-0090).
+    NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi raw cells", &gi->raw_cells));
+    NPH_TRY(make_buffer(r, (u64)cells * 32U, "gi cell keys", &gi->cell_keys));
+    NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi held 0", &gi->held[0]));
+    NPH_TRY(make_buffer(r, (u64)cells * 16U, "gi held 1", &gi->held[1]));
     // As many for the reflection cells (ADR-0077): with a quarter as many, Bistro's street at 4K,
     // whose cobbles' normals scatter their mirror directions, dropped about 4,000 rays a frame
     // walking (vis_reflect_dropped), and about 230 with as many.
@@ -102,6 +118,7 @@ NphResult render_gi_create(NphRenderer *r)
     NPH_TRY(make_buffer(r, (u64)gi->reflect_capacity * 16U, "reflect cells", &gi->reflect_cells));
     NPH_TRY(render_load_shader_file(r, "gi_update.comp", &gi->update_shader));
     NPH_TRY(render_load_shader_file(r, "gi_resolve.comp", &gi->resolve_shader));
+    NPH_TRY(render_load_shader_file(r, "gi_filter.comp", &gi->filter_shader));
     NphGpuComputePipelineDesc d;
     memset(&d, 0, sizeof d);
     d.shader = gi->update_shader;
@@ -127,6 +144,10 @@ NphResult render_gi_create(NphRenderer *r)
     d.shader = gi->resolve_shader;
     d.name = "gi resolve";
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->resolve));
+    d.shader = gi->filter_shader;
+    d.name = "gi filter";
+    NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->filter));
+    render_log_statistics(r, gi->filter, "gi filter");
     NPH_TRY(render_load_shader_file(r, "reflect_rays.comp", &gi->reflect_shader));
     memset(&d, 0, sizeof d);
     d.shader = gi->reflect_shader;
@@ -147,9 +168,11 @@ NphResult render_gi_create(NphRenderer *r)
     NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->gather));
     render_log_statistics(r, gi->gather, "reflect (a ray a pixel)");
     gi->capacity = cells;
-    // A cell's key, sums, irradiance, far fields' sum and moments.
+    // A cell's fingerprint, sums, far fields' sum, mean and moments (56 bytes), and for the filter
+    // its key with the spread and the light around it, its parents' light, what the frame looks
+    // up, and what it is held to be, twice (80 more).
     NPH_LOG_INFO(&NPH_LOG_RENDER, "%s: radiance cache: %u cells (%.1f MB), %u rays a frame",
-                 r->name, cells, (f64)cells * 56.0 / (1024.0 * 1024.0), r->desc.gi_rays);
+                 r->name, cells, (f64)cells * 136.0 / (1024.0 * 1024.0), r->desc.gi_rays);
     return NPH_RESULT_OK;
 }
 
@@ -172,6 +195,12 @@ void render_gi_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(r->dev, gi->reflect_sums);
     nph_gpu_buffer_destroy(r->dev, gi->reflect_cells);
     nph_gpu_pipeline_destroy(r->dev, gi->resolve);
+    nph_gpu_pipeline_destroy(r->dev, gi->filter);
+    nph_gpu_shader_destroy(r->dev, gi->filter_shader);
+    nph_gpu_buffer_destroy(r->dev, gi->raw_cells);
+    nph_gpu_buffer_destroy(r->dev, gi->cell_keys);
+    nph_gpu_buffer_destroy(r->dev, gi->held[0]);
+    nph_gpu_buffer_destroy(r->dev, gi->held[1]);
     nph_gpu_pipeline_destroy(r->dev, gi->update_voxels);
     nph_gpu_pipeline_destroy(r->dev, gi->update_voxels_many);
     nph_gpu_pipeline_destroy(r->dev, gi->update_many);
@@ -350,6 +379,14 @@ bool render_gi_frame_begin(NphRenderer *r, const NphRenderView *view, u32 width,
     g->far_sums = r->many.frame_active ? nph_gpu_buffer_address(r->dev, gi->far_sums) : 0U;
     g->cells = nph_gpu_buffer_address(r->dev, gi->cells);
     g->moments = nph_gpu_buffer_address(r->dev, gi->moments);
+    // The filter steps from what the cells were held to be last frame to what they are this
+    // frame (ADR-0090).
+    gi->held_at ^= 1U;
+    g->raw_cells = nph_gpu_buffer_address(r->dev, gi->raw_cells);
+    g->cell_keys = nph_gpu_buffer_address(r->dev, gi->cell_keys);
+    g->held_before = nph_gpu_buffer_address(r->dev, gi->held[gi->held_at ^ 1U]);
+    g->held = nph_gpu_buffer_address(r->dev, gi->held[gi->held_at]);
+    gi->frame_smooth = view->gi_smooth ? 1 : 0;
     g->bucket_mask = gi->capacity / (u32)NPH_RENDER_GI_BUCKET - 1U;
     g->reflect_keys = nph_gpu_buffer_address(r->dev, gi->reflect_keys);
     g->reflect_sums = nph_gpu_buffer_address(r->dev, gi->reflect_sums);
@@ -418,6 +455,10 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_fill_buffer(cmd, gi->far_sums, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->cells, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->moments, 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, gi->raw_cells, 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, gi->cell_keys, 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, gi->held[0], 0U, NPH_GPU_WHOLE_SIZE, 0U);
+    nph_gpu_cmd_fill_buffer(cmd, gi->held[1], 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_keys, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_sums, 0U, NPH_GPU_WHOLE_SIZE, 0U);
     nph_gpu_cmd_fill_buffer(cmd, gi->reflect_cells, 0U, NPH_GPU_WHOLE_SIZE, 0U);
@@ -461,6 +502,21 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     }
 }
 
+static void filter_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    const RenderGi *gi = &r->gi;
+    NphVisPush p;
+    memset(&p, 0, sizeof p);
+    p.view = r->vis.frame.view_address;
+    p.arg0 = gi->capacity;
+    p.arg1 = gi->frame_smooth ? 1U : 0U;
+    nph_gpu_cmd_bind_pipeline(cmd, gi->filter);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch(cmd, (gi->capacity + GI_RESOLVE_GROUP - 1U) / GI_RESOLVE_GROUP, 1U, 1U);
+}
+
 static NphGpuRgPass *add_pass(NphGpuRenderGraph *graph, NphRenderer *r, const char *name,
                               NphGpuRgPassType type, NphGpuRgExecuteFn execute)
 {
@@ -482,6 +538,10 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
     gi->frame_far_sums = nph_gpu_rg_import_buffer(graph, gi->far_sums);
     gi->frame_cells = nph_gpu_rg_import_buffer(graph, gi->cells);
     gi->frame_moments = nph_gpu_rg_import_buffer(graph, gi->moments);
+    gi->frame_raw_cells = nph_gpu_rg_import_buffer(graph, gi->raw_cells);
+    gi->frame_cell_keys = nph_gpu_rg_import_buffer(graph, gi->cell_keys);
+    gi->frame_held[0] = nph_gpu_rg_import_buffer(graph, gi->held[0]);
+    gi->frame_held[1] = nph_gpu_rg_import_buffer(graph, gi->held[1]);
     gi->frame_reflect_keys = nph_gpu_rg_import_buffer(graph, gi->reflect_keys);
     gi->frame_reflect_sums = nph_gpu_rg_import_buffer(graph, gi->reflect_sums);
     gi->frame_reflect_cells = nph_gpu_rg_import_buffer(graph, gi->reflect_cells);
@@ -489,6 +549,10 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
         nph_gpu_rg_buffer_is_null(gi->frame_far_sums) ||
         nph_gpu_rg_buffer_is_null(gi->frame_cells) ||
         nph_gpu_rg_buffer_is_null(gi->frame_moments) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_raw_cells) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_cell_keys) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_held[0]) ||
+        nph_gpu_rg_buffer_is_null(gi->frame_held[1]) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_keys) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_sums) ||
         nph_gpu_rg_buffer_is_null(gi->frame_reflect_cells)) {
@@ -506,6 +570,10 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
         nph_gpu_rg_write_buffer(p, gi->frame_far_sums, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, gi->frame_raw_cells, NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, gi->frame_cell_keys, NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, gi->frame_held[0], NPH_GPU_RG_USE_TRANSFER_DST);
+        nph_gpu_rg_write_buffer(p, gi->frame_held[1], NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_keys, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_sums, NPH_GPU_RG_USE_TRANSFER_DST);
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_TRANSFER_DST);
@@ -526,7 +594,14 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
     nph_gpu_rg_write_buffer(p, gi->frame_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_far_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
-    nph_gpu_rg_read_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_SHADER_READ);
+    // (What the rays meet is lit by the cells as the last frame's filter left them. A cell
+    // that takes another's slot clears what the slot held: gi_common.glsl gi_claim_cell_within.)
+    nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_raw_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_held[gi->held_at ^ 1U], NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_cell_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, in->counters, NPH_GPU_RG_USE_STORAGE_WRITE); // its dropped samples
     p = add_pass(graph, r, "gi resolve", NPH_GPU_RG_PASS_COMPUTE, resolve_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
@@ -534,11 +609,28 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
     nph_gpu_rg_write_buffer(p, gi->frame_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_far_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
-    nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_raw_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_STORAGE_WRITE);
+    // (The spread and the light around each cell, as the last frame's filter left them.)
+    nph_gpu_rg_read_buffer(p, gi->frame_cell_keys, NPH_GPU_RG_USE_SHADER_READ);
+    // (A slot it frees gives up what the filter kept of its cell.)
+    nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_held[0], NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_held[1], NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_sums, NPH_GPU_RG_USE_STORAGE_WRITE);
     nph_gpu_rg_write_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
+    p = add_pass(graph, r, "gi filter", NPH_GPU_RG_PASS_COMPUTE, filter_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, gi->frame_keys, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_buffer(p, gi->frame_cell_keys, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_read_buffer(p, gi->frame_raw_cells, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, gi->frame_moments, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, gi->frame_held[gi->held_at ^ 1U], NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_buffer(p, gi->frame_held[gi->held_at], NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, gi->frame_cells, NPH_GPU_RG_USE_STORAGE_WRITE);
     return NPH_RESULT_OK;
 }
 
@@ -756,12 +848,24 @@ i32 render_gi_level(f32 dist)
     (void)frexpf(nph_f32_max(dist, 1e-30F), &e);
     // frexp gives dist = m 2^e with m in [0.5, 1): floor(log2) is e - 1.
     const i32 level = (i32)e - 1 + NPH_RENDER_GI_LEVEL_BIAS;
-    return level < 0 ? 0 : (level > NPH_RENDER_GI_LEVELS - 1 ? NPH_RENDER_GI_LEVELS - 1 : level);
+    return level < NPH_RENDER_GI_LEVEL_MIN
+               ? NPH_RENDER_GI_LEVEL_MIN
+               : (level > NPH_RENDER_GI_LEVELS - 1 ? NPH_RENDER_GI_LEVELS - 1 : level);
+}
+
+// The octant a normal faces, as gi_common.glsl's gi_octant.
+static u32 gi_octant(NphVec3 n)
+{
+    return (n.x > -1e-3F ? 1U : 0U) | (n.y > -1e-3F ? 2U : 0U) | (n.z > -1e-3F ? 4U : 0U);
 }
 
 u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n)
 {
-    const i32 level = render_gi_level(nph_vec3_length(p));
+    return render_gi_key_at(levels, p, n, render_gi_level(nph_vec3_length(p)));
+}
+
+u64 render_gi_key_at(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n, i32 level)
+{
     const NphRenderGiLevel *l = &levels[level];
     // Half a cell out along the normal, off the cells' faces.
     const f32 out = 0.5F * l->origin.w;
@@ -773,8 +877,7 @@ u64 render_gi_key(const NphRenderGiLevel *levels, NphVec3 p, NphVec3 n)
         const u32 c = l->cell[a] + (u32)(i32)floorf((pc[a] + oc[a]) / l->origin.w);
         key |= (u64)(c & 0x1FFFFU) << (17U * a);
     }
-    const u32 octant =
-        (n.x > -1e-3F ? 1U : 0U) | (n.y > -1e-3F ? 2U : 0U) | (n.z > -1e-3F ? 4U : 0U);
+    const u32 octant = gi_octant(n);
     return key | ((u64)(u32)level << 51U) | ((u64)octant << 56U);
 }
 
@@ -817,55 +920,60 @@ static u32 find_slot(const u32 *keys, u32 capacity, u64 key)
 NphVec4 render_gi_blend(const NphRenderGiLevel *levels, const u32 *keys, const u32 *cells,
                         u32 capacity, NphVec3 p, NphVec3 n)
 {
-    const i32 level = render_gi_level(nph_vec3_length(p));
-    const NphRenderGiLevel *l = &levels[level];
-    const f32 size = l->origin.w;
+    const i32 own_level = render_gi_level(nph_vec3_length(p));
     const f32 nn[3] = {n.x, n.y, n.z};
-    const f32 x[3] = {(p.x + 0.5F * size * n.x + l->origin.x) / size,
-                      (p.y + 0.5F * size * n.y + l->origin.y) / size,
-                      (p.z + 0.5F * size * n.z + l->origin.z) / size};
     const f32 ax = nph_f32_abs(n.x);
     const f32 ay = nph_f32_abs(n.y);
     const f32 az = nph_f32_abs(n.z);
     const u32 k = ax >= ay ? (ax >= az ? 0U : 2U) : (ay >= az ? 1U : 2U);
     const u32 i = k == 0U ? 1U : 0U;
     const u32 j = k == 2U ? 1U : 2U;
-    const f32 across[2] = {x[i] - 0.5F, x[j] - 0.5F};
-    const f32 base[2] = {floorf(across[0]), floorf(across[1])};
-    const f32 t[2] = {across[0] - base[0], across[1] - base[1]};
-    const u32 octant =
-        (n.x > -1e-3F ? 1U : 0U) | (n.y > -1e-3F ? 2U : 0U) | (n.z > -1e-3F ? 4U : 0U);
+    const u32 octant = gi_octant(n);
     NphVec3 sum = nph_vec3_zero();
     f32 trusted = 0.0F;
-    for (u32 c = 0; c < 4U; ++c) {
-        const f32 o[2] = {(f32)(c & 1U), (f32)(c >> 1U)};
-        const f32 centre[2] = {base[0] + o[0] + 0.5F, base[1] + o[1] + 0.5F};
-        const f32 along = x[k] - (nn[i] * (centre[0] - x[i]) + nn[j] * (centre[1] - x[j])) / nn[k];
-        i32 cell[3];
-        cell[i] = (i32)(base[0] + o[0]);
-        cell[j] = (i32)(base[1] + o[1]);
-        cell[k] = (i32)floorf(along);
-        u64 key = 0U;
-        for (u32 a = 0; a < 3U; ++a) {
-            // Unsigned arithmetic wraps as the shader's two's complement does.
-            key |= (u64)((l->cell[a] + (u32)cell[a]) & 0x1FFFFU) << (17U * a);
+    // The point's own level's cells, and the next levels' where those hold nothing.
+    for (i32 up = 0; up <= NPH_RENDER_GI_ABOVE && trusted <= 0.0F; ++up) {
+        const i32 level = nph_min_i32(own_level + up, NPH_RENDER_GI_LEVELS - 1);
+        const NphRenderGiLevel *l = &levels[level];
+        const f32 size = l->origin.w;
+        const f32 x[3] = {(p.x + 0.5F * size * n.x + l->origin.x) / size,
+                          (p.y + 0.5F * size * n.y + l->origin.y) / size,
+                          (p.z + 0.5F * size * n.z + l->origin.z) / size};
+        const f32 across[2] = {x[i] - 0.5F, x[j] - 0.5F};
+        const f32 base[2] = {floorf(across[0]), floorf(across[1])};
+        const f32 t[2] = {across[0] - base[0], across[1] - base[1]};
+        for (u32 c = 0; c < 4U; ++c) {
+            const f32 o[2] = {(f32)(c & 1U), (f32)(c >> 1U)};
+            const f32 centre[2] = {base[0] + o[0] + 0.5F, base[1] + o[1] + 0.5F};
+            const f32 along =
+                x[k] - (nn[i] * (centre[0] - x[i]) + nn[j] * (centre[1] - x[j])) / nn[k];
+            i32 cell[3];
+            cell[i] = (i32)(base[0] + o[0]);
+            cell[j] = (i32)(base[1] + o[1]);
+            cell[k] = (i32)floorf(along);
+            u64 key = 0U;
+            for (u32 a = 0; a < 3U; ++a) {
+                // Unsigned arithmetic wraps as the shader's two's complement does.
+                key |= (u64)((l->cell[a] + (u32)cell[a]) & 0x1FFFFU) << (17U * a);
+            }
+            key |= ((u64)(u32)level << 51U) | ((u64)octant << 56U);
+            const u32 slot = find_slot(keys, capacity, key);
+            if (slot == NPH_U32_MAX) {
+                continue;
+            }
+            const u32 *cw = &cells[(u64)slot * 4U];
+            NphVec3 e;
+            memcpy(&e.x, &cw[0], sizeof(f32));
+            memcpy(&e.y, &cw[1], sizeof(f32));
+            memcpy(&e.z, &cw[2], sizeof(f32));
+            const f32 bilinear =
+                ((c & 1U) != 0U ? t[0] : 1.0F - t[0]) * ((c >> 1U) != 0U ? t[1] : 1.0F - t[1]);
+            const u32 count = cw[3] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
+            const f32 wt =
+                bilinear * nph_f32_min((f32)count * (1.0F / (f32)NPH_RENDER_GI_TRUSTED), 1.0F);
+            sum = nph_vec3_add(sum, nph_vec3_scale(e, wt));
+            trusted += wt;
         }
-        key |= ((u64)(u32)level << 51U) | ((u64)octant << 56U);
-        const u32 slot = find_slot(keys, capacity, key);
-        if (slot == NPH_U32_MAX) {
-            continue;
-        }
-        const u32 *cw = &cells[(u64)slot * 4U];
-        NphVec3 e;
-        memcpy(&e.x, &cw[0], sizeof(f32));
-        memcpy(&e.y, &cw[1], sizeof(f32));
-        memcpy(&e.z, &cw[2], sizeof(f32));
-        const f32 bilinear =
-            ((c & 1U) != 0U ? t[0] : 1.0F - t[0]) * ((c >> 1U) != 0U ? t[1] : 1.0F - t[1]);
-        const u32 count = cw[3] & ((1U << NPH_RENDER_GI_COUNT_BITS) - 1U);
-        const f32 wt = bilinear * nph_f32_min((f32)count * (1.0F / 16.0F), 1.0F);
-        sum = nph_vec3_add(sum, nph_vec3_scale(e, wt));
-        trusted += wt;
     }
     if (trusted <= 0.0F) {
         return nph_vec4(0.0F, 0.0F, 0.0F, 0.0F);

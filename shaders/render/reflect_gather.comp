@@ -131,7 +131,9 @@ void main()
                                 vec2(nov, roughness), 0.0).xy;
     const vec3 base = gi_reflect_specular(w.y);
     const vec3 tint = base * dfg.x + (vec3(1.0) - base) * dfg.y;
-    vec3 color = imageLoad(nph_images_2d[nonuniformEXT(pc.arg1)], p).rgb + tint * (sum / total);
+    // (Its ray's share of what it reflects: the resolve gave the rest, surface.glsl.)
+    vec3 color = imageLoad(nph_images_2d[nonuniformEXT(pc.arg1)], p).rgb +
+                 tint * (sum / total) * gi_reflect_ray_share(rough);
     color = min(color, vec3(NPH_RENDER_HALF_MAX));
     if (k_dither) {
         color = nph_dither_b10g11r11(color, nph_gradient_noise(vec2(p)));

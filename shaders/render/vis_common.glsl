@@ -756,7 +756,9 @@ void vis_cell_ask(VisViewRef view, uint cell, uint level)
     }
 }
 
-bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
+// `depth`: the point's reverse-Z depth in the previous frame (the clip space's z over w, which no
+// scale of its homogeneous point changes), 0 where it lay behind that frame's camera.
+bool vis_previous_point(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv, out float depth)
 {
     const vec2 ndc = (vec2(q) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
     const vec4 point = vec4(ndc, v == 0ul ? 0.0 : vis_depth(v), 1.0);
@@ -791,7 +793,14 @@ bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
         clip = view.v.reproject * point;
     }
     uv = clip.xy / clip.w * 0.5 + 0.5;
+    depth = clip.w > 0.0 ? clip.z / clip.w : 0.0;
     return clip.w > 0.0;
+}
+
+bool vis_previous_uv(VisViewRef view, ivec2 q, uint64_t v, out vec2 uv)
+{
+    float depth;
+    return vis_previous_point(view, q, v, uv, depth);
 }
 
 #endif

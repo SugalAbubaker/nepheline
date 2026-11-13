@@ -1045,7 +1045,7 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
     render_gi_levels(v.camera.position, 48.0, levels);
     pixel_rays(&v, rays);
     const NphVec3 eye = nph_vec3(0.0F, 0.0F, (f32)distance);
-    static u32 expected[PIXELS];
+    static u32 expected[(1U + NPH_RENDER_GI_ABOVE) * PIXELS];
     u32 cells = 0U;
     for (u32 i = 0; i < PIXELS; ++i) {
         const u64 texel = expected_texel(&m, positions, list, boxes, count, eye, rays[i]);
@@ -1071,6 +1071,13 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
         const NphVec3 x = nph_vec3_add(p, nph_vec3_scale(normal, brick->cell * 1.7320508F));
         const u64 h = render_gi_mix(render_gi_key(levels, x, normal));
         expected[cells++] = (u32)(h >> 32U) | 1U;
+        // And the cells of the levels above around it, its parents, which take its samples
+        // too (ADR-0090, ADR-0091).
+        const i32 level = render_gi_level(nph_vec3_length(x));
+        for (i32 up = 1; up <= NPH_RENDER_GI_ABOVE && level + up < NPH_RENDER_GI_LEVELS; ++up) {
+            const u64 hp = render_gi_mix(render_gi_key_at(levels, x, normal, level + up));
+            expected[cells++] = (u32)(hp >> 32U) | 1U;
+        }
     }
     qsort(expected, cells, sizeof(u32), compare_u32);
     u32 distinct = 0U;
@@ -1097,7 +1104,9 @@ NTEST_F(VoxelGpu, the_radiance_cache_holds_the_voxels_cells)
               "expected; %u cells found",
               distinct, cells, stats.vis_voxel_clusters, used, known, found);
     NTEST_ASSERT_GT_UINT(distinct, 50U);
-    NTEST_EXPECT_TRUE((f64)known >= 0.98 * (f64)used);
+    // (The other slots are the cells of what the update's rays met where the cache held none,
+    // ADR-0090: here the voxels' own faces that no pixel's point fell in.)
+    NTEST_EXPECT_TRUE((f64)known >= 0.6 * (f64)used);
     NTEST_EXPECT_TRUE((f64)found >= 0.98 * (f64)distinct);
 
     NPH_FREE_ARRAY(nph_allocator_system(), TwinBox, boxes, nph_max_u32(count, 1U));

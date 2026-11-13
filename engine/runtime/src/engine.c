@@ -142,6 +142,10 @@ static const NPH_CVAR_FLOAT(k_contact_shadow, "r.contact_shadow", 24.0, 0.0, 256
                             "widths (0: not at all; production, with the occlusion and the sun's "
                             "map)",
                             NPH_CVAR_FLAG_SAVED);
+static const NPH_CVAR_BOOL(k_sun_rays, "r.sun_rays", 0,
+                           "the sun's shadows by a ray a pixel in place of its map's, where the "
+                           "frame traces (production; ray queries; some 1 to 4 ms at 1440p)",
+                           NPH_CVAR_FLAG_SAVED);
 static const NPH_CVAR_BOOL(k_gi, "r.gi", 1,
                            "global illumination from the radiance cache (production; ray "
                            "queries)",
@@ -256,6 +260,7 @@ static NphResult register_cvars(NphEngine *e)
         &cv->dof,
         &cv->ao,
         &cv->contact_shadow,
+        &cv->sun_rays,
         &cv->reflections,
         &cv->gi,
         &cv->many_restir,
@@ -327,6 +332,7 @@ static NphResult register_cvars(NphEngine *e)
         &k_dof,
         &k_ao,
         &k_contact_shadow,
+        &k_sun_rays,
         &k_reflections,
         &k_gi,
         &k_many_restir,
@@ -901,6 +907,7 @@ static void choose_view(NphEngine *e, f64 dt)
     }
     e->view.ao_radius = (f32)nph_cvar_get_float(&e->cv.ao);
     e->view.contact_shadow = (f32)nph_cvar_get_float(&e->cv.contact_shadow);
+    e->view.sun_rays = nph_cvar_get_bool(&e->cv.sun_rays) ? 1 : 0;
     e->view.reflections = (NphRenderReflections)nph_cvar_get_int(&e->cv.reflections);
     e->view.gi = nph_cvar_get_bool(&e->cv.gi) ? 1 : 0;
     e->view.many_restir = (NphRenderRestir)nph_cvar_get_int(&e->cv.many_restir);

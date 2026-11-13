@@ -470,6 +470,50 @@ NTEST(gltf, glass_stays_out_of_the_rays)
     cook_gltf_free(&scene);
 }
 
+// Glass is seen through (docs/cook.md "Glass"): a material that lets most light through
+// (KHR_materials_transmission) is cooked blended and transmissive, its base colour and alpha the
+// share it keeps; not one that lets less through, nor one whose alpha mode says otherwise.
+NTEST(gltf, glass_is_a_blended_material_that_keeps_what_it_does_not_let_through)
+{
+    const f32 pos[3 * 3] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const char *doc =
+        "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_materials_transmission\"],"
+        "\"materials\":["
+        "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.8,0.6,0.4,1.0],\"metallicFactor\":0.0,"
+        "\"roughnessFactor\":0.0},"
+        "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.9}}},"
+        "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.8,0.6,0.4,1.0]},"
+        "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.3}}},"
+        "{\"alphaMode\":\"MASK\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.8,0.6,0.4,1.0]},"
+        "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.9}}}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0},"
+        "{\"attributes\":{\"POSITION\":0},\"material\":1},"
+        "{\"attributes\":{\"POSITION\":0},\"material\":2}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+        "\"min\":[0,0,0],\"max\":[1,1,0]}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+        "\"buffers\":[{\"byteLength\":36,\"uri\":\"%s\"}]}";
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(load_doc(doc, pos, sizeof pos, &scene), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 3U);
+    const NphMaterialHeader *glass = &scene.materials[0].header;
+    NTEST_EXPECT_EQ_UINT(glass->alpha_mode, NPH_MATERIAL_ALPHA_BLEND);
+    NTEST_EXPECT_TRUE((glass->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U);
+    NTEST_EXPECT_NEAR_F32(glass->base_color_factor.x, 0.08F, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(glass->base_color_factor.y, 0.06F, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(glass->base_color_factor.z, 0.04F, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(glass->base_color_factor.w, 0.1F, 1e-5F);
+    const NphMaterialHeader *tinted = &scene.materials[1].header;
+    NTEST_EXPECT_EQ_UINT(tinted->alpha_mode, NPH_MATERIAL_ALPHA_OPAQUE);
+    NTEST_EXPECT_TRUE((tinted->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) == 0U);
+    NTEST_EXPECT_NEAR_F32(tinted->base_color_factor.x, 0.8F, 1e-5F);
+    const NphMaterialHeader *cut = &scene.materials[2].header;
+    NTEST_EXPECT_EQ_UINT(cut->alpha_mode, NPH_MATERIAL_ALPHA_MASK);
+    NTEST_EXPECT_TRUE((cut->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) == 0U);
+    NTEST_EXPECT_NEAR_F32(cut->base_color_factor.w, 1.0F, 1e-5F);
+    cook_gltf_free(&scene);
+}
+
 // A light's shell stays out of the rays: a mesh every material of which glows, with an instance
 // whose box in the world holds a point or spot light. Not when the light is outside that box
 // (the parent's move counts), not a mesh that does not glow (a housing stops light), and not for

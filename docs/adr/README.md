@@ -95,6 +95,12 @@ supersedes it and both link to each other.
 | [0087](0087-motion.md) | The radiance cache in motion: new cells start from their neighbours, and reflections are refilled | Accepted |
 | [0088](0088-alpha-tested-casters.md) | Alpha-tested surfaces cast, and stop rays, as they are drawn | Accepted |
 | [0089](0089-reflections-a-ray-a-pixel.md) | Smooth surfaces reflect by a ray a pixel, gathered with their neighbours' | Accepted |
+| [0090](0090-radiance-cache-filter.md) | The radiance cache's light: filtered between cells, and right where the camera has not looked | Accepted |
+| [0091](0091-radiance-cache-in-motion.md) | The radiance cache while the camera runs: a table that makes room, cells of several sizes, and light that holds between frames | Accepted |
+| [0092](0092-light-off-what-rays-meet-and-a-still-image.md) | Light off what the rays meet, and an image that holds when the camera stands | Accepted |
+| [0093](0093-what-popped-and-what-blinked.md) | What popped with distance and what blinked standing still: a sheet's outline, a level's hand-over, a pixel's unrest | Accepted |
+| [0094](0094-glass-blended-casters-and-the-grazing-sun.md) | Glass seen through, blended surfaces that cast nothing, and the sun's shadows traced where a view asks | Accepted |
+| [0095](0095-a-view-in-motion-as-sharp-as-standing.md) | A view in motion as sharp as standing: the history's surface, its filter, and its count | Accepted |
 
 ## Template
 

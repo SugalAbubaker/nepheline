@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Rays and alpha-tested surfaces (docs/render.md "Shadow rays"). The top level
-// marks an instance that has a MASK material as not opaque (rt_instances.comp),
+// Rays and alpha-tested and blended surfaces (docs/render.md "Shadow rays"). The top level
+// marks an instance that has a MASK or a BLEND material as not opaque (rt_instances.comp),
 // so a ray query hands back each of its triangles the ray meets as a
 // candidate, and the ray goes on where the material's alpha test fails there,
 // as the raster discards the fragment (vis_raster_frag.glsl): a leaf's card
-// stops a ray only where its leaf is. Every other instance stays opaque to the
+// stops a ray only where its leaf is. It goes on through a blended surface
+// altogether: glass, and a decal a hair before its wall, light as the eye
+// passes. Every other instance stays opaque to the
 // traversal and costs what it did. The includer has the GPU scene's records
 // (vis_common.glsl) and ray queries (rt_common.glsl), and starts its queries
 // without gl_RayFlagsOpaqueEXT.
@@ -26,8 +28,11 @@ bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
     const uvec2 sub = VisUvec2Ref(mesh.submeshes).v[geometry];
     const uint mi = vis_instance_material(view, inst, sub.x);
     MaterialsRef materials = MaterialsRef(view.v.materials);
+    if (materials.m[mi].alpha_mode == 2u) {
+        return false; // a blended surface (glass, a decal) stops no ray
+    }
     if (materials.m[mi].alpha_mode != 1u) {
-        return true; // an opaque submesh of an instance that has a masked one
+        return true; // an opaque submesh of an instance that has a masked or blended one
     }
     const uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(q, false);
     const vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, false);

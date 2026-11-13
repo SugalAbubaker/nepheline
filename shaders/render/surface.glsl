@@ -892,6 +892,19 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
                 radiance = mix(radiance, gathered * spec_share, cell.w);
             }
         }
+#ifdef NPH_SURFACE_REFLECT
+        else if (rays_reflect) {
+            // A smooth surface's ray gives what it reflects (reflect_gather.comp), all of it
+            // while its lobe is narrow. The wider the lobe the more a ray's light is one sample
+            // of many, which a few pixels around and a few frames do not average: a dark table's
+            // apron of roughness 0.22 changed by a tenth from frame to frame, standing still.
+            // So towards the roughness where the rays end the surface takes the rest from what
+            // its cell has gathered, as the surfaces past it take all of theirs (ADR-0092).
+            radiance = irradiance *
+                       (NPH_INV_PI * spec_share *
+                        (1.0 - gi_reflect_ray_share(gi_reflect_rough(roughness))));
+        }
+#endif
 #ifdef NPH_SURFACE_MANY_ACTIVE
         // The many lights' far fields have no highlights of their own: what the cell
         // gathered, as if arriving evenly from everywhere, gives the specular its

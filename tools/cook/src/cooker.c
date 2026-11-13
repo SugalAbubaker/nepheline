@@ -372,6 +372,8 @@ static u64 settings_hash(const Cooker *c, u32 type)
     } else if (type == NPH_ASSET_TYPE_MESH) {
         h = nph_hash_combine(h, COOK_MESH_VERSION);
         h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
+    } else if (type == NPH_ASSET_TYPE_MATERIAL) {
+        h = nph_hash_combine(h, COOK_MATERIAL_VERSION);
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         // The cooker's defaults; a source's own settings are in its content
         // hash (cooker_cook_sound).

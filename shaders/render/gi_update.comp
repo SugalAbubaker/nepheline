@@ -15,7 +15,10 @@
 // sun (shadowed by a second ray where the sun casts shadows) and of the
 // cache's own irradiance at the hit, so each frame adds a bounce to what the
 // cells hold (the environment's irradiance where the hit's cell has none
-// yet). Point and spot lights do not bounce yet (ADR-0039). Texture detail
+// yet). Point and spot lights do not bounce yet (ADR-0039). Each sample is
+// added to its cell and to the cells of the next NPH_RENDER_GI_ABOVE levels
+// around the same point, its parents, whose light the filter gives the cell
+// where its own is thin (gi_filter.comp, ADR-0090, ADR-0091). Texture detail
 // at a hit is read at the level the hit's cell resolves: a cell across over
 // the triangle's texel size (Akenine-Möller et al., "Texture Level of
 // Detail Strategies for Real-Time Ray Tracing", Ray Tracing Gems, 2019,
@@ -118,6 +121,47 @@ vec3 many_far_sample(VisViewRef view, ViewRef rview, vec3 x, vec3 n, float u)
     return light.color.rgb * (share * nol * lit * inv_d * inv_d / pdf);
 }
 
+// One sample added to the sums of the cell in `slot`, if the frame has left it fewer than `most`.
+void add_sample_within(GiViewRef g, uint slot, uvec3 fixed_e, uint fixed_far, uint most)
+{
+    GiSumsRef sums = GiSumsRef(g.g.sums);
+    if (atomicAdd(sums.s[slot].w, 1u) >= most) {
+        atomicAdd(sums.s[slot].w, 0xFFFFFFFFu); // full: not this one
+        return;
+    }
+    if (fixed_e.x != 0u) {
+        atomicAdd(sums.s[slot].x, fixed_e.x);
+    }
+    if (fixed_e.y != 0u) {
+        atomicAdd(sums.s[slot].y, fixed_e.y);
+    }
+    if (fixed_e.z != 0u) {
+        atomicAdd(sums.s[slot].z, fixed_e.z);
+    }
+    if (fixed_far != 0u) {
+        atomicAdd(GiKeysRef(g.g.far_sums).k[slot], fixed_far);
+    }
+}
+
+// One sample added to the sums of the cell in `slot`.
+void add_sample(GiViewRef g, uint slot, uvec3 fixed_e, uint fixed_far)
+{
+    GiSumsRef sums = GiSumsRef(g.g.sums);
+    if (fixed_e.x != 0u) {
+        atomicAdd(sums.s[slot].x, fixed_e.x);
+    }
+    if (fixed_e.y != 0u) {
+        atomicAdd(sums.s[slot].y, fixed_e.y);
+    }
+    if (fixed_e.z != 0u) {
+        atomicAdd(sums.s[slot].z, fixed_e.z);
+    }
+    atomicAdd(sums.s[slot].w, 1u);
+    if (fixed_far != 0u) {
+        atomicAdd(GiKeysRef(g.g.far_sums).k[slot], fixed_far);
+    }
+}
+
 void main()
 {
     VisViewRef view = VisViewRef(pc.view);
@@ -149,14 +193,18 @@ void main()
         const vec2 q = (vec2(p) + 0.5) * view.v.viewport.zw * 2.0 - 1.0;
         x = surface_point(view, v, q, n);
     }
-    bool created;
-    const uint slot = gi_claim_new(g, gi_key(g, x, n), created);
+    const int level = gi_level(length(x));
+    const uint slot = gi_claim_cell(g, gi_key_at(g, x, n, level));
     if (slot == GI_NONE) {
+        atomicAdd(VisCountersRef(view.v.counters).c.gi_dropped, 1u);
         return; // its bucket is full: no sample
     }
-    if (created) {
-        gi_seed(g, slot, x, n); // its neighbouring level's light (ADR-0087)
-    }
+    // Its cell's parent, the cell of the next level around the point, which takes the sample too
+    // (ADR-0090): four cells' samples (a surface's), so it settles four times sooner, and it is
+    // there with its light when the camera backs away and the surface takes that level's cells.
+    const uint parent = level + 1 < NPH_RENDER_GI_LEVELS
+                            ? gi_claim_cell(g, gi_key_at(g, x, n, level + 1))
+                            : GI_NONE;
 
     // A cosine-distributed direction about n: a uniform point of the unit
     // disc lifted onto the hemisphere (Malley's method).
@@ -182,7 +230,77 @@ void main()
         if (rayQueryGetIntersectionTEXT(rq, true) < g.g.near) {
             return; // the ambient occlusion's range
         }
-        radiance = hit_radiance(view, rview, g, rq, w, 0.0);
+        const GiHit h = hit_surface(view, rview, g, rq, w, 0.0);
+        // The light the hit receives is the cache's, where it holds the hit's cell. It may not:
+        // no frame has seen the surface (ADR-0090). Taken for open to the whole sky then, as it
+        // was, the unseen side of every room and archway lit what faced it: under a roof walled
+        // on three sides, grey surfaces got eleven times their light. So the ray goes on from
+        // the hit, a bounce further, for a sample of what the hit receives, and the sample is
+        // the hit's cell's own as much as this ray's: it is added to the hit's cell, if it has
+        // one, and to that cell's parent, made if need be, which the next ray to land there
+        // finds with light (one sample alone, two chances taken in a row, left the shade it lit
+        // wandering by a third from one tenth of a second to the next). A cell found whose last
+        // sample is NPH_RENDER_GI_HIT_AGE frames old is one the camera's own samples do not keep
+        // up: the ray goes on from it too. What the second bounce meets unseen is taken to
+        // receive what the first does, or what the ray's own surface does, as the last frame
+        // left their cells.
+        vec3 arriving = h.cached;
+        if (!h.known || h.age >= uint(NPH_RENDER_GI_HIT_AGE)) {
+            const vec3 u2 = gi_random(uvec3(block, g.g.frame ^ 0x3C6EF372u));
+            const float r2 = sqrt(u2.x);
+            const float phi2 = 2.0 * NPH_PI * u2.y;
+            const float s2 = h.face.z >= 0.0 ? 1.0 : -1.0;
+            const float a2 = -1.0 / (s2 + h.face.z);
+            const float b2 = h.face.x * h.face.y * a2;
+            const vec3 t2 = vec3(1.0 + s2 * h.face.x * h.face.x * a2, s2 * b2, -s2 * h.face.x);
+            const vec3 bt2 = vec3(b2, s2 + h.face.y * h.face.y * a2, -h.face.y);
+            const vec3 w2 = normalize(r2 * cos(phi2) * t2 + r2 * sin(phi2) * bt2 +
+                                      sqrt(max(1.0 - u2.x, 0.0)) * h.face);
+            rayQueryEXT rq2;
+            rayQueryInitializeEXT(rq2, accelerationStructureEXT(rview.v.tlas), gl_RayFlagsNoneEXT,
+                                  0xFFu, nph_offset_ray(h.x + rview.v.tlas_offset.xyz, h.face), 0.0,
+                                  w2, 1e30);
+            NPH_RAY_TRAVERSE(view, rq2)
+            vec3 sample2;
+            if (rayQueryGetIntersectionTypeEXT(rq2, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+                sample2 = environment(rview, w2) * NPH_PI;
+            } else {
+                const GiHit h2 = hit_surface(view, rview, g, rq2, w2, 0.0);
+                vec3 beyond = h2.cached;
+                if (!h2.known) {
+                    beyond = h.cached;
+                    if (!h.known) {
+                        // (The ray's own cell's, or in its first frame its parent's, which was
+                        // the surface's own cell if the camera has just come nearer.)
+                        uvec4 here = GiCellsRef(g.g.cells).c[slot];
+                        if (gi_word_count(here.w) == 0u && parent != GI_NONE) {
+                            here = GiCellsRef(g.g.cells).c[parent];
+                        }
+                        beyond = uintBitsToFloat(here.xyz); // nothing, where that has none either
+                    }
+                }
+                sample2 = (h2.direct + h2.albedo * NPH_INV_PI * beyond) * NPH_PI;
+            }
+            const uvec3 fixed2 = uvec3(
+                min(sample2 * rview.v.exposure, vec3(NPH_RENDER_GI_SAMPLE_MAX)) * g.g.sum_scale + 0.5);
+            if (h.slot != GI_NONE) {
+                add_sample(g, h.slot, fixed2, 0u);
+            }
+            // (A new one in the first half of its bucket only: the cells of what the rays meet
+            // are many, all around the camera, and must not crowd the frame's own out of the
+            // table.)
+            const uint above = h.level + 1 < NPH_RENDER_GI_LEVELS
+                                   ? gi_claim_cell_within(g, gi_key_at(g, h.x, h.face, h.level + 1),
+                                                          uint(NPH_RENDER_GI_BUCKET) / 2u)
+                                   : GI_NONE;
+            if (above != GI_NONE) {
+                add_sample(g, above, fixed2, 0u);
+            }
+            if (!h.known) {
+                arriving = sample2;
+            }
+        }
+        radiance = h.direct + h.albedo * NPH_INV_PI * arriving;
     }
 
     vec3 irradiance = radiance * NPH_PI;
@@ -193,27 +311,30 @@ void main()
         irradiance += far;
     }
 
-    // The estimate, pre-exposed, in fixed point.
+    // The estimate, pre-exposed, in fixed point; the far fields' alone (their luminance), for the
+    // cell's share of them (ADR-0078).
     const vec3 e = min(irradiance * rview.v.exposure, vec3(NPH_RENDER_GI_SAMPLE_MAX));
     const uvec3 fixed_e = uvec3(e * g.g.sum_scale + 0.5);
-    GiSumsRef sums = GiSumsRef(g.g.sums);
-    if (fixed_e.x != 0u) {
-        atomicAdd(sums.s[slot].x, fixed_e.x);
-    }
-    if (fixed_e.y != 0u) {
-        atomicAdd(sums.s[slot].y, fixed_e.y);
-    }
-    if (fixed_e.z != 0u) {
-        atomicAdd(sums.s[slot].z, fixed_e.z);
-    }
-    atomicAdd(sums.s[slot].w, 1u);
-    // The far fields' alone (their luminance), for the cell's share of them (ADR-0078).
+    uint fixed_far = 0u;
     if (k_many) {
         const float far_e = min(dot(far, vec3(0.2126, 0.7152, 0.0722)) * rview.v.exposure,
                                 NPH_RENDER_GI_SAMPLE_MAX);
-        const uint fixed_far = uint(far_e * g.g.sum_scale + 0.5);
-        if (fixed_far != 0u) {
-            atomicAdd(GiKeysRef(g.g.far_sums).k[slot], fixed_far);
+        fixed_far = uint(far_e * g.g.sum_scale + 0.5);
+    }
+    add_sample(g, slot, fixed_e, fixed_far);
+    if (parent != GI_NONE) {
+        add_sample(g, parent, fixed_e, fixed_far);
+    }
+    // And the cells of the levels above those around the point (ADR-0091): each twice as wide as
+    // the one under it, with four times the samples a frame, so that where the frame has just
+    // come to a surface some cell around each point knows its light within a frame or two, and
+    // the cells under it begin with that (gi_filter.comp). Their sums hold a frame's samples
+    // only so far: the first NPH_RENDER_GI_ABOVE_SAMPLES to arrive (a sample is at most
+    // NPH_RENDER_GI_SAMPLE_MAX).
+    for (int up = 2; up <= NPH_RENDER_GI_ABOVE && level + up < NPH_RENDER_GI_LEVELS; ++up) {
+        const uint wider = gi_claim_cell(g, gi_key_at(g, x, n, level + up));
+        if (wider != GI_NONE) {
+            add_sample_within(g, wider, fixed_e, fixed_far, uint(NPH_RENDER_GI_ABOVE_SAMPLES));
         }
     }
 }

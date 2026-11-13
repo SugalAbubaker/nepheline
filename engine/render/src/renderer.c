@@ -137,9 +137,11 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
         d.depth.compare = NPH_GPU_COMPARE_GREATER; // reverse-Z
     }
     if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
-        // "Over" compositing; blended surfaces do not occlude.
+        // "Over" compositing of a colour its shader has multiplied by its alpha already
+        // (forward_frag.glsl forward_blended: glass adds what it reflects whole); blended
+        // surfaces do not occlude.
         d.blend[0].enable = 1;
-        d.blend[0].src_color = NPH_GPU_BLEND_SRC_ALPHA;
+        d.blend[0].src_color = NPH_GPU_BLEND_ONE;
         d.blend[0].dst_color = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
         d.blend[0].color_op = NPH_GPU_BLEND_OP_ADD;
         d.blend[0].src_alpha = NPH_GPU_BLEND_ONE;

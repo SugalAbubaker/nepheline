@@ -714,16 +714,109 @@ NTEST_F(Reflect, a_cut_away_surface_is_not_reflected)
     nph_render_texture_destroy(f->renderer, env);
 }
 
+// A dark floor of roughness 0.22, a sunlit white wall standing on it and a black sky: all the floor
+// shows is what it reflects, and a ray a pixel a frame is one sample of a lobe that covers the wall
+// or misses it. Its ray gives a fifth of what such a floor reflects and what its irradiance cell
+// has gathered the rest (gi_reflect_ray_share, ADR-0092), so a pixel's light changes from frame
+// to frame by 0.0007 where the rays alone change it by 0.0030: less than a floor of roughness 0.1
+// changes (0.0013), all of whose reflection is its ray's and whose lobe is half as wide.
+NTEST_F(Reflect, a_rough_floors_reflection_holds_between_frames)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F)); // onto the wall's face
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    const NphRenderMaterial white = surface(f, nph_vec3(0.9F, 0.9F, 0.9F), 0.0F, 1.0F);
+    static TestBoxScene scenes[2];
+    f64 wander[2] = {0.0, 0.0};
+    f64 level[2] = {0.0, 0.0};
+    const f32 roughness[2] = {0.22F, 0.1F};
+    for (u32 k = 0; k < 2U; ++k) {
+        TestBoxScene *scene = &scenes[k];
+        memset(scene, 0, sizeof *scene);
+        test_box_ground(f, scene, mesh,
+                        surface(f, nph_vec3(0.02F, 0.02F, 0.02F), 0.0F, roughness[k]));
+        test_box_add(f, scene, mesh, white, nph_vec3(-1.0F, 0.0F, -2.0F),
+                     nph_vec3(1.0F, 2.0F, -1.5F));
+        if (k == 0U) {
+            test_box_show(f, &scenes[0], true);
+        } else {
+            test_box_show(f, &scenes[0], false);
+            test_box_show(f, &scenes[1], true);
+        }
+        const NphRenderCamera camera =
+            test_box_camera(scene, nph_vec3(0.0F, 1.2F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+        NphRenderView v;
+        reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_RAYS);
+        static u8 image[PIXELS];
+        (void)settled(f, &v, target, image, SETTLE);
+        static f64 sum[SIZE * SIZE];
+        static f64 sum2[SIZE * SIZE];
+        memset(sum, 0, sizeof sum);
+        memset(sum2, 0, sizeof sum2);
+        const u32 frames = 16U;
+        for (u32 i = 0; i < frames; ++i) {
+            (void)settled(f, &v, target, image, 1U);
+            for (u32 p = 0; p < SIZE * SIZE; ++p) {
+                const f64 g = (f64)test_box_linear(image, p);
+                sum[p] += g;
+                sum2[p] += g * g;
+            }
+        }
+        u32 count = 0U;
+        for (u32 p = 0; p < SIZE * SIZE; ++p) {
+            NphVec3 x;
+            NphVec3 n;
+            f32 t = 0.0F;
+            // The floor before the wall, where the wall's reflection lies.
+            if (test_box_hit(scene, scene->eye, test_box_pixel_ray(scene, p), 0.0F, &t, &n) != 0) {
+                continue;
+            }
+            x = nph_vec3_add(scene->eye, nph_vec3_scale(test_box_pixel_ray(scene, p), t));
+            if (nph_f32_abs(x.x) > 1.5F || x.z < -1.4F || x.z > 1.5F) {
+                continue;
+            }
+            const f64 mean = sum[p] / (f64)frames;
+            wander[k] += sqrt(nph_f64_max(sum2[p] / (f64)frames - mean * mean, 0.0));
+            level[k] += mean;
+            ++count;
+        }
+        NTEST_ASSERT_GT_UINT(count, 500U);
+        wander[k] /= (f64)count;
+        level[k] /= (f64)count;
+    }
+    NTEST_LOG(
+        "a floor of roughness 0.22: %.4f, wandering by %.4f a pixel between frames (%.1f %%); "
+        "of 0.1: %.4f, by %.4f (%.1f %%)",
+        level[0], wander[0], 100.0 * wander[0] / level[0], level[1], wander[1],
+        100.0 * wander[1] / level[1]);
+    NTEST_EXPECT_TRUE(level[0] > 0.002);
+    NTEST_EXPECT_TRUE(wander[1] > 0.0005); // the rays' light does change
+    NTEST_EXPECT_TRUE(wander[0] < wander[1]);
+    test_box_show(f, &scenes[1], false);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+}
+
 // A room with no way out, a sky outside it, and a sun that does not reach in: nothing in it can
 // reflect the sky, which the environment's specular would have it do. The rays say how much is
 // left, and the cells come near it. The walls' faces are rough and metal: all they show is what
-// they reflect.
+// they reflect. (They reflect half the light: what a ray's hit reflects of the cache's light is
+// its base colour's share, a metal's too, ADR-0092, and walls that reflect nine tenths pass the
+// sky's light along the room until it is seven tenths of the open sky's.)
 NTEST_F(Reflect, what_is_hidden_from_the_sky_does_not_reflect_it)
 {
     REQUIRE_REFLECTIONS(f);
     const NphRenderTexture env = test_uniform_environment(f, 1.0F);
     const NphRenderMesh mesh = test_cube_mesh(f);
-    const NphRenderMaterial metal = surface(f, nph_vec3(0.9F, 0.9F, 0.9F), 1.0F, 0.6F);
+    const NphRenderMaterial metal = surface(f, nph_vec3(0.5F, 0.5F, 0.5F), 1.0F, 0.6F);
     static TestBoxScene scene;
     memset(&scene, 0, sizeof scene);
     test_box_add(f, &scene, mesh, metal, nph_vec3(-3.0F, -1.0F, -3.0F), nph_vec3(3.0F, 0.0F, 3.0F));

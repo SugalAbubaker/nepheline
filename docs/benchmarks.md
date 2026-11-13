@@ -385,11 +385,9 @@ Q and E move, Shift is four times as fast, the wheel changes the speed, the
 right mouse button looks around, 1 to 9 jump to the manifest's views, G logs
 each pass's GPU time, and F11 switches to exclusive fullscreen on the
 window's monitor at that monitor's own mode and back: a 2560 × 1440 display
-then shows the image pixel for pixel. X switches between the scene's own
-exposure, which the manifest sets for its daylight, and one metered from the
-frame and adapted over time (`NPH_RENDER_EXPOSURE_AUTO`), as an eye's on
-going indoors: Bistro's interior is black at the street's exposure and a lit
-room at its own. `--record=FILE` writes the camera's pose each frame, a line
+then shows the image pixel for pixel. The exposure is the scene's own,
+which the manifest sets for its daylight.
+`--record=FILE` writes the camera's pose each frame, a line
 of `x y z yaw pitch` in metres and radians: a walk to play back, frame for
 frame, where a fault was seen. The title gives
 the frame rate, the frame time, the worst frame, and the GPU memory, and it

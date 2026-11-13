@@ -81,6 +81,26 @@ layout(location = 3) in vec2 in_uv;
 layout(location = 4) in vec4 in_color;
 layout(location = 0) out vec4 out_color;
 
+#if NPH_FORWARD_ALPHA_MODE == 2
+// A blended surface's colour as the pipeline composites it, "over" with the colour multiplied
+// by its alpha here: alpha is a coverage, and all the surface's light scales with it. Glass
+// (NPH_RENDER_MATERIAL_TRANSMISSIVE) is whole, and thin: `alpha` is the share of the light
+// behind it that its body stops, its base colour came scaled by it, and what it reflects is its
+// surface's, added as shaded; what is behind it shows less by what the surface turns back too,
+// a dielectric's share at the angle it is seen from (Schlick, "An Inexpensive BRDF Model for
+// Physically-Based Rendering", 1994; 4 % head on).
+vec4 forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
+{
+    if ((m.flags & NPH_RENDER_MATERIAL_TRANSMISSIVE) == 0u) {
+        return vec4(color * alpha, alpha);
+    }
+    const vec3 n = normalize(s.face_normal);
+    const vec3 v = normalize(-s.position);
+    const float turned = 0.04 + 0.96 * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
+    return vec4(color, 1.0 - (1.0 - alpha) * (1.0 - turned));
+}
+#endif
+
 void main()
 {
 #if NPH_FORWARD_ALPHA_MODE == 2
@@ -166,7 +186,7 @@ void main()
         }
         color = min((albedo * g_gi_cell.rgb * (NPH_INV_PI * g_gi_cell.w) + emissive) * view.v.exposure,
                     vec3(NPH_RENDER_HALF_MAX));
-        out_color = vec4(color, base.a);
+        out_color = forward_blended(m, s, color, base.a);
         return;
     }
 #endif
@@ -175,5 +195,9 @@ void main()
     } else {
         color = nph_surface_shade(view, m, s, base);
     }
-    out_color = vec4(color, NPH_FORWARD_ALPHA_MODE == 2 ? base.a : 1.0);
+#if NPH_FORWARD_ALPHA_MODE == 2
+    out_color = forward_blended(m, s, color, base.a);
+#else
+    out_color = vec4(color, 1.0);
+#endif
 }

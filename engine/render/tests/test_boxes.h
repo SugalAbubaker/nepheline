@@ -30,8 +30,8 @@ typedef struct TestBox {
 } TestBox;
 
 typedef struct TestBoxScene {
-    TestBox boxes[4];
-    NphRenderInstance instances[4];
+    TestBox boxes[8];
+    NphRenderInstance instances[8];
     u32 count;
     NphVec3 eye;
     NphVec3 forward;
@@ -168,6 +168,7 @@ static inline NphRenderMaterial test_grey(RenderFixture *f, f32 value)
 static inline void test_box_add(RenderFixture *f, TestBoxScene *s, NphRenderMesh mesh,
                                 NphRenderMaterial mat, NphVec3 lo, NphVec3 hi)
 {
+    NTEST_ASSERT_LT_UINT(s->count, (u32)NPH_ARRAY_COUNT(s->boxes));
     NphRenderInstanceDesc id;
     memset(&id, 0, sizeof id);
     id.mesh = mesh;

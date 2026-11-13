@@ -24,11 +24,15 @@ layout(push_constant, scalar) uniform Push { NphRenderTaaPush pc; };
 layout(constant_id = 0) const bool k_dither = false;
 
 layout(location = 0) in vec2 in_ndc;
+// (out_state: x the pixel's unrest, y the frames its history holds over 255, zw its surface's
+// key in two halves; taa_unrest, taa_count_after, taa_key_pack.)
 #ifdef TAA_HISTORY_ONLY
 layout(location = 0) out vec4 out_history;
+layout(location = 1) out vec4 out_state;
 #else
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_history;
+layout(location = 2) out vec4 out_state;
 #endif
 
 float filter_weight(int i)
@@ -116,8 +120,12 @@ void main()
         packUint2x32(texelFetch(nph_utextures_2d[pc.visbuffer_index], nearest_at, 0).xy);
     // The weights sum to 1.
     vec3 resolved = n.filtered;
+    float unrest = 0.0;
+    float count = 1.0; // the frames the new history holds: this one, without a history
     vec2 then;
-    if (pc.history_scale > 0.0 && vis_previous_uv(view, nearest_at, nearest, then)) {
+    float depth_then;
+    if (pc.history_scale > 0.0 &&
+        vis_previous_point(view, nearest_at, nearest, then, depth_then)) {
         // The nearest surface's motion without jitter (its sample lies the
         // jitter away from its pixel's centre) is how far back this
         // pixel's history lies.
@@ -126,12 +134,38 @@ void main()
         const vec2 uv = (vec2(pixel) + 0.5) * inv_size - motion;
         if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
             const vec3 history =
-                taa_rgb_to_ycocg(taa_history_catmull_rom(pc.history_index, pc.sampler_index, uv,
-                                                         view.v.viewport.xy, inv_size) *
+                taa_rgb_to_ycocg(taa_history_cubic(pc.history_index, pc.sampler_index, uv,
+                                                   view.v.viewport.xy, inv_size) *
                                  pc.history_scale);
             const vec2 pixels = abs(motion * view.v.viewport.xy);
-            resolved = taa_blend(n.filtered, taa_clip_mixed(n, history),
-                                 taa_current_weight(max(pixels.x, pixels.y)));
+            const float speed = max(pixels.x, pixels.y);
+            const float moving = clamp(speed / TAA_MOVING_SPEED, 0.0, 1.0);
+            // The unrest the history's pixel left (taa_unrest) and the frames it held, with the
+            // history's own taps' sampler: its texel's where the pixel stood still.
+            const vec2 state = textureLod(sampler2D(nph_textures_2d[pc.unrest_index],
+                                                    nph_samplers[pc.sampler_index]),
+                                          uv, 0.0)
+                                   .rg;
+            const float was = state.x;
+            const float still = taa_stillness(speed);
+            // Whether the history there shows this surface: the keys of the four history
+            // pixels about the point against the point's own a frame ago. If so it is clipped
+            // as a still pixel's is, however it moved; what a nearer surface has just
+            // uncovered takes the moving pixel's box, held to its frame.
+            const vec4 keys = taa_keys_unpack(
+                textureGather(sampler2D(nph_textures_2d[pc.unrest_index],
+                                        nph_samplers[pc.point_sampler]),
+                              uv, 2),
+                textureGather(sampler2D(nph_textures_2d[pc.unrest_index],
+                                        nph_samplers[pc.point_sampler]),
+                              uv, 3));
+            const bool same = taa_history_valid(keys, taa_depth_key(depth_then));
+            const float weight = taa_count_weight(speed, state.y * 255.0);
+            resolved = taa_blend(n.filtered,
+                                 taa_clip_unrest(n, history, same ? 0.0 : moving, was * still),
+                                 weight);
+            count = taa_count_after(weight);
+            unrest = taa_unrest(was, n.filtered.x, history.x, still);
         }
     }
     vec3 rgb = max(taa_ycocg_to_rgb(resolved), vec3(0.0));
@@ -153,4 +187,9 @@ void main()
                                                                 5.588238 * float(pc.noise)))
                                 : rgb,
                        1.0);
+    // The unrest less half an 8-bit step, so that it falls to nothing where the frames agree
+    // (7/8 of a few steps, rounded, is those steps again); and the key of the surface whose
+    // motion the pixel's history follows, the nearest about it (the sky's: the farthest).
+    out_state = vec4(max(unrest - 0.5 / 255.0, 0.0), count / 255.0,
+                     taa_key_pack(taa_depth_key(vis_depth(nearest))));
 }

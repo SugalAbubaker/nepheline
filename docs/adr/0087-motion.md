@@ -3,7 +3,8 @@
 - **Date:** 2026-11-11
 - **Status:** Accepted (the user's report of 2026-11-11, after testing ADR-0086's build in the viewer: "as I move around
   the world there are concentric rings of 'light' that move with the camera ... The fact that I need to stand still
-  for the noise to go away is unacceptable for a game engine")
+  for the noise to go away is unacceptable for a game engine"); the new cells' seed is replaced by ADR-0090's
+  parents (proposed 2026-11-11)
 
 ## Context
 

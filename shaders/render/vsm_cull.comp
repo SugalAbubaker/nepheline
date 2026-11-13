@@ -199,7 +199,10 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
     // The meshlet's material where it is alpha tested, its index plus one:
     // its draws take the masked raster, which casts what the test leaves
     // (vsm_raster_mesh.glsl). A voxel cluster's material is in its voxels.
+    // A blended material's casts nothing: glass, and a decal a hair before
+    // its wall, whose shadow on the wall came and went with the level.
     uint masked = 0u;
+    bool blended = false;
     if (i < min(counters.c.meshlet_count, r.v.max_meshlets)) {
         const uvec2 item = VsmUvec2Ref(r.v.meshlets).v[i];
         slot = item.x;
@@ -211,9 +214,11 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         if ((m.z & 0xFFFFu) != 0u) {
             const uint material =
                 vis_instance_material(view, inst, VisUvec2Ref(mesh.submeshes).v[m.w].x);
-            if (MaterialsRef(view.v.materials).m[material].alpha_mode == 1u) {
+            const uint alpha_mode = MaterialsRef(view.v.materials).m[material].alpha_mode;
+            if (alpha_mode == 1u) {
                 masked = material + 1u;
             }
+            blended = alpha_mode == 2u;
         }
         // A cluster of a group too coarse for the level, from the walk: in
         // the cut where its maker's error is fine enough (level 0's is 0).
@@ -228,7 +233,7 @@ void cull_meshlets(VisViewRef view, VsmViewRef r)
         const vec3 c =
             vsm_light_space(r, vis_transform_vector(inst.transform, uintBitsToFloat(b0.xyz)) + t);
         const float radius = uintBitsToFloat(b0.w) * vis_max_scale(inst.transform);
-        if (!lod_out && !vsm_beyond(r, level, c, radius)) {
+        if (!lod_out && !blended && !vsm_beyond(r, level, c, radius)) {
             rect = vsm_sphere_rect(r, level, c, radius);
             if (rect.x <= rect.y) {
                 // Only the rows with a page to draw.

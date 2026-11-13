@@ -41,6 +41,10 @@
 
 layout(local_size_x = AO_GROUP, local_size_y = AO_GROUP) in;
 
+// Whether the frame's pass traced the sun (ao_rt.comp; RenderAo.frame_grazed): a frame whose
+// pass marched, or has no sun, does not pay for gathering rays it has none of (0.17 ms).
+layout(constant_id = 0) const bool k_sun = false;
+
 // The shares and the distance, packed (an array of a struct of its own:
 // docs/build.md "Shaders").
 struct AoTexel {
@@ -54,7 +58,16 @@ vec3 texel_at(ivec2 local)
 {
     const uint w = s_texels[(local.y + AO_APRON) * AO_SPAN + local.x + AO_APRON].packed;
     // The distance's sign is the march's (ao.comp), which the sums have no use for.
-    return vec3(float(w & 0xFFu), float((w >> 8u) & 0xFFu), abs(unpackHalf2x16(w).y));
+    return vec3(float(w & 0xFFu), float((w >> 8u) & 0xFFu),
+                abs(unpackHalf2x16(w & ~NPH_AO_TRACED).y));
+}
+
+// Whether the texel at `local` in the tile traced the sun (x) and found it (y), each 1 or 0
+// (ao_pass.glsl): what a pixel's window gathers into the sun's light on it.
+vec2 sun_at(ivec2 local)
+{
+    const uint w = s_texels[(local.y + AO_APRON) * AO_SPAN + local.x + AO_APRON].packed;
+    return (w & NPH_AO_TRACED) != 0u ? vec2(1.0, (w & 0x80000000u) != 0u ? 0.0 : 1.0) : vec2(0.0);
 }
 
 // A tap's weight in the window: the outer rows and columns count half.
@@ -95,6 +108,7 @@ void main()
     bool open_sky[4];
     float visible[4];
     float open[4];
+    vec2 sun[4]; // the window's rays: their weights, and those of the ones that found the sun
     for (int k = 0; k < 4; ++k) {
         const ivec2 l = block + ivec2(k & 1, k >> 1);
         const ivec2 t = tile + l;
@@ -109,6 +123,7 @@ void main()
         step[k] = gradient;
         visible[k] = 0.0;
         open[k] = 0.0;
+        sun[k] = vec2(0.0);
     }
 
     // A block of the sky alone is open.
@@ -116,7 +131,7 @@ void main()
         for (int k = 0; k < 4; ++k) {
             const ivec2 t = tile + block + ivec2(k & 1, k >> 1);
             if (all(lessThan(t, size))) {
-                imageStore(nph_images_2d[pc.out_index], t, vec4(1.0, 0.0, 0.0, 0.0));
+                imageStore(nph_images_2d[pc.out_index], t, vec4(1.0, 1.0, 0.0, 0.0));
             }
         }
         return;
@@ -135,6 +150,7 @@ void main()
             }
             for (int dx = -2; dx <= 3; ++dx) {
                 const vec3 s = texel_at(block + ivec2(dx, dy));
+                const vec2 ray = k_sun ? sun_at(block + ivec2(dx, dy)) : vec2(0.0);
                 for (int k = 0; k < 4; ++k) {
                     const ivec2 o = ivec2(dx - (k & 1), dy - (k >> 1));
                     if (abs(o.x) <= 2 && abs(o.y) <= 2) {
@@ -144,6 +160,7 @@ void main()
                             0.0, 1.0);
                         visible[k] += s.x * window * plane;
                         open[k] += s.y * window * plane;
+                        sun[k] += ray * (window * plane);
                     }
                 }
             }
@@ -163,6 +180,9 @@ void main()
                         1.0 - edge[k] * abs((q[k] + dot(vec2(o), step[k])) * s.z - 1.0), 0.0, 1.0);
                     visible[k] += s.x * window * plane;
                     open[k] += s.y * window * plane;
+                    if (k_sun) {
+                        sun[k] += sun_at(l + o) * (window * plane);
+                    }
                 }
             }
         }
@@ -177,12 +197,19 @@ void main()
         // the surface along its normal.)
         const float ao =
             open_sky[k] ? 1.0 : (open[k] > 0.0 ? clamp(visible[k] / open[k], 0.0, 1.0) : 1.0);
-        // The march's answer, unfiltered: the temporal resolve averages its jitter. It carries
-        // over in the occlusion's sign, of an occlusion that is never quite 0.
+        // The sun's light at the pixel, beside the occlusion (NPH_RENDER_AO_SUN_STEPS): where the
+        // pixel traced the sun, the share of the rays about it, on its plane, that found it (the
+        // pixel's own among them); where it marched, nothing if the march found the sun blocked
+        // (unfiltered: the temporal resolve averages its jitter), and otherwise no answer, by
+        // which the resolve asks the map.
         const ivec2 l = block + ivec2(k & 1, k >> 1);
-        const bool blocked =
-            (s_texels[(l.y + AO_APRON) * AO_SPAN + l.x + AO_APRON].packed & 0x80000000u) != 0u;
-        imageStore(nph_images_2d[pc.out_index], t,
-                   vec4(blocked ? -max(ao, 1.0 / 1024.0) : ao, 0.0, 0.0, 0.0));
+        const uint packed = s_texels[(l.y + AO_APRON) * AO_SPAN + l.x + AO_APRON].packed;
+        const bool blocked = (packed & 0x80000000u) != 0u;
+        const float steps = float(NPH_RENDER_AO_SUN_STEPS);
+        const float light =
+            k_sun && (packed & NPH_AO_TRACED) != 0u
+                ? floor(clamp(sun[k].y / max(sun[k].x, 1e-6), 0.0, 1.0) * steps + 0.5) / 255.0
+                : (blocked ? 0.0 : 1.0);
+        imageStore(nph_images_2d[pc.out_index], t, vec4(ao, light, 0.0, 0.0));
     }
 }

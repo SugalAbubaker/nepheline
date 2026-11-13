@@ -59,9 +59,11 @@ typedef struct LodMesh {
 } LodMesh;
 
 // Welds the mesh and builds its level-0 quadrics: each triangle's plane,
-// weighted by its area, at its corners' classes; each open edge's
-// perpendicular plane, so borders keep their shape (Garland & Heckbert
-// §6.2); and the classes' normals. `attribs` (NULL: none) are compared as
+// weighted by its area, at its corners' classes; the perpendicular plane of
+// each edge where a surface ends (an open edge, or one whose other
+// triangles fold back on it: a sheet of two faces back to back), so
+// outlines keep their shape (Garland & Heckbert §6.2); and the classes'
+// normals. `attribs` (NULL: none) are compared as
 // `attrib_stride` bytes.
 NPH_MUST_USE NphResult lod_mesh_init(LodMesh *m, NphAllocator *alloc, const NphVec3 *positions,
                                      const void *attribs, u32 attrib_stride, u32 vertex_count,

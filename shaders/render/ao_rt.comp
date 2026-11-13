@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// The ambient occlusion's pass with the rays' scene: where the sun grazes a surface the pixel
+// traces it and does not march (ao_pass.glsl AO_RAYS; ADR-0094).
+#version 460
+#extension GL_EXT_ray_query : require
+#define AO_RAYS
+#include "ao_pass.glsl"

@@ -14,7 +14,7 @@
 //
 //     and either: [--size=WxH] [--window=WxH] [--vsync] [--lists=N] [--voxel-pool=MB]
 //                 [--proxy-budget=MB] [--texture-budget=MB] [--tiles=WxH] [--walk=M/S]
-//                 [--frames=N] [--record=FILE]
+//                 [--frames=N] [--record=FILE] [--sun-rays]
 //
 // --size is the image drawn (2560x1440, the size the reference scenes gate at:
 // ADR-0082; 3840x2160 is CLAUDE.md §10.1's target) and --window the window
@@ -28,19 +28,17 @@
 // --walk moves the camera along its view by itself, and --frames ends the run.
 // --record writes the camera's pose to FILE each frame, a line of "x y z yaw pitch"
 // (metres and radians): the path walked, to play back where a fault was seen.
+// --sun-rays draws the sun's shadows by a ray a pixel in place of its map's
+// (NphRenderView.sun_rays; ADR-0094): right where the map is not, and 1 to 4 ms a frame.
 //
 // Keys: W/A/S/D move, Q/E down and up, Shift four times as fast, the mouse wheel
 // changes the speed, the right mouse button held looks around, 1 to 9 jump to the
-// manifest's views, G logs each pass's GPU time, X switches between the scene's
-// own exposure and one metered from the frame and adapted over time, as an eye's
-// going indoors (NPH_RENDER_EXPOSURE_AUTO), R switches smooth surfaces' reflections
-// between a ray a pixel, the default, and their cells (ADR-0089), F11 switches between the window
-// and exclusive fullscreen on the monitor that holds it, at the monitor's own
-// mode (a 2560x1440 display then shows the default --size pixel for pixel),
-// Escape quits. The title gives the
-// frame rate, the frame time and the worst frame's over the last half second, and
-// the GPU memory in use; it says so where the lists overflow (work is dropped, so
-// the numbers flatter the frame) or where proxies are still arriving.
+// manifest's views, G logs each pass's GPU time, F11 switches between the
+// window and exclusive fullscreen on the monitor that holds it, at the monitor's own mode (a
+// 2560x1440 display then shows the default --size pixel for pixel), Escape quits. The title gives
+// the frame rate, the frame time and the worst frame's over the last half second, and the GPU
+// memory in use; it says so where the lists overflow (work is dropped, so the numbers flatter the
+// frame) or where proxies are still arriving.
 //
 // Exit status 77: no window system or Vulkan device (CTest "skipped"); 2: a bad
 // command line; 1: the content did not load, a frame failed, or a validation
@@ -149,6 +147,7 @@ typedef struct Options {
     f32 walk;
     u64 max_frames;
     const char *record; // --record: the camera's poses, a line a frame
+    bool sun_rays;      // --sun-rays: the sun's shadows by a ray a pixel (NphRenderView.sun_rays)
 } Options;
 
 // The camera the keys and the mouse move.
@@ -199,8 +198,6 @@ typedef struct App {
     Fly fly;
     TitleClock title;
     NphRenderFrameStats stats;
-    bool auto_exposure; // X: metered and adapted, in place of the scene's own
-    bool reflect_cells; // R: smooth surfaces take their cells, in place of a ray a pixel
 } App;
 
 // ---------------------------------------------------------------------------
@@ -302,6 +299,8 @@ static bool parse(int argc, char **argv, Options *o)
             o->max_frames = strtoull(v, NULL, 10);
         } else if ((v = value_of(a, "--record=")) != NULL) {
             o->record = v;
+        } else if (strcmp(a, "--sun-rays") == 0) {
+            o->sun_rays = true;
         } else {
             return false;
         }
@@ -599,24 +598,6 @@ static void key_event(App *app, u32 key, u32 action)
             nph_render_gpu_profiler_log(app->profiler);
         }
         break;
-    case NPH_KEY_X:
-        if (down) {
-            app->auto_exposure = !app->auto_exposure;
-            if (app->auto_exposure) {
-                NPH_LOG_INFO(&LOG_SAMPLE, "exposure: metered from the frame, adapting as an eye");
-            } else {
-                NPH_LOG_INFO(&LOG_SAMPLE, "exposure: the scene's own, EV100 %.1f",
-                             (f64)app->def.ev100);
-            }
-        }
-        break;
-    case NPH_KEY_R:
-        if (down) {
-            app->reflect_cells = !app->reflect_cells;
-            NPH_LOG_INFO(&LOG_SAMPLE, "reflections: %s",
-                         app->reflect_cells ? "the reflection cells" : "a ray a smooth pixel");
-        }
-        break;
     case NPH_KEY_F11:
         if (down) {
             toggle_fullscreen(app);
@@ -763,6 +744,9 @@ static NphResult open_device(App *app, int *status)
     memset(&dd, 0, sizeof dd);
     dd.alloc = app->alloc;
     dd.app_name = "scene_viewer";
+    // A scene unloads in one go at the end: Bistro destroys some 8,000 GPU objects, the city
+    // tens of thousands (as benchmarks/render/render_perf.c gives it).
+    dd.deferred_destroy_capacity = 1U << 17U;
     const NphResult r = nph_gpu_device_create(&dd, &app->dev);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_WARN(&LOG_SAMPLE, "no Vulkan device (%s); skipping", nph_result_string(r));
@@ -1020,6 +1004,7 @@ static void run(App *app, int *status)
     view.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
     view.bloom = 0.04F;    // r.bloom's default
     view.ao_radius = 0.5F; // r.ao's default
+    view.sun_rays = app->opt.sun_rays ? 1 : 0;
     view.gi = 1;
     const u64 max = app->opt.max_frames;
     const u64 start_ns = nph_time_now_ns();
@@ -1036,10 +1021,6 @@ static void run(App *app, int *status)
         last_ns = now;
         fly_step(&app->fly, app->opt.walk, dt);
         view.camera = fly_camera(&app->fly);
-        view.exposure = app->auto_exposure ? NPH_RENDER_EXPOSURE_AUTO : NPH_RENDER_EXPOSURE_MANUAL;
-        view.frame_seconds = dt; // the adaptation's pace
-        view.reflections =
-            app->reflect_cells ? NPH_RENDER_REFLECTIONS_CACHE : NPH_RENDER_REFLECTIONS_RAYS;
         if (record != NULL) {
             (void)fprintf(record, "%.6f %.6f %.6f %.7f %.7f\n", app->fly.position.x,
                           app->fly.position.y, app->fly.position.z, (f64)app->fly.yaw,
@@ -1104,9 +1085,7 @@ int main(int argc, char **argv)
             NPH_LOG_INFO(&LOG_SAMPLE,
                          "keys: W/A/S/D move, Q/E down and up, Shift faster, the wheel changes "
                          "the speed, hold the right mouse button to look, 1 to %u the views, "
-                         "G the passes' GPU times, X automatic exposure, R reflections from cells, "
-                         "F11 fullscreen, Escape "
-                         "quits",
+                         "G the passes' GPU times, F11 fullscreen, Escape quits",
                          app.def.view_count);
             run(&app, &status);
         } else {

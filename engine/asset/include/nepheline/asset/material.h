@@ -28,6 +28,10 @@ typedef enum NphMaterialAlphaMode {
 typedef enum NphMaterialFlags {
     NPH_MATERIAL_FLAG_DOUBLE_SIDED = 1U << 0U,
     NPH_MATERIAL_FLAG_UNLIT = 1U << 1U,
+    // Glass: a blended material (NPH_MATERIAL_ALPHA_BLEND) whose base colour's alpha is the
+    // share of the light behind it that its body stops, and whose colour is already scaled by
+    // it; what it reflects is not (render/renderer.h NphRenderMaterialDesc.transmissive).
+    NPH_MATERIAL_FLAG_TRANSMISSIVE = 1U << 2U,
 } NphMaterialFlags;
 
 // The texture slots, in NphMaterialHeader.textures order.

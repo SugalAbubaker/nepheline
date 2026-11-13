@@ -82,6 +82,32 @@ bool vsm_touches_render(VsmViewRef r, int level, vec3 centre, float radius);
 // one (vsm_shadow).
 #define VSM_LEVEL_SLACK 0.001
 
+// How far below a level's boundary (in levels: log2 of the footprint) the
+// shading begins to blend with the next coarser level, which it reads alone
+// past the boundary (vsm_shadow_light_space). A level's texels are twice the
+// one's before, and where the sun grazes a wall they lie stretched down it:
+// a shadow's edge there stepped by a hand's breadth as the camera's distance
+// took the pixel across the boundary, a shadow that popped as the camera
+// walked to or from it. Blended over the last quarter of each level's range
+// (a fifth of its distance), the edge passes from one level's to the next's
+// as the distance does. Half the range blunted the finer level where it is
+// needed (test_contact_shadow.c's grazed wall: 10.1 % of what a ledge hides
+// lit, where a quarter leaves 6.6 and none 6.0). The coarser level's pages
+// are a quarter as many.
+#define VSM_BLEND_BAND 0.25
+// The band as the requests take it, a factor of vsm_q (4^band is 1.41): a
+// little wider, so that a pixel the shading finds in the band has its pages
+// whatever their two roundings.
+#define VSM_BLEND_Q 1.5
+
+// The sun's light on a surface, N.L, below which the map is not asked where the frame can trace
+// a ray (vis_resolve.glsl vis_sun): 11.5 degrees. A texel lies stretched across such a surface by
+// 1 / N.L, five times and more, and a level finer (vsm_slope) brings it to no less than twice a
+// pixel: a thin caster's shadow down the wall is a row of steps as long, light between them, and
+// each level steps them elsewhere. A vine on Bistro's wall, grazed at 3 degrees, threw dashes of
+// light that came and went with the camera's distance, where a ray finds the wall in its shade.
+#define VSM_GRAZED 0.2
+
 // A camera-relative point in light space (before a level's frame).
 vec3 vsm_light_space(VsmViewRef r, vec3 p)
 {
@@ -238,6 +264,14 @@ vec2 vsm_level_xy(VsmViewRef r, int level, vec2 ls)
     return c;
 }
 
+// Whether a point whose vsm_q, times its slope, is `q` lies in its level's
+// band (VSM_BLEND_Q), where the shading blends with the next level: as much
+// larger, it would be the next level's. Never in the last level.
+bool vsm_blends_q(float q)
+{
+    return vsm_level_of_q(q * VSM_BLEND_Q) != vsm_level_of_q(q);
+}
+
 // A request for a level's window-relative pages lo to hi (at most one apart
 // each way), packed as level | lo.x << 4 | lo.y << 11 | (hi.x > lo.x) << 18
 // | (hi.y > lo.y) << 19.
@@ -262,6 +296,25 @@ uint vsm_request(VsmViewRef r, vec3 ls, float slope)
         if (all(greaterThanEqual(c, vec2(m))) && all(lessThan(c, vec2(last)))) {
             return vsm_pack_request(level, ivec2(floor(c - m)), ivec2(floor(c + m)));
         }
+    }
+    return VSM_NONE;
+}
+
+// The pages of the next coarser level that the shading of a point blends
+// with in its level's band (vsm_blends_q), as a packed request, or VSM_NONE:
+// outside the band, or where that level's window does not hold the point
+// with the margin (the shading then keeps its own level's light).
+uint vsm_request_coarser(VsmViewRef r, vec3 ls, float slope)
+{
+    const float q = vsm_q(r, ls) * slope;
+    if (!vsm_blends_q(q)) {
+        return VSM_NONE;
+    }
+    const int level = vsm_level_of_q(q) + 1;
+    const float m = r.v.margin;
+    const vec2 c = vsm_level_xy(r, level, ls.xy);
+    if (all(greaterThanEqual(c, vec2(m))) && all(lessThan(c, vec2(float(NPH_VSM_WINDOW) - m)))) {
+        return vsm_pack_request(level, ivec2(floor(c - m)), ivec2(floor(c + m)));
     }
     return VSM_NONE;
 }
@@ -444,7 +497,45 @@ ivec2 vsm_pool_base(uint page)
 // level without the page (the request took the next coarser one:
 // VSM_LEVEL_SLACK, the margin at a window's edge) passes to the next;
 // after three levels whose windows hold the point, or past the last, the
-// point is lit.
+// point is lit. In the upper part of its own level's range (VSM_BLEND_BAND)
+// the point's light is blended with the next level's, wholly the next's at
+// the boundary, where that level's page is there.
+//
+// One level's light at level-frame point `c` (the receiver's offset
+// included): false where its page is not valid.
+bool vsm_level_light(VsmViewRef r, int level, vec3 c, out float lit)
+{
+    lit = 1.0;
+    // The state alone: `vsm update` has dropped every entry whose page
+    // the window left, so a valid one holds this frame's page.
+    const ivec2 rel = ivec2(floor(c.xy));
+    const uint state =
+        VsmEntriesRef(r.v.entries).e[vsm_entry(level, rel + vsm_window(r, level))].state;
+    if ((state & (NPH_VSM_ENTRY_VALID | NPH_VSM_ENTRY_DIRTY)) != NPH_VSM_ENTRY_VALID) {
+        return false;
+    }
+    // The page's texels, the sample point kept half a texel inside so
+    // the bilinear footprint does not reach the next page in the pool.
+    const vec2 at = vec2(vsm_pool_base(state & NPH_VSM_ENTRY_PAGE)) +
+                    clamp((c.xy - vec2(rel)) * float(NPH_VSM_PAGE), vec2(0.5),
+                          vec2(float(NPH_VSM_PAGE) - 0.5));
+    // The four depths around it in one gather, each compared and
+    // weighted as bilinear filtering would: the comparison done here
+    // rather than by a depth-comparison sampler, which needs a depth
+    // image type the bindless array does not declare (SPIR-V's
+    // OpSampledImage over a Depth 0 image; lavapipe compares nothing).
+    // Gather order: (0, 1), (1, 1), (1, 0), (0, 0). The pool and its
+    // sampler are the same for every invocation.
+    const vec4 stored = textureGather(sampler2D(nph_textures_2d[r.v.pool_index],
+                                                nph_samplers[r.v.pool_sampler]),
+                                      at * r.v.pool_scale.xy, 0);
+    const vec2 f = fract(at - 0.5);
+    const vec4 open = vec4(lessThanEqual(vec4(c.z), stored));
+    lit = dot(open, vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y),
+                         (1.0 - f.x) * (1.0 - f.y)));
+    return true;
+}
+
 float vsm_shadow_light_space(VsmViewRef r, vec3 ls, float distance, vec3 nl)
 {
     // The offset in a level's frame is the same at every level: a texel is
@@ -457,40 +548,32 @@ float vsm_shadow_light_space(VsmViewRef r, vec3 ls, float distance, vec3 nl)
     // are not and the next levels are tried. The tries count from the distance's level, as before
     // the slope: the finer ones are over.
     const int base = vsm_level_of(r, distance, VSM_LEVEL_SLACK);
+    const float footprint = distance * sqrt(vsm_slope(nl, ls));
+    const int first = vsm_level_of(r, footprint, VSM_LEVEL_SLACK);
     int tries = 0;
-    for (int level = vsm_level_of(r, distance * sqrt(vsm_slope(nl, ls)), VSM_LEVEL_SLACK);
-         level < NPH_VSM_LEVELS && tries < 3; ++level) {
+    for (int level = first; level < NPH_VSM_LEVELS && tries < 3; ++level) {
         const vec3 c = vsm_level_coords(r, level, ls) + offset;
         if (!vsm_inside(c.xy)) {
             continue;
         }
         tries += level >= base ? 1 : 0;
-        // The state alone: `vsm update` has dropped every entry whose page
-        // the window left, so a valid one holds this frame's page.
-        const ivec2 rel = ivec2(floor(c.xy));
-        const uint state = VsmEntriesRef(r.v.entries).e[vsm_entry(level, rel + vsm_window(r, level))].state;
-        if ((state & (NPH_VSM_ENTRY_VALID | NPH_VSM_ENTRY_DIRTY)) != NPH_VSM_ENTRY_VALID) {
+        float lit;
+        if (!vsm_level_light(r, level, c, lit)) {
             continue;
         }
-        // The page's texels, the sample point kept half a texel inside so
-        // the bilinear footprint does not reach the next page in the pool.
-        const vec2 at = vec2(vsm_pool_base(state & NPH_VSM_ENTRY_PAGE)) +
-                        clamp((c.xy - vec2(rel)) * float(NPH_VSM_PAGE), vec2(0.5),
-                              vec2(float(NPH_VSM_PAGE) - 0.5));
-        // The four depths around it in one gather, each compared and
-        // weighted as bilinear filtering would: the comparison done here
-        // rather than by a depth-comparison sampler, which needs a depth
-        // image type the bindless array does not declare (SPIR-V's
-        // OpSampledImage over a Depth 0 image; lavapipe compares nothing).
-        // Gather order: (0, 1), (1, 1), (1, 0), (0, 0). The pool and its
-        // sampler are the same for every invocation.
-        const vec4 stored = textureGather(sampler2D(nph_textures_2d[r.v.pool_index],
-                                                    nph_samplers[r.v.pool_sampler]),
-                                          at * r.v.pool_scale.xy, 0);
-        const vec2 f = fract(at - 0.5);
-        const vec4 lit = vec4(lessThanEqual(vec4(c.z), stored));
-        return dot(lit, vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y),
-                             (1.0 - f.x) * (1.0 - f.y)));
+        // Its own level's, this far below the boundary to the next (below
+        // level 0's the footprint's logarithm is negative, and the band is
+        // its last part as any level's).
+        const float below =
+            float(first) - (log2(max(footprint * r.v.lod_scale, 1e-12)) - VSM_LEVEL_SLACK);
+        if (level == first && below < VSM_BLEND_BAND && first + 1 < NPH_VSM_LEVELS) {
+            const vec3 c1 = vsm_level_coords(r, first + 1, ls) + offset;
+            float coarser;
+            if (vsm_inside(c1.xy) && vsm_level_light(r, first + 1, c1, coarser)) {
+                lit = mix(coarser, lit, clamp(below / VSM_BLEND_BAND, 0.0, 1.0));
+            }
+        }
+        return lit;
     }
     return 1.0;
 }

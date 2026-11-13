@@ -91,11 +91,12 @@ void main()
     o.row1 = vec4(inst.transform.row1.xyz * s, dot(inst.transform.row1.xyz, off) + t.y);
     o.row2 = vec4(inst.transform.row2.xyz * s, dot(inst.transform.row2.xyz, off) + t.z);
     o.index_and_mask = i | (0xFFu << 24u);
-    // An instance with an alpha-tested material, on any of its slots.
+    // An instance with an alpha-tested or a blended material, on any of its slots: the rays
+    // put its triangles to their materials (rt_mask.glsl).
     bool masked = false;
     MaterialsRef materials = MaterialsRef(view.v.materials);
     for (uint slot = 0u; slot < inst.material_count; ++slot) {
-        masked = masked || materials.m[vis_instance_material(view, inst, slot)].alpha_mode == 1u;
+        masked = masked || materials.m[vis_instance_material(view, inst, slot)].alpha_mode != 0u;
     }
     o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL | (masked ? RT_INSTANCE_NO_OPAQUE : 0u);
     o.blas = mesh.blas;

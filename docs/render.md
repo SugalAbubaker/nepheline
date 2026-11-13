@@ -292,7 +292,13 @@ of glTF 2.0:
   environment's ("Global illumination").
 - **Alpha:** MASK discards below the cutoff in its own shader variant (so
   the opaque variant keeps early depth testing). BLEND composites "over"
-  without writing depth. Double-sided materials flip the whole tangent
+  without writing depth, its colour multiplied by its alpha in the shader. Glass
+  (`NphRenderMaterialDesc.transmissive`) is a blended material whose alpha is the
+  share its body keeps: what it shades, its reflection with it, is added whole,
+  and what is behind it shows less by that share and by what its surface turns
+  back ([ADR-0094](adr/0094-glass-blended-casters-and-the-grazing-sun.md)). A
+  blended surface casts no shadow in the sun's map and stops no ray: glass, and
+  a decal a hair before its wall. Double-sided materials flip the whole tangent
   frame on back faces.
 - **Unlit** materials (`KHR_materials_unlit`) write their colour as
   authored, outside exposure.
@@ -670,7 +676,12 @@ visibility up once per point, before the light loop (inside it, the
 lookup's registers would add to the loop's): the resolution-matched level,
 made finer by the sun's slope on its geometric normal as the requests make
 it (ADR-0080), and biased by 0.001 octaves to the finer side, so that it
-reads the level the request took or the one finer and passes to the next;
+reads the level the request took or the one finer and passes to the next
+(within a quarter of a level below its boundary it reads the next level's
+page too and blends the two, wholly the coarser's at the boundary, whose
+pages the requests ask for there: a shadow's edge on a wall the sun grazes
+no longer jumps as the camera's distance crosses the boundary,
+[ADR-0093](adr/0093-what-popped-and-what-blinked.md));
 up to three levels from the distance's whose windows hold the point, until
 one holds its page (lit past those), the finer ones before them over.
 The point moves off its surface along its geometric normal, turned to the
@@ -757,6 +768,31 @@ texels do, so the march covers the same few of them everywhere.
   The resolves take it with the value they fetch anyway, and it multiplies the
   sun's visibility. No memory, no fetch, no descriptor. It is not filtered: the
   sun's penumbra over these lengths is under a pixel.
+- **A view may ask for the sun's shadows by rays** (`NphRenderView.sun_rays`,
+  `r.sun_rays`, off by default; `ao_pass.glsl` `AO_RAYS`, the pass as `ao_rt.comp`;
+  [ADR-0094](adr/0094-glass-blended-casters-and-the-grazing-sun.md)). The map's
+  shadow of what stands close to a surface is the march's to find, its texels lie
+  stretched across a surface the sun grazes, and each of its levels draws a thin
+  caster's shadow otherwise. Where such a view's frame traces for the radiance
+  cache or a light, every pixel the sun faces traces the sun instead of marching, a ray to
+  its centre; the denoise gathers the rays of the 5 x 5 pixels about each pixel
+  on its plane into the sun's light there: an edge two pixels soft, the same in
+  every frame. It lies beside the occlusion in the image (R8G8; 255: none), and
+  where it is there the resolve does not read the map.
+  - *A pixel that shows what stands in for finer geometry* (a coarser level of
+    its mesh, voxels, a cell's proxy: `NPH_VIS_CLUSTER_COARSE`, which the
+    meshlet cull sets and the pass reads through the visibility buffer) finds
+    the mesh itself first, along its own ray within the view's error either
+    side of what is shown, and its ray to the sun starts there: the rays' scene
+    holds the meshes' level 0, and a ray from a level's surface under a fold the
+    level had smoothed away met the fold.
+  - *A ray starts off its surface by 2^-14 of the point's distance from the
+    camera* (`AO_RAY_SLACK`, at least an eighth of a millimetre): the point
+    comes from a depth, and the rays' own offset counts units in the last place
+    of coordinates about their scene's anchor, which may be far finer.
+  - 1.3 to 4.2 ms of rays a frame on the reference views with a sun, which is
+    why it is an option and the map the default (the ADR's "Decided"):
+    `--sun-rays` in `render_perf` and `scene_viewer`.
 
 Against the rays (`--rt-shadows`, the truth of what the sun reaches) and at
 what cost: [ADR-0076](adr/0076-contact-shadows.md).
@@ -862,6 +898,14 @@ no vertex at the neighbour, so it takes one added there
 attributes, so that its normal and with it the hard edge stay as they were, and
 its texture coordinates carried from its largest triangle at the corner along
 that triangle's plane, so that its texture does not smear (ADR-0069).
+
+**Outlines.** An open edge's quadric holds the plane through it square to its
+triangle, so a border keeps its shape (Garland & Heckbert). So does an edge whose
+other triangles all fold back on the triangle, within 10 degrees on its side of the
+edge: a sheet modelled as two faces back to back has no open edge, and its faces'
+one plane lets a corner go along an edge at no error, the sheet with it a level
+later ([ADR-0093](adr/0093-what-popped-and-what-blinked.md): a banner of the
+city's, gone at 30 m).
 
 **Borders.** A collapse also costs how far it moves the borders of the class that
 goes: each of its seams and open edges comes to run from the neighbour, and the
@@ -2135,25 +2179,65 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
   the tonemap: a full-screen fragment pass writing the display colour and
   the next history as two colour attachments. The history is two images
   of the HDR format taken in turn, stochastically rounded with noise that
-  moves every frame.
+  moves every frame, each with a **state** image beside it (R8G8B8A8): a
+  pixel's unrest, the frames its history holds, and its surface's key
+  (below).
 - **Motion.** The nearest surface in the 3 × 3 neighbourhood: four gathers
   of the visibility buffer's depths through its R32G32_UINT sampled view
   (`NphGpuImageDesc.sampled_format`), then one fetch of its record. Its
   point goes from this frame's clip space to the previous frame's without
-  its jitter (`vis_previous_uv`, which the motion blur shares): through
+  its jitter (`vis_previous_point`, and `vis_previous_uv`, which the motion
+  blur shares): through
   one matrix for a still surface (`NphVisViewData.reproject`: the previous
   view-projection, the camera's move, this frame's inverse), which leaves
   the sky to the camera's rotation, and through the previous transform for
   an instance that moved (`NPH_VIS_INSTANCE_MOVED`, which the scatter pass
   keeps and the meshlet cull copies to the cluster).
 - **The blend.** The 3 × 3 neighbourhood filtered with a Gaussian of a box
-  filter's spread under the jitter; the history read by five Catmull-Rom
-  taps (Jimenez 2016), rescaled by the exposure's change, and clipped in
+  filter's spread under the jitter; the history read by five taps of a cubic
+  a little sharper than Catmull-Rom's (Jimenez 2016; Keys 1981, tension
+  -0.7), rescaled by the exposure's change, and clipped in
   YCoCg toward the centre of the neighbourhood's variance box within its
   extremes (Salvi 2016; Pedersen 2016), the box at least 1/32 of its luma
   wide (the history's own rounding); weights divided by 1 + luma (Karis
-  2014), the current frame's 1/16 still and up to 1/4 at a pixel a frame of
-  motion.
+  2014), the current frame's 1/32 still and up to 1/4 at a quarter of a pixel a
+  frame of motion, growing with the square of the speed (what a fractional read
+  of the history softens does, and a history of 1 / weight frames is read that
+  often: grown evenly, a ring of slow pixels about where the view headed was
+  softer than the rest, ADR-0094), and never under the frame's share of the
+  frames the history holds. A pixel whose history did not move takes a box of
+  three deviations, not held to the extremes
+  ([ADR-0092](adr/0092-light-off-what-rays-meet-and-a-still-image.md)):
+  detail finer than a pixel, a far building's window frames, lies outside
+  the extremes of every frame whose samples miss it, and a tight box
+  clipped it away for the next frame to find again. It also keeps its
+  **unrest** (`taa_unrest`; an R8 image beside each history): how far its
+  frames' samples have lain from its history lately, as a share of their
+  light, by which the box is three times wider
+  ([ADR-0093](adr/0093-what-popped-and-what-blinked.md)). A pattern at the
+  pixels' own pitch (a fence's bars, a far front's windows) puts a whole
+  neighbourhood on a bar in one frame and between two in the next: flat
+  either way, its box a point, and the history followed each frame. Only
+  where the history moved less than 1/16 of a pixel: a moving surface
+  leaves none, so nothing trails it.
+- **In motion**
+  ([ADR-0095](adr/0095-a-view-in-motion-as-sharp-as-standing.md)). A history
+  read at a fractional offset loses a little of its finest detail at every
+  read, and a view in motion was softer than the same view standing by a
+  fifth to a third of it, most where its pixels crept, coming back over 30
+  frames after a stop. Three things hold it: the sharper cubic and the moving
+  weight from a quarter of a pixel a frame (above); **the history's surface**:
+  each history pixel keeps its surface's distance (`taa_depth_key`, the
+  nearest about it, in the state image), and a pixel whose own point a frame
+  ago lies within the keys of the four history pixels about it
+  (`taa_history_valid`) takes the still pixel's wide box however it moved,
+  which keeps what the filter restores, while what a nearer surface has just
+  uncovered takes the tight one; and **the history's count**
+  (`taa_count_weight`): a frame weighs no less than its share of the frames
+  the history holds, 4 after a motion, so that a view that stops is a mean of
+  its frames, sharp again in a few, until the still pixel's 1/32. In motion
+  the finest detail is now 0.89 to 0.94 of standing at every speed and the
+  next within 5 %; what is left wants a history of finer pixels (the ADR).
 - **The history's life.** It continues only from the frame just before,
   resolved temporally into the same extent, without
   `NphRenderView.camera_cut` (which the runtime sets when it switches
@@ -2163,7 +2247,7 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
 
 Against the reference renderer at 4 × 4 the resolution, a still view
 converges to 0.39 levels of mean error (one sample per pixel: 1.22), a
-panning camera holds 0.65 (1.24), and a moving cube 0.33 (0.62), with no
+panning camera holds 0.60 (1.24), and a moving cube 0.31 (0.62), with no
 trail beyond an edge's own pixel. The pass costs 0.75 ms in the 4K field
 against the tonemap's 0.11 ms, over the §10.4 line for TAA, post, and the
 tonemap together; ADR-0034 records why, and what can bring it down.
@@ -2382,44 +2466,97 @@ reference renderer has none. The runtime turns it on with `r.gi`.
 
 - **Cells** (`gi_common.glsl`): a cube of the world at a level the
   point's distance from the camera chooses, 1/96 to 1/48 of that distance
-  across (23 to 47 pixels at 4K), for the surfaces in it whose geometric
-  normals face one octant, so the two sides of a wall are cells apart.
-  Each level's camera cell is worked out in double precision and the
-  shaders add the camera-relative point to it, so cells stay put in the
-  world at any distance from the origin.
-- **The table:** `gi_cells` slots (2^18: 14 MB) in buckets of 16; a cell's
+  across (23 to 47 pixels at 4K) and never under 4.2 cm (level 9, for all
+  within 4 m: [ADR-0091](adr/0091-radiance-cache-in-motion.md)), for the
+  surfaces in it whose geometric normals face one octant, so the two sides
+  of a wall are cells apart. Each level's camera cell is worked out in
+  double precision and the shaders add the camera-relative point to it, so
+  cells stay put in the world at any distance from the origin.
+- **The table:** `gi_cells` slots (2^18: 34 MB) in buckets of 16; a cell's
   key (its coordinates, level, and octant) hashes to a bucket and a 32-bit
-  fingerprint that the slot holds, claimed by compare-and-swap.
+  fingerprint that the slot holds, claimed by compare-and-swap. The slot
+  keeps the whole key too, from which the filter finds the cell's
+  neighbours. Where a new cell's bucket is full, the cell no sample has
+  reached for longest gives its slot up, if it had none in the last frame
+  (ADR-0091): a camera at a run leaves cells behind faster than their age
+  frees them, and a full table had no slot for what the frame sees. The
+  samples that still find none are counted (`vis_gi_dropped`).
 - **`gi update`** (`gi_update.comp`): within `gi_rays` (65,536) a frame,
   one ray from a random pixel of each block of the frame (12 × 12 pixels
   at 4K): the surface point rebuilt as the resolve rebuilds it (a voxel
   pixel's as the voxel resolve finds it, "Voxels", in a variant
   specialised for frames that may draw voxels), its cell claimed, one
   cosine-distributed ray traced. A miss adds the
-  environment's radiance; a hit its emission and its albedo times the
+  environment's radiance; a hit its emission and its base colour times the
   irradiance there, the sun's (shadowed by a second ray where it casts
-  shadows) and the cache's own (the environment's where it has none), so
-  each frame adds a bounce. Hits within 0.95 of the ambient occlusion's
-  radius count nothing: that range is the occlusion's. A cell the update
-  makes starts with the light of the cell around the same point a level up
-  or down, whichever holds more samples, counted as up to 16 of them
-  ([ADR-0087](adr/0087-motion.md); `gi_seed`): as the camera moves, a
-  surface crosses into the next level of cells, which hold nothing there
-  yet, and the level it leaves held its light a moment ago.
+  shadows) and the cache's own, so each frame adds a bounce. (A metal's
+  base colour too, ADR-0092: it reflects that share as a lobe, and sent on
+  evenly it is the same light in all. Counted by a metalness factor alone,
+  a city whose materials keep their metalness in a texture bounced no
+  light.) Hits within
+  0.95 of the ambient occlusion's radius count nothing: that range is the
+  occlusion's. Every sample is added to its cell and to its cell's
+  **parents**, the cells of the next four levels around the point
+  ([ADR-0090](adr/0090-radiance-cache-filter.md), ADR-0091): twice to
+  sixteen times as wide, with four to 256 times the samples a frame (512
+  at most from the second level up), so that some cell around every point
+  knows its light within a frame or two of the frame coming to it.
+- **What a ray meets unseen** (ADR-0090): the cache holds cells where the
+  frames' pixels have put samples, so a hit behind the camera, or on a
+  surface seen at so low an angle that its samples lie cells apart, may
+  have none (the hit looks for its cell's parent first). The ray then goes
+  on a bounce further for a sample of what the hit receives, and the
+  sample is kept in a cell made at the hit, at the parent's level, which
+  the next ray to land there finds with light; a cell whose last sample is
+  8 frames old gets one the same way. (Taken for open to the whole sky, as
+  such hits were, the unseen side of a room lit what faced it: under a
+  roof walled on three sides, grey surfaces got eleven times their
+  light.) The reflections' rays still take the sky for a hit the cache
+  knows nothing of.
 - **`gi resolve`** (`gi_resolve.comp`): every slot blends its frame's
-  samples into its irradiance over its history, or ages, and is freed after
+  samples into its mean over its history, or ages, and is freed after
   240 frames without any. A cell's history holds up to 1,024 samples, over
-  which a light that holds still is averaged: the estimate's wander, which
-  shows as the indirect light's noise, is about 1 / sqrt(2 h) of the
-  samples' spread for a history of h, whatever the rays a frame
-  ([ADR-0084](adr/0084-cache-history.md)). A light that changes is told
-  from that noise by the cell's moments: its light's recent mean, over
-  about 32 samples, and a sample's variance, from the frames' means. Where
-  the recent mean leaves the cell's by more than 4 of its own deviations
-  (and 2 % of the cell's luminance), each frame quarters the history, to
-  no fewer than 32 samples, so the cell follows within a few frames. The
-  test waits for the variance to have seen 16 frames; until then a young
-  cell's history is its samples. A reflection cell's (below) holds 128.
+  which a light that holds still is averaged
+  ([ADR-0084](adr/0084-cache-history.md)), or 64 frames' samples where
+  those are more (the parents', ADR-0091). A light that changes is told
+  from the samples' noise by the cell's moments: its light's recent mean,
+  over about 32 samples, against its mean. Where the two lie further apart
+  than 4 deviations of the recent mean (and 2 % of the cell's luminance),
+  each frame quarters the history, to no fewer than 32 samples. The
+  deviation is from the largest of three variances (ADR-0090): the recent
+  one, one over the mean's own history, and the one the cell's parents'
+  samples measure, pooled, which the filter leaves beside the cell's key;
+  and a rise must be further out the fewer the paths that carry the light
+  (a mean of few large samples is skewed). Judged by the recent variance
+  alone, a cell lit by few paths took each path it caught for a change:
+  where 2 % of the sky is open the cells' means were 15 % too bright and
+  36 % out. The test waits for the variance to have seen 16 frames. A
+  reflection cell's history (below) holds 128.
+- **`gi filter`** (`gi_filter.comp`, ADR-0090, ADR-0091): what the frame
+  looks up is each cell's light as its own mean, its six face neighbours'
+  and its parents' make it out together,
+  f = (a m + b P + sum of g f_j) / (a + b + sum of g): a Gaussian Markov
+  random field's posterior mean, one damped Jacobi step a frame from what
+  the cell was held to be last frame. A frame's samples so move what a
+  cell shows by their share of what is known of its light, and a camera
+  at a run, whose every near cell is new, sees the light hold between
+  frames; where the resolve's test finds the light changed, what the cell
+  is held to be goes with its mean for that frame and the six after. `a`
+  is the cell's samples over the count that would leave its light 2 % out,
+  given how its parents' samples spread: a cell whose samples agree keeps
+  its light, one lit by few paths takes its neighbourhood's, from three
+  cells away at most. `g` is 1 unless the two means differ by more than 3
+  of their difference's deviations. The weights do not follow a cell's own
+  luck and are the same from either side of a pair. A cell with fewer
+  than 256 samples leans on its parents' own means P for what it lacks of
+  them (b): each level above gives its means as far as its cells' samples
+  tell their light and leaves the rest to the level above it, so a surface
+  the frame has just come to is lit at once by the cells wide enough to
+  have had samples, and the nearer levels take over within frames. Through
+  the last eighth of its level's distances what the frame looks up of a
+  cell goes over to what its parents are held to be, so that no step marks
+  where a level ends. `NphRenderView.gi_smooth` (on by default) turns the
+  filter's work off and shows the cells' own means.
 - **The lookup:** the resolve, specialised on the cache, blends the four
   cells around the pixel's point as soon as it has it
   ([ADR-0085](adr/0085-cache-blend.md)): across the axis the surface
@@ -2427,28 +2564,31 @@ reference renderer has none. The runtime turns it on with `r.gi`.
   centres, each cell in the layer the surface's plane crosses at its
   centre, and each weighted by its trust; a cell the cache does not hold
   (past the surface's edge) drops out and leaves its weight to the others.
-  The light is then smooth across the cells' edges and the same every
-  frame, where a random point of the cell each frame (until ADR-0085)
-  made the cells' differences a noise for temporal anti-aliasing to
-  average. The shading takes the blend's irradiance wherever a cell around
-  the point holds a sample, the environment's only where none does
-  (ADR-0087: a trust that grew with a cell's samples to 16 had the
-  environment's light make up the rest, many times what arrives in shade,
-  so new cells glowed while the camera moved). Within the ambient
-  occlusion's radius the occlusion darkens it as it darkens the
-  environment's.
+  Where none of the four is held to be anything yet (a surface the frames
+  have just come to), the lookup blends the next level's four, their
+  parents, the same way, and so on up the four levels above (ADR-0090,
+  ADR-0091); the shading takes the environment's light only where those
+  hold nothing either
+  ([ADR-0087](adr/0087-motion.md)). Within the ambient occlusion's radius
+  the occlusion darkens it as it darkens the environment's.
 
-Against ground truths cast by rays, an open ground under a uniform sky
-gets the sky's irradiance exactly, a box on the ground occludes the sky
-within a thirteenth of how much the truth does, and a sunlit wall reflects
-light onto the ground within a ninth of the truth (`test_gi.c`). A
-half-shaded pixel's light wanders by a fifth of what it did with the
-128-sample history and the jitter, and a doubled sky is followed 73 % of the way in 4 frames
-and 97 % in 16 (the 128-sample history's: 47 % and 88 %). Blending four
-cells costs the resolve 21 to 42 % more than one did, 0.20 to 0.55 ms a
-frame at 2560 × 1440 (ADR-0085; Bistro's small surfaces the most). At 4K
-it adds 0.20 to 0.27 ms under the sky or the sun, and 0.36 to 0.41 ms at
-night among many lamps (ADR-0039).
+Against ground truths cast by rays (`test_gi.c`), an open ground under a
+uniform sky gets the sky's irradiance exactly; a box on the ground
+occludes the sky within a twentieth of how much the truth does; a sunlit
+wall reflects light onto the ground within an eleventh of the truth; under
+a roof that leaves 2 % of the sky open the light is within 1 % on average
+and 7 % a pixel; and under the same roof with surfaces that reflect 0.7,
+all bounces followed on the CPU, within 8 % on average. A view never seen
+before has its shade within 8 % of the settled view's in its first frame.
+A doubled sky is followed 69 to 75 % of the way in 4 frames and 97 % in
+16. Through Bistro's arch and back at 16 m/s, two frames drawn at one
+pose differ by 0.2 to 0.6 of an 8-bit level on average, as with the cache
+off (0.5 to 9 with ADR-0090's filter alone, and up to 15 before it), and
+every sample finds a slot (2.3 million of the path's 220 million did not
+before the eviction). Blending four cells costs the resolve 0.20 to 0.55 ms a
+frame at 2560 × 1440 (ADR-0085); the filter, the rays that go on, the
+parents' samples and the lookup's further tries 0.6 to 0.9 ms more
+(ADR-0090, ADR-0091).
 
 ### Reflections
 
@@ -2463,6 +2603,8 @@ split-sum's specular multiplies is, by the surface's roughness:
   reservoirs give ("Many lights"): that share of the cell stays out, and the rest is taken
   ([ADR-0078](adr/0078-local-lights-shadows.md)).
 - **Smooth** (under 0.25): by default a ray a pixel every frame, gathered with its neighbours'
+  (from roughness 0.1 the ray gives less and less of what the surface reflects and its irradiance
+  cell's light the rest, none at 0.25: ADR-0092)
   ("A ray a pixel", below; [ADR-0089](adr/0089-reflections-a-ray-a-pixel.md)). Or, with
   `NPH_RENDER_REFLECTIONS_CACHE`, a reflection cell, of a table of its own (`gi_cells` slots too, freed
   16 frames after a pixel last looked it up, ADR-0087): the same grid four times finer, for each direction of an octahedral map
@@ -2510,7 +2652,8 @@ every step of the camera rearranges; and a table of them fills while it moves. A
 every frame has neither fault:
 
 - **`reflect rays`** then gives every listed tile its turn every frame. Each smooth pixel's ray takes a sample
-  of its lobe from interleaved gradient noise moved each frame (Jimenez 2014), and leaves its light, how far
+  of its lobe from interleaved gradient noise (Jimenez 2014) moved each frame by the next step of the R2
+  sequence (Roberts 2018; ADR-0092), so a pixel's rays over the frames cover its lobe evenly, and leaves its light, how far
   it went and how far the pixel is in an image of its own (`gi_reflect_light_pack`, 8 bytes a pixel); a pixel
   of the tile without a ray leaves a zero. What the ray meets is textured at the width the ray stands for
   there (`hit_radiance`'s `footprint`), not at a cell's.
@@ -3152,7 +3295,11 @@ and synchronisation-validation gate:
   pixel's, nothing two pixels beyond an edge); a cut giving, bit for bit,
   the frame without history in the same jitter phase; the history's
   continuity across modes and extents; debug views and the reference never
-  jittered; an exposure change rescaling the history.
+  jittered; an exposure change rescaling the history; a view in motion
+  keeping bars 3 pixels apart at half their contrast or more, creeping and
+  fast; a view that stops most of the way back to its settled image in 8
+  frames; and the wall a nearer cube uncovers as the camera passes taking
+  none of the cube.
 - **Depth of field** (`test_dof.c`), against the average of 64 frames
   through points spread over the lens: a box behind the focus, a near box
   over it, the same on the reference renderer, and a temporally resolved

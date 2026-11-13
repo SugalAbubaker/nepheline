@@ -1781,6 +1781,86 @@ NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
     NTEST_EXPECT_TRUE(d.mean <= 1.5F);
 }
 
+// A level of an sRGB target as linear light.
+static f32 level_linear(u8 v)
+{
+    const f32 c = (f32)v / 255.0F;
+    return c <= 0.04045F ? c / 12.92F : nph_f32_pow((c + 0.055F) / 1.055F, 2.4F);
+}
+
+// A pane of glass (NphRenderMaterialDesc.transmissive) before a glowing wall, in the reference
+// and the production path: the wall shows through it by what the pane lets through, and the
+// pane's own light is added whole, where a plain blended pane of the same alpha (a coverage)
+// shows a tenth of its own. Head on the glass turns back 4 % of what is behind it.
+NTEST_F(Vis, glass_shows_what_is_behind_it_and_adds_its_own_light_whole)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 1.0F);
+    md.emissive = nph_vec3(8.0F, 8.0F, 8.0F);
+    NphRenderMaterial glowing;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &glowing), NPH_RESULT_OK);
+    // The panes: nothing of their own but a glow, a tenth of what is behind them kept.
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 0.1F);
+    md.roughness = 1.0F;
+    md.emissive = nph_vec3(4.0F, 4.0F, 4.0F);
+    NphRenderMaterial covering;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &covering), NPH_RESULT_OK);
+    md.transmissive = 1;
+    NphRenderMaterial glass;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &glass), NPH_RESULT_OK);
+    // Planes face +Y; a quarter turn about X faces the camera on +Z. The wall fills the view;
+    // the pane, half a metre nearer, covers its middle.
+    NphRenderTransform t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, -0.5),
+                                                         nph_quat_from_rotation_x(0.5F * NPH_PI),
+                                                         nph_vec3(8.0F, 1.0F, 8.0F));
+    const NphRenderInstance wall = instance(f, plane, glowing, t);
+    t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0),
+                                      nph_quat_from_rotation_x(0.5F * NPH_PI), nph_vec3_one());
+    const NphRenderInstance panes[2] = {instance(f, plane, covering, t),
+                                        instance(f, plane, glass, t)};
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 4.0F;
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3_zero();
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE; // the target's levels are the light's
+    static u8 image[PIXELS];
+    const u64 centre =
+        ((u64)(TEST_TARGET_SIZE / 2U) * TEST_TARGET_SIZE + TEST_TARGET_SIZE / 2U) * 4U;
+    for (u32 path = 0; path < 2U; ++path) {
+        v.pipeline = path == 0U ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
+        // The wall alone (the panes hidden), a pane alone before nothing, and both.
+        f32 seen[2][3];
+        for (u32 kind = 0; kind < 2U; ++kind) {
+            for (u32 scene = 0; scene < 3U; ++scene) {
+                nph_render_instance_set_hidden(f->renderer, wall, scene == 1U);
+                nph_render_instance_set_hidden(f->renderer, panes[kind], scene == 0U);
+                nph_render_instance_set_hidden(f->renderer, panes[kind ^ 1U], true);
+                (void)render_into(f, &v, 2U, image);
+                seen[kind][scene] = level_linear(image[centre]);
+            }
+        }
+        NTEST_LOG("%s: the wall %.4f; a covering pane alone %.4f, before the wall %.4f; glass "
+                  "alone %.4f, before the wall %.4f",
+                  path == 0U ? "reference" : "production", (f64)seen[0][0], (f64)seen[0][1],
+                  (f64)seen[0][2], (f64)seen[1][1], (f64)seen[1][2]);
+        const f32 wall_light = seen[0][0];
+        NTEST_ASSERT_TRUE(wall_light > 0.05F && wall_light < 0.9F);
+        // A coverage of a tenth: a tenth of the pane's glow, over nine tenths of the wall.
+        NTEST_EXPECT_NEAR_F32(seen[0][2], seen[0][1] + 0.9F * wall_light, 0.03F * wall_light);
+        // Glass: its glow whole, ten times the covering pane's, over the wall less the tenth
+        // its body keeps and the 4 % its surface turns back.
+        NTEST_EXPECT_NEAR_F32(seen[1][1], 10.0F * seen[0][1], 0.1F * seen[1][1]);
+        NTEST_EXPECT_NEAR_F32(seen[1][2], seen[1][1] + 0.9F * 0.96F * wall_light,
+                              0.03F * wall_light);
+    }
+}
+
 // Blended surfaces in front of opaque ones and behind them: the production
 // path has no depth attachment for them, and their fragment stage tests the
 // visibility buffer's depth itself, where the reference tests a depth

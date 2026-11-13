@@ -136,6 +136,7 @@ typedef struct EngineCvars {
     NphCvar dof;                   // r.dof
     NphCvar ao;                    // r.ao
     NphCvar contact_shadow;        // r.contact_shadow
+    NphCvar sun_rays;              // r.sun_rays
     NphCvar reflections;           // r.reflections
     NphCvar gi;                    // r.gi
     NphCvar many_restir;           // r.many_restir
