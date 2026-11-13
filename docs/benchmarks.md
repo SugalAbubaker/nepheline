@@ -497,14 +497,23 @@ the 99th percentile; ADR-0059 has every view) with
 again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
 more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
-spread). `benchmarks/reference_budgets.txt` is generated from
-`reference_scenes-2026-11-10-1440p`, Bistro, the city and the interior at the
-size they gate at (ADR-0082), a process a scene as the nightly runs them, and
-the temporal resolve's rows again from `reference_scenes-2026-11-10-agx`, with
-AgX the default tonemapper (ADR-0083), and the resolve's, the transparent
-pass's and the frames' from `reference_scenes-2026-11-11-gi-blend`, with the
-radiance cache's blended lookup (ADR-0085). The landscape has no rows there:
-the nightly does not run it.
+spread). A run started while the panel is idle measures as one with the
+editor minimized: with nothing redrawing, the same build of Bistro had no
+frame so paused, where 22 to 28 of each view's 239 had with a tool running
+in the panel, the frames' medians equal (2026-11-13: the street's 99th
+percentile 6.14 ms against 6.67, the terrace's 6.80 against 7.46). The
+rounds of 2026-11-10 and 2026-11-11 were measured with the panel busy:
+their means stand about 2 % high and their 99th percentiles 0.4 to 1.0 ms.
+`benchmarks/reference_budgets.txt` is generated from
+`reference_scenes-2026-11-13-adr-0095`, every row afresh: Bistro, the city
+and the interior at the size they gate at (ADR-0082), a process a scene as
+the nightly runs them, the mean of two rounds with the desktop still, with
+the image work of ADR-0090 to ADR-0095. So measured, sixteen of the eighteen
+views hold the gate's 6.94 ms at their 99th percentiles; Bistro's street
+turn (7.39 ms) and the city's rooftop (8.72) do not. `render_budgets.txt`'s
+rows for the scenes it budgets are from `render_perf-2026-11-13-adr-0095`,
+measured the same way. The landscape has no rows there: the nightly does
+not run it.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
