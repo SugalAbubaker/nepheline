@@ -79,6 +79,17 @@ NphVec3 nph_render_ref_sh9_irradiance(const NphVec3 sh[9], NphVec3 n);
 // sphere is kept when it is >= 0.
 f64 nph_render_ref_vis_frustum_margin(const NphVec4 planes[5], NphVec3 c, f32 r);
 
+// vis_box_in_frustum: the least over the five planes of dot(n, c) + d +
+// dot(|n|, e), for a box of centre `c` and half extents `e`. The box is kept
+// when it is >= 0.
+f64 nph_render_ref_vis_box_margin(const NphVec4 planes[5], NphVec3 c, NphVec3 e);
+
+// vis_blend_key, bit for bit: the key that orders blended surfaces by a
+// position's z in view space (which looks down -Z), the farthest first by
+// the least key. The reference renderer orders its blended draws by it too
+// (frame.c).
+u32 nph_render_ref_vis_blend_key(f32 view_z);
+
 // vis_cone_culled with the camera at the origin: dot(apex, axis) minus
 // cutoff * |apex|. Every triangle of the meshlet faces away (culled) when it
 // is >= 0 and the apex is not at the camera.

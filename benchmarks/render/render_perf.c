@@ -264,7 +264,7 @@
 
 #define EXIT_SKIPPED   77
 #define MAX_FRAMES     512U
-#define MAX_RESULTS    4096U // the synthetic scenes write some 2,300
+#define MAX_RESULTS    8192U // the synthetic scenes write some 4,500
 #define MAX_PASS_STATS 96U
 #define WARMUP_FRAMES  24U
 #define WARMUP_NS      (500ULL * 1000000ULL) // and at least this long
@@ -302,12 +302,13 @@ typedef enum SceneKind {
     SCENE_FIELD,
     SCENE_LOD,     // the terrain and its rocks, with levels of detail
     SCENE_FOLIAGE, // the terrain and shrubs of needles, with voxel levels
+    SCENE_GLASS,   // a wall of blended panes over the ground (ADR-0097)
 } SceneKind;
 
 typedef struct SceneDef {
     const char *name;
     SceneKind kind;
-    u32 count;  // grid: cubes; field: spheres
+    u32 count;  // grid: cubes; field: spheres; glass: panes
     u32 lights; // field: local lights at night (0: daylight)
     NphRenderPipeline pipeline;
     u32 width;
@@ -446,6 +447,19 @@ static const SceneDef g_scenes[] = {
      3840U, 2160U, 0U, SHADOWS_SUN_TURNING, POST_DEFAULT},
     {"foliage_shadows_sun_4k_triangles", SCENE_FOLIAGE, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION,
      3840U, 2160U, 0U, SHADOWS_SUN_TURNING, POST_NO_VOXELS},
+    // Blended surfaces (ADR-0097): the CPU's cost of a frame is the same for 256 panes as for
+    // 4096, where the reference renderer's grows with them; the GPU orders them each against
+    // every other (gpu.vis_blend_sort). The last asks for their pages of the sun's shadow map.
+    {"glass_1k_reference", SCENE_GLASS, 1024U, 0U, NPH_RENDER_PIPELINE_REFERENCE, 512U, 512U, 0U,
+     SHADOWS_NONE, 0},
+    {"glass_256_production", SCENE_GLASS, 256U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_NONE, 0},
+    {"glass_1k_production", SCENE_GLASS, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_NONE, 0},
+    {"glass_4k_production", SCENE_GLASS, 4096U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_NONE, 0},
+    {"glass_1k_shadows", SCENE_GLASS, 1024U, 0U, NPH_RENDER_PIPELINE_PRODUCTION, 512U, 512U, 0U,
+     SHADOWS_SUN, 0},
 };
 
 // Reference scenes: a manifest (benchmarks/scenes/<scene>.json) and its
@@ -582,6 +596,9 @@ typedef struct Ctx {
     NphRenderMesh rock;
     NphRenderMesh shrub;           // with voxel levels
     NphRenderMesh shrub_triangles; // without
+    // The wall of glass's pane and its tints, made the first time it runs.
+    NphRenderMesh pane;
+    NphRenderMaterial glass[8];
     NphRenderMaterial materials[4];
     NphRenderLight sun;
     NphRenderLightDesc sun_desc;
@@ -1157,9 +1174,63 @@ static NphResult sun_shadows(Ctx *ctx, const SceneDef *s, const NphRenderView *v
     return NPH_RESULT_OK;
 }
 
+// The wall of glass: panes 0.9 m across on a 1 m grid in a wall the camera faces, each a
+// tint of eight and up to 2 m before or behind the wall, so that the order is no one's
+// order of making; over the ground.
+static NphResult build_glass(Ctx *ctx, const SceneDef *s, NphRenderView *view, u32 side)
+{
+    if (ctx->pane.value == 0U) {
+        NphRenderMeshData data;
+        NPH_TRY(upload_mesh(
+            ctx, nph_render_primitive_plane(nph_allocator_system(), 1.0F, 1U, 1.0F, &data), &data,
+            "pane", &ctx->pane));
+        for (u32 i = 0; i < 8U; ++i) {
+            NphRenderMaterialDesc md;
+            nph_render_material_desc_default(&md);
+            md.base_color =
+                nph_vec4(0.3F + 0.6F * (f32)(i & 1U), 0.3F + 0.6F * (f32)((i >> 1U) & 1U),
+                         0.3F + 0.6F * (f32)((i >> 2U) & 1U), 0.3F);
+            md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+            md.double_sided = 1;
+            md.roughness = 0.2F;
+            NPH_TRY(nph_render_material_create(ctx->renderer, &md, &ctx->glass[i]));
+        }
+    }
+    NPH_TRY(add_instance(ctx, ctx->plane, 3U,
+                         trs(0.0, 0.0, 0.0, nph_vec3(400.0F, 1.0F, 400.0F), 0.0F)));
+    const f64 half = (f64)side * 0.5;
+    // The pane faces +Y: a quarter turn about X turns it to the camera on -Z.
+    const NphQuat facing = nph_quat_from_rotation_x(-0.5F * NPH_PI);
+    for (u32 i = 0; i < s->count; ++i) {
+        const u32 h = hash_u32(i * 5U + 0x61A55U);
+        const u32 row = i / side;
+        NphRenderInstanceDesc id;
+        memset(&id, 0, sizeof id);
+        id.mesh = ctx->pane;
+        id.materials = &ctx->glass[(h >> 12U) & 7U];
+        id.material_count = 1U;
+        id.transform =
+            nph_render_transform_from_trs(nph_dvec3((f64)(i % side) - half + 0.5, (f64)row + 0.7,
+                                                    4.0 * ((f64)(h & 1023U) / 1023.0 - 0.5)),
+                                          facing, nph_vec3(0.9F, 1.0F, 0.9F));
+        NPH_TRY(
+            nph_render_instance_create(ctx->renderer, &id, &ctx->instances[ctx->instance_count]));
+        ++ctx->instance_count;
+    }
+    // The whole wall in view, the nearest panes too (fov 0.9 rad).
+    const f64 distance = (half + 1.0) / (f64)nph_f32_tan(0.45F) + 3.0;
+    view->camera =
+        nph_render_camera_look_at(nph_dvec3(0.0, half + 0.2, -distance),
+                                  nph_dvec3(0.0, half + 0.2, 0.0), nph_vec3_unit_y(), 0.9F, 0.1F);
+    return sun_shadows(ctx, s, view);
+}
+
 static NphResult build_scene(Ctx *ctx, const SceneDef *s, NphRenderView *view)
 {
     const u32 side = (u32)nph_f64_ceil(nph_f64_sqrt((f64)s->count));
+    if (s->kind == SCENE_GLASS) {
+        return build_glass(ctx, s, view, side);
+    }
     if (s->kind == SCENE_GRID) {
         // Cubes 0.6 m across on a 1 m grid, the camera straight above with
         // the whole grid in its frustum.
@@ -2382,16 +2453,21 @@ static NphResult run_reference(Ctx *ctx, const RefScene *rs, u32 frames, const c
     }
     ctx->walking = false;
     ctx->turn = 0.0F;
+    // A path the buffer cannot hold is refused, not cut short.
     if (r == NPH_RESULT_OK && capture_dir != NULL) {
         char path[1024];
-        (void)snprintf(path, sizeof path, "%s/%s.bmp", capture_dir, rs->name);
-        r = capture(ctx, target, g_ref_width, g_ref_height, path);
+        const int n = snprintf(path, sizeof path, "%s/%s.bmp", capture_dir, rs->name);
+        r = n > 0 && (u32)n < (u32)sizeof path
+                ? capture(ctx, target, g_ref_width, g_ref_height, path)
+                : NPH_RESULT_INVALID_ARGUMENT;
     }
     if (r == NPH_RESULT_OK && capture_dir != NULL && g_accumulate != 0U) {
         char path[1024];
-        (void)snprintf(path, sizeof path, "%s/%s.mean.bmp", capture_dir, rs->name);
-        r = accumulate(ctx, &view, target, g_ref_width, g_ref_height, g_accumulate, path, rs->name,
-                       &run);
+        const int n = snprintf(path, sizeof path, "%s/%s.mean.bmp", capture_dir, rs->name);
+        r = n > 0 && (u32)n < (u32)sizeof path
+                ? accumulate(ctx, &view, target, g_ref_width, g_ref_height, g_accumulate, path,
+                             rs->name, &run)
+                : NPH_RESULT_INVALID_ARGUMENT;
     }
     NPH_IGNORE_RESULT(nph_gpu_device_wait_idle(ctx->dev));
     nph_gpu_image_destroy(ctx->dev, target);

@@ -268,6 +268,7 @@ reference scenes arrive:
 | `dof_4k_production`, `dof_slight_4k_production`, `dof_large_4k_production` | `field_4k_production` through a full-frame lens (24.8 mm at the camera's field of view) at f/1.4 focused 5 m away (circles of confusion up to 4 pixels), 2.6 m (up to 7.7: the most the full-resolution gather takes), or 0.6 m (the 32-pixel limit, gathered at half resolution) (docs/render.md "Depth of field") |
 | `lod_4k_production`, `lod_4k_level0` | a rolling terrain 400 m across (131,072 triangles) and 1,024 rocks on it (65,024 each, 67 million in all), both with levels of detail, from head height across the diagonal at 3840×2160; the second at level 0 (`lod_error` 0): what the levels save (docs/render.md "Levels of detail"). The meshes' levels are built at the first run (about 2.7 s) |
 | `lod_shadows_walk_4k_production`, `lod_shadows_sun_4k_production` | `lod_4k_production` with the sun's virtual shadow map: the camera walking at 1.4 m/s (the pages it comes to need drawn, each caster at the map's cut for the page's level), and the sun moving every frame at a day-night cycle's pace, a 24-minute day (every page drawn again each frame) (docs/render.md "The sun's virtual shadow map") |
+| `glass_1k_reference`, `glass_{256,1k,4k}_production`, `glass_1k_shadows` | a wall of that many blended, two-sided panes in eight tints, each up to 2 m before or behind the wall, over the ground, the whole wall in view, at 512×512: the CPU's cost of a frame whatever glass it draws, and the GPU's cull, order and draws of it ("Blended surfaces" below; ADR-0097); the last with the sun's shadows, whose pages the panes ask for |
 
 `lights_1k_every_light` and `lights_1k_shadows` are comparisons, not
 targets: like the reference renderer's scenes, they carry no budget.
@@ -530,10 +531,10 @@ a frame to test against the view (15 us for the 342), and one in view its
 draw's record (0.09 us), its place in the sort (0.10 us) and its draw in
 each of the two passes that record it (0.09 and 0.07 us), 0.35 us in all,
 of which the frame's wall time sees about 0.25 (the passes record beside
-other work). A view without blended surfaces takes 0.022 ms. The rows are
-left at the rule's 0.050 ms, past which they stand: either the GPU comes
-to draw the blended surfaces as it draws the rest, or a view's glass is
-given a budget on the main thread, which is not decided.
+other work). A view without blended surfaces takes 0.022 ms. The rows were
+left at the rule's 0.050 ms, past which they stood until the GPU came to
+draw the blended surfaces as it draws the rest (ADR-0097, "Blended
+surfaces" below): every view of Bistro takes 0.022 to 0.023 ms again.
 
 What the ray triangles took off a frame was measured apart, the same build
 on the packs cooked before and after
@@ -543,6 +544,38 @@ city's views 0.27 to 0.65 ms less a frame and 0.25 to 0.67 ms less at their
 rooftop 8.79 to 8.12), Bistro's 0.04 to 0.07 ms less and 0.03 to 0.08 ms
 (its terrace 6.83 to 6.76, its street turn 7.38 to 7.35), the interior's as
 they were.
+
+**Blended surfaces** (ADR-0097; docs/render.md "Blended surfaces"). The GPU
+culls, orders and draws them, against the build before it (eb3b5f5), two
+rounds each run in turn with the desktop still
+(`reference_scenes-2026-11-14-adr-0097`, `render_perf-2026-11-14-adr-0097-glass`):
+
+- The CPU: `nph_render_frame` takes 0.022 to 0.023 ms in every view of
+  Bistro (0.039 to 0.089 ms before) and 0.021 ms in the interior's; the
+  glass wall 0.015 ms for 256 panes, 1,024 and 4,096 alike (0.052, 0.195
+  and 0.812 ms before). The city has none and is as it was.
+- The GPU: the frames and their 99th percentiles are the same within the
+  rounds' spread. The cull takes 8 to 14 µs; the sort counts each draw's
+  place against every other, 4 to 5 µs for the scenes' hundreds of draws,
+  7 µs for 1,024 and 33 µs for 4,096. The depth pyramid's test leaves 88 of
+  Bistro's street's 279 draws in view, and the blended passes together take
+  0.021 to 0.026 ms less there, on its walk and on the terrace; where none of
+  the glass in view is hidden (Bistro's hedge and street turn, the interior)
+  the two small passes are added, 0.005 to 0.014 ms. The glass wall's 4,096
+  panes take 0.062 ms more: the sort's 0.033, the cull's 0.011, and 0.020 in
+  the transparent pass, each of the 4,096 small draws now an indirect one.
+- The budgets: two rounds of every reference view and synthetic scene exceed
+  no row of either file. The new passes and the glass wall have no rows yet.
+- The picture: with the radiance cache off, each build repeats itself to
+  0.02 % of the pixels, and Bistro's street, street turn and terrace differ
+  from the build before in 0.006 to 0.017 % of theirs, as two runs of one
+  build do (the interior's floor turn in 0.09 %, by one or two steps). With
+  it on, the cache makes the turning views come out in one of several states
+  from run to run, a patch at the screen's edge of Bistro's street turn and
+  of the interior's floor turn, with either build; elsewhere a view differs
+  from the build before about as much as two runs of one build do (Bistro's
+  street in 0.85 to 0.95 % of its pixels by a step or so, two runs 0.96 to
+  0.97 %).
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the

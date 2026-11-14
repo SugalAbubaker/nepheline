@@ -50,6 +50,8 @@ nph_add_shaders(nph_shaders_render
         render/forward_opaque_rt.frag
         render/forward_mask_rt.frag
         render/forward_blend_rt.frag
+        render/forward_blend_indirect.frag
+        render/forward_blend_indirect_rt.frag
         render/fullscreen.vert
         render/sky.frag
         render/tonemap.frag
@@ -118,6 +120,7 @@ nph_add_shaders(nph_shaders_render
         render/vsm_request.frag
         render/vis_sw_raster.comp
         render/vis_sw_raster_masked.comp
+        render/vis_blend.comp
         render/vis_voxel_raster.comp
         render/vis_voxel_resolve.comp
         render/vis_voxel_resolve_rt.comp

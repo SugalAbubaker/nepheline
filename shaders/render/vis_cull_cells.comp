@@ -37,20 +37,6 @@ layout(push_constant, scalar) uniform Push { NphVisPush pc; };
 
 NPH_BUFFER_REF(VisUvec4Ref) { uvec4 v[]; };
 
-// Whether a box (camera-relative centre, half extents) is in the frustum: on
-// the inside of each of its planes (vis_sphere_in_frustum's) with the corner
-// furthest along the plane's inward normal.
-bool vis_box_in_frustum(VisViewRef view, vec3 c, vec3 e)
-{
-    for (int i = 0; i < 5; ++i) {
-        const vec4 plane = view.v.frustum[i];
-        if (dot(plane.xyz, c) + dot(abs(plane.xyz), e) + plane.w < 0.0) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void test(VisViewRef view, VisCountersRef counters)
 {
     const uint id = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +

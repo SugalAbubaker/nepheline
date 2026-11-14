@@ -102,6 +102,7 @@ supersedes it and both link to each other.
 | [0094](0094-glass-blended-casters-and-the-grazing-sun.md) | Glass seen through, blended surfaces that cast nothing, and the sun's shadows traced where a view asks | Accepted |
 | [0095](0095-a-view-in-motion-as-sharp-as-standing.md) | A view in motion as sharp as standing: the history's surface, its filter, and its count | Accepted |
 | [0096](0096-leaf-cards-trimmed-for-rays.md) | Leaf cards trimmed for the rays: triangles for the rays alone, cut in the cooker | Accepted |
+| [0097](0097-gpu-driven-transparency.md) | GPU-driven transparency: the blended surfaces culled, ordered and drawn by the GPU | Accepted |
 
 ## Template
 

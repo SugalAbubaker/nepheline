@@ -4,21 +4,37 @@
 // positions across the mesh bounds, octahedral normals, snorm8 tangents,
 // half-float UVs, RGBA8 colours) and moves them to camera-relative world
 // space with the draw's transform.
+//
+// The production path's blended surfaces are drawn with it too, by one
+// indirect draw of draws the GPU listed (vis_blend.comp; ADR-0097): their
+// pipelines are specialised on k_indirect, with which the draw's record is
+// the one its instance index names (an indirect draw's first instance),
+// where the reference renderer's CPU pushes each draw's.
 #version 460
 #include "render_common.glsl"
 
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
+
+layout(constant_id = 4) const bool k_indirect = false;
 
 layout(location = 0) out vec3 out_position; // camera-relative world space
 layout(location = 1) out vec3 out_normal;
 layout(location = 2) out vec4 out_tangent; // xyz; w: bitangent sign
 layout(location = 3) out vec2 out_uv;
 layout(location = 4) out vec4 out_color;
+// What an indirect draw's fragments need of its record (forward_frag.glsl
+// k_indirect): x its material; y bit 0: its transform mirrors, bit 1: it has
+// one side (NphRenderDrawData.position_offset.w).
+layout(location = 5) flat out uvec2 out_draw;
 
 void main()
 {
     ViewRef view = ViewRef(pc.view_address);
-    const NphRenderDrawData draw = DrawsRef(view.v.draws_address).d[pc.draw_index];
+    uint draw_index = pc.draw_index;
+    if (k_indirect) {
+        draw_index = uint(gl_InstanceIndex);
+    }
+    const NphRenderDrawData draw = DrawsRef(view.v.draws_address).d[draw_index];
     const uvec2 q = PositionsRef(draw.positions_address).p[gl_VertexIndex];
     const vec3 unorm = vec3(q.x & 0xFFFFu, q.x >> 16u, q.y & 0xFFFFu) / 65535.0;
     const vec4 local = vec4(draw.position_offset.xyz + unorm * draw.position_scale.xyz, 1.0);
@@ -36,5 +52,7 @@ void main()
     out_uv = unpackHalf2x16(attr.z);
     out_color = unpackUnorm4x8(attr.w);
     out_position = world;
+    out_draw = uvec2(draw.material_index, (draw.position_scale.w < 0.0 ? 1u : 0u) |
+                                              (draw.position_offset.w != 0.0 ? 2u : 0u));
     gl_Position = view.v.view_proj * vec4(world, 1.0);
 }

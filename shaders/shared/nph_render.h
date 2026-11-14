@@ -135,10 +135,13 @@ NPH_SHARED_STRUCT(NphRenderDrawData)
     NphVec4 normal0; // rows of the inverse transpose of the linear part
     NphVec4 normal1;
     NphVec4 normal2;
-    NphVec4 position_offset; // xyz: dequantise as offset + unorm16 * scale; w: unused
-    NphVec4 position_scale;  // xyz; w: -1 when the transform mirrors (negative determinant), else 1
-    u64 positions_address;   // NphRenderVertexPosition[] (4 x u16)
-    u64 attribs_address;     // NphRenderVertexAttrib[] (normal, tangent, uv0, colour)
+    // xyz: dequantise as offset + unorm16 * scale; w: not 0 for a draw of a one-sided
+    // material among the production path's blended draws, whose fragment stage tells a
+    // face's side by it (forward_frag.glsl k_indirect; ADR-0097)
+    NphVec4 position_offset;
+    NphVec4 position_scale; // xyz; w: -1 when the transform mirrors (negative determinant), else 1
+    u64 positions_address;  // NphRenderVertexPosition[] (4 x u16)
+    u64 attribs_address;    // NphRenderVertexAttrib[] (normal, tangent, uv0, colour)
     u32 material_index;
     u32 instance_index;
     u32 pad0;

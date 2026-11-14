@@ -224,15 +224,17 @@ records and declares passes into the caller's render graph. The caller may
 then add its own passes (a UI, a capture, the present), compile, and execute.
 
 1. **Records.** The view (matrices, exposure, bindless indices of the
-   lighting tables), the lights, the materials (if changed), and one draw
-   record per visible submesh. Instances are frustum-culled on the CPU
-   against their mesh bounds. Each draw record carries the camera-relative
-   affine transform, its inverse transpose for normals, the mesh's
-   dequantisation, and the stream addresses.
-2. **Sorting.** Opaque and masked draws sort by pipeline (alpha mode,
-   culling), then by mesh. Blended draws sort back to front by the view depth of their
-   bounds' centre. Ties break on the record index, so the order is
-   deterministic.
+   lighting tables), the materials (if changed), and for the reference
+   renderer the lights and one draw record per visible submesh. Its instances
+   are frustum-culled on the CPU against their mesh bounds. Each draw record
+   carries the camera-relative affine transform, its inverse transpose for
+   normals, the mesh's dequantisation, and the stream addresses. (The
+   production path's scene is the GPU's, its blended surfaces too: "The
+   production path".)
+2. **Sorting.** The reference renderer's opaque and masked draws sort by
+   pipeline (alpha mode, culling), then by mesh. Its blended draws sort back
+   to front by the view depth of their bounds' centre. Ties break on the
+   record index, so the order is deterministic.
 3. **Passes.**
 
 | Pass | Type | Reads | Writes |
@@ -862,7 +864,8 @@ Buffer", JCGT 2013; Karis et al., "Nanite: A Deep Dive", SIGGRAPH 2021).
 The CPU writes the view, the records of instances that changed, and the
 pass declarations, a few microseconds whatever the object count
 (`render_perf`, docs/benchmarks.md); the GPU culls, rasterises, and
-shades. Blended surfaces stay on the forward pass, drawn over the result.
+shades. Blended surfaces stay on the forward pass, drawn over the result,
+and the GPU culls, orders and draws those too ("Blended surfaces" below).
 The frame has no depth buffer for them: their fragment stage reads the
 opaque depth from the visibility buffer (its sampled R32G32_UINT view,
 the depth's bits in y) and demotes a fragment that lies behind it, as the
@@ -878,6 +881,81 @@ fragment shader read `gl_PrimitiveID`). `nph_renderer_production_supported` says
 whether the renderer has it; a view asking for it on a device without it
 is drawn by the reference renderer, logged once. `disable_production` in
 the renderer's description skips it (no GPU memory, no pipelines).
+
+### Blended surfaces
+
+A blended surface is not in the visibility buffer: it is drawn forward, over
+the resolved image, farthest first. Until
+[ADR-0097](adr/0097-gpu-driven-transparency.md) the CPU found, ordered and
+drew them, a draw call each, and a frame's cost to the main thread grew with
+the glass in view (Bistro's street: 0.090 ms of `nph_render_frame` for 279
+draws, 0.022 ms without). Now the GPU does, as it does for everything else
+(Haar & Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015), and the
+CPU's cost is the same whatever the scene holds.
+
+- **The items.** The renderer keeps a table of the instances' blended
+  submeshes (`NphVisBlendItem`: the instance, its mesh, the submesh's
+  material slot and indices), an instance's a range of it. It is written
+  where instances come and go, an instance's afresh when its transform
+  begins or ceases to mirror, and every instance's when a material begins or
+  ends to blend or gains or loses a side while it blends; the chunks that
+  changed are sent with the next production frame
+  (`render_vis_blend_upload`). Nothing is done for it in a frame that
+  changes nothing.
+- **The index pool.** Each mesh has an index buffer of its own, and one
+  indirect draw binds one. A blended submesh's indices are therefore held in
+  a pool (`blend_index_pool`), once whatever its instances, written there by
+  a pass of the next production frame (`vis blend indices`) and leaving with
+  the last instance that draws them. (Pulling the indices in the vertex
+  stage needs no pool and shades every corner of every triangle: 0.03 ms
+  more for the street's 150,000 blended triangles.)
+- **Wound for one culling.** One draw is one pipeline, and the draws are of
+  one-sided and two-sided materials, of mirroring instances and others, in
+  one order. The pipeline culls back faces, counter-clockwise the front, and
+  a list in the pool is wound for it: a one-sided submesh's triangles as its
+  mesh winds them, or each turned for an instance that mirrors; a two-sided
+  submesh's each followed by the same turned, of which the rasteriser draws
+  the one that winds counter-clockwise on screen, so that every triangle is
+  drawn once and in its order. The rasteriser then leaves of each draw what
+  a pipeline of its own left. (Culling nothing and ending back faces in the
+  fragment stage is as exact and rasterises them all first: 0.05 ms more in
+  the interior's gallery, whose glass has one side.)
+- **The cull** (`vis blend cull`, `vis_blend.comp`): an invocation an item.
+  It keeps an item whose instance's record is shown and is the one it was
+  listed for (a record reaches the GPU a frame late where a frame's updates
+  are too many, and a slot may have changed hands), whose material blends,
+  whose mesh's box meets the frustum (`vis_box_in_frustum`), and whose
+  mesh's sphere is not behind the frame's depth pyramid everywhere it covers
+  (as phase 1 tests the opaque instances: a blended fragment behind an
+  opaque surface writes nothing, so nothing shown is lost, and
+  `NPH_RENDER_VIS_NO_OCCLUSION` leaves the picture the same to the bit). For
+  each it writes the draw's record (`NphRenderDrawData`, as the reference
+  renderer's CPU writes one: the camera-relative transform, the normals'
+  matrix, the mesh's streams, the material) and its key: the view depth of
+  its bounds' centre, farthest least (`vis_blend_key`, the reference
+  renderer's own key).
+- **The sort** (`vis blend sort`): a workgroup a draw counts the draws that
+  come before it, by key and then by item (an instance's submeshes share a
+  key, and keep their mesh's order), and writes its indirect command at that
+  place. Counting takes each draw against every other, which for a frame's
+  hundreds is microseconds and needs no pass besides.
+- **The draws.** `transparent`, and `vsm requests (blended)` before it, are
+  each one `vkCmdDrawIndexedIndirectCount` of the sorted commands with one
+  pipeline. The vertex stage finds its draw's record by the instance index
+  (`forward.vert` `k_indirect`) and hands the fragment stage its material
+  and its sides. A one-sided draw's fragments are all of front faces; a
+  two-sided draw's fragment reads its side from the primitive's index, even
+  for a triangle as made (`forward_blend_indirect.frag`).
+
+The order and the picture are the CPU path's: with the radiance cache off,
+which is what makes a frame differ from run to run, Bistro's views differ
+from its build in 0.006 to 0.017 % of their pixels, as two runs of one build
+do (docs/benchmarks.md "Blended surfaces"). They are not the same to the bit by
+construction: a draw's translation is now the GPU's difference of split
+floats, as an opaque instance's always was, where the CPU rounded a
+difference of doubles; a turned triangle reaches the rasteriser with two
+corners exchanged; and two different instances whose keys are equal to the
+bit fall in the order of their items.
 
 ### The GPU scene
 
@@ -1729,6 +1807,7 @@ they were read): hence their streaming (ADR-0063).
 | `vis cull instances 1`, `vis cull groups 1`, `vis cull nodes 1`, `vis cull meshlets 1` | the deferred instances against the new pyramid; the groups phase 0 deferred and those of the instances now visible (and the walk down the hierarchies of those that walk); then the meshlets phase 0 deferred and those of the instances now visible |
 | `vis raster 1`, `vis sw raster 1`, `vis sw raster 1 masked`, `vis voxel raster 1`, `vis hzb 1` | what phase 1 found visible; the pyramid the next frame tests against, rebuilt only where phase 1 drew (and the map's requests, the occlusion's depths and the light tiles' bounds there) |
 | `vis light tiles` | the light grid's tile masks, culled against the tiles' depth bounds (below) |
+| `vis blend indices`, `vis blend cull`, `vis blend sort` | while the renderer lists blended surfaces ("Blended surfaces"): the index lists of submeshes newly drawn blended, into their pool (only in a frame that has any); those shown, in view and not behind the frame's opaque surfaces become the frame's blended draws; and the sort puts them farthest first |
 | `vsm requests (blended)` | with the map and blended surfaces: the blended surfaces' page requests, against the visibility buffer's depth |
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice and its march towards the sun ("Contact shadows"), and the denoise (below) |
@@ -1738,7 +1817,7 @@ they were read): hence their streaming (ADR-0063).
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up), and lists the tiles that hold voxel pixels |
 | `vis voxel resolve` | the voxel pixels of the tiles listed, a workgroup a tile through an indirect dispatch ("Voxels"; only while the renderer holds voxel meshes) |
 | `vis statistics` | copies the counters for the frame's statistics |
-| `transparent` | the blended surfaces, forward, with no depth attachment: each fragment tests the visibility buffer's depth itself and is demoted behind it (`forward_frag.glsl` `k_vis_depth`) |
+| `transparent` | the blended surfaces, forward, with no depth attachment, one indirect draw of the draws the sort wrote: each fragment tests the visibility buffer's depth itself and is demoted behind it (`forward_frag.glsl` `k_vis_depth`) |
 | `dof setup`, `dof tiles`, `dof gather`, `dof resolve` | on a view with an aperture: depth of field, as the reference's ("Depth of field") |
 | `bloom …`, `exposure …` | with bloom or an automatic exposure: the chain and the metering over the HDR image, as the reference's ("Bloom and exposure") |
 | `taa` | on a view with temporal anti-aliasing: the temporal resolve, which mixes in the bloom and tonemaps too (below), or on a frame with motion blur writes only its history |
@@ -2759,9 +2838,17 @@ nodes visited and the clusters a finer level stood in for, lights in view,
 cells drawn as their proxies and the instances they stood in for),
 read back from the frame that completed
 `NPH_GPU_FRAMES_IN_FLIGHT` frames earlier (`vis_frame`). On this path
-`instances` is the live count and `culled` the hidden instances plus
-blended ones outside the frustum; `draws` and `triangles` count only the
-blended surfaces the CPU draws.
+`instances` is the live count and `culled` the hidden instances; `draws`,
+`blended`, `dropped` and `triangles` count only the blended surfaces, which
+are the GPU's draws too, and are read back with the others
+(`vis_blended_culled` and `vis_blended_occluded` beside them: the listed
+ones out of view, and those hidden). The blended surfaces have
+`max_blend_items` (the blended submeshes of all instances: the smaller of
+`max_instances` and 65,536), `max_blend_draws` (4,096 a frame, at most
+16,384: `NPH_RENDER_VIS_OVERFLOW_BLEND`) and `blend_index_pool` (2^21
+indices; a two-sided submesh's list is twice its indices); an instance
+whose submeshes fit neither the table nor the pool is drawn without its
+blended submeshes, logged once.
 
 ### Cost
 
@@ -3440,17 +3527,18 @@ path and logs what the GPU culled.
   not yet see texture coordinates' change across a collapse where they are
   not affine (ADR-0069); a shared mesh's levels are not streamed (ADR-0063).
 
-- Blended surfaces are drawn from the CPU: each frame the instances with a
-  blended material are tested against the view, their draws written and
-  sorted back to front, and recorded into the transparent pass and the pass
-  that asks for their shadow pages (`frame.c` `build_draws`,
-  `record_draws`). That is 0.044 us an instance listed and about 0.35 us a
-  draw in view on the main thread and the jobs, where everything else costs
-  the CPU the same whatever the scene holds: Bistro's street, 279 panes and
-  glasses in view of 342, takes 0.090 ms of `nph_render_frame` where a view
-  without them takes 0.022 (docs/benchmarks.md "Reference scenes"). A city
-  of windows would not fit: the blended surfaces need the GPU's cull, a
-  sort there, and one indirect draw.
+- Blended surfaces (ADR-0097) are ordered whole, by their bounds' centres,
+  as they always were: two that cross, or a surface seen through itself,
+  blend in the order of their draws and of their triangles. A frame orders
+  its blended draws each against every other, which is 0.033 ms for 4,096 on
+  the reference GPU and grows with the square beyond (`max_blend_draws` is
+  at most 16,384): a scene of more wants them sorted by buckets of depth
+  first. Many small draws cost the transparent pass more as one indirect
+  draw than as the CPU's draws did (the glass wall's 4,096 panes, 0.020 ms);
+  runs of one submesh in the order could be drawn instanced. The cull and
+  the sort cost a view 0.012 to 0.019 ms whether or not they hide anything.
+  A blended submesh of a cell's member is drawn whether or not the cell's
+  proxy stands for the cell.
 
 - Triangles for the rays alone (ADR-0096) are used where a scene's textures
   are whole. A paged texture's rays read whichever of its levels is resident,

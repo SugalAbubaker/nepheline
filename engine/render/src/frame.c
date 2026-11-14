@@ -4,12 +4,12 @@
 //
 //   1. the frame's records go into its slot of the per-frame upload
 //      buffer: the view, the materials (when they changed since that slot
-//      was last filled), the reference's lights, and the draw records the
-//      CPU draws itself, every position made camera relative in double
-//      precision (the production path keeps its lights in a GPU table and
-//      sends only the changed ones, vis_scene.c);
-//   2. the draw calls are sorted: opaque and masked ones by pipeline and
-//      mesh, blended ones back to front;
+//      was last filled), and for the reference renderer its lights and its
+//      draws' records, every position made camera relative in double
+//      precision (the production path keeps its lights and its scene in GPU
+//      tables and sends only what changed, vis_scene.c);
+//   2. the reference renderer's draw calls are sorted: opaque and masked
+//      ones by pipeline and mesh, blended ones back to front;
 //   3. the passes are declared: the image-based-lighting passes when
 //      needed (ibl.c), then either the reference renderer's forward pass
 //      into a pre-exposed HDR target or the production path's culling,
@@ -21,14 +21,15 @@
 //      instead.
 //
 // The reference draws every visible submesh itself; the production path
-// leaves opaque and masked surfaces to the GPU and draws only the blended
-// ones, which it finds through the blend list (vis_scene.c), so its CPU
-// cost does not grow with the number of objects.
+// leaves every surface to the GPU, which culls, orders and draws the blended
+// ones too (vis_blend.comp; ADR-0097), so its CPU cost does not grow with
+// the number of objects, nor with how many of them are glass.
 #include <nepheline/core/log.h>
 #include <nepheline/core/profile.h>
 #include <nepheline/gpu/upload.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/render/reference.h>
 
 #include "render_internal.h"
 
@@ -62,7 +63,9 @@ NPH_STATIC_ASSERT((u32)NPH_RENDER_SLOT_COUNT == NPH_RENDER_TEX_COUNT,
                   "the texture slots agree with the shader's");
 NPH_STATIC_ASSERT((u32)NPH_RENDER_VIS_OVERFLOW_MESHLETS == NPH_VIS_OVERFLOW_MESHLETS &&
                       (u32)NPH_RENDER_VIS_OVERFLOW_CLUSTERS == NPH_VIS_OVERFLOW_CLUSTERS &&
-                      (u32)NPH_RENDER_VIS_OVERFLOW_DEFERRED == NPH_VIS_OVERFLOW_DEFERRED,
+                      (u32)NPH_RENDER_VIS_OVERFLOW_DEFERRED == NPH_VIS_OVERFLOW_DEFERRED &&
+                      (u32)NPH_RENDER_VIS_OVERFLOW_LOD_NODES == NPH_VIS_OVERFLOW_LOD_NODES &&
+                      (u32)NPH_RENDER_VIS_OVERFLOW_BLEND == NPH_VIS_OVERFLOW_BLEND,
                   "the overflow bits agree with the shaders'");
 
 #define FRAME_ALIGN 256U
@@ -420,15 +423,12 @@ static int compare_draws(const void *a, const void *b)
 
 // Blended draws sort far to near, after every opaque draw: bit 63 is set,
 // bits 31-62 hold the distance along the view axis made order-preserving
-// for unsigned compares and inverted (far first), and the low bits the
+// for unsigned compares and inverted (far first: the key the production
+// path's GPU orders its own by, vis_blend.comp), and the low bits the
 // record (below 2^24, renderer.c).
 static u64 depth_key(f32 view_depth, u32 record)
 {
-    u32 bits = 0U;
-    const f32 d = -view_depth; // view space looks down -Z: larger is farther
-    memcpy(&bits, &d, sizeof bits);
-    bits = (bits & 0x80000000U) != 0U ? ~bits : bits | 0x80000000U; // ascending with d
-    return (1ULL << 63U) | ((u64)(~bits) << 31U) | record;
+    return (1ULL << 63U) | ((u64)nph_render_ref_vis_blend_key(view_depth) << 31U) | record;
 }
 
 typedef struct FrameCull {
@@ -443,10 +443,10 @@ typedef struct DrawList {
     u32 blend_count;
 } DrawList;
 
-// The draw records and commands of instance `i`'s submeshes: every one for
-// the reference, the blended ones only for the production path.
-static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool blend_only,
-                               DrawList *list, NphRenderFrameStats *stats)
+// The draw records and commands of instance `i`'s submeshes (the reference
+// renderer's: the production path's draws are the GPU's).
+static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, DrawList *list,
+                               NphRenderFrameStats *stats)
 {
     NphRenderDrawData *records = render_frame_at(r, r->layout.draws_offset);
     const u32 cap = r->desc.max_draws;
@@ -460,8 +460,7 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool 
     const NphMat3 lin = inst->transform.linear;
     const NphAffine model = nph_affine_from_mat3_translation(lin, t);
     if (inst->hidden) {
-        // The production path counts hidden instances without visiting them.
-        stats->culled += blend_only ? 0U : 1U;
+        stats->culled += 1U;
         return;
     }
     if (mesh->index_count == 0U) {
@@ -493,9 +492,6 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool 
             }
         }
         const u32 alpha = md != NULL ? (u32)md->alpha_mode : (u32)NPH_RENDER_ALPHA_OPAQUE;
-        if (blend_only && alpha != (u32)NPH_RENDER_ALPHA_BLEND) {
-            continue;
-        }
         const bool double_sided = md != NULL && md->double_sided;
         if (list->count == cap) {
             stats->dropped += 1U;
@@ -537,9 +533,10 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, bool 
     }
 }
 
-// The draw list: every instance's submeshes (the reference), or only the
-// blended submeshes of the instances on the blend list (the production
-// path, which leaves the rest to the GPU).
+// The reference renderer's draw list: every instance's submeshes. The
+// production path has none: its surfaces are all the GPU's to cull and draw,
+// the blended ones too (ADR-0097), and its statistics of them are read back
+// (render_vis_frame).
 static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
                         NphRenderFrameStats *stats)
 {
@@ -547,17 +544,14 @@ static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
     if (production) {
         stats->instances = nph_handle_pool_live(&r->instance_pool);
         stats->culled = r->hidden_count;
-        u32 blended = 0U;
-        const u32 *blend = render_vis_blend_list(r, &blended);
-        for (u32 i = 0; i < blended; ++i) {
-            add_instance_draws(r, fc, blend[i], true, &list, stats);
-        }
-    } else {
-        for (u32 i = 0; i < r->desc.max_instances; ++i) {
-            if (r->instances[i].handle != 0U) {
-                stats->instances += 1U;
-                add_instance_draws(r, fc, i, false, &list, stats);
-            }
+        r->opaque_count = 0U;
+        r->blend_count = 0U;
+        return;
+    }
+    for (u32 i = 0; i < r->desc.max_instances; ++i) {
+        if (r->instances[i].handle != 0U) {
+            stats->instances += 1U;
+            add_instance_draws(r, fc, i, &list, stats);
         }
     }
     // Blended keys have the top bit set, so one sort puts them last and
@@ -573,31 +567,17 @@ static void build_draws(NphRenderer *r, const FrameCull *fc, bool production,
 // Passes
 // ---------------------------------------------------------------------------
 
-// Records draw_cmds[first, first + count) with the forward pipelines, or
-// with `only` where it is not null. `visbuffer` is the visibility buffer's
-// sampled index, whose depth the production path's blended surfaces test
-// (render_vis_visbuffer_index; 0 on the reference path).
-static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count, NphGpuPipeline only,
-                         u32 visbuffer, NphGpuPipeline *bound, u32 *bound_mesh)
+// Records the reference renderer's draw_cmds[first, first + count) with the
+// forward pipelines: those that trace shadow rays in a frame that does.
+static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
+                         NphGpuPipeline *bound, u32 *bound_mesh)
 {
     NphRenderPush push = r->push;
-    push.visbuffer_index = visbuffer;
-    // The production path's blended surfaces draw into its own HDR format;
-    // a frame that traces shadow rays, or has the sun's virtual shadow map,
-    // uses the pipelines that do.
-    const bool production = r->frame_production != 0;
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
-    const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
-    // Blended surfaces where the frame's only light is the cache's (the debug views want the rest).
-    const bool cache_only = r->many.frame_no_other_light && !r->vis.debug_view;
-    const u32 gi = r->gi.frame_active != 0 ? (cache_only ? 2U : 1U) : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p = only.value != 0U ? only
-                                 : production && c->alpha_mode == (u8)NPH_RENDER_ALPHA_BLEND
-                                     ? r->vis.blend_pipelines[gi][rt][vsm][c->cull]
-                                     : (rt != 0U ? r->forward_rt[c->alpha_mode][c->cull]
-                                                 : r->forward[c->alpha_mode][c->cull]);
+        const NphGpuPipeline p =
+            rt != 0U ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull];
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -618,43 +598,14 @@ static void forward_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     NphRenderer *r = (NphRenderer *)user;
     NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
     u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, 0U, r->opaque_count, NPH_GPU_PIPELINE_NULL, 0U, &bound, &bound_mesh);
+    record_draws(r, cmd, 0U, r->opaque_count, &bound, &bound_mesh);
     // The sky fills what the opaque geometry left uncovered, before the
     // blended surfaces composite over both.
     nph_gpu_cmd_bind_pipeline(cmd, r->sky);
     nph_gpu_cmd_push_constants(cmd, &r->push, (u32)sizeof r->push);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
     bound = r->sky;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL, 0U, &bound,
-                 &bound_mesh);
-}
-
-// The production path's blended surfaces, over the resolved image.
-static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    NphRenderer *r = (NphRenderer *)user;
-    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
-    u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, NPH_GPU_PIPELINE_NULL,
-                 render_vis_visbuffer_index(r, graph), &bound, &bound_mesh);
-}
-
-// The production path's blended surfaces again, asking for the pages of
-// the sun's virtual shadow map their shading will read (vsm.c): rendering
-// with no attachments, over the frame's extent.
-static void blend_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
-{
-    NphRenderer *r = (NphRenderer *)user;
-    NphGpuRenderingDesc rd;
-    memset(&rd, 0, sizeof rd);
-    rd.width = r->vis.frame.width;
-    rd.height = r->vis.frame.height;
-    nph_gpu_cmd_begin_rendering(cmd, &rd);
-    NphGpuPipeline bound = NPH_GPU_PIPELINE_NULL;
-    u32 bound_mesh = NPH_U32_MAX;
-    record_draws(r, cmd, r->opaque_count, r->blend_count, r->vsm.request,
-                 render_vis_visbuffer_index(r, graph), &bound, &bound_mesh);
-    nph_gpu_cmd_end_rendering(cmd);
+    record_draws(r, cmd, r->opaque_count, r->blend_count, &bound, &bound_mesh);
 }
 
 static void tonemap_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -984,7 +935,7 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (rt && !production) {
         render_rt_write_instances(r);
     }
-    if (stats.dropped != 0U) {
+    if (!production && stats.dropped != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER, "%s: %u visible draws past max_draws (%u) were dropped",
                      r->name, stats.dropped, r->desc.max_draws);
     }
@@ -1047,8 +998,12 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     r->tonemap_push.encode_srgb = format_is_srgb(td->format) ? 0U : 1U;
 
     // The cells' runs that changed (ADR-0064), with the frame's other
-    // uploads: the cell cull reads them this frame.
+    // uploads: the cell cull reads them this frame. And the blended surfaces'
+    // items (ADR-0097), which a production frame's cull reads.
     NPH_TRY(render_vis_runs_upload(r));
+    if (production) {
+        NPH_TRY(render_vis_blend_upload(r));
+    }
     if (r->pending_uploads) {
         NPH_TRY(nph_gpu_upload_flush(dev, NULL));
         r->pending_uploads = 0;
@@ -1074,12 +1029,8 @@ static NphResult render_frame(NphRenderer *r, const NphRenderView *view, NphGpuR
     if (production) {
         NphGpuRgImage hdr = NPH_GPU_RG_IMAGE_NULL;
         NPH_TRY(render_vis_frame(r, view, graph, width, height, &view_m, &proj, env, specular, lut,
-                                 sh, r->blend_count != 0U ? blend_requests_execute : NULL, &hdr,
-                                 &stats));
-        if (r->blend_count != 0U) {
-            NPH_TRY(render_vis_declare_transparent(r, graph, transparent_execute, env, specular,
-                                                   lut, sh));
-        }
+                                 sh, &hdr, &stats));
+        NPH_TRY(render_vis_declare_transparent(r, graph, env, specular, lut, sh));
         r->hdr_rg = hdr;
         visbuffer = r->vis.frame.visbuffer;
     } else {

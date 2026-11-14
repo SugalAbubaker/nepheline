@@ -277,6 +277,17 @@ static NphVisMathCase random_case(NphPcg32 *rng, f32 width, f32 height, u32 i)
     c.rect = nph_vec4(x0, y0, x0 + sx, y0 + sy);
     c.depth = nph_pcg32_next_f32(rng);
     c.mirrored = nph_pcg32_next_u32(rng) & 1U;
+    // A box about the sphere's centre, flat ones among them, and a position's z in view
+    // space: either side of the camera's plane, tiny and huge, and both zeros.
+    c.extent = random_vec4(rng, nph_vec4(0.0F, 0.0F, 0.0F, 0.0F), nph_vec4(3.0F, 3.0F, 3.0F, 0.0F));
+    if ((i & 3U) == 0U) {
+        c.extent.y = 0.0F;
+    }
+    const f32 magnitude = nph_f32_pow(10.0F, nph_pcg32_next_range_f32(rng, -6.0F, 6.0F));
+    c.view_z = (nph_pcg32_next_u32(rng) & 1U) != 0U ? magnitude : -magnitude;
+    if (i < 2U) {
+        c.view_z = i == 0U ? 0.0F : -0.0F;
+    }
     // A light of every type, cones narrow to flat, and a view distance
     // from half the near plane to past the last bin.
     c.light_position = random_vec4(rng, nph_vec4(-10.0F, -10.0F, -10.0F, 0.1F),
@@ -460,6 +471,8 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     TwinTally facing = {0U, 0U, 0U, 0U};
     TwinTally triangle = {0U, 0U, 0U, 0U};
     TwinTally occluded = {0U, 0U, 0U, 0U};
+    TwinTally box = {0U, 0U, 0U, 0U};
+    u32 keys_wrong = 0U;
     u32 rect_wrong = 0U;
     u32 clipped_compared = 0U;
     u32 clipped_wrong = 0U;
@@ -519,6 +532,14 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
         f64 hm = 0.0;
         const bool occ = nph_render_ref_vis_hzb_occluded(&ref_hzb, c->rect, c->depth, &hm);
         tally(&occluded, r->hzb_occluded != 0U, occ, hm, 1e-4);
+        // The blended surfaces' cull and order (ADR-0097).
+        const f64 bm = nph_render_ref_vis_box_margin(
+            view.frustum, centre, nph_vec3(c->extent.x, c->extent.y, c->extent.z));
+        tally(&box, r->box_in_frustum != 0U, bm >= 0.0, nph_f64_abs(bm), 1e-4);
+        if (r->blend_key != nph_render_ref_vis_blend_key(c->view_z) && keys_wrong++ == 0U) {
+            NTEST_LOG("case %u: the key of z %g is %08x, want %08x", i, (f64)c->view_z,
+                      r->blend_key, nph_render_ref_vis_blend_key(c->view_z));
+        }
 
         // The light culling: the clipped rectangle of spheres reaching in
         // front of the near plane, the sphere around a light, the bins.
@@ -565,6 +586,8 @@ NTEST_F(Vis, culling_math_matches_its_cpu_twins)
     expect_tally("front facing", &facing);
     expect_tally("triangle culled", &triangle);
     expect_tally("hzb occluded", &occluded);
+    expect_tally("box in frustum", &box);
+    NTEST_EXPECT_EQ_UINT(keys_wrong, 0U);
     NTEST_EXPECT_EQ_UINT(rect_wrong, 0U);
     NTEST_LOG("light culling: %u clipped rectangles, %u bins compared", clipped_compared,
               zbins_compared);
@@ -1772,8 +1795,12 @@ NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
     static u8 vis[PIXELS];
     render_into(f, &v, 1U, ref);
     v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
-    const NphRenderFrameStats stats = render_into(f, &v, 1U, vis);
-    NTEST_EXPECT_EQ_UINT(stats.blended, 1U); // the CPU draws only the blended plane
+    render_into(f, &v, 1U, vis);
+    // The blended plane alone is a draw: the GPU's, counted when its frame is read back.
+    static u8 later[PIXELS];
+    const NphRenderFrameStats stats = render_into(f, &v, NPH_GPU_FRAMES_IN_FLIGHT, later);
+    NTEST_EXPECT_EQ_UINT(stats.blended, 1U);
+    NTEST_EXPECT_EQ_UINT(stats.draws, 1U);
     const ImageDiff d = image_diff(ref, vis, 3U);
     NTEST_LOG("alpha modes and sides: %.2f %% within 3 levels, mean %.3f, max %u",
               (f64)d.within * 100.0, (f64)d.mean, d.max);
@@ -1914,8 +1941,13 @@ NTEST_F(Vis, blended_surfaces_behind_opaque_ones_match_the_reference)
     static u8 vis[PIXELS];
     render_into(f, &v, 1U, ref);
     v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
-    const NphRenderFrameStats stats = render_into(f, &v, 1U, vis);
-    NTEST_EXPECT_EQ_UINT(stats.blended, 2U);
+    render_into(f, &v, 1U, vis);
+    static u8 later[PIXELS];
+    const NphRenderFrameStats stats = render_into(f, &v, NPH_GPU_FRAMES_IN_FLIGHT, later);
+    // The crossing plane is drawn; the one wholly behind the wall is not (the cull finds it
+    // behind the frame's depth: ADR-0097), where the reference draws it and shows nothing of it.
+    NTEST_EXPECT_EQ_UINT(stats.blended, 1U);
+    NTEST_EXPECT_EQ_UINT(stats.vis_blended_occluded, 1U);
     const ImageDiff d = image_diff(ref, vis, 3U);
     NTEST_LOG("blended in front of and behind opaque: %.2f %% within 3 levels, mean %.3f, max %u",
               (f64)d.within * 100.0, (f64)d.mean, d.max);

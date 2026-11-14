@@ -265,15 +265,20 @@ static NphResult create_pipelines(NphRenderer *r)
     gd.depth.compare = NPH_GPU_COMPARE_ALWAYS;
     gd.name = "vsm clear";
     NPH_TRY(nph_gpu_pipeline_create_graphics(dev, &gd, &v->clear));
-    // The blended draws' requests: the forward vertex stage, both faces, no
-    // attachments; the fragment stage keeps what lies in front of the
-    // opaque surfaces (reverse-Z, the visibility buffer's depth), and writes
-    // nothing but the requests.
+    // The blended draws' requests: the forward vertex stage, no attachments;
+    // the fragment stage keeps what lies in front of the opaque surfaces
+    // (reverse-Z, the visibility buffer's depth), and writes nothing but the
+    // requests. The draws are the GPU's (forward.vert k_indirect, constant 4;
+    // ADR-0097), culled as the pass that shades them culls them, from the same
+    // index lists: the faces that are shaded ask.
     memset(&gd, 0, sizeof gd);
     gd.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
     gd.fragment = v->shaders[4];
     gd.topology = NPH_GPU_TOPOLOGY_TRIANGLE_LIST;
-    gd.cull_mode = NPH_GPU_CULL_NONE;
+    gd.cull_mode = NPH_GPU_CULL_BACK;
+    gd.front_face = NPH_GPU_FRONT_FACE_CCW;
+    gd.specialization[4] = 1U;
+    gd.specialization_count = 5U;
     gd.name = "vsm request";
     return nph_gpu_pipeline_create_graphics(dev, &gd, &v->request);
 }
@@ -1080,6 +1085,7 @@ NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *g
         return NPH_RESULT_FULL;
     }
     // No attachments, so `draw` begins rendering itself.
+    render_vis_read_blend(r, p);
     nph_gpu_rg_read_image(p, visbuffer, NPH_GPU_RG_USE_SAMPLED, 0U, 1U);
     nph_gpu_rg_write_buffer(p, v->frame.work, NPH_GPU_RG_USE_STORAGE_WRITE);
     return NPH_RESULT_OK;

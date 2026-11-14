@@ -77,7 +77,8 @@
 #define NPH_VIS_OVERFLOW_MESHLETS  1 // phase 0's meshlet candidates (max_cull_meshlets)
 #define NPH_VIS_OVERFLOW_CLUSTERS  2
 #define NPH_VIS_OVERFLOW_DEFERRED  4
-#define NPH_VIS_OVERFLOW_LOD_NODES 8 // the levels' lists (max_lod_nodes, max_lod_groups)
+#define NPH_VIS_OVERFLOW_LOD_NODES 8  // the levels' lists (max_lod_nodes, max_lod_groups)
+#define NPH_VIS_OVERFLOW_BLEND     16 // the blended surfaces in view (max_blend_draws)
 
 // Levels of detail (render/cluster_lod.h; docs/render.md "Levels of
 // detail"): a hierarchy node's children, a child that is a group, and none;
@@ -160,6 +161,26 @@
 // The cell cull's modes (vis_cull_cells.comp; ADR-0064).
 #define NPH_VIS_CELLS_TEST   0 // an invocation per cell slot: the cells to list
 #define NPH_VIS_CELLS_EXPAND 1 // a workgroup per listed cell: its runs into the work list
+
+// The blended surfaces' modes (vis_blend.comp; ADR-0097).
+#define NPH_VIS_BLEND_CULL 0 // an invocation per item slot: the draws in view, and their keys
+#define NPH_VIS_BLEND_SORT 1 // a workgroup per draw in view: its place, farthest first
+#define NPH_VIS_BLEND_WIND 2 // an invocation per triangle of a submesh: its list in the pool
+
+// A free slot of the blended surfaces' items (NphVisBlendItem.instance).
+#define NPH_VIS_BLEND_NONE 0xFFFFFFFFu
+
+// How an item's indices are wound in the blended surfaces' index pool (NphVisBlendItem.flags
+// from NPH_VIS_BLEND_WINDING_SHIFT up). The frame's blended draws are one indirect draw with
+// one pipeline, which culls back faces and takes counter-clockwise as the front; the lists
+// are wound so that its culling leaves what each draw's own pipeline would have:
+#define NPH_VIS_BLEND_AS_MADE 0 // one side: the mesh's triangles as it winds them
+#define NPH_VIS_BLEND_TURNED  1 // one side, a mirroring instance's: each triangle turned
+#define NPH_VIS_BLEND_BOTH                                                                         \
+    2 // two sides: each triangle, then the same turned (one of the two
+      // is culled; an odd primitive that is drawn is a back face)
+#define NPH_VIS_BLEND_WINDINGS      3
+#define NPH_VIS_BLEND_WINDING_SHIFT 28
 
 // A transform: the linear part's rows in xyz, the translation's high
 // float in the rows' w, and its low float in `translation_low`.
@@ -368,6 +389,28 @@ NPH_SHARED_STRUCT(NphVisCluster)
     u32 counts;
 };
 
+// A blended submesh of an instance (ADR-0097): the renderer lists one for each submesh of an
+// instance whose material blends, in a table it changes only where instances and materials
+// do, and the GPU culls, orders and draws them (vis_blend.comp). An item is drawn where its
+// instance's record is the one it was listed for (shown, and of the same mesh: records reach
+// the GPU a frame late where a frame's updates are too many, and a slot may have changed
+// hands) and the material its slot names there blends.
+// Its indices are drawn from the blended surfaces' index pool, which holds a blended
+// submesh's once for each winding its instances draw it with: one index buffer for every draw
+// of the frame's one indirect draw, where each mesh has an index buffer of its own. A
+// one-sided item whose instance's record mirrors where its winding does not (or the other
+// way) waits for the record, as one of another mesh does.
+NPH_SHARED_STRUCT(NphVisBlendItem)
+{
+    u32 instance;      // its instance's slot; NPH_VIS_BLEND_NONE: a free item slot
+    u32 mesh;          // its instance's mesh's slot when it was listed
+    u32 material_slot; // the submesh's material slot of the instance
+    u32 first_index;   // its list's first index in the blended surfaces' index pool
+    u32 index_count;   // the list's indices: the submesh's, or twice as many (NPH_VIS_BLEND_BOTH)
+    u32 flags;         // NPH_VIS_BLEND_* << NPH_VIS_BLEND_WINDING_SHIFT; below, the submesh of its
+                       // mesh (the renderer's own bookkeeping)
+};
+
 // VkDrawIndexedIndirectCommand: one meshlet of the indirect raster.
 NPH_SHARED_STRUCT(NphVisDraw)
 {
@@ -412,6 +455,11 @@ NPH_SHARED_STRUCT(NphVisArgs)
     // k_share): a workgroup per cluster where the phase has few, when
     // raster_args' voxel entry has none (vis_args.comp).
     u32 voxel_share_args[2][4];
+    // The blended surfaces' draws in view, in x, raised by their cull as it lists them
+    // (vis_blend.comp; ADR-0097), and 1 in y and z (vis clear writes them): the sort's
+    // workgroups, one a draw, and the count the indirect draws of them take (the passes that
+    // draw them shade by the counters, so their count is here).
+    u32 blend_args[4];
 };
 
 // The frame's counters (cleared at the start of every frame).
@@ -472,6 +520,14 @@ NPH_SHARED_STRUCT(NphVisCounters)
     // Statistics (ADR-0091): the radiance cache's samples whose cell found its bucket full
     // (gi_update.comp).
     u32 gi_dropped;
+    // The blended surfaces (vis_blend.comp; ADR-0097): the draws its cull lists, which the
+    // passes that draw them take as their count (those past max_blend_draws are dropped:
+    // NPH_VIS_OVERFLOW_BLEND); and statistics: their triangles, the listed items it found
+    // out of view, and those in view it found behind the frame's opaque surfaces.
+    u32 blend_draws;
+    u32 blend_triangles;
+    u32 blend_culled;
+    u32 blend_occluded;
 };
 
 // The production path's view of a frame.
@@ -587,6 +643,21 @@ NPH_SHARED_STRUCT(NphVisViewData)
     u64 lod_chunk_list;
     u32 max_lod_groups;
     u32 max_lod_chunks;
+    // The blended surfaces (ADR-0097; vis_blend.comp): the items the renderer lists
+    // (NphVisBlendItem[], the first blend_item_slots of them walked), and what the cull
+    // writes of those in view: their draws' records (NphRenderDrawData[max_blend_draws],
+    // which the forward shaders read through NphRenderViewData.draws_address) and their keys
+    // (uvec2[max_blend_draws]: the order's key, least first, and the item); and what the sort
+    // writes: their draws, farthest first (VkDrawIndexedIndirectCommand[max_blend_draws]:
+    // the submesh's index count, 1, its first index in the pool, 0, the draw's record).
+    u64 blend_items;
+    u64 blend_draws;
+    u64 blend_keys;
+    u64 blend_commands;
+    u32 blend_item_slots;
+    u32 max_blend_draws;
+    u64 blend_indices; // u32[]: the blended surfaces' index pool (vis_blend.comp winds lists
+                       // into it)
 };
 
 // Push constants of every production-path shader. The visibility buffer
@@ -666,9 +737,10 @@ NPH_SHARED_STRUCT(NphVisMathCase)
     NphVec4 light_position;
     NphVec4 light_direction;
     NphVec4 light_cone;
-    f32 depth; // the rectangle's nearest depth
+    NphVec4 extent; // a box's half extents about the sphere's centre (vis_box_in_frustum)
+    f32 depth;      // the rectangle's nearest depth
     u32 mirrored;
-    u32 pad0;
+    f32 view_z; // a position's z in view space (vis_blend_key)
     u32 pad1;
 };
 
@@ -679,12 +751,14 @@ NPH_SHARED_STRUCT(NphVisMathResult)
     NphVec4 light_sphere; // vis_light_sphere
     f32 depth;
     u32 projected;
-    u32 in_frustum;   // vis_sphere_in_frustum
-    u32 cone_culled;  // vis_cone_culled
-    u32 front_facing; // vis_front_facing
-    u32 tri_culled;   // vis_cull_triangle (back faces culled)
-    u32 hzb_occluded; // vis_hzb_occluded
-    u32 zbin;         // vis_zbin
+    u32 in_frustum;     // vis_sphere_in_frustum
+    u32 cone_culled;    // vis_cone_culled
+    u32 front_facing;   // vis_front_facing
+    u32 tri_culled;     // vis_cull_triangle (back faces culled)
+    u32 hzb_occluded;   // vis_hzb_occluded
+    u32 zbin;           // vis_zbin
+    u32 box_in_frustum; // vis_box_in_frustum
+    u32 blend_key;      // vis_blend_key
 };
 
 NPH_SHARED_STRUCT(NphVisMathPush)

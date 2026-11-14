@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: Apache-2.0
+// The production path's blended surfaces (docs/render.md "Blended surfaces";
+// docs/adr/0097-gpu-driven-transparency.md): culled, ordered and listed for
+// their draws on the GPU, as the opaque ones are (Haar & Aaltonen, "GPU-Driven
+// Rendering Pipelines", SIGGRAPH 2015), so that the CPU's work a frame is the
+// same whatever glass the scene holds. Two modes (NphVisPush.mode):
+//
+//   NPH_VIS_BLEND_CULL: an invocation per item slot (NphVisBlendItem: a
+//     blended submesh of an instance, listed by the renderer). An item whose
+//     instance's record is shown and is the one it was listed for, whose
+//     material blends, whose mesh's box meets the frustum, and whose mesh's
+//     sphere is not behind the frame's opaque surfaces everywhere it covers
+//     (the depth pyramid this frame's rasters left, as phase 1 of the
+//     instance cull tests it: a blended fragment behind an opaque surface
+//     writes nothing, so a surface wholly behind them is not missed) is a
+//     draw of the frame: its record (NphRenderDrawData, as the reference renderer's
+//     CPU writes one a draw: the camera-relative transform, the normals'
+//     matrix, the mesh's streams) goes to the frame's draws, and its key and
+//     item to the list the sort reads. The key orders by the distance along
+//     the view axis of the mesh's bounds' centre, farthest first, as the
+//     reference renderer's sort does (frame.c depth_key): a blended surface
+//     composites over what lies behind it.
+//   NPH_VIS_BLEND_SORT: a workgroup per draw the cull listed. Its place is
+//     the number of draws that come before it, by key and then by item (items
+//     of one instance share a key and keep their submeshes' order, as on the
+//     CPU): the workgroup counts them, each lane a share of the keys, and
+//     writes the draw's indirect command there. Counting takes every draw
+//     against every other, which for a frame's blended surfaces (hundreds;
+//     NphRendererDesc.max_blend_draws at most) is microseconds and needs no
+//     pass besides; a lane waits on memory for each key it reads, so the
+//     counting is spread over as many lanes as the GPU runs at once, where an
+//     invocation a draw left it idle (docs/benchmarks.md "Blended surfaces").
+//
+//   NPH_VIS_BLEND_WIND: an invocation per triangle of a submesh newly drawn
+//     blended (arg0 triangles of mesh arg4 from its index arg3, to the pool's
+//     index arg2, wound as arg1): its list in the index pool.
+//
+// The draws are indexed draws from one index buffer, the pool (vis_scene.c):
+// one indirect draw, of as many draws as the cull counted, covers meshes that
+// each have an index buffer of their own, and the hardware still shades a
+// shared vertex once. (Pulling the indices in the vertex stage would need no
+// pool, and shades every corner: Bistro's street has 150,000 blended
+// triangles, and it cost 0.03 ms more; docs/adr/0097.) One draw is one
+// pipeline, which culls back faces counter-clockwise, and the draws are of
+// one-sided and two-sided materials and of mirroring instances in one order:
+// so each list is wound for that culling (NPH_VIS_BLEND_AS_MADE, _TURNED,
+// _BOTH), and the rasteriser leaves of each draw what a pipeline of its own
+// would have, its triangles in their order.
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "vis_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+NPH_BUFFER_REF(VisBlendItemsRef) { NphVisBlendItem i[]; };
+// VkDrawIndexedIndirectCommand: index count, instance count, first index, vertex offset,
+// first instance.
+struct BlendCommand {
+    uint index_count;
+    uint instance_count;
+    uint first_index;
+    int vertex_offset;
+    uint first_instance;
+};
+NPH_BUFFER_REF(VisBlendCommandsRef) { BlendCommand c[]; };
+
+// The sort: each subgroup's count of the draws before the workgroup's.
+shared uint s_before[64];
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    VisCountersRef counters = VisCountersRef(view.v.counters);
+    const uint id = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u +
+                    gl_LocalInvocationIndex;
+
+    if (pc.mode == NPH_VIS_BLEND_WIND) {
+        if (id < pc.arg0) {
+            VisUintRef from = VisUintRef(VisMeshRef(view.v.meshes)[pc.arg4].m.indices);
+            VisUintRef to = VisUintRef(view.v.blend_indices);
+            const uint a = from.v[pc.arg3 + id * 3u];
+            const uint b = from.v[pc.arg3 + id * 3u + 1u];
+            const uint c = from.v[pc.arg3 + id * 3u + 2u];
+            if (pc.arg1 == NPH_VIS_BLEND_BOTH) {
+                const uint at = pc.arg2 + id * 6u;
+                to.v[at] = a;
+                to.v[at + 1u] = b;
+                to.v[at + 2u] = c;
+                to.v[at + 3u] = a;
+                to.v[at + 4u] = c;
+                to.v[at + 5u] = b;
+            } else {
+                const bool turned = pc.arg1 == NPH_VIS_BLEND_TURNED;
+                const uint at = pc.arg2 + id * 3u;
+                to.v[at] = a;
+                to.v[at + 1u] = turned ? c : b;
+                to.v[at + 2u] = turned ? b : c;
+            }
+        }
+        return;
+    }
+    if (pc.mode == NPH_VIS_BLEND_SORT) {
+        // Every lane of every workgroup reaches the barrier; one of a draw past the list
+        // (none, with the workgroups the cull asked for) counts nothing and writes nothing.
+        const uint n = min(counters.c.blend_draws, view.v.max_blend_draws);
+        const uint draw = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+        VisUvec2Ref keys = VisUvec2Ref(view.v.blend_keys);
+        uvec2 mine = uvec2(0u);
+        uint before = 0u;
+        if (draw < n) {
+            mine = keys.v[draw];
+            for (uint j = gl_LocalInvocationIndex; j < n; j += 64u) {
+                const uvec2 other = keys.v[j];
+                before += other.x < mine.x || (other.x == mine.x && other.y < mine.y) ? 1u : 0u;
+            }
+        }
+        const uint subgroup_before = subgroupAdd(before);
+        if (subgroupElect()) {
+            s_before[gl_SubgroupID] = subgroup_before;
+        }
+        barrier();
+        if (gl_LocalInvocationIndex == 0u && draw < n) {
+            uint place = 0u;
+            for (uint k = 0u; k < gl_NumSubgroups; ++k) {
+                place += s_before[k];
+            }
+            const NphVisBlendItem item = VisBlendItemsRef(view.v.blend_items).i[mine.y];
+            // The submesh's indices in the pool, one instance, and the draw's record (the
+            // vertex stage's gl_InstanceIndex).
+            VisBlendCommandsRef(view.v.blend_commands).c[place] =
+                BlendCommand(item.index_count, 1u, item.first_index, 0, draw);
+        }
+        return;
+    }
+
+    // Every invocation reaches the list's reservation below (it uses subgroup
+    // operations); those without a draw reserve nothing.
+    bool drawn = false;
+    bool culled = false;
+    bool occluded = false;
+    uint triangles = 0u;
+    uint key = 0u;
+    NphRenderDrawData d;
+    if (id < view.v.blend_item_slots) {
+        const NphVisBlendItem item = VisBlendItemsRef(view.v.blend_items).i[id];
+        bool listed = item.instance != NPH_VIS_BLEND_NONE;
+        // Its list's winding: of two sides, or of one for an instance that mirrors or does
+        // not (the record must agree: the culling would take the wrong faces).
+        const uint winding = item.flags >> NPH_VIS_BLEND_WINDING_SHIFT;
+        const bool one_sided = winding != NPH_VIS_BLEND_BOTH;
+        NphVisInstance inst;
+        if (listed) {
+            inst = VisInstancesRef(view.v.instances).i[item.instance];
+            const bool mirrored = (inst.flags & NPH_VIS_INSTANCE_MIRRORED) != 0u;
+            listed = (inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u && inst.mesh == item.mesh &&
+                     (!one_sided || mirrored == (winding == NPH_VIS_BLEND_TURNED));
+        }
+        uint material = 0u;
+        if (listed) {
+            material = vis_instance_material(view, inst, item.material_slot);
+            listed = MaterialRef(view.v.materials)[material].m.alpha_mode == 2u;
+        }
+        if (listed) {
+            VisMeshRef mesh = VisMeshRef(view.v.meshes)[inst.mesh];
+            const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
+                                                    view.v.camera_low.xyz);
+            // The box the mesh's positions dequantise into bounds them, whatever its scale's
+            // signs (Arvo, "Transforming Axis-Aligned Bounding Boxes", Graphics Gems, 1990).
+            const vec3 half_size = 0.5 * mesh.m.position_scale.xyz;
+            const vec3 c =
+                vis_transform_vector(inst.transform, mesh.m.position_offset.xyz + half_size) + t;
+            const vec3 e = abs(half_size);
+            const vec3 extent =
+                vec3(dot(abs(inst.transform.row0.xyz), e), dot(abs(inst.transform.row1.xyz), e),
+                     dot(abs(inst.transform.row2.xyz), e));
+            drawn = vis_box_in_frustum(view, c, extent);
+            culled = !drawn;
+            // The bounds' centre in view space (the view is a rotation: the camera is the
+            // origin), for the test against the depth pyramid and for the order.
+            const vec3 centre =
+                mat3(view.v.view) * (vis_transform_vector(inst.transform, mesh.m.sphere.xyz) + t);
+            if (drawn && (view.v.flags & NPH_VIS_VIEW_OCCLUSION) != 0u) {
+                vec4 rect;
+                float depth;
+                occluded = vis_project_sphere(centre, mesh.m.sphere.w * vis_max_scale(inst.transform),
+                                              view.v.projection, rect, depth) &&
+                           vis_hzb_occluded(view, rect + view.v.jitter.xyxy, depth);
+                drawn = !occluded;
+            }
+            if (drawn) {
+                key = vis_blend_key(centre.z);
+                triangles = item.index_count / (one_sided ? 3u : 6u);
+                // The normals' matrix by rows (vis_normal_matrix's are its columns' cross
+                // products over the determinant).
+                const vec3 r0 = inst.transform.row0.xyz;
+                const vec3 r1 = inst.transform.row1.xyz;
+                const vec3 r2 = inst.transform.row2.xyz;
+                const vec3 c0 = cross(r1, r2);
+                const float inv_det = 1.0 / dot(r0, c0);
+                d.model0 = vec4(r0, t.x);
+                d.model1 = vec4(r1, t.y);
+                d.model2 = vec4(r2, t.z);
+                d.normal0 = vec4(c0 * inv_det, 0.0);
+                d.normal1 = vec4(cross(r2, r0) * inv_det, 0.0);
+                d.normal2 = vec4(cross(r0, r1) * inv_det, 0.0);
+                // w: one side, whose every fragment drawn is a front face's (forward_frag.glsl
+                // k_indirect).
+                d.position_offset = vec4(mesh.m.position_offset.xyz, one_sided ? 1.0 : 0.0);
+                d.position_scale =
+                    vec4(mesh.m.position_scale.xyz,
+                         (inst.flags & NPH_VIS_INSTANCE_MIRRORED) != 0u ? -1.0 : 1.0);
+                d.positions_address = mesh.m.positions;
+                d.attribs_address = mesh.m.attribs;
+                d.material_index = material;
+                d.instance_index = item.instance;
+                d.pad0 = 0u;
+                d.pad1 = 0u;
+            }
+        }
+    }
+    uint at;
+    VIS_RESERVE(counters.c.blend_draws, drawn ? 1u : 0u, at);
+    // A draw past the list's end is dropped, and said (NPH_VIS_OVERFLOW_BLEND).
+    const bool fits = drawn && at < view.v.max_blend_draws;
+    if (fits) {
+        DrawsRef(view.v.blend_draws).d[at] = d;
+        VisUvec2Ref(view.v.blend_keys).v[at] = uvec2(key, id);
+    }
+    if (drawn && !fits) {
+        atomicOr(counters.c.overflow, uint(NPH_VIS_OVERFLOW_BLEND));
+    }
+    // The draws listed so far: the sort's workgroups, and the indirect draws' count.
+    const uint listed = subgroupMax(fits ? at + 1u : 0u);
+    if (listed != 0u && subgroupElect()) {
+        atomicMax(VisArgsRef(view.v.args).a.blend_args[0], listed);
+    }
+    VIS_ADD(counters.c.blend_triangles, fits ? triangles : 0u);
+    VIS_COUNT(counters.c.blend_culled, culled);
+    VIS_COUNT(counters.c.blend_occluded, occluded);
+}

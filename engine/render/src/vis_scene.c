@@ -153,6 +153,20 @@ void render_vis_release_pending(NphRenderer *r, u64 current_frame)
 // Lifetime
 // ---------------------------------------------------------------------------
 
+// The blended surfaces' items are sent in chunks of this many (a dirty bit
+// each), and a draw of theirs is a VkDrawIndexedIndirectCommand.
+#define BLEND_CHUNK         64U
+#define BLEND_COMMAND_BYTES 20U
+
+NPH_STATIC_ASSERT(sizeof(NphVisBlendItem) == 24U, "NphVisBlendItem matches its GLSL layout");
+NPH_STATIC_ASSERT(NPH_VIS_BLEND_NONE == NPH_U32_MAX, "a free item is all ones (the mirror's fill)");
+
+static u32 blend_dirty_words(u32 items)
+{
+    const u32 chunks = (items + BLEND_CHUNK - 1U) / BLEND_CHUNK;
+    return (chunks + 63U) / 64U;
+}
+
 static NphResult make_buffer(NphRenderer *r, u64 size, u32 usage, NphGpuMemory memory,
                              const char *name, NphGpuBuffer *out)
 {
@@ -284,12 +298,43 @@ NphResult render_vis_scene_create(NphRenderer *r)
     v->dirty = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->sent = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     v->sent_next = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
-    v->blend = NPH_ALLOC_ARRAY(a, u32, d->max_instances);
     NPH_ARRAY_INIT(&v->pending, a);
     if (v->slot_state == NULL || v->vsm_below == NULL || v->dirty == NULL || v->sent == NULL ||
-        v->sent_next == NULL || v->blend == NULL) {
+        v->sent_next == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
     }
+    // The blended surfaces (ADR-0097): the items, a range an instance that has any, and
+    // what a frame's cull and sort write of those in view.
+    NPH_TRY(make_buffer(r, (u64)d->max_blend_items * sizeof(NphVisBlendItem), storage,
+                        NPH_GPU_MEMORY_DEVICE, "vis blend items", &v->blend_items));
+    // Read back by the tests (the draws a frame made, and their order).
+    const u32 read = (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
+    NPH_TRY(make_buffer(r, (u64)d->max_blend_draws * sizeof(NphRenderDrawData), storage | read,
+                        NPH_GPU_MEMORY_DEVICE, "vis blend draws", &v->blend_draws));
+    NPH_TRY(make_buffer(r, (u64)d->max_blend_draws * 2U * sizeof(u32), storage | read,
+                        NPH_GPU_MEMORY_DEVICE, "vis blend keys", &v->blend_keys));
+    NPH_TRY(make_buffer(r, (u64)d->max_blend_draws * BLEND_COMMAND_BYTES, indirect | read,
+                        NPH_GPU_MEMORY_DEVICE, "vis blend commands", &v->blend_commands));
+    NPH_TRY(nph_range_alloc_init(&v->blend_ranges, a, d->max_blend_items,
+                                 nph_min_u32(d->max_blend_items, d->max_instances)));
+    // Their index pool: a range for each list some instance draws (no more of them than
+    // items), wound by vis_blend.comp. Read back by the tests too.
+    NPH_TRY(make_buffer(r, (u64)d->blend_index_pool * sizeof(u32),
+                        storage | (u32)NPH_GPU_BUFFER_USAGE_INDEX | read, NPH_GPU_MEMORY_DEVICE,
+                        "vis blend indices", &v->blend_indices));
+    NPH_TRY(
+        nph_range_alloc_init(&v->blend_index_ranges, a, d->blend_index_pool, d->max_blend_items));
+    v->blend_copies = NPH_ALLOC_ARRAY(a, VisBlendCopy, d->max_blend_items);
+    if (v->blend_copies == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    v->blend_mirror = NPH_ALLOC_ARRAY(a, NphVisBlendItem, d->max_blend_items);
+    v->blend_dirty = NPH_ALLOC_ARRAY_ZEROED(a, u64, blend_dirty_words(d->max_blend_items));
+    if (v->blend_mirror == NULL || v->blend_dirty == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    // Every slot free: a chunk is sent whole, its free slots with it.
+    memset(v->blend_mirror, 0xFF, (u64)d->max_blend_items * sizeof(NphVisBlendItem));
     return render_vis_runs_create(r);
 }
 
@@ -351,8 +396,21 @@ void render_vis_scene_destroy(NphRenderer *r)
     if (v->sent_next != NULL) {
         NPH_FREE_ARRAY(a, u32, v->sent_next, d->max_instances);
     }
-    if (v->blend != NULL) {
-        NPH_FREE_ARRAY(a, u32, v->blend, d->max_instances);
+    nph_gpu_buffer_destroy(dev, v->blend_items);
+    nph_gpu_buffer_destroy(dev, v->blend_draws);
+    nph_gpu_buffer_destroy(dev, v->blend_keys);
+    nph_gpu_buffer_destroy(dev, v->blend_commands);
+    nph_gpu_buffer_destroy(dev, v->blend_indices);
+    nph_range_alloc_destroy(&v->blend_ranges);
+    nph_range_alloc_destroy(&v->blend_index_ranges);
+    if (v->blend_copies != NULL) {
+        NPH_FREE_ARRAY(a, VisBlendCopy, v->blend_copies, d->max_blend_items);
+    }
+    if (v->blend_mirror != NULL) {
+        NPH_FREE_ARRAY(a, NphVisBlendItem, v->blend_mirror, d->max_blend_items);
+    }
+    if (v->blend_dirty != NULL) {
+        NPH_FREE_ARRAY(a, u64, v->blend_dirty, blend_dirty_words(d->max_blend_items));
     }
 }
 
@@ -999,33 +1057,191 @@ static void mark_dirty(RenderVis *v, u32 slot)
     }
 }
 
-static bool instance_blends(const NphRenderer *r, const RenderInstance *inst)
+// Whether a submesh of an instance's mesh is drawn blended: it has triangles, and
+// its material slot names a live material that blends.
+static bool submesh_blends(const NphRenderer *r, const RenderInstance *inst,
+                           const NphRenderSubmesh *sm)
 {
-    for (u32 i = 0; i < inst->material_count; ++i) {
-        const u32 m = render_slot_of(&r->material_pool, inst->materials[i].value);
-        if (m != NPH_U32_MAX && r->materials[m].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND) {
-            return true;
-        }
+    if (sm->index_count == 0U || sm->material_slot >= inst->material_count) {
+        return false;
     }
-    return false;
+    const u32 m = render_slot_of(&r->material_pool, inst->materials[sm->material_slot].value);
+    return m != NPH_U32_MAX && r->materials[m].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND;
 }
 
-static void blend_add(RenderVis *v, RenderInstance *inst, u32 slot)
+static void blend_mark(RenderVis *v, u32 first, u32 count)
 {
-    inst->blend_index = v->blend_count;
-    v->blend[v->blend_count++] = slot;
+    for (u32 c = first / BLEND_CHUNK; c <= (first + count - 1U) / BLEND_CHUNK; ++c) {
+        v->blend_dirty[c >> 6U] |= 1ULL << (c & 63U);
+    }
 }
 
-static void blend_remove(NphRenderer *r, RenderInstance *inst)
+static void blend_full(NphRenderer *r, const char *what, u32 capacity)
 {
     RenderVis *v = &r->vis;
-    if (inst->blend_index == NPH_U32_MAX) {
+    if (!v->blend_full_logged) {
+        NPH_LOG_WARN(&NPH_LOG_RENDER,
+                     "%s: the blended submeshes of the instances are more than %s (%u): some "
+                     "are not drawn (said once)",
+                     r->name, what, capacity);
+        v->blend_full_logged = 1;
+    }
+}
+
+// The indices a list holds: its submesh's, or twice as many where it holds each
+// triangle and its turn.
+static u32 blend_list_indices(const RenderMesh *mesh, u32 which)
+{
+    const u32 count = mesh->submeshes[which / (u32)NPH_VIS_BLEND_WINDINGS].index_count;
+    return which % (u32)NPH_VIS_BLEND_WINDINGS == (u32)NPH_VIS_BLEND_BOTH ? 2U * count : count;
+}
+
+// One user less of a list (a submesh's indices, wound one way) in the blended
+// surfaces' pool: with the last, its range is free again (what is written into
+// it next is ordered after the frames that drew from it), and its winding, if
+// it still waits, is no longer wanted.
+static void blend_indices_release(NphRenderer *r, u32 mesh_slot, u32 which)
+{
+    RenderVis *v = &r->vis;
+    RenderBlendIndices *b = &r->meshes[mesh_slot].blend_indices[which];
+    NPH_ASSERT(b->users != 0U);
+    if (--b->users != 0U) {
         return;
     }
-    const u32 last = v->blend[--v->blend_count];
-    v->blend[inst->blend_index] = last;
-    r->instances[last].blend_index = inst->blend_index;
-    inst->blend_index = NPH_U32_MAX;
+    nph_range_free(&v->blend_index_ranges, b->range);
+    b->range = NPH_RANGE_NULL;
+    if (b->queued != 0U) {
+        // The waiting list's last entry takes its place.
+        const VisBlendCopy last = v->blend_copies[--v->blend_copy_count];
+        if (b->queued - 1U != v->blend_copy_count) {
+            v->blend_copies[b->queued - 1U] = last;
+            r->meshes[last.mesh].blend_indices[last.which].queued = b->queued;
+        }
+        b->queued = 0U;
+    }
+}
+
+// One user more of a list in the pool: the first gives it a range there, which
+// the next production frame winds its indices into (those waiting have an
+// entry a range the pool can hold). False where the pool has no room.
+static bool blend_indices_acquire(NphRenderer *r, u32 mesh_slot, u32 which)
+{
+    RenderVis *v = &r->vis;
+    const RenderMesh *mesh = &r->meshes[mesh_slot];
+    RenderBlendIndices *b = &mesh->blend_indices[which];
+    if (b->users == 0U) {
+        if (nph_range_alloc(&v->blend_index_ranges, blend_list_indices(mesh, which), &b->range) !=
+            NPH_RESULT_OK) {
+            b->range = NPH_RANGE_NULL;
+            return false;
+        }
+        NPH_ASSERT(v->blend_copy_count < r->desc.max_blend_items);
+        v->blend_copies[v->blend_copy_count].mesh = mesh_slot;
+        v->blend_copies[v->blend_copy_count].which = which;
+        b->queued = ++v->blend_copy_count;
+    }
+    b->users += 1U;
+    return true;
+}
+
+// Lists the instance's blended submeshes as items (ADR-0097): a range of the
+// table, written to its mirror and sent with the next production frame, and
+// each submesh's indices in the pool, wound for the material's sides and the
+// instance's handedness. One whose items do not fit the table, or whose
+// indices do not fit the pool, is not listed, and its blended submeshes are
+// not drawn: said once.
+static void blend_list(NphRenderer *r, u32 slot)
+{
+    RenderVis *v = &r->vis;
+    RenderInstance *inst = &r->instances[slot];
+    const u32 mesh_slot = render_slot_of(&r->mesh_pool, inst->mesh.value);
+    if (mesh_slot == NPH_U32_MAX) {
+        return;
+    }
+    // A mesh of voxels alone (a cell's proxy; ADR-0062) has no triangles to draw.
+    const RenderMesh *mesh = &r->meshes[mesh_slot];
+    u32 count = 0U;
+    for (u32 i = 0; mesh->index_count != 0U && i < mesh->submesh_count; ++i) {
+        count += submesh_blends(r, inst, &mesh->submeshes[i]) ? 1U : 0U;
+    }
+    if (count == 0U) {
+        return;
+    }
+    NphRange range = NPH_RANGE_NULL;
+    if (nph_range_alloc(&v->blend_ranges, count, &range) != NPH_RESULT_OK) {
+        blend_full(r, "max_blend_items", r->desc.max_blend_items);
+        return;
+    }
+    // As its record will say (instance_record).
+    const bool mirrored = nph_mat3_determinant(inst->transform.linear) < 0.0F;
+    u32 at = range.offset;
+    for (u32 i = 0; i < mesh->submesh_count; ++i) {
+        const NphRenderSubmesh *sm = &mesh->submeshes[i];
+        if (!submesh_blends(r, inst, sm)) {
+            continue;
+        }
+        const u32 m = render_slot_of(&r->material_pool, inst->materials[sm->material_slot].value);
+        const u32 winding = r->materials[m].desc.double_sided ? (u32)NPH_VIS_BLEND_BOTH
+                            : mirrored                        ? (u32)NPH_VIS_BLEND_TURNED
+                                                              : (u32)NPH_VIS_BLEND_AS_MADE;
+        const u32 which = i * (u32)NPH_VIS_BLEND_WINDINGS + winding;
+        if (!blend_indices_acquire(r, mesh_slot, which)) {
+            // None of it, then: the items written so far give their lists back.
+            for (u32 k = range.offset; k < at; ++k) {
+                const u32 f = v->blend_mirror[k].flags;
+                blend_indices_release(r, mesh_slot,
+                                      (f & ((1U << (u32)NPH_VIS_BLEND_WINDING_SHIFT) - 1U)) *
+                                              (u32)NPH_VIS_BLEND_WINDINGS +
+                                          (f >> (u32)NPH_VIS_BLEND_WINDING_SHIFT));
+            }
+            memset(&v->blend_mirror[range.offset], 0xFF,
+                   (u64)(at - range.offset) * sizeof(NphVisBlendItem));
+            nph_range_free(&v->blend_ranges, range);
+            blend_full(r, "blend_index_pool", r->desc.blend_index_pool);
+            return;
+        }
+        NphVisBlendItem *item = &v->blend_mirror[at++];
+        item->instance = slot;
+        item->mesh = mesh_slot;
+        item->material_slot = sm->material_slot;
+        item->first_index = mesh->blend_indices[which].range.offset;
+        item->index_count = blend_list_indices(mesh, which);
+        item->flags = i | (winding << (u32)NPH_VIS_BLEND_WINDING_SHIFT);
+    }
+    blend_mark(v, range.offset, count);
+    inst->blend_range = range;
+    inst->blend_count = count;
+    inst->blend_mirrored = mirrored ? 1 : 0;
+    v->blend_listed += count;
+    v->blend_end = nph_max_u32(v->blend_end, range.offset + count);
+}
+
+// Takes the instance's items out of the table: free slots, sent with the next
+// production frame, before which the cull passes them by for their instance's
+// record (vis_blend.comp); and its part in their lists in the pool.
+static void blend_unlist(NphRenderer *r, RenderInstance *inst)
+{
+    RenderVis *v = &r->vis;
+    if (nph_range_is_null(inst->blend_range)) {
+        return;
+    }
+    for (u32 k = 0; k < inst->blend_count; ++k) {
+        const NphVisBlendItem *item = &v->blend_mirror[inst->blend_range.offset + k];
+        blend_indices_release(r, item->mesh,
+                              (item->flags & ((1U << (u32)NPH_VIS_BLEND_WINDING_SHIFT) - 1U)) *
+                                      (u32)NPH_VIS_BLEND_WINDINGS +
+                                  (item->flags >> (u32)NPH_VIS_BLEND_WINDING_SHIFT));
+    }
+    memset(&v->blend_mirror[inst->blend_range.offset], 0xFF,
+           (u64)inst->blend_count * sizeof(NphVisBlendItem));
+    blend_mark(v, inst->blend_range.offset, inst->blend_count);
+    nph_range_free(&v->blend_ranges, inst->blend_range);
+    v->blend_listed -= inst->blend_count;
+    if (v->blend_listed == 0U) {
+        v->blend_end = 0U;
+    }
+    inst->blend_range = NPH_RANGE_NULL;
+    inst->blend_count = 0U;
 }
 
 NphResult render_vis_instance_created(NphRenderer *r, u32 slot)
@@ -1033,7 +1249,8 @@ NphResult render_vis_instance_created(NphRenderer *r, u32 slot)
     RenderVis *v = &r->vis;
     RenderInstance *inst = &r->instances[slot];
     inst->material_range = NPH_RANGE_NULL;
-    inst->blend_index = NPH_U32_MAX;
+    inst->blend_range = NPH_RANGE_NULL;
+    inst->blend_count = 0U;
     if (!v->supported) {
         return NPH_RESULT_OK;
     }
@@ -1058,16 +1275,23 @@ NphResult render_vis_instance_created(NphRenderer *r, u32 slot)
     }
     v->slot_state[slot] |= (u8)RENDER_SLOT_FRESH;
     mark_dirty(v, slot);
-    if (instance_blends(r, inst)) {
-        blend_add(v, inst, slot);
-    }
+    blend_list(r, slot);
     return NPH_RESULT_OK;
 }
 
 void render_vis_instance_changed(NphRenderer *r, u32 slot)
 {
-    if (r->vis.supported) {
-        mark_dirty(&r->vis, slot);
+    if (!r->vis.supported) {
+        return;
+    }
+    mark_dirty(&r->vis, slot);
+    // A listed instance whose transform now mirrors, or no longer does: its one-sided
+    // submeshes' index lists are wound the other way (ADR-0097).
+    RenderInstance *inst = &r->instances[slot];
+    if (!nph_range_is_null(inst->blend_range) &&
+        (nph_mat3_determinant(inst->transform.linear) < 0.0F) != (inst->blend_mirrored != 0)) {
+        blend_unlist(r, inst);
+        blend_list(r, slot);
     }
 }
 
@@ -1078,7 +1302,7 @@ void render_vis_instance_destroyed(NphRenderer *r, u32 slot)
         return;
     }
     RenderInstance *inst = &r->instances[slot];
-    blend_remove(r, inst);
+    blend_unlist(r, inst);
     free_later(r, 0U, inst->material_range);
     inst->material_range = NPH_RANGE_NULL;
     // Sent as not visible (the slot is dead when the update is written).
@@ -1091,22 +1315,41 @@ void render_vis_materials_changed(NphRenderer *r)
     r->vis.blend_stale = 1;
 }
 
-const u32 *render_vis_blend_list(NphRenderer *r, u32 *out_count)
+NphResult render_vis_blend_upload(NphRenderer *r)
 {
     RenderVis *v = &r->vis;
+    if (!v->supported) {
+        return NPH_RESULT_OK;
+    }
     if (v->blend_stale) {
-        v->blend_count = 0U;
-        for (u32 i = 0; i < r->desc.max_instances; ++i) {
+        // Which submeshes blend may have changed anywhere: every instance's afresh. One at a
+        // time, so that a submesh's indices stay in the pool while another instance still
+        // draws it.
+        v->blend_full_logged = 0;
+        for (u32 i = 0; i < r->instance_pool.bump; ++i) {
             RenderInstance *inst = &r->instances[i];
-            inst->blend_index = NPH_U32_MAX;
-            if (inst->handle != 0U && instance_blends(r, inst)) {
-                blend_add(v, inst, i);
+            if (inst->handle != 0U) {
+                blend_unlist(r, inst);
+                blend_list(r, i);
             }
         }
         v->blend_stale = 0;
     }
-    *out_count = v->blend_count;
-    return v->blend;
+    const u32 words = blend_dirty_words(r->desc.max_blend_items);
+    for (u32 w = 0; w < words; ++w) {
+        while (v->blend_dirty[w] != 0U) {
+            const u32 chunk = w * 64U + nph_ctz_u64(v->blend_dirty[w]);
+            const u32 first = chunk * BLEND_CHUNK;
+            const u32 count = nph_min_u32(BLEND_CHUNK, r->desc.max_blend_items - first);
+            // A chunk that is not sent stays marked, for the next frame.
+            NPH_TRY(nph_gpu_upload_buffer(
+                r->dev, v->blend_items, (u64)first * sizeof(NphVisBlendItem),
+                &v->blend_mirror[first], (u64)count * sizeof(NphVisBlendItem)));
+            r->pending_uploads = 1;
+            v->blend_dirty[w] &= v->blend_dirty[w] - 1U;
+        }
+    }
+    return NPH_RESULT_OK;
 }
 
 // The high and low floats of a 64-bit coordinate: their sum is the value

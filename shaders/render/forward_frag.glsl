@@ -37,6 +37,20 @@ vec4 g_gi_cell; // set in main() where k_gi
 // colour (a cell's light arrives as if evenly from everywhere: it has no highlight, and a
 // rough lobe integrates to about the base colour).
 layout(constant_id = 3) const bool k_cache_only = false;
+// The production path draws them all with one indirect draw of draws the GPU
+// listed (vis_blend.comp; ADR-0097; NPH_FORWARD_INDIRECT, which
+// forward_blend_indirect.frag sets), so with one pipeline, which culls back
+// faces counter-clockwise, from index lists wound for it: what a fragment
+// needs of its draw's record comes from the vertex stage (forward.vert
+// out_draw), and its facing from the list. A one-sided draw's fragments are
+// all of front faces (its list is turned where its transform mirrors). A
+// two-sided draw's list holds each triangle and then the same turned, of
+// which the rasteriser draws the one that winds counter-clockwise on screen:
+// an even primitive is the triangle as made, which is a front face unless the
+// transform mirrors.
+#ifdef NPH_FORWARD_INDIRECT
+layout(location = 5) flat in uvec2 in_draw;
+#endif
 #define NPH_SURFACE_GI_ACTIVE k_gi
 #define NPH_SURFACE_GI        g_gi_cell
 #define NPH_SURFACE_GI_FAR_SPECULAR
@@ -103,6 +117,12 @@ vec4 forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float al
 
 void main()
 {
+#ifdef NPH_FORWARD_INDIRECT
+    const bool front_facing =
+        (in_draw.y & 2u) != 0u || ((gl_PrimitiveID & 1) == 0) != ((in_draw.y & 1u) != 0u);
+#else
+    const bool front_facing = gl_FrontFacing;
+#endif
 #if NPH_FORWARD_ALPHA_MODE == 2
     // A fragment behind is demoted, not discarded, so that it still serves its
     // quad's derivatives; it writes nothing.
@@ -124,8 +144,9 @@ void main()
     s.uv_dx = dFdx(in_uv);
     s.uv_dy = dFdy(in_uv);
     // Mirrored transforms are drawn with clockwise front faces, so the
-    // rasteriser's facing already accounts for them.
-    s.front_facing = gl_FrontFacing;
+    // rasteriser's facing already accounts for them (an indirect draw's is its
+    // list's, above).
+    s.front_facing = front_facing;
     // The triangle's plane, from the position's screen derivatives (only
     // its line matters; a degenerate one falls back on the vertex normal).
     const vec3 face = cross(dFdx(in_position), dFdy(in_position));
@@ -142,8 +163,12 @@ void main()
     g_tlas_offset = view.v.tlas_offset.xyz;
 #endif
     g_vsm = VsmViewRef(view.v.vsm);
-    const NphRenderDrawData draw = DrawsRef(view.v.draws_address).d[pc.draw_index];
-    const NphRenderMaterialData m = MaterialsRef(view.v.materials_address).m[draw.material_index];
+#ifdef NPH_FORWARD_INDIRECT
+    const uint material_index = in_draw.x;
+#else
+    const uint material_index = DrawsRef(view.v.draws_address).d[pc.draw_index].material_index;
+#endif
+    const NphRenderMaterialData m = MaterialsRef(view.v.materials_address).m[material_index];
     s.pixel = gl_FragCoord.xy;
     s.depth = gl_FragCoord.z;
     // Where the view pages textures, a fragment of each 8 x 8 tile a frame

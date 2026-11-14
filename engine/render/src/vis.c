@@ -27,6 +27,11 @@
 //                         visible), vis args, vis raster 1, vis sw raster 1, vis
 //                         voxel raster 1
 //   vis hzb 1             the frame's depth: next frame's phase 0 tests it
+//   vis blend cull, vis blend sort
+//                         the blended surfaces in view, and their draws farthest
+//                         first (vis_blend.comp; ADR-0097; only where the
+//                         renderer lists blended surfaces, as the passes that
+//                         draw them)
 //   vsm ...               the sun's virtual shadow map (vsm.c), its page
 //                         requests made by the vis hzb passes (and, with
 //                         blended surfaces, by `vsm requests (blended)`
@@ -39,8 +44,8 @@
 //                         hold voxel pixels
 //   vis voxel resolve     those tiles' voxel pixels (an indirect dispatch)
 //   transparent           blended surfaces, forward, testing the visibility
-//                         buffer's depth themselves (only with blended
-//                         surfaces)
+//                         buffer's depth themselves: one indirect draw of the
+//                         draws the sort wrote
 //   vis statistics        the counters, read back two frames later
 //
 // Everything after `vis clear` is sized by counters the GPU itself wrote,
@@ -58,7 +63,8 @@
 #include <stdio.h>
 #include <string.h>
 
-NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 1072U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisViewData) == 1120U, "NphVisViewData matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisViewData, blend_items) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, cell_runs) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, cells) % 8U == 0U, "addresses are aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisViewData, voxel_tiles) % 8U == 0U, "addresses are aligned");
@@ -102,6 +108,9 @@ static const char *const k_shader_files[VIS_SHADER_COUNT] = {
     "vis_cull_cells.comp",
     "vis_page_requests.comp",
     "vis_sw_raster_masked.comp",
+    "vis_blend.comp",
+    "forward_blend_indirect.frag",
+    "forward_blend_indirect_rt.frag",
 };
 
 static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
@@ -113,10 +122,10 @@ static const VisShader k_compute_shaders[VIS_COMPUTE_COUNT] = {
     VIS_SHADER_LIGHT_TILES,   VIS_SHADER_CULL_NODES,
     VIS_SHADER_CULL_GROUPS,   VIS_SHADER_VOXEL_RASTER,
     VIS_SHADER_CULL_CELLS,    VIS_SHADER_SW_RASTER_MASKED,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,    VIS_SHADER_RESOLVE,
-    VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_BLEND,         VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
+    VIS_SHADER_RESOLVE,       VIS_SHADER_RESOLVE_RT,
 };
 
 static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
@@ -136,6 +145,7 @@ static const char *const k_compute_names[VIS_COMPUTE_COUNT] = {
     "vis voxel raster",
     "vis cull cells",
     "vis sw raster (masked)",
+    "vis blend",
     "vis resolve (ray traced)",
     "vis resolve (virtual shadows)",
     "vis resolve (ray traced, virtual shadows)",
@@ -269,8 +279,9 @@ NphResult render_vis_create(NphRenderer *r)
         // Only the raster path in use: a mesh shader cannot even be loaded
         // on a device without the extension, nor the ray-traced resolve on
         // one without ray queries.
-        const bool ray_queries =
-            i == (u32)VIS_SHADER_RESOLVE_RT || i == (u32)VIS_SHADER_VOXEL_RESOLVE_RT;
+        const bool ray_queries = i == (u32)VIS_SHADER_RESOLVE_RT ||
+                                 i == (u32)VIS_SHADER_VOXEL_RESOLVE_RT ||
+                                 i == (u32)VIS_SHADER_BLEND_FRAG_RT;
         // The page requests only where textures are paged.
         const bool paging_only = i == (u32)VIS_SHADER_PAGE_REQUESTS;
         if ((mesh_stage && !v->mesh_shaders) || (vertex_stage && v->mesh_shaders) ||
@@ -419,19 +430,18 @@ NphResult render_vis_create(NphRenderer *r)
     }
     // The blended surfaces, into the HDR format, testing the visibility
     // buffer's depth themselves: with and without shadow rays, and with and
-    // without the virtual shadow map.
+    // without the virtual shadow map. One pipeline draws every one of a frame's
+    // (ADR-0097), culling back faces of index lists wound for it.
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
             if ((rt != 0U && !r->rt.supported) || (map != 0U && !vsm)) {
                 continue;
             }
-            for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
-                for (u32 g = 0; g < 3U; ++g) {
-                    if (g == 0U || r->gi.supported) {
-                        NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, c,
-                                                        v->hdr_format, rt != 0U, map != 0U, true, g,
-                                                        &v->blend_pipelines[g][rt][map][c]));
-                    }
+            for (u32 g = 0; g < 3U; ++g) {
+                if (g == 0U || r->gi.supported) {
+                    NPH_TRY(render_forward_pipeline(
+                        r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW, v->hdr_format,
+                        rt != 0U, map != 0U, true, g, &v->blend_pipelines[g][rt][map]));
                 }
             }
         }
@@ -484,10 +494,8 @@ void render_vis_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, v->raster_skin);
     for (u32 rt = 0; rt < 2U; ++rt) {
         for (u32 map = 0; map < 2U; ++map) {
-            for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
-                for (u32 g = 0; g < 3U; ++g) {
-                    nph_gpu_pipeline_destroy(dev, v->blend_pipelines[g][rt][map][c]);
-                }
+            for (u32 g = 0; g < 3U; ++g) {
+                nph_gpu_pipeline_destroy(dev, v->blend_pipelines[g][rt][map]);
             }
         }
     }
@@ -704,16 +712,24 @@ static void read_stats(NphRenderer *r)
     s->vis_many_rays = c->many_rays;
     s->vis_reflect_dropped = c->reflect_dropped;
     s->vis_gi_dropped = c->gi_dropped;
+    // The blended surfaces the GPU drew (ADR-0097): the production path's draws.
+    s->blended = nph_min_u32(c->blend_draws, r->desc.max_blend_draws);
+    s->draws = s->blended;
+    s->dropped = c->blend_draws - s->blended;
+    s->triangles = c->blend_triangles;
+    s->vis_blended_culled = c->blend_culled;
+    s->vis_blended_occluded = c->blend_occluded;
     const u32 fresh = c->overflow & ~v->overflow_logged;
     if (fresh != 0U) {
         NPH_LOG_WARN(&NPH_LOG_RENDER,
-                     "%s: GPU culling dropped work (frame %llu):%s%s%s%s; raise the capacities "
+                     "%s: GPU culling dropped work (frame %llu):%s%s%s%s%s; raise the capacities "
                      "in NphRendererDesc (said once per list)",
                      r->name, (unsigned long long)s->vis_frame,
                      (fresh & (u32)NPH_VIS_OVERFLOW_MESHLETS) != 0U ? " max_cull_meshlets" : "",
                      (fresh & (u32)NPH_VIS_OVERFLOW_CLUSTERS) != 0U ? " max_visible_clusters" : "",
                      (fresh & (u32)NPH_VIS_OVERFLOW_DEFERRED) != 0U ? " max_deferred" : "",
-                     (fresh & (u32)NPH_VIS_OVERFLOW_LOD_NODES) != 0U ? " max_lod_nodes" : "");
+                     (fresh & (u32)NPH_VIS_OVERFLOW_LOD_NODES) != 0U ? " max_lod_nodes" : "",
+                     (fresh & (u32)NPH_VIS_OVERFLOW_BLEND) != 0U ? " max_blend_draws" : "");
         v->overflow_logged |= fresh;
     }
 }
@@ -886,6 +902,17 @@ static void write_view(NphRenderer *r, const NphRenderView *view, u32 width, u32
     NphRenderViewData *rv = render_frame_at(r, r->layout.view_offset);
     rv->light_grid = vd->light_grid;
 
+    // The blended surfaces (ADR-0097): the items, and what the cull and the sort write of
+    // those in view, whose records the forward shaders find through the render view.
+    vd->blend_items = nph_gpu_buffer_address(dev, v->blend_items);
+    vd->blend_draws = nph_gpu_buffer_address(dev, v->blend_draws);
+    vd->blend_keys = nph_gpu_buffer_address(dev, v->blend_keys);
+    vd->blend_commands = nph_gpu_buffer_address(dev, v->blend_commands);
+    vd->blend_indices = nph_gpu_buffer_address(dev, v->blend_indices);
+    vd->blend_item_slots = v->blend_end;
+    vd->max_blend_draws = d->max_blend_draws;
+    rv->draws_address = vd->blend_draws;
+
     // The resolve's push constants (NphVisResolvePush), from the same values.
     NphVisResolvePush *rp = &v->resolve_push;
     memset(rp, 0, sizeof *rp);
@@ -953,6 +980,12 @@ static void clear_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     nph_gpu_cmd_update_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
                               (u64)offsetof(NphVisArgs, lod_group_args), no_groups,
                               sizeof no_groups);
+    // The blended surfaces' sort and draws: none until their cull lists them.
+    if (r->vis.frame.blend) {
+        const u32 no_draws[4] = {0U, 1U, 1U, 0U};
+        nph_gpu_cmd_update_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
+                                  (u64)offsetof(NphVisArgs, blend_args), no_draws, sizeof no_draws);
+    }
     // The voxel resolve's: no tile listed yet, and one in y and z.
     if (r->vis.frame_voxels) {
         nph_gpu_cmd_fill_buffer(cmd, nph_gpu_rg_buffer(graph, f->args),
@@ -1500,6 +1533,102 @@ static void voxel_resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, f->args),
                                   ARGS_OFFSET(voxel_resolve_args));
+}
+
+// The blended surfaces (vis_blend.comp; ADR-0097). First, where submeshes are
+// newly drawn blended, their index lists wound into the pool: a dispatch a
+// list, an invocation a triangle (vis_scene.c blend_indices_acquire: every
+// entry is of a list still drawn).
+static void blend_wind_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    RenderVis *v = &r->vis;
+    nph_gpu_cmd_bind_pipeline(cmd, v->compute[VIS_COMPUTE_BLEND]);
+    for (u32 i = 0; i < v->blend_copy_count; ++i) {
+        const VisBlendCopy c = v->blend_copies[i];
+        const RenderMesh *mesh = &r->meshes[c.mesh];
+        RenderBlendIndices *b = &mesh->blend_indices[c.which];
+        const NphRenderSubmesh *sm = &mesh->submeshes[c.which / (u32)NPH_VIS_BLEND_WINDINGS];
+        NphVisPush p = push_of(r, 0U, NPH_VIS_BLEND_WIND);
+        p.arg0 = sm->index_count / 3U;
+        p.arg1 = c.which % (u32)NPH_VIS_BLEND_WINDINGS;
+        p.arg2 = b->range.offset;
+        p.arg3 = sm->index_offset;
+        p.arg4 = c.mesh;
+        nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+        dispatch_items(cmd, p.arg0);
+        b->queued = 0U;
+    }
+    v->blend_copy_count = 0U;
+}
+
+// The cull, an invocation an item slot, then the sort, a workgroup a draw the
+// cull listed.
+static void blend_cull_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NPH_UNUSED(graph);
+    NphRenderer *r = (NphRenderer *)user;
+    const NphVisPush p = push_of(r, 0U, NPH_VIS_BLEND_CULL);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_BLEND]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    dispatch_items(cmd, r->vis.frame.blend_slots);
+}
+
+static void blend_sort_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    const NphVisPush p = push_of(r, 0U, NPH_VIS_BLEND_SORT);
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.compute[VIS_COMPUTE_BLEND]);
+    nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
+    nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, r->vis.frame.args),
+                                  ARGS_OFFSET(blend_args));
+}
+
+// The frame's blended surfaces with `pipeline`: one indirect draw of the draws
+// the sort wrote, farthest first, as many as the cull counted, their indices
+// the pool's.
+static void blend_draw(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd,
+                       NphGpuPipeline pipeline)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphRenderPush push = r->push;
+    push.visbuffer_index = render_vis_visbuffer_index(r, graph);
+    nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+    nph_gpu_cmd_push_constants(cmd, &push, (u32)sizeof push);
+    nph_gpu_cmd_bind_index_buffer(cmd, nph_gpu_rg_buffer(graph, f->blend_indices), 0U,
+                                  NPH_GPU_INDEX_U32);
+    nph_gpu_cmd_draw_indexed_indirect_count(
+        cmd, nph_gpu_rg_buffer(graph, f->blend_commands), 0U, nph_gpu_rg_buffer(graph, f->args),
+        ARGS_OFFSET(blend_args), r->desc.max_blend_draws, (u32)sizeof(NphVisDraw));
+}
+
+// Over the resolved image.
+static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    // A frame that traces shadow rays, or has the sun's virtual shadow map, or
+    // the radiance cache, uses the pipeline that does; one whose only light is
+    // the cache's, the pipeline for that (the debug views want the rest).
+    const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
+    const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
+    const bool cache_only = r->many.frame_no_other_light && !r->vis.debug_view;
+    const u32 gi = r->gi.frame_active != 0 ? (cache_only ? 2U : 1U) : 0U;
+    blend_draw(r, graph, cmd, r->vis.blend_pipelines[gi][rt][vsm]);
+}
+
+// Again, asking for the pages of the sun's virtual shadow map their shading
+// will read (vsm.c): rendering with no attachments, over the frame's extent.
+static void blend_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
+{
+    NphRenderer *r = (NphRenderer *)user;
+    NphGpuRenderingDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.width = r->vis.frame.width;
+    rd.height = r->vis.frame.height;
+    nph_gpu_cmd_begin_rendering(cmd, &rd);
+    blend_draw(r, graph, cmd, r->vsm.request);
+    nph_gpu_cmd_end_rendering(cmd);
 }
 
 static void stats_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
@@ -2099,11 +2228,61 @@ static NphResult declare_culling(NphGpuRenderGraph *graph, NphRenderer *r, const
     return declare_light_tiles(graph, r);
 }
 
+// The blended surfaces in view and their order (vis_blend.comp; ADR-0097),
+// after the frame's rasters and its depth pyramid, which the cull tests them
+// against: the cull, then the sort, which the passes that draw them read
+// (render_vis_read_blend).
+static NphResult declare_blend(NphGpuRenderGraph *graph, NphRenderer *r, const VisGraph *g)
+{
+    const VisFrame *f = &r->vis.frame;
+    NphGpuRgPass *p = NULL;
+    if (f->blend_copies) {
+        p = add_pass(graph, r, "vis blend indices", NPH_GPU_RG_PASS_COMPUTE, blend_wind_execute);
+        if (p == NULL) {
+            return NPH_RESULT_FULL;
+        }
+        nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+        nph_gpu_rg_write_buffer(p, f->blend_indices, NPH_GPU_RG_USE_SHADER_WRITE);
+    }
+    p = add_pass(graph, r, "vis blend cull", NPH_GPU_RG_PASS_COMPUTE, blend_cull_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->blend_items, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->instances, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->meshes, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, g->material_map, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_image(p, f->hzb, NPH_GPU_RG_USE_SAMPLED, 0U, NPH_GPU_ALL_MIPS);
+    nph_gpu_rg_write_buffer(p, f->counters, NPH_GPU_RG_USE_STORAGE_WRITE);
+    nph_gpu_rg_write_buffer(p, f->blend_draws, NPH_GPU_RG_USE_SHADER_WRITE);
+    nph_gpu_rg_write_buffer(p, f->blend_keys, NPH_GPU_RG_USE_SHADER_WRITE);
+    // The sort's workgroups, raised as it lists the draws.
+    nph_gpu_rg_write_buffer(p, f->args, NPH_GPU_RG_USE_STORAGE_WRITE);
+    p = add_pass(graph, r, "vis blend sort", NPH_GPU_RG_PASS_COMPUTE, blend_sort_execute);
+    if (p == NULL) {
+        return NPH_RESULT_FULL;
+    }
+    nph_gpu_rg_read_buffer(p, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(p, f->counters, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, f->blend_items, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(p, f->blend_keys, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_write_buffer(p, f->blend_commands, NPH_GPU_RG_USE_SHADER_WRITE);
+    return NPH_RESULT_OK;
+}
+
+void render_vis_read_blend(const NphRenderer *r, NphGpuRgPass *pass)
+{
+    const VisFrame *f = &r->vis.frame;
+    nph_gpu_rg_read_buffer(pass, f->blend_commands, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(pass, f->args, NPH_GPU_RG_USE_INDIRECT);
+    nph_gpu_rg_read_buffer(pass, f->blend_draws, NPH_GPU_RG_USE_SHADER_READ);
+    nph_gpu_rg_read_buffer(pass, f->blend_indices, NPH_GPU_RG_USE_INDEX);
+}
+
 NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
                            u32 width, u32 height, const NphMat4 *view_m, const NphMat4 *proj,
                            NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
-                           NphGpuRgBuffer sh, NphGpuRgExecuteFn blend_requests,
-                           NphGpuRgImage *out_hdr, NphRenderFrameStats *stats)
+                           NphGpuRgBuffer sh, NphGpuRgImage *out_hdr, NphRenderFrameStats *stats)
 {
     RenderVis *v = &r->vis;
     VisFrame *f = &v->frame;
@@ -2175,6 +2354,11 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->height = height;
     f->lod_steps = lod_steps(r, flags);
     f->lod_flat = (flags & (u32)NPH_VIS_VIEW_LOD) != 0U && v->lod_flat_meshes != 0U;
+    // The blended surfaces' passes, where the renderer lists any (ADR-0097), and whether
+    // the frame's first pass has their indices to copy into the pool.
+    f->blend = v->blend_listed != 0U ? 1 : 0;
+    f->blend_slots = v->blend_end;
+    f->blend_copies = f->blend && v->blend_copy_count != 0U ? 1 : 0;
 
     // Resources.
     NphGpuImageDesc vd;
@@ -2248,6 +2432,17 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     f->prev_transforms = g.prev_transforms;
     f->clusters = g.clusters;
     f->cells = g.cells;
+    if (f->blend) {
+        f->blend_indices = nph_gpu_rg_import_buffer(graph, v->blend_indices);
+        f->blend_items = nph_gpu_rg_import_buffer(graph, v->blend_items);
+        f->blend_draws = nph_gpu_rg_import_buffer(graph, v->blend_draws);
+        f->blend_keys = nph_gpu_rg_import_buffer(graph, v->blend_keys);
+        f->blend_commands = nph_gpu_rg_import_buffer(graph, v->blend_commands);
+        if (nph_gpu_rg_buffer_is_null(f->blend_commands)) {
+            NPH_PROFILE_END();
+            return NPH_RESULT_FULL;
+        }
+    }
     if (nph_gpu_rg_image_is_null(f->visbuffer) || nph_gpu_rg_image_is_null(f->hdr) ||
         nph_gpu_rg_image_is_null(f->hzb) || nph_gpu_rg_buffer_is_null(g.lists) ||
         nph_gpu_rg_buffer_is_null(f->stats) || nph_gpu_rg_buffer_is_null(f->light_tiles) ||
@@ -2265,10 +2460,13 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     if (res == NPH_RESULT_OK) {
         res = declare_culling(graph, r, &g);
     }
-    if (res == NPH_RESULT_OK && r->vsm.frame_active && blend_requests != NULL) {
+    if (res == NPH_RESULT_OK && f->blend) {
+        res = declare_blend(graph, r, &g);
+    }
+    if (res == NPH_RESULT_OK && r->vsm.frame_active && f->blend) {
         // The blended surfaces' pages, against the opaque depth (the
         // visibility buffer's, which the transparent pass tests too).
-        res = render_vsm_declare_blend_requests(r, graph, f->visbuffer, blend_requests);
+        res = render_vsm_declare_blend_requests(r, graph, f->visbuffer, blend_requests_execute);
     }
     if (res == NPH_RESULT_OK && r->vsm.frame_active) {
         // The sun's virtual shadow map: its pages drawn where the depth
@@ -2382,6 +2580,12 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_many_rays = last->vis_many_rays;
         stats->vis_reflect_dropped = last->vis_reflect_dropped;
         stats->vis_gi_dropped = last->vis_gi_dropped;
+        stats->draws = last->draws;
+        stats->blended = last->blended;
+        stats->dropped = last->dropped;
+        stats->triangles = last->triangles;
+        stats->vis_blended_culled = last->vis_blended_culled;
+        stats->vis_blended_occluded = last->vis_blended_occluded;
         stats->vsm_requested = last->vsm_requested;
         stats->vsm_drawn = last->vsm_drawn;
         stats->vsm_resident = last->vsm_resident;
@@ -2398,19 +2602,24 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
     return res;
 }
 
-// The transparent surfaces of a production frame: forward pipelines over
-// the resolved HDR image, testing the visibility buffer's depth themselves
-// (forward_frag.glsl k_vis_depth). Only called when blended draws exist.
+// The transparent surfaces of a production frame: the forward pipeline over
+// the resolved HDR image, testing the visibility buffer's depth itself
+// (forward_frag.glsl k_vis_depth), the draws the frame's sort wrote. Nothing
+// where the renderer lists no blended surface.
 NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *graph,
-                                         NphGpuRgExecuteFn draw, NphGpuRgImage env,
-                                         NphGpuRgImage specular, NphGpuRgImage lut,
-                                         NphGpuRgBuffer sh)
+                                         NphGpuRgImage env, NphGpuRgImage specular,
+                                         NphGpuRgImage lut, NphGpuRgBuffer sh)
 {
     VisFrame *f = &r->vis.frame;
-    NphGpuRgPass *p = add_pass(graph, r, "transparent", NPH_GPU_RG_PASS_GRAPHICS, draw);
+    if (!f->blend) {
+        return NPH_RESULT_OK;
+    }
+    NphGpuRgPass *p =
+        add_pass(graph, r, "transparent", NPH_GPU_RG_PASS_GRAPHICS, transparent_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
     }
+    render_vis_read_blend(r, p);
     NphGpuRgAttachment a;
     memset(&a, 0, sizeof a);
     a.load = NPH_GPU_LOAD_OP_LOAD;

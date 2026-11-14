@@ -327,6 +327,28 @@ f64 nph_render_ref_vis_frustum_margin(const NphVec4 planes[5], NphVec3 c, f32 r)
     return margin;
 }
 
+f64 nph_render_ref_vis_box_margin(const NphVec4 planes[5], NphVec3 c, NphVec3 e)
+{
+    const D3 cd = d3(c);
+    f64 margin = HUGE_VAL;
+    for (u32 i = 0; i < 5U; ++i) {
+        const D3 n = {(f64)planes[i].x, (f64)planes[i].y, (f64)planes[i].z};
+        const f64 reach = fabs(n.x) * (f64)e.x + fabs(n.y) * (f64)e.y + fabs(n.z) * (f64)e.z;
+        const f64 d = d3_dot(n, cd) + (f64)planes[i].w + reach;
+        margin = d < margin ? d : margin;
+    }
+    return margin;
+}
+
+u32 nph_render_ref_vis_blend_key(f32 view_z)
+{
+    u32 bits = 0U;
+    const f32 d = -view_z; // larger is farther
+    memcpy(&bits, &d, sizeof bits);
+    bits = (bits & 0x80000000U) != 0U ? ~bits : bits | 0x80000000U; // ascending with d
+    return ~bits;
+}
+
 f64 nph_render_ref_vis_cone_margin(NphVec3 apex, NphVec3 axis, f32 cutoff)
 {
     const D3 a = d3(apex);

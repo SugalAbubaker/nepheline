@@ -219,6 +219,34 @@ bool vis_sphere_in_frustum(VisViewRef view, vec3 c, float r)
     return true;
 }
 
+// Whether a box (camera-relative centre, half extents along the axes) is in
+// the frustum: on the inside of each of its planes (vis_sphere_in_frustum's)
+// with the corner furthest along the plane's inward normal. The world
+// partition's cells are culled by it (vis_cull_cells.comp), and the blended
+// surfaces' meshes (vis_blend.comp).
+bool vis_box_in_frustum(VisViewRef view, vec3 c, vec3 e)
+{
+    for (int i = 0; i < 5; ++i) {
+        const vec4 plane = view.v.frustum[i];
+        if (dot(plane.xyz, c) + dot(abs(plane.xyz), e) + plane.w < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The blended surfaces' order (vis_blend.comp; ADR-0097): the key of a
+// position's z in view space, which looks down -Z. The distance's bits are
+// made to ascend with it as an unsigned integer (a negative float's inverted,
+// a positive one's above them), then inverted, so that the farthest has the
+// least key: a blended surface composites over what lies behind it.
+uint vis_blend_key(float view_z)
+{
+    uint bits = floatBitsToUint(-view_z);
+    bits = (bits & 0x80000000u) != 0u ? ~bits : bits | 0x80000000u;
+    return ~bits;
+}
+
 // The meshlet normal-cone backface test (docs/cook.md "The meshlet normal
 // cone"): true when every triangle of the meshlet faces away from the
 // camera at the origin. `apex` is camera relative, `axis` the stored

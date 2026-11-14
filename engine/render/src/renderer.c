@@ -123,8 +123,14 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     };
     NphGpuGraphicsPipelineDesc d;
     memset(&d, 0, sizeof d);
+    // The production path's draw all of a frame's blended surfaces at once, whatever their
+    // sides and their transforms' handedness, from index lists wound for the one culling
+    // (ADR-0097).
+    NPH_ASSERT(!vis_depth || cull == (u32)RENDER_CULL_BACK_CCW);
     d.vertex = r->shaders[RENDER_SHADER_FORWARD_VERT];
-    d.fragment = r->shaders[frags[ray_query ? 1 : 0][alpha]];
+    d.fragment = !vis_depth
+                     ? r->shaders[frags[ray_query ? 1 : 0][alpha]]
+                     : r->vis.shaders[ray_query ? VIS_SHADER_BLEND_FRAG_RT : VIS_SHADER_BLEND_FRAG];
     const bool none = cull == (u32)RENDER_CULL_NONE || cull == (u32)RENDER_CULL_NONE_CW;
     const bool cw = cull == (u32)RENDER_CULL_BACK_CW || cull == (u32)RENDER_CULL_NONE_CW;
     d.cull_mode = none ? NPH_GPU_CULL_NONE : NPH_GPU_CULL_BACK;
@@ -150,13 +156,15 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     } else {
         d.depth.write = 1;
     }
-    d.name = names[alpha][cull];
-    // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2).
+    d.name = vis_depth ? "forward blended (indirect)" : names[alpha][cull];
+    // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2), and
+    // forward.vert's k_indirect.
     d.specialization[0] = vsm ? 1U : 0U;
     d.specialization[1] = vis_depth ? 1U : 0U;
     d.specialization[2] = gi != 0U ? 1U : 0U;
     d.specialization[3] = gi == 2U ? 1U : 0U;
-    d.specialization_count = vis_depth ? 4U : (vsm ? 1U : 0U);
+    d.specialization[4] = vis_depth ? 1U : 0U;
+    d.specialization_count = vis_depth ? 5U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -342,6 +350,12 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->max_lod_groups = nph_min_u32(
         round_up_64(d->max_lod_groups != 0U ? d->max_lod_groups : 1U << 18U), 65535U * 64U);
     d->max_lod_flat_groups = d->max_lod_flat_groups != 0U ? d->max_lod_flat_groups : 1U << 14U;
+    // The blended surfaces' table and a frame's draws of them (ADR-0097).
+    d->max_blend_items = round_up_64(
+        d->max_blend_items != 0U ? d->max_blend_items : nph_min_u32(d->max_instances, 65536U));
+    d->max_blend_draws = nph_min_u32(
+        round_up_64(d->max_blend_draws != 0U ? d->max_blend_draws : 4096U), d->max_blend_items);
+    d->blend_index_pool = d->blend_index_pool != 0U ? d->blend_index_pool : 1U << 21U;
     d->vsm_pages = d->vsm_pages != 0U ? d->vsm_pages : 4096U;
     d->max_vsm_meshlets = d->max_vsm_meshlets != 0U ? d->max_vsm_meshlets : 1U << 20U;
     d->max_vsm_draws = d->max_vsm_draws != 0U ? d->max_vsm_draws : 1U << 20U;
@@ -349,6 +363,11 @@ static NphResult apply_defaults(NphRendererDesc *d)
     d->gi_cells = d->gi_cells != 0U ? d->gi_cells : 1U << 18U;
     d->gi_rays = d->gi_rays != 0U ? d->gi_rays : 65536U;
     if (d->max_visible_clusters > (u32)NPH_VIS_MAX_CLUSTERS) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // A frame's blended draws are ordered each against every other (vis_blend.comp), and an
+    // item's slot is the order's last word.
+    if (d->max_blend_draws > 16384U || d->max_blend_items > 1U << 24U) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     // The cache's slots come in buckets, and a slot's index fits 32 bits.
@@ -1231,6 +1250,16 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     // voxels alone has neither: its streams stay null, their addresses 0.
     const u32 accel_input = r->rt.supported ? (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT : 0U;
     const bool triangles = !voxels_alone(desc);
+    if (res == NPH_RESULT_OK && triangles) {
+        // Where its submeshes' indices lie in the blended surfaces' pool, by winding, while
+        // instances draw them blended (vis_scene.c; ADR-0097): none yet.
+        const u32 lists = desc->submesh_count * (u32)NPH_VIS_BLEND_WINDINGS;
+        m->blend_indices = NPH_ALLOC_ARRAY_ZEROED(r->alloc, RenderBlendIndices, lists);
+        res = m->blend_indices != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+        for (u32 s = 0; res == NPH_RESULT_OK && s < lists; ++s) {
+            m->blend_indices[s].range = NPH_RANGE_NULL;
+        }
+    }
     if (res == NPH_RESULT_OK) {
         m->submesh_count = desc->submesh_count;
         memcpy(m->submeshes, desc->submeshes, sizeof(NphRenderSubmesh) * desc->submesh_count);
@@ -1280,6 +1309,10 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         if (m->ray_submeshes != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, desc->submesh_count);
         }
+        if (m->blend_indices != NULL) {
+            NPH_FREE_ARRAY(r->alloc, RenderBlendIndices, m->blend_indices,
+                           desc->submesh_count * (u32)NPH_VIS_BLEND_WINDINGS);
+        }
         if (m->submeshes != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
         }
@@ -1325,6 +1358,11 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     render_rt_mesh_destroy(r, slot);
     if (m->ray_submeshes != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, m->submesh_count);
+    }
+    // No instance is left to draw them blended: none is in the pool.
+    if (m->blend_indices != NULL) {
+        NPH_FREE_ARRAY(r->alloc, RenderBlendIndices, m->blend_indices,
+                       m->submesh_count * (u32)NPH_VIS_BLEND_WINDINGS);
     }
     NPH_FREE_ARRAY(r->alloc, NphRenderSubmesh, m->submeshes, m->submesh_count);
     memset(m, 0, sizeof *m);
@@ -1595,10 +1633,18 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
             r->masked_materials -= 1U;
         }
     }
+    // Its instances' submeshes are the blended surfaces' items while it blends, their index
+    // lists wound for its sides (ADR-0097).
+    const bool blends = desc->alpha_mode == NPH_RENDER_ALPHA_BLEND;
+    const bool blend_changed =
+        (r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND) != blends ||
+        (blends && (r->materials[slot].desc.double_sided != 0) != (desc->double_sided != 0));
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     r->material_version += 1U;
-    render_vis_materials_changed(r);
+    if (blend_changed) {
+        render_vis_materials_changed(r);
+    }
     return NPH_RESULT_OK;
 }
 
@@ -1622,10 +1668,13 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
                       "triangles for the rays made for it: destroy the instances first",
                       r->name, r->materials[slot].ray_users);
     }
+    const bool blended = r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND;
     memset(&r->materials[slot], 0, sizeof r->materials[slot]);
     release_slot(&r->material_pool, material.value);
     r->material_version += 1U;
-    render_vis_materials_changed(r);
+    if (blended) {
+        render_vis_materials_changed(r);
+    }
 }
 
 bool nph_render_material_is_valid(const NphRenderer *r, NphRenderMaterial material)

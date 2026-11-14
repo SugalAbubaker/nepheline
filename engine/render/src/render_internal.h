@@ -242,6 +242,16 @@ typedef struct RenderPaging {
     b32 frame_active; // a paged texture exists: the view carries the paging record
 } RenderPaging;
 
+// A submesh's indices in the blended surfaces' index pool (vis_scene.c; ADR-0097), wound
+// one of NPH_VIS_BLEND_WINDINGS ways, there while an instance draws it blended so.
+typedef struct RenderBlendIndices {
+    NphRange range; // null: not in the pool
+    u32 users;      // the listed items that draw it
+    // While its list waits to be wound into its range (the next production frame does), its
+    // place in RenderVis.blend_copies plus one; 0 once it is there.
+    u32 queued;
+} RenderBlendIndices;
+
 typedef struct RenderMesh {
     u32 handle;
     NphGpuBuffer positions;
@@ -252,6 +262,8 @@ typedef struct RenderMesh {
     NphRenderSubmesh *submeshes; // from the renderer's allocator
     u32 submesh_count;
     u32 index_count;
+    // [submesh * NPH_VIS_BLEND_WINDINGS + winding], with `submeshes` (null: no triangles).
+    RenderBlendIndices *blend_indices;
     NphVec3 position_offset;
     NphVec3 position_scale;
     NphAABB bounds;
@@ -376,8 +388,13 @@ typedef struct RenderInstance {
     b32 proxy_finest;  // of its cell's finest level apart (NPH_VIS_INSTANCE_FINEST)
     // The production path.
     NphRange material_range; // its entries in the material map
-    u32 blend_index;         // place in the blend list; NPH_U32_MAX: not listed
-    u32 run_entry;           // place in its cell's run, or the run of no cell (vis_runs.c)
+    // Its blended submeshes' items (RenderVis.blend_items; ADR-0097): null, and none, where
+    // none of them blends; and whether its transform mirrored when they were listed (its
+    // one-sided submeshes' lists are wound for it).
+    NphRange blend_range;
+    u32 blend_count;
+    b32 blend_mirrored;
+    u32 run_entry; // place in its cell's run, or the run of no cell (vis_runs.c)
 } RenderInstance;
 
 // A run of instance slots in the cells' member buffer (ADR-0064;
@@ -718,6 +735,11 @@ typedef enum VisShader {
     // the pages the opaque pixels sample.
     VIS_SHADER_PAGE_REQUESTS,
     VIS_SHADER_SW_RASTER_MASKED,
+    VIS_SHADER_BLEND, // the blended surfaces' cull and sort (ADR-0097)
+    // And their fragment stage (forward_blend_indirect.frag), with shadow rays where the
+    // device has ray queries.
+    VIS_SHADER_BLEND_FRAG,
+    VIS_SHADER_BLEND_FRAG_RT,
     VIS_SHADER_COUNT
 } VisShader;
 
@@ -738,6 +760,7 @@ typedef enum VisCompute {
     VIS_COMPUTE_VOXEL_RASTER,     // voxel clusters (ADR-0061)
     VIS_COMPUTE_CULL_CELLS,       // a world partition's cells, first (ADR-0064)
     VIS_COMPUTE_SW_RASTER_MASKED, // small masked clusters (ADR-0071)
+    VIS_COMPUTE_BLEND,            // the blended surfaces' cull and sort (ADR-0097)
     VIS_COMPUTE_RESOLVE_RT,
     VIS_COMPUTE_RESOLVE_VSM,    // with the sun's virtual shadow map (vsm.c)
     VIS_COMPUTE_RESOLVE_RT_VSM, // with both
@@ -770,6 +793,12 @@ typedef struct VisPendingFree {
 } VisPendingFree;
 
 typedef NPH_ARRAY(VisPendingFree) VisPendingFreeArray;
+
+// A submesh whose list a frame is to wind into the blended surfaces' index pool.
+typedef struct VisBlendCopy {
+    u32 mesh;  // its mesh's slot
+    u32 which; // submesh * NPH_VIS_BLEND_WINDINGS + winding
+} VisBlendCopy;
 
 // One frame's render-graph handles and push-constant inputs, read by the
 // pass callbacks.
@@ -810,16 +839,27 @@ typedef struct VisFrame {
     // culls, copied to the slot's readback.
     NphGpuRgBuffer cell_requests;
     NphGpuRgBuffer request_readback;
+    // The blended surfaces (ADR-0097): whether the frame has their passes (the renderer
+    // lists some), the item slots its cull walks, and their buffers.
+    b32 blend;
+    b32 blend_copies; // it winds lists into the index pool first
+    u32 blend_slots;
+    NphGpuRgBuffer blend_indices;
+    NphGpuRgBuffer blend_items;
+    NphGpuRgBuffer blend_draws;
+    NphGpuRgBuffer blend_keys;
+    NphGpuRgBuffer blend_commands;
 } VisFrame;
 
 typedef struct RenderVis {
     b32 supported;           // the device can run the production path and it was not disabled
     b32 mesh_shaders;        // rasterise with mesh shaders (else indirect draws)
     NphGpuFormat hdr_format; // RENDER_HDR_COMPACT where it can, else RENDER_HDR_FORMAT
-    // Blended forward pipelines into hdr_format (null when it is
-    // RENDER_HDR_FORMAT): [ray-traced shadows][the virtual shadow map][cull].
-    // [gi: 0 none, 1 the cache's too, 2 the cache's only][rt][vsm][cull]
-    NphGpuPipeline blend_pipelines[3][2][2][RENDER_CULL_COUNT];
+    // The blended surfaces' forward pipelines into hdr_format, each drawing every one of a
+    // frame's with one indirect draw (forward.vert k_indirect; ADR-0097): [the radiance
+    // cache: 0 none, 1 the cache's too, 2 the cache's only][ray-traced shadows][the virtual
+    // shadow map].
+    NphGpuPipeline blend_pipelines[3][2][2];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2];   // [opaque, masked]: mesh or vertex pipelines
@@ -941,10 +981,31 @@ typedef struct RenderVis {
     // follows them alone (rt.c), so a streamed cell's levels, of voxels
     // alone, come and go without rebuilding it (ADR-0063 stage 4).
     u32 frame_traced;
-    // Instances with a blended material: the CPU draws those itself.
-    u32 *blend;
-    u32 blend_count;
-    b32 blend_stale; // a material's alpha mode changed: rebuild the list
+    // The blended surfaces (ADR-0097; vis_blend.comp): an item for each blended submesh of
+    // an instance, in a table the GPU culls, orders and draws from. An instance's items are
+    // a range of it (RenderInstance.blend_range), written when the instance is made, freed
+    // with it, and all listed afresh when a material begins or ends to blend (blend_stale).
+    // The table is mirrored here, and the chunks of it that changed are sent with the next
+    // production frame (blend_dirty: a bit per RENDER_BLEND_CHUNK items).
+    // Their draws are indexed draws from one index buffer, a pool that holds each blended
+    // submesh's indices once for each winding its instances draw it with
+    // (RenderMesh.blend_indices), wound there from its mesh's by the next production frame
+    // (blend_copies: the lists waiting, at most one a range of the pool, so max_blend_items).
+    NphGpuBuffer blend_items;    // NphVisBlendItem[max_blend_items]
+    NphGpuBuffer blend_draws;    // NphRenderDrawData[max_blend_draws]: a frame's, from the cull
+    NphGpuBuffer blend_keys;     // uvec2[max_blend_draws]: their keys and items
+    NphGpuBuffer blend_commands; // VkDrawIndexedIndirectCommand[max_blend_draws]: from the sort
+    NphGpuBuffer blend_indices;  // u32[blend_index_pool]
+    NphRangeAllocator blend_index_ranges;
+    VisBlendCopy *blend_copies;
+    u32 blend_copy_count;
+    NphVisBlendItem *blend_mirror;
+    u64 *blend_dirty;
+    NphRangeAllocator blend_ranges;
+    u32 blend_listed;      // the items of listed instances
+    u32 blend_end;         // one past the last item slot used since the table was last empty
+    b32 blend_stale;       // a material began or ended to blend: list every instance afresh
+    b32 blend_full_logged; // an instance's items did not fit max_blend_items: said once
 
     // The hierarchical depth of the last production frame.
     NphGpuImage hzb;
@@ -1395,7 +1456,9 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // `vsm`, the one that reads the sun's virtual shadow map (vsm.c). With
 // `vis_depth` (blended only), the production path's: no depth attachment,
 // the fragment stage testing the visibility buffer's depth itself
-// (forward_frag.glsl k_vis_depth).
+// (forward_frag.glsl k_vis_depth), and every draw of a frame in one indirect
+// draw (k_indirect; ADR-0097): `cull` is then RENDER_CULL_BACK_CCW, for which
+// the draws' index lists are wound.
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
                                   bool ray_query, bool vsm, bool vis_depth, u32 gi,
                                   NphGpuPipeline *out);
@@ -1485,10 +1548,9 @@ NphResult render_vsm_declare_begin(NphRenderer *r, NphGpuRenderGraph *graph,
 // A pass that requests pages (the depth pyramid's mip 0) writes the work.
 void render_vsm_request_pages(const NphRenderer *r, NphGpuRgPass *pass);
 // The page requests of the blended surfaces: `draw` records the blended
-// draws with the pipeline it is given, inside rendering over the frame's
-// extent with no attachments, each fragment testing the opaque surfaces'
-// depth in `visbuffer` itself (vsm_request.frag), before
-// render_vsm_declare_pages.
+// draws with RenderVsm.request, inside rendering over the frame's extent with
+// no attachments, each fragment testing the opaque surfaces' depth in
+// `visbuffer` itself (vsm_request.frag), before render_vsm_declare_pages.
 NphResult render_vsm_declare_blend_requests(NphRenderer *r, NphGpuRenderGraph *graph,
                                             NphGpuRgImage visbuffer, NphGpuRgExecuteFn draw);
 // The page tables, the allocation, the casters' culling, the page raster,
@@ -1754,28 +1816,27 @@ NphResult render_vis_target_pipelines(NphRenderer *r, RenderTargetPipelines *t,
 // and every pass from the scene update to the resolve and the transparent
 // surfaces, ending in the HDR image `*out_hdr` that the tonemap reads.
 // `view_proj`, `view_m`, and `proj` are the frame's camera-relative
-// matrices.
-// `blend_requests`, where the frame has blended draws, records them with
-// the pipeline RenderVsm.request (the sun's virtual shadow map asks for
-// their pages with it; it is not called without the map).
+// matrices. Where the renderer lists blended surfaces the frame culls and
+// orders them (VisFrame.blend), and asks for their pages of the sun's
+// virtual shadow map where it has one.
 NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRenderGraph *graph,
                            u32 width, u32 height, const NphMat4 *view_m, const NphMat4 *proj,
                            NphGpuRgImage env, NphGpuRgImage specular, NphGpuRgImage lut,
-                           NphGpuRgBuffer sh, NphGpuRgExecuteFn blend_requests,
-                           NphGpuRgImage *out_hdr, NphRenderFrameStats *stats);
+                           NphGpuRgBuffer sh, NphGpuRgImage *out_hdr, NphRenderFrameStats *stats);
 // The bindless sampled index of the frame's visibility buffer (its
 // R32G32_UINT view: the depth's bits in y), for the passes that test its
 // depth themselves: the blended surfaces, their page requests, and the
 // depth-tested debug lines (valid inside callbacks).
 u32 render_vis_visbuffer_index(const NphRenderer *r, NphGpuRenderGraph *graph);
-// The transparent surfaces of a production frame, after render_vis_frame:
-// the visibility buffer's depth into a depth attachment (unless the frame
-// already has it), then `draw` (the forward pipelines' blended draws) over
-// the HDR image.
+// The transparent surfaces of a production frame, after render_vis_frame, where
+// it has them (VisFrame.blend): the draws its sort wrote, over the HDR image,
+// each fragment testing the visibility buffer's depth itself.
 NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *graph,
-                                         NphGpuRgExecuteFn draw, NphGpuRgImage env,
-                                         NphGpuRgImage specular, NphGpuRgImage lut,
-                                         NphGpuRgBuffer sh);
+                                         NphGpuRgImage env, NphGpuRgImage specular,
+                                         NphGpuRgImage lut, NphGpuRgBuffer sh);
+// What a pass that draws the frame's blended surfaces reads: the sort's draws
+// and their count, the cull's records, and the index pool.
+void render_vis_read_blend(const NphRenderer *r, NphGpuRgPass *pass);
 
 // vis_scene.c: the GPU scene.
 NphResult render_vis_scene_create(NphRenderer *r);
@@ -1838,8 +1899,13 @@ NphResult render_vis_runs_upload(NphRenderer *r);
 // frame can read (vis_scene.c).
 void render_vis_member_range_free_later(NphRenderer *r, NphRange range);
 void render_vis_member_range_free(NphRenderer *r, NphRange range);
-// A material's alpha mode may have changed: the blend list is rebuilt.
+// A material began or ended to blend (or one that blended is gone): the next
+// production frame lists every instance's blended submeshes afresh.
 void render_vis_materials_changed(NphRenderer *r);
+// The blended surfaces' items that changed since the last production frame,
+// with a frame's other uploads, before its passes (ADR-0097): the instances
+// listed afresh first where a material began or ended to blend.
+NphResult render_vis_blend_upload(NphRenderer *r);
 // A light was created, changed, or destroyed: its record is sent with the
 // next production frame.
 void render_vis_light_changed(NphRenderer *r, u32 slot);
@@ -1868,5 +1934,3 @@ NphResult render_vis_voxel_reserve(NphRenderer *r, const NphRenderMeshDesc *d, N
 NphResult render_vis_voxel_upload(NphRenderer *r, u32 slot, const NphRenderMeshDesc *d,
                                   NphAllocator *scratch);
 void render_vis_voxel_release(NphRenderer *r, NphRange range);
-// The instances the CPU draws itself (blended materials).
-const u32 *render_vis_blend_list(NphRenderer *r, u32 *out_count);

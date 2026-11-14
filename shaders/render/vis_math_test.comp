@@ -40,5 +40,7 @@ void main()
                                       c.light_cone.y);
     r.zbin = nph_zbin(c.light_cone.z, projection.z,
                       float(NPH_RENDER_ZBINS) / float(NPH_RENDER_ZBIN_OCTAVES));
+    r.box_in_frustum = vis_box_in_frustum(view, c.sphere.xyz, c.extent.xyz) ? 1u : 0u;
+    r.blend_key = vis_blend_key(c.view_z);
     VisMathResultsRef(pc.results).r[i] = r;
 }

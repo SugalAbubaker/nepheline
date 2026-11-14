@@ -129,8 +129,10 @@ typedef struct NphRendererDesc {
     u32 max_lights;    // (256), at most NPH_RENDER_MAX_LIGHTS (4096)
     // NphRenderManyLight (0, the default: none, and nothing is paid for them).
     u32 max_many_lights;
-    u32 max_cells;   // a world partition's cells (4096), at most 2^24 - 1
-    u32 max_draws;   // visible submeshes per frame (16384); the rest are dropped and logged
+    u32 max_cells; // a world partition's cells (4096), at most 2^24 - 1
+    // The reference renderer's visible submeshes per frame (16384); the rest are dropped and
+    // logged. The production path's draws are the GPU's (max_blend_draws below).
+    u32 max_draws;
     u32 debug_lines; // per frame, depth-tested and overlay each (32768)
     // Image-based lighting resolution; zero picks the default.
     u32 environment_size; // level-0 face extent of the environment cube (256), a power of two
@@ -177,6 +179,23 @@ typedef struct NphRendererDesc {
                               // workgroups take)
     u32 max_lod_flat_groups;  // the most groups one instance hands the flat cull, past
                               // which it walks its hierarchy instead (2^14: ADR-0070)
+    // Blended surfaces (ADR-0097): the GPU culls, orders and draws them, from a table of the
+    // instances' blended submeshes. max_blend_items is the table's size: the blended
+    // submeshes of all instances (the smaller of max_instances and 65536, as a default; an
+    // instance whose submeshes do not fit is drawn without them, and it is logged).
+    // max_blend_draws is how many of them a frame draws at most (4096; at most 16384, and no
+    // more than max_blend_items): those in view past it are dropped
+    // (NPH_RENDER_VIS_OVERFLOW_BLEND). A frame orders its draws by counting, each against
+    // every other, so the GPU's cost of it grows with the square of those in view
+    // (docs/benchmarks.md "Blended surfaces"). blend_index_pool is the indices of every
+    // submesh some instance draws blended, each submesh's once whatever its instances
+    // (2^21: 8 MB; a two-sided material's submesh takes twice its indices, and a submesh
+    // drawn by mirroring instances and others, or with one-sided materials and two-sided,
+    // a list for each); an instance whose submeshes' do not fit is drawn without them too,
+    // and it is logged.
+    u32 max_blend_items;
+    u32 max_blend_draws;
+    u32 blend_index_pool;
     // The voxel pool (ADR-0063 stage 3c): one GPU buffer of this many bytes
     // that meshes of voxels alone live in, a range each (256-byte aligned) and
     // no buffers of their own, so that making one allocates nothing on the
@@ -1205,12 +1224,18 @@ f32 nph_render_view_focal_length(const NphRenderView *view);
 f32 nph_render_exposure_from_ev100(f32 ev100);
 
 typedef struct NphRenderFrameStats {
-    u32 instances;           // live instances
-    u32 culled;              // of those, outside the frustum or hidden
-    u32 draws;               // submesh draws issued (opaque + masked + blended)
-    u32 blended;             // of those, blended
-    u32 dropped;             // visible draws past max_draws
-    u32 triangles;           // drawn
+    u32 instances; // live instances
+    u32 culled;    // of those, outside the frustum or hidden (the production path: hidden;
+                   // what its GPU culls is in the vis_ fields)
+    // The reference renderer's submesh draws (opaque, masked and blended), those of them
+    // that are blended, the visible ones past max_draws, and the triangles drawn. The
+    // production path leaves every draw to the GPU: these are then its blended surfaces'
+    // alone (ADR-0097), the draws it made of them, those in view past max_blend_draws, and
+    // their triangles, read back like the vis_ fields below, of the frame `vis_frame`.
+    u32 draws;
+    u32 blended;
+    u32 dropped;
+    u32 triangles;
     u32 lights;              // live lights (the reference evaluates each for every pixel)
     u32 many_lights;         // of NphRenderManyLight, drawn this frame
     b32 many_lights_rebuilt; // a change had this frame rebuild them, on the main thread
@@ -1266,6 +1291,8 @@ typedef struct NphRenderFrameStats {
     u32 vis_reflect_dropped;     // reflections' rays whose cell's bucket was full (ADR-0077)
     u32 vis_gi_dropped;          // the radiance cache's samples whose cell's bucket was full
                                  // (ADR-0091)
+    u32 vis_blended_culled;      // blended submeshes of shown instances out of view (ADR-0097)
+    u32 vis_blended_occluded;    // and those in view behind the frame's opaque surfaces
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages
@@ -1345,6 +1372,7 @@ typedef enum NphRenderVisOverflow {
     NPH_RENDER_VIS_OVERFLOW_CLUSTERS = 1U << 1U,  // max_visible_clusters
     NPH_RENDER_VIS_OVERFLOW_DEFERRED = 1U << 2U,  // max_deferred
     NPH_RENDER_VIS_OVERFLOW_LOD_NODES = 1U << 3U, // max_lod_nodes, max_lod_groups
+    NPH_RENDER_VIS_OVERFLOW_BLEND = 1U << 4U,     // max_blend_draws
 } NphRenderVisOverflow;
 
 // Whether the renderer has the production path: the device has what it
