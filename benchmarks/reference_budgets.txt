@@ -51,7 +51,9 @@
 # their 1 % lows Bistro's street turn (7.34 ms) and the city's rooftop (8.03) are past the 6.94 ms
 # gate, the other sixteen views within it. Bistro's street, street walk and terrace take 0.074 to
 # 0.089 ms of the CPU a frame, past the flat 50 us here, as they have since 2026-11-12 and not by
-# this change: the rows stand, and say so until that is found)
+# this change: the rows stand, and say so. It is Bistro's glass, 342 blended instances since
+# ADR-0094, which the production path draws from the CPU, 279 of them in the street's view
+# (docs/benchmarks.md "Reference scenes"))
 
 bistro_street_production.cpu                   50000
 bistro_street_production.gpu.vis_clear         55000

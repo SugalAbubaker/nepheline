@@ -3440,6 +3440,18 @@ path and logs what the GPU culled.
   not yet see texture coordinates' change across a collapse where they are
   not affine (ADR-0069); a shared mesh's levels are not streamed (ADR-0063).
 
+- Blended surfaces are drawn from the CPU: each frame the instances with a
+  blended material are tested against the view, their draws written and
+  sorted back to front, and recorded into the transparent pass and the pass
+  that asks for their shadow pages (`frame.c` `build_draws`,
+  `record_draws`). That is 0.044 us an instance listed and about 0.35 us a
+  draw in view on the main thread and the jobs, where everything else costs
+  the CPU the same whatever the scene holds: Bistro's street, 279 panes and
+  glasses in view of 342, takes 0.090 ms of `nph_render_frame` where a view
+  without them takes 0.022 (docs/benchmarks.md "Reference scenes"). A city
+  of windows would not fit: the blended surfaces need the GPU's cull, a
+  sort there, and one indirect draw.
+
 - Triangles for the rays alone (ADR-0096) are used where a scene's textures
   are whole. A paged texture's rays read whichever of its levels is resident,
   and a trim that holds for every level takes little (nothing in Bistro): a

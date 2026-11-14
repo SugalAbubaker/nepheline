@@ -519,9 +519,21 @@ not run it. Three of Bistro's views (its street, street walk and terrace)
 take 0.074 to 0.089 ms of the CPU a frame where the file allows a flat
 0.050 ms: they have since 2026-11-12 (0.022 ms the day before), in the
 rounds the budgets of ADR-0095 were made from too, and not by ADR-0096,
-whose rounds on the packs cooked before and after are the same there. The
-rows are left at the rule's 0.050 ms, past which they stand until the
-per-view work on the main thread is found.
+whose rounds on the packs cooked before and after are the same there. It
+is Bistro's glass. The production path leaves opaque and alpha-tested
+surfaces to the GPU and draws blended ones from the CPU, back to front
+(docs/render.md "Limitations"), and since ADR-0094 Bistro's glass is
+blended and seen through: 342 instances, of which 279 are in the street's
+view, 205 on the terrace and 16 at the hedge (0.039 ms). Timed in
+`nph_render_frame` over 240 frames: an instance on the list costs 0.044 us
+a frame to test against the view (15 us for the 342), and one in view its
+draw's record (0.09 us), its place in the sort (0.10 us) and its draw in
+each of the two passes that record it (0.09 and 0.07 us), 0.35 us in all,
+of which the frame's wall time sees about 0.25 (the passes record beside
+other work). A view without blended surfaces takes 0.022 ms. The rows are
+left at the rule's 0.050 ms, past which they stand: either the GPU comes
+to draw the blended surfaces as it draws the rest, or a view's glass is
+given a budget on the main thread, which is not decided.
 
 What the ray triangles took off a frame was measured apart, the same build
 on the packs cooked before and after
