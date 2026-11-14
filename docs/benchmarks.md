@@ -505,25 +505,32 @@ percentile 6.14 ms against 6.67, the terrace's 6.80 against 7.46). The
 rounds of 2026-11-10 and 2026-11-11 were measured with the panel busy:
 their means stand about 2 % high and their 99th percentiles 0.4 to 1.0 ms.
 `benchmarks/reference_budgets.txt` is generated from
-`reference_scenes-2026-11-13-adr-0095`, every row afresh: Bistro, the city
+`reference_scenes-2026-11-14-adr-0096`, every row afresh: Bistro, the city
 and the interior at the size they gate at (ADR-0082), a process a scene as
 the nightly runs them, the mean of two rounds with the desktop still, with
-the image work of ADR-0090 to ADR-0095. So measured, sixteen of the eighteen
+the image work of ADR-0090 to ADR-0095 and the scenes cooked with triangles
+for the rays alone (ADR-0096: the trees' cards cut down, for the rays, to
+where their alpha test can pass). So measured, sixteen of the eighteen
 views hold the gate's 6.94 ms at their 99th percentiles; Bistro's street
-turn (7.39 ms) and the city's rooftop (8.72) do not. `render_budgets.txt`'s
-rows for the scenes it budgets are from `render_perf-2026-11-13-adr-0095`,
+turn (7.34 ms) and the city's rooftop (8.03) do not. `render_budgets.txt`'s
+rows for the scenes it budgets are from `render_perf-2026-11-14-adr-0096`,
 measured the same way. The landscape has no rows there: the nightly does
-not run it.
+not run it. Three of Bistro's views (its street, street walk and terrace)
+take 0.074 to 0.089 ms of the CPU a frame where the file allows a flat
+0.050 ms: they have since 2026-11-12 (0.022 ms the day before), in the
+rounds the budgets of ADR-0095 were made from too, and not by ADR-0096,
+whose rounds on the packs cooked before and after are the same there. The
+rows are left at the rule's 0.050 ms, past which they stand until the
+per-view work on the main thread is found.
 
-Cooked with triangles for the rays alone (ADR-0096: the trees' cards cut
-down, for the rays, to where their alpha test can pass), the same build
-measures `reference_scenes-2026-11-13-adr-0096`, the mean of two rounds
-with the desktop still against two on the packs cooked before: the city's
-views 0.27 to 0.65 ms less a frame and 0.25 to 0.67 ms less at their 99th
-percentiles (its street 5.36 to 5.08 ms, its park 6.78 to 6.49, its rooftop
-8.79 to 8.12), Bistro's 0.04 to 0.07 ms less and 0.03 to 0.08 ms (its
-terrace 6.83 to 6.76, its street turn 7.38 to 7.35), the interior's as they
-were. The budgets above are not made afresh from it: they hold with room.
+What the ray triangles took off a frame was measured apart, the same build
+on the packs cooked before and after
+(`reference_scenes-2026-11-13-adr-0096`, the mean of two rounds each): the
+city's views 0.27 to 0.65 ms less a frame and 0.25 to 0.67 ms less at their
+99th percentiles (its street 5.36 to 5.08 ms, its park 6.78 to 6.49, its
+rooftop 8.79 to 8.12), Bistro's 0.04 to 0.07 ms less and 0.03 to 0.08 ms
+(its terrace 6.83 to 6.76, its street turn 7.38 to 7.35), the interior's as
+they were.
 
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
