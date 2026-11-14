@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "executable": "cook_bench.exe",
+  "timestamp": "2026-11-14T02:52:24Z",
+  "config": "Profile",
+  "host": {"os": "windows", "arch": "x86_64", "compiler": "msvc 194435217"},
+  "min_time_s": 0.5,
+  "benchmarks": [
+    {"name": "ray_trim_cards", "label": "65536 ray triangles of 32 distinct, 22 % of the area kept", "iterations": 22, "items_per_iteration": 32768, "repeats": 7, "ns_per_op": 796.879, "min_ns_per_op": 791.367, "max_ns_per_op": 809.039}
+  ]
+}

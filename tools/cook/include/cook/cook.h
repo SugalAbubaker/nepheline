@@ -58,12 +58,15 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //   9: glass and lights' shells are flagged out of the rays (ADR-0078).
 //  10: an edge whose other triangles fold back on it keeps its place as an open
 //      edge does: a sheet of two faces back to back keeps its outline.
-#define COOK_MESH_VERSION 10U
+//  11: an alpha-tested submesh's triangles for the rays alone (mesh type version 7;
+//      cook/ray_trim.h; ADR-0096).
+#define COOK_MESH_VERSION 11U
 
 // The same for materials, part of their settings hash: bumped, it recooks them alone.
 //   1: glass (KHR_materials_transmission, most light let through) is a blended, transmissive
 //      material (NPH_MATERIAL_FLAG_TRANSMISSIVE).
-#define COOK_MATERIAL_VERSION 1U
+//   2: an alpha-tested material's key (material type version 2; ADR-0096).
+#define COOK_MATERIAL_VERSION 2U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

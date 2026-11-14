@@ -430,6 +430,28 @@ typedef struct NphRenderSubmesh {
 
 #define NPH_RENDER_MAX_SUBMESHES 256U
 
+// A submesh's triangles for the rays alone (NphRenderMeshDesc.ray_submeshes; asset/mesh.h's
+// records, byte for byte): its run of the mesh's ray triangles, `count` 0 where the rays take
+// its own triangles (`first` and `alpha_key` then 0), else the key of the alpha test the run
+// holds for (NphRenderMaterialDesc.alpha_key), never 0.
+typedef struct NphRenderRaySubmesh {
+    u32 first;
+    u32 count;
+    u64 alpha_key;
+} NphRenderRaySubmesh;
+
+// A triangle for the rays alone: its parent, a triangle of its run's submesh, by the parent's
+// first index in the mesh's indices; and each of its corners as a point of the parent, the
+// weights of the parent's second and third corners as two unorm16 (the second's in the low
+// half, the third's in the high half, their sum at most 65535: the rest is the first's).
+typedef struct NphRenderRayTriangle {
+    u32 parent;
+    u32 corner[3];
+} NphRenderRayTriangle;
+
+NPH_STATIC_ASSERT(sizeof(NphRenderRaySubmesh) == 16U, "a submesh's ray run is 16 bytes");
+NPH_STATIC_ASSERT(sizeof(NphRenderRayTriangle) == 16U, "a ray triangle is 16 bytes");
+
 typedef struct NphRenderMeshDesc {
     u32 vertex_count;
     u32 index_count;
@@ -501,6 +523,21 @@ typedef struct NphRenderMeshDesc {
     // things that rays could not afford and would learn little from (the flames of
     // 10,000 candles, 19.5 million triangles, whose light NphRenderManyLight carries).
     b32 no_rays;
+    // Triangles for the rays alone, in place of some submeshes' own (docs/render.md "Rays and
+    // trimmed cards"; ADR-0096), as a cooked mesh carries them: `ray_submeshes` a submesh each
+    // (NULL: none) and `ray_triangles`, the submeshes' runs following one another in submesh
+    // order and filling them. The bottom level then holds a trimmed submesh's ray triangles
+    // and not its own, and a ray's hit reads its parent's attributes where it lies in it. The
+    // raster draws the mesh's own triangles whatever is given here.
+    //
+    // The caller's promise is that a submesh's ray triangles hold every point of its own
+    // triangles where an instance's material lets no ray through (its alpha test passes: an
+    // alpha-tested card's triangles cut down to where its texture is not cut away). The
+    // renderer holds it to the keys: an instance of the mesh is made only with materials
+    // whose `alpha_key` is the submeshes' (nph_render_instance_create).
+    const NphRenderRaySubmesh *ray_submeshes;
+    const NphRenderRayTriangle *ray_triangles;
+    u32 ray_triangle_count;
     const char *name;
 } NphRenderMeshDesc;
 
@@ -509,7 +546,11 @@ typedef struct NphRenderMeshDesc {
 // of its own. NPH_RESULT_INVALID_ARGUMENT for empty streams (but
 // for a mesh of voxels alone), an index count that is not a multiple of 3,
 // an index or submesh range out of bounds (every index is checked), too
-// many submeshes, a voxel cluster whose record, bricks or words lie out of
+// many submeshes, triangles for the rays that are not as NphRenderMeshDesc and
+// NphRenderRaySubmesh say (runs out of order or not filling them, a run
+// without a key, a parent outside its run's submesh, a corner outside its
+// parent; or given for a mesh of voxels alone), a voxel cluster whose record,
+// bricks or words lie out of
 // bounds, whose bricks' first voxels do not follow one another, or whose
 // record's cell or flags are not the compact form's, or a mesh of voxels
 // alone with a submesh's indices, meshlet vertices or triangles, a cluster
@@ -615,17 +656,28 @@ typedef struct NphRenderMaterialDesc {
     // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
     b32 transmissive;
     NphRenderTextureBinding textures[NPH_RENDER_SLOT_COUNT];
+    // What its alpha test reads, as one number (a cooked material's
+    // NphMaterialHeader.alpha_key): the caller's word that two materials of one key cut the
+    // same parts of a surface away, which a mesh's triangles for the rays alone hold for
+    // (NphRenderRaySubmesh.alpha_key). 0: none, and no mesh's ray triangles hold for it. Only
+    // of an alpha-tested material, and only where its base colour texture is the one the key
+    // was made of, whole (a paged texture's rays read whichever level is resident).
+    u64 alpha_key;
     const char *name;
 } NphRenderMaterialDesc;
 
 // glTF's defaults: white, non-metallic, fully rough, opaque, no textures.
 void nph_render_material_desc_default(NphRenderMaterialDesc *desc);
 
-// NPH_RESULT_INVALID_ARGUMENT for a stale texture handle or out-of-range
-// enum values; NPH_RESULT_FULL past max_materials.
+// NPH_RESULT_INVALID_ARGUMENT for a stale texture handle, out-of-range
+// enum values, or an alpha key on a material that is not alpha tested;
+// NPH_RESULT_FULL past max_materials.
 NPH_MUST_USE NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc *desc,
                                                   NphRenderMaterial *out);
 // Replaces the description; visible from the next frame.
+// NPH_RESULT_INVALID_ARGUMENT as nph_render_material_create, and for another alpha key while
+// an instance of a mesh whose ray triangles hold for the old one names the material: such a
+// mesh's instances go first.
 NPH_MUST_USE NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
                                                   const NphRenderMaterialDesc *desc);
 // Instances that still name the material draw with the default material.
@@ -665,6 +717,9 @@ typedef struct NphRenderInstanceDesc {
 // NPH_RESULT_INVALID_ARGUMENT for a stale mesh, material, or cell handle or
 // a transform with a zero determinant; NPH_RESULT_FULL past max_instances;
 // NPH_RESULT_OUT_OF_MEMORY when the material table cannot be allocated.
+// (NPH_RESULT_INVALID_ARGUMENT too where the mesh has triangles for the rays alone and a
+// trimmed submesh's material is not of the key they were made for:
+// NphRenderMeshDesc.ray_submeshes.)
 NPH_MUST_USE NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc *desc,
                                                   NphRenderInstance *out);
 NPH_MUST_USE NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,

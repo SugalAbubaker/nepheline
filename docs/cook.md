@@ -212,6 +212,62 @@ glass by its material (a blended one stops none: docs/render.md "Shadow rays"). 
 counts what each rule took (`meshes out of the rays: ... of glass, ... lights' shells`);
 Bistro's are 42 and 35, around 95 of its 96 lamps.
 
+### Cards trimmed for the rays
+
+A ray that meets an alpha-tested triangle is handed it as a candidate wherever it meets it, and
+a shader reads the triangle's texture to learn whether the ray goes on (docs/render.md "Rays and
+alpha-tested surfaces"). A tree's leaves are cards, most of whose area is cut away: most of what
+the rays of a street of trees pay for is candidates the test refuses (Gruen, Benthin and Woop,
+"Sub-triangle opacity masks for faster ray tracing of transparent objects", HPG 2020, measure
+the same cost). The cooker therefore gives a scene's alpha-tested submeshes triangles for the
+rays alone ([ADR-0096](adr/0096-leaf-cards-trimmed-for-rays.md); `ray_trim.h`; the mesh's
+`RAYS`, `RAYR` and `RAYT`, docs/asset.md), where it pays: each triangle cut down to a convex
+polygon that holds every point of it where its material's alpha test can pass, as a particle's
+quad is trimmed to its sprite for the raster (Persson, "Particle trimmer", 2009). The raster's
+triangles, the levels of detail and the voxels are untouched, and a hit reads its attributes
+from the triangle the polygon was cut from (docs/render.md "Rays and trimmed cards").
+
+- **What can pass** is bounded from the texture as cooked, read back from the output and
+  decoded as the GPU decodes it: the base colour's finest level, which is what the rays' test
+  reads of a whole texture, at a point. A bilinear lookup gives no more than the greatest of
+  the four texels about its point, so a texel whose alpha can pass (with the greatest alpha
+  the triangle's vertices and the material's factor allow, against the cutoff) holds the
+  lookups within half a texel beyond its sides, and nothing else passes. A quarter of a texel
+  more is kept for the shader's float arithmetic and the rounding of the polygon's corners.
+- **The cuts.** For each of 32 directions, how far what can pass reaches in the triangle; then
+  up to four half planes are cut off the triangle, each time the one that takes most, while a
+  cut takes at least 2 % of the triangle's area. The polygon's corners are stored as points
+  of the triangle (the weights of its second and third corners in 65535ths), and a polygon is
+  written as a fan of ray triangles. A triangle no point of which can pass has none; one whose
+  test cannot be bounded stays whole (no area in the texture, texture coordinates that are no
+  numbers, more than 8192 texels long, or over more than two repeats of the texture).
+  Triangles the test cannot tell apart (the same texture coordinates and vertex alphas, as a
+  tree's hundreds of cards of a few leaves have) are worked out once.
+- **Shared edges.** Two triangles of a card share its diagonal, and each one's polygon meets
+  the diagonal where its own cuts leave it. Left so, their ray triangles would meet in
+  T-junctions, where a traversal may let a ray through between them. So the polygons of
+  triangles that share an edge (by its ends' positions) and reach it are grown to meet it over
+  the same stretch, pass after pass until none grows; the renderer then places a corner on an
+  edge from the edge's ends alone, and the two polygons share the whole stretch, bit for bit.
+- **Where it pays.** A submesh is trimmed where at least a quarter of its area goes
+  (`COOK_RAY_TRIM_MIN_SHARE`): under that the candidates saved do not pay for the polygons'
+  triangles (the city's grass, 1.6 million triangles of which a sixth would go, is left). A
+  submesh whose triangles' walk of texels passes 2^30 is left too, which bounds a cook.
+- **The key.** The polygons hold for one alpha test. The cooker gives each alpha-tested
+  material with a base colour texture its alpha key (`NphMaterialHeader.alpha_key`): a hash of
+  that texture's alpha as cooked, its size, wrap modes and filter, the factor's alpha and the
+  cutoff. A trimmed submesh carries the key of the material it was trimmed for, and a loader
+  hands its ray triangles to the renderer only for a material of that key (docs/render.md).
+  The textures' settings are in the meshes' and the materials' settings hashes, so a change
+  of them cooks both again.
+- `--no-ray-trim` (`CookMeshSettings.no_ray_trim`; `"no_ray_trim"` in a scene's manifest)
+  switches it off: no keys, no ray triangles.
+
+Bistro: 8 of its 42 alpha-tested submeshes are trimmed, 137,926 triangles as 332,921 ray
+triangles of 53 to 72 % of their area, in 0.2 s of its cook. The city: 25 submeshes of its seven
+kinds of tree, shrub and hedge, 109,704 triangles as 279,329 ray triangles of 32 % (the lindens)
+to 70 % (the azaleas) of their area, in 2.3 s. What it does to a frame is in the ADR.
+
 ## Glass
 
 A material that lets half the light through or more (`KHR_materials_transmission`'s factor;
@@ -617,6 +673,11 @@ input must never crash"):
   when its faces (up to 64) are extruded, and cook, before and after, into
   a mesh the runtime can view (the check `fuzz_mesh_check.h` shares with
   the glTF target).
+- The glTF target also gives every mesh's material slots an alpha test (a
+  texture of 16 texels a side of the input's own bytes, the material's
+  factor, cutoff and wrap modes), so the triangles for the rays alone are
+  made of hostile texture coordinates and written, and the mesh view must
+  take them.
 - `tests/fuzz/fuzz_cook_sound.c`: a settings byte, then a WAV file.
   Whatever the reader takes (up to 2^17 samples) is cooked under those
   settings, and the asset written must pass the runtime's validation, the
@@ -692,7 +753,7 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (95 cases): the block codecs against hand-built blocks
+- `cook_tests` (132 cases): the block codecs against hand-built blocks
   from the format descriptions (BC1's palettes among them) and against
   the line-fit bound; DDS files built byte by byte in every format read,
   against the block decoders, and the malformed and unsupported refused;
@@ -729,6 +790,19 @@ are logged with everything outside printable ASCII replaced.
   stream), cooked sounds loaded through the VFS and a streamed one's
   samples read back at its offset; the command-line tool end to end, its
   sound options too.
+- `test_ray_trim.c` (cards trimmed for the rays): the alpha key; the test's
+  reference lookup under each wrap mode; triangles that stay whole and that
+  have no polygon; a leaf cut out of its card; 400 random leaves, triangles,
+  wraps, cutoffs and vertex alphas, 4,000 random points each, of which none
+  that passes the test may lie outside its polygon (dropping the bilinear
+  reach fails 96 of them); a mesh of cards whose two triangles meet their
+  diagonal over the same stretch to the 65535th, whichever vertices and turn
+  each has it by, and cook the same twice; submeshes left where it does not
+  pay; ranges refused. `test_mesh.c`: the pipeline writes them, and not with
+  the setting off, for a mesh out of the rays, without slots or without
+  texture coordinates. `test_cooker.c`: a scene's cards cook with the
+  material's and the mesh's keys the same, again as current, and without
+  either when switched off or without a texture.
 - `integration_tests` (label `integration`): the GPU BC check above, and
   `test_cook_load.c`, the Phase 6 exit criterion end to end: a generated
   scene with external buffers and images, a data-URI normal map, a mesh
@@ -774,6 +848,7 @@ triangles), and an 8-mesh, 7.1 MiB GLB.
 | mesh_meshlets | 552 | triangle | 1368 meshlets, 95.8 triangles each |
 | mesh_process | 14357 | triangle | the whole pipeline, LZ HIGH, on one thread: 14 s per million triangles, 12 of them the levels of detail (2293 with `no_lods`) |
 | gltf_import_glb | 2534 | KiB | 400 MB/s |
+| ray_trim_cards | 797 | triangle | 32768 card triangles of 32 kinds as 65536 ray triangles of 22 % of their area: the sorts of the triangles and their edges, not the cuts (`cook-2026-11-13-ray-trim`) |
 
 What the numbers say:
 

@@ -451,6 +451,62 @@ solid: no sky between its leaves, no sun through it, a blob in a mirror.
   top level has no GPU scene to read a candidate's material from: its rays
   keep `gl_RayFlagsOpaqueEXT` ("Limitations").
 
+**Rays and trimmed cards** ([ADR-0096](adr/0096-leaf-cards-trimmed-for-rays.md);
+`rt.c`, `vis_ray_triangle` in `vis_common.glsl`). A candidate costs its ray a
+shader's work, its triangle's corners and a texture lookup, and a ray through a
+tree meets a card's cut-away part far more often than its leaf: most of what
+the rays of a street of trees pay for is candidates the test refuses. A mesh may
+therefore bring triangles for the rays alone (`NphRenderMeshDesc.ray_submeshes`
+and `ray_triangles`, as a cooked mesh carries them: docs/cook.md "Cards trimmed
+for the rays"), in place of some submeshes' own: each alpha-tested triangle cut
+down to a polygon that holds every point of it where its test can pass. The
+raster, the shadow map and the levels of detail draw the mesh's own triangles
+as before.
+
+- **The bottom level** holds a trimmed submesh's ray triangles as its geometry
+  and not the submesh's own (a geometry is still a submesh, so a hit names its
+  material as before). A ray triangle has no vertices: each corner is a point
+  of its parent, one of the submesh's triangles, as the weights of the parent's
+  second and third corners in 65535ths. `rt.c` places them when the mesh is
+  made, in the float positions the bottom level is built from, and lets the
+  build's inputs go once it is recorded (nothing reads them after).
+- **Shared edges stay shared.** A corner that is a corner of its parent takes
+  that vertex's position. A corner on an edge of its parent is placed from the
+  edge's two ends alone, taken in the order of their positions, by the weight
+  of the greater: two triangles that share the edge place the same point of it
+  at the same floats, bit for bit, whichever way round each has the edge. The
+  cooker gives two such triangles' polygons the same points on the edge, so
+  their ray triangles share whole edges, and the traversal, which lets no ray
+  between triangles that share an edge's two vertices, lets none between them.
+- **A hit reads its parent.** The ray triangles' records (the parent's first
+  index, the three corners' places) follow the mesh's submesh table in its
+  buffer, and a trimmed submesh's entry has `NPH_VIS_SUBMESH_RAY_TRIMMED` set
+  and names its first record. `vis_ray_triangle` gives a candidate's or a
+  hit's triangle and its place in it: for a ray triangle, its parent, and its
+  corners' places weighed by where the ray met it. The alpha test
+  (`rt_mask.glsl`) and the hit's surface (`gi_hit.glsl`) read the parent's
+  corners, as they would have had the ray met the parent itself. What a ray
+  finds is then the same, to the rounding of the hit's place (the last digit
+  of a float): the same picture, not the same bits.
+- **The promise and the keys.** The ray triangles hold for one alpha test: the
+  texture, wrap modes, factor and cutoff they were cut by. With another
+  material the rays would pass where a card is solid. A trimmed submesh
+  therefore names the key of the test it was made for
+  (`NphRenderRaySubmesh.alpha_key`), a material names the key of its own
+  (`NphRenderMaterialDesc.alpha_key`, 0: none), and the renderer holds an
+  instance to them: `nph_render_instance_create` refuses materials whose keys
+  are not the mesh's, and `nph_render_material_update` refuses another key
+  while such an instance names the material. The keys are the caller's word
+  (a cooked scene's are the cooker's hashes: docs/asset.md). A key is given
+  only where the rays read the alpha it was made of, the texture's finest
+  level: a paged texture's rays read whichever level is resident ("Virtual
+  textures"), so the samples' loader gives a paged scene's materials no keys and
+  its meshes no ray triangles (`samples/common/cooked_scene.c`), and the
+  engine's runtime, which pages, does not hand them over yet ("Limitations").
+- **The reference renderer's rays** take every triangle for opaque ("Shadow
+  rays"): of a trimmed submesh they meet the polygons, a card's leaf with a
+  rim, where they met the whole card before.
+
 **A flat mesh.** A mesh with no extent along an axis (a card, a ground
 plane, a wall of one quad) has a dequantisation scale of 0 there, and every
 quantised coordinate 0. Folded into the top level's transform as it is,
@@ -3263,6 +3319,19 @@ and synchronisation-validation gate:
   alone is made, moved, hidden and destroyed (`test_vis_cells.c`); rays
   traced only while a light casts shadows; and a renderer without ray
   tracing drawing such lights unshadowed.
+- **Triangles for the rays alone** (`test_ray_trim.c`; ADR-0096): the sun
+  through a card of a 2 x 2 checker of alpha, traced from the card's own
+  triangles, then from their halves and their quarters as ray triangles
+  (the same shadow to the pixel: a half lies over solid and clear quarters
+  alike, so each hit's alpha is read at its own place in its parent), from
+  the solid quarters' parts alone (the same on the production path; the
+  reference's rays, which test no alpha, then meet only what is there), and
+  from one solid quarter's parts (the other's shadow gone: the rays take
+  the parts). What is given as ray triangles is refused where it is not as
+  described (runs that do not fill them or lack a key, a parent outside its
+  submesh, a corner outside its parent). An instance is refused materials
+  whose alpha keys are not its mesh's, and a material keeps its key while
+  such an instance lives.
 - **The sun's virtual shadow map** (`test_vsm.c`), held to the same
   classification with a margin of its texels: the sun behind a cube, with
   mesh shaders and through the indexed indirect raster lavapipe takes; a
@@ -3370,6 +3439,16 @@ path and logs what the GPU culled.
   bottom levels and the reference renderer draw level 0; the error does
   not yet see texture coordinates' change across a collapse where they are
   not affine (ADR-0069); a shared mesh's levels are not streamed (ADR-0063).
+
+- Triangles for the rays alone (ADR-0096) are used where a scene's textures
+  are whole. A paged texture's rays read whichever of its levels is resident,
+  and a trim that holds for every level takes little (nothing in Bistro): a
+  scene loaded with paged textures traces its cards' own triangles
+  (`samples/common/cooked_scene.c`), and the engine's runtime
+  (`engine/runtime/src/render_assets.c`), which pages and whose instances'
+  materials may change, does not hand them over yet. The reference renderer's
+  rays, which test no alpha, meet a trimmed card's polygon where they met the
+  card.
 
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many

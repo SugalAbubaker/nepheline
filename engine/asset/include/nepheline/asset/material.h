@@ -16,7 +16,8 @@
 extern "C" {
 #endif
 
-#define NPH_MATERIAL_TYPE_VERSION 1U
+// 2: the alpha test's key (NphMaterialHeader.alpha_key). Version 1 still reads: it has none.
+#define NPH_MATERIAL_TYPE_VERSION 2U
 #define NPH_MATERIAL_TAG_HEADER   NPH_FOURCC('H', 'E', 'A', 'D')
 
 typedef enum NphMaterialAlphaMode {
@@ -72,7 +73,14 @@ typedef struct NphMaterialHeader {
     f32 alpha_cutoff;
     u32 alpha_mode; // NphMaterialAlphaMode
     u32 flags;      // NphMaterialFlags
-    u32 reserved[3];
+    u32 reserved;   // zero
+    // Version 2: what an alpha-tested material's test reads, as one number: the cooker's hash of
+    // its base colour texture's alpha at the finest level (as cooked), that texture's wrap modes
+    // and filter, the base colour factor's alpha and the cutoff; 0 where the cooker made none
+    // (not alpha tested, no base colour texture, or triangles trimmed for the rays switched
+    // off). A mesh's triangles for the rays alone hold for a material of the same key
+    // (asset/mesh.h NphMeshRayRange.alpha_key; ADR-0096).
+    u64 alpha_key;
     NphMaterialTextureRef textures[NPH_MATERIAL_TEXTURE_COUNT];
 } NphMaterialHeader;
 

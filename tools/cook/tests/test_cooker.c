@@ -1028,3 +1028,123 @@ NTEST_F(CookFixture, the_command_line_tool_takes_the_sound_options)
     }
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Triangles for the rays alone (cook/ray_trim.h; ADR-0096)
+// ---------------------------------------------------------------------------
+
+// A cooked mesh's runs of triangles for the rays (its first submesh's) and how many it has
+// in all: read back from the output.
+static NphMeshRayRange read_ray_run(CookFixture *f, const Cooker *c, const char *source,
+                                    u32 *out_triangles, u32 *out_parents)
+{
+    const CookDbEntry *mesh =
+        cook_db_find(cooker_db(c), nph_str_from_cstr(source), NPH_STR("mesh/0"));
+    NTEST_ASSERT_NOT_NULL(mesh);
+    char full[1500];
+    snprintf(full, sizeof full, "%s/%s", f->out_dir, mesh->output);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(full, f->alloc, &bytes, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(bytes, size, &info), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(info.header.type_version, NPH_MESH_TYPE_VERSION);
+    NphMeshRayRange run;
+    memset(&run, 0, sizeof run);
+    *out_triangles = 0U;
+    *out_parents = 0U;
+    const NphAssetBlobEntry *head = nph_asset_file_find(&info, NPH_MESH_TAG_RAY_HEADER, 0U);
+    const NphAssetBlobEntry *runs = nph_asset_file_find(&info, NPH_MESH_TAG_RAY_RANGES, 0U);
+    const NphAssetBlobEntry *tris = nph_asset_file_find(&info, NPH_MESH_TAG_RAY_TRIANGLES, 0U);
+    // All three, or none.
+    NTEST_ASSERT_TRUE((head != NULL) == (runs != NULL) && (head != NULL) == (tris != NULL));
+    if (head != NULL && runs != NULL && tris != NULL) {
+        NphMeshRayHeader rh;
+        NTEST_ASSERT_EQ_UINT(head->raw_size, sizeof rh);
+        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(bytes, head, &rh), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(runs->raw_size, sizeof run); // one submesh
+        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(bytes, runs, &run), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(tris->raw_size, (u64)rh.triangle_count * sizeof(NphMeshRayTriangle));
+        NphMeshRayTriangle *t = NPH_ALLOC_ARRAY(f->alloc, NphMeshRayTriangle, rh.triangle_count);
+        NTEST_ASSERT_NOT_NULL(t);
+        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(bytes, tris, t), NPH_RESULT_OK);
+        u32 last = NPH_U32_MAX;
+        for (u32 i = 0; i < rh.triangle_count; ++i) {
+            *out_parents += t[i].parent != last ? 1U : 0U;
+            last = t[i].parent;
+        }
+        NPH_FREE_ARRAY(f->alloc, NphMeshRayTriangle, t, rh.triangle_count);
+        *out_triangles = rh.triangle_count;
+    }
+    nph_file_free_all(f->alloc, bytes, size);
+    return run;
+}
+
+// A scene's alpha-tested cards are trimmed for the rays by their texture as cooked, the
+// material and the mesh carrying the same key; a second cook finds all current; with the
+// trim switched off, or without a texture to trim by, neither has anything of it.
+NTEST_F(CookFixture, alpha_tested_cards_are_trimmed_for_the_rays_and_keyed)
+{
+    char path[1300];
+    test_path_in(&f->dir, "cards.gltf", path, sizeof path);
+    test_write_cards(path, 60U, true);
+    Cooker *c = make_cooker(f, false);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    CookerStats st = cooker_stats(c);
+    NTEST_ASSERT_EQ_UINT(st.cooked, 4U); // the texture, the material, the mesh, the scene
+    NTEST_ASSERT_EQ_UINT(st.failed, 0U);
+    const NphMaterialHeader mat = read_material(f, c, "cards.gltf", "material/0");
+    NTEST_EXPECT_EQ_UINT(mat.alpha_mode, NPH_MATERIAL_ALPHA_MASK);
+    NTEST_EXPECT_TRUE(mat.alpha_key != 0U);
+    u32 triangles = 0U;
+    u32 parents = 0U;
+    NphMeshRayRange run = read_ray_run(f, c, "cards.gltf", &triangles, &parents);
+    NTEST_EXPECT_EQ_UINT(parents, 120U);
+    NTEST_EXPECT_GT_UINT(triangles, 120U);
+    NTEST_EXPECT_EQ_UINT(run.first, 0U);
+    NTEST_EXPECT_EQ_UINT(run.count, triangles);
+    NTEST_EXPECT_TRUE(run.alpha_key == mat.alpha_key);
+    cooker_destroy(c);
+
+    // Again: nothing to do, and the same key.
+    c = make_cooker(f, false);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    st = cooker_stats(c);
+    NTEST_EXPECT_EQ_UINT(st.cooked, 0U);
+    NTEST_EXPECT_EQ_UINT(st.skipped, 4U);
+    cooker_destroy(c);
+
+    // Switched off: the material and the mesh cook again (the texture and the scene are
+    // what they were), without a key and without the triangles.
+    CookerDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = f->alloc;
+    desc.out_dir = f->out_dir;
+    desc.source_root = f->dir.dir;
+    cook_texture_settings_default(&desc.texture);
+    cook_mesh_settings_default(&desc.mesh);
+    desc.texture.lz = NPH_LZ_LEVEL_FAST;
+    desc.mesh.lz = NPH_LZ_LEVEL_FAST;
+    desc.mesh.no_ray_trim = 1;
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    st = cooker_stats(c);
+    NTEST_EXPECT_EQ_UINT(st.cooked, 2U);
+    NTEST_EXPECT_EQ_UINT(st.skipped, 2U);
+    NTEST_EXPECT_TRUE(read_material(f, c, "cards.gltf", "material/0").alpha_key == 0U);
+    run = read_ray_run(f, c, "cards.gltf", &triangles, &parents);
+    NTEST_EXPECT_EQ_UINT(triangles, 0U);
+    NTEST_EXPECT_EQ_UINT(run.count, 0U);
+    cooker_destroy(c);
+
+    // An alpha-tested material without a texture cuts by its vertices' alpha alone: no
+    // key, and nothing to trim by.
+    test_path_in(&f->dir, "plain.gltf", path, sizeof path);
+    test_write_cards(path, 60U, false);
+    c = make_cooker(f, false);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(read_material(f, c, "plain.gltf", "material/0").alpha_key == 0U);
+    (void)read_ray_run(f, c, "plain.gltf", &triangles, &parents);
+    NTEST_EXPECT_EQ_UINT(triangles, 0U);
+    cooker_destroy(c);
+}

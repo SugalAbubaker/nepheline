@@ -36,9 +36,9 @@ bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
     }
     const uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(q, false);
     const vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, false);
-    const vec3 b = vec3(1.0 - bc.x - bc.y, bc.x, bc.y);
+    vec3 b;
     VisUintRef indices = VisUintRef(mesh.indices);
-    const uint first = sub.y + 3u * primitive;
+    const uint first = vis_ray_triangle(mesh, sub, primitive, bc, b);
     AttribsRef attribs = AttribsRef(mesh.attribs);
     const uvec4 a0 = attribs.a[indices.v[first]];
     const uvec4 a1 = attribs.a[indices.v[first + 1u]];

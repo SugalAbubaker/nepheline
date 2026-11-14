@@ -68,9 +68,9 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
     const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
     const uvec2 sub = VisUvec2Ref(mesh.submeshes).v[geometry];
     VisUintRef indices = VisUintRef(mesh.indices);
-    const uint first = sub.y + 3u * primitive;
+    vec3 b;
+    const uint first = vis_ray_triangle(mesh, sub, primitive, bc, b);
     const uvec3 vtx = uvec3(indices.v[first], indices.v[first + 1u], indices.v[first + 2u]);
-    const vec3 b = vec3(1.0 - bc.x - bc.y, bc.x, bc.y);
 
     // Its point, camera relative as the cells are keyed, and its normals.
     const vec3 t =

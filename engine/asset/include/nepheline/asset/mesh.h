@@ -75,6 +75,23 @@
 //
 //     LODK  NphMeshLodMaker[meshlet]  the sphere and error of the group that made it
 //
+// From version 7, a mesh may hold triangles for the rays alone (render/renderer.h
+// NphRenderMeshDesc.ray_triangles; docs/render.md "Rays and trimmed cards"; ADR-0096), in place
+// of some submeshes' own: an alpha-tested triangle cut down to a polygon that holds every point
+// of it where its material's alpha test can pass, so that a ray is not handed the rest of it as
+// a candidate:
+//
+//     RAYS  NphMeshRayHeader          the count
+//     RAYR  NphMeshRayRange[submesh]  each submesh's run of RAYT, and the alpha test it holds for
+//     RAYT  NphMeshRayTriangle[ray triangle]  its parent, and its corners' places in it
+//
+// A ray triangle lies in its parent, a triangle of its submesh (level 0's, INDX), and has no
+// vertices of its own: each corner is a point of the parent, the weights of the parent's second
+// and third corners as unorm16. The submeshes' runs follow one another in submesh order and
+// fill RAYT; a run of none leaves the submesh's own triangles to the rays. A run holds only
+// while the submesh's material tests the alpha it was made for (NphMeshRayRange.alpha_key,
+// asset/material.h NphMaterialHeader.alpha_key), which is the loader's to check.
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -101,9 +118,9 @@ extern "C" {
 
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
 // in the levels (VOXB, VOXA). 4: meshes of voxels alone. 5: the voxels
-// compact (VOXC). 6: levels apart (LVLS, LODK). Earlier versions without
-// voxels still read.
-#define NPH_MESH_TYPE_VERSION 6U
+// compact (VOXC). 6: levels apart (LVLS, LODK). 7: triangles for the rays
+// alone (RAYS, RAYR, RAYT). Earlier versions without voxels still read.
+#define NPH_MESH_TYPE_VERSION 7U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -124,6 +141,9 @@ extern "C" {
 #define NPH_MESH_TAG_VOXELS           NPH_FOURCC('V', 'O', 'X', 'A')
 #define NPH_MESH_TAG_LOD_MAKERS       NPH_FOURCC('L', 'O', 'D', 'K')
 #define NPH_MESH_TAG_LEVELS           NPH_FOURCC('L', 'V', 'L', 'S')
+#define NPH_MESH_TAG_RAY_HEADER       NPH_FOURCC('R', 'A', 'Y', 'S')
+#define NPH_MESH_TAG_RAY_RANGES       NPH_FOURCC('R', 'A', 'Y', 'R')
+#define NPH_MESH_TAG_RAY_TRIANGLES    NPH_FOURCC('R', 'A', 'Y', 'T')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -303,6 +323,32 @@ typedef struct NphMeshLevel {
     u32 reserved;      // zero
 } NphMeshLevel;
 
+// Triangles for the rays alone (version 7; render/renderer.h's records, byte for byte). A
+// submesh's run: RAYT[first, first + count), `count` 0 where the rays take the submesh's own
+// triangles (`first` and `alpha_key` then 0), else the key of the alpha test the run was made
+// for, never 0. A ray triangle: its parent's first index in INDX (a triangle of its run's
+// submesh), and each corner's place in the parent as two unorm16, the weight of the parent's
+// second corner in the low half and of its third in the high half (their sum at most 65535:
+// the rest is the first corner's).
+typedef struct NphMeshRayHeader {
+    u32 triangle_count; // RAYT
+    u32 reserved[3];    // zero
+} NphMeshRayHeader;
+
+typedef struct NphMeshRayRange {
+    u32 first;
+    u32 count;
+    u64 alpha_key;
+} NphMeshRayRange;
+
+typedef struct NphMeshRayTriangle {
+    u32 parent;
+    u32 corner[3];
+} NphMeshRayTriangle;
+
+NPH_STATIC_ASSERT(sizeof(NphMeshRayHeader) == 16U, "the ray triangles' header is 16 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshRayRange) == 16U, "a submesh's run of ray triangles is 16 bytes");
+NPH_STATIC_ASSERT(sizeof(NphMeshRayTriangle) == 16U, "a ray triangle is 16 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodHeader) == 32U, "the levels' header is 32 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLodMaker) == 20U, "a maker's record is 20 bytes");
 NPH_STATIC_ASSERT(sizeof(NphMeshLevel) == 32U, "a level is 32 bytes");
@@ -337,6 +383,11 @@ typedef struct NphMeshView {
     // A head's levels, finest first, NULL (and 0) for any other mesh.
     const NphMeshLevel *levels;
     u32 level_count;
+    // The rays' own triangles (version 7): each submesh's run ([submesh_count]) and the
+    // triangles; NULL (and 0) without them.
+    const NphMeshRayRange *ray_ranges;
+    const NphMeshRayTriangle *ray_triangles;
+    u32 ray_triangle_count;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
@@ -354,9 +405,13 @@ typedef struct NphMeshView {
 // naming an asset, with clusters, its errors finite, not negative, its maker
 // error at most its error and at least the finer level's) and a level
 // apart's (voxels alone, of one level, its makers' records finite, their
-// radii and errors not negative). That the hierarchy is a tree and its
-// bounds hold is the renderer's to check (nph_render_mesh_create), as that a
-// head's levels are its own: each is a mesh asset of its own, viewed alone.
+// radii and errors not negative); the rays' triangles (version 7: a mesh of
+// triangles, their runs in submesh order filling RAYT, a run of some with a
+// key and a run of none without, every parent a triangle of its run's
+// submesh, every corner within its parent, every reserved word zero). That
+// the hierarchy is a tree and its bounds hold is the renderer's to check
+// (nph_render_mesh_create), as that a head's levels are its own: each is a
+// mesh asset of its own, viewed alone.
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);
 
 // The position of vertex `p` in mesh space.

@@ -206,6 +206,7 @@ load_text_64K                  8000
 # (hosted runners have four vCPUs, the reference machine sixteen); the
 # glTF import allocates through the platform allocator and gets 5x.
 # mesh_process holds the levels of detail (step 8), on one thread.
+# ray_trim_cards is the triangles for the rays alone (ADR-0096), per card triangle.
 bc7_encode_opaque              330000
 bc7_encode_alpha               340000
 bc7_encode_opaque_p2_r1        115000
@@ -224,6 +225,7 @@ mesh_tangents                  1300
 mesh_optimize                  770
 mesh_meshlets                  1700
 mesh_process                   43000
+ray_trim_cards                 2400
 gltf_import_glb                12700
 
 # render_bench (docs/render.md, docs/golden.md). flip_256 is one golden-image

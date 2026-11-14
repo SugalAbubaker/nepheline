@@ -9,6 +9,7 @@
 #include <nepheline/core/log.h>
 #include <nepheline/math/mat.h>
 
+#include <stddef.h>
 #include <string.h>
 
 NPH_LOG_CATEGORY_DEFINE(LOG_COOKED_SCENE, "cooked_scene", NPH_LOG_LEVEL_INFO);
@@ -28,6 +29,13 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshLodMaker) == sizeof(NphRenderLodMaker),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
+NPH_STATIC_ASSERT(sizeof(NphMeshRayRange) == sizeof(NphRenderRaySubmesh) &&
+                      offsetof(NphMeshRayRange, alpha_key) ==
+                          offsetof(NphRenderRaySubmesh, alpha_key) &&
+                      sizeof(NphMeshRayTriangle) == sizeof(NphRenderRayTriangle) &&
+                      offsetof(NphMeshRayTriangle, corner) ==
+                          offsetof(NphRenderRayTriangle, corner),
+                  "cooked triangles for the rays are the renderer's records");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
                   "the wrap modes share their numbering");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_ALPHA_BLEND == (u32)NPH_RENDER_ALPHA_BLEND,
@@ -267,11 +275,57 @@ static void cooked_clusters(const NphMeshView *mv, NphRenderMeshDesc *d)
     d->lod_makers = makers;
 }
 
+// The alpha key a cooked material's render material is made with (NphRenderMaterialDesc
+// .alpha_key): the cooker's (NphMaterialHeader.alpha_key), where its rays read the alpha the
+// key was made of, the base colour texture's finest level. A paged texture's rays read
+// whichever level is resident, and a texture this device could not take is not read at all:
+// then none, and no mesh's triangles for the rays alone hold for the material (ADR-0096).
+static u64 material_alpha_key(const CookedScene *s, const NphMaterialHeader *h)
+{
+    if (h->alpha_key == 0U || s->paged_textures) {
+        return 0U;
+    }
+    const u32 t = find_asset(s, h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture);
+    return t != NPH_U32_MAX && s->textures[t].value != 0U ? h->alpha_key : 0U;
+}
+
+// Whether the scene's instances of the mesh `guid` all draw its trimmed submeshes with
+// materials of the keys their triangles for the rays were made for: the renderer makes no
+// instance of such a mesh otherwise (nph_render_instance_create), so a mesh whose triangles
+// do not hold for the scene is made without them, and its rays take its own.
+static bool ray_triangles_hold(const CookedScene *s, const NphSceneView *sv, NphGuid guid,
+                               const NphMeshView *mv)
+{
+    for (u32 i = 0; i < sv->header->instance_count; ++i) {
+        const NphSceneMeshInstance *inst = &sv->instances[i];
+        if (!nph_guid_equals(inst->mesh, guid)) {
+            continue;
+        }
+        for (u32 k = 0; k < mv->header->submesh_count; ++k) {
+            if (mv->ray_ranges[k].count == 0U) {
+                continue;
+            }
+            const u32 slot = mv->submeshes[k].material_slot;
+            const NphAsset *ma = slot < inst->material_count
+                                     ? asset_of(s, sv->materials[inst->material_offset + slot])
+                                     : NULL;
+            NphMaterialView mat;
+            if (ma == NULL || nph_material_view(ma, &mat) != NPH_RESULT_OK ||
+                material_alpha_key(s, mat.header) != mv->ray_ranges[k].alpha_key) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // The render mesh of a mesh asset (a head of levels apart has none: its
 // levels are meshes of their own, load_levels), and its bounds: the view
-// checks the whole asset, so it is taken once, here, not per instance.
-static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, NphRenderMesh *out,
-                                NphAABB *out_bounds)
+// checks the whole asset, so it is taken once, here, not per instance. With
+// the scene's view `sv`, the mesh's triangles for the rays alone where they
+// hold for the scene's instances of it (its textures are made by then).
+static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, const NphSceneView *sv,
+                                NphRenderMesh *out, NphAABB *out_bounds)
 {
     NphMeshView mv;
     NPH_TRY(nph_mesh_view(asset, &mv));
@@ -307,13 +361,26 @@ static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, NphRender
     d.bounds = h->bounds;
     d.no_rays = (h->flags & (u32)NPH_MESH_FLAG_NO_RAYS) != 0U ? 1 : 0;
     cooked_clusters(&mv, &d);
+    if (mv.ray_ranges != NULL && sv != NULL && !d.no_rays) {
+        if (ray_triangles_hold(s, sv, asset->header.guid, &mv)) {
+            // The same records (asserted at the top), handed over as they are.
+            const void *runs = mv.ray_ranges;
+            const void *triangles = mv.ray_triangles;
+            d.ray_submeshes = runs;
+            d.ray_triangles = triangles;
+            d.ray_triangle_count = mv.ray_triangle_count;
+            s->ray_meshes_trimmed += 1U;
+        } else {
+            s->ray_meshes_untrimmed += 1U;
+        }
+    }
     d.name = "cooked mesh";
     return nph_render_mesh_create(s->renderer, &d, out);
 }
 
-static NphResult create_mesh(CookedScene *s, u32 index)
+static NphResult create_mesh(CookedScene *s, const NphSceneView *sv, u32 index)
 {
-    return create_mesh_of(s, nph_asset_get(s->loader, s->assets[index]), &s->meshes[index],
+    return create_mesh_of(s, nph_asset_get(s->loader, s->assets[index]), sv, &s->meshes[index],
                           &s->mesh_bounds[index]);
 }
 
@@ -430,6 +497,7 @@ static NphResult create_material(CookedScene *s, const NphAsset *asset, f32 emis
     d.transmissive = (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U;
     d.normal_scale = h->textures[NPH_MATERIAL_TEXTURE_NORMAL].scale;
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
+    d.alpha_key = material_alpha_key(s, h);
     for (u32 t = 0; t < (u32)NPH_RENDER_SLOT_COUNT; ++t) {
         const NphMaterialTextureRef *ref = &h->textures[t];
         d.textures[t].texture = texture_of(s, ref->texture);
@@ -738,16 +806,21 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
     }
     NPH_TRY(wait_all(s, desc->jobs, &done));
 
-    // Render resources: textures and meshes, then the materials that name
-    // the textures, then the instances and lights.
-    for (u32 i = 0; i < s->asset_count; ++i) {
-        const NphAsset *a = nph_asset_get(s->loader, s->assets[i]);
-        const bool texture = a->header.type == NPH_ASSET_TYPE_TEXTURE;
-        if (!texture && a->header.type != NPH_ASSET_TYPE_MESH) {
-            continue;
-        }
-        r = texture ? create_texture(s, i) : create_mesh(s, i);
-        if (r != NPH_RESULT_OK) {
+    // Render resources: textures, then meshes (whose triangles for the rays
+    // alone hold for materials whose textures the device took: create_mesh_of),
+    // then the materials that name the textures, then the instances and lights.
+    for (u32 pass = 0; pass < 2U; ++pass) {
+        const bool texture = pass == 0U;
+        for (u32 i = 0; i < s->asset_count; ++i) {
+            const NphAsset *a = nph_asset_get(s->loader, s->assets[i]);
+            if (a->header.type !=
+                (texture ? (u32)NPH_ASSET_TYPE_TEXTURE : (u32)NPH_ASSET_TYPE_MESH)) {
+                continue;
+            }
+            r = texture ? create_texture(s, i) : create_mesh(s, &sv, i);
+            if (r == NPH_RESULT_OK) {
+                continue;
+            }
             // Which one, and how far the load got: a capacity runs out at a
             // count, not at an asset.
             char guid[NPH_GUID_STRING_LEN + 1U];
@@ -757,6 +830,13 @@ static NphResult load(CookedScene *s, const CookedSceneDesc *desc)
                           nph_result_string(r));
             return r;
         }
+    }
+    if (s->ray_meshes_untrimmed != 0U) {
+        NPH_LOG_INFO(&LOG_COOKED_SCENE,
+                     "%u meshes' triangles for the rays alone are not used: their materials' "
+                     "alpha is not what they were made for here (paged or missing textures, or "
+                     "another material)",
+                     s->ray_meshes_untrimmed);
     }
     const f32 emissive_scale = desc->emissive_scale > 0.0F ? desc->emissive_scale : 1.0F;
     const u32 tiles_x = nph_max_u32(desc->tiles_x, 1U);

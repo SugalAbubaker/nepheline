@@ -101,6 +101,7 @@ supersedes it and both link to each other.
 | [0093](0093-what-popped-and-what-blinked.md) | What popped with distance and what blinked standing still: a sheet's outline, a level's hand-over, a pixel's unrest | Accepted |
 | [0094](0094-glass-blended-casters-and-the-grazing-sun.md) | Glass seen through, blended surfaces that cast nothing, and the sun's shadows traced where a view asks | Accepted |
 | [0095](0095-a-view-in-motion-as-sharp-as-standing.md) | A view in motion as sharp as standing: the history's surface, its filter, and its count | Accepted |
+| [0096](0096-leaf-cards-trimmed-for-rays.md) | Leaf cards trimmed for the rays: triangles for the rays alone, cut in the cooker | Accepted |
 
 ## Template
 

@@ -7,8 +7,11 @@
 // the written asset must pass the runtime's validation and mesh view:
 // whatever the cooker writes from hostile input is something the engine
 // can load. A small mesh's aggregate geometry becomes voxels, sampled from
-// its materials' factors (render/voxel.h; ADR-0061; images are fuzz_image's).
-// Embedded images are probed (header only).
+// its materials' factors (render/voxel.h; ADR-0061; images are fuzz_image's),
+// and every mesh's slots are given an alpha test (a small texture of the
+// input's own bytes, the material's factor, cutoff and wrap modes), so its
+// triangles for the rays alone are made of hostile texture coordinates too
+// (cook/ray_trim.h; ADR-0096). Embedded images are probed (header only).
 #include <nepheline/asset/format.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/log.h>
@@ -17,6 +20,7 @@
 
 #include <cook/gltf.h>
 #include <cook/image.h>
+#include <cook/ray_trim.h>
 #include <cook/voxel.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -55,6 +59,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     CookMeshSettings settings;
     cook_mesh_settings_default(&settings);
     settings.lz = NPH_LZ_LEVEL_FAST;
+    // The slots' alpha: 16 texels a side of the input's bytes.
+    u8 texels[256];
+    for (u32 i = 0; i < 256U; ++i) {
+        texels[i] = data[i % size];
+    }
     u32 budget = FUZZ_MAX_VERTICES;
     for (u32 m = 0; m < scene.mesh_count; ++m) {
         const CookGltfMesh *gm = &scene.meshes[m];
@@ -66,6 +75,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         // Its slots' materials as the voxelizer reads them (a slot past
         // them never voxelizes).
         CookVoxelMaterial slots[FUZZ_VOXEL_SLOTS];
+        CookRayTrimSlot ray_slots[FUZZ_VOXEL_SLOTS];
         const u32 slot_count =
             gm->material_count < FUZZ_VOXEL_SLOTS ? gm->material_count : FUZZ_VOXEL_SLOTS;
         for (u32 s = 0; s < slot_count; ++s) {
@@ -77,8 +87,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 nph_material_header_default(&h);
             }
             cook_voxel_material_init(&slots[s], &h);
+            const NphMaterialTextureRef *ref = &h.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+            memset(&ray_slots[s], 0, sizeof ray_slots[s]);
+            ray_slots[s].alpha.texels = texels;
+            ray_slots[s].alpha.width = 16U;
+            ray_slots[s].alpha.height = 16U;
+            ray_slots[s].wrap_u = ref->wrap_u;
+            ray_slots[s].wrap_v = ref->wrap_v;
+            ray_slots[s].factor = h.base_color_factor.w;
+            ray_slots[s].cutoff = h.alpha_cutoff;
+            ray_slots[s].key = 1U;
         }
         const CookVoxelMaterials materials = {slots, slot_count};
+        const CookRayTrimSlots rays = {ray_slots, slot_count};
+        mesh->ray_slots = &rays;
         settings.voxels = mesh->indices.len / 3U <= FUZZ_VOXEL_TRIANGLES;
         NphAssetWriter w;
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
@@ -86,6 +108,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (cook_mesh_process(mesh, &settings, &materials, NULL, &w, NULL) == NPH_RESULT_OK) {
             fuzz_check_written_mesh(alloc, &w);
         }
+        mesh->ray_slots = NULL;
         nph_asset_writer_free(&w);
     }
     cook_gltf_free(&scene);

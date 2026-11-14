@@ -515,6 +515,16 @@ rows for the scenes it budgets are from `render_perf-2026-11-13-adr-0095`,
 measured the same way. The landscape has no rows there: the nightly does
 not run it.
 
+Cooked with triangles for the rays alone (ADR-0096: the trees' cards cut
+down, for the rays, to where their alpha test can pass), the same build
+measures `reference_scenes-2026-11-13-adr-0096`, the mean of two rounds
+with the desktop still against two on the packs cooked before: the city's
+views 0.27 to 0.65 ms less a frame and 0.25 to 0.67 ms less at their 99th
+percentiles (its street 5.36 to 5.08 ms, its park 6.78 to 6.49, its rooftop
+8.79 to 8.12), Bistro's 0.04 to 0.07 ms less and 0.03 to 0.08 ms (its
+terrace 6.83 to 6.76, its street turn 7.38 to 7.35), the interior's as they
+were. The budgets above are not made afresh from it: they hold with room.
+
 The visible geometry is 1.42 M triangles in 22,708 clusters (2,687 of
 them rasterised in software). 69 of the 97 lights are in view, and the
 light grid hands each pixel 11.8 of them on average, of which 5.0 reach

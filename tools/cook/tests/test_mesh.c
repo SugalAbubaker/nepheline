@@ -6,6 +6,7 @@
 #include "test_cook_support.h"
 
 #include <cook/mesh.h>
+#include <cook/ray_trim.h>
 
 // A cube with four vertices per face (normals and UVs, no tangents).
 static void make_cube(CookMesh *mesh, bool with_normals)
@@ -1207,4 +1208,97 @@ NTEST(mesh, the_pipeline_writes_levels_of_detail)
     NTEST_EXPECT_EQ_UINT(st.lod_levels, 1U);
     test_asset_free(&one);
     cook_mesh_free(&cube);
+}
+
+// ---------------------------------------------------------------------------
+// Triangles for the rays alone (cook/ray_trim.h; ADR-0096)
+// ---------------------------------------------------------------------------
+
+// `count` cards of two triangles side by side, a unit square of the texture on each.
+static void make_cards(CookMesh *mesh, u32 count)
+{
+    cook_mesh_init(mesh, nph_allocator_system());
+    for (u32 i = 0; i < count; ++i) {
+        const f32 x = (f32)i * 1.5F;
+        const CookVertex verts[4] = {
+            vertex_at(x, 0.0F, 0.0F, 0.0F, 0.0F), vertex_at(x + 1.0F, 0.0F, 0.0F, 1.0F, 0.0F),
+            vertex_at(x + 1.0F, 1.0F, 0.0F, 1.0F, 1.0F), vertex_at(x, 1.0F, 0.0F, 0.0F, 1.0F)};
+        const u32 indices[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+        NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(mesh, verts, 4U, indices, 6U, 0U), NPH_RESULT_OK);
+    }
+    // One submesh of them all.
+    mesh->submeshes.len = 1U;
+    mesh->submeshes.data[0].index_count = mesh->indices.len;
+    mesh->flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_UV0;
+}
+
+NTEST(mesh, alpha_tested_cards_cook_with_triangles_for_the_rays)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    // A leaf in the middle of its card: a disc of 10 texels in 64.
+    u8 texels[64 * 64];
+    for (u32 y = 0; y < 64U; ++y) {
+        for (u32 x = 0; x < 64U; ++x) {
+            const f32 dx = (f32)x - 31.5F;
+            const f32 dy = (f32)y - 31.5F;
+            texels[y * 64U + x] = dx * dx + dy * dy < 100.0F ? 255U : 0U;
+        }
+    }
+    CookRayTrimSlot slot;
+    memset(&slot, 0, sizeof slot);
+    slot.alpha.texels = texels;
+    slot.alpha.width = 64U;
+    slot.alpha.height = 64U;
+    slot.factor = 1.0F;
+    slot.cutoff = 0.5F;
+    slot.key = 9U;
+    const CookRayTrimSlots slots = {&slot, 1U};
+    // 0: trimmed. 1: switched off. 2: a mesh the rays pass by. 3: no slots given. 4: no
+    // texture coordinates to read the texture by.
+    for (u32 variant = 0; variant < 5U; ++variant) {
+        CookMesh m;
+        make_cards(&m, 70U);
+        CookMeshSettings s;
+        cook_mesh_settings_default(&s);
+        s.lz = NPH_LZ_LEVEL_FAST;
+        s.no_ray_trim = variant == 1U;
+        m.flags |= variant == 2U ? (u32)COOK_MESH_NO_RAYS : 0U;
+        m.ray_slots = variant == 3U ? NULL : &slots;
+        m.flags &= variant == 4U ? ~(u32)COOK_MESH_HAS_UV0 : ~0U;
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                              nph_guid_from_cstr("cards"), 1U);
+        CookMeshStats st;
+        NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, &st), NPH_RESULT_OK);
+        TestAsset ta;
+        test_asset_from_writer(alloc, &w, &ta);
+        nph_asset_writer_free(&w);
+        NphMeshView v;
+        NTEST_ASSERT_EQ_INT(nph_mesh_view(&ta.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.header->index_count, 420U);
+        if (variant == 0U) {
+            NTEST_EXPECT_EQ_UINT(st.ray_submeshes, 1U);
+            NTEST_EXPECT_EQ_UINT(st.ray_parents, 140U);
+            NTEST_EXPECT_GT_UINT(st.ray_triangles, 140U); // a polygon is a fan of some
+            NTEST_EXPECT_TRUE(st.ray_area_kept > 0.05F && st.ray_area_kept < 0.5F);
+            NTEST_ASSERT_NOT_NULL(v.ray_ranges);
+            NTEST_EXPECT_EQ_UINT(v.ray_triangle_count, st.ray_triangles);
+            NTEST_EXPECT_EQ_UINT(v.ray_ranges[0].count, st.ray_triangles);
+            NTEST_EXPECT_TRUE(v.ray_ranges[0].alpha_key == 9U);
+            // Every triangle of the cards has its part, in the cooked triangles' order.
+            u32 parents = 0U;
+            u32 last = NPH_U32_MAX;
+            for (u32 i = 0; i < v.ray_triangle_count; ++i) {
+                parents += v.ray_triangles[i].parent != last ? 1U : 0U;
+                last = v.ray_triangles[i].parent;
+            }
+            NTEST_EXPECT_EQ_UINT(parents, 140U);
+        } else {
+            NTEST_EXPECT_EQ_UINT(st.ray_triangles, 0U);
+            NTEST_EXPECT_TRUE(v.ray_ranges == NULL && v.ray_triangles == NULL);
+            NTEST_EXPECT_NULL(nph_asset_blob(&ta.asset, NPH_MESH_TAG_RAY_HEADER, 0U));
+        }
+        test_asset_free(&ta);
+        cook_mesh_free(&m);
+    }
 }

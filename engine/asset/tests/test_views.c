@@ -344,6 +344,128 @@ NTEST(views, mesh_view_resolves_levels_of_detail)
     }
 }
 
+// The cube with triangles for the rays alone (version 7): its one submesh's run of two, parts
+// of its first and its last triangle, for the alpha test of key 7.
+static void build_cube_with_rays(ImageAsset *ia, u32 type_version, bool header, bool ranges,
+                                 bool triangles)
+{
+    ImageAsset plain;
+    memset(&plain, 0, sizeof plain);
+    plain.alloc = ia->alloc;
+    build_cube(&plain, type_version);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
+                          nph_guid_from_cstr("cube"), 1U);
+    for (u32 i = 0; i < plain.asset.blob_count; ++i) {
+        const NphAssetBlob *b = &plain.asset.blobs[i];
+        add(&w, b->tag, b->index, b->data, b->size);
+    }
+    image_asset_free(&plain);
+    NphMeshRayHeader rh;
+    memset(&rh, 0, sizeof rh);
+    rh.triangle_count = 2U;
+    const NphMeshRayRange run = {0U, 2U, 7U};
+    // A corner each of the parent's own, and points of its edges and its inside.
+    const NphMeshRayTriangle tris[2] = {
+        {0U, {0U, 65535U, 65535U << 16U}},
+        {33U, {32768U, 32767U | (32768U << 16U), 100U | (200U << 16U)}},
+    };
+    if (header) {
+        add(&w, NPH_MESH_TAG_RAY_HEADER, 0U, &rh, sizeof rh);
+    }
+    if (ranges) {
+        add(&w, NPH_MESH_TAG_RAY_RANGES, 0U, &run, sizeof run);
+    }
+    if (triangles) {
+        add(&w, NPH_MESH_TAG_RAY_TRIANGLES, 0U, tris, sizeof tris);
+    }
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, mesh_view_resolves_and_checks_triangles_for_the_rays)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_cube_with_rays(&ia, NPH_MESH_TYPE_VERSION, true, true, true);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.ray_ranges);
+    NTEST_ASSERT_NOT_NULL(v.ray_triangles);
+    NTEST_EXPECT_EQ_UINT(v.ray_triangle_count, 2U);
+    NTEST_EXPECT_EQ_UINT(v.ray_ranges[0].count, 2U);
+    NTEST_EXPECT_TRUE(v.ray_ranges[0].alpha_key == 7U);
+    NTEST_EXPECT_EQ_UINT(v.ray_triangles[1].parent, 33U);
+
+    // A run that does not start where the one before ended, is longer than the triangles,
+    // or has no key; and a run of none with a start or a key.
+    NphMeshRayRange *run = (NphMeshRayRange *)blob_bytes(&ia, NPH_MESH_TAG_RAY_RANGES, 0U);
+    run->first = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    run->first = 0U;
+    run->count = 3U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    run->count = 1U; // and one that leaves a triangle to no submesh
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    run->count = 2U;
+    run->alpha_key = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    run->count = 0U;
+    run->first = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT); // none fill them
+    run->alpha_key = 7U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    run->count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+
+    // A parent that is no triangle of the submesh: past its indices, or not a first index.
+    NphMeshRayTriangle *t = (NphMeshRayTriangle *)blob_bytes(&ia, NPH_MESH_TAG_RAY_TRIANGLES, 0U);
+    t[1].parent = 36U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    t[1].parent = 34U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    t[1].parent = 33U;
+    NphSubmesh *sub = (NphSubmesh *)blob_bytes(&ia, NPH_MESH_TAG_SUBMESHES, 0U);
+    sub->index_offset = 3U; // the submesh no longer holds the first triangle
+    sub->index_count = 33U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    sub->index_offset = 0U;
+    sub->index_count = 36U;
+    // A corner outside its parent: its weights come to more than the whole.
+    t[0].corner[1] = 65535U | (1U << 16U);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    t[0].corner[1] = 65535U;
+    // A reserved word, and a header that counts none.
+    NphMeshRayHeader *rh = (NphMeshRayHeader *)blob_bytes(&ia, NPH_MESH_TAG_RAY_HEADER, 0U);
+    rh->reserved[1] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rh->reserved[1] = 0U;
+    rh->triangle_count = 0U;
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rh->triangle_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+
+    // Without them every pointer is NULL; in an older version, or with some of their blobs
+    // and not the rest, the mesh is refused.
+    build_cube(&ia, NPH_MESH_TYPE_VERSION);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.ray_ranges == NULL && v.ray_triangles == NULL &&
+                      v.ray_triangle_count == 0U);
+    image_asset_free(&ia);
+    build_cube_with_rays(&ia, 6U, true, true, true);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    const bool partial[4][3] = {
+        {false, true, true}, {true, false, true}, {true, true, false}, {false, false, true}};
+    for (u32 i = 0; i < 4U; ++i) {
+        build_cube_with_rays(&ia, NPH_MESH_TYPE_VERSION, partial[i][0], partial[i][1],
+                             partial[i][2]);
+        NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+        image_asset_free(&ia);
+    }
+}
+
 // The cube with a coarser level of voxels (version 3): its meshlet at level
 // 0, made by group 0 into one voxel cluster of two bricks, the first holding
 // two voxels (a box and a capsule) and the second one (a box), under root
@@ -1134,6 +1256,26 @@ NTEST(views, material_view_and_defaults)
     NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
     p->textures[2].wrap_v = 0U;
     NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    // The alpha test's key (version 2): of an alpha-tested material alone, and its
+    // reserved word zero.
+    p->alpha_key = 0x1234567890ABCDEFULL;
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.header->alpha_key == 0x1234567890ABCDEFULL);
+    p->alpha_mode = (u32)NPH_MATERIAL_ALPHA_BLEND;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->alpha_mode = (u32)NPH_MATERIAL_ALPHA_OPAQUE;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->alpha_mode = (u32)NPH_MATERIAL_ALPHA_MASK;
+    p->reserved = 1U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->reserved = 0U;
+    // A version 1 material still reads, and has no key.
+    ia.asset.header.type_version = 1U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->alpha_key = 0U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    ia.asset.header.type_version = NPH_MATERIAL_TYPE_VERSION + 1U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_VERSION_MISMATCH);
     image_asset_free(&ia);
 }
 
@@ -1676,8 +1818,10 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/mesh_proxy", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_level", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_levels_head", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_rays", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
+    check_seed_asset("nph/material_keyed", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/scene_cells", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);

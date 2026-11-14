@@ -21,6 +21,9 @@
 //                          triangles and vertices shuffled
 //   mesh_meshlets          the meshlets of the optimised grid
 //   mesh_process           the whole pipeline from the shuffled grid, written with LZ HIGH
+//   ray_trim_cards         the triangles for the rays alone (cook/ray_trim.h; ADR-0096) of
+//                          16384 alpha-tested cards, sixteen leaves of a 512 x 512 texture
+//                          among them (ns per triangle of the cards)
 //   gltf_import_glb        cook_gltf_load_memory of an 8-mesh, 7 MiB GLB (ns per KiB)
 //
 // The labels carry what the work achieved: PSNR (BC6H: the mean relative
@@ -41,6 +44,7 @@
 #include <cook/bc.h>
 #include <cook/gltf.h>
 #include <cook/mesh.h>
+#include <cook/ray_trim.h>
 #include <cook/texture.h>
 #include <math.h>
 #include <stdio.h>
@@ -881,4 +885,121 @@ NBENCH(gltf_import_glb)
     snprintf(label, sizeof label, "%.1f MiB, %u meshes", (f64)g_glb.size / (1024.0 * 1024.0),
              meshes);
     nbench_set_label(state, label);
+}
+
+// ---------------------------------------------------------------------------
+// Triangles for the rays alone
+// ---------------------------------------------------------------------------
+
+#define TRIM_CARDS 16384U
+#define TRIM_ALPHA 512U
+
+// Cards of two triangles, each over one of sixteen cells of the texture, a leaf in each cell:
+// a tree's cards as they are cooked.
+typedef struct TrimCards {
+    NphMeshPosition *positions;
+    NphMeshAttrib *attribs;
+    u32 *indices;
+    u8 *alpha;
+    NphSubmesh submesh;
+    bool ready;
+} TrimCards;
+
+static TrimCards g_trim;
+
+static void trim_cards_free(void)
+{
+    NphAllocator *a = nph_allocator_system();
+    if (g_trim.positions != NULL) {
+        NPH_FREE_ARRAY(a, NphMeshPosition, g_trim.positions, (u64)TRIM_CARDS * 4U);
+    }
+    if (g_trim.attribs != NULL) {
+        NPH_FREE_ARRAY(a, NphMeshAttrib, g_trim.attribs, (u64)TRIM_CARDS * 4U);
+    }
+    if (g_trim.indices != NULL) {
+        NPH_FREE_ARRAY(a, u32, g_trim.indices, (u64)TRIM_CARDS * 6U);
+    }
+    if (g_trim.alpha != NULL) {
+        NPH_FREE_ARRAY(a, u8, g_trim.alpha, (u64)TRIM_ALPHA * TRIM_ALPHA);
+    }
+}
+
+static void prepare_trim_cards(void)
+{
+    if (g_trim.ready) {
+        return;
+    }
+    setup_once();
+    atexit(trim_cards_free);
+    NphAllocator *a = nph_allocator_system();
+    g_trim.positions = NPH_ALLOC_ARRAY_ZEROED(a, NphMeshPosition, (u64)TRIM_CARDS * 4U);
+    g_trim.attribs = NPH_ALLOC_ARRAY_ZEROED(a, NphMeshAttrib, (u64)TRIM_CARDS * 4U);
+    g_trim.indices = NPH_ALLOC_ARRAY(a, u32, (u64)TRIM_CARDS * 6U);
+    g_trim.alpha = NPH_ALLOC_ARRAY_ZEROED(a, u8, (u64)TRIM_ALPHA * TRIM_ALPHA);
+    if (g_trim.positions == NULL || g_trim.attribs == NULL || g_trim.indices == NULL ||
+        g_trim.alpha == NULL) {
+        check(NPH_RESULT_OUT_OF_MEMORY);
+    }
+    // A leaf a cell: an ellipse leaning one way or the other, a third of the cell wide.
+    const u32 cell = TRIM_ALPHA / 4U;
+    for (u32 y = 0; y < TRIM_ALPHA; ++y) {
+        for (u32 x = 0; x < TRIM_ALPHA; ++x) {
+            const u32 k = (y / cell) * 4U + x / cell;
+            const f32 dx = (f32)(x % cell) - (f32)cell * 0.5F;
+            const f32 dy = (f32)(y % cell) - (f32)cell * 0.5F;
+            const f32 lean = (k & 1U) != 0U ? 0.6F : -0.6F;
+            const f32 along = (dx + lean * dy) / ((f32)cell * 0.42F);
+            const f32 across = (dy - lean * dx) / ((f32)cell * 0.17F);
+            g_trim.alpha[(u64)y * TRIM_ALPHA + x] =
+                along * along + across * across < 1.0F ? 255U : 0U;
+        }
+    }
+    static const f32 k_corner[4][2] = {{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}};
+    static const u32 k_index[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+    for (u32 i = 0; i < TRIM_CARDS; ++i) {
+        const u32 k = texel_hash(i, 7U, 0U) % 16U;
+        for (u32 c = 0; c < 4U; ++c) {
+            NphMeshPosition *p = &g_trim.positions[i * 4U + c];
+            p->x = (u16)((i % 128U) * 500U + (u32)k_corner[c][0] * 400U);
+            p->y = (u16)((i / 128U) * 500U + (u32)k_corner[c][1] * 400U);
+            p->z = (u16)(texel_hash(i, 3U, 1U) % 65536U);
+            g_trim.attribs[i * 4U + c].uv0 =
+                nph_pack_f16x2(nph_vec2(((f32)(k % 4U) + k_corner[c][0]) * 0.25F,
+                                        ((f32)(k >> 2U) + k_corner[c][1]) * 0.25F));
+            g_trim.attribs[i * 4U + c].color = 0xFFFFFFFFU;
+        }
+        for (u32 j = 0; j < 6U; ++j) {
+            g_trim.indices[i * 6U + j] = i * 4U + k_index[j];
+        }
+    }
+    g_trim.submesh.index_count = TRIM_CARDS * 6U;
+    g_trim.ready = true;
+}
+
+NBENCH(ray_trim_cards)
+{
+    static char label[96];
+    prepare_trim_cards();
+    CookRayTrimSlot slot;
+    memset(&slot, 0, sizeof slot);
+    slot.alpha.texels = g_trim.alpha;
+    slot.alpha.width = TRIM_ALPHA;
+    slot.alpha.height = TRIM_ALPHA;
+    slot.factor = 1.0F;
+    slot.cutoff = 0.5F;
+    slot.key = 1U;
+    const CookRayTrimSlots slots = {&slot, 1U};
+    nbench_set_items_per_iteration(state, (u64)TRIM_CARDS * 2U);
+    CookRayTrim trim;
+    cook_ray_trim_init(&trim, nph_allocator_system());
+    while (nbench_keep_running(state)) {
+        check(cook_ray_trim_build(nph_allocator_system(), g_trim.positions, g_trim.attribs,
+                                  TRIM_CARDS * 4U, g_trim.indices, TRIM_CARDS * 6U, &g_trim.submesh,
+                                  1U, nph_vec3(1.0F, 1.0F, 1.0F), &slots, &trim));
+    }
+    snprintf(label, sizeof label, "%u ray triangles of %u distinct, %.0f %% of the area kept",
+             trim.triangles.len, trim.stats.distinct,
+             trim.stats.area > 0.0 ? 100.0 * trim.stats.area_kept / trim.stats.area : 100.0);
+    nbench_set_label(state, label);
+    cook_ray_trim_free(&trim);
 }

@@ -273,6 +273,15 @@ typedef struct RenderMesh {
     NphGpuAccel blas_next; // the compacted copy, until it is swapped in
     u64 blas_next_bytes;   // and its size
     NphGpuAccel blas_old;  // the original, until it is retired
+    // Its triangles for the rays alone (NphRenderMeshDesc.ray_submeshes; ADR-0096): each
+    // submesh's run and key (from the renderer's allocator; NULL: none), whether its bottom
+    // level is built of them (rt.c: where the device traces and the mesh takes rays), and the
+    // build's inputs, their corners placed (rt.c ray_corner), until the build is recorded.
+    NphRenderRaySubmesh *ray_submeshes;
+    b32 ray_trimmed;
+    NphGpuBuffer ray_vertices;
+    NphGpuBuffer ray_indices;
+    u32 ray_vertex_count;
     // The production path (vis_scene.c): the meshlet streams and the
     // mesh's corners in the index pool (indirect raster only).
     NphGpuBuffer meshlets;
@@ -331,6 +340,9 @@ typedef struct RenderMaterial {
     // first resident level rewrites those slots' samplers alone (frame.c).
     u32 paged_slots;
     u32 paged_texture[NPH_RENDER_SLOT_COUNT];
+    // The live instances' submeshes whose triangles for the rays hold for its alpha key
+    // (renderer.c): while there are some, the key stays.
+    u32 ray_users;
 } RenderMaterial;
 
 // RenderVis.slot_state bits, per instance slot (they outlive an instance:

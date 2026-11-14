@@ -10,10 +10,12 @@
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
 
+#include <cook/bc.h>
 #include <cook/cooker.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
 #include <cook/polymesh.h>
+#include <cook/ray_trim.h>
 #include <cook/voxel.h>
 #include <stdio.h>
 #include <string.h>
@@ -369,11 +371,20 @@ static u64 settings_hash(const Cooker *c, u32 type)
         CookTextureSettings t = c->texture;
         t.usage = COOK_TEXTURE_COLOR; // the usage is folded in per texture
         h = nph_hash_combine(h, nph_hash64(&t, sizeof t, 1U));
-    } else if (type == NPH_ASSET_TYPE_MESH) {
-        h = nph_hash_combine(h, COOK_MESH_VERSION);
-        h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
-    } else if (type == NPH_ASSET_TYPE_MATERIAL) {
-        h = nph_hash_combine(h, COOK_MATERIAL_VERSION);
+    } else if (type == NPH_ASSET_TYPE_MESH || type == NPH_ASSET_TYPE_MATERIAL) {
+        if (type == NPH_ASSET_TYPE_MESH) {
+            h = nph_hash_combine(h, COOK_MESH_VERSION);
+            h = nph_hash_combine(h, nph_hash64(&c->mesh, sizeof c->mesh, 2U));
+        } else {
+            h = nph_hash_combine(h, COOK_MATERIAL_VERSION);
+        }
+        // A material's alpha key and a mesh's triangles for the rays are of the base colour
+        // textures as cooked (cook/ray_trim.h; ADR-0096): of the textures' settings too.
+        if (!c->mesh.no_ray_trim) {
+            CookTextureSettings t = c->texture;
+            t.usage = COOK_TEXTURE_COLOR;
+            h = nph_hash_combine(h, nph_hash64(&t, sizeof t, 6U));
+        }
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         // The cooker's defaults; a source's own settings are in its content
         // hash (cooker_cook_sound).
@@ -2007,6 +2018,174 @@ static NphResult hlod_current(Cooker *c, const char *key, HlodScene *hs)
     return NPH_RESULT_OK;
 }
 
+// ---------------------------------------------------------------------------
+// The alpha tests of a scene's materials (cook/ray_trim.h; ADR-0096)
+// ---------------------------------------------------------------------------
+
+// A cooked texture's alpha at its finest level, read back from the output as the GPU decodes
+// it; `texels` NULL where it cannot be had (no 2D texture of a format with alpha that is
+// decoded here, or its file is not there).
+typedef struct RayAlphaEntry {
+    NphGuid guid;
+    u8 *texels;
+    u32 width;
+    u32 height;
+} RayAlphaEntry;
+
+typedef NPH_ARRAY(RayAlphaEntry) RayAlphaArray;
+
+static void ray_alphas_free(Cooker *c, RayAlphaArray *alphas)
+{
+    NPH_ARRAY_FOREACH (RayAlphaEntry, e, alphas) {
+        if (e->texels != NULL) {
+            NPH_FREE_ARRAY(c->alloc, u8, e->texels, (u64)e->width * e->height);
+        }
+    }
+    NPH_ARRAY_FREE(alphas);
+}
+
+// A level's alpha, a byte a texel; false for a block that is no BC7 block (which a GPU reads
+// as it will).
+static bool level_alpha(const NphTextureHeader *th, const u8 *level, u8 *texels)
+{
+    const u32 w = th->width;
+    const u32 h = th->height;
+    if (th->format == NPH_TEXTURE_FORMAT_R8G8B8A8_UNORM ||
+        th->format == NPH_TEXTURE_FORMAT_R8G8B8A8_SRGB) {
+        for (u64 i = 0; i < (u64)w * h; ++i) {
+            texels[i] = level[i * 4U + 3U];
+        }
+        return true;
+    }
+    const u32 bw = (w + 3U) / 4U;
+    const u32 bh = (h + 3U) / 4U;
+    for (u32 by = 0; by < bh; ++by) {
+        for (u32 bx = 0; bx < bw; ++bx) {
+            CookBlockRgba8 block;
+            if (!cook_bc7_decode(level + ((u64)by * bw + bx) * 16U, &block)) {
+                return false;
+            }
+            for (u32 y = 0; y < 4U && by * 4U + y < h; ++y) {
+                for (u32 x = 0; x < 4U && bx * 4U + x < w; ++x) {
+                    texels[(u64)(by * 4U + y) * w + (u64)bx * 4U + x] =
+                        block.texels[(u64)y * 4U + x][3];
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// The finest level's alpha of the cooked texture file image `bytes`, into `e`.
+static void file_alpha(Cooker *c, const void *bytes, u64 size, RayAlphaEntry *e)
+{
+    NphAssetFileInfo info;
+    if (nph_asset_file_validate(bytes, size, &info) != NPH_RESULT_OK ||
+        info.header.type != NPH_ASSET_TYPE_TEXTURE) {
+        return;
+    }
+    NphTextureHeader th;
+    const NphAssetBlobEntry *head = nph_asset_file_find(&info, NPH_TEXTURE_TAG_HEADER, 0U);
+    const NphAssetBlobEntry *mip = nph_asset_file_find(&info, NPH_TEXTURE_TAG_MIP, 0U);
+    if (head == NULL || mip == NULL || head->raw_size != sizeof th ||
+        nph_asset_file_unpack_blob(bytes, head, &th) != NPH_RESULT_OK) {
+        return;
+    }
+    const bool decoded = th.format == NPH_TEXTURE_FORMAT_R8G8B8A8_UNORM ||
+                         th.format == NPH_TEXTURE_FORMAT_R8G8B8A8_SRGB ||
+                         th.format == NPH_TEXTURE_FORMAT_BC7_UNORM ||
+                         th.format == NPH_TEXTURE_FORMAT_BC7_SRGB;
+    if (!decoded || th.kind != (u32)NPH_TEXTURE_2D || th.layer_count != 1U || th.width == 0U ||
+        th.height == 0U || th.width > NPH_TEXTURE_MAX_EXTENT ||
+        th.height > NPH_TEXTURE_MAX_EXTENT ||
+        mip->raw_size != nph_texture_level_bytes(th.format, th.width, th.height)) {
+        return;
+    }
+    const u64 texel_count = (u64)th.width * th.height;
+    u8 *level = NPH_ALLOC_ARRAY(c->alloc, u8, mip->raw_size);
+    u8 *texels = NPH_ALLOC_ARRAY(c->alloc, u8, texel_count);
+    if (level != NULL && texels != NULL &&
+        nph_asset_file_unpack_blob(bytes, mip, level) == NPH_RESULT_OK &&
+        level_alpha(&th, level, texels)) {
+        e->texels = texels;
+        e->width = th.width;
+        e->height = th.height;
+        texels = NULL;
+    }
+    if (level != NULL) {
+        NPH_FREE_ARRAY(c->alloc, u8, level, mip->raw_size);
+    }
+    if (texels != NULL) {
+        NPH_FREE_ARRAY(c->alloc, u8, texels, texel_count);
+    }
+}
+
+// The cooked texture `guid`'s alpha (its entry's index in `alphas`), read once.
+static NphResult ray_alpha(Cooker *c, RayAlphaArray *alphas, NphGuid guid, u32 *out_index)
+{
+    for (u32 i = 0; i < alphas->len; ++i) {
+        if (nph_guid_equals(alphas->data[i].guid, guid)) {
+            *out_index = i;
+            return NPH_RESULT_OK;
+        }
+    }
+    RayAlphaEntry *e = NPH_ARRAY_PUSH_SLOT(alphas);
+    if (e == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    memset(e, 0, sizeof *e);
+    e->guid = guid;
+    *out_index = alphas->len - 1U;
+    const CookDbEntry *db = cook_db_find_guid(&c->db, guid);
+    if (db == NULL || db->type != NPH_ASSET_TYPE_TEXTURE) {
+        return NPH_RESULT_OK;
+    }
+    char full[COOKER_PATH_MAX * 2U];
+    snprintf(full, sizeof full, "%s/%s", c->out_dir, db->output);
+    void *bytes = NULL;
+    u64 size = 0U;
+    if (nph_file_read_all(full, c->alloc, &bytes, &size) == NPH_RESULT_OK) {
+        file_alpha(c, bytes, size, e);
+        nph_file_free_all(c->alloc, bytes, size);
+    }
+    return NPH_RESULT_OK;
+}
+
+// Each material's alpha test (`slots`, a material each, zeroed), and its key in its header:
+// of an alpha-tested material whose base colour texture's alpha is had. The textures are
+// cooked (their GUIDs in the headers).
+static NphResult scene_ray_slots(Cooker *c, CookGltfScene *scene, RayAlphaArray *alphas,
+                                 CookRayTrimSlot *slots)
+{
+    for (u32 m = 0; m < scene->material_count; ++m) {
+        NphMaterialHeader *h = &scene->materials[m].header;
+        const NphMaterialTextureRef *ref = &h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+        h->alpha_key = 0U;
+        if (h->alpha_mode != (u32)NPH_MATERIAL_ALPHA_MASK || nph_guid_is_null(ref->texture) ||
+            ref->texcoord != 0U) {
+            continue;
+        }
+        u32 index = 0U;
+        NPH_TRY(ray_alpha(c, alphas, ref->texture, &index));
+        const RayAlphaEntry *e = &alphas->data[index];
+        if (e->texels == NULL) {
+            continue;
+        }
+        CookRayTrimSlot *slot = &slots[m];
+        slot->alpha.texels = e->texels;
+        slot->alpha.width = e->width;
+        slot->alpha.height = e->height;
+        slot->wrap_u = ref->wrap_u;
+        slot->wrap_v = ref->wrap_v;
+        slot->factor = h->base_color_factor.w;
+        slot->cutoff = h->alpha_cutoff;
+        slot->key = cook_ray_trim_key(&slot->alpha, ref->wrap_u, ref->wrap_v, ref->nearest != 0U,
+                                      slot->factor, slot->cutoff);
+        h->alpha_key = slot->key;
+    }
+    return NPH_RESULT_OK;
+}
+
 NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
 {
     NPH_ASSERT(c != NULL && source_path != NULL);
@@ -2036,6 +2215,18 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     }
     if (r == NPH_RESULT_OK) {
         r = cook_scene_textures(c, key, &scene, &produced);
+    }
+    // The materials' alpha tests, read back from the textures as cooked: the keys the
+    // materials carry and the meshes' triangles for the rays are made for (ADR-0096).
+    RayAlphaArray ray_alphas;
+    NPH_ARRAY_INIT(&ray_alphas, alloc);
+    CookRayTrimSlot *ray_slots =
+        NPH_ALLOC_ARRAY_ZEROED(alloc, CookRayTrimSlot, nph_max_u32(scene.material_count, 1U));
+    if (r == NPH_RESULT_OK && ray_slots == NULL) {
+        r = NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (r == NPH_RESULT_OK && !c->mesh.no_ray_trim) {
+        r = scene_ray_slots(c, &scene, &ray_alphas, ray_slots);
     }
     // Materials, and the default one for primitives without a material.
     for (u32 m = 0; m < scene.material_count && r == NPH_RESULT_OK; ++m) {
@@ -2125,12 +2316,35 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
             materials.slots = slots;
             materials.slot_count = gm->material_count;
         }
+        // Its slots' alpha tests, for its triangles for the rays alone.
+        CookRayTrimSlot *mesh_ray_slots = NULL;
+        CookRayTrimSlots mesh_rays;
+        memset(&mesh_rays, 0, sizeof mesh_rays);
+        if (r == NPH_RESULT_OK && !c->mesh.no_ray_trim && gm->material_count != 0U) {
+            mesh_ray_slots = NPH_ALLOC_ARRAY_ZEROED(alloc, CookRayTrimSlot, gm->material_count);
+            if (mesh_ray_slots == NULL) {
+                r = NPH_RESULT_OUT_OF_MEMORY;
+            }
+            for (u32 s = 0; s < gm->material_count && mesh_ray_slots != NULL; ++s) {
+                const i32 mi = gm->materials[s];
+                if (mi >= 0 && (u32)mi < scene.material_count) {
+                    mesh_ray_slots[s] = ray_slots[mi];
+                }
+            }
+            mesh_rays.slots = mesh_ray_slots;
+            mesh_rays.count = gm->material_count;
+            gm->mesh.ray_slots = &mesh_rays;
+        }
         if (r == NPH_RESULT_OK && hlod.build) {
             r = cook_mesh_process_proxy(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL,
                                         c->jobs, &w, &st, hlod.min_error[m], &hlod.sources[m]);
         } else if (r == NPH_RESULT_OK) {
             r = cook_mesh_process(&gm->mesh, &c->mesh, slots != NULL ? &materials : NULL, c->jobs,
                                   &w, &st);
+        }
+        gm->mesh.ray_slots = NULL;
+        if (mesh_ray_slots != NULL) {
+            NPH_FREE_ARRAY(alloc, CookRayTrimSlot, mesh_ray_slots, gm->material_count);
         }
         if (slots != NULL && hlod.build) {
             // The proxies' samplers read them until they are built.
@@ -2157,6 +2371,13 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
                          nph_time_ns_to_s(st.prepare_ns), nph_time_ns_to_s(st.optimize_ns),
                          nph_time_ns_to_s(st.meshlets_ns), nph_time_ns_to_s(st.lods_ns),
                          nph_time_ns_to_s(st.blobs_ns));
+            if (st.ray_triangles != 0U) {
+                NPH_LOG_INFO(&NPH_LOG_COOK,
+                             "mesh %s: for the rays, %u alpha-tested submeshes' %u triangles as %u "
+                             "of %.0f %% of their area, %.2f s",
+                             gm->mesh.name, st.ray_submeshes, st.ray_parents, st.ray_triangles,
+                             100.0 * (f64)st.ray_area_kept, nph_time_ns_to_s(st.rays_ns));
+            }
             char file[COOK_MESH_NAME_MAX + 32U];
             snprintf(file, sizeof file, "mesh_%u_%s", m, gm->mesh.name);
             char relative[COOKER_PATH_MAX];
@@ -2180,6 +2401,10 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         NPH_ARRAY_FREE(&scene.meshes[m].mesh.vertices);
         NPH_ARRAY_FREE(&scene.meshes[m].mesh.indices);
     }
+    if (ray_slots != NULL) {
+        NPH_FREE_ARRAY(alloc, CookRayTrimSlot, ray_slots, nph_max_u32(scene.material_count, 1U));
+    }
+    ray_alphas_free(c, &ray_alphas);
     // The cells' proxies, then the materials they sampled.
     if (r == NPH_RESULT_OK && hlod.active && hlod.build) {
         r = hlod_build(c, key, &scene, scene.content_hash, &hlod);

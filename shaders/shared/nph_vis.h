@@ -58,6 +58,10 @@
 // from such a pixel must find first (ao_pass.glsl; ADR-0094).
 #define NPH_VIS_CLUSTER_COARSE 32
 
+// In the second word of a submesh's record (NphVisMesh.submeshes): its bottom-level geometry
+// is triangles for the rays alone (ADR-0096), and the word's other bits name their records.
+#define NPH_VIS_SUBMESH_RAY_TRIMMED 0x80000000u
+
 // The visibility buffer: 64 bits per pixel, the depth's IEEE bits high
 // (reverse-Z, so the largest value is the nearest and atomicMax is the
 // depth test), then the visible cluster's index and the triangle within
@@ -291,7 +295,12 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 meshlet_triangles;   // u8[3 * triangles] read as u32 words
     // uvec2[submesh]: each submesh's material slot and its first index into
     // `indices` (a bottom level's geometry is a submesh: a ray's hit names
-    // it, and its triangle within it)
+    // it, and its triangle within it). A submesh whose geometry is triangles
+    // for the rays alone (ADR-0096) has NPH_VIS_SUBMESH_RAY_TRIMMED set in its
+    // second word, the rest of which is its first ray triangle's record in
+    // this buffer, in uvec4s from its start: (the parent's first index into
+    // `indices`, each corner's place in the parent as two unorm16), a record
+    // a ray triangle, after the table (vis_ray_triangle, vis_common.glsl).
     u64 submeshes;
     u32 meshlet_count;
     u32 index_base; // the mesh's first corner in the meshlet index pool (indirect raster)

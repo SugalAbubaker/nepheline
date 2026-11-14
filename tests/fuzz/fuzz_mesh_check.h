@@ -25,8 +25,8 @@ static inline void fuzz_check_written_mesh(NphAllocator *alloc, NphAssetWriter *
     if (nph_asset_file_validate(image, size, &info) != NPH_RESULT_OK) {
         abort(); // the cooker wrote a file its own reader refuses
     }
-    // A mesh writes at most 16 blobs (mesh.h: nine, five of levels, two of
-    // voxels); room to spare.
+    // A mesh writes at most 20 blobs (mesh.h: nine, five of levels, three of
+    // voxels, three of triangles for the rays); room to spare.
     NphAssetBlob blobs[24];
     void *owned[24];
     u32 count = 0U;

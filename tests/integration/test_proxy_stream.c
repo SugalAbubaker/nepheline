@@ -1963,3 +1963,48 @@ NTEST(WorldPartition, the_engine_runs_the_cells_and_their_stream)
     }
     engine_close(&w);
 }
+
+// A scene's alpha-tested cards, cooked with triangles for the rays alone (asset/mesh.h version
+// 7; ADR-0096), reach the renderer with them through the samples' loader, their material made
+// with the key the triangles hold for, and their instance is made. Paged, the same scene's
+// rays read whichever level of the cards' texture is resident, which the triangles were not
+// made for: the mesh is handed over without them, its material without a key.
+NTEST(WorldPartition,
+      a_scenes_cards_reach_the_renderer_trimmed_for_the_rays_where_their_texture_is_whole)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    StreamWorld *f = NPH_ALLOC_TYPE(alloc, StreamWorld);
+    NTEST_ASSERT_NOT_NULL(f);
+    world_setup(f, 0U);
+    if (f->rf.dev == NULL) {
+        world_teardown(f);
+        NPH_FREE_TYPE(alloc, StreamWorld, f);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    TempDir dir;
+    test_temp_dir_make(&dir, "world_cards");
+    char gltf[1200];
+    test_path_in(&dir, "cards.gltf", gltf, sizeof gltf);
+    test_write_cards(gltf, 60U, true);
+    cook_and_mount(f, &dir, "cards.gltf");
+    const bool paging = nph_renderer_texture_paging_supported(f->rf.renderer);
+    for (u32 round = 0; round < (paging ? 2U : 1U); ++round) {
+        CookedSceneDesc cd;
+        memset(&cd, 0, sizeof cd);
+        cd.alloc = f->alloc;
+        cd.renderer = f->rf.renderer;
+        cd.loader = f->loader;
+        cd.jobs = f->jobs;
+        cd.scene = nph_guid_from_cstr("cards.gltf#scene");
+        cd.paged_textures = round == 1U;
+        CookedScene scene;
+        NTEST_ASSERT_EQ_INT(cooked_scene_load(&cd, &scene), NPH_RESULT_OK);
+        NTEST_EXPECT_EQ_UINT(scene.instance_count, 1U);
+        NTEST_EXPECT_EQ_UINT(scene.ray_meshes_trimmed, round == 0U ? 1U : 0U);
+        NTEST_EXPECT_EQ_UINT(scene.ray_meshes_untrimmed, round == 0U ? 0U : 1U);
+        cooked_scene_unload(&scene);
+    }
+    world_teardown(f);
+    NPH_FREE_TYPE(alloc, StreamWorld, f);
+    test_temp_dir_remove(&dir);
+}

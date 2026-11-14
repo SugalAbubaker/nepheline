@@ -92,6 +92,31 @@ vec3 vis_position(NphVisMesh mesh, uint vertex)
     return mesh.position_offset.xyz + unorm * mesh.position_scale.xyz;
 }
 
+// The mesh's triangle a ray met, as the first of its three corners in the mesh's indices, and
+// where in it (`b`, its corners' weights): from the bottom level's triangle `primitive` of the
+// geometry whose submesh record is `sub`, met at `bc`. A submesh's geometry is its own
+// triangles, or, where NPH_VIS_SUBMESH_RAY_TRIMMED is set, triangles for the rays alone
+// (render/renderer.h NphRenderRayTriangle; ADR-0096): alpha-tested cards cut down to where
+// their test can pass, each a part of one of the submesh's triangles, its parent, whose
+// attributes the hit reads. Its record (NphVisMesh.submeshes) names the parent and its three
+// corners' places in it, and the hit's place in the parent is those weighed by where the ray
+// met it.
+NPH_BUFFER_REF(VisRayRecordsRef) { uvec4 v[]; };
+
+uint vis_ray_triangle(NphVisMesh mesh, uvec2 sub, uint primitive, vec2 bc, out vec3 b)
+{
+    b = vec3(1.0 - bc.x - bc.y, bc.x, bc.y);
+    if ((sub.y & NPH_VIS_SUBMESH_RAY_TRIMMED) == 0u) {
+        return sub.y + 3u * primitive;
+    }
+    const uvec4 rec =
+        VisRayRecordsRef(mesh.submeshes).v[(sub.y & ~NPH_VIS_SUBMESH_RAY_TRIMMED) + primitive];
+    const vec2 q =
+        mat3x2(unpackUnorm2x16(rec.y), unpackUnorm2x16(rec.z), unpackUnorm2x16(rec.w)) * b;
+    b = vec3(1.0 - q.x - q.y, q.x, q.y);
+    return rec.x;
+}
+
 // Perspective-correct barycentrics of a pixel at NDC `q` and their change
 // one pixel to the right (`ddx`) and one down (`ddy`); `step` is the size
 // of a pixel in NDC (2 / width, 2 / height; Vulkan's NDC y grows down like

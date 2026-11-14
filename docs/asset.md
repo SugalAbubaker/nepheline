@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 6; earlier versions without voxels still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 7; earlier versions without voxels still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -285,15 +285,37 @@ can be handed to the renderer without further checks:
   asset with clusters, their errors finite and rising, a level's maker error
   at most its error) and a level's makers (finite, radii and errors not
   negative); that a head's levels are its own is the loader's to find, each
-  a mesh asset viewed alone.
+  a mesh asset viewed alone. From version 7, a mesh of triangles may hold
+  triangles for the rays alone ([ADR-0096](adr/0096-leaf-cards-trimmed-for-rays.md);
+  docs/cook.md "Cards trimmed for the rays"), in place of some submeshes' own
+  in the renderer's bottom level: `RAYS` (`NphMeshRayHeader`: their count),
+  `RAYR` (`NphMeshRayRange` a submesh: its run of them, none where the rays
+  take its own triangles, and the key of the alpha test the run was made
+  for) and `RAYT` (`NphMeshRayTriangle` each: its parent, a triangle of its
+  run's submesh by its first index, and its three corners as points of the
+  parent, the weights of the parent's second and third corners as unorm16;
+  the renderer's `NphRenderRayTriangle` byte for byte). A ray triangle has no
+  vertices of its own. The view checks them: the runs in submesh order and
+  filling `RAYT`, a run of some with a key and a run of none without, every
+  parent a triangle of its run's submesh, every corner within its parent
+  (its two weights at most 65535 together); a head, a level apart and a mesh
+  of voxels have none. Whether a run holds for the material a scene draws
+  the submesh with (the keys are the same) is the loader's to check.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
   Formats: R8, RG8, RGBA8 (UNORM and sRGB), RGBA16F, BC4, BC5, BC6H, BC7
   (UNORM and sRGB).
-- **Material** (`material.h`): one `HEAD` with glTF's metallic-roughness
-  parameters, alpha mode and cutoff, flags, and five texture references
-  (GUID, UV set, wrap modes, filter, scale).
+- **Material** (`material.h`, type version 2; version 1 still reads): one
+  `HEAD` with glTF's metallic-roughness parameters, alpha mode and cutoff,
+  flags, and five texture references (GUID, UV set, wrap modes, filter,
+  scale). From version 2, an alpha-tested material may carry its alpha key
+  (`alpha_key`, 0: none): what its alpha test reads as one number, the
+  cooker's hash of its base colour texture's alpha at the finest level as
+  cooked, that texture's wrap modes and filter, the base colour factor's
+  alpha and the cutoff. A mesh's triangles for the rays hold for a material
+  of the same key. The view refuses a key on a material that is not alpha
+  tested, and one in a version 1 material.
 - **Scene** (`scene.h`, type version 2; version 1 still reads): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material
@@ -323,7 +345,7 @@ can be handed to the renderer without further checks:
 
 ## Testing
 
-`asset_tests` (50 cases): GUID derivation (pinned), text round trips and
+`asset_tests` (60 cases): GUID derivation (pinned), text round trips and
 rejections, generator uniqueness; the codec on empty, tiny, zero,
 random, text, periodic (offsets 1–9), window-edge, and structured inputs
 at both levels, every size up to 300 bytes, hand-built streams from the
@@ -338,7 +360,9 @@ synchronous and asynchronous, loads by GUID through a pack, shared handles,
 release during a load, parallel decompression, checksum policies,
 failure paths, leak reporting, and forgotten assets (read again while
 their holders keep them, also during a load); every typed view on valid and corrupted
-data, sounds of each codec among them; a stored blob read back through
+data, sounds of each codec among them, and a mesh's triangles for the rays
+alone and a material's alpha key (each way they can be wrong refused, an
+older version still read); a stored blob read back through
 the VFS at its offset, from a directory and from a pack. The fuzz seeds,
 written by `scripts/fuzz_seeds.py` from an
 independent Python description of the formats (with a port of

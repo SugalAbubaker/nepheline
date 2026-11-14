@@ -146,6 +146,19 @@ def mesh_blobs():
     ]
 
 
+def mesh_ray_blobs():
+    """The triangle with a triangle for the rays alone (mesh.h version 7): its half nearest
+    its first corner, for the alpha test of key 7."""
+    header = struct.pack("<4I", 1, 0, 0, 0)
+    ranges = struct.pack("<IIQ", 0, 1, 7)
+    triangle = struct.pack("<4I", 0, 0, 32768, 32768 << 16)
+    return mesh_blobs() + [
+        ("RAYS", 0, 0, 16, header, header),
+        ("RAYR", 0, 0, 16, ranges, ranges),
+        ("RAYT", 0, 1, 16, triangle, lz_literals(triangle)),
+    ]
+
+
 def mesh_lod_blobs():
     """The triangle with levels of detail (mesh.h version 2): its one meshlet
     as level 0 under a root group, the smallest hierarchy there is."""
@@ -249,9 +262,11 @@ def texture_blobs():
     ]
 
 
-def material_blobs():
+def material_blobs(alpha_mode=0, alpha_key=0):
+    """A material (material.h); from version 2 an alpha-tested one may carry its alpha key."""
     header = struct.pack("<4f", 1, 1, 1, 1) + struct.pack("<3f", 0, 0, 0) + struct.pack("<f", 1)
-    header += struct.pack("<3f", 1, 1, 0.5) + struct.pack("<2I", 0, 0) + struct.pack("<3I", 0, 0, 0)
+    header += struct.pack("<3f", 1, 1, 0.5) + struct.pack("<2I", alpha_mode, 0)
+    header += struct.pack("<IQ", 0, alpha_key)
     for _ in range(5):
         header += bytes(16) + struct.pack("<I4BfI", 0, 0, 0, 0, 0, 1.0, 0)
     assert len(header) == 224
@@ -498,8 +513,11 @@ def main():
     write(os.path.join(CORPUS, "nph", "mesh_level"), nph_file(fourcc("MESH"), 6, mesh_level_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_levels_head"),
           nph_file(fourcc("MESH"), 6, mesh_levels_head_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_rays"), nph_file(fourcc("MESH"), 7, mesh_ray_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
+    write(os.path.join(CORPUS, "nph", "material_keyed"),
+          nph_file(fourcc("MATL"), 2, material_blobs(alpha_mode=1, alpha_key=7)))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
     write(os.path.join(CORPUS, "nph", "scene_cells"), nph_file(fourcc("SCEN"), 2, scene_cell_blobs()))
     write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))

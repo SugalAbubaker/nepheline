@@ -4,7 +4,8 @@
 //     nph_cook <source>... -o <out_dir> [--root <dir>] [--pack <file.npk>]
 //              [--force] [--lz fast|high] [--usage color|linear|normal|mask|hdr]
 //              [--uncompressed] [--no-mips] [--max-extent N]
-//              [--no-optimize] [--no-lods] [--normal-y-down] [--voxels] [--voxel-normals]
+//              [--no-optimize] [--no-lods] [--normal-y-down] [--no-ray-trim] [--voxels]
+//              [--voxel-normals]
 //              [--hlod] [--hlod-cell M] [--hlod-distance M]
 //              [--sound-codec auto|pcm|lossless|adpcm]
 //              [--sound-stream auto|always|never] [--stream-seconds S]
@@ -54,6 +55,8 @@ static void usage(FILE *out)
           "  --no-lods             meshes without levels of detail (level 0 alone)\n"
           "  --normal-y-down       the sources' normal maps have green growing downwards\n"
           "                        (DirectX's convention, not glTF's)\n"
+          "  --no-ray-trim         no triangles for the rays alone: alpha-tested cards are\n"
+          "                        otherwise trimmed for them to where their test can pass\n"
           "  --voxels              voxel levels for aggregate geometry (glTF meshes)\n"
           "  --voxel-normals       with voxels, the meshes' surfaces count their normals in\n"
           "                        the levels' collapses, as without voxels\n"
@@ -179,6 +182,8 @@ int main(int argc, char **argv)
             desc.mesh.no_lods = 1;
         } else if (strcmp(a, "--normal-y-down") == 0) {
             desc.mesh.normal_y_down = 1;
+        } else if (strcmp(a, "--no-ray-trim") == 0) {
+            desc.mesh.no_ray_trim = 1;
         } else if (strcmp(a, "--voxels") == 0) {
             desc.mesh.voxels = 1;
         } else if (strcmp(a, "--voxel-normals") == 0) {

@@ -318,6 +318,69 @@ static NphResult mesh_lods(const NphAsset *asset, const NphMeshHeader *h,
     return NPH_RESULT_OK;
 }
 
+// The rays' own triangles (version 7): each submesh's run and the triangles, checked.
+static NphResult mesh_rays(const NphAsset *asset, const NphMeshHeader *h,
+                           const NphSubmesh *submeshes, NphMeshView *out)
+{
+    if (nph_asset_blob(asset, NPH_MESH_TAG_RAY_HEADER, 0U) == NULL) {
+        // No part of them without their header.
+        return nph_asset_blob(asset, NPH_MESH_TAG_RAY_RANGES, 0U) == NULL &&
+                       nph_asset_blob(asset, NPH_MESH_TAG_RAY_TRIANGLES, 0U) == NULL
+                   ? NPH_RESULT_OK
+                   : NPH_RESULT_CORRUPT;
+    }
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_RAY_HEADER, 0U, sizeof(NphMeshRayHeader), 1U, &p));
+    const NphMeshRayHeader *rh = (const NphMeshRayHeader *)p;
+    // Of a mesh of triangles alone: a head, a level apart and a mesh of voxels have none.
+    if (asset->header.type_version < 7U || rh->triangle_count == 0U || h->index_count == 0U ||
+        (h->flags & ((u32)NPH_MESH_FLAG_LEVELS | (u32)NPH_MESH_FLAG_LEVEL)) != 0U ||
+        rh->reserved[0] != 0U || rh->reserved[1] != 0U || rh->reserved[2] != 0U) {
+        return NPH_RESULT_CORRUPT;
+    }
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_RAY_RANGES, 0U, sizeof(NphMeshRayRange),
+                       h->submesh_count, &p));
+    const NphMeshRayRange *ranges = (const NphMeshRayRange *)p;
+    NPH_TRY(typed_blob(asset, NPH_MESH_TAG_RAY_TRIANGLES, 0U, sizeof(NphMeshRayTriangle),
+                       rh->triangle_count, &p));
+    const NphMeshRayTriangle *triangles = (const NphMeshRayTriangle *)p;
+    u32 next = 0U;
+    for (u32 s = 0; s < h->submesh_count; ++s) {
+        const NphMeshRayRange *run = &ranges[s];
+        if (run->count == 0U) {
+            if (run->first != 0U || run->alpha_key != 0U) {
+                return NPH_RESULT_CORRUPT;
+            }
+            continue;
+        }
+        if (run->first != next || run->count > rh->triangle_count - next || run->alpha_key == 0U) {
+            return NPH_RESULT_CORRUPT;
+        }
+        const NphSubmesh *sub = &submeshes[s];
+        for (u32 t = 0; t < run->count; ++t) {
+            const NphMeshRayTriangle *rt = &triangles[next + t];
+            if (rt->parent < sub->index_offset ||
+                rt->parent - sub->index_offset >= sub->index_count ||
+                (rt->parent - sub->index_offset) % 3U != 0U) {
+                return NPH_RESULT_CORRUPT;
+            }
+            for (u32 c = 0; c < 3U; ++c) {
+                if ((rt->corner[c] & 0xFFFFU) + (rt->corner[c] >> 16U) > 65535U) {
+                    return NPH_RESULT_CORRUPT;
+                }
+            }
+        }
+        next += run->count;
+    }
+    if (next != rh->triangle_count) {
+        return NPH_RESULT_CORRUPT;
+    }
+    out->ray_ranges = ranges;
+    out->ray_triangles = triangles;
+    out->ray_triangle_count = rh->triangle_count;
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
 {
     NPH_ASSERT(out != NULL);
@@ -412,6 +475,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     }
     NPH_TRY(mesh_lods(asset, h, submeshes, meshlets, out));
     NPH_TRY(mesh_levels(asset, h, out));
+    NPH_TRY(mesh_rays(asset, h, submeshes, out));
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;
@@ -513,11 +577,14 @@ NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out)
 {
     NPH_ASSERT(out != NULL);
     memset(out, 0, sizeof *out);
-    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_MATERIAL, NPH_MATERIAL_TYPE_VERSION));
+    NPH_TRY(check_versions(asset, NPH_ASSET_TYPE_MATERIAL, 1U, NPH_MATERIAL_TYPE_VERSION));
     const void *p = NULL;
     NPH_TRY(typed_blob(asset, NPH_MATERIAL_TAG_HEADER, 0U, sizeof(NphMaterialHeader), 1U, &p));
     const NphMaterialHeader *h = (const NphMaterialHeader *)p;
-    if (h->alpha_mode > (u32)NPH_MATERIAL_ALPHA_BLEND) {
+    // The alpha test's key from version 2, and of an alpha-tested material alone.
+    if (h->alpha_mode > (u32)NPH_MATERIAL_ALPHA_BLEND || h->reserved != 0U ||
+        (h->alpha_key != 0U &&
+         (asset->header.type_version < 2U || h->alpha_mode != (u32)NPH_MATERIAL_ALPHA_MASK))) {
         return NPH_RESULT_CORRUPT;
     }
     for (u32 i = 0; i < NPH_MATERIAL_TEXTURE_COUNT; ++i) {

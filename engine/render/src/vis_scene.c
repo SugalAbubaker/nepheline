@@ -611,8 +611,34 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
         table[s][0] = d->submeshes[s].material_slot;
         table[s][1] = d->submeshes[s].index_offset;
     }
-    NPH_TRY(upload_stream(r, table, (u64)d->submesh_count * 2U * sizeof(u32), "mesh submeshes",
-                          &m->submesh_table));
+    if (m->ray_trimmed) {
+        // Its bottom level holds triangles for the rays alone (rt.c; ADR-0096): their records
+        // (NphRenderRayTriangle, four words) follow the table in its buffer, and a trimmed
+        // submesh's second word is its first record's place there, in records from the
+        // buffer's start, with the top bit set, where a hit's shader finds the triangle's
+        // parent and its corners' places in it (vis_ray_triangle, vis_common.glsl).
+        const u32 base = (d->submesh_count * 2U + 3U) / 4U;
+        const u64 words = ((u64)base + d->ray_triangle_count) * 4U;
+        u32 *all = NPH_ALLOC_ARRAY_ZEROED(r->alloc, u32, words);
+        if (all == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        for (u32 s = 0; s < d->submesh_count; ++s) {
+            if (m->ray_submeshes[s].count != 0U) {
+                table[s][1] = NPH_VIS_SUBMESH_RAY_TRIMMED | (base + m->ray_submeshes[s].first);
+            }
+        }
+        memcpy(all, table, (u64)d->submesh_count * 2U * sizeof(u32));
+        memcpy(all + (u64)base * 4U, d->ray_triangles,
+               (u64)d->ray_triangle_count * sizeof(NphRenderRayTriangle));
+        const NphResult res =
+            upload_stream(r, all, words * sizeof(u32), "mesh submeshes", &m->submesh_table);
+        NPH_FREE_ARRAY(r->alloc, u32, all, words);
+        NPH_TRY(res);
+    } else {
+        NPH_TRY(upload_stream(r, table, (u64)d->submesh_count * 2U * sizeof(u32), "mesh submeshes",
+                              &m->submesh_table));
+    }
     u32 index_base = 0U;
     if (!v->mesh_shaders && triangle_count != 0U) {
         // The indirect raster's indices: the meshlet-local corners widened

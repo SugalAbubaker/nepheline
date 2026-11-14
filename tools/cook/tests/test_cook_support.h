@@ -428,6 +428,99 @@ static inline void test_write_gltf(const TempDir *dir, const char *name, bool ex
 }
 
 // ---------------------------------------------------------------------------
+// Alpha-tested cards (the triangles for the rays alone, cook/ray_trim.h)
+// ---------------------------------------------------------------------------
+
+// A document of one mesh of `cards` cards (two triangles each, a unit square of the texture
+// on each) with an alpha-tested material: with `textured`, its base colour a texture of 64
+// texels a side, a solid disc of 10 on clear.
+static inline void test_write_cards(const char *path, u32 cards, bool textured)
+{
+    NphAllocator *a = nph_allocator_system();
+    const u64 pos_bytes = (u64)cards * 4U * 3U * sizeof(f32);
+    const u64 uv_bytes = (u64)cards * 4U * 2U * sizeof(f32);
+    const u64 idx_bytes = (u64)cards * 6U * sizeof(u32);
+    const u64 total = pos_bytes + uv_bytes + idx_bytes;
+    u8 *bytes = NPH_ALLOC_ARRAY(a, u8, total);
+    NTEST_ASSERT_NOT_NULL(bytes);
+    static const f32 k_corner[4][2] = {{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}};
+    static const u32 k_index[6] = {0U, 1U, 2U, 0U, 2U, 3U};
+    for (u32 i = 0; i < cards; ++i) {
+        for (u32 c = 0; c < 4U; ++c) {
+            const u64 v = (u64)i * 4U + c;
+            const f32 p[3] = {(f32)i * 1.5F + k_corner[c][0], k_corner[c][1], 0.0F};
+            memcpy(bytes + v * sizeof p, p, sizeof p);
+            memcpy(bytes + pos_bytes + v * sizeof k_corner[c], k_corner[c], sizeof k_corner[c]);
+        }
+        for (u32 k = 0; k < 6U; ++k) {
+            const u32 index = i * 4U + k_index[k];
+            memcpy(bytes + pos_bytes + uv_bytes + ((u64)i * 6U + k) * sizeof index, &index,
+                   sizeof index);
+        }
+    }
+    char *b64 = NPH_ALLOC_ARRAY(a, char, test_base64_size(total) + 1U);
+    NTEST_ASSERT_NOT_NULL(b64);
+    test_base64(bytes, total, b64);
+    const u64 rgba_bytes = 64ULL * 64ULL * 4ULL;
+    u8 *rgba = NPH_ALLOC_ARRAY(a, u8, rgba_bytes);
+    u8 *tga = NPH_ALLOC_ARRAY(a, u8, 18U + rgba_bytes);
+    char *tga_b64 = NPH_ALLOC_ARRAY(a, char, test_base64_size(18U + rgba_bytes) + 1U);
+    NTEST_ASSERT_TRUE(rgba != NULL && tga != NULL && tga_b64 != NULL);
+    for (u32 y = 0; y < 64U; ++y) {
+        for (u32 x = 0; x < 64U; ++x) {
+            const f32 dx = (f32)x - 31.5F;
+            const f32 dy = (f32)y - 31.5F;
+            u8 *t = rgba + ((u64)y * 64U + x) * 4U;
+            t[0] = 60U;
+            t[1] = 160U;
+            t[2] = 40U;
+            t[3] = dx * dx + dy * dy < 100.0F ? 255U : 0U;
+        }
+    }
+    test_base64(tga, test_write_tga(rgba, 64U, 64U, tga), tga_b64);
+    NphStrBuilder sb;
+    nph_sb_init(&sb, a);
+    NTEST_ASSERT_EQ_INT(
+        nph_sb_appendf(
+            &sb,
+            "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+            "\"nodes\":[{\"mesh\":0}],\"meshes\":[{\"name\":\"cards\",\"primitives\":[{"
+            "\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1},\"indices\":2,\"material\":0}]}],"
+            "\"materials\":[{\"name\":\"leaf\",\"alphaMode\":\"MASK\",\"alphaCutoff\":0.5%s}],",
+            textured ? ",\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}}" : ""),
+        NPH_RESULT_OK);
+    if (textured) {
+        NTEST_ASSERT_EQ_INT(nph_sb_appendf(&sb,
+                                           "\"textures\":[{\"source\":0}],\"images\":[{\"uri\":"
+                                           "\"data:image/tga;base64,%s\"}],",
+                                           tga_b64),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(
+        nph_sb_appendf(
+            &sb,
+            "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":%u,\"type\":"
+            "\"VEC3\",\"min\":[0,0,0],\"max\":[%g,1,0]},{\"bufferView\":1,\"componentType\":5126,"
+            "\"count\":%u,\"type\":\"VEC2\"},{\"bufferView\":2,\"componentType\":5125,\"count\":"
+            "%u,\"type\":\"SCALAR\"}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":%llu},{"
+            "\"buffer\":0,\"byteOffset\":%llu,\"byteLength\":%llu},{\"buffer\":0,\"byteOffset\":"
+            "%llu,\"byteLength\":%llu}],\"buffers\":[{\"byteLength\":%llu,\"uri\":"
+            "\"data:application/octet-stream;base64,%s\"}]}",
+            cards * 4U, (f64)(cards - 1U) * 1.5 + 1.0, cards * 4U, cards * 6U,
+            (unsigned long long)pos_bytes, (unsigned long long)pos_bytes,
+            (unsigned long long)uv_bytes, (unsigned long long)(pos_bytes + uv_bytes),
+            (unsigned long long)idx_bytes, (unsigned long long)total, b64),
+        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, sb.data, sb.len), NPH_RESULT_OK);
+    nph_sb_free(&sb);
+    NPH_FREE_ARRAY(a, char, tga_b64, test_base64_size(18U + rgba_bytes) + 1U);
+    NPH_FREE_ARRAY(a, u8, tga, 18U + rgba_bytes);
+    NPH_FREE_ARRAY(a, u8, rgba, rgba_bytes);
+    NPH_FREE_ARRAY(a, char, b64, test_base64_size(total) + 1U);
+    NPH_FREE_ARRAY(a, u8, bytes, total);
+}
+
+// ---------------------------------------------------------------------------
 // A partitioned grove (the world partition's cells, cook/cells.h)
 // ---------------------------------------------------------------------------
 

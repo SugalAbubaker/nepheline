@@ -100,6 +100,8 @@ typedef NPH_ARRAY(CookSubmesh) CookSubmeshArray;
 
 #define COOK_MESH_NAME_MAX 128U
 
+struct CookRayTrimSlots;
+
 typedef struct CookMesh {
     NphAllocator *alloc;
     CookVertexArray vertices;
@@ -107,6 +109,10 @@ typedef struct CookMesh {
     CookSubmeshArray submeshes;
     u32 flags; // CookMeshFlags: which attributes the vertices carry
     char name[COOK_MESH_NAME_MAX];
+    // What its material slots' alpha tests read, where the cooker knows (a scene's meshes:
+    // cook/ray_trim.h), for the triangles the mesh's write makes for the rays alone; NULL:
+    // none are made. Not owned: it outlives the mesh's write.
+    const struct CookRayTrimSlots *ray_slots;
 } CookMesh;
 
 typedef struct CookMeshSettings {
@@ -129,6 +135,10 @@ typedef struct CookMeshSettings {
     // convention, not glTF's): its tangents' w is negated (docs/cook.md
     // "Tangent handedness").
     b32 normal_y_down;
+    // No triangles for the rays alone (asset/mesh.h version 7; cook/ray_trim.h; docs/cook.md
+    // "Rays"; ADR-0096): a mesh's alpha-tested submeshes are otherwise trimmed for the rays
+    // where the mesh's slots' alpha tests are given (CookMesh.ray_slots) and it pays.
+    b32 no_ray_trim;
 } CookMeshSettings;
 
 // Defaults: optimised, the format's meshlet limits, cone weight 0.25,
@@ -258,6 +268,12 @@ typedef struct CookMeshStats {
     u32 voxel_clusters;
     u32 voxel_bricks;
     u32 voxels;
+    // The triangles for the rays alone (0 without): the submeshes trimmed, their triangles,
+    // the ray triangles their polygons make, and the share of their area the polygons keep.
+    u32 ray_submeshes;
+    u32 ray_parents;
+    u32 ray_triangles;
+    f32 ray_area_kept;
     f32 acmr_before; // average cache miss ratio (32-entry FIFO) per triangle
     f32 acmr_after;
     // Where the time went, in nanoseconds: validation, cleaning, the
@@ -268,6 +284,7 @@ typedef struct CookMeshStats {
     u64 optimize_ns;
     u64 meshlets_ns;
     u64 lods_ns;
+    u64 rays_ns; // the triangles for the rays alone
     u64 blobs_ns;
     u64 total_ns;
 } CookMeshStats;
@@ -277,9 +294,13 @@ typedef struct CookMeshStats {
 // (step 8) unless `settings` say not to, with their voxels (VOXB, VOXA)
 // where cook_mesh_build_lods makes some; the meshlet bounds written are
 // recomputed from the dequantised positions; the levels are built on
-// `jobs` where given (cook_mesh_build_lods). `stats`, where not NULL,
-// receives the levels written (1: level 0 alone), the coarsest level's
-// triangles and clusters, the voxels', and the levels' and the blobs' times.
+// `jobs` where given (cook_mesh_build_lods). Where the mesh's slots' alpha
+// tests are given (CookMesh.ray_slots) and `settings` do not say otherwise,
+// its alpha-tested submeshes' triangles for the rays alone follow (RAYS,
+// RAYR, RAYT; cook/ray_trim.h), made of the streams as written. `stats`,
+// where not NULL, receives the levels written (1: level 0 alone), the
+// coarsest level's triangles and clusters, the voxels', the rays' triangles,
+// and the levels', the rays' and the blobs' times.
 NPH_MUST_USE NphResult cook_mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
                                        const CookMeshSettings *settings,
                                        const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,

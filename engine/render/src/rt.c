@@ -102,8 +102,165 @@ static u32 mesh_geometries(NphRenderer *r, const RenderMesh *m)
         g->index_offset = (u64)m->submeshes[s].index_offset * sizeof(u32);
         g->triangle_count = m->submeshes[s].index_count / 3U;
         g->opaque = 1;
+        // Its triangles for the rays alone, where it has them (ray_geometry_create).
+        if (m->ray_trimmed && m->ray_submeshes[s].count != 0U) {
+            g->vertices = m->ray_vertices;
+            g->vertex_stride = 3U * sizeof(f32);
+            g->vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+            g->vertex_count = m->ray_vertex_count;
+            g->indices = m->ray_indices;
+            g->index_offset = (u64)m->ray_submeshes[s].first * 3U * sizeof(u32);
+            g->triangle_count = m->ray_submeshes[s].count;
+        }
     }
     return m->submesh_count;
+}
+
+static u64 position_key(NphRenderVertexPosition p)
+{
+    return (u64)p.x | ((u64)p.y << 16U) | ((u64)p.z << 32U);
+}
+
+// A corner of a triangle for the rays alone, in the positions' unit box: the point of its
+// parent that `corner` names (NphRenderRayTriangle). A corner of the parent is that corner's
+// position as the float copy has it (q / 65535). A point of one of the parent's edges is
+// placed from that edge's two ends alone, taken in the order of their positions, by the
+// weight of the greater: two triangles that share the edge then place the same point of it
+// at the same floats, bit for bit, whichever way round each has the edge, so their ray
+// triangles share whole edges and the traversal lets no ray between them (the cooker gives
+// them the same points there: tools/cook ray_trim.c). Any other point is its weights' sum.
+static void ray_corner(const NphRenderMeshDesc *desc, const NphRenderRayTriangle *t, u32 corner,
+                       f32 out[3])
+{
+    const u32 *idx = desc->indices + t->parent;
+    u32 w[3];
+    w[1] = corner & 0xFFFFU;
+    w[2] = corner >> 16U;
+    w[0] = 65535U - w[1] - w[2];
+    f64 p[3][3];
+    u64 key[3];
+    for (u32 c = 0; c < 3U; ++c) {
+        const NphRenderVertexPosition q = desc->positions[idx[c]];
+        p[c][0] = (f64)((f32)q.x / 65535.0F);
+        p[c][1] = (f64)((f32)q.y / 65535.0F);
+        p[c][2] = (f64)((f32)q.z / 65535.0F);
+        key[c] = position_key(q);
+    }
+    for (u32 c = 0; c < 3U; ++c) {
+        if (w[c] == 65535U) {
+            out[0] = (f32)p[c][0];
+            out[1] = (f32)p[c][1];
+            out[2] = (f32)p[c][2];
+            return;
+        }
+    }
+    for (u32 e = 0; e < 3U; ++e) {
+        if (w[e] != 0U) {
+            continue;
+        }
+        const u32 a = (e + 1U) % 3U;
+        const u32 b = (e + 2U) % 3U;
+        const u32 lo = key[a] <= key[b] ? a : b;
+        const u32 hi = key[a] <= key[b] ? b : a;
+        const f64 s = (f64)w[hi] / 65535.0;
+        for (u32 k = 0; k < 3U; ++k) {
+            out[k] = (f32)(p[lo][k] + (p[hi][k] - p[lo][k]) * s);
+        }
+        return;
+    }
+    for (u32 k = 0; k < 3U; ++k) {
+        out[k] = (f32)((p[0][k] * (f64)w[0] + p[1][k] * (f64)w[1] + p[2][k] * (f64)w[2]) / 65535.0);
+    }
+}
+
+// The build's inputs for the mesh's triangles for the rays alone: their corners placed
+// (ray_corner), a corner that consecutive triangles of one parent share held once, as a
+// polygon's fan shares them.
+static NphResult ray_geometry_create(NphRenderer *r, RenderMesh *m, const NphRenderMeshDesc *desc)
+{
+    const u64 triangles = desc->ray_triangle_count;
+    f32 *positions = NPH_ALLOC_ARRAY(r->alloc, f32, triangles * 9U);
+    u32 *indices = NPH_ALLOC_ARRAY(r->alloc, u32, triangles * 3U);
+    NphResult res = positions != NULL && indices != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    u32 vertex_count = 0U;
+    if (res == NPH_RESULT_OK) {
+        // The corners of the parent being written, and their vertices.
+        enum {
+            HELD = 16
+        };
+        u32 held_corner[HELD];
+        u32 held_vertex[HELD];
+        u32 held = 0U;
+        u32 parent = NPH_U32_MAX;
+        for (u64 i = 0; i < triangles; ++i) {
+            const NphRenderRayTriangle *t = &desc->ray_triangles[i];
+            if (t->parent != parent) {
+                parent = t->parent;
+                held = 0U;
+            }
+            for (u32 c = 0; c < 3U; ++c) {
+                u32 vertex = NPH_U32_MAX;
+                for (u32 k = 0; k < held; ++k) {
+                    if (held_corner[k] == t->corner[c]) {
+                        vertex = held_vertex[k];
+                    }
+                }
+                if (vertex == NPH_U32_MAX) {
+                    vertex = vertex_count++;
+                    ray_corner(desc, t, t->corner[c], positions + (u64)vertex * 3U);
+                    if (held < (u32)HELD) {
+                        held_corner[held] = t->corner[c];
+                        held_vertex[held] = vertex;
+                        ++held;
+                    }
+                }
+                indices[i * 3U + c] = vertex;
+            }
+        }
+    }
+    NphGpuDevice *dev = r->dev;
+    NphGpuBufferDesc bd;
+    memset(&bd, 0, sizeof bd);
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT | (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_DST;
+    bd.memory = NPH_GPU_MEMORY_DEVICE;
+    if (res == NPH_RESULT_OK) {
+        bd.size = (u64)vertex_count * 3U * sizeof(f32);
+        bd.name = "rt trimmed vertices";
+        res = nph_gpu_buffer_create(dev, &bd, &m->ray_vertices);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = nph_gpu_upload_buffer(dev, m->ray_vertices, 0U, positions, bd.size);
+    }
+    if (res == NPH_RESULT_OK) {
+        bd.size = triangles * 3U * sizeof(u32);
+        bd.name = "rt trimmed indices";
+        res = nph_gpu_buffer_create(dev, &bd, &m->ray_indices);
+    }
+    if (res == NPH_RESULT_OK) {
+        res = nph_gpu_upload_buffer(dev, m->ray_indices, 0U, indices, bd.size);
+    }
+    if (positions != NULL) {
+        NPH_FREE_ARRAY(r->alloc, f32, positions, triangles * 9U);
+    }
+    if (indices != NULL) {
+        NPH_FREE_ARRAY(r->alloc, u32, indices, triangles * 3U);
+    }
+    if (res == NPH_RESULT_OK) {
+        m->ray_vertex_count = vertex_count;
+        m->ray_trimmed = 1;
+    }
+    return res;
+}
+
+// The build's inputs go once it is recorded: a bottom level is built once, and nothing reads
+// them after (a hit reads its parent: vis_ray_triangle, vis_common.glsl). Destroyed when the
+// frames in flight are done with them.
+static void ray_geometry_release(NphRenderer *r, RenderMesh *m)
+{
+    nph_gpu_buffer_destroy(r->dev, m->ray_vertices);
+    nph_gpu_buffer_destroy(r->dev, m->ray_indices);
+    m->ray_vertices = NPH_GPU_BUFFER_NULL;
+    m->ray_indices = NPH_GPU_BUFFER_NULL;
 }
 
 // Room in the scratch for one build of `size` bytes at the device's
@@ -244,6 +401,9 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
         NPH_FREE_ARRAY(r->alloc, f32, v, count * 3U);
         NPH_TRY(res);
     }
+    if (m->ray_submeshes != NULL) {
+        NPH_TRY(ray_geometry_create(r, m, desc));
+    }
     const u32 geometries = mesh_geometries(r, m);
     NphGpuAccelSizes sizes;
     NPH_TRY(nph_gpu_accel_blas_sizes(dev, rt->geometries, geometries, RT_BLAS_FLAGS, &sizes));
@@ -297,6 +457,8 @@ void render_rt_mesh_destroy(NphRenderer *r, u32 slot)
     nph_gpu_accel_destroy(r->dev, m->blas_next);
     nph_gpu_accel_destroy(r->dev, m->blas_old);
     nph_gpu_buffer_destroy(r->dev, m->blas_vertices);
+    ray_geometry_release(r, m);
+    m->ray_trimmed = 0;
     m->blas = NPH_GPU_ACCEL_NULL;
     m->blas_next = NPH_GPU_ACCEL_NULL;
     m->blas_old = NPH_GPU_ACCEL_NULL;
@@ -584,10 +746,12 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
             accel_barrier(cmd); // the batch is done with the scratch
             at = 0U;
         }
+        // (Its trimmed geometry's inputs go below, once the build is recorded.)
         nph_gpu_cmd_build_blas(cmd, m->blas, rt->geometries, mesh_geometries(r, m), RT_BLAS_FLAGS,
                                rt->scratch, lead + at);
         m->blas_pending = 0;
         m->blas_state = RT_BLAS_QUERY;
+        ray_geometry_release(r, m);
         at += s;
     }
     if (rt->frame_builds != 0U) {

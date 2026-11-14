@@ -10,6 +10,7 @@
 #include <nepheline/platform/time.h>
 
 #include <cook/mesh.h>
+#include <cook/ray_trim.h>
 #include <string.h>
 
 void cook_mesh_settings_default(CookMeshSettings *out)
@@ -540,6 +541,7 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     if (stats != NULL) {
         stats->lod_levels = 1U;
         stats->lods_ns = 0U;
+        stats->rays_ns = 0U;
         stats->blobs_ns = 0U;
     }
     NPH_TRY(cook_mesh_validate(mesh));
@@ -653,6 +655,25 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
         }
         if (m != mn) {
             r = NPH_RESULT_INVALID_ARGUMENT; // meshlets out of submesh order
+        }
+    }
+    // The triangles for the rays alone (ray_trim.h): the alpha-tested submeshes' polygons,
+    // from the streams as they are written (the rays trace level 0, the mesh's own indices).
+    CookRayTrim rays;
+    cook_ray_trim_init(&rays, alloc);
+    if (r == NPH_RESULT_OK && mesh->ray_slots != NULL && !settings->no_ray_trim &&
+        (mesh->flags & (u32)COOK_MESH_NO_RAYS) == 0U &&
+        (mesh->flags & (u32)COOK_MESH_HAS_UV0) != 0U) {
+        const u64 rays_start = nph_time_now_ns();
+        r = cook_ray_trim_build(alloc, posn, attr, vn, mesh->indices.data, in, subs, sn, extent,
+                                mesh->ray_slots, &rays);
+        if (stats != NULL) {
+            stats->rays_ns = nph_time_now_ns() - rays_start;
+            stats->ray_submeshes = rays.stats.submeshes;
+            stats->ray_parents = rays.stats.parents;
+            stats->ray_triangles = rays.triangles.len;
+            stats->ray_area_kept =
+                rays.stats.area > 0.0 ? (f32)(rays.stats.area_kept / rays.stats.area) : 1.0F;
         }
     }
     // The levels of detail (step 8): every level's clusters replace level
@@ -811,9 +832,26 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
                                           NPH_ARRAY_BYTES(&packed.words), NPH_ASSET_CODEC_LZ, 0U);
         }
     }
+    if (r == NPH_RESULT_OK && rays.triangles.len != 0U) {
+        NphMeshRayHeader rh;
+        memset(&rh, 0, sizeof rh);
+        rh.triangle_count = rays.triangles.len;
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_RAY_HEADER, 0U, &rh, sizeof rh,
+                                      NPH_ASSET_CODEC_NONE, 0U);
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_RAY_RANGES, 0U, rays.ranges.data,
+                                          NPH_ARRAY_BYTES(&rays.ranges), NPH_ASSET_CODEC_NONE, 0U);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_RAY_TRIANGLES, 0U,
+                                          rays.triangles.data, NPH_ARRAY_BYTES(&rays.triangles),
+                                          NPH_ASSET_CODEC_LZ, 0U);
+        }
+    }
     if (stats != NULL) {
         stats->blobs_ns = nph_time_now_ns() - blobs_start;
     }
+    cook_ray_trim_free(&rays);
     nph_render_packed_voxels_free(&packed);
     nph_render_cluster_lods_free(&lods);
     if (positions != NULL) {
