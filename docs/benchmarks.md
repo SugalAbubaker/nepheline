@@ -506,26 +506,28 @@ percentile 6.14 ms against 6.67, the terrace's 6.80 against 7.46). The
 rounds of 2026-11-10 and 2026-11-11 were measured with the panel busy:
 their means stand about 2 % high and their 99th percentiles 0.4 to 1.0 ms.
 `benchmarks/reference_budgets.txt` is generated from
-`reference_scenes-2026-11-14-adr-0096`, every row afresh: Bistro, the city
+`reference_scenes-2026-11-14-adr-0097`, every row afresh: Bistro, the city
 and the interior at the size they gate at (ADR-0082), a process a scene as
 the nightly runs them, the mean of two rounds with the desktop still, with
-the image work of ADR-0090 to ADR-0095 and the scenes cooked with triangles
+the image work of ADR-0090 to ADR-0095, the scenes cooked with triangles
 for the rays alone (ADR-0096: the trees' cards cut down, for the rays, to
-where their alpha test can pass). So measured, sixteen of the eighteen
-views hold the gate's 6.94 ms at their 99th percentiles; Bistro's street
-turn (7.34 ms) and the city's rooftop (8.03) do not. `render_budgets.txt`'s
-rows for the scenes it budgets are from `render_perf-2026-11-14-adr-0096`,
-measured the same way. The landscape has no rows there: the nightly does
-not run it. Three of Bistro's views (its street, street walk and terrace)
-take 0.074 to 0.089 ms of the CPU a frame where the file allows a flat
-0.050 ms: they have since 2026-11-12 (0.022 ms the day before), in the
-rounds the budgets of ADR-0095 were made from too, and not by ADR-0096,
-whose rounds on the packs cooked before and after are the same there. It
-is Bistro's glass. The production path leaves opaque and alpha-tested
-surfaces to the GPU and draws blended ones from the CPU, back to front
-(docs/render.md "Limitations"), and since ADR-0094 Bistro's glass is
-blended and seen through: 342 instances, of which 279 are in the street's
-view, 205 on the terrace and 16 at the hedge (0.039 ms). Timed in
+where their alpha test can pass), and the blended surfaces culled, ordered
+and drawn by the GPU (ADR-0097), whose cull and sort have rows where a
+scene has them. So measured, sixteen of the eighteen views hold the gate's
+6.94 ms at their 99th percentiles; Bistro's street turn (7.33 ms) and the
+city's rooftop (8.03) do not. `render_budgets.txt`'s rows for the scenes it
+budgets are from `render_perf-2026-11-14-adr-0097`, measured the same way,
+the glass wall's three production scenes among them. The landscape has no
+rows there: the nightly does not run it. Three of Bistro's views (its
+street, street walk and terrace) took 0.074 to 0.089 ms of the CPU a frame
+where the file allows a flat 0.050 ms: they had since 2026-11-12 (0.022 ms
+the day before), in the rounds the budgets of ADR-0095 were made from too,
+and not by ADR-0096, whose rounds on the packs cooked before and after are
+the same there. It was Bistro's glass. The production path left opaque and
+alpha-tested surfaces to the GPU and drew blended ones from the CPU, back
+to front, and since ADR-0094 Bistro's glass is blended and seen through:
+342 instances, of which 279 are in the street's view, 205 on the terrace
+and 16 at the hedge (0.039 ms). Timed in
 `nph_render_frame` over 240 frames: an instance on the list costs 0.044 us
 a frame to test against the view (15 us for the 342), and one in view its
 draw's record (0.09 us), its place in the sort (0.10 us) and its draw in
@@ -564,8 +566,10 @@ rounds each run in turn with the desktop still
   the two small passes are added, 0.005 to 0.014 ms. The glass wall's 4,096
   panes take 0.062 ms more: the sort's 0.033, the cull's 0.011, and 0.020 in
   the transparent pass, each of the 4,096 small draws now an indirect one.
-- The budgets: two rounds of every reference view and synthetic scene exceed
-  no row of either file. The new passes and the glass wall have no rows yet.
+- The budgets: two rounds of every reference view and synthetic scene
+  exceeded no row of either file, and both files were then made afresh from
+  them, with rows for the cull and the sort where a scene has blended
+  surfaces and for the glass wall's three production scenes.
 - The picture: with the radiance cache off, each build repeats itself to
   0.02 % of the pixels, and Bistro's street, street turn and terrace differ
   from the build before in 0.006 to 0.017 % of theirs, as two runs of one
