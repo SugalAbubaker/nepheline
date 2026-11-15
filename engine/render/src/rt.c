@@ -360,6 +360,7 @@ static NphResult blas_create(NphRenderer *r, u32 slot, u32 kind, const char *nam
     NPH_LOG_DEBUG(&NPH_LOG_RENDER,
                   "%s: %s: a bottom level of %llu triangles in %u geometries, %.1f KB", r->name,
                   name, (unsigned long long)triangles, geometries, (f64)sizes.accel / 1.0e3);
+    NPH_UNUSED(triangles); // for the log alone, which a Shipping build leaves out
     const u32 e = blas_entry(slot, kind);
     b->scratch = sizes.scratch;
     b->pending = 1;
