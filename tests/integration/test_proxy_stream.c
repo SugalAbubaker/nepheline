@@ -1842,6 +1842,66 @@ NTEST(WorldPartition, the_engine_runs_the_texture_stream_its_budget_asks_for)
     test_temp_dir_remove(&dir);
 }
 
+// A scene's alpha-tested cards through the engine's runtime (render_assets.c): their mesh
+// reaches the renderer with its triangles for the rays alone and their material with its key,
+// whether textures page or not (r.texture_budget_mb; the cards' texture is too small to have
+// pages, so it is resident whole either way), and the rays take the triangles: the top level's
+// record of the cards names them, and none names the mesh's own (ADR-0098).
+NTEST(WorldPartition, the_engines_runtime_hands_the_cards_triangles_for_the_rays_to_the_renderer)
+{
+    TempDir dir;
+    test_temp_dir_make(&dir, "engine_cards");
+    char gltf[1200];
+    test_path_in(&dir, "cards.gltf", gltf, sizeof gltf);
+    test_write_cards(gltf, 60U, true);
+    NphAllocator *alloc = nph_allocator_system();
+    NphJobSystem *jobs = NULL;
+    NphJobSystemDesc jd;
+    memset(&jd, 0, sizeof jd);
+    jd.alloc = alloc;
+    jd.worker_count = 2U;
+    NTEST_ASSERT_EQ_INT(nph_job_system_create(&jd, &jobs), NPH_RESULT_OK);
+    char pack[1200];
+    cook_pack(&dir, "cards.gltf", jobs, pack, sizeof pack);
+    nph_job_system_destroy(jobs);
+    for (u32 round = 0; round < 2U; ++round) {
+        EngineWorld w;
+        const char *const settings[3] = {"r.pipeline=1", "r.taa=false",
+                                         round == 0U ? "r.texture_budget_mb=0"
+                                                     : "r.texture_budget_mb=64"};
+        NphEngine *e = engine_open(&w, pack, settings, 3U, nph_dvec3(45.0, 0.5, 30.0), 0.7F,
+                                   "cards.gltf#scene", 0.0F);
+        if (e == NULL) {
+            NPH_IGNORE_RESULT(nph_debug_allocator_destroy(&w.da, NULL, NULL));
+            test_temp_dir_remove(&dir);
+            NTEST_SKIP("no GPU");
+        }
+        const NphRenderer *r = nph_engine_renderer(e);
+        if (nph_renderer_production_supported(r) && nph_renderer_ray_tracing_supported(r)) {
+            // The top level is rebuilt as the scene's instance comes, and its records are
+            // counted a few frames late.
+            u32 trimmed = 0U;
+            u32 own = 0U;
+            bool gi = false;
+            for (u32 i = 0; i < 16U; ++i) {
+                const NphEngineFrameStats *st = engine_frames(e, 1U);
+                trimmed = nph_max_u32(trimmed, st->render.vis_rt_trimmed);
+                own = nph_max_u32(own, st->render.vis_rt_own);
+                gi = gi || st->render.gi != 0;
+            }
+            NTEST_LOG("through the engine, %s: records trimmed %u, own %u (radiance cache %s)",
+                      round == 0U ? "textures whole" : "a texture budget", trimmed, own,
+                      gi ? "on" : "off");
+            NTEST_EXPECT_TRUE(gi);
+            NTEST_EXPECT_EQ_UINT(trimmed, 1U);
+            NTEST_EXPECT_EQ_UINT(own, 0U);
+            NTEST_EXPECT_EQ_UINT(nph_gpu_device_validation_stats(nph_engine_device(e)).errors, 0U);
+        }
+        engine_close(&w);
+    }
+    test_temp_dir_remove(&dir);
+}
+
 // A scene's point lights and a mesh that rays pass by, from its glTF to the frame.
 static void write_candle(const TempDir *dir)
 {
@@ -1966,11 +2026,10 @@ NTEST(WorldPartition, the_engine_runs_the_cells_and_their_stream)
 
 // A scene's alpha-tested cards, cooked with triangles for the rays alone (asset/mesh.h version
 // 7; ADR-0096), reach the renderer with them through the samples' loader, their material made
-// with the key the triangles hold for, and their instance is made. Paged, the same scene's
-// rays read whichever level of the cards' texture is resident, which the triangles were not
-// made for: the mesh is handed over without them, its material without a key.
-NTEST(WorldPartition,
-      a_scenes_cards_reach_the_renderer_trimmed_for_the_rays_where_their_texture_is_whole)
+// with the key the triangles hold for, and their instance is made. Paged, the same: the
+// renderer's rays take the triangles on the frames the cards' texture has its finest level
+// resident, and the mesh's own triangles on the others (ADR-0098; render's RayTrim tests).
+NTEST(WorldPartition, a_scenes_cards_reach_the_renderer_trimmed_for_the_rays_paged_or_whole)
 {
     NphAllocator *alloc = nph_allocator_system();
     StreamWorld *f = NPH_ALLOC_TYPE(alloc, StreamWorld);
@@ -2000,8 +2059,7 @@ NTEST(WorldPartition,
         CookedScene scene;
         NTEST_ASSERT_EQ_INT(cooked_scene_load(&cd, &scene), NPH_RESULT_OK);
         NTEST_EXPECT_EQ_UINT(scene.instance_count, 1U);
-        NTEST_EXPECT_EQ_UINT(scene.ray_meshes_trimmed, round == 0U ? 1U : 0U);
-        NTEST_EXPECT_EQ_UINT(scene.ray_meshes_untrimmed, round == 0U ? 0U : 1U);
+        NTEST_EXPECT_EQ_UINT(scene.ray_meshes_trimmed, 1U);
         cooked_scene_unload(&scene);
     }
     world_teardown(f);

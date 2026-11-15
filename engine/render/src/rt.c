@@ -8,7 +8,14 @@
 //     its submesh (the geometry index) and its triangle within it (the
 //     primitive index; NphVisMesh.submeshes has each one's first index),
 //     created with the mesh and built in the next frame that traces, before
-//     that frame's top level;
+//     that frame's top level. A mesh with triangles for the rays alone
+//     (ADR-0096) has two (RenderBlasKind): one over those, and one over its
+//     own triangles, which an instance's record names in its place on a frame
+//     its materials do not hold them (ADR-0098). In the second, a trimmed
+//     submesh's geometry is empty and its own triangles are a geometry past
+//     the submesh count, with a plain record of its own in the submesh table
+//     (vis_scene.c): a hit on either reads its triangle the one way
+//     (vis_ray_triangle), and the shaders that trace are as they were;
 //   - a top level over the instances: their records fold each mesh's
 //     dequantisation into their transform, and come first in the record
 //     array, hidden and free slots after them as inactive records (a null
@@ -54,6 +61,10 @@ NPH_STATIC_ASSERT(sizeof(NphGpuAccelInstance) == 64U, "an instance record is 64 
 
 #define RT_ANCHOR_RADIUS 16.0
 
+// The most geometries a bottom level has: a submesh each, and a trimmed submesh's own triangles
+// again past them in the bottom level of a mesh's own triangles (mesh_geometries).
+#define RT_MAX_GEOMETRIES ((u64)NPH_RENDER_MAX_SUBMESHES * 2U)
+
 // A bottom level's compaction (RenderMesh.blas_state): built with
 // compaction allowed, its compacted size queried in the pass that built it
 // and read when that frame completes (NPH_GPU_FRAMES_IN_FLIGHT later); a
@@ -80,11 +91,40 @@ static u64 scratch_alignment(const NphRenderer *r)
     return nph_max_u32(nph_gpu_device_info(r->dev)->limits.accel_scratch_alignment, 1U);
 }
 
+// A bottom level on the lists (RenderRt.pending, compacting, frame_queries): its mesh's
+// slot times RENDER_BLAS_KINDS plus its kind.
+static u32 blas_entry(u32 slot, u32 kind)
+{
+    return slot * (u32)RENDER_BLAS_KINDS + kind;
+}
+
+static RenderBlas *blas_at(NphRenderer *r, u32 entry)
+{
+    return &r->meshes[entry / (u32)RENDER_BLAS_KINDS].blas[entry % (u32)RENDER_BLAS_KINDS];
+}
+
+// Takes `entry` off the list of `*count`, if it is there (the order does not matter).
+static void list_remove(u32 *list, u32 *count, u32 entry)
+{
+    for (u32 i = 0; i < *count; ++i) {
+        if (list[i] == entry) {
+            list[i] = list[--*count];
+            return;
+        }
+    }
+}
+
 // The mesh's triangles as a geometry per submesh, into RenderRt.geometries
 // (every submesh shares the vertices and the index buffer; the rays treat
-// every triangle as opaque); returns how many.
-static u32 mesh_geometries(NphRenderer *r, const RenderMesh *m)
+// every triangle as opaque), for its bottom level of kind `kind`: the
+// RENDER_BLAS_RAYS one takes a submesh's triangles for the rays alone where
+// it has them; the RENDER_BLAS_OWN one leaves such a submesh's geometry empty
+// and takes its own triangles after every submesh's, in submesh order, the
+// geometries the submesh table's records past the submesh count describe
+// (vis_scene.c upload_mesh). Returns how many.
+static u32 mesh_geometries(NphRenderer *r, const RenderMesh *m, u32 kind)
 {
+    u32 count = m->submesh_count;
     for (u32 s = 0; s < m->submesh_count; ++s) {
         NphGpuAccelTriangles *g = &r->rt.geometries[s];
         memset(g, 0, sizeof *g);
@@ -102,18 +142,26 @@ static u32 mesh_geometries(NphRenderer *r, const RenderMesh *m)
         g->index_offset = (u64)m->submeshes[s].index_offset * sizeof(u32);
         g->triangle_count = m->submeshes[s].index_count / 3U;
         g->opaque = 1;
-        // Its triangles for the rays alone, where it has them (ray_geometry_create).
-        if (m->ray_trimmed && m->ray_submeshes[s].count != 0U) {
-            g->vertices = m->ray_vertices;
-            g->vertex_stride = 3U * sizeof(f32);
-            g->vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
-            g->vertex_count = m->ray_vertex_count;
-            g->indices = m->ray_indices;
-            g->index_offset = (u64)m->ray_submeshes[s].first * 3U * sizeof(u32);
-            g->triangle_count = m->ray_submeshes[s].count;
+        if (!m->ray_trimmed || m->ray_submeshes[s].count == 0U) {
+            continue;
         }
+        if (kind == (u32)RENDER_BLAS_OWN) {
+            // Its own triangles, after every submesh's; here, none (Vulkan builds a geometry
+            // of no primitives as nothing).
+            r->rt.geometries[count++] = *g;
+            g->triangle_count = 0U;
+            continue;
+        }
+        // Its triangles for the rays alone (ray_geometry_create).
+        g->vertices = m->ray_vertices;
+        g->vertex_stride = 3U * sizeof(f32);
+        g->vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+        g->vertex_count = m->ray_vertex_count;
+        g->indices = m->ray_indices;
+        g->index_offset = (u64)m->ray_submeshes[s].first * 3U * sizeof(u32);
+        g->triangle_count = m->ray_submeshes[s].count;
     }
-    return m->submesh_count;
+    return count;
 }
 
 static u64 position_key(NphRenderVertexPosition p)
@@ -288,6 +336,43 @@ static NphResult reserve_scratch(NphRenderer *r, u64 size)
     return NPH_RESULT_OK;
 }
 
+// The mesh's bottom level of kind `kind` made, and listed for its build in the next frame
+// that traces and its compaction after.
+static NphResult blas_create(NphRenderer *r, u32 slot, u32 kind, const char *name)
+{
+    RenderRt *rt = &r->rt;
+    RenderMesh *m = &r->meshes[slot];
+    RenderBlas *b = &m->blas[kind];
+    const u32 geometries = mesh_geometries(r, m, kind);
+    u64 triangles = 0U;
+    for (u32 g = 0; g < geometries; ++g) {
+        triangles += rt->geometries[g].triangle_count;
+    }
+    NphGpuAccelSizes sizes;
+    NPH_TRY(nph_gpu_accel_blas_sizes(r->dev, rt->geometries, geometries, RT_BLAS_FLAGS, &sizes));
+    NPH_TRY(reserve_scratch(r, sizes.scratch));
+    NphGpuAccelDesc ad;
+    memset(&ad, 0, sizeof ad);
+    ad.type = NPH_GPU_ACCEL_BOTTOM;
+    ad.size = sizes.accel;
+    ad.name = name;
+    NPH_TRY(nph_gpu_accel_create(r->dev, &ad, &b->accel));
+    NPH_LOG_DEBUG(&NPH_LOG_RENDER,
+                  "%s: %s: a bottom level of %llu triangles in %u geometries, %.1f KB", r->name,
+                  name, (unsigned long long)triangles, geometries, (f64)sizes.accel / 1.0e3);
+    const u32 e = blas_entry(slot, kind);
+    b->scratch = sizes.scratch;
+    b->pending = 1;
+    rt->pending[rt->pending_count++] = e;
+    b->bytes = sizes.accel;
+    b->state = RT_BLAS_BUILD;
+    b->next = NPH_GPU_ACCEL_NULL;
+    b->old = NPH_GPU_ACCEL_NULL;
+    rt->compacting[rt->compacting_count++] = e;
+    rt->blas_bytes += sizes.accel;
+    return NPH_RESULT_OK;
+}
+
 NphResult render_rt_create(NphRenderer *r)
 {
     RenderRt *rt = &r->rt;
@@ -314,11 +399,13 @@ NphResult render_rt_create(NphRenderer *r)
     bd.memory = NPH_GPU_MEMORY_DEVICE;
     bd.name = "rt instance records";
     NPH_TRY(nph_gpu_buffer_create(dev, &bd, &rt->instances));
-    rt->pending = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
-    rt->geometries = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccelTriangles, NPH_RENDER_MAX_SUBMESHES);
-    rt->compacting = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
-    rt->frame_queries = NPH_ALLOC_ARRAY(r->alloc, u32, r->desc.max_meshes);
-    rt->frame_copies = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccel, (u64)r->desc.max_meshes * 2U);
+    // Room for every bottom level of every mesh slot on each list.
+    const u64 entries = (u64)r->desc.max_meshes * (u64)RENDER_BLAS_KINDS;
+    rt->pending = NPH_ALLOC_ARRAY(r->alloc, u32, entries);
+    rt->geometries = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccelTriangles, RT_MAX_GEOMETRIES);
+    rt->compacting = NPH_ALLOC_ARRAY(r->alloc, u32, entries);
+    rt->frame_queries = NPH_ALLOC_ARRAY(r->alloc, u32, entries);
+    rt->frame_copies = NPH_ALLOC_ARRAY(r->alloc, NphGpuAccel, entries * 2U);
     if (rt->pending == NULL || rt->geometries == NULL || rt->compacting == NULL ||
         rt->frame_queries == NULL || rt->frame_copies == NULL) {
         return NPH_RESULT_OUT_OF_MEMORY;
@@ -347,20 +434,21 @@ void render_rt_destroy(NphRenderer *r)
     nph_gpu_accel_destroy(dev, rt->tlas);
     nph_gpu_buffer_destroy(dev, rt->instances);
     nph_gpu_buffer_destroy(dev, rt->scratch);
+    const u64 entries = (u64)r->desc.max_meshes * (u64)RENDER_BLAS_KINDS;
     if (rt->pending != NULL) {
-        NPH_FREE_ARRAY(r->alloc, u32, rt->pending, r->desc.max_meshes);
+        NPH_FREE_ARRAY(r->alloc, u32, rt->pending, entries);
     }
     if (rt->geometries != NULL) {
-        NPH_FREE_ARRAY(r->alloc, NphGpuAccelTriangles, rt->geometries, NPH_RENDER_MAX_SUBMESHES);
+        NPH_FREE_ARRAY(r->alloc, NphGpuAccelTriangles, rt->geometries, RT_MAX_GEOMETRIES);
     }
     if (rt->compacting != NULL) {
-        NPH_FREE_ARRAY(r->alloc, u32, rt->compacting, r->desc.max_meshes);
+        NPH_FREE_ARRAY(r->alloc, u32, rt->compacting, entries);
     }
     if (rt->frame_queries != NULL) {
-        NPH_FREE_ARRAY(r->alloc, u32, rt->frame_queries, r->desc.max_meshes);
+        NPH_FREE_ARRAY(r->alloc, u32, rt->frame_queries, entries);
     }
     if (rt->frame_copies != NULL) {
-        NPH_FREE_ARRAY(r->alloc, NphGpuAccel, rt->frame_copies, (u64)r->desc.max_meshes * 2U);
+        NPH_FREE_ARRAY(r->alloc, NphGpuAccel, rt->frame_copies, entries * 2U);
     }
     memset(rt, 0, sizeof *rt);
 }
@@ -404,28 +492,14 @@ NphResult render_rt_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDes
     if (m->ray_submeshes != NULL) {
         NPH_TRY(ray_geometry_create(r, m, desc));
     }
-    const u32 geometries = mesh_geometries(r, m);
-    NphGpuAccelSizes sizes;
-    NPH_TRY(nph_gpu_accel_blas_sizes(dev, rt->geometries, geometries, RT_BLAS_FLAGS, &sizes));
-    NPH_TRY(reserve_scratch(r, sizes.scratch));
-    NphGpuAccelDesc ad;
-    memset(&ad, 0, sizeof ad);
-    ad.type = NPH_GPU_ACCEL_BOTTOM;
-    ad.size = sizes.accel;
-    ad.name = desc->name != NULL ? desc->name : "rt mesh";
-    NPH_TRY(nph_gpu_accel_create(dev, &ad, &m->blas));
-    NPH_LOG_DEBUG(&NPH_LOG_RENDER,
-                  "%s: %s: a bottom level of %u triangles in %u geometries, %.1f KB", r->name,
-                  ad.name, m->index_count / 3U, geometries, (f64)sizes.accel / 1.0e3);
-    m->blas_scratch = sizes.scratch;
-    m->blas_pending = 1;
-    rt->pending[rt->pending_count++] = slot;
-    m->blas_bytes = sizes.accel;
-    m->blas_state = RT_BLAS_BUILD;
-    m->blas_next = NPH_GPU_ACCEL_NULL;
-    m->blas_old = NPH_GPU_ACCEL_NULL;
-    rt->compacting[rt->compacting_count++] = slot;
-    rt->blas_bytes += sizes.accel;
+    NPH_TRY(
+        blas_create(r, slot, (u32)RENDER_BLAS_RAYS, desc->name != NULL ? desc->name : "rt mesh"));
+    // With triangles for the rays alone, its own triangles' too, which an instance its
+    // materials do not hold those for traces in their place (ADR-0098): made with the mesh, as
+    // a level of a paged texture comes and goes in a frame, and a build then would be late.
+    if (m->ray_trimmed) {
+        NPH_TRY(blas_create(r, slot, (u32)RENDER_BLAS_OWN, "rt mesh (its own triangles)"));
+    }
     return NPH_RESULT_OK;
 }
 
@@ -436,35 +510,30 @@ void render_rt_mesh_destroy(NphRenderer *r, u32 slot)
     if (!rt->supported) {
         return;
     }
-    if (m->blas_pending) {
-        for (u32 i = 0; i < rt->pending_count; ++i) {
-            if (rt->pending[i] == slot) {
-                rt->pending[i] = rt->pending[--rt->pending_count];
-                break;
-            }
+    for (u32 kind = 0; kind < (u32)RENDER_BLAS_KINDS; ++kind) {
+        RenderBlas *b = &m->blas[kind];
+        const u32 e = blas_entry(slot, kind);
+        if (b->pending) {
+            list_remove(rt->pending, &rt->pending_count, e);
         }
-    }
-    if (m->blas_state != RT_BLAS_DONE) {
-        for (u32 i = 0; i < rt->compacting_count; ++i) {
-            if (rt->compacting[i] == slot) {
-                rt->compacting[i] = rt->compacting[--rt->compacting_count];
-                break;
-            }
+        if (b->state != RT_BLAS_DONE) {
+            list_remove(rt->compacting, &rt->compacting_count, e);
         }
+        rt->blas_bytes -= nph_gpu_accel_is_valid(r->dev, b->accel) ? b->bytes : 0U;
+        nph_gpu_accel_destroy(r->dev, b->accel);
+        nph_gpu_accel_destroy(r->dev, b->next);
+        nph_gpu_accel_destroy(r->dev, b->old);
+        b->accel = NPH_GPU_ACCEL_NULL;
+        b->next = NPH_GPU_ACCEL_NULL;
+        b->old = NPH_GPU_ACCEL_NULL;
+        b->bytes = 0U;
+        b->pending = 0;
+        b->state = RT_BLAS_DONE;
     }
-    rt->blas_bytes -= nph_gpu_accel_is_valid(r->dev, m->blas) ? m->blas_bytes : 0U;
-    nph_gpu_accel_destroy(r->dev, m->blas);
-    nph_gpu_accel_destroy(r->dev, m->blas_next);
-    nph_gpu_accel_destroy(r->dev, m->blas_old);
     nph_gpu_buffer_destroy(r->dev, m->blas_vertices);
     ray_geometry_release(r, m);
     m->ray_trimmed = 0;
-    m->blas = NPH_GPU_ACCEL_NULL;
-    m->blas_next = NPH_GPU_ACCEL_NULL;
-    m->blas_old = NPH_GPU_ACCEL_NULL;
     m->blas_vertices = NPH_GPU_BUFFER_NULL;
-    m->blas_pending = 0;
-    m->blas_state = RT_BLAS_DONE;
 }
 
 // The compactions' work at a frame's start, traced or not: the sizes the
@@ -484,36 +553,34 @@ static void compaction_begin(NphRenderer *r)
         sizes_frame = NPH_U64_MAX;
     }
     for (u32 i = 0; i < rt->compacting_count;) {
-        const u32 slot = rt->compacting[i];
-        RenderMesh *m = &r->meshes[slot];
-        if (m->blas_state == RT_BLAS_QUERIED && sizes_frame != NPH_U64_MAX &&
-            m->blas_query_frame <= sizes_frame) {
-            const u64 size = m->blas_query_frame == sizes_frame && m->blas_query < size_count
-                                 ? sizes[m->blas_query]
-                                 : 0U;
-            if (m->blas_query_frame != sizes_frame || size == 0U) {
-                m->blas_state = RT_BLAS_QUERY; // missed or not run: ask again
-            } else if (size >= m->blas_bytes) {
-                m->blas_state = RT_BLAS_DONE; // nothing to gain (lavapipe)
+        RenderBlas *b = blas_at(r, rt->compacting[i]);
+        if (b->state == RT_BLAS_QUERIED && sizes_frame != NPH_U64_MAX &&
+            b->query_frame <= sizes_frame) {
+            const u64 size =
+                b->query_frame == sizes_frame && b->query < size_count ? sizes[b->query] : 0U;
+            if (b->query_frame != sizes_frame || size == 0U) {
+                b->state = RT_BLAS_QUERY; // missed or not run: ask again
+            } else if (size >= b->bytes) {
+                b->state = RT_BLAS_DONE; // nothing to gain (lavapipe)
             } else {
                 NphGpuAccelDesc ad;
                 memset(&ad, 0, sizeof ad);
                 ad.type = NPH_GPU_ACCEL_BOTTOM;
                 ad.size = size;
                 ad.name = "rt mesh (compacted)";
-                if (nph_gpu_accel_create(dev, &ad, &m->blas_next) == NPH_RESULT_OK) {
-                    m->blas_next_bytes = size;
-                    m->blas_state = RT_BLAS_COPY;
+                if (nph_gpu_accel_create(dev, &ad, &b->next) == NPH_RESULT_OK) {
+                    b->next_bytes = size;
+                    b->state = RT_BLAS_COPY;
                 } else {
-                    m->blas_state = RT_BLAS_DONE; // kept as built
+                    b->state = RT_BLAS_DONE; // kept as built
                 }
             }
-        } else if (m->blas_state == RT_BLAS_RETIRE && now >= m->blas_query_frame + 2U) {
-            nph_gpu_accel_destroy(dev, m->blas_old);
-            m->blas_old = NPH_GPU_ACCEL_NULL;
-            m->blas_state = RT_BLAS_DONE;
+        } else if (b->state == RT_BLAS_RETIRE && now >= b->query_frame + 2U) {
+            nph_gpu_accel_destroy(dev, b->old);
+            b->old = NPH_GPU_ACCEL_NULL;
+            b->state = RT_BLAS_DONE;
         }
-        if (m->blas_state == RT_BLAS_DONE) {
+        if (b->state == RT_BLAS_DONE) {
             rt->compacting[i] = rt->compacting[--rt->compacting_count];
         } else {
             ++i;
@@ -529,13 +596,13 @@ static void compaction_declare(NphRenderer *r)
     rt->frame_query_count = 0U;
     rt->frame_copy_count = 0U;
     for (u32 i = 0; i < rt->compacting_count; ++i) {
-        const u32 slot = rt->compacting[i];
-        const RenderMesh *m = &r->meshes[slot];
-        if (m->blas_state == RT_BLAS_QUERY) {
-            rt->frame_queries[rt->frame_query_count++] = slot;
-        } else if (m->blas_state == RT_BLAS_COPY) {
-            rt->frame_copies[(u64)rt->frame_copy_count * 2U] = m->blas;
-            rt->frame_copies[(u64)rt->frame_copy_count * 2U + 1U] = m->blas_next;
+        const u32 e = rt->compacting[i];
+        const RenderBlas *b = blas_at(r, e);
+        if (b->state == RT_BLAS_QUERY) {
+            rt->frame_queries[rt->frame_query_count++] = e;
+        } else if (b->state == RT_BLAS_COPY) {
+            rt->frame_copies[(u64)rt->frame_copy_count * 2U] = b->accel;
+            rt->frame_copies[(u64)rt->frame_copy_count * 2U + 1U] = b->next;
             ++rt->frame_copy_count;
         }
     }
@@ -550,20 +617,21 @@ static NphResult compaction_swap(NphRenderer *r)
     RenderRt *rt = &r->rt;
     NphResult res = NPH_RESULT_OK;
     for (u32 i = 0; i < rt->compacting_count; ++i) {
-        const u32 slot = rt->compacting[i];
-        RenderMesh *m = &r->meshes[slot];
-        if (m->blas_state != RT_BLAS_COPY) {
+        const u32 e = rt->compacting[i];
+        RenderBlas *b = blas_at(r, e);
+        if (b->state != RT_BLAS_COPY) {
             continue;
         }
-        rt->blas_bytes = rt->blas_bytes - m->blas_bytes + m->blas_next_bytes;
-        m->blas_bytes = m->blas_next_bytes;
-        m->blas_old = m->blas;
-        m->blas = m->blas_next;
-        m->blas_next = NPH_GPU_ACCEL_NULL;
-        m->blas_state = RT_BLAS_RETIRE;
-        m->blas_query_frame = nph_gpu_frame_index(r->dev);
+        rt->blas_bytes = rt->blas_bytes - b->bytes + b->next_bytes;
+        b->bytes = b->next_bytes;
+        b->old = b->accel;
+        b->accel = b->next;
+        b->next = NPH_GPU_ACCEL_NULL;
+        b->state = RT_BLAS_RETIRE;
+        b->query_frame = nph_gpu_frame_index(r->dev);
         const NphResult u =
-            render_vis_mesh_set_blas(r, slot, nph_gpu_accel_address(r->dev, m->blas));
+            render_vis_mesh_set_blas(r, e / (u32)RENDER_BLAS_KINDS, e % (u32)RENDER_BLAS_KINDS,
+                                     nph_gpu_accel_address(r->dev, b->accel));
         res = res == NPH_RESULT_OK ? u : res;
         rt->rebuild_owed = 1;
         rt->frame_compactions += 1U;
@@ -628,6 +696,28 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
     return true;
 }
 
+// Whether the mesh's triangles for the rays alone hold for the instance this frame: each of
+// its trimmed submeshes is drawn with a material the rays hold to the key they were made for
+// (RenderMaterial.ray_key_live, as write_materials found it this frame; frame.c). The
+// production path's top level chooses so on the GPU (rt_instances.comp).
+static bool ray_keys_hold(const NphRenderer *r, const RenderMesh *m, const RenderInstance *inst)
+{
+    for (u32 s = 0; m->ray_key_ids != NULL && s < m->submesh_count; ++s) {
+        const u32 key = m->ray_key_ids[s];
+        if (key == 0U) {
+            continue;
+        }
+        const u32 slot = m->submeshes[s].material_slot;
+        const u32 ms = slot < inst->material_count && inst->materials[slot].value != 0U
+                           ? render_slot_of(&r->material_pool, inst->materials[slot].value)
+                           : NPH_U32_MAX;
+        if (ms == NPH_U32_MAX || r->materials[ms].ray_key_live != key) {
+            return false; // the default material, which tests no alpha, holds none
+        }
+    }
+    return true;
+}
+
 void render_rt_write_instances(NphRenderer *r)
 {
     const NphDVec3 anchor = r->rt.anchor;
@@ -642,7 +732,7 @@ void render_rt_write_instances(NphRenderer *r)
         const u32 ms =
             inst->handle != 0U ? render_slot_of(&r->mesh_pool, inst->mesh.value) : NPH_U32_MAX;
         if (ms == NPH_U32_MAX || inst->hidden ||
-            !nph_gpu_accel_is_valid(r->dev, r->meshes[ms].blas)) {
+            !nph_gpu_accel_is_valid(r->dev, r->meshes[ms].blas[RENDER_BLAS_RAYS].accel)) {
             continue;
         }
         NphGpuAccelInstance *o = &out[n++];
@@ -669,7 +759,11 @@ void render_rt_write_instances(NphRenderer *r)
         }
         o->index_and_mask = i | (0xFFU << 24U);
         o->offset_and_flags = NPH_GPU_ACCEL_INSTANCE_NO_FACE_CULL << 24U;
-        o->blas = nph_gpu_accel_address(r->dev, m->blas);
+        // Its mesh's own triangles where its triangles for the rays alone do not hold for it
+        // this frame (ADR-0098).
+        const bool own = m->ray_trimmed && !ray_keys_hold(r, m, inst);
+        o->blas = nph_gpu_accel_address(
+            r->dev, m->blas[own ? (u32)RENDER_BLAS_OWN : (u32)RENDER_BLAS_RAYS].accel);
     }
     r->rt.frame_instances = n;
 }
@@ -740,18 +834,24 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     accel_barrier(cmd);
     u64 at = 0U;
     for (u32 i = 0; i < rt->frame_builds; ++i) {
-        RenderMesh *m = &r->meshes[rt->pending[i]];
-        const u64 s = align_up(m->blas_scratch, align);
+        const u32 e = rt->pending[i];
+        RenderMesh *m = &r->meshes[e / (u32)RENDER_BLAS_KINDS];
+        const u32 kind = e % (u32)RENDER_BLAS_KINDS;
+        RenderBlas *b = &m->blas[kind];
+        const u64 s = align_up(b->scratch, align);
         if (at != 0U && at + s > capacity) {
             accel_barrier(cmd); // the batch is done with the scratch
             at = 0U;
         }
-        // (Its trimmed geometry's inputs go below, once the build is recorded.)
-        nph_gpu_cmd_build_blas(cmd, m->blas, rt->geometries, mesh_geometries(r, m), RT_BLAS_FLAGS,
-                               rt->scratch, lead + at);
-        m->blas_pending = 0;
-        m->blas_state = RT_BLAS_QUERY;
-        ray_geometry_release(r, m);
+        // (Its trimmed geometry's inputs go below, once the build is recorded; the build of
+        // its own triangles reads none of them.)
+        nph_gpu_cmd_build_blas(cmd, b->accel, rt->geometries, mesh_geometries(r, m, kind),
+                               RT_BLAS_FLAGS, rt->scratch, lead + at);
+        b->pending = 0;
+        b->state = RT_BLAS_QUERY;
+        if (kind == (u32)RENDER_BLAS_RAYS) {
+            ray_geometry_release(r, m);
+        }
         at += s;
     }
     if (rt->frame_builds != 0U) {
@@ -762,17 +862,17 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     // frame has no room for waits for a later frame.
     const u64 frame = nph_gpu_frame_index(dev);
     for (u32 i = 0; i < rt->frame_query_count + rt->frame_builds; ++i) {
-        const u32 slot = i < rt->frame_query_count ? rt->frame_queries[i]
-                                                   : rt->pending[i - rt->frame_query_count];
-        RenderMesh *m = &r->meshes[slot];
-        if (m->blas_state != RT_BLAS_QUERY) {
+        const u32 e = i < rt->frame_query_count ? rt->frame_queries[i]
+                                                : rt->pending[i - rt->frame_query_count];
+        RenderBlas *b = blas_at(r, e);
+        if (b->state != RT_BLAS_QUERY) {
             continue;
         }
-        const u32 q = nph_gpu_cmd_query_accel_compacted_size(cmd, m->blas);
+        const u32 q = nph_gpu_cmd_query_accel_compacted_size(cmd, b->accel);
         if (q != NPH_GPU_INVALID_INDEX) {
-            m->blas_query = q;
-            m->blas_query_frame = frame;
-            m->blas_state = RT_BLAS_QUERIED;
+            b->query = q;
+            b->query_frame = frame;
+            b->state = RT_BLAS_QUERIED;
         }
     }
     if (rt->frame_builds != 0U) {

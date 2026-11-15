@@ -98,7 +98,32 @@ void main()
     for (uint slot = 0u; slot < inst.material_count; ++slot) {
         masked = masked || materials.m[vis_instance_material(view, inst, slot)].alpha_mode != 0u;
     }
+    // A mesh with triangles for the rays alone (ADR-0096): they are traced where they hold for
+    // the instance this frame, each trimmed submesh drawn with a material the rays hold to the
+    // key they were made for (NphRenderMaterialData.ray_key, 0 on a frame its rays read another
+    // level); elsewhere the bottom level of its own triangles (ADR-0098), whose hits the shaders
+    // read as they read any (vis_ray_triangle).
+    uint64_t blas = mesh.blas;
+    if (mesh.rays != 0ul) {
+        VisUintRef keys = VisUintRef(mesh.rays);
+        VisUvec2Ref subs = VisUvec2Ref(mesh.submeshes);
+        const uint count = keys.v[0];
+        bool hold = true;
+        for (uint s = 0u; s < count; ++s) {
+            const uint key = keys.v[1u + s];
+            if (key != 0u) {
+                hold = hold &&
+                       materials.m[vis_instance_material(view, inst, subs.v[s].x)].ray_key == key;
+            }
+        }
+        if (!hold) {
+            blas = mesh.blas_own;
+            atomicAdd(VisCountersRef(view.v.counters).c.rt_own, 1u);
+        } else {
+            atomicAdd(VisCountersRef(view.v.counters).c.rt_trimmed, 1u);
+        }
+    }
     o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL | (masked ? RT_INSTANCE_NO_OPAQUE : 0u);
-    o.blas = mesh.blas;
+    o.blas = blas;
     out_ref.a[at] = o;
 }

@@ -491,23 +491,40 @@ as before.
   finds is then the same, to the rounding of the hit's place (the last digit
   of a float): the same picture, not the same bits.
 - **The promise and the keys.** The ray triangles hold for one alpha test: the
-  texture, wrap modes, factor and cutoff they were cut by. With another
-  material the rays would pass where a card is solid. A trimmed submesh
-  therefore names the key of the test it was made for
-  (`NphRenderRaySubmesh.alpha_key`), a material names the key of its own
-  (`NphRenderMaterialDesc.alpha_key`, 0: none), and the renderer holds an
-  instance to them: `nph_render_instance_create` refuses materials whose keys
-  are not the mesh's, and `nph_render_material_update` refuses another key
-  while such an instance names the material. The keys are the caller's word
-  (a cooked scene's are the cooker's hashes: docs/asset.md). A key is given
-  only where the rays read the alpha it was made of, the texture's finest
-  level: a paged texture's rays read whichever level is resident ("Virtual
-  textures"), so the samples' loader gives a paged scene's materials no keys and
-  its meshes no ray triangles (`samples/common/cooked_scene.c`), and the
-  engine's runtime, which pages, does not hand them over yet ("Limitations").
+  texture, wrap modes, factor and cutoff they were cut by, read at the
+  texture's finest level. With another material, or another level, the rays
+  would pass where a card is solid. A trimmed submesh therefore names the key
+  of the test it was made for (`NphRenderRaySubmesh.alpha_key`), and a material
+  names the key of its own (`NphRenderMaterialDesc.alpha_key`, 0: none). The
+  keys are the caller's word (a cooked scene's are the cooker's hashes:
+  docs/asset.md).
+- **Two bottom levels, chosen each frame** ([ADR-0098](adr/0098-trimmed-cards-where-their-key-holds.md)).
+  A trimmed mesh has a second bottom level, of its own triangles. Each frame a
+  material's record carries the id of its key (`NphRenderMaterialData.ray_key`,
+  the renderer numbering keys as materials and meshes name them) where its rays
+  read the level the key was made of: always for a texture resident whole, and
+  for a paged one while its level 0 is resident (a paged texture's samples
+  take the first level from which every level is: "Virtual textures"); 0 on any
+  other frame. The top level's record of an instance (`rt_instances.comp`;
+  `rt.c` on the reference path) names the trimmed bottom level where each
+  trimmed submesh's material carries its key's id (the mesh's rays' table,
+  `NphVisMesh.rays`), and the bottom level of its own triangles otherwise. In
+  that one a trimmed submesh's geometry is empty and its own triangles are a
+  geometry past the submesh count, whose entry in the submesh table is a plain
+  one: a hit reads its triangle the one way on either, and the shaders that
+  trace are as they were (telling the two apart in the hit's shaders instead,
+  by the record's binding table offset, cost Bistro's reflections 0.02 ms a
+  frame). Any material may so go
+  with any mesh: another key or none, a material changed or destroyed under
+  its instances, a paged texture without its finest level, and the picture is
+  as without the ray triangles; only the rays' cost differs. A change of a
+  material's id has that frame's top level rebuilt (`frame.c`
+  `write_materials`), so the records and the samplers always agree.
+  `NphRenderFrameStats.vis_rt_own` counts the records that name a mesh's own
+  triangles on a frame that rebuilt the top level.
 - **The reference renderer's rays** take every triangle for opaque ("Shadow
   rays"): of a trimmed submesh they meet the polygons, a card's leaf with a
-  rim, where they met the whole card before.
+  rim, where they met the whole card before (where the keys hold).
 
 **A flat mesh.** A mesh with no extent along an axis (a card, a ground
 plane, a wall of one quad) has a dequantisation scale of 0 there, and every
@@ -3540,15 +3557,17 @@ path and logs what the GPU culled.
   A blended submesh of a cell's member is drawn whether or not the cell's
   proxy stands for the cell.
 
-- Triangles for the rays alone (ADR-0096) are used where a scene's textures
-  are whole. A paged texture's rays read whichever of its levels is resident,
-  and a trim that holds for every level takes little (nothing in Bistro): a
-  scene loaded with paged textures traces its cards' own triangles
-  (`samples/common/cooked_scene.c`), and the engine's runtime
-  (`engine/runtime/src/render_assets.c`), which pages and whose instances'
-  materials may change, does not hand them over yet. The reference renderer's
-  rays, which test no alpha, meet a trimmed card's polygon where they met the
-  card.
+- Triangles for the rays alone (ADR-0096) hold for the finest level of a card's
+  texture, so a paged card's rays take them only while that level is resident
+  (ADR-0098), and its own triangles whenever the pixels want no finer than a
+  coarser level: a view of far trees, whose rays then pay what they did before
+  the trim. A trim that holds for every level takes little (nothing in Bistro);
+  keeping cards' textures whole, which would make it hold always, is a choice of
+  memory for the game's streaming to make. A trimmed mesh keeps the bottom level
+  of its own triangles too, which a scene of whole textures and its own
+  materials never traces (Bistro 4.6 MB, the city 8.0 MB, compacted). The reference
+  renderer's rays, which test no alpha, meet a trimmed card's polygon where they
+  met the card.
 
 - Only the production path's sun has a virtual shadow map; other lights'
   shadows are ray traced, and only where the device has ray queries. Many

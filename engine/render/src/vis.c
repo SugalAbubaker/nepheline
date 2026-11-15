@@ -712,6 +712,8 @@ static void read_stats(NphRenderer *r)
     s->vis_many_rays = c->many_rays;
     s->vis_reflect_dropped = c->reflect_dropped;
     s->vis_gi_dropped = c->gi_dropped;
+    s->vis_rt_trimmed = c->rt_trimmed;
+    s->vis_rt_own = c->rt_own;
     // The blended surfaces the GPU drew (ADR-0097): the production path's draws.
     s->blended = nph_min_u32(c->blend_draws, r->desc.max_blend_draws);
     s->draws = s->blended;
@@ -2580,6 +2582,8 @@ NphResult render_vis_frame(NphRenderer *r, const NphRenderView *view, NphGpuRend
         stats->vis_many_rays = last->vis_many_rays;
         stats->vis_reflect_dropped = last->vis_reflect_dropped;
         stats->vis_gi_dropped = last->vis_gi_dropped;
+        stats->vis_rt_trimmed = last->vis_rt_trimmed;
+        stats->vis_rt_own = last->vis_rt_own;
         stats->draws = last->draws;
         stats->blended = last->blended;
         stats->dropped = last->dropped;

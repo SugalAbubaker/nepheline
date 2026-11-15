@@ -256,10 +256,12 @@ from the triangle the polygon was cut from (docs/render.md "Rays and trimmed car
 - **The key.** The polygons hold for one alpha test. The cooker gives each alpha-tested
   material with a base colour texture its alpha key (`NphMaterialHeader.alpha_key`): a hash of
   that texture's alpha as cooked, its size, wrap modes and filter, the factor's alpha and the
-  cutoff. A trimmed submesh carries the key of the material it was trimmed for, and a loader
-  hands its ray triangles to the renderer only for a material of that key (docs/render.md).
-  The textures' settings are in the meshes' and the materials' settings hashes, so a change
-  of them cooks both again.
+  cutoff. A trimmed submesh carries the key of the material it was trimmed for. Loaders hand
+  every mesh's ray triangles and every material's key to the renderer, whose rays take a
+  trimmed submesh's polygons only on frames its instance draws it with a material of that key
+  whose texture's finest level they read, and its own triangles otherwise (ADR-0098;
+  docs/render.md "Rays and trimmed cards"). The textures' settings are in the meshes' and the
+  materials' settings hashes, so a change of them cooks both again.
 - `--no-ray-trim` (`CookMeshSettings.no_ray_trim`; `"no_ray_trim"` in a scene's manifest)
   switches it off: no keys, no ray triangles.
 

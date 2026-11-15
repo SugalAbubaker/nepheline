@@ -168,7 +168,12 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     // How each slot's sampler addresses: bits 4s..4s+1 its u, 4s+2..4s+3 its
     // v (NPH_RENDER_WRAP_*), which paged textures' requests follow.
     u32 wrap;
-    u32 pad2;
+    // The id the renderer gives the material's alpha key (NphRenderMaterialDesc.alpha_key) on a
+    // frame whose rays read the level the key was made of, its base colour texture's finest
+    // (a texture resident whole, or a paged one with level 0 resident this frame), and 0 on
+    // any other: a mesh's triangles for the rays alone hold for an instance of it only while
+    // this is their key's (ADR-0098; rt_instances.comp).
+    u32 ray_key;
 };
 
 // Paged textures (docs/adr/0065-virtual-texturing.md; texture_paging.glsl):

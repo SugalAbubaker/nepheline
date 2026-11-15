@@ -100,7 +100,9 @@ vec3 vis_position(NphVisMesh mesh, uint vertex)
 // their test can pass, each a part of one of the submesh's triangles, its parent, whose
 // attributes the hit reads. Its record (NphVisMesh.submeshes) names the parent and its three
 // corners' places in it, and the hit's place in the parent is those weighed by where the ray
-// met it.
+// met it. The same mesh's bottom level of its own triangles (NphVisMesh.blas_own; ADR-0098)
+// holds a trimmed submesh's own triangles as a geometry past the submesh count, whose record
+// is a plain one: a hit on either bottom level is read here alike.
 NPH_BUFFER_REF(VisRayRecordsRef) { uvec4 v[]; };
 
 uint vis_ray_triangle(NphVisMesh mesh, uvec2 sub, uint primitive, vec2 bc, out vec3 b)

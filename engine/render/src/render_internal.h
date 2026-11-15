@@ -9,6 +9,7 @@
 #include <nepheline/core/array.h>
 #include <nepheline/core/atomic.h>
 #include <nepheline/core/handle.h>
+#include <nepheline/core/hashmap.h>
 #include <nepheline/core/range_alloc.h>
 #include <nepheline/gpu/accel.h>
 #include <nepheline/gpu/sparse.h>
@@ -252,6 +253,32 @@ typedef struct RenderBlendIndices {
     u32 queued;
 } RenderBlendIndices;
 
+// A mesh's bottom levels (RenderMesh.blas; rt.c): the one its rays trace, over its triangles
+// for the rays alone where it has them (ADR-0096) and over its own otherwise, and, for a mesh
+// that has them, the one over its own triangles, which an instance whose materials they do
+// not hold for this frame traces in its place (ADR-0098).
+typedef enum RenderBlasKind {
+    RENDER_BLAS_RAYS = 0,
+    RENDER_BLAS_OWN,
+    RENDER_BLAS_KINDS,
+} RenderBlasKind;
+
+// A bottom level (rt.c): the structure, the scratch its build needs, and its compaction.
+typedef struct RenderBlas {
+    NphGpuAccel accel;
+    u64 scratch;
+    b32 pending; // listed in RenderRt.pending
+    // Its compaction: RenderRtCompaction, listed in RenderRt.compacting from the build until
+    // the original is retired.
+    u32 state;
+    u32 query;        // the compacted size's query in query_frame
+    u64 query_frame;  // and the frame that recorded it (or swapped it in)
+    u64 bytes;        // the structure's size now
+    NphGpuAccel next; // the compacted copy, until it is swapped in
+    u64 next_bytes;   // and its size
+    NphGpuAccel old;  // the original, until it is retired
+} RenderBlas;
+
 typedef struct RenderMesh {
     u32 handle;
     NphGpuBuffer positions;
@@ -269,27 +296,19 @@ typedef struct RenderMesh {
     NphAABB bounds;
     u32 instances; // live instances referencing the mesh
     u32 vertex_count;
-    // Ray-traced shadows (rt.c): the bottom-level structure over the
-    // quantised positions, the float copy of them it is built from where the
-    // device cannot build from 16-bit unorm, and the scratch its build needs.
-    NphGpuAccel blas;
+    // Ray-traced shadows (rt.c): its bottom levels over the quantised positions
+    // (RenderBlasKind; an accel of null where it has none), and the float copy of them they
+    // are built from where the device cannot build from 16-bit unorm.
+    RenderBlas blas[RENDER_BLAS_KINDS];
     NphGpuBuffer blas_vertices;
-    u64 blas_scratch;
-    b32 blas_pending; // listed in RenderRt.pending
-    // Its compaction (rt.c): RenderRtCompaction, listed in
-    // RenderRt.compacting from the build until the original is retired.
-    u32 blas_state;
-    u32 blas_query;        // the compacted size's query in blas_query_frame
-    u64 blas_query_frame;  // and the frame that recorded it (or swapped it in)
-    u64 blas_bytes;        // the structure's size now
-    NphGpuAccel blas_next; // the compacted copy, until it is swapped in
-    u64 blas_next_bytes;   // and its size
-    NphGpuAccel blas_old;  // the original, until it is retired
     // Its triangles for the rays alone (NphRenderMeshDesc.ray_submeshes; ADR-0096): each
-    // submesh's run and key (from the renderer's allocator; NULL: none), whether its bottom
-    // level is built of them (rt.c: where the device traces and the mesh takes rays), and the
-    // build's inputs, their corners placed (rt.c ray_corner), until the build is recorded.
+    // submesh's run and key, and its key's id (render_ray_key_id; 0: none), both from the
+    // renderer's allocator (NULL: none); whether its bottom level RENDER_BLAS_RAYS is built of
+    // them (rt.c: where the device traces and the mesh takes rays; RENDER_BLAS_OWN is then its
+    // own triangles'), and the build's inputs, their corners placed (rt.c ray_corner), until
+    // the build is recorded.
     NphRenderRaySubmesh *ray_submeshes;
+    u32 *ray_key_ids;
     b32 ray_trimmed;
     NphGpuBuffer ray_vertices;
     NphGpuBuffer ray_indices;
@@ -352,9 +371,12 @@ typedef struct RenderMaterial {
     // first resident level rewrites those slots' samplers alone (frame.c).
     u32 paged_slots;
     u32 paged_texture[NPH_RENDER_SLOT_COUNT];
-    // The live instances' submeshes whose triangles for the rays hold for its alpha key
-    // (renderer.c): while there are some, the key stays.
-    u32 ray_users;
+    // Its alpha key's id (render_ray_key_id; 0: none), and the id the rays last held it to
+    // (NphRenderMaterialData.ray_key, as write_materials last found it, frame.c): when that
+    // changes, so does whether meshes' triangles for the rays alone hold for its instances, and
+    // the top level is rebuilt (ADR-0098).
+    u32 ray_key_id;
+    u32 ray_key_live;
 } RenderMaterial;
 
 // RenderVis.slot_state bits, per instance slot (they outlive an instance:
@@ -554,12 +576,14 @@ typedef struct RenderRt {
     NphGpuBuffer instances; // NphGpuAccelInstance[max_instances]: the production path's
     NphGpuBuffer scratch;   // the builds' scratch: room for the largest one
     u64 scratch_size;
-    u32 *pending; // mesh slots whose bottom level waits for its build
+    // Bottom levels waiting for their builds, each named by its mesh's slot times
+    // RENDER_BLAS_KINDS plus its kind (as compacting and frame_queries name them).
+    u32 *pending;
     u32 pending_count;
     // One bottom level's geometries (a submesh each), as mesh_geometries
     // fills them for a sizing (the main thread) or a build (the build pass,
     // while the main thread waits on the graph): never both at once.
-    NphGpuAccelTriangles *geometries; // NPH_RENDER_MAX_SUBMESHES
+    NphGpuAccelTriangles *geometries; // twice NPH_RENDER_MAX_SUBMESHES (rt.c RT_MAX_GEOMETRIES)
     u32 shadow_lights;                // live lights that cast shadows
     // The top level's space: the camera's shifted by tlas_offset (rt.c).
     NphDVec3 anchor;      // where its origin is in the world
@@ -574,11 +598,11 @@ typedef struct RenderRt {
     u32 frame_builds;     // the first pending bottom levels, built this frame
     b32 unsupported_logged;
     NphGpuPipeline instance_writer; // rt_instances.comp
-    // Compaction (rt.c): the meshes on their way, and this frame's queries
+    // Compaction (rt.c): the bottom levels on their way, and this frame's queries
     // and copies (lists the build pass records, made before it runs).
     u32 *compacting;
     u32 compacting_count;
-    u32 *frame_queries; // mesh slots
+    u32 *frame_queries; // bottom levels
     u32 frame_query_count;
     NphGpuAccel *frame_copies; // pairs: original, compacted copy
     u32 frame_copy_count;
@@ -1364,8 +1388,13 @@ struct NphRenderer {
     u8 *frame_maps[NPH_GPU_FRAMES_IN_FLIGHT];
     u64 frame_addresses[NPH_GPU_FRAMES_IN_FLIGHT];
     RenderFrameLayout layout;
-    u64 material_version;                            // bumped by every material change
-    u32 masked_materials;                            // live materials that are alpha tested
+    u64 material_version; // bumped by every material change
+    u32 masked_materials; // live materials that are alpha tested
+    // The alpha keys' ids (render_ray_key_id; ADR-0098): a u64 key to its u32 id, from 1,
+    // numbered as materials and meshes first name them and kept for the renderer's life, so
+    // an id is never another key's (NphRenderMaterialData.ray_key, NphVisMesh.rays).
+    NphHashMap ray_key_ids;
+    u32 ray_key_count;
     u64 material_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // the version each slot holds (0: none)
     u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT];   // and the paged levels' count (paging)
     RenderDrawCmd *draw_cmds;                        // max_draws, rebuilt every frame
@@ -1471,6 +1500,10 @@ u32 render_material_sampler_level(const NphRenderer *r, const NphRenderTextureBi
                                   u32 level);
 // The pool slot of a live handle, or NPH_U32_MAX for null and stale ones.
 u32 render_slot_of(const NphHandlePool *pool, u32 value);
+// The id of the alpha key `key` (RenderMaterial.ray_key_id, RenderMesh.ray_key_ids;
+// ADR-0098) into `*out`: 0 for key 0, else its number, given when a material or a mesh
+// first names it. NPH_RESULT_OUT_OF_MEMORY where a new key finds no room in the map.
+NPH_MUST_USE NphResult render_ray_key_id(NphRenderer *r, u64 key, u32 *out);
 
 // frame.c
 // `ray_tracing`: room for the reference's top-level instance records.
@@ -1862,10 +1895,10 @@ bool render_vis_lod_level_table(const NphRenderMeshDesc *d, NphSphere sphere, Np
 
 // `lod_depth`: the node levels of the mesh's hierarchy of levels of detail
 // (0 without one), as validation found them.
-// The mesh's bottom-level address in its GPU scene record, after rt.c
-// swapped in a compacted structure: an upload, so the frames after this one
-// read it.
-NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u64 address);
+// The address of the mesh's bottom level of kind `kind` (RenderBlasKind) in its GPU scene
+// record, after rt.c swapped in a compacted structure: an upload, so the frames after this
+// one read it.
+NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u32 kind, u64 address);
 NphResult render_vis_mesh_create(NphRenderer *r, u32 slot, const NphRenderMeshDesc *desc,
                                  u32 lod_depth);
 void render_vis_mesh_destroy(NphRenderer *r, u32 slot);

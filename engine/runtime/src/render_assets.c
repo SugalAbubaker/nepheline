@@ -10,6 +10,7 @@
 
 #include "runtime_internal.h"
 
+#include <stddef.h>
 #include <string.h>
 
 // The cooked streams are the renderer's streams, bit for bit.
@@ -27,6 +28,13 @@ NPH_STATIC_ASSERT(sizeof(NphMeshlet) == sizeof(NphRenderMeshlet) &&
                       sizeof(NphMeshLodMaker) == sizeof(NphRenderLodMaker),
                   "cooked meshlets and levels are the renderer's records (the cooker asserts each "
                   "field: tools/cook/src/mesh_meshlet.c, mesh_lod.c)");
+NPH_STATIC_ASSERT(sizeof(NphMeshRayRange) == sizeof(NphRenderRaySubmesh) &&
+                      offsetof(NphMeshRayRange, alpha_key) ==
+                          offsetof(NphRenderRaySubmesh, alpha_key) &&
+                      sizeof(NphMeshRayTriangle) == sizeof(NphRenderRayTriangle) &&
+                      offsetof(NphMeshRayTriangle, corner) ==
+                          offsetof(NphRenderRayTriangle, corner),
+                  "cooked triangles for the rays are the renderer's records");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_WRAP_MIRROR == (u32)NPH_RENDER_WRAP_MIRROR,
                   "the wrap modes share their numbering");
 NPH_STATIC_ASSERT((u32)NPH_MATERIAL_ALPHA_BLEND == (u32)NPH_RENDER_ALPHA_BLEND,
@@ -377,6 +385,18 @@ NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
     d->bounds = h->bounds;
     d->no_rays = (h->flags & (u32)NPH_MESH_FLAG_NO_RAYS) != 0U ? 1 : 0;
     cooked_clusters(mv, d);
+    // Its triangles for the rays alone, where it has them (asset/mesh.h version 7; ADR-0096),
+    // handed over as they are (the same records, asserted above): whatever materials its
+    // instances draw it with, the renderer's rays take them only on frames those hold them,
+    // and the mesh's own triangles otherwise (ADR-0098). A mesh of voxels alone has no
+    // triangles for a ray's to be part of.
+    if (mv->ray_ranges != NULL && h->index_count != 0U && !d->no_rays) {
+        const void *runs = mv->ray_ranges;
+        const void *triangles = mv->ray_triangles;
+        d->ray_submeshes = runs;
+        d->ray_triangles = triangles;
+        d->ray_triangle_count = mv->ray_triangle_count;
+    }
     d->name = "cooked mesh";
     return NPH_RESULT_OK;
 }
@@ -432,6 +452,14 @@ static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
         d.textures[t].wrap_u = (NphRenderWrap)ref->wrap_u;
         d.textures[t].wrap_v = (NphRenderWrap)ref->wrap_v;
         d.textures[t].nearest = ref->nearest != 0U;
+    }
+    // The cooker's key of its alpha test (ADR-0096), where it reads the texture the key was
+    // made of: an alpha-tested material whose base colour texture this device took. The
+    // renderer holds its instances' rays to it on the frames they read that texture's finest
+    // level, paged or whole (ADR-0098).
+    if (h->alpha_mode == (u32)NPH_MATERIAL_ALPHA_MASK &&
+        d.textures[NPH_RENDER_SLOT_BASE_COLOR].texture.value != 0U) {
+        d.alpha_key = h->alpha_key;
     }
     d.name = "cooked material";
     return nph_render_material_create(c->renderer, &d, &a->material);

@@ -551,9 +551,14 @@ typedef struct NphRenderMeshDesc {
     //
     // The caller's promise is that a submesh's ray triangles hold every point of its own
     // triangles where an instance's material lets no ray through (its alpha test passes: an
-    // alpha-tested card's triangles cut down to where its texture is not cut away). The
-    // renderer holds it to the keys: an instance of the mesh is made only with materials
-    // whose `alpha_key` is the submeshes' (nph_render_instance_create).
+    // alpha-tested card's triangles cut down to where its texture is not cut away), for a
+    // material of the run's `alpha_key`. The renderer holds it to the keys (ADR-0098): the
+    // mesh also has a bottom level of its own triangles, and an instance's rays take its ray
+    // triangles only on a frame that each trimmed submesh is drawn with a material of that key
+    // whose rays read the level its key was made of (NphRenderMaterialDesc.alpha_key), and its
+    // own triangles on any other: a material of another key or none, a material changed or
+    // destroyed, a paged texture without its finest level. The picture is then as without
+    // them; only the rays' cost differs (NphRenderFrameStats.vis_rt_own counts such instances).
     const NphRenderRaySubmesh *ray_submeshes;
     const NphRenderRayTriangle *ray_triangles;
     u32 ray_triangle_count;
@@ -678,9 +683,13 @@ typedef struct NphRenderMaterialDesc {
     // What its alpha test reads, as one number (a cooked material's
     // NphMaterialHeader.alpha_key): the caller's word that two materials of one key cut the
     // same parts of a surface away, which a mesh's triangles for the rays alone hold for
-    // (NphRenderRaySubmesh.alpha_key). 0: none, and no mesh's ray triangles hold for it. Only
-    // of an alpha-tested material, and only where its base colour texture is the one the key
-    // was made of, whole (a paged texture's rays read whichever level is resident).
+    // (NphRenderRaySubmesh.alpha_key), and that its base colour texture is the one the key was
+    // made of: a caller that changes what the test reads (the cutoff, the texture, its wrap
+    // or filter, the factor's alpha) gives 0 or that test's own key. 0: none, and no mesh's
+    // ray triangles hold for it. Only of an alpha-tested material. The key holds on the frames
+    // its rays read the texture's finest level: always where the texture is resident whole,
+    // and where it is paged, while its level 0 is resident (a paged texture's rays read the
+    // first level from which every level is; ADR-0098).
     u64 alpha_key;
     const char *name;
 } NphRenderMaterialDesc;
@@ -693,10 +702,9 @@ void nph_render_material_desc_default(NphRenderMaterialDesc *desc);
 // NPH_RESULT_FULL past max_materials.
 NPH_MUST_USE NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc *desc,
                                                   NphRenderMaterial *out);
-// Replaces the description; visible from the next frame.
-// NPH_RESULT_INVALID_ARGUMENT as nph_render_material_create, and for another alpha key while
-// an instance of a mesh whose ray triangles hold for the old one names the material: such a
-// mesh's instances go first.
+// Replaces the description; visible from the next frame, where another alpha key also
+// changes which meshes' triangles for the rays alone its instances' rays take
+// (NphRenderMeshDesc.ray_submeshes). NPH_RESULT_INVALID_ARGUMENT as nph_render_material_create.
 NPH_MUST_USE NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
                                                   const NphRenderMaterialDesc *desc);
 // Instances that still name the material draw with the default material.
@@ -736,9 +744,8 @@ typedef struct NphRenderInstanceDesc {
 // NPH_RESULT_INVALID_ARGUMENT for a stale mesh, material, or cell handle or
 // a transform with a zero determinant; NPH_RESULT_FULL past max_instances;
 // NPH_RESULT_OUT_OF_MEMORY when the material table cannot be allocated.
-// (NPH_RESULT_INVALID_ARGUMENT too where the mesh has triangles for the rays alone and a
-// trimmed submesh's material is not of the key they were made for:
-// NphRenderMeshDesc.ray_submeshes.)
+// Any materials go with a mesh that has triangles for the rays alone: its rays take those
+// only on frames that the materials hold them (NphRenderMeshDesc.ray_submeshes).
 NPH_MUST_USE NphResult nph_render_instance_create(NphRenderer *r, const NphRenderInstanceDesc *desc,
                                                   NphRenderInstance *out);
 NPH_MUST_USE NphResult nph_render_instance_set_transform(NphRenderer *r, NphRenderInstance instance,
@@ -1291,8 +1298,14 @@ typedef struct NphRenderFrameStats {
     u32 vis_reflect_dropped;     // reflections' rays whose cell's bucket was full (ADR-0077)
     u32 vis_gi_dropped;          // the radiance cache's samples whose cell's bucket was full
                                  // (ADR-0091)
-    u32 vis_blended_culled;      // blended submeshes of shown instances out of view (ADR-0097)
-    u32 vis_blended_occluded;    // and those in view behind the frame's opaque surfaces
+    // On a frame that rebuilt the rays' top level, its records of meshes with triangles for the
+    // rays alone that name those, and those that name their mesh's own triangles instead,
+    // which their materials did not hold them for (ADR-0098; NphRenderMeshDesc.ray_submeshes);
+    // 0 on any other frame.
+    u32 vis_rt_trimmed;
+    u32 vis_rt_own;
+    u32 vis_blended_culled;   // blended submeshes of shown instances out of view (ADR-0097)
+    u32 vis_blended_occluded; // and those in view behind the frame's opaque surfaces
     // The virtual shadow map: whether this frame has it, and the levels'
     // resolution bias it draws with (each step halves the resolution: the
     // renderer raises it while the pool overflows, or while the pages

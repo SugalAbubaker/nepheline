@@ -134,11 +134,10 @@ typedef struct CookedScene {
     // The scene's first camera, if any (else has_camera is 0).
     b32 has_camera;
     NphRenderCamera camera;
-    // The meshes handed to the renderer with their cooked triangles for the rays alone, and
-    // those that have some and were handed over without: their materials' alpha here is not
-    // what the triangles were made for (ADR-0096).
+    // The meshes handed to the renderer with their cooked triangles for the rays alone
+    // (ADR-0096), every one that has some: the renderer's rays take them on the frames the
+    // materials of an instance hold them (ADR-0098; NphRenderFrameStats.vis_rt_own).
     u32 ray_meshes_trimmed;
-    u32 ray_meshes_untrimmed;
     // The pages of paged textures still to install (CookedSceneDesc
     // .paged_textures), from `page_next` on; or, with a texture budget, the
     // stream of their levels.

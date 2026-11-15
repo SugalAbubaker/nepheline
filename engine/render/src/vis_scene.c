@@ -35,7 +35,10 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 208U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 224U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas_own) % 8U == 0U &&
+                      offsetof(NphVisMesh, rays) % 8U == 0U,
+                  "addresses are aligned");
 NPH_STATIC_ASSERT(sizeof(NphVisLodLevel) == 16U, "NphVisLodLevel matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisLodGroup) == sizeof(NphRenderLodGroup),
                   "NphVisLodGroup is its NphRenderLodGroup, a field different");
@@ -663,20 +666,37 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
                           &m->meshlet_vertices));
     NPH_TRY(upload_stream(r, triangles, (u64)triangle_count * 3U, "mesh meshlet triangles",
                           &m->meshlet_triangles));
-    // Each submesh's material slot and first index (NphVisMesh.submeshes).
-    u32 table[NPH_RENDER_MAX_SUBMESHES][2];
+    // Each submesh's material slot and first index (NphVisMesh.submeshes); for a mesh with
+    // triangles for the rays alone, the trimmed submeshes' own again after them (below).
+    u32 table[2U * NPH_RENDER_MAX_SUBMESHES][2];
     for (u32 s = 0; s < d->submesh_count; ++s) {
         table[s][0] = d->submeshes[s].material_slot;
         table[s][1] = d->submeshes[s].index_offset;
     }
+    u64 rays_at = 0U; // the rays' table's place in the buffer, in bytes (0: none)
     if (m->ray_trimmed) {
         // Its bottom level holds triangles for the rays alone (rt.c; ADR-0096): their records
         // (NphRenderRayTriangle, four words) follow the table in its buffer, and a trimmed
         // submesh's second word is its first record's place there, in records from the
         // buffer's start, with the top bit set, where a hit's shader finds the triangle's
-        // parent and its corners' places in it (vis_ray_triangle, vis_common.glsl).
-        const u32 base = (d->submesh_count * 2U + 3U) / 4U;
-        const u64 words = ((u64)base + d->ray_triangle_count) * 4U;
+        // parent and its corners' places in it (vis_ray_triangle, vis_common.glsl). The bottom
+        // level of its own triangles (ADR-0098) holds a trimmed submesh's own triangles as a
+        // geometry past the submesh count, in submesh order (rt.c mesh_geometries): the table
+        // has their plain records there. The rays' table follows the ray triangles' records
+        // (NphVisMesh.rays), at a record's alignment: the submesh count, then each submesh's
+        // key's id, which the top level's records hold the instance's materials to
+        // (rt_instances.comp).
+        u32 entries = d->submesh_count;
+        for (u32 s = 0; s < d->submesh_count; ++s) {
+            if (m->ray_submeshes[s].count != 0U) {
+                table[entries][0] = table[s][0];
+                table[entries][1] = table[s][1];
+                ++entries;
+            }
+        }
+        const u32 base = (entries * 2U + 3U) / 4U;
+        const u64 rays_word = ((u64)base + d->ray_triangle_count) * 4U;
+        const u64 words = rays_word + 1U + (u64)d->submesh_count;
         u32 *all = NPH_ALLOC_ARRAY_ZEROED(r->alloc, u32, words);
         if (all == NULL) {
             return NPH_RESULT_OUT_OF_MEMORY;
@@ -685,14 +705,17 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
             if (m->ray_submeshes[s].count != 0U) {
                 table[s][1] = NPH_VIS_SUBMESH_RAY_TRIMMED | (base + m->ray_submeshes[s].first);
             }
+            all[rays_word + 1U + s] = m->ray_key_ids[s];
         }
-        memcpy(all, table, (u64)d->submesh_count * 2U * sizeof(u32));
+        all[rays_word] = d->submesh_count;
+        memcpy(all, table, (u64)entries * 2U * sizeof(u32));
         memcpy(all + (u64)base * 4U, d->ray_triangles,
                (u64)d->ray_triangle_count * sizeof(NphRenderRayTriangle));
         const NphResult res =
             upload_stream(r, all, words * sizeof(u32), "mesh submeshes", &m->submesh_table);
         NPH_FREE_ARRAY(r->alloc, u32, all, words);
         NPH_TRY(res);
+        rays_at = rays_word * sizeof(u32);
     } else {
         NPH_TRY(upload_stream(r, table, (u64)d->submesh_count * 2U * sizeof(u32), "mesh submeshes",
                               &m->submesh_table));
@@ -736,21 +759,29 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     rec.indices = nph_gpu_buffer_address(r->dev, m->indices);
     rec.meshlet_count = meshlet_count;
     rec.index_base = index_base;
-    rec.blas =
-        nph_gpu_accel_is_valid(r->dev, m->blas) ? nph_gpu_accel_address(r->dev, m->blas) : 0U;
+    const NphGpuAccel rays = m->blas[RENDER_BLAS_RAYS].accel;
+    const NphGpuAccel own = m->blas[RENDER_BLAS_OWN].accel;
+    rec.blas = nph_gpu_accel_is_valid(r->dev, rays) ? nph_gpu_accel_address(r->dev, rays) : 0U;
+    // A mesh with triangles for the rays alone: its own triangles' bottom level and its rays'
+    // table (ADR-0098; rt.c makes both bottom levels before this record).
+    if (rays_at != 0U && nph_gpu_accel_is_valid(r->dev, own)) {
+        rec.blas_own = nph_gpu_accel_address(r->dev, own);
+        rec.rays = rec.submeshes + rays_at;
+    }
     if (d->lod_nodes != NULL) {
         NPH_TRY(upload_lods(r, m, d, &rec));
     }
     return nph_gpu_upload_buffer(r->dev, v->meshes, (u64)slot * sizeof rec, &rec, sizeof rec);
 }
 
-NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u64 address)
+NphResult render_vis_mesh_set_blas(NphRenderer *r, u32 slot, u32 kind, u64 address)
 {
     if (!r->vis.supported) {
         return NPH_RESULT_OK;
     }
-    return nph_gpu_upload_buffer(r->dev, r->vis.meshes,
-                                 (u64)slot * sizeof(NphVisMesh) + offsetof(NphVisMesh, blas),
+    const u64 field =
+        kind == (u32)RENDER_BLAS_OWN ? offsetof(NphVisMesh, blas_own) : offsetof(NphVisMesh, blas);
+    return nph_gpu_upload_buffer(r->dev, r->vis.meshes, (u64)slot * sizeof(NphVisMesh) + field,
                                  &address, sizeof address);
 }
 

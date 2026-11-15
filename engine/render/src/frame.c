@@ -313,24 +313,75 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     }
 }
 
+// The id the rays hold the material to this frame (NphRenderMaterialData.ray_key; ADR-0098):
+// its alpha key's where its rays read the level the key was made of, its base colour
+// texture's finest: a texture resident whole, or a paged one whose level 0 is resident this
+// frame (paging.c: the rays' samples clamp to its first resident level, as the pixels' do).
+// 0 otherwise, and for a material with no key or no base colour texture to read.
+static u32 material_ray_key(const NphRenderer *r, const RenderMaterial *m)
+{
+    if (m->ray_key_id == 0U) {
+        return 0U;
+    }
+    const NphRenderTextureBinding *b = &m->desc.textures[NPH_RENDER_SLOT_BASE_COLOR];
+    const RenderTexture *t = render_texture_get(r, b->texture);
+    if (t == NULL || t->kind != NPH_RENDER_TEXTURE_2D) {
+        return 0U;
+    }
+    if (t->paged) {
+        const u32 slot = render_slot_of(&r->texture_pool, b->texture.value);
+        if (slot == NPH_U32_MAX || r->paging.frame_level[slot] != 0U) {
+            return 0U;
+        }
+    }
+    return m->ray_key_id;
+}
+
+// The material record's ray_key for this frame; true where it is not the one the rays last
+// held the material to (RenderMaterial.ray_key_live), which it then becomes.
+static bool set_ray_key(const NphRenderer *r, RenderMaterial *m, NphRenderMaterialData *rec)
+{
+    const u32 key = material_ray_key(r, m);
+    rec->ray_key = key;
+    if (key == m->ray_key_live) {
+        return false;
+    }
+    m->ray_key_live = key;
+    return true;
+}
+
+// A material's ray_key changed this frame: which meshes' triangles for the rays alone hold
+// for its instances did too, and the top level traced this frame takes them as the frame's
+// records say (its records are written again: rt_instances.comp, rt.c ray_keys_hold). A
+// frame that traces nothing leaves its top level to be rebuilt by the next that does.
+static void ray_keys_changed(NphRenderer *r, bool changed)
+{
+    if (changed && r->rt.frame_active) {
+        r->rt.frame_rebuild = 1;
+    }
+}
+
 // The material table: one record per pool slot, then the default
 // material at index max_materials. Free slots are written as zero: the
 // production path checks a record's handle against the material map's,
 // so a destroyed material's record must stop matching. Written whole after
 // a change of materials or textures; after paged textures' levels alone
 // changed (paging.c), only the samplers of the slots that sample one that
-// changed since the frame slot's table was written: while textures stream
+// changed since the frame slot's table was written, and the ray key of a
+// material whose base colour texture's level changed: while textures stream
 // a level changes most frames, and the whole table cost 0.18 ms on
 // Bistro's 254 materials (ADR-0065 stage 3).
 static void write_materials(NphRenderer *r)
 {
     const u32 fs = r->frame_slot;
     NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
+    bool keys = false;
     if (r->material_uploaded[fs] != r->material_version) {
         for (u32 i = 0; i < r->desc.max_materials; ++i) {
             RenderMaterial *m = &r->materials[i];
             if (m->handle != 0U) {
                 fill_material(r, &m->desc, m->handle, &table[i], &m->paged_slots, m->paged_texture);
+                keys = set_ray_key(r, m, &table[i]) || keys;
             } else {
                 memset(&table[i], 0, sizeof table[i]);
             }
@@ -342,6 +393,7 @@ static void write_materials(NphRenderer *r)
         fill_material(r, &def, 0U, &table[r->desc.max_materials], &def_slots, def_textures);
         r->material_uploaded[fs] = r->material_version;
         r->levels_uploaded[fs] = r->paging.level_count;
+        ray_keys_changed(r, keys);
         return;
     }
     const u64 since = r->levels_uploaded[fs];
@@ -349,7 +401,7 @@ static void write_materials(NphRenderer *r)
         return;
     }
     for (u32 i = 0; i < r->desc.max_materials; ++i) {
-        const RenderMaterial *m = &r->materials[i];
+        RenderMaterial *m = &r->materials[i];
         u32 slots = m->handle != 0U ? m->paged_slots : 0U;
         while (slots != 0U) {
             const u32 s = nph_ctz_u32(slots);
@@ -358,10 +410,14 @@ static void write_materials(NphRenderer *r)
             if (r->paging.level_changed_at[t] > since) {
                 table[i].samplers[s] = render_material_sampler_level(r, &m->desc.textures[s],
                                                                      r->paging.frame_level[t]);
+                if (s == (u32)NPH_RENDER_SLOT_BASE_COLOR) {
+                    keys = set_ray_key(r, m, &table[i]) || keys;
+                }
             }
         }
     }
     r->levels_uploaded[fs] = r->paging.level_count;
+    ray_keys_changed(r, keys);
 }
 
 void render_light_data(const NphRenderLightDesc *d, NphVec3 position, NphRenderLightData *out)

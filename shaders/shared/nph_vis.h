@@ -58,8 +58,11 @@
 // from such a pixel must find first (ao_pass.glsl; ADR-0094).
 #define NPH_VIS_CLUSTER_COARSE 32
 
-// In the second word of a submesh's record (NphVisMesh.submeshes): its bottom-level geometry
-// is triangles for the rays alone (ADR-0096), and the word's other bits name their records.
+// In the second word of a submesh's record (NphVisMesh.submeshes): its geometry in the mesh's
+// bottom level (NphVisMesh.blas) is triangles for the rays alone (ADR-0096), and the word's
+// other bits name their records. The bottom level of the mesh's own triangles
+// (NphVisMesh.blas_own; ADR-0098) leaves that geometry empty and has the submesh's own
+// triangles past the submesh count, whose records there are plain.
 #define NPH_VIS_SUBMESH_RAY_TRIMMED 0x80000000u
 
 // The visibility buffer: 64 bits per pixel, the depth's IEEE bits high
@@ -322,6 +325,9 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // this buffer, in uvec4s from its start: (the parent's first index into
     // `indices`, each corner's place in the parent as two unorm16), a record
     // a ray triangle, after the table (vis_ray_triangle, vis_common.glsl).
+    // Such a mesh's table goes on past its submeshes with a plain record of
+    // each trimmed submesh's own, in submesh order: the geometries the bottom
+    // level of its own triangles has there (NphVisMesh.blas_own; ADR-0098).
     u64 submeshes;
     u32 meshlet_count;
     u32 index_base; // the mesh's first corner in the meshlet index pool (indirect raster)
@@ -353,7 +359,7 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // three a voxel or four), and its voxel clusters' records
     // (NphRenderVoxelCluster[], a uvec2 each), which a voxel cluster's meshlet
     // names in its triangle_offset, its first brick in its vertex_offset. The
-    // record's stride stays a multiple of 16 (208 bytes), the alignment every
+    // record's stride stays a multiple of 16 (224 bytes), the alignment every
     // buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF), which the
     // resolve's VisMeshRef(...)[i] assumes of each record.
     u64 voxel_bricks;
@@ -366,6 +372,14 @@ NPH_SHARED_STRUCT(NphVisMesh)
     u64 lod_levels;
     u32 lod_level_count;
     f32 lod_reach;
+    // Where `blas` holds triangles for the rays alone (ADR-0096), the bottom level of the mesh's
+    // own triangles, which an instance whose materials those do not hold for this frame traces
+    // instead (ADR-0098; rt_instances.comp), and the rays' table: uint[1 + submeshes], the
+    // submesh count, then each submesh's id of the alpha key its triangles for the rays were
+    // made for (0: none), which the material an instance draws it with must hold this frame
+    // (NphRenderMaterialData.ray_key). Both 0 otherwise.
+    u64 blas_own;
+    u64 rays;
 };
 
 // A visible cluster: one meshlet of one instance that survived culling. It
@@ -528,6 +542,12 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 blend_triangles;
     u32 blend_culled;
     u32 blend_occluded;
+    // Statistics (ADR-0098): of the top level's records, on a frame that rebuilds it, those of
+    // meshes with triangles for the rays alone that name those, and those that name their
+    // mesh's own triangles' bottom level instead, which their materials do not hold them for
+    // (rt_instances.comp).
+    u32 rt_trimmed;
+    u32 rt_own;
 };
 
 // The production path's view of a frame.

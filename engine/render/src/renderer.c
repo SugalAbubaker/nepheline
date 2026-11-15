@@ -533,7 +533,12 @@ NphResult nph_renderer_create(const NphRendererDesc *desc, NphRenderer **out)
     r->env.source = NPH_RENDER_ENV_NONE;
     r->env.intensity = 1.0F;
     r->env_dirty = 1;
-    const NphResult res = create_contents(r);
+    // The alpha keys' ids (render_ray_key_id): nothing is allocated until a key comes.
+    const NphHashMapDesc keys = nph_hashmap_desc_u64((u32)sizeof(u32));
+    NphResult res = nph_hashmap_init(&r->ray_key_ids, r->alloc, &keys);
+    if (res == NPH_RESULT_OK) {
+        res = create_contents(r);
+    }
     if (res != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RENDER, "%s: creation failed: %s", r->name, nph_result_string(res));
         nph_renderer_destroy(r);
@@ -592,6 +597,9 @@ void nph_renderer_destroy(NphRenderer *r)
             // As nph_render_mesh_destroy frees them (a mesh in the voxel pool has neither).
             if (m->ray_submeshes != NULL) {
                 NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, m->submesh_count);
+            }
+            if (m->ray_key_ids != NULL) {
+                NPH_FREE_ARRAY(r->alloc, u32, m->ray_key_ids, m->submesh_count);
             }
             if (m->blend_indices != NULL) {
                 NPH_FREE_ARRAY(r->alloc, RenderBlendIndices, m->blend_indices,
@@ -693,7 +701,26 @@ void nph_renderer_destroy(NphRenderer *r)
         nph_handle_pool_free(&r->many.pool);
     }
     nph_handle_pool_free(&r->cell_pool);
+    nph_hashmap_free(&r->ray_key_ids);
     NPH_FREE_TYPE(a, NphRenderer, r);
+}
+
+NphResult render_ray_key_id(NphRenderer *r, u64 key, u32 *out)
+{
+    *out = 0U;
+    if (key == 0U) {
+        return NPH_RESULT_OK;
+    }
+    const u32 *found = (const u32 *)nph_hashmap_find_u64(&r->ray_key_ids, key);
+    if (found != NULL) {
+        *out = *found;
+        return NPH_RESULT_OK;
+    }
+    const u32 id = r->ray_key_count + 1U;
+    NPH_TRY(nph_hashmap_insert_u64(&r->ray_key_ids, key, &id));
+    r->ray_key_count = id;
+    *out = id;
+    return NPH_RESULT_OK;
 }
 
 NphGpuDevice *nph_renderer_device(NphRenderer *r)
@@ -1273,14 +1300,19 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         memcpy(m->submeshes, desc->submeshes, sizeof(NphRenderSubmesh) * desc->submesh_count);
     }
     if (res == NPH_RESULT_OK && desc->ray_submeshes != NULL) {
-        // Its triangles for the rays alone: the runs and their keys, which its instances'
-        // materials are held to whether or not this device traces (ray_keys_hold).
+        // Its triangles for the rays alone: the runs and their keys, and the keys' ids, which
+        // its instances' materials must hold for the rays to take them (ADR-0098: the top
+        // level's records choose, rt_instances.comp and rt.c ray_keys_hold).
         m->ray_submeshes = NPH_ALLOC_ARRAY(r->alloc, NphRenderRaySubmesh, desc->submesh_count);
-        if (m->ray_submeshes == NULL) {
+        m->ray_key_ids = NPH_ALLOC_ARRAY_ZEROED(r->alloc, u32, desc->submesh_count);
+        if (m->ray_submeshes == NULL || m->ray_key_ids == NULL) {
             res = NPH_RESULT_OUT_OF_MEMORY;
         } else {
             memcpy(m->ray_submeshes, desc->ray_submeshes,
                    sizeof(NphRenderRaySubmesh) * desc->submesh_count);
+        }
+        for (u32 s = 0; res == NPH_RESULT_OK && s < desc->submesh_count; ++s) {
+            res = render_ray_key_id(r, desc->ray_submeshes[s].alpha_key, &m->ray_key_ids[s]);
         }
     }
     if (res == NPH_RESULT_OK && triangles) {
@@ -1316,6 +1348,9 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         render_rt_mesh_destroy(r, slot);
         if (m->ray_submeshes != NULL) {
             NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, desc->submesh_count);
+        }
+        if (m->ray_key_ids != NULL) {
+            NPH_FREE_ARRAY(r->alloc, u32, m->ray_key_ids, desc->submesh_count);
         }
         if (m->blend_indices != NULL) {
             NPH_FREE_ARRAY(r->alloc, RenderBlendIndices, m->blend_indices,
@@ -1366,6 +1401,9 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     render_rt_mesh_destroy(r, slot);
     if (m->ray_submeshes != NULL) {
         NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, m->submesh_count);
+    }
+    if (m->ray_key_ids != NULL) {
+        NPH_FREE_ARRAY(r->alloc, u32, m->ray_key_ids, m->submesh_count);
     }
     // No instance is left to draw them blended: none is in the pool.
     if (m->blend_indices != NULL) {
@@ -1594,6 +1632,8 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     NPH_ASSERT(r != NULL && desc != NULL && out != NULL);
     *out = NPH_RENDER_MATERIAL_NULL;
     NPH_TRY(validate_material(r, desc));
+    u32 key_id = 0U;
+    NPH_TRY(render_ray_key_id(r, desc->alpha_key, &key_id));
     u32 value = 0U;
     u32 slot = 0U;
     NPH_TRY(alloc_slot(&r->material_pool, &value, &slot));
@@ -1601,7 +1641,8 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     m->handle = value;
     m->desc = *desc;
     m->desc.name = NULL;
-    m->ray_users = 0U;
+    m->ray_key_id = key_id;
+    m->ray_key_live = 0U; // the frame's records say (frame.c write_materials)
     r->material_version += 1U;
     r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     out->value = value;
@@ -1617,16 +1658,12 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     NPH_TRY(validate_material(r, desc));
-    // Meshes' triangles for the rays alone hold for its alpha key while their instances name
-    // it (ADR-0096): it stays until they are gone.
-    if (r->materials[slot].ray_users != 0U &&
-        desc->alpha_key != r->materials[slot].desc.alpha_key) {
-        NPH_LOG_ERROR(&NPH_LOG_RENDER,
-                      "%s: a material's alpha key cannot change while %u submeshes of its "
-                      "instances have triangles for the rays made for it",
-                      r->name, r->materials[slot].ray_users);
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
+    // Another key, or another base colour texture, changes which meshes' triangles for the
+    // rays alone hold for its instances: the next frame's records say, and a change there has
+    // the top level rebuilt (frame.c write_materials; ADR-0098).
+    u32 key_id = 0U;
+    NPH_TRY(render_ray_key_id(r, desc->alpha_key, &key_id));
+    r->materials[slot].ray_key_id = key_id;
     // The rays' top level marks the instances that have an alpha-tested
     // material (rt_instances.comp): one coming or going writes them again.
     // And the sun's shadow map's pages hold what the material's casters cast
@@ -1668,13 +1705,11 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
         return;
     }
     r->masked_materials -= r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
-    if (r->materials[slot].ray_users != 0U) {
-        // Its instances draw with the default material from here on, which cuts nothing
-        // away, and their meshes' rays meet only what the material left.
-        NPH_LOG_ERROR(&NPH_LOG_RENDER,
-                      "%s: a material was destroyed while %u submeshes of its instances have "
-                      "triangles for the rays made for it: destroy the instances first",
-                      r->name, r->materials[slot].ray_users);
+    // Its instances draw with the default material from here on, which tests no alpha and
+    // holds no mesh's triangles for the rays alone: where the rays held it to a key, the
+    // top level's records are written again, and name their meshes' own triangles (ADR-0098).
+    if (r->materials[slot].ray_key_live != 0U) {
+        r->rt.rebuild_owed = 1;
     }
     const bool blended = r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND;
     memset(&r->materials[slot], 0, sizeof r->materials[slot]);
@@ -1775,55 +1810,6 @@ static NphResult cell_grow(NphRenderer *r, u32 cell_slot, const RenderInstance *
     return render_vis_cell_box_changed(r, cell_slot);
 }
 
-// The material slot of `m`'s submesh `s` in an instance's table: the material's pool slot, or
-// NPH_U32_MAX where the instance names none there (it draws the default material).
-static u32 submesh_material(const NphRenderer *r, const RenderMesh *m, u32 s,
-                            const NphRenderMaterial *materials, u32 material_count)
-{
-    const u32 slot = m->submeshes[s].material_slot;
-    return slot < material_count && materials[slot].value != 0U
-               ? render_slot_of(&r->material_pool, materials[slot].value)
-               : NPH_U32_MAX;
-}
-
-// Whether the mesh's triangles for the rays alone hold for an instance of these materials:
-// each trimmed submesh's material has the key its triangles were made for (ADR-0096).
-static bool ray_keys_hold(const NphRenderer *r, const RenderMesh *m,
-                          const NphRenderMaterial *materials, u32 material_count)
-{
-    for (u32 s = 0; m->ray_submeshes != NULL && s < m->submesh_count; ++s) {
-        if (m->ray_submeshes[s].count == 0U) {
-            continue;
-        }
-        const u32 ms = submesh_material(r, m, s, materials, material_count);
-        if (ms == NPH_U32_MAX || r->materials[ms].desc.alpha_key != m->ray_submeshes[s].alpha_key) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Counts an instance in, or out of, the materials its mesh's ray triangles hold for
-// (RenderMaterial.ray_users). A material destroyed under it is no longer there to count.
-static void ray_users_count(NphRenderer *r, const RenderMesh *m, const RenderInstance *inst,
-                            bool in)
-{
-    for (u32 s = 0; m->ray_submeshes != NULL && s < m->submesh_count; ++s) {
-        if (m->ray_submeshes[s].count == 0U) {
-            continue;
-        }
-        const u32 ms = submesh_material(r, m, s, inst->materials, inst->material_count);
-        if (ms == NPH_U32_MAX) {
-            continue;
-        }
-        if (in) {
-            r->materials[ms].ray_users += 1U;
-        } else if (r->materials[ms].ray_users != 0U) {
-            r->materials[ms].ray_users -= 1U;
-        }
-    }
-}
-
 // An instance of `desc` (its cell ignored), in cell `cell` (its slot plus one;
 // 0: none), in role `role` there.
 static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *desc, u32 cell,
@@ -1841,13 +1827,8 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
             return NPH_RESULT_INVALID_ARGUMENT;
         }
     }
-    if (!ray_keys_hold(r, &r->meshes[mesh_slot], desc->materials, desc->material_count)) {
-        NPH_LOG_ERROR(&NPH_LOG_RENDER,
-                      "%s: an instance's materials are not the ones its mesh's triangles for "
-                      "the rays were made for (NphRenderMaterialDesc.alpha_key)",
-                      r->name);
-        return NPH_RESULT_INVALID_ARGUMENT;
-    }
+    // Whatever its materials, its rays take its mesh's triangles for the rays alone only on
+    // frames that they hold for them, and its own triangles otherwise (ADR-0098).
     u32 value = 0U;
     u32 slot = 0U;
     NPH_TRY(alloc_slot(&r->instance_pool, &value, &slot));
@@ -1887,7 +1868,6 @@ static NphResult create_instance(NphRenderer *r, const NphRenderInstanceDesc *de
         return res;
     }
     r->meshes[mesh_slot].instances += 1U;
-    ray_users_count(r, &r->meshes[mesh_slot], inst, true);
     r->hidden_count += inst->hidden ? 1U : 0U;
     out->value = value;
     if (cell != 0U && !role.proxy) {
@@ -1971,7 +1951,6 @@ void nph_render_instance_destroy(NphRenderer *r, NphRenderInstance instance)
     const u32 mesh_slot = render_slot_of(&r->mesh_pool, inst->mesh.value);
     if (mesh_slot != NPH_U32_MAX) {
         r->meshes[mesh_slot].instances -= 1U;
-        ray_users_count(r, &r->meshes[mesh_slot], inst, false);
     }
     r->hidden_count -= inst->hidden ? 1U : 0U;
     if (inst->cell != 0U && !inst->proxy) {

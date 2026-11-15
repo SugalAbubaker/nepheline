@@ -4,7 +4,10 @@
 - **Status:** Accepted (built and measured; the user's words of 2026-11-13 that it answers: "We can not sacrifice
   any image quality to get to the gate", "try leaf-card trimming in the cooker and measure it", and, of the
   prototype's measurements, "go ahead and build it properly in the cooker"; accepted 2026-11-14: "commit it,
-  re-base the budgets and swap the packs")
+  re-base the budgets and swap the packs"); decisions 7 and 8 amended by
+  [ADR-0098](0098-trimmed-cards-where-their-key-holds.md): the renderer chooses each frame, for each instance,
+  between the ray triangles and the mesh's own, and refuses nothing; paged textures and the engine's runtime
+  take them too
 
 ## Context
 

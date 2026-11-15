@@ -308,7 +308,12 @@ default material, and a MeshRenderer that names no mesh draws nothing and
 is no failure. A frame never waits for a load (§10.5). A MeshRenderer holds
 eight material slots; a mesh of more also carries a MeshMaterials, with 24 more
 (ADR-0072), read whenever the MeshRenderer is: after changing one alone, touch
-the MeshRenderer.
+the MeshRenderer. A cooked mesh's triangles for the rays alone go to the
+renderer with it, and an alpha-tested material's key with it where the device
+took its base colour texture (ADR-0096): whatever materials an entity names,
+the renderer's rays take the trimmed cards on the frames those materials hold
+them, the texture's finest level resident, and the mesh's own triangles on the
+others (ADR-0098; render.md "Rays and trimmed cards").
 
 Two calls are for a host, such as the editor:
 - `nph_scene_renderer_reload` loads an asset again after its cooked file
