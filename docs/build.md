@@ -144,6 +144,19 @@ start a thread's shared memory near a page's start, it crashed lavapipe in
 `vsm_pages.comp`'s selection, in 2 runs of 3 of some tests, a read 4 bytes before
 the page. Every other GPU is unaffected, as nothing runs under an empty mask.
 
+The same holds for a buffer's address read from a record where not every lane
+runs: inside a branch, or in a loop's body after a lane has left. A lane that
+does not run reads nothing and holds 0. A load from that address, which llvmpipe
+makes once for the lanes that agree on it, takes lane 0's, so it reads address 0
+and the process crashes. So a shader reads the addresses it uses in such places
+at the top of `main`, where every lane runs, and passes them down:
+`gi_hit.glsl`'s `GiTable` holds the radiance cache's table for the lookups at a
+ray's hit (`gi_update.comp`, `reflect_rays.comp`). A loop that lanes leave at
+iterations of their own goes round the same number of times for every lane, with
+the test inside (`gi_update.comp`'s levels above a cell). Both were found by
+Linux CI (Mesa 25.2.8) and reproduced with that release's lavapipe on Windows
+(pal1000/mesa-dist-win, the loader pointed at it with `VK_DRIVER_FILES`).
+
 ### Warnings
 
 `cmake/NphWarnings.cmake`: MSVC `/W4 /WX /permissive- /Zc:preprocessor

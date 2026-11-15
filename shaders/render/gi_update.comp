@@ -167,6 +167,7 @@ void main()
     VisViewRef view = VisViewRef(pc.view);
     ViewRef rview = ViewRef(view.v.render_view);
     GiViewRef g = GiViewRef(rview.v.gi);
+    const GiTable table = gi_table(g); // here, where every invocation runs (gi_hit.glsl)
     const uvec2 block = gl_GlobalInvocationID.xy;
     const ivec2 size = ivec2(view.v.viewport.xy);
     const uint stride = g.g.stride;
@@ -230,7 +231,7 @@ void main()
         if (rayQueryGetIntersectionTEXT(rq, true) < g.g.near) {
             return; // the ambient occlusion's range
         }
-        const GiHit h = hit_surface(view, rview, g, rq, w, 0.0);
+        const GiHit h = hit_surface(view, rview, g, table, rq, w, 0.0);
         // The light the hit receives is the cache's, where it holds the hit's cell. It may not:
         // no frame has seen the surface (ADR-0090). Taken for open to the whole sky then, as it
         // was, the unseen side of every room and archway lit what faced it: under a roof walled
@@ -265,16 +266,16 @@ void main()
             if (rayQueryGetIntersectionTypeEXT(rq2, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
                 sample2 = environment(rview, w2) * NPH_PI;
             } else {
-                const GiHit h2 = hit_surface(view, rview, g, rq2, w2, 0.0);
+                const GiHit h2 = hit_surface(view, rview, g, table, rq2, w2, 0.0);
                 vec3 beyond = h2.cached;
                 if (!h2.known) {
                     beyond = h.cached;
                     if (!h.known) {
                         // (The ray's own cell's, or in its first frame its parent's, which was
                         // the surface's own cell if the camera has just come nearer.)
-                        uvec4 here = GiCellsRef(g.g.cells).c[slot];
+                        uvec4 here = GiCellsRef(table.cells).c[slot];
                         if (gi_word_count(here.w) == 0u && parent != GI_NONE) {
-                            here = GiCellsRef(g.g.cells).c[parent];
+                            here = GiCellsRef(table.cells).c[parent];
                         }
                         beyond = uintBitsToFloat(here.xyz); // nothing, where that has none either
                     }
@@ -330,11 +331,17 @@ void main()
     // come to a surface some cell around each point knows its light within a frame or two, and
     // the cells under it begin with that (gi_filter.comp). Their sums hold a frame's samples
     // only so far: the first NPH_RENDER_GI_ABOVE_SAMPLES to arrive (a sample is at most
-    // NPH_RENDER_GI_SAMPLE_MAX).
-    for (int up = 2; up <= NPH_RENDER_GI_ABOVE && level + up < NPH_RENDER_GI_LEVELS; ++up) {
-        const uint wider = gi_claim_cell(g, gi_key_at(g, x, n, level + up));
-        if (wider != GI_NONE) {
-            add_sample_within(g, wider, fixed_e, fixed_far, uint(NPH_RENDER_GI_ABOVE_SAMPLES));
+    // NPH_RENDER_GI_SAMPLE_MAX). (Every invocation goes round the loop as many times, the test of
+    // the level inside it: with that test in the loop's condition, so that each invocation left
+    // the loop at a level of its own, lavapipe (Mesa 25.2.8, the CI's) read address 0 in the
+    // loop's claims and crashed the process. The same cells take the same samples either way.)
+    for (int up = 2; up <= NPH_RENDER_GI_ABOVE; ++up) {
+        if (level + up < NPH_RENDER_GI_LEVELS) {
+            const uint wider = gi_claim_cell(g, gi_key_at(g, x, n, level + up));
+            if (wider != GI_NONE) {
+                add_sample_within(g, wider, fixed_e, fixed_far,
+                                  uint(NPH_RENDER_GI_ABOVE_SAMPLES));
+            }
         }
     }
 }

@@ -53,10 +53,31 @@ struct GiHit {
     uint parent;
 };
 
+// What the hit's cell is found with: the table's fingerprints and cells and its buckets' mask,
+// read from GiViewRef by the caller at the top of its main, where every invocation still runs
+// (gi_table). Read here instead, where an invocation's ray had met something, the table's
+// address was 0 on lavapipe (Mesa 25.2.8, the CI's) in invocations it ran together, which read
+// through it and crashed the process; the same lookups either way.
+struct GiTable {
+    uint64_t keys;
+    uint64_t cells;
+    uint bucket_mask;
+};
+
+GiTable gi_table(GiViewRef g)
+{
+    GiTable t;
+    t.keys = g.g.keys;
+    t.cells = g.g.cells;
+    t.bucket_mask = g.g.bucket_mask;
+    return t;
+}
+
 // The ray query's committed hit, met along `w`. Its textures are read at the level whose texels
 // are `footprint` wide there, the width the ray stands for (ADR-0089); 0: the size of the hit's
 // cell, for a ray that fills one.
-GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, vec3 w, float footprint)
+GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, rayQueryEXT q, vec3 w,
+                  float footprint)
 {
     // The hit's triangle: the instance its record names (the custom index
     // is the slot), the submesh its geometry is, the triangle in that.
@@ -150,12 +171,13 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
     // on the surface, and most of its cells hold none; and a surface no frame has seen has only
     // the parents the update's rays made for it (gi_update.comp).
     h.level = gi_level(length(x));
-    h.slot = gi_find(g, gi_key_at(g, x, face, h.level));
-    h.parent = h.level + 1 < NPH_RENDER_GI_LEVELS ? gi_find(g, gi_key_at(g, x, face, h.level + 1))
-                                                   : GI_NONE;
-    uvec4 held = h.slot != GI_NONE ? GiCellsRef(g.g.cells).c[h.slot] : uvec4(0u);
+    h.slot = gi_find_in(table.keys, table.bucket_mask, gi_key_at(g, x, face, h.level));
+    h.parent = h.level + 1 < NPH_RENDER_GI_LEVELS
+                   ? gi_find_in(table.keys, table.bucket_mask, gi_key_at(g, x, face, h.level + 1))
+                   : GI_NONE;
+    uvec4 held = h.slot != GI_NONE ? GiCellsRef(table.cells).c[h.slot] : uvec4(0u);
     if (gi_word_count(held.w) == 0u && h.parent != GI_NONE) {
-        held = GiCellsRef(g.g.cells).c[h.parent];
+        held = GiCellsRef(table.cells).c[h.parent];
     }
     h.cached = uintBitsToFloat(held.xyz);
     h.known = gi_word_count(held.w) != 0u;
@@ -168,9 +190,10 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, ve
 // reflects is the environment's as if nothing hid it: the reflections' rays', which show the
 // surface and little of its light's error; the cache's own update traces on instead
 // (gi_update.comp, ADR-0090).
-vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, rayQueryEXT q, vec3 w, float footprint)
+vec3 hit_radiance(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, rayQueryEXT q, vec3 w,
+                  float footprint)
 {
-    const GiHit h = hit_surface(view, rview, g, q, w, footprint);
+    const GiHit h = hit_surface(view, rview, g, table, q, w, footprint);
     const vec3 sky = (rview.v.flags & NPH_RENDER_VIEW_IBL) != 0u
                          ? nph_sh9_irradiance(ShRef(rview.v.sh_address), h.n) * rview.v.ibl_intensity
                          : vec3(0.0);

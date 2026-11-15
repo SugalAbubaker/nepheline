@@ -39,6 +39,7 @@ void main()
     VisViewRef view = VisViewRef(pc.view);
     ViewRef rview = ViewRef(view.v.render_view);
     GiViewRef g = GiViewRef(rview.v.gi);
+    const GiTable table = gi_table(g); // here, where every invocation runs (gi_hit.glsl)
     const bool rays = g.g.reflect_rays != 0u;
     const uint listed = GiKeysRef(g.g.reflect_tiles).k[gl_WorkGroupID.x];
     const uvec2 tile = uvec2(listed & 0xFFFFu, listed >> 16u);
@@ -166,7 +167,7 @@ void main()
                              rview.v.ibl_intensity
                        : vec3(0.0);
     } else {
-        radiance = hit_radiance(view, rview, g, rq, dir, footprint);
+        radiance = hit_radiance(view, rview, g, table, rq, dir, footprint);
     }
     const vec3 sample_e = min(radiance * rview.v.exposure, vec3(NPH_RENDER_GI_SAMPLE_MAX));
     if (rays) {
