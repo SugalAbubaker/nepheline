@@ -589,6 +589,14 @@ void nph_renderer_destroy(NphRenderer *r)
             nph_gpu_buffer_destroy(dev, m->indices);
             render_vis_mesh_destroy(r, i);
             render_rt_mesh_destroy(r, i);
+            // As nph_render_mesh_destroy frees them (a mesh in the voxel pool has neither).
+            if (m->ray_submeshes != NULL) {
+                NPH_FREE_ARRAY(r->alloc, NphRenderRaySubmesh, m->ray_submeshes, m->submesh_count);
+            }
+            if (m->blend_indices != NULL) {
+                NPH_FREE_ARRAY(r->alloc, RenderBlendIndices, m->blend_indices,
+                               m->submesh_count * (u32)NPH_VIS_BLEND_WINDINGS);
+            }
             if (m->submeshes != NULL) {
                 NPH_FREE_ARRAY(m->voxel_scratch != NULL ? m->voxel_scratch : r->alloc,
                                NphRenderSubmesh, m->submeshes, m->submesh_count);

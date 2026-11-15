@@ -3,6 +3,7 @@
 // argument checks, every resource kind's validation, capacities, stale
 // handles, and destruction (the fixture's teardown checks that nothing
 // leaked on the device and that validation stayed silent).
+#include <nepheline/core/alloc_debug.h>
 #include <nepheline/math/scalar.h>
 
 #include "test_render_support.h"
@@ -344,9 +345,21 @@ NTEST_F(Api, environment_checks_its_source)
 NTEST_F(Api, destroy_releases_what_the_caller_left)
 {
     REQUIRE_RENDERER(f);
-    // Leave a mesh, an instance, a material, a light, and a texture alive;
-    // the renderer's destruction releases them (the teardown's leak check
-    // on the device would fail otherwise).
+    // Leave meshes, an instance, a material and a light alive; the renderer's
+    // destruction releases them (the teardown's leak check on the device would
+    // fail otherwise), and every record they hold on the CPU: the renderer is
+    // made again here on an allocator that counts what is live. (A mesh's
+    // blended surfaces' index lists, ADR-0097, and its triangles for the rays,
+    // ADR-0096, outlived a mesh the caller left: LeakSanitizer found them on
+    // the CI's Linux Debug jobs, and MSVC's address sanitizer finds no leaks.)
+    nph_renderer_destroy(f->renderer);
+    f->renderer = NULL;
+    NphDebugAllocator counted;
+    nph_debug_allocator_init(&counted, nph_allocator_system());
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, f->dev);
+    rd.alloc = nph_debug_allocator_allocator(&counted);
+    NTEST_ASSERT_EQ_INT(nph_renderer_create(&rd, &f->renderer), NPH_RESULT_OK);
     NphRenderMeshData data;
     NTEST_ASSERT_EQ_INT(nph_render_primitive_sphere(nph_allocator_system(), 1.0F, 8U, 4U, &data),
                         NPH_RESULT_OK);
@@ -372,6 +385,28 @@ NTEST_F(Api, destroy_releases_what_the_caller_left)
     ld.direction = nph_vec3(0.0F, -1.0F, 0.0F);
     NphRenderLight light = NPH_RENDER_LIGHT_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    // A plane with triangles for the rays alone: its own two, whole.
+    NphRenderMeshData plane;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_plane(nph_allocator_system(), 1.0F, 1U, 1.0F, &plane),
+                        NPH_RESULT_OK);
+    NphRenderSubmesh sub;
+    NphRenderMeshDesc pd;
+    nph_render_mesh_data_desc(&plane, "plane with ray triangles", &sub, &pd);
+    NphRenderRayTriangle parts[2];
+    for (u32 t = 0; t < 2U; ++t) {
+        parts[t].parent = t * 3U;
+        parts[t].corner[0] = 0U;
+        parts[t].corner[1] = 65535U;
+        parts[t].corner[2] = 65535U << 16U;
+    }
+    const NphRenderRaySubmesh run = {0U, 2U, 1U};
+    pd.ray_submeshes = &run;
+    pd.ray_triangles = parts;
+    pd.ray_triangle_count = 2U;
+    NphRenderMesh trimmed = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &pd, &trimmed), NPH_RESULT_OK);
+    nph_render_mesh_data_free(&plane);
     nph_renderer_destroy(f->renderer);
     f->renderer = NULL;
+    NTEST_EXPECT_EQ_UINT(nph_debug_allocator_destroy(&counted, NULL, NULL), 0U);
 }
