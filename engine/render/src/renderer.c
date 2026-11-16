@@ -469,7 +469,6 @@ static NphResult create_contents(NphRenderer *r)
     NPH_TRY(create_frame_buffers(r));
     NPH_TRY(render_ibl_create(r));
     NPH_TRY(render_debug_create(r));
-    NPH_TRY(render_rt_create(r));
     NPH_TRY(render_post_create(r));
     NPH_TRY(render_dof_create(r));
     if (!d->disable_production && render_vis_device_supported(r)) {
@@ -485,6 +484,11 @@ static NphResult create_contents(NphRenderer *r)
         r->vsm.sun_slot = NPH_U32_MAX;
         r->gi.sun_slot = NPH_U32_MAX;
     }
+    // The rays' structures last: their sizes follow the device and the build's flags (an update
+    // in place needs a larger top level, ADR-0100), and made before the frame's buffers they moved
+    // every one of those to other places in device memory, which cost Bistro's radiance cache
+    // filter 4 % and the synthetic scenes' 7 % with no change of their own.
+    NPH_TRY(render_rt_create(r));
     return NPH_RESULT_OK;
 }
 

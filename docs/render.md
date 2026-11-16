@@ -426,6 +426,12 @@ against.
     over them, with the anchor at the camera. `shadow_rebuild` in the frame
     statistics says when either path built it whole, and `shadow_update`
     when the production path updated it.
+  - **Made last.** The renderer makes the top level, its records and the
+    scratch after every buffer the frame's passes read, so that their sizes
+    (the device's, the build's flags', the instances' capacity) move none of
+    those in device memory: made first, the larger top level an update in
+    place needs moved them all and slowed the radiance cache's filter 4 to
+    7 % with no change of its own (ADR-0100).
 - **One scratch buffer** serves every build. It is sized at creation for
   the top level of `max_instances` and grown at mesh creation when a
   bottom level needs more, so a frame never allocates. A frame's

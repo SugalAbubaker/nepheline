@@ -73,6 +73,10 @@ stay first.
    `PREFER_FAST_BUILD` and `ALLOW_UPDATE`; the reference path builds every frame as before.
 4. **The frame statistics say which** (`NphRenderFrameStats.shadow_rebuild` for a build whole,
    `shadow_update` for an update), and the editor's statistics panel shows it.
+5. **The rays' structures are made last** (renderer.c), after every buffer the frame's passes
+   read. The top level built to allow updates is larger, and made before those buffers it moved
+   every one of them elsewhere in device memory, which slowed passes that never touch it
+   (Measured, "Where the structure lives"); made last, a size of theirs moves nothing else.
 
 Moved instances still have the structure built whole: an update after instances move apart from
 where they were built would trace slower and slower, and choosing when to build again is a
@@ -99,10 +103,20 @@ the anchor costs); another had it build the structure whole every frame:
   three dispatches against two (the append first wrote every record inactive). Blocks of 1,024
   slots, 16 rounds of 64 a workgroup, first cost Bistro's few thousand slots 0.062 ms, their rounds
   run one after another; blocks of one round run side by side.
-- **The rays and the steady frame:** the two views' frames, the build against c03bb30 without a
-  variant, within the window's noise (the city -0.04 ms; Bistro +0.04 and +0.07, as much as two runs
-  of c03bb30 differ). `reflect rays` on the city within 0.01; on Bistro's turn +0.014 to +0.017 ms in
-  each of three runs (the structure built to allow updates may trace a hair slower there).
+- **Where the structure lives.** The renderer made the rays' structures before the frame's other
+  buffers (post, depth of field, the visibility buffer, TAA, motion, occlusion, the shadow map,
+  the radiance cache). The structure built to allow updates is larger, so the first build of this
+  change moved all of those to other places in device memory, and with no change of their own the
+  radiance cache's filter ran 4 % slower on Bistro's turn (0.392 to 0.394 ms in three runs against
+  0.379) and 7 % on the synthetic scenes (27 of them against main's run; this pull request's GPU
+  job failed their budgets by 0.001 to 0.003 ms), the blended surfaces 3 to 6 %, Bistro's frame
+  0.04 to 0.07 ms. Variants told the two apart: the structure built without the flag, in a buffer
+  of its old size, was as fast as before (0.376); the same tree in a buffer of the new size was as
+  slow (0.390). Made last, the structures move nothing: the filter 0.377 ms on Bistro, the
+  synthetic scenes' 1.000 of main's (the blended surfaces' 0.993), every renderer budget held
+  (CI's command, the window idle), and the steady frames within noise of before (Bistro 7.03 ms
+  against 7.10, the city 7.79 against 7.80; `reflect rays` 1.43 against 1.45 and 1.55 against
+  1.55).
 - **Memory:** the structure built to allow updates is larger, the scratch a little smaller:
   Bistro's (119,041 slots) 20.65 to 22.24 MB, its scratch 9.80 to 9.33; the city's (291,584)
   50.58 to 54.47 MB, its scratch 24.01 to 22.84. The blocks' counts: 4 bytes a 64 slots (18 KB on
@@ -131,8 +145,13 @@ the anchor costs); another had it build the structure whole every frame:
   the city 0.45 ms in that frame where it cost 1.38. It is not gone: the update still visits
   every record, and a world of the game's size pays in proportion (about 0.7 ms, estimated).
 - Every write of the records runs three dispatches where it ran two, at no more cost.
-- The structure is built with `ALLOW_UPDATE`: 1.6 to 3.9 MB more of it (a little less scratch),
-  and Bistro's reflections perhaps 0.015 ms slower.
+- The structure is built with `ALLOW_UPDATE`: 1.6 to 3.9 MB more of it (a little less scratch);
+  the rays trace it as fast.
+- The rays' structures are made after the frame's buffers, so their sizes, which follow the
+  device, the build's flags and the instances' capacity, no longer move those buffers. The
+  passes' times depend on where their buffers lie: a change of 1.6 MB made two of them 4 to 7 %
+  slower here, and a change elsewhere in what the renderer makes, and in what order, can do it
+  again (the budgets' 5 % catches it).
 - A frame after compacted bottom levels were swapped in, and one where a material's ray key
   changed, update instead of building (`Shadows.bottom_levels_are_compacted_and_cast_the_same`).
 - Moving content (the game's) still builds the structure whole every frame it moves; ADR-0063's
