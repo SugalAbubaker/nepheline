@@ -277,7 +277,13 @@ n-th test (the renderer's suite is four: `ctest -R "^render\."`).
   saw it before); one windows-msvc Development build with
   `-DNPH_FIBERS_WIN32=ON` so the fiber fallback keeps passing. Linux tests
   run under Xvfb so the window tests and the `platform_window` sample open
-  a real window. JUnit results are uploaded as artifacts.
+  a real window. The two Linux Debug rows run their tests in four parts, a
+  job each (`linux-gcc Debug (1/4)` to `(4/4)`): part k runs every fourth
+  test from the k-th (`ctest -I k,,4`). In one job those tests took 2.75 to
+  3.25 hours (ASan and UBSan at `-O0`, the GPU tests on lavapipe); a part
+  takes under an hour. Locally, `ctest --preset linux-gcc-debug -I 2,,4`
+  runs part 2. JUnit results are uploaded as artifacts, a part's with its
+  number (`test-results-linux-gcc-debug-2`).
 - **clang-tidy** on the `linux-clang-tidy` preset with LLVM 19.
 - **coverage (llvm-cov)**: an instrumented Debug build with the sanitizers
   off runs the unit tests and checks every engine module against its

@@ -51,7 +51,7 @@ jobs:
         run: python3 scripts/check_layering.py
 
   build:
-    name: ${{ matrix.name }} ${{ matrix.config }}
+    name: ${{ matrix.name }} ${{ matrix.config }}${{ matrix.part && format(' ({0}/{1})', matrix.part, matrix.parts) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,10 +64,19 @@ jobs:
           - { name: windows-msvc-win32-fibers, os: windows-2022, preset: win-msvc, config: Development, cfg: development, extra: -DNPH_FIBERS_WIN32=ON }
           - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Debug,       cfg: debug }
           - { name: windows-clang, os: windows-2022, preset: win-clang,   config: Development, cfg: development }
-          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug }
+          # The Linux Debug tests (ASan and UBSan at -O0, on lavapipe) took 2.75 to 3.25 hours
+          # in a row on a hosted runner, so each row runs as four jobs: part k runs every fourth
+          # test from the k-th (ctest -I k,,4), 31 to 56 minutes each in the times of #173.
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug, part: 1, parts: 4 }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug, part: 2, parts: 4 }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug, part: 3, parts: 4 }
+          - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Debug,       cfg: debug, part: 4, parts: 4 }
           - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Development, cfg: development }
           - { name: linux-gcc,     os: ubuntu-24.04, preset: linux-gcc,   config: Shipping,    cfg: shipping }
-          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug, part: 1, parts: 4 }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug, part: 2, parts: 4 }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug, part: 3, parts: 4 }
+          - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Debug,       cfg: debug, part: 4, parts: 4 }
           - { name: linux-clang,   os: ubuntu-24.04, preset: linux-clang, config: Development, cfg: development }
           # Clang without asserts: its -Wunused-but-set-variable counts `+=` as a
           # write, which GCC and MSVC do not flag, so a value only an assert reads
@@ -199,6 +208,7 @@ jobs:
         if: runner.os == 'Linux'
         run: >
           xvfb-run -a ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
+          ${{ matrix.part && format('-I {0},,{1}', matrix.part, matrix.parts) || '' }}
           --output-junit "${{ github.workspace }}/build/${{ matrix.preset }}/test-results/ctest-${{ matrix.cfg }}.xml"
 
       - name: Test (Windows)
@@ -211,7 +221,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results-${{ matrix.name }}-${{ matrix.cfg }}
+          name: test-results-${{ matrix.name }}-${{ matrix.cfg }}${{ matrix.part && format('-{0}', matrix.part) || '' }}
           path: build/${{ matrix.preset }}/test-results/
           if-no-files-found: warn
 
@@ -221,7 +231,7 @@ jobs:
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: golden-${{ matrix.name }}-${{ matrix.cfg }}
+          name: golden-${{ matrix.name }}-${{ matrix.cfg }}${{ matrix.part && format('-{0}', matrix.part) || '' }}
           path: build/${{ matrix.preset }}/golden/
           if-no-files-found: ignore
 
@@ -232,7 +242,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: audio-golden-${{ matrix.name }}-${{ matrix.cfg }}
+          name: audio-golden-${{ matrix.name }}-${{ matrix.cfg }}${{ matrix.part && format('-{0}', matrix.part) || '' }}
           path: build/${{ matrix.preset }}/audio_golden/
           if-no-files-found: ignore
 
