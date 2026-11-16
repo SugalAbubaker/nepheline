@@ -29,11 +29,16 @@
 //     records on the CPU, as it does its draws, and rebuilds every frame
 //     with the anchor at the camera. The production path writes them on the
 //     GPU from its GPU scene (rt_instances.comp), so its frame costs the CPU
-//     nothing per instance, and rebuilds only when its instances changed
-//     (those it holds: shown, of a mesh with triangles, before or after),
-//     after a frame that did not trace, or when the camera has moved more
-//     than RT_ANCHOR_RADIUS from the anchor (which then moves to it): a
-//     camera moving through a still scene costs no build.
+//     nothing per instance, and builds the structure whole only when its
+//     instances changed (those it holds: shown, of a mesh with triangles,
+//     before or after) or after a frame that did not trace. Where only what
+//     the records hold changes (the camera more than RT_ANCHOR_RADIUS from
+//     the anchor, which then moves to it; a bottom level's address after its
+//     compaction; a material's ray key), it updates the structure in place:
+//     the records are written in their slots' order, the same records in
+//     the same places as at the build, so the update refits the build's tree
+//     (ADR-0100). A camera moving through a still scene costs no build, and
+//     an update every RT_ANCHOR_RADIUS it travels.
 //
 // The builds share one scratch buffer, sized at creation for the top level
 // and grown with each mesh whose bottom level needs more, so a frame never
@@ -52,14 +57,22 @@
 
 NPH_STATIC_ASSERT(sizeof(NphGpuAccelInstance) == 64U, "an instance record is 64 bytes");
 
-// How far the camera may move from the top level's anchor before the
-// production path rebuilds it around the camera. Ray origins are offset by
-// units in the last place of their coordinates in that space (rt_common.glsl),
-// so near the camera the offset is at most 256 ulp(16 m), half a millimetre.
 // Every bottom level: built once for fast rays, then compacted.
 #define RT_BLAS_FLAGS ((u32)NPH_GPU_ACCEL_PREFER_TRACE | (u32)NPH_GPU_ACCEL_ALLOW_COMPACTION)
 
+// The top level: built fast, as it is built again whenever its instances change, and updatable
+// in place where only its records' contents do (ADR-0100).
+#define RT_TLAS_FLAGS ((u32)NPH_GPU_ACCEL_PREFER_BUILD | (u32)NPH_GPU_ACCEL_ALLOW_UPDATE)
+
+// How far the camera may move from the top level's anchor before the
+// production path moves the anchor to the camera, and every record with it.
+// Ray origins are offset by units in the last place of their coordinates in
+// that space (rt_common.glsl), so near the camera the offset is at most
+// 256 ulp(16 m), half a millimetre.
 #define RT_ANCHOR_RADIUS 16.0
+
+// The instance slots a workgroup of rt_instances.comp counts and writes (its RT_BLOCK).
+#define RT_INSTANCE_BLOCK 64U
 
 // The most geometries a bottom level has: a submesh each, and a trimmed submesh's own triangles
 // again past them in the bottom level of a mesh's own triangles (mesh_geometries).
@@ -385,21 +398,31 @@ NphResult render_rt_create(NphRenderer *r)
                                                  (u32)NPH_GPU_FORMAT_FEATURE_ACCEL_VERTEX);
     const u32 n = r->desc.max_instances;
     NphGpuAccelSizes sizes;
-    NPH_TRY(nph_gpu_accel_tlas_sizes(dev, n, (u32)NPH_GPU_ACCEL_PREFER_BUILD, &sizes));
+    NPH_TRY(nph_gpu_accel_tlas_sizes(dev, n, RT_TLAS_FLAGS, &sizes));
     NphGpuAccelDesc ad;
     memset(&ad, 0, sizeof ad);
     ad.type = NPH_GPU_ACCEL_TOP;
     ad.size = sizes.accel;
     ad.name = "rt instances (top level)";
     NPH_TRY(nph_gpu_accel_create(dev, &ad, &rt->tlas));
-    NPH_TRY(reserve_scratch(r, sizes.scratch));
+    NPH_TRY(reserve_scratch(r, nph_max_u64(sizes.scratch, sizes.update_scratch)));
     NphGpuBufferDesc bd;
     memset(&bd, 0, sizeof bd);
     bd.size = (u64)n * sizeof(NphGpuAccelInstance);
-    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT;
+    // Read back by the tests (their order: ADR-0100).
+    bd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE | (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT |
+               (u32)NPH_GPU_BUFFER_USAGE_TRANSFER_SRC;
     bd.memory = NPH_GPU_MEMORY_DEVICE;
     bd.name = "rt instance records";
     NPH_TRY(nph_gpu_buffer_create(dev, &bd, &rt->instances));
+    // rt_instances.comp's counts: one a block of slots, and their total.
+    NphGpuBufferDesc kd;
+    memset(&kd, 0, sizeof kd);
+    kd.size = ((u64)(n + RT_INSTANCE_BLOCK - 1U) / RT_INSTANCE_BLOCK + 1U) * sizeof(u32);
+    kd.usage = (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    kd.memory = NPH_GPU_MEMORY_DEVICE;
+    kd.name = "rt instance blocks";
+    NPH_TRY(nph_gpu_buffer_create(dev, &kd, &rt->instance_blocks));
     // Room for every bottom level of every mesh slot on each list.
     const u64 entries = (u64)r->desc.max_meshes * (u64)RENDER_BLAS_KINDS;
     rt->pending = NPH_ALLOC_ARRAY(r->alloc, u32, entries);
@@ -434,6 +457,7 @@ void render_rt_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(dev, rt->instance_writer);
     nph_gpu_accel_destroy(dev, rt->tlas);
     nph_gpu_buffer_destroy(dev, rt->instances);
+    nph_gpu_buffer_destroy(dev, rt->instance_blocks);
     nph_gpu_buffer_destroy(dev, rt->scratch);
     const u64 entries = (u64)r->desc.max_meshes * (u64)RENDER_BLAS_KINDS;
     if (rt->pending != NULL) {
@@ -656,6 +680,8 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
     rt->frame_shadows = 0;
     rt->frame_production = production ? 1 : 0;
     rt->frame_rebuild = 0;
+    rt->frame_whole = 0;
+    rt->frame_update = 0;
     rt->frame_instances = r->instance_pool.bump;
     rt->frame_builds = 0U;
     rt->tlas_offset = nph_vec3_zero();
@@ -682,13 +708,18 @@ bool render_rt_frame_begin(NphRenderer *r, bool production, NphDVec3 camera, u32
     }
     rt->frame_active = 1;
     rt->frame_shadows = shadows ? 1 : 0;
+    // A top level the reference built, or one an earlier frame left as it was while the
+    // instances may have changed unseen, is built whole. One the camera has moved away from
+    // takes the anchor's move into its records: every instance moves by the same amount, which
+    // the production path's update takes in without losing any of the build's quality.
+    const bool whole = !production || !rt->tlas_valid || !rt->tlas_production;
     const NphVec3 moved = nph_dvec3_relative(camera, rt->anchor);
-    if (!production || !rt->tlas_valid || !rt->tlas_production ||
-        nph_vec3_length_sq(moved) > (f32)(RT_ANCHOR_RADIUS * RT_ANCHOR_RADIUS)) {
+    if (whole || nph_vec3_length_sq(moved) > (f32)(RT_ANCHOR_RADIUS * RT_ANCHOR_RADIUS)) {
         rt->anchor = camera;
         rt->frame_rebuild = 1;
+        rt->frame_whole = whole ? 1 : 0;
     }
-    // A structure swapped in last frame: its address is in the GPU scene now.
+    // A structure swapped in last frame: its address is in the GPU scene now (records' contents).
     if (rt->rebuild_owed) {
         rt->frame_rebuild = 1;
         rt->rebuild_owed = 0;
@@ -786,9 +817,10 @@ static void accel_barrier(NphGpuCmd *cmd)
     nph_gpu_cmd_barrier(cmd, &bd);
 }
 
-// The production path's records: every slot's record inactive first, then
-// the active instances appended from the start (rt_instances.comp), so the
-// inactive ones that remain are all at the end (see the file comment).
+// The production path's records (rt_instances.comp): the active instances' from the start, in
+// their slots' order, and the rest inactive after them (see the file comment), in three
+// dispatches: each block of slots' live ones counted, the counts summed into each block's first
+// record, and the records written.
 static void instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NPH_UNUSED(graph);
@@ -801,16 +833,20 @@ static void instances_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *us
     const u64 dst = nph_gpu_buffer_address(r->dev, rt->instances);
     p.arg2 = (u32)(dst & 0xFFFFFFFFU);
     p.arg3 = (u32)(dst >> 32U);
+    const u64 counts = nph_gpu_buffer_address(r->dev, rt->instance_blocks);
+    p.arg1 = (u32)(counts & 0xFFFFFFFFU);
+    p.arg4 = (u32)(counts >> 32U);
     nph_gpu_cmd_bind_pipeline(cmd, rt->instance_writer);
-    const u32 groups = (rt->frame_instances + 63U) / 64U;
-    for (u32 mode = 0; mode < 2U; ++mode) {
+    const u32 blocks = (rt->frame_instances + RT_INSTANCE_BLOCK - 1U) / RT_INSTANCE_BLOCK;
+    for (u32 mode = 0; mode < 3U; ++mode) {
         p.mode = mode;
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
-        nph_gpu_cmd_dispatch(cmd, groups, 1U, 1U);
-        if (mode == 0U) {
+        nph_gpu_cmd_dispatch(cmd, mode == 1U ? 1U : blocks, 1U, 1U);
+        if (mode < 2U) {
             const NphGpuMemoryBarrier m = {
                 (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE,
-                (u32)NPH_GPU_STAGE_COMPUTE, (u32)NPH_GPU_ACCESS_SHADER_WRITE};
+                (u32)NPH_GPU_STAGE_COMPUTE,
+                (u32)NPH_GPU_ACCESS_SHADER_READ | (u32)NPH_GPU_ACCESS_SHADER_WRITE};
             NphGpuBarrierDesc bd;
             memset(&bd, 0, sizeof bd);
             bd.memory = &m;
@@ -894,8 +930,13 @@ static void accel_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     const NphGpuBuffer instances =
         rt->frame_production ? rt->instances : r->frame_buffers[r->frame_slot];
     const u64 offset = rt->frame_production ? 0U : r->layout.rt_instances_offset;
-    nph_gpu_cmd_build_tlas(cmd, rt->tlas, instances, offset, rt->frame_instances,
-                           (u32)NPH_GPU_ACCEL_PREFER_BUILD, rt->scratch, lead);
+    if (rt->frame_update) {
+        nph_gpu_cmd_update_tlas(cmd, rt->tlas, instances, offset, rt->frame_instances,
+                                RT_TLAS_FLAGS, rt->scratch, lead);
+    } else {
+        nph_gpu_cmd_build_tlas(cmd, rt->tlas, instances, offset, rt->frame_instances, RT_TLAS_FLAGS,
+                               rt->scratch, lead);
+    }
 }
 
 NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBuffer instance_table,
@@ -909,7 +950,16 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
     // frame_traced; an instance of voxels alone is never in it).
     if (rt->frame_production && r->vis.frame_traced != 0U) {
         rt->frame_rebuild = 1;
+        rt->frame_whole = 1; // one may have come or gone
     }
+    // Where no record can have turned active or inactive, the records are the same instances in
+    // the same places as at the last build (rt_instances.comp writes them in slot order), and
+    // only what they hold changed: the update in place keeps the tree that build made, which a
+    // translation of all of them (the anchor's move) leaves as good as new (ADR-0100).
+    rt->frame_update = rt->frame_rebuild && !rt->frame_whole && rt->frame_production &&
+                               rt->frame_instances != 0U && rt->frame_instances == rt->tlas_records
+                           ? 1
+                           : 0;
     // The bottom levels waiting now are this frame's, and the compactions'
     // queries and copies.
     rt->frame_builds = rt->pending_count;
@@ -918,11 +968,14 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
         nph_gpu_rg_import_buffer(graph, nph_gpu_accel_buffer(r->dev, rt->tlas));
     const NphGpuRgBuffer scratch = nph_gpu_rg_import_buffer(graph, rt->scratch);
     NphGpuRgBuffer instances = NPH_GPU_RG_BUFFER_NULL;
+    NphGpuRgBuffer blocks = NPH_GPU_RG_BUFFER_NULL;
     if (rt->frame_production) {
         instances = nph_gpu_rg_import_buffer(graph, rt->instances);
+        blocks = nph_gpu_rg_import_buffer(graph, rt->instance_blocks);
     }
     if (nph_gpu_rg_buffer_is_null(tlas) || nph_gpu_rg_buffer_is_null(scratch) ||
-        (rt->frame_production && nph_gpu_rg_buffer_is_null(instances))) {
+        (rt->frame_production &&
+         (nph_gpu_rg_buffer_is_null(instances) || nph_gpu_rg_buffer_is_null(blocks)))) {
         return NPH_RESULT_FULL;
     }
     *out_tlas = tlas;
@@ -942,8 +995,9 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
             return NPH_RESULT_FULL;
         }
         nph_gpu_rg_write_buffer(p, instances, NPH_GPU_RG_USE_SHADER_WRITE);
+        nph_gpu_rg_write_buffer(p, blocks, NPH_GPU_RG_USE_STORAGE_WRITE);
         // The instance and mesh tables, after the frame's scatter; the
-        // append counter, cleared with the frame's others.
+        // counters, cleared with the frame's others (the active records' count).
         nph_gpu_rg_read_buffer(p, instance_table, NPH_GPU_RG_USE_SHADER_READ);
         nph_gpu_rg_read_buffer(p, mesh_table, NPH_GPU_RG_USE_SHADER_READ);
         nph_gpu_rg_write_buffer(p, counters, NPH_GPU_RG_USE_STORAGE_WRITE);
@@ -962,6 +1016,9 @@ NphResult render_rt_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgBu
         nph_gpu_rg_write_buffer(p, tlas, NPH_GPU_RG_USE_ACCEL_BUILD);
         rt->tlas_valid = 1;
         rt->tlas_production = rt->frame_production;
+        if (!rt->frame_update) {
+            rt->tlas_records = rt->frame_instances;
+        }
     }
     // The pass records this frame's copies: theirs to trace from now on.
     return compaction_swap(r);

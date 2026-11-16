@@ -14,7 +14,8 @@
 // descriptor is involved.
 //
 // Building is recorded into a command buffer of a graphics or compute
-// queue (nph_gpu_cmd_build_blas, nph_gpu_cmd_build_tlas), with a scratch
+// queue (nph_gpu_cmd_build_blas, nph_gpu_cmd_build_tlas, and a top level's
+// update in place, nph_gpu_cmd_update_tlas), with a scratch
 // buffer the caller provides: nph_gpu_accel_*_sizes say how large the
 // structure and the scratch must be, and the scratch's address (the
 // buffer's address plus the offset) must be a multiple of
@@ -58,6 +59,8 @@ typedef enum NphGpuAccelBuildFlags {
     // that size (nph_gpu_cmd_query_accel_compacted_size,
     // nph_gpu_cmd_copy_accel_compact).
     NPH_GPU_ACCEL_ALLOW_COMPACTION = 1U << 2U,
+    // A top level that can be updated in place (nph_gpu_cmd_update_tlas).
+    NPH_GPU_ACCEL_ALLOW_UPDATE = 1U << 3U,
 } NphGpuAccelBuildFlags;
 
 // One geometry of a bottom-level structure: an indexed triangle list.
@@ -93,8 +96,9 @@ NPH_STATIC_ASSERT(sizeof(NphGpuAccelInstance) == 64U, "an instance is 64 bytes")
 #define NPH_GPU_ACCEL_INSTANCE_NO_OPAQUE    8U // no triangle opaque
 
 typedef struct NphGpuAccelSizes {
-    u64 accel;   // bytes of the structure (NphGpuAccelDesc.size)
-    u64 scratch; // bytes of scratch a build needs
+    u64 accel;          // bytes of the structure (NphGpuAccelDesc.size)
+    u64 scratch;        // bytes of scratch a build needs
+    u64 update_scratch; // bytes of scratch an update needs (NPH_GPU_ACCEL_ALLOW_UPDATE)
 } NphGpuAccelSizes;
 
 // The sizes of a bottom-level structure over `count` geometries, built with
@@ -136,6 +140,18 @@ void nph_gpu_cmd_build_blas(NphGpuCmd *cmd, NphGpuAccel dst, const NphGpuAccelTr
 // most its max_instances) read at `offset` of `instances` (16-byte aligned).
 void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
                             u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset);
+
+// Records an update in place of the top-level structure `dst` from `count` instances read at
+// `offset` of `instances` (16-byte aligned). `dst` was last built by nph_gpu_cmd_build_tlas with
+// the same `count` and `flags`, which include NPH_GPU_ACCEL_ALLOW_UPDATE, and each record is
+// active (names a structure) where it was at that build and inactive where it was: an update
+// takes in what the records hold (transforms, structures, masks, flags), never which are active
+// (Vulkan's update rules). It keeps the tree the build made and refits its boxes, which costs a
+// fraction of a build: the tree traces as fast as a new one where the instances moved together
+// (a translation of all of them), and slower the further they moved apart from where they were
+// built. Its scratch: NphGpuAccelSizes.update_scratch, aligned as a build's.
+void nph_gpu_cmd_update_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
+                             u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset);
 
 // Records a query of a bottom level's compacted size into the frame's
 // queries (NphGpuDeviceDesc.accel_queries_per_frame): `accel` built with

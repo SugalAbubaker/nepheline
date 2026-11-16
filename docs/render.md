@@ -399,23 +399,33 @@ against.
     point into it by adding `NphRenderViewData.tlas_offset`, the camera's
     position less the anchor.
   - **The production path** writes the records on the GPU from its GPU
-    scene (`rt instances`: every slot's record inactive, then the active
-    ones appended from the start), so its CPU cost does not depend on the
-    instance count. It rebuilds the top level only when instances it
+    scene (`rt instances`, three dispatches: each block of 64 slots'
+    active instances counted, the counts summed into each block's first
+    record, then the active records written from the start in their slots'
+    order and the rest inactive), so its CPU cost does not depend on the
+    instance count. It builds the top level whole only when instances it
     holds changed (shown, of a mesh with triangles, before or after the
     change: `RENDER_SLOT_TRACED`; an instance of voxels alone, such as a
-    streamed cell's levels, never is), after a frame that traced nothing,
-    when the camera has moved more than 16 m from the anchor, which then
-    moves to the camera, and the frame after a swap of compacted bottom
-    levels. A camera moving through a still scene costs no build, and nor
-    does a cell's proxy streaming its levels: tiled into a world of the
-    game's size (574,356 instances traced), a build takes 2.85 ms, and the
-    landscape's streamed levels rebuilt it in 46 frames of a 240-frame turn
-    (ADR-0063 "Stage 4").
+    streamed cell's levels, never is) and after a frame that traced
+    nothing. Where only what the records hold changes (the camera more
+    than 16 m from the anchor, which then moves to the camera; a swap of
+    compacted bottom levels; a material's ray key), it updates the
+    structure in place (`nph_gpu_cmd_update_tlas`; ADR-0100): written in
+    slot order, the records are the same instances in the same places as
+    at the build, and the update refits the build's tree, which the
+    anchor's move, a translation of every record, leaves as good as new. A
+    camera moving through a still scene costs no build, and an update each
+    16 m it travels: on the city (246,784 instances) the frame that moves
+    the anchor spends 0.45 ms on it, where a build took 1.38 ms. Nor
+    does a cell's proxy streaming its levels cost a build: tiled into a
+    world of the game's size (574,356 instances traced), a build takes
+    2.85 ms, and the landscape's streamed levels rebuilt it in 46 frames of
+    a 240-frame turn (ADR-0063 "Stage 4").
   - **The reference** writes the active records on the CPU into its frame
-    records, as it does its draws, and rebuilds every frame over them, with
-    the anchor at the camera. `shadow_rebuild` in the frame statistics says
-    when either path rebuilt.
+    records, as it does its draws, and builds the structure every frame
+    over them, with the anchor at the camera. `shadow_rebuild` in the frame
+    statistics says when either path built it whole, and `shadow_update`
+    when the production path updated it.
 - **One scratch buffer** serves every build. It is sized at creation for
   the top level of `max_instances` and grown at mesh creation when a
   bottom level needs more, so a frame never allocates. A frame's
@@ -518,10 +528,10 @@ as before.
   with any mesh: another key or none, a material changed or destroyed under
   its instances, a paged texture without its finest level, and the picture is
   as without the ray triangles; only the rays' cost differs. A change of a
-  material's id has that frame's top level rebuilt (`frame.c`
-  `write_materials`), so the records and the samplers always agree.
-  `NphRenderFrameStats.vis_rt_own` counts the records that name a mesh's own
-  triangles on a frame that rebuilt the top level.
+  material's id has that frame's top level take new records (`frame.c`
+  `write_materials`; updated in place, ADR-0100), so the records and the
+  samplers always agree. `NphRenderFrameStats.vis_rt_own` counts the records
+  that name a mesh's own triangles on a frame that wrote them.
 - **The reference renderer's rays** take every triangle for opaque ("Shadow
   rays"): of a trimmed submesh they meet the polygons, a card's leaf with a
   rim, where they met the whole card before (where the keys hold).
@@ -1829,7 +1839,7 @@ they were read): hence their streaming (ADR-0063).
 | `vsm update` to `vsm statistics` | the sun's map: page tables, allocation, the casters of the pages to draw, and those pages drawn ("Shadows") |
 | `ao depth`, `ao`, `ao denoise` | on a view with ambient occlusion: the depths' coarser mips, each pixel's slice and its march towards the sun ("Contact shadows"), and the denoise (below) |
 | `reflect clear`, `reflect rays`, `reflect` | on a lit view with reflections and the radiance cache, around the resolve: the tiles' list emptied, then after it the listed tiles' rays and their pixels' lookups ("Reflections") |
-| `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, when it must be rebuilt, and new meshes' bottom levels ("Shadows") |
+| `rt instances`, `rt accel` | while a light casts shadows that the sun's map does not take, or the view has global illumination: the top level's records from the GPU scene and its build, or its update in place where only what the records hold changed (ADR-0100), and new meshes' bottom levels ("Shadows") |
 | `gi clear`, `gi update`, `gi resolve` | on a view with global illumination: the radiance cache's slots zeroed (its first frame), its rays, and its cells' blend (below) |
 | `vis resolve` | shades every pixel from its cluster and triangle (the sun's map read once per pixel; shadow rays for the other lights that cast shadows; the pixel's ambient occlusion; the radiance cache's cell looked up), and lists the tiles that hold voxel pixels |
 | `vis voxel resolve` | the voxel pixels of the tiles listed, a workgroup a tile through an indirect dispatch ("Voxels"; only while the renderer holds voxel meshes) |

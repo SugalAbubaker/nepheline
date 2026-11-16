@@ -573,8 +573,9 @@ typedef struct RenderRt {
     b32 supported;      // the device has ray queries and the description allowed them
     b32 unorm_vertices; // builds read the quantised positions as they are
     NphGpuAccel tlas;
-    NphGpuBuffer instances; // NphGpuAccelInstance[max_instances]: the production path's
-    NphGpuBuffer scratch;   // the builds' scratch: room for the largest one
+    NphGpuBuffer instances;       // NphGpuAccelInstance[max_instances]: the production path's
+    NphGpuBuffer instance_blocks; // u32[]: rt_instances.comp's counts of a block of slots
+    NphGpuBuffer scratch;         // the builds' scratch: room for the largest one
     u64 scratch_size;
     // Bottom levels waiting for their builds, each named by its mesh's slot times
     // RENDER_BLAS_KINDS plus its kind (as compacting and frame_queries name them).
@@ -590,12 +591,19 @@ typedef struct RenderRt {
     NphVec3 tlas_offset;  // the camera in it, this frame
     b32 tlas_valid;       // it holds the instances as they are (as of this frame's records)
     b32 tlas_production;  // the production path built it
+    u32 tlas_records;     // the records of its last build (ADR-0100)
     b32 frame_active;     // this frame's top level is built, for shadow rays or the radiance cache
     b32 frame_shadows;    // this frame shades with shadow rays (the *_rt pipelines)
     b32 frame_production; // its instances come from the GPU scene
-    b32 frame_rebuild;    // it rebuilds the top level
-    u32 frame_instances;  // instance records of this frame's top level (active ones first)
-    u32 frame_builds;     // the first pending bottom levels, built this frame
+    b32 frame_rebuild;    // it writes the top level's records again, and builds or updates it
+    // Something this frame may make a record active or inactive (an instance changed, a frame
+    // traced nothing before, the reference path): the top level is built whole. Else only the
+    // records' contents change (the anchor, a bottom level's address, a ray key), and the
+    // production path updates it in place (frame_update; ADR-0100).
+    b32 frame_whole;
+    b32 frame_update;
+    u32 frame_instances; // instance records of this frame's top level (active ones first)
+    u32 frame_builds;    // the first pending bottom levels, built this frame
     b32 unsupported_logged;
     NphGpuPipeline instance_writer; // rt_instances.comp
     // Compaction (rt.c): the bottom levels on their way, and this frame's queries

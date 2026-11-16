@@ -2,9 +2,9 @@
 // Acceleration structures and ray queries (gpu/accel.h): bottom levels from
 // float and 16-bit unorm vertices, a top level of their instances written
 // by the CPU, and rays traced against it in a compute shader, with what
-// each ray hits checked; a bottom level compacted after its size was
-// queried, which traces as its original; and the usages refused without
-// the feature.
+// each ray hits checked; a top level updated in place, which traces its
+// new records; a bottom level compacted after its size was queried, which
+// traces as its original; and the usages refused without the feature.
 #include <nepheline/gpu/accel.h>
 
 #include "test_gpu_support.h"
@@ -237,6 +237,156 @@ NTEST_F(GpuFixture, ray_queries_hit_instanced_triangles)
     nph_gpu_buffer_destroy(dev, qb);
     nph_gpu_buffer_destroy(dev, vb);
     NTEST_EXPECT_FALSE(nph_gpu_accel_is_valid(dev, tlas));
+}
+
+// A top level built to allow updates over three records (the triangle at x = 0 as index 7, at
+// x = 5 as index 9, and an inactive record at x = 30), then updated in place from records that
+// put the first at x = 10 and the second at x = 20 as index 13, the third still inactive: rays
+// find the triangles where each set of records puts them, under the indices they give, and never
+// where the inactive record would be.
+NTEST_F(GpuFixture, a_top_level_updated_in_place_traces_its_new_records)
+{
+    REQUIRE_RAY_QUERY(f);
+    NphGpuDevice *dev = f->dev;
+    const u32 input = (u32)NPH_GPU_BUFFER_USAGE_ACCEL_INPUT | (u32)NPH_GPU_BUFFER_USAGE_STORAGE;
+    const f32 positions[9] = {0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
+    const u32 indices[3] = {0U, 1U, 2U};
+    NphGpuBuffer vb = upload_buffer(dev, positions, sizeof positions, input, "triangle vertices");
+    NphGpuBuffer ib = upload_buffer(dev, indices, sizeof indices, input, "triangle indices");
+    NphGpuAccelTriangles tri;
+    memset(&tri, 0, sizeof tri);
+    tri.vertices = vb;
+    tri.vertex_stride = 12U;
+    tri.vertex_count = 3U;
+    tri.vertex_format = NPH_GPU_FORMAT_R32G32B32_SFLOAT;
+    tri.indices = ib;
+    tri.triangle_count = 1U;
+    tri.opaque = 1;
+    NphGpuAccelSizes bsizes;
+    NTEST_ASSERT_EQ_INT(
+        nph_gpu_accel_blas_sizes(dev, &tri, 1U, (u32)NPH_GPU_ACCEL_PREFER_TRACE, &bsizes),
+        NPH_RESULT_OK);
+    NphGpuAccelDesc bd = {NPH_GPU_ACCEL_BOTTOM, bsizes.accel, "test blas"};
+    NphGpuAccel blas = NPH_GPU_ACCEL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &bd, &blas), NPH_RESULT_OK);
+    const u32 flags = (u32)NPH_GPU_ACCEL_PREFER_BUILD | (u32)NPH_GPU_ACCEL_ALLOW_UPDATE;
+    NphGpuAccelSizes tsizes;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_tlas_sizes(dev, 3U, flags, &tsizes), NPH_RESULT_OK);
+    NTEST_LOG("top level: %llu bytes, %llu of scratch to build, %llu to update",
+              (unsigned long long)tsizes.accel, (unsigned long long)tsizes.scratch,
+              (unsigned long long)tsizes.update_scratch);
+    NphGpuAccelDesc td = {NPH_GPU_ACCEL_TOP, tsizes.accel, "test tlas"};
+    NphGpuAccel tlas = NPH_GPU_ACCEL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_accel_create(dev, &td, &tlas), NPH_RESULT_OK);
+    // The bottom level's scratch, then the top level's, which its update uses in turn.
+    const u64 align = nph_max_u32(nph_gpu_device_info(dev)->limits.accel_scratch_alignment, 1U);
+    const u64 top_at = align_up(bsizes.scratch, align);
+    const u64 top_size = nph_max_u64(tsizes.scratch, tsizes.update_scratch);
+    NphGpuBuffer scratch =
+        test_make_buffer(dev, top_at + top_size + align, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                         NPH_GPU_MEMORY_DEVICE, "test scratch");
+    const u64 base = nph_gpu_buffer_address(dev, scratch);
+    const u64 lead = align_up(base, align) - base;
+
+    const u64 address = nph_gpu_accel_address(dev, blas);
+    NphGpuAccelInstance before[3];
+    before[0] = instance_of(address, 0.0F, 7U);
+    before[1] = instance_of(address, 5.0F, 9U);
+    before[2] = instance_of(0U, 30.0F, 11U); // inactive: no structure
+    NphGpuAccelInstance after[3];
+    after[0] = instance_of(address, 10.0F, 7U);
+    after[1] = instance_of(address, 20.0F, 13U);
+    after[2] = before[2];
+    NphGpuBuffer records[2] = {
+        upload_buffer(dev, before, sizeof before, input, "instances built"),
+        upload_buffer(dev, after, sizeof after, input, "instances updated"),
+    };
+
+    enum {
+        RAYS = 5U
+    };
+    const f32 rays[RAYS][8] = {
+        {0.25F, 0.25F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F},  // straight down at x = 0
+        {5.25F, 0.25F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F},  // at x = 5
+        {10.25F, 0.25F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F}, // at x = 10
+        {20.25F, 0.25F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F}, // at x = 20
+        {30.25F, 0.25F, 1.0F, 10.0F, 0.0F, 0.0F, -1.0F, 0.0F}, // at the inactive record
+    };
+    NphGpuBuffer rb =
+        upload_buffer(dev, rays, sizeof rays, (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "test rays");
+    NphGpuBuffer hb[2];
+    for (u32 i = 0; i < 2U; ++i) {
+        hb[i] = test_make_buffer(dev, (u64)RAYS * 16U, (u32)NPH_GPU_BUFFER_USAGE_STORAGE,
+                                 NPH_GPU_MEMORY_READBACK, i == 0U ? "hits built" : "hits updated");
+    }
+    NphGpuShader shader = test_load_shader(dev, "test_ray_query.comp");
+    NphGpuComputePipelineDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.shader = shader;
+    cd.name = "ray query";
+    NphGpuPipeline pipeline = NPH_GPU_PIPELINE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_compute(dev, &cd, &pipeline), NPH_RESULT_OK);
+
+    // The build and its rays, then the update and its rays, each a submission of its own.
+    for (u32 step = 0; step < 2U; ++step) {
+        NphGpuCmd *cmd = NULL;
+        NTEST_ASSERT_EQ_INT(
+            nph_gpu_cmd_begin(dev, NPH_GPU_QUEUE_GRAPHICS, step == 0U ? "build" : "update", &cmd),
+            NPH_RESULT_OK);
+        if (step == 0U) {
+            nph_gpu_cmd_build_blas(cmd, blas, &tri, 1U, (u32)NPH_GPU_ACCEL_PREFER_TRACE, scratch,
+                                   lead);
+            accel_barrier(cmd, (u32)NPH_GPU_STAGE_ACCEL_BUILD);
+            nph_gpu_cmd_build_tlas(cmd, tlas, records[0], 0U, 3U, flags, scratch, lead + top_at);
+        } else {
+            nph_gpu_cmd_update_tlas(cmd, tlas, records[1], 0U, 3U, flags, scratch, lead + top_at);
+        }
+        accel_barrier(cmd, (u32)NPH_GPU_STAGE_COMPUTE);
+        RayPush push;
+        memset(&push, 0, sizeof push);
+        push.tlas = nph_gpu_accel_address(dev, tlas);
+        push.rays = nph_gpu_buffer_address(dev, rb);
+        push.hits = nph_gpu_buffer_address(dev, hb[step]);
+        push.count = RAYS;
+        nph_gpu_cmd_bind_pipeline(cmd, pipeline);
+        nph_gpu_cmd_push_constants(cmd, &push, sizeof push);
+        nph_gpu_cmd_dispatch(cmd, 1U, 1U, 1U);
+        nph_gpu_cmd_buffer_barrier(cmd, hb[step], (u32)NPH_GPU_STAGE_COMPUTE,
+                                   (u32)NPH_GPU_ACCESS_SHADER_WRITE, (u32)NPH_GPU_STAGE_HOST,
+                                   (u32)NPH_GPU_ACCESS_HOST_READ);
+        test_submit_wait(dev, cmd);
+    }
+
+    // Each ray's distance (-1 for none) and the index it found, built then updated.
+    const f32 expect[2][RAYS][2] = {
+        {{1.0F, 7.0F}, {1.0F, 9.0F}, {-1.0F, 0.0F}, {-1.0F, 0.0F}, {-1.0F, 0.0F}},
+        {{-1.0F, 0.0F}, {-1.0F, 0.0F}, {1.0F, 7.0F}, {1.0F, 13.0F}, {-1.0F, 0.0F}},
+    };
+    for (u32 step = 0; step < 2U; ++step) {
+        const f32 *hits = (const f32 *)nph_gpu_buffer_map(dev, hb[step]);
+        for (u32 i = 0; i < RAYS; ++i) {
+            const f32 *h = hits + (u64)i * 4U;
+            NTEST_LOG("%s, ray %u: t %g, index %g", step == 0U ? "built" : "updated", i, (f64)h[0],
+                      (f64)h[1]);
+            NTEST_EXPECT_NEAR_F32(h[0], expect[step][i][0], 1e-5F);
+            if (expect[step][i][0] > 0.0F) {
+                NTEST_EXPECT_NEAR_F32(h[1], expect[step][i][1], 0.0F);
+            }
+        }
+    }
+
+    nph_gpu_pipeline_destroy(dev, pipeline);
+    nph_gpu_shader_destroy(dev, shader);
+    for (u32 i = 0; i < 2U; ++i) {
+        nph_gpu_buffer_destroy(dev, hb[i]);
+        nph_gpu_buffer_destroy(dev, records[i]);
+    }
+    nph_gpu_buffer_destroy(dev, rb);
+    nph_gpu_buffer_destroy(dev, scratch);
+    nph_gpu_accel_destroy(dev, tlas);
+    nph_gpu_accel_destroy(dev, blas);
+    nph_gpu_buffer_destroy(dev, ib);
+    nph_gpu_buffer_destroy(dev, vb);
 }
 
 // Submits `cmd` as the frame's one command buffer and ends the frame.

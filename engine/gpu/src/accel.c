@@ -30,6 +30,9 @@ static VkBuildAccelerationStructureFlagsKHR build_flags(u32 flags)
     if ((flags & (u32)NPH_GPU_ACCEL_ALLOW_COMPACTION) != 0U) {
         out |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     }
+    if ((flags & (u32)NPH_GPU_ACCEL_ALLOW_UPDATE) != 0U) {
+        out |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    }
     return out;
 }
 
@@ -113,6 +116,10 @@ static void sizes_of(NphGpuDevice *dev, const VkAccelerationStructureBuildGeomet
                                             primitive_counts, &sizes);
     out->accel = sizes.accelerationStructureSize;
     out->scratch = sizes.buildScratchSize;
+    // Defined only for a structure that allows updates.
+    const VkBuildAccelerationStructureFlagsKHR allow =
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    out->update_scratch = (info->flags & allow) != 0U ? sizes.updateScratchSize : 0U;
 }
 
 NphResult nph_gpu_accel_blas_sizes(NphGpuDevice *dev, const NphGpuAccelTriangles *geometries,
@@ -263,10 +270,13 @@ void nph_gpu_cmd_build_blas(NphGpuCmd *cmd, NphGpuAccel dst, const NphGpuAccelTr
     vkCmdBuildAccelerationStructuresKHR(cmd->vk, 1U, &info, &range_list);
 }
 
-void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
-                            u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset)
+// A top level's build, or with `update` its update in place: the structure is its own source,
+// which Vulkan allows an update.
+static void record_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
+                        u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset, bool update)
 {
     NPH_ASSERT(cmd != NULL && cmd->recording && (offset & 15U) == 0U);
+    NPH_ASSERT(!update || (flags & (u32)NPH_GPU_ACCEL_ALLOW_UPDATE) != 0U);
     NphGpuDevice *dev = cmd->dev;
     const NphGpuAccelSlot *slot = accel_slot(dev, dst);
     NPH_ASSERT(slot != NULL && slot->type == (u32)NPH_GPU_ACCEL_TOP);
@@ -280,6 +290,10 @@ void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instan
     instance_geometry(dev, instances, offset, &g);
     VkAccelerationStructureBuildGeometryInfoKHR info;
     build_info(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, flags, &g, 1U, &info);
+    if (update) {
+        info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        info.srcAccelerationStructure = slot->vk;
+    }
     info.dstAccelerationStructure = slot->vk;
     info.scratchData.deviceAddress = address_at(dev, scratch, scratch_offset);
     VkAccelerationStructureBuildRangeInfoKHR range;
@@ -287,6 +301,18 @@ void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instan
     range.primitiveCount = count;
     const VkAccelerationStructureBuildRangeInfoKHR *range_list = &range;
     vkCmdBuildAccelerationStructuresKHR(cmd->vk, 1U, &info, &range_list);
+}
+
+void nph_gpu_cmd_build_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
+                            u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset)
+{
+    record_tlas(cmd, dst, instances, offset, count, flags, scratch, scratch_offset, false);
+}
+
+void nph_gpu_cmd_update_tlas(NphGpuCmd *cmd, NphGpuAccel dst, NphGpuBuffer instances, u64 offset,
+                             u32 count, u32 flags, NphGpuBuffer scratch, u64 scratch_offset)
+{
+    record_tlas(cmd, dst, instances, offset, count, flags, scratch, scratch_offset, true);
 }
 
 u32 nph_gpu_cmd_query_accel_compacted_size(NphGpuCmd *cmd, NphGpuAccel accel)

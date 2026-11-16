@@ -542,7 +542,7 @@ NPH_SHARED_STRUCT(NphVisCounters)
     u32 blend_triangles;
     u32 blend_culled;
     u32 blend_occluded;
-    // Statistics (ADR-0098): of the top level's records, on a frame that rebuilds it, those of
+    // Statistics (ADR-0098): of the top level's records, on a frame that writes them, those of
     // meshes with triangles for the rays alone that name those, and those that name their
     // mesh's own triangles' bottom level instead, which their materials do not hold them for
     // (rt_instances.comp).

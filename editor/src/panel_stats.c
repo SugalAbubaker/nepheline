@@ -57,7 +57,9 @@ static void frame_stats(Editor *ed)
                    r->vsm_overflow != 0U ? "   (overflowed)" : "");
         }
         if (r->shadow_rays) {
-            igText("shadow rays%s", r->shadow_rebuild ? "   (top level rebuilt)" : "");
+            igText("shadow rays%s", r->shadow_rebuild  ? "   (top level rebuilt)"
+                                    : r->shadow_update ? "   (top level updated)"
+                                                       : "");
         }
         if (r->taa) {
             // The temporal resolve (r.taa): a history restarts after a cut.

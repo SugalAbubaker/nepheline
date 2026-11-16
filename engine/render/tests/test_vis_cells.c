@@ -843,7 +843,7 @@ NTEST_F(Cells, an_instance_of_voxels_alone_leaves_the_top_level_as_it_is)
     shadow_view(&v, top_camera(), 13.0F, NPH_RENDER_PIPELINE_PRODUCTION,
                 (u32)NPH_RENDER_VIS_RT_SHADOWS);
     // Built, its bottom levels compacted a few frames on (where the device
-    // saves anything) and rebuilt over the copies: then kept.
+    // saves anything) and updated over the copies (ADR-0100): then kept.
     NTEST_EXPECT_TRUE(test_render_read(f, &v).shadow_rebuild);
     for (u32 i = 0; i < 12U; ++i) {
         (void)test_render_read(f, &v);

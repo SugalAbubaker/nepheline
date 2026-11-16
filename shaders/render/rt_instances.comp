@@ -2,20 +2,35 @@
 // The top-level acceleration structure's instance records of a production
 // frame (docs/render.md "Shadows"; engine/render/src/rt.c), the
 // VkAccelerationStructureInstanceKHR records of gpu/accel.h
-// (NphGpuAccelInstance), in two dispatches of an invocation per instance
-// slot:
+// (NphGpuAccelInstance): the live, shown instances' records from the start of
+// the array in their slots' order, each named by its slot (the custom index),
+// and every record after them inactive (no structure, a zero mask), so that
+// the inactive ones are all at its end (rt.c says why). In slot order, the
+// records of a scene whose instances stay are the same records in the same
+// places frame after frame, which an update of the top level in place needs
+// (ADR-0100: it refits the tree its build made over them). Three dispatches,
+// a workgroup a block of 64 slots, an invocation a slot:
 //
-//   mode 0: every record inactive (no structure, a zero mask);
-//   mode 1: the live, shown instances' records, appended from the start of
-//     the array, so that the inactive ones left are all at its end (rt.c
-//     says why), each named by its slot (the custom index).
+//   mode 0: each block's live slots, counted;
+//   mode 1: one workgroup: each block's first record, the counts summed
+//     before it, in place of its count, and their total after the last
+//     block's (and in the counters' rt_instances);
+//   mode 2: each block's live instances' records, in slot order from the
+//     block's first (an inclusive scan in shared memory, which counts on no
+//     grouping of the invocations into subgroups); and the records past the
+//     total, inactive.
+//
+// A block is one round of a workgroup: a scene of a few thousand slots runs
+// its blocks side by side, where blocks of many rounds each ran them one
+// after another (16 rounds took Bistro's 3,000 slots 0.06 ms).
 //
 // A record is in the top level's space: camera relative, then shifted by
 // the view's tlas_offset. The mesh's bottom level holds its quantised
 // positions, so the dequantisation is folded into the transform:
 // L (offset + scale q) + t = (L diag(scale)) q + (L offset + t).
 //
-// arg0 is the slot count; arg2 and arg3 the records' address, low and high.
+// arg0 is the slot count; arg2 and arg3 the records' address, low and high;
+// arg1 and arg4 the blocks' counts' (u32[blocks + 1]), low and high.
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
@@ -23,6 +38,12 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant, scalar) uniform Push { NphVisPush pc; };
+
+// The slots a workgroup takes in modes 0 and 2 (rt.c RT_INSTANCE_BLOCK).
+#define RT_BLOCK 64u
+
+shared uint s_count; // mode 0: the block's live slots
+shared uint s_sums[64];
 
 struct AccelInstance {
     vec4 row0; // the object-to-world rows
@@ -44,40 +65,37 @@ NPH_BUFFER_REF(AccelInstancesRef) { AccelInstance a[]; };
 // to a shader.
 #define RT_INSTANCE_NO_OPAQUE (8u << 24u)
 
-void main()
+// Whether slot `i` holds a shown instance of a mesh with a bottom level: its record is active.
+bool slot_live(VisViewRef view, uint i)
 {
-    const uint i = gl_GlobalInvocationID.x;
-    VisViewRef view = VisViewRef(pc.view);
-    AccelInstancesRef out_ref = AccelInstancesRef(uint64_t(pc.arg2) | (uint64_t(pc.arg3) << 32ul));
-    if (pc.mode == 0u) {
-        if (i < pc.arg0) {
-            AccelInstance o;
-            o.row0 = vec4(0.0);
-            o.row1 = vec4(0.0);
-            o.row2 = vec4(0.0);
-            o.index_and_mask = 0u;
-            o.offset_and_flags = 0u;
-            o.blas = 0ul;
-            out_ref.a[i] = o;
-        }
-        return;
+    if (i >= pc.arg0) {
+        return false;
     }
-    bool live = false;
-    NphVisInstance inst;
-    NphVisMesh mesh;
-    if (i < pc.arg0) {
-        inst = VisInstancesRef(view.v.instances).i[i];
-        if ((inst.flags & NPH_VIS_INSTANCE_VISIBLE) != 0u) {
-            mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
-            live = mesh.blas != 0ul;
-        }
+    VisInstancesRef instances = VisInstancesRef(view.v.instances);
+    if ((instances.i[i].flags & NPH_VIS_INSTANCE_VISIBLE) == 0u) {
+        return false;
     }
-    // One atomic per subgroup for its active records.
-    uint at;
-    VIS_RESERVE(VisCountersRef(view.v.counters).c.rt_instances, live ? 1u : 0u, at);
-    if (!live) {
-        return;
-    }
+    return VisMeshesRef(view.v.meshes).m[instances.i[i].mesh].blas != 0ul;
+}
+
+// An inactive record: no structure, a zero mask.
+void write_inactive(AccelInstancesRef out_ref, uint at)
+{
+    AccelInstance o;
+    o.row0 = vec4(0.0);
+    o.row1 = vec4(0.0);
+    o.row2 = vec4(0.0);
+    o.index_and_mask = 0u;
+    o.offset_and_flags = 0u;
+    o.blas = 0ul;
+    out_ref.a[at] = o;
+}
+
+// Slot `i`'s record at `at`: the slot is live.
+void write_record(VisViewRef view, AccelInstancesRef out_ref, uint i, uint at)
+{
+    const NphVisInstance inst = VisInstancesRef(view.v.instances).i[i];
+    const NphVisMesh mesh = VisMeshesRef(view.v.meshes).m[inst.mesh];
     const vec3 t = vis_relative_translation(inst.transform, view.v.camera_high.xyz,
                                             view.v.camera_low.xyz) +
                    ViewRef(view.v.render_view).v.tlas_offset.xyz;
@@ -126,4 +144,79 @@ void main()
     o.offset_and_flags = RT_INSTANCE_NO_FACE_CULL | (masked ? RT_INSTANCE_NO_OPAQUE : 0u);
     o.blas = blas;
     out_ref.a[at] = o;
+}
+
+void main()
+{
+    VisViewRef view = VisViewRef(pc.view);
+    AccelInstancesRef out_ref = AccelInstancesRef(uint64_t(pc.arg2) | (uint64_t(pc.arg3) << 32ul));
+    VisUintRef counts = VisUintRef(uint64_t(pc.arg1) | (uint64_t(pc.arg4) << 32ul));
+    const uint lid = gl_LocalInvocationIndex;
+    const uint blocks = (pc.arg0 + RT_BLOCK - 1u) / RT_BLOCK;
+    const uint i = gl_WorkGroupID.x * RT_BLOCK + lid;
+    if (pc.mode == 0u) {
+        if (lid == 0u) {
+            s_count = 0u;
+        }
+        barrier();
+        if (slot_live(view, i)) {
+            atomicAdd(s_count, 1u);
+        }
+        barrier();
+        if (lid == 0u) {
+            counts.v[gl_WorkGroupID.x] = s_count;
+        }
+        return;
+    }
+    if (pc.mode == 1u) {
+        // A run of blocks for each invocation: its sum; the sums of the runs before it; then each
+        // block's first record in place of its count.
+        const uint run = (blocks + 63u) / 64u;
+        const uint lo = min(lid * run, blocks);
+        const uint hi = min(lo + run, blocks);
+        uint sum = 0u;
+        for (uint b = lo; b < hi; ++b) {
+            sum += counts.v[b];
+        }
+        s_sums[lid] = sum;
+        barrier();
+        if (lid == 0u) {
+            uint total = 0u;
+            for (uint k = 0u; k < 64u; ++k) {
+                const uint v = s_sums[k];
+                s_sums[k] = total;
+                total += v;
+            }
+            counts.v[blocks] = total;
+            VisCountersRef(view.v.counters).c.rt_instances = total;
+        }
+        barrier();
+        uint at = s_sums[lid];
+        for (uint b = lo; b < hi; ++b) {
+            const uint n = counts.v[b];
+            counts.v[b] = at;
+            at += n;
+        }
+        return;
+    }
+    // Mode 2: the block's live slots ranked in slot order by an inclusive scan in shared memory
+    // (which counts on no grouping of the invocations into subgroups); and the records past the
+    // total inactive.
+    const uint total = counts.v[blocks];
+    const uint base = counts.v[gl_WorkGroupID.x];
+    const bool live = slot_live(view, i);
+    s_sums[lid] = live ? 1u : 0u;
+    barrier();
+    for (uint d = 1u; d < 64u; d <<= 1u) {
+        const uint v = lid >= d ? s_sums[lid - d] : 0u;
+        barrier();
+        s_sums[lid] += v;
+        barrier();
+    }
+    if (live) {
+        write_record(view, out_ref, i, base + s_sums[lid] - 1u);
+    }
+    if (i >= total && i < pc.arg0) {
+        write_inactive(out_ref, i);
+    }
 }

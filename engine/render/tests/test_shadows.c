@@ -9,6 +9,7 @@
 // ray tracing draws the same lights unshadowed. Skipped where the device
 // has no ray queries; the fixture's teardown asserts zero validation and
 // synchronisation-validation errors and nothing leaked.
+#include "render_internal.h"
 #include "test_shadow_support.h"
 
 typedef RenderFixture Shadows;
@@ -262,9 +263,11 @@ NTEST_F(Shadows, the_structures_follow_the_scene)
 
 // The production path's top level stays as it was built while the camera
 // moves within 16 m of where it was (the shadows right from the new
-// viewpoint all the same), and is rebuilt around the camera beyond that,
-// when an instance changes, after a frame that traced nothing, and after
-// the reference drew a frame.
+// viewpoint all the same); beyond that it is updated in place around the
+// camera, its records the same instances in the same places (ADR-0100),
+// including where a hidden instance's record is left out between others;
+// and it is built whole when an instance changes, after a frame that traced
+// nothing, and after the reference drew a frame.
 NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
 {
     REQUIRE_RAY_TRACING(f);
@@ -295,8 +298,10 @@ NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
     // Built once, then kept.
     NphRenderFrameStats stats = test_render_read(f, &views[0]);
     NTEST_EXPECT_TRUE(stats.shadow_rebuild);
+    NTEST_EXPECT_FALSE(stats.shadow_update);
     stats = test_render_read(f, &views[0]);
     NTEST_EXPECT_FALSE(stats.shadow_rebuild);
+    NTEST_EXPECT_FALSE(stats.shadow_update);
     ShadowCheck c = check_shadow(f->pixels, off[0], &views[0].camera, &l, &occluder, RT_GROW);
     log_check("built at 6 m", "production", &c);
     NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
@@ -304,18 +309,21 @@ NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
     // 8 m on: the same structure, from a camera 8 m from its anchor.
     stats = test_render_read(f, &views[1]);
     NTEST_EXPECT_FALSE(stats.shadow_rebuild);
+    NTEST_EXPECT_FALSE(stats.shadow_update);
     memcpy(on, f->pixels, PIXELS);
     c = check_shadow(on, off[1], &views[1].camera, &l, &occluder, RT_GROW);
     log_check("8 m from the anchor", "production", &c);
     NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
     NTEST_EXPECT_GT_UINT(c.shadow, 50U);
-    // 24 m on: rebuilt around the camera, then kept.
-    stats = test_render_read(f, &views[2]);
-    NTEST_EXPECT_TRUE(stats.shadow_rebuild);
+    // 24 m on: updated around the camera, then kept.
     stats = test_render_read(f, &views[2]);
     NTEST_EXPECT_FALSE(stats.shadow_rebuild);
+    NTEST_EXPECT_TRUE(stats.shadow_update);
+    stats = test_render_read(f, &views[2]);
+    NTEST_EXPECT_FALSE(stats.shadow_rebuild);
+    NTEST_EXPECT_FALSE(stats.shadow_update);
     c = check_shadow(f->pixels, off[2], &views[2].camera, &l, &occluder, RT_GROW);
-    log_check("rebuilt at 30 m", "production", &c);
+    log_check("updated at 30 m", "production", &c);
     NTEST_EXPECT_EQ_UINT(c.wrong, 0U);
     NTEST_EXPECT_GT_UINT(c.shadow, 50U);
     // An instance changed: rebuilt.
@@ -325,6 +333,23 @@ NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
     nph_render_instance_set_hidden(f->renderer, s.occluder, false);
     NTEST_EXPECT_TRUE(test_render_read(f, &views[2]).shadow_rebuild);
     NTEST_EXPECT_FALSE(test_render_read(f, &views[2]).shadow_rebuild);
+    // A caster far off, in the slot after the occluder's, and the occluder hidden: its record is
+    // left out from between the others'. Drawn without shadows from 6 m, then built whole at
+    // 30 m; 24 m back, updated over those records, the floor as unshadowed as that drawing.
+    const NphRenderInstance far = instance(f, s.cube, s.grey, at(500.0, 1.0, 0.0, 1.0F));
+    nph_render_instance_set_hidden(f->renderer, s.occluder, true);
+    set_shadows(f, sun, &ld, false);
+    static u8 hidden[PIXELS];
+    render_into(f, &views[0], hidden);
+    set_shadows(f, sun, &ld, true);
+    NTEST_EXPECT_TRUE(test_render_read(f, &views[2]).shadow_rebuild);
+    stats = test_render_read(f, &views[0]);
+    NTEST_EXPECT_FALSE(stats.shadow_rebuild);
+    NTEST_EXPECT_TRUE(stats.shadow_update);
+    NTEST_EXPECT_LE_UINT(image_max_diff(f->pixels, hidden), SAME_TOL);
+    nph_render_instance_set_hidden(f->renderer, s.occluder, false);
+    nph_render_instance_destroy(f->renderer, far);
+    NTEST_EXPECT_TRUE(test_render_read(f, &views[0]).shadow_rebuild);
     // A frame without shadows, then one with: rebuilt (the instances may
     // have changed unseen).
     set_shadows(f, sun, &ld, false);
@@ -340,13 +365,115 @@ NTEST_F(Shadows, the_top_level_is_rebuilt_only_when_it_must_be)
     NTEST_EXPECT_FALSE(test_render_read(f, &views[2]).shadow_rebuild);
 }
 
+// The production path's top-level records as rt_instances.comp writes them (ADR-0100): the
+// shown instances' first, in their slots' order across its blocks of slots, hidden ones' left out
+// from between them, and every record after them inactive; and the same records in the same
+// places after the camera's 24 m move, which updates the structure in place over them.
+static void check_records(RenderFixture *f, const u32 *slots, u32 count)
+{
+    const RenderRt *rt = &f->renderer->rt;
+    const u32 n = rt->frame_instances;
+    NTEST_ASSERT_TRUE(n >= count);
+    NphAllocator *a = nph_allocator_system();
+    NphGpuAccelInstance *records = NPH_ALLOC_ARRAY(a, NphGpuAccelInstance, n);
+    NTEST_ASSERT_TRUE(records != NULL);
+    test_read_buffer(f->dev, rt->instances, 0U, (u64)n * sizeof records[0], records);
+    u32 wrong = 0U;
+    for (u32 k = 0; k < n; ++k) {
+        const u32 index = records[k].index_and_mask & 0xFFFFFFU;
+        const bool right = k < count ? index == slots[k] && records[k].blas != 0U
+                                     : records[k].blas == 0U && records[k].index_and_mask == 0U;
+        wrong += right ? 0U : 1U;
+    }
+    NTEST_LOG("%u records, %u active: %u out of place", n, count, wrong);
+    NTEST_EXPECT_EQ_UINT(wrong, 0U);
+    NPH_FREE_ARRAY(a, NphGpuAccelInstance, records, n);
+}
+
+// A renderer with room for thousands of instances, each frame sending every one's record.
+typedef RenderFixture ShadowRecords;
+
+NTEST_SETUP(ShadowRecords)
+{
+    NphRendererDesc d;
+    test_renderer_desc(&d, NULL);
+    d.max_instances = 4096U;
+    d.max_instance_updates = 4096U;
+    test_render_setup(f, &d);
+}
+
+NTEST_TEARDOWN(ShadowRecords)
+{
+    test_render_teardown(f);
+}
+
+NTEST_F(ShadowRecords, the_top_levels_records_are_the_shown_instances_in_slot_order)
+{
+    REQUIRE_RAY_TRACING(f);
+    if (!nph_renderer_production_supported(f->renderer)) {
+        NTEST_SKIP("no production path on this device");
+    }
+    Scene s;
+    scene_build(f, &s, at(0.0, 1.0, 0.0, 1.0F));
+    // 3,000 more casters off to the side, over 47 of rt_instances.comp's blocks of 64 slots,
+    // every seventh hidden.
+    enum {
+        MORE = 3000U
+    };
+    NphAllocator *a = nph_allocator_system();
+    u32 *slots = NPH_ALLOC_ARRAY(a, u32, MORE + 2U);
+    NTEST_ASSERT_TRUE(slots != NULL);
+    const u32 mask = f->renderer->instance_pool.index_mask;
+    u32 count = 0U;
+    slots[count++] = s.floor.value & mask;
+    slots[count++] = s.occluder.value & mask;
+    for (u32 i = 0; i < MORE; ++i) {
+        const u32 column = i % 60U;
+        const u32 row = i / 60U;
+        const NphRenderInstance more = instance(
+            f, s.cube, s.grey, at(100.0 + 4.0 * (f64)column, 1.0, 50.0 + 4.0 * (f64)row, 0.5F));
+        if (i % 7U == 3U) {
+            nph_render_instance_set_hidden(f->renderer, more, true);
+        } else {
+            slots[count++] = more.value & mask;
+        }
+    }
+    for (u32 i = 1; i < count; ++i) { // ascending (nearly so already)
+        for (u32 j = i; j > 0U && slots[j - 1U] > slots[j]; --j) {
+            const u32 t = slots[j];
+            slots[j] = slots[j - 1U];
+            slots[j - 1U] = t;
+        }
+    }
+    NphRenderLightDesc ld = sun_desc(false);
+    const NphRenderLight sun = make_light(f, &ld);
+    set_shadows(f, sun, &ld, true);
+    NphRenderView views[2];
+    const f64 heights[2] = {6.0, 30.0};
+    const f32 fovs[2] = {0.9F, 0.2F};
+    for (u32 i = 0; i < 2U; ++i) {
+        const NphRenderCamera c =
+            nph_render_camera_look_at(nph_dvec3(0.0, heights[i], 0.0), nph_dvec3(0.0, 0.0, 0.0),
+                                      nph_vec3(0.0F, 0.0F, -1.0F), fovs[i], 0.05F);
+        shadow_view(&views[i], c, 13.0F, NPH_RENDER_PIPELINE_PRODUCTION, RT_FLAGS);
+    }
+    NTEST_EXPECT_TRUE(test_render_read(f, &views[0]).shadow_rebuild);
+    check_records(f, slots, count);
+    NTEST_EXPECT_EQ_UINT(f->renderer->rt.tlas_records, f->renderer->rt.frame_instances);
+    const NphRenderFrameStats moved = test_render_read(f, &views[1]);
+    NTEST_EXPECT_FALSE(moved.shadow_rebuild);
+    NTEST_EXPECT_TRUE(moved.shadow_update);
+    check_records(f, slots, count);
+    NPH_FREE_ARRAY(a, u32, slots, MORE + 2U);
+}
+
 // The bottom levels are built with compaction allowed and compacted a few
 // frames on, where the device saves anything (lavapipe does not): every
 // frame through the build, the queries, the copies' swap, and the
 // originals' retirement shadows what the geometry says; the bytes they hold
 // fall, the frame of the swap reports the compactions, and the production
-// path rebuilds its top level the frame after (the GPU scene's records name
-// the copies from then on). The reference path, whose records the CPU
+// path updates its top level in place the frame after (the GPU scene's
+// records name the copies from then on: ADR-0100). The reference path, whose records the CPU
 // writes, casts the same; and a mesh destroyed while its original waits to
 // be retired leaves nothing behind (the teardown checks).
 NTEST_F(Shadows, bottom_levels_are_compacted_and_cast_the_same)
@@ -370,11 +497,11 @@ NTEST_F(Shadows, bottom_levels_are_compacted_and_cast_the_same)
     NTEST_EXPECT_TRUE(built != 0U);
     u32 compactions = 0U;
     u32 swap_frame = 0U;
-    bool rebuilt_after = false;
+    bool updated_after = false;
     for (u32 i = 1; i <= 8U; ++i) {
         st = test_render_read(f, &v);
         if (swap_frame != 0U && i == swap_frame + 1U) {
-            rebuilt_after = st.shadow_rebuild != 0;
+            updated_after = st.shadow_update != 0 && st.shadow_rebuild == 0;
         }
         if (st.shadow_compactions != 0U) {
             compactions += st.shadow_compactions;
@@ -393,7 +520,7 @@ NTEST_F(Shadows, bottom_levels_are_compacted_and_cast_the_same)
         NTEST_EXPECT_EQ_UINT(compactions, 2U);
         NTEST_EXPECT_TRUE(st.shadow_blas_bytes < built);
         if (v.pipeline == NPH_RENDER_PIPELINE_PRODUCTION) {
-            NTEST_EXPECT_TRUE(rebuilt_after);
+            NTEST_EXPECT_TRUE(updated_after);
         }
     }
     // The other pipeline traces the copies too.

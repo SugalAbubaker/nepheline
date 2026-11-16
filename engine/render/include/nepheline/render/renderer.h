@@ -1252,16 +1252,18 @@ typedef struct NphRenderFrameStats {
     // Ray-traced shadows: whether the frame traced shadow rays (some light
     // casts shadows and the renderer has ray tracing); the meshes'
     // bottom-level structures it built (each once, in the first frame that
-    // traces after the mesh's creation); and whether it rebuilt the top
-    // level over the instances (the reference every frame; the production
-    // path when instances changed, after a frame that traced nothing, when
-    // the camera moved more than 16 m from where it last built it, or the
-    // frame after compacted bottom levels were swapped in). The bottom
-    // levels are compacted a few frames after their builds: the bytes they
-    // hold now, and how many the frame swapped in compacted.
+    // traces after the mesh's creation); whether it built the top level
+    // over the instances whole (the reference every frame; the production
+    // path when instances changed or after a frame that traced nothing);
+    // and whether the production path updated it in place instead, where
+    // only its records' contents changed (the camera 16 m from its anchor,
+    // compacted bottom levels swapped in, a material's ray key: ADR-0100).
+    // The bottom levels are compacted a few frames after their builds: the
+    // bytes they hold now, and how many the frame swapped in compacted.
     b32 shadow_rays;
     u32 shadow_builds;
     b32 shadow_rebuild;
+    b32 shadow_update;
     u32 shadow_compactions;
     u64 shadow_blas_bytes;
     // The production path's GPU counters, read back from the frame that

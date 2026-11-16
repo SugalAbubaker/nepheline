@@ -178,6 +178,15 @@ the slot recycles it again) keeps the results the first recycle read:
 before, the second read an emptied pool and lost them, which every render
 test, waiting after each frame, would have hit.
 
+A top level built with `NPH_GPU_ACCEL_ALLOW_UPDATE` can be updated in
+place (`nph_gpu_cmd_update_tlas`, its scratch
+`NphGpuAccelSizes.update_scratch`): from the same number of records, with
+the same flags, each record active or inactive as it was at the build
+(Vulkan's update rules: a record turning active or inactive needs a build).
+The update keeps the build's tree and refits its boxes to what the records
+hold now, for a fraction of a build's cost; the renderer's top level takes
+the anchor's moves so (ADR-0100).
+
 ## Uploads
 
 `nph_gpu_upload_buffer` / `nph_gpu_upload_image` copy into a persistently

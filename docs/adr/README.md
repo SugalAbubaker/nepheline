@@ -105,6 +105,7 @@ supersedes it and both link to each other.
 | [0097](0097-gpu-driven-transparency.md) | GPU-driven transparency: the blended surfaces culled, ordered and drawn by the GPU | Accepted |
 | [0098](0098-trimmed-cards-where-their-key-holds.md) | Trimmed cards where their key holds: the rays choose each frame, paged or whole | Accepted |
 | [0099](0099-two-views-over-the-gate.md) | Two views over the gate: Bistro's street turn and the city's rooftop, recorded | Accepted (the user's decision) |
+| [0100](0100-top-level-updated-in-place.md) | The top level updated in place where only what its records hold changes | Accepted |
 
 ## Template
 
