@@ -515,7 +515,8 @@ where their alpha test can pass), and the blended surfaces culled, ordered
 and drawn by the GPU (ADR-0097), whose cull and sort have rows where a
 scene has them. So measured, sixteen of the eighteen views hold the gate's
 6.94 ms at their 99th percentiles; Bistro's street turn (7.33 ms) and the
-city's rooftop (8.03) do not. `render_budgets.txt`'s rows for the scenes it
+city's rooftop (8.03) do not, and ADR-0099 records them over it at Phase
+14's end, with what makes them slow. `render_budgets.txt`'s rows for the scenes it
 budgets are from `render_perf-2026-11-14-adr-0097`, measured the same way,
 the glass wall's three production scenes among them. The landscape has no
 rows there: the nightly does not run it. Three of Bistro's views (its

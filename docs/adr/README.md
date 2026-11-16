@@ -87,7 +87,7 @@ supersedes it and both link to each other.
 | [0079](0079-quality-tiers.md) | Quality tiers: the reference hardware's frame, and a high tier of rays | Accepted |
 | [0080](0080-shadow-map-slope.md) | The sun's map at the level of its slope on a surface, and a pool twice as large | Accepted |
 | [0081](0081-budgets-in-the-machines-unit.md) | Benchmark budgets in the machine's own unit | Accepted |
-| [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision) |
+| [0082](0082-gate-at-1440p.md) | The reference scenes gate at native 1440p | Accepted (the user's decision); two views recorded over it by [0099](0099-two-views-over-the-gate.md) |
 | [0083](0083-agx-default.md) | AgX is the default tonemapper | Accepted (the user's decision) |
 | [0084](0084-cache-history.md) | The radiance cache's history follows its light | Accepted |
 | [0085](0085-cache-blend.md) | The radiance cache's lookup blends the cells around a point | Accepted |
@@ -104,6 +104,7 @@ supersedes it and both link to each other.
 | [0096](0096-leaf-cards-trimmed-for-rays.md) | Leaf cards trimmed for the rays: triangles for the rays alone, cut in the cooker | Accepted |
 | [0097](0097-gpu-driven-transparency.md) | GPU-driven transparency: the blended surfaces culled, ordered and drawn by the GPU | Accepted |
 | [0098](0098-trimmed-cards-where-their-key-holds.md) | Trimmed cards where their key holds: the rays choose each frame, paged or whole | Accepted |
+| [0099](0099-two-views-over-the-gate.md) | Two views over the gate: Bistro's street turn and the city's rooftop, recorded | Accepted (the user's decision) |
 
 ## Template
 
