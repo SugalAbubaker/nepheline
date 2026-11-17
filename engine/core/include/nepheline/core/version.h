@@ -3,10 +3,13 @@
 
 // Engine version. This header is the single source of truth: CMake reads the
 // three NPH_VERSION_* macros (cmake/NphVersion.cmake) rather than generating
-// them, so the build and the binary can never disagree.
+// them, and configures again when this header changes, so the build and the
+// binary can never disagree.
 //
-// Versioning follows SemVer (CLAUDE.md §7): v0.1.0 is tagged at the end of
-// Phase 4, v1.0.0 at the end of Phase 15.
+// Versioning follows SemVer (CLAUDE.md §7). Each release tag marks a commit
+// whose version here is the tag's: v0.1.0 at the end of Phase 4, v0.9.0 at the
+// end of Phase 14, v0.10.0 at the end of Phase 15, and v1.0.0 with a public
+// release (ADR-0102).
 
 #include <stdint.h>
 
@@ -15,7 +18,7 @@ extern "C" {
 #endif
 
 #define NPH_VERSION_MAJOR 0
-#define NPH_VERSION_MINOR 1
+#define NPH_VERSION_MINOR 9
 #define NPH_VERSION_PATCH 0
 
 #define NPH_VERSION_STRINGIZE_(x) #x

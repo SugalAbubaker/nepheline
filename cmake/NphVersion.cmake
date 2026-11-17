@@ -6,6 +6,9 @@ function(nph_read_version_header header out_var)
     if(NOT EXISTS "${header}")
         message(FATAL_ERROR "Version header not found: ${header}")
     endif()
+    # Configure again whenever the header changes, so that an existing build
+    # directory takes a new version too, not only a fresh one.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${header}")
     foreach(part MAJOR MINOR PATCH)
         file(STRINGS "${header}" line REGEX "^#define NPH_VERSION_${part} +[0-9]+")
         if(NOT line MATCHES "#define NPH_VERSION_${part} +([0-9]+)")

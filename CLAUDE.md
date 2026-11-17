@@ -133,7 +133,7 @@ A module may only depend on modules to its left. `core` depends only on the C st
 - Create the GitHub remote with `gh repo create` (name and visibility confirmed with the user at the time).
 - Branches: `main` is always green and protected. Work happens on `feature/<module>-<topic>` branches and merges by PR once CI passes.
 - Commit messages: Conventional Commits (`feat(math): add quaternion slerp`).
-- Releases: semantic versioning tags (`v0.1.0` at the end of Phase 4, and so on).
+- Releases: semantic versioning tags (`v0.1.0` at the end of Phase 4, and so on), each on a commit whose `engine/core/include/nepheline/core/version.h` carries the tag's version.
 - License: to be decided by the user (ADR-0001).
 
 ## 8. Subsystem Designs
