@@ -124,6 +124,11 @@ if(NPH_BUILD_TESTS)
     if(MSVC)
         target_compile_definitions(platform_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
+    if(NOT WIN32)
+        # The crash tests' siginfo_t, sigaltstack, and SS_DISABLE are POSIX's,
+        # which glibc declares under -std=c17 only when asked, as for the module.
+        target_compile_definitions(platform_tests PRIVATE _GNU_SOURCE)
+    endif()
 
     # The crash handler on real faults (docs/adr/0103-crash-handler.md):
     # crash_helper fails in a child process, and run_crash.cmake checks the

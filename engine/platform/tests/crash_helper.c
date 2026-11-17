@@ -39,6 +39,7 @@ NPH_LOG_CATEGORY_DEFINE(LOG_HELPER, "crash_helper", NPH_LOG_LEVEL_TRACE);
 // Volatile, so that no compiler proves the faults below away.
 static volatile int *volatile g_bad; // NULL
 static volatile int g_zero;
+static volatile int g_dividend = 12345;
 static volatile u64 g_never = ~0ULL;
 
 NPH_NO_INLINE static void fault_access(void)
@@ -48,7 +49,9 @@ NPH_NO_INLINE static void fault_access(void)
 
 NPH_NO_INLINE static int fault_divide(void)
 {
-    return 1 / g_zero;
+    // Neither side known: clang and GCC compute `1 / x` without a
+    // division (x when x is -1, 0, or 1, else 0), so without the fault.
+    return g_dividend / g_zero;
 }
 
 NPH_NO_INLINE static void fault_illegal(void)

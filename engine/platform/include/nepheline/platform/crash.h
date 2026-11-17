@@ -65,7 +65,7 @@ extern "C" {
 #define NPH_CRASH_LOG_LINES  64U  // the log's last records a report ends with
 
 // Bytes of the alternate signal stack each thread gets on Linux.
-#define NPH_CRASH_ALT_STACK_SIZE (64U * 1024U)
+#define NPH_CRASH_ALT_STACK_SIZE 65536U // 64 KiB
 
 typedef struct NphCrashDesc {
     // Where reports go; created, with its parents, at install. Required.
