@@ -48,7 +48,8 @@ fault had no room left on the stack to be delivered from.
      memory those stacks point at, the modules, handles, and the memory map. It keeps global data for the modules
      beside the executable only, which are the engine's and the game's: with every module's, the player's dump
      came to 40 MB, nearly all of it NVIDIA's driver, and without the driver's it is 1.7 MB. `crash.full_dump=1`
-     writes the whole process instead.
+     writes the whole process instead. Memory that cannot be read when the dump gets to it is left out (the
+     callback answers `ReadMemoryFailureCallback`), where by default dbghelp fails the whole dump on it.
    - **A line on standard error** naming the report.
 
    The process then ends as the fault would have ended it. On Windows that is the exception's code as the exit

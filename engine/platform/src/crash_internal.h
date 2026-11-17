@@ -129,6 +129,8 @@ void crash_os_thread_detach(void);
 
 #if NPH_PLATFORM_WINDOWS
 
+#include <dbghelp.h> // after windows.h, which platform_internal.h brings
+
 // Writes the report and the dump for `pointers` (a fault on thread
 // `thread_id`; `what` names one that is not an exception, NULL otherwise),
 // and the report's path to `out_path` when it is not NULL. Once the report
@@ -145,6 +147,14 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
 // it on (EXCEPTION_CONTINUE_SEARCH) when no handler is installed or a
 // debugger is attached, which then sees it as unhandled.
 LONG crash_win32_fiber_filter(EXCEPTION_POINTERS *pointers);
+
+// The dump's callback (MINIDUMP_CALLBACK_ROUTINE): the global data of the
+// modules beside the executable only (all of it in a full dump), and memory
+// that cannot be read when the dump gets to it left out, which would
+// otherwise fail the whole dump. Tests call it.
+// NOLINTNEXTLINE(misc-misplaced-const): MINIDUMP_CALLBACK_ROUTINE's own signature
+BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT input,
+                                        PMINIDUMP_CALLBACK_OUTPUT output);
 
 #else
 

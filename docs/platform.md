@@ -313,7 +313,9 @@ process. When one happens, it writes into the directory it was given:
   data is kept only for the modules in the executable's directory (the
   engine's and the game's): with every module's, the player's dump came to
   40 MB, nearly all of it the NVIDIA driver's, and it is 1.7 MB without.
-  `full_dump` writes the whole process instead.
+  `full_dump` writes the whole process instead. Memory that cannot be read
+  when the dump gets to it is left out, where by default dbghelp fails the
+  whole dump on it.
 - **A line on standard error** naming the report.
 
 The process then ends as the fault would have ended it. On Windows that is

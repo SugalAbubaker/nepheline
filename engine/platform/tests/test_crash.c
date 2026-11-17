@@ -407,6 +407,38 @@ NTEST_F(CrashDir, install_wraps_the_assert_handler_and_uninstall_gives_it_back)
 
 #if NPH_PLATFORM_WINDOWS
 
+NTEST(crash, the_dumps_callback_leaves_out_what_it_cannot_read_and_other_modules_data)
+{
+    MINIDUMP_CALLBACK_INPUT in;
+    MINIDUMP_CALLBACK_OUTPUT out;
+    memset(&in, 0, sizeof in);
+    memset(&out, 0, sizeof out);
+    // A block dbghelp failed to read is left out and the dump goes on, where
+    // by default the one failure fails the whole dump.
+    in.CallbackType = ReadMemoryFailureCallback;
+    out.Status = E_FAIL;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == TRUE);
+    NTEST_EXPECT_EQ_INT((int)out.Status, (int)S_OK);
+
+    // A module elsewhere than beside the executable: its code, not its data.
+    wchar_t other[] = L"C:/Windows/System32/other.dll";
+    memset(&in, 0, sizeof in);
+    memset(&out, 0, sizeof out);
+    in.CallbackType = ModuleCallback;
+    in.Module.FullPath = other;
+    out.ModuleWriteFlags = (ULONG)ModuleWriteModule | (ULONG)ModuleWriteDataSeg;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == TRUE);
+    NTEST_EXPECT_EQ_UINT((u64)out.ModuleWriteFlags, (u64)ModuleWriteModule);
+
+    // Nothing more is asked for: no memory added, no cancel.
+    memset(&in, 0, sizeof in);
+    memset(&out, 0, sizeof out);
+    in.CallbackType = MemoryCallback;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == FALSE);
+    in.CallbackType = CancelCallback;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == FALSE);
+}
+
 NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
 {
     const char *skip = install_or_skip(f->dir, "crash_test");

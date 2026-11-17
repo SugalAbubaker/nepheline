@@ -217,13 +217,12 @@ static u32 walk_stack(const CONTEXT *start, u64 *frames, u32 cap)
 
 #endif
 
-// Keeps the global data (MiniDumpWithDataSegs) of the modules beside the
+// The global data (MiniDumpWithDataSegs) is kept for the modules beside the
 // executable only: the driver's alone are tens of megabytes (the player's
 // dump, with NVIDIA's, came to 40 MB) and say nothing the engine's do not.
-// Every other kind of callback asks for nothing more.
 // NOLINTNEXTLINE(misc-misplaced-const): MINIDUMP_CALLBACK_ROUTINE's own signature
-static BOOL CALLBACK dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT input,
-                                   PMINIDUMP_CALLBACK_OUTPUT output)
+BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT input,
+                                        PMINIDUMP_CALLBACK_OUTPUT output)
 {
     NPH_UNUSED(param);
     if (input == NULL || output == NULL) {
@@ -235,7 +234,7 @@ static BOOL CALLBACK dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT i
         const bool ours = path != NULL && g_exe_dir_len != 0U &&
                           _wcsnicmp(path, g_exe_dir, (size_t)g_exe_dir_len) == 0 &&
                           wcschr(path + g_exe_dir_len, L'\\') == NULL;
-        if (!ours) {
+        if (!ours && !g_crash.full_dump) {
             output->ModuleWriteFlags &= ~(ULONG)ModuleWriteDataSeg;
         }
         return TRUE;
@@ -244,6 +243,12 @@ static BOOL CALLBACK dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT i
     case IncludeThreadCallback:
     case ThreadCallback:
     case ThreadExCallback:
+        return TRUE;
+    case ReadMemoryFailureCallback:
+        // Memory that cannot be read when the dump gets to it (freed by a
+        // thread still running, or never readable) is left out. Otherwise
+        // the one failed read fails the whole dump (MINIDUMP_CALLBACK_TYPE).
+        output->Status = S_OK;
         return TRUE;
     default:
         return FALSE;
@@ -358,11 +363,10 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
                                   MiniDumpWithProcessThreadData);
         // NOLINTEND(clang-analyzer-optin.core.EnumCastOutOfRange)
         MINIDUMP_CALLBACK_INFORMATION callback;
-        callback.CallbackRoutine = dump_callback;
+        callback.CallbackRoutine = crash_win32_dump_callback;
         callback.CallbackParam = NULL;
-        if (g_write_dump == NULL ||
-            !g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), dump, type, &mei, NULL,
-                          g_crash.full_dump ? NULL : &callback)) {
+        if (g_write_dump == NULL || !g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), dump,
+                                                  type, &mei, NULL, &callback)) {
             dump_error = g_write_dump == NULL ? ERROR_PROC_NOT_FOUND : GetLastError();
         }
         CloseHandle(dump);

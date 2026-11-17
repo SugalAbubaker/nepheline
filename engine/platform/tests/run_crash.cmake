@@ -59,13 +59,24 @@ foreach(report IN LISTS reports)
         if(NOT EXISTS "${dump}")
             message(FATAL_ERROR "${MODE}: no minidump beside the report\n--- ${report} ---\n${text}")
         endif()
+        # The report says whether MiniDumpWriteDump wrote it ("dump: <name>")
+        # or why not ("not written (error <n>)").
+        get_filename_component(dump_name "${dump}" NAME)
+        string(FIND "${text}" "dump:      ${dump_name}" pos)
+        if(pos EQUAL -1)
+            message(FATAL_ERROR "${MODE}: the report does not name its minidump (exit '${rc}')\n"
+                                "--- ${report} ---\n${text}")
+        endif()
         execute_process(
             COMMAND "${DUMP_CHECK}" "${dump}"
             RESULT_VARIABLE dump_rc
             OUTPUT_VARIABLE dump_out
             ERROR_VARIABLE dump_err)
         if(NOT dump_rc EQUAL 0)
-            message(FATAL_ERROR "${MODE}: the minidump does not read: '${dump_rc}'\n${dump_out}${dump_err}")
+            file(SIZE "${dump}" dump_size)
+            message(FATAL_ERROR "${MODE}: the minidump does not read: '${dump_rc}' (${dump_size} "
+                                "bytes, the helper's exit '${rc}')\n${dump_out}${dump_err}"
+                                "--- ${report} ---\n${text}")
         endif()
         foreach(needle IN LISTS DUMP_EXPECT)
             string(FIND "${dump_out}" "${needle}" pos)
