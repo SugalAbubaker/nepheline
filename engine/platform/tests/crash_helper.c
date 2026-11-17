@@ -15,6 +15,7 @@
 #include <nepheline/core/log.h>
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/fiber.h>
+#include <nepheline/platform/file.h>
 #include <nepheline/platform/thread.h>
 
 #include <stdio.h>
@@ -185,8 +186,24 @@ int main(int argc, char **argv)
 
     NphThread t1;
     NphThread t2;
+    char lock_path[1200];
+    snprintf(lock_path, sizeof lock_path, "%s/session.lock", argv[2]);
+    NphFileLock lock;
     if (strcmp(mode, "access") == 0) {
         fault_access();
+    } else if (strcmp(mode, "locked") == 0) {
+        // Holds a lock as the process fails: the system lets go of it
+        // (file.h), which `lock_free`, run after, takes.
+        if (nph_file_lock_acquire(lock_path, &lock) != NPH_RESULT_OK) {
+            fprintf(stderr, "crash_helper: no lock\n");
+            return 92;
+        }
+        fault_access();
+    } else if (strcmp(mode, "lock_free") == 0) {
+        const NphResult lr = nph_file_lock_acquire(lock_path, &lock);
+        printf("lock %s\n", lr == NPH_RESULT_OK ? "taken" : nph_result_string(lr));
+        nph_file_lock_release(&lock);
+        return lr == NPH_RESULT_OK ? 0 : 92;
     } else if (strcmp(mode, "uninstalled") == 0) {
         nph_crash_uninstall();
 #if NPH_PLATFORM_WINDOWS

@@ -41,6 +41,7 @@ NphResult editor_new_scene(Editor *ed)
     forget_document(ed);
     NPH_TRY(nph_engine_clear_scene(ed->engine));
     ed->doc_path[0] = '\0';
+    editor_autosave_settled(ed); // nothing unsaved to keep
     NPH_LOG_INFO(&LOG_EDITOR, "new scene");
     return NPH_RESULT_OK;
 }
@@ -96,6 +97,7 @@ NphResult editor_open_scene(Editor *ed, const char *path)
     NPH_TRY(nph_engine_clear_scene(ed->engine));
     NPH_TRY(nph_engine_load_scene(ed->engine, path));
     (void)snprintf(ed->doc_path, sizeof ed->doc_path, "%s", path);
+    editor_autosave_settled(ed); // nothing unsaved to keep
     NPH_LOG_INFO(&LOG_EDITOR, "opened %s (%u entities)", path,
                  nph_world_entity_count(nph_engine_edit_world(ed->engine)));
     return NPH_RESULT_OK;
@@ -117,6 +119,7 @@ NphResult editor_save_scene(Editor *ed, const char *path)
         (void)snprintf(ed->doc_path, sizeof ed->doc_path, "%s", target);
     }
     ed->doc_saved_state = editor_history_state(ed->history);
+    editor_autosave_settled(ed); // the file holds what the autosave did
     NPH_LOG_INFO(&LOG_EDITOR, "saved %s", ed->doc_path);
     return NPH_RESULT_OK;
 }

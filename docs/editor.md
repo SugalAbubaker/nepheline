@@ -54,16 +54,18 @@ console). The edited world never simulates. **Play** (F5) plays a copy of
 it, keeping every entity's handle. **Stop** (F5 again) discards the copy
 and shows the edited world again. **Pause** is F6 and **Step** is F7.
 
-The editor adds three cvars:
+The editor adds five cvars:
 
 | Cvar | Default | What |
 |---|---|---|
 | `editor.layout` | `nph_editor_layout.ini` | the file the window layout is kept in; empty: none (tests) |
 | `editor.assets` | `assets` | the project's sources ("Assets" below) |
 | `editor.cooked` | `cooked` | the cooker's output and database, mounted at the root of the VFS |
+| `editor.autosave_dir` | `autosave` | where each running editor keeps its autosave, and a crashed one's is found ("Autosave and recovery" below); empty: none |
+| `editor.autosave_interval` | `60` | seconds between autosaves of unsaved changes; 0: only before Play (saved) |
 
-The project's two are read when the editor starts. Neither directory has to
-exist: the first import makes them.
+The project's directories are read when the editor starts. None has to
+exist: the first import, or autosave, makes them.
 
 | Key | Does |
 |---|---|
@@ -337,6 +339,43 @@ The scene is **dirty** when the history's state differs from the one saved
 or opened, so undoing back to it reads as clean again. The title shows the
 file and an asterisk. New, Open, and closing the window ask before
 discarding unsaved changes.
+
+### Autosave and recovery
+
+Every running editor keeps a session directory under `editor.autosave_dir`
+(ADR-0104). It is named `<seconds since 1970>-<pid>`, with `-<n>` after it
+while a directory holds that name (an editor attached again in one process
+within the second). It holds:
+- `lock`, held while the editor runs (platform/file.h `nph_file_lock_*`).
+  The system lets go of it when the process ends, however it ends;
+- `session.json`: the scene's file, and when the session began and last
+  autosaved;
+- `scene.nscene`, the edited world as a binary scene (a tenth of a
+  microsecond an entity to write, about a millisecond for 10,000), and the
+  one before it as `scene.previous.nscene`;
+- `mesh.nmesh`, the mesh being edited, while it has changes.
+
+**When.** Autosave runs when the scene or the mesh being edited has changes
+the last autosave does not hold and `editor.autosave_interval` seconds have
+passed since it. It waits while something is dragged or typed into, and
+while the world plays. It also runs before Play, whatever the interval:
+the game's code runs from there. Saving, opening, or a new scene leaves
+nothing unsaved, so the scene's autosave goes then. The log says what each
+autosave took (at DEBUG).
+
+**After a crash.** At the next start, another session's directory whose
+lock can be taken belongs to an editor that did not end cleanly, since a
+running editor's is held. The newest one with work in it is offered in
+**Recover Work**, which says how old the autosave is, what it holds, and
+whether the scene's file was saved after it:
+- **Recover** puts the mesh back in its source, cooked again, and opens the
+  scene in place of the edited one, under the scene's own file, unsaved;
+- **Discard** removes the directory;
+- **Later** keeps it for the next start.
+
+A clean exit removes the session's directory. One that nobody confirmed
+(the console's `quit`, a failure) with unsaved changes autosaves them and
+keeps it, so the next start offers them back as after a crash.
 
 ## Assets
 

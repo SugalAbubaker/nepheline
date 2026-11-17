@@ -780,3 +780,40 @@ void nph_dir_close(NphDirIterator *it)
     }
     memset(it, 0, sizeof *it);
 }
+
+// ---------------------------------------------------------------------------
+// Locks that last as long as the process
+// ---------------------------------------------------------------------------
+
+NphResult nph_file_lock_acquire(const char *path, NphFileLock *out)
+{
+    NPH_ASSERT(path != NULL && out != NULL);
+    memset(out, 0, sizeof *out);
+    wchar_t wide[NPH_WIN32_PATH_MAX];
+    NPH_TRY(to_wide(path, wide));
+    // No sharing: while this handle is open, every other open of the file
+    // fails, in this process and every other, until it closes or the
+    // process ends.
+    const HANDLE h = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0U, NULL, OPEN_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION) {
+            return NPH_RESULT_BUSY;
+        }
+        return file_fail("CreateFileW", path, error);
+    }
+    out->native = (u64)(uptr)h;
+    out->held = 1;
+    return NPH_RESULT_OK;
+}
+
+void nph_file_lock_release(NphFileLock *lock)
+{
+    if (lock == NULL || !lock->held) {
+        return;
+    }
+    CloseHandle((HANDLE)(uptr)lock->native);
+    lock->native = 0U;
+    lock->held = 0;
+}

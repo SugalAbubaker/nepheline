@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -617,4 +618,42 @@ void nph_dir_close(NphDirIterator *it)
         closedir((DIR *)it->handle);
     }
     memset(it, 0, sizeof *it);
+}
+
+// ---------------------------------------------------------------------------
+// Locks that last as long as the process
+// ---------------------------------------------------------------------------
+
+NphResult nph_file_lock_acquire(const char *path, NphFileLock *out)
+{
+    NPH_ASSERT(path != NULL && out != NULL);
+    memset(out, 0, sizeof *out);
+    const int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        return file_fail("open", path, errno);
+    }
+    // flock's lock belongs to this open file description: a second open in
+    // this process conflicts with it too, and the kernel drops it when the
+    // last descriptor closes, as at the process's end.
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        const int error = errno;
+        (void)close(fd);
+        if (error == EWOULDBLOCK) { // EAGAIN on Linux, the same number
+            return NPH_RESULT_BUSY;
+        }
+        return file_fail("flock", path, error);
+    }
+    out->native = (u64)fd;
+    out->held = 1;
+    return NPH_RESULT_OK;
+}
+
+void nph_file_lock_release(NphFileLock *lock)
+{
+    if (lock == NULL || !lock->held) {
+        return;
+    }
+    (void)close((int)lock->native);
+    lock->native = 0U;
+    lock->held = 0;
 }

@@ -165,6 +165,14 @@ share mode and converts paths to UTF-16 at the boundary;
 such as a missing file come back as results and are logged at DEBUG;
 real failures are logged at ERROR with the OS message.
 
+`nph_file_lock_acquire` takes a lock that lasts as long as the process:
+no other process takes it, nor another acquire in this one
+(`NPH_RESULT_BUSY`). The system lets go of it when the process ends,
+however it ends. On Windows the file is opened without sharing, on Linux
+`flock`'d. It tells a live process's files from a dead one's: the
+editor's autosave sessions (editor.md, ADR-0104), and the crash test
+`platform.crash.locked`, which takes a lock, crashes, and finds it free.
+
 ## Asynchronous I/O (`async_io.h`)
 
 An `NphAsyncIo` context queues positional reads and writes and reports

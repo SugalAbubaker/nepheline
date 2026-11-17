@@ -18,9 +18,11 @@
 #error "the editor is built with NPH_SHADER_DIR (nph_target_use_shaders)"
 #endif
 
-#define EDITOR_DEFAULT_LAYOUT "nph_editor_layout.ini"
-#define EDITOR_DEFAULT_ASSETS "assets"
-#define EDITOR_DEFAULT_COOKED "cooked"
+#define EDITOR_DEFAULT_LAYOUT            "nph_editor_layout.ini"
+#define EDITOR_DEFAULT_ASSETS            "assets"
+#define EDITOR_DEFAULT_COOKED            "cooked"
+#define EDITOR_DEFAULT_AUTOSAVE_DIR      "autosave"
+#define EDITOR_DEFAULT_AUTOSAVE_INTERVAL 60
 
 // ---------------------------------------------------------------------------
 // Dear ImGui's memory, through a tracked allocator (CLAUDE.md §1.4: all
@@ -88,6 +90,9 @@ void editor_play_toggle(Editor *ed)
         NPH_LOG_INFO(&LOG_EDITOR, "stopped playing");
         return;
     }
+    // The game's code runs from here: what is unsaved goes to the autosave
+    // first, so a crash in play loses none of it.
+    NPH_IGNORE_RESULT(editor_autosave_now(ed, "before play")); // logged
     const NphResult r = nph_engine_play_begin(e, true);
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_EDITOR, "play: %s", nph_result_string(r));
@@ -550,6 +555,8 @@ static void scene_popups(Editor *ed)
             if (ed->doc_path[0] != '\0') {
                 (void)snprintf(ed->scene_path, sizeof ed->scene_path, "%s", ed->doc_path);
             }
+        } else if (ed->popup_request == EDITOR_POPUP_RECOVER) {
+            name = "Recover Work";
         }
         (void)igOpenPopup_Str(name, 0);
         ed->popup_error[0] = '\0';
@@ -558,6 +565,7 @@ static void scene_popups(Editor *ed)
     scene_popup(ed, "Open Scene", true);
     scene_popup(ed, "Save Scene", false);
     unsaved_popup(ed);
+    editor_recovery_popup(ed);
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +650,7 @@ static void hook_sync(NphEngine *e, void *user)
     editor_assets_update(ed);
     editor_mesh_edit_update(ed);
     const u64 now = nph_time_now_ns();
+    editor_autosave_update(ed, now);
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
     ed->last_frame_ns = now;
     igNewFrame();
@@ -839,14 +848,40 @@ static NphResult register_cvars(Editor *ed)
         .value_string = EDITOR_DEFAULT_COOKED,
         .default_string = EDITOR_DEFAULT_COOKED,
     };
+    // Autosave (autosave.c): where its sessions go, read when the editor
+    // attaches, and how often.
+    const NphCvar autosave_dir = {
+        .name = "editor.autosave_dir",
+        .description =
+            "where each running editor autosaves its unsaved work, and a crashed one's is "
+            "found (empty: no autosave)",
+        .type = NPH_CVAR_TYPE_STRING,
+        .flags = NPH_CVAR_FLAG_LATCHED,
+        .value_string = EDITOR_DEFAULT_AUTOSAVE_DIR,
+        .default_string = EDITOR_DEFAULT_AUTOSAVE_DIR,
+    };
+    const NphCvar autosave_interval = {
+        .name = "editor.autosave_interval",
+        .description = "seconds between autosaves of unsaved changes (0: only before Play)",
+        .type = NPH_CVAR_TYPE_INT,
+        .flags = NPH_CVAR_FLAG_SAVED,
+        .value_int = EDITOR_DEFAULT_AUTOSAVE_INTERVAL,
+        .default_int = EDITOR_DEFAULT_AUTOSAVE_INTERVAL,
+        .min_int = 0,
+        .max_int = 3600,
+    };
     ed->cv_layout = layout;
     ed->cv_assets = assets;
     ed->cv_cooked = cooked;
+    ed->cv_autosave_dir = autosave_dir;
+    ed->cv_autosave_interval = autosave_interval;
     NphCvarRegistry *cvars = nph_engine_cvars(ed->engine);
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_layout));
     ed->cvars_registered = true; // detach unregisters what is there
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_assets));
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_cooked));
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_autosave_dir));
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_autosave_interval));
     return NPH_RESULT_OK;
 }
 
@@ -915,6 +950,11 @@ static NphResult attach(Editor *ed, NphEngine *e)
     NPH_TRY(editor_history_create(&hd, &ed->history));
     ed->doc_saved_state = editor_history_state(ed->history);
     NPH_TRY(editor_assets_open(ed));
+    // Without autosave the editor still runs; it says why.
+    const NphResult autosave = editor_autosave_open(ed);
+    if (autosave != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&LOG_EDITOR, "autosave is off: %s", nph_result_string(autosave));
+    }
     NphProfiler *prof = nph_engine_profiler(e);
     if (prof != NULL && nph_profiler_track_memory(prof, &ed->imgui_memory) == NPH_RESULT_OK) {
         ed->imgui_memory_tracked = true;
@@ -953,6 +993,9 @@ void editor_detach(Editor *ed)
         editor_release_game_input(ed);
         nph_engine_set_view(e, NULL);
     }
+    // While the edited world, the history, and the mesh being edited are
+    // all still there: an unconfirmed exit autosaves them first.
+    editor_autosave_close(ed);
     if (ed->imgui_memory_tracked) {
         nph_profiler_untrack_memory(nph_engine_profiler(e), &ed->imgui_memory);
         ed->imgui_memory_tracked = false;
@@ -986,6 +1029,8 @@ void editor_detach(Editor *ed)
         (void)nph_cvar_unregister(cvars, &ed->cv_layout);
         (void)nph_cvar_unregister(cvars, &ed->cv_assets);
         (void)nph_cvar_unregister(cvars, &ed->cv_cooked);
+        (void)nph_cvar_unregister(cvars, &ed->cv_autosave_dir);
+        (void)nph_cvar_unregister(cvars, &ed->cv_autosave_interval);
         ed->cvars_registered = false;
     }
     ed->engine = NULL;

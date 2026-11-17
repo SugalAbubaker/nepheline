@@ -12,6 +12,7 @@
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
+#include <nepheline/platform/time.h>
 #include <nepheline/runtime/engine.h>
 #include <nepheline/scene/transform.h>
 
@@ -33,6 +34,7 @@ typedef struct EditorFixture {
     bool keep_project; // finish() leaves it for another editor
     char assets_assignment[1000];
     char cooked_assignment[1000];
+    char autosave_assignment[1000];
     NphEngineConfig config;
     NphEngine *engine;
     Editor *editor;
@@ -63,11 +65,15 @@ static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *l
                    f->project);
     (void)snprintf(f->cooked_assignment, sizeof f->cooked_assignment, "editor.cooked=%s/cooked",
                    f->project);
+    // Autosave sessions in the project too, not the tests' directory.
+    (void)snprintf(f->autosave_assignment, sizeof f->autosave_assignment,
+                   "editor.autosave_dir=%s/autosave", f->project);
     f->config.assignments[0] = assignments[0];
     f->config.assignments[1] = f->assets_assignment;
     f->config.assignments[2] = f->cooked_assignment;
     f->config.assignments[3] = assignments[1];
-    f->config.assignment_count = 4U;
+    f->config.assignments[4] = f->autosave_assignment;
+    f->config.assignment_count = 5U;
     f->config.packs[0] = NPH_TEST_PACK;
     f->config.pack_count = 1U;
     f->config.headless = mode == NPH_ENGINE_MODE_HEADLESS ? 1 : 0;
@@ -1522,4 +1528,319 @@ NTEST(Editor, colliders_show_and_bodies_fall_in_play)
         NPH_WORLD_GET(w, cube, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation.y,
         3.0, 0.0);
     finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// Autosave and recovery (autosave.c)
+// ---------------------------------------------------------------------------
+
+static bool session_has(const Editor *ed, const char *name)
+{
+    char path[1200];
+    (void)snprintf(path, sizeof path, "%s/%s", ed->autosave.dir, name);
+    return nph_fs_exists(path);
+}
+
+// What a crash leaves: a copy of `ed`'s session directory, named `name`,
+// whose lock no process holds.
+static void leave_crashed_copy(const Editor *ed, const char *name, char *out, u64 cap)
+{
+    const char *slash = strrchr(ed->autosave.dir, '/');
+    NTEST_ASSERT_NOT_NULL(slash);
+    (void)snprintf(out, (size_t)cap, "%.*s/%s", (int)(slash - ed->autosave.dir), ed->autosave.dir,
+                   name);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(out), NPH_RESULT_OK);
+    static const char *const files[3] = {"session.json", "scene.nscene", "mesh.nmesh"};
+    for (u32 i = 0; i < 3U; ++i) {
+        char from[1200];
+        char to[1200];
+        (void)snprintf(from, sizeof from, "%s/%s", ed->autosave.dir, files[i]);
+        (void)snprintf(to, sizeof to, "%s/%s", out, files[i]);
+        if (nph_fs_exists(from)) {
+            NTEST_ASSERT_EQ_INT(nph_fs_copy_file(from, to), NPH_RESULT_OK);
+        }
+    }
+    char lock[1200];
+    (void)snprintf(lock, sizeof lock, "%s/lock", out);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(lock, "", 0U), NPH_RESULT_OK);
+}
+
+static u32 faces_in(const char *path)
+{
+    CookPolyMesh m;
+    NTEST_ASSERT_EQ_INT(cook_polymesh_load(nph_allocator_system(), path, &m), NPH_RESULT_OK);
+    const u32 faces = m.faces.len;
+    cook_polymesh_free(&m);
+    return faces;
+}
+
+NTEST(Editor, autosave_keeps_unsaved_changes_after_its_interval_and_before_play)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    EditorAutosave *as = &ed->autosave;
+    NTEST_ASSERT_NE_STR(as->dir, "");
+    NTEST_EXPECT_TRUE(session_has(ed, "lock"));
+    NTEST_EXPECT_TRUE(session_has(ed, "session.json"));
+    NTEST_EXPECT_FALSE(ed->recovery.offered);
+
+    // Nothing unsaved: nothing to write, however long it waits.
+    editor_autosave_update(ed, as->last_ns + 3600U * NPH_TIME_NS_PER_S);
+    NTEST_EXPECT_EQ_UINT(as->count, 0U);
+
+    NphEntity crate = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "crate", NPH_ENTITY_NULL, NULL, &crate),
+                        NPH_RESULT_OK);
+    const u64 interval = (u64)nph_cvar_get_int(&ed->cv_autosave_interval) * NPH_TIME_NS_PER_S;
+    NTEST_EXPECT_EQ_UINT(interval, 60U * NPH_TIME_NS_PER_S); // the default
+    editor_autosave_update(ed, as->last_ns + interval - 1U);
+    NTEST_EXPECT_EQ_UINT(as->count, 0U); // not yet
+    editor_autosave_update(ed, as->last_ns + interval);
+    NTEST_ASSERT_EQ_UINT(as->count, 1U);
+    NTEST_EXPECT_TRUE(session_has(ed, "scene.nscene"));
+    NTEST_EXPECT_EQ_UINT(as->last_entities,
+                         nph_world_entity_count(nph_engine_edit_world(fx.engine)));
+    editor_autosave_update(ed, as->last_ns + interval); // held already: no second one
+    NTEST_EXPECT_EQ_UINT(as->count, 1U);
+
+    // Before Play, whatever the interval, keeping the one before.
+    NTEST_ASSERT_EQ_INT(editor_edit_rename(ed->history, crate, "box"), NPH_RESULT_OK);
+    editor_play_toggle(ed);
+    NTEST_EXPECT_EQ_UINT(as->count, 2U);
+    NTEST_EXPECT_TRUE(session_has(ed, "scene.previous.nscene"));
+    frames(&fx, 2U);
+    editor_autosave_update(ed, as->last_ns + interval * 2U); // nothing while playing
+    NTEST_EXPECT_EQ_UINT(as->count, 2U);
+    editor_play_toggle(ed); // stop
+    frames(&fx, 1U);
+
+    // Saved: the file holds what the autosave did, which goes.
+    char scene[1100];
+    (void)snprintf(scene, sizeof scene, "%s/level.nscene", fx.project);
+    NTEST_ASSERT_EQ_INT(editor_save_scene(ed, scene), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(as->has_scene);
+    NTEST_EXPECT_FALSE(session_has(ed, "scene.nscene"));
+    NTEST_EXPECT_FALSE(session_has(ed, "scene.previous.nscene"));
+
+    // A clean exit takes the session away, and leaves the project.
+    char dir[EDITOR_PATH_MAX];
+    memcpy(dir, as->dir, sizeof dir);
+    char project[900];
+    memcpy(project, fx.project, sizeof project);
+    fx.keep_project = true;
+    finish(&fx);
+    NTEST_EXPECT_FALSE(nph_fs_exists(dir));
+    NTEST_EXPECT_TRUE(nph_fs_exists(scene));
+    NTEST_EXPECT_EQ_INT(nph_fs_remove_tree(project), NPH_RESULT_OK);
+}
+
+NTEST(Editor, a_crashed_sessions_work_is_offered_and_recovered_unsaved)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    char scene[1100];
+    (void)snprintf(scene, sizeof scene, "%s/level.nscene", fx.project);
+    NphEntity kept = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "kept", NPH_ENTITY_NULL, NULL, &kept),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_save_scene(ed, scene), NPH_RESULT_OK);
+    // What the file does not hold.
+    NphEntity unsaved = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "unsaved", NPH_ENTITY_NULL, NULL, &unsaved),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_autosave_now(ed, "test"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(ed->autosave.count, 1U);
+    const u32 entities = nph_world_entity_count(nph_engine_edit_world(fx.engine));
+    char crashed[1100];
+    leave_crashed_copy(ed, "1-1", crashed, sizeof crashed);
+    ed->quit_confirmed = true; // this one ends as asked; the copy is what a crash leaves
+    fx.keep_project = true;
+    char project[900];
+    memcpy(project, fx.project, sizeof project);
+    finish(&fx);
+    NTEST_ASSERT_TRUE(nph_fs_exists(crashed));
+
+    static EditorFixture again;
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    Editor *next = again.editor;
+    const EditorRecovery *rc = &next->recovery;
+    NTEST_ASSERT_TRUE(rc->offered);
+    NTEST_EXPECT_TRUE(rc->has_scene);
+    NTEST_EXPECT_FALSE(rc->has_mesh);
+    NTEST_EXPECT_EQ_STR(rc->scene, scene);
+    NTEST_EXPECT_FALSE(rc->scene_newer);
+    NTEST_EXPECT_EQ_INT((int)next->popup_request, (int)EDITOR_POPUP_RECOVER);
+    frames(&again, 2U); // the popup, drawn under the validation gate
+    NTEST_ASSERT_EQ_INT(editor_recovery_recover(next), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(rc->offered);
+    NTEST_EXPECT_EQ_UINT(nph_world_entity_count(nph_engine_edit_world(again.engine)), entities);
+    NTEST_EXPECT_EQ_STR(editor_scene_path(next), scene); // under its own file,
+    NTEST_EXPECT_TRUE(editor_scene_dirty(next));         // and not saved yet
+    NTEST_EXPECT_FALSE(nph_fs_exists(crashed));
+    NTEST_EXPECT_EQ_UINT(next->autosave.count, 1U); // in this session's autosave at once
+    NTEST_EXPECT_EQ_INT(editor_recovery_recover(next), NPH_RESULT_INVALID_STATE); // once
+    frames(&again, 2U);
+    next->quit_confirmed = true;
+    finish(&again);
+}
+
+NTEST(Editor, a_running_sessions_work_is_not_offered_and_later_and_discard_answer_a_crashed_one)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    NphEntity e = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "work", NPH_ENTITY_NULL, NULL, &e),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_autosave_now(ed, "test"), NPH_RESULT_OK);
+    char dead[1100];
+    char live[1100];
+    leave_crashed_copy(ed, "1-1", dead, sizeof dead);
+    leave_crashed_copy(ed, "2-2", live, sizeof live);
+    // One still running: its lock is held.
+    char live_lock[1200];
+    (void)snprintf(live_lock, sizeof live_lock, "%s/lock", live);
+    NphFileLock held;
+    NTEST_ASSERT_EQ_INT(nph_file_lock_acquire(live_lock, &held), NPH_RESULT_OK);
+    ed->quit_confirmed = true;
+    fx.keep_project = true;
+    char project[900];
+    memcpy(project, fx.project, sizeof project);
+    finish(&fx);
+
+    static EditorFixture second;
+    NTEST_ASSERT_EQ_INT(start_in(&second, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(second.editor->recovery.offered);
+    NTEST_EXPECT_EQ_STR(second.editor->recovery.dir, dead); // not the running one's
+    editor_recovery_later(second.editor);
+    NTEST_EXPECT_FALSE(second.editor->recovery.offered);
+    NTEST_EXPECT_TRUE(nph_fs_exists(dead)); // kept for the next start
+    second.keep_project = true;
+    finish(&second);
+
+    static EditorFixture third;
+    NTEST_ASSERT_EQ_INT(start_in(&third, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(third.editor->recovery.offered); // offered again
+    editor_recovery_discard(third.editor);
+    NTEST_EXPECT_FALSE(nph_fs_exists(dead));
+    NTEST_EXPECT_TRUE(nph_fs_exists(live)); // a running editor's: untouched
+    nph_file_lock_release(&held);
+    finish(&third);
+}
+
+NTEST(Editor, an_exit_nobody_confirmed_keeps_unsaved_changes_for_the_next_start)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    NphEntity e = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "late", NPH_ENTITY_NULL, NULL, &e),
+                        NPH_RESULT_OK);
+    // No autosave yet: the exit writes it, as after the console's quit.
+    NTEST_EXPECT_EQ_UINT(ed->autosave.count, 0U);
+    char dir[EDITOR_PATH_MAX];
+    memcpy(dir, ed->autosave.dir, sizeof dir);
+    fx.keep_project = true;
+    char project[900];
+    memcpy(project, fx.project, sizeof project);
+    finish(&fx);
+    NTEST_ASSERT_TRUE(nph_fs_exists(dir));
+
+    static EditorFixture again;
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    // Its own directory, though it may have begun in the same second as the
+    // last one, in the same process.
+    NTEST_EXPECT_NE_STR(again.editor->autosave.dir, dir);
+    NTEST_ASSERT_TRUE(again.editor->recovery.offered);
+    NTEST_EXPECT_EQ_STR(again.editor->recovery.dir, dir);
+    NTEST_EXPECT_TRUE(again.editor->recovery.has_scene);
+    editor_recovery_discard(again.editor);
+    NTEST_EXPECT_FALSE(nph_fs_exists(dir));
+    finish(&again);
+}
+
+NTEST(Editor, a_mesh_being_edited_is_autosaved_and_recovered_into_its_source)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    (void)made_cube(&fx);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_OK);
+    const u32 top = 4U;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, &top, 1U, false),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_extrude(ed, 0.5F), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_autosave_now(ed, "test"), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(ed->autosave.has_mesh);
+    char saved[1200];
+    (void)snprintf(saved, sizeof saved, "%s/mesh.nmesh", ed->autosave.dir);
+    NTEST_EXPECT_EQ_UINT(faces_in(saved), 10U); // the edited mesh
+    // Nothing new: the next autosave writes nothing.
+    const u32 count = ed->autosave.count;
+    NTEST_ASSERT_EQ_INT(editor_autosave_now(ed, "test"), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(ed->autosave.count, count);
+    char key[EDITOR_PROJECT_PATH_MAX];
+    memcpy(key, ed->mesh_edit.key, sizeof key);
+    char crashed[1100];
+    leave_crashed_copy(ed, "1-1", crashed, sizeof crashed);
+    // The edit dropped unsaved, as a crash would have: the source keeps the cube.
+    editor_mesh_edit_free(ed);
+    editor_mesh_edit_init(ed);
+    ed->quit_confirmed = true;
+    fx.keep_project = true;
+    char project[900];
+    memcpy(project, fx.project, sizeof project);
+    finish(&fx);
+    char source[2048];
+    (void)snprintf(source, sizeof source, "%s/assets/%s", project, key);
+    NTEST_ASSERT_EQ_UINT(faces_in(source), 6U);
+
+    static EditorFixture again;
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(again.editor->recovery.offered);
+    NTEST_EXPECT_TRUE(again.editor->recovery.has_mesh);
+    NTEST_EXPECT_EQ_STR(again.editor->recovery.mesh_key, key);
+    NTEST_ASSERT_EQ_INT(editor_recovery_recover(again.editor), NPH_RESULT_OK);
+    settle(&again); // the source cooks again
+    NTEST_EXPECT_EQ_UINT(faces_in(source), 10U);
+    again.editor->quit_confirmed = true;
+    finish(&again);
+}
+
+NTEST(EditorAutosave, a_new_sessions_directory_takes_a_name_no_directory_holds)
+{
+    TempDir root;
+    test_temp_dir_make(&root, "autosave_names");
+    char name[64];
+    NTEST_ASSERT_EQ_INT(editor_autosave_session_name(root.dir, 5U, 7U, name, sizeof name),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(name, "5-7");
+    // Earlier sessions of this process, in the same second, hold the name and
+    // the next: one of them may be a crashed one's, to be offered back.
+    char dir[1200];
+    (void)snprintf(dir, sizeof dir, "%s/5-7", root.dir);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    (void)snprintf(dir, sizeof dir, "%s/5-7-1", root.dir);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_autosave_session_name(root.dir, 5U, 7U, name, sizeof name),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(name, "5-7-2");
+    NTEST_ASSERT_EQ_INT(editor_autosave_session_name(root.dir, 6U, 7U, name, sizeof name),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(name, "6-7"); // another second
+    NTEST_ASSERT_EQ_INT(editor_autosave_session_name(root.dir, 5U, 8U, name, sizeof name),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(name, "5-8"); // another process
+    char small[3];
+    NTEST_EXPECT_EQ_INT(editor_autosave_session_name(root.dir, 5U, 7U, small, sizeof small),
+                        NPH_RESULT_OVERFLOW);
+    NTEST_EXPECT_EQ_STR(small, "");
+    test_temp_dir_remove(&root);
 }

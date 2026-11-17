@@ -134,6 +134,7 @@ static void changed(EditorMeshEdit *me)
 {
     me->changed = true;
     me->preview_stale = true;
+    ++me->revision; // autosave writes the mesh again when it moved on
 }
 
 // ---------------------------------------------------------------------------

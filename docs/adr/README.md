@@ -109,6 +109,7 @@ supersedes it and both link to each other.
 | [0101](0101-phase-14-exit.md) | Phase 14's exit: the phase's light kept at its cost, the landscape faster, its memory over | Accepted (the user's decision); decision 3 moved to Phase 16 by [0102](0102-in-house-tools-then-the-game.md) |
 | [0102](0102-in-house-tools-then-the-game.md) | Phase 15 builds the tools to make the game's world in-house; Phase 16 is the game | Accepted (the user's decision) |
 | [0103](0103-crash-handler.md) | The crash handler: a report and a minidump from the failing process, fibers included | Proposed |
+| [0104](0104-autosave.md) | Autosave: a session directory under a lock the system lets go of, and the work offered back | Proposed |
 
 ## Template
 

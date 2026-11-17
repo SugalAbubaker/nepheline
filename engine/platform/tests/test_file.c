@@ -442,6 +442,29 @@ NTEST_F(TempDir, read_all_and_write_all)
     nph_file_free_all(a, NULL, 0U); // harmless
 }
 
+NTEST_F(TempDir, a_lock_is_held_until_released_and_its_file_stays)
+{
+    char path[1100];
+    path_in(f, "session.lock", path, sizeof path);
+    NphFileLock a;
+    NphFileLock b;
+    NTEST_ASSERT_EQ_INT(nph_file_lock_acquire(path, &a), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(a.held);
+    NTEST_EXPECT_TRUE(nph_fs_exists(path)); // made when missing
+    // Another acquire, here as in another process, finds it held.
+    NTEST_EXPECT_EQ_INT(nph_file_lock_acquire(path, &b), NPH_RESULT_BUSY);
+    NTEST_EXPECT_FALSE(b.held);
+    nph_file_lock_release(&a);
+    NTEST_EXPECT_FALSE(a.held);
+    nph_file_lock_release(&a); // twice: nothing
+    NTEST_ASSERT_EQ_INT(nph_file_lock_acquire(path, &b), NPH_RESULT_OK);
+    nph_file_lock_release(&b);
+    NTEST_EXPECT_TRUE(nph_fs_exists(path)); // the file stays
+    NphFileLock zeroed;
+    memset(&zeroed, 0, sizeof zeroed);
+    nph_file_lock_release(&zeroed);
+}
+
 NTEST_F(TempDir, copy_file)
 {
     char a[1024];

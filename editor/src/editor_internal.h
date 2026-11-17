@@ -160,6 +160,7 @@ typedef struct EditorMeshEdit {
     EditorMeshEditSnapshots undo; // the mesh before each change
     EditorMeshEditSnapshots redo;
     bool changed; // since editing began
+    u64 revision; // counts the changes, for autosave (autosave.c)
     // A gizmo drag: the vertices it moves, where they and their centre began.
     NphArrayU32 drag_vertices;
     CookVec3Array drag_start;
@@ -196,7 +197,38 @@ typedef enum EditorPopup {
     EDITOR_POPUP_OPEN_SCENE,
     EDITOR_POPUP_SAVE_SCENE,
     EDITOR_POPUP_UNSAVED, // "discard the unsaved changes?" before `pending`
+    EDITOR_POPUP_RECOVER, // a session that did not end cleanly left work (autosave.c)
 } EditorPopup;
+
+// This session's autosave (autosave.c; docs/editor.md "Autosave and recovery").
+typedef struct EditorAutosave {
+    char dir[EDITOR_PATH_MAX]; // the session's directory; "" when autosave is off
+    NphFileLock lock;          // held while the editor runs: its directory is alive
+    u64 started_wall_ns;       // when the session began (UTC)
+    u64 saved_wall_ns;         // when it last autosaved (UTC); 0 before
+    u64 last_ns;               // the monotonic time of the last autosave, or of the start
+    u64 saved_state;           // the history's state the scene's autosave holds
+    u64 mesh_revision;         // the edited mesh's revision its autosave holds
+    bool has_scene;            // scene.nscene holds unsaved work
+    bool has_mesh;             // mesh.nmesh holds an edited mesh's changes
+    u32 count;                 // autosaves written
+    f64 last_ms;               // what the last one took
+    u32 last_entities;         // the entities it held
+} EditorAutosave;
+
+// The work a session that did not end cleanly left, offered back once at
+// start (autosave.c).
+typedef struct EditorRecovery {
+    bool offered;                // waits for Recover, Discard, or Later
+    char dir[EDITOR_PATH_MAX];   // its session's directory
+    NphFileLock lock;            // held while offered, so that no other editor offers it too
+    char scene[EDITOR_PATH_MAX]; // the file its scene was for; "" untitled
+    char mesh_key[EDITOR_PROJECT_PATH_MAX]; // the source of a mesh it was editing
+    bool has_scene;
+    bool has_mesh;
+    bool scene_newer; // the scene's file was written after the autosave
+    u64 saved_wall_ns;
+} EditorRecovery;
 
 // What waits for the answer about unsaved changes.
 typedef enum EditorPending {
@@ -229,6 +261,8 @@ struct Editor {
     NphCvar cv_layout;
     NphCvar cv_assets;
     NphCvar cv_cooked;
+    NphCvar cv_autosave_dir;
+    NphCvar cv_autosave_interval;
     bool cvars_registered;
     f32 mouse[2]; // the cursor, display units, from the window's events
 
@@ -238,6 +272,8 @@ struct Editor {
     NphMutex resolve_lock;
     EditorAssets assets;
     EditorMeshEdit mesh_edit;
+    EditorAutosave autosave;
+    EditorRecovery recovery;
 
     // The UI.
     EditorPanels show;
@@ -291,6 +327,39 @@ void editor_duplicate_selection(Editor *ed);
 
 // document.c
 void editor_update_title(Editor *ed);
+
+// autosave.c (docs/editor.md "Autosave and recovery")
+// Begins this session's autosave under editor.autosave_dir and looks for
+// work an editor that did not end cleanly left, which it offers (attach).
+NPH_MUST_USE NphResult editor_autosave_open(Editor *ed);
+// The name of a new session's directory that no directory under `root`
+// holds: `<seconds>-<pid>`, then `-<n>` after it. A session attached again in
+// this process within the second would otherwise take over the last one's
+// directory, a crashed one's work with it. OVERFLOW when the name or the path
+// does not fit, BUSY when a thousand names are held.
+NPH_MUST_USE NphResult editor_autosave_session_name(const char *root, u64 seconds, u64 pid,
+                                                    char *out, u64 cap);
+// Ends this session: its directory goes. An offer not yet answered stays
+// for the next start (detach).
+void editor_autosave_close(Editor *ed);
+// At the sync point: autosaves when there are changes the last autosave
+// does not hold and editor.autosave_interval seconds passed since it.
+void editor_autosave_update(Editor *ed, u64 now_ns);
+// Autosaves now, whatever the interval, the changes the last autosave does
+// not hold (before Play, after a recovery); nothing when there are none.
+// `why` is for the log.
+NPH_MUST_USE NphResult editor_autosave_now(Editor *ed, const char *why);
+// The document has no unsaved changes any more (saved, opened, new): the
+// scene's autosave holds nothing to recover and goes.
+void editor_autosave_settled(Editor *ed);
+// The offered work: Recover opens it in place of the scene, unsaved, under
+// the scene's file, and puts the mesh back in its source; Discard removes
+// it; Later keeps it for the next start.
+NPH_MUST_USE NphResult editor_recovery_recover(Editor *ed);
+void editor_recovery_discard(Editor *ed);
+void editor_recovery_later(Editor *ed);
+// The "Recover Work" popup (within the frame's UI).
+void editor_recovery_popup(Editor *ed);
 
 // panel_outliner.c
 void editor_panel_outliner(Editor *ed);

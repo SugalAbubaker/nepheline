@@ -343,7 +343,7 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
   - Complex models are imported from DCC tools (e.g. Blender) via glTF.
 - **Materials and textures** (Phase 15, ADR-0102): materials made and edited in the editor, procedural textures, and texture painting on models.
 - **World building** (Phase 15, ADR-0102): prefabs and placement tools; city-sized worlds of cells and scene files, streamed in the editor as in the game; terrain sculpted and painted; roads and splines; scatter painting.
-- Autosave, with the work recovered after a crash (Phase 15, ADR-0102).
+- Autosave, with the work recovered after a crash (Phase 15, ADR-0102, ADR-0104).
 - Feature test scenes: built-in sample scenes for exercising renderer, physics, and audio features.
 
 ## 9. Testing & Quality Strategy

@@ -150,9 +150,10 @@ if(NPH_BUILD_TESTS)
 
     # nph_crash_test(<mode> [REPORTS <n>] [LOG <substring>] [EXPECT <substring>...]
     #                [ON_WINDOWS <substring>...] [ON_LINUX <substring>...]
-    #                [DUMP <substring>...])
+    #                [DUMP <substring>...] [AFTER <mode> AFTER_EXPECT <substring>])
     function(nph_crash_test mode)
-        cmake_parse_arguments(PARSE_ARGV 1 ARG "" "REPORTS;LOG" "EXPECT;ON_WINDOWS;ON_LINUX;DUMP")
+        cmake_parse_arguments(PARSE_ARGV 1 ARG "" "REPORTS;LOG;AFTER;AFTER_EXPECT"
+                              "EXPECT;ON_WINDOWS;ON_LINUX;DUMP")
         set(expect ${ARG_EXPECT})
         set(dump_check "")
         set(dump_expect "")
@@ -174,6 +175,7 @@ if(NPH_BUILD_TESTS)
                 "-DDIR=${CMAKE_CURRENT_BINARY_DIR}/crash_tests/$<CONFIG>/${mode}"
                 "-DREPORTS=${ARG_REPORTS}" "-DEXPECT=${expect}" "-DLOG_EXPECT=${ARG_LOG}"
                 "-DDUMP_CHECK=${dump_check}" "-DDUMP_EXPECT=${dump_expect}"
+                "-DAFTER_MODE=${ARG_AFTER}" "-DAFTER_EXPECT=${ARG_AFTER_EXPECT}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_crash.cmake")
         set_tests_properties(platform.crash.${mode} PROPERTIES
             LABELS "unit" TIMEOUT 180 SKIP_REGULAR_EXPRESSION "skipped:")
@@ -229,6 +231,12 @@ if(NPH_BUILD_TESTS)
         ON_LINUX "fault:     SIGSEGV (11)"
         DUMP "exception 0xC00000FD" "exception thread listed 1")
     nph_crash_test(uninstalled REPORTS 0)
+    # A file lock (file.h) the failed process held is free for the next one:
+    # how the editor tells a crashed session's autosave from a live one's.
+    nph_crash_test(locked
+        ON_WINDOWS "${crash_access_windows}"
+        ON_LINUX "${crash_access_linux}"
+        AFTER lock_free AFTER_EXPECT "lock taken")
     if(WIN32)
         nph_crash_test(invalid_parameter
             ON_WINDOWS "fault:     invalid parameter (0xC0000417)"

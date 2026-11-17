@@ -4,15 +4,18 @@
 #
 #   cmake -DHELPER=<exe> -DMODE=<mode> -DDIR=<dir> [-DREPORTS=<n>]
 #         [-DEXPECT=<substrings>] [-DLOG_EXPECT=<substring>]
-#         [-DDUMP_CHECK=<exe> -DDUMP_EXPECT=<substrings>] -P run_crash.cmake
+#         [-DDUMP_CHECK=<exe> -DDUMP_EXPECT=<substrings>]
+#         [-DAFTER_MODE=<mode> -DAFTER_EXPECT=<substring>] -P run_crash.cmake
 #
 # It passes when the helper ended by its failure (not 0, nor the 90 to 93
 # it returns when it could not fail as asked), DIR holds REPORTS reports (1 by
 # default) that each contain every EXPECT, the helper's log holds
 # LOG_EXPECT (delivered after the report), and, with DUMP_CHECK, the
-# minidump beside each report reads back with every DUMP_EXPECT. Where the
-# helper prints "skipped:" (the sanitizers' builds) it prints that too, for
-# ctest's SKIP_REGULAR_EXPRESSION.
+# minidump beside each report reads back with every DUMP_EXPECT. With
+# AFTER_MODE, the helper then runs again in that mode on the same directory
+# and must exit 0 saying AFTER_EXPECT (what the failed process left, seen
+# from a live one). Where the helper prints "skipped:" (the sanitizers'
+# builds) it prints that too, for ctest's SKIP_REGULAR_EXPRESSION.
 
 if(NOT DEFINED HELPER OR NOT DEFINED MODE OR NOT DEFINED DIR)
     message(FATAL_ERROR "run_crash.cmake: HELPER, MODE, and DIR are required")
@@ -104,6 +107,21 @@ if(DEFINED LOG_EXPECT AND NOT LOG_EXPECT STREQUAL "")
     if(pos EQUAL -1)
         message(FATAL_ERROR "${MODE}: the log lacks '${LOG_EXPECT}' (not delivered after the report)\n"
                             "--- helper.log ---\n${log}")
+    endif()
+endif()
+
+if(DEFINED AFTER_MODE AND NOT AFTER_MODE STREQUAL "")
+    execute_process(
+        COMMAND "${HELPER}" "${AFTER_MODE}" "${DIR}"
+        RESULT_VARIABLE after_rc
+        OUTPUT_VARIABLE after_out
+        ERROR_VARIABLE after_err)
+    if(NOT after_rc EQUAL 0)
+        message(FATAL_ERROR "${MODE}: then ${AFTER_MODE} exited with '${after_rc}'\n${after_out}${after_err}")
+    endif()
+    string(FIND "${after_out}" "${AFTER_EXPECT}" pos)
+    if(pos EQUAL -1)
+        message(FATAL_ERROR "${MODE}: then ${AFTER_MODE} did not say '${AFTER_EXPECT}'\n${after_out}${after_err}")
     endif()
 endif()
 

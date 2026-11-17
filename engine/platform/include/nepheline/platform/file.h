@@ -226,6 +226,30 @@ bool nph_dir_next(NphDirIterator *it, NphDirEntry *out);
 
 void nph_dir_close(NphDirIterator *it);
 
+// ---------------------------------------------------------------------------
+// Locks that last as long as the process
+// ---------------------------------------------------------------------------
+
+// A lock held while a process keeps its file open: no other process takes
+// it, nor another acquire in this one, and the system lets go of it when
+// the process ends, however it ends (a crash too). It tells a live process's
+// files from a dead one's: the editor's autosave sessions (docs/editor.md).
+// On Windows the file is opened without sharing; on Linux it is flock'd.
+typedef struct NphFileLock {
+    u64 native; // HANDLE or file descriptor
+    b32 held;
+} NphFileLock;
+
+// Opens `path`, creating it when missing, and takes its lock.
+// NPH_RESULT_BUSY when it is held already; the file system's errors.
+// Thread-safety: NPH_THREADSAFE for distinct locks.
+NPH_MUST_USE NphResult nph_file_lock_acquire(const char *path, NphFileLock *out);
+
+// Lets go of the lock and closes its file, which stays. Nothing on a zeroed
+// or released lock. Release a lock before removing its file: Windows does
+// not delete a file that is open without sharing.
+void nph_file_lock_release(NphFileLock *lock);
+
 #ifdef __cplusplus
 }
 #endif

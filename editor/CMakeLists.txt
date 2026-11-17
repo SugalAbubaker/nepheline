@@ -5,6 +5,7 @@
 # library so its tests drive the same code the executable runs.
 
 add_library(nph_editor_core STATIC
+    src/autosave.c
     src/camera.c
     src/camera.h
     src/document.c
@@ -54,9 +55,10 @@ target_link_libraries(nph_editor PRIVATE nph_editor_core)
 set_target_properties(nph_editor PROPERTIES FOLDER "editor")
 
 if(NPH_BUILD_TESTS)
-    # The executable itself for a few frames, windowed, with no layout file.
+    # The executable itself for a few frames, windowed, with no layout file and
+    # no autosave (nothing left in the build directory).
     # Skipped (77) on machines without a window system or a Vulkan device.
-    add_test(NAME editor.smoke COMMAND nph_editor --frames=60 editor.layout=)
+    add_test(NAME editor.smoke COMMAND nph_editor --frames=60 editor.layout= editor.autosave_dir=)
     set_tests_properties(editor.smoke PROPERTIES TIMEOUT 120 LABELS "sample"
                                                  SKIP_RETURN_CODE 77)
 endif()
