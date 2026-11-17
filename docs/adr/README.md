@@ -106,6 +106,7 @@ supersedes it and both link to each other.
 | [0098](0098-trimmed-cards-where-their-key-holds.md) | Trimmed cards where their key holds: the rays choose each frame, paged or whole | Accepted |
 | [0099](0099-two-views-over-the-gate.md) | Two views over the gate: Bistro's street turn and the city's rooftop, recorded | Accepted (the user's decision) |
 | [0100](0100-top-level-updated-in-place.md) | The top level updated in place where only what its records hold changes | Accepted |
+| [0101](0101-phase-14-exit.md) | Phase 14's exit: the phase's light kept at its cost, the landscape faster, its memory over | Accepted (the user's decision) |
 
 ## Template
 

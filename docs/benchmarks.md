@@ -498,8 +498,15 @@ the 99th percentile; ADR-0059 has every view) with
 again and interleaved with the end, Bistro's views take 0.04 to 0.08 ms
 more, the walk down its meshes' level hierarchies, which Phase 14 won
 back first (ADR-0066, ADR-0070: 0.01 to 0.02 ms left, inside a round's
-spread). A run started while the panel is idle measures as one with the
-editor minimized: with nothing redrawing, the same build of Bistro had no
+spread). Phase 14's end is `reference_scenes-2026-11-16-exit-1440p` (the
+gate's size; `-exit-1440p-b` its second round), `-exit-4k` (the §10.4
+lines), `-exit-landscape-1440p` and `-exit-landscape-4k` (each with a
+second round, `-b`): against the start, v0.8.0 built again with each
+scene cooked by its own tree's cooker and interleaved with the end,
+Bistro's views take 2.2 to 2.9 ms more at the gate's size, the light the
+phase added, and the landscape's 4.3 to 6.9 ms less (ADR-0101). A run
+started while the panel is idle measures as one with the editor
+minimized: with nothing redrawing, the same build of Bistro had no
 frame so paused, where 22 to 28 of each view's 239 had with a tool running
 in the panel, the frames' medians equal (2026-11-13: the street's 99th
 percentile 6.14 ms against 6.67, the terrace's 6.80 against 7.46). The
