@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-16
 - **Status:** Accepted (the user's decision of 2026-11-16, "Accept, memory to Phase 15", on the exit measured that
-  day on main's 62bc9fb)
+  day on main's 62bc9fb); decision 3 moved to Phase 16 by [ADR-0102](0102-in-house-tools-then-the-game.md)
 
 ## Context
 

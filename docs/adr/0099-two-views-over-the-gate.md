@@ -4,7 +4,8 @@
 - **Status:** Accepted (the user's word of 2026-11-15: "Write the ADR recording both views as over the
   gate", after the research below found no route to the gate for either that leaves the image as it
   is; records two of the eighteen views of [ADR-0082](0082-gate-at-1440p.md)'s gate as not met, as
-  CLAUDE.md §10.4 asks of a budget that proves unreachable; CLAUDE.md §10.7 and §12 point here)
+  CLAUDE.md §10.4 asks of a budget that proves unreachable; CLAUDE.md §10.7 and §12 point here); decision 4's
+  gate at Phase 15's exit withdrawn by [ADR-0102](0102-in-house-tools-then-the-game.md)
 
 ## Context
 

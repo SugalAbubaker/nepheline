@@ -933,4 +933,5 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
 - On Windows a debugger may hold a game module's PDB; game modules that
   need it link with a unique PDB name per build.
 - Shipping builds still load the game as a module; linking a game into
-  the player statically (for whole-program optimisation) is Phase 15.
+  the player statically (for whole-program optimisation) comes with the
+  shipping builds, after Phase 16 (ADR-0102).

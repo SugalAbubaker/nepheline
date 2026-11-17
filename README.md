@@ -8,9 +8,11 @@ It is data-oriented, GPU-driven, and designed bandwidth-first for one target:
 **240 FPS at native 3840×2160 on mid-range hardware** (NVIDIA RTX 3060 Ti),
 rendering a large, detailed open world — no upscaling, no frame generation,
 every frame from fresh input and a fresh simulation step. The reference scenes
-gate at 144 FPS at native 2560×1440 through Phase 15
-([ADR-0082](docs/adr/0082-gate-at-1440p.md)); the first game, built after
-that, reaches 240 at native 4K ([ADR-0067](docs/adr/0067-the-game-is-a-city.md)).
+gate at 144 FPS at native 2560×1440
+([ADR-0082](docs/adr/0082-gate-at-1440p.md)). Phase 15 builds the tools to make
+the game's world in-house, and the first game, Phase 16, reaches 240 at native
+4K ([ADR-0067](docs/adr/0067-the-game-is-a-city.md),
+[ADR-0102](docs/adr/0102-in-house-tools-then-the-game.md)).
 
 The complete plan — engineering principles, subsystem designs with the
 research they implement, performance budgets, and the phased roadmap — lives
@@ -35,7 +37,8 @@ in [`CLAUDE.md`](CLAUDE.md). It is the project's source of truth.
 | 12 | Audio: real-time scopes that prove the audio thread never allocates or blocks; SIMD mix kernels, a bandlimited resampler, filters, delays, panning; WAV, our own lossless codec (the §13 decision), and our ADPCM; the mixer (virtual voices, buses, sends, ducking, snapshots); an equaliser, dynamics, echo, and an FDN reverberator; 3D attenuation, Doppler, air absorption, occlusion, and obstruction; the output device through miniaudio, and streaming; sound assets and their cooking; in the engine, AudioSource and AudioListener components, one-shots from any thread, and occlusion rays through the physics world; golden offline mixes; an audio sample | **done** (`v0.7.0`) |
 | 13 | Streaming and scale: cluster levels of detail (virtualized geometry), cooked with the meshes on the job system; voxel levels for aggregate geometry and the far field, drawn, splatted, and cast into the sun's virtual shadow map; a world partition's cells and their voxel proxies, streamed level by level on loading jobs, the camera and the shadow map culling cells first; virtual texturing on sparse images, whole levels clamped by the samplers, streamed within a VRAM budget; the open-landscape reference scene (Poly Haven's pine forest) streaming within 6.5 GB at native 4K, measured against every §10.4 line (ADR-0066) | **done** (`v0.8.0`) |
 | 14 | The city and ray-traced effects: the levels of detail walked by a flat cull of the levels an instance's distance may take; Emerald Square tiled into a big city, and the world partition's cells and streams in the engine's runtime; the landscape's raster optimized (its frame 15 to 23 % shorter at native 4K); many-light sampling, each light's near field per pixel and the far fields by per-pixel reservoirs (ReSTIR), and the many-light interior (Intel's Sponza and its candles); ray-query reflections, by a ray a pixel on smooth surfaces and from the radiance cache's cells on rough ones; the local lights' shadows and screen-space contact shadows; quality tiers; AgX by default, a radiance cache filtered between cells and steady in motion, alpha-tested surfaces that cast and stop rays as they are drawn, and a view in motion as sharp as standing; leaf cards trimmed for the rays, GPU-driven transparency, and a top level updated in place; Bistro, the city, and the interior at 144 FPS at native 1440p in 16 of their 18 views, the other two recorded (ADR-0099), every §10.4 line reported at native 4K (ADR-0101) | **done** (`v0.9.0`) |
-| 15 | Production hardening; then the first game, which reaches 240 FPS during its development | planned |
+| 15 | In-house production tools ([ADR-0102](docs/adr/0102-in-house-tools-then-the-game.md)): autosave and crash dumps; materials, procedural textures, and texture painting in the editor; the Blender round trip with collision; physics and audio in levels, with a first-person starter game; prefabs and placement tools; level-design modeling; city-sized worlds, terrain, roads, and scatter painting; soak tests and the editor guide | planned |
+| 16 | The first game: character models, animation, NPC AI and crowds, built as the game needs them; the engine optimized until the game holds 240 FPS at native 4K | planned |
 
 ## Building
 
