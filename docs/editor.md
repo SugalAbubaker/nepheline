@@ -83,6 +83,21 @@ the mesh's changes, and Escape (or Tab) ends editing.
 Exit status: 0; 1 on a failure (validation errors included); 2 for a bad
 command line; 77 without a window system or a Vulkan device.
 
+### Crashes
+
+A crash ends the editor with a report, and on Windows a minidump, in the
+project's `crashes/` directory: the working directory's, as for the sources
+and the cooked files (`crash.dir=<path>` elsewhere; runtime.md "Crashes";
+ADR-0103).
+- The report says what failed and where: the fault, the thread, the stack as
+  module + offset, the failed assertion if one did. Its notes name the
+  project, the scene, the GPU and the game, and it ends with the log's last
+  records.
+- The dump opens in Visual Studio with the build's PDBs: File > Open, then
+  "Debug with Native Only".
+- The console's `crash` command (not in Shipping builds) fails on purpose, to
+  see it work.
+
 ## The panels
 
 The default layout puts the outliner on the left, the viewport in the

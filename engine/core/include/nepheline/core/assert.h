@@ -49,6 +49,12 @@ typedef NphAssertAction (*NphAssertHandler)(const NphAssertInfo *info, void *use
 void nph_assert_set_handler(NphAssertHandler handler, void *user, NphAssertHandler *out_previous,
                             void **out_previous_user);
 
+// The handler used while none is installed: prints the failure to stderr
+// and asks for NPH_ASSERT_ACTION_ABORT. For a handler that adds to it and
+// calls it on (nph_assert_set_handler reports NULL while it is the one used).
+// Thread-safety: NPH_THREADSAFE.
+NphAssertAction nph_assert_default_handler(const NphAssertInfo *info, void *user);
+
 // Reports a failed assertion: formats the message, invokes the handler, and
 // performs its chosen action. Returns only for NPH_ASSERT_ACTION_CONTINUE
 // (and after a BREAK). Called by the macros below; not called directly.

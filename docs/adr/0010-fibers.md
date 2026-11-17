@@ -1,7 +1,9 @@
 # 0010. Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback
 
 - **Date:** 2026-10-12
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-11-17 by [ADR-0103](0103-crash-handler.md): on
+  Windows a fiber's stack has a guard page of the system's kind and a reserve below it, as a
+  thread's, and a frame at its base for the crash handler
 
 ## Context
 

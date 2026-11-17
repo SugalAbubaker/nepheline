@@ -50,7 +50,9 @@ returns `ABORT` (default: message on stderr, then a non-interactive
 `abort()`), `BREAK` (debugger trap), or `CONTINUE` (tests). Without asserts
 the condition of `NPH_ASSERT` is not evaluated at all and `NPH_UNREACHABLE`
 becomes an optimiser hint. The handler is process-wide diagnostic state, in
-the category §2 exempts from the no-globals rule.
+the category §2 exempts from the no-globals rule. While none is installed
+the default is used, `nph_assert_default_handler`, which a handler that adds
+to it calls on (the crash handler does: platform.md).
 
 Tests observe expected failures through `NPH_TEST_EXPECT_ASSERT(stmt)`
 (`engine/core/tests/test_support.h`), which installs a counting handler. The

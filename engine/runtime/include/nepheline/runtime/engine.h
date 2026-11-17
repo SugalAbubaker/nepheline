@@ -169,6 +169,33 @@ void nph_engine_quit(NphEngine *engine);
 bool nph_engine_should_quit(const NphEngine *engine);
 
 // ---------------------------------------------------------------------------
+// Crashes (platform/crash.h; docs/runtime.md "Crashes")
+// ---------------------------------------------------------------------------
+
+// The crash report notes the engine keeps up to date: its GPU and driver,
+// the scene last loaded or saved, and the game module. A host uses the
+// others (the editor, note 0: its project).
+#define NPH_ENGINE_CRASH_NOTE_GPU   1U
+#define NPH_ENGINE_CRASH_NOTE_SCENE 2U
+#define NPH_ENGINE_CRASH_NOTE_GAME  3U
+
+// The crash handler for a host, installed before nph_engine_create so that
+// a failure while the engine comes up is reported too. Reports go to the
+// directory the command line names with `crash.dir=<path>` (default
+// "crashes", in the working directory); `crash.full_dump=1` writes dumps of
+// the whole process (Windows). The log gets nph_crash_log_sink, so that
+// reports end with its last records. A host that cannot have one (the
+// sanitizers' builds) runs without it; what happened is logged and
+// returned. `app_name` names the reports (crash.h's rules).
+// Thread-safety: NPH_MAIN_THREAD_ONLY, after nph_log_init.
+NphResult nph_engine_crash_handler_install(const NphEngineConfig *config, const char *app_name);
+
+// Removes the handler and the log's sink, after nph_engine_destroy and
+// before nph_log_shutdown. Nothing when none is installed.
+// Thread-safety: NPH_MAIN_THREAD_ONLY.
+void nph_engine_crash_handler_uninstall(void);
+
+// ---------------------------------------------------------------------------
 // Simulation
 // ---------------------------------------------------------------------------
 

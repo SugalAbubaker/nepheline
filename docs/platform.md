@@ -91,10 +91,25 @@ bounds), swaps the stack pointer, and pops the target's state; a fresh
 fiber's first switch "returns" into a trampoline that calls its function.
 The assembly is `src/fiber_win64.asm` (MASM) and `src/fiber_sysv_x64.S`
 (GNU assembler); `src/fiber.c` lays out the initial frame, owns the
-stacks (a `vmem.h` reservation with a no-access guard page below the
-usable range), and carries the ASan and TSan annotations so the sanitizers
-follow the stack switches. `-DNPH_FIBERS_WIN32=ON` substitutes the Win32
-fiber API behind the same header (`src/fiber_win32.c`); CI builds one
+stacks, and carries the ASan and TSan annotations so the sanitizers follow
+the stack switches. A stack is a `vmem.h` reservation, committed whole.
+- On Linux, one no-access guard page sits below the usable range.
+- On Windows, the range below the stack is laid out as below a thread's
+  stack: a guard page of the system's kind (`PAGE_GUARD`), and reserved
+  pages to 64 KiB. The switch keeps the thread information block's stack
+  bounds per fiber, so the system grows an overflowing fiber's stack into
+  that reserve, then raises `EXCEPTION_STACK_OVERFLOW` with its guarantee
+  left for the crash handler to report from (ADR-0103).
+
+On Windows, `nph_fiber_entry` also runs the fiber's function inside a
+`__try` whose filter is the crash handler's. A fiber's stack ends at the
+trampoline, which has no unwind data, so without that frame an exception
+that no handler on the fiber takes would never reach the
+unhandled-exception filter at the thread's start. The frame is
+table-based and costs nothing until an exception comes.
+
+`-DNPH_FIBERS_WIN32=ON` substitutes the Win32 fiber API behind the same
+header (`src/fiber_win32.c`, with the same frame); CI builds one
 configuration with it.
 
 Rules (the header spells them out): a thread calls `nph_fiber_init_thread`
@@ -271,6 +286,72 @@ Windows console (so the console sink can use colour), and debugger
 detection. The `NPH_LOG_PLATFORM` category carries the OS messages the
 layer reports.
 
+## The crash handler (`crash.h`)
+
+`nph_crash_install` (CLAUDE.md §8.11; ADR-0103) hooks the faults that end a
+process. When one happens, it writes into the directory it was given:
+
+- **`<app>-<yyyymmdd>-<hhmmss>-<pid>.txt`, the report.** It holds:
+  - the program, its version and build, the UTC time, the process, and the
+    thread, by the name `nph_thread_set_current_name` gave it;
+  - the fault (the exception or the signal, and what it was about: a write,
+    no mapping there, and the address) and the instruction;
+  - the failed assertion, when one ended it: install wraps the assert
+    handler (core/assert.h) and calls it on;
+  - the notes (`nph_crash_set_note`). The engine keeps its GPU and driver,
+    the scene, and the game module there; the editor adds its project
+    (runtime.md "Crashes");
+  - the stack. On Windows it is the return addresses as module + offset,
+    unwound with the modules' own unwind data (`RtlVirtualUnwind`). On
+    Linux it is a `backtrace()`, followed by the process's memory map for
+    `addr2line`;
+  - the log's last 64 records, kept by `nph_crash_log_sink` where a host
+    adds it.
+- **On Windows, `<same>.dmp`, a minidump.** Visual Studio and WinDbg open it
+  with the build's PDBs. It holds the threads and their stacks, the memory
+  the stacks point at, the modules, the handles, and the memory map. Global
+  data is kept only for the modules in the executable's directory (the
+  engine's and the game's): with every module's, the player's dump came to
+  40 MB, nearly all of it the NVIDIA driver's, and it is 1.7 MB without.
+  `full_dump` writes the whole process instead.
+- **A line on standard error** naming the report.
+
+The process then ends as the fault would have ended it. On Windows that is
+the exception's code as the exit code, with no error-reporting dialog. On
+Linux it is the signal's default action, raised again: its exit status, and
+a core file where the system writes them.
+
+| | Windows | Linux |
+|---|---|---|
+| Hooks | the unhandled-exception filter, and the frame at the base of every fiber (above); the C runtime's SIGABRT (`abort()`), invalid-parameter, and pure-call handlers | `sigaction` on SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS |
+| Who writes | a thread made at install: the failing thread hands it the exception and waits | the signal handler, with async-signal-safe calls (`backtrace()` is warmed at install, so it loads nothing then) |
+| Stack overflows | `EXCEPTION_STACK_OVERFLOW`, on threads and fibers; the writing thread has a stack of its own | the guard page's SIGSEGV, on the thread's alternate signal stack: 64 KiB with a guard page, for the installing thread and every thread `nph_thread_create` makes while installed (`nph_crash_thread_attach` for others) |
+
+**Once is enough.** A second fault while one is reported waits for the
+process to end, and a fault while reporting ends it at once. Writing a report
+allocates nothing and takes no lock the process shares.
+
+**The log.** Once the report and its dump are written, the log's pending
+records are delivered (`nph_log_drain`) and the C library's streams flushed,
+so the console and any log file get the last lines. Then the report ends
+with the log's last records. The log's sinks take locks the failure may
+hold, so this step runs under a watchdog: on Windows the failing thread
+waits 5 s for it before ending the process, and on Linux `alarm(5)` ends it.
+What was written before stays.
+
+**Under a debugger.** Windows calls no unhandled-exception filter, and the
+fibers' frame passes the exception on likewise. The C runtime's hooks break
+into the debugger before they report.
+
+**Not reported:**
+- on Windows, a fail-fast (a /GS cookie check, or heap corruption that the
+  heap detects);
+- a kill from outside;
+- a hang.
+
+Under ASan and TSan install returns `NPH_RESULT_UNSUPPORTED`: the sanitizers
+own the same signals and report more.
+
 ## Benchmarks
 
 `benchmarks/platform/bench_platform.c`, Profile, Ryzen 7 5800X, Windows 10,
@@ -372,6 +453,29 @@ instead of the CPU; Phase 6 measures the streamer against both.
   `platform_test_dylib`, a shared library built by the test CMake),
   `test_locked_alloc.c` (TLSF through the lock from eight threads, then
   `nph_tlsf_validate`), `test_log_thread.c`, `test_platform.c`.
+- `test_crash.c`, the crash handler without a crash:
+  - the report's text and numbers;
+  - the UTC date, against known dates and day by day across four centuries;
+  - the report's name, the notes, and the log's ring (wrapping, oldest first);
+  - install's checks, and the assert hook wrapped and given back;
+  - a whole report written for a captured context: on Windows with its
+    minidump, on Linux with its registers, stack, and map;
+  - on Linux, the alternate signal stack of a created thread.
+- `platform.crash.<mode>` (`crash_helper.c`, `run_crash.cmake`), the crash
+  handler on real faults in a child process. Each test checks that the
+  process ended by the fault, the report's text, the log line delivered
+  after it, and on Windows the minidump, read back with dbghelp
+  (`crash_dump_check.c`: its exception, its thread, the executable's data).
+  The modes:
+  - an access violation, abort, a failed assertion;
+  - a division by zero, an illegal instruction;
+  - a stack overflow, a fault on a thread, two threads at once;
+  - a fault on a fiber, and a fiber's own stack overflow;
+  - the handler uninstalled (no report);
+  - on Windows, the C runtime's invalid parameter and pure call.
+
+  They are skipped in the sanitizers' builds, where the handler does not
+  install.
 
 Assertions are made on the main thread only; workers record into shared
 atomics. Work counts scale by `TEST_SCALE` (1 in Debug, where the

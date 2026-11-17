@@ -733,6 +733,39 @@ reports as a skip (`sample.game_sandbox`, `sample.game_sandbox_headless`,
 and `sample.game_physics`; `sample.game_physics_headless` runs the physics
 sample's autopilot and checks its verdict in the log).
 
+## Crashes
+
+The player and the editor install the crash handler (platform.md "The crash
+handler"; ADR-0103) before they create the engine, so that a failure while
+the engine comes up is reported too. They call
+`nph_engine_crash_handler_install(config, app_name)`, which:
+- reads `crash.dir=<path>` from the command line (default `crashes`, in the
+  working directory) and `crash.full_dump=1`, a dump of the whole process on
+  Windows. These come from the command line rather than cvars, because the
+  engine that registers cvars does not exist yet; the values stay pending,
+  unused;
+- adds `nph_crash_log_sink`, so that a report ends with the log's last
+  records.
+
+`nph_engine_crash_handler_uninstall` comes after `nph_engine_destroy`. Where
+no handler installs (the sanitizers' builds) the host runs without one, and
+says so in the log.
+
+The engine keeps three of the report's notes current, whether a handler is
+installed or not:
+
+| Note | What |
+|---|---|
+| `NPH_ENGINE_CRASH_NOTE_GPU` (1) | the device and its driver, once the device is made |
+| `NPH_ENGINE_CRASH_NOTE_SCENE` (2) | the scene file last loaded or saved |
+| `NPH_ENGINE_CRASH_NOTE_GAME` (3) | the game module, and how often it was reloaded |
+
+Note 0 is the host's (the editor's project); 4 to 7 are free.
+
+The console's `crash [access|abort|assert]` ends the process on purpose, to
+see the handler, the report, the dump, and the editor's recovery work. It is
+not in Shipping builds.
+
 ## Threading model
 
 The engine belongs to the thread that created it (NPH_MAIN_THREAD_ONLY);

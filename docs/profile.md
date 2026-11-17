@@ -216,7 +216,8 @@ The runtime (Phase 9) adds the frame loop's phases.
   gpu module) would align them.
 - No source locations per zone and no sampling profiler; the zones say
   where time goes at the granularity the code was instrumented.
-- The crash handler and minidumps of §8.11 are Phase 15 work.
+- The crash handler and minidumps of §8.11 are platform's (platform.md "The crash
+  handler", ADR-0103): an OS facility, as the module boundaries put them.
 - ARM64's counter rate is read from the platform's measurement; the ARM64
   path is untested until ARM64 builds exist.
 

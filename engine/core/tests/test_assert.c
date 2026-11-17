@@ -20,6 +20,16 @@ NTEST(assert, handler_round_trip)
     NTEST_ASSERT_EQ_PTR(current_user, &rec);
 }
 
+// The default, which a wrapping handler calls on: it reports (on stderr) and
+// asks for the abort, whatever the build.
+NTEST(assert, default_handler_asks_for_the_abort)
+{
+    const NphAssertInfo info = {"file.c", "fn", 7U, "x != 0", "a message"};
+    NTEST_ASSERT_EQ_INT(nph_assert_default_handler(&info, NULL), NPH_ASSERT_ACTION_ABORT);
+    const NphAssertInfo bare = {"file.c", "fn", 8U, "y != 0", ""};
+    NTEST_ASSERT_EQ_INT(nph_assert_default_handler(&bare, NULL), NPH_ASSERT_ACTION_ABORT);
+}
+
 #if NPH_ASSERTS_ENABLED
 
 NTEST(assert, failed_assert_reports_condition_and_location)

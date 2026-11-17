@@ -14,6 +14,7 @@
 #include <nepheline/platform/fiber.h>
 #include <nepheline/platform/vmem.h>
 
+#include "crash_internal.h"
 #include "platform_internal.h"
 
 #include <stdlib.h>
@@ -30,6 +31,12 @@
 #include <intrin.h>
 #else
 #include <xmmintrin.h>
+#endif
+
+#if NPH_PLATFORM_WINDOWS
+// Bytes reserved below a fiber's stack on Windows: its guard page, the pages
+// an overflow grows into, and the system's stack guarantee (nph_fiber_create).
+#define FIBER_WIN32_BELOW_STACK NPH_KIB(64)
 #endif
 
 // The assembly entry points.
@@ -116,10 +123,27 @@ NphResult nph_fiber_create(NphFiber *fiber, const NphFiberDesc *desc)
         size = NPH_FIBER_MIN_STACK_SIZE;
     }
     size = nph_align_up_u64(size, page);
-    const u64 reserved = size + page; // one guard page below the stack
+#if NPH_PLATFORM_WINDOWS
+    // Below the stack, as below a thread's: a guard page (PAGE_GUARD), and
+    // reserved pages under it that the system grows the stack into until it
+    // raises EXCEPTION_STACK_OVERFLOW with its guarantee left to report from
+    // (crash.h). The switch keeps the thread information block's stack
+    // bounds per fiber, so the system treats this stack as the thread's. A
+    // guard of no access alone leaves an overflow no room to be reported.
+    const u64 below = FIBER_WIN32_BELOW_STACK;
+#else
+    const u64 below = page; // one guard page below the stack
+#endif
+    const u64 reserved = size + below;
     void *base = NULL;
     NPH_TRY(nph_vmem_reserve(reserved, &base));
-    const NphResult r = nph_vmem_commit((u8 *)base + page, size);
+    NphResult r = nph_vmem_commit((u8 *)base + below, size);
+#if NPH_PLATFORM_WINDOWS
+    if (r == NPH_RESULT_OK && VirtualAlloc((u8 *)base + below - page, (SIZE_T)page, MEM_COMMIT,
+                                           PAGE_READWRITE | PAGE_GUARD) == NULL) {
+        r = nph_win32_fail("VirtualAlloc(fiber stack guard)", GetLastError());
+    }
+#endif
     if (r != NPH_RESULT_OK) {
         (void)nph_vmem_release(base, reserved);
         return r;
@@ -128,7 +152,7 @@ NphResult nph_fiber_create(NphFiber *fiber, const NphFiberDesc *desc)
     // left poisoned; the stack must start clean.
     NPH_ASAN_UNPOISON(base, reserved);
     fiber->stack_base = (u8 *)base;
-    fiber->stack_lo = (u8 *)base + page;
+    fiber->stack_lo = (u8 *)base + below;
     fiber->stack_size = size;
     fiber->reserved_size = reserved;
     fiber->fn = desc->fn;
@@ -210,7 +234,27 @@ NPH_NO_INLINE NphFiber *nph_fiber_current(void)
 void nph_fiber_entry(NphFiber *fiber)
 {
     finish_switch();
+#if NPH_PLATFORM_WINDOWS
+    // The fiber's stack ends at the trampoline, which has no unwind data, so
+    // an exception that no handler on the fiber takes never reaches the
+    // thread's start, where Windows calls the unhandled-exception filter.
+    // This frame stands in for it (crash.h); table-based, it costs nothing
+    // until an exception comes.
+#if NPH_COMPILER_CLANG
+// Structured exception handling is Windows's, which clang-cl accepts as an extension.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#endif
+    __try {
+        fiber->fn(fiber->user);
+    } __except (crash_win32_fiber_filter(GetExceptionInformation())) {
+    }
+#if NPH_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif
+#else
     fiber->fn(fiber->user);
+#endif
     // There is no frame to return to; a fiber ends by switching away.
     NPH_LOG_FATAL(&NPH_LOG_PLATFORM, "fiber '%s' returned from its function", fiber->name);
     nph_log_flush(0U);

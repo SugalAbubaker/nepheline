@@ -3,9 +3,11 @@
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
 #include <nepheline/core/realtime.h>
+#include <nepheline/platform/crash.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/platform/time.h>
 
+#include "crash_internal.h"
 #include "platform_internal.h"
 
 #include <limits.h>
@@ -31,12 +33,22 @@ typedef struct ThreadStart {
 // closed by the trampoline when the thread ends.
 static NPH_THREAD_LOCAL HANDLE t_sleep_timer;
 
+// The name nph_thread_set_current_name gave this thread, for crash reports:
+// the OS's own copy (GetThreadDescription) is allocated when it is read.
+static NPH_THREAD_LOCAL char t_name[NPH_THREAD_NAME_MAX];
+
+const char *nph_thread_current_name_copy(void)
+{
+    return t_name;
+}
+
 void nph_thread_exit_cleanup(void)
 {
     if (t_sleep_timer != NULL) {
         CloseHandle(t_sleep_timer);
         t_sleep_timer = NULL;
     }
+    nph_crash_thread_detach();
     nph_log_thread_detach();
 }
 
@@ -52,6 +64,8 @@ static DWORD WINAPI thread_main(LPVOID arg)
     if (name[0] != '\0') {
         nph_thread_set_current_name(name);
     }
+    // Nothing on Windows; called as on Linux (crash.h).
+    (void)nph_crash_thread_attach();
     fn(user);
     nph_thread_exit_cleanup();
     return 0U;
@@ -172,6 +186,7 @@ void nph_thread_set_current_name(const char *name)
     NPH_ASSERT(name != NULL);
     char truncated[NPH_THREAD_NAME_MAX];
     nph_thread_copy_name(truncated, name);
+    memcpy(t_name, truncated, sizeof t_name);
     wchar_t wide[NPH_THREAD_NAME_MAX];
     if (nph_win32_utf8_to_wide(truncated, wide, (u32)NPH_ARRAY_COUNT(wide)) != NPH_RESULT_OK) {
         // Truncation may have cut a multi-byte sequence; keep the ASCII prefix.

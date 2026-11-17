@@ -316,7 +316,7 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
 - CPU instrumentation zones (`NPH_PROFILE_SCOPE`) recorded per thread into ring buffers. GPU timestamps per render-graph pass.
 - Memory tracking per allocator and tag.
 - An in-editor timeline viewer. A Chrome trace JSON export for external viewing.
-- Crash handler with minidumps (Windows) and backtraces (Linux).
+- Crash handler with minidumps (Windows) and backtraces (Linux): platform's, an OS facility (`platform/crash.h`, ADR-0103).
 - A debug overlay with frame stats, cvars, and a console.
 
 ### 8.12 Runtime (`engine/runtime`)

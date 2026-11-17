@@ -3,9 +3,11 @@
 #include <nepheline/core/assert.h>
 #include <nepheline/core/log.h>
 #include <nepheline/core/realtime.h>
+#include <nepheline/platform/crash.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/platform/time.h>
 
+#include "crash_internal.h"
 #include "platform_internal.h"
 
 #include <limits.h>
@@ -40,8 +42,18 @@ typedef struct ThreadStart {
     NphAtomicU32 copied;
 } ThreadStart;
 
+// The name nph_thread_set_current_name gave this thread, whole (the
+// kernel's copy keeps 15 bytes).
+static NPH_THREAD_LOCAL char t_name[NPH_THREAD_NAME_MAX];
+
+const char *nph_thread_current_name_copy(void)
+{
+    return t_name;
+}
+
 void nph_thread_exit_cleanup(void)
 {
+    nph_crash_thread_detach();
     nph_log_thread_detach();
 }
 
@@ -58,6 +70,10 @@ static void *thread_main(void *arg)
     if (name[0] != '\0') {
         nph_thread_set_current_name(name);
     }
+    // An alternate signal stack while a crash handler is installed, so that
+    // a stack overflow here is reported (crash.h). A thread that cannot have
+    // one still runs; only its overflows would go unreported.
+    (void)nph_crash_thread_attach();
     fn(user);
     nph_thread_exit_cleanup();
     return NULL;
@@ -205,6 +221,7 @@ NphResult nph_thread_set_priority(const NphThread *t, NphThreadPriority priority
 void nph_thread_set_current_name(const char *name)
 {
     NPH_ASSERT(name != NULL);
+    nph_thread_copy_name(t_name, name);
     char truncated[16]; // the kernel limit: 15 bytes plus the terminator
     u32 i = 0U;
     for (; i + 1U < sizeof truncated && name[i] != '\0'; ++i) {

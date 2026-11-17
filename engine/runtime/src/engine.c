@@ -3,6 +3,7 @@
 // and docs/adr/0023-runtime.md.
 #include <nepheline/core/assert.h>
 #include <nepheline/core/profile.h>
+#include <nepheline/platform/crash.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/thread.h>
 #include <nepheline/platform/time.h>
@@ -12,6 +13,7 @@
 #include "engine_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef NPH_SHADER_DIR
@@ -1149,6 +1151,14 @@ bool nph_engine_should_quit(const NphEngine *e)
 // Scenes
 // ---------------------------------------------------------------------------
 
+// The scene a crash report names: the last one loaded or saved.
+static void set_scene_note(const char *path)
+{
+    char note[NPH_CRASH_NOTE_MAX];
+    (void)snprintf(note, sizeof note, "scene %s", path);
+    nph_crash_set_note(NPH_ENGINE_CRASH_NOTE_SCENE, note);
+}
+
 NphResult nph_engine_load_scene(NphEngine *e, const char *path)
 {
     NPH_ASSERT(e != NULL && path != NULL);
@@ -1181,6 +1191,7 @@ NphResult nph_engine_load_scene(NphEngine *e, const char *path)
         return r;
     }
     NPH_LOG_INFO(&NPH_LOG_RUNTIME, "%s: %u entities", path, res.entity_count);
+    set_scene_note(path);
     return NPH_RESULT_OK;
 }
 
@@ -1214,6 +1225,7 @@ NphResult nph_engine_save_scene(NphEngine *e, const char *path)
         return r;
     }
     NPH_LOG_INFO(&NPH_LOG_RUNTIME, "%s: %u entities saved", path, res.entity_count);
+    set_scene_note(path);
     return NPH_RESULT_OK;
 }
 
@@ -1367,6 +1379,41 @@ static NphResult cmd_stats(NphConsole *c, void *user, const NphStr *args, u32 co
     return NPH_RESULT_OK;
 }
 
+#if !NPH_CONFIG_SHIPPING
+
+// Volatile, so that no compiler proves the fault away.
+static volatile int *volatile g_crash_address; // NULL
+
+// Ends the process on purpose, to see the crash handler at work (its report,
+// the dump, the editor's recovery after it). Not in Shipping builds.
+static NphResult cmd_crash(NphConsole *c, void *user, const NphStr *args, u32 count)
+{
+    NPH_UNUSED(user);
+    const NphStr mode = count == 2U ? args[1] : NPH_STR("access");
+    const bool by_access = nph_str_equals(mode, NPH_STR("access"));
+    const bool by_abort = nph_str_equals(mode, NPH_STR("abort"));
+    const bool by_assert = nph_str_equals(mode, NPH_STR("assert"));
+    if (count > 2U || (!by_access && !by_abort && !by_assert)) {
+        nph_console_printf(c, "usage: %.*s [access|abort|assert]", NPH_STR_ARG(args[0]));
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    NPH_LOG_WARN(&NPH_LOG_RUNTIME, "crash: ending the process on purpose (%.*s)",
+                 NPH_STR_ARG(mode));
+    (void)nph_log_drain();
+    if (by_access) {
+        g_crash_address[4] = 1; // a write at 0x10
+    } else if (by_abort) {
+        abort();
+    } else {
+        // Directly, so that it fails where NPH_ASSERT is compiled out too.
+        nph_assert_fail(__FILE__, "cmd_crash", (u32)__LINE__, "crash assert",
+                        "the console's crash command");
+    }
+    return NPH_RESULT_OK;
+}
+
+#endif
+
 typedef struct EngineCommand {
     const char *name;
     const char *help;
@@ -1388,7 +1435,65 @@ static const EngineCommand g_commands[] = {
      "the renderer's tier: quality <reference|high> sets the cvars it decides; alone, says which "
      "they match",
      cmd_quality},
+#if !NPH_CONFIG_SHIPPING
+    {"crash", "end the process on purpose, for the crash handler: crash [access|abort|assert]",
+     cmd_crash},
+#endif
 };
+
+// ---------------------------------------------------------------------------
+// Crashes
+// ---------------------------------------------------------------------------
+
+// The value of `name=` among the command line's assignments, NULL if absent.
+static const char *config_assignment(const NphEngineConfig *config, const char *name)
+{
+    const u64 n = (u64)strlen(name);
+    for (u32 i = 0; config != NULL && i < config->assignment_count; ++i) {
+        const char *a = config->assignments[i];
+        if (strncmp(a, name, (size_t)n) == 0 && a[n] == '=') {
+            return a + n + 1U;
+        }
+    }
+    return NULL;
+}
+
+NphResult nph_engine_crash_handler_install(const NphEngineConfig *config, const char *app_name)
+{
+    // Read from the command line, not cvars: the handler comes before the
+    // engine that registers them. The values stay pending there, unused.
+    const char *dir = config_assignment(config, "crash.dir");
+    const char *full = config_assignment(config, "crash.full_dump");
+    NphCrashDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.dir = dir != NULL && dir[0] != '\0' ? dir : "crashes";
+    desc.app_name = app_name;
+    desc.full_dump = full != NULL && (strcmp(full, "1") == 0 || strcmp(full, "true") == 0);
+    const NphResult r = nph_crash_install(&desc);
+    if (r == NPH_RESULT_UNSUPPORTED) {
+        NPH_LOG_INFO(&NPH_LOG_RUNTIME,
+                     "crash handler: not installed in this build (the sanitizers report faults)");
+        return r;
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME, "crash handler: not installed into %s: %s", desc.dir,
+                     nph_result_string(r));
+        return r;
+    }
+    const NphResult s = nph_log_add_sink(nph_crash_log_sink, NULL, NPH_LOG_LEVEL_TRACE);
+    if (s != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                     "crash handler: reports go without the log's last records: %s",
+                     nph_result_string(s));
+    }
+    return NPH_RESULT_OK;
+}
+
+void nph_engine_crash_handler_uninstall(void)
+{
+    (void)nph_log_remove_sink(nph_crash_log_sink, NULL);
+    nph_crash_uninstall();
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -1489,6 +1594,17 @@ static NphResult start_gpu(NphEngine *e)
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&NPH_LOG_RUNTIME, "no Vulkan device (%s)", nph_result_string(r));
         return r == NPH_RESULT_UNSUPPORTED ? r : NPH_RESULT_UNSUPPORTED;
+    }
+    {
+        // The device a crash report names: most of the engine's faults are
+        // the driver's to explain.
+        const NphGpuDeviceInfo *info = nph_gpu_device_info(e->dev);
+        char note[NPH_CRASH_NOTE_MAX];
+        // Each part bounded, so that the whole fits a note.
+        (void)snprintf(note, sizeof note, "GPU %.80s, %.48s %.48s, Vulkan %u.%u.%u", info->name,
+                       info->driver_name, info->driver_info, info->api_version_major,
+                       info->api_version_minor, info->api_version_patch);
+        nph_crash_set_note(NPH_ENGINE_CRASH_NOTE_GPU, note);
     }
     if (e->mode == NPH_ENGINE_MODE_WINDOWED) {
         NphGpuSwapchainDesc sd;

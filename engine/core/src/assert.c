@@ -10,7 +10,7 @@
 static NphAssertHandler g_handler = NULL;
 static void *g_handler_user = NULL;
 
-static NphAssertAction default_handler(const NphAssertInfo *info, void *user)
+NphAssertAction nph_assert_default_handler(const NphAssertInfo *info, void *user)
 {
     NPH_UNUSED(user);
     fprintf(stderr, "\nAssertion failed: %s\n  at %s:%u in %s()\n", info->condition, info->file,
@@ -37,7 +37,7 @@ void nph_assert_set_handler(NphAssertHandler handler, void *user, NphAssertHandl
 
 static void dispatch(const NphAssertInfo *info)
 {
-    const NphAssertHandler handler = g_handler != NULL ? g_handler : default_handler;
+    const NphAssertHandler handler = g_handler != NULL ? g_handler : nph_assert_default_handler;
     const NphAssertAction action = handler(info, g_handler_user);
 
     switch (action) {

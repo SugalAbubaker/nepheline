@@ -15,7 +15,7 @@ supersedes it and both link to each other.
 | [0007](0007-serialization-formats.md) | Serialization formats: binary documents, JSON, and cvar config | Accepted |
 | [0008](0008-math-conventions.md) | Math module: conventions, storage layouts, and SIMD layering | Accepted |
 | [0009](0009-platform-threads-and-memory.md) | Platform layer: threads, synchronisation, virtual memory, and the TLSF locking decision | Accepted |
-| [0010](0010-fibers.md) | Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback | Accepted |
+| [0010](0010-fibers.md) | Fibers: assembly context switch, guard-paged stacks, and the Win32 fallback | Accepted; the stacks below on Windows amended by [0103](0103-crash-handler.md) |
 | [0011](0011-files-and-async-io.md) | Files, memory mapping, and asynchronous I/O backends | Accepted |
 | [0012](0012-window-and-input.md) | Window and input: GLFW behind `nph_window_*`, an event queue, and the action layer | Accepted |
 | [0013](0013-job-system.md) | Job system: fiber workers, Chase-Lev deques, futex-style counters, and depth-bounded inline waits | Accepted |
@@ -108,6 +108,7 @@ supersedes it and both link to each other.
 | [0100](0100-top-level-updated-in-place.md) | The top level updated in place where only what its records hold changes | Accepted |
 | [0101](0101-phase-14-exit.md) | Phase 14's exit: the phase's light kept at its cost, the landscape faster, its memory over | Accepted (the user's decision); decision 3 moved to Phase 16 by [0102](0102-in-house-tools-then-the-game.md) |
 | [0102](0102-in-house-tools-then-the-game.md) | Phase 15 builds the tools to make the game's world in-house; Phase 16 is the game | Accepted (the user's decision) |
+| [0103](0103-crash-handler.md) | The crash handler: a report and a minidump from the failing process, fibers included | Proposed |
 
 ## Template
 

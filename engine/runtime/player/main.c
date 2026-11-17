@@ -11,7 +11,8 @@
 //
 // Exit status: 0, 1 on a failure, 2 for a bad command line, and 77 when
 // the machine has no window system or no Vulkan device (CTest reports the
-// smoke run as skipped).
+// smoke run as skipped). A crash leaves its report in `crashes/` (or
+// crash.dir=<path>) and ends the process as the fault would.
 #include <nepheline/core/log.h>
 #include <nepheline/platform/log_thread.h>
 #include <nepheline/platform/platform.h>
@@ -145,7 +146,11 @@ int main(int argc, char **argv)
         nph_log_shutdown();
         return 1;
     }
+    // Before the engine, so that a failure while it comes up is reported too;
+    // it runs without one where none installs (docs/runtime.md "Crashes").
+    (void)nph_engine_crash_handler_install(&config, "nph_player");
     const int status = run(&config);
+    nph_engine_crash_handler_uninstall();
     nph_log_thread_stop(&log_thread);
     nph_log_shutdown();
     return status;

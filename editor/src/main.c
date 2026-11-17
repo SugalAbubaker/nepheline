@@ -11,9 +11,12 @@
 //
 // Exit status: 0, 1 on a failure, 2 for a bad command line, and 77 when
 // the machine has no window system or no Vulkan device (CTest reports the
-// smoke run as skipped).
+// smoke run as skipped). A crash leaves its report and its dump in
+// `crashes/` (or crash.dir=<path>) and ends the process as the fault would.
 #include <nepheline/core/log.h>
 #include <nepheline/gpu/device.h>
+#include <nepheline/platform/crash.h>
+#include <nepheline/platform/file.h>
 #include <nepheline/platform/log_thread.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/runtime/engine.h>
@@ -114,7 +117,23 @@ int main(int argc, char **argv)
         editor_log_sink_free(&panel);
         return 1;
     }
+    // Before the engine, so that a failure while it comes up is reported too;
+    // it runs without one where none installs (docs/editor.md "Crashes").
+    // The project is the working directory: its sources, its cooked files,
+    // and its crash reports.
+    (void)nph_engine_crash_handler_install(&config, "nph_editor");
+    char cwd[512];
+    char note[NPH_CRASH_NOTE_MAX];
+    if (nph_fs_current_directory(cwd, sizeof cwd, NULL) == NPH_RESULT_OK) {
+        // A long path keeps its end, the project's own directory.
+        const u64 len = (u64)strlen(cwd);
+        const char *tail = len > 200U ? cwd + len - 200U : cwd;
+        (void)snprintf(note, sizeof note, "editor, project %s%.200s", tail != cwd ? "..." : "",
+                       tail);
+        nph_crash_set_note(0U, note);
+    }
     const int status = run(&config, &panel);
+    nph_engine_crash_handler_uninstall();
     nph_log_thread_stop(&log_thread);
     (void)nph_log_remove_sink(editor_log_sink_fn, &panel);
     nph_log_shutdown();

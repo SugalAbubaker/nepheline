@@ -7,6 +7,7 @@
 #include <nepheline/platform/fiber.h>
 #include <nepheline/platform/vmem.h>
 
+#include "crash_internal.h"
 #include "platform_internal.h"
 
 #include <stdlib.h>
@@ -17,7 +18,20 @@ static NPH_THREAD_LOCAL NphFiber *t_current;
 static void CALLBACK fiber_proc(void *param)
 {
     NphFiber *fiber = (NphFiber *)param;
-    fiber->fn(fiber->user);
+    // An exception no handler on the fiber takes is reported from here, as
+    // in fiber.c, whatever the OS's fiber start does with it (crash.h).
+#if NPH_COMPILER_CLANG
+// Structured exception handling is Windows's, which clang-cl accepts as an extension.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#endif
+    __try {
+        fiber->fn(fiber->user);
+    } __except (crash_win32_fiber_filter(GetExceptionInformation())) {
+    }
+#if NPH_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif
     NPH_LOG_FATAL(&NPH_LOG_PLATFORM, "fiber '%s' returned from its function", fiber->name);
     nph_log_flush(0U);
     NPH_ASSERT_MSG(false, "fiber '%s' returned from its function", fiber->name);

@@ -5,6 +5,7 @@
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
 #include <nepheline/core/profile.h>
+#include <nepheline/platform/crash.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/path.h>
 #include <nepheline/platform/platform.h>
@@ -683,6 +684,15 @@ static NphResult swap_build(NphEngine *e, const char *source, bool reloading)
     retire_image(e, old_lib, old_copy);
     NPH_LOG_INFO(&NPH_LOG_RUNTIME, "game %s %s%s", api->name, reloading ? "reloaded" : "loaded",
                  migrate ? " (world moved to new components)" : "");
+    // The game a crash report names, and how often it was swapped since.
+    char note[NPH_CRASH_NOTE_MAX];
+    if (g->reloads == 0U) {
+        (void)snprintf(note, sizeof note, "game %s", api->name);
+    } else {
+        (void)snprintf(note, sizeof note, "game %s, reloaded %u time%s", api->name, g->reloads,
+                       g->reloads == 1U ? "" : "s");
+    }
+    nph_crash_set_note(NPH_ENGINE_CRASH_NOTE_GAME, note);
     NPH_PROFILE_END();
     return r;
 }
