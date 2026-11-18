@@ -1329,7 +1329,14 @@ typedef struct RenderGi {
     b32 frame_active;
     b32 frame_reflect; // the frame's smooth surfaces take reflection cells
     b32 frame_rays;    // or smooth surfaces a ray a pixel every frame
-    b32 frame_smooth;  // the filter smooths the cells (NphRenderView.gi_smooth)
+    // In the cells' mode, a frame that marks a material changed in place (NphRenderer.
+    // materials_marked; ADR-0105) gives every tile its turn (frame_reflect_restart), and the
+    // resolve that next takes the reflection cells' samples drops their histories first
+    // (frame_reflect_reset, from reflect_reset_pending): the cells then hold those rays alone.
+    b32 frame_reflect_restart;
+    b32 frame_reflect_reset;
+    b32 reflect_reset_pending;
+    b32 frame_smooth; // the filter smooths the cells (NphRenderView.gi_smooth)
     u32 frame_width;
     u32 frame_height;
     u32 frame_rays_x; // the update's samples across and down the target

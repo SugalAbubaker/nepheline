@@ -92,6 +92,7 @@ static f64 mean_of(const u8 *image, const bool *mask)
 typedef struct MirrorCounts {
     u32 seen;
     u32 seen_red;
+    u32 seen_dark; // of `seen`, those that show nothing: an empty reflection
     u32 off_red;
     u32 open;
     u32 open_red;
@@ -128,6 +129,7 @@ static MirrorCounts mirror_counts(const TestBoxScene *scene, const u8 *with, con
         if (met == 9U) {
             ++c.seen;
             c.seen_red += red_here ? 1U : 0U;
+            c.seen_dark += px[0] < 24U && px[1] < 24U && px[2] < 24U ? 1U : 0U;
             c.off_red += red_off ? 1U : 0U;
         } else if (met == 0U) {
             ++c.open;
@@ -277,6 +279,127 @@ NTEST_F(Reflect, a_mirror_by_a_ray_a_pixel_shows_its_walls_texture_through_the_w
     NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
     NTEST_EXPECT_TRUE(c.seen_red * 20U >= c.seen * 19U);
     NTEST_EXPECT_TRUE(f->renderer->gi.reflect_uv.value != 0U);
+}
+
+// A mirror's wall changes in place (ADR-0105), after the view has settled on it as it was: from
+// the identity's coordinates, three quarters green, to the transform into the red texel. `taa`:
+// with the temporal resolve, as a view by default has it. Returns the mirror's red pixels of
+// those whose rays meet the wall, on the frames `after` (1-based, rising) after the change.
+static void follow_change(RenderFixture *f, NphRenderReflections mode, bool taa, const u32 *after,
+                          u32 count, MirrorCounts *out)
+{
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMaterial mirror = surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, 0.05F);
+    static const u8 texels[16] = {255U, 63U,  63U, 255U, 63U, 255U, 63U, 255U,
+                                  63U,  255U, 63U, 255U, 63U, 255U, 63U, 255U};
+    const void *mips[1] = {texels};
+    const u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 2U;
+    td.height = 2U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.metallic = 0.0F;
+    md.roughness = 1.0F;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_u = NPH_RENDER_WRAP_CLAMP;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_v = NPH_RENDER_WRAP_CLAMP;
+    NphRenderMaterial wall = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &wall), NPH_RESULT_OK);
+    test_box_ground(f, &scene, mesh, mirror);
+    test_box_add(f, &scene, mesh, wall, nph_vec3(-3.0F, 0.0F, -2.0F), nph_vec3(3.0F, 3.0F, -1.5F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F)); // onto the wall's face
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 with[PIXELS];
+    static u8 without[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, mode);
+    if (taa) {
+        v.anti_aliasing = NPH_RENDER_AA_TEMPORAL;
+    }
+    NphRenderView off = v;
+    off.reflections = NPH_RENDER_REFLECTIONS_OFF;
+    (void)settled(f, &off, target, without, 4U);
+    (void)settled(f, &v, target, with, SETTLE);
+    const MirrorCounts before = mirror_counts(&scene, with, without);
+    NTEST_LOG("before the change: %u of %u red", before.seen_red, before.seen);
+    NTEST_ASSERT_GT_UINT(before.seen, 300U);
+    NTEST_EXPECT_TRUE(before.seen_red * 2U < before.seen); // three quarters green
+    const NphRenderUvTransform into_red = {0.25F, 0.0F, 0.125F, 0.0F, 0.25F, 0.125F};
+    md.uv = into_red;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, wall, &md), NPH_RESULT_OK);
+    u32 done = 0U;
+    for (u32 k = 0; k < count; ++k) {
+        (void)settled(f, &v, target, with, after[k] - done);
+        done = after[k];
+        out[k] = mirror_counts(&scene, with, without);
+        NTEST_LOG("%u frame(s) after: %u of %u red", done, out[k].seen_red, out[k].seen);
+    }
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_texture_destroy(f->renderer, tex);
+}
+
+// By a ray a pixel (the default), what the mirror shows of a material changed in place changes the
+// frame after, with the temporal resolve on: each pixel's ray meets the material as it now is, and
+// the history follows a change that large at once.
+NTEST_F(Reflect, a_mirror_by_a_ray_a_pixel_shows_a_material_changed_in_place_at_once)
+{
+    REQUIRE_REFLECTIONS(f);
+    static const u32 after[1] = {1U};
+    MirrorCounts c[1];
+    follow_change(f, NPH_RENDER_REFLECTIONS_RAYS, true, after, 1U, c);
+    NTEST_EXPECT_TRUE(c[0].seen_red * 20U >= c[0].seen * 19U);
+    NTEST_EXPECT_EQ_UINT(c[0].seen_dark, 0U);
+}
+
+// By the reflection cells, the same a frame later (ADR-0105): the frame that marks the change gives
+// every tile its turn, and the next frame's resolve drops the cells' histories before it takes
+// those rays, so the cells hold them alone. The frame of the change shows the cells as they were,
+// not empty ones. Without the restart the cells held the wall as it was for some 250 frames
+// (their histories, 128 samples, at a turn every 32 frames).
+NTEST_F(Reflect, the_reflection_cells_show_a_material_changed_in_place_a_frame_later)
+{
+    REQUIRE_REFLECTIONS(f);
+    static const u32 after[3] = {1U, 2U, 64U};
+    MirrorCounts c[3];
+    follow_change(f, NPH_RENDER_REFLECTIONS_CACHE, false, after, 3U, c);
+    NTEST_EXPECT_EQ_UINT(c[0].seen_dark, 0U);
+    NTEST_EXPECT_TRUE(c[1].seen_red * 20U >= c[1].seen * 19U);
+    // And the cells go on filling as any do: still the material as it now is.
+    NTEST_EXPECT_TRUE(c[2].seen_red * 20U >= c[2].seen * 19U);
+}
+
+// The same under the temporal resolve: the cells show the change a frame later, and the history of
+// the mirror's pixels, whose own material did not change, follows them as it follows any light
+// that changes: within 16 frames here (a quarter of the way the frame after, nine tenths in 4).
+NTEST_F(Reflect, the_reflection_cells_change_shows_through_the_temporal_resolve_soon)
+{
+    REQUIRE_REFLECTIONS(f);
+    static const u32 after[2] = {1U, 16U};
+    MirrorCounts c[2];
+    follow_change(f, NPH_RENDER_REFLECTIONS_CACHE, true, after, 2U, c);
+    NTEST_EXPECT_EQ_UINT(c[0].seen_dark, 0U);
+    NTEST_EXPECT_TRUE(c[1].seen_red * 20U >= c[1].seen * 19U);
 }
 
 // The same wall without the transform: three quarters of each face are green, and so is most of
