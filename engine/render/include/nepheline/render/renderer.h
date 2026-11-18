@@ -663,6 +663,15 @@ typedef struct NphRenderTextureBinding {
     b32 nearest; // nearest filtering instead of trilinear
 } NphRenderTextureBinding;
 
+// A material's texture coordinate transform (ADR-0105): u' = m00 u + m01 v + m02 and
+// v' = m10 u + m11 v + m12, applied to every texture coordinate of the material before any of
+// its textures is sampled, their derivatives through the linear part. Finite, the linear part
+// not singular.
+typedef struct NphRenderUvTransform {
+    f32 m00, m01, m02;
+    f32 m10, m11, m12;
+} NphRenderUvTransform;
+
 typedef struct NphRenderMaterialDesc {
     NphVec4 base_color; // linear RGBA
     NphVec3 emissive;   // linear radiance, cd/m^2 (glTF factor times strength, in nits)
@@ -680,6 +689,10 @@ typedef struct NphRenderMaterialDesc {
     // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
     b32 transmissive;
     NphRenderTextureBinding textures[NPH_RENDER_SLOT_COUNT];
+    // Its texture coordinates' transform: the identity by default. A material whose transform is
+    // not the identity takes its tangent frame from its coordinates' derivatives, not its mesh's
+    // tangents, so a turned or mirrored transform turns its normal map with it.
+    NphRenderUvTransform uv;
     // What its alpha test reads, as one number (a cooked material's
     // NphMaterialHeader.alpha_key): the caller's word that two materials of one key cut the
     // same parts of a surface away, which a mesh's triangles for the rays alone hold for
@@ -694,17 +707,26 @@ typedef struct NphRenderMaterialDesc {
     const char *name;
 } NphRenderMaterialDesc;
 
-// glTF's defaults: white, non-metallic, fully rough, opaque, no textures.
+// glTF's defaults: white, non-metallic, fully rough, opaque, no textures,
+// untransformed coordinates.
 void nph_render_material_desc_default(NphRenderMaterialDesc *desc);
 
+// The identity transform, and whether `t` is it, exactly.
+NphRenderUvTransform nph_render_uv_identity(void);
+bool nph_render_uv_is_identity(const NphRenderUvTransform *t);
+
 // NPH_RESULT_INVALID_ARGUMENT for a stale texture handle, out-of-range
-// enum values, or an alpha key on a material that is not alpha tested;
+// enum values, an alpha key on a material that is not alpha tested or whose
+// transform is not the identity (the key is of the test the mesh's
+// coordinates read), or a transform that is not finite or is singular;
 // NPH_RESULT_FULL past max_materials.
 NPH_MUST_USE NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc *desc,
                                                   NphRenderMaterial *out);
 // Replaces the description; visible from the next frame, where another alpha key also
 // changes which meshes' triangles for the rays alone its instances' rays take
-// (NphRenderMeshDesc.ray_submeshes). NPH_RESULT_INVALID_ARGUMENT as nph_render_material_create.
+// (NphRenderMeshDesc.ray_submeshes). On that frame the temporal resolve takes no history where
+// the nearest surface draws the material, so the change shows at once (ADR-0105); the pixels
+// of other materials keep theirs. NPH_RESULT_INVALID_ARGUMENT as nph_render_material_create.
 NPH_MUST_USE NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
                                                   const NphRenderMaterialDesc *desc);
 // Instances that still name the material draw with the default material.

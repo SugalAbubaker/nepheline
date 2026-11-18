@@ -43,8 +43,10 @@ NPH_STATIC_ASSERT(sizeof(NphRenderTexturePaging) == 32U,
 NPH_STATIC_ASSERT(sizeof(NphRenderPagingView) == 24U,
                   "NphRenderPagingView matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 112U,
+NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 144U,
                   "NphRenderMaterialData matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) % 16U == 0U,
+                  "material records are indexed by buffer reference at 16-byte alignment");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightData) == 64U, "NphRenderLightData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderLightGrid) == 64U, "NphRenderLightGrid matches its GLSL layout");
 NPH_STATIC_ASSERT(offsetof(NphRenderViewData, light_grid) % 8U == 0U, "addresses are aligned");
@@ -283,7 +285,10 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     out->handle = handle;
     out->flags = (d->double_sided ? (u32)NPH_RENDER_MATERIAL_DOUBLE_SIDED : 0U) |
                  (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U) |
-                 (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U);
+                 (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U) |
+                 (nph_render_uv_is_identity(&d->uv) ? 0U : (u32)NPH_RENDER_MATERIAL_UV_TRANSFORM);
+    out->uv_u = nph_vec4(d->uv.m00, d->uv.m01, d->uv.m02, 0.0F);
+    out->uv_v = nph_vec4(d->uv.m10, d->uv.m11, d->uv.m12, 0.0F);
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
         const NphRenderTextureBinding *b = &d->textures[s];
         const RenderTexture *t = render_texture_get(r, b->texture);
@@ -377,11 +382,20 @@ static void write_materials(NphRenderer *r)
     NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
     bool keys = false;
     if (r->material_uploaded[fs] != r->material_version) {
+        // A material updated in place since the last frame is marked on this frame alone (its
+        // pixels take no history; ADR-0105). A slot holding marks is written again when it next
+        // comes round, whatever changed, so that the marks go.
+        bool marked = false;
         for (u32 i = 0; i < r->desc.max_materials; ++i) {
             RenderMaterial *m = &r->materials[i];
             if (m->handle != 0U) {
                 fill_material(r, &m->desc, m->handle, &table[i], &m->paged_slots, m->paged_texture);
                 keys = set_ray_key(r, m, &table[i]) || keys;
+                if (m->changed != 0U) {
+                    table[i].flags |= (u32)NPH_RENDER_MATERIAL_CHANGED;
+                    m->changed = 0U;
+                    marked = true;
+                }
             } else {
                 memset(&table[i], 0, sizeof table[i]);
             }
@@ -391,7 +405,8 @@ static void write_materials(NphRenderer *r)
         u32 def_slots = 0U;
         u32 def_textures[NPH_RENDER_SLOT_COUNT];
         fill_material(r, &def, 0U, &table[r->desc.max_materials], &def_slots, def_textures);
-        r->material_uploaded[fs] = r->material_version;
+        // 0 is no version (they start at 1): the slot is written whole when it next comes round.
+        r->material_uploaded[fs] = marked ? 0U : r->material_version;
         r->levels_uploaded[fs] = r->paging.level_count;
         ray_keys_changed(r, keys);
         return;

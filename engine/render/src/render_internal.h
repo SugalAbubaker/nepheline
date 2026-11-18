@@ -377,6 +377,10 @@ typedef struct RenderMaterial {
     // the top level is rebuilt (ADR-0098).
     u32 ray_key_id;
     u32 ray_key_live;
+    // Updated in place since the last frame (nph_render_material_update): the next frame's
+    // record says so, and its pixels take no temporal history (frame.c write_materials;
+    // ADR-0105).
+    u32 changed;
 } RenderMaterial;
 
 // RenderVis.slot_state bits, per instance slot (they outlive an instance:

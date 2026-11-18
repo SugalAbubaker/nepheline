@@ -432,8 +432,17 @@ static NphResult start_material(RenderAssetCache *c, u32 index, const NphAsset *
     return NPH_RESULT_OK;
 }
 
-// The render description of header `h` with the textures `textures` (cache indices) hold.
+// A cooked material's coordinates' transform as the renderer takes it (ADR-0105).
+static NphRenderUvTransform render_uv(const NphMaterialUvTransform *t)
+{
+    const NphRenderUvTransform out = {t->m00, t->m01, t->m02, t->m10, t->m11, t->m12};
+    return out;
+}
+
+// The render description of header `h` and transform `uv` (NULL: the identity) with the
+// textures `textures` (cache indices) hold.
 static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
+                          const NphMaterialUvTransform *uv,
                           const u32 textures[RENDER_MATERIAL_TEXTURES], NphRenderMaterialDesc *out)
 {
     NphRenderMaterialDesc d;
@@ -467,6 +476,13 @@ static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
         d.textures[NPH_RENDER_SLOT_BASE_COLOR].texture.value != 0U) {
         d.alpha_key = h->alpha_key;
     }
+    // The key is of the test the mesh's own coordinates read: a transformed material has none.
+    if (uv != NULL) {
+        d.uv = render_uv(uv);
+        if (!nph_render_uv_is_identity(&d.uv)) {
+            d.alpha_key = 0U;
+        }
+    }
     d.name = "cooked material";
     *out = d;
 }
@@ -476,7 +492,7 @@ static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
     NphMaterialView mv;
     NPH_TRY(nph_material_view(nph_asset_get(c->loader, a->handle), &mv));
     NphRenderMaterialDesc d;
-    material_desc(c, mv.header, a->textures, &d);
+    material_desc(c, mv.header, mv.uv, a->textures, &d);
     return nph_render_material_create(c->renderer, &d, &a->material);
 }
 
@@ -526,7 +542,8 @@ bool render_assets_refresh(RenderAssetCache *c, u32 index)
     return true;
 }
 
-NphResult render_assets_material_set(RenderAssetCache *c, u32 index, const NphMaterialHeader *h)
+NphResult render_assets_material_set(RenderAssetCache *c, u32 index, const NphMaterialHeader *h,
+                                     const NphMaterialUvTransform *uv)
 {
     NPH_ASSERT(h != NULL);
     const RenderAsset *a = render_asset(c, index);
@@ -534,7 +551,7 @@ NphResult render_assets_material_set(RenderAssetCache *c, u32 index, const NphMa
         return NPH_RESULT_INVALID_STATE;
     }
     NphRenderMaterialDesc d;
-    material_desc(c, h, a->textures, &d);
+    material_desc(c, h, uv, a->textures, &d);
     return nph_render_material_update(c->renderer, a->material, &d);
 }
 
@@ -575,7 +592,7 @@ static void advance_refresh(RenderAssetCache *c, u32 index, NphResult *first)
     }
     NPH_VERIFY(nph_material_view(nph_asset_get(c->loader, a->next), &mv) == NPH_RESULT_OK);
     NphRenderMaterialDesc d;
-    material_desc(c, mv.header, a->next_textures, &d);
+    material_desc(c, mv.header, mv.uv, a->next_textures, &d);
     const NphResult r = nph_render_material_update(c->renderer, a->material, &d);
     if (r != NPH_RESULT_OK) {
         log_failure(a, "is not usable again; the version it had stays", r);

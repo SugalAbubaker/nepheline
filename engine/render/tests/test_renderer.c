@@ -185,6 +185,29 @@ NTEST_F(Api, materials)
                         NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_EQ_INT(nph_render_material_update(f->renderer, bad, &md),
                         NPH_RESULT_INVALID_ARGUMENT);
+    // The coordinates' transform (ADR-0105): finite, not singular, and no alpha key with it.
+    NphRenderMaterialDesc td;
+    nph_render_material_desc_default(&td);
+    NTEST_EXPECT_TRUE(nph_render_uv_is_identity(&td.uv));
+    const NphRenderUvTransform tiled = {2.0F, 0.0F, 0.5F, 0.0F, 3.0F, 0.0F};
+    td.uv = tiled;
+    NphRenderMaterial tm = NPH_RENDER_MATERIAL_NULL;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &td, &tm), NPH_RESULT_OK);
+    td.uv.m11 = 0.0F; // singular
+    NTEST_EXPECT_EQ_INT(nph_render_material_update(f->renderer, tm, &td),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    td.uv = tiled;
+    td.uv.m02 = NPH_F32_INFINITY;
+    NTEST_EXPECT_EQ_INT(nph_render_material_update(f->renderer, tm, &td),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    td.uv = tiled;
+    td.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    td.alpha_key = 7U; // of the untransformed test
+    NTEST_EXPECT_EQ_INT(nph_render_material_update(f->renderer, tm, &td),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    td.alpha_key = 0U;
+    NTEST_EXPECT_EQ_INT(nph_render_material_update(f->renderer, tm, &td), NPH_RESULT_OK);
+    nph_render_material_destroy(f->renderer, tm);
     nph_render_material_destroy(f->renderer, m);
     NTEST_EXPECT_TRUE(!nph_render_material_is_valid(f->renderer, m));
     nph_render_material_destroy(f->renderer, NPH_RENDER_MATERIAL_NULL);

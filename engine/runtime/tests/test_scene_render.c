@@ -856,17 +856,18 @@ NTEST(SceneRender, a_material_set_in_place_changes_what_draws_it)
     nph_material_header_default(&h);
     h.base_color_factor = nph_vec4(1.0F, 0.25F, 0.0F, 1.0F);
     h.roughness_factor = 0.25F;
-    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h, NULL), NPH_RESULT_OK);
     // Nothing draws that one; and a header the renderer refuses leaves the material as it was.
-    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, nph_guid_from_cstr("nothing"), &h),
-                        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_INT(
+        nph_scene_renderer_material_set(fx.sr, nph_guid_from_cstr("nothing"), &h, NULL),
+        NPH_RESULT_NOT_FOUND);
     h.roughness_factor = nph_f32_from_bits(0x7FC00000U);
-    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h),
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h, NULL),
                         NPH_RESULT_INVALID_ARGUMENT);
     // A mesh's GUID is not a material.
-    NTEST_EXPECT_EQ_INT(
-        nph_scene_renderer_material_set(fx.sr, nph_guid_from_cstr("showcase.gltf#mesh/0"), &h),
-        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(
+                            fx.sr, nph_guid_from_cstr("showcase.gltf#mesh/0"), &h, NULL),
+                        NPH_RESULT_NOT_FOUND);
     const NphSceneRenderStats st = sync(&fx);
     NTEST_EXPECT_EQ_UINT(st.instances, 2U);
     NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);

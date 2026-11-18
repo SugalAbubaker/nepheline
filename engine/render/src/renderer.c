@@ -1603,6 +1603,33 @@ void nph_render_material_desc_default(NphRenderMaterialDesc *desc)
     desc->occlusion_strength = 1.0F;
     desc->alpha_cutoff = 0.5F;
     desc->alpha_mode = NPH_RENDER_ALPHA_OPAQUE;
+    desc->uv = nph_render_uv_identity();
+}
+
+NphRenderUvTransform nph_render_uv_identity(void)
+{
+    const NphRenderUvTransform t = {1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
+    return t;
+}
+
+bool nph_render_uv_is_identity(const NphRenderUvTransform *t)
+{
+    NPH_ASSERT(t != NULL);
+    return t->m00 == 1.0F && t->m01 == 0.0F && t->m02 == 0.0F && t->m10 == 0.0F && t->m11 == 1.0F &&
+           t->m12 == 0.0F;
+}
+
+// Finite, and its linear part not singular.
+static bool uv_transform_valid(const NphRenderUvTransform *t)
+{
+    const f32 m[6] = {t->m00, t->m01, t->m02, t->m10, t->m11, t->m12};
+    for (u32 i = 0; i < 6U; ++i) {
+        if (!nph_f32_is_finite(m[i])) {
+            return false;
+        }
+    }
+    const f64 det = (f64)t->m00 * (f64)t->m11 - (f64)t->m01 * (f64)t->m10;
+    return det != 0.0;
 }
 
 static NphResult validate_material(const NphRenderer *r, const NphRenderMaterialDesc *d)
@@ -1611,7 +1638,8 @@ static NphResult validate_material(const NphRenderer *r, const NphRenderMaterial
         !nph_vec3_is_finite(d->emissive) || !nph_f32_is_finite(d->metallic) ||
         !nph_f32_is_finite(d->roughness) || !nph_f32_is_finite(d->normal_scale) ||
         !nph_f32_is_finite(d->occlusion_strength) || !nph_f32_is_finite(d->alpha_cutoff) ||
-        (d->alpha_key != 0U && d->alpha_mode != NPH_RENDER_ALPHA_MASK)) {
+        (d->alpha_key != 0U && d->alpha_mode != NPH_RENDER_ALPHA_MASK) ||
+        !uv_transform_valid(&d->uv) || (d->alpha_key != 0U && !nph_render_uv_is_identity(&d->uv))) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
@@ -1647,6 +1675,7 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     m->desc.name = NULL;
     m->ray_key_id = key_id;
     m->ray_key_live = 0U; // the frame's records say (frame.c write_materials)
+    m->changed = 0U;
     r->material_version += 1U;
     r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     out->value = value;
@@ -1690,6 +1719,8 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         (blends && (r->materials[slot].desc.double_sided != 0) != (desc->double_sided != 0));
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
+    // The next frame's resolve takes no history where it draws (frame.c write_materials).
+    r->materials[slot].changed = 1U;
     r->material_version += 1U;
     if (blend_changed) {
         render_vis_materials_changed(r);

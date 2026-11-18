@@ -49,7 +49,11 @@ void main()
     out_tangent = vec4(dot(draw.model0.xyz, t.xyz), dot(draw.model1.xyz, t.xyz),
                        dot(draw.model2.xyz, t.xyz),
                        (t.w < 0.0 ? -1.0 : 1.0) * draw.position_scale.w);
-    out_uv = unpackHalf2x16(attr.z);
+    // The material's coordinates: affine, so exact per vertex, and the fragment stage's
+    // derivatives follow (ADR-0105).
+    MaterialsRef materials = MaterialsRef(view.v.materials_address);
+    out_uv = nph_material_uv(materials.m[draw.material_index].uv_u,
+                             materials.m[draw.material_index].uv_v, unpackHalf2x16(attr.z));
     out_color = unpackUnorm4x8(attr.w);
     out_position = world;
     out_draw = uvec2(draw.material_index, (draw.position_scale.w < 0.0 ? 1u : 0u) |

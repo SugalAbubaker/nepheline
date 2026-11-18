@@ -1584,7 +1584,8 @@ NphRenderLight nph_scene_renderer_light(const NphSceneRenderer *sr, NphEntity en
 }
 
 NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
-                                          const NphMaterialHeader *header)
+                                          const NphMaterialHeader *header,
+                                          const NphMaterialUvTransform *uv)
 {
     NPH_ASSERT(sr != NULL && header != NULL);
     const u32 index = render_assets_find(&sr->assets, guid);
@@ -1592,7 +1593,7 @@ NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
     if (a == NULL || a->kind != (u32)RENDER_ASSET_MATERIAL) {
         return NPH_RESULT_NOT_FOUND;
     }
-    return render_assets_material_set(&sr->assets, index, header);
+    return render_assets_material_set(&sr->assets, index, header, uv);
 }
 
 bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden)

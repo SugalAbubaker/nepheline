@@ -247,16 +247,19 @@ bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool 
 u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid);
 
 // Draws the material with `guid` with the factors, alpha, flags and wraps of
-// `header` from the next frame, keeping its textures (`header`'s texture
-// GUIDs are not read), until it is set again or reloaded: how the editor's
-// material panel shows a change while it is being made (ADR-0105). Every
-// entity drawing it follows; none loses its instance.
+// `header` and the coordinates' transform `uv` (NULL: the identity) from the
+// next frame, keeping its textures (`header`'s texture GUIDs are not read),
+// until it is set again or reloaded: how the editor's material panel shows a
+// change while it is being made (ADR-0105). Every entity drawing it follows;
+// none loses its instance, and on that frame its pixels take no temporal
+// history (renderer.h nph_render_material_update).
 // NPH_RESULT_NOT_FOUND when nothing draws that material,
 // NPH_RESULT_INVALID_STATE when it is not ready (loading, or failed); the
 // renderer's errors (a header it refuses, as non-finite factors).
 // NPH_MAIN_THREAD_ONLY, between syncs.
 NPH_MUST_USE NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
-                                                       const NphMaterialHeader *header);
+                                                       const NphMaterialHeader *header,
+                                                       const NphMaterialUvTransform *uv);
 
 // ---------------------------------------------------------------------------
 // Importing cooked scenes

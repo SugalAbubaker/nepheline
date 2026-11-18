@@ -465,6 +465,13 @@ static NphResult create_material(CookedScene *s, const NphAsset *asset, f32 emis
     d.normal_scale = h->textures[NPH_MATERIAL_TEXTURE_NORMAL].scale;
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
     d.alpha_key = material_alpha_key(s, h);
+    // Its coordinates' transform (ADR-0105); the key is of the untransformed test.
+    const NphMaterialUvTransform uv = nph_material_view_uv(&mv);
+    const NphRenderUvTransform ruv = {uv.m00, uv.m01, uv.m02, uv.m10, uv.m11, uv.m12};
+    d.uv = ruv;
+    if (!nph_render_uv_is_identity(&d.uv)) {
+        d.alpha_key = 0U;
+    }
     for (u32 t = 0; t < (u32)NPH_RENDER_SLOT_COUNT; ++t) {
         const NphMaterialTextureRef *ref = &h->textures[t];
         d.textures[t].texture = texture_of(s, ref->texture);

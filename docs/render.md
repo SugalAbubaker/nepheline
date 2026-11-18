@@ -78,15 +78,37 @@ detected and refused rather than dereferenced.
 |---|---|---|
 | texture | GPU, immutable | levels uploaded at creation through the staging ring; any sampled format, BC included; 2D or cube; or paged, its pages installed and evicted (Virtual textures) |
 | mesh | GPU, immutable | the cooked streams as they are: unorm16 positions in the bounds, octahedral normals, snorm8 tangents, half UVs, RGBA8 colours; up to 256 submeshes; with ray tracing, a bottom-level acceleration structure over the positions |
-| material | CPU record | metallic-roughness glTF material with five texture bindings, each with its own wrap and filter |
+| material | CPU record | metallic-roughness glTF material with five texture bindings, each with its own wrap and filter, and its texture coordinates' transform |
 | instance | CPU record | a mesh, a material per material slot, a 64-bit transform, hidden flag |
 | light | CPU record | directional, point, or spot; casts shadows or not |
 
 Materials, instances, and lights are copied into per-frame upload buffers
 (one per frame in flight) when a frame is declared. Editing them therefore
-never races a frame the GPU is still reading. Materials are re-copied into a
-slot only when they changed since that slot was last filled, because each
-material carries a version counter.
+never races a frame the GPU is still reading. The material table is
+re-copied into a slot only when a material (or a texture) changed since
+that slot was last filled: the renderer keeps one version counter for them
+all, and each slot the version it holds.
+
+**A material's texture coordinates** go through its transform
+(`NphRenderMaterialDesc.uv`, a 2x3 matrix; ADR-0105) before any of its
+textures is sampled. The record holds it as two rows (`uv_u`, `uv_v`; the
+record is 144 bytes, a multiple of the 16 that indexing the table by buffer
+reference needs). It applies everywhere a material's texture is sampled:
+- per vertex in the forward pass and the alpha tests of both rasterizers
+  and of the shadow maps' (an affine map is exact per vertex, and the
+  derivatives the fragment stages take follow);
+- in the resolve and the texture page requests, to the coordinate and,
+  through the linear part, its analytic derivatives;
+- in the rays' alpha test, and on the radiance cache's and reflections'
+  hits, whose texture level grows by half the log of the linear part's
+  determinant (the coordinates' area grows by it).
+
+The identity's rows give the coordinates back to the bit, so materials
+without one draw as before. A material whose transform is not the identity
+(`NPH_RENDER_MATERIAL_UV_TRANSFORM`) takes its tangent frame from its
+coordinates' derivatives, not its mesh's tangents: a turned or mirrored
+transform turns its normal map with it. The CPU voxel and proxy bakes
+sample their own way and do not apply it yet (ADR-0105).
 
 `render` sits left of `asset` in the module order (CLAUDE.md §4), so it
 cannot read cooked assets itself. `samples/common/cooked_scene.c` is the
@@ -2412,6 +2434,17 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
   between the world's camera and the host's); otherwise the frame stands
   alone. The statistics say whether the frame resolved temporally (`taa`)
   and blended with history (`taa_history`).
+- **A material changed in place** (`nph_render_material_update`; ADR-0105)
+  shows at once. A still pixel would otherwise take it over 30 frames (its
+  new frame weighs 1/32, its box wide). The frame after the update marks the
+  material's record (`NPH_RENDER_MATERIAL_CHANGED`; a slot holding a mark is
+  written again when it next comes round, so the mark lasts one frame). The
+  meshlet cull carries the mark into its clusters' flags
+  (`NPH_VIS_CLUSTER_FRESH`), the word it already reads. Where the 3 x 3's
+  nearest surface is such a cluster, the resolve takes the current frame
+  alone, as after a cut, and the history resumes the frame after. Nothing
+  more is read or written. Blended surfaces are not in the visibility
+  buffer: a blended material changed in place still fades.
 
 Against the reference renderer at 4 × 4 the resolution, a still view
 converges to 0.39 levels of mean error (one sample per pixel: 1.22), a

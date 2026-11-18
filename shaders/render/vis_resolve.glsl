@@ -354,6 +354,11 @@ void main()
         } else {
             const NphRenderMaterialData material =
                 MaterialRef(view.v.materials)[cluster.material].m;
+            // The material's coordinates, and their derivatives through its linear part
+            // (ADR-0105).
+            s.uv = nph_material_uv(material.uv_u, material.uv_v, s.uv);
+            s.uv_dx = nph_material_uv_linear(material.uv_u, material.uv_v, s.uv_dx);
+            s.uv_dy = nph_material_uv_linear(material.uv_u, material.uv_v, s.uv_dy);
             color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
         }
     }

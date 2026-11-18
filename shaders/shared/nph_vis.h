@@ -57,6 +57,9 @@
 // error of the mesh the rays' scene holds, not the mesh's own, which a ray
 // from such a pixel must find first (ao_pass.glsl; ADR-0094).
 #define NPH_VIS_CLUSTER_COARSE 32
+// Its material changed in place this frame (NPH_RENDER_MATERIAL_CHANGED): the temporal resolve
+// takes no history where it is the nearest surface (taa_resolve.glsl; ADR-0105).
+#define NPH_VIS_CLUSTER_FRESH 64
 
 // In the second word of a submesh's record (NphVisMesh.submeshes): its geometry in the mesh's
 // bottom level (NphVisMesh.blas) is triangles for the rays alone (ADR-0096), and the word's

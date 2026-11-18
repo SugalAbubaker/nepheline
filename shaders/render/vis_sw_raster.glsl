@@ -97,6 +97,8 @@ void main()
                                       materials.m[cluster.material].samplers[NPH_RENDER_TEX_BASE_COLOR]);
     const vec2 alpha_test =
         vec2(materials.m[cluster.material].base_color.a, materials.m[cluster.material].alpha_cutoff);
+    const vec4 uv_u = materials.m[cluster.material].uv_u; // its coordinates' transform (ADR-0105)
+    const vec4 uv_v = materials.m[cluster.material].uv_v;
 #endif
 
     const vec3 t =
@@ -112,7 +114,8 @@ void main()
         s_z[i] = clip.z / clip.w;
 #if VIS_SW_MASKED
         const uvec4 attrib = AttribsRef(mesh.attribs).a[vertex];
-        s_uv_alpha[i] = vec3(unpackHalf2x16(attrib.z), unpackUnorm4x8(attrib.w).a);
+        s_uv_alpha[i] =
+            vec3(nph_material_uv(uv_u, uv_v, unpackHalf2x16(attrib.z)), unpackUnorm4x8(attrib.w).a);
 #endif
     }
     barrier();

@@ -26,6 +26,12 @@
 #define NPH_RENDER_MATERIAL_UNLIT              2
 #define NPH_RENDER_MATERIAL_NORMAL_TWO_CHANNEL 4 // RG normal map: reconstruct z
 #define NPH_RENDER_MATERIAL_TRANSMISSIVE       8 // glass: NphRenderMaterialDesc.transmissive
+// Its coordinates' transform (uv_u, uv_v) is not the identity: its tangent frame comes from its
+// coordinates' derivatives (ADR-0105).
+#define NPH_RENDER_MATERIAL_UV_TRANSFORM 16
+// Changed in place this frame (nph_render_material_update): the pixels whose nearest surface
+// draws it take no temporal history (NPH_VIS_CLUSTER_FRESH; ADR-0105).
+#define NPH_RENDER_MATERIAL_CHANGED 32
 
 // Material texture slots (NphRenderMaterialData.textures / samplers).
 #define NPH_RENDER_TEX_BASE_COLOR         0
@@ -174,6 +180,12 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     // any other: a mesh's triangles for the rays alone hold for an instance of it only while
     // this is their key's (ADR-0098; rt_instances.comp).
     u32 ray_key;
+    // The texture coordinates' transform (NphRenderMaterialDesc.uv; ADR-0105), a row each:
+    // u' = dot(uv_u.xyz, (u, v, 1)), v' = dot(uv_v.xyz, (u, v, 1)). w: unused. Rows, not an
+    // array (docs/build.md "Shaders"); the record stays a multiple of 16 bytes, which indexing
+    // the table by buffer reference needs.
+    NphVec4 uv_u;
+    NphVec4 uv_v;
 };
 
 // Paged textures (docs/adr/0065-virtual-texturing.md; texture_paging.glsl):

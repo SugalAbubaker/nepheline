@@ -570,6 +570,89 @@ NTEST_F(Frame, textures_reach_the_material)
     nph_render_texture_destroy(f->renderer, tex);
 }
 
+// The quadrants of the facing plane in the base-colour debug view: top-left, top-right,
+// bottom-left, bottom-right, each an sRGB colour.
+static void expect_quadrants(RenderFixture *f, const u8 want[4][3])
+{
+    const u32 a = TEST_TARGET_SIZE / 4U;
+    const u32 b = 3U * TEST_TARGET_SIZE / 4U;
+    const u8 *px[4] = {test_pixel(f, a, a), test_pixel(f, b, a), test_pixel(f, a, b),
+                       test_pixel(f, b, b)};
+    for (u32 q = 0; q < 4U; ++q) {
+        NTEST_EXPECT_TRUE(px[q][0] == want[q][0] && px[q][1] == want[q][1] &&
+                          px[q][2] == want[q][2]);
+    }
+}
+
+// The material's coordinates' transform (ADR-0105): the 2 x 2 image of textures_reach_the_material
+// mirrored left to right, then turned a quarter, the same in both pipelines.
+NTEST_F(Frame, a_materials_transform_moves_its_texture_in_both_pipelines)
+{
+    REQUIRE_RENDERER(f);
+    static const u8 texels[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255};
+    const void *mips[1] = {texels};
+    const u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 2U;
+    td.height = 2U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_u = NPH_RENDER_WRAP_CLAMP;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_v = NPH_RENDER_WRAP_CLAMP;
+    // Mirrored: u' = 1 - u.
+    const NphRenderUvTransform mirrored = {-1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F};
+    md.uv = mirrored;
+    NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+    const NphRenderMesh mesh = facing_plane(f);
+    const NphRenderInstance inst = add_instance(f, mesh, mat, facing_transform());
+    static const u8 red[3] = {255U, 0U, 0U};
+    static const u8 green[3] = {0U, 255U, 0U};
+    static const u8 blue[3] = {0U, 0U, 255U};
+    static const u8 yellow[3] = {255U, 255U, 0U};
+    const u8(*mirrored_want[4])[3] = {&green, &red, &yellow, &blue};
+    // A quarter turn: (u', v') = (v, 1 - u).
+    const NphRenderUvTransform turned = {0.0F, 1.0F, 0.0F, -1.0F, 0.0F, 1.0F};
+    const u8(*turned_want[4])[3] = {&blue, &red, &yellow, &green};
+    const NphRenderPipeline pipelines[2] = {NPH_RENDER_PIPELINE_REFERENCE,
+                                            NPH_RENDER_PIPELINE_PRODUCTION};
+    const u32 count = nph_renderer_production_supported(f->renderer) ? 2U : 1U;
+    for (u32 turn = 0; turn < 2U; ++turn) {
+        if (turn == 1U) {
+            md.uv = turned;
+            NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+        }
+        u8 want[4][3];
+        for (u32 q = 0; q < 4U; ++q) {
+            memcpy(want[q], turn == 0U ? *mirrored_want[q] : *turned_want[q], 3U);
+        }
+        for (u32 p = 0; p < count; ++p) {
+            NphRenderView v;
+            plain_view(&v);
+            v.debug_view = NPH_RENDER_VIEW_BASE_COLOR;
+            v.pipeline = pipelines[p];
+            // The production path culls against the frame before: a few frames to settle.
+            for (u32 i = 0; i < 3U; ++i) {
+                test_render_read(f, &v);
+            }
+            expect_quadrants(f, (const u8(*)[3])want);
+        }
+    }
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    nph_render_material_destroy(f->renderer, mat);
+    nph_render_texture_destroy(f->renderer, tex);
+}
+
 NTEST_F(Frame, debug_views_show_material_channels)
 {
     REQUIRE_RENDERER(f);

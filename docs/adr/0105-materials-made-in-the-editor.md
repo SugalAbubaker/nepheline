@@ -144,8 +144,12 @@ steps 5 to 7 are the editor's. They land as four pull requests, the source and i
 - **Later steps that sample materials must apply the transform:** the city's voxels and proxies sample meshes'
   materials, and the transform will have to reach them when editor-made worlds get proxies.
 - **Renaming a `.nmat` breaks its references**, as renaming any source does.
-- **A change in place cuts through the temporal history** (decision 4). Until the renderer's half of this step
-  lands, it fades in over about 30 frames, half a second at 60 FPS. The pixels of a changed material are resolved
-  without their history on that one frame, and so show the frame as it was drawn.
+- **A change in place cuts through the temporal history** (decision 4). The pixels of a changed material are
+  resolved without their history on that one frame, and so show the frame as it was drawn. The mark rides in a
+  cluster flag the meshlet cull already writes and the resolve already reads, so it costs no reads or bytes.
+  Blended surfaces are not in the visibility buffer, and a blended material changed in place still fades. An
+  entity given another material gets a new instance, whose pixels keep the history of the one before; marking
+  every new instance would also mark cells streamed in, so a later step marks the editor's material drops
+  alone.
 - **Recovery is not needed for materials:** every settled change is written, so autosave (ADR-0104) does not keep
   them.

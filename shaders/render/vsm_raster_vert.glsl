@@ -49,7 +49,10 @@ void main()
     MaterialsRef materials = MaterialsRef(view.v.materials);
     const uint material = item.w - 1u;
     const uvec4 a = AttribsRef(mesh.attribs).a[vertex];
-    out_uv_alpha = vec3(unpackHalf2x16(a.z), unpackUnorm4x8(a.w).a);
+    // The material's coordinates (ADR-0105).
+    out_uv_alpha = vec3(nph_material_uv(materials.m[material].uv_u, materials.m[material].uv_v,
+                                        unpackHalf2x16(a.z)),
+                        unpackUnorm4x8(a.w).a);
     out_alpha_texture = uvec2(materials.m[material].textures[NPH_RENDER_TEX_BASE_COLOR],
                               materials.m[material].samplers[NPH_RENDER_TEX_BASE_COLOR]);
     out_alpha_test = vec2(materials.m[material].base_color.a, materials.m[material].alpha_cutoff);

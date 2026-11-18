@@ -22,6 +22,19 @@ NPH_BUFFER_REF(ViewRef) { NphRenderViewData v; };
 NPH_BUFFER_REF(DrawsRef) { NphRenderDrawData d[]; };
 NPH_BUFFER_REF(MaterialsRef) { NphRenderMaterialData m[]; };
 NPH_BUFFER_REF(MaterialRef) { NphRenderMaterialData m; }; // one record, as LightRef below
+
+// A material's texture coordinate transform (NphRenderMaterialData.uv_u, uv_v; ADR-0105), exact
+// for the identity's rows: (1, 0, 0) and (0, 1, 0).
+vec2 nph_material_uv(vec4 uv_u, vec4 uv_v, vec2 uv)
+{
+    return vec2(dot(uv_u.xyz, vec3(uv, 1.0)), dot(uv_v.xyz, vec3(uv, 1.0)));
+}
+
+// Its linear part, for a derivative or a difference of coordinates.
+vec2 nph_material_uv_linear(vec4 uv_u, vec4 uv_v, vec2 d)
+{
+    return vec2(dot(uv_u.xy, d), dot(uv_v.xy, d));
+}
 NPH_BUFFER_REF(LightsRef) { NphRenderLightData l[]; };
 // One light's record: LightRef(lights)[i] is the reference to lights[i]
 // (GL_EXT_buffer_reference2), whose fields then load at fixed offsets from

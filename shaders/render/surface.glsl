@@ -777,7 +777,10 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
                    : ns.z * 2.0 - 1.0;
         tn.xy *= m.normal_scale;
         mat3 tbn;
-        if (dot(s.tangent.xyz, s.tangent.xyz) > 1e-12) {
+        // A material whose coordinates are transformed turns its normal map with them: its frame
+        // is the one of its coordinates' derivatives, which the transform reached (ADR-0105).
+        if (dot(s.tangent.xyz, s.tangent.xyz) > 1e-12 &&
+            (m.flags & NPH_RENDER_MATERIAL_UV_TRANSFORM) == 0u) {
             // MikkTSpace's frame (glTF 2.0 §3.7.2.1) in its normalised
             // variant: the interpolated normal and tangent at unit length,
             // the bitangent their cross product with the stored sign. The

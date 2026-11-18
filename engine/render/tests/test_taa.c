@@ -808,6 +808,71 @@ NTEST_F(Taa, a_cut_drops_the_history)
     NTEST_EXPECT_EQ_INT(memcmp(cut, fresh, PIXELS), 0);
 }
 
+// A material changed in place (ADR-0105): on the frame after, the pixels whose nearest surface
+// draws it are resolved without their history, exactly as on a cut in the same jitter phase;
+// another material's keep theirs.
+NTEST_F(Taa, a_material_changed_in_place_drops_its_own_pixels_history)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh mesh = cube_mesh(f);
+    const NphRenderMaterial changed = unlit(f, 0.25F);
+    const NphRenderMaterial kept = unlit(f, 0.75F);
+    (void)add_cube(f, mesh, changed, turned(nph_dvec3(-0.7, 0.0, 0.0), 0.6F));
+    (void)add_cube(f, mesh, kept, turned(nph_dvec3(0.7, 0.0, 0.0), 0.6F));
+    NphRenderView v;
+    taa_view(&v, camera_at(0.0), NPH_RENDER_AA_TEMPORAL);
+    for (u32 i = 0; i < 2U * RENDER_TAA_PHASES; ++i) {
+        (void)test_render_frame(f, &v, f->target);
+    }
+    // Frame 16, jitter phase 0: the first cube's material turns lighter.
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.9F, 0.9F, 0.9F, 1.0F);
+    md.unlit = 1;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, changed, &md), NPH_RESULT_OK);
+    static u8 after[PIXELS];
+    NphRenderFrameStats s = render_frames(f, &v, 1U, after);
+    NTEST_EXPECT_TRUE(
+        s.taa_history); // the frame has one; the changed material's pixels did not use it
+    // Frames 17 to 23, then frame 24 (phase 0 again) on a cut: the same frame without history.
+    for (u32 i = 0; i < RENDER_TAA_PHASES - 1U; ++i) {
+        (void)test_render_frame(f, &v, f->target);
+    }
+    static u8 cut[PIXELS];
+    v.camera_cut = 1;
+    s = render_frames(f, &v, 1U, cut);
+    NTEST_EXPECT_FALSE(s.taa_history);
+    // Over black, a pixel that is not black shows a cube: the first cube (the left half) as on the
+    // cut, to the bit; the second (the right half) with its history, its edges smoother than the
+    // cut's.
+    u32 left = 0U;
+    u32 left_same = 0U;
+    u32 right_different = 0U;
+    for (u32 y = 0; y < TEST_TARGET_SIZE; ++y) {
+        for (u32 x = 0; x < TEST_TARGET_SIZE; ++x) {
+            const u64 at = ((u64)y * TEST_TARGET_SIZE + x) * 4U;
+            const bool lit = (after[at] | after[at + 1U] | after[at + 2U] | cut[at] | cut[at + 1U] |
+                              cut[at + 2U]) != 0U;
+            if (!lit) {
+                continue;
+            }
+            const bool same = memcmp(after + at, cut + at, 4U) == 0;
+            if (x < TEST_TARGET_SIZE / 2U) {
+                left += 1U;
+                left_same += same ? 1U : 0U;
+            } else if (!same) {
+                right_different += 1U;
+            }
+        }
+    }
+    NTEST_EXPECT_GT_UINT(left, 0U);
+    NTEST_EXPECT_EQ_UINT(left_same, left);
+    NTEST_EXPECT_GT_UINT(right_different, 0U);
+    // The frame after keeps its history again: the mark lasts one frame.
+    v.camera_cut = 0;
+    NTEST_EXPECT_TRUE(test_render_frame(f, &v, f->target).taa_history);
+}
+
 // A frame resolved otherwise (no anti-aliasing, a debug view) or into
 // another extent breaks the history's continuity.
 NTEST_F(Taa, the_history_continues_only_from_the_frame_before)

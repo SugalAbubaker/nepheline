@@ -112,11 +112,13 @@ void render_assets_forget(RenderAssetCache *c, u32 index);
 bool render_assets_refresh(RenderAssetCache *c, u32 index);
 
 // Updates a ready material's render material from `h` (its factors, alpha,
-// flags and wraps), with the textures the entry holds; `h`'s texture GUIDs
-// are not read. NPH_RESULT_INVALID_STATE for an entry that is not a ready
-// material; the renderer's errors.
+// flags and wraps) and `uv` (its coordinates' transform; NULL: the identity),
+// with the textures the entry holds; `h`'s texture GUIDs are not read.
+// NPH_RESULT_INVALID_STATE for an entry that is not a ready material; the
+// renderer's errors.
 NPH_MUST_USE NphResult render_assets_material_set(RenderAssetCache *c, u32 index,
-                                                  const NphMaterialHeader *h);
+                                                  const NphMaterialHeader *h,
+                                                  const NphMaterialUvTransform *uv);
 
 // Advances loads: LOADING to READY or FAILED, materials WAITING for their
 // textures to READY. Returns the first resource-creation failure that is
