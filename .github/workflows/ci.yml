@@ -217,6 +217,15 @@ jobs:
           ctest --preset ${{ matrix.preset }}-${{ matrix.cfg }}
           --output-junit "${{ github.workspace }}/build/${{ matrix.preset }}/test-results/ctest-${{ matrix.cfg }}.xml"
 
+      # What the crash tests' reports said of this runner and of their dumps, passed or failed
+      # (run_crash.cmake keeps the lines after it clears the reports): on some runners dbghelp
+      # fails every dump of a process, on others none (ADR-0103).
+      - name: Crash reports (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem "build/${{ matrix.preset }}/engine/platform/crash_tests" -Recurse -Filter *.lines.txt -ErrorAction SilentlyContinue | Sort-Object Name | Get-Content
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7

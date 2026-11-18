@@ -9,12 +9,14 @@
 // thread then ends the process itself, with the exception's code, so that
 // no other handler and no error-reporting dialog runs.
 #include <nepheline/core/log.h>
+#include <nepheline/platform/cpu.h>
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/thread.h>
 
 #include "crash_internal.h"
 
 #include <dbghelp.h>
+#include <intrin.h> // __cpuid, __cpuidex: the system line's processor
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,6 +257,135 @@ BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_IN
     }
 }
 
+// What a report says of its machine (the "system:" line, ADR-0103): the system's version, the
+// processor and whether it has shadow stacks (CET), dbghelp's version, and whether the process
+// runs with user shadow stacks. Made at install, so the handler takes no lock for it. On some of
+// CI's runners every dump of a process fails (ERROR_INVALID_USER_BUFFER) where on others none
+// does: this is what tells the runners apart.
+static char g_system[256];
+
+// Appends `s` to the system line at `*at`, within its size.
+static void system_add(u32 *at, const char *s)
+{
+    while (*s != '\0' && *at + 1U < (u32)sizeof g_system) {
+        g_system[(*at)++] = *s++;
+    }
+    g_system[*at] = '\0';
+}
+
+static void system_add_dec(u32 *at, u32 v)
+{
+    char digits[12];
+    u32 n = 0U;
+    do {
+        digits[n++] = (char)('0' + (char)(v % 10U));
+        v /= 10U;
+    } while (v != 0U && n < (u32)sizeof digits);
+    char out[13];
+    for (u32 i = 0U; i < n; ++i) {
+        out[i] = digits[n - 1U - i];
+    }
+    out[n] = '\0';
+    system_add(at, out);
+}
+
+// The file version of the loaded module `m`, from its version resource's fixed part (the
+// signature 0xFEEF04BD, then the structure's version, then the file's two words): false where it
+// has none.
+static bool module_version(HMODULE m, u32 out[4])
+{
+    // RT_VERSION is 16 and VS_VERSION_INFO 1 (winver.h).
+    HRSRC res = FindResourceW(m, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(16));
+    if (res == NULL) {
+        return false;
+    }
+    HGLOBAL data = LoadResource(m, res);
+    const u8 *p = data != NULL ? (const u8 *)LockResource(data) : NULL;
+    const DWORD size = SizeofResource(m, res);
+    if (p == NULL || size < 16U) {
+        return false;
+    }
+    for (DWORD i = 0U; i + 16U <= size; i += 4U) {
+        u32 words[4];
+        memcpy(words, p + i, sizeof words);
+        if (words[0] == 0xFEEF04BDU) {
+            out[0] = words[2] >> 16U;
+            out[1] = words[2] & 0xFFFFU;
+            out[2] = words[3] >> 16U;
+            out[3] = words[3] & 0xFFFFU;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void describe_system(void)
+{
+    u32 at = 0U;
+    g_system[0] = '\0';
+    // The version as the kernel has it (GetVersionEx answers what the manifest asks for).
+    typedef LONG(WINAPI * RtlGetVersionFn)(OSVERSIONINFOW *);
+    union {
+        FARPROC proc;
+        RtlGetVersionFn fn;
+    } u;
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    u.proc = ntdll != NULL ? GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    OSVERSIONINFOW os;
+    memset(&os, 0, sizeof os);
+    os.dwOSVersionInfoSize = (DWORD)sizeof os;
+    system_add(&at, "Windows ");
+    if (u.proc != NULL && u.fn(&os) == 0) {
+        system_add_dec(&at, os.dwMajorVersion);
+        system_add(&at, ".");
+        system_add_dec(&at, os.dwMinorVersion);
+        system_add(&at, ".");
+        system_add_dec(&at, os.dwBuildNumber);
+    } else {
+        system_add(&at, "(version unknown)");
+    }
+    NphCpuInfo cpu;
+    nph_cpu_detect(&cpu);
+    system_add(&at, "; ");
+    system_add(&at, cpu.brand[0] != '\0' ? cpu.brand : "(processor unknown)");
+    // CPUID leaf 7, ECX bit 7: the processor's shadow stacks (CET_SS).
+    int regs[4] = {0, 0, 0, 0};
+    __cpuid(regs, 0);
+    bool cet = false;
+    if (regs[0] >= 7) {
+        __cpuidex(regs, 7, 0);
+        cet = ((u32)regs[2] & (1U << 7U)) != 0U;
+    }
+    system_add(&at, cet ? ", shadow stacks" : ", no shadow stacks");
+    system_add(&at, "; dbghelp ");
+    u32 v[4];
+    if (g_dbghelp != NULL && module_version(g_dbghelp, v)) {
+        for (u32 i = 0U; i < 4U; ++i) {
+            if (i != 0U) {
+                system_add(&at, ".");
+            }
+            system_add_dec(&at, v[i]);
+        }
+    } else {
+        system_add(&at, "(version unknown)");
+    }
+    // Whether this process runs with user shadow stacks (Windows 11 and Server 2022 on, where the
+    // processor has them and the executable allows them).
+    PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY ss;
+    memset(&ss, 0, sizeof ss);
+    system_add(&at, "; user shadow stacks ");
+    if (GetProcessMitigationPolicy(GetCurrentProcess(), ProcessUserShadowStackPolicy, &ss,
+                                   sizeof ss)) {
+        system_add(&at, ss.EnableUserShadowStack == 0U       ? "off"
+                        : ss.EnableUserShadowStackStrictMode ? "on (strict)"
+                                                             : "on");
+    } else {
+        system_add(&at, "(unknown, error ");
+        system_add_dec(&at, (u32)GetLastError());
+        system_add(&at, ")");
+    }
+}
+
 // The dumps tests make fail, and whether the attempts after them are stand-ins
 // (crash_win32_fail_dumps).
 static volatile LONG g_dump_failures;
@@ -385,6 +516,9 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     CrashOut o;
     crash_out_init(&o, (i64)(iptr)file);
     crash_write_header(&o, &f);
+    crash_out_str(&o, "system:    ");
+    crash_out_str(&o, g_system);
+    crash_out_str(&o, "\n");
     crash_out_flush(&o);
 
     // The dump first: it says the most, and what follows reads the modules'
@@ -680,6 +814,7 @@ NphResult crash_os_install(void)
         close_handles();
         return nph_win32_fail("GetProcAddress(MiniDumpWriteDump)", error);
     }
+    describe_system();
     // The executable's directory, for the dump's callback.
     const DWORD exe_len = GetModuleFileNameW(NULL, g_exe_dir, (DWORD)NPH_ARRAY_COUNT(g_exe_dir));
     g_exe_dir_len = 0U;

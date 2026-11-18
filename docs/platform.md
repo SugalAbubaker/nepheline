@@ -302,6 +302,14 @@ process. When one happens, it writes into the directory it was given:
 - **`<app>-<yyyymmdd>-<hhmmss>-<pid>.txt`, the report.** It holds:
   - the program, its version and build, the UTC time, the process, and the
     thread, by the name `nph_thread_set_current_name` gave it;
+  - on Windows, the machine (`system:`): the system's version, the
+    processor and whether it has shadow stacks (CET), dbghelp's version,
+    and whether the process runs with user shadow stacks. It is made when
+    the handler installs, so writing it takes no lock. On some of CI's
+    runners dbghelp fails every dump of a process where on others none
+    fails, and this is what tells them apart; the crash tests keep each
+    report's `system:` and `dump:` lines after they pass
+    (`<mode>.lines.txt`), and the Windows jobs print them;
   - the fault (the exception or the signal, and what it was about: a write,
     no mapping there, and the address) and the instruction;
   - the failed assertion, when one ended it: install wraps the assert

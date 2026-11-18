@@ -538,6 +538,15 @@ NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
     NTEST_EXPECT_TRUE(contains(text, "  #1  0x")); // the walk went past the first frame
     NTEST_EXPECT_TRUE(contains(text, "dump:      crash_test-"));
     NTEST_EXPECT_FALSE(contains(text, "not written"));
+    // What it says of the machine (ADR-0103): known, here, but the process's shadow stacks,
+    // which older systems do not report.
+    NTEST_EXPECT_TRUE(contains(text, "system:    Windows 10."));
+    NTEST_EXPECT_FALSE(contains(text, "(version unknown)"));
+    NTEST_EXPECT_FALSE(contains(text, "(processor unknown)"));
+    NTEST_EXPECT_TRUE(contains(text, "; dbghelp 10."));
+    NTEST_EXPECT_TRUE(contains(text, "shadow stacks; dbghelp") ||
+                      contains(text, "no shadow stacks; dbghelp"));
+    NTEST_EXPECT_TRUE(contains(text, "; user shadow stacks "));
 
     // The dump beside the report, a minidump by its signature.
     char dump[CRASH_PATH_MAX];

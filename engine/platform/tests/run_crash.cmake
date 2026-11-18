@@ -44,6 +44,25 @@ endif()
 
 file(GLOB reports "${DIR}/*.txt")
 list(LENGTH reports count)
+# What each report says of its machine and of its dump, kept beside the mode's directory after it
+# is cleared (<mode>.lines.txt): CI's Windows jobs print them, so the runners whose dbghelp fails
+# every dump of a process can be told from the others (ADR-0103).
+get_filename_component(lines_dir "${DIR}" DIRECTORY)
+set(summary "${MODE} (exit '${rc}', ${count} report(s)):")
+foreach(report IN LISTS reports)
+    file(READ "${report}" text)
+    foreach(key IN ITEMS "system:" "dump:")
+        string(FIND "${text}" "\n${key}" at)
+        if(NOT at EQUAL -1)
+            math(EXPR at "${at} + 1")
+            string(SUBSTRING "${text}" ${at} -1 rest)
+            string(FIND "${rest}" "\n" end)
+            string(SUBSTRING "${rest}" 0 ${end} line)
+            string(APPEND summary " ${line}")
+        endif()
+    endforeach()
+endforeach()
+file(WRITE "${lines_dir}/${MODE}.lines.txt" "${summary}\n")
 if(NOT count EQUAL REPORTS)
     message(FATAL_ERROR "${MODE}: ${count} reports where ${REPORTS} were expected: ${reports}\n"
                         "--- output (exit '${rc}') ---\n${all}")
