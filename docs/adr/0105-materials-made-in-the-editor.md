@@ -1,7 +1,7 @@
 # 0105. Materials made in the editor: a `.nmat` source, tiled by the material, edited live
 
 - **Date:** 2026-11-17
-- **Status:** Proposed (Phase 15's second step, ADR-0102)
+- **Status:** Accepted 2026-11-18 (Phase 15's second step, ADR-0102)
 
 ## Context
 
@@ -83,6 +83,13 @@ What there is today:
    While the editor's material panel changes a value, it also updates the render material itself, so the viewport
    follows the drag. It writes and cooks the source when the change settles.
 
+   **The temporal resolve forgets a pixel's history where its material changed** (the user's choice, 2026-11-18). A
+   still pixel's new frame weighs 1/32, and its colour box is wide (render.md "Temporal"), so without this a material
+   changed in place would fade in over about 30 frames, half a second at 60 FPS. The renderer marks a material that
+   changed on the frame it changed. On that frame, the resolve takes the current colour where a pixel draws that
+   material, and its usual history from the next. The pixels of other materials keep theirs. The renderer's half of
+   this step builds it, measured with the tiling (§10.7: its cost in milliseconds and bytes).
+
 5. **The material panel** opens a material from the browser, from a `MeshRenderer` slot in the inspector, or as "New
    Material" (a `.nmat` with the defaults: light grey, non-metallic, roughness 0.5). It edits colours in sRGB and
    stores them linear. Images come from the project by drag or by a list. A material has no unsaved state: every
@@ -137,9 +144,8 @@ steps 5 to 7 are the editor's. They land as four pull requests, the source and i
 - **Later steps that sample materials must apply the transform:** the city's voxels and proxies sample meshes'
   materials, and the transform will have to reach them when editor-made worlds get proxies.
 - **Renaming a `.nmat` breaks its references**, as renaming any source does.
-- **A change in place shows over the temporal resolve's frames.** A still pixel's new frame weighs 1/32
-  and keeps the wide box (render.md "Temporal"), so a material changed in place reaches the image over
-  about 30 frames, half a second at 60 FPS. A change made by the material panel shows as a quick fade, not
-  a cut.
+- **A change in place cuts through the temporal history** (decision 4). Until the renderer's half of this step
+  lands, it fades in over about 30 frames, half a second at 60 FPS. The pixels of a changed material are resolved
+  without their history on that one frame, and so show the frame as it was drawn.
 - **Recovery is not needed for materials:** every settled change is written, so autosave (ADR-0104) does not keep
   them.

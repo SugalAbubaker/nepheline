@@ -1,7 +1,7 @@
 # 0103. The crash handler: a report and a minidump from the failing process, fibers included
 
 - **Date:** 2026-11-17
-- **Status:** Proposed (Phase 15's first step, ADR-0102; CLAUDE.md §8.11 amended; amends
+- **Status:** Accepted 2026-11-18 (Phase 15's first step, ADR-0102; CLAUDE.md §8.11 amended; amends
   [ADR-0010](0010-fibers.md)'s stacks on Windows)
 
 ## Context

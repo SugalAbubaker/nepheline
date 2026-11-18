@@ -1,7 +1,7 @@
 # 0104. Autosave: a session directory under a lock the system lets go of, and the work offered back
 
 - **Date:** 2026-11-17
-- **Status:** Proposed (Phase 15's first step, with ADR-0103, ADR-0102)
+- **Status:** Accepted 2026-11-18 (Phase 15's first step, with ADR-0103, ADR-0102)
 
 ## Context
 
