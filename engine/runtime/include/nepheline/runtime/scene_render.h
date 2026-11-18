@@ -77,6 +77,7 @@
 // the world while nothing else changes it (the frame's sync point).
 
 #include <nepheline/asset/loader.h>
+#include <nepheline/asset/material.h>
 #include <nepheline/render/renderer.h>
 #include <nepheline/runtime/components.h>
 #include <nepheline/runtime/proxy_stream.h>
@@ -230,13 +231,32 @@ NphRenderLight nph_scene_renderer_light(const NphSceneRenderer *sr, NphEntity en
 bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden);
 
 // Loads the asset with `guid` again, because its file was replaced (a
-// re-import, an edited mesh). The cached version is forgotten (also by the
-// loader, asset/loader.h nph_asset_forget), and so is every material that
-// uses it as a texture. Every entity drawing either, as its mesh or a
-// material, acquires them again at the next sync: it loses its instance
-// until the new versions are ready, as an entity whose MeshRenderer changed
-// does. Returns how many entities that is; 0 when nothing holds the asset.
+// re-import, an edited mesh or material).
+// - A material is loaded again in place (ADR-0105): until its new version
+//   and its textures are ready, the entities drawing it keep their instances
+//   and the version they had, and then they draw the new one from the next
+//   frame. No entity loses its instance.
+// - A texture is forgotten (also by the loader, asset/loader.h
+//   nph_asset_forget), and every material sampling it is loaded again in
+//   place, as above, with the new texture.
+// - A mesh is forgotten, and every entity drawing it acquires it again at
+//   the next sync: it loses its instance until the new version is ready, as
+//   an entity whose MeshRenderer changed does.
+// Returns how many entities lose their instance (0 for a material or a
+// texture, and when nothing holds the asset).
 u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid);
+
+// Draws the material with `guid` with the factors, alpha, flags and wraps of
+// `header` from the next frame, keeping its textures (`header`'s texture
+// GUIDs are not read), until it is set again or reloaded: how the editor's
+// material panel shows a change while it is being made (ADR-0105). Every
+// entity drawing it follows; none loses its instance.
+// NPH_RESULT_NOT_FOUND when nothing draws that material,
+// NPH_RESULT_INVALID_STATE when it is not ready (loading, or failed); the
+// renderer's errors (a header it refuses, as non-finite factors).
+// NPH_MAIN_THREAD_ONLY, between syncs.
+NPH_MUST_USE NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
+                                                       const NphMaterialHeader *header);
 
 // ---------------------------------------------------------------------------
 // Importing cooked scenes

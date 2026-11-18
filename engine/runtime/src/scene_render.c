@@ -1583,6 +1583,18 @@ NphRenderLight nph_scene_renderer_light(const NphSceneRenderer *sr, NphEntity en
     return r != NULL ? r->light : NPH_RENDER_LIGHT_NULL;
 }
 
+NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
+                                          const NphMaterialHeader *header)
+{
+    NPH_ASSERT(sr != NULL && header != NULL);
+    const u32 index = render_assets_find(&sr->assets, guid);
+    const RenderAsset *a = render_asset(&sr->assets, index);
+    if (a == NULL || a->kind != (u32)RENDER_ASSET_MATERIAL) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    return render_assets_material_set(&sr->assets, index, header);
+}
+
 bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden)
 {
     NPH_ASSERT(sr != NULL);
@@ -1625,8 +1637,13 @@ u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid)
     if (index == RENDER_ASSET_NONE) {
         return 0U;
     }
+    // A ready material changes in place: nothing loses its instance.
+    if (c->items[index].kind == (u32)RENDER_ASSET_MATERIAL && render_assets_refresh(c, index)) {
+        return 0U;
+    }
     render_assets_forget(c, index);
-    // A texture: the materials sampling it are made again with the new one.
+    // A texture: the materials sampling it load again in place, with the new one (one that
+    // cannot, made again).
     if (c->items[index].kind == (u32)RENDER_ASSET_TEXTURE) {
         for (u32 i = 0; i < c->high; ++i) {
             const RenderAsset *a = &c->items[i];
@@ -1635,7 +1652,9 @@ u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid)
             }
             for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
                 if (a->textures[t] == index) {
-                    render_assets_forget(c, i);
+                    if (!render_assets_refresh(c, i)) {
+                        render_assets_forget(c, i);
+                    }
                     break;
                 }
             }

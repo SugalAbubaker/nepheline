@@ -839,6 +839,48 @@ NTEST(SceneRender, the_host_hides_an_instance_whatever_its_component_says)
     scene_teardown(&fx);
 }
 
+NTEST(SceneRender, a_material_set_in_place_changes_what_draws_it)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    load_showcase(&fx);
+    const NphEntity torus = named(&fx, "torus");
+    const NphRenderInstance kept = nph_scene_renderer_instance(fx.sr, torus);
+    const NphGuid material = nph_guid_from_cstr("showcase.gltf#material/1");
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    h.base_color_factor = nph_vec4(1.0F, 0.25F, 0.0F, 1.0F);
+    h.roughness_factor = 0.25F;
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h), NPH_RESULT_OK);
+    // Nothing draws that one; and a header the renderer refuses leaves the material as it was.
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, nph_guid_from_cstr("nothing"), &h),
+                        NPH_RESULT_NOT_FOUND);
+    h.roughness_factor = nph_f32_from_bits(0x7FC00000U);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, material, &h),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    // A mesh's GUID is not a material.
+    NTEST_EXPECT_EQ_INT(
+        nph_scene_renderer_material_set(fx.sr, nph_guid_from_cstr("showcase.gltf#mesh/0"), &h),
+        NPH_RESULT_NOT_FOUND);
+    const NphSceneRenderStats st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);
+    // It draws, and a reload gives the material back its file's values in place.
+    const NphRenderView view = test_view();
+    const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.culled, 0U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_reload(fx.sr, material), 0U);
+    nph_scene_renderer_wait(fx.sr);
+    NTEST_EXPECT_EQ_UINT(sync(&fx).assets_ready, SCENE_ASSETS);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);
+    scene_teardown(&fx);
+}
+
 NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
 {
     static SceneFixture fx;
@@ -872,22 +914,27 @@ NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
     NTEST_ASSERT_NOT_NULL(nph_scene_renderer_mesh_asset(fx.sr, torus));
     NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live); // the old one went
 
-    // The checker texture: its material is made again, so the torus, which
-    // uses it, is drawn again; the ground is untouched.
+    // The checker texture: the material sampling it loads again in place
+    // (ADR-0105), so the torus keeps its instance and draws the old texture
+    // until the new one is ready; the ground is untouched.
+    const NphRenderInstance kept = nph_scene_renderer_instance(fx.sr, torus);
     NTEST_EXPECT_EQ_UINT(
-        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#image/0/color")), 1U);
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#image/0/color")), 0U);
     st = sync(&fx);
-    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);
     nph_scene_renderer_wait(fx.sr);
     st = sync(&fx);
     NTEST_EXPECT_EQ_UINT(st.instances, 2U);
     NTEST_EXPECT_EQ_UINT(st.assets_ready, SCENE_ASSETS);
     NTEST_EXPECT_EQ_UINT(st.failed, 0U);
-    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live); // the old versions went
 
-    // Twice before a sync is once; an asset nothing holds reloads nothing.
+    // A material: in place too, twice before a sync as once; an asset nothing
+    // holds reloads nothing.
     NTEST_EXPECT_EQ_UINT(
-        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#material/1")), 1U);
+        nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#material/1")), 0U);
     NTEST_EXPECT_EQ_UINT(
         nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("showcase.gltf#material/1")), 0U);
     NTEST_EXPECT_EQ_UINT(nph_scene_renderer_reload(fx.sr, nph_guid_from_cstr("nothing")), 0U);
@@ -896,6 +943,8 @@ NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
     st = sync(&fx);
     NTEST_EXPECT_EQ_UINT(st.instances, 2U);
     NTEST_EXPECT_EQ_UINT(st.assets_ready, SCENE_ASSETS);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(fx.sr, torus).value, kept.value);
+    NTEST_EXPECT_EQ_UINT(nph_asset_loader_live(fx.loader), live);
     const NphRenderView view = test_view();
     const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_EXPECT_EQ_UINT(fs.draws, 2U);

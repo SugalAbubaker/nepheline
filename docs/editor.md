@@ -424,7 +424,9 @@ into the folder the asset browser shows:
 4. Whatever the cook wrote is **reloaded** where it is drawn
    (`nph_scene_renderer_reload`), before anything new is placed. A source
    imported again after it changed is drawn anew wherever it is used,
-   while the old files were mapped (ADR-0027).
+   while the old files were mapped (ADR-0027). A material, or a texture
+   it samples, changes in place: what draws it keeps its instance and
+   shows the old version until the new one is ready (ADR-0105).
 
 The copy and the cook run on the project's **import thread**, one request
 at a time, so the editor keeps drawing while textures encode. The thread
@@ -677,9 +679,14 @@ device.
   scales, and extrudes; deleting, merging, splitting, and the other
   modeling tools are §8.13's "Phase 2". The preview draws with the default
   material, whatever the entity's.
-- A reload drops the instances drawing the asset until the new version is
+- A reloaded mesh drops the instances drawing it until the new version is
   ready (a frame or two). Mesh editing covers its own entity with the
-  preview; other entities sharing the mesh blink.
+  preview; other entities sharing the mesh blink. Materials and textures
+  change in place.
+- A material that changes in place shows over the frames the temporal
+  resolve takes for a still pixel, whose new frame weighs 1/32
+  (render.md "Temporal"): about half a second at 60 FPS for a change of
+  colour.
 - Imports cannot be cancelled, and closing the editor waits for the one in
   progress.
 - Scene paths are typed. There is no native file dialog: the window

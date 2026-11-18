@@ -21,6 +21,7 @@
 #include "editor_internal.h"
 #include "test_cook_support.h"
 
+#include <cook/material.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1843,4 +1844,99 @@ NTEST(EditorAutosave, a_new_sessions_directory_takes_a_name_no_directory_holds)
                         NPH_RESULT_OVERFLOW);
     NTEST_EXPECT_EQ_STR(small, "");
     test_temp_dir_remove(&root);
+}
+
+// ---------------------------------------------------------------------------
+// A material cooked again changes in place (ADR-0105)
+// ---------------------------------------------------------------------------
+
+// The mean colour of the viewport's centre, a square of 16 pixels a side (R8G8B8A8_UNORM).
+static void centre_colour(EditorFixture *f, f32 out[3])
+{
+    const NphGpuImage image = editor_viewport_image(f->editor);
+    u64 size = 0U;
+    u8 *px = pixels_of(f, image, &size);
+    const NphGpuImageDesc *d = nph_gpu_image_desc(nph_engine_device(f->engine), image);
+    NTEST_ASSERT_NOT_NULL(d);
+    NTEST_ASSERT_EQ_INT(d->format, NPH_GPU_FORMAT_R8G8B8A8_UNORM);
+    f64 sum[3] = {0.0, 0.0, 0.0};
+    for (u32 y = d->height / 2U - 8U; y < d->height / 2U + 8U; ++y) {
+        for (u32 x = d->width / 2U - 8U; x < d->width / 2U + 8U; ++x) {
+            const u8 *p = px + ((u64)y * d->width + x) * 4U;
+            for (u32 c = 0; c < 3U; ++c) {
+                sum[c] += (f64)p[c];
+            }
+        }
+    }
+    for (u32 c = 0; c < 3U; ++c) {
+        out[c] = (f32)(sum[c] / 256.0);
+    }
+    free_pixels(px, size);
+}
+
+// A plain material of `colour` at the project's `materials/paint.nmat`, cooked.
+static void paint(EditorFixture *f, f32 r, f32 g, f32 b)
+{
+    CookMaterialSource m;
+    cook_material_source_default(&m);
+    m.base_color = nph_vec4(r, g, b, 1.0F);
+    m.roughness = 1.0F;
+    char dir[1100];
+    (void)snprintf(dir, sizeof dir, "%s/assets/materials", f->project);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    char path[1200];
+    (void)snprintf(path, sizeof path, "%s/paint.nmat", dir);
+    NTEST_ASSERT_EQ_INT(cook_material_source_save(&m, nph_allocator_system(), path), NPH_RESULT_OK);
+    u32 id = 0U;
+    NTEST_ASSERT_EQ_INT(
+        editor_project_cook(editor_project(f->editor), "materials/paint.nmat", false, 0U, &id),
+        NPH_RESULT_OK);
+}
+
+NTEST(Editor, a_material_cooked_again_changes_in_place)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    paint(&fx, 1.0F, 0.0F, 0.0F);
+    const NphEntity cube = made_cube(&fx);
+    // The cube's first slot names the material.
+    const NphComponentId id = nph_engine_components(fx.engine)->mesh_renderer;
+    NphMeshRenderer mr =
+        *(const NphMeshRenderer *)nph_world_get(nph_engine_edit_world(fx.engine), cube, id);
+    mr.material0 = nph_guid_from_cstr("materials/paint.nmat#material");
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "Paint"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_history_set(ed->history, cube, id, &mr), NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    settle(&fx);
+    f32 red[3];
+    centre_colour(&fx, red);
+    NTEST_EXPECT_TRUE(red[0] > red[1] + 30.0F);
+    NTEST_EXPECT_TRUE(red[0] > red[2] + 30.0F);
+
+    // Cooked again green: the cube keeps its instance on every frame, and turns green.
+    NphSceneRenderer *sr = nph_engine_scene_renderer(fx.engine);
+    const NphRenderInstance kept = nph_scene_renderer_instance(sr, cube);
+    NTEST_ASSERT_NE_UINT(kept.value, 0U);
+    paint(&fx, 0.0F, 1.0F, 0.0F);
+    for (u32 i = 0; i < 6U; ++i) {
+        frames(&fx, 1U);
+        NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(sr, cube).value, kept.value);
+    }
+    settle(&fx);
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(sr, cube).value, kept.value);
+    // Every frame since the update draws it green; the image shows it all after some frames,
+    // as the resolve weighs a still pixel's new frame at 1/32 (docs/render.md "Temporal").
+    f32 green[3];
+    for (u32 waited = 0U; waited < 192U; waited += 8U) {
+        centre_colour(&fx, green);
+        if (green[1] > green[0] + 30.0F && green[1] > green[2] + 30.0F) {
+            break;
+        }
+        frames(&fx, 8U);
+    }
+    NTEST_EXPECT_TRUE(green[1] > green[0] + 30.0F);
+    NTEST_EXPECT_TRUE(green[1] > green[2] + 30.0F);
+    finish(&fx);
 }

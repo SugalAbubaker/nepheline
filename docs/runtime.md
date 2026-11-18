@@ -315,13 +315,26 @@ the renderer's rays take the trimmed cards on the frames those materials hold
 them, the texture's finest level resident, and the mesh's own triangles on the
 others (ADR-0098; render.md "Rays and trimmed cards").
 
-Two calls are for a host, such as the editor:
+Three calls are for a host, such as the editor:
 - `nph_scene_renderer_reload` loads an asset again after its cooked file
-  was replaced (a re-import, an edited mesh). The cached version is
-  forgotten by the cache and the loader (`nph_asset_forget`), along with
-  the materials that use it as a texture. Every entity drawing them
-  acquires them again at the next sync, which visits every chunk, and is
-  without an instance until the new versions are ready.
+  was replaced (a re-import, an edited mesh or material).
+  - **A material changes in place** (ADR-0105). The cache keeps its entry
+    and its render material while the new version loads, with the
+    loader's copy forgotten (`nph_asset_forget`), and then acquires its
+    textures again (`render_assets_refresh`). Once those settle, it
+    updates the render material (`nph_render_material_update`) and lets
+    the old asset and textures go. Every entity drawing it keeps its
+    instance and draws the old version until then. A version that fails to
+    load or to be made leaves the old one, logged.
+  - **A texture** is forgotten, and the materials sampling it change in
+    place with the new one.
+  - **A mesh** is forgotten. Every entity drawing it acquires it again at
+    the next sync, which visits every chunk, and is without an instance
+    until the new version is ready.
+- `nph_scene_renderer_material_set` draws a ready material with the
+  factors, alpha, flags and wraps of a header, keeping its textures, from
+  the next frame until it is set again or reloaded: how the editor shows a
+  material while a value is being dragged.
 - `nph_scene_renderer_set_hidden` hides an entity's instance whatever its
   MeshRenderer says, while the host draws it its own way (the editor's
   mesh editing). It holds across mesh and transform changes. Showing the

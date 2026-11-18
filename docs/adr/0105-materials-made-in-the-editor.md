@@ -137,5 +137,9 @@ steps 5 to 7 are the editor's. They land as four pull requests, the source and i
 - **Later steps that sample materials must apply the transform:** the city's voxels and proxies sample meshes'
   materials, and the transform will have to reach them when editor-made worlds get proxies.
 - **Renaming a `.nmat` breaks its references**, as renaming any source does.
+- **A change in place shows over the temporal resolve's frames.** A still pixel's new frame weighs 1/32
+  and keeps the wide box (render.md "Temporal"), so a material changed in place reaches the image over
+  about 30 frames, half a second at 60 FPS. A change made by the material panel shows as a quick fade, not
+  a cut.
 - **Recovery is not needed for materials:** every settled change is written, so autosave (ADR-0104) does not keep
   them.

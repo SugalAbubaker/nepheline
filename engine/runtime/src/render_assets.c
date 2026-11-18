@@ -123,6 +123,10 @@ void render_assets_free(RenderAssetCache *c)
             }
             destroy_resource(c, a);
             nph_asset_release(c->loader, a->handle);
+            if (a->refresh != (u32)RENDER_REFRESH_NONE) {
+                nph_asset_release(c->loader, a->next); // its new textures go in the next pass
+                a->refresh = (u32)RENDER_REFRESH_NONE;
+            }
             a->state = RENDER_ASSET_FREE;
         }
     }
@@ -184,6 +188,8 @@ u32 render_assets_acquire(RenderAssetCache *c, NphGuid guid, RenderAssetKind kin
     return index;
 }
 
+static void cancel_refresh(RenderAssetCache *c, RenderAsset *a);
+
 void render_assets_release(RenderAssetCache *c, u32 index)
 {
     if (index == RENDER_ASSET_NONE || index >= c->high) {
@@ -194,6 +200,7 @@ void render_assets_release(RenderAssetCache *c, u32 index)
     if (--a->refs != 0U) {
         return;
     }
+    cancel_refresh(c, a);
     destroy_resource(c, a);
     for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
         render_assets_release(c, a->textures[t]);
@@ -425,11 +432,10 @@ static NphResult start_material(RenderAssetCache *c, u32 index, const NphAsset *
     return NPH_RESULT_OK;
 }
 
-static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
+// The render description of header `h` with the textures `textures` (cache indices) hold.
+static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
+                          const u32 textures[RENDER_MATERIAL_TEXTURES], NphRenderMaterialDesc *out)
 {
-    NphMaterialView mv;
-    NPH_TRY(nph_material_view(nph_asset_get(c->loader, a->handle), &mv));
-    const NphMaterialHeader *h = mv.header;
     NphRenderMaterialDesc d;
     nph_render_material_desc_default(&d);
     d.base_color = h->base_color_factor;
@@ -445,7 +451,7 @@ static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
     for (u32 t = 0; t < (u32)NPH_RENDER_SLOT_COUNT; ++t) {
         const NphMaterialTextureRef *ref = &h->textures[t];
-        const RenderAsset *tex = render_asset(c, a->textures[t]);
+        const RenderAsset *tex = render_asset(c, textures[t]);
         d.textures[t].texture = tex != NULL && tex->state == RENDER_ASSET_READY
                                     ? tex->texture
                                     : NPH_RENDER_TEXTURE_NULL;
@@ -462,7 +468,138 @@ static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
         d.alpha_key = h->alpha_key;
     }
     d.name = "cooked material";
+    *out = d;
+}
+
+static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
+{
+    NphMaterialView mv;
+    NPH_TRY(nph_material_view(nph_asset_get(c->loader, a->handle), &mv));
+    NphRenderMaterialDesc d;
+    material_desc(c, mv.header, a->textures, &d);
     return nph_render_material_create(c->renderer, &d, &a->material);
+}
+
+// ---------------------------------------------------------------------------
+// Materials loaded again in place
+// ---------------------------------------------------------------------------
+
+static void cancel_refresh(RenderAssetCache *c, RenderAsset *a)
+{
+    if (a->refresh == (u32)RENDER_REFRESH_NONE) {
+        return;
+    }
+    a->refresh = (u32)RENDER_REFRESH_NONE;
+    for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+        const u32 tex = a->next_textures[t];
+        a->next_textures[t] = RENDER_ASSET_NONE;
+        render_assets_release(c, tex);
+    }
+    nph_asset_release(c->loader, a->next);
+    a->next = NPH_ASSET_HANDLE_NULL;
+}
+
+bool render_assets_refresh(RenderAssetCache *c, u32 index)
+{
+    if (index == RENDER_ASSET_NONE || index >= c->high) {
+        return false;
+    }
+    RenderAsset *a = &c->items[index];
+    if (a->kind != (u32)RENDER_ASSET_MATERIAL || a->state != (u32)RENDER_ASSET_READY ||
+        a->forgotten != 0) {
+        return false;
+    }
+    // One in flight read the file as it was: this one reads it as it is.
+    cancel_refresh(c, a);
+    nph_asset_forget(c->loader, a->handle);
+    NphAssetHandle next = NPH_ASSET_HANDLE_NULL;
+    const NphResult r = nph_asset_load_guid_async(c->loader, a->guid, NULL, &next);
+    if (r != NPH_RESULT_OK) {
+        log_failure(a, "could not be loaded again", r);
+        return false;
+    }
+    a->next = next;
+    for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+        a->next_textures[t] = RENDER_ASSET_NONE;
+    }
+    a->refresh = (u32)RENDER_REFRESH_LOADING;
+    return true;
+}
+
+NphResult render_assets_material_set(RenderAssetCache *c, u32 index, const NphMaterialHeader *h)
+{
+    NPH_ASSERT(h != NULL);
+    const RenderAsset *a = render_asset(c, index);
+    if (a == NULL || a->kind != (u32)RENDER_ASSET_MATERIAL || a->state != (u32)RENDER_ASSET_READY) {
+        return NPH_RESULT_INVALID_STATE;
+    }
+    NphRenderMaterialDesc d;
+    material_desc(c, h, a->textures, &d);
+    return nph_render_material_update(c->renderer, a->material, &d);
+}
+
+static bool content_error(NphResult r);
+
+// Advances the refresh of entry `index`: its new asset to its textures, its textures to the
+// update. The first failure that is not a content error, in `*first`.
+static void advance_refresh(RenderAssetCache *c, u32 index, NphResult *first)
+{
+    RenderAsset *a = &c->items[index];
+    NphMaterialView mv;
+    memset(&mv, 0, sizeof mv);
+    if (a->refresh == (u32)RENDER_REFRESH_LOADING) {
+        const NphAssetState st = nph_asset_state(c->loader, a->next);
+        if (st == NPH_ASSET_STATE_LOADING) {
+            return;
+        }
+        const NphResult r = st == NPH_ASSET_STATE_READY
+                                ? nph_material_view(nph_asset_get(c->loader, a->next), &mv)
+                                : nph_asset_error(c->loader, a->next);
+        if (r != NPH_RESULT_OK) {
+            log_failure(a, "failed to load again; the version it had stays", r);
+            cancel_refresh(c, a);
+            return;
+        }
+        for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+            const u32 tex =
+                render_assets_acquire(c, mv.header->textures[t].texture, RENDER_ASSET_TEXTURE);
+            c->items[index].next_textures[t] = tex; // `items` is fixed: acquiring never moves it
+        }
+        a = &c->items[index];
+        a->refresh = (u32)RENDER_REFRESH_WAITING;
+    }
+    for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+        if (!render_asset_settled(c, a->next_textures[t])) {
+            return;
+        }
+    }
+    NPH_VERIFY(nph_material_view(nph_asset_get(c->loader, a->next), &mv) == NPH_RESULT_OK);
+    NphRenderMaterialDesc d;
+    material_desc(c, mv.header, a->next_textures, &d);
+    const NphResult r = nph_render_material_update(c->renderer, a->material, &d);
+    if (r != NPH_RESULT_OK) {
+        log_failure(a, "is not usable again; the version it had stays", r);
+        cancel_refresh(c, a);
+        if (!content_error(r) && *first == NPH_RESULT_OK) {
+            *first = r;
+        }
+        return;
+    }
+    // The new version is the entry's: the old asset and textures go.
+    const NphAssetHandle old = a->handle;
+    u32 old_textures[RENDER_MATERIAL_TEXTURES];
+    for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+        old_textures[t] = a->textures[t];
+        a->textures[t] = a->next_textures[t];
+        a->next_textures[t] = RENDER_ASSET_NONE;
+    }
+    a->handle = a->next;
+    a->next = NPH_ASSET_HANDLE_NULL;
+    a->refresh = (u32)RENDER_REFRESH_NONE;
+    for (u32 t = 0; t < RENDER_MATERIAL_TEXTURES; ++t) {
+        render_assets_release(c, old_textures[t]);
+    }
+    nph_asset_release(c->loader, old);
 }
 
 // Errors that say the content is bad (the asset fails, users go on) as
@@ -533,6 +670,13 @@ NphResult render_assets_poll(RenderAssetCache *c)
             a->state = RENDER_ASSET_READY;
         }
     }
+    // Materials loading again in place.
+    for (u32 i = 0; i < c->high; ++i) {
+        if (c->items[i].state == RENDER_ASSET_READY &&
+            c->items[i].refresh != (u32)RENDER_REFRESH_NONE) {
+            advance_refresh(c, i, &first);
+        }
+    }
     return first;
 }
 
@@ -545,6 +689,12 @@ NphResult render_assets_wait(RenderAssetCache *c)
             if (c->items[i].state == RENDER_ASSET_LOADING) {
                 (void)nph_asset_wait(c->loader, c->items[i].handle);
                 waited = true;
+            }
+            if (c->items[i].refresh != (u32)RENDER_REFRESH_NONE) {
+                if (c->items[i].refresh == (u32)RENDER_REFRESH_LOADING) {
+                    (void)nph_asset_wait(c->loader, c->items[i].next);
+                }
+                waited = true; // its new textures load from the poll below
             }
         }
         const NphResult r = render_assets_poll(c);

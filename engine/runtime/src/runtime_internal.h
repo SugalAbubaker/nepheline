@@ -4,6 +4,7 @@
 // Internal pieces of the runtime module shared between its source files.
 
 #include <nepheline/asset/loader.h>
+#include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/array.h>
 #include <nepheline/core/hashmap.h>
@@ -40,6 +41,14 @@ typedef enum RenderAssetState {
 
 #define RENDER_MATERIAL_TEXTURES 5U
 
+// A ready material loaded again in place (render_assets_refresh): its new asset loading, then
+// its new textures.
+typedef enum RenderAssetRefresh {
+    RENDER_REFRESH_NONE = 0,
+    RENDER_REFRESH_LOADING,
+    RENDER_REFRESH_WAITING,
+} RenderAssetRefresh;
+
 typedef struct RenderAsset {
     NphGuid guid;
     u32 kind;  // RenderAssetKind
@@ -52,6 +61,11 @@ typedef struct RenderAsset {
     NphRenderMaterial material;
     NphRenderTexture texture;
     u32 textures[RENDER_MATERIAL_TEXTURES]; // a material's textures (cache indices)
+    // A refresh in flight (RenderAssetRefresh): the new asset and its textures, which replace
+    // `handle` and `textures` once they settle.
+    u32 refresh;
+    NphAssetHandle next;
+    u32 next_textures[RENDER_MATERIAL_TEXTURES];
 } RenderAsset;
 
 typedef struct RenderAssetCache {
@@ -87,6 +101,22 @@ u32 render_assets_find(const RenderAssetCache *c, NphGuid guid);
 // path (asset/loader.h nph_asset_forget): the next acquire of the GUID
 // loads it again into a new entry, while this one stays for its holders.
 void render_assets_forget(RenderAssetCache *c, u32 index);
+
+// Loads a ready material again in place (ADR-0105): its asset is forgotten
+// by the loader and loaded anew, then its textures are acquired again (a
+// forgotten texture's GUID loads anew too). Until they settle, the material
+// and its users keep drawing the version they had; then the render material
+// is updated (nph_render_material_update), and the old asset and textures
+// are released. A refresh in flight starts again. False, and nothing done,
+// for an entry that is not a ready material or whose load cannot start.
+bool render_assets_refresh(RenderAssetCache *c, u32 index);
+
+// Updates a ready material's render material from `h` (its factors, alpha,
+// flags and wraps), with the textures the entry holds; `h`'s texture GUIDs
+// are not read. NPH_RESULT_INVALID_STATE for an entry that is not a ready
+// material; the renderer's errors.
+NPH_MUST_USE NphResult render_assets_material_set(RenderAssetCache *c, u32 index,
+                                                  const NphMaterialHeader *h);
 
 // Advances loads: LOADING to READY or FAILED, materials WAITING for their
 // textures to READY. Returns the first resource-creation failure that is
