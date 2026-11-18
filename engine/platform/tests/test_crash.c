@@ -483,19 +483,22 @@ NTEST_F(CrashDir, a_dump_that_fails_is_written_again_then_reduced)
         NTEST_SKIP("%s", skip);
         return;
     }
+    // The attempts after the failures are stand-ins, not dbghelp's: what is tested is what the
+    // handler does when attempts fail, not how dbghelp's go on this machine (on one CI runner
+    // they all failed for a quarter second, and with them this test).
     char report[CRASH_PATH_MAX];
-    crash_win32_fail_dumps(1U);
+    crash_win32_fail_dumps(1U, true);
     write_test_report(report, sizeof report);
     NTEST_EXPECT_TRUE(report_says(report, "dump:      crash_test-"));
     NTEST_EXPECT_TRUE(report_says(report, ".dmp (written again after error 1784)"));
-    crash_win32_fail_dumps(2U);
+    crash_win32_fail_dumps(2U, true);
     write_test_report(report, sizeof report);
     NTEST_EXPECT_TRUE(
         report_says(report, ".dmp (reduced to threads, stacks and modules after error 1784)"));
-    crash_win32_fail_dumps(3U);
+    crash_win32_fail_dumps(3U, true);
     write_test_report(report, sizeof report);
     NTEST_EXPECT_TRUE(report_says(report, "dump:      not written (error 1784)"));
-    crash_win32_fail_dumps(0U);
+    crash_win32_fail_dumps(0U, false);
 }
 
 NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)

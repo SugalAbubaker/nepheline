@@ -149,8 +149,12 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
 LONG crash_win32_fiber_filter(EXCEPTION_POINTERS *pointers);
 
 // Tests: the next `count` attempts at a dump fail as dbghelp's sometimes do
-// (ERROR_INVALID_USER_BUFFER), without writing; 0 ends it.
-void crash_win32_fail_dumps(u32 count);
+// (ERROR_INVALID_USER_BUFFER), without writing; 0 ends it. With `stand_in`,
+// the attempts after them write a stand-in (a minidump's signature alone)
+// instead of calling dbghelp, so a test of the retries does not depend on
+// how dbghelp's own attempts go on the machine (on CI's runners they fail
+// in spells: ADR-0103). The retries' pauses are skipped while either holds.
+void crash_win32_fail_dumps(u32 count, bool stand_in);
 
 // The dump's callback (MINIDUMP_CALLBACK_ROUTINE): the global data of the
 // modules beside the executable only (all of it in a full dump), and memory

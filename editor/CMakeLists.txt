@@ -63,7 +63,10 @@ if(NPH_BUILD_TESTS)
                                                  SKIP_RETURN_CODE 77)
 endif()
 
+# In shards: under Debug's sanitizers on lavapipe the suite took 430 to 570 s on CI's runners,
+# too near its 600 s timeout, and one run went over.
 nph_add_test(editor
+    SHARDS 4
     SOURCES
         tests/test_camera.c
         tests/test_editor.c

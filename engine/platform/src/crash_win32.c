@@ -255,12 +255,22 @@ BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_IN
     }
 }
 
-// The dumps tests make fail (crash_win32_fail_dumps).
+// The dumps tests make fail, and whether the attempts after them are stand-ins
+// (crash_win32_fail_dumps).
 static volatile LONG g_dump_failures;
+static volatile LONG g_dump_stand_in;
 
-void crash_win32_fail_dumps(u32 count)
+void crash_win32_fail_dumps(u32 count, bool stand_in)
 {
     (void)InterlockedExchange(&g_dump_failures, (LONG)count);
+    (void)InterlockedExchange(&g_dump_stand_in, stand_in ? 1 : 0);
+}
+
+// Whether the tests decide the dumps' attempts (crash_win32_fail_dumps).
+static bool dumps_staged(void)
+{
+    return InterlockedCompareExchange(&g_dump_failures, 0, 0) > 0 ||
+           InterlockedCompareExchange(&g_dump_stand_in, 0, 0) != 0;
 }
 
 // One attempt at the dump, into `file` from its start: ERROR_SUCCESS, or why not.
@@ -275,6 +285,14 @@ static DWORD write_dump(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFO
     if (InterlockedCompareExchange(&g_dump_failures, 0, 0) > 0) {
         (void)InterlockedDecrement(&g_dump_failures);
         return ERROR_INVALID_USER_BUFFER;
+    }
+    if (InterlockedCompareExchange(&g_dump_stand_in, 0, 0) != 0) {
+        static const char signature[4] = {'M', 'D', 'M', 'P'};
+        DWORD written = 0U;
+        return WriteFile(file, signature, (DWORD)sizeof signature, &written, NULL) &&
+                       written == (DWORD)sizeof signature
+                   ? ERROR_SUCCESS
+                   : GetLastError();
     }
     if (g_write_dump == NULL) {
         return ERROR_PROC_NOT_FOUND;
@@ -399,15 +417,20 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
         callback.CallbackRoutine = crash_win32_dump_callback;
         callback.CallbackParam = NULL;
         // dbghelp fails a dump now and then where the same process's next one goes well
-        // (ERROR_INVALID_USER_BUFFER, a dump in three on one of the CI's runners): once more as it
-        // was, then reduced to the threads, their stacks, and the modules with their data.
+        // (ERROR_INVALID_USER_BUFFER, a dump in three on one of the CI's runners), and its
+        // failures come in spells (on one runner every attempt for a quarter second failed): once
+        // more as it was a tenth of a second later, then reduced to the threads, their stacks, and
+        // the modules with their data a quarter second after that (ADR-0103).
+        const bool staged = dumps_staged();
         dump_error = write_dump(dump, type, &mei, &callback);
         first_error = dump_error;
         if (dump_error != ERROR_SUCCESS) {
+            Sleep(staged ? 0U : 100U);
             dump_error = write_dump(dump, type, &mei, &callback);
         }
         if (dump_error != ERROR_SUCCESS) {
             reduced = true;
+            Sleep(staged ? 0U : 250U);
             dump_error = write_dump(dump, MiniDumpWithDataSegs, &mei, &callback);
         }
         CloseHandle(dump);
