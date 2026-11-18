@@ -3,8 +3,8 @@
 - **Date:** 2026-11-17
 - **Status:** Accepted 2026-11-18 (Phase 15's first step, ADR-0102; CLAUDE.md §8.11 amended; amends
   [ADR-0010](0010-fibers.md)'s stacks on Windows); amended 2026-11-18 by
-  [ADR-0106](0106-crash-dumps-from-a-separate-process.md) (Proposed): on Windows the minidump is
-  written from a separate process, the dumper beside the executable
+  [ADR-0106](0106-crash-dumps-from-a-separate-process.md): on Windows the minidump is written from a
+  separate process, the dumper beside the executable
 
 ## Context
 

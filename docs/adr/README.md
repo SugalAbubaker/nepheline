@@ -111,7 +111,7 @@ supersedes it and both link to each other.
 | [0103](0103-crash-handler.md) | The crash handler: a report and a minidump from the failing process, fibers included | Accepted; the dump's writer amended by [0106](0106-crash-dumps-from-a-separate-process.md) |
 | [0104](0104-autosave.md) | Autosave: a session directory under a lock the system lets go of, and the work offered back | Accepted |
 | [0105](0105-materials-made-in-the-editor.md) | Materials made in the editor: a `.nmat` source, tiled by the material, edited live | Accepted |
-| [0106](0106-crash-dumps-from-a-separate-process.md) | Crash dumps from a separate process: the dumper beside the executable | Proposed (the user's decision to dump from a separate process) |
+| [0106](0106-crash-dumps-from-a-separate-process.md) | Crash dumps from a separate process: the dumper beside the executable | Accepted (the user's decision) |
 
 ## Template
 

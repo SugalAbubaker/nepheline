@@ -1,8 +1,9 @@
 # 0106. Crash dumps from a separate process: the dumper beside the executable
 
 - **Date:** 2026-11-18
-- **Status:** Proposed (the user's decision of 2026-11-18, to write the dumps from a separate process; amends
-  [ADR-0103](0103-crash-handler.md)'s decisions 2, 3 and 8, and its first alternative)
+- **Status:** Accepted 2026-11-18 (the user's decision of 2026-11-18, to write the dumps from a separate process,
+  and their acceptance the same day; amends [ADR-0103](0103-crash-handler.md)'s decisions 2, 3 and 8, and its first
+  alternative)
 
 ## Context
 
