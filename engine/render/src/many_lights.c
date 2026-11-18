@@ -126,6 +126,7 @@ void render_many_destroy(NphRenderer *r)
     nph_gpu_pipeline_destroy(r->dev, m->tiles_pipeline);
     nph_gpu_shader_destroy(r->dev, m->tiles_shader);
     nph_gpu_pipeline_destroy(r->dev, m->turns_pipeline);
+    nph_gpu_pipeline_destroy(r->dev, m->turns_uv_pipeline);
     nph_gpu_shader_destroy(r->dev, m->turns_shader);
     if (m->lights != NULL) {
         NPH_FREE_ARRAY(r->alloc, RenderManyLight, m->lights, r->desc.max_many_lights);
@@ -561,7 +562,7 @@ static void turns_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     p.vis_index =
         nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, m->frame_visbuffer), 0U);
     p.ao_index = NPH_VIS_NO_AO;
-    nph_gpu_cmd_bind_pipeline(cmd, m->turns_pipeline);
+    nph_gpu_cmd_bind_pipeline(cmd, m->frame_turns); // render_many_declare_turns's
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     const u32 step = 1U << (u32)NPH_RENDER_RESTIR_FEW_BITS;
     nph_gpu_cmd_dispatch(cmd, ((m->reservoir_width + 7U) / 8U + step - 1U) / step,
@@ -639,6 +640,24 @@ NphResult render_many_declare_turns(NphRenderer *r, NphGpuRenderGraph *graph,
     RenderMany *m = &r->many;
     if (!m->frame_restir) {
         return NPH_RESULT_OK;
+    }
+    // With the materials' coordinates' transforms while the renderer holds a material with one
+    // (vis_resolve.glsl k_uv), made the first time a frame needs it.
+    m->frame_turns = m->turns_pipeline;
+    if (r->uv_materials != 0U) {
+        if (m->turns_uv_pipeline.value == 0U) {
+            NphGpuComputePipelineDesc d;
+            memset(&d, 0, sizeof d);
+            d.shader = m->turns_shader;
+            d.name = "many turns";
+            d.specialization_count = 7U;
+            d.specialization[5] = 1U; // k_many
+            d.specialization[6] = 1U; // k_uv
+            NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &m->turns_uv_pipeline));
+            render_log_statistics(r, m->turns_uv_pipeline,
+                                  "many turns with the coordinates' transforms");
+        }
+        m->frame_turns = m->turns_uv_pipeline;
     }
     NphGpuRgPassDesc pd;
     memset(&pd, 0, sizeof pd);

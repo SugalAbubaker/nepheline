@@ -368,16 +368,22 @@ NphResult render_vis_create(NphRenderer *r)
             (void)snprintf(name, sizeof name, "%s with the voxel test", k_compute_names[i]);
             render_log_statistics(r, v->resolve_voxels[rt_i][vsm_i][gi_i], name);
             d.specialization[3] = 1U;
+            // The debug views have everything: the coordinates' transforms too (k_uv).
+            d.specialization[6] = 1U;
+            d.specialization_count = 7U;
             NPH_TRY(
                 nph_gpu_pipeline_create_compute(r->dev, &d, &v->resolve_debug[rt_i][vsm_i][gi_i]));
             if (r->desc.max_many_lights != 0U) {
-                // All three with the many lights' near fields (k_many).
+                // All three with the many lights' near fields (k_many), the debug views' with the
+                // transforms (k_uv); the others' with them are made when first needed
+                // (resolve_uv_pipeline).
                 d.specialization[5] = 1U;
-                d.specialization_count = 6U;
                 d.specialization[3] = 1U;
                 d.specialization[4] = 1U;
                 NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d,
                                                         &v->resolve_many[2][rt_i][vsm_i][gi_i]));
+                d.specialization[6] = 0U;
+                d.specialization_count = 6U;
                 d.specialization[3] = 0U;
                 NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d,
                                                         &v->resolve_many[1][rt_i][vsm_i][gi_i]));
@@ -481,6 +487,10 @@ void render_vis_destroy(NphRenderer *r)
         nph_gpu_pipeline_destroy(dev, v->resolve_voxels[i >> 2U][(i >> 1U) & 1U][i & 1U]);
         for (u32 kind = 0; kind < 3U; ++kind) {
             nph_gpu_pipeline_destroy(dev, v->resolve_many[kind][i >> 2U][(i >> 1U) & 1U][i & 1U]);
+        }
+        for (u32 j = 0; j < 4U; ++j) {
+            nph_gpu_pipeline_destroy(
+                dev, v->resolve_uv[j >> 1U][j & 1U][i >> 2U][(i >> 1U) & 1U][i & 1U]);
         }
     }
     nph_gpu_pipeline_destroy(dev, v->page_requests);
@@ -1489,6 +1499,70 @@ static void page_requests_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void
     nph_gpu_cmd_dispatch(cmd, (tiles_x + 7U) / 8U, (tiles_y + 7U) / 8U, 1U);
 }
 
+// The resolves by shadow rays, the virtual shadow map, and the radiance cache.
+static const VisCompute k_resolve_compute[2][2][2] = {
+    {{VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_GI},
+     {VIS_COMPUTE_RESOLVE_VSM, VIS_COMPUTE_RESOLVE_VSM_GI}},
+    {{VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_GI},
+     {VIS_COMPUTE_RESOLVE_RT_VSM, VIS_COMPUTE_RESOLVE_RT_VSM_GI}}};
+
+// The resolve that reads its materials' coordinates' transforms (vis_resolve.glsl k_uv), with the
+// many lights' near fields or not, the voxel test or not: made the first time a frame needs it,
+// a frame while the renderer holds a material with one (NphRenderer.uv_materials). Made at
+// startup, the 32 of them would double the renderer's resolves for every renderer made.
+static NphResult resolve_uv_pipeline(NphRenderer *r, u32 many, u32 voxels, u32 rt, u32 vsm, u32 gi,
+                                     NphGpuPipeline *out)
+{
+    RenderVis *v = &r->vis;
+    NphGpuPipeline *p = &v->resolve_uv[many][voxels][rt][vsm][gi];
+    if (p->value == 0U) {
+        const VisCompute c = k_resolve_compute[rt][vsm][gi];
+        NphGpuComputePipelineDesc d;
+        memset(&d, 0, sizeof d);
+        d.shader = v->shaders[k_compute_shaders[c]];
+        d.name = k_compute_names[c];
+        d.specialization[0] = v->hdr_format == RENDER_HDR_COMPACT ? 1U : 0U;
+        d.specialization[1] = vsm;
+        d.specialization[2] = gi;
+        d.specialization[3] = 0U; // k_debug: the debug views' own have k_uv always
+        d.specialization[4] = voxels;
+        d.specialization[5] = many;
+        d.specialization[6] = 1U;
+        d.specialization_count = 7U;
+        NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, p));
+        char name[96];
+        (void)snprintf(name, sizeof name, "%s with the coordinates' transforms",
+                       k_compute_names[c]);
+        render_log_statistics(r, *p, name);
+    }
+    *out = *p;
+    return NPH_RESULT_OK;
+}
+
+// The resolve this frame binds (RenderVis.frame_resolve): by shadow rays, the virtual shadow map,
+// the radiance cache, the voxel test, the many lights, a debug view, and the materials'
+// coordinates' transforms.
+static NphResult select_resolve(NphRenderer *r)
+{
+    RenderVis *v = &r->vis;
+    const u32 rt = r->rt.frame_shadows ? 1U : 0U;
+    const u32 vsm = r->vsm.frame_active ? 1U : 0U;
+    const u32 gi = r->gi.frame_active ? 1U : 0U;
+    const u32 kind = v->debug_view ? 2U : v->frame_voxels ? 1U : 0U;
+    const u32 many = r->many.frame_active ? 1U : 0U;
+    if (kind != 2U && r->uv_materials != 0U) {
+        return resolve_uv_pipeline(r, many, kind, rt, vsm, gi, &v->frame_resolve);
+    }
+    if (many != 0U) {
+        v->frame_resolve = v->resolve_many[kind][rt][vsm][gi];
+    } else {
+        v->frame_resolve = kind == 2U   ? v->resolve_debug[rt][vsm][gi]
+                           : kind == 1U ? v->resolve_voxels[rt][vsm][gi]
+                                        : v->compute[k_resolve_compute[rt][vsm][gi]];
+    }
+    return NPH_RESULT_OK;
+}
+
 static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
@@ -1497,23 +1571,7 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     p.hdr_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->hdr), 0U);
     p.vis_index = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, f->visbuffer), 0U);
     p.ao_index = r->ao.frame_active ? render_ao_index(r, graph) : NPH_VIS_NO_AO;
-    // By shadow rays, the virtual shadow map, and the radiance cache.
-    static const VisCompute k_resolve[2][2][2] = {
-        {{VIS_COMPUTE_RESOLVE, VIS_COMPUTE_RESOLVE_GI},
-         {VIS_COMPUTE_RESOLVE_VSM, VIS_COMPUTE_RESOLVE_VSM_GI}},
-        {{VIS_COMPUTE_RESOLVE_RT, VIS_COMPUTE_RESOLVE_RT_GI},
-         {VIS_COMPUTE_RESOLVE_RT_VSM, VIS_COMPUTE_RESOLVE_RT_VSM_GI}}};
-    const u32 rt = r->rt.frame_shadows ? 1U : 0U;
-    const u32 vsm = r->vsm.frame_active ? 1U : 0U;
-    const u32 gi = r->gi.frame_active ? 1U : 0U;
-    const u32 kind = r->vis.debug_view ? 2U : r->vis.frame_voxels ? 1U : 0U;
-    if (r->many.frame_active) {
-        nph_gpu_cmd_bind_pipeline(cmd, r->vis.resolve_many[kind][rt][vsm][gi]);
-    } else {
-        nph_gpu_cmd_bind_pipeline(cmd, kind == 2U   ? r->vis.resolve_debug[rt][vsm][gi]
-                                       : kind == 1U ? r->vis.resolve_voxels[rt][vsm][gi]
-                                                    : r->vis.compute[k_resolve[rt][vsm][gi]]);
-    }
+    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_resolve); // select_resolve's
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (f->width + 7U) / 8U, (f->height + 7U) / 8U, 1U);
 }
@@ -1916,6 +1974,7 @@ static NphResult declare_resolve(NphGpuRenderGraph *graph, NphRenderer *r, const
                                  NphGpuRgBuffer sh)
 {
     const VisFrame *f = &r->vis.frame;
+    NPH_TRY(select_resolve(r));
     NphGpuRgPass *p = add_pass(graph, r, "vis resolve", NPH_GPU_RG_PASS_COMPUTE, resolve_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;

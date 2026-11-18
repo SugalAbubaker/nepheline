@@ -82,6 +82,11 @@ NphResult render_taa_create(NphRenderer *r)
     d.name = "taa (history only)";
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->history_only));
     render_log_statistics(r, t->history_only, "taa (history only)");
+    // The same for a frame that marks a material changed in place (taa_resolve.glsl k_fresh).
+    d.specialization[1] = 1U;
+    d.specialization_count = 2U;
+    d.name = "taa (history only, materials changed)";
+    NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->history_only_fresh));
     NphGpuSamplerDesc s;
     nph_gpu_sampler_desc_default(&s);
     s.mip_filter = NPH_GPU_FILTER_NEAREST;
@@ -112,6 +117,7 @@ void render_taa_destroy(NphRenderer *r)
     destroy_history(r);
     nph_gpu_sampler_destroy(r->dev, t->sampler);
     nph_gpu_pipeline_destroy(r->dev, t->history_only);
+    nph_gpu_pipeline_destroy(r->dev, t->history_only_fresh);
     nph_gpu_shader_destroy(r->dev, t->history_shader);
     nph_gpu_shader_destroy(r->dev, t->shader);
     memset(t, 0, sizeof *t);
@@ -133,7 +139,11 @@ NphResult render_taa_target_pipeline(NphRenderer *r, RenderTargetPipelines *t, N
     d.name = "taa";
     NPH_TRY(nph_gpu_pipeline_create_graphics(r->dev, &d, &t->taa));
     render_log_statistics(r, t->taa, "taa");
-    return NPH_RESULT_OK;
+    // The same for a frame that marks a material changed in place (taa_resolve.glsl k_fresh).
+    d.specialization[1] = 1U;
+    d.specialization_count = 2U;
+    d.name = "taa (materials changed)";
+    return nph_gpu_pipeline_create_graphics(r->dev, &d, &t->taa_fresh);
 }
 
 // The history images for a target of `width` x `height`.
@@ -208,8 +218,11 @@ static void taa_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     p.bloom = bloom.bloom;
     p.bloom_scale = bloom.bloom_scale;
     p.bloom_uv = bloom.bloom_uv;
-    nph_gpu_cmd_bind_pipeline(cmd, r->taa.frame_history_only ? r->taa.history_only
-                                                             : r->frame_target->taa);
+    const bool fresh = r->taa.frame_fresh != 0;
+    nph_gpu_cmd_bind_pipeline(cmd,
+                              r->taa.frame_history_only
+                                  ? (fresh ? r->taa.history_only_fresh : r->taa.history_only)
+                                  : (fresh ? r->frame_target->taa_fresh : r->frame_target->taa));
     nph_gpu_cmd_push_constants(cmd, &p, (u32)sizeof p);
     nph_gpu_cmd_draw(cmd, 3U, 1U, 0U, 0U);
 }
@@ -262,6 +275,9 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     }
     render_post_read(r, p);
 
+    // The marks of a material changed in place, where this frame's table holds some (frame.c
+    // write_materials, which runs first).
+    t->frame_fresh = r->materials_marked ? 1 : 0;
     NphRenderTaaPush *push = &t->push;
     memset(push, 0, sizeof *push);
     push->view = f->view_address;
@@ -281,7 +297,6 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     push->tonemapper = r->tonemap_push.tonemapper;
     push->encode_srgb = r->tonemap_push.encode_srgb;
     push->noise = (u32)(t->sequence % 64U);
-    push->fresh = r->materials_marked ? 1U : 0U;
 
     // The next frame continues from this one.
     t->exposure = exposure;

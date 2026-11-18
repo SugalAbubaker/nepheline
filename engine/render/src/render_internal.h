@@ -110,6 +110,8 @@ typedef struct RenderTargetPipelines {
     // The production path's temporal resolve (taa.c): into the target and
     // the next history (RenderVis.hdr_format).
     NphGpuPipeline taa;
+    // The same for a frame that marks a material changed in place (taa_resolve.glsl k_fresh).
+    NphGpuPipeline taa_fresh;
     // The production path's motion blur fused with the tonemap
     // (motion_blur.c).
     NphGpuPipeline motion_blur;
@@ -671,6 +673,10 @@ typedef struct RenderMany {
     u32 frame_mode; // this frame's NPH_RENDER_MANY_RESTIR_*
     NphGpuShader turns_shader;
     NphGpuPipeline turns_pipeline;
+    // The same with the materials' coordinates' transforms (vis_resolve.glsl k_uv), made when a
+    // frame first needs it, and the one this frame binds.
+    NphGpuPipeline turns_uv_pipeline;
+    NphGpuPipeline frame_turns;
 } RenderMany;
 
 // One draw call of the forward pass, sorted by key.
@@ -1096,6 +1102,11 @@ typedef struct RenderVis {
     // may draw voxel clusters: the test alone, never taken, costs the
     // triangles' path 0.5 to 1.7 % of the resolve where compiled in.
     NphGpuPipeline resolve_voxels[2][2][2];
+    // The resolves with the materials' coordinates' transforms (vis_resolve.glsl k_uv) for frames
+    // while the renderer holds a material with one, made when a frame first needs each:
+    // [many lights][the voxel test][ray-traced shadows][virtual shadow map][radiance cache].
+    NphGpuPipeline resolve_uv[2][2][2][2][2];
+    NphGpuPipeline frame_resolve; // the resolve this frame binds (vis.c select_resolve)
     // compute[VIS_COMPUTE_CULL_MESHLETS] with the voxel clusters' routing
     // (vis_cull_meshlets.comp k_voxels), for the same frames.
     NphGpuPipeline cull_meshlets_voxels;
@@ -1126,7 +1137,8 @@ typedef struct RenderTaa {
     // taa_history.frag into the history alone (RenderVis.hdr_format): the
     // motion blur reads it and writes the target (motion_blur.c).
     NphGpuPipeline history_only;
-    NphGpuSampler sampler; // bilinear, clamped to the edge: the history's taps
+    NphGpuPipeline history_only_fresh; // the same with k_fresh (RenderTargetPipelines.taa_fresh)
+    NphGpuSampler sampler;             // bilinear, clamped to the edge: the history's taps
     NphGpuImage history[2];
     // Each history's state (R8G8B8A8): in zw its pixels' surfaces' keys (taa_depth_key), by
     // which the next frame knows a pixel's history for its own surface's; in y the frames each
@@ -1145,6 +1157,7 @@ typedef struct RenderTaa {
     b32 frame_active;       // this frame resolves temporally
     b32 frame_history;      // and blends with the history
     b32 frame_history_only; // and writes only the history (the motion blur writes the target)
+    b32 frame_fresh;        // and its material table marks a material changed in place (k_fresh)
     NphVec2 frame_jitter;   // this frame's jitter, pixels
     NphRenderTaaPush push;  // this frame's, without the transient images' indices
 } RenderTaa;
@@ -1268,9 +1281,17 @@ typedef struct RenderGi {
     NphGpuPipeline update_many;        // with the many lights' far fields (RenderMany.frame_active)
     NphGpuPipeline update_voxels_many; // and voxel pixels
     NphGpuPipeline update_voxels; // the same where voxel pixels may be (RenderVis.frame_voxels)
+    // The four with the materials' coordinates' transforms (gi_update.comp k_uv), for frames while
+    // the renderer holds a material with one, made when a frame first needs each: [voxels][many].
+    NphGpuPipeline update_uv[2][2];
+    NphGpuPipeline frame_update; // the one this frame binds (render_gi_declare)
     NphGpuPipeline resolve;
     NphGpuShader reflect_shader; // reflect_turns.comp (ADR-0077)
     NphGpuPipeline reflect;
+    // The same with the materials' coordinates' transforms (reflect_rays.comp k_uv), made when a
+    // frame first needs it, and the one this frame binds.
+    NphGpuPipeline reflect_uv;
+    NphGpuPipeline frame_reflect_rays;
     NphGpuShader apply_shader; // reflect.comp
     NphGpuPipeline apply;
     NphGpuShader gather_shader; // reflect_gather.comp (ADR-0089)
@@ -1402,6 +1423,7 @@ struct NphRenderer {
     RenderFrameLayout layout;
     u64 material_version; // bumped by every material change
     u32 masked_materials; // live materials that are alpha tested
+    u32 uv_materials;     // live materials whose coordinates are transformed (k_uv; ADR-0105)
     // The alpha keys' ids (render_ray_key_id; ADR-0098): a u64 key to its u32 id, from 1,
     // numbered as materials and meshes first name them and kept for the renderer's life, so
     // an id is never another key's (NphRenderMaterialData.ray_key, NphVisMesh.rays).
@@ -1409,7 +1431,7 @@ struct NphRenderer {
     u32 ray_key_count;
     u64 material_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // the version each slot holds (0: none)
     // This frame's material table marks a material changed in place (ADR-0105): the temporal
-    // resolve then reads its clusters' marks (NphRenderTaaPush.fresh).
+    // resolve then reads its clusters' marks (RenderTaa.frame_fresh, taa_resolve.glsl k_fresh).
     bool materials_marked;
     u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // and the paged levels' count (paging)
     RenderDrawCmd *draw_cmds;                      // max_draws, rebuilt every frame

@@ -447,10 +447,6 @@ NPH_SHARED_STRUCT(NphRenderTaaPush)
     // y the frames their histories hold, taa_count_after; zw their surfaces' keys, taa_key_pack).
     u32 unrest_index;
     NphVec2 bloom_uv;
-    // 1: this frame's material table marks a material changed in place
-    // (NPH_RENDER_MATERIAL_CHANGED; ADR-0105), whose clusters (NPH_VIS_CLUSTER_FRESH) take no
-    // history. 0 on every other frame, when the clusters' flags are not read.
-    u32 fresh;
 };
 
 // Motion blur (motion_blur.c; motion.comp, motion_tiles.comp, motion_blur.frag;

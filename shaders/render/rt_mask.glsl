@@ -19,6 +19,13 @@
 // texture is read at the finest level its sampler allows, a point of it and
 // not a footprint: a ray is one sample, and the mean of many is the coverage
 // the raster's pixels see, which a filtered alpha against the cutoff is not.
+// Whether material flags say its coordinates are transformed (ADR-0105), as the includer has it
+// tested: the resolve compiles the test out where no material has a transform (vis_resolve.glsl
+// k_uv); the passes of rays test it where they run.
+#ifndef NPH_RT_MASK_HAS_UV
+#define NPH_RT_MASK_HAS_UV(flags) nph_material_has_uv(flags)
+#endif
+
 bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
 {
     const uint slot = rayQueryGetIntersectionInstanceCustomIndexEXT(q, false);
@@ -50,7 +57,7 @@ bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
     if (tex != NPH_RENDER_NO_TEXTURE) {
         // The material's coordinates, where it has a transform (ADR-0105).
         vec2 uv = mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z)) * b;
-        if (nph_material_has_uv(materials.m[mi].flags)) {
+        if (NPH_RT_MASK_HAS_UV(materials.m[mi].flags)) {
             uv = nph_material_uv(materials.m[mi].uv_u, materials.m[mi].uv_v, uv);
         }
         alpha *=

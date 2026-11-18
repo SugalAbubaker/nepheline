@@ -203,6 +203,10 @@ void render_gi_destroy(NphRenderer *r)
     nph_gpu_buffer_destroy(r->dev, gi->held[1]);
     nph_gpu_pipeline_destroy(r->dev, gi->update_voxels);
     nph_gpu_pipeline_destroy(r->dev, gi->update_voxels_many);
+    for (u32 i = 0; i < 4U; ++i) {
+        nph_gpu_pipeline_destroy(r->dev, gi->update_uv[i >> 1U][i & 1U]);
+    }
+    nph_gpu_pipeline_destroy(r->dev, gi->reflect_uv);
     nph_gpu_pipeline_destroy(r->dev, gi->update_many);
     nph_gpu_pipeline_destroy(r->dev, gi->update);
     nph_gpu_shader_destroy(r->dev, gi->resolve_shader);
@@ -472,10 +476,7 @@ static void update_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
     memset(&p, 0, sizeof p);
     p.view = r->vis.frame.view_address;
     p.arg0 = nph_gpu_image_storage_index(r->dev, nph_gpu_rg_image(graph, gi->frame_visbuffer), 0U);
-    const bool many = r->many.frame_active != 0;
-    nph_gpu_cmd_bind_pipeline(cmd, r->vis.frame_voxels
-                                       ? (many ? gi->update_voxels_many : gi->update_voxels)
-                                       : (many ? gi->update_many : gi->update));
+    nph_gpu_cmd_bind_pipeline(cmd, gi->frame_update); // render_gi_declare's
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch(cmd, (gi->frame_rays_x + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP,
                          (gi->frame_rays_y + GI_UPDATE_GROUP - 1U) / GI_UPDATE_GROUP, 1U);
@@ -579,6 +580,30 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
         nph_gpu_rg_write_buffer(p, gi->frame_reflect_cells, NPH_GPU_RG_USE_TRANSFER_DST);
         gi->cleared = 1;
     }
+    // The update by voxel pixels, the many lights' far fields, and the materials' coordinates'
+    // transforms: those with them made the first time a frame needs each (gi_update.comp k_uv).
+    {
+        const u32 voxels = r->vis.frame_voxels ? 1U : 0U;
+        const u32 many = r->many.frame_active ? 1U : 0U;
+        gi->frame_update = voxels != 0U ? (many != 0U ? gi->update_voxels_many : gi->update_voxels)
+                                        : (many != 0U ? gi->update_many : gi->update);
+        if (r->uv_materials != 0U) {
+            NphGpuPipeline *uv = &gi->update_uv[voxels][many];
+            if (uv->value == 0U) {
+                NphGpuComputePipelineDesc d;
+                memset(&d, 0, sizeof d);
+                d.shader = gi->update_shader;
+                d.name = "gi update";
+                d.specialization[0] = voxels;
+                d.specialization[1] = many;
+                d.specialization[2] = 1U;
+                d.specialization_count = 3U;
+                NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, uv));
+                render_log_statistics(r, *uv, "gi update with the coordinates' transforms");
+            }
+            gi->frame_update = *uv;
+        }
+    }
     p = add_pass(graph, r, "gi update", NPH_GPU_RG_PASS_COMPUTE, update_execute);
     if (p == NULL) {
         return NPH_RESULT_FULL;
@@ -647,7 +672,7 @@ static void reflect_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     // (The tiles' list is the view's, NphRenderGiView.reflect_tiles.)
     p.arg3 = gi->frame_rays ? nph_gpu_image_storage_index(r->dev, gi->reflect_light, 0U) : 0U;
     p.mode = gi->frame_width | (gi->frame_height << 16U);
-    nph_gpu_cmd_bind_pipeline(cmd, gi->reflect);
+    nph_gpu_cmd_bind_pipeline(cmd, gi->frame_reflect_rays); // render_gi_declare_reflect's
     nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
     nph_gpu_cmd_dispatch_indirect(cmd, nph_gpu_rg_buffer(graph, gi->frame_reflect_args), 0U);
 }
@@ -763,6 +788,23 @@ NphResult render_gi_declare_reflect(NphRenderer *r, NphGpuRenderGraph *graph,
         return NPH_RESULT_OK;
     }
     gi->frame_hdr = in->hdr;
+    // With the materials' coordinates' transforms while the renderer holds a material with one,
+    // made the first time a frame needs it (reflect_rays.comp k_uv).
+    gi->frame_reflect_rays = gi->reflect;
+    if (r->uv_materials != 0U) {
+        if (gi->reflect_uv.value == 0U) {
+            NphGpuComputePipelineDesc d;
+            memset(&d, 0, sizeof d);
+            d.shader = gi->reflect_shader;
+            d.name = "reflect rays";
+            d.specialization[0] = 1U;
+            d.specialization_count = 1U;
+            NPH_TRY(nph_gpu_pipeline_create_compute(r->dev, &d, &gi->reflect_uv));
+            render_log_statistics(r, gi->reflect_uv,
+                                  "reflect rays with the coordinates' transforms");
+        }
+        gi->frame_reflect_rays = gi->reflect_uv;
+    }
     // The rays first: they read what the pixels left, which the other clears.
     NphGpuRgPass *p = add_pass(graph, r, "reflect rays", NPH_GPU_RG_PASS_COMPUTE, reflect_execute);
     if (p == NULL) {

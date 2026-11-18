@@ -326,6 +326,35 @@ NTEST_F(Restir, all_of_the_light_is_the_lights_the_pixel_sees)
     NTEST_EXPECT_TRUE(e.scatter < 0.35);
 }
 
+// The same through the resolve's and the turns' variants that read the materials' coordinates'
+// transforms (vis_resolve.glsl k_uv), which a frame binds while the renderer holds a material with
+// one, made when a frame first needs each (ADR-0105): a material with a transform held, drawn by
+// nothing, and the same light arrives.
+NTEST_F(Restir, the_variants_with_the_transforms_draw_the_same_light)
+{
+    REQUIRE_RESTIR(f);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    const NphRenderUvTransform tiled = {2.0F, 0.0F, 0.0F, 0.0F, 2.0F, 0.0F};
+    md.uv = tiled;
+    NphRenderMaterial held = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &held), NPH_RESULT_OK);
+    const RestirMaterial ground = {1.0F, 0.0F, 1.0F};
+    const RestirError e =
+        restir_run(f, NPH_RENDER_RESTIR_ALL, ground, "all, grey, with the transforms' variants");
+    NTEST_EXPECT_TRUE(fabs(e.bias) < 0.05);
+    NTEST_EXPECT_TRUE(e.scatter < 0.35);
+    // Made, and bound: the frame's resolve is one of them.
+    NTEST_EXPECT_TRUE(f->renderer->many.turns_uv_pipeline.value != 0U);
+    bool bound = false;
+    const NphGpuPipeline *uv = &f->renderer->vis.resolve_uv[0][0][0][0][0];
+    for (u32 i = 0; i < 32U; ++i) {
+        bound = bound || (uv[i].value != 0U && uv[i].value == f->renderer->vis.frame_resolve.value);
+    }
+    NTEST_EXPECT_TRUE(bound);
+    nph_render_material_destroy(f->renderer, held);
+}
+
 // A metal is all highlight: what the reservoirs bring, weighed by the lobe, with what scatters
 // more than once from the cache. A polished one's lobe reaches few lights.
 NTEST_F(Restir, a_metal_shows_the_highlights_of_the_lights_it_sees)

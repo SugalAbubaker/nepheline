@@ -186,8 +186,10 @@ NTEST_F(Reflect, a_mirror_shows_what_its_rays_meet)
 
 // The mirror's scene with a wall whose colour comes from a 2 x 2 texture, red at its top left and
 // green elsewhere, sampled nearest, through the coordinates' transform `uv`: what the mirror shows
-// of it from an empty cache.
-static MirrorCounts textured_wall(RenderFixture *f, const NphRenderUvTransform *uv)
+// of it from an empty cache, by its cells (NPH_RENDER_REFLECTIONS_CACHE: the cache's update's rays)
+// or by a ray a pixel (NPH_RENDER_REFLECTIONS_RAYS: reflect_rays.comp's).
+static MirrorCounts textured_wall(RenderFixture *f, const NphRenderUvTransform *uv,
+                                  NphRenderReflections mode)
 {
     const NphRenderMesh mesh = test_cube_mesh(f);
     static TestBoxScene scene;
@@ -235,7 +237,7 @@ static MirrorCounts textured_wall(RenderFixture *f, const NphRenderUvTransform *
     static u8 with[PIXELS];
     static u8 without[PIXELS];
     NphRenderView v;
-    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_CACHE);
+    reflect_view(&v, camera, mode);
     (void)settled(f, &v, target, with, SETTLE);
     v.reflections = NPH_RENDER_REFLECTIONS_OFF;
     (void)settled(f, &v, target, without, 4U);
@@ -258,10 +260,23 @@ NTEST_F(Reflect, a_mirror_shows_its_walls_texture_through_the_walls_transform)
     REQUIRE_REFLECTIONS(f);
     // (u, v) to (u / 4 + 1/8, v / 4 + 1/8): every face's coordinates in the top left texel.
     const NphRenderUvTransform into_red = {0.25F, 0.0F, 0.125F, 0.0F, 0.25F, 0.125F};
-    const MirrorCounts c = textured_wall(f, &into_red);
+    const MirrorCounts c = textured_wall(f, &into_red, NPH_RENDER_REFLECTIONS_CACHE);
     NTEST_ASSERT_GT_UINT(c.seen, 300U);
     NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
     NTEST_EXPECT_TRUE(c.seen_red * 20U >= c.seen * 19U);
+}
+
+// The same by a ray a pixel (ADR-0089): reflect_rays.comp shades its hits as the cache's update
+// does, through the variant with the transforms (k_uv) while a material has one.
+NTEST_F(Reflect, a_mirror_by_a_ray_a_pixel_shows_its_walls_texture_through_the_walls_transform)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderUvTransform into_red = {0.25F, 0.0F, 0.125F, 0.0F, 0.25F, 0.125F};
+    const MirrorCounts c = textured_wall(f, &into_red, NPH_RENDER_REFLECTIONS_RAYS);
+    NTEST_ASSERT_GT_UINT(c.seen, 300U);
+    NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
+    NTEST_EXPECT_TRUE(c.seen_red * 20U >= c.seen * 19U);
+    NTEST_EXPECT_TRUE(f->renderer->gi.reflect_uv.value != 0U);
 }
 
 // The same wall without the transform: three quarters of each face are green, and so is most of
@@ -272,7 +287,7 @@ NTEST_F(Reflect, a_mirror_shows_its_walls_texture_as_its_coordinates_lay_it)
 {
     REQUIRE_REFLECTIONS(f);
     const NphRenderUvTransform identity = nph_render_uv_identity();
-    const MirrorCounts c = textured_wall(f, &identity);
+    const MirrorCounts c = textured_wall(f, &identity, NPH_RENDER_REFLECTIONS_CACHE);
     NTEST_ASSERT_GT_UINT(c.seen, 300U);
     NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
     NTEST_EXPECT_TRUE(c.seen_red * 2U < c.seen);

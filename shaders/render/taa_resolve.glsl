@@ -22,6 +22,10 @@ layout(push_constant, scalar) uniform Push { NphRenderTaaPush pc; };
 // Whether the history is B10G11R11, whose coarse steps are rounded at
 // random (its expected value kept, so the accumulation does not drift).
 layout(constant_id = 0) const bool k_dither = false;
+// Whether this frame's material table marks a material changed in place (ADR-0105; taa.c picks
+// the variant): only then does a pixel read its nearest cluster's flags, to take no history where
+// it draws such a material. A frame without marks pays nothing for them.
+layout(constant_id = 1) const bool k_fresh = false;
 
 layout(location = 0) in vec2 in_ndc;
 // (out_state: x the pixel's unrest, y the frames its history holds over 255, zw its surface's
@@ -127,7 +131,7 @@ void main()
     // A material changed in place this frame (ADR-0105): where the nearest surface draws it, no
     // history, as after a cut. Its clusters' flags are read only on a frame that marked some.
     const bool fresh =
-        pc.fresh != 0u && nearest != 0ul &&
+        k_fresh && nearest != 0ul &&
         (VisClustersRef(view.v.clusters).c[vis_cluster(nearest)].flags &
          uint(NPH_VIS_CLUSTER_FRESH)) != 0u;
     if (pc.history_scale > 0.0 && !fresh &&

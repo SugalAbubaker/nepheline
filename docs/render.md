@@ -110,12 +110,26 @@ coordinates' derivatives, not its mesh's tangents: a turned or mirrored
 transform turns its normal map with it. The CPU voxel and proxy bakes
 sample their own way and do not apply it yet (ADR-0105).
 
-Only a material with that flag reads its rows (`nph_material_has_uv`):
-every glTF material and every one of the reference scenes' has none, and
-pays the flag's test alone. Read and applied at every site, the rows cost
-the reference views 0.03 to 0.07 ms a frame on the RTX 3060 Ti, most in
-the passes that sample a material where they decode a surface or test an
-alpha (the resolve, the ReSTIR turns, the rays' hits and alpha tests).
+Only a material with that flag reads its rows (`nph_material_has_uv`);
+no glTF material has one (the importer bakes KHR_texture_transform into
+the mesh's coordinates). Read and applied at every site, the rows cost the
+reference views 0.03 to 0.07 ms a frame on the RTX 3060 Ti; tested at every
+site, still 0.02 to 0.05, though nothing reads them there. The test alone
+spilled the resolve, held at 64 and 72 registers, a little further, and
+moved the turns' and the temporal resolve's code. So the passes that cost
+most compile it in only where it can be taken:
+- the resolve and the ReSTIR turns test for a transform only in their
+  variants with `k_uv` (`vis_resolve.glsl`), bound while the renderer holds
+  a material with one (`NphRenderer.uv_materials`). Each is made the first
+  time a frame needs it (`resolve_uv_pipeline`), since 32 more resolves
+  made with every renderer would be paid by every test and every start.
+  The debug views' variants always have it.
+- the temporal resolve reads its nearest cluster's mark only in its
+  variant with `k_fresh` (`taa_resolve.glsl`), bound on the frames whose
+  table holds a mark (below).
+- the rays' hits and alpha tests, the masked rasters, and the page
+  requests test the flag where they run: there the test costs about what
+  the rows did, and the variants would multiply pipelines for little.
 
 `render` sits left of `asset` in the module order (CLAUDE.md §4), so it
 cannot read cooked assets itself. `samples/common/cooked_scene.c` is the
@@ -2454,11 +2468,11 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
   meshlet cull carries the mark into its clusters' flags
   (`NPH_VIS_CLUSTER_FRESH`), the word it already reads. Where the 3 x 3's
   nearest surface is such a cluster, the resolve takes the current frame
-  alone, as after a cut, and the history resumes the frame after. The
-  frame's push says whether its table holds a mark
-  (`NphRenderTaaPush.fresh`): on every other frame the resolve reads no
-  cluster's flags, and on a marked one it reads the nearest's, the word
-  `vis_previous_point` reads next. Blended surfaces are not in the
+  alone, as after a cut, and the history resumes the frame after. A frame
+  whose table holds a mark binds the temporal resolve's variant with
+  `k_fresh` (`RenderTaa.frame_fresh`), which reads the nearest cluster's
+  flags, the word `vis_previous_point` reads next; every other frame binds
+  the one without, which reads none. Blended surfaces are not in the
   visibility buffer: a blended material changed in place still fades. The
   radiance cache's cells take some 100 to 200 frames to follow a material
   changed in place (`test_reflections.c`).

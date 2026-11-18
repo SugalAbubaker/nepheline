@@ -24,6 +24,13 @@
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 #include "rt_common.glsl"
+// Whether the renderer holds a material whose coordinates are transformed (gi.c
+// render_gi_declare_reflect; ADR-0105): only then do the rays' hits and alpha tests test their
+// materials for one. Compiled in, the tests cost these rays some 0.6 % on the reference views,
+// where none has one.
+layout(constant_id = 0) const bool k_uv = false;
+#define NPH_RT_MASK_HAS_UV(flags) (k_uv && nph_material_has_uv(flags))
+#define NPH_GI_HIT_HAS_UV(flags) (k_uv && nph_material_has_uv(flags))
 #include "rt_mask.glsl"
 #include "gi_common.glsl"
 #include "gi_hit.glsl"

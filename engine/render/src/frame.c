@@ -251,6 +251,7 @@ static NphResult target_pipelines(NphRenderer *r, NphGpuFormat format,
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_depth);
                 nph_gpu_pipeline_destroy(r->dev, t->vis_debug_overlay);
                 nph_gpu_pipeline_destroy(r->dev, t->taa);
+                nph_gpu_pipeline_destroy(r->dev, t->taa_fresh);
                 nph_gpu_pipeline_destroy(r->dev, t->motion_blur);
                 memset(t, 0, sizeof *t);
                 return res;

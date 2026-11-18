@@ -73,6 +73,13 @@ GiTable gi_table(GiViewRef g)
     return t;
 }
 
+// Whether material flags say its coordinates are transformed (ADR-0105), as the includer has it
+// tested: the cache's update and the reflections' rays compile the test out where no material has
+// a transform (their k_uv).
+#ifndef NPH_GI_HIT_HAS_UV
+#define NPH_GI_HIT_HAS_UV(flags) nph_material_has_uv(flags)
+#endif
+
 // The ray query's committed hit, met along `w`. Its textures are read at the level whose texels
 // are `footprint` wide there, the width the ray stands for (ADR-0089); 0: the size of the hit's
 // cell, for a ray that fills one.
@@ -113,6 +120,7 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, ra
               b);
     n = normalize(dot(n, face) < 0.0 ? -n : n);
     const mat3x2 uvs = mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z));
+    vec2 uv = uvs * b;
     const vec3 color =
         (mat3x4(unpackUnorm4x8(a0.w), unpackUnorm4x8(a1.w), unpackUnorm4x8(a2.w)) * b).rgb;
 
@@ -120,20 +128,18 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, ra
     // "Shaders"), textures at the level the hit's cell resolves.
     const uint mi = vis_instance_material(view, inst, sub.x);
     MaterialsRef materials = MaterialsRef(view.v.materials);
-    // The material's coordinates where it has a transform (ADR-0105): their area grows by the
-    // size of the linear part's determinant, which the level follows.
-    vec2 uv = uvs * b;
-    float uv_scale = 1.0;
-    if (nph_material_has_uv(materials.m[mi].flags)) {
-        const vec4 uv_u = materials.m[mi].uv_u;
-        const vec4 uv_v = materials.m[mi].uv_v;
-        uv = nph_material_uv(uv_u, uv_v, uv);
-        uv_scale = abs(uv_u.x * uv_v.y - uv_u.y * uv_v.x);
-    }
     const float cell = footprint > 0.0 ? footprint : gi_cell_size(g, gi_level(length(x)));
     const vec2 duv1 = uvs[1] - uvs[0];
     const vec2 duv2 = uvs[2] - uvs[0];
-    const float uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x) * uv_scale;
+    float uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x);
+    // The material's coordinates where it has a transform (ADR-0105): their area grows by the
+    // size of the linear part's determinant, which the level follows.
+    if (NPH_GI_HIT_HAS_UV(materials.m[mi].flags)) {
+        const vec4 uv_u = materials.m[mi].uv_u;
+        const vec4 uv_v = materials.m[mi].uv_v;
+        uv = nph_material_uv(uv_u, uv_v, uv);
+        uv_area *= abs(uv_u.x * uv_v.y - uv_u.y * uv_v.x);
+    }
     const float lod =
         log2(cell) + 0.5 * log2(max(uv_area, 1e-12) / max(length(edge_normal), 1e-12));
     // What it reflects evenly of the light it receives: its base colour, a metal's too. A metal

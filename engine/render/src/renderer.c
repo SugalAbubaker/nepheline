@@ -662,6 +662,7 @@ void nph_renderer_destroy(NphRenderer *r)
         nph_gpu_pipeline_destroy(dev, t->vis_debug_depth);
         nph_gpu_pipeline_destroy(dev, t->vis_debug_overlay);
         nph_gpu_pipeline_destroy(dev, t->taa);
+        nph_gpu_pipeline_destroy(dev, t->taa_fresh);
         nph_gpu_pipeline_destroy(dev, t->motion_blur);
     }
     for (u32 a = 0; a < 3U; ++a) {
@@ -1678,6 +1679,7 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     m->changed = 0U;
     r->material_version += 1U;
     r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
+    r->uv_materials += nph_render_uv_is_identity(&desc->uv) ? 0U : 1U;
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1740,6 +1742,9 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
     const bool blend_changed =
         (r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND) != blends ||
         (blends && (r->materials[slot].desc.double_sided != 0) != (desc->double_sided != 0));
+    // The resolves that read a transform are the frames' while any material has one (k_uv).
+    r->uv_materials -= nph_render_uv_is_identity(&r->materials[slot].desc.uv) ? 0U : 1U;
+    r->uv_materials += nph_render_uv_is_identity(&desc->uv) ? 0U : 1U;
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     // The next frame's resolve takes no history where it draws (frame.c write_materials).
@@ -1763,6 +1768,7 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
         return;
     }
     r->masked_materials -= r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
+    r->uv_materials -= nph_render_uv_is_identity(&r->materials[slot].desc.uv) ? 0U : 1U;
     // Its instances draw with the default material from here on, which tests no alpha and
     // holds no mesh's triangles for the rays alone: where the rays held it to a key, the
     // top level's records are written again, and name their meshes' own triangles (ADR-0098).

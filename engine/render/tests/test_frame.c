@@ -613,6 +613,8 @@ NTEST_F(Frame, a_materials_transform_moves_its_texture_in_both_pipelines)
     md.uv = mirrored;
     NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
     NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+    // The frames bind the resolves with the transforms (k_uv) while a material has one.
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 1U);
     const NphRenderMesh mesh = facing_plane(f);
     const NphRenderInstance inst = add_instance(f, mesh, mat, facing_transform());
     static const u8 red[3] = {255U, 0U, 0U};
@@ -646,10 +648,19 @@ NTEST_F(Frame, a_materials_transform_moves_its_texture_in_both_pipelines)
             }
             expect_quadrants(f, (const u8(*)[3])want);
         }
+        NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 1U);
     }
+    // Back to the identity: no material has a transform, and the frames' resolves have none.
+    md.uv = nph_render_uv_identity();
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 0U);
+    md.uv = mirrored;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 1U);
     nph_render_instance_destroy(f->renderer, inst);
     nph_render_mesh_destroy(f->renderer, mesh);
     nph_render_material_destroy(f->renderer, mat);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 0U);
     nph_render_texture_destroy(f->renderer, tex);
 }
 

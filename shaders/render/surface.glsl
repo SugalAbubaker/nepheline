@@ -736,6 +736,12 @@ vec3 nph_surface_irradiance_view(ViewRef view, NphSurface s, vec4 cell)
 // origin), or for an unlit material its colour as authored. `base` is
 // nph_surface_base_color's result. The irradiance debug view is
 // nph_surface_irradiance_view's.
+// Whether material `m`'s coordinates are transformed (ADR-0105), as the includer has it tested:
+// vis_resolve.glsl compiles the test out where no material has a transform (k_uv).
+#ifndef NPH_SURFACE_HAS_UV
+#define NPH_SURFACE_HAS_UV(m) nph_material_has_uv((m).flags)
+#endif
+
 vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4 base)
 {
     if ((m.flags & NPH_RENDER_MATERIAL_UNLIT) != 0u) {
@@ -780,7 +786,7 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
         // A material whose coordinates are transformed turns its normal map with them: its frame
         // is the one of its coordinates' derivatives, which the transform reached (ADR-0105).
         if (dot(s.tangent.xyz, s.tangent.xyz) > 1e-12 &&
-            (m.flags & NPH_RENDER_MATERIAL_UV_TRANSFORM) == 0u) {
+            !NPH_SURFACE_HAS_UV(m)) {
             // MikkTSpace's frame (glTF 2.0 §3.7.2.1) in its normalised
             // variant: the interpolated normal and tangent at unit length,
             // the bitangent their cross product with the stored sign. The

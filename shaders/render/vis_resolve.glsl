@@ -39,8 +39,17 @@
 #include "vis_common.glsl"
 #include "nph_bindless_int64.glsl"
 
+// Whether the renderer holds a material whose coordinates are transformed (vis.c
+// resolve_uv_pipeline; ADR-0105): only then does a pixel test its material for one, read the
+// rows, take its tangent frame from its coordinates' derivatives for one, or a shadow ray's
+// alpha test transform its hit's coordinates. Compiled in, the tests alone cost the reference
+// views 0.6 % (the resolve's and the turns' spills, though their registers held), where none of
+// their materials has a transform.
+layout(constant_id = 6) const bool k_uv = false;
+
 #ifdef NPH_RAY_QUERY
 #include "rt_common.glsl"
+#define NPH_RT_MASK_HAS_UV(flags) (k_uv && nph_material_has_uv(flags))
 #include "rt_mask.glsl"
 // The view's top-level structure and the camera's place in it, set first
 // thing in main(): the shadow test runs deep in the light loop. And the GPU
@@ -131,6 +140,7 @@ uint64_t g_counters; // set first thing in main()
 uvec2 g_reflect = uvec2(0u);
 #define NPH_SURFACE_REFLECT(p) g_reflect = gi_reflect_pack(reflect(-(p).v, (p).n), sqrt(sqrt((p).a2)), (p).spec_base)
 #endif
+#define NPH_SURFACE_HAS_UV(m) (k_uv && nph_material_has_uv((m).flags))
 #include "surface.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -356,7 +366,7 @@ void main()
                 MaterialRef(view.v.materials)[cluster.material].m;
             // The material's coordinates, and their derivatives through its linear part
             // (ADR-0105), where it has a transform.
-            if (nph_material_has_uv(material.flags)) {
+            if (k_uv && nph_material_has_uv(material.flags)) {
                 MaterialRef rows = MaterialRef(view.v.materials)[cluster.material];
                 const vec4 uv_u = rows.m.uv_u;
                 const vec4 uv_v = rows.m.uv_v;
