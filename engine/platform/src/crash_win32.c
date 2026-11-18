@@ -255,6 +255,37 @@ BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_IN
     }
 }
 
+// The dumps tests make fail (crash_win32_fail_dumps).
+static volatile LONG g_dump_failures;
+
+void crash_win32_fail_dumps(u32 count)
+{
+    (void)InterlockedExchange(&g_dump_failures, (LONG)count);
+}
+
+// One attempt at the dump, into `file` from its start: ERROR_SUCCESS, or why not.
+static DWORD write_dump(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *mei,
+                        MINIDUMP_CALLBACK_INFORMATION *callback)
+{
+    LARGE_INTEGER start;
+    start.QuadPart = 0;
+    if (!SetFilePointerEx(file, start, NULL, FILE_BEGIN) || !SetEndOfFile(file)) {
+        return GetLastError();
+    }
+    if (InterlockedCompareExchange(&g_dump_failures, 0, 0) > 0) {
+        (void)InterlockedDecrement(&g_dump_failures);
+        return ERROR_INVALID_USER_BUFFER;
+    }
+    if (g_write_dump == NULL) {
+        return ERROR_PROC_NOT_FOUND;
+    }
+    if (!g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, type, mei, NULL,
+                      callback)) {
+        return GetLastError();
+    }
+    return ERROR_SUCCESS;
+}
+
 // Opens `<stem><ext>` for writing, creating it; INVALID_HANDLE_VALUE when it
 // cannot be.
 static HANDLE create_file(const char *stem, const char *ext, char *path, u32 cap)
@@ -343,6 +374,8 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     char dump_path[CRASH_PATH_MAX];
     HANDLE dump = create_file(stem, ".dmp", dump_path, sizeof dump_path);
     DWORD dump_error = ERROR_SUCCESS;
+    DWORD first_error = ERROR_SUCCESS; // the first attempt's, when it failed
+    bool reduced = false;
     if (dump == INVALID_HANDLE_VALUE) {
         dump_error = GetLastError();
     } else {
@@ -365,9 +398,17 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
         MINIDUMP_CALLBACK_INFORMATION callback;
         callback.CallbackRoutine = crash_win32_dump_callback;
         callback.CallbackParam = NULL;
-        if (g_write_dump == NULL || !g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), dump,
-                                                  type, &mei, NULL, &callback)) {
-            dump_error = g_write_dump == NULL ? ERROR_PROC_NOT_FOUND : GetLastError();
+        // dbghelp fails a dump now and then where the same process's next one goes well
+        // (ERROR_INVALID_USER_BUFFER, a dump in three on one of the CI's runners): once more as it
+        // was, then reduced to the threads, their stacks, and the modules with their data.
+        dump_error = write_dump(dump, type, &mei, &callback);
+        first_error = dump_error;
+        if (dump_error != ERROR_SUCCESS) {
+            dump_error = write_dump(dump, type, &mei, &callback);
+        }
+        if (dump_error != ERROR_SUCCESS) {
+            reduced = true;
+            dump_error = write_dump(dump, MiniDumpWithDataSegs, &mei, &callback);
         }
         CloseHandle(dump);
     }
@@ -397,6 +438,12 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
             }
         }
         crash_out_str(&o, name);
+        if (first_error != ERROR_SUCCESS) {
+            crash_out_str(&o, reduced ? " (reduced to threads, stacks and modules after error "
+                                      : " (written again after error ");
+            crash_out_dec(&o, first_error);
+            crash_out_str(&o, ")");
+        }
     } else {
         crash_out_str(&o, "not written (error ");
         crash_out_dec(&o, dump_error);
